@@ -49,3 +49,58 @@ Then tag `vX.Y.Z` and push — CI does the rest.
 - Tauri v2: https://v2.tauri.app
 - Updater plugin: https://v2.tauri.app/plugin/updater/
 - tauri-action: https://github.com/tauri-apps/tauri-action
+
+## Managing this project — two surfaces
+
+This repo is managed from **both** the Claude Code CLI and the Claude desktop (Cowork) app.
+Both operate on the same files, so either can be used interchangeably.
+
+### CLI (Claude Code)
+
+Launch it by double-clicking **`RunClaude.cmd`** in the repo root (or run `claude` in this
+directory). That starts a Claude Code session scoped to this repo with the slash commands in
+`.claude/commands/` available:
+
+| Command | Purpose |
+|---------|---------|
+| `/ticketing-list` | List the open ticket queue with an action menu |
+| `/ticketing-new` | File a ticket interactively (auto-intercepts units of work) |
+| `/ticketing-work CPE-NNN` | Pick up and work a ticket through to Done |
+| `/ticketing-organize` | Reorganise `Done/` when it grows large |
+| `/ticketing-setup` | (Re)bootstrap the ticket system |
+| `/skills-organise` | Manage the slash commands as named feature sets |
+
+`RunClaude.cmd` passes `--dangerously-skip-permissions` for an uninterrupted local session; it is
+path-independent (`%~dp0`) so it works wherever the repo lives.
+
+### Desktop (Cowork)
+
+The desktop app manages releases and monitoring:
+
+- **`RELEASING.md`** — runbook; say "cut a release 0.2.0", "check the build", "what needs updating".
+- **`scripts/release.ps1`** — one-command version bump + tag + push.
+- **`STATUS.html`** — local dashboard (gitignored), refreshed by a scheduled task.
+- **Scheduled tasks** — `cpe-daily-status` (CI + dashboard refresh + notify) and
+  `cpe-weekly-deps` (dependency scan).
+
+### Using both together
+
+The ticket system (`Tickets/`, `.claude/commands/`) is committed to git, so tickets filed from the
+CLI are visible on the desktop and vice-versa. Release/monitoring lives on the desktop; day-to-day
+coding and ticket work happens in the CLI. Nothing is surface-specific except the desktop-only
+scheduled tasks and the `gh`-driven release helpers (which also work from a CLI PowerShell session).
+
+## Ticket System
+
+Tickets live in `Tickets/`. Folder location is the authoritative status:
+
+| Folder | Status |
+|--------|--------|
+| `Tickets/Backlog/` | Open — ready to work |
+| `Tickets/Doing/`   | In Progress — one at a time |
+| `Tickets/Blocked/` | Deferred on an external gate |
+| `Tickets/Done/`    | Closed |
+
+IDs are sequential: `CPE-NNN`. To work a ticket: `/ticketing-work CPE-NNN`. To file one
+interactively: `/ticketing-new`. When the user says "tasks", list all `Tickets/Backlog/CPE-*.md`
+as a table of ID, title, type, and priority. See `Tickets/wiki.md` for full workflow rules.
