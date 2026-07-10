@@ -1,0 +1,21 @@
+# Node / frontend
+node_modules/
+dist/
+.vite/
+*.local
+
+# Rust / Tauri
+src-tauri/target/
+src-tauri/gen/schemas/
+
+# Editor / OS
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/*
+!.vscode/extensions.json
+
+# Secrets — NEVER commit signing keys
+*.key
+.env
+.env.*

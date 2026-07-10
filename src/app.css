@@ -1,0 +1,110 @@
+:root {
+  --bg: #1e1e2e;
+  --bg-alt: #27273a;
+  --fg: #cdd6f4;
+  --fg-dim: #9399b2;
+  --accent: #89b4fa;
+  --border: #313244;
+  font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif;
+  color: var(--fg);
+  background: var(--bg);
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  height: 100vh;
+  overflow: hidden;
+}
+
+#app {
+  height: 100vh;
+  display: flex;
+  flex-direction: column;
+}
+
+.toolbar {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.5rem 0.75rem;
+  background: var(--bg-alt);
+  border-bottom: 1px solid var(--border);
+}
+
+.toolbar button {
+  background: var(--border);
+  color: var(--fg);
+  border: none;
+  border-radius: 6px;
+  padding: 0.35rem 0.6rem;
+  cursor: pointer;
+  font-size: 0.9rem;
+}
+
+.toolbar button:hover {
+  background: var(--accent);
+  color: var(--bg);
+}
+
+.path {
+  flex: 1;
+  font-family: ui-monospace, monospace;
+  font-size: 0.85rem;
+  color: var(--fg-dim);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.listing {
+  flex: 1;
+  overflow-y: auto;
+  padding: 0.25rem 0;
+}
+
+.entry {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  padding: 0.35rem 0.9rem;
+  cursor: pointer;
+  user-select: none;
+}
+
+.entry:hover {
+  background: var(--bg-alt);
+}
+
+.entry .icon {
+  width: 1.2rem;
+  text-align: center;
+}
+
+.entry .name {
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.entry .size {
+  color: var(--fg-dim);
+  font-size: 0.8rem;
+  font-variant-numeric: tabular-nums;
+}
+
+.status {
+  padding: 0.3rem 0.9rem;
+  font-size: 0.78rem;
+  color: var(--fg-dim);
+  border-top: 1px solid var(--border);
+  background: var(--bg-alt);
+}
+
+.error {
+  color: #f38ba8;
+}
