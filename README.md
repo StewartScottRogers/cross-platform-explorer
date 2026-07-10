@@ -4,6 +4,9 @@ A cross-platform desktop file explorer built with **Tauri v2** (Rust backend) an
 **Svelte + TypeScript** (frontend). It ships as a one-click native installer on
 Windows, macOS, and Linux, and updates itself automatically.
 
+**Website:** https://stewartscottrogers.github.io/cross-platform-explorer/
+**Downloads:** [latest release](https://github.com/StewartScottRogers/cross-platform-explorer/releases/latest)
+
 ## Why this stack
 
 - **Tauri** produces small native binaries (single-digit MB), builds proper OS

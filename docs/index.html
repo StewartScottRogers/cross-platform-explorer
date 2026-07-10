@@ -1,0 +1,133 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Cross-Platform Explorer — a fast, tiny file explorer</title>
+    <meta
+      name="description"
+      content="A cross-platform desktop file explorer built with Tauri and Svelte. One-click install, automatic updates, tiny footprint."
+    />
+    <link rel="icon" href="icon.png" />
+    <style>
+      :root {
+        --bg: #1e1e2e;
+        --bg-alt: #27273a;
+        --card: #2b2b40;
+        --fg: #cdd6f4;
+        --fg-dim: #9399b2;
+        --accent: #89b4fa;
+        --accent-deep: #4a5fc8;
+        --border: #313244;
+      }
+      * { box-sizing: border-box; margin: 0; padding: 0; }
+      body {
+        font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+        color: var(--fg);
+        background: radial-gradient(1200px 600px at 50% -10%, #2a2a44, var(--bg));
+        line-height: 1.6;
+        min-height: 100vh;
+      }
+      .wrap { max-width: 960px; margin: 0 auto; padding: 0 1.5rem; }
+      header { text-align: center; padding: 5rem 0 3rem; }
+      header img { width: 120px; height: 120px; border-radius: 26px; box-shadow: 0 12px 40px rgba(0,0,0,.4); }
+      h1 { font-size: 2.6rem; margin: 1.2rem 0 .4rem; letter-spacing: -.02em; }
+      .tagline { font-size: 1.2rem; color: var(--fg-dim); max-width: 620px; margin: 0 auto; }
+      .cta { display: flex; gap: .8rem; justify-content: center; flex-wrap: wrap; margin-top: 2rem; }
+      .btn {
+        display: inline-flex; align-items: center; gap: .5rem;
+        background: var(--accent); color: #10101c; font-weight: 600;
+        padding: .8rem 1.4rem; border-radius: 10px; text-decoration: none;
+        transition: transform .1s ease, background .2s ease;
+      }
+      .btn:hover { transform: translateY(-2px); }
+      .btn.secondary { background: var(--card); color: var(--fg); border: 1px solid var(--border); }
+      .platforms { color: var(--fg-dim); font-size: .9rem; margin-top: 1rem; }
+      section { padding: 2.5rem 0; }
+      h2 { font-size: 1.5rem; margin-bottom: 1.4rem; text-align: center; }
+      .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 1rem; }
+      .feature {
+        background: var(--card); border: 1px solid var(--border);
+        border-radius: 14px; padding: 1.4rem;
+      }
+      .feature h3 { font-size: 1.05rem; margin-bottom: .4rem; }
+      .feature p { color: var(--fg-dim); font-size: .95rem; }
+      .icon-badge {
+        display: inline-grid; place-items: center; width: 42px; height: 42px;
+        border-radius: 10px; background: linear-gradient(160deg, var(--accent), var(--accent-deep));
+        font-size: 1.3rem; margin-bottom: .8rem;
+      }
+      pre {
+        background: #16161f; border: 1px solid var(--border); border-radius: 12px;
+        padding: 1.1rem 1.3rem; overflow-x: auto; font-size: .9rem;
+        color: #d7e0ff; font-family: ui-monospace, "SF Mono", Menlo, monospace;
+      }
+      footer {
+        text-align: center; color: var(--fg-dim); font-size: .85rem;
+        padding: 3rem 0 4rem; border-top: 1px solid var(--border); margin-top: 2rem;
+      }
+      a { color: var(--accent); }
+    </style>
+  </head>
+  <body>
+    <div class="wrap">
+      <header>
+        <img src="icon.png" alt="Cross-Platform Explorer icon" />
+        <h1>Cross-Platform Explorer</h1>
+        <p class="tagline">
+          A fast, tiny desktop file explorer for Windows, macOS, and Linux.
+          One-click install, automatic updates, built with Tauri&nbsp;+&nbsp;Svelte.
+        </p>
+        <div class="cta">
+          <a class="btn" href="https://github.com/StewartScottRogers/cross-platform-explorer/releases/latest">
+            ⬇ Download latest
+          </a>
+          <a class="btn secondary" href="https://github.com/StewartScottRogers/cross-platform-explorer">
+            View on GitHub
+          </a>
+        </div>
+        <p class="platforms">Windows&nbsp;·&nbsp;macOS&nbsp;·&nbsp;Linux&nbsp;— installers built automatically for every release.</p>
+      </header>
+
+      <section>
+        <h2>Why it's different</h2>
+        <div class="grid">
+          <div class="feature">
+            <div class="icon-badge">🪶</div>
+            <h3>Tiny footprint</h3>
+            <p>Native binaries in the single-digit megabytes — no bundled browser engine.</p>
+          </div>
+          <div class="feature">
+            <div class="icon-badge">🔄</div>
+            <h3>Auto-updates</h3>
+            <p>Cryptographically signed updates install themselves on the next launch.</p>
+          </div>
+          <div class="feature">
+            <div class="icon-badge">🖱️</div>
+            <h3>One-click install</h3>
+            <p>Proper native installers: .msi/.exe, .dmg, and .AppImage/.deb.</p>
+          </div>
+          <div class="feature">
+            <div class="icon-badge">🤖</div>
+            <h3>AI-maintainable</h3>
+            <p>Documented architecture and build pipeline so an assistant can extend it safely.</p>
+          </div>
+        </div>
+      </section>
+
+      <section>
+        <h2>Build it yourself</h2>
+        <pre><code>git clone https://github.com/StewartScottRogers/cross-platform-explorer.git
+cd cross-platform-explorer
+npm install
+npm run tauri dev</code></pre>
+      </section>
+    </div>
+
+    <footer>
+      Built with <a href="https://v2.tauri.app">Tauri</a> and
+      <a href="https://svelte.dev">Svelte</a>.
+      © 2026 Stewart Rogers.
+    </footer>
+  </body>
+</html>
