@@ -62,6 +62,29 @@ fn dirs_home() -> Option<PathBuf> {
     }
 }
 
+#[cfg_attr(mobile, tauri::mobile_entry_point)]
+pub fn run() {
+    let mut builder = tauri::Builder::default()
+        .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_opener::init());
+
+    #[cfg(not(any(target_os = "android", target_os = "ios")))]
+    {
+        builder = builder
+            .plugin(tauri_plugin_process::init())
+            .plugin(tauri_plugin_updater::Builder::new().build());
+    }
+
+    builder
+        .invoke_handler(tauri::generate_handler![
+            list_dir, home_dir, parent_dir
+        ])
+        .run(tauri::generate_context!())
+        .expect("error while running tauri application");
+}
+
+// NOTE: clippy's `items_after_test_module` lint requires the test module to be
+// the LAST item in the file. Keep it here, at the bottom.
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -94,25 +117,4 @@ mod tests {
     fn home_dir_resolves() {
         assert!(home_dir().is_ok(), "home directory should resolve");
     }
-}
-
-#[cfg_attr(mobile, tauri::mobile_entry_point)]
-pub fn run() {
-    let mut builder = tauri::Builder::default()
-        .plugin(tauri_plugin_dialog::init())
-        .plugin(tauri_plugin_opener::init());
-
-    #[cfg(not(any(target_os = "android", target_os = "ios")))]
-    {
-        builder = builder
-            .plugin(tauri_plugin_process::init())
-            .plugin(tauri_plugin_updater::Builder::new().build());
-    }
-
-    builder
-        .invoke_handler(tauri::generate_handler![
-            list_dir, home_dir, parent_dir
-        ])
-        .run(tauri::generate_context!())
-        .expect("error while running tauri application");
 }
