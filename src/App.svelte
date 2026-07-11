@@ -20,6 +20,7 @@
   import { friendlyError, splitPath } from "./lib/format";
   import { sortEntries } from "./lib/sort";
   import { uniqueName } from "./lib/naming";
+  import { validateFileName } from "./lib/filename";
   import {
     createHistory, visit, back, forward, canGoBack, canGoForward, current,
     type History,
@@ -319,6 +320,12 @@
 
     const entry = visible.find((e) => e.path === path);
     if (!entry || newName.trim() === "" || newName === entry.name) return;
+
+    const invalid = validateFileName(newName);
+    if (invalid) {
+      showNotice(invalid, true);
+      return;
+    }
 
     try {
       const to = await invoke<string>("rename_entry", { path, newName });
