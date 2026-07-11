@@ -50,6 +50,58 @@ describe("PreviewPane", () => {
     await waitFor(() => expect(screen.getByText(/Can't preview/i)).toBeTruthy());
   });
 
+  it("renders an <audio> element for an audio entry", () => {
+    const { container } = render(PreviewPane, {
+      entry: entry({ name: "song.mp3", path: "C:\\d\\song.mp3", extension: "mp3" }),
+      assetUrl: (p: string) => `asset://${p}`,
+    });
+    const audio = container.querySelector("audio.preview-media");
+    expect(audio).toBeTruthy();
+    expect(audio!.getAttribute("src")).toBe("asset://C:\\d\\song.mp3");
+  });
+
+  it("renders a <video> element for a video entry", () => {
+    const { container } = render(PreviewPane, {
+      entry: entry({ name: "clip.mp4", path: "C:\\d\\clip.mp4", extension: "mp4" }),
+      assetUrl: (p: string) => `asset://${p}`,
+    });
+    expect(container.querySelector("video.preview-media")).toBeTruthy();
+  });
+
+  it("renders an <iframe> for a pdf entry", () => {
+    const { container } = render(PreviewPane, {
+      entry: entry({ name: "doc.pdf", path: "C:\\d\\doc.pdf", extension: "pdf" }),
+      assetUrl: (p: string) => `asset://${p}`,
+    });
+    const frame = container.querySelector("iframe.preview-pdf");
+    expect(frame).toBeTruthy();
+    expect(frame!.getAttribute("src")).toBe("asset://C:\\d\\doc.pdf");
+  });
+
+  it("pretty-prints JSON", async () => {
+    const loadText = vi.fn(async () => '{"a":1}');
+    const { container } = render(PreviewPane, {
+      entry: entry({ name: "d.json", path: "C:\\d\\d.json", extension: "json" }),
+      loadText,
+    });
+    await waitFor(() => {
+      const pre = container.querySelector(".preview-text");
+      expect(pre?.textContent).toContain('"a": 1'); // note the space — pretty-printed
+    });
+  });
+
+  it("renders a CSV as a table", async () => {
+    const loadText = vi.fn(async () => "a,b\n1,2");
+    const { container } = render(PreviewPane, {
+      entry: entry({ name: "d.csv", path: "C:\\d\\d.csv", extension: "csv" }),
+      loadText,
+    });
+    await waitFor(() => {
+      const cells = [...container.querySelectorAll(".preview-table td")].map((c) => c.textContent);
+      expect(cells).toEqual(["a", "b", "1", "2"]);
+    });
+  });
+
   it("renders the fallback (no img/pre) for a folder", () => {
     const { container } = render(PreviewPane, {
       entry: entry({ name: "dir", is_dir: true, extension: "" }),

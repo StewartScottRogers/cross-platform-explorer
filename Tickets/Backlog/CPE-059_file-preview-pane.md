@@ -87,8 +87,10 @@ Split each phase into its own child ticket when work starts, so it lands increme
 - **Phase 2 — [[CPE-061]] (Done, 2026-07-11):** wired the pane into the app; asset protocol + `protocol-asset`
   feature for images; Rust `read_file_text` (size-capped) for text; Preview/Details toggle + persisted
   setting. Merged via PR #1 after CI verified the Rust across all three OSes.
-- **Phase 3 (future):** PDF, audio/video, SVG (sandboxed), CSV/JSON pretty-print, archives, Office,
-  markdown rendering + syntax highlighting, list-view thumbnails.
+- **Phase 3a — [[CPE-062]] (Done, 2026-07-11):** audio, video, PDF, JSON pretty-print, CSV table.
+  (SVG already previews as an image via the asset protocol.)
+- **Phase 3b — [[CPE-063]] (Open):** markdown rendering, syntax highlighting, archive listing (needs
+  Rust), Office investigation, list-view thumbnails. Blocks final epic closure.
 
 This parent ticket stays open as the epic until the phases land.
 

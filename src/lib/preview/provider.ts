@@ -9,7 +9,16 @@
 import type { DirEntry } from "../types";
 import { categoryOf } from "../filetypes";
 
-export type PreviewKind = "image" | "text" | "markdown" | "none";
+export type PreviewKind =
+  | "image"
+  | "audio"
+  | "video"
+  | "pdf"
+  | "json"
+  | "csv"
+  | "markdown"
+  | "text"
+  | "none";
 
 export interface PreviewProvider {
   /** Stable id. */
@@ -35,6 +44,38 @@ export const providers: PreviewProvider[] = [
     label: "Image",
     kind: "image",
     canPreview: (e) => !e.is_dir && categoryOf(e) === "image",
+  },
+  {
+    id: "audio",
+    label: "Audio",
+    kind: "audio",
+    canPreview: (e) => !e.is_dir && categoryOf(e) === "audio",
+  },
+  {
+    id: "video",
+    label: "Video",
+    kind: "video",
+    canPreview: (e) => !e.is_dir && categoryOf(e) === "video",
+  },
+  {
+    id: "pdf",
+    label: "PDF",
+    kind: "pdf",
+    canPreview: (e) => !e.is_dir && categoryOf(e) === "pdf",
+  },
+  // JSON and CSV are declared before the generic text provider because their
+  // categories ("code"/"spreadsheet") would otherwise be claimed by it / skipped.
+  {
+    id: "json",
+    label: "JSON",
+    kind: "json",
+    canPreview: (e) => !e.is_dir && e.extension === "json",
+  },
+  {
+    id: "csv",
+    label: "CSV",
+    kind: "csv",
+    canPreview: (e) => !e.is_dir && e.extension === "csv",
   },
   {
     id: "markdown",
