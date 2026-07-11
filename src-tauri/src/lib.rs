@@ -1,6 +1,7 @@
 use serde::Serialize;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 #[derive(Serialize)]
 pub struct DirEntry {
@@ -8,6 +9,35 @@ pub struct DirEntry {
     path: String,
     is_dir: bool,
     size: u64,
+    /// Last-modified time as milliseconds since the Unix epoch.
+    /// `None` when the platform or filesystem does not report one.
+    modified: Option<u64>,
+    /// Lowercased file extension without the dot ("png"), empty for directories
+    /// and extensionless files.
+    extension: String,
+}
+
+#[derive(Serialize)]
+pub struct Place {
+    /// Display name, e.g. "Documents" or "Local Disk (C:)".
+    name: String,
+    path: String,
+    /// Logical kind, used by the UI to pick an icon:
+    /// "desktop" | "documents" | "downloads" | "pictures" | "music" | "videos" | "drive" | "home".
+    kind: String,
+}
+
+/// Convert a `SystemTime` into epoch milliseconds, if representable.
+fn to_epoch_ms(t: SystemTime) -> Option<u64> {
+    t.duration_since(UNIX_EPOCH).ok().map(|d| d.as_millis() as u64)
+}
+
+/// Lowercased extension without the dot; empty when there is none.
+fn extension_of(path: &Path) -> String {
+    path.extension()
+        .and_then(|e| e.to_str())
+        .map(|e| e.to_lowercase())
+        .unwrap_or_default()
 }
 
 /// List the immediate children of `path`.
@@ -16,19 +46,24 @@ fn list_dir(path: String) -> Result<Vec<DirEntry>, String> {
     let mut out = Vec::new();
     let read = fs::read_dir(&path).map_err(|e| format!("{path}: {e}"))?;
     for entry in read {
-        let entry = match entry {
-            Ok(e) => e,
-            Err(_) => continue, // skip entries we can't read
-        };
-        let meta = match entry.metadata() {
-            Ok(m) => m,
-            Err(_) => continue,
-        };
+        // Skip entries we can't read rather than failing the whole listing.
+        let Ok(entry) = entry else { continue };
+        let Ok(meta) = entry.metadata() else { continue };
+
+        let entry_path = entry.path();
+        let is_dir = meta.is_dir();
+
         out.push(DirEntry {
             name: entry.file_name().to_string_lossy().to_string(),
-            path: entry.path().to_string_lossy().to_string(),
-            is_dir: meta.is_dir(),
-            size: if meta.is_dir() { 0 } else { meta.len() },
+            path: entry_path.to_string_lossy().to_string(),
+            is_dir,
+            size: if is_dir { 0 } else { meta.len() },
+            modified: meta.modified().ok().and_then(to_epoch_ms),
+            extension: if is_dir {
+                String::new()
+            } else {
+                extension_of(&entry_path)
+            },
         });
     }
     Ok(out)
@@ -48,6 +83,71 @@ fn parent_dir(path: String) -> Option<String> {
     Path::new(&path)
         .parent()
         .map(|p| p.to_string_lossy().to_string())
+}
+
+/// Available drives (Windows) or filesystem roots (Unix).
+#[tauri::command]
+fn list_drives() -> Vec<Place> {
+    let mut drives = Vec::new();
+
+    #[cfg(target_os = "windows")]
+    {
+        for letter in b'A'..=b'Z' {
+            let root = format!("{}:\\", letter as char);
+            if Path::new(&root).exists() {
+                drives.push(Place {
+                    name: format!("Local Disk ({}:)", letter as char),
+                    path: root,
+                    kind: "drive".to_string(),
+                });
+            }
+        }
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    {
+        drives.push(Place {
+            name: "File System".to_string(),
+            path: "/".to_string(),
+            kind: "drive".to_string(),
+        });
+    }
+
+    drives
+}
+
+/// The user's well-known folders. Only folders that actually exist are returned,
+/// so the sidebar never shows a link that leads nowhere.
+#[tauri::command]
+fn special_folders() -> Vec<Place> {
+    let Some(home) = dirs_home() else {
+        return Vec::new();
+    };
+
+    let candidates = [
+        ("Desktop", "desktop"),
+        ("Documents", "documents"),
+        ("Downloads", "downloads"),
+        ("Pictures", "pictures"),
+        ("Music", "music"),
+        ("Videos", "videos"),
+    ];
+
+    candidates
+        .iter()
+        .filter_map(|(folder, kind)| {
+            let p = home.join(folder);
+            if p.is_dir() {
+                Some(Place {
+                    name: (*folder).to_string(),
+                    path: p.to_string_lossy().to_string(),
+                    kind: (*kind).to_string(),
+                })
+            } else {
+                None
+            }
+        })
+        .collect()
 }
 
 // Small cross-platform home-dir resolver without an extra dependency.
@@ -77,7 +177,11 @@ pub fn run() {
 
     builder
         .invoke_handler(tauri::generate_handler![
-            list_dir, home_dir, parent_dir
+            list_dir,
+            home_dir,
+            parent_dir,
+            list_drives,
+            special_folders
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
@@ -91,8 +195,10 @@ mod tests {
 
     #[test]
     fn parent_dir_returns_the_parent() {
-        let parent = parent_dir("/home/user/docs".to_string());
-        assert_eq!(parent, Some("/home/user".to_string()));
+        assert_eq!(
+            parent_dir("/home/user/docs".to_string()),
+            Some("/home/user".to_string())
+        );
     }
 
     #[test]
@@ -102,19 +208,54 @@ mod tests {
 
     #[test]
     fn list_dir_errors_on_a_missing_path() {
-        let result = list_dir("/definitely/not/a/real/path/xyz".to_string());
-        assert!(result.is_err());
+        assert!(list_dir("/definitely/not/a/real/path/xyz".to_string()).is_err());
     }
 
     #[test]
     fn list_dir_lists_a_real_directory() {
         let dir = std::env::temp_dir();
-        let result = list_dir(dir.to_string_lossy().to_string());
-        assert!(result.is_ok(), "temp dir should be listable");
+        assert!(list_dir(dir.to_string_lossy().to_string()).is_ok());
     }
 
     #[test]
     fn home_dir_resolves() {
-        assert!(home_dir().is_ok(), "home directory should resolve");
+        assert!(home_dir().is_ok());
+    }
+
+    #[test]
+    fn extension_is_lowercased_and_dotless() {
+        assert_eq!(extension_of(Path::new("/a/b/Photo.PNG")), "png");
+        assert_eq!(extension_of(Path::new("/a/b/archive.tar.gz")), "gz");
+    }
+
+    #[test]
+    fn extension_is_empty_when_absent() {
+        assert_eq!(extension_of(Path::new("/a/b/README")), "");
+    }
+
+    #[test]
+    fn epoch_ms_of_unix_epoch_is_zero() {
+        assert_eq!(to_epoch_ms(UNIX_EPOCH), Some(0));
+    }
+
+    #[test]
+    fn epoch_ms_is_monotonic_for_later_times() {
+        use std::time::Duration;
+        let later = UNIX_EPOCH + Duration::from_millis(1_500);
+        assert_eq!(to_epoch_ms(later), Some(1_500));
+    }
+
+    #[test]
+    fn list_drives_returns_at_least_one_root() {
+        assert!(!list_drives().is_empty(), "there is always at least one root");
+    }
+
+    #[test]
+    fn special_folders_all_exist_and_are_labelled() {
+        for place in special_folders() {
+            assert!(Path::new(&place.path).is_dir(), "{} should exist", place.path);
+            assert!(!place.kind.is_empty());
+            assert!(!place.name.is_empty());
+        }
     }
 }
