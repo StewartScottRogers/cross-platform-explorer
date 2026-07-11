@@ -13,15 +13,19 @@ then present an action menu following the rules in menu-render.md.
 | ID | Title | Type | Priority | Estimate |
 |----|-------|------|----------|----------|
 
-### Also surface (read-only context, not part of the workable queue)
+### ALWAYS also show Blocked (mandatory)
 
-After the Backlog table, glob `Tickets/Doing/CPE-*.md` and `Tickets/Blocked/CPE-*.md`. If either has
-tickets, show a short second table for each under its own heading:
+After the Backlog table, ALWAYS show a **Blocked** table — never omit it. Glob
+`Tickets/Blocked/CPE-*.md` and render: ID, title, and a one-line *blocked-on / unblocks-when* note
+read from the ticket's Notes or Work Log. Blocked tickets are outstanding work; leaving them out
+misrepresents the queue. If `Blocked/` is empty, print "Blocked: none" rather than dropping the
+section entirely.
 
-- **In `Doing/` (in-flight / stalled)** — so abandoned work-in-progress can be restarted.
-- **Blocked (gated on an external dependency)** — for each, read the Work Log and give a one-line
-  *blocked-on / unblocks-when* note. These are **not** offered in the action menu's Work options
-  (working them won't clear the gate); they are shown so nothing silently disappears.
+Also glob `Tickets/Doing/CPE-*.md`. If anything is in-flight or stalled there, show it under its own
+heading so abandoned work-in-progress can be restarted.
+
+Blocked tickets are **not** offered in the action menu's Work options (working them won't clear the
+gate) — they are shown for visibility only.
 
 The action menu below operates on the **Backlog** queue only. If the Backlog is empty but `Blocked/`
 has tickets, say so explicitly ("nothing workable now; N blocked on external dependencies") rather

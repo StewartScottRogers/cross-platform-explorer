@@ -102,5 +102,17 @@ Tickets live in `Tickets/`. Folder location is the authoritative status:
 | `Tickets/Done/`    | Closed |
 
 IDs are sequential: `CPE-NNN`. To work a ticket: `/ticketing-work CPE-NNN`. To file one
-interactively: `/ticketing-new`. When the user says "tasks", list all `Tickets/Backlog/CPE-*.md`
-as a table of ID, title, type, and priority. See `Tickets/wiki.md` for full workflow rules.
+interactively: `/ticketing-new`. See `Tickets/wiki.md` for full workflow rules.
+
+### Showing open tickets — ALWAYS include Blocked
+
+When the user asks to see "open tickets", "the tickets", or "tasks", ALWAYS show **two** tables —
+never just the Backlog:
+
+1. **Open** — all `Tickets/Backlog/CPE-*.md`, as a table of ID, title, type, priority, estimate.
+2. **Blocked** — all `Tickets/Blocked/CPE-*.md`, as a table of ID, title, and a one-line
+   *blocked-on / unblocks-when* note read from the ticket's Notes or Work Log.
+
+Blocked tickets are outstanding work, so omitting them misrepresents the queue. If `Blocked/` is
+empty, say "none blocked" rather than dropping the section. Also surface anything sitting in
+`Tickets/Doing/` so stalled work-in-progress is never silently lost.
