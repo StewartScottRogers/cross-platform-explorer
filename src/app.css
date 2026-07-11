@@ -50,14 +50,48 @@ body {
   color: var(--bg);
 }
 
-.path {
+.breadcrumbs {
   flex: 1;
+  display: flex;
+  align-items: center;
+  gap: 0.15rem;
+  overflow-x: auto;
+  white-space: nowrap;
+  scrollbar-width: none;
+}
+
+.breadcrumbs::-webkit-scrollbar {
+  display: none;
+}
+
+.crumb {
   font-family: ui-monospace, monospace;
   font-size: 0.85rem;
+  padding: 0.15rem 0.35rem;
+  border-radius: 5px;
+  border: none;
+  background: transparent;
   color: var(--fg-dim);
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  cursor: pointer;
+  flex: none;
+}
+
+button.crumb:hover {
+  background: var(--border);
+  color: var(--fg);
+}
+
+.crumb.current {
+  color: var(--fg);
+  font-weight: 600;
+  cursor: default;
+}
+
+.crumb-sep {
+  color: var(--fg-dim);
+  font-size: 0.8rem;
+  opacity: 0.6;
+  flex: none;
 }
 
 .listing {
@@ -77,6 +111,21 @@ body {
 
 .entry:hover {
   background: var(--bg-alt);
+}
+
+.entry.selected {
+  background: var(--accent);
+  color: var(--bg);
+}
+
+.entry.selected .size {
+  color: var(--bg);
+  opacity: 0.75;
+}
+
+.entry:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
 }
 
 .entry .icon {

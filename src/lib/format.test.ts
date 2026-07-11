@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { formatSize, friendlyError } from "./format";
+import { formatSize, friendlyError, splitPath } from "./format";
 
 describe("formatSize", () => {
   it("returns an empty string for zero bytes (directories)", () => {
@@ -56,5 +56,51 @@ describe("friendlyError", () => {
   it("never leaks the raw error text", () => {
     const raw = "C:\\secret\\path: Access is denied. (os error 5)";
     expect(friendlyError(raw)).not.toContain("secret");
+  });
+});
+
+describe("splitPath", () => {
+  it("returns nothing for an empty path", () => {
+    expect(splitPath("")).toEqual([]);
+  });
+
+  it("splits a POSIX path into cumulative segments", () => {
+    expect(splitPath("/home/stewart/docs")).toEqual([
+      { name: "/", path: "/" },
+      { name: "home", path: "/home" },
+      { name: "stewart", path: "/home/stewart" },
+      { name: "docs", path: "/home/stewart/docs" },
+    ]);
+  });
+
+  it("handles the POSIX root on its own", () => {
+    expect(splitPath("/")).toEqual([{ name: "/", path: "/" }]);
+  });
+
+  it("splits a Windows path into cumulative segments", () => {
+    expect(splitPath("C:\\Users\\Stewart\\Docs")).toEqual([
+      { name: "C:", path: "C:\\" },
+      { name: "Users", path: "C:\\Users" },
+      { name: "Stewart", path: "C:\\Users\\Stewart" },
+      { name: "Docs", path: "C:\\Users\\Stewart\\Docs" },
+    ]);
+  });
+
+  it("handles a bare Windows drive root", () => {
+    expect(splitPath("C:\\")).toEqual([{ name: "C:", path: "C:\\" }]);
+  });
+
+  it("normalises forward slashes on Windows paths", () => {
+    expect(splitPath("Z:/repos/app")).toEqual([
+      { name: "Z:", path: "Z:\\" },
+      { name: "repos", path: "Z:\\repos" },
+      { name: "app", path: "Z:\\repos\\app" },
+    ]);
+  });
+
+  it("produces a last segment whose path equals the input (round-trip)", () => {
+    const p = "/home/stewart/docs";
+    const segs = splitPath(p);
+    expect(segs[segs.length - 1].path).toBe(p);
   });
 });
