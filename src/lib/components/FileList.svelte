@@ -183,8 +183,16 @@
   <!-- svelte-ignore a11y-no-static-element-interactions -->
   <div class="rows" class:grid={view === "icons"} on:contextmenu={emptyContext}>
     {#each entries as entry, i (entry.path)}
+      <!--
+        The view class MUST stay namespaced as "view-{view}".
+        Interpolating the bare view name gave every row the class `details`,
+        which collides with the global `.details` DetailsPane rule
+        (display:flex; padding:20px) — that overrode the row's grid layout and
+        clipped every row to nothing. The list rendered 18 blank strips while
+        the status bar correctly reported "18 items". Shipped in v0.5.0. CPE-045.
+      -->
       <div
-        class="row {view}"
+        class="row view-{view}"
         class:selected={isSelected(selection, i)}
         class:cut={isCut(entry.path)}
         class:lead={selection.lead === i}
@@ -278,7 +286,7 @@
     opacity: 0.5;
   }
 
-  .row.list {
+  .row.view-list {
     grid-template-columns: 1fr;
   }
 
@@ -289,7 +297,7 @@
     padding: 10px;
   }
 
-  .row.icons {
+  .row.view-icons {
     display: flex;
     flex-direction: column;
     align-items: center;
@@ -299,13 +307,13 @@
     text-align: center;
   }
 
-  .row.icons :global(.cell.name) {
+  .row.view-icons :global(.cell.name) {
     flex-direction: column;
     gap: 6px;
     width: 100%;
   }
 
-  .row.icons .ellip {
+  .row.view-icons .ellip {
     width: 100%;
     white-space: normal;
     overflow: hidden;
