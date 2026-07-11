@@ -69,6 +69,20 @@ directory). That starts a Claude Code session scoped to this repo with the slash
 | `/ticketing-organize` | Reorganise `Done/` when it grows large |
 | `/ticketing-setup` | (Re)bootstrap the ticket system |
 | `/skills-organise` | Manage the slash commands as named feature sets |
+| `/run` | Download, install, and launch the latest released build |
+| `/remove` | Uninstall the application from this machine |
+
+### Trigger words: "Run" and "Remove"
+
+When the user says **"Run"**, execute `.claude/commands/run.md` — download the latest **published**
+GitHub release, install it silently for the current OS, verify the install, and launch the app.
+
+When the user says **"Remove"**, execute `.claude/commands/remove.md` — close the app, uninstall it
+silently, and verify it is gone. "Remove" means uninstall the **installed application**, never the
+source repo or the user's files; if that is ambiguous in context, ask first.
+
+Both commands install/uninstall the built app — they never touch this working tree. If no published
+release exists, `/run` must say so and stop rather than installing anything.
 
 `RunClaude.cmd` passes `--dangerously-skip-permissions` for an uninterrupted local session; it is
 path-independent (`%~dp0`) so it works wherever the repo lives.

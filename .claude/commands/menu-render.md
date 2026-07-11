@@ -160,3 +160,5 @@ without requiring the user to read the content first.
 | 2026-07-10 | ticketing-work | Post-close menu: Next ticket / Tasks / Dismiss (queue-aware) |
 | 2026-07-10 | ticketing-organize | Post-run menu: context-sensitive real/dry-run variants |
 | 2026-07-10 | skills-organise | Post-list/new/reorganise menus |
+| 2026-07-11 | run | Post-install menu: context-sensitive installed / no-release / failed variants |
+| 2026-07-11 | remove | Post-uninstall menu: context-sensitive removed / not-installed / failed variants |
