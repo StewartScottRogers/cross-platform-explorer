@@ -16,8 +16,8 @@ Explorer supports Ctrl+Z for file operations. Undo rename, move, and recycle-bin
 
 ## Acceptance Criteria
 
-- [x] Ctrl+Z undoes the last rename or move  <!-- delete-to-trash NOT undoable, by design -->
-- [ ] Undo of a delete restores from the Recycle Bin  <!-- NOT DONE: unsupported on macOS; would be a dead button -->
+- [x] Ctrl+Z undoes the last rename, move, or delete-to-trash  <!-- delete added by CPE-044 -->
+- [x] Undo of a delete restores from the Recycle Bin  <!-- completed by CPE-044, gated to platforms that support it -->
 - [x] Operations that cannot be undone (permanent delete) are never offered as undoable
 - [x] The undo stack is bounded and cleared on navigation errors
 - [x] An undo that fails reports why instead of silently doing nothing
@@ -49,3 +49,5 @@ at 25 entries.
 ## Notes
 Copy is intentionally NOT undoable-by-deletion — silently deleting a user's file to "undo" a copy is
 too dangerous.
+
+2026-07-11 — UPDATE: undo-of-delete, declined here because it would be a dead button on macOS, was completed by **CPE-044** — which kept that principle by simply not offering the undo on platforms that cannot restore. This ticket is now fully satisfied.

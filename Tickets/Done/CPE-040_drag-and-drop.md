@@ -18,7 +18,7 @@ Drag a selection onto a folder row or a sidebar node to move it; hold Ctrl to co
 
 - [x] Dragging a selection onto a folder row moves it; Ctrl+drag copies
 - [x] Valid drop targets highlight; invalid ones (self, descendant) do not accept
-- [ ] Dropping onto a sidebar node works  <!-- NOT DONE: list rows only -->
+- [x] Dropping onto a sidebar node works  <!-- completed later by CPE-043 -->
 - [x] The operation reuses the CPE-030 backend commands, with the same collision rules
 - [x] Cancelling the drag changes nothing
 
@@ -41,3 +41,5 @@ the identical collision and safety rules as paste.
 
 ## Notes
 Dropping a folder into itself or its own descendant must be impossible, not merely discouraged.
+
+2026-07-11 — UPDATE: the sidebar-drop criterion, left unmet here, was completed by **CPE-043**. This ticket is now fully satisfied.
