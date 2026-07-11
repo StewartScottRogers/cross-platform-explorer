@@ -13,9 +13,10 @@ export type FileCategory =
   | "audio"
   | "video"
   | "text"
+  | "executable"
   | "unknown";
 
-const CATEGORY_BY_EXT: Record<string, FileCategory> = {
+export const CATEGORY_BY_EXT: Record<string, FileCategory> = {
   // images
   png: "image", jpg: "image", jpeg: "image", gif: "image", bmp: "image",
   webp: "image", svg: "image", ico: "image", tif: "image", tiff: "image",
@@ -44,9 +45,11 @@ const CATEGORY_BY_EXT: Record<string, FileCategory> = {
   wmv: "video", flv: "video", m4v: "video",
   // text
   txt: "text", md: "text", log: "text", ini: "text", cfg: "text",
+  // executables
+  exe: "executable", msi: "executable", dll: "executable",
 };
 
-const TYPE_NAME_BY_EXT: Record<string, string> = {
+export const TYPE_NAME_BY_EXT: Record<string, string> = {
   png: "PNG image", jpg: "JPEG image", jpeg: "JPEG image", gif: "GIF image",
   bmp: "Bitmap image", webp: "WebP image", svg: "SVG image", ico: "Icon",
   heic: "HEIC image", avif: "AVIF image", jfif: "JPEG image",

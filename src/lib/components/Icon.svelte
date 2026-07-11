@@ -60,6 +60,10 @@
     <path d="M6 3h8l4 4v14H6z" fill="#f5f5f5" stroke="#6b6b6b" />
     <path d="M14 3v4h4" stroke="#6b6b6b" />
     <path d="M9 12h6M9 15h6M9 18h3" stroke="#6b6b6b" />
+  {:else if name === "executable"}
+    <rect x="3" y="5" width="18" height="14" rx="2" fill="#eae7fb" stroke="#5b3fd6" />
+    <path d="M3 9h18" stroke="#5b3fd6" />
+    <path d="M7 12l2.5 2L7 16M12 16h4" stroke="#5b3fd6" />
   {:else if name === "unknown"}
     <path d="M6 3h8l4 4v14H6z" fill="#f5f5f5" stroke="#8a8a8a" />
     <path d="M14 3v4h4" stroke="#8a8a8a" />
