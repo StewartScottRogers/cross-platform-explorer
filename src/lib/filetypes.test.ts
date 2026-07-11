@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { categoryOf, typeName } from "./filetypes";
+import { categoryOf, typeName, CATEGORY_BY_EXT, TYPE_NAME_BY_EXT } from "./filetypes";
 
 const file = (extension: string) => ({ is_dir: false, extension });
 const folder = { is_dir: true, extension: "" };
@@ -37,6 +37,21 @@ describe("categoryOf", () => {
     expect(categoryOf(file("tgz"))).toBe("archive");
     expect(categoryOf(file("mjs"))).toBe("code");
     expect(categoryOf(file("cjs"))).toBe("code");
+  });
+
+  it("classifies executables and installers (CPE-047)", () => {
+    expect(categoryOf(file("exe"))).toBe("executable");
+    expect(categoryOf(file("msi"))).toBe("executable");
+    expect(categoryOf(file("dll"))).toBe("executable");
+  });
+});
+
+describe("table consistency (CPE-047)", () => {
+  it("every named type also has an icon category", () => {
+    const missing = Object.keys(TYPE_NAME_BY_EXT).filter(
+      (ext) => !(ext in CATEGORY_BY_EXT),
+    );
+    expect(missing).toEqual([]);
   });
 });
 
