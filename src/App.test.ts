@@ -40,7 +40,7 @@ const drives: Place[] = [
 // inside vi.hoisted or the factory closes over an uninitialised binding.
 const { invoke } = vi.hoisted(() => ({ invoke: vi.fn() }));
 
-vi.mock("@tauri-apps/api/core", () => ({ invoke }));
+vi.mock("@tauri-apps/api/core", () => ({ invoke, convertFileSrc: (p: string) => `asset://${p}` }));
 vi.mock("@tauri-apps/plugin-updater", () => ({ check: vi.fn(async () => null) }));
 vi.mock("@tauri-apps/plugin-process", () => ({ relaunch: vi.fn() }));
 vi.mock("@tauri-apps/plugin-opener", () => ({ openPath: vi.fn() }));
