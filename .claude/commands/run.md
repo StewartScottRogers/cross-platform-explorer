@@ -51,7 +51,13 @@ gh release view <TAG> --repo StewartScottRogers/cross-platform-explorer --json t
 
 Report: "Published <TAG>." — then continue.
 
-**1d. If the latest release was already published**, say so in one line and continue.
+**1d. If the latest release was already published**, still verify it carries an installer for THIS
+OS before continuing. A release can be published while some platform assets are **still uploading** —
+"the release exists" is NOT the same as "my platform's installer exists" (this is exactly what bit
+CPE-024). If the installer for this OS is missing:
+
+- Check `gh run list` for an in-progress Release build. If one is running, say so and offer to wait.
+- Do NOT proceed to download.
 
 Note the `tagName` and asset names for the next step.
 
@@ -73,13 +79,25 @@ If no asset matches the current OS, say so plainly and stop — do not install t
 
 ## Step 3 — Download
 
+Clear the directory first — a stale installer from a previous version left lying around is how
+CPE-024 ended up launching the wrong build.
+
 ```powershell
 $tmp = Join-Path $env:TEMP "cpe-install"
 New-Item -ItemType Directory -Force -Path $tmp | Out-Null
+Remove-Item "$tmp\*" -Force -ErrorAction SilentlyContinue
+
 gh release download <TAG> --repo StewartScottRogers/cross-platform-explorer --pattern "<PATTERN>" --dir $tmp --clobber
+if ($LASTEXITCODE -ne 0) { throw "download failed (exit $LASTEXITCODE)" }
+
+$installer = Get-ChildItem "$tmp\*-setup.exe" | Select-Object -First 1
+if (-not $installer) { throw "no installer found after download — aborting" }
+"downloaded: $($installer.Name)"
 ```
 
-Report the file name and size.
+**Both guards are mandatory.** Never hand a possibly-null path to `Start-Process`: it exits with an
+empty exit code, which reads as success, and the flow marches on to launch whatever was already
+installed. Report the file name and size.
 
 ---
 
@@ -137,6 +155,17 @@ Get-ItemProperty HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\*,
 ```
 
 If nothing is found, the install did NOT succeed — report that honestly.
+
+**Assert the version matches the release you just downloaded.** This is the check that would have
+caught CPE-024:
+
+```powershell
+$v = (Get-ItemProperty HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\* -EA SilentlyContinue |
+      Where-Object { $_.DisplayName -like "*Cross-Platform Explorer*" }).DisplayVersion
+if ($v -ne "<VERSION>") { throw "version mismatch: installed $v, expected <VERSION>" }
+```
+
+A mismatch means the install silently no-opped and the old build is still there. Fail — do not launch.
 
 ---
 

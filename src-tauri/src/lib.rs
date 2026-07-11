@@ -116,6 +116,35 @@ fn list_drives() -> Vec<Place> {
     drives
 }
 
+/// The OneDrive root, when OneDrive is configured (Windows sets %OneDrive%).
+fn onedrive_root() -> Option<PathBuf> {
+    std::env::var_os("OneDrive")
+        .map(PathBuf::from)
+        .filter(|p| p.is_dir())
+}
+
+/// Resolve a known folder, trying the user profile first, then OneDrive.
+///
+/// Windows "Known Folder redirection" moves folders such as Pictures and
+/// Documents into OneDrive, in which case `%USERPROFILE%\Pictures` does not
+/// exist at all. Probing only the profile silently drops them (CPE-025).
+///
+/// We locate OneDrive via the `%OneDrive%` env var rather than the registry: a
+/// registry crate would be Windows-only, so it would NOT be compiled by the
+/// Linux CI job — an unverifiable dependency on a machine with no local Rust
+/// toolchain.
+fn resolve_known_folder(home: &Path, folder: &str) -> Option<PathBuf> {
+    let in_profile = home.join(folder);
+    if in_profile.is_dir() {
+        return Some(in_profile);
+    }
+    let in_onedrive = onedrive_root()?.join(folder);
+    if in_onedrive.is_dir() {
+        return Some(in_onedrive);
+    }
+    None
+}
+
 /// The user's well-known folders. Only folders that actually exist are returned,
 /// so the sidebar never shows a link that leads nowhere.
 #[tauri::command]
@@ -136,16 +165,11 @@ fn special_folders() -> Vec<Place> {
     candidates
         .iter()
         .filter_map(|(folder, kind)| {
-            let p = home.join(folder);
-            if p.is_dir() {
-                Some(Place {
-                    name: (*folder).to_string(),
-                    path: p.to_string_lossy().to_string(),
-                    kind: (*kind).to_string(),
-                })
-            } else {
-                None
-            }
+            resolve_known_folder(&home, folder).map(|p| Place {
+                name: (*folder).to_string(),
+                path: p.to_string_lossy().to_string(),
+                kind: (*kind).to_string(),
+            })
         })
         .collect()
 }
@@ -257,5 +281,28 @@ mod tests {
             assert!(!place.kind.is_empty());
             assert!(!place.name.is_empty());
         }
+    }
+
+    #[test]
+    fn known_folder_prefers_the_profile_location_when_it_exists() {
+        // temp_dir() exists, so resolving a folder that lives directly under it
+        // must return the profile-relative path.
+        let tmp = std::env::temp_dir();
+        let sub = tmp.join("cpe_known_folder_test");
+        std::fs::create_dir_all(&sub).expect("create temp subdir");
+
+        let found = resolve_known_folder(&tmp, "cpe_known_folder_test");
+        assert_eq!(found, Some(sub.clone()));
+
+        let _ = std::fs::remove_dir(&sub);
+    }
+
+    #[test]
+    fn known_folder_returns_none_when_it_exists_nowhere() {
+        let tmp = std::env::temp_dir();
+        assert_eq!(
+            resolve_known_folder(&tmp, "cpe_definitely_missing_folder_xyz"),
+            None
+        );
     }
 }

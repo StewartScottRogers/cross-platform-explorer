@@ -217,6 +217,11 @@
   $: selectedEntry =
     selected >= 0 && selected < visible.length ? visible[selected] : null;
 
+  // On Home there is no directory listing, so `visible` is empty. Reporting
+  // "0 items" while the page is visibly full of Quick access entries is simply
+  // wrong (CPE-027) — count what is actually on screen.
+  $: itemCount = isHome ? places.length + drives.length : visible.length;
+
   $: tabList = tabs.map((t) => {
     const p = current(t.history) ?? HOME;
     return {
@@ -375,12 +380,12 @@
   </div>
 
   {#if showDetails}
-    <DetailsPane entry={selectedEntry} {folderName} itemCount={visible.length} />
+    <DetailsPane entry={selectedEntry} {folderName} {itemCount} />
   {/if}
 </div>
 
 <StatusBar
-  itemCount={visible.length}
+  {itemCount}
   selectedCount={selectedEntry ? 1 : 0}
   filtered={searching}
   {notice}
