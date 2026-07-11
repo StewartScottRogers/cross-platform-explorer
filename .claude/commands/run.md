@@ -1,6 +1,6 @@
-# Run — Download, Install, and Launch
+# Run — Publish, Download, Install, and Launch
 
-Download the latest published release of Cross-Platform Explorer, install it, and launch it.
+Publish the latest release if it is still a draft, then download it, install it, and launch it.
 Triggered when the user says **"Run"** (or `/run`).
 
 Then present an action menu following the rules in menu-render.md.
@@ -9,21 +9,51 @@ Repo: `StewartScottRogers/cross-platform-explorer` (public). The `gh` CLI is aut
 
 ---
 
-## Step 1 — Find the Latest Published Release
+## Step 1 — Find the Latest Release, and Publish It If It Is a Draft
 
+`/run` always installs the **latest** release. If that release is still an unpublished draft, publish
+it first — do not dead-end.
+
+**1a. Find the latest release (drafts included):**
 ```powershell
-gh release view --repo StewartScottRogers/cross-platform-explorer --json tagName,isDraft,assets
+gh release list --repo StewartScottRogers/cross-platform-explorer --limit 1 --json tagName,isDraft,isPrerelease
 ```
 
-**If this fails, or the only release is a draft**, STOP. Do not attempt to install. Report:
+**If there are NO releases at all**, STOP. Do not install anything. Report:
 
-> No published release yet. `/run` installs from the latest **published** GitHub release.
-> Cut one with `./scripts/release.ps1 -Version X.Y.Z`, wait for CI, then publish the draft with
-> `gh release edit vX.Y.Z --draft=false`.
+> No release exists yet. Cut one with `./scripts/release.ps1 -Version X.Y.Z`, wait for CI to build
+> the installers, then say "Run" again.
 
-Then render the "No Release" menu (below) and stop.
+Render the "No Release" menu (below) and stop.
 
-Otherwise note the `tagName` and list the asset names.
+**1b. If the latest release is a draft, check it actually has installer assets BEFORE publishing:**
+```powershell
+gh release view <TAG> --repo StewartScottRogers/cross-platform-explorer --json assets --jq '.assets[].name'
+```
+
+This guard matters. A draft with no assets means the release build failed or is still running —
+publishing it would create an empty public release with nothing to download. If the asset list is
+empty or is missing an installer for the current OS:
+
+- If a release run is still **in progress** (`gh run list --limit 3`), say so and offer to wait.
+- If the run **failed**, STOP, report it, and point at `gh run view --log-failed`.
+- Either way, do NOT publish, and do NOT install.
+
+**1c. Publish the draft:**
+```powershell
+gh release edit <TAG> --repo StewartScottRogers/cross-platform-explorer --draft=false
+```
+
+Confirm it is now public:
+```powershell
+gh release view <TAG> --repo StewartScottRogers/cross-platform-explorer --json tagName,isDraft
+```
+
+Report: "Published <TAG>." — then continue.
+
+**1d. If the latest release was already published**, say so in one line and continue.
+
+Note the `tagName` and asset names for the next step.
 
 ---
 
@@ -134,10 +164,19 @@ Report: "Installed Cross-Platform Explorer <version> and launched it."
 └──────────────────────────────────┘
 ```
 
-**No published release** — HORIZONTAL:
+**No release exists at all** — HORIZONTAL:
 ```
 ┌─ No Release ─────────────────────┐
 │  [1] Cut release  [2] Tasks      │
+├──────────────────────────────────┤
+│  [3] Dismiss                     │
+└──────────────────────────────────┘
+```
+
+**Draft has no installer assets (build failed / still running)** — HORIZONTAL:
+```
+┌─ Build Incomplete ───────────────┐
+│  [1] Watch CI  [2] Detail        │
 ├──────────────────────────────────┤
 │  [3] Dismiss                     │
 └──────────────────────────────────┘
@@ -167,6 +206,12 @@ Ask for a version, then run `./scripts/release.ps1 -Version X.Y.Z` and follow RE
 
 ### [2] Tasks  *(no release)*
 Invoke /ticketing-list.
+
+### [1] Watch CI  *(build incomplete)*
+Run `gh run watch` to follow the release build; when it goes green, re-run this skill from Step 1.
+
+### [2] Detail  *(build incomplete)*
+Show `gh run view --log-failed` for the release run and list the assets currently on the draft.
 
 ### [1] Retry  *(failed)*
 Re-run from Step 3.

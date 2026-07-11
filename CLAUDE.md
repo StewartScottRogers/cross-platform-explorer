@@ -69,20 +69,28 @@ directory). That starts a Claude Code session scoped to this repo with the slash
 | `/ticketing-organize` | Reorganise `Done/` when it grows large |
 | `/ticketing-setup` | (Re)bootstrap the ticket system |
 | `/skills-organise` | Manage the slash commands as named feature sets |
-| `/run` | Download, install, and launch the latest released build |
+| `/run` | Publish the latest release (if draft), then install and launch it |
 | `/remove` | Uninstall the application from this machine |
 
 ### Trigger words: "Run" and "Remove"
 
-When the user says **"Run"**, execute `.claude/commands/run.md` — download the latest **published**
-GitHub release, install it silently for the current OS, verify the install, and launch the app.
+When the user says **"Run"**, execute `.claude/commands/run.md`:
+
+1. Find the **latest** release, drafts included.
+2. If it is still a draft, **publish it first** (`gh release edit <tag> --draft=false`) — but only
+   after confirming the draft actually carries installer assets. A draft with no assets means the
+   release build failed or is still running; publishing it would create an empty public release.
+   In that case stop and report, rather than publishing.
+3. Download the right installer for the current OS, install silently, verify the install, launch.
+
+If **no release exists at all**, `/run` stops and says so — it never installs nothing and calls it
+success.
 
 When the user says **"Remove"**, execute `.claude/commands/remove.md` — close the app, uninstall it
 silently, and verify it is gone. "Remove" means uninstall the **installed application**, never the
 source repo or the user's files; if that is ambiguous in context, ask first.
 
-Both commands install/uninstall the built app — they never touch this working tree. If no published
-release exists, `/run` must say so and stop rather than installing anything.
+Both commands act on the built app — they never touch this working tree.
 
 `RunClaude.cmd` passes `--dangerously-skip-permissions` for an uninterrupted local session; it is
 path-independent (`%~dp0`) so it works wherever the repo lives.
