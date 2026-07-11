@@ -1,7 +1,8 @@
 <script lang="ts">
   import type { DirEntry } from "../types";
-  import { pickProvider } from "../preview/provider";
+  import { pickProvider, type ArchiveEntry } from "../preview/provider";
   import { parseCsv } from "../preview/csv";
+  import { formatSize } from "../format";
 
   /** The single selected entry to preview, or null. */
   export let entry: DirEntry | null = null;
@@ -9,6 +10,8 @@
   export let assetUrl: (path: string) => string = (p) => p;
   /** Read a text file's contents (a size-capped backend command in the app). */
   export let loadText: (path: string) => Promise<string> = async () => "";
+  /** List an archive's entries (a backend command in the app). */
+  export let loadEntries: (path: string) => Promise<ArchiveEntry[]> = async () => [];
 
   /** Cap the number of CSV rows rendered so a huge sheet can't lock the pane. */
   const CSV_ROW_CAP = 200;
@@ -24,10 +27,15 @@
   let textState: "idle" | "loading" | "error" = "idle";
   let reqId = 0;
 
+  let entries: ArchiveEntry[] = [];
+  let entriesState: "idle" | "loading" | "error" = "idle";
+  let entryReqId = 0;
+
   // Load text whenever the selected entry (for a text-based provider) changes.
   // A monotonically increasing request id discards any load superseded by a
   // newer selection.
   $: if (entry && needsText) loadTextFor(entry);
+  $: if (entry && provider.kind === "archive") loadEntriesFor(entry);
 
   async function loadTextFor(e: DirEntry) {
     const mine = ++reqId;
@@ -40,6 +48,20 @@
     } catch {
       if (mine !== reqId) return;
       textState = "error";
+    }
+  }
+
+  async function loadEntriesFor(e: DirEntry) {
+    const mine = ++entryReqId;
+    entriesState = "loading";
+    try {
+      const list = await loadEntries(e.path);
+      if (mine !== entryReqId) return;
+      entries = list;
+      entriesState = "idle";
+    } catch {
+      if (mine !== entryReqId) return;
+      entriesState = "error";
     }
   }
 
@@ -66,6 +88,26 @@
     <video class="preview-media" controls src={assetUrl(entry.path)}></video>
   {:else if provider.kind === "pdf" && entry}
     <iframe class="preview-pdf" title={entry.name} src={assetUrl(entry.path)}></iframe>
+  {:else if provider.kind === "archive" && entry}
+    {#if entriesState === "loading"}
+      <p class="preview-note">Loading preview…</p>
+    {:else if entriesState === "error"}
+      <p class="preview-note">Can't read this archive.</p>
+    {:else}
+      <div class="preview-table-wrap">
+        <table class="preview-table">
+          <tbody>
+            {#each entries as e}
+              <tr>
+                <td>{e.name}</td>
+                <td class="num">{e.is_dir ? "" : formatSize(e.size)}</td>
+              </tr>
+            {/each}
+          </tbody>
+        </table>
+        <p class="preview-note">{entries.length} item{entries.length === 1 ? "" : "s"}</p>
+      </div>
+    {/if}
   {:else if needsText && entry}
     {#if textState === "loading"}
       <p class="preview-note">Loading preview…</p>
@@ -137,6 +179,7 @@
     padding: 2px 6px;
     white-space: nowrap;
   }
+  .preview-table td.num { text-align: right; color: var(--text-dim); }
   .preview-note {
     margin: auto;
     color: var(--text-faint);

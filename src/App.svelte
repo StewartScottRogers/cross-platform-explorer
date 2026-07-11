@@ -13,6 +13,7 @@
   import HomeView from "./lib/components/HomeView.svelte";
   import DetailsPane from "./lib/components/DetailsPane.svelte";
   import PreviewPane from "./lib/components/PreviewPane.svelte";
+  import type { ArchiveEntry } from "./lib/preview/provider";
   import StatusBar from "./lib/components/StatusBar.svelte";
   import ContextMenu from "./lib/components/ContextMenu.svelte";
   import ConfirmDialog from "./lib/components/ConfirmDialog.svelte";
@@ -464,6 +465,11 @@
     return invoke<string>("read_file_text", { path, maxBytes: PREVIEW_MAX_BYTES });
   }
 
+  /** List an archive's entries for the preview pane. */
+  function loadArchiveEntries(path: string): Promise<ArchiveEntry[]> {
+    return invoke<ArchiveEntry[]>("read_archive_entries", { path });
+  }
+
   /** Copy the selection's full path(s) to the OS clipboard, quoted, one per
       line — Explorer's "Copy as path". */
   async function doCopyPath() {
@@ -875,6 +881,7 @@
           entry={selectedEntries.length === 1 ? selectedEntries[0] : null}
           assetUrl={convertFileSrc}
           loadText={loadPreviewText}
+          loadEntries={loadArchiveEntries}
         >
           <DetailsPane selected={selectedEntries} {folderName} {itemCount} />
         </PreviewPane>

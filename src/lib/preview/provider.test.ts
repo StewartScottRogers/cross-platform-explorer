@@ -41,6 +41,10 @@ describe("pickProvider", () => {
     expect(pickProvider(entry({ name: "a.csv", extension: "csv" })).kind).toBe("csv");
   });
 
+  it("picks the archive provider for .zip (CPE-064)", () => {
+    expect(pickProvider(entry({ name: "a.zip", extension: "zip" })).kind).toBe("archive");
+  });
+
   it("falls back to metadata for folders, nothing, and unknown types", () => {
     expect(pickProvider(entry({ name: "dir", is_dir: true, extension: "" })).kind).toBe("none");
     expect(pickProvider(null).kind).toBe("none");

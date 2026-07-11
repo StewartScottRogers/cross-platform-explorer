@@ -16,9 +16,17 @@ export type PreviewKind =
   | "pdf"
   | "json"
   | "csv"
+  | "archive"
   | "markdown"
   | "text"
   | "none";
+
+/** One entry inside an archive (mirrors the Rust `ArchiveEntry`). */
+export interface ArchiveEntry {
+  name: string;
+  size: number;
+  is_dir: boolean;
+}
 
 export interface PreviewProvider {
   /** Stable id. */
@@ -76,6 +84,12 @@ export const providers: PreviewProvider[] = [
     label: "CSV",
     kind: "csv",
     canPreview: (e) => !e.is_dir && e.extension === "csv",
+  },
+  {
+    id: "archive",
+    label: "Archive",
+    kind: "archive",
+    canPreview: (e) => !e.is_dir && e.extension === "zip",
   },
   {
     id: "markdown",

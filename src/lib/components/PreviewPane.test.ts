@@ -102,6 +102,26 @@ describe("PreviewPane", () => {
     });
   });
 
+  it("lists archive entries via loadEntries (CPE-064)", async () => {
+    const loadEntries = vi.fn(async () => [
+      { name: "hello.txt", size: 8, is_dir: false },
+      { name: "sub/", size: 0, is_dir: true },
+    ]);
+    const { container } = render(PreviewPane, {
+      entry: entry({ name: "b.zip", path: "C:\\d\\b.zip", extension: "zip" }),
+      loadEntries,
+    });
+
+    await waitFor(() => {
+      const firstCells = [...container.querySelectorAll(".preview-table tr td")].map(
+        (c) => c.textContent,
+      );
+      expect(firstCells).toContain("hello.txt");
+      expect(firstCells).toContain("sub/");
+    });
+    expect(loadEntries).toHaveBeenCalledWith("C:\\d\\b.zip");
+  });
+
   it("renders the fallback (no img/pre) for a folder", () => {
     const { container } = render(PreviewPane, {
       entry: entry({ name: "dir", is_dir: true, extension: "" }),
