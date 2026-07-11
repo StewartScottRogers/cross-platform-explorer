@@ -443,6 +443,23 @@
     }
   }
 
+  /** Duplicate the selection in place — copy it into the folder it lives in.
+      Not undoable, for the same reason a copy-paste isn't (see doPaste). */
+  async function doDuplicate() {
+    if (isHome || selectedEntries.length === 0) return;
+    const sources = selectedEntries.map((e) => e.path);
+    try {
+      const results = await invoke<OpResult[]>("copy_entries", {
+        paths: sources,
+        dest: currentPath,
+      });
+      reportResults(results, "Duplicated");
+      await loadPath(currentPath);
+    } catch (e) {
+      showNotice(String(e), true);
+    }
+  }
+
   /** Move `paths` into `dest` (drag & drop). Ctrl-drag copies instead. */
   async function dropInto(paths: string[], dest: string, copy: boolean) {
     if (paths.length === 0 || !dest) return;
@@ -548,6 +565,7 @@
       case "cut": doCut(); break;
       case "copy": doCopy(); break;
       case "paste": doPaste(); break;
+      case "duplicate": doDuplicate(); break;
       case "rename": if (selectedEntries.length === 1) beginRename(selectedEntries[0]); break;
       case "delete": askDelete(false); break;
       case "properties": openProperties(); break;
@@ -583,6 +601,7 @@
     if (ctrl && event.key.toLowerCase() === "c") { event.preventDefault(); doCopy(); return; }
     if (ctrl && event.key.toLowerCase() === "x") { event.preventDefault(); doCut(); return; }
     if (ctrl && event.key.toLowerCase() === "v") { event.preventDefault(); doPaste(); return; }
+    if (ctrl && event.key.toLowerCase() === "d") { event.preventDefault(); doDuplicate(); return; }
     if (ctrl && event.key.toLowerCase() === "z") { event.preventDefault(); undo(); return; }
 
     if (event.altKey && event.key === "ArrowLeft") { event.preventDefault(); goBack(); return; }

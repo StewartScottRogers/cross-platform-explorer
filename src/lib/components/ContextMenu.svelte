@@ -66,6 +66,10 @@
     <button class="row" role="menuitem" on:click={() => run("open")}>
       <Icon name="folder" size={15} /> Open
     </button>
+    <button class="row" role="menuitem" on:click={() => run("duplicate")}>
+      <Icon name="copy" size={15} /> Duplicate
+      <span class="hint">Ctrl+D</span>
+    </button>
     <div class="sep" />
     <button class="row" role="menuitem" on:click={() => run("properties")}>
       <Icon name="info" size={15} /> Properties

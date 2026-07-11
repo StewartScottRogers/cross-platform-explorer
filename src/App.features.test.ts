@@ -51,6 +51,8 @@ function mockBackend(listing: DirEntry[]) {
       case "parent_dir": return null;
       case "create_dir": return `${args?.path}\\${args?.name}`;
       case "rename_entry": return `${args?.path}.renamed`;
+      case "copy_entries":
+        return (args?.paths as string[]).map((p) => ({ path: `${p} (copy)`, ok: true, error: "" }));
       default: return null;
     }
   });
@@ -98,6 +100,25 @@ describe("new folder auto-numbering (CPE-050)", () => {
       const call = invoke.mock.calls.find((c) => c[0] === "create_dir");
       expect(call).toBeTruthy();
       expect((call![1] as { name: string }).name).toBe("New folder (2)");
+    });
+  });
+});
+
+describe("duplicate (CPE-055)", () => {
+  it("Ctrl+D copies the selected item into the current folder", async () => {
+    mockBackend([file("alpha.md", "md"), file("beta.png", "png")]);
+    await enterDrive();
+    await waitFor(() => expect(screen.getByText("alpha.md")).toBeTruthy());
+
+    await fireEvent.click(screen.getByText("alpha.md"));
+    await fireEvent.keyDown(window, { key: "d", ctrlKey: true });
+
+    await waitFor(() => {
+      const call = invoke.mock.calls.find((c) => c[0] === "copy_entries");
+      expect(call).toBeTruthy();
+      const args = call![1] as { paths: string[]; dest: string };
+      expect(args.paths).toEqual(["C:\\d\\alpha.md"]);
+      expect(args.dest).toBe("C:\\d");
     });
   });
 });
