@@ -62,6 +62,40 @@ fn dirs_home() -> Option<PathBuf> {
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parent_dir_returns_the_parent() {
+        let parent = parent_dir("/home/user/docs".to_string());
+        assert_eq!(parent, Some("/home/user".to_string()));
+    }
+
+    #[test]
+    fn parent_dir_at_root_returns_none() {
+        assert_eq!(parent_dir("/".to_string()), None);
+    }
+
+    #[test]
+    fn list_dir_errors_on_a_missing_path() {
+        let result = list_dir("/definitely/not/a/real/path/xyz".to_string());
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn list_dir_lists_a_real_directory() {
+        let dir = std::env::temp_dir();
+        let result = list_dir(dir.to_string_lossy().to_string());
+        assert!(result.is_ok(), "temp dir should be listable");
+    }
+
+    #[test]
+    fn home_dir_resolves() {
+        assert!(home_dir().is_ok(), "home directory should resolve");
+    }
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     let mut builder = tauri::Builder::default()
