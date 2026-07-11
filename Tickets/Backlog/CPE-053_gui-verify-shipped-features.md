@@ -3,7 +3,7 @@ id: CPE-053
 title: Verify shipped features in the live GUI (deferred from supervised session)
 type: Test
 status: Open
-priority: Medium
+priority: Low
 component: Frontend
 estimate: 1h
 created: 2026-07-11
@@ -19,19 +19,25 @@ fully unit-tested and the app type-checks and builds, but the actual on-screen b
 observed. This ticket queues that verification for the next **unattended** Nightshift, where the app
 can be installed and driven without competing with the user for the desktop.
 
-## Acceptance Criteria — drive the running app and confirm each
+## Status update (2026-07-11)
 
-- [ ] **CPE-046 (UNC breadcrumbs):** navigate to a `\\server\share\folder` path; breadcrumbs read
-      `\\server\share` → `folder`, each segment clickable and navigating correctly.
-- [ ] **CPE-047 (executable icon):** a folder containing `.exe` / `.msi` / `.dll` shows the new
-      app-window glyph (not the generic unknown icon); Type column still reads "Application" etc.
-- [ ] **CPE-050 (new-folder auto-number):** press New folder twice in the same directory; second is
-      "New folder (2)"; a third is "New folder (3)"; gaps fill lowest-first.
-- [ ] **CPE-051 (name validation):** rename an item to `a/b` or `CON`; a friendly message appears and
-      the rename is blocked (no raw OS error).
-- [ ] **CPE-052 (wildcard search):** type `*.md` in the search box; only markdown files remain;
-      `report?.md`-style patterns behave as specified; plain text still substring-matches.
-- [ ] Any discrepancy found becomes its own Bug ticket and is fixed.
+**Most of this is now covered by automated headless tests** added in [[CPE-054]] (testing-library
+drives the real components in jsdom). What remains here is only the *literal visual appearance* that a
+DOM test can't judge — a quick human smoke-look, not behavioral verification.
+
+### Now AUTOMATED (behavior verified in jsdom — no longer needs a human)
+
+- [x] **CPE-050 (new-folder auto-number):** App test asserts `create_dir` is called with "New folder (2)".
+- [x] **CPE-051 (name validation):** App test drives an inline rename to `bad/name.md`; notice shown, `rename_entry` not called.
+- [x] **CPE-052 (wildcard search):** App test types `*.md`; only matching names remain.
+- [x] **CPE-047 (executable icon):** FileList test asserts the `.exe` row renders the executable glyph (distinct stroke) and Type "Application".
+
+### Residual — human visual smoke-check only (low priority)
+
+- [ ] The executable glyph actually *looks* like a sensible app icon at 16px and 40px (aesthetic).
+- [ ] **CPE-046 (UNC breadcrumbs):** if a real network share is available, confirm `\\server\share`
+      breadcrumbs render and navigate. (Logic is unit-tested; rendering shares the drive-letter path.)
+- [ ] Overall visual sanity pass once a screenshot/UI-automation capability or a human is available.
 
 ## Resolution
 
@@ -40,6 +46,7 @@ can be installed and driven without competing with the user for the desktop.
 ## Work Log
 
 2026-07-11 — Filed to capture GUI-verification debt from the supervised session (user chose to proceed while present). Everything listed is merged to `main`, pushed, and unit-test green at commit 72cc118; only live-app observation is outstanding.
+2026-07-11 — CPE-054 added automated headless behavioral coverage for CPE-047/050/051/052, discharging the behavioral half of this ticket. Narrowed remaining scope to the literal visual/aesthetic smoke-check. Kept Open at Low priority.
 
 ## Notes
 

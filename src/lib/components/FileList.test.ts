@@ -58,6 +58,20 @@ describe("FileList rendering", () => {
     expect(screen.getByText("docs")).toBeTruthy();
   });
 
+  it("renders the executable icon and 'Application' type for a .exe (CPE-047)", () => {
+    const { container } = render(FileList, {
+      ...base,
+      entries: [entry({ name: "setup.exe", path: "/x/setup.exe", extension: "exe" })],
+    });
+
+    expect(screen.getByText("setup.exe")).toBeTruthy();
+    expect(screen.getByText("Application")).toBeTruthy(); // Type column
+
+    // The executable glyph uses a stroke colour no other category uses.
+    const glyph = container.querySelector('svg [stroke="#5b3fd6"]');
+    expect(glyph).toBeTruthy();
+  });
+
   it("renders the details columns and the cell values", () => {
     render(FileList, { ...base, entries: [entry()] });
 
