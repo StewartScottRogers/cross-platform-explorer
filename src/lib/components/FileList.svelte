@@ -33,7 +33,59 @@
     contextEmpty: { x: number; y: number };
     commitRename: string;
     cancelRename: void;
+    drop: { paths: string[]; dest: string; copy: boolean };
   }>();
+
+  /** Paths being dragged, and the folder row currently hovered as a target. */
+  export let draggedPaths: string[] = [];
+  let dropIndex = -1;
+
+  function onDragStart(e: DragEvent, i: number) {
+    if (renamingPath) {
+      e.preventDefault();
+      return;
+    }
+    // Drag the whole selection if the grabbed row is part of it; otherwise
+    // just the grabbed row (Explorer's behaviour).
+    const paths = isSelected(selection, i)
+      ? entries.filter((_, j) => isSelected(selection, j)).map((x) => x.path)
+      : [entries[i].path];
+    draggedPaths = paths;
+    e.dataTransfer?.setData("text/plain", paths.join("\n"));
+    if (e.dataTransfer) e.dataTransfer.effectAllowed = "copyMove";
+  }
+
+  function onDragEnd() {
+    draggedPaths = [];
+    dropIndex = -1;
+  }
+
+  /** Only folders are valid targets, and never a folder being dragged itself. */
+  function validTarget(i: number): boolean {
+    const entry = entries[i];
+    if (!entry?.is_dir) return false;
+    if (draggedPaths.includes(entry.path)) return false;
+    return draggedPaths.length > 0;
+  }
+
+  function onDragOver(e: DragEvent, i: number) {
+    if (!validTarget(i)) return;
+    e.preventDefault();
+    if (e.dataTransfer) {
+      e.dataTransfer.dropEffect = e.ctrlKey ? "copy" : "move";
+    }
+    dropIndex = i;
+  }
+
+  function onDrop(e: DragEvent, i: number) {
+    if (!validTarget(i)) return;
+    e.preventDefault();
+    const paths = [...draggedPaths];
+    const dest = entries[i].path;
+    const copy = e.ctrlKey;
+    onDragEnd();
+    dispatch("drop", { paths, dest, copy });
+  }
 
   const COLUMNS: { key: SortKey; label: string; num?: boolean }[] = [
     { key: "name", label: "Name" },
@@ -136,9 +188,17 @@
         class:selected={isSelected(selection, i)}
         class:cut={isCut(entry.path)}
         class:lead={selection.lead === i}
+        class:droptarget={dropIndex === i}
+        class:dragging={draggedPaths.includes(entry.path)}
         bind:this={rowEls[i]}
         role="button"
         tabindex="0"
+        draggable={!renamingPath}
+        on:dragstart={(e) => onDragStart(e, i)}
+        on:dragend={onDragEnd}
+        on:dragover={(e) => onDragOver(e, i)}
+        on:dragleave={() => (dropIndex = dropIndex === i ? -1 : dropIndex)}
+        on:drop={(e) => onDrop(e, i)}
         on:click|stopPropagation={(e) => rowClick(e, i)}
         on:dblclick={() => dispatch("open", entry)}
         on:contextmenu={(e) => rowContext(e, i)}
@@ -204,6 +264,18 @@
   .row.lead:not(.selected) {
     outline: 1px dotted var(--text-faint);
     outline-offset: -1px;
+  }
+
+  /* Only valid drop targets ever highlight, so an invalid drop is visibly
+     impossible rather than merely rejected after the fact. */
+  .row.droptarget {
+    background: var(--selection);
+    outline: 2px solid var(--accent);
+    outline-offset: -2px;
+  }
+
+  .row.dragging {
+    opacity: 0.5;
   }
 
   .row.list {

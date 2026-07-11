@@ -32,15 +32,17 @@ jobs:
         run: npm test
 
   backend:
-    # Run on BOTH Linux and Windows. Linux alone never compiles `#[cfg(windows)]`
-    # code or Windows-target-only dependencies (e.g. the registry crate used to
-    # resolve known folders), so those would only fail at release time — CPE-028.
+    # Compile on every OS we actually SHIP. Linux alone never compiles
+    # `#[cfg(windows)]` code or Windows-only deps (the registry crate), and
+    # neither Linux nor Windows catches macOS-only breakage — yet release.yml
+    # builds a macOS bundle. Anything not compiled here only fails after a tag
+    # is pushed. See CPE-028 (Windows) and CPE-042 (macOS).
     name: Backend (${{ matrix.os }}) — cargo check, clippy, test
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, windows-latest]
+        os: [ubuntu-latest, windows-latest, macos-latest]
     steps:
       - uses: actions/checkout@v4
 

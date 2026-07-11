@@ -364,6 +364,41 @@ fn move_entries(paths: Vec<String>, dest: String) -> Vec<OpResult> {
         .collect()
 }
 
+/// Move each `from` to an EXACT `to` path. Used by undo, which must restore an
+/// item to its original name — auto-renaming here would defeat the point (undo
+/// of "rename a -> b" must produce "a", not "a - Copy").
+///
+/// Refuses to overwrite: if `to` already exists, the undo fails loudly rather
+/// than clobbering whatever now occupies that name.
+#[tauri::command]
+fn move_exact(pairs: Vec<(String, String)>) -> Vec<OpResult> {
+    pairs
+        .iter()
+        .map(|(from, to)| {
+            let src = Path::new(from);
+            let dst = Path::new(to);
+            if dst.exists() {
+                return OpResult::err(
+                    src,
+                    format!(
+                        "\"{}\" already exists",
+                        dst.file_name().unwrap_or_default().to_string_lossy()
+                    ),
+                );
+            }
+            if let Some(parent) = dst.parent() {
+                if !parent.exists() {
+                    return OpResult::err(src, "The original folder no longer exists");
+                }
+            }
+            match fs::rename(src, dst) {
+                Ok(()) => OpResult::ok(dst),
+                Err(e) => OpResult::err(src, e),
+            }
+        })
+        .collect()
+}
+
 /// Detailed metadata for the Properties dialog.
 #[tauri::command]
 fn entry_info(path: String) -> Result<EntryInfo, String> {
@@ -581,6 +616,7 @@ pub fn run() {
             delete_permanent,
             copy_entries,
             move_entries,
+            move_exact,
             entry_info,
             dir_size
         ])
@@ -886,6 +922,36 @@ mod tests {
 
         let total = dir_size(d.to_string_lossy().to_string()).unwrap();
         assert_eq!(total, 150);
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn move_exact_restores_to_the_original_name() {
+        let d = scratch("move_exact");
+        fs::write(d.join("b.txt"), b"x").unwrap();
+
+        let results = move_exact(vec![(
+            d.join("b.txt").to_string_lossy().to_string(),
+            d.join("a.txt").to_string_lossy().to_string(),
+        )]);
+        assert!(results[0].ok, "{}", results[0].error);
+        assert!(d.join("a.txt").exists());
+        assert!(!d.join("b.txt").exists());
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn move_exact_refuses_to_overwrite() {
+        let d = scratch("move_exact_clobber");
+        fs::write(d.join("a.txt"), b"keep").unwrap();
+        fs::write(d.join("b.txt"), b"other").unwrap();
+
+        let results = move_exact(vec![(
+            d.join("b.txt").to_string_lossy().to_string(),
+            d.join("a.txt").to_string_lossy().to_string(),
+        )]);
+        assert!(!results[0].ok, "undo must not clobber an existing file");
+        assert_eq!(fs::read(d.join("a.txt")).unwrap(), b"keep");
         let _ = fs::remove_dir_all(&d);
     }
 

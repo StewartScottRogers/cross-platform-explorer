@@ -32,6 +32,9 @@
     type Clipboard,
   } from "./lib/clipboard";
   import * as settings from "./lib/settings";
+  import {
+    pushUndo, popUndo, canUndo, peekLabel, invert, type UndoEntry,
+  } from "./lib/undo";
   import type { DirEntry, Place, SortKey, SortDir, ViewMode, RecentFile } from "./lib/types";
 
   interface OpResult { path: string; ok: boolean; error: string }
@@ -73,6 +76,7 @@
   /** Path of a freshly-created folder, so we can auto-rename it once listed. */
   let pendingRenamePath = "";
 
+  let undoStack: UndoEntry[] = [];
   let ctx: { x: number; y: number; target: "item" | "empty" } | null = null;
   let confirm: { title: string; message: string; label: string; onYes: () => void } | null = null;
   let propsFor: DirEntry[] | null = null;
@@ -322,7 +326,38 @@
     if (!entry || newName.trim() === "" || newName === entry.name) return;
 
     try {
-      await invoke<string>("rename_entry", { path, newName });
+      const to = await invoke<string>("rename_entry", { path, newName });
+      undoStack = pushUndo(undoStack, {
+        kind: "rename",
+        moves: [{ from: path, to }],
+        label: `Rename to "${newName}"`,
+      });
+      await loadPath(currentPath);
+    } catch (e) {
+      showNotice(String(e), true);
+    }
+  }
+
+  /** Undo the last rename or move. Copies and deletes are deliberately not
+      undoable — see the comment at the top of lib/undo.ts. */
+  async function undo() {
+    const { entry, rest } = popUndo(undoStack);
+    if (!entry) {
+      showNotice("Nothing to undo.");
+      return;
+    }
+    try {
+      const pairs = invert(entry).map((m) => [m.from, m.to] as [string, string]);
+      const results = await invoke<OpResult[]>("move_exact", { pairs });
+      const failed = results.filter((r) => !r.ok);
+      if (failed.length > 0) {
+        // Do NOT pop the entry on failure — the user can retry once they've
+        // cleared whatever is in the way.
+        showNotice(`Couldn't undo: ${failed[0].error}`, true);
+        return;
+      }
+      undoStack = rest;
+      showNotice(`Undone: ${entry.label}`);
       await loadPath(currentPath);
     } catch (e) {
       showNotice(String(e), true);
@@ -361,14 +396,74 @@
       showNotice(pasteCheck.reason, true);
       return;
     }
-    const cmd = clipboard.mode === "cut" ? "move_entries" : "copy_entries";
+    const wasCut = clipboard.mode === "cut";
+    const sources = [...clipboard.paths];
+    const cmd = wasCut ? "move_entries" : "copy_entries";
     try {
       const results = await invoke<OpResult[]>(cmd, {
-        paths: clipboard.paths,
+        paths: sources,
         dest: currentPath,
       });
-      reportResults(results, clipboard.mode === "cut" ? "Moved" : "Copied");
-      if (clipboard.mode === "cut") clipboard = emptyClipboard();
+      reportResults(results, wasCut ? "Moved" : "Copied");
+
+      // Only a MOVE is undoable. A copy is not — undoing it would mean deleting
+      // the new file, which is a destructive act to reverse a harmless one.
+      if (wasCut) {
+        const moves = results
+          .map((r, i) => ({ from: sources[i], to: r.path, ok: r.ok }))
+          .filter((m) => m.ok)
+          .map(({ from, to }) => ({ from, to }));
+        if (moves.length > 0) {
+          undoStack = pushUndo(undoStack, {
+            kind: "move",
+            moves,
+            label: `Move ${moves.length} item${moves.length === 1 ? "" : "s"}`,
+          });
+        }
+        clipboard = emptyClipboard();
+      }
+      await loadPath(currentPath);
+    } catch (e) {
+      showNotice(String(e), true);
+    }
+  }
+
+  /** Move `paths` into `dest` (drag & drop). Ctrl-drag copies instead. */
+  async function dropInto(paths: string[], dest: string, copy: boolean) {
+    if (paths.length === 0 || !dest) return;
+
+    // A folder can never be dropped into itself or its own descendant.
+    for (const p of paths) {
+      if (clipCanPaste(stage([p], copy ? "copy" : "cut"), dest).allowed === false) {
+        const check = clipCanPaste(stage([p], copy ? "copy" : "cut"), dest);
+        // "already in this folder" is a no-op, not an error worth shouting about.
+        if (check.reason.includes("itself")) {
+          showNotice(check.reason, true);
+          return;
+        }
+        return;
+      }
+    }
+
+    try {
+      const results = await invoke<OpResult[]>(
+        copy ? "copy_entries" : "move_entries",
+        { paths, dest },
+      );
+      reportResults(results, copy ? "Copied" : "Moved");
+      if (!copy) {
+        const moves = results
+          .map((r, i) => ({ from: paths[i], to: r.path, ok: r.ok }))
+          .filter((m) => m.ok)
+          .map(({ from, to }) => ({ from, to }));
+        if (moves.length > 0) {
+          undoStack = pushUndo(undoStack, {
+            kind: "move",
+            moves,
+            label: `Move ${moves.length} item${moves.length === 1 ? "" : "s"}`,
+          });
+        }
+      }
       await loadPath(currentPath);
     } catch (e) {
       showNotice(String(e), true);
@@ -456,6 +551,7 @@
     if (ctrl && event.key.toLowerCase() === "c") { event.preventDefault(); doCopy(); return; }
     if (ctrl && event.key.toLowerCase() === "x") { event.preventDefault(); doCut(); return; }
     if (ctrl && event.key.toLowerCase() === "v") { event.preventDefault(); doPaste(); return; }
+    if (ctrl && event.key.toLowerCase() === "z") { event.preventDefault(); undo(); return; }
 
     if (event.altKey && event.key === "ArrowLeft") { event.preventDefault(); goBack(); return; }
     if (event.altKey && event.key === "ArrowRight") { event.preventDefault(); goForward(); return; }
@@ -640,6 +736,7 @@
         on:contextEmpty={(e) => (ctx = { x: e.detail.x, y: e.detail.y, target: "empty" })}
         on:commitRename={(e) => commitRename(e.detail)}
         on:cancelRename={() => (renamingPath = "")}
+        on:drop={(e) => dropInto(e.detail.paths, e.detail.dest, e.detail.copy)}
       />
     {/if}
   </div>
