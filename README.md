@@ -1,5 +1,7 @@
 # Cross-Platform Explorer
 
+[![CI](https://github.com/StewartScottRogers/cross-platform-explorer/actions/workflows/ci.yml/badge.svg)](https://github.com/StewartScottRogers/cross-platform-explorer/actions/workflows/ci.yml)
+
 A cross-platform desktop file explorer built with **Tauri v2** (Rust backend) and
 **Svelte + TypeScript** (frontend). It ships as a one-click native installer on
 Windows, macOS, and Linux, and updates itself automatically.

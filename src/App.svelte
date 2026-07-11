@@ -3,6 +3,7 @@
   import { invoke } from "@tauri-apps/api/core";
   import { check } from "@tauri-apps/plugin-updater";
   import { relaunch } from "@tauri-apps/plugin-process";
+  import { formatSize, friendlyError } from "./lib/format";
 
   interface DirEntry {
     name: string;
@@ -16,22 +17,6 @@
   let error = "";
   let loading = false;
   let updateStatus = "";
-
-  // Map a raw backend error string to a friendly, user-facing message.
-  function friendlyError(raw: string): string {
-    const lower = raw.toLowerCase();
-    if (
-      lower.includes("denied") ||
-      lower.includes("os error 5") || // Windows: access is denied
-      lower.includes("os error 13") // Unix: permission denied
-    ) {
-      return "Can't open this folder — permission denied.";
-    }
-    if (lower.includes("os error 2") || lower.includes("not found")) {
-      return "This folder no longer exists.";
-    }
-    return "Can't open this folder.";
-  }
 
   async function load(path: string) {
     error = "";
@@ -70,18 +55,6 @@
     } catch (e) {
       error = String(e);
     }
-  }
-
-  function formatSize(bytes: number): string {
-    if (bytes === 0) return "";
-    const units = ["B", "KB", "MB", "GB", "TB"];
-    let i = 0;
-    let n = bytes;
-    while (n >= 1024 && i < units.length - 1) {
-      n /= 1024;
-      i++;
-    }
-    return `${n.toFixed(i === 0 ? 0 : 1)} ${units[i]}`;
   }
 
   // Check for updates on launch. Silent no-op if none / dev build.
