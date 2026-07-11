@@ -237,6 +237,14 @@
     loadPath(HOME);
   }
 
+  /** Open a folder in a new background tab, leaving the current tab active. */
+  function openInNewTab(entry: DirEntry) {
+    if (!entry?.is_dir) return;
+    const tab: Tab = { id: nextTabId++, history: createHistory(entry.path) };
+    tabs = [...tabs, tab];
+    showNotice(`Opened "${entry.name}" in a new tab.`);
+  }
+
   function closeTab(id: number) {
     if (tabs.length === 1) return;
     const idx = tabs.findIndex((t) => t.id === id);
@@ -579,6 +587,7 @@
   function runAction(action: string) {
     switch (action) {
       case "open": if (selectedEntries[0]) open(selectedEntries[0]); break;
+      case "open-new-tab": if (selectedEntries[0]) openInNewTab(selectedEntries[0]); break;
       case "cut": doCut(); break;
       case "copy": doCopy(); break;
       case "paste": doPaste(); break;
@@ -856,6 +865,7 @@
     target={ctx.target}
     canPaste={pasteCheck.allowed}
     selectionCount={selectedCount(selection)}
+    folderSelected={selectedEntries.length === 1 && selectedEntries[0]?.is_dir}
     on:action={(e) => runAction(e.detail)}
     on:close={() => (ctx = null)}
   />

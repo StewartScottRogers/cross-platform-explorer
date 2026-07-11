@@ -104,6 +104,33 @@ describe("new folder auto-numbering (CPE-050)", () => {
   });
 });
 
+describe("open in new tab (CPE-058)", () => {
+  it("adds a background tab titled after the folder, keeping the current tab", async () => {
+    mockBackend([file("alpha.md", "md"), dir("notes")]);
+    const { container } = render(App);
+    const driveButtons = await screen.findAllByText("Local Disk (C:)");
+    await fireEvent.click(driveButtons[0]);
+    await waitFor(() => expect(screen.getByText("alpha.md")).toBeTruthy());
+
+    // Right-click the "notes" folder row to open its context menu.
+    const notesRow = [...container.querySelectorAll(".row")].find((r) =>
+      (r.textContent ?? "").includes("notes"),
+    )!;
+    await fireEvent.contextMenu(notesRow);
+
+    await fireEvent.click(await screen.findByText("Open in new tab"));
+
+    // A new tab labelled "notes" appears in the tab bar; the current tab (d) stays.
+    await waitFor(() => {
+      const labels = [...container.querySelectorAll(".tabbar .tab-label")].map(
+        (l) => l.textContent,
+      );
+      expect(labels).toContain("notes");
+      expect(labels).toContain("d");
+    });
+  });
+});
+
 describe("type-ahead find (CPE-057)", () => {
   it("selects the next item whose name starts with the typed letter", async () => {
     mockBackend([file("alpha.md", "md"), file("beta.png", "png"), dir("notes")]);
