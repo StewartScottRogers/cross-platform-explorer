@@ -19,6 +19,7 @@ const CATEGORY_BY_EXT: Record<string, FileCategory> = {
   // images
   png: "image", jpg: "image", jpeg: "image", gif: "image", bmp: "image",
   webp: "image", svg: "image", ico: "image", tif: "image", tiff: "image",
+  heic: "image", avif: "image", jfif: "image",
   // documents
   doc: "document", docx: "document", odt: "document", rtf: "document",
   // spreadsheets
@@ -31,13 +32,16 @@ const CATEGORY_BY_EXT: Record<string, FileCategory> = {
   ts: "code", tsx: "code", js: "code", jsx: "code", rs: "code", py: "code",
   json: "code", html: "code", css: "code", svelte: "code", toml: "code",
   yml: "code", yaml: "code", sh: "code", ps1: "code", cmd: "code", bat: "code",
-  cs: "code", sln: "code", slnx: "code", xml: "code",
+  cs: "code", sln: "code", slnx: "code", xml: "code", mjs: "code", cjs: "code",
   // archives
   zip: "archive", rar: "archive", "7z": "archive", tar: "archive", gz: "archive",
+  xz: "archive", bz2: "archive", zst: "archive", tgz: "archive",
   // audio
   mp3: "audio", wav: "audio", flac: "audio", m4a: "audio", ogg: "audio",
+  aac: "audio", opus: "audio",
   // video
   mp4: "video", mkv: "video", mov: "video", avi: "video", webm: "video",
+  wmv: "video", flv: "video", m4v: "video",
   // text
   txt: "text", md: "text", log: "text", ini: "text", cfg: "text",
 };
@@ -45,6 +49,7 @@ const CATEGORY_BY_EXT: Record<string, FileCategory> = {
 const TYPE_NAME_BY_EXT: Record<string, string> = {
   png: "PNG image", jpg: "JPEG image", jpeg: "JPEG image", gif: "GIF image",
   bmp: "Bitmap image", webp: "WebP image", svg: "SVG image", ico: "Icon",
+  heic: "HEIC image", avif: "AVIF image", jfif: "JPEG image",
   doc: "Word document", docx: "Word document", odt: "OpenDocument text",
   rtf: "Rich Text document",
   xls: "Excel worksheet", xlsx: "Excel worksheet", csv: "CSV file",
@@ -52,6 +57,7 @@ const TYPE_NAME_BY_EXT: Record<string, string> = {
   ppt: "PowerPoint presentation", pptx: "PowerPoint presentation",
   pdf: "PDF document",
   ts: "TypeScript file", tsx: "TypeScript file", js: "JavaScript file",
+  mjs: "JavaScript module", cjs: "JavaScript module",
   jsx: "JavaScript file", rs: "Rust source file", py: "Python file",
   json: "JSON file", html: "HTML document", css: "Cascading Style Sheet",
   svelte: "Svelte component", toml: "TOML file", yml: "YAML file",
@@ -59,11 +65,13 @@ const TYPE_NAME_BY_EXT: Record<string, string> = {
   cmd: "Windows Command Script", bat: "Windows Batch File",
   xml: "XML document", sln: "Visual Studio Solution", slnx: "Visual Studio Solution",
   zip: "Compressed (zipped) Folder", rar: "RAR archive", "7z": "7z archive",
-  tar: "TAR archive", gz: "GZ archive",
+  tar: "TAR archive", gz: "GZ archive", xz: "XZ archive", bz2: "BZ2 archive",
+  zst: "Zstandard archive", tgz: "Gzipped TAR archive",
   mp3: "MP3 audio", wav: "WAV audio", flac: "FLAC audio", m4a: "M4A audio",
-  ogg: "OGG audio",
+  ogg: "OGG audio", aac: "AAC audio", opus: "Opus audio",
   mp4: "MP4 video", mkv: "Matroska video", mov: "QuickTime movie",
-  avi: "AVI video", webm: "WebM video",
+  avi: "AVI video", webm: "WebM video", wmv: "Windows Media Video",
+  flv: "Flash video", m4v: "MPEG-4 video",
   txt: "Text Document", md: "Markdown file", log: "Log file",
   ini: "Configuration settings", cfg: "Configuration file",
   exe: "Application", msi: "Windows Installer Package", dll: "Application extension",
