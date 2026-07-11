@@ -13,6 +13,7 @@ const KEYS = {
   sortKey: "cpe.sortKey",
   sortDir: "cpe.sortDir",
   showDetails: "cpe.showDetails",
+  showPreview: "cpe.showPreview",
   pins: "cpe.pins",
   recents: "cpe.recents",
 } as const;
@@ -74,6 +75,10 @@ export const saveSortDir = (v: SortDir) => write(KEYS.sortDir, v);
 export const loadShowDetails = (): boolean =>
   read(KEYS.showDetails, true, isBool);
 export const saveShowDetails = (v: boolean) => write(KEYS.showDetails, v);
+
+export const loadShowPreview = (): boolean =>
+  read(KEYS.showPreview, true, isBool);
+export const saveShowPreview = (v: boolean) => write(KEYS.showPreview, v);
 
 export const loadPins = (): string[] => read(KEYS.pins, [], isStringArray);
 export const savePins = (v: string[]) => write(KEYS.pins, v);

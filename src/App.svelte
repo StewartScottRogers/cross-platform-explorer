@@ -1,6 +1,6 @@
 <script lang="ts">
   import { onMount } from "svelte";
-  import { invoke } from "@tauri-apps/api/core";
+  import { invoke, convertFileSrc } from "@tauri-apps/api/core";
   import { check } from "@tauri-apps/plugin-updater";
   import { relaunch } from "@tauri-apps/plugin-process";
   import { openPath } from "@tauri-apps/plugin-opener";
@@ -12,6 +12,7 @@
   import FileList from "./lib/components/FileList.svelte";
   import HomeView from "./lib/components/HomeView.svelte";
   import DetailsPane from "./lib/components/DetailsPane.svelte";
+  import PreviewPane from "./lib/components/PreviewPane.svelte";
   import StatusBar from "./lib/components/StatusBar.svelte";
   import ContextMenu from "./lib/components/ContextMenu.svelte";
   import ConfirmDialog from "./lib/components/ConfirmDialog.svelte";
@@ -72,6 +73,9 @@
   let sortDir: SortDir = "asc";
   let view: ViewMode = "details";
   let showDetails = true;
+  let showPreview = true;
+  /** Cap on how much of a text file the preview will load. */
+  const PREVIEW_MAX_BYTES = 256 * 1024;
   let showHidden = false;
   let pins: string[] = [];
   let recents: RecentFile[] = [];
@@ -455,6 +459,11 @@
     }
   }
 
+  /** Fetch a text file's contents for the preview pane (size-capped backend). */
+  function loadPreviewText(path: string): Promise<string> {
+    return invoke<string>("read_file_text", { path, maxBytes: PREVIEW_MAX_BYTES });
+  }
+
   /** Copy the selection's full path(s) to the OS clipboard, quoted, one per
       line — Explorer's "Copy as path". */
   async function doCopyPath() {
@@ -722,6 +731,7 @@
     sortKey = settings.loadSortKey();
     sortDir = settings.loadSortDir();
     showDetails = settings.loadShowDetails();
+    showPreview = settings.loadShowPreview();
     pins = settings.loadPins();
     recents = settings.loadRecents();
 
@@ -844,7 +854,34 @@
   </div>
 
   {#if showDetails}
-    <DetailsPane selected={selectedEntries} {folderName} {itemCount} />
+    <div class="rightpane">
+      <div class="rightpane-toggle" role="tablist" aria-label="Preview or details">
+        <button
+          role="tab"
+          class:active={showPreview}
+          aria-selected={showPreview}
+          on:click={() => { showPreview = true; settings.saveShowPreview(true); }}
+        >Preview</button>
+        <button
+          role="tab"
+          class:active={!showPreview}
+          aria-selected={!showPreview}
+          on:click={() => { showPreview = false; settings.saveShowPreview(false); }}
+        >Details</button>
+      </div>
+
+      {#if showPreview}
+        <PreviewPane
+          entry={selectedEntries.length === 1 ? selectedEntries[0] : null}
+          assetUrl={convertFileSrc}
+          loadText={loadPreviewText}
+        >
+          <DetailsPane selected={selectedEntries} {folderName} {itemCount} />
+        </PreviewPane>
+      {:else}
+        <DetailsPane selected={selectedEntries} {folderName} {itemCount} />
+      {/if}
+    </div>
   {/if}
 </div>
 

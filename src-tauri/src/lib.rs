@@ -230,6 +230,24 @@ fn create_dir(path: String, name: String) -> Result<String, String> {
     Ok(target.to_string_lossy().to_string())
 }
 
+/// Read a text file's contents for the preview pane, capped at `max_bytes` so a
+/// huge file can never be slurped into memory. Errors (rather than truncating)
+/// when the file is too large, unreadable, or not valid UTF-8 — the frontend
+/// shows a "can't preview" state in that case.
+#[tauri::command]
+fn read_file_text(path: String, max_bytes: u64) -> Result<String, String> {
+    let p = Path::new(&path);
+    let meta = fs::metadata(p).map_err(|e| e.to_string())?;
+    if meta.len() > max_bytes {
+        return Err(format!(
+            "File is too large to preview ({} bytes; limit {max_bytes}).",
+            meta.len()
+        ));
+    }
+    let bytes = fs::read(p).map_err(|e| e.to_string())?;
+    String::from_utf8(bytes).map_err(|_| "File is not valid UTF-8 text.".to_string())
+}
+
 /// Rename a single entry in place. Returns the new path.
 #[tauri::command]
 fn rename_entry(path: String, new_name: String) -> Result<String, String> {
@@ -703,6 +721,7 @@ pub fn run() {
             list_drives,
             special_folders,
             create_dir,
+            read_file_text,
             rename_entry,
             delete_to_trash,
             delete_permanent,
@@ -840,6 +859,36 @@ mod tests {
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(&dir).expect("scratch dir");
         dir
+    }
+
+    #[test]
+    fn read_file_text_returns_contents_within_the_cap() {
+        let d = scratch("read_ok");
+        let f = d.join("note.txt");
+        fs::write(&f, b"hello world").unwrap();
+        let r = read_file_text(f.to_string_lossy().to_string(), 1024);
+        assert_eq!(r.unwrap(), "hello world");
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn read_file_text_errors_when_over_the_cap() {
+        let d = scratch("read_big");
+        let f = d.join("big.txt");
+        fs::write(&f, vec![b'x'; 200]).unwrap();
+        let r = read_file_text(f.to_string_lossy().to_string(), 100);
+        assert!(r.is_err(), "a file over the cap must error, not truncate");
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn read_file_text_errors_on_invalid_utf8() {
+        let d = scratch("read_bin");
+        let f = d.join("blob.bin");
+        fs::write(&f, [0xff, 0xfe, 0x00, 0x01]).unwrap();
+        let r = read_file_text(f.to_string_lossy().to_string(), 1024);
+        assert!(r.is_err(), "non-UTF-8 content must error");
+        let _ = fs::remove_dir_all(&d);
     }
 
     #[test]

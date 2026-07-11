@@ -34,7 +34,10 @@ const file = (name: string, extension: string): DirEntry => ({
 const drives: Place[] = [{ name: "Local Disk (C:)", path: "C:\\d", kind: "drive" }];
 
 const { invoke } = vi.hoisted(() => ({ invoke: vi.fn() }));
-vi.mock("@tauri-apps/api/core", () => ({ invoke }));
+vi.mock("@tauri-apps/api/core", () => ({
+  invoke,
+  convertFileSrc: (p: string) => `asset://${p}`,
+}));
 vi.mock("@tauri-apps/plugin-updater", () => ({ check: vi.fn(async () => null) }));
 vi.mock("@tauri-apps/plugin-process", () => ({ relaunch: vi.fn() }));
 vi.mock("@tauri-apps/plugin-opener", () => ({ openPath: vi.fn() }));
@@ -53,6 +56,7 @@ function mockBackend(listing: DirEntry[]) {
       case "rename_entry": return `${args?.path}.renamed`;
       case "copy_entries":
         return (args?.paths as string[]).map((p) => ({ path: `${p} (copy)`, ok: true, error: "" }));
+      case "read_file_text": return "FILE PREVIEW CONTENT";
       default: return null;
     }
   });
@@ -100,6 +104,54 @@ describe("new folder auto-numbering (CPE-050)", () => {
       const call = invoke.mock.calls.find((c) => c[0] === "create_dir");
       expect(call).toBeTruthy();
       expect((call![1] as { name: string }).name).toBe("New folder (2)");
+    });
+  });
+});
+
+describe("preview pane (CPE-061)", () => {
+  it("shows an image preview for a selected image file", async () => {
+    mockBackend([file("photo.png", "png"), file("a.txt", "txt")]);
+    const { container } = render(App);
+    const driveButtons = await screen.findAllByText("Local Disk (C:)");
+    await fireEvent.click(driveButtons[0]);
+    await waitFor(() => expect(screen.getByText("photo.png")).toBeTruthy());
+
+    await fireEvent.click(screen.getByText("photo.png"));
+
+    await waitFor(() => {
+      const img = container.querySelector(".preview img.preview-img") as HTMLImageElement | null;
+      expect(img).toBeTruthy();
+      expect(img!.getAttribute("src")).toBe("asset://C:\\d\\photo.png");
+    });
+  });
+
+  it("shows a text preview (via read_file_text) for a selected text file", async () => {
+    mockBackend([file("a.txt", "txt")]);
+    render(App);
+    const driveButtons = await screen.findAllByText("Local Disk (C:)");
+    await fireEvent.click(driveButtons[0]);
+    await waitFor(() => expect(screen.getByText("a.txt")).toBeTruthy());
+
+    await fireEvent.click(screen.getByText("a.txt"));
+
+    await waitFor(() => expect(screen.getByText("FILE PREVIEW CONTENT")).toBeTruthy());
+    expect(invoke.mock.calls.some((c) => c[0] === "read_file_text")).toBe(true);
+  });
+
+  it("switches to metadata when the Details toggle is chosen", async () => {
+    mockBackend([file("a.txt", "txt")]);
+    const { container } = render(App);
+    const driveButtons = await screen.findAllByText("Local Disk (C:)");
+    await fireEvent.click(driveButtons[0]);
+    await waitFor(() => expect(screen.getByText("a.txt")).toBeTruthy());
+    await fireEvent.click(screen.getByText("a.txt"));
+    await waitFor(() => expect(screen.getByText("FILE PREVIEW CONTENT")).toBeTruthy());
+
+    await fireEvent.click(screen.getByRole("tab", { name: "Details" }));
+
+    await waitFor(() => {
+      expect(container.querySelector(".rightpane .details")).toBeTruthy();
+      expect(container.querySelector(".preview-text")).toBeNull();
     });
   });
 });
