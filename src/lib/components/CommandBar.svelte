@@ -1,20 +1,25 @@
 <script lang="ts">
   import { createEventDispatcher } from "svelte";
   import Icon from "./Icon.svelte";
-  import type { SortKey, SortDir } from "../types";
+  import type { SortKey, SortDir, ViewMode } from "../types";
 
-  export let hasSelection = false;
+  export let selectionCount = 0;
+  export let canPaste = false;
   export let showDetails = true;
+  export let showHidden = false;
   export let sortKey: SortKey = "name";
   export let sortDir: SortDir = "asc";
+  export let view: ViewMode = "details";
 
   const dispatch = createEventDispatcher<{
-    open: void;
+    action: string;
     sort: { key: SortKey; dir: SortDir };
+    view: ViewMode;
+    toggleHidden: void;
     toggleDetails: void;
   }>();
 
-  let sortOpen = false;
+  let open: "" | "sort" | "view" = "";
 
   const SORTS: { key: SortKey; label: string }[] = [
     { key: "name", label: "Name" },
@@ -22,96 +27,110 @@
     { key: "type", label: "Type" },
     { key: "size", label: "Size" },
   ];
+  const VIEWS: { key: ViewMode; label: string }[] = [
+    { key: "details", label: "Details" },
+    { key: "list", label: "List" },
+    { key: "icons", label: "Large icons" },
+  ];
 
-  function pickSort(key: SortKey) {
-    dispatch("sort", { key, dir: sortDir });
-    sortOpen = false;
-  }
-  function pickDir(dir: SortDir) {
-    dispatch("sort", { key: sortKey, dir });
-    sortOpen = false;
-  }
+  $: one = selectionCount === 1;
+  $: any = selectionCount > 0;
 </script>
 
-<svelte:window on:click={() => (sortOpen = false)} />
+<svelte:window on:click={() => (open = "")} />
 
 <div class="commandbar">
-  <!--
-    Only actions that are genuinely wired up are enabled. Cut/Copy/Paste/Rename/
-    Share/Delete are shown (Explorer has them) but disabled — better a visibly
-    inert control than one that silently does nothing or, worse, pretends to.
-  -->
-  <button class="cmd new" disabled title="New — not implemented yet">
+  <button class="cmd new" title="New folder (Ctrl+Shift+N)" on:click={() => dispatch("action", "new-folder")}>
     <Icon name="plus" size={15} /> New
   </button>
 
   <span class="cmd-sep" />
 
-  <button class="cmd" disabled title="Cut — not implemented yet"><Icon name="cut" /></button>
-  <button class="cmd" disabled title="Copy — not implemented yet"><Icon name="copy" /></button>
-  <button class="cmd" disabled title="Paste — not implemented yet"><Icon name="paste" /></button>
-  <button class="cmd" disabled title="Rename — not implemented yet"><Icon name="rename" /></button>
+  <button class="cmd" disabled={!any} title="Cut (Ctrl+X)" on:click={() => dispatch("action", "cut")}>
+    <Icon name="cut" />
+  </button>
+  <button class="cmd" disabled={!any} title="Copy (Ctrl+C)" on:click={() => dispatch("action", "copy")}>
+    <Icon name="copy" />
+  </button>
+  <button class="cmd" disabled={!canPaste} title="Paste (Ctrl+V)" on:click={() => dispatch("action", "paste")}>
+    <Icon name="paste" />
+  </button>
+  <button
+    class="cmd"
+    disabled={!one}
+    title={selectionCount > 1 ? "Rename one item at a time" : "Rename (F2)"}
+    on:click={() => dispatch("action", "rename")}
+  >
+    <Icon name="rename" />
+  </button>
   <button class="cmd" disabled title="Share — not implemented yet"><Icon name="share" /></button>
-  <button class="cmd" disabled title="Delete — not implemented yet"><Icon name="delete" /></button>
+  <button class="cmd" disabled={!any} title="Delete (Del)" on:click={() => dispatch("action", "delete")}>
+    <Icon name="delete" />
+  </button>
 
   <span class="cmd-sep" />
 
-  <button
-    class="cmd"
-    disabled={!hasSelection}
-    title="Open the selected item"
-    on:click={() => dispatch("open")}
-  >
+  <button class="cmd" disabled={!any} title="Open the selection" on:click={() => dispatch("action", "open")}>
     Open
   </button>
 
   <span class="cmd-sep" />
 
   <div class="menu-wrap">
-    <button class="cmd" title="Sort" on:click|stopPropagation={() => (sortOpen = !sortOpen)}>
+    <button class="cmd" title="Sort" on:click|stopPropagation={() => (open = open === "sort" ? "" : "sort")}>
       <Icon name="sort" /> Sort <span class="chev"><Icon name="chev-down" size={12} /></span>
     </button>
-    {#if sortOpen}
-      <!-- svelte-ignore a11y-no-static-element-interactions a11y-click-events-have-key-events -->
+    {#if open === "sort"}
+      <!-- svelte-ignore a11y-no-noninteractive-element-interactions a11y-click-events-have-key-events -->
       <div class="menu" role="menu" tabindex="-1" on:click|stopPropagation>
         {#each SORTS as s (s.key)}
-          <button role="menuitem" on:click={() => pickSort(s.key)}>
-            <span class="check">
-              {#if sortKey === s.key}<Icon name="check" size={13} />{/if}
-            </span>
+          <button role="menuitem" on:click={() => { dispatch("sort", { key: s.key, dir: sortDir }); open = ""; }}>
+            <span class="check">{#if sortKey === s.key}<Icon name="check" size={13} />{/if}</span>
             {s.label}
           </button>
         {/each}
         <div class="menu-sep" />
-        <button role="menuitem" on:click={() => pickDir("asc")}>
-          <span class="check">
-            {#if sortDir === "asc"}<Icon name="check" size={13} />{/if}
-          </span>
+        <button role="menuitem" on:click={() => { dispatch("sort", { key: sortKey, dir: "asc" }); open = ""; }}>
+          <span class="check">{#if sortDir === "asc"}<Icon name="check" size={13} />{/if}</span>
           Ascending
         </button>
-        <button role="menuitem" on:click={() => pickDir("desc")}>
-          <span class="check">
-            {#if sortDir === "desc"}<Icon name="check" size={13} />{/if}
-          </span>
+        <button role="menuitem" on:click={() => { dispatch("sort", { key: sortKey, dir: "desc" }); open = ""; }}>
+          <span class="check">{#if sortDir === "desc"}<Icon name="check" size={13} />{/if}</span>
           Descending
         </button>
       </div>
     {/if}
   </div>
 
-  <button class="cmd" disabled title="View — details view only for now">
-    <Icon name="view" /> View <span class="chev"><Icon name="chev-down" size={12} /></span>
-  </button>
-  <button class="cmd" disabled title="Filter — not implemented yet">
-    <Icon name="filter" /> Filter <span class="chev"><Icon name="chev-down" size={12} /></span>
-  </button>
-  <button class="cmd" disabled title="More"><Icon name="more" /></button>
+  <div class="menu-wrap">
+    <button class="cmd" title="View" on:click|stopPropagation={() => (open = open === "view" ? "" : "view")}>
+      <Icon name="view" /> View <span class="chev"><Icon name="chev-down" size={12} /></span>
+    </button>
+    {#if open === "view"}
+      <!-- svelte-ignore a11y-no-noninteractive-element-interactions a11y-click-events-have-key-events -->
+      <div class="menu" role="menu" tabindex="-1" on:click|stopPropagation>
+        {#each VIEWS as v (v.key)}
+          <button role="menuitem" on:click={() => { dispatch("view", v.key); open = ""; }}>
+            <span class="check">{#if view === v.key}<Icon name="check" size={13} />{/if}</span>
+            {v.label}
+          </button>
+        {/each}
+        <div class="menu-sep" />
+        <button role="menuitem" on:click={() => { dispatch("toggleHidden"); open = ""; }}>
+          <span class="check">{#if showHidden}<Icon name="check" size={13} />{/if}</span>
+          Show hidden files
+        </button>
+      </div>
+    {/if}
+  </div>
+
+  <button class="cmd" disabled title="Filter — use the search box"><Icon name="filter" /> Filter</button>
 
   <span class="spacer" />
 
   <button
     class="cmd"
-    title={showDetails ? "Hide details pane" : "Show details pane"}
+    title={showDetails ? "Hide details pane (Alt+P)" : "Show details pane (Alt+P)"}
     on:click={() => dispatch("toggleDetails")}
   >
     <Icon name="details" /> Details

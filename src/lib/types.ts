@@ -7,6 +7,8 @@ export interface DirEntry {
   modified: number | null;
   /** Lowercase extension without the dot; "" for folders/extensionless files. */
   extension: string;
+  /** Hidden per OS convention: hidden attribute on Windows, dotfile on POSIX. */
+  hidden: boolean;
 }
 
 export interface Place {
@@ -18,3 +20,11 @@ export interface Place {
 
 export type SortKey = "name" | "modified" | "type" | "size";
 export type SortDir = "asc" | "desc";
+export type ViewMode = "details" | "list" | "icons";
+
+export interface RecentFile {
+  path: string;
+  name: string;
+  /** Epoch ms when it was last opened from this app. */
+  opened: number;
+}

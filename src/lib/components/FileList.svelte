@@ -1,25 +1,38 @@
 <script lang="ts">
-  import { createEventDispatcher } from "svelte";
+  import { createEventDispatcher, tick } from "svelte";
   import Icon from "./Icon.svelte";
   import { formatSize } from "../format";
   import { formatDate } from "../datetime";
   import { categoryOf, typeName } from "../filetypes";
-  import type { DirEntry, SortKey, SortDir } from "../types";
+  import { isSelected } from "../selection";
+  import type { Selection } from "../selection";
+  import type { DirEntry, SortKey, SortDir, ViewMode } from "../types";
 
   export let entries: DirEntry[] = [];
-  export let selected = -1;
+  export let selection: Selection;
   export let sortKey: SortKey = "name";
   export let sortDir: SortDir = "asc";
+  export let view: ViewMode = "details";
   export let error = "";
   export let loading = false;
   export let searching = false;
+  export let cutPaths: string[] = [];
+
+  /** Path currently being renamed inline, or "" for none. */
+  export let renamingPath = "";
+  /** Initial text for the inline editor. */
+  export let renameValue = "";
 
   export let rowEls: HTMLElement[] = [];
 
   const dispatch = createEventDispatcher<{
-    select: number;
+    click: { index: number; ctrl: boolean; shift: boolean };
     open: DirEntry;
     sort: { key: SortKey; dir: SortDir };
+    context: { x: number; y: number; index: number };
+    contextEmpty: { x: number; y: number };
+    commitRename: string;
+    cancelRename: void;
   }>();
 
   const COLUMNS: { key: SortKey; label: string; num?: boolean }[] = [
@@ -29,30 +42,77 @@
     { key: "size", label: "Size", num: true },
   ];
 
-  // Clicking the active column flips direction; a new column starts ascending.
   function headerClick(key: SortKey) {
     const dir: SortDir = key === sortKey && sortDir === "asc" ? "desc" : "asc";
     dispatch("sort", { key, dir });
   }
+
+  let editEl: HTMLInputElement | undefined;
+  $: if (renamingPath && editEl) focusEditor();
+
+  async function focusEditor() {
+    await tick();
+    if (!editEl) return;
+    editEl.focus();
+    // Select the stem, not the extension — renaming "photo.png" shouldn't make
+    // it trivially easy to destroy the extension by typing over it.
+    const dot = renameValue.lastIndexOf(".");
+    if (dot > 0) editEl.setSelectionRange(0, dot);
+    else editEl.select();
+  }
+
+  function onEditorKey(e: KeyboardEvent) {
+    e.stopPropagation(); // list shortcuts must never fire while editing
+    if (e.key === "Enter") {
+      e.preventDefault();
+      dispatch("commitRename", (e.currentTarget as HTMLInputElement).value);
+    } else if (e.key === "Escape") {
+      e.preventDefault();
+      dispatch("cancelRename");
+    }
+  }
+
+  function rowClick(e: MouseEvent, i: number) {
+    dispatch("click", {
+      index: i,
+      ctrl: e.ctrlKey || e.metaKey,
+      shift: e.shiftKey,
+    });
+  }
+
+  function rowContext(e: MouseEvent, i: number) {
+    e.preventDefault();
+    e.stopPropagation();
+    dispatch("context", { x: e.clientX, y: e.clientY, index: i });
+  }
+
+  function emptyContext(e: MouseEvent) {
+    e.preventDefault();
+    dispatch("contextEmpty", { x: e.clientX, y: e.clientY });
+  }
+
+  const isCut = (p: string) => cutPaths.includes(p);
 </script>
 
-<div class="columns">
-  {#each COLUMNS as col (col.key)}
-    <button
-      class="col"
-      class:num={col.num}
-      on:click={() => headerClick(col.key)}
-      title="Sort by {col.label}"
-    >
-      {col.label}
-      {#if sortKey === col.key}
-        <span class="sortchev">
-          <Icon name={sortDir === "asc" ? "chev-up" : "chev-down"} size={12} />
-        </span>
-      {/if}
-    </button>
-  {/each}
-</div>
+{#if view === "details" && !error && !loading && entries.length > 0}
+  <div class="columns">
+    {#each COLUMNS as col (col.key)}
+      <button
+        class="col"
+        class:num={col.num}
+        on:click={() => headerClick(col.key)}
+        title="Sort by {col.label}"
+      >
+        {col.label}
+        {#if sortKey === col.key}
+          <span class="sortchev">
+            <Icon name={sortDir === "asc" ? "chev-up" : "chev-down"} size={12} />
+          </span>
+        {/if}
+      </button>
+    {/each}
+  </div>
+{/if}
 
 {#if error}
   <div class="empty-state">
@@ -62,41 +122,125 @@
 {:else if loading}
   <div class="empty-state"><p>Loading…</p></div>
 {:else if entries.length === 0}
-  <div class="empty-state">
+  <!-- svelte-ignore a11y-no-static-element-interactions -->
+  <div class="empty-state" on:contextmenu={emptyContext}>
     <span class="empty-icon"><Icon name="folder" size={40} /></span>
     <p>{searching ? "No items match your search" : "This folder is empty"}</p>
   </div>
 {:else}
-  <div class="rows">
+  <!-- svelte-ignore a11y-no-static-element-interactions -->
+  <div class="rows" class:grid={view === "icons"} on:contextmenu={emptyContext}>
     {#each entries as entry, i (entry.path)}
       <div
-        class="row"
-        class:selected={i === selected}
+        class="row {view}"
+        class:selected={isSelected(selection, i)}
+        class:cut={isCut(entry.path)}
+        class:lead={selection.lead === i}
         bind:this={rowEls[i]}
         role="button"
         tabindex="0"
-        on:click={() => dispatch("select", i)}
+        on:click|stopPropagation={(e) => rowClick(e, i)}
         on:dblclick={() => dispatch("open", entry)}
+        on:contextmenu={(e) => rowContext(e, i)}
         on:keydown={(e) => {
           if (e.key === "Enter" || e.key === " ") {
             e.preventDefault();
-            dispatch("select", i);
             dispatch("open", entry);
           }
         }}
       >
         <span class="cell name">
-          <Icon name={categoryOf(entry)} />
-          <span class="ellip">{entry.name}</span>
+          <Icon name={categoryOf(entry)} size={view === "icons" ? 40 : 16} />
+          {#if renamingPath === entry.path}
+            <input
+              class="rename"
+              bind:this={editEl}
+              value={renameValue}
+              on:keydown={onEditorKey}
+              on:click|stopPropagation
+              on:dblclick|stopPropagation
+              on:blur={(e) => dispatch("commitRename", e.currentTarget.value)}
+            />
+          {:else}
+            <span class="ellip">{entry.name}</span>
+          {/if}
         </span>
-        <span class="cell dim">{formatDate(entry.modified)}</span>
-        <span class="cell dim">{typeName(entry)}</span>
-        <span class="cell num">{entry.is_dir ? "" : formatSize(entry.size)}</span>
+
+        {#if view === "details"}
+          <span class="cell dim">{formatDate(entry.modified)}</span>
+          <span class="cell dim">{typeName(entry)}</span>
+          <span class="cell num">{entry.is_dir ? "" : formatSize(entry.size)}</span>
+        {/if}
       </div>
     {/each}
   </div>
 {/if}
 
 <style>
-  .ellip { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .ellip {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .rename {
+    flex: 1;
+    min-width: 0;
+    font: inherit;
+    padding: 1px 4px;
+    border: 1px solid var(--accent);
+    border-radius: 3px;
+    background: #fff;
+    color: var(--text);
+    outline: none;
+  }
+
+  /* Cut items dim until the paste completes — the affordance Explorer uses, so
+     a pending move is visible rather than invisible state. */
+  .row.cut {
+    opacity: 0.45;
+  }
+
+  .row.lead:not(.selected) {
+    outline: 1px dotted var(--text-faint);
+    outline-offset: -1px;
+  }
+
+  .row.list {
+    grid-template-columns: 1fr;
+  }
+
+  .rows.grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(124px, 1fr));
+    gap: 6px;
+    padding: 10px;
+  }
+
+  .row.icons {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 6px;
+    height: auto;
+    padding: 12px 6px;
+    text-align: center;
+  }
+
+  .row.icons :global(.cell.name) {
+    flex-direction: column;
+    gap: 6px;
+    width: 100%;
+  }
+
+  .row.icons .ellip {
+    width: 100%;
+    white-space: normal;
+    overflow: hidden;
+    display: -webkit-box;
+    -webkit-line-clamp: 2;
+    line-clamp: 2;
+    -webkit-box-orient: vertical;
+    line-height: 1.25;
+  }
 </style>
