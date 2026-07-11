@@ -70,6 +70,10 @@
       <Icon name="copy" size={15} /> Duplicate
       <span class="hint">Ctrl+D</span>
     </button>
+    <button class="row" role="menuitem" on:click={() => run("copy-path")}>
+      <Icon name="paste" size={15} /> Copy as path
+      <span class="hint">Ctrl+Shift+C</span>
+    </button>
     <div class="sep" />
     <button class="row" role="menuitem" on:click={() => run("properties")}>
       <Icon name="info" size={15} /> Properties
