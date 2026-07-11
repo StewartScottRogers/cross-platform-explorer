@@ -15,6 +15,49 @@ pub struct DirEntry {
     /// Lowercased file extension without the dot ("png"), empty for directories
     /// and extensionless files.
     extension: String,
+    /// Hidden per the OS convention: the hidden attribute on Windows, a leading
+    /// dot on POSIX.
+    hidden: bool,
+}
+
+/// Per-item outcome of a bulk operation. Bulk file operations must NOT be
+/// all-or-nothing and must not abort on the first failure: if 9 of 10 files
+/// copy and one is locked, the user needs to know exactly which one failed.
+#[derive(Serialize)]
+pub struct OpResult {
+    path: String,
+    ok: bool,
+    error: String,
+}
+
+impl OpResult {
+    fn ok(path: &Path) -> Self {
+        Self {
+            path: path.to_string_lossy().to_string(),
+            ok: true,
+            error: String::new(),
+        }
+    }
+    fn err(path: &Path, e: impl std::fmt::Display) -> Self {
+        Self {
+            path: path.to_string_lossy().to_string(),
+            ok: false,
+            error: e.to_string(),
+        }
+    }
+}
+
+/// Detailed metadata for the Properties dialog.
+#[derive(Serialize)]
+pub struct EntryInfo {
+    name: String,
+    path: String,
+    is_dir: bool,
+    size: u64,
+    modified: Option<u64>,
+    created: Option<u64>,
+    readonly: bool,
+    hidden: bool,
 }
 
 #[derive(Serialize)]
@@ -40,6 +83,95 @@ fn extension_of(path: &Path) -> String {
         .unwrap_or_default()
 }
 
+/// Hidden per OS convention: the FILE_ATTRIBUTE_HIDDEN bit on Windows,
+/// a leading dot on POSIX.
+fn is_hidden(path: &Path, meta: &fs::Metadata) -> bool {
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::MetadataExt;
+        const FILE_ATTRIBUTE_HIDDEN: u32 = 0x2;
+        if meta.file_attributes() & FILE_ATTRIBUTE_HIDDEN != 0 {
+            return true;
+        }
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = meta;
+    }
+    path.file_name()
+        .and_then(|n| n.to_str())
+        .map(|n| n.starts_with('.'))
+        .unwrap_or(false)
+}
+
+/// Would moving/copying `src` into `dest` put a directory inside itself?
+/// Copying a folder into its own descendant recurses forever and shreds data —
+/// this must be impossible, not merely discouraged.
+fn is_self_or_descendant(src: &Path, dest: &Path) -> bool {
+    let src = src.canonicalize();
+    let dest = dest.canonicalize();
+    match (src, dest) {
+        (Ok(s), Ok(d)) => d == s || d.starts_with(&s),
+        // If either path can't be canonicalized we cannot prove it is safe,
+        // so refuse rather than risk it.
+        _ => false,
+    }
+}
+
+/// Pick a non-colliding name in `dir`, Explorer-style:
+/// "report.txt" -> "report - Copy.txt" -> "report - Copy (2).txt".
+/// We never overwrite an existing file — silent overwrite is data loss.
+fn unique_target(dir: &Path, file_name: &str) -> PathBuf {
+    let candidate = dir.join(file_name);
+    if !candidate.exists() {
+        return candidate;
+    }
+
+    let path = Path::new(file_name);
+    let stem = path
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or(file_name);
+    let ext = path.extension().and_then(|e| e.to_str());
+
+    let build = |suffix: &str| -> PathBuf {
+        let name = match ext {
+            Some(e) => format!("{stem}{suffix}.{e}"),
+            None => format!("{stem}{suffix}"),
+        };
+        dir.join(name)
+    };
+
+    let first = build(" - Copy");
+    if !first.exists() {
+        return first;
+    }
+    for n in 2..10_000 {
+        let p = build(&format!(" - Copy ({n})"));
+        if !p.exists() {
+            return p;
+        }
+    }
+    // Pathological fallback; effectively unreachable.
+    dir.join(format!("{file_name}.{}", std::process::id()))
+}
+
+/// Recursively copy a directory tree.
+fn copy_dir_all(src: &Path, dst: &Path) -> std::io::Result<()> {
+    fs::create_dir_all(dst)?;
+    for entry in fs::read_dir(src)? {
+        let entry = entry?;
+        let from = entry.path();
+        let to = dst.join(entry.file_name());
+        if entry.file_type()?.is_dir() {
+            copy_dir_all(&from, &to)?;
+        } else {
+            fs::copy(&from, &to)?;
+        }
+    }
+    Ok(())
+}
+
 /// List the immediate children of `path`.
 #[tauri::command]
 fn list_dir(path: String) -> Result<Vec<DirEntry>, String> {
@@ -54,6 +186,7 @@ fn list_dir(path: String) -> Result<Vec<DirEntry>, String> {
         let is_dir = meta.is_dir();
 
         out.push(DirEntry {
+            hidden: is_hidden(&entry_path, &meta),
             name: entry.file_name().to_string_lossy().to_string(),
             path: entry_path.to_string_lossy().to_string(),
             is_dir,
@@ -67,6 +200,212 @@ fn list_dir(path: String) -> Result<Vec<DirEntry>, String> {
         });
     }
     Ok(out)
+}
+
+// ---------------------------------------------------------------------------
+// Mutating file operations (CPE-030)
+//
+// Safety rules that these all obey:
+//   * Delete goes to the OS Recycle Bin / Trash. Permanent delete is a separate,
+//     explicitly-requested command.
+//   * Nothing is ever silently overwritten. Collisions either error (rename,
+//     create) or auto-rename (paste), never clobber.
+//   * A directory can never be copied or moved into itself or a descendant.
+//   * Bulk operations report per-item results rather than aborting on the first
+//     failure.
+// ---------------------------------------------------------------------------
+
+/// Create a new directory `name` inside `path`.
+#[tauri::command]
+fn create_dir(path: String, name: String) -> Result<String, String> {
+    let name = name.trim();
+    if name.is_empty() {
+        return Err("Name cannot be empty".to_string());
+    }
+    let target = Path::new(&path).join(name);
+    if target.exists() {
+        return Err(format!("\"{name}\" already exists"));
+    }
+    fs::create_dir(&target).map_err(|e| e.to_string())?;
+    Ok(target.to_string_lossy().to_string())
+}
+
+/// Rename a single entry in place. Returns the new path.
+#[tauri::command]
+fn rename_entry(path: String, new_name: String) -> Result<String, String> {
+    let new_name = new_name.trim();
+    if new_name.is_empty() {
+        return Err("Name cannot be empty".to_string());
+    }
+    let src = Path::new(&path);
+    let parent = src
+        .parent()
+        .ok_or_else(|| "Cannot rename a filesystem root".to_string())?;
+    let target = parent.join(new_name);
+
+    if target == src {
+        return Ok(path.clone()); // no-op rename
+    }
+    if target.exists() {
+        return Err(format!("\"{new_name}\" already exists"));
+    }
+    fs::rename(src, &target).map_err(|e| e.to_string())?;
+    Ok(target.to_string_lossy().to_string())
+}
+
+/// Move entries to the OS Recycle Bin / Trash. Recoverable by the user.
+#[tauri::command]
+fn delete_to_trash(paths: Vec<String>) -> Vec<OpResult> {
+    paths
+        .iter()
+        .map(|p| {
+            let path = Path::new(p);
+            match trash::delete(path) {
+                Ok(()) => OpResult::ok(path),
+                Err(e) => OpResult::err(path, e),
+            }
+        })
+        .collect()
+}
+
+/// Permanently delete entries. Irreversible — the UI must confirm explicitly
+/// before ever calling this.
+#[tauri::command]
+fn delete_permanent(paths: Vec<String>) -> Vec<OpResult> {
+    paths
+        .iter()
+        .map(|p| {
+            let path = Path::new(p);
+            let result = if path.is_dir() {
+                fs::remove_dir_all(path)
+            } else {
+                fs::remove_file(path)
+            };
+            match result {
+                Ok(()) => OpResult::ok(path),
+                Err(e) => OpResult::err(path, e),
+            }
+        })
+        .collect()
+}
+
+/// Copy entries into `dest`, auto-renaming on collision.
+#[tauri::command]
+fn copy_entries(paths: Vec<String>, dest: String) -> Vec<OpResult> {
+    let dest_dir = PathBuf::from(&dest);
+    paths
+        .iter()
+        .map(|p| {
+            let src = Path::new(p);
+            let Some(file_name) = src.file_name().and_then(|n| n.to_str()) else {
+                return OpResult::err(src, "Invalid file name");
+            };
+            if src.is_dir() && is_self_or_descendant(src, &dest_dir) {
+                return OpResult::err(src, "Cannot copy a folder into itself");
+            }
+            let target = unique_target(&dest_dir, file_name);
+            let result = if src.is_dir() {
+                copy_dir_all(src, &target)
+            } else {
+                fs::copy(src, &target).map(|_| ())
+            };
+            match result {
+                Ok(()) => OpResult::ok(&target),
+                Err(e) => OpResult::err(src, e),
+            }
+        })
+        .collect()
+}
+
+/// Move entries into `dest`, auto-renaming on collision. Falls back to
+/// copy-then-delete when the move crosses a filesystem boundary (`fs::rename`
+/// fails across volumes, e.g. C: -> Z:).
+#[tauri::command]
+fn move_entries(paths: Vec<String>, dest: String) -> Vec<OpResult> {
+    let dest_dir = PathBuf::from(&dest);
+    paths
+        .iter()
+        .map(|p| {
+            let src = Path::new(p);
+            let Some(file_name) = src.file_name().and_then(|n| n.to_str()) else {
+                return OpResult::err(src, "Invalid file name");
+            };
+            if src.is_dir() && is_self_or_descendant(src, &dest_dir) {
+                return OpResult::err(src, "Cannot move a folder into itself");
+            }
+            let target = unique_target(&dest_dir, file_name);
+
+            if fs::rename(src, &target).is_ok() {
+                return OpResult::ok(&target);
+            }
+
+            // Cross-volume move: copy, then remove the original only if the
+            // copy fully succeeded. Never delete the source on a failed copy.
+            let copied = if src.is_dir() {
+                copy_dir_all(src, &target)
+            } else {
+                fs::copy(src, &target).map(|_| ())
+            };
+            match copied {
+                Ok(()) => {
+                    let removed = if src.is_dir() {
+                        fs::remove_dir_all(src)
+                    } else {
+                        fs::remove_file(src)
+                    };
+                    match removed {
+                        Ok(()) => OpResult::ok(&target),
+                        Err(e) => OpResult::err(src, format!("Copied, but could not remove original: {e}")),
+                    }
+                }
+                Err(e) => OpResult::err(src, e),
+            }
+        })
+        .collect()
+}
+
+/// Detailed metadata for the Properties dialog.
+#[tauri::command]
+fn entry_info(path: String) -> Result<EntryInfo, String> {
+    let p = Path::new(&path);
+    let meta = fs::metadata(p).map_err(|e| format!("{path}: {e}"))?;
+    Ok(EntryInfo {
+        name: p
+            .file_name()
+            .map(|n| n.to_string_lossy().to_string())
+            .unwrap_or_else(|| path.clone()),
+        path: path.clone(),
+        is_dir: meta.is_dir(),
+        size: if meta.is_dir() { 0 } else { meta.len() },
+        modified: meta.modified().ok().and_then(to_epoch_ms),
+        created: meta.created().ok().and_then(to_epoch_ms),
+        readonly: meta.permissions().readonly(),
+        hidden: is_hidden(p, &meta),
+    })
+}
+
+/// Total size of a directory tree. Unreadable subtrees are skipped rather than
+/// failing the whole calculation.
+#[tauri::command]
+fn dir_size(path: String) -> Result<u64, String> {
+    fn walk(p: &Path) -> u64 {
+        let Ok(read) = fs::read_dir(p) else { return 0 };
+        let mut total = 0u64;
+        for entry in read.flatten() {
+            let Ok(meta) = entry.metadata() else { continue };
+            if meta.is_dir() {
+                total += walk(&entry.path());
+            } else {
+                total += meta.len();
+            }
+        }
+        total
+    }
+    let p = Path::new(&path);
+    if !p.exists() {
+        return Err(format!("{path}: not found"));
+    }
+    Ok(walk(p))
 }
 
 /// Return the user's home directory.
@@ -235,7 +574,15 @@ pub fn run() {
             home_dir,
             parent_dir,
             list_drives,
-            special_folders
+            special_folders,
+            create_dir,
+            rename_entry,
+            delete_to_trash,
+            delete_permanent,
+            copy_entries,
+            move_entries,
+            entry_info,
+            dir_size
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
@@ -353,5 +700,207 @@ mod tests {
         let desktop = known_folder_from_registry("Desktop");
         assert!(desktop.is_some(), "Desktop should resolve from the registry");
         assert!(desktop.unwrap().is_dir());
+    }
+
+    // ---- file operations (CPE-030) ----
+
+    /// Unique scratch dir per test, so tests don't collide when run in parallel.
+    fn scratch(tag: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("cpe_test_{tag}_{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).expect("scratch dir");
+        dir
+    }
+
+    #[test]
+    fn create_dir_rejects_an_empty_name() {
+        let d = scratch("create_empty");
+        let r = create_dir(d.to_string_lossy().to_string(), "   ".to_string());
+        assert!(r.is_err());
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn create_dir_refuses_to_clobber_an_existing_name() {
+        let d = scratch("create_dup");
+        let p = d.to_string_lossy().to_string();
+        assert!(create_dir(p.clone(), "thing".into()).is_ok());
+        let second = create_dir(p, "thing".into());
+        assert!(second.is_err(), "must not silently overwrite");
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn rename_refuses_to_clobber_an_existing_name() {
+        let d = scratch("rename_dup");
+        fs::write(d.join("a.txt"), b"a").unwrap();
+        fs::write(d.join("b.txt"), b"b").unwrap();
+
+        let r = rename_entry(
+            d.join("a.txt").to_string_lossy().to_string(),
+            "b.txt".into(),
+        );
+        assert!(r.is_err(), "renaming onto an existing file must fail");
+        // b.txt must be untouched.
+        assert_eq!(fs::read(d.join("b.txt")).unwrap(), b"b");
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn rename_moves_the_file() {
+        let d = scratch("rename_ok");
+        fs::write(d.join("a.txt"), b"a").unwrap();
+        let r = rename_entry(
+            d.join("a.txt").to_string_lossy().to_string(),
+            "c.txt".into(),
+        );
+        assert!(r.is_ok());
+        assert!(d.join("c.txt").exists());
+        assert!(!d.join("a.txt").exists());
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn unique_target_appends_copy_suffixes_instead_of_overwriting() {
+        let d = scratch("unique");
+        assert_eq!(unique_target(&d, "x.txt"), d.join("x.txt"));
+
+        fs::write(d.join("x.txt"), b"1").unwrap();
+        assert_eq!(unique_target(&d, "x.txt"), d.join("x - Copy.txt"));
+
+        fs::write(d.join("x - Copy.txt"), b"2").unwrap();
+        assert_eq!(unique_target(&d, "x.txt"), d.join("x - Copy (2).txt"));
+
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn unique_target_handles_extensionless_names() {
+        let d = scratch("unique_noext");
+        fs::write(d.join("README"), b"1").unwrap();
+        assert_eq!(unique_target(&d, "README"), d.join("README - Copy"));
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn copy_auto_renames_rather_than_overwriting() {
+        let d = scratch("copy_same");
+        fs::write(d.join("f.txt"), b"original").unwrap();
+
+        let results = copy_entries(
+            vec![d.join("f.txt").to_string_lossy().to_string()],
+            d.to_string_lossy().to_string(),
+        );
+        assert!(results[0].ok, "{}", results[0].error);
+        // The original must be untouched.
+        assert_eq!(fs::read(d.join("f.txt")).unwrap(), b"original");
+        assert!(d.join("f - Copy.txt").exists());
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn copying_a_folder_into_itself_is_refused() {
+        let d = scratch("copy_self");
+        let inner = d.join("inner");
+        fs::create_dir_all(inner.join("deep")).unwrap();
+
+        // inner -> inner/deep  is a descendant: must be refused, not recursed.
+        let results = copy_entries(
+            vec![inner.to_string_lossy().to_string()],
+            inner.join("deep").to_string_lossy().to_string(),
+        );
+        assert!(!results[0].ok, "copying a folder into its descendant must fail");
+        assert!(results[0].error.contains("itself"));
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn copy_dir_all_copies_the_whole_tree() {
+        let d = scratch("copy_tree");
+        let src = d.join("src");
+        fs::create_dir_all(src.join("a/b")).unwrap();
+        fs::write(src.join("a/b/leaf.txt"), b"leaf").unwrap();
+
+        let dst = d.join("dst");
+        copy_dir_all(&src, &dst).unwrap();
+        assert_eq!(fs::read(dst.join("a/b/leaf.txt")).unwrap(), b"leaf");
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn move_relocates_and_removes_the_original() {
+        let d = scratch("move_ok");
+        let from = d.join("from");
+        let to = d.join("to");
+        fs::create_dir_all(&from).unwrap();
+        fs::create_dir_all(&to).unwrap();
+        fs::write(from.join("m.txt"), b"m").unwrap();
+
+        let results = move_entries(
+            vec![from.join("m.txt").to_string_lossy().to_string()],
+            to.to_string_lossy().to_string(),
+        );
+        assert!(results[0].ok, "{}", results[0].error);
+        assert!(to.join("m.txt").exists());
+        assert!(!from.join("m.txt").exists());
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn bulk_ops_report_per_item_instead_of_aborting_on_first_failure() {
+        let d = scratch("bulk");
+        let to = d.join("to");
+        fs::create_dir_all(&to).unwrap();
+        fs::write(d.join("good.txt"), b"g").unwrap();
+
+        let results = copy_entries(
+            vec![
+                d.join("good.txt").to_string_lossy().to_string(),
+                d.join("missing.txt").to_string_lossy().to_string(),
+            ],
+            to.to_string_lossy().to_string(),
+        );
+        assert_eq!(results.len(), 2, "every item must get a result");
+        assert!(results[0].ok);
+        assert!(!results[1].ok, "the missing file must be reported, not skipped");
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn entry_info_reports_metadata() {
+        let d = scratch("info");
+        fs::write(d.join("i.txt"), b"12345").unwrap();
+        let info = entry_info(d.join("i.txt").to_string_lossy().to_string()).unwrap();
+        assert_eq!(info.name, "i.txt");
+        assert!(!info.is_dir);
+        assert_eq!(info.size, 5);
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn dir_size_sums_the_tree() {
+        let d = scratch("dirsize");
+        fs::create_dir_all(d.join("sub")).unwrap();
+        fs::write(d.join("a.bin"), vec![0u8; 100]).unwrap();
+        fs::write(d.join("sub/b.bin"), vec![0u8; 50]).unwrap();
+
+        let total = dir_size(d.to_string_lossy().to_string()).unwrap();
+        assert_eq!(total, 150);
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn dotfiles_are_hidden_on_posix_convention() {
+        let d = scratch("hidden");
+        let p = d.join(".secret");
+        fs::write(&p, b"x").unwrap();
+        let meta = fs::metadata(&p).unwrap();
+        assert!(is_hidden(&p, &meta));
+
+        let visible = d.join("plain.txt");
+        fs::write(&visible, b"x").unwrap();
+        let vmeta = fs::metadata(&visible).unwrap();
+        assert!(!is_hidden(&visible, &vmeta));
+        let _ = fs::remove_dir_all(&d);
     }
 }

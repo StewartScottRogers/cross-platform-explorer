@@ -22,6 +22,10 @@ tauri-plugin-process = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 
+# Delete must go to the OS Recycle Bin / Trash, never `fs::remove_*`. A file
+# manager that irreversibly destroys data on a mis-click is dangerous (CPE-030).
+trash = "5"
+
 # The updater plugin only makes sense on desktop targets.
 [target.'cfg(not(any(target_os = "android", target_os = "ios")))'.dependencies]
 tauri-plugin-updater = "2"
