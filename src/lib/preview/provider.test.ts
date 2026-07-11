@@ -27,7 +27,18 @@ describe("pickProvider", () => {
   it("picks the text provider for text and code files", () => {
     expect(pickProvider(entry({ name: "a.txt", extension: "txt" })).kind).toBe("text");
     expect(pickProvider(entry({ name: "a.ts", extension: "ts" })).kind).toBe("text");
-    expect(pickProvider(entry({ name: "a.json", extension: "json" })).kind).toBe("text");
+    expect(pickProvider(entry({ name: "a.css", extension: "css" })).kind).toBe("text");
+  });
+
+  it("picks media and pdf providers by category (CPE-059 phase 3)", () => {
+    expect(pickProvider(entry({ name: "a.mp3", extension: "mp3" })).kind).toBe("audio");
+    expect(pickProvider(entry({ name: "a.mp4", extension: "mp4" })).kind).toBe("video");
+    expect(pickProvider(entry({ name: "a.pdf", extension: "pdf" })).kind).toBe("pdf");
+  });
+
+  it("picks json/csv before the generic text provider", () => {
+    expect(pickProvider(entry({ name: "a.json", extension: "json" })).kind).toBe("json");
+    expect(pickProvider(entry({ name: "a.csv", extension: "csv" })).kind).toBe("csv");
   });
 
   it("falls back to metadata for folders, nothing, and unknown types", () => {
