@@ -79,6 +79,18 @@ Split each phase into its own child ticket when work starts, so it lands increme
   CSP-safe, no CDN).
 - Which syntax highlighter (e.g. Shiki vs highlight.js) given the no-external-request constraint.
 
+## Progress
+
+- **Phase 1 — [[CPE-060]] (Done, 2026-07-11):** `PreviewProvider` registry + `pickProvider` + a
+  self-contained `PreviewPane` component (image + text/markdown + fallback), fully unit/jsdom-tested
+  with file access injected. No backend/config yet.
+- **Phase 2 — [[CPE-061]] (Open):** wire the pane into the app; asset protocol for images; Rust
+  `read_file_text` for text; Preview/Details toggle + persisted setting; CSP.
+- **Phase 3 (future):** PDF, audio/video, SVG (sandboxed), CSV/JSON pretty-print, archives, Office,
+  markdown rendering + syntax highlighting, list-view thumbnails.
+
+This parent ticket stays open as the epic until the phases land.
+
 ## Notes
 
 "Plugin" is interpreted as an internal provider registry (bundled), not runtime-loaded third-party
