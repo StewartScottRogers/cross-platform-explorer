@@ -21,6 +21,7 @@
   import { sortEntries } from "./lib/sort";
   import { uniqueName } from "./lib/naming";
   import { validateFileName } from "./lib/filename";
+  import { matchesQuery } from "./lib/search";
   import {
     createHistory, visit, back, forward, canGoBack, canGoForward, current,
     type History,
@@ -263,7 +264,7 @@
   $: shown = entries.filter((e) => showHidden || !e.hidden);
 
   $: filtered = searching
-    ? shown.filter((e) => e.name.toLowerCase().includes(search.trim().toLowerCase()))
+    ? shown.filter((e) => matchesQuery(e.name, search))
     : shown;
 
   $: visible = sortEntries(filtered, sortKey, sortDir);
