@@ -22,6 +22,7 @@
   import { uniqueName } from "./lib/naming";
   import { validateFileName } from "./lib/filename";
   import { matchesQuery } from "./lib/search";
+  import { firstMatchIndex } from "./lib/typeahead";
   import {
     createHistory, visit, back, forward, canGoBack, canGoForward, current,
     type History,
@@ -62,6 +63,9 @@
 
   let selection: Selection = emptySelection();
   let rowEls: HTMLElement[] = [];
+  // Type-ahead find: accumulated prefix and the time of the last keystroke.
+  let typeAheadBuffer = "";
+  let typeAheadAt = 0;
   let clipboard: Clipboard = emptyClipboard();
 
   let sortKey: SortKey = "name";
@@ -627,6 +631,24 @@
       event.preventDefault();
       showDetails = !showDetails;
       settings.saveShowDetails(showDetails);
+      return;
+    }
+
+    // Type-ahead find: a printable key with no modifier jumps to the next match.
+    if (!ctrl && !event.altKey && event.key.length === 1 && /\S/.test(event.key)) {
+      event.preventDefault();
+      const now = Date.now();
+      const continuing = now - typeAheadAt <= 700;
+      typeAheadBuffer = continuing ? typeAheadBuffer + event.key : event.key;
+      typeAheadAt = now;
+      const single = typeAheadBuffer.length === 1;
+      const idx = firstMatchIndex(
+        visible.map((e) => e.name),
+        typeAheadBuffer,
+        selection.lead,
+        single,
+      );
+      if (idx >= 0) selection = selectOnly(idx);
       return;
     }
 

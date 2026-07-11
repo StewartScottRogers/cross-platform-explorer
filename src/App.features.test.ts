@@ -104,6 +104,24 @@ describe("new folder auto-numbering (CPE-050)", () => {
   });
 });
 
+describe("type-ahead find (CPE-057)", () => {
+  it("selects the next item whose name starts with the typed letter", async () => {
+    mockBackend([file("alpha.md", "md"), file("beta.png", "png"), dir("notes")]);
+    await enterDrive();
+    await waitFor(() => expect(screen.getByText("beta.png")).toBeTruthy());
+
+    await fireEvent.keyDown(window, { key: "b" });
+
+    // The selected list row (not the details pane, which also shows the name).
+    await waitFor(() => {
+      const betaRow = [...document.querySelectorAll(".row")].find((r) =>
+        (r.textContent ?? "").includes("beta.png"),
+      );
+      expect(betaRow?.classList.contains("selected")).toBe(true);
+    });
+  });
+});
+
 describe("copy as path (CPE-056)", () => {
   it("Ctrl+Shift+C writes the quoted path to the clipboard", async () => {
     const writeText = vi.fn(async () => {});
