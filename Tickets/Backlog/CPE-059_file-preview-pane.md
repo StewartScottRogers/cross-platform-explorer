@@ -84,8 +84,9 @@ Split each phase into its own child ticket when work starts, so it lands increme
 - **Phase 1 — [[CPE-060]] (Done, 2026-07-11):** `PreviewProvider` registry + `pickProvider` + a
   self-contained `PreviewPane` component (image + text/markdown + fallback), fully unit/jsdom-tested
   with file access injected. No backend/config yet.
-- **Phase 2 — [[CPE-061]] (Open):** wire the pane into the app; asset protocol for images; Rust
-  `read_file_text` for text; Preview/Details toggle + persisted setting; CSP.
+- **Phase 2 — [[CPE-061]] (Done, 2026-07-11):** wired the pane into the app; asset protocol + `protocol-asset`
+  feature for images; Rust `read_file_text` (size-capped) for text; Preview/Details toggle + persisted
+  setting. Merged via PR #1 after CI verified the Rust across all three OSes.
 - **Phase 3 (future):** PDF, audio/video, SVG (sandboxed), CSV/JSON pretty-print, archives, Office,
   markdown rendering + syntax highlighting, list-view thumbnails.
 

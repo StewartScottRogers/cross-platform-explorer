@@ -2,12 +2,12 @@
 id: CPE-061
 title: Preview pane Phase 2 — wire PreviewPane into the app (asset protocol + read command)
 type: Feature
-status: Open
+status: Done
 priority: Medium
 component: Multiple
 estimate: 2-3h
 created: 2026-07-11
-closed:
+closed: 2026-07-11
 ---
 
 ## Summary
@@ -32,7 +32,21 @@ app and supplies the real file access — the parts that could not be verified o
 
 ## Resolution
 
-*(Agent writes this when closing — do not fill in)*
+Added a size-capped Rust `read_file_text` command (+ 3 unit tests, registered in `generate_handler!`),
+enabled the Tauri asset protocol (`app.security.assetProtocol`, scope `**`) plus the required
+`protocol-asset` cargo feature, and wired `PreviewPane` into the right pane with a persisted
+Preview/Details toggle (`cpe.showPreview`). Images load via `convertFileSrc`, text via `read_file_text`
+(256 KB cap).
+
+Verified: frontend `npm run check` 0 errors, `npm test` 157 passed (incl. 3 preview integration tests),
+`vite build` clean. Backend could not be built locally (no cargo on the dev machine), so it was gated
+via **PR #1**: CI round 1 caught a missing `protocol-asset` feature (backend red on all 3 OSes); after
+adding it, CI went fully green (cargo check + clippy + test on ubuntu/windows/macos) and the PR was
+merged to `main` (merge commit 65a559d).
+
+**Residual (human/GUI):** on-screen pane layout/appearance and real image/text rendering in the packaged
+app — folds into [[CPE-053]]'s visual smoke-check. Markdown rendering + syntax highlighting remain a
+later phase per [[CPE-059]].
 
 ## Work Log
 
