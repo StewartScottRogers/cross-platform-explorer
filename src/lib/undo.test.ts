@@ -1,5 +1,7 @@
 import { describe, it, expect } from "vitest";
-import { pushUndo, popUndo, canUndo, peekLabel, invert } from "./undo";
+import {
+  pushUndo, popUndo, canUndo, peekLabel, invert, deletedPaths,
+} from "./undo";
 import type { UndoEntry } from "./undo";
 
 const ren = (from: string, to: string): UndoEntry => ({
@@ -59,5 +61,17 @@ describe("undo stack", () => {
       { from: "/dst/1.txt", to: "/src/1.txt" },
       { from: "/dst/2.txt", to: "/src/2.txt" },
     ]);
+  });
+
+  it("exposes the original paths of a delete, for restoring from the trash", () => {
+    const e: UndoEntry = {
+      kind: "delete",
+      moves: [
+        { from: "/a/gone.txt", to: "" },
+        { from: "/a/also-gone.txt", to: "" },
+      ],
+      label: "Delete 2 items",
+    };
+    expect(deletedPaths(e)).toEqual(["/a/gone.txt", "/a/also-gone.txt"]);
   });
 });

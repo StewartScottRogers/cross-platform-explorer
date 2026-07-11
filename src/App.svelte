@@ -33,7 +33,7 @@
   } from "./lib/clipboard";
   import * as settings from "./lib/settings";
   import {
-    pushUndo, popUndo, canUndo, peekLabel, invert, type UndoEntry,
+    pushUndo, popUndo, canUndo, peekLabel, invert, deletedPaths, type UndoEntry,
   } from "./lib/undo";
   import type { DirEntry, Place, SortKey, SortDir, ViewMode, RecentFile } from "./lib/types";
 
@@ -77,6 +77,10 @@
   let pendingRenamePath = "";
 
   let undoStack: UndoEntry[] = [];
+  /** Whether THIS platform can restore from the trash (false on macOS). */
+  let canRestoreTrash = false;
+  /** Paths currently being dragged, shared with the sidebar as a drop target. */
+  let draggedPaths: string[] = [];
   let ctx: { x: number; y: number; target: "item" | "empty" } | null = null;
   let confirm: { title: string; message: string; label: string; onYes: () => void } | null = null;
   let propsFor: DirEntry[] | null = null;
@@ -347,8 +351,19 @@
       return;
     }
     try {
-      const pairs = invert(entry).map((m) => [m.from, m.to] as [string, string]);
-      const results = await invoke<OpResult[]>("move_exact", { pairs });
+      let results: OpResult[];
+
+      if (entry.kind === "delete") {
+        // Only ever pushed onto the stack when the platform can restore, so we
+        // never reach here on macOS.
+        results = await invoke<OpResult[]>("restore_from_trash", {
+          paths: deletedPaths(entry),
+        });
+      } else {
+        const pairs = invert(entry).map((m) => [m.from, m.to] as [string, string]);
+        results = await invoke<OpResult[]>("move_exact", { pairs });
+      }
+
       const failed = results.filter((r) => !r.ok);
       if (failed.length > 0) {
         // Do NOT pop the entry on failure — the user can retry once they've
@@ -498,6 +513,23 @@
         { paths },
       );
       reportResults(results, permanent ? "Permanently deleted" : "Moved to Recycle Bin:");
+
+      // A trashed delete is undoable — but ONLY where the platform can actually
+      // restore. On macOS `canRestoreTrash` is false, so we don't push it, and
+      // Ctrl+Z will offer whatever came before instead of a button that lies.
+      // A permanent delete is never undoable, anywhere.
+      if (!permanent && canRestoreTrash) {
+        const restored = results
+          .filter((r) => r.ok)
+          .map((r) => ({ from: r.path, to: "" }));
+        if (restored.length > 0) {
+          undoStack = pushUndo(undoStack, {
+            kind: "delete",
+            moves: restored,
+            label: `Delete ${restored.length} item${restored.length === 1 ? "" : "s"}`,
+          });
+        }
+      }
       await loadPath(currentPath);
     } catch (e) {
       showNotice(String(e), true);
@@ -629,14 +661,16 @@
     recents = settings.loadRecents();
 
     try {
-      const [p, d, h] = await Promise.all([
+      const [p, d, h, canRestore] = await Promise.all([
         invoke<Place[]>("special_folders"),
         invoke<Place[]>("list_drives"),
         invoke<string>("home_dir"),
+        invoke<boolean>("can_restore_from_trash"),
       ]);
       places = p;
       drives = d;
       homePath = h;
+      canRestoreTrash = canRestore;
     } catch (e) {
       console.debug("could not load places:", e);
     }
@@ -696,8 +730,10 @@
     {drives}
     {currentPath}
     {isHome}
+    {draggedPaths}
     on:navigate={(e) => navigate(e.detail)}
     on:home={() => navigate(HOME)}
+    on:drop={(e) => dropInto(e.detail.paths, e.detail.dest, e.detail.copy)}
   />
 
   <div class="content">
@@ -726,6 +762,7 @@
         {renamingPath}
         {renameValue}
         bind:rowEls
+        bind:draggedPaths
         on:click={(e) => (selection = selClick(selection, e.detail.index, e.detail))}
         on:open={(e) => open(e.detail)}
         on:sort={(e) => {

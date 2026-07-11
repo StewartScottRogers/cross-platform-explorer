@@ -12,19 +12,23 @@
  *     to reverse a harmless action. Refusing to undo is strictly safer than
  *     guessing.
  *
- *   * DELETE is NOT undoable here. Items go to the Recycle Bin, so they are
- *     already recoverable by the user through the OS. Programmatic restore
- *     (`trash::os_limited`) is not implemented on macOS, so wiring it up would
- *     produce an "Undo" that silently does nothing on one of the three
- *     platforms we ship. A button that lies is worse than no button.
+ *   * DELETE is undoable ONLY where the platform can restore from the trash.
+ *     `trash::os_limited` is implemented on Windows and Linux but NOT on macOS.
+ *     So the app asks the backend (`can_restore_from_trash`) and simply does not
+ *     push a delete onto the stack when restore is unavailable — Ctrl+Z then
+ *     offers whatever came before it, instead of presenting an Undo that would
+ *     silently do nothing. Never offer an action that cannot happen.
  *
  * The stack is bounded so it cannot grow without limit.
  */
-export type UndoableKind = "rename" | "move";
+export type UndoableKind = "rename" | "move" | "delete";
 
 export interface UndoEntry {
   kind: UndoableKind;
-  /** Where each item ended up, paired with where it came from. */
+  /**
+   * For rename/move: where each item ended up, paired with where it came from.
+   * For delete: the original paths (`to` is unused).
+   */
   moves: { from: string; to: string }[];
   /** Human description, e.g. "Rename to report.txt". */
   label: string;
@@ -53,8 +57,14 @@ export function peekLabel(stack: UndoEntry[]): string {
 
 /**
  * Invert an entry: to undo, move everything from `to` back to `from`.
- * Returns the source paths and the destination directory for each item.
+ * Only meaningful for rename/move — a delete is undone by restoring from the
+ * trash, not by moving anything.
  */
 export function invert(entry: UndoEntry): { from: string; to: string }[] {
   return entry.moves.map((m) => ({ from: m.to, to: m.from }));
+}
+
+/** Original paths of a deleted entry, used to restore it from the trash. */
+export function deletedPaths(entry: UndoEntry): string[] {
+  return entry.moves.map((m) => m.from);
 }
