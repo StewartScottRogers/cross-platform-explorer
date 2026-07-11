@@ -103,4 +103,25 @@ describe("splitPath", () => {
     const segs = splitPath(p);
     expect(segs[segs.length - 1].path).toBe(p);
   });
+
+  it("splits a Windows UNC path rooted at \\\\server\\share", () => {
+    expect(splitPath("\\\\server\\share\\folder\\file")).toEqual([
+      { name: "\\\\server\\share", path: "\\\\server\\share" },
+      { name: "folder", path: "\\\\server\\share\\folder" },
+      { name: "file", path: "\\\\server\\share\\folder\\file" },
+    ]);
+  });
+
+  it("handles forward-slash UNC input equivalently", () => {
+    expect(splitPath("//server/share/folder")).toEqual([
+      { name: "\\\\server\\share", path: "\\\\server\\share" },
+      { name: "folder", path: "\\\\server\\share\\folder" },
+    ]);
+  });
+
+  it("handles a bare UNC share root", () => {
+    expect(splitPath("\\\\server\\share")).toEqual([
+      { name: "\\\\server\\share", path: "\\\\server\\share" },
+    ]);
+  });
 });
