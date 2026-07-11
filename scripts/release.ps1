@@ -36,11 +36,25 @@ Set-Content $cargoPath $cargo -NoNewline
 
 Write-Host "Bumped version to $Version in package.json, tauri.conf.json, Cargo.toml" -ForegroundColor Green
 
-# Commit, tag, push
-git add package.json src-tauri/tauri.conf.json src-tauri/Cargo.toml
-git commit -m "release v$Version"
-git tag "v$Version"
-git push origin HEAD --tags
+# Git writes ordinary progress text to stderr. With $ErrorActionPreference = "Stop",
+# PowerShell treats that as a terminating NativeCommandError and aborts the script
+# mid-release — leaving the version bumped but uncommitted and untagged.
+# So: relax the preference around git, and check $LASTEXITCODE explicitly instead.
+$ErrorActionPreference = "Continue"
+
+function Invoke-Git {
+  param([Parameter(ValueFromRemainingArguments = $true)][string[]]$Args)
+  & git @Args 2>&1 | ForEach-Object { Write-Host $_ }
+  if ($LASTEXITCODE -ne 0) {
+    Write-Host "git $($Args -join ' ') failed with exit code $LASTEXITCODE" -ForegroundColor Red
+    exit $LASTEXITCODE
+  }
+}
+
+Invoke-Git add package.json src-tauri/tauri.conf.json src-tauri/Cargo.toml
+Invoke-Git commit -m "release v$Version"
+Invoke-Git tag "v$Version"
+Invoke-Git push origin HEAD --tags
 
 Write-Host ""
 Write-Host "Pushed tag v$Version. GitHub Actions is now building installers." -ForegroundColor Cyan
