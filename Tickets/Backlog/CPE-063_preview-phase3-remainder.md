@@ -23,8 +23,8 @@ machine (no cargo; no pixel/GUI observation; bundle-size + XSS-sandbox judgement
   (bundle-size-conscious, no external requests) + a sanitizer.
 - **Syntax highlighting** — highlight code previews (currently raw text). Pick a highlighter
   (highlight.js / Shiki) mindful of bundle size and the no-CDN constraint.
-- **Archive listing** — list zip entries without extracting. Needs a Rust command (+ a crate) → land via
-  a PR so CI compiles/tests it, as CPE-061 did.
+- **Archive listing** — ✅ Done in [[CPE-064]] (ZIP; Rust `read_archive_entries` + `archive` provider),
+  verified locally after Rust was installed on the machine. Other formats (7z/rar/tar) remain optional.
 - **Office / OpenDocument** — investigate; likely metadata-only or a heavy dependency. Decide and
   document rather than force a preview.
 

@@ -230,6 +230,32 @@ fn create_dir(path: String, name: String) -> Result<String, String> {
     Ok(target.to_string_lossy().to_string())
 }
 
+/// One entry inside an archive, for the archive preview.
+#[derive(Serialize)]
+pub struct ArchiveEntry {
+    name: String,
+    size: u64,
+    is_dir: bool,
+}
+
+/// List the entries of a ZIP archive without extracting it, for the preview
+/// pane. Reads only the archive directory, so it is cheap even for large zips.
+#[tauri::command]
+fn read_archive_entries(path: String) -> Result<Vec<ArchiveEntry>, String> {
+    let file = fs::File::open(&path).map_err(|e| e.to_string())?;
+    let mut zip = zip::ZipArchive::new(file).map_err(|e| e.to_string())?;
+    let mut out = Vec::with_capacity(zip.len());
+    for i in 0..zip.len() {
+        let entry = zip.by_index(i).map_err(|e| e.to_string())?;
+        out.push(ArchiveEntry {
+            name: entry.name().to_string(),
+            size: entry.size(),
+            is_dir: entry.is_dir(),
+        });
+    }
+    Ok(out)
+}
+
 /// Read a text file's contents for the preview pane, capped at `max_bytes` so a
 /// huge file can never be slurped into memory. Errors (rather than truncating)
 /// when the file is too large, unreadable, or not valid UTF-8 — the frontend
@@ -722,6 +748,7 @@ pub fn run() {
             special_folders,
             create_dir,
             read_file_text,
+            read_archive_entries,
             rename_entry,
             delete_to_trash,
             delete_permanent,
@@ -888,6 +915,45 @@ mod tests {
         fs::write(&f, [0xff, 0xfe, 0x00, 0x01]).unwrap();
         let r = read_file_text(f.to_string_lossy().to_string(), 1024);
         assert!(r.is_err(), "non-UTF-8 content must error");
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn read_archive_entries_lists_zip_contents_without_extracting() {
+        use std::io::Write;
+        let d = scratch("zip_list");
+        let zip_path = d.join("bundle.zip");
+        {
+            let f = fs::File::create(&zip_path).unwrap();
+            let mut w = zip::ZipWriter::new(f);
+            let opts = zip::write::SimpleFileOptions::default()
+                .compression_method(zip::CompressionMethod::Stored);
+            w.start_file("hello.txt", opts).unwrap();
+            w.write_all(b"hi there").unwrap();
+            w.add_directory("sub/", opts).unwrap();
+            w.finish().unwrap();
+        }
+
+        let entries =
+            read_archive_entries(zip_path.to_string_lossy().to_string()).unwrap();
+        let names: Vec<&str> = entries.iter().map(|e| e.name.as_str()).collect();
+        assert!(names.contains(&"hello.txt"), "should list the file entry");
+        let file = entries.iter().find(|e| e.name == "hello.txt").unwrap();
+        assert_eq!(file.size, 8, "size is the uncompressed length");
+        assert!(!file.is_dir);
+        assert!(
+            entries.iter().any(|e| e.is_dir),
+            "the directory entry should be flagged is_dir"
+        );
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn read_archive_entries_errors_on_a_non_zip() {
+        let d = scratch("zip_bad");
+        let f = d.join("notazip.zip");
+        fs::write(&f, b"this is not a zip file").unwrap();
+        assert!(read_archive_entries(f.to_string_lossy().to_string()).is_err());
         let _ = fs::remove_dir_all(&d);
     }
 
