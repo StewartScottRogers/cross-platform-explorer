@@ -14,15 +14,39 @@
   let currentPath = "";
   let entries: DirEntry[] = [];
   let error = "";
+  let loading = false;
   let updateStatus = "";
+
+  // Map a raw backend error string to a friendly, user-facing message.
+  function friendlyError(raw: string): string {
+    const lower = raw.toLowerCase();
+    if (
+      lower.includes("denied") ||
+      lower.includes("os error 5") || // Windows: access is denied
+      lower.includes("os error 13") // Unix: permission denied
+    ) {
+      return "Can't open this folder — permission denied.";
+    }
+    if (lower.includes("os error 2") || lower.includes("not found")) {
+      return "This folder no longer exists.";
+    }
+    return "Can't open this folder.";
+  }
 
   async function load(path: string) {
     error = "";
+    loading = true;
     try {
       entries = await invoke<DirEntry[]>("list_dir", { path });
       currentPath = path;
     } catch (e) {
-      error = String(e);
+      // Clear the stale listing and surface a friendly state, but still update
+      // currentPath so the user can navigate back out of the failed folder.
+      entries = [];
+      currentPath = path;
+      error = friendlyError(String(e));
+    } finally {
+      loading = false;
     }
   }
 
@@ -94,13 +118,29 @@
 </div>
 
 <div class="listing">
-  {#each sorted as entry (entry.path)}
-    <div class="entry" on:dblclick={() => open(entry)} role="button" tabindex="0">
-      <span class="icon">{entry.is_dir ? "📁" : "📄"}</span>
-      <span class="name">{entry.name}</span>
-      <span class="size">{entry.is_dir ? "" : formatSize(entry.size)}</span>
+  {#if error}
+    <div class="empty-state">
+      <div class="empty-icon">🚫</div>
+      <p>{error}</p>
     </div>
-  {/each}
+  {:else if loading}
+    <div class="empty-state">
+      <p>Loading…</p>
+    </div>
+  {:else if sorted.length === 0}
+    <div class="empty-state">
+      <div class="empty-icon">📂</div>
+      <p>This folder is empty</p>
+    </div>
+  {:else}
+    {#each sorted as entry (entry.path)}
+      <div class="entry" on:dblclick={() => open(entry)} role="button" tabindex="0">
+        <span class="icon">{entry.is_dir ? "📁" : "📄"}</span>
+        <span class="name">{entry.name}</span>
+        <span class="size">{entry.is_dir ? "" : formatSize(entry.size)}</span>
+      </div>
+    {/each}
+  {/if}
 </div>
 
 <div class="status">
