@@ -2,12 +2,12 @@
 id: CPE-059
 title: File preview pane (right side) with a pluggable, bundled provider architecture
 type: Feature
-status: Open
+status: Done
 priority: Medium
 component: Multiple
 estimate: 4h+
 created: 2026-07-11
-closed:
+closed: 2026-07-11
 ---
 
 ## Summary
@@ -92,7 +92,11 @@ Split each phase into its own child ticket when work starts, so it lands increme
 - **Phase 3b — [[CPE-063]] (Open):** markdown rendering, syntax highlighting, archive listing (needs
   Rust), Office investigation, list-view thumbnails. Blocks final epic closure.
 
-This parent ticket stays open as the epic until the phases land.
+**Epic complete (2026-07-11).** All phases landed: registry + pane (CPE-060), app wiring + asset
+protocol + Rust text read (CPE-061), media/PDF/JSON/CSV (CPE-062), ZIP archive listing (CPE-064),
+code highlighting + sanitized markdown (CPE-065). Office preview declined and list-view thumbnails
+deferred as documented decisions in [[CPE-063]]. Residual = live/visual verification only, tracked in
+[[CPE-053]].
 
 ## Notes
 

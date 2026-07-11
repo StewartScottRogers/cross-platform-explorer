@@ -102,6 +102,40 @@ describe("PreviewPane", () => {
     });
   });
 
+  it("syntax-highlights a code file (CPE-065)", async () => {
+    const loadText = vi.fn(async () => "const x = 1;");
+    const { container } = render(PreviewPane, {
+      entry: entry({ name: "a.ts", path: "C:\\d\\a.ts", extension: "ts" }),
+      loadText,
+    });
+    await waitFor(() => {
+      expect(container.querySelector(".preview-text code span")).toBeTruthy();
+    });
+  });
+
+  it("renders markdown to HTML (CPE-065)", async () => {
+    const loadText = vi.fn(async () => "# Heading\n\n**bold**");
+    const { container } = render(PreviewPane, {
+      entry: entry({ name: "a.md", path: "C:\\d\\a.md", extension: "md" }),
+      loadText,
+    });
+    await waitFor(() => {
+      const h1 = container.querySelector(".preview-markdown h1");
+      expect(h1?.textContent).toBe("Heading");
+      expect(container.querySelector(".preview-markdown strong")).toBeTruthy();
+    });
+  });
+
+  it("sanitizes script in previewed markdown (CPE-065)", async () => {
+    const loadText = vi.fn(async () => "# Safe\n\n<script>window.evil=1</script>");
+    const { container } = render(PreviewPane, {
+      entry: entry({ name: "a.md", path: "C:\\d\\a.md", extension: "md" }),
+      loadText,
+    });
+    await waitFor(() => expect(container.querySelector(".preview-markdown h1")).toBeTruthy());
+    expect(container.querySelector(".preview-markdown script")).toBeNull();
+  });
+
   it("lists archive entries via loadEntries (CPE-064)", async () => {
     const loadEntries = vi.fn(async () => [
       { name: "hello.txt", size: 8, is_dir: false },

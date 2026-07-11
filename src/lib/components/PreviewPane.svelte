@@ -2,6 +2,8 @@
   import type { DirEntry } from "../types";
   import { pickProvider, type ArchiveEntry } from "../preview/provider";
   import { parseCsv } from "../preview/csv";
+  import { highlightCode } from "../preview/highlight";
+  import { renderMarkdown } from "../preview/markdown";
   import { formatSize } from "../format";
 
   /** The single selected entry to preview, or null. */
@@ -128,8 +130,12 @@
       </div>
     {:else if provider.kind === "json"}
       <pre class="preview-text">{prettyJson(text)}</pre>
+    {:else if provider.kind === "markdown"}
+      <!-- Sanitized by DOMPurify in renderMarkdown before injection. -->
+      <div class="preview-markdown">{@html renderMarkdown(text)}</div>
     {:else}
-      <pre class="preview-text">{text}</pre>
+      <!-- highlightCode escapes the source, so the HTML is safe to inject. -->
+      <pre class="preview-text"><code>{@html highlightCode(text, entry.extension)}</code></pre>
     {/if}
   {:else}
     <slot />
@@ -185,4 +191,22 @@
     color: var(--text-faint);
     padding: 12px;
   }
+  .preview-markdown {
+    padding: 12px 16px;
+    font-size: 13px;
+    line-height: 1.5;
+    overflow-wrap: anywhere;
+  }
+  .preview-markdown :global(h1),
+  .preview-markdown :global(h2),
+  .preview-markdown :global(h3) { margin: 0.6em 0 0.3em; }
+  .preview-markdown :global(p) { margin: 0.5em 0; }
+  .preview-markdown :global(pre) {
+    background: var(--surface-alt);
+    padding: 8px;
+    border-radius: var(--radius);
+    overflow-x: auto;
+  }
+  .preview-markdown :global(code) { font-family: var(--mono, ui-monospace, monospace); }
+  .preview-markdown :global(a) { color: var(--accent); }
 </style>
