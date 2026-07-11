@@ -143,11 +143,27 @@ If nothing is found, the install did NOT succeed — report that honestly.
 ## Step 6 — Launch
 
 **Windows:** run the executable from the `InstallLocation` found in Step 5.
+
+Do NOT assume the exe is named after `productName`. Tauri names the Windows binary after the **Cargo
+package name**, so it is `cross-platform-explorer.exe`, not `Cross-Platform Explorer.exe`. Glob for
+it and exclude the uninstaller:
+
 ```powershell
-Start-Process "<InstallLocation>\Cross-Platform Explorer.exe"
+$dir = "<InstallLocation>"   # from Step 5, strip surrounding quotes
+$exe = Get-ChildItem "$dir\*.exe" | Where-Object { $_.Name -ne "uninstall.exe" } | Select-Object -First 1
+Start-Process $exe.FullName
 ```
 **macOS:** `open -a "Cross-Platform Explorer"`
 **Linux:** `~/.local/bin/cross-platform-explorer.AppImage &`
+
+Confirm it is actually up — a started process is not proof the app rendered:
+```powershell
+Start-Sleep -Seconds 4
+Get-Process | Where-Object { $_.ProcessName -like "*cross-platform*" } |
+  Select-Object Id, MainWindowTitle, Responding
+```
+A live process **with a MainWindowTitle** and `Responding = True` is success. A process that exited,
+or one with an empty window title, is a FAILURE — report it rather than claiming the app launched.
 
 Report: "Installed Cross-Platform Explorer <version> and launched it."
 
