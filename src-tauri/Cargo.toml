@@ -26,6 +26,15 @@ serde_json = "1"
 [target.'cfg(not(any(target_os = "android", target_os = "ios")))'.dependencies]
 tauri-plugin-updater = "2"
 
+# Windows known folders (Desktop/Documents/Pictures/...) can be redirected
+# anywhere by OneDrive — on a real machine Pictures was found at
+# "…\OneDrive\Exteriors Cave Homes\Pictures". No env-var heuristic can find that;
+# the registry is the only authoritative source (CPE-025). This is a
+# Windows-only dependency, which is exactly why CI also compiles on
+# windows-latest (CPE-028).
+[target.'cfg(windows)'.dependencies]
+winreg = "0.52"
+
 [features]
 # This feature is used for production builds where `devUrl` is disabled.
 default = []

@@ -32,8 +32,15 @@ jobs:
         run: npm test
 
   backend:
-    name: Backend — cargo check, clippy, test
-    runs-on: ubuntu-latest
+    # Run on BOTH Linux and Windows. Linux alone never compiles `#[cfg(windows)]`
+    # code or Windows-target-only dependencies (e.g. the registry crate used to
+    # resolve known folders), so those would only fail at release time — CPE-028.
+    name: Backend (${{ matrix.os }}) — cargo check, clippy, test
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
     steps:
       - uses: actions/checkout@v4
 
@@ -48,6 +55,7 @@ jobs:
           workspaces: "./src-tauri -> target"
 
       - name: Install Linux system dependencies
+        if: matrix.os == 'ubuntu-latest'
         run: |
           sudo apt-get update
           sudo apt-get install -y \

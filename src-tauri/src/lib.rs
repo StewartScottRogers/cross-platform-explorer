@@ -116,31 +116,53 @@ fn list_drives() -> Vec<Place> {
     drives
 }
 
-/// The OneDrive root, when OneDrive is configured (Windows sets %OneDrive%).
-fn onedrive_root() -> Option<PathBuf> {
-    std::env::var_os("OneDrive")
-        .map(PathBuf::from)
-        .filter(|p| p.is_dir())
+/// On Windows, look up a known folder's REAL location in the registry.
+///
+/// Windows "Known Folder redirection" lets OneDrive move Desktop, Documents,
+/// Pictures, etc. anywhere at all. On a real machine Pictures resolved to
+/// `C:\Users\<user>\OneDrive\Exteriors Cave Homes\Pictures` — a path no
+/// `%USERPROFILE%\Pictures` or `%OneDrive%\Pictures` heuristic could ever guess.
+/// Worse, Windows often leaves an empty stub at `%USERPROFILE%\Desktop`, so
+/// probing the profile first returns the *wrong* folder rather than none.
+///
+/// `Shell Folders` holds fully-expanded paths (`User Shell Folders` holds
+/// unexpanded `%USERPROFILE%` tokens), so we read the former.
+///
+/// `registry_name` is the value name, which is NOT the display name:
+/// Documents is "Personal", Pictures is "My Pictures", Downloads is a GUID.
+#[cfg(windows)]
+fn known_folder_from_registry(registry_name: &str) -> Option<PathBuf> {
+    use winreg::enums::HKEY_CURRENT_USER;
+    use winreg::RegKey;
+
+    let hkcu = RegKey::predef(HKEY_CURRENT_USER);
+    let key = hkcu
+        .open_subkey(r"Software\Microsoft\Windows\CurrentVersion\Explorer\Shell Folders")
+        .ok()?;
+    let value: String = key.get_value(registry_name).ok()?;
+    let path = PathBuf::from(value);
+    if path.is_dir() {
+        Some(path)
+    } else {
+        None
+    }
 }
 
-/// Resolve a known folder, trying the user profile first, then OneDrive.
-///
-/// Windows "Known Folder redirection" moves folders such as Pictures and
-/// Documents into OneDrive, in which case `%USERPROFILE%\Pictures` does not
-/// exist at all. Probing only the profile silently drops them (CPE-025).
-///
-/// We locate OneDrive via the `%OneDrive%` env var rather than the registry: a
-/// registry crate would be Windows-only, so it would NOT be compiled by the
-/// Linux CI job — an unverifiable dependency on a machine with no local Rust
-/// toolchain.
-fn resolve_known_folder(home: &Path, folder: &str) -> Option<PathBuf> {
+#[cfg(not(windows))]
+fn known_folder_from_registry(_registry_name: &str) -> Option<PathBuf> {
+    None
+}
+
+/// Resolve a known folder: the registry (authoritative on Windows) first, then
+/// the plain `<home>/<folder>` path as a fallback for POSIX and for any folder
+/// Windows does not list.
+fn resolve_known_folder(home: &Path, folder: &str, registry_name: &str) -> Option<PathBuf> {
+    if let Some(p) = known_folder_from_registry(registry_name) {
+        return Some(p);
+    }
     let in_profile = home.join(folder);
     if in_profile.is_dir() {
         return Some(in_profile);
-    }
-    let in_onedrive = onedrive_root()?.join(folder);
-    if in_onedrive.is_dir() {
-        return Some(in_onedrive);
     }
     None
 }
@@ -153,19 +175,27 @@ fn special_folders() -> Vec<Place> {
         return Vec::new();
     };
 
+    // (display name, icon kind, Windows registry value name)
+    // The registry names are historical and do not match the display names:
+    // Documents is "Personal", Pictures is "My Pictures", Videos is "My Video",
+    // and Downloads is only exposed under its known-folder GUID.
     let candidates = [
-        ("Desktop", "desktop"),
-        ("Documents", "documents"),
-        ("Downloads", "downloads"),
-        ("Pictures", "pictures"),
-        ("Music", "music"),
-        ("Videos", "videos"),
+        ("Desktop", "desktop", "Desktop"),
+        ("Documents", "documents", "Personal"),
+        (
+            "Downloads",
+            "downloads",
+            "{374DE290-123F-4565-9164-39C4925E467B}",
+        ),
+        ("Pictures", "pictures", "My Pictures"),
+        ("Music", "music", "My Music"),
+        ("Videos", "videos", "My Video"),
     ];
 
     candidates
         .iter()
-        .filter_map(|(folder, kind)| {
-            resolve_known_folder(&home, folder).map(|p| Place {
+        .filter_map(|(folder, kind, registry_name)| {
+            resolve_known_folder(&home, folder, registry_name).map(|p| Place {
                 name: (*folder).to_string(),
                 path: p.to_string_lossy().to_string(),
                 kind: (*kind).to_string(),
@@ -284,14 +314,14 @@ mod tests {
     }
 
     #[test]
-    fn known_folder_prefers_the_profile_location_when_it_exists() {
-        // temp_dir() exists, so resolving a folder that lives directly under it
-        // must return the profile-relative path.
+    fn known_folder_falls_back_to_the_profile_path() {
+        // Use a registry value name that cannot exist, so the registry lookup
+        // misses and the profile-relative fallback is exercised on every OS.
         let tmp = std::env::temp_dir();
         let sub = tmp.join("cpe_known_folder_test");
         std::fs::create_dir_all(&sub).expect("create temp subdir");
 
-        let found = resolve_known_folder(&tmp, "cpe_known_folder_test");
+        let found = resolve_known_folder(&tmp, "cpe_known_folder_test", "CpeNoSuchRegistryValue");
         assert_eq!(found, Some(sub.clone()));
 
         let _ = std::fs::remove_dir(&sub);
@@ -301,8 +331,27 @@ mod tests {
     fn known_folder_returns_none_when_it_exists_nowhere() {
         let tmp = std::env::temp_dir();
         assert_eq!(
-            resolve_known_folder(&tmp, "cpe_definitely_missing_folder_xyz"),
+            resolve_known_folder(
+                &tmp,
+                "cpe_definitely_missing_folder_xyz",
+                "CpeNoSuchRegistryValue"
+            ),
             None
         );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn registry_lookup_misses_cleanly_for_an_unknown_value() {
+        assert_eq!(known_folder_from_registry("CpeNoSuchRegistryValue"), None);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn registry_resolves_the_desktop_known_folder() {
+        // Desktop is always present in Shell Folders on a real Windows session.
+        let desktop = known_folder_from_registry("Desktop");
+        assert!(desktop.is_some(), "Desktop should resolve from the registry");
+        assert!(desktop.unwrap().is_dir());
     }
 }
