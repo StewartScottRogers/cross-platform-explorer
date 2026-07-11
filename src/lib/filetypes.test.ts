@@ -25,6 +25,19 @@ describe("categoryOf", () => {
     expect(categoryOf(file("qqq"))).toBe("unknown");
     expect(categoryOf(file(""))).toBe("unknown");
   });
+
+  it("classifies the newly added common extensions (CPE-048)", () => {
+    expect(categoryOf(file("heic"))).toBe("image");
+    expect(categoryOf(file("avif"))).toBe("image");
+    expect(categoryOf(file("aac"))).toBe("audio");
+    expect(categoryOf(file("opus"))).toBe("audio");
+    expect(categoryOf(file("wmv"))).toBe("video");
+    expect(categoryOf(file("m4v"))).toBe("video");
+    expect(categoryOf(file("xz"))).toBe("archive");
+    expect(categoryOf(file("tgz"))).toBe("archive");
+    expect(categoryOf(file("mjs"))).toBe("code");
+    expect(categoryOf(file("cjs"))).toBe("code");
+  });
 });
 
 describe("typeName", () => {
@@ -44,5 +57,13 @@ describe("typeName", () => {
 
   it("calls an extensionless file just 'File'", () => {
     expect(typeName(file(""))).toBe("File");
+  });
+
+  it("names the newly added common extensions (CPE-048)", () => {
+    expect(typeName(file("heic"))).toBe("HEIC image");
+    expect(typeName(file("aac"))).toBe("AAC audio");
+    expect(typeName(file("wmv"))).toBe("Windows Media Video");
+    expect(typeName(file("zst"))).toBe("Zstandard archive");
+    expect(typeName(file("mjs"))).toBe("JavaScript module");
   });
 });
