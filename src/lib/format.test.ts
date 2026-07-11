@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { formatSize, friendlyError, splitPath } from "./format";
+import { formatSize, friendlyError, splitPath, formatPathsForClipboard } from "./format";
 
 describe("formatSize", () => {
   it("returns an empty string for zero bytes (directories)", () => {
@@ -123,5 +123,19 @@ describe("splitPath", () => {
     expect(splitPath("\\\\server\\share")).toEqual([
       { name: "\\\\server\\share", path: "\\\\server\\share" },
     ]);
+  });
+});
+
+describe("formatPathsForClipboard", () => {
+  it("wraps a single path in double quotes", () => {
+    expect(formatPathsForClipboard(["C:\\Users\\me\\a.txt"])).toBe('"C:\\Users\\me\\a.txt"');
+  });
+
+  it("wraps and newline-joins multiple paths", () => {
+    expect(formatPathsForClipboard(["C:\\a", "C:\\b"])).toBe('"C:\\a"\n"C:\\b"');
+  });
+
+  it("returns an empty string for no paths", () => {
+    expect(formatPathsForClipboard([])).toBe("");
   });
 });

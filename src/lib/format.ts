@@ -32,6 +32,14 @@ export function friendlyError(raw: string): string {
   return "Can't open this folder.";
 }
 
+/**
+ * Format paths for the OS clipboard the way Explorer's "Copy as path" does:
+ * each path wrapped in double quotes, one per line.
+ */
+export function formatPathsForClipboard(paths: string[]): string {
+  return paths.map((p) => `"${p}"`).join("\n");
+}
+
 export interface PathSegment {
   /** Display label for this segment (e.g. "Users", or the drive/root). */
   name: string;

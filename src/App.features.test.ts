@@ -104,6 +104,25 @@ describe("new folder auto-numbering (CPE-050)", () => {
   });
 });
 
+describe("copy as path (CPE-056)", () => {
+  it("Ctrl+Shift+C writes the quoted path to the clipboard", async () => {
+    const writeText = vi.fn(async () => {});
+    Object.defineProperty(navigator, "clipboard", {
+      value: { writeText },
+      configurable: true,
+    });
+
+    mockBackend([file("alpha.md", "md")]);
+    await enterDrive();
+    await waitFor(() => expect(screen.getByText("alpha.md")).toBeTruthy());
+
+    await fireEvent.click(screen.getByText("alpha.md"));
+    await fireEvent.keyDown(window, { key: "C", ctrlKey: true, shiftKey: true });
+
+    await waitFor(() => expect(writeText).toHaveBeenCalledWith('"C:\\d\\alpha.md"'));
+  });
+});
+
 describe("duplicate (CPE-055)", () => {
   it("Ctrl+D copies the selected item into the current folder", async () => {
     mockBackend([file("alpha.md", "md"), file("beta.png", "png")]);

@@ -17,7 +17,7 @@
   import ConfirmDialog from "./lib/components/ConfirmDialog.svelte";
   import PropertiesDialog from "./lib/components/PropertiesDialog.svelte";
 
-  import { friendlyError, splitPath } from "./lib/format";
+  import { friendlyError, splitPath, formatPathsForClipboard } from "./lib/format";
   import { sortEntries } from "./lib/sort";
   import { uniqueName } from "./lib/naming";
   import { validateFileName } from "./lib/filename";
@@ -443,6 +443,19 @@
     }
   }
 
+  /** Copy the selection's full path(s) to the OS clipboard, quoted, one per
+      line — Explorer's "Copy as path". */
+  async function doCopyPath() {
+    if (selectedEntries.length === 0) return;
+    const text = formatPathsForClipboard(selectedEntries.map((e) => e.path));
+    try {
+      await navigator.clipboard.writeText(text);
+      showNotice(`Copied path${selectedEntries.length === 1 ? "" : "s"} to the clipboard.`);
+    } catch {
+      showNotice("Couldn't copy the path to the clipboard.", true);
+    }
+  }
+
   /** Duplicate the selection in place — copy it into the folder it lives in.
       Not undoable, for the same reason a copy-paste isn't (see doPaste). */
   async function doDuplicate() {
@@ -566,6 +579,7 @@
       case "copy": doCopy(); break;
       case "paste": doPaste(); break;
       case "duplicate": doDuplicate(); break;
+      case "copy-path": doCopyPath(); break;
       case "rename": if (selectedEntries.length === 1) beginRename(selectedEntries[0]); break;
       case "delete": askDelete(false); break;
       case "properties": openProperties(); break;
@@ -598,6 +612,7 @@
     if (ctrl && event.key.toLowerCase() === "w") { event.preventDefault(); closeTab(activeId); return; }
     if (ctrl && event.key === "Tab") { event.preventDefault(); cycleTab(event.shiftKey ? -1 : 1); return; }
     if (ctrl && event.key.toLowerCase() === "a") { event.preventDefault(); selection = selectAll(visible.length); return; }
+    if (ctrl && event.shiftKey && event.key.toLowerCase() === "c") { event.preventDefault(); doCopyPath(); return; }
     if (ctrl && event.key.toLowerCase() === "c") { event.preventDefault(); doCopy(); return; }
     if (ctrl && event.key.toLowerCase() === "x") { event.preventDefault(); doCut(); return; }
     if (ctrl && event.key.toLowerCase() === "v") { event.preventDefault(); doPaste(); return; }
