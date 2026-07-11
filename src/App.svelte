@@ -19,6 +19,7 @@
 
   import { friendlyError, splitPath } from "./lib/format";
   import { sortEntries } from "./lib/sort";
+  import { uniqueName } from "./lib/naming";
   import {
     createHistory, visit, back, forward, canGoBack, canGoForward, current,
     type History,
@@ -372,9 +373,10 @@
   async function newFolder() {
     if (isHome) return;
     try {
+      const name = uniqueName("New folder", entries.map((e) => e.name));
       const created = await invoke<string>("create_dir", {
         path: currentPath,
-        name: "New folder",
+        name,
       });
       pendingRenamePath = created; // select + inline-rename it once the list reloads
       await loadPath(currentPath);
