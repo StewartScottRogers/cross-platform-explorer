@@ -70,14 +70,32 @@ jobs:
           # and store the outputs as repository secrets.
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
-          # --- Optional code signing (uncomment once you have certs) ---
-          # macOS notarization:
+          # --- OS code signing — see CPE-002 (currently Blocked on certificates) ---
+          #
+          # Leave these commented until the certificates actually exist. Setting them
+          # to empty secrets makes the signing step fail rather than skip, which would
+          # break a currently-working release build.
+          #
+          # macOS (requires Apple Developer Program membership):
+          #   APPLE_CERTIFICATE           — base64 of the .p12 Developer ID cert
+          #   APPLE_CERTIFICATE_PASSWORD  — password for that .p12
+          #   APPLE_SIGNING_IDENTITY      — e.g. "Developer ID Application: Name (TEAMID)"
+          #   APPLE_ID / APPLE_PASSWORD   — Apple ID + app-specific password (notarization)
+          #   APPLE_TEAM_ID               — 10-char team ID
+          #
           # APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
           # APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
           # APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
           # APPLE_ID: ${{ secrets.APPLE_ID }}
           # APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
           # APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          #
+          # Windows (requires an OV or EV Authenticode certificate):
+          #   Windows signing is configured in src-tauri/tauri.conf.json under
+          #   bundle.windows (certificateThumbprint + digestAlgorithm + timestampUrl),
+          #   with the cert installed on the runner — NOT via env vars here.
+          #   EV certs are typically hardware/HSM-bound, which usually means a
+          #   cloud-signing service or a self-hosted runner.
         with:
           tagName: ${{ github.ref_name }}
           releaseName: "Cross-Platform Explorer ${{ github.ref_name }}"
