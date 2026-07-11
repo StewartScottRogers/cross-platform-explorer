@@ -268,6 +268,98 @@ fn delete_to_trash(paths: Vec<String>) -> Vec<OpResult> {
         .collect()
 }
 
+/// Can this platform restore items from the OS trash?
+///
+/// `trash::os_limited` (list + restore) is implemented on Windows and Linux but
+/// NOT on macOS. The UI calls this so it can decide whether to offer undo-of-
+/// delete at all. Offering an Undo that silently does nothing on one platform is
+/// worse than not offering it — so we tell the truth instead of guessing.
+#[tauri::command]
+fn can_restore_from_trash() -> bool {
+    cfg!(any(target_os = "windows", target_os = "linux"))
+}
+
+/// Restore previously-trashed items to their original paths.
+#[cfg(any(target_os = "windows", target_os = "linux"))]
+#[tauri::command]
+fn restore_from_trash(paths: Vec<String>) -> Vec<OpResult> {
+    use trash::os_limited::{list, restore_all};
+
+    let all = match list() {
+        Ok(v) => v,
+        Err(e) => {
+            return paths
+                .iter()
+                .map(|p| OpResult::err(Path::new(p), &e))
+                .collect()
+        }
+    };
+
+    let mut results = Vec::new();
+    let mut to_restore = Vec::new();
+
+    for p in &paths {
+        let target = Path::new(p);
+
+        // Never clobber: if something now occupies the original path, refuse
+        // rather than overwrite it to satisfy an undo.
+        if target.exists() {
+            results.push(OpResult::err(
+                target,
+                "Something already exists at the original location",
+            ));
+            continue;
+        }
+
+        // Match the trashed item by the full path it was deleted from.
+        let found = all
+            .iter()
+            .find(|item| item.original_parent.join(&item.name) == target);
+
+        match found {
+            Some(item) => {
+                to_restore.push(item.clone());
+                results.push(OpResult::ok(target));
+            }
+            None => results.push(OpResult::err(
+                target,
+                "Not found in the Recycle Bin — it may have been emptied",
+            )),
+        }
+    }
+
+    if !to_restore.is_empty() {
+        if let Err(e) = restore_all(to_restore) {
+            // The restore failed as a batch; report it against every item we
+            // had intended to restore rather than falsely claiming success.
+            return paths
+                .iter()
+                .map(|p| OpResult::err(Path::new(p), &e))
+                .collect();
+        }
+    }
+
+    results
+}
+
+/// macOS has no trash listing/restore API in the `trash` crate. Rather than
+/// pretend, this returns a clear error — and the UI never reaches here, because
+/// `can_restore_from_trash()` is false so delete is never pushed onto the undo
+/// stack in the first place.
+#[cfg(not(any(target_os = "windows", target_os = "linux")))]
+#[tauri::command]
+fn restore_from_trash(paths: Vec<String>) -> Vec<OpResult> {
+    paths
+        .iter()
+        .map(|p| {
+            OpResult::err(
+                Path::new(p),
+                "Restoring from the Trash isn't supported on this platform — open the Trash to recover it",
+            )
+        })
+        .collect()
+}
+
 /// Permanently delete entries. Irreversible — the UI must confirm explicitly
 /// before ever calling this.
 #[tauri::command]
@@ -614,6 +706,8 @@ pub fn run() {
             rename_entry,
             delete_to_trash,
             delete_permanent,
+            can_restore_from_trash,
+            restore_from_trash,
             copy_entries,
             move_entries,
             move_exact,
