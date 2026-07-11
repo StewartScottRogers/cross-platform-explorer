@@ -18,7 +18,7 @@
   import PropertiesDialog from "./lib/components/PropertiesDialog.svelte";
 
   import { friendlyError, splitPath } from "./lib/format";
-  import { typeName } from "./lib/filetypes";
+  import { sortEntries } from "./lib/sort";
   import {
     createHistory, visit, back, forward, canGoBack, canGoForward, current,
     type History,
@@ -264,17 +264,7 @@
     ? shown.filter((e) => e.name.toLowerCase().includes(search.trim().toLowerCase()))
     : shown;
 
-  $: visible = [...filtered].sort((a, b) => {
-    if (a.is_dir !== b.is_dir) return a.is_dir ? -1 : 1;
-    let cmp = 0;
-    switch (sortKey) {
-      case "name": cmp = a.name.localeCompare(b.name); break;
-      case "modified": cmp = (a.modified ?? 0) - (b.modified ?? 0); break;
-      case "type": cmp = typeName(a).localeCompare(typeName(b)) || a.name.localeCompare(b.name); break;
-      case "size": cmp = a.size - b.size; break;
-    }
-    return sortDir === "asc" ? cmp : -cmp;
-  });
+  $: visible = sortEntries(filtered, sortKey, sortDir);
 
   $: crumbs = isHome
     ? [{ name: "Home", path: HOME }]
