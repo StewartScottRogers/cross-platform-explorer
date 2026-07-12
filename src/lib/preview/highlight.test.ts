@@ -47,6 +47,12 @@ describe("languageForExt", () => {
     expect(languageForExt("libsonnet")).toBe("json");
     expect(languageForName(".editorconfig")).toBe("ini");
   });
+  it("maps markup/doc formats (CPE-073/075/188)", () => {
+    expect(languageForExt("tex")).toBe("latex");
+    expect(languageForExt("adoc")).toBe("asciidoc");
+    expect(languageForExt("asciidoc")).toBe("asciidoc");
+    expect(languageForExt("mdx")).toBe("markdown");
+  });
 });
 
 describe("languageForName", () => {
@@ -83,5 +89,12 @@ describe("highlightForFile (lazy grammars)", () => {
     expect(highlightForFile("object A { def f = 1 }", "a.scala")).toContain("hljs-");
     await ensureLanguage("nix");
     expect(highlightForFile('let msg = "hi"; in msg', "a.nix")).toContain("hljs-");
+  });
+
+  it("highlights LaTeX and AsciiDoc once their grammars are ensured (CPE-073/075)", async () => {
+    await ensureLanguage("latex");
+    expect(highlightForFile("\\section{Intro} \\textbf{hi}", "a.tex")).toContain("hljs-");
+    await ensureLanguage("asciidoc");
+    expect(highlightForFile("= Title\n\n== Section", "a.adoc")).toContain("hljs-");
   });
 });
