@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { tick } from "svelte";
   import type { DirEntry } from "../types";
   import { pickProvider, type ArchiveEntry } from "../preview/provider";
   import { parseCsv } from "../preview/csv";
@@ -158,9 +159,107 @@
       save();
     }
   }
+
+  // ---- text context menu (Cut / Copy / Paste / Select All) ----
+  let editorEl: HTMLTextAreaElement | undefined;
+  let textContentEl: HTMLElement | undefined;
+  let ctxMenu: { x: number; y: number } | null = null;
+
+  // Cut/Paste only apply while editing (view is read-only). The menu items are
+  // always present; these flags disable them.
+  $: canModify = editing;
+
+  $: isTextKind =
+    provider.kind === "text" ||
+    provider.kind === "markdown" ||
+    provider.kind === "json" ||
+    provider.kind === "csv" ||
+    provider.kind === "tsv";
+
+  function openTextMenu(e: MouseEvent) {
+    if (!isTextKind || textState !== "idle") return; // let non-text use the native menu
+    e.preventDefault();
+    ctxMenu = { x: e.clientX, y: e.clientY };
+  }
+  function closeTextMenu() {
+    ctxMenu = null;
+  }
+
+  /** Currently selected text — from the editor when editing, else the window selection. */
+  function selectedText(): string {
+    if (editing && editorEl) {
+      return draft.slice(editorEl.selectionStart, editorEl.selectionEnd);
+    }
+    return window.getSelection()?.toString() ?? "";
+  }
+
+  async function menuCopy() {
+    const sel = selectedText();
+    const all = editing ? draft : text;
+    try {
+      await navigator.clipboard.writeText(sel || all);
+    } catch {
+      /* clipboard unavailable — ignore */
+    }
+    closeTextMenu();
+  }
+
+  async function menuCut() {
+    if (!editing || !editorEl) return closeTextMenu();
+    const start = editorEl.selectionStart;
+    const end = editorEl.selectionEnd;
+    const cut = draft.slice(start, end);
+    if (cut) {
+      try {
+        await navigator.clipboard.writeText(cut);
+      } catch {
+        /* ignore */
+      }
+      draft = draft.slice(0, start) + draft.slice(end);
+      await tick();
+      editorEl.focus();
+      editorEl.setSelectionRange(start, start);
+    }
+    closeTextMenu();
+  }
+
+  async function menuPaste() {
+    if (!editing || !editorEl) return closeTextMenu();
+    let clip = "";
+    try {
+      clip = await navigator.clipboard.readText();
+    } catch {
+      return closeTextMenu();
+    }
+    const start = editorEl.selectionStart;
+    const end = editorEl.selectionEnd;
+    draft = draft.slice(0, start) + clip + draft.slice(end);
+    await tick();
+    editorEl.focus();
+    const caret = start + clip.length;
+    editorEl.setSelectionRange(caret, caret);
+    closeTextMenu();
+  }
+
+  function menuSelectAll() {
+    if (editing && editorEl) {
+      editorEl.focus();
+      editorEl.select();
+    } else if (textContentEl) {
+      const range = document.createRange();
+      range.selectNodeContents(textContentEl);
+      const sel = window.getSelection();
+      sel?.removeAllRanges();
+      sel?.addRange(range);
+    }
+    closeTextMenu();
+  }
 </script>
 
-<aside class="preview">
+<svelte:window on:click={closeTextMenu} on:keydown={(e) => e.key === "Escape" && closeTextMenu()} />
+
+<!-- svelte-ignore a11y-no-noninteractive-element-interactions -->
+<aside class="preview" on:contextmenu={openTextMenu}>
   {#if provider.kind === "image" && entry}
     <img class="preview-img" src={assetUrl(entry.path)} alt={entry.name} />
   {:else if provider.kind === "audio" && entry}
@@ -206,6 +305,7 @@
       <textarea
         class="preview-editor"
         bind:value={draft}
+        bind:this={editorEl}
         on:keydown={onEditorKeydown}
         spellcheck="false"
       ></textarea>
@@ -216,7 +316,7 @@
         </div>
       {/if}
       {#if provider.kind === "csv" || provider.kind === "tsv"}
-        <div class="preview-table-wrap">
+        <div class="preview-table-wrap" bind:this={textContentEl}>
           <table class="preview-table">
             <tbody>
               {#each tableRows.slice(0, CSV_ROW_CAP) as r}
@@ -229,19 +329,37 @@
           {/if}
         </div>
       {:else if provider.kind === "json"}
-        <pre class="preview-text">{prettyJson(text)}</pre>
+        <pre class="preview-text" bind:this={textContentEl}>{prettyJson(text)}</pre>
       {:else if provider.kind === "markdown"}
         <!-- mdHtml is DOMPurify-sanitized (lazy renderer), safe to inject. -->
-        <div class="preview-markdown">{@html mdHtml}</div>
+        <div class="preview-markdown" bind:this={textContentEl}>{@html mdHtml}</div>
       {:else}
         <!-- codeHtml is escaped or hljs output (lazy grammar), safe to inject. -->
-        <pre class="preview-text"><code>{@html codeHtml}</code></pre>
+        <pre class="preview-text" bind:this={textContentEl}><code>{@html codeHtml}</code></pre>
       {/if}
     {/if}
   {:else}
     <slot />
   {/if}
 </aside>
+
+{#if ctxMenu}
+  <!-- svelte-ignore a11y-click-events-have-key-events a11y-no-noninteractive-element-interactions -->
+  <div
+    class="text-ctx"
+    role="menu"
+    tabindex="-1"
+    style="left:{ctxMenu.x}px; top:{ctxMenu.y}px"
+    on:click|stopPropagation
+    on:contextmenu|preventDefault|stopPropagation
+  >
+    <button role="menuitem" disabled={!canModify} on:click={menuCut}>Cut</button>
+    <button role="menuitem" on:click={menuCopy}>Copy</button>
+    <button role="menuitem" disabled={!canModify} on:click={menuPaste}>Paste</button>
+    <div class="text-ctx-sep"></div>
+    <button role="menuitem" on:click={menuSelectAll}>Select all</button>
+  </div>
+{/if}
 
 <style>
   .preview {
@@ -292,6 +410,28 @@
     color: var(--text-faint);
     padding: 12px;
   }
+  .text-ctx {
+    position: fixed;
+    z-index: 100;
+    min-width: 160px;
+    padding: 4px;
+    background: var(--surface);
+    border: 1px solid var(--border-strong);
+    border-radius: var(--radius-lg);
+    box-shadow: 0 8px 24px rgba(0, 0, 0, 0.16);
+  }
+  .text-ctx button {
+    display: flex;
+    align-items: center;
+    width: 100%;
+    height: 30px;
+    padding: 0 12px;
+    text-align: left;
+    border-radius: var(--radius);
+    font-size: 13px;
+  }
+  .text-ctx button:disabled { opacity: 0.4; cursor: default; }
+  .text-ctx-sep { height: 1px; background: var(--border); margin: 4px 6px; }
   .preview-edit-bar {
     display: flex;
     gap: 6px;

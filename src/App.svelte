@@ -686,6 +686,8 @@
     if (ctrl && event.key === "Tab") { event.preventDefault(); cycleTab(event.shiftKey ? -1 : 1); return; }
     if (ctrl && event.key.toLowerCase() === "a") { event.preventDefault(); selection = selectAll(visible.length); return; }
     if (ctrl && event.shiftKey && event.key.toLowerCase() === "c") { event.preventDefault(); doCopyPath(); return; }
+    // Don't hijack Ctrl+C when text is selected (e.g. in the Preview Pane) — let the browser copy it.
+    if (ctrl && event.key.toLowerCase() === "c" && !(window.getSelection()?.isCollapsed ?? true)) return;
     if (ctrl && event.key.toLowerCase() === "c") { event.preventDefault(); doCopy(); return; }
     if (ctrl && event.key.toLowerCase() === "x") { event.preventDefault(); doCut(); return; }
     if (ctrl && event.key.toLowerCase() === "v") { event.preventDefault(); doPaste(); return; }

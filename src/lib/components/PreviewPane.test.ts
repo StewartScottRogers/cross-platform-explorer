@@ -206,6 +206,60 @@ describe("PreviewPane", () => {
     await waitFor(() => expect(saveText).toHaveBeenCalledWith("C:\\d\\a.txt", "edited content"));
   });
 
+  it("opens a text context menu; Cut/Paste disabled in view (CPE-224)", async () => {
+    const { container } = render(PreviewPane, {
+      entry: entry({ name: "a.txt", path: "C:\\d\\a.txt", extension: "txt" }),
+      loadText: async () => "hello",
+    });
+    await waitFor(() => expect(container.querySelector(".preview-text")).toBeTruthy());
+    await fireEvent.contextMenu(container.querySelector(".preview")!);
+
+    const btn = (label: string) =>
+      [...container.querySelectorAll(".text-ctx button")].find((b) => b.textContent === label) as
+        | HTMLButtonElement
+        | undefined;
+    await waitFor(() => expect(btn("Copy")).toBeTruthy());
+    expect(btn("Cut")!.disabled).toBe(true);
+    expect(btn("Paste")!.disabled).toBe(true);
+    expect(btn("Copy")!.disabled).toBe(false);
+    expect(btn("Select all")!.disabled).toBe(false);
+  });
+
+  it("enables Cut/Paste in edit mode (CPE-224)", async () => {
+    const { container, getByText } = render(PreviewPane, {
+      entry: entry({ name: "a.txt", path: "C:\\d\\a.txt", extension: "txt" }),
+      loadText: async () => "x",
+    });
+    await waitFor(() => getByText("Edit"));
+    await fireEvent.click(getByText("Edit"));
+    await waitFor(() => expect(container.querySelector("textarea.preview-editor")).toBeTruthy());
+    await fireEvent.contextMenu(container.querySelector(".preview")!);
+
+    const btn = (label: string) =>
+      [...container.querySelectorAll(".text-ctx button")].find((b) => b.textContent === label) as
+        | HTMLButtonElement
+        | undefined;
+    await waitFor(() => expect(btn("Cut")).toBeTruthy());
+    expect(btn("Cut")!.disabled).toBe(false);
+    expect(btn("Paste")!.disabled).toBe(false);
+  });
+
+  it("Copy from the menu writes text to the clipboard (CPE-224)", async () => {
+    const writeText = vi.fn(async () => {});
+    Object.defineProperty(navigator, "clipboard", { value: { writeText }, configurable: true });
+    const { container } = render(PreviewPane, {
+      entry: entry({ name: "a.txt", path: "C:\\d\\a.txt", extension: "txt" }),
+      loadText: async () => "hello world",
+    });
+    await waitFor(() => expect(container.querySelector(".preview-text")).toBeTruthy());
+    await fireEvent.contextMenu(container.querySelector(".preview")!);
+    const copy = [...container.querySelectorAll(".text-ctx button")].find(
+      (b) => b.textContent === "Copy",
+    )!;
+    await fireEvent.click(copy);
+    await waitFor(() => expect(writeText).toHaveBeenCalledWith("hello world"));
+  });
+
   it("renders the fallback (no img/pre) for a folder", () => {
     const { container } = render(PreviewPane, {
       entry: entry({ name: "dir", is_dir: true, extension: "" }),
