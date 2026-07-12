@@ -197,6 +197,18 @@ button:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
 }
 .main.with-details { grid-template-columns: 220px 1fr 300px; }
 
+/* Draggable dividers between panels (CPE-069). Inline grid-template-columns on
+   .main (set by App) accounts for these 6px columns. */
+.resizer {
+  cursor: col-resize;
+  background: transparent;
+  transition: background 0.12s ease;
+  z-index: 6;
+}
+.resizer:hover { background: var(--accent); opacity: 0.35; }
+.main.resizing { cursor: col-resize; user-select: none; }
+.main.resizing * { user-select: none !important; cursor: col-resize; }
+
 /* ---------- Sidebar ---------- */
 .sidebar {
   overflow-y: auto;

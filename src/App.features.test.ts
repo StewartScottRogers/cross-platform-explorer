@@ -108,6 +108,37 @@ describe("new folder auto-numbering (CPE-050)", () => {
   });
 });
 
+describe("resizable panels (CPE-069)", () => {
+  it("drags the sidebar divider to resize and persists the width", async () => {
+    mockBackend([]);
+    const { container } = render(App);
+    await screen.findAllByText("Local Disk (C:)");
+
+    const resizer = screen.getByLabelText("Resize sidebar");
+    await fireEvent.mouseDown(resizer, { clientX: 220 });
+    await fireEvent.mouseMove(window, { clientX: 300 }); // +80px
+    await fireEvent.mouseUp(window);
+
+    const main = container.querySelector(".main") as HTMLElement;
+    expect(main.getAttribute("style")).toContain("grid-template-columns: 300px 6px 1fr");
+    expect(localStorage.getItem("cpe.sidebarWidth")).toBe("300");
+  });
+
+  it("clamps the sidebar to its safe minimum width", async () => {
+    mockBackend([]);
+    const { container } = render(App);
+    await screen.findAllByText("Local Disk (C:)");
+
+    const resizer = screen.getByLabelText("Resize sidebar");
+    await fireEvent.mouseDown(resizer, { clientX: 220 });
+    await fireEvent.mouseMove(window, { clientX: 0 }); // -220px → clamps to 160
+    await fireEvent.mouseUp(window);
+
+    const main = container.querySelector(".main") as HTMLElement;
+    expect(main.getAttribute("style")).toContain("grid-template-columns: 160px 6px 1fr");
+  });
+});
+
 describe("preview pane (CPE-061)", () => {
   it("shows an image preview for a selected image file", async () => {
     mockBackend([file("photo.png", "png"), file("a.txt", "txt")]);
