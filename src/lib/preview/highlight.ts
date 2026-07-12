@@ -59,7 +59,7 @@ const LANG_BY_EXT: Record<string, string> = {
   js: "javascript", jsx: "javascript", mjs: "javascript", cjs: "javascript",
   ts: "typescript", tsx: "typescript",
   json: "json", json5: "json", jsonc: "json",
-  css: "css", scss: "scss", less: "less", styl: "stylus",
+  css: "css", scss: "scss", sass: "scss", less: "less", styl: "stylus",
   html: "xml", xml: "xml", svelte: "xml", xsl: "xml", xslt: "xml",
   hbs: "handlebars", twig: "twig",
   // systems / general
@@ -95,10 +95,32 @@ const LANG_BY_EXT: Record<string, string> = {
   md: "markdown", markdown: "markdown",
 };
 
+/** Well-known code files whose language is keyed by full name, not extension. */
+const LANG_BY_FILENAME: Record<string, string> = {
+  dockerfile: "dockerfile", containerfile: "dockerfile",
+  makefile: "makefile", gnumakefile: "makefile",
+  "cmakelists.txt": "cmake",
+  gemfile: "ruby", rakefile: "ruby",
+  ".gitconfig": "ini", ".editorconfig": "ini", ".npmrc": "ini", ".yarnrc": "ini",
+  ".bashrc": "bash", ".zshrc": "bash", ".bash_profile": "bash", ".profile": "bash",
+};
+
 /** The highlight.js language for an extension, or null if we don't highlight it. */
 export function languageForExt(ext: string): string | null {
   const lang = LANG_BY_EXT[ext];
   return lang && hljs.getLanguage(lang) ? lang : null;
+}
+
+/**
+ * Resolve a highlight language from a full file name: special-cased names
+ * (Dockerfile, Makefile, dot-config files) first, then the extension.
+ */
+export function languageForName(name: string): string | null {
+  const lower = name.toLowerCase();
+  const byName = LANG_BY_FILENAME[lower];
+  if (byName && hljs.getLanguage(byName)) return byName;
+  const ext = lower.includes(".") ? lower.slice(lower.lastIndexOf(".") + 1) : "";
+  return languageForExt(ext);
 }
 
 function escapeHtml(s: string): string {
@@ -112,6 +134,18 @@ function escapeHtml(s: string): string {
  */
 export function highlightCode(code: string, ext: string): string {
   const lang = languageForExt(ext);
+  if (lang) {
+    return hljs.highlight(code, { language: lang }).value;
+  }
+  return escapeHtml(code);
+}
+
+/**
+ * Highlight code resolving the language from the full file name (handles
+ * Dockerfile/Makefile/dot-config files as well as by-extension). Safe for {@html}.
+ */
+export function highlightForFile(code: string, name: string): string {
+  const lang = languageForName(name);
   if (lang) {
     return hljs.highlight(code, { language: lang }).value;
   }

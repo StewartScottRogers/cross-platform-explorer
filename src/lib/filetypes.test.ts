@@ -45,6 +45,13 @@ describe("categoryOf", () => {
     }
   });
 
+  it("classifies well-known code files by name (CPE-164/166/200)", () => {
+    expect(categoryOf({ is_dir: false, extension: "", name: "Dockerfile" })).toBe("code");
+    expect(categoryOf({ is_dir: false, extension: "", name: "Makefile" })).toBe("code");
+    expect(categoryOf({ is_dir: false, extension: "", name: ".gitignore" })).toBe("code");
+    expect(categoryOf({ is_dir: false, extension: "", name: "randomfile" })).toBe("unknown");
+  });
+
   it("classifies executables and installers (CPE-047)", () => {
     expect(categoryOf(file("exe"))).toBe("executable");
     expect(categoryOf(file("msi"))).toBe("executable");

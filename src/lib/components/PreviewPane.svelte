@@ -2,7 +2,7 @@
   import type { DirEntry } from "../types";
   import { pickProvider, type ArchiveEntry } from "../preview/provider";
   import { parseCsv } from "../preview/csv";
-  import { highlightCode } from "../preview/highlight";
+  import { highlightForFile } from "../preview/highlight";
   import { renderMarkdown } from "../preview/markdown";
   import { formatSize } from "../format";
 
@@ -205,7 +205,7 @@
         <div class="preview-markdown">{@html renderMarkdown(text)}</div>
       {:else}
         <!-- highlightCode escapes the source, so the HTML is safe to inject. -->
-        <pre class="preview-text"><code>{@html highlightCode(text, entry.extension)}</code></pre>
+        <pre class="preview-text"><code>{@html highlightForFile(text, entry.name)}</code></pre>
       {/if}
     {/if}
   {:else}

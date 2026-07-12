@@ -39,7 +39,7 @@ export const CATEGORY_BY_EXT: Record<string, FileCategory> = {
   m: "code", mm: "code", go: "code", java: "code", kt: "code", kts: "code",
   swift: "code", rb: "code", php: "code", pl: "code", pm: "code", lua: "code",
   r: "code", vb: "code", graphql: "code", gql: "code", wat: "code",
-  scss: "code", less: "code", sql: "code", mk: "code",
+  scss: "code", sass: "code", less: "code", sql: "code", mk: "code",
   // more languages via individually-registered grammars (CPE-128..205)
   scala: "code", jl: "code", dart: "code", hs: "code", ex: "code", exs: "code",
   erl: "code", clj: "code", cljs: "code", edn: "code", fs: "code", fsx: "code",
@@ -107,9 +107,24 @@ export const TYPE_NAME_BY_EXT: Record<string, string> = {
   exe: "Application", msi: "Windows Installer Package", dll: "Application extension",
 };
 
-/** Visual category for an entry, used to choose its icon. */
-export function categoryOf(entry: Pick<DirEntry, "is_dir" | "extension">): FileCategory {
+/**
+ * Well-known code files that have no useful extension (Dockerfile, Makefile,
+ * dot-config files, …). Matched by full lowercased name.
+ */
+const CODE_FILENAMES = new Set([
+  "dockerfile", "containerfile", "makefile", "gnumakefile", "cmakelists.txt",
+  "rakefile", "gemfile", "brewfile", "procfile", "vagrantfile",
+  ".gitignore", ".gitattributes", ".gitconfig", ".gitmodules",
+  ".npmrc", ".yarnrc", ".editorconfig",
+  ".bashrc", ".zshrc", ".bash_profile", ".profile",
+]);
+
+/** Visual category for an entry, used to choose its icon and preview provider. */
+export function categoryOf(
+  entry: Pick<DirEntry, "is_dir" | "extension"> & { name?: string },
+): FileCategory {
   if (entry.is_dir) return "folder";
+  if (entry.name && CODE_FILENAMES.has(entry.name.toLowerCase())) return "code";
   return CATEGORY_BY_EXT[entry.extension] ?? "unknown";
 }
 
