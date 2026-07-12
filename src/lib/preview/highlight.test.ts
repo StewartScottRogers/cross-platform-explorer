@@ -37,6 +37,22 @@ describe("highlightCode", () => {
     expect(highlightCode("def hi; puts 'x'; end", "rb")).toContain("hljs-");
   });
 
+  it("highlights individually-registered grammars (Scala, Haskell, Elixir, Nix)", () => {
+    expect(highlightCode("object A { def f = 1 }", "scala")).toContain("hljs-");
+    expect(highlightCode("main = putStrLn \"hi\"", "hs")).toContain("hljs-");
+    expect(highlightCode("defmodule A do end", "ex")).toContain("hljs-");
+    expect(highlightCode('let msg = "hi"; in msg', "nix")).toContain("hljs-");
+  });
+
+  it("maps extensions that share a registered grammar", () => {
+    expect(languageForExt("edn")).toBe("clojure");
+    expect(languageForExt("ron")).toBe("rust");
+    expect(languageForExt("xslt")).toBe("xml");
+    expect(languageForExt("json5")).toBe("json");
+    expect(languageForExt("gradle")).toBe("groovy");
+    expect(languageForExt("hx")).toBe("haxe");
+  });
+
   it("escapes and does not add spans for an unmapped type", () => {
     const html = highlightCode("a < b && c > d", "txt");
     expect(html).toContain("&lt;");
