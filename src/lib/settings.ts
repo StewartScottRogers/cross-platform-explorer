@@ -14,6 +14,8 @@ const KEYS = {
   sortDir: "cpe.sortDir",
   showDetails: "cpe.showDetails",
   showPreview: "cpe.showPreview",
+  sidebarWidth: "cpe.sidebarWidth",
+  rightWidth: "cpe.rightWidth",
   pins: "cpe.pins",
   recents: "cpe.recents",
 } as const;
@@ -79,6 +81,13 @@ export const saveShowDetails = (v: boolean) => write(KEYS.showDetails, v);
 export const loadShowPreview = (): boolean =>
   read(KEYS.showPreview, true, isBool);
 export const saveShowPreview = (v: boolean) => write(KEYS.showPreview, v);
+
+const isPosNum = (v: unknown): v is number =>
+  typeof v === "number" && Number.isFinite(v) && v > 0;
+export const loadSidebarWidth = (): number => read(KEYS.sidebarWidth, 220, isPosNum);
+export const saveSidebarWidth = (v: number) => write(KEYS.sidebarWidth, v);
+export const loadRightWidth = (): number => read(KEYS.rightWidth, 300, isPosNum);
+export const saveRightWidth = (v: number) => write(KEYS.rightWidth, v);
 
 export const loadPins = (): string[] => read(KEYS.pins, [], isStringArray);
 export const savePins = (v: string[]) => write(KEYS.pins, v);

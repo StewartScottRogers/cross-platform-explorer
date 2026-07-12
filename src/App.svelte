@@ -25,6 +25,7 @@
   import { validateFileName } from "./lib/filename";
   import { matchesQuery } from "./lib/search";
   import { firstMatchIndex } from "./lib/typeahead";
+  import { clampWidth } from "./lib/resize";
   import {
     createHistory, visit, back, forward, canGoBack, canGoForward, current,
     type History,
@@ -77,6 +78,44 @@
   let showPreview = true;
   /** Cap on how much of a text file the preview will load. */
   const PREVIEW_MAX_BYTES = 256 * 1024;
+
+  // ---- resizable panels ----
+  const SIDEBAR_MIN = 160, SIDEBAR_MAX = 480;
+  const RIGHT_MIN = 220, RIGHT_MAX = 560;
+  let sidebarWidth = 220;
+  let rightWidth = 300;
+  let resizing: null | "left" | "right" = null;
+  let resizeStartX = 0;
+  let resizeStartW = 0;
+
+  $: gridCols = showDetails
+    ? `${sidebarWidth}px 6px 1fr 6px ${rightWidth}px`
+    : `${sidebarWidth}px 6px 1fr`;
+
+  function startResize(which: "left" | "right", e: MouseEvent) {
+    resizing = which;
+    resizeStartX = e.clientX;
+    resizeStartW = which === "left" ? sidebarWidth : rightWidth;
+    window.addEventListener("mousemove", onResize);
+    window.addEventListener("mouseup", endResize);
+    e.preventDefault();
+  }
+  function onResize(e: MouseEvent) {
+    const dx = e.clientX - resizeStartX;
+    if (resizing === "left") {
+      sidebarWidth = clampWidth(resizeStartW + dx, SIDEBAR_MIN, SIDEBAR_MAX);
+    } else if (resizing === "right") {
+      // The right pane grows as the divider moves left, so subtract dx.
+      rightWidth = clampWidth(resizeStartW - dx, RIGHT_MIN, RIGHT_MAX);
+    }
+  }
+  function endResize() {
+    window.removeEventListener("mousemove", onResize);
+    window.removeEventListener("mouseup", endResize);
+    if (resizing === "left") settings.saveSidebarWidth(sidebarWidth);
+    else if (resizing === "right") settings.saveRightWidth(rightWidth);
+    resizing = null;
+  }
   let showHidden = false;
   let pins: string[] = [];
   let recents: RecentFile[] = [];
@@ -744,6 +783,8 @@
     sortDir = settings.loadSortDir();
     showDetails = settings.loadShowDetails();
     showPreview = settings.loadShowPreview();
+    sidebarWidth = clampWidth(settings.loadSidebarWidth(), SIDEBAR_MIN, SIDEBAR_MAX);
+    rightWidth = clampWidth(settings.loadRightWidth(), RIGHT_MIN, RIGHT_MAX);
     pins = settings.loadPins();
     recents = settings.loadRecents();
 
@@ -811,7 +852,12 @@
   on:toggleDetails={() => { showDetails = !showDetails; settings.saveShowDetails(showDetails); }}
 />
 
-<div class="main" class:with-details={showDetails}>
+<div
+  class="main"
+  class:with-details={showDetails}
+  class:resizing
+  style="grid-template-columns: {gridCols}"
+>
   <Sidebar
     {places}
     {drives}
@@ -822,6 +868,16 @@
     on:home={() => navigate(HOME)}
     on:drop={(e) => dropInto(e.detail.paths, e.detail.dest, e.detail.copy)}
   />
+
+  <!-- svelte-ignore a11y-no-noninteractive-element-interactions -->
+  <div
+    class="resizer"
+    role="separator"
+    aria-orientation="vertical"
+    aria-label="Resize sidebar"
+    title="Drag to resize"
+    on:mousedown={(e) => startResize("left", e)}
+  ></div>
 
   <div class="content">
     {#if isHome}
@@ -866,6 +922,16 @@
   </div>
 
   {#if showDetails}
+    <!-- svelte-ignore a11y-no-noninteractive-element-interactions -->
+    <div
+      class="resizer"
+      role="separator"
+      aria-orientation="vertical"
+      aria-label="Resize details pane"
+      title="Drag to resize"
+      on:mousedown={(e) => startResize("right", e)}
+    ></div>
+
     <div class="rightpane">
       <div class="rightpane-toggle" role="tablist" aria-label="Preview or details">
         <button
