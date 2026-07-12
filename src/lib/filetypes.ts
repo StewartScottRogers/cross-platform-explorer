@@ -40,6 +40,18 @@ export const CATEGORY_BY_EXT: Record<string, FileCategory> = {
   swift: "code", rb: "code", php: "code", pl: "code", pm: "code", lua: "code",
   r: "code", vb: "code", graphql: "code", gql: "code", wat: "code",
   scss: "code", less: "code", sql: "code", mk: "code",
+  // more languages via individually-registered grammars (CPE-128..205)
+  scala: "code", jl: "code", dart: "code", hs: "code", ex: "code", exs: "code",
+  erl: "code", clj: "code", cljs: "code", edn: "code", fs: "code", fsx: "code",
+  ml: "code", mli: "code", elm: "code", re: "code", rei: "code", rkt: "code",
+  scm: "code", ss: "code", lisp: "code", lsp: "code", nim: "code", cr: "code",
+  d: "code", f90: "code", f95: "code", pas: "code", adb: "code", ads: "code",
+  prolog: "code", pro: "code", asm: "code", s: "code", ll: "code", v: "code",
+  sv: "code", vhd: "code", vhdl: "code", tcl: "code", awk: "code", hx: "code",
+  groovy: "code", gradle: "code", psm1: "code", psd1: "code", cmake: "code",
+  proto: "code", nginx: "code", nix: "code", styl: "code", hbs: "code",
+  twig: "code", xsl: "code", xslt: "code", json5: "code", jsonc: "code",
+  ron: "code",
   // archives
   zip: "archive", rar: "archive", "7z": "archive", tar: "archive", gz: "archive",
   xz: "archive", bz2: "archive", zst: "archive", tgz: "archive",
