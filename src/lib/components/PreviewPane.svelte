@@ -49,6 +49,12 @@
   let imgState: "idle" | "loading" | "error" = "idle";
   let imgReqId = 0;
 
+  let fontFamily = "";
+  let fontState: "idle" | "loading" | "error" = "idle";
+  let fontReqId = 0;
+  const FONT_SAMPLE = "The quick brown fox jumps over the lazy dog";
+  const FONT_SIZES = [12, 18, 24, 36, 48];
+
   // Load text whenever the selected entry (for a text-based provider) changes.
   // A monotonically increasing request id discards any load superseded by a
   // newer selection.
@@ -82,6 +88,31 @@
     } catch {
       if (mine !== imgReqId) return;
       imgState = "error";
+    }
+  }
+
+  $: if (entry && provider.kind === "font") loadFontFor(entry);
+
+  async function loadFontFor(e: DirEntry) {
+    const mine = ++fontReqId;
+    fontState = "loading";
+    // jsdom (tests) has no FontFace; degrade to a plain specimen.
+    if (typeof FontFace === "undefined") {
+      fontFamily = "";
+      fontState = "idle";
+      return;
+    }
+    const family = `preview-font-${mine}`;
+    try {
+      const face = new FontFace(family, `url("${assetUrl(e.path)}")`);
+      await face.load();
+      if (mine !== fontReqId) return;
+      (document as Document & { fonts: FontFaceSet }).fonts.add(face);
+      fontFamily = family;
+      fontState = "idle";
+    } catch {
+      if (mine !== fontReqId) return;
+      fontState = "error";
     }
   }
 
@@ -320,6 +351,16 @@
     <video class="preview-media" controls src={assetUrl(entry.path)}></video>
   {:else if provider.kind === "pdf" && entry}
     <iframe class="preview-pdf" title={entry.name} src={assetUrl(entry.path)}></iframe>
+  {:else if provider.kind === "font" && entry}
+    {#if fontState === "error"}
+      <p class="preview-note">Can't preview this font.</p>
+    {:else}
+      <div class="preview-font">
+        {#each FONT_SIZES as size}
+          <p style="font-family: {fontFamily || 'inherit'}; font-size: {size}px">{FONT_SAMPLE}</p>
+        {/each}
+      </div>
+    {/if}
   {:else if provider.kind === "archive" && entry}
     {#if entriesState === "loading"}
       <p class="preview-note">Loading preview…</p>
@@ -467,6 +508,15 @@
     margin: auto;
     color: var(--text-faint);
     padding: 12px;
+  }
+  .preview-font {
+    padding: 16px;
+    overflow-wrap: anywhere;
+  }
+  .preview-font p {
+    margin: 0 0 12px;
+    line-height: 1.3;
+    color: var(--text);
   }
   .text-ctx {
     position: fixed;
