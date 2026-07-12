@@ -133,6 +133,8 @@ const LANG_BY_EXT: Record<string, string> = {
   vue: "xml", astro: "xml", liquid: "handlebars",
   // logs use the accesslog grammar; .reg is INI-shaped (CPE-116/212)
   log: "accesslog", reg: "ini",
+  // Jupyter notebooks are JSON (CPE-114)
+  ipynb: "json",
 };
 
 const LANG_BY_FILENAME: Record<string, string> = {
