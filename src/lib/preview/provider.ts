@@ -22,6 +22,7 @@ export type PreviewKind =
   | "markdown"
   | "text"
   | "info"
+  | "font"
   | "none";
 
 /** One entry inside an archive (mirrors the Rust `ArchiveEntry`). */
@@ -49,7 +50,7 @@ const MARKDOWN_EXT = new Set(["md", "markdown"]);
 /** Extensions the read_archive_entries backend can list (zip family, tar, gzip). */
 const ARCHIVE_EXT = new Set([
   "zip", "jar", "apk", "war", "ear", "ipa", "xpi",
-  "tar", "tgz", "gz", "7z",
+  "tar", "tgz", "gz", "7z", "iso",
 ]);
 
 /**
@@ -72,6 +73,9 @@ const INFO_EXT = new Set([
  * read_image_data_url backend and shown via a data URL. CPE-099/101.
  */
 const DECODED_IMAGE_EXT = new Set(["tiff", "tif", "psd"]);
+
+/** Font files rendered as a live specimen via the webview's FontFace API (CPE-117). */
+const FONT_EXT = new Set(["ttf", "otf", "woff", "woff2"]);
 
 /**
  * Ordered by priority — the first match wins. Markdown is listed before text
@@ -147,6 +151,13 @@ export const providers: PreviewProvider[] = [
     // zip family (jar/apk/war/… are zips), plus tar and gzip — all listed by the
     // read_archive_entries backend (CPE-064/109/112/217).
     canPreview: (e) => !e.is_dir && ARCHIVE_EXT.has(e.extension),
+  },
+  {
+    id: "font",
+    label: "Font",
+    kind: "font",
+    editable: false,
+    canPreview: (e) => !e.is_dir && FONT_EXT.has(e.extension),
   },
   {
     id: "info",

@@ -110,8 +110,15 @@ describe("pickProvider", () => {
     }
   });
 
-  it("previews 7z via the archive provider (CPE-110)", () => {
+  it("previews 7z and ISO via the archive provider (CPE-110/113)", () => {
     expect(pickProvider(entry({ name: "a.7z", extension: "7z" })).kind).toBe("archive");
+    expect(pickProvider(entry({ name: "a.iso", extension: "iso" })).kind).toBe("archive");
+  });
+
+  it("previews fonts via the font provider (CPE-117)", () => {
+    for (const ext of ["ttf", "otf", "woff", "woff2"]) {
+      expect(pickProvider(entry({ name: `a.${ext}`, extension: ext })).kind).toBe("font");
+    }
   });
 
   it("decodes TIFF/PSD via the decoded-image provider, beating native image (CPE-099/101)", () => {

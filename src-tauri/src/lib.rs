@@ -318,9 +318,61 @@ fn sevenz_entries(path: &str) -> Result<Vec<ArchiveEntry>, String> {
         .collect())
 }
 
+/// List the files in an ISO 9660 disc image (bounded), via iso9660 (CPE-113).
+fn iso_entries(path: &str) -> Result<Vec<ArchiveEntry>, String> {
+    use iso9660::{DirectoryEntry, ISODirectory, ISO9660};
+    let file = fs::File::open(path).map_err(|e| e.to_string())?;
+    let iso = ISO9660::new(file).map_err(|e| e.to_string())?;
+
+    let mut out = Vec::new();
+    let mut stack: Vec<(String, ISODirectory<fs::File>)> = vec![(String::new(), iso.root)];
+    while let Some((prefix, dir)) = stack.pop() {
+        if out.len() >= 2000 {
+            break;
+        }
+        for entry in dir.contents() {
+            let entry = match entry {
+                Ok(e) => e,
+                Err(_) => continue,
+            };
+            match entry {
+                DirectoryEntry::Directory(d) => {
+                    if d.identifier == "." || d.identifier == ".." {
+                        continue;
+                    }
+                    let full = if prefix.is_empty() {
+                        d.identifier.clone()
+                    } else {
+                        format!("{prefix}/{}", d.identifier)
+                    };
+                    out.push(ArchiveEntry {
+                        name: format!("{full}/"),
+                        size: 0,
+                        is_dir: true,
+                    });
+                    stack.push((full, d));
+                }
+                DirectoryEntry::File(f) => {
+                    let full = if prefix.is_empty() {
+                        f.identifier.clone()
+                    } else {
+                        format!("{prefix}/{}", f.identifier)
+                    };
+                    out.push(ArchiveEntry {
+                        name: full,
+                        size: f.size() as u64,
+                        is_dir: false,
+                    });
+                }
+            }
+        }
+    }
+    Ok(out)
+}
+
 /// List an archive's entries without extracting it, for the preview pane.
 /// Dispatches by extension: ZIP family (zip/jar/apk/war/ear/ipa/xpi), TAR,
-/// gzip-compressed TAR (.tar.gz/.tgz), single-file gzip (.gz), and 7-Zip.
+/// gzip-compressed TAR (.tar.gz/.tgz), single-file gzip (.gz), 7-Zip, and ISO.
 /// Reads only the archive directory, so it stays cheap even for large archives.
 #[tauri::command]
 fn read_archive_entries(path: String) -> Result<Vec<ArchiveEntry>, String> {
@@ -335,6 +387,8 @@ fn read_archive_entries(path: String) -> Result<Vec<ArchiveEntry>, String> {
         gzip_single_entry(&path)
     } else if lower.ends_with(".7z") {
         sevenz_entries(&path)
+    } else if lower.ends_with(".iso") {
+        iso_entries(&path)
     } else {
         zip_entries(&path)
     }
@@ -1839,6 +1893,15 @@ mod tests {
         let f = d.join("a.psd");
         fs::write(&f, b"not a real psd").unwrap();
         assert!(read_image_data_url(f.to_string_lossy().to_string()).is_err());
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn read_archive_entries_errors_on_a_non_iso() {
+        let d = scratch("iso_bad");
+        let f = d.join("x.iso");
+        fs::write(&f, vec![0u8; 4096]).unwrap();
+        assert!(read_archive_entries(f.to_string_lossy().to_string()).is_err());
         let _ = fs::remove_dir_all(&d);
     }
 

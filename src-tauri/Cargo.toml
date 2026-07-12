@@ -42,6 +42,7 @@ sevenz-rust = "0.6"
 image = { version = "0.25", default-features = false, features = ["tiff", "png"] }
 psd = "0.3"
 base64 = "0.22"
+iso9660 = "0.1"
 
 # Delete must go to the OS Recycle Bin / Trash, never `fs::remove_*`. A file
 # manager that irreversibly destroys data on a mis-click is dangerous (CPE-030).
