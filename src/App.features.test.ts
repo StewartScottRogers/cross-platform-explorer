@@ -114,7 +114,7 @@ describe("resizable panels (CPE-069)", () => {
     const { container } = render(App);
     await screen.findAllByText("Local Disk (C:)");
 
-    const resizer = screen.getByLabelText("Resize sidebar");
+    const resizer = screen.getByLabelText("Resize navigation pane");
     await fireEvent.mouseDown(resizer, { clientX: 220 });
     await fireEvent.mouseMove(window, { clientX: 300 }); // +80px
     await fireEvent.mouseUp(window);
@@ -129,7 +129,7 @@ describe("resizable panels (CPE-069)", () => {
     const { container } = render(App);
     await screen.findAllByText("Local Disk (C:)");
 
-    const resizer = screen.getByLabelText("Resize sidebar");
+    const resizer = screen.getByLabelText("Resize navigation pane");
     await fireEvent.mouseDown(resizer, { clientX: 220 });
     await fireEvent.mouseMove(window, { clientX: 0 }); // -220px → clamps to 160
     await fireEvent.mouseUp(window);
