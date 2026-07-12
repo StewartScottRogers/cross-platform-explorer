@@ -4,7 +4,7 @@
  * `\r\n` line endings. Not a full RFC-4180 validator — just enough to render a
  * readable table preview.
  */
-export function parseCsv(text: string): string[][] {
+export function parseCsv(text: string, delimiter = ","): string[][] {
   const rows: string[][] = [];
   let row: string[] = [];
   let field = "";
@@ -29,7 +29,7 @@ export function parseCsv(text: string): string[][] {
 
     if (c === '"') {
       inQuotes = true;
-    } else if (c === ",") {
+    } else if (c === delimiter) {
       row.push(field);
       field = "";
     } else if (c === "\n") {

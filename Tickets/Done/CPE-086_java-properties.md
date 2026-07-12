@@ -1,24 +1,24 @@
 ---
-id: CPE-085
-title: Preview/edit support for Dotenv files (.env) files
+id: CPE-086
+title: Preview/edit support for Java .properties files
 type: Feature
-status: Open
+status: Done
 priority: Low
 component: Frontend
 estimate: 1-2h
 created: 2026-07-11
-closed:
+closed: 2026-07-12
 ---
 
 ## Summary
 
-Add a first-class preview provider for Dotenv files (.env) (.env) in the right-side preview pane.
-Key/value list with values masked by default; edit. Editable as raw source text, saved via the write_file_text command (CPE-066).
+Add a first-class preview provider for Java .properties (.properties) in the right-side preview pane.
+Key/value view; edit. Editable as raw source text, saved via the write_file_text command (CPE-066).
 
 ## Acceptance Criteria
 
-- [ ] .env is matched by a dedicated preview provider, registered in the bundled provider registry
-- [ ] Viewer: Key/value list with values masked by default; edit.
+- [ ] .properties is matched by a dedicated preview provider, registered in the bundled provider registry
+- [ ] Viewer: Key/value view; edit.
 - [ ] Editing: Editable as raw source text, saved via the write_file_text command (CPE-066).
 - [ ] Graceful handling of large or corrupt files — fall back to the metadata pane, never hang
 - [ ] In-flight loads are cancelled when the selection changes
@@ -28,3 +28,7 @@ Key/value list with values masked by default; edit. Editable as raw source text,
 
 Part of the [[CPE-059]] preview architecture (bundled provider registry; see [[CPE-060]]).
 Dependency/approach: None. Editing model: source. Editable types reuse [[CPE-066]] write_file_text.
+
+## Resolution
+
+Added .properties as a code extension mapped to the ini grammar; previews highlighted and is editable.

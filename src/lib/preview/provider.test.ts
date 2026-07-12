@@ -45,6 +45,12 @@ describe("pickProvider", () => {
     expect(pickProvider(entry({ name: "a.zip", extension: "zip" })).kind).toBe("archive");
   });
 
+  it("picks the tsv provider and marks it editable (CPE-083)", () => {
+    const p = pickProvider(entry({ name: "a.tsv", extension: "tsv" }));
+    expect(p.kind).toBe("tsv");
+    expect(p.editable).toBe(true);
+  });
+
   it("marks text-based kinds editable and binary/media kinds not (CPE-067)", () => {
     expect(pickProvider(entry({ name: "a.txt", extension: "txt" })).editable).toBe(true);
     expect(pickProvider(entry({ name: "a.md", extension: "md" })).editable).toBe(true);

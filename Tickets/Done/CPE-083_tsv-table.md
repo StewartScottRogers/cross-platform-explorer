@@ -2,12 +2,12 @@
 id: CPE-083
 title: Preview/edit support for Tab-separated values (TSV) files
 type: Feature
-status: Open
+status: Done
 priority: Low
 component: Frontend
 estimate: 1-2h
 created: 2026-07-11
-closed:
+closed: 2026-07-12
 ---
 
 ## Summary
@@ -28,3 +28,7 @@ Table view; edit cells (raw text). Editable (raw or structured), saved via the w
 
 Part of the [[CPE-059]] preview architecture (bundled provider registry; see [[CPE-060]]).
 Dependency/approach: Reuse the CSV parser with a tab delimiter. Editing model: structured. Editable types reuse [[CPE-066]] write_file_text.
+
+## Resolution
+
+Added a dedicated TSV provider that renders a table (CSV parser generalised with a tab delimiter) and is editable as source. Tests in provider/PreviewPane/csv. check + suite green.
