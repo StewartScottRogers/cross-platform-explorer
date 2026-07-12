@@ -1275,6 +1275,39 @@ fn dir_size(path: String) -> Result<u64, String> {
     Ok(walk(p))
 }
 
+/// Read `settings.json` from `dir`, returning `{}` when it's absent or
+/// unreadable so the frontend always starts from a valid document.
+fn read_settings_from(dir: &Path) -> String {
+    fs::read_to_string(dir.join("settings.json")).unwrap_or_else(|_| "{}".to_string())
+}
+
+/// Write the settings document to `settings.json` in `dir`, creating `dir` if
+/// needed.
+fn write_settings_to(dir: &Path, contents: &str) -> Result<(), String> {
+    fs::create_dir_all(dir).map_err(|e| e.to_string())?;
+    fs::write(dir.join("settings.json"), contents.as_bytes()).map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+/// Read the single on-disk settings file (`settings.json` in the app config
+/// dir). Returns `{}` when it doesn't exist yet, so the frontend can start from
+/// defaults on a fresh install (CPE-226).
+#[tauri::command]
+fn read_settings(app: tauri::AppHandle) -> Result<String, String> {
+    use tauri::Manager;
+    let dir = app.path().app_config_dir().map_err(|e| e.to_string())?;
+    Ok(read_settings_from(&dir))
+}
+
+/// Write the single on-disk settings file, creating the config dir if needed
+/// (CPE-226). `contents` is the full settings JSON document.
+#[tauri::command]
+fn write_settings(app: tauri::AppHandle, contents: String) -> Result<(), String> {
+    use tauri::Manager;
+    let dir = app.path().app_config_dir().map_err(|e| e.to_string())?;
+    write_settings_to(&dir, &contents)
+}
+
 /// Return the user's home directory.
 #[tauri::command]
 fn home_dir() -> Result<String, String> {
@@ -1466,6 +1499,8 @@ pub fn run() {
             read_archive_entries,
             read_preview_info,
             read_image_data_url,
+            read_settings,
+            write_settings,
             rename_entry,
             delete_to_trash,
             delete_permanent,
@@ -1923,6 +1958,27 @@ mod tests {
         let out = read_preview_info(f.to_string_lossy().to_string()).unwrap();
         assert!(out.contains("01 02 03"));
         let _ = fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn settings_round_trip_and_default_to_empty_object() {
+        let d = scratch("settings");
+        // Absent file → "{}" default (never errors on a fresh install).
+        assert_eq!(read_settings_from(&d), "{}");
+        // Write then read back the exact document.
+        let doc = r#"{"cpe.view":"list","cpe.showHidden":true}"#;
+        write_settings_to(&d, doc).unwrap();
+        assert_eq!(read_settings_from(&d), doc);
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn write_settings_creates_the_config_dir() {
+        let d = scratch("settings_mkdir").join("nested/config");
+        assert!(!d.exists());
+        write_settings_to(&d, "{}").unwrap();
+        assert!(d.join("settings.json").exists());
+        let _ = fs::remove_dir_all(d.parent().unwrap().parent().unwrap());
     }
 
     #[test]

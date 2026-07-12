@@ -1,6 +1,29 @@
 import { describe, it, expect } from "vitest";
-import { addRecent, togglePin } from "./settings";
+import { addRecent, togglePin, mergeLegacy } from "./settings";
 import type { RecentFile } from "./types";
+
+describe("mergeLegacy (localStorage → settings.json migration, CPE-226)", () => {
+  it("backfills keys the file lacks from legacy localStorage values", () => {
+    const ls: Record<string, string> = {
+      "cpe.view": JSON.stringify("list"),
+      "cpe.sidebarWidth": JSON.stringify(260),
+    };
+    const merged = mergeLegacy({}, (k) => ls[k] ?? null);
+    expect(merged["cpe.view"]).toBe("list");
+    expect(merged["cpe.sidebarWidth"]).toBe(260);
+  });
+
+  it("lets the file win over localStorage for keys it already has", () => {
+    const ls: Record<string, string> = { "cpe.view": JSON.stringify("icons") };
+    const merged = mergeLegacy({ "cpe.view": "details" }, (k) => ls[k] ?? null);
+    expect(merged["cpe.view"]).toBe("details");
+  });
+
+  it("ignores an unparseable legacy value", () => {
+    const merged = mergeLegacy({}, (k) => (k === "cpe.view" ? "not json" : null));
+    expect("cpe.view" in merged).toBe(false);
+  });
+});
 
 const r = (path: string, opened: number): RecentFile => ({
   path,

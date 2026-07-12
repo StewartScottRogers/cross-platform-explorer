@@ -242,6 +242,51 @@ button:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
 .nav-empty { padding: 2px 0 2px 32px; color: var(--text-faint); font-size: 12px; }
 .navigation-pane-sep { height: 1px; background: var(--border); margin: 6px 4px; }
 
+/* A pane column that stacks its Toolbar (fixed) above scrolling content (CPE-226). */
+.pane-col {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
+}
+.pane-col > .navigation-pane,
+.pane-col > .filelist-pane {
+  flex: 1 1 auto;
+  min-height: 0;
+}
+
+/* ---------- Settings popover controls (CPE-226) ---------- */
+.settings-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 5px 4px;
+  font-size: 13px;
+  color: var(--text);
+}
+.settings-row + .settings-row { border-top: 1px solid var(--border); }
+.settings-row select,
+.settings-row input[type="number"] {
+  font-size: 12px;
+  padding: 2px 4px;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius);
+  background: var(--surface);
+  color: var(--text);
+}
+.settings-row input[type="number"] { width: 72px; }
+.settings-btn {
+  width: 100%;
+  padding: 6px 8px;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius);
+  font-size: 12px;
+  color: var(--text);
+}
+.settings-btn:hover { background: var(--surface-alt); }
+
 /* ---------- File List Pane (middle column) ---------- */
 .filelist-pane {
   overflow-y: auto;

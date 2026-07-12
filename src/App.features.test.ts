@@ -121,7 +121,14 @@ describe("resizable panels (CPE-069)", () => {
 
     const main = container.querySelector(".main") as HTMLElement;
     expect(main.getAttribute("style")).toContain("grid-template-columns: 300px 6px 1fr");
-    expect(localStorage.getItem("cpe.sidebarWidth")).toBe("300");
+    // Width is persisted to the single settings file via the backend (CPE-226),
+    // debounced — so wait for the write_settings call carrying the new value.
+    await waitFor(() =>
+      expect(invoke).toHaveBeenCalledWith(
+        "write_settings",
+        expect.objectContaining({ contents: expect.stringContaining('"cpe.sidebarWidth":300') }),
+      ),
+    );
   });
 
   it("clamps the sidebar to its safe minimum width", async () => {
