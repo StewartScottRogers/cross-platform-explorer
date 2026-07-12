@@ -9,6 +9,7 @@
   import NavToolbar from "./lib/components/NavToolbar.svelte";
   import CommandBar from "./lib/components/CommandBar.svelte";
   import Sidebar from "./lib/components/Sidebar.svelte";
+  import Toolbar from "./lib/components/Toolbar.svelte";
   import FileList from "./lib/components/FileList.svelte";
   import HomeView from "./lib/components/HomeView.svelte";
   import DetailsPane from "./lib/components/DetailsPane.svelte";
@@ -788,7 +789,8 @@
     }
   }
 
-  onMount(async () => {
+  /** Pull every preference from the settings store into the reactive UI vars. */
+  function applySettings() {
     view = settings.loadView();
     showHidden = settings.loadShowHidden();
     sortKey = settings.loadSortKey();
@@ -799,6 +801,16 @@
     rightWidth = clampWidth(settings.loadRightWidth(), RIGHT_MIN, RIGHT_MAX);
     pins = settings.loadPins();
     recents = settings.loadRecents();
+  }
+
+  /** App-level Settings gear: restore every preference to its default. */
+  function resetAllSettings() {
+    settings.resetSettings();
+    applySettings();
+  }
+
+  onMount(async () => {
+    applySettings();
 
     try {
       const [p, d, h, canRestore] = await Promise.all([
@@ -820,6 +832,22 @@
 </script>
 
 <svelte:window on:keydown={handleKeydown} />
+
+<Toolbar label="Application">
+  <div class="settings-row">
+    <span>Show details/preview pane</span>
+    <input type="checkbox" bind:checked={showDetails}
+      on:change={() => settings.saveShowDetails(showDetails)} />
+  </div>
+  <div class="settings-row">
+    <span>Show hidden files</span>
+    <input type="checkbox" bind:checked={showHidden}
+      on:change={() => settings.saveShowHidden(showHidden)} />
+  </div>
+  <div class="settings-row">
+    <button class="settings-btn" on:click={resetAllSettings}>Reset all settings to defaults</button>
+  </div>
+</Toolbar>
 
 <TabBar
   tabs={tabList}
@@ -870,16 +898,33 @@
   class:resizing
   style="grid-template-columns: {gridCols}"
 >
-  <Sidebar
-    {places}
-    {drives}
-    {currentPath}
-    {isHome}
-    {draggedPaths}
-    on:navigate={(e) => navigate(e.detail)}
-    on:home={() => navigate(HOME)}
-    on:drop={(e) => dropInto(e.detail.paths, e.detail.dest, e.detail.copy)}
-  />
+  <div class="pane-col">
+    <Toolbar label="Navigation">
+      <div class="settings-row">
+        <span>Pane width</span>
+        <input
+          type="number"
+          min={SIDEBAR_MIN}
+          max={SIDEBAR_MAX}
+          bind:value={sidebarWidth}
+          on:change={() => {
+            sidebarWidth = clampWidth(sidebarWidth, SIDEBAR_MIN, SIDEBAR_MAX);
+            settings.saveSidebarWidth(sidebarWidth);
+          }}
+        />
+      </div>
+    </Toolbar>
+    <Sidebar
+      {places}
+      {drives}
+      {currentPath}
+      {isHome}
+      {draggedPaths}
+      on:navigate={(e) => navigate(e.detail)}
+      on:home={() => navigate(HOME)}
+      on:drop={(e) => dropInto(e.detail.paths, e.detail.dest, e.detail.copy)}
+    />
+  </div>
 
   <!-- svelte-ignore a11y-no-noninteractive-element-interactions -->
   <div
@@ -892,7 +937,39 @@
   ></div>
 
   <!-- File List Pane (middle column) -->
-  <div class="filelist-pane" role="region" aria-label="File list">
+  <div class="pane-col">
+   <Toolbar label="File list">
+    <div class="settings-row">
+      <span>View</span>
+      <select bind:value={view} on:change={() => settings.saveView(view)}>
+        <option value="details">Details</option>
+        <option value="list">List</option>
+        <option value="icons">Icons</option>
+      </select>
+    </div>
+    <div class="settings-row">
+      <span>Sort by</span>
+      <select bind:value={sortKey} on:change={() => settings.saveSortKey(sortKey)}>
+        <option value="name">Name</option>
+        <option value="modified">Modified</option>
+        <option value="type">Type</option>
+        <option value="size">Size</option>
+      </select>
+    </div>
+    <div class="settings-row">
+      <span>Direction</span>
+      <select bind:value={sortDir} on:change={() => settings.saveSortDir(sortDir)}>
+        <option value="asc">Ascending</option>
+        <option value="desc">Descending</option>
+      </select>
+    </div>
+    <div class="settings-row">
+      <span>Show hidden files</span>
+      <input type="checkbox" bind:checked={showHidden}
+        on:change={() => settings.saveShowHidden(showHidden)} />
+    </div>
+   </Toolbar>
+   <div class="filelist-pane" role="region" aria-label="File list">
     {#if isHome}
       <HomeView
         {places}
@@ -932,6 +1009,7 @@
         on:drop={(e) => dropInto(e.detail.paths, e.detail.dest, e.detail.copy)}
       />
     {/if}
+   </div>
   </div>
 
   {#if showDetails}
@@ -946,6 +1024,34 @@
     ></div>
 
     <div class="preview-pane">
+      <Toolbar label="Preview">
+        <div class="settings-row">
+          <span>Default tab</span>
+          <select
+            value={showPreview ? "preview" : "details"}
+            on:change={(e) => {
+              showPreview = e.currentTarget.value === "preview";
+              settings.saveShowPreview(showPreview);
+            }}
+          >
+            <option value="preview">Preview</option>
+            <option value="details">Details</option>
+          </select>
+        </div>
+        <div class="settings-row">
+          <span>Pane width</span>
+          <input
+            type="number"
+            min={RIGHT_MIN}
+            max={RIGHT_MAX}
+            bind:value={rightWidth}
+            on:change={() => {
+              rightWidth = clampWidth(rightWidth, RIGHT_MIN, RIGHT_MAX);
+              settings.saveRightWidth(rightWidth);
+            }}
+          />
+        </div>
+      </Toolbar>
       <div class="preview-pane-toggle" role="tablist" aria-label="Preview or details">
         <button
           role="tab"

@@ -1,13 +1,21 @@
 /**
- * Local persistence for user preferences, pinned folders, and recent files.
+ * User preferences, pinned folders, and recent files — persisted to a SINGLE
+ * on-disk settings file (`settings.json` in the app config dir), read/written
+ * through the read_settings / write_settings backend commands (CPE-226).
  *
- * This is private data: it is stored locally in the app's own storage and is
- * never sent anywhere. Every read is defensive — a corrupt or hand-edited value
- * must degrade to the default rather than crash the app on launch.
+ * The file is the source of truth. At startup `initSettings()` loads it into an
+ * in-memory object; the synchronous load/save helpers below read and mutate
+ * that object, and every save debounces a write back to the file. On first run
+ * the older per-key localStorage values are migrated in, so nothing is lost.
+ *
+ * This is private data: stored locally, never sent anywhere. Every read is
+ * defensive — a corrupt or hand-edited value degrades to its default rather than
+ * crashing the app on launch.
  */
+import { invoke } from "@tauri-apps/api/core";
 import type { ViewMode, SortKey, SortDir, RecentFile } from "./types";
 
-const KEYS = {
+export const KEYS = {
   view: "cpe.view",
   showHidden: "cpe.showHidden",
   sortKey: "cpe.sortKey",
@@ -22,24 +30,83 @@ const KEYS = {
 
 const MAX_RECENTS = 20;
 
-function read<T>(key: string, fallback: T, validate: (v: unknown) => boolean): T {
-  try {
-    const raw = localStorage.getItem(key);
-    if (raw === null) return fallback;
-    const parsed = JSON.parse(raw);
-    return validate(parsed) ? (parsed as T) : fallback;
-  } catch {
-    return fallback;
+/** In-memory settings document, mirrored to settings.json. */
+let state: Record<string, unknown> = {};
+
+// ---- persistence -----------------------------------------------------------
+
+let persistTimer: ReturnType<typeof setTimeout> | undefined;
+
+/** Debounced write of the whole settings document to the backend file. */
+function schedulePersist(): void {
+  if (persistTimer) clearTimeout(persistTimer);
+  persistTimer = setTimeout(() => {
+    void invoke("write_settings", { contents: JSON.stringify(state) }).catch(() => {
+      // A failed settings save must never break the app.
+    });
+  }, 150);
+}
+
+/**
+ * Merge legacy per-key localStorage values into a settings object read from the
+ * file. The file wins; only keys it lacks are backfilled from localStorage.
+ * Pure and injectable so it can be unit-tested without a real localStorage.
+ */
+export function mergeLegacy(
+  fileObj: Record<string, unknown>,
+  get: (k: string) => string | null,
+): Record<string, unknown> {
+  const merged = { ...fileObj };
+  for (const key of Object.values(KEYS)) {
+    if (key in merged) continue;
+    const raw = get(key);
+    if (raw === null) continue;
+    try {
+      merged[key] = JSON.parse(raw);
+    } catch {
+      // ignore an unparseable legacy value
+    }
   }
+  return merged;
+}
+
+/**
+ * Load settings.json into memory, migrating any legacy localStorage prefs, then
+ * persist the merged result. Call once at startup before the UI reads settings.
+ */
+export async function initSettings(): Promise<void> {
+  let fileObj: Record<string, unknown> = {};
+  try {
+    const raw = await invoke<string>("read_settings");
+    const parsed = JSON.parse(raw);
+    if (parsed && typeof parsed === "object") fileObj = parsed as Record<string, unknown>;
+  } catch {
+    // absent/corrupt/no-backend → start from defaults
+  }
+
+  const get = (k: string): string | null => {
+    try {
+      return typeof localStorage !== "undefined" ? localStorage.getItem(k) : null;
+    } catch {
+      return null;
+    }
+  };
+  state = mergeLegacy(fileObj, get);
+
+  // Persist the merged document so the migration is captured on disk.
+  schedulePersist();
+}
+
+// ---- typed accessors -------------------------------------------------------
+
+function read<T>(key: string, fallback: T, validate: (v: unknown) => boolean): T {
+  const v = state[key];
+  return v !== undefined && validate(v) ? (v as T) : fallback;
 }
 
 function write(key: string, value: unknown): void {
-  try {
-    localStorage.setItem(key, JSON.stringify(value));
-  } catch {
-    // Storage can be full or unavailable. A failed preference save must never
-    // break the app, so this is deliberately swallowed.
-  }
+  state[key] = value;
+  schedulePersist();
 }
 
 const isView = (v: unknown): v is ViewMode =>
@@ -64,8 +131,7 @@ const isRecentArray = (v: unknown): v is RecentFile[] =>
 export const loadView = (): ViewMode => read(KEYS.view, "details", isView);
 export const saveView = (v: ViewMode) => write(KEYS.view, v);
 
-export const loadShowHidden = (): boolean =>
-  read(KEYS.showHidden, false, isBool);
+export const loadShowHidden = (): boolean => read(KEYS.showHidden, false, isBool);
 export const saveShowHidden = (v: boolean) => write(KEYS.showHidden, v);
 
 export const loadSortKey = (): SortKey => read(KEYS.sortKey, "name", isSortKey);
@@ -74,12 +140,10 @@ export const saveSortKey = (v: SortKey) => write(KEYS.sortKey, v);
 export const loadSortDir = (): SortDir => read(KEYS.sortDir, "asc", isSortDir);
 export const saveSortDir = (v: SortDir) => write(KEYS.sortDir, v);
 
-export const loadShowDetails = (): boolean =>
-  read(KEYS.showDetails, true, isBool);
+export const loadShowDetails = (): boolean => read(KEYS.showDetails, true, isBool);
 export const saveShowDetails = (v: boolean) => write(KEYS.showDetails, v);
 
-export const loadShowPreview = (): boolean =>
-  read(KEYS.showPreview, true, isBool);
+export const loadShowPreview = (): boolean => read(KEYS.showPreview, true, isBool);
 export const saveShowPreview = (v: boolean) => write(KEYS.showPreview, v);
 
 const isPosNum = (v: unknown): v is number =>
@@ -92,9 +156,14 @@ export const saveRightWidth = (v: number) => write(KEYS.rightWidth, v);
 export const loadPins = (): string[] => read(KEYS.pins, [], isStringArray);
 export const savePins = (v: string[]) => write(KEYS.pins, v);
 
-export const loadRecents = (): RecentFile[] =>
-  read(KEYS.recents, [], isRecentArray);
+export const loadRecents = (): RecentFile[] => read(KEYS.recents, [], isRecentArray);
 export const saveRecents = (v: RecentFile[]) => write(KEYS.recents, v);
+
+/** Reset every stored preference to its default (used by the app Settings gear). */
+export function resetSettings(): void {
+  state = {};
+  schedulePersist();
+}
 
 /**
  * Add a file to the recent list: most recent first, de-duplicated by path,
