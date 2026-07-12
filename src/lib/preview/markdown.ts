@@ -1,15 +1,16 @@
 /**
- * Render markdown to sanitized HTML for the preview pane.
+ * Render markdown to sanitized HTML for the preview pane — LAZY.
  *
- * A previewed `.md` file is untrusted content, so its rendered HTML MUST be
- * sanitized: `marked` turns markdown into HTML, then `DOMPurify` strips
- * `<script>`, inline event handlers, `javascript:` URLs, etc. The result is safe
- * to inject with `{@html}`. Everything is bundled — no network requests.
+ * `marked` and `DOMPurify` are dynamically imported the first time a markdown
+ * file is previewed, so they are code-split out of the initial bundle. A
+ * previewed .md file is untrusted, so its HTML is always sanitized (script,
+ * inline handlers, javascript: URLs stripped) before it is injected.
  */
-import { marked } from "marked";
-import DOMPurify from "dompurify";
-
-export function renderMarkdown(src: string): string {
+export async function renderMarkdown(src: string): Promise<string> {
+  const [{ marked }, DOMPurify] = await Promise.all([
+    import("marked"),
+    import("dompurify"),
+  ]);
   const html = marked.parse(src, { async: false }) as string;
-  return DOMPurify.sanitize(html);
+  return DOMPurify.default.sanitize(html);
 }

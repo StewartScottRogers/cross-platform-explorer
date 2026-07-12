@@ -1,93 +1,119 @@
 /**
- * Syntax highlighting for code previews. Starts from the highlight.js "common"
- * bundle (~36 popular languages) and registers additional grammars for the many
- * languages we preview. Output is HTML with hljs-* token spans; highlight.js
- * HTML-escapes the source, so the result is safe to inject with {@html}.
+ * Syntax highlighting for code previews, with LAZY-LOADED grammars.
+ *
+ * We start from highlight.js core (no languages) and dynamically import each
+ * grammar the first time a file needing it is previewed. Vite splits every
+ * import() below into its own chunk, so the initial bundle carries none of the
+ * ~70 grammars — they load on demand. Highlighting is therefore async: callers
+ * `await ensureLanguageForName(name)` and then call `highlightForFile`, which
+ * escapes-plain until the grammar is registered.
  */
-import hljs from "highlight.js/lib/common";
-import scala from "highlight.js/lib/languages/scala";
-import julia from "highlight.js/lib/languages/julia";
-import dart from "highlight.js/lib/languages/dart";
-import haskell from "highlight.js/lib/languages/haskell";
-import elixir from "highlight.js/lib/languages/elixir";
-import erlang from "highlight.js/lib/languages/erlang";
-import clojure from "highlight.js/lib/languages/clojure";
-import fsharp from "highlight.js/lib/languages/fsharp";
-import ocaml from "highlight.js/lib/languages/ocaml";
-import groovy from "highlight.js/lib/languages/groovy";
-import fortran from "highlight.js/lib/languages/fortran";
-import delphi from "highlight.js/lib/languages/delphi";
-import ada from "highlight.js/lib/languages/ada";
-import x86asm from "highlight.js/lib/languages/x86asm";
-import nim from "highlight.js/lib/languages/nim";
-import crystal from "highlight.js/lib/languages/crystal";
-import dlang from "highlight.js/lib/languages/d";
-import scheme from "highlight.js/lib/languages/scheme";
-import lisp from "highlight.js/lib/languages/lisp";
-import tcl from "highlight.js/lib/languages/tcl";
-import verilog from "highlight.js/lib/languages/verilog";
-import vhdl from "highlight.js/lib/languages/vhdl";
-import powershell from "highlight.js/lib/languages/powershell";
-import awk from "highlight.js/lib/languages/awk";
-import cmake from "highlight.js/lib/languages/cmake";
-import dockerfile from "highlight.js/lib/languages/dockerfile";
-import protobuf from "highlight.js/lib/languages/protobuf";
-import llvm from "highlight.js/lib/languages/llvm";
-import prolog from "highlight.js/lib/languages/prolog";
-import elm from "highlight.js/lib/languages/elm";
-import reasonml from "highlight.js/lib/languages/reasonml";
-import haxe from "highlight.js/lib/languages/haxe";
-import nix from "highlight.js/lib/languages/nix";
-import stylus from "highlight.js/lib/languages/stylus";
-import handlebars from "highlight.js/lib/languages/handlebars";
-import twig from "highlight.js/lib/languages/twig";
-import nginx from "highlight.js/lib/languages/nginx";
+import hljs from "highlight.js/lib/core";
 
-const EXTRA: Record<string, unknown> = {
-  scala, julia, dart, haskell, elixir, erlang, clojure, fsharp, ocaml, groovy,
-  fortran, delphi, ada, x86asm, nim, crystal, d: dlang, scheme, lisp, tcl,
-  verilog, vhdl, powershell, awk, cmake, dockerfile, protobuf, llvm, prolog,
-  elm, reasonml, haxe, nix, stylus, handlebars, twig, nginx,
+/* eslint-disable @typescript-eslint/no-explicit-any */
+type Loader = () => Promise<{ default: any }>;
+
+/** Language name → dynamic import of its grammar. One Vite chunk each. */
+const LOADERS: Record<string, Loader> = {
+  javascript: () => import("highlight.js/lib/languages/javascript"),
+  typescript: () => import("highlight.js/lib/languages/typescript"),
+  json: () => import("highlight.js/lib/languages/json"),
+  xml: () => import("highlight.js/lib/languages/xml"),
+  css: () => import("highlight.js/lib/languages/css"),
+  scss: () => import("highlight.js/lib/languages/scss"),
+  less: () => import("highlight.js/lib/languages/less"),
+  stylus: () => import("highlight.js/lib/languages/stylus"),
+  handlebars: () => import("highlight.js/lib/languages/handlebars"),
+  twig: () => import("highlight.js/lib/languages/twig"),
+  markdown: () => import("highlight.js/lib/languages/markdown"),
+  rust: () => import("highlight.js/lib/languages/rust"),
+  go: () => import("highlight.js/lib/languages/go"),
+  c: () => import("highlight.js/lib/languages/c"),
+  cpp: () => import("highlight.js/lib/languages/cpp"),
+  csharp: () => import("highlight.js/lib/languages/csharp"),
+  objectivec: () => import("highlight.js/lib/languages/objectivec"),
+  java: () => import("highlight.js/lib/languages/java"),
+  kotlin: () => import("highlight.js/lib/languages/kotlin"),
+  swift: () => import("highlight.js/lib/languages/swift"),
+  vbnet: () => import("highlight.js/lib/languages/vbnet"),
+  d: () => import("highlight.js/lib/languages/d"),
+  nim: () => import("highlight.js/lib/languages/nim"),
+  crystal: () => import("highlight.js/lib/languages/crystal"),
+  scala: () => import("highlight.js/lib/languages/scala"),
+  dart: () => import("highlight.js/lib/languages/dart"),
+  haxe: () => import("highlight.js/lib/languages/haxe"),
+  nix: () => import("highlight.js/lib/languages/nix"),
+  haskell: () => import("highlight.js/lib/languages/haskell"),
+  elixir: () => import("highlight.js/lib/languages/elixir"),
+  erlang: () => import("highlight.js/lib/languages/erlang"),
+  clojure: () => import("highlight.js/lib/languages/clojure"),
+  fsharp: () => import("highlight.js/lib/languages/fsharp"),
+  ocaml: () => import("highlight.js/lib/languages/ocaml"),
+  elm: () => import("highlight.js/lib/languages/elm"),
+  reasonml: () => import("highlight.js/lib/languages/reasonml"),
+  scheme: () => import("highlight.js/lib/languages/scheme"),
+  lisp: () => import("highlight.js/lib/languages/lisp"),
+  julia: () => import("highlight.js/lib/languages/julia"),
+  python: () => import("highlight.js/lib/languages/python"),
+  ruby: () => import("highlight.js/lib/languages/ruby"),
+  php: () => import("highlight.js/lib/languages/php"),
+  perl: () => import("highlight.js/lib/languages/perl"),
+  lua: () => import("highlight.js/lib/languages/lua"),
+  r: () => import("highlight.js/lib/languages/r"),
+  bash: () => import("highlight.js/lib/languages/bash"),
+  tcl: () => import("highlight.js/lib/languages/tcl"),
+  awk: () => import("highlight.js/lib/languages/awk"),
+  groovy: () => import("highlight.js/lib/languages/groovy"),
+  powershell: () => import("highlight.js/lib/languages/powershell"),
+  verilog: () => import("highlight.js/lib/languages/verilog"),
+  vhdl: () => import("highlight.js/lib/languages/vhdl"),
+  x86asm: () => import("highlight.js/lib/languages/x86asm"),
+  llvm: () => import("highlight.js/lib/languages/llvm"),
+  wasm: () => import("highlight.js/lib/languages/wasm"),
+  fortran: () => import("highlight.js/lib/languages/fortran"),
+  delphi: () => import("highlight.js/lib/languages/delphi"),
+  ada: () => import("highlight.js/lib/languages/ada"),
+  prolog: () => import("highlight.js/lib/languages/prolog"),
+  yaml: () => import("highlight.js/lib/languages/yaml"),
+  ini: () => import("highlight.js/lib/languages/ini"),
+  sql: () => import("highlight.js/lib/languages/sql"),
+  graphql: () => import("highlight.js/lib/languages/graphql"),
+  protobuf: () => import("highlight.js/lib/languages/protobuf"),
+  cmake: () => import("highlight.js/lib/languages/cmake"),
+  nginx: () => import("highlight.js/lib/languages/nginx"),
+  makefile: () => import("highlight.js/lib/languages/makefile"),
+  diff: () => import("highlight.js/lib/languages/diff"),
+  dockerfile: () => import("highlight.js/lib/languages/dockerfile"),
 };
-for (const [name, lang] of Object.entries(EXTRA)) {
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  hljs.registerLanguage(name, lang as any);
-}
+/* eslint-enable @typescript-eslint/no-explicit-any */
 
 const LANG_BY_EXT: Record<string, string> = {
-  // JS/TS/web
   js: "javascript", jsx: "javascript", mjs: "javascript", cjs: "javascript",
   ts: "typescript", tsx: "typescript",
   json: "json", json5: "json", jsonc: "json",
   css: "css", scss: "scss", sass: "scss", less: "less", styl: "stylus",
   html: "xml", xml: "xml", svelte: "xml", xsl: "xml", xslt: "xml",
   hbs: "handlebars", twig: "twig",
-  // systems / general
   rs: "rust", ron: "rust", go: "go", c: "c",
   h: "cpp", hpp: "cpp", hh: "cpp", cpp: "cpp", cc: "cpp", cxx: "cpp",
   cs: "csharp", m: "objectivec", mm: "objectivec",
   java: "java", kt: "kotlin", kts: "kotlin", swift: "swift",
   vb: "vbnet", d: "d", nim: "nim", cr: "crystal",
   scala: "scala", dart: "dart", hx: "haxe", nix: "nix",
-  // functional
   hs: "haskell", ex: "elixir", exs: "elixir", erl: "erlang",
   clj: "clojure", cljs: "clojure", edn: "clojure",
   fs: "fsharp", fsx: "fsharp", ml: "ocaml", mli: "ocaml",
   elm: "elm", re: "reasonml", rei: "reasonml",
   rkt: "scheme", scm: "scheme", ss: "scheme", lisp: "lisp", lsp: "lisp",
   jl: "julia",
-  // scripting
   py: "python", rb: "ruby", php: "php", pl: "perl", pm: "perl",
   lua: "lua", r: "r", sh: "bash", bash: "bash", tcl: "tcl", awk: "awk",
   groovy: "groovy", gradle: "groovy",
   ps1: "powershell", psm1: "powershell", psd1: "powershell",
-  // hardware / low-level
   v: "verilog", sv: "verilog", vhd: "vhdl", vhdl: "vhdl",
   asm: "x86asm", s: "x86asm", ll: "llvm", wat: "wasm",
-  // classic
   f90: "fortran", f95: "fortran", pas: "delphi", adb: "ada", ads: "ada",
   prolog: "prolog", pro: "prolog",
-  // data / config / build / misc
   yml: "yaml", yaml: "yaml", toml: "ini", ini: "ini", cfg: "ini",
   editorconfig: "ini", properties: "ini", ndjson: "json", jsonl: "json",
   sql: "sql", graphql: "graphql", gql: "graphql",
@@ -96,7 +122,6 @@ const LANG_BY_EXT: Record<string, string> = {
   md: "markdown", markdown: "markdown",
 };
 
-/** Well-known code files whose language is keyed by full name, not extension. */
 const LANG_BY_FILENAME: Record<string, string> = {
   dockerfile: "dockerfile", containerfile: "dockerfile",
   makefile: "makefile", gnumakefile: "makefile",
@@ -107,22 +132,34 @@ const LANG_BY_FILENAME: Record<string, string> = {
   ".bashrc": "bash", ".zshrc": "bash", ".bash_profile": "bash", ".profile": "bash",
 };
 
-/** The highlight.js language for an extension, or null if we don't highlight it. */
+/** The language for an extension if we have a loader for it, else null. */
 export function languageForExt(ext: string): string | null {
   const lang = LANG_BY_EXT[ext];
-  return lang && hljs.getLanguage(lang) ? lang : null;
+  return lang && LOADERS[lang] ? lang : null;
 }
 
-/**
- * Resolve a highlight language from a full file name: special-cased names
- * (Dockerfile, Makefile, dot-config files) first, then the extension.
- */
+/** Resolve a language from a full file name (special names first, then ext). */
 export function languageForName(name: string): string | null {
   const lower = name.toLowerCase();
   const byName = LANG_BY_FILENAME[lower];
-  if (byName && hljs.getLanguage(byName)) return byName;
+  if (byName && LOADERS[byName]) return byName;
   const ext = lower.includes(".") ? lower.slice(lower.lastIndexOf(".") + 1) : "";
   return languageForExt(ext);
+}
+
+/** Register a language grammar on demand (idempotent). */
+export async function ensureLanguage(lang: string): Promise<void> {
+  if (hljs.getLanguage(lang) || !LOADERS[lang]) return;
+  const mod = await LOADERS[lang]();
+  if (!hljs.getLanguage(lang)) hljs.registerLanguage(lang, mod.default);
+}
+
+/** Ensure the grammar for a file name is loaded; resolves true if one applies. */
+export async function ensureLanguageForName(name: string): Promise<boolean> {
+  const lang = languageForName(name);
+  if (!lang) return false;
+  await ensureLanguage(lang);
+  return true;
 }
 
 function escapeHtml(s: string): string {
@@ -130,25 +167,13 @@ function escapeHtml(s: string): string {
 }
 
 /**
- * Highlight code for the given file extension, returning HTML safe for {@html}.
- * Falls back to escaped plain text when the extension has no mapped/registered
- * language, so callers can always inject the result.
- */
-export function highlightCode(code: string, ext: string): string {
-  const lang = languageForExt(ext);
-  if (lang) {
-    return hljs.highlight(code, { language: lang }).value;
-  }
-  return escapeHtml(code);
-}
-
-/**
- * Highlight code resolving the language from the full file name (handles
- * Dockerfile/Makefile/dot-config files as well as by-extension). Safe for {@html}.
+ * Highlight code for the given file name, returning HTML safe for {@html}.
+ * Only highlights if the grammar is already registered (call
+ * ensureLanguageForName first); otherwise returns escaped plain text.
  */
 export function highlightForFile(code: string, name: string): string {
   const lang = languageForName(name);
-  if (lang) {
+  if (lang && hljs.getLanguage(lang)) {
     return hljs.highlight(code, { language: lang }).value;
   }
   return escapeHtml(code);
