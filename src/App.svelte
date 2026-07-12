@@ -470,6 +470,12 @@
     return invoke<ArchiveEntry[]>("read_archive_entries", { path });
   }
 
+  /** Save edited text back to a file, then refresh so size/date update. */
+  async function savePreviewText(path: string, contents: string): Promise<void> {
+    await invoke("write_file_text", { path, contents });
+    await loadPath(currentPath);
+  }
+
   /** Copy the selection's full path(s) to the OS clipboard, quoted, one per
       line — Explorer's "Copy as path". */
   async function doCopyPath() {
@@ -882,6 +888,7 @@
           assetUrl={convertFileSrc}
           loadText={loadPreviewText}
           loadEntries={loadArchiveEntries}
+          saveText={savePreviewText}
         >
           <DetailsPane selected={selectedEntries} {folderName} {itemCount} />
         </PreviewPane>

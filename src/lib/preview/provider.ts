@@ -35,6 +35,8 @@ export interface PreviewProvider {
   label: string;
   /** How the pane should render this preview. */
   kind: PreviewKind;
+  /** Whether this file type can be edited as raw text (text/md/json/csv). */
+  editable: boolean;
   /** Whether this provider can preview the given entry. */
   canPreview(entry: DirEntry): boolean;
 }
@@ -51,24 +53,28 @@ export const providers: PreviewProvider[] = [
     id: "image",
     label: "Image",
     kind: "image",
+    editable: false,
     canPreview: (e) => !e.is_dir && categoryOf(e) === "image",
   },
   {
     id: "audio",
     label: "Audio",
     kind: "audio",
+    editable: false,
     canPreview: (e) => !e.is_dir && categoryOf(e) === "audio",
   },
   {
     id: "video",
     label: "Video",
     kind: "video",
+    editable: false,
     canPreview: (e) => !e.is_dir && categoryOf(e) === "video",
   },
   {
     id: "pdf",
     label: "PDF",
     kind: "pdf",
+    editable: false,
     canPreview: (e) => !e.is_dir && categoryOf(e) === "pdf",
   },
   // JSON and CSV are declared before the generic text provider because their
@@ -77,30 +83,35 @@ export const providers: PreviewProvider[] = [
     id: "json",
     label: "JSON",
     kind: "json",
+    editable: true,
     canPreview: (e) => !e.is_dir && e.extension === "json",
   },
   {
     id: "csv",
     label: "CSV",
     kind: "csv",
+    editable: true,
     canPreview: (e) => !e.is_dir && e.extension === "csv",
   },
   {
     id: "archive",
     label: "Archive",
     kind: "archive",
+    editable: false,
     canPreview: (e) => !e.is_dir && e.extension === "zip",
   },
   {
     id: "markdown",
     label: "Markdown",
     kind: "markdown",
+    editable: true,
     canPreview: (e) => !e.is_dir && MARKDOWN_EXT.has(e.extension),
   },
   {
     id: "text",
     label: "Text",
     kind: "text",
+    editable: true,
     canPreview: (e) =>
       !e.is_dir && (categoryOf(e) === "text" || categoryOf(e) === "code"),
   },
@@ -111,6 +122,7 @@ export const FALLBACK: PreviewProvider = {
   id: "none",
   label: "Details",
   kind: "none",
+  editable: false,
   canPreview: () => true,
 };
 

@@ -45,6 +45,17 @@ describe("pickProvider", () => {
     expect(pickProvider(entry({ name: "a.zip", extension: "zip" })).kind).toBe("archive");
   });
 
+  it("marks text-based kinds editable and binary/media kinds not (CPE-067)", () => {
+    expect(pickProvider(entry({ name: "a.txt", extension: "txt" })).editable).toBe(true);
+    expect(pickProvider(entry({ name: "a.md", extension: "md" })).editable).toBe(true);
+    expect(pickProvider(entry({ name: "a.json", extension: "json" })).editable).toBe(true);
+    expect(pickProvider(entry({ name: "a.csv", extension: "csv" })).editable).toBe(true);
+    expect(pickProvider(entry({ name: "a.png", extension: "png" })).editable).toBe(false);
+    expect(pickProvider(entry({ name: "a.mp3", extension: "mp3" })).editable).toBe(false);
+    expect(pickProvider(entry({ name: "a.zip", extension: "zip" })).editable).toBe(false);
+    expect(pickProvider(entry({ name: "dir", is_dir: true })).editable).toBe(false);
+  });
+
   it("falls back to metadata for folders, nothing, and unknown types", () => {
     expect(pickProvider(entry({ name: "dir", is_dir: true, extension: "" })).kind).toBe("none");
     expect(pickProvider(null).kind).toBe("none");
