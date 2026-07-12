@@ -181,7 +181,7 @@ describe("preview pane (CPE-061)", () => {
     await fireEvent.click(screen.getByRole("tab", { name: "Details" }));
 
     await waitFor(() => {
-      expect(container.querySelector(".rightpane .details")).toBeTruthy();
+      expect(container.querySelector(".preview-pane .details")).toBeTruthy();
       expect(container.querySelector(".preview-text")).toBeNull();
     });
   });

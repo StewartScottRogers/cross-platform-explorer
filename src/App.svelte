@@ -933,8 +933,8 @@
       on:mousedown={(e) => startResize("right", e)}
     ></div>
 
-    <div class="rightpane">
-      <div class="rightpane-toggle" role="tablist" aria-label="Preview or details">
+    <div class="preview-pane">
+      <div class="preview-pane-toggle" role="tablist" aria-label="Preview or details">
         <button
           role="tab"
           class:active={showPreview}
