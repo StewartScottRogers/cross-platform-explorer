@@ -20,6 +20,7 @@ export type PreviewKind =
   | "archive"
   | "markdown"
   | "text"
+  | "info"
   | "none";
 
 /** One entry inside an archive (mirrors the Rust `ArchiveEntry`). */
@@ -48,6 +49,17 @@ const MARKDOWN_EXT = new Set(["md", "markdown"]);
 const ARCHIVE_EXT = new Set([
   "zip", "jar", "apk", "war", "ear", "ipa", "xpi",
   "tar", "tgz", "gz",
+]);
+
+/**
+ * Binary formats previewed as a read-only text summary produced by the
+ * read_preview_info backend (hex dump / PE headers / MIDI / wasm / torrent).
+ * CPE-210/214/215/216/218.
+ */
+const INFO_EXT = new Set([
+  "exe", "dll", "sys", "efi", "ocx", "scr", "cpl", // PE headers
+  "wasm", "torrent", "mid", "midi",
+  "bin", "dat", // generic binary -> hex dump
 ]);
 
 /**
@@ -115,6 +127,13 @@ export const providers: PreviewProvider[] = [
     // zip family (jar/apk/war/… are zips), plus tar and gzip — all listed by the
     // read_archive_entries backend (CPE-064/109/112/217).
     canPreview: (e) => !e.is_dir && ARCHIVE_EXT.has(e.extension),
+  },
+  {
+    id: "info",
+    label: "Info",
+    kind: "info",
+    editable: false,
+    canPreview: (e) => !e.is_dir && INFO_EXT.has(e.extension),
   },
   {
     id: "markdown",

@@ -90,6 +90,14 @@ describe("pickProvider", () => {
     expect(nb.editable).toBe(true);
   });
 
+  it("previews binary formats as read-only info text (CPE-210/214/215/216/218)", () => {
+    for (const ext of ["exe", "dll", "wasm", "torrent", "mid", "midi", "bin", "dat"]) {
+      const p = pickProvider(entry({ name: `a.${ext}`, extension: ext }));
+      expect(p.kind).toBe("info");
+      expect(p.editable).toBe(false);
+    }
+  });
+
   it("falls back to metadata for folders, nothing, and unknown types", () => {
     expect(pickProvider(entry({ name: "dir", is_dir: true, extension: "" })).kind).toBe("none");
     expect(pickProvider(null).kind).toBe("none");

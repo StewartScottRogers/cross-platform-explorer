@@ -28,6 +28,14 @@ zip = "2"
 tar = "0.4"
 flate2 = "1"
 
+# Structured binary previews (CPE-210/214/215/216/218). All pure-Rust, no system
+# libs: goblin (PE headers), midly (MIDI), wasmprinter (wasm->wat), serde_bencode
+# (torrent metadata).
+goblin = "0.8"
+midly = "0.5"
+wasmprinter = "0.2"
+serde_bencode = "0.2"
+
 # Delete must go to the OS Recycle Bin / Trash, never `fs::remove_*`. A file
 # manager that irreversibly destroys data on a mis-click is dangerous (CPE-030).
 trash = "5"
