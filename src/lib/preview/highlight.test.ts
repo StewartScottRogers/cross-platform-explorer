@@ -32,6 +32,13 @@ describe("languageForExt", () => {
     expect(languageForExt("json5")).toBe("json");
     expect(languageForExt("gradle")).toBe("groovy");
   });
+  it("maps XML/JSON data formats to their grammars (CPE-094/206/207/208/211)", () => {
+    expect(languageForExt("geojson")).toBe("json");
+    expect(languageForExt("gpx")).toBe("xml");
+    expect(languageForExt("kml")).toBe("xml");
+    expect(languageForExt("musicxml")).toBe("xml");
+    expect(languageForExt("plist")).toBe("xml");
+  });
 });
 
 describe("languageForName", () => {

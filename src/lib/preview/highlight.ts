@@ -120,6 +120,8 @@ const LANG_BY_EXT: Record<string, string> = {
   proto: "protobuf", cmake: "cmake", nginx: "nginx",
   mk: "makefile", diff: "diff", patch: "diff",
   md: "markdown", markdown: "markdown",
+  // XML/JSON-derived data formats reuse the xml/json grammars (CPE-094/206/207/208/211)
+  geojson: "json", gpx: "xml", kml: "xml", musicxml: "xml", plist: "xml",
 };
 
 const LANG_BY_FILENAME: Record<string, string> = {
