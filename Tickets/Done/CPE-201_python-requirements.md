@@ -2,12 +2,12 @@
 id: CPE-201
 title: Preview/edit support for Python requirements files
 type: Feature
-status: Open
+status: Done
 priority: Low
 component: Frontend
 estimate: 30m
 created: 2026-07-11
-closed:
+closed: 2026-07-12
 ---
 
 ## Summary
@@ -28,3 +28,7 @@ Add a preview provider for Python requirements (requirements.txt) in the right-s
 
 Part of the [[CPE-059]] preview architecture. Approach: plain highlight. Editing model: source.
 Syntax highlighting builds on [[CPE-065]]; editable types reuse [[CPE-066]] write_file_text.
+
+## Resolution
+
+Already satisfied: requirements.txt is a .txt file, handled by the text provider (editable plain text). No dedicated grammar needed. Closed as covered.

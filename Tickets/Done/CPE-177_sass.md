@@ -2,12 +2,12 @@
 id: CPE-177
 title: Preview/edit support for Sass files
 type: Feature
-status: Open
+status: Done
 priority: Low
 component: Frontend
 estimate: 30m
 created: 2026-07-11
-closed:
+closed: 2026-07-12
 ---
 
 ## Summary
@@ -28,3 +28,7 @@ Add a preview provider for Sass (.sass) in the right-side preview pane. Highligh
 
 Part of the [[CPE-059]] preview architecture. Approach: highlight.js grammar: scss. Editing model: source.
 Syntax highlighting builds on [[CPE-065]]; editable types reuse [[CPE-066]] write_file_text.
+
+## Resolution
+
+Mapped .sass to the scss highlight grammar and added it as a code extension, so Sass files preview highlighted and are editable. check + suite green.

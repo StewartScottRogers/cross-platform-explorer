@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { highlightCode, languageForExt } from "./highlight";
+import { highlightCode, languageForExt, languageForName } from "./highlight";
 
 describe("languageForExt", () => {
   it("maps known code extensions", () => {
@@ -42,6 +42,15 @@ describe("highlightCode", () => {
     expect(highlightCode("main = putStrLn \"hi\"", "hs")).toContain("hljs-");
     expect(highlightCode("defmodule A do end", "ex")).toContain("hljs-");
     expect(highlightCode('let msg = "hi"; in msg', "nix")).toContain("hljs-");
+  });
+
+  it("resolves language from special filenames, then extension (CPE-164/166/200)", () => {
+    expect(languageForName("Dockerfile")).toBe("dockerfile");
+    expect(languageForName("Makefile")).toBe("makefile");
+    expect(languageForName("CMakeLists.txt")).toBe("cmake");
+    expect(languageForName(".gitconfig")).toBe("ini");
+    expect(languageForName("app.go")).toBe("go"); // falls through to extension
+    expect(languageForName("notes.txt")).toBeNull();
   });
 
   it("maps extensions that share a registered grammar", () => {
