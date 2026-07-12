@@ -19,6 +19,8 @@
   export let saveText: (path: string, contents: string) => Promise<void> = async () => {};
   /** Read a read-only text summary of a binary file (a backend command in the app). */
   export let loadInfo: (path: string) => Promise<string> = async () => "";
+  /** Decode a non-native image to a data: URL (a backend command in the app). */
+  export let loadImageData: (path: string) => Promise<string> = async () => "";
 
   /** Cap the number of CSV rows rendered so a huge sheet can't lock the pane. */
   const CSV_ROW_CAP = 200;
@@ -43,12 +45,17 @@
   let infoState: "idle" | "loading" | "error" = "idle";
   let infoReqId = 0;
 
+  let imgUrl = "";
+  let imgState: "idle" | "loading" | "error" = "idle";
+  let imgReqId = 0;
+
   // Load text whenever the selected entry (for a text-based provider) changes.
   // A monotonically increasing request id discards any load superseded by a
   // newer selection.
   $: if (entry && needsText) loadTextFor(entry);
   $: if (entry && provider.kind === "archive") loadEntriesFor(entry);
   $: if (entry && provider.kind === "info") loadInfoFor(entry);
+  $: if (entry && provider.kind === "decoded-image") loadImageDataFor(entry);
 
   async function loadInfoFor(e: DirEntry) {
     const mine = ++infoReqId;
@@ -61,6 +68,20 @@
     } catch {
       if (mine !== infoReqId) return;
       infoState = "error";
+    }
+  }
+
+  async function loadImageDataFor(e: DirEntry) {
+    const mine = ++imgReqId;
+    imgState = "loading";
+    try {
+      const url = await loadImageData(e.path);
+      if (mine !== imgReqId) return;
+      imgUrl = url;
+      imgState = "idle";
+    } catch {
+      if (mine !== imgReqId) return;
+      imgState = "error";
     }
   }
 
@@ -283,6 +304,14 @@
 <aside class="preview" on:contextmenu={openTextMenu}>
   {#if provider.kind === "image" && entry}
     <img class="preview-img" src={assetUrl(entry.path)} alt={entry.name} />
+  {:else if provider.kind === "decoded-image" && entry}
+    {#if imgState === "loading"}
+      <p class="preview-note">Loading preview…</p>
+    {:else if imgState === "error"}
+      <p class="preview-note">Can't preview this image.</p>
+    {:else}
+      <img class="preview-img" src={imgUrl} alt={entry.name} />
+    {/if}
   {:else if provider.kind === "audio" && entry}
     <!-- svelte-ignore a11y-media-has-caption -->
     <audio class="preview-media" controls src={assetUrl(entry.path)}></audio>

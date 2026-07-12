@@ -302,10 +302,26 @@ fn gzip_single_entry(path: &str) -> Result<Vec<ArchiveEntry>, String> {
     }])
 }
 
+/// List the entries of a 7-Zip archive via sevenz-rust (CPE-110).
+fn sevenz_entries(path: &str) -> Result<Vec<ArchiveEntry>, String> {
+    let mut file = fs::File::open(path).map_err(|e| e.to_string())?;
+    let len = file.metadata().map_err(|e| e.to_string())?.len();
+    let archive = sevenz_rust::Archive::read(&mut file, len, &[]).map_err(|e| e.to_string())?;
+    Ok(archive
+        .files
+        .iter()
+        .map(|f| ArchiveEntry {
+            name: f.name().to_string(),
+            size: f.size(),
+            is_dir: f.is_directory(),
+        })
+        .collect())
+}
+
 /// List an archive's entries without extracting it, for the preview pane.
 /// Dispatches by extension: ZIP family (zip/jar/apk/war/ear/ipa/xpi), TAR,
-/// gzip-compressed TAR (.tar.gz/.tgz), and single-file gzip (.gz). Reads only
-/// the archive directory, so it stays cheap even for large archives.
+/// gzip-compressed TAR (.tar.gz/.tgz), single-file gzip (.gz), and 7-Zip.
+/// Reads only the archive directory, so it stays cheap even for large archives.
 #[tauri::command]
 fn read_archive_entries(path: String) -> Result<Vec<ArchiveEntry>, String> {
     let lower = path.to_lowercase();
@@ -317,6 +333,8 @@ fn read_archive_entries(path: String) -> Result<Vec<ArchiveEntry>, String> {
         tar_entries(flate2::read::GzDecoder::new(file))
     } else if lower.ends_with(".gz") {
         gzip_single_entry(&path)
+    } else if lower.ends_with(".7z") {
+        sevenz_entries(&path)
     } else {
         zip_entries(&path)
     }
@@ -800,6 +818,29 @@ fn spreadsheet_info(path: &str) -> Result<String, String> {
     Ok(out)
 }
 
+/// Read-only schema summary of a Parquet file via the parquet crate's footer
+/// metadata — no full column scan (CPE-089).
+fn parquet_info(path: &str) -> Result<String, String> {
+    use parquet::file::reader::{FileReader, SerializedFileReader};
+    let file = fs::File::open(path).map_err(|e| e.to_string())?;
+    let reader = SerializedFileReader::new(file).map_err(|e| e.to_string())?;
+    let meta = reader.metadata();
+    let fmeta = meta.file_metadata();
+    let schema = fmeta.schema_descr();
+    let mut out = format!(
+        "Parquet — {} rows, {} row group(s)\nCreated by: {}\n\nColumns ({}):\n",
+        fmeta.num_rows(),
+        meta.num_row_groups(),
+        fmeta.created_by().unwrap_or("(unknown)"),
+        schema.num_columns()
+    );
+    for i in 0..schema.num_columns() {
+        let col = schema.column(i);
+        out.push_str(&format!("  {} : {:?}\n", col.name(), col.physical_type()));
+    }
+    Ok(out)
+}
+
 /// Return a human-readable text summary of a binary file, dispatched by
 /// extension. Rendered read-only by the preview pane's "info" provider.
 #[tauri::command]
@@ -816,9 +857,45 @@ fn read_preview_info(path: String) -> Result<String, String> {
         "epub" => epub_text(&path),
         "sqlite" | "sqlite3" | "db" => sqlite_info(&path),
         "xlsx" | "xlsm" | "ods" => spreadsheet_info(&path),
+        "parquet" => parquet_info(&path),
         // generic binary (.bin/.dat) and anything else routed here: hex dump
         _ => hex_dump(&path, 64 * 1024),
     }
+}
+
+/// Decode an image the webview can't render natively (TIFF, PSD) to a PNG
+/// `data:` URL the <img> tag can show (CPE-099/101). PSD uses the psd crate's
+/// flattened composite; TIFF uses the image crate. Capped by the source reader,
+/// and errors (rather than hangs) on a corrupt file.
+#[tauri::command]
+fn read_image_data_url(path: String) -> Result<String, String> {
+    use base64::Engine;
+    use std::io::Cursor;
+
+    let ext = extension_of(Path::new(&path));
+    // Produce PNG bytes from the source format.
+    let png: Vec<u8> = if ext == "psd" {
+        let bytes = fs::read(&path).map_err(|e| e.to_string())?;
+        let psd = psd::Psd::from_bytes(&bytes).map_err(|e| e.to_string())?;
+        let rgba = psd.rgba();
+        let buf = image::RgbaImage::from_raw(psd.width(), psd.height(), rgba)
+            .ok_or("PSD pixel buffer size mismatch")?;
+        let mut out = Cursor::new(Vec::new());
+        image::DynamicImage::ImageRgba8(buf)
+            .write_to(&mut out, image::ImageFormat::Png)
+            .map_err(|e| e.to_string())?;
+        out.into_inner()
+    } else {
+        // TIFF (and any other image-crate-decodable format routed here)
+        let img = image::open(&path).map_err(|e| e.to_string())?;
+        let mut out = Cursor::new(Vec::new());
+        img.write_to(&mut out, image::ImageFormat::Png)
+            .map_err(|e| e.to_string())?;
+        out.into_inner()
+    };
+
+    let b64 = base64::engine::general_purpose::STANDARD.encode(&png);
+    Ok(format!("data:image/png;base64,{b64}"))
 }
 
 /// Read a text file's contents for the preview pane, capped at `max_bytes` so a
@@ -1334,6 +1411,7 @@ pub fn run() {
             write_file_text,
             read_archive_entries,
             read_preview_info,
+            read_image_data_url,
             rename_entry,
             delete_to_trash,
             delete_permanent,
@@ -1730,6 +1808,46 @@ mod tests {
         assert!(info.contains("Workbook — 1 sheet"), "sheet count: {info:?}");
         assert!(info.contains("Name\tAge"), "header row rendered tab-separated");
         assert!(info.contains("Ann\t30"), "data row rendered");
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn parquet_info_errors_on_a_non_parquet() {
+        let d = scratch("parquet_bad");
+        let f = d.join("x.parquet");
+        fs::write(&f, b"not a parquet file").unwrap();
+        assert!(parquet_info(&f.to_string_lossy()).is_err());
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn read_image_data_url_transcodes_tiff_to_png() {
+        let d = scratch("tiff");
+        let f = d.join("a.tiff");
+        let mut img = image::RgbaImage::new(2, 2);
+        img.put_pixel(0, 0, image::Rgba([255, 0, 0, 255]));
+        img.save_with_format(&f, image::ImageFormat::Tiff).unwrap();
+        let url = read_image_data_url(f.to_string_lossy().to_string()).unwrap();
+        assert!(url.starts_with("data:image/png;base64,"), "returns a PNG data URL");
+        assert!(url.len() > 40, "carries encoded bytes");
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn read_image_data_url_errors_on_a_corrupt_psd() {
+        let d = scratch("psd_bad");
+        let f = d.join("a.psd");
+        fs::write(&f, b"not a real psd").unwrap();
+        assert!(read_image_data_url(f.to_string_lossy().to_string()).is_err());
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn read_archive_entries_errors_on_a_non_7z() {
+        let d = scratch("sevenz_bad");
+        let f = d.join("x.7z");
+        fs::write(&f, b"not a 7z archive").unwrap();
+        assert!(read_archive_entries(f.to_string_lossy().to_string()).is_err());
         let _ = fs::remove_dir_all(&d);
     }
 

@@ -104,10 +104,22 @@ describe("pickProvider", () => {
     }
   });
 
-  it("previews SQLite and spreadsheets as info text (CPE-088/090/091)", () => {
-    for (const ext of ["sqlite", "db", "xlsx", "ods"]) {
+  it("previews SQLite, spreadsheets and parquet as info text (CPE-088/089/090/091)", () => {
+    for (const ext of ["sqlite", "db", "xlsx", "ods", "parquet"]) {
       expect(pickProvider(entry({ name: `a.${ext}`, extension: ext })).kind).toBe("info");
     }
+  });
+
+  it("previews 7z via the archive provider (CPE-110)", () => {
+    expect(pickProvider(entry({ name: "a.7z", extension: "7z" })).kind).toBe("archive");
+  });
+
+  it("decodes TIFF/PSD via the decoded-image provider, beating native image (CPE-099/101)", () => {
+    for (const ext of ["tiff", "tif", "psd"]) {
+      expect(pickProvider(entry({ name: `a.${ext}`, extension: ext })).kind).toBe("decoded-image");
+    }
+    // sanity: a native image still uses the plain image provider
+    expect(pickProvider(entry({ name: "a.png", extension: "png" })).kind).toBe("image");
   });
 
   it("falls back to metadata for folders, nothing, and unknown types", () => {
