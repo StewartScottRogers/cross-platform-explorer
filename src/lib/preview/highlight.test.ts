@@ -62,6 +62,14 @@ describe("languageForExt", () => {
     expect(languageForExt("sol")).toBeNull();
     expect(languageForExt("cbl")).toBeNull();
   });
+  it("maps logs to accesslog and .reg to ini (CPE-116/212)", () => {
+    expect(languageForExt("log")).toBe("accesslog");
+    expect(languageForExt("reg")).toBe("ini");
+    // grammarless data formats fall back to escaped monospace
+    expect(languageForExt("eml")).toBeNull();
+    expect(languageForExt("vcf")).toBeNull();
+    expect(languageForExt("srt")).toBeNull();
+  });
 });
 
 describe("languageForName", () => {

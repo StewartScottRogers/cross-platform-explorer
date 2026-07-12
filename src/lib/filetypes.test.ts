@@ -73,6 +73,15 @@ describe("categoryOf", () => {
     expect(typeName(file("vue"))).toBe("Vue component");
   });
 
+  it("classifies text-based data/comms formats as code (CPE-079/092/093/106/119/202..213)", () => {
+    for (const ext of ["dot", "gv", "puml", "mmd", "fasta", "fa", "wkt", "eml", "ics", "vcf", "srt", "vtt", "pem", "crt", "reg"]) {
+      expect(categoryOf(file(ext))).toBe("code");
+    }
+    expect(typeName(file("eml"))).toBe("Email message");
+    expect(typeName(file("vcf"))).toBe("vCard contact");
+    expect(typeName(file("reg"))).toBe("Registry export");
+  });
+
   it("classifies .editorconfig by name (CPE-199)", () => {
     expect(categoryOf({ is_dir: false, extension: "", name: ".editorconfig" })).toBe("code");
   });
