@@ -57,6 +57,14 @@ describe("categoryOf", () => {
     }
   });
 
+  it("classifies markup/doc formats as code (CPE-073..076/188/189/190)", () => {
+    for (const ext of ["tex", "rst", "adoc", "asciidoc", "org", "mdx", "textile", "bib"]) {
+      expect(categoryOf(file(ext))).toBe("code");
+    }
+    expect(typeName(file("tex"))).toBe("LaTeX source");
+    expect(typeName(file("bib"))).toBe("BibTeX bibliography");
+  });
+
   it("classifies .editorconfig by name (CPE-199)", () => {
     expect(categoryOf({ is_dir: false, extension: "", name: ".editorconfig" })).toBe("code");
   });

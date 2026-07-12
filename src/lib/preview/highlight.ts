@@ -84,6 +84,9 @@ const LOADERS: Record<string, Loader> = {
   makefile: () => import("highlight.js/lib/languages/makefile"),
   diff: () => import("highlight.js/lib/languages/diff"),
   dockerfile: () => import("highlight.js/lib/languages/dockerfile"),
+  latex: () => import("highlight.js/lib/languages/latex"),
+  asciidoc: () => import("highlight.js/lib/languages/asciidoc"),
+  accesslog: () => import("highlight.js/lib/languages/accesslog"),
 };
 /* eslint-enable @typescript-eslint/no-explicit-any */
 
@@ -124,6 +127,8 @@ const LANG_BY_EXT: Record<string, string> = {
   geojson: "json", gpx: "xml", kml: "xml", musicxml: "xml", plist: "xml",
   // Jsonnet is a JSON superset — reuse the json grammar (CPE-193)
   jsonnet: "json", libsonnet: "json",
+  // markup / doc formats (CPE-073/075/188)
+  tex: "latex", adoc: "asciidoc", asciidoc: "asciidoc", mdx: "markdown",
 };
 
 const LANG_BY_FILENAME: Record<string, string> = {
