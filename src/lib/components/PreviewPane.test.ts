@@ -136,6 +136,18 @@ describe("PreviewPane", () => {
     expect(container.querySelector(".preview-markdown script")).toBeNull();
   });
 
+  it("renders a TSV as a table (CPE-083)", async () => {
+    const loadText = vi.fn(async () => "a\tb\n1\t2");
+    const { container } = render(PreviewPane, {
+      entry: entry({ name: "d.tsv", path: "C:\\d\\d.tsv", extension: "tsv" }),
+      loadText,
+    });
+    await waitFor(() => {
+      const cells = [...container.querySelectorAll(".preview-table td")].map((c) => c.textContent);
+      expect(cells).toEqual(["a", "b", "1", "2"]);
+    });
+  });
+
   it("lists archive entries via loadEntries (CPE-064)", async () => {
     const loadEntries = vi.fn(async () => [
       { name: "hello.txt", size: 8, is_dir: false },
