@@ -65,6 +65,14 @@ describe("categoryOf", () => {
     expect(typeName(file("bib"))).toBe("BibTeX bibliography");
   });
 
+  it("classifies languages & templates as code (CPE-146/150/158/180/181/183/184/185)", () => {
+    for (const ext of ["cbl", "cob", "cpy", "zig", "sol", "vue", "astro", "pug", "ejs", "liquid"]) {
+      expect(categoryOf(file(ext))).toBe("code");
+    }
+    expect(typeName(file("zig"))).toBe("Zig source");
+    expect(typeName(file("vue"))).toBe("Vue component");
+  });
+
   it("classifies .editorconfig by name (CPE-199)", () => {
     expect(categoryOf({ is_dir: false, extension: "", name: ".editorconfig" })).toBe("code");
   });
