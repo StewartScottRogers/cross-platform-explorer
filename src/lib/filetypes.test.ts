@@ -39,6 +39,12 @@ describe("categoryOf", () => {
     expect(categoryOf(file("cjs"))).toBe("code");
   });
 
+  it("classifies the common-bundle languages as code (CPE-120..178)", () => {
+    for (const ext of ["c", "cpp", "go", "java", "kt", "swift", "rb", "php", "lua", "r", "scss", "less", "graphql"]) {
+      expect(categoryOf(file(ext))).toBe("code");
+    }
+  });
+
   it("classifies executables and installers (CPE-047)", () => {
     expect(categoryOf(file("exe"))).toBe("executable");
     expect(categoryOf(file("msi"))).toBe("executable");

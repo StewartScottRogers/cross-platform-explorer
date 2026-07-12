@@ -11,12 +11,30 @@ describe("languageForExt", () => {
     expect(languageForExt("txt")).toBeNull();
     expect(languageForExt("")).toBeNull();
   });
+
+  it("maps the common-bundle languages (CPE-120..178)", () => {
+    expect(languageForExt("c")).toBe("c");
+    expect(languageForExt("cpp")).toBe("cpp");
+    expect(languageForExt("go")).toBe("go");
+    expect(languageForExt("java")).toBe("java");
+    expect(languageForExt("kt")).toBe("kotlin");
+    expect(languageForExt("swift")).toBe("swift");
+    expect(languageForExt("rb")).toBe("ruby");
+    expect(languageForExt("php")).toBe("php");
+    expect(languageForExt("scss")).toBe("scss");
+    expect(languageForExt("graphql")).toBe("graphql");
+  });
 });
 
 describe("highlightCode", () => {
   it("produces hljs token spans for a known language", () => {
     const html = highlightCode("const x = 1;", "ts");
     expect(html).toContain("hljs-");
+  });
+
+  it("highlights newly added languages (Go, Ruby)", () => {
+    expect(highlightCode("package main\nfunc main() {}", "go")).toContain("hljs-");
+    expect(highlightCode("def hi; puts 'x'; end", "rb")).toContain("hljs-");
   });
 
   it("escapes and does not add spans for an unmapped type", () => {
