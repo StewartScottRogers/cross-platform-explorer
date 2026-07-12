@@ -31,6 +31,12 @@ trash = "5"
 [target.'cfg(not(any(target_os = "android", target_os = "ios")))'.dependencies]
 tauri-plugin-updater = "2"
 
+# Keep the display awake while the app is open (CPE-225). Cross-platform screen-
+# lock / screensaver / display-sleep inhibition: Windows SetThreadExecutionState,
+# macOS IOPMAssertion, Linux org.freedesktop.ScreenSaver via zbus (no system dbus
+# headers needed). Desktop-only — mobile has no equivalent assertion.
+keepawake = "0.6"
+
 # Windows known folders (Desktop/Documents/Pictures/...) can be redirected
 # anywhere by OneDrive — on a real machine Pictures was found at
 # "…\OneDrive\Exteriors Cave Homes\Pictures". No env-var heuristic can find that;
