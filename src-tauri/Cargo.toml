@@ -35,6 +35,8 @@ goblin = "0.8"
 midly = "0.5"
 wasmprinter = "0.2"
 serde_bencode = "0.2"
+calamine = "0.26"
+rusqlite = { version = "0.32", features = ["bundled"] }
 
 # Delete must go to the OS Recycle Bin / Trash, never `fs::remove_*`. A file
 # manager that irreversibly destroys data on a mis-click is dangerous (CPE-030).
@@ -58,6 +60,10 @@ keepawake = "0.6"
 # windows-latest (CPE-028).
 [target.'cfg(windows)'.dependencies]
 winreg = "0.52"
+
+[dev-dependencies]
+# Author a real .xlsx in the spreadsheet-preview test (write side; calamine reads).
+rust_xlsxwriter = "0.79"
 
 [features]
 # This feature is used for production builds where `devUrl` is disabled.

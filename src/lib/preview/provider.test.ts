@@ -104,6 +104,12 @@ describe("pickProvider", () => {
     }
   });
 
+  it("previews SQLite and spreadsheets as info text (CPE-088/090/091)", () => {
+    for (const ext of ["sqlite", "db", "xlsx", "ods"]) {
+      expect(pickProvider(entry({ name: `a.${ext}`, extension: ext })).kind).toBe("info");
+    }
+  });
+
   it("falls back to metadata for folders, nothing, and unknown types", () => {
     expect(pickProvider(entry({ name: "dir", is_dir: true, extension: "" })).kind).toBe("none");
     expect(pickProvider(null).kind).toBe("none");

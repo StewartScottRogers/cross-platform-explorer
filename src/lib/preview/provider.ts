@@ -60,6 +60,8 @@ const INFO_EXT = new Set([
   "exe", "dll", "sys", "efi", "ocx", "scr", "cpl", // PE headers
   "wasm", "torrent", "mid", "midi",
   "rtf", "docx", "odt", "epub", // document text extraction
+  "sqlite", "sqlite3", "db", // SQLite schema + row counts
+  "xlsx", "xlsm", "ods", // spreadsheet grid
   "bin", "dat", // generic binary -> hex dump
 ]);
 
