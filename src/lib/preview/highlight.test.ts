@@ -39,6 +39,14 @@ describe("languageForExt", () => {
     expect(languageForExt("musicxml")).toBe("xml");
     expect(languageForExt("plist")).toBe("xml");
   });
+  it("maps config/infra formats (CPE-080/081/193/199)", () => {
+    expect(languageForExt("yml")).toBe("yaml");
+    expect(languageForExt("yaml")).toBe("yaml");
+    expect(languageForExt("toml")).toBe("ini");
+    expect(languageForExt("jsonnet")).toBe("json");
+    expect(languageForExt("libsonnet")).toBe("json");
+    expect(languageForName(".editorconfig")).toBe("ini");
+  });
 });
 
 describe("languageForName", () => {

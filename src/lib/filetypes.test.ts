@@ -51,6 +51,16 @@ describe("categoryOf", () => {
     }
   });
 
+  it("classifies config/infra formats as code (CPE-080/081/191/192/193)", () => {
+    for (const ext of ["yaml", "yml", "toml", "tf", "hcl", "tfvars", "dhall", "jsonnet", "libsonnet"]) {
+      expect(categoryOf(file(ext))).toBe("code");
+    }
+  });
+
+  it("classifies .editorconfig by name (CPE-199)", () => {
+    expect(categoryOf({ is_dir: false, extension: "", name: ".editorconfig" })).toBe("code");
+  });
+
   it("classifies well-known code files by name (CPE-164/166/200)", () => {
     expect(categoryOf({ is_dir: false, extension: "", name: "Dockerfile" })).toBe("code");
     expect(categoryOf({ is_dir: false, extension: "", name: "Makefile" })).toBe("code");
