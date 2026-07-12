@@ -2,7 +2,7 @@
   import type { DirEntry } from "../types";
   import { pickProvider, type ArchiveEntry } from "../preview/provider";
   import { parseCsv } from "../preview/csv";
-  import { highlightForFile } from "../preview/highlight";
+  import { highlightForFile, ensureLanguageForName } from "../preview/highlight";
   import { renderMarkdown } from "../preview/markdown";
   import { formatSize } from "../format";
 
@@ -83,6 +83,32 @@
     textState === "idle" && (provider.kind === "csv" || provider.kind === "tsv")
       ? parseCsv(text, provider.kind === "tsv" ? "\t" : ",")
       : [];
+
+  // Async-rendered HTML for code (lazy grammar) and markdown (lazy renderer).
+  let codeHtml = "";
+  let mdHtml = "";
+  let codeReq = 0;
+  let mdReq = 0;
+
+  $: if (entry && textState === "idle" && provider.kind === "text") {
+    renderCode(entry.name, text);
+  }
+  $: if (entry && textState === "idle" && provider.kind === "markdown") {
+    renderMd(text);
+  }
+
+  async function renderCode(name: string, src: string) {
+    const mine = ++codeReq;
+    codeHtml = highlightForFile(src, name); // escaped immediately
+    const ok = await ensureLanguageForName(name);
+    if (ok && mine === codeReq) codeHtml = highlightForFile(src, name); // now highlighted
+  }
+
+  async function renderMd(src: string) {
+    const mine = ++mdReq;
+    const html = await renderMarkdown(src);
+    if (mine === mdReq) mdHtml = html;
+  }
 
   // ---- editing ----
   let editing = false;
@@ -205,11 +231,11 @@
       {:else if provider.kind === "json"}
         <pre class="preview-text">{prettyJson(text)}</pre>
       {:else if provider.kind === "markdown"}
-        <!-- Sanitized by DOMPurify in renderMarkdown before injection. -->
-        <div class="preview-markdown">{@html renderMarkdown(text)}</div>
+        <!-- mdHtml is DOMPurify-sanitized (lazy renderer), safe to inject. -->
+        <div class="preview-markdown">{@html mdHtml}</div>
       {:else}
-        <!-- highlightCode escapes the source, so the HTML is safe to inject. -->
-        <pre class="preview-text"><code>{@html highlightForFile(text, entry.name)}</code></pre>
+        <!-- codeHtml is escaped or hljs output (lazy grammar), safe to inject. -->
+        <pre class="preview-text"><code>{@html codeHtml}</code></pre>
       {/if}
     {/if}
   {:else}
