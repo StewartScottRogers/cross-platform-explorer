@@ -514,6 +514,11 @@
     return invoke<string>("read_preview_info", { path });
   }
 
+  /** Decode a non-native image (TIFF/PSD) to a data: URL for the preview pane. */
+  function loadImageData(path: string): Promise<string> {
+    return invoke<string>("read_image_data_url", { path });
+  }
+
   /** Save edited text back to a file, then refresh so size/date update. */
   async function savePreviewText(path: string, contents: string): Promise<void> {
     await invoke("write_file_text", { path, contents });
@@ -963,6 +968,7 @@
           loadText={loadPreviewText}
           loadEntries={loadArchiveEntries}
           loadInfo={loadPreviewInfo}
+          loadImageData={loadImageData}
           saveText={savePreviewText}
         >
           <DetailsPane selected={selectedEntries} {folderName} {itemCount} />

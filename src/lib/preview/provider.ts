@@ -11,6 +11,7 @@ import { categoryOf } from "../filetypes";
 
 export type PreviewKind =
   | "image"
+  | "decoded-image"
   | "audio"
   | "video"
   | "pdf"
@@ -48,7 +49,7 @@ const MARKDOWN_EXT = new Set(["md", "markdown"]);
 /** Extensions the read_archive_entries backend can list (zip family, tar, gzip). */
 const ARCHIVE_EXT = new Set([
   "zip", "jar", "apk", "war", "ear", "ipa", "xpi",
-  "tar", "tgz", "gz",
+  "tar", "tgz", "gz", "7z",
 ]);
 
 /**
@@ -62,8 +63,15 @@ const INFO_EXT = new Set([
   "rtf", "docx", "odt", "epub", // document text extraction
   "sqlite", "sqlite3", "db", // SQLite schema + row counts
   "xlsx", "xlsm", "ods", // spreadsheet grid
+  "parquet", // parquet schema + row count
   "bin", "dat", // generic binary -> hex dump
 ]);
+
+/**
+ * Images the webview can't render natively — decoded to PNG by the
+ * read_image_data_url backend and shown via a data URL. CPE-099/101.
+ */
+const DECODED_IMAGE_EXT = new Set(["tiff", "tif", "psd"]);
 
 /**
  * Ordered by priority — the first match wins. Markdown is listed before text
@@ -71,6 +79,15 @@ const INFO_EXT = new Set([
  * claim it first.
  */
 export const providers: PreviewProvider[] = [
+  // Must precede the native image provider: .tiff is categorised as an image but
+  // the webview can't decode it, so it needs the backend transcode path instead.
+  {
+    id: "decoded-image",
+    label: "Image (decoded)",
+    kind: "decoded-image",
+    editable: false,
+    canPreview: (e) => !e.is_dir && DECODED_IMAGE_EXT.has(e.extension),
+  },
   {
     id: "image",
     label: "Image",

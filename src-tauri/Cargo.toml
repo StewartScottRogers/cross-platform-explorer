@@ -37,6 +37,11 @@ wasmprinter = "0.2"
 serde_bencode = "0.2"
 calamine = "0.26"
 rusqlite = { version = "0.32", features = ["bundled"] }
+parquet = { version = "53", default-features = false }
+sevenz-rust = "0.6"
+image = { version = "0.25", default-features = false, features = ["tiff", "png"] }
+psd = "0.3"
+base64 = "0.22"
 
 # Delete must go to the OS Recycle Bin / Trash, never `fs::remove_*`. A file
 # manager that irreversibly destroys data on a mis-click is dangerous (CPE-030).
