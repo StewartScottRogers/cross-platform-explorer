@@ -628,9 +628,11 @@ dependencies = [
 name = "cross-platform-explorer"
 version = "0.6.2"
 dependencies = [
+ "flate2",
  "keepawake",
  "serde",
  "serde_json",
+ "tar",
  "tauri",
  "tauri-build",
  "tauri-plugin-dialog",

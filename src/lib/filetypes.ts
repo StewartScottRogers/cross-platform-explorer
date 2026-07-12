@@ -77,6 +77,9 @@ export const CATEGORY_BY_EXT: Record<string, FileCategory> = {
   // archives
   zip: "archive", rar: "archive", "7z": "archive", tar: "archive", gz: "archive",
   xz: "archive", bz2: "archive", zst: "archive", tgz: "archive",
+  // zip-based application packages (CPE-217)
+  jar: "archive", apk: "archive", war: "archive", ear: "archive",
+  ipa: "archive", xpi: "archive",
   // audio
   mp3: "audio", wav: "audio", flac: "audio", m4a: "audio", ogg: "audio",
   aac: "audio", opus: "audio",
@@ -138,6 +141,8 @@ export const TYPE_NAME_BY_EXT: Record<string, string> = {
   zip: "Compressed (zipped) Folder", rar: "RAR archive", "7z": "7z archive",
   tar: "TAR archive", gz: "GZ archive", xz: "XZ archive", bz2: "BZ2 archive",
   zst: "Zstandard archive", tgz: "Gzipped TAR archive",
+  jar: "Java archive", apk: "Android package", war: "Web application archive",
+  ear: "Enterprise archive", ipa: "iOS app archive", xpi: "Firefox add-on",
   mp3: "MP3 audio", wav: "WAV audio", flac: "FLAC audio", m4a: "M4A audio",
   ogg: "OGG audio", aac: "AAC audio", opus: "Opus audio",
   mp4: "MP4 video", mkv: "Matroska video", mov: "QuickTime movie",

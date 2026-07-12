@@ -44,6 +44,12 @@ export interface PreviewProvider {
 
 const MARKDOWN_EXT = new Set(["md", "markdown"]);
 
+/** Extensions the read_archive_entries backend can list (zip family, tar, gzip). */
+const ARCHIVE_EXT = new Set([
+  "zip", "jar", "apk", "war", "ear", "ipa", "xpi",
+  "tar", "tgz", "gz",
+]);
+
 /**
  * Ordered by priority — the first match wins. Markdown is listed before text
  * because a `.md` file's category is "text"; without the ordering, text would
@@ -106,7 +112,9 @@ export const providers: PreviewProvider[] = [
     label: "Archive",
     kind: "archive",
     editable: false,
-    canPreview: (e) => !e.is_dir && e.extension === "zip",
+    // zip family (jar/apk/war/… are zips), plus tar and gzip — all listed by the
+    // read_archive_entries backend (CPE-064/109/112/217).
+    canPreview: (e) => !e.is_dir && ARCHIVE_EXT.has(e.extension),
   },
   {
     id: "markdown",
