@@ -53,6 +53,15 @@ describe("languageForExt", () => {
     expect(languageForExt("asciidoc")).toBe("asciidoc");
     expect(languageForExt("mdx")).toBe("markdown");
   });
+  it("maps HTML-family components + Liquid, fallback for grammarless langs (CPE-146/150/158/180/181/185)", () => {
+    expect(languageForExt("vue")).toBe("xml");
+    expect(languageForExt("astro")).toBe("xml");
+    expect(languageForExt("liquid")).toBe("handlebars");
+    // No grammar ships for these — escaped-monospace fallback (languageForExt null)
+    expect(languageForExt("zig")).toBeNull();
+    expect(languageForExt("sol")).toBeNull();
+    expect(languageForExt("cbl")).toBeNull();
+  });
 });
 
 describe("languageForName", () => {

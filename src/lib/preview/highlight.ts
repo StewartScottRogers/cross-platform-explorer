@@ -129,6 +129,8 @@ const LANG_BY_EXT: Record<string, string> = {
   jsonnet: "json", libsonnet: "json",
   // markup / doc formats (CPE-073/075/188)
   tex: "latex", adoc: "asciidoc", asciidoc: "asciidoc", mdx: "markdown",
+  // HTML-family components + Liquid templates reuse xml/handlebars (CPE-180/181/185)
+  vue: "xml", astro: "xml", liquid: "handlebars",
 };
 
 const LANG_BY_FILENAME: Record<string, string> = {

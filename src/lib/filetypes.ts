@@ -63,6 +63,9 @@ export const CATEGORY_BY_EXT: Record<string, FileCategory> = {
   // markup / doc source formats (CPE-073/074/075/076/188/189/190)
   tex: "code", rst: "code", adoc: "code", asciidoc: "code", org: "code",
   mdx: "code", textile: "code", bib: "code",
+  // languages & templates (CPE-146/150/158/180/181/183/184/185)
+  cbl: "code", cob: "code", cpy: "code", zig: "code", sol: "code",
+  vue: "code", astro: "code", pug: "code", ejs: "code", liquid: "code",
   // archives
   zip: "archive", rar: "archive", "7z": "archive", tar: "archive", gz: "archive",
   xz: "archive", bz2: "archive", zst: "archive", tgz: "archive",
@@ -112,6 +115,10 @@ export const TYPE_NAME_BY_EXT: Record<string, string> = {
   tex: "LaTeX source", rst: "reStructuredText", adoc: "AsciiDoc",
   asciidoc: "AsciiDoc", org: "Org-mode document", mdx: "MDX document",
   textile: "Textile document", bib: "BibTeX bibliography",
+  cbl: "COBOL source", cob: "COBOL source", cpy: "COBOL copybook",
+  zig: "Zig source", sol: "Solidity source", vue: "Vue component",
+  astro: "Astro component", pug: "Pug template", ejs: "EJS template",
+  liquid: "Liquid template",
   zip: "Compressed (zipped) Folder", rar: "RAR archive", "7z": "7z archive",
   tar: "TAR archive", gz: "GZ archive", xz: "XZ archive", bz2: "BZ2 archive",
   zst: "Zstandard archive", tgz: "Gzipped TAR archive",
