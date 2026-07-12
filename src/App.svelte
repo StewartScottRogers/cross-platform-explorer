@@ -874,7 +874,7 @@
     class="resizer"
     role="separator"
     aria-orientation="vertical"
-    aria-label="Resize sidebar"
+    aria-label="Resize navigation pane"
     title="Drag to resize"
     on:mousedown={(e) => startResize("left", e)}
   ></div>

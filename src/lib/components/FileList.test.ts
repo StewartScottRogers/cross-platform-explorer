@@ -130,7 +130,7 @@ describe("FileList rendering", () => {
    */
   it("never gives rows a bare class that collides with a global layout rule", () => {
     // These are global class names owned by other components / layout regions.
-    const RESERVED = ["details", "filelist-pane", "main", "sidebar", "rows", "columns"];
+    const RESERVED = ["details", "filelist-pane", "main", "navigation-pane", "rows", "columns"];
 
     for (const view of ["details", "list", "icons"] as const) {
       const { container, unmount } = render(FileList, {

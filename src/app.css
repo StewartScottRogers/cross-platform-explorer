@@ -210,7 +210,7 @@ button:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
 .main.resizing * { user-select: none !important; cursor: col-resize; }
 
 /* ---------- Sidebar ---------- */
-.sidebar {
+.navigation-pane {
   overflow-y: auto;
   padding: 6px 6px 12px;
   border-right: 1px solid var(--border);
@@ -240,7 +240,7 @@ button:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
 .twisty.hidden { visibility: hidden; }
 .nav-children { margin-left: 14px; }
 .nav-empty { padding: 2px 0 2px 32px; color: var(--text-faint); font-size: 12px; }
-.sidebar-sep { height: 1px; background: var(--border); margin: 6px 4px; }
+.navigation-pane-sep { height: 1px; background: var(--border); margin: 6px 4px; }
 
 /* ---------- File List Pane (middle column) ---------- */
 .filelist-pane {

@@ -17,7 +17,7 @@
     drop: { paths: string[]; dest: string; copy: boolean };
   }>();
 
-  /** The sidebar path currently hovered as a drop target, or "" for none. */
+  /** The navigation-pane path currently hovered as a drop target, or "" for none. */
   let dropPath = "";
 
   /** Normalise separators so parent/child checks work on both platforms. */
@@ -89,7 +89,7 @@
   }
 </script>
 
-<div class="sidebar">
+<div class="navigation-pane" role="region" aria-label="Navigation">
   <button class="nav-item" class:active={isHome} on:click={() => dispatch("home")}>
     <span class="twisty hidden" />
     <Icon name="home" />
@@ -101,13 +101,13 @@
     <span class="label">Gallery</span>
   </button>
 
-  <div class="sidebar-sep" />
+  <div class="navigation-pane-sep" />
 
   {#each [...places, ...drives] as place, i (place.path)}
     {@const open = expanded.has(place.path)}
     {@const isDrive = i >= places.length}
     {#if isDrive && i === places.length}
-      <div class="sidebar-sep" />
+      <div class="navigation-pane-sep" />
     {/if}
     <div>
       <!-- svelte-ignore a11y-no-static-element-interactions -->
