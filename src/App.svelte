@@ -879,7 +879,8 @@
     on:mousedown={(e) => startResize("left", e)}
   ></div>
 
-  <div class="content">
+  <!-- File List Pane (middle column) -->
+  <div class="filelist-pane" role="region" aria-label="File list">
     {#if isHome}
       <HomeView
         {places}
