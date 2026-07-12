@@ -747,7 +747,25 @@ pub fn run() {
             .plugin(tauri_plugin_updater::Builder::new().build());
     }
 
-    builder
+    // Keep the screen awake for as long as the app is open (CPE-225). We hold a
+    // single keep-awake assertion for the app's whole lifetime: created here on
+    // the main thread, owned by the run-loop callback below, and dropped — which
+    // releases it — the instant that loop ends, i.e. when the app quits. On a
+    // hard crash the OS releases the assertion on process death, so nothing
+    // lingers either way. Desktop-only: mobile has no such assertion. A failure
+    // to acquire is logged, not fatal — the explorer still works, the screen just
+    // isn't held awake.
+    #[cfg(not(any(target_os = "android", target_os = "ios")))]
+    let keep_awake = keepawake::Builder::default()
+        .display(true)
+        .reason("Cross-Platform Explorer is open")
+        .app_name("Cross-Platform Explorer")
+        .app_reverse_domain("com.cross-platform-explorer.app")
+        .create()
+        .map_err(|e| eprintln!("keep-awake: could not inhibit screen lock: {e}"))
+        .ok();
+
+    let app = builder
         .invoke_handler(tauri::generate_handler![
             list_dir,
             home_dir,
@@ -769,8 +787,16 @@ pub fn run() {
             entry_info,
             dir_size
         ])
-        .run(tauri::generate_context!())
-        .expect("error while running tauri application");
+        .build(tauri::generate_context!())
+        .expect("error while building tauri application");
+
+    app.run(move |_app_handle, _event| {
+        // Owning `keep_awake` here keeps the assertion alive for the entire run
+        // loop; it is dropped (and the screen lock re-enabled) when the loop
+        // ends. The reference just anchors the capture — see the comment above.
+        #[cfg(not(any(target_os = "android", target_os = "ios")))]
+        let _ = &keep_awake;
+    });
 }
 
 // NOTE: clippy's `items_after_test_module` lint requires the test module to be
