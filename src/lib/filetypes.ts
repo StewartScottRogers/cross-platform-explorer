@@ -66,6 +66,12 @@ export const CATEGORY_BY_EXT: Record<string, FileCategory> = {
   // languages & templates (CPE-146/150/158/180/181/183/184/185)
   cbl: "code", cob: "code", cpy: "code", zig: "code", sol: "code",
   vue: "code", astro: "code", pug: "code", ejs: "code", liquid: "code",
+  // text-based data / diagram / comms formats (CPE-079/092/093/106/119/202/203/204/209/212/213)
+  dot: "code", gv: "code", puml: "code", plantuml: "code", mmd: "code",
+  mermaid: "code", fasta: "code", fa: "code", fna: "code", faa: "code",
+  wkt: "code", eml: "code", ics: "code", vcf: "code", srt: "code",
+  vtt: "code", pem: "code", crt: "code", cer: "code", csr: "code",
+  key: "code", reg: "code",
   // archives
   zip: "archive", rar: "archive", "7z": "archive", tar: "archive", gz: "archive",
   xz: "archive", bz2: "archive", zst: "archive", tgz: "archive",
@@ -119,6 +125,14 @@ export const TYPE_NAME_BY_EXT: Record<string, string> = {
   zig: "Zig source", sol: "Solidity source", vue: "Vue component",
   astro: "Astro component", pug: "Pug template", ejs: "EJS template",
   liquid: "Liquid template",
+  dot: "Graphviz DOT", gv: "Graphviz DOT", puml: "PlantUML diagram",
+  plantuml: "PlantUML diagram", mmd: "Mermaid diagram", mermaid: "Mermaid diagram",
+  fasta: "FASTA sequence", fa: "FASTA sequence", fna: "FASTA sequence",
+  faa: "FASTA sequence", wkt: "WKT geometry", eml: "Email message",
+  ics: "iCalendar file", vcf: "vCard contact", srt: "Subtitle file",
+  vtt: "WebVTT subtitle", pem: "PEM certificate", crt: "Certificate",
+  cer: "Certificate", csr: "Certificate request", key: "Key file",
+  reg: "Registry export",
   zip: "Compressed (zipped) Folder", rar: "RAR archive", "7z": "7z archive",
   tar: "TAR archive", gz: "GZ archive", xz: "XZ archive", bz2: "BZ2 archive",
   zst: "Zstandard archive", tgz: "Gzipped TAR archive",

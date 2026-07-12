@@ -131,6 +131,8 @@ const LANG_BY_EXT: Record<string, string> = {
   tex: "latex", adoc: "asciidoc", asciidoc: "asciidoc", mdx: "markdown",
   // HTML-family components + Liquid templates reuse xml/handlebars (CPE-180/181/185)
   vue: "xml", astro: "xml", liquid: "handlebars",
+  // logs use the accesslog grammar; .reg is INI-shaped (CPE-116/212)
+  log: "accesslog", reg: "ini",
 };
 
 const LANG_BY_FILENAME: Record<string, string> = {
