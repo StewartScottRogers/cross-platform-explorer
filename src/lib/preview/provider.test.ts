@@ -98,6 +98,12 @@ describe("pickProvider", () => {
     }
   });
 
+  it("previews office/ebook documents as extracted text (CPE-070/071/072/077)", () => {
+    for (const ext of ["rtf", "docx", "odt", "epub"]) {
+      expect(pickProvider(entry({ name: `a.${ext}`, extension: ext })).kind).toBe("info");
+    }
+  });
+
   it("falls back to metadata for folders, nothing, and unknown types", () => {
     expect(pickProvider(entry({ name: "dir", is_dir: true, extension: "" })).kind).toBe("none");
     expect(pickProvider(null).kind).toBe("none");
