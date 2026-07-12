@@ -32,12 +32,25 @@ DOM test can't judge — a quick human smoke-look, not behavioral verification.
 - [x] **CPE-052 (wildcard search):** App test types `*.md`; only matching names remain.
 - [x] **CPE-047 (executable icon):** FileList test asserts the `.exe` row renders the executable glyph (distinct stroke) and Type "Application".
 
-### Residual — human visual smoke-check only (low priority)
+### VISUALLY VERIFIED via window screenshots (2026-07-11, against the installed v0.6.0)
 
-- [ ] The executable glyph actually *looks* like a sensible app icon at 16px and 40px (aesthetic).
-- [ ] **CPE-046 (UNC breadcrumbs):** if a real network share is available, confirm `\\server\share`
-      breadcrumbs render and navigate. (Logic is unit-tested; rendering shares the drive-letter path.)
-- [ ] Overall visual sanity pass once a screenshot/UI-automation capability or a human is available.
+Captured the live app window to PNG (PowerShell `CopyFromScreen`) and inspected it, driving it by
+keyboard (Ctrl+L address nav, arrow selection). Confirmed on screen:
+
+- [x] App launches and renders (no blank/black window); full layout intact (tabs, nav, command bar, sidebar, list, status bar).
+- [x] **Preview pane + Preview/Details toggle** render (CPE-061) — the two tabs and the pane are present.
+- [x] **Content viewer shows real file content** — selecting a `.ts` file renders **syntax-highlighted TypeScript** (CPE-060 + CPE-065).
+- [x] **Edit button** appears in the pane for an editable file (CPE-068 affordance).
+- [x] **Breadcrumbs** render multi-segment paths correctly (`Home › Z: › repos › … › src › lib`) (CPE-037/046 rendering path).
+- [x] File list columns/sort/dirs-first/selection + status count; **file-type names** e.g. "TypeScript file" (CPE-048).
+- [x] Category **icons** render in sidebar/quick-access/rows (CPE-047 path exercised).
+
+### Residual — still not visually confirmed (low priority)
+
+- [ ] Editor round-trip in the live app: click **Edit** → textarea → **Save** persists (behaviorally covered by the CPE-068 jsdom test; only the on-screen click-through is unconfirmed — SendKeys can't reliably click the button).
+- [ ] **Resizable panels (CPE-069)** — not in v0.6.0; verify after a v0.6.1 build (`drag the dividers, min-width clamp`).
+- [ ] Remaining viewer types on screen (rendered markdown, image, PDF, audio/video, CSV table, JSON pretty-print, ZIP list) — all behaviorally tested; a repeat screenshot pass didn't re-navigate (foreground-focus flakiness), so left for a quick human/UI-automation confirm.
+- [ ] Executable glyph aesthetics at 16/40px; real UNC `\\server\share` share if one is available.
 
 ## Resolution
 
@@ -47,6 +60,7 @@ DOM test can't judge — a quick human smoke-look, not behavioral verification.
 
 2026-07-11 — Filed to capture GUI-verification debt from the supervised session (user chose to proceed while present). Everything listed is merged to `main`, pushed, and unit-test green at commit 72cc118; only live-app observation is outstanding.
 2026-07-11 — CPE-054 added automated headless behavioral coverage for CPE-047/050/051/052, discharging the behavioral half of this ticket. Narrowed remaining scope to the literal visual/aesthetic smoke-check. Kept Open at Low priority.
+2026-07-11 — Performed a real visual pass by screenshotting the live v0.6.0 window (PowerShell CopyFromScreen) and driving it via keyboard. Confirmed on screen: app render, preview pane + toggle, syntax-highlighted code content, Edit button, breadcrumbs, list/columns/sort, type names, icons. Residual narrowed to: editor click-through, resizable panels (need v0.6.1), remaining viewer types, and aesthetics. Screenshots in the session scratchpad.
 
 ## Notes
 
