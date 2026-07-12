@@ -62,6 +62,28 @@ describe("pickProvider", () => {
     expect(pickProvider(entry({ name: "dir", is_dir: true })).editable).toBe(false);
   });
 
+  it("renders bitmap/vector/animated images via the image provider (CPE-095/096/098/100/103)", () => {
+    for (const ext of ["gif", "svg", "avif", "ico", "bmp"]) {
+      expect(pickProvider(entry({ name: `a.${ext}`, extension: ext })).kind).toBe("image");
+    }
+  });
+
+  it("plays WAV/FLAC audio and MKV/MOV video via the media providers (CPE-104/105/107/108)", () => {
+    expect(pickProvider(entry({ name: "a.wav", extension: "wav" })).kind).toBe("audio");
+    expect(pickProvider(entry({ name: "a.flac", extension: "flac" })).kind).toBe("audio");
+    expect(pickProvider(entry({ name: "a.mkv", extension: "mkv" })).kind).toBe("video");
+    expect(pickProvider(entry({ name: "a.mov", extension: "mov" })).kind).toBe("video");
+  });
+
+  it("previews HTML and Jupyter notebooks as editable source (CPE-078/114)", () => {
+    const html = pickProvider(entry({ name: "a.html", extension: "html" }));
+    expect(html.kind).toBe("text");
+    expect(html.editable).toBe(true);
+    const nb = pickProvider(entry({ name: "a.ipynb", extension: "ipynb" }));
+    expect(nb.kind).toBe("text");
+    expect(nb.editable).toBe(true);
+  });
+
   it("falls back to metadata for folders, nothing, and unknown types", () => {
     expect(pickProvider(entry({ name: "dir", is_dir: true, extension: "" })).kind).toBe("none");
     expect(pickProvider(null).kind).toBe("none");

@@ -72,6 +72,8 @@ export const CATEGORY_BY_EXT: Record<string, FileCategory> = {
   wkt: "code", eml: "code", ics: "code", vcf: "code", srt: "code",
   vtt: "code", pem: "code", crt: "code", cer: "code", csr: "code",
   key: "code", reg: "code",
+  // Jupyter notebooks are JSON documents (CPE-114)
+  ipynb: "code",
   // archives
   zip: "archive", rar: "archive", "7z": "archive", tar: "archive", gz: "archive",
   xz: "archive", bz2: "archive", zst: "archive", tgz: "archive",
@@ -132,7 +134,7 @@ export const TYPE_NAME_BY_EXT: Record<string, string> = {
   ics: "iCalendar file", vcf: "vCard contact", srt: "Subtitle file",
   vtt: "WebVTT subtitle", pem: "PEM certificate", crt: "Certificate",
   cer: "Certificate", csr: "Certificate request", key: "Key file",
-  reg: "Registry export",
+  reg: "Registry export", ipynb: "Jupyter notebook",
   zip: "Compressed (zipped) Folder", rar: "RAR archive", "7z": "7z archive",
   tar: "TAR archive", gz: "GZ archive", xz: "XZ archive", bz2: "BZ2 archive",
   zst: "Zstandard archive", tgz: "Gzipped TAR archive",
