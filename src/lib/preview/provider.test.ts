@@ -45,6 +45,12 @@ describe("pickProvider", () => {
     expect(pickProvider(entry({ name: "a.zip", extension: "zip" })).kind).toBe("archive");
   });
 
+  it("picks the archive provider for zip-family/tar/gzip (CPE-109/112/217)", () => {
+    for (const ext of ["jar", "apk", "war", "ipa", "xpi", "tar", "tgz", "gz"]) {
+      expect(pickProvider(entry({ name: `a.${ext}`, extension: ext })).kind).toBe("archive");
+    }
+  });
+
   it("picks the tsv provider and marks it editable (CPE-083)", () => {
     const p = pickProvider(entry({ name: "a.tsv", extension: "tsv" }));
     expect(p.kind).toBe("tsv");

@@ -246,11 +246,9 @@ pub struct ArchiveEntry {
     is_dir: bool,
 }
 
-/// List the entries of a ZIP archive without extracting it, for the preview
-/// pane. Reads only the archive directory, so it is cheap even for large zips.
-#[tauri::command]
-fn read_archive_entries(path: String) -> Result<Vec<ArchiveEntry>, String> {
-    let file = fs::File::open(&path).map_err(|e| e.to_string())?;
+/// List the entries of a ZIP archive without extracting it.
+fn zip_entries(path: &str) -> Result<Vec<ArchiveEntry>, String> {
+    let file = fs::File::open(path).map_err(|e| e.to_string())?;
     let mut zip = zip::ZipArchive::new(file).map_err(|e| e.to_string())?;
     let mut out = Vec::with_capacity(zip.len());
     for i in 0..zip.len() {
@@ -262,6 +260,66 @@ fn read_archive_entries(path: String) -> Result<Vec<ArchiveEntry>, String> {
         });
     }
     Ok(out)
+}
+
+/// List the entries of a TAR stream (optionally gzip-decompressed by the caller).
+fn tar_entries<R: std::io::Read>(reader: R) -> Result<Vec<ArchiveEntry>, String> {
+    let mut archive = tar::Archive::new(reader);
+    let mut out = Vec::new();
+    for entry in archive.entries().map_err(|e| e.to_string())? {
+        let entry = entry.map_err(|e| e.to_string())?;
+        let header = entry.header();
+        let is_dir = header.entry_type().is_dir();
+        let size = header.size().unwrap_or(0);
+        let name = entry
+            .path()
+            .map(|p| p.to_string_lossy().to_string())
+            .unwrap_or_default();
+        out.push(ArchiveEntry { name, size, is_dir });
+    }
+    Ok(out)
+}
+
+/// A single-file gzip (not a .tar.gz) has no directory. Report the decompressed
+/// file as one entry: its name is the archive name minus `.gz`, and its size is
+/// the gzip trailer's ISIZE (uncompressed length modulo 2^32).
+fn gzip_single_entry(path: &str) -> Result<Vec<ArchiveEntry>, String> {
+    let bytes = fs::read(path).map_err(|e| e.to_string())?;
+    let name = Path::new(path)
+        .file_stem()
+        .map(|s| s.to_string_lossy().to_string())
+        .unwrap_or_default();
+    let size = if bytes.len() >= 4 {
+        let n = bytes.len();
+        u32::from_le_bytes([bytes[n - 4], bytes[n - 3], bytes[n - 2], bytes[n - 1]]) as u64
+    } else {
+        0
+    };
+    Ok(vec![ArchiveEntry {
+        name,
+        size,
+        is_dir: false,
+    }])
+}
+
+/// List an archive's entries without extracting it, for the preview pane.
+/// Dispatches by extension: ZIP family (zip/jar/apk/war/ear/ipa/xpi), TAR,
+/// gzip-compressed TAR (.tar.gz/.tgz), and single-file gzip (.gz). Reads only
+/// the archive directory, so it stays cheap even for large archives.
+#[tauri::command]
+fn read_archive_entries(path: String) -> Result<Vec<ArchiveEntry>, String> {
+    let lower = path.to_lowercase();
+    if lower.ends_with(".tar") {
+        let file = fs::File::open(&path).map_err(|e| e.to_string())?;
+        tar_entries(file)
+    } else if lower.ends_with(".tar.gz") || lower.ends_with(".tgz") {
+        let file = fs::File::open(&path).map_err(|e| e.to_string())?;
+        tar_entries(flate2::read::GzDecoder::new(file))
+    } else if lower.ends_with(".gz") {
+        gzip_single_entry(&path)
+    } else {
+        zip_entries(&path)
+    }
 }
 
 /// Read a text file's contents for the preview pane, capped at `max_bytes` so a
@@ -1000,6 +1058,48 @@ mod tests {
         let f = d.join("notazip.zip");
         fs::write(&f, b"this is not a zip file").unwrap();
         assert!(read_archive_entries(f.to_string_lossy().to_string()).is_err());
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn read_archive_entries_lists_tar_contents() {
+        let d = scratch("tar_list");
+        let tar_path = d.join("bundle.tar");
+        {
+            let f = fs::File::create(&tar_path).unwrap();
+            let mut b = tar::Builder::new(f);
+            let data = b"hi there";
+            let mut header = tar::Header::new_gnu();
+            header.set_size(data.len() as u64);
+            header.set_entry_type(tar::EntryType::Regular);
+            header.set_cksum();
+            b.append_data(&mut header, "hello.txt", &data[..]).unwrap();
+            b.finish().unwrap();
+        }
+        let entries = read_archive_entries(tar_path.to_string_lossy().to_string()).unwrap();
+        let file = entries.iter().find(|e| e.name == "hello.txt").unwrap();
+        assert_eq!(file.size, 8, "size is the uncompressed length");
+        assert!(!file.is_dir);
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn read_archive_entries_lists_gzip_single_file() {
+        use flate2::write::GzEncoder;
+        use flate2::Compression;
+        use std::io::Write;
+        let d = scratch("gz_single");
+        let gz_path = d.join("note.txt.gz");
+        {
+            let f = fs::File::create(&gz_path).unwrap();
+            let mut enc = GzEncoder::new(f, Compression::default());
+            enc.write_all(b"hello world").unwrap();
+            enc.finish().unwrap();
+        }
+        let entries = read_archive_entries(gz_path.to_string_lossy().to_string()).unwrap();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].name, "note.txt", "name is the archive name minus .gz");
+        assert_eq!(entries[0].size, 11, "ISIZE trailer is the uncompressed length");
         let _ = fs::remove_dir_all(&d);
     }
 
