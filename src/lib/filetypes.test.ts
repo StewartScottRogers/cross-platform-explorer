@@ -45,6 +45,12 @@ describe("categoryOf", () => {
     }
   });
 
+  it("classifies XML/JSON data formats as code (CPE-082/094/206/207/208/211)", () => {
+    for (const ext of ["xml", "geojson", "gpx", "kml", "musicxml", "plist"]) {
+      expect(categoryOf(file(ext))).toBe("code");
+    }
+  });
+
   it("classifies well-known code files by name (CPE-164/166/200)", () => {
     expect(categoryOf({ is_dir: false, extension: "", name: "Dockerfile" })).toBe("code");
     expect(categoryOf({ is_dir: false, extension: "", name: "Makefile" })).toBe("code");
@@ -85,6 +91,14 @@ describe("typeName", () => {
 
   it("calls an extensionless file just 'File'", () => {
     expect(typeName(file(""))).toBe("File");
+  });
+
+  it("names XML/JSON data formats (CPE-082/094/206/207/208/211)", () => {
+    expect(typeName(file("geojson"))).toBe("GeoJSON file");
+    expect(typeName(file("gpx"))).toBe("GPX GPS track");
+    expect(typeName(file("kml"))).toBe("KML geographic data");
+    expect(typeName(file("musicxml"))).toBe("MusicXML score");
+    expect(typeName(file("plist"))).toBe("Apple property list");
   });
 
   it("names the newly added common extensions (CPE-048)", () => {
