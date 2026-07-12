@@ -230,6 +230,14 @@ fn create_dir(path: String, name: String) -> Result<String, String> {
     Ok(target.to_string_lossy().to_string())
 }
 
+/// Write UTF-8 text back to a file, replacing its contents — for the content
+/// editor. Returns the new byte length.
+#[tauri::command]
+fn write_file_text(path: String, contents: String) -> Result<u64, String> {
+    fs::write(&path, contents.as_bytes()).map_err(|e| e.to_string())?;
+    Ok(contents.len() as u64)
+}
+
 /// One entry inside an archive, for the archive preview.
 #[derive(Serialize)]
 pub struct ArchiveEntry {
@@ -748,6 +756,7 @@ pub fn run() {
             special_folders,
             create_dir,
             read_file_text,
+            write_file_text,
             read_archive_entries,
             rename_entry,
             delete_to_trash,
@@ -915,6 +924,17 @@ mod tests {
         fs::write(&f, [0xff, 0xfe, 0x00, 0x01]).unwrap();
         let r = read_file_text(f.to_string_lossy().to_string(), 1024);
         assert!(r.is_err(), "non-UTF-8 content must error");
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn write_file_text_replaces_contents() {
+        let d = scratch("write_txt");
+        let f = d.join("note.txt");
+        fs::write(&f, b"old text").unwrap();
+        let n = write_file_text(f.to_string_lossy().to_string(), "brand new".to_string()).unwrap();
+        assert_eq!(n, 9);
+        assert_eq!(fs::read_to_string(&f).unwrap(), "brand new");
         let _ = fs::remove_dir_all(&d);
     }
 

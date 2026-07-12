@@ -14,6 +14,8 @@
   export let loadText: (path: string) => Promise<string> = async () => "";
   /** List an archive's entries (a backend command in the app). */
   export let loadEntries: (path: string) => Promise<ArchiveEntry[]> = async () => [];
+  /** Save edited text back to a file (a backend command in the app). */
+  export let saveText: (path: string, contents: string) => Promise<void> = async () => {};
 
   /** Cap the number of CSV rows rendered so a huge sheet can't lock the pane. */
   const CSV_ROW_CAP = 200;
@@ -77,6 +79,55 @@
   }
 
   $: csvRows = provider.kind === "csv" && textState === "idle" ? parseCsv(text) : [];
+
+  // ---- editing ----
+  let editing = false;
+  let draft = "";
+  let saving = false;
+  let saveError = "";
+  let lastPath = "";
+
+  $: dirty = draft !== text;
+
+  // Leave edit mode (without saving) whenever the selected file changes.
+  $: if (entry && entry.path !== lastPath) {
+    lastPath = entry.path;
+    editing = false;
+    saveError = "";
+  }
+
+  function startEdit() {
+    draft = text;
+    saveError = "";
+    editing = true;
+  }
+
+  function cancelEdit() {
+    editing = false;
+    saveError = "";
+  }
+
+  async function save() {
+    if (!entry || !dirty || saving) return;
+    saving = true;
+    saveError = "";
+    try {
+      await saveText(entry.path, draft);
+      text = draft;
+      editing = false;
+    } catch {
+      saveError = "Couldn't save the file.";
+    } finally {
+      saving = false;
+    }
+  }
+
+  function onEditorKeydown(e: KeyboardEvent) {
+    if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "s") {
+      e.preventDefault();
+      save();
+    }
+  }
 </script>
 
 <aside class="preview">
@@ -115,27 +166,47 @@
       <p class="preview-note">Loading preview…</p>
     {:else if textState === "error"}
       <p class="preview-note">Can't preview this file.</p>
-    {:else if provider.kind === "csv"}
-      <div class="preview-table-wrap">
-        <table class="preview-table">
-          <tbody>
-            {#each csvRows.slice(0, CSV_ROW_CAP) as r}
-              <tr>{#each r as cell}<td>{cell}</td>{/each}</tr>
-            {/each}
-          </tbody>
-        </table>
-        {#if csvRows.length > CSV_ROW_CAP}
-          <p class="preview-note">Showing first {CSV_ROW_CAP} of {csvRows.length} rows.</p>
-        {/if}
+    {:else if editing}
+      <div class="preview-edit-bar">
+        <button class="editbtn primary" disabled={!dirty || saving} on:click={save}
+          >{saving ? "Saving…" : "Save"}</button>
+        <button class="editbtn" on:click={cancelEdit}>Cancel</button>
+        {#if saveError}<span class="edit-err">{saveError}</span>{/if}
       </div>
-    {:else if provider.kind === "json"}
-      <pre class="preview-text">{prettyJson(text)}</pre>
-    {:else if provider.kind === "markdown"}
-      <!-- Sanitized by DOMPurify in renderMarkdown before injection. -->
-      <div class="preview-markdown">{@html renderMarkdown(text)}</div>
+      <textarea
+        class="preview-editor"
+        bind:value={draft}
+        on:keydown={onEditorKeydown}
+        spellcheck="false"
+      ></textarea>
     {:else}
-      <!-- highlightCode escapes the source, so the HTML is safe to inject. -->
-      <pre class="preview-text"><code>{@html highlightCode(text, entry.extension)}</code></pre>
+      {#if provider.editable}
+        <div class="preview-edit-bar">
+          <button class="editbtn" on:click={startEdit}>Edit</button>
+        </div>
+      {/if}
+      {#if provider.kind === "csv"}
+        <div class="preview-table-wrap">
+          <table class="preview-table">
+            <tbody>
+              {#each csvRows.slice(0, CSV_ROW_CAP) as r}
+                <tr>{#each r as cell}<td>{cell}</td>{/each}</tr>
+              {/each}
+            </tbody>
+          </table>
+          {#if csvRows.length > CSV_ROW_CAP}
+            <p class="preview-note">Showing first {CSV_ROW_CAP} of {csvRows.length} rows.</p>
+          {/if}
+        </div>
+      {:else if provider.kind === "json"}
+        <pre class="preview-text">{prettyJson(text)}</pre>
+      {:else if provider.kind === "markdown"}
+        <!-- Sanitized by DOMPurify in renderMarkdown before injection. -->
+        <div class="preview-markdown">{@html renderMarkdown(text)}</div>
+      {:else}
+        <!-- highlightCode escapes the source, so the HTML is safe to inject. -->
+        <pre class="preview-text"><code>{@html highlightCode(text, entry.extension)}</code></pre>
+      {/if}
     {/if}
   {:else}
     <slot />
@@ -190,6 +261,37 @@
     margin: auto;
     color: var(--text-faint);
     padding: 12px;
+  }
+  .preview-edit-bar {
+    display: flex;
+    gap: 6px;
+    align-items: center;
+    padding: 6px 8px;
+    border-bottom: 1px solid var(--border);
+    flex: none;
+  }
+  .editbtn {
+    padding: 4px 10px;
+    border: 1px solid var(--border-strong);
+    border-radius: var(--radius);
+    font-size: 12px;
+  }
+  .editbtn.primary { background: var(--accent); color: #fff; border-color: var(--accent); }
+  .editbtn:disabled { opacity: 0.5; }
+  .edit-err { color: #c42b1c; font-size: 12px; }
+  .preview-editor {
+    flex: 1;
+    width: 100%;
+    resize: none;
+    border: none;
+    outline: none;
+    padding: 12px;
+    font-family: var(--mono, ui-monospace, monospace);
+    font-size: 12px;
+    line-height: 1.5;
+    color: var(--text);
+    background: var(--surface);
+    tab-size: 2;
   }
   .preview-markdown {
     padding: 12px 16px;

@@ -1,5 +1,5 @@
 import { describe, it, expect, vi } from "vitest";
-import { render, screen, waitFor } from "@testing-library/svelte";
+import { render, screen, waitFor, fireEvent } from "@testing-library/svelte";
 import PreviewPane from "./PreviewPane.svelte";
 import type { DirEntry } from "../types";
 
@@ -154,6 +154,44 @@ describe("PreviewPane", () => {
       expect(firstCells).toContain("sub/");
     });
     expect(loadEntries).toHaveBeenCalledWith("C:\\d\\b.zip");
+  });
+
+  it("shows an Edit button for an editable file and none for an image (CPE-068)", async () => {
+    const { container: editableC } = render(PreviewPane, {
+      entry: entry({ name: "a.txt", path: "C:\\d\\a.txt", extension: "txt" }),
+      loadText: async () => "hello",
+    });
+    await waitFor(() =>
+      expect([...editableC.querySelectorAll("button")].some((b) => b.textContent === "Edit")).toBe(true),
+    );
+
+    const { container: imageC } = render(PreviewPane, {
+      entry: entry({ name: "p.png", path: "C:\\d\\p.png", extension: "png" }),
+      assetUrl: (p: string) => `asset://${p}`,
+    });
+    expect([...imageC.querySelectorAll("button")].some((b) => b.textContent === "Edit")).toBe(false);
+  });
+
+  it("edits and saves via saveText (CPE-068)", async () => {
+    const saveText = vi.fn(async () => {});
+    const { container, getByText } = render(PreviewPane, {
+      entry: entry({ name: "a.txt", path: "C:\\d\\a.txt", extension: "txt" }),
+      loadText: async () => "original",
+      saveText,
+    });
+
+    await waitFor(() => getByText("Edit"));
+    await fireEvent.click(getByText("Edit"));
+
+    const textarea = (await waitFor(() => {
+      const el = container.querySelector("textarea.preview-editor");
+      expect(el).toBeTruthy();
+      return el as HTMLTextAreaElement;
+    }));
+    await fireEvent.input(textarea, { target: { value: "edited content" } });
+    await fireEvent.click(getByText("Save"));
+
+    await waitFor(() => expect(saveText).toHaveBeenCalledWith("C:\\d\\a.txt", "edited content"));
   });
 
   it("renders the fallback (no img/pre) for a folder", () => {
