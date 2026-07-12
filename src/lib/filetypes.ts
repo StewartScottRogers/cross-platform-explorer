@@ -57,6 +57,9 @@ export const CATEGORY_BY_EXT: Record<string, FileCategory> = {
   jsonl: "code", tsv: "spreadsheet", tab: "spreadsheet",
   // XML- and JSON-derived data formats (CPE-082/094/206/207/208/211)
   geojson: "code", gpx: "code", kml: "code", musicxml: "code", plist: "code",
+  // infra / config formats (CPE-191/192/193)
+  tf: "code", hcl: "code", tfvars: "code", dhall: "code",
+  jsonnet: "code", libsonnet: "code",
   // archives
   zip: "archive", rar: "archive", "7z": "archive", tar: "archive", gz: "archive",
   xz: "archive", bz2: "archive", zst: "archive", tgz: "archive",
@@ -101,6 +104,8 @@ export const TYPE_NAME_BY_EXT: Record<string, string> = {
   sql: "SQL script", mk: "Makefile",
   geojson: "GeoJSON file", gpx: "GPX GPS track", kml: "KML geographic data",
   musicxml: "MusicXML score", plist: "Apple property list",
+  tf: "Terraform file", hcl: "HCL file", tfvars: "Terraform variables",
+  dhall: "Dhall config", jsonnet: "Jsonnet file", libsonnet: "Jsonnet library",
   zip: "Compressed (zipped) Folder", rar: "RAR archive", "7z": "7z archive",
   tar: "TAR archive", gz: "GZ archive", xz: "XZ archive", bz2: "BZ2 archive",
   zst: "Zstandard archive", tgz: "Gzipped TAR archive",
