@@ -25,7 +25,8 @@
     provider.kind === "text" ||
     provider.kind === "markdown" ||
     provider.kind === "json" ||
-    provider.kind === "csv";
+    provider.kind === "csv" ||
+    provider.kind === "tsv";
 
   let text = "";
   let textState: "idle" | "loading" | "error" = "idle";
@@ -78,7 +79,10 @@
     }
   }
 
-  $: csvRows = provider.kind === "csv" && textState === "idle" ? parseCsv(text) : [];
+  $: tableRows =
+    textState === "idle" && (provider.kind === "csv" || provider.kind === "tsv")
+      ? parseCsv(text, provider.kind === "tsv" ? "\t" : ",")
+      : [];
 
   // ---- editing ----
   let editing = false;
@@ -185,17 +189,17 @@
           <button class="editbtn" on:click={startEdit}>Edit</button>
         </div>
       {/if}
-      {#if provider.kind === "csv"}
+      {#if provider.kind === "csv" || provider.kind === "tsv"}
         <div class="preview-table-wrap">
           <table class="preview-table">
             <tbody>
-              {#each csvRows.slice(0, CSV_ROW_CAP) as r}
+              {#each tableRows.slice(0, CSV_ROW_CAP) as r}
                 <tr>{#each r as cell}<td>{cell}</td>{/each}</tr>
               {/each}
             </tbody>
           </table>
-          {#if csvRows.length > CSV_ROW_CAP}
-            <p class="preview-note">Showing first {CSV_ROW_CAP} of {csvRows.length} rows.</p>
+          {#if tableRows.length > CSV_ROW_CAP}
+            <p class="preview-note">Showing first {CSV_ROW_CAP} of {tableRows.length} rows.</p>
           {/if}
         </div>
       {:else if provider.kind === "json"}

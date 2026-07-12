@@ -16,6 +16,7 @@ export type PreviewKind =
   | "pdf"
   | "json"
   | "csv"
+  | "tsv"
   | "archive"
   | "markdown"
   | "text"
@@ -92,6 +93,13 @@ export const providers: PreviewProvider[] = [
     kind: "csv",
     editable: true,
     canPreview: (e) => !e.is_dir && e.extension === "csv",
+  },
+  {
+    id: "tsv",
+    label: "TSV",
+    kind: "tsv",
+    editable: true,
+    canPreview: (e) => !e.is_dir && (e.extension === "tsv" || e.extension === "tab"),
   },
   {
     id: "archive",

@@ -52,6 +52,9 @@ export const CATEGORY_BY_EXT: Record<string, FileCategory> = {
   proto: "code", nginx: "code", nix: "code", styl: "code", hbs: "code",
   twig: "code", xsl: "code", xslt: "code", json5: "code", jsonc: "code",
   ron: "code",
+  // data/config text (CPE-083..115)
+  diff: "code", patch: "code", properties: "code", ndjson: "code",
+  jsonl: "code", tsv: "spreadsheet", tab: "spreadsheet",
   // archives
   zip: "archive", rar: "archive", "7z": "archive", tar: "archive", gz: "archive",
   xz: "archive", bz2: "archive", zst: "archive", tgz: "archive",
@@ -115,7 +118,7 @@ const CODE_FILENAMES = new Set([
   "dockerfile", "containerfile", "makefile", "gnumakefile", "cmakelists.txt",
   "rakefile", "gemfile", "brewfile", "procfile", "vagrantfile",
   ".gitignore", ".gitattributes", ".gitconfig", ".gitmodules",
-  ".npmrc", ".yarnrc", ".editorconfig",
+  ".npmrc", ".yarnrc", ".editorconfig", ".env",
   ".bashrc", ".zshrc", ".bash_profile", ".profile",
 ]);
 

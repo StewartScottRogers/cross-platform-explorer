@@ -37,4 +37,11 @@ describe("parseCsv", () => {
   it("returns nothing for empty input", () => {
     expect(parseCsv("")).toEqual([]);
   });
+
+  it("supports a custom delimiter (TSV)", () => {
+    expect(parseCsv("a\tb\n1\t2", "\t")).toEqual([
+      ["a", "b"],
+      ["1", "2"],
+    ]);
+  });
 });

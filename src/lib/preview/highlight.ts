@@ -89,7 +89,8 @@ const LANG_BY_EXT: Record<string, string> = {
   prolog: "prolog", pro: "prolog",
   // data / config / build / misc
   yml: "yaml", yaml: "yaml", toml: "ini", ini: "ini", cfg: "ini",
-  editorconfig: "ini", sql: "sql", graphql: "graphql", gql: "graphql",
+  editorconfig: "ini", properties: "ini", ndjson: "json", jsonl: "json",
+  sql: "sql", graphql: "graphql", gql: "graphql",
   proto: "protobuf", cmake: "cmake", nginx: "nginx",
   mk: "makefile", diff: "diff", patch: "diff",
   md: "markdown", markdown: "markdown",
@@ -102,6 +103,7 @@ const LANG_BY_FILENAME: Record<string, string> = {
   "cmakelists.txt": "cmake",
   gemfile: "ruby", rakefile: "ruby",
   ".gitconfig": "ini", ".editorconfig": "ini", ".npmrc": "ini", ".yarnrc": "ini",
+  ".env": "ini",
   ".bashrc": "bash", ".zshrc": "bash", ".bash_profile": "bash", ".profile": "bash",
 };
 
