@@ -17,6 +17,8 @@
   export let loadEntries: (path: string) => Promise<ArchiveEntry[]> = async () => [];
   /** Save edited text back to a file (a backend command in the app). */
   export let saveText: (path: string, contents: string) => Promise<void> = async () => {};
+  /** Read a read-only text summary of a binary file (a backend command in the app). */
+  export let loadInfo: (path: string) => Promise<string> = async () => "";
 
   /** Cap the number of CSV rows rendered so a huge sheet can't lock the pane. */
   const CSV_ROW_CAP = 200;
@@ -37,11 +39,30 @@
   let entriesState: "idle" | "loading" | "error" = "idle";
   let entryReqId = 0;
 
+  let info = "";
+  let infoState: "idle" | "loading" | "error" = "idle";
+  let infoReqId = 0;
+
   // Load text whenever the selected entry (for a text-based provider) changes.
   // A monotonically increasing request id discards any load superseded by a
   // newer selection.
   $: if (entry && needsText) loadTextFor(entry);
   $: if (entry && provider.kind === "archive") loadEntriesFor(entry);
+  $: if (entry && provider.kind === "info") loadInfoFor(entry);
+
+  async function loadInfoFor(e: DirEntry) {
+    const mine = ++infoReqId;
+    infoState = "loading";
+    try {
+      const t = await loadInfo(e.path);
+      if (mine !== infoReqId) return;
+      info = t;
+      infoState = "idle";
+    } catch {
+      if (mine !== infoReqId) return;
+      infoState = "error";
+    }
+  }
 
   async function loadTextFor(e: DirEntry) {
     const mine = ++reqId;
@@ -289,6 +310,14 @@
         </table>
         <p class="preview-note">{entries.length} item{entries.length === 1 ? "" : "s"}</p>
       </div>
+    {/if}
+  {:else if provider.kind === "info" && entry}
+    {#if infoState === "loading"}
+      <p class="preview-note">Loading preview…</p>
+    {:else if infoState === "error"}
+      <p class="preview-note">Can't preview this file.</p>
+    {:else}
+      <pre class="preview-text" bind:this={textContentEl}>{info}</pre>
     {/if}
   {:else if needsText && entry}
     {#if textState === "loading"}

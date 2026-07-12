@@ -509,6 +509,11 @@
     return invoke<ArchiveEntry[]>("read_archive_entries", { path });
   }
 
+  /** Read a read-only text summary of a binary file for the preview pane. */
+  function loadPreviewInfo(path: string): Promise<string> {
+    return invoke<string>("read_preview_info", { path });
+  }
+
   /** Save edited text back to a file, then refresh so size/date update. */
   async function savePreviewText(path: string, contents: string): Promise<void> {
     await invoke("write_file_text", { path, contents });
@@ -957,6 +962,7 @@
           assetUrl={convertFileSrc}
           loadText={loadPreviewText}
           loadEntries={loadArchiveEntries}
+          loadInfo={loadPreviewInfo}
           saveText={savePreviewText}
         >
           <DetailsPane selected={selectedEntries} {folderName} {itemCount} />
