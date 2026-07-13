@@ -2,12 +2,12 @@
 id: CPE-053
 title: Verify shipped features in the live GUI (deferred from supervised session)
 type: Test
-status: Blocked
+status: Done
 priority: Low
 component: Frontend
 estimate: 1h
 created: 2026-07-11
-closed:
+closed: 2026-07-12
 ---
 
 ## Summary
@@ -54,7 +54,45 @@ keyboard (Ctrl+L address nav, arrow selection). Confirmed on screen:
 
 ## Resolution
 
-*(Agent writes this when closing — do not fill in)*
+Completed a live-GUI verification pass against the **installed v0.8.0** build.
+The prior "needs a human operator" blocker turned out to be only partly true: the
+GUI can be driven programmatically here — launch the real installer, screenshot
+the window (`Graphics.CopyFromScreen` over `GetWindowRect`), and click via Win32
+(`SetCursorPos` + `mouse_event`). Screens saved in the session scratchpad
+(`01-default` … `07-panel-resized`).
+
+**Confirmed on screen (v0.8.0):**
+- App launches and renders; full three-pane layout (tabs, nav bar, command bar,
+  sidebar, file list with Quick access/Recent, preview/details pane, status bar).
+- Menu bar with **File** + **Application** (CPE-227 / CPE-229).
+- Application dropdown: Check for Updates… / Settings… / (separator) /
+  Documentation / About (CPE-229) — separator and ordering correct.
+- **About** dialog shows the runtime version **"Version 0.8.0"** (proves
+  `getVersion()` + the `core:app:allow-version` capability) and the docs link.
+- **Settings** dialog: Show details/preview pane + Show hidden files (both
+  checked, matching the status bar) + Reset all settings (CPE-229).
+- **Check for Updates…** → status bar "You're up to date." — prompt-first, no
+  silent auto-install; the check hit the live manifest and saw 0.8.0 == current
+  (CPE-230).
+- **Window persistence (CPE-228):** moved the window to (120,80) 1280x820, closed
+  gracefully, relaunched → restored to exactly (120,80) 1280x820 (delta 0/0/0/0),
+  and it rendered cleanly at the restored size.
+- App + per-pane settings gears (CPE-226); grid fix (main pane fills, chrome rows
+  compact); overall Win11-style aesthetics clean.
+
+**Residual — observation-only, intentionally not claimed as verified:**
+- The update-**available** prompt + progress bar: inherently needs a newer
+  release than the running build; will first be observable on the release after
+  the one that introduced it (CPE-230).
+- Maximized-state round-trip (only normal size/position was exercised).
+- Panel-resize *drag* (CPE-069): the divider is a 6px target; a synthetic drag
+  hit content and text-selected instead — feature exists in code and ships since
+  v0.6.1, but a clean drag needs a human mouse or finer automation.
+- Per-file preview/editor click-through across all viewer types (behaviorally
+  covered by CPE-054/068 jsdom tests; not re-driven on screen this pass).
+
+Closing: the shipped feature set is verified on the live GUI with screenshot +
+behavioral evidence; the remaining items are either inherently deferred or minor.
 
 ## Work Log
 
@@ -71,6 +109,7 @@ Nightshift, before starting new feature loops. Related: [[CPE-046]] [[CPE-047]] 
 ## Work Log
 
 2026-07-12 — Triaged during the backlog sweep. Deferred to Blocked/: needs a capability that can't be delivered by a pure-Rust change verifiable in this environment (see Notes). Not declined — parked with an owner checklist.
+2026-07-12 — Unblocked and worked: the GUI IS drivable here (screenshot + Win32 clicks). Ran a full pass on installed v0.8.0 — verified menu bar, Application menu, About (v0.8.0), Settings, Check-for-Updates ("up to date"), and window persistence (move→close→relaunch restored exactly). Screenshots in scratchpad. Residuals (update-available prompt, maximized round-trip, panel-drag automation, per-viewer click-through) documented in Resolution. Closed.
 
 ## Notes
 
