@@ -64,11 +64,15 @@
 
 <script>/*__XTERM_JS__*/</script>
 <script>/*__FIT_JS__*/</script>
+<script>/*__WEBGL_JS__*/</script>
+<script>/*__SEARCH_JS__*/</script>
+<script>/*__LINKS_JS__*/</script>
+<script>/*__UNICODE_JS__*/</script>
 <script>
 "use strict";
 const $ = (id) => document.getElementById(id);
 let catalog = null;
-let session = null, offset = 0, polling = null;
+let session = null;
 
 async function api(path, opts) {
   const r = await fetch(path, opts);
@@ -124,21 +128,29 @@ async function load() {
   if (last) { if (last.provider) $("provider").value = last.provider; if (last.model) $("model").value = last.model; }
 }
 
-// --- Terminal (xterm.js) --------------------------------------------------------------
-let term = null, fitAddon = null;
+// --- Terminal (xterm.js over a WebSocket) ---------------------------------------------
+let term = null, fitAddon = null, searchAddon = null, ws = null;
 
 function initTerm() {
   if (term) return;
   term = new Terminal({
     fontFamily: "ui-monospace, Consolas, 'Cascadia Mono', monospace",
-    fontSize: 13, cursorBlink: true, scrollback: 8000,
+    fontSize: 13, cursorBlink: true, scrollback: 50000,
     theme: { background: "#0d0d0d", foreground: "#d8d8d8" },
   });
   fitAddon = new FitAddon.FitAddon();
+  searchAddon = new SearchAddon.SearchAddon();
   term.loadAddon(fitAddon);
+  term.loadAddon(searchAddon);
+  term.loadAddon(new WebLinksAddon.WebLinksAddon());
+  term.loadAddon(new Unicode11Addon.Unicode11Addon());
+  term.unicode.activeVersion = "11";
   term.open($("term"));
+  // GPU renderer for lively scrolling of long sessions; fall back to DOM if unavailable.
+  try { term.loadAddon(new WebglAddon.WebglAddon()); } catch (_) {}
   fitAddon.fit();
-  term.onData((d) => sendInput(d));           // keystrokes -> PTY
+  term.onData((d) => { if (ws && ws.readyState === 1) ws.send(d); });   // keystrokes -> PTY
+  term.attachCustomKeyEventHandler(onKey);
   window.addEventListener("resize", refit);
 }
 
@@ -148,11 +160,37 @@ function refit() {
   if (session) sendResize(term.rows, term.cols);
 }
 
-function b64ToBytes(b64) {
-  const bin = atob(b64);
-  const out = new Uint8Array(bin.length);
-  for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
-  return out;
+// Ctrl+Shift+C/V copy-paste, Ctrl+F find. Returning false stops xterm passing the key on.
+function onKey(e) {
+  if (e.type !== "keydown") return true;
+  const k = e.key.toLowerCase();
+  if (e.ctrlKey && e.shiftKey && k === "c") {
+    const sel = term.getSelection();
+    if (sel) navigator.clipboard.writeText(sel).catch(() => {});
+    return false;
+  }
+  if (e.ctrlKey && e.shiftKey && k === "v") {
+    navigator.clipboard.readText().then((t) => { if (ws && ws.readyState === 1) ws.send(t); }).catch(() => {});
+    return false;
+  }
+  if (e.ctrlKey && k === "f") {
+    const q = window.prompt("Find in terminal:");
+    if (q) searchAddon.findNext(q);
+    return false;
+  }
+  return true;
+}
+
+function connectWs() {
+  const proto = location.protocol === "https:" ? "wss" : "ws";
+  ws = new WebSocket(proto + "://" + location.host + "/api/session/" + session + "/ws");
+  ws.binaryType = "arraybuffer";
+  ws.onmessage = (e) => {
+    if (typeof e.data === "string") term.write(e.data);
+    else term.write(new Uint8Array(e.data));
+  };
+  ws.onopen = () => refit();
+  ws.onclose = () => setMsg("Session ended.", false);
 }
 
 async function launch() {
@@ -169,30 +207,14 @@ async function launch() {
   setMsg("Launching…", true);
   try {
     const res = await api("/api/launch", { method: "POST", body: JSON.stringify(body) });
-    session = res.session; offset = 0;
-    initTerm(); term.reset(); refit(); term.focus();
+    session = res.session;
+    initTerm(); term.reset(); term.focus();
+    if (ws) { try { ws.close(); } catch (_) {} }
+    connectWs();
     if (res.dangerousFlags && res.dangerousFlags.length)
       setMsg("Launched with elevated flags: " + res.dangerousFlags.join(", "), false);
-    else setMsg("Session running — click the terminal and type.", true);
-    startPolling();
+    else setMsg("Session running — type here. Ctrl+Shift+C/V copy-paste, Ctrl+F find.", true);
   } catch (e) { setMsg("Launch failed: " + e.message); }
-}
-
-function startPolling() {
-  clearInterval(polling);
-  polling = setInterval(async () => {
-    if (!session || !term) return;
-    try {
-      const r = await api("/api/session/" + session + "/output?since=" + offset);
-      if (r.data) term.write(b64ToBytes(r.data));   // raw bytes -> emulator
-      offset = r.offset;
-    } catch (_) { clearInterval(polling); }
-  }, 120);
-}
-
-async function sendInput(data) {
-  if (!session) return;
-  try { await fetch("/api/session/" + session + "/input", { method: "POST", body: data }); } catch (_) {}
 }
 
 async function sendResize(rows, cols) {

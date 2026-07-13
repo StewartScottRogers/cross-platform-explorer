@@ -9,7 +9,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use ai_console::agents::AgentRegistry;
-use ai_console::console::{route, ConsoleState};
+use ai_console::console::{route, ws_route, ConsoleState};
 use ai_console::{hello, http, on_message, Reaction};
 use sidecar_contract::{Envelope, Event, Lifecycle, Message};
 
@@ -75,7 +75,7 @@ fn main() {
         // has side effects.
         if matches!(env.message, Message::Welcome(_)) {
             write_env(&mut stdout, &Envelope::new(0, Message::Lifecycle(Lifecycle::Ready)));
-            if let Ok(server) = http::serve(console_state(), route) {
+            if let Ok(server) = http::serve(console_state(), route, ws_route) {
                 write_env(
                     &mut stdout,
                     &Envelope::new(0, Message::Event(Event::Status { state: format!("ui:{}", server.url()) })),

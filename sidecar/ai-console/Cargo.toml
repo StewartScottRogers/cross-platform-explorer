@@ -22,5 +22,9 @@ portable-pty = "0.8"
 # the exact byte stream (ANSI + partial UTF-8) intact rather than lossy text (CPE-333).
 base64 = "0.22"
 
+# WebSocket handshake accept-key = base64(sha1(client-key + magic GUID)) — the only crypto
+# needed; the frame codec is hand-rolled so we own the threading (CPE-334).
+sha1 = "0.10"
+
 [dev-dependencies]
 tempfile = "3"

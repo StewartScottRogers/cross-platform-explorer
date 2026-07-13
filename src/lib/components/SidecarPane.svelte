@@ -2,12 +2,14 @@
   /**
    * Host pane that embeds a sidecar's OWN served UI in a sandboxed iframe (CPE-271,
    * host half). The `url` is the loopback address a sidecar announces via its
-   * `ui:<url>` Status event once it's running. The iframe is sandboxed WITHOUT
-   * `allow-same-origin`, so the sidecar's page runs in an opaque origin and cannot
-   * reach the explorer's window — the isolation the ADR requires.
+   * `ui:<url>` Status event once it's running.
    *
-   * Note: for the frame to load, the app CSP (tauri.conf.json) must permit
-   * `frame-src http://127.0.0.1:*` — wired with the runtime spawn plumbing.
+   * The iframe is sandboxed to `allow-scripts allow-forms allow-same-origin` (CPE-334):
+   * `allow-same-origin` is required for the terminal's clipboard (copy/paste) and WebGL
+   * to work. This is a deliberate, scoped trade-off — the page is FIRST-PARTY content the
+   * sidecar serves on loopback (127.0.0.1) only; it still cannot navigate or script the
+   * host window, and the sidecar remains a separate OS process with brokered capabilities.
+   * Documented in docs/security/threat-model.md.
    */
   export let url: string | null = null;
   export let title = "Sidecar";
@@ -20,7 +22,7 @@
       class="frame"
       src={url}
       title={`${title} UI`}
-      sandbox="allow-scripts allow-forms"
+      sandbox="allow-scripts allow-forms allow-same-origin"
       referrerpolicy="no-referrer"
     />
   {:else}

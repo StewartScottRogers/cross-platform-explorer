@@ -63,7 +63,7 @@ surface. **Status legend:** ✅ implemented & tested · 🟡 partial/gated · �
 
 | STRIDE | Threat | Mitigation | Status |
 |--------|--------|-----------|--------|
-| **E**oP (UI escape) | The sidecar UI reaches explorer internals / Tauri APIs. | Embedded in `<iframe sandbox="allow-scripts allow-forms">` **without** `allow-same-origin` ⇒ opaque origin: no access to the parent DOM, cookies, storage, or `window.__TAURI__`. The iframe cannot invoke Tauri commands. | ✅ |
+| **E**oP (UI escape) | The sidecar UI reaches explorer internals / Tauri APIs. | Embedded in `<iframe sandbox="allow-scripts allow-forms allow-same-origin">`. The frame's origin is the sidecar's **loopback URL**, which differs from the explorer's app origin, so the same-origin policy still blocks access to the parent DOM, storage, and `window.__TAURI__` — it cannot invoke Tauri commands. `allow-same-origin` (CPE-334) lets the frame use clipboard + WebGL **for its own loopback origin only**; it does not make it same-origin with the host. No `allow-top-navigation`/`allow-popups`. | ✅ |
 | **Spoofing** | UI URL points somewhere malicious. | `parseUiAnnouncement` accepts **loopback-only** URLs; the sidecar serves its own UI on `127.0.0.1`. | ✅ |
 | **I**nfo disclosure | UI exfiltrates via network. | Opaque-origin sandbox + loopback UI; no secrets are delivered to the webview (§3). | ✅ |
 | **T**ampering | Parent page tampered by the frame. | Sandbox blocks top-navigation and same-origin access; host↔UI messaging is not wired to privileged APIs. | ✅ |
@@ -94,7 +94,7 @@ surface. **Status legend:** ✅ implemented & tested · 🟡 partial/gated · �
 | No secret in logs / UI | ✅ `Redactor` + secrets never delivered to the webview. |
 | No cross-sidecar reach | ✅ Per-process isolation; namespaced storage/secrets; no cross-sidecar channel. |
 | No unconsented code execution | 🟡 Trust/verification ✅; the interactive **consent gate UI is CPE-296 (⛔)**. Bundled first-party is auto-consented; user/third-party manifests must not run until CPE-296 lands. |
-| No UI escape to explorer | ✅ Opaque-origin sandboxed iframe, loopback-only. |
+| No UI escape to explorer | ✅ Sandboxed iframe; frame runs on its own loopback origin (≠ host origin), so cross-origin policy blocks host access even with `allow-same-origin` (CPE-334). |
 
 ## 9. Gaps → tickets (sign-off blockers)
 

@@ -6,17 +6,20 @@
 //! embeds this page in a *sandboxed* iframe (opaque origin ⇒ requests carry `Origin:
 //! null`). Loopback-only, so it isn't reachable off the machine.
 
-use std::io::{BufRead, BufReader, Write};
-use std::net::TcpListener;
+use std::io::{self, BufRead, BufReader, Read, Write};
+use std::net::{TcpListener, TcpStream};
 use std::sync::Arc;
 use std::thread::{self, JoinHandle};
 
-/// A parsed HTTP request: method, path (no query), decoded query pairs, and body.
+use base64::Engine as _;
+
+/// A parsed HTTP request: method, path (no query), decoded query pairs, headers, and body.
 #[derive(Debug, Clone, Default)]
 pub struct Request {
     pub method: String,
     pub path: String,
     pub query: Vec<(String, String)>,
+    pub headers: Vec<(String, String)>,
     pub body: String,
 }
 
@@ -24,6 +27,21 @@ impl Request {
     /// The value of the first query parameter named `key`, if present.
     pub fn query(&self, key: &str) -> Option<&str> {
         self.query.iter().find(|(k, _)| k == key).map(|(_, v)| v.as_str())
+    }
+
+    /// A header value by case-insensitive name.
+    pub fn header(&self, name: &str) -> Option<&str> {
+        self.headers
+            .iter()
+            .find(|(k, _)| k.eq_ignore_ascii_case(name))
+            .map(|(_, v)| v.as_str())
+    }
+
+    /// Whether this is a WebSocket upgrade request.
+    pub fn is_websocket_upgrade(&self) -> bool {
+        self.method == "GET"
+            && self.header("upgrade").is_some_and(|u| u.eq_ignore_ascii_case("websocket"))
+            && self.header("sec-websocket-key").is_some()
     }
 }
 
@@ -111,6 +129,7 @@ pub fn read_request<R: BufRead>(reader: &mut R) -> Option<Request> {
     let method = parts.next()?.to_string();
     let target = parts.next()?.to_string();
 
+    let mut headers = Vec::new();
     let mut content_length = 0usize;
     loop {
         let mut line = String::new();
@@ -122,9 +141,11 @@ pub fn read_request<R: BufRead>(reader: &mut R) -> Option<Request> {
             break; // end of headers
         }
         if let Some((name, value)) = trimmed.split_once(':') {
-            if name.trim().eq_ignore_ascii_case("content-length") {
-                content_length = value.trim().parse().unwrap_or(0);
+            let (name, value) = (name.trim(), value.trim());
+            if name.eq_ignore_ascii_case("content-length") {
+                content_length = value.parse().unwrap_or(0);
             }
+            headers.push((name.to_string(), value.to_string()));
         }
     }
 
@@ -136,7 +157,7 @@ pub fn read_request<R: BufRead>(reader: &mut R) -> Option<Request> {
     }
 
     let (path, query) = parse_target(&target);
-    Some(Request { method, path, query, body })
+    Some(Request { method, path, query, headers, body })
 }
 
 /// A running UI server: the loopback port it listens on, and the accept thread.
@@ -152,9 +173,15 @@ impl UiServer {
     }
 }
 
-/// Serve `handler` over an ephemeral loopback port for the process's lifetime, sharing
-/// `state` across connections (one thread per connection).
-pub fn serve<S>(state: Arc<S>, handler: fn(&S, &Request) -> Response) -> Result<UiServer, String>
+/// Serve over an ephemeral loopback port for the process's lifetime, sharing `state`
+/// across connections (one thread per connection). Normal requests go to `handler`; a
+/// WebSocket upgrade is completed here and the raw stream is handed to `ws_handler`
+/// (which owns it for the session).
+pub fn serve<S>(
+    state: Arc<S>,
+    handler: fn(&S, &Request) -> Response,
+    ws_handler: fn(&S, &Request, TcpStream),
+) -> Result<UiServer, String>
 where
     S: Send + Sync + 'static,
 {
@@ -170,16 +197,128 @@ where
                     Err(_) => return,
                 });
                 let mut out = stream;
-                let resp = match read_request(&mut reader) {
-                    Some(req) if req.method == "OPTIONS" => Response::text(204, ""),
-                    Some(req) => handler(&state, &req),
-                    None => return,
-                };
-                let _ = write_response(&mut out, &resp);
+                match read_request(&mut reader) {
+                    Some(req) if req.method == "OPTIONS" => {
+                        let _ = write_response(&mut out, &Response::text(204, ""));
+                    }
+                    Some(req) if req.is_websocket_upgrade() => {
+                        let accept = ws_accept_key(req.header("sec-websocket-key").unwrap_or(""));
+                        let hs = format!(
+                            "HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\n\
+                             Connection: Upgrade\r\nSec-WebSocket-Accept: {accept}\r\n\r\n"
+                        );
+                        if out.write_all(hs.as_bytes()).is_ok() && out.flush().is_ok() {
+                            ws_handler(&state, &req, out); // hands off the upgraded stream
+                        }
+                    }
+                    Some(req) => {
+                        let _ = write_response(&mut out, &handler(&state, &req));
+                    }
+                    None => {}
+                }
             });
         }
     });
     Ok(UiServer { port, _handle: handle })
+}
+
+// ---- WebSocket (RFC 6455) — just what a terminal needs (CPE-334) --------------------
+
+/// Opcodes we handle.
+pub mod ws_op {
+    pub const TEXT: u8 = 0x1;
+    pub const BINARY: u8 = 0x2;
+    pub const CLOSE: u8 = 0x8;
+    pub const PING: u8 = 0x9;
+    pub const PONG: u8 = 0xA;
+}
+
+/// `Sec-WebSocket-Accept` = base64(sha1(client-key + magic GUID)).
+pub fn ws_accept_key(client_key: &str) -> String {
+    use sha1::{Digest, Sha1};
+    let mut h = Sha1::new();
+    h.update(client_key.as_bytes());
+    h.update(b"258EAFA5-E914-47DA-95CA-C5AB0DC85B11");
+    base64::engine::general_purpose::STANDARD.encode(h.finalize())
+}
+
+/// Write one server frame (FIN=1, unmasked).
+pub fn ws_write_frame(w: &mut impl Write, opcode: u8, payload: &[u8]) -> io::Result<()> {
+    let mut head = Vec::with_capacity(10);
+    head.push(0x80 | opcode);
+    let len = payload.len();
+    if len < 126 {
+        head.push(len as u8);
+    } else if len <= 0xFFFF {
+        head.push(126);
+        head.extend_from_slice(&(len as u16).to_be_bytes());
+    } else {
+        head.push(127);
+        head.extend_from_slice(&(len as u64).to_be_bytes());
+    }
+    w.write_all(&head)?;
+    w.write_all(payload)?;
+    w.flush()
+}
+
+/// One decoded inbound frame.
+pub struct WsFrame {
+    pub fin: bool,
+    pub opcode: u8,
+    pub payload: Vec<u8>,
+}
+
+/// Read one client frame (unmasking it). `Ok(None)` on end-of-stream.
+pub fn ws_read_frame(r: &mut impl Read) -> io::Result<Option<WsFrame>> {
+    let mut h = [0u8; 2];
+    if fill(r, &mut h)? {
+        return Ok(None);
+    }
+    let fin = h[0] & 0x80 != 0;
+    let opcode = h[0] & 0x0F;
+    let masked = h[1] & 0x80 != 0;
+    let mut len = (h[1] & 0x7F) as usize;
+    if len == 126 {
+        let mut e = [0u8; 2];
+        if fill(r, &mut e)? {
+            return Ok(None);
+        }
+        len = u16::from_be_bytes(e) as usize;
+    } else if len == 127 {
+        let mut e = [0u8; 8];
+        if fill(r, &mut e)? {
+            return Ok(None);
+        }
+        len = u64::from_be_bytes(e) as usize;
+    }
+    let mut mask = [0u8; 4];
+    if masked && fill(r, &mut mask)? {
+        return Ok(None);
+    }
+    let mut payload = vec![0u8; len];
+    if len > 0 && fill(r, &mut payload)? {
+        return Ok(None);
+    }
+    if masked {
+        for (i, b) in payload.iter_mut().enumerate() {
+            *b ^= mask[i & 3];
+        }
+    }
+    Ok(Some(WsFrame { fin, opcode, payload }))
+}
+
+/// Read exactly `buf.len()` bytes; `Ok(true)` if EOF was hit first.
+fn fill(r: &mut impl Read, buf: &mut [u8]) -> io::Result<bool> {
+    let mut filled = 0;
+    while filled < buf.len() {
+        match r.read(&mut buf[filled..]) {
+            Ok(0) => return Ok(true),
+            Ok(n) => filled += n,
+            Err(ref e) if e.kind() == io::ErrorKind::Interrupted => continue,
+            Err(e) => return Err(e),
+        }
+    }
+    Ok(false)
 }
 
 /// Write a response with permissive CORS headers (the page is a sandboxed, opaque-origin
@@ -244,7 +383,8 @@ mod tests {
         fn handler(_state: &(), req: &Request) -> Response {
             Response::text(200, format!("path={} q={:?}", req.path, req.query("x")))
         }
-        let server = serve(Arc::new(()), handler).unwrap();
+        fn ws_noop(_state: &(), _req: &Request, _stream: TcpStream) {}
+        let server = serve(Arc::new(()), handler, ws_noop).unwrap();
         // Do the exchange with a few retries: the whole test suite runs in parallel and
         // spawns many subprocesses, so a single loopback round-trip can occasionally be
         // starved. Retrying keeps this deterministic without a serial-test dependency.
@@ -267,6 +407,36 @@ mod tests {
         assert!(resp.contains("200 OK"), "resp: {resp}");
         assert!(resp.contains("Access-Control-Allow-Origin: *"));
         assert!(resp.contains("path=/hello q=Some(\"7\")"), "resp: {resp}");
+    }
+
+    #[test]
+    fn ws_accept_matches_rfc6455_example() {
+        // The canonical example from RFC 6455 §1.3.
+        assert_eq!(ws_accept_key("dGhlIHNhbXBsZSBub25jZQ=="), "s3pPLMBiTxaQ9kYGzzhZRbK+xOo=");
+    }
+
+    #[test]
+    fn ws_write_then_read_masked_roundtrip() {
+        // Server frames are unmasked, FIN + opcode + length + payload.
+        let mut buf = Vec::new();
+        ws_write_frame(&mut buf, ws_op::BINARY, b"hello").unwrap();
+        assert_eq!(buf[0], 0x80 | ws_op::BINARY);
+        assert_eq!(buf[1], 5);
+        assert_eq!(&buf[2..], b"hello");
+
+        // Client frames are masked — build one and confirm we unmask it.
+        let mask = [0x37u8, 0xfa, 0x21, 0x3d];
+        let payload = b"type me";
+        let mut frame = vec![0x80 | ws_op::TEXT, 0x80 | payload.len() as u8];
+        frame.extend_from_slice(&mask);
+        for (i, b) in payload.iter().enumerate() {
+            frame.push(b ^ mask[i & 3]);
+        }
+        let mut cur = std::io::Cursor::new(frame);
+        let f = ws_read_frame(&mut cur).unwrap().unwrap();
+        assert!(f.fin);
+        assert_eq!(f.opcode, ws_op::TEXT);
+        assert_eq!(f.payload, payload);
     }
 
     #[test]

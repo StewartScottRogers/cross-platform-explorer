@@ -6,24 +6,32 @@
 
 use std::collections::{BTreeMap, HashMap};
 use std::io::{Read, Write};
-use std::sync::{Arc, Mutex};
+use std::net::TcpStream;
+use std::sync::{mpsc, Arc, Mutex};
+use std::thread;
 
-use base64::Engine as _;
 use serde_json::{json, Value};
 
 use crate::agents::AgentRegistry;
-use crate::http::{Request, Response};
+use crate::http::{self, ws_op, Request, Response};
 use crate::lifecycle::{self, RealRunner};
 use crate::pty::PtySession;
 use crate::routing::LaunchContext;
 use crate::scope::{self, AgentLaunchRequest};
 
-/// A live agent session: the PTY (kept alive so the child isn't reaped), an append-only
-/// output buffer fed by a reader thread, and a handle to the PTY's input.
+/// Server-side scrollback tail kept per session, so reopening the pane replays recent
+/// history. Bounded so a very long session never grows host memory (CPE-334).
+const RING_CAP: usize = 512 * 1024;
+
+/// A live agent session. The PTY is kept alive (so the child isn't reaped); a reader
+/// thread streams its output to the currently-attached WebSocket AND into a bounded ring
+/// (for replay on reconnect). Input goes straight to the PTY writer.
 struct Session {
     pty: Mutex<PtySession>,
-    buffer: Arc<Mutex<Vec<u8>>>,
     writer: Mutex<Box<dyn Write + Send>>,
+    ring: Arc<Mutex<Vec<u8>>>,
+    /// The attached terminal's output channel, if any (one pane at a time).
+    live: Arc<Mutex<Option<mpsc::Sender<Vec<u8>>>>>,
 }
 
 /// Shared console state, held behind an `Arc` and served across HTTP connections.
@@ -144,16 +152,32 @@ impl ConsoleState {
             Err(e) => return bad(e),
         };
 
-        let buffer = Arc::new(Mutex::new(Vec::new()));
+        let ring: Arc<Mutex<Vec<u8>>> = Arc::new(Mutex::new(Vec::new()));
+        let live: Arc<Mutex<Option<mpsc::Sender<Vec<u8>>>>> = Arc::new(Mutex::new(None));
         {
-            let buffer = Arc::clone(&buffer);
-            std::thread::spawn(move || {
+            let ring = Arc::clone(&ring);
+            let live = Arc::clone(&live);
+            thread::spawn(move || {
                 let mut reader = reader;
-                let mut buf = [0u8; 4096];
+                let mut buf = [0u8; 8192];
                 loop {
                     match reader.read(&mut buf) {
                         Ok(0) | Err(_) => break,
-                        Ok(n) => buffer.lock().unwrap().extend_from_slice(&buf[..n]),
+                        Ok(n) => {
+                            let chunk = &buf[..n];
+                            {
+                                let mut r = ring.lock().unwrap();
+                                r.extend_from_slice(chunk);
+                                let over = r.len().saturating_sub(RING_CAP);
+                                if over > 0 {
+                                    r.drain(0..over);
+                                }
+                            }
+                            // Push live to the attached terminal, if any (drop on send error).
+                            if let Some(tx) = live.lock().unwrap().as_ref() {
+                                let _ = tx.send(chunk.to_vec());
+                            }
+                        }
                     }
                 }
             });
@@ -162,7 +186,7 @@ impl ConsoleState {
         let id = self.next_id();
         self.sessions.lock().unwrap().insert(
             id.clone(),
-            Arc::new(Session { pty: Mutex::new(session), buffer, writer: Mutex::new(writer) }),
+            Arc::new(Session { pty: Mutex::new(session), writer: Mutex::new(writer), ring, live }),
         );
         self.last_used.lock().unwrap().insert(
             cwd,
@@ -170,19 +194,6 @@ impl ConsoleState {
         );
 
         Response::json(json!({ "session": id, "dangerousFlags": dangerous }).to_string())
-    }
-
-    fn handle_output(&self, path: &str, since: Option<&str>) -> Response {
-        let id = session_id_from(path, "/output");
-        let since: usize = since.and_then(|s| s.parse().ok()).unwrap_or(0);
-        let sessions = self.sessions.lock().unwrap();
-        let Some(sess) = sessions.get(&id) else { return bad("no such session") };
-        let buf = sess.buffer.lock().unwrap();
-        let slice = if since <= buf.len() { &buf[since..] } else { &[][..] };
-        // Base64 the RAW bytes so xterm.js gets the exact stream (ANSI + partial UTF-8
-        // across poll boundaries) rather than lossy text (CPE-333).
-        let data = base64::engine::general_purpose::STANDARD.encode(slice);
-        Response::json(json!({ "offset": buf.len(), "data": data }).to_string())
     }
 
     fn handle_resize(&self, path: &str, body: &str) -> Response {
@@ -196,17 +207,6 @@ impl ConsoleState {
         match result {
             Ok(()) => Response::json("{\"ok\":true}"),
             Err(e) => bad(e),
-        }
-    }
-
-    fn handle_input(&self, path: &str, body: &str) -> Response {
-        let id = session_id_from(path, "/input");
-        let sessions = self.sessions.lock().unwrap();
-        let Some(sess) = sessions.get(&id) else { return bad("no such session") };
-        let mut w = sess.writer.lock().unwrap();
-        match w.write_all(body.as_bytes()).and_then(|_| w.flush()) {
-            Ok(()) => Response::json("{\"ok\":true}"),
-            Err(e) => bad(format!("write failed: {e}")),
         }
     }
 
@@ -255,17 +255,77 @@ pub fn route(state: &ConsoleState, req: &Request) -> Response {
         ("GET", "/api/catalog") => Response::json(state.catalog().to_string()),
         ("POST", "/api/launch") => state.handle_launch(&req.body),
         ("POST", "/api/install") => state.handle_install(&req.body),
-        ("GET", p) if p.starts_with("/api/session/") && p.ends_with("/output") => {
-            state.handle_output(p, req.query("since"))
-        }
-        ("POST", p) if p.starts_with("/api/session/") && p.ends_with("/input") => {
-            state.handle_input(p, &req.body)
-        }
         ("POST", p) if p.starts_with("/api/session/") && p.ends_with("/resize") => {
             state.handle_resize(p, &req.body)
         }
+        // Terminal I/O is a WebSocket at /api/session/{id}/ws (handled by `ws_route`).
         _ => Response::not_found(),
     }
+}
+
+/// The WebSocket terminal pump (CPE-334): stream PTY output to the browser and pipe
+/// browser input to the PTY, over one persistent connection. Owns `stream` for the
+/// session. Replays the session's ring buffer on connect, then streams live.
+pub fn ws_route(state: &ConsoleState, req: &Request, stream: TcpStream) {
+    let id = session_id_from(&req.path, "/ws");
+    let sess = match state.sessions.lock().unwrap().get(&id) {
+        Some(s) => Arc::clone(s),
+        None => return,
+    };
+
+    let write_stream = match stream.try_clone() {
+        Ok(s) => Arc::new(Mutex::new(s)),
+        Err(_) => return,
+    };
+    let mut read_stream = stream;
+
+    // Register this connection as the session's live output sink, and grab a replay
+    // snapshot of the ring under the same lock ordering.
+    let (tx, rx) = mpsc::channel::<Vec<u8>>();
+    let replay = sess.ring.lock().unwrap().clone();
+    *sess.live.lock().unwrap() = Some(tx);
+
+    // Output thread: replay recent scrollback, then forward live chunks until the channel
+    // closes (on disconnect) or the socket errors.
+    let out_handle = {
+        let ws = Arc::clone(&write_stream);
+        thread::spawn(move || {
+            if !replay.is_empty() {
+                let mut w = ws.lock().unwrap();
+                if http::ws_write_frame(&mut *w, ws_op::BINARY, &replay).is_err() {
+                    return;
+                }
+            }
+            while let Ok(chunk) = rx.recv() {
+                let mut w = ws.lock().unwrap();
+                if http::ws_write_frame(&mut *w, ws_op::BINARY, &chunk).is_err() {
+                    break;
+                }
+            }
+        })
+    };
+
+    // Input loop: browser keystrokes -> PTY. Answers pings; exits on close/EOF/error.
+    while let Ok(Some(frame)) = http::ws_read_frame(&mut read_stream) {
+        match frame.opcode {
+            ws_op::TEXT | ws_op::BINARY => {
+                if let Ok(mut w) = sess.writer.lock() {
+                    let _ = w.write_all(&frame.payload);
+                    let _ = w.flush();
+                }
+            }
+            ws_op::PING => {
+                let mut w = write_stream.lock().unwrap();
+                let _ = http::ws_write_frame(&mut *w, ws_op::PONG, &frame.payload);
+            }
+            ws_op::CLOSE => break,
+            _ => {}
+        }
+    }
+
+    // Detach: drop our sender so the output thread ends, and clear the live sink.
+    *sess.live.lock().unwrap() = None;
+    let _ = out_handle.join();
 }
 
 /// The launcher page — self-contained HTML/CSS/JS with xterm.js inlined (no external
@@ -275,6 +335,10 @@ pub fn launcher_html() -> String {
         .replace("/*__XTERM_CSS__*/", include_str!("vendor/xterm.css"))
         .replace("/*__XTERM_JS__*/", include_str!("vendor/xterm.js"))
         .replace("/*__FIT_JS__*/", include_str!("vendor/xterm-addon-fit.js"))
+        .replace("/*__WEBGL_JS__*/", include_str!("vendor/xterm-addon-webgl.js"))
+        .replace("/*__SEARCH_JS__*/", include_str!("vendor/xterm-addon-search.js"))
+        .replace("/*__LINKS_JS__*/", include_str!("vendor/xterm-addon-web-links.js"))
+        .replace("/*__UNICODE_JS__*/", include_str!("vendor/xterm-addon-unicode11.js"))
 }
 
 #[cfg(test)]
@@ -332,8 +396,16 @@ mod tests {
     }
 
     #[test]
-    fn output_for_unknown_session_is_an_error() {
-        let r = get(&state(), "/api/session/nope/output?since=0");
+    fn resize_for_unknown_session_is_an_error() {
+        let r = route(
+            &state(),
+            &Request {
+                method: "POST".into(),
+                path: "/api/session/nope/resize".into(),
+                body: r#"{"rows":24,"cols":80}"#.into(),
+                ..Default::default()
+            },
+        );
         assert_eq!(r.status, 400);
     }
 
