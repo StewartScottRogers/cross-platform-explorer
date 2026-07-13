@@ -12,7 +12,9 @@
 
 pub mod aggregate;
 pub mod agents;
+pub mod console;
 pub mod history;
+pub mod http;
 pub mod lifecycle;
 
 pub use history::{SessionHistory, SessionRecord};

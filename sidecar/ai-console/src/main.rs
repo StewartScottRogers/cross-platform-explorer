@@ -5,14 +5,47 @@
 //! an iframe pane. Depends only on `sidecar-contract` + this crate's own modules.
 
 use std::io::{BufRead, Write};
+use std::path::PathBuf;
+use std::sync::Arc;
 
-use ai_console::ui;
-use ai_console::{hello, on_message, Reaction};
+use ai_console::agents::AgentRegistry;
+use ai_console::console::{route, ConsoleState};
+use ai_console::{hello, http, on_message, Reaction};
 use sidecar_contract::{Envelope, Event, Lifecycle, Message};
 
 fn write_env(out: &mut impl Write, env: &Envelope) {
     let _ = writeln!(out, "{}", env.to_json().expect("serialize"));
     let _ = out.flush();
+}
+
+/// Locate the bundled agent catalog: an explicit override, then `agents/` next to the
+/// executable (how it ships), then the dev-tree copy.
+fn agents_dir() -> PathBuf {
+    if let Ok(p) = std::env::var("CPE_AICONSOLE_AGENTS") {
+        let pb = PathBuf::from(p);
+        if pb.is_dir() {
+            return pb;
+        }
+    }
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(dir) = exe.parent() {
+            let p = dir.join("agents");
+            if p.is_dir() {
+                return p;
+            }
+        }
+    }
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("agents")
+}
+
+/// Build the launcher's shared state: the agent catalog + the folder sessions default to.
+fn console_state() -> Arc<ConsoleState> {
+    let registry = AgentRegistry::load_from_dirs(&[agents_dir()]);
+    let cwd = std::env::var("CPE_AICONSOLE_CWD")
+        .ok()
+        .or_else(|| std::env::current_dir().ok().map(|p| p.to_string_lossy().into_owned()))
+        .unwrap_or_default();
+    Arc::new(ConsoleState::new(registry, cwd))
 }
 
 fn main() {
@@ -22,7 +55,7 @@ fn main() {
     write_env(&mut stdout, &hello());
 
     // Kept alive for the process lifetime once the handshake completes.
-    let mut _ui_server: Option<ui::UiServer> = None;
+    let mut _ui_server: Option<http::UiServer> = None;
 
     for line in stdin.lock().lines() {
         let line = match line {
@@ -42,7 +75,7 @@ fn main() {
         // has side effects.
         if matches!(env.message, Message::Welcome(_)) {
             write_env(&mut stdout, &Envelope::new(0, Message::Lifecycle(Lifecycle::Ready)));
-            if let Ok(server) = ui::serve(ui::placeholder_ui()) {
+            if let Ok(server) = http::serve(console_state(), route) {
                 write_env(
                     &mut stdout,
                     &Envelope::new(0, Message::Event(Event::Status { state: format!("ui:{}", server.url()) })),
