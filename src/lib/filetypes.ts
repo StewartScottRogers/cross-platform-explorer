@@ -208,6 +208,22 @@ export const isExecutable = (entry: Pick<DirEntry, "is_dir" | "extension">): boo
   !entry.is_dir && EXECUTABLE_EXTS.has(entry.extension);
 
 /**
+ * Indices of the non-directory entries sharing the given (already-lowercased)
+ * extension — for "Select all of this type" (CPE-258). Directories never match;
+ * an empty `ext` matches extensionless files.
+ */
+export function sameTypeIndices(
+  entries: Pick<DirEntry, "is_dir" | "extension">[],
+  ext: string,
+): number[] {
+  const out: number[] = [];
+  entries.forEach((e, i) => {
+    if (!e.is_dir && e.extension === ext) out.push(i);
+  });
+  return out;
+}
+
+/**
  * Icon name for an entry's row/tile. Prefers a format-specific glyph, then the
  * broad category icon, then "unknown". Folders are always the folder icon.
  */
