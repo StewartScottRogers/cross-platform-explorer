@@ -10,6 +10,10 @@
 //! agent registry, provider routing, secret vault, lifecycle — are added by later
 //! tickets and re-exported here.
 
+pub mod agents;
+
+pub use agents::{AgentManifest, AgentRegistry, OsCommand};
+
 use sidecar_contract::{
     Capability, Envelope, Hello, Lifecycle, Message, Response, CONTRACT_VERSION,
 };
