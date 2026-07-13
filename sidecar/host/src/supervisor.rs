@@ -26,6 +26,9 @@ use sidecar_contract::{
 use crate::broker::{decide_grants, GrantRequest};
 use crate::conformance::SidecarChannel;
 
+/// Bound on buffered inbound envelopes before the reader applies backpressure (CPE-297).
+const IPC_CHANNEL_CAPACITY: usize = 1024;
+
 /// A live connection to a sidecar: the message channel plus process liveness/control.
 pub trait Connection: SidecarChannel {
     fn is_alive(&mut self) -> bool;
@@ -163,9 +166,10 @@ pub fn spawn_process(command: &str, args: &[String]) -> Result<ProcessConnection
     let stdin = child.stdin.take().ok_or("no child stdin")?;
     let stdout = child.stdout.take().ok_or("no child stdout")?;
 
-    // A reader thread turns stdout lines into decoded envelopes on a channel, so the
-    // supervisor never blocks on the child.
-    let (tx, rx) = mpsc::channel();
+    // A reader thread turns stdout lines into decoded envelopes on a BOUNDED channel:
+    // if the supervisor stops reading, the reader blocks rather than buffering without
+    // limit — backpressure toward the child (CPE-297).
+    let (tx, rx) = mpsc::sync_channel(IPC_CHANNEL_CAPACITY);
     let reader = std::thread::spawn(move || {
         let buf = BufReader::new(stdout);
         for line in buf.lines() {
