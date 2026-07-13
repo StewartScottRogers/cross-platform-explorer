@@ -12,7 +12,10 @@
 
 pub mod aggregate;
 pub mod agents;
+pub mod history;
 pub mod lifecycle;
+
+pub use history::{SessionHistory, SessionRecord};
 pub mod lmstudio;
 pub mod plugins;
 pub mod pty;
