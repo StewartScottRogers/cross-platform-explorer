@@ -1789,6 +1789,88 @@ fn sidecar_registry_ids(app: tauri::AppHandle) -> Vec<String> {
         .collect()
 }
 
+/// Holds the live AI Console sidecar connection for the app's lifetime so it keeps
+/// running while its UI pane is mounted.
+#[cfg(feature = "sidecar-platform")]
+#[derive(Default)]
+struct AiConsoleState(std::sync::Mutex<Option<sidecar_host::supervisor::ProcessConnection>>);
+
+/// Locate the bundled `ai-console` sidecar binary. Order: explicit override env var, the
+/// app's resource dir, then a dev-tree fallback. Returns an error string if not found so
+/// the caller can degrade gracefully rather than panic.
+#[cfg(feature = "sidecar-platform")]
+fn resolve_ai_console_bin(app: &tauri::AppHandle) -> Result<String, String> {
+    use tauri::Manager;
+    let exe = if cfg!(windows) { "ai-console.exe" } else { "ai-console" };
+
+    if let Ok(p) = std::env::var("CPE_AICONSOLE_BIN") {
+        if Path::new(&p).exists() {
+            return Ok(p);
+        }
+    }
+    if let Ok(resource) = app.path().resource_dir() {
+        let p = resource.join("sidecars").join(exe);
+        if p.exists() {
+            return Ok(p.to_string_lossy().into_owned());
+        }
+    }
+    // Dev fallback: the crate builds it under sidecar/ai-console/target.
+    for profile in ["debug", "release"] {
+        let p = Path::new("sidecar/ai-console/target").join(profile).join(exe);
+        if p.exists() {
+            return Ok(p.to_string_lossy().into_owned());
+        }
+    }
+    Err(format!("ai-console binary ('{exe}') not found"))
+}
+
+/// Spawn (or reuse) the AI Console sidecar, complete the handshake, and return the URL of
+/// the UI it serves so the frontend can mount it in an iframe pane (CPE-271). Non-fatal:
+/// returns an error string that the UI surfaces, never panicking the explorer.
+#[cfg(feature = "sidecar-platform")]
+#[tauri::command]
+fn sidecar_start_ai_console(
+    app: tauri::AppHandle,
+    state: tauri::State<AiConsoleState>,
+) -> Result<String, String> {
+    use sidecar_contract::{Capability, Event, Message, CONTRACT_VERSION};
+    use sidecar_host::conformance::SidecarChannel; // brings `.recv()` into scope
+    use sidecar_host::supervisor::{handshake, spawn_process};
+    use std::collections::BTreeSet;
+
+    let bin = resolve_ai_console_bin(&app)?;
+    let mut conn = spawn_process(&bin, &[])?;
+    let token = conn.launch_token().to_string();
+
+    // The AI Console is a bundled, first-party sidecar, so its requested capabilities are
+    // granted (a user-facing consent prompt is CPE-296).
+    let consented: BTreeSet<Capability> =
+        [Capability::Context, Capability::Secrets, Capability::Storage, Capability::Events]
+            .into_iter()
+            .collect();
+    handshake(&mut conn, CONTRACT_VERSION, &consented, Some(&token))
+        .map_err(|e| format!("handshake failed: {e:?}"))?;
+
+    // Read a bounded number of frames for the `ui:<url>` announcement.
+    let mut url = None;
+    for _ in 0..20 {
+        match conn.recv() {
+            Ok(env) => {
+                if let Message::Event(Event::Status { state }) = env.message {
+                    if let Some(u) = state.strip_prefix("ui:") {
+                        url = Some(u.to_string());
+                        break;
+                    }
+                }
+            }
+            Err(_) => break,
+        }
+    }
+    let url = url.ok_or("the AI Console did not announce a UI")?;
+    *state.0.lock().map_err(|_| "state lock poisoned")? = Some(conn); // keep it alive
+    Ok(url)
+}
+
 pub fn run() {
     let mut builder = tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
@@ -1824,6 +1906,12 @@ pub fn run() {
         .map_err(|e| eprintln!("keep-awake: could not inhibit screen lock: {e}"))
         .ok();
 
+    // Hold the AI Console sidecar connection in managed state (feature-gated).
+    #[cfg(feature = "sidecar-platform")]
+    {
+        builder = builder.manage(AiConsoleState::default());
+    }
+
     let app = builder
         .invoke_handler(tauri::generate_handler![
             list_dir,
@@ -1858,7 +1946,9 @@ pub fn run() {
             open_terminal,
             create_file,
             #[cfg(feature = "sidecar-platform")]
-            sidecar_registry_ids
+            sidecar_registry_ids,
+            #[cfg(feature = "sidecar-platform")]
+            sidecar_start_ai_console
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application");

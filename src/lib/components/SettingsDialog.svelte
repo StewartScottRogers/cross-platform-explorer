@@ -14,6 +14,7 @@
     setHidden: boolean;
     setDetails: boolean;
     reset: void;
+    openConsole: void;
   }>();
 
   // Read-only sidecar platform status (CPE-317). Fetched on mount via the client, which
@@ -70,6 +71,13 @@
         {/if}
       </span>
     </div>
+    {#if sidecar?.active}
+      <div class="settings-row">
+        <button class="settings-btn" on:click={() => dispatch("openConsole")}>
+          Open AI Console
+        </button>
+      </div>
+    {/if}
 
     <div class="actions">
       <button class="btn primary" on:click={() => dispatch("close")}>Close</button>
