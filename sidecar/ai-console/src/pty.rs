@@ -42,8 +42,10 @@ impl PtySession {
             })
             .map_err(|e| format!("openpty: {e}"))?;
 
-        let mut cmd = CommandBuilder::new(&launch.program);
-        cmd.args(&launch.args);
+        // On Windows, run through `cmd /c` so script shims (npm/pip CLIs) resolve (CPE-326).
+        let (program, args) = crate::cli_command(&launch.program, &launch.args);
+        let mut cmd = CommandBuilder::new(&program);
+        cmd.args(&args);
         if let Some(cwd) = &launch.cwd {
             cmd.cwd(cwd);
         }

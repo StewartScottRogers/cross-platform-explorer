@@ -20,6 +20,23 @@ pub(crate) fn hide_console(cmd: &mut std::process::Command) {
 #[cfg(not(windows))]
 pub(crate) fn hide_console(_cmd: &mut std::process::Command) {}
 
+/// Resolve a CLI invocation for the current OS (CPE-326). On Windows, run it through
+/// `cmd /c` so the shell applies PATHEXT and resolves script shims — npm/pip installers
+/// create `foo.cmd`/`foo.ps1`, not a bare `foo.exe`, and executing the extensionless `foo`
+/// fails with "not a valid Win32 application". Elsewhere the command runs as-is.
+#[cfg(windows)]
+pub(crate) fn cli_command(program: &str, args: &[String]) -> (String, Vec<String>) {
+    let mut wrapped = Vec::with_capacity(args.len() + 2);
+    wrapped.push("/c".to_string());
+    wrapped.push(program.to_string());
+    wrapped.extend_from_slice(args);
+    ("cmd".to_string(), wrapped)
+}
+#[cfg(not(windows))]
+pub(crate) fn cli_command(program: &str, args: &[String]) -> (String, Vec<String>) {
+    (program.to_string(), args.to_vec())
+}
+
 pub mod aggregate;
 pub mod agents;
 pub mod console;

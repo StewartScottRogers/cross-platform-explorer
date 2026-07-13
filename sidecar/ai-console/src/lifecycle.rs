@@ -26,8 +26,10 @@ pub struct RealRunner;
 
 impl CommandRunner for RealRunner {
     fn run(&self, command: &str, args: &[String]) -> Result<CommandOutput, String> {
-        let mut cmd = std::process::Command::new(command);
-        cmd.args(args);
+        // On Windows, run through `cmd /c` so script shims (npm/pip CLIs) resolve (CPE-326).
+        let (program, args) = crate::cli_command(command, args);
+        let mut cmd = std::process::Command::new(&program);
+        cmd.args(&args);
         crate::hide_console(&mut cmd); // no flashing console window on Windows (CPE-325)
         let out = cmd
             .output()
