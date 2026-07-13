@@ -3,7 +3,7 @@
   import { invoke, convertFileSrc } from "@tauri-apps/api/core";
   import { check, type Update } from "@tauri-apps/plugin-updater";
   import { relaunch, exit } from "@tauri-apps/plugin-process";
-  import { openPath, openUrl } from "@tauri-apps/plugin-opener";
+  import { openUrl } from "@tauri-apps/plugin-opener";
   import { getVersion } from "@tauri-apps/api/app";
   import { WebviewWindow } from "@tauri-apps/api/webviewWindow";
   import { emit, once } from "@tauri-apps/api/event";
@@ -49,6 +49,7 @@
     type Clipboard,
   } from "./lib/clipboard";
   import { detectContexts, type FolderAction } from "./lib/folderContext";
+  import { isExecutable } from "./lib/filetypes";
   import * as settings from "./lib/settings";
   import {
     pushUndo, popUndo, canUndo, peekLabel, invert, deletedPaths, type UndoEntry,
@@ -281,18 +282,20 @@
       return;
     }
     try {
-      await openPath(entry.path);
+      // open_external runs it through the OS shell — reliably launches the
+      // default app, and executes .exe/.cmd/.bat (CPE-240).
+      await invoke("open_external", { path: entry.path });
       recents = settings.addRecent(recents, { path: entry.path, name: entry.name });
       settings.saveRecents(recents);
     } catch (e) {
-      console.debug("openPath failed:", e);
+      console.debug("open failed:", e);
       showNotice(`Can't open "${entry.name}" — no app is associated with this file type.`, true);
     }
   }
 
   async function openRecent(path: string) {
     try {
-      await openPath(path);
+      await invoke("open_external", { path });
     } catch {
       // A recent file that no longer opens is removed rather than nagging forever.
       recents = recents.filter((r) => r.path !== path);
@@ -685,10 +688,34 @@
     propsFor = selectedEntries;
   }
 
+  /** Run the selected executable normally (CPE-241) — same shell open as double-click. */
+  async function executeSelected() {
+    const entry = selectedEntries[0];
+    if (!entry || !isExecutable(entry)) return;
+    try {
+      await invoke("open_external", { path: entry.path });
+    } catch {
+      showNotice(`Couldn't run "${entry.name}".`, true);
+    }
+  }
+
+  /** Run the selected executable elevated (UAC prompt on Windows) (CPE-241). */
+  async function executeAsAdmin() {
+    const entry = selectedEntries[0];
+    if (!entry || !isExecutable(entry)) return;
+    try {
+      await invoke("run_as_admin", { path: entry.path });
+    } catch {
+      showNotice(`Couldn't run "${entry.name}" as administrator.`, true);
+    }
+  }
+
   // ---- context menu / command dispatch ----
   function runAction(action: string) {
     switch (action) {
       case "open": if (selectedEntries[0]) open(selectedEntries[0]); break;
+      case "execute": executeSelected(); break;
+      case "execute-admin": executeAsAdmin(); break;
       case "open-new-tab": if (selectedEntries[0]) openInNewTab(selectedEntries[0]); break;
       case "cut": doCut(); break;
       case "copy": doCopy(); break;
@@ -902,7 +929,8 @@
   async function handleContextAction(a: FolderAction) {
     try {
       if (a.kind === "open-path") {
-        await openPath(a.target);
+        await invoke("open_external", { path: a.target });
+        showNotice(`${a.label}…`);
       } else if (a.kind === "open-github") {
         const url = await invoke<string | null>("git_remote_url", { path: a.target });
         if (url) await openUrl(url);
@@ -1333,6 +1361,7 @@
     canPaste={pasteCheck.allowed}
     selectionCount={selectedCount(selection)}
     folderSelected={selectedEntries.length === 1 && selectedEntries[0]?.is_dir}
+    executableSelected={selectedEntries.length === 1 && isExecutable(selectedEntries[0])}
     on:action={(e) => runAction(e.detail)}
     on:close={() => (ctx = null)}
   />

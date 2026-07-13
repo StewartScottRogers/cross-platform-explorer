@@ -200,6 +200,13 @@ const ICON_BY_EXT: Record<string, string> = {
   html: "web", htm: "web",
 };
 
+/** Extensions treated as executable — eligible for Execute / Run as admin (CPE-241). */
+const EXECUTABLE_EXTS = new Set(["exe", "cmd", "bat", "msi", "com", "ps1", "scr", "vbs"]);
+
+/** True when the entry is a runnable executable/script (by extension). */
+export const isExecutable = (entry: Pick<DirEntry, "is_dir" | "extension">): boolean =>
+  !entry.is_dir && EXECUTABLE_EXTS.has(entry.extension);
+
 /**
  * Icon name for an entry's row/tile. Prefers a format-specific glyph, then the
  * broad category icon, then "unknown". Folders are always the folder icon.

@@ -10,6 +10,8 @@
   export let selectionCount = 0;
   /** True when exactly one folder is selected — enables "Open in new tab". */
   export let folderSelected = false;
+  /** True when exactly one executable file is selected — enables Execute (CPE-241). */
+  export let executableSelected = false;
 
   const dispatch = createEventDispatcher<{
     action: string;
@@ -68,6 +70,14 @@
     <button class="row" role="menuitem" on:click={() => run("open")}>
       <Icon name="folder" size={15} /> Open
     </button>
+    {#if executableSelected}
+      <button class="row" role="menuitem" on:click={() => run("execute")}>
+        <Icon name="executable" size={15} /> Execute
+      </button>
+      <button class="row" role="menuitem" on:click={() => run("execute-admin")}>
+        <Icon name="executable" size={15} /> Execute as administrator
+      </button>
+    {/if}
     {#if folderSelected}
       <button class="row" role="menuitem" on:click={() => run("open-new-tab")}>
         <Icon name="plus" size={15} /> Open in new tab

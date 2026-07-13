@@ -1476,6 +1476,49 @@ fn normalize_git_url(raw: &str) -> String {
     u
 }
 
+/// Open a file or folder with its default OS application (CPE-240). Uses the OS
+/// shell opener directly (Windows `start`, macOS `open`, Linux `xdg-open`) —
+/// more reliable than the opener plugin, which wasn't launching apps for several
+/// file types. For an executable (.exe/.cmd/.bat/…) this runs it.
+#[tauri::command]
+fn open_external(path: String) -> Result<(), String> {
+    #[cfg(target_os = "windows")]
+    let spawned = std::process::Command::new("cmd")
+        .args(["/C", "start", "", &path])
+        .spawn();
+    #[cfg(target_os = "macos")]
+    let spawned = std::process::Command::new("open").arg(&path).spawn();
+    #[cfg(all(unix, not(target_os = "macos")))]
+    let spawned = std::process::Command::new("xdg-open").arg(&path).spawn();
+
+    spawned.map(|_| ()).map_err(|e| e.to_string())
+}
+
+/// Run an executable with elevation (CPE-241). On Windows this uses
+/// `Start-Process -Verb RunAs`, which shows the UAC prompt. On other platforms
+/// there is no standard per-launch elevation prompt, so it runs normally.
+#[tauri::command]
+fn run_as_admin(path: String) -> Result<(), String> {
+    #[cfg(target_os = "windows")]
+    {
+        // Single-quote the path for PowerShell; escape any embedded quote.
+        let escaped = path.replace('\'', "''");
+        std::process::Command::new("powershell")
+            .args([
+                "-NoProfile",
+                "-Command",
+                &format!("Start-Process -FilePath '{escaped}' -Verb RunAs"),
+            ])
+            .spawn()
+            .map(|_| ())
+            .map_err(|e| e.to_string())
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        open_external(path)
+    }
+}
+
 /// Read a repo's `.git/config` and return its origin remote as a browsable https
 /// URL (folder-context plugins, CPE-235). A cheap single file read; returns None
 /// if the folder isn't a repo or has no remote.
@@ -1568,7 +1611,9 @@ pub fn run() {
             move_exact,
             entry_info,
             dir_size,
-            git_remote_url
+            git_remote_url,
+            open_external,
+            run_as_admin
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application");
