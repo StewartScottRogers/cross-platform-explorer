@@ -24,6 +24,18 @@ pub struct OsCommand {
     pub args: Vec<String>,
 }
 
+/// How to launch an agent against one provider: environment variables and extra run
+/// args, as templates with `{model}`, `{small_model}`, `{api_key}`, `{base_url}`
+/// placeholders (CPE-285). Declaring these in the manifest keeps routing CLI-agnostic —
+/// a different agent uses different env-var names, all as data.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProviderRecipe {
+    #[serde(default)]
+    pub env: BTreeMap<String, String>,
+    #[serde(default)]
+    pub args: Vec<String>,
+}
+
 /// A declarative description of a coding-agent CLI.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AgentManifest {
@@ -45,6 +57,9 @@ pub struct AgentManifest {
     /// Providers this agent supports, e.g. `["native", "openrouter", "lmstudio-local"]`.
     #[serde(default)]
     pub providers: Vec<String>,
+    /// Per-provider launch recipes (env + args templates), keyed by provider id (CPE-285).
+    #[serde(default)]
+    pub provider_recipes: BTreeMap<String, ProviderRecipe>,
     #[serde(default)]
     pub default_model: Option<String>,
     #[serde(skip)]

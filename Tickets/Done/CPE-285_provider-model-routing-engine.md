@@ -2,11 +2,12 @@
 id: CPE-285
 title: Provider / model routing engine (env recipes)
 type: Feature
-status: Open
+status: Done
 priority: High
 component: Backend
 estimate: 3-4h
 created: 2026-07-13
+closed: 2026-07-13
 ---
 
 ## Summary
@@ -30,5 +31,19 @@ from the `*--openrouter.cmd` / `*--lmstudio.cmd` launchers into data + Rust.
 ## Notes — Dependencies / Schedule
 **Depends on:** [[CPE-278]], [[CPE-279]]. **Phase:** C4. **Epic:** [[CPE-261]].
 
+## Resolution
+
+Implemented `routing` in the `ai-console` crate, driven by declarative
+`ProviderRecipe`s added to the agent manifest ([[CPE-278]]): each provider is a map of
+env-var templates + arg templates with `{model}`/`{small_model}`/`{api_key}`/`{base_url}`
+placeholders — routing is **data, not per-agent code**. `compose_launch(agent, provider,
+ctx) -> Launch { env, args }` validates provider support, fills placeholders, and
+**errors loudly if a required value (e.g. an API key) is missing** rather than launching
+unauthenticated. Verified with a Claude manifest carrying native + OpenRouter recipes
+(mirrors the reference `--openrouter.cmd`). 5 tests; 16 crate tests + clippy green.
+Bundled recipes for all agents ship with the seed catalog ([[CPE-291]]); `api_key` is
+populated from the vault ([[CPE-279]]).
+
 ## Work Log
 2026-07-13 — Filed during Nightshift epic planning.
+2026-07-13 — Implemented the data-driven routing engine during dayshift. Done.
