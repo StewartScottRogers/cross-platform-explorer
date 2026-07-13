@@ -878,6 +878,25 @@
     }
   }
 
+  // Drag-the-pane-header-to-pop-out (CPE-238): true cross-window drag isn't
+  // possible in a webview, so a drag gesture on the preview header just triggers
+  // the same pop-out as the button. A plain click (no movement) is unaffected.
+  let previewHeaderDrag: { x: number; y: number } | null = null;
+  function onPreviewHeaderDown(e: PointerEvent) {
+    if (selectedEntries.length !== 1) return;
+    previewHeaderDrag = { x: e.clientX, y: e.clientY };
+  }
+  function onPreviewHeaderMove(e: PointerEvent) {
+    if (!previewHeaderDrag) return;
+    if (Math.hypot(e.clientX - previewHeaderDrag.x, e.clientY - previewHeaderDrag.y) > 24) {
+      previewHeaderDrag = null;
+      popOutPreview();
+    }
+  }
+  function endPreviewHeaderDrag() {
+    previewHeaderDrag = null;
+  }
+
   /** Run a folder-context action (CPE-235): open a marker file, or open the
       repo's GitHub/remote page (resolved from .git/config by the backend). */
   async function handleContextAction(a: FolderAction) {
@@ -1245,7 +1264,17 @@
           />
         </div>
       </Toolbar>
-      <div class="preview-pane-toggle" role="tablist" aria-label="Preview or details">
+      <!-- svelte-ignore a11y-no-static-element-interactions -->
+      <div
+        class="preview-pane-toggle"
+        role="tablist"
+        aria-label="Preview or details"
+        title="Drag to pop out, or use the button"
+        on:pointerdown={onPreviewHeaderDown}
+        on:pointermove={onPreviewHeaderMove}
+        on:pointerup={endPreviewHeaderDrag}
+        on:pointerleave={endPreviewHeaderDrag}
+      >
         <button
           role="tab"
           class:active={showPreview}
