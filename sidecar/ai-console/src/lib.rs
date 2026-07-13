@@ -15,6 +15,9 @@ pub mod agents;
 pub mod lifecycle;
 pub mod lmstudio;
 pub mod routing;
+pub mod vault;
+
+pub use vault::{resolve_env, CredentialProfile, ProfileSet, SecretAccess};
 
 pub use lmstudio::{detect as detect_lmstudio, LmStudio};
 
