@@ -14,8 +14,11 @@ pub mod aggregate;
 pub mod agents;
 pub mod lifecycle;
 pub mod lmstudio;
+pub mod plugins;
 pub mod pty;
 pub mod routing;
+
+pub use plugins::{install_plugin, uninstall_plugin, PluginApplier, PluginManifest, PluginRegistry};
 pub mod vault;
 
 pub use pty::{PtyLaunch, PtySession};
