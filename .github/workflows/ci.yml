@@ -117,6 +117,7 @@ jobs:
           workspaces: |
             ./sidecar/contract -> target
             ./sidecar/host -> target
+            ./sidecar/ai-console -> target
 
       - name: contract — clippy + test
         working-directory: sidecar/contract
@@ -126,6 +127,12 @@ jobs:
 
       - name: host — clippy + test
         working-directory: sidecar/host
+        run: |
+          cargo clippy --all-targets -- -D warnings
+          cargo test
+
+      - name: ai-console — clippy + test
+        working-directory: sidecar/ai-console
         run: |
           cargo clippy --all-targets -- -D warnings
           cargo test

@@ -1,0 +1,15 @@
+[package]
+name = "ai-console"
+version = "0.1.0"
+edition = "2021"
+description = "The AI Console sidecar for Cross-Platform Explorer — an agentic CLI manager (CPE-261)."
+license = "MIT"
+
+# A sidecar depends ONLY on the contract (ADR 0001 one-way rule) — never on the host
+# or the explorer. Its own domain logic (agent registry, provider routing, secret
+# vault, …) lives in this crate's lib; the process entry is `src/main.rs`.
+
+[dependencies]
+sidecar-contract = { path = "../contract" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
