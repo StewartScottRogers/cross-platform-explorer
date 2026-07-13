@@ -2,11 +2,12 @@
 id: CPE-284
 title: Aggregate ops (install / update / uninstall all)
 type: Feature
-status: Open
+status: Done
 priority: Low
 component: Backend
 estimate: 1-2h
 created: 2026-07-13
+closed: 2026-07-13
 ---
 
 ## Summary
@@ -25,5 +26,10 @@ summary — one click to set up or refresh a whole toolbox.
 ## Notes — Dependencies / Schedule
 **Depends on:** [[CPE-282]], [[CPE-283]]. **Phase:** C3. **Epic:** [[CPE-261]].
 
+## Resolution
+
+Implemented `aggregate` in ai-console: `run_all`/`run_registry(registry, Action, runner)` run Install/Update/Uninstall across every agent in id order, collecting an `AgentOutcome` each; a failure (incl. a missing recipe) is recorded and the run continues, with `summarize` giving (ok, failed). Reuses the single-agent lifecycle commands. 2 tests; 28 crate tests + clippy green.
+
 ## Work Log
 2026-07-13 — Filed during Nightshift epic planning.
+2026-07-13 — Implemented aggregate ops during dayshift. Done.

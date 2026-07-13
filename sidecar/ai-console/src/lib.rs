@@ -10,9 +10,12 @@
 //! agent registry, provider routing, secret vault, lifecycle — are added by later
 //! tickets and re-exported here.
 
+pub mod aggregate;
 pub mod agents;
 pub mod lifecycle;
 pub mod routing;
+
+pub use aggregate::{run_all, run_registry, summarize, Action, AgentOutcome};
 
 pub use agents::{AgentManifest, AgentRegistry, OsCommand, ProviderRecipe};
 pub use lifecycle::{detect, install, uninstall, update, CommandRunner, DetectResult, RealRunner};
