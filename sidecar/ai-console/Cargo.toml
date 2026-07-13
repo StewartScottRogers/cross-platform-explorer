@@ -18,5 +18,9 @@ serde_json = "1"
 # (claude, aider, …) run in-app. Cross-platform: Windows ConPTY, Unix openpty.
 portable-pty = "0.8"
 
+# Base64-encode raw PTY bytes for the terminal transport, so the browser's xterm.js gets
+# the exact byte stream (ANSI + partial UTF-8) intact rather than lossy text (CPE-333).
+base64 = "0.22"
+
 [dev-dependencies]
 tempfile = "3"

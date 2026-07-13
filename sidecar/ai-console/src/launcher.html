@@ -4,6 +4,7 @@
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
 <title>AI Console</title>
+<style>/*__XTERM_CSS__*/</style>
 <style>
   :root { color-scheme: light dark; }
   * { box-sizing: border-box; }
@@ -25,10 +26,8 @@
   .badge.no { background: #b5872b; color: #fff; }
   .badge.yes { background: #3a9d4a; color: #fff; }
   #msg { padding: 4px 12px; font-size: 12px; color: #d05656; min-height: 18px; }
-  #term { flex: 1; margin: 0; padding: 10px 12px; overflow: auto; white-space: pre-wrap;
-          word-break: break-word; font: 12px ui-monospace, Consolas, monospace;
-          background: #0d0d0d; color: #d8d8d8; }
-  #term:focus { outline: 2px solid #2f6fed88; outline-offset: -2px; }
+  #term { flex: 1; min-height: 0; padding: 6px 8px; background: #0d0d0d; overflow: hidden; }
+  #term .xterm, #term .xterm-viewport { height: 100% !important; }
 </style>
 </head>
 <body>
@@ -60,9 +59,11 @@
     <span id="install-wrap"></span>
     <button id="launch" class="primary">Launch</button>
   </header>
-  <div id="msg"></div>
-  <pre id="term" tabindex="0">Pick an agent, provider and model, then Launch.</pre>
+  <div id="msg">Pick an agent, provider and model, then Launch.</div>
+  <div id="term"></div>
 
+<script>/*__XTERM_JS__*/</script>
+<script>/*__FIT_JS__*/</script>
 <script>
 "use strict";
 const $ = (id) => document.getElementById(id);
@@ -123,6 +124,37 @@ async function load() {
   if (last) { if (last.provider) $("provider").value = last.provider; if (last.model) $("model").value = last.model; }
 }
 
+// --- Terminal (xterm.js) --------------------------------------------------------------
+let term = null, fitAddon = null;
+
+function initTerm() {
+  if (term) return;
+  term = new Terminal({
+    fontFamily: "ui-monospace, Consolas, 'Cascadia Mono', monospace",
+    fontSize: 13, cursorBlink: true, scrollback: 8000,
+    theme: { background: "#0d0d0d", foreground: "#d8d8d8" },
+  });
+  fitAddon = new FitAddon.FitAddon();
+  term.loadAddon(fitAddon);
+  term.open($("term"));
+  fitAddon.fit();
+  term.onData((d) => sendInput(d));           // keystrokes -> PTY
+  window.addEventListener("resize", refit);
+}
+
+function refit() {
+  if (!term || !fitAddon) return;
+  try { fitAddon.fit(); } catch (_) {}
+  if (session) sendResize(term.rows, term.cols);
+}
+
+function b64ToBytes(b64) {
+  const bin = atob(b64);
+  const out = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
+  return out;
+}
+
 async function launch() {
   const a = agentById($("agent").value);
   // Fall back to the agent's default model when the field is blank; a provider that needs
@@ -137,33 +169,25 @@ async function launch() {
   setMsg("Launching…", true);
   try {
     const res = await api("/api/launch", { method: "POST", body: JSON.stringify(body) });
-    session = res.session; offset = 0; $("term").textContent = "";
+    session = res.session; offset = 0;
+    initTerm(); term.reset(); refit(); term.focus();
     if (res.dangerousFlags && res.dangerousFlags.length)
       setMsg("Launched with elevated flags: " + res.dangerousFlags.join(", "), false);
-    else setMsg("Session running. Click the terminal and type.", true);
-    $("term").focus();
+    else setMsg("Session running — click the terminal and type.", true);
     startPolling();
   } catch (e) { setMsg("Launch failed: " + e.message); }
 }
 
-// Minimal ANSI-escape stripping so line output is readable without a full terminal emulator.
-function stripAnsi(s) { return s.replace(/\x1b\[[0-9;?]*[ -\/]*[@-~]/g, "").replace(/\x1b[=>]/g, ""); }
-
 function startPolling() {
   clearInterval(polling);
   polling = setInterval(async () => {
-    if (!session) return;
+    if (!session || !term) return;
     try {
       const r = await api("/api/session/" + session + "/output?since=" + offset);
-      if (r.data) {
-        const term = $("term");
-        const atBottom = term.scrollTop + term.clientHeight >= term.scrollHeight - 20;
-        term.textContent += stripAnsi(r.data);
-        if (atBottom) term.scrollTop = term.scrollHeight;
-      }
+      if (r.data) term.write(b64ToBytes(r.data));   // raw bytes -> emulator
       offset = r.offset;
     } catch (_) { clearInterval(polling); }
-  }, 250);
+  }, 120);
 }
 
 async function sendInput(data) {
@@ -171,17 +195,13 @@ async function sendInput(data) {
   try { await fetch("/api/session/" + session + "/input", { method: "POST", body: data }); } catch (_) {}
 }
 
-$("term").addEventListener("keydown", (e) => {
+async function sendResize(rows, cols) {
   if (!session) return;
-  let out = null;
-  if (e.key === "Enter") out = "\r";
-  else if (e.key === "Backspace") out = "\x7f";
-  else if (e.key === "Tab") out = "\t";
-  else if (e.key === "Escape") out = "\x1b";
-  else if (e.ctrlKey && e.key.length === 1) out = String.fromCharCode(e.key.toUpperCase().charCodeAt(0) - 64);
-  else if (e.key.length === 1 && !e.metaKey) out = e.key;
-  if (out !== null) { e.preventDefault(); sendInput(out); }
-});
+  try {
+    await fetch("/api/session/" + session + "/resize",
+      { method: "POST", body: JSON.stringify({ rows, cols }) });
+  } catch (_) {}
+}
 
 $("agent").addEventListener("change", renderProviders);
 $("launch").addEventListener("click", launch);

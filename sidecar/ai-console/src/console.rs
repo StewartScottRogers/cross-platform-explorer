@@ -8,6 +8,7 @@ use std::collections::{BTreeMap, HashMap};
 use std::io::{Read, Write};
 use std::sync::{Arc, Mutex};
 
+use base64::Engine as _;
 use serde_json::{json, Value};
 
 use crate::agents::AgentRegistry;
@@ -20,7 +21,7 @@ use crate::scope::{self, AgentLaunchRequest};
 /// A live agent session: the PTY (kept alive so the child isn't reaped), an append-only
 /// output buffer fed by a reader thread, and a handle to the PTY's input.
 struct Session {
-    _pty: Mutex<PtySession>,
+    pty: Mutex<PtySession>,
     buffer: Arc<Mutex<Vec<u8>>>,
     writer: Mutex<Box<dyn Write + Send>>,
 }
@@ -161,7 +162,7 @@ impl ConsoleState {
         let id = self.next_id();
         self.sessions.lock().unwrap().insert(
             id.clone(),
-            Arc::new(Session { _pty: Mutex::new(session), buffer, writer: Mutex::new(writer) }),
+            Arc::new(Session { pty: Mutex::new(session), buffer, writer: Mutex::new(writer) }),
         );
         self.last_used.lock().unwrap().insert(
             cwd,
@@ -178,8 +179,24 @@ impl ConsoleState {
         let Some(sess) = sessions.get(&id) else { return bad("no such session") };
         let buf = sess.buffer.lock().unwrap();
         let slice = if since <= buf.len() { &buf[since..] } else { &[][..] };
-        let text = String::from_utf8_lossy(slice).into_owned();
-        Response::json(json!({ "offset": buf.len(), "data": text }).to_string())
+        // Base64 the RAW bytes so xterm.js gets the exact stream (ANSI + partial UTF-8
+        // across poll boundaries) rather than lossy text (CPE-333).
+        let data = base64::engine::general_purpose::STANDARD.encode(slice);
+        Response::json(json!({ "offset": buf.len(), "data": data }).to_string())
+    }
+
+    fn handle_resize(&self, path: &str, body: &str) -> Response {
+        let id = session_id_from(path, "/resize");
+        let v: Value = serde_json::from_str(body).unwrap_or_else(|_| json!({}));
+        let rows = v["rows"].as_u64().unwrap_or(30) as u16;
+        let cols = v["cols"].as_u64().unwrap_or(100) as u16;
+        let sessions = self.sessions.lock().unwrap();
+        let Some(sess) = sessions.get(&id) else { return bad("no such session") };
+        let result = sess.pty.lock().unwrap().resize(rows, cols);
+        match result {
+            Ok(()) => Response::json("{\"ok\":true}"),
+            Err(e) => bad(e),
+        }
     }
 
     fn handle_input(&self, path: &str, body: &str) -> Response {
@@ -244,14 +261,20 @@ pub fn route(state: &ConsoleState, req: &Request) -> Response {
         ("POST", p) if p.starts_with("/api/session/") && p.ends_with("/input") => {
             state.handle_input(p, &req.body)
         }
+        ("POST", p) if p.starts_with("/api/session/") && p.ends_with("/resize") => {
+            state.handle_resize(p, &req.body)
+        }
         _ => Response::not_found(),
     }
 }
 
-/// The launcher page — self-contained HTML/CSS/JS (no external resources, so it works under
-/// the sandboxed iframe's opaque origin).
+/// The launcher page — self-contained HTML/CSS/JS with xterm.js inlined (no external
+/// resources, so it works under the sandboxed iframe's opaque origin).
 pub fn launcher_html() -> String {
-    include_str!("launcher.html").to_string()
+    include_str!("launcher.html")
+        .replace("/*__XTERM_CSS__*/", include_str!("vendor/xterm.css"))
+        .replace("/*__XTERM_JS__*/", include_str!("vendor/xterm.js"))
+        .replace("/*__FIT_JS__*/", include_str!("vendor/xterm-addon-fit.js"))
 }
 
 #[cfg(test)]
