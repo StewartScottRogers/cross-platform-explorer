@@ -89,3 +89,43 @@ jobs:
       - name: cargo test
         working-directory: src-tauri
         run: cargo test
+
+  sidecar:
+    # The sidecar platform crates (sidecar/contract, sidecar/host) are standalone —
+    # deliberately NOT part of the app's cargo workspace, so the `backend` job above
+    # doesn't cover them. Build, lint, and test them on every OS we ship, so
+    # `#[cfg(windows)]` code (the keychain backend) and the real-process E2E tests are
+    # validated cross-platform (CPE-302; first half of the CPE-272 delete-test guard —
+    # the app CI here never references the sidecar crates, proving the one-way boundary).
+    name: Sidecar platform (${{ matrix.os }}) — clippy + test
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      - name: Rust cache
+        uses: swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            ./sidecar/contract -> target
+            ./sidecar/host -> target
+
+      - name: contract — clippy + test
+        working-directory: sidecar/contract
+        run: |
+          cargo clippy --all-targets -- -D warnings
+          cargo test
+
+      - name: host — clippy + test
+        working-directory: sidecar/host
+        run: |
+          cargo clippy --all-targets -- -D warnings
+          cargo test
