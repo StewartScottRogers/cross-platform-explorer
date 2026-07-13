@@ -18,7 +18,10 @@ use serde::{Deserialize, Serialize};
 
 /// The contract version this build of the crate implements. Bump `minor` for
 /// additive changes, `major` for breaking ones (CPE-263).
-pub const CONTRACT_VERSION: ContractVersion = ContractVersion::new(1, 0);
+///
+/// History: 1.0 initial protocol; 1.1 added [`HostSignal`] / [`Message::Signal`]
+/// (host→sidecar lifecycle signals, CPE-270) — additive, so minor.
+pub const CONTRACT_VERSION: ContractVersion = ContractVersion::new(1, 1);
 
 /// Schema version of the [`Envelope`] frame format itself (CPE-300). Distinct from
 /// the contract version so the outer frame can evolve independently of message
@@ -219,6 +222,20 @@ pub enum Event {
     Status { state: String },
 }
 
+/// A lifecycle signal the host sends *to* a sidecar (CPE-270). Added in contract 1.1.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "signal", rename_all = "snake_case")]
+pub enum HostSignal {
+    /// The sidecar's pane gained focus.
+    Activated,
+    /// The sidecar's pane lost focus.
+    Deactivated,
+    /// The host theme changed.
+    ThemeChanged { dark: bool },
+    /// The host is about to quit; drain and stop.
+    WillQuit,
+}
+
 // ---------------------------------------------------------------------------
 // The message union and framed envelope
 // ---------------------------------------------------------------------------
@@ -234,6 +251,8 @@ pub enum Message {
     Request(Request),
     Response(Response),
     Event(Event),
+    /// host → sidecar lifecycle signal (contract 1.1, CPE-270).
+    Signal(HostSignal),
     Lifecycle(Lifecycle),
     Error(ContractError),
 }
@@ -373,6 +392,8 @@ mod tests {
                 fraction: 0.5,
             }),
             Message::Lifecycle(Lifecycle::Ready),
+            Message::Signal(HostSignal::ThemeChanged { dark: true }),
+            Message::Signal(HostSignal::WillQuit),
             Message::Error(ContractError::new(ErrorCode::Transport, "pipe closed", true)),
         ];
         for m in msgs {
