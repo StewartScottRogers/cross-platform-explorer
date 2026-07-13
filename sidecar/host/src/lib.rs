@@ -14,6 +14,7 @@
 pub mod broker;
 pub mod conformance;
 pub mod consent;
+pub mod enablement;
 pub mod errors;
 pub mod migrate;
 pub mod observability;

@@ -141,3 +141,48 @@ export async function revokeCapability(id: string, capability: Capability): Prom
     return false;
   }
 }
+
+// --- Management UI (CPE-274) -----------------------------------------------------------
+
+/** A registered sidecar's identity, contract compatibility, and running/enabled state. */
+export interface SidecarInfo {
+  id: string;
+  name: string;
+  version: string;
+  contract: string;
+  compatible: boolean;
+  running: boolean;
+  enabled: boolean;
+  requested: Capability[];
+  granted: Capability[];
+}
+
+/** Details for every registered sidecar (management panel). `[]` when the platform is off. */
+export async function sidecarDetails(): Promise<SidecarInfo[]> {
+  try {
+    const rows = await invoke<SidecarInfo[]>("sidecar_details");
+    return Array.isArray(rows) ? rows : [];
+  } catch {
+    return [];
+  }
+}
+
+/** Stop a running sidecar. Resolves `false` if the platform is off or the call failed. */
+export async function stopSidecar(id: string): Promise<boolean> {
+  try {
+    await invoke("sidecar_stop", { id });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/** Enable or disable a sidecar (disabling also stops it). */
+export async function setEnabled(id: string, enabled: boolean): Promise<boolean> {
+  try {
+    await invoke("sidecar_set_enabled", { id, enabled });
+    return true;
+  } catch {
+    return false;
+  }
+}

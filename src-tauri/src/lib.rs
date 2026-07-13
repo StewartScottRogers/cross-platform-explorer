@@ -1860,6 +1860,81 @@ fn sidecar_revoke_capability(
     store.revoke(&id, capability).map_err(|e| e.to_string())
 }
 
+/// One row in the platform management UI (CPE-274): a registered sidecar with its
+/// identity, contract compatibility, running/enabled state, and consent picture.
+#[cfg(feature = "sidecar-platform")]
+#[derive(serde::Serialize)]
+struct SidecarInfo {
+    id: String,
+    name: String,
+    version: String,
+    contract: String,
+    compatible: bool,
+    running: bool,
+    enabled: bool,
+    requested: Vec<sidecar_contract::Capability>,
+    granted: Vec<sidecar_contract::Capability>,
+}
+
+/// List registered sidecars with version, contract compatibility, running/enabled state,
+/// and granted capabilities — the data behind the management panel (CPE-274).
+#[cfg(feature = "sidecar-platform")]
+#[tauri::command]
+fn sidecar_details(app: tauri::AppHandle, state: tauri::State<AiConsoleState>) -> Result<Vec<SidecarInfo>, String> {
+    use sidecar_contract::CONTRACT_VERSION;
+    let reg = sidecar_host::registry::Registry::load_from_dirs(&sidecar_dirs(&app));
+    let consent = sidecar_host::consent::ConsentStore::load(&consent_dir(&app)?);
+    let enablement = sidecar_host::enablement::EnablementStore::load(&consent_dir(&app)?);
+    let ai_running = state.0.lock().map(|g| g.is_some()).unwrap_or(false);
+
+    Ok(reg
+        .all()
+        .map(|m| {
+            let cv = &m.contract_version;
+            SidecarInfo {
+                id: m.id.clone(),
+                name: m.name.clone(),
+                version: m.version.clone(),
+                contract: format!("{}.{}", cv.major, cv.minor),
+                compatible: cv.major == CONTRACT_VERSION.major && cv.minor <= CONTRACT_VERSION.minor,
+                running: m.id == "ai-console" && ai_running,
+                enabled: enablement.is_enabled(&m.id),
+                requested: m.capabilities.clone(),
+                granted: consent.granted(&m.id).into_iter().collect(),
+            }
+        })
+        .collect())
+}
+
+/// Stop a running sidecar (management UI). Dropping the connection reaps the process.
+/// Only the AI Console is currently spawnable; a no-op for others.
+#[cfg(feature = "sidecar-platform")]
+#[tauri::command]
+fn sidecar_stop(id: String, state: tauri::State<AiConsoleState>) -> Result<(), String> {
+    if id == "ai-console" {
+        *state.0.lock().map_err(|_| "state lock poisoned")? = None;
+    }
+    Ok(())
+}
+
+/// Enable or disable a sidecar (CPE-274). Disabling stops it (if running) and prevents it
+/// from starting until re-enabled. Independent per sidecar — never touches others.
+#[cfg(feature = "sidecar-platform")]
+#[tauri::command]
+fn sidecar_set_enabled(
+    app: tauri::AppHandle,
+    state: tauri::State<AiConsoleState>,
+    id: String,
+    enabled: bool,
+) -> Result<(), String> {
+    let mut store = sidecar_host::enablement::EnablementStore::load(&consent_dir(&app)?);
+    store.set_enabled(&id, enabled).map_err(|e| e.to_string())?;
+    if !enabled && id == "ai-console" {
+        *state.0.lock().map_err(|_| "state lock poisoned")? = None; // stop it now
+    }
+    Ok(())
+}
+
 /// Holds the live AI Console sidecar connection for the app's lifetime so it keeps
 /// running while its UI pane is mounted.
 #[cfg(feature = "sidecar-platform")]
@@ -1912,6 +1987,11 @@ fn sidecar_start_ai_console(
     use sidecar_contract::{Event, Message, CONTRACT_VERSION};
     use sidecar_host::conformance::SidecarChannel; // brings `.recv()` into scope
     use sidecar_host::supervisor::{handshake, spawn_process};
+
+    // Respect the enable/disable toggle (CPE-274): a disabled sidecar must not start.
+    if !sidecar_host::enablement::EnablementStore::load(&consent_dir(&app)?).is_enabled("ai-console") {
+        return Err("the AI Console is disabled".into());
+    }
 
     let bin = resolve_ai_console_bin(&app)?;
     let mut conn = spawn_process(&bin, &[])?;
@@ -2027,6 +2107,12 @@ pub fn run() {
             sidecar_set_consent,
             #[cfg(feature = "sidecar-platform")]
             sidecar_revoke_capability,
+            #[cfg(feature = "sidecar-platform")]
+            sidecar_details,
+            #[cfg(feature = "sidecar-platform")]
+            sidecar_stop,
+            #[cfg(feature = "sidecar-platform")]
+            sidecar_set_enabled,
             #[cfg(feature = "sidecar-platform")]
             sidecar_start_ai_console
         ])

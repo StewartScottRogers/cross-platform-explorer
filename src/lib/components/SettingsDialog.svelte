@@ -4,7 +4,8 @@
       view: current values come in as props, and every change is dispatched for
       App to apply + persist, so there is a single source of truth. */
   import { createEventDispatcher, onMount } from "svelte";
-  import { listSidecars, platformActive } from "../sidecar";
+  import { platformActive } from "../sidecar";
+  import SidecarManager from "./SidecarManager.svelte";
 
   export let showHidden = false;
   export let showDetails = true;
@@ -17,12 +18,11 @@
     openConsole: void;
   }>();
 
-  // Read-only sidecar platform status (CPE-317). Fetched on mount via the client, which
-  // degrades to "off" when the app is built without the `sidecar-platform` feature.
-  let sidecar: { active: boolean; ids: string[] } | null = null;
+  // Whether the sidecar platform is built into this app. When off, the whole management
+  // section is hidden so the plain explorer looks untouched (the delete-test, UI layer).
+  let platformOn: boolean | null = null;
   onMount(async () => {
-    const active = await platformActive();
-    sidecar = { active, ids: active ? await listSidecars() : [] };
+    platformOn = await platformActive();
   });
 </script>
 
@@ -56,27 +56,9 @@
       </button>
     </div>
 
-    <div class="section-title">Sidecar platform</div>
-    <div class="settings-row">
-      <span>Status</span>
-      <span class="muted">
-        {#if sidecar === null}
-          Checking…
-        {:else if !sidecar.active}
-          Off (not built in)
-        {:else if sidecar.ids.length === 0}
-          On — no sidecars registered
-        {:else}
-          On — {sidecar.ids.join(", ")}
-        {/if}
-      </span>
-    </div>
-    {#if sidecar?.active}
-      <div class="settings-row">
-        <button class="settings-btn" on:click={() => dispatch("openConsole")}>
-          Open AI Console
-        </button>
-      </div>
+    {#if platformOn}
+      <div class="section-title">Sidecar platform</div>
+      <SidecarManager on:openConsole={() => dispatch("openConsole")} />
     {/if}
 
     <div class="actions">
@@ -110,7 +92,6 @@
     color: var(--text-dim);
     margin: 16px 0 6px;
   }
-  .muted { color: var(--text-dim); font-size: 13px; }
   .actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 18px; }
   .btn {
     height: 32px;
