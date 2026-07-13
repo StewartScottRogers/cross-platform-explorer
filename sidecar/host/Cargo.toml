@@ -1,0 +1,18 @@
+[package]
+name = "sidecar-host"
+version = "0.1.0"
+edition = "2021"
+description = "Host-side sidecar platform logic for Cross-Platform Explorer: manifest registry, negotiation, brokering (CPE-260)."
+license = "MIT"
+
+# Pure platform logic, testable in isolation. Depends only on the contract; the
+# explorer wires this in later behind a feature flag (CPE-272), so the delete-test
+# holds — removing sidecars never touches the explorer build.
+
+[dependencies]
+sidecar-contract = { path = "../contract" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[dev-dependencies]
+tempfile = "3"
