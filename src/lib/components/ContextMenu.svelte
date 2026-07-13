@@ -16,6 +16,10 @@
   export let openIcon = "folder";
   /** Whether the selected folder is pinned to Home — toggles Pin/Unpin (CPE-249). */
   export let pinned = false;
+  /** True when the selection can be packed into a .zip (CPE-251). */
+  export let compressible = false;
+  /** True when exactly one archive file is selected — enables Extract (CPE-252). */
+  export let extractable = false;
 
   const dispatch = createEventDispatcher<{
     action: string;
@@ -98,6 +102,16 @@
     <button class="row" role="menuitem" on:click={() => run("copy-name")}>
       <Icon name="rename" size={15} /> Copy name
     </button>
+    {#if extractable}
+      <button class="row" role="menuitem" on:click={() => run("extract")}>
+        <Icon name="archive" size={15} /> Extract
+      </button>
+    {/if}
+    {#if compressible}
+      <button class="row" role="menuitem" on:click={() => run("compress")}>
+        <Icon name="archive" size={15} /> Compress to ZIP
+      </button>
+    {/if}
     {#if folderSelected}
       <button class="row" role="menuitem" on:click={() => run("pin")}>
         <Icon name="pin" size={15} /> {pinned ? "Unpin from Home" : "Pin to Home"}
