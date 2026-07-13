@@ -168,6 +168,11 @@
   {:else if name === "share"}
     <circle cx="18" cy="5" r="2.5" /><circle cx="6" cy="12" r="2.5" /><circle cx="18" cy="19" r="2.5" />
     <path d="M8.2 10.8l7.6-4.3M8.2 13.2l7.6 4.3" />
+  {:else if name === "popout"}
+    <!-- Open-in-new-window: a panel with an arrow leaving the top-right corner. -->
+    <path d="M13 4h7v7" />
+    <path d="M20 4l-8 8" />
+    <path d="M18 14v4a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4" />
   {:else if name === "delete"}
     <path d="M4 7h16M9 7V5h6v2M6 7l1 13h10l1-13" />
   {:else if name === "sort"}

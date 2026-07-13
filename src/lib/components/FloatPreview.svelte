@@ -88,10 +88,22 @@
 </div>
 
 <style>
-  .float-root { height: 100vh; display: flex; flex-direction: column; background: var(--surface); }
+  /* A framed panel inset from the window edge so the float reads as a finished
+     card rather than bleeding to the OS chrome (CPE-245). */
+  .float-root {
+    height: 100vh;
+    display: flex;
+    flex-direction: column;
+    background: var(--bg);
+    padding: 8px;
+    gap: 0;
+  }
   .float-tabs {
     display: flex; gap: 2px; padding: 6px 6px 0;
-    background: var(--bg); border-bottom: 1px solid var(--border);
+    background: var(--surface-alt);
+    border: 1px solid var(--border-strong);
+    border-bottom: 1px solid var(--border);
+    border-radius: var(--radius-lg) var(--radius-lg) 0 0;
     overflow-x: auto; flex: none;
   }
   .float-tab {
@@ -111,7 +123,14 @@
   }
   .ft-close { width: 20px; height: 20px; display: grid; place-items: center; border-radius: 4px; flex: none; opacity: 0.7; }
   .ft-close:hover { background: var(--border-strong); opacity: 1; }
-  .float-body { flex: 1; min-height: 0; display: flex; }
+  .float-body {
+    flex: 1; min-height: 0; display: flex;
+    background: var(--surface);
+    border: 1px solid var(--border-strong);
+    border-top: none;
+    border-radius: 0 0 var(--radius-lg) var(--radius-lg);
+    overflow: hidden;
+  }
   .float-body :global(.preview-pane),
   .float-body :global(.preview),
   .float-body :global(.details) { flex: 1; min-height: 0; }

@@ -1494,6 +1494,27 @@ fn open_external(path: String) -> Result<(), String> {
     spawned.map(|_| ()).map_err(|e| e.to_string())
 }
 
+/// Extract a single entry from a ZIP to a temp file and return its path, so it
+/// can be opened with its default app while browsing inside the archive
+/// (CPE-242). Read-only: the temp copy is what opens, not the archived bytes.
+#[tauri::command]
+fn extract_archive_entry(zip: String, inner: String) -> Result<String, String> {
+    let file = fs::File::open(&zip).map_err(|e| e.to_string())?;
+    let mut archive = zip::ZipArchive::new(file).map_err(|e| e.to_string())?;
+    let mut entry = archive.by_name(&inner).map_err(|e| e.to_string())?;
+
+    let base = std::path::Path::new(&inner)
+        .file_name()
+        .map(|s| s.to_string_lossy().to_string())
+        .ok_or_else(|| "invalid entry name".to_string())?;
+    let dir = std::env::temp_dir().join("cpe-archive");
+    fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    let out = dir.join(&base);
+    let mut w = fs::File::create(&out).map_err(|e| e.to_string())?;
+    std::io::copy(&mut entry, &mut w).map_err(|e| e.to_string())?;
+    Ok(out.to_string_lossy().to_string())
+}
+
 /// Run an executable with elevation (CPE-241). On Windows this uses
 /// `Start-Process -Verb RunAs`, which shows the UAC prompt. On other platforms
 /// there is no standard per-launch elevation prompt, so it runs normally.
@@ -1613,7 +1634,8 @@ pub fn run() {
             dir_size,
             git_remote_url,
             open_external,
-            run_as_admin
+            run_as_admin,
+            extract_archive_entry
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application");

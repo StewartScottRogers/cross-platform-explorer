@@ -12,6 +12,10 @@
   export let folderSelected = false;
   /** True when exactly one executable file is selected — enables Execute (CPE-241). */
   export let executableSelected = false;
+  /** Icon for the "Open" item — the selected entry's own icon (CPE-243). */
+  export let openIcon = "folder";
+  /** Whether the selected folder is pinned to Home — toggles Pin/Unpin (CPE-249). */
+  export let pinned = false;
 
   const dispatch = createEventDispatcher<{
     action: string;
@@ -68,7 +72,7 @@
     </div>
     <div class="sep" />
     <button class="row" role="menuitem" on:click={() => run("open")}>
-      <Icon name="folder" size={15} /> Open
+      <Icon name={openIcon} size={15} /> Open
     </button>
     {#if executableSelected}
       <button class="row" role="menuitem" on:click={() => run("execute")}>
@@ -91,7 +95,18 @@
       <Icon name="paste" size={15} /> Copy as path
       <span class="hint">Ctrl+Shift+C</span>
     </button>
+    <button class="row" role="menuitem" on:click={() => run("copy-name")}>
+      <Icon name="rename" size={15} /> Copy name
+    </button>
+    {#if folderSelected}
+      <button class="row" role="menuitem" on:click={() => run("pin")}>
+        <Icon name="pin" size={15} /> {pinned ? "Unpin from Home" : "Pin to Home"}
+      </button>
+    {/if}
     <div class="sep" />
+    <button class="row" role="menuitem" on:click={() => run("reveal")}>
+      <Icon name="folder" size={15} /> Reveal in File Explorer
+    </button>
     <button class="row" role="menuitem" on:click={() => run("properties")}>
       <Icon name="info" size={15} /> Properties
       <span class="hint">Alt+Enter</span>
@@ -113,6 +128,10 @@
     <button class="row" role="menuitem" on:click={() => run("refresh")}>
       <Icon name="refresh" size={15} /> Refresh
       <span class="hint">F5</span>
+    </button>
+    <div class="sep" />
+    <button class="row" role="menuitem" on:click={() => run("reveal")}>
+      <Icon name="folder" size={15} /> Reveal in File Explorer
     </button>
   {/if}
 </div>

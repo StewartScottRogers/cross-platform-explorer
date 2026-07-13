@@ -419,15 +419,20 @@ button:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
   background: var(--surface-alt);
   color: var(--text);
 }
-/* Pop-out button (CPE-234) — fixed size, not a flex:1 tab. */
-.preview-pane-toggle .popout-btn {
+/* Pop-out button (CPE-234) — lives at the far right of the Preview toolbar
+   (CPE-244). Icon-only; pushed right with margin-left:auto. */
+.toolbar .popout-btn {
+  margin-left: auto;
   flex: none;
-  width: 30px;
-  padding: 0;
   display: grid;
   place-items: center;
+  width: 28px;
+  height: 24px;
+  border-radius: var(--radius);
   color: var(--text-dim);
 }
+.toolbar .popout-btn:not(:disabled):hover { background: var(--surface-alt); color: var(--text); }
+.toolbar .popout-btn:disabled { opacity: 0.4; cursor: default; }
 .preview-pane-toggle .popout-btn:not(:disabled):hover { background: var(--hover); color: var(--text); }
 /* The active pane fills the space below the toggle and scrolls itself. */
 .preview-pane > .preview { flex: 1; min-height: 0; }
