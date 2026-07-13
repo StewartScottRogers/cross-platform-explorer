@@ -9,6 +9,10 @@ name: Release (sidecar-enabled)
 # Run it from the Actions tab ("Run workflow") and provide the release tag, e.g.
 # v0.11.0-sidecar. It publishes a DRAFT release you review before making public.
 #
+# The overlay gives this build a distinct product identity — "Cross-Platform Explorer
+# (Sidecar)" / identifier ...crossplatformexplorer.sidecar (CPE-324) — so its installer is
+# a separate app that coexists with the plain release instead of colliding on version.
+#
 # Windows only for now: the feature compiles cross-OS, but the host's OS-keychain secrets
 # backend is Windows-only today, so macOS/Linux would fall back to in-memory secrets and
 # break the "secrets only in the OS keychain" invariant (ADR 0001 / CPE-268). Cross-OS is

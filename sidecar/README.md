@@ -93,6 +93,14 @@ it ships the sidecar binary + its `sidecar.json` + the agent catalog into the ap
 `npm run tauri dev -- --features sidecar-platform` with `CPE_AICONSOLE_BIN` set to the
 built binary.
 
+**Distinct product identity (CPE-324).** The overlay also gives the sidecar build its own
+`productName` ("Cross-Platform Explorer (Sidecar)") and `identifier`
+(`…crossplatformexplorer.sidecar`), and turns off `createUpdaterArtifacts`. So it's a
+**separate installable app** — a preview channel that installs to its own location and
+coexists with the plain release, instead of colliding with it (installing the same
+`0.11.0` over the plain `0.11.0` would otherwise no-op). The plain release keeps its own
+identity untouched (the delete-test).
+
 ### Bundle-resource gotcha: single files need an explicit target path (CPE-320)
 
 In `bundle.resources`, a **single-file** source must map to an explicit destination
