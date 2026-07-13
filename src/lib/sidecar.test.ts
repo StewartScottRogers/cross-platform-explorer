@@ -5,7 +5,7 @@ import { describe, it, expect, vi, beforeEach } from "vitest";
 const { invoke } = vi.hoisted(() => ({ invoke: vi.fn() }));
 vi.mock("@tauri-apps/api/core", () => ({ invoke }));
 
-import { listSidecars, platformActive } from "./sidecar";
+import { listSidecars, platformActive, parseUiAnnouncement } from "./sidecar";
 
 beforeEach(() => invoke.mockReset());
 
@@ -28,5 +28,16 @@ describe("sidecar platform client", () => {
   it("platformActive is true when the command resolves", async () => {
     invoke.mockResolvedValue([]);
     expect(await platformActive()).toBe(true);
+  });
+
+  it("parses a loopback ui: announcement", () => {
+    expect(parseUiAnnouncement("ui:http://127.0.0.1:55937")).toBe("http://127.0.0.1:55937");
+    expect(parseUiAnnouncement("ui:http://localhost:1234")).toBe("http://localhost:1234");
+  });
+
+  it("rejects non-loopback or non-ui announcements", () => {
+    expect(parseUiAnnouncement("ui:http://evil.example.com")).toBeNull();
+    expect(parseUiAnnouncement("running")).toBeNull();
+    expect(parseUiAnnouncement("ui:")).toBeNull();
   });
 });
