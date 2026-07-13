@@ -1494,6 +1494,51 @@ fn open_external(path: String) -> Result<(), String> {
     spawned.map(|_| ()).map_err(|e| e.to_string())
 }
 
+/// Open the platform's terminal with its working directory set to `path`
+/// (CPE-253). Windows prefers Windows Terminal and falls back to a fresh cmd
+/// window; macOS uses Terminal.app; Linux tries the common emulators in turn.
+#[tauri::command]
+fn open_terminal(path: String) -> Result<(), String> {
+    use std::process::Command;
+
+    #[cfg(target_os = "windows")]
+    {
+        // Windows Terminal opens directly at a directory with -d.
+        if Command::new("wt.exe").args(["-d", &path]).spawn().is_ok() {
+            return Ok(());
+        }
+        // Fallback: a new cmd window whose working dir is `path`. `start ""`
+        // spawns the window; current_dir sets where it opens.
+        Command::new("cmd")
+            .args(["/C", "start", "", "cmd"])
+            .current_dir(&path)
+            .spawn()
+            .map(|_| ())
+            .map_err(|e| e.to_string())
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        Command::new("open")
+            .args(["-a", "Terminal", &path])
+            .spawn()
+            .map(|_| ())
+            .map_err(|e| e.to_string())
+    }
+
+    #[cfg(all(unix, not(target_os = "macos")))]
+    {
+        // Try the common terminals in order; the first that launches wins.
+        let candidates = ["x-terminal-emulator", "gnome-terminal", "konsole", "xterm"];
+        for term in candidates {
+            if Command::new(term).current_dir(&path).spawn().is_ok() {
+                return Ok(());
+            }
+        }
+        Err("no terminal emulator found".into())
+    }
+}
+
 /// Extract a single entry from a ZIP to a temp file and return its path, so it
 /// can be opened with its default app while browsing inside the archive
 /// (CPE-242). Read-only: the temp copy is what opens, not the archived bytes.
@@ -1759,7 +1804,8 @@ pub fn run() {
             run_as_admin,
             extract_archive_entry,
             compress_to_zip,
-            extract_archive
+            extract_archive,
+            open_terminal
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application");

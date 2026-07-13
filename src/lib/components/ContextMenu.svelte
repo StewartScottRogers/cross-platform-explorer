@@ -20,6 +20,8 @@
   export let compressible = false;
   /** True when exactly one archive file is selected — enables Extract (CPE-252). */
   export let extractable = false;
+  /** True when Open-in-Terminal applies (a real folder, not Home/archive) (CPE-253). */
+  export let canTerminal = false;
 
   const dispatch = createEventDispatcher<{
     action: string;
@@ -90,6 +92,11 @@
       <button class="row" role="menuitem" on:click={() => run("open-new-tab")}>
         <Icon name="plus" size={15} /> Open in new tab
       </button>
+      {#if canTerminal}
+        <button class="row" role="menuitem" on:click={() => run("terminal-folder")}>
+          <Icon name="code" size={15} /> Open in Terminal
+        </button>
+      {/if}
     {/if}
     <button class="row" role="menuitem" on:click={() => run("duplicate")}>
       <Icon name="copy" size={15} /> Duplicate
@@ -144,6 +151,11 @@
       <span class="hint">F5</span>
     </button>
     <div class="sep" />
+    {#if canTerminal}
+      <button class="row" role="menuitem" on:click={() => run("terminal")}>
+        <Icon name="code" size={15} /> Open in Terminal
+      </button>
+    {/if}
     <button class="row" role="menuitem" on:click={() => run("reveal")}>
       <Icon name="folder" size={15} /> Reveal in File Explorer
     </button>
