@@ -1,0 +1,14 @@
+{
+  "schema_version": 1,
+  "id": "ai-console",
+  "name": "AI Console",
+  "version": "0.1.0",
+  "contract_version": { "major": 1, "minor": 2 },
+  "entry": {
+    "windows": { "command": "ai-console.exe" },
+    "macos": { "command": "ai-console" },
+    "linux": { "command": "ai-console" }
+  },
+  "capabilities": ["context", "secrets", "storage", "events"],
+  "ui": { "kind": "local_port", "source": "announced" }
+}
