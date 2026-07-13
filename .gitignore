@@ -27,3 +27,6 @@ Thumbs.db
 updater.pw
 .env
 .env.*
+
+# Sub-agent worktrees (transient; never commit)
+.claude/worktrees/
