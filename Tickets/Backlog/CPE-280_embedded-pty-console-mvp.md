@@ -27,8 +27,9 @@ session running in-app.
       chosen.
 
 ## Notes — Dependencies / Schedule
-**Depends on:** [[CPE-278]], [[CPE-281]], [[CPE-267]]. **Phase:** C2 (Console MVP).
-**Epic:** [[CPE-261]].
+**Depends on:** [[CPE-278]], [[CPE-281]], [[CPE-267]]; PTY approach proven in the
+spike [[CPE-294]]. **Phase:** C2 (Console MVP). **Epic:** [[CPE-261]]. Runs the
+agent scoped per [[CPE-306]]; survives restarts per [[CPE-309]].
 
 ## Work Log
 2026-07-13 — Filed during Nightshift epic planning.

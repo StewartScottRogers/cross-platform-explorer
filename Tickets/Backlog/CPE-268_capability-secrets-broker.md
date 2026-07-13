@@ -26,8 +26,9 @@ child processes, never returned to any UI/webview and never logged.
 - [ ] Tests: set/get/delete round-trip, namespace isolation, redaction.
 
 ## Notes — Dependencies / Schedule
-**Depends on:** [[CPE-266]]. **Phase:** P3. **Epic:** [[CPE-260]]. Foundation for
-the AI Console vault [[CPE-279]].
+**Depends on:** [[CPE-266]]. **Phase:** P3. **Epic:** [[CPE-260]]. Gated by user
+consent [[CPE-296]]; redaction shares the [[CPE-298]] utility; foundation for the
+AI Console vault [[CPE-279]]; reviewed in [[CPE-304]].
 
 ## Work Log
 2026-07-13 — Filed during Nightshift epic planning.
