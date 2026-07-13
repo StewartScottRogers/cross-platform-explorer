@@ -55,12 +55,27 @@ impl ConsoleState {
     /// The agent/provider/model/install catalog for the launcher UI. Detects install state
     /// per agent via its manifest's detect command (missing/unfound ⇒ not installed).
     fn catalog(&self) -> Value {
-        let runner = RealRunner;
-        let agents: Vec<Value> = self
-            .registry
-            .all()
-            .map(|a| {
-                let det = lifecycle::detect(a, &runner);
+        let agents: Vec<&crate::agents::AgentManifest> = self.registry.all().collect();
+        // Probe install state for every agent IN PARALLEL. Each `detect` spawns a
+        // subprocess (`<cli> --version`); probing 12 serially visibly stalls the launcher
+        // (CPE-325). Scoped threads let us borrow the manifests without cloning.
+        let detected: Vec<lifecycle::DetectResult> = std::thread::scope(|s| {
+            let handles: Vec<_> = agents
+                .iter()
+                .map(|&a| s.spawn(move || lifecycle::detect(a, &RealRunner)))
+                .collect();
+            handles
+                .into_iter()
+                .map(|h| {
+                    h.join()
+                        .unwrap_or(lifecycle::DetectResult { installed: false, version: None })
+                })
+                .collect()
+        });
+        let agents_json: Vec<Value> = agents
+            .iter()
+            .zip(detected)
+            .map(|(a, det)| {
                 json!({
                     "id": a.id,
                     "name": a.name,
@@ -74,7 +89,7 @@ impl ConsoleState {
             })
             .collect();
         let last = self.last_used.lock().unwrap().get(&self.default_cwd).cloned();
-        json!({ "agents": agents, "cwd": self.default_cwd, "lastUsed": last })
+        json!({ "agents": agents_json, "cwd": self.default_cwd, "lastUsed": last })
     }
 
     fn handle_launch(&self, body: &str) -> Response {

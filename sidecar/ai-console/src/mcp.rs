@@ -34,6 +34,7 @@ impl McpProcess {
         for (k, v) in &spec.env {
             cmd.env(k, v);
         }
+        crate::hide_console(&mut cmd); // no flashing console window on Windows (CPE-325)
         let child = cmd
             .stdin(Stdio::null())
             .stdout(Stdio::null())

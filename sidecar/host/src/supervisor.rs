@@ -196,14 +196,19 @@ pub struct ProcessConnection {
 /// the sidecar echoes it in `Hello` so [`handshake`] can authenticate the channel.
 pub fn spawn_process(command: &str, args: &[String]) -> Result<ProcessConnection, String> {
     let launch_token = generate_launch_token();
-    let mut child = Command::new(command)
-        .args(args)
+    let mut cmd = Command::new(command);
+    cmd.args(args)
         .env(sidecar_contract::AUTH_TOKEN_ENV, &launch_token)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
-        .stderr(Stdio::inherit())
-        .spawn()
-        .map_err(|e| format!("spawn {command}: {e}"))?;
+        .stderr(Stdio::inherit());
+    // Don't pop a console window for the sidecar on Windows (CPE-325).
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        cmd.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
+    }
+    let mut child = cmd.spawn().map_err(|e| format!("spawn {command}: {e}"))?;
 
     let stdin = child.stdin.take().ok_or("no child stdin")?;
     let stdout = child.stdout.take().ok_or("no child stdout")?;

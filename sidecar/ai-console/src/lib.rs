@@ -10,6 +10,16 @@
 //! agent registry, provider routing, secret vault, lifecycle — are added by later
 //! tickets and re-exported here.
 
+/// Suppress the console window Windows would otherwise pop for a spawned CLI (CPE-325).
+/// A no-op off Windows. Apply to every `std::process::Command` before spawning.
+#[cfg(windows)]
+pub(crate) fn hide_console(cmd: &mut std::process::Command) {
+    use std::os::windows::process::CommandExt;
+    cmd.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
+}
+#[cfg(not(windows))]
+pub(crate) fn hide_console(_cmd: &mut std::process::Command) {}
+
 pub mod aggregate;
 pub mod agents;
 pub mod console;

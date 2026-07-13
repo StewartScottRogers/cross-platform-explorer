@@ -26,8 +26,10 @@ pub struct RealRunner;
 
 impl CommandRunner for RealRunner {
     fn run(&self, command: &str, args: &[String]) -> Result<CommandOutput, String> {
-        let out = std::process::Command::new(command)
-            .args(args)
+        let mut cmd = std::process::Command::new(command);
+        cmd.args(args);
+        crate::hide_console(&mut cmd); // no flashing console window on Windows (CPE-325)
+        let out = cmd
             .output()
             .map_err(|e| format!("could not run {command}: {e}"))?;
         Ok(CommandOutput {

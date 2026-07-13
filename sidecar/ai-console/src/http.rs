@@ -245,12 +245,25 @@ mod tests {
             Response::text(200, format!("path={} q={:?}", req.path, req.query("x")))
         }
         let server = serve(Arc::new(()), handler).unwrap();
-        let mut stream = TcpStream::connect(("127.0.0.1", server.port)).unwrap();
-        // Bound the read so a pathological hang fails fast instead of stalling the suite.
-        stream.set_read_timeout(Some(std::time::Duration::from_secs(5))).unwrap();
-        stream.write_all(b"GET /hello?x=7 HTTP/1.1\r\nHost: localhost\r\n\r\n").unwrap();
+        // Do the exchange with a few retries: the whole test suite runs in parallel and
+        // spawns many subprocesses, so a single loopback round-trip can occasionally be
+        // starved. Retrying keeps this deterministic without a serial-test dependency.
         let mut resp = String::new();
-        stream.read_to_string(&mut resp).unwrap();
+        for attempt in 0..5 {
+            resp.clear();
+            let r = (|| -> std::io::Result<()> {
+                let mut stream = TcpStream::connect(("127.0.0.1", server.port))?;
+                stream.set_read_timeout(Some(std::time::Duration::from_secs(5)))?;
+                stream.write_all(b"GET /hello?x=7 HTTP/1.1\r\nHost: localhost\r\n\r\n")?;
+                stream.read_to_string(&mut resp)?;
+                Ok(())
+            })();
+            if r.is_ok() && resp.contains("200 OK") {
+                break;
+            }
+            assert!(attempt < 4, "server never responded: {r:?} resp={resp}");
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
         assert!(resp.contains("200 OK"), "resp: {resp}");
         assert!(resp.contains("Access-Control-Allow-Origin: *"));
         assert!(resp.contains("path=/hello q=Some(\"7\")"), "resp: {resp}");
