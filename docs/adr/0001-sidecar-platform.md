@@ -60,6 +60,13 @@ This single test is the boundary's guarantee, wired into CI (CPE-272). It is the
 build/coupling analogue of PURPOSE.md's "with a mode off, the explorer stays
 fast/small/predictable."
 
+**Implemented as:** the integration lives behind the `src-tauri` Cargo feature
+`sidecar-platform`, **off by default**, so the plain explorer compiles and ships with no
+sidecar code. CI proves both halves — the default `backend` job is the delete-test
+(builds/tests with zero sidecars), a feature build proves the integration compiles, and
+a grep guard fails if any sidecar crate ever depends on the explorer app (the one-way
+rule).
+
 ## Quality bars & budgets
 
 - **Startup:** zero measurable cost with all sidecars disabled.

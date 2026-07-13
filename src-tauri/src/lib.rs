@@ -1759,6 +1759,36 @@ fn git_remote_url(path: String) -> Option<String> {
     origin_url.or(first_url).map(|u| normalize_git_url(&u))
 }
 
+// ---------------------------------------------------------------------------
+// Sidecar platform integration (ADR 0001 / CPE-260), feature-gated.
+//
+// Everything below is compiled ONLY with `--features sidecar-platform`. With the
+// feature off (the default), none of this — and none of the `sidecar-host` crate —
+// is part of the build, so the plain explorer stays byte-for-byte as it was. That is
+// the delete-test (CPE-272): remove the sidecars and the explorer is unaffected.
+// ---------------------------------------------------------------------------
+
+/// List the ids of sidecars registered in the bundled + user registry directories.
+/// A first, minimal seam into the platform host; the pane mount and supervisor wiring
+/// build on this (CPE-271 onward).
+#[cfg(feature = "sidecar-platform")]
+#[tauri::command]
+fn sidecar_registry_ids(app: tauri::AppHandle) -> Vec<String> {
+    use tauri::Manager;
+    let mut dirs = Vec::new();
+    // Bundled catalog (shipped with the app) + a user-writable registry dir.
+    if let Ok(resource) = app.path().resource_dir() {
+        dirs.push(resource.join("sidecars"));
+    }
+    if let Ok(config) = app.path().app_config_dir() {
+        dirs.push(config.join("sidecars"));
+    }
+    sidecar_host::registry::Registry::load_from_dirs(&dirs)
+        .all()
+        .map(|m| m.id.clone())
+        .collect()
+}
+
 pub fn run() {
     let mut builder = tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
@@ -1826,7 +1856,9 @@ pub fn run() {
             compress_to_zip,
             extract_archive,
             open_terminal,
-            create_file
+            create_file,
+            #[cfg(feature = "sidecar-platform")]
+            sidecar_registry_ids
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application");
