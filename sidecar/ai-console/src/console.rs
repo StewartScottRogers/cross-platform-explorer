@@ -100,6 +100,7 @@ impl ConsoleState {
         let agent_id = v["agent"].as_str().unwrap_or("");
         let provider = v["provider"].as_str().unwrap_or("").to_string();
         let model = str_opt(&v, "model");
+        let small_model = str_opt(&v, "smallModel");
         let api_key = str_opt(&v, "apiKey");
         let base_url = str_opt(&v, "baseUrl");
         let cwd = str_opt(&v, "cwd").unwrap_or_else(|| self.default_cwd.clone());
@@ -112,7 +113,7 @@ impl ConsoleState {
             Some(a) => a.clone(),
             None => return bad(format!("unknown agent '{agent_id}'")),
         };
-        let ctx = LaunchContext { model, small_model: None, api_key, base_url };
+        let ctx = LaunchContext { model, small_model, api_key, base_url };
         let req = AgentLaunchRequest {
             agent: &agent,
             provider: &provider,

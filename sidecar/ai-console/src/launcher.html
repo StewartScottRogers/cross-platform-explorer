@@ -46,6 +46,10 @@
       <input id="model" class="grow" placeholder="(default)" />
     </div>
     <div class="field">
+      <label for="smallModel">Small model (optional)</label>
+      <input id="smallModel" class="grow" placeholder="(same as model)" />
+    </div>
+    <div class="field">
       <label for="apiKey">API key (optional)</label>
       <input id="apiKey" type="password" placeholder="from profile / native login" />
     </div>
@@ -120,9 +124,14 @@ async function load() {
 }
 
 async function launch() {
+  const a = agentById($("agent").value);
+  // Fall back to the agent's default model when the field is blank; a provider that needs
+  // a "small/fast" model reuses the main model unless one is given.
+  const model = $("model").value.trim() || (a && a.defaultModel) || "";
+  const smallModel = $("smallModel").value.trim() || model;
   const body = {
     agent: $("agent").value, provider: $("provider").value,
-    model: $("model").value.trim(), apiKey: $("apiKey").value,
+    model, smallModel, apiKey: $("apiKey").value,
     cwd: $("cwd").value.trim(),
   };
   setMsg("Launching…", true);
