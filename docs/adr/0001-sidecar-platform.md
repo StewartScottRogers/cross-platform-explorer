@@ -50,7 +50,7 @@ one-off: adding a future Mega-Feature is adding a sidecar, not editing the host.
 | IPC transport | Decided by the Phase-0 spike (length-prefixed frames over stdio vs local socket; must stream + backpressure) | CPE-294 |
 | Trust model | Bundled manifests are first-party; **user/third-party manifests are untrusted executable content** needing provenance + consent before any command runs | CPE-295 |
 | Versioning | Contract, sidecar manifests, agent manifests, stored state, and credential profiles **all** carry a schema version with a migration path | CPE-263, CPE-300 |
-| Distribution | **Sidecars are first-party and always BUNDLED with the app — never downloaded at runtime.** They ship inside the app install and update only when the app updates. This removes the fetched-binary path entirely: no separate download, no OS code-signing of sidecars needed (they inherit the signed app's trust), no independent update/rollback of binaries. Market pace comes from updating *agent manifests* (data), not sidecar binaries. | CPE-276 |
+| Distribution | **Sidecars are first-party and always BUNDLED with the app — never downloaded at runtime.** They ship inside the app install and update only when the app updates. This removes the fetched-binary path entirely: no separate download, no OS code-signing of sidecars needed (they inherit the signed app's trust), no independent update/rollback of binaries. Market pace comes from updating *agent manifests* (data), not sidecar binaries. The binary bundles as a plain resource copied in place; each single-file bundle entry names an explicit destination path (CPE-320). | CPE-276, CPE-320 |
 
 ## The enforcement rule — the delete-test
 

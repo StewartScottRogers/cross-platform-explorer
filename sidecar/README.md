@@ -81,7 +81,7 @@ sidecar-free (the delete-test). To build the explorer *with* the platform and th
 AI Console bundled in:
 
 ```
-# 1. build the sidecar release binary/binaries
+# 1. build the sidecar release binary
 (cd sidecar/ai-console && cargo build --release)
 # 2. build the app with the feature + the bundle overlay
 npm run tauri build -- --features sidecar-platform --config src-tauri/tauri.sidecar.conf.json
@@ -89,23 +89,22 @@ npm run tauri build -- --features sidecar-platform --config src-tauri/tauri.side
 
 `src-tauri/tauri.sidecar.conf.json` is a config overlay merged in only for this build;
 it ships the sidecar binary + its `sidecar.json` + the agent catalog into the app's
-`sidecars/` resources, which the app resolves at runtime (no env var needed).
-For dev, `npm run tauri dev -- --features sidecar-platform` with `CPE_AICONSOLE_BIN`
-set to the built binary.
+`sidecars/` resources, which the app resolves at runtime (no env var needed). For dev,
+`npm run tauri dev -- --features sidecar-platform` with `CPE_AICONSOLE_BIN` set to the
+built binary.
 
-### Windows: Defender may block the bundled binary during build
+### Bundle-resource gotcha: single files need an explicit target path (CPE-320)
 
-`tauri build` with the overlay copies the sidecar binary into the app resources.
-Windows Defender real-time protection can lock that freshly-written binary mid-copy,
-failing the build with `Access is denied. (os error 5)` (the `.json` manifests are
-unaffected). It is a *transient* scan-on-write lock on the destination — the same copy
-run manually a moment later succeeds — and it is content-based, so renaming the binary
-does not avoid it. Add a one-time exclusion for the repo in an **elevated** PowerShell,
-then rebuild:
+In `bundle.resources`, a **single-file** source must map to an explicit destination
+**file path**, not a trailing-slash directory:
 
-```
-Add-MpPreference -ExclusionPath "Z:\repos\cross-platform-explorer"
+```jsonc
+"../sidecar/ai-console/target/release/ai-console.exe": "sidecars/ai-console.exe",  // ✔
+"../sidecar/ai-console/sidecar.json":                  "sidecars/sidecar.json",     // ✔
+"../sidecar/ai-console/agents/*.json":                 "sidecars/agents/"           // ✔ (glob → dir)
 ```
 
-CI runners generally don't hit this (release builds happen there). Dev (`tauri dev` +
-`CPE_AICONSOLE_BIN`) is unaffected — it never copies the binary.
+Mapping a single file to `"sidecars/"` fails the build on Windows with
+`Access is denied. (os error 5)`: Tauri copies the file *to the path* `sidecars`, which
+collides with the `sidecars` directory the agent glob creates. A glob target keeps the
+trailing slash (it's a directory of many files); a single file names its destination.
