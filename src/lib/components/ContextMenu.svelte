@@ -109,6 +109,11 @@
     <button class="row" role="menuitem" on:click={() => run("copy-name")}>
       <Icon name="rename" size={15} /> Copy name
     </button>
+    {#if selectionCount > 1}
+      <button class="row" role="menuitem" on:click={() => run("batch-rename")}>
+        <Icon name="rename" size={15} /> Rename…
+      </button>
+    {/if}
     {#if extractable}
       <button class="row" role="menuitem" on:click={() => run("extract")}>
         <Icon name="archive" size={15} /> Extract
