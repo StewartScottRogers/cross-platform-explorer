@@ -1,7 +1,7 @@
 <script lang="ts">
   import { onMount } from "svelte";
   import { invoke, convertFileSrc } from "@tauri-apps/api/core";
-  import { check } from "@tauri-apps/plugin-updater";
+  import { check, type Update } from "@tauri-apps/plugin-updater";
   import { relaunch, exit } from "@tauri-apps/plugin-process";
   import { openPath, openUrl } from "@tauri-apps/plugin-opener";
   import { getVersion } from "@tauri-apps/api/app";
@@ -9,6 +9,7 @@
   import MenuBar from "./lib/components/MenuBar.svelte";
   import AboutDialog from "./lib/components/AboutDialog.svelte";
   import SettingsDialog from "./lib/components/SettingsDialog.svelte";
+  import UpdateDialog from "./lib/components/UpdateDialog.svelte";
   import TabBar from "./lib/components/TabBar.svelte";
   import NavToolbar from "./lib/components/NavToolbar.svelte";
   import CommandBar from "./lib/components/CommandBar.svelte";
@@ -146,6 +147,17 @@
   let showAbout = false;
   let showSettings = false;
   let appVersion = "";
+
+  // ---- In-app updates (CPE-230) ----
+  // The updater already checks a signed manifest, downloads, verifies, and can
+  // relaunch. Here we drive it through a consent-first UI: detect → prompt →
+  // (on user's say-so) download with progress → install → relaunch.
+  let pendingUpdate: Update | null = null;
+  let showUpdate = false;
+  let updateState: "prompt" | "downloading" | "error" = "prompt";
+  let updateProgress = 0;
+  let updateIndeterminate = false;
+  let updateError = "";
 
   let navToolbar: NavToolbar;
 
@@ -786,19 +798,6 @@
     }
   }
 
-  async function checkForUpdates() {
-    try {
-      const update = await check();
-      if (update) {
-        showNotice(`Update ${update.version} available — downloading…`);
-        await update.downloadAndInstall();
-        await relaunch();
-      }
-    } catch (e) {
-      console.debug("update check skipped:", e);
-    }
-  }
-
   /** Pull every preference from the settings store into the reactive UI vars. */
   function applySettings() {
     view = settings.loadView();
@@ -828,7 +827,7 @@
   function onMenuSelect(action: string) {
     switch (action) {
       case "exit": exitApp(); break;
-      case "check-updates": manualUpdateCheck(); break;
+      case "check-updates": checkForUpdates(true); break;
       case "settings": showSettings = true; break;
       case "documentation": openExternal(REPO_URL); break;
       case "about": showAbout = true; break;
@@ -844,24 +843,73 @@
     }
   }
 
-  /** Application > Check for Updates — manual counterpart to the silent startup
-      check, with feedback in every case and no crash if the updater is
-      unreachable or unconfigured (e.g. a dev build). */
-  async function manualUpdateCheck() {
-    showNotice("Checking for updates…");
+  /** Check the signed manifest for a newer version. On startup this runs quietly
+      (`manual=false`): silence when up to date, a prompt when there's an update —
+      never a silent auto-install. From the Application menu (`manual=true`) it
+      also reports "up to date" and surfaces errors. Nothing installs here. */
+  async function checkForUpdates(manual = false) {
+    if (manual) showNotice("Checking for updates…");
     try {
       const update = await check();
       if (update) {
-        showNotice(`Update ${update.version} available — downloading…`);
-        await update.downloadAndInstall();
-        await relaunch();
-      } else {
+        pendingUpdate = update;
+        updateState = "prompt";
+        updateProgress = 0;
+        updateIndeterminate = false;
+        updateError = "";
+        showUpdate = true;
+      } else if (manual) {
         showNotice("You're up to date.");
       }
     } catch (e) {
-      console.debug("manual update check failed:", e);
-      showNotice("Couldn't check for updates right now.", true);
+      console.debug("update check failed:", e);
+      if (manual) showNotice("Couldn't check for updates right now.", true);
     }
+  }
+
+  /** Download + install the pending update with progress, then relaunch. Only
+      ever called when the user clicks Install & Restart. */
+  async function installUpdate() {
+    if (!pendingUpdate) return;
+    updateState = "downloading";
+    updateProgress = 0;
+    updateError = "";
+
+    let total = 0;
+    let downloaded = 0;
+    updateIndeterminate = false;
+
+    try {
+      await pendingUpdate.downloadAndInstall((event) => {
+        switch (event.event) {
+          case "Started":
+            total = event.data.contentLength ?? 0;
+            updateIndeterminate = total === 0; // server didn't send a length
+            break;
+          case "Progress":
+            downloaded += event.data.chunkLength;
+            if (total > 0) {
+              updateProgress = Math.min(100, Math.round((downloaded / total) * 100));
+            }
+            break;
+          case "Finished":
+            updateProgress = 100;
+            updateIndeterminate = false;
+            break;
+        }
+      });
+      // Installed — restart into the new version. relaunch replaces this process.
+      await relaunch();
+    } catch (e) {
+      console.debug("update install failed:", e);
+      updateState = "error";
+      updateError = "The update couldn't be installed. Please try again later.";
+    }
+  }
+
+  /** "Later" — keep running on the current version; the update stays available. */
+  function dismissUpdate() {
+    showUpdate = false;
   }
 
   onMount(async () => {
@@ -1204,5 +1252,19 @@
     repoUrl={REPO_URL}
     on:openurl={(e) => openExternal(e.detail)}
     on:close={() => (showAbout = false)}
+  />
+{/if}
+
+{#if showUpdate && pendingUpdate}
+  <UpdateDialog
+    version={pendingUpdate.version}
+    currentVersion={appVersion}
+    notes={pendingUpdate.body ?? ""}
+    state={updateState}
+    progress={updateProgress}
+    indeterminate={updateIndeterminate}
+    error={updateError}
+    on:install={installUpdate}
+    on:close={dismissUpdate}
   />
 {/if}
