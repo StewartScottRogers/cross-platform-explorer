@@ -14,5 +14,9 @@ sidecar-contract = { path = "../contract" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 
+# The embedded terminal (CPE-280): a real pseudo-terminal so interactive agent TUIs
+# (claude, aider, …) run in-app. Cross-platform: Windows ConPTY, Unix openpty.
+portable-pty = "0.8"
+
 [dev-dependencies]
 tempfile = "3"

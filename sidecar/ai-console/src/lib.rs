@@ -14,8 +14,11 @@ pub mod aggregate;
 pub mod agents;
 pub mod lifecycle;
 pub mod lmstudio;
+pub mod pty;
 pub mod routing;
 pub mod vault;
+
+pub use pty::{PtyLaunch, PtySession};
 
 pub use vault::{resolve_env, CredentialProfile, ProfileSet, SecretAccess};
 
