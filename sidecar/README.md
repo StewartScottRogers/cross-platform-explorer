@@ -93,17 +93,19 @@ it ships the sidecar binary + its `sidecar.json` + the agent catalog into the ap
 For dev, `npm run tauri dev -- --features sidecar-platform` with `CPE_AICONSOLE_BIN`
 set to the built binary.
 
-### Windows: Defender may block the bundled `.exe` during build
+### Windows: Defender may block the bundled binary during build
 
-`tauri build` with the overlay copies the sidecar `.exe` into the app resources.
-Windows Defender real-time protection can lock that freshly-written `.exe` mid-copy,
+`tauri build` with the overlay copies the sidecar binary into the app resources.
+Windows Defender real-time protection can lock that freshly-written binary mid-copy,
 failing the build with `Access is denied. (os error 5)` (the `.json` manifests are
-unaffected). If you hit this, add a one-time exclusion for the repo in an **elevated**
-PowerShell, then rebuild:
+unaffected). It is a *transient* scan-on-write lock on the destination — the same copy
+run manually a moment later succeeds — and it is content-based, so renaming the binary
+does not avoid it. Add a one-time exclusion for the repo in an **elevated** PowerShell,
+then rebuild:
 
 ```
 Add-MpPreference -ExclusionPath "Z:\repos\cross-platform-explorer"
 ```
 
-CI runners generally don't hit this. Dev (`tauri dev` + `CPE_AICONSOLE_BIN`) is
-unaffected — it never copies the binary.
+CI runners generally don't hit this (release builds happen there). Dev (`tauri dev` +
+`CPE_AICONSOLE_BIN`) is unaffected — it never copies the binary.
