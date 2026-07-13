@@ -90,6 +90,12 @@ jobs:
         working-directory: src-tauri
         run: cargo test
 
+      # The default build above is the delete-test: the explorer compiles with ZERO
+      # sidecar code. This proves the opt-in integration also compiles (CPE-272).
+      - name: cargo check (sidecar-platform feature)
+        working-directory: src-tauri
+        run: cargo clippy --all-targets --features sidecar-platform -- -D warnings
+
   sidecar:
     # The sidecar platform crates (sidecar/contract, sidecar/host) are standalone —
     # deliberately NOT part of the app's cargo workspace, so the `backend` job above
@@ -105,6 +111,17 @@ jobs:
         os: [ubuntu-latest, windows-latest, macos-latest]
     steps:
       - uses: actions/checkout@v4
+
+      # One-way dependency guard (ADR 0001 / CPE-272): a sidecar crate must NEVER
+      # depend on the explorer app. Fail if any sidecar Cargo.toml references it.
+      - name: Enforce one-way dependency
+        shell: bash
+        run: |
+          if grep -rE '^(app_lib|cross-platform-explorer)\b|path = "\.\./\.\./src-tauri' sidecar/*/Cargo.toml; then
+            echo "::error::a sidecar crate depends on the explorer app — that breaks the one-way boundary"
+            exit 1
+          fi
+          echo "one-way dependency holds"
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable

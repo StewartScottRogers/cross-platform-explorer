@@ -23,6 +23,12 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 zip = "2"
 
+# Optional: the sidecar platform host (ADR 0001), a standalone crate under ../sidecar.
+# Compiled ONLY with the `sidecar-platform` feature, so the plain explorer builds and
+# ships with zero sidecar code — the delete-test (CPE-272). One-way dependency: the app
+# may use the host; the host never depends on the app.
+sidecar-host = { path = "../sidecar/host", optional = true }
+
 # Archive previews beyond zip (CPE-109/112/217). tar is pure-Rust; flate2 uses
 # the pure-Rust miniz_oxide backend by default, so neither needs system libs in CI.
 tar = "0.4"
@@ -77,3 +83,6 @@ rust_xlsxwriter = "0.79"
 [features]
 # This feature is used for production builds where `devUrl` is disabled.
 default = []
+# Opt-in sidecar platform integration (ADR 0001 / CPE-260). OFF by default so the plain
+# explorer compiles and ships with no sidecar code whatsoever — the delete-test (CPE-272).
+sidecar-platform = ["dep:sidecar-host"]
