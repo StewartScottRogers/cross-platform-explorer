@@ -11,9 +11,11 @@
 //! tickets and re-exported here.
 
 pub mod agents;
+pub mod lifecycle;
 pub mod routing;
 
 pub use agents::{AgentManifest, AgentRegistry, OsCommand, ProviderRecipe};
+pub use lifecycle::{detect, CommandRunner, DetectResult, RealRunner};
 pub use routing::{compose_launch, Launch, LaunchContext};
 
 use sidecar_contract::{
