@@ -1,0 +1,126 @@
+{
+  "schema_version": 1,
+  "id": "codex",
+  "name": "OpenAI Codex CLI",
+  "detect": {
+    "windows": {
+      "command": "codex",
+      "args": [
+        "--version"
+      ]
+    },
+    "macos": {
+      "command": "codex",
+      "args": [
+        "--version"
+      ]
+    },
+    "linux": {
+      "command": "codex",
+      "args": [
+        "--version"
+      ]
+    }
+  },
+  "install": {
+    "windows": {
+      "command": "npm",
+      "args": [
+        "i",
+        "-g",
+        "@openai/codex@latest"
+      ]
+    },
+    "macos": {
+      "command": "npm",
+      "args": [
+        "i",
+        "-g",
+        "@openai/codex@latest"
+      ]
+    },
+    "linux": {
+      "command": "npm",
+      "args": [
+        "i",
+        "-g",
+        "@openai/codex@latest"
+      ]
+    }
+  },
+  "update": {
+    "windows": {
+      "command": "npm",
+      "args": [
+        "i",
+        "-g",
+        "@openai/codex@latest"
+      ]
+    },
+    "macos": {
+      "command": "npm",
+      "args": [
+        "i",
+        "-g",
+        "@openai/codex@latest"
+      ]
+    },
+    "linux": {
+      "command": "npm",
+      "args": [
+        "i",
+        "-g",
+        "@openai/codex@latest"
+      ]
+    }
+  },
+  "uninstall": {
+    "windows": {
+      "command": "npm",
+      "args": [
+        "rm",
+        "-g",
+        "@openai/codex"
+      ]
+    },
+    "macos": {
+      "command": "npm",
+      "args": [
+        "rm",
+        "-g",
+        "@openai/codex"
+      ]
+    },
+    "linux": {
+      "command": "npm",
+      "args": [
+        "rm",
+        "-g",
+        "@openai/codex"
+      ]
+    }
+  },
+  "run": {
+    "windows": {
+      "command": "codex",
+      "args": []
+    },
+    "macos": {
+      "command": "codex",
+      "args": []
+    },
+    "linux": {
+      "command": "codex",
+      "args": []
+    }
+  },
+  "providers": [
+    "native"
+  ],
+  "provider_recipes": {
+    "native": {
+      "env": {},
+      "args": []
+    }
+  }
+}

@@ -1,0 +1,126 @@
+{
+  "schema_version": 1,
+  "id": "qwen",
+  "name": "Qwen Code",
+  "detect": {
+    "windows": {
+      "command": "qwen",
+      "args": [
+        "--version"
+      ]
+    },
+    "macos": {
+      "command": "qwen",
+      "args": [
+        "--version"
+      ]
+    },
+    "linux": {
+      "command": "qwen",
+      "args": [
+        "--version"
+      ]
+    }
+  },
+  "install": {
+    "windows": {
+      "command": "npm",
+      "args": [
+        "i",
+        "-g",
+        "@qwen-code/qwen-code@latest"
+      ]
+    },
+    "macos": {
+      "command": "npm",
+      "args": [
+        "i",
+        "-g",
+        "@qwen-code/qwen-code@latest"
+      ]
+    },
+    "linux": {
+      "command": "npm",
+      "args": [
+        "i",
+        "-g",
+        "@qwen-code/qwen-code@latest"
+      ]
+    }
+  },
+  "update": {
+    "windows": {
+      "command": "npm",
+      "args": [
+        "i",
+        "-g",
+        "@qwen-code/qwen-code@latest"
+      ]
+    },
+    "macos": {
+      "command": "npm",
+      "args": [
+        "i",
+        "-g",
+        "@qwen-code/qwen-code@latest"
+      ]
+    },
+    "linux": {
+      "command": "npm",
+      "args": [
+        "i",
+        "-g",
+        "@qwen-code/qwen-code@latest"
+      ]
+    }
+  },
+  "uninstall": {
+    "windows": {
+      "command": "npm",
+      "args": [
+        "rm",
+        "-g",
+        "@qwen-code/qwen-code"
+      ]
+    },
+    "macos": {
+      "command": "npm",
+      "args": [
+        "rm",
+        "-g",
+        "@qwen-code/qwen-code"
+      ]
+    },
+    "linux": {
+      "command": "npm",
+      "args": [
+        "rm",
+        "-g",
+        "@qwen-code/qwen-code"
+      ]
+    }
+  },
+  "run": {
+    "windows": {
+      "command": "qwen",
+      "args": []
+    },
+    "macos": {
+      "command": "qwen",
+      "args": []
+    },
+    "linux": {
+      "command": "qwen",
+      "args": []
+    }
+  },
+  "providers": [
+    "native"
+  ],
+  "provider_recipes": {
+    "native": {
+      "env": {},
+      "args": []
+    }
+  }
+}

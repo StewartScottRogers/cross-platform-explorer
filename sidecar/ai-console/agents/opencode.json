@@ -1,0 +1,126 @@
+{
+  "schema_version": 1,
+  "id": "opencode",
+  "name": "opencode",
+  "detect": {
+    "windows": {
+      "command": "opencode",
+      "args": [
+        "--version"
+      ]
+    },
+    "macos": {
+      "command": "opencode",
+      "args": [
+        "--version"
+      ]
+    },
+    "linux": {
+      "command": "opencode",
+      "args": [
+        "--version"
+      ]
+    }
+  },
+  "install": {
+    "windows": {
+      "command": "npm",
+      "args": [
+        "i",
+        "-g",
+        "opencode-ai@latest"
+      ]
+    },
+    "macos": {
+      "command": "npm",
+      "args": [
+        "i",
+        "-g",
+        "opencode-ai@latest"
+      ]
+    },
+    "linux": {
+      "command": "npm",
+      "args": [
+        "i",
+        "-g",
+        "opencode-ai@latest"
+      ]
+    }
+  },
+  "update": {
+    "windows": {
+      "command": "npm",
+      "args": [
+        "i",
+        "-g",
+        "opencode-ai@latest"
+      ]
+    },
+    "macos": {
+      "command": "npm",
+      "args": [
+        "i",
+        "-g",
+        "opencode-ai@latest"
+      ]
+    },
+    "linux": {
+      "command": "npm",
+      "args": [
+        "i",
+        "-g",
+        "opencode-ai@latest"
+      ]
+    }
+  },
+  "uninstall": {
+    "windows": {
+      "command": "npm",
+      "args": [
+        "rm",
+        "-g",
+        "opencode-ai"
+      ]
+    },
+    "macos": {
+      "command": "npm",
+      "args": [
+        "rm",
+        "-g",
+        "opencode-ai"
+      ]
+    },
+    "linux": {
+      "command": "npm",
+      "args": [
+        "rm",
+        "-g",
+        "opencode-ai"
+      ]
+    }
+  },
+  "run": {
+    "windows": {
+      "command": "opencode",
+      "args": []
+    },
+    "macos": {
+      "command": "opencode",
+      "args": []
+    },
+    "linux": {
+      "command": "opencode",
+      "args": []
+    }
+  },
+  "providers": [
+    "native"
+  ],
+  "provider_recipes": {
+    "native": {
+      "env": {},
+      "args": []
+    }
+  }
+}
