@@ -1,0 +1,15 @@
+[package]
+name = "sidecar-contract"
+version = "0.1.0"
+edition = "2021"
+description = "The single shared wire contract between the Cross-Platform Explorer host and its sidecars (CPE-262/263)."
+license = "MIT"
+
+# Deliberately standalone: this crate depends on nothing in the explorer, and the
+# explorer depends on nothing here. That one-way boundary is the platform's core
+# invariant (ADR 0001 / CPE-259). It is NOT a member of any workspace that includes
+# the app, so removing every sidecar never affects the explorer build (delete-test).
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"

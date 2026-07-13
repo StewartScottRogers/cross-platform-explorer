@@ -2,11 +2,12 @@
 id: CPE-259
 title: "ADR: Sidecar platform architecture"
 type: Task
-status: Open
+status: Done
 priority: High
 component: Docs
 estimate: 3-4h
 created: 2026-07-13
+closed: 2026-07-13
 ---
 
 ## Summary
@@ -112,8 +113,16 @@ Linked from PURPOSE.md and CLAUDE.md.
 **Depends on:** none (but informed by the spike [[CPE-294]]). **Phase:** Foundation.
 Blocks all of [[CPE-260]] and [[CPE-261]].
 
+## Resolution
+
+Published `docs/adr/0001-sidecar-platform.md` capturing the five principles,
+invariants, key decisions, the delete-test enforcement rule, quality bars/budgets,
+non-goals, the Agent Watch relationship, a glossary, and consequences. Linked from
+PURPOSE.md. This is the accepted foundation for [[CPE-260]] and [[CPE-261]].
+
 ## Work Log
 2026-07-13 — Filed during Nightshift epic planning.
 2026-07-13 — Expanded to a full architecture charter: added invariants, trust
 model, quality bars/budgets, versioning policy, non-goals, and links to the new
 cross-cutting tickets ([[CPE-294]]–[[CPE-314]]).
+2026-07-13 — Wrote and published the ADR doc; linked from PURPOSE.md. Done.

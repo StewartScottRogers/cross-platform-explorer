@@ -30,3 +30,11 @@ range; incompatible versions fail cleanly with a clear message, never a crash.
 
 ## Work Log
 2026-07-13 — Filed during Nightshift epic planning.
+2026-07-13 — **Partial:** the negotiation primitive is implemented and tested in the
+contract crate ([[CPE-262]]) — `ContractVersion::is_compatible_with`, `negotiate()`
+(same-major, lower-minor), and `VersionError::MajorMismatch`, with compatible /
+forward-compatible-minor / incompatible-major tests all green. Documented semver
+policy in ADR 0001. **Remaining:** wiring negotiation into the live handshake so the
+host *refuses to mount* an incompatible sidecar with an actionable error while other
+sidecars are unaffected — that enforcement belongs to the supervisor [[CPE-265]].
+Returned to Backlog to finish alongside CPE-265.

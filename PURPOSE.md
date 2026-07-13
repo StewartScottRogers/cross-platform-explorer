@@ -18,6 +18,13 @@ must never degrade the core explorer experience when it is switched off.
   filesystem activity, for following the agent's work in real time. Has its own
   design tiebreaker, scoped to that mode only.
 
+Large Mega-Features (starting with the AI Console) are hosted as isolated
+**sidecar** processes behind one versioned contract, so they can grow and evolve
+without entangling the core explorer. See
+[ADR 0001 — Sidecar platform](docs/adr/0001-sidecar-platform.md). The governing
+rule: with every sidecar removed, the explorer must still build, ship, and run
+fast/small/predictable (the "delete-test").
+
 ## Precedence
 
 The two tiebreakers above will collide — visibility costs memory, CPU, and
