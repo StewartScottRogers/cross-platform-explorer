@@ -59,3 +59,85 @@ export async function platformActive(): Promise<boolean> {
     return false;
   }
 }
+
+// --- Capability consent (CPE-296) -----------------------------------------------------
+
+/** A capability a sidecar can request. Serialized snake_case to match the Rust enum. */
+export type Capability = "context" | "secrets" | "storage" | "events" | "network";
+
+/** The persisted consent picture for a sidecar: what it asks for, what's granted, and
+ *  what still needs a decision (an undecided capability prompts the consent sheet). */
+export interface ConsentState {
+  requested: Capability[];
+  granted: Capability[];
+  undecided: Capability[];
+}
+
+/** Plain-language description + risk note per capability, shown in the consent sheet. */
+export const CAPABILITY_INFO: Record<
+  Capability,
+  { label: string; description: string; sensitive: boolean }
+> = {
+  context: {
+    label: "Explorer context",
+    description: "Read the current folder and selection you're viewing in the explorer.",
+    sensitive: false,
+  },
+  secrets: {
+    label: "Secrets",
+    description:
+      "Store and read credentials (like API keys) in your OS keychain, scoped to this sidecar.",
+    sensitive: true,
+  },
+  storage: {
+    label: "Private storage",
+    description: "Keep its own files in a private per-sidecar folder.",
+    sensitive: false,
+  },
+  events: {
+    label: "Notifications",
+    description: "Send status and progress notifications to the app.",
+    sensitive: false,
+  },
+  network: {
+    label: "Network",
+    description: "Make network connections (e.g. to a provider's API).",
+    sensitive: true,
+  },
+};
+
+/** Requested/granted/undecided capabilities for a sidecar. Returns `null` when the
+ *  platform is off or the sidecar isn't in the registry — never throws. */
+export async function consentState(id: string): Promise<ConsentState | null> {
+  try {
+    const s = await invoke<ConsentState>("sidecar_consent_state", { id });
+    return s && Array.isArray(s.requested) ? s : null;
+  } catch {
+    return null;
+  }
+}
+
+/** Record a consent decision: `granted` are approved, the rest of `decided` are denied.
+ *  Resolves `false` if the platform is off or the call failed. */
+export async function setConsent(
+  id: string,
+  granted: Capability[],
+  decided: Capability[],
+): Promise<boolean> {
+  try {
+    await invoke("sidecar_set_consent", { id, granted, decided });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/** Revoke a previously-granted capability. Takes effect on the sidecar's next launch. */
+export async function revokeCapability(id: string, capability: Capability): Promise<boolean> {
+  try {
+    await invoke("sidecar_revoke_capability", { id, capability });
+    return true;
+  } catch {
+    return false;
+  }
+}

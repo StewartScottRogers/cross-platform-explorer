@@ -1771,22 +1771,93 @@ fn git_remote_url(path: String) -> Option<String> {
 /// List the ids of sidecars registered in the bundled + user registry directories.
 /// A first, minimal seam into the platform host; the pane mount and supervisor wiring
 /// build on this (CPE-271 onward).
+/// The registry directories the platform reads sidecar manifests from: the bundled
+/// catalog (shipped with the app) + a user-writable dir under app config.
 #[cfg(feature = "sidecar-platform")]
-#[tauri::command]
-fn sidecar_registry_ids(app: tauri::AppHandle) -> Vec<String> {
+fn sidecar_dirs(app: &tauri::AppHandle) -> Vec<PathBuf> {
     use tauri::Manager;
     let mut dirs = Vec::new();
-    // Bundled catalog (shipped with the app) + a user-writable registry dir.
     if let Ok(resource) = app.path().resource_dir() {
         dirs.push(resource.join("sidecars"));
     }
     if let Ok(config) = app.path().app_config_dir() {
         dirs.push(config.join("sidecars"));
     }
-    sidecar_host::registry::Registry::load_from_dirs(&dirs)
+    dirs
+}
+
+/// Directory holding the persisted capability-consent store (CPE-296).
+#[cfg(feature = "sidecar-platform")]
+fn consent_dir(app: &tauri::AppHandle) -> Result<PathBuf, String> {
+    use tauri::Manager;
+    app.path()
+        .app_config_dir()
+        .map(|c| c.join("sidecars"))
+        .map_err(|e| e.to_string())
+}
+
+/// List the ids of sidecars registered in the bundled + user registry directories.
+#[cfg(feature = "sidecar-platform")]
+#[tauri::command]
+fn sidecar_registry_ids(app: tauri::AppHandle) -> Vec<String> {
+    sidecar_host::registry::Registry::load_from_dirs(&sidecar_dirs(&app))
         .all()
         .map(|m| m.id.clone())
         .collect()
+}
+
+/// A sidecar's requested capabilities plus the persisted consent decision (CPE-296):
+/// which are already granted, and which are still undecided (need a consent prompt).
+#[cfg(feature = "sidecar-platform")]
+#[derive(serde::Serialize)]
+struct ConsentState {
+    requested: Vec<sidecar_contract::Capability>,
+    granted: Vec<sidecar_contract::Capability>,
+    undecided: Vec<sidecar_contract::Capability>,
+}
+
+#[cfg(feature = "sidecar-platform")]
+#[tauri::command]
+fn sidecar_consent_state(app: tauri::AppHandle, id: String) -> Result<ConsentState, String> {
+    let reg = sidecar_host::registry::Registry::load_from_dirs(&sidecar_dirs(&app));
+    let requested = reg
+        .get(&id)
+        .map(|m| m.capabilities.clone())
+        .ok_or_else(|| format!("no sidecar '{id}' in the registry"))?;
+    let store = sidecar_host::consent::ConsentStore::load(&consent_dir(&app)?);
+    let granted: Vec<_> = store.granted(&id).into_iter().collect();
+    let undecided = store.undecided(&id, &requested);
+    Ok(ConsentState { requested, granted, undecided })
+}
+
+/// Record the user's consent decision: `granted` are approved, the remaining `decided`
+/// capabilities are denied. Persisted so the user is asked once per capability (CPE-296).
+#[cfg(feature = "sidecar-platform")]
+#[tauri::command]
+fn sidecar_set_consent(
+    app: tauri::AppHandle,
+    id: String,
+    granted: Vec<sidecar_contract::Capability>,
+    decided: Vec<sidecar_contract::Capability>,
+) -> Result<(), String> {
+    let mut store = sidecar_host::consent::ConsentStore::load(&consent_dir(&app)?);
+    let granted_set = granted.into_iter().collect();
+    store
+        .record(&id, &granted_set, &decided)
+        .map_err(|e| e.to_string())
+}
+
+/// Revoke a previously-granted capability (management UI, CPE-274/296). Takes effect on
+/// the sidecar's next launch.
+#[cfg(feature = "sidecar-platform")]
+#[tauri::command]
+fn sidecar_revoke_capability(
+    app: tauri::AppHandle,
+    id: String,
+    capability: sidecar_contract::Capability,
+) -> Result<(), String> {
+    let mut store = sidecar_host::consent::ConsentStore::load(&consent_dir(&app)?);
+    store.revoke(&id, capability).map_err(|e| e.to_string())
 }
 
 /// Holds the live AI Console sidecar connection for the app's lifetime so it keeps
@@ -1838,21 +1909,19 @@ fn sidecar_start_ai_console(
     app: tauri::AppHandle,
     state: tauri::State<AiConsoleState>,
 ) -> Result<String, String> {
-    use sidecar_contract::{Capability, Event, Message, CONTRACT_VERSION};
+    use sidecar_contract::{Event, Message, CONTRACT_VERSION};
     use sidecar_host::conformance::SidecarChannel; // brings `.recv()` into scope
     use sidecar_host::supervisor::{handshake, spawn_process};
-    use std::collections::BTreeSet;
 
     let bin = resolve_ai_console_bin(&app)?;
     let mut conn = spawn_process(&bin, &[])?;
     let token = conn.launch_token().to_string();
 
-    // The AI Console is a bundled, first-party sidecar, so its requested capabilities are
-    // granted (a user-facing consent prompt is CPE-296).
-    let consented: BTreeSet<Capability> =
-        [Capability::Context, Capability::Secrets, Capability::Storage, Capability::Events]
-            .into_iter()
-            .collect();
+    // Grant only what the user consented to (CPE-296). The frontend prompts for any
+    // undecided capability before calling this; whatever isn't granted is simply withheld,
+    // and the sidecar degrades gracefully (it still serves its UI, capability calls are
+    // denied by the broker).
+    let consented = sidecar_host::consent::ConsentStore::load(&consent_dir(&app)?).granted("ai-console");
     handshake(&mut conn, CONTRACT_VERSION, &consented, Some(&token))
         .map_err(|e| format!("handshake failed: {e:?}"))?;
 
@@ -1952,6 +2021,12 @@ pub fn run() {
             create_file,
             #[cfg(feature = "sidecar-platform")]
             sidecar_registry_ids,
+            #[cfg(feature = "sidecar-platform")]
+            sidecar_consent_state,
+            #[cfg(feature = "sidecar-platform")]
+            sidecar_set_consent,
+            #[cfg(feature = "sidecar-platform")]
+            sidecar_revoke_capability,
             #[cfg(feature = "sidecar-platform")]
             sidecar_start_ai_console
         ])

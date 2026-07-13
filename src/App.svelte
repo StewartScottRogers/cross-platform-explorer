@@ -14,7 +14,8 @@
   import AboutDialog from "./lib/components/AboutDialog.svelte";
   import SettingsDialog from "./lib/components/SettingsDialog.svelte";
   import SidecarPane from "./lib/components/SidecarPane.svelte";
-  import { startAiConsole } from "./lib/sidecar";
+  import ConsentSheet from "./lib/components/ConsentSheet.svelte";
+  import { startAiConsole, consentState, setConsent, type Capability, type ConsentState } from "./lib/sidecar";
   import UpdateDialog from "./lib/components/UpdateDialog.svelte";
   import TabBar from "./lib/components/TabBar.svelte";
   import NavToolbar from "./lib/components/NavToolbar.svelte";
@@ -160,15 +161,35 @@
   let showAbout = false;
   let showSettings = false;
   let aiConsoleUrl: string | null = null;
+  let consentPrompt: ConsentState | null = null;
 
   /** Start the AI Console sidecar and mount its served UI in an overlay pane (CPE-271).
       Only meaningful in a `sidecar-platform` build; otherwise the command is absent and
-      startAiConsole() returns null. */
+      startAiConsole() returns null. Gated by capability consent (CPE-296): if the sidecar
+      has undecided capabilities, prompt first and launch from the sheet's decision. */
   async function openAiConsole() {
     showSettings = false;
+    const state = await consentState("ai-console");
+    if (state && state.undecided.length > 0) {
+      consentPrompt = state; // launch continues in onConsentDecision
+      return;
+    }
+    await launchAiConsole();
+  }
+
+  async function launchAiConsole() {
     const url = await startAiConsole();
     if (url) aiConsoleUrl = url;
     else showNotice("AI Console isn't available in this build.", true);
+  }
+
+  /** Persist the consent decision from the sheet, then launch the console. */
+  async function onConsentDecision(
+    e: CustomEvent<{ granted: Capability[]; decided: Capability[] }>,
+  ) {
+    await setConsent("ai-console", e.detail.granted, e.detail.decided);
+    consentPrompt = null;
+    await launchAiConsole();
   }
   let appVersion = "";
 
@@ -1756,6 +1777,15 @@
       <SidecarPane url={aiConsoleUrl} title="AI Console" />
     </div>
   </div>
+{/if}
+
+{#if consentPrompt}
+  <ConsentSheet
+    sidecarId="ai-console"
+    state={consentPrompt}
+    on:decide={onConsentDecision}
+    on:cancel={() => (consentPrompt = null)}
+  />
 {/if}
 
 {#if showAbout}
