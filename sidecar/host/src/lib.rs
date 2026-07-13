@@ -15,6 +15,7 @@ pub mod broker;
 pub mod conformance;
 pub mod migrate;
 pub mod registry;
+pub mod supervisor;
 
 pub use broker::{
     capability_for_method, decide_grants, Broker, CapabilityProvider, GrantRequest,
