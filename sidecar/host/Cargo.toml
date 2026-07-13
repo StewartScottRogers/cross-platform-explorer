@@ -14,5 +14,12 @@ sidecar-contract = { path = "../contract" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 
+# Secrets capability (CPE-268) is backed by the OS credential store. The provider is
+# backend-agnostic (see providers::secrets), so the default build/tests use an
+# in-memory backend; the real KeyringBackend compiles only where a native store is
+# configured. Windows now; macOS/Linux store features are added when built there.
+[target.'cfg(windows)'.dependencies]
+keyring = { version = "3", features = ["windows-native"] }
+
 [dev-dependencies]
 tempfile = "3"
