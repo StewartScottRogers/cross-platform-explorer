@@ -17,8 +17,11 @@ pub mod lifecycle;
 
 pub use history::{SessionHistory, SessionRecord};
 pub mod lmstudio;
+pub mod mcp;
 pub mod plugins;
 pub mod pty;
+
+pub use mcp::{McpManager, McpProcess, McpServerSpec};
 pub mod routing;
 pub mod scope;
 
