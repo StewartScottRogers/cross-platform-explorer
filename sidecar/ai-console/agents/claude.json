@@ -114,6 +114,7 @@
       "args": []
     }
   },
+  "default_model": "claude-sonnet-4-5",
   "providers": [
     "native",
     "openrouter"
@@ -121,18 +122,29 @@
   "provider_recipes": {
     "native": {
       "env": {},
-      "args": []
+      "args": [
+        "--model",
+        "{model}"
+      ],
+      "defaults": {
+        "model": "claude-sonnet-4-5"
+      }
     },
     "openrouter": {
       "env": {
         "ANTHROPIC_BASE_URL": "https://openrouter.ai/api",
         "ANTHROPIC_AUTH_TOKEN": "{api_key}",
+        "ANTHROPIC_API_KEY": "",
         "ANTHROPIC_SMALL_FAST_MODEL": "{small_model}"
       },
       "args": [
         "--model",
         "{model}"
-      ]
+      ],
+      "defaults": {
+        "model": "anthropic/claude-sonnet-4.5",
+        "small_model": "anthropic/claude-haiku-4.5"
+      }
     }
   }
 }

@@ -44,13 +44,24 @@ pub fn compose_launch(
         .get(provider)
         .ok_or_else(|| format!("agent '{}' has no recipe for provider '{provider}'", agent.id))?;
 
+    // Fill any placeholder the caller didn't supply from the recipe's defaults, so a
+    // provider works with minimal input (CPE-328). A caller-supplied value always wins;
+    // `api_key` has no default (it's a secret, never baked into a manifest).
+    let d = &recipe.defaults;
+    let ctx = LaunchContext {
+        model: ctx.model.clone().or_else(|| d.model.clone()),
+        small_model: ctx.small_model.clone().or_else(|| d.small_model.clone()),
+        base_url: ctx.base_url.clone().or_else(|| d.base_url.clone()),
+        api_key: ctx.api_key.clone(),
+    };
+
     let mut env = BTreeMap::new();
     for (k, template) in &recipe.env {
-        env.insert(k.clone(), fill(template, ctx)?);
+        env.insert(k.clone(), fill(template, &ctx)?);
     }
     let mut args = Vec::with_capacity(recipe.args.len());
     for a in &recipe.args {
-        args.push(fill(a, ctx)?);
+        args.push(fill(a, &ctx)?);
     }
     Ok(Launch { env, args })
 }
@@ -138,6 +149,36 @@ mod tests {
         assert_eq!(launch.env["ANTHROPIC_AUTH_TOKEN"], "sk-or-secret");
         assert_eq!(launch.env["ANTHROPIC_SMALL_FAST_MODEL"], "anthropic/claude-haiku-4.5");
         assert_eq!(launch.args, vec!["--model", "anthropic/claude-sonnet-4.5"]);
+    }
+
+    #[test]
+    fn recipe_defaults_fill_unsupplied_placeholders() {
+        let d = tempfile::tempdir().unwrap();
+        write(
+            d.path(),
+            "x.json",
+            r#"{
+              "schema_version": 1, "id": "x", "name": "X",
+              "run": { "windows": { "command": "x" }, "macos": { "command": "x" }, "linux": { "command": "x" } },
+              "providers": ["openrouter"],
+              "provider_recipes": {
+                "openrouter": {
+                  "env": { "AUTH": "{api_key}", "SMALL": "{small_model}" },
+                  "args": ["--model", "{model}"],
+                  "defaults": { "model": "vendor/big", "small_model": "vendor/small" }
+                }
+              }
+            }"#,
+        );
+        let m = AgentRegistry::load_from_dirs(&[d.path().to_path_buf()]).get("x").unwrap().clone();
+        // Only the API key is supplied; model + small_model come from the recipe defaults.
+        let ctx = LaunchContext { api_key: Some("k".into()), ..Default::default() };
+        let launch = compose_launch(&m, "openrouter", &ctx).unwrap();
+        assert_eq!(launch.args, vec!["--model", "vendor/big"]);
+        assert_eq!(launch.env["SMALL"], "vendor/small");
+        // A supplied value still overrides the default.
+        let ctx2 = LaunchContext { api_key: Some("k".into()), model: Some("mine".into()), ..Default::default() };
+        assert_eq!(compose_launch(&m, "openrouter", &ctx2).unwrap().args, vec!["--model", "mine"]);
     }
 
     #[test]

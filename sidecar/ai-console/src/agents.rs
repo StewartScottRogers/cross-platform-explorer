@@ -34,6 +34,23 @@ pub struct ProviderRecipe {
     pub env: BTreeMap<String, String>,
     #[serde(default)]
     pub args: Vec<String>,
+    /// Sensible default values for this provider's placeholders, so a launch works with
+    /// minimal input (e.g. OpenRouter needs only an API key — model/small-model default).
+    /// A value supplied at launch always overrides these (CPE-328, from the reference's
+    /// per-provider `OPENROUTER_MODEL` / `OPENROUTER_SMALL_MODEL` defaults).
+    #[serde(default)]
+    pub defaults: ProviderDefaults,
+}
+
+/// Per-provider default placeholder values (all optional).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProviderDefaults {
+    #[serde(default)]
+    pub model: Option<String>,
+    #[serde(default)]
+    pub small_model: Option<String>,
+    #[serde(default)]
+    pub base_url: Option<String>,
 }
 
 /// A declarative description of a coding-agent CLI.
