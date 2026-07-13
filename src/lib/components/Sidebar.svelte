@@ -8,6 +8,9 @@
   export let drives: Place[] = [];
   export let currentPath = "";
   export let isHome = false;
+  /** The middle pane's currently selected folder (or ""), for two-way highlight
+      sync (CPE-236). */
+  export let selectedPath = "";
   /** Paths currently being dragged from the file list (CPE-043). */
   export let draggedPaths: string[] = [];
 
@@ -58,6 +61,28 @@
   let children: Record<string, DirEntry[]> = {};
   let loadingPaths = new Set<string>();
 
+  /** Load a node's sub-folders once, tolerating unreadable dirs. */
+  async function loadChildren(path: string): Promise<void> {
+    if (children[path]) return;
+    loadingPaths.add(path);
+    loadingPaths = loadingPaths;
+    try {
+      const entries = await invoke<DirEntry[]>("list_dir", { path });
+      children[path] = entries
+        .filter((e) => e.is_dir)
+        .sort((a, b) => a.name.localeCompare(b.name));
+      children = children;
+    } catch {
+      // Unreadable folder: record an empty child list so the UI shows
+      // "No folders" rather than spinning forever.
+      children[path] = [];
+      children = children;
+    } finally {
+      loadingPaths.delete(path);
+      loadingPaths = loadingPaths;
+    }
+  }
+
   async function toggle(path: string) {
     if (expanded.has(path)) {
       expanded.delete(path);
@@ -66,27 +91,45 @@
     }
     expanded.add(path);
     expanded = expanded;
+    await loadChildren(path);
+  }
 
-    if (!children[path]) {
-      loadingPaths.add(path);
-      loadingPaths = loadingPaths;
-      try {
-        const entries = await invoke<DirEntry[]>("list_dir", { path });
-        children[path] = entries
-          .filter((e) => e.is_dir)
-          .sort((a, b) => a.name.localeCompare(b.name));
-        children = children;
-      } catch {
-        // Unreadable folder: record an empty child list so the UI shows
-        // "No folders" rather than spinning forever.
-        children[path] = [];
-        children = children;
-      } finally {
-        loadingPaths.delete(path);
-        loadingPaths = loadingPaths;
+  const isAncestorOrSelf = (anc: string, p: string) => {
+    const a = norm(anc), b = norm(p);
+    return b === a || b.startsWith(a + "/");
+  };
+
+  // Two-way sync (CPE-236): reveal a path by expanding the tree from its root
+  // place/drive down to it, loading each level lazily. Keeps the left tree in
+  // step with where the middle pane is (current folder) and what's selected.
+  let revealing = new Set<string>();
+  async function revealPath(path: string): Promise<void> {
+    if (!path || isHome || revealing.has(path)) return;
+    revealing.add(path);
+    try {
+      const roots = [...places, ...drives];
+      let cur = roots.find((r) => isAncestorOrSelf(r.path, path))?.path;
+      let guard = 0;
+      while (cur && norm(cur) !== norm(path) && guard++ < 64) {
+        await loadChildren(cur);
+        expanded.add(cur);
+        expanded = expanded;
+        const next = (children[cur] ?? []).find((c) => isAncestorOrSelf(c.path, path));
+        if (!next) break;
+        cur = next.path;
       }
+    } finally {
+      revealing.delete(path);
     }
   }
+
+  // Reveal the current folder and any selected subfolder as they change.
+  $: revealPath(currentPath);
+  $: if (selectedPath) revealPath(selectedPath);
+
+  /** A node is highlighted when it is the current folder or the selected one. */
+  const isMarked = (p: string) =>
+    !isHome && (p === currentPath || (selectedPath !== "" && p === selectedPath));
 </script>
 
 <div class="navigation-pane" role="region" aria-label="Navigation">
@@ -113,7 +156,7 @@
       <!-- svelte-ignore a11y-no-static-element-interactions -->
       <div
         class="nav-item"
-        class:active={!isHome && currentPath === place.path}
+        class:active={isMarked(place.path)}
         class:droptarget={dropPath === place.path}
         on:dragover={(e) => onDragOver(e, place.path)}
         on:dragleave={() => (dropPath = dropPath === place.path ? "" : dropPath)}
@@ -147,7 +190,7 @@
             {#each children[place.path] as child (child.path)}
               <button
                 class="nav-item"
-                class:active={!isHome && currentPath === child.path}
+                class:active={isMarked(child.path)}
                 class:droptarget={dropPath === child.path}
                 on:click={() => dispatch("navigate", child.path)}
                 on:dragover={(e) => onDragOver(e, child.path)}

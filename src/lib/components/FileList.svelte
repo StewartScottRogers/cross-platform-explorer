@@ -3,7 +3,7 @@
   import Icon from "./Icon.svelte";
   import { formatSize } from "../format";
   import { formatDate } from "../datetime";
-  import { categoryOf, typeName } from "../filetypes";
+  import { iconFor, typeName } from "../filetypes";
   import { isSelected } from "../selection";
   import type { Selection } from "../selection";
   import type { DirEntry, SortKey, SortDir, ViewMode } from "../types";
@@ -40,8 +40,24 @@
   export let draggedPaths: string[] = [];
   let dropIndex = -1;
 
+  // Double-click vs drag (CPE-236): in a webview the second press of a double-
+  // click, with a hair of movement, can start a native drag and eat the "open".
+  // Suppress dragging briefly when a press lands right after another on the same
+  // row (i.e. the 2nd click of a double-click), so dblclick reliably fires. A
+  // real drag — single press then actual movement — is unaffected.
+  let lastPressAt = 0;
+  let lastPressIndex = -1;
+  let suppressDragUntil = 0;
+
+  function onRowPointerDown(i: number) {
+    const now = Date.now();
+    if (now - lastPressAt < 450 && lastPressIndex === i) suppressDragUntil = now + 600;
+    lastPressAt = now;
+    lastPressIndex = i;
+  }
+
   function onDragStart(e: DragEvent, i: number) {
-    if (renamingPath) {
+    if (renamingPath || Date.now() < suppressDragUntil) {
       e.preventDefault();
       return;
     }
@@ -202,6 +218,7 @@
         role="button"
         tabindex="0"
         draggable={!renamingPath}
+        on:pointerdown={() => onRowPointerDown(i)}
         on:dragstart={(e) => onDragStart(e, i)}
         on:dragend={onDragEnd}
         on:dragover={(e) => onDragOver(e, i)}
@@ -218,7 +235,7 @@
         }}
       >
         <span class="cell name">
-          <Icon name={categoryOf(entry)} size={view === "icons" ? 40 : 16} />
+          <Icon name={iconFor(entry)} size={view === "icons" ? 40 : 16} />
           {#if renamingPath === entry.path}
             <input
               class="rename"

@@ -1456,6 +1456,58 @@ fn dirs_home() -> Option<PathBuf> {
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
+/// Normalise a git remote URL to a browsable https URL:
+/// `git@github.com:owner/repo.git` / `ssh://git@host/owner/repo.git` /
+/// `https://host/owner/repo.git` → `https://host/owner/repo`.
+fn normalize_git_url(raw: &str) -> String {
+    let mut u = raw.trim().to_string();
+    if let Some(rest) = u.strip_prefix("git@") {
+        if let Some((host, path)) = rest.split_once(':') {
+            u = format!("https://{host}/{path}");
+        }
+    } else if let Some(rest) = u.strip_prefix("ssh://git@") {
+        u = format!("https://{rest}");
+    } else if let Some(rest) = u.strip_prefix("git://") {
+        u = format!("https://{rest}");
+    }
+    if let Some(stripped) = u.strip_suffix(".git") {
+        u = stripped.to_string();
+    }
+    u
+}
+
+/// Read a repo's `.git/config` and return its origin remote as a browsable https
+/// URL (folder-context plugins, CPE-235). A cheap single file read; returns None
+/// if the folder isn't a repo or has no remote.
+#[tauri::command]
+fn git_remote_url(path: String) -> Option<String> {
+    let cfg = std::path::Path::new(&path).join(".git").join("config");
+    let text = std::fs::read_to_string(cfg).ok()?;
+
+    let mut in_origin = false;
+    let mut origin_url: Option<String> = None;
+    let mut first_url: Option<String> = None;
+    for line in text.lines() {
+        let l = line.trim();
+        if l.starts_with('[') {
+            in_origin = l.contains("remote \"origin\"");
+            continue;
+        }
+        if let Some(rest) = l.strip_prefix("url") {
+            if let Some(eq) = rest.find('=') {
+                let value = rest[eq + 1..].trim().to_string();
+                if first_url.is_none() {
+                    first_url = Some(value.clone());
+                }
+                if in_origin {
+                    origin_url = Some(value);
+                }
+            }
+        }
+    }
+    origin_url.or(first_url).map(|u| normalize_git_url(&u))
+}
+
 pub fn run() {
     let mut builder = tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
@@ -1515,7 +1567,8 @@ pub fn run() {
             move_entries,
             move_exact,
             entry_info,
-            dir_size
+            dir_size,
+            git_remote_url
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application");

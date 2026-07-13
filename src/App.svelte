@@ -5,7 +5,11 @@
   import { relaunch, exit } from "@tauri-apps/plugin-process";
   import { openPath, openUrl } from "@tauri-apps/plugin-opener";
   import { getVersion } from "@tauri-apps/api/app";
+  import { WebviewWindow } from "@tauri-apps/api/webviewWindow";
+  import { emit, once } from "@tauri-apps/api/event";
 
+  import Icon from "./lib/components/Icon.svelte";
+  import ContextBar from "./lib/components/ContextBar.svelte";
   import MenuBar from "./lib/components/MenuBar.svelte";
   import AboutDialog from "./lib/components/AboutDialog.svelte";
   import SettingsDialog from "./lib/components/SettingsDialog.svelte";
@@ -44,6 +48,7 @@
     emptyClipboard, stage, isEmpty as clipEmpty, canPaste as clipCanPaste,
     type Clipboard,
   } from "./lib/clipboard";
+  import { detectContexts, type FolderAction } from "./lib/folderContext";
   import * as settings from "./lib/settings";
   import {
     pushUndo, popUndo, canUndo, peekLabel, invert, deletedPaths, type UndoEntry,
@@ -339,6 +344,10 @@
   // ---- derived listing ----
   $: folderName = isHome ? "Home" : (splitPath(currentPath).at(-1)?.name ?? currentPath);
   $: searching = search.trim().length > 0;
+
+  // Folder-context detection (CPE-235): runs on the RAW listing (so hidden
+  // markers like `.git` are seen regardless of the show-hidden setting).
+  $: folderContexts = isHome ? [] : detectContexts({ path: currentPath, entries });
 
   $: shown = entries.filter((e) => showHidden || !e.hidden);
 
@@ -823,6 +832,41 @@
     await exit(0);
   }
 
+  /** Tear off the current preview into the floating window (CPE-234). Pinned to
+      the file; the in-app pane keeps following the selection. A second pop-out
+      docks as another tab in the same window (created once, label "preview-float"). */
+  const FLOAT_LABEL = "preview-float";
+  async function popOutPreview() {
+    const entry = selectedEntries.length === 1 ? selectedEntries[0] : null;
+    if (!entry) return;
+    try {
+      let win = await WebviewWindow.getByLabel(FLOAT_LABEL);
+      if (!win) {
+        // Register the readiness wait BEFORE creating the window so we can't miss it.
+        const ready = new Promise<void>((resolve) => {
+          let done = false;
+          const finish = () => { if (!done) { done = true; resolve(); } };
+          void once("float:ready", finish);
+          setTimeout(finish, 2500); // fallback so a slow load never hangs the pop-out
+        });
+        win = new WebviewWindow(FLOAT_LABEL, {
+          url: "index.html?float=1",
+          title: "Preview",
+          width: 480,
+          height: 640,
+          minWidth: 320,
+          minHeight: 300,
+        });
+        await ready;
+      }
+      await emit("float:add", entry);
+      await win.setFocus();
+    } catch (e) {
+      console.debug("pop out failed:", e);
+      showNotice("Couldn't open the preview in a new window.", true);
+    }
+  }
+
   /** Route a menu selection to its action. See MenuBar's `menus` table. */
   function onMenuSelect(action: string) {
     switch (action) {
@@ -831,6 +875,23 @@
       case "settings": showSettings = true; break;
       case "documentation": openExternal(REPO_URL); break;
       case "about": showAbout = true; break;
+    }
+  }
+
+  /** Run a folder-context action (CPE-235): open a marker file, or open the
+      repo's GitHub/remote page (resolved from .git/config by the backend). */
+  async function handleContextAction(a: FolderAction) {
+    try {
+      if (a.kind === "open-path") {
+        await openPath(a.target);
+      } else if (a.kind === "open-github") {
+        const url = await invoke<string | null>("git_remote_url", { path: a.target });
+        if (url) await openUrl(url);
+        else showNotice("This repository has no remote URL configured.", true);
+      }
+    } catch (e) {
+      console.debug("context action failed:", e);
+      showNotice("Couldn't run that action.", true);
     }
   }
 
@@ -1049,6 +1110,7 @@
       {drives}
       {currentPath}
       {isHome}
+      selectedPath={selectedEntries.length === 1 && selectedEntries[0]?.is_dir ? selectedEntries[0].path : ""}
       {draggedPaths}
       on:navigate={(e) => navigate(e.detail)}
       on:home={() => navigate(HOME)}
@@ -1099,6 +1161,7 @@
         on:change={() => settings.saveShowHidden(showHidden)} />
     </div>
    </Toolbar>
+   <ContextBar contexts={folderContexts} on:action={(e) => handleContextAction(e.detail)} />
    <div class="filelist-pane" role="region" aria-label="File list">
     {#if isHome}
       <HomeView
@@ -1195,6 +1258,13 @@
           aria-selected={!showPreview}
           on:click={() => { showPreview = false; settings.saveShowPreview(false); }}
         >Details</button>
+        <button
+          class="popout-btn"
+          title="Pop out this preview into its own window"
+          aria-label="Pop out preview"
+          disabled={selectedEntries.length !== 1}
+          on:click={popOutPreview}
+        ><Icon name="share" size={14} /></button>
       </div>
 
       {#if showPreview}

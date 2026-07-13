@@ -2,7 +2,7 @@
   import Icon from "./Icon.svelte";
   import { formatSize } from "../format";
   import { formatDate } from "../datetime";
-  import { categoryOf, typeName } from "../filetypes";
+  import { iconFor, typeName } from "../filetypes";
   import type { DirEntry } from "../types";
 
   /** The current selection: 0, 1, or many. */
@@ -16,7 +16,7 @@
 
 <aside class="details">
   {#if one}
-    <div class="hero"><Icon name={categoryOf(one)} size={72} /></div>
+    <div class="hero"><Icon name={iconFor(one)} size={72} /></div>
     <h2>{one.name}</h2>
     <div class="meta">
       <div class="meta-row"><span class="meta-k">Type</span><span class="meta-v">{typeName(one)}</span></div>

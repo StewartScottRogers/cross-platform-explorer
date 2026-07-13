@@ -4,7 +4,7 @@
   import Icon from "./Icon.svelte";
   import { formatSize } from "../format";
   import { formatDate } from "../datetime";
-  import { categoryOf, typeName } from "../filetypes";
+  import { iconFor, typeName } from "../filetypes";
   import type { DirEntry } from "../types";
 
   /** The selected entries. One => full detail; many => aggregate summary. */
@@ -77,7 +77,7 @@
       <p class="error">{error}</p>
     {:else if single}
       <div class="hero">
-        <Icon name={categoryOf(single)} size={48} />
+        <Icon name={iconFor(single)} size={48} />
         <span class="fname">{single.name}</span>
       </div>
       <dl>

@@ -2,7 +2,7 @@
   import { createEventDispatcher } from "svelte";
   import Icon from "./Icon.svelte";
   import { formatDate } from "../datetime";
-  import { categoryOf } from "../filetypes";
+  import { iconFor } from "../filetypes";
   import type { Place, RecentFile } from "../types";
 
   export let places: Place[] = [];
@@ -116,7 +116,7 @@
         {#each recents as r (r.path)}
           <button class="recent-row" on:dblclick={() => dispatch("openFile", r.path)} on:click={() => dispatch("openFile", r.path)}>
             <span class="rname">
-              <Icon name={categoryOf({ is_dir: false, extension: extOf(r.name) })} />
+              <Icon name={iconFor({ is_dir: false, extension: extOf(r.name) })} />
               <span class="ellip">{r.name}</span>
             </span>
             <span class="rdate">{formatDate(r.opened)}</span>

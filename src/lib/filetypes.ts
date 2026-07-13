@@ -175,6 +175,43 @@ export function categoryOf(
 }
 
 /**
+ * More specific per-extension row icons (CPE-233). Distinct glyphs for common
+ * formats that would otherwise share a broad category (or fall to "unknown").
+ * Deliberately separate from CATEGORY_BY_EXT so the PREVIEW provider selection
+ * (driven by categoryOf) is unaffected — this only makes the list icon richer.
+ */
+const ICON_BY_EXT: Record<string, string> = {
+  // fonts
+  ttf: "font", otf: "font", woff: "font", woff2: "font", eot: "font",
+  // disk images
+  iso: "disk", img: "disk", dmg: "disk", vhd: "disk", vhdx: "disk", vmdk: "disk",
+  // databases
+  db: "database", sqlite: "database", sqlite3: "database", db3: "database",
+  sql: "database", parquet: "database", mdb: "database", accdb: "database",
+  // ebooks
+  epub: "ebook", mobi: "ebook", azw: "ebook", azw3: "ebook", fb2: "ebook",
+  // certificates / keys
+  pem: "certificate", crt: "certificate", cer: "certificate", csr: "certificate",
+  key: "certificate", der: "certificate", p12: "certificate", pfx: "certificate",
+  // 3D models
+  stl: "cube", obj: "cube", gltf: "cube", glb: "cube", "3mf": "cube",
+  fbx: "cube", dae: "cube", ply: "cube",
+  // web pages
+  html: "web", htm: "web",
+};
+
+/**
+ * Icon name for an entry's row/tile. Prefers a format-specific glyph, then the
+ * broad category icon, then "unknown". Folders are always the folder icon.
+ */
+export function iconFor(
+  entry: Pick<DirEntry, "is_dir" | "extension"> & { name?: string },
+): string {
+  if (entry.is_dir) return "folder";
+  return (entry.extension && ICON_BY_EXT[entry.extension]) || categoryOf(entry);
+}
+
+/**
  * Human-readable type, as shown in Explorer's "Type" column.
  * Folders are "File folder"; known extensions get a friendly name; unknown
  * extensions fall back to "XYZ File"; extensionless files are just "File".

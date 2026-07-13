@@ -64,6 +64,38 @@
     <rect x="3" y="5" width="18" height="14" rx="2" fill="#eae7fb" stroke="#5b3fd6" />
     <path d="M3 9h18" stroke="#5b3fd6" />
     <path d="M7 12l2.5 2L7 16M12 16h4" stroke="#5b3fd6" />
+  {:else if name === "font"}
+    <path d="M6 3h8l4 4v14H6z" fill="#e6f6f4" stroke="#0f766e" />
+    <path d="M14 3v4h4" stroke="#0f766e" />
+    <path d="M9.7 17l2.3-5 2.3 5M10.4 15.4h3.2" stroke="#0f766e" />
+  {:else if name === "disk"}
+    <path d="M6 3h8l4 4v14H6z" fill="#eef1f5" stroke="#475569" />
+    <path d="M14 3v4h4" stroke="#475569" />
+    <circle cx="12" cy="14" r="3" stroke="#475569" />
+    <circle cx="12" cy="14" r="0.8" fill="#475569" stroke="none" />
+  {:else if name === "database"}
+    <path d="M6 3h8l4 4v14H6z" fill="#eceafe" stroke="#4f46e5" />
+    <path d="M14 3v4h4" stroke="#4f46e5" />
+    <ellipse cx="12" cy="11.8" rx="3.2" ry="1.2" stroke="#4f46e5" />
+    <path d="M8.8 11.8v3.6c0 .7 1.4 1.2 3.2 1.2s3.2-.5 3.2-1.2v-3.6" stroke="#4f46e5" />
+  {:else if name === "ebook"}
+    <path d="M6 3h8l4 4v14H6z" fill="#fdf0e0" stroke="#b45309" />
+    <path d="M14 3v4h4" stroke="#b45309" />
+    <path d="M12 12c-1-.6-2.4-.6-3.4 0v4.6c1-.6 2.4-.6 3.4 0M12 12c1-.6 2.4-.6 3.4 0v4.6c-1-.6-2.4-.6-3.4 0" stroke="#b45309" />
+  {:else if name === "certificate"}
+    <path d="M6 3h8l4 4v14H6z" fill="#fdeaee" stroke="#be123c" />
+    <path d="M14 3v4h4" stroke="#be123c" />
+    <circle cx="12" cy="12.4" r="2.1" stroke="#be123c" />
+    <path d="M10.7 14.1l-.7 3 2-1 2 1-.7-3" stroke="#be123c" />
+  {:else if name === "cube"}
+    <path d="M6 3h8l4 4v14H6z" fill="#e3f4f8" stroke="#0891b2" />
+    <path d="M14 3v4h4" stroke="#0891b2" />
+    <path d="M12 10.4l3 1.6v3.5L12 17.1l-3-1.6V12zM9 12l3 1.6 3-1.6M12 13.6v3.5" stroke="#0891b2" />
+  {:else if name === "web"}
+    <path d="M6 3h8l4 4v14H6z" fill="#e7effc" stroke="#2563eb" />
+    <path d="M14 3v4h4" stroke="#2563eb" />
+    <circle cx="12" cy="14" r="3" stroke="#2563eb" />
+    <path d="M9 14h6M12 11c1.3 1.7 1.3 4.3 0 6M12 11c-1.3 1.7-1.3 4.3 0 6" stroke="#2563eb" />
   {:else if name === "unknown"}
     <path d="M6 3h8l4 4v14H6z" fill="#f5f5f5" stroke="#8a8a8a" />
     <path d="M14 3v4h4" stroke="#8a8a8a" />
