@@ -9,6 +9,8 @@ import {
   selectedCount,
   isSelected,
   remapByPath,
+  selectIndices,
+  invertSelection,
 } from "./selection";
 
 describe("selection", () => {
@@ -115,5 +117,33 @@ describe("selection", () => {
     const s = remapByPath(["/gone"], [{ path: "/a" }]);
     expect(selectedCount(s)).toBe(0);
     expect(s.anchor).toBe(-1);
+  });
+
+  it("builds a selection from explicit indices", () => {
+    const s = selectIndices([3, 1, 4]);
+    expect(selectedIndices(s)).toEqual([1, 3, 4]);
+    expect(s.anchor).toBe(1);
+    expect(s.lead).toBe(4);
+  });
+
+  it("selectIndices ignores negatives and empties cleanly", () => {
+    expect(selectedCount(selectIndices([-1, -2]))).toBe(0);
+    expect(selectIndices([]).anchor).toBe(-1);
+  });
+
+  it("inverts the selection across the visible rows", () => {
+    const s = selectIndices([0, 2]); // of 5 rows
+    const inv = invertSelection(s, 5);
+    expect(selectedIndices(inv)).toEqual([1, 3, 4]);
+  });
+
+  it("inverting an empty selection selects everything", () => {
+    const inv = invertSelection(emptySelection(), 3);
+    expect(selectedIndices(inv)).toEqual([0, 1, 2]);
+  });
+
+  it("inverting a full selection selects nothing", () => {
+    const inv = invertSelection(selectAll(4), 4);
+    expect(selectedCount(inv)).toBe(0);
   });
 });

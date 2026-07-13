@@ -87,6 +87,28 @@ export function selectAll(count: number): Selection {
   };
 }
 
+/** Build a selection from an explicit set of row indices. Negative indices are
+ *  ignored; the lowest becomes the anchor and the highest leads. */
+export function selectIndices(indices: number[]): Selection {
+  const clean = indices.filter((i) => i >= 0);
+  if (clean.length === 0) return emptySelection();
+  return {
+    indices: new Set(clean),
+    anchor: Math.min(...clean),
+    lead: Math.max(...clean),
+  };
+}
+
+/** Flip the selection across `count` visible rows: every row not currently
+ *  selected becomes selected, and vice-versa. */
+export function invertSelection(sel: Selection, count: number): Selection {
+  const out: number[] = [];
+  for (let i = 0; i < count; i++) {
+    if (!sel.indices.has(i)) out.push(i);
+  }
+  return selectIndices(out);
+}
+
 /**
  * Move the lead by `delta`, clamped to the list. With shift, extend the range
  * from the anchor; otherwise select only the new lead.
