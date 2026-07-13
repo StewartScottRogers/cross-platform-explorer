@@ -18,6 +18,7 @@ pub mod migrate;
 pub mod observability;
 pub mod providers;
 pub mod registry;
+pub mod scaffold;
 pub mod supervisor;
 
 pub use broker::{
