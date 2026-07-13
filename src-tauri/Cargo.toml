@@ -28,6 +28,7 @@ zip = "2"
 # ships with zero sidecar code — the delete-test (CPE-272). One-way dependency: the app
 # may use the host; the host never depends on the app.
 sidecar-host = { path = "../sidecar/host", optional = true }
+sidecar-contract = { path = "../sidecar/contract", optional = true }
 
 # Archive previews beyond zip (CPE-109/112/217). tar is pure-Rust; flate2 uses
 # the pure-Rust miniz_oxide backend by default, so neither needs system libs in CI.
@@ -85,4 +86,4 @@ rust_xlsxwriter = "0.79"
 default = []
 # Opt-in sidecar platform integration (ADR 0001 / CPE-260). OFF by default so the plain
 # explorer compiles and ships with no sidecar code whatsoever — the delete-test (CPE-272).
-sidecar-platform = ["dep:sidecar-host"]
+sidecar-platform = ["dep:sidecar-host", "dep:sidecar-contract"]

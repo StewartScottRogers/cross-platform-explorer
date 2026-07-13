@@ -24,6 +24,20 @@ export async function listSidecars(): Promise<string[]> {
 }
 
 /**
+ * Start (or reuse) the AI Console sidecar and return the URL of the UI it serves, so the
+ * caller can mount it in an iframe pane (CPE-271). Returns `null` when the platform is off
+ * or the sidecar couldn't start — never throws.
+ */
+export async function startAiConsole(): Promise<string | null> {
+  try {
+    const url = await invoke<string>("sidecar_start_ai_console");
+    return typeof url === "string" && url.length > 0 ? url : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
  * Extract the mount URL from a sidecar's `ui:<url>` Status announcement (CPE-271), or
  * `null` if it isn't one. Only loopback URLs are accepted — a sidecar must not point the
  * host's iframe at an off-machine address.
