@@ -2,6 +2,7 @@
   import { createEventDispatcher } from "svelte";
   import { invoke } from "@tauri-apps/api/core";
   import Icon from "./Icon.svelte";
+  import SidebarNode from "./SidebarNode.svelte";
   import type { DirEntry, Place } from "../types";
 
   export let places: Place[] = [];
@@ -188,20 +189,19 @@
             <div class="nav-empty">No folders</div>
           {:else}
             {#each children[place.path] as child (child.path)}
-              <button
-                class="nav-item"
-                class:active={isMarked(child.path)}
-                class:droptarget={dropPath === child.path}
-                on:click={() => dispatch("navigate", child.path)}
-                on:dragover={(e) => onDragOver(e, child.path)}
-                on:dragleave={() =>
-                  (dropPath = dropPath === child.path ? "" : dropPath)}
-                on:drop={(e) => onDrop(e, child.path)}
-              >
-                <span class="twisty hidden" />
-                <Icon name="folder" />
-                <span class="label">{child.name}</span>
-              </button>
+              <SidebarNode
+                node={child}
+                {expanded}
+                {children}
+                {loadingPaths}
+                {dropPath}
+                marked={isMarked}
+                onToggle={toggle}
+                onNavigate={(p) => dispatch("navigate", p)}
+                {onDragOver}
+                onDragLeave={(p) => (dropPath = dropPath === p ? "" : dropPath)}
+                {onDrop}
+              />
             {/each}
           {/if}
         </div>

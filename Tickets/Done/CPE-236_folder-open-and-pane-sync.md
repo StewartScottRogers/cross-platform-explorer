@@ -53,6 +53,7 @@ Verified: `npm run check` → 0/0. Live verification bundled into the 0.10.0 shi
 
 2026-07-12 — Double-click fix via pointerdown drag-suppression on the rapid 2nd press; real drags unaffected.
 2026-07-12 — Sidebar reveal-to-path (lazy) + selectedPath highlight; App passes selected folder. Two-way sync. check clean.
+2026-07-12 — Live check on 0.10.0 showed sync only reached depth 1 (sidebar rendered just place→immediate children). Made the tree fully RECURSIVE (new SidebarNode.svelte, self-referencing) so reveal/highlight works at any depth. check 0/0, 231 tests pass. Ships in 0.10.1.
 
 ## Notes
 Decisions (user, 2026-07-12): keep double-click to open (make it reliable) + full
