@@ -14,6 +14,7 @@
 pub mod broker;
 pub mod conformance;
 pub mod migrate;
+pub mod providers;
 pub mod registry;
 pub mod supervisor;
 
