@@ -2,7 +2,8 @@
 id: CPE-294
 title: "Phase 0: technical de-risking spike"
 type: Task
-status: Open
+status: Done
+closed: 2026-07-13
 priority: High
 component: Multiple
 estimate: 4h+
@@ -43,3 +44,9 @@ whole program.
 
 ## Work Log
 2026-07-13 — Filed during epic-plan hardening (more end-to-end detail).
+2026-07-13 — Closed **done-by-implementation**: every question was answered by building the
+real, tested components (stronger than a throwaway prototype). Findings written up in
+`docs/sidecar-phase0-findings.md` — IPC = JSON-line Envelopes over stdio; PTY = portable-pty
+(ConPTY drain gotcha solved); UI = loopback HTTP + sandboxed iframe (visually verified);
+keychain = keyring verified on Windows, macOS/Linux deferred to CPE-322; supervision =
+spawn/kill/reap with real-process E2E. Contract frozen on this evidence (now v1.2).
