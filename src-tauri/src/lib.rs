@@ -1501,7 +1501,14 @@ fn open_external(path: String) -> Result<(), String> {
 fn extract_archive_entry(zip: String, inner: String) -> Result<String, String> {
     let file = fs::File::open(&zip).map_err(|e| e.to_string())?;
     let mut archive = zip::ZipArchive::new(file).map_err(|e| e.to_string())?;
-    let mut entry = archive.by_name(&inner).map_err(|e| e.to_string())?;
+    // The frontend uses "/"; some zips store "\" — try the given name then the
+    // backslash variant so extraction works either way.
+    let backslashed = inner.replace('/', "\\");
+    let idx = archive
+        .index_for_name(&inner)
+        .or_else(|| archive.index_for_name(&backslashed))
+        .ok_or_else(|| format!("entry not found: {inner}"))?;
+    let mut entry = archive.by_index(idx).map_err(|e| e.to_string())?;
 
     let base = std::path::Path::new(&inner)
         .file_name()
