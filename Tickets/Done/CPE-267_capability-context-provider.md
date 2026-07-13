@@ -2,11 +2,12 @@
 id: CPE-267
 title: "Capability: context provider (folder / repo / selection)"
 type: Task
-status: Open
+status: Done
 priority: Medium
 component: Backend
 estimate: 1-2h
 created: 2026-07-13
+closed: 2026-07-13
 ---
 
 ## Summary
@@ -24,8 +25,21 @@ AI Console uses to scope a session to the open repo, with no reach-into internal
 - [ ] Read-only; a sidecar cannot mutate explorer state through this capability.
 - [ ] Tests via the hello sidecar reading context.
 
-## Notes — Dependencies / Schedule
-**Depends on:** [[CPE-266]]. **Phase:** P3. **Epic:** [[CPE-260]].
+## Resolution
+
+Implemented `providers::context` in `sidecar-host`: a `ContextSnapshot` DTO
+(folder / repo_root / remote / selection), a `ContextSource` trait the explorer
+implements to supply the live snapshot, and `ContextProvider` (a `CapabilityProvider`
+for `Capability::Context`) serving the read-only `context.current` method — no mutation
+method exists, and only the DTO crosses the boundary, so a sidecar can't reach or
+change explorer state. Tested directly and through the broker (denied when not granted,
+served when granted). 3 tests; 32 unit + 3 E2E + clippy green.
+
+**Deferred:** push change-events on folder/selection change — that rides the event-bus
+capability ([[CPE-270]]); the on-demand read API (the substance) is complete. The
+hello-sidecar E2E read comes with [[CPE-273]].
 
 ## Work Log
 2026-07-13 — Filed during Nightshift epic planning.
+2026-07-13 — Implemented + tested during dayshift. Done (change-event push deferred to
+CPE-270).
