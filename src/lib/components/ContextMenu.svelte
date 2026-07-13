@@ -137,6 +137,9 @@
       <Icon name="folder" size={15} /> New folder
       <span class="hint">Ctrl+Shift+N</span>
     </button>
+    <button class="row" role="menuitem" on:click={() => run("new-file")}>
+      <Icon name="document" size={15} /> New file
+    </button>
     <button class="row" role="menuitem" disabled={!canPaste} on:click={() => run("paste")}>
       <Icon name="paste" size={15} /> Paste
       <span class="hint">Ctrl+V</span>

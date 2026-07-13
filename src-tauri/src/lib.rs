@@ -230,6 +230,26 @@ fn create_dir(path: String, name: String) -> Result<String, String> {
     Ok(target.to_string_lossy().to_string())
 }
 
+/// Create a new empty file `name` inside `path` (CPE-254). Mirrors `create_dir`:
+/// `create_new` fails atomically rather than clobbering an existing file.
+#[tauri::command]
+fn create_file(path: String, name: String) -> Result<String, String> {
+    let name = name.trim();
+    if name.is_empty() {
+        return Err("Name cannot be empty".to_string());
+    }
+    let target = Path::new(&path).join(name);
+    if target.exists() {
+        return Err(format!("\"{name}\" already exists"));
+    }
+    fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&target)
+        .map_err(|e| e.to_string())?;
+    Ok(target.to_string_lossy().to_string())
+}
+
 /// Write UTF-8 text back to a file, replacing its contents — for the content
 /// editor. Returns the new byte length.
 #[tauri::command]
@@ -1805,7 +1825,8 @@ pub fn run() {
             extract_archive_entry,
             compress_to_zip,
             extract_archive,
-            open_terminal
+            open_terminal,
+            create_file
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application");
@@ -2375,6 +2396,27 @@ mod tests {
         assert!(create_dir(p.clone(), "thing".into()).is_ok());
         let second = create_dir(p, "thing".into());
         assert!(second.is_err(), "must not silently overwrite");
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn create_file_makes_an_empty_file() {
+        let d = scratch("create_file");
+        let created =
+            create_file(d.to_string_lossy().to_string(), "New Text Document.txt".into()).unwrap();
+        assert!(std::path::Path::new(&created).is_file());
+        assert_eq!(fs::metadata(&created).unwrap().len(), 0, "file starts empty");
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn create_file_refuses_to_clobber_existing_content() {
+        let d = scratch("create_file_dup");
+        let p = d.to_string_lossy().to_string();
+        // Pre-existing file with content must not be truncated by a New file.
+        fs::write(d.join("note.txt"), b"important").unwrap();
+        assert!(create_file(p, "note.txt".into()).is_err());
+        assert_eq!(fs::read_to_string(d.join("note.txt")).unwrap(), "important");
         let _ = fs::remove_dir_all(&d);
     }
 
