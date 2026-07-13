@@ -2,11 +2,12 @@
 id: CPE-268
 title: "Capability: secrets broker (OS keychain, scoped)"
 type: Task
-status: Open
+status: Done
 priority: High
 component: Backend
 estimate: 2-3h
 created: 2026-07-13
+closed: 2026-07-13
 ---
 
 ## Summary
@@ -30,5 +31,24 @@ child processes, never returned to any UI/webview and never logged.
 consent [[CPE-296]]; redaction shares the [[CPE-298]] utility; foundation for the
 AI Console vault [[CPE-279]]; reviewed in [[CPE-304]].
 
+## Resolution
+
+Implemented `providers::secrets`: a `SecretBackend` trait (set/get/delete) and
+`SecretsProvider` serving `Capability::Secrets` via `secrets.set/get/delete`. The
+keychain "service" embeds the broker-supplied sidecar id
+(`com.cross-platform-explorer.sidecar.<id>`), so a sidecar can only ever touch its
+**own** namespace — one sidecar cannot read another's secret (tested). Values are
+returned only to the requesting sidecar process (for injecting into its child); the
+provider never logs them. Real backend `KeyringBackend` (Windows Credential Manager
+via `keyring`, windows-native) with **no plaintext-on-disk fallback** — it fails
+closed. 5 in-memory tests (round-trip, missing→null, delete, namespace isolation, bad
+params) + a real-keychain round-trip test (verified passing with `--ignored`). 44 unit
++ 3 E2E + clippy green.
+
+**Deferred (small):** macOS/Linux keychain backends (same `keyring` API, needs their
+store features when built there); the shared log-redaction utility is [[CPE-298]].
+
 ## Work Log
 2026-07-13 — Filed during Nightshift epic planning.
+2026-07-13 — Implemented during dayshift; verified the real Windows Credential Manager
+round-trip. Done.
