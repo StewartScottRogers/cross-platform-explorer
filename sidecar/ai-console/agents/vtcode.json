@@ -1,0 +1,123 @@
+{
+  "schema_version": 1,
+  "id": "vtcode",
+  "name": "VTCode",
+  "detect": {
+    "windows": {
+      "command": "vtcode",
+      "args": [
+        "--version"
+      ]
+    },
+    "macos": {
+      "command": "vtcode",
+      "args": [
+        "--version"
+      ]
+    },
+    "linux": {
+      "command": "vtcode",
+      "args": [
+        "--version"
+      ]
+    }
+  },
+  "install": {
+    "windows": {
+      "command": "cargo",
+      "args": [
+        "install",
+        "vtcode"
+      ]
+    },
+    "macos": {
+      "command": "cargo",
+      "args": [
+        "install",
+        "vtcode"
+      ]
+    },
+    "linux": {
+      "command": "cargo",
+      "args": [
+        "install",
+        "vtcode"
+      ]
+    }
+  },
+  "update": {
+    "windows": {
+      "command": "cargo",
+      "args": [
+        "install",
+        "vtcode"
+      ]
+    },
+    "macos": {
+      "command": "cargo",
+      "args": [
+        "install",
+        "vtcode"
+      ]
+    },
+    "linux": {
+      "command": "cargo",
+      "args": [
+        "install",
+        "vtcode"
+      ]
+    }
+  },
+  "uninstall": {
+    "windows": {
+      "command": "cargo",
+      "args": [
+        "uninstall",
+        "vtcode"
+      ]
+    },
+    "macos": {
+      "command": "cargo",
+      "args": [
+        "uninstall",
+        "vtcode"
+      ]
+    },
+    "linux": {
+      "command": "cargo",
+      "args": [
+        "uninstall",
+        "vtcode"
+      ]
+    }
+  },
+  "run": {
+    "windows": {
+      "command": "vtcode",
+      "args": [
+        "chat"
+      ]
+    },
+    "macos": {
+      "command": "vtcode",
+      "args": [
+        "chat"
+      ]
+    },
+    "linux": {
+      "command": "vtcode",
+      "args": [
+        "chat"
+      ]
+    }
+  },
+  "providers": [
+    "native"
+  ],
+  "provider_recipes": {
+    "native": {
+      "env": {},
+      "args": []
+    }
+  }
+}

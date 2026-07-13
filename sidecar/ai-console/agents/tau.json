@@ -1,0 +1,132 @@
+{
+  "schema_version": 1,
+  "id": "tau",
+  "name": "Tau",
+  "detect": {
+    "windows": {
+      "command": "tau",
+      "args": [
+        "--version"
+      ]
+    },
+    "macos": {
+      "command": "tau",
+      "args": [
+        "--version"
+      ]
+    },
+    "linux": {
+      "command": "tau",
+      "args": [
+        "--version"
+      ]
+    }
+  },
+  "install": {
+    "windows": {
+      "command": "uv",
+      "args": [
+        "tool",
+        "install",
+        "--upgrade",
+        "tau-ai"
+      ]
+    },
+    "macos": {
+      "command": "uv",
+      "args": [
+        "tool",
+        "install",
+        "--upgrade",
+        "tau-ai"
+      ]
+    },
+    "linux": {
+      "command": "uv",
+      "args": [
+        "tool",
+        "install",
+        "--upgrade",
+        "tau-ai"
+      ]
+    }
+  },
+  "update": {
+    "windows": {
+      "command": "uv",
+      "args": [
+        "tool",
+        "install",
+        "--upgrade",
+        "tau-ai"
+      ]
+    },
+    "macos": {
+      "command": "uv",
+      "args": [
+        "tool",
+        "install",
+        "--upgrade",
+        "tau-ai"
+      ]
+    },
+    "linux": {
+      "command": "uv",
+      "args": [
+        "tool",
+        "install",
+        "--upgrade",
+        "tau-ai"
+      ]
+    }
+  },
+  "uninstall": {
+    "windows": {
+      "command": "uv",
+      "args": [
+        "tool",
+        "uninstall",
+        "tau-ai"
+      ]
+    },
+    "macos": {
+      "command": "uv",
+      "args": [
+        "tool",
+        "uninstall",
+        "tau-ai"
+      ]
+    },
+    "linux": {
+      "command": "uv",
+      "args": [
+        "tool",
+        "uninstall",
+        "tau-ai"
+      ]
+    }
+  },
+  "run": {
+    "windows": {
+      "command": "tau",
+      "args": []
+    },
+    "macos": {
+      "command": "tau",
+      "args": []
+    },
+    "linux": {
+      "command": "tau",
+      "args": []
+    }
+  },
+  "providers": [
+    "native"
+  ],
+  "provider_recipes": {
+    "native": {
+      "env": {},
+      "args": []
+    }
+  }
+}
