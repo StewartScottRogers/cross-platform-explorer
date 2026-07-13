@@ -3,7 +3,8 @@
       mirrors the app-level Toolbar gear content but as a modal. It is a dumb
       view: current values come in as props, and every change is dispatched for
       App to apply + persist, so there is a single source of truth. */
-  import { createEventDispatcher } from "svelte";
+  import { createEventDispatcher, onMount } from "svelte";
+  import { listSidecars, platformActive } from "../sidecar";
 
   export let showHidden = false;
   export let showDetails = true;
@@ -14,6 +15,14 @@
     setDetails: boolean;
     reset: void;
   }>();
+
+  // Read-only sidecar platform status (CPE-317). Fetched on mount via the client, which
+  // degrades to "off" when the app is built without the `sidecar-platform` feature.
+  let sidecar: { active: boolean; ids: string[] } | null = null;
+  onMount(async () => {
+    const active = await platformActive();
+    sidecar = { active, ids: active ? await listSidecars() : [] };
+  });
 </script>
 
 <svelte:window on:keydown={(e) => e.key === "Escape" && dispatch("close")} />
@@ -46,6 +55,22 @@
       </button>
     </div>
 
+    <div class="section-title">Sidecar platform</div>
+    <div class="settings-row">
+      <span>Status</span>
+      <span class="muted">
+        {#if sidecar === null}
+          Checking…
+        {:else if !sidecar.active}
+          Off (not built in)
+        {:else if sidecar.ids.length === 0}
+          On — no sidecars registered
+        {:else}
+          On — {sidecar.ids.join(", ")}
+        {/if}
+      </span>
+    </div>
+
     <div class="actions">
       <button class="btn primary" on:click={() => dispatch("close")}>Close</button>
     </div>
@@ -71,6 +96,13 @@
     padding: 20px;
   }
   h2 { font-size: 16px; margin-bottom: 12px; }
+  .section-title {
+    font-size: 12px;
+    font-weight: 600;
+    color: var(--text-dim);
+    margin: 16px 0 6px;
+  }
+  .muted { color: var(--text-dim); font-size: 13px; }
   .actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 18px; }
   .btn {
     height: 32px;
