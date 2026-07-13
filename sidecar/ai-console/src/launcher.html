@@ -64,12 +64,13 @@
 
 <script>/*__XTERM_JS__*/</script>
 <script>/*__FIT_JS__*/</script>
-<script>/*__WEBGL_JS__*/</script>
 <script>/*__SEARCH_JS__*/</script>
 <script>/*__LINKS_JS__*/</script>
 <script>/*__UNICODE_JS__*/</script>
 <script>
 "use strict";
+// Surface any uncaught error to the status bar (the pane has no visible devtools).
+window.onerror = function (m) { try { setMsg("Error: " + m, false); } catch (_) {} };
 const $ = (id) => document.getElementById(id);
 let catalog = null;
 let session = null;
@@ -131,27 +132,35 @@ async function load() {
 // --- Terminal (xterm.js over a WebSocket) ---------------------------------------------
 let term = null, fitAddon = null, searchAddon = null, ws = null;
 
+// Build the terminal. The core (Terminal + open + fit) must succeed; every addon is
+// optional and isolated, so a flaky one (e.g. a webview that can't give WebGL a context)
+// can never blank the terminal. Returns false if the core failed.
 function initTerm() {
-  if (term) return;
-  term = new Terminal({
-    fontFamily: "ui-monospace, Consolas, 'Cascadia Mono', monospace",
-    fontSize: 13, cursorBlink: true, scrollback: 50000,
-    theme: { background: "#0d0d0d", foreground: "#d8d8d8" },
-  });
-  fitAddon = new FitAddon.FitAddon();
-  searchAddon = new SearchAddon.SearchAddon();
-  term.loadAddon(fitAddon);
-  term.loadAddon(searchAddon);
-  term.loadAddon(new WebLinksAddon.WebLinksAddon());
-  term.loadAddon(new Unicode11Addon.Unicode11Addon());
-  term.unicode.activeVersion = "11";
-  term.open($("term"));
-  // GPU renderer for lively scrolling of long sessions; fall back to DOM if unavailable.
-  try { term.loadAddon(new WebglAddon.WebglAddon()); } catch (_) {}
-  fitAddon.fit();
-  term.onData((d) => { if (ws && ws.readyState === 1) ws.send(d); });   // keystrokes -> PTY
-  term.attachCustomKeyEventHandler(onKey);
-  window.addEventListener("resize", refit);
+  if (term) return true;
+  try {
+    term = new Terminal({
+      fontFamily: "ui-monospace, Consolas, 'Cascadia Mono', monospace",
+      fontSize: 13, cursorBlink: true, scrollback: 50000,
+      theme: { background: "#0d0d0d", foreground: "#d8d8d8" },
+    });
+    fitAddon = new FitAddon.FitAddon();
+    term.loadAddon(fitAddon);
+    try { searchAddon = new SearchAddon.SearchAddon(); term.loadAddon(searchAddon); } catch (_) {}
+    try { term.loadAddon(new WebLinksAddon.WebLinksAddon()); } catch (_) {}
+    try {
+      term.loadAddon(new Unicode11Addon.Unicode11Addon());
+      term.unicode.activeVersion = "11";
+    } catch (_) {}
+    term.open($("term"));
+    fitAddon.fit();
+    term.onData((d) => { if (ws && ws.readyState === 1) ws.send(d); }); // keystrokes -> PTY
+    term.attachCustomKeyEventHandler(onKey);
+    window.addEventListener("resize", refit);
+    return true;
+  } catch (e) {
+    setMsg("Terminal init failed: " + (e && e.message ? e.message : e), false);
+    return false;
+  }
 }
 
 function refit() {
@@ -190,6 +199,7 @@ function connectWs() {
     else term.write(new Uint8Array(e.data));
   };
   ws.onopen = () => refit();
+  ws.onerror = () => setMsg("Terminal connection error.", false);
   ws.onclose = () => setMsg("Session ended.", false);
 }
 
@@ -208,7 +218,8 @@ async function launch() {
   try {
     const res = await api("/api/launch", { method: "POST", body: JSON.stringify(body) });
     session = res.session;
-    initTerm(); term.reset(); term.focus();
+    if (!initTerm()) return;
+    term.reset(); term.focus();
     if (ws) { try { ws.close(); } catch (_) {} }
     connectWs();
     if (res.dangerousFlags && res.dangerousFlags.length)

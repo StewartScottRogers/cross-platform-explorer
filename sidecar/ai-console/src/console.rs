@@ -335,7 +335,6 @@ pub fn launcher_html() -> String {
         .replace("/*__XTERM_CSS__*/", include_str!("vendor/xterm.css"))
         .replace("/*__XTERM_JS__*/", include_str!("vendor/xterm.js"))
         .replace("/*__FIT_JS__*/", include_str!("vendor/xterm-addon-fit.js"))
-        .replace("/*__WEBGL_JS__*/", include_str!("vendor/xterm-addon-webgl.js"))
         .replace("/*__SEARCH_JS__*/", include_str!("vendor/xterm-addon-search.js"))
         .replace("/*__LINKS_JS__*/", include_str!("vendor/xterm-addon-web-links.js"))
         .replace("/*__UNICODE_JS__*/", include_str!("vendor/xterm-addon-unicode11.js"))
@@ -412,5 +411,107 @@ mod tests {
     #[test]
     fn unknown_route_is_404() {
         assert_eq!(get(&state(), "/nope").status, 404);
+    }
+
+    // Real end-to-end WebSocket test: launch an echo "agent", connect a WS client, and
+    // confirm the PTY output streams through (CPE-334). Spawns a subprocess + binds a real
+    // port + is timing-sensitive, so it's a manual diagnostic (like ai_console_flow) rather
+    // than a CI test that would flake under the parallel suite. Run:
+    //   cargo test --lib ws_streams_pty_output_end_to_end -- --ignored --nocapture
+    #[test]
+    #[ignore = "spawns a process + binds a port; run manually"]
+    fn ws_streams_pty_output_end_to_end() {
+        use std::io::{Read, Write};
+        use std::net::TcpStream;
+        use std::time::Duration;
+
+        let dir = tempfile::tempdir().unwrap();
+        let agents = dir.path().join("agents");
+        std::fs::create_dir_all(&agents).unwrap();
+        let (cmd, args) = if cfg!(windows) {
+            ("cmd", r#"["/c","echo","WS_STREAM_OK"]"#)
+        } else {
+            ("sh", r#"["-c","echo WS_STREAM_OK"]"#)
+        };
+        let manifest = format!(
+            r#"{{"schema_version":1,"id":"echo","name":"Echo",
+               "run":{{"windows":{{"command":"{cmd}","args":{args}}},
+                       "macos":{{"command":"{cmd}","args":{args}}},
+                       "linux":{{"command":"{cmd}","args":{args}}}}},
+               "providers":["native"],
+               "provider_recipes":{{"native":{{"env":{{}},"args":[]}}}}}}"#
+        );
+        std::fs::write(agents.join("echo.json"), manifest).unwrap();
+
+        let state = Arc::new(ConsoleState::new(
+            AgentRegistry::load_from_dirs(&[agents]),
+            dir.path().to_string_lossy().into_owned(),
+        ));
+        let server = crate::http::serve(Arc::clone(&state), route, ws_route).unwrap();
+        let port = server.port;
+
+        // Launch over HTTP.
+        let body = http_post(port, "/api/launch", r#"{"agent":"echo","provider":"native"}"#);
+        let session = serde_json::from_str::<Value>(&body).unwrap()["session"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        std::thread::sleep(Duration::from_millis(600)); // let echo run + land in the ring
+
+        // WebSocket handshake.
+        let mut s = TcpStream::connect(("127.0.0.1", port)).unwrap();
+        s.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+        let key = "dGhlIHNhbXBsZSBub25jZQ==";
+        let req = format!(
+            "GET /api/session/{session}/ws HTTP/1.1\r\nHost: localhost\r\nUpgrade: websocket\r\n\
+             Connection: Upgrade\r\nSec-WebSocket-Key: {key}\r\nSec-WebSocket-Version: 13\r\n\r\n"
+        );
+        s.write_all(req.as_bytes()).unwrap();
+        let mut hdr = Vec::new();
+        let mut b = [0u8; 1];
+        while !hdr.ends_with(b"\r\n\r\n") {
+            if s.read(&mut b).unwrap() == 0 {
+                break;
+            }
+            hdr.push(b[0]);
+        }
+        let resp = String::from_utf8_lossy(&hdr);
+        assert!(resp.contains("101"), "handshake failed: {resp}");
+        assert!(resp.contains(&crate::http::ws_accept_key(key)), "bad accept: {resp}");
+
+        // Read frames until we see the echoed marker.
+        let mut got = Vec::new();
+        for _ in 0..20 {
+            match crate::http::ws_read_frame(&mut s) {
+                Ok(Some(f)) if f.opcode == crate::http::ws_op::BINARY => {
+                    got.extend_from_slice(&f.payload);
+                    if String::from_utf8_lossy(&got).contains("WS_STREAM_OK") {
+                        break;
+                    }
+                }
+                Ok(Some(_)) => {}
+                _ => break,
+            }
+        }
+        assert!(
+            String::from_utf8_lossy(&got).contains("WS_STREAM_OK"),
+            "WS did not stream PTY output; got {:?}",
+            String::from_utf8_lossy(&got)
+        );
+    }
+
+    fn http_post(port: u16, path: &str, body: &str) -> String {
+        use std::io::{Read, Write};
+        use std::net::TcpStream;
+        let mut s = TcpStream::connect(("127.0.0.1", port)).unwrap();
+        let req = format!(
+            "POST {path} HTTP/1.1\r\nHost: localhost\r\nContent-Length: {}\r\n\
+             Connection: close\r\n\r\n{body}",
+            body.len()
+        );
+        s.write_all(req.as_bytes()).unwrap();
+        let mut resp = String::new();
+        s.read_to_string(&mut resp).unwrap();
+        resp.split("\r\n\r\n").nth(1).unwrap_or("").to_string()
     }
 }
