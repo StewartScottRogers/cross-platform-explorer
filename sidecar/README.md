@@ -69,3 +69,7 @@ cd sidecar/host
 cargo test                                   # unit + real-process E2E
 cargo clippy --all-targets -- -D warnings
 ```
+
+## AI Console — extending it
+
+Add a coding agent, provider, or plugin by manifest (no code): see [ai-console/docs/adding-an-agent.md](ai-console/docs/adding-an-agent.md).
