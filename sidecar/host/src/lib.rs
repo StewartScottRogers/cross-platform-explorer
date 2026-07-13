@@ -13,6 +13,7 @@
 
 pub mod broker;
 pub mod conformance;
+pub mod errors;
 pub mod migrate;
 pub mod observability;
 pub mod providers;
