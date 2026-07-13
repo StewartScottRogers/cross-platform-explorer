@@ -33,3 +33,12 @@ threat model and run a review covering the whole boundary.
 
 ## Work Log
 2026-07-13 — Filed during epic-plan hardening.
+2026-07-13 — **Threat model authored & committed**: `docs/security/threat-model.md`
+(STRIDE across all six surfaces — IPC, capability broker, secrets broker, manifest trust,
+embedded UI/CSP, spawned agent/MCP — each threat mapped to a mitigation/ticket, grounded in
+the real code) plus the repeatable per-tenant `docs/security/sidecar-review-checklist.md`.
+Interim posture recorded in ADR 0001. Invariants verified: no plaintext secrets at rest
+(✅ Win / 🟡 non-Win), no secret in logs/UI (✅), no cross-sidecar reach (✅), no UI escape
+(✅). **Final production sign-off intentionally withheld — gated on CPE-296 (consent UX)
+and CPE-322 (macOS/Linux keychains).** Re-run this review and record sign-off when both are
+Done. Acceptance items 1/2/3/5 met; item 4 (sign-off) pending those two.
