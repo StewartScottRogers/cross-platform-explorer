@@ -15,8 +15,11 @@ fn the_bundled_catalog_loads_cleanly() {
     let reg = AgentRegistry::load_from_dirs(&[catalog_dir()]);
     // Every bundled manifest is valid — no load warnings.
     assert!(reg.warnings().is_empty(), "warnings: {:?}", reg.warnings());
-    assert!(reg.len() >= 8, "expected the seed catalog, got {}", reg.len());
-    for id in ["claude", "codex", "gemini", "qwen", "opencode", "grok", "aider", "mistral"] {
+    assert!(reg.len() >= 12, "expected the seed catalog, got {}", reg.len());
+    for id in [
+        "claude", "codex", "gemini", "qwen", "opencode", "grok", "aider", "mistral",
+        "codebuff", "pi", "tau", "vtcode",
+    ] {
         assert!(reg.get(id).is_some(), "missing agent '{id}'");
     }
 }

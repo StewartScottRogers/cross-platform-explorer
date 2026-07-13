@@ -1,0 +1,132 @@
+{
+  "schema_version": 1,
+  "id": "pi",
+  "name": "Pi Coding Agent",
+  "detect": {
+    "windows": {
+      "command": "pi",
+      "args": [
+        "--version"
+      ]
+    },
+    "macos": {
+      "command": "pi",
+      "args": [
+        "--version"
+      ]
+    },
+    "linux": {
+      "command": "pi",
+      "args": [
+        "--version"
+      ]
+    }
+  },
+  "install": {
+    "windows": {
+      "command": "npm",
+      "args": [
+        "i",
+        "-g",
+        "--ignore-scripts",
+        "@earendil-works/pi-coding-agent@latest"
+      ]
+    },
+    "macos": {
+      "command": "npm",
+      "args": [
+        "i",
+        "-g",
+        "--ignore-scripts",
+        "@earendil-works/pi-coding-agent@latest"
+      ]
+    },
+    "linux": {
+      "command": "npm",
+      "args": [
+        "i",
+        "-g",
+        "--ignore-scripts",
+        "@earendil-works/pi-coding-agent@latest"
+      ]
+    }
+  },
+  "update": {
+    "windows": {
+      "command": "npm",
+      "args": [
+        "i",
+        "-g",
+        "--ignore-scripts",
+        "@earendil-works/pi-coding-agent@latest"
+      ]
+    },
+    "macos": {
+      "command": "npm",
+      "args": [
+        "i",
+        "-g",
+        "--ignore-scripts",
+        "@earendil-works/pi-coding-agent@latest"
+      ]
+    },
+    "linux": {
+      "command": "npm",
+      "args": [
+        "i",
+        "-g",
+        "--ignore-scripts",
+        "@earendil-works/pi-coding-agent@latest"
+      ]
+    }
+  },
+  "uninstall": {
+    "windows": {
+      "command": "npm",
+      "args": [
+        "rm",
+        "-g",
+        "@earendil-works/pi-coding-agent"
+      ]
+    },
+    "macos": {
+      "command": "npm",
+      "args": [
+        "rm",
+        "-g",
+        "@earendil-works/pi-coding-agent"
+      ]
+    },
+    "linux": {
+      "command": "npm",
+      "args": [
+        "rm",
+        "-g",
+        "@earendil-works/pi-coding-agent"
+      ]
+    }
+  },
+  "run": {
+    "windows": {
+      "command": "pi",
+      "args": []
+    },
+    "macos": {
+      "command": "pi",
+      "args": []
+    },
+    "linux": {
+      "command": "pi",
+      "args": []
+    }
+  },
+  "providers": [
+    "native"
+  ],
+  "provider_recipes": {
+    "native": {
+      "env": {},
+      "args": []
+    }
+  }
+}
