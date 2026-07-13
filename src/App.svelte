@@ -2,9 +2,13 @@
   import { onMount } from "svelte";
   import { invoke, convertFileSrc } from "@tauri-apps/api/core";
   import { check } from "@tauri-apps/plugin-updater";
-  import { relaunch } from "@tauri-apps/plugin-process";
-  import { openPath } from "@tauri-apps/plugin-opener";
+  import { relaunch, exit } from "@tauri-apps/plugin-process";
+  import { openPath, openUrl } from "@tauri-apps/plugin-opener";
+  import { getVersion } from "@tauri-apps/api/app";
 
+  import MenuBar from "./lib/components/MenuBar.svelte";
+  import AboutDialog from "./lib/components/AboutDialog.svelte";
+  import SettingsDialog from "./lib/components/SettingsDialog.svelte";
   import TabBar from "./lib/components/TabBar.svelte";
   import NavToolbar from "./lib/components/NavToolbar.svelte";
   import CommandBar from "./lib/components/CommandBar.svelte";
@@ -136,6 +140,12 @@
   let ctx: { x: number; y: number; target: "item" | "empty" } | null = null;
   let confirm: { title: string; message: string; label: string; onYes: () => void } | null = null;
   let propsFor: DirEntry[] | null = null;
+
+  // ---- Application menu (CPE-229) ----
+  const REPO_URL = "https://github.com/StewartScottRogers/cross-platform-explorer";
+  let showAbout = false;
+  let showSettings = false;
+  let appVersion = "";
 
   let navToolbar: NavToolbar;
 
@@ -809,6 +819,51 @@
     applySettings();
   }
 
+  /** File > Exit — quit the whole app (process:default grants allow-exit). */
+  async function exitApp() {
+    await exit(0);
+  }
+
+  /** Route a menu selection to its action. See MenuBar's `menus` table. */
+  function onMenuSelect(action: string) {
+    switch (action) {
+      case "exit": exitApp(); break;
+      case "check-updates": manualUpdateCheck(); break;
+      case "settings": showSettings = true; break;
+      case "documentation": openExternal(REPO_URL); break;
+      case "about": showAbout = true; break;
+    }
+  }
+
+  /** Open a URL in the default browser, surfacing failures rather than swallowing. */
+  async function openExternal(url: string) {
+    try {
+      await openUrl(url);
+    } catch {
+      showNotice("Couldn't open the link.", true);
+    }
+  }
+
+  /** Application > Check for Updates — manual counterpart to the silent startup
+      check, with feedback in every case and no crash if the updater is
+      unreachable or unconfigured (e.g. a dev build). */
+  async function manualUpdateCheck() {
+    showNotice("Checking for updates…");
+    try {
+      const update = await check();
+      if (update) {
+        showNotice(`Update ${update.version} available — downloading…`);
+        await update.downloadAndInstall();
+        await relaunch();
+      } else {
+        showNotice("You're up to date.");
+      }
+    } catch (e) {
+      console.debug("manual update check failed:", e);
+      showNotice("Couldn't check for updates right now.", true);
+    }
+  }
+
   onMount(async () => {
     applySettings();
 
@@ -826,12 +881,20 @@
     } catch (e) {
       console.debug("could not load places:", e);
     }
+    try {
+      appVersion = await getVersion();
+    } catch {
+      // Version is cosmetic (About dialog) — a failure must not break startup.
+    }
+
     await loadPath(HOME);
     checkForUpdates();
   });
 </script>
 
 <svelte:window on:keydown={handleKeydown} />
+
+<MenuBar on:select={(e) => onMenuSelect(e.detail)} />
 
 <Toolbar label="Application">
   <div class="settings-row">
@@ -1122,4 +1185,24 @@
 
 {#if propsFor}
   <PropertiesDialog entries={propsFor} on:close={() => (propsFor = null)} />
+{/if}
+
+{#if showSettings}
+  <SettingsDialog
+    {showHidden}
+    {showDetails}
+    on:setHidden={(e) => { showHidden = e.detail; settings.saveShowHidden(showHidden); }}
+    on:setDetails={(e) => { showDetails = e.detail; settings.saveShowDetails(showDetails); }}
+    on:reset={resetAllSettings}
+    on:close={() => (showSettings = false)}
+  />
+{/if}
+
+{#if showAbout}
+  <AboutDialog
+    version={appVersion}
+    repoUrl={REPO_URL}
+    on:openurl={(e) => openExternal(e.detail)}
+    on:close={() => (showAbout = false)}
+  />
 {/if}

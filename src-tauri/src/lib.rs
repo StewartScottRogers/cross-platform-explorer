@@ -1465,7 +1465,12 @@ pub fn run() {
     {
         builder = builder
             .plugin(tauri_plugin_process::init())
-            .plugin(tauri_plugin_updater::Builder::new().build());
+            .plugin(tauri_plugin_updater::Builder::new().build())
+            // Remember window size/position/maximized across restarts (CPE-228).
+            // The plugin auto-restores each config window on launch and auto-saves
+            // on exit, writing its own `.window-state.json`. Builder::default()
+            // uses StateFlags::all(), so maximized state is restored too.
+            .plugin(tauri_plugin_window_state::Builder::default().build());
     }
 
     // Keep the screen awake for as long as the app is open (CPE-225). We hold a

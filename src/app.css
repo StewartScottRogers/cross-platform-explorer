@@ -43,7 +43,8 @@ body {
 #app {
   height: 100vh;
   display: grid;
-  grid-template-rows: auto auto auto 1fr auto; /* tabs / nav / commands / main / status */
+  /* menubar / app-toolbar / tabs / nav / commands / main / status */
+  grid-template-rows: auto auto auto auto auto 1fr auto;
   background: var(--bg);
 }
 
