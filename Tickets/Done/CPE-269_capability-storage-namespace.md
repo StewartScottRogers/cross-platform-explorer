@@ -2,11 +2,12 @@
 id: CPE-269
 title: "Capability: storage namespace"
 type: Task
-status: Open
+status: Done
 priority: Medium
 component: Backend
 estimate: 1h
 created: 2026-07-13
+closed: 2026-07-13
 ---
 
 ## Summary
@@ -25,8 +26,17 @@ shared-global entanglement.
 - [ ] Cleared on sidecar uninstall (see [[CPE-276]]).
 - [ ] Test: two sidecars get distinct, isolated dirs.
 
-## Notes — Dependencies / Schedule
-**Depends on:** [[CPE-266]]. **Phase:** P3. **Epic:** [[CPE-260]].
+## Resolution
+
+Implemented `providers::storage`: `StorageProvider` rooted at a host base dir serves
+`Capability::Storage` via `storage.dir`, returning (and creating on first use) the
+namespace `base/<sidecar_id>`. The id comes from the broker, and `is_safe_segment`
+requires a single `Normal` path component — so `..`, `.`, `a/b`, `a\b`, absolute paths
+and Windows prefixes are all rejected and a sidecar can never escape base or reach
+another's dir. `clear()` removes a namespace for uninstall ([[CPE-276]]). 4 tests
+(created-under-base, isolation, traversal rejected, clear); 36 unit + 3 E2E + clippy
+green.
 
 ## Work Log
 2026-07-13 — Filed during Nightshift epic planning.
+2026-07-13 — Implemented + tested during dayshift. Done.
