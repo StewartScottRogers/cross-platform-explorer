@@ -14,6 +14,12 @@ sidecar-contract = { path = "../contract" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 
+# Manifest trust & signing (CPE-295). All pure-Rust, no system libs: ed25519 for
+# first-party signature verification, sha2 for content hashing, hex for encoding.
+ed25519-dalek = "2"
+sha2 = "0.10"
+hex = "0.4"
+
 # Secrets capability (CPE-268) is backed by the OS credential store. The provider is
 # backend-agnostic (see providers::secrets), so the default build/tests use an
 # in-memory backend; the real KeyringBackend compiles only where a native store is

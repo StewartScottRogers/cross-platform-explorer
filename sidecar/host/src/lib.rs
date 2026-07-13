@@ -20,6 +20,7 @@ pub mod providers;
 pub mod registry;
 pub mod scaffold;
 pub mod supervisor;
+pub mod trust;
 
 pub use broker::{
     capability_for_method, decide_grants, Broker, CapabilityProvider, GrantRequest,
