@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { categoryOf, typeName, CATEGORY_BY_EXT, TYPE_NAME_BY_EXT } from "./filetypes";
+import { categoryOf, typeName, sameTypeIndices, CATEGORY_BY_EXT, TYPE_NAME_BY_EXT } from "./filetypes";
 
 const file = (extension: string) => ({ is_dir: false, extension });
 const folder = { is_dir: true, extension: "" };
@@ -142,5 +142,28 @@ describe("typeName", () => {
     expect(typeName(file("wmv"))).toBe("Windows Media Video");
     expect(typeName(file("zst"))).toBe("Zstandard archive");
     expect(typeName(file("mjs"))).toBe("JavaScript module");
+  });
+});
+
+describe("sameTypeIndices", () => {
+  const entries = [
+    file("jpg"), // 0
+    folder, // 1
+    file("png"), // 2
+    file("jpg"), // 3
+    file(""), // 4 (extensionless)
+  ];
+
+  it("returns indices of non-dir entries sharing the extension", () => {
+    expect(sameTypeIndices(entries, "jpg")).toEqual([0, 3]);
+  });
+
+  it("never matches directories", () => {
+    // "" would match the extensionless file (4) but not the folder (1).
+    expect(sameTypeIndices(entries, "")).toEqual([4]);
+  });
+
+  it("returns empty when nothing matches", () => {
+    expect(sameTypeIndices(entries, "gif")).toEqual([]);
   });
 });

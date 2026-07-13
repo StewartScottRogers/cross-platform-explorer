@@ -22,6 +22,8 @@
   export let extractable = false;
   /** True when Open-in-Terminal applies (a real folder, not Home/archive) (CPE-253). */
   export let canTerminal = false;
+  /** Extension (no dot) to offer "Select all .ext"; empty hides the row (CPE-258). */
+  export let sameTypeExt = "";
 
   const dispatch = createEventDispatcher<{
     action: string;
@@ -112,6 +114,11 @@
     {#if selectionCount > 1}
       <button class="row" role="menuitem" on:click={() => run("batch-rename")}>
         <Icon name="rename" size={15} /> Rename…
+      </button>
+    {/if}
+    {#if sameTypeExt}
+      <button class="row" role="menuitem" on:click={() => run("select-type")}>
+        <Icon name="filter" size={15} /> Select all .{sameTypeExt}
       </button>
     {/if}
     {#if extractable}
