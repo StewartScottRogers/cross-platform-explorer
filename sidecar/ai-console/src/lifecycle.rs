@@ -6,7 +6,7 @@
 //! system; [`RealRunner`] does the actual `std::process` call. No shell scripts — Rust
 //! runs the probe and parses the result.
 
-use crate::agents::AgentManifest;
+use crate::agents::{AgentManifest, OsCommand};
 
 /// The captured result of running a command.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -70,6 +70,45 @@ fn parse_version(stdout: &str) -> Option<String> {
         .map(str::trim)
         .find(|l| !l.is_empty())
         .map(str::to_string)
+}
+
+/// Install the agent by running its per-OS `install` recipe via `runner` (CPE-282).
+/// Rust orchestrates the underlying package manager (npm/winget/brew/pipx) — the
+/// recipe is data, there are no shell scripts. Returns the captured output on success,
+/// or an error if there is no install recipe, the command can't be spawned, or it exits
+/// non-zero.
+pub fn install(agent: &AgentManifest, runner: &dyn CommandRunner) -> Result<CommandOutput, String> {
+    let cmd = agent
+        .install_for_current_os()
+        .ok_or_else(|| format!("agent '{}' has no install recipe for this OS", agent.id))?;
+    run_step(agent, "install", cmd, runner)
+}
+
+/// Update the agent. Uses the `update` recipe if present, else falls back to `install`
+/// (re-running a package-manager install updates it — as in the reference).
+pub fn update(agent: &AgentManifest, runner: &dyn CommandRunner) -> Result<CommandOutput, String> {
+    match agent.update_for_current_os() {
+        Some(cmd) => run_step(agent, "update", cmd, runner),
+        None => install(agent, runner),
+    }
+}
+
+fn run_step(
+    agent: &AgentManifest,
+    step: &str,
+    cmd: &OsCommand,
+    runner: &dyn CommandRunner,
+) -> Result<CommandOutput, String> {
+    let out = runner.run(&cmd.command, &cmd.args)?;
+    if out.status_ok {
+        Ok(out)
+    } else {
+        Err(format!(
+            "{step} of '{}' failed: {}",
+            agent.id,
+            out.stderr.trim()
+        ))
+    }
 }
 
 #[cfg(test)]
@@ -141,5 +180,65 @@ mod tests {
         let r = detect(&agent_with_detect(false), &runner);
         assert!(!r.installed);
         assert_eq!(r.version, None);
+    }
+
+    /// A manifest with install (and optionally update) recipes for every OS.
+    fn agent_with_install(with_update: bool) -> AgentManifest {
+        let d = tempfile::tempdir().unwrap();
+        let update_block = if with_update {
+            r#""update": { "windows": { "command": "npm", "args": ["update"] },
+                          "macos": { "command": "npm", "args": ["update"] },
+                          "linux": { "command": "npm", "args": ["update"] } },"#
+        } else {
+            ""
+        };
+        let json = format!(
+            r#"{{ "schema_version": 1, "id": "claude", "name": "Claude Code",
+                 "install": {{ "windows": {{ "command": "npm", "args": ["i", "-g", "x"] }},
+                              "macos": {{ "command": "npm", "args": ["i", "-g", "x"] }},
+                              "linux": {{ "command": "npm", "args": ["i", "-g", "x"] }} }},
+                 {update_block}
+                 "run": {{ "windows": {{ "command": "claude" }}, "macos": {{ "command": "claude" }}, "linux": {{ "command": "claude" }} }} }}"#
+        );
+        let mut f = std::fs::File::create(d.path().join("claude.json")).unwrap();
+        f.write_all(json.as_bytes()).unwrap();
+        AgentRegistry::load_from_dirs(&[d.path().to_path_buf()]).get("claude").unwrap().clone()
+    }
+
+    fn ok_runner() -> FakeRunner {
+        FakeRunner { result: Ok(CommandOutput { status_ok: true, stdout: "done".into(), stderr: String::new() }) }
+    }
+
+    #[test]
+    fn install_succeeds_when_the_command_succeeds() {
+        assert!(install(&agent_with_install(false), &ok_runner()).is_ok());
+    }
+
+    #[test]
+    fn install_errors_on_nonzero_with_stderr() {
+        let runner = FakeRunner {
+            result: Ok(CommandOutput { status_ok: false, stdout: String::new(), stderr: "npm boom".into() }),
+        };
+        let err = install(&agent_with_install(false), &runner).unwrap_err();
+        assert!(err.contains("install of 'claude' failed"));
+        assert!(err.contains("npm boom"));
+    }
+
+    #[test]
+    fn install_errors_when_no_recipe() {
+        // agent_with_detect(false) has no install recipe.
+        let err = install(&agent_with_detect(false), &ok_runner()).unwrap_err();
+        assert!(err.contains("no install recipe"));
+    }
+
+    #[test]
+    fn update_falls_back_to_install_when_no_update_recipe() {
+        // No update recipe → uses install, which succeeds.
+        assert!(update(&agent_with_install(false), &ok_runner()).is_ok());
+    }
+
+    #[test]
+    fn update_uses_the_update_recipe_when_present() {
+        assert!(update(&agent_with_install(true), &ok_runner()).is_ok());
     }
 }

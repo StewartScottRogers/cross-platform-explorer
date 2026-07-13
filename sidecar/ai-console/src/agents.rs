@@ -83,6 +83,9 @@ impl AgentManifest {
     pub fn install_for_current_os(&self) -> Option<&OsCommand> {
         self.install.get(Self::current_os_key())
     }
+    pub fn update_for_current_os(&self) -> Option<&OsCommand> {
+        self.update.get(Self::current_os_key())
+    }
     pub fn uninstall_for_current_os(&self) -> Option<&OsCommand> {
         self.uninstall.get(Self::current_os_key())
     }
