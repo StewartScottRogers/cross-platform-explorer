@@ -15,7 +15,7 @@ pub mod lifecycle;
 pub mod routing;
 
 pub use agents::{AgentManifest, AgentRegistry, OsCommand, ProviderRecipe};
-pub use lifecycle::{detect, CommandRunner, DetectResult, RealRunner};
+pub use lifecycle::{detect, install, update, CommandRunner, DetectResult, RealRunner};
 pub use routing::{compose_launch, Launch, LaunchContext};
 
 use sidecar_contract::{
