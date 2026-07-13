@@ -2,11 +2,12 @@
 id: CPE-298
 title: "Observability: logging, tracing & diagnostics export"
 type: Feature
-status: Open
+status: Done
 priority: Medium
 component: Multiple
 estimate: 3-4h
 created: 2026-07-13
+closed: 2026-07-13
 ---
 
 ## Summary
@@ -25,8 +26,20 @@ redacted everywhere ([[CPE-268]]).
       logs, health) with all secret values redacted.
 - [ ] Redaction is a shared, tested utility used by every log/transcript path.
 
-## Notes — Dependencies / Schedule
-**Depends on:** [[CPE-265]], [[CPE-262]]. **Phase:** P2. **Epic:** [[CPE-260]].
+## Resolution
+
+Implemented `observability` in `sidecar-host`: the shared **`Redactor`** (scrubs
+registered secret values from any string, blanks values under a `SENSITIVE_KEYS` list
+in JSON, recursively) — the single redaction utility every log/transcript/diagnostics
+path uses (referenced by [[CPE-268]], [[CPE-292]]); `LogRecord` (correlation_id +
+sidecar_id + level + message) with a bounded, thread-safe `LogCapture` ring buffer; and
+`Diagnostics` + `build_diagnostics` which assemble a shareable bundle with all log
+messages run through the redactor. 5 tests (string + JSON redaction, empty-secret
+ignored, bounded ring order, diagnostics redaction). 49 unit + 3 E2E + clippy green.
+
+**Deferred to the mgmt UI ([[CPE-274]]):** the in-app log viewer and per-sidecar
+configurable levels (data model is ready here).
 
 ## Work Log
 2026-07-13 — Filed during epic-plan hardening.
+2026-07-13 — Implemented during dayshift (in parallel with the CPE-273 sub-agent). Done.
