@@ -1,0 +1,11 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "//": "Config OVERLAY for building the explorer WITH the sidecar platform (ADR 0001). Merge it into the base config at build time so the default app stays byte-for-byte sidecar-free (the delete-test): `tauri build --features sidecar-platform --config src-tauri/tauri.sidecar.conf.json` (build the sidecar release binaries first). Sidecars are BUNDLED, never downloaded (CPE-276).",
+  "bundle": {
+    "resources": {
+      "../sidecar/ai-console/target/release/ai-console.exe": "sidecars/",
+      "../sidecar/ai-console/sidecar.json": "sidecars/",
+      "../sidecar/ai-console/agents/*.json": "sidecars/agents/"
+    }
+  }
+}

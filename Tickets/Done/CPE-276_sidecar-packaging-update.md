@@ -1,12 +1,13 @@
 ---
 id: CPE-276
-title: Sidecar packaging, signing & independent update/rollback
+title: Sidecar packaging (bundled-only, no code-signing needed)
 type: Feature
-status: Open
+status: Done
 priority: Medium
 component: Packaging
 estimate: 4h+
 created: 2026-07-13
+closed: 2026-07-13
 ---
 
 ## Summary
@@ -37,7 +38,16 @@ without breaking the delete-test or the explorer's own updater pipeline.
 **Depends on:** [[CPE-264]], [[CPE-265]], [[CPE-263]]. **Phase:** P5.
 **Epic:** [[CPE-260]]. Related: [[CPE-300]] (migration), [[CPE-308]] (catalog updates).
 
+## Resolution
+
+**Decision (user, 2026-07-13): sidecars are first-party and always BUNDLED with the app, NEVER downloaded at runtime.** Recorded in ADR 0001. This removes the fetched-binary path and its whole tail: no OS code-signing of sidecars (they inherit the signed app's trust — app signing is [[CPE-002]]), no independent download/update/rollback of binaries (a sidecar updates only when the app updates). Integrity of the bundled content is still covered by ed25519 manifest signing ([[CPE-295]]).
+
+**Delivered:** a config overlay `src-tauri/tauri.sidecar.conf.json` that bundles the ai-console release binary + its `sidecar.json` manifest + the agent catalog into the app's `sidecars/` resource dir, merged at build time so the DEFAULT app stays sidecar-free (delete-test): `tauri build --features sidecar-platform --config src-tauri/tauri.sidecar.conf.json` (build the sidecar release first). Added `sidecar/ai-console/sidecar.json` so the registry lists it. `resolve_ai_console_bin` already prefers the resource dir, so an installed feature build finds the bundled binary with no env var (dev keeps the `CPE_AICONSOLE_BIN`/dev-tree fallbacks). Verified the resource sources exist + a bundle build.
+
+**Obsolete under this decision (closed by design):** runtime-download install location, sidecar binary update/rollback, coordinated contract-major *download* upgrades. **Follow-up:** update `release.yml` to build the sidecar + use the overlay for a sidecar-enabled release channel; macOS/Linux overlay entries (per-OS binary names).
+
 ## Work Log
 2026-07-13 — Filed during Nightshift epic planning.
 2026-07-13 — Hardened: added binary code-signing, rollback / last-known-good, and
 coordinated contract-major upgrades.
+2026-07-13 — Adopted bundled-only sidecars; added the bundle overlay + sidecar manifest; rescoped away code-signing. Done.
