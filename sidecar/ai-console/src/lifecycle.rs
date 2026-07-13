@@ -93,6 +93,16 @@ pub fn update(agent: &AgentManifest, runner: &dyn CommandRunner) -> Result<Comma
     }
 }
 
+/// Uninstall the agent by running its per-OS `uninstall` recipe via `runner`
+/// (CPE-283). Never removes prerequisites shared by other agents — the recipe should
+/// remove only the agent's own package.
+pub fn uninstall(agent: &AgentManifest, runner: &dyn CommandRunner) -> Result<CommandOutput, String> {
+    let cmd = agent
+        .uninstall_for_current_os()
+        .ok_or_else(|| format!("agent '{}' has no uninstall recipe for this OS", agent.id))?;
+    run_step(agent, "uninstall", cmd, runner)
+}
+
 fn run_step(
     agent: &AgentManifest,
     step: &str,
@@ -240,5 +250,25 @@ mod tests {
     #[test]
     fn update_uses_the_update_recipe_when_present() {
         assert!(update(&agent_with_install(true), &ok_runner()).is_ok());
+    }
+
+    fn agent_with_uninstall() -> AgentManifest {
+        let d = tempfile::tempdir().unwrap();
+        let json = r#"{ "schema_version": 1, "id": "claude", "name": "Claude Code",
+             "uninstall": { "windows": { "command": "npm", "args": ["rm", "-g", "x"] },
+                            "macos": { "command": "npm", "args": ["rm", "-g", "x"] },
+                            "linux": { "command": "npm", "args": ["rm", "-g", "x"] } },
+             "run": { "windows": { "command": "claude" }, "macos": { "command": "claude" }, "linux": { "command": "claude" } } }"#;
+        let mut f = std::fs::File::create(d.path().join("claude.json")).unwrap();
+        f.write_all(json.as_bytes()).unwrap();
+        AgentRegistry::load_from_dirs(&[d.path().to_path_buf()]).get("claude").unwrap().clone()
+    }
+
+    #[test]
+    fn uninstall_succeeds_and_errors_appropriately() {
+        assert!(uninstall(&agent_with_uninstall(), &ok_runner()).is_ok());
+        // No uninstall recipe → error.
+        let err = uninstall(&agent_with_install(false), &ok_runner()).unwrap_err();
+        assert!(err.contains("no uninstall recipe"));
     }
 }
