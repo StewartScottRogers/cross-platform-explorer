@@ -13,7 +13,10 @@
 pub mod aggregate;
 pub mod agents;
 pub mod lifecycle;
+pub mod lmstudio;
 pub mod routing;
+
+pub use lmstudio::{detect as detect_lmstudio, LmStudio};
 
 pub use aggregate::{run_all, run_registry, summarize, Action, AgentOutcome};
 
