@@ -55,20 +55,57 @@ pub enum HandshakeError {
     Version(VersionError),
     NoReady(String),
     Send(String),
+    /// The Hello's auth token didn't match the token the host issued at spawn — a
+    /// possible impostor connection (CPE-275).
+    Untrusted,
+}
+
+/// A random per-launch channel token (CPE-275). The host sets it in the child's
+/// environment (`AUTH_TOKEN_ENV`) at spawn; the sidecar echoes it in `Hello`, and the
+/// host rejects a Hello whose token doesn't match — so a foreign process can't
+/// impersonate a sidecar on the channel.
+pub fn generate_launch_token() -> String {
+    let mut bytes = [0u8; 16];
+    // Fall back to a process/time-derived value only if the OS RNG is unavailable.
+    if getrandom::getrandom(&mut bytes).is_err() {
+        let seed = std::process::id() as u128
+            ^ std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0);
+        bytes = seed.to_le_bytes();
+    }
+    bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
 
 /// Drive the opening handshake over `conn`. On a major-version mismatch the host
 /// sends a `Rejected` and returns `Version(..)` — it does **not** mount the sidecar.
+/// When `expected_token` is `Some`, the Hello's `auth_token` must match it (CPE-275).
 pub fn handshake(
     conn: &mut dyn Connection,
     host_version: ContractVersion,
     consented: &BTreeSet<Capability>,
+    expected_token: Option<&str>,
 ) -> Result<HandshakeOutcome, HandshakeError> {
     let hello_env = conn.recv().map_err(HandshakeError::NoHello)?;
     let hello = match hello_env.message {
         Message::Hello(h) => h,
         _ => return Err(HandshakeError::NotHello),
     };
+
+    // Authenticate the channel: the sidecar must echo the token we issued.
+    if let Some(expected) = expected_token {
+        if hello.auth_token.as_deref() != Some(expected) {
+            let _ = conn.send(&Envelope::new(
+                hello_env.id,
+                Message::Rejected(Rejected {
+                    code: RejectCode::Untrusted,
+                    reason: "auth token mismatch".into(),
+                }),
+            ));
+            return Err(HandshakeError::Untrusted);
+        }
+    }
 
     let negotiated = match negotiate(host_version, hello.contract_version) {
         Ok(v) => v,
@@ -150,13 +187,18 @@ pub struct ProcessConnection {
     stdin: ChildStdin,
     rx: Receiver<Result<Envelope, String>>,
     recv_timeout: Duration,
+    launch_token: String,
     _reader: JoinHandle<()>,
 }
 
 /// Spawn `command args...` as a sidecar and wire its stdio into a [`ProcessConnection`].
+/// A per-launch auth token is generated and passed to the child via `AUTH_TOKEN_ENV`;
+/// the sidecar echoes it in `Hello` so [`handshake`] can authenticate the channel.
 pub fn spawn_process(command: &str, args: &[String]) -> Result<ProcessConnection, String> {
+    let launch_token = generate_launch_token();
     let mut child = Command::new(command)
         .args(args)
+        .env(sidecar_contract::AUTH_TOKEN_ENV, &launch_token)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::inherit())
@@ -195,8 +237,17 @@ pub fn spawn_process(command: &str, args: &[String]) -> Result<ProcessConnection
         stdin,
         rx,
         recv_timeout: Duration::from_secs(5),
+        launch_token,
         _reader: reader,
     })
+}
+
+impl ProcessConnection {
+    /// The per-launch auth token issued to this child (CPE-275) — pass it to
+    /// [`handshake`] as the expected token.
+    pub fn launch_token(&self) -> &str {
+        &self.launch_token
+    }
 }
 
 impl SidecarChannel for ProcessConnection {
@@ -282,6 +333,7 @@ mod tests {
                 sidecar_version: "0.1.0".into(),
                 contract_version: ContractVersion::new(major, 0),
                 capabilities_requested: vec![Capability::Context, Capability::Secrets],
+                auth_token: None,
             }),
         )
     }
@@ -293,7 +345,7 @@ mod tests {
             Envelope::new(0, Message::Lifecycle(Lifecycle::Ready)),
         ]);
         let consented = [Capability::Context].into_iter().collect();
-        let out = handshake(&mut conn, CONTRACT_VERSION, &consented).unwrap();
+        let out = handshake(&mut conn, CONTRACT_VERSION, &consented, None).unwrap();
         assert_eq!(out.sidecar_id, "fake");
         // Requested {Context, Secrets} ∩ consented {Context} = {Context}.
         assert_eq!(out.granted, [Capability::Context].into_iter().collect());
@@ -305,7 +357,7 @@ mod tests {
     #[test]
     fn handshake_refuses_an_incompatible_major_and_sends_rejected() {
         let mut conn = FakeConn::new(vec![hello(CONTRACT_VERSION.major + 1)]);
-        let err = handshake(&mut conn, CONTRACT_VERSION, &BTreeSet::new()).unwrap_err();
+        let err = handshake(&mut conn, CONTRACT_VERSION, &BTreeSet::new(), None).unwrap_err();
         assert!(matches!(err, HandshakeError::Version(_)));
         // Host told the sidecar why, and did not mount it.
         assert!(matches!(
@@ -320,8 +372,56 @@ mod tests {
             hello(CONTRACT_VERSION.major),
             Envelope::new(0, Message::Response(Response { result: Ok(serde_json::Value::Null) })),
         ]);
-        let err = handshake(&mut conn, CONTRACT_VERSION, &BTreeSet::new()).unwrap_err();
+        let err = handshake(&mut conn, CONTRACT_VERSION, &BTreeSet::new(), None).unwrap_err();
         assert!(matches!(err, HandshakeError::NoReady(_)));
+    }
+
+    fn hello_with_token(token: Option<&str>) -> Envelope {
+        Envelope::new(
+            9,
+            Message::Hello(Hello {
+                sidecar_id: "fake".into(),
+                sidecar_version: "0.1.0".into(),
+                contract_version: CONTRACT_VERSION,
+                capabilities_requested: vec![],
+                auth_token: token.map(str::to_string),
+            }),
+        )
+    }
+
+    #[test]
+    fn handshake_accepts_a_matching_token_and_rejects_a_wrong_one() {
+        // Matching token → proceeds to Ready → ok.
+        let mut ok = FakeConn::new(vec![
+            hello_with_token(Some("secret-token")),
+            Envelope::new(0, Message::Lifecycle(Lifecycle::Ready)),
+        ]);
+        assert!(handshake(&mut ok, CONTRACT_VERSION, &BTreeSet::new(), Some("secret-token")).is_ok());
+
+        // Wrong token → Untrusted + a Rejected sent.
+        let mut bad = FakeConn::new(vec![hello_with_token(Some("wrong"))]);
+        let err = handshake(&mut bad, CONTRACT_VERSION, &BTreeSet::new(), Some("secret-token")).unwrap_err();
+        assert!(matches!(err, HandshakeError::Untrusted));
+        assert!(matches!(
+            bad.sent[0].message,
+            Message::Rejected(Rejected { code: RejectCode::Untrusted, .. })
+        ));
+
+        // Missing token when one is expected → Untrusted.
+        let mut missing = FakeConn::new(vec![hello_with_token(None)]);
+        assert!(matches!(
+            handshake(&mut missing, CONTRACT_VERSION, &BTreeSet::new(), Some("secret-token")).unwrap_err(),
+            HandshakeError::Untrusted
+        ));
+    }
+
+    #[test]
+    fn generated_launch_tokens_are_unique_and_hex() {
+        let a = generate_launch_token();
+        let b = generate_launch_token();
+        assert_ne!(a, b);
+        assert_eq!(a.len(), 32);
+        assert!(a.chars().all(|c| c.is_ascii_hexdigit()));
     }
 
     #[test]

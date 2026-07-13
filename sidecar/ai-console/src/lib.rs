@@ -79,6 +79,7 @@ pub fn hello() -> Envelope {
             sidecar_version: env!("CARGO_PKG_VERSION").into(),
             contract_version: CONTRACT_VERSION,
             capabilities_requested: REQUESTED_CAPABILITIES.to_vec(),
+            auth_token: std::env::var(sidecar_contract::AUTH_TOKEN_ENV).ok(),
         }),
     )
 }

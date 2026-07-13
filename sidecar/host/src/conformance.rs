@@ -209,6 +209,7 @@ mod tests {
                     sidecar_version: "0.1.0".into(),
                     contract_version: CONTRACT_VERSION,
                     capabilities_requested: vec![Capability::Context],
+                    auth_token: None,
                 }),
             ));
             s

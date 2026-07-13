@@ -148,6 +148,7 @@ fn main() {
                     Capability::Storage,
                     Capability::Events,
                 ],
+                auth_token: std::env::var(sidecar_contract::AUTH_TOKEN_ENV).ok(),
             }),
         ),
     );
