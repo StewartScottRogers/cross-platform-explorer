@@ -11,6 +11,8 @@
 //! user-writable directory, with malformed/incompatible manifests skipped (not
 //! fatal) — mirroring the explorer's skip-on-error listing rule.
 
+pub mod migrate;
 pub mod registry;
 
+pub use migrate::{Migrations, MigrationStep};
 pub use registry::{EntryPoint, LoadWarning, Registry, SidecarManifest, UiMount};
