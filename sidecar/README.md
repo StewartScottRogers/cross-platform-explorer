@@ -73,3 +73,22 @@ cargo clippy --all-targets -- -D warnings
 ## AI Console — extending it
 
 Add a coding agent, provider, or plugin by manifest (no code): see [ai-console/docs/adding-an-agent.md](ai-console/docs/adding-an-agent.md).
+
+## Building the explorer WITH the sidecar platform
+
+Sidecars are **bundled, never downloaded** (ADR 0001). The default app build is
+sidecar-free (the delete-test). To build the explorer *with* the platform and the
+AI Console bundled in:
+
+```
+# 1. build the sidecar release binary/binaries
+(cd sidecar/ai-console && cargo build --release)
+# 2. build the app with the feature + the bundle overlay
+npm run tauri build -- --features sidecar-platform --config src-tauri/tauri.sidecar.conf.json
+```
+
+`src-tauri/tauri.sidecar.conf.json` is a config overlay merged in only for this build;
+it ships the sidecar binary + its `sidecar.json` + the agent catalog into the app's
+`sidecars/` resources, which the app resolves at runtime (no env var needed).
+For dev, `npm run tauri dev -- --features sidecar-platform` with `CPE_AICONSOLE_BIN`
+set to the built binary.
