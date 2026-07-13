@@ -23,6 +23,19 @@ export async function listSidecars(): Promise<string[]> {
   }
 }
 
+/**
+ * Extract the mount URL from a sidecar's `ui:<url>` Status announcement (CPE-271), or
+ * `null` if it isn't one. Only loopback URLs are accepted — a sidecar must not point the
+ * host's iframe at an off-machine address.
+ */
+export function parseUiAnnouncement(state: string): string | null {
+  const prefix = "ui:";
+  if (!state.startsWith(prefix)) return null;
+  const url = state.slice(prefix.length);
+  const loopback = url.startsWith("http://127.0.0.1:") || url.startsWith("http://localhost:");
+  return loopback ? url : null;
+}
+
 /** Whether the sidecar platform is active in this build (i.e. the command exists). */
 export async function platformActive(): Promise<boolean> {
   try {

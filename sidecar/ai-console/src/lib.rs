@@ -27,6 +27,8 @@ pub mod scope;
 
 pub use plugins::{install_plugin, uninstall_plugin, PluginApplier, PluginManifest, PluginRegistry};
 pub use scope::{build_launch, dangerous_flags, AgentLaunchRequest};
+pub mod ui;
+pub use ui::{serve as serve_ui, UiServer};
 pub mod vault;
 
 pub use pty::{PtyLaunch, PtySession};
