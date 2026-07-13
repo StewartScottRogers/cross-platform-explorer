@@ -92,3 +92,18 @@ it ships the sidecar binary + its `sidecar.json` + the agent catalog into the ap
 `sidecars/` resources, which the app resolves at runtime (no env var needed).
 For dev, `npm run tauri dev -- --features sidecar-platform` with `CPE_AICONSOLE_BIN`
 set to the built binary.
+
+### Windows: Defender may block the bundled `.exe` during build
+
+`tauri build` with the overlay copies the sidecar `.exe` into the app resources.
+Windows Defender real-time protection can lock that freshly-written `.exe` mid-copy,
+failing the build with `Access is denied. (os error 5)` (the `.json` manifests are
+unaffected). If you hit this, add a one-time exclusion for the repo in an **elevated**
+PowerShell, then rebuild:
+
+```
+Add-MpPreference -ExclusionPath "Z:\repos\cross-platform-explorer"
+```
+
+CI runners generally don't hit this. Dev (`tauri dev` + `CPE_AICONSOLE_BIN`) is
+unaffected — it never copies the binary.
