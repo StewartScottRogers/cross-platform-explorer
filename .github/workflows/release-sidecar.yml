@@ -1,0 +1,82 @@
+name: Release (sidecar-enabled)
+
+# Opt-in channel that builds the app WITH the sidecar platform + AI Console bundled in
+# (CPE-321). Separate from release.yml on purpose: the public release ships the plain,
+# sidecar-free explorer by default; this channel is a manual, draft-only preview of the
+# sidecar-enabled build while the console matures (placeholder UI; security sign-off
+# CPE-304 open).
+#
+# Run it from the Actions tab ("Run workflow") and provide the release tag, e.g.
+# v0.11.0-sidecar. It publishes a DRAFT release you review before making public.
+#
+# Windows only for now: the feature compiles cross-OS, but the host's OS-keychain secrets
+# backend is Windows-only today, so macOS/Linux would fall back to in-memory secrets and
+# break the "secrets only in the OS keychain" invariant (ADR 0001 / CPE-268). Cross-OS is
+# gated on CPE-322 (macOS/Linux keychain backends).
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag to publish under (e.g. v0.11.0-sidecar)"
+        required: true
+        type: string
+
+# Needed so the workflow can create the GitHub Release.
+permissions:
+  contents: write
+
+jobs:
+  release-sidecar:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Rust cache
+        uses: swatinem/rust-cache@v2
+        with:
+          # Cache the app target and the standalone sidecar target (separate crate,
+          # not in the app workspace).
+          workspaces: |
+            ./src-tauri -> target
+            ./sidecar/ai-console -> target
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: "npm"
+
+      - name: Install frontend dependencies
+        run: npm ci
+
+      # The bundle overlay references the built sidecar binary as a resource, so it must
+      # exist before tauri-action packages the app.
+      - name: Build the AI Console sidecar
+        working-directory: sidecar/ai-console
+        run: cargo build --release
+
+      - name: Build and publish sidecar-enabled release
+        uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # Reuse the updater signing secret so bundles sign identically to the main
+          # release (the pubkey in tauri.conf.json requires a matching private key).
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        with:
+          tagName: ${{ inputs.tag }}
+          releaseName: "Cross-Platform Explorer ${{ inputs.tag }} (sidecar preview)"
+          releaseBody: |
+            Preview build with the sidecar platform + AI Console bundled in.
+            Opt-in / draft channel — not part of the auto-update stream. See the assets below.
+          releaseDraft: true
+          prerelease: true
+          # Build with the sidecar feature + the bundle overlay (ships the compiled
+          # sidecar binary + its manifest + agent catalog into the app's resources).
+          args: --features sidecar-platform --config src-tauri/tauri.sidecar.conf.json
+          # Keep this channel out of the auto-update manifest (it's a manual preview).
+          includeUpdaterJson: false
