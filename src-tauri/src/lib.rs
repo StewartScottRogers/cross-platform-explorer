@@ -1814,11 +1814,16 @@ fn resolve_ai_console_bin(app: &tauri::AppHandle) -> Result<String, String> {
             return Ok(p.to_string_lossy().into_owned());
         }
     }
-    // Dev fallback: the crate builds it under sidecar/ai-console/target.
+    // Dev fallback: resolve relative to THIS crate (src-tauri) at compile time, not the
+    // runtime CWD — `cargo tauri dev` runs the app with cwd = src-tauri, so a plain
+    // relative path would miss. `../sidecar/ai-console/target/<profile>/<exe>`.
+    let manifest = Path::new(env!("CARGO_MANIFEST_DIR"));
     for profile in ["debug", "release"] {
-        let p = Path::new("sidecar/ai-console/target").join(profile).join(exe);
-        if p.exists() {
-            return Ok(p.to_string_lossy().into_owned());
+        for base in [manifest.join("../sidecar/ai-console/target"), PathBuf::from("sidecar/ai-console/target")] {
+            let p = base.join(profile).join(exe);
+            if p.exists() {
+                return Ok(p.to_string_lossy().into_owned());
+            }
         }
     }
     Err(format!("ai-console binary ('{exe}') not found"))
