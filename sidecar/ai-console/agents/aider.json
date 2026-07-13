@@ -1,0 +1,132 @@
+{
+  "schema_version": 1,
+  "id": "aider",
+  "name": "Aider",
+  "detect": {
+    "windows": {
+      "command": "aider",
+      "args": [
+        "--version"
+      ]
+    },
+    "macos": {
+      "command": "aider",
+      "args": [
+        "--version"
+      ]
+    },
+    "linux": {
+      "command": "aider",
+      "args": [
+        "--version"
+      ]
+    }
+  },
+  "install": {
+    "windows": {
+      "command": "uv",
+      "args": [
+        "tool",
+        "install",
+        "--upgrade",
+        "aider-chat"
+      ]
+    },
+    "macos": {
+      "command": "uv",
+      "args": [
+        "tool",
+        "install",
+        "--upgrade",
+        "aider-chat"
+      ]
+    },
+    "linux": {
+      "command": "uv",
+      "args": [
+        "tool",
+        "install",
+        "--upgrade",
+        "aider-chat"
+      ]
+    }
+  },
+  "update": {
+    "windows": {
+      "command": "uv",
+      "args": [
+        "tool",
+        "install",
+        "--upgrade",
+        "aider-chat"
+      ]
+    },
+    "macos": {
+      "command": "uv",
+      "args": [
+        "tool",
+        "install",
+        "--upgrade",
+        "aider-chat"
+      ]
+    },
+    "linux": {
+      "command": "uv",
+      "args": [
+        "tool",
+        "install",
+        "--upgrade",
+        "aider-chat"
+      ]
+    }
+  },
+  "uninstall": {
+    "windows": {
+      "command": "uv",
+      "args": [
+        "tool",
+        "uninstall",
+        "aider-chat"
+      ]
+    },
+    "macos": {
+      "command": "uv",
+      "args": [
+        "tool",
+        "uninstall",
+        "aider-chat"
+      ]
+    },
+    "linux": {
+      "command": "uv",
+      "args": [
+        "tool",
+        "uninstall",
+        "aider-chat"
+      ]
+    }
+  },
+  "run": {
+    "windows": {
+      "command": "aider",
+      "args": []
+    },
+    "macos": {
+      "command": "aider",
+      "args": []
+    },
+    "linux": {
+      "command": "aider",
+      "args": []
+    }
+  },
+  "providers": [
+    "native"
+  ],
+  "provider_recipes": {
+    "native": {
+      "env": {},
+      "args": []
+    }
+  }
+}

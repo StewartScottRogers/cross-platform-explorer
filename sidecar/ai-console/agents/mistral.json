@@ -1,0 +1,132 @@
+{
+  "schema_version": 1,
+  "id": "mistral",
+  "name": "Mistral Vibe",
+  "detect": {
+    "windows": {
+      "command": "vibe",
+      "args": [
+        "--version"
+      ]
+    },
+    "macos": {
+      "command": "vibe",
+      "args": [
+        "--version"
+      ]
+    },
+    "linux": {
+      "command": "vibe",
+      "args": [
+        "--version"
+      ]
+    }
+  },
+  "install": {
+    "windows": {
+      "command": "uv",
+      "args": [
+        "tool",
+        "install",
+        "--upgrade",
+        "mistral-vibe"
+      ]
+    },
+    "macos": {
+      "command": "uv",
+      "args": [
+        "tool",
+        "install",
+        "--upgrade",
+        "mistral-vibe"
+      ]
+    },
+    "linux": {
+      "command": "uv",
+      "args": [
+        "tool",
+        "install",
+        "--upgrade",
+        "mistral-vibe"
+      ]
+    }
+  },
+  "update": {
+    "windows": {
+      "command": "uv",
+      "args": [
+        "tool",
+        "install",
+        "--upgrade",
+        "mistral-vibe"
+      ]
+    },
+    "macos": {
+      "command": "uv",
+      "args": [
+        "tool",
+        "install",
+        "--upgrade",
+        "mistral-vibe"
+      ]
+    },
+    "linux": {
+      "command": "uv",
+      "args": [
+        "tool",
+        "install",
+        "--upgrade",
+        "mistral-vibe"
+      ]
+    }
+  },
+  "uninstall": {
+    "windows": {
+      "command": "uv",
+      "args": [
+        "tool",
+        "uninstall",
+        "mistral-vibe"
+      ]
+    },
+    "macos": {
+      "command": "uv",
+      "args": [
+        "tool",
+        "uninstall",
+        "mistral-vibe"
+      ]
+    },
+    "linux": {
+      "command": "uv",
+      "args": [
+        "tool",
+        "uninstall",
+        "mistral-vibe"
+      ]
+    }
+  },
+  "run": {
+    "windows": {
+      "command": "vibe",
+      "args": []
+    },
+    "macos": {
+      "command": "vibe",
+      "args": []
+    },
+    "linux": {
+      "command": "vibe",
+      "args": []
+    }
+  },
+  "providers": [
+    "native"
+  ],
+  "provider_recipes": {
+    "native": {
+      "env": {},
+      "args": []
+    }
+  }
+}

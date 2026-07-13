@@ -1,0 +1,126 @@
+{
+  "schema_version": 1,
+  "id": "gemini",
+  "name": "Gemini CLI",
+  "detect": {
+    "windows": {
+      "command": "gemini",
+      "args": [
+        "--version"
+      ]
+    },
+    "macos": {
+      "command": "gemini",
+      "args": [
+        "--version"
+      ]
+    },
+    "linux": {
+      "command": "gemini",
+      "args": [
+        "--version"
+      ]
+    }
+  },
+  "install": {
+    "windows": {
+      "command": "npm",
+      "args": [
+        "i",
+        "-g",
+        "@google/gemini-cli@latest"
+      ]
+    },
+    "macos": {
+      "command": "npm",
+      "args": [
+        "i",
+        "-g",
+        "@google/gemini-cli@latest"
+      ]
+    },
+    "linux": {
+      "command": "npm",
+      "args": [
+        "i",
+        "-g",
+        "@google/gemini-cli@latest"
+      ]
+    }
+  },
+  "update": {
+    "windows": {
+      "command": "npm",
+      "args": [
+        "i",
+        "-g",
+        "@google/gemini-cli@latest"
+      ]
+    },
+    "macos": {
+      "command": "npm",
+      "args": [
+        "i",
+        "-g",
+        "@google/gemini-cli@latest"
+      ]
+    },
+    "linux": {
+      "command": "npm",
+      "args": [
+        "i",
+        "-g",
+        "@google/gemini-cli@latest"
+      ]
+    }
+  },
+  "uninstall": {
+    "windows": {
+      "command": "npm",
+      "args": [
+        "rm",
+        "-g",
+        "@google/gemini-cli"
+      ]
+    },
+    "macos": {
+      "command": "npm",
+      "args": [
+        "rm",
+        "-g",
+        "@google/gemini-cli"
+      ]
+    },
+    "linux": {
+      "command": "npm",
+      "args": [
+        "rm",
+        "-g",
+        "@google/gemini-cli"
+      ]
+    }
+  },
+  "run": {
+    "windows": {
+      "command": "gemini",
+      "args": []
+    },
+    "macos": {
+      "command": "gemini",
+      "args": []
+    },
+    "linux": {
+      "command": "gemini",
+      "args": []
+    }
+  },
+  "providers": [
+    "native"
+  ],
+  "provider_recipes": {
+    "native": {
+      "env": {},
+      "args": []
+    }
+  }
+}

@@ -1,0 +1,138 @@
+{
+  "schema_version": 1,
+  "id": "claude",
+  "name": "Claude Code",
+  "detect": {
+    "windows": {
+      "command": "claude",
+      "args": [
+        "--version"
+      ]
+    },
+    "macos": {
+      "command": "claude",
+      "args": [
+        "--version"
+      ]
+    },
+    "linux": {
+      "command": "claude",
+      "args": [
+        "--version"
+      ]
+    }
+  },
+  "install": {
+    "windows": {
+      "command": "npm",
+      "args": [
+        "i",
+        "-g",
+        "@anthropic-ai/claude-code@latest"
+      ]
+    },
+    "macos": {
+      "command": "npm",
+      "args": [
+        "i",
+        "-g",
+        "@anthropic-ai/claude-code@latest"
+      ]
+    },
+    "linux": {
+      "command": "npm",
+      "args": [
+        "i",
+        "-g",
+        "@anthropic-ai/claude-code@latest"
+      ]
+    }
+  },
+  "update": {
+    "windows": {
+      "command": "npm",
+      "args": [
+        "i",
+        "-g",
+        "@anthropic-ai/claude-code@latest"
+      ]
+    },
+    "macos": {
+      "command": "npm",
+      "args": [
+        "i",
+        "-g",
+        "@anthropic-ai/claude-code@latest"
+      ]
+    },
+    "linux": {
+      "command": "npm",
+      "args": [
+        "i",
+        "-g",
+        "@anthropic-ai/claude-code@latest"
+      ]
+    }
+  },
+  "uninstall": {
+    "windows": {
+      "command": "npm",
+      "args": [
+        "rm",
+        "-g",
+        "@anthropic-ai/claude-code"
+      ]
+    },
+    "macos": {
+      "command": "npm",
+      "args": [
+        "rm",
+        "-g",
+        "@anthropic-ai/claude-code"
+      ]
+    },
+    "linux": {
+      "command": "npm",
+      "args": [
+        "rm",
+        "-g",
+        "@anthropic-ai/claude-code"
+      ]
+    }
+  },
+  "run": {
+    "windows": {
+      "command": "claude",
+      "args": []
+    },
+    "macos": {
+      "command": "claude",
+      "args": []
+    },
+    "linux": {
+      "command": "claude",
+      "args": []
+    }
+  },
+  "providers": [
+    "native",
+    "openrouter"
+  ],
+  "provider_recipes": {
+    "native": {
+      "env": {},
+      "args": []
+    },
+    "openrouter": {
+      "env": {
+        "ANTHROPIC_BASE_URL": "https://openrouter.ai/api",
+        "ANTHROPIC_AUTH_TOKEN": "{api_key}",
+        "ANTHROPIC_SMALL_FAST_MODEL": "{small_model}"
+      },
+      "args": [
+        "--model",
+        "{model}"
+      ]
+    }
+  }
+}
