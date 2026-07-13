@@ -1,20 +1,30 @@
 <script lang="ts">
-  /** Software-update prompt (CPE-230). A dumb, state-driven modal: App owns the
-      updater lifecycle and drives `state`/`progress`; this just renders and emits
-      `install` / `close`. Nothing installs until the user asks. It refuses to be
-      dismissed mid-download so the install is never yanked away. */
+  /** Software-update dialog (CPE-230, CPE-231). A dumb, state-driven modal; App
+      owns the updater lifecycle and sets `state`. A MANUAL check always opens
+      this (checking → available / uptodate / error); the silent startup check
+      only opens it in the "available" state. It refuses to be dismissed while
+      downloading so the install is never yanked away. */
   import { createEventDispatcher } from "svelte";
 
-  export let version = "";
+  export let state: "checking" | "available" | "uptodate" | "downloading" | "error" = "checking";
+  export let version = ""; // the new version (available/downloading)
   export let currentVersion = "";
   export let notes = "";
-  export let state: "prompt" | "downloading" | "error" = "prompt";
-  export let progress = 0; // 0..100, used when not indeterminate
+  export let progress = 0; // 0..100 when not indeterminate
   export let indeterminate = false;
   export let error = "";
 
-  const dispatch = createEventDispatcher<{ install: void; close: void }>();
+  const dispatch = createEventDispatcher<{ install: void; retry: void; close: void }>();
 
+  const titles = {
+    checking: "Checking for updates…",
+    available: "Update available",
+    uptodate: "You're up to date",
+    downloading: "Updating…",
+    error: "Update problem",
+  };
+
+  // Downloading must not be interrupted; every other state is dismissable.
   function tryClose() {
     if (state !== "downloading") dispatch("close");
   }
@@ -26,31 +36,47 @@
 <div class="backdrop" on:click={tryClose}>
   <!-- svelte-ignore a11y-click-events-have-key-events a11y-no-noninteractive-element-interactions -->
   <div class="dialog" role="dialog" aria-modal="true" aria-label="Software update" on:click|stopPropagation>
-    <h2>Update available</h2>
-    <p class="sub">
-      Version {version} is ready to install{currentVersion ? ` — you have ${currentVersion}` : ""}.
-    </p>
+    <h2>{titles[state]}</h2>
 
-    {#if notes}
-      <div class="notes" aria-label="Release notes">{notes}</div>
-    {/if}
+    {#if state === "checking"}
+      <p class="sub">Looking for a newer version…</p>
+      <div class="progress indeterminate"><div class="bar"></div></div>
 
-    {#if state === "downloading"}
+    {:else if state === "available"}
+      <p class="sub">
+        Version {version} is available{currentVersion ? ` — you have ${currentVersion}` : ""}.
+      </p>
+      {#if notes}
+        <div class="notes" aria-label="Release notes">{notes}</div>
+      {/if}
+
+    {:else if state === "uptodate"}
+      <p class="sub">
+        You're on the latest version{currentVersion ? ` — ${currentVersion}` : ""}.
+      </p>
+
+    {:else if state === "downloading"}
+      <p class="sub">Downloading version {version}…</p>
       <div class="progress" class:indeterminate role="progressbar" aria-valuemin={0} aria-valuemax={100} aria-valuenow={indeterminate ? undefined : progress}>
         <div class="bar" style={indeterminate ? "" : `width:${progress}%`}></div>
       </div>
-      <p class="status">{indeterminate ? "Downloading…" : `Downloading… ${progress}%`}</p>
+      <p class="status">{indeterminate ? "Downloading…" : `${progress}%`}</p>
+
     {:else if state === "error"}
       <p class="err">{error}</p>
     {/if}
 
     <div class="actions">
-      {#if state === "prompt"}
+      {#if state === "available"}
         <button class="btn" on:click={() => dispatch("close")}>Later</button>
         <button class="btn primary" on:click={() => dispatch("install")}>Install &amp; Restart</button>
       {:else if state === "error"}
         <button class="btn" on:click={() => dispatch("close")}>Close</button>
-        <button class="btn primary" on:click={() => dispatch("install")}>Try Again</button>
+        <button class="btn primary" on:click={() => dispatch("retry")}>Try Again</button>
+      {:else if state === "uptodate"}
+        <button class="btn primary" on:click={() => dispatch("close")}>Close</button>
+      {:else if state === "checking"}
+        <button class="btn" on:click={() => dispatch("close")}>Cancel</button>
       {:else}
         <button class="btn" disabled>Installing…</button>
       {/if}

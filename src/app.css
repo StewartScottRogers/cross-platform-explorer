@@ -296,10 +296,20 @@ button:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
   padding: 4px 0 12px;
 }
 
+/* Shared column template (CPE-232). Name is capped so it never balloons on a
+   wide window; the metadata columns shrink within bounds so a narrow pane never
+   clips the Size column; the trailing 1fr spacer soaks up surplus width as empty
+   space on the right, keeping the columns left-packed and no wider than needed.
+   .columns and .row MUST use the SAME template or the header and rows misalign. */
+:root {
+  --filelist-cols:
+    minmax(120px, 640px) minmax(96px, 168px) minmax(84px, 148px) minmax(60px, 96px) 1fr;
+}
+
 /* column headers */
 .columns {
   display: grid;
-  grid-template-columns: 1fr 170px 150px 100px;
+  grid-template-columns: var(--filelist-cols);
   padding: 0 12px 0 10px;
   border-bottom: 1px solid var(--border);
   position: sticky; top: 0; z-index: 5;
@@ -320,7 +330,7 @@ button:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
 .rows { padding: 2px 6px 0; }
 .row {
   display: grid;
-  grid-template-columns: 1fr 170px 150px 100px;
+  grid-template-columns: var(--filelist-cols);
   align-items: center;
   height: var(--row-h);
   padding: 0 6px 0 4px;

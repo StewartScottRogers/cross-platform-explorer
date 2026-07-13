@@ -154,7 +154,7 @@
   // (on user's say-so) download with progress → install → relaunch.
   let pendingUpdate: Update | null = null;
   let showUpdate = false;
-  let updateState: "prompt" | "downloading" | "error" = "prompt";
+  let updateState: "checking" | "available" | "uptodate" | "downloading" | "error" = "checking";
   let updateProgress = 0;
   let updateIndeterminate = false;
   let updateError = "";
@@ -848,22 +848,35 @@
       never a silent auto-install. From the Application menu (`manual=true`) it
       also reports "up to date" and surfaces errors. Nothing installs here. */
   async function checkForUpdates(manual = false) {
-    if (manual) showNotice("Checking for updates…");
+    // A manual check always opens the dialog so it never feels like nothing
+    // happened: "Checking…" → available / up to date / error (CPE-231). The
+    // silent startup check (manual=false) stays quiet unless an update exists.
+    if (manual) {
+      pendingUpdate = null;
+      updateError = "";
+      updateProgress = 0;
+      updateIndeterminate = false;
+      updateState = "checking";
+      showUpdate = true;
+    }
     try {
       const update = await check();
       if (update) {
         pendingUpdate = update;
-        updateState = "prompt";
         updateProgress = 0;
         updateIndeterminate = false;
         updateError = "";
+        updateState = "available";
         showUpdate = true;
       } else if (manual) {
-        showNotice("You're up to date.");
+        updateState = "uptodate";
       }
     } catch (e) {
       console.debug("update check failed:", e);
-      if (manual) showNotice("Couldn't check for updates right now.", true);
+      if (manual) {
+        updateState = "error";
+        updateError = "Couldn't check for updates right now. Check your connection and try again.";
+      }
     }
   }
 
@@ -907,9 +920,15 @@
     }
   }
 
-  /** "Later" — keep running on the current version; the update stays available. */
+  /** "Later" / "Close" — dismiss the dialog; any pending update stays available. */
   function dismissUpdate() {
     showUpdate = false;
+  }
+
+  /** "Try Again" — retry the install if an update is pending, else re-check. */
+  function retryUpdate() {
+    if (pendingUpdate) installUpdate();
+    else checkForUpdates(true);
   }
 
   onMount(async () => {
@@ -1255,16 +1274,17 @@
   />
 {/if}
 
-{#if showUpdate && pendingUpdate}
+{#if showUpdate}
   <UpdateDialog
-    version={pendingUpdate.version}
-    currentVersion={appVersion}
-    notes={pendingUpdate.body ?? ""}
     state={updateState}
+    version={pendingUpdate?.version ?? ""}
+    currentVersion={appVersion}
+    notes={pendingUpdate?.body ?? ""}
     progress={updateProgress}
     indeterminate={updateIndeterminate}
     error={updateError}
     on:install={installUpdate}
+    on:retry={retryUpdate}
     on:close={dismissUpdate}
   />
 {/if}
