@@ -2,11 +2,12 @@
 id: CPE-279
 title: Secret vault + credential profiles
 type: Feature
-status: Open
+status: Done
 priority: High
 component: Backend
 estimate: 3-4h
 created: 2026-07-13
+closed: 2026-07-13
 ---
 
 ## Summary
@@ -31,5 +32,12 @@ shown in the webview. Replaces the reference's `setx` + on-screen key handling.
 **Depends on:** [[CPE-268]], [[CPE-277]]. **Phase:** C1. **Epic:** [[CPE-261]].
 Directly addresses the "secure multi-env logins" requirement.
 
+## Resolution
+
+Implemented `vault` in ai-console: `CredentialProfile` (named, switchable set of ENV-VAR -> vault-key REFERENCES — never values), `ProfileSet` (add/get/remove/persist, schema-versioned), and `resolve_env(profile, access)` which fetches each referenced secret via a `SecretAccess` trait (backed by the platform secrets capability CPE-268 in production; in-memory fake in tests) and errors if any is missing so a session never launches half-populated. Secret VALUES flow only through `SecretAccess` — a serialized profile carries key names, never values (tested). Feeds `LaunchContext` in the routing engine ([[CPE-285]]). 5 tests (resolve, missing-error, refs-not-values, profile CRUD+persist, profile switching). 38 crate tests + clippy green.
+
+**Deferred:** the credential-entry UI + key verification is [[CPE-287]]; wiring `SecretAccess` to real contract `secrets.*` requests lands with the sidecar's host loop.
+
 ## Work Log
 2026-07-13 — Filed during Nightshift epic planning.
+2026-07-13 — Implemented the vault + credential profiles during dayshift. Done.
