@@ -20,13 +20,19 @@ use serde::{Deserialize, Serialize};
 /// additive changes, `major` for breaking ones (CPE-263).
 ///
 /// History: 1.0 initial protocol; 1.1 added [`HostSignal`] / [`Message::Signal`]
-/// (host→sidecar lifecycle signals, CPE-270) — additive, so minor.
-pub const CONTRACT_VERSION: ContractVersion = ContractVersion::new(1, 1);
+/// (host→sidecar lifecycle signals, CPE-270); 1.2 added [`Hello::auth_token`]
+/// (per-launch channel authentication, CPE-275) — both additive, so minor.
+pub const CONTRACT_VERSION: ContractVersion = ContractVersion::new(1, 2);
 
 /// Schema version of the [`Envelope`] frame format itself (CPE-300). Distinct from
 /// the contract version so the outer frame can evolve independently of message
 /// payloads.
 pub const ENVELOPE_SCHEMA_VERSION: u16 = 1;
+
+/// Environment variable the host sets at spawn carrying the per-launch auth token; the
+/// sidecar echoes it in [`Hello::auth_token`] so the host can reject an impostor
+/// (CPE-275).
+pub const AUTH_TOKEN_ENV: &str = "CPE_SIDECAR_TOKEN";
 
 // ---------------------------------------------------------------------------
 // Versioning & negotiation (CPE-263)
@@ -160,6 +166,11 @@ pub struct Hello {
     pub sidecar_version: String,
     pub contract_version: ContractVersion,
     pub capabilities_requested: Vec<Capability>,
+    /// Per-launch authentication token the host passed to the sidecar at spawn (env
+    /// `CPE_SIDECAR_TOKEN`), echoed back so the host can reject an impostor connection
+    /// (contract 1.2, CPE-275). `None` when the host didn't issue one.
+    #[serde(default)]
+    pub auth_token: Option<String>,
 }
 
 /// host → sidecar: handshake accepted, with the negotiated version and the subset of
@@ -343,6 +354,7 @@ mod tests {
                 sidecar_version: "0.1.0".into(),
                 contract_version: CONTRACT_VERSION,
                 capabilities_requested: vec![Capability::Context, Capability::Secrets],
+                auth_token: None,
             }),
         );
         let line = codec::encode_line(&env).unwrap();

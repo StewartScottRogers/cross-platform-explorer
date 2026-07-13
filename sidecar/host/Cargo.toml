@@ -23,6 +23,9 @@ hex = "0.4"
 # Per-sidecar memory sampling for resource budgets (CPE-297).
 sysinfo = "0.30"
 
+# Random per-launch channel tokens (CPE-275).
+getrandom = "0.2"
+
 # Secrets capability (CPE-268) is backed by the OS credential store. The provider is
 # backend-agnostic (see providers::secrets), so the default build/tests use an
 # in-memory backend; the real KeyringBackend compiles only where a native store is

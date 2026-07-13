@@ -30,7 +30,7 @@ fn conformance_kit_passes_against_a_real_process() {
 fn supervisor_handshake_completes_against_a_real_process() {
     let mut conn = spawn_process(&echo_bin(), &[]).expect("spawn echo_sidecar");
     let consented: BTreeSet<Capability> = [Capability::Context].into_iter().collect();
-    let outcome = handshake(&mut conn, CONTRACT_VERSION, &consented).expect("handshake");
+    let outcome = { let _tok = conn.launch_token().to_string(); handshake(&mut conn, CONTRACT_VERSION, &consented, Some(&_tok)) }.expect("handshake");
     assert_eq!(outcome.sidecar_id, "echo");
     assert_eq!(outcome.negotiated.major, CONTRACT_VERSION.major);
     // echo requests only Context; consent grants it.

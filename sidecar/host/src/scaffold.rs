@@ -83,6 +83,7 @@ fn main() {{
                 sidecar_version: env!("CARGO_PKG_VERSION").into(),
                 contract_version: CONTRACT_VERSION,
                 capabilities_requested: vec![Capability::Context],
+                auth_token: std::env::var(sidecar_contract::AUTH_TOKEN_ENV).ok(),
             }}),
         ),
     );

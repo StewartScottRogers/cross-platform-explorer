@@ -20,7 +20,7 @@ fn a_crashed_sidecar_is_detected_and_restarted() {
 
     // First life: spawn, handshake, healthy.
     let mut conn = spawn_process(&echo(), &[]).expect("spawn");
-    handshake(&mut conn, CONTRACT_VERSION, &consent).expect("handshake");
+    { let _tok = conn.launch_token().to_string(); handshake(&mut conn, CONTRACT_VERSION, &consent, Some(&_tok)) }.expect("handshake");
     assert!(conn.is_alive());
 
     // Inject a crash by killing the process.
@@ -34,7 +34,7 @@ fn a_crashed_sidecar_is_detected_and_restarted() {
 
     // ...so a respawn yields a fresh, healthy sidecar that handshakes cleanly.
     let mut restarted = spawn_process(&echo(), &[]).expect("respawn");
-    let outcome = handshake(&mut restarted, CONTRACT_VERSION, &consent).expect("re-handshake");
+    let outcome = { let _tok = restarted.launch_token().to_string(); handshake(&mut restarted, CONTRACT_VERSION, &consent, Some(&_tok)) }.expect("re-handshake");
     assert_eq!(outcome.sidecar_id, "echo");
     assert!(restarted.is_alive());
     restarted.shutdown();
