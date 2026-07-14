@@ -14,7 +14,7 @@
   import AboutDialog from "./lib/components/AboutDialog.svelte";
   import SettingsDialog from "./lib/components/SettingsDialog.svelte";
   import ConsentSheet from "./lib/components/ConsentSheet.svelte";
-  import { startAiConsole, consoleUrlWith, consentState, setConsent, type Capability, type ConsentState } from "./lib/sidecar";
+  import { startAiConsole, consoleUrlWith, platformActive, consentState, setConsent, type Capability, type ConsentState } from "./lib/sidecar";
   import UpdateDialog from "./lib/components/UpdateDialog.svelte";
   import TabBar from "./lib/components/TabBar.svelte";
   import NavToolbar from "./lib/components/NavToolbar.svelte";
@@ -163,6 +163,8 @@
   let showAbout = false;
   let showSettings = false;
   let shortcutsOpen = false;
+  /** True in sidecar-platform builds — gates the AI Console toolbar button (CPE-351). */
+  let aiConsoleAvailable = false;
   const AI_CONSOLE_LABEL = "ai-console";
   let consentPrompt: ConsentState | null = null;
 
@@ -1476,6 +1478,8 @@
 
   onMount(async () => {
     applySettings();
+    // Reveal the AI Console button only when the sidecar platform is present (CPE-351).
+    platformActive().then((v) => (aiConsoleAvailable = v)).catch(() => {});
 
     try {
       const [p, d, h, canRestore] = await Promise.all([
@@ -1507,6 +1511,18 @@
 <MenuBar on:select={(e) => onMenuSelect(e.detail)} />
 
 <Toolbar label="Application">
+  <svelte:fragment slot="actions">
+    {#if aiConsoleAvailable}
+      <button
+        class="tb-console"
+        type="button"
+        title="Open the AI Console"
+        on:click={() => openAiConsole()}
+      >
+        <Icon name="code" size={15} /> AI Console
+      </button>
+    {/if}
+  </svelte:fragment>
   <div class="settings-row">
     <span>Show details/preview pane</span>
     <input type="checkbox" bind:checked={showDetails}
@@ -1891,4 +1907,21 @@
 {/if}
 
 <style>
+  /* AI Console toolbar button (CPE-351) — sits next to the settings gear. */
+  .tb-console {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    height: 24px;
+    margin-left: 4px;
+    padding: 0 10px;
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    background: var(--surface);
+    color: var(--text);
+    font-size: 12px;
+  }
+  .tb-console:hover {
+    background: var(--surface-alt);
+  }
 </style>
