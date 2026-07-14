@@ -2051,15 +2051,24 @@ fn catalog_url() -> String {
 /// bundle from GitHub Releases and apply it (gated by CPE-372/373). Never errors the channel — a
 /// failure comes back as `indexOk:false` with a message.
 #[cfg(feature = "sidecar-platform")]
-fn fetch_catalog_response(app: &tauri::AppHandle) -> sidecar_contract::Response {
+fn fetch_catalog_response(
+    app: &tauri::AppHandle,
+    params: &serde_json::Value,
+) -> sidecar_contract::Response {
     use serde_json::json;
-    let body = do_fetch_catalog(app)
+    // Pinned agents the sidecar asked us to skip (CPE-378).
+    let pinned: Vec<String> = params
+        .get("pinned")
+        .and_then(|v| v.as_array())
+        .map(|a| a.iter().filter_map(|x| x.as_str().map(str::to_string)).collect())
+        .unwrap_or_default();
+    let body = do_fetch_catalog(app, &pinned)
         .unwrap_or_else(|e| json!({ "indexOk": false, "applied": [], "rejected": 0, "error": e }));
     sidecar_contract::Response { result: Ok(body) }
 }
 
 #[cfg(feature = "sidecar-platform")]
-fn do_fetch_catalog(app: &tauri::AppHandle) -> Result<serde_json::Value, String> {
+fn do_fetch_catalog(app: &tauri::AppHandle, pinned: &[String]) -> Result<serde_json::Value, String> {
     use serde_json::json;
     if keyverify::is_offline(std::env::var("CPE_OFFLINE").ok()) {
         return Ok(json!({ "indexOk": false, "applied": [], "rejected": 0, "offline": true }));
@@ -2088,7 +2097,7 @@ fn do_fetch_catalog(app: &tauri::AppHandle) -> Result<serde_json::Value, String>
     // Apply with anti-rollback against the persisted version map (last-known-good on failure).
     let vpath = dir.join("versions.json");
     let mut versions = sidecar_host::catalog::load_versions(&vpath);
-    let report = sidecar_host::catalog::apply_bundle(&staging, &dir, &keys, &mut versions);
+    let report = sidecar_host::catalog::apply_bundle(&staging, &dir, &keys, &mut versions, pinned);
     let _ = sidecar_host::catalog::save_versions(&vpath, &versions);
     let _ = std::fs::remove_dir_all(&staging);
     Ok(json!({ "indexOk": report.index_ok, "applied": report.applied, "rejected": report.rejected.len() }))
@@ -2158,7 +2167,7 @@ fn serve_ai_console_requests(
                         verify_key_response(&req.params)
                     } else if req.method == "host.fetch_catalog" {
                         // Fetch + apply the signed catalog bundle from GitHub Releases (CPE-376).
-                        fetch_catalog_response(&app)
+                        fetch_catalog_response(&app, &req.params)
                     } else {
                         broker.dispatch("ai-console", &req)
                     };

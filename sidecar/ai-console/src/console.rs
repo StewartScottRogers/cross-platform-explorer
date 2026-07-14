@@ -599,7 +599,8 @@ impl ConsoleState {
     /// `POST /api/catalog/refresh` → ask the host to fetch + apply the signed catalog bundle
     /// (CPE-376), then hot-reload if anything changed. Returns `{ indexOk, applied, agents }`.
     fn handle_catalog_refresh(&self) -> Response {
-        match self.dialogs.fetch_catalog() {
+        let pinned = self.presets.load().pinned_agents;
+        match self.dialogs.fetch_catalog(&pinned) {
             Ok(res) => {
                 let agents = if res.applied > 0 {
                     self.reload_catalog()
@@ -611,6 +612,34 @@ impl ConsoleState {
                         .to_string(),
                 )
             }
+            Err(e) => bad(e),
+        }
+    }
+
+    /// `POST /api/catalog/settings {autoUpdate}` → persist the opt-in auto-update flag (CPE-378).
+    fn handle_catalog_settings(&self, body: &str) -> Response {
+        let v: Value = serde_json::from_str(body).unwrap_or_else(|_| json!({}));
+        let Some(on) = v["autoUpdate"].as_bool() else { return bad("autoUpdate must be a bool") };
+        let mut store = self.presets.load();
+        store.auto_update_catalog = on;
+        match self.presets.save(&store) {
+            Ok(()) => Response::json(json!({ "autoUpdate": on }).to_string()),
+            Err(e) => bad(e),
+        }
+    }
+
+    /// `POST /api/catalog/pin {agent, pinned}` → pin/unpin an agent from catalog updates (CPE-378).
+    fn handle_catalog_pin(&self, body: &str) -> Response {
+        let v: Value = serde_json::from_str(body).unwrap_or_else(|_| json!({}));
+        let agent = v["agent"].as_str().unwrap_or("").trim();
+        if agent.is_empty() {
+            return bad("agent is required");
+        }
+        let pinned = v["pinned"].as_bool().unwrap_or(true);
+        let mut store = self.presets.load();
+        store.set_pinned(agent, pinned);
+        match self.presets.save(&store) {
+            Ok(()) => Response::json(json!({ "agent": agent, "pinned": pinned }).to_string()),
             Err(e) => bad(e),
         }
     }
@@ -703,6 +732,8 @@ pub fn route(state: &ConsoleState, req: &Request) -> Response {
         ("POST", "/api/keys/verify") => state.handle_key_verify(&req.body),
         ("POST", "/api/catalog/reload") => state.handle_catalog_reload(),
         ("POST", "/api/catalog/refresh") => state.handle_catalog_refresh(),
+        ("POST", "/api/catalog/settings") => state.handle_catalog_settings(&req.body),
+        ("POST", "/api/catalog/pin") => state.handle_catalog_pin(&req.body),
         ("GET", "/api/history") => state.handle_history_list(),
         ("GET", p) if p.starts_with("/api/history/") => state.handle_history_detail(p),
         ("POST", p) if p.starts_with("/api/session/") && p.ends_with("/resize") => {
@@ -928,7 +959,7 @@ mod tests {
             self.called.store(true, std::sync::atomic::Ordering::SeqCst);
             Ok(self.verdict.clone())
         }
-        fn fetch_catalog(&self) -> Result<crate::broker_client::CatalogFetch, String> {
+        fn fetch_catalog(&self, _pinned: &[String]) -> Result<crate::broker_client::CatalogFetch, String> {
             Err("stub".into())
         }
     }
@@ -1056,6 +1087,30 @@ mod tests {
         .unwrap();
         assert_eq!(r["agents"], 1);
         assert!(st.registry.read().unwrap().get("newagent").is_some());
+    }
+
+    #[test]
+    fn catalog_auto_update_and_pin_persist(){
+        let st = state();
+        let post = |path: &str, body: &str| {
+            route(&st, &Request { method: "POST".into(), path: path.into(), body: body.into(), ..Default::default() })
+        };
+        // Auto-update toggle persists and shows up in the catalog's presets.
+        assert_eq!(post("/api/catalog/settings", r#"{"autoUpdate":true}"#).status, 200);
+        let cat: Value = serde_json::from_slice(&get(&st, "/api/catalog").body).unwrap();
+        assert_eq!(cat["presets"]["autoUpdateCatalog"], true);
+
+        // Pin then unpin an agent.
+        assert_eq!(post("/api/catalog/pin", r#"{"agent":"claude","pinned":true}"#).status, 200);
+        let cat: Value = serde_json::from_slice(&get(&st, "/api/catalog").body).unwrap();
+        assert_eq!(cat["presets"]["pinnedAgents"][0], "claude");
+        post("/api/catalog/pin", r#"{"agent":"claude","pinned":false}"#);
+        let cat: Value = serde_json::from_slice(&get(&st, "/api/catalog").body).unwrap();
+        assert_eq!(cat["presets"]["pinnedAgents"].as_array().unwrap().len(), 0);
+
+        // Bad input is rejected.
+        assert_eq!(post("/api/catalog/pin", r#"{"pinned":true}"#).status, 400);
+        assert_eq!(post("/api/catalog/settings", r#"{}"#).status, 400);
     }
 
     #[test]

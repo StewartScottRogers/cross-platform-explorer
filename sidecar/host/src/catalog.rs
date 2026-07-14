@@ -133,6 +133,8 @@ pub enum ApplyOutcome {
     MissingManifest,
     MissingSignature,
     BadSignature,
+    /// The user pinned this agent, so the update was skipped (CPE-378).
+    Pinned,
 }
 
 /// The result of applying a catalog bundle. `index_ok == false` means the index didn't verify and
@@ -160,6 +162,7 @@ pub fn apply_bundle(
     out: &Path,
     trusted_keys: &[String],
     installed: &mut VersionMap,
+    pinned: &[String],
 ) -> ApplyReport {
     let mut report = ApplyReport::default();
 
@@ -178,6 +181,11 @@ pub fn apply_bundle(
 
     // 2. Gate + apply each entry.
     for entry in &index.entries {
+        // A pinned agent is intentionally frozen at its installed version (CPE-378).
+        if pinned.iter().any(|p| p == &entry.id) {
+            report.rejected.push((entry.id.clone(), ApplyOutcome::Pinned));
+            continue;
+        }
         let Ok(bytes) = std::fs::read(staging.join(format!("{}.json", entry.id))) else {
             report.rejected.push((entry.id.clone(), ApplyOutcome::MissingManifest));
             continue;
@@ -355,7 +363,7 @@ mod tests {
         stage_bundle(stage.path(), &[("claude", br#"{"id":"claude"}"#, 5)], &k);
 
         let mut installed = VersionMap::new();
-        let report = apply_bundle(stage.path(), out.path(), &[pk], &mut installed);
+        let report = apply_bundle(stage.path(), out.path(), &[pk], &mut installed, &[]);
         assert!(report.index_ok);
         assert_eq!(report.applied, vec!["claude".to_string()]);
         assert!(out.path().join("claude.json").exists());
@@ -374,7 +382,7 @@ mod tests {
         // Rollback: same version 5.
         let s1 = tempfile::tempdir().unwrap();
         stage_bundle(s1.path(), &[("claude", br#"{"id":"claude"}"#, 5)], &k);
-        let r1 = apply_bundle(s1.path(), out.path(), &[pk.clone()], &mut installed);
+        let r1 = apply_bundle(s1.path(), out.path(), &[pk.clone()], &mut installed, &[]);
         assert_eq!(r1.rejected, vec![("claude".to_string(), ApplyOutcome::Rollback)]);
         assert_eq!(std::fs::read(out.path().join("claude.json")).unwrap(), b"GOOD"); // untouched
 
@@ -384,7 +392,7 @@ mod tests {
         std::fs::write(s2.path().join("claude.json"), br#"{"id":"claude","v":"EVIL"}"#).unwrap();
         std::fs::write(s2.path().join("claude.json.sig"), sign(&k, br#"{"id":"claude","v":"EVIL"}"#))
             .unwrap();
-        let r2 = apply_bundle(s2.path(), out.path(), &[pk], &mut installed);
+        let r2 = apply_bundle(s2.path(), out.path(), &[pk], &mut installed, &[]);
         assert_eq!(r2.rejected, vec![("claude".to_string(), ApplyOutcome::ContentMismatch)]);
         assert_eq!(std::fs::read(out.path().join("claude.json")).unwrap(), b"GOOD"); // still untouched
     }
@@ -400,7 +408,7 @@ mod tests {
         std::fs::write(stage.path().join("index.json.sig"), sign(&k, b"not the index")).unwrap();
 
         let mut installed = VersionMap::new();
-        let report = apply_bundle(stage.path(), out.path(), &[pk], &mut installed);
+        let report = apply_bundle(stage.path(), out.path(), &[pk], &mut installed, &[]);
         assert!(!report.index_ok);
         assert!(report.applied.is_empty());
         assert_eq!(std::fs::read(out.path().join("claude.json")).unwrap(), b"GOOD");
@@ -416,7 +424,7 @@ mod tests {
         std::fs::remove_file(stage.path().join("claude.json.sig")).unwrap();
 
         let mut installed = VersionMap::new();
-        let report = apply_bundle(stage.path(), out.path(), &[pk], &mut installed);
+        let report = apply_bundle(stage.path(), out.path(), &[pk], &mut installed, &[]);
         assert!(report.index_ok);
         assert_eq!(report.rejected, vec![("claude".to_string(), ApplyOutcome::MissingSignature)]);
         assert!(!out.path().join("claude.json").exists());
@@ -450,11 +458,27 @@ mod tests {
 
         let out = tempfile::tempdir().unwrap();
         let mut installed = VersionMap::new();
-        let report = apply_bundle(stage.path(), out.path(), &[pk], &mut installed);
+        let report = apply_bundle(stage.path(), out.path(), &[pk], &mut installed, &[]);
         assert!(report.index_ok);
         assert_eq!(report.applied.len(), 2);
         assert_eq!(installed.get("claude"), Some(&7));
         assert!(report.rejected.is_empty());
+    }
+
+    #[test]
+    fn a_pinned_agent_is_skipped_even_when_an_upgrade_is_available() {
+        let (k, pk) = keypair(1);
+        let stage = tempfile::tempdir().unwrap();
+        let out = tempfile::tempdir().unwrap();
+        stage_bundle(stage.path(), &[("claude", br#"{"id":"claude"}"#, 9)], &k);
+        let mut installed = VersionMap::new();
+        let report =
+            apply_bundle(stage.path(), out.path(), &[pk], &mut installed, &["claude".to_string()]);
+        assert!(report.index_ok);
+        assert_eq!(report.rejected, vec![("claude".to_string(), ApplyOutcome::Pinned)]);
+        assert!(report.applied.is_empty());
+        assert!(!out.path().join("claude.json").exists());
+        assert!(installed.get("claude").is_none()); // pin froze it — nothing recorded
     }
 
     #[test]
