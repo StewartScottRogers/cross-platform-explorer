@@ -316,8 +316,11 @@ async function sendResize(s) {
 async function launch() {
   const a = agentById($("agent").value);
   // Fall back to the agent's default model when the field is blank; a provider that needs
-  // a "small/fast" model reuses the main model unless one is given.
-  const model = $("model").value.trim() || (a && a.defaultModel) || "";
+  // a "small/fast" model reuses the main model unless one is given. Exception: the local
+  // LM Studio provider leaves a blank model blank on purpose, so the backend adopts the
+  // endpoint's actually-loaded model instead of the vendor default (CPE-330).
+  const isLmStudio = $("provider").value === "lmstudio-local";
+  const model = $("model").value.trim() || (isLmStudio ? "" : ((a && a.defaultModel) || ""));
   const smallModel = $("smallModel").value.trim() || model;
   const body = {
     agent: $("agent").value, provider: $("provider").value,
