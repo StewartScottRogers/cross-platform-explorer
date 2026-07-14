@@ -1783,6 +1783,15 @@ fn sidecar_dirs(app: &tauri::AppHandle) -> Vec<PathBuf> {
     if let Ok(config) = app.path().app_config_dir() {
         dirs.push(config.join("sidecars"));
     }
+    // Dev fallback: `tauri dev` (debug) has no bundled `sidecars/` resource dir, so the host
+    // registry wouldn't know the sidecar and consent would be skipped (CPE-364). Point at the
+    // source-tree manifest, guarded by its existence so it's inert in a bundled release.
+    let manifest = Path::new(env!("CARGO_MANIFEST_DIR"));
+    for p in [manifest.join("../sidecar/ai-console"), PathBuf::from("sidecar/ai-console")] {
+        if p.join("sidecar.json").exists() {
+            dirs.push(p);
+        }
+    }
     dirs
 }
 
