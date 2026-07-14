@@ -114,7 +114,10 @@
     <div class="row">
       <div class="field grow">
         <label for="cwd">Working folder</label>
-        <input id="cwd" />
+        <div style="display:flex;gap:4px">
+          <input id="cwd" style="flex:1;min-width:0" />
+          <button id="cwd-browse" type="button" title="Choose a folder" style="flex:0 0 auto">Browse…</button>
+        </div>
       </div>
       <input id="set-name" placeholder="Save current as a set…" style="width:170px;flex:0 0 auto" />
       <button id="set-save" type="button" title="Save the current selection as a named set">Save set</button>
@@ -512,6 +515,15 @@ $("agent").addEventListener("change", () => { renderProviders(); applyLastUsed()
 $("preset").addEventListener("change", applyPreset);
 $("set-save").addEventListener("click", saveSet);
 $("set-del").addEventListener("click", deleteSet);
+
+// Native folder picker for the Working-folder box (CPE-354) — routed through the host.
+async function pickFolder() {
+  try {
+    const r = await api("/api/pick-folder", { method: "POST" });
+    if (r.path) $("cwd").value = r.path; // null = cancelled, leave as-is
+  } catch (e) { setMsg("Couldn't open the folder picker: " + e.message); }
+}
+$("cwd-browse").addEventListener("click", pickFolder);
 $("launch").addEventListener("click", launch);
 load().catch((e) => setMsg("Could not load catalog: " + e.message));
 </script>

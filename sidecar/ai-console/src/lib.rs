@@ -66,7 +66,10 @@ pub mod vault;
 pub use pty::{PtyLaunch, PtySession};
 
 pub use vault::{resolve_env, CredentialProfile, ProfileSet, SecretAccess};
-pub use broker_client::{BrokerClient, BrokerPresets, BrokerSecrets, MemSecrets, SharedWriter};
+pub use broker_client::{
+    BrokerClient, BrokerDialogs, BrokerPresets, BrokerSecrets, HostDialogs, MemSecrets, NoopDialogs,
+    SharedWriter,
+};
 pub use presets::{MemPresets, Preset, PresetStore, PresetsBackend};
 
 pub use lmstudio::{detect as detect_lmstudio, LmStudio};

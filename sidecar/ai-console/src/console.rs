@@ -44,6 +44,8 @@ pub struct ConsoleState {
     secrets: Arc<dyn crate::vault::SecretAccess + Send + Sync>,
     /// Launcher presets + remembered selection, persisted via host storage (CPE-352).
     presets: Arc<dyn crate::presets::PresetsBackend>,
+    /// Host-mediated dialogs (native folder picker) for the sandboxed launcher (CPE-354).
+    dialogs: Arc<dyn crate::broker_client::HostDialogs>,
 }
 
 /// The vault key a provider's shared API key is stored under (CPE-344/287). One key per
@@ -73,15 +75,17 @@ impl ConsoleState {
             default_cwd,
             Arc::new(crate::broker_client::MemSecrets::default()),
             Arc::new(crate::presets::MemPresets::default()),
+            Arc::new(crate::broker_client::NoopDialogs),
         )
     }
 
-    /// State wired to real backends (the host keychain + storage brokers, in production).
+    /// State wired to real backends (the host keychain + storage + dialog brokers).
     pub fn with_backends(
         registry: AgentRegistry,
         default_cwd: String,
         secrets: Arc<dyn crate::vault::SecretAccess + Send + Sync>,
         presets: Arc<dyn crate::presets::PresetsBackend>,
+        dialogs: Arc<dyn crate::broker_client::HostDialogs>,
     ) -> Self {
         Self {
             registry,
@@ -90,6 +94,7 @@ impl ConsoleState {
             seq: Mutex::new(0),
             secrets,
             presets,
+            dialogs,
         }
     }
 
@@ -287,6 +292,15 @@ impl ConsoleState {
         }
     }
 
+    /// Open the host's native folder picker for the Working-folder box (CPE-354). Returns
+    /// `{ path }` (null when cancelled). The sandboxed launcher can't open dialogs itself.
+    fn handle_pick_folder(&self) -> Response {
+        match self.dialogs.pick_folder() {
+            Ok(path) => Response::json(json!({ "path": path }).to_string()),
+            Err(e) => bad(e),
+        }
+    }
+
     // ---- launcher preset sets (CPE-353) ----
 
     /// Save (or update by name) a named set for an agent. The catalog already returns the
@@ -437,6 +451,7 @@ pub fn route(state: &ConsoleState, req: &Request) -> Response {
         ("POST", "/api/install") => state.handle_install(&req.body),
         ("POST", "/api/presets") => state.handle_preset_save(&req.body),
         ("POST", "/api/presets/delete") => state.handle_preset_delete(&req.body),
+        ("POST", "/api/pick-folder") => state.handle_pick_folder(),
         ("GET", "/api/keys") => state.handle_key_list(),
         ("POST", "/api/keys") => state.handle_key_set(&req.body),
         ("POST", "/api/keys/delete") => state.handle_key_delete(&req.body),

@@ -1974,12 +1974,33 @@ impl Drop for ConsoleConn {
 /// broker holding the granted providers (the OS keychain secrets provider on Windows), and
 /// writes the response back with the same correlation id. Exits on stop or when the sidecar
 /// closes the connection, dropping the connection (which reaps the child).
+/// Open the native folder dialog (on the main thread) and return `{ path }` — the response
+/// to the sandboxed launcher's `host.pick_folder` request (CPE-354). `path` is null when the
+/// user cancels.
+#[cfg(feature = "sidecar-platform")]
+fn pick_folder_response(app: &tauri::AppHandle) -> sidecar_contract::Response {
+    use serde_json::json;
+    use tauri_plugin_dialog::DialogExt;
+    let (tx, rx) = std::sync::mpsc::channel();
+    app.dialog().file().pick_folder(move |folder| {
+        let _ = tx.send(folder);
+    });
+    let path = rx
+        .recv()
+        .ok()
+        .flatten()
+        .and_then(|f| f.into_path().ok())
+        .map(|p| p.to_string_lossy().into_owned());
+    sidecar_contract::Response { result: Ok(json!({ "path": path })) }
+}
+
 #[cfg(feature = "sidecar-platform")]
 fn serve_ai_console_requests(
     mut conn: sidecar_host::supervisor::ProcessConnection,
     granted: std::collections::BTreeSet<sidecar_contract::Capability>,
     stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
     storage_base: std::path::PathBuf,
+    app: tauri::AppHandle,
 ) {
     use sidecar_contract::{Envelope, Message};
     use sidecar_host::conformance::SidecarChannel;
@@ -2004,7 +2025,13 @@ fn serve_ai_console_requests(
         match conn.recv() {
             Ok(env) => {
                 if let Message::Request(req) = env.message {
-                    let resp = broker.dispatch("ai-console", &req);
+                    // host.pick_folder is a host UI action, not a brokered capability — handle
+                    // it directly by opening the native folder dialog (CPE-354).
+                    let resp = if req.method == "host.pick_folder" {
+                        pick_folder_response(&app)
+                    } else {
+                        broker.dispatch("ai-console", &req)
+                    };
                     if conn.send(&Envelope::new(env.id, Message::Response(resp))).is_err() {
                         break; // sidecar's stdin closed
                     }
@@ -2162,7 +2189,10 @@ fn sidecar_start_ai_console(
         .app_data_dir()
         .map(|d| d.join("sidecar-storage"))
         .unwrap_or_else(|_| std::env::temp_dir().join("cpe-sidecar-storage"));
-    let thread = std::thread::spawn(move || serve_ai_console_requests(conn, consented, thread_stop, storage_base));
+    let app_for_thread = app.clone();
+    let thread = std::thread::spawn(move || {
+        serve_ai_console_requests(conn, consented, thread_stop, storage_base, app_for_thread)
+    });
     *state.conn.lock().map_err(|_| "state lock poisoned")? = Some(ConsoleConn { stop, _thread: thread });
     Ok(url)
 }
