@@ -8,12 +8,11 @@ use std::io::{BufRead, Write};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
-use ai_console::agents::AgentRegistry;
 use ai_console::broker_client::{
     BrokerClient, BrokerDialogs, BrokerHistory, BrokerPresets, BrokerSecrets, HostDialogs,
     SharedWriter,
 };
-use ai_console::console::{route, ws_route, ConsoleState};
+use ai_console::console::{route, ws_route, CatalogSources, ConsoleState};
 use ai_console::history::HistoryBackend;
 use ai_console::presets::PresetsBackend;
 use ai_console::vault::SecretAccess;
@@ -54,24 +53,29 @@ fn console_state(
     dialogs: Arc<dyn HostDialogs>,
     history: Arc<dyn HistoryBackend>,
 ) -> Arc<ConsoleState> {
-    let mut registry = AgentRegistry::load_from_dirs(&[agents_dir()]);
-    // Optionally layer a verified, user-pointed/fetched catalog over the bundled one (CPE-308
-    // part 1). Only manifests signed by a configured trusted key are accepted; unset ⇒ no-op.
+    // Bundled first-party catalog, optionally layered with a verified, fetched/user-pointed source
+    // (CPE-308). Only manifests signed by a configured trusted key are accepted; unset ⇒ bundled
+    // only. Kept as `CatalogSources` so a catalog update can be hot-reloaded (CPE-375).
+    let mut sources = CatalogSources { bundled: vec![agents_dir()], signed_dir: None, keys: vec![] };
     if let Ok(dir) = std::env::var("CPE_AICONSOLE_CATALOG") {
-        let keys: Vec<String> = std::env::var("CPE_AICONSOLE_CATALOG_KEYS")
+        sources.signed_dir = Some(PathBuf::from(dir));
+        sources.keys = std::env::var("CPE_AICONSOLE_CATALOG_KEYS")
             .unwrap_or_default()
             .split([',', ' ', ';'])
             .map(str::trim)
             .filter(|s| !s.is_empty())
             .map(str::to_string)
             .collect();
-        registry.load_signed_source(std::path::Path::new(&dir), &keys);
     }
+    let registry = sources.build();
     let cwd = std::env::var("CPE_AICONSOLE_CWD")
         .ok()
         .or_else(|| std::env::current_dir().ok().map(|p| p.to_string_lossy().into_owned()))
         .unwrap_or_default();
-    Arc::new(ConsoleState::with_backends(registry, cwd, secrets, presets, dialogs, history))
+    Arc::new(
+        ConsoleState::with_backends(registry, cwd, secrets, presets, dialogs, history)
+            .with_catalog_sources(sources),
+    )
 }
 
 fn main() {
