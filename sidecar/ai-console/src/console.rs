@@ -269,6 +269,77 @@ impl ConsoleState {
             Err(e) => bad(e),
         }
     }
+
+    // ---- provider credential management (CPE-345) ----
+
+    /// Store a provider's API key in the OS keychain (via the broker). Format-checked
+    /// first so an obviously-wrong paste is rejected before it's saved. One key per
+    /// provider, shared across every agent that uses it.
+    fn handle_key_set(&self, body: &str) -> Response {
+        let v: Value = match serde_json::from_str(body) {
+            Ok(v) => v,
+            Err(e) => return bad(format!("bad json: {e}")),
+        };
+        let provider = v["provider"].as_str().unwrap_or("").trim();
+        let key = v["key"].as_str().unwrap_or("").trim();
+        if provider.is_empty() {
+            return bad("missing 'provider'");
+        }
+        if let Err(e) = crate::keycheck::check_key_format(provider, key) {
+            return bad(e);
+        }
+        match self.secrets.set(&provider_secret_name(provider), key) {
+            Ok(()) => Response::json(json!({ "ok": true }).to_string()),
+            Err(e) => bad(e),
+        }
+    }
+
+    /// List which providers have a stored key — NAMES ONLY, never a value. The keychain
+    /// has no enumerate, so probe every provider the catalog knows about.
+    fn handle_key_list(&self) -> Response {
+        let mut providers: Vec<String> =
+            self.registry.all().flat_map(|a| a.providers.iter().cloned()).collect();
+        providers.sort();
+        providers.dedup();
+        let have: Vec<String> = providers
+            .into_iter()
+            .filter(|p| self.secrets.get(&provider_secret_name(p)).ok().flatten().is_some())
+            .collect();
+        Response::json(json!({ "providers": have }).to_string())
+    }
+
+    /// Remove a provider's stored key.
+    fn handle_key_delete(&self, body: &str) -> Response {
+        let v: Value = match serde_json::from_str(body) {
+            Ok(v) => v,
+            Err(e) => return bad(format!("bad json: {e}")),
+        };
+        let provider = v["provider"].as_str().unwrap_or("").trim();
+        if provider.is_empty() {
+            return bad("missing 'provider'");
+        }
+        match self.secrets.delete(&provider_secret_name(provider)) {
+            Ok(()) => Response::json(json!({ "ok": true }).to_string()),
+            Err(e) => bad(e),
+        }
+    }
+
+    /// Pre-check a key's format before saving. `live:false` marks this as an offline
+    /// shape check, not a real provider call (that needs the Network capability — CPE-347).
+    fn handle_key_verify(&self, body: &str) -> Response {
+        let v: Value = match serde_json::from_str(body) {
+            Ok(v) => v,
+            Err(e) => return bad(format!("bad json: {e}")),
+        };
+        let provider = v["provider"].as_str().unwrap_or("").trim();
+        let key = v["key"].as_str().unwrap_or("");
+        match crate::keycheck::check_key_format(provider, key) {
+            Ok(()) => Response::json(
+                json!({ "valid": true, "live": false, "detail": "Format looks valid." }).to_string(),
+            ),
+            Err(e) => Response::json(json!({ "valid": false, "live": false, "detail": e }).to_string()),
+        }
+    }
 }
 
 /// Extract a non-empty string field from a JSON object.
@@ -299,6 +370,10 @@ pub fn route(state: &ConsoleState, req: &Request) -> Response {
         ("GET", "/api/catalog") => Response::json(state.catalog().to_string()),
         ("POST", "/api/launch") => state.handle_launch(&req.body),
         ("POST", "/api/install") => state.handle_install(&req.body),
+        ("GET", "/api/keys") => state.handle_key_list(),
+        ("POST", "/api/keys") => state.handle_key_set(&req.body),
+        ("POST", "/api/keys/delete") => state.handle_key_delete(&req.body),
+        ("POST", "/api/keys/verify") => state.handle_key_verify(&req.body),
         ("POST", p) if p.starts_with("/api/session/") && p.ends_with("/resize") => {
             state.handle_resize(p, &req.body)
         }
@@ -474,6 +549,33 @@ mod tests {
         );
         // …and a different provider isn't affected (namespaced by name).
         assert_eq!(resolve_provider_key(&s, "anthropic", None), None);
+    }
+
+    #[test]
+    fn key_management_api_stores_lists_and_removes_without_leaking_values() {
+        let st = state();
+        let post = |path: &str, body: &str| {
+            route(&st, &Request { method: "POST".into(), path: path.into(), body: body.into(), ..Default::default() })
+        };
+
+        // Store an OpenRouter key (valid format) → 200.
+        assert_eq!(post("/api/keys", r#"{"provider":"openrouter","key":"sk-or-abcdef123456"}"#).status, 200);
+        // A wrong-format key is rejected before it's ever stored → 400.
+        assert_eq!(post("/api/keys", r#"{"provider":"openrouter","key":"nope"}"#).status, 400);
+
+        // List reports the provider name — but NEVER the key value.
+        let body = String::from_utf8_lossy(&get(&st, "/api/keys").body).to_string();
+        assert!(body.contains("openrouter"));
+        assert!(!body.contains("sk-or"), "the key list must not leak values");
+
+        // Verify is an offline format pre-check (live:false).
+        let v: Value = serde_json::from_slice(&post("/api/keys/verify", r#"{"provider":"openrouter","key":"sk-or-abcdef123456"}"#).body).unwrap();
+        assert_eq!(v["valid"], true);
+        assert_eq!(v["live"], false);
+
+        // Delete removes it from the list.
+        assert_eq!(post("/api/keys/delete", r#"{"provider":"openrouter"}"#).status, 200);
+        assert!(!String::from_utf8_lossy(&get(&st, "/api/keys").body).contains("openrouter"));
     }
 
     // Real end-to-end WebSocket test: launch an echo "agent", connect a WS client, and
