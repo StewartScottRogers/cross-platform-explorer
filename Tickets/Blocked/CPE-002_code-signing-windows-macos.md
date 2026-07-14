@@ -5,6 +5,7 @@ type: Task
 status: Blocked
 priority: High
 component: Packaging
+tags: [resource-blocked, needs-cert]
 estimate: 3-4h
 created: 2026-07-10
 closed:

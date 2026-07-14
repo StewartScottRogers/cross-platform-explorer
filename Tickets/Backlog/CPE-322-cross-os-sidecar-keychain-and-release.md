@@ -5,6 +5,7 @@ type: Task
 status: Open
 priority: Medium
 component: Backend
+tags: [resource-blocked, needs-macos-linux]
 estimate: 4h
 created: 2026-07-13
 ---

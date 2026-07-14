@@ -5,6 +5,7 @@ type: Feature
 status: Blocked
 priority: Low
 component: Multiple
+tags: [resource-blocked, needs-heavy-dep]
 estimate: 2-3h
 created: 2026-07-11
 closed:

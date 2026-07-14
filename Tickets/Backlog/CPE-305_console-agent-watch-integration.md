@@ -5,6 +5,7 @@ type: Feature
 status: Open
 priority: Medium
 component: Multiple
+tags: [needs-prereq]
 estimate: 3-4h
 created: 2026-07-13
 ---
