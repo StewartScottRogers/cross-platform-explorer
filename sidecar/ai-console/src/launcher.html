@@ -134,10 +134,10 @@
         <select id="agent"></select>
       </div>
       <div class="field" style="width:170px;flex:0 0 auto">
-        <label for="preset">Set</label>
+        <label for="preset">Preset</label>
         <div style="display:flex;gap:4px">
           <select id="preset" style="flex:1;min-width:0"></select>
-          <button id="set-del" type="button" title="Delete the selected set" style="width:30px;padding:0">✕</button>
+          <button id="set-del" type="button" title="Delete the selected preset" style="width:30px;padding:0">✕</button>
         </div>
       </div>
       <div class="install" id="install-wrap"></div>
@@ -170,8 +170,8 @@
           <button id="cwd-browse" type="button" title="Choose a folder" style="flex:0 0 auto">Browse…</button>
         </div>
       </div>
-      <input id="set-name" placeholder="Save current as a set…" style="width:170px;flex:0 0 auto" />
-      <button id="set-save" type="button" title="Save the current selection as a named set">Save set</button>
+      <input id="set-name" placeholder="Name this preset…" style="width:170px;flex:0 0 auto" />
+      <button id="set-save" type="button" title="Save this agent's provider + model as a named preset — NOT your API key (use Keys… for that)">Save preset</button>
       <button id="keys-btn" type="button" title="Manage provider API keys">Keys…</button>
       <button id="history-btn" type="button" title="Past sessions — relaunch or view transcript">Recent…</button>
       <button id="refresh-agents" type="button" title="Check for new or updated agents (signed catalog)">Update agents</button>
@@ -393,7 +393,7 @@ function agentSets() {
 }
 function renderPresets() {
   const sel = $("preset"); sel.innerHTML = "";
-  const blank = document.createElement("option"); blank.value = ""; blank.textContent = "— sets —"; sel.appendChild(blank);
+  const blank = document.createElement("option"); blank.value = ""; blank.textContent = "— presets —"; sel.appendChild(blank);
   agentSets().forEach((p) => { const o = document.createElement("option"); o.value = p.name; o.textContent = p.name; sel.appendChild(o); });
 }
 function applyPreset() {
@@ -416,7 +416,7 @@ async function saveSet() {
     $("set-name").value = "";
     catalog = await api("/api/catalog"); // refresh the stored sets
     renderPresets(); $("preset").value = name;
-    setMsg("Saved set “" + name + "”.", true);
+    setMsg("Saved preset “" + name + "” (provider + model — your key is saved separately in Keys…).", true);
   } catch (e) { setMsg("Couldn't save set: " + e.message); }
 }
 async function deleteSet() {
@@ -426,7 +426,7 @@ async function deleteSet() {
     await api("/api/presets/delete", { method: "POST", body: JSON.stringify({ agent: $("agent").value, name }) });
     catalog = await api("/api/catalog");
     renderPresets();
-    setMsg("Deleted set “" + name + "”.", true);
+    setMsg("Deleted preset “" + name + "”.", true);
   } catch (e) { setMsg("Couldn't delete set: " + e.message); }
 }
 

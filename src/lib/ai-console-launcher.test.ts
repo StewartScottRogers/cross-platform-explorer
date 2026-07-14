@@ -1,0 +1,137 @@
+/**
+ * AI Console launcher UI harness (CPE-388).
+ *
+ * The launcher is an inline HTML/JS page embedded in the ai-console sidecar and rendered in a
+ * WebView2 pane we can't drive headlessly — so its rendering + wiring had no automated coverage,
+ * which is where the recent user-facing bugs came from. This loads the *real* launcher script into
+ * jsdom with stubbed xterm/WebSocket and a mock `fetch`, so we can unit-test behaviour headlessly.
+ */
+import { describe, it, expect, vi } from "vitest";
+import { JSDOM } from "jsdom";
+import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
+
+const HTML = readFileSync(resolve(process.cwd(), "sidecar/ai-console/src/launcher.html"), "utf8");
+// The DOM (everything before the first <script>) and the inline app script (the last <script>).
+const BODY = HTML.match(/<body[^>]*>([\s\S]*?)<\/body>/)![1].split(/<script/)[0];
+const APP = [...HTML.matchAll(/<script(?:\s[^>]*)?>([\s\S]*?)<\/script>/g)].map((m) => m[1]).at(-1)!;
+
+/** A default catalog so the launcher's boot `load()` succeeds; override per test via routes. */
+function defaultCatalog() {
+  return {
+    agents: [
+      { id: "claude", name: "Claude Code", installed: true, providers: ["openrouter", "native"], defaultModel: "claude-sonnet-4-5" },
+    ],
+    cwd: "/repo",
+    presets: { lastAgent: "claude", agents: { claude: { presets: [], lastUsed: null } }, credentials: [], onboarded: true, autoUpdateCatalog: false, pinnedAgents: [] },
+  };
+}
+
+/** Mount the launcher in a fresh jsdom. `routes(path, opts) => data | {ok,status,data}`. */
+async function mountLauncher(routes: (path: string, opts: any) => any = () => ({})) {
+  const dom = new JSDOM(`<!doctype html><html><head></head><body>${BODY}</body></html>`, {
+    runScripts: "dangerously",
+    pretendToBeVisual: true,
+    url: "http://127.0.0.1/",
+  });
+  const w = dom.window as any;
+  class FakeTerm {
+    unicode = { activeVersion: "" };
+    loadAddon() {}
+    open() {}
+    write(_d: unknown, cb?: () => void) { cb && cb(); }
+    onData() {} onScroll() {} attachCustomKeyEventHandler() {} focus() {}
+    scrollToBottom() {} scrollToTop() {} scrollToLine() {} dispose() {}
+    get buffer() { return { active: { baseY: 0, viewportY: 0 } }; }
+  }
+  w.Terminal = FakeTerm;
+  w.FitAddon = { FitAddon: class { fit() {} } };
+  w.SearchAddon = { SearchAddon: class {} };
+  w.WebLinksAddon = { WebLinksAddon: class {} };
+  w.Unicode11Addon = { Unicode11Addon: class {} };
+  w.WebSocket = class { close() {} send() {} };
+  w.ResizeObserver = class { observe() {} disconnect() {} };
+  w.requestAnimationFrame = (cb: (t: number) => void) => cb(0);
+
+  const fetchMock = vi.fn(async (path: string, opts: any) => {
+    const r = routes(path, opts);
+    const has = r && typeof r === "object" && ("ok" in r || "status" in r || "data" in r);
+    const ok = has ? r.ok ?? true : true;
+    const status = has ? r.status ?? (ok ? 200 : 400) : 200;
+    // /api/catalog defaults to the base catalog so boot never fails.
+    const data = has ? r.data ?? {} : r ?? {};
+    const body = path === "/api/catalog" && (!data || Object.keys(data).length === 0) ? defaultCatalog() : data;
+    return { ok, status, text: async () => JSON.stringify(body) };
+  });
+  w.fetch = fetchMock;
+
+  const s = w.document.createElement("script");
+  s.textContent = APP;
+  w.document.body.appendChild(s);
+  await new Promise((r) => setTimeout(r, 0)); // let boot load() settle
+  return { w, fetchMock };
+}
+
+describe("AI Console launcher — Keys panel error hints (CPE-386)", () => {
+  it("turns a 'Secrets not granted' error into an actionable message; passes others through", async () => {
+    const { w } = await mountLauncher();
+    expect(w.permHint("Secrets is not granted to 'ai-console'")).toMatch(/reopen the AI Console/i);
+    expect(w.permHint("secrets denied")).toMatch(/Allow for Secrets/i);
+    expect(w.permHint("bad json: x")).toBe("bad json: x");
+  });
+});
+
+describe("AI Console launcher — named sets / presets (the reported confusion)", () => {
+  it("renders the current agent's sets into the dropdown, with a blank placeholder", async () => {
+    const { w } = await mountLauncher();
+    w.eval(`catalog = ${JSON.stringify({ ...defaultCatalog(), presets: { agents: { claude: { presets: [{ name: "Work", provider: "openrouter", model: "sonnet" }] } } } })}`);
+    w.document.getElementById("agent").value = "claude";
+    w.renderPresets();
+    const opts = [...w.document.getElementById("preset").options].map((o: any) => o.value);
+    expect(opts).toEqual(["", "Work"]);
+  });
+
+  it("saveSet with an empty name warns and does NOT hit the API", async () => {
+    const { w, fetchMock } = await mountLauncher();
+    fetchMock.mockClear();
+    w.document.getElementById("set-name").value = "   ";
+    await w.saveSet();
+    expect(fetchMock).not.toHaveBeenCalled();
+    expect(w.document.getElementById("msg").textContent).toMatch(/type a name/i);
+  });
+
+  it("saveSet with a name POSTs the agent config (not the key) to /api/presets", async () => {
+    const posts: any[] = [];
+    const { w } = await mountLauncher((path, opts) => {
+      if (path === "/api/presets") posts.push(JSON.parse(opts.body));
+      return {};
+    });
+    w.document.getElementById("agent").value = "claude";
+    w.document.getElementById("provider").value = "openrouter";
+    w.document.getElementById("model").value = "sonnet";
+    w.document.getElementById("set-name").value = "Work";
+    await w.saveSet();
+    expect(posts).toHaveLength(1);
+    expect(posts[0]).toMatchObject({ agent: "claude", name: "Work", provider: "openrouter", model: "sonnet" });
+    expect(posts[0]).not.toHaveProperty("key"); // it saves the config, never the key
+  });
+});
+
+describe("AI Console launcher — catalog controls + scrollback helpers", () => {
+  it("renderCatalogControls reflects the persisted auto-update + pin state", async () => {
+    const { w } = await mountLauncher();
+    w.eval(`catalog = ${JSON.stringify({ ...defaultCatalog(), presets: { agents: { claude: {} }, autoUpdateCatalog: true, pinnedAgents: ["claude"] } })}`);
+    w.document.getElementById("agent").value = "claude";
+    w.renderCatalogControls();
+    expect(w.document.getElementById("auto-update").checked).toBe(true);
+    expect(w.document.getElementById("pin-agent").checked).toBe(true);
+  });
+
+  it("stripAltScreen removes alternate-screen enter/leave sequences", async () => {
+    const { w } = await mountLauncher();
+    const enc = (s: string) => new w.Uint8Array([...s].map((c) => c.charCodeAt(0)));
+    const dec = (a: Uint8Array) => String.fromCharCode(...a);
+    const input = enc("\x1b[?1049hHELLO\x1b[?1049l");
+    expect(dec(w.stripAltScreen(input))).toBe("HELLO");
+  });
+});
