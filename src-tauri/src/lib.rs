@@ -1944,9 +1944,74 @@ fn sidecar_set_enabled(
 /// `sidecar_start_ai_console` and read (redacted) by `sidecar_diagnostics`.
 #[cfg(feature = "sidecar-platform")]
 struct AiConsoleState {
-    conn: std::sync::Mutex<Option<sidecar_host::supervisor::ProcessConnection>>,
+    /// Handle to the live AI Console connection (CPE-349): a servicing thread owns the real
+    /// `ProcessConnection`; this is the control handle. `Some` still means "running", and
+    /// setting the slot to `None` (stop/disable) drops it, signalling the thread to exit and
+    /// reap the child — preserving the previous stop semantics.
+    conn: std::sync::Mutex<Option<ConsoleConn>>,
     logs: sidecar_host::observability::LogCapture,
     last_error: std::sync::Mutex<Option<String>>,
+}
+
+/// Control handle for the AI Console servicing thread (CPE-349). Dropping it asks the thread
+/// to stop; the thread then drops the underlying connection, which reaps the child.
+#[cfg(feature = "sidecar-platform")]
+struct ConsoleConn {
+    stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    _thread: std::thread::JoinHandle<()>,
+}
+
+#[cfg(feature = "sidecar-platform")]
+impl Drop for ConsoleConn {
+    fn drop(&mut self) {
+        self.stop.store(true, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
+/// Service the AI Console sidecar's inbound capability requests (CPE-349). The sidecar sends
+/// `secrets.*` (CPE-344) over the channel; without this loop those requests are never
+/// answered and the launcher's Keys panel times out. Reads a request, dispatches it through a
+/// broker holding the granted providers (the OS keychain secrets provider on Windows), and
+/// writes the response back with the same correlation id. Exits on stop or when the sidecar
+/// closes the connection, dropping the connection (which reaps the child).
+#[cfg(feature = "sidecar-platform")]
+fn serve_ai_console_requests(
+    mut conn: sidecar_host::supervisor::ProcessConnection,
+    granted: std::collections::BTreeSet<sidecar_contract::Capability>,
+    stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
+) {
+    use sidecar_contract::{Envelope, Message};
+    use sidecar_host::conformance::SidecarChannel;
+
+    let mut broker = sidecar_host::broker::Broker::new();
+    // The keychain-backed secrets provider (Windows Credential Manager). macOS/Linux backends
+    // arrive with CPE-322; there the broker simply has no secrets provider and denies cleanly.
+    #[cfg(windows)]
+    broker.register_provider(Box::new(sidecar_host::providers::secrets::SecretsProvider::new(
+        sidecar_host::providers::secrets::KeyringBackend,
+    )));
+    broker.set_grants("ai-console", granted);
+
+    loop {
+        if stop.load(std::sync::atomic::Ordering::SeqCst) {
+            break;
+        }
+        match conn.recv() {
+            Ok(env) => {
+                if let Message::Request(req) = env.message {
+                    let resp = broker.dispatch("ai-console", &req);
+                    if conn.send(&Envelope::new(env.id, Message::Response(resp))).is_err() {
+                        break; // sidecar's stdin closed
+                    }
+                }
+                // Non-request frames (Status/Event/Lifecycle) need no reply here.
+            }
+            // A poll timeout is normal — loop to re-check `stop`. Anything else means the
+            // sidecar closed the connection.
+            Err(e) if e.contains("timed out") => continue,
+            Err(_) => break,
+        }
+    }
 }
 
 #[cfg(feature = "sidecar-platform")]
@@ -2078,7 +2143,14 @@ fn sidecar_start_ai_console(
     let url = url.ok_or_else(|| state.fail("the AI Console did not announce a UI"))?;
     state.log(LogLevel::Info, format!("ui ready at {url}"));
     state.clear_error(); // a clean start clears any prior failure marker
-    *state.conn.lock().map_err(|_| "state lock poisoned")? = Some(conn); // keep it alive
+
+    // Hand the connection to a servicing thread so the sidecar's capability requests (secrets
+    // for the Keys panel) are actually answered (CPE-349). The control handle in state keeps
+    // "running" = is_some() and lets stop/disable end it by dropping the handle.
+    let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let thread_stop = stop.clone();
+    let thread = std::thread::spawn(move || serve_ai_console_requests(conn, consented, thread_stop));
+    *state.conn.lock().map_err(|_| "state lock poisoned")? = Some(ConsoleConn { stop, _thread: thread });
     Ok(url)
 }
 

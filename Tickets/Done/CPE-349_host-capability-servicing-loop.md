@@ -2,7 +2,8 @@
 id: CPE-349
 title: "Host: service the AI Console's capability requests (secrets.* dispatch loop)"
 type: Feature
-status: Open
+status: Done
+closed: 2026-07-13
 priority: High
 component: Backend
 created: 2026-07-13
@@ -36,3 +37,24 @@ and can launch agent sessions; only capability round-trips (secrets) are dead.
 ## Notes
 Discovered while demoing the `sidecar-platform` dev build for CPE-287. The CPE-344/345/346
 layers are correct and unit-tested against a fake transport; this wires the real host end.
+
+## Work Log
+2026-07-13 (Dayshift) — Implemented in `src-tauri/src/lib.rs`.
+- `AiConsoleState.conn` now holds a `ConsoleConn` control handle (stop flag + servicing-thread
+  join handle) instead of the raw `ProcessConnection`. `Some` still means "running"; dropping
+  it (stop/disable set the slot to `None`) sets the stop flag, so the thread exits and drops
+  the real connection, reaping the child — the previous stop semantics are preserved (stop
+  latency ≤ the 5s recv poll).
+- `serve_ai_console_requests`: builds a `Broker`, registers the keychain `SecretsProvider`
+  (`#[cfg(windows)]` — mac/linux backends land with CPE-322 and deny cleanly until then),
+  `set_grants("ai-console", consented)`, then loops `recv → dispatch → send` answering the
+  sidecar's `secrets.*` with the request's correlation id. Poll-timeouts re-check the stop
+  flag; a closed connection ends the loop.
+- `sidecar_start_ai_console` spawns that thread (moving the connection into it) and stores the
+  handle.
+
+Verified: builds under `--features sidecar-platform`; `cargo clippy --features sidecar-platform`
+clean; `cargo test --features sidecar-platform` 61 pass. Ran live in `tauri dev` — the AI
+Console launcher's **Keys** panel now reaches the Windows Credential Manager (Save/list/Remove)
+instead of timing out. This is the functional completion of the CPE-287 credential workflow on
+Windows.
