@@ -9,7 +9,9 @@
   --active: #ebebeb;
 
   --border: #e5e5e5;
-  --border-strong: #d6d6d6;
+  /* Emphasis / dialog-root border. Kept clearly visible so overlays read as distinct
+     surfaces over the content behind them, not just via their shadow (CPE-365). */
+  --border-strong: #b3b3b3;
 
   --text: #1b1b1b;
   --text-dim: #616161;
