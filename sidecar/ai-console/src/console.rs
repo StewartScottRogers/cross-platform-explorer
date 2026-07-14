@@ -1203,6 +1203,14 @@ mod tests {
     }
 
     #[test]
+    fn session_output_endpoint_rejects_an_unknown_session() {
+        // The scrollback panel (CPE-385) fetches /api/session/{id}/output; an unknown id is a 400,
+        // not a panic. (The happy path — a real ring — is exercised by the ws end-to-end test.)
+        let st = state();
+        assert_eq!(get(&st, "/api/session/no-such/output").status, 400);
+    }
+
+    #[test]
     fn catalog_auto_update_and_pin_persist(){
         let st = state();
         let post = |path: &str, body: &str| {
