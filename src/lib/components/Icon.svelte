@@ -211,6 +211,9 @@
   {:else if name === "ban"}
     <circle cx="12" cy="12" r="9" />
     <path d="M6 6l12 12" />
+  {:else if name === "keyboard"}
+    <rect x="2" y="6" width="20" height="12" rx="2" />
+    <path d="M6 9h.01M10 9h.01M14 9h.01M18 9h.01M6 12h.01M10 12h.01M14 12h.01M18 12h.01M8 15h8" />
   {/if}
 </svg>
 
