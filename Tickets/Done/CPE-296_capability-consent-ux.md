@@ -52,3 +52,7 @@ persisted + revoke wired ✅ — the *viewing/revoking surface* lands with the m
 feature clippy clean, `npm run check` 0/0, 264 frontend tests. **Visual flow of the sheet
 still wants a human confirm** (pixels), but the security-critical enforcement is
 backend-tested. This is the consent half of the CPE-304 sign-off gate.
+2026-07-14 — Re-verified while assessing the CPE-382 ship-gate: host consent tests (8) +
+`decide_grants` exclusion test pass; `ConsentSheet.svelte` + `SidecarManager.svelte` (per-cap
+revoke, CPE-274) present; `npm run check` 0/0. Corrected the stale threat-model markers that still
+listed this as ⛔/unbuilt (CPE-384). The consent gate is genuinely closed.

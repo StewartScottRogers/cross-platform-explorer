@@ -6,10 +6,12 @@ egress. **Method:** STRIDE per surface. **Status legend:** ✅ implemented & tes
 (gap filed). This is a living document; re-run per new tenant sidecar using
 [`sidecar-review-checklist.md`](sidecar-review-checklist.md).
 
-> **Sign-off status: NOT production-signed-off.** The design mitigates every identified
-> threat, and the core is implemented and tested, but two mitigations are incomplete:
-> capability **consent UX** (CPE-296, ⛔ backend-ready/UI-pending) and **non-Windows
-> keychains** (CPE-322, 🟡). Production sign-off is gated on those. See §9.
+> **Sign-off status: NOT production-signed-off.** The design mitigates every identified threat and
+> the core is implemented + tested. Capability **consent UX (CPE-296) is now DONE** — the
+> interactive consent sheet, per-capability grant/deny, and revoke UI all shipped (CPE-274). The one
+> remaining incomplete mitigation is **non-Windows keychains** (CPE-322, 🟡): off-Windows secrets
+> don't yet persist in a native store, so the platform is Windows-first. Production sign-off is gated
+> on CPE-322 + a final review pass. See §9.
 
 ## Assets & trust boundaries
 
@@ -41,7 +43,7 @@ egress. **Method:** STRIDE per surface. **Status legend:** ✅ implemented & tes
 |--------|--------|-----------|--------|
 | **E**oP | Sidecar uses a capability it wasn't granted. | Granted set = **`requested ∩ consented ∩ policy`** (`broker::decide_grants`) — least privilege; a capability absent from `capabilities_granted` is refused at the provider. No ambient authority. | ✅ |
 | **Spoofing/Tampering** | Sidecar claims a broader grant than consented. | Grants are computed host-side from the consent set, never taken from the sidecar's request alone. | ✅ |
-| **Consent integrity** | Capabilities granted without the user actually agreeing. | Design: `consented` comes from an explicit user prompt (CPE-296). **Today** bundled first-party sidecars are auto-consented to their declared set; the interactive consent prompt UI is **not yet built**. | ⛔ CPE-296 |
+| **Consent integrity** | Capabilities granted without the user actually agreeing. | `consented` comes from an explicit user prompt — the **consent sheet** (`ConsentSheet.svelte`, CPE-296): per-capability grant/deny with plain-language descriptions + a sensitive-risk badge (secrets/network default off), shown on first run and re-prompting for any newly-requested capability after an update. Grants persist and are revocable in the manager (CPE-274). | ✅ |
 
 ## 3. Secrets broker
 
@@ -57,7 +59,7 @@ egress. **Method:** STRIDE per surface. **Status legend:** ✅ implemented & tes
 | STRIDE | Threat | Mitigation | Status |
 |--------|--------|-----------|--------|
 | **Tampering / Spoofing** | A manifest is altered or a malicious one is dropped in. | First-party manifests are **bundled** (ship inside the signed app, never downloaded — CPE-276). Integrity via `content_hash` (sha256) and ed25519 `verify_signature` against a `TrustStore` (CPE-295). | ✅ |
-| **E**oP (code execution) | A user/third-party manifest runs arbitrary commands. | User/third-party manifests are treated as **untrusted executable content**: unsigned/unknown-provenance manifests require explicit consent before any command runs (CPE-295/296). Bundled ≠ user dir; user dir overrides only by explicit id and is flagged. | 🟡 (verification ✅; the consent-gate UI is CPE-296 ⛔) |
+| **E**oP (code execution) | A user/third-party manifest runs arbitrary commands. | User/third-party manifests are treated as **untrusted executable content**: unsigned/unknown-provenance manifests require explicit consent before any command runs (CPE-295/296). Bundled ≠ user dir; user dir overrides only by explicit id and is flagged. The capability consent UI (CPE-296) is done; the shipped AI Console runs only bundled first-party (signed) manifests — no untrusted-manifest loading is exposed. | ✅ |
 | **R**epudiation | No record of which manifest was trusted. | `TrustDecision` records provenance; host logs the trust outcome. | ✅ |
 | **Tampering / Rollback** | A runtime **catalog update** ships a tampered or stale-but-signed agent manifest (RCE via a swapped install/run recipe, or replaying an old bad recipe). | Host-authoritative catalog index (`host::catalog`, CPE-308/371): the index is ed25519-verified against a trusted key, each entry is **content-bound** by sha256, and entries are **anti-rollback** (strictly-monotonic `version`). The sidecar then re-verifies each manifest's signature on load (`ai_console::catalog`), defence-in-depth. The remote **fetch** that delivers a catalog is deferred (CPE-308 part 2) and will be host-mediated + allow-listed, extending §7. | 🟡 (index verify + anti-rollback ✅; host-mediated fetch pending — part 2) |
 
@@ -109,18 +111,19 @@ sends only `{provider, key}` and never a URL.
 | No plaintext secrets at rest | ✅ Windows (keychain). 🟡 macOS/Linux use in-memory (no disk, no persistence) until CPE-322. |
 | No secret in logs / UI | ✅ `Redactor` + secrets never delivered to the webview. |
 | No cross-sidecar reach | ✅ Per-process isolation; namespaced storage/secrets; no cross-sidecar channel. |
-| No unconsented code execution | 🟡 Trust/verification ✅; the interactive **consent gate UI is CPE-296 (⛔)**. Bundled first-party is auto-consented; user/third-party manifests must not run until CPE-296 lands. |
+| No unconsented code execution | ✅ Capabilities are consent-gated by the interactive sheet (CPE-296, done) with per-capability grant/deny + revoke (CPE-274); manifest execution is limited to bundled first-party signed manifests (CPE-295) — untrusted-manifest loading is not exposed in the shipped console. |
 | No UI escape to explorer | ✅ Sandboxed iframe; frame runs on its own loopback origin (≠ host origin), so cross-origin policy blocks host access even with `allow-same-origin` (CPE-334). |
-| No SSRF / arbitrary network egress from a sidecar | ✅ The only egress is the host-mediated key check, which hits an allow-listed provider endpoint; the sidecar can't supply a URL and no general fetch primitive exists (§7, CPE-347). |
+| No SSRF / arbitrary network egress from a sidecar | ✅ Egress is only ever host-mediated and allow-listed: the key check to a provider endpoint (§7, CPE-347) and the catalog fetch to the app's GitHub Releases (§4, CPE-376). The sidecar can never supply a URL; no general fetch primitive exists. |
 
 ## 10. Gaps → tickets (sign-off blockers)
 
-- **CPE-296** — capability & manifest **consent UX**. Until this ships, the "no unconsented
-  code execution" invariant holds only because untrusted manifests are refused/auto-scope
-  is limited to bundled first-party. **Blocks production sign-off.**
+- ~~**CPE-296** — capability consent UX.~~ **DONE** (2026-07-13): interactive consent sheet with
+  per-capability grant/deny + risk badges, re-prompt on newly-requested capabilities, and revoke in
+  the manager (CPE-274). Enforcement is broker-side (`decide_grants` = requested ∩ consented ∩
+  policy) and unit-tested (deny-secrets → no access). No longer a blocker.
 - **CPE-322** — macOS/Linux **OS-keychain** backends. Until this ships, secrets don't
-  persist in a native store off-Windows, so the sidecar release stays Windows-only.
-  **Blocks cross-OS production sign-off.**
+  persist in a native store off-Windows, so the sidecar release stays **Windows-first**.
+  **Blocks cross-OS production sign-off** (Windows-only sign-off is not blocked by this).
 
-When CPE-296 and CPE-322 are Done, re-run this review and record final sign-off in
-`docs/adr/0001-sidecar-platform.md`.
+The consent gate is closed; the remaining sign-off blocker is **CPE-322** (cross-OS). When it's
+Done, re-run this review and record final sign-off in `docs/adr/0001-sidecar-platform.md`.

@@ -47,3 +47,8 @@ Done. Acceptance items 1/2/3/5 met; item 4 (sign-off) pending those two.
 the `host.verify_key` key-check added in CPE-347 (SSRF containment via host-chosen allow-listed
 URL, key-in-transit, forged-verdict fail-safe, DoS timeout) + a new "no SSRF/arbitrary egress"
 invariant. Doc stays current with the code; final sign-off still gated on CPE-296 + CPE-322.
+2026-07-14 — Verified **CPE-296 (consent gate) is DONE** and corrected the stale threat-model
+markers (6 spots said ⛔/"not built"): consent sheet + per-cap grant/deny + re-prompt + revoke
+(CPE-274) all shipped; broker enforcement (`decide_grants`) unit-tested (deny-secrets → no access).
+**Sign-off gate reduced to CPE-322** (non-Windows keychains) + this final review pass. A
+Windows-first sign-off is now unblocked on the consent axis. Tracked as CPE-384.
