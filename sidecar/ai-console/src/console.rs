@@ -287,6 +287,54 @@ impl ConsoleState {
         }
     }
 
+    // ---- launcher preset sets (CPE-353) ----
+
+    /// Save (or update by name) a named set for an agent. The catalog already returns the
+    /// stored sets, so the launcher re-reads them after this.
+    fn handle_preset_save(&self, body: &str) -> Response {
+        let v: Value = match serde_json::from_str(body) {
+            Ok(v) => v,
+            Err(e) => return bad(format!("bad json: {e}")),
+        };
+        let agent = v["agent"].as_str().unwrap_or("").trim();
+        let name = v["name"].as_str().unwrap_or("").trim();
+        if agent.is_empty() || name.is_empty() {
+            return bad("missing 'agent' or 'name'");
+        }
+        let preset = crate::presets::Preset {
+            name: name.to_string(),
+            provider: v["provider"].as_str().unwrap_or("").to_string(),
+            model: v["model"].as_str().unwrap_or("").to_string(),
+            small_model: v["smallModel"].as_str().unwrap_or("").to_string(),
+            key_ref: v["keyRef"].as_str().map(str::to_string),
+        };
+        let mut store = self.presets.load();
+        store.save_preset(agent, preset);
+        match self.presets.save(&store) {
+            Ok(()) => Response::json(json!({ "ok": true }).to_string()),
+            Err(e) => bad(e),
+        }
+    }
+
+    /// Delete a named set from an agent.
+    fn handle_preset_delete(&self, body: &str) -> Response {
+        let v: Value = match serde_json::from_str(body) {
+            Ok(v) => v,
+            Err(e) => return bad(format!("bad json: {e}")),
+        };
+        let agent = v["agent"].as_str().unwrap_or("").trim();
+        let name = v["name"].as_str().unwrap_or("").trim();
+        if agent.is_empty() || name.is_empty() {
+            return bad("missing 'agent' or 'name'");
+        }
+        let mut store = self.presets.load();
+        store.delete_preset(agent, name);
+        match self.presets.save(&store) {
+            Ok(()) => Response::json(json!({ "ok": true }).to_string()),
+            Err(e) => bad(e),
+        }
+    }
+
     // ---- provider credential management (CPE-345) ----
 
     /// Store a provider's API key in the OS keychain (via the broker). Format-checked
@@ -387,6 +435,8 @@ pub fn route(state: &ConsoleState, req: &Request) -> Response {
         ("GET", "/api/catalog") => Response::json(state.catalog().to_string()),
         ("POST", "/api/launch") => state.handle_launch(&req.body),
         ("POST", "/api/install") => state.handle_install(&req.body),
+        ("POST", "/api/presets") => state.handle_preset_save(&req.body),
+        ("POST", "/api/presets/delete") => state.handle_preset_delete(&req.body),
         ("GET", "/api/keys") => state.handle_key_list(),
         ("POST", "/api/keys") => state.handle_key_set(&req.body),
         ("POST", "/api/keys/delete") => state.handle_key_delete(&req.body),
@@ -593,6 +643,32 @@ mod tests {
         // Delete removes it from the list.
         assert_eq!(post("/api/keys/delete", r#"{"provider":"openrouter"}"#).status, 200);
         assert!(!String::from_utf8_lossy(&get(&st, "/api/keys").body).contains("openrouter"));
+    }
+
+    #[test]
+    fn preset_sets_api_saves_lists_and_deletes() {
+        let st = state();
+        let post = |path: &str, body: &str| {
+            route(&st, &Request { method: "POST".into(), path: path.into(), body: body.into(), ..Default::default() })
+        };
+        // Save a named set for the claude agent.
+        assert_eq!(
+            post("/api/presets", r#"{"agent":"claude","name":"Work","provider":"openrouter","model":"sonnet"}"#).status,
+            200,
+        );
+        // The catalog now carries it under presets.agents.claude.presets.
+        let cat: Value = serde_json::from_slice(&get(&st, "/api/catalog").body).unwrap();
+        let sets = &cat["presets"]["agents"]["claude"]["presets"];
+        assert_eq!(sets[0]["name"], "Work");
+        assert_eq!(sets[0]["provider"], "openrouter");
+        assert_eq!(sets[0]["model"], "sonnet");
+        // Missing agent/name is rejected.
+        assert_eq!(post("/api/presets", r#"{"agent":"","name":"x"}"#).status, 400);
+        // Delete removes it.
+        assert_eq!(post("/api/presets/delete", r#"{"agent":"claude","name":"Work"}"#).status, 200);
+        let cat2: Value = serde_json::from_slice(&get(&st, "/api/catalog").body).unwrap();
+        let n = cat2["presets"]["agents"]["claude"]["presets"].as_array().map(|a| a.len()).unwrap_or(0);
+        assert_eq!(n, 0);
     }
 
     // Real end-to-end WebSocket test: launch an echo "agent", connect a WS client, and
