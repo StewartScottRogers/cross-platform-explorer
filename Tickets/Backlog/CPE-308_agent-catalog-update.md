@@ -52,3 +52,8 @@ map, last-known-good on failure; 9 host catalog tests. Remaining: **CPE-375** (r
 runtime reload — `needs-decision` on the source URL) and **CPE-374** (user controls UI). All the
 pure catalog trust/apply logic is now built and tested; what's left is network egress + runtime
 reload + UI.
+2026-07-14 — **Part 2 pipeline complete:** reload (CPE-375), host-mediated GitHub-Releases fetch
+(CPE-376), CI sign+publish + docs (CPE-377), and the "Update agents" refresh UI (CPE-374) all
+landed. The feature is wired end-to-end and **dormant/safe** until an operator generates the catalog
+signing key (README) — then the CI publishes a signed bundle and the app fetches/verifies/applies it.
+Only advanced controls remain: **CPE-378** (auto-update toggle + pin/rollback, `big-design`).
