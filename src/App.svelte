@@ -46,6 +46,7 @@
     createHistory, visit, back, forward, canGoBack, canGoForward, current,
     type History,
   } from "./lib/history";
+  import { pushClosedTab } from "./lib/tabs";
   import {
     emptySelection, click as selClick, selectOnly, selectAll, moveLead,
     selectedIndices, selectedCount, remapByPath, invertSelection, selectIndices,
@@ -72,6 +73,8 @@
   let nextTabId = 2;
   let tabs: Tab[] = [{ id: 1, history: createHistory(HOME) }];
   let activeId = 1;
+  /** Folders of recently-closed tabs, for Ctrl+Shift+T (CPE-356). */
+  let closedTabPaths: string[] = [];
 
   let entries: DirEntry[] = [];
   let places: Place[] = [];
@@ -528,12 +531,25 @@
   function closeTab(id: number) {
     if (tabs.length === 1) return;
     const idx = tabs.findIndex((t) => t.id === id);
+    const closing = tabs[idx];
+    if (closing) closedTabPaths = pushClosedTab(closedTabPaths, current(closing.history) ?? HOME);
     tabs = tabs.filter((t) => t.id !== id);
     if (activeId === id) {
       const fallback = tabs[Math.max(0, idx - 1)];
       activeId = fallback.id;
       loadPath(current(fallback.history) ?? HOME);
     }
+  }
+
+  /** Reopen the most recently closed tab at its folder (Ctrl+Shift+T, CPE-356). */
+  function reopenClosedTab() {
+    if (closedTabPaths.length === 0) return;
+    const path = closedTabPaths[closedTabPaths.length - 1];
+    closedTabPaths = closedTabPaths.slice(0, -1);
+    const tab: Tab = { id: nextTabId++, history: createHistory(path) };
+    tabs = [...tabs, tab];
+    activeId = tab.id;
+    loadPath(path);
   }
 
   function selectTab(id: number) {
@@ -1222,6 +1238,7 @@
     if (ctrl && event.key.toLowerCase() === "f") { event.preventDefault(); navToolbar?.focusSearch(); return; }
     if (ctrl && event.shiftKey && event.key.toLowerCase() === "n") { event.preventDefault(); newFolder(); return; }
     if (ctrl && event.shiftKey && event.key.toLowerCase() === "o") { event.preventDefault(); popOutPreview(); return; }
+    if (ctrl && event.shiftKey && event.key.toLowerCase() === "t") { event.preventDefault(); reopenClosedTab(); return; }
     if (ctrl && event.key.toLowerCase() === "t") { event.preventDefault(); newTab(); return; }
     if (ctrl && event.key.toLowerCase() === "w") { event.preventDefault(); closeTab(activeId); return; }
     if (ctrl && event.key === "Tab") { event.preventDefault(); cycleTab(event.shiftKey ? -1 : 1); return; }

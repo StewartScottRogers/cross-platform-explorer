@@ -40,6 +40,7 @@ export const SHORTCUT_GROUPS: ShortcutGroup[] = [
     items: [
       { keys: "Ctrl+T", description: "New tab" },
       { keys: "Ctrl+W", description: "Close tab" },
+      { keys: "Ctrl+Shift+T", description: "Reopen last closed tab" },
       { keys: "Ctrl+Tab", description: "Next tab" },
       { keys: "Ctrl+Shift+Tab", description: "Previous tab" },
     ],
