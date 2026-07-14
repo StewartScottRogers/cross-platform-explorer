@@ -5,6 +5,7 @@ type: Task
 status: Open
 priority: Critical
 component: Multiple
+tags: [needs-prereq]
 estimate: 4h+
 created: 2026-07-13
 ---

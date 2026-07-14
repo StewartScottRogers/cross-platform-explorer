@@ -145,8 +145,10 @@ interactively: `/ticketing-new`. See `Tickets/wiki.md` for full workflow rules.
 When the user asks to see "open tickets", "the tickets", or "tasks", ALWAYS show **two** tables â€”
 never just the Backlog:
 
-1. **Open** â€” all `Tickets/Backlog/CPE-*.md`, as a table of ID, title, type, priority, estimate.
-2. **Blocked** â€” all `Tickets/Blocked/CPE-*.md`, as a table of ID, title, and a one-line
+1. **Open** â€” all `Tickets/Backlog/CPE-*.md`, as a table of ID, title, type, priority, tags, estimate.
+   `tags` is the ticket's disposition (`ready`, `big-design`, `resource-blocked` + qualifier, etc.);
+   the controlled vocabulary lives in `Tickets/wiki.md` ("Disposition Tags").
+2. **Blocked** â€” all `Tickets/Blocked/CPE-*.md`, as a table of ID, title, tags, and a one-line
    *blocked-on / unblocks-when* note read from the ticket's Notes or Work Log.
 
 Blocked tickets are outstanding work, so omitting them misrepresents the queue. If `Blocked/` is

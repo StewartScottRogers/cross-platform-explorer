@@ -5,6 +5,7 @@ type: Task
 status: Open
 priority: High
 component: Multiple
+tags: [epic]
 estimate: 4h+
 created: 2026-07-13
 ---

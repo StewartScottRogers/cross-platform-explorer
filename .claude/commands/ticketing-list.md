@@ -6,18 +6,19 @@ then present an action menu following the rules in menu-render.md.
 ## Step 1 — Display the Table
 
 1. Glob Tickets/Backlog/CPE-*.md
-2. For each file read frontmatter: id, title, type, priority, estimate
+2. For each file read frontmatter: id, title, type, priority, tags, estimate
 3. Sort by ID ascending
-4. Output the table:
+4. Output the table (Tags = the `tags:` disposition list, comma-separated — see the
+   Disposition Tags vocabulary in `Tickets/wiki.md`):
 
-| ID | Title | Type | Priority | Estimate |
-|----|-------|------|----------|----------|
+| ID | Title | Type | Priority | Tags | Estimate |
+|----|-------|------|----------|------|----------|
 
 ### ALWAYS also show Blocked (mandatory)
 
 After the Backlog table, ALWAYS show a **Blocked** table — never omit it. Glob
-`Tickets/Blocked/CPE-*.md` and render: ID, title, and a one-line *blocked-on / unblocks-when* note
-read from the ticket's Notes or Work Log. Blocked tickets are outstanding work; leaving them out
+`Tickets/Blocked/CPE-*.md` and render: ID, title, **Tags** (from `tags:`), and a one-line
+*blocked-on / unblocks-when* note read from the ticket's Notes or Work Log. Blocked tickets are outstanding work; leaving them out
 misrepresents the queue. If `Blocked/` is empty, print "Blocked: none" rather than dropping the
 section entirely.
 

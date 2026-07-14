@@ -49,6 +49,14 @@ Use these time bands:
 
 State the estimate and your reasoning in one sentence before proceeding.
 
+## Step 3b — Assign a Disposition Tag
+
+Pick the ticket's `tags:` from the controlled vocabulary in `Tickets/wiki.md` ("Disposition Tags").
+Exactly one primary tag (`ready` · `big-design` · `needs-decision` · `needs-prereq` · `epic` ·
+`resource-blocked`), plus any qualifiers. Most freshly-filed, actionable work is `ready`. If it's
+`resource-blocked`, add a qualifier (e.g. `needs-macos-linux`) so the listing shows what's needed.
+Never coin a tag that isn't in the wiki — add it there first.
+
 ## Step 4 — Create the File
 
 Derive a kebab-case filename slug from the title (3-8 words, lowercase, hyphens).
@@ -64,6 +72,7 @@ type: {Type}
 status: Open
 priority: {Priority}
 component: {Component}
+tags: [{tags from Step 3b}]
 estimate: {estimate from Step 3}
 created: YYYY-MM-DD
 closed:

@@ -5,6 +5,7 @@ type: Task
 status: Open
 priority: Medium
 component: Backend
+tags: [resource-blocked, needs-reference]
 created: 2026-07-13
 ---
 

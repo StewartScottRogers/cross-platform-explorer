@@ -5,6 +5,7 @@ type: Feature
 status: Open
 priority: Low
 component: Multiple
+tags: [needs-decision]
 estimate: 2-3h
 created: 2026-07-13
 ---
