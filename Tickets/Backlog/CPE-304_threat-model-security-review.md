@@ -58,3 +58,9 @@ off-Windows" invariant is now *coded* for all three OSes; the cross-OS sign-off'
 a **runtime round-trip QA on a real mac/Linux desktop** (store/get/delete against the live Keychain /
 Secret Service) — needs the hardware. So: consent gate ✅ (CPE-296), cross-OS backend code ✅,
 awaiting only cross-OS runtime QA + the final review to lift the sign-off.
+2026-07-14 — **CPE-382 done: the sidecar platform now builds + bundles cross-OS** (Windows/macOS/
+Linux draft channel; Windows install verified — sidecar + agents bundled, app launches). Every
+technical mitigation is now implemented + verified (consent ✅, keychain code ✅ all-OS, no-SSRF ✅,
+signed catalog ✅). The sign-off's remaining items are HUMAN/QA, not code: (1) runtime QA of the AI
+Console per-OS (Windows eyeball + real mac/Linux), (2) the final review sign-off recorded in ADR
+0001. Once done, the sidecar channel can be promoted to public.

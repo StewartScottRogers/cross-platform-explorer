@@ -2,11 +2,12 @@
 id: CPE-382
 title: "Ship the sidecar platform in release builds (bundle sidecar + enable feature)"
 type: Feature
-status: Open
+status: Done
 priority: Medium
 component: Packaging
-tags: [big-design, needs-prereq]
+tags: [ready]
 created: 2026-07-14
+closed: 2026-07-14
 ---
 
 ## Summary
@@ -48,3 +49,11 @@ Windows + Linux (+ webkit/libdbus) + macOS (native-arch). Manual + draft-only, s
 auto-release. Verifying via a draft `workflow_dispatch` run. Remaining: runtime QA of the AI Console
 in each installed OS build (Windows verifiable here; mac/Linux need hardware); the CPE-304 sign-off
 before making any sidecar release public.
+2026-07-14 — **Cross-OS channel verified.** A draft `workflow_dispatch` run built all three OSes
+(v0.12.1-sidecar): Windows `.exe/.msi`, macOS `.dmg`, Linux `.AppImage/.deb`. Installed the Windows
+build → the bundled `ai-console.exe` + `sidecar.json` + 12 agents are present under
+`resource_dir/sidecars/`, and the app launches. Engineering done. **Before making a sidecar release
+public:** (a) runtime QA of the AI Console flow (open console → consent → spawn → catalog/keychain)
+by eyeball on Windows + on real macOS/Linux; (b) the CPE-304 sign-off. The auto public release
+(release.yml) still ships the plain explorer — promoting the sidecar to the main/public stream is
+the gated decision.
