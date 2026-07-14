@@ -7,7 +7,8 @@
 use std::collections::{BTreeMap, HashMap};
 use std::io::{Read, Write};
 use std::net::TcpStream;
-use std::sync::{mpsc, Arc, Mutex};
+use std::path::PathBuf;
+use std::sync::{mpsc, Arc, Mutex, RwLock};
 use std::thread;
 
 use serde_json::{json, Value};
@@ -48,7 +49,8 @@ struct SessionMeta {
 
 /// Shared console state, held behind an `Arc` and served across HTTP connections.
 pub struct ConsoleState {
-    registry: AgentRegistry,
+    /// Hot-swappable so a catalog update can be reloaded without a restart (CPE-375).
+    registry: RwLock<AgentRegistry>,
     default_cwd: String,
     sessions: Mutex<HashMap<String, Arc<Session>>>,
     seq: Mutex<u64>,
@@ -60,6 +62,33 @@ pub struct ConsoleState {
     dialogs: Arc<dyn crate::broker_client::HostDialogs>,
     /// Persisted session history so sessions + transcripts survive a restart (CPE-370/292).
     history: Arc<dyn crate::history::HistoryBackend>,
+    /// How to rebuild the registry on reload (CPE-375): the bundled dirs + optional verified source.
+    sources: CatalogSources,
+}
+
+/// The inputs used to (re)build the agent registry, so a catalog update can be hot-reloaded
+/// without a restart (CPE-375). `bundled` dirs are first-party (loaded as-is); `signed_dir` is an
+/// untrusted source whose manifests must each be signed by one of `keys` (CPE-371).
+#[derive(Clone, Default)]
+pub struct CatalogSources {
+    pub bundled: Vec<PathBuf>,
+    pub signed_dir: Option<PathBuf>,
+    pub keys: Vec<String>,
+}
+
+impl CatalogSources {
+    /// Build a fresh registry: the bundled dirs, then the verified signed source layered over them.
+    pub fn build(&self) -> AgentRegistry {
+        let mut reg = AgentRegistry::load_from_dirs(&self.bundled);
+        if let Some(dir) = &self.signed_dir {
+            reg.load_signed_source(dir, &self.keys);
+        }
+        reg
+    }
+
+    fn is_empty(&self) -> bool {
+        self.bundled.is_empty() && self.signed_dir.is_none()
+    }
 }
 
 /// The implicit credential label — a provider's single/primary key (CPE-348).
@@ -113,7 +142,7 @@ impl ConsoleState {
         history: Arc<dyn crate::history::HistoryBackend>,
     ) -> Self {
         Self {
-            registry,
+            registry: RwLock::new(registry),
             default_cwd,
             sessions: Mutex::new(HashMap::new()),
             seq: Mutex::new(0),
@@ -121,7 +150,28 @@ impl ConsoleState {
             presets,
             dialogs,
             history,
+            sources: CatalogSources::default(),
         }
+    }
+
+    /// Record how to rebuild the registry, enabling [`reload_catalog`] (CPE-375). Chained after
+    /// construction by the sidecar's real wiring; tests/dev states without sources can't reload.
+    pub fn with_catalog_sources(mut self, sources: CatalogSources) -> Self {
+        self.sources = sources;
+        self
+    }
+
+    /// Rebuild the registry from its sources and hot-swap it in (CPE-375). Returns the agent count.
+    /// A no-op (returns the current count) when no sources are configured, so it can never wipe a
+    /// registry that was constructed directly.
+    pub fn reload_catalog(&self) -> usize {
+        if self.sources.is_empty() {
+            return self.registry.read().unwrap().len();
+        }
+        let fresh = self.sources.build();
+        let count = fresh.len();
+        *self.registry.write().unwrap() = fresh;
+        count
     }
 
     fn next_id(&self) -> String {
@@ -133,7 +183,8 @@ impl ConsoleState {
     /// The agent/provider/model/install catalog for the launcher UI. Detects install state
     /// per agent via its manifest's detect command (missing/unfound ⇒ not installed).
     fn catalog(&self) -> Value {
-        let agents: Vec<&crate::agents::AgentManifest> = self.registry.all().collect();
+        let reg = self.registry.read().unwrap();
+        let agents: Vec<&crate::agents::AgentManifest> = reg.all().collect();
         // Probe install state for every agent IN PARALLEL. Each `detect` spawns a
         // subprocess (`<cli> --version`); probing 12 serially visibly stalls the launcher
         // (CPE-325). Scoped threads let us borrow the manifests without cloning.
@@ -188,7 +239,7 @@ impl ConsoleState {
             .map(|a| a.iter().filter_map(|x| x.as_str().map(str::to_string)).collect())
             .unwrap_or_default();
 
-        let agent = match self.registry.get(agent_id) {
+        let agent = match self.registry.read().unwrap().get(agent_id) {
             Some(a) => a.clone(),
             None => return bad(format!("unknown agent '{agent_id}'")),
         };
@@ -332,7 +383,7 @@ impl ConsoleState {
             Err(e) => return bad(format!("bad json: {e}")),
         };
         let agent_id = v["agent"].as_str().unwrap_or("");
-        let agent = match self.registry.get(agent_id) {
+        let agent = match self.registry.read().unwrap().get(agent_id) {
             Some(a) => a.clone(),
             None => return bad(format!("unknown agent '{agent_id}'")),
         };
@@ -450,7 +501,7 @@ impl ConsoleState {
         let mut creds: Vec<crate::presets::CredentialRef> = store.credentials.clone();
         // Back-compat: default keys stored before the index existed are found by probing.
         let mut providers: Vec<String> =
-            self.registry.all().flat_map(|a| a.providers.iter().cloned()).collect();
+            self.registry.read().unwrap().all().flat_map(|a| a.providers.iter().cloned()).collect();
         providers.sort();
         providers.dedup();
         for p in providers {
@@ -539,6 +590,12 @@ impl ConsoleState {
         Response::json(json!({ "sessions": sessions }).to_string())
     }
 
+    /// `POST /api/catalog/reload` → re-scan the catalog sources and hot-swap the registry after an
+    /// update was applied to disk (CPE-375). Returns the new agent count.
+    fn handle_catalog_reload(&self) -> Response {
+        Response::json(json!({ "agents": self.reload_catalog() }).to_string())
+    }
+
     /// `GET /api/history/{id}` → one session's stored (already-redacted) transcript + metadata.
     fn handle_history_detail(&self, path: &str) -> Response {
         let id = path.strip_prefix("/api/history/").unwrap_or("");
@@ -625,6 +682,7 @@ pub fn route(state: &ConsoleState, req: &Request) -> Response {
         ("POST", "/api/keys") => state.handle_key_set(&req.body),
         ("POST", "/api/keys/delete") => state.handle_key_delete(&req.body),
         ("POST", "/api/keys/verify") => state.handle_key_verify(&req.body),
+        ("POST", "/api/catalog/reload") => state.handle_catalog_reload(),
         ("GET", "/api/history") => state.handle_history_list(),
         ("GET", p) if p.starts_with("/api/history/") => state.handle_history_detail(p),
         ("POST", p) if p.starts_with("/api/session/") && p.ends_with("/resize") => {
@@ -940,6 +998,41 @@ mod tests {
 
         // Unknown id → 400.
         assert_eq!(get(&st, "/api/history/nope").status, 400);
+    }
+
+    #[test]
+    fn reload_catalog_hot_swaps_in_a_newly_signed_agent() {
+        use ed25519_dalek::{Signer, SigningKey};
+        let k = SigningKey::from_bytes(&[7u8; 32]);
+        let pk = hex::encode(k.verifying_key().to_bytes());
+        let signed = tempfile::tempdir().unwrap();
+        let sources = CatalogSources {
+            bundled: vec![],
+            signed_dir: Some(signed.path().to_path_buf()),
+            keys: vec![pk],
+        };
+        let st = ConsoleState::with_backends(
+            sources.build(),
+            "/repo".into(),
+            Arc::new(crate::broker_client::MemSecrets::default()),
+            Arc::new(crate::presets::MemPresets::default()),
+            Arc::new(crate::broker_client::NoopDialogs),
+            Arc::new(crate::history::MemHistory::default()),
+        )
+        .with_catalog_sources(sources);
+        assert_eq!(st.registry.read().unwrap().len(), 0);
+
+        // Drop a newly-signed manifest into the source, then reload via the endpoint.
+        let m = br#"{"schema_version":1,"id":"newagent","name":"New","run":{"windows":{"command":"x"},"macos":{"command":"x"},"linux":{"command":"x"}}}"#;
+        std::fs::write(signed.path().join("newagent.json"), m).unwrap();
+        std::fs::write(signed.path().join("newagent.json.sig"), hex::encode(k.sign(m).to_bytes())).unwrap();
+
+        let r: Value = serde_json::from_slice(
+            &route(&st, &Request { method: "POST".into(), path: "/api/catalog/reload".into(), ..Default::default() }).body,
+        )
+        .unwrap();
+        assert_eq!(r["agents"], 1);
+        assert!(st.registry.read().unwrap().get("newagent").is_some());
     }
 
     #[test]
