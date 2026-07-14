@@ -19,7 +19,18 @@
 
   let pathInput: HTMLInputElement | undefined;
   let searchInput: HTMLInputElement | undefined;
+  let addressEl: HTMLElement | undefined;
   let draft = "";
+
+  // On a deep path the crumb strip overflows (address is overflow-x:auto with a
+  // hidden scrollbar). Default scroll is the left/root end, which hides the crumb
+  // you're actually in. Scroll to the end so the current folder stays visible
+  // whenever the path changes (CPE-343).
+  $: if (crumbs && !editingPath) scrollAddressToEnd();
+  async function scrollAddressToEnd() {
+    await tick();
+    if (addressEl) addressEl.scrollLeft = addressEl.scrollWidth;
+  }
 
   // When the parent flips editingPath on (Ctrl+L / Alt+D), seed and focus.
   $: if (editingPath) startEdit();
@@ -84,6 +95,7 @@
     <!-- svelte-ignore a11y-no-static-element-interactions a11y-click-events-have-key-events a11y-no-noninteractive-element-interactions -->
     <nav
       class="address"
+      bind:this={addressEl}
       aria-label="Current path"
       title="Click the empty area to type a path (Ctrl+L)"
       on:click={(e) => {

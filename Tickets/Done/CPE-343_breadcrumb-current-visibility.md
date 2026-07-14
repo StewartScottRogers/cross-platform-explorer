@@ -2,7 +2,8 @@
 id: CPE-343
 title: "Keep the current crumb visible on deep paths (address-bar overflow)"
 type: Feature
-status: Open
+status: Done
+closed: 2026-07-13
 priority: Low
 component: Frontend
 created: 2026-07-13
@@ -35,3 +36,17 @@ constraint. Queued for a session where the running GUI can be eyeballed.
 - Navigating into a deeply-nested folder leaves the current crumb visible without manual
   scrolling.
 - Shallow paths are unchanged.
+
+## Work Log
+2026-07-13 (Dayshift) — Implemented **option 1 (auto-scroll to end)** on branch
+`CPE-343-crumb-visibility`. `NavToolbar.svelte` binds the `.address` element and, whenever
+`crumbs` change (and not in path-edit mode), does `await tick()` then
+`addressEl.scrollLeft = addressEl.scrollWidth` — so the rightmost/current crumb is revealed.
+Shallow paths (no overflow) are unaffected: scrollWidth ≈ clientWidth so the assignment is a
+no-op.
+
+`npm run check` 0 errors; `npm run build` ok. No unit test: the behaviour is pure rendered
+scroll geometry (`scrollWidth`/`scrollLeft`), which jsdom reports as 0 — not assertable in
+the harness (this is exactly why the ticket was deferred from Nightshift). Change is 3 lines,
+low-risk (only scrolls an existing overflow container). Visual confirmation on a deep path
+still recommended. Done.
