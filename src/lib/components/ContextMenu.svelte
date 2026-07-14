@@ -115,6 +115,14 @@
       <Icon name="paste" size={15} /> Copy as path
       <span class="hint">Ctrl+Shift+C</span>
     </button>
+    {#if canTerminal}
+      <button class="row" role="menuitem" on:click={() => run("copy-to")}>
+        <Icon name="copy" size={15} /> Copy to folder…
+      </button>
+      <button class="row" role="menuitem" on:click={() => run("move-to")}>
+        <Icon name="cut" size={15} /> Move to folder…
+      </button>
+    {/if}
     <button class="row" role="menuitem" on:click={() => run("copy-name")}>
       <Icon name="rename" size={15} /> Copy name
     </button>
