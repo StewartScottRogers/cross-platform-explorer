@@ -2020,6 +2020,103 @@ fn verify_key_response(params: &serde_json::Value) -> sidecar_contract::Response
     sidecar_contract::Response { result: Ok(json!({ "valid": valid, "live": live, "detail": detail })) }
 }
 
+/// Trusted first-party public keys (hex) for agent-catalog signatures (CPE-376/377). Empty until
+/// CPE-377 ships the real key — empty means every fetched manifest fails verification, so the
+/// catalog-update feature is safely **dormant** (nothing is trusted, nothing is applied).
+#[cfg(feature = "sidecar-platform")]
+const CATALOG_TRUSTED_KEYS: &[&str] = &[];
+
+/// The writable agent-catalog dir on this machine — where fetched, verified manifests land and
+/// where the sidecar loads them from. Both the fetch handler and the sidecar (via env) agree on it.
+#[cfg(feature = "sidecar-platform")]
+fn catalog_dir(app: &tauri::AppHandle) -> PathBuf {
+    use tauri::Manager;
+    app.path()
+        .app_data_dir()
+        .map(|d| d.join("ai-console-catalog"))
+        .unwrap_or_else(|_| std::env::temp_dir().join("cpe-ai-console-catalog"))
+}
+
+/// The catalog source base URL — the app's GitHub Releases `latest/download/` by default (the
+/// signed bundle rides next to the installer), overridable via `CPE_CATALOG_URL`.
+#[cfg(feature = "sidecar-platform")]
+fn catalog_url() -> String {
+    std::env::var("CPE_CATALOG_URL").unwrap_or_else(|_| {
+        "https://github.com/StewartScottRogers/cross-platform-explorer/releases/latest/download/"
+            .into()
+    })
+}
+
+/// Response to the sandboxed `host.fetch_catalog` request (CPE-376): download the signed catalog
+/// bundle from GitHub Releases and apply it (gated by CPE-372/373). Never errors the channel — a
+/// failure comes back as `indexOk:false` with a message.
+#[cfg(feature = "sidecar-platform")]
+fn fetch_catalog_response(app: &tauri::AppHandle) -> sidecar_contract::Response {
+    use serde_json::json;
+    let body = do_fetch_catalog(app)
+        .unwrap_or_else(|e| json!({ "indexOk": false, "applied": [], "rejected": 0, "error": e }));
+    sidecar_contract::Response { result: Ok(body) }
+}
+
+#[cfg(feature = "sidecar-platform")]
+fn do_fetch_catalog(app: &tauri::AppHandle) -> Result<serde_json::Value, String> {
+    use serde_json::json;
+    if keyverify::is_offline(std::env::var("CPE_OFFLINE").ok()) {
+        return Ok(json!({ "indexOk": false, "applied": [], "rejected": 0, "offline": true }));
+    }
+    let keys: Vec<String> = CATALOG_TRUSTED_KEYS.iter().map(|s| s.to_string()).collect();
+    let base = catalog_url();
+    let dir = catalog_dir(app);
+    let staging = std::env::temp_dir().join(format!("cpe-catalog-stage-{}", std::process::id()));
+    std::fs::create_dir_all(&staging).map_err(|e| e.to_string())?;
+
+    // Index + its detached signature.
+    let index_bytes = catalog_http_get(&format!("{base}catalog-index.json"))?;
+    let index_sig = catalog_http_get(&format!("{base}catalog-index.json.sig"))?;
+    std::fs::write(staging.join("index.json"), &index_bytes).map_err(|e| e.to_string())?;
+    std::fs::write(staging.join("index.json.sig"), &index_sig).map_err(|e| e.to_string())?;
+
+    // Each listed manifest + its signature.
+    let index = sidecar_host::catalog::CatalogIndex::from_json(&String::from_utf8_lossy(&index_bytes))?;
+    for entry in &index.entries {
+        let m = catalog_http_get(&format!("{base}{}.json", entry.id))?;
+        let s = catalog_http_get(&format!("{base}{}.json.sig", entry.id))?;
+        std::fs::write(staging.join(format!("{}.json", entry.id)), &m).map_err(|e| e.to_string())?;
+        std::fs::write(staging.join(format!("{}.json.sig", entry.id)), &s).map_err(|e| e.to_string())?;
+    }
+
+    // Apply with anti-rollback against the persisted version map (last-known-good on failure).
+    let vpath = dir.join("versions.json");
+    let mut versions = sidecar_host::catalog::load_versions(&vpath);
+    let report = sidecar_host::catalog::apply_bundle(&staging, &dir, &keys, &mut versions);
+    let _ = sidecar_host::catalog::save_versions(&vpath, &versions);
+    let _ = std::fs::remove_dir_all(&staging);
+    Ok(json!({ "indexOk": report.index_ok, "applied": report.applied, "rejected": report.rejected.len() }))
+}
+
+/// One allow-listed HTTPS GET for a catalog asset (CPE-376), proxy/offline-aware (reuses CPE-369).
+/// The host builds every URL from `catalog_url()` — the sidecar never supplies one (no SSRF).
+#[cfg(feature = "sidecar-platform")]
+fn catalog_http_get(url: &str) -> Result<Vec<u8>, String> {
+    use std::io::Read;
+    let host = keyverify::host_of(url);
+    let mut builder = ureq::AgentBuilder::new();
+    if let Some(p) = keyverify::resolve_proxy(host, |k| std::env::var(k).ok()) {
+        if let Ok(px) = ureq::Proxy::new(&p) {
+            builder = builder.proxy(px);
+        }
+    }
+    let resp = builder
+        .build()
+        .get(url)
+        .timeout(std::time::Duration::from_secs(20))
+        .call()
+        .map_err(|e| format!("fetch failed: {e}"))?;
+    let mut buf = Vec::new();
+    resp.into_reader().read_to_end(&mut buf).map_err(|e| e.to_string())?;
+    Ok(buf)
+}
+
 #[cfg(feature = "sidecar-platform")]
 fn serve_ai_console_requests(
     mut conn: sidecar_host::supervisor::ProcessConnection,
@@ -2059,6 +2156,9 @@ fn serve_ai_console_requests(
                         // A live key check against an allow-listed provider endpoint (CPE-347),
                         // not a brokered capability — handle it directly.
                         verify_key_response(&req.params)
+                    } else if req.method == "host.fetch_catalog" {
+                        // Fetch + apply the signed catalog bundle from GitHub Releases (CPE-376).
+                        fetch_catalog_response(&app)
                     } else {
                         broker.dispatch("ai-console", &req)
                     };
@@ -2166,7 +2266,7 @@ fn sidecar_start_ai_console(
     use sidecar_contract::{Event, Message, CONTRACT_VERSION};
     use sidecar_host::conformance::SidecarChannel; // brings `.recv()` into scope
     use sidecar_host::observability::LogLevel;
-    use sidecar_host::supervisor::{handshake, spawn_process};
+    use sidecar_host::supervisor::{handshake, spawn_process_with_env};
     use tauri::Manager; // for app.path()
 
     // Respect the enable/disable toggle (CPE-274): a disabled sidecar must not start.
@@ -2176,7 +2276,18 @@ fn sidecar_start_ai_console(
 
     state.log(LogLevel::Info, "starting ai-console");
     let bin = resolve_ai_console_bin(&app).map_err(|e| state.fail(e))?;
-    let mut conn = spawn_process(&bin, &[]).map_err(|e| state.fail(format!("spawn failed: {e}")))?;
+    // Tell the sidecar where the (fetched) catalog lives + which key to trust, so it loads and can
+    // reload verified updates (CPE-376). Empty keys until CPE-377 ⇒ nothing is trusted (dormant).
+    let cat_dir = catalog_dir(&app);
+    let _ = std::fs::create_dir_all(&cat_dir);
+    let cat_dir_str = cat_dir.to_string_lossy().into_owned();
+    let cat_keys = CATALOG_TRUSTED_KEYS.join(",");
+    let cat_env = [
+        ("CPE_AICONSOLE_CATALOG", cat_dir_str.as_str()),
+        ("CPE_AICONSOLE_CATALOG_KEYS", cat_keys.as_str()),
+    ];
+    let mut conn =
+        spawn_process_with_env(&bin, &[], &cat_env).map_err(|e| state.fail(format!("spawn failed: {e}")))?;
     let token = conn.launch_token().to_string();
 
     // Grant only what the user consented to (CPE-296). The frontend prompts for any

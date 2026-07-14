@@ -596,6 +596,25 @@ impl ConsoleState {
         Response::json(json!({ "agents": self.reload_catalog() }).to_string())
     }
 
+    /// `POST /api/catalog/refresh` → ask the host to fetch + apply the signed catalog bundle
+    /// (CPE-376), then hot-reload if anything changed. Returns `{ indexOk, applied, agents }`.
+    fn handle_catalog_refresh(&self) -> Response {
+        match self.dialogs.fetch_catalog() {
+            Ok(res) => {
+                let agents = if res.applied > 0 {
+                    self.reload_catalog()
+                } else {
+                    self.registry.read().unwrap().len()
+                };
+                Response::json(
+                    json!({ "indexOk": res.index_ok, "applied": res.applied, "agents": agents })
+                        .to_string(),
+                )
+            }
+            Err(e) => bad(e),
+        }
+    }
+
     /// `GET /api/history/{id}` → one session's stored (already-redacted) transcript + metadata.
     fn handle_history_detail(&self, path: &str) -> Response {
         let id = path.strip_prefix("/api/history/").unwrap_or("");
@@ -683,6 +702,7 @@ pub fn route(state: &ConsoleState, req: &Request) -> Response {
         ("POST", "/api/keys/delete") => state.handle_key_delete(&req.body),
         ("POST", "/api/keys/verify") => state.handle_key_verify(&req.body),
         ("POST", "/api/catalog/reload") => state.handle_catalog_reload(),
+        ("POST", "/api/catalog/refresh") => state.handle_catalog_refresh(),
         ("GET", "/api/history") => state.handle_history_list(),
         ("GET", p) if p.starts_with("/api/history/") => state.handle_history_detail(p),
         ("POST", p) if p.starts_with("/api/session/") && p.ends_with("/resize") => {
@@ -907,6 +927,9 @@ mod tests {
         fn verify_key(&self, _p: &str, _k: &str) -> Result<crate::broker_client::KeyVerdict, String> {
             self.called.store(true, std::sync::atomic::Ordering::SeqCst);
             Ok(self.verdict.clone())
+        }
+        fn fetch_catalog(&self) -> Result<crate::broker_client::CatalogFetch, String> {
+            Err("stub".into())
         }
     }
 
