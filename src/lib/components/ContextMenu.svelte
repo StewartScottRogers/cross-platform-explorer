@@ -184,6 +184,9 @@
     <button class="row" role="menuitem" on:click={() => run("invert-selection")}>
       <Icon name="check" size={15} /> Invert selection
     </button>
+    <button class="row" role="menuitem" on:click={() => run("select-pattern")}>
+      <Icon name="filter" size={15} /> Select by pattern…
+    </button>
     <button class="row" role="menuitem" on:click={() => run("refresh")}>
       <Icon name="refresh" size={15} /> Refresh
       <span class="hint">F5</span>

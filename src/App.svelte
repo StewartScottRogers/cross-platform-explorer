@@ -40,6 +40,8 @@
   import { uniqueName, uniqueNameWithExt } from "./lib/naming";
   import { validateFileName } from "./lib/filename";
   import { matchesQuery } from "./lib/search";
+  import { matchesGlob } from "./lib/glob";
+  import PatternSelectDialog from "./lib/components/PatternSelectDialog.svelte";
   import { firstMatchIndex } from "./lib/typeahead";
   import { clampWidth } from "./lib/resize";
   import {
@@ -175,6 +177,7 @@
   let showAbout = false;
   let showSettings = false;
   let shortcutsOpen = false;
+  let patternSelectOpen = false;
   /** True in sidecar-platform builds — gates the AI Console toolbar button (CPE-351). */
   let aiConsoleAvailable = false;
   const AI_CONSOLE_LABEL = "ai-console";
@@ -591,6 +594,20 @@
       const cur = tabs.find((t) => t.id === menu.id);
       if (cur) loadPath(current(cur.history) ?? HOME);
     }
+  }
+
+  /** Select every visible entry whose name matches the glob (CPE-360). */
+  function selectByPattern(pattern: string) {
+    patternSelectOpen = false;
+    const idx = visible
+      .map((e, i) => (matchesGlob(e.name, pattern) ? i : -1))
+      .filter((i) => i >= 0);
+    selection = selectIndices(idx);
+    showNotice(
+      idx.length === 0
+        ? `No items match "${pattern}".`
+        : `Selected ${idx.length} item${idx.length === 1 ? "" : "s"} matching "${pattern}".`,
+    );
   }
 
   function selectTab(id: number) {
@@ -1255,6 +1272,7 @@
       case "new-file": newFile(); break;
       case "select-all": selection = selectAll(visible.length); break;
       case "invert-selection": selection = invertSelection(selection, visible.length); break;
+      case "select-pattern": patternSelectOpen = true; break;
       case "select-type": {
         const e = selectedEntries[0];
         if (e && !e.is_dir) selection = selectIndices(sameTypeIndices(visible, e.extension));
@@ -2022,6 +2040,13 @@
 
 {#if shortcutsOpen}
   <ShortcutsDialog on:close={() => (shortcutsOpen = false)} />
+{/if}
+
+{#if patternSelectOpen}
+  <PatternSelectDialog
+    on:submit={(e) => selectByPattern(e.detail)}
+    on:cancel={() => (patternSelectOpen = false)}
+  />
 {/if}
 
 {#if showUpdate}
