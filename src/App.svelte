@@ -1548,11 +1548,13 @@
     <Sidebar
       {places}
       {drives}
+      {favorites}
       {currentPath}
       {isHome}
       selectedPath={selectedEntries.length === 1 && selectedEntries[0]?.is_dir ? selectedEntries[0].path : ""}
       {draggedPaths}
       on:navigate={(e) => { if (archive) exitArchive(); navigate(e.detail); }}
+      on:openFile={(e) => openRecent(e.detail)}
       on:home={() => { if (archive) exitArchive(); navigate(HOME); }}
       on:drop={(e) => dropInto(e.detail.paths, e.detail.dest, e.detail.copy)}
     />
