@@ -50,13 +50,16 @@ pub struct PresetStore {
     /// The agent selected on the most recent launch, restored on open.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_agent: Option<String>,
+    /// Whether the user has dismissed the first-run onboarding (CPE-312).
+    #[serde(default)]
+    pub onboarded: bool,
     #[serde(default)]
     pub agents: BTreeMap<String, AgentPresets>,
 }
 
 impl Default for PresetStore {
     fn default() -> Self {
-        Self { schema_version: PRESETS_SCHEMA_VERSION, last_agent: None, agents: BTreeMap::new() }
+        Self { schema_version: PRESETS_SCHEMA_VERSION, last_agent: None, onboarded: false, agents: BTreeMap::new() }
     }
 }
 
