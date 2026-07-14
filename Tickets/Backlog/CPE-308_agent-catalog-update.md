@@ -46,3 +46,9 @@ threat-model row. Reconciled trust: the index (host) governs allowed ids/version
 `.sig` (sidecar, CPE-371) governs content authenticity. Remaining split to **CPE-373** (fetch/apply,
 offline-safe, last-known-good) and **CPE-374** (user controls UI). Default first-party source URL
 still open — CPE-373 runs against a local/configured source until one is hosted.
+2026-07-14 — **Slice 2a landed (CPE-373):** `host::catalog::apply_bundle` — gate a staged bundle
+against the signed index (content + anti-rollback), write accepted manifests, persist the version
+map, last-known-good on failure; 9 host catalog tests. Remaining: **CPE-375** (remote fetch +
+runtime reload — `needs-decision` on the source URL) and **CPE-374** (user controls UI). All the
+pure catalog trust/apply logic is now built and tested; what's left is network egress + runtime
+reload + UI.
