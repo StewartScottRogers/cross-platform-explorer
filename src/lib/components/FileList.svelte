@@ -65,6 +65,16 @@
     window.addEventListener("pointerup", up);
   }
 
+  /** Keyboard resize for a focused column divider — ← / → nudge the width (Shift = bigger
+      step), so the columns are usable without a mouse (CPE-314 a11y). */
+  function onResizeKey(e: KeyboardEvent, i: number) {
+    if (e.key !== "ArrowLeft" && e.key !== "ArrowRight") return;
+    e.preventDefault();
+    const step = (e.shiftKey ? 32 : 8) * (e.key === "ArrowLeft" ? -1 : 1);
+    columnWidths = resizeColumnTo(columnWidths, i, columnWidths[i] + step);
+    dispatch("resizeColumns", columnWidths);
+  }
+
   /** Paths being dragged, and the folder row currently hovered as a target. */
   export let draggedPaths: string[] = [];
 
@@ -258,12 +268,20 @@
       </button>
     {/each}
     {#each handleOffsets as x, i (i)}
-      <!-- svelte-ignore a11y-no-static-element-interactions -->
+      <!-- A focusable separator is the valid ARIA "window splitter" pattern; the lint
+           flags the tabindex/handlers as if it were plain text, so suppress those. -->
+      <!-- svelte-ignore a11y-no-static-element-interactions a11y-no-noninteractive-tabindex a11y-no-noninteractive-element-interactions -->
       <span
         class="col-resize"
         style="left: {x}px"
-        title="Drag to resize column"
+        role="separator"
+        aria-orientation="vertical"
+        aria-label="Resize {COLUMNS[i]?.label ?? 'column'} column"
+        aria-valuenow={Math.round(columnWidths[i])}
+        tabindex="0"
+        title="Drag, or focus and use ← / → to resize"
         on:pointerdown={(e) => startColResize(e, i)}
+        on:keydown={(e) => onResizeKey(e, i)}
       />
     {/each}
   </div>

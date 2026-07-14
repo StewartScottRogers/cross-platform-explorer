@@ -7,7 +7,7 @@
  * below would have caught it before release.
  */
 import { describe, it, expect, vi } from "vitest";
-import { render, screen } from "@testing-library/svelte";
+import { render, screen, fireEvent } from "@testing-library/svelte";
 import FileList from "./FileList.svelte";
 import { emptySelection, selectOnly } from "../selection";
 import type { DirEntry } from "../types";
@@ -133,6 +133,25 @@ describe("FileList rendering", () => {
     expect(container.querySelectorAll(".thumb-slot")).toHaveLength(1);
     expect(screen.getByText("notes.txt")).toBeTruthy();
     expect(screen.getByText("docs")).toBeTruthy();
+  });
+
+  it("column dividers are labelled separators, resizable by keyboard (CPE-314 a11y)", async () => {
+    const { container, component } = render(FileList, {
+      ...base,
+      view: "details",
+      entries: [entry({ name: "a.md", path: "/x/a.md" })],
+    });
+    const handle = container.querySelector(".col-resize") as HTMLElement;
+    expect(handle).toBeTruthy();
+    expect(handle.getAttribute("role")).toBe("separator");
+    expect(handle.getAttribute("aria-label")).toMatch(/Resize/);
+    expect(handle.getAttribute("tabindex")).toBe("0");
+
+    const resized = vi.fn();
+    component.$on("resizeColumns", (e) => resized(e.detail));
+    await fireEvent.keyDown(handle, { key: "ArrowRight" });
+    expect(resized).toHaveBeenCalled();
+    expect(resized.mock.calls[0][0][0]).toBeGreaterThan(320); // Name column widened from its default
   });
 
   it("does not use thumbnail slots in details view (CPE-257)", () => {
