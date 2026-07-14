@@ -38,5 +38,14 @@ getrandom = "0.2"
 [target.'cfg(windows)'.dependencies]
 keyring = { version = "3", features = ["windows-native"] }
 
+# macOS Keychain via the Security framework (CPE-322). Pure system framework — no extra libs.
+[target.'cfg(target_os = "macos")'.dependencies]
+keyring = { version = "3", features = ["apple-native"] }
+
+# Linux Secret Service over D-Bus (GNOME Keyring / KWallet), CPE-322. `sync-secret-service` uses
+# zbus (pure-Rust D-Bus, no libdbus); `crypto-rust` keeps the session crypto pure-Rust (no OpenSSL).
+[target.'cfg(target_os = "linux")'.dependencies]
+keyring = { version = "3", features = ["sync-secret-service", "crypto-rust"] }
+
 [dev-dependencies]
 tempfile = "3"

@@ -92,12 +92,13 @@ impl<B: SecretBackend> CapabilityProvider for SecretsProvider<B> {
     }
 }
 
-/// The real OS keychain backend (Windows Credential Manager here). macOS/Linux use
-/// the same `keyring` API once their store features are enabled in Cargo.toml.
-#[cfg(windows)]
+/// The real OS keychain backend, via the cross-platform `keyring` crate (CPE-268/322): Windows
+/// Credential Manager, macOS Keychain (Security framework), and Linux Secret Service (D-Bus). The
+/// code is identical across all three — only the per-target `keyring` feature differs in Cargo.toml.
+#[cfg(any(windows, target_os = "macos", target_os = "linux"))]
 pub struct KeyringBackend;
 
-#[cfg(windows)]
+#[cfg(any(windows, target_os = "macos", target_os = "linux"))]
 impl SecretBackend for KeyringBackend {
     fn set(&self, service: &str, account: &str, secret: &str) -> Result<(), String> {
         keyring::Entry::new(service, account)
