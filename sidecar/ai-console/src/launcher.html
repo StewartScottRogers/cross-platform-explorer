@@ -215,7 +215,10 @@ function updateThumb(s) {
   const b = s.term.buffer.active;
   const trackH = s.sb.clientHeight;
   const total = b.baseY + s.term.rows;
-  if (b.baseY <= 0 || trackH <= 0) { s.thumb.style.display = "none"; return; } // nothing to scroll
+  // Nothing to scroll. This also correctly hides the thumb under a full-screen TUI agent
+  // (e.g. Claude Code): those switch to the ALTERNATE screen buffer, which has no scrollback,
+  // so baseY stays 0 and the agent owns its own scrolling via mouse tracking. See CPE-337.
+  if (b.baseY <= 0 || trackH <= 0) { s.thumb.style.display = "none"; return; }
   s.thumb.style.display = "block";
   const thumbH = Math.max(26, Math.round((trackH * s.term.rows) / total));
   const top = Math.round((b.viewportY / b.baseY) * (trackH - thumbH));

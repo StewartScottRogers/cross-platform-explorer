@@ -500,6 +500,70 @@ mod tests {
         );
     }
 
+    // Diagnostic: does Claude Code switch to the terminal's ALTERNATE screen buffer? If it
+    // does (ESC[?1049h / ?47h / ?1047h), there is no xterm scrollback to attach a scrollbar
+    // to — the agent owns its scrolling. Run:
+    //   cargo test --lib probe_claude_altscreen -- --ignored --nocapture
+    //
+    // CONFIRMED (CPE-337, 2026-07-13): ALT_SCREEN = true; Claude also enables full mouse
+    // tracking (?1000h/?1002h/?1003h/?1006h). Conclusion: the custom scrollbar in
+    // launcher.html correctly self-hides under such agents because xterm keeps baseY == 0 in
+    // the alt buffer, and wheel events pass through to the agent. No frontend change needed.
+    #[test]
+    #[ignore = "probe: needs claude installed; spawns the real TUI"]
+    fn probe_claude_altscreen() {
+        use crate::routing::LaunchContext;
+        use crate::scope::{build_launch, AgentLaunchRequest};
+        use std::io::Read;
+        use std::sync::mpsc;
+        use std::time::{Duration, Instant};
+
+        let dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("agents");
+        let agent = AgentRegistry::load_from_dirs(&[dir]).get("claude").unwrap().clone();
+        let req = AgentLaunchRequest {
+            agent: &agent,
+            provider: "native",
+            ctx: LaunchContext::default(),
+            profile_env: BTreeMap::new(),
+            cwd: ".".into(),
+            extra_args: vec![],
+            rows: 40,
+            cols: 120,
+        };
+        let launch = build_launch(&req).unwrap();
+        let mut session = crate::pty::PtySession::spawn(&launch).unwrap();
+        let mut reader = session.reader().unwrap();
+        let (tx, rx) = mpsc::channel::<Vec<u8>>();
+        std::thread::spawn(move || {
+            let mut b = [0u8; 8192];
+            loop {
+                match reader.read(&mut b) {
+                    Ok(0) | Err(_) => break,
+                    Ok(n) => {
+                        if tx.send(b[..n].to_vec()).is_err() {
+                            break;
+                        }
+                    }
+                }
+            }
+        });
+        let start = Instant::now();
+        let mut out = Vec::new();
+        while start.elapsed() < Duration::from_secs(3) {
+            if let Ok(c) = rx.recv_timeout(Duration::from_millis(200)) {
+                out.extend_from_slice(&c);
+            }
+        }
+        let _ = session.kill();
+        let alt = out.windows(8).any(|w| w == b"\x1b[?1049h")
+            || out.windows(8).any(|w| w == b"\x1b[?1047h")
+            || out.windows(6).any(|w| w == b"\x1b[?47h");
+        let head: String = out.iter().take(160).map(|b| format!("{b:02x}")).collect();
+        eprintln!("=== ALT_SCREEN = {alt} ===");
+        eprintln!("=== bytes read = {} ===", out.len());
+        eprintln!("=== head hex = {head} ===");
+    }
+
     fn http_post(port: u16, path: &str, body: &str) -> String {
         use std::io::{Read, Write};
         use std::net::TcpStream;
