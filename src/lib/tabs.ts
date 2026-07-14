@@ -10,3 +10,15 @@
 export function pushClosedTab(stack: string[], path: string, cap = 10): string[] {
   return [...stack, path].slice(-cap);
 }
+
+/** Tab ids that survive "Close others" — only the target (CPE-357). */
+export function keepOnly(ids: number[], id: number): number[] {
+  return ids.filter((x) => x === id);
+}
+
+/** Tab ids that survive "Close tabs to the right" — the target and everything left of it.
+    An unknown id keeps all (a no-op). */
+export function keepThroughRight(ids: number[], id: number): number[] {
+  const i = ids.indexOf(id);
+  return i < 0 ? ids.slice() : ids.slice(0, i + 1);
+}
