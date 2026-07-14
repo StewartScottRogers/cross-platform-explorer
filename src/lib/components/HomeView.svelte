@@ -18,6 +18,7 @@
     openFile: string;
     unpin: string;
     unfavorite: string;
+    removeRecent: string;
     clearRecents: void;
   }>();
 
@@ -128,6 +129,17 @@
                 <span class="ellip">{r.name}</span>
               </span>
               <span class="rdate">{formatDate(r.opened)}</span>
+              <!-- svelte-ignore a11y-no-static-element-interactions a11y-click-events-have-key-events -->
+              <span
+                class="rmv"
+                role="button"
+                tabindex="-1"
+                aria-label="Remove from Recent"
+                title="Remove from Recent"
+                on:click|stopPropagation={() => dispatch("removeRecent", r.path)}
+              >
+                <Icon name="close" size={13} />
+              </span>
             </button>
           {/each}
         </div>
@@ -182,7 +194,7 @@
   .recent-list { max-width: 860px; }
   .recent-head {
     display: grid;
-    grid-template-columns: 1fr 170px;
+    grid-template-columns: 1fr 170px 24px;
     padding: 4px 8px;
     color: var(--text-dim);
     font-size: 12px;
@@ -190,7 +202,7 @@
   }
   .recent-row {
     display: grid;
-    grid-template-columns: 1fr 170px;
+    grid-template-columns: 1fr 170px 24px;
     align-items: center;
     width: 100%;
     height: 30px;
@@ -198,6 +210,9 @@
     border-radius: 4px;
     text-align: left;
   }
+  .rmv { display: grid; place-items: center; color: var(--text-faint); border-radius: 4px; opacity: 0; }
+  .recent-row:hover .rmv { opacity: 1; }
+  .rmv:hover { background: var(--active); color: var(--text); }
   .rname { display: flex; align-items: center; gap: 8px; min-width: 0; }
   .rdate { color: var(--text-dim); font-size: 12px; }
   .ellip { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }

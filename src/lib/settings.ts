@@ -195,6 +195,11 @@ export function addRecent(
   );
 }
 
+/** Drop a single entry from the recent list by path (leaves the rest in order). */
+export function removeRecent(list: RecentFile[], path: string): RecentFile[] {
+  return list.filter((r) => r.path !== path);
+}
+
 /** Toggle a folder's pinned state. */
 export function togglePin(pins: string[], path: string): string[] {
   return pins.includes(path)
