@@ -216,6 +216,48 @@ fn write_entry(out: &Path, id: &str, bytes: &[u8], sig: &str) -> std::io::Result
     Ok(())
 }
 
+/// Build + sign a catalog bundle from agent manifests (CPE-377) — the release-side counterpart to
+/// [`apply_bundle`]. Given `(id, manifest_bytes)` pairs, a 32-byte ed25519 seed (hex), and a
+/// monotonic `version` stamped on every entry, returns the files to publish as release assets:
+/// `catalog-index.json` (+ `.sig`) and each `<id>.json` (+ `.sig`). The output verifies under
+/// [`verify_index`] / [`gate_manifest`] with the seed's public key.
+pub fn sign_bundle(
+    manifests: &[(String, Vec<u8>)],
+    signing_key_hex: &str,
+    version: u64,
+) -> Result<Vec<(String, Vec<u8>)>, String> {
+    use ed25519_dalek::{Signer, SigningKey};
+
+    let seed = hex::decode(signing_key_hex.trim()).map_err(|e| format!("bad key hex: {e}"))?;
+    let seed: [u8; 32] = seed.try_into().map_err(|_| "signing key must be a 32-byte seed".to_string())?;
+    let key = SigningKey::from_bytes(&seed);
+    let sign = |bytes: &[u8]| hex::encode(key.sign(bytes).to_bytes());
+
+    let mut entries = Vec::with_capacity(manifests.len());
+    let mut files = Vec::new();
+    for (id, bytes) in manifests {
+        // The manifest's declared agent-schema version (default 1 if absent).
+        let schema_version = serde_json::from_slice::<serde_json::Value>(bytes)
+            .ok()
+            .and_then(|v| v.get("schema_version").and_then(|s| s.as_u64()))
+            .unwrap_or(1) as u16;
+        entries.push(CatalogEntry {
+            id: id.clone(),
+            schema_version,
+            sha256: trust::content_hash(bytes),
+            version,
+        });
+        files.push((format!("{id}.json"), bytes.clone()));
+        files.push((format!("{id}.json.sig"), sign(bytes).into_bytes()));
+    }
+
+    let index = CatalogIndex { schema_version: CATALOG_SCHEMA_VERSION, entries };
+    let index_bytes = serde_json::to_vec(&index).map_err(|e| e.to_string())?;
+    files.push(("catalog-index.json.sig".into(), sign(&index_bytes).into_bytes()));
+    files.push(("catalog-index.json".into(), index_bytes));
+    Ok(files)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -378,6 +420,41 @@ mod tests {
         assert!(report.index_ok);
         assert_eq!(report.rejected, vec![("claude".to_string(), ApplyOutcome::MissingSignature)]);
         assert!(!out.path().join("claude.json").exists());
+    }
+
+    #[test]
+    fn sign_bundle_output_verifies_and_applies() {
+        // Sign a bundle with a seed, then confirm it verifies + applies under the seed's pubkey.
+        let seed = [42u8; 32];
+        let seed_hex = hex::encode(seed);
+        let pk = hex::encode(SigningKey::from_bytes(&seed).verifying_key().to_bytes());
+        let manifests = vec![
+            ("claude".to_string(), br#"{"schema_version":1,"id":"claude"}"#.to_vec()),
+            ("aider".to_string(), br#"{"schema_version":1,"id":"aider"}"#.to_vec()),
+        ];
+        let files = sign_bundle(&manifests, &seed_hex, 7).unwrap();
+
+        // Write the produced files to a staging dir and apply them.
+        let stage = tempfile::tempdir().unwrap();
+        for (name, bytes) in &files {
+            std::fs::write(stage.path().join(name), bytes).unwrap();
+        }
+        // apply_bundle expects `index.json`, not `catalog-index.json` — mirror the fetch, which
+        // saves the index under that name.
+        std::fs::rename(stage.path().join("catalog-index.json"), stage.path().join("index.json")).unwrap();
+        std::fs::rename(
+            stage.path().join("catalog-index.json.sig"),
+            stage.path().join("index.json.sig"),
+        )
+        .unwrap();
+
+        let out = tempfile::tempdir().unwrap();
+        let mut installed = VersionMap::new();
+        let report = apply_bundle(stage.path(), out.path(), &[pk], &mut installed);
+        assert!(report.index_ok);
+        assert_eq!(report.applied.len(), 2);
+        assert_eq!(installed.get("claude"), Some(&7));
+        assert!(report.rejected.is_empty());
     }
 
     #[test]

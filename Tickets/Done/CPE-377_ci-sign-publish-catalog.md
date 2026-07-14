@@ -2,12 +2,13 @@
 id: CPE-377
 title: "CI: build, sign & publish the catalog bundle as release assets (CPE-308 part 2, slice 2d)"
 type: Task
-status: Open
+status: Done
 priority: Medium
 component: CI
 tags: [ready]
 estimate: 2h
 created: 2026-07-14
+closed: 2026-07-14
 ---
 
 ## Summary
@@ -18,14 +19,14 @@ the trusted public key and document the keypair. This is the release-side counte
 
 ## Acceptance Criteria
 
-- [ ] A script builds `catalog-index.json` from the bundled `ai-console/agents/*.json`
+- [x] A script builds `catalog-index.json` from the bundled `ai-console/agents/*.json`
       (id, schema_version, sha256, monotonic version) and signs the index + each manifest (ed25519)
       with a CI secret key.
-- [ ] The release workflow uploads `catalog-index.json` + `*.sig` + the manifests as release assets
+- [x] The release workflow uploads `catalog-index.json` + `*.sig` + the manifests as release assets
       (alongside the installer).
-- [ ] The trusted **public** key is embedded in the app config (a constant / config file), consumed
+- [x] The trusted **public** key is embedded in the app config (a constant / config file), consumed
       by CPE-376 and passed to the sidecar.
-- [ ] README "Agent catalog updates" section: how it works + how to generate the keypair and set the
+- [x] README "Agent catalog updates" section: how it works + how to generate the keypair and set the
       `CPE_CATALOG_SIGNING_KEY` CI secret (mirrors the updater-key docs).
 
 ## Notes — key is the user's step

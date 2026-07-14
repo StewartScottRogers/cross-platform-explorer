@@ -77,6 +77,36 @@ This writes all required sizes into `src-tauri/icons/`.
 
 5. **Never commit `updater.key`.** It is already covered by `.gitignore`.
 
+## Agent catalog updates — one-time setup (optional)
+
+The AI Console's roster of coding agents is described by signed manifests. The catalog can refresh
+from your **GitHub Releases** (the bundle rides next to the installer) so new agents / changed
+install recipes arrive without shipping a new app release. It's **off until you set up signing** —
+until then the app ships with the bundled catalog only, exactly as before. To turn it on:
+
+1. **Generate a catalog signing key** — a 32-byte ed25519 seed, hex. Any tool works; e.g. in a
+   Rust scratch or `python -c "import os;print(os.urandom(32).hex())"` for the seed, then derive the
+   public key by running the signer once locally:
+
+   ```bash
+   CPE_CATALOG_SIGNING_KEY=<seed-hex> \
+     cargo run --manifest-path sidecar/host/Cargo.toml --bin catalog-sign -- \
+     sidecar/ai-console/agents ./catalog-out 1
+   ```
+
+   (The `catalog-index.json` it writes is signed by your key; the matching **public** key is what you
+   embed next.)
+
+2. Put the **public key** (hex) into `CATALOG_TRUSTED_KEYS` in `src-tauri/src/lib.rs` (empty by
+   default = feature dormant). This is a public value, safe to commit.
+
+3. Add the repository secret **`CPE_CATALOG_SIGNING_KEY`** (the *private* seed hex). The release
+   workflow's `catalog` job then signs `sidecar/ai-console/agents/*` and uploads the bundle as
+   release assets. Without the secret, that job **skips** — releases are unaffected.
+
+4. **Never commit the private seed.** The catalog fetch is host-mediated, TLS, proxy/offline-aware,
+   verified + anti-rollback before anything is trusted (see `docs/design/CPE-308-agent-catalog-updates.md`).
+
 ## Releasing
 
 ```bash
