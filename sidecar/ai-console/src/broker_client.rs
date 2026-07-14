@@ -47,9 +47,15 @@ impl BrokerClient {
         }
     }
 
-    /// Send a capability request and block until the host's response arrives (or the
+    /// Send a capability request and block until the host's response arrives (or the default
     /// timeout elapses). Returns the JSON result, or the error message.
     pub fn request(&self, method: &str, params: Value) -> Result<Value, String> {
+        self.request_timeout(method, params, self.timeout)
+    }
+
+    /// Like [`request`], but with an explicit wait — e.g. a folder dialog the user must
+    /// interact with needs far longer than a plain capability call.
+    pub fn request_timeout(&self, method: &str, params: Value, timeout: Duration) -> Result<Value, String> {
         let id = self.next_id.fetch_add(1, Ordering::SeqCst);
         let (tx, rx) = channel();
         self.pending.lock().unwrap().insert(id, tx);
@@ -62,7 +68,7 @@ impl BrokerClient {
             w.flush().map_err(|e| e.to_string())?;
         }
 
-        match rx.recv_timeout(self.timeout) {
+        match rx.recv_timeout(timeout) {
             Ok(resp) => resp.result.map_err(|e| e.message),
             Err(_) => {
                 self.pending.lock().unwrap().remove(&id); // don't leak the waiter
@@ -155,6 +161,43 @@ impl SecretAccess for BrokerSecrets {
         self.client
             .request("secrets.delete", json!({ "name": key }))
             .map(|_| ())
+    }
+}
+
+/// Host-mediated UI dialogs the sandboxed launcher can't open itself (CPE-354).
+pub trait HostDialogs: Send + Sync {
+    /// Open a native folder picker. `Ok(Some(path))` chosen, `Ok(None)` cancelled.
+    fn pick_folder(&self) -> Result<Option<String>, String>;
+}
+
+/// [`HostDialogs`] over the broker: asks the host to open the dialog (`host.pick_folder`).
+pub struct BrokerDialogs {
+    client: Arc<BrokerClient>,
+}
+
+impl BrokerDialogs {
+    pub fn new(client: Arc<BrokerClient>) -> Self {
+        Self { client }
+    }
+}
+
+impl HostDialogs for BrokerDialogs {
+    fn pick_folder(&self) -> Result<Option<String>, String> {
+        // Longer wait than a normal request — the user has to interact with the dialog.
+        let v = self.client.request_timeout(
+            "host.pick_folder",
+            serde_json::Value::Null,
+            Duration::from_secs(300),
+        )?;
+        Ok(v.get("path").and_then(Value::as_str).map(str::to_string))
+    }
+}
+
+/// Dev/standalone fallback — no host, so "cancelled".
+pub struct NoopDialogs;
+impl HostDialogs for NoopDialogs {
+    fn pick_folder(&self) -> Result<Option<String>, String> {
+        Ok(None)
     }
 }
 
