@@ -67,6 +67,12 @@ pub struct PresetStore {
     pub credentials: Vec<CredentialRef>,
     #[serde(default)]
     pub agents: BTreeMap<String, AgentPresets>,
+    /// Auto-refresh the agent catalog on open (CPE-378). Opt-in; default off.
+    #[serde(default)]
+    pub auto_update_catalog: bool,
+    /// Agent ids the user has pinned — catalog updates skip these (CPE-378).
+    #[serde(default)]
+    pub pinned_agents: Vec<String>,
 }
 
 impl Default for PresetStore {
@@ -77,6 +83,8 @@ impl Default for PresetStore {
             onboarded: false,
             credentials: Vec::new(),
             agents: BTreeMap::new(),
+            auto_update_catalog: false,
+            pinned_agents: Vec::new(),
         }
     }
 }
@@ -95,6 +103,18 @@ impl PresetStore {
 
     pub fn presets(&self, agent: &str) -> &[Preset] {
         self.agents.get(agent).map(|a| a.presets.as_slice()).unwrap_or(&[])
+    }
+
+    /// Pin (or unpin) an agent so catalog updates skip it (CPE-378).
+    pub fn set_pinned(&mut self, agent: &str, pinned: bool) {
+        self.pinned_agents.retain(|a| a != agent);
+        if pinned {
+            self.pinned_agents.push(agent.to_string());
+        }
+    }
+
+    pub fn is_pinned(&self, agent: &str) -> bool {
+        self.pinned_agents.iter().any(|a| a == agent)
     }
 
     /// Save (or update by name) a named set for an agent.

@@ -162,6 +162,8 @@
       <button id="keys-btn" type="button" title="Manage provider API keys">Keys…</button>
       <button id="history-btn" type="button" title="Past sessions — relaunch or view transcript">Recent…</button>
       <button id="refresh-agents" type="button" title="Check for new or updated agents (signed catalog)">Update agents</button>
+      <label style="display:inline-flex;align-items:center;gap:3px;font-size:12px" title="Automatically check for agent updates when this opens"><input type="checkbox" id="auto-update"> Auto</label>
+      <label style="display:inline-flex;align-items:center;gap:3px;font-size:12px" title="Pin the selected agent — skip its catalog updates"><input type="checkbox" id="pin-agent"> Pin</label>
       <button id="launch" class="primary">Launch</button>
     </div>
   </div>
@@ -323,6 +325,12 @@ async function load() {
   renderProviders();
   applyLastUsed();
   renderPresets();
+  renderCatalogControls();
+  // Auto-update on open when opted in (CPE-378) — once per page load, so it can't loop.
+  if (presets.autoUpdateCatalog && !window.__cpeAutoRefreshed) {
+    window.__cpeAutoRefreshed = true;
+    refreshCatalog();
+  }
   // First-run onboarding (CPE-312): show once until dismissed.
   if (!presets.onboarded) $("onboard-overlay").hidden = false;
 }
@@ -703,7 +711,30 @@ async function refreshCatalog() {
     }
   } catch (e) { setMsg("Update failed: " + e.message); }
 }
+// Reflect the persisted auto-update flag + the selected agent's pin state (CPE-378).
+function renderCatalogControls() {
+  const p = (catalog && catalog.presets) || {};
+  $("auto-update").checked = !!p.autoUpdateCatalog;
+  $("pin-agent").checked = (p.pinnedAgents || []).indexOf($("agent").value) !== -1;
+}
 $("refresh-agents").addEventListener("click", refreshCatalog);
+$("auto-update").addEventListener("change", async (e) => {
+  try {
+    await api("/api/catalog/settings", { method: "POST", body: JSON.stringify({ autoUpdate: e.target.checked }) });
+    if (catalog && catalog.presets) catalog.presets.autoUpdateCatalog = e.target.checked;
+  } catch (err) { setMsg("Couldn't save setting: " + err.message); }
+});
+$("pin-agent").addEventListener("change", async (e) => {
+  const agent = $("agent").value;
+  try {
+    await api("/api/catalog/pin", { method: "POST", body: JSON.stringify({ agent, pinned: e.target.checked }) });
+    if (catalog && catalog.presets) {
+      const set = new Set(catalog.presets.pinnedAgents || []);
+      e.target.checked ? set.add(agent) : set.delete(agent);
+      catalog.presets.pinnedAgents = [...set];
+    }
+  } catch (err) { setMsg("Couldn't pin: " + err.message); }
+});
 
 $("history-btn").addEventListener("click", openHistory);
 $("history-close").addEventListener("click", () => ($("history-overlay").hidden = true));
@@ -715,7 +746,7 @@ $("key-verify").addEventListener("click", verifyKey);
 $("key-save").addEventListener("click", saveKey);
 $("keys-overlay").addEventListener("click", (e) => { if (e.target === $("keys-overlay")) $("keys-overlay").hidden = true; });
 
-$("agent").addEventListener("change", () => { renderProviders(); applyLastUsed(); renderPresets(); });
+$("agent").addEventListener("change", () => { renderProviders(); applyLastUsed(); renderPresets(); renderCatalogControls(); });
 $("provider").addEventListener("change", renderCredentials);
 $("preset").addEventListener("change", applyPreset);
 $("set-save").addEventListener("click", saveSet);

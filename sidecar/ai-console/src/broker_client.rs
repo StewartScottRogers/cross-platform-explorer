@@ -224,8 +224,8 @@ pub trait HostDialogs: Send + Sync {
     fn verify_key(&self, provider: &str, key: &str) -> Result<KeyVerdict, String>;
 
     /// Ask the host to fetch + apply the signed agent-catalog bundle from its configured source
-    /// (CPE-376). `Err` = no host (dev/standalone).
-    fn fetch_catalog(&self) -> Result<CatalogFetch, String>;
+    /// (CPE-376). `pinned` agents are skipped (CPE-378). `Err` = no host (dev/standalone).
+    fn fetch_catalog(&self, pinned: &[String]) -> Result<CatalogFetch, String>;
 }
 
 /// [`HostDialogs`] over the broker: asks the host to open the dialog (`host.pick_folder`).
@@ -264,11 +264,11 @@ impl HostDialogs for BrokerDialogs {
         })
     }
 
-    fn fetch_catalog(&self) -> Result<CatalogFetch, String> {
+    fn fetch_catalog(&self, pinned: &[String]) -> Result<CatalogFetch, String> {
         // A network round-trip (download + verify + apply) — allow it a generous wait.
         let v = self.client.request_timeout(
             "host.fetch_catalog",
-            serde_json::Value::Null,
+            serde_json::json!({ "pinned": pinned }),
             Duration::from_secs(60),
         )?;
         Ok(CatalogFetch {
@@ -287,7 +287,7 @@ impl HostDialogs for NoopDialogs {
     fn verify_key(&self, _provider: &str, _key: &str) -> Result<KeyVerdict, String> {
         Err("no host to verify against".into())
     }
-    fn fetch_catalog(&self) -> Result<CatalogFetch, String> {
+    fn fetch_catalog(&self, _pinned: &[String]) -> Result<CatalogFetch, String> {
         Err("no host to fetch the catalog".into())
     }
 }

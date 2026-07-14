@@ -57,3 +57,5 @@ reload + UI.
 landed. The feature is wired end-to-end and **dormant/safe** until an operator generates the catalog
 signing key (README) — then the CI publishes a signed bundle and the app fetches/verifies/applies it.
 Only advanced controls remain: **CPE-378** (auto-update toggle + pin/rollback, `big-design`).
+2026-07-14 — **CPE-378 landed** (auto-update toggle + per-agent pin; apply skips pinned). Only
+explicit rollback remains — **CPE-379** (`big-design`: release enumeration + audited downgrade).
