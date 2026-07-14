@@ -119,6 +119,31 @@ describe("FileList rendering", () => {
     expect(screen.getByText("pic.png")).toBeTruthy();
   });
 
+  it("gives image tiles a thumbnail slot in icons view, but not other files (CPE-257)", () => {
+    const { container } = render(FileList, {
+      ...base,
+      view: "icons",
+      entries: [
+        entry({ name: "pic.png", path: "/x/pic.png", extension: "png" }),
+        entry({ name: "notes.txt", path: "/x/notes.txt", extension: "txt" }),
+        entry({ name: "docs", path: "/x/docs", is_dir: true, extension: "" }),
+      ],
+    });
+    // Exactly one thumbnail slot — the image. The .txt and the folder keep icons.
+    expect(container.querySelectorAll(".thumb-slot")).toHaveLength(1);
+    expect(screen.getByText("notes.txt")).toBeTruthy();
+    expect(screen.getByText("docs")).toBeTruthy();
+  });
+
+  it("does not use thumbnail slots in details view (CPE-257)", () => {
+    const { container } = render(FileList, {
+      ...base,
+      view: "details",
+      entries: [entry({ name: "pic.png", path: "/x/pic.png", extension: "png" })],
+    });
+    expect(container.querySelector(".thumb-slot")).toBeNull();
+  });
+
   /**
    * CPE-045. `class="row {view}"` gave every row the bare class `details`, which
    * collided with the global `.details` DetailsPane rule and clipped every row

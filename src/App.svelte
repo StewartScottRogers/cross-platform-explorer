@@ -1648,6 +1648,7 @@
         {cutPaths}
         {renamingPath}
         {renameValue}
+        assetUrl={convertFileSrc}
         bind:rowEls
         bind:draggedPaths
         on:click={(e) => (selection = selClick(selection, e.detail.index, e.detail))}
