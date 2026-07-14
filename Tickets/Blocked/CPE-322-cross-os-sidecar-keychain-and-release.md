@@ -6,6 +6,8 @@ status: Open
 priority: Medium
 component: Backend
 tags: [resource-blocked, needs-macos-linux]
+# Implementation done + CI-compile-verified on mac/linux; only a runtime round-trip on real
+# hardware remains — hence still parked in Blocked (needs a mac/linux desktop for QA).
 estimate: 4h
 created: 2026-07-13
 ---
