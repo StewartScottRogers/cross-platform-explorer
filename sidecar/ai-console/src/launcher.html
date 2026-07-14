@@ -86,6 +86,13 @@
         <label for="agent">Agent</label>
         <select id="agent"></select>
       </div>
+      <div class="field" style="width:170px;flex:0 0 auto">
+        <label for="preset">Set</label>
+        <div style="display:flex;gap:4px">
+          <select id="preset" style="flex:1;min-width:0"></select>
+          <button id="set-del" type="button" title="Delete the selected set" style="width:30px;padding:0">✕</button>
+        </div>
+      </div>
       <div class="install" id="install-wrap"></div>
       <div class="field" style="width:160px;flex:0 0 auto">
         <label for="provider">Provider</label>
@@ -109,6 +116,8 @@
         <label for="cwd">Working folder</label>
         <input id="cwd" />
       </div>
+      <input id="set-name" placeholder="Save current as a set…" style="width:170px;flex:0 0 auto" />
+      <button id="set-save" type="button" title="Save the current selection as a named set">Save set</button>
       <button id="keys-btn" type="button" title="Manage provider API keys">Keys…</button>
       <button id="launch" class="primary">Launch</button>
     </div>
@@ -211,6 +220,7 @@ async function load() {
   else if (prev) { sel.value = prev; }
   renderProviders();
   applyLastUsed();
+  renderPresets();
 }
 
 /** Apply the selected agent's remembered provider/model/small-model (CPE-352). Called on
@@ -222,6 +232,48 @@ function applyLastUsed() {
   if (lu.provider) $("provider").value = lu.provider;
   $("model").value = lu.model || "";
   $("smallModel").value = lu.smallModel || "";
+}
+
+// --- Named preset sets per agent (CPE-353) --------------------------------------------
+function agentSets() {
+  const byAgent = (catalog && catalog.presets && catalog.presets.agents) || {};
+  return ((byAgent[$("agent").value] || {}).presets) || [];
+}
+function renderPresets() {
+  const sel = $("preset"); sel.innerHTML = "";
+  const blank = document.createElement("option"); blank.value = ""; blank.textContent = "— sets —"; sel.appendChild(blank);
+  agentSets().forEach((p) => { const o = document.createElement("option"); o.value = p.name; o.textContent = p.name; sel.appendChild(o); });
+}
+function applyPreset() {
+  const p = agentSets().find((x) => x.name === $("preset").value);
+  if (!p) return;
+  if (p.provider) $("provider").value = p.provider;
+  $("model").value = p.model || "";
+  $("smallModel").value = p.smallModel || "";
+}
+async function saveSet() {
+  const name = $("set-name").value.trim();
+  if (!name) { setMsg("Type a name to save the set.", false); return; }
+  try {
+    await api("/api/presets", { method: "POST", body: JSON.stringify({
+      agent: $("agent").value, name,
+      provider: $("provider").value, model: $("model").value.trim(), smallModel: $("smallModel").value.trim(),
+    }) });
+    $("set-name").value = "";
+    catalog = await api("/api/catalog"); // refresh the stored sets
+    renderPresets(); $("preset").value = name;
+    setMsg("Saved set “" + name + "”.", true);
+  } catch (e) { setMsg("Couldn't save set: " + e.message); }
+}
+async function deleteSet() {
+  const name = $("preset").value;
+  if (!name) { setMsg("Pick a set to delete.", false); return; }
+  try {
+    await api("/api/presets/delete", { method: "POST", body: JSON.stringify({ agent: $("agent").value, name }) });
+    catalog = await api("/api/catalog");
+    renderPresets();
+    setMsg("Deleted set “" + name + "”.", true);
+  } catch (e) { setMsg("Couldn't delete set: " + e.message); }
 }
 
 // --- Sessions as tabs (xterm.js over WebSocket, one agent per tab; CPE-336) -----------
@@ -456,7 +508,10 @@ $("key-verify").addEventListener("click", verifyKey);
 $("key-save").addEventListener("click", saveKey);
 $("keys-overlay").addEventListener("click", (e) => { if (e.target === $("keys-overlay")) $("keys-overlay").hidden = true; });
 
-$("agent").addEventListener("change", () => { renderProviders(); applyLastUsed(); });
+$("agent").addEventListener("change", () => { renderProviders(); applyLastUsed(); renderPresets(); });
+$("preset").addEventListener("change", applyPreset);
+$("set-save").addEventListener("click", saveSet);
+$("set-del").addEventListener("click", deleteSet);
 $("launch").addEventListener("click", launch);
 load().catch((e) => setMsg("Could not load catalog: " + e.message));
 </script>
