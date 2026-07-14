@@ -162,6 +162,7 @@
       <button id="keys-btn" type="button" title="Manage provider API keys">Keys…</button>
       <button id="history-btn" type="button" title="Past sessions — relaunch or view transcript">Recent…</button>
       <button id="refresh-agents" type="button" title="Check for new or updated agents (signed catalog)">Update agents</button>
+      <button id="reset-agents" type="button" title="Roll back to the agents shipped with the app">Reset</button>
       <label style="display:inline-flex;align-items:center;gap:3px;font-size:12px" title="Automatically check for agent updates when this opens"><input type="checkbox" id="auto-update"> Auto</label>
       <label style="display:inline-flex;align-items:center;gap:3px;font-size:12px" title="Pin the selected agent — skip its catalog updates"><input type="checkbox" id="pin-agent"> Pin</label>
       <button id="launch" class="primary">Launch</button>
@@ -717,7 +718,16 @@ function renderCatalogControls() {
   $("auto-update").checked = !!p.autoUpdateCatalog;
   $("pin-agent").checked = (p.pinnedAgents || []).indexOf($("agent").value) !== -1;
 }
+async function resetCatalog() {
+  setMsg("Rolling back to the shipped agents…", true);
+  try {
+    const r = await api("/api/catalog/reset", { method: "POST" });
+    await load();
+    setMsg("Reset to the shipped agents (" + r.agents + ").", true);
+  } catch (e) { setMsg("Reset failed: " + e.message); }
+}
 $("refresh-agents").addEventListener("click", refreshCatalog);
+$("reset-agents").addEventListener("click", resetCatalog);
 $("auto-update").addEventListener("change", async (e) => {
   try {
     await api("/api/catalog/settings", { method: "POST", body: JSON.stringify({ autoUpdate: e.target.checked }) });

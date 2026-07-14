@@ -616,6 +616,26 @@ impl ConsoleState {
         }
     }
 
+    /// `POST /api/catalog/reset` → roll back to the **shipped** catalog (CPE-379): clear the fetched
+    /// verified source (manifests + sigs + the version map) and hot-reload, so the registry returns
+    /// to the bundled first-party agents. The simplest, safest rollback — undo a bad update.
+    fn handle_catalog_reset(&self) -> Response {
+        if let Some(dir) = &self.sources.signed_dir {
+            if let Ok(entries) = std::fs::read_dir(dir) {
+                for path in entries.flatten().map(|e| e.path()) {
+                    let clear = path
+                        .extension()
+                        .map(|x| x == "json" || x == "sig")
+                        .unwrap_or(false);
+                    if clear {
+                        let _ = std::fs::remove_file(path);
+                    }
+                }
+            }
+        }
+        Response::json(json!({ "reset": true, "agents": self.reload_catalog() }).to_string())
+    }
+
     /// `POST /api/catalog/settings {autoUpdate}` → persist the opt-in auto-update flag (CPE-378).
     fn handle_catalog_settings(&self, body: &str) -> Response {
         let v: Value = serde_json::from_str(body).unwrap_or_else(|_| json!({}));
@@ -732,6 +752,7 @@ pub fn route(state: &ConsoleState, req: &Request) -> Response {
         ("POST", "/api/keys/verify") => state.handle_key_verify(&req.body),
         ("POST", "/api/catalog/reload") => state.handle_catalog_reload(),
         ("POST", "/api/catalog/refresh") => state.handle_catalog_refresh(),
+        ("POST", "/api/catalog/reset") => state.handle_catalog_reset(),
         ("POST", "/api/catalog/settings") => state.handle_catalog_settings(&req.body),
         ("POST", "/api/catalog/pin") => state.handle_catalog_pin(&req.body),
         ("GET", "/api/history") => state.handle_history_list(),
@@ -1087,6 +1108,42 @@ mod tests {
         .unwrap();
         assert_eq!(r["agents"], 1);
         assert!(st.registry.read().unwrap().get("newagent").is_some());
+    }
+
+    #[test]
+    fn catalog_reset_reverts_to_the_shipped_set() {
+        use ed25519_dalek::{Signer, SigningKey};
+        let k = SigningKey::from_bytes(&[8u8; 32]);
+        let pk = hex::encode(k.verifying_key().to_bytes());
+        let signed = tempfile::tempdir().unwrap();
+        let sources = CatalogSources {
+            bundled: vec![],
+            signed_dir: Some(signed.path().to_path_buf()),
+            keys: vec![pk],
+        };
+        let m = br#"{"schema_version":1,"id":"extra","name":"Extra","run":{"windows":{"command":"x"},"macos":{"command":"x"},"linux":{"command":"x"}}}"#;
+        std::fs::write(signed.path().join("extra.json"), m).unwrap();
+        std::fs::write(signed.path().join("extra.json.sig"), hex::encode(k.sign(m).to_bytes())).unwrap();
+        std::fs::write(signed.path().join("versions.json"), "{}").unwrap();
+        let st = ConsoleState::with_backends(
+            sources.build(),
+            "/repo".into(),
+            Arc::new(crate::broker_client::MemSecrets::default()),
+            Arc::new(crate::presets::MemPresets::default()),
+            Arc::new(crate::broker_client::NoopDialogs),
+            Arc::new(crate::history::MemHistory::default()),
+        )
+        .with_catalog_sources(sources);
+        assert_eq!(st.registry.read().unwrap().len(), 1);
+
+        let r: Value = serde_json::from_slice(
+            &route(&st, &Request { method: "POST".into(), path: "/api/catalog/reset".into(), ..Default::default() }).body,
+        )
+        .unwrap();
+        assert_eq!(r["agents"], 0);
+        assert!(st.registry.read().unwrap().get("extra").is_none());
+        assert!(!signed.path().join("extra.json").exists()); // fetched files cleared
+        assert!(!signed.path().join("versions.json").exists());
     }
 
     #[test]
