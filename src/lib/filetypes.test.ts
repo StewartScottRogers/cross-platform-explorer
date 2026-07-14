@@ -1,8 +1,31 @@
 import { describe, it, expect } from "vitest";
-import { categoryOf, typeName, sameTypeIndices, CATEGORY_BY_EXT, TYPE_NAME_BY_EXT } from "./filetypes";
+import { categoryOf, typeName, sameTypeIndices, matchesFileFilter, CATEGORY_BY_EXT, TYPE_NAME_BY_EXT } from "./filetypes";
 
 const file = (extension: string) => ({ is_dir: false, extension });
 const folder = { is_dir: true, extension: "" };
+
+describe("matchesFileFilter (CPE-358)", () => {
+  it("'all' matches everything (incl. folders and unknown)", () => {
+    expect(matchesFileFilter(folder, "all")).toBe(true);
+    expect(matchesFileFilter(file("png"), "all")).toBe(true);
+    expect(matchesFileFilter(file("xyz"), "all")).toBe(true);
+  });
+  it("filters to a single category", () => {
+    expect(matchesFileFilter(file("png"), "image")).toBe(true);
+    expect(matchesFileFilter(file("txt"), "image")).toBe(false);
+    expect(matchesFileFilter(folder, "folder")).toBe(true);
+    expect(matchesFileFilter(file("png"), "folder")).toBe(false);
+  });
+  it("groups broad categories (Documents spans pdf/doc/spreadsheet/text)", () => {
+    expect(matchesFileFilter(file("pdf"), "document")).toBe(true);
+    expect(matchesFileFilter(file("docx"), "document")).toBe(true);
+    expect(matchesFileFilter(file("xlsx"), "document")).toBe(true);
+    expect(matchesFileFilter(file("png"), "document")).toBe(false);
+  });
+  it("an unknown filter key matches everything", () => {
+    expect(matchesFileFilter(file("png"), "bogus")).toBe(true);
+  });
+});
 
 describe("categoryOf", () => {
   it("classifies folders", () => {

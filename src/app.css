@@ -164,6 +164,8 @@ button:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
   color: var(--text);
 }
 .cmd.new { font-weight: 400; }
+/* An active file-type filter (CPE-358) tints its button so the mode is visible. */
+.cmd.on { color: var(--accent); font-weight: 600; }
 .cmd-sep {
   width: 1px; height: 20px; background: var(--border-strong);
   margin: 0 6px; flex: none;

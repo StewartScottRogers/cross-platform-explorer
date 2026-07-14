@@ -207,6 +207,34 @@ const EXECUTABLE_EXTS = new Set(["exe", "cmd", "bat", "msi", "com", "ps1", "scr"
 export const isExecutable = (entry: Pick<DirEntry, "is_dir" | "extension">): boolean =>
   !entry.is_dir && EXECUTABLE_EXTS.has(entry.extension);
 
+/** A file-type filter group for the listing filter (CPE-358). Empty `categories` = "all". */
+export interface FilterGroup {
+  key: string;
+  label: string;
+  categories: FileCategory[];
+}
+
+export const FILE_FILTERS: FilterGroup[] = [
+  { key: "all", label: "All items", categories: [] },
+  { key: "folder", label: "Folders", categories: ["folder"] },
+  { key: "image", label: "Images", categories: ["image"] },
+  { key: "document", label: "Documents", categories: ["document", "pdf", "spreadsheet", "presentation", "text"] },
+  { key: "media", label: "Audio & video", categories: ["audio", "video"] },
+  { key: "code", label: "Code", categories: ["code"] },
+  { key: "archive", label: "Archives", categories: ["archive"] },
+];
+
+/** Whether an entry passes the file-type filter `key`. "all" (or an unknown key) matches
+    everything; otherwise the entry's category must be in the group (CPE-358). */
+export function matchesFileFilter(
+  entry: Pick<DirEntry, "is_dir" | "extension"> & { name?: string },
+  key: string,
+): boolean {
+  const group = FILE_FILTERS.find((f) => f.key === key);
+  if (!group || group.categories.length === 0) return true;
+  return group.categories.includes(categoryOf(entry));
+}
+
 /**
  * Indices of the non-directory entries sharing the given (already-lowercased)
  * extension — for "Select all of this type" (CPE-258). Directories never match;
