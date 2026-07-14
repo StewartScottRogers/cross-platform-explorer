@@ -1696,6 +1696,7 @@
   bind:editingPath
   {crumbs}
   {currentPath}
+  recentPaths={recentFolders.map((r) => r.path)}
   canBack={canGoBack(activeTab.history)}
   canForward={canGoForward(activeTab.history)}
   {search}

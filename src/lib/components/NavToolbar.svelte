@@ -11,6 +11,8 @@
   export let currentPath = "";
   /** Bound from the parent so Ctrl+L can switch us into edit mode. */
   export let editingPath = false;
+  /** Recent folder paths, offered as address-bar autocomplete (CPE-361). */
+  export let recentPaths: string[] = [];
 
   const dispatch = createEventDispatcher<{
     back: void; forward: void; up: void; refresh: void;
@@ -83,6 +85,7 @@
   {#if editingPath}
     <input
       class="pathedit"
+      list="recent-paths"
       bind:this={pathInput}
       bind:value={draft}
       spellcheck="false"
@@ -91,6 +94,9 @@
       on:keydown={onKey}
       on:blur={() => (editingPath = false)}
     />
+    <datalist id="recent-paths">
+      {#each recentPaths as p (p)}<option value={p}></option>{/each}
+    </datalist>
   {:else}
     <!-- svelte-ignore a11y-no-static-element-interactions a11y-click-events-have-key-events a11y-no-noninteractive-element-interactions -->
     <nav
