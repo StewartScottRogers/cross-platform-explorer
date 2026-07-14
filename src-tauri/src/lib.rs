@@ -3,8 +3,10 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-/// Live provider API-key verification for the AI Console sidecar (CPE-347). Pure endpoint/status
-/// logic is always compiled (and unit-tested); the networked `verify_live` needs the platform.
+/// Live provider API-key verification + catalog egress for the AI Console sidecar (CPE-347/369/376).
+/// Only compiled with the platform: without it nothing calls these, so the module would be dead
+/// code under `-D warnings` (its pure logic is still unit-tested under the feature).
+#[cfg(feature = "sidecar-platform")]
 mod keyverify;
 
 #[derive(Serialize)]
