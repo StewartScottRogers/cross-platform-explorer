@@ -32,3 +32,9 @@ locked-down/air-gapped setups.
 
 ## Work Log
 2026-07-13 — Filed during epic-plan hardening.
+2026-07-14 — First concrete slice landed as **CPE-369**: the `host.verify_key` egress (CPE-347)
+now honours `HTTPS_PROXY`/`ALL_PROXY`/`NO_PROXY` and a `CPE_OFFLINE` switch (no surprise outbound
+call; reported as an offline check, never blocking a save). Proxy/NO_PROXY/offline resolution is
+pure + unit-tested; the key rides an HTTPS CONNECT tunnel so it isn't proxy-visible. **Still open
+here:** proxy for installers/package-managers + catalog fetch + LM Studio; cached-catalog offline
+behaviour; a user-facing air-gapped mode/UI. Remains `big-design` for those surfaces.
