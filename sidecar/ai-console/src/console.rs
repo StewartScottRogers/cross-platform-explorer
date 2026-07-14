@@ -980,6 +980,48 @@ mod tests {
         assert!(!String::from_utf8_lossy(&get(&st, "/api/keys").body).contains("openrouter"));
     }
 
+    #[test]
+    fn a_key_saved_via_the_keys_panel_is_the_one_the_launch_resolver_uses() {
+        // The end-to-end contract behind "the GUI can use this key": a key stored via the Keys
+        // panel API (handle_key_set) must resolve, under the same provider_secret_name, to exactly
+        // what the launch flow (resolve_provider_key, used by handle_launch → the agent env) reads.
+        // Fake keys only — never a real one.
+        let st = state();
+        let post = |path: &str, body: &str| {
+            route(&st, &Request { method: "POST".into(), path: path.into(), body: body.into(), ..Default::default() })
+        };
+        // Save a default key and a labelled ("work") key for openrouter via the Keys panel.
+        assert_eq!(post("/api/keys", r#"{"provider":"openrouter","key":"sk-or-defaultkey000"}"#).status, 200);
+        assert_eq!(
+            post("/api/keys", r#"{"provider":"openrouter","key":"sk-or-workkey00000","label":"work"}"#).status,
+            200
+        );
+
+        // The launch resolver picks up exactly what the API stored — for the default and the label.
+        assert_eq!(
+            resolve_provider_key(&*st.secrets, "openrouter", None, "default").as_deref(),
+            Some("sk-or-defaultkey000")
+        );
+        assert_eq!(
+            resolve_provider_key(&*st.secrets, "openrouter", None, "work").as_deref(),
+            Some("sk-or-workkey00000")
+        );
+        // A key typed for this one launch overrides the stored one (precedence, CPE-344/348).
+        assert_eq!(
+            resolve_provider_key(&*st.secrets, "openrouter", Some("sk-or-typednow0000".into()), "default").as_deref(),
+            Some("sk-or-typednow0000")
+        );
+
+        // Deleting the default via the API → the launch resolves to no key (falls back to the
+        // agent's native login); the labelled key is untouched.
+        assert_eq!(post("/api/keys/delete", r#"{"provider":"openrouter"}"#).status, 200);
+        assert_eq!(resolve_provider_key(&*st.secrets, "openrouter", None, "default"), None);
+        assert_eq!(
+            resolve_provider_key(&*st.secrets, "openrouter", None, "work").as_deref(),
+            Some("sk-or-workkey00000")
+        );
+    }
+
     /// A [`HostDialogs`] whose `verify_key` returns a scripted verdict and records whether it was
     /// called — to prove the live path is taken (and skipped for bad-format keys). CPE-347.
     struct StubDialogs {
