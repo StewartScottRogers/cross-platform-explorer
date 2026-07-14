@@ -1,6 +1,7 @@
 <script lang="ts">
   import { onMount } from "svelte";
   import { invoke, convertFileSrc } from "@tauri-apps/api/core";
+  import { open as openFolderDialog } from "@tauri-apps/plugin-dialog";
   import { check, type Update } from "@tauri-apps/plugin-updater";
   import { relaunch, exit } from "@tauri-apps/plugin-process";
   import { openUrl, revealItemInDir } from "@tauri-apps/plugin-opener";
@@ -762,6 +763,52 @@
     showNotice(`Cut ${clipboard.paths.length} item${clipboard.paths.length === 1 ? "" : "s"}.`);
   }
 
+  /** Copy or move the selection into a folder chosen from the native picker (CPE-355) —
+      no cut/navigate/paste dance. A move leaves the current folder, so it reloads and is
+      undoable; a copy only reloads when the destination is the folder in view. */
+  async function copyMoveToFolder(move: boolean) {
+    if (isHome || archive || selectedEntries.length === 0) return;
+    const sources = selectedEntries.map((e) => e.path);
+    const n = sources.length;
+    let dest: string | string[] | null;
+    try {
+      dest = await openFolderDialog({
+        directory: true,
+        multiple: false,
+        defaultPath: currentPath,
+        title: `${move ? "Move" : "Copy"} ${n} item${n === 1 ? "" : "s"} to…`,
+      });
+    } catch {
+      return; // dialog unavailable / errored — no-op
+    }
+    if (!dest || typeof dest !== "string") return; // cancelled
+    try {
+      const results = await invoke<OpResult[]>(move ? "move_entries" : "copy_entries", {
+        paths: sources,
+        dest,
+      });
+      reportResults(results, move ? "Moved" : "Copied");
+      if (move) {
+        const moves = results
+          .map((r, i) => ({ from: sources[i], to: r.path, ok: r.ok }))
+          .filter((m) => m.ok)
+          .map(({ from, to }) => ({ from, to }));
+        if (moves.length > 0) {
+          undoStack = pushUndo(undoStack, {
+            kind: "move",
+            moves,
+            label: `Move ${moves.length} item${moves.length === 1 ? "" : "s"}`,
+          });
+        }
+        await loadPath(currentPath);
+      } else if (dest === currentPath) {
+        await loadPath(currentPath);
+      }
+    } catch (e) {
+      showNotice(String(e), true);
+    }
+  }
+
   async function doPaste() {
     if (isHome || blockedInArchive() || clipEmpty(clipboard)) return;
     if (!pasteCheck.allowed) {
@@ -1135,6 +1182,8 @@
       case "pin": togglePinSelected(); break;
       case "favorite": toggleFavoriteSelected(); break;
       case "open-in-console": openSelectionInConsole(); break;
+      case "copy-to": copyMoveToFolder(false); break;
+      case "move-to": copyMoveToFolder(true); break;
       case "open-folder-in-console": if (!isHome && !archive) openAiConsole({ cwd: currentPath }); break;
       case "rename": if (selectedEntries.length === 1) beginRename(selectedEntries[0]); break;
       case "batch-rename": beginBatchRename(); break;
