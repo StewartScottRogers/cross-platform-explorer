@@ -36,16 +36,31 @@
   .badge.yes { background: #3a9d4a; color: #fff; }
   #msg { padding: 6px 16px; font-size: 12px; min-height: 20px; border-bottom: 1px solid var(--line);
          opacity: .85; }
-  #term { flex: 1; min-height: 0; background: #0d0d0d; overflow: hidden; }
-  /* Force a classic, always-visible scrollbar GLOBALLY. This is deliberate: xterm measures
-     the scrollbar width on a throwaway element to decide how many columns fit, so the rule
-     must apply everywhere (not just .xterm-viewport) — otherwise it measures WebView2's
-     zero-width overlay scrollbar, reserves no space, and the text canvas covers the bar. */
-  * { scrollbar-width: auto; scrollbar-color: #6a6a6a #141414; }
-  ::-webkit-scrollbar { width: 14px; height: 14px; }
-  ::-webkit-scrollbar-track { background: #141414; }
-  ::-webkit-scrollbar-thumb { background: #6a6a6a; border-radius: 7px; border: 3px solid #141414; min-height: 30px; }
-  ::-webkit-scrollbar-thumb:hover { background: #8a8a8a; }
+  /* Session tabs — one agent per tab (CPE-336) */
+  #tabs { display: flex; gap: 2px; padding: 0 10px; overflow-x: auto;
+          background: rgba(128,128,128,0.07); border-bottom: 1px solid var(--line); }
+  #tabs:empty { display: none; }
+  .tab { display: flex; align-items: center; gap: 8px; padding: 7px 10px; font-size: 12px;
+         cursor: pointer; border-top: 2px solid transparent; opacity: .62; white-space: nowrap; max-width: 240px; }
+  .tab.active { opacity: 1; border-top-color: var(--accent); background: rgba(128,128,128,0.09); }
+  .tab.ended .tab-label { text-decoration: line-through; opacity: .6; }
+  .tab-label { overflow: hidden; text-overflow: ellipsis; }
+  .tab-close { border: 0; background: transparent; color: inherit; cursor: pointer;
+               font-size: 15px; line-height: 1; padding: 0 2px; opacity: .55; }
+  .tab-close:hover { color: #d05656; opacity: 1; }
+  #terms { flex: 1; min-height: 0; position: relative; background: #0d0d0d; }
+  .term-pane { position: absolute; inset: 0; }
+  /* Each terminal reserves a 14px right gutter for our OWN scrollbar. WebView2 won't
+     reliably paint a native scrollbar thumb, so we hide xterm's and draw a real,
+     always-visible, draggable thumb synced to xterm's scroll state (CPE-336). */
+  .term-host { position: absolute; left: 0; top: 0; bottom: 0; right: 14px; }
+  .xterm-viewport { scrollbar-width: none; }
+  .xterm-viewport::-webkit-scrollbar { display: none; }
+  .sb { position: absolute; right: 0; top: 0; bottom: 0; width: 14px; background: #141414; }
+  .sb-thumb { position: absolute; left: 2px; right: 2px; min-height: 26px; background: #6a6a6a;
+              border-radius: 5px; cursor: grab; }
+  .sb-thumb:hover { background: #8f8f8f; }
+  .sb-thumb:active { cursor: grabbing; background: #a5a5a5; }
 </style>
 </head>
 <body>
@@ -82,7 +97,8 @@
     </div>
   </div>
   <div id="msg">Pick an agent, provider and model, then Launch.</div>
-  <div id="term"></div>
+  <div id="tabs"></div>
+  <div id="terms"></div>
 
 <script>/*__XTERM_JS__*/</script>
 <script>/*__FIT_JS__*/</script>
@@ -95,7 +111,6 @@
 window.onerror = function (m) { try { setMsg("Error: " + m, false); } catch (_) {} };
 const $ = (id) => document.getElementById(id);
 let catalog = null;
-let session = null;
 
 async function api(path, opts) {
   const r = await fetch(path, opts);
@@ -151,81 +166,148 @@ async function load() {
   if (last) { if (last.provider) $("provider").value = last.provider; if (last.model) $("model").value = last.model; }
 }
 
-// --- Terminal (xterm.js over a WebSocket) ---------------------------------------------
-let term = null, fitAddon = null, searchAddon = null, ws = null;
+// --- Sessions as tabs (xterm.js over WebSocket, one agent per tab; CPE-336) -----------
+// Each Launch spawns an independent agent session on the sidecar (its own PTY) and adds a
+// tab; switching tabs shows that session's terminal. The sidecar runs them all at once.
+const sessions = new Map(); // id -> { id, name, term, fit, search, ws, pane, tab }
+let activeId = null;
 
-// Build the terminal. The core (Terminal + open + fit) must succeed; every addon is
-// optional and isolated, so a flaky one (e.g. a webview that can't give WebGL a context)
-// can never blank the terminal. Returns false if the core failed.
-function initTerm() {
-  if (term) return true;
-  try {
-    term = new Terminal({
-      fontFamily: "ui-monospace, Consolas, 'Cascadia Mono', monospace",
-      fontSize: 13, cursorBlink: true, scrollback: 50000,
-      theme: { background: "#0d0d0d", foreground: "#d8d8d8" },
-    });
-    fitAddon = new FitAddon.FitAddon();
-    term.loadAddon(fitAddon);
-    try { searchAddon = new SearchAddon.SearchAddon(); term.loadAddon(searchAddon); } catch (_) {}
-    try { term.loadAddon(new WebLinksAddon.WebLinksAddon()); } catch (_) {}
-    try {
-      term.loadAddon(new Unicode11Addon.Unicode11Addon());
-      term.unicode.activeVersion = "11";
-    } catch (_) {}
-    term.open($("term"));
-    fitAddon.fit();
-    term.onData((d) => { if (ws && ws.readyState === 1) ws.send(d); }); // keystrokes -> PTY
-    term.attachCustomKeyEventHandler(onKey);
-    // Re-fit precisely whenever the pane changes size (overlay animating in, window resize,
-    // splitter drag) — more accurate than a window resize listener alone.
-    if (window.ResizeObserver) new ResizeObserver(() => refit()).observe($("term"));
-    else window.addEventListener("resize", refit);
-    return true;
-  } catch (e) {
-    setMsg("Terminal init failed: " + (e && e.message ? e.message : e), false);
-    return false;
+function buildTerm(s) {
+  const term = new Terminal({
+    fontFamily: "ui-monospace, Consolas, 'Cascadia Mono', monospace",
+    fontSize: 13, cursorBlink: true, scrollback: 50000,
+    theme: { background: "#0d0d0d", foreground: "#d8d8d8" },
+  });
+  const fit = new FitAddon.FitAddon();
+  term.loadAddon(fit);
+  let search = null;
+  try { search = new SearchAddon.SearchAddon(); term.loadAddon(search); } catch (_) {}
+  try { term.loadAddon(new WebLinksAddon.WebLinksAddon()); } catch (_) {}
+  try { term.loadAddon(new Unicode11Addon.Unicode11Addon()); term.unicode.activeVersion = "11"; } catch (_) {}
+  term.open(s.host);
+  fit.fit();
+  term.onData((d) => { if (s.ws && s.ws.readyState === 1) s.ws.send(d); });
+  term.attachCustomKeyEventHandler((e) => onKey(e, s));
+  term.onScroll(() => updateThumb(s));
+  if (window.ResizeObserver) new ResizeObserver(() => { if (s.id === activeId) refit(s); }).observe(s.pane);
+  s.term = term; s.fit = fit; s.search = search;
+}
+
+function refit(s) {
+  try { s.fit.fit(); } catch (_) {}
+  sendResize(s);
+  updateThumb(s);
+}
+
+function activate(id) {
+  activeId = id;
+  for (const s of sessions.values()) {
+    const on = s.id === id;
+    s.pane.style.display = on ? "block" : "none";
+    s.tab.classList.toggle("active", on);
+    if (on) { refit(s); s.term.focus(); }
   }
 }
 
-function refit() {
-  if (!term || !fitAddon) return;
-  try { fitAddon.fit(); } catch (_) {}
-  if (session) sendResize(term.rows, term.cols);
+// --- Custom scrollbar (WebView2 won't reliably paint a native one) ---------------------
+function updateThumb(s) {
+  if (!s.term) return;
+  const b = s.term.buffer.active;
+  const trackH = s.sb.clientHeight;
+  const total = b.baseY + s.term.rows;
+  if (b.baseY <= 0 || trackH <= 0) { s.thumb.style.display = "none"; return; } // nothing to scroll
+  s.thumb.style.display = "block";
+  const thumbH = Math.max(26, Math.round((trackH * s.term.rows) / total));
+  const top = Math.round((b.viewportY / b.baseY) * (trackH - thumbH));
+  s.thumb.style.height = thumbH + "px";
+  s.thumb.style.top = top + "px";
+}
+function scheduleThumb(s) {
+  if (s._pend) return;
+  s._pend = true;
+  requestAnimationFrame(() => { s._pend = false; updateThumb(s); });
+}
+function wireScrollbar(s) {
+  s.thumb.addEventListener("mousedown", (e) => {
+    e.preventDefault();
+    const startY = e.clientY, startTop = parseFloat(s.thumb.style.top) || 0;
+    const trackH = s.sb.clientHeight, thumbH = s.thumb.offsetHeight, span = (trackH - thumbH) || 1;
+    const move = (ev) => {
+      const b = s.term.buffer.active;
+      const top = Math.max(0, Math.min(span, startTop + (ev.clientY - startY)));
+      s.term.scrollToLine(Math.round((top / span) * b.baseY));
+    };
+    const up = () => { window.removeEventListener("mousemove", move); window.removeEventListener("mouseup", up); };
+    window.addEventListener("mousemove", move);
+    window.addEventListener("mouseup", up);
+  });
+  s.sb.addEventListener("mousedown", (e) => {
+    if (e.target === s.thumb) return; // click on track = page toward the cursor
+    const b = s.term.buffer.active;
+    s.term.scrollToLine(Math.round((e.offsetY / (s.sb.clientHeight || 1)) * b.baseY));
+  });
 }
 
-// Ctrl+Shift+C/V copy-paste, Ctrl+F find. Returning false stops xterm passing the key on.
-function onKey(e) {
+function connectWs(s) {
+  const proto = location.protocol === "https:" ? "wss" : "ws";
+  s.ws = new WebSocket(proto + "://" + location.host + "/api/session/" + s.id + "/ws");
+  s.ws.binaryType = "arraybuffer";
+  s.ws.onmessage = (e) => {
+    if (typeof e.data === "string") s.term.write(e.data);
+    else s.term.write(new Uint8Array(e.data));
+    scheduleThumb(s); // content grew — resize/reposition the thumb
+  };
+  s.ws.onopen = () => refit(s);
+  s.ws.onclose = () => s.tab.classList.add("ended");
+}
+
+function addSession(id, name) {
+  const pane = document.createElement("div"); pane.className = "term-pane";
+  const host = document.createElement("div"); host.className = "term-host";
+  const sb = document.createElement("div"); sb.className = "sb";
+  const thumb = document.createElement("div"); thumb.className = "sb-thumb";
+  sb.appendChild(thumb); pane.appendChild(host); pane.appendChild(sb);
+  $("terms").appendChild(pane);
+  const tab = document.createElement("div"); tab.className = "tab";
+  const lbl = document.createElement("span"); lbl.className = "tab-label"; lbl.textContent = name;
+  const x = document.createElement("button"); x.className = "tab-close"; x.title = "Close session"; x.textContent = "×";
+  tab.appendChild(lbl); tab.appendChild(x);
+  $("tabs").appendChild(tab);
+  const s = { id, name, term: null, fit: null, search: null, ws: null, pane, host, sb, thumb, tab };
+  sessions.set(id, s);
+  tab.onclick = (e) => { if (e.target !== x) activate(id); };
+  x.onclick = (e) => { e.stopPropagation(); closeSession(id); };
+  buildTerm(s);
+  wireScrollbar(s);
+  connectWs(s);
+  activate(id);
+}
+
+function closeSession(id) {
+  const s = sessions.get(id); if (!s) return;
+  try { if (s.ws) s.ws.close(); } catch (_) {}
+  try { if (s.term) s.term.dispose(); } catch (_) {}
+  s.pane.remove(); s.tab.remove();
+  sessions.delete(id);
+  if (activeId === id) { const next = sessions.keys().next().value; if (next) activate(next); else activeId = null; }
+}
+
+// Ctrl+Shift+C/V copy-paste, Ctrl+F find on the given session. false = don't send the key on.
+function onKey(e, s) {
   if (e.type !== "keydown") return true;
   const k = e.key.toLowerCase();
-  if (e.ctrlKey && e.shiftKey && k === "c") {
-    const sel = term.getSelection();
-    if (sel) navigator.clipboard.writeText(sel).catch(() => {});
-    return false;
-  }
-  if (e.ctrlKey && e.shiftKey && k === "v") {
-    navigator.clipboard.readText().then((t) => { if (ws && ws.readyState === 1) ws.send(t); }).catch(() => {});
-    return false;
-  }
-  if (e.ctrlKey && k === "f") {
-    const q = window.prompt("Find in terminal:");
-    if (q) searchAddon.findNext(q);
-    return false;
-  }
+  if (e.ctrlKey && e.shiftKey && k === "c") { const sel = s.term.getSelection(); if (sel) navigator.clipboard.writeText(sel).catch(() => {}); return false; }
+  if (e.ctrlKey && e.shiftKey && k === "v") { navigator.clipboard.readText().then((t) => { if (s.ws && s.ws.readyState === 1) s.ws.send(t); }).catch(() => {}); return false; }
+  if (e.ctrlKey && k === "f") { const q = window.prompt("Find in terminal:"); if (q && s.search) s.search.findNext(q); return false; }
   return true;
 }
 
-function connectWs() {
-  const proto = location.protocol === "https:" ? "wss" : "ws";
-  ws = new WebSocket(proto + "://" + location.host + "/api/session/" + session + "/ws");
-  ws.binaryType = "arraybuffer";
-  ws.onmessage = (e) => {
-    if (typeof e.data === "string") term.write(e.data);
-    else term.write(new Uint8Array(e.data));
-  };
-  ws.onopen = () => refit();
-  ws.onerror = () => setMsg("Terminal connection error.", false);
-  ws.onclose = () => setMsg("Session ended.", false);
+async function sendResize(s) {
+  if (!s || !s.term) return;
+  try {
+    await fetch("/api/session/" + s.id + "/resize",
+      { method: "POST", body: JSON.stringify({ rows: s.term.rows, cols: s.term.cols }) });
+  } catch (_) {}
 }
 
 async function launch() {
@@ -242,23 +324,12 @@ async function launch() {
   setMsg("Launching…", true);
   try {
     const res = await api("/api/launch", { method: "POST", body: JSON.stringify(body) });
-    session = res.session;
-    if (!initTerm()) return;
-    term.reset(); term.focus();
-    if (ws) { try { ws.close(); } catch (_) {} }
-    connectWs();
+    const name = (a ? a.name : $("agent").value) + " · " + $("provider").value;
+    addSession(res.session, name);
     if (res.dangerousFlags && res.dangerousFlags.length)
       setMsg("Launched with elevated flags: " + res.dangerousFlags.join(", "), false);
-    else setMsg("Session running — type here. Ctrl+Shift+C/V copy-paste, Ctrl+F find.", true);
+    else setMsg("Session running — type in the terminal. Launch again for another tab. Ctrl+Shift+C/V, Ctrl+F.", true);
   } catch (e) { setMsg("Launch failed: " + e.message); }
-}
-
-async function sendResize(rows, cols) {
-  if (!session) return;
-  try {
-    await fetch("/api/session/" + session + "/resize",
-      { method: "POST", body: JSON.stringify({ rows, cols }) });
-  } catch (_) {}
 }
 
 $("agent").addEventListener("change", renderProviders);
