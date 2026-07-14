@@ -42,3 +42,7 @@ Interim posture recorded in ADR 0001. Invariants verified: no plaintext secrets 
 (✅). **Final production sign-off intentionally withheld — gated on CPE-296 (consent UX)
 and CPE-322 (macOS/Linux keychains).** Re-run this review and record sign-off when both are
 Done. Acceptance items 1/2/3/5 met; item 4 (sign-off) pending those two.
+2026-07-14 — Threat model extended (CPE-367) with **§7 Host-mediated network egress**, covering
+the `host.verify_key` key-check added in CPE-347 (SSRF containment via host-chosen allow-listed
+URL, key-in-transit, forged-verdict fail-safe, DoS timeout) + a new "no SSRF/arbitrary egress"
+invariant. Doc stays current with the code; final sign-off still gated on CPE-296 + CPE-322.

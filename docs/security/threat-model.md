@@ -1,15 +1,15 @@
 # Sidecar platform — threat model & security review (CPE-304)
 
 **Scope:** the whole sidecar boundary — IPC channel, capability broker, secrets broker,
-manifest trust, embedded UI/CSP, and spawned agent/MCP processes. **Method:** STRIDE per
-surface. **Status legend:** ✅ implemented & tested · 🟡 partial/gated · ⛔ not yet built
+manifest trust, embedded UI/CSP, spawned agent/MCP processes, and host-mediated network
+egress. **Method:** STRIDE per surface. **Status legend:** ✅ implemented & tested · 🟡 partial/gated · ⛔ not yet built
 (gap filed). This is a living document; re-run per new tenant sidecar using
 [`sidecar-review-checklist.md`](sidecar-review-checklist.md).
 
 > **Sign-off status: NOT production-signed-off.** The design mitigates every identified
 > threat, and the core is implemented and tested, but two mitigations are incomplete:
 > capability **consent UX** (CPE-296, ⛔ backend-ready/UI-pending) and **non-Windows
-> keychains** (CPE-322, 🟡). Production sign-off is gated on those. See §8.
+> keychains** (CPE-322, 🟡). Production sign-off is gated on those. See §9.
 
 ## Assets & trust boundaries
 
@@ -18,7 +18,8 @@ surface. **Status legend:** ✅ implemented & tested · 🟡 partial/gated · �
 - **Boundaries:** (a) explorer host ⇄ sidecar process (OS process boundary + IPC);
   (b) host ⇄ embedded sidecar UI (iframe origin boundary); (c) sidecar ⇄ spawned agent
   CLI / MCP server (PTY/child-process boundary); (d) first-party bundled manifests ⇄
-  user/third-party manifests (trust boundary).
+  user/third-party manifests (trust boundary); (e) host ⇄ external provider API on the
+  sidecar's behalf (allow-listed network egress, §7).
 - **Adversaries:** a malicious or compromised sidecar; a malicious agent manifest; a
   malicious page loaded in an embedded UI; a local process trying to impersonate a
   sidecar; a curious user reading logs/disk for secrets.
@@ -72,12 +73,26 @@ surface. **Status legend:** ✅ implemented & tested · 🟡 partial/gated · �
 
 | STRIDE | Threat | Mitigation | Status |
 |--------|--------|-----------|--------|
-| **E**oP | An agent CLI is arbitrary code with the user's privileges. | This is inherent to "run a coding agent" — the user explicitly launches it. Scoped by design: launched only from a consented manifest; `scope::dangerous_flags` surfaces risky flags; the agent runs as a child of the sidecar (its own crash/kill domain), not the host. | 🟡 (surfaced; a hard sandbox of the agent is out of scope — see §7) |
+| **E**oP | An agent CLI is arbitrary code with the user's privileges. | This is inherent to "run a coding agent" — the user explicitly launches it. Scoped by design: launched only from a consented manifest; `scope::dangerous_flags` surfaces risky flags; the agent runs as a child of the sidecar (its own crash/kill domain), not the host. | 🟡 (surfaced; a hard sandbox of the agent is out of scope — see §8) |
 | **I**nfo disclosure | Credentials injected into the agent's env leak. | Keys are resolved from the keychain and injected into the child env at spawn (`vault::resolve_env`), never written to disk or logged (`Redactor`). | ✅ |
 | **D**oS / orphans | Agent/MCP processes leak or wedge. | Supervisor spawn/kill/reap with restart policy; PTY drain avoids the ConPTY hang; MCP lifecycle is managed (`mcp`). | ✅ |
 | **Spoofing** | A rogue MCP server impersonates a trusted one. | MCP servers are declared per-agent manifest (trusted like the manifest, §4); no auto-discovery of arbitrary servers. | ✅ |
 
-## 7. Explicit non-goals / accepted risks
+## 7. Host-mediated network egress (key verification)
+
+The sidecar has no network client of its own. The single outbound path is the host performing a
+**host-chosen** provider key-check on the sidecar's behalf (`host.verify_key`, CPE-347) — the sidecar
+sends only `{provider, key}` and never a URL.
+
+| STRIDE | Threat | Mitigation | Status |
+|--------|--------|-----------|--------|
+| **E**oP / SSRF | A sidecar coerces the host into fetching an attacker-chosen URL (SSRF, port-scan, cloud-metadata endpoint). | The host maps `provider` → a URL from a fixed **allow-list** (OpenRouter/OpenAI/Anthropic key-check endpoints); it never accepts a URL from the sidecar. `host.verify_key` is a narrow key-check, so **no `Capability::Network`/`network.fetch` general-fetch primitive exists** to abuse. | ✅ |
+| **I**nfo disclosure | The API key leaks in transit or to the wrong host. | Sent over TLS (rustls) only to the allow-listed endpoint, in the provider's standard auth header; never logged (`Redactor` unchanged) and never echoed back in the verdict. | ✅ |
+| **T**ampering / spoofing | A MITM returns a forged "valid" to get a bad key stored. | The verdict is fail-safe: only a definitive 401/403 yields a live rejection; any **inconclusive** result (transport error, unexpected status, rate-limit) is reported `live:false` and is never upgraded to "verified", so a forged/failed response cannot produce a false green. Default rustls cert validation resists MITM. | ✅ |
+| **D**oS | A slow/hostile endpoint wedges host servicing. | 12s request timeout; the call runs on the per-sidecar servicing thread, so a stall is contained to that sidecar's capability servicing, not the explorer. | ✅ |
+| **Repudiation / privacy** | The check reveals the user is validating a key. | Only the key's own provider is contacted, only on an explicit "Check" click — no third party, no telemetry. | ✅ |
+
+## 8. Explicit non-goals / accepted risks
 
 - **The agent itself is trusted-by-user.** The platform's job is to isolate the *sidecar
   and secrets*, surface risk, and require consent — not to sandbox a coding agent the user
@@ -86,7 +101,7 @@ surface. **Status legend:** ✅ implemented & tested · 🟡 partial/gated · �
 - **Not sidecar-to-sidecar orchestration** — no cross-sidecar channel exists to attack
   (ADR 0001).
 
-## 8. Verification of the required invariants
+## 9. Verification of the required invariants
 
 | Invariant (from CPE-304) | Result |
 |--------------------------|--------|
@@ -95,8 +110,9 @@ surface. **Status legend:** ✅ implemented & tested · 🟡 partial/gated · �
 | No cross-sidecar reach | ✅ Per-process isolation; namespaced storage/secrets; no cross-sidecar channel. |
 | No unconsented code execution | 🟡 Trust/verification ✅; the interactive **consent gate UI is CPE-296 (⛔)**. Bundled first-party is auto-consented; user/third-party manifests must not run until CPE-296 lands. |
 | No UI escape to explorer | ✅ Sandboxed iframe; frame runs on its own loopback origin (≠ host origin), so cross-origin policy blocks host access even with `allow-same-origin` (CPE-334). |
+| No SSRF / arbitrary network egress from a sidecar | ✅ The only egress is the host-mediated key check, which hits an allow-listed provider endpoint; the sidecar can't supply a URL and no general fetch primitive exists (§7, CPE-347). |
 
-## 9. Gaps → tickets (sign-off blockers)
+## 10. Gaps → tickets (sign-off blockers)
 
 - **CPE-296** — capability & manifest **consent UX**. Until this ships, the "no unconsented
   code execution" invariant holds only because untrusted manifests are refused/auto-scope
