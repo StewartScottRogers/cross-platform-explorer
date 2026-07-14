@@ -39,6 +39,7 @@ pub(crate) fn cli_command(program: &str, args: &[String]) -> (String, Vec<String
 
 pub mod aggregate;
 pub mod agents;
+pub mod broker_client;
 pub mod console;
 pub mod history;
 pub mod http;
@@ -63,6 +64,7 @@ pub mod vault;
 pub use pty::{PtyLaunch, PtySession};
 
 pub use vault::{resolve_env, CredentialProfile, ProfileSet, SecretAccess};
+pub use broker_client::{BrokerClient, BrokerSecrets, MemSecrets, SharedWriter};
 
 pub use lmstudio::{detect as detect_lmstudio, LmStudio};
 

@@ -42,16 +42,48 @@ pub struct ConsoleState {
     /// Last-used selection per repo (cwd) — powers "remember my choice" in the UI.
     last_used: Mutex<HashMap<String, Value>>,
     seq: Mutex<u64>,
+    /// Provider keys / credential profiles, brokered to the OS keychain (CPE-344).
+    secrets: Arc<dyn crate::vault::SecretAccess + Send + Sync>,
+}
+
+/// The vault key a provider's shared API key is stored under (CPE-344/287). One key per
+/// provider, reused by every agent that launches against it.
+pub(crate) fn provider_secret_name(provider: &str) -> String {
+    format!("provider:{provider}")
+}
+
+/// Which API key a launch uses: an explicit one (typed for this launch) wins; otherwise the
+/// key stored for this provider; otherwise none (the agent's native login).
+pub(crate) fn resolve_provider_key(
+    secrets: &dyn crate::vault::SecretAccess,
+    provider: &str,
+    explicit: Option<String>,
+) -> Option<String> {
+    if explicit.is_some() {
+        return explicit;
+    }
+    secrets.get(&provider_secret_name(provider)).ok().flatten()
 }
 
 impl ConsoleState {
+    /// Standalone/dev state with an in-memory secrets store (no host broker).
     pub fn new(registry: AgentRegistry, default_cwd: String) -> Self {
+        Self::with_secrets(registry, default_cwd, Arc::new(crate::broker_client::MemSecrets::default()))
+    }
+
+    /// State wired to a real secrets backend (the host keychain broker, in production).
+    pub fn with_secrets(
+        registry: AgentRegistry,
+        default_cwd: String,
+        secrets: Arc<dyn crate::vault::SecretAccess + Send + Sync>,
+    ) -> Self {
         Self {
             registry,
             default_cwd,
             sessions: Mutex::new(HashMap::new()),
             last_used: Mutex::new(HashMap::new()),
             seq: Mutex::new(0),
+            secrets,
         }
     }
 
@@ -122,6 +154,9 @@ impl ConsoleState {
             Some(a) => a.clone(),
             None => return bad(format!("unknown agent '{agent_id}'")),
         };
+        // Use the provider's stored key when the user didn't type one this launch — one key
+        // shared across every agent using that provider (CPE-344/287).
+        let api_key = resolve_provider_key(&*self.secrets, &provider, api_key);
         // LM Studio local provider (CPE-330): auto-detect a reachable endpoint and adopt
         // its actually-loaded model, so "agent × lmstudio-local" launches with no manual
         // URL entry. Any value the caller pinned still wins; if nothing is detected the
@@ -420,6 +455,25 @@ mod tests {
     #[test]
     fn unknown_route_is_404() {
         assert_eq!(get(&state(), "/nope").status, 404);
+    }
+
+    #[test]
+    fn provider_key_resolution_precedence() {
+        use crate::broker_client::MemSecrets;
+        use crate::vault::SecretAccess;
+        let s = MemSecrets::default();
+        // Nothing stored, nothing typed → no key (native login).
+        assert_eq!(resolve_provider_key(&s, "openrouter", None), None);
+        // A stored key is used when the user didn't type one…
+        s.set(&provider_secret_name("openrouter"), "sk-stored").unwrap();
+        assert_eq!(resolve_provider_key(&s, "openrouter", None).as_deref(), Some("sk-stored"));
+        // …but an explicit key always wins…
+        assert_eq!(
+            resolve_provider_key(&s, "openrouter", Some("sk-typed".into())).as_deref(),
+            Some("sk-typed"),
+        );
+        // …and a different provider isn't affected (namespaced by name).
+        assert_eq!(resolve_provider_key(&s, "anthropic", None), None);
     }
 
     // Real end-to-end WebSocket test: launch an echo "agent", connect a WS client, and
