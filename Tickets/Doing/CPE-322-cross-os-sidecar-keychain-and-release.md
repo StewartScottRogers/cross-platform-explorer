@@ -48,3 +48,8 @@ build clean locally, and **CI compiles the real mac/Linux keyring code on the ma
 ubuntu-latest runners**. **Remaining:** (2) a runtime round-trip on a real macOS/Linux desktop
 (store/get/delete a secret against the live Keychain / Secret Service — can't be done headlessly);
 (3+4) per-OS sidecar bundling + release matrix → folded into [[CPE-382]] (ship the platform).
+2026-07-14 — CI verified: macOS (`apple-native`) compiles clean on the runner. Linux
+`sync-secret-service` links **libdbus** (`libdbus-sys`), so it needs `libdbus-1-dev` + `pkg-config`
+at build time — added to the CI Sidecar job. **The Linux release build (CPE-382) must install the
+same** (`sudo apt-get install libdbus-1-dev pkg-config`). dbus is universal on Linux desktops at
+runtime, so no end-user impact.
