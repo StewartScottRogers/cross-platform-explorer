@@ -37,7 +37,9 @@ pub fn run_all(
             let result = match action {
                 Action::Install => install(agent, runner),
                 Action::Update => update(agent, runner),
-                Action::Uninstall => uninstall(agent, runner),
+                // Batch uninstall assumes the caller ensured no session is live; a
+                // session-aware route can pass the real `running` state (CPE-331).
+                Action::Uninstall => uninstall(agent, runner, false),
             };
             match result {
                 Ok(_) => AgentOutcome { id: agent.id.clone(), ok: true, error: None },

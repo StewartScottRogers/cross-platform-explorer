@@ -6,6 +6,8 @@
 //! system; [`RealRunner`] does the actual `std::process` call. No shell scripts — Rust
 //! runs the probe and parses the result.
 
+use std::path::{Path, PathBuf};
+
 use crate::agents::{AgentManifest, OsCommand};
 
 /// The captured result of running a command.
@@ -204,14 +206,68 @@ pub fn update(agent: &AgentManifest, runner: &dyn CommandRunner) -> Result<Comma
     }
 }
 
-/// Uninstall the agent by running its per-OS `uninstall` recipe via `runner`
-/// (CPE-283). Never removes prerequisites shared by other agents — the recipe should
-/// remove only the agent's own package.
-pub fn uninstall(agent: &AgentManifest, runner: &dyn CommandRunner) -> Result<CommandOutput, String> {
+/// The `~/.local/bin` directory where native-installer CLIs land (CPE-331).
+fn native_bin_dir(home: &Path) -> PathBuf {
+    home.join(".local").join("bin")
+}
+
+/// Candidate native-binary paths for a CLI named `cli`, in probe order. Windows also
+/// carries the `.exe` (checked first, as that's what native installers drop).
+fn native_binary_candidates(home: &Path, cli: &str, windows: bool) -> Vec<PathBuf> {
+    let dir = native_bin_dir(home);
+    let name = Path::new(cli).file_name().and_then(|s| s.to_str()).unwrap_or(cli);
+    if windows {
+        vec![dir.join(format!("{name}.exe")), dir.join(name)]
+    } else {
+        vec![dir.join(name)]
+    }
+}
+
+/// Remove a native-installer binary left behind alongside the npm package, if present.
+/// Returns the path removed, or None if there was nothing to remove.
+fn remove_native_binary(home: &Path, cli: &str, windows: bool) -> Option<PathBuf> {
+    native_binary_candidates(home, cli, windows)
+        .into_iter()
+        .find(|p| p.is_file() && std::fs::remove_file(p).is_ok())
+}
+
+/// The user's home directory, from the platform env var.
+fn home_root() -> Option<PathBuf> {
+    std::env::var_os("USERPROFILE")
+        .or_else(|| std::env::var_os("HOME"))
+        .map(PathBuf::from)
+}
+
+/// Uninstall the agent (CPE-283, hardened in CPE-331). Refuses while a session is live
+/// (`running`) so the CLI is never half-removed. Runs the per-OS `uninstall` recipe (the
+/// npm/pip package) AND removes any native-installer binary the recipe leaves behind
+/// (`~/.local/bin/<cli>[.exe]`), reporting what was removed. Never touches prerequisites
+/// shared by other agents or the user's config — only the agent's own artifacts.
+pub fn uninstall(
+    agent: &AgentManifest,
+    runner: &dyn CommandRunner,
+    running: bool,
+) -> Result<CommandOutput, String> {
+    if running {
+        return Err(format!(
+            "'{}' has a running session — close it before uninstalling to avoid a half-removed state.",
+            agent.name
+        ));
+    }
     let cmd = agent
         .uninstall_for_current_os()
         .ok_or_else(|| format!("agent '{}' has no uninstall recipe for this OS", agent.id))?;
-    run_step(agent, "uninstall", cmd, runner)
+    let mut out = run_step(agent, "uninstall", cmd, runner)?;
+
+    // Also remove a native-installer binary (e.g. from a curl|sh install), which the
+    // npm-based recipe would otherwise leave behind — the CPE-331 defect.
+    if let (Some(cli), Some(home)) = (agent.run_for_current_os().map(|c| c.command.clone()), home_root()) {
+        match remove_native_binary(&home, &cli, cfg!(windows)) {
+            Some(removed) => out.stdout.push_str(&format!("\nAlso removed native binary: {}", removed.display())),
+            None => out.stdout.push_str("\nNo native-installer binary found."),
+        }
+    }
+    Ok(out)
 }
 
 fn run_step(
@@ -483,9 +539,51 @@ mod tests {
 
     #[test]
     fn uninstall_succeeds_and_errors_appropriately() {
-        assert!(uninstall(&agent_with_uninstall(), &ok_runner()).is_ok());
+        assert!(uninstall(&agent_with_uninstall(), &ok_runner(), false).is_ok());
         // No uninstall recipe → error.
-        let err = uninstall(&agent_with_install(false), &ok_runner()).unwrap_err();
+        let err = uninstall(&agent_with_install(false), &ok_runner(), false).unwrap_err();
         assert!(err.contains("no uninstall recipe"));
+    }
+
+    #[test]
+    fn uninstall_refuses_while_a_session_is_running() {
+        let err = uninstall(&agent_with_uninstall(), &ok_runner(), true).unwrap_err();
+        assert!(err.contains("running session"));
+        // The recipe must NOT have run — guard bails first. (ok_runner would have said "ok".)
+        assert!(!err.contains("ok"));
+    }
+
+    #[test]
+    fn native_binary_candidates_cover_exe_first_on_windows() {
+        let home = Path::new("/home/u");
+        let win = native_binary_candidates(home, "claude", true);
+        assert_eq!(win[0], home.join(".local").join("bin").join("claude.exe"));
+        assert_eq!(win[1], home.join(".local").join("bin").join("claude"));
+        let unix = native_binary_candidates(home, "claude", false);
+        assert_eq!(unix, vec![home.join(".local").join("bin").join("claude")]);
+    }
+
+    #[test]
+    fn native_binary_candidates_use_only_the_leaf_name() {
+        // A run command given as a path still probes ~/.local/bin/<leaf>.
+        let home = Path::new("/home/u");
+        let c = native_binary_candidates(home, "/opt/x/claude", false);
+        assert_eq!(c, vec![home.join(".local").join("bin").join("claude")]);
+    }
+
+    #[test]
+    fn remove_native_binary_deletes_an_existing_file_and_reports_none_otherwise() {
+        let home = tempfile::tempdir().unwrap();
+        let bindir = native_bin_dir(home.path());
+        std::fs::create_dir_all(&bindir).unwrap();
+        let exe = bindir.join("claude");
+        std::fs::write(&exe, b"#!/bin/sh\n").unwrap();
+
+        let removed = remove_native_binary(home.path(), "claude", false);
+        assert_eq!(removed.as_deref(), Some(exe.as_path()));
+        assert!(!exe.exists());
+
+        // Second call: nothing left to remove.
+        assert!(remove_native_binary(home.path(), "claude", false).is_none());
     }
 }
