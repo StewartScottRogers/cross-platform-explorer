@@ -16,6 +16,8 @@
   export let openIcon = "folder";
   /** Whether the selected folder is pinned to Home — toggles Pin/Unpin (CPE-249). */
   export let pinned = false;
+  /** Whether the single selected item is a favorite — toggles the label (CPE-338). */
+  export let favorited = false;
   /** True when the selection can be packed into a .zip (CPE-251). */
   export let compressible = false;
   /** True when exactly one archive file is selected — enables Extract (CPE-252). */
@@ -134,6 +136,11 @@
     {#if folderSelected}
       <button class="row" role="menuitem" on:click={() => run("pin")}>
         <Icon name="pin" size={15} /> {pinned ? "Unpin from Home" : "Pin to Home"}
+      </button>
+    {/if}
+    {#if selectionCount === 1}
+      <button class="row" role="menuitem" on:click={() => run("favorite")}>
+        <Icon name="star" size={15} /> {favorited ? "Remove from Favorites" : "Add to Favorites"}
       </button>
     {/if}
     <div class="sep" />

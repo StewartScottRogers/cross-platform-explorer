@@ -13,7 +13,7 @@
  * crashing the app on launch.
  */
 import { invoke } from "@tauri-apps/api/core";
-import type { ViewMode, SortKey, SortDir, RecentFile } from "./types";
+import type { ViewMode, SortKey, SortDir, RecentFile, Favorite } from "./types";
 
 export const KEYS = {
   view: "cpe.view",
@@ -26,6 +26,7 @@ export const KEYS = {
   rightWidth: "cpe.rightWidth",
   pins: "cpe.pins",
   recents: "cpe.recents",
+  favorites: "cpe.favorites",
 } as const;
 
 const MAX_RECENTS = 20;
@@ -127,6 +128,16 @@ const isRecentArray = (v: unknown): v is RecentFile[] =>
       typeof (x as RecentFile).name === "string" &&
       typeof (x as RecentFile).opened === "number",
   );
+const isFavoriteArray = (v: unknown): v is Favorite[] =>
+  Array.isArray(v) &&
+  v.every(
+    (x) =>
+      x &&
+      typeof x === "object" &&
+      typeof (x as Favorite).path === "string" &&
+      typeof (x as Favorite).name === "string" &&
+      typeof (x as Favorite).is_dir === "boolean",
+  );
 
 export const loadView = (): ViewMode => read(KEYS.view, "details", isView);
 export const saveView = (v: ViewMode) => write(KEYS.view, v);
@@ -159,6 +170,9 @@ export const savePins = (v: string[]) => write(KEYS.pins, v);
 export const loadRecents = (): RecentFile[] => read(KEYS.recents, [], isRecentArray);
 export const saveRecents = (v: RecentFile[]) => write(KEYS.recents, v);
 
+export const loadFavorites = (): Favorite[] => read(KEYS.favorites, [], isFavoriteArray);
+export const saveFavorites = (v: Favorite[]) => write(KEYS.favorites, v);
+
 /** Reset every stored preference to its default (used by the app Settings gear). */
 export function resetSettings(): void {
   state = {};
@@ -186,4 +200,17 @@ export function togglePin(pins: string[], path: string): string[] {
   return pins.includes(path)
     ? pins.filter((p) => p !== path)
     : [...pins, path];
+}
+
+/**
+ * Toggle an item's favorite state, keyed by path. Removing wins when present;
+ * otherwise the entry (file or folder) is appended, newest last.
+ */
+export function toggleFavorite(
+  favorites: Favorite[],
+  entry: { path: string; name: string; is_dir: boolean },
+): Favorite[] {
+  return favorites.some((f) => f.path === entry.path)
+    ? favorites.filter((f) => f.path !== entry.path)
+    : [...favorites, { path: entry.path, name: entry.name, is_dir: entry.is_dir }];
 }

@@ -28,3 +28,10 @@ export interface RecentFile {
   /** Epoch ms when it was last opened from this app. */
   opened: number;
 }
+
+export interface Favorite {
+  path: string;
+  name: string;
+  /** Folders navigate on click; files open. */
+  is_dir: boolean;
+}
