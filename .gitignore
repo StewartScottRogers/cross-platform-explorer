@@ -30,3 +30,6 @@ updater.pw
 
 # Sub-agent worktrees (transient; never commit)
 .claude/worktrees/
+
+# Generated catalog bundle (produced by CI / catalog-sign)
+catalog-out/
