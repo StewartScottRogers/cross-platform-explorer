@@ -66,15 +66,75 @@ pub fn interpret_status(status: u16) -> Verdict {
     }
 }
 
+/// The bare host of a URL (no scheme, userinfo, port, or path). Pure — used to match against
+/// `NO_PROXY` and to pick a proxy per request.
+pub fn host_of(url: &str) -> &str {
+    let after = url.split_once("://").map(|(_, r)| r).unwrap_or(url);
+    let host_port = after.split(['/', '?', '#']).next().unwrap_or(after);
+    let host_port = host_port.rsplit_once('@').map(|(_, h)| h).unwrap_or(host_port);
+    host_port.split(':').next().unwrap_or(host_port)
+}
+
+/// True if `host` is excluded from proxying by a `NO_PROXY` list (comma/space separated). Entries
+/// match case-insensitively by exact host, by domain suffix (a bare or dot-prefixed domain covers
+/// its subdomains), or `*` (everything). Pure.
+pub fn host_matches_no_proxy(host: &str, list: &str) -> bool {
+    let h = host.trim_end_matches('.').to_ascii_lowercase();
+    for raw in list.split([',', ' ']).map(str::trim).filter(|s| !s.is_empty()) {
+        if raw == "*" {
+            return true;
+        }
+        let entry = raw.trim_start_matches('.').trim_end_matches('.').to_ascii_lowercase();
+        if !entry.is_empty() && (h == entry || h.ends_with(&format!(".{entry}"))) {
+            return true;
+        }
+    }
+    false
+}
+
+/// Resolve the proxy URL for an HTTPS request to `host` from environment-style lookups, following
+/// the de-facto curl convention: `NO_PROXY` excludes a host; otherwise `HTTPS_PROXY` then
+/// `ALL_PROXY` (either case) selects the proxy. `None` = connect directly. `env` is injected so
+/// this is pure and unit-testable. The key never reaches the proxy in cleartext — HTTPS is
+/// tunnelled through a CONNECT, so the proxy sees only the host, not the auth header.
+pub fn resolve_proxy<F: Fn(&str) -> Option<String>>(host: &str, env: F) -> Option<String> {
+    let no_proxy = env("NO_PROXY").or_else(|| env("no_proxy"));
+    if let Some(list) = no_proxy {
+        if host_matches_no_proxy(host, &list) {
+            return None;
+        }
+    }
+    ["HTTPS_PROXY", "https_proxy", "ALL_PROXY", "all_proxy"]
+        .into_iter()
+        .find_map(env)
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+}
+
+/// Whether an offline-mode value is truthy (`1`/`true`/`yes`/`on`, case-insensitive). Pure.
+pub fn is_offline(val: Option<String>) -> bool {
+    matches!(
+        val.as_deref().map(|s| s.trim().to_ascii_lowercase()).as_deref(),
+        Some("1" | "true" | "yes" | "on")
+    )
+}
+
 /// Ask the provider whether `key` is valid, making the single allow-listed GET. Returns a
-/// [`Verdict`]; `live:false` when there is no endpoint for `provider` or the call couldn't
-/// complete. Only compiled with the sidecar platform (needs the optional `ureq` dependency).
+/// [`Verdict`]; `live:false` when offline, when there is no endpoint for `provider`, or when the
+/// call couldn't complete. Honours `CPE_OFFLINE` and `HTTPS_PROXY`/`ALL_PROXY`/`NO_PROXY` (CPE-369).
+/// Only compiled with the sidecar platform (needs the optional `ureq` dependency).
 #[cfg(feature = "sidecar-platform")]
 pub fn verify_live(provider: &str, key: &str) -> Verdict {
+    // Offline / air-gapped: make no outbound call at all, and say so (never a failed check).
+    if is_offline(std::env::var("CPE_OFFLINE").ok()) {
+        return (true, false, "Offline mode — key not checked with the provider.".into());
+    }
     let Some(ep) = verify_endpoint(provider) else {
         return (true, false, format!("No live check available for \"{provider}\"."));
     };
-    let mut req = ureq::get(ep.url)
+    let agent = build_agent(host_of(ep.url));
+    let mut req = agent
+        .get(ep.url)
         .timeout(std::time::Duration::from_secs(12))
         .set(ep.auth_header, &format!("{}{}", ep.auth_prefix, key));
     for (k, v) in ep.extra {
@@ -88,6 +148,19 @@ pub fn verify_live(provider: &str, key: &str) -> Verdict {
             (true, false, format!("Couldn't reach the provider ({}).", transport_reason(&t)))
         }
     }
+}
+
+/// A ureq agent that routes through the system proxy for `host` when one is configured (CPE-369).
+/// A malformed proxy URL is ignored (connect directly) rather than failing the check.
+#[cfg(feature = "sidecar-platform")]
+fn build_agent(host: &str) -> ureq::Agent {
+    let mut builder = ureq::AgentBuilder::new();
+    if let Some(proxy_url) = resolve_proxy(host, |k| std::env::var(k).ok()) {
+        if let Ok(proxy) = ureq::Proxy::new(&proxy_url) {
+            builder = builder.proxy(proxy);
+        }
+    }
+    builder.build()
 }
 
 /// A short, user-facing reason from a ureq transport error, without leaking the target URL.
@@ -138,5 +211,65 @@ mod tests {
             let (valid, live, _) = interpret_status(code);
             assert!(valid && !live, "HTTP {code} should be inconclusive, not a rejection");
         }
+    }
+
+    #[test]
+    fn host_of_strips_scheme_port_userinfo_and_path() {
+        assert_eq!(host_of("https://openrouter.ai/api/v1/key"), "openrouter.ai");
+        assert_eq!(host_of("https://user:pw@api.openai.com:443/v1/models"), "api.openai.com");
+        assert_eq!(host_of("api.anthropic.com"), "api.anthropic.com");
+    }
+
+    #[test]
+    fn no_proxy_matches_exact_suffix_and_wildcard() {
+        assert!(host_matches_no_proxy("api.openai.com", "api.openai.com"));
+        assert!(host_matches_no_proxy("api.openai.com", ".openai.com")); // domain suffix
+        assert!(host_matches_no_proxy("api.openai.com", "openai.com")); // bare domain covers subs
+        assert!(host_matches_no_proxy("anything", "*"));
+        assert!(host_matches_no_proxy("a.corp", "example.com, corp")); // list, spaces
+        assert!(!host_matches_no_proxy("api.openai.com", "openai.org"));
+        assert!(!host_matches_no_proxy("notopenai.com", "openai.com")); // not a real suffix
+    }
+
+    #[test]
+    fn resolve_proxy_prefers_https_then_all_and_honours_no_proxy() {
+        let env = |map: &[(&str, &str)]| {
+            let owned: Vec<(String, String)> =
+                map.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect();
+            move |k: &str| owned.iter().find(|(ek, _)| ek == k).map(|(_, v)| v.clone())
+        };
+        // HTTPS_PROXY selected.
+        assert_eq!(
+            resolve_proxy("openrouter.ai", env(&[("HTTPS_PROXY", "http://p:8080")])),
+            Some("http://p:8080".into())
+        );
+        // ALL_PROXY as fallback when no HTTPS_PROXY.
+        assert_eq!(
+            resolve_proxy("openrouter.ai", env(&[("ALL_PROXY", "http://all:3128")])),
+            Some("http://all:3128".into())
+        );
+        // NO_PROXY excludes the host → direct.
+        assert_eq!(
+            resolve_proxy(
+                "openrouter.ai",
+                env(&[("HTTPS_PROXY", "http://p:8080"), ("NO_PROXY", "openrouter.ai")])
+            ),
+            None
+        );
+        // Nothing configured → direct.
+        assert_eq!(resolve_proxy("openrouter.ai", env(&[])), None);
+        // Empty value is ignored.
+        assert_eq!(resolve_proxy("openrouter.ai", env(&[("HTTPS_PROXY", "  ")])), None);
+    }
+
+    #[test]
+    fn offline_flag_parsing() {
+        for v in ["1", "true", "YES", "On"] {
+            assert!(is_offline(Some(v.into())), "{v} should be offline");
+        }
+        for v in ["0", "false", "", "off"] {
+            assert!(!is_offline(Some(v.into())), "{v} should not be offline");
+        }
+        assert!(!is_offline(None));
     }
 }
