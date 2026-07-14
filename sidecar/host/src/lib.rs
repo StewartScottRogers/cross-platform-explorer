@@ -12,6 +12,7 @@
 //! fatal) — mirroring the explorer's skip-on-error listing rule.
 
 pub mod broker;
+pub mod catalog;
 pub mod conformance;
 pub mod consent;
 pub mod enablement;
