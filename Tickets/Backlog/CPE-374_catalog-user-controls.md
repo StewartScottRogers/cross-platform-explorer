@@ -25,7 +25,8 @@ catalog version.
 - [ ] Panel gets the standard visible border; visual QA noted (launcher UI isn't headlessly verifiable).
 
 ## Notes
-Depends on [[CPE-375]] (fetch+reload) → [[CPE-373]] → [[CPE-372]]. `needs-prereq` until CPE-375 lands.
+Depends on [[CPE-376]] (fetch) → [[CPE-375]] (reload) → [[CPE-373]]/[[CPE-372]]. `needs-prereq`
+until the fetch path (CPE-376) lands.
 
 ## Work Log
 2026-07-14 — Filed as slice 3 of CPE-308 part 2.
