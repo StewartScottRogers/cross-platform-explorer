@@ -61,6 +61,19 @@
               border-radius: 5px; cursor: grab; }
   .sb-thumb:hover { background: #8f8f8f; }
   .sb-thumb:active { cursor: grabbing; background: #a5a5a5; }
+  /* Scrollable "Session output" panel (CPE-385) — a read-only replay with the custom scrollbar. */
+  #scrollback-btn { position: absolute; top: 6px; right: 20px; z-index: 5; height: 26px;
+                    padding: 0 10px; font-size: 12px; opacity: .82; display: none; }
+  #scrollback-btn:hover { opacity: 1; }
+  #scrollback-overlay { position: fixed; inset: 0; background: rgba(0,0,0,.5); display: grid;
+                        place-items: center; z-index: 70; }
+  #scrollback-overlay[hidden] { display: none; }
+  #scrollback-panel { width: 88vw; height: 82vh; background: Canvas; color: CanvasText;
+                      border: 1px solid rgba(128,128,128,.55); border-radius: 10px; padding: 14px 16px;
+                      box-shadow: 0 20px 50px rgba(0,0,0,.35); display: flex; flex-direction: column; }
+  #scrollback-body { position: relative; flex: 1; min-height: 0; margin-top: 8px; background: #0d0d0d;
+                     border-radius: 6px; overflow: hidden; }
+  #scrollback-host { position: absolute; left: 0; top: 0; bottom: 0; right: 14px; }
   /* Provider credential manager (CPE-346) */
   #keys-overlay { position: fixed; inset: 0; background: rgba(0,0,0,.35); display: grid;
                   place-items: center; z-index: 50; }
@@ -170,7 +183,9 @@
   </div>
   <div id="msg">Pick an agent, provider and model, then Launch.</div>
   <div id="tabs"></div>
-  <div id="terms"></div>
+  <div id="terms">
+    <button id="scrollback-btn" type="button" title="Scroll through everything this session produced">⇕ Output</button>
+  </div>
 
   <!-- Provider credential manager (CPE-346). Values are write-only: saved to the OS
        keychain via the host, never read back into the UI. -->
@@ -211,6 +226,20 @@
         its saved output (secrets redacted).</p>
       <div id="history-list"></div>
       <pre id="history-transcript" hidden></pre>
+    </div>
+  </div>
+
+  <!-- Scrollable session-output replay (CPE-385): read-only terminal + the custom scrollbar. -->
+  <div id="scrollback-overlay" hidden>
+    <div id="scrollback-panel">
+      <div class="keys-head">
+        <span>Session output</span>
+        <button id="scrollback-close" type="button" class="keys-x" title="Close">×</button>
+      </div>
+      <div id="scrollback-body">
+        <div id="scrollback-host"></div>
+        <div class="sb" id="scrollback-sb"><div class="sb-thumb" id="scrollback-thumb"></div></div>
+      </div>
     </div>
   </div>
 
@@ -436,6 +465,7 @@ function refit(s) {
 
 function activate(id) {
   activeId = id;
+  $("scrollback-btn").style.display = "block"; // a session exists → offer the output panel (CPE-385)
   for (const s of sessions.values()) {
     const on = s.id === id;
     s.pane.style.display = on ? "block" : "none";
@@ -485,6 +515,64 @@ function wireScrollbar(s) {
     s.term.scrollToLine(Math.round((e.offsetY / (s.sb.clientHeight || 1)) * b.baseY));
   });
 }
+
+// --- Scrollable "Session output" panel (CPE-385): a read-only replay + the custom scrollbar ------
+let sbState = null; // { term, fit, sb, thumb } — wired once; the replay term is swapped per open.
+function base64ToBytes(b64) {
+  const bin = atob(b64 || "");
+  const a = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) a[i] = bin.charCodeAt(i);
+  return a;
+}
+// Strip alternate-screen enter/leave so a full-screen agent's output accumulates in the scrollable
+// main buffer (otherwise the replay would only show the last frame, like the live view).
+function stripAltScreen(bytes) {
+  let bin = "";
+  for (let i = 0; i < bytes.length; i++) bin += String.fromCharCode(bytes[i]);
+  bin = bin.replace(/\x1b\[\?(?:1049|1047|47)[hl]/g, "");
+  const out = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
+  return out;
+}
+function ensureSbWired() {
+  if (sbState) return;
+  sbState = { term: null, fit: null, sb: $("scrollback-sb"), thumb: $("scrollback-thumb") };
+  wireScrollbar(sbState); // closures read sbState.term live, so wiring once is enough
+  if (window.ResizeObserver) {
+    new ResizeObserver(() => {
+      if (sbState.term && sbState.fit) { try { sbState.fit.fit(); updateThumb(sbState); } catch (_) {} }
+    }).observe($("scrollback-host"));
+  }
+}
+async function openScrollback() {
+  if (!activeId) { setMsg("No active session.", false); return; }
+  try {
+    const data = await api("/api/session/" + activeId + "/output");
+    showScrollback(stripAltScreen(base64ToBytes(data.outputB64)));
+  } catch (e) { setMsg("Couldn't load output: " + e.message); }
+}
+function showScrollback(bytes) {
+  ensureSbWired();
+  if (sbState.term) { try { sbState.term.dispose(); } catch (_) {} }
+  $("scrollback-overlay").hidden = false;
+  const host = $("scrollback-host"); host.innerHTML = "";
+  const term = new Terminal({
+    fontFamily: "ui-monospace, Consolas, 'Cascadia Mono', monospace", fontSize: 13,
+    scrollback: 200000, disableStdin: true, theme: { background: "#0d0d0d", foreground: "#d8d8d8" },
+  });
+  const fit = new FitAddon.FitAddon(); term.loadAddon(fit);
+  term.open(host); fit.fit();
+  sbState.term = term; sbState.fit = fit;
+  term.onScroll(() => updateThumb(sbState));
+  term.write(bytes, () => { term.scrollToBottom(); updateThumb(sbState); });
+}
+function closeScrollback() {
+  $("scrollback-overlay").hidden = true;
+  if (sbState && sbState.term) { try { sbState.term.dispose(); } catch (_) {} sbState.term = null; }
+}
+$("scrollback-btn").addEventListener("click", openScrollback);
+$("scrollback-close").addEventListener("click", closeScrollback);
+$("scrollback-overlay").addEventListener("click", (e) => { if (e.target === $("scrollback-overlay")) closeScrollback(); });
 
 function connectWs(s) {
   const proto = location.protocol === "https:" ? "wss" : "ws";
