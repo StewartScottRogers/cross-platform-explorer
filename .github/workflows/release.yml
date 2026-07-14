@@ -105,3 +105,40 @@ jobs:
           args: ${{ matrix.args }}
           # Emit the updater manifest consumed by tauri.conf.json endpoints.
           includeUpdaterJson: true
+
+  # Sign + publish the agent-catalog bundle next to the installer (CPE-377/308), so the AI Console
+  # can refresh its agent roster without an app release. Runs once, after the installers. Guarded by
+  # the signing-key secret so it SKIPS (never fails) on repos that haven't set up catalog signing —
+  # exactly like the OS-code-signing pattern above.
+  catalog:
+    needs: release
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Detect catalog signing key
+        id: k
+        env:
+          KEY: ${{ secrets.CPE_CATALOG_SIGNING_KEY }}
+        run: |
+          if [ -n "$KEY" ]; then echo "has=true" >> "$GITHUB_OUTPUT"; else echo "has=false" >> "$GITHUB_OUTPUT"; fi
+
+      - name: Install Rust toolchain
+        if: steps.k.outputs.has == 'true'
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Build + sign the catalog bundle
+        if: steps.k.outputs.has == 'true'
+        env:
+          # A 32-byte ed25519 seed (hex). Generate once; its public key goes in CATALOG_TRUSTED_KEYS.
+          CPE_CATALOG_SIGNING_KEY: ${{ secrets.CPE_CATALOG_SIGNING_KEY }}
+        run: |
+          VERSION=$(date +%s)   # monotonic across releases → anti-rollback (CPE-372)
+          cargo run --release --quiet --manifest-path sidecar/host/Cargo.toml --bin catalog-sign -- \
+            sidecar/ai-console/agents catalog-out "$VERSION"
+
+      - name: Upload catalog assets to the release
+        if: steps.k.outputs.has == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: gh release upload "${{ github.ref_name }}" catalog-out/* --clobber

@@ -9,6 +9,11 @@ license = "MIT"
 # explorer wires this in later behind a feature flag (CPE-272), so the delete-test
 # holds — removing sidecars never touches the explorer build.
 
+# Release-time catalog signer (CPE-377): builds + signs the agent-catalog bundle.
+[[bin]]
+name = "catalog-sign"
+path = "src/bin/catalog_sign.rs"
+
 [dependencies]
 sidecar-contract = { path = "../contract" }
 serde = { version = "1", features = ["derive"] }
