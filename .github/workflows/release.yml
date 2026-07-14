@@ -127,6 +127,12 @@ jobs:
         if: steps.k.outputs.has == 'true'
         uses: dtolnay/rust-toolchain@stable
 
+      # The host crate's Linux keyring backend (CPE-322) links libdbus, so building any host
+      # binary on Linux — including catalog-sign — needs it.
+      - name: Install libdbus (host crate's Linux keyring dep)
+        if: steps.k.outputs.has == 'true'
+        run: sudo apt-get update && sudo apt-get install -y libdbus-1-dev pkg-config
+
       - name: Build + sign the catalog bundle
         if: steps.k.outputs.has == 'true'
         env:
