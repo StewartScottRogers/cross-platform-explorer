@@ -842,6 +842,25 @@
     showNotice(`Cut ${clipboard.paths.length} item${clipboard.paths.length === 1 ? "" : "s"}.`);
   }
 
+  /** Browse to a folder via the native picker and navigate there (CPE-366) — avoids
+      hand-typing a deep path in the address bar. */
+  async function browseForFolder() {
+    let dest: string | string[] | null;
+    try {
+      dest = await openFolderDialog({
+        directory: true,
+        multiple: false,
+        defaultPath: isHome ? undefined : currentPath,
+        title: "Go to folder…",
+      });
+    } catch {
+      return; // dialog unavailable / errored — no-op
+    }
+    if (!dest || typeof dest !== "string") return; // cancelled
+    if (archive) exitArchive();
+    navigate(dest);
+  }
+
   /** Copy or move the selection into a folder chosen from the native picker (CPE-355) —
       no cut/navigate/paste dance. A move leaves the current folder, so it reloads and is
       undoable; a copy only reloads when the destination is the folder in view. */
@@ -1705,6 +1724,7 @@
   on:forward={goForward}
   on:up={goUp}
   on:refresh={refresh}
+  on:browse={browseForFolder}
   on:navigate={(e) => onCrumbNavigate(e.detail)}
   on:search={(e) => { search = e.detail; selection = emptySelection(); }}
 />

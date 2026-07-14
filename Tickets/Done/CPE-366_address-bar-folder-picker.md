@@ -2,7 +2,8 @@
 id: CPE-366
 title: "Explorer address bar: add a Browse-folder picker (avoid typing mistakes)"
 type: Feature
-status: Open
+status: Done
+closed: 2026-07-14
 priority: Medium
 component: Frontend
 created: 2026-07-14
@@ -29,3 +30,12 @@ folder. (AI Console cwd — CPE-354 — and explorer Copy/Move-to — CPE-355 �
 
 ## Notes
 Filed from an app-wide path-input audit (user rule). See memory `path-inputs-need-picker`.
+
+2026-07-14 — Implemented on branch `CPE-366-address-folder-picker`.
+- `NavToolbar.svelte`: a folder button in the nav toolbar (after Refresh), always visible,
+  dispatching `browse`.
+- `App.svelte`: `browseForFolder()` opens `open({directory:true, defaultPath: currentPath})` and
+  navigates to the chosen folder (exits archive mode first; cancel is a no-op). Wired `on:browse`.
+- `NavToolbar.test.ts`: asserts the button dispatches `browse`.
+- `npm run check` 0 errors; suite 325 pass; `npm run build` ok. Every path input now offers a
+  native picker (address bar ✔, cwd ✔, Copy/Move-to ✔).
