@@ -26,8 +26,10 @@ export function compareEntries(
   b: DirEntry,
   key: SortKey,
   dir: SortDir,
+  foldersFirst = true,
 ): number {
-  if (a.is_dir !== b.is_dir) return a.is_dir ? -1 : 1;
+  // Directories float to the top unless the user opted into mixed sorting (CPE-359).
+  if (foldersFirst && a.is_dir !== b.is_dir) return a.is_dir ? -1 : 1;
 
   let cmp = 0;
   switch (key) {
@@ -48,7 +50,13 @@ export function compareEntries(
   return dir === "asc" ? cmp : -cmp;
 }
 
-/** Return a new array of entries sorted for display. Does not mutate the input. */
-export function sortEntries(entries: DirEntry[], key: SortKey, dir: SortDir): DirEntry[] {
-  return [...entries].sort((a, b) => compareEntries(a, b, key, dir));
+/** Return a new array of entries sorted for display. Does not mutate the input.
+    `foldersFirst` (default true) floats directories above files (CPE-359). */
+export function sortEntries(
+  entries: DirEntry[],
+  key: SortKey,
+  dir: SortDir,
+  foldersFirst = true,
+): DirEntry[] {
+  return [...entries].sort((a, b) => compareEntries(a, b, key, dir, foldersFirst));
 }

@@ -19,6 +19,7 @@ import { COLUMN_DEFAULTS } from "./columns";
 export const KEYS = {
   view: "cpe.view",
   showHidden: "cpe.showHidden",
+  foldersFirst: "cpe.foldersFirst",
   sortKey: "cpe.sortKey",
   sortDir: "cpe.sortDir",
   showDetails: "cpe.showDetails",
@@ -147,6 +148,9 @@ export const saveView = (v: ViewMode) => write(KEYS.view, v);
 
 export const loadShowHidden = (): boolean => read(KEYS.showHidden, false, isBool);
 export const saveShowHidden = (v: boolean) => write(KEYS.showHidden, v);
+
+export const loadFoldersFirst = (): boolean => read(KEYS.foldersFirst, true, isBool);
+export const saveFoldersFirst = (v: boolean) => write(KEYS.foldersFirst, v);
 
 export const loadSortKey = (): SortKey => read(KEYS.sortKey, "name", isSortKey);
 export const saveSortKey = (v: SortKey) => write(KEYS.sortKey, v);

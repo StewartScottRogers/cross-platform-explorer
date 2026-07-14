@@ -97,3 +97,27 @@ describe("compareEntries", () => {
     expect(compareEntries(entry({ name: "same" }), entry({ name: "same" }), "name", "asc")).toBe(0);
   });
 });
+
+describe("foldersFirst toggle (CPE-359)", () => {
+  const items = [
+    entry({ name: "banana.txt", is_dir: false }),
+    entry({ name: "Apples", is_dir: true }),
+    entry({ name: "cherry.md", is_dir: false }),
+  ];
+
+  it("floats folders above files by default", () => {
+    expect(names(sortEntries(items, "name", "asc"))).toEqual(["Apples", "banana.txt", "cherry.md"]);
+  });
+
+  it("interleaves folders and files alphabetically when foldersFirst is off", () => {
+    expect(names(sortEntries(items, "name", "asc", false))).toEqual(["Apples", "banana.txt", "cherry.md"]);
+    // A folder that sorts later stays later when mixed:
+    const mixed = [
+      entry({ name: "zeta", is_dir: true }),
+      entry({ name: "alpha.txt", is_dir: false }),
+    ];
+    expect(names(sortEntries(mixed, "name", "asc", false))).toEqual(["alpha.txt", "zeta"]);
+    // …but with foldersFirst on, the folder leads regardless of name:
+    expect(names(sortEntries(mixed, "name", "asc", true))).toEqual(["zeta", "alpha.txt"]);
+  });
+});
