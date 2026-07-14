@@ -37,3 +37,14 @@ the catalog publish/verify loop works, but shipped apps can't fetch until the pl
 
 ## Work Log
 2026-07-14 — Filed after confirming no sidecar bundling exists + the threat-model gate.
+
+## Work Log
+2026-07-14 — Found this is ~80% built: `tauri.sidecar.conf.json` (bundles ai-console + sidecar.json
++ agents as resources, distinct "(Sidecar)" product identity) and `release-sidecar.yml` (manual,
+draft-only Windows channel) already exist and work. The gate was "cross-OS blocked on CPE-322" —
+now done. **Extended to cross-OS:** split the overlay into base + `tauri.sidecar.windows.conf.json`
++ `tauri.sidecar.unix.conf.json` (per-OS binary name), and matrixed `release-sidecar.yml` to
+Windows + Linux (+ webkit/libdbus) + macOS (native-arch). Manual + draft-only, so no impact on the
+auto-release. Verifying via a draft `workflow_dispatch` run. Remaining: runtime QA of the AI Console
+in each installed OS build (Windows verifiable here; mac/Linux need hardware); the CPE-304 sign-off
+before making any sidecar release public.

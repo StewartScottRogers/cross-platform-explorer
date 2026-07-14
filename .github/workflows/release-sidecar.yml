@@ -1,22 +1,21 @@
 name: Release (sidecar-enabled)
 
 # Opt-in channel that builds the app WITH the sidecar platform + AI Console bundled in
-# (CPE-321). Separate from release.yml on purpose: the public release ships the plain,
+# (CPE-321/382). Separate from release.yml on purpose: the public release ships the plain,
 # sidecar-free explorer by default; this channel is a manual, draft-only preview of the
-# sidecar-enabled build while the console matures (placeholder UI; security sign-off
-# CPE-304 open).
+# sidecar-enabled build while the console matures (security sign-off CPE-304 open).
 #
 # Run it from the Actions tab ("Run workflow") and provide the release tag, e.g.
-# v0.11.0-sidecar. It publishes a DRAFT release you review before making public.
+# v0.11.0-sidecar. It publishes a DRAFT prerelease you review before making public.
 #
 # The overlay gives this build a distinct product identity — "Cross-Platform Explorer
 # (Sidecar)" / identifier ...crossplatformexplorer.sidecar (CPE-324) — so its installer is
 # a separate app that coexists with the plain release instead of colliding on version.
 #
-# Windows only for now: the feature compiles cross-OS, but the host's OS-keychain secrets
-# backend is Windows-only today, so macOS/Linux would fall back to in-memory secrets and
-# break the "secrets only in the OS keychain" invariant (ADR 0001 / CPE-268). Cross-OS is
-# gated on CPE-322 (macOS/Linux keychain backends).
+# Cross-OS (CPE-382): builds Windows, Linux, and macOS now that the host OS-keychain secrets
+# backend is cross-platform (CPE-322: Windows Credential Manager / macOS Keychain / Linux
+# Secret Service). macOS builds native-arch — the bundled sidecar is single-arch, so this
+# channel is not a universal binary (a preview-channel limitation). Linux links libdbus.
 
 on:
   workflow_dispatch:
@@ -32,7 +31,17 @@ permissions:
 
 jobs:
   release-sidecar:
-    runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: windows-latest
+            overlay: windows
+          - platform: ubuntu-latest
+            overlay: unix
+          - platform: macos-latest
+            overlay: unix
+    runs-on: ${{ matrix.platform }}
     steps:
       - uses: actions/checkout@v4
 
@@ -48,6 +57,18 @@ jobs:
             ./src-tauri -> target
             ./sidecar/ai-console -> target
 
+      - name: Install Linux system dependencies
+        if: matrix.platform == 'ubuntu-latest'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev \
+            libappindicator3-dev \
+            librsvg2-dev \
+            patchelf \
+            libdbus-1-dev \
+            pkg-config
+
       - name: Setup Node
         uses: actions/setup-node@v4
         with:
@@ -58,7 +79,7 @@ jobs:
         run: npm ci
 
       # The bundle overlay references the built sidecar binary as a resource, so it must
-      # exist before tauri-action packages the app.
+      # exist before tauri-action packages the app. Native-arch per runner.
       - name: Build the AI Console sidecar
         working-directory: sidecar/ai-console
         run: cargo build --release
@@ -79,8 +100,8 @@ jobs:
             Opt-in / draft channel — not part of the auto-update stream. See the assets below.
           releaseDraft: true
           prerelease: true
-          # Build with the sidecar feature + the bundle overlay (ships the compiled
-          # sidecar binary + its manifest + agent catalog into the app's resources).
-          args: --features sidecar-platform --config src-tauri/tauri.sidecar.conf.json
+          # Build with the sidecar feature + the base overlay (product identity) + the per-OS
+          # overlay (which bundles the correctly-named sidecar binary + manifest + agent catalog).
+          args: --features sidecar-platform --config src-tauri/tauri.sidecar.conf.json --config src-tauri/tauri.sidecar.${{ matrix.overlay }}.conf.json
           # Keep this channel out of the auto-update manifest (it's a manual preview).
           includeUpdaterJson: false
