@@ -301,6 +301,16 @@ impl ConsoleState {
         }
     }
 
+    /// Mark first-run onboarding as dismissed so it doesn't show again (CPE-312).
+    fn handle_onboarded(&self) -> Response {
+        let mut store = self.presets.load();
+        store.onboarded = true;
+        match self.presets.save(&store) {
+            Ok(()) => Response::json(json!({ "ok": true }).to_string()),
+            Err(e) => bad(e),
+        }
+    }
+
     // ---- launcher preset sets (CPE-353) ----
 
     /// Save (or update by name) a named set for an agent. The catalog already returns the
@@ -451,6 +461,7 @@ pub fn route(state: &ConsoleState, req: &Request) -> Response {
         ("POST", "/api/install") => state.handle_install(&req.body),
         ("POST", "/api/presets") => state.handle_preset_save(&req.body),
         ("POST", "/api/presets/delete") => state.handle_preset_delete(&req.body),
+        ("POST", "/api/onboarded") => state.handle_onboarded(),
         ("POST", "/api/pick-folder") => state.handle_pick_folder(),
         ("GET", "/api/keys") => state.handle_key_list(),
         ("POST", "/api/keys") => state.handle_key_set(&req.body),
@@ -684,6 +695,17 @@ mod tests {
         let cat2: Value = serde_json::from_slice(&get(&st, "/api/catalog").body).unwrap();
         let n = cat2["presets"]["agents"]["claude"]["presets"].as_array().map(|a| a.len()).unwrap_or(0);
         assert_eq!(n, 0);
+    }
+
+    #[test]
+    fn onboarding_flag_starts_false_and_persists_true() {
+        let st = state();
+        let cat: Value = serde_json::from_slice(&get(&st, "/api/catalog").body).unwrap();
+        assert_eq!(cat["presets"]["onboarded"], false);
+        let r = route(&st, &Request { method: "POST".into(), path: "/api/onboarded".into(), ..Default::default() });
+        assert_eq!(r.status, 200);
+        let cat2: Value = serde_json::from_slice(&get(&st, "/api/catalog").body).unwrap();
+        assert_eq!(cat2["presets"]["onboarded"], true);
     }
 
     // Real end-to-end WebSocket test: launch an echo "agent", connect a WS client, and

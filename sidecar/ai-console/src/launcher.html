@@ -77,6 +77,20 @@
   .key-row { display: flex; align-items: center; justify-content: space-between;
              padding: 6px 8px; border-top: 1px solid var(--line); font-size: 12.5px; }
   #keys-list:empty { display: none; }
+  /* First-run onboarding (CPE-312) */
+  #onboard-overlay { position: fixed; inset: 0; background: rgba(0,0,0,.4); display: grid;
+                     place-items: center; z-index: 60; }
+  #onboard-overlay[hidden] { display: none; }
+  #onboard-panel { width: 520px; max-width: 92vw; background: Canvas; color: CanvasText;
+                   border: 1px solid var(--line); border-radius: 12px; padding: 22px 24px;
+                   box-shadow: 0 24px 60px rgba(0,0,0,.4); }
+  #onboard-panel h2 { margin: 0 0 6px; font-size: 18px; }
+  #onboard-panel .lead { opacity: .8; margin: 0 0 14px; font-size: 13px; }
+  #onboard-panel ol { margin: 0 0 14px; padding-left: 20px; line-height: 1.6; font-size: 13px; }
+  #onboard-panel li { margin-bottom: 6px; }
+  #onboard-panel .sec { font-size: 11.5px; opacity: .7; line-height: 1.5; margin: 0 0 18px;
+                        border-top: 1px solid var(--line); padding-top: 12px; }
+  #onboard-go { min-width: 130px; }
 </style>
 </head>
 <body>
@@ -147,6 +161,23 @@
       </div>
       <div id="keys-msg"></div>
       <div id="keys-list"></div>
+    </div>
+  </div>
+
+  <!-- First-run onboarding (CPE-312). Shown once; dismissal persists via /api/onboarded. -->
+  <div id="onboard-overlay" hidden>
+    <div id="onboard-panel">
+      <h2>Welcome to the AI Console</h2>
+      <p class="lead">Run coding agents — Claude, Codex, Gemini and more — right here, scoped to a folder.</p>
+      <ol>
+        <li><b>Pick an agent</b> in the toolbar. If it says <i>not installed</i>, click <b>Install</b>.</li>
+        <li><b>Add a provider key</b> (optional) via <b>Keys…</b>. It's stored in your OS keychain,
+            never shown again, and reused automatically next time.</li>
+        <li>Choose a provider &amp; model, set the <b>Working folder</b> (or Browse…), then <b>Launch</b>.</li>
+      </ol>
+      <p class="sec">Your keys live in the OS keychain — never in a file. Each agent only gets the
+        capabilities you consent to.</p>
+      <button id="onboard-go" class="primary">Get started</button>
     </div>
   </div>
 
@@ -224,6 +255,16 @@ async function load() {
   renderProviders();
   applyLastUsed();
   renderPresets();
+  // First-run onboarding (CPE-312): show once until dismissed.
+  if (!presets.onboarded) $("onboard-overlay").hidden = false;
+}
+
+async function dismissOnboarding() {
+  $("onboard-overlay").hidden = true;
+  try {
+    await api("/api/onboarded", { method: "POST" });
+    if (catalog && catalog.presets) catalog.presets.onboarded = true;
+  } catch (_) {}
 }
 
 /** Apply the selected agent's remembered provider/model/small-model (CPE-352). Called on
@@ -524,6 +565,7 @@ async function pickFolder() {
   } catch (e) { setMsg("Couldn't open the folder picker: " + e.message); }
 }
 $("cwd-browse").addEventListener("click", pickFolder);
+$("onboard-go").addEventListener("click", dismissOnboarding);
 $("launch").addEventListener("click", launch);
 load().catch((e) => setMsg("Could not load catalog: " + e.message));
 </script>
