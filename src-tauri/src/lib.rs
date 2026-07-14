@@ -1885,7 +1885,7 @@ fn sidecar_details(app: tauri::AppHandle, state: tauri::State<AiConsoleState>) -
     let reg = sidecar_host::registry::Registry::load_from_dirs(&sidecar_dirs(&app));
     let consent = sidecar_host::consent::ConsentStore::load(&consent_dir(&app)?);
     let enablement = sidecar_host::enablement::EnablementStore::load(&consent_dir(&app)?);
-    let ai_running = state.0.lock().map(|g| g.is_some()).unwrap_or(false);
+    let ai_running = state.conn.lock().map(|g| g.is_some()).unwrap_or(false);
 
     Ok(reg
         .all()
@@ -1912,7 +1912,8 @@ fn sidecar_details(app: tauri::AppHandle, state: tauri::State<AiConsoleState>) -
 #[tauri::command]
 fn sidecar_stop(id: String, state: tauri::State<AiConsoleState>) -> Result<(), String> {
     if id == "ai-console" {
-        *state.0.lock().map_err(|_| "state lock poisoned")? = None;
+        *state.conn.lock().map_err(|_| "state lock poisoned")? = None;
+        state.log(sidecar_host::observability::LogLevel::Info, "stopped by user");
     }
     Ok(())
 }
@@ -1930,16 +1931,67 @@ fn sidecar_set_enabled(
     let mut store = sidecar_host::enablement::EnablementStore::load(&consent_dir(&app)?);
     store.set_enabled(&id, enabled).map_err(|e| e.to_string())?;
     if !enabled && id == "ai-console" {
-        *state.0.lock().map_err(|_| "state lock poisoned")? = None; // stop it now
+        *state.conn.lock().map_err(|_| "state lock poisoned")? = None; // stop it now
+        state.log(sidecar_host::observability::LogLevel::Info, "disabled by user");
     }
     Ok(())
 }
 
 /// Holds the live AI Console sidecar connection for the app's lifetime so it keeps
-/// running while its UI pane is mounted.
+/// running while its UI pane is mounted, plus the observability state the management
+/// panel surfaces (CPE-323): a bounded ring buffer of recent lifecycle log lines and the
+/// last error that stopped it from starting. Both are populated by
+/// `sidecar_start_ai_console` and read (redacted) by `sidecar_diagnostics`.
 #[cfg(feature = "sidecar-platform")]
-#[derive(Default)]
-struct AiConsoleState(std::sync::Mutex<Option<sidecar_host::supervisor::ProcessConnection>>);
+struct AiConsoleState {
+    conn: std::sync::Mutex<Option<sidecar_host::supervisor::ProcessConnection>>,
+    logs: sidecar_host::observability::LogCapture,
+    last_error: std::sync::Mutex<Option<String>>,
+}
+
+#[cfg(feature = "sidecar-platform")]
+impl Default for AiConsoleState {
+    fn default() -> Self {
+        Self {
+            conn: std::sync::Mutex::new(None),
+            // A small ring buffer: enough recent lines to diagnose a failed launch or
+            // crash without growing without bound (CPE-298).
+            logs: sidecar_host::observability::LogCapture::new(200),
+            last_error: std::sync::Mutex::new(None),
+        }
+    }
+}
+
+#[cfg(feature = "sidecar-platform")]
+impl AiConsoleState {
+    /// Append a lifecycle log line for the AI Console.
+    fn log(&self, level: sidecar_host::observability::LogLevel, message: impl Into<String>) {
+        self.logs.push(sidecar_host::observability::LogRecord {
+            correlation_id: 0,
+            sidecar_id: "ai-console".into(),
+            level,
+            message: message.into(),
+        });
+    }
+
+    /// Record (and log) the error that stopped the AI Console from starting, then return
+    /// it so callers can `?`/propagate the same string to the frontend.
+    fn fail(&self, message: impl Into<String>) -> String {
+        let message = message.into();
+        self.log(sidecar_host::observability::LogLevel::Error, message.clone());
+        if let Ok(mut slot) = self.last_error.lock() {
+            *slot = Some(message.clone());
+        }
+        message
+    }
+
+    /// Clear the last-error marker after a successful start.
+    fn clear_error(&self) {
+        if let Ok(mut slot) = self.last_error.lock() {
+            *slot = None;
+        }
+    }
+}
 
 /// Locate the bundled `ai-console` sidecar binary. Order: explicit override env var, the
 /// app's resource dir, then a dev-tree fallback. Returns an error string if not found so
@@ -1986,15 +2038,17 @@ fn sidecar_start_ai_console(
 ) -> Result<String, String> {
     use sidecar_contract::{Event, Message, CONTRACT_VERSION};
     use sidecar_host::conformance::SidecarChannel; // brings `.recv()` into scope
+    use sidecar_host::observability::LogLevel;
     use sidecar_host::supervisor::{handshake, spawn_process};
 
     // Respect the enable/disable toggle (CPE-274): a disabled sidecar must not start.
     if !sidecar_host::enablement::EnablementStore::load(&consent_dir(&app)?).is_enabled("ai-console") {
-        return Err("the AI Console is disabled".into());
+        return Err(state.fail("the AI Console is disabled"));
     }
 
-    let bin = resolve_ai_console_bin(&app)?;
-    let mut conn = spawn_process(&bin, &[])?;
+    state.log(LogLevel::Info, "starting ai-console");
+    let bin = resolve_ai_console_bin(&app).map_err(|e| state.fail(e))?;
+    let mut conn = spawn_process(&bin, &[]).map_err(|e| state.fail(format!("spawn failed: {e}")))?;
     let token = conn.launch_token().to_string();
 
     // Grant only what the user consented to (CPE-296). The frontend prompts for any
@@ -2003,7 +2057,8 @@ fn sidecar_start_ai_console(
     // denied by the broker).
     let consented = sidecar_host::consent::ConsentStore::load(&consent_dir(&app)?).granted("ai-console");
     handshake(&mut conn, CONTRACT_VERSION, &consented, Some(&token))
-        .map_err(|e| format!("handshake failed: {e:?}"))?;
+        .map_err(|e| state.fail(format!("handshake failed: {e:?}")))?;
+    state.log(LogLevel::Info, "handshake ok");
 
     // Read a bounded number of frames for the `ui:<url>` announcement.
     let mut url = None;
@@ -2020,9 +2075,82 @@ fn sidecar_start_ai_console(
             Err(_) => break,
         }
     }
-    let url = url.ok_or("the AI Console did not announce a UI")?;
-    *state.0.lock().map_err(|_| "state lock poisoned")? = Some(conn); // keep it alive
+    let url = url.ok_or_else(|| state.fail("the AI Console did not announce a UI"))?;
+    state.log(LogLevel::Info, format!("ui ready at {url}"));
+    state.clear_error(); // a clean start clears any prior failure marker
+    *state.conn.lock().map_err(|_| "state lock poisoned")? = Some(conn); // keep it alive
     Ok(url)
+}
+
+/// One redacted log line in a diagnostics response (CPE-323).
+#[cfg(feature = "sidecar-platform")]
+#[derive(serde::Serialize)]
+struct DiagLogLine {
+    /// Severity, snake_case (`info` / `warn` / `error` / …).
+    level: String,
+    /// The log message, run through the redactor — never contains a secret.
+    message: String,
+}
+
+/// A sidecar's health for the management panel (CPE-323): running state, the last error
+/// that stopped it (if any), and recent log lines. Every string here is redacted.
+#[cfg(feature = "sidecar-platform")]
+#[derive(serde::Serialize)]
+struct SidecarDiagnostics {
+    id: String,
+    running: bool,
+    /// The last start/crash error, redacted, or `None` if the sidecar is healthy.
+    last_error: Option<String>,
+    /// Recent log lines, oldest first, already redacted.
+    logs: Vec<DiagLogLine>,
+}
+
+/// Return a sidecar's last error and recent, REDACTED log lines for the management panel
+/// (CPE-323). Only the AI Console currently produces live logs; other registered sidecars
+/// return an empty (but valid) diagnostics record so the panel can render uniformly.
+///
+/// Redaction is defence-in-depth: every message runs through
+/// [`Redactor::redact_log_line`], which masks registered secrets *and* heuristic secret
+/// shapes (API-key prefixes, bearer tokens, `sensitive_key=value`), so a secret can never
+/// surface here even if one reached a log line.
+#[cfg(feature = "sidecar-platform")]
+#[tauri::command]
+fn sidecar_diagnostics(
+    id: String,
+    state: tauri::State<AiConsoleState>,
+) -> Result<SidecarDiagnostics, String> {
+    use sidecar_host::observability::Redactor;
+
+    let redactor = Redactor::new();
+    let is_ai_console = id == "ai-console";
+    let running = is_ai_console && state.conn.lock().map(|g| g.is_some()).unwrap_or(false);
+
+    let last_error = if is_ai_console {
+        state
+            .last_error
+            .lock()
+            .ok()
+            .and_then(|g| g.clone())
+            .map(|e| redactor.redact_log_line(&e))
+    } else {
+        None
+    };
+
+    let logs = if is_ai_console {
+        state
+            .logs
+            .recent()
+            .into_iter()
+            .map(|r| DiagLogLine {
+                level: format!("{:?}", r.level).to_ascii_lowercase(),
+                message: redactor.redact_log_line(&r.message),
+            })
+            .collect()
+    } else {
+        Vec::new()
+    };
+
+    Ok(SidecarDiagnostics { id, running, last_error, logs })
 }
 
 pub fn run() {
@@ -2114,7 +2242,9 @@ pub fn run() {
             #[cfg(feature = "sidecar-platform")]
             sidecar_set_enabled,
             #[cfg(feature = "sidecar-platform")]
-            sidecar_start_ai_console
+            sidecar_start_ai_console,
+            #[cfg(feature = "sidecar-platform")]
+            sidecar_diagnostics
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application");
