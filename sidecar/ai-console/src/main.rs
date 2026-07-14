@@ -54,7 +54,19 @@ fn console_state(
     dialogs: Arc<dyn HostDialogs>,
     history: Arc<dyn HistoryBackend>,
 ) -> Arc<ConsoleState> {
-    let registry = AgentRegistry::load_from_dirs(&[agents_dir()]);
+    let mut registry = AgentRegistry::load_from_dirs(&[agents_dir()]);
+    // Optionally layer a verified, user-pointed/fetched catalog over the bundled one (CPE-308
+    // part 1). Only manifests signed by a configured trusted key are accepted; unset ⇒ no-op.
+    if let Ok(dir) = std::env::var("CPE_AICONSOLE_CATALOG") {
+        let keys: Vec<String> = std::env::var("CPE_AICONSOLE_CATALOG_KEYS")
+            .unwrap_or_default()
+            .split([',', ' ', ';'])
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string)
+            .collect();
+        registry.load_signed_source(std::path::Path::new(&dir), &keys);
+    }
     let cwd = std::env::var("CPE_AICONSOLE_CWD")
         .ok()
         .or_else(|| std::env::current_dir().ok().map(|p| p.to_string_lossy().into_owned()))

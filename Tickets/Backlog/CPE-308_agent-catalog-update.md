@@ -32,3 +32,11 @@ changed install recipes arrive as data.
 
 ## Work Log
 2026-07-13 — Filed during epic-plan hardening.
+2026-07-14 — **Part 1 landed (CPE-371):** the trust gate + merge semantics — sidecar-local
+signature verification (`catalog::verify_manifest`, format-compatible with CPE-295) and
+`AgentRegistry::load_signed_source` (signed-only, override-by-id, additive/last-known-good), wired
+behind `CPE_AICONSOLE_CATALOG`. **Part 2 designed:** `docs/design/CPE-308-agent-catalog-updates.md`
+covers the remote subscription (host-authoritative fetch+verify, signed catalog index, key
+distribution/TOFU, auto-update/pin/rollback, offline-safe + anti-rollback, and the threat-model
+section). Stays `big-design` pending sign-off on the design's open questions (D1–D4); once signed
+off it splits into the 4 `ready` slices listed there.

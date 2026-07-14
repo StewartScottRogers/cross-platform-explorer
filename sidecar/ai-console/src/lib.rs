@@ -40,6 +40,7 @@ pub(crate) fn cli_command(program: &str, args: &[String]) -> (String, Vec<String
 pub mod aggregate;
 pub mod agents;
 pub mod broker_client;
+pub mod catalog;
 pub mod console;
 pub mod history;
 pub mod http;

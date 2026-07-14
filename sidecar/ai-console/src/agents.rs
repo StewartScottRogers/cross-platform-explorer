@@ -177,15 +177,74 @@ impl AgentRegistry {
             Ok(t) => t,
             Err(e) => return self.warn(path, format!("could not read: {e}")),
         };
-        let mut manifest: AgentManifest = match serde_json::from_str(&text) {
-            Ok(m) => m,
-            Err(e) => return self.warn(path, format!("invalid JSON/shape: {e}")),
-        };
-        if let Err(reason) = manifest.validate() {
-            return self.warn(path, reason);
+        match Self::parse_and_validate(&text) {
+            Ok(manifest) => self.insert_from(path, manifest),
+            Err(reason) => self.warn(path, reason),
         }
+    }
+
+    /// Parse + validate a manifest's JSON text, shared by the trusted (bundled) and verified
+    /// (signed source) loaders.
+    fn parse_and_validate(text: &str) -> Result<AgentManifest, String> {
+        let manifest: AgentManifest =
+            serde_json::from_str(text).map_err(|e| format!("invalid JSON/shape: {e}"))?;
+        manifest.validate()?;
+        Ok(manifest)
+    }
+
+    fn insert_from(&mut self, path: &Path, mut manifest: AgentManifest) {
         manifest.source_dir = path.parent().unwrap_or(path).to_path_buf();
         self.by_id.insert(manifest.id.clone(), manifest);
+    }
+
+    /// Load agent manifests from an **untrusted** source directory — a user-pointed or fetched
+    /// catalog (CPE-308 part 1). Unlike the bundled first-party dirs, each `*.json` here MUST have
+    /// a sibling `*.json.sig` (hex ed25519) that verifies against one of `trusted_keys`, or it is
+    /// skipped with a warning — an unsigned/tampered manifest can never inject an agent. Verified
+    /// manifests override existing ones by id (like a user dir). This is **additive**: a bad,
+    /// empty, or unverifiable source never removes already-loaded agents (last-known-good).
+    pub fn load_signed_source(&mut self, dir: &Path, trusted_keys: &[String]) {
+        let entries = match std::fs::read_dir(dir) {
+            Ok(e) => e,
+            Err(_) => return, // no source dir → nothing to add, existing catalog stands
+        };
+        let mut files: Vec<PathBuf> = entries
+            .filter_map(|e| e.ok().map(|e| e.path()))
+            .filter(|p| p.extension().map(|x| x == "json").unwrap_or(false))
+            .collect();
+        files.sort();
+        for path in files {
+            let bytes = match std::fs::read(&path) {
+                Ok(b) => b,
+                Err(e) => {
+                    self.warn(&path, format!("could not read: {e}"));
+                    continue;
+                }
+            };
+            let sig_path = PathBuf::from(format!("{}.sig", path.display()));
+            let sig = match std::fs::read_to_string(&sig_path) {
+                Ok(s) => s,
+                Err(_) => {
+                    self.warn(&path, "no signature (.sig) — refused from an untrusted source".into());
+                    continue;
+                }
+            };
+            if !crate::catalog::verify_manifest(&bytes, sig.trim(), trusted_keys) {
+                self.warn(&path, "signature did not verify against a trusted key".into());
+                continue;
+            }
+            let text = match String::from_utf8(bytes) {
+                Ok(t) => t,
+                Err(e) => {
+                    self.warn(&path, format!("not UTF-8: {e}"));
+                    continue;
+                }
+            };
+            match Self::parse_and_validate(&text) {
+                Ok(manifest) => self.insert_from(&path, manifest),
+                Err(reason) => self.warn(&path, reason),
+            }
+        }
     }
 
     fn warn(&mut self, path: &Path, reason: String) {
@@ -310,5 +369,75 @@ mod tests {
         ]);
         assert_eq!(reg.len(), 1);
         assert_eq!(reg.get("claude").unwrap().default_model.as_deref(), Some("claude-opus-4-8"));
+    }
+
+    // --- Verified (signed) source loading (CPE-308 part 1 / CPE-371) --------------------
+    use ed25519_dalek::{Signer, SigningKey};
+
+    fn keypair(seed: u8) -> (SigningKey, String) {
+        let k = SigningKey::from_bytes(&[seed; 32]);
+        (k.clone(), hex::encode(k.verifying_key().to_bytes()))
+    }
+    /// Write a manifest plus a sibling `<name>.sig` signing its exact bytes with `k`.
+    fn write_signed(dir: &Path, name: &str, json: &str, k: &SigningKey) {
+        write(dir, name, json);
+        write(dir, &format!("{name}.sig"), &hex::encode(k.sign(json.as_bytes()).to_bytes()));
+    }
+
+    #[test]
+    fn signed_source_loads_verified_and_refuses_unsigned_or_tampered() {
+        let (k, pk) = keypair(1);
+        let src = tempfile::tempdir().unwrap();
+        write_signed(src.path(), "claude.json", claude_manifest(), &k); // valid
+        let aider = claude_manifest().replace("\"claude\"", "\"aider\"");
+        write(src.path(), "aider.json", &aider); // unsigned → refused
+        let cody = claude_manifest().replace("\"claude\"", "\"cody\"");
+        write(src.path(), "cody.json", &cody);
+        // a .sig over different bytes → tampered → refused
+        write(src.path(), "cody.json.sig", &hex::encode(k.sign(b"different").to_bytes()));
+
+        let mut reg = AgentRegistry::default();
+        reg.load_signed_source(src.path(), &[pk]);
+        assert!(reg.get("claude").is_some());
+        assert!(reg.get("aider").is_none());
+        assert!(reg.get("cody").is_none());
+        assert_eq!(reg.len(), 1);
+        assert_eq!(reg.warnings().len(), 2);
+    }
+
+    #[test]
+    fn signed_source_from_an_untrusted_key_is_refused() {
+        let (k, _pk) = keypair(2);
+        let src = tempfile::tempdir().unwrap();
+        write_signed(src.path(), "claude.json", claude_manifest(), &k);
+        let mut reg = AgentRegistry::default();
+        reg.load_signed_source(src.path(), &[keypair(9).1]); // trusts a DIFFERENT key
+        assert!(reg.is_empty());
+    }
+
+    #[test]
+    fn signed_source_overrides_by_id_and_a_bad_source_keeps_last_known_good() {
+        let (k, pk) = keypair(1);
+        let bundled = tempfile::tempdir().unwrap();
+        write(bundled.path(), "claude.json", claude_manifest());
+        let mut reg = AgentRegistry::load_from_dirs(&[bundled.path().to_path_buf()]);
+
+        // A verified source overrides the bundled manifest by id.
+        let src = tempfile::tempdir().unwrap();
+        write_signed(
+            src.path(),
+            "claude.json",
+            &claude_manifest().replace("claude-sonnet-4-5", "claude-opus-4-8"),
+            &k,
+        );
+        reg.load_signed_source(src.path(), &[pk.clone()]);
+        assert_eq!(reg.get("claude").unwrap().default_model.as_deref(), Some("claude-opus-4-8"));
+
+        // A later unsigned/bad source must NOT clobber the good catalog.
+        let bad = tempfile::tempdir().unwrap();
+        write(bad.path(), "claude.json", &claude_manifest().replace("claude-sonnet-4-5", "evil"));
+        reg.load_signed_source(bad.path(), &[pk]);
+        assert_eq!(reg.get("claude").unwrap().default_model.as_deref(), Some("claude-opus-4-8"));
+        assert_eq!(reg.len(), 1);
     }
 }
