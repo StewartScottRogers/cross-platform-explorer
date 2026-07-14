@@ -10,9 +10,11 @@ use std::sync::{Arc, Mutex};
 
 use ai_console::agents::AgentRegistry;
 use ai_console::broker_client::{
-    BrokerClient, BrokerDialogs, BrokerPresets, BrokerSecrets, HostDialogs, SharedWriter,
+    BrokerClient, BrokerDialogs, BrokerHistory, BrokerPresets, BrokerSecrets, HostDialogs,
+    SharedWriter,
 };
 use ai_console::console::{route, ws_route, ConsoleState};
+use ai_console::history::HistoryBackend;
 use ai_console::presets::PresetsBackend;
 use ai_console::vault::SecretAccess;
 use ai_console::{hello, http, on_message, Reaction};
@@ -50,13 +52,14 @@ fn console_state(
     secrets: Arc<dyn SecretAccess + Send + Sync>,
     presets: Arc<dyn PresetsBackend>,
     dialogs: Arc<dyn HostDialogs>,
+    history: Arc<dyn HistoryBackend>,
 ) -> Arc<ConsoleState> {
     let registry = AgentRegistry::load_from_dirs(&[agents_dir()]);
     let cwd = std::env::var("CPE_AICONSOLE_CWD")
         .ok()
         .or_else(|| std::env::current_dir().ok().map(|p| p.to_string_lossy().into_owned()))
         .unwrap_or_default();
-    Arc::new(ConsoleState::with_backends(registry, cwd, secrets, presets, dialogs))
+    Arc::new(ConsoleState::with_backends(registry, cwd, secrets, presets, dialogs, history))
 }
 
 fn main() {
@@ -100,7 +103,10 @@ fn main() {
             let secrets = Arc::new(BrokerSecrets::new(broker.clone()));
             let presets = Arc::new(BrokerPresets::new(broker.clone()));
             let dialogs = Arc::new(BrokerDialogs::new(broker.clone()));
-            if let Ok(server) = http::serve(console_state(secrets, presets, dialogs), route, ws_route) {
+            let history = Arc::new(BrokerHistory::new(broker.clone()));
+            if let Ok(server) =
+                http::serve(console_state(secrets, presets, dialogs, history), route, ws_route)
+            {
                 write_env(
                     &writer,
                     &Envelope::new(0, Message::Event(Event::Status { state: format!("ui:{}", server.url()) })),

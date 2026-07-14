@@ -38,3 +38,8 @@ real `big-design` core of this ticket. (2) The *achievable* value — sessions +
 a restart and are relaunchable — is deliverable now: `history.rs` (CPE-292) already implements the
 persistence, but it was **never wired in**. Split that implementable slice to **CPE-370** (`ready`).
 This ticket stays `big-design` for the live-reattach core; revisit if PTY re-parenting is pursued.
+2026-07-14 — **CPE-370 landed**: sessions + redacted transcripts now survive a restart and are
+relaunchable (agent/provider/model/cwd) from the launcher's "Recent sessions" panel. The graceful
+half of this ticket's first acceptance criterion ("fails gracefully with the transcript preserved
+— never a silent kill") is met. Remaining here: *live* reattach of a still-running agent (needs
+PTY re-parenting) — the `big-design` core.

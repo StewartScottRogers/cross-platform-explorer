@@ -46,7 +46,7 @@ pub mod http;
 pub mod keycheck;
 pub mod lifecycle;
 
-pub use history::{SessionHistory, SessionRecord};
+pub use history::{HistoryBackend, MemHistory, SessionHistory, SessionRecord};
 pub mod lmstudio;
 pub mod mcp;
 pub mod plugins;
@@ -67,8 +67,8 @@ pub use pty::{PtyLaunch, PtySession};
 
 pub use vault::{resolve_env, CredentialProfile, ProfileSet, SecretAccess};
 pub use broker_client::{
-    BrokerClient, BrokerDialogs, BrokerPresets, BrokerSecrets, HostDialogs, MemSecrets, NoopDialogs,
-    SharedWriter,
+    BrokerClient, BrokerDialogs, BrokerHistory, BrokerPresets, BrokerSecrets, HostDialogs,
+    MemSecrets, NoopDialogs, SharedWriter,
 };
 pub use presets::{CredentialRef, MemPresets, Preset, PresetStore, PresetsBackend};
 

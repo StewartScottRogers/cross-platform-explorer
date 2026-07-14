@@ -36,3 +36,6 @@ Implemented `history` in ai-console: `SessionRecord` (agent/provider/model/cwd/s
 ## Work Log
 2026-07-13 — Filed during Nightshift epic planning.
 2026-07-13 — Implemented session history with redaction + bounds during dayshift. Done.
+2026-07-14 — The deferred wiring (live storage capability + history UI) landed in **CPE-370**:
+`SessionHistory` is now recorded on session end via `BrokerHistory`, exposed at `/api/history`,
+and surfaced in the launcher's "Recent sessions" panel with relaunch.
