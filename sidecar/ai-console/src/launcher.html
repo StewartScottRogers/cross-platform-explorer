@@ -674,6 +674,13 @@ async function launchWith(body, name) {
 
 // --- Provider credential manager (CPE-346) --------------------------------------------
 function keysMsg(m, ok) { const e = $("keys-msg"); e.textContent = m || ""; e.style.color = ok ? "#3a9d4a" : "#d05656"; }
+// A "Secrets not granted" broker error means the sensitive Secrets permission is off — turn the
+// cryptic message into an action (CPE-386).
+function permHint(msg) {
+  return /not granted|secrets/i.test(msg || "")
+    ? "Saving keys needs the Secrets permission, which is off. Close and reopen the AI Console, choose Allow for Secrets when asked, then try again."
+    : msg;
+}
 function allProviders() {
   const set = new Set();
   ((catalog && catalog.agents) || []).forEach((a) => (a.providers || []).forEach((p) => set.add(p)));
@@ -700,7 +707,7 @@ async function refreshKeys() {
       rm.onclick = () => removeKey(c.provider, c.label);
       row.appendChild(name); row.appendChild(rm); list.appendChild(row);
     });
-  } catch (e) { list.textContent = "Couldn't load keys: " + e.message; }
+  } catch (e) { list.textContent = permHint(e.message); }
 }
 async function verifyKey() {
   try {
@@ -723,7 +730,7 @@ async function saveKey() {
     catalog = await api("/api/catalog"); // refresh the credential index for the picker
     renderCredentials();
     await refreshKeys();
-  } catch (e) { keysMsg("Save failed: " + e.message); }
+  } catch (e) { const h = permHint(e.message); keysMsg(h === e.message ? "Save failed: " + e.message : h); }
 }
 async function removeKey(provider, label) {
   try {

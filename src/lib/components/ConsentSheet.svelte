@@ -28,8 +28,15 @@
   }
 
   function decide() {
-    const decided = state.requested;
-    const grantedSel = decided.filter((c) => checked[c]);
+    const grantedSel = state.requested.filter((c) => checked[c]);
+    // Don't hard-DENY a sensitive capability the user merely left at its default-off — that would
+    // silently dead-end a feature that needs it (e.g. Secrets for saving provider keys, CPE-386),
+    // with no obvious way back. Leave those UNDECIDED so opening the console re-prompts. A cap is
+    // "decided" only if the user granted it, actively unchecked one that was already granted, or
+    // it's non-sensitive (those default on, so unchecking is a deliberate deny).
+    const decided = state.requested.filter(
+      (c) => checked[c] || granted0.has(c) || !CAPABILITY_INFO[c].sensitive,
+    );
     dispatch("decide", { granted: grantedSel, decided });
   }
 </script>
