@@ -2,6 +2,7 @@
   import { createEventDispatcher } from "svelte";
   import Icon from "./Icon.svelte";
   import type { SortKey, SortDir, ViewMode } from "../types";
+  import { FILE_FILTERS } from "../filetypes";
 
   export let selectionCount = 0;
   export let canPaste = false;
@@ -10,16 +11,18 @@
   export let sortKey: SortKey = "name";
   export let sortDir: SortDir = "asc";
   export let view: ViewMode = "details";
+  export let fileFilter = "all";
 
   const dispatch = createEventDispatcher<{
     action: string;
     sort: { key: SortKey; dir: SortDir };
     view: ViewMode;
+    filter: string;
     toggleHidden: void;
     toggleDetails: void;
   }>();
 
-  let open: "" | "sort" | "view" = "";
+  let open: "" | "sort" | "view" | "filter" = "";
 
   const SORTS: { key: SortKey; label: string }[] = [
     { key: "name", label: "Name" },
@@ -124,7 +127,23 @@
     {/if}
   </div>
 
-  <button class="cmd" disabled title="Filter — use the search box"><Icon name="filter" /> Filter</button>
+  <div class="menu-wrap">
+    <button class="cmd" class:on={fileFilter !== "all"} title="Filter by type" on:click|stopPropagation={() => (open = open === "filter" ? "" : "filter")}>
+      <Icon name="filter" /> {FILE_FILTERS.find((f) => f.key === fileFilter)?.label ?? "Filter"}
+      <span class="chev"><Icon name="chev-down" size={12} /></span>
+    </button>
+    {#if open === "filter"}
+      <!-- svelte-ignore a11y-no-noninteractive-element-interactions a11y-click-events-have-key-events -->
+      <div class="menu" role="menu" tabindex="-1" on:click|stopPropagation>
+        {#each FILE_FILTERS as f (f.key)}
+          <button role="menuitem" on:click={() => { dispatch("filter", f.key); open = ""; }}>
+            <span class="check">{#if fileFilter === f.key}<Icon name="check" size={13} />{/if}</span>
+            {f.label}
+          </button>
+        {/each}
+      </div>
+    {/if}
+  </div>
 
   <span class="spacer" />
 

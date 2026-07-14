@@ -58,7 +58,7 @@
     type Clipboard,
   } from "./lib/clipboard";
   import { detectContexts, type FolderAction } from "./lib/folderContext";
-  import { isExecutable, iconFor, sameTypeIndices } from "./lib/filetypes";
+  import { isExecutable, iconFor, sameTypeIndices, matchesFileFilter } from "./lib/filetypes";
   import * as settings from "./lib/settings";
   import {
     pushUndo, popUndo, canUndo, peekLabel, invert, deletedPaths, type UndoEntry,
@@ -99,6 +99,8 @@
   let sortKey: SortKey = "name";
   let sortDir: SortDir = "asc";
   let view: ViewMode = "details";
+  /** Active file-type filter key (CPE-358); "all" = no filter. */
+  let fileFilter = "all";
   let showDetails = true;
   let showPreview = true;
   /** Cap on how much of a text file the preview will load. */
@@ -618,9 +620,14 @@
     ? shown.filter((e) => matchesQuery(e.name, search))
     : shown;
 
+  // File-type filter (CPE-358): narrows to a category, applied after search/hidden.
+  $: typeFiltered = fileFilter === "all"
+    ? filtered
+    : filtered.filter((e) => matchesFileFilter(e, fileFilter));
+
   $: visible = archive
     ? sortEntries(archiveChildren(archive), sortKey, sortDir)
-    : sortEntries(filtered, sortKey, sortDir);
+    : sortEntries(typeFiltered, sortKey, sortDir);
 
   $: crumbs = archive
     ? [{ name: "Home", path: HOME }, ...splitPath(currentPath), ...archiveCrumbs(archive)]
@@ -1688,12 +1695,14 @@
   {sortKey}
   {sortDir}
   {view}
+  {fileFilter}
   on:action={(e) => runAction(e.detail)}
   on:sort={(e) => {
     sortKey = e.detail.key; sortDir = e.detail.dir;
     settings.saveSortKey(sortKey); settings.saveSortDir(sortDir);
   }}
   on:view={(e) => { view = e.detail; settings.saveView(view); }}
+  on:filter={(e) => (fileFilter = e.detail)}
   on:toggleHidden={() => { showHidden = !showHidden; settings.saveShowHidden(showHidden); }}
   on:toggleDetails={() => { showDetails = !showDetails; settings.saveShowDetails(showDetails); }}
 />
