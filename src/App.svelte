@@ -139,6 +139,7 @@
   let recents: RecentFile[] = [];
   let favorites: Favorite[] = [];
   let recentFolders: RecentFile[] = [];
+  let columnWidths: number[] = settings.loadColumnWidths();
   let search = "";
   let editingPath = false;
 
@@ -1271,6 +1272,7 @@
     recents = settings.loadRecents();
     favorites = settings.loadFavorites();
     recentFolders = settings.loadRecentFolders();
+    columnWidths = settings.loadColumnWidths();
   }
 
   /** Record a successfully-opened folder in the recently-visited MRU (CPE-342). */
@@ -1693,6 +1695,8 @@
         {renamingPath}
         {renameValue}
         assetUrl={convertFileSrc}
+        {columnWidths}
+        on:resizeColumns={(e) => { columnWidths = e.detail; settings.saveColumnWidths(columnWidths); }}
         bind:rowEls
         bind:draggedPaths
         on:click={(e) => (selection = selClick(selection, e.detail.index, e.detail))}

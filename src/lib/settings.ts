@@ -14,6 +14,7 @@
  */
 import { invoke } from "@tauri-apps/api/core";
 import type { ViewMode, SortKey, SortDir, RecentFile, Favorite } from "./types";
+import { COLUMN_DEFAULTS } from "./columns";
 
 export const KEYS = {
   view: "cpe.view",
@@ -28,6 +29,7 @@ export const KEYS = {
   recents: "cpe.recents",
   favorites: "cpe.favorites",
   recentFolders: "cpe.recentFolders",
+  columnWidths: "cpe.columnWidths",
 } as const;
 
 const MAX_RECENTS = 20;
@@ -176,6 +178,14 @@ export const saveFavorites = (v: Favorite[]) => write(KEYS.favorites, v);
 
 export const loadRecentFolders = (): RecentFile[] => read(KEYS.recentFolders, [], isRecentArray);
 export const saveRecentFolders = (v: RecentFile[]) => write(KEYS.recentFolders, v);
+
+// Details-view column widths (CPE-350): exactly four positive numbers (Name/Date/Type/Size).
+const isColumnWidths = (v: unknown): v is number[] =>
+  Array.isArray(v) && v.length === COLUMN_DEFAULTS.length &&
+  v.every((x) => typeof x === "number" && Number.isFinite(x) && x > 0);
+export const loadColumnWidths = (): number[] =>
+  read(KEYS.columnWidths, COLUMN_DEFAULTS.slice(), isColumnWidths);
+export const saveColumnWidths = (v: number[]) => write(KEYS.columnWidths, v);
 
 /** Reset every stored preference to its default (used by the app Settings gear). */
 export function resetSettings(): void {
