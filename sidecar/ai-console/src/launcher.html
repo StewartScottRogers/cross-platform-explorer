@@ -161,6 +161,7 @@
       <button id="set-save" type="button" title="Save the current selection as a named set">Save set</button>
       <button id="keys-btn" type="button" title="Manage provider API keys">Keys…</button>
       <button id="history-btn" type="button" title="Past sessions — relaunch or view transcript">Recent…</button>
+      <button id="refresh-agents" type="button" title="Check for new or updated agents (signed catalog)">Update agents</button>
       <button id="launch" class="primary">Launch</button>
     </div>
   </div>
@@ -687,6 +688,23 @@ async function relaunch(s) {
   }, name);
   if (ok) $("history-overlay").hidden = true;
 }
+// --- Catalog refresh (CPE-374/376): fetch + apply the signed agent catalog, then re-render. ---
+async function refreshCatalog() {
+  setMsg("Checking for agent updates…", true);
+  try {
+    const r = await api("/api/catalog/refresh", { method: "POST" });
+    if (r.applied > 0) {
+      await load(); // re-render the agent list with the newly-applied manifests
+      setMsg("Updated " + r.applied + " agent" + (r.applied === 1 ? "" : "s") + ".", true);
+    } else if (r.indexOk) {
+      setMsg("Agents are already up to date.", true);
+    } else {
+      setMsg("No agent update available (offline, or none published yet).", true);
+    }
+  } catch (e) { setMsg("Update failed: " + e.message); }
+}
+$("refresh-agents").addEventListener("click", refreshCatalog);
+
 $("history-btn").addEventListener("click", openHistory);
 $("history-close").addEventListener("click", () => ($("history-overlay").hidden = true));
 $("history-overlay").addEventListener("click", (e) => { if (e.target === $("history-overlay")) $("history-overlay").hidden = true; });
