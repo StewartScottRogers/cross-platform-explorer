@@ -122,6 +122,15 @@ impl ConsoleState {
             Some(a) => a.clone(),
             None => return bad(format!("unknown agent '{agent_id}'")),
         };
+        // LM Studio local provider (CPE-330): auto-detect a reachable endpoint and adopt
+        // its actually-loaded model, so "agent × lmstudio-local" launches with no manual
+        // URL entry. Any value the caller pinned still wins; if nothing is detected the
+        // recipe's `base_url` default applies. Only pay the probe cost for this provider.
+        let (base_url, model) = if provider == crate::lmstudio::PROVIDER_ID {
+            crate::lmstudio::resolve_launch(base_url, model, crate::lmstudio::detect_default())
+        } else {
+            (base_url, model)
+        };
         let ctx = LaunchContext { model, small_model, api_key, base_url };
         let req = AgentLaunchRequest {
             agent: &agent,

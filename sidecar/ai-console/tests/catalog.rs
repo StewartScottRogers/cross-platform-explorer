@@ -57,6 +57,48 @@ fn claude_supports_openrouter_and_routes() {
 }
 
 #[test]
+fn claude_lmstudio_local_injects_detected_url_and_loaded_model() {
+    // CPE-330: the lmstudio-local recipe points the agent at a *detected* endpoint via
+    // {base_url} and runs the endpoint's actually-loaded model — no manual URL entry.
+    let reg = AgentRegistry::load_from_dirs(&[catalog_dir()]);
+    let claude = reg.get("claude").unwrap();
+    assert!(claude.supports_provider("lmstudio-local"));
+
+    // Emulate what the launch handler does: merge detection into the launch context.
+    let detected = ai_console::LmStudio {
+        base_url: "http://192.168.1.7:1234".into(),
+        model: Some("qwen3-coder-30b".into()),
+    };
+    let (base_url, model) =
+        ai_console::lmstudio::resolve_launch(None, None, Some(detected));
+    let launch = compose_launch(
+        claude,
+        "lmstudio-local",
+        &LaunchContext { model, base_url, ..Default::default() },
+    )
+    .unwrap();
+    assert_eq!(launch.env["ANTHROPIC_BASE_URL"], "http://192.168.1.7:1234");
+    assert_eq!(launch.env["ANTHROPIC_AUTH_TOKEN"], "lm-studio");
+    assert_eq!(launch.args, vec!["--model", "qwen3-coder-30b"]);
+}
+
+#[test]
+fn lmstudio_local_falls_back_to_recipe_base_url_when_undetected() {
+    // With nothing detected and nothing supplied, the recipe's default base_url applies
+    // so the launch still targets the conventional loopback endpoint.
+    let reg = AgentRegistry::load_from_dirs(&[catalog_dir()]);
+    let claude = reg.get("claude").unwrap();
+    let (base_url, _model) = ai_console::lmstudio::resolve_launch(None, None, None);
+    let launch = compose_launch(
+        claude,
+        "lmstudio-local",
+        &LaunchContext { model: Some("m".into()), base_url, ..Default::default() },
+    )
+    .unwrap();
+    assert_eq!(launch.env["ANTHROPIC_BASE_URL"], "http://127.0.0.1:1234");
+}
+
+#[test]
 fn aider_installs_via_uv() {
     let reg = AgentRegistry::load_from_dirs(&[catalog_dir()]);
     let aider = reg.get("aider").unwrap();

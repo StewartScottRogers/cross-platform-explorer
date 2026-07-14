@@ -71,6 +71,28 @@ adding OpenRouter to an Anthropic-compatible agent:
 The `{api_key}` comes from your **credential profile** (a named set of ENV-VAR → vault-key
 references; values live only in the OS keychain, never in the profile or a log).
 
+### The `lmstudio-local` provider (auto-detected URL)
+
+`lmstudio-local` is a first-class local provider: at launch the console probes for a
+reachable LM Studio server (loopback and this host's LAN IPv4 on ports 1234/1235) and
+injects the detected URL into `{base_url}` and the endpoint's *actually-loaded* model into
+`{model}` — so there is **no manual URL entry**. Declare it like any other recipe, using
+`{base_url}` in the env and a `defaults.base_url` fallback for when nothing is detected:
+
+```json
+"lmstudio-local": {
+  "env": {
+    "ANTHROPIC_BASE_URL": "{base_url}",
+    "ANTHROPIC_AUTH_TOKEN": "lm-studio"
+  },
+  "args": ["--model", "{model}"],
+  "defaults": { "base_url": "http://127.0.0.1:1234" }
+}
+```
+
+For an OpenAI-compatible agent, point `OPENAI_BASE_URL` at `{base_url}/v1` instead. A
+value you type into the launcher's Model/URL fields always overrides detection.
+
 ## 3. Add a plugin
 
 A plugin (e.g. an MCP server) extends every agent that `supports` it. Installing it fans
