@@ -92,6 +92,43 @@ impl SessionHistory {
     pub fn is_empty(&self) -> bool {
         self.sessions.is_empty()
     }
+
+    /// Serialize for storage; never panics (an empty object on the impossible error).
+    pub fn to_json(&self) -> String {
+        serde_json::to_string(self).unwrap_or_else(|_| "{}".into())
+    }
+
+    /// Parse from storage, tolerating garbage/missing files by returning the default (the console
+    /// must never fail to open because history is corrupt).
+    pub fn from_json(s: &str) -> Self {
+        serde_json::from_str(s).unwrap_or_default()
+    }
+}
+
+/// Persistence for [`SessionHistory`] — mirrors `PresetsBackend`. Wired to host storage in
+/// production ([`crate::broker_client::BrokerHistory`]) and in-memory for dev/tests
+/// ([`MemHistory`]). CPE-370 connects it to the console lifecycle.
+pub trait HistoryBackend: Send + Sync {
+    /// Load history, returning the default on any error (never fails the console).
+    fn load(&self) -> SessionHistory;
+    /// Persist history.
+    fn save(&self, history: &SessionHistory) -> Result<(), String>;
+}
+
+/// In-memory backend for dev/standalone runs (no host storage). Not durable.
+#[derive(Default)]
+pub struct MemHistory {
+    store: std::sync::Mutex<SessionHistory>,
+}
+
+impl HistoryBackend for MemHistory {
+    fn load(&self) -> SessionHistory {
+        self.store.lock().unwrap().clone()
+    }
+    fn save(&self, history: &SessionHistory) -> Result<(), String> {
+        *self.store.lock().unwrap() = history.clone();
+        Ok(())
+    }
 }
 
 /// Keep only the last `cap` bytes of `s`, on a char boundary.
@@ -160,5 +197,23 @@ mod tests {
         assert_eq!(back.len(), 1);
         h.clear();
         assert!(h.is_empty());
+    }
+
+    #[test]
+    fn from_json_tolerates_garbage_and_to_json_round_trips() {
+        assert!(SessionHistory::from_json("not json").is_empty());
+        let mut h = SessionHistory::new();
+        h.record(rec("1", "hi"), &[]);
+        assert_eq!(SessionHistory::from_json(&h.to_json()).len(), 1);
+    }
+
+    #[test]
+    fn mem_backend_persists_within_the_process() {
+        let b = MemHistory::default();
+        let mut h = b.load();
+        assert!(h.is_empty());
+        h.record(rec("1", "hi"), &[]);
+        b.save(&h).unwrap();
+        assert_eq!(b.load().len(), 1);
     }
 }

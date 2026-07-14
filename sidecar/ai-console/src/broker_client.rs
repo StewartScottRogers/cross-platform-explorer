@@ -134,6 +134,38 @@ impl crate::presets::PresetsBackend for BrokerPresets {
     }
 }
 
+/// [`crate::history::HistoryBackend`] persisted under host storage (CPE-370). Reads/writes a
+/// single `history.json` next to `presets.json`; load degrades to empty on any error so the
+/// console never fails to open.
+pub struct BrokerHistory {
+    client: Arc<BrokerClient>,
+}
+
+impl BrokerHistory {
+    pub fn new(client: Arc<BrokerClient>) -> Self {
+        Self { client }
+    }
+    fn path(&self) -> Result<std::path::PathBuf, String> {
+        Ok(self.client.storage_dir()?.join("history.json"))
+    }
+}
+
+impl crate::history::HistoryBackend for BrokerHistory {
+    fn load(&self) -> crate::history::SessionHistory {
+        match self.path().and_then(|p| std::fs::read_to_string(p).map_err(|e| e.to_string())) {
+            Ok(s) => crate::history::SessionHistory::from_json(&s),
+            Err(_) => crate::history::SessionHistory::default(),
+        }
+    }
+    fn save(&self, history: &crate::history::SessionHistory) -> Result<(), String> {
+        let path = self.path()?;
+        if let Some(dir) = path.parent() {
+            std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
+        }
+        std::fs::write(path, history.to_json()).map_err(|e| e.to_string())
+    }
+}
+
 /// [`SecretAccess`] backed by the host secrets broker (CPE-268/344). Maps the vault's
 /// key → the broker's `name` param. Wire protocol: `secrets.set {name,value}`,
 /// `secrets.get {name} → {value}`, `secrets.delete {name}`.

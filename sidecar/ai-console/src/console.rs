@@ -34,6 +34,18 @@ struct Session {
     live: Arc<Mutex<Option<mpsc::Sender<Vec<u8>>>>>,
 }
 
+/// The reproducible identity of a launched session — captured at launch, recorded to history when
+/// the session ends so its transcript survives a restart and it can be relaunched (CPE-370).
+#[derive(Clone)]
+struct SessionMeta {
+    agent: String,
+    provider: String,
+    model: String,
+    cwd: String,
+    /// Epoch-millis string (opaque to history; the launcher formats it).
+    started_at: String,
+}
+
 /// Shared console state, held behind an `Arc` and served across HTTP connections.
 pub struct ConsoleState {
     registry: AgentRegistry,
@@ -46,6 +58,8 @@ pub struct ConsoleState {
     presets: Arc<dyn crate::presets::PresetsBackend>,
     /// Host-mediated dialogs (native folder picker) for the sandboxed launcher (CPE-354).
     dialogs: Arc<dyn crate::broker_client::HostDialogs>,
+    /// Persisted session history so sessions + transcripts survive a restart (CPE-370/292).
+    history: Arc<dyn crate::history::HistoryBackend>,
 }
 
 /// The implicit credential label — a provider's single/primary key (CPE-348).
@@ -85,6 +99,7 @@ impl ConsoleState {
             Arc::new(crate::broker_client::MemSecrets::default()),
             Arc::new(crate::presets::MemPresets::default()),
             Arc::new(crate::broker_client::NoopDialogs),
+            Arc::new(crate::history::MemHistory::default()),
         )
     }
 
@@ -95,6 +110,7 @@ impl ConsoleState {
         secrets: Arc<dyn crate::vault::SecretAccess + Send + Sync>,
         presets: Arc<dyn crate::presets::PresetsBackend>,
         dialogs: Arc<dyn crate::broker_client::HostDialogs>,
+        history: Arc<dyn crate::history::HistoryBackend>,
     ) -> Self {
         Self {
             registry,
@@ -104,6 +120,7 @@ impl ConsoleState {
             secrets,
             presets,
             dialogs,
+            history,
         }
     }
 
@@ -189,6 +206,15 @@ impl ConsoleState {
         } else {
             (base_url, model)
         };
+        // Capture what history/relaunch needs before `model`/`api_key` move into the launch.
+        let injected_secrets: Vec<String> = api_key.iter().cloned().collect();
+        let meta = SessionMeta {
+            agent: agent_id.to_string(),
+            provider: provider.clone(),
+            model: model.clone().unwrap_or_default(),
+            cwd: cwd.clone(),
+            started_at: now_millis(),
+        };
         let ctx = LaunchContext { model, small_model, api_key, base_url };
         let req = AgentLaunchRequest {
             agent: &agent,
@@ -219,11 +245,17 @@ impl ConsoleState {
             Err(e) => return bad(e),
         };
 
+        let id = self.next_id();
         let ring: Arc<Mutex<Vec<u8>>> = Arc::new(Mutex::new(Vec::new()));
         let live: Arc<Mutex<Option<mpsc::Sender<Vec<u8>>>>> = Arc::new(Mutex::new(None));
         {
             let ring = Arc::clone(&ring);
             let live = Arc::clone(&live);
+            // On EOF (agent exited) record the session to history so its transcript survives a
+            // restart (CPE-370). Best-effort — a storage error just drops the record.
+            let history = Arc::clone(&self.history);
+            let record_id = id.clone();
+            let secrets = injected_secrets;
             thread::spawn(move || {
                 let mut reader = reader;
                 let mut buf = [0u8; 8192];
@@ -247,13 +279,19 @@ impl ConsoleState {
                         }
                     }
                 }
+                let transcript = String::from_utf8_lossy(&ring.lock().unwrap()).into_owned();
+                record_session_end(&*history, &meta, &record_id, transcript, &secrets);
             });
         }
 
-        let id = self.next_id();
         self.sessions.lock().unwrap().insert(
             id.clone(),
-            Arc::new(Session { pty: Mutex::new(session), writer: Mutex::new(writer), ring, live }),
+            Arc::new(Session {
+                pty: Mutex::new(session),
+                writer: Mutex::new(writer),
+                ring,
+                live,
+            }),
         );
         // Remember this selection for the agent so it's restored on next open (CPE-352).
         // Only the choice is stored (provider/model), never a key value.
@@ -484,6 +522,39 @@ impl ConsoleState {
             ),
         }
     }
+
+    /// `GET /api/history` → recent sessions (newest first), metadata only — no transcript, so the
+    /// list stays light. Powers the launcher's "Recent sessions" panel (CPE-370).
+    fn handle_history_list(&self) -> Response {
+        let hist = self.history.load();
+        let sessions: Vec<Value> = hist
+            .recent()
+            .map(|s| {
+                json!({
+                    "id": s.id, "agent": s.agent, "provider": s.provider,
+                    "model": s.model, "cwd": s.cwd, "startedAt": s.started_at,
+                })
+            })
+            .collect();
+        Response::json(json!({ "sessions": sessions }).to_string())
+    }
+
+    /// `GET /api/history/{id}` → one session's stored (already-redacted) transcript + metadata.
+    fn handle_history_detail(&self, path: &str) -> Response {
+        let id = path.strip_prefix("/api/history/").unwrap_or("");
+        let hist = self.history.load();
+        let found = hist.recent().find(|s| s.id == id).cloned();
+        match found {
+            Some(s) => Response::json(
+                json!({
+                    "id": s.id, "agent": s.agent, "provider": s.provider, "model": s.model,
+                    "cwd": s.cwd, "startedAt": s.started_at, "transcript": s.transcript,
+                })
+                .to_string(),
+            ),
+            None => bad("no such session"),
+        }
+    }
 }
 
 /// Extract a non-empty string field from a JSON object.
@@ -507,6 +578,38 @@ fn bad(msg: impl Into<String>) -> Response {
     }
 }
 
+/// Epoch-millis as a string, used as a session's start time (opaque to history; the launcher
+/// formats it). Empty on the impossible pre-epoch clock.
+fn now_millis() -> String {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis().to_string())
+        .unwrap_or_default()
+}
+
+/// Append a finished session to history and persist it — best-effort, never panics the reader
+/// thread. The transcript is redacted against the injected key(s) before storage (CPE-370/292).
+fn record_session_end(
+    history: &dyn crate::history::HistoryBackend,
+    meta: &SessionMeta,
+    id: &str,
+    transcript: String,
+    secrets: &[String],
+) {
+    let record = crate::history::SessionRecord {
+        id: id.to_string(),
+        agent: meta.agent.clone(),
+        provider: meta.provider.clone(),
+        model: (!meta.model.is_empty()).then(|| meta.model.clone()),
+        cwd: meta.cwd.clone(),
+        started_at: meta.started_at.clone(),
+        transcript,
+    };
+    let mut hist = history.load();
+    hist.record(record, secrets);
+    let _ = history.save(&hist);
+}
+
 /// Route one request to the console API or the launcher page.
 pub fn route(state: &ConsoleState, req: &Request) -> Response {
     match (req.method.as_str(), req.path.as_str()) {
@@ -522,6 +625,8 @@ pub fn route(state: &ConsoleState, req: &Request) -> Response {
         ("POST", "/api/keys") => state.handle_key_set(&req.body),
         ("POST", "/api/keys/delete") => state.handle_key_delete(&req.body),
         ("POST", "/api/keys/verify") => state.handle_key_verify(&req.body),
+        ("GET", "/api/history") => state.handle_history_list(),
+        ("GET", p) if p.starts_with("/api/history/") => state.handle_history_detail(p),
         ("POST", p) if p.starts_with("/api/session/") && p.ends_with("/resize") => {
             state.handle_resize(p, &req.body)
         }
@@ -756,6 +861,7 @@ mod tests {
             Arc::new(crate::broker_client::MemSecrets::default()),
             Arc::new(crate::presets::MemPresets::default()),
             dialogs,
+            Arc::new(crate::history::MemHistory::default()),
         )
     }
 
@@ -802,6 +908,38 @@ mod tests {
         assert_eq!(v["valid"], false);
         assert_eq!(v["live"], false);
         assert!(!stub.called.load(std::sync::atomic::Ordering::SeqCst), "no network on a bad shape");
+    }
+
+    #[test]
+    fn session_history_records_lists_and_serves_a_redacted_transcript() {
+        let st = state(); // MemHistory backend
+        let meta = SessionMeta {
+            agent: "claude".into(),
+            provider: "openrouter".into(),
+            model: "sonnet".into(),
+            cwd: "/repo".into(),
+            started_at: "1720000000000".into(),
+        };
+        // Simulate a session ending with the injected key echoed into its transcript.
+        record_session_end(&*st.history, &meta, "s1", "logged in with sk-or-topsecret\n".into(), &[
+            "sk-or-topsecret".into(),
+        ]);
+
+        // GET /api/history lists it (metadata only, newest-first) and never the key.
+        let list: Value = serde_json::from_slice(&get(&st, "/api/history").body).unwrap();
+        assert_eq!(list["sessions"][0]["id"], "s1");
+        assert_eq!(list["sessions"][0]["agent"], "claude");
+        assert_eq!(list["sessions"][0]["model"], "sonnet");
+        assert!(!String::from_utf8_lossy(&get(&st, "/api/history").body).contains("topsecret"));
+
+        // GET /api/history/{id} returns the transcript with the secret redacted.
+        let detail: Value = serde_json::from_slice(&get(&st, "/api/history/s1").body).unwrap();
+        let transcript = detail["transcript"].as_str().unwrap();
+        assert!(transcript.contains("***"), "secret should be redacted");
+        assert!(!transcript.contains("topsecret"));
+
+        // Unknown id → 400.
+        assert_eq!(get(&st, "/api/history/nope").status, 400);
     }
 
     #[test]

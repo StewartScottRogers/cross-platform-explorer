@@ -82,6 +82,21 @@
   .key-row { display: flex; align-items: center; justify-content: space-between;
              padding: 6px 8px; border-top: 1px solid var(--line); font-size: 12.5px; }
   #keys-list:empty { display: none; }
+  /* Recent sessions (CPE-370) — mirrors the keys panel, incl. the visible border. */
+  #history-overlay { position: fixed; inset: 0; background: rgba(0,0,0,.35); display: grid;
+                     place-items: center; z-index: 50; }
+  #history-overlay[hidden] { display: none; }
+  #history-panel { width: 560px; max-width: 94vw; background: Canvas; color: CanvasText;
+                   border: 1px solid rgba(128,128,128,.55); border-radius: 10px; padding: 18px 20px;
+                   box-shadow: 0 20px 50px rgba(0,0,0,.35); }
+  .hist-row { display: flex; align-items: center; justify-content: space-between; gap: 8px;
+              padding: 6px 8px; border-top: 1px solid var(--line); font-size: 12.5px; }
+  .hist-meta { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .hist-btns { flex: 0 0 auto; }
+  #history-list:empty { display: none; }
+  #history-transcript { max-height: 260px; overflow: auto; margin-top: 10px; padding: 8px;
+                        background: rgba(128,128,128,.08); border: 1px solid var(--line);
+                        border-radius: 6px; font-size: 11.5px; white-space: pre-wrap; }
   /* First-run onboarding (CPE-312) */
   #onboard-overlay { position: fixed; inset: 0; background: rgba(0,0,0,.4); display: grid;
                      place-items: center; z-index: 60; }
@@ -145,6 +160,7 @@
       <input id="set-name" placeholder="Save current as a set…" style="width:170px;flex:0 0 auto" />
       <button id="set-save" type="button" title="Save the current selection as a named set">Save set</button>
       <button id="keys-btn" type="button" title="Manage provider API keys">Keys…</button>
+      <button id="history-btn" type="button" title="Past sessions — relaunch or view transcript">Recent…</button>
       <button id="launch" class="primary">Launch</button>
     </div>
   </div>
@@ -176,6 +192,21 @@
       </div>
       <div id="keys-msg"></div>
       <div id="keys-list"></div>
+    </div>
+  </div>
+
+  <!-- Recent sessions (CPE-370). Persisted across restarts; transcripts are redacted at rest. -->
+  <div id="history-overlay" hidden>
+    <div id="history-panel">
+      <div class="keys-head">
+        <span>Recent sessions</span>
+        <button id="history-close" type="button" class="keys-x" title="Close">×</button>
+      </div>
+      <p class="keys-note">Kept across restarts, so a restart never loses your work. <b>Relaunch</b>
+        reopens a session with the same agent, provider, model and folder; <b>Transcript</b> shows
+        its saved output (secrets redacted).</p>
+      <div id="history-list"></div>
+      <pre id="history-transcript" hidden></pre>
     </div>
   </div>
 
@@ -522,19 +553,25 @@ async function launch() {
     credential: selectedCredential(),
     cwd: $("cwd").value.trim(),
   };
+  // Per-session tab title: agent · provider · model, so concurrent sessions are told apart at
+  // a glance (CPE-290). Model is omitted when blank (e.g. LM Studio, resolved after detection).
+  const name = (a ? a.name : $("agent").value) + " · " + $("provider").value
+    + (model ? " · " + model : "");
+  await launchWith(body, name);
+}
+
+// Shared launch: POST the body, open a tab, report status. Reused by the form Launch and by
+// relaunching a past session from history (CPE-370). Returns true on success.
+async function launchWith(body, name) {
   setMsg("Launching…", true);
   try {
     const res = await api("/api/launch", { method: "POST", body: JSON.stringify(body) });
-    // Per-session tab title: agent · provider · model, so concurrent sessions are
-    // told apart at a glance (CPE-290). Model is omitted when blank (e.g. the LM
-    // Studio provider, where the loaded model is only known after detection).
-    const name = (a ? a.name : $("agent").value) + " · " + $("provider").value
-      + (model ? " · " + model : "");
     addSession(res.session, name);
     if (res.dangerousFlags && res.dangerousFlags.length)
       setMsg("Launched with elevated flags: " + res.dangerousFlags.join(", "), false);
     else setMsg("Session running — type in the terminal. Launch again for another tab. Ctrl+Shift+C/V, Ctrl+F.", true);
-  } catch (e) { setMsg("Launch failed: " + e.message); }
+    return true;
+  } catch (e) { setMsg("Launch failed: " + e.message); return false; }
 }
 
 // --- Provider credential manager (CPE-346) --------------------------------------------
@@ -599,6 +636,61 @@ async function removeKey(provider, label) {
     await refreshKeys();
   } catch (e) { keysMsg("Remove failed: " + e.message); }
 }
+// --- Recent sessions (CPE-370) --------------------------------------------------------
+async function openHistory() {
+  const pre = $("history-transcript"); pre.hidden = true; pre.textContent = "";
+  $("history-overlay").hidden = false;
+  await renderHistory();
+}
+async function renderHistory() {
+  const list = $("history-list"); list.textContent = "Loading…";
+  try {
+    const data = await api("/api/history");
+    const sessions = data.sessions || [];
+    list.innerHTML = "";
+    if (!sessions.length) { list.textContent = "No past sessions yet."; return; }
+    sessions.forEach((s) => {
+      const a = agentById(s.agent);
+      const when = s.startedAt ? new Date(Number(s.startedAt)).toLocaleString() : "";
+      const row = document.createElement("div"); row.className = "hist-row";
+      const meta = document.createElement("span"); meta.className = "hist-meta";
+      meta.textContent = (a ? a.name : s.agent) + " · " + s.provider
+        + (s.model ? " · " + s.model : "") + (when ? "  —  " + when : "");
+      meta.title = s.cwd || "";
+      const btns = document.createElement("span"); btns.className = "hist-btns";
+      const view = document.createElement("button"); view.type = "button"; view.textContent = "Transcript";
+      view.addEventListener("click", () => viewTranscript(s.id));
+      const re = document.createElement("button"); re.type = "button"; re.className = "primary";
+      re.textContent = "Relaunch"; re.style.marginLeft = "6px";
+      re.addEventListener("click", () => relaunch(s));
+      btns.appendChild(view); btns.appendChild(re);
+      row.appendChild(meta); row.appendChild(btns);
+      list.appendChild(row);
+    });
+  } catch (e) { list.textContent = "Couldn't load history: " + e.message; }
+}
+async function viewTranscript(id) {
+  const pre = $("history-transcript");
+  try {
+    const d = await api("/api/history/" + encodeURIComponent(id));
+    pre.textContent = d.transcript || "(empty)";
+    pre.hidden = false; pre.scrollTop = 0;
+  } catch (e) { pre.textContent = "Couldn't load transcript: " + e.message; pre.hidden = false; }
+}
+async function relaunch(s) {
+  const a = agentById(s.agent);
+  const name = (a ? a.name : s.agent) + " · " + s.provider + (s.model ? " · " + s.model : "");
+  // No apiKey typed → the stored provider key resolves from the keychain at launch.
+  const ok = await launchWith({
+    agent: s.agent, provider: s.provider, model: s.model || "", smallModel: s.model || "",
+    apiKey: "", credential: "default", cwd: s.cwd || "",
+  }, name);
+  if (ok) $("history-overlay").hidden = true;
+}
+$("history-btn").addEventListener("click", openHistory);
+$("history-close").addEventListener("click", () => ($("history-overlay").hidden = true));
+$("history-overlay").addEventListener("click", (e) => { if (e.target === $("history-overlay")) $("history-overlay").hidden = true; });
+
 $("keys-btn").addEventListener("click", openKeys);
 $("keys-close").addEventListener("click", () => ($("keys-overlay").hidden = true));
 $("key-verify").addEventListener("click", verifyKey);
