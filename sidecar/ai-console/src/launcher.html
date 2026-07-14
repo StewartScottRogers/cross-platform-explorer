@@ -330,7 +330,11 @@ async function launch() {
   setMsg("Launching…", true);
   try {
     const res = await api("/api/launch", { method: "POST", body: JSON.stringify(body) });
-    const name = (a ? a.name : $("agent").value) + " · " + $("provider").value;
+    // Per-session tab title: agent · provider · model, so concurrent sessions are
+    // told apart at a glance (CPE-290). Model is omitted when blank (e.g. the LM
+    // Studio provider, where the loaded model is only known after detection).
+    const name = (a ? a.name : $("agent").value) + " · " + $("provider").value
+      + (model ? " · " + model : "");
     addSession(res.session, name);
     if (res.dangerousFlags && res.dangerousFlags.length)
       setMsg("Launched with elevated flags: " + res.dangerousFlags.join(", "), false);
