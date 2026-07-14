@@ -449,8 +449,10 @@ impl ConsoleState {
         Response::json(json!({ "ok": true }).to_string())
     }
 
-    /// Pre-check a key's format before saving. `live:false` marks this as an offline
-    /// shape check, not a real provider call (that needs the Network capability — CPE-347).
+    /// Check a key before saving (CPE-345/347): the cheap offline shape check first, then — if the
+    /// shape is plausible — a live check against the provider via the host. `live:true` in the
+    /// reply means the provider gave a definitive answer; `live:false` is the offline "format
+    /// looks valid" result (no verifier for this provider, or the live check couldn't run).
     fn handle_key_verify(&self, body: &str) -> Response {
         let v: Value = match serde_json::from_str(body) {
             Ok(v) => v,
@@ -458,11 +460,28 @@ impl ConsoleState {
         };
         let provider = v["provider"].as_str().unwrap_or("").trim();
         let key = v["key"].as_str().unwrap_or("");
-        match crate::keycheck::check_key_format(provider, key) {
-            Ok(()) => Response::json(
-                json!({ "valid": true, "live": false, "detail": "Format looks valid." }).to_string(),
+        // Never spend a network round-trip on an obviously-malformed key.
+        if let Err(e) = crate::keycheck::check_key_format(provider, key) {
+            return Response::json(json!({ "valid": false, "live": false, "detail": e }).to_string());
+        }
+        match self.dialogs.verify_key(provider, key) {
+            // Definitive provider answer (verified or rejected) — pass it straight through.
+            Ok(verdict) if verdict.live => Response::json(
+                json!({ "valid": verdict.valid, "live": true, "detail": verdict.detail }).to_string(),
             ),
-            Err(e) => Response::json(json!({ "valid": false, "live": false, "detail": e }).to_string()),
+            // No live verifier for this provider — report the offline result, using the host's
+            // explanation when it gave one.
+            Ok(verdict) => {
+                let detail =
+                    if verdict.detail.is_empty() { "Format looks valid.".into() } else { verdict.detail };
+                Response::json(json!({ "valid": true, "live": false, "detail": detail }).to_string())
+            }
+            // The live check couldn't run (dev/standalone, or a transient host error) — don't
+            // block the user; fall back to the offline result.
+            Err(_) => Response::json(
+                json!({ "valid": true, "live": false, "detail": "Format looks valid (live check unavailable)." })
+                    .to_string(),
+            ),
         }
     }
 }
@@ -701,7 +720,8 @@ mod tests {
         assert!(body.contains("openrouter"));
         assert!(!body.contains("sk-or"), "the key list must not leak values");
 
-        // Verify is an offline format pre-check (live:false).
+        // With no host verifier (NoopDialogs) verify falls back to the offline shape check
+        // (live:false), never blocking on a check it can't run.
         let v: Value = serde_json::from_slice(&post("/api/keys/verify", r#"{"provider":"openrouter","key":"sk-or-abcdef123456"}"#).body).unwrap();
         assert_eq!(v["valid"], true);
         assert_eq!(v["live"], false);
@@ -709,6 +729,79 @@ mod tests {
         // Delete removes it from the list.
         assert_eq!(post("/api/keys/delete", r#"{"provider":"openrouter"}"#).status, 200);
         assert!(!String::from_utf8_lossy(&get(&st, "/api/keys").body).contains("openrouter"));
+    }
+
+    /// A [`HostDialogs`] whose `verify_key` returns a scripted verdict and records whether it was
+    /// called — to prove the live path is taken (and skipped for bad-format keys). CPE-347.
+    struct StubDialogs {
+        verdict: crate::broker_client::KeyVerdict,
+        called: std::sync::atomic::AtomicBool,
+    }
+    impl crate::broker_client::HostDialogs for StubDialogs {
+        fn pick_folder(&self) -> Result<Option<String>, String> {
+            Ok(None)
+        }
+        fn verify_key(&self, _p: &str, _k: &str) -> Result<crate::broker_client::KeyVerdict, String> {
+            self.called.store(true, std::sync::atomic::Ordering::SeqCst);
+            Ok(self.verdict.clone())
+        }
+    }
+
+    fn state_with_dialogs(dialogs: Arc<StubDialogs>) -> ConsoleState {
+        let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("agents");
+        let registry = AgentRegistry::load_from_dirs(&[dir]);
+        ConsoleState::with_backends(
+            registry,
+            "/repo".into(),
+            Arc::new(crate::broker_client::MemSecrets::default()),
+            Arc::new(crate::presets::MemPresets::default()),
+            dialogs,
+        )
+    }
+
+    #[test]
+    fn key_verify_passes_through_a_live_provider_verdict() {
+        // A definitive provider rejection comes back live:true, valid:false with the host's detail.
+        let stub = Arc::new(StubDialogs {
+            verdict: crate::broker_client::KeyVerdict {
+                valid: false,
+                live: true,
+                detail: "Provider rejected this key (unauthorized).".into(),
+            },
+            called: Default::default(),
+        });
+        let st = state_with_dialogs(stub.clone());
+        let r = route(&st, &Request {
+            method: "POST".into(),
+            path: "/api/keys/verify".into(),
+            body: r#"{"provider":"openrouter","key":"sk-or-abcdef123456"}"#.into(),
+            ..Default::default()
+        });
+        let v: Value = serde_json::from_slice(&r.body).unwrap();
+        assert_eq!(v["live"], true);
+        assert_eq!(v["valid"], false);
+        assert_eq!(v["detail"], "Provider rejected this key (unauthorized).");
+        assert!(stub.called.load(std::sync::atomic::Ordering::SeqCst));
+    }
+
+    #[test]
+    fn key_verify_skips_the_live_check_for_a_bad_format_key() {
+        // A malformed key must be rejected offline — the host is never contacted.
+        let stub = Arc::new(StubDialogs {
+            verdict: crate::broker_client::KeyVerdict { valid: true, live: true, detail: String::new() },
+            called: Default::default(),
+        });
+        let st = state_with_dialogs(stub.clone());
+        let r = route(&st, &Request {
+            method: "POST".into(),
+            path: "/api/keys/verify".into(),
+            body: r#"{"provider":"openrouter","key":"totally-wrong"}"#.into(),
+            ..Default::default()
+        });
+        let v: Value = serde_json::from_slice(&r.body).unwrap();
+        assert_eq!(v["valid"], false);
+        assert_eq!(v["live"], false);
+        assert!(!stub.called.load(std::sync::atomic::Ordering::SeqCst), "no network on a bad shape");
     }
 
     #[test]

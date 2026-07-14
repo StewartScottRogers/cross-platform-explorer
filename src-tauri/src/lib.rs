@@ -3,6 +3,10 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+/// Live provider API-key verification for the AI Console sidecar (CPE-347). Pure endpoint/status
+/// logic is always compiled (and unit-tested); the networked `verify_live` needs the platform.
+mod keyverify;
+
 #[derive(Serialize)]
 pub struct DirEntry {
     name: String,
@@ -2003,6 +2007,19 @@ fn pick_folder_response(app: &tauri::AppHandle) -> sidecar_contract::Response {
     sidecar_contract::Response { result: Ok(json!({ "path": path })) }
 }
 
+/// Verify a provider API key on the sidecar's behalf (CPE-347) — the response to a sandboxed
+/// `host.verify_key` request. The URL is chosen host-side from an allow-list (see `keyverify`),
+/// never from the request, so this can't be turned into a general fetch. Returns
+/// `{ valid, live, detail }`.
+#[cfg(feature = "sidecar-platform")]
+fn verify_key_response(params: &serde_json::Value) -> sidecar_contract::Response {
+    use serde_json::json;
+    let provider = params.get("provider").and_then(|v| v.as_str()).unwrap_or("");
+    let key = params.get("key").and_then(|v| v.as_str()).unwrap_or("");
+    let (valid, live, detail) = keyverify::verify_live(provider, key);
+    sidecar_contract::Response { result: Ok(json!({ "valid": valid, "live": live, "detail": detail })) }
+}
+
 #[cfg(feature = "sidecar-platform")]
 fn serve_ai_console_requests(
     mut conn: sidecar_host::supervisor::ProcessConnection,
@@ -2038,6 +2055,10 @@ fn serve_ai_console_requests(
                     // it directly by opening the native folder dialog (CPE-354).
                     let resp = if req.method == "host.pick_folder" {
                         pick_folder_response(&app)
+                    } else if req.method == "host.verify_key" {
+                        // A live key check against an allow-listed provider endpoint (CPE-347),
+                        // not a brokered capability — handle it directly.
+                        verify_key_response(&req.params)
                     } else {
                         broker.dispatch("ai-console", &req)
                     };
