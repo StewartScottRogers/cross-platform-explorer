@@ -1616,6 +1616,7 @@
         on:openFile={(e) => openRecent(e.detail)}
         on:unpin={(e) => { pins = settings.togglePin(pins, e.detail); settings.savePins(pins); }}
         on:unfavorite={(e) => { favorites = favorites.filter((f) => f.path !== e.detail); settings.saveFavorites(favorites); }}
+        on:removeRecent={(e) => { recents = settings.removeRecent(recents, e.detail); settings.saveRecents(recents); }}
         on:clearRecents={() => { recents = []; settings.saveRecents(recents); }}
       />
     {:else}

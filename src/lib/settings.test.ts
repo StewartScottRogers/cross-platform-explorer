@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { addRecent, togglePin, toggleFavorite, mergeLegacy } from "./settings";
+import { addRecent, removeRecent, togglePin, toggleFavorite, mergeLegacy } from "./settings";
 import type { RecentFile, Favorite } from "./types";
 
 describe("mergeLegacy (localStorage → settings.json migration, CPE-226)", () => {
@@ -54,6 +54,19 @@ describe("addRecent", () => {
     expect(list).toHaveLength(20);
     expect(list[0].path).toBe("/f39.txt"); // newest retained
     expect(list.some((x) => x.path === "/f0.txt")).toBe(false); // oldest evicted
+  });
+});
+
+describe("removeRecent (CPE-341)", () => {
+  it("drops only the matching path and keeps the rest in order", () => {
+    const list = [r("/a.txt", 3), r("/b.txt", 2), r("/c.txt", 1)];
+    expect(removeRecent(list, "/b.txt").map((x) => x.path)).toEqual(["/a.txt", "/c.txt"]);
+  });
+
+  it("is a no-op when the path is absent, and does not mutate the input", () => {
+    const list = [r("/a.txt", 1)];
+    expect(removeRecent(list, "/z.txt")).toEqual(list);
+    expect(list.map((x) => x.path)).toEqual(["/a.txt"]);
   });
 });
 
