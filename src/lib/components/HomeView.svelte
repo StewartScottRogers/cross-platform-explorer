@@ -12,6 +12,8 @@
   export let recents: RecentFile[] = [];
   /** User-starred files and folders. */
   export let favorites: Favorite[] = [];
+  /** Recently-visited folders (MRU). */
+  export let recentFolders: RecentFile[] = [];
 
   const dispatch = createEventDispatcher<{
     navigate: string;
@@ -19,13 +21,14 @@
     unpin: string;
     unfavorite: string;
     removeRecent: string;
+    removeRecentFolder: string;
     clearRecents: void;
   }>();
 
   let quickOpen = true;
   let recentOpen = true;
   /** Which pill tab is showing in the lower section. */
-  let tab: "recent" | "favorites" = "recent";
+  let tab: "recent" | "favorites" | "folders" = "recent";
 
   // Pinned folders appear alongside the built-in places.
   $: pinned = pins.map((p) => ({
@@ -91,7 +94,7 @@
     >
       <Icon name="chev-right" size={13} />
     </button>
-    <span>{tab === "favorites" ? "Favorites" : "Recent"}</span>
+    <span>{tab === "favorites" ? "Favorites" : tab === "folders" ? "Recent folders" : "Recent"}</span>
     {#if tab === "recent" && recents.length > 0}
       <button class="clear" on:click={() => dispatch("clearRecents")}>Clear</button>
     {/if}
@@ -104,6 +107,9 @@
       </button>
       <button class="pill" class:active={tab === "favorites"} on:click={() => (tab = "favorites")}>
         <Icon name="star" size={14} /> Favorites
+      </button>
+      <button class="pill" class:active={tab === "folders"} on:click={() => (tab = "folders")}>
+        <Icon name="folder" size={14} /> Folders
       </button>
       <button class="pill" disabled title="Shared — not implemented yet">
         <Icon name="people" size={14} /> Shared
@@ -144,7 +150,7 @@
           {/each}
         </div>
       {/if}
-    {:else}
+    {:else if tab === "favorites"}
       {#if favorites.length === 0}
         <div class="empty-state">
           <span class="empty-icon"><Icon name="star" size={36} /></span>
@@ -173,6 +179,41 @@
                 on:click|stopPropagation={() => dispatch("unfavorite", f.path)}
               >
                 <Icon name="star" size={14} />
+              </span>
+            </button>
+          {/each}
+        </div>
+      {/if}
+    {:else}
+      {#if recentFolders.length === 0}
+        <div class="empty-state">
+          <span class="empty-icon"><Icon name="folder" size={36} /></span>
+          <p>No recent folders yet</p>
+          <p style="font-size:12px">Folders you open will appear here.</p>
+        </div>
+      {:else}
+        <div class="recent-list">
+          {#each recentFolders as d (d.path)}
+            <button
+              class="recent-row fav-row"
+              on:dblclick={() => dispatch("navigate", d.path)}
+              on:click={() => dispatch("navigate", d.path)}
+            >
+              <span class="rname">
+                <Icon name="folder" />
+                <span class="ellip">{d.name}</span>
+                <span class="fav-path ellip">{d.path}</span>
+              </span>
+              <!-- svelte-ignore a11y-no-static-element-interactions a11y-click-events-have-key-events -->
+              <span
+                class="rmv"
+                role="button"
+                tabindex="-1"
+                aria-label="Remove from Recent folders"
+                title="Remove from Recent folders"
+                on:click|stopPropagation={() => dispatch("removeRecentFolder", d.path)}
+              >
+                <Icon name="close" size={13} />
               </span>
             </button>
           {/each}
