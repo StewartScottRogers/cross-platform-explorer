@@ -29,11 +29,14 @@
   #term { flex: 1; min-height: 0; background: #0d0d0d; overflow: hidden; }
   /* Force a classic, space-reserving scrollbar so FitAddon leaves room for it and the last
      column never renders under it (WebView2 defaults to zero-width overlay scrollbars). */
+  /* Standard scrollbar properties (Chromium/WebView2 honors these and shows an
+     always-visible, non-overlay scrollbar — the ::-webkit- rules are a fallback). */
+  #term .xterm-viewport { scrollbar-width: auto; scrollbar-color: #6a6a6a #141414; }
   #term .xterm-viewport::-webkit-scrollbar { width: 14px; }
   #term .xterm-viewport::-webkit-scrollbar-track { background: #141414; }
-  #term .xterm-viewport::-webkit-scrollbar-thumb { background: #5a5a5a; border-radius: 7px;
+  #term .xterm-viewport::-webkit-scrollbar-thumb { background: #6a6a6a; border-radius: 7px;
     border: 3px solid #141414; min-height: 30px; }
-  #term .xterm-viewport::-webkit-scrollbar-thumb:hover { background: #7d7d7d; }
+  #term .xterm-viewport::-webkit-scrollbar-thumb:hover { background: #8a8a8a; }
 </style>
 </head>
 <body>

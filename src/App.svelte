@@ -13,7 +13,6 @@
   import MenuBar from "./lib/components/MenuBar.svelte";
   import AboutDialog from "./lib/components/AboutDialog.svelte";
   import SettingsDialog from "./lib/components/SettingsDialog.svelte";
-  import SidecarPane from "./lib/components/SidecarPane.svelte";
   import ConsentSheet from "./lib/components/ConsentSheet.svelte";
   import { startAiConsole, consentState, setConsent, type Capability, type ConsentState } from "./lib/sidecar";
   import UpdateDialog from "./lib/components/UpdateDialog.svelte";
@@ -160,15 +159,18 @@
   const REPO_URL = "https://github.com/StewartScottRogers/cross-platform-explorer";
   let showAbout = false;
   let showSettings = false;
-  let aiConsoleUrl: string | null = null;
+  const AI_CONSOLE_LABEL = "ai-console";
   let consentPrompt: ConsentState | null = null;
 
-  /** Start the AI Console sidecar and mount its served UI in an overlay pane (CPE-271).
-      Only meaningful in a `sidecar-platform` build; otherwise the command is absent and
-      startAiConsole() returns null. Gated by capability consent (CPE-296): if the sidecar
-      has undecided capabilities, prompt first and launch from the sheet's decision. */
+  /** Open the AI Console in its own OS window (CPE-335) — native title bar (drag it around
+      the screen), resize borders, and frame, independent of the explorer's focus. Only
+      meaningful in a `sidecar-platform` build. Gated by capability consent (CPE-296). The
+      window loads the sidecar's loopback URL directly and has NO Tauri API (its label is
+      in no capability), so the untrusted sidecar UI stays isolated. */
   async function openAiConsole() {
     showSettings = false;
+    const existing = await WebviewWindow.getByLabel(AI_CONSOLE_LABEL);
+    if (existing) { await existing.setFocus(); return; } // reuse the running session
     const state = await consentState("ai-console");
     if (state && state.undecided.length > 0) {
       consentPrompt = state; // launch continues in onConsentDecision
@@ -179,8 +181,22 @@
 
   async function launchAiConsole() {
     const url = await startAiConsole();
-    if (url) aiConsoleUrl = url;
-    else showNotice("AI Console isn't available in this build.", true);
+    if (!url) { showNotice("AI Console isn't available in this build.", true); return; }
+    try {
+      const win = new WebviewWindow(AI_CONSOLE_LABEL, {
+        url,
+        title: "AI Console",
+        width: 1100,
+        height: 760,
+        minWidth: 640,
+        minHeight: 400,
+        resizable: true,
+        center: true,
+      });
+      win.once("tauri://error", () => showNotice("Couldn't open the AI Console window.", true));
+    } catch {
+      showNotice("Couldn't open the AI Console window.", true);
+    }
   }
 
   /** Persist the consent decision from the sheet, then launch the console. */
@@ -1765,20 +1781,6 @@
   />
 {/if}
 
-{#if aiConsoleUrl}
-  <!-- Persistent (not a click-away modal): a console session must survive clicking
-       elsewhere / losing focus. Closes only via the explicit button. -->
-  <div class="ai-console-overlay">
-    <div class="ai-console-window">
-      <div class="ai-console-bar">
-        <span>AI Console</span>
-        <button on:click={() => (aiConsoleUrl = null)}>Close</button>
-      </div>
-      <SidecarPane url={aiConsoleUrl} title="AI Console" />
-    </div>
-  </div>
-{/if}
-
 {#if consentPrompt}
   <ConsentSheet
     sidecarId="ai-console"
@@ -1813,40 +1815,4 @@
 {/if}
 
 <style>
-  .ai-console-overlay {
-    position: fixed;
-    inset: 0;
-    background: rgba(0, 0, 0, 0.35);
-    display: grid;
-    place-items: center;
-    z-index: 210;
-  }
-  .ai-console-window {
-    width: min(1100px, 92vw);
-    height: min(760px, 88vh);
-    display: flex;
-    flex-direction: column;
-    background: var(--surface);
-    border: 1px solid var(--border-strong);
-    border-radius: 10px;
-    overflow: hidden;
-    box-shadow: 0 20px 50px rgba(0, 0, 0, 0.3);
-  }
-  .ai-console-bar {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    padding: 8px 12px;
-    border-bottom: 1px solid var(--border);
-    font-size: 13px;
-    font-weight: 600;
-  }
-  .ai-console-bar button {
-    height: 26px;
-    padding: 0 12px;
-    border: 1px solid var(--border-strong);
-    border-radius: var(--radius);
-    background: var(--surface-alt);
-    font-weight: 500;
-  }
 </style>
