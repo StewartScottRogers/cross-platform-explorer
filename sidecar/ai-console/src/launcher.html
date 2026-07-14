@@ -26,8 +26,13 @@
   .badge.no { background: #b5872b; color: #fff; }
   .badge.yes { background: #3a9d4a; color: #fff; }
   #msg { padding: 4px 12px; font-size: 12px; color: #d05656; min-height: 18px; }
-  #term { flex: 1; min-height: 0; padding: 6px 8px; background: #0d0d0d; overflow: hidden; }
-  #term .xterm, #term .xterm-viewport { height: 100% !important; }
+  #term { flex: 1; min-height: 0; background: #0d0d0d; overflow: hidden; }
+  /* Force a classic, space-reserving scrollbar so FitAddon leaves room for it and the last
+     column never renders under it (WebView2 defaults to zero-width overlay scrollbars). */
+  #term .xterm-viewport::-webkit-scrollbar { width: 12px; }
+  #term .xterm-viewport::-webkit-scrollbar-track { background: transparent; }
+  #term .xterm-viewport::-webkit-scrollbar-thumb { background: #444; border-radius: 6px; border: 3px solid #0d0d0d; }
+  #term .xterm-viewport::-webkit-scrollbar-thumb:hover { background: #666; }
 </style>
 </head>
 <body>
@@ -155,7 +160,10 @@ function initTerm() {
     fitAddon.fit();
     term.onData((d) => { if (ws && ws.readyState === 1) ws.send(d); }); // keystrokes -> PTY
     term.attachCustomKeyEventHandler(onKey);
-    window.addEventListener("resize", refit);
+    // Re-fit precisely whenever the pane changes size (overlay animating in, window resize,
+    // splitter drag) — more accurate than a window resize listener alone.
+    if (window.ResizeObserver) new ResizeObserver(() => refit()).observe($("term"));
+    else window.addEventListener("resize", refit);
     return true;
   } catch (e) {
     setMsg("Terminal init failed: " + (e && e.message ? e.message : e), false);
