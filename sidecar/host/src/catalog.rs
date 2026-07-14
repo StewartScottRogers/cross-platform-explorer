@@ -10,6 +10,9 @@
 //! The index signature is detached — over the exact index bytes — mirroring the per-manifest `.sig`
 //! convention from CPE-371, so there is no JSON-canonicalisation ambiguity.
 
+use std::collections::BTreeMap;
+use std::path::Path;
+
 use serde::{Deserialize, Serialize};
 
 use crate::trust;
@@ -103,6 +106,116 @@ pub fn gate_manifest(
     EntryVerdict::Accept
 }
 
+/// The installed catalog `version` per agent id — persisted so anti-rollback survives restarts.
+pub type VersionMap = BTreeMap<String, u64>;
+
+/// Load the persisted version map (empty on any error — a missing/corrupt map just means
+/// "nothing installed yet", never a failure).
+pub fn load_versions(path: &Path) -> VersionMap {
+    std::fs::read_to_string(path).ok().and_then(|s| serde_json::from_str(&s).ok()).unwrap_or_default()
+}
+
+/// Persist the version map.
+pub fn save_versions(path: &Path, versions: &VersionMap) -> Result<(), String> {
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
+    }
+    let json = serde_json::to_string(versions).map_err(|e| e.to_string())?;
+    std::fs::write(path, json).map_err(|e| e.to_string())
+}
+
+/// Why one entry in a bundle was or wasn't applied.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ApplyOutcome {
+    Applied,
+    ContentMismatch,
+    Rollback,
+    MissingManifest,
+    MissingSignature,
+    BadSignature,
+}
+
+/// The result of applying a catalog bundle. `index_ok == false` means the index didn't verify and
+/// **nothing was touched** (last-known-good).
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct ApplyReport {
+    pub index_ok: bool,
+    pub applied: Vec<String>,
+    pub rejected: Vec<(String, ApplyOutcome)>,
+}
+
+/// Apply a catalog **bundle** staged at `staging` into the sidecar catalog dir `out`, gating every
+/// entry against its signed index (CPE-308 part 2). A bundle is `index.json` + `index.json.sig` +
+/// per-entry `<id>.json` + `<id>.json.sig`, all signed by a trusted key.
+///
+/// - If the **index** doesn't verify (bad/missing signature, unsupported schema) nothing is written
+///   — the previous catalog stands (**last-known-good**).
+/// - Each entry needs a present, trusted-key-signed manifest whose content matches the index
+///   (`gate_manifest`) and whose `version` strictly upgrades `installed` (anti-rollback); otherwise
+///   it's rejected and its previously-applied copy is left untouched.
+/// - Accepted manifests + their `.sig` are written to `out` and `installed` is bumped. Offline by
+///   construction (reads local staging); the remote fetch that fills `staging` is a separate wrapper.
+pub fn apply_bundle(
+    staging: &Path,
+    out: &Path,
+    trusted_keys: &[String],
+    installed: &mut VersionMap,
+) -> ApplyReport {
+    let mut report = ApplyReport::default();
+
+    // 1. Verify the index (governs the whole set). Any failure ⇒ touch nothing.
+    let Ok(index_bytes) = std::fs::read(staging.join("index.json")) else { return report };
+    let Ok(index_sig) = std::fs::read_to_string(staging.join("index.json.sig")) else { return report };
+    if !verify_index(&index_bytes, index_sig.trim(), trusted_keys) {
+        return report;
+    }
+    let Ok(index_text) = String::from_utf8(index_bytes) else { return report };
+    let Ok(index) = CatalogIndex::from_json(&index_text) else { return report };
+    if !index.is_supported() {
+        return report;
+    }
+    report.index_ok = true;
+
+    // 2. Gate + apply each entry.
+    for entry in &index.entries {
+        let Ok(bytes) = std::fs::read(staging.join(format!("{}.json", entry.id))) else {
+            report.rejected.push((entry.id.clone(), ApplyOutcome::MissingManifest));
+            continue;
+        };
+        let Ok(sig) = std::fs::read_to_string(staging.join(format!("{}.json.sig", entry.id))) else {
+            report.rejected.push((entry.id.clone(), ApplyOutcome::MissingSignature));
+            continue;
+        };
+        // The manifest itself must be signed by a trusted key (the sidecar re-checks on load,
+        // CPE-371 — refuse early here too).
+        if !trusted_keys.iter().any(|pk| trust::verify_signature(&bytes, sig.trim(), pk)) {
+            report.rejected.push((entry.id.clone(), ApplyOutcome::BadSignature));
+            continue;
+        }
+        match gate_manifest(&index, &entry.id, &bytes, installed.get(&entry.id).copied()) {
+            EntryVerdict::Accept => {
+                if write_entry(out, &entry.id, &bytes, sig.trim()).is_ok() {
+                    installed.insert(entry.id.clone(), entry.version);
+                    report.applied.push(entry.id.clone());
+                }
+            }
+            EntryVerdict::ContentMismatch => {
+                report.rejected.push((entry.id.clone(), ApplyOutcome::ContentMismatch))
+            }
+            EntryVerdict::Rollback => report.rejected.push((entry.id.clone(), ApplyOutcome::Rollback)),
+            EntryVerdict::Unlisted => {} // impossible: we iterate the index's own entries
+        }
+    }
+    report
+}
+
+fn write_entry(out: &Path, id: &str, bytes: &[u8], sig: &str) -> std::io::Result<()> {
+    std::fs::create_dir_all(out)?;
+    std::fs::write(out.join(format!("{id}.json")), bytes)?;
+    std::fs::write(out.join(format!("{id}.json.sig")), sig)?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -162,5 +275,118 @@ mod tests {
         let idx = CatalogIndex { schema_version: 99, entries: vec![] };
         assert!(!idx.is_supported());
         assert!(CatalogIndex { schema_version: 1, entries: vec![] }.is_supported());
+    }
+
+    // --- Bundle apply (CPE-373) --------------------------------------------------------
+    use std::path::Path;
+
+    /// Stage a signed bundle: index.json (+ .sig) and each `<id>.json` (+ .sig), all signed by `k`.
+    /// `entries` = (id, manifest_bytes, version). If `corrupt_content` names an id, its manifest is
+    /// written as different bytes than the index hash (a tamper).
+    fn stage_bundle(dir: &Path, entries: &[(&str, &[u8], u64)], k: &SigningKey) {
+        let index = CatalogIndex {
+            schema_version: 1,
+            entries: entries
+                .iter()
+                .map(|(id, bytes, v)| CatalogEntry {
+                    id: id.to_string(),
+                    schema_version: 1,
+                    sha256: trust::content_hash(bytes),
+                    version: *v,
+                })
+                .collect(),
+        };
+        let index_json = serde_json::to_string(&index).unwrap();
+        std::fs::write(dir.join("index.json"), &index_json).unwrap();
+        std::fs::write(dir.join("index.json.sig"), sign(k, index_json.as_bytes())).unwrap();
+        for (id, bytes, _) in entries {
+            std::fs::write(dir.join(format!("{id}.json")), bytes).unwrap();
+            std::fs::write(dir.join(format!("{id}.json.sig")), sign(k, bytes)).unwrap();
+        }
+    }
+
+    #[test]
+    fn apply_accepts_an_upgrade_writes_it_and_bumps_the_version() {
+        let (k, pk) = keypair(1);
+        let stage = tempfile::tempdir().unwrap();
+        let out = tempfile::tempdir().unwrap();
+        stage_bundle(stage.path(), &[("claude", br#"{"id":"claude"}"#, 5)], &k);
+
+        let mut installed = VersionMap::new();
+        let report = apply_bundle(stage.path(), out.path(), &[pk], &mut installed);
+        assert!(report.index_ok);
+        assert_eq!(report.applied, vec!["claude".to_string()]);
+        assert!(out.path().join("claude.json").exists());
+        assert!(out.path().join("claude.json.sig").exists());
+        assert_eq!(installed.get("claude"), Some(&5));
+    }
+
+    #[test]
+    fn apply_rejects_rollback_and_tamper_without_touching_the_good_copy() {
+        let (k, pk) = keypair(1);
+        let out = tempfile::tempdir().unwrap();
+        // A good copy is already installed at v5.
+        std::fs::write(out.path().join("claude.json"), b"GOOD").unwrap();
+        let mut installed = VersionMap::from([("claude".to_string(), 5u64)]);
+
+        // Rollback: same version 5.
+        let s1 = tempfile::tempdir().unwrap();
+        stage_bundle(s1.path(), &[("claude", br#"{"id":"claude"}"#, 5)], &k);
+        let r1 = apply_bundle(s1.path(), out.path(), &[pk.clone()], &mut installed);
+        assert_eq!(r1.rejected, vec![("claude".to_string(), ApplyOutcome::Rollback)]);
+        assert_eq!(std::fs::read(out.path().join("claude.json")).unwrap(), b"GOOD"); // untouched
+
+        // Tamper: index says v9 over bytesA, but ship different manifest bytes.
+        let s2 = tempfile::tempdir().unwrap();
+        stage_bundle(s2.path(), &[("claude", br#"{"id":"claude","v":"A"}"#, 9)], &k);
+        std::fs::write(s2.path().join("claude.json"), br#"{"id":"claude","v":"EVIL"}"#).unwrap();
+        std::fs::write(s2.path().join("claude.json.sig"), sign(&k, br#"{"id":"claude","v":"EVIL"}"#))
+            .unwrap();
+        let r2 = apply_bundle(s2.path(), out.path(), &[pk], &mut installed);
+        assert_eq!(r2.rejected, vec![("claude".to_string(), ApplyOutcome::ContentMismatch)]);
+        assert_eq!(std::fs::read(out.path().join("claude.json")).unwrap(), b"GOOD"); // still untouched
+    }
+
+    #[test]
+    fn a_bad_index_signature_touches_nothing_last_known_good() {
+        let (k, pk) = keypair(1);
+        let stage = tempfile::tempdir().unwrap();
+        let out = tempfile::tempdir().unwrap();
+        std::fs::write(out.path().join("claude.json"), b"GOOD").unwrap();
+        stage_bundle(stage.path(), &[("claude", br#"{"id":"claude"}"#, 5)], &k);
+        // Corrupt the index signature.
+        std::fs::write(stage.path().join("index.json.sig"), sign(&k, b"not the index")).unwrap();
+
+        let mut installed = VersionMap::new();
+        let report = apply_bundle(stage.path(), out.path(), &[pk], &mut installed);
+        assert!(!report.index_ok);
+        assert!(report.applied.is_empty());
+        assert_eq!(std::fs::read(out.path().join("claude.json")).unwrap(), b"GOOD");
+        assert!(installed.is_empty());
+    }
+
+    #[test]
+    fn a_missing_manifest_signature_is_rejected() {
+        let (k, pk) = keypair(1);
+        let stage = tempfile::tempdir().unwrap();
+        let out = tempfile::tempdir().unwrap();
+        stage_bundle(stage.path(), &[("claude", br#"{"id":"claude"}"#, 1)], &k);
+        std::fs::remove_file(stage.path().join("claude.json.sig")).unwrap();
+
+        let mut installed = VersionMap::new();
+        let report = apply_bundle(stage.path(), out.path(), &[pk], &mut installed);
+        assert!(report.index_ok);
+        assert_eq!(report.rejected, vec![("claude".to_string(), ApplyOutcome::MissingSignature)]);
+        assert!(!out.path().join("claude.json").exists());
+    }
+
+    #[test]
+    fn version_map_round_trips_to_disk() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("versions.json");
+        assert!(load_versions(&path).is_empty()); // missing → empty
+        let map = VersionMap::from([("claude".to_string(), 7u64), ("aider".to_string(), 2)]);
+        save_versions(&path, &map).unwrap();
+        assert_eq!(load_versions(&path), map);
     }
 }
