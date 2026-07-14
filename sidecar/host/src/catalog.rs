@@ -289,7 +289,7 @@ mod tests {
         let (k, pk) = keypair(1);
         let bytes = index_json("claude", "deadbeef", 3);
         let sig = sign(&k, bytes.as_bytes());
-        assert!(verify_index(bytes.as_bytes(), &sig, &[pk.clone()]));
+        assert!(verify_index(bytes.as_bytes(), &sig, std::slice::from_ref(&pk)));
         assert!(!verify_index(b"tampered", &sig, &[pk]));
         assert!(!verify_index(bytes.as_bytes(), &sig, &[keypair(9).1])); // untrusted key
     }
@@ -382,7 +382,7 @@ mod tests {
         // Rollback: same version 5.
         let s1 = tempfile::tempdir().unwrap();
         stage_bundle(s1.path(), &[("claude", br#"{"id":"claude"}"#, 5)], &k);
-        let r1 = apply_bundle(s1.path(), out.path(), &[pk.clone()], &mut installed, &[]);
+        let r1 = apply_bundle(s1.path(), out.path(), std::slice::from_ref(&pk), &mut installed, &[]);
         assert_eq!(r1.rejected, vec![("claude".to_string(), ApplyOutcome::Rollback)]);
         assert_eq!(std::fs::read(out.path().join("claude.json")).unwrap(), b"GOOD"); // untouched
 
@@ -478,7 +478,7 @@ mod tests {
         assert_eq!(report.rejected, vec![("claude".to_string(), ApplyOutcome::Pinned)]);
         assert!(report.applied.is_empty());
         assert!(!out.path().join("claude.json").exists());
-        assert!(installed.get("claude").is_none()); // pin froze it — nothing recorded
+        assert!(!installed.contains_key("claude")); // pin froze it — nothing recorded
     }
 
     #[test]

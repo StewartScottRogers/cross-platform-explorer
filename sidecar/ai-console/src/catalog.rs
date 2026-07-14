@@ -70,7 +70,7 @@ mod tests {
         let (k, pk) = keypair(1);
         let msg = b"x";
         let good = sign(&k, msg);
-        assert!(!verify_manifest(msg, "not-hex", &[pk.clone()]));
+        assert!(!verify_manifest(msg, "not-hex", std::slice::from_ref(&pk)));
         assert!(!verify_manifest(msg, &good, &["not-hex".into()]));
         assert!(!verify_manifest(msg, &good, &[])); // no trusted keys → nothing trusted
     }

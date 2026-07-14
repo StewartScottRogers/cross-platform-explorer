@@ -430,7 +430,7 @@ mod tests {
             &claude_manifest().replace("claude-sonnet-4-5", "claude-opus-4-8"),
             &k,
         );
-        reg.load_signed_source(src.path(), &[pk.clone()]);
+        reg.load_signed_source(src.path(), std::slice::from_ref(&pk));
         assert_eq!(reg.get("claude").unwrap().default_model.as_deref(), Some("claude-opus-4-8"));
 
         // A later unsigned/bad source must NOT clobber the good catalog.
