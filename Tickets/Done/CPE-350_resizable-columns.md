@@ -2,7 +2,8 @@
 id: CPE-350
 title: "Details view: drag to resize file-list columns"
 type: Bug
-status: Open
+status: Done
+closed: 2026-07-13
 priority: Medium
 component: Frontend
 created: 2026-07-13
@@ -31,3 +32,15 @@ widths.
 
 ## Work Log
 2026-07-13 — Reported by the user: center-pane columns can't be drag-resized. Filing + fixing.
+
+2026-07-13 — Implemented on branch `CPE-350-resizable-columns`.
+- `columns.ts`: pure `columnsTemplate` / `resizeColumnTo` (min/max clamped) / `boundaryOffsets`
+  + defaults & mins. 8 unit tests.
+- `FileList.svelte`: `columnWidths` prop drives an inline `--filelist-cols` on BOTH the header
+  and the rows (so they stay aligned); absolute `.col-resize` handles straddle each column's
+  right edge (contained by the already-sticky `.columns`); pointer-drag resizes live and
+  dispatches `resizeColumns` on release.
+- `settings.ts`: `cpe.columnWidths` (validated: 4 positive numbers). `App.svelte`: loads,
+  passes, saves on release.
+- `npm run check` 0 errors; frontend suite 303 pass. Visual drag needs an eyeball (headless
+  can't simulate the pointer geometry), but the width math + clamping + template are unit-tested.

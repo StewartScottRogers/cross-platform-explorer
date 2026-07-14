@@ -5,6 +5,7 @@
   import { formatDate } from "../datetime";
   import { iconFor, typeName } from "../filetypes";
   import { canThumbnail, thumbKey, cachedThumb, makeThumbnail } from "../thumbnails";
+  import { columnsTemplate, resizeColumnTo, boundaryOffsets, COLUMN_DEFAULTS } from "../columns";
   import { isSelected } from "../selection";
   import type { Selection } from "../selection";
   import type { DirEntry, SortKey, SortDir, ViewMode } from "../types";
@@ -35,7 +36,34 @@
     commitRename: string;
     cancelRename: void;
     drop: { paths: string[]; dest: string; copy: boolean };
+    resizeColumns: number[];
   }>();
+
+  /** Details-view column widths (Name/Date/Type/Size), bound from the parent so they
+      persist; the trailing spacer is implicit (CPE-350). */
+  export let columnWidths: number[] = COLUMN_DEFAULTS.slice();
+  $: colTemplate = columnsTemplate(columnWidths);
+  // Right-edge offset of each column, for placing the drag handles. 10px = .columns pad-left.
+  $: handleOffsets = boundaryOffsets(columnWidths, 10);
+
+  /** Drag a column's right edge to resize it; the layout updates live and persists on
+      release. `stopPropagation` keeps the click off the sort-header button. */
+  function startColResize(e: PointerEvent, i: number) {
+    e.preventDefault();
+    e.stopPropagation();
+    const startX = e.clientX;
+    const startW = columnWidths[i];
+    const move = (ev: PointerEvent) => {
+      columnWidths = resizeColumnTo(columnWidths, i, startW + (ev.clientX - startX));
+    };
+    const up = () => {
+      window.removeEventListener("pointermove", move);
+      window.removeEventListener("pointerup", up);
+      dispatch("resizeColumns", columnWidths);
+    };
+    window.addEventListener("pointermove", move);
+    window.addEventListener("pointerup", up);
+  }
 
   /** Paths being dragged, and the folder row currently hovered as a target. */
   export let draggedPaths: string[] = [];
@@ -213,7 +241,7 @@
 </script>
 
 {#if view === "details" && !error && !loading && entries.length > 0}
-  <div class="columns">
+  <div class="columns" style="--filelist-cols: {colTemplate}">
     {#each COLUMNS as col (col.key)}
       <button
         class="col"
@@ -228,6 +256,15 @@
           </span>
         {/if}
       </button>
+    {/each}
+    {#each handleOffsets as x, i (i)}
+      <!-- svelte-ignore a11y-no-static-element-interactions -->
+      <span
+        class="col-resize"
+        style="left: {x}px"
+        title="Drag to resize column"
+        on:pointerdown={(e) => startColResize(e, i)}
+      />
     {/each}
   </div>
 {/if}
@@ -247,7 +284,7 @@
   </div>
 {:else}
   <!-- svelte-ignore a11y-no-static-element-interactions -->
-  <div class="rows" class:grid={view === "icons"} on:contextmenu={emptyContext}>
+  <div class="rows" class:grid={view === "icons"} style="--filelist-cols: {colTemplate}" on:contextmenu={emptyContext}>
     {#each entries as entry, i (entry.path)}
       <!--
         The view class MUST stay namespaced as "view-{view}".
@@ -388,6 +425,22 @@
     flex-direction: column;
     gap: 6px;
     width: 100%;
+  }
+
+  /* Column resize handles — thin hit-targets straddling each column's right edge (CPE-350).
+     .columns is position:sticky, so these absolute handles are contained by it. */
+  .col-resize {
+    position: absolute;
+    top: 0;
+    height: 100%;
+    width: 7px;
+    margin-left: -3px;
+    cursor: col-resize;
+    z-index: 6;
+  }
+  .col-resize:hover {
+    background: var(--accent);
+    opacity: 0.5;
   }
 
   .thumb-slot {
