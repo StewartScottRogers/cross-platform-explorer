@@ -205,8 +205,15 @@ pub struct KeyVerdict {
     pub detail: String,
 }
 
+/// The host's summary of a catalog fetch+apply (CPE-376).
+#[derive(Debug, Clone, Default)]
+pub struct CatalogFetch {
+    pub index_ok: bool,
+    pub applied: usize,
+}
+
 /// Host-mediated operations the sandboxed launcher can't perform itself — native dialogs
-/// (CPE-354) and outbound network (CPE-347), which the sandbox has no client for.
+/// (CPE-354) and outbound network (CPE-347/376), which the sandbox has no client for.
 pub trait HostDialogs: Send + Sync {
     /// Open a native folder picker. `Ok(Some(path))` chosen, `Ok(None)` cancelled.
     fn pick_folder(&self) -> Result<Option<String>, String>;
@@ -215,6 +222,10 @@ pub trait HostDialogs: Send + Sync {
     /// allow-listed endpoint (the sandbox never supplies the URL). `Err` = the check couldn't
     /// run (no host); the caller falls back to the offline format check.
     fn verify_key(&self, provider: &str, key: &str) -> Result<KeyVerdict, String>;
+
+    /// Ask the host to fetch + apply the signed agent-catalog bundle from its configured source
+    /// (CPE-376). `Err` = no host (dev/standalone).
+    fn fetch_catalog(&self) -> Result<CatalogFetch, String>;
 }
 
 /// [`HostDialogs`] over the broker: asks the host to open the dialog (`host.pick_folder`).
@@ -252,6 +263,19 @@ impl HostDialogs for BrokerDialogs {
             detail: v.get("detail").and_then(Value::as_str).unwrap_or_default().to_string(),
         })
     }
+
+    fn fetch_catalog(&self) -> Result<CatalogFetch, String> {
+        // A network round-trip (download + verify + apply) — allow it a generous wait.
+        let v = self.client.request_timeout(
+            "host.fetch_catalog",
+            serde_json::Value::Null,
+            Duration::from_secs(60),
+        )?;
+        Ok(CatalogFetch {
+            index_ok: v.get("indexOk").and_then(Value::as_bool).unwrap_or(false),
+            applied: v.get("applied").and_then(Value::as_array).map(|a| a.len()).unwrap_or(0),
+        })
+    }
 }
 
 /// Dev/standalone fallback — no host, so "cancelled" / "can't verify".
@@ -262,6 +286,9 @@ impl HostDialogs for NoopDialogs {
     }
     fn verify_key(&self, _provider: &str, _key: &str) -> Result<KeyVerdict, String> {
         Err("no host to verify against".into())
+    }
+    fn fetch_catalog(&self) -> Result<CatalogFetch, String> {
+        Err("no host to fetch the catalog".into())
     }
 }
 

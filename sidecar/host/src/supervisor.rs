@@ -195,10 +195,21 @@ pub struct ProcessConnection {
 /// A per-launch auth token is generated and passed to the child via `AUTH_TOKEN_ENV`;
 /// the sidecar echoes it in `Hello` so [`handshake`] can authenticate the channel.
 pub fn spawn_process(command: &str, args: &[String]) -> Result<ProcessConnection, String> {
+    spawn_process_with_env(command, args, &[])
+}
+
+/// Like [`spawn_process`], but also sets extra environment variables on the child (CPE-376 —
+/// e.g. the agent-catalog dir + trusted keys the sidecar loads).
+pub fn spawn_process_with_env(
+    command: &str,
+    args: &[String],
+    env: &[(&str, &str)],
+) -> Result<ProcessConnection, String> {
     let launch_token = generate_launch_token();
     let mut cmd = Command::new(command);
     cmd.args(args)
         .env(sidecar_contract::AUTH_TOKEN_ENV, &launch_token)
+        .envs(env.iter().copied())
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::inherit());
