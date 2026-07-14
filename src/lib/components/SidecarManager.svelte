@@ -12,19 +12,37 @@
     setEnabled,
     stopSidecar,
     revokeCapability,
+    sidecarDiagnostics,
     CAPABILITY_INFO,
     type SidecarInfo,
     type Capability,
+    type SidecarDiagnostics,
   } from "../sidecar";
 
   const dispatch = createEventDispatcher<{ openConsole: void }>();
 
   let rows: SidecarInfo[] | null = null;
+  // Per-sidecar diagnostics (CPE-323), keyed by id; loaded on refresh + when logs opened.
+  let diags: Record<string, SidecarDiagnostics> = {};
+  // Which sidecars have their log panel expanded.
+  let logsOpen: Record<string, boolean> = {};
+
+  async function loadDiag(id: string) {
+    diags = { ...diags, [id]: await sidecarDiagnostics(id) };
+  }
 
   async function refresh() {
     rows = await sidecarDetails();
+    // Refresh diagnostics for every registered sidecar so the health line is current.
+    await Promise.all(rows.map((r) => loadDiag(r.id)));
   }
   onMount(refresh);
+
+  async function toggleLogs(row: SidecarInfo) {
+    const open = !logsOpen[row.id];
+    logsOpen = { ...logsOpen, [row.id]: open };
+    if (open) await loadDiag(row.id); // pull the freshest lines when opening
+  }
 
   async function toggleEnabled(row: SidecarInfo) {
     await setEnabled(row.id, !row.enabled);
@@ -49,6 +67,7 @@
     <div class="muted">No sidecars registered.</div>
   {:else}
     {#each rows as row (row.id)}
+      {@const diag = diags[row.id]}
       <div class="sidecar" class:disabled={!row.enabled}>
         <div class="head">
           <span class="dot" class:on={row.running} title={row.running ? "Running" : "Stopped"} />
@@ -78,6 +97,29 @@
           {/each}
           {#if row.requested.length === 0}<span class="muted">no capabilities</span>{/if}
         </div>
+
+        <div class="health">
+          {#if diag?.last_error}
+            <span class="err" title="Last error">⚠ {diag.last_error}</span>
+          {:else if row.running}
+            <span class="ok">Healthy</span>
+          {:else}
+            <span class="muted">Not running</span>
+          {/if}
+          <span class="spacer" />
+          {#if diag && diag.logs.length > 0}
+            <button class="logs-toggle" on:click={() => toggleLogs(row)}>
+              {logsOpen[row.id] ? "Hide logs" : `View logs (${diag.logs.length})`}
+            </button>
+          {:else}
+            <span class="muted small">no logs</span>
+          {/if}
+        </div>
+
+        {#if logsOpen[row.id] && diag}
+          <pre class="logs">{#each diag.logs as line}<span class="log-line log-{line.level}">{line.level}: {line.message}
+</span>{/each}</pre>
+        {/if}
 
         {#if row.id === "ai-console"}
           <div class="row-actions">
@@ -196,5 +238,59 @@
     display: flex;
     gap: 8px;
     margin-top: 10px;
+  }
+  .health {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin-top: 8px;
+    font-size: 12px;
+  }
+  .health .ok {
+    color: #3a9d4a;
+  }
+  .health .err {
+    color: var(--warn, #d08b2b);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    max-width: 60%;
+  }
+  .small {
+    font-size: 11px;
+  }
+  .logs-toggle {
+    border: 1px solid var(--border, #3a3a3a);
+    background: transparent;
+    color: var(--text-dim, #a0a0a0);
+    cursor: pointer;
+    font-size: 11px;
+    padding: 2px 8px;
+    border-radius: 6px;
+  }
+  .logs-toggle:hover {
+    color: var(--text, #eaeaea);
+  }
+  .logs {
+    margin: 8px 0 0;
+    padding: 8px;
+    max-height: 180px;
+    overflow: auto;
+    background: var(--bg-dim, #0f0f0f);
+    border: 1px solid var(--border, #3a3a3a);
+    border-radius: 6px;
+    font-size: 11px;
+    line-height: 1.5;
+    white-space: pre-wrap;
+    word-break: break-word;
+  }
+  .log-line {
+    color: var(--text-dim, #a0a0a0);
+  }
+  .log-error {
+    color: var(--warn, #d08b2b);
+  }
+  .log-warn {
+    color: #c9a227;
   }
 </style>

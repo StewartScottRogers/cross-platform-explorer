@@ -5,7 +5,14 @@ import { describe, it, expect, vi, beforeEach } from "vitest";
 const { invoke } = vi.hoisted(() => ({ invoke: vi.fn() }));
 vi.mock("@tauri-apps/api/core", () => ({ invoke }));
 
-import { listSidecars, platformActive, parseUiAnnouncement, startAiConsole } from "./sidecar";
+import {
+  listSidecars,
+  platformActive,
+  parseUiAnnouncement,
+  startAiConsole,
+  sidecarDiagnostics,
+  emptyDiagnostics,
+} from "./sidecar";
 
 beforeEach(() => invoke.mockReset());
 
@@ -49,5 +56,37 @@ describe("sidecar platform client", () => {
     expect(parseUiAnnouncement("ui:http://evil.example.com")).toBeNull();
     expect(parseUiAnnouncement("running")).toBeNull();
     expect(parseUiAnnouncement("ui:")).toBeNull();
+  });
+
+  it("sidecarDiagnostics passes through a well-formed record", async () => {
+    invoke.mockResolvedValue({
+      id: "ai-console",
+      running: true,
+      last_error: null,
+      logs: [{ level: "info", message: "ui ready at http://127.0.0.1:5" }],
+    });
+    const d = await sidecarDiagnostics("ai-console");
+    expect(d.running).toBe(true);
+    expect(d.last_error).toBeNull();
+    expect(d.logs).toHaveLength(1);
+    expect(d.logs[0].level).toBe("info");
+  });
+
+  it("sidecarDiagnostics normalises a malformed record to safe defaults", async () => {
+    // Missing logs array + non-string last_error must not throw or leak junk.
+    invoke.mockResolvedValue({ id: "ai-console", running: 1, last_error: 42 });
+    const d = await sidecarDiagnostics("ai-console");
+    expect(d.running).toBe(true);
+    expect(d.last_error).toBeNull();
+    expect(d.logs).toEqual([]);
+  });
+
+  it("emptyDiagnostics is a valid, inert record", () => {
+    expect(emptyDiagnostics("x")).toEqual({
+      id: "x",
+      running: false,
+      last_error: null,
+      logs: [],
+    });
   });
 });

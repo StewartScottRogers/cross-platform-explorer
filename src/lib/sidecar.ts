@@ -186,3 +186,45 @@ export async function setEnabled(id: string, enabled: boolean): Promise<boolean>
     return false;
   }
 }
+
+// --- Health, last error & logs (CPE-323) ----------------------------------------------
+
+/** One redacted log line from a sidecar's diagnostics. */
+export interface DiagLogLine {
+  /** Severity, lower-case: `trace` | `debug` | `info` | `warn` | `error`. */
+  level: string;
+  /** The log message — already redacted host-side; never contains a secret. */
+  message: string;
+}
+
+/** A sidecar's health snapshot for the management panel: running state, the last error
+ *  that stopped it (redacted, `null` when healthy), and recent redacted log lines. */
+export interface SidecarDiagnostics {
+  id: string;
+  running: boolean;
+  last_error: string | null;
+  logs: DiagLogLine[];
+}
+
+/** An empty (but valid) diagnostics record — the graceful "nothing to show" fallback used
+ *  when the platform is off or the call fails, so the panel never has to special-case null. */
+export function emptyDiagnostics(id: string): SidecarDiagnostics {
+  return { id, running: false, last_error: null, logs: [] };
+}
+
+/** Fetch a sidecar's last error + recent redacted log lines (CPE-323). Returns an empty
+ *  record rather than throwing when the platform is off or the sidecar has no diagnostics. */
+export async function sidecarDiagnostics(id: string): Promise<SidecarDiagnostics> {
+  try {
+    const d = await invoke<SidecarDiagnostics>("sidecar_diagnostics", { id });
+    if (!d || typeof d !== "object") return emptyDiagnostics(id);
+    return {
+      id: typeof d.id === "string" ? d.id : id,
+      running: !!d.running,
+      last_error: typeof d.last_error === "string" ? d.last_error : null,
+      logs: Array.isArray(d.logs) ? d.logs : [],
+    };
+  } catch {
+    return emptyDiagnostics(id);
+  }
+}

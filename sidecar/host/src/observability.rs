@@ -71,6 +71,19 @@ impl Redactor {
         out
     }
 
+    /// Redact a free-text log line for safe display in a diagnostics panel or bundle.
+    ///
+    /// First scrubs every *registered* secret ([`redact_str`](Self::redact_str)), then
+    /// applies the heuristic [`redact_secret_patterns`] so an **unregistered** secret
+    /// can't slip through: bearer tokens, `sensitive_key=value` / `sensitive_key: value`
+    /// assignments, and tokens carrying a well-known credential prefix are all masked.
+    /// This is the method the `sidecar_diagnostics` command runs every captured line
+    /// through — here over-redaction is the safe failure (a diagnostics view that hides
+    /// one word beats one that leaks a key).
+    pub fn redact_log_line(&self, input: &str) -> String {
+        redact_secret_patterns(&self.redact_str(input))
+    }
+
     /// Redact a JSON value in place: blank the string values of [`SENSITIVE_KEYS`] and
     /// scrub any registered secret out of every string.
     pub fn redact_json(&self, value: &mut Value) {
@@ -99,6 +112,97 @@ impl Redactor {
 fn is_sensitive_key(key: &str) -> bool {
     let lower = key.to_ascii_lowercase();
     SENSITIVE_KEYS.iter().any(|k| lower == *k)
+}
+
+/// Well-known credential prefixes. A whitespace token that starts with one of these (and
+/// is long enough to be a real token) is masked wholesale — covers provider API keys and
+/// VCS/CI tokens whose *value* the host never registered (defence in depth).
+const SECRET_PREFIXES: &[&str] = &[
+    "sk-",          // OpenAI / OpenRouter / Anthropic-style
+    "sk_live_",     // Stripe live
+    "sk_test_",     // Stripe test
+    "pk_live_",     // Stripe publishable (still worth hiding)
+    "rk_live_",     // Stripe restricted
+    "ghp_",         // GitHub personal access token
+    "gho_",         // GitHub OAuth
+    "ghu_",         // GitHub user-to-server
+    "ghs_",         // GitHub server-to-server
+    "ghr_",         // GitHub refresh
+    "github_pat_",  // GitHub fine-grained PAT
+    "xoxb-",        // Slack bot
+    "xoxp-",        // Slack user
+    "xoxa-",        // Slack app
+    "AKIA",         // AWS access key id
+    "ASIA",         // AWS temporary access key id
+    "AIza",         // Google API key
+    "ya29.",        // Google OAuth access token
+    "glpat-",       // GitLab PAT
+];
+
+/// Strip surrounding punctuation/quotes so a trailing comma or closing brace doesn't hide
+/// a prefix match or leak part of a value.
+fn trim_token(tok: &str) -> &str {
+    tok.trim_matches(|c: char| !(c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '.'))
+}
+
+/// True if `tok` looks like a bare credential token by its prefix.
+fn looks_like_secret_token(tok: &str) -> bool {
+    let t = trim_token(tok);
+    t.len() >= 8 && SECRET_PREFIXES.iter().any(|p| t.starts_with(p))
+}
+
+/// Heuristic scrub of a free-text line for secret shapes the host never registered.
+/// Operates token-by-token (whitespace-delimited): masks `sensitive_key=value` /
+/// `sensitive_key: value` assignments, `Bearer <token>` / `Authorization: <token>`
+/// pairs, and any token carrying a [`SECRET_PREFIXES`] prefix. Whitespace is normalised
+/// to single spaces in the process — acceptable for a diagnostics view.
+pub fn redact_secret_patterns(input: &str) -> String {
+    let mut out: Vec<String> = Vec::new();
+    // When the previous meaningful token was `bearer` / `authorization`, the *next*
+    // token is the credential and gets masked whole.
+    let mut mask_next = false;
+    for tok in input.split_whitespace() {
+        let key = trim_token(tok).to_ascii_lowercase();
+        if mask_next {
+            // An auth *scheme* word (`Authorization: Bearer <token>`) is kept and the
+            // masking deferred to the token that actually carries the credential.
+            if key == "bearer" || key == "basic" || key == "token" {
+                out.push(tok.to_string());
+            } else {
+                out.push(REDACTED.to_string());
+                mask_next = false;
+            }
+            continue;
+        }
+        if key == "bearer" || key == "authorization" {
+            out.push(tok.to_string());
+            mask_next = true;
+            continue;
+        }
+        if let Some(masked) = redact_assignment(tok) {
+            out.push(masked);
+        } else if looks_like_secret_token(tok) {
+            out.push(REDACTED.to_string());
+        } else {
+            out.push(tok.to_string());
+        }
+    }
+    out.join(" ")
+}
+
+/// If `tok` is a `key=value` or `key:value` assignment whose key is sensitive, return the
+/// key and separator with the value replaced by [`REDACTED`]; otherwise `None`.
+fn redact_assignment(tok: &str) -> Option<String> {
+    // Prefer the first separator so `api_key=sk:abc` masks the whole value.
+    let sep = tok.find(['=', ':'])?;
+    let (key_raw, rest) = tok.split_at(sep);
+    let separator = &rest[..1];
+    // Normalise the key: drop quotes and surrounding punctuation.
+    let key = key_raw.trim_matches(|c: char| !c.is_ascii_alphanumeric() && c != '_');
+    if key.is_empty() || !is_sensitive_key(key) {
+        return None;
+    }
+    Some(format!("{key_raw}{separator}{REDACTED}"))
 }
 
 /// Severity of a [`LogRecord`].
@@ -251,6 +355,52 @@ mod tests {
         assert_eq!(recent.len(), 2, "ring buffer drops the oldest");
         assert_eq!(recent[0].message, "m1");
         assert_eq!(recent[1].message, "m2");
+    }
+
+    #[test]
+    fn redact_log_line_masks_unregistered_secret_shapes() {
+        let r = Redactor::new(); // no registered secrets — pattern scrub must catch these
+        // Provider API key by prefix.
+        assert_eq!(
+            r.redact_log_line("calling provider with key sk-abc123def456ghi789"),
+            "calling provider with key ***"
+        );
+        // Bearer token.
+        assert_eq!(
+            r.redact_log_line("GET /v1 Authorization: Bearer eyJhbGciOi.payload.sig"),
+            "GET /v1 Authorization: Bearer ***"
+        );
+        // Sensitive key=value assignment.
+        assert_eq!(
+            r.redact_log_line("connecting api_key=super-secret-value endpoint=api.example.com"),
+            "connecting api_key=*** endpoint=api.example.com"
+        );
+        // Sensitive key: value assignment (colon form).
+        assert_eq!(
+            r.redact_log_line("auth token:abcd1234deadbeef done"),
+            "auth token:*** done"
+        );
+        // GitHub PAT by prefix, wrapped in punctuation (the whole token is masked).
+        assert_eq!(
+            r.redact_log_line("token (ghp_0123456789abcdef0123456789abcdef0123)."),
+            "token ***"
+        );
+    }
+
+    #[test]
+    fn redact_log_line_leaves_ordinary_text_alone() {
+        let r = Redactor::new();
+        let line = "listing /home/user/docs took 12ms, 42 entries";
+        assert_eq!(r.redact_log_line(line), line);
+    }
+
+    #[test]
+    fn redact_log_line_still_scrubs_registered_secrets() {
+        let r = Redactor::new().with_secret("hunter2");
+        assert_eq!(
+            r.redact_log_line("login failed for user bob with hunter2"),
+            "login failed for user bob with ***"
+        );
     }
 
     #[test]
