@@ -1766,10 +1766,10 @@
 {/if}
 
 {#if aiConsoleUrl}
-  <!-- svelte-ignore a11y-click-events-have-key-events a11y-no-static-element-interactions -->
-  <div class="ai-console-overlay" on:click={() => (aiConsoleUrl = null)}>
-    <!-- svelte-ignore a11y-click-events-have-key-events a11y-no-static-element-interactions -->
-    <div class="ai-console-window" on:click|stopPropagation>
+  <!-- Persistent (not a click-away modal): a console session must survive clicking
+       elsewhere / losing focus. Closes only via the explicit button. -->
+  <div class="ai-console-overlay">
+    <div class="ai-console-window">
       <div class="ai-console-bar">
         <span>AI Console</span>
         <button on:click={() => (aiConsoleUrl = null)}>Close</button>
