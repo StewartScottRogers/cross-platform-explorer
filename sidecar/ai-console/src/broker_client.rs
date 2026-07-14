@@ -80,9 +80,51 @@ impl BrokerClient {
         }
     }
 
+    /// Resolve this sidecar's private storage directory from the host (`storage.dir`,
+    /// CPE-268). The sidecar reads/writes its own files there (e.g. presets.json).
+    pub fn storage_dir(&self) -> Result<std::path::PathBuf, String> {
+        let v = self.request("storage.dir", serde_json::Value::Null)?;
+        v.get("dir")
+            .and_then(|d| d.as_str())
+            .map(std::path::PathBuf::from)
+            .ok_or_else(|| "storage.dir returned no path".to_string())
+    }
+
     #[cfg(test)]
     fn pending_len(&self) -> usize {
         self.pending.lock().unwrap().len()
+    }
+}
+
+/// [`PresetsBackend`] persisted under the host storage directory (CPE-352). Reads/writes a
+/// single `presets.json`. Load degrades to an empty store on any error so the console never
+/// fails to open.
+pub struct BrokerPresets {
+    client: Arc<BrokerClient>,
+}
+
+impl BrokerPresets {
+    pub fn new(client: Arc<BrokerClient>) -> Self {
+        Self { client }
+    }
+    fn path(&self) -> Result<std::path::PathBuf, String> {
+        Ok(self.client.storage_dir()?.join("presets.json"))
+    }
+}
+
+impl crate::presets::PresetsBackend for BrokerPresets {
+    fn load(&self) -> crate::presets::PresetStore {
+        match self.path().and_then(|p| std::fs::read_to_string(p).map_err(|e| e.to_string())) {
+            Ok(s) => crate::presets::PresetStore::from_json(&s),
+            Err(_) => crate::presets::PresetStore::default(),
+        }
+    }
+    fn save(&self, store: &crate::presets::PresetStore) -> Result<(), String> {
+        let path = self.path()?;
+        if let Some(dir) = path.parent() {
+            std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
+        }
+        std::fs::write(path, store.to_json()).map_err(|e| e.to_string())
     }
 }
 

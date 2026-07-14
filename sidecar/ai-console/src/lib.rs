@@ -50,6 +50,7 @@ pub use history::{SessionHistory, SessionRecord};
 pub mod lmstudio;
 pub mod mcp;
 pub mod plugins;
+pub mod presets;
 pub mod pty;
 
 pub use mcp::{McpManager, McpProcess, McpServerSpec};
@@ -65,7 +66,8 @@ pub mod vault;
 pub use pty::{PtyLaunch, PtySession};
 
 pub use vault::{resolve_env, CredentialProfile, ProfileSet, SecretAccess};
-pub use broker_client::{BrokerClient, BrokerSecrets, MemSecrets, SharedWriter};
+pub use broker_client::{BrokerClient, BrokerPresets, BrokerSecrets, MemSecrets, SharedWriter};
+pub use presets::{MemPresets, Preset, PresetStore, PresetsBackend};
 
 pub use lmstudio::{detect as detect_lmstudio, LmStudio};
 

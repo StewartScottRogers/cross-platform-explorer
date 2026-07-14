@@ -1979,6 +1979,7 @@ fn serve_ai_console_requests(
     mut conn: sidecar_host::supervisor::ProcessConnection,
     granted: std::collections::BTreeSet<sidecar_contract::Capability>,
     stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    storage_base: std::path::PathBuf,
 ) {
     use sidecar_contract::{Envelope, Message};
     use sidecar_host::conformance::SidecarChannel;
@@ -1989,6 +1990,10 @@ fn serve_ai_console_requests(
     #[cfg(windows)]
     broker.register_provider(Box::new(sidecar_host::providers::secrets::SecretsProvider::new(
         sidecar_host::providers::secrets::KeyringBackend,
+    )));
+    // Storage: a private per-sidecar directory the console persists its presets under (CPE-352).
+    broker.register_provider(Box::new(sidecar_host::providers::storage::StorageProvider::new(
+        storage_base,
     )));
     broker.set_grants("ai-console", granted);
 
@@ -2105,6 +2110,7 @@ fn sidecar_start_ai_console(
     use sidecar_host::conformance::SidecarChannel; // brings `.recv()` into scope
     use sidecar_host::observability::LogLevel;
     use sidecar_host::supervisor::{handshake, spawn_process};
+    use tauri::Manager; // for app.path()
 
     // Respect the enable/disable toggle (CPE-274): a disabled sidecar must not start.
     if !sidecar_host::enablement::EnablementStore::load(&consent_dir(&app)?).is_enabled("ai-console") {
@@ -2149,7 +2155,14 @@ fn sidecar_start_ai_console(
     // "running" = is_some() and lets stop/disable end it by dropping the handle.
     let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
     let thread_stop = stop.clone();
-    let thread = std::thread::spawn(move || serve_ai_console_requests(conn, consented, thread_stop));
+    // Host-owned base for the sidecar's private storage (presets etc.); the provider roots
+    // each sidecar's dir under it by id.
+    let storage_base = app
+        .path()
+        .app_data_dir()
+        .map(|d| d.join("sidecar-storage"))
+        .unwrap_or_else(|_| std::env::temp_dir().join("cpe-sidecar-storage"));
+    let thread = std::thread::spawn(move || serve_ai_console_requests(conn, consented, thread_stop, storage_base));
     *state.conn.lock().map_err(|_| "state lock poisoned")? = Some(ConsoleConn { stop, _thread: thread });
     Ok(url)
 }
