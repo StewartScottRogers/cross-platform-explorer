@@ -42,6 +42,15 @@ pub struct AgentPresets {
     pub last_used: Option<Preset>,
 }
 
+/// A stored credential's identity — which labelled key a provider has (CPE-348). Values
+/// live in the OS keychain; this index just tracks the NAMES so labelled keys are listable.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CredentialRef {
+    pub provider: String,
+    pub label: String,
+}
+
 /// The whole persisted document.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -53,13 +62,22 @@ pub struct PresetStore {
     /// Whether the user has dismissed the first-run onboarding (CPE-312).
     #[serde(default)]
     pub onboarded: bool,
+    /// Which labelled provider credentials exist — names only (CPE-348).
+    #[serde(default)]
+    pub credentials: Vec<CredentialRef>,
     #[serde(default)]
     pub agents: BTreeMap<String, AgentPresets>,
 }
 
 impl Default for PresetStore {
     fn default() -> Self {
-        Self { schema_version: PRESETS_SCHEMA_VERSION, last_agent: None, onboarded: false, agents: BTreeMap::new() }
+        Self {
+            schema_version: PRESETS_SCHEMA_VERSION,
+            last_agent: None,
+            onboarded: false,
+            credentials: Vec::new(),
+            agents: BTreeMap::new(),
+        }
     }
 }
 
@@ -92,6 +110,17 @@ impl PresetStore {
         if let Some(a) = self.agents.get_mut(agent) {
             a.presets.retain(|p| p.name != name);
         }
+    }
+
+    /// Record that a labelled credential exists for a provider (CPE-348, dedup).
+    pub fn add_credential(&mut self, provider: &str, label: &str) {
+        if !self.credentials.iter().any(|c| c.provider == provider && c.label == label) {
+            self.credentials.push(CredentialRef { provider: provider.into(), label: label.into() });
+        }
+    }
+
+    pub fn remove_credential(&mut self, provider: &str, label: &str) {
+        self.credentials.retain(|c| !(c.provider == provider && c.label == label));
     }
 
     pub fn to_json(&self) -> String {

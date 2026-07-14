@@ -70,7 +70,7 @@ pub use broker_client::{
     BrokerClient, BrokerDialogs, BrokerPresets, BrokerSecrets, HostDialogs, MemSecrets, NoopDialogs,
     SharedWriter,
 };
-pub use presets::{MemPresets, Preset, PresetStore, PresetsBackend};
+pub use presets::{CredentialRef, MemPresets, Preset, PresetStore, PresetsBackend};
 
 pub use lmstudio::{detect as detect_lmstudio, LmStudio};
 

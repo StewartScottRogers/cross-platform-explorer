@@ -72,7 +72,7 @@
                font-weight: 600; font-size: 14px; margin-bottom: 8px; }
   .keys-x { height: 26px; padding: 0 8px; }
   .keys-note { font-size: 11.5px; opacity: .7; line-height: 1.45; margin: 0 0 12px; }
-  .keys-form { display: grid; grid-template-columns: 130px 1fr auto auto; gap: 8px; align-items: center; }
+  .keys-form { display: grid; grid-template-columns: 120px 110px 1fr auto auto; gap: 8px; align-items: center; }
   #keys-msg { min-height: 18px; font-size: 12px; margin: 10px 0; }
   .key-row { display: flex; align-items: center; justify-content: space-between;
              padding: 6px 8px; border-top: 1px solid var(--line); font-size: 12.5px; }
@@ -111,6 +111,10 @@
       <div class="field" style="width:160px;flex:0 0 auto">
         <label for="provider">Provider</label>
         <select id="provider"></select>
+      </div>
+      <div class="field" id="credential-wrap" style="width:130px;flex:0 0 auto;display:none">
+        <label for="credential">Credential</label>
+        <select id="credential"></select>
       </div>
       <div class="field grow">
         <label for="model">Model</label>
@@ -151,10 +155,12 @@
         <span>Provider keys</span>
         <button id="keys-close" type="button" class="keys-x" title="Close">×</button>
       </div>
-      <p class="keys-note">Stored in your OS keychain and shared by every agent that uses the
-        provider. A key is never shown again after it's saved.</p>
+      <p class="keys-note">Stored in your OS keychain, never shown again. Give a key a
+        <b>label</b> (e.g. “work”, “personal”) to keep several per provider (CPE-348);
+        blank means the provider's default key.</p>
       <div class="keys-form">
         <select id="key-provider"></select>
+        <input id="key-label" placeholder="label (optional)" autocomplete="off" spellcheck="false" />
         <input id="key-value" type="password" placeholder="Paste API key" autocomplete="off" spellcheck="false" />
         <button id="key-verify" type="button">Check</button>
         <button id="key-save" type="button" class="primary">Save</button>
@@ -211,6 +217,27 @@ function renderProviders() {
   });
   $("model").placeholder = (a && a.defaultModel) ? a.defaultModel : "(default)";
   renderInstall();
+  renderCredentials();
+}
+
+// --- Multiple credentials per provider (CPE-348) --------------------------------------
+function providerCredentialLabels() {
+  const creds = (catalog && catalog.presets && catalog.presets.credentials) || [];
+  const p = $("provider").value;
+  return [...new Set(creds.filter((c) => c.provider === p).map((c) => c.label))];
+}
+/** Show the credential picker only when the provider has a real choice (≥2 labels). */
+function renderCredentials() {
+  const labels = providerCredentialLabels();
+  const sel = $("credential");
+  if (labels.length < 2) { $("credential-wrap").style.display = "none"; sel.value = "default"; return; }
+  $("credential-wrap").style.display = "";
+  sel.innerHTML = "";
+  labels.sort().forEach((l) => { const o = document.createElement("option"); o.value = l; o.textContent = l; sel.appendChild(o); });
+  sel.value = labels.includes("default") ? "default" : labels[0];
+}
+function selectedCredential() {
+  return ($("credential-wrap").style.display === "none") ? "default" : ($("credential").value || "default");
 }
 function renderInstall() {
   const a = agentById($("agent").value);
@@ -276,6 +303,8 @@ function applyLastUsed() {
   if (lu.provider) $("provider").value = lu.provider;
   $("model").value = lu.model || "";
   $("smallModel").value = lu.smallModel || "";
+  renderCredentials();
+  if (lu.keyRef && $("credential-wrap").style.display !== "none") $("credential").value = lu.keyRef;
 }
 
 // --- Named preset sets per agent (CPE-353) --------------------------------------------
@@ -294,6 +323,8 @@ function applyPreset() {
   if (p.provider) $("provider").value = p.provider;
   $("model").value = p.model || "";
   $("smallModel").value = p.smallModel || "";
+  renderCredentials();
+  if (p.keyRef && $("credential-wrap").style.display !== "none") $("credential").value = p.keyRef;
 }
 async function saveSet() {
   const name = $("set-name").value.trim();
@@ -479,6 +510,7 @@ async function launch() {
   const body = {
     agent: $("agent").value, provider: $("provider").value,
     model, smallModel, apiKey: $("apiKey").value,
+    credential: selectedCredential(),
     cwd: $("cwd").value.trim(),
   };
   setMsg("Launching…", true);
@@ -506,7 +538,7 @@ function allProviders() {
 async function openKeys() {
   const sel = $("key-provider"); sel.innerHTML = "";
   allProviders().forEach((p) => { const o = document.createElement("option"); o.value = p; o.textContent = p; sel.appendChild(o); });
-  $("key-value").value = ""; keysMsg("");
+  $("key-value").value = ""; $("key-label").value = ""; keysMsg("");
   $("keys-overlay").hidden = false;
   await refreshKeys();
 }
@@ -514,13 +546,14 @@ async function refreshKeys() {
   const list = $("keys-list"); list.innerHTML = "";
   try {
     const data = await api("/api/keys");
-    const providers = data.providers || [];
-    if (!providers.length) { list.textContent = "No keys stored yet."; return; }
-    providers.forEach((p) => {
+    const creds = data.credentials || [];
+    if (!creds.length) { list.textContent = "No keys stored yet."; return; }
+    creds.forEach((c) => {
       const row = document.createElement("div"); row.className = "key-row";
-      const name = document.createElement("span"); name.textContent = p + " — saved";
+      const name = document.createElement("span");
+      name.textContent = c.provider + (c.label && c.label !== "default" ? " · " + c.label : "") + " — saved";
       const rm = document.createElement("button"); rm.type = "button"; rm.textContent = "Remove";
-      rm.onclick = () => removeKey(p);
+      rm.onclick = () => removeKey(c.provider, c.label);
       row.appendChild(name); row.appendChild(rm); list.appendChild(row);
     });
   } catch (e) { list.textContent = "Couldn't load keys: " + e.message; }
@@ -532,17 +565,24 @@ async function verifyKey() {
   } catch (e) { keysMsg("Check failed: " + e.message); }
 }
 async function saveKey() {
+  const label = $("key-label").value.trim();
   try {
-    await api("/api/keys", { method: "POST", body: JSON.stringify({ provider: $("key-provider").value, key: $("key-value").value }) });
+    await api("/api/keys", { method: "POST", body: JSON.stringify({
+      provider: $("key-provider").value, key: $("key-value").value, label,
+    }) });
     $("key-value").value = ""; // never keep the value around
-    keysMsg("Saved " + $("key-provider").value + " key.", true);
+    keysMsg("Saved " + $("key-provider").value + (label ? " · " + label : "") + " key.", true);
+    catalog = await api("/api/catalog"); // refresh the credential index for the picker
+    renderCredentials();
     await refreshKeys();
   } catch (e) { keysMsg("Save failed: " + e.message); }
 }
-async function removeKey(provider) {
+async function removeKey(provider, label) {
   try {
-    await api("/api/keys/delete", { method: "POST", body: JSON.stringify({ provider }) });
-    keysMsg("Removed " + provider + " key.", true);
+    await api("/api/keys/delete", { method: "POST", body: JSON.stringify({ provider, label }) });
+    keysMsg("Removed " + provider + (label && label !== "default" ? " · " + label : "") + " key.", true);
+    catalog = await api("/api/catalog");
+    renderCredentials();
     await refreshKeys();
   } catch (e) { keysMsg("Remove failed: " + e.message); }
 }
@@ -553,6 +593,7 @@ $("key-save").addEventListener("click", saveKey);
 $("keys-overlay").addEventListener("click", (e) => { if (e.target === $("keys-overlay")) $("keys-overlay").hidden = true; });
 
 $("agent").addEventListener("change", () => { renderProviders(); applyLastUsed(); renderPresets(); });
+$("provider").addEventListener("change", renderCredentials);
 $("preset").addEventListener("change", applyPreset);
 $("set-save").addEventListener("click", saveSet);
 $("set-del").addEventListener("click", deleteSet);
