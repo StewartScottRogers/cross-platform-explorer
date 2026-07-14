@@ -76,15 +76,122 @@ fn parse_version(stdout: &str) -> Option<String> {
         .map(str::to_string)
 }
 
+/// A build/runtime prerequisite an install recipe needs on PATH before it can run
+/// (CPE-329). Recognised from the recipe's package-manager command so we can bootstrap
+/// it or, failing that, tell the user exactly what to do — instead of letting the raw
+/// `npm ... : command not found` spawn error surface.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Prerequisite {
+    /// Node.js + npm — needed by every `npm i -g <agent>` recipe.
+    Node,
+}
+
+impl Prerequisite {
+    /// The prerequisite implied by an install recipe's command, if any.
+    fn for_command(command: &str) -> Option<Self> {
+        match command.trim().to_ascii_lowercase().as_str() {
+            "npm" | "npx" | "pnpm" | "yarn" => Some(Self::Node),
+            _ => None,
+        }
+    }
+
+    /// Command that proves the prerequisite is present (exit 0 = available).
+    fn probe(self) -> (&'static str, Vec<String>) {
+        match self {
+            Self::Node => ("npm", vec!["--version".into()]),
+        }
+    }
+
+    /// winget package id used to bootstrap it on Windows.
+    fn winget_id(self) -> &'static str {
+        match self {
+            Self::Node => "OpenJS.NodeJS.LTS",
+        }
+    }
+
+    fn display(self) -> &'static str {
+        match self {
+            Self::Node => "Node.js (npm)",
+        }
+    }
+}
+
+/// Whether `program` runs and exits successfully (i.e. it's installed and on PATH).
+/// A spawn failure or non-zero exit both mean "not available".
+fn command_available(runner: &dyn CommandRunner, program: &str, args: &[String]) -> bool {
+    matches!(runner.run(program, args), Ok(out) if out.status_ok)
+}
+
+/// Ensure an install recipe's prerequisite (e.g. Node/npm) is present, bootstrapping it
+/// via winget when possible, or returning a precise, actionable message otherwise
+/// (CPE-329). A recipe with no recognised prerequisite is a no-op.
+fn ensure_prerequisites(cmd: &OsCommand, runner: &dyn CommandRunner) -> Result<(), String> {
+    let Some(prereq) = Prerequisite::for_command(&cmd.command) else {
+        return Ok(());
+    };
+    let (probe_cmd, probe_args) = prereq.probe();
+    if command_available(runner, probe_cmd, &probe_args) {
+        return Ok(());
+    }
+
+    let winget_cmd = format!("winget install -e --id {}", prereq.winget_id());
+
+    // Without winget we can't bootstrap — tell the user the one command that fixes it.
+    if !command_available(runner, "winget", &["--version".into()]) {
+        return Err(format!(
+            "{} is required but not installed, and winget is unavailable to bootstrap it. \
+             Install Node.js LTS from https://nodejs.org (or run `{}`) and try again.",
+            prereq.display(),
+            winget_cmd,
+        ));
+    }
+
+    // Bootstrap it via winget.
+    let out = runner.run(
+        "winget",
+        &[
+            "install".into(),
+            "-e".into(),
+            "--id".into(),
+            prereq.winget_id().into(),
+            "--accept-source-agreements".into(),
+            "--accept-package-agreements".into(),
+        ],
+    )?;
+    if !out.status_ok {
+        return Err(format!(
+            "tried to install {} via winget but it failed: {}. Install it manually with `{}` and try again.",
+            prereq.display(),
+            out.stderr.trim(),
+            winget_cmd,
+        ));
+    }
+
+    // Installed — but a running process won't see the new PATH entry until it restarts,
+    // so re-probe and, if still not visible, ask the user to relaunch rather than fail
+    // opaquely mid-install.
+    if command_available(runner, probe_cmd, &probe_args) {
+        Ok(())
+    } else {
+        Err(format!(
+            "Installed {}. Restart the app so npm is on PATH, then install again.",
+            prereq.display(),
+        ))
+    }
+}
+
 /// Install the agent by running its per-OS `install` recipe via `runner` (CPE-282).
 /// Rust orchestrates the underlying package manager (npm/winget/brew/pipx) — the
-/// recipe is data, there are no shell scripts. Returns the captured output on success,
-/// or an error if there is no install recipe, the command can't be spawned, or it exits
-/// non-zero.
+/// recipe is data, there are no shell scripts. Before an npm-based recipe runs, its
+/// Node/npm prerequisite is verified and bootstrapped when missing (CPE-329). Returns
+/// the captured output on success, or an error if there is no install recipe, a
+/// prerequisite is missing and can't be bootstrapped, the command can't be spawned, or
+/// it exits non-zero.
 pub fn install(agent: &AgentManifest, runner: &dyn CommandRunner) -> Result<CommandOutput, String> {
     let cmd = agent
         .install_for_current_os()
         .ok_or_else(|| format!("agent '{}' has no install recipe for this OS", agent.id))?;
+    ensure_prerequisites(cmd, runner)?;
     run_step(agent, "install", cmd, runner)
 }
 
@@ -162,6 +269,25 @@ mod tests {
         }
     }
 
+    fn ok_output() -> CommandOutput {
+        CommandOutput { status_ok: true, stdout: "ok".into(), stderr: String::new() }
+    }
+    fn fail_output(stderr: &str) -> CommandOutput {
+        CommandOutput { status_ok: false, stdout: String::new(), stderr: stderr.into() }
+    }
+
+    /// A runner that dispatches on the (command, args) pair via a closure — needed to
+    /// distinguish e.g. the `npm --version` probe from the `npm i -g` install (CPE-329).
+    struct FnRunner<F>(F);
+    impl<F: Fn(&str, &[String]) -> Result<CommandOutput, String>> CommandRunner for FnRunner<F> {
+        fn run(&self, c: &str, a: &[String]) -> Result<CommandOutput, String> {
+            (self.0)(c, a)
+        }
+    }
+    fn is_probe(args: &[String]) -> bool {
+        args == ["--version"]
+    }
+
     #[test]
     fn installed_when_detect_succeeds_and_parses_version() {
         let runner = FakeRunner {
@@ -230,12 +356,99 @@ mod tests {
 
     #[test]
     fn install_errors_on_nonzero_with_stderr() {
-        let runner = FakeRunner {
-            result: Ok(CommandOutput { status_ok: false, stdout: String::new(), stderr: "npm boom".into() }),
-        };
+        // npm is present (probe ok); the actual install command is what fails.
+        let runner = FnRunner(|cmd: &str, args: &[String]| {
+            if cmd == "npm" && is_probe(args) {
+                Ok(ok_output())
+            } else {
+                Ok(fail_output("npm boom"))
+            }
+        });
         let err = install(&agent_with_install(false), &runner).unwrap_err();
         assert!(err.contains("install of 'claude' failed"));
         assert!(err.contains("npm boom"));
+    }
+
+    #[test]
+    fn install_proceeds_when_npm_is_present() {
+        // Probe ok, install ok — no bootstrap needed.
+        let runner = FnRunner(|_c: &str, _a: &[String]| Ok(ok_output()));
+        assert!(install(&agent_with_install(false), &runner).is_ok());
+    }
+
+    #[test]
+    fn install_advises_clearly_when_npm_and_winget_both_missing() {
+        // Nothing is available: no raw spawn error — a precise, actionable message.
+        let runner = FnRunner(|_c: &str, _a: &[String]| Ok(fail_output("not recognized")));
+        let err = install(&agent_with_install(false), &runner).unwrap_err();
+        assert!(err.contains("Node.js"));
+        assert!(err.contains("nodejs.org"));
+        assert!(err.contains("OpenJS.NodeJS.LTS"));
+        assert!(!err.contains("not recognized")); // not the raw spawn/exec error
+    }
+
+    #[test]
+    fn install_bootstraps_node_via_winget_then_succeeds() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let npm_probes = AtomicUsize::new(0);
+        let runner = FnRunner(move |cmd: &str, args: &[String]| {
+            if cmd == "npm" && is_probe(args) {
+                // Missing before bootstrap, present after.
+                let n = npm_probes.fetch_add(1, Ordering::SeqCst);
+                Ok(if n == 0 { fail_output("missing") } else { ok_output() })
+            } else {
+                Ok(ok_output()) // winget --version, winget install, and the npm install
+            }
+        });
+        assert!(install(&agent_with_install(false), &runner).is_ok());
+    }
+
+    #[test]
+    fn install_asks_for_restart_when_npm_still_missing_after_bootstrap() {
+        // winget present and its install "succeeds", but npm never shows up on PATH.
+        let runner = FnRunner(|cmd: &str, args: &[String]| {
+            if cmd == "npm" && is_probe(args) {
+                Ok(fail_output("missing"))
+            } else {
+                Ok(ok_output())
+            }
+        });
+        let err = install(&agent_with_install(false), &runner).unwrap_err();
+        assert!(err.contains("Restart"));
+    }
+
+    #[test]
+    fn install_errors_when_winget_bootstrap_fails() {
+        let runner = FnRunner(|cmd: &str, args: &[String]| {
+            if cmd == "npm" && is_probe(args) {
+                Ok(fail_output("missing")) // npm not present
+            } else if cmd == "winget" && is_probe(args) {
+                Ok(ok_output()) // winget IS present
+            } else {
+                Ok(fail_output("winget: package failed")) // the winget install fails
+            }
+        });
+        let err = install(&agent_with_install(false), &runner).unwrap_err();
+        assert!(err.contains("winget but it failed"));
+        assert!(err.contains("winget: package failed"));
+    }
+
+    #[test]
+    fn install_skips_prerequisite_gate_for_non_npm_recipes() {
+        // A recipe whose command isn't a Node package manager is never gated on npm.
+        let d = tempfile::tempdir().unwrap();
+        let json = r#"{ "schema_version": 1, "id": "claude", "name": "Claude Code",
+             "install": { "windows": { "command": "pipx", "args": ["install", "x"] },
+                          "macos": { "command": "pipx", "args": ["install", "x"] },
+                          "linux": { "command": "pipx", "args": ["install", "x"] } },
+             "run": { "windows": { "command": "claude" }, "macos": { "command": "claude" }, "linux": { "command": "claude" } } }"#;
+        std::fs::File::create(d.path().join("claude.json")).unwrap().write_all(json.as_bytes()).unwrap();
+        let agent = AgentRegistry::load_from_dirs(&[d.path().to_path_buf()]).get("claude").unwrap().clone();
+        // npm/winget would both report missing, but pipx isn't gated, so install runs.
+        let runner = FnRunner(|cmd: &str, _a: &[String]| {
+            Ok(if cmd == "pipx" { ok_output() } else { fail_output("missing") })
+        });
+        assert!(install(&agent, &runner).is_ok());
     }
 
     #[test]
