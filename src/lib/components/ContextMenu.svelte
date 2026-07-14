@@ -102,6 +102,11 @@
         </button>
       {/if}
     {/if}
+    {#if canTerminal}
+      <button class="row" role="menuitem" on:click={() => run("open-in-console")}>
+        <Icon name="code" size={15} /> Work on this in AI Console
+      </button>
+    {/if}
     <button class="row" role="menuitem" on:click={() => run("duplicate")}>
       <Icon name="copy" size={15} /> Duplicate
       <span class="hint">Ctrl+D</span>
@@ -179,6 +184,9 @@
     {#if canTerminal}
       <button class="row" role="menuitem" on:click={() => run("terminal")}>
         <Icon name="code" size={15} /> Open in Terminal
+      </button>
+      <button class="row" role="menuitem" on:click={() => run("open-folder-in-console")}>
+        <Icon name="code" size={15} /> Work on this folder in AI Console
       </button>
     {/if}
     <button class="row" role="menuitem" on:click={() => run("reveal")}>

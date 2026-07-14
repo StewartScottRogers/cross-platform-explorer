@@ -28,6 +28,21 @@ export async function listSidecars(): Promise<string[]> {
  * caller can mount it in an iframe pane (CPE-271). Returns `null` when the platform is off
  * or the sidecar couldn't start — never throws.
  */
+/**
+ * Append an explorer "work on this" context to the AI Console loopback URL as query
+ * params (CPE-313). The console page reads `cwd`/`task` client-side to pre-scope a
+ * session — a decoupled hand-off: the explorer never touches console internals, it just
+ * opens a URL. Empty/absent values are omitted so the plain open is unchanged.
+ */
+export function consoleUrlWith(baseUrl: string, cwd?: string, task?: string): string {
+  const params = new URLSearchParams();
+  if (cwd && cwd.trim()) params.set("cwd", cwd.trim());
+  if (task && task.trim()) params.set("task", task.trim());
+  const qs = params.toString();
+  if (!qs) return baseUrl;
+  return baseUrl + (baseUrl.includes("?") ? "&" : "?") + qs;
+}
+
 export async function startAiConsole(): Promise<string | null> {
   try {
     const url = await invoke<string>("sidecar_start_ai_console");

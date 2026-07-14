@@ -14,7 +14,7 @@
   import AboutDialog from "./lib/components/AboutDialog.svelte";
   import SettingsDialog from "./lib/components/SettingsDialog.svelte";
   import ConsentSheet from "./lib/components/ConsentSheet.svelte";
-  import { startAiConsole, consentState, setConsent, type Capability, type ConsentState } from "./lib/sidecar";
+  import { startAiConsole, consoleUrlWith, consentState, setConsent, type Capability, type ConsentState } from "./lib/sidecar";
   import UpdateDialog from "./lib/components/UpdateDialog.svelte";
   import TabBar from "./lib/components/TabBar.svelte";
   import NavToolbar from "./lib/components/NavToolbar.svelte";
@@ -171,10 +171,19 @@
       meaningful in a `sidecar-platform` build. Gated by capability consent (CPE-296). The
       window loads the sidecar's loopback URL directly and has NO Tauri API (its label is
       in no capability), so the untrusted sidecar UI stays isolated. */
-  async function openAiConsole() {
+  /** Pending explorer→console hand-off (CPE-313): folder to scope to and a task hint,
+      consumed by launchAiConsole once consent (if any) is resolved. */
+  let consoleContext: { cwd?: string; task?: string } = {};
+
+  async function openAiConsole(ctx: { cwd?: string; task?: string } = {}) {
     showSettings = false;
+    consoleContext = ctx;
     const existing = await WebviewWindow.getByLabel(AI_CONSOLE_LABEL);
-    if (existing) { await existing.setFocus(); return; } // reuse the running session
+    if (existing) {
+      await existing.setFocus(); // can't re-scope a live window without disrupting sessions
+      if (ctx.cwd) showNotice("AI Console is already open — set the working folder in its toolbar.", false);
+      return;
+    }
     const state = await consentState("ai-console");
     if (state && state.undecided.length > 0) {
       consentPrompt = state; // launch continues in onConsentDecision
@@ -184,8 +193,9 @@
   }
 
   async function launchAiConsole() {
-    const url = await startAiConsole();
-    if (!url) { showNotice("AI Console isn't available in this build.", true); return; }
+    const base = await startAiConsole();
+    if (!base) { showNotice("AI Console isn't available in this build.", true); return; }
+    const url = consoleUrlWith(base, consoleContext.cwd, consoleContext.task);
     try {
       const win = new WebviewWindow(AI_CONSOLE_LABEL, {
         url,
@@ -869,6 +879,22 @@
     showNotice(wasPinned ? `Unpinned "${entry.name}" from Home.` : `Pinned "${entry.name}" to Home.`);
   }
 
+  /** "Work on this" — open the AI Console scoped to the selection (CPE-313). A single
+      folder scopes to itself; files scope to the current folder with a task naming them;
+      no selection just opens the current folder. Degrades cleanly when the console is
+      absent (launchAiConsole shows a notice). */
+  function openSelectionInConsole() {
+    if (isHome || archive) { openAiConsole(); return; }
+    const sel = selectedEntries;
+    if (sel.length === 1 && sel[0].is_dir) {
+      openAiConsole({ cwd: sel[0].path, task: `Work in the folder "${sel[0].name}".` });
+    } else if (sel.length >= 1) {
+      openAiConsole({ cwd: currentPath, task: `Work on: ${sel.map((e) => e.name).join(", ")}` });
+    } else {
+      openAiConsole({ cwd: currentPath });
+    }
+  }
+
   /** Star/unstar the single selected item (file or folder) as a Favorite (CPE-338). */
   function toggleFavoriteSelected() {
     const entry = selectedEntries[0];
@@ -1105,6 +1131,8 @@
       case "terminal-folder": if (selectedEntries[0]?.is_dir) openTerminal(selectedEntries[0].path); break;
       case "pin": togglePinSelected(); break;
       case "favorite": toggleFavoriteSelected(); break;
+      case "open-in-console": openSelectionInConsole(); break;
+      case "open-folder-in-console": if (!isHome && !archive) openAiConsole({ cwd: currentPath }); break;
       case "rename": if (selectedEntries.length === 1) beginRename(selectedEntries[0]); break;
       case "batch-rename": beginBatchRename(); break;
       case "delete": askDelete(false); break;
@@ -1820,7 +1848,7 @@
     on:setHidden={(e) => { showHidden = e.detail; settings.saveShowHidden(showHidden); }}
     on:setDetails={(e) => { showDetails = e.detail; settings.saveShowDetails(showDetails); }}
     on:reset={resetAllSettings}
-    on:openConsole={openAiConsole}
+    on:openConsole={() => openAiConsole()}
     on:close={() => (showSettings = false)}
   />
 {/if}

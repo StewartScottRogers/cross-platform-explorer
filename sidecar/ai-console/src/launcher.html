@@ -160,6 +160,13 @@ async function load() {
     o.textContent = a.name + (a.installed ? "" : " (not installed)"); sel.appendChild(o);
   });
   $("cwd").value = catalog.cwd || "";
+  // Explorer "work on this" hand-off (CPE-313): cwd/task passed as query params
+  // pre-scope the session. Decoupled — the explorer merely opened this URL.
+  const ctx = new URLSearchParams(location.search);
+  const ctxCwd = ctx.get("cwd");
+  if (ctxCwd) $("cwd").value = ctxCwd;
+  const ctxTask = ctx.get("task");
+  if (ctxTask) setMsg("From explorer — " + ctxTask + "  (pick agent & provider, then Launch)", true);
   const last = catalog.lastUsed;
   if (last && agentById(last.agent)) { sel.value = last.agent; } else if (prev) { sel.value = prev; }
   renderProviders();

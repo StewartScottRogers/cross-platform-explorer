@@ -12,7 +12,33 @@ import {
   startAiConsole,
   sidecarDiagnostics,
   emptyDiagnostics,
+  consoleUrlWith,
 } from "./sidecar";
+
+describe("consoleUrlWith (CPE-313 explorer→console hand-off)", () => {
+  const base = "http://127.0.0.1:8731/";
+
+  it("returns the base unchanged when no context is given", () => {
+    expect(consoleUrlWith(base)).toBe(base);
+    expect(consoleUrlWith(base, "", "  ")).toBe(base);
+  });
+
+  it("appends cwd and task as encoded query params", () => {
+    const url = new URL(consoleUrlWith(base, "C:\\repos\\app", "Work on: a.ts, b.ts"));
+    expect(url.searchParams.get("cwd")).toBe("C:\\repos\\app");
+    expect(url.searchParams.get("task")).toBe("Work on: a.ts, b.ts");
+  });
+
+  it("uses & when the base already has a query string", () => {
+    expect(consoleUrlWith("http://h/?x=1", "/repo")).toBe("http://h/?x=1&cwd=%2Frepo");
+  });
+
+  it("omits an absent value but keeps the present one", () => {
+    const url = new URL(consoleUrlWith(base, "/repo"));
+    expect(url.searchParams.get("cwd")).toBe("/repo");
+    expect(url.searchParams.has("task")).toBe(false);
+  });
+});
 
 beforeEach(() => invoke.mockReset());
 
