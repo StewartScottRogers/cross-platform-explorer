@@ -6,14 +6,17 @@
 
 use std::io::{BufRead, Write};
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use ai_console::agents::AgentRegistry;
+use ai_console::broker_client::{BrokerClient, BrokerSecrets, SharedWriter};
 use ai_console::console::{route, ws_route, ConsoleState};
+use ai_console::vault::SecretAccess;
 use ai_console::{hello, http, on_message, Reaction};
 use sidecar_contract::{Envelope, Event, Lifecycle, Message};
 
-fn write_env(out: &mut impl Write, env: &Envelope) {
+fn write_env(writer: &SharedWriter, env: &Envelope) {
+    let mut out = writer.lock().unwrap();
     let _ = writeln!(out, "{}", env.to_json().expect("serialize"));
     let _ = out.flush();
 }
@@ -38,21 +41,27 @@ fn agents_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("agents")
 }
 
-/// Build the launcher's shared state: the agent catalog + the folder sessions default to.
-fn console_state() -> Arc<ConsoleState> {
+/// Build the launcher's shared state: the agent catalog, the default folder, and the
+/// secrets backend (the host keychain broker) so provider keys resolve at launch.
+fn console_state(secrets: Arc<dyn SecretAccess + Send + Sync>) -> Arc<ConsoleState> {
     let registry = AgentRegistry::load_from_dirs(&[agents_dir()]);
     let cwd = std::env::var("CPE_AICONSOLE_CWD")
         .ok()
         .or_else(|| std::env::current_dir().ok().map(|p| p.to_string_lossy().into_owned()))
         .unwrap_or_default();
-    Arc::new(ConsoleState::new(registry, cwd))
+    Arc::new(ConsoleState::with_secrets(registry, cwd, secrets))
 }
 
 fn main() {
     let stdin = std::io::stdin();
-    let mut stdout = std::io::stdout();
+    // A single shared writer so the main loop and the broker client never interleave
+    // partial lines on stdout (CPE-344).
+    let writer: SharedWriter = Arc::new(Mutex::new(Box::new(std::io::stdout())));
+    // Outbound capability client (secrets.*). The loopback HTTP handlers call it; the
+    // main loop below routes the host's responses back to it.
+    let broker = Arc::new(BrokerClient::new(writer.clone()));
 
-    write_env(&mut stdout, &hello());
+    write_env(&writer, &hello());
 
     // Kept alive for the process lifetime once the handshake completes.
     let mut _ui_server: Option<http::UiServer> = None;
@@ -70,14 +79,21 @@ fn main() {
             Err(_) => continue,
         };
 
+        // A response to one of our outbound capability requests: hand it to the waiter.
+        if let Message::Response(resp) = &env.message {
+            broker.deliver(env.id, resp.clone());
+            continue;
+        }
+
         // On Welcome: reach Ready, start the UI server, and announce its URL so the host
         // can mount it (CPE-271). Handled here (not in the pure `on_message`) because it
-        // has side effects.
+        // has side effects. The console gets a keychain-backed secrets store (CPE-344).
         if matches!(env.message, Message::Welcome(_)) {
-            write_env(&mut stdout, &Envelope::new(0, Message::Lifecycle(Lifecycle::Ready)));
-            if let Ok(server) = http::serve(console_state(), route, ws_route) {
+            write_env(&writer, &Envelope::new(0, Message::Lifecycle(Lifecycle::Ready)));
+            let secrets = Arc::new(BrokerSecrets::new(broker.clone()));
+            if let Ok(server) = http::serve(console_state(secrets), route, ws_route) {
                 write_env(
-                    &mut stdout,
+                    &writer,
                     &Envelope::new(0, Message::Event(Event::Status { state: format!("ui:{}", server.url()) })),
                 );
                 _ui_server = Some(server);
@@ -86,7 +102,7 @@ fn main() {
         }
 
         match on_message(env) {
-            Reaction::Send(reply) => write_env(&mut stdout, &reply),
+            Reaction::Send(reply) => write_env(&writer, &reply),
             Reaction::Exit(code) => std::process::exit(code),
             Reaction::Nothing => {}
         }
