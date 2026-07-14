@@ -138,6 +138,7 @@
   let pins: string[] = [];
   let recents: RecentFile[] = [];
   let favorites: Favorite[] = [];
+  let recentFolders: RecentFile[] = [];
   let search = "";
   let editingPath = false;
 
@@ -372,6 +373,11 @@
     } finally {
       loading = false;
     }
+
+    // A folder we actually opened joins the recently-visited MRU (CPE-342). The
+    // error guard means an unreadable path (or a file mistaken for a folder, e.g.
+    // an archive) is never recorded.
+    if (!error) recordRecentFolder(path);
 
     // Re-derive the selection from paths — indices are meaningless after a reload.
     if (keepSelection && previouslySelected.length > 0) {
@@ -1234,6 +1240,14 @@
     pins = settings.loadPins();
     recents = settings.loadRecents();
     favorites = settings.loadFavorites();
+    recentFolders = settings.loadRecentFolders();
+  }
+
+  /** Record a successfully-opened folder in the recently-visited MRU (CPE-342). */
+  function recordRecentFolder(path: string) {
+    const name = path.split(/[\\/]/).filter(Boolean).pop() ?? path;
+    recentFolders = settings.addRecent(recentFolders, { path, name });
+    settings.saveRecentFolders(recentFolders);
   }
 
   /** App-level Settings gear: restore every preference to its default. */
@@ -1612,11 +1626,13 @@
         {pins}
         {recents}
         {favorites}
+        {recentFolders}
         on:navigate={(e) => navigate(e.detail)}
         on:openFile={(e) => openRecent(e.detail)}
         on:unpin={(e) => { pins = settings.togglePin(pins, e.detail); settings.savePins(pins); }}
         on:unfavorite={(e) => { favorites = favorites.filter((f) => f.path !== e.detail); settings.saveFavorites(favorites); }}
         on:removeRecent={(e) => { recents = settings.removeRecent(recents, e.detail); settings.saveRecents(recents); }}
+        on:removeRecentFolder={(e) => { recentFolders = settings.removeRecent(recentFolders, e.detail); settings.saveRecentFolders(recentFolders); }}
         on:clearRecents={() => { recents = []; settings.saveRecents(recents); }}
       />
     {:else}

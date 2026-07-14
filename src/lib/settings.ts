@@ -27,6 +27,7 @@ export const KEYS = {
   pins: "cpe.pins",
   recents: "cpe.recents",
   favorites: "cpe.favorites",
+  recentFolders: "cpe.recentFolders",
 } as const;
 
 const MAX_RECENTS = 20;
@@ -172,6 +173,9 @@ export const saveRecents = (v: RecentFile[]) => write(KEYS.recents, v);
 
 export const loadFavorites = (): Favorite[] => read(KEYS.favorites, [], isFavoriteArray);
 export const saveFavorites = (v: Favorite[]) => write(KEYS.favorites, v);
+
+export const loadRecentFolders = (): RecentFile[] => read(KEYS.recentFolders, [], isRecentArray);
+export const saveRecentFolders = (v: RecentFile[]) => write(KEYS.recentFolders, v);
 
 /** Reset every stored preference to its default (used by the app Settings gear). */
 export function resetSettings(): void {

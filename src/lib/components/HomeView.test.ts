@@ -49,6 +49,39 @@ describe("HomeView Favorites tab (CPE-338)", () => {
   });
 });
 
+describe("HomeView Recent folders tab (CPE-342)", () => {
+  const recentFolders: RecentFile[] = [
+    { path: "/home/projects", name: "projects", opened: 2 },
+    { path: "/home/music", name: "music", opened: 1 },
+  ];
+
+  it("lists visited folders and navigates on click", async () => {
+    const { component } = render(HomeView, {
+      places: [], drives: [], pins: [], recents: [], favorites: [], recentFolders,
+    });
+    const navigate = vi.fn();
+    component.$on("navigate", (e) => navigate(e.detail));
+
+    await fireEvent.click(screen.getByRole("button", { name: /Folders/i }));
+    expect(screen.getByText("projects")).toBeTruthy();
+    await fireEvent.click(screen.getByText("projects"));
+    expect(navigate).toHaveBeenCalledWith("/home/projects");
+  });
+
+  it("removes one folder from the MRU via its ✕", async () => {
+    const { component } = render(HomeView, {
+      places: [], drives: [], pins: [], recents: [], favorites: [], recentFolders,
+    });
+    const removeRecentFolder = vi.fn();
+    component.$on("removeRecentFolder", (e) => removeRecentFolder(e.detail));
+
+    await fireEvent.click(screen.getByRole("button", { name: /Folders/i }));
+    const buttons = screen.getAllByRole("button", { name: /Remove from Recent folders/i });
+    await fireEvent.click(buttons[0]);
+    expect(removeRecentFolder).toHaveBeenCalledWith("/home/projects");
+  });
+});
+
 describe("HomeView Recent remove (CPE-341)", () => {
   it("dispatches removeRecent with just that row's path", async () => {
     const { component } = render(HomeView, { places: [], drives: [], pins: [], recents, favorites: [] });
