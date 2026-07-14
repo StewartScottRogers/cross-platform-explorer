@@ -30,3 +30,11 @@ re-attaches, or sessions checkpoint and resume cleanly.
 
 ## Work Log
 2026-07-13 — Filed during epic-plan hardening.
+2026-07-14 — Triage while working the backlog. Two findings: (1) **Live reattach of a *running*
+agent across a sidecar restart is architecturally impossible as built** — the agent PTYs are
+children of the sidecar process, so they die when it does. True live reattach would require
+re-parenting the agent to a supervisor that outlives the UI process (a large change) — that is the
+real `big-design` core of this ticket. (2) The *achievable* value — sessions + transcripts survive
+a restart and are relaunchable — is deliverable now: `history.rs` (CPE-292) already implements the
+persistence, but it was **never wired in**. Split that implementable slice to **CPE-370** (`ready`).
+This ticket stays `big-design` for the live-reattach core; revisit if PTY re-parenting is pursued.
