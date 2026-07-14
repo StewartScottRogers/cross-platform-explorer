@@ -2020,11 +2020,12 @@ fn verify_key_response(params: &serde_json::Value) -> sidecar_contract::Response
     sidecar_contract::Response { result: Ok(json!({ "valid": valid, "live": live, "detail": detail })) }
 }
 
-/// Trusted first-party public keys (hex) for agent-catalog signatures (CPE-376/377). Empty until
-/// CPE-377 ships the real key — empty means every fetched manifest fails verification, so the
-/// catalog-update feature is safely **dormant** (nothing is trusted, nothing is applied).
+/// Trusted first-party public keys (hex) for agent-catalog signatures (CPE-376/377/380). The
+/// matching private seed is the `CPE_CATALOG_SIGNING_KEY` release secret. Empty here would mean the
+/// catalog-update feature is dormant (nothing trusted); a real key activates it.
 #[cfg(feature = "sidecar-platform")]
-const CATALOG_TRUSTED_KEYS: &[&str] = &[];
+const CATALOG_TRUSTED_KEYS: &[&str] =
+    &["5b18ad467b37b7c06556000f15359a845bd85790ece91de110a337890d017130"];
 
 /// The writable agent-catalog dir on this machine — where fetched, verified manifests land and
 /// where the sidecar loads them from. Both the fetch handler and the sidecar (via env) agree on it.
