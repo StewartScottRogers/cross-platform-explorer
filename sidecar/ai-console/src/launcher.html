@@ -6,68 +6,81 @@
 <title>AI Console</title>
 <style>/*__XTERM_CSS__*/</style>
 <style>
-  :root { color-scheme: light dark; }
+  :root { color-scheme: light dark; --line: rgba(128,128,128,0.26); --accent: #2f6fed; }
   * { box-sizing: border-box; }
-  body { font: 13px system-ui, sans-serif; margin: 0; height: 100vh; display: flex;
+  body { font: 13px system-ui, "Segoe UI", sans-serif; margin: 0; height: 100vh; display: flex;
          flex-direction: column; background: Canvas; color: CanvasText; }
-  header { padding: 8px 12px; border-bottom: 1px solid rgba(128,128,128,0.3);
-           display: flex; flex-wrap: wrap; gap: 8px; align-items: end; }
-  .field { display: flex; flex-direction: column; gap: 2px; }
-  .field label { font-size: 10px; text-transform: uppercase; letter-spacing: .04em; opacity: .6; }
-  select, input { font: inherit; padding: 4px 6px; background: Field; color: FieldText;
-                  border: 1px solid rgba(128,128,128,0.4); border-radius: 5px; }
-  input.grow { min-width: 180px; }
-  button { font: inherit; padding: 5px 12px; border-radius: 6px; cursor: pointer;
-           border: 1px solid rgba(128,128,128,0.4); background: ButtonFace; color: ButtonText; }
-  button.primary { background: #2f6fed; border-color: #2f6fed; color: #fff; }
+
+  /* Launcher toolbar */
+  .toolbar { padding: 11px 16px; display: flex; flex-direction: column; gap: 10px;
+             background: rgba(128,128,128,0.07); border-bottom: 1px solid var(--line); }
+  .toolbar .row { display: flex; gap: 14px; align-items: flex-end; }
+  .field { display: flex; flex-direction: column; gap: 4px; min-width: 0; }
+  .field.grow { flex: 1; }
+  .field label { font-size: 10px; text-transform: uppercase; letter-spacing: .06em;
+                 opacity: .55; font-weight: 600; }
+  select, input { font: inherit; height: 30px; width: 100%; padding: 0 9px;
+                  background: Field; color: FieldText; border: 1px solid var(--line);
+                  border-radius: 6px; }
+  select:focus, input:focus { outline: none; border-color: var(--accent); }
+  button { font: inherit; height: 30px; padding: 0 14px; border-radius: 6px; cursor: pointer;
+           border: 1px solid var(--line); background: ButtonFace; color: ButtonText; font-weight: 500; }
+  button.primary { height: 34px; min-width: 130px; padding: 0 20px; background: var(--accent);
+                   border-color: var(--accent); color: #fff; font-weight: 600; }
+  button.primary:hover { filter: brightness(1.08); }
   button:disabled { opacity: .5; cursor: default; }
-  .spacer { flex: 1; }
-  .badge { font-size: 10px; padding: 1px 6px; border-radius: 999px; }
+  .install { display: flex; align-items: center; gap: 8px; height: 30px; }
+  .badge { font-size: 10px; padding: 2px 9px; border-radius: 999px; font-weight: 600;
+           text-transform: uppercase; letter-spacing: .03em; white-space: nowrap; }
   .badge.no { background: #b5872b; color: #fff; }
   .badge.yes { background: #3a9d4a; color: #fff; }
-  #msg { padding: 4px 12px; font-size: 12px; color: #d05656; min-height: 18px; }
+  #msg { padding: 6px 16px; font-size: 12px; min-height: 20px; border-bottom: 1px solid var(--line);
+         opacity: .85; }
   #term { flex: 1; min-height: 0; background: #0d0d0d; overflow: hidden; }
-  /* Force a classic, space-reserving scrollbar so FitAddon leaves room for it and the last
-     column never renders under it (WebView2 defaults to zero-width overlay scrollbars). */
-  /* Standard scrollbar properties (Chromium/WebView2 honors these and shows an
-     always-visible, non-overlay scrollbar — the ::-webkit- rules are a fallback). */
-  #term .xterm-viewport { scrollbar-width: auto; scrollbar-color: #6a6a6a #141414; }
-  #term .xterm-viewport::-webkit-scrollbar { width: 14px; }
-  #term .xterm-viewport::-webkit-scrollbar-track { background: #141414; }
-  #term .xterm-viewport::-webkit-scrollbar-thumb { background: #6a6a6a; border-radius: 7px;
-    border: 3px solid #141414; min-height: 30px; }
-  #term .xterm-viewport::-webkit-scrollbar-thumb:hover { background: #8a8a8a; }
+  /* Force a classic, always-visible scrollbar GLOBALLY. This is deliberate: xterm measures
+     the scrollbar width on a throwaway element to decide how many columns fit, so the rule
+     must apply everywhere (not just .xterm-viewport) — otherwise it measures WebView2's
+     zero-width overlay scrollbar, reserves no space, and the text canvas covers the bar. */
+  * { scrollbar-width: auto; scrollbar-color: #6a6a6a #141414; }
+  ::-webkit-scrollbar { width: 14px; height: 14px; }
+  ::-webkit-scrollbar-track { background: #141414; }
+  ::-webkit-scrollbar-thumb { background: #6a6a6a; border-radius: 7px; border: 3px solid #141414; min-height: 30px; }
+  ::-webkit-scrollbar-thumb:hover { background: #8a8a8a; }
 </style>
 </head>
 <body>
-  <header>
-    <div class="field">
-      <label for="agent">Agent</label>
-      <select id="agent"></select>
+  <div class="toolbar">
+    <div class="row">
+      <div class="field" style="width:190px;flex:0 0 auto">
+        <label for="agent">Agent</label>
+        <select id="agent"></select>
+      </div>
+      <div class="install" id="install-wrap"></div>
+      <div class="field" style="width:160px;flex:0 0 auto">
+        <label for="provider">Provider</label>
+        <select id="provider"></select>
+      </div>
+      <div class="field grow">
+        <label for="model">Model</label>
+        <input id="model" placeholder="(default)" />
+      </div>
+      <div class="field grow">
+        <label for="smallModel">Small model</label>
+        <input id="smallModel" placeholder="(same as model)" />
+      </div>
+      <div class="field grow">
+        <label for="apiKey">API key</label>
+        <input id="apiKey" type="password" placeholder="optional — native login otherwise" />
+      </div>
     </div>
-    <div class="field">
-      <label for="provider">Provider</label>
-      <select id="provider"></select>
+    <div class="row">
+      <div class="field grow">
+        <label for="cwd">Working folder</label>
+        <input id="cwd" />
+      </div>
+      <button id="launch" class="primary">Launch</button>
     </div>
-    <div class="field">
-      <label for="model">Model</label>
-      <input id="model" class="grow" placeholder="(default)" />
-    </div>
-    <div class="field">
-      <label for="smallModel">Small model (optional)</label>
-      <input id="smallModel" class="grow" placeholder="(same as model)" />
-    </div>
-    <div class="field">
-      <label for="apiKey">API key (optional)</label>
-      <input id="apiKey" type="password" placeholder="from profile / native login" />
-    </div>
-    <div class="field" style="flex:1;min-width:220px">
-      <label for="cwd">Working folder</label>
-      <input id="cwd" class="grow" style="width:100%" />
-    </div>
-    <span id="install-wrap"></span>
-    <button id="launch" class="primary">Launch</button>
-  </header>
+  </div>
   <div id="msg">Pick an agent, provider and model, then Launch.</div>
   <div id="term"></div>
 
