@@ -32,6 +32,7 @@
         { id: "check-updates", label: "Check for Updates…" },
         { id: "settings", label: "Settings…" },
         { sep: true },
+        { id: "shortcuts", label: "Keyboard shortcuts", hint: "F1" },
         { id: "documentation", label: "Documentation" },
         { id: "about", label: "About" },
       ],

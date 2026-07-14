@@ -29,6 +29,7 @@
   import StatusBar from "./lib/components/StatusBar.svelte";
   import ContextMenu from "./lib/components/ContextMenu.svelte";
   import ConfirmDialog from "./lib/components/ConfirmDialog.svelte";
+  import ShortcutsDialog from "./lib/components/ShortcutsDialog.svelte";
   import PropertiesDialog from "./lib/components/PropertiesDialog.svelte";
   import BatchRenameDialog from "./lib/components/BatchRenameDialog.svelte";
   import type { RenameItem } from "./lib/batchRename";
@@ -160,6 +161,7 @@
   const REPO_URL = "https://github.com/StewartScottRogers/cross-platform-explorer";
   let showAbout = false;
   let showSettings = false;
+  let shortcutsOpen = false;
   const AI_CONSOLE_LABEL = "ai-console";
   let consentPrompt: ConsentState | null = null;
 
@@ -1177,6 +1179,7 @@
     }
 
     switch (event.key) {
+      case "F1": event.preventDefault(); shortcutsOpen = true; break;
       case "F5": event.preventDefault(); refresh(); break;
       case "F2":
         event.preventDefault();
@@ -1289,6 +1292,7 @@
       case "pop-out-preview": popOutPreview(); break;
       case "check-updates": checkForUpdates(true); break;
       case "settings": showSettings = true; break;
+      case "shortcuts": shortcutsOpen = true; break;
       case "documentation": openExternal(REPO_URL); break;
       case "about": showAbout = true; break;
     }
@@ -1817,6 +1821,10 @@
     on:openurl={(e) => openExternal(e.detail)}
     on:close={() => (showAbout = false)}
   />
+{/if}
+
+{#if shortcutsOpen}
+  <ShortcutsDialog on:close={() => (shortcutsOpen = false)} />
 {/if}
 
 {#if showUpdate}
