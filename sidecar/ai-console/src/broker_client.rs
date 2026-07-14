@@ -164,10 +164,25 @@ impl SecretAccess for BrokerSecrets {
     }
 }
 
-/// Host-mediated UI dialogs the sandboxed launcher can't open itself (CPE-354).
+/// The host's answer to a live key check (CPE-347). `live` = "the provider gave a definitive
+/// answer"; only `live && !valid` is a real rejection.
+#[derive(Debug, Clone)]
+pub struct KeyVerdict {
+    pub valid: bool,
+    pub live: bool,
+    pub detail: String,
+}
+
+/// Host-mediated operations the sandboxed launcher can't perform itself — native dialogs
+/// (CPE-354) and outbound network (CPE-347), which the sandbox has no client for.
 pub trait HostDialogs: Send + Sync {
     /// Open a native folder picker. `Ok(Some(path))` chosen, `Ok(None)` cancelled.
     fn pick_folder(&self) -> Result<Option<String>, String>;
+
+    /// Verify a provider key against the provider's API. The host makes a single request to an
+    /// allow-listed endpoint (the sandbox never supplies the URL). `Err` = the check couldn't
+    /// run (no host); the caller falls back to the offline format check.
+    fn verify_key(&self, provider: &str, key: &str) -> Result<KeyVerdict, String>;
 }
 
 /// [`HostDialogs`] over the broker: asks the host to open the dialog (`host.pick_folder`).
@@ -191,13 +206,30 @@ impl HostDialogs for BrokerDialogs {
         )?;
         Ok(v.get("path").and_then(Value::as_str).map(str::to_string))
     }
+
+    fn verify_key(&self, provider: &str, key: &str) -> Result<KeyVerdict, String> {
+        // Longer than a plain capability call — the host makes an outbound HTTPS round-trip.
+        let v = self.client.request_timeout(
+            "host.verify_key",
+            serde_json::json!({ "provider": provider, "key": key }),
+            Duration::from_secs(20),
+        )?;
+        Ok(KeyVerdict {
+            valid: v.get("valid").and_then(Value::as_bool).unwrap_or(false),
+            live: v.get("live").and_then(Value::as_bool).unwrap_or(false),
+            detail: v.get("detail").and_then(Value::as_str).unwrap_or_default().to_string(),
+        })
+    }
 }
 
-/// Dev/standalone fallback — no host, so "cancelled".
+/// Dev/standalone fallback — no host, so "cancelled" / "can't verify".
 pub struct NoopDialogs;
 impl HostDialogs for NoopDialogs {
     fn pick_folder(&self) -> Result<Option<String>, String> {
         Ok(None)
+    }
+    fn verify_key(&self, _provider: &str, _key: &str) -> Result<KeyVerdict, String> {
+        Err("no host to verify against".into())
     }
 }
 

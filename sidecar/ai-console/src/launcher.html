@@ -569,8 +569,12 @@ async function refreshKeys() {
 }
 async function verifyKey() {
   try {
+    keysMsg("Checking key with the provider…", true);
     const r = await api("/api/keys/verify", { method: "POST", body: JSON.stringify({ provider: $("key-provider").value, key: $("key-value").value }) });
-    keysMsg((r.valid ? "Format looks valid" : "Won't save: " + r.detail) + (r.live ? "" : " (offline check)"), r.valid);
+    // r.live means the provider gave a definitive yes/no; otherwise r.detail is the offline
+    // shape result ("Format looks valid." or the reason it won't save).
+    const msg = r.live ? (r.valid ? "✓ " : "✗ ") + r.detail : r.detail;
+    keysMsg(msg, r.valid);
   } catch (e) { keysMsg("Check failed: " + e.message); }
 }
 async function saveKey() {

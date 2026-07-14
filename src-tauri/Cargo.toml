@@ -51,6 +51,11 @@ psd = "0.3"
 base64 = "0.22"
 iso9660 = "0.1"
 
+# Live provider API-key verification for the AI Console (CPE-347). Optional + gated behind
+# `sidecar-platform` so the plain explorer pulls no HTTP/TLS stack. ureq's default backend is
+# pure-Rust rustls — no OpenSSL / system libs.
+ureq = { version = "2", optional = true }
+
 # Delete must go to the OS Recycle Bin / Trash, never `fs::remove_*`. A file
 # manager that irreversibly destroys data on a mis-click is dangerous (CPE-030).
 trash = "5"
@@ -86,4 +91,4 @@ rust_xlsxwriter = "0.79"
 default = []
 # Opt-in sidecar platform integration (ADR 0001 / CPE-260). OFF by default so the plain
 # explorer compiles and ships with no sidecar code whatsoever — the delete-test (CPE-272).
-sidecar-platform = ["dep:sidecar-host", "dep:sidecar-contract"]
+sidecar-platform = ["dep:sidecar-host", "dep:sidecar-contract", "dep:ureq"]
