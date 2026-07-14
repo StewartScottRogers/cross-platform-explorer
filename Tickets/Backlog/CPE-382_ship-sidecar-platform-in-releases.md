@@ -25,11 +25,11 @@ including catalog auto-update, does nothing in shipped builds).
 
 ## Blocker — security sign-off (needs-prereq)
 
-The threat model is **NOT production-signed-off** (`docs/security/threat-model.md`): shipping the
-platform to end users is gated on **CPE-296** (capability/manifest consent-gate UI, ⛔) and the
-**CPE-304** milestone, and non-Windows keychains (**CPE-322**). Do not ship the platform to users
-before those land — bundled first-party manifests are auto-consented, but the broader platform
-sign-off is incomplete.
+The threat model is **NOT production-signed-off** (`docs/security/threat-model.md`). The consent gate
+(**CPE-296**) is now **DONE** — that no longer blocks. The remaining gate is **CPE-322** (non-Windows
+keychains, so off-Windows secrets persist) plus the final **CPE-304** review pass. A **Windows-first**
+ship is the closest: capability consent is enforced + tested and only bundled first-party signed
+manifests run. Confirm CPE-304 sign-off before a public platform release.
 
 ## Notes
 Part of [[CPE-260]]/[[CPE-261]]. Surfaced while proving the catalog pipeline end-to-end (v0.12.0):
