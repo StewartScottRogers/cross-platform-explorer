@@ -101,6 +101,8 @@
   let view: ViewMode = "details";
   /** Active file-type filter key (CPE-358); "all" = no filter. */
   let fileFilter = "all";
+  /** Whether folders sort above files (CPE-359). */
+  let foldersFirst = true;
   let showDetails = true;
   let showPreview = true;
   /** Cap on how much of a text file the preview will load. */
@@ -626,8 +628,8 @@
     : filtered.filter((e) => matchesFileFilter(e, fileFilter));
 
   $: visible = archive
-    ? sortEntries(archiveChildren(archive), sortKey, sortDir)
-    : sortEntries(typeFiltered, sortKey, sortDir);
+    ? sortEntries(archiveChildren(archive), sortKey, sortDir, foldersFirst)
+    : sortEntries(typeFiltered, sortKey, sortDir, foldersFirst);
 
   $: crumbs = archive
     ? [{ name: "Home", path: HOME }, ...splitPath(currentPath), ...archiveCrumbs(archive)]
@@ -1372,6 +1374,7 @@
   function applySettings() {
     view = settings.loadView();
     showHidden = settings.loadShowHidden();
+    foldersFirst = settings.loadFoldersFirst();
     sortKey = settings.loadSortKey();
     sortDir = settings.loadSortDir();
     showDetails = settings.loadShowDetails();
@@ -1696,6 +1699,7 @@
   {sortDir}
   {view}
   {fileFilter}
+  {foldersFirst}
   on:action={(e) => runAction(e.detail)}
   on:sort={(e) => {
     sortKey = e.detail.key; sortDir = e.detail.dir;
@@ -1704,6 +1708,7 @@
   on:view={(e) => { view = e.detail; settings.saveView(view); }}
   on:filter={(e) => (fileFilter = e.detail)}
   on:toggleHidden={() => { showHidden = !showHidden; settings.saveShowHidden(showHidden); }}
+  on:toggleFoldersFirst={() => { foldersFirst = !foldersFirst; settings.saveFoldersFirst(foldersFirst); }}
   on:toggleDetails={() => { showDetails = !showDetails; settings.saveShowDetails(showDetails); }}
 />
 

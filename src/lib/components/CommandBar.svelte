@@ -12,6 +12,7 @@
   export let sortDir: SortDir = "asc";
   export let view: ViewMode = "details";
   export let fileFilter = "all";
+  export let foldersFirst = true;
 
   const dispatch = createEventDispatcher<{
     action: string;
@@ -19,6 +20,7 @@
     view: ViewMode;
     filter: string;
     toggleHidden: void;
+    toggleFoldersFirst: void;
     toggleDetails: void;
   }>();
 
@@ -122,6 +124,10 @@
         <button role="menuitem" on:click={() => { dispatch("toggleHidden"); open = ""; }}>
           <span class="check">{#if showHidden}<Icon name="check" size={13} />{/if}</span>
           Show hidden files
+        </button>
+        <button role="menuitem" on:click={() => { dispatch("toggleFoldersFirst"); open = ""; }}>
+          <span class="check">{#if foldersFirst}<Icon name="check" size={13} />{/if}</span>
+          Group folders first
         </button>
       </div>
     {/if}
