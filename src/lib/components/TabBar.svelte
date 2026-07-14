@@ -7,6 +7,7 @@
 
   const dispatch = createEventDispatcher<{
     select: number; close: number; new: void;
+    menu: { id: number; x: number; y: number };
   }>();
 </script>
 
@@ -16,6 +17,7 @@
       class="tab"
       class:active={tab.id === activeId}
       on:click={() => dispatch("select", tab.id)}
+      on:contextmenu|preventDefault={(e) => dispatch("menu", { id: tab.id, x: e.clientX, y: e.clientY })}
       title={tab.title}
     >
       <Icon name="home" size={15} />

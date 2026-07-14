@@ -46,7 +46,8 @@
     createHistory, visit, back, forward, canGoBack, canGoForward, current,
     type History,
   } from "./lib/history";
-  import { pushClosedTab } from "./lib/tabs";
+  import { pushClosedTab, keepOnly, keepThroughRight } from "./lib/tabs";
+  import TabMenu from "./lib/components/TabMenu.svelte";
   import {
     emptySelection, click as selClick, selectOnly, selectAll, moveLead,
     selectedIndices, selectedCount, remapByPath, invertSelection, selectIndices,
@@ -75,6 +76,8 @@
   let activeId = 1;
   /** Folders of recently-closed tabs, for Ctrl+Shift+T (CPE-356). */
   let closedTabPaths: string[] = [];
+  /** Open tab context menu (CPE-357), or null. */
+  let tabMenu: { id: number; x: number; y: number } | null = null;
 
   let entries: DirEntry[] = [];
   let places: Place[] = [];
@@ -550,6 +553,40 @@
     tabs = [...tabs, tab];
     activeId = tab.id;
     loadPath(path);
+  }
+
+  /** Record the folders of the tabs about to close so Ctrl+Shift+T can bring them back. */
+  function recordClosing(closing: Tab[]) {
+    for (const t of closing) closedTabPaths = pushClosedTab(closedTabPaths, current(t.history) ?? HOME);
+  }
+
+  /** Tab context-menu actions (CPE-357). */
+  function onTabMenuAction(action: "duplicate" | "close-others" | "close-right") {
+    const menu = tabMenu;
+    tabMenu = null;
+    if (!menu) return;
+    if (action === "duplicate") {
+      const t = tabs.find((x) => x.id === menu.id);
+      if (t) {
+        const path = current(t.history) ?? HOME;
+        const tab: Tab = { id: nextTabId++, history: createHistory(path) };
+        tabs = [...tabs, tab];
+        activeId = tab.id;
+        loadPath(path);
+      }
+      return;
+    }
+    const keep = action === "close-others"
+      ? keepOnly(tabs.map((t) => t.id), menu.id)
+      : keepThroughRight(tabs.map((t) => t.id), menu.id);
+    recordClosing(tabs.filter((t) => !keep.includes(t.id)));
+    const activeClosed = !keep.includes(activeId);
+    tabs = tabs.filter((t) => keep.includes(t.id));
+    if (activeClosed) {
+      activeId = menu.id;
+      const cur = tabs.find((t) => t.id === menu.id);
+      if (cur) loadPath(current(cur.history) ?? HOME);
+    }
   }
 
   function selectTab(id: number) {
@@ -1612,7 +1649,19 @@
   on:select={(e) => selectTab(e.detail)}
   on:close={(e) => closeTab(e.detail)}
   on:new={newTab}
+  on:menu={(e) => (tabMenu = e.detail)}
 />
+
+{#if tabMenu}
+  <TabMenu
+    x={tabMenu.x}
+    y={tabMenu.y}
+    hasOthers={tabs.length > 1}
+    hasRight={tabs.findIndex((t) => t.id === tabMenu?.id) < tabs.length - 1}
+    on:action={(e) => onTabMenuAction(e.detail)}
+    on:close={() => (tabMenu = null)}
+  />
+{/if}
 
 <NavToolbar
   bind:this={navToolbar}
