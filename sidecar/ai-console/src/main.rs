@@ -9,8 +9,9 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
 use ai_console::agents::AgentRegistry;
-use ai_console::broker_client::{BrokerClient, BrokerSecrets, SharedWriter};
+use ai_console::broker_client::{BrokerClient, BrokerPresets, BrokerSecrets, SharedWriter};
 use ai_console::console::{route, ws_route, ConsoleState};
+use ai_console::presets::PresetsBackend;
 use ai_console::vault::SecretAccess;
 use ai_console::{hello, http, on_message, Reaction};
 use sidecar_contract::{Envelope, Event, Lifecycle, Message};
@@ -43,13 +44,16 @@ fn agents_dir() -> PathBuf {
 
 /// Build the launcher's shared state: the agent catalog, the default folder, and the
 /// secrets backend (the host keychain broker) so provider keys resolve at launch.
-fn console_state(secrets: Arc<dyn SecretAccess + Send + Sync>) -> Arc<ConsoleState> {
+fn console_state(
+    secrets: Arc<dyn SecretAccess + Send + Sync>,
+    presets: Arc<dyn PresetsBackend>,
+) -> Arc<ConsoleState> {
     let registry = AgentRegistry::load_from_dirs(&[agents_dir()]);
     let cwd = std::env::var("CPE_AICONSOLE_CWD")
         .ok()
         .or_else(|| std::env::current_dir().ok().map(|p| p.to_string_lossy().into_owned()))
         .unwrap_or_default();
-    Arc::new(ConsoleState::with_secrets(registry, cwd, secrets))
+    Arc::new(ConsoleState::with_backends(registry, cwd, secrets, presets))
 }
 
 fn main() {
@@ -91,7 +95,8 @@ fn main() {
         if matches!(env.message, Message::Welcome(_)) {
             write_env(&writer, &Envelope::new(0, Message::Lifecycle(Lifecycle::Ready)));
             let secrets = Arc::new(BrokerSecrets::new(broker.clone()));
-            if let Ok(server) = http::serve(console_state(secrets), route, ws_route) {
+            let presets = Arc::new(BrokerPresets::new(broker.clone()));
+            if let Ok(server) = http::serve(console_state(secrets, presets), route, ws_route) {
                 write_env(
                     &writer,
                     &Envelope::new(0, Message::Event(Event::Status { state: format!("ui:{}", server.url()) })),

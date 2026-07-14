@@ -39,11 +39,11 @@ pub struct ConsoleState {
     registry: AgentRegistry,
     default_cwd: String,
     sessions: Mutex<HashMap<String, Arc<Session>>>,
-    /// Last-used selection per repo (cwd) — powers "remember my choice" in the UI.
-    last_used: Mutex<HashMap<String, Value>>,
     seq: Mutex<u64>,
     /// Provider keys / credential profiles, brokered to the OS keychain (CPE-344).
     secrets: Arc<dyn crate::vault::SecretAccess + Send + Sync>,
+    /// Launcher presets + remembered selection, persisted via host storage (CPE-352).
+    presets: Arc<dyn crate::presets::PresetsBackend>,
 }
 
 /// The vault key a provider's shared API key is stored under (CPE-344/287). One key per
@@ -66,24 +66,30 @@ pub(crate) fn resolve_provider_key(
 }
 
 impl ConsoleState {
-    /// Standalone/dev state with an in-memory secrets store (no host broker).
+    /// Standalone/dev state with in-memory backends (no host broker).
     pub fn new(registry: AgentRegistry, default_cwd: String) -> Self {
-        Self::with_secrets(registry, default_cwd, Arc::new(crate::broker_client::MemSecrets::default()))
+        Self::with_backends(
+            registry,
+            default_cwd,
+            Arc::new(crate::broker_client::MemSecrets::default()),
+            Arc::new(crate::presets::MemPresets::default()),
+        )
     }
 
-    /// State wired to a real secrets backend (the host keychain broker, in production).
-    pub fn with_secrets(
+    /// State wired to real backends (the host keychain + storage brokers, in production).
+    pub fn with_backends(
         registry: AgentRegistry,
         default_cwd: String,
         secrets: Arc<dyn crate::vault::SecretAccess + Send + Sync>,
+        presets: Arc<dyn crate::presets::PresetsBackend>,
     ) -> Self {
         Self {
             registry,
             default_cwd,
             sessions: Mutex::new(HashMap::new()),
-            last_used: Mutex::new(HashMap::new()),
             seq: Mutex::new(0),
             secrets,
+            presets,
         }
     }
 
@@ -129,8 +135,9 @@ impl ConsoleState {
                 })
             })
             .collect();
-        let last = self.last_used.lock().unwrap().get(&self.default_cwd).cloned();
-        json!({ "agents": agents_json, "cwd": self.default_cwd, "lastUsed": last })
+        // Persisted presets + remembered selection (CPE-352), for the launcher to restore.
+        let presets = serde_json::to_value(self.presets.load()).unwrap_or_else(|_| json!({}));
+        json!({ "agents": agents_json, "cwd": self.default_cwd, "presets": presets })
     }
 
     fn handle_launch(&self, body: &str) -> Response {
@@ -232,10 +239,20 @@ impl ConsoleState {
             id.clone(),
             Arc::new(Session { pty: Mutex::new(session), writer: Mutex::new(writer), ring, live }),
         );
-        self.last_used.lock().unwrap().insert(
-            cwd,
-            json!({ "agent": agent_id, "provider": provider, "model": v["model"] }),
+        // Remember this selection for the agent so it's restored on next open (CPE-352).
+        // Only the choice is stored (provider/model), never a key value.
+        let mut store = self.presets.load();
+        store.remember(
+            agent_id,
+            crate::presets::Preset {
+                name: String::new(),
+                provider: provider.clone(),
+                model: v["model"].as_str().unwrap_or("").to_string(),
+                small_model: v["smallModel"].as_str().unwrap_or("").to_string(),
+                key_ref: None,
+            },
         );
+        let _ = self.presets.save(&store);
 
         Response::json(json!({ "session": id, "dangerousFlags": dangerous }).to_string())
     }

@@ -205,10 +205,23 @@ async function load() {
   if (ctxCwd) $("cwd").value = ctxCwd;
   const ctxTask = ctx.get("task");
   if (ctxTask) setMsg("From explorer — " + ctxTask + "  (pick agent & provider, then Launch)", true);
-  const last = catalog.lastUsed;
-  if (last && agentById(last.agent)) { sel.value = last.agent; } else if (prev) { sel.value = prev; }
+  // Restore the last agent used (CPE-352), then its remembered selection.
+  const presets = catalog.presets || {};
+  if (presets.lastAgent && agentById(presets.lastAgent)) { sel.value = presets.lastAgent; }
+  else if (prev) { sel.value = prev; }
   renderProviders();
-  if (last) { if (last.provider) $("provider").value = last.provider; if (last.model) $("model").value = last.model; }
+  applyLastUsed();
+}
+
+/** Apply the selected agent's remembered provider/model/small-model (CPE-352). Called on
+    load and whenever the agent changes. */
+function applyLastUsed() {
+  const byAgent = (catalog && catalog.presets && catalog.presets.agents) || {};
+  const lu = (byAgent[$("agent").value] || {}).lastUsed;
+  if (!lu) return;
+  if (lu.provider) $("provider").value = lu.provider;
+  $("model").value = lu.model || "";
+  $("smallModel").value = lu.smallModel || "";
 }
 
 // --- Sessions as tabs (xterm.js over WebSocket, one agent per tab; CPE-336) -----------
@@ -443,7 +456,7 @@ $("key-verify").addEventListener("click", verifyKey);
 $("key-save").addEventListener("click", saveKey);
 $("keys-overlay").addEventListener("click", (e) => { if (e.target === $("keys-overlay")) $("keys-overlay").hidden = true; });
 
-$("agent").addEventListener("change", renderProviders);
+$("agent").addEventListener("change", () => { renderProviders(); applyLastUsed(); });
 $("launch").addEventListener("click", launch);
 load().catch((e) => setMsg("Could not load catalog: " + e.message));
 </script>
