@@ -33,3 +33,6 @@ updater.pw
 
 # Generated catalog bundle (produced by CI / catalog-sign)
 catalog-out/
+
+# Bundled sidecar binary staged for release (built in CI / locally)
+src-tauri/sidecars/

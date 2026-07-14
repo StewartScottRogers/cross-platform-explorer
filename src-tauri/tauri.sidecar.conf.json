@@ -3,11 +3,6 @@
   "productName": "Cross-Platform Explorer (Sidecar)",
   "identifier": "com.example.crossplatformexplorer.sidecar",
   "bundle": {
-    "createUpdaterArtifacts": false,
-    "resources": {
-      "../sidecar/ai-console/target/release/ai-console.exe": "sidecars/ai-console.exe",
-      "../sidecar/ai-console/sidecar.json": "sidecars/sidecar.json",
-      "../sidecar/ai-console/agents/*.json": "sidecars/agents/"
-    }
+    "createUpdaterArtifacts": false
   }
 }

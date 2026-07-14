@@ -1,0 +1,10 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "bundle": {
+    "resources": {
+      "../sidecar/ai-console/target/release/ai-console": "sidecars/ai-console",
+      "../sidecar/ai-console/sidecar.json": "sidecars/sidecar.json",
+      "../sidecar/ai-console/agents/*.json": "sidecars/agents/"
+    }
+  }
+}
