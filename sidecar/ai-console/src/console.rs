@@ -48,23 +48,32 @@ pub struct ConsoleState {
     dialogs: Arc<dyn crate::broker_client::HostDialogs>,
 }
 
-/// The vault key a provider's shared API key is stored under (CPE-344/287). One key per
-/// provider, reused by every agent that launches against it.
-pub(crate) fn provider_secret_name(provider: &str) -> String {
-    format!("provider:{provider}")
+/// The implicit credential label — a provider's single/primary key (CPE-348).
+pub(crate) const DEFAULT_CREDENTIAL: &str = "default";
+
+/// The vault key a provider's API key is stored under (CPE-344/287/348). The `default` label
+/// keeps the original `provider:<id>` name (back-compat); other labels get `provider:<id>#<label>`
+/// so a provider can hold several credentials.
+pub(crate) fn provider_secret_name(provider: &str, label: &str) -> String {
+    if label.is_empty() || label == DEFAULT_CREDENTIAL {
+        format!("provider:{provider}")
+    } else {
+        format!("provider:{provider}#{label}")
+    }
 }
 
 /// Which API key a launch uses: an explicit one (typed for this launch) wins; otherwise the
-/// key stored for this provider; otherwise none (the agent's native login).
+/// stored key for this provider under `label`; otherwise none (the agent's native login).
 pub(crate) fn resolve_provider_key(
     secrets: &dyn crate::vault::SecretAccess,
     provider: &str,
     explicit: Option<String>,
+    label: &str,
 ) -> Option<String> {
     if explicit.is_some() {
         return explicit;
     }
-    secrets.get(&provider_secret_name(provider)).ok().flatten()
+    secrets.get(&provider_secret_name(provider, label)).ok().flatten()
 }
 
 impl ConsoleState {
@@ -166,9 +175,11 @@ impl ConsoleState {
             Some(a) => a.clone(),
             None => return bad(format!("unknown agent '{agent_id}'")),
         };
-        // Use the provider's stored key when the user didn't type one this launch — one key
-        // shared across every agent using that provider (CPE-344/287).
-        let api_key = resolve_provider_key(&*self.secrets, &provider, api_key);
+        // Use the provider's stored key when the user didn't type one this launch. A
+        // credential label picks which of the provider's keys to use (CPE-348); default is the
+        // provider's primary key (CPE-344/287).
+        let credential = str_opt(&v, "credential").unwrap_or_else(|| DEFAULT_CREDENTIAL.to_string());
+        let api_key = resolve_provider_key(&*self.secrets, &provider, api_key, &credential);
         // LM Studio local provider (CPE-330): auto-detect a reachable endpoint and adopt
         // its actually-loaded model, so "agent × lmstudio-local" launches with no manual
         // URL entry. Any value the caller pinned still wins; if nothing is detected the
@@ -254,7 +265,8 @@ impl ConsoleState {
                 provider: provider.clone(),
                 model: v["model"].as_str().unwrap_or("").to_string(),
                 small_model: v["smallModel"].as_str().unwrap_or("").to_string(),
-                key_ref: None,
+                // Remember which credential was used, so it's restored next open (CPE-348).
+                key_ref: (credential != DEFAULT_CREDENTIAL).then(|| credential.clone()),
             },
         );
         let _ = self.presets.save(&store);
@@ -361,9 +373,14 @@ impl ConsoleState {
 
     // ---- provider credential management (CPE-345) ----
 
-    /// Store a provider's API key in the OS keychain (via the broker). Format-checked
-    /// first so an obviously-wrong paste is rejected before it's saved. One key per
-    /// provider, shared across every agent that uses it.
+    /// The credential label from a request body, defaulting to the provider's primary key.
+    fn credential_label(v: &Value) -> String {
+        let l = v["label"].as_str().unwrap_or("").trim();
+        if l.is_empty() { DEFAULT_CREDENTIAL.to_string() } else { l.to_string() }
+    }
+
+    /// Store a provider's API key in the OS keychain (via the broker), under an optional
+    /// label so a provider can hold several credentials (CPE-345/348). Format-checked first.
     fn handle_key_set(&self, body: &str) -> Response {
         let v: Value = match serde_json::from_str(body) {
             Ok(v) => v,
@@ -371,46 +388,65 @@ impl ConsoleState {
         };
         let provider = v["provider"].as_str().unwrap_or("").trim();
         let key = v["key"].as_str().unwrap_or("").trim();
+        let label = Self::credential_label(&v);
         if provider.is_empty() {
             return bad("missing 'provider'");
         }
         if let Err(e) = crate::keycheck::check_key_format(provider, key) {
             return bad(e);
         }
-        match self.secrets.set(&provider_secret_name(provider), key) {
-            Ok(()) => Response::json(json!({ "ok": true }).to_string()),
-            Err(e) => bad(e),
+        if let Err(e) = self.secrets.set(&provider_secret_name(provider, &label), key) {
+            return bad(e);
         }
+        // Track the credential's identity so labelled keys are listable (CPE-348).
+        let mut store = self.presets.load();
+        store.add_credential(provider, &label);
+        let _ = self.presets.save(&store);
+        Response::json(json!({ "ok": true }).to_string())
     }
 
-    /// List which providers have a stored key — NAMES ONLY, never a value. The keychain
-    /// has no enumerate, so probe every provider the catalog knows about.
+    /// List stored credentials as `{provider, label}` — NAMES ONLY, never a value (CPE-348).
+    /// Merges the persisted index (labelled keys) with a probe for legacy default keys.
     fn handle_key_list(&self) -> Response {
+        let store = self.presets.load();
+        let mut creds: Vec<crate::presets::CredentialRef> = store.credentials.clone();
+        // Back-compat: default keys stored before the index existed are found by probing.
         let mut providers: Vec<String> =
             self.registry.all().flat_map(|a| a.providers.iter().cloned()).collect();
         providers.sort();
         providers.dedup();
-        let have: Vec<String> = providers
-            .into_iter()
-            .filter(|p| self.secrets.get(&provider_secret_name(p)).ok().flatten().is_some())
-            .collect();
-        Response::json(json!({ "providers": have }).to_string())
+        for p in providers {
+            if self.secrets.get(&provider_secret_name(&p, DEFAULT_CREDENTIAL)).ok().flatten().is_some()
+                && !creds.iter().any(|c| c.provider == p && c.label == DEFAULT_CREDENTIAL)
+            {
+                creds.push(crate::presets::CredentialRef { provider: p, label: DEFAULT_CREDENTIAL.into() });
+            }
+        }
+        // Legacy field `providers` (names of anything with a key) kept for compatibility.
+        let mut names: Vec<String> = creds.iter().map(|c| c.provider.clone()).collect();
+        names.sort();
+        names.dedup();
+        Response::json(json!({ "credentials": creds, "providers": names }).to_string())
     }
 
-    /// Remove a provider's stored key.
+    /// Remove a provider's stored key (optionally a specific label) and drop it from the index.
     fn handle_key_delete(&self, body: &str) -> Response {
         let v: Value = match serde_json::from_str(body) {
             Ok(v) => v,
             Err(e) => return bad(format!("bad json: {e}")),
         };
         let provider = v["provider"].as_str().unwrap_or("").trim();
+        let label = Self::credential_label(&v);
         if provider.is_empty() {
             return bad("missing 'provider'");
         }
-        match self.secrets.delete(&provider_secret_name(provider)) {
-            Ok(()) => Response::json(json!({ "ok": true }).to_string()),
-            Err(e) => bad(e),
+        if let Err(e) = self.secrets.delete(&provider_secret_name(provider, &label)) {
+            return bad(e);
         }
+        let mut store = self.presets.load();
+        store.remove_credential(provider, &label);
+        let _ = self.presets.save(&store);
+        Response::json(json!({ "ok": true }).to_string())
     }
 
     /// Pre-check a key's format before saving. `live:false` marks this as an offline
@@ -631,17 +667,21 @@ mod tests {
         use crate::vault::SecretAccess;
         let s = MemSecrets::default();
         // Nothing stored, nothing typed → no key (native login).
-        assert_eq!(resolve_provider_key(&s, "openrouter", None), None);
-        // A stored key is used when the user didn't type one…
-        s.set(&provider_secret_name("openrouter"), "sk-stored").unwrap();
-        assert_eq!(resolve_provider_key(&s, "openrouter", None).as_deref(), Some("sk-stored"));
+        assert_eq!(resolve_provider_key(&s, "openrouter", None, "default"), None);
+        // A stored default key is used when the user didn't type one…
+        s.set(&provider_secret_name("openrouter", "default"), "sk-stored").unwrap();
+        assert_eq!(resolve_provider_key(&s, "openrouter", None, "default").as_deref(), Some("sk-stored"));
         // …but an explicit key always wins…
         assert_eq!(
-            resolve_provider_key(&s, "openrouter", Some("sk-typed".into())).as_deref(),
+            resolve_provider_key(&s, "openrouter", Some("sk-typed".into()), "default").as_deref(),
             Some("sk-typed"),
         );
-        // …and a different provider isn't affected (namespaced by name).
-        assert_eq!(resolve_provider_key(&s, "anthropic", None), None);
+        // …a different provider isn't affected…
+        assert_eq!(resolve_provider_key(&s, "anthropic", None, "default"), None);
+        // …and a labelled credential is a distinct key (CPE-348).
+        s.set(&provider_secret_name("openrouter", "work"), "sk-work").unwrap();
+        assert_eq!(resolve_provider_key(&s, "openrouter", None, "work").as_deref(), Some("sk-work"));
+        assert_eq!(resolve_provider_key(&s, "openrouter", None, "default").as_deref(), Some("sk-stored"));
     }
 
     #[test]
@@ -695,6 +735,26 @@ mod tests {
         let cat2: Value = serde_json::from_slice(&get(&st, "/api/catalog").body).unwrap();
         let n = cat2["presets"]["agents"]["claude"]["presets"].as_array().map(|a| a.len()).unwrap_or(0);
         assert_eq!(n, 0);
+    }
+
+    #[test]
+    fn multiple_labelled_credentials_per_provider() {
+        let st = state();
+        let post = |path: &str, body: &str| {
+            route(&st, &Request { method: "POST".into(), path: path.into(), body: body.into(), ..Default::default() })
+        };
+        // Two labelled OpenRouter keys.
+        assert_eq!(post("/api/keys", r#"{"provider":"openrouter","label":"work","key":"sk-or-workkey123"}"#).status, 200);
+        assert_eq!(post("/api/keys", r#"{"provider":"openrouter","label":"personal","key":"sk-or-homekey123"}"#).status, 200);
+        // Both listed by label — never a value.
+        let body = String::from_utf8_lossy(&get(&st, "/api/keys").body).to_string();
+        assert!(body.contains("work") && body.contains("personal"));
+        assert!(!body.contains("sk-or-"), "credential list must not leak values");
+        // Deleting one leaves the other.
+        assert_eq!(post("/api/keys/delete", r#"{"provider":"openrouter","label":"work"}"#).status, 200);
+        let body2 = String::from_utf8_lossy(&get(&st, "/api/keys").body).to_string();
+        assert!(!body2.contains("work"));
+        assert!(body2.contains("personal"));
     }
 
     #[test]
