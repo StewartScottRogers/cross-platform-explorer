@@ -59,7 +59,7 @@
   import {
     pushUndo, popUndo, canUndo, peekLabel, invert, deletedPaths, type UndoEntry,
   } from "./lib/undo";
-  import type { DirEntry, Place, SortKey, SortDir, ViewMode, RecentFile } from "./lib/types";
+  import type { DirEntry, Place, SortKey, SortDir, ViewMode, RecentFile, Favorite } from "./lib/types";
 
   interface OpResult { path: string; ok: boolean; error: string }
 
@@ -136,6 +136,7 @@
   let showHidden = false;
   let pins: string[] = [];
   let recents: RecentFile[] = [];
+  let favorites: Favorite[] = [];
   let search = "";
   let editingPath = false;
 
@@ -860,6 +861,20 @@
     showNotice(wasPinned ? `Unpinned "${entry.name}" from Home.` : `Pinned "${entry.name}" to Home.`);
   }
 
+  /** Star/unstar the single selected item (file or folder) as a Favorite (CPE-338). */
+  function toggleFavoriteSelected() {
+    const entry = selectedEntries[0];
+    if (!entry) return;
+    const wasFav = favorites.some((f) => f.path === entry.path);
+    favorites = settings.toggleFavorite(favorites, {
+      path: entry.path,
+      name: entry.name,
+      is_dir: entry.is_dir,
+    });
+    settings.saveFavorites(favorites);
+    showNotice(wasFav ? `Removed "${entry.name}" from Favorites.` : `Added "${entry.name}" to Favorites.`);
+  }
+
   /** Duplicate the selection in place — copy it into the folder it lives in.
       Not undoable, for the same reason a copy-paste isn't (see doPaste). */
   async function doDuplicate() {
@@ -1081,6 +1096,7 @@
       case "terminal": openTerminal(currentPath); break;
       case "terminal-folder": if (selectedEntries[0]?.is_dir) openTerminal(selectedEntries[0].path); break;
       case "pin": togglePinSelected(); break;
+      case "favorite": toggleFavoriteSelected(); break;
       case "rename": if (selectedEntries.length === 1) beginRename(selectedEntries[0]); break;
       case "batch-rename": beginBatchRename(); break;
       case "delete": askDelete(false); break;
@@ -1214,6 +1230,7 @@
     rightWidth = clampWidth(settings.loadRightWidth(), RIGHT_MIN, RIGHT_MAX);
     pins = settings.loadPins();
     recents = settings.loadRecents();
+    favorites = settings.loadFavorites();
   }
 
   /** App-level Settings gear: restore every preference to its default. */
@@ -1588,9 +1605,11 @@
         {drives}
         {pins}
         {recents}
+        {favorites}
         on:navigate={(e) => navigate(e.detail)}
         on:openFile={(e) => openRecent(e.detail)}
         on:unpin={(e) => { pins = settings.togglePin(pins, e.detail); settings.savePins(pins); }}
+        on:unfavorite={(e) => { favorites = favorites.filter((f) => f.path !== e.detail); settings.saveFavorites(favorites); }}
         on:clearRecents={() => { recents = []; settings.saveRecents(recents); }}
       />
     {:else}
@@ -1737,6 +1756,7 @@
     executableSelected={selectedEntries.length === 1 && isExecutable(selectedEntries[0])}
     openIcon={selectedEntries.length === 1 ? iconFor(selectedEntries[0]) : "folder"}
     pinned={selectedEntries.length === 1 && pins.includes(selectedEntries[0].path)}
+    favorited={selectedEntries.length === 1 && favorites.some((f) => f.path === selectedEntries[0].path)}
     extractable={!isHome && !archive && selectedEntries.length === 1 && isExtractable(selectedEntries[0])}
     compressible={!isHome && !archive && selectedEntries.length >= 1}
     canTerminal={!isHome && !archive}

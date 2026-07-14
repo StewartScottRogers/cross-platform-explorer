@@ -1,6 +1,6 @@
 import { describe, it, expect } from "vitest";
-import { addRecent, togglePin, mergeLegacy } from "./settings";
-import type { RecentFile } from "./types";
+import { addRecent, togglePin, toggleFavorite, mergeLegacy } from "./settings";
+import type { RecentFile, Favorite } from "./types";
 
 describe("mergeLegacy (localStorage → settings.json migration, CPE-226)", () => {
   it("backfills keys the file lacks from legacy localStorage values", () => {
@@ -70,5 +70,30 @@ describe("togglePin", () => {
     const pins = ["/a"];
     togglePin(pins, "/b");
     expect(pins).toEqual(["/a"]);
+  });
+});
+
+describe("toggleFavorite (CPE-338)", () => {
+  const file = { path: "/a.txt", name: "a.txt", is_dir: false };
+  const dir = { path: "/docs", name: "docs", is_dir: true };
+
+  it("adds a favorite (file or folder) when absent, preserving is_dir", () => {
+    const list = toggleFavorite([], dir);
+    expect(list).toEqual([{ path: "/docs", name: "docs", is_dir: true }]);
+    expect(toggleFavorite(list, file).map((f) => f.path)).toEqual(["/docs", "/a.txt"]);
+  });
+
+  it("removes a favorite when the path is already present", () => {
+    const list: Favorite[] = [
+      { path: "/docs", name: "docs", is_dir: true },
+      { path: "/a.txt", name: "a.txt", is_dir: false },
+    ];
+    expect(toggleFavorite(list, dir).map((f) => f.path)).toEqual(["/a.txt"]);
+  });
+
+  it("does not mutate the input", () => {
+    const list: Favorite[] = [{ path: "/a.txt", name: "a.txt", is_dir: false }];
+    toggleFavorite(list, dir);
+    expect(list).toEqual([{ path: "/a.txt", name: "a.txt", is_dir: false }]);
   });
 });

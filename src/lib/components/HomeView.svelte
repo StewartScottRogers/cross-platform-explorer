@@ -3,23 +3,28 @@
   import Icon from "./Icon.svelte";
   import { formatDate } from "../datetime";
   import { iconFor } from "../filetypes";
-  import type { Place, RecentFile } from "../types";
+  import type { Place, RecentFile, Favorite } from "../types";
 
   export let places: Place[] = [];
   export let drives: Place[] = [];
   /** User-pinned folder paths. */
   export let pins: string[] = [];
   export let recents: RecentFile[] = [];
+  /** User-starred files and folders. */
+  export let favorites: Favorite[] = [];
 
   const dispatch = createEventDispatcher<{
     navigate: string;
     openFile: string;
     unpin: string;
+    unfavorite: string;
     clearRecents: void;
   }>();
 
   let quickOpen = true;
   let recentOpen = true;
+  /** Which pill tab is showing in the lower section. */
+  let tab: "recent" | "favorites" = "recent";
 
   // Pinned folders appear alongside the built-in places.
   $: pinned = pins.map((p) => ({
@@ -85,16 +90,18 @@
     >
       <Icon name="chev-right" size={13} />
     </button>
-    <span>Recent</span>
-    {#if recents.length > 0}
+    <span>{tab === "favorites" ? "Favorites" : "Recent"}</span>
+    {#if tab === "recent" && recents.length > 0}
       <button class="clear" on:click={() => dispatch("clearRecents")}>Clear</button>
     {/if}
   </div>
 
   {#if recentOpen}
     <div class="pills">
-      <button class="pill active"><Icon name="recent" size={14} /> Recent</button>
-      <button class="pill" disabled title="Favorites — not implemented yet">
+      <button class="pill" class:active={tab === "recent"} on:click={() => (tab = "recent")}>
+        <Icon name="recent" size={14} /> Recent
+      </button>
+      <button class="pill" class:active={tab === "favorites"} on:click={() => (tab = "favorites")}>
         <Icon name="star" size={14} /> Favorites
       </button>
       <button class="pill" disabled title="Shared — not implemented yet">
@@ -102,27 +109,63 @@
       </button>
     </div>
 
-    {#if recents.length === 0}
-      <div class="empty-state">
-        <span class="empty-icon"><Icon name="recent" size={36} /></span>
-        <p>No recent files yet</p>
-        <p style="font-size:12px">Files you open in this app will appear here.</p>
-      </div>
-    {:else}
-      <div class="recent-list">
-        <div class="recent-head">
-          <span>Name</span><span>Date opened</span>
+    {#if tab === "recent"}
+      {#if recents.length === 0}
+        <div class="empty-state">
+          <span class="empty-icon"><Icon name="recent" size={36} /></span>
+          <p>No recent files yet</p>
+          <p style="font-size:12px">Files you open in this app will appear here.</p>
         </div>
-        {#each recents as r (r.path)}
-          <button class="recent-row" on:dblclick={() => dispatch("openFile", r.path)} on:click={() => dispatch("openFile", r.path)}>
-            <span class="rname">
-              <Icon name={iconFor({ is_dir: false, extension: extOf(r.name) })} />
-              <span class="ellip">{r.name}</span>
-            </span>
-            <span class="rdate">{formatDate(r.opened)}</span>
-          </button>
-        {/each}
-      </div>
+      {:else}
+        <div class="recent-list">
+          <div class="recent-head">
+            <span>Name</span><span>Date opened</span>
+          </div>
+          {#each recents as r (r.path)}
+            <button class="recent-row" on:dblclick={() => dispatch("openFile", r.path)} on:click={() => dispatch("openFile", r.path)}>
+              <span class="rname">
+                <Icon name={iconFor({ is_dir: false, extension: extOf(r.name) })} />
+                <span class="ellip">{r.name}</span>
+              </span>
+              <span class="rdate">{formatDate(r.opened)}</span>
+            </button>
+          {/each}
+        </div>
+      {/if}
+    {:else}
+      {#if favorites.length === 0}
+        <div class="empty-state">
+          <span class="empty-icon"><Icon name="star" size={36} /></span>
+          <p>No favorites yet</p>
+          <p style="font-size:12px">Right-click any file or folder → Add to Favorites.</p>
+        </div>
+      {:else}
+        <div class="recent-list">
+          {#each favorites as f (f.path)}
+            <button
+              class="recent-row fav-row"
+              on:dblclick={() => dispatch(f.is_dir ? "navigate" : "openFile", f.path)}
+              on:click={() => dispatch(f.is_dir ? "navigate" : "openFile", f.path)}
+            >
+              <span class="rname">
+                <Icon name={f.is_dir ? "folder" : iconFor({ is_dir: false, extension: extOf(f.name) })} />
+                <span class="ellip">{f.name}</span>
+                <span class="fav-path ellip">{f.path}</span>
+              </span>
+              <!-- svelte-ignore a11y-no-static-element-interactions a11y-click-events-have-key-events -->
+              <span
+                class="pin pinned"
+                role="button"
+                tabindex="-1"
+                title="Remove from Favorites"
+                on:click|stopPropagation={() => dispatch("unfavorite", f.path)}
+              >
+                <Icon name="star" size={14} />
+              </span>
+            </button>
+          {/each}
+        </div>
+      {/if}
     {/if}
   {/if}
 </div>
@@ -158,4 +201,9 @@
   .rname { display: flex; align-items: center; gap: 8px; min-width: 0; }
   .rdate { color: var(--text-dim); font-size: 12px; }
   .ellip { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  /* Favorites rows: name grows, star sits at the right edge (CPE-338). */
+  .fav-row { grid-template-columns: 1fr auto; }
+  .fav-path { color: var(--text-faint); font-size: 12px; margin-left: 4px; min-width: 0; }
+  .fav-row .pin { opacity: 0; }
+  .fav-row:hover .pin, .fav-row .pin.pinned { opacity: 1; }
 </style>
