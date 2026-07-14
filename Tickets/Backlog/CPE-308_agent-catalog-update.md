@@ -40,3 +40,9 @@ covers the remote subscription (host-authoritative fetch+verify, signed catalog 
 distribution/TOFU, auto-update/pin/rollback, offline-safe + anti-rollback, and the threat-model
 section). Stays `big-design` pending sign-off on the design's open questions (D1–D4); once signed
 off it splits into the 4 `ready` slices listed there.
+2026-07-14 — **Design signed off (D1–D4 as recommended); slice 1 landed (CPE-372):** host-side
+signed catalog index — `verify_index` + content-binding + anti-rollback (`host::catalog`), plus the
+threat-model row. Reconciled trust: the index (host) governs allowed ids/versions; per-manifest
+`.sig` (sidecar, CPE-371) governs content authenticity. Remaining split to **CPE-373** (fetch/apply,
+offline-safe, last-known-good) and **CPE-374** (user controls UI). Default first-party source URL
+still open — CPE-373 runs against a local/configured source until one is hosted.
