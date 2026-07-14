@@ -3,10 +3,13 @@
   import { invoke } from "@tauri-apps/api/core";
   import Icon from "./Icon.svelte";
   import SidebarNode from "./SidebarNode.svelte";
-  import type { DirEntry, Place } from "../types";
+  import { iconFor } from "../filetypes";
+  import type { DirEntry, Place, Favorite } from "../types";
 
   export let places: Place[] = [];
   export let drives: Place[] = [];
+  /** User-starred files and folders, shown in the quick-access section (CPE-340). */
+  export let favorites: Favorite[] = [];
   export let currentPath = "";
   export let isHome = false;
   /** The middle pane's currently selected folder (or ""), for two-way highlight
@@ -17,9 +20,17 @@
 
   const dispatch = createEventDispatcher<{
     navigate: string;
+    openFile: string;
     home: void;
     drop: { paths: string[]; dest: string; copy: boolean };
   }>();
+
+  /** Favorites section collapse state (transient, like the Home twisties). */
+  let favOpen = true;
+  const extOf = (name: string) => {
+    const i = name.lastIndexOf(".");
+    return i > 0 ? name.slice(i + 1).toLowerCase() : "";
+  };
 
   /** The navigation-pane path currently hovered as a drop target, or "" for none. */
   let dropPath = "";
@@ -134,6 +145,32 @@
 </script>
 
 <div class="navigation-pane" role="region" aria-label="Navigation">
+  {#if favorites.length > 0}
+    <div class="nav-item fav-head">
+      <button class="twisty" class:open={favOpen} title={favOpen ? "Collapse" : "Expand"} on:click={() => (favOpen = !favOpen)}>
+        <Icon name="chev-right" size={12} />
+      </button>
+      <Icon name="star" />
+      <span class="label fav-title">Favorites</span>
+    </div>
+    {#if favOpen}
+      <div class="nav-children">
+        {#each favorites as f (f.path)}
+          <button
+            class="nav-item fav-item"
+            class:active={isMarked(f.path)}
+            title={f.path}
+            on:click={() => dispatch(f.is_dir ? "navigate" : "openFile", f.path)}
+          >
+            <span class="twisty hidden" />
+            <Icon name={f.is_dir ? "folder" : iconFor({ is_dir: false, extension: extOf(f.name) })} />
+            <span class="label">{f.name}</span>
+          </button>
+        {/each}
+      </div>
+    {/if}
+    <div class="navigation-pane-sep" />
+  {/if}
   <button class="nav-item" class:active={isHome} on:click={() => dispatch("home")}>
     <span class="twisty hidden" />
     <Icon name="home" />
@@ -218,4 +255,7 @@
     outline: 2px solid var(--accent);
     outline-offset: -2px;
   }
+  /* The Favorites section header reads as a heading, not a navigable row (CPE-340). */
+  .fav-head { cursor: default; }
+  .fav-title { font-weight: 600; }
 </style>
