@@ -52,3 +52,9 @@ markers (6 spots said ⛔/"not built"): consent sheet + per-cap grant/deny + re-
 (CPE-274) all shipped; broker enforcement (`decide_grants`) unit-tested (deny-secrets → no access).
 **Sign-off gate reduced to CPE-322** (non-Windows keychains) + this final review pass. A
 Windows-first sign-off is now unblocked on the consent axis. Tracked as CPE-384.
+2026-07-14 — **CPE-322 keychain backends implemented + CI-compile-verified on macOS (apple-native)
+and Linux (sync-secret-service, +libdbus) runners.** The "secrets persist in a native store
+off-Windows" invariant is now *coded* for all three OSes; the cross-OS sign-off's remaining item is
+a **runtime round-trip QA on a real mac/Linux desktop** (store/get/delete against the live Keychain /
+Secret Service) — needs the hardware. So: consent gate ✅ (CPE-296), cross-OS backend code ✅,
+awaiting only cross-OS runtime QA + the final review to lift the sign-off.
