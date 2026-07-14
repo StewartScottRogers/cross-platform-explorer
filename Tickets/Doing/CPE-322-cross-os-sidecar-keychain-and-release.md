@@ -37,3 +37,14 @@ sidecar installers on those platforms until their keychains are wired.
 
 ## Notes
 Blocked-on nothing external; it's real backend work. Until done, CPE-321 stays Windows-only.
+
+## Work Log
+2026-07-14 — **Backends done (scope 1).** The `KeyringBackend` was already cross-platform
+(`keyring::Entry`); it was only `#[cfg(windows)]` because the dep was Windows-only. Added the
+per-target `keyring` deps — macOS `apple-native`, Linux `sync-secret-service` + `crypto-rust` (pure
+Rust, no libdbus/OpenSSL) — and widened the cfg on `KeyringBackend` + its provider registration to
+`any(windows, macos, linux)`. Feature names verified against keyring v3 docs; resolution + Windows
+build clean locally, and **CI compiles the real mac/Linux keyring code on the macos-latest +
+ubuntu-latest runners**. **Remaining:** (2) a runtime round-trip on a real macOS/Linux desktop
+(store/get/delete a secret against the live Keychain / Secret Service — can't be done headlessly);
+(3+4) per-OS sidecar bundling + release matrix → folded into [[CPE-382]] (ship the platform).

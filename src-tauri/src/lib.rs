@@ -2141,9 +2141,10 @@ fn serve_ai_console_requests(
     use sidecar_host::conformance::SidecarChannel;
 
     let mut broker = sidecar_host::broker::Broker::new();
-    // The keychain-backed secrets provider (Windows Credential Manager). macOS/Linux backends
-    // arrive with CPE-322; there the broker simply has no secrets provider and denies cleanly.
-    #[cfg(windows)]
+    // The keychain-backed secrets provider: Windows Credential Manager, macOS Keychain, or Linux
+    // Secret Service (CPE-268/322). On any other target the broker simply has no secrets provider
+    // and denies cleanly.
+    #[cfg(any(windows, target_os = "macos", target_os = "linux"))]
     broker.register_provider(Box::new(sidecar_host::providers::secrets::SecretsProvider::new(
         sidecar_host::providers::secrets::KeyringBackend,
     )));
