@@ -226,6 +226,17 @@ mod tests {
         out
     }
 
+    /// Wait for `marker` from an attachment, accepting it from the `replay` OR the live stream
+    /// (CPE-415). On a loaded machine the marker can be emitted *before* the client attaches, so it
+    /// arrives in the replay, not live — checking only `live` is a race. Accumulates both.
+    fn drain_attach(att: &Attachment, marker: &str, timeout: Duration) -> String {
+        let mut seen = String::from_utf8_lossy(&att.replay).into_owned();
+        if !seen.contains(marker) {
+            seen.push_str(&recv_until(&att.live, marker, timeout));
+        }
+        seen
+    }
+
     /// A cross-platform command that prints READY, waits, prints TICK, then stays alive a while.
     /// The gap before TICK is generous so a reattaching client reliably connects before it fires.
     fn ready_then_tick() -> PtyLaunch {
@@ -254,22 +265,23 @@ mod tests {
 
         // Client A attaches, reads the initial output, then drops (simulating a UI/sidecar restart).
         let a = daemon.attach("s1").unwrap();
-        let seen_a = recv_until(&a.live, "READY", Duration::from_secs(10));
+        let seen_a = drain_attach(&a, "READY", Duration::from_secs(10));
         assert!(seen_a.contains("READY"), "client A missed READY: {seen_a:?}");
         drop(a); // the UI process went away
 
         // The session must still be running — it is owned by the daemon, not the client.
         assert!(daemon.is_running("s1"), "session died when its client dropped");
 
-        // Client B re-attaches: it must REPLAY what it missed (READY) and then get LIVE output (TICK).
+        // Client B re-attaches: it must recover what it missed (READY) and then get subsequent
+        // output (TICK) — from replay or live, whichever the timing produced.
         let b = daemon.attach("s1").unwrap();
         assert!(
             String::from_utf8_lossy(&b.replay).contains("READY"),
             "reattach did not replay missed output: {:?}",
             String::from_utf8_lossy(&b.replay)
         );
-        let live_b = recv_until(&b.live, "TICK", Duration::from_secs(15));
-        assert!(live_b.contains("TICK"), "reattached client got no live output: {live_b:?}");
+        let seen_b = drain_attach(&b, "TICK", Duration::from_secs(15));
+        assert!(seen_b.contains("TICK"), "reattached client got no live output: {seen_b:?}");
 
         daemon.kill("s1").unwrap();
     }
@@ -280,8 +292,8 @@ mod tests {
         daemon.launch("s2", &ready_then_tick()).unwrap();
         let a = daemon.attach("s2").unwrap();
         let b = daemon.attach("s2").unwrap();
-        assert!(recv_until(&a.live, "READY", Duration::from_secs(10)).contains("READY"));
-        assert!(recv_until(&b.live, "READY", Duration::from_secs(10)).contains("READY"));
+        assert!(drain_attach(&a, "READY", Duration::from_secs(10)).contains("READY"));
+        assert!(drain_attach(&b, "READY", Duration::from_secs(10)).contains("READY"));
         daemon.kill("s2").unwrap();
     }
 
@@ -312,9 +324,9 @@ mod tests {
         daemon
             .launch("s4", &PtyLaunch { program, args, cwd: None, env: BTreeMap::new(), rows: 24, cols: 80 })
             .unwrap();
-        // Drain to EOF so the reader marks it exited.
+        // Observe the output (replay or live), then wait for the real exit below.
         let att = daemon.attach("s4").unwrap();
-        let _ = recv_until(&att.live, "bye", Duration::from_secs(10));
+        let _ = drain_attach(&att, "bye", Duration::from_secs(10));
         // Wait until the child has actually exited (try_wait — reliable on every OS, unlike
         // reader EOF which a Windows ConPTY may withhold).
         let deadline = Instant::now() + Duration::from_secs(15);
