@@ -1,0 +1,12 @@
+{
+  "schema_version": 1,
+  "id": "github-models",
+  "name": "GitHub Models",
+  "models_endpoint": "https://models.github.ai/catalog/models",
+  "auth": "github",
+  "api_hosts": [
+    "models.github.ai"
+  ],
+  "normalizer": "github",
+  "web_base": "https://github.com/marketplace/models"
+}

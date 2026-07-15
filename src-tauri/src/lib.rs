@@ -12,6 +12,10 @@ mod keyverify;
 /// feature-gated, pure allow-list/URL-builder/SSRF core unit-tested under the feature.
 #[cfg(feature = "sidecar-platform")]
 mod forge_egress;
+/// Host-brokered model-list egress for the AI Console (CPE-447) — allow-listed reseller `/models`
+/// fetch on the sidecar's behalf; same feature-gating + no-SSRF rationale as `keyverify`.
+#[cfg(feature = "sidecar-platform")]
+mod models_egress;
 
 #[derive(Serialize)]
 pub struct DirEntry {
@@ -2349,6 +2353,24 @@ fn verify_key_response(params: &serde_json::Value) -> sidecar_contract::Response
     sidecar_contract::Response { result: Ok(json!({ "valid": valid, "live": live, "detail": detail })) }
 }
 
+/// Fetch a reseller's model list on the AI Console's behalf (CPE-447) — the response to a sandboxed
+/// `host.list_models { reseller, token? }`. The endpoint is chosen host-side from an allow-list
+/// (`models_egress`), never from the request, so it can't become a general fetch. Returns
+/// `{ ok, status, body }` on a completed call, or `{ ok:false, error }` otherwise. The token is
+/// never logged or echoed.
+#[cfg(feature = "sidecar-platform")]
+fn list_models_response(params: &serde_json::Value) -> sidecar_contract::Response {
+    use serde_json::json;
+    let reseller = params.get("reseller").and_then(|v| v.as_str()).unwrap_or("");
+    let token = params.get("token").and_then(|v| v.as_str());
+    match models_egress::list_models(reseller, token) {
+        Ok((status, body)) => {
+            sidecar_contract::Response { result: Ok(json!({ "ok": true, "status": status, "body": body })) }
+        }
+        Err(e) => sidecar_contract::Response { result: Ok(json!({ "ok": false, "error": format!("{e:?}") })) },
+    }
+}
+
 /// Perform an allow-listed forge API call on the repos sidecar's behalf (CPE-433) — the response to
 /// a sandboxed `host.forge_request { provider, method, path, host?, token?, body? }`. The URL is
 /// built host-side from the provider allow-list (`forge_egress`), never from the request, so this is
@@ -2654,6 +2676,10 @@ fn serve_ai_console_requests(
                             // A live key check against an allow-listed provider endpoint (CPE-347),
                             // not a brokered capability — handle it directly.
                             verify_key_response(&req.params)
+                        } else if req.method == "host.list_models" {
+                            // Allow-listed reseller model-list fetch (CPE-447), host-side endpoint —
+                            // not a brokered capability; handle it directly like verify_key.
+                            list_models_response(&req.params)
                         } else if req.method == "host.fetch_catalog" {
                             // Fetch + apply the signed catalog bundle from GitHub Releases (CPE-376);
                             // an optional `tag`+`agents` rolls chosen agents back to a prior version

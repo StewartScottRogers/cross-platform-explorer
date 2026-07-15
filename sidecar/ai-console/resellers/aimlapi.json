@@ -1,0 +1,12 @@
+{
+  "schema_version": 1,
+  "id": "aimlapi",
+  "name": "AI/ML API",
+  "models_endpoint": "https://api.aimlapi.com/v1/models",
+  "auth": "bearer",
+  "api_hosts": [
+    "api.aimlapi.com"
+  ],
+  "normalizer": "openai",
+  "web_base": "https://aimlapi.com/models"
+}
