@@ -25,6 +25,21 @@ export function formatDiskFree(free: number, total: number): string {
 }
 
 /**
+ * Used-percentage + severity for a drive usage bar (CPE-406). `severity` drives the bar colour:
+ * "full" when under 5% free, "warn" under 15%, else "ok". Guards a missing/zero total.
+ */
+export function diskUsage(
+  free: number,
+  total: number,
+): { usedPct: number; severity: "ok" | "warn" | "full" } {
+  if (!total || total <= 0) return { usedPct: 0, severity: "ok" };
+  const freeRatio = Math.max(0, Math.min(1, free / total));
+  const usedPct = Math.round((1 - freeRatio) * 100);
+  const severity = freeRatio < 0.05 ? "full" : freeRatio < 0.15 ? "warn" : "ok";
+  return { usedPct, severity };
+}
+
+/**
  * Map a raw backend error string to a friendly, user-facing message.
  */
 export function friendlyError(raw: string): string {

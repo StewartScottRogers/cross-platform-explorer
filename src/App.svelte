@@ -233,6 +233,22 @@
   // archives; a stale response (navigated away before it resolved) is discarded.
   let diskFree: number | null = null;
   let diskTotal: number | null = null;
+  /** Per-drive free/total for the sidebar usage bars (CPE-406); filled once on mount. */
+  let driveUsage: Record<string, { free: number; total: number }> = {};
+
+  /** Probe each drive's capacity once, non-blocking — a slow/failed probe never delays the UI. */
+  async function loadDriveUsage(list: Place[]) {
+    await Promise.all(
+      list.map(async (d) => {
+        try {
+          const s = await invoke<{ free: number; total: number }>("disk_space", { path: d.path });
+          driveUsage = { ...driveUsage, [d.path]: s };
+        } catch {
+          /* skip a drive we can't stat (e.g. an empty card reader) */
+        }
+      }),
+    );
+  }
   $: updateDiskSpace(currentPath, isHome, !!archive);
   async function updateDiskSpace(path: string, home: boolean, inArchive: boolean) {
     if (home || inArchive || !path) { diskFree = null; diskTotal = null; return; }
@@ -1709,6 +1725,7 @@
       drives = d;
       homePath = h;
       canRestoreTrash = canRestore;
+      loadDriveUsage(d); // fire-and-forget: sidebar usage bars (CPE-406)
     } catch (e) {
       console.debug("could not load places:", e);
     }
@@ -1851,6 +1868,7 @@
       {places}
       {drives}
       {favorites}
+      {driveUsage}
       sessions={$agentSessions}
       {currentPath}
       {isHome}

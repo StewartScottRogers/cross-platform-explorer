@@ -57,3 +57,34 @@ describe("Sidebar Agents section (CPE-397)", () => {
     expect(screen.getByText("api")).toBeTruthy();
   });
 });
+
+describe("Sidebar drive usage bars (CPE-406)", () => {
+  const drive = { name: "Local Disk (C:)", path: "C:\\", kind: "drive" };
+  it("renders a usage bar + free label under a drive when usage is known", () => {
+    const { container } = render(Sidebar, {
+      places: [],
+      drives: [drive],
+      favorites: [],
+      driveUsage: { "C:\\": { free: 50 * 1024 ** 3, total: 200 * 1024 ** 3 } },
+    });
+    const fill = container.querySelector(".drive-bar-fill") as HTMLElement;
+    expect(fill).toBeTruthy();
+    expect(fill.style.width).toBe("75%"); // 150/200 used
+    expect(screen.getByText(/50.0 GB free/)).toBeTruthy();
+  });
+
+  it("flags a nearly-full drive as full", () => {
+    const { container } = render(Sidebar, {
+      places: [],
+      drives: [drive],
+      favorites: [],
+      driveUsage: { "C:\\": { free: 2 * 1024 ** 3, total: 200 * 1024 ** 3 } },
+    });
+    expect(container.querySelector(".drive-bar-fill.full")).toBeTruthy(); // <5% free
+  });
+
+  it("shows no bar when usage is absent (off means off)", () => {
+    const { container } = render(Sidebar, { places: [], drives: [drive], favorites: [], driveUsage: {} });
+    expect(container.querySelector(".drive-bar")).toBeNull();
+  });
+});
