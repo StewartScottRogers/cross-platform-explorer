@@ -2216,6 +2216,26 @@ fn serve_ai_console_requests(
                         use tauri::Emitter;
                         let _ = app.emit("ai-console://session", state);
                     }
+                    // Agent Watch reads (CPE-405): the console reports a file the agent READ (parsed
+                    // from its tool-output stream, since an FS watcher can't see reads) as an
+                    // `fs-read:<json {path}>` Status. Merge it into the SAME `fs-activity` channel as
+                    // watcher mutations, tagged `kind:"read"`, so the timeline + row annotations show
+                    // it. Malformed payloads are ignored (never block the terminal).
+                    Message::Event(sidecar_contract::Event::Status { state })
+                        if state.starts_with("fs-read:") =>
+                    {
+                        use tauri::Emitter;
+                        if let Ok(v) =
+                            serde_json::from_str::<serde_json::Value>(&state["fs-read:".len()..])
+                        {
+                            if let Some(path) = v.get("path").and_then(|p| p.as_str()) {
+                                let _ = app.emit(
+                                    "ai-console://fs-activity",
+                                    serde_json::json!([{ "kind": "read", "path": path }]),
+                                );
+                            }
+                        }
+                    }
                     // Other non-request frames (Lifecycle, other Status) need no reply here.
                     _ => {}
                 }

@@ -130,9 +130,11 @@ export function applySessionAnnouncement(
 
 // --- Agent Watch: filesystem activity (CPE-398) ---------------------------------------
 
-/** One coalesced filesystem action under a watched Project folder, as emitted by the host. */
+/** One coalesced filesystem action under a watched Project folder, as emitted by the host. `read`
+ *  (CPE-405) comes from the agent's own tool-output stream, not the FS watcher, and is the weakest
+ *  signal — a file the agent consulted rather than changed. */
 export interface FsActivity {
-  kind: "created" | "modified" | "removed" | "renamed";
+  kind: "created" | "modified" | "removed" | "renamed" | "read";
   path: string;
 }
 
@@ -160,7 +162,7 @@ export async function stopAgentWatch(): Promise<void> {
  *  anything malformed. Kept pure so the host→UI wire format is unit-testable headlessly. */
 export function normalizeFsActivity(payload: unknown): FsActivity[] {
   if (!Array.isArray(payload)) return [];
-  const kinds = new Set(["created", "modified", "removed", "renamed"]);
+  const kinds = new Set(["created", "modified", "removed", "renamed", "read"]);
   const out: FsActivity[] = [];
   for (const item of payload) {
     const kind = (item as { kind?: unknown })?.kind;

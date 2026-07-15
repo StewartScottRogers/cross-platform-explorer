@@ -37,6 +37,7 @@ pub(crate) fn cli_command(program: &str, args: &[String]) -> (String, Vec<String
     (program.to_string(), args.to_vec())
 }
 
+pub mod agent_reads;
 pub mod aggregate;
 pub mod agents;
 pub mod broker_client;

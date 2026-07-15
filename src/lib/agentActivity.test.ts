@@ -65,6 +65,40 @@ describe("Agent Watch activity folding (CPE-399)", () => {
   });
 });
 
+describe("Agent Watch reads (CPE-405)", () => {
+  it("ingests a read kind into the map and timeline", () => {
+    clearActivity();
+    ingestActivity([{ kind: "read", path: "/r/consulted.rs" }], 700);
+    expect(read()["/r/consulted.rs"]).toEqual({ kind: "read", at: 700 });
+    expect(readTimeline()[0]).toMatchObject({ kind: "read", path: "/r/consulted.rs" });
+    clearActivity();
+  });
+
+  it("a read is the weakest signal — it never downgrades a mutation, but a mutation upgrades a read", () => {
+    // read after modified: the modified annotation stays.
+    const m1 = foldActivities({ "/f": { kind: "modified", at: 10 } }, [{ kind: "read", path: "/f" }], 20);
+    expect(m1["/f"]).toEqual({ kind: "modified", at: 10 });
+    // modified after read: the mutation wins and refreshes the timestamp.
+    const m2 = foldActivities({ "/f": { kind: "read", at: 10 } }, [{ kind: "modified", path: "/f" }], 20);
+    expect(m2["/f"]).toEqual({ kind: "modified", at: 20 });
+    // read after read: just refreshes.
+    const m3 = foldActivities({ "/f": { kind: "read", at: 10 } }, [{ kind: "read", path: "/f" }], 20);
+    expect(m3["/f"]).toEqual({ kind: "read", at: 20 });
+  });
+
+  it("a read never triggers a re-list (membership is unchanged)", () => {
+    expect(affectsListing([{ kind: "read", path: "Z:/repos/app/consulted.ts" }], "Z:/repos/app")).toBe(false);
+  });
+
+  it("unknown kinds are still dropped by normalization (graceful for other agents)", () => {
+    clearActivity();
+    ingestActivity([{ kind: "opened", path: "/x" }, { kind: "read", path: "/y" }]);
+    expect(read()["/x"]).toBeUndefined();
+    expect(read()["/y"]).toBeTruthy();
+    clearActivity();
+  });
+});
+
 describe("Agent Watch durable timeline (CPE-400)", () => {
   it("mergeTimeline prepends newest-first with unique ids, capped", () => {
     const items: FsActivity[] = [

@@ -22,6 +22,7 @@
     modified: "edited",
     removed: "deleted",
     renamed: "moved",
+    read: "read", // CPE-405: consulted, not changed
   };
   // The active paths, recomputed only when the activity map changes — used to light up folder rows
   // whose subtree the agent is changing (CPE-402).
@@ -453,11 +454,19 @@
   .agent-badge.modified { background: #b5872b; }
   .agent-badge.renamed { background: #3a72b5; }
   .agent-badge.removed { background: #b5433a; }
+  /* CPE-405: a read is a consult, not a change — a muted, hollow badge. */
+  .agent-badge.read {
+    background: transparent;
+    color: var(--text-muted, #9a9a9a);
+    border: 1px solid var(--border, #5a5a5a);
+  }
   /* Per-kind left accent, driven by the row's data attribute. */
   .row.agent-active[data-agent-kind="created"] { --agent-accent: #3a9d4a; }
   .row.agent-active[data-agent-kind="modified"] { --agent-accent: #b5872b; }
   .row.agent-active[data-agent-kind="renamed"] { --agent-accent: #3a72b5; }
   .row.agent-active[data-agent-kind="removed"] { --agent-accent: #b5433a; }
+  /* CPE-405: dimmer accent for a read, so consulted files read as subordinate to changed ones. */
+  .row.agent-active[data-agent-kind="read"] { --agent-accent: #6b6b6b; }
   /* A folder whose subtree the agent is changing — a soft accent so you can follow it down (CPE-402). */
   .row.agent-inside:not(.agent-active) {
     box-shadow: inset 3px 0 0 color-mix(in srgb, var(--accent, #2f6fed) 55%, transparent);

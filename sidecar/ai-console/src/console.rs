@@ -129,6 +129,15 @@ pub(crate) fn resolve_provider_key(
 /// Build a session lifecycle announcement for the explorer's Agent Watch (CPE-396). `event` is
 /// "started" or "ended"; the payload carries just enough to list + locate the session (its
 /// Project folder is `cwd`). No secrets are ever included.
+/// Build the `fs-read:<json>` announcement for a file the agent reported reading (CPE-405).
+/// The raw captured path (relative or absolute) is resolved against the session's Project folder
+/// (`cwd`) so it matches the absolute paths the host's FS watcher emits (CPE-398); the host forwards
+/// it onto the `ai-console://fs-activity` channel with `kind:"read"`.
+fn read_announcement(cwd: &str, raw: &str) -> String {
+    let abs = std::path::Path::new(cwd).join(raw).to_string_lossy().into_owned();
+    format!("fs-read:{}", json!({ "path": abs }))
+}
+
 fn session_payload(event: &str, id: &str, agent_name: &str, meta: &SessionMeta) -> String {
     json!({
         "event": event,
@@ -349,9 +358,15 @@ impl ConsoleState {
             let record_id = id.clone();
             let secrets = injected_secrets;
             let announce = Arc::clone(&self.announce);
+            // Agent Watch reads (CPE-405): tap the same output for `Read(path)` tool calls the agent
+            // prints, and announce each as an `fs-read:<json>` — read-only, it never alters the
+            // stream. Paths are resolved against the session's Project folder (cwd) so they match the
+            // absolute paths the FS watcher emits (CPE-398).
+            let read_cwd = meta.cwd.clone();
             thread::spawn(move || {
                 let mut reader = reader;
                 let mut buf = [0u8; 8192];
+                let mut reads = crate::agent_reads::ReadScanner::new();
                 loop {
                     match reader.read(&mut buf) {
                         Ok(0) | Err(_) => break,
@@ -368,6 +383,10 @@ impl ConsoleState {
                             // Push live to the attached terminal, if any (drop on send error).
                             if let Some(tx) = live.lock().unwrap().as_ref() {
                                 let _ = tx.send(chunk.to_vec());
+                            }
+                            // Surface any file the agent reported reading (CPE-405).
+                            for raw in reads.feed(&String::from_utf8_lossy(chunk)) {
+                                announce(read_announcement(&read_cwd, &raw));
                             }
                         }
                     }
@@ -988,6 +1007,22 @@ mod tests {
         let state = state().with_announcer(Arc::new(move |p| sink.lock().unwrap().push(p)));
         state.announce_session("session:{\"event\":\"ended\"}".into());
         assert_eq!(seen.lock().unwrap().as_slice(), &["session:{\"event\":\"ended\"}".to_string()]);
+    }
+
+    #[test]
+    fn read_announcement_resolves_against_cwd_and_tags_the_channel() {
+        // A relative read path is resolved against the session's Project folder, so it matches the
+        // absolute paths the FS watcher emits; the payload is a `fs-read:<json>` the host forwards.
+        let s = read_announcement("Z:/repos/app", "src/main.rs");
+        let json = s.strip_prefix("fs-read:").expect("fs-read prefix");
+        let v: Value = serde_json::from_str(json).unwrap();
+        let path = v["path"].as_str().unwrap().replace('\\', "/");
+        assert_eq!(path, "Z:/repos/app/src/main.rs");
+        // An already-absolute path is preserved (join replaces the base with an absolute child).
+        let abs = if cfg!(windows) { "C:/tmp/x.rs" } else { "/tmp/x.rs" };
+        let s2 = read_announcement("Z:/repos/app", abs);
+        let v2: Value = serde_json::from_str(s2.strip_prefix("fs-read:").unwrap()).unwrap();
+        assert_eq!(v2["path"].as_str().unwrap().replace('\\', "/"), abs);
     }
 
     #[test]

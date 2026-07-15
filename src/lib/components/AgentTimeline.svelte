@@ -19,6 +19,7 @@
     modified: "edited",
     removed: "deleted",
     renamed: "moved",
+    read: "read", // CPE-405: consulted, not changed — a dimmer, distinct signal
   };
   const norm = (p: string) => p.replace(/\\/g, "/").replace(/\/+$/, "");
   const baseOf = (p: string) => norm(p).split("/").pop() || p;
@@ -155,6 +156,12 @@
   .tl-badge.modified { background: #b5872b; }
   .tl-badge.renamed { background: #3a72b5; }
   .tl-badge.removed { background: #b5433a; }
+  /* CPE-405: a read is the weakest signal — a hollow, muted badge, visually subordinate to changes. */
+  .tl-badge.read {
+    background: transparent;
+    color: var(--text-muted, #9a9a9a);
+    border: 1px solid var(--border, #4a4a4a);
+  }
   .tl-name {
     flex: 1;
     overflow: hidden;

@@ -55,14 +55,20 @@ export function mergeTimeline(
   return [...created.reverse(), ...prev].slice(0, cap);
 }
 
-/** Fold a batch of activities into the previous map (pure; newest kind + timestamp win per path). */
+/** Fold a batch of activities into the previous map (pure; newest kind + timestamp win per path).
+ *  A `read` (CPE-405) is the weakest signal: it never overwrites a stronger mutation kind already
+ *  recorded for that path, so a file the agent edited *and* read still annotates as edited. */
 export function foldActivities(
   prev: Record<string, AgentActivity>,
   items: FsActivity[],
   now: number,
 ): Record<string, AgentActivity> {
   const next = { ...prev };
-  for (const it of items) next[it.path] = { kind: it.kind, at: now };
+  for (const it of items) {
+    const existing = next[it.path];
+    if (it.kind === "read" && existing && existing.kind !== "read") continue;
+    next[it.path] = { kind: it.kind, at: now };
+  }
   return next;
 }
 
@@ -116,13 +122,14 @@ export function folderHasActivity(paths: string[], dir: string): boolean {
 /**
  * Whether a batch changes which rows belong in `folder` — i.e. a create/remove/rename of a DIRECT
  * child (CPE-401). Drives a live re-list so new files appear and deleted ones vanish. A `modified`
- * doesn't change membership (its row already exists; the annotation is enough), so it's excluded.
+ * or `read` doesn't change membership (its row already exists; the annotation is enough), so those
+ * are excluded — a read never re-lists.
  */
 export function affectsListing(items: FsActivity[], folder: string): boolean {
   const f = normalizePath(folder);
   if (!f) return false;
   return items.some((it) => {
-    if (it.kind === "modified") return false;
+    if (it.kind === "modified" || it.kind === "read") return false;
     const p = normalizePath(it.path);
     const cut = p.lastIndexOf("/");
     return cut > 0 && p.slice(0, cut) === f;
