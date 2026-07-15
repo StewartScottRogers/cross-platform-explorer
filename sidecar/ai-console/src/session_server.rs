@@ -7,10 +7,10 @@
 //! (newline-delimited), with binary PTY bytes base64-encoded:
 //!
 //! - client → daemon: `{"op":"launch",…}` `{"op":"attach","id":…}` `{"op":"input","id":…,"data":b64}`
-//!   `{"op":"resize",…}` `{"op":"kill","id":…}` `{"op":"list"}`
+//!   `{"op":"resize",…}` `{"op":"kill","id":…}` `{"op":"close_all"}` `{"op":"list"}`
 //! - daemon → client: `{"ev":"launched","id":…}` `{"ev":"replay","id":…,"data":b64}`
 //!   `{"ev":"output","id":…,"data":b64}` `{"ev":"exit","id":…}` `{"ev":"sessions","ids":[…]}`
-//!   `{"ev":"ok"}` `{"ev":"error","msg":…}`
+//!   `{"ev":"closed","ids":[…]}` `{"ev":"ok"}` `{"ev":"error","msg":…}`
 //!
 //! On `attach` the daemon writes the buffered **replay** then streams live **output** — the reattach
 //! that restores I/O to a reconnecting UI. The socket is loopback-only (same trust boundary as the
@@ -118,6 +118,8 @@ fn dispatch(msg: &Value, daemon: &Arc<SessionDaemon>, writer: &Arc<Mutex<TcpStre
             reply_ok(writer, daemon.resize(&id(), rows, cols))
         }
         "kill" => reply_ok(writer, daemon.kill(&id())),
+        // Close every session at once and reclaim their agents/PTYs (CPE-442).
+        "close_all" => send(writer, json!({ "ev": "closed", "ids": daemon.close_all() })),
         "list" => send(writer, json!({ "ev": "sessions", "ids": daemon.list() })),
         other => send(writer, json!({ "ev": "error", "msg": format!("unknown op '{other}'") })),
     }
@@ -280,6 +282,29 @@ mod tests {
 
         b.send(json!({ "op": "kill", "id": "s1" }));
         assert!(b.wait_for(Duration::from_secs(5), |v| ev_is(v, "ok")).is_some());
+    }
+
+    #[test]
+    fn close_all_over_the_socket_reclaims_every_session() {
+        let addr = start();
+        let mut c = Client::connect(&addr);
+        // Launch two long-running sessions.
+        for id in ["s1", "s2"] {
+            let mut launch = ready_then_tick();
+            launch["id"] = json!(id);
+            c.send(launch);
+            assert!(c.wait_for(Duration::from_secs(5), |v| ev_is(v, "launched")).is_some());
+        }
+        // close_all returns both ids, and a subsequent list is empty — nothing left running.
+        c.send(json!({ "op": "close_all" }));
+        let closed = c.wait_for(Duration::from_secs(5), |v| ev_is(v, "closed")).unwrap();
+        let mut ids: Vec<String> =
+            closed["ids"].as_array().unwrap().iter().map(|x| x.as_str().unwrap().to_string()).collect();
+        ids.sort();
+        assert_eq!(ids, vec!["s1", "s2"]);
+        c.send(json!({ "op": "list" }));
+        let sessions = c.wait_for(Duration::from_secs(5), |v| ev_is(v, "sessions")).unwrap();
+        assert!(sessions["ids"].as_array().unwrap().is_empty(), "sessions remained after close_all");
     }
 
     #[test]
