@@ -37,9 +37,12 @@ async function mountLauncher(routes: (path: string, opts: any) => any = () => ({
   const w = dom.window as any;
   class FakeTerm {
     unicode = { activeVersion: "" };
+    rows = 24;
+    cols = 80;
     loadAddon() {}
     open() {}
     write(_d: unknown, cb?: () => void) { cb && cb(); }
+    reset() {}
     onData() {} onScroll() {} attachCustomKeyEventHandler() {} focus() {}
     scrollToBottom() {} scrollToTop() {} scrollToLine() {} dispose() {}
     get buffer() { return { active: { baseY: 0, viewportY: 0 } }; }
@@ -209,6 +212,32 @@ describe("AI Console launcher — inexperienced-user goal (CPE-392/393/394)", ()
     w.document.getElementById("onboard-addkey").click();
     expect(w.document.getElementById("onboard-overlay").hidden).toBe(true);
     expect(w.document.getElementById("keys-overlay").hidden).toBe(false);
+  });
+});
+
+describe("AI Console launcher — Full output live-update (CPE-410)", () => {
+  it("opening the panel loads output + starts a live poll; closing stops it", async () => {
+    const { w } = await mountLauncher((path) =>
+      path.includes("/api/session/") && path.includes("/output")
+        ? { outputB64: Buffer.from("hello world").toString("base64") }
+        : {},
+    );
+    w.eval("activeId = 's1'");
+    await w.openScrollback();
+    expect(w.document.getElementById("scrollback-overlay").hidden).toBe(false);
+    expect(w.eval("sbState.writtenLen")).toBe("hello world".length); // initial output written
+    expect(w.eval("!!(sbState && sbState.pollTimer)")).toBe(true); // live poll running
+    w.closeScrollback();
+    expect(w.eval("!!(sbState && sbState.pollTimer)")).toBe(false); // poll torn down
+    expect(w.document.getElementById("scrollback-overlay").hidden).toBe(true);
+  });
+
+  it("open guards against no active session", async () => {
+    const { w } = await mountLauncher();
+    w.eval("activeId = null");
+    await w.openScrollback();
+    expect(w.document.getElementById("scrollback-overlay").hidden).toBe(true);
+    expect(w.document.getElementById("msg").textContent).toMatch(/no active session/i);
   });
 });
 
