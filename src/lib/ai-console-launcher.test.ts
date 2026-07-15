@@ -316,45 +316,46 @@ describe("AI Console launcher — Close all + reclaim resources (CPE-442)", () =
   });
 });
 
-describe("AI Console launcher — Model browser (CPE-449)", () => {
+describe("AI Console launcher — inline Model dropdown (CPE-454)", () => {
   const catalog = {
     reseller: "openrouter",
     models: [
-      { id: "anthropic/claude-3.5-sonnet", reseller: "openrouter", display_name: "Claude 3.5 Sonnet", context_length: 200000, pricing: { prompt: 0.000003, completion: 0.000015 }, modalities: ["text"], moderated: true },
-      { id: "openai/gpt-4o", reseller: "openrouter", display_name: "GPT-4o", context_length: 128000, pricing: { prompt: 0.0000025, completion: 0.00001 }, modalities: ["text", "image"], moderated: false },
-      { id: "meta-llama/llama-3-8b", reseller: "openrouter", display_name: "Llama 3 8B", context_length: 8192, pricing: { prompt: 0, completion: 0 }, modalities: ["text"], moderated: false },
+      { id: "anthropic/claude-3.5-sonnet", reseller: "openrouter", display_name: "Claude 3.5 Sonnet", context_length: 200000, pricing: { prompt: 0.000003 }, modalities: ["text"], moderated: true },
+      { id: "openai/gpt-4o", reseller: "openrouter", display_name: "GPT-4o", context_length: 128000, pricing: { prompt: 0.0000025 }, modalities: ["text"], moderated: false },
     ],
   };
 
-  it("opens, lists the reseller's models, filters, and picks one into the Model field", async () => {
-    const { w } = await mountLauncher((path) => {
-      if (path.startsWith("/api/models")) return catalog;
-      return {};
-    });
-    await w.openModelBrowser();
-    expect(w.document.getElementById("model-overlay").hidden).toBe(false);
-    expect(w.document.querySelectorAll(".model-row").length).toBe(3);
-    expect(w.document.getElementById("model-status").textContent).toMatch(/3 models from openrouter/);
-
-    // Filter narrows the list by id or name.
-    w.renderModelList("gpt");
-    const rows = [...w.document.querySelectorAll(".model-row")];
-    expect(rows.length).toBe(1);
-    expect(rows[0].textContent).toMatch(/GPT-4o/);
-
-    // Picking a model fills the Model field and closes the overlay.
-    rows[0].click();
-    expect(w.document.getElementById("model").value).toBe("openai/gpt-4o");
-    expect(w.document.getElementById("model-overlay").hidden).toBe(true);
+  it("populates the Model field's datalist inline (no modal), each option carrying the id", async () => {
+    const { w } = await mountLauncher((path) => (path.startsWith("/api/models") ? catalog : {}));
+    await w.populateModels();
+    // It's an editable <input> bound to a <datalist> — a dropdown, not a modal.
+    expect(w.document.getElementById("model").getAttribute("list")).toBe("model-options");
+    expect(w.document.getElementById("model-overlay")).toBeNull(); // the old modal is gone
+    const opts = [...w.document.getElementById("model-options").options].map((o: any) => o.value);
+    expect(opts).toEqual(["anthropic/claude-3.5-sonnet", "openai/gpt-4o"]);
   });
 
-  it("shows an inline error when the model fetch fails", async () => {
+  it("re-populates when the provider changes, and stays editable/custom-capable", async () => {
+    let reseller = "";
     const { w } = await mountLauncher((path) => {
-      if (path.startsWith("/api/models")) return { ok: false, status: 502, data: { error: "offline" } };
+      if (path.startsWith("/api/models")) { reseller = new URLSearchParams(path.split("?")[1]).get("reseller") || ""; return catalog; }
       return {};
     });
-    await w.openModelBrowser();
-    expect(w.document.getElementById("model-status").textContent).toMatch(/Couldn't load models/i);
-    expect(w.document.querySelectorAll(".model-row").length).toBe(0);
+    const p = w.document.getElementById("provider");
+    p.innerHTML = '<option value="groq">groq</option>'; // a provider the current agent exposes
+    p.value = "groq";
+    p.dispatchEvent(new w.Event("change"));
+    await new Promise((r) => setTimeout(r, 0));
+    expect(reseller).toBe("groq"); // provider change drives the fetch — one uniform control
+    // The field remains a free-text input, so a custom/unlisted id is never a dead end.
+    w.document.getElementById("model").value = "my/custom-model";
+    expect(w.document.getElementById("model").value).toBe("my/custom-model");
+  });
+
+  it("offline (fetch fails) leaves the field editable with an empty list — never a dead end", async () => {
+    const { w } = await mountLauncher((path) => (path.startsWith("/api/models") ? { ok: false, status: 502 } : {}));
+    await w.populateModels();
+    expect(w.document.getElementById("model-options").options.length).toBe(0);
+    expect(w.document.getElementById("model").disabled).toBeFalsy();
   });
 });

@@ -19,6 +19,9 @@ export default defineConfig(async () => ({
   test: {
     environment: "jsdom",
     globals: true,
+    // Never collect tests from sub-agent git worktrees or the Rust target dir — they'd run stale
+    // copies against the live source tree and report phantom failures.
+    exclude: ["**/node_modules/**", "**/dist/**", "**/.claude/**", "**/target/**"],
     // @tauri-apps/* must be inlined, otherwise Vite pre-bundles it and
     // vi.mock() cannot intercept the import inside .svelte files.
     server: { deps: { inline: [/^@tauri-apps\//] } },

@@ -2,11 +2,12 @@
 id: CPE-454
 title: "Inline Model dropdown — change on a dime, uniform across agents/providers"
 type: Defect
-status: Open
+status: Done
 priority: High
 component: Frontend
 tags: [ready]
 created: 2026-07-15
+closed: 2026-07-15
 epic: CPE-444
 ---
 
@@ -41,17 +42,17 @@ an **inline, always-visible Model dropdown** in the launch bar that lets you swi
   (e.g. an `<input>` + `<datalist>`, or a filtering combobox), not a raw 300-row native `<select>`.
 
 ## Acceptance Criteria
-- [ ] The "Browse…" modal (`#model-browse` / `#model-overlay` / `openModelBrowser`) is removed in
+- [x] The "Browse…" modal (`#model-browse` / `#model-overlay` / `openModelBrowser`) is removed in
       favour of an inline dropdown control in the launch bar.
-- [ ] The dropdown is populated with the current provider/reseller's models and updates when the
+- [x] The dropdown is populated with the current provider/reseller's models and updates when the
       provider changes; switching models takes a single action.
-- [ ] The control behaves identically across all agents and providers (one code path, no per-agent
+- [x] The control behaves identically across all agents and providers (one code path, no per-agent
       special-casing of the interaction).
-- [ ] Remains editable/custom-capable and falls back cleanly when the list is empty/offline; the
+- [x] Remains editable/custom-capable and falls back cleanly when the list is empty/offline; the
       agent's default still applies when nothing is chosen.
-- [ ] The "Fast model" (`#smallModel`) field gets the same treatment (or is explicitly out of scope
+- [x] The "Fast model" (`#smallModel`) field gets the same treatment (or is explicitly out of scope
       with a note).
-- [ ] jsdom launcher tests cover: population on provider change, one-action pick sets `#model`,
+- [x] jsdom launcher tests cover: population on provider change, one-action pick sets `#model`,
       type-ahead filtering, and the offline/custom fallback. `npm run check` clean.
 
 ## Notes
@@ -59,3 +60,6 @@ Supersedes the CPE-449 "Browse…" overlay UX (keep its fetch/normalize backend 
 `model_catalog::normalize_models` — and re-present it as an inline dropdown). Reuse the reseller/model
 plumbing from CPE-444/447/449; this is a **frontend UX rework**, not new backend. Verify the final
 feel in a real GUI run (the "on a dime" quality is a hands-on judgement).
+
+## Resolution
+Replaced the CPE-449 "Browse…" modal with an **inline editable combobox**: the Model field is now `<input id="model" list="model-options">` + a `<datalist>` populated with the current reseller's models (`populateModels()` fetches `/api/models` and fills the options with id + name/context/price labels). Change on a dime — type to filter (native datalist), pick, or type a custom id; the field stays editable so an unlisted model is never a dead end. **Uniform**: one control + one populate path, driven by provider/agent change and initial load, identical for every agent/provider. Offline/failed fetch → empty list, still editable. Removed the modal markup, its CSS, and `openModelBrowser`/`renderModelList`/`modelCatalog`; kept the `/api/models` backend (CPE-447/449). Also excluded `.claude/worktrees` + `target` from vitest so sub-agent worktrees can't pollute test collection. svelte-check 0, launcher suite 20, full frontend suite 432 green. Final feel is a GUI eyeball.
