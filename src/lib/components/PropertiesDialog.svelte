@@ -5,6 +5,7 @@
   import { formatSize } from "../format";
   import { formatDate } from "../datetime";
   import { iconFor, typeName } from "../filetypes";
+  import { checksumMatches } from "../checksum";
   import type { DirEntry } from "../types";
 
   /** The selected entries. One => full detail; many => aggregate summary. */
@@ -34,6 +35,9 @@
   let hashing = false;
   let hashError = "";
   let copied = false;
+  // Verify against a pasted expected digest (CPE-413). `null` verdict = neutral (nothing entered).
+  let expected = "";
+  $: verdict = checksum ? checksumMatches(checksum, expected) : null;
 
   async function computeHash() {
     if (!single || single.is_dir) return;
@@ -150,6 +154,20 @@
                   <Icon name={copied ? "check" : "copy"} size={13} />
                   {copied ? "Copied" : "Copy"}
                 </button>
+                <div class="verify">
+                  <input
+                    class="verify-in"
+                    placeholder="Paste expected hash to verify"
+                    bind:value={expected}
+                    spellcheck="false"
+                    autocomplete="off"
+                  />
+                  {#if verdict === true}
+                    <span class="match" title="The file matches the expected hash">✓ Match</span>
+                  {:else if verdict === false}
+                    <span class="nomatch" title="The file does NOT match">✗ No match</span>
+                  {/if}
+                </div>
               {:else if hashing}
                 <span class="dim">Computing…</span>
               {:else if hashError}
@@ -222,6 +240,14 @@
     border: 1px solid var(--border-strong); background: var(--surface-alt); font-size: 12px;
   }
   .mini:hover { background: var(--surface); }
+  .verify { display: flex; align-items: center; gap: 8px; flex-basis: 100%; margin-top: 2px; }
+  .verify-in {
+    flex: 1; min-width: 140px; height: 26px; padding: 0 8px;
+    border: 1px solid var(--border-strong); border-radius: var(--radius);
+    background: var(--surface-alt); font-family: ui-monospace, monospace; font-size: 11px;
+  }
+  .match { color: #1a7f37; font-weight: 600; white-space: nowrap; }
+  .nomatch { color: #c42b1c; font-weight: 600; white-space: nowrap; }
   .actions { display: flex; justify-content: flex-end; padding-top: 8px; }
   .btn { height: 32px; padding: 0 16px; border-radius: var(--radius);
          border: 1px solid var(--border-strong); background: var(--surface-alt); }
