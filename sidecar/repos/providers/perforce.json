@@ -1,0 +1,16 @@
+{
+  "schema_version": 1,
+  "id": "perforce",
+  "name": "Perforce Helix",
+  "kind": "perforce",
+  "auth": [
+    "pat"
+  ],
+  "api_hosts": [],
+  "capabilities": [
+    "clone",
+    "pull",
+    "push"
+  ],
+  "experimental": true
+}

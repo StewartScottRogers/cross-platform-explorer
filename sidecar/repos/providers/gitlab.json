@@ -1,0 +1,21 @@
+{
+  "schema_version": 1,
+  "id": "gitlab",
+  "name": "GitLab",
+  "kind": "git",
+  "auth": [
+    "oauth",
+    "pat",
+    "ssh"
+  ],
+  "api_hosts": [
+    "gitlab.com"
+  ],
+  "capabilities": [
+    "browse",
+    "clone",
+    "pull",
+    "push"
+  ],
+  "web_base": "https://gitlab.com"
+}
