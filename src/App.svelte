@@ -1,7 +1,7 @@
 <script lang="ts">
   import { onMount, onDestroy } from "svelte";
   import { invoke, convertFileSrc } from "@tauri-apps/api/core";
-  import { open as openFolderDialog } from "@tauri-apps/plugin-dialog";
+  import { open as openFolderDialog, save as saveFileDialog } from "@tauri-apps/plugin-dialog";
   import { check, type Update } from "@tauri-apps/plugin-updater";
   import { relaunch, exit } from "@tauri-apps/plugin-process";
   import { openUrl, revealItemInDir } from "@tauri-apps/plugin-opener";
@@ -37,7 +37,7 @@
   import ShortcutsDialog from "./lib/components/ShortcutsDialog.svelte";
   import ContentSearchDialog from "./lib/components/ContentSearchDialog.svelte";
   import DuplicatesDialog from "./lib/components/DuplicatesDialog.svelte";
-  import { namesList, detailList } from "./lib/listing";
+  import { namesList, detailList, csvList } from "./lib/listing";
   import { parentDir as parentOfPath } from "./lib/contentSearch";
   import PropertiesDialog from "./lib/components/PropertiesDialog.svelte";
   import BatchRenameDialog from "./lib/components/BatchRenameDialog.svelte";
@@ -1610,6 +1610,30 @@
       case "find-duplicates": if (!isHome && !archive) duplicatesOpen = true; break;
       case "copy-file-names": copyListing(namesList(visible), "file names"); break;
       case "copy-file-list": copyListing(detailList(visible), "file list"); break;
+      case "save-file-list": saveFileList(); break;
+    }
+  }
+
+  /** Save the current (visible) folder listing to a CSV/TXT file via a native Save dialog (CPE-425). */
+  async function saveFileList() {
+    if (isHome || visible.length === 0) {
+      showNotice("Nothing to save here.");
+      return;
+    }
+    try {
+      const path = await saveFileDialog({
+        defaultPath: "file-list.csv",
+        filters: [
+          { name: "CSV", extensions: ["csv"] },
+          { name: "Text", extensions: ["txt"] },
+        ],
+      });
+      if (!path) return; // cancelled
+      const text = path.toLowerCase().endsWith(".txt") ? detailList(visible) : csvList(visible);
+      await invoke("write_file_text", { path, contents: text });
+      showNotice(`Saved ${visible.length} rows to ${path.split(/[\\/]/).pop()}.`);
+    } catch (e) {
+      showNotice(String(e), true);
     }
   }
 
