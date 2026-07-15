@@ -1,17 +1,23 @@
 <script lang="ts">
   import { createEventDispatcher } from "svelte";
-  import { planFindReplace, type RenameItem } from "../batchRename";
+  import { planFindReplace, planAffix, type RenameItem } from "../batchRename";
 
   /** The names of the selected items to rename. */
   export let names: string[] = [];
 
+  let mode: "replace" | "affix" = "replace";
   let find = "";
   let replace = "";
   let caseSensitive = false;
+  let prefix = "";
+  let suffix = "";
 
   const dispatch = createEventDispatcher<{ apply: RenameItem[]; cancel: void }>();
 
-  $: items = planFindReplace(names, find, replace, caseSensitive);
+  $: items =
+    mode === "replace"
+      ? planFindReplace(names, find, replace, caseSensitive)
+      : planAffix(names, prefix, suffix);
   $: changed = items.filter((i) => i.changed);
   $: hasConflict = items.some((i) => i.conflict);
   $: canApply = changed.length > 0 && !hasConflict;
@@ -30,21 +36,39 @@
   <div class="dialog" role="dialog" aria-modal="true" on:click|stopPropagation>
     <h2>Rename {names.length} items</h2>
 
-    <div class="fields">
-      <label>
-        <span>Find</span>
-        <!-- svelte-ignore a11y-autofocus -->
-        <input bind:value={find} autofocus placeholder="text to find" />
-      </label>
-      <label>
-        <span>Replace with</span>
-        <input bind:value={replace} placeholder="replacement" />
-      </label>
-      <label class="check">
-        <input type="checkbox" bind:checked={caseSensitive} />
-        Case-sensitive
-      </label>
+    <div class="modes">
+      <button class="mode" class:active={mode === "replace"} on:click={() => (mode = "replace")}>Find &amp; replace</button>
+      <button class="mode" class:active={mode === "affix"} on:click={() => (mode = "affix")}>Add text</button>
     </div>
+
+    {#if mode === "replace"}
+      <div class="fields">
+        <label>
+          <span>Find</span>
+          <!-- svelte-ignore a11y-autofocus -->
+          <input bind:value={find} autofocus placeholder="text to find" />
+        </label>
+        <label>
+          <span>Replace with</span>
+          <input bind:value={replace} placeholder="replacement" />
+        </label>
+        <label class="check">
+          <input type="checkbox" bind:checked={caseSensitive} />
+          Case-sensitive
+        </label>
+      </div>
+    {:else}
+      <div class="fields">
+        <label>
+          <span>Prefix</span>
+          <input bind:value={prefix} placeholder="text before the name" />
+        </label>
+        <label>
+          <span>Suffix</span>
+          <input bind:value={suffix} placeholder="text before the extension" />
+        </label>
+      </div>
+    {/if}
 
     <div class="preview">
       {#each items as it (it.from)}
@@ -58,7 +82,7 @@
 
     <div class="status">
       {#if hasConflict}
-        <span class="warn">Some names would collide — adjust the replacement.</span>
+        <span class="warn">Some names would collide — adjust the inputs.</span>
       {:else if changed.length === 0}
         <span>No names change yet.</span>
       {:else}
@@ -91,6 +115,12 @@
     box-shadow: 0 20px 50px rgba(0, 0, 0, 0.25);
     padding: 20px;
   }
+  .modes { display: flex; gap: 6px; margin: 4px 0 12px; }
+  .mode {
+    height: 28px; padding: 0 12px; border-radius: var(--radius);
+    border: 1px solid var(--border-strong); background: var(--surface-alt); font-size: 12px;
+  }
+  .mode.active { background: var(--accent); border-color: var(--accent); color: #fff; }
   h2 {
     font-size: 16px;
     margin-bottom: 14px;
