@@ -1739,10 +1739,13 @@
       <button
         class="tb-console"
         type="button"
-        title="Open the AI Console"
+        title={$agentSessions.length ? `Open the AI Console — ${$agentSessions.length} agent${$agentSessions.length === 1 ? "" : "s"} running` : "Open the AI Console"}
         on:click={() => openAiConsole()}
       >
         <Icon name="code" size={15} /> AI Console
+        {#if $agentSessions.length}
+          <span class="tb-console-count" aria-label="{$agentSessions.length} agents running">{$agentSessions.length}</span>
+        {/if}
       </button>
     {/if}
   </svelte:fragment>
@@ -2257,5 +2260,20 @@
   }
   .tb-console:hover {
     background: var(--surface-alt);
+  }
+  /* Live count of running agent sessions (CPE-404) — visible even with the console window closed. */
+  .tb-console-count {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    min-width: 16px;
+    height: 16px;
+    padding: 0 4px;
+    border-radius: 999px;
+    background: #3a9d4a;
+    color: #fff;
+    font-size: 10px;
+    font-weight: 700;
+    line-height: 1;
   }
 </style>
