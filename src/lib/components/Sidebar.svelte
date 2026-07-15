@@ -5,11 +5,15 @@
   import SidebarNode from "./SidebarNode.svelte";
   import { iconFor } from "../filetypes";
   import type { DirEntry, Place, Favorite } from "../types";
+  import type { AgentSession } from "../sidecar";
 
   export let places: Place[] = [];
   export let drives: Place[] = [];
   /** User-starred files and folders, shown in the quick-access section (CPE-340). */
   export let favorites: Favorite[] = [];
+  /** Live coding-agent sessions from the AI Console (Agent Watch, CPE-397). Each row
+      navigates the explorer to the agent's Project folder. Empty ⇒ the section is hidden. */
+  export let sessions: AgentSession[] = [];
   export let currentPath = "";
   export let isHome = false;
   /** The middle pane's currently selected folder (or ""), for two-way highlight
@@ -27,10 +31,14 @@
 
   /** Favorites section collapse state (transient, like the Home twisties). */
   let favOpen = true;
+  /** Agents (Agent Watch) section collapse state. */
+  let agentsOpen = true;
   const extOf = (name: string) => {
     const i = name.lastIndexOf(".");
     return i > 0 ? name.slice(i + 1).toLowerCase() : "";
   };
+  /** Last path segment of a Project folder, for the compact agent-row subtitle. */
+  const baseName = (p: string) => norm(p).split("/").pop() || p;
 
   /** The navigation-pane path currently hovered as a drop target, or "" for none. */
   let dropPath = "";
@@ -145,6 +153,35 @@
 </script>
 
 <div class="navigation-pane" role="region" aria-label="Navigation">
+  {#if sessions.length > 0}
+    <div class="nav-item agents-head">
+      <button class="twisty" class:open={agentsOpen} title={agentsOpen ? "Collapse" : "Expand"} on:click={() => (agentsOpen = !agentsOpen)}>
+        <Icon name="chev-right" size={12} />
+      </button>
+      <Icon name="code" />
+      <span class="label agents-title">Agents</span>
+    </div>
+    {#if agentsOpen}
+      <div class="nav-children">
+        {#each sessions as s (s.sessionId)}
+          <button
+            class="nav-item agent-item"
+            class:active={isMarked(s.cwd)}
+            title={`${s.agentName} — ${s.cwd}`}
+            on:click={() => dispatch("navigate", s.cwd)}
+          >
+            <span class="twisty hidden" />
+            <Icon name="cube" />
+            <span class="label agent-label">
+              <span class="agent-name">{s.agentName || s.agentId || "Agent"}</span>
+              <span class="agent-folder">{baseName(s.cwd)}</span>
+            </span>
+          </button>
+        {/each}
+      </div>
+    {/if}
+    <div class="navigation-pane-sep" />
+  {/if}
   {#if favorites.length > 0}
     <div class="nav-item fav-head">
       <button class="twisty" class:open={favOpen} title={favOpen ? "Collapse" : "Expand"} on:click={() => (favOpen = !favOpen)}>
@@ -258,4 +295,10 @@
   /* The Favorites section header reads as a heading, not a navigable row (CPE-340). */
   .fav-head { cursor: default; }
   .fav-title { font-weight: 600; }
+  /* Agents (Agent Watch) section — a running coding agent's Project folder (CPE-397). */
+  .agents-head { cursor: default; }
+  .agents-title { font-weight: 600; }
+  .agent-label { display: flex; flex-direction: column; line-height: 1.15; overflow: hidden; }
+  .agent-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .agent-folder { font-size: 11px; opacity: 0.6; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 </style>
