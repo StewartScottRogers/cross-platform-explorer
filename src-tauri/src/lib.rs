@@ -1332,6 +1332,40 @@ fn hash_file(path: String) -> Result<String, String> {
     Ok(hex)
 }
 
+/// Line / word / character / byte counts for a text file (CPE-414). Lines follow `str::lines`
+/// (a final unterminated line still counts); words are whitespace-separated; characters are Unicode
+/// scalar values. Capped so analysing a file stays predictable; a non-UTF-8 (binary) file, a
+/// directory, or an over-cap file is an `Err`. Opt-in from the UI, never automatic.
+#[derive(serde::Serialize)]
+struct TextStats {
+    lines: u64,
+    words: u64,
+    chars: u64,
+    bytes: u64,
+}
+
+/// Largest file the text-stats command will read into memory (keeps it fast/predictable).
+const TEXT_STATS_MAX_BYTES: u64 = 25 * 1024 * 1024;
+
+#[tauri::command]
+fn text_stats(path: String) -> Result<TextStats, String> {
+    let p = Path::new(&path);
+    let meta = fs::metadata(p).map_err(|e| format!("{path}: {e}"))?;
+    if meta.is_dir() {
+        return Err(format!("{path}: is a folder"));
+    }
+    if meta.len() > TEXT_STATS_MAX_BYTES {
+        return Err("file is too large to analyze (25 MB limit)".into());
+    }
+    let content = fs::read_to_string(p).map_err(|_| format!("{path}: not a text file"))?;
+    Ok(TextStats {
+        lines: content.lines().count() as u64,
+        words: content.split_whitespace().count() as u64,
+        chars: content.chars().count() as u64,
+        bytes: content.len() as u64,
+    })
+}
+
 /// Read `settings.json` from `dir`, returning `{}` when it's absent or
 /// unreadable so the frontend always starts from a valid document.
 fn read_settings_from(dir: &Path) -> String {
@@ -2846,6 +2880,7 @@ pub fn run() {
             entry_info,
             dir_size,
             hash_file,
+            text_stats,
             git_remote_url,
             open_external,
             run_as_admin,
@@ -3700,6 +3735,23 @@ mod tests {
         // A directory and a missing path are errors, not panics.
         assert!(hash_file(d.to_string_lossy().to_string()).is_err());
         assert!(hash_file(d.join("nope.txt").to_string_lossy().to_string()).is_err());
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn text_stats_counts_lines_words_chars_bytes() {
+        let d = scratch("stats");
+        // 2 lines, 3 words, 16 chars (incl. 2 newlines), 16 bytes (all ASCII).
+        fs::write(d.join("t.txt"), b"hello world\nfoo\n").unwrap();
+        let s = text_stats(d.join("t.txt").to_string_lossy().to_string()).unwrap();
+        assert_eq!((s.lines, s.words, s.chars, s.bytes), (2, 3, 16, 16));
+        // A final unterminated line still counts (str::lines semantics).
+        fs::write(d.join("u.txt"), b"a\nb").unwrap();
+        assert_eq!(text_stats(d.join("u.txt").to_string_lossy().to_string()).unwrap().lines, 2);
+        // Non-UTF-8 (binary) and a folder are errors, not panics.
+        fs::write(d.join("bin"), [0xff, 0xfe, 0x00]).unwrap();
+        assert!(text_stats(d.join("bin").to_string_lossy().to_string()).is_err());
+        assert!(text_stats(d.to_string_lossy().to_string()).is_err());
         let _ = fs::remove_dir_all(&d);
     }
 

@@ -4,7 +4,7 @@
   import Icon from "./Icon.svelte";
   import { formatSize } from "../format";
   import { formatDate } from "../datetime";
-  import { iconFor, typeName } from "../filetypes";
+  import { iconFor, typeName, categoryOf } from "../filetypes";
   import { checksumMatches } from "../checksum";
   import type { DirEntry } from "../types";
 
@@ -38,6 +38,27 @@
   // Verify against a pasted expected digest (CPE-413). `null` verdict = neutral (nothing entered).
   let expected = "";
   $: verdict = checksum ? checksumMatches(checksum, expected) : null;
+
+  // On-demand text stats (CPE-414) — offered only for text/code files; opt-in, like the checksum.
+  interface Stats { lines: number; words: number; chars: number; bytes: number }
+  let stats: Stats | null = null;
+  let statting = false;
+  let statError = "";
+  $: isTextFile = !!single && !single.is_dir && ["text", "code"].includes(categoryOf(single));
+
+  async function computeStats() {
+    if (!single) return;
+    statting = true;
+    statError = "";
+    stats = null;
+    try {
+      stats = await invoke<Stats>("text_stats", { path: single.path });
+    } catch (e) {
+      statError = String(e);
+    } finally {
+      statting = false;
+    }
+  }
 
   async function computeHash() {
     if (!single || single.is_dir) return;
@@ -174,6 +195,22 @@
                 <span class="err-inline">{hashError}</span>
               {:else}
                 <button class="mini" on:click={computeHash}>Compute</button>
+              {/if}
+            </dd>
+          </div>
+        {/if}
+        {#if isTextFile}
+          <div>
+            <dt>Contents</dt>
+            <dd class="checksum">
+              {#if stats}
+                <span>{stats.lines.toLocaleString()} lines · {stats.words.toLocaleString()} words · {stats.chars.toLocaleString()} characters</span>
+              {:else if statting}
+                <span class="dim">Counting…</span>
+              {:else if statError}
+                <span class="err-inline">{statError}</span>
+              {:else}
+                <button class="mini" on:click={computeStats}>Count</button>
               {/if}
             </dd>
           </div>
