@@ -1,0 +1,12 @@
+{
+  "schema_version": 1,
+  "id": "groq",
+  "name": "Groq",
+  "models_endpoint": "https://api.groq.com/openai/v1/models",
+  "auth": "bearer",
+  "api_hosts": [
+    "api.groq.com"
+  ],
+  "normalizer": "openai",
+  "web_base": "https://console.groq.com/docs/models"
+}

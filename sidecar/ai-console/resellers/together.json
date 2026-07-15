@@ -1,0 +1,12 @@
+{
+  "schema_version": 1,
+  "id": "together",
+  "name": "Together AI",
+  "models_endpoint": "https://api.together.xyz/v1/models",
+  "auth": "bearer",
+  "api_hosts": [
+    "api.together.xyz"
+  ],
+  "normalizer": "openai",
+  "web_base": "https://api.together.xyz"
+}

@@ -1,0 +1,12 @@
+{
+  "schema_version": 1,
+  "id": "fireworks",
+  "name": "Fireworks AI",
+  "models_endpoint": "https://api.fireworks.ai/inference/v1/models",
+  "auth": "bearer",
+  "api_hosts": [
+    "api.fireworks.ai"
+  ],
+  "normalizer": "openai",
+  "web_base": "https://fireworks.ai/models"
+}

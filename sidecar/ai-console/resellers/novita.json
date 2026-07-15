@@ -1,0 +1,12 @@
+{
+  "schema_version": 1,
+  "id": "novita",
+  "name": "Novita AI",
+  "models_endpoint": "https://api.novita.ai/v3/openai/models",
+  "auth": "bearer",
+  "api_hosts": [
+    "api.novita.ai"
+  ],
+  "normalizer": "openai",
+  "web_base": "https://novita.ai/models"
+}
