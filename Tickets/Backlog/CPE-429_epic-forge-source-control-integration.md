@@ -126,3 +126,27 @@ this is a Mega-Feature the size of the AI Console.
 2026-07-15 — Filed from the user's request for GitHub + all-forge integration (two-way mirroring, a
 left-pane section, sidecar-based). Restated the intent, enumerated providers, sketched the sidecar
 architecture + child tickets, and captured the open design questions. Awaiting sign-off on D1–D5.
+
+## Decision (2026-07-15, dayshift) — native-first forge, sidecar deferred
+The forge integration shipped as a **native explorer feature** for v1, not the isolated sidecar
+tenant this epic (and ADR 0001 / D2) originally assumed:
+- **Host commands** (feature-gated): `forge_browse` (CPE-434), `forge_clone` (CPE-436),
+  `forge_set/get/delete_token` (CPE-439), backed by `src-tauri/src/forge_egress.rs` (CPE-433 —
+  allow-listed, no SSRF; the sidecar never supplies a URL, the host builds it).
+- **UI**: a **Repositories** entry in the explorer left pane → `RepoBrowser.svelte` (CPE-435):
+  browse any GitHub/forge repo tree, clone to a chosen folder, remember the token in the keychain.
+
+**Why:** it delivered the visible, usable feature (see + browse + clone GitHub) far faster than
+standing up a whole hosted sidecar + iframe pane. The provider allow-list, clone hardening
+(threat-model §C), and credential handling all live in the native path.
+
+**What this means for the children:**
+- CPE-433 (egress), 434 (browse), 436 (clone), 439 (credentials), 435 (left-pane) — **DONE** natively.
+- CPE-432 (repos sidecar process skeleton) — **Deferred**: superseded for v1; revisit if forge needs
+  process isolation or the long-lived two-way **mirror** engine (CPE-438 planner is built; push/mirror
+  UI is not wired).
+- CPE-440 (threat model) — applies to the native path; ADR sign-off still wants a GUI run.
+
+**Still open under the epic:** two-way **mirror/sync** (push + the CPE-438 planner wired to a UI),
+more provider parsers beyond GitHub Contents, and self-hosted-forge connections. Revisit the
+sidecar architecture (CPE-432) only if isolation/mirror needs demand it.
