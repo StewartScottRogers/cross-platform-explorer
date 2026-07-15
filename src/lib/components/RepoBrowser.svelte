@@ -2,7 +2,7 @@
   // Repositories browser (CPE-434/435): connect to a forge (GitHub first) and browse a repo's tree
   // in-app. Backed by the host-brokered, allow-listed `forge_browse` command (no SSRF). Public repos
   // need no token; a token unlocks private ones. This is the visible surface of the forge epic.
-  import { createEventDispatcher } from "svelte";
+  import { createEventDispatcher, onMount } from "svelte";
   import { invoke } from "@tauri-apps/api/core";
   import { open as openFolderDialog } from "@tauri-apps/plugin-dialog";
   import Icon from "./Icon.svelte";
@@ -33,6 +33,7 @@
       });
       path = toPath;
       loaded = true;
+      syncToken(); // a successful browse means the token (if any) works — persist per Remember
     } catch (e) {
       error = e instanceof Error ? e.message : String(e);
       entries = [];
@@ -43,6 +44,24 @@
 
   let cloning = false;
   let cloneMsg = "";
+  let remember = false;
+
+  // Load any saved token for this provider (CPE-439) so browse/clone don't need it re-typed.
+  async function loadToken(): Promise<void> {
+    try {
+      const saved = await invoke<string | null>("forge_get_token", { provider });
+      if (saved) { token = saved; remember = true; }
+    } catch { /* no host / no saved token — leave the field blank */ }
+  }
+  onMount(loadToken);
+
+  /** Persist or forget the token per the Remember checkbox (CPE-439). Best-effort. */
+  async function syncToken(): Promise<void> {
+    try {
+      if (remember && token.trim()) await invoke("forge_set_token", { provider, token: token.trim() });
+      else if (!remember) await invoke("forge_delete_token", { provider });
+    } catch { /* keychain unavailable — ignore */ }
+  }
 
   /** Clone the current repo into a user-chosen folder (CPE-436) via the host `forge_clone` command
       (hardened git args, allow-listed host). Clones into `<chosen>/<repo-name>`. */
@@ -97,6 +116,9 @@
         on:keydown={(e) => e.key === "Enter" && browse("")}
       />
       <input class="repo-token" type="password" placeholder="token (optional — for private repos)" bind:value={token} />
+      <label class="repo-remember" title="Save this token in the OS keychain for next time">
+        <input type="checkbox" bind:checked={remember} on:change={syncToken} /> Remember
+      </label>
       <button class="repo-go" on:click={() => browse("")} disabled={loading}>Browse</button>
       <button class="repo-go" on:click={clone} disabled={cloning} title="Clone this repo to a local folder">
         {cloning ? "Cloning…" : "Clone"}
@@ -164,4 +186,5 @@
   .repo-empty { padding: 20px 14px; opacity: 0.6; text-align: center; }
   .repo-error { padding: 14px; color: #e0706b; }
   .repo-clonemsg { padding: 4px 14px; font-size: 12px; color: var(--accent, #6ab0ff); }
+  .repo-remember { display: flex; align-items: center; gap: 4px; font-size: 12px; opacity: 0.8; white-space: nowrap; }
 </style>

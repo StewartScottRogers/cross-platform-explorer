@@ -3215,6 +3215,41 @@ fn forge_clone(
     }
 }
 
+/// Keychain "service" for forge tokens (CPE-439) — kept apart from sidecar secrets so a GitHub
+/// token never collides with a sidecar's namespace. The account is the provider id.
+#[cfg(feature = "sidecar-platform")]
+const FORGE_TOKEN_SERVICE: &str = "com.cross-platform-explorer.forge";
+
+/// Store a forge access token in the OS keychain so browse/clone don't need it re-typed (CPE-439).
+/// Reuses the host's `KeyringBackend` (Windows Credential Manager / macOS Keychain / Linux Secret
+/// Service). The token is never logged.
+#[cfg(feature = "sidecar-platform")]
+#[tauri::command]
+fn forge_set_token(provider: String, token: String) -> Result<(), String> {
+    use sidecar_host::providers::secrets::{KeyringBackend, SecretBackend};
+    if provider.trim().is_empty() {
+        return Err("missing provider".into());
+    }
+    KeyringBackend.set(FORGE_TOKEN_SERVICE, &provider, &token)
+}
+
+/// Fetch the stored forge token for `provider` (CPE-439), or `None`. The value is returned only to
+/// the app's own frontend over the IPC boundary; it is never logged.
+#[cfg(feature = "sidecar-platform")]
+#[tauri::command]
+fn forge_get_token(provider: String) -> Result<Option<String>, String> {
+    use sidecar_host::providers::secrets::{KeyringBackend, SecretBackend};
+    KeyringBackend.get(FORGE_TOKEN_SERVICE, &provider)
+}
+
+/// Forget a provider's stored forge token (CPE-439).
+#[cfg(feature = "sidecar-platform")]
+#[tauri::command]
+fn forge_delete_token(provider: String) -> Result<(), String> {
+    use sidecar_host::providers::secrets::{KeyringBackend, SecretBackend};
+    KeyringBackend.delete(FORGE_TOKEN_SERVICE, &provider)
+}
+
 #[cfg(feature = "sidecar-platform")]
 #[tauri::command]
 fn sidecar_diagnostics(
@@ -3362,7 +3397,13 @@ pub fn run() {
             #[cfg(feature = "sidecar-platform")]
             forge_browse,
             #[cfg(feature = "sidecar-platform")]
-            forge_clone
+            forge_clone,
+            #[cfg(feature = "sidecar-platform")]
+            forge_set_token,
+            #[cfg(feature = "sidecar-platform")]
+            forge_get_token,
+            #[cfg(feature = "sidecar-platform")]
+            forge_delete_token
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application");
