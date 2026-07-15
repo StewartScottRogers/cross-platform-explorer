@@ -21,10 +21,38 @@ export interface AgentActivity {
 /** How long an annotation lingers before it fades out of the map. */
 export const ACTIVITY_TTL_MS = 6000;
 
+/** How many timeline entries to keep — a durable but bounded session history (CPE-400). */
+export const TIMELINE_CAP = 300;
+
+/** One durable entry in the session activity timeline (does NOT fade, unlike {@link AgentActivity}). */
+export interface TimelineEntry {
+  id: number;
+  kind: FsActivity["kind"];
+  path: string;
+  at: number;
+}
+
 const store = writable<Record<string, AgentActivity>>({});
+const timeline = writable<TimelineEntry[]>([]);
+let nextId = 0;
 
 /** Reactive per-path activity map (keyed by absolute path). Empty when not watching. */
 export const fsActivity: Readable<Record<string, AgentActivity>> = store;
+
+/** Reactive, newest-first, bounded session activity history for the timeline panel (CPE-400). */
+export const agentTimeline: Readable<TimelineEntry[]> = timeline;
+
+/** Prepend a batch to the timeline, newest-first, capped (pure). `baseId` seeds unique keys. */
+export function mergeTimeline(
+  prev: TimelineEntry[],
+  items: FsActivity[],
+  now: number,
+  baseId: number,
+  cap = TIMELINE_CAP,
+): TimelineEntry[] {
+  const created = items.map((it, i) => ({ id: baseId + i, kind: it.kind, path: it.path, at: now }));
+  return [...created.reverse(), ...prev].slice(0, cap);
+}
 
 /** Fold a batch of activities into the previous map (pure; newest kind + timestamp win per path). */
 export function foldActivities(
@@ -59,15 +87,19 @@ export function recentActivities(
     .slice(0, limit);
 }
 
-/** Fold a raw event payload into the store (exposed for headless tests). */
+/** Fold a raw event payload into the transient map + the durable timeline (headless-testable). */
 export function ingestActivity(payload: unknown, now = Date.now()): void {
   const items = normalizeFsActivity(payload);
-  if (items.length) store.update((prev) => foldActivities(prev, items, now));
+  if (!items.length) return;
+  store.update((prev) => foldActivities(prev, items, now));
+  timeline.update((prev) => mergeTimeline(prev, items, now, nextId));
+  nextId += items.length;
 }
 
-/** Clear all activity (on stop-watching), so a stale folder never annotates a new one. */
+/** Clear all activity + timeline (on stop-watching), so a stale folder never bleeds into a new one. */
 export function clearActivity(): void {
   store.set({});
+  timeline.set([]);
 }
 
 /**

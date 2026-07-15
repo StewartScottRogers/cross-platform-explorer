@@ -18,7 +18,8 @@
   import { startAiConsole, consoleUrlWith, platformActive, consentState, setConsent, type Capability, type ConsentState } from "./lib/sidecar";
   import { initAgentSessions, agentSessions, watchTargetFor, normalizePath } from "./lib/agentSessions";
   import { startAgentWatch, stopAgentWatch } from "./lib/sidecar";
-  import { initAgentActivity, fsActivity, recentActivities } from "./lib/agentActivity";
+  import { initAgentActivity, fsActivity, recentActivities, agentTimeline } from "./lib/agentActivity";
+  import AgentTimeline from "./lib/components/AgentTimeline.svelte";
   import UpdateDialog from "./lib/components/UpdateDialog.svelte";
   import TabBar from "./lib/components/TabBar.svelte";
   import NavToolbar from "./lib/components/NavToolbar.svelte";
@@ -190,6 +191,8 @@
   // running agent's project, and off the moment it leaves — off means off (AGENT-WATCH.md).
   let activeWatchCwd = "";
   let unlistenActivity: (() => void) | null = null;
+  /** Whether the Agent Watch activity timeline drawer is open (CPE-400). */
+  let showTimeline = false;
 
   const baseNameOf = (p: string) => normalizePath(p).split("/").pop() || p;
 
@@ -203,6 +206,8 @@
     if (cwd) {
       unlistenActivity = await initAgentActivity();
       await startAgentWatch(cwd);
+    } else {
+      showTimeline = false; // no watched project ⇒ close the timeline drawer (CPE-400)
     }
   }
 
@@ -1901,6 +1906,9 @@
           {#if recentChanges.length === 0}
             <span class="agent-strip-idle">watching for changes…</span>
           {/if}
+          <button class="agent-log-btn" on:click={() => (showTimeline = !showTimeline)} title="Show the full activity log">
+            Log {$agentTimeline.length ? `(${$agentTimeline.length})` : ""}
+          </button>
         </div>
       {/if}
       <FileList
@@ -2071,6 +2079,15 @@
   />
 {/if}
 
+{#if activeWatchCwd && showTimeline}
+  <AgentTimeline
+    entries={$agentTimeline}
+    agentName={watchedAgentName}
+    on:navigate={(e) => navigate(e.detail)}
+    on:close={() => (showTimeline = false)}
+  />
+{/if}
+
 {#if batchRenameFor}
   <BatchRenameDialog
     names={batchRenameFor.map((e) => e.name)}
@@ -2181,6 +2198,20 @@
   .agent-chip.modified { background: #b5872b; }
   .agent-chip.renamed { background: #3a72b5; }
   .agent-chip.removed { background: #b5433a; }
+  .agent-log-btn {
+    flex: 0 0 auto;
+    margin-left: auto;
+    height: 20px;
+    padding: 0 9px;
+    border: 1px solid var(--border);
+    border-radius: 999px;
+    background: var(--surface);
+    color: var(--text);
+    font-size: 11px;
+    font-weight: 600;
+    cursor: pointer;
+  }
+  .agent-log-btn:hover { background: var(--surface-alt); }
 
   /* AI Console toolbar button (CPE-351) — sits next to the settings gear. */
   .tb-console {

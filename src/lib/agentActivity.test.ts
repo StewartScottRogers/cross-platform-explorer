@@ -3,17 +3,25 @@ import {
   foldActivities,
   pruneActivities,
   recentActivities,
+  mergeTimeline,
   ingestActivity,
   clearActivity,
   fsActivity,
+  agentTimeline,
   ACTIVITY_TTL_MS,
   type AgentActivity,
+  type TimelineEntry,
 } from "./agentActivity";
 import type { FsActivity } from "./sidecar";
 
 const read = () => {
   let v: Record<string, AgentActivity> = {};
   fsActivity.subscribe((x) => (v = x))();
+  return v;
+};
+const readTimeline = () => {
+  let v: TimelineEntry[] = [];
+  agentTimeline.subscribe((x) => (v = x))();
   return v;
 };
 
@@ -52,5 +60,33 @@ describe("Agent Watch activity folding (CPE-399)", () => {
     expect(read()["/store/a"]).toBeTruthy(); // malformed ignored, prior state intact
     clearActivity();
     expect(read()).toEqual({});
+  });
+});
+
+describe("Agent Watch durable timeline (CPE-400)", () => {
+  it("mergeTimeline prepends newest-first with unique ids, capped", () => {
+    const items: FsActivity[] = [
+      { kind: "created", path: "/a" },
+      { kind: "modified", path: "/b" },
+    ];
+    const t1 = mergeTimeline([], items, 100, 0);
+    expect(t1.map((e) => e.path)).toEqual(["/b", "/a"]); // last of batch is newest → first
+    expect(t1.map((e) => e.id)).toEqual([1, 0]);
+    const t2 = mergeTimeline(t1, [{ kind: "removed", path: "/c" }], 200, 2);
+    expect(t2[0]).toMatchObject({ id: 2, kind: "removed", path: "/c", at: 200 });
+    // cap keeps only the newest `cap` entries
+    const big = Array.from({ length: 5 }, (_, i) => ({ kind: "created" as const, path: `/f${i}` }));
+    expect(mergeTimeline([], big, 0, 0, 3)).toHaveLength(3);
+  });
+
+  it("ingestActivity records to the timeline; clearActivity empties it", () => {
+    clearActivity();
+    ingestActivity([{ kind: "created", path: "/t/a" }, { kind: "modified", path: "/t/b" }], 1);
+    ingestActivity([{ kind: "removed", path: "/t/a" }], 2);
+    const tl = readTimeline();
+    expect(tl.map((e) => e.path)).toEqual(["/t/a", "/t/b", "/t/a"]); // newest-first, history preserved
+    expect(new Set(tl.map((e) => e.id)).size).toBe(3); // ids stay unique across batches
+    clearActivity();
+    expect(readTimeline()).toEqual([]);
   });
 });
