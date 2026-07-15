@@ -315,3 +315,46 @@ describe("AI Console launcher — Close all + reclaim resources (CPE-442)", () =
     expect(w.document.querySelectorAll(".tab").length).toBe(1); // untouched
   });
 });
+
+describe("AI Console launcher — Model browser (CPE-449)", () => {
+  const catalog = {
+    reseller: "openrouter",
+    models: [
+      { id: "anthropic/claude-3.5-sonnet", reseller: "openrouter", display_name: "Claude 3.5 Sonnet", context_length: 200000, pricing: { prompt: 0.000003, completion: 0.000015 }, modalities: ["text"], moderated: true },
+      { id: "openai/gpt-4o", reseller: "openrouter", display_name: "GPT-4o", context_length: 128000, pricing: { prompt: 0.0000025, completion: 0.00001 }, modalities: ["text", "image"], moderated: false },
+      { id: "meta-llama/llama-3-8b", reseller: "openrouter", display_name: "Llama 3 8B", context_length: 8192, pricing: { prompt: 0, completion: 0 }, modalities: ["text"], moderated: false },
+    ],
+  };
+
+  it("opens, lists the reseller's models, filters, and picks one into the Model field", async () => {
+    const { w } = await mountLauncher((path) => {
+      if (path.startsWith("/api/models")) return catalog;
+      return {};
+    });
+    await w.openModelBrowser();
+    expect(w.document.getElementById("model-overlay").hidden).toBe(false);
+    expect(w.document.querySelectorAll(".model-row").length).toBe(3);
+    expect(w.document.getElementById("model-status").textContent).toMatch(/3 models from openrouter/);
+
+    // Filter narrows the list by id or name.
+    w.renderModelList("gpt");
+    const rows = [...w.document.querySelectorAll(".model-row")];
+    expect(rows.length).toBe(1);
+    expect(rows[0].textContent).toMatch(/GPT-4o/);
+
+    // Picking a model fills the Model field and closes the overlay.
+    rows[0].click();
+    expect(w.document.getElementById("model").value).toBe("openai/gpt-4o");
+    expect(w.document.getElementById("model-overlay").hidden).toBe(true);
+  });
+
+  it("shows an inline error when the model fetch fails", async () => {
+    const { w } = await mountLauncher((path) => {
+      if (path.startsWith("/api/models")) return { ok: false, status: 502, data: { error: "offline" } };
+      return {};
+    });
+    await w.openModelBrowser();
+    expect(w.document.getElementById("model-status").textContent).toMatch(/Couldn't load models/i);
+    expect(w.document.querySelectorAll(".model-row").length).toBe(0);
+  });
+});
