@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { formatSize } from "../format";
+  import { formatSize, formatDiskFree } from "../format";
 
   export let itemCount = 0;
   export let selectedCount = 0;
@@ -8,6 +8,12 @@
   export let hiddenShown = false;
   export let notice = "";
   export let noticeIsError = false;
+  /** Free / total bytes on the current drive (CPE-403); null ⇒ unknown (Home/archive/error). */
+  export let diskFree: number | null = null;
+  export let diskTotal: number | null = null;
+
+  $: diskLabel =
+    diskFree !== null && diskTotal !== null ? formatDiskFree(diskFree, diskTotal) : "";
 </script>
 
 <div class="statusbar">
@@ -26,8 +32,14 @@
   {#if notice}
     <span class:error={noticeIsError}>{notice}</span>
   {/if}
+
+  {#if diskLabel}
+    <span class="dim disk" title="Free space on this drive">{diskLabel}</span>
+  {/if}
 </div>
 
 <style>
   .dim { color: var(--text-faint); }
+  /* Free space sits at the far right, away from the item/selection counts. */
+  .disk { margin-left: auto; }
 </style>

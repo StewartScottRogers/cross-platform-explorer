@@ -65,6 +65,10 @@ notify = { version = "6", optional = true }
 # manager that irreversibly destroys data on a mis-click is dangerous (CPE-030).
 trash = "5"
 
+# Free/total disk space for the status bar (CPE-403). Cross-platform (statvfs /
+# GetDiskFreeSpaceExW) with no system libs; `sync` = the plain std stat functions.
+fs4 = { version = "1", features = ["sync"] }
+
 # The updater plugin only makes sense on desktop targets. Window-state (remember
 # window size/position/maximized across restarts, CPE-228) is likewise desktop-
 # only — mobile has no free-floating, user-positioned window to restore.

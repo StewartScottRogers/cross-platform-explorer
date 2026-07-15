@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { formatSize, friendlyError, splitPath, formatPathsForClipboard } from "./format";
+import { formatSize, formatDiskFree, friendlyError, splitPath, formatPathsForClipboard } from "./format";
 
 describe("formatSize", () => {
   it("returns an empty string for zero bytes (directories)", () => {
@@ -137,5 +137,18 @@ describe("formatPathsForClipboard", () => {
 
   it("returns an empty string for no paths", () => {
     expect(formatPathsForClipboard([])).toBe("");
+  });
+});
+
+describe("formatDiskFree (CPE-403)", () => {
+  it("formats free of total", () => {
+    expect(formatDiskFree(12.3 * 1024 ** 3, 500 * 1024 ** 3)).toBe("12.3 GB free of 500.0 GB");
+  });
+  it("shows 0 B for a full drive rather than blank", () => {
+    expect(formatDiskFree(0, 256 * 1024 ** 3)).toBe("0 B free of 256.0 GB");
+  });
+  it("returns empty when total is unknown/zero", () => {
+    expect(formatDiskFree(0, 0)).toBe("");
+    expect(formatDiskFree(100, -1)).toBe("");
   });
 });

@@ -1381,6 +1381,23 @@ fn list_drives() -> Vec<Place> {
     drives
 }
 
+/// Free + total bytes on the volume containing `path`, for the status bar (CPE-403).
+#[derive(serde::Serialize)]
+struct DiskSpace {
+    free: u64,
+    total: u64,
+}
+
+/// Report free/total space on the volume that holds `path` (CPE-403). `free` is what's available to
+/// the user (respects quotas). Non-fatal: returns an error string the frontend degrades on rather
+/// than surfacing — a status-bar nicety must never break navigation.
+#[tauri::command]
+fn disk_space(path: String) -> Result<DiskSpace, String> {
+    let free = fs4::available_space(&path).map_err(|e| e.to_string())?;
+    let total = fs4::total_space(&path).map_err(|e| e.to_string())?;
+    Ok(DiskSpace { free, total })
+}
+
 /// On Windows, look up a known folder's REAL location in the registry.
 ///
 /// Windows "Known Folder redirection" lets OneDrive move Desktop, Documents,
@@ -2624,6 +2641,7 @@ pub fn run() {
             home_dir,
             parent_dir,
             list_drives,
+            disk_space,
             special_folders,
             create_dir,
             read_file_text,
@@ -2772,6 +2790,14 @@ mod tests {
     #[test]
     fn list_drives_returns_at_least_one_root() {
         assert!(!list_drives().is_empty(), "there is always at least one root");
+    }
+
+    #[test]
+    fn disk_space_reports_sensible_free_and_total() {
+        // The temp dir always exists on any runner; free must never exceed total (CPE-403).
+        let d = disk_space(std::env::temp_dir().to_string_lossy().into_owned()).unwrap();
+        assert!(d.total > 0, "a real volume has non-zero capacity");
+        assert!(d.free <= d.total, "free ({}) cannot exceed total ({})", d.free, d.total);
     }
 
     #[test]

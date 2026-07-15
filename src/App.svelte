@@ -229,6 +229,19 @@
     $agentSessions.find((s) => normalizePath(s.cwd) === normalizePath(activeWatchCwd))?.agentName || "agent";
   $: recentChanges = activeWatchCwd ? recentActivities($fsActivity, 6) : [];
 
+  // Free disk space for the status bar (CPE-403). Refetched on navigation; hidden for Home /
+  // archives; a stale response (navigated away before it resolved) is discarded.
+  let diskFree: number | null = null;
+  let diskTotal: number | null = null;
+  $: updateDiskSpace(currentPath, isHome, !!archive);
+  async function updateDiskSpace(path: string, home: boolean, inArchive: boolean) {
+    if (home || inArchive || !path) { diskFree = null; diskTotal = null; return; }
+    try {
+      const d = await invoke<{ free: number; total: number }>("disk_space", { path });
+      if (currentPath === path) { diskFree = d.free; diskTotal = d.total; }
+    } catch { if (currentPath === path) { diskFree = null; diskTotal = null; } }
+  }
+
   const AI_CONSOLE_LABEL = "ai-console";
   let consentPrompt: ConsentState | null = null;
 
@@ -2058,6 +2071,8 @@
   hiddenShown={showHidden}
   {notice}
   {noticeIsError}
+  {diskFree}
+  {diskTotal}
 />
 
 {#if ctx}
