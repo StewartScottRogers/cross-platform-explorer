@@ -60,6 +60,7 @@ pub mod routing;
 pub mod scope;
 pub mod session_daemon;
 pub use session_daemon::{Attachment, SessionDaemon};
+pub mod session_server;
 
 pub use plugins::{install_plugin, uninstall_plugin, PluginApplier, PluginManifest, PluginRegistry};
 pub use scope::{build_launch, dangerous_flags, AgentLaunchRequest};

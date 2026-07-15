@@ -77,3 +77,22 @@ reattach is not yet wired**, so the ticket is not closed. Remaining slices (each
     UI-sidecar restart (crash/update/toggle), with budgets/reaping (CPE-297) wired to the daemon; a
     cross-process integration test: launch a session, kill+respawn the UI sidecar, assert live I/O
     resumes.
+
+2026-07-14 — **Slice 2 landed: the daemon runs as its own process behind a loopback socket.** Added
+`sidecar/ai-console/src/session_server.rs` — a newline-delimited JSON protocol over loopback TCP
+around the slice-1 `SessionDaemon`: client ops `launch`/`attach`/`input`/`resize`/`kill`/`list`,
+daemon events `launched`/`replay`/`output`/`exit`/`sessions`/`ok`/`error` (PTY bytes base64). On
+`attach` it writes the buffered **replay** then streams live **output** on a per-connection pump
+thread; the shared `SessionDaemon` means a session outlives any one connection. Added a
+`--session-daemon [--port N]` process entry in `main.rs` (prints `PORT <n>` for a parent to read).
+**Tests:** an in-process **socket** test proving the reattach over the wire — client A launches +
+reads output, **disconnects**, client B **reconnects**, `list` shows the session still alive, and B
+gets the **replay + live** output; an error-handling test; and a **cross-process** integration test
+(`tests/session_daemon_process.rs`) spawning the real binary in daemon mode, reading its `PORT`, and
+driving the protocol over a real socket. `cargo test -p ai-console` **144 + 2 + 1** green; clippy
+`--all-targets` clean.
+
+2026-07-14 — Still open (`big-design`): the reattach **mechanism** is now proven end-to-end at the
+socket/process layer, but the **product** wiring remains — **S3** (point `console.rs` at the daemon so
+the actual launcher UI reattaches) and **S4** (host keeps the daemon alive across a UI-sidecar
+restart + budgets/reaping). Those two close AC1's "survives" half and AC2 end-to-end.

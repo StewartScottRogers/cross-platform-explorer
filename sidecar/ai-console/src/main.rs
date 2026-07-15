@@ -80,7 +80,41 @@ fn console_state(
     )
 }
 
+/// Run the process in session-daemon mode (CPE-309 slice 2): serve the PTY [`SessionDaemon`] over a
+/// loopback socket forever. `--port <n>` pins the port (default 0 = OS-assigned); the chosen port is
+/// printed as `PORT <n>` on stdout for the parent to read.
+fn run_session_daemon() {
+    let args: Vec<String> = std::env::args().collect();
+    let port = args
+        .iter()
+        .position(|a| a == "--port")
+        .and_then(|i| args.get(i + 1))
+        .and_then(|p| p.parse::<u16>().ok())
+        .unwrap_or(0);
+    let listener = match ai_console::session_server::bind(&format!("127.0.0.1:{port}")) {
+        Ok(l) => l,
+        Err(e) => {
+            eprintln!("session-daemon: bind failed: {e}");
+            std::process::exit(1);
+        }
+    };
+    if let Ok(addr) = listener.local_addr() {
+        println!("PORT {}", addr.port());
+        let _ = std::io::stdout().flush();
+    }
+    ai_console::session_server::serve(listener, Arc::new(ai_console::SessionDaemon::new()));
+}
+
 fn main() {
+    // Session-daemon mode (CPE-309 slice 2): run only the PTY session daemon behind a loopback
+    // socket, as its own long-lived process, so agent sessions survive a restart of the UI-sidecar
+    // process (slices 3/4 wire the UI to it). Binds 127.0.0.1:<port|0>, prints `PORT <n>` so a
+    // supervisor/parent learns the port, then serves until killed.
+    if std::env::args().any(|a| a == "--session-daemon") {
+        run_session_daemon();
+        return;
+    }
+
     let stdin = std::io::stdin();
     // A single shared writer so the main loop and the broker client never interleave
     // partial lines on stdout (CPE-344).
