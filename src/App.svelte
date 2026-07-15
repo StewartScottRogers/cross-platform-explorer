@@ -16,7 +16,7 @@
   import SettingsDialog from "./lib/components/SettingsDialog.svelte";
   import ConsentSheet from "./lib/components/ConsentSheet.svelte";
   import { startAiConsole, consoleUrlWith, platformActive, consentState, setConsent, type Capability, type ConsentState } from "./lib/sidecar";
-  import { initAgentSessions } from "./lib/agentSessions";
+  import { initAgentSessions, agentSessions } from "./lib/agentSessions";
   import UpdateDialog from "./lib/components/UpdateDialog.svelte";
   import TabBar from "./lib/components/TabBar.svelte";
   import NavToolbar from "./lib/components/NavToolbar.svelte";
@@ -1785,6 +1785,7 @@
       {places}
       {drives}
       {favorites}
+      sessions={$agentSessions}
       {currentPath}
       {isHome}
       selectedPath={selectedEntries.length === 1 && selectedEntries[0]?.is_dir ? selectedEntries[0].path : ""}

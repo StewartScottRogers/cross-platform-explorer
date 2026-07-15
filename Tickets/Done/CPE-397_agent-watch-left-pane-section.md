@@ -4,8 +4,9 @@ title: Agent Watch — left-pane "Agents" section + navigate-to-project
 type: feature
 priority: high
 estimate: M
-status: Open
+status: Done
 created: 2026-07-14
+closed: 2026-07-14
 tags: [big-design, agent-watch, ui]
 epic: AGENT-WATCH.md
 depends-on: CPE-396
@@ -24,6 +25,6 @@ Project Folder — the two-way tie between the console's Project Folder and the 
 - Empty when nothing is running (section hidden), so the plain sidebar is unchanged.
 
 ## Acceptance
-- [ ] Running agent appears in the left pane
-- [ ] Clicking navigates the explorer to its Project Folder
-- [ ] Section absent when no sessions; no layout/startup change when off
+- [x] Running agent appears in the left pane
+- [x] Clicking navigates the explorer to its Project Folder
+- [x] Section absent when no sessions; no layout/startup change when off
