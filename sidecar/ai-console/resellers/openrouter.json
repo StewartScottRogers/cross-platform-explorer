@@ -1,0 +1,10 @@
+{
+  "schema_version": 1,
+  "id": "openrouter",
+  "name": "OpenRouter",
+  "models_endpoint": "https://openrouter.ai/api/v1/models",
+  "auth": "bearer",
+  "api_hosts": ["openrouter.ai"],
+  "normalizer": "openrouter",
+  "web_base": "https://openrouter.ai/models"
+}

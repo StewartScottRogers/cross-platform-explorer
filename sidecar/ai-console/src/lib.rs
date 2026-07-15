@@ -51,6 +51,7 @@ pub mod lifecycle;
 pub use history::{HistoryBackend, MemHistory, SessionHistory, SessionRecord};
 pub mod lmstudio;
 pub mod mcp;
+pub mod model_catalog;
 pub mod plugins;
 pub mod presets;
 pub mod pty;
