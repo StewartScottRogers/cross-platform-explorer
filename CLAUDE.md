@@ -134,23 +134,27 @@ Tickets live in `Tickets/`. Folder location is the authoritative status:
 |--------|--------|
 | `Tickets/Backlog/` | Open â€” ready to work |
 | `Tickets/Doing/`   | In Progress â€” one at a time |
-| `Tickets/Blocked/` | Deferred on an external gate |
+| `Tickets/Blocked/` | Deferred on an **external** gate — not workable until it clears |
+| `Tickets/Deferred/`| Postponed by **our** choice / an internal prereq — pickable anytime |
 | `Tickets/Done/`    | Closed |
 
 IDs are sequential: `CPE-NNN`. To work a ticket: `/ticketing-work CPE-NNN`. To file one
 interactively: `/ticketing-new`. See `Tickets/wiki.md` for full workflow rules.
 
-### Showing open tickets â€” ALWAYS include Blocked
+### Showing open tickets â€” ALWAYS include Blocked and Deferred
 
-When the user asks to see "open tickets", "the tickets", or "tasks", ALWAYS show **two** tables â€”
-never just the Backlog:
+When the user asks to see "open tickets", "the tickets", "tasks", or "all tickets", ALWAYS show the
+Backlog table **plus** the Blocked and Deferred tables — never just the Backlog:
 
 1. **Open** â€” all `Tickets/Backlog/CPE-*.md`, as a table of ID, title, type, priority, tags, estimate.
    `tags` is the ticket's disposition (`ready`, `big-design`, `resource-blocked` + qualifier, etc.);
    the controlled vocabulary lives in `Tickets/wiki.md` ("Disposition Tags").
-2. **Blocked** â€” all `Tickets/Blocked/CPE-*.md`, as a table of ID, title, tags, and a one-line
+2. **Blocked** — all `Tickets/Blocked/CPE-*.md`, as a table of ID, title, tags, and a one-line
    *blocked-on / unblocks-when* note read from the ticket's Notes or Work Log.
+3. **Deferred** — all `Tickets/Deferred/CPE-*.md`, as a table of ID, title, tags, and a one-line
+   *deferred-on / revisit-when* note. These are postponed by our choice (often an internal prereq),
+   not externally gated, so they remain pickable.
 
-Blocked tickets are outstanding work, so omitting them misrepresents the queue. If `Blocked/` is
-empty, say "none blocked" rather than dropping the section. Also surface anything sitting in
-`Tickets/Doing/` so stalled work-in-progress is never silently lost.
+Blocked and Deferred tickets are outstanding work, so omitting them misrepresents the queue. If a
+section is empty, say "none blocked" / "none deferred" rather than dropping it. Also surface anything
+sitting in `Tickets/Doing/` so stalled work-in-progress is never silently lost.

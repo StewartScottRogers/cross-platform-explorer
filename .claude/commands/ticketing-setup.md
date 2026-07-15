@@ -52,7 +52,8 @@ its purpose, rules, and conventions.
 Tickets/
   Backlog/wiki.md  <- purpose, how to file, priority guide, how to invoke ticketing-work
   Doing/wiki.md    <- one-at-a-time rule, what the agent updates, how to pause/resume
-  Blocked/wiki.md  <- external-gate tickets, what a blocked note must contain
+  Blocked/wiki.md  <- EXTERNAL-gate tickets, what a blocked note must contain
+  Deferred/wiki.md <- OUR-choice/internal-prereq postponements (pickable); Blocked-vs-Deferred rule
   Done/wiki.md     <- terminal statuses, what a closed ticket contains, how to reopen
 ```
 
@@ -64,7 +65,8 @@ Write the workflow rules (substitute PROJECT / APP / PREFIX / COMPONENTS). Cover
 folder structure (folder = status), ID scheme (`{PREFIX}-NNN`, sequential, zero-padded),
 file naming (`{PREFIX}-NNN_slug.md`, never renamed on move), frontmatter schema, the type and
 priority tables, the status lifecycle (Backlog -> Doing -> Done, with Blocked as an external-gate
-side state), the body sections table, and the Work Log format. Include a
+side state and Deferred as an our-choice/internal-prereq side state), the body sections table, and
+the Work Log format. Include a
 "When to Auto-File a Ticket" section defining what units of work get intercepted by ticketing-new.
 
 Do NOT include any MSBuild / `.projitems` / Visual Studio instructions — this project has none.
@@ -93,7 +95,8 @@ Tickets live in `Tickets/`. Folder location is the authoritative status:
 |--------|--------|
 | `Tickets/Backlog/` | Open — ready to work |
 | `Tickets/Doing/`   | In Progress — one at a time |
-| `Tickets/Blocked/` | Deferred on an external gate |
+| `Tickets/Blocked/` | Deferred on an **external** gate — not workable until it clears |
+| `Tickets/Deferred/`| Postponed by **our** choice / an internal prereq — pickable anytime |
 | `Tickets/Done/`    | Closed |
 
 IDs are sequential: `CPE-NNN`. To work a ticket: `/ticketing-work CPE-NNN`.
