@@ -182,6 +182,22 @@ impl SessionDaemon {
         pty.kill()
     }
 
+    /// Kill and drop **every** session at once (CPE-442) — the daemon-side fan-out teardown, mirror
+    /// of [`ConsoleState::close_all`](crate::console). Reclaims each agent child + PTY and empties the
+    /// set, so a daemon process teardown leaves no orphaned agents. Idempotent: with nothing held it
+    /// returns an empty list. Returns the closed ids, sorted.
+    pub fn close_all(&self) -> Vec<String> {
+        let drained: Vec<(String, Arc<DaemonSession>)> =
+            self.sessions.lock().unwrap().drain().collect();
+        let mut ids: Vec<String> = Vec::with_capacity(drained.len());
+        for (id, ds) in drained {
+            let _ = ds.pty.lock().unwrap().kill();
+            ids.push(id);
+        }
+        ids.sort();
+        ids
+    }
+
     /// Drop any sessions whose agent has already exited, freeing their handles. Interaction
     /// with resource budgets (CPE-297): the supervisor samples memory of the daemon process;
     /// reaping exited sessions here keeps that footprint bounded, and a killed/oversized
@@ -344,5 +360,24 @@ mod tests {
         let daemon = SessionDaemon::new();
         assert!(daemon.attach("nope").is_err());
         assert!(!daemon.is_running("nope"));
+    }
+
+    #[test]
+    fn close_all_kills_and_clears_every_session_and_is_idempotent(){
+        let daemon = SessionDaemon::new();
+        for id in ["a", "b", "c"] {
+            daemon.launch(id, &ready_then_tick()).unwrap();
+        }
+        assert_eq!(daemon.list(), vec!["a", "b", "c"]);
+        // Every session is live before teardown.
+        assert!(daemon.is_running("a") && daemon.is_running("b") && daemon.is_running("c"));
+
+        // One call reclaims them all.
+        assert_eq!(daemon.close_all(), vec!["a", "b", "c"]);
+        assert!(daemon.list().is_empty(), "sessions remained after close_all");
+        assert!(!daemon.is_running("a") && !daemon.is_running("b") && !daemon.is_running("c"));
+
+        // Idempotent: closing again with nothing held is a no-op.
+        assert!(daemon.close_all().is_empty());
     }
 }

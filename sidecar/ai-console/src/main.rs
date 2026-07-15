@@ -127,6 +127,9 @@ fn main() {
 
     // Kept alive for the process lifetime once the handshake completes.
     let mut _ui_server: Option<http::UiServer> = None;
+    // A handle to the live console state so shutdown can reclaim every out-of-process resource
+    // (agent PTYs) before the process exits — nothing left running on quit (CPE-442).
+    let mut console: Option<Arc<ConsoleState>> = None;
 
     for line in stdin.lock().lines() {
         let line = match line {
@@ -167,19 +170,27 @@ fn main() {
                 );
             });
             let state = console_state(secrets, presets, dialogs, history, announce);
-            if let Ok(server) = http::serve(state, route, ws_route) {
+            if let Ok(server) = http::serve(Arc::clone(&state), route, ws_route) {
                 write_env(
                     &writer,
                     &Envelope::new(0, Message::Event(Event::Status { state: format!("ui:{}", server.url()) })),
                 );
                 _ui_server = Some(server);
             }
+            console = Some(state);
             continue;
         }
 
         match on_message(env) {
             Reaction::Send(reply) => write_env(&writer, &reply),
-            Reaction::Exit(code) => std::process::exit(code),
+            Reaction::Exit(code) => {
+                // Reclaim every out-of-process resource before we go — a `sidecar.shutdown` or host
+                // `WillQuit` must not leave orphaned agent processes/PTYs behind (CPE-442).
+                if let Some(c) = &console {
+                    let _ = c.close_all();
+                }
+                std::process::exit(code);
+            }
             Reaction::Nothing => {}
         }
     }

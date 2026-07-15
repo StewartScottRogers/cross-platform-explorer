@@ -51,6 +51,11 @@
   .tab-close { border: 0; background: transparent; color: inherit; cursor: pointer;
                font-size: 15px; line-height: 1; padding: 0 2px; opacity: .55; }
   .tab-close:hover { color: #d05656; opacity: 1; }
+  /* "Close all" pinned to the end of the tab strip; only present while sessions exist (CPE-442). */
+  .close-all-btn { margin-left: auto; align-self: center; border: 1px solid var(--line);
+                   background: transparent; color: inherit; cursor: pointer; font-size: 11px;
+                   padding: 3px 9px; border-radius: 4px; opacity: .72; white-space: nowrap; }
+  .close-all-btn:hover { opacity: 1; border-color: #d05656; color: #d05656; }
   #terms { flex: 1; min-height: 0; position: relative; background: #0d0d0d; }
   /* Bottom status bar: project folder (left) + selected agent/model (right) + a sizing grip. */
   #statusbar { flex: 0 0 auto; display: flex; align-items: center; gap: 12px; height: 24px;
@@ -653,16 +658,55 @@ function addSession(id, name) {
   buildTerm(s);
   wireScrollbar(s);
   connectWs(s);
+  ensureCloseAll();
   activate(id);
+}
+
+// Keep a "Close all" button at the end of the tab strip while any session is open (CPE-442).
+function ensureCloseAll() {
+  let b = $("close-all");
+  if (!b) {
+    b = document.createElement("button");
+    b.id = "close-all"; b.type = "button"; b.className = "close-all-btn";
+    b.textContent = "Close all";
+    b.title = "Close every session and reclaim its agent process";
+    b.onclick = closeAllSessions;
+  }
+  $("tabs").appendChild(b); // (re)append so it stays last, after the newest tab
+}
+
+// Remove the "Close all" button once nothing is left to close (so the empty strip hides).
+function dropCloseAllIfEmpty() {
+  if (sessions.size === 0) { const b = $("close-all"); if (b) b.remove(); }
 }
 
 function closeSession(id) {
   const s = sessions.get(id); if (!s) return;
+  // Tell the backend to kill the agent + reclaim its PTY — closing a pane must not orphan a
+  // running process (CPE-442). Best-effort; the UI teardown proceeds regardless.
+  try { fetch("/api/session/" + id + "/close", { method: "POST" }); } catch (_) {}
   try { if (s.ws) s.ws.close(); } catch (_) {}
   try { if (s.term) s.term.dispose(); } catch (_) {}
   s.pane.remove(); s.tab.remove();
   sessions.delete(id);
+  dropCloseAllIfEmpty();
   if (activeId === id) { const next = sessions.keys().next().value; if (next) activate(next); else activeId = null; }
+}
+
+// Close every open session at once and reclaim all out-of-process resources (CPE-442). Confirms
+// first because running agents are terminated. Idempotent: a no-op when nothing is open.
+async function closeAllSessions() {
+  if (!sessions.size) return;
+  if (!window.confirm("Close all sessions? Any running agents will be terminated.")) return;
+  try { await fetch("/api/close-all", { method: "POST" }); } catch (_) {}
+  for (const s of sessions.values()) {
+    try { if (s.ws) s.ws.close(); } catch (_) {}
+    try { if (s.term) s.term.dispose(); } catch (_) {}
+    s.pane.remove(); s.tab.remove();
+  }
+  sessions.clear();
+  activeId = null;
+  dropCloseAllIfEmpty();
 }
 
 // Ctrl+Shift+C/V copy-paste, Ctrl+F find on the given session. false = don't send the key on.

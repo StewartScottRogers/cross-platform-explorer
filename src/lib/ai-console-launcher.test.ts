@@ -266,3 +266,52 @@ describe("AI Console launcher — Browse ↔ Project folder sync (CPE-395)", () 
     expect(w.document.getElementById("cwd").value).toBe("/picked/dir"); // and syncs back
   });
 });
+
+describe("AI Console launcher — Close all + reclaim resources (CPE-442)", () => {
+  it("closing a pane also tells the backend to reclaim that session's process", async () => {
+    const posts: string[] = [];
+    const { w } = await mountLauncher((path, opts) => {
+      if (opts?.method === "POST") posts.push(path);
+      return {};
+    });
+    w.addSession("s1", "Claude");
+    w.addSession("s2", "Codex");
+    expect(w.document.querySelectorAll(".tab").length).toBe(2);
+
+    w.closeSession("s1");
+    expect(posts).toContain("/api/session/s1/close"); // backend reclaim, not just a UI hide
+    expect(w.document.querySelectorAll(".tab").length).toBe(1);
+    expect(w.document.getElementById("close-all")).not.toBeNull(); // one session still open
+  });
+
+  it("'Close all' confirms, POSTs /api/close-all, clears every pane, and drops the button", async () => {
+    const posts: string[] = [];
+    const { w } = await mountLauncher((path, opts) => {
+      if (opts?.method === "POST") posts.push(path);
+      return {};
+    });
+    w.confirm = () => true;
+    w.addSession("s1", "Claude");
+    w.addSession("s2", "Codex");
+    expect(w.document.getElementById("close-all")).not.toBeNull();
+
+    await w.closeAllSessions();
+    expect(posts).toContain("/api/close-all");
+    expect(w.document.querySelectorAll(".tab").length).toBe(0); // every pane torn down
+    expect(w.document.querySelectorAll(".term-pane").length).toBe(0);
+    expect(w.document.getElementById("close-all")).toBeNull(); // strip empties → button gone
+  });
+
+  it("'Close all' cancelled at the confirm does nothing", async () => {
+    const posts: string[] = [];
+    const { w } = await mountLauncher((path, opts) => {
+      if (opts?.method === "POST") posts.push(path);
+      return {};
+    });
+    w.confirm = () => false;
+    w.addSession("s1", "Claude");
+    await w.closeAllSessions();
+    expect(posts).not.toContain("/api/close-all");
+    expect(w.document.querySelectorAll(".tab").length).toBe(1); // untouched
+  });
+});

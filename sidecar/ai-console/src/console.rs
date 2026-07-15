@@ -426,6 +426,47 @@ impl ConsoleState {
         Response::json(json!({ "session": id, "dangerousFlags": dangerous }).to_string())
     }
 
+    /// Close one session: remove it from the live set and kill its agent PTY. Killing the child
+    /// drives the session's reader thread to EOF, which runs the normal end path (history record +
+    /// the `ended` announce for Agent Watch), so no separate teardown bookkeeping is needed. Returns
+    /// whether a session by that id was present. Idempotent: closing an unknown id is a no-op.
+    fn close_session(&self, id: &str) -> bool {
+        let removed = self.sessions.lock().unwrap().remove(id);
+        match removed {
+            Some(s) => {
+                let _ = s.pty.lock().unwrap().kill();
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// Close **every** live session at once (CPE-442) — the fan-out teardown behind the launcher's
+    /// "Close all" and process shutdown. Kills each agent PTY (reclaiming the child process + its
+    /// PTY) and empties the set, so nothing is left running. Idempotent: with nothing open it returns
+    /// an empty list. Returns the closed ids, sorted.
+    pub fn close_all(&self) -> Vec<String> {
+        let drained: Vec<(String, Arc<Session>)> = self.sessions.lock().unwrap().drain().collect();
+        let mut ids: Vec<String> = Vec::with_capacity(drained.len());
+        for (id, s) in drained {
+            let _ = s.pty.lock().unwrap().kill();
+            ids.push(id);
+        }
+        ids.sort();
+        ids
+    }
+
+    /// `POST /api/session/{id}/close` → close one session and reclaim its process/PTY.
+    fn handle_close(&self, path: &str) -> Response {
+        let id = session_id_from(path, "/close");
+        Response::json(json!({ "closed": self.close_session(&id) }).to_string())
+    }
+
+    /// `POST /api/close-all` → close every session and reclaim all out-of-process resources.
+    fn handle_close_all(&self) -> Response {
+        Response::json(json!({ "closed": self.close_all() }).to_string())
+    }
+
     fn handle_resize(&self, path: &str, body: &str) -> Response {
         let id = session_id_from(path, "/resize");
         let v: Value = serde_json::from_str(body).unwrap_or_else(|_| json!({}));
@@ -857,6 +898,10 @@ pub fn route(state: &ConsoleState, req: &Request) -> Response {
         ("GET", "/") => Response::html(launcher_html()),
         ("GET", "/api/catalog") => Response::json(state.catalog().to_string()),
         ("POST", "/api/launch") => state.handle_launch(&req.body),
+        ("POST", "/api/close-all") => state.handle_close_all(),
+        ("POST", p) if p.starts_with("/api/session/") && p.ends_with("/close") => {
+            state.handle_close(p)
+        }
         ("POST", "/api/install") => state.handle_install(&req.body),
         ("POST", "/api/presets") => state.handle_preset_save(&req.body),
         ("POST", "/api/presets/delete") => state.handle_preset_delete(&req.body),
@@ -1472,6 +1517,66 @@ mod tests {
         assert_eq!(r.status, 200);
         let cat2: Value = serde_json::from_slice(&get(&st, "/api/catalog").body).unwrap();
         assert_eq!(cat2["presets"]["onboarded"], true);
+    }
+
+    #[test]
+    fn close_reclaims_sessions_via_the_routes_one_and_all() {
+        // A long-running agent so each launch leaves a live child to reclaim (CPE-442).
+        let dir = tempfile::tempdir().unwrap();
+        let agents = dir.path().join("agents");
+        std::fs::create_dir_all(&agents).unwrap();
+        let (cmd, args) = if cfg!(windows) {
+            ("cmd", r#"["/c","ping","-n","30","127.0.0.1"]"#)
+        } else {
+            ("sh", r#"["-c","sleep 30"]"#)
+        };
+        let manifest = format!(
+            r#"{{"schema_version":1,"id":"sleeper","name":"Sleeper",
+               "run":{{"windows":{{"command":"{cmd}","args":{args}}},
+                       "macos":{{"command":"{cmd}","args":{args}}},
+                       "linux":{{"command":"{cmd}","args":{args}}}}},
+               "providers":["native"],
+               "provider_recipes":{{"native":{{"env":{{}},"args":[]}}}}}}"#
+        );
+        std::fs::write(agents.join("sleeper.json"), manifest).unwrap();
+        let st = ConsoleState::new(
+            AgentRegistry::load_from_dirs(&[agents]),
+            dir.path().to_string_lossy().into_owned(),
+        );
+
+        let launch = |st: &ConsoleState| -> String {
+            let r = route(
+                st,
+                &Request {
+                    method: "POST".into(),
+                    path: "/api/launch".into(),
+                    body: r#"{"agent":"sleeper","provider":"native"}"#.into(),
+                    ..Default::default()
+                },
+            );
+            assert_eq!(r.status, 200, "launch failed: {}", String::from_utf8_lossy(&r.body));
+            serde_json::from_slice::<Value>(&r.body).unwrap()["session"].as_str().unwrap().to_string()
+        };
+        let post = |st: &ConsoleState, path: &str| -> Value {
+            let r = route(st, &Request { method: "POST".into(), path: path.into(), ..Default::default() });
+            serde_json::from_slice::<Value>(&r.body).unwrap()
+        };
+
+        let id1 = launch(&st);
+        let _id2 = launch(&st);
+        assert_eq!(st.sessions.lock().unwrap().len(), 2, "two sessions should be live");
+
+        // Close ONE via its route: the session is removed and its child reclaimed.
+        assert_eq!(post(&st, &format!("/api/session/{id1}/close"))["closed"], true);
+        assert_eq!(st.sessions.lock().unwrap().len(), 1, "one session should remain");
+        // Closing an unknown id is a harmless no-op.
+        assert_eq!(post(&st, "/api/session/nope/close")["closed"], false);
+
+        // Close ALL reclaims the rest and empties the set — nothing left running.
+        assert_eq!(post(&st, "/api/close-all")["closed"].as_array().unwrap().len(), 1);
+        assert!(st.sessions.lock().unwrap().is_empty(), "sessions remained after close-all");
+        // Idempotent with nothing open.
+        assert!(post(&st, "/api/close-all")["closed"].as_array().unwrap().is_empty());
     }
 
     // Real end-to-end WebSocket test: launch an echo "agent", connect a WS client, and
