@@ -1157,6 +1157,22 @@
     }
   }
 
+  /** Compare exactly two selected files for byte-identical content (CPE-418) → a notice. */
+  async function compareFiles() {
+    if (selectedEntries.length !== 2 || selectedEntries.some((e) => e.is_dir)) return;
+    const [a, b] = selectedEntries;
+    try {
+      const same = await invoke<boolean>("files_identical", { a: a.path, b: b.path });
+      showNotice(
+        same
+          ? `"${a.name}" and "${b.name}" are identical.`
+          : `"${a.name}" and "${b.name}" differ.`,
+      );
+    } catch (e) {
+      showNotice(String(e), true);
+    }
+  }
+
   /** Join a directory and a leaf name using the directory's own separator. */
   function joinPath(dir: string, name: string): string {
     const sep = dir.includes("\\") ? "\\" : "/";
@@ -1353,6 +1369,7 @@
       case "copy": doCopy(); break;
       case "paste": doPaste(); break;
       case "duplicate": doDuplicate(); break;
+      case "compare": compareFiles(); break;
       case "compress": doCompress(); break;
       case "extract": doExtract(); break;
       case "copy-path": doCopyPath(); break;
@@ -2116,6 +2133,7 @@
     favorited={selectedEntries.length === 1 && favorites.some((f) => f.path === selectedEntries[0].path)}
     extractable={!isHome && !archive && selectedEntries.length === 1 && isExtractable(selectedEntries[0])}
     compressible={!isHome && !archive && selectedEntries.length >= 1}
+    comparable={!isHome && !archive && selectedEntries.length === 2 && selectedEntries.every((e) => !e.is_dir)}
     canTerminal={!isHome && !archive}
     sameTypeExt={selectedEntries.length === 1 && !selectedEntries[0].is_dir ? selectedEntries[0].extension : ""}
     on:action={(e) => runAction(e.detail)}

@@ -47,4 +47,17 @@ describe("ContextMenu Copy to / Move to folder (CPE-355)", () => {
     expect(screen.queryByText("Copy to folder…")).toBeNull();
     expect(screen.queryByText("Move to folder…")).toBeNull();
   });
+
+  it("shows Compare files only when comparable, and dispatches compare (CPE-418)", async () => {
+    const { component } = render(ContextMenu, { props: { ...base, selectionCount: 2, comparable: true } });
+    const action = vi.fn();
+    component.$on("action", (e) => action(e.detail));
+    await fireEvent.click(screen.getByText("Compare files"));
+    expect(action).toHaveBeenCalledWith("compare");
+  });
+
+  it("hides Compare files when not comparable", () => {
+    render(ContextMenu, { props: { ...base, selectionCount: 2, comparable: false } });
+    expect(screen.queryByText("Compare files")).toBeNull();
+  });
 });

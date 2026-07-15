@@ -1366,6 +1366,46 @@ fn text_stats(path: String) -> Result<TextStats, String> {
     })
 }
 
+/// Whether two files have identical content (CPE-418). Different sizes short-circuit to `false`;
+/// otherwise the bytes are streamed and compared with an early exit on the first difference — cheaper
+/// and collision-free versus hashing both. A directory or unreadable path is an `Err`, never a panic.
+#[tauri::command]
+fn files_identical(a: String, b: String) -> Result<bool, String> {
+    use std::io::Read;
+    let (pa, pb) = (Path::new(&a), Path::new(&b));
+    let (ma, mb) = (
+        fs::metadata(pa).map_err(|e| format!("{a}: {e}"))?,
+        fs::metadata(pb).map_err(|e| format!("{b}: {e}"))?,
+    );
+    if ma.is_dir() || mb.is_dir() {
+        return Err("folders can't be compared".into());
+    }
+    if ma.len() != mb.len() {
+        return Ok(false); // different size ⇒ different content, no need to read
+    }
+    let mut fa = fs::File::open(pa).map_err(|e| format!("{a}: {e}"))?;
+    let mut fb = fs::File::open(pb).map_err(|e| format!("{b}: {e}"))?;
+    let (mut ba, mut bb) = ([0u8; 64 * 1024], [0u8; 64 * 1024]);
+    loop {
+        let na = fa.read(&mut ba).map_err(|e| format!("{a}: {e}"))?;
+        // Same length overall, so read the same count from b (loop until filled or EOF).
+        let mut nb = 0;
+        while nb < na {
+            let r = fb.read(&mut bb[nb..na]).map_err(|e| format!("{b}: {e}"))?;
+            if r == 0 {
+                break;
+            }
+            nb += r;
+        }
+        if na != nb || ba[..na] != bb[..nb] {
+            return Ok(false);
+        }
+        if na == 0 {
+            return Ok(true);
+        }
+    }
+}
+
 /// One content-search hit: the file, the 1-based line number, and the (trimmed, truncated) line.
 #[derive(serde::Serialize)]
 struct ContentMatch {
@@ -2983,6 +3023,7 @@ pub fn run() {
             hash_file,
             text_stats,
             search_file_contents,
+            files_identical,
             git_remote_url,
             open_external,
             run_as_admin,
@@ -3889,6 +3930,26 @@ mod tests {
         // Empty query and a non-folder root behave sanely.
         assert_eq!(search_file_contents(d.to_string_lossy().to_string(), "  ".into(), false).unwrap().matches.len(), 0);
         assert!(search_file_contents(d.join("a.txt").to_string_lossy().to_string(), "x".into(), false).is_err());
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn files_identical_compares_content_and_short_circuits_on_size() {
+        let d = scratch("cmp");
+        fs::write(d.join("a"), b"same content here").unwrap();
+        fs::write(d.join("b"), b"same content here").unwrap();
+        fs::write(d.join("c"), b"same content HERE").unwrap(); // same length, different bytes
+        fs::write(d.join("e"), b"different length entirely").unwrap();
+        let p = |n: &str| d.join(n).to_string_lossy().to_string();
+        assert_eq!(files_identical(p("a"), p("b")), Ok(true));
+        assert_eq!(files_identical(p("a"), p("c")), Ok(false)); // same size, differing byte
+        assert_eq!(files_identical(p("a"), p("e")), Ok(false)); // different size
+        // Empty files are identical; a folder or missing path errors.
+        fs::write(d.join("z1"), b"").unwrap();
+        fs::write(d.join("z2"), b"").unwrap();
+        assert_eq!(files_identical(p("z1"), p("z2")), Ok(true));
+        assert!(files_identical(p("a"), d.to_string_lossy().to_string()).is_err());
+        assert!(files_identical(p("a"), p("nope")).is_err());
         let _ = fs::remove_dir_all(&d);
     }
 
