@@ -333,7 +333,7 @@
   let updateError = "";
 
   // ---- Archive browsing (CPE-242): read-only virtual view inside a .zip ----
-  const ARCH = " arch:"; // sentinel prefix for in-archive breadcrumb paths
+  const ARCH = "\u0000arch:"; // sentinel prefix for in-archive breadcrumb paths
   const ARCHIVE_EXTS = new Set(["zip", "jar", "apk", "war", "ear", "ipa", "xpi", "whl", "nupkg", "vsix"]);
   interface ArchiveView { zipPath: string; zipName: string; entries: ArchiveEntry[]; inner: string }
   let archive: ArchiveView | null = null;
