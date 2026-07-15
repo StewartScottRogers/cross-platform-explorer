@@ -10,6 +10,7 @@ license = "MIT"
 # contract wiring land in CPE-432. Modelled on the AI Console (CPE-261).
 
 [dependencies]
+sidecar-contract = { path = "../contract" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 
