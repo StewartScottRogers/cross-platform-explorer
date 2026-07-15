@@ -17,8 +17,8 @@
   import ConsentSheet from "./lib/components/ConsentSheet.svelte";
   import { startAiConsole, consoleUrlWith, platformActive, consentState, setConsent, type Capability, type ConsentState } from "./lib/sidecar";
   import { initAgentSessions, agentSessions, watchTargetFor, normalizePath } from "./lib/agentSessions";
-  import { startAgentWatch, stopAgentWatch } from "./lib/sidecar";
-  import { initAgentActivity, fsActivity, recentActivities, agentTimeline } from "./lib/agentActivity";
+  import { startAgentWatch, stopAgentWatch, type FsActivity } from "./lib/sidecar";
+  import { initAgentActivity, fsActivity, recentActivities, agentTimeline, affectsListing } from "./lib/agentActivity";
   import AgentTimeline from "./lib/components/AgentTimeline.svelte";
   import UpdateDialog from "./lib/components/UpdateDialog.svelte";
   import TabBar from "./lib/components/TabBar.svelte";
@@ -196,15 +196,27 @@
 
   const baseNameOf = (p: string) => normalizePath(p).split("/").pop() || p;
 
+  /** Debounce handle for live folder re-list while watching (CPE-401). */
+  let watchRefreshTimer: ReturnType<typeof setTimeout> | null = null;
+
+  /** When the agent adds/removes a file in the folder on screen, re-list it (debounced) so the
+   *  change appears — created files show up (and get their badge), deleted ones vanish (CPE-401). */
+  function onAgentBatch(items: FsActivity[]) {
+    if (!activeWatchCwd || !affectsListing(items, currentPath)) return;
+    if (watchRefreshTimer) clearTimeout(watchRefreshTimer);
+    watchRefreshTimer = setTimeout(() => refresh(), 400);
+  }
+
   /** Start/stop the filesystem watch as the watched project changes (CPE-398/399). */
   async function syncAgentWatch(cwd: string) {
     if (cwd === activeWatchCwd) return;
     activeWatchCwd = cwd;
     unlistenActivity?.();
     unlistenActivity = null;
+    if (watchRefreshTimer) { clearTimeout(watchRefreshTimer); watchRefreshTimer = null; }
     await stopAgentWatch();
     if (cwd) {
-      unlistenActivity = await initAgentActivity();
+      unlistenActivity = await initAgentActivity(onAgentBatch);
       await startAgentWatch(cwd);
     } else {
       showTimeline = false; // no watched project ⇒ close the timeline drawer (CPE-400)
@@ -1700,6 +1712,7 @@
   onDestroy(() => {
     unlistenSessions?.();
     unlistenActivity?.();
+    if (watchRefreshTimer) clearTimeout(watchRefreshTimer);
   });
 </script>
 

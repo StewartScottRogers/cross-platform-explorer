@@ -1,6 +1,7 @@
 import { writable, type Readable } from "svelte/store";
 import { listen } from "@tauri-apps/api/event";
 import { normalizeFsActivity, type FsActivity } from "./sidecar";
+import { normalizePath } from "./agentSessions";
 
 /**
  * Live filesystem-activity map for the Agent Watch view (CPE-399).
@@ -87,13 +88,33 @@ export function recentActivities(
     .slice(0, limit);
 }
 
-/** Fold a raw event payload into the transient map + the durable timeline (headless-testable). */
-export function ingestActivity(payload: unknown, now = Date.now()): void {
-  const items = normalizeFsActivity(payload);
-  if (!items.length) return;
+/** Fold a normalized batch into the transient map + durable timeline. */
+function applyItems(items: FsActivity[], now: number): void {
   store.update((prev) => foldActivities(prev, items, now));
   timeline.update((prev) => mergeTimeline(prev, items, now, nextId));
   nextId += items.length;
+}
+
+/** Fold a raw event payload into the transient map + the durable timeline (headless-testable). */
+export function ingestActivity(payload: unknown, now = Date.now()): void {
+  const items = normalizeFsActivity(payload);
+  if (items.length) applyItems(items, now);
+}
+
+/**
+ * Whether a batch changes which rows belong in `folder` — i.e. a create/remove/rename of a DIRECT
+ * child (CPE-401). Drives a live re-list so new files appear and deleted ones vanish. A `modified`
+ * doesn't change membership (its row already exists; the annotation is enough), so it's excluded.
+ */
+export function affectsListing(items: FsActivity[], folder: string): boolean {
+  const f = normalizePath(folder);
+  if (!f) return false;
+  return items.some((it) => {
+    if (it.kind === "modified") return false;
+    const p = normalizePath(it.path);
+    const cut = p.lastIndexOf("/");
+    return cut > 0 && p.slice(0, cut) === f;
+  });
 }
 
 /** Clear all activity + timeline (on stop-watching), so a stale folder never bleeds into a new one. */
@@ -106,8 +127,15 @@ export function clearActivity(): void {
  * Start consuming activity events + expiring stale entries. Returns a teardown that unlistens,
  * stops the pruner, and clears the map. Call when watching begins; call the teardown when it ends.
  */
-export async function initAgentActivity(): Promise<() => void> {
-  const unlisten = await listen("ai-console://fs-activity", (e) => ingestActivity(e.payload));
+export async function initAgentActivity(
+  onBatch?: (items: FsActivity[]) => void,
+): Promise<() => void> {
+  const unlisten = await listen("ai-console://fs-activity", (e) => {
+    const items = normalizeFsActivity(e.payload);
+    if (!items.length) return;
+    applyItems(items, Date.now());
+    onBatch?.(items); // lets the explorer live-refresh the listing (CPE-401)
+  });
   const timer = setInterval(() => store.update((m) => pruneActivities(m, Date.now())), 1000);
   return () => {
     unlisten();

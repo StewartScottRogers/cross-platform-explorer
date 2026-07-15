@@ -4,6 +4,7 @@ import {
   pruneActivities,
   recentActivities,
   mergeTimeline,
+  affectsListing,
   ingestActivity,
   clearActivity,
   fsActivity,
@@ -88,5 +89,21 @@ describe("Agent Watch durable timeline (CPE-400)", () => {
     expect(new Set(tl.map((e) => e.id)).size).toBe(3); // ids stay unique across batches
     clearActivity();
     expect(readTimeline()).toEqual([]);
+  });
+});
+
+describe("affectsListing (CPE-401 — should we re-list the folder)", () => {
+  const folder = "Z:/repos/app";
+  it("true when a direct child is created/removed/renamed (cross-platform)", () => {
+    expect(affectsListing([{ kind: "created", path: "Z:\\repos\\app\\new.ts" }], folder)).toBe(true);
+    expect(affectsListing([{ kind: "removed", path: "Z:/repos/app/gone.rs" }], folder)).toBe(true);
+    expect(affectsListing([{ kind: "renamed", path: "Z:/repos/app/moved.md" }], folder)).toBe(true);
+  });
+  it("false for a modified child (row already exists), or a change deeper down / elsewhere", () => {
+    expect(affectsListing([{ kind: "modified", path: "Z:/repos/app/edit.ts" }], folder)).toBe(false);
+    expect(affectsListing([{ kind: "created", path: "Z:/repos/app/src/deep.ts" }], folder)).toBe(false);
+    expect(affectsListing([{ kind: "created", path: "Z:/other/x.ts" }], folder)).toBe(false);
+    expect(affectsListing([], folder)).toBe(false);
+    expect(affectsListing([{ kind: "created", path: "/x/y.ts" }], "")).toBe(false);
   });
 });
