@@ -64,7 +64,14 @@ pub struct ConsoleState {
     history: Arc<dyn crate::history::HistoryBackend>,
     /// How to rebuild the registry on reload (CPE-375): the bundled dirs + optional verified source.
     sources: CatalogSources,
+    /// Announce session lifecycle to the host so the explorer can surface it (Agent Watch, CPE-396).
+    /// Each call gets a JSON payload; the wire side (main.rs) turns it into a `session:<json>`
+    /// Status event. Defaults to a no-op so dev/standalone + tests need no host.
+    announce: SessionAnnouncer,
 }
+
+/// Hook the console calls to announce session start/end to the host (CPE-396). No-op by default.
+pub type SessionAnnouncer = Arc<dyn Fn(String) + Send + Sync>;
 
 /// The inputs used to (re)build the agent registry, so a catalog update can be hot-reloaded
 /// without a restart (CPE-375). `bundled` dirs are first-party (loaded as-is); `signed_dir` is an
@@ -119,6 +126,22 @@ pub(crate) fn resolve_provider_key(
     secrets.get(&provider_secret_name(provider, label)).ok().flatten()
 }
 
+/// Build a session lifecycle announcement for the explorer's Agent Watch (CPE-396). `event` is
+/// "started" or "ended"; the payload carries just enough to list + locate the session (its
+/// Project folder is `cwd`). No secrets are ever included.
+fn session_payload(event: &str, id: &str, agent_name: &str, meta: &SessionMeta) -> String {
+    json!({
+        "event": event,
+        "sessionId": id,
+        "agentId": meta.agent,
+        "agentName": agent_name,
+        "provider": meta.provider,
+        "model": meta.model,
+        "cwd": meta.cwd,
+    })
+    .to_string()
+}
+
 impl ConsoleState {
     /// Standalone/dev state with in-memory backends (no host broker).
     pub fn new(registry: AgentRegistry, default_cwd: String) -> Self {
@@ -151,6 +174,7 @@ impl ConsoleState {
             dialogs,
             history,
             sources: CatalogSources::default(),
+            announce: Arc::new(|_| {}),
         }
     }
 
@@ -159,6 +183,18 @@ impl ConsoleState {
     pub fn with_catalog_sources(mut self, sources: CatalogSources) -> Self {
         self.sources = sources;
         self
+    }
+
+    /// Wire the host-announce hook so launched/ended sessions reach the explorer (CPE-396).
+    /// Chained after construction by the sidecar; dev/tests leave the default no-op.
+    pub fn with_announcer(mut self, announce: SessionAnnouncer) -> Self {
+        self.announce = announce;
+        self
+    }
+
+    /// Emit a session lifecycle announcement to the host (CPE-396). `event` is "started"|"ended".
+    fn announce_session(&self, payload: String) {
+        (self.announce)(payload);
     }
 
     /// Rebuild the registry from its sources and hot-swap it in (CPE-375). Returns the agent count.
@@ -297,6 +333,11 @@ impl ConsoleState {
         };
 
         let id = self.next_id();
+        // Announcements for the explorer's Agent Watch (CPE-396): built here where the identity is
+        // known; "started" is emitted below once the session is live, "ended" from the reader
+        // thread when the agent's PTY closes.
+        let started_payload = session_payload("started", &id, &agent.name, &meta);
+        let ended_payload = session_payload("ended", &id, &agent.name, &meta);
         let ring: Arc<Mutex<Vec<u8>>> = Arc::new(Mutex::new(Vec::new()));
         let live: Arc<Mutex<Option<mpsc::Sender<Vec<u8>>>>> = Arc::new(Mutex::new(None));
         {
@@ -307,6 +348,7 @@ impl ConsoleState {
             let history = Arc::clone(&self.history);
             let record_id = id.clone();
             let secrets = injected_secrets;
+            let announce = Arc::clone(&self.announce);
             thread::spawn(move || {
                 let mut reader = reader;
                 let mut buf = [0u8; 8192];
@@ -332,6 +374,7 @@ impl ConsoleState {
                 }
                 let transcript = String::from_utf8_lossy(&ring.lock().unwrap()).into_owned();
                 record_session_end(&*history, &meta, &record_id, transcript, &secrets);
+                announce(ended_payload); // tell the explorer this session is gone (CPE-396)
             });
         }
 
@@ -359,6 +402,7 @@ impl ConsoleState {
             },
         );
         let _ = self.presets.save(&store);
+        self.announce_session(started_payload); // surface the new session to the explorer (CPE-396)
 
         Response::json(json!({ "session": id, "dangerousFlags": dangerous }).to_string())
     }
@@ -913,6 +957,37 @@ mod tests {
         );
         assert_eq!(r.status, 400);
         assert!(String::from_utf8_lossy(&r.body).contains("unknown agent"));
+    }
+
+    #[test]
+    fn session_payload_carries_identity_and_cwd_without_secrets() {
+        // Agent Watch (CPE-396): the announcement must locate the session (cwd = Project folder)
+        // and never leak a key.
+        let meta = SessionMeta {
+            agent: "claude".into(),
+            provider: "openrouter".into(),
+            model: "sonnet".into(),
+            cwd: "Z:/repos/app".into(),
+            started_at: "0".into(),
+        };
+        let v: Value = serde_json::from_str(&session_payload("started", "s1", "Claude Code", &meta)).unwrap();
+        assert_eq!(v["event"], "started");
+        assert_eq!(v["sessionId"], "s1");
+        assert_eq!(v["agentId"], "claude");
+        assert_eq!(v["agentName"], "Claude Code");
+        assert_eq!(v["provider"], "openrouter");
+        assert_eq!(v["cwd"], "Z:/repos/app");
+        assert!(v.get("apiKey").is_none() && v.get("key").is_none() && v.get("secret").is_none());
+    }
+
+    #[test]
+    fn announcer_hook_receives_what_the_console_emits() {
+        use std::sync::{Arc, Mutex};
+        let seen = Arc::new(Mutex::new(Vec::<String>::new()));
+        let sink = seen.clone();
+        let state = state().with_announcer(Arc::new(move |p| sink.lock().unwrap().push(p)));
+        state.announce_session("session:{\"event\":\"ended\"}".into());
+        assert_eq!(seen.lock().unwrap().as_slice(), &["session:{\"event\":\"ended\"}".to_string()]);
     }
 
     #[test]

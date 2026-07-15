@@ -29,6 +29,8 @@
     "@testing-library/jest-dom": "^6.9.1",
     "@testing-library/svelte": "^5.4.2",
     "@tsconfig/svelte": "^5",
+    "@types/jsdom": "^28.0.3",
+    "@types/node": "^26.1.1",
     "jsdom": "^29.1.1",
     "svelte": "^4",
     "svelte-check": "^3",

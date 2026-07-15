@@ -65,6 +65,69 @@ export function parseUiAnnouncement(state: string): string | null {
   return loopback ? url : null;
 }
 
+// --- Agent Watch: active session registry (CPE-396) -----------------------------------
+
+/** A live coding-agent session launched from the AI Console, as surfaced to the explorer.
+ *  `cwd` is the agent's Project folder — the anchor the explorer navigates to / watches. */
+export interface AgentSession {
+  sessionId: string;
+  agentId: string;
+  agentName: string;
+  provider: string;
+  model: string;
+  cwd: string;
+}
+
+/** A session lifecycle announcement decoded from a `session:<json>` Status (CPE-396). */
+export interface SessionAnnouncement {
+  event: "started" | "ended";
+  session: AgentSession;
+}
+
+/**
+ * Decode a `session:<json>` Status announcement into a typed lifecycle event, or `null` if it
+ * isn't one / is malformed (sibling of {@link parseUiAnnouncement}). Kept pure + defensive so a
+ * bad frame can never throw into the event listener; the wire format is unit-tested.
+ */
+export function parseSessionAnnouncement(state: string): SessionAnnouncement | null {
+  const prefix = "session:";
+  if (!state.startsWith(prefix)) return null;
+  let o: Record<string, unknown>;
+  try {
+    o = JSON.parse(state.slice(prefix.length));
+  } catch {
+    return null;
+  }
+  const event = o.event;
+  if (event !== "started" && event !== "ended") return null;
+  const sessionId = typeof o.sessionId === "string" ? o.sessionId : "";
+  if (!sessionId) return null;
+  const str = (v: unknown) => (typeof v === "string" ? v : "");
+  return {
+    event,
+    session: {
+      sessionId,
+      agentId: str(o.agentId),
+      agentName: str(o.agentName),
+      provider: str(o.provider),
+      model: str(o.model),
+      cwd: str(o.cwd),
+    },
+  };
+}
+
+/**
+ * Pure reducer for the active-session list: a "started" adds/replaces the session (keyed by id),
+ * an "ended" drops it. Order is preserved with newest appended, so the UI is stable.
+ */
+export function applySessionAnnouncement(
+  list: AgentSession[],
+  a: SessionAnnouncement,
+): AgentSession[] {
+  const rest = list.filter((s) => s.sessionId !== a.session.sessionId);
+  return a.event === "ended" ? rest : [...rest, a.session];
+}
+
 /** Whether the sidecar platform is active in this build (i.e. the command exists). */
 export async function platformActive(): Promise<boolean> {
   try {

@@ -12,7 +12,7 @@ use ai_console::broker_client::{
     BrokerClient, BrokerDialogs, BrokerHistory, BrokerPresets, BrokerSecrets, HostDialogs,
     SharedWriter,
 };
-use ai_console::console::{route, ws_route, CatalogSources, ConsoleState};
+use ai_console::console::{route, ws_route, CatalogSources, ConsoleState, SessionAnnouncer};
 use ai_console::history::HistoryBackend;
 use ai_console::presets::PresetsBackend;
 use ai_console::vault::SecretAccess;
@@ -52,6 +52,7 @@ fn console_state(
     presets: Arc<dyn PresetsBackend>,
     dialogs: Arc<dyn HostDialogs>,
     history: Arc<dyn HistoryBackend>,
+    announce: SessionAnnouncer,
 ) -> Arc<ConsoleState> {
     // Bundled first-party catalog, optionally layered with a verified, fetched/user-pointed source
     // (CPE-308). Only manifests signed by a configured trusted key are accepted; unset ⇒ bundled
@@ -74,7 +75,8 @@ fn console_state(
         .unwrap_or_default();
     Arc::new(
         ConsoleState::with_backends(registry, cwd, secrets, presets, dialogs, history)
-            .with_catalog_sources(sources),
+            .with_catalog_sources(sources)
+            .with_announcer(announce),
     )
 }
 
@@ -120,9 +122,18 @@ fn main() {
             let presets = Arc::new(BrokerPresets::new(broker.clone()));
             let dialogs = Arc::new(BrokerDialogs::new(broker.clone()));
             let history = Arc::new(BrokerHistory::new(broker.clone()));
-            if let Ok(server) =
-                http::serve(console_state(secrets, presets, dialogs, history), route, ws_route)
-            {
+            // Forward session lifecycle to the host as a `session:<json>` Status event so the
+            // explorer can surface it in Agent Watch (CPE-396). Uses the same shared writer as
+            // the main loop, so frames never interleave.
+            let announce_writer = writer.clone();
+            let announce: SessionAnnouncer = Arc::new(move |payload: String| {
+                write_env(
+                    &announce_writer,
+                    &Envelope::new(0, Message::Event(Event::Status { state: format!("session:{payload}") })),
+                );
+            });
+            let state = console_state(secrets, presets, dialogs, history, announce);
+            if let Ok(server) = http::serve(state, route, ws_route) {
                 write_env(
                     &writer,
                     &Envelope::new(0, Message::Event(Event::Status { state: format!("ui:{}", server.url()) })),
