@@ -16,7 +16,9 @@
   import SettingsDialog from "./lib/components/SettingsDialog.svelte";
   import ConsentSheet from "./lib/components/ConsentSheet.svelte";
   import { startAiConsole, consoleUrlWith, platformActive, consentState, setConsent, type Capability, type ConsentState } from "./lib/sidecar";
-  import { initAgentSessions, agentSessions } from "./lib/agentSessions";
+  import { initAgentSessions, agentSessions, watchTargetFor, normalizePath } from "./lib/agentSessions";
+  import { startAgentWatch, stopAgentWatch } from "./lib/sidecar";
+  import { initAgentActivity, fsActivity, recentActivities } from "./lib/agentActivity";
   import UpdateDialog from "./lib/components/UpdateDialog.svelte";
   import TabBar from "./lib/components/TabBar.svelte";
   import NavToolbar from "./lib/components/NavToolbar.svelte";
@@ -183,6 +185,33 @@
   let aiConsoleAvailable = false;
   /** Teardown for the Agent Watch session listener (CPE-396). */
   let unlistenSessions: (() => void) | null = null;
+  // Agent Watch view (CPE-399): the Project folder currently being watched (or ""), and the
+  // teardown for its activity listener. Watching turns on only while the explorer is inside a
+  // running agent's project, and off the moment it leaves — off means off (AGENT-WATCH.md).
+  let activeWatchCwd = "";
+  let unlistenActivity: (() => void) | null = null;
+
+  const baseNameOf = (p: string) => normalizePath(p).split("/").pop() || p;
+
+  /** Start/stop the filesystem watch as the watched project changes (CPE-398/399). */
+  async function syncAgentWatch(cwd: string) {
+    if (cwd === activeWatchCwd) return;
+    activeWatchCwd = cwd;
+    unlistenActivity?.();
+    unlistenActivity = null;
+    await stopAgentWatch();
+    if (cwd) {
+      unlistenActivity = await initAgentActivity();
+      await startAgentWatch(cwd);
+    }
+  }
+
+  // Re-evaluate whenever the session list or the current folder changes.
+  $: syncAgentWatch(watchTargetFor($agentSessions, currentPath));
+  $: watchedAgentName =
+    $agentSessions.find((s) => normalizePath(s.cwd) === normalizePath(activeWatchCwd))?.agentName || "agent";
+  $: recentChanges = activeWatchCwd ? recentActivities($fsActivity, 6) : [];
+
   const AI_CONSOLE_LABEL = "ai-console";
   let consentPrompt: ConsentState | null = null;
 
@@ -1663,7 +1692,10 @@
     checkForUpdates();
   });
 
-  onDestroy(() => unlistenSessions?.());
+  onDestroy(() => {
+    unlistenSessions?.();
+    unlistenActivity?.();
+  });
 </script>
 
 <svelte:window on:keydown={handleKeydown} />
@@ -1859,8 +1891,21 @@
         on:clearRecents={() => { recents = []; settings.saveRecents(recents); }}
       />
     {:else}
+      {#if activeWatchCwd}
+        <div class="agent-strip" role="status">
+          <span class="agent-dot" />
+          <span class="agent-strip-label">Agent Watch — {watchedAgentName}</span>
+          {#each recentChanges as c (c.path)}
+            <span class="agent-chip {c.kind}" title={c.path}>{c.kind === "removed" ? "−" : c.kind === "created" ? "+" : "~"} {baseNameOf(c.path)}</span>
+          {/each}
+          {#if recentChanges.length === 0}
+            <span class="agent-strip-idle">watching for changes…</span>
+          {/if}
+        </div>
+      {/if}
       <FileList
         entries={visible}
+        activity={activeWatchCwd ? $fsActivity : {}}
         {selection}
         {sortKey}
         {sortDir}
@@ -2095,6 +2140,48 @@
 {/if}
 
 <style>
+  /* Agent Watch activity strip (CPE-399) — a thin live banner above the file list, shown only
+     while the explorer is inside a running agent's Project folder. */
+  .agent-strip {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 4px 12px;
+    font-size: 12px;
+    background: color-mix(in srgb, var(--accent) 10%, var(--surface));
+    border-bottom: 1px solid var(--border);
+    overflow: hidden;
+    white-space: nowrap;
+  }
+  .agent-dot {
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    background: #3a9d4a;
+    flex: 0 0 auto;
+    animation: agent-dot-pulse 1.6s ease-in-out infinite;
+  }
+  @keyframes agent-dot-pulse {
+    0%, 100% { opacity: 1; }
+    50% { opacity: 0.35; }
+  }
+  .agent-strip-label { font-weight: 600; flex: 0 0 auto; }
+  .agent-strip-idle { opacity: 0.6; }
+  .agent-chip {
+    flex: 0 0 auto;
+    padding: 1px 7px;
+    border-radius: 999px;
+    font-size: 11px;
+    color: #fff;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    max-width: 180px;
+  }
+  .agent-chip.created { background: #3a9d4a; }
+  .agent-chip.modified { background: #b5872b; }
+  .agent-chip.renamed { background: #3a72b5; }
+  .agent-chip.removed { background: #b5433a; }
+
   /* AI Console toolbar button (CPE-351) — sits next to the settings gear. */
   .tb-console {
     display: inline-flex;

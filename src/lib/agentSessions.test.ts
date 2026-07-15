@@ -4,6 +4,7 @@ import {
   applySessionAnnouncement,
   type AgentSession,
 } from "./sidecar";
+import { watchTargetFor } from "./agentSessions";
 import { ingestSessionState, currentSessions } from "./agentSessions";
 
 const started = (id: string, cwd = "Z:/repo") =>
@@ -65,5 +66,27 @@ describe("session store ingest (CPE-396)", () => {
 
   it("ignores a malformed payload without throwing", () => {
     expect(() => ingestSessionState("session:{broken")).not.toThrow();
+  });
+});
+
+describe("watchTargetFor (CPE-399 — which project am I in)", () => {
+  const sess = (cwd: string): AgentSession => ({ sessionId: cwd, agentId: "a", agentName: "A", provider: "p", model: "m", cwd });
+
+  it("matches the folder itself and any descendant, cross-platform", () => {
+    const sessions = [sess("Z:\\repos\\app")];
+    expect(watchTargetFor(sessions, "Z:\\repos\\app")).toBe("Z:\\repos\\app");
+    expect(watchTargetFor(sessions, "Z:/repos/app/src/lib")).toBe("Z:\\repos\\app"); // descendant, mixed seps
+    expect(watchTargetFor(sessions, "Z:/repos/app-other")).toBe(""); // sibling with shared prefix ≠ inside
+    expect(watchTargetFor(sessions, "Z:/elsewhere")).toBe("");
+  });
+
+  it("picks the deepest project when nested agents overlap", () => {
+    const sessions = [sess("/work"), sess("/work/api")];
+    expect(watchTargetFor(sessions, "/work/api/routes")).toBe("/work/api");
+    expect(watchTargetFor(sessions, "/work/web")).toBe("/work");
+  });
+
+  it("returns empty when no agent is running", () => {
+    expect(watchTargetFor([], "/anywhere")).toBe("");
   });
 });

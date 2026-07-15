@@ -9,8 +9,19 @@
   import { isSelected } from "../selection";
   import type { Selection } from "../selection";
   import type { DirEntry, SortKey, SortDir, ViewMode } from "../types";
+  import type { AgentActivity } from "../agentActivity";
 
   export let entries: DirEntry[] = [];
+  /** Agent Watch (CPE-399): per-path live activity, keyed by absolute path. Empty ⇒ no
+      annotations, so the list is visually unchanged when not watching an agent. */
+  export let activity: Record<string, AgentActivity> = {};
+  /** Human labels for the row badge, by activity kind. */
+  const ACTIVITY_LABEL: Record<AgentActivity["kind"], string> = {
+    created: "new",
+    modified: "edited",
+    removed: "deleted",
+    renamed: "moved",
+  };
   export let selection: Selection;
   export let sortKey: SortKey = "name";
   export let sortDir: SortDir = "asc";
@@ -319,6 +330,8 @@
         class:lead={selection.lead === i}
         class:droptarget={dropIndex === i}
         class:dragging={draggedPaths.includes(entry.path)}
+        class:agent-active={!!activity[entry.path]}
+        data-agent-kind={activity[entry.path]?.kind ?? ""}
         bind:this={rowEls[i]}
         role="button"
         tabindex="0"
@@ -364,6 +377,9 @@
           {:else}
             <span class="ellip">{entry.name}</span>
           {/if}
+          {#if activity[entry.path]}
+            <span class="agent-badge {activity[entry.path].kind}">{ACTIVITY_LABEL[activity[entry.path].kind]}</span>
+          {/if}
         </span>
 
         {#if view === "details"}
@@ -400,6 +416,40 @@
   .row.cut {
     opacity: 0.45;
   }
+
+  /* Agent Watch (CPE-399): a file the agent just touched gets a left accent bar + a kind
+     badge, pulsing briefly on appearance so a live change draws the eye. Purely additive —
+     rows with no activity are untouched (off means off). */
+  .row.agent-active {
+    box-shadow: inset 3px 0 0 var(--agent-accent, #3a9d4a);
+    animation: agent-pulse 900ms ease-out;
+  }
+  @keyframes agent-pulse {
+    from { background: color-mix(in srgb, var(--agent-accent, #3a9d4a) 26%, transparent); }
+    to { background: transparent; }
+  }
+  .agent-badge {
+    flex: 0 0 auto;
+    margin-left: 8px;
+    padding: 0 6px;
+    border-radius: 999px;
+    font-size: 10px;
+    font-weight: 600;
+    line-height: 16px;
+    text-transform: uppercase;
+    letter-spacing: 0.03em;
+    color: #fff;
+    white-space: nowrap;
+  }
+  .agent-badge.created { background: #3a9d4a; }
+  .agent-badge.modified { background: #b5872b; }
+  .agent-badge.renamed { background: #3a72b5; }
+  .agent-badge.removed { background: #b5433a; }
+  /* Per-kind left accent, driven by the row's data attribute. */
+  .row.agent-active[data-agent-kind="created"] { --agent-accent: #3a9d4a; }
+  .row.agent-active[data-agent-kind="modified"] { --agent-accent: #b5872b; }
+  .row.agent-active[data-agent-kind="renamed"] { --agent-accent: #3a72b5; }
+  .row.agent-active[data-agent-kind="removed"] { --agent-accent: #b5433a; }
 
   .row.lead:not(.selected) {
     outline: 1px dotted var(--text-faint);

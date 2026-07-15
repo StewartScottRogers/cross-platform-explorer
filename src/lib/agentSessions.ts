@@ -21,6 +21,28 @@ const store = writable<AgentSession[]>([]);
 /** Reactive list of currently-active agent sessions (empty when none are running). */
 export const agentSessions: Readable<AgentSession[]> = store;
 
+/** Normalize a path for cross-platform comparison: forward slashes, no trailing slash, lowercased
+ *  (Windows is case-insensitive; over-matching two truly-distinct case-only paths on Linux is a
+ *  benign edge for this "which project am I in" check). */
+export function normalizePath(p: string): string {
+  return p.replace(/\\/g, "/").replace(/\/+$/, "").toLowerCase();
+}
+
+/**
+ * The deepest running-agent Project folder that contains — or equals — `current`, or "" if the
+ * explorer isn't inside any agent's project (CPE-399). Drives when Agent Watch turns on/off:
+ * navigating into a watched agent's tree watches it; leaving stops it (off means off).
+ */
+export function watchTargetFor(sessions: AgentSession[], current: string): string {
+  const c = normalizePath(current);
+  let best = "";
+  for (const s of sessions) {
+    const cw = normalizePath(s.cwd);
+    if ((c === cw || c.startsWith(cw + "/")) && cw.length > normalizePath(best).length) best = s.cwd;
+  }
+  return best;
+}
+
 /** Test/introspection helper: the current session list synchronously. */
 export function currentSessions(): AgentSession[] {
   let snapshot: AgentSession[] = [];
