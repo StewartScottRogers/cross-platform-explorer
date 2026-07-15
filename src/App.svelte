@@ -38,6 +38,7 @@
   import ContentSearchDialog from "./lib/components/ContentSearchDialog.svelte";
   import DuplicatesDialog from "./lib/components/DuplicatesDialog.svelte";
   import { namesList, detailList } from "./lib/listing";
+  import { parentDir as parentOfPath } from "./lib/contentSearch";
   import PropertiesDialog from "./lib/components/PropertiesDialog.svelte";
   import BatchRenameDialog from "./lib/components/BatchRenameDialog.svelte";
   import type { RenameItem } from "./lib/batchRename";
@@ -517,6 +518,15 @@
   async function navigate(path: string) {
     setHistory(visit(activeTab.history, path));
     await loadPath(path);
+  }
+
+  /** Navigate to a file's folder and select + scroll to the file itself (CPE-423). Used by the
+   *  content-search and duplicate-finder results so a hit lands on the file, not just its folder. */
+  async function revealFileInApp(filePath: string) {
+    const dir = parentOfPath(filePath);
+    if (!dir) return;
+    pendingSelectPath = filePath; // the post-load hook selects it; the reactive block scrolls to it
+    await navigateToTyped(dir);
   }
 
   async function goBack() {
@@ -2232,7 +2242,7 @@
 {#if contentSearchOpen}
   <ContentSearchDialog
     root={currentPath}
-    on:navigate={(e) => { contentSearchOpen = false; navigateToTyped(e.detail); }}
+    on:navigate={(e) => { contentSearchOpen = false; revealFileInApp(e.detail); }}
     on:close={() => (contentSearchOpen = false)}
   />
 {/if}
@@ -2240,7 +2250,7 @@
 {#if duplicatesOpen}
   <DuplicatesDialog
     root={currentPath}
-    on:navigate={(e) => { duplicatesOpen = false; navigateToTyped(e.detail); }}
+    on:navigate={(e) => { duplicatesOpen = false; revealFileInApp(e.detail); }}
     on:close={() => (duplicatesOpen = false)}
   />
 {/if}
