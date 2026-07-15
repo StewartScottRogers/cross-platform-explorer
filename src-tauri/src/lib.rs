@@ -1304,19 +1304,16 @@ fn dir_size(path: String) -> Result<u64, String> {
 /// Compute the SHA-256 checksum of a file, returned as lowercase hex (CPE-412). Streamed in fixed
 /// chunks so a multi-GB file never loads into memory. A directory, missing, or unreadable path is an
 /// `Err`, never a panic. Opt-in from the UI (hashing is I/O-bound) — never run automatically.
-#[tauri::command]
-fn hash_file(path: String) -> Result<String, String> {
+/// Stream a file through SHA-256 and return the lowercase hex digest. Shared by `hash_file` (CPE-412)
+/// and the duplicate finder (CPE-420). 64 KiB chunks — a multi-GB file never loads into memory.
+fn sha256_file(path: &Path) -> std::io::Result<String> {
     use sha2::{Digest, Sha256};
     use std::io::Read;
-    let p = Path::new(&path);
-    if p.is_dir() {
-        return Err(format!("{path}: is a folder"));
-    }
-    let mut file = fs::File::open(p).map_err(|e| format!("{path}: {e}"))?;
+    let mut file = fs::File::open(path)?;
     let mut hasher = Sha256::new();
     let mut buf = [0u8; 64 * 1024];
     loop {
-        let n = file.read(&mut buf).map_err(|e| format!("{path}: {e}"))?;
+        let n = file.read(&mut buf)?;
         if n == 0 {
             break;
         }
@@ -1330,6 +1327,15 @@ fn hash_file(path: String) -> Result<String, String> {
         let _ = write!(hex, "{b:02x}");
     }
     Ok(hex)
+}
+
+#[tauri::command]
+fn hash_file(path: String) -> Result<String, String> {
+    let p = Path::new(&path);
+    if p.is_dir() {
+        return Err(format!("{path}: is a folder"));
+    }
+    sha256_file(p).map_err(|e| format!("{path}: {e}"))
 }
 
 /// Line / word / character / byte counts for a text file (CPE-414). Lines follow `str::lines`
@@ -1505,6 +1511,91 @@ fn search_file_contents(
         }
     }
     Ok(result)
+}
+
+/// A set of byte-identical files (CPE-420): their shared size + hash and every path.
+#[derive(serde::Serialize)]
+struct DupGroup {
+    size: u64,
+    hash: String,
+    paths: Vec<String>,
+}
+
+/// The result of a duplicate scan: the groups (largest reclaimable space first), how many files were
+/// considered, and whether the file cap was hit.
+#[derive(serde::Serialize)]
+struct DupResult {
+    groups: Vec<DupGroup>,
+    files_scanned: u64,
+    truncated: bool,
+}
+
+const DUP_MAX_FILES: u64 = 50_000;
+
+/// Find duplicate files under `root` (CPE-420). Efficient: group by size first (a unique size can't
+/// be a duplicate), then SHA-256 only the size-collision candidates — most files are never read.
+/// Skips dot-directories and empty files; unreadable entries are skipped (never failing the scan);
+/// stops at a file cap (reporting `truncated`). Groups are sorted by reclaimable space (largest
+/// first). A non-folder root is an `Err`.
+#[tauri::command]
+fn find_duplicates(root: String) -> Result<DupResult, String> {
+    use std::collections::HashMap;
+    let root_path = Path::new(&root);
+    if !root_path.is_dir() {
+        return Err(format!("{root}: not a folder"));
+    }
+
+    // Pass 1: group candidate files by size (skip-on-error like `list_dir`).
+    let mut by_size: HashMap<u64, Vec<std::path::PathBuf>> = HashMap::new();
+    let mut files_scanned = 0u64;
+    let mut truncated = false;
+    let mut stack = vec![root_path.to_path_buf()];
+    'walk: while let Some(dir) = stack.pop() {
+        let Ok(entries) = fs::read_dir(&dir) else { continue };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let name = entry.file_name();
+            let Ok(meta) = entry.metadata() else { continue };
+            if meta.is_dir() {
+                if !name.to_string_lossy().starts_with('.') {
+                    stack.push(path);
+                }
+                continue;
+            }
+            if !meta.is_file() || meta.len() == 0 {
+                continue; // empty files are all "equal" — not useful to report
+            }
+            if files_scanned >= DUP_MAX_FILES {
+                truncated = true;
+                break 'walk;
+            }
+            files_scanned += 1;
+            by_size.entry(meta.len()).or_default().push(path);
+        }
+    }
+
+    // Pass 2: within each size collision, hash the candidates and group identical content.
+    let mut groups: Vec<DupGroup> = Vec::new();
+    for (size, paths) in by_size {
+        if paths.len() < 2 {
+            continue;
+        }
+        let mut by_hash: HashMap<String, Vec<String>> = HashMap::new();
+        for p in &paths {
+            if let Ok(h) = sha256_file(p) {
+                by_hash.entry(h).or_default().push(p.to_string_lossy().into_owned());
+            }
+        }
+        for (hash, group_paths) in by_hash {
+            if group_paths.len() > 1 {
+                groups.push(DupGroup { size, hash, paths: group_paths });
+            }
+        }
+    }
+
+    // Largest reclaimable space first: size × (copies − 1).
+    groups.sort_by_key(|g| std::cmp::Reverse(g.size * (g.paths.len() as u64 - 1)));
+    Ok(DupResult { groups, files_scanned, truncated })
 }
 
 /// Read `settings.json` from `dir`, returning `{}` when it's absent or
@@ -3024,6 +3115,7 @@ pub fn run() {
             text_stats,
             search_file_contents,
             files_identical,
+            find_duplicates,
             git_remote_url,
             open_external,
             run_as_admin,
@@ -3951,6 +4043,41 @@ mod tests {
         assert!(files_identical(p("a"), d.to_string_lossy().to_string()).is_err());
         assert!(files_identical(p("a"), p("nope")).is_err());
         let _ = fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn find_duplicates_groups_identical_files_and_ignores_unique_sizes() {
+        let d = scratch("dups");
+        fs::create_dir_all(d.join("sub")).unwrap();
+        // Three identical files across subfolders (a 3-way group).
+        for n in ["one.txt", "sub/two.txt", "sub/three.txt"] {
+            fs::write(d.join(n), b"duplicate payload").unwrap();
+        }
+        // A same-SIZE-but-different file — must NOT group with the above.
+        fs::write(d.join("decoy.txt"), b"DUPLICATE payloaD").unwrap(); // 17 bytes, like the others
+        // A unique file — never hashed, never grouped.
+        fs::write(d.join("unique.txt"), b"i am one of a kind").unwrap();
+        // Empty files are ignored.
+        fs::write(d.join("empty1"), b"").unwrap();
+        fs::write(d.join("empty2"), b"").unwrap();
+
+        let r = find_duplicates(d.to_string_lossy().to_string()).unwrap();
+        assert_eq!(r.groups.len(), 1, "exactly one duplicate group");
+        let g = &r.groups[0];
+        assert_eq!(g.paths.len(), 3, "the 3-way group");
+        assert_eq!(g.size, 17);
+        let names: Vec<String> = g.paths.iter().map(|p| p.replace('\\', "/")).collect();
+        assert!(names.iter().any(|p| p.ends_with("one.txt")));
+        assert!(names.iter().any(|p| p.ends_with("sub/two.txt")));
+        assert!(!names.iter().any(|p| p.ends_with("decoy.txt")));
+
+        // No-duplicate folder → empty; a non-folder root → Err.
+        let d2 = scratch("nodups");
+        fs::write(d2.join("only.txt"), b"solo").unwrap();
+        assert!(find_duplicates(d2.to_string_lossy().to_string()).unwrap().groups.is_empty());
+        assert!(find_duplicates(d.join("one.txt").to_string_lossy().to_string()).is_err());
+        let _ = fs::remove_dir_all(&d);
+        let _ = fs::remove_dir_all(&d2);
     }
 
     #[test]
