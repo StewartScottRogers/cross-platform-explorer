@@ -647,7 +647,10 @@ function ensureSbWired() {
 async function openScrollback() {
   if (!activeId) { setMsg("No active session.", false); return; }
   try {
-    const data = await api("/api/session/" + activeId + "/output");
+    // Always pull the CURRENT ring — a plain GET on this stable URL can be served stale from the
+    // WebView2 cache, so force a fresh fetch (no-store + cache-buster) each open (CPE-409).
+    const url = "/api/session/" + activeId + "/output?t=" + Date.now();
+    const data = await api(url, { cache: "no-store" });
     showScrollback(stripAltScreen(base64ToBytes(data.outputB64)));
   } catch (e) { setMsg("Couldn't load output: " + e.message); }
 }
