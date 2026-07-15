@@ -708,6 +708,25 @@ impl ConsoleState {
         Response::json(json!({ "ok": true }).to_string())
     }
 
+    /// The model resellers the Keys panel offers a key entry for (CPE-452) — matches the bundled
+    /// `resellers/*.json`. Kept here so listing can probe for stored keys without enumerating the
+    /// keychain (which the broker can't do).
+    const KNOWN_RESELLERS: &[&str] = &[
+        "openrouter", "together", "fireworks", "groq", "deepinfra", "novita", "aimlapi",
+        "wavespeed", "github-models",
+    ];
+
+    /// `GET /api/reseller-keys` → the resellers that have a stored key (names only, never a value).
+    /// Probes each known reseller's default slot, mirroring how `handle_key_list` finds legacy keys.
+    fn handle_reseller_key_list(&self) -> Response {
+        let stored: Vec<Value> = Self::KNOWN_RESELLERS
+            .iter()
+            .filter(|r| self.secrets.get(&reseller_secret_name(r, DEFAULT_CREDENTIAL)).ok().flatten().is_some())
+            .map(|r| json!({ "reseller": r }))
+            .collect();
+        Response::json(json!({ "resellers": stored }).to_string())
+    }
+
     /// `POST /api/reseller-keys/delete {reseller, label?}` — remove a reseller key.
     fn handle_reseller_key_delete(&self, body: &str) -> Response {
         let v: Value = match serde_json::from_str(body) {
@@ -989,6 +1008,7 @@ pub fn route(state: &ConsoleState, req: &Request) -> Response {
         ("GET", "/api/keys") => state.handle_key_list(),
         ("POST", "/api/keys") => state.handle_key_set(&req.body),
         ("POST", "/api/keys/delete") => state.handle_key_delete(&req.body),
+        ("GET", "/api/reseller-keys") => state.handle_reseller_key_list(),
         ("POST", "/api/reseller-keys") => state.handle_reseller_key_set(&req.body),
         ("POST", "/api/reseller-keys/delete") => state.handle_reseller_key_delete(&req.body),
         ("POST", "/api/keys/verify") => state.handle_key_verify(&req.body),
@@ -1428,16 +1448,24 @@ mod tests {
         let post = |path: &str, body: &str| {
             route(&st, &Request { method: "POST".into(), path: path.into(), body: body.into(), ..Default::default() })
         };
+        let get = |path: &str| {
+            let r = route(&st, &Request { method: "GET".into(), path: path.into(), ..Default::default() });
+            serde_json::from_slice::<Value>(&r.body).unwrap()
+        };
         // Set a reseller key; it lands in the reseller: namespace (not provider:).
         assert_eq!(post("/api/reseller-keys", r#"{"reseller":"openrouter","key":"sk-or-abc123"}"#).status, 200);
         assert_eq!(st.secrets.get("reseller:openrouter").unwrap().as_deref(), Some("sk-or-abc123"));
         assert!(st.secrets.get("provider:openrouter").unwrap().is_none(), "must not collide with provider keys");
+        // The list endpoint reports it (names only, never the value).
+        let listed = get("/api/reseller-keys");
+        assert!(listed["resellers"].as_array().unwrap().iter().any(|r| r["reseller"] == "openrouter"));
         // Missing fields are rejected.
         assert_eq!(post("/api/reseller-keys", r#"{"reseller":"","key":"x"}"#).status, 400);
         assert_eq!(post("/api/reseller-keys", r#"{"reseller":"groq","key":""}"#).status, 400);
         // Delete removes it.
         assert_eq!(post("/api/reseller-keys/delete", r#"{"reseller":"openrouter"}"#).status, 200);
         assert!(st.secrets.get("reseller:openrouter").unwrap().is_none());
+        assert!(get("/api/reseller-keys")["resellers"].as_array().unwrap().is_empty());
     }
 
     #[test]

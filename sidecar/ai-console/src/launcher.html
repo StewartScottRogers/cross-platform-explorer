@@ -788,58 +788,76 @@ function allProviders() {
   ((catalog && catalog.agents) || []).forEach((a) => (a.providers || []).forEach((p) => set.add(p)));
   return [...set].sort();
 }
+// Model resellers offered in the Keys panel (CPE-452) — keys used by the Model dropdown + inference.
+// A dropdown value of "reseller:<id>" routes to the reseller-key endpoints instead of provider keys.
+const RESELLERS = ["openrouter", "together", "fireworks", "groq", "deepinfra", "novita", "aimlapi", "wavespeed", "github-models"];
+const resellerOf = (v) => (v && v.startsWith("reseller:") ? v.slice("reseller:".length) : null);
+
 async function openKeys() {
   const sel = $("key-provider"); sel.innerHTML = "";
   allProviders().forEach((p) => { const o = document.createElement("option"); o.value = p; o.textContent = p; sel.appendChild(o); });
+  RESELLERS.forEach((r) => { const o = document.createElement("option"); o.value = "reseller:" + r; o.textContent = r + " (reseller)"; sel.appendChild(o); });
   $("key-value").value = ""; $("key-label").value = ""; keysMsg("");
   $("keys-overlay").hidden = false;
   await refreshKeys();
 }
 async function refreshKeys() {
   const list = $("keys-list"); list.innerHTML = "";
+  const addRow = (labelText, onRemove) => {
+    const row = document.createElement("div"); row.className = "key-row";
+    const name = document.createElement("span"); name.textContent = labelText;
+    const rm = document.createElement("button"); rm.type = "button"; rm.textContent = "Remove";
+    rm.onclick = onRemove;
+    row.appendChild(name); row.appendChild(rm); list.appendChild(row);
+  };
   try {
-    const data = await api("/api/keys");
-    const creds = data.credentials || [];
-    if (!creds.length) { list.textContent = "No keys stored yet."; return; }
-    creds.forEach((c) => {
-      const row = document.createElement("div"); row.className = "key-row";
-      const name = document.createElement("span");
-      name.textContent = c.provider + (c.label && c.label !== "default" ? " · " + c.label : "") + " — saved";
-      const rm = document.createElement("button"); rm.type = "button"; rm.textContent = "Remove";
-      rm.onclick = () => removeKey(c.provider, c.label);
-      row.appendChild(name); row.appendChild(rm); list.appendChild(row);
-    });
+    const [keys, res] = await Promise.all([api("/api/keys"), api("/api/reseller-keys").catch(() => ({ resellers: [] }))]);
+    const creds = keys.credentials || [];
+    const resellers = res.resellers || [];
+    if (!creds.length && !resellers.length) { list.textContent = "No keys stored yet."; return; }
+    creds.forEach((c) => addRow(
+      c.provider + (c.label && c.label !== "default" ? " · " + c.label : "") + " — saved",
+      () => removeKey(c.provider, c.label, false),
+    ));
+    resellers.forEach((r) => addRow(r.reseller + " (reseller) — saved", () => removeKey(r.reseller, "", true)));
   } catch (e) { list.textContent = permHint(e.message); }
 }
 async function verifyKey() {
+  const reseller = resellerOf($("key-provider").value);
+  if (reseller) { keysMsg("No live check for resellers — click Save to store the key.", true); return; }
   try {
     keysMsg("Checking key with the provider…", true);
     const r = await api("/api/keys/verify", { method: "POST", body: JSON.stringify({ provider: $("key-provider").value, key: $("key-value").value }) });
-    // r.live means the provider gave a definitive yes/no; otherwise r.detail is the offline
-    // shape result ("Format looks valid." or the reason it won't save).
     const msg = r.live ? (r.valid ? "✓ " : "✗ ") + r.detail : r.detail;
     keysMsg(msg, r.valid);
   } catch (e) { keysMsg("Check failed: " + e.message); }
 }
 async function saveKey() {
   const label = $("key-label").value.trim();
+  const sel = $("key-provider").value;
+  const reseller = resellerOf(sel);
   try {
-    await api("/api/keys", { method: "POST", body: JSON.stringify({
-      provider: $("key-provider").value, key: $("key-value").value, label,
-    }) });
+    if (reseller) {
+      await api("/api/reseller-keys", { method: "POST", body: JSON.stringify({ reseller, key: $("key-value").value, label }) });
+    } else {
+      await api("/api/keys", { method: "POST", body: JSON.stringify({ provider: sel, key: $("key-value").value, label }) });
+    }
     $("key-value").value = ""; // never keep the value around
-    keysMsg("Saved " + $("key-provider").value + (label ? " · " + label : "") + " key.", true);
-    catalog = await api("/api/catalog"); // refresh the credential index for the picker
-    renderCredentials();
+    keysMsg("Saved " + (reseller || sel) + (label ? " · " + label : "") + " key.", true);
+    if (!reseller) { catalog = await api("/api/catalog"); renderCredentials(); } // provider keys feed the picker
     await refreshKeys();
   } catch (e) { const h = permHint(e.message); keysMsg(h === e.message ? "Save failed: " + e.message : h); }
 }
-async function removeKey(provider, label) {
+async function removeKey(id, label, isReseller) {
   try {
-    await api("/api/keys/delete", { method: "POST", body: JSON.stringify({ provider, label }) });
-    keysMsg("Removed " + provider + (label && label !== "default" ? " · " + label : "") + " key.", true);
-    catalog = await api("/api/catalog");
-    renderCredentials();
+    if (isReseller) {
+      await api("/api/reseller-keys/delete", { method: "POST", body: JSON.stringify({ reseller: id, label }) });
+    } else {
+      await api("/api/keys/delete", { method: "POST", body: JSON.stringify({ provider: id, label }) });
+      catalog = await api("/api/catalog");
+      renderCredentials();
+    }
+    keysMsg("Removed " + id + (label && label !== "default" ? " · " + label : "") + " key.", true);
     await refreshKeys();
   } catch (e) { keysMsg("Remove failed: " + e.message); }
 }

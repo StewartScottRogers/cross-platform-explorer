@@ -316,6 +316,29 @@ describe("AI Console launcher — Close all + reclaim resources (CPE-442)", () =
   });
 });
 
+describe("AI Console launcher — reseller keys in the Keys panel (CPE-452)", () => {
+  it("offers resellers in the key dropdown and routes save to the reseller endpoint", async () => {
+    const posts: { path: string; body: any }[] = [];
+    const { w } = await mountLauncher((path, opts) => {
+      if (opts?.method === "POST") posts.push({ path, body: JSON.parse(opts.body) });
+      if (path === "/api/reseller-keys") return { resellers: [] };
+      if (path === "/api/keys") return { credentials: [] };
+      return {};
+    });
+    await w.openKeys();
+    const opts = [...w.document.getElementById("key-provider").options].map((o: any) => o.value);
+    expect(opts).toContain("reseller:openrouter"); // resellers appear alongside providers
+
+    // Saving a reseller entry routes to /api/reseller-keys (not /api/keys).
+    w.document.getElementById("key-provider").value = "reseller:openrouter";
+    w.document.getElementById("key-value").value = "sk-or-xyz";
+    await w.saveKey();
+    const resellerPost = posts.find((p) => p.path === "/api/reseller-keys");
+    expect(resellerPost?.body).toMatchObject({ reseller: "openrouter", key: "sk-or-xyz" });
+    expect(posts.some((p) => p.path === "/api/keys")).toBe(false); // never the provider path
+  });
+});
+
 describe("AI Console launcher — inline Model dropdown (CPE-454)", () => {
   const catalog = {
     reseller: "openrouter",
