@@ -27,9 +27,11 @@ base64 = "0.22"
 sha1 = "0.10"
 
 # Verify first-party signatures on agent-catalog manifests from an untrusted source (CPE-308
-# part 1 / CPE-371). Same pure-Rust primitives + format as the host's trust engine (CPE-295);
-# verified sidecar-locally because a sidecar depends only on the contract, not the host.
+# part 1 / CPE-371) and on the signed model-catalog snapshot (CPE-450/451). Same pure-Rust
+# primitives + format as the host's trust engine (CPE-295): ed25519 signatures, sha2 content
+# hashing, hex encoding. Verified sidecar-locally because a sidecar depends only on the contract.
 ed25519-dalek = "2"
+sha2 = "0.10"
 hex = "0.4"
 
 [dev-dependencies]
