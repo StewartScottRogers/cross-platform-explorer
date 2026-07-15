@@ -212,6 +212,14 @@ pub struct CatalogFetch {
     pub applied: usize,
 }
 
+/// One prior published catalog version offered by the rollback picker (CPE-383).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CatalogVersion {
+    pub tag: String,
+    pub published_at: String,
+    pub prerelease: bool,
+}
+
 /// Host-mediated operations the sandboxed launcher can't perform itself — native dialogs
 /// (CPE-354) and outbound network (CPE-347/376), which the sandbox has no client for.
 pub trait HostDialogs: Send + Sync {
@@ -227,6 +235,13 @@ pub trait HostDialogs: Send + Sync {
     /// Ask the host to fetch + apply the signed agent-catalog bundle from its configured source
     /// (CPE-376). `pinned` agents are skipped (CPE-378). `Err` = no host (dev/standalone).
     fn fetch_catalog(&self, pinned: &[String]) -> Result<CatalogFetch, String>;
+
+    /// Enumerate prior published catalog versions for the rollback picker (CPE-383). `Err` = no host.
+    fn list_catalog_versions(&self) -> Result<Vec<CatalogVersion>, String>;
+
+    /// Roll `agents` back to a specific published catalog version `tag` (CPE-383) — an audited
+    /// downgrade (`allow_downgrade`) applied only to those agents. `Err` = no host.
+    fn rollback_catalog(&self, tag: &str, agents: &[String]) -> Result<CatalogFetch, String>;
 }
 
 /// [`HostDialogs`] over the broker: asks the host to open the dialog (`host.pick_folder`).
@@ -277,6 +292,45 @@ impl HostDialogs for BrokerDialogs {
             applied: v.get("applied").and_then(Value::as_array).map(|a| a.len()).unwrap_or(0),
         })
     }
+
+    fn list_catalog_versions(&self) -> Result<Vec<CatalogVersion>, String> {
+        let v = self.client.request_timeout(
+            "host.list_catalog_versions",
+            serde_json::json!({}),
+            Duration::from_secs(20),
+        )?;
+        Ok(v.get("versions")
+            .and_then(Value::as_array)
+            .map(|a| {
+                a.iter()
+                    .filter_map(|x| {
+                        Some(CatalogVersion {
+                            tag: x.get("tag").and_then(Value::as_str)?.to_string(),
+                            published_at: x
+                                .get("publishedAt")
+                                .and_then(Value::as_str)
+                                .unwrap_or_default()
+                                .to_string(),
+                            prerelease: x.get("prerelease").and_then(Value::as_bool).unwrap_or(false),
+                        })
+                    })
+                    .collect()
+            })
+            .unwrap_or_default())
+    }
+
+    fn rollback_catalog(&self, tag: &str, agents: &[String]) -> Result<CatalogFetch, String> {
+        // Same host call as a fetch, but pinned to a specific `tag` with an `agents` downgrade set.
+        let v = self.client.request_timeout(
+            "host.fetch_catalog",
+            serde_json::json!({ "tag": tag, "agents": agents }),
+            Duration::from_secs(60),
+        )?;
+        Ok(CatalogFetch {
+            index_ok: v.get("indexOk").and_then(Value::as_bool).unwrap_or(false),
+            applied: v.get("applied").and_then(Value::as_array).map(|a| a.len()).unwrap_or(0),
+        })
+    }
 }
 
 /// Dev/standalone fallback — no host, so "cancelled" / "can't verify".
@@ -290,6 +344,12 @@ impl HostDialogs for NoopDialogs {
     }
     fn fetch_catalog(&self, _pinned: &[String]) -> Result<CatalogFetch, String> {
         Err("no host to fetch the catalog".into())
+    }
+    fn list_catalog_versions(&self) -> Result<Vec<CatalogVersion>, String> {
+        Err("no host to enumerate catalog versions".into())
+    }
+    fn rollback_catalog(&self, _tag: &str, _agents: &[String]) -> Result<CatalogFetch, String> {
+        Err("no host to roll the catalog back".into())
     }
 }
 

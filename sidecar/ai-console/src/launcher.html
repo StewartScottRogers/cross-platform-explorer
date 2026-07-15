@@ -203,6 +203,7 @@
           <label class="menu-item"><input type="checkbox" id="auto-update"> Auto-update on open</label>
           <label class="menu-item"><input type="checkbox" id="pin-agent"> Pin this agent (skip updates)</label>
           <button id="reset-agents" type="button" class="menu-item">Reset to the shipped agents</button>
+          <button id="rollback-agents" type="button" class="menu-item">Roll back a version…</button>
         </div>
       </div>
       <button id="advanced-btn" type="button" title="Optional extras: reusable setups, a fast model, a per-launch key">Advanced ▾</button>
@@ -284,6 +285,25 @@
         its saved output (secrets redacted).</p>
       <div id="history-list"></div>
       <pre id="history-transcript" hidden></pre>
+    </div>
+  </div>
+
+  <!-- Roll an agent back to a specific published catalog version (CPE-383). -->
+  <div id="rollback-overlay" hidden>
+    <div id="history-panel">
+      <div class="keys-head">
+        <span>Roll back a version — <span id="rollback-agent">agent</span></span>
+        <button id="rollback-close" type="button" class="keys-x" title="Close">×</button>
+      </div>
+      <p class="keys-note">Reinstall a <b>specific earlier</b> published version of this agent's
+        catalog entry (signed + verified, an audited downgrade). Only this agent is affected.</p>
+      <div class="field">
+        <label for="rollback-version">Published version</label>
+        <select id="rollback-version"></select>
+      </div>
+      <div class="row" style="margin-top:8px">
+        <button id="rollback-apply" type="button" class="primary">Roll back this agent</button>
+      </div>
     </div>
   </div>
 
@@ -950,8 +970,52 @@ async function resetCatalog() {
     setMsg("Reset to the shipped agents (" + r.agents + ").", true);
   } catch (e) { setMsg("Reset failed: " + e.message); }
 }
+// Roll the selected agent back to a specific published version (CPE-383).
+async function openRollback() {
+  closeManageMenu();
+  const agent = $("agent").value;
+  $("rollback-agent").textContent = (agentById(agent) || {}).name || agent;
+  setMsg("Looking up published versions…", true);
+  let versions = [];
+  try {
+    const r = await api("/api/catalog/versions");
+    versions = (r && r.versions) || [];
+  } catch (e) { setMsg("Couldn't list versions: " + e.message); return; }
+  if (!versions.length) {
+    setMsg("No prior versions available (offline, or none published yet).", true);
+    return;
+  }
+  const sel = $("rollback-version");
+  sel.innerHTML = "";
+  for (const v of versions) {
+    const o = document.createElement("option");
+    o.value = v.tag;
+    const when = v.publishedAt ? " — " + String(v.publishedAt).slice(0, 10) : "";
+    o.textContent = v.tag + when + (v.prerelease ? " (pre-release)" : "");
+    sel.appendChild(o);
+  }
+  setMsg("", true);
+  $("rollback-overlay").hidden = false;
+}
+async function applyRollback() {
+  const tag = $("rollback-version").value;
+  const agent = $("agent").value;
+  if (!tag || !agent) return;
+  setMsg("Rolling " + agent + " back to " + tag + "…", true);
+  try {
+    const r = await api("/api/catalog/rollback", { method: "POST", body: JSON.stringify({ tag: tag, agents: [agent] }) });
+    $("rollback-overlay").hidden = true;
+    await load();
+    if (r.applied > 0) setMsg(agent + " rolled back to " + tag + ".", true);
+    else setMsg("Nothing changed (that version may not include this agent).", true);
+  } catch (e) { setMsg("Roll back failed: " + e.message); }
+}
 $("refresh-agents").addEventListener("click", refreshCatalog);
 $("reset-agents").addEventListener("click", resetCatalog);
+$("rollback-agents").addEventListener("click", openRollback);
+$("rollback-apply").addEventListener("click", applyRollback);
+$("rollback-close").addEventListener("click", () => ($("rollback-overlay").hidden = true));
+$("rollback-overlay").addEventListener("click", (e) => { if (e.target === $("rollback-overlay")) $("rollback-overlay").hidden = true; });
 // "Manage agents ▾" dropdown + Help panel (CPE-390)
 function closeManageMenu() { $("manage-menu").hidden = true; }
 $("manage-btn").addEventListener("click", (e) => { e.stopPropagation(); $("manage-menu").hidden = !$("manage-menu").hidden; });

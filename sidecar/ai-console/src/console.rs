@@ -743,6 +743,54 @@ impl ConsoleState {
         }
     }
 
+    /// `GET /api/catalog/versions` → enumerate prior published catalog versions for the rollback
+    /// picker (CPE-383). Host-mediated GitHub Releases API; empty list when there's no host/offline.
+    fn handle_catalog_versions(&self) -> Response {
+        match self.dialogs.list_catalog_versions() {
+            Ok(vs) => {
+                let arr: Vec<Value> = vs
+                    .into_iter()
+                    .map(|v| json!({ "tag": v.tag, "publishedAt": v.published_at, "prerelease": v.prerelease }))
+                    .collect();
+                Response::json(json!({ "versions": arr }).to_string())
+            }
+            // No host (dev/standalone) is not an error to the UI — just an empty picker.
+            Err(_) => Response::json(json!({ "versions": [] }).to_string()),
+        }
+    }
+
+    /// `POST /api/catalog/rollback {tag, agents}` → roll the chosen `agents` back to a specific prior
+    /// published version `tag` (CPE-383): an audited per-agent downgrade override. Hot-reloads on
+    /// apply. `agents` empty ⇒ nothing to do.
+    fn handle_catalog_rollback(&self, body: &str) -> Response {
+        let v: Value = serde_json::from_str(body).unwrap_or_else(|_| json!({}));
+        let tag = v["tag"].as_str().unwrap_or("").trim().to_string();
+        if tag.is_empty() {
+            return bad("tag is required");
+        }
+        let agents: Vec<String> = v["agents"]
+            .as_array()
+            .map(|a| a.iter().filter_map(|x| x.as_str().map(str::to_string)).collect())
+            .unwrap_or_default();
+        if agents.is_empty() {
+            return bad("at least one agent is required to roll back");
+        }
+        match self.dialogs.rollback_catalog(&tag, &agents) {
+            Ok(res) => {
+                let agents_now = if res.applied > 0 {
+                    self.reload_catalog()
+                } else {
+                    self.registry.read().unwrap().len()
+                };
+                Response::json(
+                    json!({ "indexOk": res.index_ok, "applied": res.applied, "tag": tag, "agents": agents_now })
+                        .to_string(),
+                )
+            }
+            Err(e) => bad(e),
+        }
+    }
+
     /// `GET /api/history/{id}` → one session's stored (already-redacted) transcript + metadata.
     fn handle_history_detail(&self, path: &str) -> Response {
         let id = path.strip_prefix("/api/history/").unwrap_or("");
@@ -835,6 +883,8 @@ pub fn route(state: &ConsoleState, req: &Request) -> Response {
         ("POST", "/api/catalog/reload") => state.handle_catalog_reload(),
         ("POST", "/api/catalog/refresh") => state.handle_catalog_refresh(),
         ("POST", "/api/catalog/reset") => state.handle_catalog_reset(),
+        ("GET", "/api/catalog/versions") => state.handle_catalog_versions(),
+        ("POST", "/api/catalog/rollback") => state.handle_catalog_rollback(&req.body),
         ("POST", "/api/catalog/settings") => state.handle_catalog_settings(&req.body),
         ("POST", "/api/catalog/pin") => state.handle_catalog_pin(&req.body),
         ("GET", "/api/history") => state.handle_history_list(),
@@ -1154,6 +1204,22 @@ mod tests {
         fn fetch_catalog(&self, _pinned: &[String]) -> Result<crate::broker_client::CatalogFetch, String> {
             Err("stub".into())
         }
+        fn list_catalog_versions(
+            &self,
+        ) -> Result<Vec<crate::broker_client::CatalogVersion>, String> {
+            Ok(vec![crate::broker_client::CatalogVersion {
+                tag: "v0.1.0".into(),
+                published_at: "2026-07-01T00:00:00Z".into(),
+                prerelease: false,
+            }])
+        }
+        fn rollback_catalog(
+            &self,
+            _tag: &str,
+            _agents: &[String],
+        ) -> Result<crate::broker_client::CatalogFetch, String> {
+            Ok(crate::broker_client::CatalogFetch { index_ok: true, applied: 1 })
+        }
     }
 
     fn state_with_dialogs(dialogs: Arc<StubDialogs>) -> ConsoleState {
@@ -1192,6 +1258,29 @@ mod tests {
         assert_eq!(v["valid"], false);
         assert_eq!(v["detail"], "Provider rejected this key (unauthorized).");
         assert!(stub.called.load(std::sync::atomic::Ordering::SeqCst));
+    }
+
+    #[test]
+    fn catalog_versions_and_rollback_routes(){
+        let stub = Arc::new(StubDialogs {
+            verdict: crate::broker_client::KeyVerdict { valid: true, live: true, detail: String::new() },
+            called: Default::default(),
+        });
+        let st = state_with_dialogs(stub);
+        // Enumerate: the stub offers one version.
+        let vs: Value = serde_json::from_slice(
+            &route(&st, &Request { method: "GET".into(), path: "/api/catalog/versions".into(), ..Default::default() }).body,
+        ).unwrap();
+        assert_eq!(vs["versions"][0]["tag"], "v0.1.0");
+        // Rollback: a tag + agents applies (stub returns applied:1).
+        let post = |body: &str| route(&st, &Request { method: "POST".into(), path: "/api/catalog/rollback".into(), body: body.into(), ..Default::default() });
+        let ok: Value = serde_json::from_slice(&post(r#"{"tag":"v0.1.0","agents":["claude"]}"#).body).unwrap();
+        assert_eq!(ok["indexOk"], true);
+        assert_eq!(ok["applied"], 1);
+        assert_eq!(ok["tag"], "v0.1.0");
+        // Guards: a missing tag or empty agents is a 400.
+        assert_eq!(post(r#"{"agents":["claude"]}"#).status, 400);
+        assert_eq!(post(r#"{"tag":"v0.1.0","agents":[]}"#).status, 400);
     }
 
     #[test]

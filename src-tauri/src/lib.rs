@@ -2066,14 +2066,80 @@ fn catalog_dir(app: &tauri::AppHandle) -> PathBuf {
         .unwrap_or_else(|_| std::env::temp_dir().join("cpe-ai-console-catalog"))
 }
 
+/// The GitHub owner/repo whose Releases carry the signed catalog bundles.
+#[cfg(feature = "sidecar-platform")]
+const CATALOG_REPO: &str = "StewartScottRogers/cross-platform-explorer";
+
 /// The catalog source base URL — the app's GitHub Releases `latest/download/` by default (the
 /// signed bundle rides next to the installer), overridable via `CPE_CATALOG_URL`.
 #[cfg(feature = "sidecar-platform")]
 fn catalog_url() -> String {
     std::env::var("CPE_CATALOG_URL").unwrap_or_else(|_| {
-        "https://github.com/StewartScottRogers/cross-platform-explorer/releases/latest/download/"
-            .into()
+        format!("https://github.com/{CATALOG_REPO}/releases/latest/download/")
     })
+}
+
+/// Whether a release tag is safe to splice into a URL path (CPE-383): a version tag's characters
+/// only — no `/`, `..`, scheme, or whitespace — so a chosen tag can never escape the releases path
+/// (defence-in-depth, even though tags come from our own enumerated list).
+#[cfg(feature = "sidecar-platform")]
+fn is_safe_release_tag(tag: &str) -> bool {
+    !tag.is_empty()
+        && tag.len() <= 64
+        && tag.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_' | '+'))
+}
+
+/// The `releases/download/<tag>/` base for a **specific** published version (CPE-383) — not
+/// `latest`. Honours a `CPE_CATALOG_URL` override's origin for tests by only applying to the
+/// default GitHub host.
+#[cfg(feature = "sidecar-platform")]
+fn catalog_url_for_tag(tag: &str) -> String {
+    if let Ok(base) = std::env::var("CPE_CATALOG_URL") {
+        // Test/override hook: swap a trailing `latest/download/` for this tag if present.
+        return base.replace("latest/download/", &format!("download/{tag}/"));
+    }
+    format!("https://github.com/{CATALOG_REPO}/releases/download/{tag}/")
+}
+
+/// The GitHub Releases API URL listing published versions (CPE-383). Host-built from a constant —
+/// the sidecar never supplies it — so it is a fixed **allow-listed** egress (threat model §7), a
+/// read-only public GET with no secret.
+#[cfg(feature = "sidecar-platform")]
+fn github_releases_api() -> String {
+    std::env::var("CPE_CATALOG_RELEASES_API")
+        .unwrap_or_else(|_| format!("https://api.github.com/repos/{CATALOG_REPO}/releases?per_page=30"))
+}
+
+/// Parse the GitHub Releases API JSON into the catalog versions the rollback picker offers: each
+/// published release that actually carries a catalog bundle (a `catalog-index.json` asset), with a
+/// safe tag. Pure + unit-tested — the network fetch is a thin wrapper.
+#[cfg(feature = "sidecar-platform")]
+fn parse_release_versions(body: &[u8]) -> Vec<serde_json::Value> {
+    use serde_json::json;
+    let Ok(parsed) = serde_json::from_slice::<serde_json::Value>(body) else { return vec![] };
+    let Some(rels) = parsed.as_array() else { return vec![] };
+    rels.iter()
+        .filter_map(|r| {
+            let tag = r.get("tag_name")?.as_str()?;
+            if !is_safe_release_tag(tag) {
+                return None;
+            }
+            let has_catalog = r
+                .get("assets")
+                .and_then(|a| a.as_array())
+                .is_some_and(|a| {
+                    a.iter().any(|x| x.get("name").and_then(|n| n.as_str()) == Some("catalog-index.json"))
+                });
+            if !has_catalog {
+                return None;
+            }
+            Some(json!({
+                "tag": tag,
+                "publishedAt": r.get("published_at").and_then(|p| p.as_str()).unwrap_or(""),
+                "prerelease": r.get("prerelease").and_then(|p| p.as_bool()).unwrap_or(false),
+            }))
+        })
+        .collect()
 }
 
 /// Response to the sandboxed `host.fetch_catalog` request (CPE-376): download the signed catalog
@@ -2086,24 +2152,74 @@ fn fetch_catalog_response(
 ) -> sidecar_contract::Response {
     use serde_json::json;
     // Pinned agents the sidecar asked us to skip (CPE-378).
-    let pinned: Vec<String> = params
-        .get("pinned")
-        .and_then(|v| v.as_array())
-        .map(|a| a.iter().filter_map(|x| x.as_str().map(str::to_string)).collect())
-        .unwrap_or_default();
-    let body = do_fetch_catalog(app, &pinned)
+    let pinned: Vec<String> = str_list(params, "pinned");
+    // CPE-383: an optional specific version to roll back to, and the agents allowed to downgrade to
+    // it. `tag` absent ⇒ the normal `latest` fetch with no downgrade.
+    let tag = params.get("tag").and_then(|v| v.as_str()).map(str::to_string);
+    let allow_downgrade: Vec<String> = str_list(params, "agents");
+    let body = do_fetch_catalog(app, &pinned, tag.as_deref(), &allow_downgrade)
         .unwrap_or_else(|e| json!({ "indexOk": false, "applied": [], "rejected": 0, "error": e }));
     sidecar_contract::Response { result: Ok(body) }
 }
 
+/// Collect a JSON array field of strings from `params` (empty if absent/malformed).
 #[cfg(feature = "sidecar-platform")]
-fn do_fetch_catalog(app: &tauri::AppHandle, pinned: &[String]) -> Result<serde_json::Value, String> {
+fn str_list(params: &serde_json::Value, key: &str) -> Vec<String> {
+    params
+        .get(key)
+        .and_then(|v| v.as_array())
+        .map(|a| a.iter().filter_map(|x| x.as_str().map(str::to_string)).collect())
+        .unwrap_or_default()
+}
+
+/// Response to `host.list_catalog_versions` (CPE-383): enumerate prior published catalog versions
+/// from the GitHub Releases API. Never errors the channel — a failure/offline comes back as an empty
+/// list with a message.
+#[cfg(feature = "sidecar-platform")]
+fn list_catalog_versions_response(params: &serde_json::Value) -> sidecar_contract::Response {
+    use serde_json::json;
+    let _ = params;
+    let body = match list_catalog_versions() {
+        Ok(versions) => json!({ "versions": versions }),
+        Err(e) => json!({ "versions": [], "error": e }),
+    };
+    sidecar_contract::Response { result: Ok(body) }
+}
+
+/// Enumerate published catalog versions via the GitHub Releases API (CPE-383). Offline ⇒ empty list
+/// (never a surprise call). Proxy-aware via the shared `catalog_http_get`.
+#[cfg(feature = "sidecar-platform")]
+fn list_catalog_versions() -> Result<Vec<serde_json::Value>, String> {
+    if keyverify::is_offline(std::env::var("CPE_OFFLINE").ok()) {
+        return Ok(vec![]);
+    }
+    let body = catalog_http_get(&github_releases_api())?;
+    Ok(parse_release_versions(&body))
+}
+
+#[cfg(feature = "sidecar-platform")]
+fn do_fetch_catalog(
+    app: &tauri::AppHandle,
+    pinned: &[String],
+    tag: Option<&str>,
+    allow_downgrade: &[String],
+) -> Result<serde_json::Value, String> {
     use serde_json::json;
     if keyverify::is_offline(std::env::var("CPE_OFFLINE").ok()) {
         return Ok(json!({ "indexOk": false, "applied": [], "rejected": 0, "offline": true }));
     }
     let keys: Vec<String> = CATALOG_TRUSTED_KEYS.iter().map(|s| s.to_string()).collect();
-    let base = catalog_url();
+    // CPE-383: a specific prior version fetches from `releases/download/<tag>/` (not `latest`), and
+    // its `agents` are allowed to downgrade. A malformed tag is refused (no URL-path escape).
+    let base = match tag {
+        Some(t) => {
+            if !is_safe_release_tag(t) {
+                return Err(format!("unsafe release tag: {t}"));
+            }
+            catalog_url_for_tag(t)
+        }
+        None => catalog_url(),
+    };
     let dir = catalog_dir(app);
     let staging = std::env::temp_dir().join(format!("cpe-catalog-stage-{}", std::process::id()));
     std::fs::create_dir_all(&staging).map_err(|e| e.to_string())?;
@@ -2126,7 +2242,14 @@ fn do_fetch_catalog(app: &tauri::AppHandle, pinned: &[String]) -> Result<serde_j
     // Apply with anti-rollback against the persisted version map (last-known-good on failure).
     let vpath = dir.join("versions.json");
     let mut versions = sidecar_host::catalog::load_versions(&vpath);
-    let report = sidecar_host::catalog::apply_bundle(&staging, &dir, &keys, &mut versions, pinned);
+    let report = sidecar_host::catalog::apply_bundle_with(
+        &staging,
+        &dir,
+        &keys,
+        &mut versions,
+        pinned,
+        allow_downgrade,
+    );
     let _ = sidecar_host::catalog::save_versions(&vpath, &versions);
     let _ = std::fs::remove_dir_all(&staging);
     Ok(json!({ "indexOk": report.index_ok, "applied": report.applied, "rejected": report.rejected.len() }))
@@ -2148,6 +2271,10 @@ fn catalog_http_get(url: &str) -> Result<Vec<u8>, String> {
         .build()
         .get(url)
         .timeout(std::time::Duration::from_secs(20))
+        // GitHub (Releases API + downloads) requires a User-Agent; the Accept keeps the API on its
+        // stable JSON contract. Harmless for the plain download host.
+        .set("User-Agent", "cross-platform-explorer")
+        .set("Accept", "application/vnd.github+json")
         .call()
         .map_err(|e| format!("fetch failed: {e}"))?;
     let mut buf = Vec::new();
@@ -2198,8 +2325,14 @@ fn serve_ai_console_requests(
                             // not a brokered capability — handle it directly.
                             verify_key_response(&req.params)
                         } else if req.method == "host.fetch_catalog" {
-                            // Fetch + apply the signed catalog bundle from GitHub Releases (CPE-376).
+                            // Fetch + apply the signed catalog bundle from GitHub Releases (CPE-376);
+                            // an optional `tag`+`agents` rolls chosen agents back to a prior version
+                            // (CPE-383).
                             fetch_catalog_response(&app, &req.params)
+                        } else if req.method == "host.list_catalog_versions" {
+                            // Enumerate prior published catalog versions for the rollback picker
+                            // (CPE-383) — a host-built GitHub Releases API GET, no sidecar URL.
+                            list_catalog_versions_response(&req.params)
                         } else {
                             broker.dispatch("ai-console", &req)
                         };
@@ -2748,6 +2881,47 @@ mod agent_watch_tests {
         // …and reads / unknowns are dropped (a Windows watcher can't see reads anyway).
         assert_eq!(classify_fs_event(&EventKind::Access(notify::event::AccessKind::Read)), None);
         assert_eq!(classify_fs_event(&EventKind::Other), None);
+    }
+
+    // --- Catalog version rollback (CPE-383) --------------------------------------------
+    use super::{catalog_url_for_tag, is_safe_release_tag, parse_release_versions};
+
+    #[test]
+    fn a_release_tag_must_be_url_safe() {
+        assert!(is_safe_release_tag("v0.2.0"));
+        assert!(is_safe_release_tag("2026.07.14-rc1"));
+        // No traversal, separators, scheme, or spaces — a chosen tag can never escape the path.
+        assert!(!is_safe_release_tag("../secret"));
+        assert!(!is_safe_release_tag("v1/../.."));
+        assert!(!is_safe_release_tag("a b"));
+        assert!(!is_safe_release_tag(""));
+    }
+
+    #[test]
+    fn a_tag_url_targets_the_specific_release_not_latest() {
+        // Default host: the `download/<tag>/` path, never `latest`.
+        std::env::remove_var("CPE_CATALOG_URL");
+        let u = catalog_url_for_tag("v0.1.9");
+        assert!(u.ends_with("/releases/download/v0.1.9/"), "{u}");
+        assert!(!u.contains("latest"));
+    }
+
+    #[test]
+    fn parse_release_versions_keeps_only_catalog_bearing_releases_with_safe_tags() {
+        let body = br#"[
+            {"tag_name":"v0.3.0","published_at":"2026-07-14T00:00:00Z","prerelease":false,
+             "assets":[{"name":"catalog-index.json"},{"name":"app.msi"}]},
+            {"tag_name":"v0.2.0","published_at":"2026-07-01T00:00:00Z","prerelease":true,
+             "assets":[{"name":"app.msi"}]},
+            {"tag_name":"../evil","published_at":"","assets":[{"name":"catalog-index.json"}]}
+        ]"#;
+        let got = parse_release_versions(body);
+        // Only v0.3.0 qualifies: v0.2.0 has no catalog asset, and the traversal tag is refused.
+        assert_eq!(got.len(), 1);
+        assert_eq!(got[0]["tag"], "v0.3.0");
+        assert_eq!(got[0]["prerelease"], false);
+        // Malformed input never panics — just yields nothing.
+        assert!(parse_release_versions(b"not json").is_empty());
     }
 }
 

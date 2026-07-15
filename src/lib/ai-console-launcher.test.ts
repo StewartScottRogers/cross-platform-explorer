@@ -130,6 +130,49 @@ describe("AI Console launcher — catalog controls + scrollback helpers", () => 
     expect(w.document.getElementById("pin-agent").checked).toBe(true);
   });
 
+  it("version rollback (CPE-383): picker lists published versions and rolls the selected agent back", async () => {
+    const posts: any[] = [];
+    const { w } = await mountLauncher((path, opts) => {
+      if (path === "/api/catalog/versions")
+        return {
+          versions: [
+            { tag: "v0.1.0", publishedAt: "2026-07-01T00:00:00Z", prerelease: false },
+            { tag: "v0.0.9", publishedAt: "2026-06-01T00:00:00Z", prerelease: true },
+          ],
+        };
+      if (path === "/api/catalog/rollback") {
+        posts.push(JSON.parse(opts.body));
+        return { indexOk: true, applied: 1, tag: "v0.1.0", agents: 1 };
+      }
+      return {};
+    });
+    w.document.getElementById("agent").value = "claude";
+    // Open the picker from the Manage menu → overlay shows, populated with the versions.
+    w.document.getElementById("rollback-agents").click();
+    await new Promise((r) => setTimeout(r, 0));
+    expect(w.document.getElementById("rollback-overlay").hidden).toBe(false);
+    expect(w.document.getElementById("rollback-agent").textContent).toBe("Claude Code");
+    const opts = [...w.document.getElementById("rollback-version").options].map((o: any) => o.value);
+    expect(opts).toEqual(["v0.1.0", "v0.0.9"]);
+    // Apply → POSTs {tag, agents:[currentAgent]} and closes the overlay.
+    w.document.getElementById("rollback-version").value = "v0.1.0";
+    w.document.getElementById("rollback-apply").click();
+    await new Promise((r) => setTimeout(r, 0));
+    expect(posts).toEqual([{ tag: "v0.1.0", agents: ["claude"] }]);
+    expect(w.document.getElementById("rollback-overlay").hidden).toBe(true);
+    expect(w.document.getElementById("msg").textContent).toMatch(/rolled back to v0\.1\.0/i);
+  });
+
+  it("version rollback with no published versions shows a message and no overlay", async () => {
+    const { w } = await mountLauncher((path) =>
+      path === "/api/catalog/versions" ? { versions: [] } : {},
+    );
+    w.document.getElementById("rollback-agents").click();
+    await new Promise((r) => setTimeout(r, 0));
+    expect(w.document.getElementById("rollback-overlay").hidden).toBe(true);
+    expect(w.document.getElementById("msg").textContent).toMatch(/no prior versions/i);
+  });
+
   it("stripAltScreen removes alternate-screen enter/leave sequences", async () => {
     const { w } = await mountLauncher();
     const enc = (s: string) => new w.Uint8Array([...s].map((c) => c.charCodeAt(0)));

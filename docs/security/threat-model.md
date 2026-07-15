@@ -116,7 +116,7 @@ sends only `{provider, key}` and never a URL.
 | No cross-sidecar reach | ✅ Per-process isolation; namespaced storage/secrets; no cross-sidecar channel. |
 | No unconsented code execution | ✅ Capabilities are consent-gated by the interactive sheet (CPE-296, done) with per-capability grant/deny + revoke (CPE-274); manifest execution is limited to bundled first-party signed manifests (CPE-295) — untrusted-manifest loading is not exposed in the shipped console. |
 | No UI escape to explorer | ✅ Sandboxed iframe; frame runs on its own loopback origin (≠ host origin), so cross-origin policy blocks host access even with `allow-same-origin` (CPE-334). |
-| No SSRF / arbitrary network egress from a sidecar | ✅ Egress is only ever host-mediated and allow-listed: the key check to a provider endpoint (§7, CPE-347) and the catalog fetch to the app's GitHub Releases (§4, CPE-376). The sidecar can never supply a URL; no general fetch primitive exists. |
+| No SSRF / arbitrary network egress from a sidecar | ✅ Egress is only ever host-mediated and allow-listed: the key check to a provider endpoint (§7, CPE-347), the catalog fetch to the app's GitHub Releases (§4, CPE-376), catalog **version enumeration** via the GitHub Releases **API** (`api.github.com`, host-built URL, read-only public GET, CPE-383), and a **version-specific** catalog fetch from `releases/download/<tag>/` where the tag is validated against a strict `[A-Za-z0-9._+-]` charset so it can't escape the releases path (CPE-383). The sidecar can never supply a URL; no general fetch primitive exists. |
 
 ## 10. Gaps → tickets (sign-off blockers)
 
