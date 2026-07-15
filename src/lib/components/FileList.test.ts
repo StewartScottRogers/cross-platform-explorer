@@ -42,6 +42,31 @@ const base = {
   draggedPaths: [],
 };
 
+describe("FileList Agent Watch annotations (CPE-399)", () => {
+  it("badges + accents a row the agent just touched, and leaves untouched rows plain", () => {
+    const entries = [
+      entry({ name: "changed.rs", path: "/x/changed.rs", extension: "rs" }),
+      entry({ name: "quiet.md", path: "/x/quiet.md" }),
+    ];
+    const { container } = render(FileList, {
+      ...base,
+      entries,
+      activity: { "/x/changed.rs": { kind: "modified" as const, at: Date.now() } },
+    });
+
+    expect(screen.getByText("edited")).toBeTruthy(); // the kind badge
+    const active = container.querySelectorAll(".row.agent-active");
+    expect(active.length).toBe(1);
+    expect(active[0].getAttribute("data-agent-kind")).toBe("modified");
+  });
+
+  it("shows no annotations when the activity map is empty (off means off)", () => {
+    const { container } = render(FileList, { ...base, entries: [entry()], activity: {} });
+    expect(container.querySelector(".agent-active")).toBeNull();
+    expect(container.querySelector(".agent-badge")).toBeNull();
+  });
+});
+
 describe("FileList rendering", () => {
   it("renders a row for every entry", () => {
     const entries = [
