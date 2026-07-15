@@ -56,6 +56,12 @@ export function ingestSessionState(state: string): void {
   if (ann) store.update((list) => applySessionAnnouncement(list, ann));
 }
 
+/** Clear every active-session leaf at once — used when the whole AI Console is stopped from the
+ *  explorer (its process is reaped, so no per-session `ended` announcements arrive). CPE-457. */
+export function clearAgentSessions(): void {
+  store.set([]);
+}
+
 /**
  * Start listening for session announcements. Returns an unlisten function. Safe to call when the
  * sidecar platform is off — the event simply never fires. Call once at app start.
