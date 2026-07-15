@@ -11,5 +11,7 @@
 //! is a manifest, not host code — mirroring the AI Console's agent registry (CPE-278).
 
 pub mod providers;
+pub mod status;
 
 pub use providers::{ProviderManifest, ProviderRegistry};
+pub use status::{parse_status, RepoState};
