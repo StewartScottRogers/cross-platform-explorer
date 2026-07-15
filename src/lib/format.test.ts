@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { formatSize, formatDiskFree, friendlyError, splitPath, formatPathsForClipboard } from "./format";
+import { formatSize, formatDiskFree, diskUsage, friendlyError, splitPath, formatPathsForClipboard } from "./format";
 
 describe("formatSize", () => {
   it("returns an empty string for zero bytes (directories)", () => {
@@ -150,5 +150,21 @@ describe("formatDiskFree (CPE-403)", () => {
   it("returns empty when total is unknown/zero", () => {
     expect(formatDiskFree(0, 0)).toBe("");
     expect(formatDiskFree(100, -1)).toBe("");
+  });
+});
+
+describe("diskUsage (CPE-406)", () => {
+  it("computes used percentage from free/total", () => {
+    expect(diskUsage(25, 100)).toEqual({ usedPct: 75, severity: "ok" });
+    expect(diskUsage(100, 100)).toEqual({ usedPct: 0, severity: "ok" });
+  });
+  it("escalates severity as free space runs low", () => {
+    expect(diskUsage(10, 100).severity).toBe("warn"); // 10% free
+    expect(diskUsage(3, 100).severity).toBe("full"); // 3% free
+    expect(diskUsage(50, 100).severity).toBe("ok");
+  });
+  it("guards a missing total and clamps out-of-range inputs", () => {
+    expect(diskUsage(1, 0)).toEqual({ usedPct: 0, severity: "ok" });
+    expect(diskUsage(999, 100).usedPct).toBe(0); // free>total clamps to 0% used
   });
 });

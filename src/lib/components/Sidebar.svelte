@@ -4,6 +4,7 @@
   import Icon from "./Icon.svelte";
   import SidebarNode from "./SidebarNode.svelte";
   import { iconFor } from "../filetypes";
+  import { formatSize, diskUsage } from "../format";
   import type { DirEntry, Place, Favorite } from "../types";
   import type { AgentSession } from "../sidecar";
 
@@ -14,6 +15,8 @@
   /** Live coding-agent sessions from the AI Console (Agent Watch, CPE-397). Each row
       navigates the explorer to the agent's Project folder. Empty ⇒ the section is hidden. */
   export let sessions: AgentSession[] = [];
+  /** Free/total bytes per drive path for the usage bars (CPE-406). Absent ⇒ no bar. */
+  export let driveUsage: Record<string, { free: number; total: number }> = {};
   export let currentPath = "";
   export let isHome = false;
   /** The middle pane's currently selected folder (or ""), for two-way highlight
@@ -255,6 +258,17 @@
         </button>
       </div>
 
+      {#if isDrive && driveUsage[place.path]}
+        {@const u = driveUsage[place.path]}
+        {@const usage = diskUsage(u.free, u.total)}
+        <div class="drive-usage" title={`${formatSize(u.free)} free of ${formatSize(u.total)}`}>
+          <div class="drive-bar">
+            <div class="drive-bar-fill {usage.severity}" style="width:{usage.usedPct}%" />
+          </div>
+          <span class="drive-free">{formatSize(u.free)} free</span>
+        </div>
+      {/if}
+
       {#if open}
         <div class="nav-children">
           {#if loadingPaths.has(place.path)}
@@ -301,4 +315,11 @@
   .agent-label { display: flex; flex-direction: column; line-height: 1.15; overflow: hidden; }
   .agent-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .agent-folder { font-size: 11px; opacity: 0.6; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  /* Drive usage bar (CPE-406) — a thin used/free indicator under each drive, like Explorer. */
+  .drive-usage { padding: 2px 10px 6px 34px; display: flex; flex-direction: column; gap: 2px; }
+  .drive-bar { height: 5px; border-radius: 3px; background: rgba(128, 128, 128, 0.28); overflow: hidden; }
+  .drive-bar-fill { height: 100%; border-radius: 3px; background: var(--accent, #2f6fed); }
+  .drive-bar-fill.warn { background: #b5872b; }
+  .drive-bar-fill.full { background: #b5433a; }
+  .drive-free { font-size: 10px; opacity: 0.55; }
 </style>
