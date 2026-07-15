@@ -112,6 +112,17 @@ pub(crate) fn provider_secret_name(provider: &str, label: &str) -> String {
     }
 }
 
+/// Keychain name for a model **reseller's** key (CPE-452), namespaced apart from provider keys so a
+/// reseller credential never collides with a provider one. Resolved for the allow-listed model-list
+/// egress (CPE-447) + inference; the value never leaves the keychain broker.
+pub(crate) fn reseller_secret_name(reseller: &str, label: &str) -> String {
+    if label.is_empty() || label == DEFAULT_CREDENTIAL {
+        format!("reseller:{reseller}")
+    } else {
+        format!("reseller:{reseller}#{label}")
+    }
+}
+
 /// Which API key a launch uses: an explicit one (typed for this launch) wins; otherwise the
 /// stored key for this provider under `label`; otherwise none (the agent's native login).
 pub(crate) fn resolve_provider_key(
@@ -491,7 +502,7 @@ impl ConsoleState {
             .filter(|r| !r.is_empty())
             .unwrap_or("openrouter");
         // A per-reseller key is used when present (CPE-452), but listing usually needs none.
-        let token = self.secrets.get(&format!("models/{reseller}/default")).ok().flatten();
+        let token = self.secrets.get(&reseller_secret_name(reseller, DEFAULT_CREDENTIAL)).ok().flatten();
         match self.dialogs.list_models(reseller, token.as_deref()) {
             Ok(models) => Response::json(json!({ "reseller": reseller, "models": models }).to_string()),
             Err(e) => bad(e),
@@ -661,6 +672,46 @@ impl ConsoleState {
         let mut store = self.presets.load();
         store.remove_credential(provider, &label);
         let _ = self.presets.save(&store);
+        Response::json(json!({ "ok": true }).to_string())
+    }
+
+    /// `POST /api/reseller-keys {reseller, key, label?}` — store a model reseller's API key in the
+    /// keychain namespace (CPE-452), so the picker + inference can authenticate. Kept separate from
+    /// provider keys; no provider-specific format check (resellers vary), just non-empty.
+    fn handle_reseller_key_set(&self, body: &str) -> Response {
+        let v: Value = match serde_json::from_str(body) {
+            Ok(v) => v,
+            Err(e) => return bad(format!("bad json: {e}")),
+        };
+        let reseller = v["reseller"].as_str().unwrap_or("").trim();
+        let key = v["key"].as_str().unwrap_or("").trim();
+        let label = Self::credential_label(&v);
+        if reseller.is_empty() {
+            return bad("missing 'reseller'");
+        }
+        if key.is_empty() {
+            return bad("missing 'key'");
+        }
+        if let Err(e) = self.secrets.set(&reseller_secret_name(reseller, &label), key) {
+            return bad(e);
+        }
+        Response::json(json!({ "ok": true }).to_string())
+    }
+
+    /// `POST /api/reseller-keys/delete {reseller, label?}` — remove a reseller key.
+    fn handle_reseller_key_delete(&self, body: &str) -> Response {
+        let v: Value = match serde_json::from_str(body) {
+            Ok(v) => v,
+            Err(e) => return bad(format!("bad json: {e}")),
+        };
+        let reseller = v["reseller"].as_str().unwrap_or("").trim();
+        let label = Self::credential_label(&v);
+        if reseller.is_empty() {
+            return bad("missing 'reseller'");
+        }
+        if let Err(e) = self.secrets.delete(&reseller_secret_name(reseller, &label)) {
+            return bad(e);
+        }
         Response::json(json!({ "ok": true }).to_string())
     }
 
@@ -928,6 +979,8 @@ pub fn route(state: &ConsoleState, req: &Request) -> Response {
         ("GET", "/api/keys") => state.handle_key_list(),
         ("POST", "/api/keys") => state.handle_key_set(&req.body),
         ("POST", "/api/keys/delete") => state.handle_key_delete(&req.body),
+        ("POST", "/api/reseller-keys") => state.handle_reseller_key_set(&req.body),
+        ("POST", "/api/reseller-keys/delete") => state.handle_reseller_key_delete(&req.body),
         ("POST", "/api/keys/verify") => state.handle_key_verify(&req.body),
         ("POST", "/api/catalog/reload") => state.handle_catalog_reload(),
         ("POST", "/api/catalog/refresh") => state.handle_catalog_refresh(),
@@ -1310,6 +1363,28 @@ mod tests {
         // Default reseller when the query is absent.
         let r2 = route(&st, &Request { method: "GET".into(), path: "/api/models".into(), ..Default::default() });
         assert_eq!(serde_json::from_slice::<Value>(&r2.body).unwrap()["reseller"], "openrouter");
+    }
+
+    #[test]
+    fn reseller_keys_store_under_their_own_namespace_and_resolve_for_egress() {
+        let dialogs = Arc::new(StubDialogs {
+            verdict: crate::broker_client::KeyVerdict { valid: true, live: true, detail: String::new() },
+            called: std::sync::atomic::AtomicBool::new(false),
+        });
+        let st = state_with_dialogs(dialogs);
+        let post = |path: &str, body: &str| {
+            route(&st, &Request { method: "POST".into(), path: path.into(), body: body.into(), ..Default::default() })
+        };
+        // Set a reseller key; it lands in the reseller: namespace (not provider:).
+        assert_eq!(post("/api/reseller-keys", r#"{"reseller":"openrouter","key":"sk-or-abc123"}"#).status, 200);
+        assert_eq!(st.secrets.get("reseller:openrouter").unwrap().as_deref(), Some("sk-or-abc123"));
+        assert!(st.secrets.get("provider:openrouter").unwrap().is_none(), "must not collide with provider keys");
+        // Missing fields are rejected.
+        assert_eq!(post("/api/reseller-keys", r#"{"reseller":"","key":"x"}"#).status, 400);
+        assert_eq!(post("/api/reseller-keys", r#"{"reseller":"groq","key":""}"#).status, 400);
+        // Delete removes it.
+        assert_eq!(post("/api/reseller-keys/delete", r#"{"reseller":"openrouter"}"#).status, 200);
+        assert!(st.secrets.get("reseller:openrouter").unwrap().is_none());
     }
 
     #[test]
