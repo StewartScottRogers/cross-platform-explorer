@@ -36,4 +36,17 @@ describe("PropertiesDialog — SHA-256 checksum (CPE-412)", () => {
     render(PropertiesDialog, { entries: [file({ is_dir: true, name: "d", path: "/d", extension: "" })] });
     await waitFor(() => expect(screen.queryByText("SHA-256")).toBeNull());
   });
+
+  it("verifies against a pasted expected hash — Match then No match (CPE-413)", async () => {
+    const digest = "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad";
+    render(PropertiesDialog, { entries: [file()] });
+    await fireEvent.click(await screen.findByText("Compute"));
+    const input = await screen.findByPlaceholderText("Paste expected hash to verify");
+    // Correct (uppercased + spaced) → Match.
+    await fireEvent.input(input, { target: { value: `  ${digest.toUpperCase()} ` } });
+    await waitFor(() => expect(screen.getByText("✓ Match")).toBeTruthy());
+    // Wrong → No match.
+    await fireEvent.input(input, { target: { value: "deadbeef" } });
+    await waitFor(() => expect(screen.getByText("✗ No match")).toBeTruthy());
+  });
 });
