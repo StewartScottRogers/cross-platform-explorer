@@ -16,7 +16,7 @@
   import SettingsDialog from "./lib/components/SettingsDialog.svelte";
   import ConsentSheet from "./lib/components/ConsentSheet.svelte";
   import { startAiConsole, consoleUrlWith, platformActive, consentState, setConsent, type Capability, type ConsentState } from "./lib/sidecar";
-  import { initAgentSessions, agentSessions, watchTargetFor, normalizePath } from "./lib/agentSessions";
+  import { initAgentSessions, agentSessions, watchTargetFor, normalizePath, clearAgentSessions } from "./lib/agentSessions";
   import { startAgentWatch, stopAgentWatch, type FsActivity } from "./lib/sidecar";
   import { initAgentActivity, fsActivity, recentActivities, agentTimeline, affectsListing } from "./lib/agentActivity";
   import AgentTimeline from "./lib/components/AgentTimeline.svelte";
@@ -26,6 +26,7 @@
   import CommandBar from "./lib/components/CommandBar.svelte";
   import Sidebar from "./lib/components/Sidebar.svelte";
   import RepoBrowser from "./lib/components/RepoBrowser.svelte";
+  import AgentMenu from "./lib/components/AgentMenu.svelte";
   import Toolbar from "./lib/components/Toolbar.svelte";
   import FileList from "./lib/components/FileList.svelte";
   import HomeView from "./lib/components/HomeView.svelte";
@@ -193,6 +194,21 @@
   let patternSelectOpen = false;
   /** Repositories browser overlay (CPE-434/435) — browse GitHub & other forges in-app. */
   let showRepos = false;
+  /** Right-click "close the AI Console" menu (CPE-457), shown from an Agents leaf or the AI
+      Console button. `label` differs per source; confirming stops the console + clears the leaves. */
+  let agentMenu: { x: number; y: number; label: string } | null = null;
+
+  /** Close the AI Console entirely (all running agents) and clear the Agents leaves. The console
+      process is reaped, so no per-session `ended` arrives — clear the leaves here (CPE-457). */
+  async function closeAllConsoles() {
+    agentMenu = null;
+    try {
+      await invoke("sidecar_stop", { id: "ai-console" });
+    } catch (e) {
+      console.debug("close consoles failed:", e);
+    }
+    clearAgentSessions();
+  }
   /** True in sidecar-platform builds — gates the AI Console toolbar button (CPE-351). */
   let aiConsoleAvailable = false;
   /** Teardown for the Agent Watch session listener (CPE-396). */
@@ -1837,8 +1853,9 @@
       <button
         class="tb-console"
         type="button"
-        title={$agentSessions.length ? `Open the AI Console — ${$agentSessions.length} agent${$agentSessions.length === 1 ? "" : "s"} running` : "Open the AI Console"}
+        title={$agentSessions.length ? `Open the AI Console — ${$agentSessions.length} agent${$agentSessions.length === 1 ? "" : "s"} running (right-click to close all)` : "Open the AI Console"}
         on:click={() => openAiConsole()}
+        on:contextmenu|preventDefault={(e) => (agentMenu = { x: e.clientX, y: e.clientY, label: "Close all consoles" })}
       >
         <Icon name="code" size={15} /> AI Console
         {#if $agentSessions.length}
@@ -1959,6 +1976,7 @@
       on:openFile={(e) => openRecent(e.detail)}
       on:home={() => { if (archive) exitArchive(); navigate(HOME); }}
       on:repos={() => (showRepos = true)}
+      on:agentMenu={(e) => (agentMenu = { x: e.detail.x, y: e.detail.y, label: "Close AI Console" })}
       on:drop={(e) => dropInto(e.detail.paths, e.detail.dest, e.detail.copy)}
     />
   </div>
@@ -2284,6 +2302,16 @@
 
 {#if showRepos}
   <RepoBrowser on:close={() => (showRepos = false)} />
+{/if}
+
+{#if agentMenu}
+  <AgentMenu
+    x={agentMenu.x}
+    y={agentMenu.y}
+    label={agentMenu.label}
+    on:confirm={closeAllConsoles}
+    on:close={() => (agentMenu = null)}
+  />
 {/if}
 
 {#if patternSelectOpen}

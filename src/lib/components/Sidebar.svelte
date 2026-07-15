@@ -30,6 +30,7 @@
     openFile: string;
     home: void;
     repos: void;
+    agentMenu: { x: number; y: number };
     drop: { paths: string[]; dest: string; copy: boolean };
   }>();
 
@@ -171,8 +172,9 @@
           <button
             class="nav-item agent-item"
             class:active={isMarked(s.cwd)}
-            title={`${s.agentName} — ${s.cwd}`}
+            title={`${s.agentName} — ${s.cwd}  (right-click to close the AI Console)`}
             on:click={() => dispatch("navigate", s.cwd)}
+            on:contextmenu|preventDefault|stopPropagation={(e) => dispatch("agentMenu", { x: e.clientX, y: e.clientY })}
           >
             <span class="twisty hidden" />
             <Icon name="cube" />

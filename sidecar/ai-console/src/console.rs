@@ -446,10 +446,19 @@ impl ConsoleState {
         match removed {
             Some(s) => {
                 let _ = s.pty.lock().unwrap().kill();
+                // Announce the end immediately so the explorer's Agents leaf disappears now, rather
+                // than waiting for the reader thread's EOF (which a Windows ConPTY may withhold).
+                self.announce_ended(id);
                 true
             }
             None => false,
         }
+    }
+
+    /// Minimal `ended` announcement (just the id) so a closed session's Agent-Watch leaf is removed
+    /// promptly. The frontend reducer keys removal on `sessionId` alone (CPE-397).
+    fn announce_ended(&self, id: &str) {
+        self.announce_session(format!(r#"{{"event":"ended","sessionId":"{id}"}}"#));
     }
 
     /// Close **every** live session at once (CPE-442) — the fan-out teardown behind the launcher's
@@ -461,6 +470,7 @@ impl ConsoleState {
         let mut ids: Vec<String> = Vec::with_capacity(drained.len());
         for (id, s) in drained {
             let _ = s.pty.lock().unwrap().kill();
+            self.announce_ended(&id); // remove each Agents leaf immediately (CPE-397)
             ids.push(id);
         }
         ids.sort();
@@ -1363,6 +1373,49 @@ mod tests {
         // Default reseller when the query is absent.
         let r2 = route(&st, &Request { method: "GET".into(), path: "/api/models".into(), ..Default::default() });
         assert_eq!(serde_json::from_slice::<Value>(&r2.body).unwrap()["reseller"], "openrouter");
+    }
+
+    #[test]
+    fn closing_a_session_announces_ended_for_leaf_sync() {
+        use std::sync::{Arc, Mutex};
+        let dir = tempfile::tempdir().unwrap();
+        let agents = dir.path().join("agents");
+        std::fs::create_dir_all(&agents).unwrap();
+        let (cmd, args) = if cfg!(windows) {
+            ("cmd", r#"["/c","ping","-n","30","127.0.0.1"]"#)
+        } else {
+            ("sh", r#"["-c","sleep 30"]"#)
+        };
+        let manifest = format!(
+            r#"{{"schema_version":1,"id":"sleeper","name":"Sleeper",
+               "run":{{"windows":{{"command":"{cmd}","args":{args}}},
+                       "macos":{{"command":"{cmd}","args":{args}}},
+                       "linux":{{"command":"{cmd}","args":{args}}}}},
+               "providers":["native"],"provider_recipes":{{"native":{{"env":{{}},"args":[]}}}}}}"#
+        );
+        std::fs::write(agents.join("sleeper.json"), manifest).unwrap();
+        let seen = Arc::new(Mutex::new(Vec::<String>::new()));
+        let rec = Arc::clone(&seen);
+        let st = ConsoleState::new(
+            AgentRegistry::load_from_dirs(&[agents]),
+            dir.path().to_string_lossy().into_owned(),
+        )
+        .with_announcer(Arc::new(move |p: String| rec.lock().unwrap().push(p)));
+
+        let launch = route(&st, &Request {
+            method: "POST".into(),
+            path: "/api/launch".into(),
+            body: r#"{"agent":"sleeper","provider":"native"}"#.into(),
+            ..Default::default()
+        });
+        let id = serde_json::from_slice::<Value>(&launch.body).unwrap()["session"].as_str().unwrap().to_string();
+        assert_eq!(st.close_all().len(), 1);
+        // The close path announced an `ended` for that session id so the explorer removes its leaf.
+        let announces = seen.lock().unwrap().clone();
+        assert!(
+            announces.iter().any(|a| a.contains("\"event\":\"ended\"") && a.contains(&id)),
+            "expected an ended announce for {id}, got {announces:?}"
+        );
     }
 
     #[test]
