@@ -1,6 +1,12 @@
+<p align="center">
+  <img src="brand/logo.svg" alt="Cross-Platform Explorer" width="440">
+</p>
+
 # Cross-Platform Explorer
 
 [![CI](https://github.com/StewartScottRogers/cross-platform-explorer/actions/workflows/ci.yml/badge.svg)](https://github.com/StewartScottRogers/cross-platform-explorer/actions/workflows/ci.yml)
+
+> Brand assets, usage guide, and license live in [`brand/`](brand/BRANDING.md).
 
 A cross-platform desktop file explorer built with **Tauri v2** (Rust backend) and
 **Svelte + TypeScript** (frontend). It ships as a one-click native installer on
