@@ -2,7 +2,7 @@
 id: CPE-311
 title: Usage/cost tracking & opt-in telemetry
 type: Feature
-status: Open
+status: Deferred
 priority: Low
 component: Multiple
 tags: [needs-decision]
@@ -29,3 +29,6 @@ strictly opt-in and privacy-preserving — never prompts, code, or secrets.
 
 ## Work Log
 2026-07-13 — Filed during epic-plan hardening.
+
+## Work Log
+2026-07-15 — Moved to Deferred (needs-decision). Deferred-on: awaiting a product decision — whether to build telemetry at all, opt-in model, and exactly what is collected. Revisit-when: when you decide the telemetry scope/opt-in policy. Nothing external gates it — it's pickable the moment the decision is made.
