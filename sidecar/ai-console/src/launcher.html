@@ -71,7 +71,7 @@
   #scrollback-overlay { position: fixed; inset: 0; background: rgba(0,0,0,.5); display: grid;
                         place-items: center; z-index: 70; }
   #scrollback-overlay[hidden] { display: none; }
-  #scrollback-panel { width: 88vw; height: 82vh; background: Canvas; color: CanvasText;
+  #scrollback-panel { width: 96vw; height: 86vh; background: Canvas; color: CanvasText;
                       border: 1px solid rgba(128,128,128,.55); border-radius: 10px; padding: 14px 16px;
                       box-shadow: 0 20px 50px rgba(0,0,0,.35); display: flex; flex-direction: column; }
   #scrollback-body { position: relative; flex: 1; min-height: 0; margin-top: 8px; background: #0d0d0d;
@@ -661,10 +661,15 @@ function showScrollback(bytes) {
     scrollback: 200000, disableStdin: true, theme: { background: "#0d0d0d", foreground: "#d8d8d8" },
   });
   const fit = new FitAddon.FitAddon(); term.loadAddon(fit);
-  term.open(host); fit.fit();
+  term.open(host);
   sbState.term = term; sbState.fit = fit;
   term.onScroll(() => updateThumb(sbState));
-  term.write(bytes, () => { term.scrollToBottom(); updateThumb(sbState); });
+  // Fit AFTER the overlay has laid out (a synchronous fit right after un-hiding under-measures the
+  // width and the console re-wraps at too few columns), THEN write so it wraps at the full width.
+  requestAnimationFrame(() => {
+    try { fit.fit(); } catch (_) {}
+    term.write(bytes, () => { term.scrollToBottom(); updateThumb(sbState); });
+  });
 }
 function closeScrollback() {
   $("scrollback-overlay").hidden = true;
