@@ -37,4 +37,18 @@ describe("DuplicatesDialog (CPE-421)", () => {
     await fireEvent.click(screen.getByText("Scan for duplicates"));
     await waitFor(() => expect(screen.getByText(/No duplicate files found/)).toBeTruthy());
   });
+
+  it("cleanup: Select redundant then Move to Recycle Bin trashes the extra copy and prunes (CPE-428)", async () => {
+    response = { groups: [{ size: 1024, hash: "abc", paths: ["/repo/a.txt", "/repo/sub/b.txt"] }], files_scanned: 42, truncated: false };
+    invoke.mockClear();
+    render(DuplicatesDialog, { root: "/repo" });
+    await fireEvent.click(screen.getByText("Scan for duplicates"));
+    await waitFor(() => expect(screen.getByText(/1 duplicate set/)).toBeTruthy());
+    // Safe default keeps the first copy; only /sub/b.txt is marked.
+    await fireEvent.click(screen.getByText("Select redundant"));
+    await fireEvent.click(await screen.findByText("Move 1 to Recycle Bin"));
+    await waitFor(() => expect(invoke).toHaveBeenCalledWith("delete_to_trash", { paths: ["/repo/sub/b.txt"] }));
+    // The set drops to one copy → no longer a duplicate → the list empties.
+    await waitFor(() => expect(screen.getByText(/No duplicate files found/)).toBeTruthy());
+  });
 });
