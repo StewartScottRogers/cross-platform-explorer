@@ -1366,6 +1366,107 @@ fn text_stats(path: String) -> Result<TextStats, String> {
     })
 }
 
+/// One content-search hit: the file, the 1-based line number, and the (trimmed, truncated) line.
+#[derive(serde::Serialize)]
+struct ContentMatch {
+    path: String,
+    line_number: u64,
+    line: String,
+}
+
+/// The result of a content search (CPE-416): the hits, how many files were scanned, and whether a
+/// cap was hit (so the UI can say "showing first N").
+#[derive(serde::Serialize)]
+struct ContentSearchResult {
+    matches: Vec<ContentMatch>,
+    files_scanned: u64,
+    truncated: bool,
+}
+
+// Bounds that keep a content search fast + predictable regardless of the tree it's pointed at.
+const SEARCH_MAX_MATCHES: usize = 1000;
+const SEARCH_MAX_FILES: u64 = 20_000;
+const SEARCH_MAX_FILE_BYTES: u64 = 5 * 1024 * 1024;
+const SEARCH_SNIPPET_MAX: usize = 400;
+
+/// True if a byte slice looks binary (contains a NUL in the sniffed prefix) — skip such files.
+fn looks_binary(bytes: &[u8]) -> bool {
+    bytes.iter().take(8192).any(|&b| b == 0)
+}
+
+/// Search text files under `root` for lines containing `query` (CPE-416). Recursive, but bounded:
+/// skips dot-directories (`.git`, `.venv`, …), binary/oversized files, and stops at match/file caps
+/// (reporting `truncated`). Unreadable entries are skipped, never failing the whole search — the
+/// same resilience as `list_dir`. Empty/whitespace `query` returns nothing.
+#[tauri::command]
+fn search_file_contents(
+    root: String,
+    query: String,
+    case_sensitive: bool,
+) -> Result<ContentSearchResult, String> {
+    let needle = if case_sensitive { query.clone() } else { query.to_lowercase() };
+    let mut result = ContentSearchResult { matches: Vec::new(), files_scanned: 0, truncated: false };
+    if needle.trim().is_empty() {
+        return Ok(result);
+    }
+    let root_path = Path::new(&root);
+    if !root_path.is_dir() {
+        return Err(format!("{root}: not a folder"));
+    }
+
+    // Explicit stack, not recursion — bounded memory, and matches `list_dir`'s skip-on-error ethos.
+    let mut stack = vec![root_path.to_path_buf()];
+    while let Some(dir) = stack.pop() {
+        let Ok(entries) = fs::read_dir(&dir) else { continue };
+        for entry in entries.flatten() {
+            if result.matches.len() >= SEARCH_MAX_MATCHES || result.files_scanned >= SEARCH_MAX_FILES {
+                result.truncated = true;
+                return Ok(result);
+            }
+            let path = entry.path();
+            let name = entry.file_name();
+            let name = name.to_string_lossy();
+            let Ok(meta) = entry.metadata() else { continue };
+            if meta.is_dir() {
+                // Skip dot-dirs (.git, .venv, node_modules-style noise starts with '.') to stay fast.
+                if !name.starts_with('.') {
+                    stack.push(path);
+                }
+                continue;
+            }
+            if !meta.is_file() || meta.len() > SEARCH_MAX_FILE_BYTES {
+                continue;
+            }
+            let Ok(bytes) = fs::read(&path) else { continue };
+            if looks_binary(&bytes) {
+                continue;
+            }
+            result.files_scanned += 1;
+            let text = String::from_utf8_lossy(&bytes);
+            let path_str = path.to_string_lossy().into_owned();
+            for (i, line) in text.lines().enumerate() {
+                let hay = if case_sensitive { line.to_string() } else { line.to_lowercase() };
+                if hay.contains(&needle) {
+                    let mut snippet = line.trim().to_string();
+                    if snippet.chars().count() > SEARCH_SNIPPET_MAX {
+                        snippet = snippet.chars().take(SEARCH_SNIPPET_MAX).collect::<String>() + "…";
+                    }
+                    result.matches.push(ContentMatch {
+                        path: path_str.clone(),
+                        line_number: (i + 1) as u64,
+                        line: snippet,
+                    });
+                    if result.matches.len() >= SEARCH_MAX_MATCHES {
+                        result.truncated = true;
+                        return Ok(result);
+                    }
+                }
+            }
+        }
+    }
+    Ok(result)
+}
+
 /// Read `settings.json` from `dir`, returning `{}` when it's absent or
 /// unreadable so the frontend always starts from a valid document.
 fn read_settings_from(dir: &Path) -> String {
@@ -2881,6 +2982,7 @@ pub fn run() {
             dir_size,
             hash_file,
             text_stats,
+            search_file_contents,
             git_remote_url,
             open_external,
             run_as_admin,
@@ -3752,6 +3854,41 @@ mod tests {
         fs::write(d.join("bin"), [0xff, 0xfe, 0x00]).unwrap();
         assert!(text_stats(d.join("bin").to_string_lossy().to_string()).is_err());
         assert!(text_stats(d.to_string_lossy().to_string()).is_err());
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn search_file_contents_finds_matches_recursively_and_skips_noise() {
+        let d = scratch("search");
+        fs::write(d.join("a.txt"), b"hello world\nsecond line\nNEEDLE here\n").unwrap();
+        fs::create_dir_all(d.join("sub")).unwrap();
+        fs::write(d.join("sub").join("b.md"), b"nothing\nfound the needle deep\n").unwrap();
+        // A binary file with the text — must be skipped.
+        fs::write(d.join("c.bin"), b"needle\x00binary").unwrap();
+        // A dot-dir — must be skipped.
+        fs::create_dir_all(d.join(".git")).unwrap();
+        fs::write(d.join(".git").join("x"), b"needle in git").unwrap();
+
+        let r = search_file_contents(d.to_string_lossy().to_string(), "needle".into(), false).unwrap();
+        let paths: Vec<String> = r.matches.iter().map(|m| m.path.replace('\\', "/")).collect();
+        // Case-insensitive: matches "NEEDLE" (a.txt) and "needle" (sub/b.md); NOT the binary or .git.
+        assert_eq!(r.matches.len(), 2, "got {paths:?}");
+        assert!(paths.iter().any(|p| p.ends_with("a.txt")));
+        assert!(paths.iter().any(|p| p.ends_with("sub/b.md")));
+        assert!(!paths.iter().any(|p| p.contains(".git") || p.ends_with("c.bin")));
+        // Line numbers are 1-based.
+        let a = r.matches.iter().find(|m| m.path.ends_with("a.txt")).unwrap();
+        assert_eq!(a.line_number, 3);
+        assert_eq!(a.line, "NEEDLE here");
+
+        // Case-sensitive excludes the uppercase hit.
+        let cs = search_file_contents(d.to_string_lossy().to_string(), "needle".into(), true).unwrap();
+        assert_eq!(cs.matches.len(), 1);
+        assert!(cs.matches[0].path.replace('\\', "/").ends_with("sub/b.md"));
+
+        // Empty query and a non-folder root behave sanely.
+        assert_eq!(search_file_contents(d.to_string_lossy().to_string(), "  ".into(), false).unwrap().matches.len(), 0);
+        assert!(search_file_contents(d.join("a.txt").to_string_lossy().to_string(), "x".into(), false).is_err());
         let _ = fs::remove_dir_all(&d);
     }
 
