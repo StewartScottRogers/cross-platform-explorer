@@ -4,6 +4,7 @@
   // need no token; a token unlocks private ones. This is the visible surface of the forge epic.
   import { createEventDispatcher } from "svelte";
   import { invoke } from "@tauri-apps/api/core";
+  import { open as openFolderDialog } from "@tauri-apps/plugin-dialog";
   import Icon from "./Icon.svelte";
 
   interface RepoEntry { name: string; path: string; is_dir: boolean; size: number }
@@ -40,6 +41,30 @@
     }
   }
 
+  let cloning = false;
+  let cloneMsg = "";
+
+  /** Clone the current repo into a user-chosen folder (CPE-436) via the host `forge_clone` command
+      (hardened git args, allow-listed host). Clones into `<chosen>/<repo-name>`. */
+  async function clone(): Promise<void> {
+    const r = repo.trim();
+    if (!r.includes("/")) { error = "Enter a repository as owner/name."; return; }
+    const dir = await openFolderDialog({ directory: true, title: `Clone ${r} into which folder?` });
+    if (!dir || typeof dir !== "string") return;
+    const name = r.split("/").pop();
+    const target = dir.replace(/[\\/]$/, "") + "/" + name;
+    cloning = true; cloneMsg = `Cloning ${r} → ${target}…`; error = "";
+    try {
+      await invoke("forge_clone", { provider, repo: r, targetDir: target, token: token.trim() || null });
+      cloneMsg = `Cloned to ${target}`;
+    } catch (e) {
+      cloneMsg = "";
+      error = "Clone failed: " + (e instanceof Error ? e.message : String(e));
+    } finally {
+      cloning = false;
+    }
+  }
+
   /** Into a folder, or up one level. */
   function open(entry: RepoEntry) { if (entry.is_dir) browse(entry.path); }
   function up() {
@@ -73,7 +98,12 @@
       />
       <input class="repo-token" type="password" placeholder="token (optional — for private repos)" bind:value={token} />
       <button class="repo-go" on:click={() => browse("")} disabled={loading}>Browse</button>
+      <button class="repo-go" on:click={clone} disabled={cloning} title="Clone this repo to a local folder">
+        {cloning ? "Cloning…" : "Clone"}
+      </button>
     </div>
+
+    {#if cloneMsg}<div class="repo-clonemsg">{cloneMsg}</div>{/if}
 
     {#if loaded && !error}
       <div class="repo-crumbs">
@@ -133,4 +163,5 @@
   .repo-size { font-size: 11px; opacity: 0.55; }
   .repo-empty { padding: 20px 14px; opacity: 0.6; text-align: center; }
   .repo-error { padding: 14px; color: #e0706b; }
+  .repo-clonemsg { padding: 4px 14px; font-size: 12px; color: var(--accent, #6ab0ff); }
 </style>

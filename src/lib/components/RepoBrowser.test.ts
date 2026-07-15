@@ -6,10 +6,13 @@
 import { render, screen, fireEvent, waitFor } from "@testing-library/svelte";
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { invoke } from "@tauri-apps/api/core";
+import { open as openFolderDialog } from "@tauri-apps/plugin-dialog";
 import RepoBrowser from "./RepoBrowser.svelte";
 
 vi.mock("@tauri-apps/api/core", () => ({ invoke: vi.fn() }));
+vi.mock("@tauri-apps/plugin-dialog", () => ({ open: vi.fn() }));
 const invokeMock = invoke as unknown as ReturnType<typeof vi.fn>;
+const openMock = openFolderDialog as unknown as ReturnType<typeof vi.fn>;
 
 const root = [
   { name: "src", path: "src", is_dir: true, size: 0 },
@@ -17,7 +20,7 @@ const root = [
 ];
 const srcDir = [{ name: "lib.rs", path: "src/lib.rs", is_dir: false, size: 42 }];
 
-beforeEach(() => invokeMock.mockReset());
+beforeEach(() => { invokeMock.mockReset(); openMock.mockReset(); });
 
 describe("RepoBrowser", () => {
   it("browses a repo and calls forge_browse with owner/name + provider", async () => {
@@ -49,6 +52,26 @@ describe("RepoBrowser", () => {
     await fireEvent.click(screen.getByRole("button", { name: "Browse" }));
     expect(invokeMock).not.toHaveBeenCalled();
     expect(await screen.findByText(/owner\/name/i)).toBeTruthy();
+  });
+
+  it("clones into <chosen>/<repo-name> via forge_clone after a folder pick", async () => {
+    openMock.mockResolvedValueOnce("/home/me/code");
+    invokeMock.mockResolvedValueOnce("ok");
+    render(RepoBrowser, { props: { provider: "github", repo: "tauri-apps/tauri" } });
+    await fireEvent.click(screen.getByRole("button", { name: "Clone" }));
+
+    await waitFor(() => expect(invokeMock).toHaveBeenCalledWith("forge_clone", {
+      provider: "github", repo: "tauri-apps/tauri", targetDir: "/home/me/code/tauri", token: null,
+    }));
+    expect(await screen.findByText(/Cloned to \/home\/me\/code\/tauri/)).toBeTruthy();
+  });
+
+  it("does nothing if the folder pick is cancelled", async () => {
+    openMock.mockResolvedValueOnce(null);
+    render(RepoBrowser, { props: { repo: "o/r" } });
+    await fireEvent.click(screen.getByRole("button", { name: "Clone" }));
+    await waitFor(() => expect(openMock).toHaveBeenCalled());
+    expect(invokeMock).not.toHaveBeenCalledWith("forge_clone", expect.anything());
   });
 
   it("surfaces a backend error inline", async () => {
