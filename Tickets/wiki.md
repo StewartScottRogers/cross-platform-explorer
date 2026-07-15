@@ -17,7 +17,8 @@ Tickets/
   _template.md   <- copy to Backlog/ to start a new ticket
   Backlog/       <- open tickets waiting to be worked
   Doing/         <- ticket the agent is currently working (one at a time)
-  Blocked/       <- tickets deferred on an external gate
+  Blocked/       <- tickets deferred on an EXTERNAL gate (can't be worked until it clears)
+  Deferred/      <- tickets WE postponed by choice / on an internal prereq (pickable anytime)
   Done/          <- closed tickets — never deleted
 ```
 
@@ -43,7 +44,7 @@ Sequential. To find the next ID: scan all folders for `CPE-*.md`, read the highe
 id: CPE-NNN
 title: Human-readable title (sentence case)
 type: Bug | Defect | Task | Feature | Test
-status: Open | In Progress | Blocked | Done | Won't Fix | Duplicate
+status: Open | In Progress | Blocked | Deferred | Done | Won't Fix | Duplicate
 priority: Low | Medium | High | Critical
 component: Frontend | Backend | Updater | CI | Packaging | Docs | Multiple
 tags: [<disposition tag>, ...]   # at least one — see Disposition Tags below
@@ -120,11 +121,20 @@ Rules:
 ```
 Backlog/ (Open) -> Doing/ (In Progress) -> Done/ (Done | Won't Fix | Duplicate)
                         |
-                        +-> Blocked/ (Blocked)  <- external gate; returns to Backlog/ when cleared
+                        +-> Blocked/ (Blocked)   <- EXTERNAL gate; returns to Backlog/ when cleared
+                        |
+                        +-> Deferred/ (Deferred) <- OUR choice / internal prereq; pick up anytime
 ```
 
 Only one ticket in Doing/ at a time under normal circumstances.
 To reopen: move from Done/ back to Backlog/, set `status: Open`, add a Work Log note.
+
+**Blocked vs Deferred** — both are non-terminal side states, but they differ by *cause*:
+`Blocked/` is an **external** gate we can't clear by working (certs, macOS/Linux hardware, a paid
+plan, a third party, a date) — not pickable until it clears. `Deferred/` is a **deliberate
+postponement** by us — usually waiting on an *internal* prerequisite ticket, or deprioritized to
+revisit later — and it stays pickable at any time (`/ticketing-work` un-defers it). Never close
+either as Won't Fix; they are postponed, not declined. See each folder's `wiki.md`.
 
 ---
 

@@ -13,3 +13,8 @@ Blocked is a side state, not a terminal one. Do NOT close blocked tickets as Won
 deferred, not declined. When the gate clears, move the ticket back to `Backlog/` (or straight to
 `Doing/` via `/ticketing-work`). Blocked tickets are shown by `/ticketing-list` but are not offered
 in its Work options.
+
+**Blocked vs Deferred:** use `Blocked/` only for an **external** gate you cannot clear by working.
+If *we* chose to postpone the work — it's doable but waiting on an internal prerequisite ticket, or
+deprioritized to revisit later — it belongs in [`../Deferred/`](../Deferred/wiki.md), which stays
+pickable at any time. If in doubt: can working alone unblock it? Yes → Deferred. No → Blocked.

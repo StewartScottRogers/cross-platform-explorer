@@ -3,10 +3,13 @@ pick up -> implement -> close.
 
 ## Picking Up
 
-1. Find the file. Check Tickets/Backlog/CPE-$ARGUMENTS_*.md first, then Blocked/, then Doing/, then Done/ recursively.
+1. Find the file. Check Tickets/Backlog/CPE-$ARGUMENTS_*.md first, then Blocked/, then Deferred/, then Doing/, then Done/ recursively.
 2. If found in Done/: ask the user whether to reopen before proceeding.
    If found in Blocked/: read the Work Log's blocked-on / unblock note first. Confirm the blocker has
    actually cleared before picking up; if it has not, tell the user what is still gating it and stop.
+   If found in Deferred/: read the Work Log's deferred-on / revisit note. No external gate blocks it —
+   picking it up *is* the decision to un-defer it; just note that in the Work Log and proceed (if it
+   was deferred on an internal prereq, sanity-check that prereq is far enough along).
 3. Read the ticket fully — Summary, type, component, and every Acceptance Criterion —
    before touching any code.
 4. Review the `estimate:` frontmatter field:
@@ -100,3 +103,9 @@ Exit without action.
   blocked on* and *what will unblock it* (prefer a "Next Actions — Owner" checklist so the unblock is
   turnkey). Do NOT close it as Won't Fix — it is deferred, not declined. (Returning a ticket to
   `Backlog/` instead is also fine when no partial work was needed.)
+- If the remaining work is not externally gated but should be **postponed by choice** — its
+  headlessly-verifiable core is done and the tail waits on an **internal prerequisite ticket**, or it
+  is deliberately deprioritized — land the completable part, then **move the ticket to `Deferred/`** —
+  set `status: Deferred` and record in the Work Log *deferred-on* (the prereq ticket / reason) and
+  *revisit-when*. Distinct from Blocked: nothing external stops it, so it stays pickable at any time.
+  Prefer `Deferred/` over leaving a half-done ticket sitting in `Backlog/` marked "Open".

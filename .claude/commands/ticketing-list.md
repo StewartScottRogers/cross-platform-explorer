@@ -14,7 +14,7 @@ then present an action menu following the rules in menu-render.md.
 | ID | Title | Type | Priority | Tags | Estimate |
 |----|-------|------|----------|------|----------|
 
-### ALWAYS also show Blocked (mandatory)
+### ALWAYS also show Blocked and Deferred (mandatory)
 
 After the Backlog table, ALWAYS show a **Blocked** table — never omit it. Glob
 `Tickets/Blocked/CPE-*.md` and render: ID, title, **Tags** (from `tags:`), and a one-line
@@ -22,15 +22,22 @@ After the Backlog table, ALWAYS show a **Blocked** table — never omit it. Glob
 misrepresents the queue. If `Blocked/` is empty, print "Blocked: none" rather than dropping the
 section entirely.
 
+Then ALWAYS show a **Deferred** table too. Glob `Tickets/Deferred/CPE-*.md` and render: ID, title,
+**Tags**, and a one-line *deferred-on / revisit-when* note from the ticket's Notes or Work Log.
+Deferred tickets are work we postponed by choice (often an internal prereq), not externally gated —
+still outstanding. If `Deferred/` is empty, print "Deferred: none" rather than dropping the section.
+
 Also glob `Tickets/Doing/CPE-*.md`. If anything is in-flight or stalled there, show it under its own
 heading so abandoned work-in-progress can be restarted.
 
 Blocked tickets are **not** offered in the action menu's Work options (working them won't clear the
-gate) — they are shown for visibility only.
+gate). Deferred tickets are also **not** in the default Work-all/subset options — but unlike Blocked
+they *can* be picked up explicitly at any time (no gate to clear), so [3] One accepts a Deferred ID.
 
-The action menu below operates on the **Backlog** queue only. If the Backlog is empty but `Blocked/`
-has tickets, say so explicitly ("nothing workable now; N blocked on external dependencies") rather
-than implying there is no outstanding work.
+The action menu below operates on the **Backlog** queue by default. If the Backlog is empty but
+`Blocked/`/`Deferred/` have tickets, say so explicitly ("nothing in the ready queue; N blocked on
+external gates, M deferred by choice — pick a deferred one up anytime") rather than implying there is
+no outstanding work.
 
 ---
 
