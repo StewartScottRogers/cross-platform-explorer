@@ -31,6 +31,7 @@ export const SHORTCUT_GROUPS: ShortcutGroup[] = [
       { keys: "Ctrl+L", description: "Edit address (type a path)" },
       { keys: "Alt+D", description: "Edit address (type a path)" },
       { keys: "Ctrl+F", description: "Search the current folder" },
+      { keys: "Ctrl+Shift+F", description: "Search inside files (content search)" },
       { keys: "Enter", description: "Open the selected item" },
       { keys: "Type a name", description: "Jump to the matching item" },
     ],

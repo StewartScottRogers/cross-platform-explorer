@@ -35,6 +35,7 @@
   import ContextMenu from "./lib/components/ContextMenu.svelte";
   import ConfirmDialog from "./lib/components/ConfirmDialog.svelte";
   import ShortcutsDialog from "./lib/components/ShortcutsDialog.svelte";
+  import ContentSearchDialog from "./lib/components/ContentSearchDialog.svelte";
   import PropertiesDialog from "./lib/components/PropertiesDialog.svelte";
   import BatchRenameDialog from "./lib/components/BatchRenameDialog.svelte";
   import type { RenameItem } from "./lib/batchRename";
@@ -181,6 +182,8 @@
   let showAbout = false;
   let showSettings = false;
   let shortcutsOpen = false;
+  /** "Search in files" content-search overlay (Ctrl+Shift+F), scoped to the current folder (CPE-417). */
+  let contentSearchOpen = false;
   let patternSelectOpen = false;
   /** True in sidecar-platform builds — gates the AI Console toolbar button (CPE-351). */
   let aiConsoleAvailable = false;
@@ -1402,6 +1405,7 @@
     if (ctrl && event.shiftKey && event.key.toLowerCase() === "n") { event.preventDefault(); newFolder(); return; }
     if (ctrl && event.shiftKey && event.key.toLowerCase() === "o") { event.preventDefault(); popOutPreview(); return; }
     if (ctrl && event.shiftKey && event.key.toLowerCase() === "t") { event.preventDefault(); reopenClosedTab(); return; }
+    if (ctrl && event.shiftKey && event.key.toLowerCase() === "f") { event.preventDefault(); if (!isHome && !archive) contentSearchOpen = true; return; }
     if (ctrl && event.key.toLowerCase() === "t") { event.preventDefault(); newTab(); return; }
     if (ctrl && event.key.toLowerCase() === "w") { event.preventDefault(); closeTab(activeId); return; }
     if (ctrl && event.key === "Tab") { event.preventDefault(); cycleTab(event.shiftKey ? -1 : 1); return; }
@@ -2183,6 +2187,14 @@
 
 {#if shortcutsOpen}
   <ShortcutsDialog on:close={() => (shortcutsOpen = false)} />
+{/if}
+
+{#if contentSearchOpen}
+  <ContentSearchDialog
+    root={currentPath}
+    on:navigate={(e) => { contentSearchOpen = false; navigateToTyped(e.detail); }}
+    on:close={() => (contentSearchOpen = false)}
+  />
 {/if}
 
 {#if patternSelectOpen}
