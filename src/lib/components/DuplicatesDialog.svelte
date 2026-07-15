@@ -41,8 +41,8 @@
   }
 
   function goToFile(path: string) {
-    const dir = parentDir(path);
-    if (dir) dispatch("navigate", dir);
+    // Dispatch the FILE path — the host reveals it (navigates to its folder AND selects it, CPE-423).
+    dispatch("navigate", path);
     dispatch("close");
   }
 </script>

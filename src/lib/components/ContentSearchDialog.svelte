@@ -7,7 +7,7 @@
   import { createEventDispatcher } from "svelte";
   import { invoke } from "@tauri-apps/api/core";
   import Icon from "./Icon.svelte";
-  import { groupMatches, baseName, parentDir, type ContentSearchResult } from "../contentSearch";
+  import { groupMatches, baseName, type ContentSearchResult } from "../contentSearch";
 
   export let root = "";
 
@@ -39,8 +39,8 @@
   }
 
   function goToFile(path: string) {
-    const dir = parentDir(path);
-    if (dir) dispatch("navigate", dir);
+    // Dispatch the FILE path — the host reveals it (navigates to its folder AND selects it, CPE-423).
+    dispatch("navigate", path);
     dispatch("close");
   }
 </script>

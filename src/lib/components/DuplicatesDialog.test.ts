@@ -28,7 +28,7 @@ describe("DuplicatesDialog (CPE-421)", () => {
     expect(screen.getByText(/2 copies/)).toBeTruthy();
 
     await fireEvent.click(screen.getByText("b.txt"));
-    expect(onNavigate).toHaveBeenCalledWith("/repo/sub");
+    expect(onNavigate).toHaveBeenCalledWith("/repo/sub/b.txt");
   });
 
   it("reports when there are no duplicates", async () => {

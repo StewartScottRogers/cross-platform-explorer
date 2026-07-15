@@ -31,9 +31,9 @@ describe("ContentSearchDialog (CPE-417)", () => {
     expect(screen.getByText("a.txt")).toBeTruthy();
     expect(screen.getByText("the needle is here")).toBeTruthy();
 
-    // Clicking a hit dispatches navigate to the file's PARENT folder.
+    // Clicking a hit dispatches navigate with the FILE path (the host reveals + selects it, CPE-423).
     await fireEvent.click(screen.getByText("found the needle deep"));
-    expect(onNavigate).toHaveBeenCalledWith("/repo/sub");
+    expect(onNavigate).toHaveBeenCalledWith("/repo/sub/b.md");
   });
 
   it("shows a no-matches message when nothing is found", async () => {
