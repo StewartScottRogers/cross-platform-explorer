@@ -74,19 +74,6 @@
               border-radius: 5px; cursor: grab; }
   .sb-thumb:hover { background: #8f8f8f; }
   .sb-thumb:active { cursor: grabbing; background: #a5a5a5; }
-  /* Scrollable "Session output" panel (CPE-385) — a read-only replay with the custom scrollbar. */
-  #scrollback-btn { position: absolute; top: 6px; right: 20px; z-index: 5; height: 26px;
-                    padding: 0 10px; font-size: 12px; opacity: .82; display: none; }
-  #scrollback-btn:hover { opacity: 1; }
-  #scrollback-overlay { position: fixed; inset: 0; background: rgba(0,0,0,.5); display: grid;
-                        place-items: center; z-index: 70; }
-  #scrollback-overlay[hidden] { display: none; }
-  #scrollback-panel { width: 96vw; height: 86vh; background: Canvas; color: CanvasText;
-                      border: 1px solid rgba(128,128,128,.55); border-radius: 10px; padding: 14px 16px;
-                      box-shadow: 0 20px 50px rgba(0,0,0,.35); display: flex; flex-direction: column; }
-  #scrollback-body { position: relative; flex: 1; min-height: 0; margin-top: 8px; background: #0d0d0d;
-                     border-radius: 6px; overflow: hidden; }
-  #scrollback-host { position: absolute; left: 0; top: 0; bottom: 0; right: 14px; }
   /* "Manage agents" dropdown + Help panel (CPE-390) */
   .menu-wrap { position: relative; display: inline-block; }
   .menu { position: absolute; top: calc(100% + 4px); right: 0; z-index: 40; min-width: 230px;
@@ -238,7 +225,6 @@
   <div id="msg">Pick an agent, provider and model, then Launch.</div>
   <div id="tabs"></div>
   <div id="terms">
-    <button id="scrollback-btn" type="button" title="Scroll through everything this session produced">⇕ Full output</button>
   </div>
   <div id="statusbar">
     <span id="sb-folder" title="Project folder">No project folder set</span>
@@ -307,19 +293,6 @@
     </div>
   </div>
 
-  <!-- Scrollable session-output replay (CPE-385): read-only terminal + the custom scrollbar. -->
-  <div id="scrollback-overlay" hidden>
-    <div id="scrollback-panel">
-      <div class="keys-head">
-        <span>Session output</span>
-        <button id="scrollback-close" type="button" class="keys-x" title="Close">×</button>
-      </div>
-      <div id="scrollback-body">
-        <div id="scrollback-host"></div>
-        <div class="sb" id="scrollback-sb"><div class="sb-thumb" id="scrollback-thumb"></div></div>
-      </div>
-    </div>
-  </div>
 
   <!-- Task-oriented help (CPE-390): the "?" button opens this; explains what each feature is for. -->
   <div id="help-overlay" hidden>
@@ -340,10 +313,7 @@
         <h3>3 · Save a reusable setup — “Save setup”</h3>
         <p>A <b>setup</b> remembers your <b>provider + model</b> choice under a name. It does <b>not</b> save your key — keys live in <b>Keys…</b>. Type a name, click <b>Save setup</b>, then pick it later from the <b>Setup</b> dropdown. Setups are per-agent.</p>
 
-        <h3>4 · Scroll back through output — “⇕ Full output”</h3>
-        <p>A full-screen agent like Claude Code draws its own screen and does its own scrolling — just use your <b>mouse wheel</b> inside it. To review <b>everything</b> a session printed, with a draggable scrollbar, click <b>⇕ Full output</b> at the top-right of the terminal.</p>
-
-        <h3>5 · Keep agents current — “Manage agents ▾”</h3>
+        <h3>4 · Keep agents current — “Manage agents ▾”</h3>
         <p><b>Check for updates now</b> fetches new/updated agents (signed); <b>Auto-update on open</b> does it automatically; <b>Pin this agent</b> freezes one agent's version; <b>Reset to the shipped agents</b> undoes updates.</p>
 
         <h3>6 · Recent sessions — “Recent…”</h3>
@@ -600,7 +570,6 @@ function refit(s) {
 
 function activate(id) {
   activeId = id;
-  $("scrollback-btn").style.display = "block"; // a session exists → offer the output panel (CPE-385)
   for (const s of sessions.values()) {
     const on = s.id === id;
     s.pane.style.display = on ? "block" : "none";
@@ -652,75 +621,6 @@ function wireScrollbar(s) {
 }
 
 // --- Scrollable "Session output" panel (CPE-385): a read-only replay + the custom scrollbar ------
-let sbState = null; // { term, fit, sb, thumb } — wired once; the replay term is swapped per open.
-function base64ToBytes(b64) {
-  const bin = atob(b64 || "");
-  const a = new Uint8Array(bin.length);
-  for (let i = 0; i < bin.length; i++) a[i] = bin.charCodeAt(i);
-  return a;
-}
-// Strip alternate-screen enter/leave so a full-screen agent's output accumulates in the scrollable
-// main buffer (otherwise the replay would only show the last frame, like the live view).
-function stripAltScreen(bytes) {
-  let bin = "";
-  for (let i = 0; i < bytes.length; i++) bin += String.fromCharCode(bytes[i]);
-  bin = bin.replace(/\x1b\[\?(?:1049|1047|47)[hl]/g, "");
-  const out = new Uint8Array(bin.length);
-  for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
-  return out;
-}
-function ensureSbWired() {
-  if (sbState) return;
-  sbState = { term: null, fit: null, sb: $("scrollback-sb"), thumb: $("scrollback-thumb") };
-  wireScrollbar(sbState); // closures read sbState.term live, so wiring once is enough
-  if (window.ResizeObserver) {
-    new ResizeObserver(() => {
-      if (sbState.term && sbState.fit) { try { sbState.fit.fit(); updateThumb(sbState); } catch (_) {} }
-    }).observe($("scrollback-host"));
-  }
-}
-// Fetch the session's current output ring, alt-screen stripped. Always a fresh pull — a plain GET
-// on this stable URL can be served stale from the WebView2 cache, so no-store + a cache-buster
-// (CPE-409). Shared by the initial open and the live-update poll (CPE-410).
-async function fetchSessionOutput() {
-  const url = "/api/session/" + activeId + "/output?t=" + Date.now();
-  const data = await api(url, { cache: "no-store" });
-  return stripAltScreen(base64ToBytes(data.outputB64));
-}
-async function openScrollback() {
-  if (!activeId) { setMsg("No active session.", false); return; }
-  try {
-    showScrollback(await fetchSessionOutput());
-  } catch (e) { setMsg("Couldn't load output: " + e.message); }
-}
-function showScrollback(bytes) {
-  ensureSbWired();
-  if (sbState.term) { try { sbState.term.dispose(); } catch (_) {} }
-  $("scrollback-overlay").hidden = false;
-  const host = $("scrollback-host"); host.innerHTML = "";
-  const term = new Terminal({
-    fontFamily: "ui-monospace, Consolas, 'Cascadia Mono', monospace", fontSize: 13,
-    scrollback: 200000, disableStdin: true, theme: { background: "#0d0d0d", foreground: "#d8d8d8" },
-  });
-  const fit = new FitAddon.FitAddon(); term.loadAddon(fit);
-  term.open(host);
-  sbState.term = term; sbState.fit = fit;
-  term.onScroll(() => updateThumb(sbState));
-  // Fit AFTER the overlay has laid out (a synchronous fit right after un-hiding under-measures the
-  // width and the console re-wraps at too few columns), THEN write so it wraps at the full width.
-  requestAnimationFrame(() => {
-    try { fit.fit(); } catch (_) {}
-    term.write(bytes, () => { term.scrollToBottom(); updateThumb(sbState); });
-  });
-}
-function closeScrollback() {
-  $("scrollback-overlay").hidden = true;
-  if (sbState && sbState.term) { try { sbState.term.dispose(); } catch (_) {} sbState.term = null; }
-}
-$("scrollback-btn").addEventListener("click", openScrollback);
-$("scrollback-close").addEventListener("click", closeScrollback);
-$("scrollback-overlay").addEventListener("click", (e) => { if (e.target === $("scrollback-overlay")) closeScrollback(); });
-
 function connectWs(s) {
   const proto = location.protocol === "https:" ? "wss" : "ws";
   s.ws = new WebSocket(proto + "://" + location.host + "/api/session/" + s.id + "/ws");

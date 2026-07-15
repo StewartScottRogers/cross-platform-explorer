@@ -120,7 +120,7 @@ describe("AI Console launcher — named sets / presets (the reported confusion)"
   });
 });
 
-describe("AI Console launcher — catalog controls + scrollback helpers", () => {
+describe("AI Console launcher — catalog controls", () => {
   it("renderCatalogControls reflects the persisted auto-update + pin state", async () => {
     const { w } = await mountLauncher();
     w.eval(`catalog = ${JSON.stringify({ ...defaultCatalog(), presets: { agents: { claude: {} }, autoUpdateCatalog: true, pinnedAgents: ["claude"] } })}`);
@@ -171,14 +171,6 @@ describe("AI Console launcher — catalog controls + scrollback helpers", () => 
     await new Promise((r) => setTimeout(r, 0));
     expect(w.document.getElementById("rollback-overlay").hidden).toBe(true);
     expect(w.document.getElementById("msg").textContent).toMatch(/no prior versions/i);
-  });
-
-  it("stripAltScreen removes alternate-screen enter/leave sequences", async () => {
-    const { w } = await mountLauncher();
-    const enc = (s: string) => new w.Uint8Array([...s].map((c) => c.charCodeAt(0)));
-    const dec = (a: Uint8Array) => String.fromCharCode(...a);
-    const input = enc("\x1b[?1049hHELLO\x1b[?1049l");
-    expect(dec(w.stripAltScreen(input))).toBe("HELLO");
   });
 });
 
@@ -255,29 +247,6 @@ describe("AI Console launcher — inexperienced-user goal (CPE-392/393/394)", ()
     w.document.getElementById("onboard-addkey").click();
     expect(w.document.getElementById("onboard-overlay").hidden).toBe(true);
     expect(w.document.getElementById("keys-overlay").hidden).toBe(false);
-  });
-});
-
-describe("AI Console launcher — Session output panel (CPE-408/409)", () => {
-  it("opening the panel loads the session output and shows the overlay", async () => {
-    const { w } = await mountLauncher((path) =>
-      path.includes("/api/session/") && path.includes("/output")
-        ? { outputB64: Buffer.from("hello world").toString("base64") }
-        : {},
-    );
-    w.eval("activeId = 's1'");
-    await w.openScrollback();
-    expect(w.document.getElementById("scrollback-overlay").hidden).toBe(false);
-    w.closeScrollback();
-    expect(w.document.getElementById("scrollback-overlay").hidden).toBe(true);
-  });
-
-  it("open guards against no active session", async () => {
-    const { w } = await mountLauncher();
-    w.eval("activeId = null");
-    await w.openScrollback();
-    expect(w.document.getElementById("scrollback-overlay").hidden).toBe(true);
-    expect(w.document.getElementById("msg").textContent).toMatch(/no active session/i);
   });
 });
 
