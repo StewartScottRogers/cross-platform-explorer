@@ -10,6 +10,7 @@
   import Icon from "./Icon.svelte";
   import { formatSize } from "../format";
   import { baseName, parentDir } from "../contentSearch";
+  import { redundantPaths, keepsOnePerGroup, pruneGroups } from "../duplicates";
 
   export let root = "";
 
@@ -22,6 +23,34 @@
   let error = "";
   let started = false;
   let result: DupResult = { groups: [], files_scanned: 0, truncated: false };
+
+  // Paths the user has marked for removal (CPE-428). A Set, reassigned to trigger reactivity.
+  let selected = new Set<string>();
+  let deleting = false;
+  $: canClean = selected.size > 0 && keepsOnePerGroup(result.groups, selected);
+
+  function toggle(path: string) {
+    if (selected.has(path)) selected.delete(path);
+    else selected.add(path);
+    selected = new Set(selected);
+  }
+  function selectRedundant() {
+    selected = new Set(redundantPaths(result.groups));
+  }
+  async function cleanUp() {
+    if (!canClean) return;
+    const paths = [...selected];
+    deleting = true;
+    try {
+      await invoke("delete_to_trash", { paths });
+      result = { ...result, groups: pruneGroups(result.groups, selected) };
+      selected = new Set();
+    } catch (e) {
+      error = String(e);
+    } finally {
+      deleting = false;
+    }
+  }
 
   // Reclaimable = for each group, the redundant copies × size (keep one copy per group).
   $: reclaimable = result.groups.reduce((n, g) => n + g.size * (g.paths.length - 1), 0);
@@ -61,7 +90,7 @@
 
     {#if !started}
       <div class="intro">
-        <p>Scan this folder (and subfolders) for byte-identical files. Nothing is deleted — you choose what to remove.</p>
+        <p>Scan this folder (and subfolders) for byte-identical files. You choose which copies to remove — they go to the Recycle Bin, and at least one copy of each set is always kept.</p>
         <button class="btn primary" on:click={run}>Scan for duplicates</button>
       </div>
     {:else if loading}
@@ -71,11 +100,19 @@
     {:else if result.groups.length === 0}
       <p class="dim">No duplicate files found ({result.files_scanned.toLocaleString()} files scanned).</p>
     {:else}
-      <p class="summary">
-        {result.groups.length} duplicate set{result.groups.length === 1 ? "" : "s"} ·
-        {formatSize(reclaimable) || "0 B"} reclaimable
-        {#if result.truncated}<span class="dim"> (scan capped)</span>{/if}
-      </p>
+      <div class="summary">
+        <span>
+          {result.groups.length} duplicate set{result.groups.length === 1 ? "" : "s"} ·
+          {formatSize(reclaimable) || "0 B"} reclaimable
+          {#if result.truncated}<span class="dim"> (scan capped)</span>{/if}
+        </span>
+        <span class="cleanup">
+          <button class="mini" on:click={selectRedundant} title="Tick every copy except the first in each set">Select redundant</button>
+          <button class="mini danger" disabled={!canClean || deleting} on:click={cleanUp}>
+            {deleting ? "Removing…" : `Move ${selected.size} to Recycle Bin`}
+          </button>
+        </span>
+      </div>
       <div class="results">
         {#each result.groups as g (g.hash)}
           <div class="group">
@@ -85,10 +122,15 @@
               <span class="waste">{formatSize(g.size * (g.paths.length - 1)) || "0 B"} extra</span>
             </div>
             {#each g.paths as p (p)}
-              <button class="hit" title={p} on:click={() => goToFile(p)}>
-                <Icon name="file" size={12} /> <span class="name">{baseName(p)}</span>
-                <span class="loc">{parentDir(p)}</span>
-              </button>
+              <div class="row">
+                <label class="pick" title="Mark this copy for the Recycle Bin">
+                  <input type="checkbox" checked={selected.has(p)} on:change={() => toggle(p)} />
+                </label>
+                <button class="hit" title={p} on:click={() => goToFile(p)}>
+                  <Icon name="file" size={12} /> <span class="name">{baseName(p)}</span>
+                  <span class="loc">{parentDir(p)}</span>
+                </button>
+              </div>
             {/each}
           </div>
         {/each}
@@ -112,7 +154,15 @@
   .intro p { color: var(--text-dim); font-size: 13px; }
   .btn { height: 32px; padding: 0 16px; border-radius: var(--radius); border: 1px solid var(--border-strong); background: var(--surface-alt); justify-self: start; }
   .btn.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
-  .summary { font-size: 12px; color: var(--text-dim); margin-bottom: 6px; }
+  .summary { font-size: 12px; color: var(--text-dim); margin-bottom: 6px; display: flex; align-items: center; gap: 10px; }
+  .cleanup { margin-left: auto; display: flex; gap: 6px; flex: 0 0 auto; }
+  .mini { height: 24px; padding: 0 10px; border-radius: var(--radius); border: 1px solid var(--border-strong); background: var(--surface-alt); font-size: 12px; }
+  .mini:hover { background: var(--surface); }
+  .mini.danger:not(:disabled) { border-color: #c42b1c; color: #c42b1c; }
+  .mini:disabled { opacity: 0.5; }
+  .row { display: flex; align-items: center; gap: 4px; padding-left: 16px; }
+  .pick { display: inline-flex; align-items: center; }
+  .row .hit { flex: 1; }
   .results { overflow: auto; }
   .group { margin-bottom: 10px; }
   .ghead { display: flex; align-items: center; gap: 6px; font-size: 12px; font-weight: 600; padding: 3px 6px; }
