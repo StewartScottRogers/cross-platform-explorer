@@ -78,6 +78,20 @@ describe("batch rename — add prefix/suffix (CPE-424)", () => {
   });
 });
 
+describe("batch rename — change case (CPE-427)", () => {
+  it("transforms the base only, preserving the extension", async () => {
+    const { planCase } = await import("./batchRename");
+    expect(planCase(["README.TXT"], "lower").map((i) => i.to)).toEqual(["readme.TXT"]);
+    expect(planCase(["my file.md"], "upper").map((i) => i.to)).toEqual(["MY FILE.md"]);
+    expect(planCase(["my_cool file.PNG"], "title").map((i) => i.to)).toEqual(["My_Cool File.PNG"]);
+  });
+
+  it("marks no change when the base already matches", async () => {
+    const { planCase } = await import("./batchRename");
+    expect(planCase(["readme.txt"], "lower").every((i) => !i.changed)).toBe(true);
+  });
+});
+
 describe("batch rename — sequential numbering (CPE-426)", () => {
   it("zero-pads the # run, preserves extension, counts from start, in order", async () => {
     const { planNumber } = await import("./batchRename");
