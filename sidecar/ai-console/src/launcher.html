@@ -52,6 +52,16 @@
                font-size: 15px; line-height: 1; padding: 0 2px; opacity: .55; }
   .tab-close:hover { color: #d05656; opacity: 1; }
   #terms { flex: 1; min-height: 0; position: relative; background: #0d0d0d; }
+  /* Bottom status bar: project folder (left) + selected agent/model (right) + a sizing grip. */
+  #statusbar { flex: 0 0 auto; display: flex; align-items: center; gap: 12px; height: 24px;
+               padding: 0 4px 0 16px; font-size: 11.5px; color: CanvasText; opacity: .9;
+               border-top: 1px solid var(--line); background: rgba(128,128,128,0.07); white-space: nowrap; }
+  #sb-folder { flex: 1; overflow: hidden; text-overflow: ellipsis; }
+  #sb-session { flex: 0 0 auto; opacity: .65; overflow: hidden; text-overflow: ellipsis; max-width: 55%; }
+  #sb-grip { flex: 0 0 auto; width: 16px; height: 16px; cursor: nwse-resize;
+             background: repeating-linear-gradient(135deg, transparent 0 2px, rgba(128,128,128,.6) 2px 3px);
+             -webkit-mask: linear-gradient(135deg, transparent 45%, #000 45%);
+             mask: linear-gradient(135deg, transparent 45%, #000 45%); }
   .term-pane { position: absolute; inset: 0; }
   /* Each terminal reserves a 14px right gutter for our OWN scrollbar. WebView2 won't
      reliably paint a native scrollbar thumb, so we hide xterm's and draw a real,
@@ -162,7 +172,6 @@
         <label for="agent" title="The coding tool to run (Claude Code, aider, …)">Agent</label>
         <select id="agent"></select>
       </div>
-      <div class="install" id="install-wrap"></div>
       <div class="field" style="width:160px;flex:0 0 auto">
         <label for="provider" title="Who serves the model — e.g. OpenRouter, or the tool's own built-in login">Provider</label>
         <select id="provider"></select>
@@ -175,6 +184,7 @@
         <label for="model" title="Which AI model to use — leave blank for the tool's default">Model</label>
         <input id="model" placeholder="(default)" />
       </div>
+      <div class="install" id="install-wrap" title="Whether the selected agent is installed"></div>
     </div>
     <div class="row">
       <div class="field grow">
@@ -228,6 +238,11 @@
   <div id="tabs"></div>
   <div id="terms">
     <button id="scrollback-btn" type="button" title="Scroll through everything this session produced">⇕ Full output</button>
+  </div>
+  <div id="statusbar">
+    <span id="sb-folder" title="Project folder">No project folder set</span>
+    <span id="sb-session"></span>
+    <div id="sb-grip" title="Drag to resize (the window's edges also resize it)"></div>
   </div>
 
   <!-- Provider credential manager (CPE-346). Values are write-only: saved to the OS
@@ -660,7 +675,6 @@ async function openScrollback() {
 }
 function showScrollback(bytes) {
   ensureSbWired();
-  stopScrollbackPoll();
   if (sbState.term) { try { sbState.term.dispose(); } catch (_) {} }
   $("scrollback-overlay").hidden = false;
   const host = $("scrollback-host"); host.innerHTML = "";
@@ -670,46 +684,16 @@ function showScrollback(bytes) {
   });
   const fit = new FitAddon.FitAddon(); term.loadAddon(fit);
   term.open(host);
-  sbState.term = term; sbState.fit = fit; sbState.writtenLen = 0;
+  sbState.term = term; sbState.fit = fit;
   term.onScroll(() => updateThumb(sbState));
   // Fit AFTER the overlay has laid out (a synchronous fit right after un-hiding under-measures the
   // width and the console re-wraps at too few columns), THEN write so it wraps at the full width.
   requestAnimationFrame(() => {
     try { fit.fit(); } catch (_) {}
-    term.write(bytes, () => { sbState.writtenLen = bytes.length; term.scrollToBottom(); updateThumb(sbState); });
-    startScrollbackPoll(); // keep the panel live while it's open (CPE-410)
+    term.write(bytes, () => { term.scrollToBottom(); updateThumb(sbState); });
   });
 }
-// Live-update the open panel (CPE-410): poll the ring and append only the NEW output, following the
-// bottom if the user is already there and leaving their scroll position alone if they've scrolled up.
-function startScrollbackPoll() {
-  stopScrollbackPoll();
-  sbState.pollTimer = setInterval(pollScrollback, 1200);
-}
-function stopScrollbackPoll() {
-  if (sbState && sbState.pollTimer) { clearInterval(sbState.pollTimer); sbState.pollTimer = null; }
-}
-async function pollScrollback() {
-  if (!activeId || !sbState || !sbState.term) return;
-  let bytes;
-  try { bytes = await fetchSessionOutput(); } catch (_) { return; }
-  const term = sbState.term;
-  if (!term) return; // closed while the fetch was in flight
-  const b = term.buffer.active;
-  const following = b.viewportY >= b.baseY; // user is at the bottom → keep tailing
-  if (bytes.length > sbState.writtenLen) {
-    const tail = bytes.slice(sbState.writtenLen);
-    sbState.writtenLen = bytes.length;
-    term.write(tail, () => { if (following) term.scrollToBottom(); updateThumb(sbState); });
-  } else if (bytes.length < sbState.writtenLen) {
-    // The bounded ring dropped old bytes (or the session changed) — redraw from scratch.
-    sbState.writtenLen = bytes.length;
-    term.reset();
-    term.write(bytes, () => { term.scrollToBottom(); updateThumb(sbState); });
-  }
-}
 function closeScrollback() {
-  stopScrollbackPoll();
   $("scrollback-overlay").hidden = true;
   if (sbState && sbState.term) { try { sbState.term.dispose(); } catch (_) {} sbState.term = null; }
 }
@@ -1028,7 +1012,30 @@ $("cwd-browse").addEventListener("click", pickFolder);
 $("onboard-go").addEventListener("click", dismissOnboarding);
 $("onboard-addkey").addEventListener("click", () => { dismissOnboarding(); openKeys(); });
 $("launch").addEventListener("click", launch);
-load().catch((e) => setMsg("Could not load catalog: " + e.message));
+
+// Bottom status bar: mirror the project folder + the selected agent/provider/model as persistent
+// context. Updated on edits and once the catalog + remembered selection have loaded.
+function updateStatusBar() {
+  const cwd = $("cwd").value.trim();
+  $("sb-folder").textContent = cwd || "No project folder set";
+  const a = agentById($("agent").value);
+  const prov = $("provider").value || "";
+  const model = $("model").value.trim() || "default model";
+  $("sb-session").textContent = a ? (a.name + (prov ? " · " + prov : "") + " · " + model) : "";
+}
+["agent", "provider", "model", "cwd"].forEach((id) => {
+  $(id).addEventListener("input", updateStatusBar);
+  $(id).addEventListener("change", updateStatusBar);
+});
+// Sizing grip: resize the native window via the Tauri API when it's available; the window's edges
+// resize it regardless, so this is a discoverable affordance either way.
+$("sb-grip").addEventListener("mousedown", (e) => {
+  const t = window.__TAURI__, win = t && t.window;
+  const cur = win && (win.getCurrentWindow ? win.getCurrentWindow() : (win.getCurrent && win.getCurrent()));
+  if (cur && cur.startResizeDragging) { e.preventDefault(); try { cur.startResizeDragging("SouthEast"); } catch (_) {} }
+});
+
+load().then(updateStatusBar).catch((e) => setMsg("Could not load catalog: " + e.message));
 </script>
 </body>
 </html>
