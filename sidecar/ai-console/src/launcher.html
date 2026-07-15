@@ -15,6 +15,9 @@
   .toolbar { padding: 11px 16px; display: flex; flex-direction: column; gap: 10px;
              background: rgba(128,128,128,0.07); border-bottom: 1px solid var(--line); }
   .toolbar .row { display: flex; gap: 14px; align-items: flex-end; }
+  /* A more specific rule than `.toolbar .row` is needed or `display:flex` beats the [hidden]
+     attribute and the Advanced row can never collapse (CPE-395). */
+  .toolbar .row[hidden] { display: none; }
   .field { display: flex; flex-direction: column; gap: 4px; min-width: 0; }
   .field.grow { flex: 1; }
   .field label { font-size: 10px; text-transform: uppercase; letter-spacing: .06em;
@@ -80,10 +83,14 @@
           background: Canvas; color: CanvasText; border: 1px solid rgba(128,128,128,.55);
           border-radius: 8px; box-shadow: 0 12px 30px rgba(0,0,0,.3); padding: 5px; }
   .menu[hidden] { display: none; }
-  .menu-item { display: flex; align-items: center; gap: 7px; width: 100%; text-align: left; height: 30px;
+  .menu-item { display: flex; align-items: center; gap: 8px; width: 100%; text-align: left; height: 30px;
                padding: 0 9px; margin: 0; border: 0; background: none; border-radius: 6px; font: inherit;
-               font-size: 12.5px; color: CanvasText; cursor: pointer; box-sizing: border-box; }
+               font-size: 12.5px; color: CanvasText; cursor: pointer; box-sizing: border-box;
+               white-space: nowrap; }
   .menu-item:hover { background: rgba(128,128,128,.15); }
+  /* The global `input { width:100% }` (for text fields) otherwise stretches these checkboxes to
+     ~116px and shoves the label into a wrapping column — keep menu checkboxes their natural size. */
+  .menu-item input[type="checkbox"] { flex: 0 0 auto; width: auto; height: auto; min-width: 0; margin: 0; }
   #help-btn { width: 30px; padding: 0; font-weight: 700; }
   #help-overlay { position: fixed; inset: 0; background: rgba(0,0,0,.4); display: grid;
                   place-items: center; z-index: 65; }
@@ -967,7 +974,10 @@ $("set-del").addEventListener("click", deleteSet);
 // Native folder picker for the Working-folder box (CPE-354) — routed through the host.
 async function pickFolder() {
   try {
-    const r = await api("/api/pick-folder", { method: "POST" });
+    // Open the picker AT the Project folder that's currently typed, so Browse and the box stay in
+    // sync both ways. The host falls back to a sensible default if that path no longer exists.
+    const start = $("cwd").value.trim();
+    const r = await api("/api/pick-folder", { method: "POST", body: JSON.stringify({ start }) });
     if (r.path) $("cwd").value = r.path; // null = cancelled, leave as-is
   } catch (e) { setMsg("Couldn't open the folder picker: " + e.message); }
 }

@@ -1993,11 +1993,20 @@ impl Drop for ConsoleConn {
 /// to the sandboxed launcher's `host.pick_folder` request (CPE-354). `path` is null when the
 /// user cancels.
 #[cfg(feature = "sidecar-platform")]
-fn pick_folder_response(app: &tauri::AppHandle) -> sidecar_contract::Response {
+fn pick_folder_response(app: &tauri::AppHandle, params: &serde_json::Value) -> sidecar_contract::Response {
     use serde_json::json;
     use tauri_plugin_dialog::DialogExt;
     let (tx, rx) = std::sync::mpsc::channel();
-    app.dialog().file().pick_folder(move |folder| {
+    let mut builder = app.dialog().file();
+    // Open at the launcher's current Project folder when it still exists — a typo or a since-deleted
+    // path just falls back to the OS default rather than erroring.
+    if let Some(start) = params.get("start").and_then(|v| v.as_str()) {
+        let p = std::path::Path::new(start);
+        if p.is_dir() {
+            builder = builder.set_directory(p);
+        }
+    }
+    builder.pick_folder(move |folder| {
         let _ = tx.send(folder);
     });
     let path = rx
@@ -2164,7 +2173,7 @@ fn serve_ai_console_requests(
                     // host.pick_folder is a host UI action, not a brokered capability — handle
                     // it directly by opening the native folder dialog (CPE-354).
                     let resp = if req.method == "host.pick_folder" {
-                        pick_folder_response(&app)
+                        pick_folder_response(&app, &req.params)
                     } else if req.method == "host.verify_key" {
                         // A live key check against an allow-listed provider endpoint (CPE-347),
                         // not a brokered capability — handle it directly.

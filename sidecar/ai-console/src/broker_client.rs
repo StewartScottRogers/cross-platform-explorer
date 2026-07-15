@@ -215,8 +215,9 @@ pub struct CatalogFetch {
 /// Host-mediated operations the sandboxed launcher can't perform itself — native dialogs
 /// (CPE-354) and outbound network (CPE-347/376), which the sandbox has no client for.
 pub trait HostDialogs: Send + Sync {
-    /// Open a native folder picker. `Ok(Some(path))` chosen, `Ok(None)` cancelled.
-    fn pick_folder(&self) -> Result<Option<String>, String>;
+    /// Open a native folder picker, starting at `start` when it's an existing directory (CPE-395).
+    /// `Ok(Some(path))` chosen, `Ok(None)` cancelled.
+    fn pick_folder(&self, start: Option<&str>) -> Result<Option<String>, String>;
 
     /// Verify a provider key against the provider's API. The host makes a single request to an
     /// allow-listed endpoint (the sandbox never supplies the URL). `Err` = the check couldn't
@@ -240,11 +241,11 @@ impl BrokerDialogs {
 }
 
 impl HostDialogs for BrokerDialogs {
-    fn pick_folder(&self) -> Result<Option<String>, String> {
+    fn pick_folder(&self, start: Option<&str>) -> Result<Option<String>, String> {
         // Longer wait than a normal request — the user has to interact with the dialog.
         let v = self.client.request_timeout(
             "host.pick_folder",
-            serde_json::Value::Null,
+            serde_json::json!({ "start": start }),
             Duration::from_secs(300),
         )?;
         Ok(v.get("path").and_then(Value::as_str).map(str::to_string))
@@ -281,7 +282,7 @@ impl HostDialogs for BrokerDialogs {
 /// Dev/standalone fallback — no host, so "cancelled" / "can't verify".
 pub struct NoopDialogs;
 impl HostDialogs for NoopDialogs {
-    fn pick_folder(&self) -> Result<Option<String>, String> {
+    fn pick_folder(&self, _start: Option<&str>) -> Result<Option<String>, String> {
         Ok(None)
     }
     fn verify_key(&self, _provider: &str, _key: &str) -> Result<KeyVerdict, String> {
