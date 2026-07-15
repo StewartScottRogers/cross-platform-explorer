@@ -96,3 +96,22 @@ driving the protocol over a real socket. `cargo test -p ai-console` **144 + 2 + 
 socket/process layer, but the **product** wiring remains — **S3** (point `console.rs` at the daemon so
 the actual launcher UI reattaches) and **S4** (host keeps the daemon alive across a UI-sidecar
 restart + budgets/reaping). Those two close AC1's "survives" half and AC2 end-to-end.
+
+2026-07-15 — **Slice 3a landed: the daemon CLIENT** (`sidecar/ai-console/src/session_client.rs`) —
+the counterpart to the slice-2 server and the exact API the `console.rs` swap will proxy through:
+`SessionClient::{connect,launch,attach,input,resize,kill,list}`. One background thread demuxes the
+socket — session I/O (`replay`/`output`/`exit`) is routed to the matching `attach` stream; control
+acks (`launched`/`ok`/`error`/`sessions`) go to a control channel the request methods wait on. Fixed a
+latent leak found while building it: the reader now holds a `Weak<Inner>` and `Inner::drop` shuts the
+socket down, so a dropped client actually closes its connection/thread (important once the console
+opens/closes these per restart). **3 tests** incl. `a_second_client_reattaches_and_gets_replay_plus_
+live_output` — a *second* `SessionClient` reconnects after the first drops and recovers replay + live
+output, the client-side reattach. Protocol is now complete + tested on **both ends**.
+`cargo test -p ai-console` **147 + 7 + 1** green; clippy `--all-targets` clean.
+
+2026-07-15 — Assessed the remaining S3 rewire before touching it: pointing `console.rs` at the daemon
+is invasive because it also entangles **history recording (CPE-370)** and the **read tap (CPE-405)**
+(both currently live in the in-process reader thread and must move to the client attach pump), and it
+only pays off once the daemon is a **supervised separate process (S4)** — so S3-completion + S4 are
+coupled and best done together, carefully, against the working 147-test session subsystem. Deferred
+as the final slice rather than rushed. Foundation (engine + server + client, all tested) is in place.
