@@ -28,8 +28,9 @@ box. Anything unchecked is a blocker.
 
 ## Embedded UI
 - [ ] Serves its UI on **loopback only**; announces via `ui:<127.0.0.1 url>`.
-- [ ] Assumes the opaque-origin sandbox (`allow-scripts allow-forms`, no
-      `allow-same-origin`); never expects Tauri/parent access.
+- [ ] Assumes the cross-origin sandbox (`allow-scripts allow-forms allow-same-origin`,
+      CPE-334); `allow-same-origin` grants same-origin only to the frame's **own loopback
+      origin** (for clipboard/WebGL), never to the host — never expects Tauri/parent access.
 - [ ] Receives no raw secrets in the webview; triggers secret use by name.
 
 ## Observability
@@ -38,3 +39,10 @@ box. Anything unchecked is a blocker.
 
 ## Sign-off
 - [ ] Reviewer + date recorded; any gap filed as a blocker ticket and linked here.
+
+### Tenant sign-off log
+- **AI Console (CPE-261)** — reviewed 2026-07-14 (CPE-304 final pass). All boxes pass on
+  **Windows** (bundled first-party manifests only; keychain round-trip verified). Cross-OS
+  secret-store persistence pending runtime QA on real macOS/Linux hardware → blocker
+  **CPE-322**. Windows-first sign-off: **granted**. Cross-OS sign-off: **deferred** to
+  CPE-322.

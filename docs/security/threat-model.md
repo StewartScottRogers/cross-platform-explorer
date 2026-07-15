@@ -6,12 +6,15 @@ egress. **Method:** STRIDE per surface. **Status legend:** ✅ implemented & tes
 (gap filed). This is a living document; re-run per new tenant sidecar using
 [`sidecar-review-checklist.md`](sidecar-review-checklist.md).
 
-> **Sign-off status: NOT production-signed-off.** The design mitigates every identified threat and
-> the core is implemented + tested. Capability **consent UX (CPE-296) is now DONE** — the
-> interactive consent sheet, per-capability grant/deny, and revoke UI all shipped (CPE-274). The one
-> remaining incomplete mitigation is **non-Windows keychains** (CPE-322, 🟡): off-Windows secrets
-> don't yet persist in a native store, so the platform is Windows-first. Production sign-off is gated
-> on CPE-322 + a final review pass. See §9.
+> **Sign-off status: WINDOWS-FIRST SIGNED-OFF (2026-07-14, CPE-304 final pass); cross-OS deferred.**
+> The final review pass verified every mitigation below against the current code (broker
+> `decide_grants`, `Redactor`, per-sidecar keychain namespace, the `verify_key` 3-endpoint
+> allow-list, and the loopback iframe sandbox). Capability **consent UX (CPE-296) is DONE**. On
+> **Windows** every mitigation is implemented, tested, and the secret store is a real OS keychain
+> (round-trip verified) — the shipping (Windows-first, bundled-first-party-only) scope is
+> **signed off**. The **cross-OS** sign-off is **deferred**: macOS/Linux keychain backends are
+> coded and CI-compile-verified but await a runtime store/get/delete round-trip on real hardware
+> (**CPE-322**, Blocked — needs a mac/Linux desktop). See §9/§10.
 
 ## Assets & trust boundaries
 
@@ -127,3 +130,14 @@ sends only `{provider, key}` and never a URL.
 
 The consent gate is closed; the remaining sign-off blocker is **CPE-322** (cross-OS). When it's
 Done, re-run this review and record final sign-off in `docs/adr/0001-sidecar-platform.md`.
+
+## 11. Sign-off record
+
+| Scope | Decision | Date | Basis |
+|-------|----------|------|-------|
+| **Windows-first** (shipping scope: bundled first-party manifests, Windows keychain) | **Signed off** | 2026-07-14 | CPE-304 final review pass — every §1–§7 mitigation verified against current code; Windows keychain round-trip verified (CPE-322 log); Windows runtime QA done (CPE-382). Invariants §9 all ✅ on Windows. |
+| **macOS / Linux** | **Deferred** | — | Keychain backends coded + CI-compile-verified (CPE-322) but not yet runtime-QA'd on real hardware. Gap tracked as **CPE-322** (Blocked, `needs-macos-linux`). Re-run this review and add a row here when the round-trip passes on each OS. |
+
+Reviewer: CPE-304 review process. This records the **engineering security-review** sign-off for the
+Windows-first scope; promoting the sidecar channel to a **public** cross-OS release additionally
+requires the CPE-322 hardware QA above.

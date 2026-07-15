@@ -73,13 +73,15 @@ rule).
 - **Startup:** zero measurable cost with all sidecars disabled.
 - **Footprint:** documented per-sidecar memory ceiling, supervisor-enforced (CPE-297).
 - **Security:** passes the end-to-end threat model / review (CPE-304); secrets never
-  on disk in plaintext, never logged, never in a webview (CPE-268). **Interim posture
-  (2026-07-13):** the STRIDE threat model is authored
-  ([`docs/security/threat-model.md`](../security/threat-model.md)) with a repeatable
-  per-tenant checklist; the design mitigates every identified threat and the core is
-  implemented/tested. **Final production sign-off is gated** on two mitigations: consent
-  UX (CPE-296) and macOS/Linux keychains (CPE-322). Until then the sidecar ships
-  Windows-only and bundled-first-party-only.
+  on disk in plaintext, never logged, never in a webview (CPE-268). The STRIDE threat model
+  is authored ([`docs/security/threat-model.md`](../security/threat-model.md)) with a
+  repeatable per-tenant checklist. **Sign-off (2026-07-14, CPE-304 final pass):** every
+  mitigation was re-verified against the current code; consent UX (CPE-296) is done. The
+  **Windows-first** shipping scope (bundled-first-party-only, Windows OS keychain) is
+  **signed off** — see the threat model §11 sign-off record. The **cross-OS** sign-off is
+  **deferred** to CPE-322 (macOS/Linux keychain backends are coded + CI-compile-verified but
+  await a runtime round-trip on real hardware); until it passes, promotion of the sidecar
+  channel to a public cross-OS release is gated. Windows remains the shipping OS.
 - **Observability:** every sidecar failure is diagnosable from host-side logs
   (CPE-298) and surfaced with an actionable error (CPE-299).
 - **Testability:** a sidecar proves compliance via the conformance kit (CPE-301); the
