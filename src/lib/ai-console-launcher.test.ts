@@ -211,3 +211,20 @@ describe("AI Console launcher — inexperienced-user goal (CPE-392/393/394)", ()
     expect(w.document.getElementById("keys-overlay").hidden).toBe(false);
   });
 });
+
+describe("AI Console launcher — Browse ↔ Project folder sync (CPE-395)", () => {
+  it("Browse opens the picker at the typed Project folder, and writes the choice back", async () => {
+    const posts: any[] = [];
+    const { w } = await mountLauncher((path, opts) => {
+      if (path === "/api/pick-folder") {
+        posts.push(JSON.parse(opts.body));
+        return { path: "/picked/dir" };
+      }
+      return {};
+    });
+    w.document.getElementById("cwd").value = "/my/project";
+    await w.pickFolder();
+    expect(posts).toEqual([{ start: "/my/project" }]); // opens AT the current box value
+    expect(w.document.getElementById("cwd").value).toBe("/picked/dir"); // and syncs back
+  });
+});

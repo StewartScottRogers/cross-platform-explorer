@@ -395,8 +395,13 @@ impl ConsoleState {
 
     /// Open the host's native folder picker for the Working-folder box (CPE-354). Returns
     /// `{ path }` (null when cancelled). The sandboxed launcher can't open dialogs itself.
-    fn handle_pick_folder(&self) -> Response {
-        match self.dialogs.pick_folder() {
+    fn handle_pick_folder(&self, body: &str) -> Response {
+        // The launcher passes the Project-folder box's current value so the picker opens there.
+        let start = serde_json::from_str::<Value>(body)
+            .ok()
+            .and_then(|v| v.get("start").and_then(Value::as_str).map(str::to_string))
+            .filter(|s| !s.is_empty());
+        match self.dialogs.pick_folder(start.as_deref()) {
             Ok(path) => Response::json(json!({ "path": path }).to_string()),
             Err(e) => bad(e),
         }
@@ -756,7 +761,7 @@ pub fn route(state: &ConsoleState, req: &Request) -> Response {
         ("POST", "/api/presets") => state.handle_preset_save(&req.body),
         ("POST", "/api/presets/delete") => state.handle_preset_delete(&req.body),
         ("POST", "/api/onboarded") => state.handle_onboarded(),
-        ("POST", "/api/pick-folder") => state.handle_pick_folder(),
+        ("POST", "/api/pick-folder") => state.handle_pick_folder(&req.body),
         ("GET", "/api/keys") => state.handle_key_list(),
         ("POST", "/api/keys") => state.handle_key_set(&req.body),
         ("POST", "/api/keys/delete") => state.handle_key_delete(&req.body),
@@ -1029,7 +1034,7 @@ mod tests {
         called: std::sync::atomic::AtomicBool,
     }
     impl crate::broker_client::HostDialogs for StubDialogs {
-        fn pick_folder(&self) -> Result<Option<String>, String> {
+        fn pick_folder(&self, _start: Option<&str>) -> Result<Option<String>, String> {
             Ok(None)
         }
         fn verify_key(&self, _p: &str, _k: &str) -> Result<crate::broker_client::KeyVerdict, String> {
