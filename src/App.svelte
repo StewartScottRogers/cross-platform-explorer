@@ -1600,7 +1600,6 @@
   function onMenuSelect(action: string) {
     switch (action) {
       case "exit": exitApp(); break;
-      case "pop-out-preview": popOutPreview(); break;
       case "check-updates": checkForUpdates(true); break;
       case "settings": showSettings = true; break;
       case "shortcuts": shortcutsOpen = true; break;
