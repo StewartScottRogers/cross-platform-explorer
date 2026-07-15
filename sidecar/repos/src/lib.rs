@@ -11,12 +11,14 @@
 //! is a manifest, not host code — mirroring the AI Console's agent registry (CPE-278).
 
 pub mod browse;
+pub mod clone;
 pub mod protocol;
 pub mod providers;
 pub mod status;
 pub mod sync;
 
 pub use browse::{parse_github_contents, RemoteEntry};
+pub use clone::{build_clone_args, CloneError, CloneRequest};
 pub use protocol::{hello, on_message, Reaction, REQUESTED_CAPABILITIES, SIDECAR_ID};
 pub use providers::{ProviderManifest, ProviderRegistry};
 pub use status::{parse_status, RepoState};
