@@ -77,3 +77,19 @@ describe("batch rename — add prefix/suffix (CPE-424)", () => {
     expect(r.some((i) => i.conflict)).toBe(false);
   });
 });
+
+describe("batch rename — sequential numbering (CPE-426)", () => {
+  it("zero-pads the # run, preserves extension, counts from start, in order", async () => {
+    const { planNumber } = await import("./batchRename");
+    const r = planNumber(["a.jpg", "b.png", "c.gif"], "photo-###", 1);
+    expect(r.map((i) => i.to)).toEqual(["photo-001.jpg", "photo-002.png", "photo-003.gif"]);
+    // A different start.
+    expect(planNumber(["x.txt"], "doc-#", 7).map((i) => i.to)).toEqual(["doc-7.txt"]);
+  });
+
+  it("appends the number when the pattern has no # token; empty pattern is a no-op", async () => {
+    const { planNumber } = await import("./batchRename");
+    expect(planNumber(["a.md", "b.md"], "note", 1).map((i) => i.to)).toEqual(["note1.md", "note2.md"]);
+    expect(planNumber(["a.md"], "", 1).every((i) => !i.changed)).toBe(true);
+  });
+});

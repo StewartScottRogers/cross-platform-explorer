@@ -1,23 +1,27 @@
 <script lang="ts">
   import { createEventDispatcher } from "svelte";
-  import { planFindReplace, planAffix, type RenameItem } from "../batchRename";
+  import { planFindReplace, planAffix, planNumber, type RenameItem } from "../batchRename";
 
   /** The names of the selected items to rename. */
   export let names: string[] = [];
 
-  let mode: "replace" | "affix" = "replace";
+  let mode: "replace" | "affix" | "number" = "replace";
   let find = "";
   let replace = "";
   let caseSensitive = false;
   let prefix = "";
   let suffix = "";
+  let pattern = "";
+  let start = 1;
 
   const dispatch = createEventDispatcher<{ apply: RenameItem[]; cancel: void }>();
 
   $: items =
     mode === "replace"
       ? planFindReplace(names, find, replace, caseSensitive)
-      : planAffix(names, prefix, suffix);
+      : mode === "affix"
+        ? planAffix(names, prefix, suffix)
+        : planNumber(names, pattern, Number.isFinite(start) ? start : 1);
   $: changed = items.filter((i) => i.changed);
   $: hasConflict = items.some((i) => i.conflict);
   $: canApply = changed.length > 0 && !hasConflict;
@@ -39,6 +43,7 @@
     <div class="modes">
       <button class="mode" class:active={mode === "replace"} on:click={() => (mode = "replace")}>Find &amp; replace</button>
       <button class="mode" class:active={mode === "affix"} on:click={() => (mode = "affix")}>Add text</button>
+      <button class="mode" class:active={mode === "number"} on:click={() => (mode = "number")}>Number</button>
     </div>
 
     {#if mode === "replace"}
@@ -57,7 +62,7 @@
           Case-sensitive
         </label>
       </div>
-    {:else}
+    {:else if mode === "affix"}
       <div class="fields">
         <label>
           <span>Prefix</span>
@@ -66,6 +71,17 @@
         <label>
           <span>Suffix</span>
           <input bind:value={suffix} placeholder="text before the extension" />
+        </label>
+      </div>
+    {:else}
+      <div class="fields">
+        <label>
+          <span>Name pattern</span>
+          <input bind:value={pattern} placeholder="photo-### (the # run becomes the number)" />
+        </label>
+        <label>
+          <span>Start at</span>
+          <input type="number" bind:value={start} min="0" style="width:90px" />
         </label>
       </div>
     {/if}

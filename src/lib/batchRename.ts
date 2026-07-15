@@ -46,6 +46,29 @@ function markConflicts(items: RenameItem[]): RenameItem[] {
 }
 
 /**
+ * Sequentially number the names (CPE-426). `pattern` is the new base name with a run of `#` marking
+ * where the number goes, zero-padded to the run's width (`photo-###`, start 1 → `photo-001.jpg`); a
+ * pattern with no `#` gets the number appended. The original extension is preserved. An empty
+ * pattern is a no-op. Numbers count from `start` in the given order.
+ */
+export function planNumber(names: string[], pattern: string, start: number): RenameItem[] {
+  const items: RenameItem[] = names.map((from, i) => {
+    if (!pattern) {
+      return { from, to: from, changed: false, conflict: false };
+    }
+    const n = start + i;
+    const [, ext] = splitExt(from);
+    const run = pattern.match(/#+/);
+    const base = run
+      ? pattern.replace(/#+/, String(n).padStart(run[0].length, "0"))
+      : `${pattern}${n}`;
+    const to = `${base}${ext}`;
+    return { from, to, changed: to !== from, conflict: false };
+  });
+  return markConflicts(items);
+}
+
+/**
  * Add a `prefix` and/or `suffix` to each name, keeping the extension last (CPE-424): the suffix
  * lands before the extension (`report.pdf` + suffix `-v2` → `report-v2.pdf`). Both empty ⇒ no-op.
  */
