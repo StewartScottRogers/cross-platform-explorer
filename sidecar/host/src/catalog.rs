@@ -94,13 +94,29 @@ pub fn gate_manifest(
     manifest_bytes: &[u8],
     installed_version: Option<u64>,
 ) -> EntryVerdict {
+    gate_manifest_opt(index, id, manifest_bytes, installed_version, false)
+}
+
+/// As [`gate_manifest`], but with an explicit `allow_downgrade` override (CPE-383). When `true`, the
+/// anti-rollback check is deliberately bypassed for **this** entry so a user-chosen *specific prior
+/// version* can be reinstalled — a rollback. **Every other gate still applies**: the index must
+/// already be signature-verified (caller's job) and the manifest content must match the index hash
+/// (`ContentMismatch` on tamper). The override only relaxes the "must be strictly newer" rule; it
+/// never accepts unsigned or tampered content. Intended to be enabled per-agent, never blanket.
+pub fn gate_manifest_opt(
+    index: &CatalogIndex,
+    id: &str,
+    manifest_bytes: &[u8],
+    installed_version: Option<u64>,
+    allow_downgrade: bool,
+) -> EntryVerdict {
     let Some(entry) = index.get(id) else {
         return EntryVerdict::Unlisted;
     };
     if !entry.matches(manifest_bytes) {
         return EntryVerdict::ContentMismatch;
     }
-    if !entry.is_upgrade_over(installed_version) {
+    if !allow_downgrade && !entry.is_upgrade_over(installed_version) {
         return EntryVerdict::Rollback;
     }
     EntryVerdict::Accept
@@ -164,6 +180,25 @@ pub fn apply_bundle(
     installed: &mut VersionMap,
     pinned: &[String],
 ) -> ApplyReport {
+    apply_bundle_with(staging, out, trusted_keys, installed, pinned, &[])
+}
+
+/// As [`apply_bundle`], but with an audited per-agent **downgrade override** (CPE-383): ids listed
+/// in `allow_downgrade` may be applied even when the bundle's `version` is not newer than the
+/// installed one — used to roll an agent back to a specific previously-published version. The
+/// override is deliberately narrow: it applies **only** to the named ids and only relaxes the
+/// anti-rollback rule; index-signature, per-manifest signature, and content-hash binding are all
+/// still enforced, and any id **not** in `allow_downgrade` still gets full anti-rollback. On accept,
+/// `installed` is set to the (older) version so subsequent normal fetches upgrade from there.
+/// A pinned agent is still frozen (pin wins over a rollback request).
+pub fn apply_bundle_with(
+    staging: &Path,
+    out: &Path,
+    trusted_keys: &[String],
+    installed: &mut VersionMap,
+    pinned: &[String],
+    allow_downgrade: &[String],
+) -> ApplyReport {
     let mut report = ApplyReport::default();
 
     // 1. Verify the index (governs the whole set). Any failure ⇒ touch nothing.
@@ -200,7 +235,8 @@ pub fn apply_bundle(
             report.rejected.push((entry.id.clone(), ApplyOutcome::BadSignature));
             continue;
         }
-        match gate_manifest(&index, &entry.id, &bytes, installed.get(&entry.id).copied()) {
+        let dg = allow_downgrade.iter().any(|a| a == &entry.id);
+        match gate_manifest_opt(&index, &entry.id, &bytes, installed.get(&entry.id).copied(), dg) {
             EntryVerdict::Accept => {
                 if write_entry(out, &entry.id, &bytes, sig.trim()).is_ok() {
                     installed.insert(entry.id.clone(), entry.version);
@@ -479,6 +515,81 @@ mod tests {
         assert!(report.applied.is_empty());
         assert!(!out.path().join("claude.json").exists());
         assert!(!installed.contains_key("claude")); // pin froze it — nothing recorded
+    }
+
+    // --- Audited downgrade override (CPE-383) ------------------------------------------
+
+    #[test]
+    fn gate_opt_allows_a_downgrade_only_when_opted_in_and_never_relaxes_content() {
+        let manifest = br#"{"schema_version":1,"id":"claude"}"#;
+        let sha = trust::content_hash(manifest);
+        let index = CatalogIndex::from_json(&index_json("claude", &sha, 3)).unwrap();
+        // Installed v7; the bundle names v3 (older). Without opt-in → Rollback; with opt-in → Accept.
+        assert_eq!(gate_manifest_opt(&index, "claude", manifest, Some(7), false), EntryVerdict::Rollback);
+        assert_eq!(gate_manifest_opt(&index, "claude", manifest, Some(7), true), EntryVerdict::Accept);
+        // The override never accepts tampered content, even when downgrade is allowed.
+        assert_eq!(
+            gate_manifest_opt(&index, "claude", b"EVIL", Some(7), true),
+            EntryVerdict::ContentMismatch
+        );
+    }
+
+    #[test]
+    fn apply_with_downgrade_rolls_the_chosen_agent_back_and_leaves_others_on_anti_rollback() {
+        let (k, pk) = keypair(1);
+        let out = tempfile::tempdir().unwrap();
+        // Both agents already installed at v7.
+        std::fs::write(out.path().join("claude.json"), b"OLD-CLAUDE").unwrap();
+        std::fs::write(out.path().join("aider.json"), b"OLD-AIDER").unwrap();
+        let mut installed = VersionMap::from([("claude".to_string(), 7u64), ("aider".to_string(), 7u64)]);
+
+        // A signed *older* (v3) bundle for both agents — a specific prior version.
+        let stage = tempfile::tempdir().unwrap();
+        stage_bundle(
+            stage.path(),
+            &[("claude", br#"{"id":"claude","v":3}"#, 3), ("aider", br#"{"id":"aider","v":3}"#, 3)],
+            &k,
+        );
+
+        // Only claude is opted into the downgrade.
+        let report = apply_bundle_with(
+            stage.path(),
+            out.path(),
+            &[pk],
+            &mut installed,
+            &[],
+            &["claude".to_string()],
+        );
+        assert!(report.index_ok);
+        // claude rolled back and written; installed set to the older version.
+        assert_eq!(report.applied, vec!["claude".to_string()]);
+        assert_eq!(installed.get("claude"), Some(&3));
+        assert_eq!(std::fs::read(out.path().join("claude.json")).unwrap(), br#"{"id":"claude","v":3}"#);
+        // aider was NOT opted in → still anti-rollback → rejected, its good copy untouched.
+        assert_eq!(report.rejected, vec![("aider".to_string(), ApplyOutcome::Rollback)]);
+        assert_eq!(installed.get("aider"), Some(&7));
+        assert_eq!(std::fs::read(out.path().join("aider.json")).unwrap(), b"OLD-AIDER");
+    }
+
+    #[test]
+    fn a_pin_still_wins_over_a_downgrade_request() {
+        let (k, pk) = keypair(1);
+        let stage = tempfile::tempdir().unwrap();
+        let out = tempfile::tempdir().unwrap();
+        stage_bundle(stage.path(), &[("claude", br#"{"id":"claude","v":2}"#, 2)], &k);
+        let mut installed = VersionMap::from([("claude".to_string(), 7u64)]);
+        // Pinned AND asked to downgrade → the pin freezes it (safety), so nothing is applied.
+        let report = apply_bundle_with(
+            stage.path(),
+            out.path(),
+            &[pk],
+            &mut installed,
+            &["claude".to_string()],
+            &["claude".to_string()],
+        );
+        assert_eq!(report.rejected, vec![("claude".to_string(), ApplyOutcome::Pinned)]);
+        assert!(report.applied.is_empty());
+        assert_eq!(installed.get("claude"), Some(&7)); // unchanged
     }
 
     #[test]
