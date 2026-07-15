@@ -2,9 +2,13 @@
   import { formatSize, formatDiskFree } from "../format";
 
   export let itemCount = 0;
+  /** The folder's total item count before filtering; when it exceeds itemCount the status
+      reads "X of Y items" so the filter's effect is visible (CPE-407). */
+  export let totalCount = 0;
   export let selectedCount = 0;
   export let selectedSize = 0;
-  export let filtered = false;
+
+  $: isFiltered = totalCount > itemCount;
   export let hiddenShown = false;
   export let notice = "";
   export let noticeIsError = false;
@@ -17,7 +21,13 @@
 </script>
 
 <div class="statusbar">
-  <span>{itemCount} item{itemCount === 1 ? "" : "s"}{filtered ? " (filtered)" : ""}</span>
+  <span>
+    {#if isFiltered}
+      {itemCount} of {totalCount} items
+    {:else}
+      {itemCount} item{itemCount === 1 ? "" : "s"}
+    {/if}
+  </span>
 
   {#if selectedCount > 0}
     <span>

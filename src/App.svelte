@@ -738,6 +738,8 @@
 
   $: selectedSize = selectedEntries.reduce((n, e) => n + (e.is_dir ? 0 : e.size), 0);
   $: itemCount = isHome ? places.length + drives.length + pins.length : visible.length;
+  // The folder's pre-filter total, so the status bar can read "X of Y items" (CPE-407).
+  $: totalCount = isHome || archive ? itemCount : shown.length;
   $: pasteCheck = clipCanPaste(clipboard, isHome ? "" : currentPath);
   $: cutPaths = clipboard.mode === "cut" ? clipboard.paths : [];
 
@@ -2086,9 +2088,9 @@
 
 <StatusBar
   {itemCount}
+  {totalCount}
   selectedCount={selectedCount(selection)}
   {selectedSize}
-  filtered={searching}
   hiddenShown={showHidden}
   {notice}
   {noticeIsError}
