@@ -644,18 +644,23 @@ function ensureSbWired() {
     }).observe($("scrollback-host"));
   }
 }
+// Fetch the session's current output ring, alt-screen stripped. Always a fresh pull — a plain GET
+// on this stable URL can be served stale from the WebView2 cache, so no-store + a cache-buster
+// (CPE-409). Shared by the initial open and the live-update poll (CPE-410).
+async function fetchSessionOutput() {
+  const url = "/api/session/" + activeId + "/output?t=" + Date.now();
+  const data = await api(url, { cache: "no-store" });
+  return stripAltScreen(base64ToBytes(data.outputB64));
+}
 async function openScrollback() {
   if (!activeId) { setMsg("No active session.", false); return; }
   try {
-    // Always pull the CURRENT ring — a plain GET on this stable URL can be served stale from the
-    // WebView2 cache, so force a fresh fetch (no-store + cache-buster) each open (CPE-409).
-    const url = "/api/session/" + activeId + "/output?t=" + Date.now();
-    const data = await api(url, { cache: "no-store" });
-    showScrollback(stripAltScreen(base64ToBytes(data.outputB64)));
+    showScrollback(await fetchSessionOutput());
   } catch (e) { setMsg("Couldn't load output: " + e.message); }
 }
 function showScrollback(bytes) {
   ensureSbWired();
+  stopScrollbackPoll();
   if (sbState.term) { try { sbState.term.dispose(); } catch (_) {} }
   $("scrollback-overlay").hidden = false;
   const host = $("scrollback-host"); host.innerHTML = "";
@@ -665,16 +670,46 @@ function showScrollback(bytes) {
   });
   const fit = new FitAddon.FitAddon(); term.loadAddon(fit);
   term.open(host);
-  sbState.term = term; sbState.fit = fit;
+  sbState.term = term; sbState.fit = fit; sbState.writtenLen = 0;
   term.onScroll(() => updateThumb(sbState));
   // Fit AFTER the overlay has laid out (a synchronous fit right after un-hiding under-measures the
   // width and the console re-wraps at too few columns), THEN write so it wraps at the full width.
   requestAnimationFrame(() => {
     try { fit.fit(); } catch (_) {}
-    term.write(bytes, () => { term.scrollToBottom(); updateThumb(sbState); });
+    term.write(bytes, () => { sbState.writtenLen = bytes.length; term.scrollToBottom(); updateThumb(sbState); });
+    startScrollbackPoll(); // keep the panel live while it's open (CPE-410)
   });
 }
+// Live-update the open panel (CPE-410): poll the ring and append only the NEW output, following the
+// bottom if the user is already there and leaving their scroll position alone if they've scrolled up.
+function startScrollbackPoll() {
+  stopScrollbackPoll();
+  sbState.pollTimer = setInterval(pollScrollback, 1200);
+}
+function stopScrollbackPoll() {
+  if (sbState && sbState.pollTimer) { clearInterval(sbState.pollTimer); sbState.pollTimer = null; }
+}
+async function pollScrollback() {
+  if (!activeId || !sbState || !sbState.term) return;
+  let bytes;
+  try { bytes = await fetchSessionOutput(); } catch (_) { return; }
+  const term = sbState.term;
+  if (!term) return; // closed while the fetch was in flight
+  const b = term.buffer.active;
+  const following = b.viewportY >= b.baseY; // user is at the bottom → keep tailing
+  if (bytes.length > sbState.writtenLen) {
+    const tail = bytes.slice(sbState.writtenLen);
+    sbState.writtenLen = bytes.length;
+    term.write(tail, () => { if (following) term.scrollToBottom(); updateThumb(sbState); });
+  } else if (bytes.length < sbState.writtenLen) {
+    // The bounded ring dropped old bytes (or the session changed) — redraw from scratch.
+    sbState.writtenLen = bytes.length;
+    term.reset();
+    term.write(bytes, () => { term.scrollToBottom(); updateThumb(sbState); });
+  }
+}
 function closeScrollback() {
+  stopScrollbackPoll();
   $("scrollback-overlay").hidden = true;
   if (sbState && sbState.term) { try { sbState.term.dispose(); } catch (_) {} sbState.term = null; }
 }
