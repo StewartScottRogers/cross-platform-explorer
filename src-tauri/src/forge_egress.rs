@@ -337,6 +337,60 @@ pub fn parse_github_contents(json: &str) -> Vec<RepoEntry> {
     out
 }
 
+/// Parse a **GitLab** repository-tree response (`GET /projects/:id/repository/tree`) into entries —
+/// a JSON array of `{name, type:"tree"|"blob", path}` (no size). Folders (`tree`) sort before files
+/// (`blob`), then by name. Malformed input → empty list. Pure.
+pub fn parse_gitlab_tree(json: &str) -> Vec<RepoEntry> {
+    let value: serde_json::Value = match serde_json::from_str(json) {
+        Ok(v) => v,
+        Err(_) => return Vec::new(),
+    };
+    let Some(arr) = value.as_array() else { return Vec::new() };
+    let mut out: Vec<RepoEntry> = arr
+        .iter()
+        .filter_map(|it| {
+            let name = it.get("name")?.as_str()?.to_string();
+            let path = it.get("path").and_then(|p| p.as_str()).unwrap_or(&name).to_string();
+            let is_dir = it.get("type").and_then(|t| t.as_str()) == Some("tree");
+            Some(RepoEntry { name, path, is_dir, size: 0 })
+        })
+        .collect();
+    out.sort_by(|a, b| b.is_dir.cmp(&a.is_dir).then_with(|| a.name.to_lowercase().cmp(&b.name.to_lowercase())));
+    out
+}
+
+/// Build the provider-appropriate **browse** API path for `repo` (`owner/name`) at `sub` (a subfolder
+/// or `""`). GitHub-family forges (github, gitea/forgejo/codeberg, GHE) use the Contents API; GitLab
+/// uses its tree endpoint with the project URL-encoded. The path is host-relative (the host prepends
+/// the scheme+host+base_path from the allow-list, CPE-433).
+pub fn browse_path(provider: &str, repo: &str, sub: &str) -> String {
+    let p = provider.to_ascii_lowercase();
+    let repo = repo.trim_matches('/');
+    let sub = sub.trim_start_matches('/');
+    if p == "gitlab" || p.starts_with("gitlab-") {
+        // GitLab: project id is `owner%2Frepo`; tree is a query, not a path segment.
+        let project = repo.replace('/', "%2F");
+        let mut path = format!("/projects/{project}/repository/tree?per_page=100");
+        if !sub.is_empty() {
+            path.push_str(&format!("&path={sub}"));
+        }
+        path
+    } else {
+        // GitHub Contents API (also gitea/forgejo/codeberg, which are API-compatible).
+        format!("/repos/{repo}/contents/{sub}")
+    }
+}
+
+/// Parse a browse response with the parser matching `provider`.
+pub fn parse_browse(provider: &str, json: &str) -> Vec<RepoEntry> {
+    let p = provider.to_ascii_lowercase();
+    if p == "gitlab" || p.starts_with("gitlab-") {
+        parse_gitlab_tree(json)
+    } else {
+        parse_github_contents(json)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -469,6 +523,34 @@ mod tests {
         // A single file object (GitHub returns this for a file path), and garbage → empty.
         assert_eq!(parse_github_contents(r#"{"name":"x","path":"a/x","type":"file","size":7}"#).len(), 1);
         assert!(parse_github_contents("nope").is_empty());
+    }
+
+    #[test]
+    fn browse_path_differs_per_provider() {
+        assert_eq!(browse_path("github", "octocat/hello", ""), "/repos/octocat/hello/contents/");
+        assert_eq!(browse_path("github", "octocat/hello", "src"), "/repos/octocat/hello/contents/src");
+        // gitea/codeberg are GitHub-Contents-compatible.
+        assert_eq!(browse_path("codeberg", "o/r", "src"), "/repos/o/r/contents/src");
+        // GitLab: project url-encoded, tree as a query.
+        assert_eq!(browse_path("gitlab", "group/proj", ""), "/projects/group%2Fproj/repository/tree?per_page=100");
+        assert_eq!(browse_path("gitlab", "group/proj", "src"), "/projects/group%2Fproj/repository/tree?per_page=100&path=src");
+    }
+
+    #[test]
+    fn gitlab_tree_parse_is_folders_first_and_total() {
+        let json = r#"[
+            {"name":"README.md","type":"blob","path":"README.md"},
+            {"name":"src","type":"tree","path":"src"},
+            {"name":"lib","type":"tree","path":"lib"}
+        ]"#;
+        let e = parse_gitlab_tree(json);
+        assert_eq!(e.iter().map(|x| x.name.as_str()).collect::<Vec<_>>(), ["lib", "src", "README.md"]);
+        assert!(e[0].is_dir && !e[2].is_dir);
+        assert!(parse_gitlab_tree("nope").is_empty());
+        // The dispatcher routes to the right parser: only GitLab's understands `type:"tree"` as a
+        // folder — the GitHub parser (looking for `type:"dir"`) would mis-read them all as files.
+        assert_eq!(parse_browse("gitlab", json).iter().filter(|e| e.is_dir).count(), 2);
+        assert_eq!(parse_browse("github", json).iter().filter(|e| e.is_dir).count(), 0);
     }
 
     #[test]
