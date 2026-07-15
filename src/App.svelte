@@ -37,6 +37,7 @@
   import ShortcutsDialog from "./lib/components/ShortcutsDialog.svelte";
   import ContentSearchDialog from "./lib/components/ContentSearchDialog.svelte";
   import DuplicatesDialog from "./lib/components/DuplicatesDialog.svelte";
+  import { namesList, detailList } from "./lib/listing";
   import PropertiesDialog from "./lib/components/PropertiesDialog.svelte";
   import BatchRenameDialog from "./lib/components/BatchRenameDialog.svelte";
   import type { RenameItem } from "./lib/batchRename";
@@ -1597,6 +1598,22 @@
       case "about": showAbout = true; break;
       case "content-search": if (!isHome && !archive) contentSearchOpen = true; break;
       case "find-duplicates": if (!isHome && !archive) duplicatesOpen = true; break;
+      case "copy-file-names": copyListing(namesList(visible), "file names"); break;
+      case "copy-file-list": copyListing(detailList(visible), "file list"); break;
+    }
+  }
+
+  /** Copy the current (visible) folder listing to the clipboard as text (CPE-422). */
+  async function copyListing(text: string, what: string) {
+    if (isHome || visible.length === 0) {
+      showNotice("Nothing to copy here.");
+      return;
+    }
+    try {
+      await navigator.clipboard.writeText(text);
+      showNotice(`Copied ${visible.length} ${what === "file names" ? "name" : "row"}${visible.length === 1 ? "" : "s"} to the clipboard.`);
+    } catch (e) {
+      showNotice(String(e), true);
     }
   }
 

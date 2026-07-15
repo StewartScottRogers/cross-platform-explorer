@@ -30,6 +30,9 @@
       items: [
         { id: "content-search", label: "Search in files…", hint: "Ctrl+Shift+F" },
         { id: "find-duplicates", label: "Find duplicate files…" },
+        { sep: true },
+        { id: "copy-file-names", label: "Copy file names" },
+        { id: "copy-file-list", label: "Copy file list (name + size)" },
       ],
     },
     {
