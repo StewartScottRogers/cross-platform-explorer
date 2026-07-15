@@ -128,6 +128,50 @@ export function applySessionAnnouncement(
   return a.event === "ended" ? rest : [...rest, a.session];
 }
 
+// --- Agent Watch: filesystem activity (CPE-398) ---------------------------------------
+
+/** One coalesced filesystem action under a watched Project folder, as emitted by the host. */
+export interface FsActivity {
+  kind: "created" | "modified" | "removed" | "renamed";
+  path: string;
+}
+
+/** Start watching an agent's Project folder for filesystem activity (CPE-398). Resolves `false`
+ *  when the platform is off or the path can't be watched — never throws. */
+export async function startAgentWatch(path: string): Promise<boolean> {
+  try {
+    await invoke("agent_watch_start", { path });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/** Stop the active filesystem watch (CPE-398). Safe + idempotent when the platform is off. */
+export async function stopAgentWatch(): Promise<void> {
+  try {
+    await invoke("agent_watch_stop");
+  } catch {
+    /* platform off — nothing to stop */
+  }
+}
+
+/** Normalize the `ai-console://fs-activity` event payload into a clean, typed list, dropping
+ *  anything malformed. Kept pure so the host→UI wire format is unit-testable headlessly. */
+export function normalizeFsActivity(payload: unknown): FsActivity[] {
+  if (!Array.isArray(payload)) return [];
+  const kinds = new Set(["created", "modified", "removed", "renamed"]);
+  const out: FsActivity[] = [];
+  for (const item of payload) {
+    const kind = (item as { kind?: unknown })?.kind;
+    const path = (item as { path?: unknown })?.path;
+    if (typeof kind === "string" && kinds.has(kind) && typeof path === "string" && path) {
+      out.push({ kind: kind as FsActivity["kind"], path });
+    }
+  }
+  return out;
+}
+
 /** Whether the sidecar platform is active in this build (i.e. the command exists). */
 export async function platformActive(): Promise<boolean> {
   try {

@@ -4,8 +4,9 @@ title: Agent Watch — filesystem activity watcher (notify), gated + idle-when-o
 type: feature
 priority: high
 estimate: L
-status: Open
+status: Done
 created: 2026-07-14
+closed: 2026-07-14
 tags: [big-design, agent-watch, backend]
 epic: AGENT-WATCH.md
 depends-on: CPE-396
@@ -28,6 +29,6 @@ Watcher is created only while a session is active and being watched; on session 
 off it is torn down. No watcher, no polling, no thread when idle. Feature-gated.
 
 ## Acceptance
-- [ ] Mutations under the watched folder arrive in the frontend as typed events
-- [ ] Watcher starts on watch, stops on unwatch/exit — verified no residual watcher when off
-- [ ] Debounced; bounded under heavy churn
+- [x] Mutations under the watched folder arrive in the frontend as typed events
+- [x] Watcher starts on watch, stops on unwatch/exit — verified no residual watcher when off
+- [x] Debounced; bounded under heavy churn

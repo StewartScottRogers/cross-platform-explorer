@@ -2211,6 +2211,137 @@ fn serve_ai_console_requests(
     }
 }
 
+// --- Agent Watch: filesystem-activity watcher (CPE-398) --------------------------------
+
+/// The live filesystem watcher for Agent Watch — at most one at a time, on the currently-watched
+/// agent's Project folder. Holding the `notify` watcher here keeps it alive; dropping it (a new
+/// watch, or `agent_watch_stop`) stops watching AND ends its emitter thread (the event channel
+/// closes). Off means off (AGENT-WATCH.md): with nothing watched there is no watcher and no thread.
+#[cfg(feature = "sidecar-platform")]
+#[derive(Default)]
+struct AgentWatchState {
+    current: std::sync::Mutex<Option<AgentWatch>>,
+}
+
+#[cfg(feature = "sidecar-platform")]
+struct AgentWatch {
+    _watcher: notify::RecommendedWatcher,
+    #[allow(dead_code)]
+    path: String,
+}
+
+/// Map a raw `notify` event to the coarse Agent Watch activity kind, or `None` to ignore it.
+/// Reads (`Access`) are deliberately dropped — a Windows watcher can't see them anyway, so reads
+/// are out of scope here (they'd need the agent's own tool stream; see CPE-398).
+#[cfg(feature = "sidecar-platform")]
+fn classify_fs_event(kind: &notify::EventKind) -> Option<&'static str> {
+    use notify::event::ModifyKind;
+    use notify::EventKind::*;
+    match kind {
+        Create(_) => Some("created"),
+        Modify(ModifyKind::Name(_)) => Some("renamed"),
+        Modify(_) => Some("modified"),
+        Remove(_) => Some("removed"),
+        _ => None, // Access / Other
+    }
+}
+
+/// Coalescing emitter: fold raw watcher events per-path over a short window and flush batches to
+/// the frontend as `ai-console://fs-activity`. Bounded so a big refactor can't flood the UI — the
+/// pending set is capped and flushed early when full. Ends when the channel closes (watcher dropped).
+#[cfg(feature = "sidecar-platform")]
+fn fs_activity_pump(
+    app: tauri::AppHandle,
+    rx: std::sync::mpsc::Receiver<notify::Result<notify::Event>>,
+) {
+    use serde_json::json;
+    use std::collections::HashMap;
+    use std::sync::mpsc::RecvTimeoutError;
+    use std::time::{Duration, Instant};
+    use tauri::Emitter;
+
+    const FLUSH: Duration = Duration::from_millis(200);
+    const CAP: usize = 500;
+    let mut pending: HashMap<String, &'static str> = HashMap::new();
+    let mut last_flush = Instant::now();
+
+    let flush = |app: &tauri::AppHandle, pending: &mut HashMap<String, &'static str>| {
+        if pending.is_empty() {
+            return;
+        }
+        let items: Vec<_> =
+            pending.drain().map(|(path, kind)| json!({ "kind": kind, "path": path })).collect();
+        let _ = app.emit("ai-console://fs-activity", items);
+    };
+
+    loop {
+        match rx.recv_timeout(FLUSH) {
+            Ok(Ok(event)) => {
+                if let Some(kind) = classify_fs_event(&event.kind) {
+                    for p in event.paths {
+                        // A `removed` wins over a same-window `created`/`modified` so a file the
+                        // agent creates then deletes reads as gone, not as churn.
+                        let path = p.to_string_lossy().into_owned();
+                        let slot = pending.entry(path).or_insert(kind);
+                        if kind == "removed" || *slot != "removed" {
+                            *slot = kind;
+                        }
+                    }
+                }
+                if pending.len() >= CAP {
+                    flush(&app, &mut pending);
+                    last_flush = Instant::now();
+                }
+            }
+            Ok(Err(_)) => {} // a watch error — ignore, keep pumping
+            Err(RecvTimeoutError::Timeout) => {}
+            Err(RecvTimeoutError::Disconnected) => {
+                flush(&app, &mut pending);
+                break;
+            }
+        }
+        if last_flush.elapsed() >= FLUSH {
+            flush(&app, &mut pending);
+            last_flush = Instant::now();
+        }
+    }
+}
+
+/// Start watching an agent's Project folder for filesystem activity (CPE-398). Replaces any
+/// existing watch. Non-fatal: returns an error string the caller can surface. A missing folder
+/// (e.g. a since-deleted path) is rejected rather than silently watching nothing.
+#[cfg(feature = "sidecar-platform")]
+#[tauri::command]
+fn agent_watch_start(
+    app: tauri::AppHandle,
+    state: tauri::State<AgentWatchState>,
+    path: String,
+) -> Result<(), String> {
+    use notify::{RecursiveMode, Watcher};
+    let dir = std::path::Path::new(&path);
+    if !dir.is_dir() {
+        return Err(format!("not a folder: {path}"));
+    }
+    let (tx, rx) = std::sync::mpsc::channel();
+    let mut watcher = notify::recommended_watcher(move |res| {
+        let _ = tx.send(res);
+    })
+    .map_err(|e| e.to_string())?;
+    watcher.watch(dir, RecursiveMode::Recursive).map_err(|e| e.to_string())?;
+    // Dropping the watcher (below, when we replace `current`, or on stop) closes `rx` and ends
+    // this thread — no separate stop signal needed.
+    std::thread::spawn(move || fs_activity_pump(app, rx));
+    *state.current.lock().unwrap() = Some(AgentWatch { _watcher: watcher, path });
+    Ok(())
+}
+
+/// Stop watching (CPE-398). Dropping the stored watcher ends its emitter thread. Idempotent.
+#[cfg(feature = "sidecar-platform")]
+#[tauri::command]
+fn agent_watch_stop(state: tauri::State<AgentWatchState>) {
+    *state.current.lock().unwrap() = None;
+}
+
 #[cfg(feature = "sidecar-platform")]
 impl Default for AiConsoleState {
     fn default() -> Self {
@@ -2483,6 +2614,8 @@ pub fn run() {
     #[cfg(feature = "sidecar-platform")]
     {
         builder = builder.manage(AiConsoleState::default());
+        // Agent Watch's filesystem watcher lives here (CPE-398); empty until a folder is watched.
+        builder = builder.manage(AgentWatchState::default());
     }
 
     let app = builder
@@ -2535,7 +2668,11 @@ pub fn run() {
             #[cfg(feature = "sidecar-platform")]
             sidecar_start_ai_console,
             #[cfg(feature = "sidecar-platform")]
-            sidecar_diagnostics
+            sidecar_diagnostics,
+            #[cfg(feature = "sidecar-platform")]
+            agent_watch_start,
+            #[cfg(feature = "sidecar-platform")]
+            agent_watch_stop
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application");
@@ -2551,6 +2688,31 @@ pub fn run() {
 
 // NOTE: clippy's `items_after_test_module` lint requires the test module to be
 // the LAST item in the file. Keep it here, at the bottom.
+#[cfg(all(test, feature = "sidecar-platform"))]
+mod agent_watch_tests {
+    use super::classify_fs_event;
+    use notify::event::{CreateKind, ModifyKind, RemoveKind, RenameMode};
+    use notify::EventKind;
+
+    #[test]
+    fn classify_maps_mutations_and_ignores_reads() {
+        // Mutations become the coarse Agent Watch kinds (CPE-398)…
+        assert_eq!(classify_fs_event(&EventKind::Create(CreateKind::File)), Some("created"));
+        assert_eq!(classify_fs_event(&EventKind::Remove(RemoveKind::File)), Some("removed"));
+        assert_eq!(
+            classify_fs_event(&EventKind::Modify(ModifyKind::Name(RenameMode::Both))),
+            Some("renamed"),
+        );
+        assert_eq!(
+            classify_fs_event(&EventKind::Modify(ModifyKind::Data(notify::event::DataChange::Content))),
+            Some("modified"),
+        );
+        // …and reads / unknowns are dropped (a Windows watcher can't see reads anyway).
+        assert_eq!(classify_fs_event(&EventKind::Access(notify::event::AccessKind::Read)), None);
+        assert_eq!(classify_fs_event(&EventKind::Other), None);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

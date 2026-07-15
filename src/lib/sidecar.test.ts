@@ -13,6 +13,9 @@ import {
   sidecarDiagnostics,
   emptyDiagnostics,
   consoleUrlWith,
+  normalizeFsActivity,
+  startAgentWatch,
+  stopAgentWatch,
 } from "./sidecar";
 
 describe("consoleUrlWith (CPE-313 explorer→console hand-off)", () => {
@@ -114,5 +117,37 @@ describe("sidecar platform client", () => {
       last_error: null,
       logs: [],
     });
+  });
+});
+
+describe("Agent Watch filesystem activity (CPE-398)", () => {
+  it("normalizeFsActivity keeps well-formed items and drops the rest", () => {
+    const items = normalizeFsActivity([
+      { kind: "created", path: "/a.txt" },
+      { kind: "modified", path: "/b.rs" },
+      { kind: "bogus", path: "/c" }, // unknown kind → dropped
+      { kind: "removed" }, // no path → dropped
+      { kind: "renamed", path: "/d" },
+      "nope", // not an object → dropped
+    ]);
+    expect(items).toEqual([
+      { kind: "created", path: "/a.txt" },
+      { kind: "modified", path: "/b.rs" },
+      { kind: "renamed", path: "/d" },
+    ]);
+    expect(normalizeFsActivity("not an array")).toEqual([]);
+  });
+
+  it("startAgentWatch invokes the command and reports success/failure without throwing", async () => {
+    invoke.mockResolvedValueOnce(undefined);
+    expect(await startAgentWatch("Z:/repo")).toBe(true);
+    expect(invoke).toHaveBeenCalledWith("agent_watch_start", { path: "Z:/repo" });
+    invoke.mockRejectedValueOnce(new Error("platform off"));
+    expect(await startAgentWatch("Z:/repo")).toBe(false); // degrades, never throws
+  });
+
+  it("stopAgentWatch is safe when the platform is off", async () => {
+    invoke.mockRejectedValueOnce(new Error("off"));
+    await expect(stopAgentWatch()).resolves.toBeUndefined();
   });
 });
