@@ -1,0 +1,17 @@
+{
+  "schema_version": 1,
+  "id": "aws-codecommit",
+  "name": "AWS CodeCommit",
+  "kind": "git",
+  "auth": [
+    "ssh",
+    "pat"
+  ],
+  "api_hosts": [],
+  "capabilities": [
+    "browse",
+    "clone",
+    "pull",
+    "push"
+  ]
+}

@@ -1,0 +1,21 @@
+{
+  "schema_version": 1,
+  "id": "bitbucket",
+  "name": "Bitbucket",
+  "kind": "git",
+  "auth": [
+    "oauth",
+    "pat",
+    "ssh"
+  ],
+  "api_hosts": [
+    "api.bitbucket.org"
+  ],
+  "capabilities": [
+    "browse",
+    "clone",
+    "pull",
+    "push"
+  ],
+  "web_base": "https://bitbucket.org"
+}

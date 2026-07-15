@@ -1,0 +1,21 @@
+{
+  "schema_version": 1,
+  "id": "github",
+  "name": "GitHub",
+  "kind": "git",
+  "auth": [
+    "oauth",
+    "pat",
+    "ssh"
+  ],
+  "api_hosts": [
+    "api.github.com"
+  ],
+  "capabilities": [
+    "browse",
+    "clone",
+    "pull",
+    "push"
+  ],
+  "web_base": "https://github.com"
+}

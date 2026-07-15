@@ -1,0 +1,17 @@
+{
+  "schema_version": 1,
+  "id": "subversion",
+  "name": "Subversion",
+  "kind": "svn",
+  "auth": [
+    "pat",
+    "anonymous"
+  ],
+  "api_hosts": [],
+  "capabilities": [
+    "clone",
+    "pull",
+    "push"
+  ],
+  "experimental": true
+}

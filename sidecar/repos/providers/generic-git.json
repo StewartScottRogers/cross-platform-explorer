@@ -1,0 +1,17 @@
+{
+  "schema_version": 1,
+  "id": "generic-git",
+  "name": "Git (any remote)",
+  "kind": "git",
+  "auth": [
+    "ssh",
+    "pat",
+    "anonymous"
+  ],
+  "api_hosts": [],
+  "capabilities": [
+    "clone",
+    "pull",
+    "push"
+  ]
+}
