@@ -778,6 +778,7 @@ dependencies = [
  "serde_bencode",
  "serde_json",
  "sevenz-rust",
+ "sha2",
  "sidecar-contract",
  "sidecar-host",
  "tar",

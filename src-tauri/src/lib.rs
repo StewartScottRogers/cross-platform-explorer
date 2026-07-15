@@ -1301,6 +1301,37 @@ fn dir_size(path: String) -> Result<u64, String> {
     Ok(walk(p))
 }
 
+/// Compute the SHA-256 checksum of a file, returned as lowercase hex (CPE-412). Streamed in fixed
+/// chunks so a multi-GB file never loads into memory. A directory, missing, or unreadable path is an
+/// `Err`, never a panic. Opt-in from the UI (hashing is I/O-bound) — never run automatically.
+#[tauri::command]
+fn hash_file(path: String) -> Result<String, String> {
+    use sha2::{Digest, Sha256};
+    use std::io::Read;
+    let p = Path::new(&path);
+    if p.is_dir() {
+        return Err(format!("{path}: is a folder"));
+    }
+    let mut file = fs::File::open(p).map_err(|e| format!("{path}: {e}"))?;
+    let mut hasher = Sha256::new();
+    let mut buf = [0u8; 64 * 1024];
+    loop {
+        let n = file.read(&mut buf).map_err(|e| format!("{path}: {e}"))?;
+        if n == 0 {
+            break;
+        }
+        hasher.update(&buf[..n]);
+    }
+    let digest = hasher.finalize();
+    // Lowercase hex — one dependency fewer than pulling in `hex` for three lines.
+    let mut hex = String::with_capacity(digest.len() * 2);
+    for b in digest {
+        use std::fmt::Write as _;
+        let _ = write!(hex, "{b:02x}");
+    }
+    Ok(hex)
+}
+
 /// Read `settings.json` from `dir`, returning `{}` when it's absent or
 /// unreadable so the frontend always starts from a valid document.
 fn read_settings_from(dir: &Path) -> String {
@@ -2814,6 +2845,7 @@ pub fn run() {
             move_exact,
             entry_info,
             dir_size,
+            hash_file,
             git_remote_url,
             open_external,
             run_as_admin,
@@ -3655,6 +3687,19 @@ mod tests {
         assert_eq!(info.name, "i.txt");
         assert!(!info.is_dir);
         assert_eq!(info.size, 5);
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn hash_file_matches_the_known_sha256_vector_and_rejects_folders() {
+        let d = scratch("hash");
+        // The canonical SHA-256("abc") test vector.
+        fs::write(d.join("abc.txt"), b"abc").unwrap();
+        let hex = hash_file(d.join("abc.txt").to_string_lossy().to_string()).unwrap();
+        assert_eq!(hex, "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad");
+        // A directory and a missing path are errors, not panics.
+        assert!(hash_file(d.to_string_lossy().to_string()).is_err());
+        assert!(hash_file(d.join("nope.txt").to_string_lossy().to_string()).is_err());
         let _ = fs::remove_dir_all(&d);
     }
 

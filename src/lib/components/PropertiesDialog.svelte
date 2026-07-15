@@ -29,6 +29,36 @@
   let sizing = false;
   let cancelled = false;
 
+  // On-demand SHA-256 checksum (CPE-412) — hashing is I/O-bound, so it's opt-in, never automatic.
+  let checksum = "";
+  let hashing = false;
+  let hashError = "";
+  let copied = false;
+
+  async function computeHash() {
+    if (!single || single.is_dir) return;
+    hashing = true;
+    hashError = "";
+    checksum = "";
+    try {
+      checksum = await invoke<string>("hash_file", { path: single.path });
+    } catch (e) {
+      hashError = String(e);
+    } finally {
+      hashing = false;
+    }
+  }
+
+  async function copyHash() {
+    try {
+      await navigator.clipboard.writeText(checksum);
+      copied = true;
+      setTimeout(() => (copied = false), 1500);
+    } catch {
+      /* clipboard unavailable — leave the digest on screen to copy manually */
+    }
+  }
+
   $: single = entries.length === 1 ? entries[0] : null;
   $: totalSize = entries.reduce((n, e) => n + (e.is_dir ? 0 : e.size), 0);
   $: folderCount = entries.filter((e) => e.is_dir).length;
@@ -110,6 +140,26 @@
             </dd>
           </div>
         {/if}
+        {#if !single.is_dir}
+          <div>
+            <dt>SHA-256</dt>
+            <dd class="checksum">
+              {#if checksum}
+                <code class="hash">{checksum}</code>
+                <button class="mini" on:click={copyHash} title="Copy checksum to clipboard">
+                  <Icon name={copied ? "check" : "copy"} size={13} />
+                  {copied ? "Copied" : "Copy"}
+                </button>
+              {:else if hashing}
+                <span class="dim">Computing…</span>
+              {:else if hashError}
+                <span class="err-inline">{hashError}</span>
+              {:else}
+                <button class="mini" on:click={computeHash}>Compute</button>
+              {/if}
+            </dd>
+          </div>
+        {/if}
       </dl>
     {:else}
       <div class="hero">
@@ -162,6 +212,16 @@
   dd { flex: 1; overflow-wrap: anywhere; }
   dd.path { font-family: ui-monospace, monospace; font-size: 12px; }
   dd.dim { color: var(--text-faint); }
+  dd.checksum { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+  .hash { font-family: ui-monospace, monospace; font-size: 11px; overflow-wrap: anywhere; }
+  .err-inline { color: #c42b1c; }
+  .dim { color: var(--text-faint); }
+  .mini {
+    display: inline-flex; align-items: center; gap: 5px;
+    height: 24px; padding: 0 10px; border-radius: var(--radius);
+    border: 1px solid var(--border-strong); background: var(--surface-alt); font-size: 12px;
+  }
+  .mini:hover { background: var(--surface); }
   .actions { display: flex; justify-content: flex-end; padding-top: 8px; }
   .btn { height: 32px; padding: 0 16px; border-radius: var(--radius);
          border: 1px solid var(--border-strong); background: var(--surface-alt); }
