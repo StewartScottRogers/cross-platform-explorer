@@ -33,6 +33,7 @@
         { sep: true },
         { id: "copy-file-names", label: "Copy file names" },
         { id: "copy-file-list", label: "Copy file list (name + size)" },
+        { id: "save-file-list", label: "Save file list…" },
       ],
     },
     {

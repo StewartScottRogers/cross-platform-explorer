@@ -17,3 +17,20 @@ export function detailList(entries: DirEntry[]): string {
   const rows = entries.map((e) => `${e.name}\t${e.is_dir ? "<folder>" : formatSize(e.size) || "0 B"}`);
   return ["Name\tSize", ...rows].join("\n");
 }
+
+/** Escape one CSV cell: quote it when it contains a comma, quote, or newline; double inner quotes. */
+function csvCell(s: string): string {
+  return /[",\n\r]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
+}
+
+/** A CSV manifest: `Name,Size,Modified` (size in bytes, empty for folders; modified as a UTC ISO
+ *  timestamp so the output is deterministic). Suitable for saving to a `.csv` file. */
+export function csvList(entries: DirEntry[]): string {
+  const header = "Name,Size,Modified";
+  const rows = entries.map((e) => {
+    const size = e.is_dir ? "" : String(e.size);
+    const modified = e.modified ? new Date(e.modified).toISOString() : "";
+    return [csvCell(e.name), size, modified].join(",");
+  });
+  return [header, ...rows].join("\n");
+}
