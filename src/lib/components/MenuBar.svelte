@@ -40,7 +40,6 @@
       id: "app",
       label: "Application",
       items: [
-        { id: "pop-out-preview", label: "Pop out preview", hint: "Ctrl+Shift+O" },
         { id: "check-updates", label: "Check for Updates…" },
         { id: "settings", label: "Settings…" },
         { sep: true },
