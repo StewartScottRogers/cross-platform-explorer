@@ -152,48 +152,48 @@
   <div class="toolbar">
     <div class="row">
       <div class="field" style="width:190px;flex:0 0 auto">
-        <label for="agent">Agent</label>
+        <label for="agent" title="The coding tool to run (Claude Code, aider, …)">Agent</label>
         <select id="agent"></select>
       </div>
       <div class="field" style="width:170px;flex:0 0 auto">
-        <label for="preset">Preset</label>
+        <label for="preset" title="A named provider+model setup you can reuse — not your key">Setup</label>
         <div style="display:flex;gap:4px">
           <select id="preset" style="flex:1;min-width:0"></select>
-          <button id="set-del" type="button" title="Delete the selected preset" style="width:30px;padding:0">✕</button>
+          <button id="set-del" type="button" title="Delete the selected setup" style="width:30px;padding:0">✕</button>
         </div>
       </div>
       <div class="install" id="install-wrap"></div>
       <div class="field" style="width:160px;flex:0 0 auto">
-        <label for="provider">Provider</label>
+        <label for="provider" title="Who serves the model — e.g. OpenRouter, or the tool's own built-in login">Provider</label>
         <select id="provider"></select>
       </div>
       <div class="field" id="credential-wrap" style="width:130px;flex:0 0 auto;display:none">
-        <label for="credential">Credential</label>
+        <label for="credential" title="Which of this provider's saved keys to use (e.g. work vs personal)">Account</label>
         <select id="credential"></select>
       </div>
       <div class="field grow">
-        <label for="model">Model</label>
+        <label for="model" title="Which AI model to use — leave blank for the tool's default">Model</label>
         <input id="model" placeholder="(default)" />
       </div>
       <div class="field grow">
-        <label for="smallModel">Small model</label>
+        <label for="smallModel" title="A cheaper/faster model for minor steps — optional">Fast model</label>
         <input id="smallModel" placeholder="(same as model)" />
       </div>
       <div class="field grow">
-        <label for="apiKey">API key</label>
+        <label for="apiKey" title="Paste a key just for this launch — optional; your saved keys are used otherwise (see Keys…)">API key</label>
         <input id="apiKey" type="password" placeholder="optional — native login otherwise" />
       </div>
     </div>
     <div class="row">
       <div class="field grow">
-        <label for="cwd">Working folder</label>
+        <label for="cwd">Project folder</label>
         <div style="display:flex;gap:4px">
           <input id="cwd" style="flex:1;min-width:0" />
           <button id="cwd-browse" type="button" title="Choose a folder" style="flex:0 0 auto">Browse…</button>
         </div>
       </div>
-      <input id="set-name" placeholder="Name this preset…" style="width:170px;flex:0 0 auto" />
-      <button id="set-save" type="button" title="Save this agent's provider + model as a named preset — NOT your API key (use Keys… for that)">Save preset</button>
+      <input id="set-name" placeholder="Name this setup…" style="width:170px;flex:0 0 auto" />
+      <button id="set-save" type="button" title="Save this agent's provider + model as a named setup you can reuse — NOT your API key (use Keys… for that)">Save setup</button>
       <button id="keys-btn" type="button" title="Manage provider API keys">Keys…</button>
       <button id="history-btn" type="button" title="Past sessions — relaunch or view transcript">Recent…</button>
       <div class="menu-wrap">
@@ -212,7 +212,7 @@
   <div id="msg">Pick an agent, provider and model, then Launch.</div>
   <div id="tabs"></div>
   <div id="terms">
-    <button id="scrollback-btn" type="button" title="Scroll through everything this session produced">⇕ Output</button>
+    <button id="scrollback-btn" type="button" title="Scroll through everything this session produced">⇕ Full output</button>
   </div>
 
   <!-- Provider credential manager (CPE-346). Values are write-only: saved to the OS
@@ -285,13 +285,13 @@
         <p>Pick an <b>Agent</b>, a <b>Provider</b>, and a <b>Model</b> (leave Model blank for the agent's default), set the <b>Working folder</b>, then click <b>Launch</b>. Each Launch opens its own tab; the sidecar runs them all at once.</p>
 
         <h3>2 · Use your own API key — “Keys…”</h3>
-        <p>Click <b>Keys…</b> to save a provider key. It's stored in your OS keychain, never in a file, and never shown again. Give it a <b>label</b> (e.g. “work”) to keep several keys per provider — a labelled key then appears in the <b>Credential</b> picker. <b>Check</b> verifies a key with the provider before you save it.</p>
+        <p>Click <b>Keys…</b> to save a provider key. It's stored in your OS keychain, never in a file, and never shown again. Give it a <b>label</b> (e.g. “work”) to keep several keys per provider — a labelled key then appears in the <b>Account</b> picker. <b>Check</b> verifies a key with the provider before you save it.</p>
 
-        <h3>3 · Save a setup to reuse — “Preset”</h3>
-        <p>A <b>Preset</b> remembers your <b>provider + model</b> choice under a name. It does <b>not</b> save your key — keys live in <b>Keys…</b>. Type a name, click <b>Save preset</b>, then pick it later from the <b>Preset</b> dropdown. Presets are per-agent.</p>
+        <h3>3 · Save a reusable setup — “Save setup”</h3>
+        <p>A <b>setup</b> remembers your <b>provider + model</b> choice under a name. It does <b>not</b> save your key — keys live in <b>Keys…</b>. Type a name, click <b>Save setup</b>, then pick it later from the <b>Setup</b> dropdown. Setups are per-agent.</p>
 
-        <h3>4 · Scroll back through output — “⇕ Output”</h3>
-        <p>A full-screen agent like Claude Code draws its own screen and does its own scrolling — just use your <b>mouse wheel</b> inside it. To review <b>everything</b> a session printed, with a draggable scrollbar, click <b>⇕ Output</b> at the top-right of the terminal.</p>
+        <h3>4 · Scroll back through output — “⇕ Full output”</h3>
+        <p>A full-screen agent like Claude Code draws its own screen and does its own scrolling — just use your <b>mouse wheel</b> inside it. To review <b>everything</b> a session printed, with a draggable scrollbar, click <b>⇕ Full output</b> at the top-right of the terminal.</p>
 
         <h3>5 · Keep agents current — “Manage agents ▾”</h3>
         <p><b>Check for updates now</b> fetches new/updated agents (signed); <b>Auto-update on open</b> does it automatically; <b>Pin this agent</b> freezes one agent's version; <b>Reset to the shipped agents</b> undoes updates.</p>
@@ -455,7 +455,7 @@ function agentSets() {
 }
 function renderPresets() {
   const sel = $("preset"); sel.innerHTML = "";
-  const blank = document.createElement("option"); blank.value = ""; blank.textContent = "— presets —"; sel.appendChild(blank);
+  const blank = document.createElement("option"); blank.value = ""; blank.textContent = "— saved setups —"; sel.appendChild(blank);
   agentSets().forEach((p) => { const o = document.createElement("option"); o.value = p.name; o.textContent = p.name; sel.appendChild(o); });
 }
 function applyPreset() {
@@ -478,7 +478,7 @@ async function saveSet() {
     $("set-name").value = "";
     catalog = await api("/api/catalog"); // refresh the stored sets
     renderPresets(); $("preset").value = name;
-    setMsg("Saved preset “" + name + "” (provider + model — your key is saved separately in Keys…).", true);
+    setMsg("Saved setup “" + name + "” (provider + model — your key is saved separately in Keys…).", true);
   } catch (e) { setMsg("Couldn't save set: " + e.message); }
 }
 async function deleteSet() {
@@ -488,7 +488,7 @@ async function deleteSet() {
     await api("/api/presets/delete", { method: "POST", body: JSON.stringify({ agent: $("agent").value, name }) });
     catalog = await api("/api/catalog");
     renderPresets();
-    setMsg("Deleted preset “" + name + "”.", true);
+    setMsg("Deleted setup “" + name + "”.", true);
   } catch (e) { setMsg("Couldn't delete set: " + e.message); }
 }
 
