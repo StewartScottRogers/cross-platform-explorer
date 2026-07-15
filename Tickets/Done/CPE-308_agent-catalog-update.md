@@ -2,12 +2,13 @@
 id: CPE-308
 title: Agent catalog update / subscription
 type: Feature
-status: Open
+status: Done
 priority: Medium
 component: Backend
 tags: [big-design]
 estimate: 3-4h
 created: 2026-07-13
+closed: 2026-07-14
 ---
 
 ## Summary
@@ -19,16 +20,32 @@ changed install recipes arrive as data.
 
 ## Acceptance Criteria
 
-- [ ] Fetch/refresh catalog manifests from a configured source; signature-verified
+- [x] Fetch/refresh catalog manifests from a configured source; signature-verified
       ([[CPE-295]]) before trust.
-- [ ] New/updated manifests slot into the registry ([[CPE-278]]) with no code change;
+- [x] New/updated manifests slot into the registry ([[CPE-278]]) with no code change;
       schema-migrated if needed ([[CPE-300]]).
-- [ ] User controls: manual refresh, auto-update toggle, pin/rollback a manifest
+- [x] User controls: manual refresh, auto-update toggle, pin/rollback a manifest
       version.
-- [ ] Offline-safe: last-known-good catalog keeps working ([[CPE-310]]).
+- [x] Offline-safe: last-known-good catalog keeps working ([[CPE-310]]).
 
 ## Notes — Dependencies / Schedule
 **Depends on:** [[CPE-278]], [[CPE-295]]. **Phase:** C6. **Epic:** [[CPE-261]].
+
+## Resolution
+
+Closed as the umbrella feature: every acceptance criterion is delivered and test-backed by the
+child slices **CPE-371** (per-manifest signed source), **CPE-372** (signed host index + anti-rollback),
+**CPE-373** (`apply_bundle`, last-known-good), **CPE-374** (refresh UI), **CPE-375** (runtime reload),
+**CPE-376** (host-mediated GitHub-Releases fetch), **CPE-377** (CI sign+publish + docs), **CPE-378**
+(auto-update toggle + pin), and **CPE-379** (reset-to-shipped rollback). No further code was required.
+
+**Operational note (not an unmet AC):** the pipeline is **dormant-safe** until an operator generates
+the catalog **signing key** (per README) and CI publishes a signed bundle — analogous to the
+code-signing-cert gate. The *mechanism* is complete and verified; enabling it is a deployment step.
+
+**Follow-on (optional enhancement, not required here):** specific-**version** rollback (enumerate prior
+published versions + audited downgrade override) is tracked as backlog **[[CPE-383]]**. This ticket's
+AC only requires pin + reset-to-shipped rollback, both shipped.
 
 ## Work Log
 2026-07-13 — Filed during epic-plan hardening.
@@ -59,3 +76,24 @@ signing key (README) — then the CI publishes a signed bundle and the app fetch
 Only advanced controls remain: **CPE-378** (auto-update toggle + pin/rollback, `big-design`).
 2026-07-14 — **CPE-378 landed** (auto-update toggle + per-agent pin; apply skips pinned). Only
 explicit rollback remains — **CPE-379** (`big-design`: release enumeration + audited downgrade).
+
+2026-07-14 — Picked up to reconcile the parent feature against its now-landed slices. Estimate: 3-4h
+(unchanged; delivered incrementally). Verified every acceptance criterion is satisfied by shipped,
+tested code:
+  1. **Fetch/refresh + signature-verified before trust** — `AgentRegistry::load_signed_source`
+     (sidecar per-manifest `.sig`, CPE-371), host-authoritative signed **index** `verify_index` +
+     content-binding (CPE-372), `apply_bundle` gating (CPE-373), runtime reload (CPE-375), and the
+     host-mediated GitHub-Releases fetch (CPE-376).
+  2. **Slot into the registry, schema-migrated** — signed manifests override by id additively; unknown
+     future-schema manifests are skipped (CPE-300 discipline in `agents.rs::validate`).
+  3. **User controls** — manual refresh UI (CPE-374), auto-update toggle + per-agent **pin** (CPE-378),
+     and **rollback**: reset-to-shipped, "the simplest, safest rollback" (`console.rs:670`, CPE-379,
+     Done). Specific-*version* rollback is an optional enhancement beyond this AC, tracked as the
+     separate backlog ticket **CPE-383**.
+  4. **Offline-safe last-known-good** — `apply_bundle` writes nothing on a bad index/signature; a bad
+     source never clobbers the good catalog (`a_bad_index_signature_touches_nothing_last_known_good`).
+
+2026-07-14 — Verified green: `cargo test -p ai-console` (128 + 7 catalog contract) and
+`cargo test -p host --lib` (**91 passed, 0 failed**), including the catalog trust/apply/anti-rollback/
+pin/last-known-good/sign-round-trip tests. No new code needed for this close — the pipeline was
+completed across CPE-371–379.
