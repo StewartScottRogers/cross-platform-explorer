@@ -5,6 +5,7 @@ import {
   recentActivities,
   mergeTimeline,
   affectsListing,
+  folderHasActivity,
   ingestActivity,
   clearActivity,
   fsActivity,
@@ -105,5 +106,18 @@ describe("affectsListing (CPE-401 — should we re-list the folder)", () => {
     expect(affectsListing([{ kind: "created", path: "Z:/other/x.ts" }], folder)).toBe(false);
     expect(affectsListing([], folder)).toBe(false);
     expect(affectsListing([{ kind: "created", path: "/x/y.ts" }], "")).toBe(false);
+  });
+});
+
+describe("folderHasActivity (CPE-402 — is the agent working inside this folder)", () => {
+  it("true for a direct or nested descendant, cross-platform", () => {
+    expect(folderHasActivity(["Z:/repos/app/src/lib/x.ts"], "Z:\\repos\\app\\src")).toBe(true);
+    expect(folderHasActivity(["Z:/repos/app/a.ts"], "Z:/repos/app")).toBe(true);
+  });
+  it("false for the folder itself, a sibling sharing a prefix, or an empty folder", () => {
+    expect(folderHasActivity(["Z:/repos/app"], "Z:/repos/app")).toBe(false); // self, not inside
+    expect(folderHasActivity(["Z:/repos/app-2/x.ts"], "Z:/repos/app")).toBe(false); // prefix ≠ descendant
+    expect(folderHasActivity([], "Z:/repos/app")).toBe(false);
+    expect(folderHasActivity(["Z:/repos/app/x.ts"], "")).toBe(false);
   });
 });

@@ -10,6 +10,7 @@
   import type { Selection } from "../selection";
   import type { DirEntry, SortKey, SortDir, ViewMode } from "../types";
   import type { AgentActivity } from "../agentActivity";
+  import { folderHasActivity } from "../agentActivity";
 
   export let entries: DirEntry[] = [];
   /** Agent Watch (CPE-399): per-path live activity, keyed by absolute path. Empty ⇒ no
@@ -22,6 +23,9 @@
     removed: "deleted",
     renamed: "moved",
   };
+  // The active paths, recomputed only when the activity map changes — used to light up folder rows
+  // whose subtree the agent is changing (CPE-402).
+  $: activityPaths = Object.keys(activity);
   export let selection: Selection;
   export let sortKey: SortKey = "name";
   export let sortDir: SortDir = "asc";
@@ -323,6 +327,7 @@
         clipped every row to nothing. The list rendered 18 blank strips while
         the status bar correctly reported "18 items". Shipped in v0.5.0. CPE-045.
       -->
+      {@const insideActive = entry.is_dir && folderHasActivity(activityPaths, entry.path)}
       <div
         class="row view-{view}"
         class:selected={isSelected(selection, i)}
@@ -331,6 +336,7 @@
         class:droptarget={dropIndex === i}
         class:dragging={draggedPaths.includes(entry.path)}
         class:agent-active={!!activity[entry.path]}
+        class:agent-inside={insideActive}
         data-agent-kind={activity[entry.path]?.kind ?? ""}
         bind:this={rowEls[i]}
         role="button"
@@ -379,6 +385,8 @@
           {/if}
           {#if activity[entry.path]}
             <span class="agent-badge {activity[entry.path].kind}">{ACTIVITY_LABEL[activity[entry.path].kind]}</span>
+          {:else if insideActive}
+            <span class="agent-inside-dot" title="The agent is changing files in here">●</span>
           {/if}
         </span>
 
@@ -450,6 +458,18 @@
   .row.agent-active[data-agent-kind="modified"] { --agent-accent: #b5872b; }
   .row.agent-active[data-agent-kind="renamed"] { --agent-accent: #3a72b5; }
   .row.agent-active[data-agent-kind="removed"] { --agent-accent: #b5433a; }
+  /* A folder whose subtree the agent is changing — a soft accent so you can follow it down (CPE-402). */
+  .row.agent-inside:not(.agent-active) {
+    box-shadow: inset 3px 0 0 color-mix(in srgb, var(--accent, #2f6fed) 55%, transparent);
+  }
+  .agent-inside-dot {
+    flex: 0 0 auto;
+    margin-left: 8px;
+    font-size: 9px;
+    line-height: 1;
+    color: var(--accent, #2f6fed);
+    opacity: 0.8;
+  }
 
   .row.lead:not(.selected) {
     outline: 1px dotted var(--text-faint);

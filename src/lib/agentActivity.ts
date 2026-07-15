@@ -102,6 +102,18 @@ export function ingestActivity(payload: unknown, now = Date.now()): void {
 }
 
 /**
+ * Whether any of `paths` is a descendant of `dir` — i.e. the agent is changing files somewhere
+ * inside this folder (CPE-402). Used to light up folder rows so you can follow the agent down the
+ * tree. Excludes `dir` itself. Cross-platform (case/separator-normalized).
+ */
+export function folderHasActivity(paths: string[], dir: string): boolean {
+  const d = normalizePath(dir);
+  if (!d) return false;
+  const prefix = d + "/";
+  return paths.some((p) => normalizePath(p).startsWith(prefix));
+}
+
+/**
  * Whether a batch changes which rows belong in `folder` — i.e. a create/remove/rename of a DIRECT
  * child (CPE-401). Drives a live re-list so new files appear and deleted ones vanish. A `modified`
  * doesn't change membership (its row already exists; the annotation is enough), so it's excluded.

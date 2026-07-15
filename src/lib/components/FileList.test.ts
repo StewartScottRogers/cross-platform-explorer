@@ -65,6 +65,21 @@ describe("FileList Agent Watch annotations (CPE-399)", () => {
     expect(container.querySelector(".agent-active")).toBeNull();
     expect(container.querySelector(".agent-badge")).toBeNull();
   });
+
+  it("flags a folder whose subtree the agent is changing, but not an unrelated folder (CPE-402)", () => {
+    const entries = [
+      entry({ name: "src", path: "/x/src", is_dir: true, extension: "" }),
+      entry({ name: "docs", path: "/x/docs", is_dir: true, extension: "" }),
+    ];
+    const { container } = render(FileList, {
+      ...base,
+      entries,
+      activity: { "/x/src/lib/main.rs": { kind: "modified" as const, at: Date.now() } },
+    });
+    const inside = container.querySelectorAll(".row.agent-inside");
+    expect(inside.length).toBe(1); // only src
+    expect(screen.getByTitle(/agent is changing files in here/i)).toBeTruthy();
+  });
 });
 
 describe("FileList rendering", () => {
