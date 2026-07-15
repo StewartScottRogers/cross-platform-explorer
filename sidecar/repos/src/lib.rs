@@ -12,6 +12,8 @@
 
 pub mod providers;
 pub mod status;
+pub mod sync;
 
 pub use providers::{ProviderManifest, ProviderRegistry};
 pub use status::{parse_status, RepoState};
+pub use sync::{plan_sync, DivergePolicy, SyncAction, SyncPlan, SyncPolicy};
