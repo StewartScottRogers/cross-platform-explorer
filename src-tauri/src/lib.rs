@@ -8,6 +8,10 @@ use std::time::{SystemTime, UNIX_EPOCH};
 /// code under `-D warnings` (its pure logic is still unit-tested under the feature).
 #[cfg(feature = "sidecar-platform")]
 mod keyverify;
+/// Host-brokered forge API egress for the repos sidecar (CPE-433). Same rationale as `keyverify`:
+/// feature-gated, pure allow-list/URL-builder/SSRF core unit-tested under the feature.
+#[cfg(feature = "sidecar-platform")]
+mod forge_egress;
 
 #[derive(Serialize)]
 pub struct DirEntry {
@@ -2343,6 +2347,35 @@ fn verify_key_response(params: &serde_json::Value) -> sidecar_contract::Response
     let key = params.get("key").and_then(|v| v.as_str()).unwrap_or("");
     let (valid, live, detail) = keyverify::verify_live(provider, key);
     sidecar_contract::Response { result: Ok(json!({ "valid": valid, "live": live, "detail": detail })) }
+}
+
+/// Perform an allow-listed forge API call on the repos sidecar's behalf (CPE-433) — the response to
+/// a sandboxed `host.forge_request { provider, method, path, host?, token?, body? }`. The URL is
+/// built host-side from the provider allow-list (`forge_egress`), never from the request, so this is
+/// not a general fetch (no SSRF). Returns `{ ok, status, body }` on a completed call, or
+/// `{ ok:false, error }` for a refused/failed one. The token is never logged or echoed.
+///
+/// Not yet wired into a request router: the repos sidecar's own host connection lands with CPE-432
+/// AC3 (host launch/supervision). This handler is ready to drop into that connection's dispatch,
+/// exactly as `verify_key_response` sits in the AI Console connection.
+#[cfg(feature = "sidecar-platform")]
+#[allow(dead_code)]
+fn forge_request_response(params: &serde_json::Value) -> sidecar_contract::Response {
+    use serde_json::json;
+    let provider = params.get("provider").and_then(|v| v.as_str()).unwrap_or("");
+    let method = params.get("method").and_then(|v| v.as_str()).unwrap_or("GET");
+    let path = params.get("path").and_then(|v| v.as_str()).unwrap_or("");
+    let host = params.get("host").and_then(|v| v.as_str());
+    let token = params.get("token").and_then(|v| v.as_str());
+    let body = params.get("body").and_then(|v| v.as_str());
+    match forge_egress::forge_request(provider, method, host, path, token, body) {
+        Ok((status, body)) => {
+            sidecar_contract::Response { result: Ok(json!({ "ok": true, "status": status, "body": body })) }
+        }
+        Err(e) => sidecar_contract::Response {
+            result: Ok(json!({ "ok": false, "error": format!("{e:?}") })),
+        },
+    }
 }
 
 /// Trusted first-party public keys (hex) for agent-catalog signatures (CPE-376/377/380). The
