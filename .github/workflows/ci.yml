@@ -142,6 +142,7 @@ jobs:
             ./sidecar/contract -> target
             ./sidecar/host -> target
             ./sidecar/ai-console -> target
+            ./sidecar/repos -> target
 
       - name: contract — clippy + test
         working-directory: sidecar/contract
@@ -157,6 +158,12 @@ jobs:
 
       - name: ai-console — clippy + test
         working-directory: sidecar/ai-console
+        run: |
+          cargo clippy --all-targets -- -D warnings
+          cargo test
+
+      - name: repos — clippy + test
+        working-directory: sidecar/repos
         run: |
           cargo clippy --all-targets -- -D warnings
           cargo test
