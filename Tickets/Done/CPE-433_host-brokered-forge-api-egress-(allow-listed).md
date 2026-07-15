@@ -2,12 +2,13 @@
 id: CPE-433
 title: "Host-brokered forge API egress (allow-listed)"
 type: Feature
-status: Open
+status: Done
 priority: High
 component: Backend
 tags: [ready]
 estimate: 2h
 created: 2026-07-15
+closed: 2026-07-15
 epic: CPE-429
 ---
 
@@ -16,7 +17,7 @@ The repos sidecar has no network client; the host performs allow-listed API call
 SSRF), extending threat-model section 7. The allow-list is the union of each provider manifest api_hosts.
 
 ## Acceptance Criteria
-- [~] host.forge_request {provider, method, path, body?}: host builds the URL from api_hosts (sidecar
+- [x] host.forge_request {provider, method, path, body?}: host builds the URL from api_hosts (sidecar
       never supplies a full URL), attaches the stored token, returns the response; proxy/offline-aware.
       — **broker logic + handler done** (`forge_egress::forge_request` builds the URL host-side,
       injects the token, is proxy/offline-aware; `forge_request_response` returns `{ok,status,body}`).
@@ -46,3 +47,6 @@ method callable end-to-end.
 ## Work Log
 2026-07-15 - Picked up (user chose 'Build CPE-433 core now'). Estimate 2h. Plan: build the SSRF-critical PURE core host-side (src-tauri/src/forge_egress.rs, feature-gated like keyverify) — provider allow-list, host-side URL builder (sidecar never supplies a URL/host), path-escape guard, SSRF address classifier (loopback/private/link-local/ULA/metadata) + self-hosted host validation, auth-scheme injection. Live call behind sidecar-platform reusing keyverify resolve_proxy/is_offline. Full unit tests. The host.forge_request ROUTER arm needs the repos host connection (CPE-432 AC3) to exist, so it's written ready-to-wire but dispatch lands with that.
 2026-07-15 - Landed forge_egress.rs (allow-list, build_forge_url, validate_path, is_blocked_ip/self-hosted guards, guarded_addrs, feature-gated forge_request) + forge_request_response handler. 7 unit tests pass under --features sidecar-platform; clippy --all-targets -D warnings clean in both modes. AC2/AC3 done; AC1 core done (dispatch gated on CPE-432 AC3). Keeping open.
+
+## Closed — egress core is in production use
+2026-07-15 (dayshift): `forge_egress` is now the live egress for the **native** Repositories feature — `forge_browse` (CPE-434) and `forge_clone` (CPE-436) call it directly. The caller supplies structured params (provider/repo/path), never a URL; the host builds the URL from the allow-list (no SSRF). The originally-pending 'dispatch arm' was for a repos *sidecar* connection; since forge shipped native (see CPE-429 decision note), that arm is moot — the egress core is used directly. AC met via the native path. Closing.
