@@ -57,6 +57,8 @@ pub mod pty;
 pub use mcp::{McpManager, McpProcess, McpServerSpec};
 pub mod routing;
 pub mod scope;
+pub mod session_daemon;
+pub use session_daemon::{Attachment, SessionDaemon};
 
 pub use plugins::{install_plugin, uninstall_plugin, PluginApplier, PluginManifest, PluginRegistry};
 pub use scope::{build_launch, dangerous_flags, AgentLaunchRequest};
