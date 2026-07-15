@@ -25,6 +25,7 @@
   import NavToolbar from "./lib/components/NavToolbar.svelte";
   import CommandBar from "./lib/components/CommandBar.svelte";
   import Sidebar from "./lib/components/Sidebar.svelte";
+  import RepoBrowser from "./lib/components/RepoBrowser.svelte";
   import Toolbar from "./lib/components/Toolbar.svelte";
   import FileList from "./lib/components/FileList.svelte";
   import HomeView from "./lib/components/HomeView.svelte";
@@ -190,6 +191,8 @@
   /** "Find duplicate files" overlay, scoped to the current folder (CPE-421). */
   let duplicatesOpen = false;
   let patternSelectOpen = false;
+  /** Repositories browser overlay (CPE-434/435) — browse GitHub & other forges in-app. */
+  let showRepos = false;
   /** True in sidecar-platform builds — gates the AI Console toolbar button (CPE-351). */
   let aiConsoleAvailable = false;
   /** Teardown for the Agent Watch session listener (CPE-396). */
@@ -1955,6 +1958,7 @@
       on:navigate={(e) => { if (archive) exitArchive(); navigate(e.detail); }}
       on:openFile={(e) => openRecent(e.detail)}
       on:home={() => { if (archive) exitArchive(); navigate(HOME); }}
+      on:repos={() => (showRepos = true)}
       on:drop={(e) => dropInto(e.detail.paths, e.detail.dest, e.detail.copy)}
     />
   </div>
@@ -2276,6 +2280,10 @@
     on:navigate={(e) => { duplicatesOpen = false; revealFileInApp(e.detail); }}
     on:close={() => (duplicatesOpen = false)}
   />
+{/if}
+
+{#if showRepos}
+  <RepoBrowser on:close={() => (showRepos = false)} />
 {/if}
 
 {#if patternSelectOpen}

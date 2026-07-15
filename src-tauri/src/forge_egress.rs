@@ -299,6 +299,44 @@ fn read_response(resp: ureq::Response) -> Result<(u16, String), EgressError> {
     Ok((status, buf))
 }
 
+/// One entry in a browsed remote repo tree (CPE-434/435) — a file or folder, for the Repositories
+/// left-pane view. Serialised to the frontend.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct RepoEntry {
+    pub name: String,
+    pub path: String,
+    pub is_dir: bool,
+    pub size: u64,
+}
+
+/// Parse a GitHub **Contents API** response (`GET /repos/{o}/{r}/contents/{path}`) into entries —
+/// a JSON array for a directory, or a single object for a file. Folders sort before files, then by
+/// name (the explorer's ordering). Malformed input yields an empty list. Pure + unit-tested; mirrors
+/// the repos sidecar's parser so the host can render a tree from a brokered fetch.
+pub fn parse_github_contents(json: &str) -> Vec<RepoEntry> {
+    let value: serde_json::Value = match serde_json::from_str(json) {
+        Ok(v) => v,
+        Err(_) => return Vec::new(),
+    };
+    let items: Vec<&serde_json::Value> = match &value {
+        serde_json::Value::Array(a) => a.iter().collect(),
+        serde_json::Value::Object(_) => vec![&value],
+        _ => return Vec::new(),
+    };
+    let mut out: Vec<RepoEntry> = items
+        .into_iter()
+        .filter_map(|it| {
+            let name = it.get("name")?.as_str()?.to_string();
+            let path = it.get("path").and_then(|p| p.as_str()).unwrap_or(&name).to_string();
+            let is_dir = it.get("type").and_then(|t| t.as_str()) == Some("dir");
+            let size = it.get("size").and_then(|s| s.as_u64()).unwrap_or(0);
+            Some(RepoEntry { name, path, is_dir, size: if is_dir { 0 } else { size } })
+        })
+        .collect();
+    out.sort_by(|a, b| b.is_dir.cmp(&a.is_dir).then_with(|| a.name.to_lowercase().cmp(&b.name.to_lowercase())));
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -415,6 +453,22 @@ mod tests {
             build_forge_url("github-enterprise", Some("10.0.0.1"), "/x"),
             Err(EgressError::BlockedAddress)
         );
+    }
+
+    #[test]
+    fn github_contents_parse_is_folders_first_and_total_on_garbage() {
+        let json = r#"[
+            {"name":"README.md","path":"README.md","type":"file","size":1024},
+            {"name":"src","path":"src","type":"dir"},
+            {"name":".github","path":".github","type":"dir"}
+        ]"#;
+        let e = parse_github_contents(json);
+        assert_eq!(e.iter().map(|x| x.name.as_str()).collect::<Vec<_>>(), [".github", "src", "README.md"]);
+        assert!(e[0].is_dir && !e[2].is_dir);
+        assert_eq!(e[2].size, 1024);
+        // A single file object (GitHub returns this for a file path), and garbage → empty.
+        assert_eq!(parse_github_contents(r#"{"name":"x","path":"a/x","type":"file","size":7}"#).len(), 1);
+        assert!(parse_github_contents("nope").is_empty());
     }
 
     #[test]

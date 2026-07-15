@@ -29,6 +29,7 @@
     navigate: string;
     openFile: string;
     home: void;
+    repos: void;
     drop: { paths: string[]; dest: string; copy: boolean };
   }>();
 
@@ -220,6 +221,11 @@
     <span class="twisty hidden" />
     <Icon name="gallery" />
     <span class="label">Gallery</span>
+  </button>
+  <button class="nav-item" title="Browse GitHub and other code repositories" on:click={() => dispatch("repos")}>
+    <span class="twisty hidden" />
+    <Icon name="code" />
+    <span class="label">Repositories</span>
   </button>
 
   <div class="navigation-pane-sep" />
