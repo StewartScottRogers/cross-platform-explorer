@@ -101,6 +101,7 @@ version = "0.1.0"
 dependencies = [
  "serde",
  "serde_json",
+ "sidecar-contract",
  "tempfile",
 ]
 
@@ -158,6 +159,14 @@ dependencies = [
  "serde",
  "serde_core",
  "zmij",
+]
+
+[[package]]
+name = "sidecar-contract"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
 ]
 
 [[package]]
