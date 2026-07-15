@@ -25,6 +25,14 @@
       items: [{ id: "exit", label: "Exit", hint: "Alt+F4" }],
     },
     {
+      id: "tools",
+      label: "Tools",
+      items: [
+        { id: "content-search", label: "Search in files…", hint: "Ctrl+Shift+F" },
+        { id: "find-duplicates", label: "Find duplicate files…" },
+      ],
+    },
+    {
       id: "app",
       label: "Application",
       items: [

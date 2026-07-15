@@ -36,6 +36,7 @@
   import ConfirmDialog from "./lib/components/ConfirmDialog.svelte";
   import ShortcutsDialog from "./lib/components/ShortcutsDialog.svelte";
   import ContentSearchDialog from "./lib/components/ContentSearchDialog.svelte";
+  import DuplicatesDialog from "./lib/components/DuplicatesDialog.svelte";
   import PropertiesDialog from "./lib/components/PropertiesDialog.svelte";
   import BatchRenameDialog from "./lib/components/BatchRenameDialog.svelte";
   import type { RenameItem } from "./lib/batchRename";
@@ -184,6 +185,8 @@
   let shortcutsOpen = false;
   /** "Search in files" content-search overlay (Ctrl+Shift+F), scoped to the current folder (CPE-417). */
   let contentSearchOpen = false;
+  /** "Find duplicate files" overlay, scoped to the current folder (CPE-421). */
+  let duplicatesOpen = false;
   let patternSelectOpen = false;
   /** True in sidecar-platform builds — gates the AI Console toolbar button (CPE-351). */
   let aiConsoleAvailable = false;
@@ -1592,6 +1595,8 @@
       case "shortcuts": shortcutsOpen = true; break;
       case "documentation": openExternal(REPO_URL); break;
       case "about": showAbout = true; break;
+      case "content-search": if (!isHome && !archive) contentSearchOpen = true; break;
+      case "find-duplicates": if (!isHome && !archive) duplicatesOpen = true; break;
     }
   }
 
@@ -2212,6 +2217,14 @@
     root={currentPath}
     on:navigate={(e) => { contentSearchOpen = false; navigateToTyped(e.detail); }}
     on:close={() => (contentSearchOpen = false)}
+  />
+{/if}
+
+{#if duplicatesOpen}
+  <DuplicatesDialog
+    root={currentPath}
+    on:navigate={(e) => { duplicatesOpen = false; navigateToTyped(e.detail); }}
+    on:close={() => (duplicatesOpen = false)}
   />
 {/if}
 
