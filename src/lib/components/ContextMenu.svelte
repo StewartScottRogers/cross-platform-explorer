@@ -20,6 +20,8 @@
   export let favorited = false;
   /** True when the selection can be packed into a .zip (CPE-251). */
   export let compressible = false;
+  /** True when exactly two files (no folders) are selected — enables Compare (CPE-418). */
+  export let comparable = false;
   /** True when exactly one archive file is selected — enables Extract (CPE-252). */
   export let extractable = false;
   /** True when Open-in-Terminal applies (a real folder, not Home/archive) (CPE-253). */
@@ -129,6 +131,11 @@
     {#if selectionCount > 1}
       <button class="row" role="menuitem" on:click={() => run("batch-rename")}>
         <Icon name="rename" size={15} /> Rename…
+      </button>
+    {/if}
+    {#if comparable}
+      <button class="row" role="menuitem" on:click={() => run("compare")}>
+        <Icon name="copy" size={15} /> Compare files
       </button>
     {/if}
     {#if sameTypeExt}
