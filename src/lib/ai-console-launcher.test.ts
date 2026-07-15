@@ -135,3 +135,34 @@ describe("AI Console launcher — catalog controls + scrollback helpers", () => 
     expect(dec(w.stripAltScreen(input))).toBe("HELLO");
   });
 });
+
+describe("AI Console launcher — Help panel + Manage menu (CPE-390)", () => {
+  it("the ? button opens the Help panel and × closes it", async () => {
+    const { w } = await mountLauncher();
+    const overlay = w.document.getElementById("help-overlay");
+    expect(overlay.hidden).toBe(true);
+    w.document.getElementById("help-btn").click();
+    expect(overlay.hidden).toBe(false);
+    expect(w.document.getElementById("help-body").textContent).toMatch(/does not save your key|Preset/i);
+    w.document.getElementById("help-close").click();
+    expect(overlay.hidden).toBe(true);
+  });
+
+  it("Manage agents ▾ toggles its menu, which holds the moved advanced controls; an action closes it", async () => {
+    const { w } = await mountLauncher((path) =>
+      path === "/api/catalog/refresh" ? { indexOk: true, applied: 0, agents: 1 } : {},
+    );
+    const menu = w.document.getElementById("manage-menu");
+    expect(menu.hidden).toBe(true);
+    w.document.getElementById("manage-btn").click();
+    expect(menu.hidden).toBe(false);
+    // the advanced controls now live INSIDE the menu (same ids → wiring unchanged)
+    expect(menu.contains(w.document.getElementById("auto-update"))).toBe(true);
+    expect(menu.contains(w.document.getElementById("pin-agent"))).toBe(true);
+    expect(menu.contains(w.document.getElementById("refresh-agents"))).toBe(true);
+    // a menu action (Check for updates) closes the menu
+    w.document.getElementById("refresh-agents").click();
+    await new Promise((r) => setTimeout(r, 0));
+    expect(menu.hidden).toBe(true);
+  });
+});

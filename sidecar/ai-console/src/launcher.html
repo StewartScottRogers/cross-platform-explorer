@@ -74,6 +74,28 @@
   #scrollback-body { position: relative; flex: 1; min-height: 0; margin-top: 8px; background: #0d0d0d;
                      border-radius: 6px; overflow: hidden; }
   #scrollback-host { position: absolute; left: 0; top: 0; bottom: 0; right: 14px; }
+  /* "Manage agents" dropdown + Help panel (CPE-390) */
+  .menu-wrap { position: relative; display: inline-block; }
+  .menu { position: absolute; top: calc(100% + 4px); right: 0; z-index: 40; min-width: 230px;
+          background: Canvas; color: CanvasText; border: 1px solid rgba(128,128,128,.55);
+          border-radius: 8px; box-shadow: 0 12px 30px rgba(0,0,0,.3); padding: 5px; }
+  .menu[hidden] { display: none; }
+  .menu-item { display: flex; align-items: center; gap: 7px; width: 100%; text-align: left; height: 30px;
+               padding: 0 9px; margin: 0; border: 0; background: none; border-radius: 6px; font: inherit;
+               font-size: 12.5px; color: CanvasText; cursor: pointer; box-sizing: border-box; }
+  .menu-item:hover { background: rgba(128,128,128,.15); }
+  #help-btn { width: 30px; padding: 0; font-weight: 700; }
+  #help-overlay { position: fixed; inset: 0; background: rgba(0,0,0,.4); display: grid;
+                  place-items: center; z-index: 65; }
+  #help-overlay[hidden] { display: none; }
+  #help-panel { width: 640px; max-width: 94vw; max-height: 86vh; overflow: auto; background: Canvas;
+                color: CanvasText; border: 1px solid rgba(128,128,128,.55); border-radius: 10px;
+                padding: 18px 22px; box-shadow: 0 20px 50px rgba(0,0,0,.35); }
+  #help-body h3 { font-size: 13.5px; margin: 15px 0 3px; }
+  #help-body p { font-size: 12.5px; line-height: 1.5; margin: 0 0 6px; opacity: .92; }
+  #help-body b { font-weight: 600; }
+  #help-body code { font-family: ui-monospace, monospace; background: rgba(128,128,128,.15);
+                    padding: 1px 5px; border-radius: 4px; font-size: 11.5px; }
   /* Provider credential manager (CPE-346) */
   #keys-overlay { position: fixed; inset: 0; background: rgba(0,0,0,.35); display: grid;
                   place-items: center; z-index: 50; }
@@ -174,10 +196,16 @@
       <button id="set-save" type="button" title="Save this agent's provider + model as a named preset — NOT your API key (use Keys… for that)">Save preset</button>
       <button id="keys-btn" type="button" title="Manage provider API keys">Keys…</button>
       <button id="history-btn" type="button" title="Past sessions — relaunch or view transcript">Recent…</button>
-      <button id="refresh-agents" type="button" title="Check for new or updated agents (signed catalog)">Update agents</button>
-      <button id="reset-agents" type="button" title="Roll back to the agents shipped with the app">Reset</button>
-      <label style="display:inline-flex;align-items:center;gap:3px;font-size:12px" title="Automatically check for agent updates when this opens"><input type="checkbox" id="auto-update"> Auto</label>
-      <label style="display:inline-flex;align-items:center;gap:3px;font-size:12px" title="Pin the selected agent — skip its catalog updates"><input type="checkbox" id="pin-agent"> Pin</label>
+      <div class="menu-wrap">
+        <button id="manage-btn" type="button" title="Update, pin, or reset the agent catalog">Manage agents ▾</button>
+        <div id="manage-menu" class="menu" hidden>
+          <button id="refresh-agents" type="button" class="menu-item">Check for updates now</button>
+          <label class="menu-item"><input type="checkbox" id="auto-update"> Auto-update on open</label>
+          <label class="menu-item"><input type="checkbox" id="pin-agent"> Pin this agent (skip updates)</label>
+          <button id="reset-agents" type="button" class="menu-item">Reset to the shipped agents</button>
+        </div>
+      </div>
+      <button id="help-btn" type="button" title="How the AI Console works — a quick guide">?</button>
       <button id="launch" class="primary">Launch</button>
     </div>
   </div>
@@ -239,6 +267,40 @@
       <div id="scrollback-body">
         <div id="scrollback-host"></div>
         <div class="sb" id="scrollback-sb"><div class="sb-thumb" id="scrollback-thumb"></div></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Task-oriented help (CPE-390): the "?" button opens this; explains what each feature is for. -->
+  <div id="help-overlay" hidden>
+    <div id="help-panel">
+      <div class="keys-head">
+        <span>How the AI Console works</span>
+        <button id="help-close" type="button" class="keys-x" title="Close">×</button>
+      </div>
+      <div id="help-body">
+        <p>It all does one job: <b>run a coding agent (Claude Code, aider, …) against a folder, using the provider and model you choose.</b></p>
+
+        <h3>1 · Start an agent</h3>
+        <p>Pick an <b>Agent</b>, a <b>Provider</b>, and a <b>Model</b> (leave Model blank for the agent's default), set the <b>Working folder</b>, then click <b>Launch</b>. Each Launch opens its own tab; the sidecar runs them all at once.</p>
+
+        <h3>2 · Use your own API key — “Keys…”</h3>
+        <p>Click <b>Keys…</b> to save a provider key. It's stored in your OS keychain, never in a file, and never shown again. Give it a <b>label</b> (e.g. “work”) to keep several keys per provider — a labelled key then appears in the <b>Credential</b> picker. <b>Check</b> verifies a key with the provider before you save it.</p>
+
+        <h3>3 · Save a setup to reuse — “Preset”</h3>
+        <p>A <b>Preset</b> remembers your <b>provider + model</b> choice under a name. It does <b>not</b> save your key — keys live in <b>Keys…</b>. Type a name, click <b>Save preset</b>, then pick it later from the <b>Preset</b> dropdown. Presets are per-agent.</p>
+
+        <h3>4 · Scroll back through output — “⇕ Output”</h3>
+        <p>A full-screen agent like Claude Code draws its own screen and does its own scrolling — just use your <b>mouse wheel</b> inside it. To review <b>everything</b> a session printed, with a draggable scrollbar, click <b>⇕ Output</b> at the top-right of the terminal.</p>
+
+        <h3>5 · Keep agents current — “Manage agents ▾”</h3>
+        <p><b>Check for updates now</b> fetches new/updated agents (signed); <b>Auto-update on open</b> does it automatically; <b>Pin this agent</b> freezes one agent's version; <b>Reset to the shipped agents</b> undoes updates.</p>
+
+        <h3>6 · Recent sessions — “Recent…”</h3>
+        <p>Lists past sessions (kept across restarts). <b>Relaunch</b> reopens one with the same agent/provider/model/folder; or view its (secret-redacted) transcript.</p>
+
+        <h3>Permissions</h3>
+        <p>The console runs as its own sandboxed process and only gets what you allow. <b>Secrets</b> is the permission that lets it store your API keys — if you skip it, saving keys won't work and you'll simply be asked again next time you open the console. Review or revoke permissions in the app's sidecar settings.</p>
       </div>
     </div>
   </div>
@@ -794,6 +856,7 @@ async function relaunch(s) {
 }
 // --- Catalog refresh (CPE-374/376): fetch + apply the signed agent catalog, then re-render. ---
 async function refreshCatalog() {
+  closeManageMenu();
   setMsg("Checking for agent updates…", true);
   try {
     const r = await api("/api/catalog/refresh", { method: "POST" });
@@ -814,6 +877,7 @@ function renderCatalogControls() {
   $("pin-agent").checked = (p.pinnedAgents || []).indexOf($("agent").value) !== -1;
 }
 async function resetCatalog() {
+  closeManageMenu();
   setMsg("Rolling back to the shipped agents…", true);
   try {
     const r = await api("/api/catalog/reset", { method: "POST" });
@@ -823,6 +887,13 @@ async function resetCatalog() {
 }
 $("refresh-agents").addEventListener("click", refreshCatalog);
 $("reset-agents").addEventListener("click", resetCatalog);
+// "Manage agents ▾" dropdown + Help panel (CPE-390)
+function closeManageMenu() { $("manage-menu").hidden = true; }
+$("manage-btn").addEventListener("click", (e) => { e.stopPropagation(); $("manage-menu").hidden = !$("manage-menu").hidden; });
+document.addEventListener("click", (e) => { if (!$("manage-menu").hidden && !e.target.closest(".menu-wrap")) closeManageMenu(); });
+$("help-btn").addEventListener("click", () => { $("help-overlay").hidden = false; });
+$("help-close").addEventListener("click", () => { $("help-overlay").hidden = true; });
+$("help-overlay").addEventListener("click", (e) => { if (e.target === $("help-overlay")) $("help-overlay").hidden = true; });
 $("auto-update").addEventListener("change", async (e) => {
   try {
     await api("/api/catalog/settings", { method: "POST", body: JSON.stringify({ autoUpdate: e.target.checked }) });
