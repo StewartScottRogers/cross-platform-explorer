@@ -220,6 +220,59 @@ pub fn parse_openrouter_models(json: &str) -> Vec<Model> {
     out
 }
 
+/// Normalize a reseller's model-list response into [`Model`]s using the normalizer implied by its
+/// `id` (CPE-446/448). OpenAI-compatible resellers share the OpenRouter parser (a superset — extra
+/// fields default gracefully); GitHub Models has its own `catalog/models` shape. Total on malformed.
+pub fn normalize_models(reseller: &str, body: &str) -> Vec<Model> {
+    let r = reseller.to_ascii_lowercase();
+    if r == "github-models" || r.starts_with("github-models-") {
+        parse_github_models(body)
+    } else {
+        // openrouter + every OpenAI-compatible reseller. Re-tag the reseller so rows show their source.
+        let mut models = parse_openrouter_models(body);
+        for m in &mut models {
+            m.reseller = reseller.to_string();
+        }
+        models
+    }
+}
+
+/// Parse GitHub Models' `GET /catalog/models` response — a JSON array of `{ id|name, publisher,
+/// summary, supported_input_modalities, … }`. Total on malformed. Sorted by id.
+pub fn parse_github_models(json: &str) -> Vec<Model> {
+    let value: serde_json::Value = match serde_json::from_str(json) {
+        Ok(v) => v,
+        Err(_) => return Vec::new(),
+    };
+    let items = match value.as_array() {
+        Some(a) => a,
+        None => return Vec::new(),
+    };
+    let mut out: Vec<Model> = items
+        .iter()
+        .filter_map(|it| {
+            let id = it.get("id").or_else(|| it.get("name")).and_then(|v| v.as_str())?.to_string();
+            let display_name = it.get("name").and_then(|n| n.as_str()).unwrap_or(&id).to_string();
+            let modalities = it
+                .get("supported_input_modalities")
+                .and_then(|m| m.as_array())
+                .map(|a| a.iter().filter_map(|x| x.as_str().map(str::to_string)).collect())
+                .unwrap_or_else(|| vec!["text".to_string()]);
+            Some(Model {
+                id,
+                reseller: "github-models".into(),
+                display_name,
+                context_length: None,
+                pricing: Pricing::default(),
+                modalities,
+                moderated: false,
+            })
+        })
+        .collect();
+    out.sort_by(|a, b| a.id.cmp(&b.id));
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -290,6 +343,23 @@ mod tests {
         assert_eq!(l.modalities, vec!["text"]);
         assert!(!l.moderated);
         assert_eq!(l.pricing.completion, Some(0.0));
+    }
+
+    #[test]
+    fn normalize_dispatches_by_reseller_and_retags_source() {
+        // OpenAI-compatible reseller reuses the OpenRouter parser but is tagged with its own id.
+        let openai_shape = r#"{"data":[{"id":"llama-3.1-70b","name":"Llama 3.1 70B"}]}"#;
+        let m = normalize_models("groq", openai_shape);
+        assert_eq!(m.len(), 1);
+        assert_eq!(m[0].reseller, "groq");
+        // GitHub Models uses its own array shape.
+        let gh = r#"[{"id":"openai/gpt-4o","name":"GPT-4o","supported_input_modalities":["text","image"]}]"#;
+        let g = normalize_models("github-models", gh);
+        assert_eq!(g.len(), 1);
+        assert_eq!((g[0].reseller.as_str(), g[0].id.as_str()), ("github-models", "openai/gpt-4o"));
+        assert_eq!(g[0].modalities, vec!["text", "image"]);
+        // Malformed → empty, never a panic.
+        assert!(normalize_models("github-models", "nope").is_empty());
     }
 
     #[test]

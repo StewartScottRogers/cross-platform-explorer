@@ -236,6 +236,12 @@ pub trait HostDialogs: Send + Sync {
     /// (CPE-376). `pinned` agents are skipped (CPE-378). `Err` = no host (dev/standalone).
     fn fetch_catalog(&self, pinned: &[String]) -> Result<CatalogFetch, String>;
 
+    /// Fetch + normalize a reseller's model list via the host's allow-listed egress
+    /// (`host.list_models`, CPE-447) so the launcher can offer **any** model the reseller lists
+    /// (CPE-444/449). `token` is optional — OpenRouter's model list is public. `Err` = no host or
+    /// the fetch failed; the caller falls back to the static per-agent model set.
+    fn list_models(&self, reseller: &str, token: Option<&str>) -> Result<Vec<crate::model_catalog::Model>, String>;
+
     /// Enumerate prior published catalog versions for the rollback picker (CPE-383). `Err` = no host.
     fn list_catalog_versions(&self) -> Result<Vec<CatalogVersion>, String>;
 
@@ -293,6 +299,20 @@ impl HostDialogs for BrokerDialogs {
         })
     }
 
+    fn list_models(&self, reseller: &str, token: Option<&str>) -> Result<Vec<crate::model_catalog::Model>, String> {
+        // A network round-trip through the host's allow-listed egress; give it a generous wait.
+        let v = self.client.request_timeout(
+            "host.list_models",
+            serde_json::json!({ "reseller": reseller, "token": token }),
+            Duration::from_secs(30),
+        )?;
+        if !v.get("ok").and_then(Value::as_bool).unwrap_or(false) {
+            return Err(v.get("error").and_then(Value::as_str).unwrap_or("model fetch failed").to_string());
+        }
+        let body = v.get("body").and_then(Value::as_str).unwrap_or("");
+        Ok(crate::model_catalog::normalize_models(reseller, body))
+    }
+
     fn list_catalog_versions(&self) -> Result<Vec<CatalogVersion>, String> {
         let v = self.client.request_timeout(
             "host.list_catalog_versions",
@@ -344,6 +364,9 @@ impl HostDialogs for NoopDialogs {
     }
     fn fetch_catalog(&self, _pinned: &[String]) -> Result<CatalogFetch, String> {
         Err("no host to fetch the catalog".into())
+    }
+    fn list_models(&self, _reseller: &str, _token: Option<&str>) -> Result<Vec<crate::model_catalog::Model>, String> {
+        Err("no host to fetch models".into())
     }
     fn list_catalog_versions(&self) -> Result<Vec<CatalogVersion>, String> {
         Err("no host to enumerate catalog versions".into())

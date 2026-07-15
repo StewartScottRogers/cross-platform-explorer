@@ -481,6 +481,23 @@ impl ConsoleState {
         }
     }
 
+    /// `GET /api/models?reseller=<id>` → the reseller's live model list (CPE-449), fetched via the
+    /// host's allow-listed egress and normalized to `Model`s. Defaults to `openrouter`, whose list
+    /// is public (no key). Returns `{ models: [...] }`, or an error the picker shows inline.
+    fn handle_models(&self, path: &str) -> Response {
+        let reseller = path
+            .split_once("reseller=")
+            .map(|(_, r)| r.split('&').next().unwrap_or("openrouter"))
+            .filter(|r| !r.is_empty())
+            .unwrap_or("openrouter");
+        // A per-reseller key is used when present (CPE-452), but listing usually needs none.
+        let token = self.secrets.get(&format!("models/{reseller}/default")).ok().flatten();
+        match self.dialogs.list_models(reseller, token.as_deref()) {
+            Ok(models) => Response::json(json!({ "reseller": reseller, "models": models }).to_string()),
+            Err(e) => bad(e),
+        }
+    }
+
     fn handle_install(&self, body: &str) -> Response {
         let v: Value = match serde_json::from_str(body) {
             Ok(v) => v,
@@ -907,6 +924,7 @@ pub fn route(state: &ConsoleState, req: &Request) -> Response {
         ("POST", "/api/presets/delete") => state.handle_preset_delete(&req.body),
         ("POST", "/api/onboarded") => state.handle_onboarded(),
         ("POST", "/api/pick-folder") => state.handle_pick_folder(&req.body),
+        ("GET", p) if p.starts_with("/api/models") => state.handle_models(p),
         ("GET", "/api/keys") => state.handle_key_list(),
         ("POST", "/api/keys") => state.handle_key_set(&req.body),
         ("POST", "/api/keys/delete") => state.handle_key_delete(&req.body),
@@ -1235,6 +1253,14 @@ mod tests {
         fn fetch_catalog(&self, _pinned: &[String]) -> Result<crate::broker_client::CatalogFetch, String> {
             Err("stub".into())
         }
+        fn list_models(&self, reseller: &str, _token: Option<&str>) -> Result<Vec<crate::model_catalog::Model>, String> {
+            // Two canned OpenRouter-shaped models so the /api/models route has something to return.
+            let json = r#"{"data":[
+                {"id":"anthropic/claude-3.5-sonnet","name":"Claude 3.5 Sonnet","context_length":200000,"pricing":{"prompt":"0.000003","completion":"0.000015"}},
+                {"id":"openai/gpt-4o","name":"GPT-4o","context_length":128000,"pricing":{"prompt":"0.0000025","completion":"0.00001"}}
+            ]}"#;
+            Ok(crate::model_catalog::normalize_models(reseller, json))
+        }
         fn list_catalog_versions(
             &self,
         ) -> Result<Vec<crate::broker_client::CatalogVersion>, String> {
@@ -1264,6 +1290,26 @@ mod tests {
             dialogs,
             Arc::new(crate::history::MemHistory::default()),
         )
+    }
+
+    #[test]
+    fn models_route_returns_the_resellers_normalized_list() {
+        let dialogs = Arc::new(StubDialogs {
+            verdict: crate::broker_client::KeyVerdict { valid: true, live: true, detail: String::new() },
+            called: std::sync::atomic::AtomicBool::new(false),
+        });
+        let st = state_with_dialogs(dialogs);
+        let r = route(&st, &Request { method: "GET".into(), path: "/api/models?reseller=openrouter".into(), ..Default::default() });
+        assert_eq!(r.status, 200);
+        let v: Value = serde_json::from_slice(&r.body).unwrap();
+        assert_eq!(v["reseller"], "openrouter");
+        let models = v["models"].as_array().unwrap();
+        assert_eq!(models.len(), 2);
+        assert_eq!(models[0]["id"], "anthropic/claude-3.5-sonnet");
+        assert_eq!(models[0]["context_length"], 200000);
+        // Default reseller when the query is absent.
+        let r2 = route(&st, &Request { method: "GET".into(), path: "/api/models".into(), ..Default::default() });
+        assert_eq!(serde_json::from_slice::<Value>(&r2.body).unwrap()["reseller"], "openrouter");
     }
 
     #[test]
