@@ -115,12 +115,32 @@
     }
   },
   "providers": [
-    "native"
+    "native",
+    "openrouter"
   ],
   "provider_recipes": {
     "native": {
       "env": {},
-      "args": []
+      "args": [
+        "--model",
+        "{model}"
+      ],
+      "defaults": {
+        "model": "anthropic/claude-sonnet-4-5"
+      }
+    },
+    "openrouter": {
+      "env": {
+        "OPENROUTER_API_KEY": "{api_key}"
+      },
+      "args": [
+        "--model",
+        "openrouter/{model}"
+      ],
+      "defaults": {
+        "model": "anthropic/claude-sonnet-4.5"
+      }
     }
-  }
+  },
+  "default_model": "anthropic/claude-sonnet-4-5"
 }

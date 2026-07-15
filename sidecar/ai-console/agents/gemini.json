@@ -120,7 +120,14 @@
   "provider_recipes": {
     "native": {
       "env": {},
-      "args": []
+      "args": [
+        "--model",
+        "{model}"
+      ],
+      "defaults": {
+        "model": "gemini-2.5-pro"
+      }
     }
-  }
+  },
+  "default_model": "gemini-2.5-pro"
 }

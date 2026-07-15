@@ -121,12 +121,51 @@
     }
   },
   "providers": [
-    "native"
+    "native",
+    "openrouter",
+    "lmstudio-local"
   ],
   "provider_recipes": {
     "native": {
       "env": {},
-      "args": []
+      "args": [
+        "--model",
+        "{model}"
+      ],
+      "defaults": {
+        "model": "anthropic/claude-sonnet-4.5"
+      }
+    },
+    "openrouter": {
+      "env": {
+        "OPENROUTER_API_KEY": "{api_key}"
+      },
+      "args": [
+        "--provider",
+        "openrouter",
+        "--model",
+        "{model}"
+      ],
+      "defaults": {
+        "model": "anthropic/claude-sonnet-4.5"
+      }
+    },
+    "lmstudio-local": {
+      "env": {
+        "OPENAI_API_KEY": "lm-studio",
+        "OPENAI_BASE_URL": "{base_url}/v1"
+      },
+      "args": [
+        "--provider",
+        "openai",
+        "--model",
+        "{model}"
+      ],
+      "defaults": {
+        "base_url": "http://127.0.0.1:1234",
+        "model": "qwen3-coder-30b"
+      }
     }
-  }
+  },
+  "default_model": "anthropic/claude-sonnet-4.5"
 }

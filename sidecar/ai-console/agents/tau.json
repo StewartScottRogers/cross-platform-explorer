@@ -121,12 +121,36 @@
     }
   },
   "providers": [
-    "native"
+    "native",
+    "openrouter"
   ],
   "provider_recipes": {
     "native": {
       "env": {},
-      "args": []
+      "args": [
+        "--provider",
+        "anthropic",
+        "--model",
+        "{model}"
+      ],
+      "defaults": {
+        "model": "claude-sonnet-4-6"
+      }
+    },
+    "openrouter": {
+      "env": {
+        "OPENROUTER_API_KEY": "{api_key}"
+      },
+      "args": [
+        "--provider",
+        "openrouter",
+        "--model",
+        "{model}"
+      ],
+      "defaults": {
+        "model": "anthropic/claude-sonnet-4.5"
+      }
     }
-  }
+  },
+  "default_model": "claude-sonnet-4-6"
 }
