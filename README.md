@@ -15,6 +15,27 @@ Windows, macOS, and Linux, and updates itself automatically.
 **Website:** https://stewartscottrogers.github.io/cross-platform-explorer/
 **Downloads:** [latest release](https://github.com/StewartScottRogers/cross-platform-explorer/releases/latest)
 
+## Features
+
+Beyond a fast, native file explorer, the **sidecar-enabled** build adds:
+
+- **Repositories** — a left-pane entry opens an in-app browser for **GitHub** and other forges
+  (GitLab, Bitbucket, Codeberg…). Enter `owner/name`, **browse** the repo tree, and **clone** it to a
+  chosen folder. Access is host-brokered and allow-listed (no SSRF); clones use hardened `git` flags
+  (no hooks/filters/submodule-URL injection); a private-repo token can be **remembered** in the OS
+  keychain. *(Native explorer feature — see the CPE-429 epic decision note for why it isn't a sidecar.)*
+- **AI Console** — launch and manage agentic coding CLIs (Claude Code, aider, …) as sandboxed
+  sidecars, with a live **Agent Watch** view of their filesystem activity in the left pane. Right-click
+  an agent (or the AI Console button) to **close** consoles; each closes its own process tree.
+- **Any model, any reseller** — the AI Console's **Model** field is an inline, type-to-filter dropdown
+  populated with the full live model list from **OpenRouter** and other resellers (Together, Fireworks,
+  Groq, DeepInfra, GitHub Models, …). Per-reseller API keys are stored in the OS keychain. Model lists
+  are fetched through the host's allow-listed egress and can ride a signed catalog snapshot for
+  offline use.
+
+*(These are gated to the sidecar-enabled build; the plain explorer stays fast, small, and
+sidecar-free by default.)*
+
 ## Why this stack
 
 - **Tauri** produces small native binaries (single-digit MB), builds proper OS
