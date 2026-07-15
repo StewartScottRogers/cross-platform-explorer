@@ -155,13 +155,6 @@
         <label for="agent" title="The coding tool to run (Claude Code, aider, …)">Agent</label>
         <select id="agent"></select>
       </div>
-      <div class="field" style="width:170px;flex:0 0 auto">
-        <label for="preset" title="A named provider+model setup you can reuse — not your key">Setup</label>
-        <div style="display:flex;gap:4px">
-          <select id="preset" style="flex:1;min-width:0"></select>
-          <button id="set-del" type="button" title="Delete the selected setup" style="width:30px;padding:0">✕</button>
-        </div>
-      </div>
       <div class="install" id="install-wrap"></div>
       <div class="field" style="width:160px;flex:0 0 auto">
         <label for="provider" title="Who serves the model — e.g. OpenRouter, or the tool's own built-in login">Provider</label>
@@ -175,14 +168,6 @@
         <label for="model" title="Which AI model to use — leave blank for the tool's default">Model</label>
         <input id="model" placeholder="(default)" />
       </div>
-      <div class="field grow">
-        <label for="smallModel" title="A cheaper/faster model for minor steps — optional">Fast model</label>
-        <input id="smallModel" placeholder="(same as model)" />
-      </div>
-      <div class="field grow">
-        <label for="apiKey" title="Paste a key just for this launch — optional; your saved keys are used otherwise (see Keys…)">API key</label>
-        <input id="apiKey" type="password" placeholder="optional — native login otherwise" />
-      </div>
     </div>
     <div class="row">
       <div class="field grow">
@@ -192,8 +177,6 @@
           <button id="cwd-browse" type="button" title="Choose a folder" style="flex:0 0 auto">Browse…</button>
         </div>
       </div>
-      <input id="set-name" placeholder="Name this setup…" style="width:170px;flex:0 0 auto" />
-      <button id="set-save" type="button" title="Save this agent's provider + model as a named setup you can reuse — NOT your API key (use Keys… for that)">Save setup</button>
       <button id="keys-btn" type="button" title="Manage provider API keys">Keys…</button>
       <button id="history-btn" type="button" title="Past sessions — relaunch or view transcript">Recent…</button>
       <div class="menu-wrap">
@@ -205,8 +188,33 @@
           <button id="reset-agents" type="button" class="menu-item">Reset to the shipped agents</button>
         </div>
       </div>
+      <button id="advanced-btn" type="button" title="Optional extras: reusable setups, a fast model, a per-launch key">Advanced ▾</button>
       <button id="help-btn" type="button" title="How the AI Console works — a quick guide">?</button>
       <button id="launch" class="primary">Launch</button>
+    </div>
+    <div class="row" id="advanced-row" hidden>
+      <div class="field" style="width:200px;flex:0 0 auto">
+        <label for="preset" title="A named provider+model setup you can reuse — not your key">Saved setup</label>
+        <div style="display:flex;gap:4px">
+          <select id="preset" style="flex:1;min-width:0"></select>
+          <button id="set-del" type="button" title="Delete the selected setup" style="width:30px;padding:0">✕</button>
+        </div>
+      </div>
+      <div class="field" style="width:230px;flex:0 0 auto">
+        <label for="set-name">Save current as a setup</label>
+        <div style="display:flex;gap:4px">
+          <input id="set-name" placeholder="Name this setup…" style="flex:1;min-width:0" />
+          <button id="set-save" type="button" title="Save this agent's provider + model as a named setup — NOT your API key (use Keys… for that)">Save</button>
+        </div>
+      </div>
+      <div class="field grow">
+        <label for="smallModel" title="A cheaper/faster model for minor steps — optional">Fast model</label>
+        <input id="smallModel" placeholder="(same as model)" />
+      </div>
+      <div class="field grow">
+        <label for="apiKey" title="Paste a key just for this launch — optional; your saved keys are used otherwise (see Keys…)">API key (this launch)</label>
+        <input id="apiKey" type="password" placeholder="optional — saved keys are used otherwise" />
+      </div>
     </div>
   </div>
   <div id="msg">Pick an agent, provider and model, then Launch.</div>
@@ -308,17 +316,21 @@
   <!-- First-run onboarding (CPE-312). Shown once; dismissal persists via /api/onboarded. -->
   <div id="onboard-overlay" hidden>
     <div id="onboard-panel">
-      <h2>Welcome to the AI Console</h2>
-      <p class="lead">Run coding agents — Claude, Codex, Gemini and more — right here, scoped to a folder.</p>
+      <h2>Welcome — let's run your first coding agent</h2>
+      <p class="lead">You need two things: a <b>tool</b> to run (Claude Code, aider, …), and how it
+        <b>connects</b> to an AI — either your own API key, or a tool's built-in login.</p>
       <ol>
-        <li><b>Pick an agent</b> in the toolbar. If it says <i>not installed</i>, click <b>Install</b>.</li>
-        <li><b>Add a provider key</b> (optional) via <b>Keys…</b>. It's stored in your OS keychain,
-            never shown again, and reused automatically next time.</li>
-        <li>Choose a provider &amp; model, set the <b>Working folder</b> (or Browse…), then <b>Launch</b>.</li>
+        <li><b>Connect.</b> Add your API key (kept in your OS keychain, never in a file) — or pick a
+            provider with a <b>built-in login</b>, which needs no key.</li>
+        <li><b>Pick</b> a tool and provider. If a tool says <i>not installed</i>, click <b>Install</b>.</li>
+        <li>Set your <b>Project folder</b>, then click <b>Launch</b>.</li>
       </ol>
-      <p class="sec">Your keys live in the OS keychain — never in a file. Each agent only gets the
-        capabilities you consent to.</p>
-      <button id="onboard-go" class="primary">Get started</button>
+      <p class="sec">Stuck? The <b>?</b> button explains everything, anytime. Each tool only gets the
+        permissions you allow.</p>
+      <div style="display:flex;gap:8px">
+        <button id="onboard-addkey" type="button" class="primary">Add an API key</button>
+        <button id="onboard-go" type="button">I'll use a built-in login</button>
+      </div>
     </div>
   </div>
 
@@ -344,15 +356,34 @@ async function api(path, opts) {
 function agentById(id) { return catalog.agents.find((a) => a.id === id); }
 function setMsg(m, ok) { const el = $("msg"); el.textContent = m || ""; el.style.color = ok ? "#3a9d4a" : "#d05656"; }
 
+// A provider needs an API key unless it's a built-in login ("native") or a local server (CPE-394).
+function providerNeedsKey(p) { return !!p && p !== "native" && !/local/i.test(p); }
+function haveKeyFor(provider) {
+  const creds = (catalog && catalog.presets && catalog.presets.credentials) || [];
+  return creds.some((c) => c.provider === provider) || !!$("apiKey").value.trim();
+}
+// Guide the commonest dead-end: a paid provider chosen with no key set. Clears a stale hint when
+// the selection becomes fine.
+function checkLaunchReady() {
+  const p = $("provider").value;
+  if (providerNeedsKey(p) && !haveKeyFor(p)) {
+    setMsg(p + " needs an API key — click Keys… to add one, or pick a provider with a built-in login.", false);
+  } else if (/needs an API key/.test($("msg").textContent)) {
+    setMsg("Ready — set your Project folder and Launch.", true);
+  }
+}
 function renderProviders() {
   const a = agentById($("agent").value);
-  $("provider").innerHTML = "";
-  (a ? a.providers : []).forEach((p) => {
-    const o = document.createElement("option"); o.value = p; o.textContent = p; $("provider").appendChild(o);
-  });
+  const sel = $("provider"); sel.innerHTML = "";
+  const provs = a ? a.providers : [];
+  provs.forEach((p) => { const o = document.createElement("option"); o.value = p; o.textContent = p; sel.appendChild(o); });
+  // First-timer with no saved keys → default to a provider that needs none, so they can launch now.
+  const creds = (catalog && catalog.presets && catalog.presets.credentials) || [];
+  if (!creds.length) { const noKey = provs.find((p) => !providerNeedsKey(p)); if (noKey) sel.value = noKey; }
   $("model").placeholder = (a && a.defaultModel) ? a.defaultModel : "(default)";
   renderInstall();
   renderCredentials();
+  checkLaunchReady();
 }
 
 // --- Multiple credentials per provider (CPE-348) --------------------------------------
@@ -891,6 +922,10 @@ $("reset-agents").addEventListener("click", resetCatalog);
 function closeManageMenu() { $("manage-menu").hidden = true; }
 $("manage-btn").addEventListener("click", (e) => { e.stopPropagation(); $("manage-menu").hidden = !$("manage-menu").hidden; });
 document.addEventListener("click", (e) => { if (!$("manage-menu").hidden && !e.target.closest(".menu-wrap")) closeManageMenu(); });
+$("advanced-btn").addEventListener("click", () => {
+  const r = $("advanced-row"); r.hidden = !r.hidden;
+  $("advanced-btn").textContent = r.hidden ? "Advanced ▾" : "Advanced ▴";
+});
 $("help-btn").addEventListener("click", () => { $("help-overlay").hidden = false; });
 $("help-close").addEventListener("click", () => { $("help-overlay").hidden = true; });
 $("help-overlay").addEventListener("click", (e) => { if (e.target === $("help-overlay")) $("help-overlay").hidden = true; });
@@ -923,7 +958,8 @@ $("key-save").addEventListener("click", saveKey);
 $("keys-overlay").addEventListener("click", (e) => { if (e.target === $("keys-overlay")) $("keys-overlay").hidden = true; });
 
 $("agent").addEventListener("change", () => { renderProviders(); applyLastUsed(); renderPresets(); renderCatalogControls(); });
-$("provider").addEventListener("change", renderCredentials);
+$("provider").addEventListener("change", () => { renderCredentials(); checkLaunchReady(); });
+$("apiKey").addEventListener("input", checkLaunchReady);
 $("preset").addEventListener("change", applyPreset);
 $("set-save").addEventListener("click", saveSet);
 $("set-del").addEventListener("click", deleteSet);
@@ -937,6 +973,7 @@ async function pickFolder() {
 }
 $("cwd-browse").addEventListener("click", pickFolder);
 $("onboard-go").addEventListener("click", dismissOnboarding);
+$("onboard-addkey").addEventListener("click", () => { dismissOnboarding(); openKeys(); });
 $("launch").addEventListener("click", launch);
 load().catch((e) => setMsg("Could not load catalog: " + e.message));
 </script>

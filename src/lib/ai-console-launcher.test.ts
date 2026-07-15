@@ -166,3 +166,48 @@ describe("AI Console launcher — Help panel + Manage menu (CPE-390)", () => {
     expect(menu.hidden).toBe(true);
   });
 });
+
+describe("AI Console launcher — inexperienced-user goal (CPE-392/393/394)", () => {
+  it("optional fields are collapsed under Advanced ▾ by default; the toggle reveals them", async () => {
+    const { w } = await mountLauncher();
+    const adv = w.document.getElementById("advanced-row");
+    expect(adv.hidden).toBe(true);
+    for (const id of ["smallModel", "apiKey", "preset", "set-save"]) {
+      expect(adv.contains(w.document.getElementById(id))).toBe(true);
+    }
+    w.document.getElementById("advanced-btn").click();
+    expect(adv.hidden).toBe(false);
+    w.document.getElementById("advanced-btn").click();
+    expect(adv.hidden).toBe(true);
+  });
+
+  it("providerNeedsKey distinguishes paid providers from built-in / local logins", async () => {
+    const { w } = await mountLauncher();
+    expect(w.providerNeedsKey("openrouter")).toBe(true);
+    expect(w.providerNeedsKey("anthropic")).toBe(true);
+    expect(w.providerNeedsKey("native")).toBe(false);
+    expect(w.providerNeedsKey("lmstudio-local")).toBe(false);
+  });
+
+  it("defaults a keyless first-timer to a no-key provider, and warns only when a paid one is chosen", async () => {
+    const { w } = await mountLauncher(); // default catalog: claude [openrouter, native], no keys
+    expect(w.document.getElementById("provider").value).toBe("native");
+    expect(w.document.getElementById("msg").textContent).not.toMatch(/needs an API key/i);
+    // pick the paid provider → readiness hint appears
+    w.document.getElementById("provider").value = "openrouter";
+    w.checkLaunchReady();
+    expect(w.document.getElementById("msg").textContent).toMatch(/needs an API key/i);
+    // typing a key clears the hint
+    w.document.getElementById("apiKey").value = "sk-or-abc";
+    w.checkLaunchReady();
+    expect(w.document.getElementById("msg").textContent).not.toMatch(/needs an API key/i);
+  });
+
+  it("the first-run guide's 'Add an API key' opens the Keys panel", async () => {
+    const { w } = await mountLauncher();
+    w.document.getElementById("onboard-overlay").hidden = false; // simulate first run
+    w.document.getElementById("onboard-addkey").click();
+    expect(w.document.getElementById("onboard-overlay").hidden).toBe(true);
+    expect(w.document.getElementById("keys-overlay").hidden).toBe(false);
+  });
+});
