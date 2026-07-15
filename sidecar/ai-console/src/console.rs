@@ -704,17 +704,6 @@ impl ConsoleState {
         Response::json(json!({ "reset": true, "agents": self.reload_catalog() }).to_string())
     }
 
-    /// `GET /api/session/{id}/output` → the session's captured output (raw ring bytes, base64) for
-    /// the scrollable "Session output" panel (CPE-385). Base64 keeps the terminal bytes intact.
-    fn handle_session_output(&self, path: &str) -> Response {
-        use base64::Engine as _;
-        let id = session_id_from(path, "/output");
-        let sessions = self.sessions.lock().unwrap();
-        let Some(sess) = sessions.get(&id) else { return bad("no such session") };
-        let b64 = base64::engine::general_purpose::STANDARD.encode(&sess.ring.lock().unwrap()[..]);
-        Response::json(json!({ "outputB64": b64 }).to_string())
-    }
-
     /// `POST /api/catalog/settings {autoUpdate}` → persist the opt-in auto-update flag (CPE-378).
     fn handle_catalog_settings(&self, body: &str) -> Response {
         let v: Value = serde_json::from_str(body).unwrap_or_else(|_| json!({}));
@@ -877,9 +866,6 @@ pub fn route(state: &ConsoleState, req: &Request) -> Response {
         ("POST", "/api/keys") => state.handle_key_set(&req.body),
         ("POST", "/api/keys/delete") => state.handle_key_delete(&req.body),
         ("POST", "/api/keys/verify") => state.handle_key_verify(&req.body),
-        ("GET", p) if p.starts_with("/api/session/") && p.ends_with("/output") => {
-            state.handle_session_output(p)
-        }
         ("POST", "/api/catalog/reload") => state.handle_catalog_reload(),
         ("POST", "/api/catalog/refresh") => state.handle_catalog_refresh(),
         ("POST", "/api/catalog/reset") => state.handle_catalog_reset(),
@@ -1406,13 +1392,6 @@ mod tests {
         assert!(!signed.path().join("versions.json").exists());
     }
 
-    #[test]
-    fn session_output_endpoint_rejects_an_unknown_session() {
-        // The scrollback panel (CPE-385) fetches /api/session/{id}/output; an unknown id is a 400,
-        // not a panic. (The happy path — a real ring — is exercised by the ws end-to-end test.)
-        let st = state();
-        assert_eq!(get(&st, "/api/session/no-such/output").status, 400);
-    }
 
     #[test]
     fn catalog_auto_update_and_pin_persist(){
