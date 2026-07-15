@@ -3074,7 +3074,7 @@ fn forge_browse(
     token: Option<String>,
 ) -> Result<Vec<forge_egress::RepoEntry>, String> {
     let sub = path.unwrap_or_default();
-    let api_path = format!("/repos/{}/contents/{}", repo.trim_matches('/'), sub.trim_start_matches('/'));
+    let api_path = forge_egress::browse_path(&provider, &repo, &sub);
     let (status, body) =
         forge_egress::forge_request(&provider, "GET", None, &api_path, token.as_deref(), None)
             .map_err(|e| format!("Couldn't reach the repo ({e:?})."))?;
@@ -3085,7 +3085,7 @@ fn forge_browse(
             s => format!("Couldn't browse '{repo}': HTTP {s}."),
         });
     }
-    Ok(forge_egress::parse_github_contents(&body))
+    Ok(forge_egress::parse_browse(&provider, &body))
 }
 
 /// Map a known forge `provider` to its **fixed** clone host and the username git expects alongside a
