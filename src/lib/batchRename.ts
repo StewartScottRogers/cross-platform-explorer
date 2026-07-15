@@ -45,6 +45,29 @@ function markConflicts(items: RenameItem[]): RenameItem[] {
   return items;
 }
 
+/** The case transforms offered by {@link planCase}. */
+export type CaseMode = "lower" | "upper" | "title";
+
+/** Title-case: capitalise the first letter of each word (runs of letters/digits), lowercase the rest. */
+function toTitleCase(s: string): string {
+  return s.toLowerCase().replace(/[\p{L}\p{N}]+/gu, (w) => w.charAt(0).toUpperCase() + w.slice(1));
+}
+
+/**
+ * Change the case of each name's **base** (the extension is left untouched, so `README.TXT` →
+ * lower → `readme.TXT`), by `mode` (CPE-427). A base that already matches is left unchanged.
+ */
+export function planCase(names: string[], mode: CaseMode): RenameItem[] {
+  const transform = (base: string): string =>
+    mode === "lower" ? base.toLowerCase() : mode === "upper" ? base.toUpperCase() : toTitleCase(base);
+  const items: RenameItem[] = names.map((from) => {
+    const [base, ext] = splitExt(from);
+    const to = `${transform(base)}${ext}`;
+    return { from, to, changed: to !== from, conflict: false };
+  });
+  return markConflicts(items);
+}
+
 /**
  * Sequentially number the names (CPE-426). `pattern` is the new base name with a run of `#` marking
  * where the number goes, zero-padded to the run's width (`photo-###`, start 1 → `photo-001.jpg`); a

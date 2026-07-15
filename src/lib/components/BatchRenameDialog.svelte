@@ -1,11 +1,11 @@
 <script lang="ts">
   import { createEventDispatcher } from "svelte";
-  import { planFindReplace, planAffix, planNumber, type RenameItem } from "../batchRename";
+  import { planFindReplace, planAffix, planNumber, planCase, type RenameItem, type CaseMode } from "../batchRename";
 
   /** The names of the selected items to rename. */
   export let names: string[] = [];
 
-  let mode: "replace" | "affix" | "number" = "replace";
+  let mode: "replace" | "affix" | "number" | "case" = "replace";
   let find = "";
   let replace = "";
   let caseSensitive = false;
@@ -13,6 +13,7 @@
   let suffix = "";
   let pattern = "";
   let start = 1;
+  let caseMode: CaseMode = "lower";
 
   const dispatch = createEventDispatcher<{ apply: RenameItem[]; cancel: void }>();
 
@@ -21,7 +22,9 @@
       ? planFindReplace(names, find, replace, caseSensitive)
       : mode === "affix"
         ? planAffix(names, prefix, suffix)
-        : planNumber(names, pattern, Number.isFinite(start) ? start : 1);
+        : mode === "number"
+          ? planNumber(names, pattern, Number.isFinite(start) ? start : 1)
+          : planCase(names, caseMode);
   $: changed = items.filter((i) => i.changed);
   $: hasConflict = items.some((i) => i.conflict);
   $: canApply = changed.length > 0 && !hasConflict;
@@ -44,6 +47,7 @@
       <button class="mode" class:active={mode === "replace"} on:click={() => (mode = "replace")}>Find &amp; replace</button>
       <button class="mode" class:active={mode === "affix"} on:click={() => (mode = "affix")}>Add text</button>
       <button class="mode" class:active={mode === "number"} on:click={() => (mode = "number")}>Number</button>
+      <button class="mode" class:active={mode === "case"} on:click={() => (mode = "case")}>Change case</button>
     </div>
 
     {#if mode === "replace"}
@@ -73,7 +77,7 @@
           <input bind:value={suffix} placeholder="text before the extension" />
         </label>
       </div>
-    {:else}
+    {:else if mode === "number"}
       <div class="fields">
         <label>
           <span>Name pattern</span>
@@ -82,6 +86,17 @@
         <label>
           <span>Start at</span>
           <input type="number" bind:value={start} min="0" style="width:90px" />
+        </label>
+      </div>
+    {:else}
+      <div class="fields">
+        <label>
+          <span>Case</span>
+          <select bind:value={caseMode}>
+            <option value="lower">lowercase</option>
+            <option value="upper">UPPERCASE</option>
+            <option value="title">Title Case</option>
+          </select>
         </label>
       </div>
     {/if}
