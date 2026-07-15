@@ -15,6 +15,16 @@ export function formatSize(bytes: number): string {
 }
 
 /**
+ * "12.3 GB free of 500 GB" for the status bar (CPE-403). Empty when total is unknown/0, so callers
+ * can render it unconditionally. Unlike {@link formatSize}, a zero component still shows "0 B".
+ */
+export function formatDiskFree(free: number, total: number): string {
+  if (!total || total <= 0) return "";
+  const size = (n: number) => (n <= 0 ? "0 B" : formatSize(n));
+  return `${size(free)} free of ${size(total)}`;
+}
+
+/**
  * Map a raw backend error string to a friendly, user-facing message.
  */
 export function friendlyError(raw: string): string {
