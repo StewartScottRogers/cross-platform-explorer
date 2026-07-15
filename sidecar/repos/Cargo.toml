@@ -1,0 +1,17 @@
+[package]
+name = "repos"
+version = "0.1.0"
+edition = "2021"
+description = "The Repositories sidecar for Cross-Platform Explorer — browse & two-way mirror any forge/VCS (CPE-429)."
+license = "MIT"
+
+# A sidecar depends ONLY on the contract (ADR 0001 one-way rule). This crate starts as the
+# provider-agnostic domain library (provider registry, per-forge manifests); the process entry and
+# contract wiring land in CPE-432. Modelled on the AI Console (CPE-261).
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[dev-dependencies]
+tempfile = "3"
