@@ -31,6 +31,10 @@ sha2 = "0.10"
 # may use the host; the host never depends on the app.
 sidecar-host = { path = "../sidecar/host", optional = true }
 sidecar-contract = { path = "../sidecar/contract", optional = true }
+# The Repositories sidecar's domain crate (CPE-429). Pulled in ONLY to reuse its already-tested,
+# hardened `git clone` argv builder for the host `forge_clone` command (CPE-436) — same feature gate,
+# so the plain explorer still ships with zero repos/clone code (the delete-test).
+repos = { path = "../sidecar/repos", optional = true }
 
 # Archive previews beyond zip (CPE-109/112/217). tar is pure-Rust; flate2 uses
 # the pure-Rust miniz_oxide backend by default, so neither needs system libs in CI.
@@ -102,4 +106,4 @@ rust_xlsxwriter = "0.79"
 default = []
 # Opt-in sidecar platform integration (ADR 0001 / CPE-260). OFF by default so the plain
 # explorer compiles and ships with no sidecar code whatsoever — the delete-test (CPE-272).
-sidecar-platform = ["dep:sidecar-host", "dep:sidecar-contract", "dep:ureq", "dep:notify"]
+sidecar-platform = ["dep:sidecar-host", "dep:sidecar-contract", "dep:ureq", "dep:notify", "dep:repos"]

@@ -3088,6 +3088,133 @@ fn forge_browse(
     Ok(forge_egress::parse_github_contents(&body))
 }
 
+/// Map a known forge `provider` to its **fixed** clone host and the username git expects alongside a
+/// token. The host is chosen here, never taken from the caller — the same SSRF-hygiene rule as
+/// `forge_egress`: a caller supplies `owner/name`, never a scheme or host. `None` means we don't
+/// clone from this provider (e.g. self-hosted kinds with no fixed host). Matched by leading segment
+/// so `github-personal` still maps to github.com, while `github-enterprise` is refused.
+#[cfg(feature = "sidecar-platform")]
+fn clone_host(provider: &str) -> Option<(&'static str, &'static str)> {
+    let p = provider.to_ascii_lowercase();
+    let is = |needle: &str| p == needle || p.starts_with(&format!("{needle}-"));
+    // Self-hosted kinds have no fixed clone host — refuse them before the hosted-prefix checks.
+    if is("github-enterprise") || is("gitea") || is("forgejo") {
+        None
+    } else if is("github") {
+        Some(("github.com", "x-access-token"))
+    } else if is("gitlab") {
+        Some(("gitlab.com", "oauth2"))
+    } else if is("bitbucket") {
+        Some(("bitbucket.org", "x-token-auth"))
+    } else if is("codeberg") {
+        Some(("codeberg.org", "oauth2"))
+    } else {
+        None
+    }
+}
+
+/// True if `repo` is a safe `owner/name` slug (optionally deeper for GitLab subgroups): at least two
+/// non-empty `[A-Za-z0-9._-]` segments, no `..`, no leading `-`. Anything else must not be
+/// interpolated into the clone URL.
+#[cfg(feature = "sidecar-platform")]
+fn is_safe_repo_slug(repo: &str) -> bool {
+    let segs: Vec<&str> = repo.split('/').collect();
+    segs.len() >= 2
+        && segs.iter().all(|s| {
+            !s.is_empty()
+                && *s != ".."
+                && !s.starts_with('-')
+                && s.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'))
+        })
+}
+
+/// True if `token` is url-safe enough to embed in the clone URL's userinfo without breaking the
+/// authority or smuggling a second URL. Deliberately strict — a real PAT is `[A-Za-z0-9_.~-]`.
+#[cfg(feature = "sidecar-platform")]
+fn is_safe_token(token: &str) -> bool {
+    !token.is_empty()
+        && token.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.' | '~'))
+}
+
+/// Build the hardened `git clone` argv for `(provider, repo, target_dir, token?)`. Pure and cleanly
+/// testable: the clone URL is assembled host-side from the fixed provider host, then handed to the
+/// **already-tested** hardened builder in the repos crate (threat-model §C: empty hooksPath, no
+/// ext/file transports, no fsmonitor, no submodule recursion, `--` before url/target). A token is
+/// injected as userinfo for a private clone; on any failure the token value is NEVER echoed.
+#[cfg(feature = "sidecar-platform")]
+fn build_git_clone(
+    provider: &str,
+    repo: &str,
+    target_dir: &str,
+    token: Option<&str>,
+) -> Result<Vec<String>, String> {
+    let (host, token_user) = clone_host(provider)
+        .ok_or_else(|| format!("Cloning isn't supported for provider '{provider}'."))?;
+    let slug = repo.trim().trim_matches('/');
+    if !is_safe_repo_slug(slug) {
+        return Err("Repository must be in 'owner/name' form.".to_string());
+    }
+    // URL built host-side from the fixed host — the caller never supplies a scheme/host.
+    let url = match token {
+        Some(t) => {
+            if !is_safe_token(t) {
+                // Never echo the token itself in the error.
+                return Err("The access token contains unsupported characters.".to_string());
+            }
+            format!("https://{token_user}:{t}@{host}/{slug}.git")
+        }
+        None => format!("https://{host}/{slug}.git"),
+    };
+    repos::build_clone_args(&repos::CloneRequest {
+        url,
+        target_dir: target_dir.to_string(),
+        depth: None,
+        branch: None,
+    })
+    .map_err(|e| match e {
+        repos::CloneError::BadUrl => "The clone URL was rejected as unsafe.".to_string(),
+        repos::CloneError::BadTarget => {
+            "The target must be an absolute path to a fresh, non-repo folder.".to_string()
+        }
+        repos::CloneError::BadRef => "The requested branch name was rejected.".to_string(),
+    })
+}
+
+/// Clone a remote repo (CPE-436) from a known forge `provider` into `target_dir`. The clone URL is
+/// built host-side from the provider allow-list (`clone_host`) — the caller supplies only `owner/name`,
+/// never a scheme or host (SSRF hygiene, as in `forge_egress`). git runs with the hardened argv from
+/// the repos crate (threat-model §C). An optional `token` clones a private repo: it is injected into
+/// the URL for git and is NEVER logged — and is scrubbed from any git error text before it is returned.
+#[cfg(feature = "sidecar-platform")]
+#[tauri::command]
+fn forge_clone(
+    provider: String,
+    repo: String,
+    target_dir: String,
+    token: Option<String>,
+) -> Result<String, String> {
+    let args = build_git_clone(&provider, &repo, &target_dir, token.as_deref())?;
+    let output = std::process::Command::new("git")
+        .args(&args)
+        .output()
+        .map_err(|e| format!("Couldn't run git: {e}"))?;
+    if output.status.success() {
+        Ok(format!("Cloned {} into {target_dir}.", repo.trim().trim_matches('/')))
+    } else {
+        let mut stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        // Defence-in-depth: never surface the token, even if git echoed the URL in an error.
+        if let Some(t) = token.as_deref() {
+            if !t.is_empty() {
+                stderr = stderr.replace(t, "***");
+            }
+        }
+        if stderr.is_empty() {
+            stderr = format!("git clone failed (exit {:?}).", output.status.code());
+        }
+        Err(stderr)
+    }
+}
+
 #[cfg(feature = "sidecar-platform")]
 #[tauri::command]
 fn sidecar_diagnostics(
@@ -3233,7 +3360,9 @@ pub fn run() {
             #[cfg(feature = "sidecar-platform")]
             agent_watch_stop,
             #[cfg(feature = "sidecar-platform")]
-            forge_browse
+            forge_browse,
+            #[cfg(feature = "sidecar-platform")]
+            forge_clone
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application");
@@ -3312,6 +3441,60 @@ mod agent_watch_tests {
         assert_eq!(got[0]["prerelease"], false);
         // Malformed input never panics — just yields nothing.
         assert!(parse_release_versions(b"not json").is_empty());
+    }
+
+    // --- Clone argv/URL construction (CPE-436) -----------------------------------------
+    use super::build_git_clone;
+
+    #[test]
+    fn a_public_clone_builds_the_https_url_host_side_with_all_hardening() {
+        let args = build_git_clone("github", "octocat/hello", "/tmp/hello", None).unwrap();
+        let j = args.join(" ");
+        // The hardened flags from the reused repos builder are present (threat-model §C).
+        assert!(j.contains("-c core.hooksPath="));
+        assert!(j.contains("-c protocol.ext.allow=never"));
+        assert!(j.contains("-c protocol.file.allow=never"));
+        assert!(j.contains("-c core.fsmonitor=false"));
+        assert!(j.contains("--recurse-submodules=no"));
+        // URL + target come after `--` so neither parses as an option; host is built host-side.
+        let dd = args.iter().position(|a| a == "--").unwrap();
+        assert_eq!(
+            &args[dd + 1..],
+            &["https://github.com/octocat/hello.git".to_string(), "/tmp/hello".to_string()]
+        );
+    }
+
+    #[test]
+    fn a_private_clone_embeds_the_token_as_userinfo() {
+        let args =
+            build_git_clone("github", "me/private", "/tmp/p", Some("ghp_SECRET123")).unwrap();
+        let dd = args.iter().position(|a| a == "--").unwrap();
+        assert_eq!(&args[dd + 1], "https://x-access-token:ghp_SECRET123@github.com/me/private.git");
+    }
+
+    #[test]
+    fn other_hosted_providers_map_to_their_fixed_clone_host() {
+        let g = build_git_clone("gitlab", "grp/proj", "/tmp/g", None).unwrap();
+        assert!(g.iter().any(|a| a == "https://gitlab.com/grp/proj.git"));
+        let b = build_git_clone("bitbucket", "team/repo", "/tmp/b", Some("tok123")).unwrap();
+        assert!(b.iter().any(|a| a == "https://x-token-auth:tok123@bitbucket.org/team/repo.git"));
+        let c = build_git_clone("codeberg", "o/r", "/tmp/c", None).unwrap();
+        assert!(c.iter().any(|a| a == "https://codeberg.org/o/r.git"));
+    }
+
+    #[test]
+    fn unknown_provider_bad_repo_bad_target_and_bad_token_are_refused_safely() {
+        // An unknown / self-hosted provider has no fixed clone host.
+        assert!(build_git_clone("myspace", "a/b", "/tmp/x", None).is_err());
+        assert!(build_git_clone("github-enterprise", "a/b", "/tmp/x", None).is_err());
+        // A repo that isn't `owner/name` must not be interpolated into a URL.
+        assert!(build_git_clone("github", "notaslug", "/tmp/x", None).is_err());
+        assert!(build_git_clone("github", "a/../evil", "/tmp/x", None).is_err());
+        // A relative target is refused by the hardened builder.
+        assert!(build_git_clone("github", "a/b", "relative", None).is_err());
+        // A token with url-unsafe chars is refused — and its value is never echoed in the error.
+        let e = build_git_clone("github", "a/b", "/tmp/x", Some("bad tok@evil")).unwrap_err();
+        assert!(!e.contains("bad tok@evil"));
     }
 }
 
