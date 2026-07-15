@@ -3061,6 +3061,33 @@ struct SidecarDiagnostics {
 /// [`Redactor::redact_log_line`], which masks registered secrets *and* heuristic secret
 /// shapes (API-key prefixes, bearer tokens, `sensitive_key=value`), so a secret can never
 /// surface here even if one reached a log line.
+/// Browse a remote repo's tree for the Repositories left-pane view (CPE-434/435). Uses the
+/// host-brokered, allow-listed forge egress (`forge_egress`) — public GitHub needs no token; an
+/// optional token enables private repos. `repo` is `owner/name`, `path` is a subfolder (or empty for
+/// the root). Returns folders-first entries, or an actionable error message.
+#[cfg(feature = "sidecar-platform")]
+#[tauri::command]
+fn forge_browse(
+    provider: String,
+    repo: String,
+    path: Option<String>,
+    token: Option<String>,
+) -> Result<Vec<forge_egress::RepoEntry>, String> {
+    let sub = path.unwrap_or_default();
+    let api_path = format!("/repos/{}/contents/{}", repo.trim_matches('/'), sub.trim_start_matches('/'));
+    let (status, body) =
+        forge_egress::forge_request(&provider, "GET", None, &api_path, token.as_deref(), None)
+            .map_err(|e| format!("Couldn't reach the repo ({e:?})."))?;
+    if !(200..300).contains(&status) {
+        return Err(match status {
+            404 => format!("Repo '{repo}' not found (or private — add a token)."),
+            401 | 403 => "Access denied — check the token.".to_string(),
+            s => format!("Couldn't browse '{repo}': HTTP {s}."),
+        });
+    }
+    Ok(forge_egress::parse_github_contents(&body))
+}
+
 #[cfg(feature = "sidecar-platform")]
 #[tauri::command]
 fn sidecar_diagnostics(
@@ -3204,7 +3231,9 @@ pub fn run() {
             #[cfg(feature = "sidecar-platform")]
             agent_watch_start,
             #[cfg(feature = "sidecar-platform")]
-            agent_watch_stop
+            agent_watch_stop,
+            #[cfg(feature = "sidecar-platform")]
+            forge_browse
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application");
