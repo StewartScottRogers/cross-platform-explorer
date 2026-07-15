@@ -2169,26 +2169,39 @@ fn serve_ai_console_requests(
         }
         match conn.recv() {
             Ok(env) => {
-                if let Message::Request(req) = env.message {
-                    // host.pick_folder is a host UI action, not a brokered capability — handle
-                    // it directly by opening the native folder dialog (CPE-354).
-                    let resp = if req.method == "host.pick_folder" {
-                        pick_folder_response(&app, &req.params)
-                    } else if req.method == "host.verify_key" {
-                        // A live key check against an allow-listed provider endpoint (CPE-347),
-                        // not a brokered capability — handle it directly.
-                        verify_key_response(&req.params)
-                    } else if req.method == "host.fetch_catalog" {
-                        // Fetch + apply the signed catalog bundle from GitHub Releases (CPE-376).
-                        fetch_catalog_response(&app, &req.params)
-                    } else {
-                        broker.dispatch("ai-console", &req)
-                    };
-                    if conn.send(&Envelope::new(env.id, Message::Response(resp))).is_err() {
-                        break; // sidecar's stdin closed
+                let env_id = env.id;
+                match env.message {
+                    Message::Request(req) => {
+                        // host.pick_folder is a host UI action, not a brokered capability — handle
+                        // it directly by opening the native folder dialog (CPE-354).
+                        let resp = if req.method == "host.pick_folder" {
+                            pick_folder_response(&app, &req.params)
+                        } else if req.method == "host.verify_key" {
+                            // A live key check against an allow-listed provider endpoint (CPE-347),
+                            // not a brokered capability — handle it directly.
+                            verify_key_response(&req.params)
+                        } else if req.method == "host.fetch_catalog" {
+                            // Fetch + apply the signed catalog bundle from GitHub Releases (CPE-376).
+                            fetch_catalog_response(&app, &req.params)
+                        } else {
+                            broker.dispatch("ai-console", &req)
+                        };
+                        if conn.send(&Envelope::new(env_id, Message::Response(resp))).is_err() {
+                            break; // sidecar's stdin closed
+                        }
                     }
+                    // Agent Watch (CPE-396): the console announces session start/end as a
+                    // `session:<json>` Status. Forward it to the frontend so the explorer can list
+                    // active agent sessions and locate their Project folders.
+                    Message::Event(sidecar_contract::Event::Status { state })
+                        if state.starts_with("session:") =>
+                    {
+                        use tauri::Emitter;
+                        let _ = app.emit("ai-console://session", state);
+                    }
+                    // Other non-request frames (Lifecycle, other Status) need no reply here.
+                    _ => {}
                 }
-                // Non-request frames (Status/Event/Lifecycle) need no reply here.
             }
             // A poll timeout is normal — loop to re-check `stop`. Anything else means the
             // sidecar closed the connection.

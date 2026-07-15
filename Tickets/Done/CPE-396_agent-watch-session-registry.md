@@ -4,8 +4,9 @@ title: Agent Watch — session registry (console announces active agent sessions
 type: feature
 priority: high
 estimate: M
-status: Open
+status: Done
 created: 2026-07-14
+closed: 2026-07-14
 tags: [big-design, agent-watch, sidecar]
 epic: AGENT-WATCH.md
 ---
@@ -26,6 +27,6 @@ than adding new plumbing.
 No sessions announced → empty list, nothing allocated. Feature-gated behind sidecar-platform.
 
 ## Acceptance
-- [ ] Console emits session announcements on start + end
-- [ ] Frontend exposes a reactive list of active sessions (id, agent, cwd, status)
-- [ ] Headless tests for the parse + store; plain explorer unaffected when off
+- [x] Console emits session announcements on start + end
+- [x] Frontend exposes a reactive list of active sessions (id, agent, cwd, status)
+- [x] Headless tests for the parse + store; plain explorer unaffected when off

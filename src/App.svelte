@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { onMount } from "svelte";
+  import { onMount, onDestroy } from "svelte";
   import { invoke, convertFileSrc } from "@tauri-apps/api/core";
   import { open as openFolderDialog } from "@tauri-apps/plugin-dialog";
   import { check, type Update } from "@tauri-apps/plugin-updater";
@@ -16,6 +16,7 @@
   import SettingsDialog from "./lib/components/SettingsDialog.svelte";
   import ConsentSheet from "./lib/components/ConsentSheet.svelte";
   import { startAiConsole, consoleUrlWith, platformActive, consentState, setConsent, type Capability, type ConsentState } from "./lib/sidecar";
+  import { initAgentSessions } from "./lib/agentSessions";
   import UpdateDialog from "./lib/components/UpdateDialog.svelte";
   import TabBar from "./lib/components/TabBar.svelte";
   import NavToolbar from "./lib/components/NavToolbar.svelte";
@@ -180,6 +181,8 @@
   let patternSelectOpen = false;
   /** True in sidecar-platform builds — gates the AI Console toolbar button (CPE-351). */
   let aiConsoleAvailable = false;
+  /** Teardown for the Agent Watch session listener (CPE-396). */
+  let unlistenSessions: (() => void) | null = null;
   const AI_CONSOLE_LABEL = "ai-console";
   let consentPrompt: ConsentState | null = null;
 
@@ -1632,6 +1635,9 @@
     applySettings();
     // Reveal the AI Console button only when the sidecar platform is present (CPE-351).
     platformActive().then((v) => (aiConsoleAvailable = v)).catch(() => {});
+    // Listen for coding-agent sessions launched from the console so the explorer can surface
+    // them (Agent Watch, CPE-396). Idle until a session announces itself; unlistened on teardown.
+    initAgentSessions().then((un) => (unlistenSessions = un)).catch(() => {});
 
     try {
       const [p, d, h, canRestore] = await Promise.all([
@@ -1656,6 +1662,8 @@
     await loadPath(HOME);
     checkForUpdates();
   });
+
+  onDestroy(() => unlistenSessions?.());
 </script>
 
 <svelte:window on:keydown={handleKeydown} />
