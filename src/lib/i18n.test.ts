@@ -49,6 +49,20 @@ describe("i18n translate()", () => {
     }
   });
 
+  it("translates the context-menu items across locales incl. interpolation (CPE-481)", () => {
+    expect(translate("en", "ctx.duplicate")).toBe("Duplicate");
+    expect(translate("es", "ctx.newFolder")).toBe("Nueva carpeta");
+    expect(translate("de", "ctx.reveal")).toBe("Im Datei-Explorer anzeigen");
+    expect(translate("fr", "ctx.paste")).toBe("Coller");
+    expect(translate("en", "ctx.selectAllExt", { ext: "rs" })).toBe("Select all .rs");
+    // All ctx.* keys defined in every locale (no English fallback needed).
+    const keys = localeKeys("en").filter((k) => k.startsWith("ctx."));
+    expect(keys.length).toBeGreaterThanOrEqual(30);
+    for (const loc of ["es", "de", "fr"] as const) {
+      for (const k of keys) expect(localeKeys(loc)).toContain(k);
+    }
+  });
+
   it("interpolates {name} placeholders", () => {
     expect(translate("en", "status.items", { count: 42 })).toBe("42 items");
     expect(translate("es", "status.selected", { count: 3 })).toBe("3 seleccionados");

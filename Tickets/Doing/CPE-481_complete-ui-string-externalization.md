@@ -39,3 +39,9 @@ for Updates, Settings, Keyboard shortcuts, Documentation, About) to i18n. Added 
 via `$t()`. Test added (menu-item translations + all-locale coverage). `npm run check` clean; 468
 frontend tests pass. Remaining to migrate (future loops): dialogs (Properties, BatchRename,
 Duplicates, Update, Consent), ContextMenu, CommandBar, FileList, HomeView, App.svelte chrome.
+2026-07-16 (Nightshift loop 15) — Migrated **ContextMenu.svelte** (the right-click menu) to i18n: 30
+`ctx.*` keys added to all 4 locales (en/es/de/fr), every visible item label rendered via `$t()`
+including interpolation (`ctx.selectAllExt` with `{ext}`) and the conditional pin/favorite toggles.
+Test added (context-menu translations + all-locale coverage). `npm run check` clean; 469 frontend
+tests pass. Remaining: the ContextMenu top-row icon-button tooltips (Cut/Copy/Rename/Delete — carry
+hotkeys), and the dialogs (Properties, BatchRename, Duplicates, Update, Consent), HomeView, CommandBar.

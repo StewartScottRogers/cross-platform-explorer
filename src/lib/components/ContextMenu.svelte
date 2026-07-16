@@ -1,6 +1,7 @@
 <script lang="ts">
   import { createEventDispatcher, onMount } from "svelte";
   import Icon from "./Icon.svelte";
+  import { t } from "../i18n";
 
   export let x = 0;
   export let y = 0;
@@ -84,131 +85,131 @@
     </div>
     <div class="sep" />
     <button class="row" role="menuitem" on:click={() => run("open")}>
-      <Icon name={openIcon} size={15} /> Open
+      <Icon name={openIcon} size={15} /> {$t('ctx.open')}
     </button>
     {#if executableSelected}
       <button class="row" role="menuitem" on:click={() => run("execute")}>
-        <Icon name="executable" size={15} /> Execute
+        <Icon name="executable" size={15} /> {$t('ctx.execute')}
       </button>
       <button class="row" role="menuitem" on:click={() => run("execute-admin")}>
-        <Icon name="executable" size={15} /> Execute as administrator
+        <Icon name="executable" size={15} /> {$t('ctx.executeAdmin')}
       </button>
     {/if}
     {#if folderSelected}
       <button class="row" role="menuitem" on:click={() => run("open-new-tab")}>
-        <Icon name="plus" size={15} /> Open in new tab
+        <Icon name="plus" size={15} /> {$t('ctx.openNewTab')}
       </button>
       {#if canTerminal}
         <button class="row" role="menuitem" on:click={() => run("terminal-folder")}>
-          <Icon name="code" size={15} /> Open in Terminal
+          <Icon name="code" size={15} /> {$t('ctx.openInTerminal')}
         </button>
       {/if}
     {/if}
     {#if canTerminal}
       <button class="row" role="menuitem" on:click={() => run("open-in-console")}>
-        <Icon name="code" size={15} /> Work on this in AI Console
+        <Icon name="code" size={15} /> {$t('ctx.workOnThis')}
       </button>
     {/if}
     <button class="row" role="menuitem" on:click={() => run("duplicate")}>
-      <Icon name="copy" size={15} /> Duplicate
+      <Icon name="copy" size={15} /> {$t('ctx.duplicate')}
       <span class="hint">Ctrl+D</span>
     </button>
     <button class="row" role="menuitem" on:click={() => run("copy-path")}>
-      <Icon name="paste" size={15} /> Copy as path
+      <Icon name="paste" size={15} /> {$t('ctx.copyAsPath')}
       <span class="hint">Ctrl+Shift+C</span>
     </button>
     {#if canTerminal}
       <button class="row" role="menuitem" on:click={() => run("copy-to")}>
-        <Icon name="copy" size={15} /> Copy to folder…
+        <Icon name="copy" size={15} /> {$t('ctx.copyToFolder')}
       </button>
       <button class="row" role="menuitem" on:click={() => run("move-to")}>
-        <Icon name="cut" size={15} /> Move to folder…
+        <Icon name="cut" size={15} /> {$t('ctx.moveToFolder')}
       </button>
     {/if}
     <button class="row" role="menuitem" on:click={() => run("copy-name")}>
-      <Icon name="rename" size={15} /> Copy name
+      <Icon name="rename" size={15} /> {$t('ctx.copyName')}
     </button>
     {#if selectionCount > 1}
       <button class="row" role="menuitem" on:click={() => run("batch-rename")}>
-        <Icon name="rename" size={15} /> Rename…
+        <Icon name="rename" size={15} /> {$t('ctx.rename')}
       </button>
     {/if}
     {#if comparable}
       <button class="row" role="menuitem" on:click={() => run("compare")}>
-        <Icon name="copy" size={15} /> Compare files
+        <Icon name="copy" size={15} /> {$t('ctx.compareFiles')}
       </button>
     {/if}
     {#if sameTypeExt}
       <button class="row" role="menuitem" on:click={() => run("select-type")}>
-        <Icon name="filter" size={15} /> Select all .{sameTypeExt}
+        <Icon name="filter" size={15} /> {$t('ctx.selectAllExt', { ext: sameTypeExt })}
       </button>
     {/if}
     {#if extractable}
       <button class="row" role="menuitem" on:click={() => run("extract")}>
-        <Icon name="archive" size={15} /> Extract
+        <Icon name="archive" size={15} /> {$t('ctx.extract')}
       </button>
     {/if}
     {#if compressible}
       <button class="row" role="menuitem" on:click={() => run("compress")}>
-        <Icon name="archive" size={15} /> Compress to ZIP
+        <Icon name="archive" size={15} /> {$t('ctx.compressZip')}
       </button>
     {/if}
     {#if folderSelected}
       <button class="row" role="menuitem" on:click={() => run("pin")}>
-        <Icon name="pin" size={15} /> {pinned ? "Unpin from Home" : "Pin to Home"}
+        <Icon name="pin" size={15} /> {pinned ? $t('ctx.unpinFromHome') : $t('ctx.pinToHome')}
       </button>
     {/if}
     {#if selectionCount === 1}
       <button class="row" role="menuitem" on:click={() => run("favorite")}>
-        <Icon name="star" size={15} /> {favorited ? "Remove from Favorites" : "Add to Favorites"}
+        <Icon name="star" size={15} /> {favorited ? $t('ctx.removeFavorite') : $t('ctx.addFavorite')}
       </button>
     {/if}
     <div class="sep" />
     <button class="row" role="menuitem" on:click={() => run("reveal")}>
-      <Icon name="folder" size={15} /> Reveal in File Explorer
+      <Icon name="folder" size={15} /> {$t('ctx.reveal')}
     </button>
     <button class="row" role="menuitem" on:click={() => run("properties")}>
-      <Icon name="info" size={15} /> Properties
+      <Icon name="info" size={15} /> {$t('ctx.properties')}
       <span class="hint">Alt+Enter</span>
     </button>
   {:else}
     <button class="row" role="menuitem" on:click={() => run("new-folder")}>
-      <Icon name="folder" size={15} /> New folder
+      <Icon name="folder" size={15} /> {$t('ctx.newFolder')}
       <span class="hint">Ctrl+Shift+N</span>
     </button>
     <button class="row" role="menuitem" on:click={() => run("new-file")}>
-      <Icon name="document" size={15} /> New file
+      <Icon name="document" size={15} /> {$t('ctx.newFile')}
     </button>
     <button class="row" role="menuitem" disabled={!canPaste} on:click={() => run("paste")}>
-      <Icon name="paste" size={15} /> Paste
+      <Icon name="paste" size={15} /> {$t('ctx.paste')}
       <span class="hint">Ctrl+V</span>
     </button>
     <div class="sep" />
     <button class="row" role="menuitem" on:click={() => run("select-all")}>
-      <Icon name="check" size={15} /> Select all
+      <Icon name="check" size={15} /> {$t('ctx.selectAll')}
       <span class="hint">Ctrl+A</span>
     </button>
     <button class="row" role="menuitem" on:click={() => run("invert-selection")}>
-      <Icon name="check" size={15} /> Invert selection
+      <Icon name="check" size={15} /> {$t('ctx.invertSelection')}
     </button>
     <button class="row" role="menuitem" on:click={() => run("select-pattern")}>
-      <Icon name="filter" size={15} /> Select by pattern…
+      <Icon name="filter" size={15} /> {$t('ctx.selectByPattern')}
     </button>
     <button class="row" role="menuitem" on:click={() => run("refresh")}>
-      <Icon name="refresh" size={15} /> Refresh
+      <Icon name="refresh" size={15} /> {$t('ctx.refresh')}
       <span class="hint">F5</span>
     </button>
     <div class="sep" />
     {#if canTerminal}
       <button class="row" role="menuitem" on:click={() => run("terminal")}>
-        <Icon name="code" size={15} /> Open in Terminal
+        <Icon name="code" size={15} /> {$t('ctx.openInTerminal')}
       </button>
       <button class="row" role="menuitem" on:click={() => run("open-folder-in-console")}>
-        <Icon name="code" size={15} /> Work on this folder in AI Console
+        <Icon name="code" size={15} /> {$t('ctx.workOnFolder')}
       </button>
     {/if}
     <button class="row" role="menuitem" on:click={() => run("reveal")}>
-      <Icon name="folder" size={15} /> Reveal in File Explorer
+      <Icon name="folder" size={15} /> {$t('ctx.reveal')}
     </button>
   {/if}
 </div>
