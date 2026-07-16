@@ -134,6 +134,71 @@ pub fn set_status(md: &str, new_status: &str) -> String {
     out
 }
 
+/// Add or remove the `review` disposition tag on a ticket's `tags:` frontmatter line (CPE-523) — the
+/// board's virtual Review lane is driven by this tag, so no new `Tickets/` folder is needed. Pure.
+pub fn set_review(md: &str, on: bool) -> String {
+    let mut out = String::with_capacity(md.len() + 16);
+    let mut in_fm = false;
+    let mut seen_open = false;
+    let mut done = false;
+    for line in md.lines() {
+        if line.trim() == "---" {
+            if !seen_open {
+                seen_open = true;
+                in_fm = true;
+            } else if in_fm {
+                if !done && on {
+                    out.push_str("tags: [review]\n"); // no tags line existed — add one
+                    done = true;
+                }
+                in_fm = false;
+            }
+            out.push_str(line);
+            out.push('\n');
+            continue;
+        }
+        if in_fm && !done && line.trim_start().starts_with("tags:") {
+            let raw = line.split_once(':').map(|(_, v)| v).unwrap_or("");
+            let mut tags = parse_tags(raw);
+            let has = tags.iter().any(|t| t == "review");
+            if on && !has {
+                tags.push("review".to_string());
+            } else if !on && has {
+                tags.retain(|t| t != "review");
+            }
+            out.push_str(&format!("tags: [{}]\n", tags.join(", ")));
+            done = true;
+            continue;
+        }
+        out.push_str(line);
+        out.push('\n');
+    }
+    out
+}
+
+/// Append a finding bullet under a `## Findings` section (creating it at the end if absent) — the
+/// affordance a dispatched agent (or the UI) uses to record progress on a card (CPE-523). Pure.
+pub fn append_finding(md: &str, note: &str) -> String {
+    let note = note.trim();
+    if note.is_empty() {
+        return md.to_string();
+    }
+    let bullet = format!("- {note}");
+    if let Some(pos) = md.find("## Findings") {
+        // Insert the bullet right after the heading line.
+        let after_heading = md[pos..].find('\n').map(|n| pos + n + 1).unwrap_or(md.len());
+        let mut out = String::with_capacity(md.len() + bullet.len() + 1);
+        out.push_str(&md[..after_heading]);
+        out.push_str(&bullet);
+        out.push('\n');
+        out.push_str(&md[after_heading..]);
+        out
+    } else {
+        let sep = if md.ends_with('\n') { "" } else { "\n" };
+        format!("{md}{sep}\n## Findings\n{bullet}\n")
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -194,5 +259,38 @@ mod tests {
         let out = set_status(no_status, "Done");
         assert!(out.contains("status: Done"));
         assert!(out.contains("id: CPE-1"));
+    }
+
+    #[test]
+    fn set_review_adds_and_removes_the_review_tag() {
+        let on = set_review(TICKET, true);
+        assert_eq!(card_from(&on, "Doing").unwrap().tags, vec!["ready", "backend", "review"]);
+        let off = set_review(&on, false);
+        assert_eq!(card_from(&off, "Doing").unwrap().tags, vec!["ready", "backend"]);
+        // Idempotent both ways.
+        assert_eq!(card_from(&set_review(&on, true), "Doing").unwrap().tags, vec!["ready", "backend", "review"]);
+        assert_eq!(card_from(&set_review(TICKET, false), "Doing").unwrap().tags, vec!["ready", "backend"]);
+    }
+
+    #[test]
+    fn set_review_adds_a_tags_line_when_absent() {
+        let no_tags = "---\nid: CPE-1\ntitle: x\n---\nbody\n";
+        let out = set_review(no_tags, true);
+        assert_eq!(card_from(&out, "Doing").unwrap().tags, vec!["review"]);
+    }
+
+    #[test]
+    fn append_finding_creates_the_section_then_appends() {
+        let a = append_finding(TICKET, "found a null deref");
+        assert!(a.contains("## Findings"));
+        assert!(a.contains("- found a null deref"));
+        // A second finding lands under the same heading, newest first.
+        let b = append_finding(&a, "and a race");
+        let idx_head = b.find("## Findings").unwrap();
+        let idx_race = b.find("- and a race").unwrap();
+        let idx_first = b.find("- found a null deref").unwrap();
+        assert!(idx_head < idx_race && idx_race < idx_first);
+        // A blank note is a no-op.
+        assert_eq!(append_finding(TICKET, "   "), TICKET);
     }
 }

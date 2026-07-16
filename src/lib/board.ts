@@ -37,6 +37,26 @@ export function groupByColumn(cards: Card[]): Record<Column, Card[]> {
   return out;
 }
 
+/** The board's display lanes — the folder columns plus a virtual **Review** lane between Doing and
+    Done (CPE-523). Review is not a folder: it's Doing-cards carrying the `review` tag. */
+export const BOARD_LANES = ["Backlog", "Doing", "Review", "Blocked", "Deferred", "Done"] as const;
+export type Lane = (typeof BOARD_LANES)[number];
+
+/** The lane a card displays in: a Doing card tagged `review` shows in Review; otherwise its column. */
+export function laneFor(card: Card): Lane {
+  if (card.column === "Doing" && card.tags.includes("review")) return "Review";
+  return isColumn(card.column) ? (card.column as Lane) : "Backlog";
+}
+
+/** Group cards into display lanes (incl. the virtual Review lane), each ordered by id. */
+export function groupByLane(cards: Card[]): Record<Lane, Card[]> {
+  const out = {} as Record<Lane, Card[]>;
+  for (const l of BOARD_LANES) out[l] = [];
+  for (const c of cards) out[laneFor(c)].push(c);
+  for (const l of BOARD_LANES) out[l].sort((a, b) => idNum(a.id) - idNum(b.id));
+  return out;
+}
+
 /** Per-column counts, for the column headers. */
 export function columnCounts(cards: Card[]): Record<Column, number> {
   const g = groupByColumn(cards);
