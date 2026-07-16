@@ -251,6 +251,27 @@ describe("AI Console launcher — grid layout persistence (CPE-509)", () => {
   });
 });
 
+describe("AI Console launcher — responsive grid columns (CPE-510)", () => {
+  it("colsForWidth caps columns so tiles never drop below the legible minimum", async () => {
+    const { w } = await mountLauncher();
+    // Wide enough for the near-square ideal.
+    expect(w.colsForWidth(4, 1000, 320)).toBe(2); // ideal 2, fits 3 → 2
+    expect(w.colsForWidth(9, 1000, 320)).toBe(3); // ideal 3, fits 3 → 3
+    // Narrow: fewer columns than ideal so tiles stay ≥ 320px.
+    expect(w.colsForWidth(4, 700, 320)).toBe(2); // fits 2
+    expect(w.colsForWidth(4, 400, 320)).toBe(1); // fits 1 → collapses to a single column
+    expect(w.colsForWidth(9, 700, 320)).toBe(2); // ideal 3 but only 2 fit
+    // Very narrow always yields at least one column (no zero).
+    expect(w.colsForWidth(6, 100, 320)).toBe(1);
+  });
+
+  it("treats unknown/zero width (headless) as wide → uses the ideal columns", async () => {
+    const { w } = await mountLauncher();
+    expect(w.colsForWidth(4, 0, 320)).toBe(2);
+    expect(w.colsForWidth(5, 0, 320)).toBe(3);
+  });
+});
+
 describe("AI Console launcher — named sets / presets (the reported confusion)", () => {
   it("renders the current agent's sets into the dropdown, with a blank placeholder", async () => {
     const { w } = await mountLauncher();
