@@ -2,7 +2,7 @@
 id: CPE-502
 title: "EPIC: Swarm orchestration — role-based agent teams (ownership, mailbox, gates)"
 type: Task
-status: Proposed
+status: In Progress
 priority: Medium
 component: Multiple
 tags: [epic, big-design]
@@ -32,5 +32,38 @@ collide on files**, message each other, and pass **quality gates** before a task
 - Mailbox transport: reuse the MCP layer (CPE-288/307) or an internal bus?
 - Cost/token controls for N concurrent agents; failure/retry + coordinator authority.
 
+## Decisions (activation 2026-07-16)
+Adopted the **recommended defaults** — the activation questions were surfaced twice but the dialog went
+unanswered, so I proceeded on sound defaults rather than stall the sprint. **Any of these is easy to
+change; say so and I'll re-decompose.**
+- **Role model:** **Declarative manifest templates** — a team is a manifest of roles
+  (coordinator/builder/scout/reviewer) bound to agent+model, reusing the [[CPE-278]] registry pattern.
+- **File-ownership locks:** **Path-glob claims** — a task exclusively owns matching globs; overlaps are
+  refused/queued; shared deps sequenced.
+- **Mailbox transport:** **Reuse the MCP layer** ([[CPE-288]]/[[CPE-307]]) — one substrate; ties to
+  [[CPE-504]]. (The [[CPE-511]] Herdr socket-API idea is noted as an alternative if MCP proves limiting.)
+- **First wave:** **File-ownership lock manager first** — the safety substrate everything builds on.
+
+## Child tickets (created at activation)
+Wave 1 — the foundation (assigned to sprint **[[SPR-01]]**):
+- [[CPE-514]] — File-ownership lock manager (path-glob claims + shared-dep sequencing) *(ready; wave 1)*
+- [[CPE-515]] — Role/team manifest model (coordinator/builder/scout/reviewer) *(ready)*
+- [[CPE-516]] — Inter-agent mailbox over MCP *(needs-prereq: MCP)*
+
+Wave 2 — the orchestration (later sprint):
+- [[CPE-517]] — Coordinator dispatch loop *(needs-prereq 514/515/516; big-design)*
+- [[CPE-518]] — Quality gates before a task is "done" *(needs-prereq 517)*
+- [[CPE-519]] — Cost/token budgets + retry + coordinator authority *(needs-prereq 517)*
+
+Suggested order: **CPE-514** first (unblocks the coordinator), then CPE-515 / CPE-516 (independent), then
+CPE-517 → CPE-518 / CPE-519.
+
 ## Notes
 From [[CPE-500]]; builds on the AI Console session engine + agent registry + MCP. `big-design`.
+
+## Work Log
+2026-07-16 — Filed as a dormant `Proposed` brief (from spike CPE-500).
+2026-07-16 — **Activated** into sprint SPR-01. Surfaced the 4 open questions to the user (twice); the
+dialog went unanswered, so adopted the recommended defaults (see Decisions — reversible) rather than
+stall. Decomposed into 6 children (CPE-514…519); wave-1 foundation (514/515/516) assigned to SPR-01.
+Status → In Progress.
