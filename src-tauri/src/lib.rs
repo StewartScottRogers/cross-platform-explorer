@@ -124,6 +124,26 @@ fn board_note(root: String, id: String, note: String) -> Result<(), String> {
     std::fs::write(&path, ticket_board::append_finding(&md, &note)).map_err(|e| e.to_string())
 }
 
+/// Run `git diff` (working tree vs HEAD) in `root` and return the raw unified-diff text for the
+/// integrated workbench (CPE-526). An optional `path` limits it to one file. Read-only.
+#[tauri::command]
+fn workbench_diff(root: String, path: Option<String>) -> Result<String, String> {
+    let mut args = vec!["-C".to_string(), root, "diff".to_string()];
+    if let Some(p) = path.filter(|p| !p.is_empty()) {
+        args.push("--".to_string());
+        args.push(p);
+    }
+    let out = std::process::Command::new("git")
+        .args(&args)
+        .output()
+        .map_err(|e| format!("Couldn't run git: {e}"))?;
+    if out.status.success() {
+        Ok(String::from_utf8_lossy(&out.stdout).into_owned())
+    } else {
+        Err(String::from_utf8_lossy(&out.stderr).trim().to_string())
+    }
+}
+
 #[derive(Serialize)]
 pub struct DirEntry {
     name: String,
@@ -4157,6 +4177,7 @@ pub fn run() {
             board_move,
             board_review,
             board_note,
+            workbench_diff,
             home_dir,
             parent_dir,
             list_drives,
