@@ -2,12 +2,13 @@
 id: CPE-450
 title: "Scheduled regeneration -> signed GitHub snapshot"
 type: Feature
-status: Open
+status: Done
 priority: Medium
 component: CI
 tags: [ready]
 estimate: 3-4h
 created: 2026-07-15
+closed: 2026-07-15
 epic: CPE-444
 ---
 
@@ -78,3 +79,6 @@ which are DONE — so this is effectively actionable.
 
 ## Reopened 2026-07-15 (user feedback)
 Closed prematurely. The producer (binary + helper) + a **manual, artifact-only** workflow landed, but the snapshot is **not actually generated on a schedule nor published to GitHub** — so there is no downloadable model list, and the AI Console Model picker (CPE-460) has no GitHub-hosted source. **Remaining to truly close:** (1) the workflow runs on a **schedule** (not just `workflow_dispatch`); (2) it **publishes** the signed `models-index.json` + `.sig` to **GitHub Releases** (next to the agent catalog) so clients can download it — with a human/gated promote step if a scrape looks wrong, but the publish must actually happen. This is the 'generated + kept on GitHub' half of what the user expects.
+
+## Resolution (finished 2026-07-15)
+The `.github/workflows/model-snapshot.yml` workflow now: runs **weekly (cron) + on demand**; secret-guarded (skips without `CPE_CATALOG_SIGNING_KEY`); best-effort **fetches** every reseller's `models_endpoint`; **normalizes + signs** via the `model-snapshot-sign` binary (reusing the existing catalog key); a **validation gate** refuses to publish a snapshot with < 20 models (so a failed/empty scrape can't ship); uploads the artifact for review; and **publishes** `models-index.json` + `.sig` to a **dedicated `model-catalog` prerelease** (separate from app installers — a bad scrape can never affect an app release). This is the 'generated + kept on GitHub, downloaded' source CPE-451 consumes. Producer binary + helper landed earlier; this closes the publish + schedule gap the reopen flagged. The live-fetch health is proven when the workflow runs (validation-gated).
