@@ -30,12 +30,20 @@ still outstanding. If `Deferred/` is empty, print "Deferred: none" rather than d
 Also glob `Tickets/Doing/CPE-*.md`. If anything is in-flight or stalled there, show it under its own
 heading so abandoned work-in-progress can be restarted.
 
-Finally, ALWAYS show an **Epics** table (the separate epic queue). Glob `Tickets/Epics/CPE-*.md` and
+ALWAYS show an **Epics** table (the separate epic queue). Glob `Tickets/Epics/CPE-*.md` and
 render: ID, title, **status** (`Proposed` = dormant brief / `In Progress` = activated), **Tags**, and
 a one-line goal. For an `In Progress` epic, add a child-progress note (`X of Y children Done`, counting
 tickets whose `epic:` frontmatter names it). Epics are **not** in the Backlog Work options — they are
 decomposed via `/ticketing-epic activate CPE-NNN`, not built by `/ticketing-work`. If `Epics/` is
 empty, print "Epics: none". (See the `ticketing-epic` skill and `Tickets/wiki.md` → "Epics".)
+
+Finally, ALWAYS show a **Sprints** table too (mandatory — the user asked for epics **and** sprints on
+every listing). Glob `Tickets/Sprints/SPR-*.md` and render, **Active first then Planned**: ID, title,
+**status** (`Active`/`Planned`), **window** (`start → end`), a one-line goal, and **progress**
+(`X of Y tickets Done`, counting tickets whose `sprint:` frontmatter names it, across all folders).
+Sprints are time-boxed batches, orthogonal to epics — a ticket may appear in both. They are managed via
+`/ticketing-sprint`, not built directly. If `Sprints/` is empty, print "Sprints: none". (See the
+`ticketing-sprint` skill and `Tickets/wiki.md` → "Sprints".)
 
 Blocked tickets are **not** offered in the action menu's Work options (working them won't clear the
 gate). Deferred tickets are also **not** in the default Work-all/subset options — but unlike Blocked
