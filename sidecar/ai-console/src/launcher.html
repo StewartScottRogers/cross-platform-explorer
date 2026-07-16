@@ -56,6 +56,22 @@
                    background: transparent; color: inherit; cursor: pointer; font-size: 11px;
                    padding: 3px 9px; border-radius: 4px; opacity: .72; white-space: nowrap; }
   .close-all-btn:hover { opacity: 1; border-color: #d05656; color: #d05656; }
+  /* Model picker combobox (CPE-460) — a real dropdown, type-to-filter + a visible ▾ affordance. */
+  .model-combo { position: relative; display: flex; align-items: stretch; }
+  .model-combo #model { flex: 1; min-width: 0; }
+  #model-toggle { flex: 0 0 auto; width: 24px; border: 1px solid var(--line, #555); border-left: 0;
+                  background: rgba(128,128,128,0.12); color: inherit; cursor: pointer; font-size: 11px; }
+  #model-toggle:hover { background: rgba(128,128,128,0.22); }
+  #model-menu { position: absolute; top: 100%; left: 0; right: 0; z-index: 40; max-height: 300px;
+                overflow-y: auto; margin-top: 2px; background: var(--bg, #1e1e1e);
+                border: 1px solid var(--line, #555); border-radius: 4px; box-shadow: 0 8px 24px rgba(0,0,0,0.4); }
+  .model-opt { display: block; width: 100%; text-align: left; border: 0; background: transparent;
+               color: inherit; cursor: pointer; padding: 5px 9px; font-size: 12px; white-space: nowrap;
+               overflow: hidden; text-overflow: ellipsis; }
+  .model-opt:hover, .model-opt.active { background: rgba(128,128,128,0.18); }
+  .model-opt .mo-sub { opacity: 0.55; font-size: 11px; margin-left: 6px; }
+  .model-msg { padding: 8px 10px; font-size: 12px; opacity: 0.7; display: flex; justify-content: space-between; gap: 8px; align-items: center; }
+  .model-msg button { font-size: 11px; padding: 2px 8px; cursor: pointer; }
   #terms { flex: 1; min-height: 0; position: relative; background: #0d0d0d; }
   /* Bottom status bar: project folder (left) + selected agent/model (right) + a sizing grip. */
   #statusbar { flex: 0 0 auto; display: flex; align-items: center; gap: 12px; height: 24px;
@@ -184,8 +200,11 @@
       </div>
       <div class="field grow">
         <label for="model" title="Which AI model to use — type to filter, pick from the list, or leave blank for the tool's default">Model</label>
-        <input id="model" list="model-options" placeholder="(default)" autocomplete="off" />
-        <datalist id="model-options"></datalist>
+        <div class="model-combo">
+          <input id="model" placeholder="(default) — type to filter" autocomplete="off" />
+          <button id="model-toggle" type="button" tabindex="-1" title="Show models" aria-label="Show models">▾</button>
+          <div id="model-menu" hidden></div>
+        </div>
       </div>
       <div class="install" id="install-wrap" title="Whether the selected agent is installed"></div>
     </div>
@@ -1040,28 +1059,67 @@ $("history-overlay").addEventListener("click", (e) => { if (e.target === $("hist
 // populated with the current reseller's models — change on a dime by typing to filter or picking from
 // the list, or type a custom id. ONE control, identical for every agent + provider. Falls back to a
 // plain editable field when the list can't load (offline / no reseller).
+// Model picker combobox (CPE-460): a visible dropdown — type-to-filter, a ▾ affordance, and explicit
+// loading/empty/error states with a Refresh. Source is the reseller's model list (live now; the
+// signed GitHub snapshot once CPE-450/451 land). Never a dead end — the field stays free-text.
+let modelOptions = [];
+let modelsState = "idle"; // idle | loading | ready | error
+
 async function populateModels() {
   const reseller = ($("provider").value || "").trim() || "openrouter";
-  const dl = $("model-options");
+  modelsState = "loading"; renderModelMenu();
   try {
     const d = await api("/api/models?reseller=" + encodeURIComponent(reseller));
-    const models = d.models || [];
-    dl.innerHTML = "";
-    for (const m of models.slice(0, 1000)) {
-      const opt = document.createElement("option");
-      opt.value = m.id;
-      const bits = [];
-      if (m.display_name && m.display_name !== m.id) bits.push(m.display_name);
-      if (m.context_length) bits.push(m.context_length.toLocaleString() + " ctx");
-      if (m.pricing && m.pricing.prompt != null) bits.push("$" + m.pricing.prompt + "/tok");
-      if (bits.length) opt.label = bits.join(" · ");
-      dl.appendChild(opt);
-    }
+    modelOptions = d.models || [];
+    modelsState = "ready";
   } catch (_) {
-    // Offline or unlistable reseller: keep the field editable with whatever's typed — never a dead end.
-    dl.innerHTML = "";
+    modelOptions = []; modelsState = "error";
+  }
+  renderModelMenu();
+}
+
+function modelSubLabel(m) {
+  const bits = [];
+  if (m.context_length) bits.push(m.context_length.toLocaleString() + " ctx");
+  if (m.pricing && m.pricing.prompt != null) bits.push("$" + m.pricing.prompt + "/tok");
+  return bits.join(" · ");
+}
+
+function renderModelMenu() {
+  const menu = $("model-menu");
+  if (!menu || menu.hidden) return;
+  menu.innerHTML = "";
+  if (modelsState === "loading") { menu.innerHTML = '<div class="model-msg">Loading models…</div>'; return; }
+  if (modelsState === "error") {
+    const d = document.createElement("div"); d.className = "model-msg";
+    const span = document.createElement("span"); span.textContent = "Couldn't load models.";
+    const b = document.createElement("button"); b.type = "button"; b.textContent = "Refresh";
+    b.onclick = (e) => { e.stopPropagation(); populateModels(); };
+    d.appendChild(span); d.appendChild(b); menu.appendChild(d); return;
+  }
+  const q = ($("model").value || "").toLowerCase();
+  const rows = modelOptions.filter((m) =>
+    !q || (m.id && m.id.toLowerCase().includes(q)) || (m.display_name && m.display_name.toLowerCase().includes(q))
+  ).slice(0, 500);
+  if (!rows.length) {
+    menu.innerHTML = '<div class="model-msg">' + (modelOptions.length ? "No models match." : "No models available.") + "</div>";
+    return;
+  }
+  for (const m of rows) {
+    const opt = document.createElement("button");
+    opt.type = "button"; opt.className = "model-opt";
+    opt.textContent = m.display_name && m.display_name !== m.id ? m.display_name + " (" + m.id + ")" : m.id;
+    const sub = modelSubLabel(m);
+    if (sub) { const s = document.createElement("span"); s.className = "mo-sub"; s.textContent = sub; opt.appendChild(s); }
+    // mousedown + preventDefault: select before the input blurs (which would close the menu first).
+    opt.onmousedown = (e) => { e.preventDefault(); $("model").value = m.id; closeModelMenu(); };
+    menu.appendChild(opt);
   }
 }
+
+function openModelMenu() { $("model-menu").hidden = false; renderModelMenu(); }
+function closeModelMenu() { $("model-menu").hidden = true; }
+function toggleModelMenu() { if ($("model-menu").hidden) { openModelMenu(); $("model").focus(); } else closeModelMenu(); }
 
 $("keys-btn").addEventListener("click", openKeys);
 $("keys-close").addEventListener("click", () => ($("keys-overlay").hidden = true));
@@ -1071,6 +1129,11 @@ $("keys-overlay").addEventListener("click", (e) => { if (e.target === $("keys-ov
 
 $("agent").addEventListener("change", () => { renderProviders(); applyLastUsed(); renderPresets(); renderCatalogControls(); populateModels(); });
 $("provider").addEventListener("change", () => { renderCredentials(); checkLaunchReady(); populateModels(); });
+// Model picker combobox wiring (CPE-460).
+$("model-toggle").addEventListener("click", (e) => { e.stopPropagation(); toggleModelMenu(); });
+$("model").addEventListener("focus", openModelMenu);
+$("model").addEventListener("input", () => { if ($("model-menu").hidden) openModelMenu(); else renderModelMenu(); });
+document.addEventListener("click", (e) => { if (!e.target.closest(".model-combo")) closeModelMenu(); });
 $("apiKey").addEventListener("input", checkLaunchReady);
 $("preset").addEventListener("change", applyPreset);
 $("set-save").addEventListener("click", saveSet);
