@@ -5,7 +5,6 @@
 //! modules — this layer is glue + JSON.
 
 use std::collections::{BTreeMap, HashMap};
-use std::io::{Read, Write};
 use std::net::TcpStream;
 use std::path::PathBuf;
 use std::sync::{mpsc, Arc, Mutex, RwLock};
@@ -16,7 +15,6 @@ use serde_json::{json, Value};
 use crate::agents::AgentRegistry;
 use crate::http::{self, ws_op, Request, Response};
 use crate::lifecycle::{self, RealRunner};
-use crate::pty::PtySession;
 use crate::routing::LaunchContext;
 use crate::scope::{self, AgentLaunchRequest};
 
@@ -24,12 +22,12 @@ use crate::scope::{self, AgentLaunchRequest};
 /// history. Bounded so a very long session never grows host memory (CPE-334).
 const RING_CAP: usize = 512 * 1024;
 
-/// A live agent session. The PTY is kept alive (so the child isn't reaped); a reader
-/// thread streams its output to the currently-attached WebSocket AND into a bounded ring
-/// (for replay on reconnect). Input goes straight to the PTY writer.
+/// A live agent session. Its PTY lives wherever the [`SessionEngine`] puts it — in-process
+/// (`LocalEngine`) or in the session daemon (`DaemonEngine`, so it survives a console restart,
+/// CPE-309). A reader thread streams the engine's output channel to the attached WebSocket AND into a
+/// bounded ring (for replay on reconnect). Input/resize/kill go through the engine's `SessionIo`.
 struct Session {
-    pty: Mutex<PtySession>,
-    writer: Mutex<Box<dyn Write + Send>>,
+    io: Arc<dyn crate::session_engine::SessionIo>,
     ring: Arc<Mutex<Vec<u8>>>,
     /// The attached terminal's output channel, if any (one pane at a time).
     live: Arc<Mutex<Option<mpsc::Sender<Vec<u8>>>>>,
@@ -62,6 +60,9 @@ pub struct ConsoleState {
     registry: RwLock<AgentRegistry>,
     default_cwd: String,
     sessions: Mutex<HashMap<String, Arc<Session>>>,
+    /// Where session PTYs live (CPE-309): `LocalEngine` in-process by default; the real sidecar wires
+    /// a `DaemonEngine` so sessions survive a console restart.
+    engine: Arc<dyn crate::session_engine::SessionEngine>,
     seq: Mutex<u64>,
     /// Provider keys / credential profiles, brokered to the OS keychain (CPE-344).
     secrets: Arc<dyn crate::vault::SecretAccess + Send + Sync>,
@@ -230,6 +231,7 @@ impl ConsoleState {
             registry: RwLock::new(registry),
             default_cwd,
             sessions: Mutex::new(HashMap::new()),
+            engine: Arc::new(crate::session_engine::LocalEngine),
             seq: Mutex::new(0),
             secrets,
             presets,
@@ -239,6 +241,31 @@ impl ConsoleState {
             announce: Arc::new(|_| {}),
             snapshot_models: Mutex::new(None),
             snapshot_keys: vec![MODEL_CATALOG_TRUSTED_KEY.to_string()],
+        }
+    }
+
+    /// Swap the session engine (CPE-309). The real sidecar passes a `DaemonEngine` so session PTYs
+    /// live in the long-lived daemon process and survive a console restart; dev/tests keep the
+    /// in-process `LocalEngine`. Chained after construction.
+    pub fn with_engine(mut self, engine: Arc<dyn crate::session_engine::SessionEngine>) -> Self {
+        self.engine = engine;
+        self
+    }
+
+    /// On console boot, re-open a tab for every session still alive in the engine (CPE-309/461 across
+    /// a full process restart): the daemon keeps the PTYs, so we `attach` each and wire the same
+    /// reader pipeline as a fresh launch. Local engines hold nothing, so this is a no-op there.
+    /// Returns the ids reattached. The tab name defaults to the id (names were console-side and don't
+    /// survive the restart; the scrollback + live I/O do, which is the point).
+    pub fn reattach_running_sessions(self: &Arc<Self>) {
+        for id in self.engine.reattachable() {
+            if self.sessions.lock().unwrap().contains_key(&id) {
+                continue;
+            }
+            if let Some(io) = self.engine.attach(&id) {
+                let name = format!("Session {id}");
+                self.adopt_session(id, io, name, String::new(), String::new(), Vec::new(), None);
+            }
         }
     }
 
@@ -392,98 +419,29 @@ impl ConsoleState {
         };
         let dangerous = scope::dangerous_flags(&launch.args);
 
-        let session = match PtySession::spawn(&launch) {
-            Ok(s) => s,
-            Err(e) => return bad(e),
-        };
-        let reader = match session.reader() {
-            Ok(r) => r,
-            Err(e) => return bad(e),
-        };
-        let writer = match session.writer() {
-            Ok(w) => w,
-            Err(e) => return bad(e),
-        };
-
         let id = self.next_id();
-        // Announcements for the explorer's Agent Watch (CPE-396): built here where the identity is
-        // known; "started" is emitted below once the session is live, "ended" from the reader
-        // thread when the agent's PTY closes.
+        // The session's PTY now lives wherever the engine puts it (in-process or the daemon, CPE-309).
+        let io = match self.engine.launch(&id, &launch) {
+            Ok(io) => io,
+            Err(e) => return bad(e),
+        };
+        // Agent Watch announcements (CPE-396): "started" once live (below); "ended" is emitted from the
+        // reader pipeline when the session's output stream closes.
         let started_payload = session_payload("started", &id, &agent.name, &meta);
         let ended_payload = session_payload("ended", &id, &agent.name, &meta);
-        let ring: Arc<Mutex<Vec<u8>>> = Arc::new(Mutex::new(Vec::new()));
-        let live: Arc<Mutex<Option<mpsc::Sender<Vec<u8>>>>> = Arc::new(Mutex::new(None));
-        let usage: Arc<Mutex<crate::usage::Usage>> = Arc::new(Mutex::new(crate::usage::Usage::default()));
-        {
-            let ring = Arc::clone(&ring);
-            let live = Arc::clone(&live);
-            let usage = Arc::clone(&usage);
-            // On EOF (agent exited) record the session to history so its transcript survives a
-            // restart (CPE-370). Best-effort — a storage error just drops the record.
-            let history = Arc::clone(&self.history);
-            let record_id = id.clone();
-            let secrets = injected_secrets;
-            let announce = Arc::clone(&self.announce);
-            // Agent Watch reads (CPE-405): tap the same output for `Read(path)` tool calls the agent
-            // prints, and announce each as an `fs-read:<json>` — read-only, it never alters the
-            // stream. Paths are resolved against the session's Project folder (cwd) so they match the
-            // absolute paths the FS watcher emits (CPE-398).
-            let read_cwd = meta.cwd.clone();
-            thread::spawn(move || {
-                let mut reader = reader;
-                let mut buf = [0u8; 8192];
-                let mut reads = crate::agent_reads::ReadScanner::new();
-                let mut usage_scan = crate::usage::UsageScanner::new();
-                loop {
-                    match reader.read(&mut buf) {
-                        Ok(0) | Err(_) => break,
-                        Ok(n) => {
-                            let chunk = &buf[..n];
-                            {
-                                let mut r = ring.lock().unwrap();
-                                r.extend_from_slice(chunk);
-                                let over = r.len().saturating_sub(RING_CAP);
-                                if over > 0 {
-                                    r.drain(0..over);
-                                }
-                            }
-                            // Push live to the attached terminal, if any (drop on send error).
-                            if let Some(tx) = live.lock().unwrap().as_ref() {
-                                let _ = tx.send(chunk.to_vec());
-                            }
-                            let text = String::from_utf8_lossy(chunk);
-                            // Surface any file the agent reported reading (CPE-405).
-                            for raw in reads.feed(&text) {
-                                announce(read_announcement(&read_cwd, &raw));
-                            }
-                            // Fold provider-reported token/cost usage for this session (CPE-311).
-                            let latest = usage_scan.feed(&text);
-                            *usage.lock().unwrap() = latest;
-                        }
-                    }
-                }
-                let transcript = String::from_utf8_lossy(&ring.lock().unwrap()).into_owned();
-                record_session_end(&*history, &meta, &record_id, transcript, &secrets);
-                announce(ended_payload); // tell the explorer this session is gone (CPE-396)
-            });
-        }
-
         // Tab label for reattach (CPE-461): the launcher sends `tabName` (agent · provider · model);
         // fall back to the agent name so a session always has a label.
         let tab_name = str_opt(&v, "tabName").unwrap_or_else(|| agent.name.clone());
-        self.sessions.lock().unwrap().insert(
+        self.adopt_session(
             id.clone(),
-            Arc::new(Session {
-                pty: Mutex::new(session),
-                writer: Mutex::new(writer),
-                ring,
-                live,
-                name: tab_name,
-                usage,
-                agent: agent_id.to_string(),
-                provider: provider.clone(),
-            }),
+            io,
+            tab_name,
+            agent_id.to_string(),
+            provider.clone(),
+            injected_secrets,
+            Some((meta, ended_payload)),
         );
+
         // Remember this selection for the agent so it's restored on next open (CPE-352).
         // Only the choice is stored (provider/model), never a key value.
         let mut store = self.presets.load();
@@ -504,15 +462,87 @@ impl ConsoleState {
         Response::json(json!({ "session": id, "dangerousFlags": dangerous }).to_string())
     }
 
+    /// Wire a session's I/O into the console: spawn the reader pipeline that fans the engine's output
+    /// channel into the replay ring + the live WebSocket, taps reads (CPE-405) + usage (CPE-311), and
+    /// on stream-close records history + announces "ended"; then insert the `Session`. Shared by a
+    /// fresh `handle_launch` and boot-time `reattach_running_sessions` (CPE-309). `end` is
+    /// `Some((meta, ended_payload))` for a launch (full history record) or `None` for a reattached
+    /// session (identity was console-side and didn't survive the restart — a minimal `ended` announce
+    /// is emitted by id instead).
+    #[allow(clippy::too_many_arguments)]
+    fn adopt_session(
+        &self,
+        id: String,
+        io: Arc<dyn crate::session_engine::SessionIo>,
+        name: String,
+        agent: String,
+        provider: String,
+        injected_secrets: Vec<String>,
+        end: Option<(SessionMeta, String)>,
+    ) {
+        let ring: Arc<Mutex<Vec<u8>>> = Arc::new(Mutex::new(Vec::new()));
+        let live: Arc<Mutex<Option<mpsc::Sender<Vec<u8>>>>> = Arc::new(Mutex::new(None));
+        let usage: Arc<Mutex<crate::usage::Usage>> = Arc::new(Mutex::new(crate::usage::Usage::default()));
+        let out = io.take_output();
+        {
+            let ring = Arc::clone(&ring);
+            let live = Arc::clone(&live);
+            let usage = Arc::clone(&usage);
+            let history = Arc::clone(&self.history);
+            let announce = Arc::clone(&self.announce);
+            let record_id = id.clone();
+            let read_cwd = end.as_ref().map(|(m, _)| m.cwd.clone()).unwrap_or_default();
+            thread::spawn(move || {
+                let Some(rx) = out else { return };
+                let mut reads = crate::agent_reads::ReadScanner::new();
+                let mut usage_scan = crate::usage::UsageScanner::new();
+                while let Ok(chunk) = rx.recv() {
+                    {
+                        let mut r = ring.lock().unwrap();
+                        r.extend_from_slice(&chunk);
+                        let over = r.len().saturating_sub(RING_CAP);
+                        if over > 0 {
+                            r.drain(0..over);
+                        }
+                    }
+                    // Push live to the attached terminal, if any (drop on send error).
+                    if let Some(tx) = live.lock().unwrap().as_ref() {
+                        let _ = tx.send(chunk.clone());
+                    }
+                    let text = String::from_utf8_lossy(&chunk);
+                    // Surface any file the agent reported reading (CPE-405).
+                    for raw in reads.feed(&text) {
+                        announce(read_announcement(&read_cwd, &raw));
+                    }
+                    // Fold provider-reported token/cost usage for this session (CPE-311).
+                    *usage.lock().unwrap() = usage_scan.feed(&text);
+                }
+                // Stream closed → the agent exited (or the daemon connection dropped).
+                match end {
+                    Some((meta, ended_payload)) => {
+                        let transcript = String::from_utf8_lossy(&ring.lock().unwrap()).into_owned();
+                        record_session_end(&*history, &meta, &record_id, transcript, &injected_secrets);
+                        announce(ended_payload); // tell the explorer this session is gone (CPE-396)
+                    }
+                    None => announce(format!(r#"{{"event":"ended","sessionId":"{record_id}"}}"#)),
+                }
+            });
+        }
+        self.sessions.lock().unwrap().insert(
+            id,
+            Arc::new(Session { io, ring, live, name, usage, agent, provider }),
+        );
+    }
+
     /// Close one session: remove it from the live set and kill its agent PTY. Killing the child
-    /// drives the session's reader thread to EOF, which runs the normal end path (history record +
+    /// drives the session's reader pipeline to EOF, which runs the normal end path (history record +
     /// the `ended` announce for Agent Watch), so no separate teardown bookkeeping is needed. Returns
     /// whether a session by that id was present. Idempotent: closing an unknown id is a no-op.
     fn close_session(&self, id: &str) -> bool {
         let removed = self.sessions.lock().unwrap().remove(id);
         match removed {
             Some(s) => {
-                let _ = s.pty.lock().unwrap().kill();
+                let _ = s.io.kill();
                 // Announce the end immediately so the explorer's Agents leaf disappears now, rather
                 // than waiting for the reader thread's EOF (which a Windows ConPTY may withhold).
                 self.announce_ended(id);
@@ -536,7 +566,7 @@ impl ConsoleState {
         let drained: Vec<(String, Arc<Session>)> = self.sessions.lock().unwrap().drain().collect();
         let mut ids: Vec<String> = Vec::with_capacity(drained.len());
         for (id, s) in drained {
-            let _ = s.pty.lock().unwrap().kill();
+            let _ = s.io.kill();
             self.announce_ended(&id); // remove each Agents leaf immediately (CPE-397)
             ids.push(id);
         }
@@ -597,10 +627,14 @@ impl ConsoleState {
         let v: Value = serde_json::from_str(body).unwrap_or_else(|_| json!({}));
         let rows = v["rows"].as_u64().unwrap_or(30) as u16;
         let cols = v["cols"].as_u64().unwrap_or(100) as u16;
-        let sessions = self.sessions.lock().unwrap();
-        let Some(sess) = sessions.get(&id) else { return bad("no such session") };
-        let result = sess.pty.lock().unwrap().resize(rows, cols);
-        match result {
+        let sess = {
+            let sessions = self.sessions.lock().unwrap();
+            match sessions.get(&id) {
+                Some(s) => Arc::clone(s),
+                None => return bad("no such session"),
+            }
+        };
+        match sess.io.resize(rows, cols) {
             Ok(()) => Response::json("{\"ok\":true}"),
             Err(e) => bad(e),
         }
@@ -1236,10 +1270,7 @@ pub fn ws_route(state: &ConsoleState, req: &Request, stream: TcpStream) {
     while let Ok(Some(frame)) = http::ws_read_frame(&mut read_stream) {
         match frame.opcode {
             ws_op::TEXT | ws_op::BINARY => {
-                if let Ok(mut w) = sess.writer.lock() {
-                    let _ = w.write_all(&frame.payload);
-                    let _ = w.flush();
-                }
+                let _ = sess.io.write(&frame.payload);
             }
             ws_op::PING => {
                 let mut w = write_stream.lock().unwrap();

@@ -63,6 +63,8 @@ pub mod scope;
 pub mod session_daemon;
 pub use session_daemon::{Attachment, SessionDaemon};
 pub mod session_client;
+pub mod session_engine;
+pub use session_engine::{DaemonEngine, LocalEngine, SessionEngine, SessionIo};
 pub mod session_server;
 pub mod session_supervisor;
 pub use session_client::{SessionClient, StreamMsg};
