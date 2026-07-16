@@ -64,6 +64,7 @@ pub mod session_daemon;
 pub use session_daemon::{Attachment, SessionDaemon};
 pub mod session_client;
 pub mod session_server;
+pub mod session_supervisor;
 pub use session_client::{SessionClient, StreamMsg};
 
 pub use plugins::{install_plugin, uninstall_plugin, PluginApplier, PluginManifest, PluginRegistry};

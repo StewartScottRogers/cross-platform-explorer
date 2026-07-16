@@ -5,7 +5,7 @@ type: Feature
 status: Open
 priority: Medium
 component: Backend
-tags: [big-design]
+tags: [ready]
 estimate: 3-4h
 created: 2026-07-13
 ---
@@ -115,3 +115,10 @@ is invasive because it also entangles **history recording (CPE-370)** and the **
 only pays off once the daemon is a **supervised separate process (S4)** — so S3-completion + S4 are
 coupled and best done together, carefully, against the working 147-test session subsystem. Deferred
 as the final slice rather than rushed. Foundation (engine + server + client, all tested) is in place.
+
+## Design decided + first slice landed 2026-07-15 (dayshift)
+**Design call made** (`docs/design/CPE-309-session-reattach.md`): PTY ownership moves out of the console UI process into the long-lived `--session-daemon` process; the console becomes a `SessionClient` of it, routes all session ops through it, and on restart reconnects + `list`s + reattaches (the daemon replays each ring). The daemon-owns-PTYs model sidesteps Windows ConPTY re-parenting (the daemon never dies on a console restart).
+
+**Built + tested (engine/transport):** `SessionDaemon`, `session_server`, `SessionClient`, the `--session-daemon` process mode — all unit-tested. **New this slice:** `session_supervisor::SessionDaemonHandle` — spawns/owns the daemon child, reads its `PORT`, hands out clients, reaps on drop; an integration test spawns the REAL process, connects a client, lists, and reaps.
+
+**Remaining (kept open, now `ready`):** route `ConsoleState`'s `handle_launch`/`ws_route`/input/resize/close_*/`/api/sessions` through the `SessionClient` instead of owning in-process `PtySession`s; reattach on console boot; supervise+restart. **Verification is a multi-process runtime test** (launch → kill the console, not the daemon → new console reattaches with scrollback) — the honest gate before closing.
