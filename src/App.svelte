@@ -194,6 +194,33 @@
   let patternSelectOpen = false;
   /** Repositories browser overlay (CPE-434/435) — browse GitHub & other forges in-app. */
   let showRepos = false;
+  /** Git sync status of the current folder (CPE-462) — two-way mirror status bar. Null when the
+      folder isn't a git repo, or in the plain (non-sidecar) build where the command is absent. */
+  let gitStatus: { is_repo?: boolean; branch?: string; ahead?: number; behind?: number; dirty?: boolean } | null = null;
+
+  /** Refresh the git sync status when the folder changes (read-only, best-effort). */
+  async function refreshGitStatus(path: string) {
+    if (!path || isHome || archive) { gitStatus = null; return; }
+    try {
+      const s = await invoke<typeof gitStatus>("forge_repo_status", { path });
+      gitStatus = s && (s as { is_repo?: boolean }).is_repo ? s : null;
+    } catch {
+      gitStatus = null; // plain build (command absent) or git unavailable
+    }
+  }
+  $: refreshGitStatus(currentPath);
+
+  /** Run a safe sync step (Pull = ff-only, Push = no-force) via the host, then re-list (CPE-462). */
+  async function doSync(action: "pull" | "push") {
+    try {
+      await invoke("forge_sync", { path: currentPath, action });
+      await refreshGitStatus(currentPath);
+      refresh();
+    } catch (e) {
+      notice = "Sync failed: " + (e instanceof Error ? e.message : String(e));
+      noticeIsError = true;
+    }
+  }
   /** Right-click "close the AI Console" menu (CPE-457), shown from an Agents leaf or the AI
       Console button. `label` differs per source; confirming stops the console + clears the leaves. */
   let agentMenu: { x: number; y: number; label: string } | null = null;
@@ -2194,6 +2221,9 @@
   {noticeIsError}
   {diskFree}
   {diskTotal}
+  git={gitStatus}
+  on:pull={() => doSync("pull")}
+  on:push={() => doSync("push")}
 />
 
 {#if ctx}

@@ -1,5 +1,11 @@
 <script lang="ts">
+  import { createEventDispatcher } from "svelte";
   import { formatSize, formatDiskFree } from "../format";
+
+  /** Git sync status of the current folder (CPE-462), or null when it isn't a repo. Shape mirrors
+      the host `forge_repo_status` command: { is_repo, branch, upstream, ahead, behind, dirty, ... }. */
+  export let git: { is_repo?: boolean; branch?: string; upstream?: string; ahead?: number; behind?: number; dirty?: boolean } | null = null;
+  const dispatch = createEventDispatcher<{ pull: void; push: void }>();
 
   export let itemCount = 0;
   /** The folder's total item count before filtering; when it exceeds itemCount the status
@@ -43,6 +49,17 @@
     <span class:error={noticeIsError}>{notice}</span>
   {/if}
 
+  {#if git && git.is_repo}
+    <span class="git" title={git.upstream ? `Tracking ${git.upstream}` : "No upstream branch"}>
+      <span class="git-branch">⎇ {git.branch || "detached"}</span>
+      {#if git.behind}<span class="git-ct" title="{git.behind} behind">↓{git.behind}</span>{/if}
+      {#if git.ahead}<span class="git-ct" title="{git.ahead} ahead">↑{git.ahead}</span>{/if}
+      {#if git.dirty}<span class="git-dirty" title="Uncommitted changes">●</span>{/if}
+      {#if git.behind}<button class="git-btn" on:click={() => dispatch("pull")} title="Fast-forward pull from the remote">Pull</button>{/if}
+      {#if git.ahead}<button class="git-btn" on:click={() => dispatch("push")} title="Push local commits to the remote">Push</button>{/if}
+    </span>
+  {/if}
+
   {#if diskLabel}
     <span class="dim disk" title="Free space on this drive">{diskLabel}</span>
   {/if}
@@ -50,6 +67,13 @@
 
 <style>
   .dim { color: var(--text-faint); }
-  /* Free space sits at the far right, away from the item/selection counts. */
-  .disk { margin-left: auto; }
+  /* Git sync + free space sit at the far right, away from the item/selection counts. */
+  .git { display: flex; align-items: center; gap: 6px; margin-left: auto; }
+  .git-branch { opacity: 0.85; }
+  .git-ct { font-variant-numeric: tabular-nums; opacity: 0.8; }
+  .git-dirty { color: #b5872b; }
+  .git-btn { font-size: 11px; padding: 1px 7px; cursor: pointer; border: 1px solid var(--border-strong, #555);
+             background: transparent; color: inherit; border-radius: 4px; }
+  .git-btn:hover { background: var(--selection, rgba(128,128,128,0.2)); }
+  .disk { margin-left: 12px; }
 </style>
