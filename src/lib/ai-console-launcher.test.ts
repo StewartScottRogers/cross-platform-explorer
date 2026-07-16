@@ -384,15 +384,28 @@ describe("AI Console launcher — Model picker combobox (CPE-454/460)", () => {
     let opts = [...w.document.querySelectorAll(".model-opt")].map((e: any) => e.textContent);
     expect(opts.length).toBe(2);
     expect(opts.join(" ")).toMatch(/GPT-4o/);
-    // Type-to-filter narrows the list.
-    w.document.getElementById("model").value = "gpt";
-    w.renderModelMenu();
+    // Type-to-filter narrows the list — the `input` event drives the filter (CPE-465).
+    const modelInput = w.document.getElementById("model");
+    modelInput.value = "gpt";
+    modelInput.dispatchEvent(new w.Event("input"));
     const rows = [...w.document.querySelectorAll(".model-opt")];
     expect(rows.length).toBe(1);
     // Picking fills the field and closes the menu.
     rows[0].dispatchEvent(new w.MouseEvent("mousedown"));
     expect(w.document.getElementById("model").value).toBe("openai/gpt-4o");
     expect(w.document.getElementById("model-menu").hidden).toBe(true);
+  });
+
+  it("opening the menu shows the FULL list even when the field holds a committed model id (CPE-465)", async () => {
+    // The reported bug: after applyLastUsed pre-fills the field with a full model id, opening the
+    // menu filtered the list down to that single exact match — "only one model for openrouter".
+    const { w } = await mountLauncher((path) => (path.startsWith("/api/models") ? catalog : {}));
+    await w.populateModels();
+    // Simulate a returning user whose field already carries a committed selection.
+    w.document.getElementById("model").value = "openai/gpt-4o";
+    w.openModelMenu();
+    const rows = [...w.document.querySelectorAll(".model-opt")];
+    expect(rows.length).toBe(2); // full list, NOT filtered to the one committed id
   });
 
   it("re-populates when the provider changes, and stays editable/custom-capable", async () => {
@@ -420,5 +433,25 @@ describe("AI Console launcher — Model picker combobox (CPE-454/460)", () => {
     expect(msg?.textContent).toMatch(/Couldn't load models/i);
     expect(msg?.querySelector("button")?.textContent).toMatch(/Refresh/i);
     expect(w.document.getElementById("model").disabled).toBeFalsy(); // still editable
+  });
+});
+
+describe("AI Console launcher — session tabs match the main window (CPE-466)", () => {
+  // The main explorer tab bar (src/app.css .tab) is a rounded-top raised "folder" tab: 34px tall,
+  // 6px top-corner radius, and the active tab lifted onto the page background with a 3-sided border
+  // box-shadow. The console tabs must adopt the same treatment (using system colors).
+  it("uses the raised rounded-top tab shape, not the old flat underline style", () => {
+    expect(HTML).toMatch(/\.tab\s*\{[^}]*height:\s*34px/);
+    expect(HTML).toMatch(/\.tab\s*\{[^}]*border-radius:\s*6px 6px 0 0/);
+  });
+
+  it("lifts the active tab onto the page background with a 3-sided border, like the main window", () => {
+    expect(HTML).toMatch(/\.tab\.active\s*\{[^}]*background:\s*Canvas/);
+    expect(HTML).toMatch(/\.tab\.active\s*\{[^}]*box-shadow:[^}]*var\(--line\)/);
+  });
+
+  it("close (×) hover is a neutral grey affordance, not a hardcoded red", () => {
+    expect(HTML).toMatch(/\.tab-close\s*\{[^}]*border-radius:\s*4px/);
+    expect(HTML).not.toMatch(/\.tab-close:hover\s*\{[^}]*#d05656/);
   });
 });

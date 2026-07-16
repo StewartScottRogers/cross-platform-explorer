@@ -39,18 +39,24 @@
   .badge.yes { background: #3a9d4a; color: #fff; }
   #msg { padding: 6px 16px; font-size: 12px; min-height: 20px; border-bottom: 1px solid var(--line);
          opacity: .85; }
-  /* Session tabs — one agent per tab (CPE-336) */
-  #tabs { display: flex; gap: 2px; padding: 0 10px; overflow-x: auto;
-          background: rgba(128,128,128,0.07); border-bottom: 1px solid var(--line); }
+  /* Session tabs — one agent per tab (CPE-336). Styled to match the main explorer window's tab bar
+     (src/app.css .tabbar/.tab): rounded-top raised "folder" tabs, the active one lifted onto the
+     page background with a 3-sided border, a neutral grey close-hover — using system colors so it
+     stays legible on the light theme (CPE-466). */
+  #tabs { display: flex; align-items: center; gap: 2px; padding: 6px 8px 0; overflow-x: auto;
+          background: rgba(128,128,128,0.10); }
   #tabs:empty { display: none; }
-  .tab { display: flex; align-items: center; gap: 8px; padding: 7px 10px; font-size: 12px;
-         cursor: pointer; border-top: 2px solid transparent; opacity: .62; white-space: nowrap; max-width: 240px; }
-  .tab.active { opacity: 1; border-top-color: var(--accent); background: rgba(128,128,128,0.09); }
+  .tab { display: flex; align-items: center; gap: 8px; height: 34px; padding: 0 8px 0 12px;
+         font-size: 12px; cursor: pointer; border-radius: 6px 6px 0 0; color: CanvasText;
+         opacity: .62; white-space: nowrap; max-width: 240px; min-width: 120px; }
+  .tab.active { opacity: 1; background: Canvas;
+                box-shadow: 0 -1px 0 var(--line), 1px 0 0 var(--line), -1px 0 0 var(--line); }
   .tab.ended .tab-label { text-decoration: line-through; opacity: .6; }
-  .tab-label { overflow: hidden; text-overflow: ellipsis; }
-  .tab-close { border: 0; background: transparent; color: inherit; cursor: pointer;
-               font-size: 15px; line-height: 1; padding: 0 2px; opacity: .55; }
-  .tab-close:hover { color: #d05656; opacity: 1; }
+  .tab-label { flex: 1; text-align: left; overflow: hidden; text-overflow: ellipsis; }
+  .tab-close { width: 20px; height: 20px; display: grid; place-items: center; border: 0;
+               background: transparent; color: inherit; cursor: pointer; border-radius: 4px;
+               flex: none; opacity: .7; font-size: 14px; line-height: 1; }
+  .tab-close:hover { background: rgba(128,128,128,0.28); opacity: 1; }
   /* "Close all" pinned to the end of the tab strip; only present while sessions exist (CPE-442). */
   .close-all-btn { margin-left: auto; align-self: center; border: 1px solid var(--line);
                    background: transparent; color: inherit; cursor: pointer; font-size: 11px;
@@ -1066,6 +1072,10 @@ $("history-overlay").addEventListener("click", (e) => { if (e.target === $("hist
 // signed GitHub snapshot once CPE-450/451 land). Never a dead end — the field stays free-text.
 let modelOptions = [];
 let modelsState = "idle"; // idle | loading | ready | error
+// The field doubles as selected-model display AND filter input. `modelQuery` is the filter, set ONLY
+// while the user types; opening the menu resets it to "" so the full list shows even when the field
+// already holds a committed model id (CPE-465 — a full id would otherwise match exactly one row).
+let modelQuery = "";
 
 async function populateModels() {
   const reseller = ($("provider").value || "").trim() || "openrouter";
@@ -1099,7 +1109,7 @@ function renderModelMenu() {
     b.onclick = (e) => { e.stopPropagation(); populateModels(); };
     d.appendChild(span); d.appendChild(b); menu.appendChild(d); return;
   }
-  const q = ($("model").value || "").toLowerCase();
+  const q = (modelQuery || "").toLowerCase();
   const rows = modelOptions.filter((m) =>
     !q || (m.id && m.id.toLowerCase().includes(q)) || (m.display_name && m.display_name.toLowerCase().includes(q))
   ).slice(0, 500);
@@ -1114,12 +1124,14 @@ function renderModelMenu() {
     const sub = modelSubLabel(m);
     if (sub) { const s = document.createElement("span"); s.className = "mo-sub"; s.textContent = sub; opt.appendChild(s); }
     // mousedown + preventDefault: select before the input blurs (which would close the menu first).
-    opt.onmousedown = (e) => { e.preventDefault(); $("model").value = m.id; closeModelMenu(); };
+    opt.onmousedown = (e) => { e.preventDefault(); $("model").value = m.id; modelQuery = ""; closeModelMenu(); };
     menu.appendChild(opt);
   }
 }
 
-function openModelMenu() { $("model-menu").hidden = false; renderModelMenu(); }
+// Opening shows the FULL list: reset the filter so a committed model id in the field doesn't
+// narrow the menu to its single exact match (CPE-465).
+function openModelMenu() { modelQuery = ""; $("model-menu").hidden = false; renderModelMenu(); }
 function closeModelMenu() { $("model-menu").hidden = true; }
 function toggleModelMenu() { if ($("model-menu").hidden) { openModelMenu(); $("model").focus(); } else closeModelMenu(); }
 
@@ -1134,7 +1146,9 @@ $("provider").addEventListener("change", () => { renderCredentials(); checkLaunc
 // Model picker combobox wiring (CPE-460).
 $("model-toggle").addEventListener("click", (e) => { e.stopPropagation(); toggleModelMenu(); });
 $("model").addEventListener("focus", openModelMenu);
-$("model").addEventListener("input", () => { if ($("model-menu").hidden) openModelMenu(); else renderModelMenu(); });
+// Typing is what sets the filter (CPE-465): the field's current text becomes the query, then the
+// menu (opened if needed) re-renders against it.
+$("model").addEventListener("input", () => { if ($("model-menu").hidden) $("model-menu").hidden = false; modelQuery = $("model").value || ""; renderModelMenu(); });
 document.addEventListener("click", (e) => { if (!e.target.closest(".model-combo")) closeModelMenu(); });
 $("apiKey").addEventListener("input", checkLaunchReady);
 $("preset").addEventListener("change", applyPreset);
