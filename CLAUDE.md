@@ -94,6 +94,7 @@ directory). That starts a Claude Code session scoped to this repo with the slash
 | `/ticketing-new` | File a ticket interactively (auto-intercepts units of work; routes epics to the Epics queue) |
 | `/ticketing-work CPE-NNN` | Pick up and work a ticket through to Done (redirects epics to `/ticketing-epic`) |
 | `/ticketing-epic` | Manage epics — `list` / `activate CPE-NNN` / `close CPE-NNN`; decomposes an epic just-in-time |
+| `/ticketing-sprint` | Manage sprints (time-boxed ticket batches) — `list` / `new` / `activate` / `close` / `assign CPE-NNN` |
 | `/ticketing-organize` | Reorganise `Done/` when it grows large |
 | `/ticketing-setup` | (Re)bootstrap the ticket system |
 | `/skills-organise` | Manage the slash commands as named feature sets |
@@ -147,6 +148,7 @@ Tickets live in `Tickets/`. Folder location is the authoritative status:
 | Folder | Status |
 |--------|--------|
 | `Tickets/Epics/`   | Umbrella trackers — a **separate queue**, decomposed just-in-time (`Proposed` = dormant brief, `In Progress` = activated) |
+| `Tickets/Sprints/` | Time-boxed ticket batches — a **separate queue** (`SPR-NN`; `Planned` / `Active` / `Closed`); orthogonal to epics, managed via `/ticketing-sprint` |
 | `Tickets/Backlog/` | Open â€” ready to work |
 | `Tickets/Doing/`   | In Progress â€” one at a time |
 | `Tickets/Blocked/` | Deferred on an **external** gate — not workable until it clears |
@@ -160,10 +162,12 @@ interactively: `/ticketing-new`. See `Tickets/wiki.md` for full workflow rules.
 sub-ticketed until *activated* with `/ticketing-epic activate CPE-NNN`. A dormant epic is just a brief;
 `/ticketing-work` never builds one directly. See `Tickets/wiki.md` → "Epics" and the `ticketing-epic` skill.
 
-### Showing open tickets â€” ALWAYS include Blocked and Deferred
+### Showing open tickets â€” ALWAYS include Blocked, Deferred, Epics, and Sprints
 
 When the user asks to see "open tickets", "the tickets", "tasks", or "all tickets", ALWAYS show the
-Backlog table **plus** the Blocked and Deferred tables — never just the Backlog:
+Backlog table **plus** the Blocked, Deferred, **Epics**, and **Sprints** tables — never just the
+Backlog. (User preference, stated 2026-07-16: ticket listings must always surface **epics and
+sprints**.):
 
 1. **Open** â€” all `Tickets/Backlog/CPE-*.md`, as a table of ID, title, type, priority, tags, estimate.
    `tags` is the ticket's disposition (`ready`, `big-design`, `resource-blocked` + qualifier, etc.);
@@ -176,7 +180,13 @@ Backlog table **plus** the Blocked and Deferred tables — never just the Backlo
 4. **Epics** — all `Tickets/Epics/CPE-*.md`, as a table of ID, title, status (`Proposed`/`In Progress`),
    tags, and a one-line goal (plus `X of Y children Done` for an activated epic). This is the separate
    epic queue; epics are decomposed via `/ticketing-epic`, not worked by `/ticketing-work`.
+5. **Sprints** — all `Tickets/Sprints/SPR-*.md`, **Active first then Planned**, as a table of ID, title,
+   status (`Active`/`Planned`), window (`start â†’ end`), a one-line goal, and progress (`X of Y tickets
+   Done`, counting tickets whose `sprint:` frontmatter names it). This is the separate, time-boxed sprint
+   queue; sprints are managed via `/ticketing-sprint`, not worked directly. Orthogonal to epics — a
+   ticket can appear in both.
 
-Blocked, Deferred, and Epic tickets are all outstanding work, so omitting them misrepresents the queue.
-If a section is empty, say "none blocked" / "none deferred" / "no epics" rather than dropping it. Also
-surface anything sitting in `Tickets/Doing/` so stalled work-in-progress is never silently lost.
+Blocked, Deferred, Epic, and Sprint tickets are all outstanding work, so omitting them misrepresents the
+queue. If a section is empty, say "none blocked" / "none deferred" / "no epics" / "no sprints" rather
+than dropping it. Also surface anything sitting in `Tickets/Doing/` so stalled work-in-progress is never
+silently lost.

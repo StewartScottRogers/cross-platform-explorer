@@ -16,6 +16,7 @@ Tickets/
   wiki.md        <- workflow rules (you are here)
   _template.md   <- copy to Backlog/ to start a new ticket
   Epics/         <- umbrella trackers, decomposed just-in-time (SEPARATE queue — see "Epics" below)
+  Sprints/       <- time-boxed batches of tickets (SEPARATE queue — see "Sprints" below)
   Backlog/       <- open tickets waiting to be worked
   Doing/         <- ticket the agent is currently working (one at a time)
   Blocked/       <- tickets deferred on an EXTERNAL gate (can't be worked until it clears)
@@ -31,6 +32,9 @@ The folder a ticket lives in IS its status. The `status:` frontmatter field mirr
 
 Format: `CPE-NNN` (zero-padded three digits — `CPE-001`, `CPE-042`, `CPE-100`).
 Sequential. To find the next ID: scan all folders for `CPE-*.md`, read the highest NNN, add 1.
+
+**Sprints use a separate sequence:** `SPR-NN` (zero-padded two digits — `SPR-01`, `SPR-02`). Scan
+`Tickets/**/SPR-*.md` for the highest NN, add 1. Sprints never take a `CPE` id.
 
 ## File Naming
 
@@ -53,6 +57,7 @@ estimate: 15m | 30m | 1h | 1-2h | 2-3h | 3-4h | 4h+
 created: YYYY-MM-DD
 closed: YYYY-MM-DD
 epic: CPE-NNN                     # optional — present on a child ticket, naming its parent epic
+sprint: SPR-NN                    # optional — present when the ticket is assigned to a sprint
 ---
 ```
 
@@ -167,6 +172,34 @@ Lifecycle:
   `ticketing-epic activate`). Only an epic's *children* are worked, as ordinary Backlog tickets.
 - Every child carries an `epic: CPE-NNN` frontmatter field so progress is countable and the epic
   closes exactly when its children (and DoD) do.
+
+---
+
+## Sprints (a separate queue, time-boxed)
+
+A **sprint** is a **named, time-boxed batch of tickets** worked together toward a near-term goal — the
+"what are we doing now/next" grouping. Sprints are managed by the **`ticketing-sprint`** skill and live
+in **`Tickets/Sprints/`**, ids **`SPR-NN`** (a separate sequence from `CPE-NNN`).
+
+Sprints are **orthogonal to epics**: an epic is a *thematic* umbrella; a sprint is a *time-boxed*
+selection that can pull tickets from **any** epic or none. A ticket may belong to both at once — it can
+carry an `epic:` **and** a `sprint:` field.
+
+Lifecycle:
+
+| Stage | Folder / status | What exists |
+|-------|-----------------|-------------|
+| **Planned** | `Sprints/`, `status: Planned` | A named, dated sprint queued behind the current one. |
+| **Active** | `Sprints/`, `status: Active` | The current focus (convention: one Active at a time). |
+| **Closed** | `Done/`, `status: Closed` | Time-box ended / all members Done; carry-overs documented. |
+
+- **Membership is the `sprint: SPR-NN` frontmatter field** on member tickets — authoritative and
+  countable (glob tickets whose `sprint:` names the sprint to get `X of Y Done`). The sprint file's
+  `## Tickets` list mirrors it; keep them in step on `assign`/`remove`.
+- A sprint **never works tickets itself** — its members are ordinary tickets worked via
+  `/ticketing-work`; the sprint is a lens over them.
+- **When listing tickets, ALWAYS show Sprints alongside Epics** (user preference) — see
+  `ticketing-list`.
 
 ---
 
