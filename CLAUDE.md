@@ -78,8 +78,9 @@ directory). That starts a Claude Code session scoped to this repo with the slash
 | Command | Purpose |
 |---------|---------|
 | `/ticketing-list` | List the open ticket queue with an action menu |
-| `/ticketing-new` | File a ticket interactively (auto-intercepts units of work) |
-| `/ticketing-work CPE-NNN` | Pick up and work a ticket through to Done |
+| `/ticketing-new` | File a ticket interactively (auto-intercepts units of work; routes epics to the Epics queue) |
+| `/ticketing-work CPE-NNN` | Pick up and work a ticket through to Done (redirects epics to `/ticketing-epic`) |
+| `/ticketing-epic` | Manage epics — `list` / `activate CPE-NNN` / `close CPE-NNN`; decomposes an epic just-in-time |
 | `/ticketing-organize` | Reorganise `Done/` when it grows large |
 | `/ticketing-setup` | (Re)bootstrap the ticket system |
 | `/skills-organise` | Manage the slash commands as named feature sets |
@@ -132,6 +133,7 @@ Tickets live in `Tickets/`. Folder location is the authoritative status:
 
 | Folder | Status |
 |--------|--------|
+| `Tickets/Epics/`   | Umbrella trackers — a **separate queue**, decomposed just-in-time (`Proposed` = dormant brief, `In Progress` = activated) |
 | `Tickets/Backlog/` | Open â€” ready to work |
 | `Tickets/Doing/`   | In Progress â€” one at a time |
 | `Tickets/Blocked/` | Deferred on an **external** gate — not workable until it clears |
@@ -140,6 +142,10 @@ Tickets live in `Tickets/`. Folder location is the authoritative status:
 
 IDs are sequential: `CPE-NNN`. To work a ticket: `/ticketing-work CPE-NNN`. To file one
 interactively: `/ticketing-new`. See `Tickets/wiki.md` for full workflow rules.
+
+**Epics** are handled specially: they live in `Tickets/Epics/` and are **not** researched, planned, or
+sub-ticketed until *activated* with `/ticketing-epic activate CPE-NNN`. A dormant epic is just a brief;
+`/ticketing-work` never builds one directly. See `Tickets/wiki.md` → "Epics" and the `ticketing-epic` skill.
 
 ### Showing open tickets â€” ALWAYS include Blocked and Deferred
 
@@ -154,7 +160,10 @@ Backlog table **plus** the Blocked and Deferred tables — never just the Backlo
 3. **Deferred** — all `Tickets/Deferred/CPE-*.md`, as a table of ID, title, tags, and a one-line
    *deferred-on / revisit-when* note. These are postponed by our choice (often an internal prereq),
    not externally gated, so they remain pickable.
+4. **Epics** — all `Tickets/Epics/CPE-*.md`, as a table of ID, title, status (`Proposed`/`In Progress`),
+   tags, and a one-line goal (plus `X of Y children Done` for an activated epic). This is the separate
+   epic queue; epics are decomposed via `/ticketing-epic`, not worked by `/ticketing-work`.
 
-Blocked and Deferred tickets are outstanding work, so omitting them misrepresents the queue. If a
-section is empty, say "none blocked" / "none deferred" rather than dropping it. Also surface anything
-sitting in `Tickets/Doing/` so stalled work-in-progress is never silently lost.
+Blocked, Deferred, and Epic tickets are all outstanding work, so omitting them misrepresents the queue.
+If a section is empty, say "none blocked" / "none deferred" / "no epics" rather than dropping it. Also
+surface anything sitting in `Tickets/Doing/` so stalled work-in-progress is never silently lost.

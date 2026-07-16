@@ -30,6 +30,13 @@ still outstanding. If `Deferred/` is empty, print "Deferred: none" rather than d
 Also glob `Tickets/Doing/CPE-*.md`. If anything is in-flight or stalled there, show it under its own
 heading so abandoned work-in-progress can be restarted.
 
+Finally, ALWAYS show an **Epics** table (the separate epic queue). Glob `Tickets/Epics/CPE-*.md` and
+render: ID, title, **status** (`Proposed` = dormant brief / `In Progress` = activated), **Tags**, and
+a one-line goal. For an `In Progress` epic, add a child-progress note (`X of Y children Done`, counting
+tickets whose `epic:` frontmatter names it). Epics are **not** in the Backlog Work options — they are
+decomposed via `/ticketing-epic activate CPE-NNN`, not built by `/ticketing-work`. If `Epics/` is
+empty, print "Epics: none". (See the `ticketing-epic` skill and `Tickets/wiki.md` → "Epics".)
+
 Blocked tickets are **not** offered in the action menu's Work options (working them won't clear the
 gate). Deferred tickets are also **not** in the default Work-all/subset options — but unlike Blocked
 they *can* be picked up explicitly at any time (no gate to clear), so [3] One accepts a Deferred ID.

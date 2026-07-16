@@ -12,10 +12,15 @@ git ops, cutting or publishing a release, managing tickets or the skill system, 
 being iterated live, or anything the user says to "just do." If it is genuinely borderline, ask first.
 See "When to Auto-File a Ticket" in `Tickets/wiki.md` for the authoritative boundaries.
 
+**Epic exception:** if the request is epic-sized (a Mega-Feature / many-child effort), do NOT work it
+to Done. File it as a brief in the **Epics queue** and stop — see Step 3c. Epics are decomposed later,
+just-in-time, via `/ticketing-epic activate`.
+
 ## Step 1 — Find the Next ID
 
-Scan Tickets/Backlog/, Tickets/Doing/, and Tickets/Done/ recursively for all CPE-NNN_*.md files.
-Find the highest NNN. New ID = that number + 1, zero-padded to three digits (e.g. CPE-022).
+Scan **all** ticket folders recursively — `Tickets/Epics/`, `Backlog/`, `Doing/`, `Blocked/`,
+`Deferred/`, `Done/` — for every CPE-NNN_*.md file. Find the highest NNN. New ID = that number + 1,
+zero-padded to three digits (e.g. CPE-022). (IDs are shared across all queues, epics included.)
 
 ## Step 2 — Gather Details
 
@@ -56,6 +61,23 @@ Exactly one primary tag (`ready` · `big-design` · `needs-decision` · `needs-p
 `resource-blocked`), plus any qualifiers. Most freshly-filed, actionable work is `ready`. If it's
 `resource-blocked`, add a qualifier (e.g. `needs-macos-linux`) so the listing shows what's needed.
 Never coin a tag that isn't in the wiki — add it there first.
+
+## Step 3c — Epic fork (STOP if this is epic-sized)
+
+If the item is too big for one unit of work — a Mega-Feature, or something that will clearly need
+many child tickets — it is an **epic**, and epics take a different path. Do **not** file it into
+`Backlog/`, and do **not** decompose it now. Instead:
+
+1. Create it in **`Tickets/Epics/`** with `status: Proposed` and `tags: [epic]`, as a one-page
+   **brief only**: the goal (Summary), a rough scope, and any open `## Open questions` — **no child
+   tickets, no research, no acceptance-criteria breakdown of sub-work**. (An epic-level Definition of
+   Done is fine; per-slice detail is not.)
+2. Report: "Filed epic CPE-NNN in the Epics queue — decompose it later with
+   `/ticketing-epic activate CPE-NNN`."
+3. **Skip the rest of this skill.** An epic is never worked directly; its research, planning, and
+   sub-ticketing happen only at activation (see the `ticketing-epic` skill). Do not offer "Work it now".
+
+Everything below (Steps 4–5) is for a normal, single-unit ticket.
 
 ## Step 4 — Create the File
 

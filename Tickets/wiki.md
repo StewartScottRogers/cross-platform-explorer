@@ -15,6 +15,7 @@ tracker or IDE project integration to keep in sync.
 Tickets/
   wiki.md        <- workflow rules (you are here)
   _template.md   <- copy to Backlog/ to start a new ticket
+  Epics/         <- umbrella trackers, decomposed just-in-time (SEPARATE queue — see "Epics" below)
   Backlog/       <- open tickets waiting to be worked
   Doing/         <- ticket the agent is currently working (one at a time)
   Blocked/       <- tickets deferred on an EXTERNAL gate (can't be worked until it clears)
@@ -44,13 +45,14 @@ Sequential. To find the next ID: scan all folders for `CPE-*.md`, read the highe
 id: CPE-NNN
 title: Human-readable title (sentence case)
 type: Bug | Defect | Task | Feature | Test
-status: Open | In Progress | Blocked | Deferred | Done | Won't Fix | Duplicate
+status: Proposed | Open | In Progress | Blocked | Deferred | Done | Won't Fix | Duplicate
 priority: Low | Medium | High | Critical
 component: Frontend | Backend | Updater | CI | Packaging | Docs | Multiple
 tags: [<disposition tag>, ...]   # at least one — see Disposition Tags below
 estimate: 15m | 30m | 1h | 1-2h | 2-3h | 3-4h | 4h+
 created: YYYY-MM-DD
 closed: YYYY-MM-DD
+epic: CPE-NNN                     # optional — present on a child ticket, naming its parent epic
 ---
 ```
 
@@ -95,7 +97,7 @@ Keep tags current: when the situation changes (a prereq lands, a decision is mad
 | `big-design` | Substantial; needs a design pass (decisions baked into the design) before coding. |
 | `needs-decision` | Blocked on a product/UX decision from the user — record the open question in Notes. |
 | `needs-prereq` | Depends on another unbuilt ticket/feature — name it in Notes. |
-| `epic` | Umbrella tracker, not a single unit of work; closes when its children do. |
+| `epic` | Umbrella tracker, not a single unit of work; lives in `Tickets/Epics/` (a separate queue), decomposed just-in-time, closes when its children do. See "Epics" below. |
 | `resource-blocked` | Needs something the agent can't access in this environment. **Always pair with a qualifier below.** |
 
 Qualifiers for `resource-blocked` (add alongside it):
@@ -135,6 +137,36 @@ plan, a third party, a date) — not pickable until it clears. `Deferred/` is a 
 postponement** by us — usually waiting on an *internal* prerequisite ticket, or deprioritized to
 revisit later — and it stays pickable at any time (`/ticketing-work` un-defers it). Never close
 either as Won't Fix; they are postponed, not declined. See each folder's `wiki.md`.
+
+---
+
+## Epics (a separate queue, decomposed just-in-time)
+
+An **epic** is a headline goal too big for one unit of work (a Mega-Feature, or anything that will
+clearly spawn many child tickets). Epics are managed by the **`ticketing-epic`** skill and live in
+their own queue, **`Tickets/Epics/`** — never in `Backlog/`.
+
+**The core rule: no research, planning, or sub-ticketing until an epic is *activated*.** A dormant
+epic is a one-page brief — goal, rough scope, open questions, maybe an epic-level Definition of Done —
+and nothing more. Up-front breakdown rots as scope drifts and clutters the backlog with speculative
+work. Pulling an epic from the queue IS the decision to invest in planning it.
+
+Lifecycle:
+
+| Stage | Folder / status | What exists |
+|-------|-----------------|-------------|
+| **Proposed** | `Epics/`, `status: Proposed` | Just the brief. No children, no research. |
+| **Active** | `Epics/`, `status: In Progress` | Activated: decisions resolved, child tickets created in `Backlog/` (each with `epic: CPE-NNN`). |
+| **Done** | `Done/`, `status: Done` | All children Done + the epic's Definition of Done met. |
+
+- `status: Proposed` is **epics-only** — it marks a dormant, not-yet-decomposed brief.
+- **`activate`** (in `ticketing-epic`) is the *only* place an epic is decomposed: research → resolve
+  `needs-decision` questions with the user → create `epic:`-linked children in `Backlog/` → set the
+  epic `In Progress`.
+- Epics are **never** put in `Doing/` and **never** built by `/ticketing-work` (it redirects to
+  `ticketing-epic activate`). Only an epic's *children* are worked, as ordinary Backlog tickets.
+- Every child carries an `epic: CPE-NNN` frontmatter field so progress is countable and the epic
+  closes exactly when its children (and DoD) do.
 
 ---
 
