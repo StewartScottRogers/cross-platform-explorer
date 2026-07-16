@@ -2,12 +2,13 @@
 id: CPE-489
 title: "Close a single agent session from the left-pane Agents context menu"
 type: Feature
-status: Open
+status: Done
 priority: Medium
 component: Frontend
 tags: [ready]
 estimate: 1-2h
 created: 2026-07-16
+closed: 2026-07-16
 epic: CPE-261
 ---
 
@@ -19,17 +20,17 @@ leaf today opens a context menu (`AgentMenu.svelte`) whose only action closes **
 one session** they right-clicked, while keeping a "Close all" option.
 
 ## Acceptance Criteria
-- [ ] Right-clicking a specific Agents leaf offers **"Close this session"** (labelled with the
+- [x] Right-clicking a specific Agents leaf offers **"Close this session"** (labelled with the
       agent/session so it's clear which one), which closes only that session — the other running
       sessions and their tabs are untouched.
-- [ ] The existing **"Close all"** action remains available (e.g. as a second item in the same menu,
+- [x] The existing **"Close all"** action remains available (e.g. as a second item in the same menu,
       and/or the AI Console toolbar button's right-click, which already closes all).
-- [ ] `Sidebar.svelte` passes the leaf's `sessionId` (+ agent name) in the `agentMenu` dispatch so the
+- [x] `Sidebar.svelte` passes the leaf's `sessionId` (+ agent name) in the `agentMenu` dispatch so the
       menu knows the target; `AgentMenu.svelte` supports more than one item.
-- [ ] Closing one session ends that agent's PTY/tab in the AI Console and removes its left-pane leaf;
+- [x] Closing one session ends that agent's PTY/tab in the AI Console and removes its left-pane leaf;
       the session list (`agentSessions`) updates reactively. If it was the last session, the behaviour
       matches "close all" (console can shut down).
-- [ ] Headless test coverage for the Sidebar dispatch (target session id) and the menu's per-session
+- [x] Headless test coverage for the Sidebar dispatch (target session id) and the menu's per-session
       action.
 
 ## Notes
@@ -38,3 +39,14 @@ Implementation surface: `Sidebar.svelte` (pass session id on right-click), `Agen
 `closeAllConsoles` exists — closing one session needs a way to route "close session `<id>`" to the AI
 Console (a host command + a console op / reuse the console's existing per-session close / daemon
 `kill(id)`). Related to [[CPE-490]] (both enhance the same Agents leaves) and [[CPE-442]] (close-all).
+
+## Resolution
+Right-clicking a specific Agents leaf now offers **"Close <agent · model>"** (closes just that session)
+alongside **"Close all consoles"**. `Sidebar.svelte` passes the leaf's `sessionId` + a human label in
+the `agentMenu` dispatch; `AgentMenu.svelte` became a multi-item menu (`closeOne` event); `App.svelte`
+gained `closeOneConsole(id)`. The new host command `sidecar_close_session` (src-tauri, feature-gated)
+POSTs to the console's existing `/api/session/{id}/close` over its loopback URL — the console emits an
+`ended` for that session, pruning its leaf while the others keep running (id is validated to a simple
+token so it can't reshape the URL path). Headless tests cover the Sidebar dispatch + the menu's
+per-session action. Files: `src/lib/components/{Sidebar,AgentMenu}.svelte`, `src/App.svelte`,
+`src-tauri/src/lib.rs`. `npm run check` clean; tests + clippy green.

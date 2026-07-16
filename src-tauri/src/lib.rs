@@ -2298,6 +2298,31 @@ fn sidecar_stop(id: String, state: tauri::State<AiConsoleState>) -> Result<(), S
     Ok(())
 }
 
+/// Close a single AI Console session (CPE-489) — the left-pane Agents "Close this session". Routes to
+/// the console's own per-session close endpoint over its loopback UI server
+/// (`{url}/api/session/{id}/close`); the console then emits an `ended` for that session, pruning its
+/// leaf while the others keep running. A no-op if the console isn't running (no URL yet).
+#[cfg(feature = "sidecar-platform")]
+#[tauri::command]
+fn sidecar_close_session(session_id: String, state: tauri::State<AiConsoleState>) -> Result<(), String> {
+    // Session ids are simple tokens (`s1`, `s12`). Refuse anything else so it can never reshape the
+    // loopback URL path (no traversal / injection into the request line).
+    if session_id.is_empty()
+        || !session_id.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+    {
+        return Err("invalid session id".into());
+    }
+    let url = { state.url.lock().map_err(|_| "state lock poisoned")?.clone() };
+    let Some(base) = url else { return Ok(()) }; // console not running → nothing to close
+    let target = format!("{}/api/session/{session_id}/close", base.trim_end_matches('/'));
+    ureq::post(&target)
+        .timeout(std::time::Duration::from_secs(5))
+        .call()
+        .map_err(|e| format!("close session failed: {e}"))?;
+    state.log(sidecar_host::observability::LogLevel::Info, format!("closed session {session_id} by user"));
+    Ok(())
+}
+
 /// Enable or disable a sidecar (CPE-274). Disabling stops it (if running) and prevents it
 /// from starting until re-enabled. Independent per sidecar — never touches others.
 #[cfg(feature = "sidecar-platform")]
@@ -3662,6 +3687,8 @@ pub fn run() {
             sidecar_details,
             #[cfg(feature = "sidecar-platform")]
             sidecar_stop,
+            #[cfg(feature = "sidecar-platform")]
+            sidecar_close_session,
             #[cfg(feature = "sidecar-platform")]
             sidecar_set_enabled,
             #[cfg(feature = "sidecar-platform")]

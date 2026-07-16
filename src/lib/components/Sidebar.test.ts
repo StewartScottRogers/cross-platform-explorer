@@ -56,6 +56,37 @@ describe("Sidebar Agents section (CPE-397)", () => {
     expect(screen.getByText("Aider")).toBeTruthy();
     expect(screen.getByText("api")).toBeTruthy();
   });
+
+  it("shows a session-identity chip + short model on each leaf (CPE-490)", () => {
+    const { container } = render(Sidebar, {
+      places: [],
+      drives: [],
+      favorites: [],
+      sessions: [session({ sessionId: "s2", model: "anthropic/claude-sonnet-5" })],
+    });
+    const chip = container.querySelector(".agent-chip") as HTMLElement;
+    expect(chip).toBeTruthy();
+    expect(chip.textContent).toBe("2"); // number derived from the id
+    expect(chip.style.background).not.toBe(""); // deterministic colour applied
+    expect(screen.getByText(/claude-sonnet-5/)).toBeTruthy(); // shortened model in the label
+  });
+
+  it("right-clicking a leaf opens the menu targeting that session (CPE-489)", async () => {
+    const { component, container } = render(Sidebar, {
+      places: [],
+      drives: [],
+      favorites: [],
+      sessions: [session({ sessionId: "s2", agentName: "Aider" })],
+    });
+    const agentMenu = vi.fn();
+    component.$on("agentMenu", (e) => agentMenu(e.detail));
+
+    const leaf = container.querySelector(".agent-item") as HTMLElement;
+    await fireEvent.contextMenu(leaf);
+    expect(agentMenu).toHaveBeenCalledOnce();
+    expect(agentMenu.mock.calls[0][0].sessionId).toBe("s2");
+    expect(agentMenu.mock.calls[0][0].sessionLabel).toMatch(/Aider/);
+  });
 });
 
 describe("Sidebar drive usage bars (CPE-406)", () => {

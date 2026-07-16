@@ -1,15 +1,20 @@
 <script lang="ts">
-  /** Right-click menu for closing the AI Console (CPE-457) — shown on an Agents leaf ("Close AI
-      Console") and on the AI Console toolbar button ("Close all consoles"). The owner decides the
-      label + what confirming does; this just positions and dispatches. */
+  /** Right-click menu for closing AI Console sessions (CPE-457, CPE-489). On a specific Agents leaf it
+      offers "Close <this session>" AND "Close all"; on the toolbar button (no `sessionId`) just the
+      close-all action. The owner decides what each action does; this only positions + dispatches. */
   import { createEventDispatcher, onMount } from "svelte";
   import Icon from "./Icon.svelte";
 
   export let x = 0;
   export let y = 0;
+  /** The close-all action's label (e.g. "Close all consoles"). */
   export let label = "Close AI Console";
+  /** When set, a per-session close is offered for this session id (CPE-489). */
+  export let sessionId: string | undefined = undefined;
+  /** Human label for the per-session close item (e.g. "claude · sonnet-4.5"). */
+  export let sessionLabel = "this session";
 
-  const dispatch = createEventDispatcher<{ confirm: void; close: void }>();
+  const dispatch = createEventDispatcher<{ confirm: void; closeOne: string; close: void }>();
 
   let el: HTMLDivElement;
   let left = x;
@@ -40,7 +45,13 @@
   on:click|stopPropagation
   on:contextmenu|stopPropagation|preventDefault
 >
-  <button class="row danger" role="menuitem" on:click={() => { dispatch("confirm"); dispatch("close"); }}>
+  {#if sessionId}
+    <button class="row danger" role="menuitem" on:click={() => { dispatch("closeOne", sessionId); dispatch("close"); }}>
+      <Icon name="close" size={15} /> Close {sessionLabel}
+    </button>
+    <div class="sep" role="separator" />
+  {/if}
+  <button class="row" class:danger={!sessionId} role="menuitem" on:click={() => { dispatch("confirm"); dispatch("close"); }}>
     <Icon name="close" size={15} /> {label}
   </button>
 </div>
@@ -68,4 +79,6 @@
     border-radius: var(--radius);
   }
   .row.danger { color: #d05656; }
+  .row:hover { background: var(--active); }
+  .sep { height: 1px; margin: 4px 6px; background: var(--border); }
 </style>

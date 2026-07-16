@@ -225,7 +225,7 @@
   }
   /** Right-click "close the AI Console" menu (CPE-457), shown from an Agents leaf or the AI
       Console button. `label` differs per source; confirming stops the console + clears the leaves. */
-  let agentMenu: { x: number; y: number; label: string } | null = null;
+  let agentMenu: { x: number; y: number; label: string; sessionId?: string; sessionLabel?: string } | null = null;
 
   /** Close the AI Console entirely (all running agents) and clear the Agents leaves. The console
       process is reaped, so no per-session `ended` arrives — clear the leaves here (CPE-457). */
@@ -237,6 +237,16 @@
       console.debug("close consoles failed:", e);
     }
     clearAgentSessions();
+  }
+  /** Close a single agent session (CPE-489) — routes to the AI Console's per-session close endpoint
+      via the host. The console emits an `ended` for it, which prunes the leaf; the others keep running. */
+  async function closeOneConsole(sessionId: string) {
+    agentMenu = null;
+    try {
+      await invoke("sidecar_close_session", { sessionId });
+    } catch (e) {
+      console.debug("close session failed:", e);
+    }
   }
   /** True in sidecar-platform builds — gates the AI Console toolbar button (CPE-351). */
   let aiConsoleAvailable = false;
@@ -2012,7 +2022,7 @@
       on:openFile={(e) => openRecent(e.detail)}
       on:home={() => { if (archive) exitArchive(); navigate(HOME); }}
       on:repos={() => (showRepos = true)}
-      on:agentMenu={(e) => (agentMenu = { x: e.detail.x, y: e.detail.y, label: $t("tb.closeAiConsole") })}
+      on:agentMenu={(e) => (agentMenu = { x: e.detail.x, y: e.detail.y, label: $t("tb.closeAllConsoles"), sessionId: e.detail.sessionId, sessionLabel: e.detail.sessionLabel })}
       on:drop={(e) => dropInto(e.detail.paths, e.detail.dest, e.detail.copy)}
     />
   </div>
@@ -2348,7 +2358,10 @@
     x={agentMenu.x}
     y={agentMenu.y}
     label={agentMenu.label}
+    sessionId={agentMenu.sessionId}
+    sessionLabel={agentMenu.sessionLabel}
     on:confirm={closeAllConsoles}
+    on:closeOne={(e) => closeOneConsole(e.detail)}
     on:close={() => (agentMenu = null)}
   />
 {/if}

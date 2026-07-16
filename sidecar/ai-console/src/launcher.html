@@ -55,6 +55,10 @@
                 box-shadow: 0 -1px 0 var(--line), 1px 0 0 var(--line), -1px 0 0 var(--line); }
   .tab.ended .tab-label { text-decoration: line-through; opacity: .6; }
   .tab-label { flex: 1; text-align: left; overflow: hidden; text-overflow: ellipsis; }
+  /* Session-identity chip (CPE-490): same colour+number as the explorer's left-pane Agents leaf. */
+  .tab-chip { flex: 0 0 auto; display: inline-grid; place-items: center; width: 16px; height: 16px;
+    border-radius: 5px; color: #fff; font-size: 10px; font-weight: 700; line-height: 1;
+    font-variant-numeric: tabular-nums; }
   /* Provider-reported usage/cost for the session (CPE-311); hidden until the agent reports any. */
   .tab-usage { font-size: 10px; opacity: .62; white-space: nowrap; font-variant-numeric: tabular-nums; }
   .tab-usage:empty { display: none; }
@@ -654,6 +658,16 @@ async function deleteSet() {
 const sessions = new Map(); // id -> { id, name, term, fit, search, ws, pane, tab }
 let activeId = null;
 
+// Session-identity chip (CPE-490) — MUST match src/lib/sessionChip.ts so a console tab and its
+// left-pane Agents leaf show the same colour + number (same session id ⇒ same chip).
+const SESSION_CHIP_COLORS = ["#3a72b5","#3a9d4a","#b5872b","#a24bd0","#c94f4f","#2aa1a1","#c96f18","#6b7bd6"];
+function sessionColor(id) {
+  let h = 0;
+  for (let i = 0; i < id.length; i++) h = (Math.imul(h, 31) + id.charCodeAt(i)) >>> 0;
+  return SESSION_CHIP_COLORS[h % SESSION_CHIP_COLORS.length];
+}
+function sessionNum(id) { const m = /(\d+)/.exec(id || ""); return m ? m[1] : "•"; }
+
 function buildTerm(s) {
   const term = new Terminal({
     fontFamily: "ui-monospace, Consolas, 'Cascadia Mono', monospace",
@@ -754,11 +768,12 @@ function addSession(id, name) {
   const thumb = document.createElement("div"); thumb.className = "sb-thumb";
   sb.appendChild(thumb); pane.appendChild(host); pane.appendChild(sb);
   $("terms").appendChild(pane);
-  const tab = document.createElement("div"); tab.className = "tab";
+  const tab = document.createElement("div"); tab.className = "tab"; tab.title = name; // full detail on hover
+  const chip = document.createElement("span"); chip.className = "tab-chip"; chip.textContent = sessionNum(id); chip.style.background = sessionColor(id);
   const lbl = document.createElement("span"); lbl.className = "tab-label"; lbl.textContent = name;
   const use = document.createElement("span"); use.className = "tab-usage"; use.title = "Provider-reported usage this session";
   const x = document.createElement("button"); x.className = "tab-close"; x.title = "Close session"; x.textContent = "×";
-  tab.appendChild(lbl); tab.appendChild(use); tab.appendChild(x);
+  tab.appendChild(chip); tab.appendChild(lbl); tab.appendChild(use); tab.appendChild(x);
   $("tabs").appendChild(tab);
   const s = { id, name, term: null, fit: null, search: null, ws: null, pane, host, sb, thumb, tab, usageEl: use };
   sessions.set(id, s);

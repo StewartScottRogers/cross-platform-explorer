@@ -2,12 +2,13 @@
 id: CPE-490
 title: "Make AI Console tabs and left-pane Agent leaves clear + correlatable"
 type: Feature
-status: Open
+status: Done
 priority: Medium
 component: Multiple
 tags: [ready]
 estimate: 2-3h
 created: 2026-07-16
+closed: 2026-07-16
 epic: CPE-261
 ---
 
@@ -31,14 +32,14 @@ both surfaces can derive an **identical chip with zero cross-window coordination
   <folder> · started …`.
 
 ## Acceptance Criteria
-- [ ] Each running session shows the **same colour + number chip** on its AI Console tab and its
+- [x] Each running session shows the **same colour + number chip** on its AI Console tab and its
       left-pane Agents leaf, so a user can match them at a glance.
-- [ ] AI Console tab caption is readable when several same-agent sessions run (chip + shortened,
+- [x] AI Console tab caption is readable when several same-agent sessions run (chip + shortened,
       distinguishing label; full detail in the tooltip).
-- [ ] Left-pane Agents leaf shows the chip + agent + short model + folder, with a full tooltip.
-- [ ] Colour/number derivation is identical on both surfaces (same `sessionId` → same chip), verified
+- [x] Left-pane Agents leaf shows the chip + agent + short model + folder, with a full tooltip.
+- [x] Colour/number derivation is identical on both surfaces (same `sessionId` → same chip), verified
       by a test on the shared helper.
-- [ ] Existing behaviour (click leaf → navigate to cwd; tabs switch sessions) is preserved.
+- [x] Existing behaviour (click leaf → navigate to cwd; tabs switch sessions) is preserved.
 
 ## Notes
 Filed from a direct user request ("captions … too short and not easily correlated"). Surfaces:
@@ -46,3 +47,12 @@ Filed from a direct user request ("captions … too short and not easily correla
 (agent leaves). Possible follow-up (out of scope here): **two-way linking** — clicking a left-pane leaf
 focuses the AI Console window and selects that session's tab (needs cross-window messaging). Pairs with
 [[CPE-489]] (same Agents leaves).
+
+## Resolution
+Every running session now carries an identical **colour + number chip** on its AI Console tab and its
+left-pane Agents leaf, derived from the shared `sessionId` — so they correlate at a glance with no
+cross-window coordination. New `src/lib/sessionChip.ts` (`sessionColor`/`sessionNum`/`shortModel`,
+unit-tested) is mirrored by matching JS in `launcher.html`. Leaves gain a short model in the label +
+a full tooltip; tabs get the chip + a full-detail `title`. Files: `src/lib/sessionChip.ts` (+test),
+`src/lib/components/Sidebar.svelte`, `sidecar/ai-console/src/launcher.html`. `npm run check` clean;
+490 frontend tests pass; clippy clean. Two-way tab-linking noted as a future follow-up (out of scope).

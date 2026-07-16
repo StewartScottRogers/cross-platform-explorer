@@ -6,6 +6,7 @@
   import { iconFor } from "../filetypes";
   import { formatSize, diskUsage } from "../format";
   import { t } from "../i18n";
+  import { sessionColor, sessionNum, shortModel } from "../sessionChip";
   import type { DirEntry, Place, Favorite } from "../types";
   import type { AgentSession } from "../sidecar";
 
@@ -31,7 +32,7 @@
     openFile: string;
     home: void;
     repos: void;
-    agentMenu: { x: number; y: number };
+    agentMenu: { x: number; y: number; sessionId?: string; sessionLabel?: string };
     drop: { paths: string[]; dest: string; copy: boolean };
   }>();
 
@@ -170,17 +171,24 @@
     {#if agentsOpen}
       <div class="nav-children">
         {#each sessions as s (s.sessionId)}
+          {@const model = shortModel(s.model)}
           <button
             class="nav-item agent-item"
             class:active={isMarked(s.cwd)}
-            title={`${s.agentName} — ${s.cwd}  (right-click to close the AI Console)`}
+            title={`${s.agentName}${s.provider ? " · " + s.provider : ""}${s.model ? " · " + s.model : ""} · ${s.cwd}  (right-click to close)`}
             on:click={() => dispatch("navigate", s.cwd)}
-            on:contextmenu|preventDefault|stopPropagation={(e) => dispatch("agentMenu", { x: e.clientX, y: e.clientY })}
+            on:contextmenu|preventDefault|stopPropagation={(e) =>
+              dispatch("agentMenu", {
+                x: e.clientX,
+                y: e.clientY,
+                sessionId: s.sessionId,
+                sessionLabel: `${s.agentName || s.agentId || "Agent"}${model ? " · " + model : ""}`,
+              })}
           >
             <span class="twisty hidden" />
-            <Icon name="cube" />
+            <span class="agent-chip" style="background:{sessionColor(s.sessionId)}">{sessionNum(s.sessionId)}</span>
             <span class="label agent-label">
-              <span class="agent-name">{s.agentName || s.agentId || "Agent"}</span>
+              <span class="agent-name">{s.agentName || s.agentId || "Agent"}{#if model}<span class="agent-model"> · {model}</span>{/if}</span>
               <span class="agent-folder">{baseName(s.cwd)}</span>
             </span>
           </button>
@@ -323,7 +331,23 @@
   .agents-title { font-weight: 600; }
   .agent-label { display: flex; flex-direction: column; line-height: 1.15; overflow: hidden; }
   .agent-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .agent-model { opacity: 0.6; }
   .agent-folder { font-size: 11px; opacity: 0.6; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  /* Shared session-identity chip (CPE-490): same colour+number as the AI Console tab, so a leaf and
+     its tab correlate at a glance. */
+  .agent-chip {
+    flex: 0 0 auto;
+    display: inline-grid;
+    place-items: center;
+    width: 16px;
+    height: 16px;
+    border-radius: 5px;
+    color: #fff;
+    font-size: 10px;
+    font-weight: 700;
+    line-height: 1;
+    font-variant-numeric: tabular-nums;
+  }
   /* Drive usage bar (CPE-406) — a thin used/free indicator under each drive, like Explorer. */
   .drive-usage { padding: 2px 10px 6px 34px; display: flex; flex-direction: column; gap: 2px; }
   .drive-bar { height: 5px; border-radius: 3px; background: rgba(128, 128, 128, 0.28); overflow: hidden; }

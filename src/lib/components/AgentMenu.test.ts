@@ -24,4 +24,25 @@ describe("AgentMenu", () => {
     render(AgentMenu, { props: { label: "Close AI Console" } });
     expect(screen.getByRole("menuitem", { name: /close ai console/i })).toBeTruthy();
   });
+
+  it("offers a per-session close that dispatches closeOne with the id (CPE-489)", async () => {
+    const { component } = render(AgentMenu, {
+      props: { label: "Close all consoles", sessionId: "s2", sessionLabel: "claude · sonnet-4.5" },
+    });
+    const closeOne = vi.fn();
+    component.$on("closeOne", closeOne);
+
+    // Both items are present: the specific session AND close-all.
+    const one = screen.getByRole("menuitem", { name: /close claude · sonnet-4\.5/i });
+    expect(screen.getByRole("menuitem", { name: /close all consoles/i })).toBeTruthy();
+
+    await fireEvent.click(one);
+    expect(closeOne).toHaveBeenCalledOnce();
+    expect(closeOne.mock.calls[0][0].detail).toBe("s2");
+  });
+
+  it("shows only close-all when no session id is given (toolbar button)", () => {
+    render(AgentMenu, { props: { label: "Close all consoles" } });
+    expect(screen.queryAllByRole("menuitem")).toHaveLength(1);
+  });
 });
