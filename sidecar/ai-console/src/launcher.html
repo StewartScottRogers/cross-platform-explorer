@@ -715,8 +715,9 @@ function applyView() {
   const terms = $("terms");
   const grid = viewMode === "grid" && sessions.size > 0;
   terms.classList.toggle("grid-view", grid);
+  const visible = grid ? visibleGridIds() : null; // capped tile set (CPE-508)
   if (grid) {
-    const d = gridDims(sessions.size);
+    const d = gridDims(visible.size);
     terms.style.setProperty("--grid-cols", String(d.cols));
     terms.style.setProperty("--grid-rows", String(d.rows));
   } else {
@@ -724,11 +725,13 @@ function applyView() {
     terms.style.removeProperty("--grid-rows");
   }
   for (const s of sessions.values()) {
-    s.pane.style.display = grid ? "block" : (s.id === activeId ? "block" : "none");
+    const show = grid ? visible.has(s.id) : (s.id === activeId);
+    s.pane.style.display = show ? "block" : "none";
     s.pane.classList.toggle("focused", grid && s.id === activeId);
     s.tab.classList.toggle("active", s.id === activeId);
   }
-  for (const s of sessions.values()) if (s.pane.style.display !== "none") refit(s);
+  // A pane that just became visible flushes any output buffered while it was hidden (CPE-508).
+  for (const s of sessions.values()) if (s.pane.style.display !== "none") { flushBuf(s); refit(s); }
   updateViewToggle();
 }
 
@@ -751,6 +754,7 @@ function focusPane(id) {
     t.pane.classList.toggle("focused", viewMode === "grid" && t.id === activeId);
     t.tab.classList.toggle("active", t.id === activeId);
   }
+  flushBuf(s); // the newly focused pane catches up on anything buffered while unfocused (CPE-508)
   if (s.term) s.term.focus();
 }
 
@@ -765,6 +769,57 @@ function nextPaneId(ids, currentId, dir, cols) {
   else if (dir === "up") n -= cols;
   else if (dir === "down") n += cols;
   return n >= 0 && n < ids.length ? ids[n] : currentId;
+}
+
+// --- 16-pane scaling + off-screen output throttling (CPE-508) ---------------------------
+const MAX_GRID_TILES = 16; // ceiling on simultaneously-tiled agents; the rest stay reachable via tabs
+
+// The sessions that get a tile in grid view: the first MAX_GRID_TILES in order, plus the focused one
+// (never hide the agent you're looking at). Returns a Set of ids.
+function visibleGridIds() {
+  const ids = [...sessions.keys()];
+  if (ids.length <= MAX_GRID_TILES) return new Set(ids);
+  const set = new Set(ids.slice(0, MAX_GRID_TILES));
+  if (activeId != null) set.add(activeId);
+  return set;
+}
+
+// Pure policy: how a pane should receive PTY output given its role. focused ⇒ write immediately
+// (smooth); a visible-but-unfocused tile ⇒ coalesce writes per frame (fewer repaints); hidden ⇒ defer
+// until shown. No output is dropped — deferred/coalesced bytes are buffered in order and flushed.
+function paneWritePolicy(role) {
+  return role === "focused" ? "sync" : role === "tile" ? "throttled" : "deferred";
+}
+
+// A pane's role for the write policy, given the visible-tile set (null in tabs view).
+function paneRole(s, visible) {
+  if (s.id === activeId) return "focused";
+  if (viewMode === "grid" && visible && visible.has(s.id)) return "tile";
+  return "hidden";
+}
+
+// Route one chunk of PTY output through the throttle policy (CPE-508).
+function routeWrite(s, data) {
+  const policy = paneWritePolicy(paneRole(s, viewMode === "grid" ? visibleGridIds() : null));
+  if (policy === "sync") { s.term.write(data); scheduleThumb(s); return; }
+  (s._buf || (s._buf = [])).push(data);
+  // A pane hidden forever mustn't grow unbounded: past a cap, flush regardless (xterm's own scrollback
+  // is capped, so memory stays bounded and byte order is preserved either way).
+  if (s._buf.length > 400) { flushBuf(s); return; }
+  if (policy === "throttled") scheduleFlush(s); // deferred ⇒ flush when the pane becomes live
+}
+
+function scheduleFlush(s) {
+  if (s._flush) return;
+  s._flush = requestAnimationFrame(() => { s._flush = 0; flushBuf(s); });
+}
+
+function flushBuf(s) {
+  if (s._flush) { try { cancelAnimationFrame(s._flush); } catch (_) {} s._flush = 0; }
+  if (!s._buf || !s._buf.length || !s.term) return;
+  for (const d of s._buf) s.term.write(d);
+  s._buf.length = 0;
+  scheduleThumb(s);
 }
 
 // Session-identity chip (CPE-490) — MUST match src/lib/sessionChip.ts so a console tab and its
@@ -862,9 +917,8 @@ function connectWs(s) {
   s.ws = new WebSocket(proto + "://" + location.host + "/api/session/" + s.id + "/ws");
   s.ws.binaryType = "arraybuffer";
   s.ws.onmessage = (e) => {
-    if (typeof e.data === "string") s.term.write(e.data);
-    else s.term.write(new Uint8Array(e.data));
-    scheduleThumb(s); // content grew — resize/reposition the thumb
+    // Throttle policy (CPE-508): focused writes now, other tiles coalesce, hidden panes buffer.
+    routeWrite(s, typeof e.data === "string" ? e.data : new Uint8Array(e.data));
   };
   s.ws.onopen = () => refit(s);
   s.ws.onclose = () => { s.tab.classList.add("ended"); s.pane.classList.add("ended"); };
