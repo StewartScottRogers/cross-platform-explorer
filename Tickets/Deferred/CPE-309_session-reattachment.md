@@ -323,17 +323,37 @@ every hop of the daemon transport so a missing "FIRST bytes" line names the brea
 Verified headlessly: `cargo test -p ai-console` 194 passed; `cargo clippy --all-targets -D warnings`
 clean; diagnostics inert unless the daemon path is on.
 
-## THE diagnostic run (user — this is what closes or re-targets the ticket)
-Run the installed app **once** with the daemon path + tracer on:
+## THE diagnostic run — the AGENT reads the log; the user only drives the GUI
+The tracer writes to `%TEMP%\cpe-ai-console\session-diag.log` on **this** machine, and the agent runs
+on this machine too — so **the agent reads that file itself** (Read / PowerShell `Get-Content`). The
+user never copies, pastes, or sends the log. The only step the agent can't do is the GUI interaction
+(it can't type into the Tauri webview terminal); everything else — launch, read, diagnose — is the
+agent's.
 
-1. **PowerShell:** `$env:CPE_AICONSOLE_DAEMON = "1"` then launch the app from that same shell:
-   `& "$env:LOCALAPPDATA\Programs\cross-platform-explorer\cross-platform-explorer.exe"`
-   (adjust the path to the install location; the env var must be set in the shell that launches it).
-2. Open the AI Console, launch an agent, and let it try to print output.
-3. Regardless of whether the terminal shows output, close the app, then send me
-   **`%TEMP%\cpe-ai-console\session-diag.log`**.
+Procedure (agent-driven except step 3):
+1. **Agent — clear stale lines.** `Remove-Item (Join-Path $env:TEMP 'cpe-ai-console\session-diag.log') -EA SilentlyContinue`
+   so only this run is read. (The file also collects lines from local `cargo test` daemon runs, whose
+   session id is `s1` — clear first so those aren't mistaken for a real session.)
+2. **Agent — launch with the daemon path on.** Start the installed **sidecar** build with
+   `CPE_AICONSOLE_DAEMON=1` set in the launching shell (fold this into the `/run` launch step):
+   `$env:CPE_AICONSOLE_DAEMON="1"; & "$env:LOCALAPPDATA\Cross-Platform Explorer (Sidecar)\cross-platform-explorer.exe"`
+3. **User — the one human step.** In the opened window, open the AI Console, launch an agent, and let
+   it try to print output. Note whether the terminal shows anything.
+4. **Agent — read + diagnose.** Read `%TEMP%\cpe-ai-console\session-diag.log` directly and analyse it.
+   The last hop that logged `FIRST bytes` is where I/O stops:
+   `daemon: pty[<id>]` → `client: recv` → `console: pump[<id>] … live_ws=<bool>`. Ignore any `pty[s1]`
+   lines (test noise).
 
-The last hop that logged "FIRST bytes" is where I/O stops — that turns the fix from guesswork into a
-one-line target (PTY vs transport vs WS). If every hop logged bytes and the terminal was live → the
-daemon path works now (CPE-483 having removed the stale-binary confound) and we ship it + close the
-ticket. Either outcome is progress; the run is the only thing I can't do from here.
+Outcome:
+- A missing hop names the break → the fix becomes a one-line target (PTY vs transport vs WS/frontend).
+- Every hop present **and** a live terminal → the daemon path works now (CPE-483 removed the
+  stale-binary confound); ship it as the default and close the ticket.
+
+## 2026-07-16 — procedure updated: the agent reads the log, the user does not
+Per user request, the diagnostic run above was rewritten so the **agent** reads
+`%TEMP%\cpe-ai-console\session-diag.log` directly (same machine) and does the analysis; the user's
+only step is the in-GUI agent launch (step 3). Removed the "send me the log" hand-off. Also confirmed
+the current log content is **test noise** (session id `s1`, several daemon spawns from a local
+`cargo test -p ai-console` run) — not a real GUI session — so the procedure now clears it first. The
+real run waits on the installed **v0.23.0-sidecar** build (in progress); the tracer only exists there,
+not in the currently-installed v0.22.0-sidecar.
