@@ -33,6 +33,9 @@ struct Session {
     ring: Arc<Mutex<Vec<u8>>>,
     /// The attached terminal's output channel, if any (one pane at a time).
     live: Arc<Mutex<Option<mpsc::Sender<Vec<u8>>>>>,
+    /// The tab label (agent · provider · model), so the launcher can **reattach** a tab to this
+    /// still-running session when the AI Console is closed and reopened (CPE-461).
+    name: String,
 }
 
 /// The reproducible identity of a launched session — captured at launch, recorded to history when
@@ -408,6 +411,9 @@ impl ConsoleState {
             });
         }
 
+        // Tab label for reattach (CPE-461): the launcher sends `tabName` (agent · provider · model);
+        // fall back to the agent name so a session always has a label.
+        let tab_name = str_opt(&v, "tabName").unwrap_or_else(|| agent.name.clone());
         self.sessions.lock().unwrap().insert(
             id.clone(),
             Arc::new(Session {
@@ -415,6 +421,7 @@ impl ConsoleState {
                 writer: Mutex::new(writer),
                 ring,
                 live,
+                name: tab_name,
             }),
         );
         // Remember this selection for the agent so it's restored on next open (CPE-352).
@@ -486,6 +493,18 @@ impl ConsoleState {
     /// `POST /api/close-all` → close every session and reclaim all out-of-process resources.
     fn handle_close_all(&self) -> Response {
         Response::json(json!({ "closed": self.close_all() }).to_string())
+    }
+
+    /// `GET /api/sessions` → the running sessions `[{id, name}]`, so the launcher can **reattach** a
+    /// tab to each still-running session when the AI Console is closed and reopened (CPE-461). The
+    /// sessions live in this process independent of the (destroyed-on-close) launcher UI.
+    fn handle_sessions_list(&self) -> Response {
+        let sessions = self.sessions.lock().unwrap();
+        let mut list: Vec<(String, String)> =
+            sessions.iter().map(|(id, s)| (id.clone(), s.name.clone())).collect();
+        list.sort_by(|a, b| a.0.cmp(&b.0)); // sequential ids ⇒ launch order
+        let out: Vec<Value> = list.into_iter().map(|(id, name)| json!({ "id": id, "name": name })).collect();
+        Response::json(json!({ "sessions": out }).to_string())
     }
 
     fn handle_resize(&self, path: &str, body: &str) -> Response {
@@ -1004,6 +1023,7 @@ pub fn route(state: &ConsoleState, req: &Request) -> Response {
         ("POST", "/api/presets/delete") => state.handle_preset_delete(&req.body),
         ("POST", "/api/onboarded") => state.handle_onboarded(),
         ("POST", "/api/pick-folder") => state.handle_pick_folder(&req.body),
+        ("GET", "/api/sessions") => state.handle_sessions_list(),
         ("GET", p) if p.starts_with("/api/models") => state.handle_models(p),
         ("GET", "/api/keys") => state.handle_key_list(),
         ("POST", "/api/keys") => state.handle_key_set(&req.body),
@@ -1767,6 +1787,15 @@ mod tests {
         let id1 = launch(&st);
         let _id2 = launch(&st);
         assert_eq!(st.sessions.lock().unwrap().len(), 2, "two sessions should be live");
+
+        // GET /api/sessions lists the running sessions so the launcher can reattach tabs after a
+        // close/reopen (CPE-461); the name defaults to the agent when no tabName was sent.
+        let listed: Value = serde_json::from_slice(
+            &route(&st, &Request { method: "GET".into(), path: "/api/sessions".into(), ..Default::default() }).body,
+        ).unwrap();
+        let arr = listed["sessions"].as_array().unwrap();
+        assert_eq!(arr.len(), 2);
+        assert!(arr.iter().any(|s| s["id"] == id1.as_str() && s["name"] == "Sleeper"));
 
         // Close ONE via its route: the session is removed and its child reclaimed.
         assert_eq!(post(&st, &format!("/api/session/{id1}/close"))["closed"], true);

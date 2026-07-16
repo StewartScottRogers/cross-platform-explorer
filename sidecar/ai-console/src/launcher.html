@@ -484,6 +484,19 @@ async function load() {
   }
   // First-run onboarding (CPE-312): show once until dismissed.
   if (!presets.onboarded) $("onboard-overlay").hidden = false;
+  // Reattach tabs to sessions still running in the sidecar (CPE-461) — closing + reopening the AI
+  // Console must not lose tabs while the agents keep running (and show in the explorer's left pane).
+  await reattachSessions();
+}
+
+// Restore a tab for each still-running session (idempotent — skips sessions already tabbed).
+async function reattachSessions() {
+  try {
+    const d = await api("/api/sessions");
+    for (const s of (d.sessions || [])) {
+      if (s.id && !sessions.has(s.id)) addSession(s.id, s.name || s.id);
+    }
+  } catch (_) { /* no host, or nothing running */ }
 }
 
 async function dismissOnboarding() {
@@ -765,7 +778,8 @@ async function launch() {
 async function launchWith(body, name) {
   setMsg("Launching…", true);
   try {
-    const res = await api("/api/launch", { method: "POST", body: JSON.stringify(body) });
+    // `tabName` is stored server-side so the tab can be reattached after a close/reopen (CPE-461).
+    const res = await api("/api/launch", { method: "POST", body: JSON.stringify({ ...body, tabName: name }) });
     addSession(res.session, name);
     if (res.dangerousFlags && res.dangerousFlags.length)
       setMsg("Launched with elevated flags: " + res.dangerousFlags.join(", "), false);

@@ -316,6 +316,26 @@ describe("AI Console launcher — Close all + reclaim resources (CPE-442)", () =
   });
 });
 
+describe("AI Console launcher — reattach tabs on reopen (CPE-461)", () => {
+  it("recreates a tab for each still-running session on boot", async () => {
+    const { w } = await mountLauncher((path) => {
+      if (path === "/api/sessions") return { sessions: [{ id: "s7", name: "Claude · openrouter · sonnet" }] };
+      return {};
+    });
+    // Boot's reattach is a few awaits deep — poll for the restored tab.
+    for (let i = 0; i < 40 && !w.document.querySelector(".tab-label"); i++) await new Promise((r) => setTimeout(r, 5));
+    const tabs = [...w.document.querySelectorAll(".tab-label")].map((e: any) => e.textContent);
+    expect(tabs).toContain("Claude · openrouter · sonnet");
+    expect(w.document.querySelectorAll(".term-pane").length).toBe(1);
+  });
+
+  it("boots with no tabs when nothing is running", async () => {
+    const { w } = await mountLauncher((path) => (path === "/api/sessions" ? { sessions: [] } : {}));
+    await new Promise((r) => setTimeout(r, 10));
+    expect(w.document.querySelectorAll(".tab-label").length).toBe(0);
+  });
+});
+
 describe("AI Console launcher — reseller keys in the Keys panel (CPE-452)", () => {
   it("offers resellers in the key dropdown and routes save to the reseller endpoint", async () => {
     const posts: { path: string; body: any }[] = [];
