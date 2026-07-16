@@ -4,6 +4,7 @@
       close-all action. The owner decides what each action does; this only positions + dispatches. */
   import { createEventDispatcher, onMount } from "svelte";
   import Icon from "./Icon.svelte";
+  import { sessionColor, sessionNum } from "../sessionChip";
 
   export let x = 0;
   export let y = 0;
@@ -47,7 +48,9 @@
 >
   {#if sessionId}
     <button class="row" role="menuitem" on:click={() => { dispatch("closeOne", sessionId); dispatch("close"); }}>
-      <Icon name="close" size={15} /> Close {sessionLabel}
+      <!-- The same colour+number chip as the leaf (CPE-493), so it's unambiguous which session closes. -->
+      <span class="menu-chip" style="background:{sessionColor(sessionId)}">{sessionNum(sessionId)}</span>
+      Close {sessionLabel}
     </button>
     <div class="sep" role="separator" />
   {/if}
@@ -81,4 +84,18 @@
   /* Item text uses the theme's --text (never a hard-coded colour); hover comes from the global
      `button:hover → var(--hover)` (app.css), matching ContextMenu/TabMenu. See docs/design/MENUS.md. */
   .sep { height: 1px; margin: 4px 6px; background: var(--border); }
+  /* Same session-identity chip as the left-pane leaf + the AI Console tab (CPE-490/493). */
+  .menu-chip {
+    flex: 0 0 auto;
+    display: inline-grid;
+    place-items: center;
+    width: 16px;
+    height: 16px;
+    border-radius: 5px;
+    color: #fff;
+    font-size: 10px;
+    font-weight: 700;
+    line-height: 1;
+    font-variant-numeric: tabular-nums;
+  }
 </style>

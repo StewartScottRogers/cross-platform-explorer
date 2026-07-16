@@ -26,7 +26,7 @@ describe("AgentMenu", () => {
   });
 
   it("offers a per-session close that dispatches closeOne with the id (CPE-489)", async () => {
-    const { component } = render(AgentMenu, {
+    const { component, container } = render(AgentMenu, {
       props: { label: "Close all consoles", sessionId: "s2", sessionLabel: "claude · sonnet-4.5" },
     });
     const closeOne = vi.fn();
@@ -35,6 +35,12 @@ describe("AgentMenu", () => {
     // Both items are present: the specific session AND close-all.
     const one = screen.getByRole("menuitem", { name: /close claude · sonnet-4\.5/i });
     expect(screen.getByRole("menuitem", { name: /close all consoles/i })).toBeTruthy();
+
+    // The per-session item carries the same chip as the leaf (CPE-493): number from the id.
+    const chip = container.querySelector(".menu-chip") as HTMLElement;
+    expect(chip).toBeTruthy();
+    expect(chip.textContent).toBe("2");
+    expect(chip.style.background).not.toBe("");
 
     await fireEvent.click(one);
     expect(closeOne).toHaveBeenCalledOnce();
