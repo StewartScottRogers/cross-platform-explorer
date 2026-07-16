@@ -2250,6 +2250,7 @@ fn sidecar_details(app: tauri::AppHandle, state: tauri::State<AiConsoleState>) -
 fn sidecar_stop(id: String, state: tauri::State<AiConsoleState>) -> Result<(), String> {
     if id == "ai-console" {
         *state.conn.lock().map_err(|_| "state lock poisoned")? = None;
+        *state.url.lock().map_err(|_| "state lock poisoned")? = None; // no reuse once stopped (CPE-464)
         state.log(sidecar_host::observability::LogLevel::Info, "stopped by user");
     }
     Ok(())
@@ -2269,6 +2270,7 @@ fn sidecar_set_enabled(
     store.set_enabled(&id, enabled).map_err(|e| e.to_string())?;
     if !enabled && id == "ai-console" {
         *state.conn.lock().map_err(|_| "state lock poisoned")? = None; // stop it now
+        *state.url.lock().map_err(|_| "state lock poisoned")? = None; // CPE-464
         state.log(sidecar_host::observability::LogLevel::Info, "disabled by user");
     }
     Ok(())
@@ -2288,6 +2290,9 @@ struct AiConsoleState {
     conn: std::sync::Mutex<Option<ConsoleConn>>,
     logs: sidecar_host::observability::LogCapture,
     last_error: std::sync::Mutex<Option<String>>,
+    /// The running sidecar's served UI URL (CPE-464) — so reopening the console reuses the live
+    /// sidecar (and its sessions) instead of spawning a fresh one. `None` when not running.
+    url: std::sync::Mutex<Option<String>>,
 }
 
 /// Control handle for the AI Console servicing thread (CPE-349). Dropping it asks the thread
@@ -2931,6 +2936,7 @@ impl Default for AiConsoleState {
             // crash without growing without bound (CPE-298).
             logs: sidecar_host::observability::LogCapture::new(200),
             last_error: std::sync::Mutex::new(None),
+            url: std::sync::Mutex::new(None),
         }
     }
 }
@@ -3020,6 +3026,17 @@ fn sidecar_start_ai_console(
         return Err(state.fail("the AI Console is disabled"));
     }
 
+    // Reuse a still-running sidecar (CPE-464). Closing + reopening the AI Console window must NOT
+    // spawn a second sidecar — that would drop the old one and kill its live agent sessions. If one
+    // is already running, return its served URL so the reopened window loads the SAME sidecar and
+    // reattaches to the live sessions (CPE-461).
+    if state.conn.lock().map(|g| g.is_some()).unwrap_or(false) {
+        if let Some(url) = state.url.lock().ok().and_then(|g| g.clone()) {
+            state.log(LogLevel::Info, "reusing running ai-console");
+            return Ok(url);
+        }
+    }
+
     state.log(LogLevel::Info, "starting ai-console");
     let bin = resolve_ai_console_bin(&app).map_err(|e| state.fail(e))?;
     // Tell the sidecar where the (fetched) catalog lives + which key to trust, so it loads and can
@@ -3081,6 +3098,8 @@ fn sidecar_start_ai_console(
         serve_ai_console_requests(conn, consented, thread_stop, storage_base, app_for_thread)
     });
     *state.conn.lock().map_err(|_| "state lock poisoned")? = Some(ConsoleConn { stop, _thread: thread });
+    // Remember the served URL so a reopen reuses this same sidecar (CPE-464).
+    *state.url.lock().map_err(|_| "state lock poisoned")? = Some(url.clone());
     Ok(url)
 }
 
