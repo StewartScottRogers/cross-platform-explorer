@@ -2,10 +2,10 @@
 id: CPE-309
 title: Session reattachment across sidecar restart
 type: Feature
-status: Open
+status: Deferred
 priority: Medium
 component: Backend
-tags: [ready]
+tags: [big-design]
 estimate: 3-4h
 created: 2026-07-13
 ---
@@ -122,3 +122,36 @@ as the final slice rather than rushed. Foundation (engine + server + client, all
 **Built + tested (engine/transport):** `SessionDaemon`, `session_server`, `SessionClient`, the `--session-daemon` process mode — all unit-tested. **New this slice:** `session_supervisor::SessionDaemonHandle` — spawns/owns the daemon child, reads its `PORT`, hands out clients, reaps on drop; an integration test spawns the REAL process, connects a client, lists, and reaps.
 
 **Remaining (kept open, now `ready`):** route `ConsoleState`'s `handle_launch`/`ws_route`/input/resize/close_*/`/api/sessions` through the `SessionClient` instead of owning in-process `PtySession`s; reattach on console boot; supervise+restart. **Verification is a multi-process runtime test** (launch → kill the console, not the daemon → new console reattaches with scrollback) — the honest gate before closing.
+
+2026-07-15 (user: "do CPE-309") — **Landed the automated cross-process reattach proof** and reassessed
+closure. Added `tests/session_reattach_across_restart.rs`: it spawns the **real** `--session-daemon`
+process, has client A launch a session and read its first output, **drops client A** (the launching
+console dying — crash/update/toggle), then a **new** client B reconnects to the same daemon process,
+`list`s the session (still alive), re-attaches, and recovers the **scrollback replay (READY) + live
+output (TICK)**. This is the automated form of AC4's core claim — "restart the sidecar mid-session,
+session recoverable" — proven against a genuinely separate OS process, not an in-process served daemon
+(the existing `session_daemon_process.rs` only proved boot/bind/list-empty). **Ran locally: 1 passed
+in 4.98s; `cargo clippy --all-targets -D warnings` clean.** Purely additive — no source touched, so the
+147-test session subsystem is unchanged.
+
+**Honest closure assessment — Deferred (not Done).** The reattach *mechanism* (engine + server + client
++ supervisor + this real-process reattach test) is complete and verifiable headlessly. But the four
+ACs are **product-level** and the remaining tail is coupled + gated on a live run I cannot do headlessly:
+  - **S3 (console rewire)** — route `ConsoleState`'s launch/ws/input/resize/close through the
+    `SessionClient`, moving history recording (CPE-370) + the read-tap (CPE-405) into the attach pump.
+    Invasive to a working 2228-line, 147-test file. On its own it delivers **no** new user-visible
+    capability (a UI reopen already reattaches in-process via CPE-461), so it is net-negative unless
+    landed **with** S4 — which is why the prior sessions deferred them together.
+  - **S4 (host supervision)** — the daemon must outlive the **sidecar process** (discover-or-spawn +
+    no-reap). On Windows this collides with the host's job-object that kills the sidecar's process
+    tree on exit; whether the daemon actually survives a host-driven sidecar swap can only be
+    confirmed by a **real host run**.
+  - **AC4 product gate** — a human GUI walkthrough: launch an agent, kill the sidecar *process*, reopen,
+    confirm the tab reattaches with scrollback. Not performable headlessly here.
+
+**Deferred-on:** internal prereq — S3 + S4 must be built together, and their honest verification is a
+live multi-process / host GUI run unavailable in this headless environment. Doing S3 alone would risk
+the session subsystem for zero user-visible gain. **Revisit-when:** picking up the console rewire +
+host daemon-supervision as one careful change, paired with a real GUI restart-survival run. The
+mechanism they build on is now fully proven (this ticket's test) — the tail is integration + a run,
+not new mechanism.

@@ -74,4 +74,12 @@ on an explicit `close_all`/shutdown (or when orphaned and idle — see Risks).
 
 - Unit: the supervisor (spawn → connect → list → reap) against the real `--session-daemon` process.
 - Unit: the daemon/server/client reattach behaviour (already covered).
-- Runtime (GUI): the full restart-survival flow above — the honest gate before this ticket closes.
+- **Cross-process (automated, landed 2026-07-15):** `tests/session_reattach_across_restart.rs` spawns
+  the real `--session-daemon` process, launches a session via client A, drops client A (the launching
+  console dying), then reconnects client B to the same process and asserts the session is still listed
+  and re-attaches with **replay (scrollback) + live output**. This is the automated form of AC4's core
+  claim against a genuinely separate OS process.
+- Runtime (GUI): the full restart-survival flow above — launch an agent, kill the **sidecar process**,
+  reopen, confirm the tab reattaches with scrollback. This remains the human gate, and depends on the
+  console-side rewire (S3) + host daemon-supervision (S4, incl. the Windows job-object question) being
+  landed together — the honest close-out gate for this ticket.
