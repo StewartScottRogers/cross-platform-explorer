@@ -156,6 +156,27 @@ jobs:
           cargo clippy --all-targets -- -D warnings
           cargo test
 
+      # CPE-322: verify a REAL OS-keychain round-trip on each runner (Windows Credential Manager /
+      # macOS Keychain / Linux Secret Service) — the hardware verification the ticket needs, run on
+      # GitHub's macOS + Linux hosts. The test is `#[ignore]`d so the normal run never touches the
+      # keychain; here we run it explicitly. Linux needs an unlocked gnome-keyring in a D-Bus session.
+      # Best-effort (continue-on-error): a CI keychain quirk must never red the pipeline — a green run
+      # is the signal.
+      - name: host — real keychain round-trip (CPE-322)
+        working-directory: sidecar/host
+        continue-on-error: true
+        shell: bash
+        run: |
+          if [ "$RUNNER_OS" = "Linux" ]; then
+            sudo apt-get install -y gnome-keyring
+            dbus-run-session -- bash -c '
+              eval "$(printf "\n" | gnome-keyring-daemon --unlock --components=secrets)"
+              cargo test --test keyring_roundtrip -- --ignored --nocapture
+            '
+          else
+            cargo test --test keyring_roundtrip -- --ignored --nocapture
+          fi
+
       - name: ai-console — clippy + test
         working-directory: sidecar/ai-console
         run: |
