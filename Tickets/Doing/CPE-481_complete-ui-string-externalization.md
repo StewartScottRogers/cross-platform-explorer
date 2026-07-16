@@ -45,3 +45,10 @@ including interpolation (`ctx.selectAllExt` with `{ext}`) and the conditional pi
 Test added (context-menu translations + all-locale coverage). `npm run check` clean; 469 frontend
 tests pass. Remaining: the ContextMenu top-row icon-button tooltips (Cut/Copy/Rename/Delete — carry
 hotkeys), and the dialogs (Properties, BatchRename, Duplicates, Update, Consent), HomeView, CommandBar.
+2026-07-16 (Nightshift loop 16) — Migrated **CommandBar.svelte** (the toolbar): New/Open/Sort/View
+buttons, the Sort menu (Name/Date modified/Type/Size + Ascending/Descending), the View menu
+(Details/List/Large icons + Show hidden files/Group folders first), and the Filter menu (All items/
+Folders/Images/Documents/Audio & video/Code/Archives — rendered via `$t('filter.'+key)` without
+touching the shared FILE_FILTERS array's logic). 23 keys (cmd./sort./view./filter.) × 4 locales.
+Test added. `npm run check` clean; 470 frontend tests pass. Remaining: dialogs (Properties,
+BatchRename, Duplicates, Update, Consent), HomeView, and a few icon-button tooltips.
