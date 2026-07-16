@@ -2,12 +2,13 @@
 id: CPE-501
 title: "EPIC: Agent Grid — tiled split-pane grid of agent terminals"
 type: Task
-status: In Progress
+status: Done
 priority: Medium
 component: Multiple
 tags: [epic]
 estimate: 4h+
 created: 2026-07-16
+closed: 2026-07-16
 ---
 
 ## Summary
@@ -61,9 +62,37 @@ grid math + toggle/persistence logic is unit-testable headlessly.
 Suggested order: **CPE-506** first (unblocks all), then CPE-507 / CPE-509 (independent), CPE-508
 (performance), CPE-510 (polish).
 
+## Resolution (closed 2026-07-16)
+The Agent Grid shipped end-to-end over five children, all Done — the AI Console can now show many
+running agents side by side, per the activation decisions (auto-reflow grid · Tabs⇄Grid toggle · 16
+panes with off-screen throttling · persist per session-set):
+- **[[CPE-506]]** — auto-reflow layout engine + Tabs⇄Grid toggle (foundation; `gridDims`, `applyView`).
+- **[[CPE-507]]** — per-pane identity (CPE-490 chip/label/usage) + focus ring + Ctrl+Alt+Arrow keynav.
+- **[[CPE-508]]** — scale to 16 tiles with off-screen output throttling (no output lost).
+- **[[CPE-509]]** — persist the view + focus per workspace, restored on relaunch/reattach (CPE-309).
+- **[[CPE-510]]** — responsive narrow-window fallback (width-aware columns, no horizontal scroll).
+
+All built additively over the existing per-session term-panes — the **plain single-pane tabs view is
+the untouched default** (PURPOSE tiebreaker). Fully headless-tested: the launcher jsdom harness grew
+from 33 → 48 tests (gridDims/toggle/nextPaneId/paneWritePolicy/visibleGridIds/serialize/colsForWidth);
+523 frontend tests pass overall; `npm run check` clean throughout.
+
+**Carve-out / deferred (recorded):** the *live* 16-PTY smoothness measurement in [[CPE-508]] needs real
+WebView2 + PTYs and is deferred to GUI QA — the throttle mechanism + policy are unit-verified. Also, a
+future **manual split-pane override** (vs. pure auto-grid) was consciously left out at activation and
+could be a follow-up. Neither blocks this epic.
+
+The [[CPE-511]] Herdr spike (filed during this epic) recommends adding **semantic agent-state
+awareness** (idle/working/blocked/done) to these grid tiles — a strong candidate follow-up child/sibling.
+
 ## Notes
 Successor/sibling to [[CPE-261]]; from [[CPE-500]]. Highest-value + closest-to-existing of the five —
 recommended to build first.
+
+## Work Log (close)
+2026-07-16 — **Closed.** All 5 children (CPE-506…510) Done; DoD met (grid usable end-to-end, identity +
+keynav, 16-pane throttling, persistence, responsive). Built additively; plain tabs view unchanged.
+Deferred: live 16-PTY perf measurement (GUI QA) + optional manual splits. Moved Epics/ → Done/.
 
 ## Work Log
 2026-07-16 — Filed as a dormant `Proposed` brief (from spike CPE-500).
