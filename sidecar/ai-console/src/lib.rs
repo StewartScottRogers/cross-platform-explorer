@@ -72,6 +72,8 @@ pub mod swarm_locks;
 pub use swarm_locks::{path_globs_overlap, ClaimOutcome, LockManager};
 pub mod swarm_team;
 pub use swarm_team::{default_team, Role, RoleSpec, TeamError, TeamManifest};
+pub mod swarm_mailbox;
+pub use swarm_mailbox::Mailbox; // Message/Recipient via swarm_mailbox:: (Message clashes with the contract's)
 pub use session_client::{SessionClient, StreamMsg};
 
 pub use plugins::{install_plugin, uninstall_plugin, PluginApplier, PluginManifest, PluginRegistry};
