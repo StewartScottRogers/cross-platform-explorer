@@ -8,5 +8,7 @@
     "api.aimlapi.com"
   ],
   "normalizer": "openai",
-  "web_base": "https://aimlapi.com/models"
+  "web_base": "https://aimlapi.com/models",
+  "protocol": "openai",
+  "launch_base_url": "https://api.aimlapi.com/v1"
 }

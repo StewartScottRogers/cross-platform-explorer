@@ -8,5 +8,7 @@
     "api.groq.com"
   ],
   "normalizer": "openai",
-  "web_base": "https://console.groq.com/docs/models"
+  "web_base": "https://console.groq.com/docs/models",
+  "protocol": "openai",
+  "launch_base_url": "https://api.groq.com/openai/v1"
 }

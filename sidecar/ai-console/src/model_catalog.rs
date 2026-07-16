@@ -61,6 +61,15 @@ pub struct ResellerManifest {
     pub normalizer: String,
     #[serde(default)]
     pub web_base: Option<String>,
+    /// The API dialect this reseller's **inference** endpoint speaks — `anthropic` | `openai` —
+    /// matched against an agent's `reseller_recipes` so it can be launched (CPE-468/471). `None` ⇒
+    /// model-list only (not yet launch-capable).
+    #[serde(default)]
+    pub protocol: Option<String>,
+    /// The inference base URL fed to a launch as `{base_url}` (e.g. `https://api.together.xyz/v1`).
+    /// Distinct from `models_endpoint` (the list URL). `None` ⇒ not launch-capable (CPE-471).
+    #[serde(default)]
+    pub launch_base_url: Option<String>,
     #[serde(skip)]
     pub source_dir: Option<PathBuf>,
 }
@@ -86,7 +95,35 @@ impl ResellerManifest {
         if !KNOWN_NORMALIZERS.contains(&self.normalizer.as_str()) {
             return Err(format!("reseller '{}' has unknown normalizer '{}'", self.id, self.normalizer));
         }
+        // Launch fields (CPE-471) are optional, but if present must be well-formed: a known protocol
+        // and an https base URL, so a malformed launch descriptor can't reach the launcher.
+        if let Some(p) = &self.protocol {
+            if !matches!(p.as_str(), "anthropic" | "openai") {
+                return Err(format!("reseller '{}' has unknown protocol '{}'", self.id, p));
+            }
+        }
+        if let Some(b) = &self.launch_base_url {
+            if !b.starts_with("https://") {
+                return Err(format!("reseller '{}' launch_base_url must be https", self.id));
+            }
+        }
         Ok(())
+    }
+
+    /// A launch [`ResellerDescriptor`](crate::routing::ResellerDescriptor) for this reseller, if it
+    /// declares an inference protocol + base URL (CPE-468/471). `None` for a model-list-only reseller.
+    pub fn descriptor(&self) -> Option<crate::routing::ResellerDescriptor> {
+        let protocol = self.protocol.as_deref()?.trim();
+        let base_url = self.launch_base_url.as_deref()?.trim();
+        if protocol.is_empty() || base_url.is_empty() {
+            return None;
+        }
+        Some(crate::routing::ResellerDescriptor {
+            id: self.id.clone(),
+            name: self.name.clone(),
+            protocol: protocol.to_string(),
+            base_url: base_url.to_string(),
+        })
     }
 }
 
@@ -161,6 +198,15 @@ impl ResellerRegistry {
     }
     pub fn warnings(&self) -> &[LoadWarning] {
         &self.warnings
+    }
+
+    /// Every **launch-capable** reseller as a descriptor (CPE-471) — what the launcher offers as
+    /// providers and routes launches through (`compose_reseller_launch`). Model-list-only resellers
+    /// (no `protocol`/`launch_base_url`) are excluded. Ordered by id for a stable menu.
+    pub fn descriptors(&self) -> Vec<crate::routing::ResellerDescriptor> {
+        let mut ds: Vec<_> = self.resellers.iter().filter_map(|m| m.descriptor()).collect();
+        ds.sort_by(|a, b| a.id.cmp(&b.id));
+        ds
     }
 
     /// The union of every reseller's `api_hosts` — the host's egress allow-list (CPE-447). Sorted +
@@ -305,6 +351,74 @@ mod tests {
         assert_eq!(reg.get("openrouter").unwrap().normalizer, "openrouter");
         assert_eq!(reg.egress_allow_list(), vec!["api.groq.com", "openrouter.ai"]);
         assert!(reg.warnings().is_empty());
+    }
+
+    #[test]
+    fn launch_fields_derive_a_reseller_descriptor_only_when_present() {
+        let dir = tempfile::tempdir().unwrap();
+        // Launch-capable: has protocol + launch_base_url.
+        write_manifest(
+            dir.path(),
+            "together.json",
+            r#"{"schema_version":1,"id":"together","name":"Together AI",
+               "models_endpoint":"https://api.together.xyz/v1/models","auth":"bearer",
+               "api_hosts":["api.together.xyz"],"normalizer":"openai",
+               "protocol":"openai","launch_base_url":"https://api.together.xyz/v1"}"#,
+        );
+        // Model-list only: no launch fields → no descriptor.
+        write_manifest(
+            dir.path(),
+            "listonly.json",
+            r#"{"schema_version":1,"id":"listonly","name":"ListOnly",
+               "models_endpoint":"https://x.example/v1/models","auth":"bearer",
+               "api_hosts":["x.example"],"normalizer":"openai"}"#,
+        );
+        let reg = ResellerRegistry::load_from_dirs(&[dir.path().to_path_buf()]);
+        assert!(reg.warnings().is_empty());
+        assert_eq!(reg.get("listonly").unwrap().descriptor(), None);
+        let together = reg.get("together").unwrap().descriptor().expect("launch-capable");
+        assert_eq!(together.protocol, "openai");
+        assert_eq!(together.base_url, "https://api.together.xyz/v1");
+        // descriptors() returns only the launch-capable one.
+        let ds = reg.descriptors();
+        assert_eq!(ds.len(), 1);
+        assert_eq!(ds[0].id, "together");
+    }
+
+    #[test]
+    fn malformed_launch_fields_are_rejected_as_warnings() {
+        let dir = tempfile::tempdir().unwrap();
+        write_manifest(
+            dir.path(),
+            "badproto.json",
+            r#"{"schema_version":1,"id":"a","name":"A","models_endpoint":"https://a/v1/models",
+               "auth":"bearer","api_hosts":["a"],"normalizer":"openai","protocol":"grpc"}"#,
+        );
+        write_manifest(
+            dir.path(),
+            "httpbase.json",
+            r#"{"schema_version":1,"id":"b","name":"B","models_endpoint":"https://b/v1/models",
+               "auth":"bearer","api_hosts":["b"],"normalizer":"openai",
+               "protocol":"openai","launch_base_url":"http://b/v1"}"#,
+        );
+        let reg = ResellerRegistry::load_from_dirs(&[dir.path().to_path_buf()]);
+        assert_eq!(reg.len(), 0, "both malformed manifests should be skipped");
+        assert_eq!(reg.warnings().len(), 2);
+    }
+
+    #[test]
+    fn the_bundled_resellers_expose_launch_descriptors() {
+        // The migrated OpenAI-compatible resellers (CPE-471) must be launch-capable.
+        let dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("resellers");
+        let reg = ResellerRegistry::load_from_dirs(&[dir]);
+        assert!(reg.warnings().is_empty(), "bundled resellers must all be valid: {:?}", reg.warnings());
+        let ids: Vec<_> = reg.descriptors().into_iter().map(|d| d.id).collect();
+        for expected in ["together", "groq", "fireworks", "deepinfra", "novita", "aimlapi"] {
+            assert!(ids.contains(&expected.to_string()), "{expected} should be launch-capable; got {ids:?}");
+        }
+        let groq = reg.get("groq").unwrap().descriptor().unwrap();
+        assert_eq!(groq.base_url, "https://api.groq.com/openai/v1");
+        assert_eq!(groq.protocol, "openai");
     }
 
     #[test]

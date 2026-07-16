@@ -8,5 +8,7 @@
     "api.deepinfra.com"
   ],
   "normalizer": "openai",
-  "web_base": "https://deepinfra.com/models"
+  "web_base": "https://deepinfra.com/models",
+  "protocol": "openai",
+  "launch_base_url": "https://api.deepinfra.com/v1/openai"
 }
