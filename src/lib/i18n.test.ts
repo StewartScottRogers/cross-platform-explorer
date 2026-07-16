@@ -36,6 +36,19 @@ describe("i18n translate()", () => {
     expect(translate("es", "does.not.exist")).toBe("does.not.exist");
   });
 
+  it("translates the menu dropdown items across locales (CPE-481)", () => {
+    expect(translate("en", "mi.searchInFiles")).toBe("Search in files…");
+    expect(translate("es", "mi.settings")).toBe("Configuración…");
+    expect(translate("de", "mi.exit")).toBe("Beenden");
+    expect(translate("fr", "mi.about")).toBe("À propos");
+    // Every menu-item key is defined in all four locales (no fallback needed).
+    const keys = localeKeys("en").filter((k) => k.startsWith("mi."));
+    expect(keys.length).toBeGreaterThanOrEqual(11);
+    for (const loc of ["es", "de", "fr"] as const) {
+      for (const k of keys) expect(localeKeys(loc)).toContain(k);
+    }
+  });
+
   it("interpolates {name} placeholders", () => {
     expect(translate("en", "status.items", { count: 42 })).toBe("42 items");
     expect(translate("es", "status.selected", { count: 3 })).toBe("3 seleccionados");

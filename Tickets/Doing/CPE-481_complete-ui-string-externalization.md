@@ -2,7 +2,7 @@
 id: CPE-481
 title: "Complete UI string externalization — migrate remaining components to i18n"
 type: Task
-status: Open
+status: In Progress
 priority: Low
 component: Frontend
 tags: [ready]
@@ -30,3 +30,12 @@ catalog keys, so the app is fully translatable.
 Split from CPE-362 (the i18n framework). Deliberately Low — a single-user local explorer — but now
 that the framework exists, this is straightforward per-component work. The framework's fallback
 (locale → English → key) means partial migration is always safe/legible in the meantime.
+
+## Work Log
+2026-07-16 (Nightshift loop 10) — Migrated the **MenuBar dropdown items** (File/Tools/Application:
+Exit, Search in files, Find duplicate files, Copy file names, Copy file list, Save file list, Check
+for Updates, Settings, Keyboard shortcuts, Documentation, About) to i18n. Added 11 `mi.*` keys to all
+4 locales (en/es/de/fr) in `src/lib/i18n.ts`; `MenuBar.svelte` items now carry a `labelKey` rendered
+via `$t()`. Test added (menu-item translations + all-locale coverage). `npm run check` clean; 468
+frontend tests pass. Remaining to migrate (future loops): dialogs (Properties, BatchRename,
+Duplicates, Update, Consent), ContextMenu, CommandBar, FileList, HomeView, App.svelte chrome.
