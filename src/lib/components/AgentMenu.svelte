@@ -46,12 +46,12 @@
   on:contextmenu|stopPropagation|preventDefault
 >
   {#if sessionId}
-    <button class="row danger" role="menuitem" on:click={() => { dispatch("closeOne", sessionId); dispatch("close"); }}>
+    <button class="row" role="menuitem" on:click={() => { dispatch("closeOne", sessionId); dispatch("close"); }}>
       <Icon name="close" size={15} /> Close {sessionLabel}
     </button>
     <div class="sep" role="separator" />
   {/if}
-  <button class="row" class:danger={!sessionId} role="menuitem" on:click={() => { dispatch("confirm"); dispatch("close"); }}>
+  <button class="row" role="menuitem" on:click={() => { dispatch("confirm"); dispatch("close"); }}>
     <Icon name="close" size={15} /> {label}
   </button>
 </div>
@@ -78,7 +78,7 @@
     text-align: left;
     border-radius: var(--radius);
   }
-  .row.danger { color: #d05656; }
-  .row:hover { background: var(--active); }
+  /* Item text uses the theme's --text (never a hard-coded colour); hover comes from the global
+     `button:hover → var(--hover)` (app.css), matching ContextMenu/TabMenu. See docs/design/MENUS.md. */
   .sep { height: 1px; margin: 4px 6px; background: var(--border); }
 </style>

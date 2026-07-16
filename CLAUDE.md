@@ -58,11 +58,19 @@ Then tag `vX.Y.Z` and push â€” CI does the rest.
 - Filesystem commands skip entries they can't read rather than failing the whole
   listing â€” preserve that behavior when editing `list_dir`.
 
+## UI conventions
+
+- **Menus** — every popup menu (right-click context menus + dropdowns) follows one standard:
+  [docs/design/MENUS.md](docs/design/MENUS.md). Key rule: item text is always `var(--text)` (never a
+  hard-coded colour, never red for "destructive"); colours come from theme variables so menus are
+  identical light/dark and cross-platform. New menus must match it.
+
 ## Docs
 
 - Tauri v2: https://v2.tauri.app
 - Updater plugin: https://v2.tauri.app/plugin/updater/
 - tauri-action: https://github.com/tauri-apps/tauri-action
+- Menu design standard: [docs/design/MENUS.md](docs/design/MENUS.md)
 
 ## Managing this project â€” two surfaces
 
