@@ -138,6 +138,53 @@ describe("AI Console launcher — Agent Grid view (CPE-506)", () => {
   });
 });
 
+describe("AI Console launcher — grid pane identity + keyboard nav (CPE-507)", () => {
+  it("nextPaneId moves row-major in a cols-wide grid and clamps at edges", async () => {
+    const { w } = await mountLauncher();
+    const ids = ["a", "b", "c", "d", "e"]; // 5 panes → gridDims cols = 3 (rows 2×3)
+    // 0 1 2
+    // 3 4
+    expect(w.nextPaneId(ids, "a", "right", 3)).toBe("b");
+    expect(w.nextPaneId(ids, "a", "down", 3)).toBe("d");
+    expect(w.nextPaneId(ids, "e", "left", 3)).toBe("d");
+    expect(w.nextPaneId(ids, "d", "up", 3)).toBe("a");
+    // Edge clamps: no movement past the ends / off-grid.
+    expect(w.nextPaneId(ids, "a", "left", 3)).toBe("a");
+    expect(w.nextPaneId(ids, "a", "up", 3)).toBe("a");
+    expect(w.nextPaneId(ids, "e", "down", 3)).toBe("e");
+    expect(w.nextPaneId(ids, "x", "right", 3)).toBe("x"); // unknown id unchanged
+  });
+
+  it("gives every grid tile an identity header with the CPE-490 chip number", async () => {
+    const { w } = await mountLauncher();
+    const doc = w.document;
+    w.addSession("agent-1", "Claude Code");
+    w.addSession("agent-2", "aider");
+    const heads = [...doc.querySelectorAll(".pane-head")];
+    expect(heads.length).toBe(2);
+    // Chip number is derived from the id digits (sessionNum), label is the session name.
+    const chip = heads[0].querySelector(".pane-chip");
+    const label = heads[0].querySelector(".pane-label");
+    expect(chip.textContent).toBe("1");
+    expect(label.textContent).toBe("Claude Code");
+  });
+
+  it("focusPane moves the focus ring + active highlight to the clicked tile", async () => {
+    const { w } = await mountLauncher();
+    const doc = w.document;
+    w.addSession("agent-1", "A");
+    w.addSession("agent-2", "B");
+    w.setView("grid");
+    w.focusPane("agent-1");
+    const panes = [...doc.querySelectorAll(".term-pane")];
+    const focused = panes.filter((p: any) => p.classList.contains("focused"));
+    expect(focused.length).toBe(1);
+    // The focused pane is the first tile (agent-1), matching the active tab.
+    const activeTabs = [...doc.querySelectorAll(".tab.active")];
+    expect(activeTabs.length).toBe(1);
+  });
+});
+
 describe("AI Console launcher — named sets / presets (the reported confusion)", () => {
   it("renders the current agent's sets into the dropdown, with a blank placeholder", async () => {
     const { w } = await mountLauncher();

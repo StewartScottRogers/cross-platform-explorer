@@ -126,8 +126,23 @@
                      grid-template-rows: repeat(var(--grid-rows, 1), minmax(0, 1fr)); }
   #terms.grid-view .term-pane { position: relative; inset: auto; border: 1px solid #2a2a2a;
                                 border-radius: 6px; overflow: hidden; }
-  /* The focused tile gets a subtle ring; the fuller focus/keynav UX is CPE-507. */
-  #terms.grid-view .term-pane.focused { border-color: #4a86c5; }
+  /* The focused tile gets a subtle ring (CPE-507). */
+  #terms.grid-view .term-pane.focused { border-color: #4a86c5; box-shadow: inset 0 0 0 1px #4a86c5; }
+  /* Per-pane identity header (CPE-507): chip + label + usage, shown only in grid view; reserves a
+     22px strip at the top of each tile that the terminal host/scrollbar are offset below. */
+  .pane-head { display: none; position: absolute; top: 0; left: 0; right: 0; height: 22px; z-index: 2;
+               align-items: center; gap: 6px; padding: 0 8px; background: #161616;
+               border-bottom: 1px solid #2a2a2a; font-size: 11px; }
+  #terms.grid-view .pane-head { display: flex; }
+  #terms.grid-view .term-host { top: 22px; }
+  #terms.grid-view .sb { top: 22px; }
+  .pane-chip { flex: 0 0 auto; display: inline-grid; place-items: center; width: 15px; height: 15px;
+               border-radius: 4px; color: #fff; font-size: 10px; font-weight: 700;
+               font-variant-numeric: tabular-nums; }
+  .pane-label { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; opacity: .9; }
+  .pane-usage { flex: 0 0 auto; opacity: .62; white-space: nowrap; font-variant-numeric: tabular-nums; }
+  .pane-usage:empty { display: none; }
+  .term-pane.ended .pane-label { text-decoration: line-through; opacity: .55; }
   /* "Manage agents" dropdown + Help panel (CPE-390) */
   .menu-wrap { position: relative; display: inline-block; }
   /* System-color theming (Canvas/CanvasText) + var(--line) border, matching #model-menu, so both
@@ -390,6 +405,12 @@
         <h3>6 · Recent sessions — “Recent…”</h3>
         <p>Lists past sessions (kept across restarts). <b>Relaunch</b> reopens one with the same agent/provider/model/folder; or view its (secret-redacted) transcript.</p>
 
+        <h3>See several agents at once — Grid</h3>
+        <p>With sessions open, click <b>▦ Grid</b> to tile every agent side by side (they auto-arrange);
+          click <b>▤ Tabs</b> to go back to one at a time. In grid view, click a tile to focus it, or
+          press <b>Ctrl+Alt+Arrow</b> to move between tiles. Each tile shows the agent's colour chip,
+          name, and usage. Nothing about the single-tab view changes.</p>
+
         <h3>Permissions</h3>
         <p>The console runs as its own sandboxed process and only gets what you allow. <b>Secrets</b> is the permission that lets it store your API keys — if you skip it, saving keys won't work and you'll simply be asked again next time you open the console. Review or revoke permissions in the app's sidecar settings.</p>
       </div>
@@ -590,7 +611,9 @@ function fmtUsage(u) {
 function applyUsage(d) {
   const byId = new Map((d.sessions || []).map((s) => [s.id, s.usage]));
   for (const [id, s] of sessions) {
-    if (s.usageEl) s.usageEl.textContent = fmtUsage(byId.get(id));
+    const u = fmtUsage(byId.get(id));
+    if (s.usageEl) s.usageEl.textContent = u;
+    if (s.paneUsageEl) s.paneUsageEl.textContent = u; // mirror onto the grid pane header (CPE-507)
   }
   const active = activeId != null ? byId.get(activeId) : null;
   const el = $("sb-usage");
@@ -720,6 +743,30 @@ function updateViewToggle() {
 function setView(mode) { viewMode = (mode === "grid" ? "grid" : "tabs"); applyView(); }
 function toggleView() { setView(viewMode === "grid" ? "tabs" : "grid"); }
 
+// Move focus to a pane WITHOUT relaying out (CPE-507): update activeId + focus ring + tab highlight.
+function focusPane(id) {
+  const s = sessions.get(id); if (!s) return;
+  activeId = id;
+  for (const t of sessions.values()) {
+    t.pane.classList.toggle("focused", viewMode === "grid" && t.id === activeId);
+    t.tab.classList.toggle("active", t.id === activeId);
+  }
+  if (s.term) s.term.focus();
+}
+
+// The pane id reached by moving `dir` from `currentId` in a `cols`-wide grid (row-major insertion
+// order). Clamps at the edges (no wrap). Pure — unit-tested.
+function nextPaneId(ids, currentId, dir, cols) {
+  const i = ids.indexOf(currentId);
+  if (i < 0) return currentId;
+  let n = i;
+  if (dir === "left") n -= 1;
+  else if (dir === "right") n += 1;
+  else if (dir === "up") n -= cols;
+  else if (dir === "down") n += cols;
+  return n >= 0 && n < ids.length ? ids[n] : currentId;
+}
+
 // Session-identity chip (CPE-490) — MUST match src/lib/sessionChip.ts so a console tab and its
 // left-pane Agents leaf show the same colour + number (same session id ⇒ same chip).
 const SESSION_CHIP_COLORS = ["#3a72b5","#3a9d4a","#b5872b","#a24bd0","#c94f4f","#2aa1a1","#c96f18","#6b7bd6"];
@@ -820,7 +867,7 @@ function connectWs(s) {
     scheduleThumb(s); // content grew — resize/reposition the thumb
   };
   s.ws.onopen = () => refit(s);
-  s.ws.onclose = () => s.tab.classList.add("ended");
+  s.ws.onclose = () => { s.tab.classList.add("ended"); s.pane.classList.add("ended"); };
 }
 
 function addSession(id, name) {
@@ -829,6 +876,14 @@ function addSession(id, name) {
   const sb = document.createElement("div"); sb.className = "sb";
   const thumb = document.createElement("div"); thumb.className = "sb-thumb";
   sb.appendChild(thumb); pane.appendChild(host); pane.appendChild(sb);
+  // Per-pane identity header for grid view (CPE-507): same chip colour+number as the tab / left-pane
+  // Agents leaf (CPE-490), the session label, and the provider-reported usage.
+  const head = document.createElement("div"); head.className = "pane-head";
+  const pchip = document.createElement("span"); pchip.className = "pane-chip"; pchip.textContent = sessionNum(id); pchip.style.background = sessionColor(id);
+  const plbl = document.createElement("span"); plbl.className = "pane-label"; plbl.textContent = name;
+  const puse = document.createElement("span"); puse.className = "pane-usage"; puse.title = "Provider-reported usage this session";
+  head.appendChild(pchip); head.appendChild(plbl); head.appendChild(puse);
+  pane.appendChild(head);
   $("terms").appendChild(pane);
   const tab = document.createElement("div"); tab.className = "tab"; tab.title = name; // full detail on hover
   const chip = document.createElement("span"); chip.className = "tab-chip"; chip.textContent = sessionNum(id); chip.style.background = sessionColor(id);
@@ -837,10 +892,12 @@ function addSession(id, name) {
   const x = document.createElement("button"); x.className = "tab-close"; x.title = "Close session"; x.textContent = "×";
   tab.appendChild(chip); tab.appendChild(lbl); tab.appendChild(use); tab.appendChild(x);
   $("tabs").appendChild(tab);
-  const s = { id, name, term: null, fit: null, search: null, ws: null, pane, host, sb, thumb, tab, usageEl: use };
+  const s = { id, name, term: null, fit: null, search: null, ws: null, pane, host, sb, thumb, tab, usageEl: use, paneUsageEl: puse };
   sessions.set(id, s);
   tab.onclick = (e) => { if (e.target !== x) activate(id); };
   x.onclick = (e) => { e.stopPropagation(); closeSession(id); };
+  // Click a tile to focus it in grid view (CPE-507) — moves the focus ring + input target.
+  pane.addEventListener("mousedown", () => { if (viewMode === "grid") focusPane(id); });
   buildTerm(s);
   wireScrollbar(s);
   connectWs(s);
@@ -908,6 +965,13 @@ function onKey(e, s) {
   if (e.ctrlKey && e.shiftKey && k === "c") { const sel = s.term.getSelection(); if (sel) navigator.clipboard.writeText(sel).catch(() => {}); return false; }
   if (e.ctrlKey && e.shiftKey && k === "v") { navigator.clipboard.readText().then((t) => { if (s.ws && s.ws.readyState === 1) s.ws.send(t); }).catch(() => {}); return false; }
   if (e.ctrlKey && k === "f") { const q = window.prompt("Find in terminal:"); if (q && s.search) s.search.findNext(q); return false; }
+  // Ctrl+Alt+Arrow moves focus between grid tiles (CPE-507) — only in grid view, so it never steals
+  // an arrow key the terminal needs in single-pane tabs mode.
+  if (e.ctrlKey && e.altKey && viewMode === "grid" && e.key.indexOf("Arrow") === 0) {
+    const dir = e.key.slice(5).toLowerCase();
+    focusPane(nextPaneId([...sessions.keys()], activeId, dir, gridDims(sessions.size).cols));
+    return false;
+  }
   return true;
 }
 
