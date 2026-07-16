@@ -70,7 +70,19 @@ fn staff(team: &TeamManifest) -> Vec<(String, Role)> {
     out
 }
 
-/// Drives a mission to completion across a role-based team, collision-free (CPE-517).
+/// A spend cap (CPE-519). `0` means unlimited. Cost is in **milli-dollars** to stay integer.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Budget {
+    pub max_tokens: u64,
+    pub max_cost_millis: u64,
+}
+
+fn over(cap: u64, used: u64) -> bool {
+    cap > 0 && used > cap
+}
+
+/// Drives a mission to completion across a role-based team, collision-free (CPE-517), with quality
+/// gates (CPE-518) and budget/retry/authority guardrails (CPE-519).
 #[derive(Debug)]
 pub struct Coordinator {
     tasks: Vec<Task>,
@@ -79,6 +91,18 @@ pub struct Coordinator {
     busy: HashSet<String>,             // agents currently running a task
     locks: LockManager,
     mailbox: Mailbox,
+    // --- CPE-519: budgets, retry, authority ---
+    mission_budget: Budget,
+    per_agent_budget: Budget,
+    tokens_by_agent: HashMap<String, u64>,
+    cost_by_agent: HashMap<String, u64>,
+    total_tokens: u64,
+    total_cost: u64,
+    paused: HashSet<String>, // agents held back (over budget or by authority)
+    mission_paused: bool,
+    max_retries: u32,
+    attempts: HashMap<String, u32>, // failures per task
+    audit: Vec<String>,             // human-readable authority/budget events
 }
 
 impl Coordinator {
@@ -114,7 +138,28 @@ impl Coordinator {
             busy: HashSet::new(),
             locks: LockManager::new(),
             mailbox,
+            mission_budget: Budget::default(),
+            per_agent_budget: Budget::default(),
+            tokens_by_agent: HashMap::new(),
+            cost_by_agent: HashMap::new(),
+            total_tokens: 0,
+            total_cost: 0,
+            paused: HashSet::new(),
+            mission_paused: false,
+            max_retries: 0,
+            attempts: HashMap::new(),
+            audit: Vec::new(),
         })
+    }
+
+    /// Set spend caps (CPE-519): a mission-wide cap and a per-agent cap. `0` fields = unlimited.
+    pub fn set_budget(&mut self, mission: Budget, per_agent: Budget) {
+        self.mission_budget = mission;
+        self.per_agent_budget = per_agent;
+    }
+    /// How many times a failed task is retried before it's escalated to a terminal failure (CPE-519).
+    pub fn set_max_retries(&mut self, n: u32) {
+        self.max_retries = n;
     }
 
     /// Kick off the mission: dispatch every task that can start now. Returns the dispatch intents.
@@ -127,16 +172,20 @@ impl Coordinator {
     /// a single pass suffices, but the loop is robust). Returns the newly-dispatched intents.
     fn advance(&mut self) -> Vec<Assignment> {
         let mut dispatched = Vec::new();
+        if self.mission_paused {
+            return dispatched; // over the mission budget / paused by authority — dispatch nothing (CPE-519)
+        }
         loop {
             let mut progressed = false;
-            // Collect candidates first to avoid borrowing self.tasks while mutating self.
+            // Collect candidates first to avoid borrowing self.tasks while mutating self. Skip tasks
+            // whose agent is busy OR paused (over budget / stopped by authority — CPE-519).
             let ready: Vec<(String, String, Vec<String>)> = self
                 .tasks
                 .iter()
                 .filter(|t| self.state[&t.id] == TaskState::Pending)
                 .filter_map(|t| {
                     let agent = self.assignee[&t.id].clone();
-                    if self.busy.contains(&agent) {
+                    if self.busy.contains(&agent) || self.paused.contains(&agent) {
                         None
                     } else {
                         Some((t.id.clone(), agent, t.globs.clone()))
@@ -212,15 +261,117 @@ impl Coordinator {
         self.advance()
     }
 
-    /// Report a task failed outright: free its agent + release locks, mark Failed, dispatch unblocked.
-    /// (Retry policy is CPE-519.)
+    /// Report a task failed outright: free its agent + release locks, then **retry** it up to
+    /// `max_retries` (reopen to Pending) before **escalating** to a terminal Failed. Every outcome is
+    /// audited. (CPE-519)
     pub fn on_failed(&mut self, task_id: &str) -> Vec<Assignment> {
         if let Some(a) = self.assignee.get(task_id) {
             self.busy.remove(a);
         }
         self.locks.release(task_id);
-        self.state.insert(task_id.to_string(), TaskState::Failed);
+        let n = self.attempts.entry(task_id.to_string()).or_insert(0);
+        *n += 1;
+        if *n <= self.max_retries {
+            self.audit.push(format!("retry {task_id} (attempt {n})"));
+            self.state.insert(task_id.to_string(), TaskState::Pending);
+        } else {
+            self.audit.push(format!("task {task_id} failed after {n} attempt(s) — escalated"));
+            self.state.insert(task_id.to_string(), TaskState::Failed);
+        }
         self.advance()
+    }
+
+    // --- CPE-519: budget accounting + coordinator authority ---------------------------------------
+
+    /// Record provider-reported usage for `agent`. Exceeding the per-agent cap pauses that agent;
+    /// exceeding the mission cap pauses the whole mission. Never silently overspends — it stops
+    /// dispatching and records the reason. (CPE-519)
+    pub fn on_usage(&mut self, agent: &str, tokens: u64, cost_millis: u64) {
+        *self.tokens_by_agent.entry(agent.to_string()).or_insert(0) += tokens;
+        *self.cost_by_agent.entry(agent.to_string()).or_insert(0) += cost_millis;
+        self.total_tokens += tokens;
+        self.total_cost += cost_millis;
+        let at = self.tokens_by_agent[agent];
+        let ac = self.cost_by_agent[agent];
+        if (over(self.per_agent_budget.max_tokens, at) || over(self.per_agent_budget.max_cost_millis, ac))
+            && self.paused.insert(agent.to_string())
+        {
+            self.audit.push(format!("paused {agent} — over per-agent budget"));
+        }
+        if (over(self.mission_budget.max_tokens, self.total_tokens)
+            || over(self.mission_budget.max_cost_millis, self.total_cost))
+            && !self.mission_paused
+        {
+            self.mission_paused = true;
+            self.audit.push("mission paused — over budget".to_string());
+        }
+    }
+
+    /// Coordinator authority: hold an agent back from new dispatch.
+    pub fn pause_agent(&mut self, agent: &str) {
+        if self.paused.insert(agent.to_string()) {
+            self.audit.push(format!("paused {agent} (authority)"));
+        }
+    }
+    /// Release a paused agent and dispatch anything it can now take.
+    pub fn resume_agent(&mut self, agent: &str) -> Vec<Assignment> {
+        if self.paused.remove(agent) {
+            self.audit.push(format!("resumed {agent}"));
+        }
+        self.advance()
+    }
+    /// Lift a mission pause (e.g. after the budget is raised) and resume dispatch.
+    pub fn resume_mission(&mut self) -> Vec<Assignment> {
+        if self.mission_paused {
+            self.mission_paused = false;
+            self.audit.push("mission resumed".to_string());
+        }
+        self.advance()
+    }
+    /// Stop an agent: pause it and fail whatever it is running (which then follows the retry policy).
+    pub fn stop_agent(&mut self, agent: &str) -> Vec<Assignment> {
+        self.pause_agent(agent);
+        let running: Vec<String> = self
+            .tasks
+            .iter()
+            .filter(|t| {
+                self.assignee.get(&t.id).map(|a| a == agent).unwrap_or(false)
+                    && self.state[&t.id] == TaskState::Running
+            })
+            .map(|t| t.id.clone())
+            .collect();
+        let mut out = Vec::new();
+        for tid in running {
+            self.audit.push(format!("stopped {agent} running {tid}"));
+            out.extend(self.on_failed(&tid));
+        }
+        out
+    }
+    /// Reassign a not-yet-running task to a different agent, then dispatch if now possible.
+    pub fn reassign(&mut self, task_id: &str, new_agent: &str) -> Vec<Assignment> {
+        if self.state.get(task_id) == Some(&TaskState::Pending) {
+            self.assignee.insert(task_id.to_string(), new_agent.to_string());
+            self.audit.push(format!("reassigned {task_id} → {new_agent}"));
+        }
+        self.advance()
+    }
+
+    pub fn is_agent_paused(&self, agent: &str) -> bool {
+        self.paused.contains(agent)
+    }
+    pub fn is_mission_paused(&self) -> bool {
+        self.mission_paused
+    }
+    pub fn attempts_of(&self, task_id: &str) -> u32 {
+        self.attempts.get(task_id).copied().unwrap_or(0)
+    }
+    /// (total tokens, total cost in milli-dollars) spent so far.
+    pub fn spend(&self) -> (u64, u64) {
+        (self.total_tokens, self.total_cost)
+    }
+    /// The audit trail of authority + budget events.
+    pub fn audit(&self) -> &[String] {
+        &self.audit
     }
 
     pub fn state_of(&self, task_id: &str) -> Option<TaskState> {
@@ -399,6 +550,75 @@ mod tests {
         let reviewer = "claude#reviewer1";
         let inbox = c.mailbox().read(reviewer);
         assert!(inbox.iter().any(|m| m.kind == "review" && m.body == "do t1"));
+    }
+
+    // --- Budgets, retry, authority (CPE-519) --------------------------------------------
+    #[test]
+    fn a_failed_task_is_retried_up_to_the_limit_then_escalated() {
+        let mut c = Coordinator::new(&team_with_builders(1), vec![task("t1", &["a/**"])]).unwrap();
+        c.set_max_retries(2);
+        c.start();
+        c.on_failed("t1"); // attempt 1 → retry
+        assert_eq!(c.state_of("t1"), Some(TaskState::Running));
+        assert_eq!(c.attempts_of("t1"), 1);
+        c.on_failed("t1"); // attempt 2 → retry
+        assert_eq!(c.state_of("t1"), Some(TaskState::Running));
+        c.on_failed("t1"); // attempt 3 → over the limit → terminal Failed
+        assert_eq!(c.state_of("t1"), Some(TaskState::Failed));
+        assert!(c.audit().iter().any(|e| e.contains("escalated")));
+    }
+
+    #[test]
+    fn exceeding_a_per_agent_budget_pauses_that_agent() {
+        let mut c = Coordinator::new(&team_with_builders(1), vec![task("t1", &["a/**"]), task("t2", &["b/**"])]).unwrap();
+        c.set_budget(Budget::default(), Budget { max_tokens: 100, max_cost_millis: 0 });
+        c.start();
+        let agent = c.assignee_of("t1").unwrap().to_string();
+        c.on_usage(&agent, 150, 0); // blew the per-agent token cap
+        assert!(c.is_agent_paused(&agent));
+        // Finishing t1 does NOT dispatch t2 — its (only) agent is paused.
+        let next = c.on_done("t1");
+        assert!(next.is_empty());
+        assert_eq!(c.state_of("t2"), Some(TaskState::Pending));
+        // Authority resumes the agent → t2 dispatches.
+        let resumed = c.resume_agent(&agent);
+        assert_eq!(resumed.len(), 1);
+        assert_eq!(c.state_of("t2"), Some(TaskState::Running));
+    }
+
+    #[test]
+    fn exceeding_the_mission_budget_pauses_all_dispatch() {
+        // One builder so t2 waits behind t1 (agent busy) — the mission pause is what keeps it waiting.
+        let mut c = Coordinator::new(&team_with_builders(1), vec![task("t1", &["a/**"]), task("t2", &["b/**"])]).unwrap();
+        c.set_budget(Budget { max_tokens: 0, max_cost_millis: 500 }, Budget::default());
+        c.start();
+        c.on_usage("claude#builder1", 0, 600); // over the mission cost cap
+        assert!(c.is_mission_paused());
+        c.on_done("t1"); // the agent frees, but the mission is paused
+        assert_eq!(c.state_of("t2"), Some(TaskState::Pending)); // nothing new dispatches
+        let resumed = c.resume_mission();
+        assert_eq!(resumed.len(), 1);
+        assert_eq!(c.state_of("t2"), Some(TaskState::Running));
+        assert_eq!(c.spend(), (0, 600));
+    }
+
+    #[test]
+    fn authority_can_pause_reassign_and_stop() {
+        let mut c = Coordinator::new(&team_with_builders(2), vec![task("t1", &["a/**"])]).unwrap();
+        let assigned = c.assignee_of("t1").unwrap().to_string(); // fixed at construction
+        // Pause its agent → the task can't dispatch (assignment is fixed, not auto-rerouted).
+        c.pause_agent(&assigned);
+        assert!(c.start().is_empty());
+        assert_eq!(c.state_of("t1"), Some(TaskState::Pending));
+        // Reassign to the other builder → now it dispatches.
+        let other = if assigned == "claude#builder1" { "claude#builder2" } else { "claude#builder1" };
+        let re = c.reassign("t1", other);
+        assert_eq!(re.len(), 1);
+        assert_eq!(c.state_of("t1"), Some(TaskState::Running));
+        // Stop the running agent → its task fails (no retries configured) + is audited.
+        c.stop_agent(other);
+        assert_eq!(c.state_of("t1"), Some(TaskState::Failed));
+        assert!(c.audit().iter().any(|e| e.contains("stopped")));
     }
 
     #[test]
