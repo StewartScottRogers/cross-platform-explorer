@@ -3304,6 +3304,89 @@ fn forge_delete_token(provider: String) -> Result<(), String> {
     KeyringBackend.delete(FORGE_TOKEN_SERVICE, &provider)
 }
 
+/// The git sync state of a local folder for the two-way-mirror status bar (CPE-462), flattened from
+/// the repos crate's `RepoState` + safe `SyncPlan` for the frontend. `is_repo` is false for a
+/// non-repo (or when `git` isn't available).
+#[cfg(feature = "sidecar-platform")]
+#[derive(Default, serde::Serialize)]
+struct RepoSyncStatus {
+    is_repo: bool,
+    branch: Option<String>,
+    upstream: Option<String>,
+    ahead: u32,
+    behind: u32,
+    dirty: bool,
+    /// Planned safe steps: any of `pull-ff` / `pull-merge` / `pull-rebase` / `push`.
+    actions: Vec<String>,
+    up_to_date: bool,
+    conflicts_possible: bool,
+    blocked: Option<String>,
+    warnings: Vec<String>,
+}
+
+/// Report the git sync status of `path` (CPE-462) — read-only. Runs `git status --porcelain=v2
+/// --branch`, parses it (`repos::parse_status`), and plans a **safe** two-way sync
+/// (`repos::plan_sync`, never force). Used by the explorer's status bar to show ahead/behind and
+/// offer Pull/Push. A non-repo (or no `git`) returns `is_repo:false`.
+#[cfg(feature = "sidecar-platform")]
+#[tauri::command]
+fn forge_repo_status(path: String) -> RepoSyncStatus {
+    use repos::SyncAction;
+    let output = std::process::Command::new("git")
+        .args(["-C", &path, "status", "--porcelain=v2", "--branch"])
+        .output();
+    let out = match output {
+        Ok(o) if o.status.success() => o,
+        _ => return RepoSyncStatus::default(), // not a repo, or git unavailable
+    };
+    let state = repos::parse_status(&String::from_utf8_lossy(&out.stdout));
+    let plan = repos::plan_sync(&state, &repos::SyncPolicy::default());
+    let actions = plan
+        .actions
+        .iter()
+        .map(|a| match a {
+            SyncAction::PullFastForward => "pull-ff",
+            SyncAction::PullMerge => "pull-merge",
+            SyncAction::PullRebase => "pull-rebase",
+            SyncAction::Push => "push",
+        }
+        .to_string())
+        .collect();
+    RepoSyncStatus {
+        is_repo: true,
+        branch: state.branch,
+        upstream: state.upstream,
+        ahead: state.ahead,
+        behind: state.behind,
+        dirty: state.dirty,
+        actions,
+        up_to_date: plan.up_to_date,
+        conflicts_possible: plan.conflicts_possible,
+        blocked: plan.blocked,
+        warnings: plan.warnings,
+    }
+}
+
+/// Execute one **safe** sync step on `path` (CPE-462): `pull` fast-forwards only (never clobbers
+/// local work), `push` pushes without force. Anything that could rewrite history is refused —
+/// diverged histories surface in `forge_repo_status` for the user to resolve. Returns git's output.
+#[cfg(feature = "sidecar-platform")]
+#[tauri::command]
+fn forge_sync(path: String, action: String) -> Result<String, String> {
+    let args: Vec<&str> = match action.as_str() {
+        "pull" => vec!["-C", &path, "pull", "--ff-only"],
+        "push" => vec!["-C", &path, "push"],
+        other => return Err(format!("unsupported sync action '{other}'")),
+    };
+    let out = std::process::Command::new("git").args(&args).output().map_err(|e| e.to_string())?;
+    if out.status.success() {
+        let s = String::from_utf8_lossy(&out.stdout);
+        Ok(if s.trim().is_empty() { format!("{action} ok") } else { s.trim().to_string() })
+    } else {
+        Err(String::from_utf8_lossy(&out.stderr).trim().to_string())
+    }
+}
+
 #[cfg(feature = "sidecar-platform")]
 #[tauri::command]
 fn sidecar_diagnostics(
@@ -3457,7 +3540,11 @@ pub fn run() {
             #[cfg(feature = "sidecar-platform")]
             forge_get_token,
             #[cfg(feature = "sidecar-platform")]
-            forge_delete_token
+            forge_delete_token,
+            #[cfg(feature = "sidecar-platform")]
+            forge_repo_status,
+            #[cfg(feature = "sidecar-platform")]
+            forge_sync
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application");
