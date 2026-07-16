@@ -272,6 +272,48 @@ describe("AI Console launcher — responsive grid columns (CPE-510)", () => {
   });
 });
 
+describe("AI Console launcher — agent-state awareness (CPE-512)", () => {
+  it("agentStateFromText classifies blocked / done / working / idle by priority", async () => {
+    const { w } = await mountLauncher();
+    // Blocked: an input prompt awaiting the user (outranks everything).
+    expect(w.agentStateFromText("Building...\nDo you want to continue? (y/n)")).toBe("blocked");
+    expect(w.agentStateFromText("Overwrite file? [Y/n]")).toBe("blocked");
+    expect(w.agentStateFromText("What should I call the module?")).toBe("blocked"); // ends with ?
+    // Done: a completion marker at the end.
+    expect(w.agentStateFromText("running tests\nAll tests passed. Done.")).toBe("done");
+    expect(w.agentStateFromText("wrote 3 files\n✓")).toBe("done");
+    // Working: spinner / ellipsis / activity verb.
+    expect(w.agentStateFromText("⠹ compiling crate")).toBe("working");
+    expect(w.agentStateFromText("Thinking...")).toBe("working");
+    expect(w.agentStateFromText("Generating a plan")).toBe("working");
+    // Idle: a plain shell prompt / nothing notable.
+    expect(w.agentStateFromText("$ ")).toBe("idle");
+    expect(w.agentStateFromText("")).toBe("idle");
+  });
+
+  it("sessionState layers recency: a fresh write reads as working, a prompt still wins", async () => {
+    const { w } = await mountLauncher();
+    const now = 1_000_000;
+    // Recent, non-prompt output → working even if the text alone looks idle.
+    expect(w.sessionState({ _recent: "some log line", _lastOut: now }, now + 200)).toBe("working");
+    // Gone quiet → falls back to the text classification (idle here).
+    expect(w.sessionState({ _recent: "$ ", _lastOut: now }, now + 5000)).toBe("idle");
+    // A prompt outranks recency — still blocked even with a fresh write.
+    expect(w.sessionState({ _recent: "Proceed? (y/n)", _lastOut: now }, now + 100)).toBe("blocked");
+  });
+
+  it("shows a state dot on both the tab and the grid pane header", async () => {
+    const { w } = await mountLauncher();
+    const doc = w.document;
+    w.addSession("agent-1", "A");
+    expect(doc.querySelectorAll(".tab .state-dot").length).toBe(1);
+    expect(doc.querySelectorAll(".pane-head .state-dot").length).toBe(1);
+    // A blocked prompt marks the tab and pulses.
+    w.eval("const s = sessions.get('agent-1'); s._recent = 'Continue? (y/n)'; renderState(s);");
+    expect(doc.querySelector(".tab").classList.contains("blocked")).toBe(true);
+  });
+});
+
 describe("AI Console launcher — named sets / presets (the reported confusion)", () => {
   it("renders the current agent's sets into the dropdown, with a blank placeholder", async () => {
     const { w } = await mountLauncher();
