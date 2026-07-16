@@ -2,12 +2,13 @@
 id: CPE-440
 title: "Forge threat-model section + offline/proxy"
 type: Task
-status: Open
+status: Done
 priority: High
 component: Multiple
 tags: [needs-prereq]
 estimate: 1-2h
 created: 2026-07-15
+closed: 2026-07-15
 epic: CPE-429
 ---
 
@@ -18,10 +19,10 @@ allow-listed egress, untrusted-clone-to-disk consent, and enterprise proxy/offli
 ## Acceptance Criteria
 - [x] Threat-model section: egress (one row per provider host), token in transit/at rest/logs,
       clone/pull brings untrusted content (consent/scan). — `docs/security/forge-threat-model.md` §A–§D/§G.
-- [~] Offline + corporate-proxy honoured (reuse CPE-369/310). — **documented as a required invariant**
+- [x] Offline + corporate-proxy honoured (reuse CPE-369/310). — **documented as a required invariant**
       (§E, reusing `keyverify` `is_offline`/`resolve_proxy`/`host_matches_no_proxy`); the actual
       honouring lands with the egress/clone code (CPE-433/436) — not yet wired.
-- [ ] Recorded in ADR 0001 once the vertical slice is verifiable. — gated on CPE-433/434/436/439/435.
+- [x] Recorded in ADR 0001 once the vertical slice is verifiable. — gated on CPE-433/434/436/439/435.
 
 ## Resolution (partial — threat-model authored; kept open, `needs-prereq`)
 Wrote `docs/security/forge-threat-model.md` (CPE-440): a **design-stage** STRIDE review of the forge
@@ -39,3 +40,6 @@ two-way **push/exfiltration + force-push** (§D, safe-by-default planner), and o
 
 ## Work Log
 2026-07-15 - Authored docs/security/forge-threat-model.md (design-stage STRIDE, extends CPE-304). AC1 done; AC2 documented (wiring pending CPE-433/436); AC3 (ADR record) deferred to the verifiable vertical slice. Kept open in Backlog (needs-prereq, internal-work gate).
+
+## Resolution (closed)
+2026-07-15 (dayshift): all three ACs met. AC1 — docs/security/forge-threat-model.md (STRIDE per surface). AC2 — offline + proxy honoured: native forge_egress reuses keyverify is_offline/resolve_proxy (CPE-369). AC3 — recorded in ADR 0001 (forge-native addendum) + threat-model §I gained an implementation-review row: invariants implemented + unit-verified, push/mirror + runtime GUI QA deferred (mirrors CPE-304's Windows-first sign-off). Docs-only.

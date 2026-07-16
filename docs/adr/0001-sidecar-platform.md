@@ -109,6 +109,24 @@ up Agent Watch on that repo.
 - **Capability** — a scoped, brokered permission a sidecar requests.
 - **Manifest** — declarative data describing a sidecar (or, inside a tenant, an agent).
 
+## Addendum — forge integration shipped native, not as a sidecar (2026-07-15, CPE-429/440)
+
+The **forge / source-control** Mega-Feature (browse, clone, and — planned — two-way mirror any Git
+forge) was originally scoped as a sidecar tenant under this ADR. It shipped instead as a **native
+explorer feature**: host commands (`forge_browse`, `forge_clone`, `forge_set/get/delete_token`) over
+`src-tauri/src/forge_egress.rs`, surfaced by a left-pane **Repositories** entry → `RepoBrowser.svelte`.
+
+**Why the deviation:** it delivered the usable feature (see + browse + clone GitHub/GitLab) far faster
+than standing up a hosted sidecar + iframe pane, and the security-critical parts (host-side
+allow-listed egress with no SSRF, hardened clone flags, keychain tokens, offline/proxy) live natively
+and are unit-tested. The repos-sidecar skeleton (CPE-432) is **Deferred**, to be revisited only if
+forge operations need process isolation or the long-lived two-way-mirror engine warrants a tenant.
+
+**Security review outcome (CPE-440):** the forge invariants are **implemented and unit-verified**;
+two-way push/mirror and live runtime/GUI QA are deferred — the honest, delimited status recorded in
+[`docs/security/forge-threat-model.md`](../security/forge-threat-model.md) §I, mirroring the AI
+Console's Windows-first-signed / cross-OS-deferred posture (CPE-304).
+
 ## Consequences
 
 - Strong isolation and a genuine standalone story, at the cost of IPC and a second
