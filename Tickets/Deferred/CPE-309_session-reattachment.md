@@ -357,3 +357,29 @@ the current log content is **test noise** (session id `s1`, several daemon spawn
 `cargo test -p ai-console` run) — not a real GUI session — so the procedure now clears it first. The
 real run waits on the installed **v0.23.0-sidecar** build (in progress); the tracer only exists there,
 not in the currently-installed v0.22.0-sidecar.
+
+## 2026-07-16 — ROOT CAUSE FOUND via the tracer (GUI run + agent read the log)
+Ran the installed v0.23.0-sidecar with `CPE_AICONSOLE_DAEMON=1`; user launched agents; agent read
+`%TEMP%\cpe-ai-console\session-diag.log` directly. Findings overturn the multi-day theory:
+
+**The output path is byte-exact perfect.** For the long session s1 the log shows all three hops firing
+with matching totals: `daemon: pty[s1] total N` == `console: pump[s1] total N`, all the way to **1.39 MB**
+(`daemon: pty[s1] FIRST bytes` → `client: recv output[s1]` → `console: pump[s1]`). **ConPTY in the
+daemon is NOT the problem** — the days spent on detached/CREATE_NO_WINDOW ConPTY were a red herring.
+
+**The bug is control-ack starvation on the daemon socket.** On the daemon build, input/resize/kill go
+through `SessionClient::request()` (`session_client.rs`), which **writes the op then blocks waiting for
+an `{"ev":"ok"}` ack**. That ack shares ONE ordered socket with bulk PTY output; the reader
+(`session_client.rs:86-98`) processes lines in order, so under an output flood (s1 = 1.39 MB) the input
+`ok` is stuck behind the backlog and `request()` times out (`"daemon did not respond"`). Result:
+- **"no input"** — keystrokes' `request()` starves → never reach the PTY.
+- **resize starves too** — xterm's on-open resize `request()` times out → the agent never gets its
+  terminal size → renders blank / spins (plausibly the cause of the flood itself and the blank s2–s5
+  tabs, which also `stream closed` in <1s).
+In-process (`LocalIo`) has none of this: input/resize hit the PTY directly, no ack, no socket.
+
+**Fix direction (concrete, no longer big-design):** PTY input/resize are fire-and-forget by nature —
+make `DaemonIo::write`/`resize` (and `SessionClient::input`/`resize`) send the op **without blocking on
+an ack**, or split control acks onto a channel separate from the output stream so acks can't starve.
+Then re-run the GUI diagnostic (input should echo; agents should render). This is a bounded protocol
+fix, not new mechanism — the reattach engine/transport are proven working by this very run.
