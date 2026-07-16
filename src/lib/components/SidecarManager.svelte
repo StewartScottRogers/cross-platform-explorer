@@ -7,6 +7,7 @@
    * leaves the explorer and other sidecars untouched.
    */
   import { createEventDispatcher, onMount } from "svelte";
+  import { t } from "../i18n";
   import {
     sidecarDetails,
     setEnabled,
@@ -62,24 +63,24 @@
 
 <div class="mgr">
   {#if rows === null}
-    <div class="muted">Checking…</div>
+    <div class="muted">{$t("mgr.checking")}</div>
   {:else if rows.length === 0}
-    <div class="muted">No sidecars registered.</div>
+    <div class="muted">{$t("mgr.none")}</div>
   {:else}
     {#each rows as row (row.id)}
       {@const diag = diags[row.id]}
       <div class="sidecar" class:disabled={!row.enabled}>
         <div class="head">
-          <span class="dot" class:on={row.running} title={row.running ? "Running" : "Stopped"} />
+          <span class="dot" class:on={row.running} title={row.running ? $t("mgr.running") : $t("mgr.stopped")} />
           <span class="name">{row.name}</span>
           <span class="ver">v{row.version}</span>
-          <span class="compat" class:bad={!row.compatible} title="Contract version">
-            contract {row.contract}{row.compatible ? "" : " (incompatible)"}
+          <span class="compat" class:bad={!row.compatible} title={$t("mgr.contractTip")}>
+            {row.compatible ? $t("mgr.contractOk", { v: row.contract }) : $t("mgr.contractBad", { v: row.contract })}
           </span>
           <span class="spacer" />
-          <label class="switch" title={row.enabled ? "Enabled" : "Disabled"}>
+          <label class="switch" title={row.enabled ? $t("mgr.enabled") : $t("mgr.disabled")}>
             <input type="checkbox" checked={row.enabled} on:change={() => toggleEnabled(row)} />
-            <span>{row.enabled ? "Enabled" : "Disabled"}</span>
+            <span>{row.enabled ? $t("mgr.enabled") : $t("mgr.disabled")}</span>
           </label>
         </div>
 
@@ -89,30 +90,30 @@
             <span class="cap" class:granted={isGranted}>
               {CAPABILITY_INFO[cap].label}
               {#if isGranted}
-                <button class="revoke" title="Revoke" on:click={() => revoke(row, cap)}>×</button>
+                <button class="revoke" title={$t("mgr.revoke")} on:click={() => revoke(row, cap)}>×</button>
               {:else}
-                <span class="denied">denied</span>
+                <span class="denied">{$t("mgr.denied")}</span>
               {/if}
             </span>
           {/each}
-          {#if row.requested.length === 0}<span class="muted">no capabilities</span>{/if}
+          {#if row.requested.length === 0}<span class="muted">{$t("mgr.noCapabilities")}</span>{/if}
         </div>
 
         <div class="health">
           {#if diag?.last_error}
-            <span class="err" title="Last error">⚠ {diag.last_error}</span>
+            <span class="err" title={$t("mgr.lastError")}>⚠ {diag.last_error}</span>
           {:else if row.running}
-            <span class="ok">Healthy</span>
+            <span class="ok">{$t("mgr.healthy")}</span>
           {:else}
-            <span class="muted">Not running</span>
+            <span class="muted">{$t("mgr.notRunning")}</span>
           {/if}
           <span class="spacer" />
           {#if diag && diag.logs.length > 0}
             <button class="logs-toggle" on:click={() => toggleLogs(row)}>
-              {logsOpen[row.id] ? "Hide logs" : `View logs (${diag.logs.length})`}
+              {logsOpen[row.id] ? $t("mgr.hideLogs") : $t("mgr.viewLogs", { count: diag.logs.length })}
             </button>
           {:else}
-            <span class="muted small">no logs</span>
+            <span class="muted small">{$t("mgr.noLogs")}</span>
           {/if}
         </div>
 
@@ -128,10 +129,10 @@
               disabled={!row.enabled}
               on:click={() => dispatch("openConsole")}
             >
-              Open
+              {$t("mgr.open")}
             </button>
             {#if row.running}
-              <button class="settings-btn" on:click={() => stop(row)}>Stop</button>
+              <button class="settings-btn" on:click={() => stop(row)}>{$t("mgr.stop")}</button>
             {/if}
           </div>
         {/if}

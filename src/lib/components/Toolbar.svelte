@@ -5,6 +5,8 @@
    * slot. Additional toolbar buttons can be passed via the "actions" slot (none
    * in v1). Used at the app level and at the top of each pane.
    */
+  import { t } from "../i18n";
+
   export let label: string;
 
   let open = false;
@@ -23,8 +25,8 @@
     class="tb-gear"
     class:active={open}
     type="button"
-    title="{label} settings"
-    aria-label="{label} settings"
+    title={$t("tb.settings", { label })}
+    aria-label={$t("tb.settings", { label })}
     aria-haspopup="dialog"
     aria-expanded={open}
     on:click|stopPropagation={toggle}
@@ -41,7 +43,7 @@
 
   {#if open}
     <!-- svelte-ignore a11y-click-events-have-key-events a11y-no-noninteractive-element-interactions -->
-    <div class="tb-popover" role="dialog" aria-label="{label} settings" on:click|stopPropagation>
+    <div class="tb-popover" role="dialog" aria-label={$t("tb.settings", { label })} on:click|stopPropagation>
       <div class="tb-popover-head">{label}</div>
       <div class="tb-popover-body"><slot /></div>
     </div>

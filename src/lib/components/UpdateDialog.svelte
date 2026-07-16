@@ -5,6 +5,7 @@
       only opens it in the "available" state. It refuses to be dismissed while
       downloading so the install is never yanked away. */
   import { createEventDispatcher } from "svelte";
+  import { t } from "../i18n";
 
   export let state: "checking" | "available" | "uptodate" | "downloading" | "error" = "checking";
   export let version = ""; // the new version (available/downloading)
@@ -16,12 +17,12 @@
 
   const dispatch = createEventDispatcher<{ install: void; retry: void; close: void }>();
 
-  const titles = {
-    checking: "Checking for updates…",
-    available: "Update available",
-    uptodate: "You're up to date",
-    downloading: "Updating…",
-    error: "Update problem",
+  const titleKeys = {
+    checking: "upd.titleChecking",
+    available: "upd.titleAvailable",
+    uptodate: "upd.titleUptodate",
+    downloading: "upd.titleDownloading",
+    error: "upd.titleError",
   };
 
   // Downloading must not be interrupted; every other state is dismissable.
@@ -35,32 +36,32 @@
 <!-- svelte-ignore a11y-click-events-have-key-events a11y-no-static-element-interactions -->
 <div class="backdrop" on:click={tryClose}>
   <!-- svelte-ignore a11y-click-events-have-key-events a11y-no-noninteractive-element-interactions -->
-  <div class="dialog" role="dialog" aria-modal="true" aria-label="Software update" on:click|stopPropagation>
-    <h2>{titles[state]}</h2>
+  <div class="dialog" role="dialog" aria-modal="true" aria-label={$t("upd.software")} on:click|stopPropagation>
+    <h2>{$t(titleKeys[state])}</h2>
 
     {#if state === "checking"}
-      <p class="sub">Looking for a newer version…</p>
+      <p class="sub">{$t("upd.checkingSub")}</p>
       <div class="progress indeterminate"><div class="bar"></div></div>
 
     {:else if state === "available"}
       <p class="sub">
-        Version {version} is available{currentVersion ? ` — you have ${currentVersion}` : ""}.
+        {currentVersion ? $t("upd.availableHave", { version, current: currentVersion }) : $t("upd.available", { version })}
       </p>
       {#if notes}
-        <div class="notes" aria-label="Release notes">{notes}</div>
+        <div class="notes" aria-label={$t("upd.releaseNotes")}>{notes}</div>
       {/if}
 
     {:else if state === "uptodate"}
       <p class="sub">
-        You're on the latest version{currentVersion ? ` — ${currentVersion}` : ""}.
+        {currentVersion ? $t("upd.uptodateVer", { current: currentVersion }) : $t("upd.uptodate")}
       </p>
 
     {:else if state === "downloading"}
-      <p class="sub">Downloading version {version}…</p>
+      <p class="sub">{$t("upd.downloadingVersion", { version })}</p>
       <div class="progress" class:indeterminate role="progressbar" aria-valuemin={0} aria-valuemax={100} aria-valuenow={indeterminate ? undefined : progress}>
         <div class="bar" style={indeterminate ? "" : `width:${progress}%`}></div>
       </div>
-      <p class="status">{indeterminate ? "Downloading…" : `${progress}%`}</p>
+      <p class="status">{indeterminate ? $t("upd.downloadingShort") : `${progress}%`}</p>
 
     {:else if state === "error"}
       <p class="err">{error}</p>
@@ -68,17 +69,17 @@
 
     <div class="actions">
       {#if state === "available"}
-        <button class="btn" on:click={() => dispatch("close")}>Later</button>
-        <button class="btn primary" on:click={() => dispatch("install")}>Install &amp; Restart</button>
+        <button class="btn" on:click={() => dispatch("close")}>{$t("upd.later")}</button>
+        <button class="btn primary" on:click={() => dispatch("install")}>{$t("upd.installRestart")}</button>
       {:else if state === "error"}
-        <button class="btn" on:click={() => dispatch("close")}>Close</button>
-        <button class="btn primary" on:click={() => dispatch("retry")}>Try Again</button>
+        <button class="btn" on:click={() => dispatch("close")}>{$t("common.close")}</button>
+        <button class="btn primary" on:click={() => dispatch("retry")}>{$t("upd.tryAgain")}</button>
       {:else if state === "uptodate"}
-        <button class="btn primary" on:click={() => dispatch("close")}>Close</button>
+        <button class="btn primary" on:click={() => dispatch("close")}>{$t("common.close")}</button>
       {:else if state === "checking"}
-        <button class="btn" on:click={() => dispatch("close")}>Cancel</button>
+        <button class="btn" on:click={() => dispatch("close")}>{$t("common.cancel")}</button>
       {:else}
-        <button class="btn" disabled>Installing…</button>
+        <button class="btn" disabled>{$t("upd.installing")}</button>
       {/if}
     </div>
   </div>

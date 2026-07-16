@@ -1,6 +1,7 @@
 <script lang="ts">
   import { createEventDispatcher, tick } from "svelte";
   import Icon from "./Icon.svelte";
+  import { t } from "../i18n";
   import { formatSize } from "../format";
   import { formatDate } from "../datetime";
   import { iconFor, typeName } from "../filetypes";
@@ -17,12 +18,12 @@
       annotations, so the list is visually unchanged when not watching an agent. */
   export let activity: Record<string, AgentActivity> = {};
   /** Human labels for the row badge, by activity kind. */
-  const ACTIVITY_LABEL: Record<AgentActivity["kind"], string> = {
-    created: "new",
-    modified: "edited",
-    removed: "deleted",
-    renamed: "moved",
-    read: "read", // CPE-405: consulted, not changed
+  const ACTIVITY_LABEL_KEY: Record<AgentActivity["kind"], string> = {
+    created: "fl.badgeNew",
+    modified: "fl.badgeEdited",
+    removed: "fl.badgeDeleted",
+    renamed: "fl.badgeMoved",
+    read: "fl.badgeRead", // CPE-405: consulted, not changed
   };
   // The active paths, recomputed only when the activity map changes — used to light up folder rows
   // whose subtree the agent is changing (CPE-402).
@@ -207,11 +208,11 @@
     dispatch("drop", { paths, dest, copy });
   }
 
-  const COLUMNS: { key: SortKey; label: string; num?: boolean }[] = [
-    { key: "name", label: "Name" },
-    { key: "modified", label: "Date modified" },
-    { key: "type", label: "Type" },
-    { key: "size", label: "Size", num: true },
+  const COLUMNS: { key: SortKey; labelKey: string; num?: boolean }[] = [
+    { key: "name", labelKey: "sort.name" },
+    { key: "modified", labelKey: "sort.modified" },
+    { key: "type", labelKey: "sort.type" },
+    { key: "size", labelKey: "sort.size", num: true },
   ];
 
   function headerClick(key: SortKey) {
@@ -273,9 +274,9 @@
         class="col"
         class:num={col.num}
         on:click={() => headerClick(col.key)}
-        title="Sort by {col.label}"
+        title={$t("fl.sortBy", { col: $t(col.labelKey) })}
       >
-        {col.label}
+        {$t(col.labelKey)}
         {#if sortKey === col.key}
           <span class="sortchev">
             <Icon name={sortDir === "asc" ? "chev-up" : "chev-down"} size={12} />
@@ -292,10 +293,10 @@
         style="left: {x}px"
         role="separator"
         aria-orientation="vertical"
-        aria-label="Resize {COLUMNS[i]?.label ?? 'column'} column"
+        aria-label={$t("fl.resizeColumn", { col: COLUMNS[i] ? $t(COLUMNS[i].labelKey) : "" })}
         aria-valuenow={Math.round(columnWidths[i])}
         tabindex="0"
-        title="Drag, or focus and use ← / → to resize"
+        title={$t("fl.resizeTip")}
         on:pointerdown={(e) => startColResize(e, i)}
         on:keydown={(e) => onResizeKey(e, i)}
       />
@@ -309,12 +310,12 @@
     <p class="error">{error}</p>
   </div>
 {:else if loading}
-  <div class="empty-state"><p>Loading…</p></div>
+  <div class="empty-state"><p>{$t("fl.loading")}</p></div>
 {:else if entries.length === 0}
   <!-- svelte-ignore a11y-no-static-element-interactions -->
   <div class="empty-state" on:contextmenu={emptyContext}>
     <span class="empty-icon"><Icon name="folder" size={40} /></span>
-    <p>{searching ? "No items match your search" : "This folder is empty"}</p>
+    <p>{searching ? $t("fl.noMatch") : $t("fl.empty")}</p>
   </div>
 {:else}
   <!-- svelte-ignore a11y-no-static-element-interactions -->
@@ -385,9 +386,9 @@
             <span class="ellip">{entry.name}</span>
           {/if}
           {#if activity[entry.path]}
-            <span class="agent-badge {activity[entry.path].kind}">{ACTIVITY_LABEL[activity[entry.path].kind]}</span>
+            <span class="agent-badge {activity[entry.path].kind}">{$t(ACTIVITY_LABEL_KEY[activity[entry.path].kind])}</span>
           {:else if insideActive}
-            <span class="agent-inside-dot" title="The agent is changing files in here">●</span>
+            <span class="agent-inside-dot" title={$t("fl.agentInside")}>●</span>
           {/if}
         </span>
 

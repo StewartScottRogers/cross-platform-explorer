@@ -1,5 +1,6 @@
 <script lang="ts">
   import { createEventDispatcher } from "svelte";
+  import { t } from "../i18n";
   import { planFindReplace, planAffix, planNumber, planCase, type RenameItem, type CaseMode } from "../batchRename";
 
   /** The names of the selected items to rename. */
@@ -41,61 +42,61 @@
 <div class="backdrop" on:click={() => dispatch("cancel")}>
   <!-- svelte-ignore a11y-click-events-have-key-events a11y-no-static-element-interactions a11y-no-noninteractive-element-interactions -->
   <div class="dialog" role="dialog" aria-modal="true" on:click|stopPropagation>
-    <h2>Rename {names.length} items</h2>
+    <h2>{$t("ren.title", { count: names.length })}</h2>
 
     <div class="modes">
-      <button class="mode" class:active={mode === "replace"} on:click={() => (mode = "replace")}>Find &amp; replace</button>
-      <button class="mode" class:active={mode === "affix"} on:click={() => (mode = "affix")}>Add text</button>
-      <button class="mode" class:active={mode === "number"} on:click={() => (mode = "number")}>Number</button>
-      <button class="mode" class:active={mode === "case"} on:click={() => (mode = "case")}>Change case</button>
+      <button class="mode" class:active={mode === "replace"} on:click={() => (mode = "replace")}>{$t("ren.findReplace")}</button>
+      <button class="mode" class:active={mode === "affix"} on:click={() => (mode = "affix")}>{$t("ren.addText")}</button>
+      <button class="mode" class:active={mode === "number"} on:click={() => (mode = "number")}>{$t("ren.number")}</button>
+      <button class="mode" class:active={mode === "case"} on:click={() => (mode = "case")}>{$t("ren.changeCase")}</button>
     </div>
 
     {#if mode === "replace"}
       <div class="fields">
         <label>
-          <span>Find</span>
+          <span>{$t("ren.find")}</span>
           <!-- svelte-ignore a11y-autofocus -->
-          <input bind:value={find} autofocus placeholder="text to find" />
+          <input bind:value={find} autofocus placeholder={$t("ren.findPlaceholder")} />
         </label>
         <label>
-          <span>Replace with</span>
-          <input bind:value={replace} placeholder="replacement" />
+          <span>{$t("ren.replaceWith")}</span>
+          <input bind:value={replace} placeholder={$t("ren.replacePlaceholder")} />
         </label>
         <label class="check">
           <input type="checkbox" bind:checked={caseSensitive} />
-          Case-sensitive
+          {$t("ren.caseSensitive")}
         </label>
       </div>
     {:else if mode === "affix"}
       <div class="fields">
         <label>
-          <span>Prefix</span>
-          <input bind:value={prefix} placeholder="text before the name" />
+          <span>{$t("ren.prefix")}</span>
+          <input bind:value={prefix} placeholder={$t("ren.prefixPlaceholder")} />
         </label>
         <label>
-          <span>Suffix</span>
-          <input bind:value={suffix} placeholder="text before the extension" />
+          <span>{$t("ren.suffix")}</span>
+          <input bind:value={suffix} placeholder={$t("ren.suffixPlaceholder")} />
         </label>
       </div>
     {:else if mode === "number"}
       <div class="fields">
         <label>
-          <span>Name pattern</span>
-          <input bind:value={pattern} placeholder="photo-### (the # run becomes the number)" />
+          <span>{$t("ren.namePattern")}</span>
+          <input bind:value={pattern} placeholder={$t("ren.patternPlaceholder")} />
         </label>
         <label>
-          <span>Start at</span>
+          <span>{$t("ren.startAt")}</span>
           <input type="number" bind:value={start} min="0" style="width:90px" />
         </label>
       </div>
     {:else}
       <div class="fields">
         <label>
-          <span>Case</span>
+          <span>{$t("ren.case")}</span>
           <select bind:value={caseMode}>
-            <option value="lower">lowercase</option>
-            <option value="upper">UPPERCASE</option>
-            <option value="title">Title Case</option>
+            <option value="lower">{$t("ren.lowercase")}</option>
+            <option value="upper">{$t("ren.uppercase")}</option>
+            <option value="title">{$t("ren.titlecase")}</option>
           </select>
         </label>
       </div>
@@ -113,17 +114,17 @@
 
     <div class="status">
       {#if hasConflict}
-        <span class="warn">Some names would collide — adjust the inputs.</span>
+        <span class="warn">{$t("ren.conflict")}</span>
       {:else if changed.length === 0}
-        <span>No names change yet.</span>
+        <span>{$t("ren.noChange")}</span>
       {:else}
-        <span>{changed.length} of {names.length} will be renamed.</span>
+        <span>{$t("ren.willRename", { changed: changed.length, total: names.length })}</span>
       {/if}
     </div>
 
     <div class="actions">
-      <button class="btn" on:click={() => dispatch("cancel")}>Cancel</button>
-      <button class="btn primary" disabled={!canApply} on:click={apply}>Rename</button>
+      <button class="btn" on:click={() => dispatch("cancel")}>{$t("common.cancel")}</button>
+      <button class="btn primary" disabled={!canApply} on:click={apply}>{$t("ren.rename")}</button>
     </div>
   </div>
 </div>

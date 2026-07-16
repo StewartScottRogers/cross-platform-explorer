@@ -7,6 +7,7 @@
    * the sidecar gracefully — it never crashes it.
    */
   import { createEventDispatcher } from "svelte";
+  import { t } from "../i18n";
   import { CAPABILITY_INFO, type Capability, type ConsentState } from "../sidecar";
 
   export let sidecarId: string;
@@ -44,11 +45,10 @@
 <svelte:window on:keydown={(e) => e.key === "Escape" && dispatch("cancel")} />
 <!-- svelte-ignore a11y-click-events-have-key-events a11y-no-static-element-interactions -->
 <div class="consent-backdrop" on:click|self={() => dispatch("cancel")}>
-  <div class="consent-sheet" role="dialog" aria-modal="true" aria-label="Capability consent">
-    <h2>Allow “{sidecarId}” to…</h2>
+  <div class="consent-sheet" role="dialog" aria-modal="true" aria-label={$t("consent.title")}>
+    <h2>{$t("consent.allow", { id: sidecarId })}</h2>
     <p class="lead">
-      This sidecar runs as its own process and only gets what you allow. Choose what it may
-      do — you can change this later.
+      {$t("consent.lead")}
     </p>
 
     <ul class="caps">
@@ -59,8 +59,8 @@
             <span class="cap-text">
               <span class="cap-label">
                 {CAPABILITY_INFO[cap].label}
-                {#if CAPABILITY_INFO[cap].sensitive}<span class="badge">sensitive</span>{/if}
-                {#if state.granted.includes(cap)}<span class="badge granted">granted</span>{/if}
+                {#if CAPABILITY_INFO[cap].sensitive}<span class="badge">{$t("consent.sensitive")}</span>{/if}
+                {#if state.granted.includes(cap)}<span class="badge granted">{$t("consent.granted")}</span>{/if}
               </span>
               <span class="cap-desc">{CAPABILITY_INFO[cap].description}</span>
             </span>
@@ -70,8 +70,8 @@
     </ul>
 
     <div class="actions">
-      <button class="secondary" on:click={() => dispatch("cancel")}>Cancel</button>
-      <button class="primary" on:click={decide}>Allow selected & continue</button>
+      <button class="secondary" on:click={() => dispatch("cancel")}>{$t("common.cancel")}</button>
+      <button class="primary" on:click={decide}>{$t("consent.allowSelected")}</button>
     </div>
   </div>
 </div>

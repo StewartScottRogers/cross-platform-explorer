@@ -5,6 +5,7 @@
   import { parseCsv } from "../preview/csv";
   import { highlightForFile, ensureLanguageForName } from "../preview/highlight";
   import { renderMarkdown } from "../preview/markdown";
+  import { t } from "../i18n";
   import { formatSize } from "../format";
 
   /** The single selected entry to preview, or null. */
@@ -337,9 +338,9 @@
     <img class="preview-img" src={assetUrl(entry.path)} alt={entry.name} />
   {:else if provider.kind === "decoded-image" && entry}
     {#if imgState === "loading"}
-      <p class="preview-note">Loading preview…</p>
+      <p class="preview-note">{$t("pv.loading")}</p>
     {:else if imgState === "error"}
-      <p class="preview-note">Can't preview this image.</p>
+      <p class="preview-note">{$t("pv.cantImage")}</p>
     {:else}
       <img class="preview-img" src={imgUrl} alt={entry.name} />
     {/if}
@@ -353,7 +354,7 @@
     <iframe class="preview-pdf" title={entry.name} src={assetUrl(entry.path)}></iframe>
   {:else if provider.kind === "font" && entry}
     {#if fontState === "error"}
-      <p class="preview-note">Can't preview this font.</p>
+      <p class="preview-note">{$t("pv.cantFont")}</p>
     {:else}
       <div class="preview-font">
         {#each FONT_SIZES as size}
@@ -363,9 +364,9 @@
     {/if}
   {:else if provider.kind === "archive" && entry}
     {#if entriesState === "loading"}
-      <p class="preview-note">Loading preview…</p>
+      <p class="preview-note">{$t("pv.loading")}</p>
     {:else if entriesState === "error"}
-      <p class="preview-note">Can't read this archive.</p>
+      <p class="preview-note">{$t("pv.cantArchive")}</p>
     {:else}
       <div class="preview-table-wrap">
         <table class="preview-table">
@@ -378,27 +379,27 @@
             {/each}
           </tbody>
         </table>
-        <p class="preview-note">{entries.length} item{entries.length === 1 ? "" : "s"}</p>
+        <p class="preview-note">{entries.length === 1 ? $t("pv.itemOne", { count: entries.length }) : $t("pv.itemMany", { count: entries.length })}</p>
       </div>
     {/if}
   {:else if provider.kind === "info" && entry}
     {#if infoState === "loading"}
-      <p class="preview-note">Loading preview…</p>
+      <p class="preview-note">{$t("pv.loading")}</p>
     {:else if infoState === "error"}
-      <p class="preview-note">Can't preview this file.</p>
+      <p class="preview-note">{$t("pv.cantFile")}</p>
     {:else}
       <pre class="preview-text" bind:this={textContentEl}>{info}</pre>
     {/if}
   {:else if needsText && entry}
     {#if textState === "loading"}
-      <p class="preview-note">Loading preview…</p>
+      <p class="preview-note">{$t("pv.loading")}</p>
     {:else if textState === "error"}
-      <p class="preview-note">Can't preview this file.</p>
+      <p class="preview-note">{$t("pv.cantFile")}</p>
     {:else if editing}
       <div class="preview-edit-bar">
         <button class="editbtn primary" disabled={!dirty || saving} on:click={save}
-          >{saving ? "Saving…" : "Save"}</button>
-        <button class="editbtn" on:click={cancelEdit}>Cancel</button>
+          >{saving ? $t("pv.saving") : $t("pv.save")}</button>
+        <button class="editbtn" on:click={cancelEdit}>{$t("common.cancel")}</button>
         {#if saveError}<span class="edit-err">{saveError}</span>{/if}
       </div>
       <textarea
@@ -411,7 +412,7 @@
     {:else}
       {#if provider.editable}
         <div class="preview-edit-bar">
-          <button class="editbtn" on:click={startEdit}>Edit</button>
+          <button class="editbtn" on:click={startEdit}>{$t("pv.edit")}</button>
         </div>
       {/if}
       {#if provider.kind === "csv" || provider.kind === "tsv"}
@@ -424,7 +425,7 @@
             </tbody>
           </table>
           {#if tableRows.length > CSV_ROW_CAP}
-            <p class="preview-note">Showing first {CSV_ROW_CAP} of {tableRows.length} rows.</p>
+            <p class="preview-note">{$t("pv.showingRows", { cap: CSV_ROW_CAP, total: tableRows.length })}</p>
           {/if}
         </div>
       {:else if provider.kind === "json"}
@@ -452,11 +453,11 @@
     on:click|stopPropagation
     on:contextmenu|preventDefault|stopPropagation
   >
-    <button role="menuitem" disabled={!canModify} on:click={menuCut}>Cut</button>
-    <button role="menuitem" on:click={menuCopy}>Copy</button>
-    <button role="menuitem" disabled={!canModify} on:click={menuPaste}>Paste</button>
+    <button role="menuitem" disabled={!canModify} on:click={menuCut}>{$t("menu.cut")}</button>
+    <button role="menuitem" on:click={menuCopy}>{$t("menu.copy")}</button>
+    <button role="menuitem" disabled={!canModify} on:click={menuPaste}>{$t("menu.paste")}</button>
     <div class="text-ctx-sep"></div>
-    <button role="menuitem" on:click={menuSelectAll}>Select all</button>
+    <button role="menuitem" on:click={menuSelectAll}>{$t("ctx.selectAll")}</button>
   </div>
 {/if}
 

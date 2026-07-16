@@ -1,5 +1,6 @@
 // CPE-362: i18n core — lookup, interpolation, graceful fallback, locale switching, Intl formatting.
 import { describe, it, expect, beforeEach } from "vitest";
+import { readFileSync } from "node:fs";
 import { get } from "svelte/store";
 import {
   SUPPORTED_LOCALES,
@@ -75,6 +76,34 @@ describe("i18n translate()", () => {
     }
   });
 
+  it("translates the dialogs + remaining chrome across locales (CPE-481)", () => {
+    // A representative key from each newly-migrated namespace resolves per locale.
+    expect(translate("es", "upd.titleAvailable")).toBe("Actualización disponible");
+    expect(translate("de", "dup.title")).toBe("Doppelte Dateien finden");
+    expect(translate("fr", "prop.location")).toBe("Emplacement");
+    expect(translate("es", "ren.findReplace")).toBe("Buscar y reemplazar");
+    expect(translate("de", "consent.allowSelected")).toBe("Ausgewählte erlauben & fortfahren");
+    expect(translate("fr", "home.noRecent")).toBe("Aucun fichier récent pour l'instant");
+    expect(translate("es", "mgr.healthy")).toBe("Correcto");
+    expect(translate("de", "fl.empty")).toBe("Dieser Ordner ist leer");
+    expect(translate("fr", "pv.loading")).toBe("Chargement de l'aperçu…");
+    expect(translate("es", "tb.application")).toBe("Aplicación");
+    // Interpolation carries through in every migrated namespace.
+    expect(translate("en", "ren.willRename", { changed: 2, total: 5 })).toBe("2 of 5 will be renamed.");
+    expect(translate("en", "dup.moveToBin", { count: 3 })).toBe("Move 3 to Recycle Bin");
+    expect(translate("en", "fl.sortBy", { col: "Name" })).toBe("Sort by Name");
+    expect(translate("en", "consent.allow", { id: "ai-console" })).toBe("Allow “ai-console” to…");
+    // Every key added for CPE-481 exists in all four locales (fully translated, no fallback).
+    const namespaces = ["upd.", "dup.", "prop.", "ren.", "consent.", "home.", "mgr.", "fl.", "pv.", "tb.", "agent."];
+    for (const ns of namespaces) {
+      const keys = localeKeys("en").filter((k) => k.startsWith(ns));
+      expect(keys.length, `no keys for namespace ${ns}`).toBeGreaterThan(0);
+      for (const loc of ["es", "de", "fr"] as const) {
+        for (const k of keys) expect(localeKeys(loc), `${loc} missing ${k}`).toContain(k);
+      }
+    }
+  });
+
   it("interpolates {name} placeholders", () => {
     expect(translate("en", "status.items", { count: 42 })).toBe("42 items");
     expect(translate("es", "status.selected", { count: 3 })).toBe("3 seleccionados");
@@ -132,4 +161,37 @@ describe("i18n locale detection + persistence", () => {
     localStorage.clear();
     expect(SUPPORTED_LOCALES.some((l) => l.code === detectInitialLocale())).toBe(true);
   });
+});
+
+// CPE-481: guard against a stray hardcoded string sneaking back into a migrated component.
+// Two cheap, deterministic checks per file: (1) the component actually pulls in the i18n `t`
+// store, and (2) none of the specific English literals we replaced still live in its markup.
+describe("i18n migration guard (CPE-481)", () => {
+  const read = (rel: string) => readFileSync(new URL(rel, import.meta.url), "utf8");
+
+  // path → English literals that MUST no longer appear (each was chosen to be markup-only,
+  // never present in that file's comments or script, so a match means a genuine regression).
+  const MIGRATED: Record<string, string[]> = {
+    "./components/UpdateDialog.svelte": ["Looking for a newer version", "Install &amp; Restart", "Try Again"],
+    "./components/DuplicatesDialog.svelte": ["Scan for duplicates", "Select redundant", "Move ${selected.size}"],
+    "./components/PropertiesDialog.svelte": ["Paste expected hash to verify", ">Compute<", "items selected"],
+    "./components/BatchRenameDialog.svelte": ["Find &amp; replace", "text before the extension", "will be renamed"],
+    "./components/ConsentSheet.svelte": ["Allow selected & continue", "you can change this later"],
+    "./components/HomeView.svelte": ["No recent files yet", "Right-click any file or folder", "Quick access</span>"],
+    "./components/SidecarManager.svelte": ["No sidecars registered.", ">Checking…<", "no capabilities</span>"],
+    "./components/FileList.svelte": ["This folder is empty", "No items match your search", "Sort by {col.label}"],
+    "./components/PreviewPane.svelte": ["Loading preview…", "Can't preview this image", ">Select all<"],
+    "./components/Toolbar.svelte": ['"{label} settings"'],
+    "../App.svelte": ["Reset all settings to defaults", "Show details/preview pane", "watching for changes…", "Resize navigation pane"],
+  };
+
+  for (const [file, literals] of Object.entries(MIGRATED)) {
+    it(`${file} uses i18n and keeps no migrated literal`, () => {
+      const src = read(file);
+      expect(src, `${file} should import the i18n t store`).toMatch(/from "\.\.?\/(?:lib\/)?i18n"/);
+      for (const lit of literals) {
+        expect(src.includes(lit), `${file} still contains hardcoded "${lit}"`).toBe(false);
+      }
+    });
+  }
 });

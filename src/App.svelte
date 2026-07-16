@@ -45,6 +45,7 @@
   import BatchRenameDialog from "./lib/components/BatchRenameDialog.svelte";
   import type { RenameItem } from "./lib/batchRename";
 
+  import { t } from "./lib/i18n";
   import { friendlyError, splitPath, formatPathsForClipboard } from "./lib/format";
   import { withBusy } from "./lib/busy";
   import { sortEntries } from "./lib/sort";
@@ -1878,35 +1879,39 @@
 
 <MenuBar on:select={(e) => onMenuSelect(e.detail)} />
 
-<Toolbar label="Application">
+<Toolbar label={$t("tb.application")}>
   <svelte:fragment slot="actions">
     {#if aiConsoleAvailable}
       <button
         class="tb-console"
         type="button"
-        title={$agentSessions.length ? `Open the AI Console — ${$agentSessions.length} agent${$agentSessions.length === 1 ? "" : "s"} running (right-click to close all)` : "Open the AI Console"}
+        title={$agentSessions.length === 0
+          ? $t("tb.openConsole")
+          : $agentSessions.length === 1
+            ? $t("tb.openConsoleOne")
+            : $t("tb.openConsoleMany", { count: $agentSessions.length })}
         on:click={() => openAiConsole()}
-        on:contextmenu|preventDefault={(e) => (agentMenu = { x: e.clientX, y: e.clientY, label: "Close all consoles" })}
+        on:contextmenu|preventDefault={(e) => (agentMenu = { x: e.clientX, y: e.clientY, label: $t("tb.closeAllConsoles") })}
       >
-        <Icon name="code" size={15} /> AI Console
+        <Icon name="code" size={15} /> {$t("tb.aiConsole")}
         {#if $agentSessions.length}
-          <span class="tb-console-count" aria-label="{$agentSessions.length} agents running">{$agentSessions.length}</span>
+          <span class="tb-console-count" aria-label={$t("tb.agentsRunning", { count: $agentSessions.length })}>{$agentSessions.length}</span>
         {/if}
       </button>
     {/if}
   </svelte:fragment>
   <div class="settings-row">
-    <span>Show details/preview pane</span>
+    <span>{$t("tb.showDetailsPane")}</span>
     <input type="checkbox" bind:checked={showDetails}
       on:change={() => settings.saveShowDetails(showDetails)} />
   </div>
   <div class="settings-row">
-    <span>Show hidden files</span>
+    <span>{$t("cmd.showHidden")}</span>
     <input type="checkbox" bind:checked={showHidden}
       on:change={() => settings.saveShowHidden(showHidden)} />
   </div>
   <div class="settings-row">
-    <button class="settings-btn" on:click={resetAllSettings}>Reset all settings to defaults</button>
+    <button class="settings-btn" on:click={resetAllSettings}>{$t("tb.resetSettings")}</button>
   </div>
 </Toolbar>
 
@@ -1978,9 +1983,9 @@
   style="grid-template-columns: {gridCols}"
 >
   <div class="pane-col">
-    <Toolbar label="Navigation">
+    <Toolbar label={$t("tb.navigation")}>
       <div class="settings-row">
-        <span>Pane width</span>
+        <span>{$t("tb.paneWidth")}</span>
         <input
           type="number"
           min={SIDEBAR_MIN}
@@ -2007,7 +2012,7 @@
       on:openFile={(e) => openRecent(e.detail)}
       on:home={() => { if (archive) exitArchive(); navigate(HOME); }}
       on:repos={() => (showRepos = true)}
-      on:agentMenu={(e) => (agentMenu = { x: e.detail.x, y: e.detail.y, label: "Close AI Console" })}
+      on:agentMenu={(e) => (agentMenu = { x: e.detail.x, y: e.detail.y, label: $t("tb.closeAiConsole") })}
       on:drop={(e) => dropInto(e.detail.paths, e.detail.dest, e.detail.copy)}
     />
   </div>
@@ -2017,46 +2022,46 @@
     class="resizer"
     role="separator"
     aria-orientation="vertical"
-    aria-label="Resize navigation pane"
-    title="Drag to resize"
+    aria-label={$t("tb.resizeNav")}
+    title={$t("tb.resizeTip")}
     on:mousedown={(e) => startResize("left", e)}
   ></div>
 
   <!-- File List Pane (middle column) -->
   <div class="pane-col">
-   <Toolbar label="File list">
+   <Toolbar label={$t("tb.fileList")}>
     <div class="settings-row">
-      <span>View</span>
+      <span>{$t("menu.view")}</span>
       <select bind:value={view} on:change={() => settings.saveView(view)}>
-        <option value="details">Details</option>
-        <option value="list">List</option>
-        <option value="icons">Icons</option>
+        <option value="details">{$t("view.details")}</option>
+        <option value="list">{$t("view.list")}</option>
+        <option value="icons">{$t("tb.icons")}</option>
       </select>
     </div>
     <div class="settings-row">
-      <span>Sort by</span>
+      <span>{$t("tb.sortBy")}</span>
       <select bind:value={sortKey} on:change={() => settings.saveSortKey(sortKey)}>
-        <option value="name">Name</option>
-        <option value="modified">Modified</option>
-        <option value="type">Type</option>
-        <option value="size">Size</option>
+        <option value="name">{$t("sort.name")}</option>
+        <option value="modified">{$t("tb.modified")}</option>
+        <option value="type">{$t("sort.type")}</option>
+        <option value="size">{$t("sort.size")}</option>
       </select>
     </div>
     <div class="settings-row">
-      <span>Direction</span>
+      <span>{$t("tb.direction")}</span>
       <select bind:value={sortDir} on:change={() => settings.saveSortDir(sortDir)}>
-        <option value="asc">Ascending</option>
-        <option value="desc">Descending</option>
+        <option value="asc">{$t("cmd.ascending")}</option>
+        <option value="desc">{$t("cmd.descending")}</option>
       </select>
     </div>
     <div class="settings-row">
-      <span>Show hidden files</span>
+      <span>{$t("cmd.showHidden")}</span>
       <input type="checkbox" bind:checked={showHidden}
         on:change={() => settings.saveShowHidden(showHidden)} />
     </div>
    </Toolbar>
    <ContextBar contexts={folderContexts} on:action={(e) => handleContextAction(e.detail)} />
-   <div class="filelist-pane" role="region" aria-label="File list">
+   <div class="filelist-pane" role="region" aria-label={$t("tb.fileList")}>
     {#if isHome}
       <HomeView
         {places}
@@ -2077,15 +2082,15 @@
       {#if activeWatchCwd}
         <div class="agent-strip" role="status">
           <span class="agent-dot" />
-          <span class="agent-strip-label">Agent Watch — {watchedAgentName}</span>
+          <span class="agent-strip-label">{$t("agent.watch", { name: watchedAgentName })}</span>
           {#each recentChanges as c (c.path)}
             <span class="agent-chip {c.kind}" title={c.path}>{c.kind === "removed" ? "−" : c.kind === "created" ? "+" : "~"} {baseNameOf(c.path)}</span>
           {/each}
           {#if recentChanges.length === 0}
-            <span class="agent-strip-idle">watching for changes…</span>
+            <span class="agent-strip-idle">{$t("agent.watching")}</span>
           {/if}
-          <button class="agent-log-btn" on:click={() => (showTimeline = !showTimeline)} title="Show the full activity log">
-            Log {$agentTimeline.length ? `(${$agentTimeline.length})` : ""}
+          <button class="agent-log-btn" on:click={() => (showTimeline = !showTimeline)} title={$t("agent.showLog")}>
+            {$t("agent.log")} {$agentTimeline.length ? `(${$agentTimeline.length})` : ""}
           </button>
         </div>
       {/if}
@@ -2129,23 +2134,23 @@
       class="resizer"
       role="separator"
       aria-orientation="vertical"
-      aria-label="Resize details pane"
-      title="Drag to resize"
+      aria-label={$t("tb.resizeDetails")}
+      title={$t("tb.resizeTip")}
       on:mousedown={(e) => startResize("right", e)}
     ></div>
 
     <div class="preview-pane">
-      <Toolbar label="Preview">
+      <Toolbar label={$t("tb.preview")}>
         <button
           slot="actions"
           class="popout-btn"
-          title="Pop out this preview into its own window (Ctrl+Shift+O), or drag the tab bar"
-          aria-label="Pop out preview into a new window"
+          title={$t("tb.popoutTip")}
+          aria-label={$t("tb.popoutAria")}
           disabled={selectedEntries.length !== 1}
           on:click={popOutPreview}
         ><Icon name="popout" size={16} /></button>
         <div class="settings-row">
-          <span>Default tab</span>
+          <span>{$t("tb.defaultTab")}</span>
           <select
             value={showPreview ? "preview" : "details"}
             on:change={(e) => {
@@ -2153,12 +2158,12 @@
               settings.saveShowPreview(showPreview);
             }}
           >
-            <option value="preview">Preview</option>
-            <option value="details">Details</option>
+            <option value="preview">{$t("tb.preview")}</option>
+            <option value="details">{$t("view.details")}</option>
           </select>
         </div>
         <div class="settings-row">
-          <span>Pane width</span>
+          <span>{$t("tb.paneWidth")}</span>
           <input
             type="number"
             min={RIGHT_MIN}
@@ -2175,8 +2180,8 @@
       <div
         class="preview-pane-toggle"
         role="tablist"
-        aria-label="Preview or details"
-        title="Drag to pop out, or use the button"
+        aria-label={$t("tb.previewOrDetails")}
+        title={$t("tb.dragPopoutTip")}
         on:pointerdown={onPreviewHeaderDown}
         on:pointermove={onPreviewHeaderMove}
         on:pointerup={endPreviewHeaderDrag}
@@ -2187,13 +2192,13 @@
           class:active={showPreview}
           aria-selected={showPreview}
           on:click={() => { showPreview = true; settings.saveShowPreview(true); }}
-        >Preview</button>
+        >{$t("tb.preview")}</button>
         <button
           role="tab"
           class:active={!showPreview}
           aria-selected={!showPreview}
           on:click={() => { showPreview = false; settings.saveShowPreview(false); }}
-        >Details</button>
+        >{$t("view.details")}</button>
       </div>
 
       {#if showPreview}

@@ -2,6 +2,7 @@
   import { createEventDispatcher, onMount } from "svelte";
   import { invoke } from "@tauri-apps/api/core";
   import Icon from "./Icon.svelte";
+  import { t } from "../i18n";
   import { formatSize } from "../format";
   import { formatDate } from "../datetime";
   import { iconFor, typeName, categoryOf } from "../filetypes";
@@ -124,8 +125,8 @@
   <!-- svelte-ignore a11y-click-events-have-key-events a11y-no-static-element-interactions a11y-no-noninteractive-element-interactions -->
   <div class="dialog" role="dialog" aria-modal="true" on:click|stopPropagation>
     <header>
-      <h2>Properties</h2>
-      <button class="x" title="Close" on:click={close}><Icon name="close" size={14} /></button>
+      <h2>{$t("prop.title")}</h2>
+      <button class="x" title={$t("common.close")} on:click={close}><Icon name="close" size={14} /></button>
     </header>
 
     {#if error}
@@ -136,32 +137,32 @@
         <span class="fname">{single.name}</span>
       </div>
       <dl>
-        <div><dt>Type</dt><dd>{typeName(single)}</dd></div>
-        <div><dt>Location</dt><dd class="path">{single.path}</dd></div>
+        <div><dt>{$t("prop.type")}</dt><dd>{typeName(single)}</dd></div>
+        <div><dt>{$t("prop.location")}</dt><dd class="path">{single.path}</dd></div>
         {#if single.is_dir}
           <div>
-            <dt>Size</dt>
+            <dt>{$t("prop.size")}</dt>
             <dd>
-              {#if sizing}Calculating…
-              {:else if folderSize !== null}{formatSize(folderSize) || "0 B"} ({folderSize.toLocaleString()} bytes)
-              {:else}Unavailable{/if}
+              {#if sizing}{$t("prop.calculating")}
+              {:else if folderSize !== null}{$t("prop.sizeBytes", { size: formatSize(folderSize) || "0 B", bytes: folderSize.toLocaleString() })}
+              {:else}{$t("prop.unavailable")}{/if}
             </dd>
           </div>
         {:else}
           <div>
-            <dt>Size</dt>
-            <dd>{formatSize(single.size) || "0 B"} ({single.size.toLocaleString()} bytes)</dd>
+            <dt>{$t("prop.size")}</dt>
+            <dd>{$t("prop.sizeBytes", { size: formatSize(single.size) || "0 B", bytes: single.size.toLocaleString() })}</dd>
           </div>
         {/if}
         {#if info}
-          <div><dt>Created</dt><dd>{formatDate(info.created) || "—"}</dd></div>
-          <div><dt>Modified</dt><dd>{formatDate(info.modified) || "—"}</dd></div>
+          <div><dt>{$t("prop.created")}</dt><dd>{formatDate(info.created) || "—"}</dd></div>
+          <div><dt>{$t("prop.modified")}</dt><dd>{formatDate(info.modified) || "—"}</dd></div>
           <div>
-            <dt>Attributes</dt>
+            <dt>{$t("prop.attributes")}</dt>
             <dd>
-              {[info.readonly ? "Read-only" : null, info.hidden ? "Hidden" : null]
+              {[info.readonly ? $t("prop.readonly") : null, info.hidden ? $t("prop.hidden") : null]
                 .filter(Boolean)
-                .join(", ") || "None"}
+                .join(", ") || $t("prop.none")}
             </dd>
           </div>
         {/if}
@@ -171,46 +172,46 @@
             <dd class="checksum">
               {#if checksum}
                 <code class="hash">{checksum}</code>
-                <button class="mini" on:click={copyHash} title="Copy checksum to clipboard">
+                <button class="mini" on:click={copyHash} title={$t("prop.copyChecksumTip")}>
                   <Icon name={copied ? "check" : "copy"} size={13} />
-                  {copied ? "Copied" : "Copy"}
+                  {copied ? $t("prop.copied") : $t("prop.copy")}
                 </button>
                 <div class="verify">
                   <input
                     class="verify-in"
-                    placeholder="Paste expected hash to verify"
+                    placeholder={$t("prop.pasteExpected")}
                     bind:value={expected}
                     spellcheck="false"
                     autocomplete="off"
                   />
                   {#if verdict === true}
-                    <span class="match" title="The file matches the expected hash">✓ Match</span>
+                    <span class="match" title={$t("prop.matchTip")}>{$t("prop.match")}</span>
                   {:else if verdict === false}
-                    <span class="nomatch" title="The file does NOT match">✗ No match</span>
+                    <span class="nomatch" title={$t("prop.noMatchTip")}>{$t("prop.noMatch")}</span>
                   {/if}
                 </div>
               {:else if hashing}
-                <span class="dim">Computing…</span>
+                <span class="dim">{$t("prop.computing")}</span>
               {:else if hashError}
                 <span class="err-inline">{hashError}</span>
               {:else}
-                <button class="mini" on:click={computeHash}>Compute</button>
+                <button class="mini" on:click={computeHash}>{$t("prop.compute")}</button>
               {/if}
             </dd>
           </div>
         {/if}
         {#if isTextFile}
           <div>
-            <dt>Contents</dt>
+            <dt>{$t("prop.contents")}</dt>
             <dd class="checksum">
               {#if stats}
-                <span>{stats.lines.toLocaleString()} lines · {stats.words.toLocaleString()} words · {stats.chars.toLocaleString()} characters</span>
+                <span>{$t("prop.contentStats", { lines: stats.lines.toLocaleString(), words: stats.words.toLocaleString(), chars: stats.chars.toLocaleString() })}</span>
               {:else if statting}
-                <span class="dim">Counting…</span>
+                <span class="dim">{$t("prop.counting")}</span>
               {:else if statError}
                 <span class="err-inline">{statError}</span>
               {:else}
-                <button class="mini" on:click={computeStats}>Count</button>
+                <button class="mini" on:click={computeStats}>{$t("prop.count")}</button>
               {/if}
             </dd>
           </div>
@@ -219,23 +220,23 @@
     {:else}
       <div class="hero">
         <Icon name="folder" size={48} />
-        <span class="fname">{entries.length} items selected</span>
+        <span class="fname">{$t("prop.itemsSelected", { count: entries.length })}</span>
       </div>
       <dl>
-        <div><dt>Folders</dt><dd>{folderCount}</dd></div>
-        <div><dt>Files</dt><dd>{fileCount}</dd></div>
+        <div><dt>{$t("prop.folders")}</dt><dd>{folderCount}</dd></div>
+        <div><dt>{$t("prop.files")}</dt><dd>{fileCount}</dd></div>
         <div>
-          <dt>Size of files</dt>
-          <dd>{formatSize(totalSize) || "0 B"} ({totalSize.toLocaleString()} bytes)</dd>
+          <dt>{$t("prop.sizeOfFiles")}</dt>
+          <dd>{$t("prop.sizeBytes", { size: formatSize(totalSize) || "0 B", bytes: totalSize.toLocaleString() })}</dd>
         </div>
         {#if folderCount > 0}
-          <div><dt>Note</dt><dd class="dim">Folder contents are not included in the total.</dd></div>
+          <div><dt>{$t("prop.note")}</dt><dd class="dim">{$t("prop.folderNote")}</dd></div>
         {/if}
       </dl>
     {/if}
 
     <div class="actions">
-      <button class="btn primary" on:click={close}>Close</button>
+      <button class="btn primary" on:click={close}>{$t("common.close")}</button>
     </div>
   </div>
 </div>

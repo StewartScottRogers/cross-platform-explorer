@@ -8,6 +8,7 @@
   import { createEventDispatcher } from "svelte";
   import { invoke } from "@tauri-apps/api/core";
   import Icon from "./Icon.svelte";
+  import { t } from "../i18n";
   import { formatSize } from "../format";
   import { baseName, parentDir } from "../contentSearch";
   import { redundantPaths, keepsOnePerGroup, pruneGroups } from "../duplicates";
@@ -83,33 +84,34 @@
   <!-- svelte-ignore a11y-click-events-have-key-events a11y-no-static-element-interactions a11y-no-noninteractive-element-interactions -->
   <div class="dialog" role="dialog" aria-modal="true" on:click|stopPropagation>
     <header>
-      <h2>Find duplicate files</h2>
+      <h2>{$t("dup.title")}</h2>
       <span class="root" title={root}>{baseName(root) || root}</span>
-      <button class="x" title="Close" on:click={() => dispatch("close")}><Icon name="close" size={14} /></button>
+      <button class="x" title={$t("common.close")} on:click={() => dispatch("close")}><Icon name="close" size={14} /></button>
     </header>
 
     {#if !started}
       <div class="intro">
-        <p>Scan this folder (and subfolders) for byte-identical files. You choose which copies to remove — they go to the Recycle Bin, and at least one copy of each set is always kept.</p>
-        <button class="btn primary" on:click={run}>Scan for duplicates</button>
+        <p>{$t("dup.intro")}</p>
+        <button class="btn primary" on:click={run}>{$t("dup.scan")}</button>
       </div>
     {:else if loading}
-      <p class="dim">Scanning…</p>
+      <p class="dim">{$t("dup.scanning")}</p>
     {:else if error}
       <p class="err">{error}</p>
     {:else if result.groups.length === 0}
-      <p class="dim">No duplicate files found ({result.files_scanned.toLocaleString()} files scanned).</p>
+      <p class="dim">{$t("dup.none", { count: result.files_scanned.toLocaleString() })}</p>
     {:else}
       <div class="summary">
         <span>
-          {result.groups.length} duplicate set{result.groups.length === 1 ? "" : "s"} ·
-          {formatSize(reclaimable) || "0 B"} reclaimable
-          {#if result.truncated}<span class="dim"> (scan capped)</span>{/if}
+          {result.groups.length === 1
+            ? $t("dup.summaryOne", { count: result.groups.length, size: formatSize(reclaimable) || "0 B" })
+            : $t("dup.summaryMany", { count: result.groups.length, size: formatSize(reclaimable) || "0 B" })}
+          {#if result.truncated}<span class="dim"> {$t("dup.capped")}</span>{/if}
         </span>
         <span class="cleanup">
-          <button class="mini" on:click={selectRedundant} title="Tick every copy except the first in each set">Select redundant</button>
+          <button class="mini" on:click={selectRedundant} title={$t("dup.selectRedundantTip")}>{$t("dup.selectRedundant")}</button>
           <button class="mini danger" disabled={!canClean || deleting} on:click={cleanUp}>
-            {deleting ? "Removing…" : `Move ${selected.size} to Recycle Bin`}
+            {deleting ? $t("dup.removing") : $t("dup.moveToBin", { count: selected.size })}
           </button>
         </span>
       </div>
@@ -118,12 +120,12 @@
           <div class="group">
             <div class="ghead">
               <Icon name="copy" size={13} />
-              {g.paths.length} copies · {formatSize(g.size) || "0 B"} each
-              <span class="waste">{formatSize(g.size * (g.paths.length - 1)) || "0 B"} extra</span>
+              {$t("dup.copiesEach", { count: g.paths.length, size: formatSize(g.size) || "0 B" })}
+              <span class="waste">{$t("dup.extra", { size: formatSize(g.size * (g.paths.length - 1)) || "0 B" })}</span>
             </div>
             {#each g.paths as p (p)}
               <div class="row">
-                <label class="pick" title="Mark this copy for the Recycle Bin">
+                <label class="pick" title={$t("dup.markForBin")}>
                   <input type="checkbox" checked={selected.has(p)} on:change={() => toggle(p)} />
                 </label>
                 <button class="hit" title={p} on:click={() => goToFile(p)}>

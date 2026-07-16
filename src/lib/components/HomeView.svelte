@@ -1,6 +1,7 @@
 <script lang="ts">
   import { createEventDispatcher } from "svelte";
   import Icon from "./Icon.svelte";
+  import { t } from "../i18n";
   import { formatDate } from "../datetime";
   import { iconFor } from "../filetypes";
   import type { Place, RecentFile, Favorite } from "../types";
@@ -49,12 +50,12 @@
     <button
       class="twisty"
       class:open={quickOpen}
-      title={quickOpen ? "Collapse" : "Expand"}
+      title={quickOpen ? $t("home.collapse") : $t("home.expand")}
       on:click={() => (quickOpen = !quickOpen)}
     >
       <Icon name="chev-right" size={13} />
     </button>
-    <span>Quick access</span>
+    <span>{$t("home.quickAccess")}</span>
   </div>
 
   {#if quickOpen}
@@ -72,7 +73,7 @@
               class="pin pinned"
               role="button"
               tabindex="-1"
-              title="Unpin from Quick access"
+              title={$t("home.unpinQuick")}
               on:click|stopPropagation={() => dispatch("unpin", place.path)}
             >
               <Icon name="pin" size={13} />
@@ -89,30 +90,30 @@
     <button
       class="twisty"
       class:open={recentOpen}
-      title={recentOpen ? "Collapse" : "Expand"}
+      title={recentOpen ? $t("home.collapse") : $t("home.expand")}
       on:click={() => (recentOpen = !recentOpen)}
     >
       <Icon name="chev-right" size={13} />
     </button>
-    <span>{tab === "favorites" ? "Favorites" : tab === "folders" ? "Recent folders" : "Recent"}</span>
+    <span>{tab === "favorites" ? $t("home.favorites") : tab === "folders" ? $t("home.recentFolders") : $t("home.recent")}</span>
     {#if tab === "recent" && recents.length > 0}
-      <button class="clear" on:click={() => dispatch("clearRecents")}>Clear</button>
+      <button class="clear" on:click={() => dispatch("clearRecents")}>{$t("home.clear")}</button>
     {/if}
   </div>
 
   {#if recentOpen}
     <div class="pills">
       <button class="pill" class:active={tab === "recent"} on:click={() => (tab = "recent")}>
-        <Icon name="recent" size={14} /> Recent
+        <Icon name="recent" size={14} /> {$t("home.recent")}
       </button>
       <button class="pill" class:active={tab === "favorites"} on:click={() => (tab = "favorites")}>
-        <Icon name="star" size={14} /> Favorites
+        <Icon name="star" size={14} /> {$t("home.favorites")}
       </button>
       <button class="pill" class:active={tab === "folders"} on:click={() => (tab = "folders")}>
-        <Icon name="folder" size={14} /> Folders
+        <Icon name="folder" size={14} /> {$t("home.folders")}
       </button>
-      <button class="pill" disabled title="Shared — not implemented yet">
-        <Icon name="people" size={14} /> Shared
+      <button class="pill" disabled title={$t("home.sharedTip")}>
+        <Icon name="people" size={14} /> {$t("home.shared")}
       </button>
     </div>
 
@@ -120,13 +121,13 @@
       {#if recents.length === 0}
         <div class="empty-state">
           <span class="empty-icon"><Icon name="recent" size={36} /></span>
-          <p>No recent files yet</p>
-          <p style="font-size:12px">Files you open in this app will appear here.</p>
+          <p>{$t("home.noRecent")}</p>
+          <p style="font-size:12px">{$t("home.noRecentSub")}</p>
         </div>
       {:else}
         <div class="recent-list">
           <div class="recent-head">
-            <span>Name</span><span>Date opened</span>
+            <span>{$t("home.name")}</span><span>{$t("home.dateOpened")}</span>
           </div>
           {#each recents as r (r.path)}
             <button class="recent-row" on:dblclick={() => dispatch("openFile", r.path)} on:click={() => dispatch("openFile", r.path)}>
@@ -140,8 +141,8 @@
                 class="rmv"
                 role="button"
                 tabindex="-1"
-                aria-label="Remove from Recent"
-                title="Remove from Recent"
+                aria-label={$t("home.removeFromRecent")}
+                title={$t("home.removeFromRecent")}
                 on:click|stopPropagation={() => dispatch("removeRecent", r.path)}
               >
                 <Icon name="close" size={13} />
@@ -154,8 +155,8 @@
       {#if favorites.length === 0}
         <div class="empty-state">
           <span class="empty-icon"><Icon name="star" size={36} /></span>
-          <p>No favorites yet</p>
-          <p style="font-size:12px">Right-click any file or folder → Add to Favorites.</p>
+          <p>{$t("home.noFavorites")}</p>
+          <p style="font-size:12px">{$t("home.noFavoritesSub")}</p>
         </div>
       {:else}
         <div class="recent-list">
@@ -175,7 +176,7 @@
                 class="pin pinned"
                 role="button"
                 tabindex="-1"
-                title="Remove from Favorites"
+                title={$t("home.removeFromFavorites")}
                 on:click|stopPropagation={() => dispatch("unfavorite", f.path)}
               >
                 <Icon name="star" size={14} />
@@ -188,8 +189,8 @@
       {#if recentFolders.length === 0}
         <div class="empty-state">
           <span class="empty-icon"><Icon name="folder" size={36} /></span>
-          <p>No recent folders yet</p>
-          <p style="font-size:12px">Folders you open will appear here.</p>
+          <p>{$t("home.noRecentFolders")}</p>
+          <p style="font-size:12px">{$t("home.noRecentFoldersSub")}</p>
         </div>
       {:else}
         <div class="recent-list">
@@ -209,8 +210,8 @@
                 class="rmv"
                 role="button"
                 tabindex="-1"
-                aria-label="Remove from Recent folders"
-                title="Remove from Recent folders"
+                aria-label={$t("home.removeFromRecentFolders")}
+                title={$t("home.removeFromRecentFolders")}
                 on:click|stopPropagation={() => dispatch("removeRecentFolder", d.path)}
               >
                 <Icon name="close" size={13} />
