@@ -26,6 +26,7 @@
   import CommandBar from "./lib/components/CommandBar.svelte";
   import Sidebar from "./lib/components/Sidebar.svelte";
   import RepoBrowser from "./lib/components/RepoBrowser.svelte";
+  import BoardView from "./lib/components/BoardView.svelte";
   import AgentMenu from "./lib/components/AgentMenu.svelte";
   import Toolbar from "./lib/components/Toolbar.svelte";
   import FileList from "./lib/components/FileList.svelte";
@@ -200,6 +201,8 @@
   let patternSelectOpen = false;
   /** Repositories browser overlay (CPE-434/435) — browse GitHub & other forges in-app. */
   let showRepos = false;
+  /** Agent Board (CPE-521) — Kanban over the current folder's Tickets/. */
+  let showBoard = false;
   /** Git sync status of the current folder (CPE-462) — two-way mirror status bar. Null when the
       folder isn't a git repo, or in the plain (non-sidecar) build where the command is absent. */
   let gitStatus: { is_repo?: boolean; branch?: string; ahead?: number; behind?: number; dirty?: boolean; conflicted?: boolean } | null = null;
@@ -2083,6 +2086,7 @@
       on:openFile={(e) => openRecent(e.detail)}
       on:home={() => { if (archive) exitArchive(); navigate(HOME); }}
       on:repos={() => (showRepos = true)}
+      on:board={() => (showBoard = true)}
       on:agentMenu={(e) => (agentMenu = { x: e.detail.x, y: e.detail.y, label: $t("tb.closeAllConsoles"), sessionId: e.detail.sessionId, sessionLabel: e.detail.sessionLabel })}
       on:drop={(e) => dropInto(e.detail.paths, e.detail.dest, e.detail.copy)}
     />
@@ -2431,6 +2435,10 @@
 
 {#if showRepos}
   <RepoBrowser on:close={() => (showRepos = false)} />
+{/if}
+
+{#if showBoard}
+  <BoardView root={currentPath} on:close={() => (showBoard = false)} />
 {/if}
 
 {#if agentMenu}

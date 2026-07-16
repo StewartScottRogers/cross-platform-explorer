@@ -32,6 +32,7 @@
     openFile: string;
     home: void;
     repos: void;
+    board: void;
     agentMenu: { x: number; y: number; sessionId?: string; sessionLabel?: string };
     drop: { paths: string[]; dest: string; copy: boolean };
   }>();
@@ -237,6 +238,12 @@
     <span class="twisty hidden" />
     <Icon name="code" />
     <span class="label">{$t("sidebar.repositories")}</span>
+  </button>
+
+  <button class="nav-item" title="Agent Board — Kanban over this folder's Tickets/" on:click={() => dispatch("board")}>
+    <span class="twisty hidden" />
+    <Icon name="documents" />
+    <span class="label">Agent Board</span>
   </button>
 
   <div class="navigation-pane-sep" />
