@@ -68,6 +68,8 @@ pub mod session_engine;
 pub use session_engine::{DaemonEngine, LocalEngine, SessionEngine, SessionIo};
 pub mod session_server;
 pub mod session_supervisor;
+pub mod swarm_locks;
+pub use swarm_locks::{path_globs_overlap, ClaimOutcome, LockManager};
 pub use session_client::{SessionClient, StreamMsg};
 
 pub use plugins::{install_plugin, uninstall_plugin, PluginApplier, PluginManifest, PluginRegistry};
