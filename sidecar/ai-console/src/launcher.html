@@ -114,6 +114,20 @@
               border-radius: 5px; cursor: grab; }
   .sb-thumb:hover { background: #8f8f8f; }
   .sb-thumb:active { cursor: grabbing; background: #a5a5a5; }
+  /* Agent Grid (CPE-506): a Tabs⇄Grid toggle over the SAME per-session term-panes. In grid view
+     #terms becomes a CSS grid whose tiles auto-reflow (cols/rows from gridDims); tabs view is the
+     unchanged single-pane default. */
+  #view-bar { display: none; align-items: center; justify-content: flex-end; gap: 8px; padding: 4px 8px 0; }
+  #view-toggle { font: inherit; font-size: 12px; height: 26px; padding: 0 12px; border-radius: 6px;
+                 border: 1px solid ButtonBorder; background: ButtonFace; color: ButtonText; cursor: pointer; }
+  #view-toggle:hover { background: rgba(128,128,128,0.16); }
+  #terms.grid-view { display: grid; gap: 6px; padding: 6px;
+                     grid-template-columns: repeat(var(--grid-cols, 1), minmax(0, 1fr));
+                     grid-template-rows: repeat(var(--grid-rows, 1), minmax(0, 1fr)); }
+  #terms.grid-view .term-pane { position: relative; inset: auto; border: 1px solid #2a2a2a;
+                                border-radius: 6px; overflow: hidden; }
+  /* The focused tile gets a subtle ring; the fuller focus/keynav UX is CPE-507. */
+  #terms.grid-view .term-pane.focused { border-color: #4a86c5; }
   /* "Manage agents" dropdown + Help panel (CPE-390) */
   .menu-wrap { position: relative; display: inline-block; }
   /* System-color theming (Canvas/CanvasText) + var(--line) border, matching #model-menu, so both
@@ -279,6 +293,7 @@
     </div>
   </div>
   <div id="msg">Pick an agent, provider and model, then Launch.</div>
+  <div id="view-bar"><button id="view-toggle" type="button" title="Show all agents in a grid">▦ Grid</button></div>
   <div id="tabs"></div>
   <div id="terms">
   </div>
@@ -660,6 +675,51 @@ async function deleteSet() {
 const sessions = new Map(); // id -> { id, name, term, fit, search, ws, pane, tab }
 let activeId = null;
 
+// --- Agent Grid: Tabs⇄Grid view over the same term-panes (CPE-506) ---------------------
+let viewMode = "tabs"; // "tabs" | "grid"
+
+// Best-fit tile dimensions for n panes: near-square, cols-first so 2⇒1×2 (side by side),
+// 3-4⇒2×2, 5-6⇒2×3, … up to 16⇒4×4. Pure — unit-tested headlessly.
+function gridDims(n) {
+  if (n <= 1) return { rows: 1, cols: 1 };
+  const cols = Math.ceil(Math.sqrt(n));
+  const rows = Math.ceil(n / cols);
+  return { rows, cols };
+}
+
+// The single layout authority: show one pane (tabs) or tile them all (grid), then fit the visible.
+function applyView() {
+  const terms = $("terms");
+  const grid = viewMode === "grid" && sessions.size > 0;
+  terms.classList.toggle("grid-view", grid);
+  if (grid) {
+    const d = gridDims(sessions.size);
+    terms.style.setProperty("--grid-cols", String(d.cols));
+    terms.style.setProperty("--grid-rows", String(d.rows));
+  } else {
+    terms.style.removeProperty("--grid-cols");
+    terms.style.removeProperty("--grid-rows");
+  }
+  for (const s of sessions.values()) {
+    s.pane.style.display = grid ? "block" : (s.id === activeId ? "block" : "none");
+    s.pane.classList.toggle("focused", grid && s.id === activeId);
+    s.tab.classList.toggle("active", s.id === activeId);
+  }
+  for (const s of sessions.values()) if (s.pane.style.display !== "none") refit(s);
+  updateViewToggle();
+}
+
+function updateViewToggle() {
+  const bar = $("view-bar"), btn = $("view-toggle");
+  if (!bar || !btn) return;
+  bar.style.display = sessions.size > 0 ? "flex" : "none";
+  btn.textContent = viewMode === "grid" ? "▤ Tabs" : "▦ Grid";
+  btn.title = viewMode === "grid" ? "Switch back to single-pane tabs" : "Show all agents in a grid";
+}
+
+function setView(mode) { viewMode = (mode === "grid" ? "grid" : "tabs"); applyView(); }
+function toggleView() { setView(viewMode === "grid" ? "tabs" : "grid"); }
+
 // Session-identity chip (CPE-490) — MUST match src/lib/sessionChip.ts so a console tab and its
 // left-pane Agents leaf show the same colour + number (same session id ⇒ same chip).
 const SESSION_CHIP_COLORS = ["#3a72b5","#3a9d4a","#b5872b","#a24bd0","#c94f4f","#2aa1a1","#c96f18","#6b7bd6"];
@@ -687,7 +747,10 @@ function buildTerm(s) {
   term.onData((d) => { if (s.ws && s.ws.readyState === 1) s.ws.send(d); });
   term.attachCustomKeyEventHandler((e) => onKey(e, s));
   term.onScroll(() => updateThumb(s));
-  if (window.ResizeObserver) new ResizeObserver(() => { if (s.id === activeId) refit(s); }).observe(s.pane);
+  // Refit on pane resize: the active pane in tabs view, or any visible tile in grid view (CPE-506).
+  if (window.ResizeObserver) new ResizeObserver(() => {
+    if (s.id === activeId || (viewMode === "grid" && s.pane.style.display !== "none")) refit(s);
+  }).observe(s.pane);
   s.term = term; s.fit = fit; s.search = search;
 }
 
@@ -699,12 +762,9 @@ function refit(s) {
 
 function activate(id) {
   activeId = id;
-  for (const s of sessions.values()) {
-    const on = s.id === id;
-    s.pane.style.display = on ? "block" : "none";
-    s.tab.classList.toggle("active", on);
-    if (on) { refit(s); s.term.focus(); }
-  }
+  applyView(); // lays out tabs OR grid, shows/refits panes, updates tab highlight + toggle
+  const s = sessions.get(id);
+  if (s && s.term) s.term.focus();
 }
 
 // --- Custom scrollbar (WebView2 won't reliably paint a native one) ---------------------
@@ -816,7 +876,12 @@ function closeSession(id) {
   s.pane.remove(); s.tab.remove();
   sessions.delete(id);
   dropCloseAllIfEmpty();
-  if (activeId === id) { const next = sessions.keys().next().value; if (next) activate(next); else activeId = null; }
+  if (activeId === id) {
+    const next = sessions.keys().next().value;
+    if (next) { activate(next); return; } // activate re-lays-out
+    activeId = null;
+  }
+  applyView(); // a background tile closed (or the last one) — reflow the grid / hide the bar
 }
 
 // Close every open session at once and reclaim all out-of-process resources (CPE-442). Confirms
@@ -833,6 +898,7 @@ async function closeAllSessions() {
   sessions.clear();
   activeId = null;
   dropCloseAllIfEmpty();
+  applyView(); // nothing left — drop the grid class + hide the view toggle
 }
 
 // Ctrl+Shift+C/V copy-paste, Ctrl+F find on the given session. false = don't send the key on.
@@ -1244,6 +1310,8 @@ $("cwd-browse").addEventListener("click", pickFolder);
 $("onboard-go").addEventListener("click", dismissOnboarding);
 $("onboard-addkey").addEventListener("click", () => { dismissOnboarding(); openKeys(); });
 $("launch").addEventListener("click", launch);
+$("view-toggle").addEventListener("click", toggleView); // Agent Grid Tabs⇄Grid (CPE-506)
+updateViewToggle(); // reflect the (empty) initial state so the bar is explicitly hidden
 
 // Bottom status bar: mirror the project folder + the selected agent/provider/model as persistent
 // context. Updated on edits and once the catalog + remembered selection have loaded.
