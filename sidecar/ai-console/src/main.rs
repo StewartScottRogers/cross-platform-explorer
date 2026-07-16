@@ -77,12 +77,13 @@ fn console_state(
         .with_catalog_sources(sources)
         .with_announcer(announce);
 
-    // CPE-309: route session PTYs through the long-lived session-daemon process so they survive a
-    // console restart (crash/update/toggle). Discover an already-running daemon (from a prior console)
-    // or spawn a detached one. If the daemon can't be started, fall back to in-process sessions —
-    // degrading to pre-CPE-309 behavior rather than ever blocking a launch. `CPE_AICONSOLE_NO_DAEMON`
-    // forces the in-process path.
-    if std::env::var("CPE_AICONSOLE_NO_DAEMON").is_err() {
+    // CPE-309: the session-daemon engine (sessions survive a console restart) is **opt-in** behind
+    // `CPE_AICONSOLE_SESSION_DAEMON` while a Windows issue is resolved: a DETACHED_PROCESS daemon has
+    // no console, and ConPTY (portable-pty) produces **no output** for children spawned there — which
+    // broke every tab. The default stays the proven in-process engine so the AI Console works. The
+    // real fix for daemon-survival is host-owned (non-detached) daemon supervision — see CPE-309.
+    let want_daemon = std::env::var("CPE_AICONSOLE_SESSION_DAEMON").is_ok();
+    if want_daemon {
         if let Ok(exe) = std::env::current_exe() {
             match ai_console::session_supervisor::SessionDaemonHandle::discover_or_spawn(
                 &exe,
@@ -98,7 +99,7 @@ fn console_state(
 
     let state = Arc::new(state);
     // Reattach any sessions the daemon still holds from a previous console (CPE-309/461 across a full
-    // restart) so their tabs come back with scrollback + live I/O.
+    // restart) so their tabs come back with scrollback + live I/O. No-op for the in-process default.
     state.reattach_running_sessions();
     state
 }
