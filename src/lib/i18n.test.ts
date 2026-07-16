@@ -63,6 +63,18 @@ describe("i18n translate()", () => {
     }
   });
 
+  it("translates the CommandBar sort/view/filter labels across locales (CPE-481)", () => {
+    expect(translate("es", "cmd.sort")).toBe("Ordenar");
+    expect(translate("de", "sort.modified")).toBe("Änderungsdatum");
+    expect(translate("fr", "view.icons")).toBe("Grandes icônes");
+    expect(translate("es", "filter.document")).toBe("Documentos");
+    for (const ns of ["cmd.", "sort.", "view.", "filter."]) {
+      const keys = localeKeys("en").filter((k) => k.startsWith(ns));
+      expect(keys.length).toBeGreaterThan(0);
+      for (const loc of ["es", "de", "fr"] as const) for (const k of keys) expect(localeKeys(loc)).toContain(k);
+    }
+  });
+
   it("interpolates {name} placeholders", () => {
     expect(translate("en", "status.items", { count: 42 })).toBe("42 items");
     expect(translate("es", "status.selected", { count: 3 })).toBe("3 seleccionados");
