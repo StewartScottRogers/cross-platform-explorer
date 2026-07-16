@@ -27,6 +27,7 @@
   import Sidebar from "./lib/components/Sidebar.svelte";
   import RepoBrowser from "./lib/components/RepoBrowser.svelte";
   import BoardView from "./lib/components/BoardView.svelte";
+  import WorkbenchView from "./lib/components/WorkbenchView.svelte";
   import AgentMenu from "./lib/components/AgentMenu.svelte";
   import Toolbar from "./lib/components/Toolbar.svelte";
   import FileList from "./lib/components/FileList.svelte";
@@ -203,6 +204,8 @@
   let showRepos = false;
   /** Agent Board (CPE-521) — Kanban over the current folder's Tickets/. */
   let showBoard = false;
+  /** Integrated workbench (CPE-526) — git diff of the current folder. */
+  let showWorkbench = false;
   /** Git sync status of the current folder (CPE-462) — two-way mirror status bar. Null when the
       folder isn't a git repo, or in the plain (non-sidecar) build where the command is absent. */
   let gitStatus: { is_repo?: boolean; branch?: string; ahead?: number; behind?: number; dirty?: boolean; conflicted?: boolean } | null = null;
@@ -2087,6 +2090,7 @@
       on:home={() => { if (archive) exitArchive(); navigate(HOME); }}
       on:repos={() => (showRepos = true)}
       on:board={() => (showBoard = true)}
+      on:workbench={() => (showWorkbench = true)}
       on:agentMenu={(e) => (agentMenu = { x: e.detail.x, y: e.detail.y, label: $t("tb.closeAllConsoles"), sessionId: e.detail.sessionId, sessionLabel: e.detail.sessionLabel })}
       on:drop={(e) => dropInto(e.detail.paths, e.detail.dest, e.detail.copy)}
     />
@@ -2443,6 +2447,10 @@
     on:launch={(e) => openAiConsole({ cwd: currentPath, task: e.detail.task })}
     on:close={() => (showBoard = false)}
   />
+{/if}
+
+{#if showWorkbench}
+  <WorkbenchView root={currentPath} on:close={() => (showWorkbench = false)} />
 {/if}
 
 {#if agentMenu}

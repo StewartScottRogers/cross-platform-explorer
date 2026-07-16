@@ -33,6 +33,7 @@
     home: void;
     repos: void;
     board: void;
+    workbench: void;
     agentMenu: { x: number; y: number; sessionId?: string; sessionLabel?: string };
     drop: { paths: string[]; dest: string; copy: boolean };
   }>();
@@ -244,6 +245,12 @@
     <span class="twisty hidden" />
     <Icon name="documents" />
     <span class="label">Agent Board</span>
+  </button>
+
+  <button class="nav-item" title="Workbench — view this folder's git diff" on:click={() => dispatch("workbench")}>
+    <span class="twisty hidden" />
+    <Icon name="details" />
+    <span class="label">Workbench</span>
   </button>
 
   <div class="navigation-pane-sep" />

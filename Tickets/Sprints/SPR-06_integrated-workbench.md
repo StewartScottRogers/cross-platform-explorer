@@ -13,7 +13,7 @@ Build the **Integrated workbench** epic [[CPE-505]]: read an agent's diff, edit 
 localhost — the diff model + view first, then the editor + embedded-browser panes.
 
 ## Tickets
-- [ ] CPE-526 — git diff model + Diff view
+- [x] CPE-526 — git diff model + Diff view
 - [ ] CPE-527 — editor pane + embedded browser (webview)
 
 Order: CPE-526 (diff) → CPE-527 (editor + browser).
