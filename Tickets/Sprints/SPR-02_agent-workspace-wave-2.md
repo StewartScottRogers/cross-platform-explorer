@@ -16,7 +16,7 @@ Wave 2 of the **Swarm** epic [[CPE-502]]: build the **coordinator** that ties th
 ## Tickets
 Wave-2 orchestration of [[CPE-502]] (each carries `sprint: SPR-02`):
 - [x] CPE-517 — Coordinator dispatch loop (mission → tasks → collect) *(big-design; keystone)*
-- [ ] CPE-518 — Quality gates before a task is "done"
+- [x] CPE-518 — Quality gates before a task is "done"
 - [ ] CPE-519 — Cost/token budgets + retry + coordinator authority
 
 Suggested order: CPE-517 first (the keystone the other two extend), then CPE-518 / CPE-519.

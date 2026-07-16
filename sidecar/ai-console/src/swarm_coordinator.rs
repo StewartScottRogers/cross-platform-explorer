@@ -15,14 +15,26 @@ use crate::swarm_mailbox::{Mailbox, Recipient};
 use crate::swarm_team::{Role, TeamManifest};
 use std::collections::{HashMap, HashSet};
 
-/// A unit of work in a mission: a description, the role that should do it, and the file globs it will
-/// exclusively own while running (its lock claim).
+/// The quality gate a task must pass before it counts as done (CPE-518).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Gate {
+    /// No gate — finishing the work is done.
+    None,
+    /// A test suite must pass (run by the live driver, which reports `on_gate_pass`/`on_gate_fail`).
+    Tests,
+    /// A reviewer agent must approve (the coordinator requests it over the mailbox).
+    Review,
+}
+
+/// A unit of work in a mission: a description, the role that should do it, the file globs it will
+/// exclusively own while running (its lock claim), and the quality gate it must pass to be done.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Task {
     pub id: String,
     pub description: String,
     pub role: Role,
     pub globs: Vec<String>,
+    pub gate: Gate,
 }
 
 /// A task's lifecycle state.
@@ -30,6 +42,8 @@ pub struct Task {
 pub enum TaskState {
     Pending,
     Running,
+    /// Work finished, awaiting its quality gate (CPE-518); locks stay held so a reopen is safe.
+    Gating,
     Done,
     Failed,
 }
@@ -134,7 +148,9 @@ impl Coordinator {
                 if self.busy.contains(&agent) {
                     continue;
                 }
-                if self.locks.try_claim(&task_id, globs) {
+                // A reopened task (CPE-518 gate fail) still holds its lock — re-dispatch without
+                // re-claiming; a fresh task must acquire its files.
+                if self.locks.is_held(&task_id) || self.locks.try_claim(&task_id, globs) {
                     self.state.insert(task_id.clone(), TaskState::Running);
                     self.busy.insert(agent.clone());
                     let desc =
@@ -151,23 +167,59 @@ impl Coordinator {
         dispatched
     }
 
-    /// Report a task finished successfully: free its agent + locks, then dispatch anything unblocked.
-    pub fn on_done(&mut self, task_id: &str) -> Vec<Assignment> {
-        self.finish(task_id, TaskState::Done)
+    fn gate_of(&self, task_id: &str) -> Gate {
+        self.tasks.iter().find(|t| t.id == task_id).map(|t| t.gate).unwrap_or(Gate::None)
+    }
+    fn desc_of(&self, task_id: &str) -> String {
+        self.tasks.iter().find(|t| t.id == task_id).map(|t| t.description.clone()).unwrap_or_default()
     }
 
-    /// Report a task failed: free its agent + locks, mark Failed, then dispatch anything unblocked.
+    /// Report a task's **work** finished. Its agent is freed. A task with no gate is Done immediately;
+    /// a gated task moves to `Gating` (keeping its file locks) and its gate is requested — a `Review`
+    /// gate posts a review request to the reviewers, a `Tests` gate waits for the driver to run tests.
+    /// The gate result arrives via [`on_gate_pass`] / [`on_gate_fail`]. (CPE-518)
+    pub fn on_done(&mut self, task_id: &str) -> Vec<Assignment> {
+        if let Some(a) = self.assignee.get(task_id) {
+            self.busy.remove(a);
+        }
+        match self.gate_of(task_id) {
+            Gate::None => {
+                self.locks.release(task_id);
+                self.state.insert(task_id.to_string(), TaskState::Done);
+            }
+            gate => {
+                self.state.insert(task_id.to_string(), TaskState::Gating); // locks stay held
+                if gate == Gate::Review {
+                    let desc = self.desc_of(task_id);
+                    self.mailbox.post("coordinator", Recipient::Role(Role::Reviewer), "review", &desc, 0);
+                }
+            }
+        }
+        self.advance()
+    }
+
+    /// The task's quality gate passed → accept it: release its locks, mark Done, dispatch unblocked. (CPE-518)
+    pub fn on_gate_pass(&mut self, task_id: &str) -> Vec<Assignment> {
+        self.locks.release(task_id);
+        self.state.insert(task_id.to_string(), TaskState::Done);
+        self.advance()
+    }
+
+    /// The gate failed → **reopen** the task (back to Pending, keeping its locks) so its agent redoes
+    /// the work; it will be re-dispatched. (CPE-518)
+    pub fn on_gate_fail(&mut self, task_id: &str) -> Vec<Assignment> {
+        self.state.insert(task_id.to_string(), TaskState::Pending);
+        self.advance()
+    }
+
+    /// Report a task failed outright: free its agent + release locks, mark Failed, dispatch unblocked.
     /// (Retry policy is CPE-519.)
     pub fn on_failed(&mut self, task_id: &str) -> Vec<Assignment> {
-        self.finish(task_id, TaskState::Failed)
-    }
-
-    fn finish(&mut self, task_id: &str, end: TaskState) -> Vec<Assignment> {
         if let Some(a) = self.assignee.get(task_id) {
             self.busy.remove(a);
         }
         self.locks.release(task_id);
-        self.state.insert(task_id.to_string(), end);
+        self.state.insert(task_id.to_string(), TaskState::Failed);
         self.advance()
     }
 
@@ -202,11 +254,26 @@ mod tests {
     use crate::swarm_team::{default_team, RoleSpec, TeamManifest};
 
     fn task(id: &str, globs: &[&str]) -> Task {
+        gated(id, globs, Gate::None)
+    }
+    fn gated(id: &str, globs: &[&str], gate: Gate) -> Task {
         Task {
             id: id.into(),
             description: format!("do {id}"),
             role: Role::Builder,
             globs: globs.iter().map(|s| s.to_string()).collect(),
+            gate,
+        }
+    }
+    fn team_with_reviewer() -> TeamManifest {
+        TeamManifest {
+            name: "T".into(),
+            description: String::new(),
+            roles: vec![
+                RoleSpec { role: Role::Coordinator, agent: "claude".into(), model: None, count: 1 },
+                RoleSpec { role: Role::Builder, agent: "claude".into(), model: None, count: 1 },
+                RoleSpec { role: Role::Reviewer, agent: "claude".into(), model: None, count: 1 },
+            ],
         }
     }
 
@@ -291,8 +358,63 @@ mod tests {
 
     #[test]
     fn new_errors_when_a_task_needs_an_unstaffed_role() {
-        let scout_task = Task { id: "s".into(), description: "scan".into(), role: Role::Scout, globs: vec![] };
+        let scout_task = Task { id: "s".into(), description: "scan".into(), role: Role::Scout, globs: vec![], gate: Gate::None };
         // default_team has no scout.
         assert!(Coordinator::new(&default_team(), vec![scout_task]).is_err());
+    }
+
+    // --- Quality gates (CPE-518) --------------------------------------------------------
+    #[test]
+    fn a_gated_task_awaits_its_gate_before_done() {
+        let mut c = Coordinator::new(&team_with_reviewer(), vec![gated("t1", &["a/**"], Gate::Tests)]).unwrap();
+        c.start();
+        c.on_done("t1"); // work finished, but a gate is required
+        assert_eq!(c.state_of("t1"), Some(TaskState::Gating));
+        assert!(!c.is_complete()); // NOT done until the gate passes
+        c.on_gate_pass("t1");
+        assert_eq!(c.state_of("t1"), Some(TaskState::Done));
+        assert!(c.is_complete());
+    }
+
+    #[test]
+    fn a_failed_gate_reopens_the_task_for_rework() {
+        let mut c = Coordinator::new(&team_with_reviewer(), vec![gated("t1", &["a/**"], Gate::Tests)]).unwrap();
+        c.start();
+        c.on_done("t1");
+        let redispatch = c.on_gate_fail("t1"); // gate failed → reopen
+        assert_eq!(redispatch.len(), 1); // the same task is dispatched again to fix it
+        assert_eq!(c.state_of("t1"), Some(TaskState::Running));
+        // Fixing + passing the gate finally completes it.
+        c.on_done("t1");
+        c.on_gate_pass("t1");
+        assert!(c.is_complete());
+    }
+
+    #[test]
+    fn a_review_gate_asks_a_reviewer_over_the_mailbox() {
+        let mut c = Coordinator::new(&team_with_reviewer(), vec![gated("t1", &["a/**"], Gate::Review)]).unwrap();
+        c.start();
+        c.on_done("t1");
+        // The reviewer instance got a "review" request.
+        let reviewer = "claude#reviewer1";
+        let inbox = c.mailbox().read(reviewer);
+        assert!(inbox.iter().any(|m| m.kind == "review" && m.body == "do t1"));
+    }
+
+    #[test]
+    fn a_gating_task_keeps_its_files_locked_so_overlaps_still_wait() {
+        // One builder, two tasks sharing files; the first is gated. While it's Gating, the second must
+        // still wait (its files are held), even though the agent is free.
+        let mut c = Coordinator::new(
+            &team_with_reviewer(),
+            vec![gated("t1", &["src/**"], Gate::Tests), gated("t2", &["src/lib.rs"], Gate::None)],
+        )
+        .unwrap();
+        c.start(); // t1 runs (assigned first)
+        assert_eq!(c.state_of("t1"), Some(TaskState::Running));
+        c.on_done("t1"); // → Gating, locks held
+        assert_eq!(c.state_of("t2"), Some(TaskState::Pending)); // still blocked on files
+        c.on_gate_pass("t1"); // releases files
+        assert_eq!(c.state_of("t2"), Some(TaskState::Running));
     }
 }
