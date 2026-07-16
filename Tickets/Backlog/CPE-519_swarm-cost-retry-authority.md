@@ -9,6 +9,7 @@ tags: [needs-prereq]
 estimate: 2-3h
 created: 2026-07-16
 epic: CPE-502
+sprint: SPR-02
 ---
 
 ## Summary

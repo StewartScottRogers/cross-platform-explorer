@@ -1,11 +1,11 @@
 ---
 id: SPR-01
 title: "Sprint 1 — Agent Workspace, wave 1 (Swarm)"
-status: Active
+status: Closed
 start: 2026-07-16
 end: 2026-07-30
 created: 2026-07-16
-closed:
+closed: 2026-07-16
 ---
 
 ## Goal
@@ -20,4 +20,11 @@ Wave-1 foundation of the Swarm epic [[CPE-502]] (each carries `sprint: SPR-01`):
 - [x] CPE-515 — Swarm role/team manifest model (coordinator/builder/scout/reviewer)
 - [x] CPE-516 — Swarm inter-agent mailbox over MCP
 
-_Wave 2 (CPE-517 coordinator, CPE-518 gates, CPE-519 budgets/authority) is queued for a later sprint._
+_Wave 2 (CPE-517 coordinator, CPE-518 gates, CPE-519 budgets/authority) continues in [[SPR-02]]._
+
+## Resolution (closed 2026-07-16)
+**Goal met** — all 3 assigned tickets Done. The Swarm foundation substrates shipped as pure, tested
+modules in the ai-console crate: [[CPE-514]] file-ownership lock manager (no collisions), [[CPE-515]]
+role/team manifest (team definition), [[CPE-516]] inter-agent mailbox (coordination). 21 unit tests,
+clippy clean, CI green. These are exactly what the coordinator (CPE-517) ties together — carried into
+**SPR-02** (wave 2). No carry-overs.
