@@ -17,7 +17,7 @@ control-API idea is the coordination substrate Swarm needs.
 ## Tickets
 Wave-1 foundation of the Swarm epic [[CPE-502]] (each carries `sprint: SPR-01`):
 - [x] CPE-514 — Swarm file-ownership lock manager (path-glob claims + shared-dep sequencing) *(Done)*
-- [ ] CPE-515 — Swarm role/team manifest model (coordinator/builder/scout/reviewer)
+- [x] CPE-515 — Swarm role/team manifest model (coordinator/builder/scout/reviewer)
 - [ ] CPE-516 — Swarm inter-agent mailbox over MCP
 
 _Wave 2 (CPE-517 coordinator, CPE-518 gates, CPE-519 budgets/authority) is queued for a later sprint._
