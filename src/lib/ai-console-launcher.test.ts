@@ -185,6 +185,35 @@ describe("AI Console launcher — grid pane identity + keyboard nav (CPE-507)", 
   });
 });
 
+describe("AI Console launcher — 16-pane throttling (CPE-508)", () => {
+  it("paneWritePolicy: focused writes now, tiles coalesce, hidden defers", async () => {
+    const { w } = await mountLauncher();
+    expect(w.paneWritePolicy("focused")).toBe("sync");
+    expect(w.paneWritePolicy("tile")).toBe("throttled");
+    expect(w.paneWritePolicy("hidden")).toBe("deferred");
+  });
+
+  it("caps visible grid tiles at 16, always including the focused agent", async () => {
+    const { w } = await mountLauncher();
+    for (let i = 1; i <= 20; i++) w.addSession("agent-" + i, "A" + i);
+    const vis = w.visibleGridIds(); // active is agent-20 (last added), past the first 16
+    expect(vis.size).toBe(17); // first 16 by order + the focused one
+    expect(vis.has("agent-1")).toBe(true);
+    expect(vis.has("agent-20")).toBe(true); // focused is never hidden
+    expect(vis.has("agent-17")).toBe(false); // past the cap + not focused → reachable via tabs
+  });
+
+  it("buffers output for a hidden pane and flushes it when shown — no output lost", async () => {
+    const { w } = await mountLauncher();
+    w.addSession("a", "A");
+    w.addSession("b", "B"); // b is active; a is hidden in tabs view
+    w.eval("routeWrite(sessions.get('a'), 'hello')");
+    expect(w.eval("sessions.get('a')._buf.length")).toBe(1); // deferred, buffered not written
+    w.activate("a"); // shows a → flushes its buffer
+    expect(w.eval("sessions.get('a')._buf.length")).toBe(0);
+  });
+});
+
 describe("AI Console launcher — named sets / presets (the reported confusion)", () => {
   it("renders the current agent's sets into the dropdown, with a blank placeholder", async () => {
     const { w } = await mountLauncher();
