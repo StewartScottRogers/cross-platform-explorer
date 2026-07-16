@@ -7,7 +7,7 @@
 use serde::{Deserialize, Serialize};
 
 /// A role an agent can play in a Swarm team. Closed vocabulary with defined responsibilities.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Role {
     /// Plans the mission, splits it into tasks, dispatches + sequences the team, holds authority.

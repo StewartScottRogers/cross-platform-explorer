@@ -92,6 +92,18 @@ impl LockManager {
         }
     }
 
+    /// Claim `globs` for `task_id` **only if immediately free** — never queues. Returns `true` if
+    /// granted. For callers (e.g. the CPE-517 coordinator) that poll + re-evaluate their own schedule
+    /// rather than rely on the FIFO wait queue.
+    pub fn try_claim(&mut self, task_id: &str, globs: Vec<String>) -> bool {
+        if self.overlaps_active(&globs) {
+            false
+        } else {
+            self.active.push(Claim { task_id: task_id.to_string(), globs });
+            true
+        }
+    }
+
     /// Release every claim held by `task_id`, then grant any queued claims whose overlap has now
     /// cleared, in FIFO order. Returns the task ids newly granted (so the caller can wake them).
     pub fn release(&mut self, task_id: &str) -> Vec<String> {
@@ -190,6 +202,15 @@ mod tests {
         // Releasing t2 then wakes t3.
         assert_eq!(lm.release("t2"), vec!["t3".to_string()]);
         assert!(lm.is_held("t3"));
+    }
+
+    #[test]
+    fn try_claim_grants_when_free_and_refuses_without_queuing() {
+        let mut lm = LockManager::new();
+        assert!(lm.try_claim("t1", vec!["src/**".into()]));
+        assert!(!lm.try_claim("t2", vec!["src/x.rs".into()])); // overlaps → refused
+        assert!(lm.queued_tasks().is_empty()); // and NOT queued
+        assert!(lm.try_claim("t3", vec!["docs/**".into()])); // disjoint → granted
     }
 
     #[test]
