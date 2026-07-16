@@ -2,7 +2,7 @@
 id: CPE-309
 title: Session reattachment across sidecar restart
 type: Feature
-status: Deferred
+status: In Progress
 priority: Medium
 component: Backend
 tags: [big-design]
@@ -225,3 +225,36 @@ spawns the session daemon **with a console** (so ConPTY works) and outside the s
 survives), then hands its address to the sidecar. That's a focused host-side follow-up — the
 engine/seam/client/supervisor all stay as-is. Deferring on that internal prereq; the default app is
 healthy in the meantime.
+
+## Host-owned daemon built 2026-07-15 (user: "build the host-owned daemon for CPE-309")
+The correct S4 design, now implemented — and it fixes the v0.19.0 no-output bug at its root.
+
+**Why the detached self-spawn produced no output:** the sidecar's `spawn_detached` used
+`DETACHED_PROCESS` (no console) — but the host spawns the *UI sidecar* itself with **`CREATE_NO_WINDOW`
+(a hidden console)**, and that sidecar's in-process ConPTY PTYs work fine. So the fix is to spawn the
+daemon **the same way the host spawns the sidecar**: hidden console, not detached.
+
+**Implementation:**
+- **Host (`src-tauri/src/lib.rs`, feature-gated):** `AiConsoleState` gains a host-owned
+  `HostSessionDaemon { child, port }` (Drop reaps it on app exit). `ensure_session_daemon(bin)` spawns
+  `<ai-console> --session-daemon` with **`CREATE_NO_WINDOW`** (hidden console → ConPTY has output),
+  reads its `PORT`, and reuses a live one. `sidecar_start_ai_console` brings the daemon up and passes
+  `CPE_AICONSOLE_SESSION_DAEMON_ADDR=127.0.0.1:<port>` to the UI sidecar. Because the daemon is owned
+  by the **host** (long-lived) and not the UI sidecar, it **survives the sidecar being restarted,
+  toggled, or crashing** — and `sidecar_stop` deliberately leaves it running so a reopen reattaches.
+- **Sidecar (`ai-console`):** `SessionDaemonHandle::external(port)` references the host-owned daemon
+  (never reaps it). `main.rs` connects a `DaemonEngine` to `CPE_AICONSOLE_SESSION_DAEMON_ADDR` when
+  present (else in-process), then `reattach_running_sessions()` re-opens a tab per surviving session.
+- Removed the broken detached self-spawn from the production path; the in-process engine remains the
+  automatic fallback if the daemon can't start (never blocks a launch).
+
+**Verified headlessly:** `cargo test -p ai-console` 184 passed; `cargo clippy --all-targets -D warnings`
+clean; `cargo check/clippy --features sidecar-platform` on the host clean; host clippy clean in both
+feature modes. The DaemonEngine reattach path is proven by `session_engine_daemon.rs`.
+
+**Your GUI confirmation (closes the ticket):**
+1. Open the AI Console, launch an agent — output should stream (the no-output bug is fixed: the daemon
+   now has a hidden console).
+2. Kill the **UI sidecar** process (or toggle the mode / trigger an update) — leave the app (host)
+   running. The host keeps the daemon (and your session) alive.
+3. Reopen the AI Console → the tab returns with scrollback and keeps streaming.
