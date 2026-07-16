@@ -36,6 +36,7 @@
   import StatusBar from "./lib/components/StatusBar.svelte";
   import SyncDialog from "./lib/components/SyncDialog.svelte";
   import { loadSyncPolicy } from "./lib/syncPolicy";
+  import { loadAutoMirror, isDue, autoSyncActions, pausedReason } from "./lib/autoMirror";
   import ContextMenu from "./lib/components/ContextMenu.svelte";
   import ConfirmDialog from "./lib/components/ConfirmDialog.svelte";
   import ShortcutsDialog from "./lib/components/ShortcutsDialog.svelte";
@@ -227,6 +228,50 @@
     } catch (e) {
       notice = "Sync failed: " + (e instanceof Error ? e.message : String(e));
       noticeIsError = true;
+    }
+  }
+
+  // --- Scheduled / background auto-mirror (CPE-497) -----------------------------------------------
+  /** Last successful auto-sync per repo path (this session) — gates the interval. In-memory: a
+      restart just means the next auto-sync happens sooner, which is harmless. */
+  let lastAutoSync = new Map<string, number>();
+  let autoMirrorTimer: ReturnType<typeof setInterval> | undefined;
+  let autoSyncRunning = false;
+
+  /** If the current repo has auto-mirror enabled and is due, run ONLY the unattended-safe steps
+      (fast-forward pull + push). A divergence/conflict pauses and surfaces — it is never reconciled
+      in the background, and nothing is ever force-pushed (`forge_sync` has no force action). */
+  async function maybeAutoSync() {
+    const path = currentPath;
+    if (autoSyncRunning || !path || isHome || archive) return;
+    if (!gitStatus?.is_repo) return;
+    const cfg = loadAutoMirror(path);
+    if (!cfg.enabled) return;
+    if (!isDue(lastAutoSync.get(path) ?? null, cfg.intervalMinutes, Date.now())) return;
+
+    autoSyncRunning = true;
+    try {
+      const plan = await invoke<typeof gitStatus>("forge_repo_status", { path, onDiverge: loadSyncPolicy(path) });
+      if (!plan || !(plan as { is_repo?: boolean }).is_repo) return;
+      const actions = autoSyncActions(plan as Parameters<typeof autoSyncActions>[0]);
+      if (actions.length === 0) {
+        const reason = pausedReason(plan as Parameters<typeof pausedReason>[0]);
+        if (reason) showNotice("Auto-sync paused — " + reason, false);
+        return; // nothing safe to do (or diverged) — don't hammer; wait the interval out
+      }
+      for (const action of actions) {
+        await invoke("forge_sync", { path, action });
+      }
+      lastAutoSync.set(path, Date.now());
+      if (currentPath === path) { await refreshGitStatus(path); refresh(); }
+      showNotice(`Auto-synced ${new Date().toLocaleTimeString()}`, false);
+    } catch (e) {
+      // A failed background sync must never nag repeatedly: back off by marking it "done" for this
+      // interval, and surface once.
+      lastAutoSync.set(path, Date.now());
+      showNotice("Auto-sync failed: " + (e instanceof Error ? e.message : String(e)), true);
+    } finally {
+      autoSyncRunning = false;
     }
   }
   /** Right-click "close the AI Console" menu (CPE-457), shown from an Agents leaf or the AI
@@ -1882,12 +1927,19 @@
 
     await loadPath(HOME);
     checkForUpdates();
+
+    // Auto-mirror scheduler (CPE-497): a 60s tick + a window-focus check. Both funnel through
+    // maybeAutoSync, which no-ops unless the current repo opted in and its interval has elapsed.
+    autoMirrorTimer = setInterval(maybeAutoSync, 60_000);
+    window.addEventListener("focus", maybeAutoSync);
   });
 
   onDestroy(() => {
     unlistenSessions?.();
     unlistenActivity?.();
     if (watchRefreshTimer) clearTimeout(watchRefreshTimer);
+    if (autoMirrorTimer) clearInterval(autoMirrorTimer);
+    window.removeEventListener("focus", maybeAutoSync);
   });
 </script>
 

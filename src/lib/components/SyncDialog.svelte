@@ -6,6 +6,7 @@
   import { createEventDispatcher, onMount } from "svelte";
   import { invoke } from "@tauri-apps/api/core";
   import { type OnDiverge, loadSyncPolicy, saveSyncPolicy, syncActionLabel } from "../syncPolicy";
+  import { type AutoMirror, loadAutoMirror, saveAutoMirror, INTERVAL_CHOICES } from "../autoMirror";
 
   export let path: string;
 
@@ -26,6 +27,12 @@
   const dispatch = createEventDispatcher<{ close: void; done: void }>();
 
   let policy: OnDiverge = loadSyncPolicy(path);
+  let auto: AutoMirror = loadAutoMirror(path);
+
+  function persistAuto() {
+    saveAutoMirror(path, auto);
+    auto = auto; // trigger reactivity
+  }
   let status: Status | null = null;
   let planning = true;
   let running = false;
@@ -139,6 +146,27 @@
       {/each}
     </div>
 
+    <div class="auto">
+      <label class="auto-toggle">
+        <input type="checkbox" bind:checked={auto.enabled} on:change={persistAuto} disabled={running} />
+        <span>Auto-sync in the background</span>
+      </label>
+      {#if auto.enabled}
+        <label class="auto-interval">
+          every
+          <select bind:value={auto.intervalMinutes} on:change={persistAuto} disabled={running}>
+            {#each INTERVAL_CHOICES as m}
+              <option value={m}>{m < 60 ? `${m} min` : `${m / 60} h`}</option>
+            {/each}
+          </select>
+        </label>
+      {/if}
+    </div>
+    {#if auto.enabled}
+      <p class="auto-note">Runs a fast-forward pull + push on a timer and on window focus. A divergence
+        or possible conflict <b>pauses</b> and surfaces here — never auto-reconciled, never force-pushed.</p>
+    {/if}
+
     {#if log.length}
       <div class="log" class:failed>
         {#each log as line}<div class="log-line">{line}</div>{/each}
@@ -202,6 +230,13 @@
     font-size: 11px; padding: 3px 10px; border-radius: 6px;
     background: var(--surface-alt); border: 1px solid var(--border-strong);
   }
+  .auto { display: flex; align-items: center; gap: 12px; flex-wrap: wrap;
+    border-top: 1px solid var(--border); padding-top: 12px; margin-bottom: 8px; }
+  .auto-toggle { display: flex; align-items: center; gap: 7px; font-size: 12px; }
+  .auto-interval { display: flex; align-items: center; gap: 6px; font-size: 12px; color: var(--text-dim); }
+  .auto-interval select { height: 28px; padding: 0 6px; border: 1px solid var(--border-strong);
+    border-radius: var(--radius); background: var(--surface-alt); color: inherit; }
+  .auto-note { font-size: 11px; color: var(--text-dim); line-height: 1.45; margin-bottom: 12px; }
   .warn-text { color: #b5872b; font-size: 12px; }
   .warn-text.small { font-size: 11px; margin-top: 6px; }
   .log {
