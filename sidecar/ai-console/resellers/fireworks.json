@@ -8,5 +8,7 @@
     "api.fireworks.ai"
   ],
   "normalizer": "openai",
-  "web_base": "https://fireworks.ai/models"
+  "web_base": "https://fireworks.ai/models",
+  "protocol": "openai",
+  "launch_base_url": "https://api.fireworks.ai/inference/v1"
 }

@@ -8,5 +8,7 @@
     "api.together.xyz"
   ],
   "normalizer": "openai",
-  "web_base": "https://api.together.xyz"
+  "web_base": "https://api.together.xyz",
+  "protocol": "openai",
+  "launch_base_url": "https://api.together.xyz/v1"
 }
