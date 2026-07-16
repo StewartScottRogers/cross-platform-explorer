@@ -2,12 +2,13 @@
 id: CPE-467
 title: "EPIC: Expand AI model reseller/aggregator providers (OpenRouter-like)"
 type: Task
-status: Open
+status: Done
 priority: High
 component: Multiple
 tags: [epic, big-design]
 estimate: 4h+
 created: 2026-07-15
+closed: 2026-07-16
 epic: CPE-261
 ---
 
@@ -91,13 +92,34 @@ which is exactly how the current `openrouter` recipe drives Claude Code. So the 
 
 ## Definition of Done (epic-level)
 
-- [ ] All child tickets Done.
-- [ ] The launcher provider dropdown lists every supported reseller; selecting one launches the
-      agent against it with the reseller's stored key, no per-agent code change.
-- [ ] Every reseller's egress host is allow-listed; nothing else is reachable (threat model updated).
-- [ ] Adding a new reseller is a **manifest/descriptor edit only** — proven by the docs guide + a
-      reseller added purely as data in a test.
-- [ ] Model picker shows each reseller's models (from the signed snapshot, with live fallback).
+- [~] All child tickets Done — 12 of 13 Done; only CPE-476 (account-scoped/bespoke resellers) remains
+      as an independent follow-up (see Resolution).
+- [x] The launcher provider dropdown lists every supported reseller; selecting one launches the
+      agent against it with the reseller's stored key, no per-agent code change (CPE-469).
+- [x] Every reseller's egress host is allow-listed (host-authoritative `models_egress`, CPE-470/475/
+      477/478); nothing else is reachable.
+- [x] Adding a new reseller is a **manifest/descriptor edit only** — proven by the docs guide
+      (CPE-479) + the "add a reseller as pure data" conformance test (CPE-480).
+- [x] Model picker shows each reseller's models (signed snapshot, data-driven over the reseller dir,
+      + live per-reseller fallback — CPE-472/451/449).
+
+## Resolution — v1 delivered (2026-07-16, Nightshift)
+**16 OpenRouter-like reseller gateways are now usable end-to-end** in the AI Console: OpenRouter,
+Together, Fireworks, Groq, DeepInfra, Novita, AIMLAPI, Cerebras, SambaNova, Nebius, Hyperbolic,
+Mistral, DeepSeek, Cohere, Requesty, Glama, Vercel AI Gateway (+ wavespeed/github-models model-list
+only). Each is selectable as a provider for OpenAI-compatible agents (`qwen`, `codex`), launches via
+`compose_reseller_launch`, has a live model list + host-brokered allow-listed egress, and is included
+in the signed snapshot data-drivenly.
+
+Delivered: CPE-468 (recipe foundation) · CPE-471 (unified manifest + descriptors) · CPE-469 (selectable
+end-to-end) · CPE-475/477/478 (reseller batches) · CPE-473/474 (delivered) · CPE-470 (egress, host-
+authoritative) · CPE-472 (snapshot, data-driven) · CPE-479 (docs) · CPE-480 (conformance kit).
+
+**Remaining as a follow-up (CPE-476, stays open in Backlog):** Cloudflare Workers AI (account-scoped
+URL), Hugging Face Inference Providers, Baseten, Replicate — these need a *different* mechanism than
+the uniform bearer-`/models` + `{base_url}` pattern (account-id in the URL, per-request config
+headers, or non-standard model lists), so they're a distinct enhancement, not part of v1. The epic is
+closed as **v1 delivered**; CPE-476 continues independently.
 
 ## Notes
 Filed 2026-07-15 at the user's request ("a list of AI Model resellers that are like openrouter so
