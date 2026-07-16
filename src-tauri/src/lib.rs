@@ -3485,7 +3485,7 @@ struct RepoSyncStatus {
 /// offer Pull/Push. A non-repo (or no `git`) returns `is_repo:false`.
 #[cfg(feature = "sidecar-platform")]
 #[tauri::command]
-fn forge_repo_status(path: String) -> RepoSyncStatus {
+fn forge_repo_status(path: String, on_diverge: Option<String>) -> RepoSyncStatus {
     use repos::SyncAction;
     let output = std::process::Command::new("git")
         .args(["-C", &path, "status", "--porcelain=v2", "--branch"])
@@ -3495,7 +3495,17 @@ fn forge_repo_status(path: String) -> RepoSyncStatus {
         _ => return RepoSyncStatus::default(), // not a repo, or git unavailable
     };
     let state = repos::parse_status(&String::from_utf8_lossy(&out.stdout));
-    let plan = repos::plan_sync(&state, &repos::SyncPolicy::default());
+    // The dry-run PREVIEW reflects the caller's chosen on-diverge policy (CPE-495); safe-by-default
+    // (never force). Absent ⇒ the merge default (as the quick status-bar Pull/Push uses).
+    let policy = repos::SyncPolicy {
+        on_diverge: match on_diverge.as_deref() {
+            Some("rebase") => repos::DivergePolicy::Rebase,
+            Some("manual") => repos::DivergePolicy::Manual,
+            _ => repos::DivergePolicy::Merge,
+        },
+        allow_force: false,
+    };
+    let plan = repos::plan_sync(&state, &policy);
     let actions = plan
         .actions
         .iter()
@@ -3529,7 +3539,12 @@ fn forge_repo_status(path: String) -> RepoSyncStatus {
 #[tauri::command]
 fn forge_sync(path: String, action: String) -> Result<String, String> {
     let args: Vec<&str> = match action.as_str() {
-        "pull" => vec!["-C", &path, "pull", "--ff-only"],
+        // Safe pulls: fast-forward only never risks local work; merge/rebase reconcile a divergence and
+        // MAY conflict — git returns non-zero and we surface its output for the user to resolve
+        // (CPE-495/496). None of these ever force-push (there is no force action).
+        "pull" | "pull-ff" => vec!["-C", &path, "pull", "--ff-only"],
+        "pull-merge" => vec!["-C", &path, "pull", "--no-rebase"],
+        "pull-rebase" => vec!["-C", &path, "pull", "--rebase"],
         "push" => vec!["-C", &path, "push"],
         other => return Err(format!("unsupported sync action '{other}'")),
     };

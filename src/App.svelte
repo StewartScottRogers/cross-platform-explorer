@@ -34,6 +34,8 @@
   import PreviewPane from "./lib/components/PreviewPane.svelte";
   import type { ArchiveEntry } from "./lib/preview/provider";
   import StatusBar from "./lib/components/StatusBar.svelte";
+  import SyncDialog from "./lib/components/SyncDialog.svelte";
+  import { loadSyncPolicy } from "./lib/syncPolicy";
   import ContextMenu from "./lib/components/ContextMenu.svelte";
   import ConfirmDialog from "./lib/components/ConfirmDialog.svelte";
   import ShortcutsDialog from "./lib/components/ShortcutsDialog.svelte";
@@ -200,11 +202,15 @@
       folder isn't a git repo, or in the plain (non-sidecar) build where the command is absent. */
   let gitStatus: { is_repo?: boolean; branch?: string; ahead?: number; behind?: number; dirty?: boolean } | null = null;
 
-  /** Refresh the git sync status when the folder changes (read-only, best-effort). */
+  /** The path whose full two-way-mirror Sync dialog is open (CPE-495), or null when closed. */
+  let syncDialogPath: string | null = null;
+
+  /** Refresh the git sync status when the folder changes (read-only, best-effort). The dry-run
+      preview honours this repo's saved on-diverge policy so the status bar and the Sync dialog agree. */
   async function refreshGitStatus(path: string) {
     if (!path || isHome || archive) { gitStatus = null; return; }
     try {
-      const s = await invoke<typeof gitStatus>("forge_repo_status", { path });
+      const s = await invoke<typeof gitStatus>("forge_repo_status", { path, onDiverge: loadSyncPolicy(path) });
       gitStatus = s && (s as { is_repo?: boolean }).is_repo ? s : null;
     } catch {
       gitStatus = null; // plain build (command absent) or git unavailable
@@ -2243,7 +2249,16 @@
   git={gitStatus}
   on:pull={() => doSync("pull")}
   on:push={() => doSync("push")}
+  on:sync={() => (syncDialogPath = currentPath)}
 />
+
+{#if syncDialogPath}
+  <SyncDialog
+    path={syncDialogPath}
+    on:done={() => { refreshGitStatus(currentPath); refresh(); }}
+    on:close={() => (syncDialogPath = null)}
+  />
+{/if}
 
 {#if ctx}
   <ContextMenu

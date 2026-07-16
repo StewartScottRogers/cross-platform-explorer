@@ -5,7 +5,7 @@
   /** Git sync status of the current folder (CPE-462), or null when it isn't a repo. Shape mirrors
       the host `forge_repo_status` command: { is_repo, branch, upstream, ahead, behind, dirty, ... }. */
   export let git: { is_repo?: boolean; branch?: string; upstream?: string; ahead?: number; behind?: number; dirty?: boolean } | null = null;
-  const dispatch = createEventDispatcher<{ pull: void; push: void }>();
+  const dispatch = createEventDispatcher<{ pull: void; push: void; sync: void }>();
 
   export let itemCount = 0;
   /** The folder's total item count before filtering; when it exceeds itemCount the status
@@ -57,6 +57,7 @@
       {#if git.dirty}<span class="git-dirty" title="Uncommitted changes">●</span>{/if}
       {#if git.behind}<button class="git-btn" on:click={() => dispatch("pull")} title="Fast-forward pull from the remote">Pull</button>{/if}
       {#if git.ahead}<button class="git-btn" on:click={() => dispatch("push")} title="Push local commits to the remote">Push</button>{/if}
+      <button class="git-btn" on:click={() => dispatch("sync")} title="Two-way sync: preview the plan, set the on-diverge policy, then run">Sync…</button>
     </span>
   {/if}
 
