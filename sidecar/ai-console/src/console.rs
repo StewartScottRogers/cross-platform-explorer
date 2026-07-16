@@ -936,7 +936,7 @@ impl ConsoleState {
     /// keychain (which the broker can't do).
     const KNOWN_RESELLERS: &[&str] = &[
         "openrouter", "together", "fireworks", "groq", "deepinfra", "novita", "aimlapi",
-        "wavespeed", "github-models",
+        "wavespeed", "github-models", "cerebras", "sambanova", "nebius", "hyperbolic",
     ];
 
     /// `GET /api/reseller-keys` → the resellers that have a stored key (names only, never a value).
