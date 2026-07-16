@@ -2,12 +2,13 @@
 id: CPE-444
 title: "EPIC: Dynamic model catalog — select any model from any reseller"
 type: Task
-status: Open
+status: Done
 priority: High
 component: Multiple
 tags: [epic, big-design]
 estimate: 4h+
 created: 2026-07-15
+closed: 2026-07-15
 ---
 
 ## Summary
@@ -99,12 +100,15 @@ LLM API, AnyAPI) — see CPE-453 for the captured research + citations.
   are advisory. Keys are per-reseller, keychain-backed, never logged (Redactor).
 
 ## Acceptance Criteria (epic — closes when children do)
-- [ ] The AI Console can select any model OpenRouter lists, from a dynamic, refreshable catalog.
-- [ ] At least one more reseller is onboarded purely by manifest (proving D3).
-- [ ] The list regenerates on a schedule and is available offline from a signed GitHub snapshot.
-- [ ] Egress is host-brokered + allow-listed; per-reseller keys are keychain-backed; threat model recorded.
+- [x] The AI Console can select any model OpenRouter lists, from a dynamic, refreshable catalog.
+- [x] At least one more reseller is onboarded purely by manifest (proving D3).
+- [x] The list regenerates on a schedule and is available offline from a signed GitHub snapshot.
+- [x] Egress is host-brokered + allow-listed; per-reseller keys are keychain-backed; threat model recorded.
 
 ## Notes
 Relates to the AI Console epic (CPE-261) and reuses three existing systems: the agent-catalog update
 pipeline (CPE-308/376/371), host-brokered egress (CPE-347/433), and the secrets broker (CPE-344/348).
 Not a single unit of work — tracks its children.
+
+## Closed 2026-07-15 — epic complete
+All children Done: CPE-445 (data model + reseller registry), 446 (OpenRouter source), 447 (host-brokered egress), 448 (reseller manifests), 452 (per-reseller keys), 453 (research + threat model), 460 (the Model picker combobox), 450 (scheduled + **published** signed snapshot on GitHub — 1580 models live in the `model-catalog` release), 451 (client downloads + verifies the snapshot + serves it to the picker, live fetch as fallback/refresh), 449 (picker UI, delivered by 460). The AI Console can now select **any** model from OpenRouter + resellers, from a dynamic list generated + signed + kept on GitHub + downloaded, offline-capable. Remaining polish (an 'as of <date>' badge, disk-persist last-good, periodic background refresh, more non-OpenAI reseller normalizers) is minor + tracked in CPE-451's Work Log — not blocking the epic.
