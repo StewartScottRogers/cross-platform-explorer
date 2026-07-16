@@ -12,7 +12,9 @@
 
   const dispatch = createEventDispatcher<{ select: string }>();
 
-  type Item = { id: string; label: string; hint?: string } | { sep: true };
+  // Item labels are i18n keys (CPE-481) resolved via `$t` at render; `hint` is a key combo (not
+  // translated). A `sep` is a divider.
+  type Item = { id: string; labelKey: string; hint?: string } | { sep: true };
   interface Menu {
     id: string;
     /** i18n key for the top-level title (falls back to English/key). */
@@ -24,30 +26,30 @@
     {
       id: "file",
       labelKey: "menu.file",
-      items: [{ id: "exit", label: "Exit", hint: "Alt+F4" }],
+      items: [{ id: "exit", labelKey: "mi.exit", hint: "Alt+F4" }],
     },
     {
       id: "tools",
       labelKey: "menu.tools",
       items: [
-        { id: "content-search", label: "Search in files…", hint: "Ctrl+Shift+F" },
-        { id: "find-duplicates", label: "Find duplicate files…" },
+        { id: "content-search", labelKey: "mi.searchInFiles", hint: "Ctrl+Shift+F" },
+        { id: "find-duplicates", labelKey: "mi.findDuplicates" },
         { sep: true },
-        { id: "copy-file-names", label: "Copy file names" },
-        { id: "copy-file-list", label: "Copy file list (name + size)" },
-        { id: "save-file-list", label: "Save file list…" },
+        { id: "copy-file-names", labelKey: "mi.copyFileNames" },
+        { id: "copy-file-list", labelKey: "mi.copyFileList" },
+        { id: "save-file-list", labelKey: "mi.saveFileList" },
       ],
     },
     {
       id: "app",
       labelKey: "menu.application",
       items: [
-        { id: "check-updates", label: "Check for Updates…" },
-        { id: "settings", label: "Settings…" },
+        { id: "check-updates", labelKey: "mi.checkUpdates" },
+        { id: "settings", labelKey: "mi.settings" },
         { sep: true },
-        { id: "shortcuts", label: "Keyboard shortcuts", hint: "F1" },
-        { id: "documentation", label: "Documentation" },
-        { id: "about", label: "About" },
+        { id: "shortcuts", labelKey: "mi.shortcuts", hint: "F1" },
+        { id: "documentation", labelKey: "mi.documentation" },
+        { id: "about", labelKey: "mi.about" },
       ],
     },
   ];
@@ -117,7 +119,7 @@
                 role="menuitem"
                 on:click={() => choose(item.id)}
               >
-                {item.label}
+                {$t(item.labelKey)}
                 {#if item.hint}<span class="hint">{item.hint}</span>{/if}
               </button>
             {/if}
