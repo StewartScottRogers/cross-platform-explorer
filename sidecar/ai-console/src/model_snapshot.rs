@@ -17,10 +17,12 @@
 //! (CPE-450), the host-mediated allow-listed fetch, hot-reload into the running [`ResellerRegistry`],
 //! and the offline/stale "as of <date>" UI (CPE-451).
 
+use std::path::Path;
+
 use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
 use sha2::{Digest, Sha256};
 
-use crate::model_catalog::Model;
+use crate::model_catalog::{normalize_models, Model};
 
 /// The snapshot-schema version this build understands. Bumped only on a breaking shape change.
 pub const SNAPSHOT_SCHEMA_VERSION: u32 = 1;
@@ -85,6 +87,37 @@ pub fn sign_snapshot(signing_key_hex: &str, snapshot: &ModelSnapshot) -> Result<
         seed.try_into().map_err(|_| "signing key must be a 32-byte seed".to_string())?;
     let key = SigningKey::from_bytes(&seed);
     Ok(hex::encode(key.sign(&canonical_bytes(snapshot)).to_bytes()))
+}
+
+/// Producer side (CPE-450): build a [`ModelSnapshot`] from a directory of raw reseller `/models`
+/// responses. Each `<reseller>.json` file in `dir` is read and passed to
+/// [`normalize_models`](crate::model_catalog::normalize_models) with the **file stem** as the
+/// reseller id (so `openrouter.json` normalizes as `openrouter`, `github-models.json` as
+/// `github-models`), and every resulting [`Model`] is collected into one snapshot.
+///
+/// Tolerant by design — the exact contract `list_dir` keeps: a missing directory, an unreadable
+/// file, or garbage JSON is **skipped**, never fatal. A reseller whose response failed to fetch (so
+/// its file is absent) simply contributes no models; one bad file never sinks the whole snapshot.
+/// Files are processed in sorted order for a stable result, and [`canonical_bytes`] re-sorts the
+/// models before signing so the signature is order-independent regardless.
+pub fn snapshot_from_reseller_dir(dir: &Path, version: u64, generated_at: String) -> ModelSnapshot {
+    let mut models = Vec::new();
+    if let Ok(entries) = std::fs::read_dir(dir) {
+        let mut paths: Vec<_> = entries
+            .flatten()
+            .map(|e| e.path())
+            .filter(|p| p.extension().and_then(|x| x.to_str()) == Some("json"))
+            .collect();
+        paths.sort();
+        for path in &paths {
+            let Some(stem) = path.file_stem().and_then(|s| s.to_str()) else { continue };
+            let Ok(body) = std::fs::read_to_string(path) else { continue };
+            // `normalize_models` is itself total on malformed JSON (yields no models), so a garbage
+            // file contributes nothing rather than erroring.
+            models.extend(normalize_models(stem, &body));
+        }
+    }
+    ModelSnapshot::new(version, generated_at, models)
 }
 
 /// Client side (CPE-451): verify a detached `signature_hex` over `snapshot`'s canonical bytes
@@ -235,6 +268,60 @@ mod tests {
         assert!(!accept_snapshot(Some(5), &snapshot(5)));
         // Lower is rejected (a rollback).
         assert!(!accept_snapshot(Some(5), &snapshot(4)));
+    }
+
+    #[test]
+    fn snapshot_from_reseller_dir_collects_models_from_every_reseller_response() {
+        use std::io::Write;
+
+        let dir = tempfile::tempdir().unwrap();
+        let write = |name: &str, body: &str| {
+            let mut f = std::fs::File::create(dir.path().join(name)).unwrap();
+            f.write_all(body.as_bytes()).unwrap();
+        };
+
+        // An OpenRouter-shaped response (`{ "data": [...] }`, string prices).
+        write(
+            "openrouter.json",
+            r#"{"data":[
+                {"id":"anthropic/claude-3.5-sonnet","name":"Claude 3.5 Sonnet","context_length":200000,
+                 "pricing":{"prompt":"0.000003","completion":"0.000015"},
+                 "architecture":{"input_modalities":["text","image"]}},
+                {"id":"meta-llama/llama-3-8b","name":"Llama 3 8B"}
+            ]}"#,
+        );
+        // A GitHub-Models-shaped response (a top-level array).
+        write(
+            "github-models.json",
+            r#"[{"id":"openai/gpt-4o","name":"GPT-4o","supported_input_modalities":["text","image"]}]"#,
+        );
+        // A garbage file and a non-JSON file are both tolerated (skipped), not fatal.
+        write("broken.json", "not json at all");
+        write("notes.txt", "ignored — not a .json reseller response");
+
+        let snap = snapshot_from_reseller_dir(dir.path(), 42, "2026-07-15T00:00:00Z".into());
+
+        assert_eq!(snap.version, 42);
+        assert_eq!(snap.generated_at, "2026-07-15T00:00:00Z");
+        // Two OpenRouter models + one GitHub model + zero from the broken/txt files.
+        assert_eq!(snap.models.len(), 3);
+        // Models carry their source reseller (from the file stem).
+        assert!(snap.models.iter().any(|m| m.reseller == "openrouter" && m.id == "anthropic/claude-3.5-sonnet"));
+        assert!(snap.models.iter().any(|m| m.reseller == "openrouter" && m.id == "meta-llama/llama-3-8b"));
+        assert!(snap.models.iter().any(|m| m.reseller == "github-models" && m.id == "openai/gpt-4o"));
+
+        // The whole bundle signs + verifies as one snapshot.
+        let (k, pk) = keypair(6);
+        let sig = sign_snapshot(&hex::encode(k.to_bytes()), &snap).unwrap();
+        assert!(verify_snapshot(&snap, &sig, &[pk]));
+    }
+
+    #[test]
+    fn snapshot_from_reseller_dir_tolerates_a_missing_directory() {
+        let missing = std::path::Path::new("this-directory-does-not-exist-cpe450");
+        let snap = snapshot_from_reseller_dir(missing, 1, "2026-07-15T00:00:00Z".into());
+        assert!(snap.models.is_empty());
+        assert_eq!(snap.version, 1);
     }
 
     #[test]
