@@ -2,12 +2,13 @@
 id: CPE-260
 title: "EPIC: Sidecar platform (host)"
 type: Task
-status: Open
+status: Done
 priority: High
 component: Multiple
 tags: [epic]
 estimate: 4h+
 created: 2026-07-13
+closed: 2026-07-15
 ---
 
 ## Summary
@@ -68,15 +69,15 @@ Governed by the ADR [[CPE-259]].
 
 ## Definition of Done (epic-level gates)
 
-- [ ] All child tickets Done.
-- [ ] **Delete-test** green: explorer builds/ships/runs with zero sidecars; removing
+- [x] All child tickets Done.
+- [x] **Delete-test** green: explorer builds/ships/runs with zero sidecars; removing
       one sidecar affects nothing else ([[CPE-272]]).
-- [ ] A brand-new sidecar can be added by manifest + binary with **no** host/platform
+- [x] A brand-new sidecar can be added by manifest + binary with **no** host/platform
       code change (proven by the hello sidecar + scaffolder).
-- [ ] Conformance kit + E2E harness pass in CI on all three OSes.
-- [ ] Security review ([[CPE-304]]) signed off; no plaintext secrets, no unconsented
+- [x] Conformance kit + E2E harness pass in CI on all three OSes.
+- [x] Security review ([[CPE-304]]) signed off; no plaintext secrets, no unconsented
       code execution, no cross-sidecar reach, no UI escape.
-- [ ] Performance budget met: zero startup delta when disabled; per-sidecar memory
+- [x] Performance budget met: zero startup delta when disabled; per-sidecar memory
       ceiling enforced.
 
 ## Key risks
@@ -86,8 +87,23 @@ Governed by the ADR [[CPE-259]].
 - **Cross-platform PTY/keychain/webview quirks** — surfaced by [[CPE-294]] first.
 - **Scope creep making the explorer heavy** — guarded by the delete-test + budgets.
 
+## Resolution
+**Epic delivered.** All 28 child tickets are Done — the sidecar platform pattern is live: the
+contract/SDK crate + version negotiation + manifest schema (CPE-262/263/264/300/301), the process
+supervisor (CPE-265), the capability broker + capabilities (context/secrets/storage/events, CPE-266–270),
+the UI mount pane (CPE-271), reference "hello" sidecar + scaffolder (CPE-273/303), platform management
+UI (CPE-274), IPC hardening + threat model + security review (CPE-275/295/296/304), resource governance
+(CPE-297), observability (CPE-298), error model (CPE-299), packaging/signing/update (CPE-276), and the
+conformance + E2E harness (CPE-301/302). The AI Console (CPE-261) runs as the first tenant, proving a
+Mega-Feature ships behind the contract with the whole thing feature-gated (`sidecar-platform` OFF by
+default = delete-test green in CI, both feature modes clippy-clean). Every epic-level DoD gate is met.
+
+Not a code change — an organizational close-out; the implementing work landed under the child tickets.
+
 ## Work Log
 2026-07-13 — Filed during Nightshift epic planning.
 2026-07-13 — Hardened: added P0 spike, security/trust/consent, resource budgets,
 observability, error model, schema migration, conformance + E2E testing, scaffolder,
 threat-model milestone, a11y. Reworked waves and added epic-level DoD + risks.
+2026-07-15 — Closed as delivered. Audited children: all 28 in Done/ (the only open cross-reference is
+the peer epic CPE-261, its tenant, not a child gate). DoD gates all satisfied via their child tickets.

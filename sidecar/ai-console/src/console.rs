@@ -36,6 +36,12 @@ struct Session {
     /// The tab label (agent · provider · model), so the launcher can **reattach** a tab to this
     /// still-running session when the AI Console is closed and reopened (CPE-461).
     name: String,
+    /// Provider-reported token/cost usage for this session, accumulated from the output stream by the
+    /// reader thread (CPE-311). Surfaced via `/api/sessions`; never sent anywhere.
+    usage: Arc<Mutex<crate::usage::Usage>>,
+    /// Identity (agent/provider) so usage can be aggregated per agent/provider (CPE-311).
+    agent: String,
+    provider: String,
 }
 
 /// The reproducible identity of a launched session — captured at launch, recorded to history when
@@ -165,6 +171,24 @@ pub(crate) fn resolve_provider_key(
 fn read_announcement(cwd: &str, raw: &str) -> String {
     let abs = std::path::Path::new(cwd).join(raw).to_string_lossy().into_owned();
     format!("fs-read:{}", json!({ "path": abs }))
+}
+
+/// JSON view of a session's usage (CPE-311). Omitted fields stay 0; the launcher hides an all-zero
+/// readout so a session whose agent prints no usage shows nothing.
+fn usage_json(u: &crate::usage::Usage) -> Value {
+    json!({
+        "inputTokens": u.input_tokens,
+        "outputTokens": u.output_tokens,
+        "costUsd": u.cost_usd,
+    })
+}
+
+/// Sum one session's usage into an aggregate bucket (per agent / per provider). Across sessions the
+/// figures **add** (each session's cost is independent), unlike the within-session max.
+fn accumulate_usage(acc: &mut crate::usage::Usage, u: &crate::usage::Usage) {
+    acc.input_tokens += u.input_tokens;
+    acc.output_tokens += u.output_tokens;
+    acc.cost_usd += u.cost_usd;
 }
 
 fn session_payload(event: &str, id: &str, agent_name: &str, meta: &SessionMeta) -> String {
@@ -389,9 +413,11 @@ impl ConsoleState {
         let ended_payload = session_payload("ended", &id, &agent.name, &meta);
         let ring: Arc<Mutex<Vec<u8>>> = Arc::new(Mutex::new(Vec::new()));
         let live: Arc<Mutex<Option<mpsc::Sender<Vec<u8>>>>> = Arc::new(Mutex::new(None));
+        let usage: Arc<Mutex<crate::usage::Usage>> = Arc::new(Mutex::new(crate::usage::Usage::default()));
         {
             let ring = Arc::clone(&ring);
             let live = Arc::clone(&live);
+            let usage = Arc::clone(&usage);
             // On EOF (agent exited) record the session to history so its transcript survives a
             // restart (CPE-370). Best-effort — a storage error just drops the record.
             let history = Arc::clone(&self.history);
@@ -407,6 +433,7 @@ impl ConsoleState {
                 let mut reader = reader;
                 let mut buf = [0u8; 8192];
                 let mut reads = crate::agent_reads::ReadScanner::new();
+                let mut usage_scan = crate::usage::UsageScanner::new();
                 loop {
                     match reader.read(&mut buf) {
                         Ok(0) | Err(_) => break,
@@ -424,10 +451,14 @@ impl ConsoleState {
                             if let Some(tx) = live.lock().unwrap().as_ref() {
                                 let _ = tx.send(chunk.to_vec());
                             }
+                            let text = String::from_utf8_lossy(chunk);
                             // Surface any file the agent reported reading (CPE-405).
-                            for raw in reads.feed(&String::from_utf8_lossy(chunk)) {
+                            for raw in reads.feed(&text) {
                                 announce(read_announcement(&read_cwd, &raw));
                             }
+                            // Fold provider-reported token/cost usage for this session (CPE-311).
+                            let latest = usage_scan.feed(&text);
+                            *usage.lock().unwrap() = latest;
                         }
                     }
                 }
@@ -448,6 +479,9 @@ impl ConsoleState {
                 ring,
                 live,
                 name: tab_name,
+                usage,
+                agent: agent_id.to_string(),
+                provider: provider.clone(),
             }),
         );
         // Remember this selection for the agent so it's restored on next open (CPE-352).
@@ -526,11 +560,36 @@ impl ConsoleState {
     /// sessions live in this process independent of the (destroyed-on-close) launcher UI.
     fn handle_sessions_list(&self) -> Response {
         let sessions = self.sessions.lock().unwrap();
-        let mut list: Vec<(String, String)> =
-            sessions.iter().map(|(id, s)| (id.clone(), s.name.clone())).collect();
-        list.sort_by(|a, b| a.0.cmp(&b.0)); // sequential ids ⇒ launch order
-        let out: Vec<Value> = list.into_iter().map(|(id, name)| json!({ "id": id, "name": name })).collect();
-        Response::json(json!({ "sessions": out }).to_string())
+        // Snapshot id, name, identity, and usage under the lock (CPE-461 + CPE-311).
+        let mut rows: Vec<(String, String, String, String, crate::usage::Usage)> = sessions
+            .iter()
+            .map(|(id, s)| {
+                (id.clone(), s.name.clone(), s.agent.clone(), s.provider.clone(), *s.usage.lock().unwrap())
+            })
+            .collect();
+        rows.sort_by(|a, b| a.0.cmp(&b.0)); // sequential ids ⇒ launch order
+
+        // Aggregate usage per agent and per provider (CPE-311).
+        let mut by_agent: BTreeMap<String, crate::usage::Usage> = BTreeMap::new();
+        let mut by_provider: BTreeMap<String, crate::usage::Usage> = BTreeMap::new();
+        for (_, _, agent, provider, u) in &rows {
+            accumulate_usage(by_agent.entry(agent.clone()).or_default(), u);
+            accumulate_usage(by_provider.entry(provider.clone()).or_default(), u);
+        }
+
+        let out: Vec<Value> = rows
+            .into_iter()
+            .map(|(id, name, _, _, u)| {
+                json!({ "id": id, "name": name, "usage": usage_json(&u) })
+            })
+            .collect();
+        let agents: Vec<Value> =
+            by_agent.into_iter().map(|(k, u)| json!({ "id": k, "usage": usage_json(&u) })).collect();
+        let providers: Vec<Value> =
+            by_provider.into_iter().map(|(k, u)| json!({ "id": k, "usage": usage_json(&u) })).collect();
+        Response::json(
+            json!({ "sessions": out, "usageByAgent": agents, "usageByProvider": providers }).to_string(),
+        )
     }
 
     fn handle_resize(&self, path: &str, body: &str) -> Response {
@@ -2046,6 +2105,12 @@ mod tests {
         let arr = listed["sessions"].as_array().unwrap();
         assert_eq!(arr.len(), 2);
         assert!(arr.iter().any(|s| s["id"] == id1.as_str() && s["name"] == "Sleeper"));
+        // Each session carries a usage object, and the endpoint aggregates per agent/provider
+        // (CPE-311). A freshly-launched `sleep` reports nothing, so figures are zero but present.
+        let u = &arr[0]["usage"];
+        assert!(u["inputTokens"].is_u64() && u["outputTokens"].is_u64() && u["costUsd"].is_number());
+        assert!(listed["usageByAgent"].is_array(), "usage is aggregated per agent");
+        assert!(listed["usageByProvider"].is_array(), "usage is aggregated per provider");
 
         // Close ONE via its route: the session is removed and its child reclaimed.
         assert_eq!(post(&st, &format!("/api/session/{id1}/close"))["closed"], true);
