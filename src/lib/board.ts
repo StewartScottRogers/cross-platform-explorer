@@ -51,3 +51,10 @@ export function isValidMove(cards: Card[], id: string, to: string): boolean {
   const card = cards.find((c) => c.id === id);
   return !!card && card.column !== to;
 }
+
+/** The task string injected into a dispatched agent session (CPE-522): names the ticket it should
+    work, reusing the CPE-313 explorer→console task hand-off. */
+export function ticketTask(card: Pick<Card, "id" | "title">): string {
+  const title = card.title.trim();
+  return title ? `Work on ticket ${card.id}: ${title}` : `Work on ticket ${card.id}.`;
+}

@@ -6,12 +6,12 @@
   import { createEventDispatcher, onMount } from "svelte";
   import { invoke } from "@tauri-apps/api/core";
   import Icon from "./Icon.svelte";
-  import { BOARD_COLUMNS, groupByColumn, isValidMove, type Card, type Column } from "../board";
+  import { BOARD_COLUMNS, groupByColumn, isValidMove, ticketTask, type Card, type Column } from "../board";
 
   /** Repo root that contains the Tickets/ folder. */
   export let root: string;
 
-  const dispatch = createEventDispatcher<{ close: void }>();
+  const dispatch = createEventDispatcher<{ close: void; launch: { id: string; task: string } }>();
 
   let cards: Card[] = [];
   let loading = true;
@@ -56,6 +56,22 @@
       error = `Couldn't move ${id}: ` + (e instanceof Error ? e.message : String(e));
     }
     await load(); // reconcile with the folders (also picks up CLI changes)
+  }
+
+  /** Dispatch a card to an agent (CPE-522): move it to Doing, then hand off to the AI Console scoped
+      to this folder with the ticket injected as its task (CPE-313). The console's own launcher is the
+      agent chooser and defaults to the last-used agent/provider/model. Explicit action — never on a drag. */
+  async function dispatchCard(card: Card) {
+    if (card.column !== "Doing" && isValidMove(cards, card.id, "Doing")) {
+      cards = cards.map((c) => (c.id === card.id ? { ...c, column: "Doing" } : c));
+      try {
+        await invoke("board_move", { root, id: card.id, toColumn: "Doing" });
+      } catch (e) {
+        error = `Couldn't move ${card.id}: ` + (e instanceof Error ? e.message : String(e));
+      }
+      await load();
+    }
+    dispatch("launch", { id: card.id, task: ticketTask(card) });
   }
 </script>
 
@@ -105,6 +121,10 @@
                       {#each c.tags as t}<span class="pill">{t}</span>{/each}
                     </div>
                   {/if}
+                  <div class="card-actions">
+                    <button class="dispatch-btn" title="Move to Doing + open an agent scoped to this ticket"
+                      on:click|stopPropagation={() => dispatchCard(c)}>▶ Dispatch</button>
+                  </div>
                 </div>
               {/each}
               {#if grouped[col].length === 0}<div class="board-col-empty">—</div>{/if}
@@ -163,4 +183,10 @@
     background: var(--surface-alt); }
   .pill.epic { border-color: #a24bd0; color: #a24bd0; }
   .pill.sprint { border-color: #3a72b5; color: #3a72b5; }
+  /* Dispatch appears on hover/focus so the card stays uncluttered at rest (CPE-522). */
+  .card-actions { display: flex; justify-content: flex-end; margin-top: 6px; opacity: 0; transition: opacity .1s; }
+  .card:hover .card-actions, .card:focus-within .card-actions { opacity: 1; }
+  .dispatch-btn { font: inherit; font-size: 11px; height: 22px; padding: 0 8px; border-radius: 5px; cursor: pointer;
+    border: 1px solid var(--accent); background: var(--accent); color: #fff; }
+  .dispatch-btn:hover { filter: brightness(1.08); }
 </style>
