@@ -383,8 +383,12 @@ button:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
 }
 .pin { color: var(--text-faint); flex: none; }
 
-.pills { display: flex; gap: 8px; margin: 4px 0 10px; }
+/* Tick-tack reflow: the row wraps its pills + grows height; each pill keeps its text on one line
+   (nowrap) and never shrinks, so labels can't wrap inside and overflow. */
+.pills { display: flex; flex-wrap: wrap; gap: 8px; margin: 4px 0 10px; }
 .pill {
+  flex: 0 0 auto;
+  white-space: nowrap;
   display: flex; align-items: center; gap: 6px;
   height: 32px; padding: 0 14px;
   border-radius: 16px;

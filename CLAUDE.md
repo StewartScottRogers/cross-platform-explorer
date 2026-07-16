@@ -64,6 +64,11 @@ Then tag `vX.Y.Z` and push â€” CI does the rest.
   [docs/design/MENUS.md](docs/design/MENUS.md). Key rule: item text is always `var(--text)` (never a
   hard-coded colour, never red for "destructive"); colours come from theme variables so menus are
   identical light/dark and cross-platform. New menus must match it.
+- **Pills / chips / badges ("tick-tacks")** — a row of pills must **reflow**: the container wraps the
+  pills onto more rows and grows its height (`display:flex; flex-wrap:wrap; gap`), while each pill keeps
+  its text on **one line** and doesn't shrink (`white-space:nowrap; flex:0 0 auto`; add
+  `max-width`+ellipsis for a pill whose own text can be long). **Never** let text wrap inside a pill and
+  overflow its background. Applies to context/capability/filter/agent chips everywhere.
 
 ## Docs
 

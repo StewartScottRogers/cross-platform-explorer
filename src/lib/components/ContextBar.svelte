@@ -46,8 +46,12 @@
     border-bottom: 1px solid var(--border);
     flex: none;
   }
+  /* Tick-tack reflow: the rows wrap the pills (row+column gap) and grow height; each pill keeps its
+     text on one line (nowrap) + never shrinks, so labels never wrap inside and overflow. */
   .ctx-chips { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
   .ctx-chip {
+    flex: 0 0 auto;
+    white-space: nowrap;
     display: inline-flex; align-items: center; gap: 6px;
     height: 24px; padding: 0 10px;
     border-radius: 12px;
@@ -57,8 +61,10 @@
     font-size: 12px;
   }
   .ctx-detail { color: var(--text-dim); }
-  .ctx-actions { display: flex; align-items: center; gap: 6px; margin-left: auto; }
+  .ctx-actions { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; margin-left: auto; }
   .ctx-action {
+    flex: 0 0 auto;
+    white-space: nowrap;
     height: 26px; padding: 0 12px;
     border: 1px solid var(--border-strong);
     border-radius: var(--radius);

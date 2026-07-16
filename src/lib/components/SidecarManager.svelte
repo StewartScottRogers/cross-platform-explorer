@@ -205,6 +205,8 @@
     margin-top: 8px;
   }
   .cap {
+    flex: 0 0 auto;
+    white-space: nowrap; /* tick-tack: pill keeps its label on one line; .caps wraps the pills */
     display: inline-flex;
     align-items: center;
     gap: 4px;

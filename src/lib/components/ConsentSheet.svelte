@@ -143,6 +143,7 @@
     font-size: 13px;
     display: flex;
     align-items: center;
+    flex-wrap: wrap; /* tick-tack: label + its badges wrap onto another row rather than overflow */
     gap: 6px;
   }
   .cap-desc {
@@ -151,6 +152,8 @@
     line-height: 1.35;
   }
   .badge {
+    flex: 0 0 auto;
+    white-space: nowrap; /* tick-tack: badge text stays on one line */
     font-size: 10px;
     font-weight: 600;
     text-transform: uppercase;
