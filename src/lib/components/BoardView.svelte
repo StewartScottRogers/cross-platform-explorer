@@ -6,7 +6,7 @@
   import { createEventDispatcher, onMount } from "svelte";
   import { invoke } from "@tauri-apps/api/core";
   import Icon from "./Icon.svelte";
-  import { BOARD_COLUMNS, groupByColumn, isValidMove, ticketTask, type Card, type Column } from "../board";
+  import { BOARD_LANES, groupByLane, isValidMove, ticketTask, type Card, type Lane } from "../board";
 
   /** Repo root that contains the Tickets/ folder. */
   export let root: string;
@@ -17,9 +17,9 @@
   let loading = true;
   let error = "";
   let dragId: string | null = null;
-  let overCol: Column | null = null;
+  let overCol: Lane | null = null;
 
-  $: grouped = groupByColumn(cards);
+  $: grouped = groupByLane(cards);
 
   async function load() {
     loading = true;
@@ -43,15 +43,23 @@
     }
   }
 
-  async function onDrop(col: Column) {
+  async function onDrop(lane: Lane) {
     overCol = null;
     const id = dragId;
     dragId = null;
-    if (!id || !isValidMove(cards, id, col)) return;
-    // Optimistic: reflect the move immediately, then persist + reconcile.
-    cards = cards.map((c) => (c.id === id ? { ...c, column: col } : c));
+    if (!id) return;
+    const card = cards.find((c) => c.id === id);
+    if (!card) return;
     try {
-      await invoke("board_move", { root, id, toColumn: col });
+      if (lane === "Review") {
+        // The virtual Review lane is the `review` tag on a Doing card — send it there.
+        if (card.column !== "Doing") await invoke("board_move", { root, id, toColumn: "Doing" });
+        await invoke("board_review", { root, id, on: true });
+      } else {
+        // A real column: clear any review mark, then move if the folder actually changes.
+        if (card.tags.includes("review")) await invoke("board_review", { root, id, on: false });
+        if (card.column !== lane) await invoke("board_move", { root, id, toColumn: lane });
+      }
     } catch (e) {
       error = `Couldn't move ${id}: ` + (e instanceof Error ? e.message : String(e));
     }
@@ -92,7 +100,7 @@
       <div class="board-empty">Loading the board…</div>
     {:else}
       <div class="board-columns">
-        {#each BOARD_COLUMNS as col}
+        {#each BOARD_LANES as col}
           <!-- svelte-ignore a11y-no-static-element-interactions -->
           <div
             class="board-col"

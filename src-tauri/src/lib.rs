@@ -90,6 +90,40 @@ fn board_move(root: String, id: String, to_column: String) -> Result<(), String>
     Ok(())
 }
 
+/// Find a ticket's file `<id>_*.md` across the board columns.
+fn find_ticket_file(root: &str, id: &str) -> Option<std::path::PathBuf> {
+    let tickets = std::path::Path::new(root).join("Tickets");
+    let prefix = format!("{id}_");
+    for col in ticket_board::COLUMNS {
+        let Ok(entries) = std::fs::read_dir(tickets.join(col)) else { continue };
+        for e in entries.flatten() {
+            let p = e.path();
+            let name = p.file_name().and_then(|s| s.to_str()).unwrap_or("");
+            if name.starts_with(&prefix) && name.ends_with(".md") {
+                return Some(p);
+            }
+        }
+    }
+    None
+}
+
+/// Toggle the `review` tag on ticket `id` (CPE-523) — drives the board's virtual Review lane.
+#[tauri::command]
+fn board_review(root: String, id: String, on: bool) -> Result<(), String> {
+    let path = find_ticket_file(&root, &id).ok_or_else(|| format!("ticket {id} not found"))?;
+    let md = std::fs::read_to_string(&path).map_err(|e| e.to_string())?;
+    std::fs::write(&path, ticket_board::set_review(&md, on)).map_err(|e| e.to_string())
+}
+
+/// Append a finding note to ticket `id` (CPE-523) — the affordance a dispatched agent (or the UI) uses
+/// to record progress on a card.
+#[tauri::command]
+fn board_note(root: String, id: String, note: String) -> Result<(), String> {
+    let path = find_ticket_file(&root, &id).ok_or_else(|| format!("ticket {id} not found"))?;
+    let md = std::fs::read_to_string(&path).map_err(|e| e.to_string())?;
+    std::fs::write(&path, ticket_board::append_finding(&md, &note)).map_err(|e| e.to_string())
+}
+
 #[derive(Serialize)]
 pub struct DirEntry {
     name: String,
@@ -4121,6 +4155,8 @@ pub fn run() {
             list_dir,
             board_cards,
             board_move,
+            board_review,
+            board_note,
             home_dir,
             parent_dir,
             list_drives,

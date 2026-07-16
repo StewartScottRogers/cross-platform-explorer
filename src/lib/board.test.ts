@@ -1,6 +1,6 @@
 // CPE-521: Agent Board model — column grouping, ordering, counts, and move validation.
 import { describe, it, expect } from "vitest";
-import { groupByColumn, columnCounts, isValidMove, isColumn, ticketTask, type Card } from "./board";
+import { groupByColumn, columnCounts, isValidMove, isColumn, ticketTask, groupByLane, laneFor, type Card } from "./board";
 
 function card(id: string, column: string, extra: Partial<Card> = {}): Card {
   return { id, title: `t ${id}`, ticket_type: "Feature", priority: "Medium", tags: [], column, ...extra };
@@ -49,5 +49,24 @@ describe("board model (CPE-521)", () => {
   it("ticketTask builds the injected agent task from the card (CPE-522)", () => {
     expect(ticketTask({ id: "CPE-42", title: "Fix the parser" })).toBe("Work on ticket CPE-42: Fix the parser");
     expect(ticketTask({ id: "CPE-7", title: "   " })).toBe("Work on ticket CPE-7."); // blank title
+  });
+
+  it("laneFor surfaces a Doing card tagged 'review' in the virtual Review lane (CPE-523)", () => {
+    expect(laneFor(card("CPE-1", "Doing", { tags: ["review"] }))).toBe("Review");
+    expect(laneFor(card("CPE-2", "Doing", { tags: ["ready"] }))).toBe("Doing"); // not review
+    expect(laneFor(card("CPE-3", "Backlog", { tags: ["review"] }))).toBe("Backlog"); // review only counts in Doing
+    expect(laneFor(card("CPE-4", "Done"))).toBe("Done");
+  });
+
+  it("groupByLane splits Doing into Doing + Review", () => {
+    const cs = [
+      card("CPE-1", "Doing", { tags: ["review"] }),
+      card("CPE-2", "Doing"),
+      card("CPE-3", "Done"),
+    ];
+    const g = groupByLane(cs);
+    expect(g.Review.map((c) => c.id)).toEqual(["CPE-1"]);
+    expect(g.Doing.map((c) => c.id)).toEqual(["CPE-2"]);
+    expect(g.Done.map((c) => c.id)).toEqual(["CPE-3"]);
   });
 });

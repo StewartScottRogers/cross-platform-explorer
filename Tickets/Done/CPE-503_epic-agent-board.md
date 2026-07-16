@@ -2,12 +2,13 @@
 id: CPE-503
 title: "EPIC: Agent Board — a Kanban that dispatches agents, synced with the ticket system"
 type: Task
-status: In Progress
+status: Done
 priority: Medium
 component: Multiple
 tags: [epic]
 estimate: 4h+
 created: 2026-07-16
+closed: 2026-07-16
 ---
 
 ## Summary
@@ -50,8 +51,31 @@ Wave 2 — dispatch (sprint SPR-04, later):
 
 Suggested order: CPE-520 → CPE-521 (wave 1), then CPE-522 → CPE-523 (wave 2).
 
+## Resolution (closed 2026-07-16)
+The Agent Board shipped across 4 children / 2 sprints, backed by the **real `Tickets/` files** (single
+source of truth with the CLI):
+- **Wave 1 (SPR-03):** [[CPE-520]] backend (`board_cards` / `board_move`, pure card+status logic),
+  [[CPE-521]] Kanban UI (columns + drag-to-move, opened from a Sidebar entry).
+- **Wave 2 (SPR-04):** [[CPE-522]] Dispatch (card → scoped AI Console session via the CPE-313 hand-off;
+  launcher supplies the last-used chooser), [[CPE-523]] virtual Review lane + `board_review` /
+  `board_note` (agent card-updates + review before Done).
+
+Move a card → its status changes; Dispatch a card → an agent opens scoped to that ticket; mark it for
+Review → it waits for sign-off — all reading/writing the actual ticket markdown, so the board and
+`/ticketing-*` never diverge. ~19 tests across the backend + model; clippy clean both feature modes;
+534 frontend tests green.
+
+**Follow-on (recorded):** a tighter session-chip↔card correlation and a fuller agent-driven auto-update
+(beyond `board_note` + file-refresh) are natural next steps, and the board pairs well with the Swarm
+coordinator ([[CPE-502]]) as a dispatch surface. Neither blocks this epic.
+
 ## Notes
 From [[CPE-500]]. Uniquely feasible here because the ticket system already exists ([[CPE-487]] workflow).
+
+## Work Log (close)
+2026-07-16 — **Closed.** All 4 children Done across SPR-03 (read+drag board) + SPR-04 (dispatch+review).
+The board is a real, usable Kanban over `Tickets/` that dispatches agents and moves cards through review,
+consistent with the CLI. Moved Epics/ → Done/.
 
 ## Work Log
 2026-07-16 — Filed as a dormant `Proposed` brief (from spike CPE-500).
