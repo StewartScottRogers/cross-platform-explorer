@@ -1,37 +1,35 @@
 name: Model snapshot
 
-# Build + sign the model-catalog snapshot (CPE-450), the offline/fast counterpart to the live
-# per-reseller /models fetch. It normalizes every reseller's model list into one bundle, ed25519-signs
-# it with the SAME first-party key that signs the agent catalog (CPE-308/377), and uploads the result
-# as a workflow artifact for a human to review and promote.
-#
-# ── How to run it manually ──────────────────────────────────────────────────────────────────────
-#   1. Actions tab → "Model snapshot" → "Run workflow" (this is workflow_dispatch-only; see below).
-#   2. When it finishes, download the "model-snapshot" artifact — it holds:
-#        models-index.json      the canonical, signed snapshot bytes
-#        models-index.json.sig  the detached ed25519 hex signature
-#   3. Bump nothing by hand: the run stamps a strictly-increasing `version` (unix seconds) so a newer
-#      snapshot always wins anti-rollback (CPE-451). `generated_at` is the run's UTC time.
-#
-# ── How to PROMOTE it to a release (deliberately manual, NOT automated here) ─────────────────────
-#   This workflow never publishes to a GitHub Release or touches the app release flow — that stays a
-#   human decision so a bad scrape can't auto-ship. To promote a reviewed artifact, attach both files
-#   to the relevant release, e.g.:
-#        gh release upload <tag> models-index.json models-index.json.sig --clobber
-#   The client (CPE-451) verifies the signature under CATALOG_TRUSTED_KEYS and honors the monotonic
-#   version, so only a genuinely newer, validly-signed snapshot is ever adopted.
+# Build, sign, and PUBLISH the model-catalog snapshot (CPE-450) — the offline/fast, GitHub-hosted
+# source for the AI Console's model picker (downloaded + verified by CPE-451). It normalizes every
+# reseller's model list into one bundle, ed25519-signs it with the SAME first-party key that signs the
+# agent catalog (CPE-308/377), validates it isn't empty, and publishes it to a DEDICATED
+# `model-catalog` prerelease (kept separate from the app installer releases, so a bad scrape can never
+# affect an app release).
 #
 # ── Cadence ──────────────────────────────────────────────────────────────────────────────────────
-#   Manual for now (opt-in, non-destructive). A scheduled cadence is intentionally left commented out
-#   below until the live reseller fetch is proven in a few manual runs; flip it on to regenerate, say,
-#   weekly. Even scheduled, it would only ever produce an artifact — promotion stays manual.
+#   Runs weekly (Mondays 06:00 UTC) and on demand (Actions → "Model snapshot" → Run workflow).
+#   Every run stamps a strictly-increasing `version` (unix seconds) so anti-rollback (CPE-451) always
+#   prefers the newest validly-signed snapshot; `generated_at` is the run's UTC time.
+#
+# ── Safety ───────────────────────────────────────────────────────────────────────────────────────
+#   - Secret-guarded: skips (never fails) on repos without `CPE_CATALOG_SIGNING_KEY`, like release.yml.
+#   - Validation gate: publish only if the snapshot has >= MIN_MODELS models, so an empty/failed scrape
+#     (most resellers need an API key we don't carry in CI) never ships a broken catalog. OpenRouter's
+#     list is public, so a healthy run carries hundreds.
+#   - Published to the `model-catalog` tag ONLY — never the app releases; the client verifies the
+#     signature under CATALOG_TRUSTED_KEYS + the monotonic version before adopting it.
 
 on:
   workflow_dispatch: {}
-  # schedule:
-  #   # Weekly, Mondays 06:00 UTC. Enable only after manual runs confirm the fetch + sign are healthy.
-  #   # Note: a scheduled run still only UPLOADS AN ARTIFACT — it never publishes a Release.
-  #   - cron: "0 6 * * 1"
+  schedule:
+    - cron: "0 6 * * 1" # weekly, Mondays 06:00 UTC
+
+permissions:
+  contents: write # to publish/update the model-catalog release
+
+env:
+  MIN_MODELS: "20" # refuse to publish a snapshot smaller than this (a failed/empty scrape)
 
 jobs:
   snapshot:
@@ -39,8 +37,6 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      # Guard: skip (never fail) on repos that haven't configured catalog signing — exactly like the
-      # release.yml `catalog` job and the OS-code-signing pattern. Every step below is gated on this.
       - name: Detect catalog signing key
         id: k
         env:
@@ -59,9 +55,8 @@ jobs:
           workspaces: "sidecar/ai-console -> target"
 
       # Best-effort fetch: for each reseller manifest, curl its models_endpoint into
-      # responses/<id>.json. A failed or auth-gated fetch (most resellers need an API key we don't
-      # carry in CI) simply omits that reseller — snapshot_from_reseller_dir tolerates the gap. Public
-      # endpoints (e.g. OpenRouter) succeed and populate the bundle.
+      # responses/<id>.json. A failed or auth-gated fetch simply omits that reseller;
+      # snapshot_from_reseller_dir tolerates the gap. Public endpoints (OpenRouter) populate the bundle.
       - name: Fetch reseller model lists (best-effort)
         if: steps.k.outputs.has == 'true'
         run: |
@@ -69,36 +64,44 @@ jobs:
           for manifest in sidecar/ai-console/resellers/*.json; do
             id=$(jq -r '.id' "$manifest")
             endpoint=$(jq -r '.models_endpoint' "$manifest")
-            if [ -z "$id" ] || [ "$id" = "null" ] || [ -z "$endpoint" ] || [ "$endpoint" = "null" ]; then
-              echo "skip $manifest: missing id/models_endpoint"
-              continue
-            fi
+            if [ -z "$id" ] || [ "$id" = "null" ] || [ -z "$endpoint" ] || [ "$endpoint" = "null" ]; then continue; fi
             echo "fetch $id <- $endpoint"
             if curl -fsSL --max-time 30 "$endpoint" -o "responses/$id.json"; then
               echo "  ok ($(wc -c < "responses/$id.json") bytes)"
             else
-              echo "  fetch failed — omitting $id from this snapshot"
-              rm -f "responses/$id.json"
+              echo "  fetch failed — omitting $id"; rm -f "responses/$id.json"
             fi
           done
-          echo "collected:"; ls -la responses || true
+          ls -la responses || true
 
       - name: Build + sign the model snapshot
         if: steps.k.outputs.has == 'true'
         env:
-          # 32-byte ed25519 seed (hex) — the same secret that signs the agent catalog. Never printed.
           CPE_CATALOG_SIGNING_KEY: ${{ secrets.CPE_CATALOG_SIGNING_KEY }}
         run: |
-          VERSION=$(date -u +%s)                          # monotonic across runs → anti-rollback (CPE-451)
+          VERSION=$(date -u +%s)
           export SNAPSHOT_GENERATED_AT=$(date -u +%Y-%m-%dT%H:%M:%SZ)
           cargo run --release --quiet \
             --manifest-path sidecar/ai-console/Cargo.toml \
             --bin model-snapshot-sign -- \
             responses snapshot-out "$VERSION"
-          echo "snapshot-out contents:"; ls -la snapshot-out
+          ls -la snapshot-out
 
-      # Upload only — a human downloads, reviews, and promotes to a Release (see header). This step
-      # deliberately does NOT call `gh release upload`.
+      # Validation gate: a healthy snapshot has plenty of models. An empty/failed scrape must not ship.
+      - name: Validate snapshot is not empty
+        if: steps.k.outputs.has == 'true'
+        id: v
+        run: |
+          COUNT=$(jq '.models | length' snapshot-out/models-index.json)
+          echo "models in snapshot: $COUNT (min ${MIN_MODELS})"
+          if [ "$COUNT" -ge "${MIN_MODELS}" ]; then
+            echo "ok=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "ok=false" >> "$GITHUB_OUTPUT"
+            echo "::warning::snapshot too small ($COUNT < ${MIN_MODELS}) — not publishing"
+          fi
+
+      # Always upload the artifact (for review/debugging), even if validation failed.
       - name: Upload snapshot artifact
         if: steps.k.outputs.has == 'true'
         uses: actions/upload-artifact@v4
@@ -108,3 +111,16 @@ jobs:
             snapshot-out/models-index.json
             snapshot-out/models-index.json.sig
           if-no-files-found: error
+
+      # Publish to the dedicated `model-catalog` prerelease (never the app releases). The client
+      # (CPE-451) downloads from here, verifies the signature + monotonic version, then adopts it.
+      - name: Publish to the model-catalog release
+        if: steps.k.outputs.has == 'true' && steps.v.outputs.ok == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release view model-catalog >/dev/null 2>&1 || \
+            gh release create model-catalog --prerelease --title "Model catalog (rolling)" \
+              --notes "Signed model-catalog snapshot for the AI Console. Regenerated by the Model snapshot workflow; verified client-side under CATALOG_TRUSTED_KEYS with strict anti-rollback. Not an app release."
+          gh release upload model-catalog snapshot-out/models-index.json snapshot-out/models-index.json.sig --clobber
+          echo "published models-index.json to the model-catalog release"
