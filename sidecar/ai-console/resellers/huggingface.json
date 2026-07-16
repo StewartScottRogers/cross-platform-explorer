@@ -1,0 +1,14 @@
+{
+  "schema_version": 1,
+  "id": "huggingface",
+  "name": "Hugging Face",
+  "models_endpoint": "https://router.huggingface.co/v1/models",
+  "auth": "bearer",
+  "api_hosts": [
+    "router.huggingface.co"
+  ],
+  "normalizer": "openai",
+  "web_base": "https://router.huggingface.co/v1",
+  "protocol": "openai",
+  "launch_base_url": "https://router.huggingface.co/v1"
+}

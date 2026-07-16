@@ -70,6 +70,10 @@ pub fn models_endpoint(reseller: &str) -> Option<ModelsEndpoint> {
         bearer("https://glama.ai/api/gateway/openai/v1/models")
     } else if is("vercel") {
         bearer("https://ai-gateway.vercel.sh/v1/models")
+    } else if is("huggingface") {
+        bearer("https://router.huggingface.co/v1/models")
+    } else if is("baseten") {
+        bearer("https://inference.baseten.co/v1/models")
     } else {
         None
     }
@@ -150,7 +154,7 @@ mod tests {
         for r in [
             "openrouter", "together", "fireworks", "groq", "deepinfra", "novita", "aimlapi",
             "wavespeed", "github-models", "cerebras", "sambanova", "nebius", "hyperbolic",
-            "mistral", "deepseek", "cohere", "requesty", "glama", "vercel",
+            "mistral", "deepseek", "cohere", "requesty", "glama", "vercel", "huggingface", "baseten",
         ] {
             let ep = models_endpoint(r).unwrap_or_else(|| panic!("{r} should be allow-listed"));
             assert!(ep.url.starts_with("https://"), "{r} must be https");
