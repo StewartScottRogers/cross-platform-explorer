@@ -1,6 +1,6 @@
 // CPE-521: Agent Board model — column grouping, ordering, counts, and move validation.
 import { describe, it, expect } from "vitest";
-import { groupByColumn, columnCounts, isValidMove, isColumn, type Card } from "./board";
+import { groupByColumn, columnCounts, isValidMove, isColumn, ticketTask, type Card } from "./board";
 
 function card(id: string, column: string, extra: Partial<Card> = {}): Card {
   return { id, title: `t ${id}`, ticket_type: "Feature", priority: "Medium", tags: [], column, ...extra };
@@ -44,5 +44,10 @@ describe("board model (CPE-521)", () => {
     expect(isValidMove(cards, "CPE-3", "Doing")).toBe(false); // same column
     expect(isValidMove(cards, "CPE-3", "Nonsense")).toBe(false); // invalid column
     expect(isValidMove(cards, "CPE-999", "Done")).toBe(false); // unknown card
+  });
+
+  it("ticketTask builds the injected agent task from the card (CPE-522)", () => {
+    expect(ticketTask({ id: "CPE-42", title: "Fix the parser" })).toBe("Work on ticket CPE-42: Fix the parser");
+    expect(ticketTask({ id: "CPE-7", title: "   " })).toBe("Work on ticket CPE-7."); // blank title
   });
 });

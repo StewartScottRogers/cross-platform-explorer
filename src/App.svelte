@@ -2438,7 +2438,11 @@
 {/if}
 
 {#if showBoard}
-  <BoardView root={currentPath} on:close={() => (showBoard = false)} />
+  <BoardView
+    root={currentPath}
+    on:launch={(e) => openAiConsole({ cwd: currentPath, task: e.detail.task })}
+    on:close={() => (showBoard = false)}
+  />
 {/if}
 
 {#if agentMenu}
