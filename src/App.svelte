@@ -206,6 +206,16 @@
   let showBoard = false;
   /** Integrated workbench (CPE-526) — git diff of the current folder. */
   let showWorkbench = false;
+
+  /** Open a URL in a dedicated browser webview window (CPE-527) — safe under the strict CSP since it's
+      a separate webview, not an iframe in the main window. The URL is validated http/https in-view. */
+  function openBrowserWindow(url: string) {
+    try {
+      new WebviewWindow(`workbench-browser-${Date.now()}`, { url, title: url, width: 1000, height: 720 });
+    } catch {
+      showNotice("Couldn't open the browser window.", true);
+    }
+  }
   /** Git sync status of the current folder (CPE-462) — two-way mirror status bar. Null when the
       folder isn't a git repo, or in the plain (non-sidecar) build where the command is absent. */
   let gitStatus: { is_repo?: boolean; branch?: string; ahead?: number; behind?: number; dirty?: boolean; conflicted?: boolean } | null = null;
@@ -2450,7 +2460,12 @@
 {/if}
 
 {#if showWorkbench}
-  <WorkbenchView root={currentPath} on:close={() => (showWorkbench = false)} />
+  <WorkbenchView
+    root={currentPath}
+    on:browse={(e) => openBrowserWindow(e.detail)}
+    on:edit={(e) => { openRecent(e.detail); showWorkbench = false; }}
+    on:close={() => (showWorkbench = false)}
+  />
 {/if}
 
 {#if agentMenu}

@@ -2,12 +2,13 @@
 id: CPE-505
 title: "EPIC: Integrated workbench — in-pane diff/editor + embedded browser"
 type: Task
-status: In Progress
+status: Done
 priority: Medium
 component: Frontend
 tags: [epic]
 estimate: 4h+
 created: 2026-07-16
+closed: 2026-07-16
 ---
 
 ## Summary
@@ -40,6 +41,15 @@ Adopted on the "do them all" directive — defaults, reversible:
 Sprint **[[SPR-06]]**:
 - [[CPE-526]] — git diff model + Diff view *(ready)*
 - [[CPE-527]] — editor pane + embedded browser (webview) *(needs-prereq CPE-526)*
+
+## Resolution (closed 2026-07-16)
+The integrated workbench shipped across 2 children in SPR-06: [[CPE-526]] a pure unified-diff parser +
+`workbench_diff` command + Diff view (read an agent's changes), and [[CPE-527]] an editor hand-off
+(reusing the preview editor) + an embedded browser in a dedicated webview window (open localhost). Opened
+from a **"Workbench"** Sidebar entry. Read the diff, edit alongside, open the running app — in one window.
+~10 tests; clippy + `npm run check` clean. **Follow-on (recorded):** a side-by-side split (diff | editor
+| browser) layout and broad external-origin browsing (Tauri capability config) are polish items; the
+localhost + diff + edit loop is complete.
 
 ## Notes
 From [[CPE-500]]; the explorer file tree + preview/edit are the starting point.

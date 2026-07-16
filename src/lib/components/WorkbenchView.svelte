@@ -7,15 +7,26 @@
   import { invoke } from "@tauri-apps/api/core";
   import Icon from "./Icon.svelte";
   import { parseDiff, diffStats, fileLabel, type DiffFile } from "../diff";
+  import { isBrowsableUrl, normalizeUrl } from "../workbench";
 
   /** Repo root to diff. */
   export let root: string;
 
-  const dispatch = createEventDispatcher<{ close: void }>();
+  const dispatch = createEventDispatcher<{ close: void; browse: string; edit: string }>();
 
   let files: DiffFile[] = [];
   let loading = true;
   let error = "";
+  let url = ""; // embedded-browser address (CPE-527)
+
+  function openBrowser() {
+    if (isBrowsableUrl(url)) dispatch("browse", normalizeUrl(url));
+    else error = "Enter an http/https or localhost URL.";
+  }
+  function editFile(f: DiffFile) {
+    const p = f.newPath && f.newPath !== "/dev/null" ? f.newPath : f.oldPath;
+    if (p && p !== "/dev/null") dispatch("edit", root.replace(/[\\/]$/, "") + "/" + p);
+  }
 
   $: stats = diffStats(files);
 
@@ -49,6 +60,17 @@
       </div>
     </div>
 
+    <div class="wb-address">
+      <input
+        class="wb-url"
+        placeholder="localhost:3000 — open the running app in a browser window"
+        bind:value={url}
+        spellcheck="false"
+        on:keydown={(e) => e.key === "Enter" && openBrowser()}
+      />
+      <button class="wb-btn" on:click={openBrowser} title="Open this URL in a browser window">Open in browser</button>
+    </div>
+
     {#if error}<div class="wb-status error">{error}</div>{/if}
 
     <div class="wb-body">
@@ -59,7 +81,10 @@
       {:else}
         {#each files as f (f.oldPath + "→" + f.newPath)}
           <div class="file">
-            <div class="file-head">{fileLabel(f)}{#if f.binary} <span class="binary">binary</span>{/if}</div>
+            <div class="file-head">
+              <span class="file-name">{fileLabel(f)}{#if f.binary} <span class="binary">binary</span>{/if}</span>
+              <button class="edit-btn" on:click={() => editFile(f)} title="Open this file in the editor">Edit</button>
+            </div>
             {#if !f.binary}
               {#each f.hunks as h}
                 <div class="hunk-head">{h.header}</div>
@@ -102,9 +127,18 @@
   .wb-body { flex: 1; overflow: auto; padding: 10px 12px;
     font-family: var(--mono, ui-monospace, Consolas, monospace); font-size: 12px; }
   .file { border: 1px solid var(--border); border-radius: 6px; margin-bottom: 12px; overflow: hidden; }
-  .file-head { padding: 6px 10px; background: var(--surface-alt); border-bottom: 1px solid var(--border);
+  .file-head { display: flex; align-items: center; justify-content: space-between; gap: 8px;
+    padding: 6px 10px; background: var(--surface-alt); border-bottom: 1px solid var(--border);
     font-family: system-ui, sans-serif; font-size: 12px; font-weight: 600; }
+  .file-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .binary { font-weight: 400; opacity: .6; }
+  .edit-btn { flex: 0 0 auto; font: inherit; font-size: 11px; font-weight: 500; height: 22px; padding: 0 9px;
+    border-radius: 5px; cursor: pointer; border: 1px solid var(--border-strong); background: var(--surface); color: var(--text); }
+  .edit-btn:hover { background: rgba(128,128,128,0.14); }
+  .wb-address { display: flex; gap: 8px; padding: 8px 14px; border-bottom: 1px solid var(--border); }
+  .wb-url { flex: 1; height: 30px; padding: 0 10px; border: 1px solid var(--border); border-radius: 6px;
+    background: var(--surface); color: var(--text); font: inherit; }
+  .wb-url:focus { outline: none; border-color: var(--accent); }
   .hunk-head { padding: 3px 10px; color: #3a72b5; background: rgba(58,114,181,0.08); opacity: .9; }
   .line { display: flex; white-space: pre; }
   .gutter { flex: 0 0 auto; width: 16px; text-align: center; opacity: .6; user-select: none; }
