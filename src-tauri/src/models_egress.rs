@@ -50,6 +50,14 @@ pub fn models_endpoint(reseller: &str) -> Option<ModelsEndpoint> {
         bearer("https://api.aimlapi.com/v1/models")
     } else if is("wavespeed") {
         bearer("https://api.wavespeed.ai/v1/models")
+    } else if is("cerebras") {
+        bearer("https://api.cerebras.ai/v1/models")
+    } else if is("sambanova") {
+        bearer("https://api.sambanova.ai/v1/models")
+    } else if is("nebius") {
+        bearer("https://api.studio.nebius.ai/v1/models")
+    } else if is("hyperbolic") {
+        bearer("https://api.hyperbolic.xyz/v1/models")
     } else {
         None
     }
@@ -127,7 +135,10 @@ mod tests {
 
     #[test]
     fn every_advertised_reseller_resolves_and_uses_https() {
-        for r in ["openrouter", "together", "fireworks", "groq", "deepinfra", "novita", "aimlapi", "wavespeed", "github-models"] {
+        for r in [
+            "openrouter", "together", "fireworks", "groq", "deepinfra", "novita", "aimlapi",
+            "wavespeed", "github-models", "cerebras", "sambanova", "nebius", "hyperbolic",
+        ] {
             let ep = models_endpoint(r).unwrap_or_else(|| panic!("{r} should be allow-listed"));
             assert!(ep.url.starts_with("https://"), "{r} must be https");
         }

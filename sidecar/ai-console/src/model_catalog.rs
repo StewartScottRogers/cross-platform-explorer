@@ -413,7 +413,10 @@ mod tests {
         let reg = ResellerRegistry::load_from_dirs(&[dir]);
         assert!(reg.warnings().is_empty(), "bundled resellers must all be valid: {:?}", reg.warnings());
         let ids: Vec<_> = reg.descriptors().into_iter().map(|d| d.id).collect();
-        for expected in ["together", "groq", "fireworks", "deepinfra", "novita", "aimlapi"] {
+        for expected in [
+            "together", "groq", "fireworks", "deepinfra", "novita", "aimlapi",
+            "cerebras", "sambanova", "nebius", "hyperbolic",
+        ] {
             assert!(ids.contains(&expected.to_string()), "{expected} should be launch-capable; got {ids:?}");
         }
         let groq = reg.get("groq").unwrap().descriptor().unwrap();

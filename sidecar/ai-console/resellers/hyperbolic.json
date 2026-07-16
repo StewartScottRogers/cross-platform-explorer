@@ -1,0 +1,14 @@
+{
+  "schema_version": 1,
+  "id": "hyperbolic",
+  "name": "Hyperbolic",
+  "models_endpoint": "https://api.hyperbolic.xyz/v1/models",
+  "auth": "bearer",
+  "api_hosts": [
+    "api.hyperbolic.xyz"
+  ],
+  "normalizer": "openai",
+  "web_base": "https://api.hyperbolic.xyz/v1",
+  "protocol": "openai",
+  "launch_base_url": "https://api.hyperbolic.xyz/v1"
+}
