@@ -8,6 +8,7 @@
   import { invoke } from "@tauri-apps/api/core";
   import { open as openFolderDialog } from "@tauri-apps/plugin-dialog";
   import Icon from "./Icon.svelte";
+  import { withBusy } from "../busy";
 
   interface RepoEntry { name: string; path: string; is_dir: boolean; size: number }
 
@@ -30,9 +31,9 @@
     repo = r;
     loading = true; error = "";
     try {
-      entries = await invoke<RepoEntry[]>("forge_browse", {
+      entries = await withBusy(() => invoke<RepoEntry[]>("forge_browse", {
         provider, repo: r, path: toPath, token: token.trim() || null,
-      });
+      }));
       path = toPath;
       loaded = true;
       syncToken(); // a successful browse means the token (if any) works — persist per Remember
@@ -76,7 +77,7 @@
     const target = dir.replace(/[\\/]$/, "") + "/" + name;
     cloning = true; cloneMsg = `Cloning ${r} → ${target}…`; error = "";
     try {
-      await invoke("forge_clone", { provider, repo: r, targetDir: target, token: token.trim() || null });
+      await withBusy(() => invoke("forge_clone", { provider, repo: r, targetDir: target, token: token.trim() || null }));
       cloneMsg = `Cloned to ${target}`;
     } catch (e) {
       cloneMsg = "";
