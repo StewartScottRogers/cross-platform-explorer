@@ -17,6 +17,79 @@ mod forge_egress;
 #[cfg(feature = "sidecar-platform")]
 mod models_egress;
 
+/// Agent Board backend (CPE-520): read the repo's `Tickets/` folders as Kanban cards + move a card
+/// between columns. Pure card/frontmatter logic lives here; the commands below do the file I/O.
+mod ticket_board;
+
+/// Read every ticket under `<root>/Tickets/{Backlog,Doing,Blocked,Deferred,Done}/CPE-*.md` into board
+/// cards (CPE-520). Read-only; a malformed file is skipped, never fails the listing.
+#[tauri::command]
+fn board_cards(root: String) -> Vec<ticket_board::Card> {
+    let tickets = std::path::Path::new(&root).join("Tickets");
+    let mut cards = Vec::new();
+    for col in ticket_board::COLUMNS {
+        let Ok(entries) = std::fs::read_dir(tickets.join(col)) else { continue };
+        for e in entries.flatten() {
+            let p = e.path();
+            let name = p.file_name().and_then(|s| s.to_str()).unwrap_or("");
+            if !name.starts_with("CPE-") || !name.ends_with(".md") {
+                continue;
+            }
+            if let Ok(md) = std::fs::read_to_string(&p) {
+                if let Some(card) = ticket_board::card_from(&md, col) {
+                    cards.push(card);
+                }
+            }
+        }
+    }
+    cards
+}
+
+/// Move ticket `id` to `to_column` (CPE-520): rewrite its `status:` frontmatter to match, then move the
+/// file into that folder. The only writer. Refuses an unknown id/column and never clobbers an existing
+/// file. A move to the current column is a no-op.
+#[tauri::command]
+fn board_move(root: String, id: String, to_column: String) -> Result<(), String> {
+    let folder =
+        ticket_board::folder_for_column(&to_column).ok_or_else(|| format!("unknown column '{to_column}'"))?;
+    let status = ticket_board::status_for_column(&to_column).unwrap_or(folder);
+    let tickets = std::path::Path::new(&root).join("Tickets");
+
+    // Locate the ticket file: `<id>_*.md` in one of the columns.
+    let prefix = format!("{id}_");
+    let mut found: Option<(std::path::PathBuf, &'static str)> = None;
+    for col in ticket_board::COLUMNS {
+        let Ok(entries) = std::fs::read_dir(tickets.join(col)) else { continue };
+        for e in entries.flatten() {
+            let p = e.path();
+            let name = p.file_name().and_then(|s| s.to_str()).unwrap_or("");
+            if name.starts_with(&prefix) && name.ends_with(".md") {
+                found = Some((p, col));
+                break;
+            }
+        }
+        if found.is_some() {
+            break;
+        }
+    }
+    let (src, cur_col) = found.ok_or_else(|| format!("ticket {id} not found on the board"))?;
+    if cur_col.eq_ignore_ascii_case(&to_column) {
+        return Ok(()); // already there
+    }
+
+    let file_name = src.file_name().ok_or("bad source path")?.to_owned();
+    let dest_dir = tickets.join(folder);
+    std::fs::create_dir_all(&dest_dir).map_err(|e| e.to_string())?;
+    let dest = dest_dir.join(&file_name);
+    if dest.exists() {
+        return Err(format!("a ticket file already exists at {}", dest.display()));
+    }
+    let md = std::fs::read_to_string(&src).map_err(|e| e.to_string())?;
+    std::fs::write(&src, ticket_board::set_status(&md, status)).map_err(|e| e.to_string())?;
+    std::fs::rename(&src, &dest).map_err(|e| e.to_string())?;
+    Ok(())
+}
+
 #[derive(Serialize)]
 pub struct DirEntry {
     name: String,
@@ -4046,6 +4119,8 @@ pub fn run() {
     let app = builder
         .invoke_handler(tauri::generate_handler![
             list_dir,
+            board_cards,
+            board_move,
             home_dir,
             parent_dir,
             list_drives,
