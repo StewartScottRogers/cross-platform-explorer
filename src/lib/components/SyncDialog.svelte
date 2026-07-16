@@ -22,9 +22,10 @@
     conflicts_possible?: boolean;
     blocked?: string | null;
     warnings?: string[];
+    conflicted?: boolean;
   };
 
-  const dispatch = createEventDispatcher<{ close: void; done: void }>();
+  const dispatch = createEventDispatcher<{ close: void; done: void; resolve: void }>();
 
   let policy: OnDiverge = loadSyncPolicy(path);
   let auto: AutoMirror = loadAutoMirror(path);
@@ -175,6 +176,9 @@
 
     <div class="actions">
       <button class="btn" on:click={() => dispatch("close")} disabled={running}>Close</button>
+      {#if status?.conflicted}
+        <button class="btn warn-btn" on:click={() => dispatch("resolve")} disabled={running}>Resolve conflicts…</button>
+      {/if}
       <button class="btn primary" on:click={run} disabled={!canRun}>
         {running ? "Syncing…" : "Run sync"}
       </button>
@@ -255,4 +259,6 @@
   .btn:disabled { opacity: 0.5; cursor: default; }
   .btn.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
   .btn.primary:not(:disabled):hover { background: var(--accent-hover); }
+  .btn.warn-btn { border-color: #b5872b; color: #b5872b; }
+  .btn.warn-btn:not(:disabled):hover { background: #b5872b; color: #fff; }
 </style>

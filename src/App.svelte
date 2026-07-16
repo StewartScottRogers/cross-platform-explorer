@@ -35,6 +35,7 @@
   import type { ArchiveEntry } from "./lib/preview/provider";
   import StatusBar from "./lib/components/StatusBar.svelte";
   import SyncDialog from "./lib/components/SyncDialog.svelte";
+  import ConflictDialog from "./lib/components/ConflictDialog.svelte";
   import { loadSyncPolicy } from "./lib/syncPolicy";
   import { loadAutoMirror, isDue, autoSyncActions, pausedReason } from "./lib/autoMirror";
   import ContextMenu from "./lib/components/ContextMenu.svelte";
@@ -201,10 +202,12 @@
   let showRepos = false;
   /** Git sync status of the current folder (CPE-462) — two-way mirror status bar. Null when the
       folder isn't a git repo, or in the plain (non-sidecar) build where the command is absent. */
-  let gitStatus: { is_repo?: boolean; branch?: string; ahead?: number; behind?: number; dirty?: boolean } | null = null;
+  let gitStatus: { is_repo?: boolean; branch?: string; ahead?: number; behind?: number; dirty?: boolean; conflicted?: boolean } | null = null;
 
   /** The path whose full two-way-mirror Sync dialog is open (CPE-495), or null when closed. */
   let syncDialogPath: string | null = null;
+  /** The path whose conflict resolver is open (CPE-496), or null when closed. */
+  let conflictDialogPath: string | null = null;
 
   /** Refresh the git sync status when the folder changes (read-only, best-effort). The dry-run
       preview honours this repo's saved on-diverge policy so the status bar and the Sync dialog agree. */
@@ -2302,13 +2305,23 @@
   on:pull={() => doSync("pull")}
   on:push={() => doSync("push")}
   on:sync={() => (syncDialogPath = currentPath)}
+  on:resolve={() => (conflictDialogPath = currentPath)}
 />
 
 {#if syncDialogPath}
   <SyncDialog
     path={syncDialogPath}
     on:done={() => { refreshGitStatus(currentPath); refresh(); }}
+    on:resolve={() => { syncDialogPath = null; conflictDialogPath = currentPath; }}
     on:close={() => (syncDialogPath = null)}
+  />
+{/if}
+
+{#if conflictDialogPath}
+  <ConflictDialog
+    path={conflictDialogPath}
+    on:done={() => { refreshGitStatus(currentPath); refresh(); }}
+    on:close={() => (conflictDialogPath = null)}
   />
 {/if}
 

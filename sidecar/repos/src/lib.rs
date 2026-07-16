@@ -12,6 +12,7 @@
 
 pub mod browse;
 pub mod clone;
+pub mod conflict;
 pub mod generic;
 pub mod protocol;
 pub mod providers;
@@ -21,6 +22,7 @@ pub mod ui;
 
 pub use browse::{parse_github_contents, RemoteEntry};
 pub use clone::{build_clone_args, CloneError, CloneRequest};
+pub use conflict::{parse_conflicts, Conflict, ConflictKind};
 pub use generic::{normalize_host, parse_remote, GitRemote, RemoteScheme};
 pub use protocol::{hello, on_message, Reaction, REQUESTED_CAPABILITIES, SIDECAR_ID};
 pub use providers::{ProviderManifest, ProviderRegistry};

@@ -3669,6 +3669,9 @@ struct RepoSyncStatus {
     conflicts_possible: bool,
     blocked: Option<String>,
     warnings: Vec<String>,
+    /// True when the working tree currently has unmerged files (a merge/rebase left conflicts) — the
+    /// status bar surfaces a "Resolve…" entry into the CPE-496 resolver.
+    conflicted: bool,
 }
 
 /// Report the git sync status of `path` (CPE-462) — read-only. Runs `git status --porcelain=v2
@@ -3686,7 +3689,9 @@ fn forge_repo_status(path: String, on_diverge: Option<String>) -> RepoSyncStatus
         Ok(o) if o.status.success() => o,
         _ => return RepoSyncStatus::default(), // not a repo, or git unavailable
     };
-    let state = repos::parse_status(&String::from_utf8_lossy(&out.stdout));
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let state = repos::parse_status(&stdout);
+    let conflicted = !repos::parse_conflicts(&stdout).is_empty(); // CPE-496 resolver entry point
     // The dry-run PREVIEW reflects the caller's chosen on-diverge policy (CPE-495); safe-by-default
     // (never force). Absent ⇒ the merge default (as the quick status-bar Pull/Push uses).
     let policy = repos::SyncPolicy {
@@ -3721,6 +3726,7 @@ fn forge_repo_status(path: String, on_diverge: Option<String>) -> RepoSyncStatus
         conflicts_possible: plan.conflicts_possible,
         blocked: plan.blocked,
         warnings: plan.warnings,
+        conflicted,
     }
 }
 
@@ -3744,6 +3750,200 @@ fn forge_sync(path: String, action: String) -> Result<String, String> {
     if out.status.success() {
         let s = String::from_utf8_lossy(&out.stdout);
         Ok(if s.trim().is_empty() { format!("{action} ok") } else { s.trim().to_string() })
+    } else {
+        Err(String::from_utf8_lossy(&out.stderr).trim().to_string())
+    }
+}
+
+// --- In-app conflict resolver (CPE-496) ---------------------------------------------------------
+
+/// One conflicted file for the resolver UI.
+#[cfg(feature = "sidecar-platform")]
+#[derive(serde::Serialize)]
+struct ConflictFile {
+    path: String,
+    /// snake_case kind (`both_modified`, `added_by_us`, …).
+    code: String,
+    /// Human label ("both modified", …).
+    label: String,
+}
+
+/// The repo's conflict state for the resolver (CPE-496): which reconcile is in progress (`merge` /
+/// `rebase` / `none`) and the list of unmerged files with their kind.
+#[cfg(feature = "sidecar-platform")]
+#[derive(serde::Serialize)]
+struct ConflictState {
+    /// "merge" | "rebase" | "none".
+    operation: String,
+    files: Vec<ConflictFile>,
+}
+
+/// Which reconcile git is mid-way through, by the marker files/dirs it leaves in `.git`.
+#[cfg(feature = "sidecar-platform")]
+fn merge_operation(path: &str) -> &'static str {
+    let git = std::path::Path::new(path).join(".git");
+    if git.join("rebase-merge").exists() || git.join("rebase-apply").exists() {
+        "rebase"
+    } else if git.join("MERGE_HEAD").exists() {
+        "merge"
+    } else {
+        "none"
+    }
+}
+
+/// Report the current conflict state (CPE-496) — read-only. Lists unmerged files from
+/// `git status --porcelain=v2` and detects any in-progress merge/rebase.
+#[cfg(feature = "sidecar-platform")]
+#[tauri::command]
+fn forge_conflict_state(path: String) -> ConflictState {
+    let out = std::process::Command::new("git")
+        .args(["-C", &path, "status", "--porcelain=v2"])
+        .output();
+    let files = match out {
+        Ok(o) if o.status.success() => repos::parse_conflicts(&String::from_utf8_lossy(&o.stdout))
+            .into_iter()
+            .map(|c| ConflictFile {
+                path: c.path,
+                code: c.kind.code().to_string(),
+                label: c.kind.label().to_string(),
+            })
+            .collect(),
+        _ => Vec::new(),
+    };
+    ConflictState { operation: merge_operation(&path).to_string(), files }
+}
+
+/// The three stage versions of a conflicted file (CPE-496): `base` (stage 1, the common ancestor),
+/// `ours` (stage 2), `theirs` (stage 3), plus `merged` — the current working-tree content **with**
+/// conflict markers. A stage absent for this conflict kind (e.g. add/add has no base) is `None`. Each
+/// is capped so a huge/binary file can't wedge the UI.
+#[cfg(feature = "sidecar-platform")]
+#[derive(serde::Serialize)]
+struct ConflictVersions {
+    base: Option<String>,
+    ours: Option<String>,
+    theirs: Option<String>,
+    merged: Option<String>,
+    /// True when any side was omitted for being binary or over the size cap.
+    truncated: bool,
+}
+
+/// Max bytes we surface per version — big enough for real source files, small enough to stay snappy.
+#[cfg(feature = "sidecar-platform")]
+const CONFLICT_MAX_BYTES: usize = 512 * 1024;
+
+/// Read one git stage of a path as UTF-8 text, or `None` if that stage is absent, binary, or too big.
+#[cfg(feature = "sidecar-platform")]
+fn read_stage(path: &str, stage: u8, file: &str, truncated: &mut bool) -> Option<String> {
+    let out = std::process::Command::new("git")
+        .args(["-C", path, "show", &format!(":{stage}:{file}")])
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None; // stage doesn't exist for this conflict kind
+    }
+    if out.stdout.len() > CONFLICT_MAX_BYTES || out.stdout.contains(&0) {
+        *truncated = true;
+        return None;
+    }
+    Some(String::from_utf8_lossy(&out.stdout).into_owned())
+}
+
+#[cfg(feature = "sidecar-platform")]
+#[tauri::command]
+fn forge_conflict_versions(path: String, file: String) -> ConflictVersions {
+    let mut truncated = false;
+    let base = read_stage(&path, 1, &file, &mut truncated);
+    let ours = read_stage(&path, 2, &file, &mut truncated);
+    let theirs = read_stage(&path, 3, &file, &mut truncated);
+    // The working-tree copy (with `<<<<<<<`/`=======`/`>>>>>>>` markers) is the merge starting point.
+    let merged = std::fs::read(std::path::Path::new(&path).join(&file))
+        .ok()
+        .and_then(|b| {
+            if b.len() > CONFLICT_MAX_BYTES || b.contains(&0) {
+                truncated = true;
+                None
+            } else {
+                Some(String::from_utf8_lossy(&b).into_owned())
+            }
+        });
+    ConflictVersions { base, ours, theirs, merged, truncated }
+}
+
+/// True if `file` is a safe repo-relative path to stage a resolution into: non-empty, relative, and
+/// with no `..` component or drive/UNC prefix — so a resolution can never write outside the repo.
+#[cfg(feature = "sidecar-platform")]
+fn is_safe_repo_relative(file: &str) -> bool {
+    use std::path::{Component, Path};
+    !file.is_empty()
+        && !Path::new(file).is_absolute()
+        && !file.contains(':') // reject Windows drive / stream prefixes
+        && Path::new(file)
+            .components()
+            .all(|c| matches!(c, Component::Normal(_) | Component::CurDir))
+}
+
+/// Stage a resolved file (CPE-496): write `content` to `<repo>/<file>` and `git add` it. The path is
+/// confined to the repo — a `..`/absolute `file` is refused so a resolution can't write outside it.
+#[cfg(feature = "sidecar-platform")]
+#[tauri::command]
+fn forge_resolve_file(path: String, file: String, content: String) -> Result<(), String> {
+    if !is_safe_repo_relative(&file) {
+        return Err("Refusing an unsafe file path.".to_string());
+    }
+    let full = std::path::Path::new(&path).join(&file);
+    std::fs::write(&full, content).map_err(|e| format!("Couldn't write the file: {e}"))?;
+    let out = std::process::Command::new("git")
+        .args(["-C", &path, "add", "--", &file])
+        .output()
+        .map_err(|e| format!("Couldn't run git: {e}"))?;
+    if out.status.success() {
+        Ok(())
+    } else {
+        Err(String::from_utf8_lossy(&out.stderr).trim().to_string())
+    }
+}
+
+/// Continue the in-progress merge/rebase after conflicts are staged (CPE-496). Runs the right
+/// continuation with `GIT_EDITOR=true` so it never blocks on an editor. Fails (surfacing git's
+/// message) if files remain unmerged.
+#[cfg(feature = "sidecar-platform")]
+#[tauri::command]
+fn forge_conflict_continue(path: String) -> Result<String, String> {
+    let op = merge_operation(&path);
+    let args: Vec<&str> = match op {
+        "rebase" => vec!["-C", &path, "rebase", "--continue"],
+        "merge" => vec!["-C", &path, "commit", "--no-edit"],
+        _ => return Err("No merge or rebase is in progress.".to_string()),
+    };
+    let out = std::process::Command::new("git")
+        .args(&args)
+        .env("GIT_EDITOR", "true") // never open an interactive editor
+        .output()
+        .map_err(|e| format!("Couldn't run git: {e}"))?;
+    if out.status.success() {
+        Ok(format!("{op} completed"))
+    } else {
+        Err(String::from_utf8_lossy(&out.stderr).trim().to_string())
+    }
+}
+
+/// Abort the in-progress merge/rebase (CPE-496), restoring the pre-sync state so **no work is lost**.
+#[cfg(feature = "sidecar-platform")]
+#[tauri::command]
+fn forge_conflict_abort(path: String) -> Result<String, String> {
+    let op = merge_operation(&path);
+    let args: Vec<&str> = match op {
+        "rebase" => vec!["-C", &path, "rebase", "--abort"],
+        "merge" => vec!["-C", &path, "merge", "--abort"],
+        _ => return Err("No merge or rebase is in progress.".to_string()),
+    };
+    let out = std::process::Command::new("git")
+        .args(&args)
+        .output()
+        .map_err(|e| format!("Couldn't run git: {e}"))?;
+    if out.status.success() {
+        Ok(format!("{op} aborted — restored to the pre-sync state"))
     } else {
         Err(String::from_utf8_lossy(&out.stderr).trim().to_string())
     }
@@ -3929,7 +4129,17 @@ pub fn run() {
             #[cfg(feature = "sidecar-platform")]
             forge_repo_status,
             #[cfg(feature = "sidecar-platform")]
-            forge_sync
+            forge_sync,
+            #[cfg(feature = "sidecar-platform")]
+            forge_conflict_state,
+            #[cfg(feature = "sidecar-platform")]
+            forge_conflict_versions,
+            #[cfg(feature = "sidecar-platform")]
+            forge_resolve_file,
+            #[cfg(feature = "sidecar-platform")]
+            forge_conflict_continue,
+            #[cfg(feature = "sidecar-platform")]
+            forge_conflict_abort
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application");
@@ -4112,6 +4322,23 @@ mod agent_watch_tests {
         let e = build_generic_clone("https://git.acme.io/o/r.git", "/tmp/r", Some("bad tok@x"), true)
             .unwrap_err();
         assert!(!e.contains("bad tok@x"));
+    }
+
+    // --- Conflict-resolution path safety (CPE-496) --------------------------------------
+    use super::is_safe_repo_relative;
+
+    #[test]
+    fn a_resolution_writes_only_inside_the_repo() {
+        // Ordinary repo-relative paths are fine.
+        assert!(is_safe_repo_relative("src/app.rs"));
+        assert!(is_safe_repo_relative("a/b/c.txt"));
+        assert!(is_safe_repo_relative("./file.rs"));
+        // Anything that could escape the repo is refused.
+        assert!(!is_safe_repo_relative(""));
+        assert!(!is_safe_repo_relative("../outside.rs"));
+        assert!(!is_safe_repo_relative("a/../../etc/passwd"));
+        assert!(!is_safe_repo_relative("/etc/passwd"));
+        assert!(!is_safe_repo_relative("C:\\Windows\\system32"));
     }
 }
 
