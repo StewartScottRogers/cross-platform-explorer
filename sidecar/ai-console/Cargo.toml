@@ -9,6 +9,13 @@ license = "MIT"
 # or the explorer. Its own domain logic (agent registry, provider routing, secret
 # vault, …) lives in this crate's lib; the process entry is `src/main.rs`.
 
+# Release-time model-snapshot signer (CPE-450): normalizes every reseller's /models response
+# into one bundle and ed25519-signs it, mirroring the host's `catalog-sign`. Run by the manual
+# `model-snapshot.yml` workflow. (`src/main.rs` + other `src/bin/*.rs` are still auto-discovered.)
+[[bin]]
+name = "model-snapshot-sign"
+path = "src/bin/model_snapshot_sign.rs"
+
 [dependencies]
 sidecar-contract = { path = "../contract" }
 serde = { version = "1", features = ["derive"] }

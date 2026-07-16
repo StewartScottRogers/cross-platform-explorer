@@ -1,0 +1,110 @@
+name: Model snapshot
+
+# Build + sign the model-catalog snapshot (CPE-450), the offline/fast counterpart to the live
+# per-reseller /models fetch. It normalizes every reseller's model list into one bundle, ed25519-signs
+# it with the SAME first-party key that signs the agent catalog (CPE-308/377), and uploads the result
+# as a workflow artifact for a human to review and promote.
+#
+# ── How to run it manually ──────────────────────────────────────────────────────────────────────
+#   1. Actions tab → "Model snapshot" → "Run workflow" (this is workflow_dispatch-only; see below).
+#   2. When it finishes, download the "model-snapshot" artifact — it holds:
+#        models-index.json      the canonical, signed snapshot bytes
+#        models-index.json.sig  the detached ed25519 hex signature
+#   3. Bump nothing by hand: the run stamps a strictly-increasing `version` (unix seconds) so a newer
+#      snapshot always wins anti-rollback (CPE-451). `generated_at` is the run's UTC time.
+#
+# ── How to PROMOTE it to a release (deliberately manual, NOT automated here) ─────────────────────
+#   This workflow never publishes to a GitHub Release or touches the app release flow — that stays a
+#   human decision so a bad scrape can't auto-ship. To promote a reviewed artifact, attach both files
+#   to the relevant release, e.g.:
+#        gh release upload <tag> models-index.json models-index.json.sig --clobber
+#   The client (CPE-451) verifies the signature under CATALOG_TRUSTED_KEYS and honors the monotonic
+#   version, so only a genuinely newer, validly-signed snapshot is ever adopted.
+#
+# ── Cadence ──────────────────────────────────────────────────────────────────────────────────────
+#   Manual for now (opt-in, non-destructive). A scheduled cadence is intentionally left commented out
+#   below until the live reseller fetch is proven in a few manual runs; flip it on to regenerate, say,
+#   weekly. Even scheduled, it would only ever produce an artifact — promotion stays manual.
+
+on:
+  workflow_dispatch: {}
+  # schedule:
+  #   # Weekly, Mondays 06:00 UTC. Enable only after manual runs confirm the fetch + sign are healthy.
+  #   # Note: a scheduled run still only UPLOADS AN ARTIFACT — it never publishes a Release.
+  #   - cron: "0 6 * * 1"
+
+jobs:
+  snapshot:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # Guard: skip (never fail) on repos that haven't configured catalog signing — exactly like the
+      # release.yml `catalog` job and the OS-code-signing pattern. Every step below is gated on this.
+      - name: Detect catalog signing key
+        id: k
+        env:
+          KEY: ${{ secrets.CPE_CATALOG_SIGNING_KEY }}
+        run: |
+          if [ -n "$KEY" ]; then echo "has=true" >> "$GITHUB_OUTPUT"; else echo "has=false" >> "$GITHUB_OUTPUT"; fi
+
+      - name: Install Rust toolchain
+        if: steps.k.outputs.has == 'true'
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Rust cache
+        if: steps.k.outputs.has == 'true'
+        uses: swatinem/rust-cache@v2
+        with:
+          workspaces: "sidecar/ai-console -> target"
+
+      # Best-effort fetch: for each reseller manifest, curl its models_endpoint into
+      # responses/<id>.json. A failed or auth-gated fetch (most resellers need an API key we don't
+      # carry in CI) simply omits that reseller — snapshot_from_reseller_dir tolerates the gap. Public
+      # endpoints (e.g. OpenRouter) succeed and populate the bundle.
+      - name: Fetch reseller model lists (best-effort)
+        if: steps.k.outputs.has == 'true'
+        run: |
+          mkdir -p responses
+          for manifest in sidecar/ai-console/resellers/*.json; do
+            id=$(jq -r '.id' "$manifest")
+            endpoint=$(jq -r '.models_endpoint' "$manifest")
+            if [ -z "$id" ] || [ "$id" = "null" ] || [ -z "$endpoint" ] || [ "$endpoint" = "null" ]; then
+              echo "skip $manifest: missing id/models_endpoint"
+              continue
+            fi
+            echo "fetch $id <- $endpoint"
+            if curl -fsSL --max-time 30 "$endpoint" -o "responses/$id.json"; then
+              echo "  ok ($(wc -c < "responses/$id.json") bytes)"
+            else
+              echo "  fetch failed — omitting $id from this snapshot"
+              rm -f "responses/$id.json"
+            fi
+          done
+          echo "collected:"; ls -la responses || true
+
+      - name: Build + sign the model snapshot
+        if: steps.k.outputs.has == 'true'
+        env:
+          # 32-byte ed25519 seed (hex) — the same secret that signs the agent catalog. Never printed.
+          CPE_CATALOG_SIGNING_KEY: ${{ secrets.CPE_CATALOG_SIGNING_KEY }}
+        run: |
+          VERSION=$(date -u +%s)                          # monotonic across runs → anti-rollback (CPE-451)
+          export SNAPSHOT_GENERATED_AT=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+          cargo run --release --quiet \
+            --manifest-path sidecar/ai-console/Cargo.toml \
+            --bin model-snapshot-sign -- \
+            responses snapshot-out "$VERSION"
+          echo "snapshot-out contents:"; ls -la snapshot-out
+
+      # Upload only — a human downloads, reviews, and promotes to a Release (see header). This step
+      # deliberately does NOT call `gh release upload`.
+      - name: Upload snapshot artifact
+        if: steps.k.outputs.has == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: model-snapshot
+          path: |
+            snapshot-out/models-index.json
+            snapshot-out/models-index.json.sig
+          if-no-files-found: error
