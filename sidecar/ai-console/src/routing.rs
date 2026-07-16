@@ -43,10 +43,42 @@ pub fn compose_launch(
         .provider_recipes
         .get(provider)
         .ok_or_else(|| format!("agent '{}' has no recipe for provider '{provider}'", agent.id))?;
+    apply_recipe(recipe, ctx)
+}
 
-    // Fill any placeholder the caller didn't supply from the recipe's defaults, so a
-    // provider works with minimal input (CPE-328). A caller-supplied value always wins;
-    // `api_key` has no default (it's a secret, never baked into a manifest).
+/// A reseller / aggregator gateway (OpenRouter-like) described as **data** (CPE-468): one API key
+/// fronting many models over a protocol-compatible endpoint. Adding a reseller is a descriptor, not
+/// per-agent code — an agent that declares a `reseller_recipes` entry for `protocol` can target it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResellerDescriptor {
+    pub id: String,
+    pub name: String,
+    /// The API dialect this reseller speaks — matched against an agent's `reseller_recipes` keys.
+    pub protocol: String,
+    /// The base URL fed to the agent's reseller recipe as `{base_url}`.
+    pub base_url: String,
+}
+
+/// Compose a launch for `agent` against `reseller` using the agent's generic reseller recipe for the
+/// reseller's protocol (CPE-468). The reseller's `base_url` fills `{base_url}` (selecting a reseller
+/// *means* using its endpoint, so it wins over any default/caller value); the caller supplies the key
+/// + model in `ctx`. Errors if the agent doesn't speak the reseller's protocol.
+pub fn compose_reseller_launch(
+    agent: &AgentManifest,
+    reseller: &ResellerDescriptor,
+    ctx: &LaunchContext,
+) -> Result<Launch, String> {
+    let recipe = agent.reseller_recipes.get(&reseller.protocol).ok_or_else(|| {
+        format!("agent '{}' can't use a '{}'-protocol reseller ({})", agent.id, reseller.protocol, reseller.id)
+    })?;
+    let ctx = LaunchContext { base_url: Some(reseller.base_url.clone()), ..ctx.clone() };
+    apply_recipe(recipe, &ctx)
+}
+
+/// Fill a recipe's env + arg templates from `ctx`, backfilling unsupplied placeholders from the
+/// recipe's defaults (CPE-328). A caller-supplied value always wins; `api_key` has no default (it's a
+/// secret, never baked into a manifest). Shared by the provider + reseller launch paths.
+fn apply_recipe(recipe: &crate::agents::ProviderRecipe, ctx: &LaunchContext) -> Result<Launch, String> {
     let d = &recipe.defaults;
     let ctx = LaunchContext {
         model: ctx.model.clone().or_else(|| d.model.clone()),
@@ -54,7 +86,6 @@ pub fn compose_launch(
         base_url: ctx.base_url.clone().or_else(|| d.base_url.clone()),
         api_key: ctx.api_key.clone(),
     };
-
     let mut env = BTreeMap::new();
     for (k, template) in &recipe.env {
         env.insert(k.clone(), fill(template, &ctx)?);
@@ -214,5 +245,77 @@ mod tests {
         };
         assert_eq!(fill("{base_url}/v1?model={model}", &ctx).unwrap(), "http://x/v1?model=m");
         assert_eq!(fill("no-placeholders", &ctx).unwrap(), "no-placeholders");
+    }
+
+    /// An agent with a generic anthropic-protocol reseller recipe (using `{base_url}`) — how a Claude
+    /// Code-style agent consumes ANY OpenRouter-like reseller (CPE-468).
+    fn reseller_agent() -> AgentManifest {
+        let d = tempfile::tempdir().unwrap();
+        write(
+            d.path(),
+            "a.json",
+            r#"{
+              "schema_version": 1, "id": "claude", "name": "Claude Code",
+              "run": { "windows": { "command": "claude" }, "macos": { "command": "claude" }, "linux": { "command": "claude" } },
+              "providers": ["native"],
+              "reseller_recipes": {
+                "anthropic": {
+                  "env": { "ANTHROPIC_BASE_URL": "{base_url}", "ANTHROPIC_AUTH_TOKEN": "{api_key}" },
+                  "args": ["--model", "{model}"]
+                }
+              }
+            }"#,
+        );
+        AgentRegistry::load_from_dirs(&[d.path().to_path_buf()]).get("claude").unwrap().clone()
+    }
+
+    #[test]
+    fn a_reseller_descriptor_composes_a_launch_via_the_protocol_recipe() {
+        let m = reseller_agent();
+        assert!(m.supports_reseller("anthropic"));
+        assert_eq!(m.reseller_protocols(), vec!["anthropic"]);
+        let together = ResellerDescriptor {
+            id: "together".into(), name: "Together AI".into(),
+            protocol: "anthropic".into(), base_url: "https://api.together.xyz/v1".into(),
+        };
+        let ctx = LaunchContext { model: Some("moonshotai/kimi-k2".into()), api_key: Some("k".into()), ..Default::default() };
+        let launch = compose_reseller_launch(&m, &together, &ctx).unwrap();
+        assert_eq!(launch.env["ANTHROPIC_BASE_URL"], "https://api.together.xyz/v1"); // reseller base_url wins
+        assert_eq!(launch.env["ANTHROPIC_AUTH_TOKEN"], "k");
+        assert_eq!(launch.args, vec!["--model", "moonshotai/kimi-k2"]);
+    }
+
+    #[test]
+    fn the_same_agent_targets_a_different_reseller_with_no_code_change() {
+        // The "add a reseller as pure data" claim: a second descriptor, same recipe, just works.
+        let m = reseller_agent();
+        let groq = ResellerDescriptor {
+            id: "groq".into(), name: "Groq".into(),
+            protocol: "anthropic".into(), base_url: "https://api.groq.com/openai/v1".into(),
+        };
+        let ctx = LaunchContext { model: Some("llama-3.3-70b".into()), api_key: Some("g".into()), ..Default::default() };
+        let l = compose_reseller_launch(&m, &groq, &ctx).unwrap();
+        assert_eq!(l.env["ANTHROPIC_BASE_URL"], "https://api.groq.com/openai/v1");
+    }
+
+    #[test]
+    fn a_reseller_protocol_the_agent_cant_speak_is_rejected() {
+        let m = reseller_agent(); // speaks anthropic only
+        let openai_reseller = ResellerDescriptor {
+            id: "fireworks".into(), name: "Fireworks".into(),
+            protocol: "openai".into(), base_url: "https://api.fireworks.ai/inference/v1".into(),
+        };
+        let err = compose_reseller_launch(&m, &openai_reseller, &LaunchContext::default()).unwrap_err();
+        assert!(err.contains("can't use") && err.contains("openai"), "got: {err}");
+    }
+
+    #[test]
+    fn a_reseller_missing_its_api_key_is_a_loud_error() {
+        let m = reseller_agent();
+        let r = ResellerDescriptor {
+            id: "x".into(), name: "X".into(), protocol: "anthropic".into(), base_url: "https://x/v1".into(),
+        };
+        let err = compose_reseller_launch(&m, &r, &LaunchContext { model: Some("m".into()), ..Default::default() }).unwrap_err();
+        assert!(err.contains("api_key"), "got: {err}");
     }
 }

@@ -92,7 +92,7 @@ pub use aggregate::{run_all, run_registry, summarize, Action, AgentOutcome};
 
 pub use agents::{AgentManifest, AgentRegistry, OsCommand, ProviderRecipe};
 pub use lifecycle::{detect, install, uninstall, update, CommandRunner, DetectResult, RealRunner};
-pub use routing::{compose_launch, Launch, LaunchContext};
+pub use routing::{compose_launch, compose_reseller_launch, Launch, LaunchContext, ResellerDescriptor};
 
 use sidecar_contract::{
     Capability, Envelope, Hello, Lifecycle, Message, Response, CONTRACT_VERSION,

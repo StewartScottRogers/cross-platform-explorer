@@ -77,6 +77,12 @@ pub struct AgentManifest {
     /// Per-provider launch recipes (env + args templates), keyed by provider id (CPE-285).
     #[serde(default)]
     pub provider_recipes: BTreeMap<String, ProviderRecipe>,
+    /// Generic **reseller** recipes keyed by *protocol* (e.g. `"anthropic"`, `"openai"`): how this
+    /// agent consumes ANY OpenRouter-like reseller gateway of that protocol, as templates using
+    /// `{base_url}` + `{api_key}`. This lets a new reseller be added as **data** (a descriptor that
+    /// supplies `base_url`) with no per-agent recipe (CPE-468). `openrouter` etc. become descriptors.
+    #[serde(default)]
+    pub reseller_recipes: BTreeMap<String, ProviderRecipe>,
     #[serde(default)]
     pub default_model: Option<String>,
     #[serde(skip)]
@@ -112,6 +118,17 @@ impl AgentManifest {
 
     pub fn supports_provider(&self, provider: &str) -> bool {
         self.providers.iter().any(|p| p == provider)
+    }
+
+    /// The reseller protocols this agent can speak (the keys of `reseller_recipes`) — so the launcher
+    /// can offer every reseller of a matching protocol as a provider (CPE-468).
+    pub fn reseller_protocols(&self) -> Vec<&str> {
+        self.reseller_recipes.keys().map(String::as_str).collect()
+    }
+
+    /// Whether this agent can be launched against a reseller speaking `protocol`.
+    pub fn supports_reseller(&self, protocol: &str) -> bool {
+        self.reseller_recipes.contains_key(protocol)
     }
 
     fn validate(&self) -> Result<(), String> {
