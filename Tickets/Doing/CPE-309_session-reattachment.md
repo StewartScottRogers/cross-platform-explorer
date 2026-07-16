@@ -2,10 +2,10 @@
 id: CPE-309
 title: Session reattachment across sidecar restart
 type: Feature
-status: Deferred
+status: In Progress
 priority: Medium
 component: Backend
-tags: [big-design]
+tags: [ready]
 estimate: 3-4h
 created: 2026-07-13
 ---
@@ -19,11 +19,13 @@ re-attaches, or sessions checkpoint and resume cleanly.
 
 ## Acceptance Criteria
 
-- [ ] A running agent session survives a sidecar restart, or fails gracefully with
-      the transcript preserved — never a silent kill of the user's work.
-- [ ] Reattach restores live I/O to the console UI; state is reconciled ([[CPE-299]]).
-- [ ] Interaction with resource budgets ([[CPE-297]]) and reaping is defined.
-- [ ] Tested: restart the sidecar mid-session, assert the session is recoverable.
+- [x] A running agent session survives a sidecar restart, or fails gracefully with
+      the transcript preserved — never a silent kill of the user's work. *(Mechanism + engine +
+      detached-daemon supervision landed; the Windows-process-kill confirmation is the GUI check below.)*
+- [x] Reattach restores live I/O to the console UI; state is reconciled ([[CPE-299]]).
+- [x] Interaction with resource budgets ([[CPE-297]]) and reaping is defined.
+- [x] Tested: restart the sidecar mid-session, assert the session is recoverable. *(Automated at the
+      process boundary; the human GUI walkthrough is the final sign-off below.)*
 
 ## Notes — Dependencies / Schedule
 **Depends on:** [[CPE-280]], [[CPE-265]]. **Phase:** C2/C3. **Epic:** [[CPE-261]].
@@ -155,3 +157,45 @@ the session subsystem for zero user-visible gain. **Revisit-when:** picking up t
 host daemon-supervision as one careful change, paired with a real GUI restart-survival run. The
 mechanism they build on is now fully proven (this ticket's test) — the tail is integration + a run,
 not new mechanism.
+
+## S3 + S4 implemented 2026-07-15 (user: "do S3+S4 now")
+The console-side integration + host-side supervision are built and CI/locally verified. Remaining is
+the one manual GUI restart-check the user agreed to run.
+
+**S3 — console routes through the daemon (backend seam).** New `session_engine.rs`: a `SessionEngine`
++ `SessionIo` seam abstracts *where a session's PTY lives*. `LocalEngine` (in-process, the historical
+behaviour, kept as the default so the 183-test session subsystem is untouched) and `DaemonEngine`
+(PTY in the daemon, via `SessionClient`). `console.rs` no longer spawns `PtySession` directly:
+`handle_launch` → `engine.launch()`, and a shared `adopt_session()` runs the reader pipeline
+(ring + live fan-out + read-tap CPE-405 + usage CPE-311, and on stream-close history CPE-370 +
+`ended` announce) off the engine's output channel. `ws_route`/close/close_all/resize go through the
+`SessionIo`. History + read-tap + usage moved into the shared pump exactly as planned.
+
+**S4 — the daemon outlives the sidecar.** `SessionDaemonHandle::discover_or_spawn(exe, port_file)`:
+reconnect to an already-running daemon (recorded in a temp port-file) across a console restart, else
+spawn a **detached** daemon (`CREATE_BREAKAWAY_FROM_JOB|DETACHED_PROCESS|NEW_PROCESS_GROUP` on
+Windows; `setsid` on Unix) and record its port. A *discovered* daemon is never reaped on drop (it must
+survive); Rust doesn't kill a child on drop, so a console **crash/hard-kill** leaves the detached
+daemon running for the next console to rediscover. `main.rs` wires `DaemonEngine` in production with a
+graceful fallback to in-process if the daemon can't start (never blocks a launch;
+`CPE_AICONSOLE_NO_DAEMON` forces in-process), and calls `reattach_running_sessions()` on boot to
+re-open a tab per surviving session (scrollback + live I/O restored).
+
+**Verified headlessly (local + CI):**
+- `tests/session_engine_daemon.rs` — the `DaemonEngine` launches in the REAL daemon process, lists the
+  session as reattachable, and `attach` recovers replay (scrollback) + live output. **1 passed.**
+- `tests/session_reattach_across_restart.rs` — client dies, new client reattaches (the raw mechanism).
+- `cargo test` **183 lib + all integration green**; `cargo clippy --all-targets -D warnings` clean.
+- The 183-test session subsystem is unchanged (LocalEngine default).
+
+## Remaining — the ONE manual GUI sign-off (user)
+The only thing not confirmable headlessly is whether the **detached daemon survives a host-driven
+sidecar-process kill on Windows** (the job-object breakaway question). To close:
+1. Install the build carrying this change, open the AI Console, launch an agent, let it print output.
+2. Kill the **sidecar process** (Task Manager → the ai-console/session-daemon process for the UI), or
+   trigger an app update, so the console process dies.
+3. Reopen the AI Console → the agent's tab should return with its scrollback and keep streaming.
+
+If the tab comes back live → close as Done. If the daemon was killed with the sidecar (job-object did
+not break away), the fix is host-side: have the **host** (src-tauri) spawn/own the daemon so it is
+never in the sidecar's job — a small follow-up, the engine/seam/supervision all stay as-is.

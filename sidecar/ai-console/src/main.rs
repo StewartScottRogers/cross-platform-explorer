@@ -73,11 +73,34 @@ fn console_state(
         .ok()
         .or_else(|| std::env::current_dir().ok().map(|p| p.to_string_lossy().into_owned()))
         .unwrap_or_default();
-    Arc::new(
-        ConsoleState::with_backends(registry, cwd, secrets, presets, dialogs, history)
-            .with_catalog_sources(sources)
-            .with_announcer(announce),
-    )
+    let mut state = ConsoleState::with_backends(registry, cwd, secrets, presets, dialogs, history)
+        .with_catalog_sources(sources)
+        .with_announcer(announce);
+
+    // CPE-309: route session PTYs through the long-lived session-daemon process so they survive a
+    // console restart (crash/update/toggle). Discover an already-running daemon (from a prior console)
+    // or spawn a detached one. If the daemon can't be started, fall back to in-process sessions —
+    // degrading to pre-CPE-309 behavior rather than ever blocking a launch. `CPE_AICONSOLE_NO_DAEMON`
+    // forces the in-process path.
+    if std::env::var("CPE_AICONSOLE_NO_DAEMON").is_err() {
+        if let Ok(exe) = std::env::current_exe() {
+            match ai_console::session_supervisor::SessionDaemonHandle::discover_or_spawn(
+                &exe,
+                &ai_console::session_supervisor::default_port_file(),
+            ) {
+                Ok(handle) => {
+                    state = state.with_engine(Arc::new(ai_console::DaemonEngine::new(handle)));
+                }
+                Err(e) => eprintln!("ai-console: session daemon unavailable, using in-process sessions: {e}"),
+            }
+        }
+    }
+
+    let state = Arc::new(state);
+    // Reattach any sessions the daemon still holds from a previous console (CPE-309/461 across a full
+    // restart) so their tabs come back with scrollback + live I/O.
+    state.reattach_running_sessions();
+    state
 }
 
 /// Run the process in session-daemon mode (CPE-309 slice 2): serve the PTY [`SessionDaemon`] over a
