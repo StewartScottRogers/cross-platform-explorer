@@ -78,7 +78,7 @@ impl SessionDaemon {
             subscribers: Arc::new(Mutex::new(Vec::new())),
             exited: Arc::new(Mutex::new(false)),
         });
-        Self::spawn_reader(Arc::clone(&ds), reader);
+        Self::spawn_reader(id.to_string(), Arc::clone(&ds), reader);
         sessions.insert(id.to_string(), ds);
         Ok(())
     }
@@ -86,13 +86,18 @@ impl SessionDaemon {
     /// Pump the PTY's output into the ring and out to every subscriber until EOF. Runs for
     /// the life of the session, regardless of whether anyone is attached — that is exactly
     /// what lets output accumulate for a client that attaches *later*.
-    fn spawn_reader(ds: Arc<DaemonSession>, mut reader: Box<dyn Read + Send>) {
+    fn spawn_reader(id: String, ds: Arc<DaemonSession>, mut reader: Box<dyn Read + Send>) {
         std::thread::spawn(move || {
+            // CPE-309 diag hop 1: does the PTY *inside the daemon process* actually produce bytes?
+            // (The historical "black terminal" was ConPTY yielding nothing when the daemon ran with no
+            // console.) A missing "FIRST bytes" line here means the break is at the PTY, not transport.
+            let mut bt = crate::session_diag::ByteTrace::new("daemon", format!("pty[{id}]"));
             let mut buf = [0u8; 8192];
             loop {
                 match reader.read(&mut buf) {
                     Ok(0) | Err(_) => break,
                     Ok(n) => {
+                        bt.add(n);
                         let chunk = &buf[..n];
                         {
                             let mut ring = ds.ring.lock().unwrap();
@@ -108,6 +113,7 @@ impl SessionDaemon {
                     }
                 }
             }
+            bt.end("EOF/exit");
             *ds.exited.lock().unwrap() = true;
             // Wake attached clients so their read loop can observe the exit and close.
             ds.subscribers.lock().unwrap().clear();

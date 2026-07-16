@@ -298,3 +298,42 @@ daemon survival path remains deferred, and its "survivors lock the sidecar binar
 reason to keep it off until (a) the host owns + reaps the daemon deterministically and (b) install/
 startup proactively clears orphaned daemons — tracked in [[CPE-483]]. Reattach across a UI-sidecar
 *window* close/reopen already works (CPE-461); only a full *process* restart needs the daemon.
+
+## Diagnostics added 2026-07-16 (user: "do 309" → chose "add diagnostics, then you test")
+Precondition (b) above is now **satisfied** — [[CPE-483]] shipped: startup reaps orphaned
+`--session-daemon` processes and `/run`+`/remove` kill-all before install, so a stale sidecar / zombie
+daemon can no longer masquerade as the black-terminal cause. That removes the confound that wrecked the
+last several GUI runs. What's left is the genuine open question: **on the daemon path, does PTY output
+actually flow end-to-end in the real GUI, and if not, at which hop does it stop?** No headless test
+reproduces the black terminal, so the honest next step is an evidence-based GUI run.
+
+**Built a per-hop I/O tracer** (`sidecar/ai-console/src/session_diag.rs`) — opt-in (only active when a
+daemon-path env var is set; the 194-test session subsystem traces nothing and is unchanged), writes
+timestamped byte-counters to `%TEMP%\cpe-ai-console\session-diag.log` **and** stderr. Instrumented
+every hop of the daemon transport so a missing "FIRST bytes" line names the break:
+  - `daemon: session-daemon starting / listening on 127.0.0.1:<port>` — the daemon process booted.
+  - `sidecar: using DaemonEngine → …` — the UI sidecar took the daemon path (not in-process fallback).
+  - `daemon: pty[<id>] FIRST bytes …` — the PTY **inside the daemon** produced output (the prime
+    suspect: ConPTY yielding nothing under the daemon). Missing ⇒ the break is the PTY itself.
+  - `client: recv output[<id>] …` — output events crossed the socket to the sidecar's `SessionClient`.
+    Missing while `pty[..]` present ⇒ the break is the daemon→socket→client transport.
+  - `console: pump[<id>] FIRST bytes … ; live_ws=<bool>` — the console consumed the bytes and whether a
+    live WebSocket was attached to forward them. Present (with `live_ws=Some(true)`) but still a black
+    terminal ⇒ the break is the WS/frontend, not the daemon.
+Verified headlessly: `cargo test -p ai-console` 194 passed; `cargo clippy --all-targets -D warnings`
+clean; diagnostics inert unless the daemon path is on.
+
+## THE diagnostic run (user — this is what closes or re-targets the ticket)
+Run the installed app **once** with the daemon path + tracer on:
+
+1. **PowerShell:** `$env:CPE_AICONSOLE_DAEMON = "1"` then launch the app from that same shell:
+   `& "$env:LOCALAPPDATA\Programs\cross-platform-explorer\cross-platform-explorer.exe"`
+   (adjust the path to the install location; the env var must be set in the shell that launches it).
+2. Open the AI Console, launch an agent, and let it try to print output.
+3. Regardless of whether the terminal shows output, close the app, then send me
+   **`%TEMP%\cpe-ai-console\session-diag.log`**.
+
+The last hop that logged "FIRST bytes" is where I/O stops — that turns the fix from guesswork into a
+one-line target (PTY vs transport vs WS). If every hop logged bytes and the terminal was live → the
+daemon path works now (CPE-483 having removed the stale-binary confound) and we ship it + close the
+ticket. Either outcome is progress; the run is the only thing I can't do from here.

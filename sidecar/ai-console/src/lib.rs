@@ -60,6 +60,7 @@ pub mod pty;
 pub use mcp::{McpManager, McpProcess, McpServerSpec};
 pub mod routing;
 pub mod scope;
+pub mod session_diag;
 pub mod session_daemon;
 pub use session_daemon::{Attachment, SessionDaemon};
 pub mod session_client;

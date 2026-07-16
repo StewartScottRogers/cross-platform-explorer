@@ -103,6 +103,8 @@ fn console_state(
         if let Some(port) = addr.rsplit(':').next().and_then(|p| p.parse::<u16>().ok()) {
             let handle = ai_console::session_supervisor::SessionDaemonHandle::external(port);
             state = state.with_engine(Arc::new(ai_console::DaemonEngine::new(handle)));
+            // CPE-309 diag: the sidecar took the daemon path (vs. falling back to in-process).
+            ai_console::session_diag::trace("sidecar", &format!("using DaemonEngine → 127.0.0.1:{port}"));
         }
     }
 
@@ -117,6 +119,11 @@ fn console_state(
 /// loopback socket forever. `--port <n>` pins the port (default 0 = OS-assigned); the chosen port is
 /// printed as `PORT <n>` on stdout for the parent to read.
 fn run_session_daemon() {
+    // The daemon only runs on the reattach path, so always enable the CPE-309 I/O tracer here — it is
+    // the process whose ConPTY output the "black terminal" investigation needs to observe. (The env is
+    // process-local; it does not affect the UI sidecar or tests.)
+    std::env::set_var("CPE_AICONSOLE_DIAG", "1");
+    ai_console::session_diag::trace("daemon", &format!("session-daemon starting (pid {})", std::process::id()));
     let args: Vec<String> = std::env::args().collect();
     let port = args
         .iter()
@@ -134,6 +141,7 @@ fn run_session_daemon() {
     if let Ok(addr) = listener.local_addr() {
         println!("PORT {}", addr.port());
         let _ = std::io::stdout().flush();
+        ai_console::session_diag::trace("daemon", &format!("listening on 127.0.0.1:{}", addr.port()));
     }
     ai_console::session_server::serve(listener, Arc::new(ai_console::SessionDaemon::new()));
 }

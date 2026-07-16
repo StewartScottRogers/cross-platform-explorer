@@ -520,12 +520,19 @@ impl ConsoleState {
             let history = Arc::clone(&self.history);
             let announce = Arc::clone(&self.announce);
             let record_id = id.clone();
+            let diag_id = id.clone();
             let read_cwd = end.as_ref().map(|(m, _)| m.cwd.clone()).unwrap_or_default();
             thread::spawn(move || {
                 let Some(rx) = out else { return };
                 let mut reads = crate::agent_reads::ReadScanner::new();
                 let mut usage_scan = crate::usage::UsageScanner::new();
+                // CPE-309 diag hop 3: bytes the console actually consumed from the engine, and whether
+                // a live WebSocket was attached to forward them to. "console pump FIRST bytes" present
+                // but a black terminal ⇒ the break is the WS/frontend, not the daemon or transport.
+                let mut bt = crate::session_diag::ByteTrace::new("console", format!("pump[{diag_id}]"));
+                let mut noted_ws = false;
                 while let Ok(chunk) = rx.recv() {
+                    bt.add(chunk.len());
                     {
                         let mut r = ring.lock().unwrap();
                         r.extend_from_slice(&chunk);
@@ -535,8 +542,13 @@ impl ConsoleState {
                         }
                     }
                     // Push live to the attached terminal, if any (drop on send error).
-                    if let Some(tx) = live.lock().unwrap().as_ref() {
-                        let _ = tx.send(chunk.clone());
+                    let live_attached = live.lock().unwrap().as_ref().map(|tx| tx.send(chunk.clone()).is_ok());
+                    if !noted_ws {
+                        noted_ws = true;
+                        crate::session_diag::trace(
+                            "console",
+                            &format!("pump[{diag_id}] first chunk forwarded; live_ws={live_attached:?}"),
+                        );
                     }
                     let text = String::from_utf8_lossy(&chunk);
                     // Surface any file the agent reported reading (CPE-405).
@@ -546,6 +558,7 @@ impl ConsoleState {
                     // Fold provider-reported token/cost usage for this session (CPE-311).
                     *usage.lock().unwrap() = usage_scan.feed(&text);
                 }
+                bt.end("stream closed");
                 // Stream closed → the agent exited (or the daemon connection dropped).
                 match end {
                     Some((meta, ended_payload)) => {

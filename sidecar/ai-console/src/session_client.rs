@@ -173,12 +173,21 @@ impl SessionClient {
 /// Route a stream event to the attached session's channel (dropping it if none is attached).
 fn route_stream(inner: &Arc<Inner>, v: &Value) {
     let Some(id) = v.get("id").and_then(Value::as_str) else { return };
-    let msg = match v.get("ev").and_then(Value::as_str) {
-        Some("replay") => StreamMsg::Replay(unb64(v)),
-        Some("output") => StreamMsg::Output(unb64(v)),
-        Some("exit") => StreamMsg::Exit,
+    let ev = v.get("ev").and_then(Value::as_str).unwrap_or("");
+    let msg = match ev {
+        "replay" => StreamMsg::Replay(unb64(v)),
+        "output" => StreamMsg::Output(unb64(v)),
+        "exit" => StreamMsg::Exit,
         _ => return,
     };
+    // CPE-309 diag hop 2: are output/replay events reaching the sidecar's client across the socket?
+    // (If the daemon read bytes but nothing is logged here, the break is the daemon→socket→client
+    // transport, not the PTY.)
+    let len = match &msg {
+        StreamMsg::Replay(b) | StreamMsg::Output(b) => b.len(),
+        StreamMsg::Exit => 0,
+    };
+    crate::session_diag::note_client_event(id, ev, len);
     let streams = inner.streams.lock().unwrap();
     if let Some(tx) = streams.get(id) {
         let _ = tx.send(msg);
