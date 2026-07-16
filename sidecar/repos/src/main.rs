@@ -1,16 +1,15 @@
 //! The Repositories sidecar process (CPE-432). A thin stdio wrapper around the pure protocol loop
 //! in the library: emit `Hello`, then read JSON-line envelopes and act on each. On `Welcome` it
-//! reaches `Ready`. Depends only on `sidecar-contract` + this crate's own modules.
-//!
-//! This is the **base skeleton**: it handshakes and answers lifecycle. The UI server + its
-//! `ui:<url>` announce (CPE-435), host-brokered forge egress (CPE-433), and the browse/clone/sync
-//! request methods layer onto the `Welcome`/`Request` arms in later slices, exactly as the AI
-//! Console's `main.rs` grew from the same skeleton.
+//! reaches `Ready`, then serves its **own** loopback UI and announces the URL to the host
+//! (`ui:<url>` Status event, CPE-432 AC2) — exactly as the AI Console's `main.rs` does. Host-brokered
+//! forge egress (CPE-433) and the browse/clone/sync request methods layer onto the `Request` arm in
+//! later slices. Depends only on `sidecar-contract` + this crate's own modules.
 
 use std::io::{BufRead, Write};
 
+use repos::ui;
 use repos::{hello, on_message, Reaction};
-use sidecar_contract::{Envelope, Lifecycle, Message};
+use sidecar_contract::{Envelope, Event, Lifecycle, Message};
 
 fn write_env(env: &Envelope) {
     let mut out = std::io::stdout();
@@ -21,6 +20,9 @@ fn write_env(env: &Envelope) {
 fn main() {
     let stdin = std::io::stdin();
     write_env(&hello());
+
+    // Kept alive for the process's lifetime once started (dropping it would stop serving the UI).
+    let mut _ui_server: Option<ui::UiServer> = None;
 
     for line in stdin.lock().lines() {
         let line = match line {
@@ -35,10 +37,17 @@ fn main() {
             Err(_) => continue,
         };
 
-        // On Welcome: reach Ready. Later slices start the UI server here and announce its URL
-        // (side-effecting, so kept out of the pure `on_message`).
+        // On Welcome: reach Ready, then start the UI server and announce its loopback URL so the host
+        // can embed it. Both are side-effecting, so they live here rather than in pure `on_message`.
         if matches!(env.message, Message::Welcome(_)) {
             write_env(&Envelope::new(0, Message::Lifecycle(Lifecycle::Ready)));
+            if let Ok(server) = ui::serve(ui::placeholder_ui()) {
+                write_env(&Envelope::new(
+                    0,
+                    Message::Event(Event::Status { state: format!("ui:{}", server.url()) }),
+                ));
+                _ui_server = Some(server);
+            }
             continue;
         }
 

@@ -17,7 +17,7 @@ and its own loopback UI server, like the AI Console skeleton (CPE-277/271).
 
 ## Acceptance Criteria
 - [x] Emits Hello, reaches Ready, requests only needed capabilities (secrets, network-broker).
-- [ ] Serves its own UI on loopback; announces the URL to the host.
+- [x] Serves its own UI on loopback; announces the URL to the host.
 - [ ] Bundled + wired behind the sidecar-platform feature; conformance kit passes.
 - [x] One-way dependency (only sidecar-contract); process isolation preserved.
 
@@ -29,3 +29,24 @@ and its own loopback UI server, like the AI Console skeleton (CPE-277/271).
 
 ## Work Log
 2026-07-15 (dayshift) — Moved to Deferred. Deferred-on: **superseded for v1** by the native Repositories feature (host `forge_browse`/`forge_clone`/`forge_*_token` + `RepoBrowser.svelte`), which delivers browse+clone+credentials without launching a separate repos sidecar. The handshake skeleton (this ticket's landed core) stays valid. Revisit-when: process isolation of forge operations (untrusted-repo containment beyond the clone hardening) is required, or the two-way *mirror* engine (CPE-438 planner) needs a long-lived tenant. Not externally gated — a deliberate architecture choice; pickable if we decide to move forge into its own sidecar.
+2026-07-16 — Un-deferred to land the completable, headlessly-verifiable slice (AC2). Estimate for the
+remaining work was 2-3h; AC2 alone was ~30m mirroring the AI Console. **AC2 done:** new
+`sidecar/repos/src/ui.rs` — a dependency-free loopback HTTP server (`serve`/`UiServer`/`url`) + a
+`placeholder_ui()` "Repositories" page, a direct mirror of ai-console's `ui.rs` (CPE-271). `main.rs`
+now, on `Welcome`, reaches `Ready`, starts the UI server, and announces its loopback URL to the host
+via `Message::Event(Event::Status { state: "ui:<url>" })` — the exact string the host already parses
+(`src-tauri/src/lib.rs` `strip_prefix("ui:")`). The `UiServer` is held for the process lifetime.
+Verified headlessly: 2 new `ui` unit tests (31 lib unit tests total) + a new real-process integration
+test `tests/handshake.rs::the_repos_process_serves_its_ui_and_announces_the_url` (spawns the built
+binary, drives Hello→Ready→`ui:` announce, connects to the announced loopback URL, asserts it serves
+the Repositories page, then shuts down clean). `cargo test` green; `cargo clippy --all-targets
+-D warnings` clean. One-way dependency preserved (still only `sidecar-contract` + serde).
+2026-07-16 — Re-deferred with **only AC3 remaining**. AC3 = *bundle the `repos` sidecar behind the
+`sidecar-platform` feature + host launch/supervision + conformance-kit-against-the-real-process*. Left
+deferred **by the same v1 rationale**: v1 ships the native Repositories feature and does **not** launch
+a repos sidecar, so bundling + wiring host supervision would add a parallel, unused code path (against
+PURPOSE.md fast/small/predictable) and needs a real GUI run to verify. A conformance-against-process
+test would also require a `repos → sidecar-host` dev-dependency, muddying the clean one-way graph. All
+of AC3 becomes worth doing exactly when the revisit-when trigger fires (forge moves into its own
+sidecar / the mirror engine needs a long-lived tenant). Deferred-on: v1 native-forge decision.
+Revisit-when: the repos sidecar is actually launched by the host (per the CPE-429 epic direction).

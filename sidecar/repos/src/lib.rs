@@ -16,6 +16,7 @@ pub mod protocol;
 pub mod providers;
 pub mod status;
 pub mod sync;
+pub mod ui;
 
 pub use browse::{parse_github_contents, RemoteEntry};
 pub use clone::{build_clone_args, CloneError, CloneRequest};
