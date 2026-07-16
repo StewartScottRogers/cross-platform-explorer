@@ -1,11 +1,11 @@
 ---
 id: SPR-05
 title: "Sprint 5 — Shared agent memory graph"
-status: Active
+status: Closed
 start: 2026-07-16
 end: 2026-07-30
 created: 2026-07-16
-closed:
+closed: 2026-07-16
 ---
 
 ## Goal
@@ -15,6 +15,9 @@ MCP tool surface.
 
 ## Tickets
 - [x] CPE-524 — Graph store + recall (notes, `[[links]]`, relevance)
-- [ ] CPE-525 — `.agentmemory/` persistence + MCP tool surface
+- [x] CPE-525 — `.agentmemory/` persistence + MCP tool surface
 
 Order: CPE-524 (store) → CPE-525 (persistence + MCP).
+
+## Resolution (closed 2026-07-16)
+**Goal met** — both tickets Done. The shared agent memory graph ships: [[CPE-524]] graph store + recall (notes, `[[links]]`, relevance) and [[CPE-525]] `.agentmemory/` persistence + the `memory.write/read/recall` MCP tool surface. **Completes the epic [[CPE-504]].** Live MCP-server registration is the flagged follow-on. No carry-overs.

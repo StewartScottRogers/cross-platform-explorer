@@ -2,12 +2,13 @@
 id: CPE-504
 title: "EPIC: Shared agent memory graph over MCP"
 type: Task
-status: In Progress
+status: Done
 priority: Medium
 component: Multiple
 tags: [epic]
 estimate: 4h+
 created: 2026-07-16
+closed: 2026-07-16
 ---
 
 ## Summary
@@ -43,6 +44,14 @@ Adopted on the user's "just do them all" directive — recommended defaults, rev
 Sprint **[[SPR-05]]**:
 - [[CPE-524]] — Graph store + recall (notes, `[[links]]`, relevance) *(ready)*
 - [[CPE-525]] — `.agentmemory/` persistence + MCP tool surface *(needs-prereq CPE-524; live MCP flagged)*
+
+## Resolution (closed 2026-07-16)
+Shared agent memory shipped across 2 children in SPR-05: [[CPE-524]] the pure graph store + recall
+(markdown notes, `[[links]]`, relevance by tag/text/link-proximity, append-only + hash dedup) and
+[[CPE-525]] `.agentmemory/` disk persistence + the `memory.write/read/recall` MCP tool adapter. Agents
+can now write notes and recall relevant prior context — separate from the app's own memory. 10 unit
+tests; clippy clean. **Follow-on (recorded):** live MCP-server registration exposing the tools to
+external agent processes (as with the Swarm mailbox CPE-516) — the core is proven in isolation.
 
 ## Notes
 From [[CPE-500]]; builds on the AI Console MCP plumbing.

@@ -12,7 +12,7 @@ use std::collections::HashMap;
 use std::hash::{Hash, Hasher};
 
 /// A single memory note.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct Note {
     pub id: String,
     pub tags: Vec<String>,
@@ -168,6 +168,91 @@ impl MemoryGraph {
     }
 }
 
+// --- Disk persistence + MCP tool surface (CPE-525) ----------------------------------------------
+
+/// Serialize a note back to markdown (frontmatter `id`/`tags` + body). Round-trips with `parse_note`.
+pub fn note_to_markdown(note: &Note) -> String {
+    format!("---\nid: {}\ntags: [{}]\n---\n{}\n", note.id, note.tags.join(", "), note.body.trim())
+}
+
+fn sanitize(id: &str) -> String {
+    id.chars().map(|c| if c.is_ascii_alphanumeric() || c == '-' || c == '_' { c } else { '-' }).collect()
+}
+
+/// Write a note as a file in `dir` (created if needed): `<id>-<hash8>.md`. Append-only — the hash
+/// suffix makes concurrent writers land in distinct files, never clobbering. Returns the path.
+pub fn save_note(dir: &std::path::Path, note: &Note) -> std::io::Result<std::path::PathBuf> {
+    std::fs::create_dir_all(dir)?;
+    let hash = content_hash(&note.tags, &note.body);
+    let path = dir.join(format!("{}-{:08x}.md", sanitize(&note.id), (hash & 0xffff_ffff) as u32));
+    std::fs::write(&path, note_to_markdown(note))?;
+    Ok(path)
+}
+
+/// Load every `*.md` in `dir` into a graph (dedup applies). A missing dir ⇒ empty graph, never an error.
+pub fn load_dir(dir: &std::path::Path) -> MemoryGraph {
+    let mut g = MemoryGraph::new();
+    let Ok(entries) = std::fs::read_dir(dir) else { return g };
+    for e in entries.flatten() {
+        let p = e.path();
+        if p.extension().and_then(|s| s.to_str()) != Some("md") {
+            continue;
+        }
+        if let Ok(md) = std::fs::read_to_string(&p) {
+            if let Some(n) = parse_note(&md) {
+                g.add(n);
+            }
+        }
+    }
+    g
+}
+
+/// Dispatch an MCP memory tool against a graph (CPE-525) — the pure adapter the MCP server maps
+/// `memory.write` / `memory.read` / `memory.recall` onto. `write` mutates the graph (the server also
+/// persists via [`save_note`]); `read`/`recall` are read-only. Returns a JSON result.
+pub fn memory_tool(graph: &mut MemoryGraph, tool: &str, args: &serde_json::Value) -> serde_json::Value {
+    use serde_json::json;
+    match tool {
+        "memory.write" => {
+            let body = args.get("body").and_then(|v| v.as_str()).unwrap_or("").to_string();
+            if body.trim().is_empty() {
+                return json!({ "ok": false, "error": "empty body" });
+            }
+            let tags: Vec<String> = args
+                .get("tags")
+                .and_then(|v| v.as_array())
+                .map(|a| a.iter().filter_map(|t| t.as_str().map(String::from)).collect())
+                .unwrap_or_default();
+            let id = args
+                .get("id")
+                .and_then(|v| v.as_str())
+                .map(String::from)
+                .unwrap_or_else(|| format!("note-{:08x}", (content_hash(&tags, &body) & 0xffff_ffff) as u32));
+            let mut links = parse_links(&body);
+            if let Some(extra) = args.get("links").and_then(|v| v.as_array()) {
+                links.extend(extra.iter().filter_map(|l| l.as_str().map(String::from)));
+            }
+            let stored = graph.add(Note { id: id.clone(), tags, links, body });
+            json!({ "ok": true, "stored": stored, "id": id })
+        }
+        "memory.read" => {
+            let id = args.get("id").and_then(|v| v.as_str()).unwrap_or("");
+            json!({ "ok": true, "note": graph.get(id) })
+        }
+        "memory.recall" => {
+            let query = args.get("query").and_then(|v| v.as_str()).unwrap_or("");
+            let tags: Vec<String> = args
+                .get("tags")
+                .and_then(|v| v.as_array())
+                .map(|a| a.iter().filter_map(|t| t.as_str().map(String::from)).collect())
+                .unwrap_or_default();
+            let n = args.get("n").and_then(|v| v.as_u64()).unwrap_or(5) as usize;
+            json!({ "ok": true, "notes": graph.recall(query, &tags, n) })
+        }
+        other => json!({ "ok": false, "error": format!("unknown memory tool '{other}'") }),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -230,5 +315,55 @@ mod tests {
         let mut g = MemoryGraph::new();
         g.add(note("a", &["x"], "alpha"));
         assert!(g.recall("zzz nonexistent", &[], 5).is_empty());
+    }
+
+    // --- Persistence + MCP tool surface (CPE-525) ---------------------------------------
+    #[test]
+    fn markdown_round_trips_through_parse() {
+        let n = note("auth", &["auth", "design"], "OAuth flow, see [[tokens]]");
+        let back = parse_note(&note_to_markdown(&n)).unwrap();
+        assert_eq!(back.id, "auth");
+        assert_eq!(back.tags, vec!["auth", "design"]);
+        assert_eq!(back.links, vec!["tokens"]);
+    }
+
+    #[test]
+    fn save_then_load_dir_round_trips() {
+        let dir = std::env::temp_dir().join(format!("cpe-mem-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        save_note(&dir, &note("a", &["x"], "alpha [[b]]")).unwrap();
+        save_note(&dir, &note("b", &[], "beta")).unwrap();
+        save_note(&dir, &note("dup", &["x"], "alpha [[b]]")).unwrap(); // same content as 'a' → dedups on load
+        let g = load_dir(&dir);
+        assert_eq!(g.len(), 2); // a/dup dedup to one; b
+        assert_eq!(g.neighbors("a").len(), 1);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn load_dir_of_a_missing_folder_is_empty_not_an_error() {
+        assert!(load_dir(std::path::Path::new("/no/such/cpe/dir")).is_empty());
+    }
+
+    #[test]
+    fn memory_tool_write_read_recall() {
+        use serde_json::json;
+        let mut g = MemoryGraph::new();
+        let w = memory_tool(&mut g, "memory.write", &json!({ "id": "auth", "tags": ["auth"], "body": "token flow [[tokens]]" }));
+        assert_eq!(w["ok"], true);
+        assert_eq!(w["stored"], true);
+        assert_eq!(g.len(), 1);
+        // A duplicate write dedups.
+        let w2 = memory_tool(&mut g, "memory.write", &json!({ "id": "auth2", "tags": ["auth"], "body": "token flow [[tokens]]" }));
+        assert_eq!(w2["stored"], false);
+
+        let r = memory_tool(&mut g, "memory.read", &json!({ "id": "auth" }));
+        assert_eq!(r["note"]["id"], "auth");
+
+        let rc = memory_tool(&mut g, "memory.recall", &json!({ "query": "token", "tags": ["auth"] }));
+        assert_eq!(rc["notes"][0]["id"], "auth");
+
+        assert_eq!(memory_tool(&mut g, "memory.bogus", &json!({}))["ok"], false);
+        assert_eq!(memory_tool(&mut g, "memory.write", &json!({ "body": "  " }))["ok"], false); // empty body
     }
 }

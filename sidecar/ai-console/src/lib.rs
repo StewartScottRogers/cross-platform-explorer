@@ -77,7 +77,7 @@ pub use swarm_mailbox::Mailbox; // Message/Recipient via swarm_mailbox:: (Messag
 pub mod swarm_coordinator;
 pub use swarm_coordinator::{Assignment, Budget, Coordinator, Gate, Task, TaskState};
 pub mod agent_memory;
-pub use agent_memory::{parse_note, MemoryGraph, Note};
+pub use agent_memory::{load_dir as load_memory_dir, memory_tool, parse_note, save_note, MemoryGraph, Note};
 pub use session_client::{SessionClient, StreamMsg};
 
 pub use plugins::{install_plugin, uninstall_plugin, PluginApplier, PluginManifest, PluginRegistry};
