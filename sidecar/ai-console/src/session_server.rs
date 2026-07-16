@@ -12,6 +12,11 @@
 //!   `{"ev":"output","id":…,"data":b64}` `{"ev":"exit","id":…}` `{"ev":"sessions","ids":[…]}`
 //!   `{"ev":"closed","ids":[…]}` `{"ev":"ok"}` `{"ev":"error","msg":…}`
 //!
+//! `input` and `resize` are **fire-and-forget** — the daemon applies them and sends NO ack (CPE-309):
+//! an ack would share this socket with bulk PTY output and starve behind an output flood, hanging the
+//! client's keystrokes. `launch`/`kill`/`list`/`close_all` are request/reply (`launched`/`ok`/
+//! `sessions`/`closed`).
+//!
 //! On `attach` the daemon writes the buffered **replay** then streams live **output** — the reattach
 //! that restores I/O to a reconnecting UI. The socket is loopback-only (same trust boundary as the
 //! sidecar's own UI server, CPE-271); it carries terminal I/O, never secrets.
@@ -108,14 +113,20 @@ fn dispatch(msg: &Value, daemon: &Arc<SessionDaemon>, writer: &Arc<Mutex<TcpStre
             }
             Err(e) => send(writer, json!({ "ev": "error", "msg": e })),
         },
+        // input/resize are FIRE-AND-FORGET (CPE-309): no ack. An ack here would share this socket with
+        // bulk PTY output and starve behind an output flood, hanging the client's keystrokes. The op
+        // was already read + applied; a bad id just no-ops. Best-effort, exactly like an in-process PTY
+        // write. (Not acking also means no stale ack can pollute the client's next real request.)
         "input" => {
             let bytes = msg.get("data").and_then(Value::as_str).and_then(unb64).unwrap_or_default();
-            reply_ok(writer, daemon.input(&id(), &bytes))
+            let _ = daemon.input(&id(), &bytes);
+            true
         }
         "resize" => {
             let rows = msg.get("rows").and_then(Value::as_u64).unwrap_or(24) as u16;
             let cols = msg.get("cols").and_then(Value::as_u64).unwrap_or(80) as u16;
-            reply_ok(writer, daemon.resize(&id(), rows, cols))
+            let _ = daemon.resize(&id(), rows, cols);
+            true
         }
         "kill" => reply_ok(writer, daemon.kill(&id())),
         // Close every session at once and reclaim their agents/PTYs (CPE-442).

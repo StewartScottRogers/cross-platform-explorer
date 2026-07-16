@@ -383,3 +383,21 @@ make `DaemonIo::write`/`resize` (and `SessionClient::input`/`resize`) send the o
 an ack**, or split control acks onto a channel separate from the output stream so acks can't starve.
 Then re-run the GUI diagnostic (input should echo; agents should render). This is a bounded protocol
 fix, not new mechanism — the reattach engine/transport are proven working by this very run.
+
+## 2026-07-16 — FIX built: input/resize are now fire-and-forget (user: "build it")
+Fixed the control-ack starvation. On the daemon build, `SessionClient::input`/`resize` no longer go
+through the blocking `request()` (which waited for an ack that starves behind bulk output); they now
+`send()` fire-and-forget, and the daemon (`session_server::dispatch`) applies input/resize **without
+acking**. The op still reaches the PTY promptly — it travels on the *upstream* (client→daemon) socket
+direction, which output never floods; only the (unneeded) downstream ack was the problem. Not acking
+also means no stale `ok` can pollute the client's next real `request` (launch/kill/list).
+
+Files: `sidecar/ai-console/src/session_client.rs` (new `send()` helper; input/resize use it),
+`sidecar/ai-console/src/session_server.rs` (input/resize apply + no ack; doc updated). New regression
+test `input_and_resize_are_fire_and_forget_and_dont_poison_control_channel` (burst of input+resize,
+then `list` must still get its own ack — caught the old poisoning). `cargo test -p ai-console` 195
+passed; `clippy --all-targets -D warnings` clean; the reattach integration tests still green.
+
+Verification remaining: one GUI run on the **v0.24.0-sidecar** build (built next) — open a console,
+launch an agent, type: input should echo and the terminal should render. If it does, the ACs are met
+end-to-end and this closes.

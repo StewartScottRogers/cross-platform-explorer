@@ -121,6 +121,18 @@ impl SessionClient {
         Ok(ack)
     }
 
+    /// Send a **fire-and-forget** op — write it and return, without waiting for an ack (CPE-309). Used
+    /// for the hot PTY-control path (`input`/`resize`): those acks travel back on the same socket as
+    /// bulk PTY *output*, so under an output flood a blocking ack starves and every keystroke hangs
+    /// ("no input" in the GUI). The op itself reaches the daemon promptly — it goes on the *upstream*
+    /// (client→daemon) direction, which output never floods — so the PTY still gets the bytes. The
+    /// daemon deliberately does not ack these ops, so no stale ack can pollute a later `request`.
+    fn send(&self, msg: Value) -> Result<(), String> {
+        let mut w = self.inner.writer.lock().map_err(|_| "writer poisoned".to_string())?;
+        writeln!(w, "{msg}").map_err(|e| e.to_string())?;
+        w.flush().map_err(|e| e.to_string())
+    }
+
     /// Launch a new session in the daemon.
     pub fn launch(&self, id: &str, launch: &PtyLaunch) -> Result<(), String> {
         let env: serde_json::Map<String, Value> =
@@ -144,14 +156,16 @@ impl SessionClient {
         Ok(rx)
     }
 
-    /// Send input bytes to a session's PTY.
+    /// Send input bytes to a session's PTY. Fire-and-forget (CPE-309): a per-keystroke ack would
+    /// starve behind bulk output on the shared socket. See [`SessionClient::send`].
     pub fn input(&self, id: &str, bytes: &[u8]) -> Result<(), String> {
-        self.request(json!({ "op": "input", "id": id, "data": b64(bytes) })).map(|_| ())
+        self.send(json!({ "op": "input", "id": id, "data": b64(bytes) }))
     }
 
-    /// Resize a session's terminal.
+    /// Resize a session's terminal. Fire-and-forget for the same reason as [`SessionClient::input`]
+    /// (a terminal's on-open resize must not block on an ack that the output flood starves).
     pub fn resize(&self, id: &str, rows: u16, cols: u16) -> Result<(), String> {
-        self.request(json!({ "op": "resize", "id": id, "rows": rows, "cols": cols })).map(|_| ())
+        self.send(json!({ "op": "resize", "id": id, "rows": rows, "cols": cols }))
     }
 
     /// Kill a session.
@@ -249,6 +263,29 @@ mod tests {
         assert_eq!(c.list().unwrap(), vec!["s1".to_string()]);
         let rx = c.attach("s1").unwrap();
         assert!(drain_until(&rx, "READY", Duration::from_secs(10)).contains("READY"));
+        c.kill("s1").unwrap();
+    }
+
+    #[test]
+    fn input_and_resize_are_fire_and_forget_and_dont_poison_control_channel() {
+        // CPE-309 regression: input/resize must not wait for — or leave behind — a control ack. If they
+        // did (the old bug), a burst of keystrokes would either block behind the output flood ("no
+        // input") or leave stale `ok`s on the control channel so the NEXT real request (`list`) would
+        // recv a stale ack instead of its own reply.
+        let addr = start();
+        let c = SessionClient::connect(&addr).unwrap();
+        c.launch("s1", &ready_then_tick()).unwrap();
+        let _rx = c.attach("s1").unwrap();
+
+        // A burst of input + a resize — each returns immediately, no ack awaited, no hang.
+        for _ in 0..20 {
+            c.input("s1", b"x").unwrap();
+        }
+        c.resize("s1", 40, 120).unwrap();
+
+        // The control channel is clean: a real request still gets ITS OWN ack (the session list),
+        // not a stale input/resize `ok`. (Before the fix this returned `[]` — a mis-parsed `ok`.)
+        assert_eq!(c.list().unwrap(), vec!["s1".to_string()], "input/resize poisoned the control channel");
         c.kill("s1").unwrap();
     }
 
