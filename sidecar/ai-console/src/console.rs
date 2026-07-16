@@ -2321,4 +2321,33 @@ mod tests {
         s.read_to_string(&mut resp).unwrap();
         resp.split("\r\n\r\n").nth(1).unwrap_or("").to_string()
     }
+
+    /// Regression guard for the CPE-309 "no output in any tab" break: with the default (in-process)
+    /// engine, a launched session's output must reach its replay ring via the `adopt_session`
+    /// pipeline — i.e. the seam refactor didn't sever PTY → ring → WS.
+    #[test]
+    fn a_launched_session_streams_output_into_its_replay_ring() {
+        use std::time::{Duration, Instant};
+        let st = state(); // default LocalEngine
+        let (program, args) = crate::pty::shell_command("echo ring-capture-works");
+        let launch = crate::pty::PtyLaunch { program, args, cwd: None, env: BTreeMap::new(), rows: 24, cols: 80 };
+        let io = st.engine.launch("t1", &launch).expect("local engine launches");
+        st.adopt_session("t1".into(), io, "tab".into(), "agent".into(), "provider".into(), vec![], None);
+
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            let seen = st
+                .sessions
+                .lock()
+                .unwrap()
+                .get("t1")
+                .map(|s| String::from_utf8_lossy(&s.ring.lock().unwrap()).into_owned())
+                .unwrap_or_default();
+            if seen.contains("ring-capture-works") {
+                break;
+            }
+            assert!(Instant::now() < deadline, "session output never reached the ring: {seen:?}");
+            std::thread::sleep(Duration::from_millis(50));
+        }
+    }
 }

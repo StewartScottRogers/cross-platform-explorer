@@ -2,10 +2,10 @@
 id: CPE-309
 title: Session reattachment across sidecar restart
 type: Feature
-status: In Progress
+status: Deferred
 priority: Medium
 component: Backend
-tags: [ready]
+tags: [big-design]
 estimate: 3-4h
 created: 2026-07-13
 ---
@@ -19,13 +19,16 @@ re-attaches, or sessions checkpoint and resume cleanly.
 
 ## Acceptance Criteria
 
-- [x] A running agent session survives a sidecar restart, or fails gracefully with
-      the transcript preserved — never a silent kill of the user's work. *(Mechanism + engine +
-      detached-daemon supervision landed; the Windows-process-kill confirmation is the GUI check below.)*
-- [x] Reattach restores live I/O to the console UI; state is reconciled ([[CPE-299]]).
+- [~] A running agent session survives a sidecar restart, or fails gracefully with
+      the transcript preserved — never a silent kill of the user's work. *(Graceful half done via
+      CPE-370. Live survival: engine + supervision built + tested but NOT shipped by default —
+      detached-ConPTY yields no output on Windows; needs host-owned non-detached daemon. See the
+      2026-07-15 regression note.)*
+- [~] Reattach restores live I/O to the console UI; state is reconciled ([[CPE-299]]). *(Mechanism
+      built + automated-tested via `DaemonEngine`; not the production default yet.)*
 - [x] Interaction with resource budgets ([[CPE-297]]) and reaping is defined.
-- [x] Tested: restart the sidecar mid-session, assert the session is recoverable. *(Automated at the
-      process boundary; the human GUI walkthrough is the final sign-off below.)*
+- [~] Tested: restart the sidecar mid-session, assert the session is recoverable. *(Automated at the
+      process boundary with a non-detached daemon; the product path awaits host-owned supervision.)*
 
 ## Notes — Dependencies / Schedule
 **Depends on:** [[CPE-280]], [[CPE-265]]. **Phase:** C2/C3. **Epic:** [[CPE-261]].
@@ -199,3 +202,26 @@ sidecar-process kill on Windows** (the job-object breakaway question). To close:
 If the tab comes back live → close as Done. If the daemon was killed with the sidecar (job-object did
 not break away), the fix is host-side: have the **host** (src-tauri) spawn/own the daemon so it is
 never in the sidecar's job — a small follow-up, the engine/seam/supervision all stay as-is.
+
+## Regression found + fixed 2026-07-15 (user: "no output on any tab … you fix")
+Shipping the DaemonEngine as the **production default** (v0.19.0) broke the AI Console: every tab
+showed "Session running" but **no output**. Root cause: the daemon is spawned **detached**
+(`DETACHED_PROCESS`, no console) for job-object survival, but Windows **ConPTY** (portable-pty)
+produces no output for children spawned in a process with no console — so the PTY ran but streamed
+nothing. The automated `session_engine_daemon.rs` passed only because it spawns the daemon
+**non-detached** (inheriting the test's console), which is exactly the gap a headless test couldn't
+catch and the GUI run surfaced.
+
+**Fix:** the DaemonEngine is now **opt-in** behind `CPE_AICONSOLE_SESSION_DAEMON`; the production
+default reverts to the proven **in-process `LocalEngine`**, so the AI Console works again. Added a
+headless regression guard `console::tests::a_launched_session_streams_output_into_its_replay_ring`
+(launch via the default engine → assert output reaches the replay ring), so the "no output" break
+can't recur silently. `cargo test --lib` 184 passed; clippy `--all-targets -D warnings` clean.
+
+**Status:** the S3 seam + DaemonEngine + supervision are all built and tested, but daemon-survival is
+**not shipped** (opt-in only) because detached-ConPTY yields no output. The correct path for the
+survival feature is **host-owned, non-detached daemon supervision**: the Tauri host (src-tauri)
+spawns the session daemon **with a console** (so ConPTY works) and outside the sidecar's job (so it
+survives), then hands its address to the sidecar. That's a focused host-side follow-up — the
+engine/seam/client/supervisor all stay as-is. Deferring on that internal prereq; the default app is
+healthy in the meantime.
