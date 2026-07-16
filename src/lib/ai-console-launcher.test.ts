@@ -84,6 +84,60 @@ describe("AI Console launcher — Keys panel error hints (CPE-386)", () => {
   });
 });
 
+describe("AI Console launcher — Agent Grid view (CPE-506)", () => {
+  it("gridDims gives a near-square, cols-first best fit that reflows", async () => {
+    const { w } = await mountLauncher();
+    expect(w.gridDims(1)).toEqual({ rows: 1, cols: 1 });
+    expect(w.gridDims(2)).toEqual({ rows: 1, cols: 2 }); // side by side
+    expect(w.gridDims(3)).toEqual({ rows: 2, cols: 2 });
+    expect(w.gridDims(4)).toEqual({ rows: 2, cols: 2 });
+    expect(w.gridDims(5)).toEqual({ rows: 2, cols: 3 }); // reflows to 2×3
+    expect(w.gridDims(9)).toEqual({ rows: 3, cols: 3 });
+    expect(w.gridDims(16)).toEqual({ rows: 4, cols: 4 });
+  });
+
+  it("toggles between tabs (one pane visible) and grid (all tiles visible)", async () => {
+    const { w } = await mountLauncher();
+    const doc = w.document;
+    w.addSession("agent-1", "A");
+    w.addSession("agent-2", "B");
+    const terms = doc.getElementById("terms");
+    const panes = () => [...doc.querySelectorAll(".term-pane")];
+
+    // Tabs (default): only the active (last-added) pane is shown.
+    expect(terms.classList.contains("grid-view")).toBe(false);
+    expect(panes().filter((p: any) => p.style.display !== "none").length).toBe(1);
+
+    // Grid: every pane visible, columns from gridDims(2).
+    w.toggleView();
+    expect(terms.classList.contains("grid-view")).toBe(true);
+    expect(terms.style.getPropertyValue("--grid-cols")).toBe("2");
+    expect(panes().every((p: any) => p.style.display !== "none")).toBe(true);
+    expect(panes().filter((p: any) => p.classList.contains("focused")).length).toBe(1); // one focused tile
+
+    // Back to tabs: single pane again.
+    w.toggleView();
+    expect(terms.classList.contains("grid-view")).toBe(false);
+    expect(panes().filter((p: any) => p.style.display !== "none").length).toBe(1);
+  });
+
+  it("shows the view toggle only when sessions exist, and reflows columns as they change", async () => {
+    const { w } = await mountLauncher();
+    const doc = w.document;
+    const bar = doc.getElementById("view-bar");
+    const terms = doc.getElementById("terms");
+    expect(bar.style.display).toBe("none"); // no sessions yet
+
+    w.addSession("a", "A"); w.addSession("b", "B"); w.addSession("c", "C");
+    expect(bar.style.display).toBe("flex");
+    w.setView("grid");
+    expect(terms.style.getPropertyValue("--grid-cols")).toBe("2"); // 3 → 2×2
+
+    w.addSession("d", "D"); w.addSession("e", "E");
+    expect(terms.style.getPropertyValue("--grid-cols")).toBe("3"); // 5 → 2×3
+  });
+});
+
 describe("AI Console launcher — named sets / presets (the reported confusion)", () => {
   it("renders the current agent's sets into the dropdown, with a blank placeholder", async () => {
     const { w } = await mountLauncher();
