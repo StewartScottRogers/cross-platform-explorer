@@ -3101,10 +3101,16 @@ fn sidecar_start_ai_console(
     let _ = std::fs::create_dir_all(&cat_dir);
     let cat_dir_str = cat_dir.to_string_lossy().into_owned();
     let cat_keys = CATALOG_TRUSTED_KEYS.join(",");
-    // CPE-309 S4: bring up the host-owned session daemon (survives UI-sidecar restarts) and tell the
-    // sidecar its address, so agent PTYs live there. Best-effort — if it can't start, we simply don't
-    // pass the addr and the sidecar uses in-process sessions (pre-CPE-309 behaviour), never blocking.
-    let daemon_addr = state.ensure_session_daemon(&bin).map(|port| format!("127.0.0.1:{port}"));
+    // CPE-309 S4: the host-owned session daemon (sessions survive a UI-sidecar restart) is **opt-in**
+    // behind `CPE_AICONSOLE_DAEMON=1`. It is NOT the default because in the real GUI the daemon path
+    // still shows no PTY output (black terminal) — a deeper issue than the console flag, still being
+    // diagnosed. The default is the proven in-process engine, so the AI Console always works. When
+    // opted in, the daemon addr is passed and the sidecar routes sessions to it.
+    let daemon_addr = if std::env::var("CPE_AICONSOLE_DAEMON").is_ok() {
+        state.ensure_session_daemon(&bin).map(|port| format!("127.0.0.1:{port}"))
+    } else {
+        None
+    };
     let mut cat_env = vec![
         ("CPE_AICONSOLE_CATALOG", cat_dir_str.as_str()),
         ("CPE_AICONSOLE_CATALOG_KEYS", cat_keys.as_str()),

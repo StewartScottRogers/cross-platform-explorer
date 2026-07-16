@@ -2,7 +2,7 @@
 id: CPE-309
 title: Session reattachment across sidecar restart
 type: Feature
-status: In Progress
+status: Deferred
 priority: Medium
 component: Backend
 tags: [big-design]
@@ -258,3 +258,22 @@ feature modes. The DaemonEngine reattach path is proven by `session_engine_daemo
 2. Kill the **UI sidecar** process (or toggle the mode / trigger an update) — leave the app (host)
    running. The host keeps the daemon (and your session) alive.
 3. Reopen the AI Console → the tab returns with scrollback and keeps streaming.
+
+## Host-owned daemon STILL shows no output in the GUI — reverted to opt-in 2026-07-15
+Shipping the host-owned daemon (v0.21.0, `CREATE_NO_WINDOW`) did NOT fix it: the user reports a
+**black terminal, no caret, no echo when typing** — the daemon path still delivers no PTY I/O in the
+real GUI, even though `session_engine_daemon.rs` (real daemon process, non-GUI) passes. So the failure
+is specific to the daemon running under the host/GUI, not the engine/protocol — and my
+`CREATE_NO_WINDOW` reasoning (matching the UI-sidecar spawn) was insufficient. Root cause still unknown
+(candidates: ConPTY behaviour differs for a host-spawned daemon vs the UI sidecar; a WS/attach timing
+difference only present with the WebviewWindow; input-ack blocking).
+
+**Action:** the host-owned daemon is now **opt-in** behind `CPE_AICONSOLE_DAEMON=1`; the default is the
+proven **in-process engine**, so the AI Console works. This stops shipping a broken-by-default console.
+`cargo clippy --features sidecar-platform -D warnings` clean.
+
+**Deferred** again — but now with the full host-owned machinery in place behind a flag. Closing needs
+an **evidence-based** diagnosis (real logs from the daemon path in the GUI: does the daemon spawn, does
+its PTY produce bytes, do they reach the socket/console/WS?), not another speculative flag change. Next
+step: add diagnostics to the daemon path surfaced in the app's Diagnostics panel, then have the user
+run once with `CPE_AICONSOLE_DAEMON=1` to capture where the I/O stops.
