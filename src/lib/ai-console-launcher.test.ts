@@ -359,7 +359,7 @@ describe("AI Console launcher — reseller keys in the Keys panel (CPE-452)", ()
   });
 });
 
-describe("AI Console launcher — inline Model dropdown (CPE-454)", () => {
+describe("AI Console launcher — Model picker combobox (CPE-454/460)", () => {
   const catalog = {
     reseller: "openrouter",
     models: [
@@ -368,14 +368,24 @@ describe("AI Console launcher — inline Model dropdown (CPE-454)", () => {
     ],
   };
 
-  it("populates the Model field's datalist inline (no modal), each option carrying the id", async () => {
+  it("opens a real dropdown of models, filters, and picks one into the field (CPE-460)", async () => {
     const { w } = await mountLauncher((path) => (path.startsWith("/api/models") ? catalog : {}));
     await w.populateModels();
-    // It's an editable <input> bound to a <datalist> — a dropdown, not a modal.
-    expect(w.document.getElementById("model").getAttribute("list")).toBe("model-options");
-    expect(w.document.getElementById("model-overlay")).toBeNull(); // the old modal is gone
-    const opts = [...w.document.getElementById("model-options").options].map((o: any) => o.value);
-    expect(opts).toEqual(["anthropic/claude-3.5-sonnet", "openai/gpt-4o"]);
+    // A visible ▾ toggle + an anchored menu — not a bare input.
+    expect(w.document.getElementById("model-toggle")).not.toBeNull();
+    w.openModelMenu();
+    let opts = [...w.document.querySelectorAll(".model-opt")].map((e: any) => e.textContent);
+    expect(opts.length).toBe(2);
+    expect(opts.join(" ")).toMatch(/GPT-4o/);
+    // Type-to-filter narrows the list.
+    w.document.getElementById("model").value = "gpt";
+    w.renderModelMenu();
+    const rows = [...w.document.querySelectorAll(".model-opt")];
+    expect(rows.length).toBe(1);
+    // Picking fills the field and closes the menu.
+    rows[0].dispatchEvent(new w.MouseEvent("mousedown"));
+    expect(w.document.getElementById("model").value).toBe("openai/gpt-4o");
+    expect(w.document.getElementById("model-menu").hidden).toBe(true);
   });
 
   it("re-populates when the provider changes, and stays editable/custom-capable", async () => {
@@ -385,20 +395,23 @@ describe("AI Console launcher — inline Model dropdown (CPE-454)", () => {
       return {};
     });
     const p = w.document.getElementById("provider");
-    p.innerHTML = '<option value="groq">groq</option>'; // a provider the current agent exposes
+    p.innerHTML = '<option value="groq">groq</option>';
     p.value = "groq";
     p.dispatchEvent(new w.Event("change"));
     await new Promise((r) => setTimeout(r, 0));
     expect(reseller).toBe("groq"); // provider change drives the fetch — one uniform control
-    // The field remains a free-text input, so a custom/unlisted id is never a dead end.
+    // The field remains free-text, so a custom/unlisted id is never a dead end.
     w.document.getElementById("model").value = "my/custom-model";
     expect(w.document.getElementById("model").value).toBe("my/custom-model");
   });
 
-  it("offline (fetch fails) leaves the field editable with an empty list — never a dead end", async () => {
+  it("shows a visible error + Refresh when the model fetch fails (not a silent empty box)", async () => {
     const { w } = await mountLauncher((path) => (path.startsWith("/api/models") ? { ok: false, status: 502 } : {}));
     await w.populateModels();
-    expect(w.document.getElementById("model-options").options.length).toBe(0);
-    expect(w.document.getElementById("model").disabled).toBeFalsy();
+    w.openModelMenu();
+    const msg = w.document.querySelector(".model-msg");
+    expect(msg?.textContent).toMatch(/Couldn't load models/i);
+    expect(msg?.querySelector("button")?.textContent).toMatch(/Refresh/i);
+    expect(w.document.getElementById("model").disabled).toBeFalsy(); // still editable
   });
 });
