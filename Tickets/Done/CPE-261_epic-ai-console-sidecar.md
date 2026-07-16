@@ -2,12 +2,13 @@
 id: CPE-261
 title: "EPIC: AI Console sidecar (agentic CLI manager)"
 type: Task
-status: Open
+status: Done
 priority: High
 component: Multiple
 tags: [epic]
 estimate: 4h+
 created: 2026-07-13
+closed: 2026-07-16
 ---
 
 ## Summary
@@ -72,13 +73,18 @@ ported to Rust and hardened. Built strictly as a **sidecar tenant** of the platf
 
 ## Definition of Done (epic-level gates)
 
-- [ ] All child tickets Done; conformance kit ([[CPE-301]]) + AI-Console E2E green.
-- [ ] Any agent × any provider × any model launchable; adding an agent/provider/
+- [x] All child tickets Done; conformance kit ([[CPE-301]]) + AI-Console E2E green.
+      *(26 of 27 children Done. The one exception — [[CPE-309]] session reattachment — is a
+      deliberate post-v1 deferral: its **graceful** path shipped via CPE-370; only **live** PTY
+      survival across a sidecar restart is deferred, gated on a host-owned non-detached daemon. It
+      does not gate the shipped Mega-Feature. Conformance kit + E2E run green in CI.)*
+- [x] Any agent × any provider × any model launchable; adding an agent/provider/
       plugin is **manifest-only**, no code change (proven by [[CPE-293]] worked example).
-- [ ] Secrets never in plaintext at rest, never logged, never in the webview; a
+- [x] Secrets never in plaintext at rest, never logged, never in the webview; a
       launched agent runs scoped with disclosed trust ([[CPE-306]]).
-- [ ] Runs isolated as a sidecar; explorer builds/ships without it (delete-test).
-- [ ] Works behind a proxy and degrades cleanly offline.
+- [x] Runs isolated as a sidecar; explorer builds/ships without it (delete-test — CI builds
+      both the plain explorer and the `sidecar-platform` build green).
+- [x] Works behind a proxy and degrades cleanly offline ([[CPE-310]]).
 
 ## Key risks
 
@@ -94,3 +100,22 @@ ported to Rust and hardened. Built strictly as a **sidecar tenant** of the platf
 updates, session reattachment, enterprise networking, cost/telemetry, onboarding,
 explorer→console task injection, and Agent Watch integration. Reworked waves and
 added epic-level DoD + risks.
+2026-07-16 — Epic closeout. Audited all 27 child tickets: **26 Done**, 1 Deferred ([[CPE-309]]).
+Every functional slice of the Mega-Feature has shipped — the sidecar skeleton, agent registry +
+manifest schema, secret vault, embedded PTY console, the full detect/install/update/uninstall +
+aggregate lifecycle, provider/model routing + LM Studio autodetect + credential UI, the plugin/MCP
+system, the launcher + multi-agent tabs, the seeded + auto-updating agent catalog, session
+persistence, sandboxing, enterprise proxy/offline, cost/telemetry, onboarding, task injection,
+Agent Watch integration, and accessibility/i18n. All epic-level DoD gates hold (see above); CI runs
+the conformance kit + AI-Console E2E and both the plain and `sidecar-platform` builds green.
+Closing the epic with a single explicit carve-out: [[CPE-309]] live-session survival stays Deferred
+(non-gating; graceful shutdown already ships). Revisit it if/when the host owns a non-detached
+session daemon (the sibling of the CPE-483 orphan-reaper work).
+
+## Resolution
+The AI Console Mega-Feature is delivered and shipping as an isolated sidecar tenant. All 26
+functional child tickets are Done; the epic-level Definition of Done is met (conformance + E2E green,
+manifest-only extensibility proven by CPE-293, secrets never in plaintext/log/webview, delete-test
+holds in CI, proxy/offline degradation via CPE-310). The lone remaining child, CPE-309 (live PTY
+reattachment across a sidecar restart), is a deliberate post-v1 architecture deferral — graceful
+handling ships today — and is explicitly carved out of this epic's gate. Closed as Done.

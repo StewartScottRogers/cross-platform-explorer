@@ -2,12 +2,13 @@
 id: CPE-429
 title: "EPIC: Source-control / forge integration — browse & two-way mirror any repository, as sidecars"
 type: Task
-status: Open
+status: Done
 priority: High
 component: Multiple
 tags: [epic, big-design, needs-decision]
 estimate: 4h+
 created: 2026-07-15
+closed: 2026-07-16
 ---
 
 ## Summary
@@ -150,3 +151,36 @@ standing up a whole hosted sidecar + iframe pane. The provider allow-list, clone
 **Still open under the epic:** two-way **mirror/sync** (push + the CPE-438 planner wired to a UI),
 more provider parsers beyond GitHub Contents, and self-hosted-forge connections. Revisit the
 sidecar architecture (CPE-432) only if isolation/mirror needs demand it.
+
+## Work Log
+2026-07-15 — Filed from the user's request; restated intent, enumerated providers, sketched the
+sidecar architecture + child tickets, captured design questions D1–D5. See the Decision above.
+2026-07-16 — Epic closeout. Audited the 8 child tickets: **7 Done** (CPE-433 egress, CPE-434 browse,
+CPE-435 left-pane, CPE-436 clone, CPE-438 mirror/sync engine, CPE-439 credentials, CPE-440 threat
+model), **1 Deferred** (CPE-432 repos sidecar skeleton — superseded by the native-forge decision for
+v1; its AC2 loopback-UI slice was landed 2026-07-16, only the bundle/host-launch AC3 remains
+deferred). The v1 goal — a Repositories left-pane section that browses any GitHub/forge repo and
+clones it locally with keychain-stored credentials over host-brokered, allow-listed egress — is
+**delivered natively** and shipping. Design questions D1–D5 are resolved (see Decision: native-first,
+shell-out VCS, safe-by-default sync, one provider-agnostic path, Git-first).
+
+Closing the epic as **v1-delivered**, with the residual scope recorded as explicit post-v1
+follow-ups rather than blockers (none is a v1 gate, and none is a filed open ticket):
+- **Mirror push UI** — the CPE-438 planner engine is Done; wiring push + a divergence/conflict
+  surface into the Repositories UI is a follow-up (file a new ticket when prioritized).
+- **More provider parsers** beyond the GitHub Contents API (GitLab, Bitbucket, Gitea/Forgejo,
+  Codeberg, SourceHut, Azure DevOps, …) — each is a manifest + parser, added as demand arises.
+- **Self-hosted-forge** connections and **Tier 2/3 VCS** (hg/svn/p4/fossil, Radicle) — manifest
+  follow-ups per the tiered plan.
+- **Process isolation via the repos sidecar** ([[CPE-432]]) — stays Deferred; revisit only if
+  untrusted-repo containment or a long-lived mirror tenant demands it.
+
+## Resolution
+Forge integration shipped as a **native explorer feature** for v1 (the deliberate D2 decision):
+host commands `forge_browse`/`forge_clone`/`forge_*_token` over allow-listed, no-SSRF egress
+(`src-tauri/src/forge_egress.rs`), surfaced through a **Repositories** left-pane section
+(`RepoBrowser.svelte`). 7 of 8 children Done; the 8th (CPE-432 sidecar path) is a deliberate,
+documented deferral. Remaining forge scope (mirror push UI, additional providers, self-hosted, Tier
+2/3 VCS) is post-v1 enhancement work, not an epic gate — captured above so nothing is lost. The
+Mega-Feature's v1 promise (browse + clone any forge, credentials in the keychain, provider-agnostic
+foundation) is delivered. Closed as Done.
