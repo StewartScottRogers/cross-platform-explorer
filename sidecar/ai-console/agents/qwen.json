@@ -151,5 +151,18 @@
       }
     }
   },
-  "default_model": "qwen/qwen3-coder"
+  "default_model": "qwen/qwen3-coder",
+  "reseller_recipes": {
+    "openai": {
+      "env": {
+        "OPENAI_API_KEY": "{api_key}",
+        "OPENAI_BASE_URL": "{base_url}",
+        "OPENAI_MODEL": "{model}"
+      },
+      "args": [
+        "--model",
+        "{model}"
+      ]
+    }
+  }
 }

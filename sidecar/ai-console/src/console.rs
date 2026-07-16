@@ -87,6 +87,9 @@ pub struct ConsoleState {
     /// Production is the single hardcoded [`MODEL_CATALOG_TRUSTED_KEY`]; tests inject their own via
     /// [`ConsoleState::with_snapshot_keys`].
     snapshot_keys: Vec<String>,
+    /// Reseller launch descriptors (CPE-469): if the selected provider matches one of these ids and
+    /// the agent speaks its protocol, `handle_launch` routes through `compose_reseller_launch`.
+    resellers: Vec<crate::routing::ResellerDescriptor>,
 }
 
 /// Hook the console calls to announce session start/end to the host (CPE-396). No-op by default.
@@ -241,7 +244,15 @@ impl ConsoleState {
             announce: Arc::new(|_| {}),
             snapshot_models: Mutex::new(None),
             snapshot_keys: vec![MODEL_CATALOG_TRUSTED_KEY.to_string()],
+            resellers: Vec::new(),
         }
+    }
+
+    /// Provide the reseller launch descriptors (CPE-469) — the launch-capable resellers from the
+    /// bundled `resellers/*.json`. Chained after construction.
+    pub fn with_resellers(mut self, resellers: Vec<crate::routing::ResellerDescriptor>) -> Self {
+        self.resellers = resellers;
+        self
     }
 
     /// Swap the session engine (CPE-309). The real sidecar passes a `DaemonEngine` so session PTYs
@@ -347,6 +358,9 @@ impl ConsoleState {
                     "installed": det.installed,
                     "version": det.version,
                     "providers": a.providers,
+                    // Reseller protocols this agent speaks (CPE-469) — the launcher offers every
+                    // reseller of a matching protocol as an extra provider.
+                    "resellerProtocols": a.reseller_protocols(),
                     "defaultModel": a.default_model,
                     "canInstall": a.install_for_current_os().is_some(),
                     "runnable": a.run_for_current_os().is_some(),
@@ -355,7 +369,14 @@ impl ConsoleState {
             .collect();
         // Persisted presets + remembered selection (CPE-352), for the launcher to restore.
         let presets = serde_json::to_value(self.presets.load()).unwrap_or_else(|_| json!({}));
-        json!({ "agents": agents_json, "cwd": self.default_cwd, "presets": presets })
+        // Launch-capable resellers (CPE-469): the launcher offers each as a provider for agents whose
+        // `resellerProtocols` include the reseller's protocol.
+        let resellers: Vec<Value> = self
+            .resellers
+            .iter()
+            .map(|r| json!({ "id": r.id, "name": r.name, "protocol": r.protocol }))
+            .collect();
+        json!({ "agents": agents_json, "cwd": self.default_cwd, "presets": presets, "resellers": resellers })
     }
 
     fn handle_launch(&self, body: &str) -> Response {
@@ -403,9 +424,17 @@ impl ConsoleState {
             started_at: now_millis(),
         };
         let ctx = LaunchContext { model, small_model, api_key, base_url };
+        // If the selected "provider" is actually a reseller gateway this build knows AND the agent
+        // speaks its protocol, launch through the reseller path (CPE-469) instead of a provider recipe.
+        let reseller = self
+            .resellers
+            .iter()
+            .find(|r| r.id == provider && agent.supports_reseller(&r.protocol))
+            .cloned();
         let req = AgentLaunchRequest {
             agent: &agent,
             provider: &provider,
+            reseller,
             ctx,
             profile_env: BTreeMap::new(),
             cwd: cwd.clone(),
@@ -2266,6 +2295,7 @@ mod tests {
         let req = AgentLaunchRequest {
             agent: &agent,
             provider: "native",
+            reseller: None,
             ctx: LaunchContext::default(),
             profile_env: BTreeMap::new(),
             cwd: ".".into(),

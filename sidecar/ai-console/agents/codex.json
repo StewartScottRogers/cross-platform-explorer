@@ -174,5 +174,26 @@
       }
     }
   },
-  "default_model": "gpt-5.5"
+  "default_model": "gpt-5.5",
+  "reseller_recipes": {
+    "openai": {
+      "env": {
+        "RESELLER_API_KEY": "{api_key}"
+      },
+      "args": [
+        "-c",
+        "model_provider=reseller",
+        "-c",
+        "model_providers.reseller.name=Reseller",
+        "-c",
+        "model_providers.reseller.base_url={base_url}",
+        "-c",
+        "model_providers.reseller.env_key=RESELLER_API_KEY",
+        "-c",
+        "model_providers.reseller.wire_api=chat",
+        "--model",
+        "{model}"
+      ]
+    }
+  }
 }

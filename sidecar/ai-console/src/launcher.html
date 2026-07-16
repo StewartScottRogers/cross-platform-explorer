@@ -452,6 +452,11 @@ function renderProviders() {
   const sel = $("provider"); sel.innerHTML = "";
   const provs = a ? a.providers : [];
   provs.forEach((p) => { const o = document.createElement("option"); o.value = p; o.textContent = p; sel.appendChild(o); });
+  // Reseller gateways (CPE-469): offer every reseller whose protocol this agent speaks as an extra
+  // provider. Selecting one launches via the agent's reseller recipe (server routes on the id).
+  const protos = (a && a.resellerProtocols) || [];
+  const resellers = ((catalog && catalog.resellers) || []).filter((r) => protos.includes(r.protocol));
+  resellers.forEach((r) => { const o = document.createElement("option"); o.value = r.id; o.textContent = r.name + " (reseller)"; sel.appendChild(o); });
   // First-timer with no saved keys → default to a provider that needs none, so they can launch now.
   const creds = (catalog && catalog.presets && catalog.presets.credentials) || [];
   if (!creds.length) { const noKey = provs.find((p) => !providerNeedsKey(p)); if (noKey) sel.value = noKey; }
