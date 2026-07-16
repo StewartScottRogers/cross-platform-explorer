@@ -488,6 +488,32 @@ describe("AI Console launcher — per-session usage/cost (CPE-311)", () => {
   });
 });
 
+describe("AI Console launcher — reseller providers in the dropdown (CPE-469)", () => {
+  it("offers every reseller whose protocol the agent speaks, as an extra provider option", async () => {
+    const { w } = await mountLauncher();
+    // A catalog: an openai-protocol agent + two resellers (one openai, one anthropic).
+    const cat = {
+      agents: [{ id: "qwen", name: "Qwen Code", installed: true, providers: ["native"], resellerProtocols: ["openai"], defaultModel: "qwen3" }],
+      cwd: "/repo",
+      resellers: [
+        { id: "groq", name: "Groq", protocol: "openai" },
+        { id: "together", name: "Together AI", protocol: "openai" },
+        { id: "some-anthropic", name: "AnthropicOnly", protocol: "anthropic" },
+      ],
+      presets: { agents: { qwen: {} }, credentials: [] },
+    };
+    w.eval(`catalog = ${JSON.stringify(cat)}`);
+    w.document.getElementById("agent").innerHTML = '<option value="qwen">Qwen Code</option>';
+    w.document.getElementById("agent").value = "qwen";
+    w.renderProviders();
+    const opts = [...w.document.getElementById("provider").options].map((o: any) => ({ v: o.value, t: o.textContent }));
+    // native + the two openai resellers; NOT the anthropic-only one (qwen doesn't speak anthropic).
+    expect(opts.map((o) => o.v)).toEqual(["native", "groq", "together"]);
+    expect(opts.find((o) => o.v === "groq")?.t).toBe("Groq (reseller)");
+    expect(opts.some((o) => o.v === "some-anthropic")).toBe(false);
+  });
+});
+
 describe("AI Console launcher — busy/wait cursor (CPE-482)", () => {
   it("maps body.busy to the OS progress cursor", () => {
     expect(HTML).toMatch(/body\.busy[\s\S]*?cursor:\s*progress\s*!important/);

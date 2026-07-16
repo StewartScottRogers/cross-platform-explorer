@@ -45,6 +45,19 @@ fn agents_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("agents")
 }
 
+/// Locate the bundled reseller manifests (CPE-469), same resolution order as `agents_dir`.
+fn resellers_dir() -> PathBuf {
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(dir) = exe.parent() {
+            let p = dir.join("resellers");
+            if p.is_dir() {
+                return p;
+            }
+        }
+    }
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("resellers")
+}
+
 /// Build the launcher's shared state: the agent catalog, the default folder, and the
 /// secrets backend (the host keychain broker) so provider keys resolve at launch.
 fn console_state(
@@ -73,8 +86,12 @@ fn console_state(
         .ok()
         .or_else(|| std::env::current_dir().ok().map(|p| p.to_string_lossy().into_owned()))
         .unwrap_or_default();
+    // Launch-capable reseller descriptors (CPE-469): selecting one as the provider launches the agent
+    // against that gateway via its protocol recipe.
+    let resellers = ai_console::model_catalog::ResellerRegistry::load_from_dirs(&[resellers_dir()]).descriptors();
     let mut state = ConsoleState::with_backends(registry, cwd, secrets, presets, dialogs, history)
         .with_catalog_sources(sources)
+        .with_resellers(resellers)
         .with_announcer(announce);
 
     // CPE-309 S4: sessions survive a console restart by living in a **host-owned** session daemon.

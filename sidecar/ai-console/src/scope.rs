@@ -27,6 +27,10 @@ const DANGEROUS_FLAGS: &[&str] = &[
 pub struct AgentLaunchRequest<'a> {
     pub agent: &'a AgentManifest,
     pub provider: &'a str,
+    /// When `Some`, launch against a **reseller** gateway (CPE-469): the launch is composed from the
+    /// agent's `reseller_recipes[protocol]` with the reseller's `base_url`, instead of the per-agent
+    /// `provider_recipes[provider]`. `provider` is then just the reseller's id (for logging/presets).
+    pub reseller: Option<crate::routing::ResellerDescriptor>,
     /// Model/keys/urls for the provider recipe (api_key resolved from the vault).
     pub ctx: LaunchContext,
     /// Extra env from the selected credential profile (resolved via the vault).
@@ -57,7 +61,10 @@ pub fn build_launch(req: &AgentLaunchRequest) -> Result<PtyLaunch, String> {
         .run_for_current_os()
         .ok_or_else(|| format!("agent '{}' has no run command for this OS", req.agent.id))?;
 
-    let routed = compose_launch(req.agent, req.provider, &req.ctx)?;
+    let routed = match &req.reseller {
+        Some(r) => crate::routing::compose_reseller_launch(req.agent, r, &req.ctx)?,
+        None => compose_launch(req.agent, req.provider, &req.ctx)?,
+    };
 
     // Env: routing recipe first, then the profile env (profile wins on conflict — it's
     // the user's explicit choice). Nothing else is added.
@@ -99,6 +106,7 @@ mod tests {
         let req = AgentLaunchRequest {
             agent: &agent,
             provider: "openrouter",
+            reseller: None,
             ctx: LaunchContext {
                 model: Some("anthropic/claude-sonnet-4.5".into()),
                 small_model: Some("anthropic/claude-haiku-4.5".into()),
@@ -123,11 +131,42 @@ mod tests {
     }
 
     #[test]
+    fn build_launch_uses_the_reseller_path_when_a_descriptor_is_set() {
+        // The real qwen manifest declares an `openai` reseller recipe (CPE-469); launched against a
+        // Groq descriptor it must fill OPENAI_BASE_URL from the reseller, not a provider recipe.
+        let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("agents");
+        let agent = AgentRegistry::load_from_dirs(&[dir]).get("qwen").unwrap().clone();
+        assert!(agent.supports_reseller("openai"), "qwen should declare an openai reseller recipe");
+        let reseller = crate::routing::ResellerDescriptor {
+            id: "groq".into(),
+            name: "Groq".into(),
+            protocol: "openai".into(),
+            base_url: "https://api.groq.com/openai/v1".into(),
+        };
+        let req = AgentLaunchRequest {
+            agent: &agent,
+            provider: "groq",
+            reseller: Some(reseller),
+            ctx: LaunchContext { model: Some("llama-3.3-70b".into()), api_key: Some("gsk".into()), ..Default::default() },
+            profile_env: BTreeMap::new(),
+            cwd: "/repo".into(),
+            extra_args: vec![],
+            rows: 24,
+            cols: 80,
+        };
+        let launch = build_launch(&req).unwrap();
+        assert_eq!(launch.env["OPENAI_BASE_URL"], "https://api.groq.com/openai/v1"); // reseller wins
+        assert_eq!(launch.env["OPENAI_API_KEY"], "gsk");
+        assert!(launch.args.contains(&"llama-3.3-70b".to_string()));
+    }
+
+    #[test]
     fn errors_on_unsupported_provider() {
         let agent = claude();
         let req = AgentLaunchRequest {
             agent: &agent,
             provider: "bedrock",
+            reseller: None,
             ctx: LaunchContext::default(),
             profile_env: BTreeMap::new(),
             cwd: "/repo".into(),
