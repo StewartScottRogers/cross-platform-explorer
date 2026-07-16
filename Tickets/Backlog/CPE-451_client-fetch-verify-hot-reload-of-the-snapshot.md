@@ -39,3 +39,6 @@ The client downloads the signed model-catalog snapshot (host-mediated, allow-lis
 
 ## Notes
 needs-prereq: CPE-450 (the snapshot must exist) + shares its signing-key gate.
+
+## Clarification 2026-07-15 (user feedback)
+The verify + anti-rollback CORE is done (`model_snapshot::verify_snapshot`/`accept_snapshot`). **Remaining = the user-visible half:** host-mediated **download** of the published snapshot (CPE-450) from GitHub (reuse the catalog fetch path CPE-376), verify it, and **populate the AI Console Model picker (CPE-460) from it** — the 'downloaded regularly and shown in the dropdown' behaviour. Live OpenRouter fetch becomes a manual Refresh; the downloaded snapshot is the default + offline source ('as of <date>').

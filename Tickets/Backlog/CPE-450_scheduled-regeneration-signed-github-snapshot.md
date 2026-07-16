@@ -2,13 +2,12 @@
 id: CPE-450
 title: "Scheduled regeneration -> signed GitHub snapshot"
 type: Feature
-status: Done
+status: Open
 priority: Medium
 component: CI
 tags: [ready]
 estimate: 3-4h
 created: 2026-07-15
-closed: 2026-07-15
 epic: CPE-444
 ---
 
@@ -76,3 +75,6 @@ already ships a signed *agent* catalog bundle. This ticket reuses that same key 
 machinery for the *model* snapshot — so it's a build task (the model-snapshot job), not a key-procurement
 gate. Retag to `ready` when picked up. `needs-prereq` now only reflects CPE-445..448 (the model data),
 which are DONE — so this is effectively actionable.
+
+## Reopened 2026-07-15 (user feedback)
+Closed prematurely. The producer (binary + helper) + a **manual, artifact-only** workflow landed, but the snapshot is **not actually generated on a schedule nor published to GitHub** — so there is no downloadable model list, and the AI Console Model picker (CPE-460) has no GitHub-hosted source. **Remaining to truly close:** (1) the workflow runs on a **schedule** (not just `workflow_dispatch`); (2) it **publishes** the signed `models-index.json` + `.sig` to **GitHub Releases** (next to the agent catalog) so clients can download it — with a human/gated promote step if a scrape looks wrong, but the publish must actually happen. This is the 'generated + kept on GitHub' half of what the user expects.
