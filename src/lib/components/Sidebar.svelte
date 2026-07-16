@@ -5,6 +5,7 @@
   import SidebarNode from "./SidebarNode.svelte";
   import { iconFor } from "../filetypes";
   import { formatSize, diskUsage } from "../format";
+  import { t } from "../i18n";
   import type { DirEntry, Place, Favorite } from "../types";
   import type { AgentSession } from "../sidecar";
 
@@ -164,7 +165,7 @@
         <Icon name="chev-right" size={12} />
       </button>
       <Icon name="code" />
-      <span class="label agents-title">Agents</span>
+      <span class="label agents-title">{$t("sidebar.agents")}</span>
     </div>
     {#if agentsOpen}
       <div class="nav-children">
@@ -227,7 +228,7 @@
   <button class="nav-item" title="Browse GitHub and other code repositories" on:click={() => dispatch("repos")}>
     <span class="twisty hidden" />
     <Icon name="code" />
-    <span class="label">Repositories</span>
+    <span class="label">{$t("sidebar.repositories")}</span>
   </button>
 
   <div class="navigation-pane-sep" />

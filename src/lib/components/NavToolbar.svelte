@@ -2,6 +2,7 @@
   import { createEventDispatcher, tick } from "svelte";
   import Icon from "./Icon.svelte";
   import type { PathSegment } from "../format";
+  import { t } from "../i18n";
 
   export let crumbs: PathSegment[] = [];
   export let canBack = false;
@@ -69,16 +70,16 @@
 </script>
 
 <div class="navbar">
-  <button class="iconbtn" title="Back (Alt+Left)" disabled={!canBack} on:click={() => dispatch("back")}>
+  <button class="iconbtn" title="{$t('nav.back')} (Alt+Left)" disabled={!canBack} on:click={() => dispatch("back")}>
     <Icon name="back" />
   </button>
-  <button class="iconbtn" title="Forward (Alt+Right)" disabled={!canForward} on:click={() => dispatch("forward")}>
+  <button class="iconbtn" title="{$t('nav.forward')} (Alt+Right)" disabled={!canForward} on:click={() => dispatch("forward")}>
     <Icon name="forward" />
   </button>
-  <button class="iconbtn" title="Up (Alt+Up / Backspace)" on:click={() => dispatch("up")}>
+  <button class="iconbtn" title="{$t('nav.up')} (Alt+Up / Backspace)" on:click={() => dispatch("up")}>
     <Icon name="up" />
   </button>
-  <button class="iconbtn" title="Refresh (F5)" on:click={() => dispatch("refresh")}>
+  <button class="iconbtn" title="{$t('nav.refresh')} (F5)" on:click={() => dispatch("refresh")}>
     <Icon name="refresh" />
   </button>
   <button class="iconbtn" title="Browse for a folder…" aria-label="Browse for a folder" on:click={() => dispatch("browse")}>
@@ -131,8 +132,8 @@
     <input
       type="text"
       bind:this={searchInput}
-      placeholder="Search {searchScope}"
-      aria-label="Search {searchScope}"
+      placeholder="{$t('nav.search')} {searchScope}"
+      aria-label="{$t('nav.search')} {searchScope}"
       value={search}
       on:keydown|stopPropagation={(e) => {
         if (e.key === "Escape") { dispatch("search", ""); e.currentTarget.blur(); }

@@ -8,25 +8,27 @@
    * closes on Escape, click-away, or after a choice.
    */
   import { createEventDispatcher } from "svelte";
+  import { t, locale, SUPPORTED_LOCALES, type Locale } from "../i18n";
 
   const dispatch = createEventDispatcher<{ select: string }>();
 
   type Item = { id: string; label: string; hint?: string } | { sep: true };
   interface Menu {
     id: string;
-    label: string;
+    /** i18n key for the top-level title (falls back to English/key). */
+    labelKey: string;
     items: Item[];
   }
 
   const menus: Menu[] = [
     {
       id: "file",
-      label: "File",
+      labelKey: "menu.file",
       items: [{ id: "exit", label: "Exit", hint: "Alt+F4" }],
     },
     {
       id: "tools",
-      label: "Tools",
+      labelKey: "menu.tools",
       items: [
         { id: "content-search", label: "Search in files…", hint: "Ctrl+Shift+F" },
         { id: "find-duplicates", label: "Find duplicate files…" },
@@ -38,7 +40,7 @@
     },
     {
       id: "app",
-      label: "Application",
+      labelKey: "menu.application",
       items: [
         { id: "check-updates", label: "Check for Updates…" },
         { id: "settings", label: "Settings…" },
@@ -49,6 +51,11 @@
       ],
     },
   ];
+
+  function pickLocale(code: Locale) {
+    locale.set(code);
+    close();
+  }
 
   /** Id of the open top-level menu, or null when the bar is idle. */
   let openId: string | null = null;
@@ -89,7 +96,7 @@
         on:click|stopPropagation={() => toggle(menu.id)}
         on:mouseenter={() => hover(menu.id)}
       >
-        {menu.label}
+        {$t(menu.labelKey)}
       </button>
 
       {#if openId === menu.id}
@@ -98,7 +105,7 @@
           class="menu-drop"
           role="menu"
           tabindex="-1"
-          aria-label={menu.label}
+          aria-label={$t(menu.labelKey)}
           on:click|stopPropagation
         >
           {#each menu.items as item}
@@ -119,6 +126,34 @@
       {/if}
     </div>
   {/each}
+
+  <!-- Language picker (CPE-362): switches the app locale live; a check marks the active one. -->
+  <div class="menu-wrap">
+    <button
+      class="menu-title"
+      class:active={openId === "language"}
+      type="button"
+      role="menuitem"
+      aria-haspopup="menu"
+      aria-expanded={openId === "language"}
+      title={$t("menu.language")}
+      on:click|stopPropagation={() => toggle("language")}
+      on:mouseenter={() => hover("language")}
+    >
+      🌐 {$t("menu.language")}
+    </button>
+    {#if openId === "language"}
+      <!-- svelte-ignore a11y-click-events-have-key-events a11y-no-noninteractive-element-interactions -->
+      <div class="menu-drop" role="menu" tabindex="-1" aria-label={$t("menu.language")} on:click|stopPropagation>
+        {#each SUPPORTED_LOCALES as l (l.code)}
+          <button class="mb-item" role="menuitemradio" aria-checked={$locale === l.code} on:click={() => pickLocale(l.code)}>
+            <span class="check" aria-hidden="true">{$locale === l.code ? "✓" : ""}</span>
+            {l.name}
+          </button>
+        {/each}
+      </div>
+    {/if}
+  </div>
 </div>
 
 <style>
@@ -172,6 +207,11 @@
     margin-left: auto;
     color: var(--text-faint);
     font-size: 12px;
+  }
+  .check {
+    display: inline-block;
+    width: 14px;
+    color: var(--accent);
   }
   .mb-sep {
     height: 1px;
