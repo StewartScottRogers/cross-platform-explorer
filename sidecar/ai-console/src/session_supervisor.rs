@@ -82,6 +82,14 @@ impl SessionDaemonHandle {
         Ok(SessionDaemonHandle { child: Some(child), port })
     }
 
+    /// Reference a daemon the **host** already spawned + owns (CPE-309 S4), at `port`. We never reap
+    /// it (the host does, on app exit), so it survives this UI sidecar restarting. This is the
+    /// production path: the host spawns the daemon with a hidden console (ConPTY works) and outside
+    /// the UI sidecar's lifetime (it survives), then passes the port here.
+    pub fn external(port: u16) -> SessionDaemonHandle {
+        SessionDaemonHandle { child: None, port }
+    }
+
     pub fn port(&self) -> u16 {
         self.port
     }

@@ -77,23 +77,15 @@ fn console_state(
         .with_catalog_sources(sources)
         .with_announcer(announce);
 
-    // CPE-309: the session-daemon engine (sessions survive a console restart) is **opt-in** behind
-    // `CPE_AICONSOLE_SESSION_DAEMON` while a Windows issue is resolved: a DETACHED_PROCESS daemon has
-    // no console, and ConPTY (portable-pty) produces **no output** for children spawned there — which
-    // broke every tab. The default stays the proven in-process engine so the AI Console works. The
-    // real fix for daemon-survival is host-owned (non-detached) daemon supervision — see CPE-309.
-    let want_daemon = std::env::var("CPE_AICONSOLE_SESSION_DAEMON").is_ok();
-    if want_daemon {
-        if let Ok(exe) = std::env::current_exe() {
-            match ai_console::session_supervisor::SessionDaemonHandle::discover_or_spawn(
-                &exe,
-                &ai_console::session_supervisor::default_port_file(),
-            ) {
-                Ok(handle) => {
-                    state = state.with_engine(Arc::new(ai_console::DaemonEngine::new(handle)));
-                }
-                Err(e) => eprintln!("ai-console: session daemon unavailable, using in-process sessions: {e}"),
-            }
+    // CPE-309 S4: sessions survive a console restart by living in a **host-owned** session daemon.
+    // The host spawns that daemon with a hidden console (so Windows ConPTY produces output — the bug
+    // that a DETACHED_PROCESS self-spawn hit) and outside this UI sidecar's lifetime (so it survives),
+    // then passes its loopback address here. When present, route sessions to it and reattach any it
+    // still holds; otherwise use the proven in-process engine.
+    if let Ok(addr) = std::env::var("CPE_AICONSOLE_SESSION_DAEMON_ADDR") {
+        if let Some(port) = addr.rsplit(':').next().and_then(|p| p.parse::<u16>().ok()) {
+            let handle = ai_console::session_supervisor::SessionDaemonHandle::external(port);
+            state = state.with_engine(Arc::new(ai_console::DaemonEngine::new(handle)));
         }
     }
 

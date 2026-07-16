@@ -2293,6 +2293,26 @@ struct AiConsoleState {
     /// The running sidecar's served UI URL (CPE-464) — so reopening the console reuses the live
     /// sidecar (and its sessions) instead of spawning a fresh one. `None` when not running.
     url: std::sync::Mutex<Option<String>>,
+    /// The **host-owned** session daemon (CPE-309 S4): agent PTYs live in this separate, long-lived
+    /// process so they survive the UI sidecar being restarted/toggled. Owned by the host (this state
+    /// lives for the app's lifetime), spawned with a hidden console so Windows ConPTY produces output.
+    /// `None` until first started; reaped when this state drops (app exit).
+    daemon: std::sync::Mutex<Option<HostSessionDaemon>>,
+}
+
+/// A session daemon process the host spawned + owns (CPE-309 S4). Dropping it reaps the child.
+#[cfg(feature = "sidecar-platform")]
+struct HostSessionDaemon {
+    child: std::process::Child,
+    port: u16,
+}
+
+#[cfg(feature = "sidecar-platform")]
+impl Drop for HostSessionDaemon {
+    fn drop(&mut self) {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+    }
 }
 
 /// Control handle for the AI Console servicing thread (CPE-349). Dropping it asks the thread
@@ -2937,6 +2957,7 @@ impl Default for AiConsoleState {
             logs: sidecar_host::observability::LogCapture::new(200),
             last_error: std::sync::Mutex::new(None),
             url: std::sync::Mutex::new(None),
+            daemon: std::sync::Mutex::new(None),
         }
     }
 }
@@ -2969,6 +2990,41 @@ impl AiConsoleState {
         if let Ok(mut slot) = self.last_error.lock() {
             *slot = None;
         }
+    }
+
+    /// Ensure the host-owned session daemon (CPE-309 S4) is running and return its loopback port.
+    /// Reuses a live one; (re)spawns `<bin> --session-daemon` if absent or dead. Spawned with a
+    /// hidden console (`CREATE_NO_WINDOW`, matching how the UI sidecar is spawned — so ConPTY works)
+    /// and owned by the host, so it outlives the UI sidecar being restarted/toggled. Returns `None`
+    /// on any failure so the caller falls back to in-process sessions rather than blocking a launch.
+    fn ensure_session_daemon(&self, bin: &str) -> Option<u16> {
+        use std::io::{BufRead, BufReader};
+        let mut guard = self.daemon.lock().ok()?;
+        if let Some(d) = guard.as_mut() {
+            if matches!(d.child.try_wait(), Ok(None)) {
+                return Some(d.port); // still alive → reuse
+            }
+        }
+        let mut cmd = std::process::Command::new(bin);
+        cmd.arg("--session-daemon")
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::null());
+        #[cfg(windows)]
+        {
+            use std::os::windows::process::CommandExt;
+            cmd.creation_flags(0x0800_0000); // CREATE_NO_WINDOW — hidden console so ConPTY has output
+        }
+        let mut child = cmd.spawn().ok()?;
+        let stdout = child.stdout.take()?;
+        let mut line = String::new();
+        BufReader::new(stdout).read_line(&mut line).ok()?;
+        let port = line.trim().strip_prefix("PORT ").and_then(|p| p.parse::<u16>().ok())?;
+        self.log(
+            sidecar_host::observability::LogLevel::Info,
+            format!("session daemon ready on 127.0.0.1:{port}"),
+        );
+        *guard = Some(HostSessionDaemon { child, port });
+        Some(port)
     }
 }
 
@@ -3045,10 +3101,17 @@ fn sidecar_start_ai_console(
     let _ = std::fs::create_dir_all(&cat_dir);
     let cat_dir_str = cat_dir.to_string_lossy().into_owned();
     let cat_keys = CATALOG_TRUSTED_KEYS.join(",");
-    let cat_env = [
+    // CPE-309 S4: bring up the host-owned session daemon (survives UI-sidecar restarts) and tell the
+    // sidecar its address, so agent PTYs live there. Best-effort — if it can't start, we simply don't
+    // pass the addr and the sidecar uses in-process sessions (pre-CPE-309 behaviour), never blocking.
+    let daemon_addr = state.ensure_session_daemon(&bin).map(|port| format!("127.0.0.1:{port}"));
+    let mut cat_env = vec![
         ("CPE_AICONSOLE_CATALOG", cat_dir_str.as_str()),
         ("CPE_AICONSOLE_CATALOG_KEYS", cat_keys.as_str()),
     ];
+    if let Some(addr) = daemon_addr.as_deref() {
+        cat_env.push(("CPE_AICONSOLE_SESSION_DAEMON_ADDR", addr));
+    }
     let mut conn =
         spawn_process_with_env(&bin, &[], &cat_env).map_err(|e| state.fail(format!("spawn failed: {e}")))?;
     let token = conn.launch_token().to_string();
