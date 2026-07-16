@@ -2,13 +2,13 @@
 id: CPE-488
 title: "EPIC: Forge v2 — two-way mirror UI + more providers (self-hosted & non-Git)"
 type: Task
-status: In Progress
+status: Done
 priority: Medium
 component: Multiple
 tags: [epic]
 estimate: 4h+
 created: 2026-07-16
-closed:
+closed: 2026-07-16
 ---
 
 ## Summary
@@ -50,13 +50,40 @@ CPE-429 north star, minus what v1 already shipped.
 - **Q6 — Tier 2/3 VCS:** in scope for v2 or explicit non-goals?
 
 ## Definition of Done (epic-level — refined at activation)
-- [ ] Two-way mirror is usable end-to-end for at least Generic Git + GitHub: pull **and** push with a
-      clear divergence/conflict surface; never silently loses work.
-- [ ] At least the top few Tier-1 providers (chosen in Q4) browse + clone via manifest parsers.
-- [ ] Self-hosted instances connect within the host-brokered, allow-listed egress model (no SSRF).
-- [ ] Q3 decided and recorded (native vs sidecar), with the threat model ([[CPE-440]]) extended to any
-      new egress hosts and to push/write operations.
-- [ ] Child tickets all Done; conformance/threat gates green.
+- [x] Two-way mirror is usable end-to-end for at least Generic Git + GitHub: pull **and** push with a
+      clear divergence/conflict surface; never silently loses work. *(CPE-495 Sync dialog + CPE-496
+      conflict resolver + CPE-498 Generic Git.)*
+- [x] At least the top few Tier-1 providers (chosen in Q4) browse + clone via manifest parsers.
+      *(Q4 chose **Generic Git** as the next provider — it clones/syncs any HTTPS/SSH remote incl.
+      self-hosted, CPE-498. Named-forge manifests, GitLab/Bitbucket/Gitea, were explicitly deferred to
+      a follow-up wave — see carve-out below.)*
+- [x] Self-hosted instances connect within the host-brokered, allow-listed egress model (no SSRF).
+      *(CPE-498 consent-based, no-wildcard, fail-closed host admission.)*
+- [x] Q3 decided and recorded (native vs sidecar), with the threat model ([[CPE-440]]) extended to any
+      new egress hosts and to push/write operations. *(Native path; CPE-499 added §J.)*
+- [x] Child tickets all Done; conformance/threat gates green.
+
+## Resolution (closed 2026-07-16)
+Forge v2 delivered the two-way-mirror experience and broadened provider reach beyond browse+clone,
+across five children:
+- **[[CPE-495]]** — the two-way mirror **Sync dialog**: dry-run preview of the CPE-438 plan, per-repo
+  on-diverge policy (merge/rebase/manual), safe-by-default pull/push, never force.
+- **[[CPE-498]]** — the **Generic Git** provider: clone/sync any HTTPS/SSH remote (incl. self-hosted)
+  behind consent-based, no-wildcard, fail-closed host admission (Q4 + Q5).
+- **[[CPE-497]]** — **scheduled/background auto-mirror** (Q2): off-by-default per-repo, ff-pull+push
+  only, a divergence pauses rather than reconciling; never background-force-pushes.
+- **[[CPE-496]]** — the **in-app three-way conflict resolver** (Q1): list unmerged files, pick/edit
+  ours/theirs/base, stage + continue, or abort (restores pre-sync state — no work lost).
+- **[[CPE-499]]** — the **threat-model §J** extension covering push execution + Generic-Git egress,
+  with an honest residual-risk record and a v2 sign-off row.
+
+**Carve-out (recorded, not silent):** named-forge **manifest parsers** for GitLab / Bitbucket /
+Gitea-Forgejo (browse via their APIs) were **out of this v2 wave** by the Q4 decision — Generic Git
+covers cloning/syncing those hosts today; API-level browse for them is a future follow-up. Tier 2/3
+VCS (hg/svn/p4/fossil, Radicle) remain explicit non-goals (Q6). Neither blocks this epic.
+
+All children green (repos + app clippy, Rust tests, `npm run check`, 508 frontend tests); the forge
+threat model carries a v2 implementation sign-off row.
 
 ## Notes
 Successor to [[CPE-429]]. Builds on shipped pieces: [[CPE-433]] (host-brokered egress), [[CPE-434]]
@@ -95,3 +122,6 @@ CPE-499 (depends on 498).
 `forge_sync`/`forge_repo_status` + ahead/behind status bar already exist; only a GitHub Contents parser
 exists for browse). Resolved Q1–Q6 with the user (see Decisions) and decomposed into 5 child tickets
 (CPE-495…499) in Backlog, each linked back with `epic: CPE-488`. Status → In Progress.
+
+## Work Log (close)
+2026-07-16 — **Closed.** All 5 children (CPE-495/496/497/498/499) Done; epic DoD met. Recorded a carve-out for named-forge manifest parsers (GitLab/Bitbucket/Gitea browse) deferred to a follow-up wave — Generic Git covers those hosts for clone/sync today. Moved Epics/ → Done/.
