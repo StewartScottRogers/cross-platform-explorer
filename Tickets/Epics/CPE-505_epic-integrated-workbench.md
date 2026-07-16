@@ -2,7 +2,7 @@
 id: CPE-505
 title: "EPIC: Integrated workbench — in-pane diff/editor + embedded browser"
 type: Task
-status: Proposed
+status: In Progress
 priority: Medium
 component: Frontend
 tags: [epic]
@@ -29,5 +29,22 @@ window (BridgeSpace's integrated editor + browser).
 - Reuse the preview pane's editor, or a richer code editor?
 - Diff source + granularity (working tree vs a session's changes).
 
+## Decisions (activation 2026-07-16)
+Adopted on the "do them all" directive — defaults, reversible:
+- **Embedded browser:** a **dedicated webview window** (safe under the strict CSP — not an iframe in
+  the main window), reusing the AI Console separate-window pattern.
+- **Editor:** **reuse the preview-pane editor** ([[CPE-066]]) for now (not a richer code editor).
+- **Diff source:** **working tree vs HEAD** (`git diff`).
+
+## Child tickets (created at activation)
+Sprint **[[SPR-06]]**:
+- [[CPE-526]] — git diff model + Diff view *(ready)*
+- [[CPE-527]] — editor pane + embedded browser (webview) *(needs-prereq CPE-526)*
+
 ## Notes
 From [[CPE-500]]; the explorer file tree + preview/edit are the starting point.
+
+## Work Log
+2026-07-16 — Filed as a dormant `Proposed` brief (from spike CPE-500).
+2026-07-16 — **Activated** into SPR-06 on the "do them all" directive (defaults above). Decomposed into
+CPE-526 (diff) + CPE-527 (editor + browser). Status → In Progress.
