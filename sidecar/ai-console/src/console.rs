@@ -71,6 +71,15 @@ pub struct ConsoleState {
     /// Each call gets a JSON payload; the wire side (main.rs) turns it into a `session:<json>`
     /// Status event. Defaults to a no-op so dev/standalone + tests need no host.
     announce: SessionAnnouncer,
+    /// The last **verified** model-catalog snapshot the picker serves from — `(version, models)`
+    /// (CPE-451). Downloaded host-mediated, ed25519-verified, and anti-rollback-gated before it lands
+    /// here; `None` until a good one is adopted, in which case the picker uses the live per-reseller
+    /// fetch. Fast + offline once populated.
+    snapshot_models: Mutex<Option<(u64, Vec<crate::model_catalog::Model>)>>,
+    /// Trusted first-party public keys (hex) a downloaded snapshot must be signed by (CPE-451).
+    /// Production is the single hardcoded [`MODEL_CATALOG_TRUSTED_KEY`]; tests inject their own via
+    /// [`ConsoleState::with_snapshot_keys`].
+    snapshot_keys: Vec<String>,
 }
 
 /// Hook the console calls to announce session start/end to the host (CPE-396). No-op by default.
@@ -103,6 +112,12 @@ impl CatalogSources {
 
 /// The implicit credential label — a provider's single/primary key (CPE-348).
 pub(crate) const DEFAULT_CREDENTIAL: &str = "default";
+
+/// The trusted first-party ed25519 public key (hex) the downloaded model-catalog snapshot must be
+/// signed by (CPE-451). Same public value as the host's `CATALOG_TRUSTED_KEYS`; a public key is safe
+/// to embed. The matching private seed is the `CPE_CATALOG_SIGNING_KEY` release secret, never here.
+pub(crate) const MODEL_CATALOG_TRUSTED_KEY: &str =
+    "5b18ad467b37b7c06556000f15359a845bd85790ece91de110a337890d017130";
 
 /// The vault key a provider's API key is stored under (CPE-344/287/348). The `default` label
 /// keeps the original `provider:<id>` name (back-compat); other labels get `provider:<id>#<label>`
@@ -198,7 +213,18 @@ impl ConsoleState {
             history,
             sources: CatalogSources::default(),
             announce: Arc::new(|_| {}),
+            snapshot_models: Mutex::new(None),
+            snapshot_keys: vec![MODEL_CATALOG_TRUSTED_KEY.to_string()],
         }
+    }
+
+    /// Override the trusted snapshot-signing keys (test-only). Production always uses the hardcoded
+    /// [`MODEL_CATALOG_TRUSTED_KEY`]; tests sign a snapshot with a deterministic seed and inject its
+    /// public key here so the adopt/reject paths can be exercised headlessly.
+    #[cfg(test)]
+    pub fn with_snapshot_keys(mut self, keys: Vec<String>) -> Self {
+        self.snapshot_keys = keys;
+        self
     }
 
     /// Record how to rebuild the registry, enabling [`reload_catalog`] (CPE-375). Chained after
@@ -521,19 +547,75 @@ impl ConsoleState {
         }
     }
 
-    /// `GET /api/models?reseller=<id>` → the reseller's live model list (CPE-449), fetched via the
-    /// host's allow-listed egress and normalized to `Model`s. Defaults to `openrouter`, whose list
-    /// is public (no key). Returns `{ models: [...] }`, or an error the picker shows inline.
+    /// Download, verify, and adopt the published model-catalog snapshot (CPE-451). Asks the host to
+    /// fetch `models-index.json` + `.sig`, parses the index as a [`ModelSnapshot`], checks the
+    /// ed25519 signature against [`Self::snapshot_keys`] and the strictly-monotonic anti-rollback
+    /// counter against the cached version, and on success caches `(version, models)` as the picker's
+    /// default source. **Fail-safe:** any failure — no host, malformed JSON, unverifiable signature,
+    /// or an older/equal version — leaves the cache untouched, so the picker falls back to the live
+    /// per-reseller fetch. Never errors; returns whether a new snapshot was adopted.
+    pub fn refresh_snapshot(&self) -> bool {
+        let (index, sig) = match self.dialogs.fetch_model_snapshot() {
+            Ok(v) => v,
+            Err(_) => return false, // no host / fetch failed → keep whatever we had
+        };
+        let snap: crate::model_snapshot::ModelSnapshot = match serde_json::from_str(&index) {
+            Ok(s) => s,
+            Err(_) => return false, // malformed snapshot is ignored, never adopted
+        };
+        // Fail-closed signature check, then strict anti-rollback against the cached version.
+        if !crate::model_snapshot::verify_snapshot(&snap, &sig, &self.snapshot_keys) {
+            return false;
+        }
+        let current = self.snapshot_models.lock().unwrap().as_ref().map(|(v, _)| *v);
+        if !crate::model_snapshot::accept_snapshot(current, &snap) {
+            return false;
+        }
+        *self.snapshot_models.lock().unwrap() = Some((snap.version, snap.models));
+        true
+    }
+
+    /// `GET /api/models?reseller=<id>` → the model list for the picker (CPE-449/451). Prefers the
+    /// **downloaded, verified snapshot** (fast + offline) for a reseller it covers, populating it
+    /// lazily on first use; falls back to the live per-reseller fetch via the host's allow-listed
+    /// egress otherwise. `?refresh=1` forces the live path (a manual Refresh). Defaults to
+    /// `openrouter`, whose list is public (no key). Returns `{ reseller, models, source }`, or an
+    /// error the picker shows inline.
     fn handle_models(&self, path: &str) -> Response {
-        let reseller = path
-            .split_once("reseller=")
-            .map(|(_, r)| r.split('&').next().unwrap_or("openrouter"))
+        let query = path.split_once('?').map(|(_, q)| q).unwrap_or("");
+        let reseller = query
+            .split('&')
+            .find_map(|kv| kv.strip_prefix("reseller="))
             .filter(|r| !r.is_empty())
             .unwrap_or("openrouter");
+        let force_refresh = query.split('&').any(|kv| kv == "refresh=1");
+
+        // Prefer the verified snapshot unless the caller forced the live path. Populate it lazily on
+        // first use so the download happens on demand (a background refresh is a fine future add).
+        if !force_refresh {
+            if self.snapshot_models.lock().unwrap().is_none() {
+                self.refresh_snapshot();
+            }
+            if let Some((version, models)) = self.snapshot_models.lock().unwrap().clone() {
+                let models: Vec<_> = models.into_iter().filter(|m| m.reseller == reseller).collect();
+                // Only serve from the snapshot if it actually covers this reseller; otherwise fall
+                // through to the live fetch below.
+                if !models.is_empty() {
+                    return Response::json(json!({
+                        "reseller": reseller,
+                        "models": models,
+                        "source": "snapshot",
+                        "snapshotVersion": version,
+                    }).to_string());
+                }
+            }
+        }
+
+        // Live per-reseller fetch — the fallback and the forced-refresh path (CPE-449).
         // A per-reseller key is used when present (CPE-452), but listing usually needs none.
         let token = self.secrets.get(&reseller_secret_name(reseller, DEFAULT_CREDENTIAL)).ok().flatten();
         match self.dialogs.list_models(reseller, token.as_deref()) {
-            Ok(models) => Response::json(json!({ "reseller": reseller, "models": models }).to_string()),
+            Ok(models) => Response::json(json!({ "reseller": reseller, "models": models, "source": "live" }).to_string()),
             Err(e) => bad(e),
         }
     }
@@ -1380,6 +1462,10 @@ mod tests {
         ) -> Result<crate::broker_client::CatalogFetch, String> {
             Ok(crate::broker_client::CatalogFetch { index_ok: true, applied: 1 })
         }
+        fn fetch_model_snapshot(&self) -> Result<(String, String), String> {
+            // No snapshot from this stub → /api/models falls back to the live `list_models` above.
+            Err("stub: no snapshot".into())
+        }
     }
 
     fn state_with_dialogs(dialogs: Arc<StubDialogs>) -> ConsoleState {
@@ -1410,9 +1496,173 @@ mod tests {
         assert_eq!(models.len(), 2);
         assert_eq!(models[0]["id"], "anthropic/claude-3.5-sonnet");
         assert_eq!(models[0]["context_length"], 200000);
+        // No snapshot available (StubDialogs returns Err) → the live per-reseller path is served.
+        assert_eq!(v["source"], "live");
         // Default reseller when the query is absent.
         let r2 = route(&st, &Request { method: "GET".into(), path: "/api/models".into(), ..Default::default() });
         assert_eq!(serde_json::from_slice::<Value>(&r2.body).unwrap()["reseller"], "openrouter");
+    }
+
+    /// A [`HostDialogs`] that serves a scripted, swappable model snapshot (index + sig) and records
+    /// whether the **live** `list_models` fallback was hit — to prove the picker prefers a verified
+    /// snapshot and only falls back when it can't be adopted (CPE-451).
+    struct SnapshotDialogs {
+        snapshot: Mutex<Option<(String, String)>>,
+        live_called: std::sync::atomic::AtomicBool,
+    }
+    impl crate::broker_client::HostDialogs for SnapshotDialogs {
+        fn pick_folder(&self, _s: Option<&str>) -> Result<Option<String>, String> {
+            Ok(None)
+        }
+        fn verify_key(&self, _p: &str, _k: &str) -> Result<crate::broker_client::KeyVerdict, String> {
+            Err("n/a".into())
+        }
+        fn fetch_catalog(&self, _pinned: &[String]) -> Result<crate::broker_client::CatalogFetch, String> {
+            Err("n/a".into())
+        }
+        fn list_models(&self, reseller: &str, _t: Option<&str>) -> Result<Vec<crate::model_catalog::Model>, String> {
+            self.live_called.store(true, std::sync::atomic::Ordering::SeqCst);
+            Ok(vec![snap_model(reseller, &format!("live/{reseller}"))])
+        }
+        fn list_catalog_versions(&self) -> Result<Vec<crate::broker_client::CatalogVersion>, String> {
+            Ok(vec![])
+        }
+        fn rollback_catalog(&self, _t: &str, _a: &[String]) -> Result<crate::broker_client::CatalogFetch, String> {
+            Err("n/a".into())
+        }
+        fn fetch_model_snapshot(&self) -> Result<(String, String), String> {
+            self.snapshot.lock().unwrap().clone().ok_or_else(|| "no snapshot".to_string())
+        }
+    }
+
+    fn snap_model(reseller: &str, id: &str) -> crate::model_catalog::Model {
+        crate::model_catalog::Model {
+            id: id.into(),
+            reseller: reseller.into(),
+            display_name: id.into(),
+            context_length: Some(128_000),
+            pricing: crate::model_catalog::Pricing { prompt: Some(0.000003), completion: Some(0.000015) },
+            modalities: vec!["text".into()],
+            moderated: false,
+        }
+    }
+
+    /// A deterministic ed25519 keypair (seed_hex, pubkey_hex) for signing test snapshots.
+    fn snapshot_keypair(seed: u8) -> (String, String) {
+        let k = ed25519_dalek::SigningKey::from_bytes(&[seed; 32]);
+        (hex::encode(k.to_bytes()), hex::encode(k.verifying_key().to_bytes()))
+    }
+
+    /// Build a signed snapshot's wire form `(index_json, sig_hex)` from a seed.
+    fn signed_snapshot_wire(seed_hex: &str, version: u64, reseller: &str, id: &str) -> (String, String) {
+        let snap = crate::model_snapshot::ModelSnapshot::new(
+            version,
+            "2026-07-15T00:00:00Z",
+            vec![snap_model(reseller, id)],
+        );
+        let index = serde_json::to_string(&snap).unwrap();
+        let sig = crate::model_snapshot::sign_snapshot(seed_hex, &snap).unwrap();
+        (index, sig)
+    }
+
+    fn state_with_snapshot(dialogs: Arc<SnapshotDialogs>, keys: Vec<String>) -> ConsoleState {
+        let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("agents");
+        let registry = AgentRegistry::load_from_dirs(&[dir]);
+        ConsoleState::with_backends(
+            registry,
+            "/repo".into(),
+            Arc::new(crate::broker_client::MemSecrets::default()),
+            Arc::new(crate::presets::MemPresets::default()),
+            dialogs,
+            Arc::new(crate::history::MemHistory::default()),
+        )
+        .with_snapshot_keys(keys)
+    }
+
+    fn models_get(st: &ConsoleState, path: &str) -> Value {
+        let r = route(st, &Request { method: "GET".into(), path: path.into(), ..Default::default() });
+        assert_eq!(r.status, 200);
+        serde_json::from_slice(&r.body).unwrap()
+    }
+
+    #[test]
+    fn models_route_prefers_a_verified_snapshot_over_the_live_list() {
+        let (seed, pk) = snapshot_keypair(11);
+        let wire = signed_snapshot_wire(&seed, 5, "openrouter", "snap/model-a");
+        let dialogs = Arc::new(SnapshotDialogs { snapshot: Mutex::new(Some(wire)), live_called: Default::default() });
+        let st = state_with_snapshot(dialogs.clone(), vec![pk]);
+
+        // Lazily downloaded + verified on the first request, then served (fast + offline).
+        let v = models_get(&st, "/api/models?reseller=openrouter");
+        assert_eq!(v["source"], "snapshot");
+        assert_eq!(v["snapshotVersion"], 5);
+        let models = v["models"].as_array().unwrap();
+        assert_eq!(models.len(), 1);
+        assert_eq!(models[0]["id"], "snap/model-a");
+        // A verified snapshot was present, so the live per-reseller fetch must NOT have run.
+        assert!(!dialogs.live_called.load(std::sync::atomic::Ordering::SeqCst));
+    }
+
+    #[test]
+    fn models_route_falls_back_to_live_when_the_snapshot_signature_is_untrusted() {
+        let (seed, _pk) = snapshot_keypair(11);
+        let (_seed2, other_pk) = snapshot_keypair(22); // trust a DIFFERENT key than the signer
+        let wire = signed_snapshot_wire(&seed, 5, "openrouter", "snap/model-a");
+        let dialogs = Arc::new(SnapshotDialogs { snapshot: Mutex::new(Some(wire)), live_called: Default::default() });
+        let st = state_with_snapshot(dialogs.clone(), vec![other_pk]);
+
+        let v = models_get(&st, "/api/models?reseller=openrouter");
+        // Signature untrusted → snapshot ignored → the live list is served instead.
+        assert_eq!(v["source"], "live");
+        assert_eq!(v["models"][0]["id"], "live/openrouter");
+        assert!(dialogs.live_called.load(std::sync::atomic::Ordering::SeqCst));
+    }
+
+    #[test]
+    fn refresh_snapshot_rejects_a_tampered_snapshot() {
+        let (seed, pk) = snapshot_keypair(11);
+        let (index, sig) = signed_snapshot_wire(&seed, 5, "openrouter", "snap/model-a");
+        // Mutate the index AFTER signing — the signature no longer covers it.
+        let mut snap: crate::model_snapshot::ModelSnapshot = serde_json::from_str(&index).unwrap();
+        snap.models[0].id = "snap/evil".into();
+        let tampered = serde_json::to_string(&snap).unwrap();
+        let dialogs = Arc::new(SnapshotDialogs { snapshot: Mutex::new(Some((tampered, sig))), live_called: Default::default() });
+        let st = state_with_snapshot(dialogs, vec![pk]);
+        assert!(!st.refresh_snapshot(), "a tampered snapshot must never be adopted");
+    }
+
+    #[test]
+    fn refresh_snapshot_enforces_anti_rollback() {
+        let (seed, pk) = snapshot_keypair(11);
+        let dialogs = Arc::new(SnapshotDialogs {
+            snapshot: Mutex::new(Some(signed_snapshot_wire(&seed, 5, "openrouter", "snap/new"))),
+            live_called: Default::default(),
+        });
+        let st = state_with_snapshot(dialogs.clone(), vec![pk]);
+        assert!(st.refresh_snapshot(), "v5 is the first snapshot → adopted");
+
+        // Offer a strictly OLDER version — a rollback. It must be refused; the cache stays at v5.
+        *dialogs.snapshot.lock().unwrap() = Some(signed_snapshot_wire(&seed, 3, "openrouter", "snap/old"));
+        assert!(!st.refresh_snapshot(), "an older version is a rollback → refused");
+
+        let v = models_get(&st, "/api/models?reseller=openrouter");
+        assert_eq!(v["snapshotVersion"], 5);
+        assert_eq!(v["models"][0]["id"], "snap/new");
+    }
+
+    #[test]
+    fn models_route_refresh_1_forces_the_live_path() {
+        let (seed, pk) = snapshot_keypair(11);
+        let dialogs = Arc::new(SnapshotDialogs {
+            snapshot: Mutex::new(Some(signed_snapshot_wire(&seed, 5, "openrouter", "snap/model-a"))),
+            live_called: Default::default(),
+        });
+        let st = state_with_snapshot(dialogs.clone(), vec![pk]);
+        assert!(st.refresh_snapshot()); // warm the cache
+
+        let v = models_get(&st, "/api/models?reseller=openrouter&refresh=1");
+        assert_eq!(v["source"], "live", "?refresh=1 forces the live per-reseller fetch");
+        assert!(dialogs.live_called.load(std::sync::atomic::Ordering::SeqCst));
     }
 
     #[test]

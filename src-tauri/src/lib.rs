@@ -2634,6 +2634,55 @@ fn catalog_http_get(url: &str) -> Result<Vec<u8>, String> {
     Ok(buf)
 }
 
+/// The GitHub release tag carrying the signed model-catalog snapshot (CPE-450/451): a single,
+/// continuously-updated release whose assets are `models-index.json` (the canonical JSON) and
+/// `models-index.json.sig` (its detached ed25519 signature, hex).
+#[cfg(feature = "sidecar-platform")]
+const MODEL_SNAPSHOT_TAG: &str = "model-catalog";
+
+/// The `releases/download/model-catalog/` base for the published model snapshot (CPE-451). Reuses
+/// `catalog_url_for_tag` so a `CPE_CATALOG_URL` test override applies the same way as for the agent
+/// catalog.
+#[cfg(feature = "sidecar-platform")]
+fn model_snapshot_url() -> String {
+    catalog_url_for_tag(MODEL_SNAPSHOT_TAG)
+}
+
+/// Response to the sandboxed `host.fetch_model_snapshot` request (CPE-451): download the published
+/// model-catalog snapshot (`models-index.json` + its detached `.sig`) from the `model-catalog`
+/// GitHub release using the SAME allow-listed / proxy / offline machinery as `do_fetch_catalog`.
+///
+/// The host deliberately does NOT verify the signature — the AI Console owns the crypto
+/// (`model_snapshot::verify_snapshot`) and is the sole trust boundary; this handler only fetches the
+/// raw bytes. Never errors the channel — a failure/offline comes back as `{ ok:false, error }`, and
+/// success as `{ ok:true, index, sig }` (both raw strings).
+#[cfg(feature = "sidecar-platform")]
+fn fetch_model_snapshot_response(params: &serde_json::Value) -> sidecar_contract::Response {
+    use serde_json::json;
+    let _ = params;
+    let body = match fetch_model_snapshot() {
+        Ok((index, sig)) => json!({ "ok": true, "index": index, "sig": sig }),
+        Err(e) => json!({ "ok": false, "error": e }),
+    };
+    sidecar_contract::Response { result: Ok(body) }
+}
+
+/// Fetch the two snapshot assets from the `model-catalog` release (CPE-451). Offline ⇒ a clean
+/// error (never a surprise call). Each URL is host-built from `model_snapshot_url()` — the sidecar
+/// never supplies one (no SSRF) — and rides the shared proxy-aware `catalog_http_get`.
+#[cfg(feature = "sidecar-platform")]
+fn fetch_model_snapshot() -> Result<(String, String), String> {
+    if keyverify::is_offline(std::env::var("CPE_OFFLINE").ok()) {
+        return Err("offline".to_string());
+    }
+    let base = model_snapshot_url();
+    let index = catalog_http_get(&format!("{base}models-index.json"))?;
+    let sig = catalog_http_get(&format!("{base}models-index.json.sig"))?;
+    let index = String::from_utf8(index).map_err(|e| format!("snapshot index not utf-8: {e}"))?;
+    let sig = String::from_utf8(sig).map_err(|e| format!("snapshot signature not utf-8: {e}"))?;
+    Ok((index, sig))
+}
+
 #[cfg(feature = "sidecar-platform")]
 fn serve_ai_console_requests(
     mut conn: sidecar_host::supervisor::ProcessConnection,
@@ -2689,6 +2738,11 @@ fn serve_ai_console_requests(
                             // Enumerate prior published catalog versions for the rollback picker
                             // (CPE-383) — a host-built GitHub Releases API GET, no sidecar URL.
                             list_catalog_versions_response(&req.params)
+                        } else if req.method == "host.fetch_model_snapshot" {
+                            // Download the signed model-catalog snapshot from the `model-catalog`
+                            // release (CPE-451). The host only fetches raw bytes; the console
+                            // verifies the ed25519 signature + anti-rollback before adopting it.
+                            fetch_model_snapshot_response(&req.params)
                         } else {
                             broker.dispatch("ai-console", &req)
                         };

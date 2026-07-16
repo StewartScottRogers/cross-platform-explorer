@@ -248,6 +248,12 @@ pub trait HostDialogs: Send + Sync {
     /// Roll `agents` back to a specific published catalog version `tag` (CPE-383) — an audited
     /// downgrade (`allow_downgrade`) applied only to those agents. `Err` = no host.
     fn rollback_catalog(&self, tag: &str, agents: &[String]) -> Result<CatalogFetch, String>;
+
+    /// Download the published model-catalog snapshot via the host's allow-listed egress
+    /// (`host.fetch_model_snapshot`, CPE-451). Returns the raw `(index_json, sig_hex)` — the caller
+    /// verifies the ed25519 signature + anti-rollback before trusting it (the host never verifies).
+    /// `Err` = no host or the fetch failed; the caller falls back to the live per-reseller list.
+    fn fetch_model_snapshot(&self) -> Result<(String, String), String>;
 }
 
 /// [`HostDialogs`] over the broker: asks the host to open the dialog (`host.pick_folder`).
@@ -351,6 +357,21 @@ impl HostDialogs for BrokerDialogs {
             applied: v.get("applied").and_then(Value::as_array).map(|a| a.len()).unwrap_or(0),
         })
     }
+
+    fn fetch_model_snapshot(&self) -> Result<(String, String), String> {
+        // A network round-trip (two GitHub asset GETs) through the host's allow-listed egress.
+        let v = self.client.request_timeout(
+            "host.fetch_model_snapshot",
+            serde_json::json!({}),
+            Duration::from_secs(30),
+        )?;
+        if !v.get("ok").and_then(Value::as_bool).unwrap_or(false) {
+            return Err(v.get("error").and_then(Value::as_str).unwrap_or("snapshot fetch failed").to_string());
+        }
+        let index = v.get("index").and_then(Value::as_str).unwrap_or_default().to_string();
+        let sig = v.get("sig").and_then(Value::as_str).unwrap_or_default().to_string();
+        Ok((index, sig))
+    }
 }
 
 /// Dev/standalone fallback — no host, so "cancelled" / "can't verify".
@@ -373,6 +394,9 @@ impl HostDialogs for NoopDialogs {
     }
     fn rollback_catalog(&self, _tag: &str, _agents: &[String]) -> Result<CatalogFetch, String> {
         Err("no host to roll the catalog back".into())
+    }
+    fn fetch_model_snapshot(&self) -> Result<(String, String), String> {
+        Err("no host to fetch the model snapshot".into())
     }
 }
 
