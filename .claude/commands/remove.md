@@ -29,16 +29,22 @@ remove." — render the "Not Installed" menu, and stop. Do not invent an uninsta
 
 ---
 
-## Step 2 — Close the App if Running
+## Step 2 — Close the App AND every sidecar process (CPE-483)
 
-The uninstaller will fail or leave files behind if the app is running.
+The uninstaller will fail or leave files behind if the app is running — and just as importantly, a
+leftover **`ai-console --session-daemon`** (these outlive the app by design; see [[CPE-309]]) holds
+`sidecars\ai-console.exe` **file-locked**, so the uninstaller can't delete it. Kill **all**
+`cross-platform-explorer` AND `ai-console` processes (including `--session-daemon`) before
+uninstalling, then clear the daemon's temp dir.
 
 **Windows:**
 ```powershell
-Get-Process -Name "Cross-Platform Explorer" -EA SilentlyContinue | Stop-Process -Force
+Get-Process | Where-Object { $_.ProcessName -match 'ai-console|cross-platform|Cross-Platform Explorer' } |
+  Stop-Process -Force -EA SilentlyContinue
+Remove-Item (Join-Path $env:TEMP 'cpe-ai-console') -Recurse -Force -EA SilentlyContinue
 ```
-**macOS:** `osascript -e 'quit app "Cross-Platform Explorer"'`
-**Linux:** `pkill -f cross-platform-explorer` (best effort)
+**macOS:** `osascript -e 'quit app "Cross-Platform Explorer"'`; then `pkill -f ai-console` (best effort)
+**Linux:** `pkill -f cross-platform-explorer; pkill -f ai-console` (best effort)
 
 ---
 

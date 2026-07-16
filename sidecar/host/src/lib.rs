@@ -20,6 +20,7 @@ pub mod errors;
 pub mod migrate;
 pub mod observability;
 pub mod providers;
+pub mod reaper;
 pub mod registry;
 pub mod resources;
 pub mod scaffold;

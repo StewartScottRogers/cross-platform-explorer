@@ -64,6 +64,26 @@ git tag v0.2.0
 git push origin main --tags
 ```
 
+## Verify the sidecar actually updated (CPE-483)
+
+After installing an update, **a stale sidecar can masquerade as up-to-date**: the registry/app version
+reflects the *host* exe, not the bundled `sidecars\ai-console.exe`. If a leftover
+`ai-console --session-daemon` held that binary file-locked during install, NSIS silently skips it and
+you end up with a new host running an **old** sidecar (the "black terminal" saga).
+
+So don't trust the version number alone — verify the timestamps match:
+
+```powershell
+$d = "<InstallLocation>"   # e.g. C:\Users\...\Cross-Platform Explorer
+Get-Item "$d\cross-platform-explorer.exe","$d\sidecars\ai-console.exe" | Select-Object Name, LastWriteTime
+```
+
+A `sidecars\ai-console.exe` `LastWriteTime` lagging the host exe means it was locked and NOT replaced.
+Kill **all** `cross-platform-explorer` + `ai-console` processes (incl. `--session-daemon`), clear
+`%TEMP%\cpe-ai-console`, and reinstall. The app also self-heals: on startup it reaps orphaned
+session-daemons before they can lock the binary (`sidecar/host/src/reaper.rs`), and `/run` + `/remove`
+kill-all before touching the installer.
+
 ## Signing keys — do not lose these
 
 - Updater signing key: stored as repo secrets `TAURI_SIGNING_PRIVATE_KEY` and

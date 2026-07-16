@@ -2123,6 +2123,40 @@ fn sidecar_dirs(app: &tauri::AppHandle) -> Vec<PathBuf> {
     dirs
 }
 
+/// Candidate paths of *this app's* bundled AI Console sidecar binary — the bundled resource copy
+/// and the user-config copy. Used to scope the orphan-daemon sweep (CPE-483) tightly to our own
+/// binary so it never touches an unrelated `ai-console` elsewhere.
+#[cfg(feature = "sidecar-platform")]
+fn sidecar_ai_console_exes(app: &tauri::AppHandle) -> Vec<PathBuf> {
+    use tauri::Manager;
+    let exe_name = if cfg!(windows) { "ai-console.exe" } else { "ai-console" };
+    let mut exes = Vec::new();
+    if let Ok(resource) = app.path().resource_dir() {
+        exes.push(resource.join("sidecars").join(exe_name));
+    }
+    if let Ok(config) = app.path().app_config_dir() {
+        exes.push(config.join("sidecars").join(exe_name));
+    }
+    exes
+}
+
+/// Sweep leftover `ai-console --session-daemon` orphans at startup (CPE-483). Runs before the host
+/// spawns any daemon of its own, so every match is one this host does not own — safe to reap. Also
+/// clears the stale daemon port file. Best-effort and never fatal: a failed sweep only logs.
+#[cfg(feature = "sidecar-platform")]
+fn reap_orphan_session_daemons_on_startup(app: &tauri::AppHandle) {
+    let exes = sidecar_ai_console_exes(app);
+    let port_file = sidecar_host::reaper::default_session_daemon_port_file();
+    let report = sidecar_host::reaper::reap_orphan_session_daemons(&exes, Some(&port_file));
+    if !report.killed_pids.is_empty() || report.port_file_removed {
+        eprintln!(
+            "cpe: reaped {} orphan session-daemon(s) at startup{}",
+            report.killed_pids.len(),
+            if report.port_file_removed { "; cleared stale port file" } else { "" },
+        );
+    }
+}
+
 /// Directory holding the persisted capability-consent store (CPE-296).
 #[cfg(feature = "sidecar-platform")]
 fn consent_dir(app: &tauri::AppHandle) -> Result<PathBuf, String> {
@@ -3556,6 +3590,17 @@ pub fn run() {
         builder = builder.manage(AiConsoleState::default());
         // Agent Watch's filesystem watcher lives here (CPE-398); empty until a folder is watched.
         builder = builder.manage(AgentWatchState::default());
+    }
+
+    // On startup, clear any orphaned `ai-console --session-daemon` left by a prior run before it can
+    // lock the sidecar binary during an update or serve stale sessions (CPE-483). Feature-gated:
+    // with the platform off there is no sidecar, so nothing to reap.
+    #[cfg(feature = "sidecar-platform")]
+    {
+        builder = builder.setup(|app| {
+            reap_orphan_session_daemons_on_startup(app.handle());
+            Ok(())
+        });
     }
 
     let app = builder
