@@ -46,6 +46,7 @@
   import type { RenameItem } from "./lib/batchRename";
 
   import { friendlyError, splitPath, formatPathsForClipboard } from "./lib/format";
+  import { withBusy } from "./lib/busy";
   import { sortEntries } from "./lib/sort";
   import { uniqueName, uniqueNameWithExt } from "./lib/naming";
   import { validateFileName } from "./lib/filename";
@@ -213,7 +214,7 @@
   /** Run a safe sync step (Pull = ff-only, Push = no-force) via the host, then re-list (CPE-462). */
   async function doSync(action: "pull" | "push") {
     try {
-      await invoke("forge_sync", { path: currentPath, action });
+      await withBusy(() => invoke("forge_sync", { path: currentPath, action }));
       await refreshGitStatus(currentPath);
       refresh();
     } catch (e) {
@@ -458,7 +459,10 @@
       return;
     }
     try {
-      const temp = await invoke<string>("extract_archive_entry", { zip: archive.zipPath, inner: entry.path });
+      const zipPath = archive.zipPath;
+      const temp = await withBusy(() =>
+        invoke<string>("extract_archive_entry", { zip: zipPath, inner: entry.path }),
+      );
       await invoke("open_external", { path: temp });
     } catch {
       showNotice(`Couldn't open "${entry.name}" from the archive.`, true);
@@ -525,7 +529,7 @@
 
     loading = true;
     try {
-      entries = await invoke<DirEntry[]>("list_dir", { path });
+      entries = await withBusy(() => invoke<DirEntry[]>("list_dir", { path }));
     } catch (e) {
       entries = [];
       error = friendlyError(String(e));

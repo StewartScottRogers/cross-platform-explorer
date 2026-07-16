@@ -489,3 +489,8 @@ button:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
 }
 .empty-state .empty-icon { opacity: 0.55; }
 .error { color: #c42b1c; }
+
+/* Busy/wait cursor for perceptible wait conditions (CPE-482). When an operation is in flight the
+   body gets `busy` and the OS `progress` pointer (arrow + spinner) shows app-wide, so nothing looks
+   frozen. `!important` overrides per-element cursors (text fields, buttons, resize handles). */
+body.busy, body.busy * { cursor: progress !important; }

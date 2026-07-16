@@ -487,3 +487,19 @@ describe("AI Console launcher — per-session usage/cost (CPE-311)", () => {
     expect(w.document.getElementById("sb-usage").textContent).toBe("$0.500 · 1.5k tok");
   });
 });
+
+describe("AI Console launcher — busy/wait cursor (CPE-482)", () => {
+  it("maps body.busy to the OS progress cursor", () => {
+    expect(HTML).toMatch(/body\.busy[\s\S]*?cursor:\s*progress\s*!important/);
+  });
+
+  it("toggles body.busy after the debounce and clears when the last op ends", async () => {
+    const { w } = await mountLauncher(() => ({}));
+    const end = w.beginBusy();
+    expect(w.document.body.classList.contains("busy")).toBe(false); // under the 150ms debounce
+    await new Promise((r) => setTimeout(r, 180));
+    expect(w.document.body.classList.contains("busy")).toBe(true);
+    end();
+    expect(w.document.body.classList.contains("busy")).toBe(false);
+  });
+});
