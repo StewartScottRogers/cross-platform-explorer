@@ -53,6 +53,9 @@
                 box-shadow: 0 -1px 0 var(--line), 1px 0 0 var(--line), -1px 0 0 var(--line); }
   .tab.ended .tab-label { text-decoration: line-through; opacity: .6; }
   .tab-label { flex: 1; text-align: left; overflow: hidden; text-overflow: ellipsis; }
+  /* Provider-reported usage/cost for the session (CPE-311); hidden until the agent reports any. */
+  .tab-usage { font-size: 10px; opacity: .62; white-space: nowrap; font-variant-numeric: tabular-nums; }
+  .tab-usage:empty { display: none; }
   .tab-close { width: 20px; height: 20px; display: grid; place-items: center; border: 0;
                background: transparent; color: inherit; cursor: pointer; border-radius: 4px;
                flex: none; opacity: .7; font-size: 14px; line-height: 1; }
@@ -87,6 +90,8 @@
                border-top: 1px solid var(--line); background: rgba(128,128,128,0.07); white-space: nowrap; }
   #sb-folder { flex: 1; overflow: hidden; text-overflow: ellipsis; }
   #sb-session { flex: 0 0 auto; opacity: .65; overflow: hidden; text-overflow: ellipsis; max-width: 55%; }
+  #sb-usage { flex: 0 0 auto; opacity: .72; white-space: nowrap; font-variant-numeric: tabular-nums; }
+  #sb-usage:empty { display: none; }
   #sb-grip { flex: 0 0 auto; width: 16px; height: 16px; cursor: nwse-resize;
              background: repeating-linear-gradient(135deg, transparent 0 2px, rgba(128,128,128,.6) 2px 3px);
              -webkit-mask: linear-gradient(135deg, transparent 45%, #000 45%);
@@ -272,6 +277,7 @@
   <div id="statusbar">
     <span id="sb-folder" title="Project folder">No project folder set</span>
     <span id="sb-session"></span>
+    <span id="sb-usage" title="Provider-reported usage for the active session (nothing is sent anywhere)"></span>
     <div id="sb-grip" title="Drag to resize (the window's edges also resize it)"></div>
   </div>
 
@@ -523,8 +529,39 @@ async function reattachSessions() {
     for (const s of (d.sessions || [])) {
       if (s.id && !sessions.has(s.id)) addSession(s.id, s.name || s.id);
     }
+    applyUsage(d);
   } catch (_) { /* no host, or nothing running */ }
 }
+
+// Compact readout of a session's provider-reported usage (CPE-311): cost leads when present,
+// tokens otherwise; empty string when nothing was reported (the badge then hides itself).
+function fmtUsage(u) {
+  if (!u) return "";
+  const bits = [];
+  if (u.costUsd > 0) bits.push("$" + (u.costUsd < 1 ? u.costUsd.toFixed(3) : u.costUsd.toFixed(2)));
+  const tok = (u.inputTokens || 0) + (u.outputTokens || 0);
+  if (tok > 0) bits.push((tok >= 1000 ? (tok / 1000).toFixed(1) + "k" : String(tok)) + " tok");
+  return bits.join(" · ");
+}
+
+// Push the latest /api/sessions usage onto each tab badge + the status bar (CPE-311). No telemetry
+// is sent anywhere — this only displays what the provider itself reported in the session output.
+function applyUsage(d) {
+  const byId = new Map((d.sessions || []).map((s) => [s.id, s.usage]));
+  for (const [id, s] of sessions) {
+    if (s.usageEl) s.usageEl.textContent = fmtUsage(byId.get(id));
+  }
+  const active = activeId != null ? byId.get(activeId) : null;
+  const el = $("sb-usage");
+  if (el) el.textContent = fmtUsage(active);
+}
+
+async function refreshUsage() {
+  if (!sessions.size) return;
+  try { applyUsage(await api("/api/sessions")); } catch (_) { /* transient */ }
+}
+// Poll usage while sessions are open; cheap and only fires when something is running.
+setInterval(refreshUsage, 5000);
 
 async function dismissOnboarding() {
   $("onboard-overlay").hidden = true;
@@ -699,10 +736,11 @@ function addSession(id, name) {
   $("terms").appendChild(pane);
   const tab = document.createElement("div"); tab.className = "tab";
   const lbl = document.createElement("span"); lbl.className = "tab-label"; lbl.textContent = name;
+  const use = document.createElement("span"); use.className = "tab-usage"; use.title = "Provider-reported usage this session";
   const x = document.createElement("button"); x.className = "tab-close"; x.title = "Close session"; x.textContent = "×";
-  tab.appendChild(lbl); tab.appendChild(x);
+  tab.appendChild(lbl); tab.appendChild(use); tab.appendChild(x);
   $("tabs").appendChild(tab);
-  const s = { id, name, term: null, fit: null, search: null, ws: null, pane, host, sb, thumb, tab };
+  const s = { id, name, term: null, fit: null, search: null, ws: null, pane, host, sb, thumb, tab, usageEl: use };
   sessions.set(id, s);
   tab.onclick = (e) => { if (e.target !== x) activate(id); };
   x.onclick = (e) => { e.stopPropagation(); closeSession(id); };

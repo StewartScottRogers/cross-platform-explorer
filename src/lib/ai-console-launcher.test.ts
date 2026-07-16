@@ -455,3 +455,35 @@ describe("AI Console launcher — session tabs match the main window (CPE-466)",
     expect(HTML).not.toMatch(/\.tab-close:hover\s*\{[^}]*#d05656/);
   });
 });
+
+describe("AI Console launcher — per-session usage/cost (CPE-311)", () => {
+  it("formats cost-leading, then tokens, and blanks when nothing was reported", async () => {
+    const { w } = await mountLauncher(() => ({}));
+    expect(w.fmtUsage({ costUsd: 0.1234, inputTokens: 1200, outputTokens: 800 })).toBe("$0.123 · 2.0k tok");
+    expect(w.fmtUsage({ costUsd: 0, inputTokens: 500, outputTokens: 250 })).toBe("750 tok");
+    expect(w.fmtUsage({ costUsd: 2.5, inputTokens: 0, outputTokens: 0 })).toBe("$2.50");
+    expect(w.fmtUsage({ costUsd: 0, inputTokens: 0, outputTokens: 0 })).toBe("");
+    expect(w.fmtUsage(null)).toBe("");
+  });
+
+  it("paints each session's usage onto its tab badge + the status bar for the active one", async () => {
+    const sessions = {
+      sessions: [
+        { id: "s1", name: "Claude", usage: { costUsd: 0.5, inputTokens: 1000, outputTokens: 500 } },
+        { id: "s2", name: "Aider", usage: { costUsd: 0, inputTokens: 0, outputTokens: 0 } },
+      ],
+    };
+    const { w } = await mountLauncher((path) => (path.startsWith("/api/sessions") ? sessions : {}));
+    w.addSession("s1", "Claude");
+    w.addSession("s2", "Aider");
+    w.applyUsage(sessions);
+    const badges = [...w.document.querySelectorAll(".tab-usage")].map((e: any) => e.textContent);
+    expect(badges).toContain("$0.500 · 1.5k tok");
+    expect(badges).toContain(""); // s2 reported nothing → empty badge (CSS hides it)
+    // s2 is the last added, so it's active; its status-bar readout is blank.
+    expect(w.document.getElementById("sb-usage").textContent).toBe("");
+    w.activate("s1");
+    w.applyUsage(sessions);
+    expect(w.document.getElementById("sb-usage").textContent).toBe("$0.500 · 1.5k tok");
+  });
+});
