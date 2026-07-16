@@ -2,7 +2,7 @@
 id: CPE-488
 title: "EPIC: Forge v2 — two-way mirror UI + more providers (self-hosted & non-Git)"
 type: Task
-status: Proposed
+status: In Progress
 priority: Medium
 component: Multiple
 tags: [epic]
@@ -64,3 +64,34 @@ Successor to [[CPE-429]]. Builds on shipped pieces: [[CPE-433]] (host-brokered e
 [[CPE-439]] (credentials), [[CPE-440]] (threat model), and [[CPE-432]] (repos sidecar tenant). Filed
 as a dormant brief on 2026-07-16 per the just-in-time epic workflow ([[CPE-487]]); activate to research,
 resolve Q1–Q6 with the user, and split into child tickets.
+
+## Decisions (activation 2026-07-16)
+- **Q3 — Architecture:** **Stay native for v2** (default/recommended; not overridden). Keep building on
+  the shipping `forge_*` host commands + `RepoBrowser`; revisit the repos sidecar ([[CPE-432]]) only if
+  untrusted-repo isolation demands it later.
+- **Q4 — Providers:** **Generic Git (any HTTPS/SSH)** is the next provider — it also covers self-hosted.
+  GitLab / Bitbucket / Gitea-Forgejo are *later* manifest follow-ups, not this wave.
+- **Q2 — Sync trigger:** **On-demand + scheduled/background** auto-mirror (interval / on focus) with a
+  visible pause control.
+- **Q1 — Conflicts:** **Rich in-app conflict view** (three-way / inline resolver), not just "open in
+  external tool."
+- **Q5 — Self-hosted egress:** folded into the Generic-Git child — a user-supplied host is admitted to
+  the allow-list only with explicit per-connection consent (no wildcard, SSRF-safe).
+- **Q6 — Tier 2/3 VCS (hg/svn/p4/fossil, Radicle):** **out of scope for v2** (explicit non-goal; revisit later).
+
+## Child tickets (created at activation)
+- [[CPE-495]] — Two-way mirror UI: pull/push/sync + per-repo policy + dry-run preview *(foundation; ready)*
+- [[CPE-496]] — Rich in-app conflict resolver (three-way/inline) *(needs-prereq CPE-495; big-design)*
+- [[CPE-497]] — Scheduled/background auto-mirror + pause control *(needs-prereq CPE-495)*
+- [[CPE-498]] — Generic Git provider + self-hosted host admission *(ready)*
+- [[CPE-499]] — Threat-model extension: push/write + generic-host egress *(needs-prereq CPE-498)*
+
+Suggested order: CPE-495 → CPE-498 (both ready, independent) → CPE-497 / CPE-496 (depend on 495) →
+CPE-499 (depends on 498).
+
+## Work Log
+2026-07-16 — Filed as a dormant `Proposed` brief (residual forge scope from CPE-429).
+2026-07-16 — **Activated.** Researched the current forge feature (the CPE-438 mirror engine +
+`forge_sync`/`forge_repo_status` + ahead/behind status bar already exist; only a GitHub Contents parser
+exists for browse). Resolved Q1–Q6 with the user (see Decisions) and decomposed into 5 child tickets
+(CPE-495…499) in Backlog, each linked back with `epic: CPE-488`. Status → In Progress.
