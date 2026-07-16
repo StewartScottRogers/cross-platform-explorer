@@ -2,12 +2,13 @@
 id: CPE-502
 title: "EPIC: Swarm orchestration — role-based agent teams (ownership, mailbox, gates)"
 type: Task
-status: In Progress
+status: Done
 priority: Medium
 component: Multiple
 tags: [epic, big-design]
 estimate: 4h+
 created: 2026-07-16
+closed: 2026-07-16
 ---
 
 ## Summary
@@ -58,8 +59,36 @@ Wave 2 — the orchestration (later sprint):
 Suggested order: **CPE-514** first (unblocks the coordinator), then CPE-515 / CPE-516 (independent), then
 CPE-517 → CPE-518 / CPE-519.
 
+## Resolution (closed 2026-07-16)
+Swarm orchestration is built end-to-end across 6 children (2 sprints), as pure, fully-tested modules in
+the ai-console crate:
+- **Substrates (SPR-01):** [[CPE-514]] file-ownership lock manager (path-glob claims, no collisions),
+  [[CPE-515]] role/team manifest (coordinator/builder/scout/reviewer), [[CPE-516]] inter-agent mailbox
+  (addressed/role/broadcast, ordered, contained).
+- **Orchestration (SPR-02):** [[CPE-517]] coordinator (staff → assign → lock-gated schedule → dispatch
+  via mailbox → collect), [[CPE-518]] quality gates (Gating state, reopen-on-fail, review over the
+  mailbox), [[CPE-519]] budgets + retry + authority (per-agent/mission caps that pause not overspend,
+  bounded retry-then-escalate, pause/stop/reassign with an audit trail).
+
+One prompt → a coordinator staffs a role-based team, splits the mission into tasks that **exclusively own
+their files** (concurrent agents never collide; shared files sequence), **coordinate via the mailbox**,
+and pass **quality gates** before done — with budget/retry/authority guardrails. ~55 new unit tests
+across the six modules; 233 ai-console lib tests green; clippy clean in both feature modes; CI green.
+
+**Carve-out / follow-on (recorded):** the **live driver** — turning each coordinator `Assignment`
+dispatch intent into a real launched Agent-Grid session (and the mailbox's live MCP-server exposure to
+external agent processes) — is the integration layer that sits on top of these pure cores. It is not
+headlessly verifiable and was deliberately kept out of scope; it's flagged in CPE-516/517 and is the
+natural next epic (wiring Swarm to real sessions). Does not block this epic — the orchestration brain is
+complete and proven in isolation.
+
 ## Notes
 From [[CPE-500]]; builds on the AI Console session engine + agent registry + MCP. `big-design`.
+
+## Work Log (close)
+2026-07-16 — **Closed.** All 6 children Done across SPR-01 (substrates) + SPR-02 (orchestration). The
+coordinator ties locks + team + mailbox into gated, budgeted, collision-free multi-agent orchestration,
+fully unit-tested. Live session-dispatch driver flagged as the follow-on epic. Moved Epics/ → Done/.
 
 ## Work Log
 2026-07-16 — Filed as a dormant `Proposed` brief (from spike CPE-500).
