@@ -277,3 +277,24 @@ an **evidence-based** diagnosis (real logs from the daemon path in the GUI: does
 its PTY produce bytes, do they reach the socket/console/WS?), not another speculative flag change. Next
 step: add diagnostics to the daemon path surfaced in the app's Diagnostics panel, then have the user
 run once with `CPE_AICONSOLE_DAEMON=1` to capture where the I/O stops.
+
+## Black-terminal saga root-caused 2026-07-15 — it was a STALE SIDECAR, not the engine
+After the daemon builds, the AI Console showed a black terminal even on the in-process default. The
+real cause was **not** the engine and **not** ConPTY-under-CREATE_NO_WINDOW: leftover
+`ai-console.exe --session-daemon` processes (survivors from the v0.19–v0.21 daemon builds — they
+outlive the app by design) held **`sidecars\ai-console.exe` file-locked**, so the NSIS installer
+**silently skipped replacing the sidecar** on every reinstall. The host exe updated (registry showed
+0.22.0) but the sidecar stayed an old build that still routed sessions into the broken daemon → black.
+Confirmed by timestamps (host 22:30 vs sidecar 21:42) and by the sidecar launching a session into a
+surviving daemon whose parent was a dead instance.
+
+**Fix:** kill ALL `cross-platform-explorer`/`ai-console` processes (incl. `--session-daemon`), delete
+the daemon port file, then reinstall — the sidecar then updated (→ 22:27) and the terminal streamed
+output ("much better"). So: **the in-process engine + ConPTY work fine in the packaged app**; the
+whole black-terminal episode was stale-binary + zombie-daemon pollution.
+
+**Implications for this ticket:** the in-process path is healthy and is the shipping default. The
+daemon survival path remains deferred, and its "survivors lock the sidecar binary" hazard is itself a
+reason to keep it off until (a) the host owns + reaps the daemon deterministically and (b) install/
+startup proactively clears orphaned daemons — tracked in [[CPE-483]]. Reattach across a UI-sidecar
+*window* close/reopen already works (CPE-461); only a full *process* restart needs the daemon.

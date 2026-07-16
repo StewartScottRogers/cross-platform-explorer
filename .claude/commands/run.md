@@ -106,11 +106,27 @@ installed. Report the file name and size.
 Always install **silently**, and always report the exit code.
 
 **Windows (NSIS `.exe`):**
+
+**CRITICAL — kill ALL processes first (CPE-483).** Before installing, terminate every
+`cross-platform-explorer` AND `ai-console` process, **including any `ai-console --session-daemon`**
+(these survive the app by design and hold `sidecars\ai-console.exe` **file-locked**). If you skip
+this, NSIS **silently skips replacing the locked sidecar** — you get a new host running a STALE
+sidecar, and the registry `DisplayVersion` lies (it only reflects the host exe). Also wipe the daemon
+port dir.
 ```powershell
+Get-Process | Where-Object { $_.ProcessName -match 'ai-console|cross-platform' } | Stop-Process -Force -EA SilentlyContinue
+Start-Sleep -Seconds 2
+Remove-Item (Join-Path $env:TEMP 'cpe-ai-console') -Recurse -Force -EA SilentlyContinue
 $installer = Get-ChildItem "$env:TEMP\cpe-install\*-setup.exe" | Select-Object -First 1
 $p = Start-Process -FilePath $installer.FullName -ArgumentList "/S" -Wait -PassThru
 "exit code: $($p.ExitCode)"
 ```
+After install, VERIFY the sidecar actually updated (not just the host): the timestamps must match.
+```powershell
+$d = "$env:LOCALAPPDATA\Cross-Platform Explorer (Sidecar)"
+Get-Item "$d\cross-platform-explorer.exe","$d\sidecars\ai-console.exe" | Select-Object Name, LastWriteTime
+```
+A sidecar `LastWriteTime` lagging the host means it was locked and NOT replaced — kill processes and reinstall.
 
 **Windows (MSI fallback):**
 ```powershell
