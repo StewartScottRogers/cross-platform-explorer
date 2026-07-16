@@ -1,6 +1,7 @@
 <script lang="ts">
   import { createEventDispatcher } from "svelte";
   import Icon from "./Icon.svelte";
+  import { t } from "../i18n";
 
   export let tabs: { id: number; title: string }[] = [];
   export let activeId: number;
@@ -28,7 +29,7 @@
           class="tab-close"
           role="button"
           tabindex="-1"
-          title="Close tab"
+          title={$t("app.closeTab")}
           on:click|stopPropagation={() => dispatch("close", tab.id)}
           on:keydown|stopPropagation
         >
@@ -37,7 +38,7 @@
       {/if}
     </button>
   {/each}
-  <button class="tab-new" title="Add new tab" on:click={() => dispatch("new")}>
+  <button class="tab-new" title={$t("app.newTab")} on:click={() => dispatch("new")}>
     <Icon name="plus" size={15} />
   </button>
 </div>

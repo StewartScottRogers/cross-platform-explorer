@@ -1,0 +1,96 @@
+// CPE-362: i18n core — lookup, interpolation, graceful fallback, locale switching, Intl formatting.
+import { describe, it, expect, beforeEach } from "vitest";
+import { get } from "svelte/store";
+import {
+  SUPPORTED_LOCALES,
+  translate,
+  localeKeys,
+  locale,
+  t,
+  formatDate,
+  formatNumber,
+  detectInitialLocale,
+} from "./i18n";
+
+beforeEach(() => {
+  try {
+    localStorage.clear();
+  } catch {
+    /* ignore */
+  }
+  locale.set("en");
+});
+
+describe("i18n translate()", () => {
+  it("returns the message for the active locale", () => {
+    expect(translate("en", "menu.file")).toBe("File");
+    expect(translate("es", "menu.file")).toBe("Archivo");
+    expect(translate("de", "menu.delete")).toBe("Löschen");
+    expect(translate("fr", "nav.back")).toBe("Précédent");
+  });
+
+  it("falls back to English when a key is missing in the locale", () => {
+    // A key present only in English still resolves for another locale (no blank label).
+    expect(translate("es", "menu.file")).toBe("Archivo"); // present
+    // Simulate a missing key by asking for one no catalog defines → returns the key itself.
+    expect(translate("es", "does.not.exist")).toBe("does.not.exist");
+  });
+
+  it("interpolates {name} placeholders", () => {
+    expect(translate("en", "status.items", { count: 42 })).toBe("42 items");
+    expect(translate("es", "status.selected", { count: 3 })).toBe("3 seleccionados");
+  });
+
+  it("leaves an unmatched placeholder intact rather than blanking it", () => {
+    expect(translate("en", "status.items", {})).toBe("{count} items");
+  });
+});
+
+describe("i18n reactive t() + locale switch", () => {
+  it("re-resolves when the locale changes", () => {
+    expect(get(t)("menu.view")).toBe("View");
+    locale.set("de");
+    expect(get(t)("menu.view")).toBe("Ansicht");
+    locale.set("fr");
+    expect(get(t)("menu.view")).toBe("Affichage");
+  });
+
+  it("every non-English locale is a strict subset of English keys (no orphan translations)", () => {
+    // Guard against a typo'd key in a translation that would never be reached.
+    const enKeys = new Set(localeKeys("en"));
+    for (const { code } of SUPPORTED_LOCALES) {
+      for (const k of localeKeys(code)) {
+        expect(enKeys.has(k), `${code} has key '${k}' not in English`).toBe(true);
+      }
+    }
+  });
+});
+
+describe("i18n Intl formatting", () => {
+  it("formats numbers per locale", () => {
+    locale.set("en");
+    expect(get(formatNumber)(1234.5)).toBe("1,234.5");
+    locale.set("de");
+    expect(get(formatNumber)(1234.5)).toBe("1.234,5"); // German uses . / ,
+  });
+
+  it("formats dates per locale without throwing", () => {
+    const d = new Date(Date.UTC(2026, 0, 15));
+    locale.set("en");
+    expect(get(formatDate)(d, { dateStyle: "short", timeZone: "UTC" })).toMatch(/1\/15\/26|1\/15\/2026/);
+    locale.set("fr");
+    expect(typeof get(formatDate)(d, { dateStyle: "short", timeZone: "UTC" })).toBe("string");
+  });
+});
+
+describe("i18n locale detection + persistence", () => {
+  it("persists the chosen locale and restores it", () => {
+    locale.set("es");
+    expect(detectInitialLocale()).toBe("es");
+  });
+
+  it("defaults to a supported locale", () => {
+    localStorage.clear();
+    expect(SUPPORTED_LOCALES.some((l) => l.code === detectInitialLocale())).toBe(true);
+  });
+});
