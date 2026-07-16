@@ -34,6 +34,11 @@ type Subscriber = mpsc::Sender<Vec<u8>>;
 /// One PTY-backed session owned by the daemon, independent of any client connection.
 struct DaemonSession {
     pty: Mutex<PtySession>,
+    /// The PTY's input (stdin) handle, taken **once** at launch and held open for the session's whole
+    /// life — exactly like the in-process `LocalIo` (CPE-309). Taking a fresh writer per keystroke and
+    /// dropping it (the old bug) closes the child's stdin, so an interactive TUI agent (e.g. Claude
+    /// Code) sees EOF and exits, and further input is lost.
+    writer: Mutex<Box<dyn Write + Send>>,
     /// Bounded tail of everything the PTY has emitted, for replay on (re)attach.
     ring: Arc<Mutex<Vec<u8>>>,
     /// Everyone currently attached; the reader thread fans each chunk out to all of them
@@ -72,8 +77,11 @@ impl SessionDaemon {
         }
         let session = PtySession::spawn(launch)?;
         let reader = session.reader()?;
+        // Take the input handle ONCE and hold it for the session's life (see `DaemonSession::writer`).
+        let writer = session.writer()?;
         let ds = Arc::new(DaemonSession {
             pty: Mutex::new(session),
+            writer: Mutex::new(writer),
             ring: Arc::new(Mutex::new(Vec::new())),
             subscribers: Arc::new(Mutex::new(Vec::new())),
             exited: Arc::new(Mutex::new(false)),
@@ -136,12 +144,15 @@ impl SessionDaemon {
         Ok(Attachment { replay, live: rx })
     }
 
-    /// Write bytes to a session's PTY input (keystrokes from the attached client).
+    /// Write bytes to a session's PTY input (keystrokes from the attached client). Writes to the
+    /// **held** writer (taken once at launch) so the child's stdin stays open across keystrokes — the
+    /// old code took + dropped a fresh writer each call, closing stdin and killing interactive agents.
     pub fn input(&self, id: &str, bytes: &[u8]) -> Result<(), String> {
-        let sessions = self.sessions.lock().unwrap();
-        let ds = sessions.get(id).ok_or_else(|| format!("no such session '{id}'"))?;
-        let pty = ds.pty.lock().unwrap();
-        let mut writer = pty.writer()?;
+        let ds = {
+            let sessions = self.sessions.lock().unwrap();
+            Arc::clone(sessions.get(id).ok_or_else(|| format!("no such session '{id}'"))?)
+        };
+        let mut writer = ds.writer.lock().map_err(|_| "writer poisoned".to_string())?;
         writer.write_all(bytes).map_err(|e| e.to_string())?;
         writer.flush().map_err(|e| e.to_string())
     }
@@ -337,6 +348,31 @@ mod tests {
         let out = recv_until(&att.live, "GOT-hello", Duration::from_secs(10));
         assert!(out.contains("GOT-hello"), "input did not echo: {out:?}");
         let _ = daemon.kill("s3");
+    }
+
+    #[test]
+    fn input_can_be_written_repeatedly_without_closing_stdin() {
+        // CPE-309 regression: the writer is taken ONCE at launch and held. The old code did
+        // `take_writer()` per keystroke and dropped it — so the SECOND input always failed (a writer
+        // can only be taken once) and dropping it closed the child's stdin (EOF), which made
+        // interactive TUI agents like Claude Code exit immediately. A long-lived shell lets us send
+        // several inputs; every one must succeed.
+        let daemon = SessionDaemon::new();
+        let (program, args) = if cfg!(windows) {
+            ("cmd".to_string(), Vec::<String>::new()) // interactive cmd stays open on its own stdin
+        } else {
+            ("cat".to_string(), Vec::<String>::new())
+        };
+        daemon
+            .launch("sw", &PtyLaunch { program, args, cwd: None, env: BTreeMap::new(), rows: 24, cols: 80 })
+            .unwrap();
+        let _att = daemon.attach("sw").unwrap();
+        for i in 0..5 {
+            daemon
+                .input("sw", format!("echo line{i}\n").as_bytes())
+                .unwrap_or_else(|e| panic!("input #{i} failed (stdin was closed by the old take-writer bug): {e}"));
+        }
+        let _ = daemon.kill("sw");
     }
 
     #[test]

@@ -401,3 +401,21 @@ passed; `clippy --all-targets -D warnings` clean; the reattach integration tests
 Verification remaining: one GUI run on the **v0.24.0-sidecar** build (built next) — open a console,
 launch an agent, type: input should echo and the terminal should render. If it does, the ACs are met
 end-to-end and this closes.
+
+## 2026-07-16 — SECOND root cause (the real one): daemon closed the PTY stdin per keystroke
+The v0.24.0 GUI run still failed ("no output, no input, Session running"). Read the saved session
+transcripts (`sidecar-storage/ai-console/history.json`) directly: the agents are full-screen TUIs
+(Claude Code, codex) that **render their entire UI then emit teardown sequences and exit** — a classic
+stdin-EOF exit (codex, which loops an animation, instead stayed alive and flooded 1.39 MB).
+
+Root cause in `session_daemon.rs`: `SessionDaemon::input` did `pty.writer()` — i.e. portable-pty's
+**`take_writer()`** — on **every keystroke** and dropped it. `take_writer()` takes the PTY input handle
+out (so the *second* keystroke always errored) and dropping it **closes the child's stdin (EOF)**, so
+an interactive agent quits and input dies. The in-process `LocalIo` never had this: it takes the
+writer **once at launch and holds it** for the session's life. Fix: make the daemon do the same —
+`DaemonSession` now holds the writer (taken once in `launch`), and `input` writes to it.
+
+New cross-platform regression test `input_can_be_written_repeatedly_without_closing_stdin` (5 inputs in
+a row all succeed — the old take-writer-once bug failed on #2). `cargo test -p ai-console` 196 passed;
+clippy clean. Combined with the fire-and-forget fix (ack starvation), the daemon path should now keep
+interactive agents alive AND accept input. Verify on v0.25.0-sidecar.
