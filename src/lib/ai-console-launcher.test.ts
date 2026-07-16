@@ -214,6 +214,43 @@ describe("AI Console launcher — 16-pane throttling (CPE-508)", () => {
   });
 });
 
+describe("AI Console launcher — grid layout persistence (CPE-509)", () => {
+  it("serializeLayout/parseLayout round-trip and tolerate garbage", async () => {
+    const { w } = await mountLauncher();
+    const s = w.serializeLayout({ viewMode: "grid", activeId: "a" });
+    expect(w.parseLayout(s)).toEqual({ viewMode: "grid", activeId: "a" });
+    expect(w.parseLayout("not json")).toEqual({ viewMode: "tabs", activeId: null });
+    expect(w.parseLayout(JSON.stringify({ viewMode: "weird" }))).toEqual({ viewMode: "tabs", activeId: null });
+  });
+
+  it("persists the view per workspace and restores it on reattach", async () => {
+    const { w } = await mountLauncher();
+    w.addSession("a", "A");
+    w.setView("grid"); // user switches to grid → saved for this cwd
+    w.eval("viewMode = 'tabs'"); // simulate a fresh relaunch defaulting to tabs
+    w.restoreLayout(); // sessions exist → reapply saved view
+    expect(w.eval("viewMode")).toBe("grid");
+  });
+
+  it("scopes layout by workspace so unrelated folders don't clobber", async () => {
+    const { w } = await mountLauncher();
+    w.addSession("a", "A");
+    w.setView("grid"); // saved under cwd "/repo"
+    w.eval("catalog.cwd = '/other-project'");
+    expect(w.loadLayout().viewMode).toBe("tabs"); // a different workspace defaults to tabs
+  });
+
+  it("resets to the default tabs view when all sessions close", async () => {
+    const { w } = await mountLauncher();
+    w.addSession("a", "A");
+    w.setView("grid");
+    w.confirm = () => true; // closeAllSessions confirms first
+    await w.closeAllSessions();
+    expect(w.eval("viewMode")).toBe("tabs");
+    expect(w.loadLayout().viewMode).toBe("tabs");
+  });
+});
+
 describe("AI Console launcher — named sets / presets (the reported confusion)", () => {
   it("renders the current agent's sets into the dropdown, with a blank placeholder", async () => {
     const { w } = await mountLauncher();

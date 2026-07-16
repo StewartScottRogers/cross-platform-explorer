@@ -592,6 +592,7 @@ async function reattachSessions() {
       if (s.id && !sessions.has(s.id)) addSession(s.id, s.name || s.id);
     }
     applyUsage(d);
+    restoreLayout(); // reapply the saved Tabs⇄Grid view + focus for this workspace (CPE-509)
   } catch (_) { /* no host, or nothing running */ }
 }
 
@@ -743,7 +744,7 @@ function updateViewToggle() {
   btn.title = viewMode === "grid" ? "Switch back to single-pane tabs" : "Show all agents in a grid";
 }
 
-function setView(mode) { viewMode = (mode === "grid" ? "grid" : "tabs"); applyView(); }
+function setView(mode) { viewMode = (mode === "grid" ? "grid" : "tabs"); applyView(); saveLayout(); }
 function toggleView() { setView(viewMode === "grid" ? "tabs" : "grid"); }
 
 // Move focus to a pane WITHOUT relaying out (CPE-507): update activeId + focus ring + tab highlight.
@@ -820,6 +821,42 @@ function flushBuf(s) {
   for (const d of s._buf) s.term.write(d);
   s._buf.length = 0;
   scheduleThumb(s);
+}
+
+// --- Persist the Tabs⇄Grid view per workspace, restored on relaunch/reattach (CPE-509) ---------
+// With auto-grid the only durable "arrangement" is the view mode + which agent was focused; the tile
+// order is whatever order the daemon restores sessions in (CPE-309). Keyed by the project folder so
+// unrelated workspaces don't clobber each other. Stored in localStorage (per WebView origin).
+const LAYOUT_KEY = "cpe.aiconsole.layout";
+function workspaceKey() { return (typeof catalog !== "undefined" && catalog && catalog.cwd) || "default"; }
+
+// Pure (de)serialization — tolerant of missing/garbage input, always a valid state.
+function serializeLayout(state) {
+  return JSON.stringify({ viewMode: state && state.viewMode === "grid" ? "grid" : "tabs", activeId: (state && state.activeId) || null });
+}
+function parseLayout(str) {
+  try { const o = JSON.parse(str); return { viewMode: o && o.viewMode === "grid" ? "grid" : "tabs", activeId: (o && o.activeId) || null }; }
+  catch (_) { return { viewMode: "tabs", activeId: null }; }
+}
+function saveLayout() {
+  try {
+    const all = JSON.parse(localStorage.getItem(LAYOUT_KEY) || "{}");
+    all[workspaceKey()] = JSON.parse(serializeLayout({ viewMode, activeId }));
+    localStorage.setItem(LAYOUT_KEY, JSON.stringify(all));
+  } catch (_) { /* storage unavailable — the view just won't persist */ }
+}
+function loadLayout() {
+  try {
+    const all = JSON.parse(localStorage.getItem(LAYOUT_KEY) || "{}");
+    return parseLayout(JSON.stringify(all[workspaceKey()] || null));
+  } catch (_) { return { viewMode: "tabs", activeId: null }; }
+}
+// After sessions are (re)attached, restore the saved view + focus for this workspace (CPE-309/509).
+function restoreLayout() {
+  if (!sessions.size) return;
+  const saved = loadLayout();
+  if (saved.activeId && sessions.has(saved.activeId)) activeId = saved.activeId;
+  setView(saved.viewMode); // lays out + persists (idempotent)
 }
 
 // Session-identity chip (CPE-490) — MUST match src/lib/sessionChip.ts so a console tab and its
@@ -1008,8 +1045,10 @@ async function closeAllSessions() {
   }
   sessions.clear();
   activeId = null;
+  viewMode = "tabs"; // closing everything resets to the default view (CPE-509)
   dropCloseAllIfEmpty();
   applyView(); // nothing left — drop the grid class + hide the view toggle
+  saveLayout();
 }
 
 // Ctrl+Shift+C/V copy-paste, Ctrl+F find on the given session. false = don't send the key on.
