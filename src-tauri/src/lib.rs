@@ -2113,9 +2113,17 @@ fn sidecar_dirs(app: &tauri::AppHandle) -> Vec<PathBuf> {
     }
     // Dev fallback: `tauri dev` (debug) has no bundled `sidecars/` resource dir, so the host
     // registry wouldn't know the sidecar and consent would be skipped (CPE-364). Point at the
-    // source-tree manifest, guarded by its existence so it's inert in a bundled release.
+    // source-tree manifests, guarded by their existence so they're inert in a bundled release.
     let manifest = Path::new(env!("CARGO_MANIFEST_DIR"));
-    for p in [manifest.join("../sidecar/ai-console"), PathBuf::from("sidecar/ai-console")] {
+    for p in [
+        manifest.join("../sidecar/ai-console"),
+        PathBuf::from("sidecar/ai-console"),
+        // The Repositories sidecar is a registered tenant too (CPE-432): the host discovers +
+        // manages it (enable/disable, contract-compat) via the generic registry. v1 surfaces forge
+        // natively, so no bespoke launch UI is wired — but it is bundled + registered behind the feature.
+        manifest.join("../sidecar/repos"),
+        PathBuf::from("sidecar/repos"),
+    ] {
         if p.join("sidecar.json").exists() {
             dirs.push(p);
         }

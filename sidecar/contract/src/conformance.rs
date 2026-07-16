@@ -1,15 +1,16 @@
-//! Contract conformance kit (CPE-301).
+//! Contract conformance kit (CPE-301, relocated to the contract crate in CPE-432).
 //!
-//! "Add more sidecars easily" only holds if a candidate sidecar can *prove* it speaks
-//! the contract. This is a reusable, transport-agnostic battery that drives a sidecar
-//! through the handshake and core protocol behaviours and reports pass/fail. It talks
-//! to the sidecar through the [`SidecarChannel`] trait, so it runs against an
-//! in-memory mock (unit tests) or a real child process (wired by the supervisor,
-//! CPE-265). The battery grows as the contract grows.
+//! "Add more sidecars easily" only holds if a candidate sidecar can *prove* it speaks the contract.
+//! This is a reusable, transport-agnostic battery that drives a sidecar through the handshake and
+//! core protocol behaviours and reports pass/fail. It talks to the sidecar through the
+//! [`SidecarChannel`] trait, so it runs against an in-memory mock (unit tests) or a real child
+//! process (wired by the host supervisor, or by a sidecar's own integration test).
+//!
+//! It lives in the **contract** crate — it depends only on contract types — so *every* sidecar can
+//! run it against itself without depending on the host (ADR 0001 one-way rule). The host re-exports
+//! it as `sidecar_host::conformance` for its own e2e tests.
 
-use sidecar_contract::{
-    negotiate, ContractVersion, Envelope, Lifecycle, Message, Request, Welcome,
-};
+use crate::{negotiate, ContractVersion, Envelope, Lifecycle, Message, Request, Welcome};
 
 /// A bidirectional channel to the sidecar under test. `recv` returns the next
 /// envelope the sidecar emitted, or an error on close/timeout.
@@ -50,14 +51,25 @@ impl Report {
     }
 }
 
-/// Drive the sidecar through the battery, presenting `host_version` as the host's
-/// contract version. Stops early only if the handshake can't even begin (nothing
-/// further is meaningful); otherwise records every check.
+/// Receive the next envelope that is **not** an async `Event`. Events (notifications, `ui:<url>`
+/// announces, progress) are out-of-band — the real host demuxes them from the request/response
+/// stream via its EventRouter — so the handshake/response checks must skip them rather than mistake
+/// one for the frame they're waiting on. A conformant sidecar is allowed to emit events at any time.
+fn recv_non_event(channel: &mut dyn SidecarChannel) -> Result<Envelope, String> {
+    loop {
+        let env = channel.recv()?;
+        if !matches!(env.message, Message::Event(_)) {
+            return Ok(env);
+        }
+    }
+}
+
+/// Drive a sidecar through the base protocol and report which checks passed.
 pub fn run_conformance(channel: &mut dyn SidecarChannel, host_version: ContractVersion) -> Report {
     let mut checks = Vec::new();
 
     // 1. The sidecar opens with a well-formed Hello.
-    let hello = match channel.recv() {
+    let hello = match recv_non_event(channel) {
         Ok(env) => env,
         Err(e) => {
             checks.push(CheckResult::fail("hello_received", format!("no Hello: {e}")));
@@ -116,7 +128,7 @@ pub fn run_conformance(channel: &mut dyn SidecarChannel, host_version: ContractV
     }
 
     // 4. The sidecar reports Ready after the Welcome.
-    match channel.recv() {
+    match recv_non_event(channel) {
         Ok(env) if matches!(env.message, Message::Lifecycle(Lifecycle::Ready)) => {
             checks.push(CheckResult::pass("reaches_ready"));
         }
@@ -148,7 +160,7 @@ fn request_is_correlated(
     if let Err(e) = channel.send(&req) {
         return CheckResult::fail("response_correlated", e);
     }
-    match channel.recv() {
+    match recv_non_event(channel) {
         Ok(env) if env.id == id && matches!(env.message, Message::Response(_) | Message::Error(_)) => {
             CheckResult::pass("response_correlated")
         }
@@ -171,7 +183,7 @@ fn unknown_method_errors(channel: &mut dyn SidecarChannel, id: u64) -> CheckResu
     if let Err(e) = channel.send(&req) {
         return CheckResult::fail("unknown_method_errors", e);
     }
-    match channel.recv() {
+    match recv_non_event(channel) {
         Ok(env) => match env.message {
             Message::Error(_) => CheckResult::pass("unknown_method_errors"),
             Message::Response(r) if r.result.is_err() => CheckResult::pass("unknown_method_errors"),
@@ -187,9 +199,7 @@ fn unknown_method_errors(channel: &mut dyn SidecarChannel, id: u64) -> CheckResu
 #[cfg(test)]
 mod tests {
     use super::*;
-    use sidecar_contract::{
-        Capability, ContractError, ErrorCode, Hello, Response, CONTRACT_VERSION,
-    };
+    use crate::{Capability, ContractError, ErrorCode, Event, Hello, Response, CONTRACT_VERSION};
     use std::collections::VecDeque;
 
     /// An in-memory sidecar that behaves correctly, unless a fault is injected.
@@ -197,11 +207,18 @@ mod tests {
         outbox: VecDeque<Envelope>,
         wrong_correlation: bool,
         never_ready: bool,
+        /// Emit a stray async event right after Ready — a conformant behaviour the kit must tolerate.
+        chatty_events: bool,
     }
 
     impl MockSidecar {
         fn good() -> Self {
-            let mut s = Self { outbox: VecDeque::new(), wrong_correlation: false, never_ready: false };
+            let mut s = Self {
+                outbox: VecDeque::new(),
+                wrong_correlation: false,
+                never_ready: false,
+                chatty_events: false,
+            };
             s.outbox.push_back(Envelope::new(
                 0,
                 Message::Hello(Hello {
@@ -224,6 +241,14 @@ mod tests {
                     if !self.never_ready {
                         self.outbox
                             .push_back(Envelope::new(0, Message::Lifecycle(Lifecycle::Ready)));
+                    }
+                    // A chatty sidecar announces its UI right after Ready — an out-of-band event the
+                    // correlation checks must skip past.
+                    if self.chatty_events {
+                        self.outbox.push_back(Envelope::new(
+                            0,
+                            Message::Event(Event::Status { state: "ui:http://127.0.0.1:1234".into() }),
+                        ));
                     }
                 }
                 Message::Request(req) => {
@@ -252,6 +277,15 @@ mod tests {
         let report = run_conformance(&mut s, CONTRACT_VERSION);
         assert!(report.passed(), "failures: {:?}", report.failures().collect::<Vec<_>>());
         assert_eq!(report.checks.len(), 6);
+    }
+
+    #[test]
+    fn a_sidecar_that_emits_async_events_still_passes() {
+        // The kit must skip out-of-band events (e.g. a `ui:<url>` announce) when correlating.
+        let mut s = MockSidecar::good();
+        s.chatty_events = true;
+        let report = run_conformance(&mut s, CONTRACT_VERSION);
+        assert!(report.passed(), "failures: {:?}", report.failures().collect::<Vec<_>>());
     }
 
     #[test]

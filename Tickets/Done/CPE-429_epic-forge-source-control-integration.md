@@ -172,8 +172,11 @@ follow-ups rather than blockers (none is a v1 gate, and none is a filed open tic
   Codeberg, SourceHut, Azure DevOps, …) — each is a manifest + parser, added as demand arises.
 - **Self-hosted-forge** connections and **Tier 2/3 VCS** (hg/svn/p4/fossil, Radicle) — manifest
   follow-ups per the tiered plan.
-- **Process isolation via the repos sidecar** ([[CPE-432]]) — stays Deferred; revisit only if
-  untrusted-repo containment or a long-lived mirror tenant demands it.
+- **Process isolation via the repos sidecar** ([[CPE-432]]) — ~~stays Deferred~~ **completed
+  2026-07-16**: the repos sidecar is now a bundled, host-registered, contract-conformant tenant
+  (its AC3 landed — manifest + registry wiring behind the `sidecar-platform` feature + the conformance
+  kit, relocated to the contract crate, passing against the real process). A bespoke interactive
+  launch UI is still intentionally omitted (native forge supersedes it for v1).
 
 ## Resolution
 Forge integration shipped as a **native explorer feature** for v1 (the deliberate D2 decision):

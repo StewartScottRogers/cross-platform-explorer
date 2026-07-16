@@ -13,7 +13,9 @@
 
 pub mod broker;
 pub mod catalog;
-pub mod conformance;
+/// The contract-conformance kit now lives in the contract crate (CPE-432) so sidecars can run it
+/// without depending on the host. Re-exported here so `sidecar_host::conformance::…` keeps working.
+pub use sidecar_contract::conformance;
 pub mod consent;
 pub mod enablement;
 pub mod errors;

@@ -316,6 +316,10 @@ pub mod codec {
     }
 }
 
+/// The reusable contract-conformance battery (CPE-301). Lives here so any sidecar can prove it
+/// speaks the contract using only this crate — no host dependency.
+pub mod conformance;
+
 #[cfg(test)]
 mod tests {
     use super::*;

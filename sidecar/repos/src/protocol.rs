@@ -5,7 +5,10 @@
 //! stdio. The stdio driver in `main.rs` just pumps envelopes through here. Later slices extend the
 //! request handling (forge browse/clone/sync) on top.
 
-use sidecar_contract::{Capability, Envelope, Hello, Lifecycle, Message, Response, CONTRACT_VERSION};
+use sidecar_contract::{
+    Capability, ContractError, Envelope, ErrorCode, Hello, Lifecycle, Message, Response,
+    CONTRACT_VERSION,
+};
 
 /// The sidecar's stable id (matches its manifest / the host's launch config).
 pub const SIDECAR_ID: &str = "repos";
@@ -50,17 +53,25 @@ pub fn hello() -> Envelope {
 }
 
 /// The base reaction to one inbound message: reach `Ready` after `Welcome`, exit on a rejection /
-/// quit signal / `sidecar.shutdown`, and acknowledge other requests. Forge methods extend the
-/// request arm in later slices.
+/// quit signal / `sidecar.shutdown`, and return a **correlated error Response** for any other request
+/// — no forge method (browse/clone/sync) is implemented yet, so every one is "not found". Answering
+/// an unimplemented method with a clean error (rather than a false `ok`) is what the contract
+/// conformance kit requires; the real methods replace this arm in later slices.
 pub fn on_message(env: Envelope) -> Reaction {
     match env.message {
         Message::Welcome(_) => Reaction::Send(Envelope::new(0, Message::Lifecycle(Lifecycle::Ready))),
         Message::Rejected(_) => Reaction::Exit(1),
         Message::Signal(sidecar_contract::HostSignal::WillQuit) => Reaction::Exit(0),
         Message::Request(req) if req.method == "sidecar.shutdown" => Reaction::Exit(0),
-        Message::Request(_) => Reaction::Send(Envelope::new(
+        Message::Request(req) => Reaction::Send(Envelope::new(
             env.id,
-            Message::Response(Response { result: Ok(serde_json::json!({ "ok": true })) }),
+            Message::Response(Response {
+                result: Err(ContractError::new(
+                    ErrorCode::ToolFailure,
+                    format!("unknown method: {}", req.method),
+                    false,
+                )),
+            }),
         )),
         _ => Reaction::Nothing,
     }
@@ -105,14 +116,19 @@ mod tests {
     }
 
     #[test]
-    fn an_unknown_request_is_acknowledged_not_fatal() {
+    fn an_unknown_request_gets_a_correlated_error_response() {
+        // No forge method is implemented yet, so an unknown method must return a correlated *error*
+        // Response (not a false `ok`) — what the conformance kit's unknown-method check requires.
         let req = Envelope::new(3, Message::Request(Request { method: "forge.something".into(), params: serde_json::Value::Null }));
         match on_message(req) {
             Reaction::Send(env) => {
                 assert_eq!(env.id, 3);
-                assert!(matches!(env.message, Message::Response(_)));
+                match env.message {
+                    Message::Response(r) => assert!(r.result.is_err(), "expected an error result"),
+                    other => panic!("expected a Response, got {other:?}"),
+                }
             }
-            other => panic!("expected an ack Response, got {other:?}"),
+            other => panic!("expected an error Response, got {other:?}"),
         }
     }
 }
