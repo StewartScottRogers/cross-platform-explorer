@@ -2,14 +2,13 @@
 id: CPE-322
 title: "Cross-OS sidecar: macOS/Linux keychain backends, then extend the release channel"
 type: Task
-status: Open
+status: Done
 priority: Medium
 component: Backend
-tags: [resource-blocked, needs-macos-linux]
-# Implementation done + CI-compile-verified on mac/linux; only a runtime round-trip on real
-# hardware remains — hence still parked in Blocked (needs a mac/linux desktop for QA).
+tags: [ready]
 estimate: 4h
 created: 2026-07-13
+closed: 2026-07-16
 ---
 
 ## Summary
@@ -34,8 +33,11 @@ sidecar installers on those platforms until their keychains are wired.
 
 ## Acceptance
 
-- Secrets persist in the native store on macOS and Linux (verified round-trip).
-- The sidecar release channel produces installers on all three OSes.
+- [x] Secrets persist in the native store on macOS and Linux (verified round-trip). *(CI now runs a
+      real `KeyringBackend` round-trip on the macos + ubuntu runners — Keychain + Secret Service —
+      2026-07-16; `test result: ok. 1 passed` on all three OSes.)*
+- [x] The sidecar release channel produces installers on all three OSes. *(v0.28.0-sidecar assets:
+      Windows `.exe`/`.msi`, macOS `.dmg`/`.app`, Linux `.AppImage`/`.deb`/`.rpm`.)*
 
 ## Notes
 Blocked-on nothing external; it's real backend work. Until done, CPE-321 stays Windows-only.
@@ -55,3 +57,24 @@ ubuntu-latest runners**. **Remaining:** (2) a runtime round-trip on a real macOS
 at build time — added to the CI Sidecar job. **The Linux release build (CPE-382) must install the
 same** (`sudo apt-get install libdbus-1-dev pkg-config`). dbus is universal on Linux desktops at
 runtime, so no end-user impact.
+
+## 2026-07-16 — Unblocked + closed: CI is the mac/linux hardware
+The one remaining item (scope 2 — a real keychain round-trip on macOS + Linux) was parked as
+"needs a mac/linux desktop for QA". Realised the **CI runners ARE that hardware**: the sidecar job
+runs on macos-latest + ubuntu-latest. Added `sidecar/host/tests/keyring_roundtrip.rs` — a real
+`KeyringBackend` round-trip (set → get → delete against the native store), `#[ignore]`d so the normal
+run never touches the keychain — and a CI step that runs it per-OS (Linux first starts an unlocked
+gnome-keyring in a `dbus-run-session`). Result: **`test result: ok. 1 passed` on Windows (Credential
+Manager), macOS (Keychain), AND Linux (Secret Service)** — the secrets-in-native-store invariant is
+now proven on all three, not just Windows. Also confirmed scopes 3+4 are already live: the
+release-sidecar channel builds all three OSes with the unix overlay and ships Linux AppImage/deb/rpm,
+macOS dmg, Windows exe/msi. Both acceptance criteria met → Done.
+
+## Resolution
+Cross-OS keychain support is complete and verified. The `KeyringBackend` was already cross-platform
+(only the `keyring` dep was Windows-gated); the per-target deps (macOS `apple-native`, Linux
+`sync-secret-service` + `crypto-rust`) and the widened `cfg` landed earlier. This session added the
+missing piece — an automated real-OS round-trip test that runs on GitHub's macOS + Linux hosts, so
+"secrets only in the OS keychain" (ADR 0001 / CPE-268) is now enforced *and demonstrated* on every
+platform. The sidecar release channel already ships installers for all three. Files:
+`sidecar/host/tests/keyring_roundtrip.rs` (new), `.github/workflows/ci.yml`.
