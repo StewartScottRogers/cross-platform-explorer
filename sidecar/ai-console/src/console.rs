@@ -937,7 +937,7 @@ impl ConsoleState {
     const KNOWN_RESELLERS: &[&str] = &[
         "openrouter", "together", "fireworks", "groq", "deepinfra", "novita", "aimlapi",
         "wavespeed", "github-models", "cerebras", "sambanova", "nebius", "hyperbolic",
-        "mistral", "deepseek", "cohere", "requesty", "glama", "vercel",
+        "mistral", "deepseek", "cohere", "requesty", "glama", "vercel", "huggingface", "baseten",
     ];
 
     /// `GET /api/reseller-keys` → the resellers that have a stored key (names only, never a value).

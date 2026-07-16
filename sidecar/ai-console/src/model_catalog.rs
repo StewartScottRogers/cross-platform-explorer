@@ -416,7 +416,7 @@ mod tests {
         for expected in [
             "together", "groq", "fireworks", "deepinfra", "novita", "aimlapi",
             "cerebras", "sambanova", "nebius", "hyperbolic",
-            "mistral", "deepseek", "cohere", "requesty", "glama", "vercel",
+            "mistral", "deepseek", "cohere", "requesty", "glama", "vercel", "huggingface", "baseten",
         ] {
             assert!(ids.contains(&expected.to_string()), "{expected} should be launch-capable; got {ids:?}");
         }
