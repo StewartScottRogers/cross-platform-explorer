@@ -64,6 +64,12 @@ pub fn models_endpoint(reseller: &str) -> Option<ModelsEndpoint> {
         bearer("https://api.deepseek.com/models")
     } else if is("cohere") {
         bearer("https://api.cohere.ai/compatibility/v1/models")
+    } else if is("requesty") {
+        bearer("https://router.requesty.ai/v1/models")
+    } else if is("glama") {
+        bearer("https://glama.ai/api/gateway/openai/v1/models")
+    } else if is("vercel") {
+        bearer("https://ai-gateway.vercel.sh/v1/models")
     } else {
         None
     }
@@ -144,7 +150,7 @@ mod tests {
         for r in [
             "openrouter", "together", "fireworks", "groq", "deepinfra", "novita", "aimlapi",
             "wavespeed", "github-models", "cerebras", "sambanova", "nebius", "hyperbolic",
-            "mistral", "deepseek", "cohere",
+            "mistral", "deepseek", "cohere", "requesty", "glama", "vercel",
         ] {
             let ep = models_endpoint(r).unwrap_or_else(|| panic!("{r} should be allow-listed"));
             assert!(ep.url.starts_with("https://"), "{r} must be https");

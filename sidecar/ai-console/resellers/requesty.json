@@ -1,0 +1,14 @@
+{
+  "schema_version": 1,
+  "id": "requesty",
+  "name": "Requesty",
+  "models_endpoint": "https://router.requesty.ai/v1/models",
+  "auth": "bearer",
+  "api_hosts": [
+    "router.requesty.ai"
+  ],
+  "normalizer": "openai",
+  "web_base": "https://router.requesty.ai/v1",
+  "protocol": "openai",
+  "launch_base_url": "https://router.requesty.ai/v1"
+}
