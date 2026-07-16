@@ -85,6 +85,12 @@ pub fn plan_sync(state: &RepoState, policy: &SyncPolicy) -> SyncPlan {
         // Only local moved → push.
         (false, true) => plan.actions.push(SyncAction::Push),
         // Both moved (diverged) → reconcile per policy, then push.
+        (true, true) if state.dirty => {
+            // git merge/rebase both REFUSE to run with uncommitted changes, so don't hand back a plan
+            // that's guaranteed to fail — block until the tree is clean (CPE-485).
+            plan.blocked =
+                Some("commit or stash your changes before reconciling a diverged history".into());
+        }
         (true, true) => match policy.on_diverge {
             DivergePolicy::Manual => {
                 plan.blocked =
@@ -151,6 +157,23 @@ mod tests {
         let p = plan_sync(&state(2, 2, false), &policy);
         assert!(p.actions.is_empty());
         assert!(p.blocked.as_deref().unwrap().contains("diverged"));
+    }
+
+    #[test]
+    fn diverged_on_a_dirty_tree_is_blocked_not_a_doomed_merge() {
+        // git merge/rebase can't run with uncommitted changes, so a diverged+dirty sync must block
+        // rather than plan steps that will fail (CPE-485).
+        for policy in [
+            SyncPolicy::default(), // Merge
+            SyncPolicy { on_diverge: DivergePolicy::Rebase, allow_force: false },
+        ] {
+            let p = plan_sync(&state(2, 3, true), &policy);
+            assert!(p.actions.is_empty(), "no doomed actions on a dirty diverged tree");
+            assert!(!p.conflicts_possible);
+            assert!(p.blocked.as_deref().unwrap().contains("commit or stash"));
+        }
+        // Clean diverged still plans normally.
+        assert!(!plan_sync(&state(2, 3, false), &SyncPolicy::default()).actions.is_empty());
     }
 
     #[test]
