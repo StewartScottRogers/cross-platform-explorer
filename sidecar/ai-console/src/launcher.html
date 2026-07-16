@@ -59,12 +59,14 @@
   /* Model picker combobox (CPE-460) — a real dropdown, type-to-filter + a visible ▾ affordance. */
   .model-combo { position: relative; display: flex; align-items: stretch; }
   .model-combo #model { flex: 1; min-width: 0; }
-  #model-toggle { flex: 0 0 auto; width: 24px; border: 1px solid var(--line, #555); border-left: 0;
+  #model-toggle { flex: 0 0 auto; width: 24px; border: 1px solid var(--line); border-left: 0;
                   background: rgba(128,128,128,0.12); color: inherit; cursor: pointer; font-size: 11px; }
   #model-toggle:hover { background: rgba(128,128,128,0.22); }
+  /* Use the launcher's system-color theming (Canvas/CanvasText) so the menu is legible in BOTH light
+     and dark — a hardcoded dark background was invisible (black-on-black) on the light theme (CPE-463). */
   #model-menu { position: absolute; top: 100%; left: 0; right: 0; z-index: 40; max-height: 300px;
-                overflow-y: auto; margin-top: 2px; background: var(--bg, #1e1e1e);
-                border: 1px solid var(--line, #555); border-radius: 4px; box-shadow: 0 8px 24px rgba(0,0,0,0.4); }
+                overflow-y: auto; margin-top: 2px; background: Canvas; color: CanvasText;
+                border: 1px solid var(--line); border-radius: 4px; box-shadow: 0 8px 24px rgba(0,0,0,0.4); }
   .model-opt { display: block; width: 100%; text-align: left; border: 0; background: transparent;
                color: inherit; cursor: pointer; padding: 5px 9px; font-size: 12px; white-space: nowrap;
                overflow: hidden; text-overflow: ellipsis; }

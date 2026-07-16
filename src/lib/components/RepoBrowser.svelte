@@ -162,20 +162,22 @@
 <style>
   .repo-overlay { position: fixed; inset: 0; background: rgba(0,0,0,0.45); display: flex;
     align-items: center; justify-content: center; z-index: 60; }
+  /* Use the explorer's theme tokens (app.css) so the dialog is legible on the light theme — the old
+     hardcoded-dark fallbacks were light-text-on-light / invisible (CPE-463). */
   .repo-panel { width: min(680px, 92vw); max-height: 82vh; display: flex; flex-direction: column;
-    background: var(--bg, #1e1e1e); color: var(--fg, #eee); border: 1px solid var(--line, #444);
-    border-radius: 8px; box-shadow: 0 12px 40px rgba(0,0,0,0.5); overflow: hidden; }
+    background: var(--surface); color: var(--text); border: 1px solid var(--border-strong);
+    border-radius: 8px; box-shadow: 0 12px 40px rgba(0,0,0,0.35); overflow: hidden; }
   .repo-head { display: flex; align-items: center; justify-content: space-between; padding: 10px 14px;
-    border-bottom: 1px solid var(--line, #444); font-weight: 600; }
+    border-bottom: 1px solid var(--border); font-weight: 600; }
   .repo-x { border: 0; background: transparent; color: inherit; font-size: 20px; cursor: pointer; line-height: 1; }
   .repo-form { display: flex; gap: 6px; padding: 10px 14px; flex-wrap: wrap; }
   .repo-input { flex: 1 1 220px; min-width: 0; }
   .repo-token { flex: 1 1 160px; min-width: 0; }
-  .repo-form input, .repo-form select { padding: 5px 8px; background: var(--input-bg, #2a2a2a);
-    color: inherit; border: 1px solid var(--line, #555); border-radius: 4px; }
+  .repo-form input, .repo-form select { padding: 5px 8px; background: var(--surface-alt);
+    color: inherit; border: 1px solid var(--border); border-radius: 4px; }
   .repo-go { padding: 5px 14px; cursor: pointer; }
   .repo-crumbs { padding: 4px 14px; font-size: 12px; opacity: 0.75; }
-  .repo-crumb { border: 0; background: transparent; color: var(--accent, #6ab0ff); cursor: pointer; padding: 0; }
+  .repo-crumb { border: 0; background: transparent; color: var(--accent); cursor: pointer; padding: 0; }
   .repo-list { overflow-y: auto; padding: 4px 8px 10px; }
   .repo-row { display: flex; align-items: center; gap: 8px; width: 100%; text-align: left;
     border: 0; background: transparent; color: inherit; cursor: pointer; padding: 6px 8px; border-radius: 4px; }
@@ -185,6 +187,6 @@
   .repo-size { font-size: 11px; opacity: 0.55; }
   .repo-empty { padding: 20px 14px; opacity: 0.6; text-align: center; }
   .repo-error { padding: 14px; color: #e0706b; }
-  .repo-clonemsg { padding: 4px 14px; font-size: 12px; color: var(--accent, #6ab0ff); }
+  .repo-clonemsg { padding: 4px 14px; font-size: 12px; color: var(--accent); }
   .repo-remember { display: flex; align-items: center; gap: 4px; font-size: 12px; opacity: 0.8; white-space: nowrap; }
 </style>

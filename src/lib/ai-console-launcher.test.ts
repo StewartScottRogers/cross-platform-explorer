@@ -368,6 +368,13 @@ describe("AI Console launcher — Model picker combobox (CPE-454/460)", () => {
     ],
   };
 
+  it("themes the dropdown with system colors, not a hardcoded dark bg (CPE-463)", () => {
+    // Regression guard for the "black rectangle": the menu must use Canvas/CanvasText so it's legible
+    // on the light theme (the launcher themes with system colors, not a `--bg` var).
+    expect(HTML).toMatch(/#model-menu\b[\s\S]*?background:\s*Canvas;\s*color:\s*CanvasText/);
+    expect(HTML).not.toContain("#1e1e1e"); // the old hardcoded dark fallback is gone
+  });
+
   it("opens a real dropdown of models, filters, and picks one into the field (CPE-460)", async () => {
     const { w } = await mountLauncher((path) => (path.startsWith("/api/models") ? catalog : {}));
     await w.populateModels();
