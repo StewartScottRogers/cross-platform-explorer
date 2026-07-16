@@ -5,9 +5,11 @@
 //! **both directions** — pull what's remote, push what's local. Pure, so the exact plan is
 //! unit-tested; the sidecar executes it by shelling out to `git`.
 //!
-//! **Safe by default (D3):** it never force-pushes unless `allow_force` is explicitly set, it refuses
-//! to plan through a diverged history under `Manual`, and it surfaces conflict risk + dirty-tree
-//! warnings rather than clobbering. It is a *dry-run description* — nothing is executed here.
+//! **Safe by default (D3):** the planner **never force-pushes** (there is no `SyncAction::ForcePush`)
+//! — after a rebase the local branch is strictly ahead of the ancestor remote, so a normal `Push`
+//! suffices. It refuses to plan through a diverged history under `Manual`, blocks a diverged
+//! reconcile on a dirty tree (CPE-485), and surfaces conflict risk + dirty-tree warnings rather than
+//! clobbering. It is a *dry-run description* — nothing is executed here.
 
 use crate::status::RepoState;
 
@@ -26,7 +28,10 @@ pub enum DivergePolicy {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SyncPolicy {
     pub on_diverge: DivergePolicy,
-    /// Allow a force-push (dangerous — overwrites remote history). Off by default.
+    /// **Reserved / not yet wired.** Intended for a future, guarded "mirror-overwrite" mode that
+    /// force-pushes local over remote history. The current planner never force-pushes (no
+    /// `SyncAction::ForcePush`), so setting this has no effect today — it exists so the policy shape
+    /// is stable when that dangerous mode is added behind an explicit opt-in. Off by default.
     pub allow_force: bool,
 }
 
