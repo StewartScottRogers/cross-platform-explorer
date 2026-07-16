@@ -15,7 +15,7 @@ updates). Read + drag only; agent dispatch is wave 2 (SPR-04).
 
 ## Tickets
 Wave-1 board foundation of [[CPE-503]] (each carries `sprint: SPR-03`):
-- [ ] CPE-520 — Backend: read `Tickets/` as cards + move a card between columns
+- [x] CPE-520 — Backend: read `Tickets/` as cards + move a card between columns
 - [ ] CPE-521 — Kanban UI: columns + drag a card to change status
 
 Order: CPE-520 (backend) → CPE-521 (UI).
