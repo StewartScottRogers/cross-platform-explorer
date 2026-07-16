@@ -11,6 +11,26 @@ menus, and the AI Console's own menus in `sidecar/ai-console/src/launcher.html`.
 > Not covered: the **CLI** action menus (the ASCII boxes in `.claude/commands/*`), which have their
 > own spec in `.claude/commands/menu-render.md`. Different medium, different rules.
 
+## How menus are built (two shared implementations)
+
+There are two, both conforming to everything below — reuse them, don't invent a third:
+
+1. **Dropdowns** (open below a trigger) use the **global** classes in `src/app.css`:
+   `.menu` (container) · `.menu button` (item) · `.menu-sep` (separator) · `.menu .check` (a ✓ in
+   `var(--accent)` marking the active value). Used by `CommandBar` (sort/view/filter) and `MenuBar`.
+   New dropdowns should use these classes — no local copy.
+2. **Context menus** (open at the cursor) use the `.ctx` + `.row` pattern, currently defined
+   per-component (`ContextMenu`, `AgentMenu`, `TabMenu`, `PreviewPane`'s `.text-ctx`). They are
+   consistent with each other and with the table below. *(Follow-up: extract this into shared global
+   classes like `.menu`, so the copies collapse to one — tracked, not required for compliance.)*
+
+**Active/selected value:** a menu that tracks a current choice (sort key, view mode, filter, locale)
+marks it — a leading `✓` in `var(--accent)` (the `.check` element), or `background: var(--selection)`
+on the row. Do this consistently.
+
+**Audit (2026-07-16):** every menu conforms after removing the `AgentMenu` red. Dropdowns via the
+global `.menu`; context menus via `.ctx`; the console's `launcher.html` menus via system colors.
+
 ---
 
 ## Cross-platform first

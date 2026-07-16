@@ -116,8 +116,10 @@
   .sb-thumb:active { cursor: grabbing; background: #a5a5a5; }
   /* "Manage agents" dropdown + Help panel (CPE-390) */
   .menu-wrap { position: relative; display: inline-block; }
+  /* System-color theming (Canvas/CanvasText) + var(--line) border, matching #model-menu, so both
+     console menus are legible in light + dark and consistent with each other. See docs/design/MENUS.md. */
   .menu { position: absolute; top: calc(100% + 4px); right: 0; z-index: 40; min-width: 230px;
-          background: Canvas; color: CanvasText; border: 1px solid rgba(128,128,128,.55);
+          background: Canvas; color: CanvasText; border: 1px solid var(--line);
           border-radius: 8px; box-shadow: 0 12px 30px rgba(0,0,0,.3); padding: 5px; }
   .menu[hidden] { display: none; }
   .menu-item { display: flex; align-items: center; gap: 8px; width: 100%; text-align: left; height: 30px;
