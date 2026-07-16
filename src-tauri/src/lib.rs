@@ -3424,6 +3424,198 @@ fn forge_clone(
     }
 }
 
+// --- Generic Git provider + consent-based host admission (CPE-498) ------------------------------
+
+/// Where the Generic-Git egress allow-list persists: a JSON array of admitted hostnames under the app
+/// data dir. A host lands here ONLY after the user explicitly consents in the UI; it is the host-side
+/// gate `forge_clone_url` checks before letting git reach an arbitrary (self-hosted) host — no wildcard,
+/// no silent admission (threat-model Q5).
+#[cfg(feature = "sidecar-platform")]
+fn admitted_hosts_path(app: &tauri::AppHandle) -> Result<std::path::PathBuf, String> {
+    use tauri::Manager;
+    let dir = app.path().app_data_dir().map_err(|_| "no app data dir".to_string())?;
+    Ok(dir.join("forge-admitted-hosts.json"))
+}
+
+/// The consented Generic-Git egress allow-list (normalized hosts). Missing/corrupt ⇒ empty (fail
+/// closed: an unreadable list admits nothing).
+#[cfg(feature = "sidecar-platform")]
+fn load_admitted_hosts(app: &tauri::AppHandle) -> std::collections::BTreeSet<String> {
+    let path = match admitted_hosts_path(app) {
+        Ok(p) => p,
+        Err(_) => return Default::default(),
+    };
+    std::fs::read_to_string(&path)
+        .ok()
+        .and_then(|raw| serde_json::from_str::<Vec<String>>(&raw).ok())
+        .map(|v| v.into_iter().map(|h| repos::normalize_host(&h)).collect())
+        .unwrap_or_default()
+}
+
+#[cfg(feature = "sidecar-platform")]
+fn save_admitted_hosts(
+    app: &tauri::AppHandle,
+    hosts: &std::collections::BTreeSet<String>,
+) -> Result<(), String> {
+    let path = admitted_hosts_path(app)?;
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+    }
+    let json = serde_json::to_string_pretty(&hosts.iter().collect::<Vec<_>>())
+        .map_err(|e| e.to_string())?;
+    std::fs::write(&path, json).map_err(|e| e.to_string())
+}
+
+/// What the Generic-Git consent prompt needs: the parsed host, transport, credential-stripped URL,
+/// and whether the host is already admitted.
+#[cfg(feature = "sidecar-platform")]
+#[derive(serde::Serialize)]
+struct GenericRemoteInfo {
+    host: String,
+    /// "https" | "ssh".
+    scheme: String,
+    /// The remote with any embedded credentials stripped — safe to display.
+    url: String,
+    admitted: bool,
+}
+
+/// Parse an arbitrary git URL for the Generic-Git add flow (CPE-498): returns its host + a
+/// credential-stripped URL + whether that host is already in the consent allow-list. Read-only — it
+/// never admits anything. An unsupported transport is an error the UI can show.
+#[cfg(feature = "sidecar-platform")]
+#[tauri::command]
+fn forge_generic_remote(app: tauri::AppHandle, url: String) -> Result<GenericRemoteInfo, String> {
+    let r = repos::parse_remote(&url)
+        .ok_or_else(|| "Not a supported git URL (use https://, ssh://, or user@host:path).".to_string())?;
+    let admitted = load_admitted_hosts(&app).contains(&r.host);
+    Ok(GenericRemoteInfo {
+        scheme: match r.scheme {
+            repos::RemoteScheme::Https => "https",
+            repos::RemoteScheme::Ssh => "ssh",
+        }
+        .to_string(),
+        host: r.host,
+        url: r.url,
+        admitted,
+    })
+}
+
+/// The Generic-Git egress allow-list — hosts the user has consented to reach (CPE-498).
+#[cfg(feature = "sidecar-platform")]
+#[tauri::command]
+fn forge_admitted_hosts(app: tauri::AppHandle) -> Vec<String> {
+    load_admitted_hosts(&app).into_iter().collect()
+}
+
+/// Admit ONE host after explicit user consent (CPE-498). Never a wildcard and never a URL: exactly the
+/// normalized host is stored, so consenting to `a.example.com` never admits `b.example.com`. Idempotent.
+#[cfg(feature = "sidecar-platform")]
+#[tauri::command]
+fn forge_admit_host(app: tauri::AppHandle, host: String) -> Result<(), String> {
+    let host = repos::normalize_host(&host);
+    if host.is_empty()
+        || host.contains('*')
+        || host.contains('/')
+        || host.contains(char::is_whitespace)
+    {
+        return Err("Refusing to admit an invalid or wildcard host.".to_string());
+    }
+    let mut hosts = load_admitted_hosts(&app);
+    hosts.insert(host);
+    save_admitted_hosts(&app, &hosts)
+}
+
+/// Revoke a host from the Generic-Git allow-list (management; CPE-498).
+#[cfg(feature = "sidecar-platform")]
+#[tauri::command]
+fn forge_forget_host(app: tauri::AppHandle, host: String) -> Result<(), String> {
+    let host = repos::normalize_host(&host);
+    let mut hosts = load_admitted_hosts(&app);
+    hosts.remove(&host);
+    save_admitted_hosts(&app, &hosts)
+}
+
+/// Build the hardened `git clone` argv for an arbitrary git URL (Generic Git, CPE-498). Pure and
+/// testable: parse → (host, cred-stripped url), refuse a non-admitted host, inject an https token as
+/// userinfo, then defer to the repos crate's hardened builder. `admitted` is passed in so this stays
+/// pure — the command below checks the persisted allow-list.
+#[cfg(feature = "sidecar-platform")]
+fn build_generic_clone(
+    url: &str,
+    target_dir: &str,
+    token: Option<&str>,
+    admitted: bool,
+) -> Result<Vec<String>, String> {
+    let r = repos::parse_remote(url)
+        .ok_or_else(|| "Not a supported git URL (use https://, ssh://, or user@host:path).".to_string())?;
+    if !admitted {
+        return Err(format!(
+            "Host '{}' hasn't been granted access. Grant it, then try again.",
+            r.host
+        ));
+    }
+    // A token applies only to https (ssh authenticates via the agent/keys). Injected as userinfo and
+    // NEVER logged; scrubbed from any error by the caller.
+    let clone_url = match (r.scheme, token) {
+        (repos::RemoteScheme::Https, Some(t)) => {
+            if !is_safe_token(t) {
+                return Err("The access token contains unsupported characters.".to_string());
+            }
+            r.url.replacen("https://", &format!("https://{t}@"), 1)
+        }
+        _ => r.url,
+    };
+    repos::build_clone_args(&repos::CloneRequest {
+        url: clone_url,
+        target_dir: target_dir.to_string(),
+        depth: None,
+        branch: None,
+    })
+    .map_err(|e| match e {
+        repos::CloneError::BadUrl => "The clone URL was rejected as unsafe.".to_string(),
+        repos::CloneError::BadTarget => {
+            "The target must be an absolute path to a fresh, non-repo folder.".to_string()
+        }
+        repos::CloneError::BadRef => "The requested branch name was rejected.".to_string(),
+    })
+}
+
+/// Clone an ARBITRARY https/ssh git URL into `target_dir` (Generic Git, CPE-498) — the self-hosted /
+/// unknown-forge path. Gated on the URL's host being in the consent allow-list; a non-admitted host is
+/// refused (no silent admission). git runs with the repos crate's hardened argv; an https `token` is
+/// injected for a private clone and is scrubbed from any error text.
+#[cfg(feature = "sidecar-platform")]
+#[tauri::command]
+fn forge_clone_url(
+    app: tauri::AppHandle,
+    url: String,
+    target_dir: String,
+    token: Option<String>,
+) -> Result<String, String> {
+    let admitted = repos::parse_remote(&url)
+        .map(|r| load_admitted_hosts(&app).contains(&r.host))
+        .unwrap_or(false);
+    let args = build_generic_clone(&url, &target_dir, token.as_deref(), admitted)?;
+    let output = std::process::Command::new("git")
+        .args(&args)
+        .output()
+        .map_err(|e| format!("Couldn't run git: {e}"))?;
+    if output.status.success() {
+        Ok(format!("Cloned into {target_dir}."))
+    } else {
+        let mut stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        if let Some(t) = token.as_deref() {
+            if !t.is_empty() {
+                stderr = stderr.replace(t, "***");
+            }
+        }
+        if stderr.is_empty() {
+            stderr = format!("git clone failed (exit {:?}).", output.status.code());
+        }
+        Err(stderr)
+    }
+}
+
 /// Keychain "service" for forge tokens (CPE-439) — kept apart from sidecar secrets so a GitHub
 /// token never collides with a sidecar's namespace. The account is the provider id.
 #[cfg(feature = "sidecar-platform")]
@@ -3719,6 +3911,16 @@ pub fn run() {
             #[cfg(feature = "sidecar-platform")]
             forge_clone,
             #[cfg(feature = "sidecar-platform")]
+            forge_generic_remote,
+            #[cfg(feature = "sidecar-platform")]
+            forge_admitted_hosts,
+            #[cfg(feature = "sidecar-platform")]
+            forge_admit_host,
+            #[cfg(feature = "sidecar-platform")]
+            forge_forget_host,
+            #[cfg(feature = "sidecar-platform")]
+            forge_clone_url,
+            #[cfg(feature = "sidecar-platform")]
             forge_set_token,
             #[cfg(feature = "sidecar-platform")]
             forge_get_token,
@@ -3860,6 +4062,56 @@ mod agent_watch_tests {
         // A token with url-unsafe chars is refused — and its value is never echoed in the error.
         let e = build_git_clone("github", "a/b", "/tmp/x", Some("bad tok@evil")).unwrap_err();
         assert!(!e.contains("bad tok@evil"));
+    }
+
+    // --- Generic Git provider + consent-gated admission (CPE-498) -----------------------
+    use super::build_generic_clone;
+
+    #[test]
+    fn generic_clone_refuses_a_non_admitted_host() {
+        // Even a perfectly valid URL is refused until its host is admitted (no silent admission).
+        let e = build_generic_clone("https://git.acme.io/o/r.git", "/tmp/r", None, false).unwrap_err();
+        assert!(e.contains("git.acme.io"));
+        assert!(e.contains("granted access"));
+    }
+
+    #[test]
+    fn generic_clone_of_an_admitted_host_builds_hardened_argv() {
+        let args =
+            build_generic_clone("https://git.acme.io/o/r.git", "/tmp/r", None, true).unwrap();
+        let j = args.join(" ");
+        assert!(j.contains("-c protocol.ext.allow=never"));
+        assert!(j.contains("-c protocol.file.allow=never"));
+        let dd = args.iter().position(|a| a == "--").unwrap();
+        assert_eq!(&args[dd + 1], "https://git.acme.io/o/r.git");
+    }
+
+    #[test]
+    fn generic_clone_injects_an_https_token_as_userinfo() {
+        let args =
+            build_generic_clone("https://git.acme.io/o/r.git", "/tmp/r", Some("tok_123"), true)
+                .unwrap();
+        let dd = args.iter().position(|a| a == "--").unwrap();
+        assert_eq!(&args[dd + 1], "https://tok_123@git.acme.io/o/r.git");
+    }
+
+    #[test]
+    fn generic_clone_does_not_inject_a_token_for_ssh() {
+        // ssh authenticates via the agent — the token is ignored, not embedded in the URL.
+        let args =
+            build_generic_clone("ssh://git@git.acme.io/o/r.git", "/tmp/r", Some("tok_123"), true)
+                .unwrap();
+        assert!(args.iter().all(|a| !a.contains("tok_123")));
+    }
+
+    #[test]
+    fn generic_clone_rejects_bad_urls_and_unsafe_tokens() {
+        assert!(build_generic_clone("git://git.acme.io/o/r", "/tmp/r", None, true).is_err());
+        assert!(build_generic_clone("ext::sh -c evil", "/tmp/r", None, true).is_err());
+        // An unsafe token is refused and never echoed.
+        let e = build_generic_clone("https://git.acme.io/o/r.git", "/tmp/r", Some("bad tok@x"), true)
+            .unwrap_err();
+        assert!(!e.contains("bad tok@x"));
     }
 }
 

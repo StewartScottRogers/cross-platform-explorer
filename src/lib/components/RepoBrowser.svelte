@@ -69,6 +69,7 @@
   /** Clone the current repo into a user-chosen folder (CPE-436) via the host `forge_clone` command
       (hardened git args, allow-listed host). Clones into `<chosen>/<repo-name>`. */
   async function clone(): Promise<void> {
+    if (isGeneric) return cloneGeneric();
     const r = repo.trim();
     if (!r.includes("/")) { error = "Enter a repository as owner/name."; return; }
     const dir = await openFolderDialog({ directory: true, title: `Clone ${r} into which folder?` });
@@ -79,6 +80,75 @@
     try {
       await withBusy(() => invoke("forge_clone", { provider, repo: r, targetDir: target, token: token.trim() || null }));
       cloneMsg = `Cloned to ${target}`;
+    } catch (e) {
+      cloneMsg = "";
+      error = "Clone failed: " + (e instanceof Error ? e.message : String(e));
+    } finally {
+      cloning = false;
+    }
+  }
+
+  // --- Generic Git provider (CPE-498): clone/sync ANY https/ssh URL, incl. self-hosted -----------
+  $: isGeneric = provider === "generic";
+
+  /** A clone held pending the user's explicit consent to reach a not-yet-admitted host. Cloning from
+      a self-hosted / unknown host is gated on admitting exactly that host (no wildcard). */
+  let consent: { host: string; url: string; target: string; token: string | null } | null = null;
+
+  /** Last path segment of a git URL → the default clone folder name. */
+  function repoNameFromUrl(url: string): string {
+    const seg = url.trim().replace(/\.git$/i, "").replace(/[\\/]+$/, "").split(/[\\/:]/).pop();
+    return seg || "repo";
+  }
+
+  /** Clone via the Generic-Git path: parse the URL host-side, pick a target folder, then clone —
+      pausing for consent first if the host isn't yet admitted to the egress allow-list. */
+  async function cloneGeneric(): Promise<void> {
+    const url = repo.trim();
+    if (!url) { error = "Enter a git URL (https://… or git@host:…)."; return; }
+    error = ""; cloneMsg = "";
+    let info: { host: string; scheme: string; url: string; admitted: boolean };
+    try {
+      info = await invoke("forge_generic_remote", { url });
+    } catch (e) {
+      error = e instanceof Error ? e.message : String(e);
+      return;
+    }
+    const dir = await openFolderDialog({ directory: true, title: "Clone into which folder?" });
+    if (!dir || typeof dir !== "string") return;
+    const target = dir.replace(/[\\/]$/, "") + "/" + repoNameFromUrl(info.url);
+    // A token only applies to https (ssh uses the agent/keys).
+    const tok = info.scheme === "https" && token.trim() ? token.trim() : null;
+    if (!info.admitted) {
+      consent = { host: info.host, url, target, token: tok }; // gate egress on explicit consent
+      return;
+    }
+    await runGenericClone(info.host, url, target, tok);
+  }
+
+  /** Admit the pending host (explicit consent given), then clone. */
+  async function grantAndClone(): Promise<void> {
+    if (!consent) return;
+    const c = consent;
+    consent = null;
+    try {
+      await invoke("forge_admit_host", { host: c.host });
+    } catch (e) {
+      error = "Couldn't grant access: " + (e instanceof Error ? e.message : String(e));
+      return;
+    }
+    await runGenericClone(c.host, c.url, c.target, c.token);
+  }
+
+  async function runGenericClone(host: string, url: string, target: string, tok: string | null): Promise<void> {
+    cloning = true; cloneMsg = `Cloning → ${target}…`; error = "";
+    try {
+      await withBusy(() => invoke("forge_clone_url", { url, targetDir: target, token: tok }));
+      cloneMsg = `Cloned to ${target}`;
+      // Per-connection credential: remember the token keyed by host (CPE-439/498). Best-effort.
+      try {
+        if (remember && tok) await invoke("forge_set_token", { provider: host, token: tok });
+      } catch { /* keychain unavailable */ }
     } catch (e) {
       cloneMsg = "";
       error = "Clone failed: " + (e instanceof Error ? e.message : String(e));
@@ -104,9 +174,11 @@
       ? cloneMsg
       : loading
         ? "Loading…"
-        : loaded
+        : loaded && !isGeneric
           ? `${entries.length} item${entries.length === 1 ? "" : "s"}`
-          : "Pick a provider, enter owner/name, then Browse.";
+          : isGeneric
+            ? "Enter any git URL and Clone. In-app browse isn't available for a generic remote — clone, then sync locally."
+            : "Pick a provider, enter owner/name, then Browse.";
   $: statusKind = error ? "error" : cloneMsg ? "ok" : "";
 </script>
 
@@ -127,34 +199,56 @@
             <option value="gitlab">GitLab</option>
             <option value="bitbucket">Bitbucket</option>
             <option value="codeberg">Codeberg</option>
+            <option value="generic">Generic Git (any URL)</option>
           </select>
         </label>
         <label class="repo-field grow">
-          <span>Repository</span>
+          <span>{isGeneric ? "Git URL" : "Repository"}</span>
           <input
-            placeholder="owner/name  (e.g. tauri-apps/tauri)"
+            placeholder={isGeneric ? "https://host/owner/repo.git  or  git@host:owner/repo.git" : "owner/name  (e.g. tauri-apps/tauri)"}
             bind:value={repo}
             spellcheck="false"
-            on:keydown={(e) => e.key === "Enter" && browse("")}
+            on:keydown={(e) => e.key === "Enter" && (isGeneric ? clone() : browse(""))}
           />
         </label>
         <label class="repo-field">
-          <span>Token <em>(private repos)</em></span>
+          <span>Token <em>({isGeneric ? "https only" : "private repos"})</em></span>
           <input type="password" placeholder="token — optional" bind:value={token} />
         </label>
-        <button class="repo-btn primary" on:click={() => browse("")} disabled={loading}>
-          {loading ? "Browsing…" : "Browse"}
-        </button>
-        <button class="repo-btn" on:click={clone} disabled={cloning} title="Clone this repo to a local folder">
+        {#if !isGeneric}
+          <button class="repo-btn primary" on:click={() => browse("")} disabled={loading}>
+            {loading ? "Browsing…" : "Browse"}
+          </button>
+        {/if}
+        <button class="repo-btn" class:primary={isGeneric} on:click={clone} disabled={cloning} title="Clone this repository to a local folder">
           {cloning ? "Cloning…" : "Clone"}
         </button>
       </div>
-      <label class="repo-remember" title="Save this token in the OS keychain for next time">
-        <input type="checkbox" bind:checked={remember} on:change={syncToken} /> Remember token for {provider}
-      </label>
+      {#if !isGeneric}
+        <label class="repo-remember" title="Save this token in the OS keychain for next time">
+          <input type="checkbox" bind:checked={remember} on:change={syncToken} /> Remember token for {provider}
+        </label>
+      {:else}
+        <label class="repo-remember" title="Save this token in the OS keychain, keyed by the host">
+          <input type="checkbox" bind:checked={remember} /> Remember token for this host
+        </label>
+      {/if}
     </div>
 
     <div class="repo-status" class:error={statusKind === "error"} class:ok={statusKind === "ok"}>{statusText}</div>
+
+    {#if consent}
+      <div class="repo-consent">
+        <div class="repo-consent-text">
+          Allow this app to connect to <b>{consent.host}</b>? Cloning from a self-hosted or unknown host
+          needs your explicit consent — only this exact host is added to the allow-list (no wildcard).
+        </div>
+        <div class="repo-consent-actions">
+          <button class="repo-btn" on:click={() => (consent = null)}>Cancel</button>
+          <button class="repo-btn primary" on:click={grantAndClone}>Grant &amp; clone</button>
+        </div>
+      </div>
+    {/if}
 
     {#if loaded && !error}
       <div class="repo-crumbs">
@@ -164,7 +258,14 @@
     {/if}
 
     <div class="repo-list">
-      {#if loading}
+      {#if isGeneric}
+        <div class="repo-empty repo-generic-hint">
+          <Icon name="code" size={28} />
+          <p><b>Generic Git</b> clones any HTTPS or SSH remote — including self-hosted forges.</p>
+          <p>Paste a URL above and click <b>Clone</b>. The first time you reach a new host you'll be
+            asked to grant access to it. Once cloned, use <b>Pull / Push / Sync…</b> in the status bar.</p>
+        </div>
+      {:else if loading}
         <div class="repo-empty">Loading…</div>
       {:else if error}
         <!-- The full error is shown in the status line above; keep the body generic so it isn't duplicated. -->
@@ -235,6 +336,16 @@
 
   .repo-remember { display: flex; align-items: center; gap: 6px; font-size: 12px; opacity: .8;
     white-space: nowrap; }
+
+  /* Generic-Git host consent (CPE-498): a distinct band naming the host before any egress. */
+  .repo-consent { display: flex; align-items: center; gap: 14px; padding: 10px 14px;
+    background: var(--surface-alt); border-bottom: 1px solid var(--border-strong); }
+  .repo-consent-text { flex: 1; font-size: 12px; line-height: 1.45; }
+  .repo-consent-actions { display: flex; gap: 8px; flex: 0 0 auto; }
+
+  .repo-generic-hint { display: flex; flex-direction: column; align-items: center; gap: 8px;
+    max-width: 460px; margin: 0 auto; line-height: 1.5; }
+  .repo-generic-hint p { margin: 0; }
 
   /* Status line — the launcher's #msg equivalent. */
   .repo-status { padding: 6px 14px; font-size: 12px; min-height: 20px; opacity: .85;
