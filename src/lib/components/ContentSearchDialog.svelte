@@ -39,6 +39,12 @@
 
   $: groups = groupMatches(result.matches);
 
+  // Narrow the result files by name/path on big result sets (CPE-577). Client-side; empty = all.
+  let resultFilter = "";
+  $: shownGroups = resultFilter.trim()
+    ? groups.filter((g) => g.path.toLowerCase().includes(resultFilter.trim().toLowerCase()))
+    : groups;
+
   // Collapse a file's matches on big result sets (CPE-574) — the file header stays a jump-to link.
   let collapsedFiles = new Set<string>();
   function toggleFile(path: string) {
@@ -112,11 +118,18 @@
       {:else if searched && result.matches.length === 0}
         <p class="dim">No matches in this folder.</p>
       {:else if result.matches.length > 0}
+        {#if groups.length > 1}
+          <input class="result-filter" bind:value={resultFilter} placeholder="Filter files…" spellcheck="false" aria-label="Filter result files" />
+        {/if}
         <p class="summary">
           {result.matches.length} match{result.matches.length === 1 ? "" : "es"} in {groups.length} file{groups.length === 1 ? "" : "s"}
+          {#if resultFilter.trim()}<span class="dim"> · {shownGroups.length} shown</span>{/if}
           {#if result.truncated}<span class="dim"> (showing the first results)</span>{/if}
         </p>
-        {#each groups as g (g.path)}
+        {#if resultFilter.trim() && shownGroups.length === 0}
+          <p class="dim">No files match “{resultFilter.trim()}”.</p>
+        {/if}
+        {#each shownGroups as g (g.path)}
           <div class="group">
             <div class="group-head">
               <button class="chev" on:click|stopPropagation={() => toggleFile(g.path)} aria-label="Toggle file" title={collapsedFiles.has(g.path) ? "Expand" : "Collapse"}>{collapsedFiles.has(g.path) ? "▸" : "▾"}</button>
@@ -158,6 +171,9 @@
   .btn.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
   .btn.primary:disabled { opacity: 0.5; }
   .results { margin-top: 10px; overflow: auto; }
+  .result-filter { width: 100%; height: 26px; padding: 0 10px; margin-bottom: 6px; font: inherit; font-size: 12px;
+    border: 1px solid var(--border); border-radius: var(--radius); background: var(--surface-alt); }
+  .result-filter:focus { outline: none; border-color: var(--accent); }
   .summary { font-size: 12px; color: var(--text-dim); margin-bottom: 6px; }
   .group { margin-bottom: 8px; }
   .group-head { display: flex; align-items: center; }

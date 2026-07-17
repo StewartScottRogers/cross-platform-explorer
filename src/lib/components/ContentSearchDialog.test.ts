@@ -60,6 +60,19 @@ describe("ContentSearchDialog (CPE-417)", () => {
     expect(screen.getByText(codeLine("found the needle deep"))).toBeTruthy();
   });
 
+  it("filters the result files by name (CPE-577)", async () => {
+    const codeLine = (text: string) => (_: string, el: Element | null) =>
+      el?.tagName.toLowerCase() === "code" && el.textContent === text;
+    render(ContentSearchDialog, { root: "/repo" });
+    await fireEvent.input(screen.getByPlaceholderText("Text to find inside files"), { target: { value: "needle" } });
+    await fireEvent.click(screen.getByText("Search"));
+    await waitFor(() => expect(screen.getByText(codeLine("the needle is here"))).toBeTruthy());
+
+    await fireEvent.input(screen.getByLabelText("Filter result files"), { target: { value: "b.md" } });
+    expect(screen.queryByText(codeLine("the needle is here"))).toBeNull(); // a.txt filtered out
+    expect(screen.getByText(codeLine("found the needle deep"))).toBeTruthy(); // b.md still shown
+  });
+
   it("restores the saved Match-case toggle on open (CPE-576)", async () => {
     localStorage.setItem("cpe.contentSearchCase", "1");
     render(ContentSearchDialog, { root: "/repo" });
