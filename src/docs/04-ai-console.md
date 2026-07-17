@@ -29,3 +29,9 @@ jump straight to that agent's tab.
 ## Grid
 
 With sessions open, switch to **Grid** to see several agents side by side. See the **Agent Grid** page.
+
+## Run a swarm
+
+**Run swarm ▾** launches a small **team** of agents on one task — a coordinator plus a builder — that
+coordinate through a shared mailbox and memory. Type a task, click **Start**, and each agent opens in its
+own tab. It's a preview feature; see the **Swarms** page for how it works.

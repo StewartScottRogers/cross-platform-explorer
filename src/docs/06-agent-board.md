@@ -5,11 +5,19 @@ order: 6
 
 # Agent Board
 
-The Agent Board is a **Kanban view over your tickets** — the `Tickets/` markdown files in the current
+The Agent Board is a **Kanban view over your tickets** — the `Tickets/` markdown files in a project
 folder. It is not a separate task list; it reads and writes the same files the ticket workflow uses, so
 the board and the command-line flow never drift.
 
 Open it from **Agent Board** in the left sidebar.
+
+## Choosing a project
+
+The board reads a project's `Tickets/` folder. When you open it inside a repo, it **finds the project
+automatically** — it walks up from the current folder to the nearest one that has a `Tickets/` folder.
+You can also click **📁 Project** to point it at any project folder; your choice is **remembered** for
+next time. If no `Tickets/` folder is found, the board tells you so (and offers the picker) instead of
+showing a blank panel.
 
 ## Columns and cards
 
@@ -24,8 +32,15 @@ Open it from **Agent Board** in the left sidebar.
 - **Dispatch** on a card moves it to Doing and opens an agent scoped to that ticket.
 - Send a card to **Review** before Done.
 
+## Filtering
+
+Type in the **Filter cards** box to narrow the board by ticket **id, title, tag, type, or priority** —
+across every lane and the Epics view at once. Press **Esc** to clear it. If nothing matches, the board
+says so rather than showing empty columns.
+
 ## Epics view
 
 Toggle **Epics** to organize by epic: pick an epic on the left and see its tickets with **to-do on top
 and done on the bottom**. The Done column keeps only recent items; older ones are archived (shown behind
-a **+N archived** toggle).
+a **+N archived** toggle). Your view choice (Board or Epics) and the archived toggle are **remembered**
+between opens.
