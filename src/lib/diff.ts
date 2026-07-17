@@ -76,6 +76,59 @@ export function parseDiff(text: string): DiffFile[] {
   return files;
 }
 
+/** One run of a modified line: unchanged text, or the changed span (highlighted). */
+export interface InlineSeg {
+  text: string;
+  changed: boolean;
+}
+
+/**
+ * Approximate **intra-line diff** for a modified line pair (a `del` immediately followed by an `add`):
+ * the common leading prefix + trailing suffix are unchanged, the middle differs. Returns segment lists
+ * for the old and new text so the diff view can highlight exactly what changed within the line (CPE-570).
+ * Cheap + deterministic (prefix/suffix scan, not a full LCS) — good enough for line-level edits.
+ */
+export function inlineDiff(oldText: string, newText: string): { old: InlineSeg[]; new: InlineSeg[] } {
+  let start = 0;
+  const max = Math.min(oldText.length, newText.length);
+  while (start < max && oldText[start] === newText[start]) start++;
+  let endOld = oldText.length;
+  let endNew = newText.length;
+  while (endOld > start && endNew > start && oldText[endOld - 1] === newText[endNew - 1]) {
+    endOld--;
+    endNew--;
+  }
+  const seg = (full: string, s: number, e: number): InlineSeg[] => {
+    const out: InlineSeg[] = [];
+    if (s > 0) out.push({ text: full.slice(0, s), changed: false });
+    if (e > s) out.push({ text: full.slice(s, e), changed: true });
+    if (e < full.length) out.push({ text: full.slice(e), changed: false });
+    return out.length ? out : [{ text: full, changed: false }];
+  };
+  return { old: seg(oldText, start, endOld), new: seg(newText, start, endNew) };
+}
+
+/** A diff line ready to render, with optional intra-line highlight segments (set on a modified pair). */
+export interface RenderLine extends DiffLine {
+  segs?: InlineSeg[];
+}
+
+/** Annotate a hunk's lines with intra-line highlight segments: each `del` immediately followed by an
+ *  `add` is treated as a modified line and both get [`InlineSeg`]s from [`inlineDiff`] (CPE-570). Other
+ *  lines pass through unchanged. Pure. */
+export function annotateInline(lines: DiffLine[]): RenderLine[] {
+  const out: RenderLine[] = lines.map((l) => ({ ...l }));
+  for (let i = 0; i < out.length - 1; i++) {
+    if (out[i].kind === "del" && out[i + 1].kind === "add") {
+      const d = inlineDiff(out[i].text, out[i + 1].text);
+      out[i].segs = d.old;
+      out[i + 1].segs = d.new;
+      i++; // consume the pair
+    }
+  }
+  return out;
+}
+
 /** Added / removed line totals across a parsed diff, for a summary. */
 export function diffStats(files: DiffFile[]): { added: number; removed: number; files: number } {
   let added = 0;

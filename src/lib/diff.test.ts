@@ -1,6 +1,6 @@
 // CPE-526: unified-diff parser — files/hunks/typed lines, stats, labels, tolerance.
 import { describe, it, expect } from "vitest";
-import { parseDiff, diffStats, fileStats, fileLabel } from "./diff";
+import { parseDiff, diffStats, fileStats, fileLabel, inlineDiff, annotateInline } from "./diff";
 
 const SAMPLE = `diff --git a/src/app.ts b/src/app.ts
 index 1111..2222 100644
@@ -49,6 +49,37 @@ describe("unified-diff parser (CPE-526)", () => {
 
   it("computes add/remove/file stats", () => {
     expect(diffStats(parseDiff(SAMPLE))).toEqual({ added: 3, removed: 2, files: 2 });
+  });
+
+  it("computes an intra-line diff: common prefix/suffix unchanged, middle changed (CPE-570)", () => {
+    const d = inlineDiff("const y = 2;", "const y = 3;");
+    expect(d.old).toEqual([
+      { text: "const y = ", changed: false },
+      { text: "2", changed: true },
+      { text: ";", changed: false },
+    ]);
+    expect(d.new).toEqual([
+      { text: "const y = ", changed: false },
+      { text: "3", changed: true },
+      { text: ";", changed: false },
+    ]);
+  });
+
+  it("intra-line diff handles identical + fully-different lines", () => {
+    expect(inlineDiff("same", "same")).toEqual({ old: [{ text: "same", changed: false }], new: [{ text: "same", changed: false }] });
+    expect(inlineDiff("abc", "xyz")).toEqual({ old: [{ text: "abc", changed: true }], new: [{ text: "xyz", changed: true }] });
+    // pure insertion: old is all common, new has an added middle
+    expect(inlineDiff("ac", "abc").new).toEqual([{ text: "a", changed: false }, { text: "b", changed: true }, { text: "c", changed: false }]);
+  });
+
+  it("annotates a modified del→add pair with inline segments, leaves others plain (CPE-570)", () => {
+    const [app] = parseDiff(SAMPLE); // context, del(y=2), add(y=3), add(z=4), context
+    const rows = annotateInline(app.hunks[0].lines);
+    expect(rows[0].segs).toBeUndefined(); // context — plain
+    expect(rows[1].segs).toBeDefined(); // del of the modified pair
+    expect(rows[2].segs).toBeDefined(); // add of the modified pair
+    expect(rows[2].segs!.some((s) => s.changed && s.text === "3")).toBe(true);
+    expect(rows[3].segs).toBeUndefined(); // a pure add (z=4), not paired
   });
 
   it("computes per-file add/remove stats (CPE-567)", () => {

@@ -6,7 +6,7 @@
   import { createEventDispatcher, onMount } from "svelte";
   import { invoke } from "../invoke";
   import Icon from "./Icon.svelte";
-  import { parseDiff, diffStats, fileStats, fileLabel, type DiffFile } from "../diff";
+  import { parseDiff, diffStats, fileStats, fileLabel, annotateInline, type DiffFile } from "../diff";
   import { isBrowsableUrl, normalizeUrl, workbenchState } from "../workbench";
 
   /** Repo root to diff. */
@@ -129,8 +129,8 @@
             {#if !f.binary && !isCollapsed}
               {#each f.hunks as h}
                 <div class="hunk-head">{h.header}</div>
-                {#each h.lines as l}
-                  <div class="line {l.kind}"><span class="lno" aria-hidden="true">{l.oldLine ?? ""}</span><span class="lno" aria-hidden="true">{l.newLine ?? ""}</span><span class="gutter">{l.kind === "add" ? "+" : l.kind === "del" ? "−" : " "}</span><span class="code">{l.text}</span></div>
+                {#each annotateInline(h.lines) as l}
+                  <div class="line {l.kind}"><span class="lno" aria-hidden="true">{l.oldLine ?? ""}</span><span class="lno" aria-hidden="true">{l.newLine ?? ""}</span><span class="gutter">{l.kind === "add" ? "+" : l.kind === "del" ? "−" : " "}</span><span class="code">{#if l.segs}{#each l.segs as s}{#if s.changed}<span class="chg">{s.text}</span>{:else}{s.text}{/if}{/each}{:else}{l.text}{/if}</span></div>
                 {/each}
               {/each}
             {/if}
@@ -198,4 +198,7 @@
   .code { flex: 1; overflow-x: auto; }
   .line.add { background: rgba(58,157,74,0.14); }
   .line.del { background: rgba(201,79,79,0.14); }
+  /* Intra-line highlight (CPE-570): the exact span that changed within a modified line. */
+  .line.add .chg { background: rgba(58,157,74,0.4); border-radius: 2px; }
+  .line.del .chg { background: rgba(201,79,79,0.4); border-radius: 2px; }
 </style>

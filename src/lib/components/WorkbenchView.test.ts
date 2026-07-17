@@ -37,31 +37,44 @@ diff --git a/b.ts b/b.ts
 -old b
 +new b`;
 
+// A modified line's text is split across <span class="chg"> nodes (CPE-570 inline highlight), so match
+// on the .code element's full textContent.
+const codeLine = (text: string) => (_: string, el: Element | null) =>
+  (el?.classList?.contains("code") ?? false) && el!.textContent === text;
+
 describe("WorkbenchView collapse (CPE-568)", () => {
   it("collapses a file's hunks on header click, and expands again", async () => {
     render(WorkbenchView, { root: "/repo" });
-    await waitFor(() => expect(screen.getByText("const y = 3;")).toBeTruthy());
+    await waitFor(() => expect(screen.getByText(codeLine("const y = 3;"))).toBeTruthy());
 
     const head = screen.getByText("src/app.ts").closest(".file-head") as HTMLElement;
     await fireEvent.click(head);
-    expect(screen.queryByText("const y = 3;")).toBeNull(); // hunks folded away
+    expect(screen.queryByText(codeLine("const y = 3;"))).toBeNull(); // hunks folded away
 
     await fireEvent.click(head);
-    expect(await screen.findByText("const y = 3;")).toBeTruthy(); // expanded again
+    expect(await screen.findByText(codeLine("const y = 3;"))).toBeTruthy(); // expanded again
   });
 
   it("collapse all / expand all fold every file (CPE-569)", async () => {
     invokeMock.mockImplementation(async (cmd: string) =>
       cmd === "workbench_diff" ? { is_repo: true, branch: "main", diff: DIFF2 } : {});
     render(WorkbenchView, { root: "/repo" });
-    await waitFor(() => expect(screen.getByText("new a")).toBeTruthy());
+    await waitFor(() => expect(screen.getByText(codeLine("new a"))).toBeTruthy());
 
     await fireEvent.click(screen.getByText("Collapse all"));
-    expect(screen.queryByText("new a")).toBeNull();
-    expect(screen.queryByText("new b")).toBeNull();
+    expect(screen.queryByText(codeLine("new a"))).toBeNull();
+    expect(screen.queryByText(codeLine("new b"))).toBeNull();
 
     await fireEvent.click(screen.getByText("Expand all"));
-    expect(await screen.findByText("new a")).toBeTruthy();
-    expect(screen.getByText("new b")).toBeTruthy();
+    expect(await screen.findByText(codeLine("new a"))).toBeTruthy();
+    expect(screen.getByText(codeLine("new b"))).toBeTruthy();
+  });
+
+  it("highlights the changed span within a modified line (CPE-570)", async () => {
+    const { container } = render(WorkbenchView, { root: "/repo" });
+    await waitFor(() => expect(screen.getByText(codeLine("const y = 3;"))).toBeTruthy());
+    // the add line's "3" and the del line's "2" are wrapped in .chg highlights
+    const chg = [...container.querySelectorAll(".line.add .chg")].map((e) => e.textContent);
+    expect(chg).toContain("3");
   });
 });
