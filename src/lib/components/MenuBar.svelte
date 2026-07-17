@@ -8,7 +8,9 @@
    * closes on Escape, click-away, or after a choice.
    */
   import { createEventDispatcher } from "svelte";
-  import { t, locale, SUPPORTED_LOCALES, type Locale } from "../i18n";
+  import { t, locale, filterLocales, type Locale } from "../i18n";
+
+  let langQuery = ""; // search filter for the language picker (CPE-533)
 
   const dispatch = createEventDispatcher<{ select: string }>();
 
@@ -56,6 +58,7 @@
 
   function pickLocale(code: Locale) {
     locale.set(code);
+    langQuery = "";
     close();
   }
 
@@ -146,13 +149,18 @@
     </button>
     {#if openId === "language"}
       <!-- svelte-ignore a11y-click-events-have-key-events a11y-no-noninteractive-element-interactions -->
-      <div class="menu-drop" role="menu" tabindex="-1" aria-label={$t("menu.language")} on:click|stopPropagation>
-        {#each SUPPORTED_LOCALES as l (l.code)}
-          <button class="mb-item" role="menuitemradio" aria-checked={$locale === l.code} on:click={() => pickLocale(l.code)}>
-            <span class="check" aria-hidden="true">{$locale === l.code ? "✓" : ""}</span>
-            {l.name}
-          </button>
-        {/each}
+      <div class="menu-drop lang-drop" role="menu" tabindex="-1" aria-label={$t("menu.language")} on:click|stopPropagation>
+        <!-- With dozens of languages, a search filters the list by native/English name (CPE-533). -->
+        <input class="lang-search" placeholder="Search…" bind:value={langQuery} spellcheck="false" on:click|stopPropagation />
+        <div class="lang-list">
+          {#each filterLocales(langQuery) as l (l.code)}
+            <button class="mb-item" role="menuitemradio" aria-checked={$locale === l.code} on:click={() => pickLocale(l.code)}>
+              <span class="check" aria-hidden="true">{$locale === l.code ? "✓" : ""}</span>
+              {l.name} <span class="lang-en">{l.english}</span>
+            </button>
+          {/each}
+          {#if filterLocales(langQuery).length === 0}<div class="lang-empty">No match.</div>{/if}
+        </div>
       </div>
     {/if}
   </div>
@@ -194,6 +202,14 @@
     border-radius: var(--radius-lg);
     box-shadow: 0 8px 24px rgba(0, 0, 0, 0.16);
   }
+  /* Language picker at scale (CPE-533): a search box + a scrolling list of dozens of languages. */
+  .lang-drop { min-width: 240px; }
+  .lang-search { width: 100%; height: 28px; padding: 0 8px; margin-bottom: 4px; box-sizing: border-box;
+    border: 1px solid var(--border); border-radius: 6px; background: var(--surface); color: var(--text); font: inherit; }
+  .lang-search:focus { outline: none; border-color: var(--accent); }
+  .lang-list { max-height: 320px; overflow-y: auto; }
+  .lang-en { margin-left: auto; opacity: .5; font-size: 11px; }
+  .lang-empty { padding: 8px 10px; color: var(--text-faint); font-size: 12px; }
   .mb-item {
     display: flex;
     align-items: center;

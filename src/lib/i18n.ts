@@ -10,15 +10,71 @@
 
 import { derived, writable } from "svelte/store";
 
-export type Locale = "en" | "es" | "de" | "fr";
+// A locale is any BCP-47-ish code in the registry below. `en` is the source of truth + fallback;
+// a locale without a full catalog gracefully shows English for its untranslated keys (incremental
+// coverage — the standard i18n model). Adding real translations for a language = adding its catalog.
+export type Locale = string;
 
-/** The languages offered in the settings picker. `en` is the source-of-truth + fallback. */
-export const SUPPORTED_LOCALES: { code: Locale; name: string }[] = [
-  { code: "en", name: "English" },
-  { code: "es", name: "Español" },
-  { code: "de", name: "Deutsch" },
-  { code: "fr", name: "Français" },
+/** One offered language: its code, native name, English name, and whether it lays out right-to-left. */
+export interface LocaleInfo {
+  code: Locale;
+  name: string; // native name, shown in the picker
+  english: string; // English name, for search
+  rtl?: boolean;
+}
+
+/** The languages the app offers in the 🌐 picker (native names). en/es/de/fr have full catalogs; the
+    rest fall back to English per key until their catalog is filled in (CPE-533). */
+export const LOCALES: LocaleInfo[] = [
+  { code: "en", name: "English", english: "English" },
+  { code: "es", name: "Español", english: "Spanish" },
+  { code: "de", name: "Deutsch", english: "German" },
+  { code: "fr", name: "Français", english: "French" },
+  { code: "it", name: "Italiano", english: "Italian" },
+  { code: "pt", name: "Português", english: "Portuguese" },
+  { code: "nl", name: "Nederlands", english: "Dutch" },
+  { code: "pl", name: "Polski", english: "Polish" },
+  { code: "ru", name: "Русский", english: "Russian" },
+  { code: "uk", name: "Українська", english: "Ukrainian" },
+  { code: "cs", name: "Čeština", english: "Czech" },
+  { code: "sv", name: "Svenska", english: "Swedish" },
+  { code: "no", name: "Norsk", english: "Norwegian" },
+  { code: "da", name: "Dansk", english: "Danish" },
+  { code: "fi", name: "Suomi", english: "Finnish" },
+  { code: "el", name: "Ελληνικά", english: "Greek" },
+  { code: "tr", name: "Türkçe", english: "Turkish" },
+  { code: "ro", name: "Română", english: "Romanian" },
+  { code: "hu", name: "Magyar", english: "Hungarian" },
+  { code: "ja", name: "日本語", english: "Japanese" },
+  { code: "ko", name: "한국어", english: "Korean" },
+  { code: "zh", name: "中文", english: "Chinese" },
+  { code: "hi", name: "हिन्दी", english: "Hindi" },
+  { code: "bn", name: "বাংলা", english: "Bengali" },
+  { code: "id", name: "Bahasa Indonesia", english: "Indonesian" },
+  { code: "vi", name: "Tiếng Việt", english: "Vietnamese" },
+  { code: "th", name: "ไทย", english: "Thai" },
+  { code: "ar", name: "العربية", english: "Arabic", rtl: true },
+  { code: "he", name: "עברית", english: "Hebrew", rtl: true },
+  { code: "fa", name: "فارسی", english: "Persian", rtl: true },
+  { code: "ur", name: "اردو", english: "Urdu", rtl: true },
 ];
+
+/** The pickable languages (kept for back-compat; the picker uses `LOCALES`). */
+export const SUPPORTED_LOCALES: LocaleInfo[] = LOCALES;
+
+/** Filter the offered languages by native or English name / code (for the searchable picker). */
+export function filterLocales(query: string): LocaleInfo[] {
+  const q = query.trim().toLowerCase();
+  if (!q) return LOCALES;
+  return LOCALES.filter(
+    (l) => l.name.toLowerCase().includes(q) || l.english.toLowerCase().includes(q) || l.code.includes(q),
+  );
+}
+
+/** Whether a locale lays out right-to-left. */
+export function isRtl(code: Locale): boolean {
+  return !!LOCALES.find((l) => l.code === code)?.rtl;
+}
 
 const STORAGE_KEY = "cpe.locale";
 
@@ -1273,7 +1329,10 @@ locale.subscribe((loc) => {
   } catch {
     /* ignore */
   }
-  if (typeof document !== "undefined") document.documentElement.lang = loc;
+  if (typeof document !== "undefined") {
+    document.documentElement.lang = loc;
+    document.documentElement.dir = isRtl(loc) ? "rtl" : "ltr"; // RTL layout for ar/he/fa/ur (CPE-533)
+  }
 });
 
 /** The message keys defined for a locale (introspection/test helper — used to guard against a

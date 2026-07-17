@@ -37,6 +37,30 @@ describe("i18n translate()", () => {
     expect(translate("es", "does.not.exist")).toBe("does.not.exist");
   });
 
+  it("offers dozens of languages with native names + RTL flags (CPE-533)", async () => {
+    const { LOCALES, filterLocales, isRtl } = await import("./i18n");
+    // Dozens offered, English first, native names present.
+    expect(LOCALES.length).toBeGreaterThanOrEqual(24);
+    expect(LOCALES[0].code).toBe("en");
+    expect(LOCALES.find((l) => l.code === "ja")?.name).toBe("日本語");
+    // RTL languages flagged.
+    expect(isRtl("ar")).toBe(true);
+    expect(isRtl("he")).toBe(true);
+    expect(isRtl("en")).toBe(false);
+    // Search matches native + English name + code.
+    expect(filterLocales("japan").map((l) => l.code)).toContain("ja");
+    expect(filterLocales("Español").map((l) => l.code)).toContain("es");
+    expect(filterLocales("ar").map((l) => l.code)).toContain("ar");
+    expect(filterLocales("zzz").length).toBe(0);
+    expect(filterLocales("").length).toBe(LOCALES.length);
+  });
+
+  it("an offered language without a catalog falls back to English per key (CPE-533)", () => {
+    // Japanese has no catalog yet → keys resolve to English (incremental coverage).
+    expect(translate("ja", "mi.settings")).toBe(translate("en", "mi.settings"));
+    expect(translate("ar", "menu.language")).toBe(translate("en", "menu.language"));
+  });
+
   it("translates the menu dropdown items across locales (CPE-481)", () => {
     expect(translate("en", "mi.searchInFiles")).toBe("Search in files…");
     expect(translate("es", "mi.settings")).toBe("Configuración…");
