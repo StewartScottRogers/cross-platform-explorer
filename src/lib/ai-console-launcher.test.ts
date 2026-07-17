@@ -138,21 +138,34 @@ describe("AI Console launcher — Agent Grid view (CPE-506)", () => {
   });
 });
 
-describe("AI Console launcher — boot loading cursor (CPE-552)", () => {
-  it("ships a booting body class + a progress-cursor rule for it (pre-JS coverage)", () => {
-    expect(HTML).toMatch(/<body[^>]*class="[^"]*\bbooting\b[^"]*"/);
-    expect(HTML).toMatch(/body\.booting[\s\S]*?cursor:\s*progress\s*!important/);
+describe("AI Console launcher — boot loader (CPE-561, supersedes CPE-552)", () => {
+  it("ships an animated boot overlay + spinner + label (pre-JS coverage)", () => {
+    expect(HTML).toMatch(/<div id="boot-overlay"[^>]*class="boot-overlay"/);
+    expect(HTML).toMatch(/class="boot-ring"/);
+    expect(HTML).toMatch(/\.boot-ring[\s\S]*?animation:\s*boot-spin/);
+    expect(HTML).toMatch(/Starting the AI Console/);
+    // The ugly progress-cursor boot rule is gone (the overlay is the indicator now).
+    expect(HTML).not.toMatch(/body\.booting[\s\S]*?cursor:\s*progress/);
   });
 
-  it("endBoot() clears the boot cursor class", async () => {
+  it("endBoot() fades the overlay out (marks it done) and clears the booting class", async () => {
     const { w } = await mountLauncher();
+    // Mount already ran endBoot once; clear its overlay and set up a fresh boot state.
+    w.document.getElementById("boot-overlay")?.remove();
+    const o = w.document.createElement("div");
+    o.id = "boot-overlay";
+    w.document.body.appendChild(o);
     w.document.body.classList.add("booting");
     w.endBoot();
     expect(w.document.body.classList.contains("booting")).toBe(false);
+    expect(o.classList.contains("done")).toBe(true);
   });
 
-  it("boot clears the booting class once the launcher has loaded", async () => {
-    const { w } = await mountLauncher(); // mountLauncher awaits boot settle
+  it("boot dismisses the overlay once the launcher has loaded", async () => {
+    const { w } = await mountLauncher(); // awaits boot settle → endBoot ran
+    const o = w.document.getElementById("boot-overlay");
+    // Either already removed, or faded (has the `done` class) pending its removal timer.
+    expect(o === null || o.classList.contains("done")).toBe(true);
     expect(w.document.body.classList.contains("booting")).toBe(false);
   });
 });

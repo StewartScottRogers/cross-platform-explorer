@@ -12,9 +12,28 @@
          flex-direction: column; background: Canvas; color: CanvasText; }
   /* Busy/wait cursor for perceptible operations (CPE-482). */
   body.busy, body.busy * { cursor: progress !important; }
-  /* Boot cursor (CPE-552): show the wait pointer from first paint until the launcher is interactive,
-     so a slow sidecar start / catalog fetch never looks frozen. Cleared by the boot code below. */
-  body.booting, body.booting * { cursor: progress !important; }
+  /* Boot loader (CPE-561, supersedes the CPE-552 progress-cursor): a polished, on-brand animated
+     spinner shown from first paint until the launcher is interactive, then faded out by endBoot(). */
+  .boot-overlay {
+    position: fixed; inset: 0; z-index: 9999; cursor: default;
+    display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 18px;
+    background: Canvas; transition: opacity .4s ease;
+  }
+  .boot-overlay.done { opacity: 0; pointer-events: none; }
+  .boot-ring {
+    width: 54px; height: 54px; border-radius: 50%;
+    background: conic-gradient(from 90deg, #4F46E5, #06B6D4, #4F46E5);
+    -webkit-mask: radial-gradient(farthest-side, #0000 calc(100% - 5px), #000 calc(100% - 4px));
+            mask: radial-gradient(farthest-side, #0000 calc(100% - 5px), #000 calc(100% - 4px));
+    animation: boot-spin .9s linear infinite;
+  }
+  @keyframes boot-spin { to { transform: rotate(360deg); } }
+  .boot-label { font-size: 12.5px; letter-spacing: .3px; color: CanvasText; animation: boot-pulse 1.6s ease-in-out infinite; }
+  @keyframes boot-pulse { 0%,100% { opacity: .45; } 50% { opacity: .85; } }
+  @media (prefers-reduced-motion: reduce) {
+    .boot-ring { animation-duration: 2.2s; }
+    .boot-label { animation: none; opacity: .7; }
+  }
 
   /* Launcher toolbar */
   .toolbar { padding: 11px 16px; display: flex; flex-direction: column; gap: 10px;
@@ -237,6 +256,11 @@
 </style>
 </head>
 <body class="booting">
+  <!-- Boot loader (CPE-561): pretty animated liveness indicator until the launcher is interactive. -->
+  <div id="boot-overlay" class="boot-overlay" role="status" aria-label="Starting the AI Console">
+    <div class="boot-ring" aria-hidden="true"></div>
+    <div class="boot-label">Starting the AI Console…</div>
+  </div>
   <div class="brandbar" title="Cross-Platform Explorer" style="display:flex;align-items:center;gap:8px;padding:6px 12px;border-bottom:1px solid var(--line);font-size:12px">
     <svg viewBox="0 0 1024 1024" width="20" height="20" aria-hidden="true" style="flex:0 0 auto">
       <defs><linearGradient id="cpe-brandmark" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#4F46E5"/><stop offset="1" stop-color="#06B6D4"/></linearGradient></defs>
@@ -1648,8 +1672,15 @@ $("sb-grip").addEventListener("mousedown", (e) => {
   if (cur && cur.startResizeDragging) { e.preventDefault(); try { cur.startResizeDragging("SouthEast"); } catch (_) {} }
 });
 
-// Clear the boot wait-cursor once the launcher is interactive (CPE-552) — success or failure.
-function endBoot() { try { document.body.classList.remove("booting"); } catch (_) {} }
+// Dismiss the boot loader once the launcher is interactive (CPE-561) — success or failure: fade the
+// overlay out, then remove it so it never intercepts clicks.
+function endBoot() {
+  try {
+    document.body.classList.remove("booting");
+    const o = document.getElementById("boot-overlay");
+    if (o) { o.classList.add("done"); setTimeout(() => { try { o.remove(); } catch (_) {} }, 450); }
+  } catch (_) {}
+}
 load().then(updateStatusBar).catch((e) => setMsg("Could not load catalog: " + e.message)).finally(endBoot);
 </script>
 </body>
