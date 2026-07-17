@@ -252,6 +252,22 @@ describe("AI Console launcher — live swarm trigger (CPE-541)", () => {
       expect(w.parseSwarmTasks("   \n\n")).toEqual([]); // blank input → no tasks
     });
   });
+
+  it("adopts a server-created swarm session into a tab on poll, from a fresh console (CPE-586)", async () => {
+    let sessionsResp: any = { sessions: [] }; // empty at boot; a swarm launches afterwards
+    const { w } = await mountLauncher((path) => {
+      if (path === "/api/sessions") return { data: sessionsResp };
+      return {};
+    });
+    const doc = w.document;
+    const panes = () => doc.querySelectorAll(".term-pane").length;
+    expect(panes()).toBe(0); // fresh console — the old poll early-returned here and never adopted
+
+    // A swarm run creates the session server-side (no client /api/launch); the poll must pick it up.
+    sessionsResp = { sessions: [{ id: "t1", name: "claude#builder1", usage: {} }] };
+    await w.refreshUsage();
+    expect(panes()).toBe(1); // the backend-created swarm session became a tab
+  });
 });
 
 describe("AI Console launcher — grid pane identity + keyboard nav (CPE-507)", () => {

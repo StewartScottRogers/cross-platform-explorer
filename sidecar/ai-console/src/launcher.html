@@ -677,11 +677,18 @@ function applyUsage(d) {
   if (el) el.textContent = fmtUsage(active);
 }
 
+// Poll /api/sessions: adopt any server-created session into a tab (swarm agents are created by the
+// backend, not a client /api/launch — CPE-586) AND refresh usage badges. Runs even with zero tabs open,
+// so a swarm launched from a fresh console still surfaces its agents as tabs within one interval.
 async function refreshUsage() {
-  if (!sessions.size) return;
-  try { applyUsage(await api("/api/sessions")); } catch (_) { /* transient */ }
+  try {
+    const d = await api("/api/sessions");
+    for (const s of (d.sessions || [])) {
+      if (s.id && !sessions.has(s.id)) addSession(s.id, s.name || s.id);
+    }
+    applyUsage(d);
+  } catch (_) { /* transient / no host */ }
 }
-// Poll usage while sessions are open; cheap and only fires when something is running.
 setInterval(refreshUsage, 5000);
 
 async function dismissOnboarding() {
