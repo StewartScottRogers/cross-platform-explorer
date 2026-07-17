@@ -77,4 +77,16 @@ describe("WorkbenchView collapse (CPE-568)", () => {
     const chg = [...container.querySelectorAll(".line.add .chg")].map((e) => e.textContent);
     expect(chg).toContain("3");
   });
+
+  it("copies a file's reconstructed diff to the clipboard (CPE-572)", async () => {
+    const writeText = vi.fn().mockResolvedValue(undefined);
+    Object.defineProperty(navigator, "clipboard", { value: { writeText }, configurable: true });
+    render(WorkbenchView, { root: "/repo" });
+    await waitFor(() => expect(screen.getByText("Copy")).toBeTruthy());
+
+    await fireEvent.click(screen.getByText("Copy"));
+    expect(writeText).toHaveBeenCalledTimes(1);
+    expect(writeText.mock.calls[0][0]).toContain("diff --git a/src/app.ts b/src/app.ts");
+    expect(writeText.mock.calls[0][0]).toContain("+const y = 3;");
+  });
 });

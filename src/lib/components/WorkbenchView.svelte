@@ -6,7 +6,7 @@
   import { createEventDispatcher, onMount } from "svelte";
   import { invoke } from "../invoke";
   import Icon from "./Icon.svelte";
-  import { parseDiff, diffStats, fileStats, fileLabel, annotateInline, type DiffFile } from "../diff";
+  import { parseDiff, diffStats, fileStats, fileLabel, annotateInline, toPatch, type DiffFile } from "../diff";
   import { isBrowsableUrl, normalizeUrl, workbenchState } from "../workbench";
 
   /** Repo root to diff. */
@@ -46,6 +46,16 @@
   const fileKey = (f: DiffFile) => f.oldPath + "→" + f.newPath;
   function collapseAll() { collapsed = new Set(files.map(fileKey)); }
   function expandAll() { collapsed = new Set(); }
+
+  // Copy a single file's reconstructed diff to the clipboard, with a brief ✓ (CPE-572).
+  let copiedFile: string | null = null;
+  let copiedFileTimer: ReturnType<typeof setTimeout> | undefined;
+  async function copyPatch(f: DiffFile) {
+    try { await navigator.clipboard.writeText(toPatch(f)); } catch { /* clipboard unavailable — ignore */ }
+    copiedFile = fileKey(f);
+    clearTimeout(copiedFileTimer);
+    copiedFileTimer = setTimeout(() => (copiedFile = null), 1100);
+  }
 
   async function load() {
     loading = true;
@@ -124,6 +134,7 @@
               <span class="chevron" aria-hidden="true">{isCollapsed ? "▸" : "▾"}</span>
               <span class="file-name">{fileLabel(f)}{#if f.binary} <span class="binary">binary</span>{/if}</span>
               {#if !f.binary}<span class="file-stat"><span class="fs-add">+{fs.added}</span> <span class="fs-del">−{fs.removed}</span></span>{/if}
+              {#if !f.binary}<button class="edit-btn" on:click|stopPropagation={() => copyPatch(f)} title="Copy this file's diff">{copiedFile === key ? "✓ Copied" : "Copy"}</button>{/if}
               <button class="edit-btn" on:click|stopPropagation={() => editFile(f)} title="Open this file in the editor">Edit</button>
             </div>
             {#if !f.binary && !isCollapsed}

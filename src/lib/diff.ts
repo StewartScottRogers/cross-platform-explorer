@@ -150,6 +150,25 @@ export function fileStats(f: DiffFile): { added: number; removed: number } {
   return { added, removed };
 }
 
+/** Reconstruct a single file's unified-diff text from the parsed model — for a "copy this file's diff"
+ *  action (CPE-572). Faithful for viewing/sharing (omits optional index/mode lines). */
+export function toPatch(f: DiffFile): string {
+  const old = f.oldPath || "/dev/null";
+  const nw = f.newPath || "/dev/null";
+  const lines: string[] = [
+    `diff --git a/${f.oldPath || old} b/${f.newPath || nw}`,
+    `--- ${old === "/dev/null" ? "/dev/null" : "a/" + old}`,
+    `+++ ${nw === "/dev/null" ? "/dev/null" : "b/" + nw}`,
+  ];
+  for (const h of f.hunks) {
+    lines.push(h.header);
+    for (const l of h.lines) {
+      lines.push((l.kind === "add" ? "+" : l.kind === "del" ? "-" : " ") + l.text);
+    }
+  }
+  return lines.join("\n") + "\n";
+}
+
 /** A short label for a file's change: its new path, or `old → new` on a rename, or the deleted path. */
 export function fileLabel(f: DiffFile): string {
   if (f.newPath === "/dev/null") return `${f.oldPath} (deleted)`;

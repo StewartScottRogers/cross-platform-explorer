@@ -1,6 +1,6 @@
 // CPE-526: unified-diff parser — files/hunks/typed lines, stats, labels, tolerance.
 import { describe, it, expect } from "vitest";
-import { parseDiff, diffStats, fileStats, fileLabel, inlineDiff, annotateInline } from "./diff";
+import { parseDiff, diffStats, fileStats, fileLabel, inlineDiff, annotateInline, toPatch } from "./diff";
 
 const SAMPLE = `diff --git a/src/app.ts b/src/app.ts
 index 1111..2222 100644
@@ -80,6 +80,23 @@ describe("unified-diff parser (CPE-526)", () => {
     expect(rows[2].segs).toBeDefined(); // add of the modified pair
     expect(rows[2].segs!.some((s) => s.changed && s.text === "3")).toBe(true);
     expect(rows[3].segs).toBeUndefined(); // a pure add (z=4), not paired
+  });
+
+  it("reconstructs a file's unified-diff text (CPE-572)", () => {
+    const [app] = parseDiff(SAMPLE);
+    expect(toPatch(app)).toBe(
+      "diff --git a/src/app.ts b/src/app.ts\n" +
+        "--- a/src/app.ts\n" +
+        "+++ b/src/app.ts\n" +
+        "@@ -1,3 +1,4 @@\n" +
+        " const x = 1;\n" +
+        "-const y = 2;\n" +
+        "+const y = 3;\n" +
+        "+const z = 4;\n" +
+        " export { x };\n",
+    );
+    // round-trips: re-parsing the reconstructed patch yields the same hunks.
+    expect(parseDiff(toPatch(app))[0].hunks[0].lines.map((l) => l.kind)).toEqual(app.hunks[0].lines.map((l) => l.kind));
   });
 
   it("computes per-file add/remove stats (CPE-567)", () => {
