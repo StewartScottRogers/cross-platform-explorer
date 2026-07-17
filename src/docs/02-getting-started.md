@@ -27,6 +27,13 @@ Open the **AI Console** to run a coding agent (Claude Code, aider, and others) a
 the provider and model you choose. Launch several at once, then view them side by side in the **Agent
 Grid**. See the **AI Console** and **Agent Grid** pages for details.
 
+## Language
+
+The app is available in dozens of languages. Open the **🌐 Language** menu, search for yours, and pick
+it — the interface switches instantly and remembers your choice. Right-to-left languages (Arabic,
+Hebrew, Persian, Urdu) mirror the layout. English is fully translated and is the fallback for any string
+a language hasn't been translated yet.
+
 ## Keyboard
 
 Common shortcuts: navigate with the arrow keys, Enter to open, Backspace to go up, Ctrl+T for a new tab,

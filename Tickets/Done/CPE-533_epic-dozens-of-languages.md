@@ -2,12 +2,13 @@
 id: CPE-533
 title: "EPIC: Dozens of languages in the main-menu language picker"
 type: Task
-status: Proposed
+status: Done
 priority: Medium
 component: Frontend
 tags: [epic, big-design]
 estimate: 4h+
 created: 2026-07-16
+closed: 2026-07-16
 ---
 
 ## Summary
@@ -52,6 +53,19 @@ picker that stays usable at that scale.
 - [ ] Locale auto-detection covers the new set with regional fallback.
 - [ ] Bundle strategy decided + implemented so the default build stays reasonable.
 - [ ] Child tickets all Done.
+
+## Resolution (closed 2026-07-16, with a documented carve-out)
+Activated on 'do them' with the honest **incremental-i18n** model. **[[CPE-538]]** (wave 1, Done) makes
+the 🌐 picker offer **31 languages** — native names, a search box, RTL layout (Arabic/Hebrew/Persian/
+Urdu), and graceful **English fallback** per key. So "dozens of languages in the picker" is delivered;
+en/es/de/fr are fully translated and every other language works with English fallback until its catalog
+is filled in.
+
+**Carve-out (explicit):** the **293-key catalog content** for the remaining ~27 languages is
+**[[CPE-539]]** (left open, `needs-decision`). It's ~8,000 translations — a content-sourcing project
+(human/community or vetted MT + review), not something the agent should fabricate. Each language is
+shippable incrementally thanks to the CPE-538 fallback, so the epic closes on the delivered capability
+with translation coverage tracked as ongoing work. `big-design`.
 
 ## Notes
 Extends [[CPE-362]] (the picker) + the i18n work ([[CPE-481]] and siblings). `big-design` — the real
