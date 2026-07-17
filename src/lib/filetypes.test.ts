@@ -27,6 +27,29 @@ describe("matchesFileFilter (CPE-358)", () => {
   });
 });
 
+describe("common extensions (CPE-559)", () => {
+  it("classifies newly-added common formats", () => {
+    expect(categoryOf(file("psd"))).toBe("image");
+    expect(categoryOf(file("epub"))).toBe("document");
+    expect(categoryOf(file("mobi"))).toBe("document");
+    expect(categoryOf(file("iso"))).toBe("archive");
+    expect(categoryOf(file("dmg"))).toBe("archive");
+    expect(categoryOf(file("cab"))).toBe("archive");
+    expect(categoryOf(file("wma"))).toBe("audio");
+    expect(categoryOf(file("mid"))).toBe("audio");
+    expect(categoryOf(file("aiff"))).toBe("audio");
+    expect(categoryOf(file("mpeg"))).toBe("video");
+    expect(categoryOf(file("3gp"))).toBe("video");
+    expect(categoryOf(file("appimage"))).toBe("executable");
+  });
+  it("gives them readable type names", () => {
+    expect(typeName(file("psd"))).toBe("Photoshop image");
+    expect(typeName(file("epub"))).toBe("EPUB e-book");
+    expect(typeName(file("iso"))).toBe("Disc image");
+    expect(typeName(file("appimage"))).toBe("AppImage application");
+  });
+});
+
 describe("categoryOf", () => {
   it("classifies folders", () => {
     expect(categoryOf(folder)).toBe("folder");
