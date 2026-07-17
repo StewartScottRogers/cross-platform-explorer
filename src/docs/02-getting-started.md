@@ -1,0 +1,33 @@
+---
+title: Getting Started
+order: 2
+---
+
+# Getting Started
+
+## Browse
+
+Open the app and you land on **Home** — your common folders and drives. Click any folder to open it, or
+type a path in the address bar. Use the **back / forward / up** buttons to move around, and **tabs**
+(across the top) to keep several places open at once.
+
+## Preview and edit
+
+Select a file to preview it in the side pane. Text files can be **edited in place** — make your changes
+and save. Images, markdown, PDFs, CSVs, and other common formats render directly.
+
+## Find things
+
+Use **Search** to filter the current folder by name, or **Content Search** to look inside files. Filters
+and sorting are on the toolbar; hidden files can be toggled from the menu.
+
+## Run a coding agent
+
+Open the **AI Console** to run a coding agent (Claude Code, aider, and others) against a folder, using
+the provider and model you choose. Launch several at once, then view them side by side in the **Agent
+Grid**. See the **AI Console** and **Agent Grid** pages for details.
+
+## Keyboard
+
+Common shortcuts: navigate with the arrow keys, Enter to open, Backspace to go up, Ctrl+T for a new tab,
+Ctrl+F to search. The menu lists the rest.
