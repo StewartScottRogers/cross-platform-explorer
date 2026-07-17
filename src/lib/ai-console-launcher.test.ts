@@ -302,6 +302,18 @@ describe("AI Console launcher — agent-state awareness (CPE-512)", () => {
     expect(w.sessionState({ _recent: "Proceed? (y/n)", _lastOut: now }, now + 100)).toBe("blocked");
   });
 
+  it("selectRequestedSession activates the requested tab, ignores unknown/blank (CPE-532)", async () => {
+    const { w } = await mountLauncher();
+    w.addSession("agent-1", "A");
+    w.addSession("agent-2", "B"); // agent-2 active (last added)
+    w.selectRequestedSession("agent-1");
+    expect(w.eval("activeId")).toBe("agent-1");
+    // Unknown id + blank are no-ops (stay on agent-1).
+    w.selectRequestedSession("ghost");
+    w.selectRequestedSession(null);
+    expect(w.eval("activeId")).toBe("agent-1");
+  });
+
   it("shows a state dot on both the tab and the grid pane header", async () => {
     const { w } = await mountLauncher();
     const doc = w.document;

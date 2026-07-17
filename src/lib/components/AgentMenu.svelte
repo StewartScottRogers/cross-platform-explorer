@@ -15,7 +15,7 @@
   /** Human label for the per-session close item (e.g. "claude · sonnet-4.5"). */
   export let sessionLabel = "this session";
 
-  const dispatch = createEventDispatcher<{ confirm: void; closeOne: string; close: void }>();
+  const dispatch = createEventDispatcher<{ confirm: void; closeOne: string; open: string; close: void }>();
 
   let el: HTMLDivElement;
   let left = x;
@@ -47,6 +47,11 @@
   on:contextmenu|stopPropagation|preventDefault
 >
   {#if sessionId}
+    <!-- Open the AI Console focused on this session's tab (CPE-532). -->
+    <button class="row" role="menuitem" on:click={() => { dispatch("open", sessionId); dispatch("close"); }}>
+      <span class="menu-chip" style="background:{sessionColor(sessionId)}">{sessionNum(sessionId)}</span>
+      Open {sessionLabel}
+    </button>
     <button class="row" role="menuitem" on:click={() => { dispatch("closeOne", sessionId); dispatch("close"); }}>
       <!-- The same colour+number chip as the leaf (CPE-493), so it's unambiguous which session closes. -->
       <span class="menu-chip" style="background:{sessionColor(sessionId)}">{sessionNum(sessionId)}</span>

@@ -592,6 +592,13 @@ async function load() {
   // Reattach tabs to sessions still running in the sidecar (CPE-461) — closing + reopening the AI
   // Console must not lose tabs while the agents keep running (and show in the explorer's left pane).
   await reattachSessions();
+  // Explorer "open this agent's tab" hand-off (CPE-532): focus the requested session if it attached.
+  selectRequestedSession(ctx.get("session"));
+}
+
+// Activate the tab for `id` if such a session is open (CPE-532) — used by the ?session= hand-off.
+function selectRequestedSession(id) {
+  if (id && sessions.has(id)) activate(id);
 }
 
 // Restore a tab for each still-running session (idempotent — skips sessions already tabbed).
