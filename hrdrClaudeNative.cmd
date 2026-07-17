@@ -1,5 +1,5 @@
 @echo off
-setlocal
+setlocal EnableDelayedExpansion
 
 REM ============================================================
 REM  herdr + Claude (native)  --  terminal+agent pair
@@ -86,25 +86,28 @@ endlocal
 exit /b 1
 
 :server_ready
-REM  A herdr agent name is unique per session, so if a "Claude" pane already
-REM  exists, starting another would fail with "agent name Claude is already
-REM  used". In that case just focus the existing one and we're done.
-"%HERDR%" agent get Claude >nul 2>nul
+REM  A herdr agent name is unique per session: 'agent start Claude' fails once a
+REM  "Claude" pane already exists. Probe with 'agent get' (exit 0 = taken) and add
+REM  a numeric suffix until a free name is found, so every launch starts a fresh
+REM  tracked Claude pane ("Claude", "Claude 2", "Claude 3", ...).
+set "AGENT_NAME=Claude"
+set "N=1"
+:namecheck
+"%HERDR%" agent get "!AGENT_NAME!" >nul 2>nul
 if not errorlevel 1 (
-    echo A Claude pane already exists in herdr - focusing it.
-    "%HERDR%" agent focus Claude >nul 2>nul
-    endlocal
-    exit /b 0
+    set /a N+=1
+    set "AGENT_NAME=Claude !N!"
+    goto :namecheck
 )
 
-REM  Launch Claude as a tracked "Claude" agent pane. --cwd anchors it to
-REM  this repo; --env forwards the chosen model so it is honoured even if
-REM  the herdr server's captured environment predates a CLAUDE_MODEL
-REM  change in this shell.
-"%HERDR%" agent start Claude --cwd "%REPO_DIR%" --env CLAUDE_MODEL=%CLAUDE_MODEL% --focus -- cmd /c "%CLAUDE_CMD%"
+REM  Launch Claude as a tracked agent pane under the free name. --cwd anchors it
+REM  to this repo; --env forwards the chosen model so it is honoured even if the
+REM  herdr server's captured environment predates a CLAUDE_MODEL change here.
+echo Launching !AGENT_NAME! inside herdr...
+"%HERDR%" agent start "!AGENT_NAME!" --cwd "%REPO_DIR%" --env CLAUDE_MODEL=%CLAUDE_MODEL% --focus -- cmd /c "%CLAUDE_CMD%"
 if errorlevel 1 (
     echo.
-    echo ERROR: herdr could not start the Claude pane.
+    echo ERROR: herdr could not start the !AGENT_NAME! pane.
     echo.
     pause
     endlocal
@@ -113,7 +116,7 @@ if errorlevel 1 (
 
 REM ---- Attach this console to the herd (unless we just opened one) ----
 if defined STARTED_HERDR (
-    echo Claude is running in the new herdr window - switch to it.
+    echo !AGENT_NAME! is running in the new herdr window - switch to it.
     endlocal
     exit /b 0
 )
