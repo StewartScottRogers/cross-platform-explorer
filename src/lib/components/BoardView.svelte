@@ -4,6 +4,7 @@
   // status frontmatter updates), keeping the board and the CLI /ticketing-* flow in one source of
   // truth. Read + drag only — agent dispatch is wave 2 (CPE-522). Backed by the CPE-520 commands.
   import { createEventDispatcher, onMount } from "svelte";
+  import { open as openFolderDialog } from "@tauri-apps/plugin-dialog";
   import { invoke } from "../invoke";
   import Icon from "./Icon.svelte";
   import {
@@ -13,14 +14,25 @@
     type Card, type Lane, type Epic,
   } from "../board";
 
-  /** Repo root that contains the Tickets/ folder. */
+  /** The folder the board scans (`<root>/Tickets/…`) — defaults to the folder being browsed. */
   export let root: string;
 
   const dispatch = createEventDispatcher<{ close: void; launch: { id: string; task: string } }>();
 
+  // The board is a *project* tool: it stays pointed at the last project you chose (persisted), so it
+  // doesn't reset to wherever you happen to be browsing. Falls back to the current folder (CPE-551).
+  const BOARD_ROOT_KEY = "cpe.boardRoot";
+  function savedRoot(): string | null {
+    try { return localStorage.getItem(BOARD_ROOT_KEY); } catch { return null; }
+  }
+  let boardRoot = savedRoot() ?? root;
+
   let cards: Card[] = [];
   let loading = true;
   let error = "";
+  // Distinguish "nothing loaded" from "loading": an empty result across every source means this folder
+  // has no readable Tickets/ — show a helpful prompt instead of a blank panel (CPE-551).
+  $: isEmpty = !loading && !error && cards.length === 0 && archived.length === 0 && epics.length === 0;
   let note = ""; // last action, shown in the status bar (CPE-529)
   let dragId: string | null = null;
   let overCol: Lane | null = null;
@@ -72,7 +84,7 @@
     loading = true;
     error = "";
     try {
-      cards = await invoke<Card[]>("board_cards", { root });
+      cards = await invoke<Card[]>("board_cards", { root: boardRoot });
     } catch (e) {
       error = e instanceof Error ? e.message : String(e);
       cards = [];
@@ -82,20 +94,39 @@
   }
   async function loadEpics() {
     try {
-      epics = await invoke<Epic[]>("board_epics", { root });
+      epics = await invoke<Epic[]>("board_epics", { root: boardRoot });
     } catch {
       epics = [];
     }
   }
   async function loadArchived() {
     try {
-      archived = await invoke<Card[]>("board_archived", { root });
+      archived = await invoke<Card[]>("board_archived", { root: boardRoot });
     } catch {
       archived = [];
     }
   }
   function refresh() { load(); loadEpics(); loadArchived(); }
   onMount(refresh);
+
+  /** Point the board at a different project folder (one that has a Tickets/ folder), and remember it. */
+  async function chooseProject() {
+    let dest: string | string[] | null;
+    try {
+      dest = await openFolderDialog({
+        directory: true,
+        multiple: false,
+        defaultPath: boardRoot || undefined,
+        title: "Choose a project folder (one that has a Tickets/ folder)",
+      });
+    } catch {
+      return; // dialog unavailable / errored — no-op
+    }
+    if (!dest || typeof dest !== "string") return; // cancelled
+    boardRoot = dest;
+    try { localStorage.setItem(BOARD_ROOT_KEY, boardRoot); } catch { /* ignore */ }
+    refresh();
+  }
 
   function onDragStart(e: DragEvent, id: string) {
     dragId = id;
@@ -155,6 +186,7 @@
       <div class="board-tools">
         <button class="board-btn" class:active={viewMode === "board"} on:click={() => (viewMode = "board")} title="Kanban columns">▦ Board</button>
         <button class="board-btn" class:active={viewMode === "epics"} on:click={() => (viewMode = "epics")} title="Organize by epic">◧ Epics</button>
+        <button class="board-btn" on:click={chooseProject} title={"Project: " + boardRoot + "\nChoose a different project folder"}>📁 Project</button>
         <button class="board-btn" on:click={refresh} title="Refresh from the Tickets/ folders">Refresh</button>
         <button class="board-x" title="Close" aria-label="Close" on:click={() => dispatch("close")}>×</button>
       </div>
@@ -164,6 +196,13 @@
 
     {#if loading}
       <div class="board-empty">Loading the board…</div>
+    {:else if isEmpty}
+      <div class="board-empty board-noproject">
+        <p class="np-title">No tickets found here.</p>
+        <p class="np-body">The board reads a project's <code>Tickets/</code> folder, but none was found in:</p>
+        <p class="np-path">{boardRoot}</p>
+        <button class="board-btn np-choose" on:click={chooseProject}>📁 Choose a project folder…</button>
+      </div>
     {:else if viewMode === "epics"}
       <div class="epic-view">
         <aside class="epic-list">
@@ -309,6 +348,13 @@
   .board-status { padding: 6px 14px; font-size: 12px; border-bottom: 1px solid var(--border); }
   .board-status.error { color: #e0706b; }
   .board-empty { flex: 1; display: grid; place-items: center; color: var(--text-dim); }
+  .board-noproject { align-content: center; gap: 6px; text-align: center; padding: 24px; }
+  .board-noproject .np-title { font-size: 15px; font-weight: 600; color: var(--text); margin: 0; }
+  .board-noproject .np-body { margin: 0; font-size: 13px; }
+  .board-noproject .np-path { margin: 0; font-size: 12px; color: var(--text); font-family: var(--mono, monospace);
+    background: rgba(128,128,128,0.12); padding: 6px 10px; border-radius: 6px; max-width: 90%;
+    overflow-wrap: anywhere; }
+  .board-noproject .np-choose { margin-top: 8px; height: 32px; }
 
   .board-columns { flex: 1; display: flex; gap: 10px; padding: 12px; overflow-x: auto; min-height: 0; }
   .board-col { flex: 1 1 0; min-width: 190px; display: flex; flex-direction: column;
