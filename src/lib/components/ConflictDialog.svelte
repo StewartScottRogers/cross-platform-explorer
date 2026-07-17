@@ -4,7 +4,7 @@
   // (ours / theirs / base) or edit the resolution per file, stages it, then Continue or Abort. Abort
   // restores the pre-sync state — work is never lost. Backed by the host forge_conflict_* commands.
   import { createEventDispatcher, onMount } from "svelte";
-  import { invoke } from "@tauri-apps/api/core";
+  import { invoke } from "../invoke";
   import Icon from "./Icon.svelte";
 
   export let path: string;

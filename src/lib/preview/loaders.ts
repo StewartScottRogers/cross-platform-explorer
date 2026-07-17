@@ -3,7 +3,7 @@
  * torn-off floating preview window (FloatPreview) render previews the same way.
  * Each is a thin wrapper over a Rust command; they work in any window.
  */
-import { invoke } from "@tauri-apps/api/core";
+import { invoke } from "../invoke";
 import type { ArchiveEntry } from "./provider";
 
 /** Cap on how much of a text file the preview will load. */

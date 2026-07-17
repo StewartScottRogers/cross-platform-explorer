@@ -5,7 +5,7 @@
    * containing folder. An overlay so it stays out of the plain folder listing.
    */
   import { createEventDispatcher } from "svelte";
-  import { invoke } from "@tauri-apps/api/core";
+  import { invoke } from "../invoke";
   import Icon from "./Icon.svelte";
   import { groupMatches, baseName, type ContentSearchResult } from "../contentSearch";
 

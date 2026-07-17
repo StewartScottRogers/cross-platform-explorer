@@ -4,7 +4,7 @@
   // command and renders it per-file with add/del/context styling. The editor + embedded browser panes
   // are wave 2 (CPE-527).
   import { createEventDispatcher, onMount } from "svelte";
-  import { invoke } from "@tauri-apps/api/core";
+  import { invoke } from "../invoke";
   import Icon from "./Icon.svelte";
   import { parseDiff, diffStats, fileLabel, type DiffFile } from "../diff";
   import { isBrowsableUrl, normalizeUrl, workbenchState } from "../workbench";

@@ -4,7 +4,7 @@
   // status frontmatter updates), keeping the board and the CLI /ticketing-* flow in one source of
   // truth. Read + drag only — agent dispatch is wave 2 (CPE-522). Backed by the CPE-520 commands.
   import { createEventDispatcher, onMount } from "svelte";
-  import { invoke } from "@tauri-apps/api/core";
+  import { invoke } from "../invoke";
   import Icon from "./Icon.svelte";
   import {
     BOARD_LANES, groupByLane, isValidMove, ticketTask,

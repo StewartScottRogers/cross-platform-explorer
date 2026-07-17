@@ -1,6 +1,7 @@
 <script lang="ts">
   import { onMount, onDestroy } from "svelte";
-  import { invoke, convertFileSrc } from "@tauri-apps/api/core";
+  import { convertFileSrc } from "@tauri-apps/api/core";
+  import { invoke } from "./lib/invoke";
   import { open as openFolderDialog, save as saveFileDialog } from "@tauri-apps/plugin-dialog";
   import { check, type Update } from "@tauri-apps/plugin-updater";
   import { relaunch, exit } from "@tauri-apps/plugin-process";

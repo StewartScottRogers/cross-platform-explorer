@@ -5,7 +5,7 @@
   // CPE-484: restyled to match the AI Console launcher — labeled toolbar, unified status line, header
   // + status bar — a polished mini-app rather than a bare form.
   import { createEventDispatcher, onMount } from "svelte";
-  import { invoke } from "@tauri-apps/api/core";
+  import { invoke } from "../invoke";
   import { open as openFolderDialog } from "@tauri-apps/plugin-dialog";
   import Icon from "./Icon.svelte";
   import { withBusy } from "../busy";

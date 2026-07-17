@@ -12,7 +12,7 @@
  * defensive — a corrupt or hand-edited value degrades to its default rather than
  * crashing the app on launch.
  */
-import { invoke } from "@tauri-apps/api/core";
+import { invoke } from "./invoke";
 import type { ViewMode, SortKey, SortDir, RecentFile, Favorite } from "./types";
 import { COLUMN_DEFAULTS } from "./columns";
 

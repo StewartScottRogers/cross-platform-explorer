@@ -4,7 +4,7 @@
   // it re-plans whenever the policy changes and runs each planned step via forge_sync. Never
   // force-pushes — a divergence under the "manual" policy surfaces for the user instead of reconciling.
   import { createEventDispatcher, onMount } from "svelte";
-  import { invoke } from "@tauri-apps/api/core";
+  import { invoke } from "../invoke";
   import { type OnDiverge, loadSyncPolicy, saveSyncPolicy, syncActionLabel } from "../syncPolicy";
   import { type AutoMirror, loadAutoMirror, saveAutoMirror, INTERVAL_CHOICES } from "../autoMirror";
 
