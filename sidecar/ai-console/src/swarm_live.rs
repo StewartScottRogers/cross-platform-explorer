@@ -22,6 +22,7 @@ use crate::swarm_bridge::{launch_spec_for, SwarmLaunch};
 use crate::swarm_coordinator::{Assignment, Coordinator, Task};
 use crate::swarm_driver::{apply_outcome, SessionOutcome};
 use crate::swarm_team::TeamManifest;
+use crate::usage::UsageScanner;
 
 /// Turns a coordinator assignment (+ its concrete [`SwarmLaunch`]) into a scoped [`PtyLaunch`]. The live
 /// implementation resolves the agent manifest/provider and injects the swarm MCP config; a test uses a
@@ -39,6 +40,17 @@ pub type OutcomeClassifier = Arc<dyn Fn(&str) -> bool + Send + Sync>;
 /// The default classifier: a session that ended is a success. Honest about its limits — see the type doc.
 pub fn assume_success() -> OutcomeClassifier {
     Arc::new(|_output: &str| true)
+}
+
+/// Extract a session's real spend from its terminal output as `(tokens, cost_millis)` for a
+/// [`SessionOutcome`]. Reuses the same [`UsageScanner`] the live console uses (CPE-311), so the
+/// swarm's budget caps see the same figures the UI does. Cost is dollars → integer milli-dollars.
+fn usage_from_output(output: &str) -> (u64, u64) {
+    let mut scanner = UsageScanner::new();
+    let u = scanner.feed(output);
+    let tokens = u.input_tokens.saturating_add(u.output_tokens);
+    let cost_millis = (u.cost_usd.max(0.0) * 1000.0).round() as u64;
+    (tokens, cost_millis)
 }
 
 /// How long the loop waits for a session to finish before giving up (a hung agent shouldn't hang the
@@ -108,11 +120,14 @@ impl SwarmDriver {
             let c = rx.recv_timeout(self.timeout).map_err(|_| "driver timed out waiting for a session".to_string())?;
             in_flight -= 1;
             let success = (self.classify)(&c.output);
-            // Usage (tokens/cost) is fed by the real provider stream in the live app; 0 here.
+            // Real usage: scan what the agent actually printed (Claude Code & co. report tokens/cost in
+            // their session output) so budget caps bite on real spend — via `apply_outcome`, which reports
+            // usage before completion. Zero when the agent printed nothing recognizable.
+            let (tokens, cost_millis) = usage_from_output(&c.output);
             let outcome = if success {
-                SessionOutcome::success(&c.task_id, &c.agent_id, 0, 0)
+                SessionOutcome::success(&c.task_id, &c.agent_id, tokens, cost_millis)
             } else {
-                SessionOutcome::failure(&c.task_id, &c.agent_id, 0, 0)
+                SessionOutcome::failure(&c.task_id, &c.agent_id, tokens, cost_millis)
             };
             pending.extend(apply_outcome(&mut self.coord, &outcome));
         }
@@ -253,5 +268,29 @@ mod tests {
         d.coord.set_max_retries(1);
         let coord = d.run().unwrap();
         assert_eq!(coord.state_of("t1"), Some(TaskState::Failed));
+    }
+
+    #[test]
+    fn usage_is_parsed_from_a_sessions_output() {
+        let (tokens, cost_millis) = usage_from_output("thinking...\ninput: 1000 output: 500 total cost: $0.05\ndone\n");
+        assert_eq!(tokens, 1500, "input+output tokens");
+        assert_eq!(cost_millis, 50, "$0.05 → 50 milli-dollars");
+        assert_eq!(usage_from_output("no figures here\n"), (0, 0), "silent output → zero spend");
+    }
+
+    #[test]
+    fn a_sessions_reported_spend_reaches_the_coordinator() {
+        // A planner whose agent prints a real usage line → the driver folds that spend into the
+        // coordinator (not the hardcoded zero), so budget caps would see it.
+        struct UsagePlanner;
+        impl LaunchPlanner for UsagePlanner {
+            fn plan(&self, _a: &Assignment, _s: &SwarmLaunch) -> Result<PtyLaunch, String> {
+                let (program, args) = crate::pty::shell_command("echo input: 2000 output: 1000 total cost: $0.12");
+                Ok(PtyLaunch { program, args, cwd: None, env: BTreeMap::new(), rows: 24, cols: 80 })
+            }
+        }
+        let coord = driver(team(1), vec![task("t1", &["a/**"])], Arc::new(UsagePlanner), assume_success()).run().unwrap();
+        assert!(coord.is_complete());
+        assert_eq!(coord.spend(), (3000, 120), "the agent's printed tokens + $0.12 reached the coordinator");
     }
 }

@@ -159,6 +159,58 @@ fn run_swarm_mcp() {
     ai_console::swarm_mcp_server::run(dir, agent);
 }
 
+/// Test harness (CPE-541): a stand-in for a real coding agent, so the full swarm loop —
+/// planner writes the MCP config → driver launches the agent → the agent loads the config, spawns the
+/// `--swarm-mcp` host, and coordinates → shared state lands on disk — is verifiable end-to-end
+/// **headlessly**, without a real LLM. Not wired into any user path; only the end-to-end integration
+/// test launches it. Reads its injected `--mcp-config`, spawns exactly the host the planner configured,
+/// then writes a memory note + posts a `done` broadcast over JSON-RPC and exits.
+fn run_swarm_agent_sim() {
+    use std::io::{BufRead, BufReader, Write};
+    use std::process::{Command, Stdio};
+
+    let args: Vec<String> = std::env::args().collect();
+    let val = |name: &str| args.iter().position(|a| a == name).and_then(|i| args.get(i + 1)).cloned();
+    let cfg_path = val("--mcp-config").expect("--swarm-agent-sim needs --mcp-config");
+    let agent = val("--agent").unwrap_or_else(|| "sim".to_string());
+
+    // Load exactly the MCP config the planner wrote and pull the swarm host's command line from it —
+    // proving the injected config is well-formed and points at a real launchable host.
+    let cfg: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&cfg_path).expect("read mcp config")).expect("parse mcp config");
+    let server = &cfg["mcpServers"]["swarm"];
+    let command = server["command"].as_str().expect("swarm server command").to_string();
+    let host_args: Vec<String> =
+        server["args"].as_array().expect("swarm server args").iter().map(|a| a.as_str().unwrap_or("").to_string()).collect();
+
+    let mut child = Command::new(&command)
+        .args(&host_args)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("spawn swarm mcp host");
+    let mut stdin = child.stdin.take().expect("host stdin");
+    let mut stdout = BufReader::new(child.stdout.take().expect("host stdout"));
+    let mut rpc = |line: String| {
+        writeln!(stdin, "{line}").expect("write to host");
+        stdin.flush().expect("flush host");
+        let mut resp = String::new();
+        stdout.read_line(&mut resp).expect("read host response");
+    };
+
+    rpc(r#"{"jsonrpc":"2.0","id":0,"method":"initialize"}"#.to_string());
+    rpc(format!(
+        r#"{{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{{"name":"memory.write","arguments":{{"body":"{agent} completed its task","tags":["sim"]}}}}}}"#
+    ));
+    rpc(format!(
+        r#"{{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{{"name":"mailbox.post","arguments":{{"to":"broadcast","kind":"done","body":"{agent} finished"}}}}}}"#
+    ));
+
+    drop(stdin); // close the host's stdin so it exits cleanly
+    let _ = child.wait();
+}
+
 fn main() {
     // Session-daemon mode (CPE-309 slice 2): run only the PTY session daemon behind a loopback
     // socket, as its own long-lived process, so agent sessions survive a restart of the UI-sidecar
@@ -174,6 +226,14 @@ fn main() {
     // context with the rest of the swarm. One process per agent; state is shared through `--dir`.
     if std::env::args().any(|a| a == "--swarm-mcp") {
         run_swarm_mcp();
+        return;
+    }
+
+    // Test harness (CPE-541): a fake swarm agent that proves the launch→config→host→coordinate loop
+    // without a real LLM. Reads its injected `--mcp-config`, spawns the configured `--swarm-mcp` host,
+    // and coordinates (memory.write + mailbox.post) — so the end-to-end wiring is verifiable headlessly.
+    if std::env::args().any(|a| a == "--swarm-agent-sim") {
+        run_swarm_agent_sim();
         return;
     }
 
