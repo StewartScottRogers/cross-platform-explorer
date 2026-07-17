@@ -38,4 +38,15 @@ describe("matchesGlob (CPE-360)", () => {
     expect(matchesGlob("a.txt", "*.txt, , ")).toBe(true);
     expect(matchesGlob("a.txt", " , ")).toBe(false);
   });
+
+  it("supports !-prefixed exclusions (CPE-578)", () => {
+    // include minus exclude
+    expect(matchesGlob("app.js", "*.js, !*.min.js")).toBe(true);
+    expect(matchesGlob("app.min.js", "*.js, !*.min.js")).toBe(false);
+    // only exclusions ⇒ everything except them
+    expect(matchesGlob("a.txt", "!*.tmp")).toBe(true);
+    expect(matchesGlob("a.tmp", "!*.tmp")).toBe(false);
+    // a bare "!" (no pattern after) is ignored, not a match-all exclude
+    expect(matchesGlob("a.txt", "*.txt, !")).toBe(true);
+  });
 });
