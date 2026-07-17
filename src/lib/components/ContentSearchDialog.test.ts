@@ -29,10 +29,16 @@ describe("ContentSearchDialog (CPE-417)", () => {
     // Passes the current folder as root + the camelCase caseSensitive arg.
     expect(invoke).toHaveBeenCalledWith("search_file_contents", { root: "/repo", query: "needle", caseSensitive: false });
     expect(screen.getByText("a.txt")).toBeTruthy();
-    expect(screen.getByText("the needle is here")).toBeTruthy();
+    // The line text is split across <mark>/text nodes now (CPE-557 highlighting), so match on the
+    // <code> element's full textContent.
+    const codeLine = (text: string) => (_: string, el: Element | null) =>
+      el?.tagName.toLowerCase() === "code" && el.textContent === text;
+    expect(screen.getByText(codeLine("the needle is here"))).toBeTruthy();
+    // The query is highlighted: one <mark>needle</mark> per result line (CPE-557).
+    expect(screen.getAllByText("needle")).toHaveLength(2);
 
     // Clicking a hit dispatches navigate with the FILE path (the host reveals + selects it, CPE-423).
-    await fireEvent.click(screen.getByText("found the needle deep"));
+    await fireEvent.click(screen.getByText(codeLine("found the needle deep")));
     expect(onNavigate).toHaveBeenCalledWith("/repo/sub/b.md");
   });
 

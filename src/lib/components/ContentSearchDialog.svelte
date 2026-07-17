@@ -7,7 +7,7 @@
   import { createEventDispatcher } from "svelte";
   import { invoke } from "../invoke";
   import Icon from "./Icon.svelte";
-  import { groupMatches, baseName, type ContentSearchResult } from "../contentSearch";
+  import { groupMatches, baseName, highlightSegments, type ContentSearchResult } from "../contentSearch";
 
   export let root = "";
 
@@ -18,6 +18,9 @@
   let loading = false;
   let error = "";
   let searched = false;
+  // The query + case setting actually searched, so highlighting matches the results (not a later edit).
+  let searchedQuery = "";
+  let searchedCase = false;
   let result: ContentSearchResult = { matches: [], files_scanned: 0, truncated: false };
 
   $: groups = groupMatches(result.matches);
@@ -28,6 +31,8 @@
     loading = true;
     error = "";
     searched = true;
+    searchedQuery = q;
+    searchedCase = caseSensitive;
     try {
       result = await invoke<ContentSearchResult>("search_file_contents", { root, query: q, caseSensitive });
     } catch (e) {
@@ -91,7 +96,8 @@
             </button>
             {#each g.matches as mt (mt.line_number)}
               <button class="hit" on:click={() => goToFile(g.path)}>
-                <span class="ln">{mt.line_number}</span><code>{mt.line}</code>
+                <span class="ln">{mt.line_number}</span><code
+                  >{#each highlightSegments(mt.line, searchedQuery, searchedCase) as seg}{#if seg.match}<mark class="hl">{seg.text}</mark>{:else}{seg.text}{/if}{/each}</code>
               </button>
             {/each}
           </div>
@@ -127,6 +133,8 @@
   .hit { display: flex; gap: 8px; width: 100%; text-align: left; padding: 2px 6px 2px 22px; font-size: 12px; }
   .ln { color: var(--text-faint); min-width: 34px; text-align: right; font-variant-numeric: tabular-nums; }
   .hit code { font-family: ui-monospace, monospace; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  /* Highlighted match within a result line (CPE-557) — theme-driven, not the browser default yellow. */
+  .hit code .hl { background: var(--accent); color: #fff; border-radius: 2px; padding: 0 1px; }
   .dim { color: var(--text-faint); }
   .err { color: #c42b1c; }
 </style>
