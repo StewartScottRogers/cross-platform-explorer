@@ -25,7 +25,8 @@ and sorting are on the toolbar; hidden files can be toggled from the menu.
 
 Open the **AI Console** to run a coding agent (Claude Code, aider, and others) against a folder, using
 the provider and model you choose. Launch several at once, then view them side by side in the **Agent
-Grid**. See the **AI Console** and **Agent Grid** pages for details.
+Grid** — or use **Run swarm** to put a small team of agents on one task together (see the **Swarms**
+page). See the **AI Console** and **Agent Grid** pages for details.
 
 ## Language
 

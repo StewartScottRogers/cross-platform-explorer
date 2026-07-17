@@ -22,6 +22,9 @@ add or close agents (2 side by side, 4 in a 2×2, and so on).
 - The **focused** agent renders live; off-screen tiles are throttled so many agents stay responsive
   (up to about a dozen at once).
 
+The grid is also the natural way to watch a **swarm** — several agents working one task together each get
+their own tile. See the **Swarms** page.
+
 ## Persistence
 
 Your view (Tabs or Grid) and layout are remembered per workspace and restored when you reopen the
