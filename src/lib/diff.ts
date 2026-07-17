@@ -6,6 +6,10 @@ export type DiffLineKind = "add" | "del" | "context";
 export interface DiffLine {
   kind: DiffLineKind;
   text: string;
+  /** 1-based line number in the OLD file (present on `del` + `context`). */
+  oldLine?: number;
+  /** 1-based line number in the NEW file (present on `add` + `context`). */
+  newLine?: number;
 }
 export interface Hunk {
   header: string; // the @@ … @@ line
@@ -30,6 +34,8 @@ export function parseDiff(text: string): DiffFile[] {
   const files: DiffFile[] = [];
   let cur: DiffFile | null = null;
   let hunk: Hunk | null = null;
+  let oldNo = 0; // running line number in the old file, from the @@ header
+  let newNo = 0; // running line number in the new file
 
   for (const line of text.split(/\r?\n/)) {
     if (line.startsWith("diff --git")) {
@@ -55,12 +61,16 @@ export function parseDiff(text: string): DiffFile[] {
     if (line.startsWith("@@")) {
       hunk = { header: line, lines: [] };
       cur.hunks.push(hunk);
+      // `@@ -oldStart[,oldCount] +newStart[,newCount] @@` seeds the line counters.
+      const m = /^@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@/.exec(line);
+      oldNo = m ? Number(m[1]) : 0;
+      newNo = m ? Number(m[2]) : 0;
       continue;
     }
     if (!hunk) continue; // index/mode/similarity lines between the header and first hunk
-    if (line.startsWith("+")) hunk.lines.push({ kind: "add", text: line.slice(1) });
-    else if (line.startsWith("-")) hunk.lines.push({ kind: "del", text: line.slice(1) });
-    else if (line.startsWith(" ")) hunk.lines.push({ kind: "context", text: line.slice(1) });
+    if (line.startsWith("+")) hunk.lines.push({ kind: "add", text: line.slice(1), newLine: newNo++ });
+    else if (line.startsWith("-")) hunk.lines.push({ kind: "del", text: line.slice(1), oldLine: oldNo++ });
+    else if (line.startsWith(" ")) hunk.lines.push({ kind: "context", text: line.slice(1), oldLine: oldNo++, newLine: newNo++ });
     // a `\ No newline at end of file` marker and blank trailing lines are ignored.
   }
   return files;

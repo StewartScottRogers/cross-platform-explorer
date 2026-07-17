@@ -109,7 +109,7 @@
               {#each f.hunks as h}
                 <div class="hunk-head">{h.header}</div>
                 {#each h.lines as l}
-                  <div class="line {l.kind}"><span class="gutter">{l.kind === "add" ? "+" : l.kind === "del" ? "−" : " "}</span><span class="code">{l.text}</span></div>
+                  <div class="line {l.kind}"><span class="lno" aria-hidden="true">{l.oldLine ?? ""}</span><span class="lno" aria-hidden="true">{l.newLine ?? ""}</span><span class="gutter">{l.kind === "add" ? "+" : l.kind === "del" ? "−" : " "}</span><span class="code">{l.text}</span></div>
                 {/each}
               {/each}
             {/if}
@@ -164,6 +164,9 @@
   .wb-url:focus { outline: none; border-color: var(--accent); }
   .hunk-head { padding: 3px 10px; color: #3a72b5; background: rgba(58,114,181,0.08); opacity: .9; }
   .line { display: flex; white-space: pre; }
+  /* Old/new line-number gutter (CPE-566) — muted, fixed-width, not selectable so copying grabs code only. */
+  .lno { flex: 0 0 auto; width: 40px; padding: 0 6px; text-align: right; opacity: .4; user-select: none;
+    font-variant-numeric: tabular-nums; }
   .gutter { flex: 0 0 auto; width: 16px; text-align: center; opacity: .6; user-select: none; }
   .code { flex: 1; overflow-x: auto; }
   .line.add { background: rgba(58,157,74,0.14); }

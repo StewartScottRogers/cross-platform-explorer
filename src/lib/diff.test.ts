@@ -35,6 +35,18 @@ describe("unified-diff parser (CPE-526)", () => {
     expect(app.hunks[0].header).toContain("@@");
   });
 
+  it("tracks old/new line numbers per line from the @@ header (CPE-566)", () => {
+    const [app] = parseDiff(SAMPLE);
+    const ls = app.hunks[0].lines;
+    expect(ls[0]).toMatchObject({ kind: "context", oldLine: 1, newLine: 1 });
+    expect(ls[1]).toMatchObject({ kind: "del", oldLine: 2 });
+    expect(ls[1].newLine).toBeUndefined();
+    expect(ls[2]).toMatchObject({ kind: "add", newLine: 2 });
+    expect(ls[2].oldLine).toBeUndefined();
+    expect(ls[3]).toMatchObject({ kind: "add", newLine: 3 });
+    expect(ls[4]).toMatchObject({ kind: "context", oldLine: 3, newLine: 4 });
+  });
+
   it("computes add/remove/file stats", () => {
     expect(diffStats(parseDiff(SAMPLE))).toEqual({ added: 3, removed: 2, files: 2 });
   });
