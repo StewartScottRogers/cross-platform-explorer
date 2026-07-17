@@ -8,7 +8,7 @@
    * closes on Escape, click-away, or after a choice.
    */
   import { createEventDispatcher } from "svelte";
-  import { t, locale, filterLocales, type Locale } from "../i18n";
+  import { t, locale, filterLocales, localeCoverage, type Locale } from "../i18n";
 
   let langQuery = ""; // search filter for the language picker (CPE-533)
 
@@ -154,9 +154,16 @@
         <input class="lang-search" placeholder="Search…" bind:value={langQuery} spellcheck="false" on:click|stopPropagation />
         <div class="lang-list">
           {#each filterLocales(langQuery) as l (l.code)}
+            {@const cov = localeCoverage(l.code)}
             <button class="mb-item" role="menuitemradio" aria-checked={$locale === l.code} on:click={() => pickLocale(l.code)}>
               <span class="check" aria-hidden="true">{$locale === l.code ? "✓" : ""}</span>
               {l.name} <span class="lang-en">{l.english}</span>
+              {#if cov < 1}
+                <span
+                  class="lang-cov"
+                  title={cov === 0 ? "Not yet translated — shows in English" : `${Math.round(cov * 100)}% translated — the rest shows in English`}
+                >{cov === 0 ? "English" : `${Math.round(cov * 100)}%`}</span>
+              {/if}
             </button>
           {/each}
           {#if filterLocales(langQuery).length === 0}<div class="lang-empty">No match.</div>{/if}
@@ -209,6 +216,17 @@
   .lang-search:focus { outline: none; border-color: var(--accent); }
   .lang-list { max-height: 320px; overflow-y: auto; }
   .lang-en { margin-left: auto; opacity: .5; font-size: 11px; }
+  /* Coverage indicator (CPE-539): honest signal that a language is partly/entirely English fallback.
+     Single badge — stays on one line and doesn't shrink, per the tick-tacks rule. */
+  .lang-cov {
+    flex: 0 0 auto;
+    white-space: nowrap;
+    font-size: 10px;
+    padding: 1px 6px;
+    border-radius: 999px;
+    color: var(--text-faint);
+    border: 1px solid var(--border);
+  }
   .lang-empty { padding: 8px 10px; color: var(--text-faint); font-size: 12px; }
   .mb-item {
     display: flex;

@@ -6,6 +6,7 @@ import {
   SUPPORTED_LOCALES,
   translate,
   localeKeys,
+  localeCoverage,
   locale,
   t,
   formatDate,
@@ -154,6 +155,37 @@ describe("i18n reactive t() + locale switch", () => {
       for (const k of localeKeys(code)) {
         expect(enKeys.has(k), `${code} has key '${k}' not in English`).toBe(true);
       }
+    }
+  });
+});
+
+describe("i18n locale coverage (CPE-539)", () => {
+  it("reports 1 for English and for fully-translated locales", () => {
+    expect(localeCoverage("en")).toBe(1);
+    // es/de/fr are complete today (the CPE-481 gate enforces it) → 100%.
+    for (const code of ["es", "de", "fr"] as const) {
+      expect(localeCoverage(code), `${code} should be fully covered`).toBe(1);
+    }
+  });
+
+  it("reports 0 for an offered locale with no catalog yet (full English fallback)", () => {
+    // Japanese is offered but has no catalog — it falls back entirely to English.
+    expect(localeCoverage("ja")).toBe(0);
+  });
+
+  it("is a fraction in [0,1] for every offered locale", () => {
+    for (const { code } of SUPPORTED_LOCALES) {
+      const c = localeCoverage(code);
+      expect(c).toBeGreaterThanOrEqual(0);
+      expect(c).toBeLessThanOrEqual(1);
+    }
+  });
+
+  it("equals the share of English keys the locale defines", () => {
+    const total = localeKeys("en").length;
+    for (const code of ["en", "es", "ja"] as const) {
+      const defined = localeKeys(code).filter((k) => localeKeys("en").includes(k)).length;
+      expect(localeCoverage(code)).toBeCloseTo(defined / total, 10);
     }
   });
 });

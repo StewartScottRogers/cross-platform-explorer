@@ -1341,6 +1341,20 @@ export function localeKeys(loc: Locale): string[] {
   return Object.keys(messages[loc] ?? {});
 }
 
+/** How complete a locale's catalog is: the fraction (0..1) of the English **source** keys it actually
+ *  translates. `en` and any fully-translated locale (es/de/fr today) return 1; a locale with a partial
+ *  or absent catalog returns less, so the picker can be honest that it falls back to English for the
+ *  rest (CPE-539). Extra keys a locale might carry don't count — only English-source coverage does. */
+export function localeCoverage(loc: Locale): number {
+  const enKeys = Object.keys(messages.en);
+  if (enKeys.length === 0) return 1;
+  const cat = messages[loc];
+  if (!cat) return loc === "en" ? 1 : 0;
+  let have = 0;
+  for (const k of enKeys) if (k in cat) have += 1;
+  return have / enKeys.length;
+}
+
 /** Look up + interpolate a message for a specific locale (exported for unit tests). */
 export function translate(loc: Locale, key: string, params?: Record<string, string | number>): string {
   const msg = messages[loc]?.[key] ?? messages.en[key] ?? key;
