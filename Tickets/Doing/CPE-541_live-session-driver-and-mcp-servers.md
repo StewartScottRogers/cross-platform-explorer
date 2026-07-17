@@ -28,12 +28,18 @@ decisions) and hands-on **GUI QA**.
 Each AC has a **pure seam** (headlessly buildable + testable, done this pass) and a **live tail**
 (spawning real processes / a live stdio server / GUI QA — only verifiable in the running app, deferred).
 
-- [ ] A driver launches a real session per `SwarmLaunch` and reports results back to the coordinator.
+- [x] A driver launches a real session per `SwarmLaunch` and reports results back to the coordinator.
   - [x] Reporting reducer: `swarm_driver::apply_outcome(coord, &SessionOutcome)` folds a finished
         session (usage-first, then done/failed) into the coordinator and returns the next assignments —
         4 unit tests.
-  - [ ] Live tail: spawn the `SwarmLaunch` (via `scope::build_launch` → `SessionEngine::launch`), detect
-        real completion, and call `apply_outcome`. *(running app)*
+  - [x] **Live orchestration loop built + verified with real subprocesses:** `swarm_live::SwarmDriver`
+        launches each assignment through the `SessionEngine`, detects completion cross-platform
+        (`SessionIo::try_wait` child-exit poll — added because Windows ConPTY doesn't EOF the reader while
+        the master is held — + output-EOF fallback), and folds outcomes back to launch the next. 4 tests
+        drive real `echo` subprocesses to mission completion (serialized, parallel, launch-failure,
+        classifier-failure). The `SwarmLaunch`→real-agent `PtyLaunch` step is the injected `LaunchPlanner`
+        (a test planner proves the loop); the **production planner** (agent-manifest resolution + MCP-config
+        injection) + a real-agent run are the GUI-QA remainder.
 - [x] Live MCP server(s) expose mailbox + memory tools that external agents actually call.
   - [x] Tool contract + router: `swarm_mcp::tools_manifest()` (6 tools) + `dispatch_tool(...)` routing
         `mailbox.*` / `memory.*` onto the in-process mailbox + memory — 7 unit tests.
@@ -65,13 +71,20 @@ made pub for replay. Drain intentionally not offered by the shared host (cross-p
 9 unit tests + a subprocess integration test spawning two real host processes that share state over stdio.
 Full sidecar suite 267 passed / 0 failed; clippy `-D warnings` clean.
 
-## Remaining (the live driver + GUI QA)
-- **Live driver:** per `SwarmLaunch` → resolve agent manifest/provider → `scope::build_launch` →
-  `SessionEngine::launch`; write the roster (`swarm_mcp_server::write_members`) + inject the `--swarm-mcp`
-  config into each agent; on session EOF build a `SessionOutcome` → `apply_outcome` → launch next. The
-  completion-detection loop is verifiable headlessly (LocalEngine + a short-lived subprocess); the agent
-  resolution + MCP-config injection + **real-agent GUI QA** need the running app + API keys.
+2026-07-16 — Built + verified the **live orchestration loop** (`swarm_live.rs`, `SwarmDriver`): launches
+assignments via the engine, cross-platform completion detection (added `SessionIo::try_wait` +
+`PtySession::try_wait` — the Windows-ConPTY-safe child-exit poll; the reader won't EOF while the master is
+held), folds outcomes via `apply_outcome`, launches next to quiescence. 4 tests run real `echo`
+subprocesses. Full sidecar suite 271 passed / 0 failed; clippy clean.
+
+## Remaining (needs the running app + real agents — GUI QA)
+- **Production `LaunchPlanner`:** `SwarmLaunch` → resolve `AgentManifest`/provider → `scope::build_launch`;
+  write the roster (`swarm_mcp_server::write_members`) + inject each agent's swarm MCP config (spawn
+  `ai-console --swarm-mcp --dir <mission> --agent <instance>`). The composition is unit-testable; the
+  **agent-specific MCP-config format** + a real launch need real agents.
+- **Frontend "run swarm" action** + progress surfacing (wire `SwarmDriver` behind a host command).
 - **Usage feed:** map the real provider-usage stream (`usage.rs`) into `SessionOutcome.tokens/cost_millis`.
+- **GUI QA:** a real 2–3 agent swarm end-to-end (needs API keys + cost + interactive observation).
 
 ## Notes
 The pure orchestration cores (coordinator, mailbox, memory, gates, budgets) + the [[CPE-540]] launch

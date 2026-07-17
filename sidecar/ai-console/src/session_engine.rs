@@ -34,6 +34,13 @@ pub trait SessionIo: Send + Sync {
     fn resize(&self, rows: u16, cols: u16) -> Result<(), String>;
     /// Terminate the session (reclaims the child + PTY).
     fn kill(&self) -> Result<(), String>;
+    /// Non-blocking child-exit check: `Some(code)` once the session's process has exited, `None` while
+    /// it runs *or* if this engine can't poll the child (e.g. the daemon path today — then a consumer
+    /// falls back to the output channel closing). Output-EOF is reliable on Unix PTYs but not on Windows
+    /// ConPTY while the master is held, so the live swarm driver (CPE-541) polls this too.
+    fn try_wait(&self) -> Option<i32> {
+        None
+    }
 }
 
 /// Creates + reattaches sessions. The console holds one `Arc<dyn SessionEngine>`.
@@ -109,6 +116,11 @@ impl SessionIo for LocalIo {
     }
     fn kill(&self) -> Result<(), String> {
         self.pty.lock().map_err(|_| "pty poisoned".to_string())?.kill()
+    }
+    fn try_wait(&self) -> Option<i32> {
+        // Poll the child's process handle (the reader thread holds a *cloned* reader, not this lock, so
+        // it keeps draining meanwhile). `Some(code)` once the agent process has exited.
+        self.pty.lock().ok().and_then(|mut p| p.try_wait()).map(|code| code as i32)
     }
 }
 

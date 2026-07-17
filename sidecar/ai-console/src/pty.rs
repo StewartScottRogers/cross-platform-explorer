@@ -85,6 +85,16 @@ impl PtySession {
         matches!(self.child.try_wait(), Ok(None))
     }
 
+    /// Non-blocking exit check: `Some(code)` if the child has exited, `None` if it's still running.
+    /// Polls the process handle, so it detects exit even on Windows ConPTY where the output pipe stays
+    /// open until the master closes (used by the live swarm driver, CPE-541).
+    pub fn try_wait(&mut self) -> Option<u32> {
+        match self.child.try_wait() {
+            Ok(Some(status)) => Some(status.exit_code()),
+            _ => None,
+        }
+    }
+
     /// Terminate the session.
     pub fn kill(&mut self) -> Result<(), String> {
         self.child.kill().map_err(|e| e.to_string())
