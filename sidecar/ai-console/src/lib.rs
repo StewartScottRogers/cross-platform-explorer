@@ -78,6 +78,8 @@ pub mod swarm_coordinator;
 pub use swarm_coordinator::{Assignment, Budget, Coordinator, Gate, Task, TaskState};
 pub mod agent_memory;
 pub use agent_memory::{load_dir as load_memory_dir, memory_tool, parse_note, save_note, MemoryGraph, Note};
+pub mod swarm_bridge;
+pub use swarm_bridge::{launch_spec_for, SwarmLaunch};
 pub use session_client::{SessionClient, StreamMsg};
 
 pub use plugins::{install_plugin, uninstall_plugin, PluginApplier, PluginManifest, PluginRegistry};
