@@ -221,6 +221,37 @@ describe("AI Console launcher — live swarm trigger (CPE-541)", () => {
     expect(posted[0].tasks[0].description).toBe("build the parser");
     expect(posted[0].provider).toBeDefined();
   });
+
+  it("staffs one builder per task line — two lines → two builders + two tasks", async () => {
+    const posted: any[] = [];
+    const { w } = await mountLauncher((path, opts) => {
+      if (path === "/api/swarm/run") { posted.push(JSON.parse(opts.body)); return { ok: true, data: { ok: true } }; }
+      return {};
+    });
+    const doc = w.document;
+    await w.runSwarmFromForm(); // reveal
+    doc.getElementById("swarm-task").value = "add tests\ndocument it\n";
+    await w.runSwarmFromForm(); // run
+    expect(posted).toHaveLength(1);
+    const m = posted[0];
+    expect(m.tasks.map((t: any) => t.description)).toEqual(["add tests", "document it"]);
+    expect(m.tasks.map((t: any) => t.id)).toEqual(["t1", "t2"]);
+    const builder = m.team.roles.find((r: any) => r.role === "builder");
+    expect(builder.count).toBe(2); // one builder per task, so they can run concurrently
+    expect(m.tasks.every((t: any) => t.role === "builder")).toBe(true);
+  });
+
+  it("parses an optional 'glob :: task' scope so disjoint tasks can run in parallel", () => {
+    // parseSwarmTasks is a pure top-level helper — assert its shape directly.
+    return mountLauncher().then(({ w }) => {
+      const tasks = w.parseSwarmTasks("src/**,lib/** :: refactor\ndocs/** :: write docs\nplain task\n");
+      expect(tasks).toHaveLength(3);
+      expect(tasks[0]).toMatchObject({ id: "t1", description: "refactor", globs: ["src/**", "lib/**"] });
+      expect(tasks[1]).toMatchObject({ id: "t2", description: "write docs", globs: ["docs/**"] });
+      expect(tasks[2]).toMatchObject({ description: "plain task", globs: ["**"] }); // no scope → whole tree
+      expect(w.parseSwarmTasks("   \n\n")).toEqual([]); // blank input → no tasks
+    });
+  });
 });
 
 describe("AI Console launcher — grid pane identity + keyboard nav (CPE-507)", () => {
