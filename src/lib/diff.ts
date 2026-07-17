@@ -91,6 +91,12 @@ export function diffStats(files: DiffFile[]): { added: number; removed: number; 
   return { added, removed, files: files.length };
 }
 
+/** Added / removed line totals for a single file — for a per-file `+N −M` badge (CPE-567). */
+export function fileStats(f: DiffFile): { added: number; removed: number } {
+  const { added, removed } = diffStats([f]);
+  return { added, removed };
+}
+
 /** A short label for a file's change: its new path, or `old → new` on a rename, or the deleted path. */
 export function fileLabel(f: DiffFile): string {
   if (f.newPath === "/dev/null") return `${f.oldPath} (deleted)`;

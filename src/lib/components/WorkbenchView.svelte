@@ -6,7 +6,7 @@
   import { createEventDispatcher, onMount } from "svelte";
   import { invoke } from "../invoke";
   import Icon from "./Icon.svelte";
-  import { parseDiff, diffStats, fileLabel, type DiffFile } from "../diff";
+  import { parseDiff, diffStats, fileStats, fileLabel, type DiffFile } from "../diff";
   import { isBrowsableUrl, normalizeUrl, workbenchState } from "../workbench";
 
   /** Repo root to diff. */
@@ -100,9 +100,11 @@
         <div class="wb-empty">✓ No changes — <b>{branch || "the working tree"}</b> matches HEAD.</div>
       {:else}
         {#each files as f (f.oldPath + "→" + f.newPath)}
+          {@const fs = fileStats(f)}
           <div class="file">
             <div class="file-head">
               <span class="file-name">{fileLabel(f)}{#if f.binary} <span class="binary">binary</span>{/if}</span>
+              {#if !f.binary}<span class="file-stat"><span class="fs-add">+{fs.added}</span> <span class="fs-del">−{fs.removed}</span></span>{/if}
               <button class="edit-btn" on:click={() => editFile(f)} title="Open this file in the editor">Edit</button>
             </div>
             {#if !f.binary}
@@ -153,8 +155,12 @@
   .file-head { display: flex; align-items: center; justify-content: space-between; gap: 8px;
     padding: 6px 10px; background: var(--surface-alt); border-bottom: 1px solid var(--border);
     font-family: system-ui, sans-serif; font-size: 12px; font-weight: 600; }
-  .file-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .file-name { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .binary { font-weight: 400; opacity: .6; }
+  /* Per-file add/remove badge (CPE-567). */
+  .file-stat { flex: 0 0 auto; font-size: 11px; font-variant-numeric: tabular-nums; }
+  .fs-add { color: #3a9d4a; }
+  .fs-del { color: #c94f4f; }
   .edit-btn { flex: 0 0 auto; font: inherit; font-size: 11px; font-weight: 500; height: 22px; padding: 0 9px;
     border-radius: 5px; cursor: pointer; border: 1px solid var(--border-strong); background: var(--surface); color: var(--text); }
   .edit-btn:hover { background: rgba(128,128,128,0.14); }

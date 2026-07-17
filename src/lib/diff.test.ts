@@ -1,6 +1,6 @@
 // CPE-526: unified-diff parser — files/hunks/typed lines, stats, labels, tolerance.
 import { describe, it, expect } from "vitest";
-import { parseDiff, diffStats, fileLabel } from "./diff";
+import { parseDiff, diffStats, fileStats, fileLabel } from "./diff";
 
 const SAMPLE = `diff --git a/src/app.ts b/src/app.ts
 index 1111..2222 100644
@@ -49,6 +49,12 @@ describe("unified-diff parser (CPE-526)", () => {
 
   it("computes add/remove/file stats", () => {
     expect(diffStats(parseDiff(SAMPLE))).toEqual({ added: 3, removed: 2, files: 2 });
+  });
+
+  it("computes per-file add/remove stats (CPE-567)", () => {
+    const [app, readme] = parseDiff(SAMPLE);
+    expect(fileStats(app)).toEqual({ added: 2, removed: 1 });
+    expect(fileStats(readme)).toEqual({ added: 1, removed: 1 });
   });
 
   it("labels new / deleted / renamed / modified files", () => {
