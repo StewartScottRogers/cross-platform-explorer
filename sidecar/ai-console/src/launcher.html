@@ -12,6 +12,9 @@
          flex-direction: column; background: Canvas; color: CanvasText; }
   /* Busy/wait cursor for perceptible operations (CPE-482). */
   body.busy, body.busy * { cursor: progress !important; }
+  /* Boot cursor (CPE-552): show the wait pointer from first paint until the launcher is interactive,
+     so a slow sidecar start / catalog fetch never looks frozen. Cleared by the boot code below. */
+  body.booting, body.booting * { cursor: progress !important; }
 
   /* Launcher toolbar */
   .toolbar { padding: 11px 16px; display: flex; flex-direction: column; gap: 10px;
@@ -233,7 +236,7 @@
   #onboard-go { min-width: 130px; }
 </style>
 </head>
-<body>
+<body class="booting">
   <div class="brandbar" title="Cross-Platform Explorer" style="display:flex;align-items:center;gap:8px;padding:6px 12px;border-bottom:1px solid var(--line);font-size:12px">
     <svg viewBox="0 0 1024 1024" width="20" height="20" aria-hidden="true" style="flex:0 0 auto">
       <defs><linearGradient id="cpe-brandmark" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#4F46E5"/><stop offset="1" stop-color="#06B6D4"/></linearGradient></defs>
@@ -1645,7 +1648,9 @@ $("sb-grip").addEventListener("mousedown", (e) => {
   if (cur && cur.startResizeDragging) { e.preventDefault(); try { cur.startResizeDragging("SouthEast"); } catch (_) {} }
 });
 
-load().then(updateStatusBar).catch((e) => setMsg("Could not load catalog: " + e.message));
+// Clear the boot wait-cursor once the launcher is interactive (CPE-552) — success or failure.
+function endBoot() { try { document.body.classList.remove("booting"); } catch (_) {} }
+load().then(updateStatusBar).catch((e) => setMsg("Could not load catalog: " + e.message)).finally(endBoot);
 </script>
 </body>
 </html>

@@ -138,6 +138,25 @@ describe("AI Console launcher — Agent Grid view (CPE-506)", () => {
   });
 });
 
+describe("AI Console launcher — boot loading cursor (CPE-552)", () => {
+  it("ships a booting body class + a progress-cursor rule for it (pre-JS coverage)", () => {
+    expect(HTML).toMatch(/<body[^>]*class="[^"]*\bbooting\b[^"]*"/);
+    expect(HTML).toMatch(/body\.booting[\s\S]*?cursor:\s*progress\s*!important/);
+  });
+
+  it("endBoot() clears the boot cursor class", async () => {
+    const { w } = await mountLauncher();
+    w.document.body.classList.add("booting");
+    w.endBoot();
+    expect(w.document.body.classList.contains("booting")).toBe(false);
+  });
+
+  it("boot clears the booting class once the launcher has loaded", async () => {
+    const { w } = await mountLauncher(); // mountLauncher awaits boot settle
+    expect(w.document.body.classList.contains("booting")).toBe(false);
+  });
+});
+
 describe("AI Console launcher — live swarm trigger (CPE-541)", () => {
   it("runSwarm POSTs the mission to /api/swarm/run and reports success", async () => {
     const calls: Array<{ path: string; body: any }> = [];
