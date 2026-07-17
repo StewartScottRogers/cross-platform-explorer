@@ -146,6 +146,19 @@ fn run_session_daemon() {
     ai_console::session_server::serve(listener, Arc::new(ai_console::SessionDaemon::new()));
 }
 
+/// Run the live swarm MCP host (CPE-541): `--swarm-mcp --dir <mission> --agent <id>`. Serves the swarm
+/// coordination tools over JSON-RPC/stdio, sharing state through the mission dir. `--agent` names the
+/// calling agent (so it can't post as another); defaults keep it runnable standalone for diagnostics.
+fn run_swarm_mcp() {
+    let args: Vec<String> = std::env::args().collect();
+    let val = |name: &str| args.iter().position(|a| a == name).and_then(|i| args.get(i + 1)).cloned();
+    let dir = val("--dir")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
+    let agent = val("--agent").unwrap_or_else(|| "agent".to_string());
+    ai_console::swarm_mcp_server::run(dir, agent);
+}
+
 fn main() {
     // Session-daemon mode (CPE-309 slice 2): run only the PTY session daemon behind a loopback
     // socket, as its own long-lived process, so agent sessions survive a restart of the UI-sidecar
@@ -153,6 +166,14 @@ fn main() {
     // supervisor/parent learns the port, then serves until killed.
     if std::env::args().any(|a| a == "--session-daemon") {
         run_session_daemon();
+        return;
+    }
+
+    // Live swarm MCP host (CPE-541): serve the mailbox + shared-memory tools over JSON-RPC/stdio against
+    // a mission dir, so a launched agent that lists this process in its MCP config coordinates + shares
+    // context with the rest of the swarm. One process per agent; state is shared through `--dir`.
+    if std::env::args().any(|a| a == "--swarm-mcp") {
+        run_swarm_mcp();
         return;
     }
 

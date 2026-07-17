@@ -34,11 +34,15 @@ Each AC has a **pure seam** (headlessly buildable + testable, done this pass) an
         4 unit tests.
   - [ ] Live tail: spawn the `SwarmLaunch` (via `scope::build_launch` → `SessionEngine::launch`), detect
         real completion, and call `apply_outcome`. *(running app)*
-- [ ] Live MCP server(s) expose mailbox + memory tools that external agents actually call.
+- [x] Live MCP server(s) expose mailbox + memory tools that external agents actually call.
   - [x] Tool contract + router: `swarm_mcp::tools_manifest()` (6 tools) + `dispatch_tool(...)` routing
         `mailbox.*` / `memory.*` onto the in-process mailbox + memory — 7 unit tests.
-  - [ ] Live tail: one in-process **stdio** MCP host serving that router, injected into each launched
-        agent's MCP config. *(running app)*
+  - [x] **Live host built + cross-process verified:** `ai-console --swarm-mcp --dir <d> --agent <id>` —
+        a real JSON-RPC 2.0 / stdio MCP server (`swarm_mcp_server`), state shared through the mission dir
+        (`memory/` + `mailbox.jsonl` + `members.json`). 9 unit tests + a **subprocess integration test**
+        (`tests/swarm_mcp_server_process.rs`) that spawns TWO real host processes and proves they share
+        memory + mailbox over stdio. Injecting the config into each launched agent is the driver's job
+        (AC #1 live tail).
 - [ ] Budget/gate signals fed from real provider usage.
   - [x] Usage→budget wiring proven: `apply_outcome` reports usage *before* completion, so a real cap
         pauses the agent/mission before re-dispatch (unit-tested).
@@ -49,6 +53,25 @@ Each AC has a **pure seam** (headlessly buildable + testable, done this pass) an
 - One MCP server for mailbox+memory or two? How do agent processes discover it?
 - Coordinator↔session bridge in the host vs the frontend? Failure/observability model?
 - Security of the MCP exposure surface.
+
+## Work Log (reopened — live wiring)
+2026-07-16 — Reopened from Deferred on the user's "do it" (they picked CPE-541 live wiring). Architecture
+call recorded under Decisions: the live MCP host is a **`ai-console --swarm-mcp` subcommand** (JSON-RPC 2.0
+over stdio), state shared through the **filesystem** mission dir (no sidecar IPC, no network/port/token).
+2026-07-16 — Built + verified the **live MCP host** (`swarm_mcp_server.rs`): file-backed shared store
+(memory via `.agentmemory` persistence; `mailbox.jsonl`; `members.json` roster for role/broadcast), a real
+JSON-RPC loop (`initialize`/`tools/list`/`tools/call`), `--swarm-mcp` entry in `main.rs`, `parse_recipient`
+made pub for replay. Drain intentionally not offered by the shared host (cross-process cursor out of scope).
+9 unit tests + a subprocess integration test spawning two real host processes that share state over stdio.
+Full sidecar suite 267 passed / 0 failed; clippy `-D warnings` clean.
+
+## Remaining (the live driver + GUI QA)
+- **Live driver:** per `SwarmLaunch` → resolve agent manifest/provider → `scope::build_launch` →
+  `SessionEngine::launch`; write the roster (`swarm_mcp_server::write_members`) + inject the `--swarm-mcp`
+  config into each agent; on session EOF build a `SessionOutcome` → `apply_outcome` → launch next. The
+  completion-detection loop is verifiable headlessly (LocalEngine + a short-lived subprocess); the agent
+  resolution + MCP-config injection + **real-agent GUI QA** need the running app + API keys.
+- **Usage feed:** map the real provider-usage stream (`usage.rs`) into `SessionOutcome.tokens/cost_millis`.
 
 ## Notes
 The pure orchestration cores (coordinator, mailbox, memory, gates, budgets) + the [[CPE-540]] launch

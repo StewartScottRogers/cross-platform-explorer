@@ -84,8 +84,9 @@ pub fn tools_manifest() -> Value {
 
 /// Parse the `to` field of a `mailbox.post` call into a [`Recipient`]. Accepts the string
 /// `"broadcast"`, `{"agent": "id"}`, or `{"role": "builder"}` (role names match the lowercase
-/// [`Role`] vocabulary). Returns `Err` with a caller-facing message on anything else.
-fn parse_recipient(to: &Value) -> Result<Recipient, String> {
+/// [`Role`] vocabulary). Returns `Err` with a caller-facing message on anything else. Public so the
+/// file-backed live MCP host ([`crate::swarm_mcp_server`]) can resolve stored recipients on replay.
+pub fn parse_recipient(to: &Value) -> Result<Recipient, String> {
     if let Some(s) = to.as_str() {
         return match s {
             "broadcast" => Ok(Recipient::Broadcast),

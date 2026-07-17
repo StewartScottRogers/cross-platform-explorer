@@ -84,6 +84,7 @@ pub mod swarm_driver;
 pub use swarm_driver::{apply_outcome, SessionOutcome};
 pub mod swarm_mcp;
 pub use swarm_mcp::{dispatch_tool as swarm_tool_call, tools_manifest as swarm_tools_manifest};
+pub mod swarm_mcp_server;
 pub use session_client::{SessionClient, StreamMsg};
 
 pub use plugins::{install_plugin, uninstall_plugin, PluginApplier, PluginManifest, PluginRegistry};
