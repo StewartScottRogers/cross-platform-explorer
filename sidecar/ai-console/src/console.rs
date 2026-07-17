@@ -491,6 +491,69 @@ impl ConsoleState {
         Response::json(json!({ "session": id, "dangerousFlags": dangerous }).to_string())
     }
 
+    /// `POST /api/swarm/run {team, tasks, provider, model?, credential?, cwd?}` — launch a **live swarm**
+    /// (CPE-541): assemble the coordinator + [`ProductionPlanner`] + [`SwarmDriver`] and run the mission
+    /// on a background thread, spawning a real agent session per assignment (each wired to a shared
+    /// `--swarm-mcp` host in the mission dir). Returns immediately with the mission dir; progress/end
+    /// surface through the normal per-session Agent-Watch announcements. Uses the same
+    /// agent-launch surface as `handle_launch`, so it inherits its trust model.
+    ///
+    /// NB: the *end-to-end* behaviour (agents actually loading the host + coordinating) is the GUI-QA
+    /// step — the assembly here is unit-tested; a real-agent run is not yet verified.
+    fn handle_swarm_run(&self, body: &str) -> Response {
+        let v: Value = match serde_json::from_str(body) {
+            Ok(v) => v,
+            Err(e) => return bad(format!("bad json: {e}")),
+        };
+        let team: crate::swarm_team::TeamManifest = match serde_json::from_value(v["team"].clone()) {
+            Ok(t) => t,
+            Err(e) => return bad(format!("bad team: {e}")),
+        };
+        let tasks: Vec<crate::swarm_coordinator::Task> = match serde_json::from_value(v["tasks"].clone()) {
+            Ok(t) => t,
+            Err(e) => return bad(format!("bad tasks: {e}")),
+        };
+        if tasks.is_empty() {
+            return bad("a swarm mission needs at least one task");
+        }
+        let provider = v["provider"].as_str().unwrap_or("").to_string();
+        // Per-role models come from the team manifest (via the launch-spec bridge), not a global field.
+        let cwd = str_opt(&v, "cwd").unwrap_or_else(|| self.default_cwd.clone());
+        let credential = str_opt(&v, "credential").unwrap_or_else(|| DEFAULT_CREDENTIAL.to_string());
+        let api_key = resolve_provider_key(&*self.secrets, &provider, None, &credential);
+
+        // A fresh per-mission dir holds the shared memory / mailbox / roster / MCP configs.
+        let mission_dir = std::env::temp_dir().join(format!("cpe-swarm-{}", now_millis()));
+        let exe = match std::env::current_exe() {
+            Ok(p) => p,
+            Err(e) => return bad(format!("locate self: {e}")),
+        };
+        // A read-only snapshot of the catalog for the mission thread (planner only reads it).
+        let registry = std::sync::Arc::new(self.registry.read().unwrap().clone());
+        let roster = crate::swarm_plan::ProductionPlanner::roster_for(&team);
+        let planner = crate::swarm_plan::ProductionPlanner::new(
+            registry, mission_dir.clone(), exe, cwd, provider, api_key, None,
+        );
+        if let Err(e) = planner.init_mission(&roster) {
+            return bad(e);
+        }
+        let driver = match crate::swarm_live::SwarmDriver::new(
+            team,
+            tasks,
+            self.engine.clone(),
+            std::sync::Arc::new(planner),
+            crate::swarm_live::assume_success(),
+        ) {
+            Ok(d) => d,
+            Err(e) => return bad(e),
+        };
+        // Run the mission to completion off the request thread; sessions announce themselves as they go.
+        std::thread::spawn(move || {
+            let _ = driver.run();
+        });
+        Response::json(json!({ "ok": true, "mission": mission_dir.to_string_lossy() }).to_string())
+    }
+
     /// Wire a session's I/O into the console: spawn the reader pipeline that fans the engine's output
     /// channel into the replay ring + the live WebSocket, taps reads (CPE-405) + usage (CPE-311), and
     /// on stream-close records history + announces "ended"; then insert the `Session`. Shared by a
@@ -1232,6 +1295,7 @@ pub fn route(state: &ConsoleState, req: &Request) -> Response {
         ("GET", "/") => Response::html(launcher_html()),
         ("GET", "/api/catalog") => Response::json(state.catalog().to_string()),
         ("POST", "/api/launch") => state.handle_launch(&req.body),
+        ("POST", "/api/swarm/run") => state.handle_swarm_run(&req.body),
         ("POST", "/api/close-all") => state.handle_close_all(),
         ("POST", p) if p.starts_with("/api/session/") && p.ends_with("/close") => {
             state.handle_close(p)
@@ -1459,6 +1523,34 @@ mod tests {
     #[test]
     fn unknown_route_is_404() {
         assert_eq!(get(&state(), "/nope").status, 404);
+    }
+
+    fn swarm_run(body: &str) -> Response {
+        route(
+            &state(),
+            &Request { method: "POST".into(), path: "/api/swarm/run".into(), body: body.into(), ..Default::default() },
+        )
+    }
+
+    // Validation only — the happy path spawns real agent sessions (GUI QA), so it isn't exercised here;
+    // the assembly is covered by the swarm_plan + swarm_live tests.
+    #[test]
+    fn swarm_run_rejects_bad_json() {
+        assert_eq!(swarm_run("{not json").status, 400);
+    }
+
+    #[test]
+    fn swarm_run_rejects_a_mission_with_no_tasks() {
+        let body = r#"{"team":{"name":"T","description":"","roles":[{"role":"coordinator","agent":"claude","count":1},{"role":"builder","agent":"claude","count":1}]},"tasks":[],"provider":"openrouter"}"#;
+        let r = swarm_run(body);
+        assert_eq!(r.status, 400);
+        assert!(String::from_utf8_lossy(&r.body).contains("task"));
+    }
+
+    #[test]
+    fn swarm_run_rejects_a_malformed_team() {
+        let body = r#"{"team":{"nope":true},"tasks":[{"id":"t1","description":"x","role":"builder","globs":["a/**"]}],"provider":"openrouter"}"#;
+        assert_eq!(swarm_run(body).status, 400);
     }
 
     #[test]

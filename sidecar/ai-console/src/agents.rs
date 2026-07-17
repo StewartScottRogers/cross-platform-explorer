@@ -156,7 +156,7 @@ pub struct LoadWarning {
 }
 
 /// The loaded, validated set of agent manifests, keyed by id.
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone)]
 pub struct AgentRegistry {
     by_id: BTreeMap<String, AgentManifest>,
     warnings: Vec<LoadWarning>,

@@ -291,6 +291,14 @@
       <button id="advanced-btn" type="button" title="Optional extras: reusable setups, a fast model, a per-launch key">Advanced ▾</button>
       <button id="help-btn" type="button" title="How the AI Console works — a quick guide">?</button>
       <button id="launch" class="primary">Launch</button>
+      <button id="run-swarm" type="button" title="Run a small multi-agent swarm (a coordinator + a builder of the selected agent) on one task — experimental (CPE-541)">Run swarm ▾</button>
+    </div>
+    <div class="row" id="swarm-row" hidden>
+      <div class="field" style="flex:1">
+        <label for="swarm-task" title="The task the swarm works — a coordinator dispatches it to a builder">Swarm task</label>
+        <input id="swarm-task" placeholder="e.g. add unit tests for the CSV parser">
+      </div>
+      <button id="swarm-go" type="button" class="primary" title="Start the swarm">Start</button>
     </div>
     <div class="row" id="advanced-row" hidden>
       <div class="field" style="width:200px;flex:0 0 auto">
@@ -1208,6 +1216,50 @@ async function launchWith(body, name) {
   } catch (e) { setMsg("Launch failed: " + e.message); return false; }
 }
 
+// --- Live swarm (CPE-541) -------------------------------------------------------------
+// POST a mission {team, tasks, provider, credential?, cwd?} to the backend, which assembles the
+// coordinator + driver and launches a real agent session per assignment, each wired to a shared
+// swarm MCP host. Returns true on a started mission. The end-to-end behaviour is GUI-QA; this is the
+// frontend→backend trigger (jsdom-tested).
+async function runSwarm(mission) {
+  if (!mission || !mission.team || !Array.isArray(mission.tasks) || mission.tasks.length === 0) {
+    setMsg("A swarm needs a team and at least one task.", false);
+    return false;
+  }
+  setMsg("Starting swarm…", true);
+  try {
+    const res = await withBusy(() => api("/api/swarm/run", { method: "POST", body: JSON.stringify(mission) }));
+    setMsg("Swarm started — its agents launch in their own tabs and coordinate over the shared MCP host.", true);
+    return res && res.ok !== false;
+  } catch (e) { setMsg("Swarm failed: " + e.message, false); return false; }
+}
+
+// Build a minimal mission from the current form (a coordinator + a builder of the selected agent) and
+// run it. First click just reveals the task field.
+async function runSwarmFromForm() {
+  const row = $("swarm-row");
+  if (row.hidden) { row.hidden = false; $("swarm-task").focus(); return false; }
+  const task = $("swarm-task").value.trim();
+  if (!task) { setMsg("Enter a task for the swarm.", false); $("swarm-task").focus(); return false; }
+  const a = agentById($("agent").value);
+  const model = $("model").value.trim() || (a && a.defaultModel) || "";
+  const agent = $("agent").value;
+  const mission = {
+    team: {
+      name: "swarm", description: "",
+      roles: [
+        { role: "coordinator", agent, model: model || null, count: 1 },
+        { role: "builder", agent, model: model || null, count: 1 },
+      ],
+    },
+    tasks: [{ id: "t1", description: task, role: "builder", globs: ["**"], gate: "none" }],
+    provider: $("provider").value,
+    credential: selectedCredential(),
+    cwd: $("cwd").value.trim(),
+  };
+  return runSwarm(mission);
+}
+
 // --- Provider credential manager (CPE-346) --------------------------------------------
 function keysMsg(m, ok) { const e = $("keys-msg"); e.textContent = m || ""; e.style.color = ok ? "#3a9d4a" : "#d05656"; }
 // A "Secrets not granted" broker error means the sensitive Secrets permission is off — turn the
@@ -1562,6 +1614,8 @@ $("cwd-browse").addEventListener("click", pickFolder);
 $("onboard-go").addEventListener("click", dismissOnboarding);
 $("onboard-addkey").addEventListener("click", () => { dismissOnboarding(); openKeys(); });
 $("launch").addEventListener("click", launch);
+$("run-swarm").addEventListener("click", runSwarmFromForm);
+$("swarm-go").addEventListener("click", runSwarmFromForm);
 $("view-toggle").addEventListener("click", toggleView); // Agent Grid Tabs⇄Grid (CPE-506)
 updateViewToggle(); // reflect the (empty) initial state so the bar is explicitly hidden
 // Recompute the width-aware grid columns as the window resizes (CPE-510).

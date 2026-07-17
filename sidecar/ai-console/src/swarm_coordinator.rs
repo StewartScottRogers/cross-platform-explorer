@@ -16,7 +16,8 @@ use crate::swarm_team::{Role, TeamManifest};
 use std::collections::{HashMap, HashSet};
 
 /// The quality gate a task must pass before it counts as done (CPE-518).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
 pub enum Gate {
     /// No gate — finishing the work is done.
     None,
@@ -28,13 +29,18 @@ pub enum Gate {
 
 /// A unit of work in a mission: a description, the role that should do it, the file globs it will
 /// exclusively own while running (its lock claim), and the quality gate it must pass to be done.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Task {
     pub id: String,
     pub description: String,
     pub role: Role,
     pub globs: Vec<String>,
+    #[serde(default = "gate_none")]
     pub gate: Gate,
+}
+
+fn gate_none() -> Gate {
+    Gate::None
 }
 
 /// A task's lifecycle state.

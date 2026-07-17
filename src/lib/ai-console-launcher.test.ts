@@ -138,6 +138,59 @@ describe("AI Console launcher — Agent Grid view (CPE-506)", () => {
   });
 });
 
+describe("AI Console launcher — live swarm trigger (CPE-541)", () => {
+  it("runSwarm POSTs the mission to /api/swarm/run and reports success", async () => {
+    const calls: Array<{ path: string; body: any }> = [];
+    const { w } = await mountLauncher((path, opts) => {
+      if (path === "/api/swarm/run") {
+        calls.push({ path, body: JSON.parse(opts.body) });
+        return { ok: true, data: { ok: true, mission: "/tmp/cpe-swarm-1" } };
+      }
+      return {};
+    });
+    const mission = {
+      team: { name: "swarm", description: "", roles: [{ role: "coordinator", agent: "claude", count: 1 }, { role: "builder", agent: "claude", count: 1 }] },
+      tasks: [{ id: "t1", description: "add tests", role: "builder", globs: ["**"], gate: "none" }],
+      provider: "openrouter",
+    };
+    const ok = await w.runSwarm(mission);
+    expect(ok).toBe(true);
+    expect(calls).toHaveLength(1);
+    expect(calls[0].body.tasks[0].description).toBe("add tests");
+    expect(calls[0].body.team.roles).toHaveLength(2);
+  });
+
+  it("runSwarm refuses a mission with no tasks and does not call the backend", async () => {
+    const calls: string[] = [];
+    const { w } = await mountLauncher((path) => {
+      if (path === "/api/swarm/run") calls.push(path);
+      return {};
+    });
+    const ok = await w.runSwarm({ team: { name: "x", description: "", roles: [] }, tasks: [] });
+    expect(ok).toBe(false);
+    expect(calls).toHaveLength(0);
+  });
+
+  it("the Run swarm button reveals the task field first, then runs on the second trigger", async () => {
+    const posted: any[] = [];
+    const { w } = await mountLauncher((path, opts) => {
+      if (path === "/api/swarm/run") { posted.push(JSON.parse(opts.body)); return { ok: true, data: { ok: true } }; }
+      return {};
+    });
+    const doc = w.document;
+    expect(doc.getElementById("swarm-row").hidden).toBe(true);
+    await w.runSwarmFromForm(); // first: reveal
+    expect(doc.getElementById("swarm-row").hidden).toBe(false);
+    expect(posted).toHaveLength(0);
+
+    doc.getElementById("swarm-task").value = "build the parser";
+    await w.runSwarmFromForm(); // second: run
+    expect(posted).toHaveLength(1);
+    expect(posted[0].tasks[0].description).toBe("build the parser");
+    expect(posted[0].provider).toBeDefined();
+  });
+});
+
 describe("AI Console launcher — grid pane identity + keyboard nav (CPE-507)", () => {
   it("nextPaneId moves row-major in a cols-wide grid and clamps at edges", async () => {
     const { w } = await mountLauncher();

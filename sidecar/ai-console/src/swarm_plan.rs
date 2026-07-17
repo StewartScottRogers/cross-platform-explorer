@@ -17,7 +17,7 @@
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
-use std::sync::{Arc, RwLock};
+use std::sync::Arc;
 
 use serde_json::json;
 
@@ -37,7 +37,7 @@ fn sanitize(id: &str) -> String {
 
 /// Builds real agent launches for a swarm mission, wiring each agent to the shared MCP host.
 pub struct ProductionPlanner {
-    registry: Arc<RwLock<AgentRegistry>>,
+    registry: Arc<AgentRegistry>,
     /// The mission directory the swarm shares (memory / mailbox / roster / MCP configs).
     mission_dir: PathBuf,
     /// Path to the `ai-console` executable that hosts `--swarm-mcp`.
@@ -59,7 +59,7 @@ impl ProductionPlanner {
     /// `cwd` is the repo the swarm works in; `provider`/`api_key`/`base_url` select the model gateway.
     #[allow(clippy::too_many_arguments)]
     pub fn new(
-        registry: Arc<RwLock<AgentRegistry>>,
+        registry: Arc<AgentRegistry>,
         mission_dir: PathBuf,
         exe: PathBuf,
         cwd: String,
@@ -124,8 +124,6 @@ impl LaunchPlanner for ProductionPlanner {
     fn plan(&self, assignment: &Assignment, spec: &SwarmLaunch) -> Result<PtyLaunch, String> {
         let agent = self
             .registry
-            .read()
-            .map_err(|_| "agent registry poisoned".to_string())?
             .get(&spec.agent)
             .cloned()
             .ok_or_else(|| format!("unknown agent '{}'", spec.agent))?;
@@ -159,9 +157,9 @@ mod tests {
     use super::*;
     use crate::swarm_team::RoleSpec;
 
-    fn registry() -> Arc<RwLock<AgentRegistry>> {
+    fn registry() -> Arc<AgentRegistry> {
         let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("agents");
-        Arc::new(RwLock::new(AgentRegistry::load_from_dirs(&[dir])))
+        Arc::new(AgentRegistry::load_from_dirs(&[dir]))
     }
 
     fn planner(mission: PathBuf) -> ProductionPlanner {
