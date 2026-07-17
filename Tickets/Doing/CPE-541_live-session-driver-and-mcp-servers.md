@@ -77,14 +77,23 @@ assignments via the engine, cross-platform completion detection (added `SessionI
 held), folds outcomes via `apply_outcome`, launches next to quiescence. 4 tests run real `echo`
 subprocesses. Full sidecar suite 271 passed / 0 failed; clippy clean.
 
-## Remaining (needs the running app + real agents — GUI QA)
-- **Production `LaunchPlanner`:** `SwarmLaunch` → resolve `AgentManifest`/provider → `scope::build_launch`;
-  write the roster (`swarm_mcp_server::write_members`) + inject each agent's swarm MCP config (spawn
-  `ai-console --swarm-mcp --dir <mission> --agent <instance>`). The composition is unit-testable; the
-  **agent-specific MCP-config format** + a real launch need real agents.
-- **Frontend "run swarm" action** + progress surfacing (wire `SwarmDriver` behind a host command).
-- **Usage feed:** map the real provider-usage stream (`usage.rs`) into `SessionOutcome.tokens/cost_millis`.
-- **GUI QA:** a real 2–3 agent swarm end-to-end (needs API keys + cost + interactive observation).
+2026-07-16 — Built the **production `LaunchPlanner`** (`swarm_plan.rs`, `ProductionPlanner`): resolves the
+agent manifest, writes each agent's MCP config (`--swarm-mcp --dir <mission> --agent <instance>`) + the
+roster, composes the real launch via `scope::build_launch`. Composition unit-tested (4). Then the
+**end-to-end trigger**: `POST /api/swarm/run` (`console.rs`) assembles coordinator + planner + driver and
+runs the mission on a background thread (3 validation tests); `Task`/`Gate` got serde; `AgentRegistry:
+Clone`. And the **frontend**: a "Run swarm" button + `runSwarm()` in `launcher.html`, 3 jsdom tests.
+Sidecar 278 tests, frontend 571, clippy + check clean.
+
+## Remaining — GUI QA only (needs real agents + API keys)
+The whole vertical is built + wired + unit/jsdom-tested. What's left cannot be verified without a live
+run and is the QA the ticket was carved out for:
+- **Real 2–3 agent swarm end-to-end:** confirm each agent actually loads its `--swarm-mcp` host, agents
+  coordinate over the live mailbox + share memory, and completion drives the next launch. Real cost.
+- **Agent-specific MCP-config form:** the Claude-style `--mcp-config <file>` + trailing prompt
+  (`ProductionPlanner::mcp_flag`) is the v1 QA point — verify per agent it's picked up.
+- **Real usage feed:** `SessionOutcome.tokens/cost_millis` are `0` today; map the provider-usage stream
+  (`usage.rs`) once observed live so budget caps bite on real spend.
 
 ## Notes
 The pure orchestration cores (coordinator, mailbox, memory, gates, budgets) + the [[CPE-540]] launch
