@@ -57,6 +57,43 @@ export function groupByLane(cards: Card[]): Record<Lane, Card[]> {
   return out;
 }
 
+// --- Epic-organized view (CPE-530): group by epic, split to-do (top) vs done (bottom). ------------
+export interface Epic {
+  id: string;
+  title: string;
+  status: string;
+  tags: string[];
+}
+
+/** The synthetic key for tickets with no epic. */
+export const NO_EPIC = "";
+
+/** Group cards by their `epic:` id ("" = no epic). */
+export function groupByEpic(cards: Card[]): Record<string, Card[]> {
+  const out: Record<string, Card[]> = {};
+  for (const c of cards) {
+    const k = c.epic || NO_EPIC;
+    (out[k] ||= []).push(c);
+  }
+  return out;
+}
+
+/** Split a set of cards into to-do (any non-Done column) and done, each id-ordered. To-do shows on
+    top, done on the bottom — the epic view's ordering. */
+export function todoDone(cards: Card[]): { todo: Card[]; done: Card[] } {
+  const byId = (a: Card, b: Card) => idNum(a.id) - idNum(b.id);
+  return {
+    todo: cards.filter((c) => c.column !== "Done").sort(byId),
+    done: cards.filter((c) => c.column === "Done").sort(byId),
+  };
+}
+
+/** Per-epic progress `{ done, total }` computed from the cards attached to that epic id. */
+export function epicProgress(cards: Card[], epicId: string): { done: number; total: number } {
+  const mine = cards.filter((c) => (c.epic || NO_EPIC) === epicId);
+  return { done: mine.filter((c) => c.column === "Done").length, total: mine.length };
+}
+
 /** Per-column counts, for the column headers. */
 export function columnCounts(cards: Card[]): Record<Column, number> {
   const g = groupByColumn(cards);
