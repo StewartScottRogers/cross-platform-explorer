@@ -10,7 +10,7 @@
   import {
     BOARD_LANES, groupByLane, isValidMove, ticketTask,
     clampBoardSize, loadBoardSize, saveBoardSize,
-    groupByEpic, todoDone, epicProgress, NO_EPIC, doneWithArchived,
+    groupByEpic, todoDone, epicProgress, NO_EPIC, doneWithArchived, filterCards,
     type Card, type Lane, type Epic,
   } from "../board";
 
@@ -37,20 +37,24 @@
   let dragId: string | null = null;
   let overCol: Lane | null = null;
 
-  $: grouped = groupByLane(cards);
+  // Free-text card filter (CPE-555): narrows the visible cards by id/title/tag/type/priority. Empty = all.
+  let boardQuery = "";
+  $: filtered = filterCards(cards, boardQuery);
+
+  $: grouped = groupByLane(filtered);
 
   // --- Done archival (CPE-531): recent Done (top-level) shown by default; archived (dated Done/**
   // subfolders) loaded separately + shown only on demand, so the board stays fast as Done grows. ----
   let archived: Card[] = [];
   let showArchived = false;
-  $: doneDisplay = doneWithArchived(grouped.Done, archived, showArchived);
+  $: doneDisplay = doneWithArchived(grouped.Done, filterCards(archived, boardQuery), showArchived);
 
   // --- Epic-organized view (CPE-530): a Board ⇄ Epics toggle. ------------------------------------
   let viewMode: "board" | "epics" = "board";
   let epics: Epic[] = [];
   let selectedEpic: string | null = null;
 
-  $: epicGroups = groupByEpic(cards);
+  $: epicGroups = groupByEpic(filtered);
   $: epicList = [
     ...epics.map((e) => ({ id: e.id, title: e.title, status: e.status })),
     ...(epicGroups[NO_EPIC]?.length ? [{ id: NO_EPIC, title: "No epic", status: "" }] : []),
@@ -194,6 +198,7 @@
     <div class="board-titlebar">
       <span class="board-title"><Icon name="code" size={15} /> Agent Board</span>
       <div class="board-tools">
+        <input class="board-search" bind:value={boardQuery} placeholder="Filter cards…" spellcheck="false" aria-label="Filter cards" title="Filter cards by id, title, tag, type, or priority" />
         <button class="board-btn" class:active={viewMode === "board"} on:click={() => (viewMode = "board")} title="Kanban columns">▦ Board</button>
         <button class="board-btn" class:active={viewMode === "epics"} on:click={() => (viewMode = "epics")} title="Organize by epic">◧ Epics</button>
         <button class="board-btn" on:click={chooseProject} title={"Project: " + boardRoot + "\nChoose a different project folder"}>📁 Project</button>
@@ -330,6 +335,10 @@
   .board-btn { font: inherit; font-size: 12px; height: 28px; padding: 0 12px; border-radius: 6px; cursor: pointer;
     border: 1px solid var(--border-strong); background: var(--surface); color: var(--text); }
   .board-btn:hover { background: rgba(128,128,128,0.14); }
+  .board-search { font: inherit; font-size: 12px; height: 28px; padding: 0 10px; border-radius: 6px;
+    border: 1px solid var(--border); background: var(--bg); color: var(--text); width: 160px; min-width: 90px; }
+  .board-search::placeholder { color: var(--text-faint); }
+  .board-search:focus { outline: none; border-color: var(--accent); }
   .board-btn.active { background: var(--accent); border-color: var(--accent); color: #fff; }
 
   /* Epic-organized view (CPE-530): epic list on the left, the epic's tickets to-do→done on the right. */

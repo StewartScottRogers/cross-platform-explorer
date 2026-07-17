@@ -1,6 +1,6 @@
 // CPE-521: Agent Board model — column grouping, ordering, counts, and move validation.
 import { describe, it, expect } from "vitest";
-import { groupByColumn, columnCounts, isValidMove, isColumn, ticketTask, groupByLane, laneFor, clampBoardSize, BOARD_MIN_W, BOARD_MIN_H, groupByEpic, todoDone, epicProgress, doneWithArchived, type Card } from "./board";
+import { groupByColumn, columnCounts, isValidMove, isColumn, ticketTask, groupByLane, laneFor, clampBoardSize, BOARD_MIN_W, BOARD_MIN_H, groupByEpic, todoDone, epicProgress, doneWithArchived, filterCards, type Card } from "./board";
 
 function card(id: string, column: string, extra: Partial<Card> = {}): Card {
   return { id, title: `t ${id}`, ticket_type: "Feature", priority: "Medium", tags: [], column, ...extra };
@@ -13,6 +13,31 @@ const cards: Card[] = [
   card("CPE-2", "Done"),
   card("CPE-7", "Nonsense"), // unknown column → dropped
 ];
+
+describe("board card filter (CPE-555)", () => {
+  const rows: Card[] = [
+    card("CPE-100", "Backlog", { title: "Add parser", tags: ["ready"], priority: "High" }),
+    card("CPE-9", "Doing", { title: "Fix cursor bug", ticket_type: "Bug", tags: ["ui"] }),
+    card("CPE-2", "Done", { title: "Docs pass", tags: ["docs"] }),
+  ];
+
+  it("returns every card for a blank query", () => {
+    expect(filterCards(rows, "").length).toBe(3);
+    expect(filterCards(rows, "   ").length).toBe(3);
+  });
+
+  it("matches id, title, tag, type, and priority (case-insensitive substring)", () => {
+    expect(filterCards(rows, "cpe-9").map((c) => c.id)).toEqual(["CPE-9"]); // id
+    expect(filterCards(rows, "parser").map((c) => c.id)).toEqual(["CPE-100"]); // title
+    expect(filterCards(rows, "DOCS").map((c) => c.id)).toEqual(["CPE-2"]); // tag, case-insensitive
+    expect(filterCards(rows, "bug").map((c) => c.id).sort()).toEqual(["CPE-9"]); // type Bug + "bug" in title both → CPE-9 only
+    expect(filterCards(rows, "high").map((c) => c.id)).toEqual(["CPE-100"]); // priority
+  });
+
+  it("returns nothing when no card matches", () => {
+    expect(filterCards(rows, "zzz-nomatch")).toEqual([]);
+  });
+});
 
 describe("board model (CPE-521)", () => {
   it("groups cards by column and orders each by numeric id", () => {

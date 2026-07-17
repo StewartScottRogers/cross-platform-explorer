@@ -26,6 +26,21 @@ function idNum(id: string): number {
   return m ? Number(m[1]) : 0;
 }
 
+/** Filter cards by a free-text query — case-insensitive substring across id, title, any tag, type, or
+ *  priority. A blank query returns every card unchanged (CPE-555). Pure, so the board stays thin. */
+export function filterCards(cards: Card[], query: string): Card[] {
+  const q = query.trim().toLowerCase();
+  if (!q) return cards;
+  return cards.filter(
+    (c) =>
+      c.id.toLowerCase().includes(q) ||
+      c.title.toLowerCase().includes(q) ||
+      c.ticket_type.toLowerCase().includes(q) ||
+      c.priority.toLowerCase().includes(q) ||
+      c.tags.some((t) => t.toLowerCase().includes(q)),
+  );
+}
+
 /** Group cards into their columns, each column ordered by id. Unknown columns are dropped. */
 export function groupByColumn(cards: Card[]): Record<Column, Card[]> {
   const out = {} as Record<Column, Card[]>;
