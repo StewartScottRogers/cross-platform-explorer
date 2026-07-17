@@ -185,6 +185,20 @@
     if (mine === mdReq) mdHtml = html;
   }
 
+  // ---- word wrap (CPE-565): wrap long lines in the text/code/json preview; remembered across files. ----
+  const WRAP_KEY = "cpe.previewWrap";
+  function loadWrap(): boolean {
+    // Default ON (the pane has always wrapped); only an explicit "0" turns wrapping off.
+    try { return localStorage.getItem(WRAP_KEY) !== "0"; } catch { return true; }
+  }
+  let wrapLines = loadWrap();
+  function toggleWrap() {
+    wrapLines = !wrapLines;
+    try { localStorage.setItem(WRAP_KEY, wrapLines ? "1" : "0"); } catch { /* ignore */ }
+  }
+  // The `<pre>`-rendered previews where wrapping applies (JSON + text/code); markdown + tables don't.
+  $: isPreText = provider.kind === "json" || provider.kind === "text";
+
   // ---- editing ----
   let editing = false;
   let draft = "";
@@ -412,6 +426,9 @@
     {:else}
       {#if provider.editable}
         <div class="preview-edit-bar">
+          {#if isPreText}
+            <button class="editbtn wrapbtn" class:on={wrapLines} title="Wrap long lines" aria-label="Wrap long lines" aria-pressed={wrapLines} on:click={toggleWrap}>↩</button>
+          {/if}
           <button class="editbtn" on:click={startEdit}>{$t("pv.edit")}</button>
         </div>
       {/if}
@@ -429,13 +446,13 @@
           {/if}
         </div>
       {:else if provider.kind === "json"}
-        <pre class="preview-text" bind:this={textContentEl}>{prettyJson(text)}</pre>
+        <pre class="preview-text" class:nowrap={!wrapLines} bind:this={textContentEl}>{prettyJson(text)}</pre>
       {:else if provider.kind === "markdown"}
         <!-- mdHtml is DOMPurify-sanitized (lazy renderer), safe to inject. -->
         <div class="preview-markdown" bind:this={textContentEl}>{@html mdHtml}</div>
       {:else}
         <!-- codeHtml is escaped or hljs output (lazy grammar), safe to inject. -->
-        <pre class="preview-text" bind:this={textContentEl}><code>{@html codeHtml}</code></pre>
+        <pre class="preview-text" class:nowrap={!wrapLines} bind:this={textContentEl}><code>{@html codeHtml}</code></pre>
       {/if}
     {/if}
   {:else}
@@ -491,6 +508,10 @@
     font-family: var(--mono, ui-monospace, monospace);
     font-size: 12px;
   }
+  /* Wrap toggle (CPE-565): off = preserve code indentation with horizontal scroll. */
+  .preview-text.nowrap { white-space: pre; word-break: normal; overflow-x: auto; }
+  .wrapbtn { font-size: 13px; line-height: 1; min-width: 26px; }
+  .editbtn.on { background: var(--accent); color: #fff; border-color: var(--accent); }
   .preview-table-wrap {
     overflow: auto;
     padding: 8px;

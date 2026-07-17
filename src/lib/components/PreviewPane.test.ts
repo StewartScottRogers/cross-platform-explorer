@@ -38,6 +38,22 @@ describe("PreviewPane", () => {
     expect(loadText).toHaveBeenCalledWith("C:\\d\\a.txt");
   });
 
+  it("toggles word-wrap off for a text/code preview and remembers it (CPE-565)", async () => {
+    try { localStorage.removeItem("cpe.previewWrap"); } catch { /* ignore */ }
+    const loadText = vi.fn(async () => "a very long line ".repeat(40));
+    const { container, getByLabelText } = render(PreviewPane, {
+      entry: entry({ name: "a.txt", path: "/a.txt", extension: "txt" }),
+      loadText,
+    });
+    const pre = () => container.querySelector("pre.preview-text");
+    await waitFor(() => expect(pre()).toBeTruthy());
+    expect(pre()!.classList.contains("nowrap")).toBe(false); // wraps by default
+
+    await fireEvent.click(getByLabelText("Wrap long lines"));
+    expect(pre()!.classList.contains("nowrap")).toBe(true); // toggled to no-wrap
+    expect(localStorage.getItem("cpe.previewWrap")).toBe("0"); // persisted
+  });
+
   it("shows an error state when the text load fails", async () => {
     const loadText = vi.fn(async () => {
       throw new Error("nope");
