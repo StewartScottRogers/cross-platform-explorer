@@ -285,12 +285,14 @@ mod tests {
         struct UsagePlanner;
         impl LaunchPlanner for UsagePlanner {
             fn plan(&self, _a: &Assignment, _s: &SwarmLaunch) -> Result<PtyLaunch, String> {
-                let (program, args) = crate::pty::shell_command("echo input: 2000 output: 1000 total cost: $0.12");
+                // Tokens only — a `$` cost figure isn't shell-safe (Unix `sh -c` expands `$0`); the
+                // `$cost` parse is covered deterministically by `usage_is_parsed_from_a_sessions_output`.
+                let (program, args) = crate::pty::shell_command("echo input: 2000 output: 1000");
                 Ok(PtyLaunch { program, args, cwd: None, env: BTreeMap::new(), rows: 24, cols: 80 })
             }
         }
         let coord = driver(team(1), vec![task("t1", &["a/**"])], Arc::new(UsagePlanner), assume_success()).run().unwrap();
         assert!(coord.is_complete());
-        assert_eq!(coord.spend(), (3000, 120), "the agent's printed tokens + $0.12 reached the coordinator");
+        assert_eq!(coord.spend(), (3000, 0), "the agent's printed tokens reached the coordinator");
     }
 }
