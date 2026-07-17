@@ -100,6 +100,8 @@ winreg = "0.52"
 [dev-dependencies]
 # Author a real .xlsx in the spreadsheet-preview test (write side; calamine reads).
 rust_xlsxwriter = "0.79"
+# Temp dirs for filesystem tests (e.g. the Agent Board project-root walk-up, CPE-554).
+tempfile = "3"
 
 [features]
 # This feature is used for production builds where `devUrl` is disabled.

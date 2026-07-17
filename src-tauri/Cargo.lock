@@ -758,7 +758,7 @@ dependencies = [
 
 [[package]]
 name = "cross-platform-explorer"
-version = "0.31.0"
+version = "0.32.0"
 dependencies = [
  "base64 0.22.1",
  "calamine",
@@ -790,6 +790,7 @@ dependencies = [
  "tauri-plugin-process",
  "tauri-plugin-updater",
  "tauri-plugin-window-state",
+ "tempfile",
  "trash",
  "ureq",
  "wasmprinter",

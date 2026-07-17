@@ -225,11 +225,43 @@ pub fn append_finding(md: &str, note: &str) -> String {
     }
 }
 
+/// Walk up from `start` (inclusive) and return the nearest ancestor directory that contains a readable
+/// `Tickets/` folder — so the Agent Board auto-finds the project you're inside (CPE-554). `None` when no
+/// ancestor has one. Read-only; a missing/denied dir simply isn't a match.
+pub fn nearest_project_root(start: &std::path::Path) -> Option<std::path::PathBuf> {
+    let mut dir = Some(start);
+    while let Some(d) = dir {
+        if d.join("Tickets").is_dir() {
+            return Some(d.to_path_buf());
+        }
+        dir = d.parent();
+    }
+    None
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     const TICKET: &str = "---\nid: CPE-520\ntitle: \"Board — read + move\"\ntype: Feature\nstatus: Open\npriority: Medium\ntags: [ready, backend]\nepic: CPE-503\nsprint: SPR-03\n---\n\n## Summary\nbody\n";
+
+    #[test]
+    fn nearest_project_root_walks_up_to_the_tickets_folder() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        std::fs::create_dir_all(root.join("Tickets").join("Backlog")).unwrap();
+        let deep = root.join("src").join("lib").join("components");
+        std::fs::create_dir_all(&deep).unwrap();
+
+        // Found from deep inside the project…
+        assert_eq!(nearest_project_root(&deep).as_deref(), Some(root));
+        // …and at the project root itself.
+        assert_eq!(nearest_project_root(root).as_deref(), Some(root));
+
+        // A tree with no Tickets/ ancestor yields None.
+        let other = tempfile::tempdir().unwrap();
+        assert_eq!(nearest_project_root(other.path()), None);
+    }
 
     #[test]
     fn parses_a_card_from_frontmatter() {

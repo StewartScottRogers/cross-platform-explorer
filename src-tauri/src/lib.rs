@@ -45,6 +45,14 @@ fn board_cards(root: String) -> Vec<ticket_board::Card> {
     cards
 }
 
+/// Find the nearest project root at/above `start` — the closest ancestor dir with a `Tickets/` folder —
+/// so the Agent Board can auto-open the project you're inside (CPE-554). `None` if none is found.
+#[tauri::command]
+fn find_project_root(start: String) -> Option<String> {
+    ticket_board::nearest_project_root(std::path::Path::new(&start))
+        .map(|p| p.to_string_lossy().into_owned())
+}
+
 /// Move ticket `id` to `to_column` (CPE-520): rewrite its `status:` frontmatter to match, then move the
 /// file into that folder. The only writer. Refuses an unknown id/column and never clobbers an existing
 /// file. A move to the current column is a no-op.
@@ -4257,6 +4265,7 @@ pub fn run() {
     let app = builder
         .invoke_handler(tauri::generate_handler![
             list_dir,
+            find_project_root,
             board_cards,
             board_epics,
             board_archived,

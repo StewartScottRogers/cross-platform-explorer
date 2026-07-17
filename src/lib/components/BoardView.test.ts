@@ -6,17 +6,22 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { render, screen, fireEvent } from "@testing-library/svelte";
 
-const invokeMock = vi.fn(async (_cmd: string, _args?: unknown) => [] as unknown[]);
+const invokeMock = vi.fn(async (_cmd: string, _args?: unknown): Promise<unknown> => []);
 vi.mock("../invoke", () => ({ invoke: (...a: unknown[]) => (invokeMock as (...x: unknown[]) => unknown)(...a) }));
 const openMock = vi.fn(async () => null as unknown);
 vi.mock("@tauri-apps/plugin-dialog", () => ({ open: (...a: unknown[]) => (openMock as (...x: unknown[]) => unknown)(...a) }));
 
 import BoardView from "./BoardView.svelte";
 
+// Default: no project auto-detected (find_project_root → null), and board_* return empty.
+function defaultInvoke(cmd: string): unknown {
+  return cmd === "find_project_root" ? null : [];
+}
+
 beforeEach(() => {
   try { localStorage.clear(); } catch { /* ignore */ }
   invokeMock.mockReset();
-  invokeMock.mockResolvedValue([]);
+  invokeMock.mockImplementation(async (cmd: string) => defaultInvoke(cmd));
   openMock.mockReset();
   openMock.mockResolvedValue(null);
 });
@@ -48,6 +53,16 @@ describe("BoardView empty-state (CPE-551)", () => {
     render(BoardView, { root: "/some/other/folder" });
     await vi.waitFor(() => {
       expect(invokeMock).toHaveBeenCalledWith("board_cards", { root: "/remembered/project" });
+    });
+  });
+
+  it("auto-detects the enclosing project root when none is saved (CPE-554)", async () => {
+    invokeMock.mockImplementation(async (cmd: string) =>
+      cmd === "find_project_root" ? "/detected/project" : []);
+    render(BoardView, { root: "/detected/project/src/lib/components" });
+    await vi.waitFor(() => {
+      expect(invokeMock).toHaveBeenCalledWith("find_project_root", { start: "/detected/project/src/lib/components" });
+      expect(invokeMock).toHaveBeenCalledWith("board_cards", { root: "/detected/project" });
     });
   });
 });

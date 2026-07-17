@@ -107,7 +107,17 @@
     }
   }
   function refresh() { load(); loadEpics(); loadArchived(); }
-  onMount(refresh);
+  onMount(async () => {
+    // No explicit project chosen yet? auto-detect the project you're inside — the nearest ancestor of the
+    // browsed folder that has a Tickets/ folder (CPE-554) — before scanning. A saved/chosen root wins.
+    if (!savedRoot()) {
+      try {
+        const detected = await invoke<string | null>("find_project_root", { start: root });
+        if (detected) boardRoot = detected;
+      } catch { /* ignore — fall back to the current folder (→ empty-state) */ }
+    }
+    refresh();
+  });
 
   /** Point the board at a different project folder (one that has a Tickets/ folder), and remember it. */
   async function chooseProject() {
