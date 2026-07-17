@@ -788,6 +788,12 @@ impl ConsoleState {
             .unwrap_or("openrouter");
         let force_refresh = query.split('&').any(|kv| kv == "refresh=1");
 
+        // LM Studio (CPE-584): a local provider, not a reseller — list its actually-loaded models live
+        // from the OpenAI-compatible `/v1/models` over localhost (no snapshot, no host egress broker).
+        if reseller == crate::lmstudio::PROVIDER_ID {
+            return self.handle_lmstudio_models();
+        }
+
         // Prefer the verified snapshot unless the caller forced the live path. Populate it lazily on
         // first use so the download happens on demand (a background refresh is a fine future add).
         if !force_refresh {
@@ -816,6 +822,20 @@ impl ConsoleState {
             Ok(models) => Response::json(json!({ "reseller": reseller, "models": models, "source": "live" }).to_string()),
             Err(e) => bad(e),
         }
+    }
+
+    /// List LM Studio's loaded models for the picker (CPE-584). Detects a reachable endpoint (loopback
+    /// then LAN, ports 1234/1235 — the same auto-detection used at launch), fetches its `/v1/models`,
+    /// and normalizes it. Returns a well-formed empty list (not an error) when LM Studio isn't running,
+    /// so the picker shows "no models available" rather than a scary failure.
+    fn handle_lmstudio_models(&self) -> Response {
+        use std::time::Duration;
+        let provider = crate::lmstudio::PROVIDER_ID;
+        let models = crate::lmstudio::detect_default()
+            .and_then(|ep| crate::lmstudio::fetch_models_body(&ep.base_url, Duration::from_secs(3)))
+            .map(|body| crate::model_catalog::normalize_models(provider, &body))
+            .unwrap_or_default();
+        Response::json(json!({ "reseller": provider, "models": models, "source": "live" }).to_string())
     }
 
     fn handle_install(&self, body: &str) -> Response {

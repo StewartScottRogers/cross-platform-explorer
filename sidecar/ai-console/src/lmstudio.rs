@@ -107,19 +107,38 @@ pub struct RealProbe {
 
 impl Probe for RealProbe {
     fn probe(&self, base_url: &str) -> Option<String> {
-        let (host, port) = split_host_port(base_url)?;
-        let addr = format!("{host}:{port}");
-        let sock = addr.to_socket_addrs_first()?;
-        let mut stream = TcpStream::connect_timeout(&sock, self.timeout).ok()?;
-        stream.set_read_timeout(Some(self.timeout)).ok()?;
-        stream.set_write_timeout(Some(self.timeout)).ok()?;
-        let req = format!("GET /v1/models HTTP/1.0\r\nHost: {host}\r\nConnection: close\r\n\r\n");
-        stream.write_all(req.as_bytes()).ok()?;
-        let mut body = String::new();
-        stream.read_to_string(&mut body).ok()?;
         // Reachable; pull the first "id":"..." if present (best effort).
-        Some(first_json_id(&body).unwrap_or_default())
+        let resp = http_get(base_url, "/v1/models", self.timeout)?;
+        Some(first_json_id(&resp).unwrap_or_default())
     }
+}
+
+/// One HTTP/1.0 `GET <path>` to an LM Studio base_url, returning the **raw** response (status line +
+/// headers + body), or `None` if it can't connect. Shared by the reachability probe and the model-list
+/// fetch. Localhost only in practice — no egress broker needed (CPE-584).
+fn http_get(base_url: &str, path: &str, timeout: Duration) -> Option<String> {
+    let (host, port) = split_host_port(base_url)?;
+    let addr = format!("{host}:{port}").to_socket_addrs_first()?;
+    let mut stream = TcpStream::connect_timeout(&addr, timeout).ok()?;
+    stream.set_read_timeout(Some(timeout)).ok()?;
+    stream.set_write_timeout(Some(timeout)).ok()?;
+    let req = format!("GET {path} HTTP/1.0\r\nHost: {host}\r\nConnection: close\r\n\r\n");
+    stream.write_all(req.as_bytes()).ok()?;
+    let mut resp = String::new();
+    stream.read_to_string(&mut resp).ok()?;
+    Some(resp)
+}
+
+/// Fetch LM Studio's `GET /v1/models` and return just the JSON **body** (HTTP headers stripped), ready
+/// for [`crate::model_catalog::normalize_models`]. `None` if LM Studio isn't reachable at `base_url`.
+pub fn fetch_models_body(base_url: &str, timeout: Duration) -> Option<String> {
+    Some(strip_http_headers(&http_get(base_url, "/v1/models", timeout)?).to_string())
+}
+
+/// The body of an HTTP response — everything after the blank line that ends the headers. If no header
+/// terminator is found, returns the input unchanged (best effort).
+fn strip_http_headers(raw: &str) -> &str {
+    raw.split_once("\r\n\r\n").or_else(|| raw.split_once("\n\n")).map(|(_, body)| body).unwrap_or(raw)
 }
 
 /// Parse `http://host:port` into (host, port).
@@ -252,6 +271,26 @@ mod tests {
         let (url, model) = resolve_launch(Some("http://x:1234".into()), None, None);
         assert_eq!(url.as_deref(), Some("http://x:1234"));
         assert_eq!(model, None);
+    }
+
+    #[test]
+    fn strip_http_headers_returns_the_json_body() {
+        let raw = "HTTP/1.0 200 OK\r\nContent-Type: application/json\r\n\r\n{\"data\":[]}";
+        assert_eq!(strip_http_headers(raw), "{\"data\":[]}");
+        // Tolerates LF-only separators and a body with no headers.
+        assert_eq!(strip_http_headers("HTTP/1.0 200 OK\n\n{\"x\":1}"), "{\"x\":1}");
+        assert_eq!(strip_http_headers("{\"already\":\"body\"}"), "{\"already\":\"body\"}");
+    }
+
+    #[test]
+    fn an_lm_studio_models_body_normalizes_to_the_picker_list() {
+        // LM Studio's `/v1/models` is the minimal OpenAI shape (id only) — normalize_models tags them
+        // to the provider and fills the rest with defaults.
+        let body = r#"{"data":[{"id":"qwen/qwen3.5-9b","object":"model"},{"id":"nvidia/nemotron-3-super","object":"model"}]}"#;
+        let models = crate::model_catalog::normalize_models(PROVIDER_ID, body);
+        assert_eq!(models.len(), 2);
+        assert!(models.iter().all(|m| m.reseller == PROVIDER_ID));
+        assert!(models.iter().any(|m| m.id == "qwen/qwen3.5-9b"));
     }
 
     #[test]
