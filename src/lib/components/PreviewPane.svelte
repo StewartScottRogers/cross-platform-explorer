@@ -7,6 +7,7 @@
   import { renderMarkdown } from "../preview/markdown";
   import { t } from "../i18n";
   import { formatSize } from "../format";
+  import { lsBool, lsSet } from "../persist";
 
   /** The single selected entry to preview, or null. */
   export let entry: DirEntry | null = null;
@@ -186,15 +187,12 @@
   }
 
   // ---- word wrap (CPE-565): wrap long lines in the text/code/json preview; remembered across files. ----
+  // Default ON (the pane has always wrapped); only an explicit "0" turns wrapping off.
   const WRAP_KEY = "cpe.previewWrap";
-  function loadWrap(): boolean {
-    // Default ON (the pane has always wrapped); only an explicit "0" turns wrapping off.
-    try { return localStorage.getItem(WRAP_KEY) !== "0"; } catch { return true; }
-  }
-  let wrapLines = loadWrap();
+  let wrapLines = lsBool(WRAP_KEY, true);
   function toggleWrap() {
     wrapLines = !wrapLines;
-    try { localStorage.setItem(WRAP_KEY, wrapLines ? "1" : "0"); } catch { /* ignore */ }
+    lsSet(WRAP_KEY, wrapLines ? "1" : "0");
   }
   // The `<pre>`-rendered previews where wrapping applies (JSON + text/code); markdown + tables don't.
   $: isPreText = provider.kind === "json" || provider.kind === "text";

@@ -6,6 +6,7 @@
   import { createEventDispatcher, onMount } from "svelte";
   import { open as openFolderDialog } from "@tauri-apps/plugin-dialog";
   import { invoke } from "../invoke";
+  import { lsGet, lsSet, lsBool } from "../persist";
   import Icon from "./Icon.svelte";
   import {
     BOARD_LANES, groupByLane, isValidMove, ticketTask,
@@ -22,9 +23,7 @@
   // The board is a *project* tool: it stays pointed at the last project you chose (persisted), so it
   // doesn't reset to wherever you happen to be browsing. Falls back to the current folder (CPE-551).
   const BOARD_ROOT_KEY = "cpe.boardRoot";
-  function savedRoot(): string | null {
-    try { return localStorage.getItem(BOARD_ROOT_KEY); } catch { return null; }
-  }
+  const savedRoot = (): string | null => lsGet(BOARD_ROOT_KEY);
   let boardRoot = savedRoot() ?? root;
 
   let cards: Card[] = [];
@@ -62,14 +61,10 @@
   // board root/size. A malformed/absent value degrades to the defaults (board view, archived hidden). --
   const VIEW_KEY = "cpe.boardView";
   const ARCHIVED_KEY = "cpe.boardArchived";
-  function savedView(): "board" | "epics" {
-    try { return localStorage.getItem(VIEW_KEY) === "epics" ? "epics" : "board"; } catch { return "board"; }
-  }
-  function savedArchived(): boolean {
-    try { return localStorage.getItem(ARCHIVED_KEY) === "1"; } catch { return false; }
-  }
-  function persistView(v: "board" | "epics") { try { localStorage.setItem(VIEW_KEY, v); } catch { /* ignore */ } }
-  function persistArchived(v: boolean) { try { localStorage.setItem(ARCHIVED_KEY, v ? "1" : "0"); } catch { /* ignore */ } }
+  const savedView = (): "board" | "epics" => (lsGet(VIEW_KEY) === "epics" ? "epics" : "board");
+  const savedArchived = (): boolean => lsBool(ARCHIVED_KEY, false);
+  const persistView = (v: "board" | "epics") => lsSet(VIEW_KEY, v);
+  const persistArchived = (v: boolean) => lsSet(ARCHIVED_KEY, v ? "1" : "0");
 
   // --- Done archival (CPE-531): recent Done (top-level) shown by default; archived (dated Done/**
   // subfolders) loaded separately + shown only on demand, so the board stays fast as Done grows. ----
@@ -168,7 +163,7 @@
     }
     if (!dest || typeof dest !== "string") return; // cancelled
     boardRoot = dest;
-    try { localStorage.setItem(BOARD_ROOT_KEY, boardRoot); } catch { /* ignore */ }
+    lsSet(BOARD_ROOT_KEY, boardRoot);
     refresh();
   }
 

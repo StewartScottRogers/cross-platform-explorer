@@ -4,6 +4,7 @@
   import { t } from "../i18n";
   import { formatDate } from "../datetime";
   import { iconFor } from "../filetypes";
+  import { lsGet, lsSet, lsBool } from "../persist";
   import type { Place, RecentFile, Favorite } from "../types";
 
   export let places: Place[] = [];
@@ -28,19 +29,13 @@
 
   // Remember the Home layout across sessions (CPE-573): which section is open + the active pill tab.
   type HomeTab = "recent" | "favorites" | "folders";
-  function ls(key: string): string | null {
-    try { return localStorage.getItem(key); } catch { return null; }
-  }
-  function setLs(key: string, val: string) {
-    try { localStorage.setItem(key, val); } catch { /* ignore */ }
-  }
-  let quickOpen = ls("cpe.homeQuickOpen") !== "0";
-  let recentOpen = ls("cpe.homeRecentOpen") !== "0";
+  let quickOpen = lsBool("cpe.homeQuickOpen", true);
+  let recentOpen = lsBool("cpe.homeRecentOpen", true);
   /** Which pill tab is showing in the lower section. */
-  let tab: HomeTab = ((v) => (v === "favorites" || v === "folders" ? v : "recent"))(ls("cpe.homeTab"));
-  $: setLs("cpe.homeQuickOpen", quickOpen ? "1" : "0");
-  $: setLs("cpe.homeRecentOpen", recentOpen ? "1" : "0");
-  $: setLs("cpe.homeTab", tab);
+  let tab: HomeTab = ((v) => (v === "favorites" || v === "folders" ? v : "recent"))(lsGet("cpe.homeTab"));
+  $: lsSet("cpe.homeQuickOpen", quickOpen ? "1" : "0");
+  $: lsSet("cpe.homeRecentOpen", recentOpen ? "1" : "0");
+  $: lsSet("cpe.homeTab", tab);
 
   // Pinned folders appear alongside the built-in places.
   $: pinned = pins.map((p) => ({

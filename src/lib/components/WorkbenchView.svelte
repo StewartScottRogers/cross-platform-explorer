@@ -7,6 +7,7 @@
   import { invoke } from "../invoke";
   import Icon from "./Icon.svelte";
   import { parseDiff, diffStats, fileStats, fileLabel, annotateInline, toPatch, type DiffFile } from "../diff";
+  import { lsGet, lsSet } from "../persist";
   import { isBrowsableUrl, normalizeUrl, workbenchState } from "../workbench";
 
   /** Repo root to diff. */
@@ -22,11 +23,8 @@
   let isRepo = false;
   let branch: string | null = null;
   // Embedded-browser address (CPE-527), remembered across opens so your dev-server URL sticks (CPE-575).
-  function loadUrl(): string {
-    try { return localStorage.getItem("cpe.workbenchUrl") ?? ""; } catch { return ""; }
-  }
-  let url = loadUrl();
-  $: { try { localStorage.setItem("cpe.workbenchUrl", url); } catch { /* ignore */ } }
+  let url = lsGet("cpe.workbenchUrl") ?? "";
+  $: lsSet("cpe.workbenchUrl", url);
 
   $: state = workbenchState({ loading, error, isRepo, fileCount: files.length });
 

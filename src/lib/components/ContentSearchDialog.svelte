@@ -8,17 +8,16 @@
   import { invoke } from "../invoke";
   import Icon from "./Icon.svelte";
   import { groupMatches, baseName, highlightSegments, pushRecentSearch, type ContentSearchResult } from "../contentSearch";
+  import { lsGet, lsSet, lsBool } from "../persist";
 
   const RECENTS_KEY = "cpe.contentSearchRecents";
   function loadRecents(): string[] {
     try {
-      const v = JSON.parse(localStorage.getItem(RECENTS_KEY) ?? "[]");
+      const v = JSON.parse(lsGet(RECENTS_KEY) ?? "[]");
       return Array.isArray(v) ? v.filter((x): x is string => typeof x === "string") : [];
     } catch { return []; }
   }
-  function saveRecents(list: string[]) {
-    try { localStorage.setItem(RECENTS_KEY, JSON.stringify(list)); } catch { /* ignore */ }
-  }
+  const saveRecents = (list: string[]) => lsSet(RECENTS_KEY, JSON.stringify(list));
   let recents: string[] = loadRecents();
 
   export let root = "";
@@ -27,8 +26,8 @@
 
   let query = "";
   // Remember the Match-case choice across opens (CPE-576).
-  let caseSensitive = (() => { try { return localStorage.getItem("cpe.contentSearchCase") === "1"; } catch { return false; } })();
-  $: { try { localStorage.setItem("cpe.contentSearchCase", caseSensitive ? "1" : "0"); } catch { /* ignore */ } }
+  let caseSensitive = lsBool("cpe.contentSearchCase", false);
+  $: lsSet("cpe.contentSearchCase", caseSensitive ? "1" : "0");
   let loading = false;
   let error = "";
   let searched = false;
