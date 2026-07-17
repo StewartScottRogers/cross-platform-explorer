@@ -46,6 +46,16 @@
     if (e.key === "Escape") { boardQuery = ""; e.stopPropagation(); }
   }
 
+  // Copy a card's ticket id to the clipboard (handy for commits/branches), with a brief ✓ (CPE-564).
+  let copiedId: string | null = null;
+  let copiedTimer: ReturnType<typeof setTimeout> | undefined;
+  async function copyId(id: string) {
+    try { await navigator.clipboard.writeText(id); } catch { /* clipboard unavailable — ignore */ }
+    copiedId = id;
+    clearTimeout(copiedTimer);
+    copiedTimer = setTimeout(() => (copiedId = null), 1100);
+  }
+
   $: grouped = groupByLane(filtered);
 
   // --- View preferences (CPE-556): remember the view mode + archived toggle across opens, like the
@@ -260,7 +270,7 @@
           <div class="epic-group-head">To do <span class="gc">{split.todo.length}</span></div>
           {#each split.todo as c (c.id)}
             <div class="ecard" title={c.title}>
-              <div class="ecard-top"><span class="card-id">{c.id}</span><span class="ecard-col">{c.column}</span></div>
+              <div class="ecard-top"><span class="card-id">{c.id}</span><button class="card-copy" title="Copy id" aria-label={"Copy " + c.id} on:click|stopPropagation={() => copyId(c.id)}>{copiedId === c.id ? "✓" : "⧉"}</button><span class="ecard-col">{c.column}</span></div>
               <div class="card-title">{c.title}</div>
               <div class="card-actions">
                 <button class="dispatch-btn" on:click|stopPropagation={() => dispatchCard(c)}>▶ Dispatch</button>
@@ -304,6 +314,8 @@
                 <div class="card" draggable="true" on:dragstart={(e) => onDragStart(e, c.id)} title={c.title}>
                   <div class="card-top">
                     <span class="card-id">{c.id}</span>
+                    <button class="card-copy" title="Copy id" aria-label={"Copy " + c.id}
+                      on:click|stopPropagation={() => copyId(c.id)} on:mousedown|stopPropagation>{copiedId === c.id ? "✓" : "⧉"}</button>
                     {#if c.priority}<span class="card-pri">{c.priority}</span>{/if}
                   </div>
                   <div class="card-title">{c.title}</div>
@@ -417,6 +429,11 @@
   .card-top { display: flex; align-items: center; justify-content: space-between; gap: 6px; margin-bottom: 4px; }
   .card-id { font-size: 11px; font-variant-numeric: tabular-nums; opacity: .7; }
   .card-pri { font-size: 10px; opacity: .55; }
+  /* Copy-id affordance (CPE-564): unobtrusive, revealed on card hover. */
+  .card-copy { margin-right: auto; font: inherit; font-size: 11px; line-height: 1; padding: 1px 4px;
+    border-radius: 4px; color: var(--text-faint); cursor: pointer; opacity: 0; transition: opacity .12s; }
+  .card:hover .card-copy, .ecard:hover .card-copy, .card-copy:focus-visible { opacity: .75; }
+  .card-copy:hover { background: rgba(128,128,128,0.16); color: var(--text); opacity: 1; }
   .card-title { font-size: 12px; line-height: 1.35; }
   /* Tag pills reflow (tick-tack rule): the row wraps + grows; each pill stays one line + doesn't shrink. */
   .card-tags { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 6px; }

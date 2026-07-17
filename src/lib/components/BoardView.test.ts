@@ -74,6 +74,19 @@ describe("BoardView empty-state (CPE-551)", () => {
     });
   });
 
+  it("copies a card's ticket id to the clipboard (CPE-564)", async () => {
+    const writeText = vi.fn().mockResolvedValue(undefined);
+    Object.defineProperty(navigator, "clipboard", { value: { writeText }, configurable: true });
+    const aCard = { id: "CPE-42", title: "hi", ticket_type: "Feature", priority: "Medium", tags: [], column: "Backlog" };
+    invokeMock.mockImplementation(async (cmd: string) =>
+      cmd === "find_project_root" ? null : cmd === "board_cards" ? [aCard] : []);
+    const { findByText, getByLabelText } = render(BoardView, { root: "/x" });
+    await findByText("CPE-42");
+
+    await fireEvent.click(getByLabelText("Copy CPE-42"));
+    expect(writeText).toHaveBeenCalledWith("CPE-42");
+  });
+
   it("shows a no-match hint and Escape clears the filter (CPE-560)", async () => {
     const aCard = { id: "CPE-1", title: "hello", ticket_type: "Feature", priority: "Medium", tags: [], column: "Backlog" };
     invokeMock.mockImplementation(async (cmd: string) =>
