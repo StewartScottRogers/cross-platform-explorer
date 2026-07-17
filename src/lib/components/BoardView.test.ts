@@ -65,4 +65,12 @@ describe("BoardView empty-state (CPE-551)", () => {
       expect(invokeMock).toHaveBeenCalledWith("board_cards", { root: "/detected/project" });
     });
   });
+
+  it("restores the saved view mode on open (CPE-556)", async () => {
+    localStorage.setItem("cpe.boardView", "epics");
+    const { getByTitle } = render(BoardView, { root: "/some/folder" });
+    await vi.waitFor(() => {
+      expect(getByTitle("Organize by epic").classList.contains("active")).toBe(true);
+    });
+  });
 });

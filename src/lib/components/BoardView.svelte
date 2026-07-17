@@ -43,14 +43,29 @@
 
   $: grouped = groupByLane(filtered);
 
+  // --- View preferences (CPE-556): remember the view mode + archived toggle across opens, like the
+  // board root/size. A malformed/absent value degrades to the defaults (board view, archived hidden). --
+  const VIEW_KEY = "cpe.boardView";
+  const ARCHIVED_KEY = "cpe.boardArchived";
+  function savedView(): "board" | "epics" {
+    try { return localStorage.getItem(VIEW_KEY) === "epics" ? "epics" : "board"; } catch { return "board"; }
+  }
+  function savedArchived(): boolean {
+    try { return localStorage.getItem(ARCHIVED_KEY) === "1"; } catch { return false; }
+  }
+  function persistView(v: "board" | "epics") { try { localStorage.setItem(VIEW_KEY, v); } catch { /* ignore */ } }
+  function persistArchived(v: boolean) { try { localStorage.setItem(ARCHIVED_KEY, v ? "1" : "0"); } catch { /* ignore */ } }
+
   // --- Done archival (CPE-531): recent Done (top-level) shown by default; archived (dated Done/**
   // subfolders) loaded separately + shown only on demand, so the board stays fast as Done grows. ----
   let archived: Card[] = [];
-  let showArchived = false;
+  let showArchived = savedArchived();
+  $: persistArchived(showArchived);
   $: doneDisplay = doneWithArchived(grouped.Done, filterCards(archived, boardQuery), showArchived);
 
   // --- Epic-organized view (CPE-530): a Board ⇄ Epics toggle. ------------------------------------
-  let viewMode: "board" | "epics" = "board";
+  let viewMode: "board" | "epics" = savedView();
+  $: persistView(viewMode);
   let epics: Epic[] = [];
   let selectedEpic: string | null = null;
 
