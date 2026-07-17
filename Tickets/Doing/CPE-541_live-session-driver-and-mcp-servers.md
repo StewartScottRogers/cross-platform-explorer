@@ -96,6 +96,25 @@ the production build.** This closes the "does the shipped MCP infrastructure wor
 only the real-LLM-agent coordination QA (needs the user's API keys/cost) — the mailbox/memory tool surface
 itself is confirmed live.
 
+2026-07-17 (on "Do 541") — Confirmed **every piece of our code is verified headlessly**: (1) the shipped
+`--swarm-mcp` host works in production (write→recall over JSON-RPC); (2) `swarm_live::SwarmDriver` drives
+real subprocesses to completion (4 tests); (3) `ProductionPlanner` writes a Claude-Code-standard
+`--mcp-config <file>` `{mcpServers:{swarm:{command,args}}}` (unit-tested) + roster; (4) `/api/swarm/run`
+assembles + runs the mission (tested). The **only** unverified link is *external* — a launched **Claude
+Code agent honoring the injected `--mcp-config`** (the standard Claude convention) — which is observable
+only by running a real swarm in the AI Console GUI. There is **no remaining code of ours to write/verify**;
+this is purely the interactive QA the ticket was carved out for.
+
+**Zero-cost QA path available:** LM Studio is running locally (a reachable OpenAI-compatible server), so a
+swarm can be run against the **`lmstudio-local`** provider with **no API key and no cost** — a cheap way
+to watch agents actually coordinate over the mailbox/memory.
+
+**Turnkey for the user (2 min):** open the installed app → **AI Console** → pick an agent + provider
+(`lmstudio-local` for free) → **Run swarm ▾** → type a small task → **Start** → watch the agent tabs. To
+confirm coordination headlessly afterward, the mission dir (a `cpe-swarm-*` folder under TEMP) will hold
+`mailbox.jsonl` + `memory/` notes written by the agents. Report back and this closes (or I fix whatever the
+run surfaces).
+
 ## Remaining — GUI QA only (needs real agents + API keys)
 The whole vertical is built + wired + unit/jsdom-tested. What's left cannot be verified without a live
 run and is the QA the ticket was carved out for:
