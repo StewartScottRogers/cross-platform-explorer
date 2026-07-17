@@ -26,7 +26,9 @@
   const dispatch = createEventDispatcher<{ close: void; navigate: string }>();
 
   let query = "";
-  let caseSensitive = false;
+  // Remember the Match-case choice across opens (CPE-576).
+  let caseSensitive = (() => { try { return localStorage.getItem("cpe.contentSearchCase") === "1"; } catch { return false; } })();
+  $: { try { localStorage.setItem("cpe.contentSearchCase", caseSensitive ? "1" : "0"); } catch { /* ignore */ } }
   let loading = false;
   let error = "";
   let searched = false;

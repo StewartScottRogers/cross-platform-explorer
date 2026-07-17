@@ -1,6 +1,9 @@
-import { describe, it, expect, vi } from "vitest";
+import { describe, it, expect, vi, beforeEach } from "vitest";
 import { render, screen, waitFor, fireEvent } from "@testing-library/svelte";
 import ContentSearchDialog from "./ContentSearchDialog.svelte";
+
+// The dialog persists recent queries + the Match-case toggle (CPE-558/576); isolate localStorage.
+beforeEach(() => { try { localStorage.clear(); } catch { /* ignore */ } });
 
 const invoke = vi.fn(async (_cmd: string, args: any) => {
   if (args.query === "needle")
@@ -55,6 +58,13 @@ describe("ContentSearchDialog (CPE-417)", () => {
     expect(screen.queryByText(codeLine("the needle is here"))).toBeNull();
     // the other file's match still shows
     expect(screen.getByText(codeLine("found the needle deep"))).toBeTruthy();
+  });
+
+  it("restores the saved Match-case toggle on open (CPE-576)", async () => {
+    localStorage.setItem("cpe.contentSearchCase", "1");
+    render(ContentSearchDialog, { root: "/repo" });
+    const caseBox = screen.getByRole("checkbox") as HTMLInputElement;
+    expect(caseBox.checked).toBe(true);
   });
 
   it("shows a no-matches message when nothing is found", async () => {
