@@ -15,7 +15,7 @@ use ai_console::pty::PtyLaunch;
 use ai_console::session_engine::LocalEngine;
 use ai_console::swarm_bridge::SwarmLaunch;
 use ai_console::swarm_coordinator::{Assignment, Gate, Task};
-use ai_console::swarm_live::{assume_success, LaunchPlanner, SwarmDriver};
+use ai_console::swarm_live::{assume_success, EngineRunner, LaunchPlanner, SwarmDriver};
 use ai_console::swarm_team::{Role, RoleSpec, TeamManifest};
 
 /// Path to the freshly-built `ai-console` binary Cargo provides to integration tests.
@@ -80,7 +80,8 @@ fn a_launched_agent_coordinates_over_the_injected_mcp_host() {
     }];
 
     let planner = SimPlanner { dir: dir.path().to_path_buf() };
-    let driver = SwarmDriver::new(team, tasks, Arc::new(LocalEngine), Arc::new(planner), assume_success())
+    let runner = Arc::new(EngineRunner::new(Arc::new(LocalEngine)));
+    let driver = SwarmDriver::new(team, tasks, runner, Arc::new(planner), assume_success())
         .expect("staff the mission")
         .with_timeout(Duration::from_secs(60));
 

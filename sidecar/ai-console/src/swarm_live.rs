@@ -57,18 +57,95 @@ fn usage_from_output(output: &str) -> (u64, u64) {
 /// mission forever).
 const SESSION_TIMEOUT: Duration = Duration::from_secs(600);
 
-struct Completion {
-    task_id: String,
-    agent_id: String,
-    output: String,
+pub struct Completion {
+    pub task_id: String,
+    pub agent_id: String,
+    pub output: String,
 }
 
-/// Drives a mission's coordinator over a live [`SessionEngine`].
+/// Launches a planned session and reports its completion. Abstracts *where* a session runs and who
+/// watches it finish: [`EngineRunner`] launches through a [`SessionEngine`] and reads the PTY directly
+/// (the pure loop + headless tests); the console supplies a runner that instead **adopts** the session
+/// into the UI (CPE-574) so it appears as a live, streaming, recorded session — the driver then never
+/// contends for the single-consumer output channel.
+pub trait SessionRunner: Send + Sync {
+    /// Launch `launch` as session `task_id` (run by `agent_id`); when it finishes, send its collected
+    /// output as a [`Completion`] on `done`. `Err` means it couldn't even start (an immediate failure).
+    fn launch(
+        &self,
+        task_id: &str,
+        agent_id: &str,
+        launch: &PtyLaunch,
+        done: Sender<Completion>,
+    ) -> Result<(), String>;
+}
+
+/// The default runner: launch through a [`SessionEngine`] and read the PTY directly to detect
+/// completion. This owns the cross-platform completion detection (see [`SessionRunner::launch`]).
+pub struct EngineRunner {
+    engine: Arc<dyn SessionEngine>,
+}
+
+impl EngineRunner {
+    pub fn new(engine: Arc<dyn SessionEngine>) -> EngineRunner {
+        EngineRunner { engine }
+    }
+}
+
+impl SessionRunner for EngineRunner {
+    fn launch(
+        &self,
+        task_id: &str,
+        agent_id: &str,
+        launch: &PtyLaunch,
+        done: Sender<Completion>,
+    ) -> Result<(), String> {
+        let io = self.engine.launch(task_id, launch)?;
+        let out_rx = io.take_output().ok_or_else(|| "session has no output channel".to_string())?;
+        let task_id = task_id.to_string();
+        let agent_id = agent_id.to_string();
+        thread::spawn(move || {
+            // Wait for the session to finish while collecting its output. Completion is whichever comes
+            // first: the child exits (polled via `try_wait` — reliable on Windows ConPTY, where the
+            // output channel doesn't EOF while the master is held), or the output channel closes (EOF —
+            // the signal on Unix PTYs and the daemon path, where `try_wait` is unsupported). On a
+            // detected exit we `kill` to close the PTY so the buffered output drains to EOF.
+            let mut output = String::new();
+            loop {
+                match out_rx.recv_timeout(Duration::from_millis(50)) {
+                    Ok(chunk) => output.push_str(&String::from_utf8_lossy(&chunk)),
+                    Err(mpsc::RecvTimeoutError::Disconnected) => break, // EOF (Unix / after master close)
+                    Err(mpsc::RecvTimeoutError::Timeout) => {}
+                }
+                if io.try_wait().is_some() {
+                    // Child exited (authoritative on Windows ConPTY, where the reader won't EOF while the
+                    // master is held). Briefly drain any buffered output, then finish — dropping `io`
+                    // below closes the PTY, which ends the engine's reader thread.
+                    let grace = Instant::now() + Duration::from_millis(150);
+                    while Instant::now() < grace {
+                        match out_rx.try_recv() {
+                            Ok(chunk) => output.push_str(&String::from_utf8_lossy(&chunk)),
+                            Err(mpsc::TryRecvError::Empty) => thread::sleep(Duration::from_millis(10)),
+                            Err(mpsc::TryRecvError::Disconnected) => break,
+                        }
+                    }
+                    let _ = io.kill();
+                    break;
+                }
+            }
+            let _ = done.send(Completion { task_id, agent_id, output });
+            drop(io);
+        });
+        Ok(())
+    }
+}
+
+/// Drives a mission's coordinator by launching each assignment through a [`SessionRunner`].
 pub struct SwarmDriver {
     coord: Coordinator,
     team: TeamManifest,
     task_text: HashMap<String, String>,
-    engine: Arc<dyn SessionEngine>,
+    runner: Arc<dyn SessionRunner>,
     planner: Arc<dyn LaunchPlanner>,
     classify: OutcomeClassifier,
     timeout: Duration,
@@ -80,13 +157,13 @@ impl SwarmDriver {
     pub fn new(
         team: TeamManifest,
         tasks: Vec<Task>,
-        engine: Arc<dyn SessionEngine>,
+        runner: Arc<dyn SessionRunner>,
         planner: Arc<dyn LaunchPlanner>,
         classify: OutcomeClassifier,
     ) -> Result<SwarmDriver, String> {
         let task_text = tasks.iter().map(|t| (t.id.clone(), t.description.clone())).collect();
         let coord = Coordinator::new(&team, tasks)?;
-        Ok(SwarmDriver { coord, team, task_text, engine, planner, classify, timeout: SESSION_TIMEOUT })
+        Ok(SwarmDriver { coord, team, task_text, runner, planner, classify, timeout: SESSION_TIMEOUT })
     }
 
     /// Override the per-session wait (tests use a short one).
@@ -134,51 +211,14 @@ impl SwarmDriver {
         Ok(self.coord)
     }
 
-    /// Launch one assignment as a real session and, on a background thread, report its completion (the
-    /// session's output channel closing = agent exit) back to the loop. The `SessionIo` is held by that
-    /// thread for the session's lifetime so it isn't reclaimed early.
+    /// Plan an assignment into a concrete launch and hand it to the [`SessionRunner`], which spawns the
+    /// real session and reports its completion back on `tx`. A plan/launch that can't even start is an
+    /// error the caller turns into an immediate failed outcome.
     fn try_launch(&self, a: &Assignment, tx: &Sender<Completion>) -> Result<(), String> {
         let task = self.task_text.get(&a.task_id).cloned().unwrap_or_default();
         let spec = launch_spec_for(&a.agent_id, &self.team, &task);
         let launch = self.planner.plan(a, &spec)?;
-        let io = self.engine.launch(&a.task_id, &launch)?;
-        let out_rx = io.take_output().ok_or_else(|| "session has no output channel".to_string())?;
-        let tx = tx.clone();
-        let task_id = a.task_id.clone();
-        let agent_id = a.agent_id.clone();
-        thread::spawn(move || {
-            // Wait for the session to finish while collecting its output. Completion is whichever comes
-            // first: the child exits (polled via `try_wait` — reliable on Windows ConPTY, where the
-            // output channel doesn't EOF while the master is held), or the output channel closes (EOF —
-            // the signal on Unix PTYs and the daemon path, where `try_wait` is unsupported). On a
-            // detected exit we `kill` to close the PTY so the buffered output drains to EOF.
-            let mut output = String::new();
-            loop {
-                match out_rx.recv_timeout(Duration::from_millis(50)) {
-                    Ok(chunk) => output.push_str(&String::from_utf8_lossy(&chunk)),
-                    Err(mpsc::RecvTimeoutError::Disconnected) => break, // EOF (Unix / after master close)
-                    Err(mpsc::RecvTimeoutError::Timeout) => {}
-                }
-                if io.try_wait().is_some() {
-                    // Child exited (authoritative on Windows ConPTY, where the reader won't EOF while the
-                    // master is held). Briefly drain any buffered output, then finish — dropping `io`
-                    // below closes the PTY, which ends the engine's reader thread.
-                    let grace = Instant::now() + Duration::from_millis(150);
-                    while Instant::now() < grace {
-                        match out_rx.try_recv() {
-                            Ok(chunk) => output.push_str(&String::from_utf8_lossy(&chunk)),
-                            Err(mpsc::TryRecvError::Empty) => thread::sleep(Duration::from_millis(10)),
-                            Err(mpsc::TryRecvError::Disconnected) => break,
-                        }
-                    }
-                    let _ = io.kill();
-                    break;
-                }
-            }
-            let _ = tx.send(Completion { task_id, agent_id, output });
-            drop(io);
-        });
-        Ok(())
+        self.runner.launch(&a.task_id, &a.agent_id, &launch, tx.clone())
     }
 }
 
@@ -221,7 +261,8 @@ mod tests {
     }
 
     fn driver(team: TeamManifest, tasks: Vec<Task>, planner: Arc<dyn LaunchPlanner>, classify: OutcomeClassifier) -> SwarmDriver {
-        SwarmDriver::new(team, tasks, Arc::new(LocalEngine), planner, classify)
+        let runner = Arc::new(EngineRunner::new(Arc::new(LocalEngine)));
+        SwarmDriver::new(team, tasks, runner, planner, classify)
             .unwrap()
             .with_timeout(Duration::from_secs(20))
     }

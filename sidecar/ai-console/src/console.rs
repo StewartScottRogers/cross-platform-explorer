@@ -59,7 +59,9 @@ pub struct ConsoleState {
     /// Hot-swappable so a catalog update can be reloaded without a restart (CPE-375).
     registry: RwLock<AgentRegistry>,
     default_cwd: String,
-    sessions: Mutex<HashMap<String, Arc<Session>>>,
+    /// `Arc` so a background swarm mission thread can adopt its launched sessions into the same set
+    /// (CPE-574); every access is still a plain `.lock()`.
+    sessions: Arc<Mutex<HashMap<String, Arc<Session>>>>,
     /// Where session PTYs live (CPE-309): `LocalEngine` in-process by default; the real sidecar wires
     /// a `DaemonEngine` so sessions survive a console restart.
     engine: Arc<dyn crate::session_engine::SessionEngine>,
@@ -208,6 +210,182 @@ fn session_payload(event: &str, id: &str, agent_name: &str, meta: &SessionMeta) 
     .to_string()
 }
 
+/// Register a session with the console: spawn the reader pipeline that fans the engine's output channel
+/// into the replay ring + the live WebSocket, taps reads (CPE-405) + usage (CPE-311), and on stream-close
+/// records history + announces "ended"; then insert the `Session`. Shared by [`ConsoleState::adopt_session`]
+/// (a fresh launch / reattach) and the swarm runner (CPE-574), which passes an `on_end` hook so the swarm
+/// driver learns the session finished — off the same pipeline, without contending for the single-consumer
+/// output channel.
+#[allow(clippy::too_many_arguments)]
+fn adopt_into(
+    sessions: &Arc<Mutex<HashMap<String, Arc<Session>>>>,
+    history: &Arc<dyn crate::history::HistoryBackend>,
+    announce: &SessionAnnouncer,
+    id: String,
+    io: Arc<dyn crate::session_engine::SessionIo>,
+    name: String,
+    agent: String,
+    provider: String,
+    injected_secrets: Vec<String>,
+    end: Option<(SessionMeta, String)>,
+    on_end: Option<Box<dyn FnOnce() + Send>>,
+) {
+    let ring: Arc<Mutex<Vec<u8>>> = Arc::new(Mutex::new(Vec::new()));
+    let live: Arc<Mutex<Option<mpsc::Sender<Vec<u8>>>>> = Arc::new(Mutex::new(None));
+    let usage: Arc<Mutex<crate::usage::Usage>> = Arc::new(Mutex::new(crate::usage::Usage::default()));
+    let out = io.take_output();
+    {
+        let ring = Arc::clone(&ring);
+        let live = Arc::clone(&live);
+        let usage = Arc::clone(&usage);
+        let history = Arc::clone(history);
+        let announce = Arc::clone(announce);
+        let record_id = id.clone();
+        let diag_id = id.clone();
+        let read_cwd = end.as_ref().map(|(m, _)| m.cwd.clone()).unwrap_or_default();
+        thread::spawn(move || {
+            let Some(rx) = out else { return };
+            let mut reads = crate::agent_reads::ReadScanner::new();
+            let mut usage_scan = crate::usage::UsageScanner::new();
+            // CPE-309 diag hop 3: bytes the console actually consumed from the engine, and whether
+            // a live WebSocket was attached to forward them to. "console pump FIRST bytes" present
+            // but a black terminal ⇒ the break is the WS/frontend, not the daemon or transport.
+            let mut bt = crate::session_diag::ByteTrace::new("console", format!("pump[{diag_id}]"));
+            let mut noted_ws = false;
+            while let Ok(chunk) = rx.recv() {
+                bt.add(chunk.len());
+                {
+                    let mut r = ring.lock().unwrap();
+                    r.extend_from_slice(&chunk);
+                    let over = r.len().saturating_sub(RING_CAP);
+                    if over > 0 {
+                        r.drain(0..over);
+                    }
+                }
+                // Push live to the attached terminal, if any (drop on send error).
+                let live_attached = live.lock().unwrap().as_ref().map(|tx| tx.send(chunk.clone()).is_ok());
+                if !noted_ws {
+                    noted_ws = true;
+                    crate::session_diag::trace(
+                        "console",
+                        &format!("pump[{diag_id}] first chunk forwarded; live_ws={live_attached:?}"),
+                    );
+                }
+                let text = String::from_utf8_lossy(&chunk);
+                // Surface any file the agent reported reading (CPE-405).
+                for raw in reads.feed(&text) {
+                    announce(read_announcement(&read_cwd, &raw));
+                }
+                // Fold provider-reported token/cost usage for this session (CPE-311).
+                *usage.lock().unwrap() = usage_scan.feed(&text);
+            }
+            bt.end("stream closed");
+            // Stream closed → the agent exited (or the daemon connection dropped).
+            match end {
+                Some((meta, ended_payload)) => {
+                    let transcript = String::from_utf8_lossy(&ring.lock().unwrap()).into_owned();
+                    record_session_end(&*history, &meta, &record_id, transcript, &injected_secrets);
+                    announce(ended_payload); // tell the explorer this session is gone (CPE-396)
+                }
+                None => announce(format!(r#"{{"event":"ended","sessionId":"{record_id}"}}"#)),
+            }
+            // Notify a swarm driver (if any) that this session has finished (CPE-574).
+            if let Some(cb) = on_end {
+                cb();
+            }
+        });
+    }
+    sessions.lock().unwrap().insert(
+        id,
+        Arc::new(Session { io, ring, live, name, usage, agent, provider }),
+    );
+}
+
+/// A [`SessionRunner`](crate::swarm_live::SessionRunner) that **adopts** each swarm session into the
+/// console (CPE-574): the session becomes a real console session — announced to Agent Watch, streamed to
+/// any attached terminal, and recorded in history — exactly like an interactively launched agent.
+/// Completion is observed off the console's own reader pipeline (an `on_end` hook), so the swarm driver
+/// never contends for the single-consumer output channel. On Windows ConPTY (where a held master won't
+/// EOF on the agent's self-exit) a watcher polls `try_wait` and kills the PTY to drive the reader to EOF.
+struct SwarmSessionRunner {
+    sessions: Arc<Mutex<HashMap<String, Arc<Session>>>>,
+    history: Arc<dyn crate::history::HistoryBackend>,
+    announce: SessionAnnouncer,
+    engine: Arc<dyn crate::session_engine::SessionEngine>,
+    provider: String,
+    cwd: String,
+}
+
+impl crate::swarm_live::SessionRunner for SwarmSessionRunner {
+    fn launch(
+        &self,
+        task_id: &str,
+        agent_id: &str,
+        launch: &crate::pty::PtyLaunch,
+        done: mpsc::Sender<crate::swarm_live::Completion>,
+    ) -> Result<(), String> {
+        let io = self.engine.launch(task_id, launch)?;
+        // A swarm session's identity for Agent Watch: its instance id (e.g. `claude#builder1`) as the
+        // label, the mission's provider + cwd; the per-role model isn't threaded here (blank is fine).
+        let meta = SessionMeta {
+            agent: agent_id.to_string(),
+            provider: self.provider.clone(),
+            model: String::new(),
+            cwd: self.cwd.clone(),
+            started_at: now_millis(),
+        };
+        let started = session_payload("started", task_id, agent_id, &meta);
+        let ended = session_payload("ended", task_id, agent_id, &meta);
+        (self.announce)(started);
+
+        // The reader pipeline calls `on_end` once the session's stream closes; forward that as the
+        // driver's completion signal. Output is left empty — the classifier is `assume_success` and the
+        // console already scans usage; the driver never reads this session's bytes.
+        let done_flag = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let flag_for_end = Arc::clone(&done_flag);
+        let on_task = task_id.to_string();
+        let on_agent = agent_id.to_string();
+        let on_end: Box<dyn FnOnce() + Send> = Box::new(move || {
+            flag_for_end.store(true, std::sync::atomic::Ordering::SeqCst);
+            let _ = done.send(crate::swarm_live::Completion {
+                task_id: on_task,
+                agent_id: on_agent,
+                output: String::new(),
+            });
+        });
+
+        let io_watch = Arc::clone(&io);
+        adopt_into(
+            &self.sessions,
+            &self.history,
+            &self.announce,
+            task_id.to_string(),
+            io,
+            agent_id.to_string(),
+            agent_id.to_string(),
+            self.provider.clone(),
+            Vec::new(),
+            Some((meta, ended)),
+            Some(on_end),
+        );
+
+        // ConPTY safety net: a held master won't EOF when the agent self-exits, so the reader pipeline
+        // (and thus `on_end`) would never fire. Poll the child and, on exit, kill the PTY to drive EOF.
+        // On Unix/daemon the reader EOFs on its own; the flag lets this watcher stop then, not spin.
+        thread::spawn(move || loop {
+            if done_flag.load(std::sync::atomic::Ordering::SeqCst) {
+                break;
+            }
+            if io_watch.try_wait().is_some() {
+                let _ = io_watch.kill();
+                break;
+            }
+            thread::sleep(std::time::Duration::from_millis(100));
+        });
+        Ok(())
+    }
+}
+
 impl ConsoleState {
     /// Standalone/dev state with in-memory backends (no host broker).
     pub fn new(registry: AgentRegistry, default_cwd: String) -> Self {
@@ -233,7 +411,7 @@ impl ConsoleState {
         Self {
             registry: RwLock::new(registry),
             default_cwd,
-            sessions: Mutex::new(HashMap::new()),
+            sessions: Arc::new(Mutex::new(HashMap::new())),
             engine: Arc::new(crate::session_engine::LocalEngine),
             seq: Mutex::new(0),
             secrets,
@@ -531,6 +709,16 @@ impl ConsoleState {
         // A read-only snapshot of the catalog for the mission thread (planner only reads it).
         let registry = std::sync::Arc::new(self.registry.read().unwrap().clone());
         let roster = crate::swarm_plan::ProductionPlanner::roster_for(&team);
+        // The runner adopts each launched session into the console (CPE-574) so swarm agents show up as
+        // real, live sessions in Agent Watch. Capture provider/cwd before they move into the planner.
+        let runner = std::sync::Arc::new(SwarmSessionRunner {
+            sessions: Arc::clone(&self.sessions),
+            history: Arc::clone(&self.history),
+            announce: Arc::clone(&self.announce),
+            engine: Arc::clone(&self.engine),
+            provider: provider.clone(),
+            cwd: cwd.clone(),
+        });
         let planner = crate::swarm_plan::ProductionPlanner::new(
             registry, mission_dir.clone(), exe, cwd, provider, api_key, None,
         );
@@ -540,7 +728,7 @@ impl ConsoleState {
         let driver = match crate::swarm_live::SwarmDriver::new(
             team,
             tasks,
-            self.engine.clone(),
+            runner,
             std::sync::Arc::new(planner),
             crate::swarm_live::assume_success(),
         ) {
@@ -572,70 +760,18 @@ impl ConsoleState {
         injected_secrets: Vec<String>,
         end: Option<(SessionMeta, String)>,
     ) {
-        let ring: Arc<Mutex<Vec<u8>>> = Arc::new(Mutex::new(Vec::new()));
-        let live: Arc<Mutex<Option<mpsc::Sender<Vec<u8>>>>> = Arc::new(Mutex::new(None));
-        let usage: Arc<Mutex<crate::usage::Usage>> = Arc::new(Mutex::new(crate::usage::Usage::default()));
-        let out = io.take_output();
-        {
-            let ring = Arc::clone(&ring);
-            let live = Arc::clone(&live);
-            let usage = Arc::clone(&usage);
-            let history = Arc::clone(&self.history);
-            let announce = Arc::clone(&self.announce);
-            let record_id = id.clone();
-            let diag_id = id.clone();
-            let read_cwd = end.as_ref().map(|(m, _)| m.cwd.clone()).unwrap_or_default();
-            thread::spawn(move || {
-                let Some(rx) = out else { return };
-                let mut reads = crate::agent_reads::ReadScanner::new();
-                let mut usage_scan = crate::usage::UsageScanner::new();
-                // CPE-309 diag hop 3: bytes the console actually consumed from the engine, and whether
-                // a live WebSocket was attached to forward them to. "console pump FIRST bytes" present
-                // but a black terminal ⇒ the break is the WS/frontend, not the daemon or transport.
-                let mut bt = crate::session_diag::ByteTrace::new("console", format!("pump[{diag_id}]"));
-                let mut noted_ws = false;
-                while let Ok(chunk) = rx.recv() {
-                    bt.add(chunk.len());
-                    {
-                        let mut r = ring.lock().unwrap();
-                        r.extend_from_slice(&chunk);
-                        let over = r.len().saturating_sub(RING_CAP);
-                        if over > 0 {
-                            r.drain(0..over);
-                        }
-                    }
-                    // Push live to the attached terminal, if any (drop on send error).
-                    let live_attached = live.lock().unwrap().as_ref().map(|tx| tx.send(chunk.clone()).is_ok());
-                    if !noted_ws {
-                        noted_ws = true;
-                        crate::session_diag::trace(
-                            "console",
-                            &format!("pump[{diag_id}] first chunk forwarded; live_ws={live_attached:?}"),
-                        );
-                    }
-                    let text = String::from_utf8_lossy(&chunk);
-                    // Surface any file the agent reported reading (CPE-405).
-                    for raw in reads.feed(&text) {
-                        announce(read_announcement(&read_cwd, &raw));
-                    }
-                    // Fold provider-reported token/cost usage for this session (CPE-311).
-                    *usage.lock().unwrap() = usage_scan.feed(&text);
-                }
-                bt.end("stream closed");
-                // Stream closed → the agent exited (or the daemon connection dropped).
-                match end {
-                    Some((meta, ended_payload)) => {
-                        let transcript = String::from_utf8_lossy(&ring.lock().unwrap()).into_owned();
-                        record_session_end(&*history, &meta, &record_id, transcript, &injected_secrets);
-                        announce(ended_payload); // tell the explorer this session is gone (CPE-396)
-                    }
-                    None => announce(format!(r#"{{"event":"ended","sessionId":"{record_id}"}}"#)),
-                }
-            });
-        }
-        self.sessions.lock().unwrap().insert(
+        adopt_into(
+            &self.sessions,
+            &self.history,
+            &self.announce,
             id,
-            Arc::new(Session { io, ring, live, name, usage, agent, provider }),
+            io,
+            name,
+            agent,
+            provider,
+            injected_secrets,
+            end,
+            None,
         );
     }
 
@@ -1508,6 +1644,46 @@ mod tests {
         let state = state().with_announcer(Arc::new(move |p| sink.lock().unwrap().push(p)));
         state.announce_session("session:{\"event\":\"ended\"}".into());
         assert_eq!(seen.lock().unwrap().as_slice(), &["session:{\"event\":\"ended\"}".to_string()]);
+    }
+
+    #[test]
+    fn a_swarm_session_is_adopted_into_the_console_and_announced() {
+        // CPE-574: a swarm session must become a real console session (inserted + streamed + announced),
+        // not a private driver-owned process, so it appears in Agent Watch. Drive a trivial real session
+        // through the runner and assert it's adopted, announced started→ended, and reports completion.
+        use crate::swarm_live::SessionRunner;
+        use std::sync::mpsc;
+        use std::time::Duration;
+
+        let seen = Arc::new(Mutex::new(Vec::<String>::new()));
+        let sink = seen.clone();
+        let sessions: Arc<Mutex<HashMap<String, Arc<Session>>>> = Arc::new(Mutex::new(HashMap::new()));
+        let runner = SwarmSessionRunner {
+            sessions: Arc::clone(&sessions),
+            history: Arc::new(crate::history::MemHistory::default()),
+            announce: Arc::new(move |p| sink.lock().unwrap().push(p)),
+            engine: Arc::new(crate::session_engine::LocalEngine),
+            provider: "native".into(),
+            cwd: "/repo".into(),
+        };
+        let (program, args) = crate::pty::shell_command("echo hi");
+        let launch = crate::pty::PtyLaunch { program, args, cwd: None, env: Default::default(), rows: 24, cols: 80 };
+        let (tx, rx) = mpsc::channel();
+        runner.launch("t1", "claude#builder1", &launch, tx).unwrap();
+
+        // Adoption is synchronous: the session is registered before `launch` returns.
+        assert!(sessions.lock().unwrap().contains_key("t1"), "swarm session adopted into ConsoleState.sessions");
+
+        // The agent exits → the reader pipeline closes → completion is reported to the driver.
+        let c = rx.recv_timeout(Duration::from_secs(20)).expect("completion reported when the session ends");
+        assert_eq!(c.task_id, "t1");
+        assert_eq!(c.agent_id, "claude#builder1");
+
+        // Agent Watch sees the session's whole lifecycle. (`ended` is emitted right before `on_end`, so it's
+        // present by the time the completion above arrives.)
+        let msgs = seen.lock().unwrap().clone();
+        assert!(msgs.iter().any(|m| m.contains("\"started\"") && m.contains("t1")), "started announced: {msgs:?}");
+        assert!(msgs.iter().any(|m| m.contains("\"ended\"") && m.contains("t1")), "ended announced: {msgs:?}");
     }
 
     #[test]

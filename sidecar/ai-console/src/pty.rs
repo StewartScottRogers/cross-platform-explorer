@@ -14,7 +14,10 @@ use portable_pty::{native_pty_system, CommandBuilder, PtySize};
 
 /// A running agent session in a pseudo-terminal.
 pub struct PtySession {
-    master: Box<dyn portable_pty::MasterPty + Send>,
+    /// `Some` while the session is live. `kill` drops it, which closes the ConPTY so the output reader
+    /// EOFs — the only way a Windows ConPTY reader ends when the session is *held* by the console rather
+    /// than owned+dropped by the caller (CPE-574; on Unix the reader EOFs on child exit already).
+    master: Option<Box<dyn portable_pty::MasterPty + Send>>,
     child: Box<dyn portable_pty::Child + Send + Sync>,
 }
 
@@ -60,22 +63,27 @@ impl PtySession {
         // Drop the slave so the master sees EOF when the child exits.
         drop(pair.slave);
 
-        Ok(PtySession { master: pair.master, child })
+        Ok(PtySession { master: Some(pair.master), child })
+    }
+
+    /// Borrow the live master, or error if the session has been killed (master dropped).
+    fn master(&self) -> Result<&(dyn portable_pty::MasterPty + Send), String> {
+        self.master.as_deref().ok_or_else(|| "session terminated".to_string())
     }
 
     /// A reader for the terminal's output stream (clone of the master).
     pub fn reader(&self) -> Result<Box<dyn Read + Send>, String> {
-        self.master.try_clone_reader().map_err(|e| e.to_string())
+        self.master()?.try_clone_reader().map_err(|e| e.to_string())
     }
 
     /// A writer for the terminal's input stream.
     pub fn writer(&self) -> Result<Box<dyn Write + Send>, String> {
-        self.master.take_writer().map_err(|e| e.to_string())
+        self.master()?.take_writer().map_err(|e| e.to_string())
     }
 
     /// Resize the terminal (on window/pane resize).
     pub fn resize(&self, rows: u16, cols: u16) -> Result<(), String> {
-        self.master
+        self.master()?
             .resize(PtySize { rows: rows.max(1), cols: cols.max(1), pixel_width: 0, pixel_height: 0 })
             .map_err(|e| e.to_string())
     }
@@ -95,9 +103,14 @@ impl PtySession {
         }
     }
 
-    /// Terminate the session.
+    /// Terminate the session: kill the child and **close the ConPTY** (drop the master). Closing the
+    /// master is what EOFs the output reader on Windows ConPTY when the session is held by the console
+    /// (not owned+dropped by the caller) — without it an adopted swarm session never reports completion
+    /// (CPE-574). Idempotent.
     pub fn kill(&mut self) -> Result<(), String> {
-        self.child.kill().map_err(|e| e.to_string())
+        let r = self.child.kill().map_err(|e| e.to_string());
+        self.master = None; // drop the master → close the ConPTY → the output reader EOFs
+        r
     }
 
     /// Wait for the child to exit and return its exit code.
