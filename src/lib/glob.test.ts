@@ -29,4 +29,13 @@ describe("matchesGlob (CPE-360)", () => {
     expect(matchesGlob("a.txt", "")).toBe(false);
     expect(matchesGlob("a.txt", "   ")).toBe(false);
   });
+
+  it("matches ANY of several comma-separated patterns (CPE-571)", () => {
+    expect(matchesGlob("photo.jpg", "*.jpg, *.png")).toBe(true);
+    expect(matchesGlob("icon.png", "*.jpg, *.png")).toBe(true);
+    expect(matchesGlob("notes.txt", "*.jpg, *.png")).toBe(false);
+    // blanks between commas are ignored; a wholly-blank list still matches nothing.
+    expect(matchesGlob("a.txt", "*.txt, , ")).toBe(true);
+    expect(matchesGlob("a.txt", " , ")).toBe(false);
+  });
 });
