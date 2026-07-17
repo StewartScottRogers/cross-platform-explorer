@@ -21,7 +21,12 @@
   let error = "";
   let isRepo = false;
   let branch: string | null = null;
-  let url = ""; // embedded-browser address (CPE-527)
+  // Embedded-browser address (CPE-527), remembered across opens so your dev-server URL sticks (CPE-575).
+  function loadUrl(): string {
+    try { return localStorage.getItem("cpe.workbenchUrl") ?? ""; } catch { return ""; }
+  }
+  let url = loadUrl();
+  $: { try { localStorage.setItem("cpe.workbenchUrl", url); } catch { /* ignore */ } }
 
   $: state = workbenchState({ loading, error, isRepo, fileCount: files.length });
 

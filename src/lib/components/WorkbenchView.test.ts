@@ -19,6 +19,7 @@ const DIFF = `diff --git a/src/app.ts b/src/app.ts
 +const y = 3;`;
 
 beforeEach(() => {
+  try { localStorage.clear(); } catch { /* ignore */ } // WorkbenchView persists the browser URL (CPE-575)
   invokeMock.mockReset();
   invokeMock.mockImplementation(async (cmd: string) =>
     cmd === "workbench_diff" ? { is_repo: true, branch: "main", diff: DIFF } : {});
@@ -76,6 +77,13 @@ describe("WorkbenchView collapse (CPE-568)", () => {
     // the add line's "3" and the del line's "2" are wrapped in .chg highlights
     const chg = [...container.querySelectorAll(".line.add .chg")].map((e) => e.textContent);
     expect(chg).toContain("3");
+  });
+
+  it("remembers the browser URL across opens (CPE-575)", async () => {
+    localStorage.setItem("cpe.workbenchUrl", "localhost:5173");
+    render(WorkbenchView, { root: "/repo" });
+    const input = screen.getByPlaceholderText(/open the running app in a browser/i) as HTMLInputElement;
+    expect(input.value).toBe("localhost:5173");
   });
 
   it("copies a file's reconstructed diff to the clipboard (CPE-572)", async () => {
