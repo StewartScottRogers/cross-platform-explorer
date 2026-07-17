@@ -42,6 +42,21 @@ describe("ContentSearchDialog (CPE-417)", () => {
     expect(onNavigate).toHaveBeenCalledWith("/repo/sub/b.md");
   });
 
+  it("collapses a file's matches when its chevron is clicked (CPE-574)", async () => {
+    const codeLine = (text: string) => (_: string, el: Element | null) =>
+      el?.tagName.toLowerCase() === "code" && el.textContent === text;
+    render(ContentSearchDialog, { root: "/repo" });
+    await fireEvent.input(screen.getByPlaceholderText("Text to find inside files"), { target: { value: "needle" } });
+    await fireEvent.click(screen.getByText("Search"));
+    await waitFor(() => expect(screen.getByText(codeLine("the needle is here"))).toBeTruthy());
+
+    const chevrons = screen.getAllByLabelText("Toggle file");
+    await fireEvent.click(chevrons[0]); // collapse the first file (a.txt)
+    expect(screen.queryByText(codeLine("the needle is here"))).toBeNull();
+    // the other file's match still shows
+    expect(screen.getByText(codeLine("found the needle deep"))).toBeTruthy();
+  });
+
   it("shows a no-matches message when nothing is found", async () => {
     render(ContentSearchDialog, { root: "/repo" });
     await fireEvent.input(screen.getByPlaceholderText("Text to find inside files"), { target: { value: "zzz" } });

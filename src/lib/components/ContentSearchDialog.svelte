@@ -37,6 +37,14 @@
 
   $: groups = groupMatches(result.matches);
 
+  // Collapse a file's matches on big result sets (CPE-574) — the file header stays a jump-to link.
+  let collapsedFiles = new Set<string>();
+  function toggleFile(path: string) {
+    if (collapsedFiles.has(path)) collapsedFiles.delete(path);
+    else collapsedFiles.add(path);
+    collapsedFiles = collapsedFiles;
+  }
+
   async function run() {
     const q = query.trim();
     if (!q) return;
@@ -108,16 +116,21 @@
         </p>
         {#each groups as g (g.path)}
           <div class="group">
-            <button class="file" on:click={() => goToFile(g.path)} title={g.path}>
-              <Icon name="file" size={13} /> {baseName(g.path)}
-              <span class="count">{g.matches.length}</span>
-            </button>
+            <div class="group-head">
+              <button class="chev" on:click|stopPropagation={() => toggleFile(g.path)} aria-label="Toggle file" title={collapsedFiles.has(g.path) ? "Expand" : "Collapse"}>{collapsedFiles.has(g.path) ? "▸" : "▾"}</button>
+              <button class="file" on:click={() => goToFile(g.path)} title={g.path}>
+                <Icon name="file" size={13} /> {baseName(g.path)}
+                <span class="count">{g.matches.length}</span>
+              </button>
+            </div>
+            {#if !collapsedFiles.has(g.path)}
             {#each g.matches as mt (mt.line_number)}
               <button class="hit" on:click={() => goToFile(g.path)}>
                 <span class="ln">{mt.line_number}</span><code
                   >{#each highlightSegments(mt.line, searchedQuery, searchedCase) as seg}{#if seg.match}<mark class="hl">{seg.text}</mark>{:else}{seg.text}{/if}{/each}</code>
               </button>
             {/each}
+            {/if}
           </div>
         {/each}
       {/if}
@@ -145,7 +158,9 @@
   .results { margin-top: 10px; overflow: auto; }
   .summary { font-size: 12px; color: var(--text-dim); margin-bottom: 6px; }
   .group { margin-bottom: 8px; }
-  .file { display: flex; align-items: center; gap: 6px; width: 100%; text-align: left; font-weight: 600; font-size: 13px; padding: 4px 6px; border-radius: var(--radius); }
+  .group-head { display: flex; align-items: center; }
+  .chev { flex: 0 0 auto; width: 18px; text-align: center; font-size: 10px; color: var(--text-faint); cursor: pointer; }
+  .file { display: flex; align-items: center; gap: 6px; flex: 1; min-width: 0; text-align: left; font-weight: 600; font-size: 13px; padding: 4px 6px; border-radius: var(--radius); }
   .file:hover, .hit:hover { background: var(--surface-alt); }
   .count { margin-left: auto; color: var(--text-faint); font-weight: 400; }
   .hit { display: flex; gap: 8px; width: 100%; text-align: left; padding: 2px 6px 2px 22px; font-size: 12px; }
