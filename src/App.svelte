@@ -404,15 +404,16 @@
       in no capability), so the untrusted sidecar UI stays isolated. */
   /** Pending explorer→console hand-off (CPE-313): folder to scope to and a task hint,
       consumed by launchAiConsole once consent (if any) is resolved. */
-  let consoleContext: { cwd?: string; task?: string } = {};
+  let consoleContext: { cwd?: string; task?: string; session?: string } = {};
 
-  async function openAiConsole(ctx: { cwd?: string; task?: string } = {}) {
+  async function openAiConsole(ctx: { cwd?: string; task?: string; session?: string } = {}) {
     showSettings = false;
     consoleContext = ctx;
     const existing = await WebviewWindow.getByLabel(AI_CONSOLE_LABEL);
     if (existing) {
       await existing.setFocus(); // can't re-scope a live window without disrupting sessions
-      if (ctx.cwd) showNotice("AI Console is already open — set the working folder in its toolbar.", false);
+      if (ctx.session) showNotice("AI Console is already open — click the agent's tab to focus it.", false);
+      else if (ctx.cwd) showNotice("AI Console is already open — set the working folder in its toolbar.", false);
       return;
     }
     const state = await consentState("ai-console");
@@ -423,10 +424,17 @@
     await launchAiConsole();
   }
 
+  /** Open the AI Console focused on a specific agent session's tab (CPE-532) — from double-clicking an
+      Agents leaf or its context-menu "Open". Scopes to the agent's folder + passes the session id so
+      the launcher activates that tab after reattach. */
+  function openSession(sessionId: string, cwd?: string) {
+    openAiConsole({ cwd, session: sessionId });
+  }
+
   async function launchAiConsole() {
     const base = await startAiConsole();
     if (!base) { showNotice("AI Console isn't available in this build.", true); return; }
-    const url = consoleUrlWith(base, consoleContext.cwd, consoleContext.task);
+    const url = consoleUrlWith(base, consoleContext.cwd, consoleContext.task, consoleContext.session);
     try {
       const win = new WebviewWindow(AI_CONSOLE_LABEL, {
         url,
@@ -2101,6 +2109,7 @@
       on:repos={() => (showRepos = true)}
       on:board={() => (showBoard = true)}
       on:workbench={() => (showWorkbench = true)}
+      on:openSession={(e) => openSession(e.detail.sessionId, e.detail.cwd)}
       on:agentMenu={(e) => (agentMenu = { x: e.detail.x, y: e.detail.y, label: $t("tb.closeAllConsoles"), sessionId: e.detail.sessionId, sessionLabel: e.detail.sessionLabel })}
       on:drop={(e) => dropInto(e.detail.paths, e.detail.dest, e.detail.copy)}
     />
@@ -2477,6 +2486,7 @@
     sessionLabel={agentMenu.sessionLabel}
     on:confirm={closeAllConsoles}
     on:closeOne={(e) => closeOneConsole(e.detail)}
+    on:open={(e) => { openSession(e.detail); agentMenu = null; }}
     on:close={() => (agentMenu = null)}
   />
 {/if}

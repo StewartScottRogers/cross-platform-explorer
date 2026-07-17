@@ -35,6 +35,7 @@
     board: void;
     workbench: void;
     agentMenu: { x: number; y: number; sessionId?: string; sessionLabel?: string };
+    openSession: { sessionId: string; cwd: string };
     drop: { paths: string[]; dest: string; copy: boolean };
   }>();
 
@@ -177,8 +178,9 @@
           <button
             class="nav-item agent-item"
             class:active={isMarked(s.cwd)}
-            title={`${s.agentName}${s.provider ? " · " + s.provider : ""}${s.model ? " · " + s.model : ""} · ${s.cwd}  (right-click to close)`}
+            title={`${s.agentName}${s.provider ? " · " + s.provider : ""}${s.model ? " · " + s.model : ""} · ${s.cwd}  (double-click to open its tab · right-click for more)`}
             on:click={() => dispatch("navigate", s.cwd)}
+            on:dblclick={() => dispatch("openSession", { sessionId: s.sessionId, cwd: s.cwd })}
             on:contextmenu|preventDefault|stopPropagation={(e) =>
               dispatch("agentMenu", {
                 x: e.clientX,

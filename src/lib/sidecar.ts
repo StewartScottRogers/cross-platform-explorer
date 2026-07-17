@@ -34,10 +34,11 @@ export async function listSidecars(): Promise<string[]> {
  * session — a decoupled hand-off: the explorer never touches console internals, it just
  * opens a URL. Empty/absent values are omitted so the plain open is unchanged.
  */
-export function consoleUrlWith(baseUrl: string, cwd?: string, task?: string): string {
+export function consoleUrlWith(baseUrl: string, cwd?: string, task?: string, session?: string): string {
   const params = new URLSearchParams();
   if (cwd && cwd.trim()) params.set("cwd", cwd.trim());
   if (task && task.trim()) params.set("task", task.trim());
+  if (session && session.trim()) params.set("session", session.trim()); // CPE-532: focus this tab on open
   const qs = params.toString();
   if (!qs) return baseUrl;
   return baseUrl + (baseUrl.includes("?") ? "&" : "?") + qs;
