@@ -5,13 +5,16 @@
  * they assert the favorites list actually renders and that the row controls
  * dispatch the right events with the right paths.
  */
-import { describe, it, expect, vi } from "vitest";
+import { describe, it, expect, vi, beforeEach } from "vitest";
 import { render, screen, fireEvent } from "@testing-library/svelte";
 import HomeView from "./HomeView.svelte";
 import type { Favorite, RecentFile } from "../types";
 
 // The component tree imports Tauri APIs transitively; stub them for jsdom.
 vi.mock("@tauri-apps/api/core", () => ({ invoke: vi.fn() }));
+
+// HomeView persists its layout (CPE-573); isolate localStorage so tests don't inherit each other's state.
+beforeEach(() => { try { localStorage.clear(); } catch { /* ignore */ } });
 
 const favorites: Favorite[] = [
   { path: "/home/docs", name: "docs", is_dir: true },
@@ -21,6 +24,17 @@ const recents: RecentFile[] = [
   { path: "/home/a.md", name: "a.md", opened: 2 },
   { path: "/home/b.md", name: "b.md", opened: 1 },
 ];
+
+describe("HomeView layout persistence (CPE-573)", () => {
+  it("restores the saved section tab on open", async () => {
+    try { localStorage.clear(); } catch { /* ignore */ }
+    localStorage.setItem("cpe.homeTab", "favorites");
+    render(HomeView, { places: [], drives: [], pins: [], recents: [], favorites });
+    // The Favorites tab is restored, so its items show without clicking a pill.
+    expect(screen.getByText("docs")).toBeTruthy();
+    expect(screen.getByText("notes.txt")).toBeTruthy();
+  });
+});
 
 describe("HomeView Favorites tab (CPE-338)", () => {
   it("lists starred items and routes folder→navigate, file→openFile", async () => {
