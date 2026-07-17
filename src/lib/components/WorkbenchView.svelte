@@ -43,6 +43,9 @@
     else collapsed.add(key);
     collapsed = collapsed; // reassign so Svelte re-renders
   }
+  const fileKey = (f: DiffFile) => f.oldPath + "→" + f.newPath;
+  function collapseAll() { collapsed = new Set(files.map(fileKey)); }
+  function expandAll() { collapsed = new Set(); }
 
   async function load() {
     loading = true;
@@ -75,6 +78,10 @@
       <div class="wb-tools">
         {#if state === "changes"}
           <span class="wb-stat"><span class="add">+{stats.added}</span> <span class="del">−{stats.removed}</span> · {stats.files} file{stats.files === 1 ? "" : "s"}</span>
+        {/if}
+        {#if files.length > 1}
+          <button class="wb-btn" on:click={collapseAll} title="Collapse every file">Collapse all</button>
+          <button class="wb-btn" on:click={expandAll} title="Expand every file">Expand all</button>
         {/if}
         <button class="wb-btn" on:click={load} title="Re-run git diff">Refresh</button>
         <button class="wb-x" title="Close" aria-label="Close" on:click={() => dispatch("close")}>×</button>

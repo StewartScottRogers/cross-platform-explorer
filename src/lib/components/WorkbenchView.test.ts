@@ -24,6 +24,19 @@ beforeEach(() => {
     cmd === "workbench_diff" ? { is_repo: true, branch: "main", diff: DIFF } : {});
 });
 
+const DIFF2 = `diff --git a/a.ts b/a.ts
+--- a/a.ts
++++ b/a.ts
+@@ -1 +1 @@
+-old a
++new a
+diff --git a/b.ts b/b.ts
+--- a/b.ts
++++ b/b.ts
+@@ -1 +1 @@
+-old b
++new b`;
+
 describe("WorkbenchView collapse (CPE-568)", () => {
   it("collapses a file's hunks on header click, and expands again", async () => {
     render(WorkbenchView, { root: "/repo" });
@@ -35,5 +48,20 @@ describe("WorkbenchView collapse (CPE-568)", () => {
 
     await fireEvent.click(head);
     expect(await screen.findByText("const y = 3;")).toBeTruthy(); // expanded again
+  });
+
+  it("collapse all / expand all fold every file (CPE-569)", async () => {
+    invokeMock.mockImplementation(async (cmd: string) =>
+      cmd === "workbench_diff" ? { is_repo: true, branch: "main", diff: DIFF2 } : {});
+    render(WorkbenchView, { root: "/repo" });
+    await waitFor(() => expect(screen.getByText("new a")).toBeTruthy());
+
+    await fireEvent.click(screen.getByText("Collapse all"));
+    expect(screen.queryByText("new a")).toBeNull();
+    expect(screen.queryByText("new b")).toBeNull();
+
+    await fireEvent.click(screen.getByText("Expand all"));
+    expect(await screen.findByText("new a")).toBeTruthy();
+    expect(screen.getByText("new b")).toBeTruthy();
   });
 });
