@@ -1,6 +1,6 @@
 // CPE-521: Agent Board model — column grouping, ordering, counts, and move validation.
 import { describe, it, expect } from "vitest";
-import { groupByColumn, columnCounts, isValidMove, isColumn, ticketTask, groupByLane, laneFor, clampBoardSize, BOARD_MIN_W, BOARD_MIN_H, groupByEpic, todoDone, epicProgress, type Card } from "./board";
+import { groupByColumn, columnCounts, isValidMove, isColumn, ticketTask, groupByLane, laneFor, clampBoardSize, BOARD_MIN_W, BOARD_MIN_H, groupByEpic, todoDone, epicProgress, doneWithArchived, type Card } from "./board";
 
 function card(id: string, column: string, extra: Partial<Card> = {}): Card {
   return { id, title: `t ${id}`, ticket_type: "Feature", priority: "Medium", tags: [], column, ...extra };
@@ -84,6 +84,15 @@ describe("board model (CPE-521)", () => {
     expect(split.todo.map((c) => c.id)).toEqual(["CPE-10", "CPE-12"]); // non-Done, id-ordered
     expect(split.done.map((c) => c.id)).toEqual(["CPE-11"]);
     expect(epicProgress(cs, "CPE-500")).toEqual({ done: 1, total: 3 });
+  });
+
+  it("doneWithArchived includes archived only when toggled on (CPE-531)", () => {
+    const recent = [card("CPE-50", "Done"), card("CPE-40", "Done")];
+    const archived = [card("CPE-9", "Done"), card("CPE-3", "Done")];
+    // Off → recent only, id-ordered.
+    expect(doneWithArchived(recent, archived, false).map((c) => c.id)).toEqual(["CPE-40", "CPE-50"]);
+    // On → recent + archived, id-ordered together.
+    expect(doneWithArchived(recent, archived, true).map((c) => c.id)).toEqual(["CPE-3", "CPE-9", "CPE-40", "CPE-50"]);
   });
 
   it("clampBoardSize enforces the min and the viewport max (CPE-529)", () => {

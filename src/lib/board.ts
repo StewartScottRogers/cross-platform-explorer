@@ -144,6 +144,13 @@ export function saveBoardSize(w: number, h: number): void {
   }
 }
 
+/** The Done cards to display (CPE-531): the recent (top-level) Done, plus the archived (dated
+    subfolder) Done only when `showArchived` is on — id-ordered. Keeps the default board bounded. */
+export function doneWithArchived(recent: Card[], archived: Card[], showArchived: boolean): Card[] {
+  const list = showArchived ? [...recent, ...archived] : recent;
+  return [...list].sort((a, b) => idNum(a.id) - idNum(b.id));
+}
+
 /** The task string injected into a dispatched agent session (CPE-522): names the ticket it should
     work, reusing the CPE-313 explorer→console task hand-off. */
 export function ticketTask(card: Pick<Card, "id" | "title">): string {
