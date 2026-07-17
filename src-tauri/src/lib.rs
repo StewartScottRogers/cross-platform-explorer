@@ -180,10 +180,38 @@ fn board_note(root: String, id: String, note: String) -> Result<(), String> {
     std::fs::write(&path, ticket_board::append_finding(&md, &note)).map_err(|e| e.to_string())
 }
 
-/// Run `git diff` (working tree vs HEAD) in `root` and return the raw unified-diff text for the
-/// integrated workbench (CPE-526). An optional `path` limits it to one file. Read-only.
+/// The workbench's view of a folder (CPE-526/535): whether it's a git repo, the branch, and the diff.
+#[derive(serde::Serialize)]
+struct WorkbenchDiff {
+    is_repo: bool,
+    branch: Option<String>,
+    diff: String,
+}
+
+/// `git diff` (working tree vs HEAD) in `root` for the integrated workbench, with friendly edge cases
+/// (CPE-535): a non-repo folder is a normal `is_repo:false` result (not an error), git-not-installed is
+/// a distinct error, and an empty `root` is refused. An optional `path` limits it to one file. Read-only.
 #[tauri::command]
-fn workbench_diff(root: String, path: Option<String>) -> Result<String, String> {
+fn workbench_diff(root: String, path: Option<String>) -> Result<WorkbenchDiff, String> {
+    if root.trim().is_empty() {
+        return Err("no-folder".to_string()); // opened on Home / no folder
+    }
+    // Is this a git work tree? Distinguishes not-a-repo (friendly) from git-missing (error).
+    let inside = std::process::Command::new("git")
+        .args(["-C", &root, "rev-parse", "--is-inside-work-tree"])
+        .output()
+        .map_err(|e| format!("git-missing: {e}"))?;
+    if !inside.status.success() {
+        return Ok(WorkbenchDiff { is_repo: false, branch: None, diff: String::new() });
+    }
+    let branch = std::process::Command::new("git")
+        .args(["-C", &root, "rev-parse", "--abbrev-ref", "HEAD"])
+        .output()
+        .ok()
+        .filter(|o| o.status.success())
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+        .filter(|s| !s.is_empty());
+
     let mut args = vec!["-C".to_string(), root, "diff".to_string()];
     if let Some(p) = path.filter(|p| !p.is_empty()) {
         args.push("--".to_string());
@@ -194,7 +222,7 @@ fn workbench_diff(root: String, path: Option<String>) -> Result<String, String> 
         .output()
         .map_err(|e| format!("Couldn't run git: {e}"))?;
     if out.status.success() {
-        Ok(String::from_utf8_lossy(&out.stdout).into_owned())
+        Ok(WorkbenchDiff { is_repo: true, branch, diff: String::from_utf8_lossy(&out.stdout).into_owned() })
     } else {
         Err(String::from_utf8_lossy(&out.stderr).trim().to_string())
     }

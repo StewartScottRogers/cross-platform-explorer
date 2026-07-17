@@ -7,17 +7,23 @@
   import { invoke } from "@tauri-apps/api/core";
   import Icon from "./Icon.svelte";
   import { parseDiff, diffStats, fileLabel, type DiffFile } from "../diff";
-  import { isBrowsableUrl, normalizeUrl } from "../workbench";
+  import { isBrowsableUrl, normalizeUrl, workbenchState } from "../workbench";
 
   /** Repo root to diff. */
   export let root: string;
 
   const dispatch = createEventDispatcher<{ close: void; browse: string; edit: string }>();
 
+  interface WorkbenchDiff { is_repo: boolean; branch: string | null; diff: string }
+
   let files: DiffFile[] = [];
   let loading = true;
   let error = "";
+  let isRepo = false;
+  let branch: string | null = null;
   let url = ""; // embedded-browser address (CPE-527)
+
+  $: state = workbenchState({ loading, error, isRepo, fileCount: files.length });
 
   function openBrowser() {
     if (isBrowsableUrl(url)) dispatch("browse", normalizeUrl(url));
@@ -34,11 +40,15 @@
     loading = true;
     error = "";
     try {
-      const text = await invoke<string>("workbench_diff", { root });
-      files = parseDiff(text);
+      const r = await invoke<WorkbenchDiff>("workbench_diff", { root });
+      isRepo = r.is_repo;
+      branch = r.branch;
+      files = r.is_repo ? parseDiff(r.diff) : [];
     } catch (e) {
       error = e instanceof Error ? e.message : String(e);
       files = [];
+      isRepo = false;
+      branch = null;
     } finally {
       loading = false;
     }
@@ -50,9 +60,12 @@
 <div class="wb-overlay" on:click|self={() => dispatch("close")}>
   <div class="wb-panel">
     <div class="wb-titlebar">
-      <span class="wb-title"><Icon name="code" size={15} /> Workbench — Diff</span>
+      <span class="wb-title">
+        <Icon name="code" size={15} /> Workbench — Diff
+        {#if state === "changes" || state === "clean"}<span class="wb-branch" title="Current branch">⎇ {branch || "detached"}</span>{/if}
+      </span>
       <div class="wb-tools">
-        {#if !loading && !error}
+        {#if state === "changes"}
           <span class="wb-stat"><span class="add">+{stats.added}</span> <span class="del">−{stats.removed}</span> · {stats.files} file{stats.files === 1 ? "" : "s"}</span>
         {/if}
         <button class="wb-btn" on:click={load} title="Re-run git diff">Refresh</button>
@@ -71,13 +84,20 @@
       <button class="wb-btn" on:click={openBrowser} title="Open this URL in a browser window">Open in browser</button>
     </div>
 
-    {#if error}<div class="wb-status error">{error}</div>{/if}
-
     <div class="wb-body">
-      {#if loading}
+      {#if state === "loading"}
         <div class="wb-empty">Running git diff…</div>
-      {:else if files.length === 0}
-        <div class="wb-empty">No changes — the working tree matches HEAD.</div>
+      {:else if state === "no-folder"}
+        <div class="wb-empty wb-edge"><div class="wb-edge-h">Open a folder first</div><p>Navigate to a project folder in the explorer, then reopen the Workbench to review its changes.</p></div>
+      {:else if state === "git-missing"}
+        <div class="wb-empty wb-edge"><div class="wb-edge-h">Git isn't available</div><p>The Workbench needs <code>git</code> on your PATH to read changes. Install Git, then try again.</p></div>
+      {:else if state === "not-a-repo"}
+        <div class="wb-empty wb-edge"><div class="wb-edge-h">Not a Git repository</div>
+          <p><code>{root || "(no folder)"}</code> isn't a Git repo, so there are no changes to show. Open a repository folder (one with a <code>.git</code>), or clone one from <b>Repositories</b>.</p></div>
+      {:else if state === "error"}
+        <div class="wb-empty wb-edge error"><div class="wb-edge-h">Couldn't read the diff</div><p>{error}</p></div>
+      {:else if state === "clean"}
+        <div class="wb-empty">✓ No changes — <b>{branch || "the working tree"}</b> matches HEAD.</div>
       {:else}
         {#each files as f (f.oldPath + "→" + f.newPath)}
           <div class="file">
@@ -120,9 +140,12 @@
     line-height: 1; padding: 0 4px; border-radius: 4px; }
   .wb-x:hover { background: rgba(128,128,128,0.18); color: var(--text); }
 
-  .wb-status { padding: 6px 14px; font-size: 12px; border-bottom: 1px solid var(--border); }
-  .wb-status.error { color: #e0706b; }
-  .wb-empty { flex: 1; display: grid; place-items: center; color: var(--text-dim); }
+  .wb-branch { font-size: 12px; opacity: .7; margin-left: 6px; font-weight: 400; }
+  .wb-empty { flex: 1; display: grid; place-items: center; color: var(--text-dim); text-align: center; }
+  .wb-edge { align-content: center; max-width: 480px; margin: 0 auto; line-height: 1.5; }
+  .wb-edge-h { font-size: 15px; color: var(--text); margin-bottom: 6px; }
+  .wb-edge p { margin: 0; } .wb-edge code { font-size: 11px; }
+  .wb-edge.error .wb-edge-h { color: #e0706b; }
 
   .wb-body { flex: 1; overflow: auto; padding: 10px 12px;
     font-family: var(--mono, ui-monospace, Consolas, monospace); font-size: 12px; }
