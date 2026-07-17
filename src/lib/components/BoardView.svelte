@@ -9,7 +9,7 @@
   import {
     BOARD_LANES, groupByLane, isValidMove, ticketTask,
     clampBoardSize, loadBoardSize, saveBoardSize,
-    groupByEpic, todoDone, epicProgress, NO_EPIC,
+    groupByEpic, todoDone, epicProgress, NO_EPIC, doneWithArchived,
     type Card, type Lane, type Epic,
   } from "../board";
 
@@ -26,6 +26,12 @@
   let overCol: Lane | null = null;
 
   $: grouped = groupByLane(cards);
+
+  // --- Done archival (CPE-531): recent Done (top-level) shown by default; archived (dated Done/**
+  // subfolders) loaded separately + shown only on demand, so the board stays fast as Done grows. ----
+  let archived: Card[] = [];
+  let showArchived = false;
+  $: doneDisplay = doneWithArchived(grouped.Done, archived, showArchived);
 
   // --- Epic-organized view (CPE-530): a Board ⇄ Epics toggle. ------------------------------------
   let viewMode: "board" | "epics" = "board";
@@ -81,7 +87,14 @@
       epics = [];
     }
   }
-  function refresh() { load(); loadEpics(); }
+  async function loadArchived() {
+    try {
+      archived = await invoke<Card[]>("board_archived", { root });
+    } catch {
+      archived = [];
+    }
+  }
+  function refresh() { load(); loadEpics(); loadArchived(); }
   onMount(refresh);
 
   function onDragStart(e: DragEvent, id: string) {
@@ -192,6 +205,7 @@
     {:else}
       <div class="board-columns">
         {#each BOARD_LANES as col}
+          {@const list = col === "Done" ? doneDisplay : grouped[col]}
           <!-- svelte-ignore a11y-no-static-element-interactions -->
           <div
             class="board-col"
@@ -202,10 +216,14 @@
           >
             <div class="board-col-head">
               <span class="board-col-name">{col}</span>
-              <span class="board-col-count">{grouped[col].length}</span>
+              <span class="board-col-count">{list.length}</span>
+              {#if col === "Done" && archived.length}
+                <button class="archive-toggle" on:click={() => (showArchived = !showArchived)}
+                  title="Archived Done tickets live in the dated Done/ subfolders">{showArchived ? "hide" : `+${archived.length} archived`}</button>
+              {/if}
             </div>
             <div class="board-col-body">
-              {#each grouped[col] as c (c.id)}
+              {#each list as c (c.id)}
                 <!-- svelte-ignore a11y-no-static-element-interactions -->
                 <div class="card" draggable="true" on:dragstart={(e) => onDragStart(e, c.id)} title={c.title}>
                   <div class="card-top">
@@ -226,7 +244,7 @@
                   </div>
                 </div>
               {/each}
-              {#if grouped[col].length === 0}<div class="board-col-empty">—</div>{/if}
+              {#if list.length === 0}<div class="board-col-empty">—</div>{/if}
             </div>
           </div>
         {/each}
@@ -300,6 +318,9 @@
     border-bottom: 1px solid var(--border); font-size: 12px; }
   .board-col-name { font-weight: 600; text-transform: uppercase; letter-spacing: .04em; opacity: .8; }
   .board-col-count { font-variant-numeric: tabular-nums; opacity: .6; }
+  .archive-toggle { margin-left: 4px; font: inherit; font-size: 10px; padding: 1px 6px; border-radius: 4px;
+    border: 1px solid var(--border-strong); background: var(--surface); color: var(--text-dim); cursor: pointer; }
+  .archive-toggle:hover { background: rgba(128,128,128,0.14); color: var(--text); }
   .board-col-body { flex: 1; overflow-y: auto; padding: 8px; display: flex; flex-direction: column; gap: 8px; }
   .board-col-empty { text-align: center; color: var(--text-faint); padding: 8px 0; }
 

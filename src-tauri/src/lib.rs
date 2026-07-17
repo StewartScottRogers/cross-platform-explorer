@@ -90,6 +90,38 @@ fn board_move(root: String, id: String, to_column: String) -> Result<(), String>
     Ok(())
 }
 
+/// Collect archived Done tickets — those in **subdirectories** of `Tickets/Done/` (the dated
+/// `YYYY/QN/…` folders `/ticketing-organize` produces). Top-level Done files are "recent" and are
+/// returned by `board_cards`; anything nested is archived (CPE-531). Recursive.
+fn collect_archived(dir: &std::path::Path, top_level: bool, out: &mut Vec<ticket_board::Card>) {
+    let Ok(entries) = std::fs::read_dir(dir) else { return };
+    for e in entries.flatten() {
+        let p = e.path();
+        if p.is_dir() {
+            collect_archived(&p, false, out);
+        } else if !top_level {
+            let name = p.file_name().and_then(|s| s.to_str()).unwrap_or("");
+            if name.starts_with("CPE-") && name.ends_with(".md") {
+                if let Ok(md) = std::fs::read_to_string(&p) {
+                    if let Some(card) = ticket_board::card_from(&md, "Done") {
+                        out.push(card);
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// The archived Done tickets (in dated `Done/**` subfolders) for the board's "show archived" affordance
+/// (CPE-531). Kept separate from `board_cards` so the default board stays fast as Done grows.
+#[tauri::command]
+fn board_archived(root: String) -> Vec<ticket_board::Card> {
+    let done = std::path::Path::new(&root).join("Tickets").join("Done");
+    let mut out = Vec::new();
+    collect_archived(&done, true, &mut out);
+    out
+}
+
 /// List the repo's epics for the board's epic-organized view (CPE-530): active/proposed epics from
 /// `Tickets/Epics/` + closed epics from `Tickets/Done/` (top level), each `epic`-tagged. Read-only.
 #[tauri::command]
@@ -4199,6 +4231,7 @@ pub fn run() {
             list_dir,
             board_cards,
             board_epics,
+            board_archived,
             board_move,
             board_review,
             board_note,
