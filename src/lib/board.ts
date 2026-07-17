@@ -72,6 +72,41 @@ export function isValidMove(cards: Card[], id: string, to: string): boolean {
   return !!card && card.column !== to;
 }
 
+// --- Panel size (CPE-529): a resizable board panel, persisted, clamped to a legible minimum. -------
+export const BOARD_MIN_W = 640;
+export const BOARD_MIN_H = 420;
+const SIZE_KEY = "cpe.board.size";
+
+/** Clamp a requested panel size to [min, viewport]. Pure. */
+export function clampBoardSize(w: number, h: number, vw: number, vh: number): { w: number; h: number } {
+  const maxW = Math.max(BOARD_MIN_W, vw);
+  const maxH = Math.max(BOARD_MIN_H, vh);
+  return {
+    w: Math.round(Math.min(Math.max(w, BOARD_MIN_W), maxW)),
+    h: Math.round(Math.min(Math.max(h, BOARD_MIN_H), maxH)),
+  };
+}
+
+/** The saved board panel size, or null if none/garbage. */
+export function loadBoardSize(): { w: number; h: number } | null {
+  try {
+    const raw = localStorage.getItem(SIZE_KEY);
+    if (!raw) return null;
+    const o = JSON.parse(raw);
+    return typeof o?.w === "number" && typeof o?.h === "number" ? { w: o.w, h: o.h } : null;
+  } catch {
+    return null;
+  }
+}
+
+export function saveBoardSize(w: number, h: number): void {
+  try {
+    localStorage.setItem(SIZE_KEY, JSON.stringify({ w: Math.round(w), h: Math.round(h) }));
+  } catch {
+    /* storage unavailable */
+  }
+}
+
 /** The task string injected into a dispatched agent session (CPE-522): names the ticket it should
     work, reusing the CPE-313 explorer→console task hand-off. */
 export function ticketTask(card: Pick<Card, "id" | "title">): string {

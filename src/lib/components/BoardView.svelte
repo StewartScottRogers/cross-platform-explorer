@@ -6,7 +6,11 @@
   import { createEventDispatcher, onMount } from "svelte";
   import { invoke } from "@tauri-apps/api/core";
   import Icon from "./Icon.svelte";
-  import { BOARD_LANES, groupByLane, isValidMove, ticketTask, type Card, type Lane } from "../board";
+  import {
+    BOARD_LANES, groupByLane, isValidMove, ticketTask,
+    clampBoardSize, loadBoardSize, saveBoardSize,
+    type Card, type Lane,
+  } from "../board";
 
   /** Repo root that contains the Tickets/ folder. */
   export let root: string;
@@ -16,10 +20,31 @@
   let cards: Card[] = [];
   let loading = true;
   let error = "";
+  let note = ""; // last action, shown in the status bar (CPE-529)
   let dragId: string | null = null;
   let overCol: Lane | null = null;
 
   $: grouped = groupByLane(cards);
+
+  // --- Resizable panel (CPE-529): drag the corner grip; size clamped + persisted. -----------------
+  const saved = loadBoardSize();
+  let panelW = saved?.w ?? Math.min(1100, typeof window !== "undefined" ? window.innerWidth * 0.96 : 1100);
+  let panelH = saved?.h ?? Math.min(760, typeof window !== "undefined" ? window.innerHeight * 0.92 : 760);
+  function startResize(e: MouseEvent) {
+    e.preventDefault();
+    const sx = e.clientX, sy = e.clientY, sw = panelW, sh = panelH;
+    const move = (ev: MouseEvent) => {
+      const c = clampBoardSize(sw + (ev.clientX - sx), sh + (ev.clientY - sy), window.innerWidth, window.innerHeight);
+      panelW = c.w; panelH = c.h;
+    };
+    const up = () => {
+      window.removeEventListener("mousemove", move);
+      window.removeEventListener("mouseup", up);
+      saveBoardSize(panelW, panelH);
+    };
+    window.addEventListener("mousemove", move);
+    window.addEventListener("mouseup", up);
+  }
 
   async function load() {
     loading = true;
@@ -60,6 +85,8 @@
         if (card.tags.includes("review")) await invoke("board_review", { root, id, on: false });
         if (card.column !== lane) await invoke("board_move", { root, id, toColumn: lane });
       }
+      note = lane === "Review" ? `Sent ${id} to review` : `Moved ${id} → ${lane}`;
+      error = "";
     } catch (e) {
       error = `Couldn't move ${id}: ` + (e instanceof Error ? e.message : String(e));
     }
@@ -85,7 +112,7 @@
 
 <!-- svelte-ignore a11y-click-events-have-key-events a11y-no-static-element-interactions -->
 <div class="board-overlay" on:click={(e) => { if (e.target === e.currentTarget) dispatch("close"); }}>
-  <div class="board-panel">
+  <div class="board-panel" style="width: {panelW}px; height: {panelH}px;">
     <div class="board-titlebar">
       <span class="board-title"><Icon name="code" size={15} /> Agent Board</span>
       <div class="board-tools">
@@ -141,13 +168,27 @@
         {/each}
       </div>
     {/if}
+
+    <!-- Bottom status bar (CPE-529): per-column counts, the root folder, and the last action/error. -->
+    <div class="board-statusbar">
+      <span class="sb-counts">
+        {#each BOARD_LANES as l}<span class="sb-col">{l} <b>{grouped[l].length}</b></span>{/each}
+      </span>
+      <span class="sb-msg" class:error={!!error}>{error || note || ""}</span>
+      <span class="sb-root" title={root}>{root}</span>
+    </div>
+
+    <!-- Resize grip (CPE-529). -->
+    <!-- svelte-ignore a11y-no-static-element-interactions -->
+    <div class="board-grip" title="Drag to resize" on:mousedown={startResize}></div>
   </div>
 </div>
 
 <style>
   .board-overlay { position: fixed; inset: 0; background: rgba(0,0,0,0.45); display: flex;
     align-items: center; justify-content: center; z-index: 60; }
-  .board-panel { width: min(1100px, 96vw); height: min(760px, 92vh); display: flex; flex-direction: column;
+  /* Size comes from inline width/height (CPE-529 resizable); max keeps it inside the viewport. */
+  .board-panel { max-width: 98vw; max-height: 96vh; display: flex; flex-direction: column; position: relative;
     background: var(--surface); color: var(--text); border: 1px solid var(--border-strong);
     border-radius: 8px; box-shadow: 0 16px 48px rgba(0,0,0,0.4); overflow: hidden; }
 
@@ -191,6 +232,20 @@
     background: var(--surface-alt); }
   .pill.epic { border-color: #a24bd0; color: #a24bd0; }
   .pill.sprint { border-color: #3a72b5; color: #3a72b5; }
+
+  /* Bottom status bar (CPE-529). */
+  .board-statusbar { display: flex; align-items: center; gap: 14px; height: 26px; flex: 0 0 auto;
+    padding: 0 12px; background: var(--surface-alt); border-top: 1px solid var(--border);
+    font-size: 11px; color: var(--text-dim); }
+  .sb-counts { display: flex; gap: 10px; flex: 0 0 auto; }
+  .sb-col { white-space: nowrap; } .sb-col b { font-variant-numeric: tabular-nums; color: var(--text); }
+  .sb-msg { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; text-align: center; }
+  .sb-msg.error { color: #e0706b; }
+  .sb-root { flex: 0 1 auto; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; opacity: .7; direction: rtl; }
+  /* Resize grip (CPE-529). */
+  .board-grip { position: absolute; right: 0; bottom: 0; width: 16px; height: 16px; cursor: nwse-resize; z-index: 2;
+    background: repeating-linear-gradient(135deg, transparent 0 2px, rgba(128,128,128,.6) 2px 3px);
+    -webkit-mask: linear-gradient(135deg, transparent 45%, #000 45%); mask: linear-gradient(135deg, transparent 45%, #000 45%); }
   /* Dispatch appears on hover/focus so the card stays uncluttered at rest (CPE-522). */
   .card-actions { display: flex; justify-content: flex-end; margin-top: 6px; opacity: 0; transition: opacity .1s; }
   .card:hover .card-actions, .card:focus-within .card-actions { opacity: 1; }

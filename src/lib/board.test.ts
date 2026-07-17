@@ -1,6 +1,6 @@
 // CPE-521: Agent Board model — column grouping, ordering, counts, and move validation.
 import { describe, it, expect } from "vitest";
-import { groupByColumn, columnCounts, isValidMove, isColumn, ticketTask, groupByLane, laneFor, type Card } from "./board";
+import { groupByColumn, columnCounts, isValidMove, isColumn, ticketTask, groupByLane, laneFor, clampBoardSize, BOARD_MIN_W, BOARD_MIN_H, type Card } from "./board";
 
 function card(id: string, column: string, extra: Partial<Card> = {}): Card {
   return { id, title: `t ${id}`, ticket_type: "Feature", priority: "Medium", tags: [], column, ...extra };
@@ -68,5 +68,16 @@ describe("board model (CPE-521)", () => {
     expect(g.Review.map((c) => c.id)).toEqual(["CPE-1"]);
     expect(g.Doing.map((c) => c.id)).toEqual(["CPE-2"]);
     expect(g.Done.map((c) => c.id)).toEqual(["CPE-3"]);
+  });
+
+  it("clampBoardSize enforces the min and the viewport max (CPE-529)", () => {
+    // Within bounds → unchanged (rounded).
+    expect(clampBoardSize(900, 600, 1920, 1080)).toEqual({ w: 900, h: 600 });
+    // Below the minimum → clamped up.
+    expect(clampBoardSize(100, 100, 1920, 1080)).toEqual({ w: BOARD_MIN_W, h: BOARD_MIN_H });
+    // Above the viewport → clamped down to the viewport.
+    expect(clampBoardSize(5000, 5000, 1200, 800)).toEqual({ w: 1200, h: 800 });
+    // A tiny viewport never goes below the legible minimum.
+    expect(clampBoardSize(500, 500, 300, 300)).toEqual({ w: BOARD_MIN_W, h: BOARD_MIN_H });
   });
 });
