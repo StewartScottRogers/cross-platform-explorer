@@ -97,6 +97,32 @@ pub fn card_from(md: &str, column: &str) -> Option<Card> {
     })
 }
 
+/// An epic for the board's epic-organized left pane (CPE-530).
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct Epic {
+    pub id: String,
+    pub title: String,
+    pub status: String,
+    pub tags: Vec<String>,
+}
+
+/// Parse an epic from a ticket's markdown. Returns `None` if it has no id **or** isn't an epic (its
+/// `tags` must include `epic`). Used to list epics from `Tickets/Epics/` + closed epics in `Done/`.
+pub fn epic_from(md: &str) -> Option<Epic> {
+    let fm = frontmatter(md);
+    let id = fm.get("id").map(|s| unquote(s)).filter(|s| !s.is_empty())?;
+    let tags: Vec<String> = fm.get("tags").map(|s| parse_tags(s)).unwrap_or_default();
+    if !tags.iter().any(|t| t == "epic") {
+        return None;
+    }
+    Some(Epic {
+        id,
+        title: fm.get("title").map(|s| unquote(s)).unwrap_or_default(),
+        status: fm.get("status").map(|s| unquote(s)).unwrap_or_default(),
+        tags,
+    })
+}
+
 /// Rewrite the `status:` line of a ticket's frontmatter to `new_status` (adding one if absent). Only
 /// the first `status:` in the frontmatter block is touched. Pure — the caller writes the result.
 pub fn set_status(md: &str, new_status: &str) -> String {
@@ -270,6 +296,18 @@ mod tests {
         // Idempotent both ways.
         assert_eq!(card_from(&set_review(&on, true), "Doing").unwrap().tags, vec!["ready", "backend", "review"]);
         assert_eq!(card_from(&set_review(TICKET, false), "Doing").unwrap().tags, vec!["ready", "backend"]);
+    }
+
+    #[test]
+    fn epic_from_parses_only_epic_tagged_tickets() {
+        let epic = "---\nid: CPE-528\ntitle: \"EPIC: Wire live sessions\"\nstatus: Proposed\ntags: [epic, big-design]\n---\nbody";
+        let e = epic_from(epic).unwrap();
+        assert_eq!(e.id, "CPE-528");
+        assert_eq!(e.status, "Proposed");
+        assert!(e.title.contains("Wire live"));
+        // A normal (non-epic) ticket is not an epic.
+        assert!(epic_from("---\nid: CPE-1\ntitle: x\ntags: [ready]\n---\nb").is_none());
+        assert!(epic_from("no frontmatter").is_none());
     }
 
     #[test]

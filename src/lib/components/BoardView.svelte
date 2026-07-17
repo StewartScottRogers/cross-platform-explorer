@@ -9,7 +9,8 @@
   import {
     BOARD_LANES, groupByLane, isValidMove, ticketTask,
     clampBoardSize, loadBoardSize, saveBoardSize,
-    type Card, type Lane,
+    groupByEpic, todoDone, epicProgress, NO_EPIC,
+    type Card, type Lane, type Epic,
   } from "../board";
 
   /** Repo root that contains the Tickets/ folder. */
@@ -25,6 +26,21 @@
   let overCol: Lane | null = null;
 
   $: grouped = groupByLane(cards);
+
+  // --- Epic-organized view (CPE-530): a Board ⇄ Epics toggle. ------------------------------------
+  let viewMode: "board" | "epics" = "board";
+  let epics: Epic[] = [];
+  let selectedEpic: string | null = null;
+
+  $: epicGroups = groupByEpic(cards);
+  $: epicList = [
+    ...epics.map((e) => ({ id: e.id, title: e.title, status: e.status })),
+    ...(epicGroups[NO_EPIC]?.length ? [{ id: NO_EPIC, title: "No epic", status: "" }] : []),
+  ];
+  $: if (viewMode === "epics" && (selectedEpic === null || !epicList.some((e) => e.id === selectedEpic)) && epicList.length)
+    selectedEpic = epicList[0].id;
+  $: selectedCards = selectedEpic !== null ? (epicGroups[selectedEpic] ?? []) : [];
+  $: split = todoDone(selectedCards);
 
   // --- Resizable panel (CPE-529): drag the corner grip; size clamped + persisted. -----------------
   const saved = loadBoardSize();
@@ -58,7 +74,15 @@
       loading = false;
     }
   }
-  onMount(load);
+  async function loadEpics() {
+    try {
+      epics = await invoke<Epic[]>("board_epics", { root });
+    } catch {
+      epics = [];
+    }
+  }
+  function refresh() { load(); loadEpics(); }
+  onMount(refresh);
 
   function onDragStart(e: DragEvent, id: string) {
     dragId = id;
@@ -116,7 +140,9 @@
     <div class="board-titlebar">
       <span class="board-title"><Icon name="code" size={15} /> Agent Board</span>
       <div class="board-tools">
-        <button class="board-btn" on:click={load} title="Refresh from the Tickets/ folders">Refresh</button>
+        <button class="board-btn" class:active={viewMode === "board"} on:click={() => (viewMode = "board")} title="Kanban columns">▦ Board</button>
+        <button class="board-btn" class:active={viewMode === "epics"} on:click={() => (viewMode = "epics")} title="Organize by epic">◧ Epics</button>
+        <button class="board-btn" on:click={refresh} title="Refresh from the Tickets/ folders">Refresh</button>
         <button class="board-x" title="Close" aria-label="Close" on:click={() => dispatch("close")}>×</button>
       </div>
     </div>
@@ -125,6 +151,44 @@
 
     {#if loading}
       <div class="board-empty">Loading the board…</div>
+    {:else if viewMode === "epics"}
+      <div class="epic-view">
+        <aside class="epic-list">
+          {#each epicList as e (e.id)}
+            {@const p = epicProgress(cards, e.id)}
+            <!-- svelte-ignore a11y-no-static-element-interactions a11y-click-events-have-key-events -->
+            <div class="epic-item" class:sel={selectedEpic === e.id} on:click={() => (selectedEpic = e.id)} title={e.title}>
+              <div class="epic-item-title">{e.title}</div>
+              <div class="epic-item-meta">
+                {#if e.status}<span class="epic-status">{e.status}</span>{/if}
+                <span class="epic-prog">{p.done}/{p.total}</span>
+              </div>
+            </div>
+          {/each}
+          {#if epicList.length === 0}<div class="board-col-empty">No epics.</div>{/if}
+        </aside>
+        <section class="epic-cards">
+          <div class="epic-group-head">To do <span class="gc">{split.todo.length}</span></div>
+          {#each split.todo as c (c.id)}
+            <div class="ecard" title={c.title}>
+              <div class="ecard-top"><span class="card-id">{c.id}</span><span class="ecard-col">{c.column}</span></div>
+              <div class="card-title">{c.title}</div>
+              <div class="card-actions">
+                <button class="dispatch-btn" on:click|stopPropagation={() => dispatchCard(c)}>▶ Dispatch</button>
+              </div>
+            </div>
+          {/each}
+          {#if split.todo.length === 0}<div class="board-col-empty">Nothing outstanding — all done. 🎉</div>{/if}
+          <div class="epic-group-head done">Done <span class="gc">{split.done.length}</span></div>
+          {#each split.done as c (c.id)}
+            <div class="ecard done" title={c.title}>
+              <div class="ecard-top"><span class="card-id">{c.id}</span><span class="ecard-col">Done</span></div>
+              <div class="card-title">{c.title}</div>
+            </div>
+          {/each}
+          {#if split.done.length === 0}<div class="board-col-empty">—</div>{/if}
+        </section>
+      </div>
     {:else}
       <div class="board-columns">
         {#each BOARD_LANES as col}
@@ -199,6 +263,27 @@
   .board-btn { font: inherit; font-size: 12px; height: 28px; padding: 0 12px; border-radius: 6px; cursor: pointer;
     border: 1px solid var(--border-strong); background: var(--surface); color: var(--text); }
   .board-btn:hover { background: rgba(128,128,128,0.14); }
+  .board-btn.active { background: var(--accent); border-color: var(--accent); color: #fff; }
+
+  /* Epic-organized view (CPE-530): epic list on the left, the epic's tickets to-do→done on the right. */
+  .epic-view { flex: 1; display: flex; min-height: 0; }
+  .epic-list { width: 260px; flex: 0 0 auto; border-right: 1px solid var(--border); overflow-y: auto; padding: 6px; }
+  .epic-item { padding: 8px 10px; border-radius: 6px; cursor: pointer; }
+  .epic-item:hover { background: rgba(128,128,128,0.12); }
+  .epic-item.sel { background: var(--selection, rgba(128,128,128,0.22)); }
+  .epic-item-title { font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .epic-item-meta { display: flex; gap: 8px; margin-top: 3px; font-size: 10px; color: var(--text-dim); }
+  .epic-status { text-transform: uppercase; letter-spacing: .03em; }
+  .epic-prog { margin-left: auto; font-variant-numeric: tabular-nums; }
+  .epic-cards { flex: 1; overflow-y: auto; padding: 10px 14px; }
+  .epic-group-head { font-size: 11px; text-transform: uppercase; letter-spacing: .05em; color: var(--text-faint);
+    margin: 4px 0 8px; display: flex; align-items: center; gap: 8px; }
+  .epic-group-head.done { margin-top: 16px; border-top: 1px solid var(--border); padding-top: 12px; }
+  .epic-group-head .gc { font-variant-numeric: tabular-nums; }
+  .ecard { background: var(--surface); border: 1px solid var(--border-strong); border-radius: 6px; padding: 8px 10px; margin-bottom: 8px; }
+  .ecard.done { opacity: .6; }
+  .ecard-top { display: flex; align-items: center; justify-content: space-between; gap: 6px; margin-bottom: 4px; }
+  .ecard-col { font-size: 10px; opacity: .6; text-transform: uppercase; }
   .board-x { border: 0; background: transparent; color: var(--text-dim); font-size: 20px; cursor: pointer;
     line-height: 1; padding: 0 4px; border-radius: 4px; }
   .board-x:hover { background: rgba(128,128,128,0.18); color: var(--text); }

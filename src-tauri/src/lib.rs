@@ -90,6 +90,30 @@ fn board_move(root: String, id: String, to_column: String) -> Result<(), String>
     Ok(())
 }
 
+/// List the repo's epics for the board's epic-organized view (CPE-530): active/proposed epics from
+/// `Tickets/Epics/` + closed epics from `Tickets/Done/` (top level), each `epic`-tagged. Read-only.
+#[tauri::command]
+fn board_epics(root: String) -> Vec<ticket_board::Epic> {
+    let tickets = std::path::Path::new(&root).join("Tickets");
+    let mut epics = Vec::new();
+    for sub in ["Epics", "Done"] {
+        let Ok(entries) = std::fs::read_dir(tickets.join(sub)) else { continue };
+        for e in entries.flatten() {
+            let p = e.path();
+            let name = p.file_name().and_then(|s| s.to_str()).unwrap_or("");
+            if !name.starts_with("CPE-") || !name.ends_with(".md") {
+                continue;
+            }
+            if let Ok(md) = std::fs::read_to_string(&p) {
+                if let Some(epic) = ticket_board::epic_from(&md) {
+                    epics.push(epic);
+                }
+            }
+        }
+    }
+    epics
+}
+
 /// Find a ticket's file `<id>_*.md` across the board columns.
 fn find_ticket_file(root: &str, id: &str) -> Option<std::path::PathBuf> {
     let tickets = std::path::Path::new(root).join("Tickets");
@@ -4174,6 +4198,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             list_dir,
             board_cards,
+            board_epics,
             board_move,
             board_review,
             board_note,
