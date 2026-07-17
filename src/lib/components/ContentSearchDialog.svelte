@@ -7,7 +7,19 @@
   import { createEventDispatcher } from "svelte";
   import { invoke } from "../invoke";
   import Icon from "./Icon.svelte";
-  import { groupMatches, baseName, highlightSegments, type ContentSearchResult } from "../contentSearch";
+  import { groupMatches, baseName, highlightSegments, pushRecentSearch, type ContentSearchResult } from "../contentSearch";
+
+  const RECENTS_KEY = "cpe.contentSearchRecents";
+  function loadRecents(): string[] {
+    try {
+      const v = JSON.parse(localStorage.getItem(RECENTS_KEY) ?? "[]");
+      return Array.isArray(v) ? v.filter((x): x is string => typeof x === "string") : [];
+    } catch { return []; }
+  }
+  function saveRecents(list: string[]) {
+    try { localStorage.setItem(RECENTS_KEY, JSON.stringify(list)); } catch { /* ignore */ }
+  }
+  let recents: string[] = loadRecents();
 
   export let root = "";
 
@@ -33,6 +45,8 @@
     searched = true;
     searchedQuery = q;
     searchedCase = caseSensitive;
+    recents = pushRecentSearch(recents, q);
+    saveRecents(recents);
     try {
       result = await invoke<ContentSearchResult>("search_file_contents", { root, query: q, caseSensitive });
     } catch (e) {
@@ -71,7 +85,11 @@
         autofocus
         spellcheck="false"
         autocomplete="off"
+        list="cs-recents"
       />
+      <datalist id="cs-recents">
+        {#each recents as r}<option value={r}></option>{/each}
+      </datalist>
       <label class="case" title="Match case"><input type="checkbox" bind:checked={caseSensitive} /> Aa</label>
       <button class="btn primary" type="submit" disabled={!query.trim() || loading}>Search</button>
     </form>

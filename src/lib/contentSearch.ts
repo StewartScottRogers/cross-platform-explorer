@@ -33,6 +33,14 @@ export function groupMatches(matches: ContentMatch[]): FileGroup[] {
   return order.map((path) => ({ path, matches: by.get(path)! }));
 }
 
+/** Add `query` to a recent-search list: newest-first, de-duplicated (exact), capped at `max`. A blank
+ *  query returns the list unchanged. Pure — the dialog persists the result (CPE-558). */
+export function pushRecentSearch(list: string[], query: string, max = 10): string[] {
+  const q = query.trim();
+  if (!q) return list;
+  return [q, ...list.filter((x) => x !== q)].slice(0, Math.max(0, max));
+}
+
 /** One run of a result line: matched text (rendered highlighted) or plain text. */
 export interface Segment {
   text: string;

@@ -1,7 +1,27 @@
 import { describe, it, expect } from "vitest";
-import { groupMatches, baseName, parentDir, highlightSegments, type ContentMatch } from "./contentSearch";
+import { groupMatches, baseName, parentDir, highlightSegments, pushRecentSearch, type ContentMatch } from "./contentSearch";
 
 const m = (path: string, line_number: number, line = "x"): ContentMatch => ({ path, line_number, line });
+
+describe("pushRecentSearch (CPE-558)", () => {
+  it("prepends newest-first and ignores a blank query", () => {
+    expect(pushRecentSearch([], "foo")).toEqual(["foo"]);
+    expect(pushRecentSearch(["foo"], "bar")).toEqual(["bar", "foo"]);
+    expect(pushRecentSearch(["foo"], "   ")).toEqual(["foo"]); // blank ignored
+  });
+
+  it("de-duplicates, moving a repeat to the front", () => {
+    expect(pushRecentSearch(["a", "b", "c"], "c")).toEqual(["c", "a", "b"]);
+  });
+
+  it("caps the list at max", () => {
+    expect(pushRecentSearch(["b", "c", "d"], "a", 3)).toEqual(["a", "b", "c"]);
+  });
+
+  it("trims the stored query", () => {
+    expect(pushRecentSearch([], "  hi  ")).toEqual(["hi"]);
+  });
+});
 
 describe("highlightSegments (CPE-557)", () => {
   const texts = (line: string, q: string, cs = false) => highlightSegments(line, q, cs).map((s) => (s.match ? `[${s.text}]` : s.text)).join("");
