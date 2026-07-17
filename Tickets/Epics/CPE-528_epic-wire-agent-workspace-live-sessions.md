@@ -51,7 +51,9 @@ controllable end-to-end — not just proven in isolation.
 
 ## Child tickets (created at activation)
 - [[CPE-540]] — Swarm → session launch-spec bridge (pure seam) *(Done, SPR-09)*
-- [[CPE-541]] — Live session driver + live MCP servers *(Backlog; needs the running app + GUI QA)*
+- [[CPE-541]] — Live session driver + live MCP servers *(Deferred; pure seams landed —
+  `swarm_driver::apply_outcome` reporting reducer + `swarm_mcp` tool manifest/router, unit-tested — the
+  live tail (real spawn, live stdio MCP host, real usage feed) + GUI QA remain, needing a running-app session)*
 
 ## Status
 **In Progress.** Wave 1 (the pure bridge) is Done; the epic stays open because its essence — live

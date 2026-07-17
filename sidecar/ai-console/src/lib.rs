@@ -80,6 +80,10 @@ pub mod agent_memory;
 pub use agent_memory::{load_dir as load_memory_dir, memory_tool, parse_note, save_note, MemoryGraph, Note};
 pub mod swarm_bridge;
 pub use swarm_bridge::{launch_spec_for, SwarmLaunch};
+pub mod swarm_driver;
+pub use swarm_driver::{apply_outcome, SessionOutcome};
+pub mod swarm_mcp;
+pub use swarm_mcp::{dispatch_tool as swarm_tool_call, tools_manifest as swarm_tools_manifest};
 pub use session_client::{SessionClient, StreamMsg};
 
 pub use plugins::{install_plugin, uninstall_plugin, PluginApplier, PluginManifest, PluginRegistry};
