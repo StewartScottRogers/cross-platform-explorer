@@ -13,7 +13,7 @@ Build the **Application → Documents** epic [[CPE-534]]: a professional docs li
 + an in-app viewer opened from the Application menu.
 
 ## Tickets
-- [ ] CPE-536 — Docs library + build-in bundling
+- [x] CPE-536 — Docs library + build-in bundling
 - [ ] CPE-537 — In-app viewer + Application → Documents menu
 
 Order: CPE-536 (library) → CPE-537 (viewer).
