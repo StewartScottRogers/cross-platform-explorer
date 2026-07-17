@@ -36,6 +36,14 @@
 
   $: stats = diffStats(files);
 
+  // Collapsed files in the diff (CPE-568) — click a file header to fold its hunks away on big diffs.
+  let collapsed = new Set<string>();
+  function toggleCollapse(key: string) {
+    if (collapsed.has(key)) collapsed.delete(key);
+    else collapsed.add(key);
+    collapsed = collapsed; // reassign so Svelte re-renders
+  }
+
   async function load() {
     loading = true;
     error = "";
@@ -101,13 +109,17 @@
       {:else}
         {#each files as f (f.oldPath + "→" + f.newPath)}
           {@const fs = fileStats(f)}
+          {@const key = f.oldPath + "→" + f.newPath}
+          {@const isCollapsed = collapsed.has(key)}
           <div class="file">
-            <div class="file-head">
+            <!-- svelte-ignore a11y-no-static-element-interactions a11y-click-events-have-key-events -->
+            <div class="file-head" on:click={() => toggleCollapse(key)} title={isCollapsed ? "Expand" : "Collapse"}>
+              <span class="chevron" aria-hidden="true">{isCollapsed ? "▸" : "▾"}</span>
               <span class="file-name">{fileLabel(f)}{#if f.binary} <span class="binary">binary</span>{/if}</span>
               {#if !f.binary}<span class="file-stat"><span class="fs-add">+{fs.added}</span> <span class="fs-del">−{fs.removed}</span></span>{/if}
-              <button class="edit-btn" on:click={() => editFile(f)} title="Open this file in the editor">Edit</button>
+              <button class="edit-btn" on:click|stopPropagation={() => editFile(f)} title="Open this file in the editor">Edit</button>
             </div>
-            {#if !f.binary}
+            {#if !f.binary && !isCollapsed}
               {#each f.hunks as h}
                 <div class="hunk-head">{h.header}</div>
                 {#each h.lines as l}
@@ -154,7 +166,9 @@
   .file { border: 1px solid var(--border); border-radius: 6px; margin-bottom: 12px; overflow: hidden; }
   .file-head { display: flex; align-items: center; justify-content: space-between; gap: 8px;
     padding: 6px 10px; background: var(--surface-alt); border-bottom: 1px solid var(--border);
-    font-family: system-ui, sans-serif; font-size: 12px; font-weight: 600; }
+    font-family: system-ui, sans-serif; font-size: 12px; font-weight: 600; cursor: pointer; }
+  .file-head:hover { background: rgba(128,128,128,0.1); }
+  .chevron { flex: 0 0 auto; width: 12px; opacity: .6; font-size: 10px; }
   .file-name { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .binary { font-weight: 400; opacity: .6; }
   /* Per-file add/remove badge (CPE-567). */
