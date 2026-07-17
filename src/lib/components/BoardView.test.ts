@@ -73,4 +73,20 @@ describe("BoardView empty-state (CPE-551)", () => {
       expect(getByTitle("Organize by epic").classList.contains("active")).toBe(true);
     });
   });
+
+  it("shows a no-match hint and Escape clears the filter (CPE-560)", async () => {
+    const aCard = { id: "CPE-1", title: "hello", ticket_type: "Feature", priority: "Medium", tags: [], column: "Backlog" };
+    invokeMock.mockImplementation(async (cmd: string) =>
+      cmd === "find_project_root" ? null : cmd === "board_cards" ? [aCard] : []);
+    const { getByLabelText, findByText, queryByText } = render(BoardView, { root: "/x" });
+    await findByText("CPE-1"); // card rendered
+
+    const input = getByLabelText("Filter cards") as HTMLInputElement;
+    await fireEvent.input(input, { target: { value: "zzz-nomatch" } });
+    expect(await findByText(/No cards match/)).toBeTruthy();
+    expect(queryByText("CPE-1")).toBeNull();
+
+    await fireEvent.keyDown(input, { key: "Escape" });
+    await findByText("CPE-1"); // Escape cleared the filter → card back
+  });
 });

@@ -40,6 +40,11 @@
   // Free-text card filter (CPE-555): narrows the visible cards by id/title/tag/type/priority. Empty = all.
   let boardQuery = "";
   $: filtered = filterCards(cards, boardQuery);
+  // The filter excludes everything (but there ARE cards) — show a hint, not blank lanes (CPE-560).
+  $: noMatch = !loading && !error && cards.length > 0 && boardQuery.trim() !== "" && filtered.length === 0;
+  function onSearchKeydown(e: KeyboardEvent) {
+    if (e.key === "Escape") { boardQuery = ""; e.stopPropagation(); }
+  }
 
   $: grouped = groupByLane(filtered);
 
@@ -213,7 +218,7 @@
     <div class="board-titlebar">
       <span class="board-title"><Icon name="code" size={15} /> Agent Board</span>
       <div class="board-tools">
-        <input class="board-search" bind:value={boardQuery} placeholder="Filter cards…" spellcheck="false" aria-label="Filter cards" title="Filter cards by id, title, tag, type, or priority" />
+        <input class="board-search" bind:value={boardQuery} on:keydown={onSearchKeydown} placeholder="Filter cards…" spellcheck="false" aria-label="Filter cards" title="Filter cards by id, title, tag, type, or priority (Esc clears)" />
         <button class="board-btn" class:active={viewMode === "board"} on:click={() => (viewMode = "board")} title="Kanban columns">▦ Board</button>
         <button class="board-btn" class:active={viewMode === "epics"} on:click={() => (viewMode = "epics")} title="Organize by epic">◧ Epics</button>
         <button class="board-btn" on:click={chooseProject} title={"Project: " + boardRoot + "\nChoose a different project folder"}>📁 Project</button>
@@ -226,6 +231,8 @@
 
     {#if loading}
       <div class="board-empty">Loading the board…</div>
+    {:else if noMatch}
+      <div class="board-empty">No cards match “{boardQuery.trim()}”.</div>
     {:else if isEmpty}
       <div class="board-empty board-noproject">
         <p class="np-title">No tickets found here.</p>
