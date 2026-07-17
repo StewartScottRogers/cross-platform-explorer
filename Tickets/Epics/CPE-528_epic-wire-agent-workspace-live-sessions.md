@@ -2,7 +2,7 @@
 id: CPE-528
 title: "EPIC: Wire the Agent Workspace to live sessions (the integration layer)"
 type: Task
-status: Proposed
+status: In Progress
 priority: Medium
 component: Multiple
 tags: [epic, big-design]
@@ -43,6 +43,20 @@ controllable end-to-end — not just proven in isolation.
 - How much of the coordinator↔session bridge lives in the AI Console host vs. the frontend?
 - Failure/observability model: how are live-session crashes surfaced back into the coordinator + UI?
 - Security: the mailbox/memory MCP server's exposure surface + the browser-origin admission (SSRF-ish).
+
+## Decisions (activation 2026-07-16, on 'do them')
+- **Split by verifiability:** the **unit-testable seam** (assignment → launch spec) is built now
+  ([[CPE-540]]); the **live drivers** (spawning real sessions, live MCP servers, feeding results back)
+  are [[CPE-541]] and require the **running app + GUI QA** — not fabricated headlessly.
+
+## Child tickets (created at activation)
+- [[CPE-540]] — Swarm → session launch-spec bridge (pure seam) *(Done, SPR-09)*
+- [[CPE-541]] — Live session driver + live MCP servers *(Backlog; needs the running app + GUI QA)*
+
+## Status
+**In Progress.** Wave 1 (the pure bridge) is Done; the epic stays open because its essence — live
+cross-process agent wiring — can only be completed + verified in the running app, which a headless build
+can't do responsibly. It's ready for an interactive/QA session.
 
 ## Notes
 From [[CPE-500]]; consumes the shipped cores from all five program epics. `big-design` — this is where
