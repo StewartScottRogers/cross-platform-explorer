@@ -2,7 +2,7 @@
 id: CPE-534
 title: "EPIC: Application → Documents — an in-app professional documentation library, built in"
 type: Task
-status: Proposed
+status: In Progress
 priority: Medium
 component: Multiple
 tags: [epic, big-design]
@@ -56,6 +56,20 @@ searchable. The library is the single source of truth, versioned in git, compile
 - [ ] Every current major feature has a real doc page (not a stub).
 - [ ] The maintenance discipline is written into the project guidance (CLAUDE.md) so docs stay current.
 - [ ] Child tickets all Done.
+
+## Decisions (activation 2026-07-16, on 'do all the epics')
+Recommended defaults, reversible:
+- **Location/format:** markdown in **`src/docs/*.md`**, each with a title + order; bundled at build time
+  via Vite **`import.meta.glob`** (eager, raw) — offline, no runtime fetch, default build stays lean.
+- **Viewer:** reuse the **preview markdown renderer** + the overlay-panel pattern; TOC sidebar + search.
+- **Entry point:** an **Application → Documents** menu item.
+- **Initial coverage:** Overview, Getting Started, Explorer, AI Console, Agent Grid, Agent Board,
+  Workbench, Repositories (real prose). i18n deferred (English first; hooks to CPE-533 later).
+
+## Child tickets (created at activation)
+Sprint **[[SPR-07]]**:
+- [[CPE-536]] — Docs library + build-in bundling (index + search + initial set) *(ready)*
+- [[CPE-537]] — In-app viewer (TOC + markdown + search) + Application → Documents menu *(needs-prereq CPE-536)*
 
 ## Notes
 `big-design` — the weight is authoring a genuinely comprehensive doc set + the build-in pipeline + the
