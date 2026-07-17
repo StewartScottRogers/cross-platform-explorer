@@ -20,3 +20,23 @@ export function isBrowsableUrl(input: string): boolean {
     return false;
   }
 }
+
+// --- Workbench diff view state (CPE-535): friendly edge cases. ------------------------------------
+export type WbState = "loading" | "no-folder" | "git-missing" | "not-a-repo" | "error" | "clean" | "changes";
+
+/** Which state the Diff view should show, from the load result. Pure — drives the friendly messages. */
+export function workbenchState(opts: {
+  loading?: boolean;
+  error?: string;
+  isRepo?: boolean;
+  fileCount?: number;
+}): WbState {
+  if (opts.loading) return "loading";
+  if (opts.error) {
+    if (opts.error === "no-folder") return "no-folder";
+    if (opts.error.startsWith("git-missing")) return "git-missing";
+    return "error";
+  }
+  if (!opts.isRepo) return "not-a-repo";
+  return (opts.fileCount ?? 0) > 0 ? "changes" : "clean";
+}
