@@ -27,19 +27,14 @@ describe("matchesFileFilter (CPE-358)", () => {
   });
 });
 
-describe("common extensions (CPE-559)", () => {
-  it("classifies newly-added common formats", () => {
+describe("common extensions (CPE-559 / CPE-563)", () => {
+  it("classifies newly-added common formats (icon-only categories with correct previews)", () => {
     expect(categoryOf(file("psd"))).toBe("image");
     expect(categoryOf(file("epub"))).toBe("document");
     expect(categoryOf(file("mobi"))).toBe("document");
     expect(categoryOf(file("iso"))).toBe("archive");
     expect(categoryOf(file("dmg"))).toBe("archive");
     expect(categoryOf(file("cab"))).toBe("archive");
-    expect(categoryOf(file("wma"))).toBe("audio");
-    expect(categoryOf(file("mid"))).toBe("audio");
-    expect(categoryOf(file("aiff"))).toBe("audio");
-    expect(categoryOf(file("mpeg"))).toBe("video");
-    expect(categoryOf(file("3gp"))).toBe("video");
     expect(categoryOf(file("appimage"))).toBe("executable");
   });
   it("gives them readable type names", () => {
@@ -47,6 +42,12 @@ describe("common extensions (CPE-559)", () => {
     expect(typeName(file("epub"))).toBe("EPUB e-book");
     expect(typeName(file("iso"))).toBe("Disc image");
     expect(typeName(file("appimage"))).toBe("AppImage application");
+  });
+  it("leaves non-web audio/video formats uncategorised so their preview stays read-only info (CPE-563)", () => {
+    // mid/midi/wma/mpeg etc. must NOT become audio/video — that would break their info preview.
+    for (const ext of ["mid", "midi", "wma", "aiff", "mpeg", "3gp", "mts"]) {
+      expect(categoryOf(file(ext))).toBe("unknown");
+    }
   });
 });
 

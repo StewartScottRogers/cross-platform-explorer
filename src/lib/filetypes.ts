@@ -90,12 +90,13 @@ export const CATEGORY_BY_EXT: Record<string, FileCategory> = {
   txt: "text", md: "text", log: "text", ini: "text", cfg: "text",
   // executables
   exe: "executable", msi: "executable", dll: "executable",
-  // additional common formats (CPE-559)
-  psd: "image",
+  // additional common formats (CPE-559). NB: only categories whose preview is handled correctly — the
+  // audio/video category routes to the media-player preview, which breaks for non-web formats (and would
+  // override the read-only "info" preview for e.g. mid/midi), so those extensions are intentionally left
+  // uncategorised (CPE-563).
+  psd: "image", // rendered via the decoded-image provider
   epub: "document", mobi: "document", pages: "document",
   iso: "archive", dmg: "archive", cab: "archive", lz: "archive", lzma: "archive",
-  wma: "audio", aiff: "audio", aif: "audio", mid: "audio", midi: "audio",
-  mpg: "video", mpeg: "video", "3gp": "video", mts: "video", m2ts: "video",
   appimage: "executable",
 };
 
@@ -158,13 +159,10 @@ export const TYPE_NAME_BY_EXT: Record<string, string> = {
   txt: "Text Document", md: "Markdown file", log: "Log file",
   ini: "Configuration settings", cfg: "Configuration file",
   exe: "Application", msi: "Windows Installer Package", dll: "Application extension",
-  // additional common formats (CPE-559)
+  // additional common formats (CPE-559 / CPE-563 — type names for the safe icon categories only)
   psd: "Photoshop image", epub: "EPUB e-book", mobi: "Mobipocket e-book",
   pages: "Pages document", iso: "Disc image", dmg: "Apple disk image",
   cab: "Cabinet archive", lz: "LZIP archive", lzma: "LZMA archive",
-  wma: "Windows Media Audio", aiff: "AIFF audio", aif: "AIFF audio",
-  mid: "MIDI audio", midi: "MIDI audio", mpg: "MPEG video", mpeg: "MPEG video",
-  "3gp": "3GP video", mts: "AVCHD video", m2ts: "AVCHD video",
   appimage: "AppImage application",
 };
 
