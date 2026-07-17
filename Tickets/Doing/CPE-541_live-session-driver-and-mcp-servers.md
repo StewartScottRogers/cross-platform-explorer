@@ -85,6 +85,10 @@ runs the mission on a background thread (3 validation tests); `Task`/`Gate` got 
 Clone`. And the **frontend**: a "Run swarm" button + `runSwarm()` in `launcher.html`, 3 jsdom tests.
 Sidecar 278 tests, frontend 571, clippy + check clean.
 
+2026-07-16 — Cut + published **v0.32.0-sidecar** (sidecar-enabled preview with all CPE-541 wiring) and
+installed it locally (0.32.0 registered; sidecar replaced). The running app now has the "Run swarm ▾"
+button — **ready for the GUI QA below.**
+
 ## Remaining — GUI QA only (needs real agents + API keys)
 The whole vertical is built + wired + unit/jsdom-tested. What's left cannot be verified without a live
 run and is the QA the ticket was carved out for:
