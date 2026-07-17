@@ -4,6 +4,8 @@ import { readFileSync } from "node:fs";
 import { get } from "svelte/store";
 import {
   SUPPORTED_LOCALES,
+  COMPLETE_LOCALES,
+  isComplete,
   translate,
   localeKeys,
   localeCoverage,
@@ -13,6 +15,11 @@ import {
   formatNumber,
   detectInitialLocale,
 } from "./i18n";
+
+// The non-English locales the CPE-481 gate holds to 100% coverage. Derived from the single source of
+// truth so that *completing* a catalog (CPE-539) — i.e. adding its code to COMPLETE_LOCALES — extends
+// every gate below to that locale automatically, with no test edit. English is the source, so drop it.
+const COMPLETE = COMPLETE_LOCALES.filter((c) => c !== "en");
 
 beforeEach(() => {
   try {
@@ -70,7 +77,7 @@ describe("i18n translate()", () => {
     // Every menu-item key is defined in all four locales (no fallback needed).
     const keys = localeKeys("en").filter((k) => k.startsWith("mi."));
     expect(keys.length).toBeGreaterThanOrEqual(11);
-    for (const loc of ["es", "de", "fr"] as const) {
+    for (const loc of COMPLETE) {
       for (const k of keys) expect(localeKeys(loc)).toContain(k);
     }
   });
@@ -84,7 +91,7 @@ describe("i18n translate()", () => {
     // All ctx.* keys defined in every locale (no English fallback needed).
     const keys = localeKeys("en").filter((k) => k.startsWith("ctx."));
     expect(keys.length).toBeGreaterThanOrEqual(30);
-    for (const loc of ["es", "de", "fr"] as const) {
+    for (const loc of COMPLETE) {
       for (const k of keys) expect(localeKeys(loc)).toContain(k);
     }
   });
@@ -97,7 +104,7 @@ describe("i18n translate()", () => {
     for (const ns of ["cmd.", "sort.", "view.", "filter."]) {
       const keys = localeKeys("en").filter((k) => k.startsWith(ns));
       expect(keys.length).toBeGreaterThan(0);
-      for (const loc of ["es", "de", "fr"] as const) for (const k of keys) expect(localeKeys(loc)).toContain(k);
+      for (const loc of COMPLETE) for (const k of keys) expect(localeKeys(loc)).toContain(k);
     }
   });
 
@@ -123,7 +130,7 @@ describe("i18n translate()", () => {
     for (const ns of namespaces) {
       const keys = localeKeys("en").filter((k) => k.startsWith(ns));
       expect(keys.length, `no keys for namespace ${ns}`).toBeGreaterThan(0);
-      for (const loc of ["es", "de", "fr"] as const) {
+      for (const loc of COMPLETE) {
         for (const k of keys) expect(localeKeys(loc), `${loc} missing ${k}`).toContain(k);
       }
     }
@@ -166,6 +173,19 @@ describe("i18n locale coverage (CPE-539)", () => {
     for (const code of ["es", "de", "fr"] as const) {
       expect(localeCoverage(code), `${code} should be fully covered`).toBe(1);
     }
+  });
+
+  // AC#4: the CPE-481 coverage gate, made data-driven so it extends to newly-completed locales for
+  // free. COMPLETE_LOCALES is the single source of truth for "which locales are done"; this holds
+  // every one of them to 100% coverage. Add a locale's code to COMPLETE_LOCALES and this fails until
+  // all 293 keys are actually present — you can't *declare* a locale complete without it *being* so.
+  it("holds every locale declared complete to 100% coverage (CPE-481 gate, extended per CPE-539)", () => {
+    for (const code of COMPLETE_LOCALES) {
+      expect(isComplete(code), `${code} should be reported complete`).toBe(true);
+      expect(localeCoverage(code), `${code} is declared complete but is missing keys`).toBe(1);
+    }
+    // Today only en/es/de/fr are done; an offered-but-partial locale must NOT be declared complete.
+    expect(isComplete("ja")).toBe(false);
   });
 
   it("reports 0 for an offered locale with no catalog yet (full English fallback)", () => {

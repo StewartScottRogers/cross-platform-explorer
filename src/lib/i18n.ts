@@ -62,6 +62,22 @@ export const LOCALES: LocaleInfo[] = [
 /** The pickable languages (kept for back-compat; the picker uses `LOCALES`). */
 export const SUPPORTED_LOCALES: LocaleInfo[] = LOCALES;
 
+/** Locales asserted to be **fully translated** — every English source key is present, so they never
+ *  fall back. English is the source and is trivially complete. This is the **single source of truth**
+ *  for "which locales are done": the CPE-481 coverage gate (see `i18n.test.ts`) holds every locale
+ *  listed here to 100% coverage, and the picker treats the rest as partial (badge + English fallback).
+ *
+ *  Completing a catalog (CPE-539, wave 2) is therefore a one-line change: add the locale's code here.
+ *  The gate then fails CI until every one of the 293 keys is actually present for it — so a locale
+ *  can't be *declared* complete without *being* complete. Do NOT add a code here on the strength of
+ *  machine-guessed strings; add it once the catalog has passed its review bar. */
+export const COMPLETE_LOCALES: Locale[] = ["en", "es", "de", "fr"];
+
+/** Whether a locale is declared fully translated (listed in {@link COMPLETE_LOCALES}). */
+export function isComplete(loc: Locale): boolean {
+  return COMPLETE_LOCALES.includes(loc);
+}
+
 /** Filter the offered languages by native or English name / code (for the searchable picker). */
 export function filterLocales(query: string): LocaleInfo[] {
   const q = query.trim().toLowerCase();
