@@ -17,6 +17,13 @@ The one empirical check that couldn't be automated in [[CPE-541]]: confirm a **r
 honours the injected `--mcp-config`, loads the `--swarm-mcp` host, and coordinates with a sibling
 agent over the live mailbox/memory. Everything upstream is built + tested; this is a manual GUI smoke.
 
+## Prerequisite — DONE ([[CPE-583]])
+Attempting this surfaced a real blocker: the swarm launched **interactive** `claude`, which never
+self-exits, so the driver's exit-based completion never fired and the mission stalled. Fixed in
+[[CPE-583]] — swarm agents now launch in **print mode** (`claude -p … --mcp-config … --dangerously-skip-permissions`)
+via a manifest `swarm` recipe, so each runs its task, streams output, and exits → the coordinator
+advances. This smoke is now unblocked.
+
 ## Why this is manual
 It needs the GUI open (the AI Console starts the swarm), a launchable agent, and a human watching the
 agent tabs — none of which is reachable headlessly. It is **not externally gated**: it can be run any

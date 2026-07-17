@@ -115,6 +115,15 @@
     }
   },
   "default_model": "claude-sonnet-4-5",
+  "swarm": {
+    "args": [
+      "-p",
+      "{task}",
+      "--mcp-config",
+      "{mcp_config}",
+      "--dangerously-skip-permissions"
+    ]
+  },
   "providers": [
     "native",
     "openrouter",

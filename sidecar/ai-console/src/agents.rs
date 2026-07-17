@@ -54,7 +54,7 @@ pub struct ProviderDefaults {
 }
 
 /// A declarative description of a coding-agent CLI.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AgentManifest {
     pub schema_version: u16,
     pub id: String,
@@ -85,8 +85,23 @@ pub struct AgentManifest {
     pub reseller_recipes: BTreeMap<String, ProviderRecipe>,
     #[serde(default)]
     pub default_model: Option<String>,
+    /// How to run this agent **non-interactively for a swarm** (CPE-583): an args template with
+    /// `{task}` and `{mcp_config}` placeholders. Present ⇒ the swarm planner uses these instead of the
+    /// default positional-task form, so the agent runs the task to completion and **exits** (letting the
+    /// driver detect completion). Kept as data so the exact print-mode/permission/tool-allow flags are
+    /// tunable during QA without a rebuild. Absent ⇒ the agent has no non-interactive swarm form.
+    #[serde(default)]
+    pub swarm: Option<SwarmRecipe>,
     #[serde(skip)]
     pub source_dir: PathBuf,
+}
+
+/// The non-interactive invocation for a swarm agent (CPE-583). `args` are templated with `{task}` (the
+/// assignment's task text) and `{mcp_config}` (the per-agent swarm MCP-config path).
+#[derive(Debug, Clone, serde::Deserialize, serde::Serialize, PartialEq, Eq)]
+pub struct SwarmRecipe {
+    #[serde(default)]
+    pub args: Vec<String>,
 }
 
 impl AgentManifest {

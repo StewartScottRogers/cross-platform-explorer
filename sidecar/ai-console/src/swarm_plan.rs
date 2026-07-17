@@ -21,7 +21,7 @@ use std::sync::Arc;
 
 use serde_json::json;
 
-use crate::agents::AgentRegistry;
+use crate::agents::{AgentManifest, AgentRegistry};
 use crate::routing::LaunchContext;
 use crate::scope::{build_launch, AgentLaunchRequest};
 use crate::swarm_bridge::SwarmLaunch;
@@ -93,10 +93,24 @@ impl ProductionPlanner {
         out
     }
 
-    /// The run args that attach the swarm MCP host + the task to this agent. **The v1 QA point** — the
-    /// `--mcp-config <file>` + trailing-prompt form is the Claude Code convention; adjust here per agent.
-    fn mcp_flag(&self, config_path: &str, task: &str) -> Vec<String> {
-        vec!["--mcp-config".to_string(), config_path.to_string(), task.to_string()]
+    /// The run args that attach the swarm MCP host and the task to this agent, from the agent's manifest
+    /// **`swarm` recipe** (CPE-583) — its non-interactive/print-mode invocation, templated with the
+    /// `{task}` and `{mcp_config}` placeholders. This is what makes the agent run the task to completion
+    /// and **exit**, so the driver detects completion. Keeping the exact flags in the manifest (data)
+    /// means they're tunable during QA without a rebuild — this replaced the hardcoded v1 form.
+    ///
+    /// Fallback (agent without a `swarm` recipe): the pre-CPE-583 positional `--mcp-config <file> <task>`
+    /// form. That launches the agent *interactively*, which won't self-terminate — so the driver can't
+    /// detect completion; such an agent needs a `swarm` recipe before it works in a mission.
+    fn swarm_args(agent: &AgentManifest, config_path: &str, task: &str) -> Vec<String> {
+        match &agent.swarm {
+            Some(recipe) => recipe
+                .args
+                .iter()
+                .map(|a| a.replace("{task}", task).replace("{mcp_config}", config_path))
+                .collect(),
+            None => vec!["--mcp-config".to_string(), config_path.to_string(), task.to_string()],
+        }
     }
 
     /// Write the per-agent MCP config that points at this agent's shared host, returning its path.
@@ -129,7 +143,7 @@ impl LaunchPlanner for ProductionPlanner {
             .ok_or_else(|| format!("unknown agent '{}'", spec.agent))?;
 
         let config_path = self.write_mcp_config(&assignment.agent_id)?;
-        let extra_args = self.mcp_flag(&config_path.to_string_lossy(), &spec.task);
+        let extra_args = Self::swarm_args(&agent, &config_path.to_string_lossy(), &spec.task);
 
         let ctx = LaunchContext {
             model: spec.model.clone(),
@@ -185,6 +199,12 @@ mod tests {
         assert_eq!(launch.program, "claude");
         assert!(launch.args.contains(&"--mcp-config".to_string()), "MCP config flag injected");
         assert!(launch.args.contains(&"build the parser".to_string()), "task passed as a run arg");
+        // CPE-583: from claude's `swarm` recipe — print mode so the agent completes + exits, and a
+        // non-interactive permission posture so tool calls don't block.
+        assert!(launch.args.contains(&"-p".to_string()), "print mode injected so the agent exits");
+        assert!(launch.args.contains(&"--dangerously-skip-permissions".to_string()), "non-interactive permissions");
+        let p_at = launch.args.iter().position(|a| a == "-p").unwrap();
+        assert_eq!(launch.args.get(p_at + 1), Some(&"build the parser".to_string()), "task is the print prompt");
         assert_eq!(launch.cwd.as_deref(), Some("/repo"));
 
         // The per-agent MCP config file exists and points the agent at its shared host.
@@ -194,6 +214,25 @@ mod tests {
         let args = &cfg["mcpServers"]["swarm"]["args"];
         assert_eq!(args[0], json!("--swarm-mcp"));
         assert!(args.as_array().unwrap().iter().any(|a| a == "claude#builder1"), "host launched for this agent instance");
+    }
+
+    #[test]
+    fn swarm_recipe_templates_task_and_mcp_config() {
+        let agent = AgentManifest {
+            swarm: Some(crate::agents::SwarmRecipe {
+                args: vec!["-p".into(), "{task}".into(), "--mcp-config".into(), "{mcp_config}".into()],
+            }),
+            ..AgentManifest::default()
+        };
+        let args = ProductionPlanner::swarm_args(&agent, "/m/mcp-x.json", "do the thing");
+        assert_eq!(args, vec!["-p", "do the thing", "--mcp-config", "/m/mcp-x.json"]);
+    }
+
+    #[test]
+    fn without_a_swarm_recipe_it_falls_back_to_the_positional_form() {
+        let agent = AgentManifest::default(); // no swarm recipe
+        let args = ProductionPlanner::swarm_args(&agent, "/m/mcp-x.json", "do the thing");
+        assert_eq!(args, vec!["--mcp-config", "/m/mcp-x.json", "do the thing"]);
     }
 
     #[test]
