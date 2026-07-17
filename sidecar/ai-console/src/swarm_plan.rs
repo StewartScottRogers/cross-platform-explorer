@@ -35,6 +35,23 @@ fn sanitize(id: &str) -> String {
     id.chars().map(|c| if c.is_ascii_alphanumeric() || c == '-' || c == '_' { c } else { '-' }).collect()
 }
 
+/// Make a swarm task safe to pass as a **command-line argument** to a launched agent (CPE-587). On
+/// Windows the launch goes through `cmd /c <shim>` (CPE-326, because `claude` is a `.cmd` shim), and
+/// `portable_pty` MSVC-quotes each arg (`"` → `\"`) — which `cmd` then mis-parses, splitting the prompt
+/// and making the agent error (it echoes the mangled text in red instead of working the task). Neutralise
+/// the offenders: double-quotes become typographic quotes (identical meaning to the model) and any
+/// newlines/control chars collapse to spaces (a multi-line arg also breaks the `cmd` re-parse). A
+/// follow-up will deliver the task verbatim via stdin/file so nothing is rewritten at all.
+fn cmd_safe_task(task: &str) -> String {
+    task.chars()
+        .map(|c| match c {
+            '"' => '\u{2019}',                       // → ’  (right single quote; reads the same)
+            c if c.is_control() => ' ',              // newlines/tabs/etc. → space
+            c => c,
+        })
+        .collect()
+}
+
 /// Builds real agent launches for a swarm mission, wiring each agent to the shared MCP host.
 pub struct ProductionPlanner {
     registry: Arc<AgentRegistry>,
@@ -103,13 +120,14 @@ impl ProductionPlanner {
     /// form. That launches the agent *interactively*, which won't self-terminate — so the driver can't
     /// detect completion; such an agent needs a `swarm` recipe before it works in a mission.
     fn swarm_args(agent: &AgentManifest, config_path: &str, task: &str) -> Vec<String> {
+        let task = cmd_safe_task(task);
         match &agent.swarm {
             Some(recipe) => recipe
                 .args
                 .iter()
-                .map(|a| a.replace("{task}", task).replace("{mcp_config}", config_path))
+                .map(|a| a.replace("{task}", &task).replace("{mcp_config}", config_path))
                 .collect(),
-            None => vec!["--mcp-config".to_string(), config_path.to_string(), task.to_string()],
+            None => vec!["--mcp-config".to_string(), config_path.to_string(), task],
         }
     }
 
@@ -226,6 +244,28 @@ mod tests {
         };
         let args = ProductionPlanner::swarm_args(&agent, "/m/mcp-x.json", "do the thing");
         assert_eq!(args, vec!["-p", "do the thing", "--mcp-config", "/m/mcp-x.json"]);
+    }
+
+    #[test]
+    fn cmd_safe_task_neutralises_argv_breaking_characters() {
+        // Double-quotes (which break the Windows `cmd /c` re-parse) become typographic quotes; control
+        // chars collapse to spaces. Ordinary punctuation (commas, semicolons, periods) is untouched.
+        let out = cmd_safe_task("post a \"done\" message; then stop.\nnext line");
+        assert!(!out.contains('"'), "no straight double-quotes remain: {out}");
+        assert!(!out.contains('\n'), "newlines collapsed: {out}");
+        assert!(out.contains("post a \u{2019}done\u{2019} message; then stop. next line"));
+        // A quote-free task is unchanged.
+        assert_eq!(cmd_safe_task("build the parser"), "build the parser");
+    }
+
+    #[test]
+    fn swarm_args_sanitises_a_task_with_quotes_for_argv() {
+        let agent = AgentManifest {
+            swarm: Some(crate::agents::SwarmRecipe { args: vec!["-p".into(), "{task}".into()] }),
+            ..AgentManifest::default()
+        };
+        let args = ProductionPlanner::swarm_args(&agent, "/m/x.json", "say \"hi\"");
+        assert_eq!(args, vec!["-p", "say \u{2019}hi\u{2019}"]); // quotes neutralised before argv
     }
 
     #[test]
