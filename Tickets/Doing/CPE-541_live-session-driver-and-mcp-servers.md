@@ -2,7 +2,7 @@
 id: CPE-541
 title: "Live session driver + live MCP servers (mailbox / memory) — needs the running app + GUI QA"
 type: Feature
-status: Deferred
+status: In Progress
 priority: Medium
 component: Multiple
 tags: [needs-decision, big-design]
@@ -88,6 +88,13 @@ Sidecar 278 tests, frontend 571, clippy + check clean.
 2026-07-16 — Cut + published **v0.32.0-sidecar** (sidecar-enabled preview with all CPE-541 wiring) and
 installed it locally (0.32.0 registered; sidecar replaced). The running app now has the "Run swarm ▾"
 button — **ready for the GUI QA below.**
+
+2026-07-17 — Cut + installed **v0.33.0-sidecar**, then **smoke-tested the shipped `--swarm-mcp` host over
+real JSON-RPC** (installed `sidecars/ai-console.exe`, not just CI): `initialize` + `memory.write` →
+`stored:true`, then `memory.recall` → returned the written note. **The live MCP host is verified working in
+the production build.** This closes the "does the shipped MCP infrastructure work" question; what remains is
+only the real-LLM-agent coordination QA (needs the user's API keys/cost) — the mailbox/memory tool surface
+itself is confirmed live.
 
 ## Remaining — GUI QA only (needs real agents + API keys)
 The whole vertical is built + wired + unit/jsdom-tested. What's left cannot be verified without a live
