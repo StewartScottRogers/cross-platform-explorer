@@ -28,6 +28,7 @@
   import RepoBrowser from "./lib/components/RepoBrowser.svelte";
   import BoardView from "./lib/components/BoardView.svelte";
   import WorkbenchView from "./lib/components/WorkbenchView.svelte";
+  import DocsView from "./lib/components/DocsView.svelte";
   import AgentMenu from "./lib/components/AgentMenu.svelte";
   import Toolbar from "./lib/components/Toolbar.svelte";
   import FileList from "./lib/components/FileList.svelte";
@@ -206,6 +207,8 @@
   let showBoard = false;
   /** Integrated workbench (CPE-526) — git diff of the current folder. */
   let showWorkbench = false;
+  /** Application → Documents (CPE-537) — the built-in docs viewer. */
+  let showDocs = false;
 
   /** Open a URL in a dedicated browser webview window (CPE-527) — safe under the strict CSP since it's
       a separate webview, not an iframe in the main window. The URL is validated http/https in-view. */
@@ -1742,7 +1745,7 @@
       case "check-updates": checkForUpdates(true); break;
       case "settings": showSettings = true; break;
       case "shortcuts": shortcutsOpen = true; break;
-      case "documentation": openExternal(REPO_URL); break;
+      case "documents": showDocs = true; break;
       case "about": showAbout = true; break;
       case "content-search": if (!isHome && !archive) contentSearchOpen = true; break;
       case "find-duplicates": if (!isHome && !archive) duplicatesOpen = true; break;
@@ -2475,6 +2478,10 @@
     on:edit={(e) => { openRecent(e.detail); showWorkbench = false; }}
     on:close={() => (showWorkbench = false)}
   />
+{/if}
+
+{#if showDocs}
+  <DocsView on:close={() => (showDocs = false)} />
 {/if}
 
 {#if agentMenu}

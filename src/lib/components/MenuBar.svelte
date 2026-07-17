@@ -48,7 +48,7 @@
         { id: "settings", labelKey: "mi.settings" },
         { sep: true },
         { id: "shortcuts", labelKey: "mi.shortcuts", hint: "F1" },
-        { id: "documentation", labelKey: "mi.documentation" },
+        { id: "documents", labelKey: "mi.documents" },
         { id: "about", labelKey: "mi.about" },
       ],
     },

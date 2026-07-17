@@ -2,12 +2,13 @@
 id: CPE-534
 title: "EPIC: Application → Documents — an in-app professional documentation library, built in"
 type: Task
-status: In Progress
+status: Done
 priority: Medium
 component: Multiple
 tags: [epic, big-design]
 estimate: 4h+
 created: 2026-07-16
+closed: 2026-07-16
 ---
 
 ## Summary
@@ -70,6 +71,15 @@ Recommended defaults, reversible:
 Sprint **[[SPR-07]]**:
 - [[CPE-536]] — Docs library + build-in bundling (index + search + initial set) *(ready)*
 - [[CPE-537]] — In-app viewer (TOC + markdown + search) + Application → Documents menu *(needs-prereq CPE-536)*
+
+## Resolution (closed 2026-07-16)
+Application → Documents shipped across 2 children in SPR-07: [[CPE-536]] a professional docs library
+(`src/docs/*.md`, 8 real pages) bundled into the app at build time (Vite glob, offline) with a pure
+tested index+search, and [[CPE-537]] an in-app viewer (TOC + sanitized-markdown + search) opened from
+the **Application → Documents** menu item. 10 tests; `npm run check` clean. The **standing rule** — keep
+the library updated/extended while doing tickets/epics ([[maintain-in-app-docs-library]]) — is now
+active (already applied here). **Follow-on:** fold the discipline explicitly into CLAUDE.md; add pages
+as new features land; i18n the docs (hooks to [[CPE-533]]).
 
 ## Notes
 `big-design` — the weight is authoring a genuinely comprehensive doc set + the build-in pipeline + the

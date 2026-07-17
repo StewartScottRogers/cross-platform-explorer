@@ -25,4 +25,7 @@ and layers optional **AI Agent Workspace** modes on top for developers who run c
 - **Preview pane** — shows the selected file (text, images, markdown, PDF, and more), with in-place edit
   for text.
 
-Read **Getting Started** next for a quick tour.
+## Getting help
+
+These pages are the built-in manual — open them any time from **Application → Documents**. They ship
+inside the app, so they work offline. Read **Getting Started** next for a quick tour.
