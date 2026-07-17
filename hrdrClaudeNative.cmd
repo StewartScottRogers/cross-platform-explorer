@@ -52,6 +52,17 @@ REM  pane reports Claude's state (idle/working/blocked) in the sidebar.
 herdr integration status 2>nul | findstr /b /c:"claude: current" >nul
 if errorlevel 1 herdr integration install claude
 
+REM  A herdr agent name is unique per session, so if a "Claude" pane already
+REM  exists, starting another would fail with "agent name Claude is already
+REM  used". In that case just focus the existing one and we're done.
+herdr agent get Claude >nul 2>nul
+if not errorlevel 1 (
+    echo A Claude pane already exists in herdr - focusing it.
+    herdr agent focus Claude >nul 2>nul
+    endlocal
+    exit /b 0
+)
+
 REM  Launch Claude as a tracked "Claude" agent pane. --cwd anchors it to
 REM  this repo; --env forwards the chosen model so it is honoured even if
 REM  the herdr server's captured environment predates a CLAUDE_MODEL
@@ -59,8 +70,8 @@ REM  change in this shell.
 herdr agent start Claude --cwd "%REPO_DIR%" --env CLAUDE_MODEL=%CLAUDE_MODEL% --focus -- cmd /c "%CLAUDE_CMD%"
 if errorlevel 1 (
     echo.
-    echo ERROR: herdr could not start the Claude pane. Is a herdr session running?
-    echo     Start herdr first ^(run: herdr^), then retry this script.
+    echo ERROR: herdr could not start the Claude pane.
+    echo     Make sure a herdr session is running ^(run: herdr^), then retry.
     echo.
     pause
     endlocal
