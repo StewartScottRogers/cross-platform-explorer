@@ -1,5 +1,5 @@
 ---
-id: CPE-635
+id: CPE-660
 title: "EPIC: Collapsible left-panel sections"
 type: Task
 status: Proposed
