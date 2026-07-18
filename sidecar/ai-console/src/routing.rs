@@ -43,7 +43,29 @@ pub fn compose_launch(
         .provider_recipes
         .get(provider)
         .ok_or_else(|| format!("agent '{}' has no recipe for provider '{provider}'", agent.id))?;
+    // The `native` provider is the agent's own login (e.g. Claude Code): it wants a bare model
+    // alias/id, not an OpenRouter-style `vendor/model` — which it rejects ("model may not exist").
+    // Normalise so a model picked from the shared catalog still launches natively (CPE-589).
+    if provider == "native" {
+        let ctx = LaunchContext { model: ctx.model.as_deref().map(native_model), ..ctx.clone() };
+        return apply_recipe(recipe, &ctx);
+    }
     apply_recipe(recipe, ctx)
+}
+
+/// Map a model id to a value the **native** provider accepts. An OpenRouter-style `vendor/model`
+/// (e.g. `anthropic/claude-opus-4.8`) is reduced to a family alias (`opus`/`sonnet`/`haiku`) — which the
+/// native CLI resolves to its latest — falling back to the part after the slash. Bare/native ids (no
+/// slash) pass through unchanged (CPE-589).
+fn native_model(model: &str) -> String {
+    let Some((_, rest)) = model.split_once('/') else { return model.to_string() };
+    let lower = rest.to_ascii_lowercase();
+    for family in ["opus", "sonnet", "haiku"] {
+        if lower.contains(family) {
+            return family.to_string();
+        }
+    }
+    rest.to_string()
 }
 
 /// A reseller / aggregator gateway (OpenRouter-like) described as **data** (CPE-468): one API key
@@ -180,6 +202,28 @@ mod tests {
         assert_eq!(launch.env["ANTHROPIC_AUTH_TOKEN"], "sk-or-secret");
         assert_eq!(launch.env["ANTHROPIC_SMALL_FAST_MODEL"], "anthropic/claude-haiku-4.5");
         assert_eq!(launch.args, vec!["--model", "anthropic/claude-sonnet-4.5"]);
+    }
+
+    #[test]
+    fn native_provider_normalises_an_openrouter_model_to_a_native_alias() {
+        // The picker can hand `native` an OpenRouter-format id; the native CLI rejects `vendor/model`,
+        // so it must be reduced to an alias it accepts (CPE-589).
+        let m = manifest();
+        let ctx = LaunchContext { model: Some("anthropic/claude-opus-4.8".into()), ..Default::default() };
+        let launch = compose_launch(&m, "native", &ctx).unwrap();
+        assert_eq!(launch.args, vec!["--model", "opus"]);
+
+        // A bare/native id is left alone.
+        let ctx = LaunchContext { model: Some("claude-sonnet-4-5".into()), ..Default::default() };
+        assert_eq!(compose_launch(&m, "native", &ctx).unwrap().args, vec!["--model", "claude-sonnet-4-5"]);
+    }
+
+    #[test]
+    fn native_model_maps_families_and_passes_bare_ids_through() {
+        assert_eq!(native_model("anthropic/claude-opus-4.8"), "opus");
+        assert_eq!(native_model("anthropic/claude-sonnet-4.5"), "sonnet");
+        assert_eq!(native_model("openai/gpt-5"), "gpt-5"); // unknown family → part after the slash
+        assert_eq!(native_model("claude-sonnet-4-5"), "claude-sonnet-4-5"); // already native
     }
 
     #[test]
