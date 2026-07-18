@@ -52,7 +52,7 @@
   import FileNameSearchDialog from "./lib/components/FileNameSearchDialog.svelte";
   import DuplicatesDialog from "./lib/components/DuplicatesDialog.svelte";
   import { namesList, detailList, csvList } from "./lib/listing";
-  import { parentDir as parentOfPath } from "./lib/contentSearch";
+  import { parentDir as parentOfPath, baseName } from "./lib/contentSearch";
   import PropertiesDialog from "./lib/components/PropertiesDialog.svelte";
   import BatchRenameDialog from "./lib/components/BatchRenameDialog.svelte";
   import type { RenameItem } from "./lib/batchRename";
@@ -287,7 +287,7 @@
     // Jump back to a recently-visited folder (CPE-604) — the full path is a keyword so typing any
     // part of it matches, while the label stays the short folder name.
     ...recentPaths(activeTab.history).map((p) => ({
-      id: `recent:${p}`, group: "Recent", label: baseNameOf(p) || p, keywords: p, run: () => navigate(p),
+      id: `recent:${p}`, group: "Recent", label: baseName(p) || p, keywords: p, run: () => navigate(p),
     })),
   ] satisfies Command[];
 
@@ -413,8 +413,6 @@
   let unlistenActivity: (() => void) | null = null;
   /** Whether the Agent Watch activity timeline drawer is open (CPE-400). */
   let showTimeline = false;
-
-  const baseNameOf = (p: string) => normalizePath(p).split("/").pop() || p;
 
   /** Debounce handle for live folder re-list while watching (CPE-401). */
   let watchRefreshTimer: ReturnType<typeof setTimeout> | null = null;
@@ -2277,7 +2275,7 @@
           <span class="agent-dot" />
           <span class="agent-strip-label">{$t("agent.watch", { name: watchedAgentName })}</span>
           {#each recentChanges as c (c.path)}
-            <span class="agent-chip {c.kind}" title={c.path}>{c.kind === "removed" ? "−" : c.kind === "created" ? "+" : "~"} {baseNameOf(c.path)}</span>
+            <span class="agent-chip {c.kind}" title={c.path}>{c.kind === "removed" ? "−" : c.kind === "created" ? "+" : "~"} {baseName(c.path)}</span>
           {/each}
           {#if recentChanges.length === 0}
             <span class="agent-strip-idle">{$t("agent.watching")}</span>

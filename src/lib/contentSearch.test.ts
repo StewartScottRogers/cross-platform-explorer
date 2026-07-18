@@ -66,4 +66,8 @@ describe("content search helpers (CPE-417)", () => {
     expect(parentDir("Z:\\repos\\app\\main.ts")).toBe("Z:\\repos\\app");
     expect(parentDir("x")).toBe("");
   });
+  it("baseName preserves case (CPE-618 — must not lowercase display names)", () => {
+    expect(baseName("C:/Users/Stewart/Documents")).toBe("Documents");
+    expect(baseName("Z:\\repos\\App.svelte")).toBe("App.svelte");
+  });
 });
