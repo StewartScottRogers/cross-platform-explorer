@@ -127,7 +127,18 @@ impl ProductionPlanner {
                 .iter()
                 .map(|a| a.replace("{task}", &task).replace("{mcp_config}", config_path))
                 .collect(),
-            None => vec!["--mcp-config".to_string(), config_path.to_string(), task],
+            // Fallback when the manifest has no `swarm` recipe (e.g. an auto-updated catalog that
+            // predates CPE-583). It MUST be variadic-safe: `claude`'s `--mcp-config <configs...>` is
+            // greedy, so the task can never follow the config path (or it's slurped as a second config —
+            // CPE-590). Mirror the print-mode recipe: task via `-p`, then `--mcp-config <cfg>` terminated
+            // by a trailing flag so only the config is consumed.
+            None => vec![
+                "-p".to_string(),
+                task,
+                "--mcp-config".to_string(),
+                config_path.to_string(),
+                "--dangerously-skip-permissions".to_string(),
+            ],
         }
     }
 
@@ -269,10 +280,15 @@ mod tests {
     }
 
     #[test]
-    fn without_a_swarm_recipe_it_falls_back_to_the_positional_form() {
-        let agent = AgentManifest::default(); // no swarm recipe
+    fn without_a_swarm_recipe_the_fallback_is_variadic_safe() {
+        // No recipe (e.g. a stale catalog) → the fallback must NOT put the task after --mcp-config, or
+        // claude's greedy `--mcp-config <configs...>` slurps it as a second config file (CPE-590).
+        let agent = AgentManifest::default();
         let args = ProductionPlanner::swarm_args(&agent, "/m/mcp-x.json", "do the thing");
-        assert_eq!(args, vec!["--mcp-config", "/m/mcp-x.json", "do the thing"]);
+        assert_eq!(args, vec!["-p", "do the thing", "--mcp-config", "/m/mcp-x.json", "--dangerously-skip-permissions"]);
+        // The config path is the last token before a flag — nothing the variadic option can swallow.
+        let cfg_at = args.iter().position(|a| a == "--mcp-config").unwrap();
+        assert!(args[cfg_at + 2].starts_with("--"), "a flag must follow the config path, not the task");
     }
 
     #[test]
