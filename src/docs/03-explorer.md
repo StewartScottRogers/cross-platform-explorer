@@ -35,7 +35,8 @@ The explorer is the core of the app and is tuned to stay **fast, small, and pred
 - **File transfers** — a paste that **copies** runs through the transfer manager: a small panel appears
   in the bottom-right showing the progress bar, file count, and any errors, and lets you **cancel**
   mid-copy. It stays hidden when nothing is transferring. (Moves are near-instant same-folder-volume
-  renames, so they don't need the panel.)
+  renames, so they don't need the panel.) If a copy would overwrite files that already exist, a prompt
+  asks once how to handle the whole batch — **Replace**, **Keep both** (auto-numbered), or **Skip**.
 
 ## Command palette
 
