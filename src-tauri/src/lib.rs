@@ -1245,14 +1245,81 @@ fn make_thumbnail_png(path: &Path, max_edge: u32) -> Result<Vec<u8>, String> {
     Ok(buf.into_inner())
 }
 
-/// A PNG thumbnail of an image file as a `data:` URL the `<img>` tag can show (CPE-642). Bounded by
-/// the preview size cap so a huge image can't exhaust memory. Errors (rather than hangs) on a
-/// non-image or corrupt file, so the frontend can fall back to a generic icon.
+/// A cache key for a thumbnail: hex SHA-256 of the path + mtime + edge, so editing the file (mtime
+/// changes) or requesting a different size is a cache miss (CPE-644). Pure.
+fn thumb_cache_key(path: &Path, mtime: u64, max_edge: u32) -> String {
+    use sha2::{Digest, Sha256};
+    let mut h = Sha256::new();
+    h.update(path.to_string_lossy().as_bytes());
+    h.update(mtime.to_le_bytes());
+    h.update(max_edge.to_le_bytes());
+    format!("{:x}.png", h.finalize())
+}
+
+/// A file's mtime as whole seconds since the epoch (0 if unavailable).
+fn file_mtime_secs(path: &Path) -> u64 {
+    fs::metadata(path)
+        .and_then(|m| m.modified())
+        .ok()
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
+
+/// Keep the thumbnail cache under `cap_bytes` by deleting the oldest files first. Best-effort — cache
+/// misses just regenerate. (CPE-644)
+fn prune_thumb_cache(cache_dir: &Path, cap_bytes: u64) {
+    let Ok(rd) = fs::read_dir(cache_dir) else { return };
+    let mut files: Vec<(std::path::PathBuf, u64, std::time::SystemTime)> = rd
+        .flatten()
+        .filter_map(|e| {
+            let m = e.metadata().ok()?;
+            Some((e.path(), m.len(), m.modified().ok()?))
+        })
+        .collect();
+    let total: u64 = files.iter().map(|(_, l, _)| *l).sum();
+    if total <= cap_bytes {
+        return;
+    }
+    files.sort_by_key(|(_, _, t)| *t); // oldest first
+    let mut to_free = total - cap_bytes;
+    for (p, len, _) in files {
+        if to_free == 0 {
+            break;
+        }
+        let _ = fs::remove_file(&p);
+        to_free = to_free.saturating_sub(len);
+    }
+}
+
+const THUMB_CACHE_CAP_BYTES: u64 = 128 * 1024 * 1024;
+
+/// Thumbnail PNG bytes for `path`, served from `cache_dir` when present + fresh, else generated,
+/// cached, and pruned. Pure over an explicit `cache_dir` so it's testable (CPE-644).
+fn thumbnail_cached(cache_dir: &Path, path: &Path, max_edge: u32) -> Result<Vec<u8>, String> {
+    let file = cache_dir.join(thumb_cache_key(path, file_mtime_secs(path), max_edge));
+    if let Ok(bytes) = fs::read(&file) {
+        return Ok(bytes);
+    }
+    let png = make_thumbnail_png(path, max_edge)?;
+    if fs::create_dir_all(cache_dir).is_ok() && fs::write(&file, &png).is_ok() {
+        prune_thumb_cache(cache_dir, THUMB_CACHE_CAP_BYTES);
+    }
+    Ok(png)
+}
+
+/// A PNG thumbnail of an image file as a `data:` URL the `<img>` tag can show (CPE-642), served from
+/// an mtime-keyed on-disk cache (CPE-644). Bounded by the preview size cap so a huge image can't
+/// exhaust memory. Errors (rather than hangs) on a non-image, so the frontend falls back to an icon.
 #[tauri::command]
-fn thumbnail(path: String, max_edge: u32) -> Result<String, String> {
+fn thumbnail(app: tauri::AppHandle, path: String, max_edge: u32) -> Result<String, String> {
     use base64::Engine;
+    use tauri::Manager;
     ensure_previewable_size(&path, PREVIEW_INFO_MAX_BYTES)?;
-    let png = make_thumbnail_png(Path::new(&path), max_edge)?;
+    let png = match app.path().app_cache_dir() {
+        Ok(dir) => thumbnail_cached(&dir.join("thumbnails"), Path::new(&path), max_edge)?,
+        Err(_) => make_thumbnail_png(Path::new(&path), max_edge)?, // no cache dir — generate fresh
+    };
     Ok(format!("data:image/png;base64,{}", base64::engine::general_purpose::STANDARD.encode(png)))
 }
 
@@ -5811,6 +5878,45 @@ mod tests {
         let f = d.join("x.parquet");
         fs::write(&f, b"not a parquet file").unwrap();
         assert!(parquet_info(&f.to_string_lossy()).is_err());
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn thumbnail_cache_keys_by_path_mtime_and_edge() {
+        let p = Path::new("/a/b.png");
+        // Same inputs → same key; any change → different key.
+        assert_eq!(thumb_cache_key(p, 100, 64), thumb_cache_key(p, 100, 64));
+        assert_ne!(thumb_cache_key(p, 100, 64), thumb_cache_key(p, 101, 64)); // mtime
+        assert_ne!(thumb_cache_key(p, 100, 64), thumb_cache_key(p, 100, 32)); // edge
+        assert_ne!(thumb_cache_key(p, 100, 64), thumb_cache_key(Path::new("/a/c.png"), 100, 64));
+        assert!(thumb_cache_key(p, 100, 64).ends_with(".png"));
+    }
+
+    #[test]
+    fn thumbnail_cached_writes_then_reads_the_cache() {
+        let d = scratch("thumbcache");
+        image::RgbImage::from_pixel(60, 60, image::Rgb([1u8, 2, 3])).save(d.join("i.png")).unwrap();
+        let cache = d.join("cache");
+        let first = thumbnail_cached(&cache, &d.join("i.png"), 32).unwrap();
+        // A cache file now exists; a second call returns identical bytes (served from cache).
+        assert_eq!(fs::read_dir(&cache).unwrap().count(), 1);
+        assert_eq!(thumbnail_cached(&cache, &d.join("i.png"), 32).unwrap(), first);
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn prune_thumb_cache_drops_oldest_over_cap() {
+        let d = scratch("thumbprune");
+        fs::create_dir_all(&d).unwrap();
+        // Three 100-byte files; cap 150 → prune the oldest until <= cap.
+        for (i, n) in ["a", "b", "c"].iter().enumerate() {
+            fs::write(d.join(n), vec![0u8; 100]).unwrap();
+            // stagger mtimes so "a" is oldest
+            std::thread::sleep(std::time::Duration::from_millis(10 * (i as u64 + 1)));
+        }
+        prune_thumb_cache(&d, 150);
+        let remaining: u64 = fs::read_dir(&d).unwrap().flatten().map(|e| e.metadata().unwrap().len()).sum();
+        assert!(remaining <= 150, "cache should be pruned under the cap, got {remaining}");
         let _ = fs::remove_dir_all(&d);
     }
 
