@@ -2549,6 +2549,14 @@ fn tag_store_prune_empty(store: &mut TagStore) {
     store.retain(|_, e| !e.tags.is_empty() || !e.label.is_empty());
 }
 
+/// Re-key an entry from `from` → `to` so its tags/label follow an in-app rename or move (CPE-650). A
+/// no-op when `from` has no entry. Pure.
+fn tag_store_rename(store: &mut TagStore, from: &str, to: &str) {
+    if let Some(e) = store.remove(from) {
+        store.insert(to.to_string(), e);
+    }
+}
+
 /// Merge `incoming` into `store` (CPE-640, import): union each path's tags; take a non-empty imported
 /// label over an existing one. Non-destructive — existing tags are never dropped. Pure.
 fn tag_store_merge(store: &mut TagStore, incoming: TagStore) {
@@ -2630,6 +2638,20 @@ fn delete_tag(app: tauri::AppHandle, tag: String) -> Result<TagStore, String> {
     tag_store_delete_tag(&mut store, &tag);
     tag_store_prune_empty(&mut store);
     write_tags_to(&dir, &store)?;
+    Ok(store)
+}
+
+/// Re-key a path's tags/label after an in-app rename or move (CPE-650), so tags follow the file.
+/// Returns the updated store. A no-op when the old path had no tags.
+#[tauri::command]
+fn retag_path(app: tauri::AppHandle, from: String, to: String) -> Result<TagStore, String> {
+    use tauri::Manager;
+    let dir = app.path().app_config_dir().map_err(|e| e.to_string())?;
+    let mut store = read_tags_from(&dir);
+    if store.contains_key(&from) {
+        tag_store_rename(&mut store, &from, &to);
+        write_tags_to(&dir, &store)?;
+    }
     Ok(store)
 }
 
@@ -5205,6 +5227,7 @@ pub fn run() {
             rename_tag,
             delete_tag,
             import_tags,
+            retag_path,
             rename_entry,
             delete_to_trash,
             delete_permanent,
@@ -6171,6 +6194,19 @@ mod tests {
         tag_store_prune_empty(&mut s);
         assert_eq!(s["/a"].tags, vec!["urgent".to_string()]);
         assert!(!s.contains_key("/b"), "an entry with no tags/label is pruned");
+    }
+
+    #[test]
+    fn tag_store_rename_carries_tags_to_the_new_path() {
+        let mut s = TagStore::new();
+        tag_store_set(&mut s, "/old", vec!["keep".into()], "red".into());
+        tag_store_rename(&mut s, "/old", "/new");
+        assert!(!s.contains_key("/old") && s.contains_key("/new"));
+        assert_eq!(s["/new"].tags, vec!["keep".to_string()]);
+        assert_eq!(s["/new"].label, "red");
+        // Renaming an untagged path is a no-op.
+        tag_store_rename(&mut s, "/nothing", "/elsewhere");
+        assert!(!s.contains_key("/elsewhere"));
     }
 
     #[test]
