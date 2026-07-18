@@ -13,7 +13,6 @@
   import { getCurrentWebview } from "@tauri-apps/api/webview";
 
   import Icon from "./lib/components/Icon.svelte";
-  import ContextBar from "./lib/components/ContextBar.svelte";
   import MenuBar from "./lib/components/MenuBar.svelte";
   import AboutDialog from "./lib/components/AboutDialog.svelte";
   import SettingsDialog from "./lib/components/SettingsDialog.svelte";
@@ -2507,40 +2506,6 @@
 
   <!-- File List Pane (middle column) -->
   <div class="pane-col">
-   <Toolbar label={$t("tb.fileList")}>
-    <div class="settings-row">
-      <span>{$t("menu.view")}</span>
-      <select bind:value={view} on:change={() => settings.saveView(view)}>
-        <option value="details">{$t("view.details")}</option>
-        <option value="list">{$t("view.list")}</option>
-        <option value="icons">{$t("tb.icons")}</option>
-        <option value="gallery">{$t("view.gallery")}</option>
-      </select>
-    </div>
-    <div class="settings-row">
-      <span>{$t("tb.sortBy")}</span>
-      <select bind:value={sortKey} on:change={() => settings.saveSortKey(sortKey)}>
-        <option value="name">{$t("sort.name")}</option>
-        <option value="modified">{$t("tb.modified")}</option>
-        <option value="type">{$t("sort.type")}</option>
-        <option value="size">{$t("sort.size")}</option>
-      </select>
-    </div>
-    <div class="settings-row">
-      <span>{$t("tb.direction")}</span>
-      <select bind:value={sortDir} on:change={() => settings.saveSortDir(sortDir)}>
-        <option value="asc">{$t("cmd.ascending")}</option>
-        <option value="desc">{$t("cmd.descending")}</option>
-      </select>
-    </div>
-    <div class="settings-row">
-      <span>{$t("cmd.showHidden")}</span>
-      <input type="checkbox" bind:checked={showHidden}
-        on:change={() => settings.saveShowHidden(showHidden)} />
-    </div>
-   </Toolbar>
-   <ContextBar contexts={folderContexts} on:action={(e) => handleContextAction(e.detail)} />
-   <div class="filelist-pane" role="region" aria-label={$t("tb.fileList")}>
     <ExplorerPane
       inHome={isHome && !smartFolder}
       {places}
@@ -2562,13 +2527,16 @@
       bind:renamingPath
       {renameValue}
       canDrag={!archive}
-      {view}
+      bind:view
+      bind:showHidden
+      {folderContexts}
       bind:sortKey
       bind:sortDir
       bind:columnWidths
       bind:selection
       bind:draggedPaths
       bind:rowEls
+      on:contextAction={(e) => handleContextAction(e.detail)}
       on:navigate={(e) => navigate(e.detail)}
       on:openRecent={(e) => openRecent(e.detail)}
       on:unpin={(e) => { pins = settings.togglePin(pins, e.detail); settings.savePins(pins); }}
@@ -2582,7 +2550,6 @@
       on:commitRename={(e) => commitRename(e.detail)}
       on:drop={(e) => dropInto(e.detail.paths, e.detail.dest, e.detail)}
     />
-   </div>
   </div>
 
   {#if showDetails}

@@ -8,11 +8,14 @@
   import Icon from "./Icon.svelte";
   import HomeView from "./HomeView.svelte";
   import FileList from "./FileList.svelte";
+  import Toolbar from "./Toolbar.svelte";
+  import ContextBar from "./ContextBar.svelte";
   import { t } from "../i18n";
   import * as settings from "../settings";
   import { baseName } from "../contentSearch";
   import { fsActivity, agentTimeline } from "../agentActivity";
   import { click as selClick, type Selection } from "../selection";
+  import type { FolderAction, FolderContext } from "../folderContext";
   import type { DirEntry, Place, SortKey, SortDir, ViewMode, RecentFile, Favorite } from "../types";
 
   /** True when the Home screen should show (App: `isHome && !smartFolder`). */
@@ -31,6 +34,8 @@
   export let showTimeline = false;
 
   // The listing + its display state.
+  export let showHidden = false;
+  export let folderContexts: FolderContext[] = [];
   export let visible: DirEntry[] = [];
   export let selectedTag = "";
   export let error = "";
@@ -61,9 +66,44 @@
     contextEmpty: { x: number; y: number };
     commitRename: string;
     drop: { paths: string[]; dest: string; ctrlKey: boolean; shiftKey: boolean };
+    contextAction: FolderAction;
   }>();
 </script>
 
+<Toolbar label={$t("tb.fileList")}>
+  <div class="settings-row">
+    <span>{$t("menu.view")}</span>
+    <select bind:value={view} on:change={() => settings.saveView(view)}>
+      <option value="details">{$t("view.details")}</option>
+      <option value="list">{$t("view.list")}</option>
+      <option value="icons">{$t("tb.icons")}</option>
+      <option value="gallery">{$t("view.gallery")}</option>
+    </select>
+  </div>
+  <div class="settings-row">
+    <span>{$t("tb.sortBy")}</span>
+    <select bind:value={sortKey} on:change={() => settings.saveSortKey(sortKey)}>
+      <option value="name">{$t("sort.name")}</option>
+      <option value="modified">{$t("tb.modified")}</option>
+      <option value="type">{$t("sort.type")}</option>
+      <option value="size">{$t("sort.size")}</option>
+    </select>
+  </div>
+  <div class="settings-row">
+    <span>{$t("tb.direction")}</span>
+    <select bind:value={sortDir} on:change={() => settings.saveSortDir(sortDir)}>
+      <option value="asc">{$t("cmd.ascending")}</option>
+      <option value="desc">{$t("cmd.descending")}</option>
+    </select>
+  </div>
+  <div class="settings-row">
+    <span>{$t("cmd.showHidden")}</span>
+    <input type="checkbox" bind:checked={showHidden}
+      on:change={() => settings.saveShowHidden(showHidden)} />
+  </div>
+</Toolbar>
+<ContextBar contexts={folderContexts} on:action={(e) => dispatch("contextAction", e.detail)} />
+<div class="filelist-pane" role="region" aria-label={$t("tb.fileList")}>
 {#if inHome}
   <HomeView
     {places}
@@ -137,6 +177,7 @@
     on:drop={(e) => dispatch("drop", e.detail)}
   />
 {/if}
+</div>
 
 <style>
   /* Agent Watch activity strip (CPE-399) — a thin live banner above the file list, shown only
