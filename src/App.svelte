@@ -234,6 +234,12 @@
   let paletteOpen = false;
   const inFolder = () => !isHome && !archive;
   const hasSelection = () => selectedEntries.length > 0;
+  const oneSelected = () => selectedEntries.length === 1;
+  const canCloseTab = () => tabs.length > 1;
+  // Wrappers so the palette's reactive block references functions, not reactive reads/writes inline —
+  // reading selectedEntries/activeId directly inside `$: paletteCommands` forms a dependency cycle.
+  const renameSelected = () => { if (selectedEntries.length === 1) beginRename(selectedEntries[0]); };
+  const closeActiveTab = () => closeTab(activeId);
   $: paletteCommands = [
     { id: "nav.home", group: "Go", label: "Home", shortcut: "", run: () => { if (archive) exitArchive(); navigate(HOME); } },
     { id: "nav.back", group: "Go", label: "Back", shortcut: "Alt+←", run: goBack, enabled: () => canGoBack(activeTab.history) },
@@ -241,6 +247,8 @@
     { id: "nav.up", group: "Go", label: "Up one folder", shortcut: "Alt+↑", run: goUp, enabled: inFolder },
     { id: "nav.refresh", group: "Go", label: "Refresh", shortcut: "F5", run: refresh },
     { id: "tab.new", group: "Go", label: "New tab", shortcut: "Ctrl+T", run: newTab },
+    { id: "tab.close", group: "Go", label: "Close tab", shortcut: "Ctrl+W", run: closeActiveTab, enabled: canCloseTab },
+    { id: "tab.reopen", group: "Go", label: "Reopen closed tab", shortcut: "Ctrl+Shift+T", run: reopenClosedTab },
     { id: "file.newFolder", group: "File", label: "New folder", keywords: "create directory mkdir", run: newFolder, enabled: inFolder },
     { id: "file.newFile", group: "File", label: "New file", keywords: "create", run: newFile, enabled: inFolder },
     { id: "file.copy", group: "File", label: "Copy", shortcut: "Ctrl+C", run: doCopy, enabled: hasSelection },
@@ -248,14 +256,24 @@
     { id: "file.paste", group: "File", label: "Paste", shortcut: "Ctrl+V", run: doPaste, enabled: inFolder },
     { id: "file.copyPath", group: "File", label: "Copy as path", shortcut: "Ctrl+Shift+C", run: doCopyPath, enabled: hasSelection },
     { id: "file.copyName", group: "File", label: "Copy name", run: doCopyName, enabled: hasSelection },
+    { id: "file.rename", group: "File", label: "Rename", shortcut: "F2", run: renameSelected, enabled: oneSelected },
+    { id: "file.duplicate", group: "File", label: "Duplicate", shortcut: "Ctrl+D", run: doDuplicate, enabled: hasSelection },
+    { id: "file.delete", group: "File", label: "Delete", keywords: "recycle bin trash remove", shortcut: "Delete", run: () => doDelete(false), enabled: hasSelection },
+    { id: "file.deletePermanent", group: "File", label: "Delete permanently", keywords: "remove", shortcut: "Shift+Delete", run: () => doDelete(true), enabled: hasSelection },
+    { id: "file.selectAll", group: "File", label: "Select all", shortcut: "Ctrl+A", run: selectAllVisible, enabled: inFolder },
+    { id: "file.properties", group: "File", label: "Properties", shortcut: "Alt+Enter", run: openProperties, enabled: hasSelection },
+    { id: "file.reveal", group: "File", label: "Reveal in file manager", keywords: "explorer finder show os", run: revealInExplorer, enabled: inFolder },
+    { id: "file.terminal", group: "File", label: "Open terminal here", keywords: "shell command prompt console", run: () => openTerminal(currentPath), enabled: inFolder },
     { id: "view.details", group: "View", label: "View: Details", run: () => { view = "details"; settings.saveView(view); } },
     { id: "view.list", group: "View", label: "View: List", run: () => { view = "list"; settings.saveView(view); } },
     { id: "view.icons", group: "View", label: "View: Large icons", run: () => { view = "icons"; settings.saveView(view); } },
-    { id: "sort.name", group: "View", label: "Sort by name", run: () => (sortKey = "name") },
-    { id: "sort.modified", group: "View", label: "Sort by date modified", run: () => (sortKey = "modified") },
-    { id: "sort.type", group: "View", label: "Sort by type", run: () => (sortKey = "type") },
-    { id: "sort.size", group: "View", label: "Sort by size", run: () => (sortKey = "size") },
-    { id: "sort.dir", group: "View", label: "Toggle sort direction", run: () => (sortDir = sortDir === "asc" ? "desc" : "asc") },
+    { id: "sort.name", group: "View", label: "Sort by name", run: () => { sortKey = "name"; settings.saveSortKey(sortKey); } },
+    { id: "sort.modified", group: "View", label: "Sort by date modified", run: () => { sortKey = "modified"; settings.saveSortKey(sortKey); } },
+    { id: "sort.type", group: "View", label: "Sort by type", run: () => { sortKey = "type"; settings.saveSortKey(sortKey); } },
+    { id: "sort.size", group: "View", label: "Sort by size", run: () => { sortKey = "size"; settings.saveSortKey(sortKey); } },
+    { id: "sort.dir", group: "View", label: "Toggle sort direction", run: () => { sortDir = sortDir === "asc" ? "desc" : "asc"; settings.saveSortDir(sortDir); } },
+    { id: "view.toggleDetails", group: "View", label: showDetails ? "Hide details panel" : "Show details panel", shortcut: "Alt+P", run: () => { showDetails = !showDetails; settings.saveShowDetails(showDetails); } },
+    { id: "view.popOut", group: "View", label: "Pop out the preview", shortcut: "Ctrl+Shift+O", run: popOutPreview },
     { id: "view.hidden", group: "View", label: showHidden ? "Hide hidden files" : "Show hidden files", run: () => { showHidden = !showHidden; settings.saveShowHidden(showHidden); } },
     { id: "view.foldersFirst", group: "View", label: foldersFirst ? "Mix folders and files" : "Group folders first", run: () => { foldersFirst = !foldersFirst; settings.saveFoldersFirst(foldersFirst); } },
     { id: "tool.findByName", group: "Tools", label: "Find files by name…", shortcut: "Ctrl+P", run: () => (fileSearchOpen = true), enabled: inFolder },
@@ -1553,6 +1571,13 @@
   function openProperties() {
     if (selectedEntries.length === 0) return;
     propsFor = selectedEntries;
+  }
+
+  /** Select every visible entry (CPE-605). A named function so the palette command can reference it
+      without textually assigning `selection` inside the reactive `paletteCommands` block — that would
+      make Svelte see a write and form a selection ⇄ selectedEntries cycle. */
+  function selectAllVisible() {
+    selection = selectAll(visible.length);
   }
 
   /** Run the selected executable normally (CPE-241) — same shell open as double-click. */
