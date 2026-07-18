@@ -64,8 +64,8 @@ describe("i18n translate()", () => {
   });
 
   it("an offered language without a catalog falls back to English per key (CPE-533)", () => {
-    // Japanese has no catalog yet → keys resolve to English (incremental coverage).
-    expect(translate("ja", "mi.settings")).toBe(translate("en", "mi.settings"));
+    // Thai has no catalog yet → keys resolve to English (incremental coverage).
+    expect(translate("th", "mi.settings")).toBe(translate("en", "mi.settings"));
     expect(translate("ar", "menu.language")).toBe(translate("en", "menu.language"));
   });
 
@@ -184,13 +184,13 @@ describe("i18n locale coverage (CPE-539)", () => {
       expect(isComplete(code), `${code} should be reported complete`).toBe(true);
       expect(localeCoverage(code), `${code} is declared complete but is missing keys`).toBe(1);
     }
-    // Today only en/es/de/fr are done; an offered-but-partial locale must NOT be declared complete.
-    expect(isComplete("ja")).toBe(false);
+    // An offered-but-uncatalogued locale (e.g. Thai) must NOT be declared complete.
+    expect(isComplete("th")).toBe(false);
   });
 
   it("reports 0 for an offered locale with no catalog yet (full English fallback)", () => {
-    // Japanese is offered but has no catalog — it falls back entirely to English.
-    expect(localeCoverage("ja")).toBe(0);
+    // Thai is offered but has no catalog — it falls back entirely to English.
+    expect(localeCoverage("th")).toBe(0);
   });
 
   it("is a fraction in [0,1] for every offered locale", () => {
@@ -203,7 +203,7 @@ describe("i18n locale coverage (CPE-539)", () => {
 
   it("equals the share of English keys the locale defines", () => {
     const total = localeKeys("en").length;
-    for (const code of ["en", "es", "ja"] as const) {
+    for (const code of ["en", "es", "th"] as const) {
       const defined = localeKeys(code).filter((k) => localeKeys("en").includes(k)).length;
       expect(localeCoverage(code)).toBeCloseTo(defined / total, 10);
     }
