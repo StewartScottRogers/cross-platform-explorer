@@ -2,7 +2,7 @@
 id: CPE-660
 title: "EPIC: Collapsible left-panel sections"
 type: Task
-status: Proposed
+status: In Progress
 priority: Medium
 component: Frontend
 tags: [epic]
@@ -77,3 +77,21 @@ don't touch it.
 - Per-node tree expansion still works and is independent of group collapse.
 - Headers are keyboard-accessible, expose `aria-expanded`, and are themed from variables (identical
   light/dark).
+
+## Decisions (activated 2026-07-18, nightshift — user away, no-questions; best-guess logged)
+- **Labels:** pinned nav group = **"Explore"** (Home/Gallery/Repos/Board/Workbench); quick-access
+  `places` = **"Quick access"**; `drives` = **"Drives"**. Existing Favorites/Agents/Tags/Smart keep their
+  labels.
+- **Persistence:** one small localStorage-backed store (`src/lib/sidebarSections.ts`, keyed by section
+  id) — global (not per-window/tab), reusing the shared `persist` layer like `smartFolders`.
+- **Default:** all sections expanded (unset = open) — zero change on first run.
+- **Header affordance:** the whole header row toggles (matches `fav-head`), keyboard-focusable with
+  `aria-expanded`; dividers between groups kept.
+- **Consistency:** convert the existing transient twisties (Favorites/Agents/Tags/Smart) to the same
+  persisted store so **all** sidebar sections behave + persist identically (serves the DoD's
+  "consistent" + "persists" gates), rather than extracting a new shared component (lower risk).
+
+## Child tickets
+1. **CPE-675** — Collapsible core sidebar sections: add "Explore"/"Quick access"/"Drives" headers with
+   persisted twisties, convert all existing section twisties to the shared persisted store, labels + i18n
+   ×12, a11y (`aria-expanded`, focusable) + theming. Covers the epic's DoD in one cohesive change.
