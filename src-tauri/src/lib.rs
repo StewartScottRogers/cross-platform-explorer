@@ -1946,6 +1946,52 @@ fn entry_info(path: String) -> Result<EntryInfo, String> {
     })
 }
 
+/// Recursive counts + size of a directory tree, for the Properties dialog (CPE-649): number of files,
+/// number of sub-folders, and total bytes. Cycle-safe (doesn't follow symlinked dirs) and bounded —
+/// stops at a large entry cap (reporting `truncated`) so it can't spin on a pathological tree.
+#[derive(serde::Serialize, Default)]
+struct FolderStats {
+    files: u64,
+    dirs: u64,
+    bytes: u64,
+    truncated: bool,
+}
+
+const FOLDER_STATS_MAX_ENTRIES: u64 = 500_000;
+
+#[tauri::command]
+fn folder_stats(path: String) -> Result<FolderStats, String> {
+    let root = Path::new(&path);
+    if !root.is_dir() {
+        return Err(format!("{path}: not a folder"));
+    }
+    let mut stats = FolderStats::default();
+    let mut seen = 0u64;
+    let mut stack = vec![root.to_path_buf()];
+    while let Some(dir) = stack.pop() {
+        let Ok(entries) = fs::read_dir(&dir) else { continue };
+        for entry in entries.flatten() {
+            seen += 1;
+            if seen > FOLDER_STATS_MAX_ENTRIES {
+                stats.truncated = true;
+                return Ok(stats);
+            }
+            let Ok(meta) = entry.metadata() else { continue };
+            if meta.is_dir() {
+                stats.dirs += 1;
+                // Skip symlinked dirs to avoid cycles (CPE-609/611).
+                if !entry_is_symlink(&entry) {
+                    stack.push(entry.path());
+                }
+            } else {
+                stats.files += 1;
+                stats.bytes += meta.len();
+            }
+        }
+    }
+    Ok(stats)
+}
+
 /// Total size of a directory tree. Unreadable subtrees are skipped rather than
 /// failing the whole calculation.
 #[tauri::command]
@@ -5171,6 +5217,7 @@ pub fn run() {
             move_exact,
             entry_info,
             dir_size,
+            folder_stats,
             hash_file,
             text_stats,
             search_file_contents,
@@ -6688,6 +6735,20 @@ mod tests {
 
         let total = dir_size(d.to_string_lossy().to_string()).unwrap();
         assert_eq!(total, 150);
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn folder_stats_counts_files_dirs_and_bytes() {
+        let d = scratch("folderstats");
+        fs::create_dir_all(d.join("sub/deep")).unwrap();
+        fs::write(d.join("a.bin"), vec![0u8; 100]).unwrap();
+        fs::write(d.join("sub/b.bin"), vec![0u8; 50]).unwrap();
+        fs::write(d.join("sub/deep/c.bin"), vec![0u8; 7]).unwrap();
+        let s = folder_stats(d.to_string_lossy().to_string()).unwrap();
+        assert_eq!((s.files, s.dirs, s.bytes, s.truncated), (3, 2, 157, false));
+        // A non-folder is an error.
+        assert!(folder_stats(d.join("a.bin").to_string_lossy().to_string()).is_err());
         let _ = fs::remove_dir_all(&d);
     }
 
