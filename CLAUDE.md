@@ -68,6 +68,13 @@ Then tag `vX.Y.Z` and push â€” CI does the rest.
   conventional active-tab treatment: an **accent top-bar** + content-surface background lifting it onto
   the pane, with **inactive tabs as recessed chips** (subtle fill + dimmed text), all from theme
   variables. Standard: [docs/design/TABS.md](docs/design/TABS.md). New tab strips reuse `.tab`/`.tab.active`.
+- **Streaming liveness** — producers of large/slow payloads (directory listings, recursive searches,
+  future bulk producers) stream results in batches over a Tauri `ipc::Channel` instead of a blocking
+  `invoke` that returns one big `Vec`, so the pane paints the first rows immediately. One shared walker
+  backs both a collect-to-vec command and its streaming variant; the frontend appends batches, flips
+  `loading` off on the first batch, and supersedes an in-flight stream by generation token. Standard:
+  [docs/design/STREAMING.md](docs/design/STREAMING.md). New bulk producers follow it. See
+  [[prefer-streaming-liveness]].
 - **Busy cursor / `invoke`** — production code imports `invoke` from `src/lib/invoke.ts` (the
   busy-tracking wrapper), **never** from `@tauri-apps/api/core`, so a slow command app-wide raises the
   OS wait cursor for free. Operations that render their own progress use `rawInvoke` + the guard-test

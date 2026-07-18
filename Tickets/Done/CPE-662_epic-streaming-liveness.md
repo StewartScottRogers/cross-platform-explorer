@@ -2,13 +2,13 @@
 id: CPE-662
 title: "EPIC: Streaming liveness — progressive middle-pane loading"
 type: Task
-status: In Progress
+status: Done
 priority: High
 component: Multiple
 tags: [epic]
 estimate: 4h+
 created: 2026-07-18
-closed:
+closed: 2026-07-18
 ---
 
 ## Goal
@@ -106,3 +106,19 @@ Research resolved most open questions against the existing architecture:
    superseded stream stops walking rather than running to completion. *(prereq: 663/664)*
 4. **CPE-666** — Generalise: apply the channel-streaming shape to one more large/slow producer and
    **document** it as the house style for bulk data. *(prereq: 664)*
+
+## Resolution (closed 2026-07-18)
+Delivered progressive, cancellable streaming for the explorer's bulk producers:
+- CPE-663 — backend `list_dir_stream` over an `ipc::Channel` (shared `stream_dir_entries` walker).
+- CPE-664 — frontend progressive middle-pane render (first batch paints immediately; generation-token
+  supersede on navigation).
+- CPE-665 — cooperative backend cancellation so a superseded walk stops churning.
+- CPE-666 — generalised the pattern to filename search (Ctrl+P) and documented it in
+  docs/design/STREAMING.md (house style + CLAUDE.md pointer).
+
+DoD met: opening a large/slow folder paints its first rows within a couple of frames then fills in;
+the busy-cursor dead-wait on folder open is gone (rawInvoke self-progress); unreadable entries still
+skipped and final order matches the one-shot path (reactive sort); mid-load navigation supersedes +
+cancels the previous stream; small folders are one flush (no regression); the pattern is documented and
+applied to a second producer. This directly resolves the user's report that the middle pane stalled on
+folder open.

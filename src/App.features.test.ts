@@ -70,6 +70,11 @@ function mockBackend(listing: DirEntry[]) {
         return (args?.paths as string[]).map((p) => ({ path: `${p} (copy)`, ok: true, error: "" }));
       case "read_file_text": return "FILE PREVIEW CONTENT";
       case "find_files_by_name": return { matches: [], dirs_scanned: 1, truncated: false };
+      case "find_files_by_name_stream": {
+        const ch = args?.onMatch as { onmessage: (b: unknown) => void };
+        ch.onmessage([{ path: "C:\\d\\alpha.md", name: "alpha.md", is_dir: false }]);
+        return { matches: [], dirs_scanned: 1, truncated: false };
+      }
       default: return null;
     }
   });
@@ -345,7 +350,12 @@ describe("find files by name (CPE-603)", () => {
     await fireEvent.click(screen.getByText("Search"));
 
     await waitFor(() =>
-      expect(invoke).toHaveBeenCalledWith("find_files_by_name", { root: "C:\\d", query: "*.md" }),
+      expect(invoke).toHaveBeenCalledWith(
+        "find_files_by_name_stream",
+        expect.objectContaining({ root: "C:\\d", query: "*.md" }),
+      ),
     );
+    // The streamed hit renders in the dialog's results.
+    await waitFor(() => expect(screen.getAllByText("alpha.md").length).toBeGreaterThan(1));
   });
 });

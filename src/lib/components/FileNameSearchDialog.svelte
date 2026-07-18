@@ -6,11 +6,12 @@
    * which searches file *contents* instead.
    */
   import { createEventDispatcher } from "svelte";
-  import { invoke } from "../invoke";
+  import { Channel } from "@tauri-apps/api/core";
+  import { rawInvoke } from "../invoke";
   import Icon from "./Icon.svelte";
   import { t } from "../i18n";
   import { baseName, parentDir, pushRecentSearch } from "../contentSearch";
-  import { sortNameMatches, type NameSearchResult } from "../fileNameSearch";
+  import { sortNameMatches, type NameSearchResult, type NameMatch } from "../fileNameSearch";
   import { lsGet, lsSet } from "../persist";
 
   const RECENTS_KEY = "cpe.nameSearchRecents";
@@ -32,6 +33,8 @@
   let error = "";
   let searched = false;
   let result: NameSearchResult = { matches: [], dirs_scanned: 0, truncated: false };
+  // Supersede token (CPE-666): a new search drops batches still arriving from the previous one.
+  let searchGen = 0;
 
   $: hits = sortNameMatches(result.matches);
 
@@ -43,13 +46,26 @@
     searched = true;
     recents = pushRecentSearch(recents, q);
     saveRecents(recents);
+    result = { matches: [], dirs_scanned: 0, truncated: false };
+    // Stream hits as the tree is walked (CPE-666) so a search over a big tree lists results
+    // progressively instead of blocking on the whole walk; the reactive `hits` re-sorts each batch.
+    const gen = ++searchGen;
     try {
-      result = await invoke<NameSearchResult>("find_files_by_name", { root, query: q });
+      const channel = new Channel<NameMatch[]>();
+      channel.onmessage = (batch) => {
+        if (gen !== searchGen) return; // superseded by a newer search — drop stale hits
+        result = { ...result, matches: result.matches.concat(batch) };
+        loading = false; // first hits are in — reveal them
+      };
+      const final = await rawInvoke<NameSearchResult>("find_files_by_name_stream", { root, query: q, onMatch: channel });
+      if (gen === searchGen) result = { ...result, dirs_scanned: final.dirs_scanned, truncated: final.truncated };
     } catch (e) {
-      error = String(e);
-      result = { matches: [], dirs_scanned: 0, truncated: false };
+      if (gen === searchGen) {
+        error = String(e);
+        result = { matches: [], dirs_scanned: 0, truncated: false };
+      }
     } finally {
-      loading = false;
+      if (gen === searchGen) loading = false;
     }
   }
 

@@ -31,7 +31,8 @@ The explorer is the core of the app and is tuned to stay **fast, small, and pred
 - **Search** — three complementary tools:
   - a quick **name filter** for the current folder (Ctrl+F; supports `*`/`?` wildcards),
   - **Find files by name** (Ctrl+P) to search the whole tree below the current folder for a name or
-    glob and jump straight to a hit,
+    glob and jump straight to a hit — results stream in as they're found, so a big tree lists matches
+    progressively instead of waiting for the whole walk,
   - **Search in files** (Ctrl+Shift+F) to grep folder contents, with matches highlighted in each result
     line.
 

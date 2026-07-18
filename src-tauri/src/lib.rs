@@ -2468,26 +2468,43 @@ fn entry_is_symlink(entry: &fs::DirEntry) -> bool {
 /// like `search_file_contents`: skips dot-directories, stops at match/dir caps (reporting
 /// `truncated`), and skips unreadable directories rather than failing the whole search. Empty query
 /// returns nothing; a non-folder root is an `Err`.
-#[tauri::command]
-fn find_files_by_name(root: String, query: String) -> Result<NameSearchResult, String> {
+/// Directories scanned + whether a cap truncated the walk — the non-match part of a name search.
+struct NameWalkStats {
+    dirs_scanned: u64,
+    truncated: bool,
+}
+
+/// The shared filename-search walk behind both `find_files_by_name` (collect-to-vec) and
+/// `find_files_by_name_stream` (progressive, CPE-666). Invokes `flush` with each batch of ≤`batch`
+/// matches as they're found; `flush` returns `ControlFlow` so a streaming caller could stop early. Same
+/// bounds as before: skips dot-dirs + symlinks, caps dirs/matches (reporting `truncated`), skips
+/// unreadable dirs. Empty query yields nothing; a non-folder root is an `Err`.
+fn walk_name_matches(
+    root: &str,
+    query: &str,
+    batch: usize,
+    mut flush: impl FnMut(Vec<NameMatch>) -> std::ops::ControlFlow<()>,
+) -> Result<NameWalkStats, String> {
     let q = query.trim().to_lowercase();
-    let mut result = NameSearchResult { matches: Vec::new(), dirs_scanned: 0, truncated: false };
+    let mut stats = NameWalkStats { dirs_scanned: 0, truncated: false };
     if q.is_empty() {
-        return Ok(result);
+        return Ok(stats);
     }
-    let root_path = Path::new(&root);
+    let root_path = Path::new(root);
     if !root_path.is_dir() {
         return Err(format!("{root}: not a folder"));
     }
 
+    let mut buf: Vec<NameMatch> = Vec::new();
+    let mut total_matches = 0usize;
     // Explicit stack, not recursion — bounded memory, and matches `list_dir`'s skip-on-error ethos.
     let mut stack = vec![root_path.to_path_buf()];
-    while let Some(dir) = stack.pop() {
+    'walk: while let Some(dir) = stack.pop() {
         let Ok(entries) = fs::read_dir(&dir) else { continue };
-        result.dirs_scanned += 1;
-        if result.dirs_scanned > NAME_SEARCH_MAX_DIRS {
-            result.truncated = true;
-            return Ok(result);
+        stats.dirs_scanned += 1;
+        if stats.dirs_scanned > NAME_SEARCH_MAX_DIRS {
+            stats.truncated = true;
+            break;
         }
         for entry in entries.flatten() {
             let path = entry.path();
@@ -2496,14 +2513,18 @@ fn find_files_by_name(root: String, query: String) -> Result<NameSearchResult, S
             let Ok(meta) = entry.metadata() else { continue };
             let is_dir = meta.is_dir();
             if name_matches(&name, &q) {
-                result.matches.push(NameMatch {
+                buf.push(NameMatch {
                     path: path.to_string_lossy().into_owned(),
                     name: name.to_string(),
                     is_dir,
                 });
-                if result.matches.len() >= NAME_SEARCH_MAX_MATCHES {
-                    result.truncated = true;
-                    return Ok(result);
+                total_matches += 1;
+                if buf.len() >= batch && flush(std::mem::take(&mut buf)).is_break() {
+                    break 'walk;
+                }
+                if total_matches >= NAME_SEARCH_MAX_MATCHES {
+                    stats.truncated = true;
+                    break 'walk;
                 }
             }
             // Descend into real sub-directories, skipping dot-dirs (.git, .venv, …) and symlinks
@@ -2513,7 +2534,40 @@ fn find_files_by_name(root: String, query: String) -> Result<NameSearchResult, S
             }
         }
     }
-    Ok(result)
+    if !buf.is_empty() {
+        let _ = flush(buf);
+    }
+    Ok(stats)
+}
+
+#[tauri::command]
+fn find_files_by_name(root: String, query: String) -> Result<NameSearchResult, String> {
+    let mut matches = Vec::new();
+    let stats = walk_name_matches(&root, &query, usize::MAX, |b| {
+        matches.extend(b);
+        std::ops::ControlFlow::Continue(())
+    })?;
+    Ok(NameSearchResult { matches, dirs_scanned: stats.dirs_scanned, truncated: stats.truncated })
+}
+
+/// How many matches to buffer before flushing a batch over the channel — small so hits appear live.
+const NAME_SEARCH_BATCH: usize = 32;
+
+/// Streaming variant of `find_files_by_name` (CPE-666, epic CPE-662): pushes batches of hits over an IPC
+/// channel as the tree is walked, so a search over a big tree lists results progressively instead of
+/// blocking on the whole walk. The returned `NameSearchResult` carries the final `dirs_scanned` +
+/// `truncated` flags with an empty `matches` (those were streamed).
+#[tauri::command]
+fn find_files_by_name_stream(
+    root: String,
+    query: String,
+    on_match: tauri::ipc::Channel<Vec<NameMatch>>,
+) -> Result<NameSearchResult, String> {
+    let stats = walk_name_matches(&root, &query, NAME_SEARCH_BATCH, |batch| {
+        let _ = on_match.send(batch);
+        std::ops::ControlFlow::Continue(())
+    })?;
+    Ok(NameSearchResult { matches: Vec::new(), dirs_scanned: stats.dirs_scanned, truncated: stats.truncated })
 }
 
 /// A set of byte-identical files (CPE-420): their shared size + hash and every path.
@@ -5400,6 +5454,7 @@ pub fn run() {
             image_meta,
             list_dir_stream,
             cancel_dir_stream,
+            find_files_by_name_stream,
             dir_size,
             folder_stats,
             hash_file,
@@ -6930,6 +6985,19 @@ mod tests {
         // Empty query and a non-folder root behave sanely.
         assert_eq!(find_files_by_name(d.to_string_lossy().to_string(), "  ".into()).unwrap().matches.len(), 0);
         assert!(find_files_by_name(d.join("report.txt").to_string_lossy().to_string(), "x".into()).is_err());
+
+        // The streaming walk (CPE-666) yields the same matches as the collected command, in batches.
+        let mut streamed = Vec::new();
+        let mut batches = 0;
+        let stats = walk_name_matches(&d.to_string_lossy(), "report", 1, |b| {
+            batches += 1;
+            streamed.extend(b);
+            std::ops::ControlFlow::Continue(())
+        })
+        .unwrap();
+        assert_eq!(streamed.len(), 3, "streamed the same 3 hits");
+        assert!(batches >= 3, "batch size 1 flushes per hit");
+        assert!(!stats.truncated);
         let _ = fs::remove_dir_all(&d);
     }
 
