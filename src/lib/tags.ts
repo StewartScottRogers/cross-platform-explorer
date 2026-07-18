@@ -4,7 +4,7 @@
 // the store tail just wires the `invoke` calls. Idle by default — an empty store costs nothing, so
 // the plain explorer is unaffected until a path is actually tagged.
 
-import { writable, type Readable } from "svelte/store";
+import { writable, get, type Readable } from "svelte/store";
 import { invoke } from "./invoke";
 
 /** One path's tags plus its single colour label (mirror of the Rust `TagEntry`). */
@@ -81,4 +81,33 @@ export async function setEntryTags(path: string, tags: string[], label: string):
 /** Tag usage counts, most-used first (`[tag, count][]`), straight from the backend. */
 export function tagCounts(): Promise<[string, number][]> {
   return invoke<[string, number][]>("tag_counts");
+}
+
+/** Re-key a path's tags after an in-app rename/move so they follow the file (CPE-652). No-op if untagged. */
+export async function retagPath(from: string, to: string): Promise<void> {
+  const updated = await invoke<TagStore>("retag_path", { from, to });
+  store.set(updated ?? {});
+}
+
+/** Rename tag `old` → `next` across every path (CPE-653). An empty `next` deletes it. */
+export async function renameTag(old: string, next: string): Promise<void> {
+  const updated = await invoke<TagStore>("rename_tag", { old, new: next });
+  store.set(updated ?? {});
+}
+
+/** Remove a tag from every path (CPE-653). */
+export async function deleteTag(tag: string): Promise<void> {
+  const updated = await invoke<TagStore>("delete_tag", { tag });
+  store.set(updated ?? {});
+}
+
+/** Merge an exported tag store (JSON) into the current one (CPE-654). */
+export async function importTags(json: string): Promise<void> {
+  const updated = await invoke<TagStore>("import_tags", { json });
+  store.set(updated ?? {});
+}
+
+/** The current tag store serialized as pretty JSON, for export (CPE-654). */
+export function exportTags(): string {
+  return JSON.stringify(get(store), null, 2);
 }

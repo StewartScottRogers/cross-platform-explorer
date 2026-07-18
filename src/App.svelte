@@ -59,7 +59,7 @@
   import PropertiesDialog from "./lib/components/PropertiesDialog.svelte";
   import BatchRenameDialog from "./lib/components/BatchRenameDialog.svelte";
   import TagEditor from "./lib/components/TagEditor.svelte";
-  import { initTags, tags } from "./lib/tags";
+  import { initTags, tags, retagPath } from "./lib/tags";
   import { filterEntriesByTag, tagCounts } from "./lib/tagFilter";
   import type { RenameItem } from "./lib/batchRename";
 
@@ -1086,6 +1086,8 @@
 
     try {
       const to = await invoke<string>("rename_entry", { path, newName });
+      // Carry any tags to the new path so they follow the file (CPE-652); best-effort.
+      retagPath(path, to).catch(() => {});
       undoStack = pushUndo(undoStack, {
         kind: "rename",
         moves: [{ from: path, to }],
