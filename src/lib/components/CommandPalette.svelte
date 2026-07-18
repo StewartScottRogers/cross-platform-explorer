@@ -3,6 +3,7 @@
   // `filterCommands` result; keyboard-first (↑/↓/Enter/Esc). Theme-correct via CSS variables.
   import { createEventDispatcher, tick } from "svelte";
   import { filterCommands, isEnabled, type Command } from "../commandPalette";
+  import { t } from "../i18n";
 
   export let commands: Command[] = [];
 
@@ -40,20 +41,20 @@
 
 <!-- svelte-ignore a11y-click-events-have-key-events a11y-no-static-element-interactions -->
 <div class="cp-overlay" on:click|self={() => dispatch("close")}>
-  <div class="cp-panel" role="dialog" aria-label="Command palette">
+  <div class="cp-panel" role="dialog" aria-label={$t("palette.ariaPalette")}>
     <!-- svelte-ignore a11y-autofocus -->
     <input
       class="cp-input"
       autofocus
       bind:value={query}
       on:keydown={onKeydown}
-      placeholder="Type a command…"
+      placeholder={$t("palette.placeholder")}
       spellcheck="false"
-      aria-label="Search commands"
+      aria-label={$t("palette.ariaSearch")}
     />
     <div class="cp-list" bind:this={listEl}>
       {#if results.length === 0}
-        <div class="cp-empty">No matching commands.</div>
+        <div class="cp-empty">{$t("palette.noMatches")}</div>
       {:else}
         {#each results as { command }, i (command.id)}
           <!-- svelte-ignore a11y-no-static-element-interactions -->
