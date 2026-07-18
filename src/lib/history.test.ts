@@ -1,6 +1,6 @@
 import { describe, it, expect } from "vitest";
 import {
-  createHistory, visit, back, forward, canGoBack, canGoForward, current,
+  createHistory, visit, back, forward, canGoBack, canGoForward, current, recentPaths,
 } from "./history";
 
 describe("history", () => {
@@ -49,5 +49,26 @@ describe("history", () => {
     let h = createHistory("/a");
     expect(back(h)).toBe(h);
     expect(forward(h)).toBe(h);
+  });
+
+  describe("recentPaths (CPE-604)", () => {
+    it("lists distinct prior paths, most recent first, excluding the current", () => {
+      let h = createHistory("/a");
+      h = visit(h, "/b");
+      h = visit(h, "/c"); // current = /c
+      expect(recentPaths(h)).toEqual(["/b", "/a"]);
+    });
+    it("collapses duplicates and honours the cap", () => {
+      let h = createHistory("/a");
+      h = visit(h, "/b");
+      h = visit(h, "/a"); // re-visited /a truncates forward but /a is now current
+      h = visit(h, "/c"); // current = /c; entries: /a,/b,/a,/c
+      expect(recentPaths(h)).toEqual(["/a", "/b"]); // /a once, /c (current) excluded
+      expect(recentPaths(h, 1)).toEqual(["/a"]);
+    });
+    it("returns nothing for an empty or single-entry history", () => {
+      expect(recentPaths(createHistory())).toEqual([]);
+      expect(recentPaths(createHistory("/only"))).toEqual([]);
+    });
   });
 });

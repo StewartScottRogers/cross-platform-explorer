@@ -41,3 +41,21 @@ export function forward(h: History): History {
 export function current(h: History): string | null {
   return h.index >= 0 ? h.entries[h.index] : null;
 }
+
+/**
+ * Distinct visited paths for a "recent locations" list — most-recently-visited first, with the
+ * current path excluded and duplicates collapsed, capped at `max`. Pure; drives the command
+ * palette's recent-folder jump entries.
+ */
+export function recentPaths(h: History, max = 8): string[] {
+  const cur = current(h);
+  const seen = new Set<string>();
+  const out: string[] = [];
+  for (let i = h.entries.length - 1; i >= 0 && out.length < max; i--) {
+    const p = h.entries[i];
+    if (p === cur || seen.has(p)) continue;
+    seen.add(p);
+    out.push(p);
+  }
+  return out;
+}

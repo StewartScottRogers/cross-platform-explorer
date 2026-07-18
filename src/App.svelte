@@ -69,7 +69,7 @@
   import { firstMatchIndex } from "./lib/typeahead";
   import { clampWidth } from "./lib/resize";
   import {
-    createHistory, visit, back, forward, canGoBack, canGoForward, current,
+    createHistory, visit, back, forward, canGoBack, canGoForward, current, recentPaths,
     type History,
   } from "./lib/history";
   import { pushClosedTab, keepOnly, keepThroughRight } from "./lib/tabs";
@@ -266,6 +266,11 @@
     { id: "app.documents", group: "App", label: "Documents", shortcut: "F1", run: () => openDocs(currentSection()) },
     { id: "app.shortcuts", group: "App", label: "Keyboard shortcuts", shortcut: "?", run: () => (shortcutsOpen = true) },
     { id: "app.about", group: "App", label: "About", run: () => (showAbout = true) },
+    // Jump back to a recently-visited folder (CPE-604) — the full path is a keyword so typing any
+    // part of it matches, while the label stays the short folder name.
+    ...recentPaths(activeTab.history).map((p) => ({
+      id: `recent:${p}`, group: "Recent", label: baseNameOf(p) || p, keywords: p, run: () => navigate(p),
+    })),
   ] satisfies Command[];
 
   /** Open a URL in a dedicated browser webview window (CPE-527) — safe under the strict CSP since it's
