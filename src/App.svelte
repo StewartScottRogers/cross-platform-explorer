@@ -91,7 +91,8 @@
     type Clipboard,
   } from "./lib/clipboard";
   import { detectContexts, type FolderAction } from "./lib/folderContext";
-  import { isExecutable, iconFor, sameTypeIndices, matchesFileFilter } from "./lib/filetypes";
+  import { isExecutable, iconFor, sameTypeIndices, matchesFileFilter, isImage } from "./lib/filetypes";
+  import QuickLook from "./lib/components/QuickLook.svelte";
   import * as settings from "./lib/settings";
   import {
     pushUndo, popUndo, canUndo, peekLabel, invert, deletedPaths, type UndoEntry,
@@ -189,6 +190,25 @@
   let selectedTag = "";
   /** Right-click menu for a sidebar tag (rename/delete), or null (CPE-653). */
   let tagMenu: { x: number; y: number; tag: string } | null = null;
+  /** Full-screen quick-look of images (Space), or null (CPE-645). */
+  let quickLook: { images: { path: string; name: string }[]; index: number } | null = null;
+
+  /** Open quick-look on the selected image, seeding the folder's images. Returns false if not applicable. */
+  function openQuickLook(): boolean {
+    if (isHome || archive || selectedEntries.length !== 1) return false;
+    const sel = selectedEntries[0];
+    if (sel.is_dir || !isImage(sel.name)) return false;
+    const images = visible.filter((e) => !e.is_dir && isImage(e.name)).map((e) => ({ path: e.path, name: e.name }));
+    const index = images.findIndex((im) => im.path === sel.path);
+    if (index < 0) return false;
+    quickLook = { images, index };
+    return true;
+  }
+  function quickLookMove(delta: number) {
+    if (!quickLook) return;
+    const n = quickLook.images.length;
+    quickLook = { ...quickLook, index: (quickLook.index + delta + n) % n };
+  }
   let editingPath = false;
 
   let renamingPath = "";
@@ -1722,7 +1742,17 @@
     if (target && ["INPUT", "TEXTAREA"].includes(target.tagName)) return;
     if (renamingPath) return;
 
+    // Quick-look owns the keyboard while open (CPE-645).
+    if (quickLook) {
+      if (event.key === "Escape" || event.key === " ") { event.preventDefault(); quickLook = null; }
+      else if (event.key === "ArrowRight") { event.preventDefault(); quickLookMove(1); }
+      else if (event.key === "ArrowLeft") { event.preventDefault(); quickLookMove(-1); }
+      return;
+    }
+
     const ctrl = event.ctrlKey || event.metaKey;
+    // Space quick-looks the selected image (CPE-645).
+    if (!ctrl && !event.altKey && !event.shiftKey && event.key === " " && openQuickLook()) { event.preventDefault(); return; }
 
     if (ctrl && event.key.toLowerCase() === "l") { event.preventDefault(); editingPath = true; return; }
     if (event.altKey && event.key.toLowerCase() === "d") { event.preventDefault(); editingPath = true; return; }
@@ -2711,6 +2741,16 @@
 {/if}
 
 <TransferPanel />
+
+{#if quickLook}
+  <QuickLook
+    images={quickLook.images}
+    index={quickLook.index}
+    on:prev={() => quickLookMove(-1)}
+    on:next={() => quickLookMove(1)}
+    on:close={() => (quickLook = null)}
+  />
+{/if}
 
 {#if pendingCopy}
   <TransferConflictDialog
