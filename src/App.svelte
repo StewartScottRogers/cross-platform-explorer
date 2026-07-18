@@ -2386,6 +2386,16 @@
           </button>
         </div>
       {/if}
+      {#if selectedTag}
+        <div class="tag-filter-bar">
+          <Icon name="tag" size={13} />
+          <span class="tf-label">{selectedTag}</span>
+          <span class="tf-count">{visible.length}</span>
+          <button class="tf-clear" title="Clear tag filter" aria-label="Clear tag filter" on:click={() => (selectedTag = "")}>
+            <Icon name="close" size={12} />
+          </button>
+        </div>
+      {/if}
       <FileList
         entries={visible}
         activity={activeWatchCwd ? $fsActivity : {}}
@@ -2807,6 +2817,18 @@
     cursor: pointer;
   }
   .agent-log-btn:hover { background: var(--surface-alt); }
+
+  /* Active tag-filter indicator above the list (CPE-655). */
+  .tag-filter-bar {
+    display: flex; align-items: center; gap: 6px;
+    padding: 4px 10px; margin: 4px 6px 0; border-radius: 6px;
+    background: var(--surface-alt); border: 1px solid var(--border);
+    font-size: 12px; color: var(--text);
+  }
+  .tf-label { font-weight: 600; }
+  .tf-count { color: var(--text-faint); font-variant-numeric: tabular-nums; }
+  .tf-clear { margin-left: auto; width: 20px; height: 20px; display: grid; place-items: center; border-radius: 4px; color: var(--text-dim); }
+  .tf-clear:hover { background: var(--surface); color: var(--text); }
 
   /* AI Console toolbar button (CPE-351) — sits next to the settings gear. */
   .tb-console {
