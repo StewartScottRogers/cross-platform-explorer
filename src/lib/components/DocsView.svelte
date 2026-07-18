@@ -9,8 +9,13 @@
 
   const dispatch = createEventDispatcher<{ close: void }>();
 
+  // Optional deep-link: open on this doc slug (CPE-594). Unknown/absent → the default first doc, so
+  // existing callers that pass nothing are unaffected. The viewer stays dumb — the caller/registry
+  // decides which slug to pass.
+  export let initialSlug: string | null = null;
+
   let query = "";
-  let selected: Doc | null = DOCS[0] ?? null;
+  let selected: Doc | null = (initialSlug ? DOCS.find((d) => d.slug === initialSlug) : null) ?? DOCS[0] ?? null;
   let html = "";
 
   $: results = searchDocs(DOCS, query);

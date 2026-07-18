@@ -80,6 +80,12 @@ Then tag `vX.Y.Z` and push â€” CI does the rest.
 
 ## Docs
 
+- **In-app docs are self-maintaining (CPE-579).** Every feature that adds a user-facing **section** must
+  (a) ship/update its page in `src/docs/*.md`, and (b) add its `section → doc slug` entry in
+  `src/lib/sectionDocs.ts` (the one source of truth). The guard test `src/lib/sectionDocs.test.ts` asserts
+  every `Section` is mapped and every mapped slug exists in `DOCS`, so a new section without its doc — or a
+  typo'd slug — **fails CI**. Contextual help (the toolbar "?" / F1) opens the current section's page via
+  that registry; `DocsView` takes an optional `initialSlug`. See [[maintain-in-app-docs-library]].
 - Tauri v2: https://v2.tauri.app
 - Updater plugin: https://v2.tauri.app/plugin/updater/
 - tauri-action: https://github.com/tauri-apps/tauri-action

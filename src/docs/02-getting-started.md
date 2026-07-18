@@ -38,4 +38,10 @@ a language hasn't been translated yet.
 ## Keyboard
 
 Common shortcuts: navigate with the arrow keys, Enter to open, Backspace to go up, Ctrl+T for a new tab,
-Ctrl+F to search. The menu lists the rest.
+Ctrl+F to search. Press **?** for the full keyboard-shortcuts list. The menu lists the rest.
+
+## Getting help
+
+Every section has its own page in these docs. Press **F1** — or click the **?** button in the toolbar —
+and Documents opens straight to the page for whatever you're looking at (the AI Console, the Workbench,
+Swarms, and so on). Opening Documents from the Application menu does the same for your current section.

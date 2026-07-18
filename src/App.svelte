@@ -30,6 +30,7 @@
   import BoardView from "./lib/components/BoardView.svelte";
   import WorkbenchView from "./lib/components/WorkbenchView.svelte";
   import DocsView from "./lib/components/DocsView.svelte";
+  import { docSlugForSection, type Section } from "./lib/sectionDocs";
   import AgentMenu from "./lib/components/AgentMenu.svelte";
   import Toolbar from "./lib/components/Toolbar.svelte";
   import FileList from "./lib/components/FileList.svelte";
@@ -210,6 +211,18 @@
   let showWorkbench = false;
   /** Application → Documents (CPE-537) — the built-in docs viewer. */
   let showDocs = false;
+  /** Optional deep-link slug for the docs viewer (CPE-594/596); null ⇒ default (Overview). */
+  let docsSlug: string | null = null;
+  /** Open Documents, optionally on a specific section's page (CPE-596). */
+  function openDocs(section: Section | null = null) {
+    docsSlug = section ? docSlugForSection(section) : null;
+    showDocs = true;
+  }
+  /** The section the user is currently in, for F1 / the global Documents open (CPE-596). */
+  function currentSection(): Section {
+    if (showWorkbench) return "workbench";
+    return isHome ? "home" : "explorer";
+  }
 
   /** Open a URL in a dedicated browser webview window (CPE-527) — safe under the strict CSP since it's
       a separate webview, not an iframe in the main window. The URL is validated http/https in-view. */
@@ -1623,7 +1636,8 @@
     }
 
     switch (event.key) {
-      case "F1": event.preventDefault(); shortcutsOpen = true; break;
+      case "F1": event.preventDefault(); openDocs(currentSection()); break; // help for this section (CPE-596)
+      case "?": event.preventDefault(); shortcutsOpen = true; break; // keyboard shortcuts (moved off F1)
       case "F5": event.preventDefault(); refresh(); break;
       case "F2":
         event.preventDefault();
@@ -1746,7 +1760,7 @@
       case "check-updates": checkForUpdates(true); break;
       case "settings": showSettings = true; break;
       case "shortcuts": shortcutsOpen = true; break;
-      case "documents": showDocs = true; break;
+      case "documents": openDocs(currentSection()); break;
       case "about": showAbout = true; break;
       case "content-search": if (!isHome && !archive) contentSearchOpen = true; break;
       case "find-duplicates": if (!isHome && !archive) duplicatesOpen = true; break;
@@ -2049,6 +2063,7 @@
   on:up={goUp}
   on:refresh={refresh}
   on:browse={browseForFolder}
+  on:help={() => openDocs(currentSection())}
   on:navigate={(e) => onCrumbNavigate(e.detail)}
   on:search={(e) => { search = e.detail; selection = emptySelection(); }}
 />
@@ -2482,7 +2497,7 @@
 {/if}
 
 {#if showDocs}
-  <DocsView on:close={() => (showDocs = false)} />
+  <DocsView initialSlug={docsSlug} on:close={() => (showDocs = false)} />
 {/if}
 
 {#if agentMenu}

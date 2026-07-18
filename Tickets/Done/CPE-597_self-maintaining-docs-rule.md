@@ -2,13 +2,14 @@
 id: CPE-597
 title: "Self-maintaining docs discipline: new feature ⇒ doc page + registry entry (CLAUDE.md rule)"
 type: Task
-status: Open
+status: Done
 priority: Medium
 component: Docs
 tags: [ready]
 epic: CPE-579
 estimate: 30m
 created: 2026-07-17
+closed: 2026-07-17
 ---
 
 ## Summary
@@ -17,13 +18,18 @@ section ships its doc page **and** registers its section→doc mapping" into the
 the exhaustiveness guard test ([[CPE-595]]).
 
 ## Acceptance Criteria
-- [ ] `CLAUDE.md` gains a rule (near the docs-library guidance): a feature that adds a user-facing
+- [x] `CLAUDE.md` gains a rule (near the docs-library guidance): a feature that adds a user-facing
       section must add/update its `src/docs/` page **and** its entry in the section→doc registry; the
       guard test enforces it.
-- [ ] The in-app **Documents** library is updated so its own pages describe contextual help (open a
+- [x] The in-app **Documents** library is updated so its own pages describe contextual help (open a
       section's page from its "?" / F1) — per [[maintain-in-app-docs-library]].
-- [ ] Cross-reference the registry + guard test from the docs-library rule so the enforcement is
+- [x] Cross-reference the registry + guard test from the docs-library rule so the enforcement is
       discoverable.
 
 ## Notes
 Closes the loop that makes CPE-579 self-maintaining rather than a one-off wiring.
+
+## Resolution
+CLAUDE.md "Docs" section gains the rule: a new section must add its `src/docs/` page AND its
+`sectionDocs.ts` entry, enforced by the guard test. `02-getting-started.md` documents F1/"?" contextual
+help. Ties into [[maintain-in-app-docs-library]].

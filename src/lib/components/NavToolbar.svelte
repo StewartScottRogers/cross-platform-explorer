@@ -16,7 +16,7 @@
   export let recentPaths: string[] = [];
 
   const dispatch = createEventDispatcher<{
-    back: void; forward: void; up: void; refresh: void; browse: void;
+    back: void; forward: void; up: void; refresh: void; browse: void; help: void;
     navigate: string; search: string; pathError: string;
   }>();
 
@@ -81,6 +81,9 @@
   </button>
   <button class="iconbtn" title="{$t('nav.refresh')} (F5)" on:click={() => dispatch("refresh")}>
     <Icon name="refresh" />
+  </button>
+  <button class="iconbtn" title="Help for this section (F1)" aria-label="Help for this section" on:click={() => dispatch("help")}>
+    <Icon name="info" size={18} />
   </button>
   <button class="iconbtn" title="Browse for a folder…" aria-label="Browse for a folder" on:click={() => dispatch("browse")}>
     <Icon name="folder" />
