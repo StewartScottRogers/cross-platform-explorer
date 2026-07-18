@@ -7,6 +7,7 @@
   import { createEventDispatcher } from "svelte";
   import { invoke } from "../invoke";
   import Icon from "./Icon.svelte";
+  import { t } from "../i18n";
   import { groupMatches, baseName, highlightSegments, pushRecentSearch, type ContentSearchResult } from "../contentSearch";
   import { lsGet, lsSet, lsBool } from "../persist";
 
@@ -86,16 +87,16 @@
   <!-- svelte-ignore a11y-click-events-have-key-events a11y-no-static-element-interactions a11y-no-noninteractive-element-interactions -->
   <div class="dialog" role="dialog" aria-modal="true" on:click|stopPropagation>
     <header>
-      <h2>Search in files</h2>
+      <h2>{$t("search.inFilesTitle")}</h2>
       <span class="root" title={root}>{baseName(root) || root}</span>
-      <button class="x" title="Close" on:click={() => dispatch("close")}><Icon name="close" size={14} /></button>
+      <button class="x" title={$t("common.close")} on:click={() => dispatch("close")}><Icon name="close" size={14} /></button>
     </header>
 
     <form class="query-row" on:submit|preventDefault={run}>
       <!-- svelte-ignore a11y-autofocus -->
       <input
         class="q"
-        placeholder="Text to find inside files"
+        placeholder={$t("search.inFilesPlaceholder")}
         bind:value={query}
         autofocus
         spellcheck="false"
@@ -105,33 +106,36 @@
       <datalist id="cs-recents">
         {#each recents as r}<option value={r}></option>{/each}
       </datalist>
-      <label class="case" title="Match case"><input type="checkbox" bind:checked={caseSensitive} /> Aa</label>
-      <button class="btn primary" type="submit" disabled={!query.trim() || loading}>Search</button>
+      <label class="case" title={$t("search.matchCase")}><input type="checkbox" bind:checked={caseSensitive} /> Aa</label>
+      <button class="btn primary" type="submit" disabled={!query.trim() || loading}>{$t("search.button")}</button>
     </form>
 
     <div class="results">
       {#if loading}
-        <p class="dim">Searching…</p>
+        <p class="dim">{$t("search.searching")}</p>
       {:else if error}
         <p class="err">{error}</p>
       {:else if searched && result.matches.length === 0}
-        <p class="dim">No matches in this folder.</p>
+        <p class="dim">{$t("search.noMatchesInFolder")}</p>
       {:else if result.matches.length > 0}
         {#if groups.length > 1}
-          <input class="result-filter" bind:value={resultFilter} placeholder="Filter files…" spellcheck="false" aria-label="Filter result files" />
+          <input class="result-filter" bind:value={resultFilter} placeholder={$t("search.filterFiles")} spellcheck="false" aria-label={$t("search.filterResultsAria")} />
         {/if}
         <p class="summary">
-          {result.matches.length} match{result.matches.length === 1 ? "" : "es"} in {groups.length} file{groups.length === 1 ? "" : "s"}
-          {#if resultFilter.trim()}<span class="dim"> · {shownGroups.length} shown</span>{/if}
-          {#if result.truncated}<span class="dim"> (showing the first results)</span>{/if}
+          {$t("search.matchesInFiles", {
+            matches: result.matches.length === 1 ? $t("search.matchOne", { count: result.matches.length }) : $t("search.matchMany", { count: result.matches.length }),
+            files: groups.length === 1 ? $t("search.fileOne", { count: groups.length }) : $t("search.fileMany", { count: groups.length }),
+          })}
+          {#if resultFilter.trim()}<span class="dim"> · {$t("search.shown", { count: shownGroups.length })}</span>{/if}
+          {#if result.truncated}<span class="dim"> {$t("search.truncated")}</span>{/if}
         </p>
         {#if resultFilter.trim() && shownGroups.length === 0}
-          <p class="dim">No files match “{resultFilter.trim()}”.</p>
+          <p class="dim">{$t("search.noFilesMatch", { query: resultFilter.trim() })}</p>
         {/if}
         {#each shownGroups as g (g.path)}
           <div class="group">
             <div class="group-head">
-              <button class="chev" on:click|stopPropagation={() => toggleFile(g.path)} aria-label="Toggle file" title={collapsedFiles.has(g.path) ? "Expand" : "Collapse"}>{collapsedFiles.has(g.path) ? "▸" : "▾"}</button>
+              <button class="chev" on:click|stopPropagation={() => toggleFile(g.path)} aria-label={$t("search.toggleFile")} title={collapsedFiles.has(g.path) ? $t("home.expand") : $t("home.collapse")}>{collapsedFiles.has(g.path) ? "▸" : "▾"}</button>
               <button class="file" on:click={() => goToFile(g.path)} title={g.path}>
                 <Icon name="file" size={13} /> {baseName(g.path)}
                 <span class="count">{g.matches.length}</span>
