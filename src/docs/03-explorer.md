@@ -12,7 +12,9 @@ The explorer is the core of the app and is tuned to stay **fast, small, and pred
 - **Address bar** — type or paste a path; press Enter to go.
 - **Back / Forward / Up** — move through history and up the tree.
 - **Tabs** — Ctrl+T opens a new tab; each tab remembers its own folder and history.
-- **Sidebar** — Home, Favorites (pin folders you use often), and drives with free-space bars.
+- **Sidebar** — Home, Favorites (pin folders you use often), and drives with free-space bars. Each
+  section (Explore, Quick access, Drives, Favorites, Tags, Smart Folders) has a header you can click to
+  **collapse** it and reclaim vertical space; your choices persist across sessions.
 
 ## Files
 
@@ -50,6 +52,13 @@ The explorer is the core of the app and is tuned to stay **fast, small, and pred
 - **Selection** — multi-select with Shift/Ctrl; the status bar shows the count and total size.
 - **Operations** — copy, cut, paste, rename, delete (to the trash, restorable), new folder, and batch
   rename. Filesystem operations skip entries they can't read rather than failing the whole listing.
+- **Drag and drop** — drag any selection onto a folder row or a sidebar place/drive to move or copy it.
+  The action follows the OS convention: dropping **within the same drive moves**, **across drives copies**,
+  and you can force it with a modifier — hold **Ctrl** to copy, **Shift** to move. Dragging more than one
+  item shows a small badge with the count. You can also drag files **in** from the desktop or your system
+  file manager: drop them on the window and they're **copied** into the folder under the cursor (or the
+  current folder), with a highlight while you drag over. Drops run through the transfer manager, so a large
+  one shows the same progress panel as a paste.
 - **File transfers** — a paste that **copies** runs through the transfer manager: a small panel appears
   in the bottom-right showing the progress bar, file count, and any errors, and lets you **cancel**
   mid-copy. It stays hidden when nothing is transferring. (Moves are near-instant same-folder-volume
