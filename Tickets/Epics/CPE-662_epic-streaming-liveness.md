@@ -2,7 +2,7 @@
 id: CPE-662
 title: "EPIC: Streaming liveness — progressive middle-pane loading"
 type: Task
-status: Proposed
+status: In Progress
 priority: High
 component: Multiple
 tags: [epic]
@@ -78,3 +78,31 @@ degrades gracefully (a small folder still arrives in one batch).
 - Small folders are no slower/larger than before (measured) — the plain explorer stays fast & predictable.
 - The streaming pattern is documented as the standard for large/slow payloads and applied to at least
   one other producer beyond `list_dir`.
+
+## Decisions (activated 2026-07-18)
+
+Research resolved most open questions against the existing architecture:
+
+- **Transport:** Tauri v2 `ipc::Channel<Vec<DirEntry>>`, entries flushed in **batches of 256**. Keep the
+  synchronous `list_dir` (tests, archive expansion, any collect-to-vec caller) and share **one walker**
+  (`stream_dir_entries`) between it and the streaming command so behaviour can't diverge.
+- **Sorting — no backend sort, no row-jump special-casing.** The frontend *already* sorts reactively:
+  `visible = sortEntries(entries, …)` re-derives on every change to `entries` (`App.svelte:1005`). So
+  streaming is simply "append each batch to `entries`" and the existing reactive pipeline re-sorts to the
+  correct final order. In-place insertion as batches land is accepted (matches OS explorers). This
+  dissolves the hardest open question.
+- **Cancellation:** v1 uses a frontend **generation token** — a new `loadPath` supersedes, and batches
+  tagged with a stale generation are dropped. A **backend cooperative cancel** (stop walking a superseded
+  stream so a huge folder doesn't finish invisibly) is a separate follow-up child.
+- **Affordance:** keep a lightweight "loading" indicator while a stream is in flight; drop the
+  busy-cursor-until-done model for folder open (the pane is interactive as soon as the first batch lands).
+
+## Child tickets
+1. **CPE-663** — Backend streaming `list_dir_stream(path, channel)` over `ipc::Channel`, batched (256),
+   skip-unreadable preserved, sharing a `stream_dir_entries` walker with `list_dir`; cargo-tested.
+2. **CPE-664** — Frontend progressive render: `loadPath` opens a `Channel`, appends batches to `entries`,
+   generation-token supersede on navigation, loading affordance; small-folder no-regression. *(prereq: 663)*
+3. **CPE-665** — Backend cooperative cancellation: a generation/`AtomicBool` registry + cancel path so a
+   superseded stream stops walking rather than running to completion. *(prereq: 663/664)*
+4. **CPE-666** — Generalise: apply the channel-streaming shape to one more large/slow producer and
+   **document** it as the house style for bulk data. *(prereq: 664)*
