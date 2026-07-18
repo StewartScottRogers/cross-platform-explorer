@@ -300,6 +300,7 @@
     { id: "view.details", group: $t("palette.groupView"), label: $t("palette.viewDetails"), run: () => { view = "details"; settings.saveView(view); } },
     { id: "view.list", group: $t("palette.groupView"), label: $t("palette.viewList"), run: () => { view = "list"; settings.saveView(view); } },
     { id: "view.icons", group: $t("palette.groupView"), label: $t("palette.viewIcons"), run: () => { view = "icons"; settings.saveView(view); } },
+    { id: "view.gallery", group: $t("palette.groupView"), label: $t("palette.viewGallery"), run: () => { view = "gallery"; settings.saveView(view); } },
     { id: "sort.name", group: $t("palette.groupView"), label: $t("palette.sortName"), run: () => { sortKey = "name"; settings.saveSortKey(sortKey); } },
     { id: "sort.modified", group: $t("palette.groupView"), label: $t("palette.sortModified"), run: () => { sortKey = "modified"; settings.saveSortKey(sortKey); } },
     { id: "sort.type", group: $t("palette.groupView"), label: $t("palette.sortType"), run: () => { sortKey = "type"; settings.saveSortKey(sortKey); } },
@@ -2367,6 +2368,7 @@
         <option value="details">{$t("view.details")}</option>
         <option value="list">{$t("view.list")}</option>
         <option value="icons">{$t("tb.icons")}</option>
+        <option value="gallery">{$t("view.gallery")}</option>
       </select>
     </div>
     <div class="settings-row">

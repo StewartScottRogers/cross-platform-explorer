@@ -272,7 +272,7 @@
   </div>
 {:else}
   <!-- svelte-ignore a11y-no-static-element-interactions -->
-  <div class="rows" class:grid={view === "icons"} style="--filelist-cols: {colTemplate}" on:contextmenu={emptyContext}>
+  <div class="rows" class:grid={view === "icons" || view === "gallery"} class:gallery={view === "gallery"} style="--filelist-cols: {colTemplate}" on:contextmenu={emptyContext}>
     {#each entries as entry, i (entry.path)}
       <!--
         The view class MUST stay namespaced as "view-{view}".
@@ -317,10 +317,10 @@
         }}
       >
         <span class="cell name">
-          {#if view === "icons" && !entry.is_dir && isImage(entry.name)}
-            <ThumbnailImage path={entry.path} size={48} fallback={iconFor(entry)} />
+          {#if (view === "icons" || view === "gallery") && !entry.is_dir && isImage(entry.name)}
+            <ThumbnailImage path={entry.path} size={view === "gallery" ? 128 : 48} fallback={iconFor(entry)} />
           {:else}
-            <Icon name={iconFor(entry)} size={view === "icons" ? 40 : 16} />
+            <Icon name={iconFor(entry)} size={view === "gallery" ? 88 : view === "icons" ? 40 : 16} />
           {/if}
           {#if tagEntry.label}
             <span class="label-dot" style="background: {labelColor(tagEntry.label)}" title={tagEntry.label} aria-hidden="true" />
@@ -510,6 +510,11 @@
     grid-template-columns: repeat(auto-fill, minmax(124px, 1fr));
     gap: 6px;
     padding: 10px;
+  }
+  /* Gallery: larger tiles for a photo light-table (CPE-658). */
+  .rows.grid.gallery {
+    grid-template-columns: repeat(auto-fill, minmax(184px, 1fr));
+    gap: 10px;
   }
 
   .row.view-icons {

@@ -20,7 +20,7 @@ export interface Place {
 
 export type SortKey = "name" | "modified" | "type" | "size";
 export type SortDir = "asc" | "desc";
-export type ViewMode = "details" | "list" | "icons";
+export type ViewMode = "details" | "list" | "icons" | "gallery";
 
 export interface RecentFile {
   path: string;
