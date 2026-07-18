@@ -2345,7 +2345,6 @@
         {cutPaths}
         {renamingPath}
         {renameValue}
-        assetUrl={convertFileSrc}
         {columnWidths}
         on:resizeColumns={(e) => { columnWidths = e.detail; settings.saveColumnWidths(columnWidths); }}
         bind:rowEls

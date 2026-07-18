@@ -1,8 +1,32 @@
 import { describe, it, expect } from "vitest";
-import { categoryOf, typeName, sameTypeIndices, matchesFileFilter, CATEGORY_BY_EXT, TYPE_NAME_BY_EXT } from "./filetypes";
+import { categoryOf, typeName, sameTypeIndices, matchesFileFilter, isImage, CATEGORY_BY_EXT, TYPE_NAME_BY_EXT } from "./filetypes";
 
 const file = (extension: string) => ({ is_dir: false, extension });
 const folder = { is_dir: true, extension: "" };
+
+describe("isImage (CPE-643)", () => {
+  it("is true for the thumbnailable raster extensions, case-insensitively", () => {
+    for (const ext of ["jpg", "jpeg", "png", "gif", "webp", "bmp", "tif", "tiff", "avif"]) {
+      expect(isImage(`photo.${ext}`)).toBe(true);
+      expect(isImage(`PHOTO.${ext.toUpperCase()}`)).toBe(true);
+    }
+  });
+  it("uses the last extension of a multi-dot name", () => {
+    expect(isImage("archive.tar.png")).toBe(true);
+    expect(isImage("archive.png.tar")).toBe(false);
+  });
+  it("is false for non-image, vector, and unsupported formats", () => {
+    for (const name of ["notes.txt", "clip.mp4", "logo.svg", "favicon.ico", "raw.heic", "song.mp3"]) {
+      expect(isImage(name)).toBe(false);
+    }
+  });
+  it("is false for extensionless names, dotfiles, and trailing dots", () => {
+    expect(isImage("README")).toBe(false);
+    expect(isImage(".png")).toBe(false);
+    expect(isImage("photo.")).toBe(false);
+    expect(isImage("")).toBe(false);
+  });
+});
 
 describe("matchesFileFilter (CPE-358)", () => {
   it("'all' matches everything (incl. folders and unknown)", () => {
