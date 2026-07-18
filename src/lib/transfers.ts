@@ -58,6 +58,21 @@ export function dismiss(list: TransferState[], id: number): TransferState[] {
   return list.filter((t) => t.id !== id);
 }
 
+/**
+ * The base names among `sources` that already exist in `existing` (the destination folder's entry
+ * names) — i.e. copying these here would collide. Pure; drives the conflict chooser. Exact-match (a
+ * case-only difference just falls through to keep-both auto-rename, which is harmless).
+ */
+export function collidingNames(sources: string[], existing: string[]): string[] {
+  const set = new Set(existing);
+  const out: string[] = [];
+  for (const s of sources) {
+    const base = s.replace(/[\\/]+$/, "").split(/[\\/]/).pop() ?? s;
+    if (set.has(base)) out.push(base);
+  }
+  return out;
+}
+
 const store = writable<TransferState[]>([]);
 
 /** Reactive list of active + just-finished transfers (empty when idle). */

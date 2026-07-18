@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { upsertProgress, markFinished, dismiss, percent, type TransferState, type TransferProgress, type TransferReport } from "./transfers";
+import { upsertProgress, markFinished, dismiss, percent, collidingNames, type TransferState, type TransferProgress, type TransferReport } from "./transfers";
 
 const prog = (id: number, done: number, total: number): TransferProgress => ({
   id, total_bytes: total, done_bytes: done, total_items: 1, done_items: 0, current: "x",
@@ -32,6 +32,14 @@ describe("transfers reducer (CPE-622)", () => {
     l = upsertProgress(l, prog(1, 100, 100)); // a stray late event must not wipe the report
     expect(l[0].report).toEqual(r);
     expect(dismiss(l, 1)).toHaveLength(0);
+  });
+
+  it("finds base-name collisions against the destination (CPE-624)", () => {
+    const existing = ["a.txt", "sub", "keep.md"];
+    expect(collidingNames(["C:\\x\\a.txt", "C:\\x\\new.txt", "/y/sub"], existing)).toEqual(["a.txt", "sub"]);
+    expect(collidingNames(["/y/none.txt"], existing)).toEqual([]);
+    // Trailing slash on a folder source is stripped before matching.
+    expect(collidingNames(["/y/sub/"], existing)).toEqual(["sub"]);
   });
 
   it("computes percent by bytes, falling back to items, and 100 when finished", () => {
