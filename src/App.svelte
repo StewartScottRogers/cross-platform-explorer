@@ -59,7 +59,7 @@
   import PropertiesDialog from "./lib/components/PropertiesDialog.svelte";
   import BatchRenameDialog from "./lib/components/BatchRenameDialog.svelte";
   import TagEditor from "./lib/components/TagEditor.svelte";
-  import { initTags, tags, retagPath, renameTag, deleteTag } from "./lib/tags";
+  import { initTags, tags, retagPath, renameTag, deleteTag, importTags, exportTags } from "./lib/tags";
   import TagMenu from "./lib/components/TagMenu.svelte";
   import { filterEntriesByTag, tagCounts } from "./lib/tagFilter";
   import type { RenameItem } from "./lib/batchRename";
@@ -296,6 +296,8 @@
     { id: "app.settings", group: $t("palette.groupApp"), label: $t("palette.settings"), run: () => (showSettings = true) },
     { id: "app.documents", group: $t("palette.groupApp"), label: $t("palette.documents"), shortcut: "F1", run: () => openDocs(currentSection()) },
     { id: "app.shortcuts", group: $t("palette.groupApp"), label: $t("palette.shortcuts"), shortcut: "?", run: () => (shortcutsOpen = true) },
+    { id: "app.exportTags", group: $t("palette.groupApp"), label: $t("palette.exportTags"), keywords: "tags backup", run: exportTagsToFile },
+    { id: "app.importTags", group: $t("palette.groupApp"), label: $t("palette.importTags"), keywords: "tags restore merge", run: importTagsFromFile },
     { id: "app.about", group: $t("palette.groupApp"), label: $t("palette.about"), run: () => (showAbout = true) },
     // Jump back to a recently-visited folder (CPE-604) — the full path is a keyword so typing any
     // part of it matches, while the label stays the short folder name.
@@ -1917,6 +1919,31 @@
       const text = path.toLowerCase().endsWith(".txt") ? detailList(visible) : csvList(visible);
       await invoke("write_file_text", { path, contents: text });
       showNotice(`Saved ${visible.length} rows to ${path.split(/[\\/]/).pop()}.`);
+    } catch (e) {
+      showNotice(String(e), true);
+    }
+  }
+
+  /** Export the whole tag store to a JSON file (CPE-654). */
+  async function exportTagsToFile() {
+    try {
+      const path = await saveFileDialog({ defaultPath: "tags.json", filters: [{ name: "JSON", extensions: ["json"] }] });
+      if (!path) return;
+      await invoke("write_file_text", { path, contents: exportTags() });
+      showNotice(`Tags exported to ${path.split(/[\\/]/).pop()}.`);
+    } catch (e) {
+      showNotice(String(e), true);
+    }
+  }
+
+  /** Import a tag store JSON file, merged into the current tags (CPE-654). */
+  async function importTagsFromFile() {
+    try {
+      const picked = await openFolderDialog({ directory: false, multiple: false, filters: [{ name: "JSON", extensions: ["json"] }] });
+      if (!picked || typeof picked !== "string") return;
+      const json = await invoke<string>("read_file_text", { path: picked, maxBytes: 16 * 1024 * 1024 });
+      await importTags(json);
+      showNotice("Tags imported.");
     } catch (e) {
       showNotice(String(e), true);
     }
