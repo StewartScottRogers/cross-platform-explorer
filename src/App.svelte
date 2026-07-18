@@ -746,6 +746,9 @@
     // directory. A generation token supersedes an in-flight stream when the user navigates away, and the
     // reactive `visible` pipeline re-sorts each time `entries` grows, so the final order is unchanged.
     const gen = ++loadGen;
+    // Tell the backend to stop walking the folder we just left (CPE-665) so a huge/slow previous stream
+    // doesn't keep churning after we've moved on. No-op if it already finished.
+    if (gen > 1) rawInvoke("cancel_dir_stream", { streamId: gen - 1 }).catch(() => {});
     entries = [];
     loading = true;
     try {
@@ -755,7 +758,7 @@
         entries = entries.concat(batch);
         loading = false; // first real rows are in — reveal them (drop the "Loading…" placeholder)
       };
-      await rawInvoke("list_dir_stream", { path, onEntry: channel });
+      await rawInvoke("list_dir_stream", { path, streamId: gen, onEntry: channel });
     } catch (e) {
       if (gen === loadGen) {
         entries = [];

@@ -411,7 +411,10 @@ fn copy_dir_all(src: &Path, dst: &Path) -> std::io::Result<()> {
 #[tauri::command]
 fn list_dir(path: String) -> Result<Vec<DirEntry>, String> {
     let mut out = Vec::new();
-    stream_dir_entries(&path, LIST_DIR_BATCH, |batch| out.extend(batch))?;
+    stream_dir_entries(&path, LIST_DIR_BATCH, |batch| {
+        out.extend(batch);
+        std::ops::ControlFlow::Continue(())
+    })?;
     Ok(out)
 }
 
@@ -439,12 +442,13 @@ const LIST_DIR_BATCH: usize = 256;
 
 /// Walk `path`, invoking `flush` with each batch of up to `batch` readable entries as they're read.
 /// Unreadable entries are skipped (never fail the listing). Returns the total number of entries emitted.
-/// This is the single directory walker behind both the synchronous `list_dir` and the streaming
-/// `list_dir_stream` command, so their contents and skip behaviour stay identical.
+/// `flush` returns a `ControlFlow` so a streaming caller can stop the walk early (cancellation, CPE-665)
+/// at a batch boundary. This is the single directory walker behind both the synchronous `list_dir` and
+/// the streaming `list_dir_stream` command, so their contents and skip behaviour stay identical.
 fn stream_dir_entries(
     path: &str,
     batch: usize,
-    mut flush: impl FnMut(Vec<DirEntry>),
+    mut flush: impl FnMut(Vec<DirEntry>) -> std::ops::ControlFlow<()>,
 ) -> Result<usize, String> {
     let read = fs::read_dir(path).map_err(|e| format!("{path}: {e}"))?;
     let cap = batch.min(1024);
@@ -456,27 +460,65 @@ fn stream_dir_entries(
         buf.push(de);
         if buf.len() >= batch {
             total += buf.len();
-            flush(std::mem::replace(&mut buf, Vec::with_capacity(cap)));
+            if flush(std::mem::replace(&mut buf, Vec::with_capacity(cap))).is_break() {
+                return Ok(total);
+            }
         }
     }
     if !buf.is_empty() {
         total += buf.len();
-        flush(buf);
+        let _ = flush(buf);
     }
     Ok(total)
 }
 
+/// Registry of in-flight `list_dir_stream` walks' cancel flags, keyed by the frontend-supplied stream id,
+/// so `cancel_dir_stream` can stop a walk the user has navigated away from (CPE-665). Mirrors the
+/// transfer cancel registry.
+static DIR_STREAM_CANCELS: std::sync::OnceLock<
+    std::sync::Mutex<std::collections::HashMap<u64, std::sync::Arc<std::sync::atomic::AtomicBool>>>,
+> = std::sync::OnceLock::new();
+
+fn dir_stream_registry(
+) -> &'static std::sync::Mutex<std::collections::HashMap<u64, std::sync::Arc<std::sync::atomic::AtomicBool>>>
+{
+    DIR_STREAM_CANCELS.get_or_init(Default::default)
+}
+
 /// Streaming variant of `list_dir` (CPE-663, epic CPE-662): pushes `DirEntry` batches over an IPC channel
 /// as the directory is read, so the frontend paints the first rows immediately instead of waiting for the
-/// whole listing. Returns the total entry count once the walk completes.
+/// whole listing. `stream_id` (frontend-supplied, monotonic) registers a cancel flag polled each batch, so
+/// a superseded walk stops promptly instead of reading a huge folder to completion (CPE-665). Returns the
+/// total entry count once the walk completes (or is cancelled).
 #[tauri::command]
 fn list_dir_stream(
     path: String,
+    stream_id: u64,
     on_entry: tauri::ipc::Channel<Vec<DirEntry>>,
 ) -> Result<usize, String> {
-    stream_dir_entries(&path, LIST_DIR_BATCH, |batch| {
+    use std::sync::atomic::Ordering;
+    let cancel = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    dir_stream_registry().lock().unwrap().insert(stream_id, cancel.clone());
+    let result = stream_dir_entries(&path, LIST_DIR_BATCH, |batch| {
         let _ = on_entry.send(batch);
-    })
+        if cancel.load(Ordering::Relaxed) {
+            std::ops::ControlFlow::Break(())
+        } else {
+            std::ops::ControlFlow::Continue(())
+        }
+    });
+    dir_stream_registry().lock().unwrap().remove(&stream_id);
+    result
+}
+
+/// Signal an in-flight `list_dir_stream` to stop at the next batch boundary (CPE-665). A no-op if the
+/// stream already finished (its id is gone from the registry).
+#[tauri::command]
+fn cancel_dir_stream(stream_id: u64) {
+    use std::sync::atomic::Ordering;
+    if let Some(flag) = dir_stream_registry().lock().unwrap().get(&stream_id) {
+        flag.store(true, Ordering::Relaxed);
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -5357,6 +5399,7 @@ pub fn run() {
             entry_info,
             image_meta,
             list_dir_stream,
+            cancel_dir_stream,
             dir_size,
             folder_stats,
             hash_file,
@@ -5668,12 +5711,45 @@ mod tests {
             fs::write(d.join(format!("f{i:03}.txt")), b"x").unwrap();
         }
         let mut batch_sizes = Vec::new();
-        let n = stream_dir_entries(d.to_str().unwrap(), 256, |b| batch_sizes.push(b.len())).unwrap();
+        let n = stream_dir_entries(d.to_str().unwrap(), 256, |b| {
+            batch_sizes.push(b.len());
+            std::ops::ControlFlow::Continue(())
+        })
+        .unwrap();
         assert_eq!(n, 500);
         assert_eq!(batch_sizes.iter().sum::<usize>(), 500);
         assert!(batch_sizes.len() >= 2, "500 entries at batch 256 should flush more than once");
         assert!(batch_sizes.iter().all(|&s| s <= 256), "no batch exceeds the cap");
         let _ = fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn stream_dir_entries_stops_on_break() {
+        let d = scratch("streambreak");
+        for i in 0..1000 {
+            fs::write(d.join(format!("f{i:04}.txt")), b"x").unwrap();
+        }
+        let mut seen = 0usize;
+        // Break after the first flush — the walk must stop rather than read all 1000.
+        let n = stream_dir_entries(d.to_str().unwrap(), 100, |b| {
+            seen += b.len();
+            std::ops::ControlFlow::Break(())
+        })
+        .unwrap();
+        assert_eq!(seen, 100, "break after the first batch stops the walk");
+        assert_eq!(n, 100);
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn cancel_dir_stream_sets_the_registered_flag() {
+        use std::sync::atomic::Ordering;
+        let flag = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        dir_stream_registry().lock().unwrap().insert(999_001, flag.clone());
+        cancel_dir_stream(999_001);
+        assert!(flag.load(Ordering::Relaxed), "cancel should set the stream's flag");
+        cancel_dir_stream(999_002); // unknown id is a harmless no-op
+        dir_stream_registry().lock().unwrap().remove(&999_001);
     }
 
     #[test]
@@ -5685,7 +5761,11 @@ mod tests {
         fs::create_dir(d.join("sub")).unwrap();
         // A tiny batch of 2 exercises the mid-walk flush path.
         let mut streamed = Vec::new();
-        stream_dir_entries(d.to_str().unwrap(), 2, |b| streamed.extend(b)).unwrap();
+        stream_dir_entries(d.to_str().unwrap(), 2, |b| {
+            streamed.extend(b);
+            std::ops::ControlFlow::Continue(())
+        })
+        .unwrap();
         let listed = list_dir(d.to_string_lossy().to_string()).unwrap();
         let mut a: Vec<_> = streamed.iter().map(|e| e.name.clone()).collect();
         let mut b: Vec<_> = listed.iter().map(|e| e.name.clone()).collect();
