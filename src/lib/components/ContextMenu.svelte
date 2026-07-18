@@ -163,6 +163,9 @@
       <button class="row" role="menuitem" on:click={() => run("favorite")}>
         <Icon name="star" size={15} /> {favorited ? $t('ctx.removeFavorite') : $t('ctx.addFavorite')}
       </button>
+      <button class="row" role="menuitem" on:click={() => run("tags")}>
+        <Icon name="tag" size={15} /> {$t('ctx.tags')}
+      </button>
     {/if}
     <div class="sep" />
     <button class="row" role="menuitem" on:click={() => run("reveal")}>

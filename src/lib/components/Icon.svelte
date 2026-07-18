@@ -214,6 +214,9 @@
   {:else if name === "keyboard"}
     <rect x="2" y="6" width="20" height="12" rx="2" />
     <path d="M6 9h.01M10 9h.01M14 9h.01M18 9h.01M6 12h.01M10 12h.01M14 12h.01M18 12h.01M8 15h8" />
+  {:else if name === "tag"}
+    <path d="M4 4h7l9 9-7 7-9-9z" />
+    <circle cx="8" cy="8" r="1.3" fill="currentColor" stroke="none" />
   {/if}
 </svg>
 

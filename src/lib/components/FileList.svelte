@@ -12,6 +12,7 @@
   import type { DirEntry, SortKey, SortDir, ViewMode } from "../types";
   import type { AgentActivity } from "../agentActivity";
   import { folderHasActivity } from "../agentActivity";
+  import { tags, entryFor, labelColor } from "../tags";
 
   export let entries: DirEntry[] = [];
   /** Agent Watch (CPE-399): per-path live activity, keyed by absolute path. Empty ⇒ no
@@ -282,6 +283,7 @@
         the status bar correctly reported "18 items". Shipped in v0.5.0. CPE-045.
       -->
       {@const insideActive = entry.is_dir && folderHasActivity(activityPaths, entry.path)}
+      {@const tagEntry = entryFor($tags, entry.path)}
       <div
         class="row view-{view}"
         class:selected={isSelected(selection, i)}
@@ -291,6 +293,8 @@
         class:dragging={draggedPaths.includes(entry.path)}
         class:agent-active={!!activity[entry.path]}
         class:agent-inside={insideActive}
+        class:tagged={!!tagEntry.label}
+        style={tagEntry.label ? `--label-color: ${labelColor(tagEntry.label)}` : ""}
         data-agent-kind={activity[entry.path]?.kind ?? ""}
         bind:this={rowEls[i]}
         role="button"
@@ -318,6 +322,9 @@
           {:else}
             <Icon name={iconFor(entry)} size={view === "icons" ? 40 : 16} />
           {/if}
+          {#if tagEntry.label}
+            <span class="label-dot" style="background: {labelColor(tagEntry.label)}" title={tagEntry.label} aria-hidden="true" />
+          {/if}
           {#if renamingPath === entry.path}
             <input
               class="rename"
@@ -330,6 +337,13 @@
             />
           {:else}
             <span class="ellip">{entry.name}</span>
+          {/if}
+          {#if tagEntry.tags.length > 0 && renamingPath !== entry.path}
+            <span class="tag-chips">
+              {#each tagEntry.tags as tag (tag)}
+                <span class="tag-chip">{tag}</span>
+              {/each}
+            </span>
           {/if}
           {#if activity[entry.path]}
             <span class="agent-badge {activity[entry.path].kind}">{$t(ACTIVITY_LABEL_KEY[activity[entry.path].kind])}</span>
@@ -425,6 +439,49 @@
     line-height: 1;
     color: var(--accent, #2f6fed);
     opacity: 0.8;
+  }
+
+  /* Tags (CPE-638): a tagged file gets a small colour dot before its name and its tags as chips
+     after it; a labelled file also gets a soft left accent bar. Purely additive — an untagged row
+     is untouched. Agent Watch's own accent bar (agent-active/inside) takes precedence over the
+     label tint so a live change is never masked. */
+  .row.tagged:not(.agent-active):not(.agent-inside) {
+    box-shadow: inset 3px 0 0 var(--label-color);
+  }
+  .label-dot {
+    flex: 0 0 auto;
+    width: 9px;
+    height: 9px;
+    border-radius: 999px;
+    box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.15) inset;
+  }
+  /* Chip row reflows (wraps + grows) in icons view; in the fixed-height details/list rows it stays
+     on one line and is clipped by the cell's overflow — the name keeps priority (tick-tacks rule:
+     chips never wrap their own text). */
+  .tag-chips {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 4px;
+    min-width: 0;
+    flex: 0 1 auto;
+  }
+  .tag-chip {
+    flex: 0 0 auto;
+    max-width: 140px;
+    padding: 0 6px;
+    border-radius: 999px;
+    font-size: 10.5px;
+    line-height: 16px;
+    background: var(--surface-alt);
+    border: 1px solid var(--border);
+    color: var(--text-dim);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .row.view-icons .tag-chips {
+    justify-content: center;
+    width: 100%;
   }
 
   .row.lead:not(.selected) {

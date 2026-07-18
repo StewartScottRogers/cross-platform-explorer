@@ -58,6 +58,8 @@
   import { parentDir as parentOfPath, baseName } from "./lib/contentSearch";
   import PropertiesDialog from "./lib/components/PropertiesDialog.svelte";
   import BatchRenameDialog from "./lib/components/BatchRenameDialog.svelte";
+  import TagEditor from "./lib/components/TagEditor.svelte";
+  import { initTags } from "./lib/tags";
   import type { RenameItem } from "./lib/batchRename";
 
   import { t } from "./lib/i18n";
@@ -198,6 +200,8 @@
   let confirm: { title: string; message: string; label: string; onYes: () => void } | null = null;
   let propsFor: DirEntry[] | null = null;
   let batchRenameFor: DirEntry[] | null = null;
+  /** The entry whose tags/label are being edited (CPE-637), or null when the editor is closed. */
+  let tagEditorFor: DirEntry | null = null;
 
   // ---- Application menu (CPE-229) ----
   const REPO_URL = "https://github.com/StewartScottRogers/cross-platform-explorer";
@@ -1664,6 +1668,7 @@
       case "batch-rename": beginBatchRename(); break;
       case "delete": askDelete(false); break;
       case "properties": openProperties(); break;
+      case "tags": if (selectedEntries.length === 1) tagEditorFor = selectedEntries[0]; break;
       case "new-folder": newFolder(); break;
       case "new-file": newFile(); break;
       case "select-all": selection = selectAll(visible.length); break;
@@ -2061,6 +2066,9 @@
     // Transfer manager (CPE-613): consume progress events, and on completion refresh the current
     // folder (a copy may have landed here) + report the outcome. Idle until a transfer starts.
     initTransfers().catch(() => {});
+    // Tag store (CPE-636): load persisted tags/labels once so rows can show chips + tints. Idle
+    // (empty) until something is actually tagged, so the plain explorer is unaffected.
+    initTags().catch(() => {});
     listen<TransferReport>("transfer://done", (e) => {
       const r = e.payload;
       loadPath(currentPath).catch(() => {});
@@ -2543,6 +2551,14 @@
 
 {#if propsFor}
   <PropertiesDialog entries={propsFor} on:close={() => (propsFor = null)} />
+{/if}
+
+{#if tagEditorFor}
+  <TagEditor
+    path={tagEditorFor.path}
+    name={tagEditorFor.name}
+    on:close={() => (tagEditorFor = null)}
+  />
 {/if}
 
 {#if showSettings}
