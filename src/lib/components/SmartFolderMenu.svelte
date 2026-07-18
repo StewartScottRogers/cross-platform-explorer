@@ -1,23 +1,22 @@
 <script lang="ts">
-  // Sidebar tag context menu (CPE-653, epic CPE-614): right-click a tag in the Tags section to rename
-  // it (across every file) or delete it. A small popover positioned at the click; theme-only colours
-  // per docs/design/MENUS.md (no red destructive text).
+  // Sidebar smart-folder context menu (CPE-667, epic CPE-614): right-click a saved smart folder to
+  // rename or delete it. Mirrors TagMenu; theme-only colours per docs/design/MENUS.md (no red text).
   import { createEventDispatcher, onMount } from "svelte";
   import { t } from "../i18n";
 
   export let x = 0;
   export let y = 0;
-  export let tag = "";
+  export let name = "";
 
-  const dispatch = createEventDispatcher<{ rename: string; remove: void; saveSmart: void; close: void }>();
+  const dispatch = createEventDispatcher<{ rename: string; remove: void; close: void }>();
 
-  let value = tag;
+  let value = name;
   let input: HTMLInputElement | undefined;
   onMount(() => input?.focus());
 
   function apply() {
     const v = value.trim();
-    if (v && v !== tag) dispatch("rename", v);
+    if (v && v !== name) dispatch("rename", v);
     else dispatch("close");
   }
 </script>
@@ -27,8 +26,8 @@
 <!-- svelte-ignore a11y-click-events-have-key-events a11y-no-static-element-interactions -->
 <div class="backdrop" on:click={() => dispatch("close")}>
   <!-- svelte-ignore a11y-click-events-have-key-events a11y-no-static-element-interactions a11y-no-noninteractive-element-interactions -->
-  <div class="menu" role="dialog" aria-label="Tag actions" style="left:{x}px; top:{y}px" on:click|stopPropagation>
-    <div class="head">{tag}</div>
+  <div class="menu" role="dialog" aria-label="Smart folder actions" style="left:{x}px; top:{y}px" on:click|stopPropagation>
+    <div class="head">{name}</div>
     <input
       bind:this={input}
       class="rename"
@@ -38,7 +37,6 @@
       autocomplete="off"
       aria-label={$t("ctx.rename")}
     />
-    <button class="btn wide" on:click={() => dispatch("saveSmart")}>{$t("smart.saveAs")}</button>
     <div class="row">
       <button class="btn primary" on:click={apply}>{$t("common.apply")}</button>
       <button class="btn" on:click={() => dispatch("remove")}>{$t("menu.delete")}</button>
@@ -59,7 +57,6 @@
   .rename { width: 100%; height: 30px; padding: 0 8px; font: inherit; font-size: 13px;
     border: 1px solid var(--border-strong); border-radius: var(--radius); background: var(--surface-alt); color: var(--text); }
   .rename:focus { outline: none; border-color: var(--accent); }
-  .btn.wide { width: 100%; margin-top: 8px; justify-content: center; }
   .row { display: flex; gap: 6px; margin-top: 8px; justify-content: flex-end; }
   .btn { height: 28px; padding: 0 10px; font: inherit; font-size: 12px; border-radius: var(--radius);
     border: 1px solid var(--border-strong); background: var(--surface-alt); color: var(--text); }

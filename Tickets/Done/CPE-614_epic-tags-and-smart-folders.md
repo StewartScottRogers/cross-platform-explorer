@@ -2,13 +2,13 @@
 id: CPE-614
 title: "EPIC: Tags, labels & smart folders"
 type: Task
-status: In Progress
+status: Done
 priority: Medium
 component: Multiple
 tags: [epic]
 estimate: 4h+
 created: 2026-07-18
-closed:
+closed: 2026-07-18
 ---
 
 ## Goal
@@ -72,3 +72,11 @@ lightweight organiser — a clear differentiator that stays additive (off = plai
 5. CPE-639 — "Tags" sidebar section (all tags + counts) → filter the view by a tag.
 6. CPE-640 — Import/export the tag store.
 7. CPE-641 — Docs + i18n for the tags feature.
+
+## Resolution (closed 2026-07-18)
+Tags shipped across 15 children (store/service, assign menu, chips, sidebar filter, import/export, bulk +
+batch tagging, filter helpers/indicator, tags-follow-move/rename), and the final DoD gate — "at least one
+smart-folder query type works end-to-end and updates as files change" — landed as CPE-667 (a saved,
+self-updating tag query surfaced as a virtual folder). DoD met: tag/label + chips + view/sidebar filter;
+one smart-folder query type live and reactive; tag store persists/exports with a moved/renamed story;
+zero weight when nothing tagged and no smart folder open; core logic headlessly tested. No carve-outs.

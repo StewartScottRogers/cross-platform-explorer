@@ -41,6 +41,12 @@ The explorer is the core of the app and is tuned to stay **fast, small, and pred
   single colour label. Tagged rows show their tags as small chips, and a labelled row gets a colour dot
   and a soft accent bar in its label's colour. Tags persist across sessions; untagged items look exactly
   as before.
+- **Smart folders** — a saved search surfaced as a virtual folder. Right-click a tag in the sidebar's
+  **Tags** section and choose **Save as smart folder**; it appears under **Smart Folders** in the
+  sidebar. Opening it lists every file carrying that tag, wherever they live, and the view refreshes
+  automatically as you add or remove that tag. It's a read-only view (open a file's real location to
+  change it); rename or delete a smart folder by right-clicking it. Smart folders persist across
+  sessions and cost nothing when you have none.
 - **Selection** — multi-select with Shift/Ctrl; the status bar shows the count and total size.
 - **Operations** — copy, cut, paste, rename, delete (to the trash, restorable), new folder, and batch
   rename. Filesystem operations skip entries they can't read rather than failing the whole listing.

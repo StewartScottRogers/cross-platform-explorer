@@ -521,6 +521,34 @@ fn cancel_dir_stream(stream_id: u64) {
     }
 }
 
+/// Metadata for a single path, or `None` if it can't be read (gone/unreadable). Used to build a listing
+/// from an arbitrary set of paths (smart folders, CPE-667) rather than one directory's children.
+fn entry_for_path(path: &str) -> Option<DirEntry> {
+    let p = Path::new(path);
+    let meta = fs::metadata(p).ok()?;
+    let is_dir = meta.is_dir();
+    Some(DirEntry {
+        hidden: is_hidden(p, &meta),
+        name: p
+            .file_name()
+            .map(|n| n.to_string_lossy().to_string())
+            .unwrap_or_else(|| path.to_string()),
+        path: path.to_string(),
+        is_dir,
+        size: if is_dir { 0 } else { meta.len() },
+        modified: meta.modified().ok().and_then(to_epoch_ms),
+        extension: if is_dir { String::new() } else { extension_of(p) },
+    })
+}
+
+/// Stat a set of paths into `DirEntry` rows for a virtual listing (smart folders, CPE-667). Paths that
+/// no longer exist or can't be read are silently skipped, so a smart folder self-heals as files move or
+/// are deleted rather than showing dead rows.
+#[tauri::command]
+fn entries_for_paths(paths: Vec<String>) -> Vec<DirEntry> {
+    paths.iter().filter_map(|p| entry_for_path(p)).collect()
+}
+
 // ---------------------------------------------------------------------------
 // Mutating file operations (CPE-030)
 //
@@ -5484,6 +5512,7 @@ pub fn run() {
             image_meta,
             list_dir_stream,
             cancel_dir_stream,
+            entries_for_paths,
             find_files_by_name_stream,
             dir_size,
             folder_stats,
@@ -6352,6 +6381,22 @@ mod tests {
         let f = d.join("x.parquet");
         fs::write(&f, b"not a parquet file").unwrap();
         assert!(parquet_info(&f.to_string_lossy()).is_err());
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn entries_for_paths_stats_existing_and_skips_missing() {
+        let d = scratch("entriesforpaths");
+        fs::write(d.join("a.txt"), b"hi").unwrap();
+        fs::create_dir(d.join("sub")).unwrap();
+        let a = d.join("a.txt").to_string_lossy().to_string();
+        let sub = d.join("sub").to_string_lossy().to_string();
+        let gone = d.join("nope.txt").to_string_lossy().to_string();
+        let out = entries_for_paths(vec![a.clone(), sub.clone(), gone]);
+        // The missing path is skipped; the two real ones come back with correct kinds.
+        assert_eq!(out.len(), 2);
+        assert!(out.iter().any(|e| e.name == "a.txt" && !e.is_dir && e.extension == "txt"));
+        assert!(out.iter().any(|e| e.name == "sub" && e.is_dir));
         let _ = fs::remove_dir_all(&d);
     }
 

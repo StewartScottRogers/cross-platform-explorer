@@ -9,6 +9,7 @@
   import { sessionColor, sessionNum, shortModel } from "../sessionChip";
   import type { DirEntry, Place, Favorite } from "../types";
   import type { AgentSession } from "../sidecar";
+  import type { SmartFolder } from "../smartFolders";
 
   export let places: Place[] = [];
   export let drives: Place[] = [];
@@ -30,6 +31,10 @@
   export let tagList: [string, number][] = [];
   /** The active tag filter (or ""), for the highlight. */
   export let selectedTag = "";
+  /** Saved smart folders, for the Smart Folders section (CPE-667). Empty ⇒ the section is hidden. */
+  export let smartFolders: SmartFolder[] = [];
+  /** The id of the currently-open smart folder (or ""), for the highlight. */
+  export let activeSmartFolder = "";
 
   const dispatch = createEventDispatcher<{
     navigate: string;
@@ -43,6 +48,8 @@
     drop: { paths: string[]; dest: string; copy: boolean };
     filterTag: string;
     tagMenu: { x: number; y: number; tag: string };
+    openSmartFolder: SmartFolder;
+    smartFolderMenu: { x: number; y: number; id: string; name: string };
   }>();
 
   /** Favorites section collapse state (transient, like the Home twisties). */
@@ -51,6 +58,8 @@
   let agentsOpen = true;
   /** Tags section collapse state (CPE-639). */
   let tagsOpen = true;
+  /** Smart Folders section collapse state (CPE-667). */
+  let smartOpen = true;
   const extOf = (name: string) => {
     const i = name.lastIndexOf(".");
     return i > 0 ? name.slice(i + 1).toLowerCase() : "";
@@ -257,6 +266,33 @@
             <Icon name="tag" />
             <span class="label">{tag}</span>
             <span class="tag-count">{count}</span>
+          </button>
+        {/each}
+      </div>
+    {/if}
+    <div class="navigation-pane-sep" />
+  {/if}
+  {#if smartFolders.length > 0}
+    <div class="nav-item fav-head">
+      <button class="twisty" class:open={smartOpen} title={smartOpen ? "Collapse" : "Expand"} on:click={() => (smartOpen = !smartOpen)}>
+        <Icon name="chev-right" size={12} />
+      </button>
+      <Icon name="filter" />
+      <span class="label fav-title">{$t("smart.section")}</span>
+    </div>
+    {#if smartOpen}
+      <div class="nav-children">
+        {#each smartFolders as sf (sf.id)}
+          <button
+            class="nav-item fav-item"
+            class:active={activeSmartFolder === sf.id}
+            title={$t("smart.itemTip", { tag: sf.tag })}
+            on:click={() => dispatch("openSmartFolder", sf)}
+            on:contextmenu|preventDefault={(e) => dispatch("smartFolderMenu", { x: e.clientX, y: e.clientY, id: sf.id, name: sf.name })}
+          >
+            <span class="twisty hidden" />
+            <Icon name="filter" />
+            <span class="label">{sf.name}</span>
           </button>
         {/each}
       </div>

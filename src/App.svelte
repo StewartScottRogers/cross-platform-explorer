@@ -61,7 +61,16 @@
   import BatchRenameDialog from "./lib/components/BatchRenameDialog.svelte";
   import TagEditor from "./lib/components/TagEditor.svelte";
   import { initTags, tags, retagPath, renameTag, deleteTag, importTags, exportTags } from "./lib/tags";
+  import {
+    smartFolders,
+    smartFolderPaths,
+    saveSmartFolder,
+    renameSaved as renameSmartSaved,
+    removeSaved as removeSmartSaved,
+    type SmartFolder,
+  } from "./lib/smartFolders";
   import TagMenu from "./lib/components/TagMenu.svelte";
+  import SmartFolderMenu from "./lib/components/SmartFolderMenu.svelte";
   import { filterEntriesByTag, tagCounts } from "./lib/tagFilter";
   import type { RenameItem } from "./lib/batchRename";
 
@@ -194,6 +203,8 @@
   let selectedTag = "";
   /** Right-click menu for a sidebar tag (rename/delete), or null (CPE-653). */
   let tagMenu: { x: number; y: number; tag: string } | null = null;
+  /** Right-click menu for a sidebar smart folder (rename/delete), or null (CPE-667). */
+  let smartFolderMenu: { x: number; y: number; id: string; name: string } | null = null;
   /** Full-screen quick-look of images (Space), or null (CPE-645). */
   let quickLook: { images: { path: string; name: string }[]; index: number } | null = null;
 
@@ -269,7 +280,7 @@
   // Command Palette (CPE-602): Ctrl+Shift+P. The command list reuses existing handlers — nothing is
   // duplicated; `enabled` closures read live state so context-invalid commands grey out.
   let paletteOpen = false;
-  const inFolder = () => !isHome && !archive;
+  const inFolder = () => !isHome && !archive && !smartFolder;
   const hasSelection = () => selectedEntries.length > 0;
   const oneSelected = () => selectedEntries.length === 1;
   const canCloseTab = () => tabs.length > 1;
@@ -604,6 +615,33 @@
   interface ArchiveView { zipPath: string; zipName: string; entries: ArchiveEntry[]; inner: string }
   let archive: ArchiveView | null = null;
 
+  // Active smart folder (CPE-667): a saved tag query opened as a virtual, read-only listing. `null` when
+  // not in one. `smartEntries` is the statted result of its matching paths, refreshed reactively as the
+  // tag store changes so the view self-updates.
+  let smartFolder: SmartFolder | null = null;
+  let smartEntries: DirEntry[] = [];
+  $: smartPaths = smartFolder ? smartFolderPaths($tags, smartFolder) : [];
+  $: void loadSmartEntries(smartFolder, smartPaths);
+  async function loadSmartEntries(sf: SmartFolder | null, paths: string[]) {
+    if (!sf) { smartEntries = []; return; }
+    try {
+      smartEntries = await invoke<DirEntry[]>("entries_for_paths", { paths });
+    } catch {
+      smartEntries = [];
+    }
+  }
+  function openSmartFolder(sf: SmartFolder) {
+    smartFolder = sf;
+    archive = null;
+    selectedTag = "";
+    search = "";
+    selection = emptySelection();
+  }
+  function exitSmartFolder() {
+    smartFolder = null;
+    selection = emptySelection();
+  }
+
   const isArchiveFile = (e: DirEntry) => !e.is_dir && ARCHIVE_EXTS.has(e.extension);
 
   // Formats extract_archive can unpack to a folder (CPE-252): the zip family plus
@@ -658,6 +696,10 @@
 
   /** Guard file-mutating actions: the in-archive view is read-only. */
   function blockedInArchive(): boolean {
+    if (smartFolder) {
+      showNotice("This is a smart folder — a saved search view. Open a file's real location to change it.", true);
+      return true;
+    }
     if (archive) {
       showNotice("This is a read-only view inside an archive.", true);
       return true;
@@ -728,6 +770,8 @@
     const previouslySelected = keepSelection
       ? selectedIndices(selection).map((i) => visible[i]?.path).filter(Boolean)
       : [];
+
+    smartFolder = null; // navigating to a real folder exits any open smart folder (CPE-667)
 
     if (!keepSelection) {
       selection = emptySelection();
@@ -1005,14 +1049,18 @@
   // ---- derived listing ----
   $: folderName = archive
     ? (archive.inner ? archive.inner.split("/").at(-1)! : archive.zipName)
+    : smartFolder ? smartFolder.name
     : isHome ? "Home" : (splitPath(currentPath).at(-1)?.name ?? currentPath);
   $: searching = search.trim().length > 0;
 
   // Folder-context detection (CPE-235): runs on the RAW listing (so hidden
   // markers like `.git` are seen regardless of the show-hidden setting).
-  $: folderContexts = (isHome || archive) ? [] : detectContexts({ path: currentPath, entries });
+  $: folderContexts = (isHome || archive || smartFolder) ? [] : detectContexts({ path: currentPath, entries });
 
-  $: shown = entries.filter((e) => showHidden || !e.hidden);
+  // A smart folder swaps the base listing for its statted matches; everything downstream (hidden/search/
+  // type filters, sort) is unchanged (CPE-667).
+  $: baseEntries = smartFolder ? smartEntries : entries;
+  $: shown = baseEntries.filter((e) => showHidden || !e.hidden);
 
   $: filtered = searching
     ? shown.filter((e) => matchesQuery(e.name, search))
@@ -1035,18 +1083,20 @@
 
   $: crumbs = archive
     ? [{ name: "Home", path: HOME }, ...splitPath(currentPath), ...archiveCrumbs(archive)]
-    : isHome
-      ? [{ name: "Home", path: HOME }]
-      : [{ name: "Home", path: HOME }, ...splitPath(currentPath)];
+    : smartFolder
+      ? [{ name: "Home", path: HOME }, { name: smartFolder.name, path: "" }]
+      : isHome
+        ? [{ name: "Home", path: HOME }]
+        : [{ name: "Home", path: HOME }, ...splitPath(currentPath)];
 
   $: selectedEntries = selectedIndices(selection)
     .map((i) => visible[i])
     .filter(Boolean);
 
   $: selectedSize = selectedEntries.reduce((n, e) => n + (e.is_dir ? 0 : e.size), 0);
-  $: itemCount = isHome ? places.length + drives.length + pins.length : visible.length;
+  $: itemCount = (isHome && !smartFolder) ? places.length + drives.length + pins.length : visible.length;
   // The folder's pre-filter total, so the status bar can read "X of Y items" (CPE-407).
-  $: totalCount = isHome || archive ? itemCount : shown.length;
+  $: totalCount = ((isHome && !smartFolder) || archive) ? itemCount : shown.length;
   $: pasteCheck = clipCanPaste(clipboard, isHome ? "" : currentPath);
   $: cutPaths = clipboard.mode === "cut" ? clipboard.paths : [];
 
@@ -2358,8 +2408,12 @@
       {draggedPaths}
       {tagList}
       {selectedTag}
+      smartFolders={$smartFolders}
+      activeSmartFolder={smartFolder?.id ?? ""}
       on:filterTag={(e) => (selectedTag = selectedTag === e.detail ? "" : e.detail)}
       on:tagMenu={(e) => (tagMenu = e.detail)}
+      on:openSmartFolder={(e) => openSmartFolder(e.detail)}
+      on:smartFolderMenu={(e) => (smartFolderMenu = e.detail)}
       on:navigate={(e) => { if (archive) exitArchive(); navigate(e.detail); }}
       on:openFile={(e) => openRecent(e.detail)}
       on:home={() => { if (archive) exitArchive(); navigate(HOME); }}
@@ -2418,7 +2472,7 @@
    </Toolbar>
    <ContextBar contexts={folderContexts} on:action={(e) => handleContextAction(e.detail)} />
    <div class="filelist-pane" role="region" aria-label={$t("tb.fileList")}>
-    {#if isHome}
+    {#if isHome && !smartFolder}
       <HomeView
         {places}
         {drives}
@@ -2810,7 +2864,19 @@
     tag={tagMenu.tag}
     on:rename={(e) => { const old = tagMenu?.tag ?? ""; if (selectedTag === old) selectedTag = e.detail; renameTag(old, e.detail).catch((err) => showNotice(String(err), true)); tagMenu = null; }}
     on:remove={() => { const tg = tagMenu?.tag ?? ""; if (selectedTag === tg) selectedTag = ""; deleteTag(tg).catch((err) => showNotice(String(err), true)); tagMenu = null; }}
+    on:saveSmart={() => { const tg = tagMenu?.tag ?? ""; if (tg) { saveSmartFolder(tg, tg); showNotice($t("smart.saved", { name: tg })); } tagMenu = null; }}
     on:close={() => (tagMenu = null)}
+  />
+{/if}
+
+{#if smartFolderMenu}
+  <SmartFolderMenu
+    x={smartFolderMenu.x}
+    y={smartFolderMenu.y}
+    name={smartFolderMenu.name}
+    on:rename={(e) => { renameSmartSaved(smartFolderMenu?.id ?? "", e.detail); if (smartFolder && smartFolder.id === smartFolderMenu?.id) smartFolder = { ...smartFolder, name: e.detail }; smartFolderMenu = null; }}
+    on:remove={() => { const id = smartFolderMenu?.id ?? ""; if (smartFolder?.id === id) exitSmartFolder(); removeSmartSaved(id); smartFolderMenu = null; }}
+    on:close={() => (smartFolderMenu = null)}
   />
 {/if}
 
