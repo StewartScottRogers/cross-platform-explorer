@@ -8,7 +8,7 @@
   import { openUrl, revealItemInDir } from "@tauri-apps/plugin-opener";
   import { getVersion } from "@tauri-apps/api/app";
   import { WebviewWindow } from "@tauri-apps/api/webviewWindow";
-  import { emit, once } from "@tauri-apps/api/event";
+  import { emit, once, listen } from "@tauri-apps/api/event";
 
   import Icon from "./lib/components/Icon.svelte";
   import ContextBar from "./lib/components/ContextBar.svelte";
@@ -50,6 +50,8 @@
   import ShortcutsDialog from "./lib/components/ShortcutsDialog.svelte";
   import ContentSearchDialog from "./lib/components/ContentSearchDialog.svelte";
   import FileNameSearchDialog from "./lib/components/FileNameSearchDialog.svelte";
+  import TransferPanel from "./lib/components/TransferPanel.svelte";
+  import { initTransfers, startTransfer, type TransferReport } from "./lib/transfers";
   import DuplicatesDialog from "./lib/components/DuplicatesDialog.svelte";
   import { namesList, detailList, csvList } from "./lib/listing";
   import { parentDir as parentOfPath, baseName } from "./lib/contentSearch";
@@ -406,6 +408,7 @@
   let aiConsoleAvailable = false;
   /** Teardown for the Agent Watch session listener (CPE-396). */
   let unlistenSessions: (() => void) | null = null;
+  let unlistenTransferDone: (() => void) | null = null;
   // Agent Watch view (CPE-399): the Project folder currently being watched (or ""), and the
   // teardown for its activity listener. Watching turns on only while the explorer is inside a
   // running agent's project, and off the moment it leaves — off means off (AGENT-WATCH.md).
@@ -1233,30 +1236,35 @@
     }
     const wasCut = clipboard.mode === "cut";
     const sources = [...clipboard.paths];
-    const cmd = wasCut ? "move_entries" : "copy_entries";
-    try {
-      const results = await invoke<OpResult[]>(cmd, {
-        paths: sources,
-        dest: currentPath,
-      });
-      reportResults(results, wasCut ? "Moved" : "Copied");
 
-      // Only a MOVE is undoable. A copy is not — undoing it would mean deleting
-      // the new file, which is a destructive act to reverse a harmless one.
-      if (wasCut) {
-        const moves = results
-          .map((r, i) => ({ from: sources[i], to: r.path, ok: r.ok }))
-          .filter((m) => m.ok)
-          .map(({ from, to }) => ({ from, to }));
-        if (moves.length > 0) {
-          undoStack = pushUndo(undoStack, {
-            kind: "move",
-            moves,
-            label: `Move ${moves.length} item${moves.length === 1 ? "" : "s"}`,
-          });
-        }
-        clipboard = emptyClipboard();
+    // COPY → the transfer engine (CPE-613): progress shows in the operations panel and the
+    // transfer://done listener refreshes the folder + reports. Copies aren't undoable, so there's no
+    // undo coupling; conflict policy "keepboth" preserves the old auto-rename-on-collision behaviour.
+    if (!wasCut) {
+      try {
+        await startTransfer(sources, currentPath, "copy", "keepboth");
+      } catch (e) {
+        showNotice(String(e), true);
       }
+      return;
+    }
+
+    // MOVE → the existing synchronous path: instant same-volume rename and undo support.
+    try {
+      const results = await invoke<OpResult[]>("move_entries", { paths: sources, dest: currentPath });
+      reportResults(results, "Moved");
+      const moves = results
+        .map((r, i) => ({ from: sources[i], to: r.path, ok: r.ok }))
+        .filter((m) => m.ok)
+        .map(({ from, to }) => ({ from, to }));
+      if (moves.length > 0) {
+        undoStack = pushUndo(undoStack, {
+          kind: "move",
+          moves,
+          label: `Move ${moves.length} item${moves.length === 1 ? "" : "s"}`,
+        });
+      }
+      clipboard = emptyClipboard();
       await loadPath(currentPath);
     } catch (e) {
       showNotice(String(e), true);
@@ -2023,6 +2031,17 @@
     // them (Agent Watch, CPE-396). Idle until a session announces itself; unlistened on teardown.
     initAgentSessions().then((un) => (unlistenSessions = un)).catch(() => {});
 
+    // Transfer manager (CPE-613): consume progress events, and on completion refresh the current
+    // folder (a copy may have landed here) + report the outcome. Idle until a transfer starts.
+    initTransfers().catch(() => {});
+    listen<TransferReport>("transfer://done", (e) => {
+      const r = e.payload;
+      loadPath(currentPath).catch(() => {});
+      if (r.cancelled) showNotice("Copy cancelled.");
+      else if (r.failed > 0) showNotice(`Copied ${r.transferred}, ${r.failed} failed.`, true);
+      else showNotice(`Copied ${r.transferred} item${r.transferred === 1 ? "" : "s"}.`);
+    }).then((un) => (unlistenTransferDone = un)).catch(() => {});
+
     try {
       const [p, d, h, canRestore] = await Promise.all([
         invoke<Place[]>("special_folders"),
@@ -2055,6 +2074,7 @@
 
   onDestroy(() => {
     unlistenSessions?.();
+    unlistenTransferDone?.();
     unlistenActivity?.();
     if (watchRefreshTimer) clearTimeout(watchRefreshTimer);
     if (autoMirrorTimer) clearInterval(autoMirrorTimer);
@@ -2581,6 +2601,8 @@
 {#if showDocs}
   <DocsView initialSlug={docsSlug} on:close={() => (showDocs = false)} />
 {/if}
+
+<TransferPanel />
 
 {#if paletteOpen}
   <CommandPalette commands={paletteCommands} on:close={() => (paletteOpen = false)} />
