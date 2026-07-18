@@ -64,6 +64,10 @@ Then tag `vX.Y.Z` and push â€” CI does the rest.
   [docs/design/MENUS.md](docs/design/MENUS.md). Key rule: item text is always `var(--text)` (never a
   hard-coded colour, never red for "destructive"); colours come from theme variables so menus are
   identical light/dark and cross-platform. New menus must match it.
+- **Tabs** — every tab strip (main window `.tabbar`, AI Console `#tabs`, future ones) uses one
+  conventional active-tab treatment: an **accent top-bar** + content-surface background lifting it onto
+  the pane, with **inactive tabs as recessed chips** (subtle fill + dimmed text), all from theme
+  variables. Standard: [docs/design/TABS.md](docs/design/TABS.md). New tab strips reuse `.tab`/`.tab.active`.
 - **Busy cursor / `invoke`** — production code imports `invoke` from `src/lib/invoke.ts` (the
   busy-tracking wrapper), **never** from `@tauri-apps/api/core`, so a slow command app-wide raises the
   OS wait cursor for free. Operations that render their own progress use `rawInvoke` + the guard-test

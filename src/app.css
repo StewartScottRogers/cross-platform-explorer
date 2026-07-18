@@ -84,12 +84,21 @@ button:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
   height: 34px; padding: 0 8px 0 12px;
   border-radius: var(--radius) var(--radius) 0 0;
   color: var(--text-dim);
+  /* Inactive tabs read as distinct, recessed chips (not just dimmed text). */
+  background: var(--surface-alt);
+  box-shadow: inset 0 0 0 1px var(--border);
   max-width: 240px; min-width: 120px;
+  cursor: pointer;
 }
+.tab:hover { background: var(--hover); color: var(--text); }
 .tab.active {
   background: var(--surface);
   color: var(--text);
-  box-shadow: 0 -1px 0 var(--border), 1px 0 0 var(--border), -1px 0 0 var(--border);
+  font-weight: 600;
+  /* Conventional active tab: an accent bar along the top + a 3-sided border that lifts it onto the
+     content surface below (no bottom edge, so it visually connects to the pane). */
+  box-shadow: inset 0 2px 0 0 var(--accent),
+              0 -1px 0 var(--border), 1px 0 0 var(--border), -1px 0 0 var(--border);
 }
 .tab .tab-label {
   flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
