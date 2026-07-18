@@ -12,6 +12,13 @@ describe("tags helpers (CPE-636)", () => {
     expect(entryFor(store, "/a/missing")).toEqual({ tags: [], label: "" });
   });
 
+  it("entryFor is null-safe — an absent/empty store yields an empty entry (CPE-638)", () => {
+    // The row renderer calls entryFor($tags, path) on every entry; the store must never crash it,
+    // even before the tag store has loaded.
+    expect(entryFor(undefined as unknown as TagStore, "/a/one")).toEqual({ tags: [], label: "" });
+    expect(entryFor({}, "/a/one")).toEqual({ tags: [], label: "" });
+  });
+
   it("hasTag reports membership per path", () => {
     expect(hasTag(store, "/a/one", "urgent")).toBe(true);
     expect(hasTag(store, "/a/one", "home")).toBe(false);

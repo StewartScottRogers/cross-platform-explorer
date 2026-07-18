@@ -29,6 +29,10 @@ The explorer is the core of the app and is tuned to stay **fast, small, and pred
     line.
 
   Your recent queries autocomplete in each.
+- **Tags & labels** — right-click a file or folder and choose **Tags…** to attach free-text tags and a
+  single colour label. Tagged rows show their tags as small chips, and a labelled row gets a colour dot
+  and a soft accent bar in its label's colour. Tags persist across sessions; untagged items look exactly
+  as before.
 - **Selection** — multi-select with Shift/Ctrl; the status bar shows the count and total size.
 - **Operations** — copy, cut, paste, rename, delete (to the trash, restorable), new folder, and batch
   rename. Filesystem operations skip entries they can't read rather than failing the whole listing.

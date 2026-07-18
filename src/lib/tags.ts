@@ -36,9 +36,10 @@ export function labelColor(label: string): string {
   return LABEL_COLORS[label] ?? "";
 }
 
-/** The entry for a path, or an empty entry if the path is untagged. Pure (never mutates the store). */
+/** The entry for a path, or an empty entry if the path is untagged (or the store is empty/absent).
+    Pure (never mutates the store). */
 export function entryFor(store: TagStore, path: string): TagEntry {
-  return store[path] ?? { tags: [], label: "" };
+  return store?.[path] ?? { tags: [], label: "" };
 }
 
 /** Whether `path` currently carries `tag`. Pure. */
@@ -66,13 +67,15 @@ export async function initTags(): Promise<void> {
   if (loaded) return;
   loaded = true;
   const s = await invoke<TagStore>("load_tags");
-  store.set(s);
+  // The backend always returns a map; guard against a nullish response so the store is never null
+  // (an empty map keeps the plain explorer untouched).
+  store.set(s ?? {});
 }
 
 /** Replace one path's tags + label; the store is updated from the returned whole store. */
 export async function setEntryTags(path: string, tags: string[], label: string): Promise<void> {
   const updated = await invoke<TagStore>("set_tags", { path, tags, label });
-  store.set(updated);
+  store.set(updated ?? {});
 }
 
 /** Tag usage counts, most-used first (`[tag, count][]`), straight from the backend. */
