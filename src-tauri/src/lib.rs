@@ -5650,10 +5650,13 @@ mod tests {
         assert!(!c.truncated, "content search hit its cap — symlink cycle not skipped");
         assert!(c.matches.iter().any(|m| m.path.replace('\\', "/").ends_with("real/target.txt")));
 
-        // dir_size must NOT stack-overflow on the cycle (it recurses); it counts the one real file
-        // (b"needle" = 6 bytes) once and does not follow the symlink. Without the CPE-611 fix this
-        // recurses until the thread stack overflows and aborts the whole test binary.
-        assert_eq!(dir_size(d.to_string_lossy().to_string()).unwrap(), 6);
+        // dir_size must NOT stack-overflow on the cycle (it recurses). The invariant is simply that it
+        // *terminates* with a small, finite total — without the CPE-611 fix it recurses until the thread
+        // stack overflows and aborts the whole test binary. Don't assert an exact byte count: it isn't
+        // portable (Linux counts the symlink entry's target-path length, ~31 bytes; Windows reports 0),
+        // so bound it instead: at least the real file (6 bytes), and nowhere near a runaway.
+        let sz = dir_size(d.to_string_lossy().to_string()).unwrap();
+        assert!((6..100_000).contains(&sz), "dir_size should terminate small on a cycle, got {sz}");
 
         // find_duplicates likewise terminates (one file, no dupes, not truncated).
         let dup = find_duplicates(d.to_string_lossy().to_string()).unwrap();
