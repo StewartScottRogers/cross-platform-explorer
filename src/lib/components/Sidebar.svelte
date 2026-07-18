@@ -10,6 +10,7 @@
   import type { DirEntry, Place, Favorite } from "../types";
   import type { AgentSession } from "../sidecar";
   import type { SmartFolder } from "../smartFolders";
+  import { isValidDrop, hoverEffect } from "../dnd";
 
   export let places: Place[] = [];
   export let drives: Place[] = [];
@@ -45,7 +46,7 @@
     workbench: void;
     agentMenu: { x: number; y: number; sessionId?: string; sessionLabel?: string };
     openSession: { sessionId: string; cwd: string };
-    drop: { paths: string[]; dest: string; copy: boolean };
+    drop: { paths: string[]; dest: string; ctrlKey: boolean; shiftKey: boolean };
     filterTag: string;
     tagMenu: { x: number; y: number; tag: string };
     openSmartFolder: SmartFolder;
@@ -79,18 +80,13 @@
    * move a directory inside itself.
    */
   function validTarget(dest: string): boolean {
-    if (draggedPaths.length === 0 || !dest) return false;
-    const d = norm(dest);
-    return !draggedPaths.some((p) => {
-      const s = norm(p);
-      return d === s || d.startsWith(s + "/");
-    });
+    return isValidDrop(draggedPaths, dest);
   }
 
   function onDragOver(e: DragEvent, dest: string) {
     if (!validTarget(dest)) return;
     e.preventDefault();
-    if (e.dataTransfer) e.dataTransfer.dropEffect = e.ctrlKey ? "copy" : "move";
+    if (e.dataTransfer) e.dataTransfer.dropEffect = hoverEffect(e);
     dropPath = dest;
   }
 
@@ -98,9 +94,8 @@
     if (!validTarget(dest)) return;
     e.preventDefault();
     const paths = [...draggedPaths];
-    const copy = e.ctrlKey;
     dropPath = "";
-    dispatch("drop", { paths, dest, copy });
+    dispatch("drop", { paths, dest, ctrlKey: e.ctrlKey, shiftKey: e.shiftKey });
   }
 
   // Lazily-loaded children per path, and which nodes are expanded.

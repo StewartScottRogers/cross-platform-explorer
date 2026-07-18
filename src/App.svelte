@@ -61,6 +61,7 @@
   import BatchRenameDialog from "./lib/components/BatchRenameDialog.svelte";
   import TagEditor from "./lib/components/TagEditor.svelte";
   import { initTags, tags, retagPath, renameTag, deleteTag, importTags, exportTags } from "./lib/tags";
+  import { resolveEffect } from "./lib/dnd";
   import {
     smartFolders,
     smartFolderPaths,
@@ -1632,8 +1633,16 @@
   }
 
   /** Move `paths` into `dest` (drag & drop). Ctrl-drag copies instead. */
-  async function dropInto(paths: string[], dest: string, copy: boolean) {
+  async function dropInto(paths: string[], dest: string, mods: { ctrlKey: boolean; shiftKey: boolean }) {
     if (paths.length === 0 || !dest) return;
+
+    // Copy-vs-move follows the OS convention (CPE-669): a modifier overrides, else same-volume moves and
+    // cross-volume copies. same_volume is best-effort — on error it returns false → copy (never loses src).
+    let sameVolume: boolean | null = null;
+    if (!mods.ctrlKey && !mods.shiftKey) {
+      sameVolume = await invoke<boolean>("same_volume", { a: paths[0], b: dest }).catch(() => false);
+    }
+    const copy = resolveEffect(mods, sameVolume) === "copy";
 
     // A folder can never be dropped into itself or its own descendant.
     for (const p of paths) {
@@ -2422,7 +2431,7 @@
       on:workbench={() => (showWorkbench = true)}
       on:openSession={(e) => openSession(e.detail.sessionId, e.detail.cwd)}
       on:agentMenu={(e) => (agentMenu = { x: e.detail.x, y: e.detail.y, label: $t("tb.closeAllConsoles"), sessionId: e.detail.sessionId, sessionLabel: e.detail.sessionLabel })}
-      on:drop={(e) => dropInto(e.detail.paths, e.detail.dest, e.detail.copy)}
+      on:drop={(e) => dropInto(e.detail.paths, e.detail.dest, e.detail)}
     />
   </div>
 
@@ -2541,7 +2550,7 @@
         on:contextEmpty={(e) => (ctx = { x: e.detail.x, y: e.detail.y, target: "empty" })}
         on:commitRename={(e) => commitRename(e.detail)}
         on:cancelRename={() => (renamingPath = "")}
-        on:drop={(e) => dropInto(e.detail.paths, e.detail.dest, e.detail.copy)}
+        on:drop={(e) => dropInto(e.detail.paths, e.detail.dest, e.detail)}
       />
     {/if}
    </div>

@@ -8,6 +8,7 @@
   import { iconFor, typeName, isImage } from "../filetypes";
   import { columnsTemplate, resizeColumnTo, boundaryOffsets, COLUMN_DEFAULTS } from "../columns";
   import { isSelected } from "../selection";
+  import { setDragData, isValidDrop, hoverEffect } from "../dnd";
   import type { Selection } from "../selection";
   import type { DirEntry, SortKey, SortDir, ViewMode } from "../types";
   import type { AgentActivity } from "../agentActivity";
@@ -53,7 +54,7 @@
     contextEmpty: { x: number; y: number };
     commitRename: string;
     cancelRename: void;
-    drop: { paths: string[]; dest: string; copy: boolean };
+    drop: { paths: string[]; dest: string; ctrlKey: boolean; shiftKey: boolean };
     resizeColumns: number[];
   }>();
 
@@ -125,8 +126,8 @@
       ? entries.filter((_, j) => isSelected(selection, j)).map((x) => x.path)
       : [entries[i].path];
     draggedPaths = paths;
-    e.dataTransfer?.setData("text/plain", paths.join("\n"));
-    if (e.dataTransfer) e.dataTransfer.effectAllowed = "copyMove";
+    setDragData(e.dataTransfer, paths);
+    setDragBadge(e, paths.length);
   }
 
   function onDragEnd() {
@@ -134,20 +135,30 @@
     dropIndex = -1;
   }
 
-  /** Only folders are valid targets, and never a folder being dragged itself. */
+  /** A themed drag image showing the item count for a multi-selection drag (CPE-669). Appended to the
+      body (so it inherits theme vars) and removed after the browser has snapshotted it. */
+  function setDragBadge(e: DragEvent, count: number) {
+    if (!e.dataTransfer || count < 2) return;
+    const badge = document.createElement("div");
+    badge.textContent = $t("dnd.itemCount", { count });
+    badge.style.cssText =
+      "position:absolute; top:-1000px; left:-1000px; padding:4px 10px; border-radius:6px;" +
+      "background:var(--accent); color:#fff; font:600 12px system-ui,sans-serif; white-space:nowrap;";
+    document.body.appendChild(badge);
+    e.dataTransfer.setDragImage(badge, -8, -8);
+    setTimeout(() => badge.remove(), 0);
+  }
+
+  /** Only folders are valid targets (plus the shared self/descendant rule). */
   function validTarget(i: number): boolean {
     const entry = entries[i];
-    if (!entry?.is_dir) return false;
-    if (draggedPaths.includes(entry.path)) return false;
-    return draggedPaths.length > 0;
+    return !!entry?.is_dir && isValidDrop(draggedPaths, entry.path);
   }
 
   function onDragOver(e: DragEvent, i: number) {
     if (!validTarget(i)) return;
     e.preventDefault();
-    if (e.dataTransfer) {
-      e.dataTransfer.dropEffect = e.ctrlKey ? "copy" : "move";
-    }
+    if (e.dataTransfer) e.dataTransfer.dropEffect = hoverEffect(e);
     dropIndex = i;
   }
 
@@ -156,9 +167,8 @@
     e.preventDefault();
     const paths = [...draggedPaths];
     const dest = entries[i].path;
-    const copy = e.ctrlKey;
     onDragEnd();
-    dispatch("drop", { paths, dest, copy });
+    dispatch("drop", { paths, dest, ctrlKey: e.ctrlKey, shiftKey: e.shiftKey });
   }
 
   const COLUMNS: { key: SortKey; labelKey: string; num?: boolean }[] = [
