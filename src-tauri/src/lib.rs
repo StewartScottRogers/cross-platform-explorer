@@ -1451,6 +1451,324 @@ fn move_entries(paths: Vec<String>, dest: String) -> Vec<OpResult> {
         .collect()
 }
 
+// ---- Transfer engine (CPE-620, epic CPE-613) -------------------------------------------------
+// A streamed copy/move engine with byte-level progress, cancellation, and a per-batch conflict
+// policy. The pure core (`run_transfer`) takes a progress closure + a cancel flag so it is fully
+// unit-testable headlessly; the async `start_transfer` command is the thin tail that spawns it on a
+// thread and forwards progress as Tauri events.
+
+/// Whether a batch copies or moves its sources.
+#[derive(Clone, Copy, PartialEq, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
+enum TransferKind {
+    Copy,
+    Move,
+}
+
+/// How a name collision at the destination is resolved for the whole batch.
+#[derive(Clone, Copy, PartialEq, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
+enum ConflictPolicy {
+    /// Replace the existing entry.
+    Overwrite,
+    /// Leave the existing entry; don't transfer this source.
+    Skip,
+    /// Keep both — auto-number the new one ("name (2)").
+    Keepboth,
+}
+
+/// A progress snapshot emitted while a transfer runs.
+#[derive(Clone, serde::Serialize)]
+struct TransferProgress {
+    id: u64,
+    total_bytes: u64,
+    done_bytes: u64,
+    total_items: u64,
+    done_items: u64,
+    current: String,
+}
+
+/// The final outcome of a transfer.
+#[derive(Clone, Default, serde::Serialize)]
+struct TransferReport {
+    id: u64,
+    transferred: u64,
+    skipped: u64,
+    failed: u64,
+    cancelled: bool,
+    errors: Vec<String>,
+}
+
+/// Sum the byte size + file count under `p`, skip-on-error and without following symlinked dirs
+/// (cycle-safe, like the other walks — CPE-609/611). Used to seed the progress totals.
+fn measure_one(p: &Path, bytes: &mut u64, files: &mut u64) {
+    match fs::metadata(p) {
+        Ok(m) if m.is_dir() => {
+            let Ok(rd) = fs::read_dir(p) else { return };
+            for e in rd.flatten() {
+                if e.file_type().map(|t| t.is_symlink()).unwrap_or(false) {
+                    *files += 1; // count the link itself, don't descend
+                    continue;
+                }
+                measure_one(&e.path(), bytes, files);
+            }
+        }
+        Ok(m) => {
+            *bytes += m.len();
+            *files += 1;
+        }
+        Err(_) => {}
+    }
+}
+
+/// Resolve a collision at `base_target` per `policy`. `Some(path)` is where to write; `None` means
+/// skip this source (policy `Skip` with an existing target). `Overwrite` removes the existing entry.
+fn resolve_conflict(base_target: &Path, policy: ConflictPolicy) -> Option<PathBuf> {
+    if !base_target.exists() {
+        return Some(base_target.to_path_buf());
+    }
+    match policy {
+        ConflictPolicy::Skip => None,
+        ConflictPolicy::Keepboth => {
+            let dir = base_target.parent().unwrap_or_else(|| Path::new("."));
+            let name = base_target.file_name().and_then(|n| n.to_str()).unwrap_or("file");
+            Some(unique_target(dir, name))
+        }
+        ConflictPolicy::Overwrite => {
+            if base_target.is_dir() {
+                let _ = fs::remove_dir_all(base_target);
+            } else {
+                let _ = fs::remove_file(base_target);
+            }
+            Some(base_target.to_path_buf())
+        }
+    }
+}
+
+/// Copy one file, streamed in fixed chunks, advancing `prog.done_bytes` and emitting a throttled
+/// progress event. Returns `Ok(false)` if cancelled mid-file (the partial dest is left for the
+/// caller's policy to overwrite next run — we don't delete, to stay predictable).
+fn stream_copy_file(
+    src: &Path,
+    dst: &Path,
+    cancel: &std::sync::atomic::AtomicBool,
+    prog: &mut TransferProgress,
+    emit: &mut dyn FnMut(&TransferProgress),
+    last_emit: &mut u64,
+) -> std::io::Result<bool> {
+    use std::io::{Read, Write};
+    use std::sync::atomic::Ordering;
+    let mut r = fs::File::open(src)?;
+    let mut w = fs::File::create(dst)?;
+    let mut buf = vec![0u8; 128 * 1024];
+    loop {
+        if cancel.load(Ordering::Relaxed) {
+            return Ok(false);
+        }
+        let n = r.read(&mut buf)?;
+        if n == 0 {
+            break;
+        }
+        w.write_all(&buf[..n])?;
+        prog.done_bytes += n as u64;
+        if prog.done_bytes - *last_emit >= 512 * 1024 {
+            *last_emit = prog.done_bytes;
+            emit(prog);
+        }
+    }
+    w.flush()?;
+    Ok(true)
+}
+
+/// Recursively copy `src` -> `dst`, streaming each file. Returns `false` only when **cancelled** (the
+/// caller stops the whole batch); per-item errors are recorded in `report` and don't abort the tree
+/// (same skip-on-error ethos as `list_dir`). Symlinked directories are not descended (cycle-safe).
+#[allow(clippy::too_many_arguments)]
+fn copy_tree_streamed(
+    src: &Path,
+    dst: &Path,
+    cancel: &std::sync::atomic::AtomicBool,
+    prog: &mut TransferProgress,
+    emit: &mut dyn FnMut(&TransferProgress),
+    last_emit: &mut u64,
+    report: &mut TransferReport,
+) -> bool {
+    use std::sync::atomic::Ordering;
+    let ft = match fs::symlink_metadata(src) {
+        Ok(m) => m.file_type(),
+        Err(e) => {
+            report.failed += 1;
+            report.errors.push(format!("{}: {e}", src.display()));
+            return true;
+        }
+    };
+    if ft.is_dir() {
+        if let Err(e) = fs::create_dir_all(dst) {
+            report.failed += 1;
+            report.errors.push(format!("{}: {e}", dst.display()));
+            return true;
+        }
+        let Ok(rd) = fs::read_dir(src) else { return true };
+        for e in rd.flatten() {
+            if cancel.load(Ordering::Relaxed) {
+                return false;
+            }
+            let child = e.path();
+            if !copy_tree_streamed(&child, &dst.join(e.file_name()), cancel, prog, emit, last_emit, report) {
+                return false;
+            }
+        }
+        true
+    } else {
+        prog.current = src.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+        match stream_copy_file(src, dst, cancel, prog, emit, last_emit) {
+            Ok(true) => {
+                prog.done_items += 1;
+                emit(prog);
+                true
+            }
+            Ok(false) => false,
+            Err(e) => {
+                report.failed += 1;
+                report.errors.push(format!("{}: {e}", src.display()));
+                prog.done_items += 1;
+                true
+            }
+        }
+    }
+}
+
+/// Run a whole transfer batch. Pure + headless: `cancel` is polled between chunks and `emit` receives
+/// progress snapshots. Returns the final report. A `Move` uses a same-volume rename fast path and
+/// only deletes a source after its copy fully succeeds (never on partial failure).
+fn run_transfer(
+    id: u64,
+    sources: &[PathBuf],
+    dest_dir: &Path,
+    kind: TransferKind,
+    policy: ConflictPolicy,
+    cancel: &std::sync::atomic::AtomicBool,
+    mut emit: impl FnMut(&TransferProgress),
+) -> TransferReport {
+    use std::sync::atomic::Ordering;
+    let measured: Vec<(u64, u64)> = sources
+        .iter()
+        .map(|s| {
+            let (mut b, mut f) = (0, 0);
+            measure_one(s, &mut b, &mut f);
+            (b, f)
+        })
+        .collect();
+    let mut prog = TransferProgress {
+        id,
+        total_bytes: measured.iter().map(|(b, _)| b).sum(),
+        done_bytes: 0,
+        total_items: measured.iter().map(|(_, f)| f).sum(),
+        done_items: 0,
+        current: String::new(),
+    };
+    let mut report = TransferReport { id, ..Default::default() };
+    let mut last_emit = 0u64;
+    emit(&prog);
+
+    for (src, (sb, sf)) in sources.iter().zip(measured.iter()) {
+        if cancel.load(Ordering::Relaxed) {
+            report.cancelled = true;
+            break;
+        }
+        let Some(name) = src.file_name().and_then(|n| n.to_str()) else {
+            report.failed += 1;
+            report.errors.push(format!("{}: invalid name", src.display()));
+            continue;
+        };
+        if src.is_dir() && is_self_or_descendant(src, dest_dir) {
+            report.failed += 1;
+            report.errors.push(format!("{name}: can't transfer a folder into itself"));
+            continue;
+        }
+        let target = match resolve_conflict(&dest_dir.join(name), policy) {
+            Some(t) => t,
+            None => {
+                report.skipped += 1;
+                prog.done_bytes += sb;
+                prog.done_items += sf;
+                emit(&prog);
+                continue;
+            }
+        };
+        // Same-volume move: an atomic rename, no byte streaming needed.
+        if kind == TransferKind::Move && fs::rename(src, &target).is_ok() {
+            report.transferred += 1;
+            prog.done_bytes += sb;
+            prog.done_items += sf;
+            last_emit = prog.done_bytes;
+            emit(&prog);
+            continue;
+        }
+        let failed_before = report.failed;
+        if !copy_tree_streamed(src, &target, cancel, &mut prog, &mut emit, &mut last_emit, &mut report) {
+            report.cancelled = true;
+            break;
+        }
+        report.transferred += 1;
+        // For a (cross-volume) move, delete the source only if its copy had zero failures.
+        if kind == TransferKind::Move && report.failed == failed_before {
+            let _ = if src.is_dir() { fs::remove_dir_all(src) } else { fs::remove_file(src) };
+        }
+    }
+    prog.current.clear();
+    emit(&prog);
+    report
+}
+
+/// Registry of live transfers' cancel flags, keyed by transfer id, so `cancel_transfer` can signal a
+/// running `start_transfer` thread.
+static TRANSFER_CANCELS: std::sync::OnceLock<
+    std::sync::Mutex<std::collections::HashMap<u64, std::sync::Arc<std::sync::atomic::AtomicBool>>>,
+> = std::sync::OnceLock::new();
+static TRANSFER_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+
+fn transfer_registry(
+) -> &'static std::sync::Mutex<std::collections::HashMap<u64, std::sync::Arc<std::sync::atomic::AtomicBool>>> {
+    TRANSFER_CANCELS.get_or_init(Default::default)
+}
+
+/// Start a copy/move on a background thread, returning its id immediately. Progress is emitted as
+/// `transfer://progress` events and the final `TransferReport` as `transfer://done` (CPE-620).
+#[tauri::command]
+fn start_transfer(
+    app: tauri::AppHandle,
+    sources: Vec<String>,
+    dest: String,
+    kind: TransferKind,
+    policy: ConflictPolicy,
+) -> u64 {
+    use std::sync::atomic::Ordering;
+    let id = TRANSFER_SEQ.fetch_add(1, Ordering::Relaxed);
+    let cancel = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    transfer_registry().lock().unwrap().insert(id, cancel.clone());
+    let srcs: Vec<PathBuf> = sources.iter().map(PathBuf::from).collect();
+    let dest_dir = PathBuf::from(dest);
+    std::thread::spawn(move || {
+        use tauri::Emitter;
+        let report = run_transfer(id, &srcs, &dest_dir, kind, policy, &cancel, |p| {
+            let _ = app.emit("transfer://progress", p);
+        });
+        let _ = app.emit("transfer://done", &report);
+        transfer_registry().lock().unwrap().remove(&id);
+    });
+    id
+}
+
+/// Signal a running transfer to stop at the next chunk boundary (CPE-620).
+#[tauri::command]
+fn cancel_transfer(id: u64) {
+    use std::sync::atomic::Ordering;
+    if let Some(flag) = transfer_registry().lock().unwrap().get(&id) {
+        flag.store(true, Ordering::Relaxed);
+    }
+}
+
 /// Move each `from` to an EXACT `to` path. Used by undo, which must restore an
 /// item to its original name — auto-renaming here would defeat the point (undo
 /// of "rename a -> b" must produce "a", not "a - Copy").
@@ -4499,6 +4817,8 @@ pub fn run() {
             restore_from_trash,
             copy_entries,
             move_entries,
+            start_transfer,
+            cancel_transfer,
             move_exact,
             entry_info,
             dir_size,
@@ -5456,6 +5776,87 @@ mod tests {
         let dst = d.join("dst");
         copy_dir_all(&src, &dst).unwrap();
         assert_eq!(fs::read(dst.join("a/b/leaf.txt")).unwrap(), b"leaf");
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn run_transfer_copies_a_tree_and_reports_byte_progress() {
+        let d = scratch("xfer_copy");
+        fs::create_dir_all(d.join("src/sub")).unwrap();
+        fs::write(d.join("src/a.txt"), b"hello").unwrap(); // 5 bytes
+        fs::write(d.join("src/sub/b.txt"), b"world!!").unwrap(); // 7 bytes
+        fs::create_dir_all(d.join("dst")).unwrap();
+        let cancel = std::sync::atomic::AtomicBool::new(false);
+        let mut last_done = 0u64;
+        let report = run_transfer(
+            1,
+            &[d.join("src")],
+            &d.join("dst"),
+            TransferKind::Copy,
+            ConflictPolicy::Keepboth,
+            &cancel,
+            |p| last_done = p.done_bytes,
+        );
+        assert_eq!(report.transferred, 1);
+        assert_eq!(report.failed, 0);
+        assert!(!report.cancelled);
+        assert_eq!(fs::read(d.join("dst/src/a.txt")).unwrap(), b"hello");
+        assert_eq!(fs::read(d.join("dst/src/sub/b.txt")).unwrap(), b"world!!");
+        // Byte counts here are file *content* lengths (portable, unlike dir/symlink sizes): 5 + 7.
+        assert_eq!(last_done, 12);
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn run_transfer_honours_conflict_policies() {
+        let d = scratch("xfer_conf");
+        fs::write(d.join("a.txt"), b"NEW").unwrap();
+        fs::create_dir_all(d.join("dst")).unwrap();
+        fs::write(d.join("dst/a.txt"), b"OLD").unwrap();
+        let cancel = std::sync::atomic::AtomicBool::new(false);
+        let src = || vec![d.join("a.txt")];
+
+        // Skip: the existing file is untouched.
+        let r = run_transfer(1, &src(), &d.join("dst"), TransferKind::Copy, ConflictPolicy::Skip, &cancel, |_| {});
+        assert_eq!(r.skipped, 1);
+        assert_eq!(fs::read(d.join("dst/a.txt")).unwrap(), b"OLD");
+
+        // Keep both: a non-colliding copy is created; the original stays.
+        let r = run_transfer(2, &src(), &d.join("dst"), TransferKind::Copy, ConflictPolicy::Keepboth, &cancel, |_| {});
+        assert_eq!(r.transferred, 1);
+        assert_eq!(fs::read(d.join("dst/a.txt")).unwrap(), b"OLD");
+        assert!(d.join("dst/a - Copy.txt").exists(), "keep-both should auto-number");
+
+        // Overwrite: the existing file is replaced.
+        let r = run_transfer(3, &src(), &d.join("dst"), TransferKind::Copy, ConflictPolicy::Overwrite, &cancel, |_| {});
+        assert_eq!(r.transferred, 1);
+        assert_eq!(fs::read(d.join("dst/a.txt")).unwrap(), b"NEW");
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn run_transfer_move_removes_the_source() {
+        let d = scratch("xfer_move");
+        fs::write(d.join("m.txt"), b"data").unwrap();
+        fs::create_dir_all(d.join("dst")).unwrap();
+        let cancel = std::sync::atomic::AtomicBool::new(false);
+        let r = run_transfer(1, &[d.join("m.txt")], &d.join("dst"), TransferKind::Move, ConflictPolicy::Keepboth, &cancel, |_| {});
+        assert_eq!(r.transferred, 1);
+        assert!(!d.join("m.txt").exists(), "move should remove the source");
+        assert_eq!(fs::read(d.join("dst/m.txt")).unwrap(), b"data");
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn run_transfer_cancel_stops_before_copying() {
+        let d = scratch("xfer_cancel");
+        fs::write(d.join("a.txt"), b"x").unwrap();
+        fs::create_dir_all(d.join("dst")).unwrap();
+        let cancel = std::sync::atomic::AtomicBool::new(true); // pre-cancelled
+        let r = run_transfer(1, &[d.join("a.txt")], &d.join("dst"), TransferKind::Copy, ConflictPolicy::Keepboth, &cancel, |_| {});
+        assert!(r.cancelled);
+        assert_eq!(r.transferred, 0);
+        assert!(!d.join("dst/a.txt").exists());
         let _ = fs::remove_dir_all(&d);
     }
 

@@ -2,7 +2,7 @@
 id: CPE-613
 title: "EPIC: File transfer & operations manager"
 type: Task
-status: Proposed
+status: In Progress
 priority: High
 component: Multiple
 tags: [epic]
@@ -51,3 +51,24 @@ hide, so a deliberate engine with tests is safer than ad-hoc calls.
 - Errors on individual items don't abort the whole operation; they're reported at the end.
 - The plain explorer stays fast/small/predictable when no transfer is running (the panel is idle-hidden).
 - Engine has headless tests (progress accounting, cancellation, collision decisions, cross-volume move).
+
+## Decisions (2026-07-18, activated in dayshift — user away, best-guess defaults logged)
+- **Progress granularity:** byte-level (streamed copy in fixed chunks, periodic progress events). Gives
+  a real progress bar + ETA; the streaming loop also gives a natural cancellation checkpoint.
+- **Scope of a transfer:** window-scoped for v1 (a running transfer belongs to the app session; not
+  persisted across restart). Simpler + safe.
+- **Where it lives:** core (`src-tauri/src/lib.rs`) — file transfer is fundamental, not a Mega-Feature
+  sidecar.
+- **Pause/resume:** OUT of v1. Cancel only (a cancel flag checked in the copy loop).
+- **Conflict policy v1:** overwrite / skip / keep-both (auto-numbered "name (2)"), chosen per-batch
+  ("apply to all"). Per-item rename can come later.
+
+## Child tickets (created just-in-time as each is worked, in dayshift)
+1. CPE-620 — Backend transfer engine: streamed copy/move core + conflict policy + cancel flag, cargo-tested.
+2. CPE-621 — Async `start_transfer`/`cancel_transfer` commands emitting `transfer://progress` events.
+3. CPE-622 — Frontend transfer store consuming the progress events (pure, testable).
+4. CPE-623 — Operations panel UI: live queue with progress bars + cancel button (idle-hidden).
+5. CPE-624 — Batch conflict dialog ("apply to all remaining").
+6. CPE-625 — Route copy/cut/paste + move through the engine.
+7. CPE-626 — Undo integration for a completed transfer.
+8. CPE-627 — Docs: in-app docs + design note.
