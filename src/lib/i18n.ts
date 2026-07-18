@@ -485,6 +485,13 @@ const messages: Record<Locale, Record<string, string>> = {
     "palette.noMatches": "No matching commands.",
     "palette.ariaPalette": "Command palette",
     "palette.ariaSearch": "Search commands",
+
+    "xfer.conflictTitle": "Some items already exist",
+    "xfer.conflictOne": "1 item already exists here. What would you like to do?",
+    "xfer.conflictMany": "{count} items already exist here. What would you like to do?",
+    "xfer.replace": "Replace",
+    "xfer.keepBoth": "Keep both",
+    "xfer.skip": "Skip",
   },
   es: {
     "app.newTab": "Nueva pestaña",
@@ -868,6 +875,13 @@ const messages: Record<Locale, Record<string, string>> = {
     "palette.noMatches": "No hay comandos coincidentes.",
     "palette.ariaPalette": "Paleta de comandos",
     "palette.ariaSearch": "Buscar comandos",
+
+    "xfer.conflictTitle": "Algunos elementos ya existen",
+    "xfer.conflictOne": "1 elemento ya existe aquí. ¿Qué deseas hacer?",
+    "xfer.conflictMany": "{count} elementos ya existen aquí. ¿Qué deseas hacer?",
+    "xfer.replace": "Reemplazar",
+    "xfer.keepBoth": "Conservar ambos",
+    "xfer.skip": "Omitir",
   },
   de: {
     "app.newTab": "Neuer Tab",
@@ -1251,6 +1265,13 @@ const messages: Record<Locale, Record<string, string>> = {
     "palette.noMatches": "Keine passenden Befehle.",
     "palette.ariaPalette": "Befehlspalette",
     "palette.ariaSearch": "Befehle suchen",
+
+    "xfer.conflictTitle": "Einige Elemente sind bereits vorhanden",
+    "xfer.conflictOne": "1 Element ist hier bereits vorhanden. Was möchten Sie tun?",
+    "xfer.conflictMany": "{count} Elemente sind hier bereits vorhanden. Was möchten Sie tun?",
+    "xfer.replace": "Ersetzen",
+    "xfer.keepBoth": "Beide behalten",
+    "xfer.skip": "Überspringen",
   },
   fr: {
     "app.newTab": "Nouvel onglet",
@@ -1634,6 +1655,13 @@ const messages: Record<Locale, Record<string, string>> = {
     "palette.noMatches": "Aucune commande correspondante.",
     "palette.ariaPalette": "Palette de commandes",
     "palette.ariaSearch": "Rechercher des commandes",
+
+    "xfer.conflictTitle": "Certains éléments existent déjà",
+    "xfer.conflictOne": "1 élément existe déjà ici. Que souhaitez-vous faire ?",
+    "xfer.conflictMany": "{count} éléments existent déjà ici. Que souhaitez-vous faire ?",
+    "xfer.replace": "Remplacer",
+    "xfer.keepBoth": "Conserver les deux",
+    "xfer.skip": "Ignorer",
   },
   it: {
     "app.newTab": "Nuova scheda",
@@ -2007,6 +2035,13 @@ const messages: Record<Locale, Record<string, string>> = {
     "palette.noMatches": "Nessun comando corrispondente.",
     "palette.ariaPalette": "Palette dei comandi",
     "palette.ariaSearch": "Cerca comandi",
+
+    "xfer.conflictTitle": "Alcuni elementi esistono già",
+    "xfer.conflictOne": "1 elemento esiste già qui. Cosa vuoi fare?",
+    "xfer.conflictMany": "{count} elementi esistono già qui. Cosa vuoi fare?",
+    "xfer.replace": "Sostituisci",
+    "xfer.keepBoth": "Mantieni entrambi",
+    "xfer.skip": "Ignora",
   },
   pt: {
     "app.newTab": "Nova aba",
@@ -2380,6 +2415,13 @@ const messages: Record<Locale, Record<string, string>> = {
     "palette.noMatches": "Nenhum comando correspondente.",
     "palette.ariaPalette": "Paleta de comandos",
     "palette.ariaSearch": "Pesquisar comandos",
+
+    "xfer.conflictTitle": "Alguns itens já existem",
+    "xfer.conflictOne": "1 item já existe aqui. O que você deseja fazer?",
+    "xfer.conflictMany": "{count} itens já existem aqui. O que você deseja fazer?",
+    "xfer.replace": "Substituir",
+    "xfer.keepBoth": "Manter ambos",
+    "xfer.skip": "Ignorar",
   },
   nl: {
     "app.newTab": "Nieuw tabblad",
@@ -2753,6 +2795,13 @@ const messages: Record<Locale, Record<string, string>> = {
     "palette.noMatches": "Geen overeenkomende opdrachten.",
     "palette.ariaPalette": "Opdrachtenpalet",
     "palette.ariaSearch": "Opdrachten zoeken",
+
+    "xfer.conflictTitle": "Sommige items bestaan al",
+    "xfer.conflictOne": "1 item bestaat hier al. Wat wil je doen?",
+    "xfer.conflictMany": "{count} items bestaan hier al. Wat wil je doen?",
+    "xfer.replace": "Vervangen",
+    "xfer.keepBoth": "Beide behouden",
+    "xfer.skip": "Overslaan",
   },
   pl: {
     "app.newTab": "Nowa karta",
@@ -3126,6 +3175,13 @@ const messages: Record<Locale, Record<string, string>> = {
     "palette.noMatches": "Brak pasujących poleceń.",
     "palette.ariaPalette": "Paleta poleceń",
     "palette.ariaSearch": "Szukaj poleceń",
+
+    "xfer.conflictTitle": "Niektóre elementy już istnieją",
+    "xfer.conflictOne": "1 element już tutaj istnieje. Co chcesz zrobić?",
+    "xfer.conflictMany": "{count} elementów już tutaj istnieje. Co chcesz zrobić?",
+    "xfer.replace": "Zastąp",
+    "xfer.keepBoth": "Zachowaj oba",
+    "xfer.skip": "Pomiń",
   },
   ru: {
     "app.newTab": "Новая вкладка",
@@ -3499,6 +3555,13 @@ const messages: Record<Locale, Record<string, string>> = {
     "palette.noMatches": "Нет подходящих команд.",
     "palette.ariaPalette": "Палитра команд",
     "palette.ariaSearch": "Поиск команд",
+
+    "xfer.conflictTitle": "Некоторые элементы уже существуют",
+    "xfer.conflictOne": "1 элемент уже существует здесь. Что вы хотите сделать?",
+    "xfer.conflictMany": "{count} элементов уже существуют здесь. Что вы хотите сделать?",
+    "xfer.replace": "Заменить",
+    "xfer.keepBoth": "Сохранить оба",
+    "xfer.skip": "Пропустить",
   },
   zh: {
     "app.newTab": "新标签页",
@@ -3872,6 +3935,13 @@ const messages: Record<Locale, Record<string, string>> = {
     "palette.noMatches": "没有匹配的命令。",
     "palette.ariaPalette": "命令面板",
     "palette.ariaSearch": "搜索命令",
+
+    "xfer.conflictTitle": "某些项目已存在",
+    "xfer.conflictOne": "此处已存在 1 个项目。您想怎么做？",
+    "xfer.conflictMany": "此处已存在 {count} 个项目。您想怎么做？",
+    "xfer.replace": "替换",
+    "xfer.keepBoth": "两者都保留",
+    "xfer.skip": "跳过",
   },
   ja: {
     "app.newTab": "新しいタブ",
@@ -4245,6 +4315,13 @@ const messages: Record<Locale, Record<string, string>> = {
     "palette.noMatches": "一致するコマンドがありません。",
     "palette.ariaPalette": "コマンドパレット",
     "palette.ariaSearch": "コマンドを検索",
+
+    "xfer.conflictTitle": "一部の項目はすでに存在します",
+    "xfer.conflictOne": "ここには 1 個の項目がすでに存在します。どうしますか？",
+    "xfer.conflictMany": "ここには {count} 個の項目がすでに存在します。どうしますか？",
+    "xfer.replace": "置き換える",
+    "xfer.keepBoth": "両方を保持",
+    "xfer.skip": "スキップ",
   },
   ko: {
     "app.newTab": "새 탭",
@@ -4618,6 +4695,13 @@ const messages: Record<Locale, Record<string, string>> = {
     "palette.noMatches": "일치하는 명령이 없습니다.",
     "palette.ariaPalette": "명령 팔레트",
     "palette.ariaSearch": "명령 검색",
+
+    "xfer.conflictTitle": "일부 항목이 이미 존재합니다",
+    "xfer.conflictOne": "여기에 1개의 항목이 이미 있습니다. 어떻게 하시겠습니까?",
+    "xfer.conflictMany": "여기에 {count}개의 항목이 이미 있습니다. 어떻게 하시겠습니까?",
+    "xfer.replace": "바꾸기",
+    "xfer.keepBoth": "둘 다 유지",
+    "xfer.skip": "건너뛰기",
   },
 };
 
