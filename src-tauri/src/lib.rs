@@ -1516,7 +1516,11 @@ fn dir_size(path: String) -> Result<u64, String> {
         for entry in read.flatten() {
             let Ok(meta) = entry.metadata() else { continue };
             if meta.is_dir() {
-                total += walk(&entry.path());
+                // Don't recurse into symlinked dirs (CPE-611): a cycle would recurse until the thread
+                // stack overflows and crashes the app. Matches `du`, which doesn't follow symlinks.
+                if !entry_is_symlink(&entry) {
+                    total += walk(&entry.path());
+                }
             } else {
                 total += meta.len();
             }
@@ -1912,7 +1916,8 @@ fn find_duplicates(root: String) -> Result<DupResult, String> {
             let name = entry.file_name();
             let Ok(meta) = entry.metadata() else { continue };
             if meta.is_dir() {
-                if !name.to_string_lossy().starts_with('.') {
+                // Skip dot-dirs and symlinked dirs (avoid cycles, CPE-611).
+                if !name.to_string_lossy().starts_with('.') && !entry_is_symlink(&entry) {
                     stack.push(path);
                 }
                 continue;
@@ -5644,6 +5649,15 @@ mod tests {
         let c = search_file_contents(d.to_string_lossy().to_string(), "needle".into(), false).unwrap();
         assert!(!c.truncated, "content search hit its cap — symlink cycle not skipped");
         assert!(c.matches.iter().any(|m| m.path.replace('\\', "/").ends_with("real/target.txt")));
+
+        // dir_size must NOT stack-overflow on the cycle (it recurses); it counts the one real file
+        // (b"needle" = 6 bytes) once and does not follow the symlink. Without the CPE-611 fix this
+        // recurses until the thread stack overflows and aborts the whole test binary.
+        assert_eq!(dir_size(d.to_string_lossy().to_string()).unwrap(), 6);
+
+        // find_duplicates likewise terminates (one file, no dupes, not truncated).
+        let dup = find_duplicates(d.to_string_lossy().to_string()).unwrap();
+        assert!(!dup.truncated, "find_duplicates hit its cap — symlink cycle not skipped");
 
         // remove_dir_all removes the symlink itself without following it.
         let _ = fs::remove_dir_all(&d);
