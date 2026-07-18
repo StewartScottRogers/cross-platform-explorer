@@ -9,6 +9,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 /// Pure window-geometry resolver for the CLI launch options (CPE-598) — core feature, always compiled.
 mod geometry;
 mod location;
+mod provider;
 #[cfg(feature = "sidecar-platform")]
 mod keyverify;
 /// Host-brokered forge API egress for the repos sidecar (CPE-433). Same rationale as `keyverify`:
