@@ -1251,11 +1251,18 @@
           moves,
           label: `Move ${moves.length} item${moves.length === 1 ? "" : "s"}`,
         });
+        retagMoves(moves); // tags follow the moved files (CPE-657)
       }
       await loadPath(currentPath);
     } catch (e) {
       showNotice(String(e), true);
     }
+  }
+
+  /** After a move, carry each moved file's tags to its new path so they follow it (CPE-657).
+      Best-effort + fire-and-forget; an untagged file is a cheap no-op. */
+  function retagMoves(moves: { from: string; to: string }[]) {
+    for (const m of moves) retagPath(m.from, m.to).catch(() => {});
   }
 
   /** Start a copy of `sources` into the current folder with the chosen conflict policy (CPE-624). */
@@ -1311,6 +1318,7 @@
           moves,
           label: `Move ${moves.length} item${moves.length === 1 ? "" : "s"}`,
         });
+        retagMoves(moves); // tags follow the moved files (CPE-657)
       }
       clipboard = emptyClipboard();
       await loadPath(currentPath);
@@ -1563,6 +1571,7 @@
             moves,
             label: `Move ${moves.length} item${moves.length === 1 ? "" : "s"}`,
           });
+          retagMoves(moves); // tags follow the moved files (CPE-657)
         }
       }
       await loadPath(currentPath);
