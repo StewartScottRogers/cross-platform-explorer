@@ -2,7 +2,7 @@
 id: CPE-661
 title: "EPIC: Universal drag-and-drop for files"
 type: Task
-status: Proposed
+status: In Progress
 priority: Medium
 component: Frontend
 tags: [epic]
@@ -77,3 +77,36 @@ through the shared transfer queue, closes those gaps and removes duplicated, dri
 - Files dragged **in** from the OS are copied/imported into the intended folder.
 - Drop targets, drag image, and copy/move feedback are consistent and themed (light/dark) everywhere.
 - No regression to existing keyboard copy/move or the single-pane explorer when DnD isn't used.
+
+## Decisions (activated 2026-07-18, with the user present)
+
+- **Copy-vs-move = OS convention.** Same-volume drop = **move**, cross-volume = **copy**, with a modifier
+  to override. Needs backend volume detection (new `same_volume` command). Replaces the current
+  Ctrl=copy/else=move rule.
+- **Drop-IN target = folder under the cursor.** OS files dropped on a folder row or sidebar place copy
+  *there*; otherwise into the current folder. Action = copy (importing from elsewhere).
+- **Drop-IN transport:** Tauri v2 core `getCurrentWebview().onDragDropEvent()` — no plugin needed.
+- **Drag-OUT:** needs a third-party plugin (`tauri-plugin-drag`); gated behind a research spike first
+  (cross-platform viability is the biggest unknown).
+- **Route drops through the transfer manager** ([[CPE-613]], landed) so drag-copy/move are tracked with
+  progress + conflict handling — preserving the existing undo + tag-follow (retag) behaviour.
+- **v1 scope = broad:** explorer file lists (details/list/icons/**gallery**) + sidebar + OS drag-in/out,
+  **and** the specialized views — archive (drag-out = extract-on-drop; no drop-in), and no regression to
+  Agent **Board** card DnD. Gallery inherits FileList DnD for free (same component).
+- **Multi-select:** the drag payload always carries the full current selection, not just the grabbed row
+  (already true; preserve it).
+
+## Child tickets
+1. **CPE-668** — Backend `same_volume(a, b)` (Windows drive/volume, Unix `st_dev`); cargo-tested. Foundation
+   for the OS-convention copy/move rule.
+2. **CPE-669** — Unify internal DnD into one shared model (`src/lib/dnd.ts`): draggable + valid-target +
+   OS-convention copy/move (uses 668) + consistent drop highlight and count badge, reused by FileList
+   (all view modes incl. gallery) and Sidebar/SidebarNode. *(prereq: 668)*
+3. **CPE-670** — Drop IN from the OS via `onDragDropEvent`: copy dropped files to the folder under the
+   cursor (row/place) else the current folder, with a themed drop overlay. *(prereq: 669)*
+4. **CPE-671** — Route drag copy/move through the transfer manager (CPE-613) — tracked progress +
+   conflict handling — preserving undo + retag. *(prereq: 669)*
+5. **CPE-672** — Drag OUT to the OS: spike `tauri-plugin-drag` cross-platform viability, then start a
+   native drag carrying real file paths so files drop into other apps. *(prereq: 669; spike-gated)*
+6. **CPE-673** — Specialized views: archive drag-out = extract-on-drop (no drop-in); verify gallery DnD;
+   ensure Agent Board card DnD isn't regressed; consistent themed affordances everywhere. *(prereq: 669)*
