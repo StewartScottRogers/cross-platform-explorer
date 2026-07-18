@@ -2503,6 +2503,24 @@ fn tag_store_prune_empty(store: &mut TagStore) {
     store.retain(|_, e| !e.tags.is_empty() || !e.label.is_empty());
 }
 
+/// Merge `incoming` into `store` (CPE-640, import): union each path's tags; take a non-empty imported
+/// label over an existing one. Non-destructive — existing tags are never dropped. Pure.
+fn tag_store_merge(store: &mut TagStore, incoming: TagStore) {
+    for (path, e) in incoming {
+        let cur = store.entry(path).or_default();
+        for t in e.tags {
+            if !cur.tags.contains(&t) {
+                cur.tags.push(t);
+            }
+        }
+        cur.tags.sort();
+        cur.tags.dedup();
+        if !e.label.trim().is_empty() {
+            cur.label = e.label;
+        }
+    }
+}
+
 /// Load the tag store from `tags.json` in `dir`, returning an empty store when absent or corrupt.
 fn read_tags_from(dir: &Path) -> TagStore {
     fs::read_to_string(dir.join("tags.json"))
@@ -2565,6 +2583,20 @@ fn delete_tag(app: tauri::AppHandle, tag: String) -> Result<TagStore, String> {
     let mut store = read_tags_from(&dir);
     tag_store_delete_tag(&mut store, &tag);
     tag_store_prune_empty(&mut store);
+    write_tags_to(&dir, &store)?;
+    Ok(store)
+}
+
+/// Import a previously-exported tag store (JSON), merged into the current one (CPE-640). Non-
+/// destructive: existing tags are kept, imported tags unioned in. Returns the merged store. (Export
+/// is just `load_tags` + `JSON.stringify` on the frontend.)
+#[tauri::command]
+fn import_tags(app: tauri::AppHandle, json: String) -> Result<TagStore, String> {
+    use tauri::Manager;
+    let incoming: TagStore = serde_json::from_str(&json).map_err(|e| format!("invalid tags file: {e}"))?;
+    let dir = app.path().app_config_dir().map_err(|e| e.to_string())?;
+    let mut store = read_tags_from(&dir);
+    tag_store_merge(&mut store, incoming);
     write_tags_to(&dir, &store)?;
     Ok(store)
 }
@@ -5126,6 +5158,7 @@ pub fn run() {
             tag_counts,
             rename_tag,
             delete_tag,
+            import_tags,
             rename_entry,
             delete_to_trash,
             delete_permanent,
@@ -6091,6 +6124,21 @@ mod tests {
         tag_store_prune_empty(&mut s);
         assert_eq!(s["/a"].tags, vec!["urgent".to_string()]);
         assert!(!s.contains_key("/b"), "an entry with no tags/label is pruned");
+    }
+
+    #[test]
+    fn tag_store_merge_is_non_destructive() {
+        let mut s = TagStore::new();
+        tag_store_set(&mut s, "/a", vec!["keep".into()], "red".into());
+        let mut incoming = TagStore::new();
+        tag_store_set(&mut incoming, "/a", vec!["added".into()], "blue".into());
+        tag_store_set(&mut incoming, "/b", vec!["new".into()], "".into());
+        tag_store_merge(&mut s, incoming);
+        // /a: tags unioned (keep + added), imported non-empty label wins.
+        assert_eq!(s["/a"].tags, vec!["added".to_string(), "keep".to_string()]);
+        assert_eq!(s["/a"].label, "blue");
+        // /b: brought in fresh.
+        assert_eq!(s["/b"].tags, vec!["new".to_string()]);
     }
 
     #[test]
