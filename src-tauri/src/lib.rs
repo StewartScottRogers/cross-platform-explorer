@@ -661,8 +661,16 @@ fn read_archive_entries(path: String) -> Result<Vec<ArchiveEntry>, String> {
 
 /// Classic hex + ASCII dump of the first `max` bytes (CPE-214).
 fn hex_dump(path: &str, max: usize) -> Result<String, String> {
-    let bytes = fs::read(path).map_err(|e| e.to_string())?;
-    let n = bytes.len().min(max);
+    use std::io::Read;
+    // Read at most `max` bytes — never slurp a whole (possibly multi-GB) binary into memory just to
+    // show its first bytes (CPE-633). `take` bounds the read regardless of file size.
+    let mut bytes = Vec::new();
+    fs::File::open(path)
+        .map_err(|e| e.to_string())?
+        .take(max as u64)
+        .read_to_end(&mut bytes)
+        .map_err(|e| e.to_string())?;
+    let n = bytes.len();
     let mut out = String::new();
     for (i, chunk) in bytes[..n].chunks(16).enumerate() {
         let mut hex = String::new();
@@ -6037,6 +6045,18 @@ mod tests {
         // A directory and a missing path are errors, not panics.
         assert!(hash_file(d.to_string_lossy().to_string()).is_err());
         assert!(hash_file(d.join("nope.txt").to_string_lossy().to_string()).is_err());
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn hex_dump_caps_output_at_max_bytes() {
+        let d = scratch("hexcap");
+        fs::write(d.join("f.bin"), vec![0xABu8; 10_000]).unwrap();
+        // 32 bytes = two 16-byte rows; a third row offset (00000020) must not appear.
+        let out = hex_dump(&d.join("f.bin").to_string_lossy(), 32).unwrap();
+        assert!(out.contains("00000000") && out.contains("00000010"));
+        assert!(!out.contains("00000020"), "dumped past the max");
+        assert!(out.contains("ab ab"), "bytes rendered");
         let _ = fs::remove_dir_all(&d);
     }
 
