@@ -57,6 +57,7 @@ function mockBackend(listing: DirEntry[]) {
       case "copy_entries":
         return (args?.paths as string[]).map((p) => ({ path: `${p} (copy)`, ok: true, error: "" }));
       case "read_file_text": return "FILE PREVIEW CONTENT";
+      case "find_files_by_name": return { matches: [], dirs_scanned: 1, truncated: false };
       default: return null;
     }
   });
@@ -300,5 +301,39 @@ describe("file-name validation on rename (CPE-051)", () => {
 
     await waitFor(() => expect(screen.getByText(/can't contain/i)).toBeTruthy());
     expect(invoke.mock.calls.some((c) => c[0] === "rename_entry")).toBe(false);
+  });
+});
+
+describe("command palette (CPE-602/605)", () => {
+  it("opens on Ctrl+Shift+P and filters to a matching command", async () => {
+    mockBackend([file("alpha.md", "md")]);
+    await enterDrive();
+    await waitFor(() => expect(screen.getByText("alpha.md")).toBeTruthy());
+
+    await fireEvent.keyDown(window, { key: "P", ctrlKey: true, shiftKey: true });
+
+    const input = await screen.findByPlaceholderText(/Type a command/);
+    await fireEvent.input(input, { target: { value: "terminal" } });
+
+    // "Open terminal here" (added in CPE-605) is the only command matching "terminal".
+    await waitFor(() => expect(screen.getByText("Open terminal here")).toBeTruthy());
+  });
+});
+
+describe("find files by name (CPE-603)", () => {
+  it("opens on Ctrl+P and searches the current folder recursively", async () => {
+    mockBackend([file("alpha.md", "md")]);
+    await enterDrive();
+    await waitFor(() => expect(screen.getByText("alpha.md")).toBeTruthy());
+
+    await fireEvent.keyDown(window, { key: "p", ctrlKey: true });
+
+    const box = await screen.findByPlaceholderText(/Name to find/);
+    await fireEvent.input(box, { target: { value: "*.md" } });
+    await fireEvent.click(screen.getByText("Search"));
+
+    await waitFor(() =>
+      expect(invoke).toHaveBeenCalledWith("find_files_by_name", { root: "C:\\d", query: "*.md" }),
+    );
   });
 });
