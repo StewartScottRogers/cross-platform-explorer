@@ -2476,6 +2476,33 @@ fn tag_store_counts(store: &TagStore) -> Vec<(String, usize)> {
     v
 }
 
+/// Rename tag `old` → `new` across every path (CPE-646). De-dupes if a path already has `new`; an
+/// empty `new` just removes `old` (same as delete). Pure.
+fn tag_store_rename_tag(store: &mut TagStore, old: &str, new: &str) {
+    let new = new.trim();
+    for e in store.values_mut() {
+        if let Some(pos) = e.tags.iter().position(|t| t == old) {
+            e.tags.remove(pos);
+            if !new.is_empty() && !e.tags.iter().any(|t| t == new) {
+                e.tags.push(new.to_string());
+            }
+            e.tags.sort();
+        }
+    }
+}
+
+/// Remove tag `tag` from every path (CPE-646). Pure.
+fn tag_store_delete_tag(store: &mut TagStore, tag: &str) {
+    for e in store.values_mut() {
+        e.tags.retain(|t| t != tag);
+    }
+}
+
+/// Drop entries left with no tags and no label, so the store stays tidy after bulk edits. Pure.
+fn tag_store_prune_empty(store: &mut TagStore) {
+    store.retain(|_, e| !e.tags.is_empty() || !e.label.is_empty());
+}
+
 /// Load the tag store from `tags.json` in `dir`, returning an empty store when absent or corrupt.
 fn read_tags_from(dir: &Path) -> TagStore {
     fs::read_to_string(dir.join("tags.json"))
@@ -2516,6 +2543,30 @@ fn tag_counts(app: tauri::AppHandle) -> Result<Vec<(String, usize)>, String> {
     use tauri::Manager;
     let dir = app.path().app_config_dir().map_err(|e| e.to_string())?;
     Ok(tag_store_counts(&read_tags_from(&dir)))
+}
+
+/// Rename a tag across every path (CPE-646); an empty `new` deletes it. Returns the updated store.
+#[tauri::command]
+fn rename_tag(app: tauri::AppHandle, old: String, new: String) -> Result<TagStore, String> {
+    use tauri::Manager;
+    let dir = app.path().app_config_dir().map_err(|e| e.to_string())?;
+    let mut store = read_tags_from(&dir);
+    tag_store_rename_tag(&mut store, &old, &new);
+    tag_store_prune_empty(&mut store);
+    write_tags_to(&dir, &store)?;
+    Ok(store)
+}
+
+/// Remove a tag from every path (CPE-646). Returns the updated store.
+#[tauri::command]
+fn delete_tag(app: tauri::AppHandle, tag: String) -> Result<TagStore, String> {
+    use tauri::Manager;
+    let dir = app.path().app_config_dir().map_err(|e| e.to_string())?;
+    let mut store = read_tags_from(&dir);
+    tag_store_delete_tag(&mut store, &tag);
+    tag_store_prune_empty(&mut store);
+    write_tags_to(&dir, &store)?;
+    Ok(store)
 }
 
 /// Return the user's home directory.
@@ -5073,6 +5124,8 @@ pub fn run() {
             load_tags,
             set_tags,
             tag_counts,
+            rename_tag,
+            delete_tag,
             rename_entry,
             delete_to_trash,
             delete_permanent,
@@ -6022,6 +6075,22 @@ mod tests {
         // A label alone keeps the entry.
         tag_store_set(&mut s, "/b", vec![], "blue".into());
         assert_eq!(s["/b"].label, "blue");
+    }
+
+    #[test]
+    fn tag_store_bulk_rename_and_delete() {
+        let mut s = TagStore::new();
+        tag_store_set(&mut s, "/a", vec!["wrk".into(), "urgent".into()], "".into());
+        tag_store_set(&mut s, "/b", vec!["wrk".into(), "work".into()], "".into());
+        // Rename wrk -> work everywhere; /b already had work → de-duped.
+        tag_store_rename_tag(&mut s, "wrk", "work");
+        assert_eq!(s["/a"].tags, vec!["urgent".to_string(), "work".to_string()]);
+        assert_eq!(s["/b"].tags, vec!["work".to_string()]);
+        // Delete "work" everywhere; /b becomes empty and is pruned.
+        tag_store_delete_tag(&mut s, "work");
+        tag_store_prune_empty(&mut s);
+        assert_eq!(s["/a"].tags, vec!["urgent".to_string()]);
+        assert!(!s.contains_key("/b"), "an entry with no tags/label is pruned");
     }
 
     #[test]
