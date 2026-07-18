@@ -1,0 +1,29 @@
+---
+id: CPE-676
+title: Extract an <ExplorerPane> component from App.svelte
+type: refactor
+component: Frontend
+priority: low
+status: Deferred
+tags: deferred-internal
+created: 2026-07-18
+epic: CPE-617
+estimate: 4h+
+---
+
+## Summary
+Foundation for dual-pane (CPE-617). Extract one explorer view's state + operations from the ~3,112-line
+App.svelte monolith into a reusable `<ExplorerPane>` component (its own path/history, entries, selection,
+sort, view, archive/smart-folder, search, DnD, file ops), so single-pane renders one instance and
+dual-pane can render two. App becomes a thin shell (window chrome, layout, shared services).
+
+## Acceptance Criteria
+- [ ] `<ExplorerPane>` owns per-pane state + operations; App holds only shared/window-level concerns.
+- [ ] Single-pane behaviour is byte-for-byte unchanged (all existing App tests pass, GUI-verified).
+- [ ] No measurable single-pane startup/memory regression.
+- [ ] `npm run check` + full suite green; clippy unaffected.
+
+## Deferred
+deferred-on: this is a large, high-regression-surface refactor of the app core — it must be done
+**attended with live GUI verification**, not shipped blind in an unattended nightshift. revisit-when: an
+attended session dedicated to the extraction. It's the gating prereq for CPE-677/678/679.
