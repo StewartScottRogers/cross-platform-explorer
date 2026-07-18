@@ -49,6 +49,7 @@
   import ConfirmDialog from "./lib/components/ConfirmDialog.svelte";
   import ShortcutsDialog from "./lib/components/ShortcutsDialog.svelte";
   import ContentSearchDialog from "./lib/components/ContentSearchDialog.svelte";
+  import FileNameSearchDialog from "./lib/components/FileNameSearchDialog.svelte";
   import DuplicatesDialog from "./lib/components/DuplicatesDialog.svelte";
   import { namesList, detailList, csvList } from "./lib/listing";
   import { parentDir as parentOfPath } from "./lib/contentSearch";
@@ -202,6 +203,8 @@
   let shortcutsOpen = false;
   /** "Search in files" content-search overlay (Ctrl+Shift+F), scoped to the current folder (CPE-417). */
   let contentSearchOpen = false;
+  /** "Find files by name" recursive name-search overlay (Ctrl+P), scoped to the current folder (CPE-603). */
+  let fileSearchOpen = false;
   /** "Find duplicate files" overlay, scoped to the current folder (CPE-421). */
   let duplicatesOpen = false;
   let patternSelectOpen = false;
@@ -255,6 +258,7 @@
     { id: "sort.dir", group: "View", label: "Toggle sort direction", run: () => (sortDir = sortDir === "asc" ? "desc" : "asc") },
     { id: "view.hidden", group: "View", label: showHidden ? "Hide hidden files" : "Show hidden files", run: () => { showHidden = !showHidden; settings.saveShowHidden(showHidden); } },
     { id: "view.foldersFirst", group: "View", label: foldersFirst ? "Mix folders and files" : "Group folders first", run: () => { foldersFirst = !foldersFirst; settings.saveFoldersFirst(foldersFirst); } },
+    { id: "tool.findByName", group: "Tools", label: "Find files by name…", shortcut: "Ctrl+P", run: () => (fileSearchOpen = true), enabled: inFolder },
     { id: "tool.searchInFiles", group: "Tools", label: "Search in files…", shortcut: "Ctrl+Shift+F", run: () => (contentSearchOpen = true), enabled: inFolder },
     { id: "tool.findDuplicates", group: "Tools", label: "Find duplicate files…", run: () => (duplicatesOpen = true), enabled: inFolder },
     { id: "tool.aiConsole", group: "Tools", label: "Open AI Console", run: () => openAiConsole(), enabled: () => aiConsoleAvailable },
@@ -1634,6 +1638,7 @@
     if (ctrl && event.shiftKey && event.key.toLowerCase() === "t") { event.preventDefault(); reopenClosedTab(); return; }
     if (ctrl && event.shiftKey && event.key.toLowerCase() === "f") { event.preventDefault(); if (!isHome && !archive) contentSearchOpen = true; return; }
     if (ctrl && event.shiftKey && event.key.toLowerCase() === "p") { event.preventDefault(); paletteOpen = true; return; } // command palette (CPE-602)
+    if (ctrl && !event.shiftKey && event.key.toLowerCase() === "p") { event.preventDefault(); if (!isHome && !archive) fileSearchOpen = true; return; } // find files by name (CPE-603)
     if (ctrl && event.key.toLowerCase() === "t") { event.preventDefault(); newTab(); return; }
     if (ctrl && event.key.toLowerCase() === "w") { event.preventDefault(); closeTab(activeId); return; }
     if (ctrl && event.key === "Tab") { event.preventDefault(); cycleTab(event.shiftKey ? -1 : 1); return; }
@@ -2505,6 +2510,14 @@
     root={currentPath}
     on:navigate={(e) => { contentSearchOpen = false; revealFileInApp(e.detail); }}
     on:close={() => (contentSearchOpen = false)}
+  />
+{/if}
+
+{#if fileSearchOpen}
+  <FileNameSearchDialog
+    root={currentPath}
+    on:navigate={(e) => { fileSearchOpen = false; revealFileInApp(e.detail); }}
+    on:close={() => (fileSearchOpen = false)}
   />
 {/if}
 

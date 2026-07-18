@@ -1742,6 +1742,122 @@ fn search_file_contents(
     Ok(result)
 }
 
+/// One filename-search hit (CPE-603): the full path, the bare name, and whether it's a folder.
+#[derive(serde::Serialize)]
+struct NameMatch {
+    path: String,
+    name: String,
+    is_dir: bool,
+}
+
+/// The result of a filename search: the hits, how many directories were walked, and whether a cap
+/// was hit (so the UI can say "showing the first results").
+#[derive(serde::Serialize)]
+struct NameSearchResult {
+    matches: Vec<NameMatch>,
+    dirs_scanned: u64,
+    truncated: bool,
+}
+
+const NAME_SEARCH_MAX_MATCHES: usize = 2000;
+const NAME_SEARCH_MAX_DIRS: u64 = 50_000;
+
+/// Anchored wildcard match: `*` matches any run of characters, `?` exactly one. Both `name` and
+/// `pattern` are assumed already lowercased. Iterative two-pointer backtracking — no regex
+/// dependency, linear-ish, and pure so it's unit-testable.
+fn glob_is_match(name: &str, pattern: &str) -> bool {
+    let n: Vec<char> = name.chars().collect();
+    let p: Vec<char> = pattern.chars().collect();
+    let (mut i, mut j) = (0usize, 0usize);
+    let (mut star, mut mark) = (None, 0usize);
+    while i < n.len() {
+        if j < p.len() && (p[j] == '?' || p[j] == n[i]) {
+            i += 1;
+            j += 1;
+        } else if j < p.len() && p[j] == '*' {
+            star = Some(j);
+            mark = i;
+            j += 1;
+        } else if let Some(s) = star {
+            j = s + 1;
+            mark += 1;
+            i = mark;
+        } else {
+            return false;
+        }
+    }
+    while j < p.len() && p[j] == '*' {
+        j += 1;
+    }
+    j == p.len()
+}
+
+/// Case-insensitive name match mirroring the frontend `matchesQuery` (CPE-603): a query containing
+/// `*`/`?` is an anchored glob over the whole name; otherwise a plain substring. `query_lower` must
+/// already be lowercased and non-empty (an empty query matches nothing — the caller gates on it).
+fn name_matches(name: &str, query_lower: &str) -> bool {
+    if query_lower.is_empty() {
+        return false;
+    }
+    let n = name.to_lowercase();
+    if query_lower.contains('*') || query_lower.contains('?') {
+        glob_is_match(&n, query_lower)
+    } else {
+        n.contains(query_lower)
+    }
+}
+
+/// Find files and folders under `root` whose NAME matches `query` (CPE-603). Recursive, but bounded
+/// like `search_file_contents`: skips dot-directories, stops at match/dir caps (reporting
+/// `truncated`), and skips unreadable directories rather than failing the whole search. Empty query
+/// returns nothing; a non-folder root is an `Err`.
+#[tauri::command]
+fn find_files_by_name(root: String, query: String) -> Result<NameSearchResult, String> {
+    let q = query.trim().to_lowercase();
+    let mut result = NameSearchResult { matches: Vec::new(), dirs_scanned: 0, truncated: false };
+    if q.is_empty() {
+        return Ok(result);
+    }
+    let root_path = Path::new(&root);
+    if !root_path.is_dir() {
+        return Err(format!("{root}: not a folder"));
+    }
+
+    // Explicit stack, not recursion — bounded memory, and matches `list_dir`'s skip-on-error ethos.
+    let mut stack = vec![root_path.to_path_buf()];
+    while let Some(dir) = stack.pop() {
+        let Ok(entries) = fs::read_dir(&dir) else { continue };
+        result.dirs_scanned += 1;
+        if result.dirs_scanned > NAME_SEARCH_MAX_DIRS {
+            result.truncated = true;
+            return Ok(result);
+        }
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let name = entry.file_name();
+            let name = name.to_string_lossy();
+            let Ok(meta) = entry.metadata() else { continue };
+            let is_dir = meta.is_dir();
+            if name_matches(&name, &q) {
+                result.matches.push(NameMatch {
+                    path: path.to_string_lossy().into_owned(),
+                    name: name.to_string(),
+                    is_dir,
+                });
+                if result.matches.len() >= NAME_SEARCH_MAX_MATCHES {
+                    result.truncated = true;
+                    return Ok(result);
+                }
+            }
+            // Descend into real sub-directories, skipping dot-dirs (.git, .venv, …) to stay fast.
+            if is_dir && !name.starts_with('.') {
+                stack.push(path);
+            }
+        }
+    }
+    Ok(result)
+}
+
 /// A set of byte-identical files (CPE-420): their shared size + hash and every path.
 #[derive(serde::Serialize)]
 struct DupGroup {
@@ -4374,6 +4490,7 @@ pub fn run() {
             hash_file,
             text_stats,
             search_file_contents,
+            find_files_by_name,
             files_identical,
             find_duplicates,
             git_remote_url,
@@ -5439,6 +5556,54 @@ mod tests {
         // Empty query and a non-folder root behave sanely.
         assert_eq!(search_file_contents(d.to_string_lossy().to_string(), "  ".into(), false).unwrap().matches.len(), 0);
         assert!(search_file_contents(d.join("a.txt").to_string_lossy().to_string(), "x".into(), false).is_err());
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn name_matches_does_substring_and_glob() {
+        // Plain query = case-insensitive substring.
+        assert!(name_matches("Report.pdf", "report"));
+        assert!(name_matches("Report.pdf", "port"));
+        assert!(!name_matches("Report.pdf", "xls"));
+        // Glob = anchored over the whole name.
+        assert!(name_matches("photo.png", "*.png"));
+        assert!(!name_matches("photo.pngx", "*.png")); // anchored: trailing chars fail
+        assert!(name_matches("a1b2.txt", "a?b?.txt"));
+        assert!(!name_matches("ab.txt", "a?b?.txt")); // '?' needs exactly one char
+        assert!(name_matches("anything", "*")); // lone star matches all
+        assert!(name_matches("IMG_2024.jpg", "img_*.jpg")); // case-insensitive glob
+        // Empty query matches nothing (caller gates).
+        assert!(!name_matches("x", ""));
+    }
+
+    #[test]
+    fn find_files_by_name_walks_recursively_and_skips_dot_dirs() {
+        let d = scratch("namesearch");
+        fs::write(d.join("report.txt"), b"").unwrap();
+        fs::create_dir_all(d.join("sub")).unwrap();
+        fs::write(d.join("sub").join("report-2.txt"), b"").unwrap();
+        fs::create_dir_all(d.join("reports")).unwrap(); // a matching FOLDER
+        // A dot-dir with a matching file — both dir and file must be skipped.
+        fs::create_dir_all(d.join(".git")).unwrap();
+        fs::write(d.join(".git").join("report.log"), b"").unwrap();
+
+        let r = find_files_by_name(d.to_string_lossy().to_string(), "report".into()).unwrap();
+        let names: Vec<&str> = r.matches.iter().map(|m| m.name.as_str()).collect();
+        // report.txt, sub/report-2.txt, and the "reports" folder — never anything under .git.
+        assert_eq!(r.matches.len(), 3, "got {names:?}");
+        assert!(names.contains(&"report.txt"));
+        assert!(names.contains(&"report-2.txt"));
+        assert!(r.matches.iter().any(|m| m.name == "reports" && m.is_dir));
+        assert!(!r.matches.iter().any(|m| m.path.contains(".git")));
+
+        // Glob query.
+        let g = find_files_by_name(d.to_string_lossy().to_string(), "*.txt".into()).unwrap();
+        assert_eq!(g.matches.len(), 2);
+        assert!(g.matches.iter().all(|m| m.name.ends_with(".txt")));
+
+        // Empty query and a non-folder root behave sanely.
+        assert_eq!(find_files_by_name(d.to_string_lossy().to_string(), "  ".into()).unwrap().matches.len(), 0);
+        assert!(find_files_by_name(d.join("report.txt").to_string_lossy().to_string(), "x".into()).is_err());
         let _ = fs::remove_dir_all(&d);
     }
 
