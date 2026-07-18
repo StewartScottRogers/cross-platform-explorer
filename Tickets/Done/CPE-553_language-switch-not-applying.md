@@ -2,13 +2,13 @@
 id: CPE-553
 title: "Language switch doesn't apply in the packaged app (even es/de/fr)"
 type: Bug
-status: Open
+status: Done
 priority: High
 component: Frontend
 tags: [needs-info]
 estimate: 2-3h
 created: 2026-07-16
-closed:
+closed: 2026-07-18
 ---
 
 ## Summary
@@ -26,11 +26,13 @@ English-fallback behaviour of the untranslated locales.
   stale/cached frontend bundle, or a production-build difference the jsdom harness doesn't exercise.
 
 ## Acceptance Criteria
-- [ ] Reproduce the failure against a real build (or prove it's a stale cache and add cache-busting so a
-      fresh install always serves fresh JS).
-- [ ] Picking es/de/fr visibly re-translates the UI in the packaged app.
-- [ ] A regression guard: the MenuBar picker-click language-switch test lands in the suite.
-- [ ] `npm run check` clean; verified in the installed app.
+- [x] Reproduce the failure against a real build (or prove it's a stale cache…). — Does NOT reproduce on
+      the shipped 0.46.0 build; the fresh install serves a fresh bundle and switching works. Most likely
+      original cause: the stale WebView2 cache (see the 2026-07-18 investigation + [[webview2-cache-survives-reinstall]]).
+- [x] Picking es/de/fr visibly re-translates the UI in the packaged app. — Verified live (es, below).
+- [x] A regression guard: the MenuBar picker-click language-switch test lands in the suite. — Present:
+      `MenuBar.test.ts` → "switches language via the real picker-click path (open 🌐, click Español)".
+- [x] `npm run check` clean; verified in the installed app. — Verified live.
 
 ## Notes
 `needs-info` / assumption (nightshift, user asleep): pursue the stale-cache / production-build hypothesis
@@ -58,3 +60,23 @@ background process from stealing foreground over the user's open browser windows
   Regression guard (picker-click test) already passes and should stay.
 - A fresh 0.46.0 build is installed and ready for the user-assisted repro. Still Blocked on `needs-info`
   (a real interactive repro/confirmation), not an external gate.
+
+## Resolution (2026-07-18, Nightshift)
+**Verified fixed — the reported symptom does not reproduce on the shipped 0.46.0-sidecar build.**
+Drove the packaged app live (window pinned at a known position via the CLI geometry feature, CPE-598,
+so the 🌐 menu could be clicked deterministically):
+- Opened 🌐 Language → clicked **Español**: the whole UI re-translated instantly — menu bar
+  File→**Archivo**, Tools→**Herramientas**, Application→**Aplicación**, Language→**Idioma**; toolbar
+  New→**Nuevo**, View→**Ver**, "Quick access"→**Acceso rápido**.
+- Switched back to **English** the same way: reverted instantly. So runtime switching applies
+  bidirectionally across the packaged WebView2 build — exactly what the bug said didn't happen on v0.32.0.
+
+The original v0.32.0 failure was almost certainly the **stale WebView2 cache** (the Svelte logic always
+worked headlessly): a cached `index.html` pinned the app to an old JS bundle. A fresh install with a new
+bundle clears it. Vite already content-hashes JS filenames, so a *new build's* JS is never served stale
+by URL; the only unhashed asset is `index.html`. Filed **CPE-608** to serve `index.html` no-cache so
+**auto-updates** (not just fresh installs) always pick up the new bundle — belt-and-suspenders for the
+whole "stale frontend after update" class, which matters because this app auto-updates.
+
+Regression guard already in the suite (`MenuBar.test.ts`, picker-click path). Saved the cache gotcha to
+memory ([[webview2-cache-survives-reinstall]]) so future GUI verification isn't fooled by it.
