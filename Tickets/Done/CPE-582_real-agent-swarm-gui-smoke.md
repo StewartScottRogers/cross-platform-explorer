@@ -2,7 +2,8 @@
 id: CPE-582
 title: "Real-agent swarm GUI smoke — watch a live 2–3 agent swarm coordinate"
 type: Task
-status: Open
+status: Done
+closed: 2026-07-17
 priority: Low
 component: Multiple
 tags: [ready]
@@ -49,3 +50,14 @@ server), so no API key or spend is required.
 If anything here fails, it's a real bug to fix — report what the mission dir shows (or doesn't). The
 mechanism is already proven with a real process in `tests/swarm_end_to_end.rs`; this validates it with
 a real model.
+
+## Resolution (PASSED 2026-07-17)
+Ran a real `claude` (native) swarm from the AI Console on 0.40.0. The builder tab streamed real output
+("Done. Both actions completed…"), and `verify-swarm.ps1` confirmed the shared host received them:
+- **mailbox.jsonl**: `[done] claude#builder1 -> broadcast: "builder1 done."`
+- **memory/note-87949f71**: "Hello from builder1."
+
+Getting here required a chain of real fixes found by tracing the actual launch path: CPE-574 (adopt
+sessions), CPE-583 (print mode), CPE-586 (tab surfacing), CPE-587 (cmd quote-safety), CPE-589 (native
+model normalization), CPE-590 (variadic-safe fallback) + clearing the stale catalog cache. Epic
+[[CPE-528]]'s goal — a live, coordinating agent swarm visible in the app — is achieved.
