@@ -59,7 +59,8 @@
   import PropertiesDialog from "./lib/components/PropertiesDialog.svelte";
   import BatchRenameDialog from "./lib/components/BatchRenameDialog.svelte";
   import TagEditor from "./lib/components/TagEditor.svelte";
-  import { initTags } from "./lib/tags";
+  import { initTags, tags } from "./lib/tags";
+  import { filterEntriesByTag, tagCounts } from "./lib/tagFilter";
   import type { RenameItem } from "./lib/batchRename";
 
   import { t } from "./lib/i18n";
@@ -183,6 +184,8 @@
   let recentFolders: RecentFile[] = [];
   let columnWidths: number[] = settings.loadColumnWidths();
   let search = "";
+  /** Active sidebar Tags filter — show only entries carrying this tag (CPE-639); "" = off. */
+  let selectedTag = "";
   let editingPath = false;
 
   let renamingPath = "";
@@ -699,6 +702,7 @@
     if (!keepSelection) {
       selection = emptySelection();
       search = "";
+      selectedTag = ""; // a tag filter is folder-scoped; leaving the folder clears it (CPE-639)
     }
     error = "";
 
@@ -970,9 +974,15 @@
     ? filtered
     : filtered.filter((e) => matchesFileFilter(e, fileFilter));
 
+  // Narrow to a single tag when the sidebar Tags filter is active (CPE-639); cleared when leaving a folder.
+  $: tagFiltered = selectedTag ? filterEntriesByTag(typeFiltered, $tags, selectedTag) : typeFiltered;
   $: visible = archive
     ? sortEntries(archiveChildren(archive), sortKey, sortDir, foldersFirst)
-    : sortEntries(typeFiltered, sortKey, sortDir, foldersFirst);
+    : sortEntries(tagFiltered, sortKey, sortDir, foldersFirst);
+
+  /** All tags with counts, for the sidebar Tags section. */
+  $: tagList = tagCounts($tags);
+
 
   $: crumbs = archive
     ? [{ name: "Home", path: HOME }, ...splitPath(currentPath), ...archiveCrumbs(archive)]
@@ -2251,6 +2261,9 @@
       {isHome}
       selectedPath={selectedEntries.length === 1 && selectedEntries[0]?.is_dir ? selectedEntries[0].path : ""}
       {draggedPaths}
+      {tagList}
+      {selectedTag}
+      on:filterTag={(e) => (selectedTag = selectedTag === e.detail ? "" : e.detail)}
       on:navigate={(e) => { if (archive) exitArchive(); navigate(e.detail); }}
       on:openFile={(e) => openRecent(e.detail)}
       on:home={() => { if (archive) exitArchive(); navigate(HOME); }}

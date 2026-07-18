@@ -13,3 +13,13 @@ export function filterEntriesByTag<T extends { path: string }>(entries: T[], sto
 export function anyEntryHasTag<T extends { path: string }>(entries: T[], store: TagStore, tag: string): boolean {
   return entries.some((e) => store[e.path]?.tags.includes(tag) ?? false);
 }
+
+/** Every tag with the number of paths carrying it, most-used first then alphabetical (mirrors the
+ *  backend `tag_counts`). Drives the sidebar Tags section. Pure. */
+export function tagCounts(store: TagStore): [string, number][] {
+  const counts = new Map<string, number>();
+  for (const entry of Object.values(store)) {
+    for (const t of entry.tags) counts.set(t, (counts.get(t) ?? 0) + 1);
+  }
+  return [...counts.entries()].sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]));
+}

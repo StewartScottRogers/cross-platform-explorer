@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { filterEntriesByTag, anyEntryHasTag } from "./tagFilter";
+import { filterEntriesByTag, anyEntryHasTag, tagCounts } from "./tagFilter";
 import type { TagStore } from "./tags";
 
 const store: TagStore = {
@@ -21,5 +21,10 @@ describe("tagFilter (CPE-639)", () => {
   it("anyEntryHasTag reflects presence", () => {
     expect(anyEntryHasTag(entries, store, "work")).toBe(true);
     expect(anyEntryHasTag(entries, store, "nope")).toBe(false);
+  });
+  it("tagCounts tallies most-used first", () => {
+    // work: /a,/b = 2; urgent: /a = 1.
+    expect(tagCounts(store)).toEqual([["work", 2], ["urgent", 1]]);
+    expect(tagCounts({})).toEqual([]);
   });
 });

@@ -26,6 +26,10 @@
   export let selectedPath = "";
   /** Paths currently being dragged from the file list (CPE-043). */
   export let draggedPaths: string[] = [];
+  /** All tags with counts, for the Tags section (CPE-639). Empty ⇒ the section is hidden. */
+  export let tagList: [string, number][] = [];
+  /** The active tag filter (or ""), for the highlight. */
+  export let selectedTag = "";
 
   const dispatch = createEventDispatcher<{
     navigate: string;
@@ -37,12 +41,15 @@
     agentMenu: { x: number; y: number; sessionId?: string; sessionLabel?: string };
     openSession: { sessionId: string; cwd: string };
     drop: { paths: string[]; dest: string; copy: boolean };
+    filterTag: string;
   }>();
 
   /** Favorites section collapse state (transient, like the Home twisties). */
   let favOpen = true;
   /** Agents (Agent Watch) section collapse state. */
   let agentsOpen = true;
+  /** Tags section collapse state (CPE-639). */
+  let tagsOpen = true;
   const extOf = (name: string) => {
     const i = name.lastIndexOf(".");
     return i > 0 ? name.slice(i + 1).toLowerCase() : "";
@@ -227,6 +234,33 @@
     {/if}
     <div class="navigation-pane-sep" />
   {/if}
+  {#if tagList.length > 0}
+    <div class="nav-item fav-head">
+      <button class="twisty" class:open={tagsOpen} title={tagsOpen ? "Collapse" : "Expand"} on:click={() => (tagsOpen = !tagsOpen)}>
+        <Icon name="chev-right" size={12} />
+      </button>
+      <Icon name="tag" />
+      <span class="label fav-title">Tags</span>
+    </div>
+    {#if tagsOpen}
+      <div class="nav-children">
+        {#each tagList as [tag, count] (tag)}
+          <button
+            class="nav-item fav-item"
+            class:active={selectedTag === tag}
+            title={`${count} item${count === 1 ? "" : "s"} tagged “${tag}” — click to filter`}
+            on:click={() => dispatch("filterTag", tag)}
+          >
+            <span class="twisty hidden" />
+            <Icon name="tag" />
+            <span class="label">{tag}</span>
+            <span class="tag-count">{count}</span>
+          </button>
+        {/each}
+      </div>
+    {/if}
+    <div class="navigation-pane-sep" />
+  {/if}
   <button class="nav-item" class:active={isHome} on:click={() => dispatch("home")}>
     <span class="twisty hidden" />
     <Icon name="home" />
@@ -342,6 +376,7 @@
   /* The Favorites section header reads as a heading, not a navigable row (CPE-340). */
   .fav-head { cursor: default; }
   .fav-title { font-weight: 600; }
+  .tag-count { margin-left: auto; font-size: 11px; color: var(--text-faint); font-variant-numeric: tabular-nums; }
   /* Agents (Agent Watch) section — a running coding agent's Project folder (CPE-397). */
   .agents-head { cursor: default; }
   .agents-title { font-weight: 600; }
