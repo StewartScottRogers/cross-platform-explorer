@@ -2663,9 +2663,40 @@ fn tar_unpack<R: std::io::Read>(reader: R, dest: &std::path::Path) -> Result<(),
     archive.unpack(dest).map_err(|e| e.to_string())
 }
 
+/// True if an archive entry name is a plain relative path that cannot escape the extraction root — no
+/// absolute path, no `..`, no drive prefix, on either separator. The shared "zip-slip" guard for
+/// extractors that don't provide one (CPE-628). `\` is normalised to `/` so a backslash-traversal name
+/// is rejected on every platform, not just Windows.
+fn entry_name_is_safe(name: &str) -> bool {
+    use std::path::Component;
+    if name.is_empty() {
+        return false;
+    }
+    let normalized = name.replace('\\', "/");
+    let p = std::path::Path::new(&normalized);
+    !p.is_absolute() && p.components().all(|c| matches!(c, Component::Normal(_) | Component::CurDir))
+}
+
+/// Extract a `.7z` into `dest` **safely**. `sevenz-rust` 0.6 joins the raw entry name onto `dest` with
+/// no path-traversal check, so a malicious entry like `..\..\evil` would be written OUTSIDE `dest`
+/// ("zip slip" — arbitrary file write). We validate each entry with `entry_name_is_safe` and skip any
+/// that isn't a plain relative path, matching how the `zip`/`tar` crates already guard their own
+/// extractors (CPE-628).
+fn extract_7z_safe(src: &Path, dest: &Path) -> Result<(), String> {
+    sevenz_rust::decompress_file_with_extract_fn(src, dest, |entry, reader, entry_dest| {
+        if entry_name_is_safe(entry.name()) {
+            sevenz_rust::default_entry_extract_fn(entry, reader, entry_dest)
+        } else {
+            Ok(true) // skip the unsafe entry; keep extracting the rest
+        }
+    })
+    .map_err(|e| e.to_string())
+}
+
 /// Extract an archive into `dest`, which is created if missing (CPE-252).
-/// Dispatched by extension like `read_archive_entries`; zip extraction uses the
-/// crate's path-safe extractor, so a malicious "zip-slip" entry can't escape.
+/// Dispatched by extension like `read_archive_entries`. Every format is guarded against "zip-slip"
+/// path traversal: zip via the crate's `enclosed_name`, tar via the crate's checked `unpack`, and 7z
+/// via `extract_7z_safe` (the sevenz crate itself doesn't check — CPE-628).
 #[tauri::command]
 fn extract_archive(path: String, dest: String) -> Result<String, String> {
     fs::create_dir_all(&dest).map_err(|e| e.to_string())?;
@@ -2689,7 +2720,7 @@ fn extract_archive(path: String, dest: String) -> Result<String, String> {
         let mut out = fs::File::create(dest_path.join(stem)).map_err(|e| e.to_string())?;
         std::io::copy(&mut decoder, &mut out).map_err(|e| e.to_string())?;
     } else if lower.ends_with(".7z") {
-        sevenz_rust::decompress_file(&path, dest_path).map_err(|e| e.to_string())?;
+        extract_7z_safe(Path::new(&path), dest_path)?;
     } else {
         // zip family (zip/jar/apk/war/…): the crate's extractor guards against
         // path traversal via ZipFile::enclosed_name.
@@ -5352,6 +5383,21 @@ mod tests {
             "beta"
         );
         let _ = fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn entry_name_is_safe_rejects_zip_slip_traversal() {
+        // Plain relative paths are fine.
+        assert!(entry_name_is_safe("a/b/c.txt"));
+        assert!(entry_name_is_safe("./x.txt"));
+        assert!(entry_name_is_safe("folder/leaf"));
+        // Traversal / absolute / drive / empty are rejected — on BOTH separators, every platform.
+        assert!(!entry_name_is_safe("../evil"));
+        assert!(!entry_name_is_safe("a/../../evil"));
+        assert!(!entry_name_is_safe("..\\evil")); // backslash traversal, normalised
+        assert!(!entry_name_is_safe("a\\..\\..\\evil"));
+        assert!(!entry_name_is_safe("/etc/passwd"));
+        assert!(!entry_name_is_safe(""));
     }
 
     #[test]
