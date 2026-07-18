@@ -2615,7 +2615,15 @@ fn zip_add_path(
     src: &std::path::Path,
     name_in_zip: &str,
     opts: zip::write::SimpleFileOptions,
+    skip: Option<&std::path::Path>,
 ) -> Result<(), String> {
+    // Never pack the output archive into itself: a `dest` that lives inside a source folder would
+    // otherwise be added to the growing zip — a sharing violation or a corrupt, bloated archive (CPE-632).
+    if let (Some(skip), Ok(canon)) = (skip, src.canonicalize()) {
+        if canon == skip {
+            return Ok(());
+        }
+    }
     let meta = fs::symlink_metadata(src).map_err(|e| e.to_string())?;
     if meta.is_dir() {
         writer
@@ -2634,6 +2642,7 @@ fn zip_add_path(
                 &child.path(),
                 &format!("{name_in_zip}/{child_name}"),
                 opts,
+                skip,
             )?;
         }
     } else {
@@ -2658,13 +2667,16 @@ fn compress_to_zip(paths: Vec<String>, dest: String) -> Result<String, String> {
     let mut writer = zip::ZipWriter::new(file);
     let opts = zip::write::SimpleFileOptions::default()
         .compression_method(zip::CompressionMethod::Deflated);
+    // Canonical path of the output archive (it exists now) so the walk can skip it if it sits inside
+    // one of the sources — otherwise it would try to add itself (CPE-632).
+    let dest_canon = std::path::Path::new(&dest).canonicalize().ok();
     for p in &paths {
         let src = std::path::Path::new(p);
         let name = src
             .file_name()
             .map(|s| s.to_string_lossy().to_string())
             .ok_or_else(|| format!("invalid path: {p}"))?;
-        zip_add_path(&mut writer, src, &name, opts)?;
+        zip_add_path(&mut writer, src, &name, opts, dest_canon.as_deref())?;
     }
     writer.finish().map_err(|e| e.to_string())?;
     Ok(dest)
@@ -5428,6 +5440,28 @@ mod tests {
         let d = scratch("zip_empty");
         let zip_path = d.join("empty.zip");
         assert!(compress_to_zip(vec![], zip_path.to_string_lossy().to_string()).is_err());
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn compress_skips_the_output_archive_inside_a_source() {
+        let d = scratch("zip_self");
+        fs::create_dir_all(d.join("folder")).unwrap();
+        fs::write(d.join("folder").join("a.txt"), b"a").unwrap();
+        // The output .zip lives INSIDE the folder being compressed.
+        let dest = d.join("folder").join("out.zip");
+        let r = compress_to_zip(
+            vec![d.join("folder").to_string_lossy().to_string()],
+            dest.to_string_lossy().to_string(),
+        );
+        assert!(r.is_ok(), "{r:?}");
+        let names: Vec<String> = zip_entries(&dest.to_string_lossy())
+            .unwrap()
+            .into_iter()
+            .map(|e| e.name)
+            .collect();
+        assert!(names.iter().any(|n| n.ends_with("a.txt")), "should contain the real file: {names:?}");
+        assert!(!names.iter().any(|n| n.contains("out.zip")), "must not contain itself: {names:?}");
         let _ = fs::remove_dir_all(&d);
     }
 
