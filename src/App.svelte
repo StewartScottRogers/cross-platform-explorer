@@ -2596,6 +2596,7 @@
         {searching}
         {cutPaths}
         {renamingPath}
+        canDrag={!archive}
         {renameValue}
         {columnWidths}
         on:resizeColumns={(e) => { columnWidths = e.detail; settings.saveColumnWidths(columnWidths); }}

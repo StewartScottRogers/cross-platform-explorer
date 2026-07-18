@@ -41,6 +41,10 @@
 
   /** Path currently being renamed inline, or "" for none. */
   export let renamingPath = "";
+  /** Whether drag-and-drop is active for these rows. False in read-only virtual views like an open
+      archive (CPE-673), whose rows are synthetic in-zip paths, not real files — so dragging them out or
+      dropping onto them would be meaningless. */
+  export let canDrag = true;
   /** Initial text for the inline editor. */
   export let renameValue = "";
 
@@ -149,8 +153,9 @@
     setTimeout(() => badge.remove(), 0);
   }
 
-  /** Only folders are valid targets (plus the shared self/descendant rule). */
+  /** Only folders are valid targets (plus the shared self/descendant rule); no targets when DnD is off. */
   function validTarget(i: number): boolean {
+    if (!canDrag) return false;
     const entry = entries[i];
     return !!entry?.is_dir && isValidDrop(draggedPaths, entry.path);
   }
@@ -310,7 +315,7 @@
         bind:this={rowEls[i]}
         role="button"
         tabindex="0"
-        draggable={!renamingPath}
+        draggable={!renamingPath && canDrag}
         on:pointerdown={() => onRowPointerDown(i)}
         on:dragstart={(e) => onDragStart(e, i)}
         on:dragend={onDragEnd}
