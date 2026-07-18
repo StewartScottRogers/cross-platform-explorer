@@ -1231,6 +1231,31 @@ fn read_image_data_url(path: String) -> Result<String, String> {
     Ok(format!("data:image/png;base64,{b64}"))
 }
 
+/// Decode `path` and produce a downscaled PNG thumbnail whose longest edge is at most `max_edge`
+/// pixels, preserving aspect ratio (CPE-642, epic CPE-615). Pure + testable; the `thumbnail` command
+/// wraps it as a data URL. `image::thumbnail` is a fast box filter — good enough for a grid tile.
+fn make_thumbnail_png(path: &Path, max_edge: u32) -> Result<Vec<u8>, String> {
+    let img = image::open(path).map_err(|e| e.to_string())?;
+    let edge = max_edge.max(1);
+    let thumb = img.thumbnail(edge, edge);
+    let mut buf = std::io::Cursor::new(Vec::new());
+    thumb
+        .write_to(&mut buf, image::ImageFormat::Png)
+        .map_err(|e| e.to_string())?;
+    Ok(buf.into_inner())
+}
+
+/// A PNG thumbnail of an image file as a `data:` URL the `<img>` tag can show (CPE-642). Bounded by
+/// the preview size cap so a huge image can't exhaust memory. Errors (rather than hangs) on a
+/// non-image or corrupt file, so the frontend can fall back to a generic icon.
+#[tauri::command]
+fn thumbnail(path: String, max_edge: u32) -> Result<String, String> {
+    use base64::Engine;
+    ensure_previewable_size(&path, PREVIEW_INFO_MAX_BYTES)?;
+    let png = make_thumbnail_png(Path::new(&path), max_edge)?;
+    Ok(format!("data:image/png;base64,{}", base64::engine::general_purpose::STANDARD.encode(png)))
+}
+
 /// Read a text file's contents for the preview pane, capped at `max_bytes` so a
 /// huge file can never be slurped into memory. Errors (rather than truncating)
 /// when the file is too large, unreadable, or not valid UTF-8 — the frontend
@@ -4975,6 +5000,7 @@ pub fn run() {
             read_archive_entries,
             read_preview_info,
             read_image_data_url,
+            thumbnail,
             read_settings,
             write_settings,
             load_tags,
@@ -5785,6 +5811,23 @@ mod tests {
         let f = d.join("x.parquet");
         fs::write(&f, b"not a parquet file").unwrap();
         assert!(parquet_info(&f.to_string_lossy()).is_err());
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn make_thumbnail_png_downscales_and_preserves_aspect() {
+        let d = scratch("thumb");
+        // A 100x40 image → longest edge scaled to 32 → 32 x ~13, aspect kept.
+        image::RgbImage::from_pixel(100, 40, image::Rgb([10u8, 20, 30]))
+            .save(d.join("x.png"))
+            .unwrap();
+        let png = make_thumbnail_png(&d.join("x.png"), 32).unwrap();
+        let out = image::load_from_memory(&png).unwrap();
+        assert_eq!(out.width(), 32, "longest edge scaled to max_edge");
+        assert!(out.height() <= 32 && out.height() >= 10, "aspect preserved: {}", out.height());
+        // A non-image file errors (frontend falls back to a generic icon).
+        fs::write(d.join("t.txt"), b"not an image").unwrap();
+        assert!(make_thumbnail_png(&d.join("t.txt"), 32).is_err());
         let _ = fs::remove_dir_all(&d);
     }
 

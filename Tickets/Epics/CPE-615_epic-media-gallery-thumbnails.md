@@ -2,7 +2,7 @@
 id: CPE-615
 title: "EPIC: Media gallery & thumbnails"
 type: Task
-status: Proposed
+status: In Progress
 priority: Medium
 component: Multiple
 tags: [epic]
@@ -51,3 +51,17 @@ tiebreaker while adding high-visible value for the media case.
 - Details/properties show dimensions + basic EXIF for supported images.
 - The thumbnail cache is bounded, stale-aware, and never blocks the plain views.
 - With media features unused, the plain explorer's startup/memory are unchanged (verified).
+
+## Decisions (2026-07-18, activated in dayshift — best-guess)
+- **v1 formats:** whatever the `image` crate decodes (JPEG/PNG/GIF/WebP/BMP/TIFF). HEIC/RAW/video stay
+  Blocked (CPE-097/102) — no change here.
+- **Thumbnail generation:** backend `thumbnail(path, max_edge)` → PNG data URL via `image::thumbnail`
+  (fast aspect-preserving downscale). Generated lazily by the frontend, off the main thread.
+- **Cache:** a size-capped on-disk cache keyed by path+mtime is a follow-up child (v1 returns fresh).
+- **Gallery mode / quick-look:** follow-up children once thumbnails render in the icon view.
+
+## Child tickets (just-in-time)
+1. CPE-642 — Backend `thumbnail(path, max_edge)` PNG data URL (cargo-tested).
+2. CPE-643 — Frontend: lazy thumbnail loading in the icon view (image files show real thumbnails).
+3. CPE-644 — On-disk thumbnail cache (path+mtime keyed, size-capped).
+4. CPE-645 — Gallery mode (bigger tiles) + spacebar quick-look.
