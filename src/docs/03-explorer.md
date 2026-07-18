@@ -20,6 +20,10 @@ The explorer is the core of the app and is tuned to stay **fast, small, and pred
 - **Thumbnails** — in the **icons** view, image files (JPEG, PNG, GIF, WebP, BMP, TIFF, AVIF) show a real
   downscaled thumbnail instead of a generic icon. They load lazily as tiles scroll into view, so a folder
   of hundreds of photos stays responsive; non-image files and the list/details views are unchanged.
+- **Gallery view** — a fourth view mode (View menu or the command palette) that lays photos out as large
+  tiles on a wide grid — a light-table for a folder of images, with bigger thumbnails than the icons view.
+- **Quick-look** — press **Space** on a selected image to open a full-screen preview; **←/→** step through
+  the folder's images and **Esc** (or Space again) closes it.
 - **Sort & filter** — order by name, size, date, or type; filter the list by a pattern.
 - **Search** — three complementary tools:
   - a quick **name filter** for the current folder (Ctrl+F; supports `*`/`?` wildcards),
@@ -53,4 +57,6 @@ jump back to one by name. It's the fastest way to reach anything without hunting
 ## Details & properties
 
 The details pane and the Properties dialog show size, dates, type, and (where relevant) checksums and
-duplicate detection.
+duplicate detection. For image files the Properties dialog also shows **dimensions** and any embedded
+**EXIF** — camera, lens, date taken, ISO, aperture, exposure, and focal length — omitting whatever the
+photo doesn't carry.

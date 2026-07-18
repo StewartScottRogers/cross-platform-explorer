@@ -5,7 +5,7 @@
   import { t } from "../i18n";
   import { formatSize } from "../format";
   import { formatDate } from "../datetime";
-  import { iconFor, typeName, categoryOf } from "../filetypes";
+  import { iconFor, typeName, categoryOf, isImage } from "../filetypes";
   import { checksumMatches } from "../checksum";
   import type { DirEntry } from "../types";
 
@@ -85,6 +85,34 @@
     }
   }
 
+  // Image dimensions + basic EXIF (CPE-659) — auto-loaded for a single image file, best-effort.
+  interface ImageMeta {
+    width: number | null;
+    height: number | null;
+    camera: string | null;
+    lens: string | null;
+    taken: string | null;
+    iso: string | null;
+    aperture: string | null;
+    exposure: string | null;
+    focal_length: string | null;
+  }
+  let imageMeta: ImageMeta | null = null;
+  $: isImageFile = !!single && !single.is_dir && isImage(single.name);
+  // Rows to render, in order, skipping fields with no data.
+  $: imageRows = imageMeta
+    ? ([
+        [$t("prop.dimensions"), imageMeta.width && imageMeta.height ? `${imageMeta.width} × ${imageMeta.height}` : null],
+        [$t("prop.camera"), imageMeta.camera],
+        [$t("prop.lens"), imageMeta.lens],
+        [$t("prop.dateTaken"), imageMeta.taken],
+        [$t("prop.iso"), imageMeta.iso],
+        [$t("prop.aperture"), imageMeta.aperture],
+        [$t("prop.exposure"), imageMeta.exposure],
+        [$t("prop.focalLength"), imageMeta.focal_length],
+      ] as [string, string | null][]).filter(([, v]) => v)
+    : [];
+
   $: single = entries.length === 1 ? entries[0] : null;
   $: totalSize = entries.reduce((n, e) => n + (e.is_dir ? 0 : e.size), 0);
   $: folderCount = entries.filter((e) => e.is_dir).length;
@@ -96,6 +124,14 @@
       info = await invoke<Info>("entry_info", { path: single.path });
     } catch (e) {
       error = String(e);
+    }
+    // Image metadata is best-effort — a failure just leaves the rows off, never blocks the dialog.
+    if (!single.is_dir && isImage(single.name)) {
+      try {
+        imageMeta = await invoke<ImageMeta>("image_meta", { path: single.path });
+      } catch {
+        /* leave imageMeta null; the dialog just omits the media rows */
+      }
     }
     // Folder sizes must be computed recursively, which can take a while on a
     // big tree — do it after the dialog is already showing, never blocking it.
@@ -165,6 +201,11 @@
                 .join(", ") || $t("prop.none")}
             </dd>
           </div>
+        {/if}
+        {#if isImageFile && imageRows.length}
+          {#each imageRows as [label, value]}
+            <div><dt>{label}</dt><dd>{value}</dd></div>
+          {/each}
         {/if}
         {#if !single.is_dir}
           <div>

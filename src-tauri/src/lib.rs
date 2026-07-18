@@ -1955,6 +1955,71 @@ fn entry_info(path: String) -> Result<EntryInfo, String> {
     })
 }
 
+/// Image dimensions + basic EXIF for the Properties dialog (CPE-659, epic CPE-615). Best-effort:
+/// every field is optional and a non-image / EXIF-less file yields an all-`None` struct rather than an
+/// error, so the frontend simply omits the rows it has no data for.
+#[derive(serde::Serialize, Default)]
+struct ImageMeta {
+    width: Option<u32>,
+    height: Option<u32>,
+    camera: Option<String>,
+    lens: Option<String>,
+    taken: Option<String>,
+    iso: Option<String>,
+    aperture: Option<String>,
+    exposure: Option<String>,
+    focal_length: Option<String>,
+}
+
+fn read_exif(path: &str) -> Result<exif::Exif, exif::Error> {
+    let file = fs::File::open(path)?;
+    let mut reader = std::io::BufReader::new(&file);
+    exif::Reader::new().read_from_container(&mut reader)
+}
+
+#[tauri::command]
+fn image_meta(path: String) -> Result<ImageMeta, String> {
+    use exif::{In, Tag};
+    let mut meta = ImageMeta::default();
+
+    // Dimensions come cheaply from the header without a full decode.
+    if let Ok((w, h)) = image::image_dimensions(&path) {
+        meta.width = Some(w);
+        meta.height = Some(h);
+    }
+
+    if let Ok(exif) = read_exif(&path) {
+        // A human-readable value for a tag, with unit (e.g. "f/2.8", "1/200 s", "50 mm"), trimmed of
+        // the quotes kamadak wraps ASCII strings in; `None` when the tag is absent or empty.
+        let field = |tag: Tag| {
+            exif.get_field(tag, In::PRIMARY)
+                .map(|f| f.display_value().with_unit(&exif).to_string())
+                .map(|s| s.trim().trim_matches('"').trim().to_string())
+                .filter(|s| !s.is_empty())
+        };
+
+        // Model usually already includes the make ("NIKON D750"); don't duplicate it.
+        meta.camera = match (field(Tag::Make), field(Tag::Model)) {
+            (Some(mk), Some(md)) => Some(if md.starts_with(&mk) { md } else { format!("{mk} {md}") }),
+            (mk, md) => mk.or(md),
+        };
+        meta.lens = field(Tag::LensModel);
+        meta.taken = field(Tag::DateTimeOriginal);
+        meta.iso = field(Tag::PhotographicSensitivity);
+        meta.aperture = field(Tag::FNumber);
+        meta.exposure = field(Tag::ExposureTime);
+        meta.focal_length = field(Tag::FocalLength);
+
+        // JPEGs the `image` crate couldn't size still carry pixel dimensions in EXIF.
+        if meta.width.is_none() {
+            meta.width = exif.get_field(Tag::PixelXDimension, In::PRIMARY).and_then(|f| f.value.get_uint(0));
+            meta.height = exif.get_field(Tag::PixelYDimension, In::PRIMARY).and_then(|f| f.value.get_uint(0));
+        }
+    }
+
+    Ok(meta)
+}
+
 /// Recursive counts + size of a directory tree, for the Properties dialog (CPE-649): number of files,
 /// number of sub-folders, and total bytes. Cycle-safe (doesn't follow symlinked dirs) and bounded —
 /// stops at a large entry cap (reporting `truncated`) so it can't spin on a pathological tree.
@@ -5248,6 +5313,7 @@ pub fn run() {
             cancel_transfer,
             move_exact,
             entry_info,
+            image_meta,
             dir_size,
             folder_stats,
             hash_file,
@@ -6043,6 +6109,27 @@ mod tests {
         let f = d.join("x.parquet");
         fs::write(&f, b"not a parquet file").unwrap();
         assert!(parquet_info(&f.to_string_lossy()).is_err());
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn image_meta_reports_dimensions() {
+        let d = scratch("imgmeta");
+        let f = d.join("p.png");
+        image::RgbImage::from_pixel(24, 16, image::Rgb([9u8, 9, 9])).save(&f).unwrap();
+        let m = image_meta(f.to_string_lossy().to_string()).unwrap();
+        assert_eq!(m.width, Some(24));
+        assert_eq!(m.height, Some(16));
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn image_meta_non_image_is_all_none() {
+        let d = scratch("imgmeta-txt");
+        let f = d.join("x.txt");
+        fs::write(&f, b"not an image").unwrap();
+        let m = image_meta(f.to_string_lossy().to_string()).unwrap();
+        assert!(m.width.is_none() && m.camera.is_none() && m.taken.is_none());
         let _ = fs::remove_dir_all(&d);
     }
 

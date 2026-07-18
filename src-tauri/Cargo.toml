@@ -53,7 +53,8 @@ calamine = "0.26"
 rusqlite = { version = "0.32", features = ["bundled"] }
 parquet = { version = "53", default-features = false }
 sevenz-rust = "0.6"
-image = { version = "0.25", default-features = false, features = ["tiff", "png"] }
+image = { version = "0.25", default-features = false, features = ["tiff", "png", "jpeg", "gif", "webp", "bmp"] }
+kamadak-exif = "0.6"
 psd = "0.3"
 base64 = "0.22"
 iso9660 = "0.1"
