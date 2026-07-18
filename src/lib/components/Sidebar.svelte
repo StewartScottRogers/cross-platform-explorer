@@ -11,6 +11,7 @@
   import type { AgentSession } from "../sidecar";
   import type { SmartFolder } from "../smartFolders";
   import { isValidDrop, hoverEffect } from "../dnd";
+  import { sidebarSections, isOpen, toggleSection } from "../sidebarSections";
 
   export let places: Place[] = [];
   export let drives: Place[] = [];
@@ -53,14 +54,15 @@
     smartFolderMenu: { x: number; y: number; id: string; name: string };
   }>();
 
-  /** Favorites section collapse state (transient, like the Home twisties). */
-  let favOpen = true;
-  /** Agents (Agent Watch) section collapse state. */
-  let agentsOpen = true;
-  /** Tags section collapse state (CPE-639). */
-  let tagsOpen = true;
-  /** Smart Folders section collapse state (CPE-667). */
-  let smartOpen = true;
+  // Every sidebar section's collapse state now comes from one persisted store (CPE-675), so a layout the
+  // user sets sticks and all sections behave identically. Unset = open (fresh install is fully expanded).
+  $: exploreOpen = isOpen($sidebarSections, "explore");
+  $: placesOpen = isOpen($sidebarSections, "places");
+  $: drivesOpen = isOpen($sidebarSections, "drives");
+  $: favOpen = isOpen($sidebarSections, "favorites");
+  $: agentsOpen = isOpen($sidebarSections, "agents");
+  $: tagsOpen = isOpen($sidebarSections, "tags");
+  $: smartOpen = isOpen($sidebarSections, "smart");
   const extOf = (name: string) => {
     const i = name.lastIndexOf(".");
     return i > 0 ? name.slice(i + 1).toLowerCase() : "";
@@ -177,7 +179,7 @@
 <div class="navigation-pane" role="region" aria-label="Navigation">
   {#if sessions.length > 0}
     <div class="nav-item agents-head">
-      <button class="twisty" class:open={agentsOpen} title={agentsOpen ? "Collapse" : "Expand"} on:click={() => (agentsOpen = !agentsOpen)}>
+      <button class="twisty" class:open={agentsOpen} title={agentsOpen ? "Collapse" : "Expand"} on:click={() => toggleSection("agents")}>
         <Icon name="chev-right" size={12} />
       </button>
       <Icon name="code" />
@@ -215,7 +217,7 @@
   {/if}
   {#if favorites.length > 0}
     <div class="nav-item fav-head">
-      <button class="twisty" class:open={favOpen} title={favOpen ? "Collapse" : "Expand"} on:click={() => (favOpen = !favOpen)}>
+      <button class="twisty" class:open={favOpen} title={favOpen ? "Collapse" : "Expand"} on:click={() => toggleSection("favorites")}>
         <Icon name="chev-right" size={12} />
       </button>
       <Icon name="star" />
@@ -241,7 +243,7 @@
   {/if}
   {#if tagList.length > 0}
     <div class="nav-item fav-head">
-      <button class="twisty" class:open={tagsOpen} title={tagsOpen ? "Collapse" : "Expand"} on:click={() => (tagsOpen = !tagsOpen)}>
+      <button class="twisty" class:open={tagsOpen} title={tagsOpen ? "Collapse" : "Expand"} on:click={() => toggleSection("tags")}>
         <Icon name="chev-right" size={12} />
       </button>
       <Icon name="tag" />
@@ -269,7 +271,7 @@
   {/if}
   {#if smartFolders.length > 0}
     <div class="nav-item fav-head">
-      <button class="twisty" class:open={smartOpen} title={smartOpen ? "Collapse" : "Expand"} on:click={() => (smartOpen = !smartOpen)}>
+      <button class="twisty" class:open={smartOpen} title={smartOpen ? "Collapse" : "Expand"} on:click={() => toggleSection("smart")}>
         <Icon name="chev-right" size={12} />
       </button>
       <Icon name="filter" />
@@ -294,42 +296,68 @@
     {/if}
     <div class="navigation-pane-sep" />
   {/if}
-  <button class="nav-item" class:active={isHome} on:click={() => dispatch("home")}>
-    <span class="twisty hidden" />
+  <div class="nav-item fav-head">
+    <button class="twisty" class:open={exploreOpen} title={exploreOpen ? "Collapse" : "Expand"} aria-expanded={exploreOpen} on:click={() => toggleSection("explore")}>
+      <Icon name="chev-right" size={12} />
+    </button>
     <Icon name="home" />
-    <span class="label">Home</span>
-  </button>
-  <button class="nav-item" disabled title="Gallery — not implemented yet">
-    <span class="twisty hidden" />
-    <Icon name="gallery" />
-    <span class="label">Gallery</span>
-  </button>
-  <button class="nav-item" title="Browse GitHub and other code repositories" on:click={() => dispatch("repos")}>
-    <span class="twisty hidden" />
-    <Icon name="code" />
-    <span class="label">{$t("sidebar.repositories")}</span>
-  </button>
-
-  <button class="nav-item" title="Agent Board — Kanban over this folder's Tickets/" on:click={() => dispatch("board")}>
-    <span class="twisty hidden" />
-    <Icon name="documents" />
-    <span class="label">Agent Board</span>
-  </button>
-
-  <button class="nav-item" title="Workbench — view this folder's git diff" on:click={() => dispatch("workbench")}>
-    <span class="twisty hidden" />
-    <Icon name="details" />
-    <span class="label">Workbench</span>
-  </button>
+    <span class="label fav-title">{$t("sidebar.explore")}</span>
+  </div>
+  {#if exploreOpen}
+    <button class="nav-item" class:active={isHome} on:click={() => dispatch("home")}>
+      <span class="twisty hidden" />
+      <Icon name="home" />
+      <span class="label">Home</span>
+    </button>
+    <button class="nav-item" disabled title="Gallery — not implemented yet">
+      <span class="twisty hidden" />
+      <Icon name="gallery" />
+      <span class="label">Gallery</span>
+    </button>
+    <button class="nav-item" title="Browse GitHub and other code repositories" on:click={() => dispatch("repos")}>
+      <span class="twisty hidden" />
+      <Icon name="code" />
+      <span class="label">{$t("sidebar.repositories")}</span>
+    </button>
+    <button class="nav-item" title="Agent Board — Kanban over this folder's Tickets/" on:click={() => dispatch("board")}>
+      <span class="twisty hidden" />
+      <Icon name="documents" />
+      <span class="label">Agent Board</span>
+    </button>
+    <button class="nav-item" title="Workbench — view this folder's git diff" on:click={() => dispatch("workbench")}>
+      <span class="twisty hidden" />
+      <Icon name="details" />
+      <span class="label">Workbench</span>
+    </button>
+  {/if}
 
   <div class="navigation-pane-sep" />
 
+  {#if places.length > 0}
+    <div class="nav-item fav-head">
+      <button class="twisty" class:open={placesOpen} title={placesOpen ? "Collapse" : "Expand"} aria-expanded={placesOpen} on:click={() => toggleSection("places")}>
+        <Icon name="chev-right" size={12} />
+      </button>
+      <Icon name="folder" />
+      <span class="label fav-title">{$t("sidebar.quickAccess")}</span>
+    </div>
+  {/if}
   {#each [...places, ...drives] as place, i (place.path)}
     {@const open = expanded.has(place.path)}
     {@const isDrive = i >= places.length}
     {#if isDrive && i === places.length}
       <div class="navigation-pane-sep" />
+      {#if drives.length > 0}
+        <div class="nav-item fav-head">
+          <button class="twisty" class:open={drivesOpen} title={drivesOpen ? "Collapse" : "Expand"} aria-expanded={drivesOpen} on:click={() => toggleSection("drives")}>
+            <Icon name="chev-right" size={12} />
+          </button>
+          <Icon name="drive" />
+          <span class="label fav-title">{$t("sidebar.drives")}</span>
+        </div>
+      {/if}
     {/if}
+    {#if isDrive ? drivesOpen : placesOpen}
     <div>
       <!-- svelte-ignore a11y-no-static-element-interactions -->
       <div
@@ -396,6 +424,7 @@
         </div>
       {/if}
     </div>
+    {/if}
   {/each}
 </div>
 

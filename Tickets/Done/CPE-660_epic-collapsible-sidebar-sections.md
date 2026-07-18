@@ -2,13 +2,13 @@
 id: CPE-660
 title: "EPIC: Collapsible left-panel sections"
 type: Task
-status: In Progress
+status: Done
 priority: Medium
 component: Frontend
 tags: [epic]
 estimate: 4h+
 created: 2026-07-18
-closed:
+closed: 2026-07-18
 ---
 
 ## Goal
@@ -95,3 +95,10 @@ don't touch it.
 1. **CPE-675** — Collapsible core sidebar sections: add "Explore"/"Quick access"/"Drives" headers with
    persisted twisties, convert all existing section twisties to the shared persisted store, labels + i18n
    ×12, a11y (`aria-expanded`, focusable) + theming. Covers the epic's DoD in one cohesive change.
+
+## Resolution (closed 2026-07-18)
+Delivered in one child (CPE-675): the three core sidebar groups (Explore / Quick access / Drives) got
+collapse headers with persisted twisties, and all existing sections (Favorites/Agents/Tags/Smart) were
+converted to the same persisted `sidebarSections` store — so every section folds, looks, and persists
+identically. Default all-expanded (unset = open), per-node tree expansion independent, headers
+`aria-expanded` + keyboard-focusable + themed. DoD fully met; no carve-outs.
