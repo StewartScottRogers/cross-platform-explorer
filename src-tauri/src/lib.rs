@@ -1703,8 +1703,9 @@ fn search_file_contents(
             let name = name.to_string_lossy();
             let Ok(meta) = entry.metadata() else { continue };
             if meta.is_dir() {
-                // Skip dot-dirs (.git, .venv, node_modules-style noise starts with '.') to stay fast.
-                if !name.starts_with('.') {
+                // Skip dot-dirs (.git, .venv, node_modules-style noise starts with '.') and symlinked
+                // dirs (avoid cycles, CPE-609) to stay fast.
+                if !name.starts_with('.') && !entry_is_symlink(&entry) {
                     stack.push(path);
                 }
                 continue;
@@ -1807,6 +1808,14 @@ fn name_matches(name: &str, query_lower: &str) -> bool {
     }
 }
 
+/// Whether a directory entry is a symlink, without following it (CPE-609). Recursive walks use this to
+/// avoid descending into symlinked directories: a symlink cycle (a link pointing at an ancestor) would
+/// otherwise spin until the walk's caps, wasting work and truncating real results. Matches ripgrep's
+/// default of not following symlinks. Symlinked *files* are unaffected — only descent is skipped.
+fn entry_is_symlink(entry: &fs::DirEntry) -> bool {
+    entry.file_type().map(|t| t.is_symlink()).unwrap_or(false)
+}
+
 /// Find files and folders under `root` whose NAME matches `query` (CPE-603). Recursive, but bounded
 /// like `search_file_contents`: skips dot-directories, stops at match/dir caps (reporting
 /// `truncated`), and skips unreadable directories rather than failing the whole search. Empty query
@@ -1849,8 +1858,9 @@ fn find_files_by_name(root: String, query: String) -> Result<NameSearchResult, S
                     return Ok(result);
                 }
             }
-            // Descend into real sub-directories, skipping dot-dirs (.git, .venv, …) to stay fast.
-            if is_dir && !name.starts_with('.') {
+            // Descend into real sub-directories, skipping dot-dirs (.git, .venv, …) and symlinks
+            // (avoid cycles) to stay fast. A symlinked dir is still reported as a match above.
+            if is_dir && !name.starts_with('.') && !entry_is_symlink(&entry) {
                 stack.push(path);
             }
         }
@@ -5604,6 +5614,38 @@ mod tests {
         // Empty query and a non-folder root behave sanely.
         assert_eq!(find_files_by_name(d.to_string_lossy().to_string(), "  ".into()).unwrap().matches.len(), 0);
         assert!(find_files_by_name(d.join("report.txt").to_string_lossy().to_string(), "x".into()).is_err());
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn recursive_walks_skip_symlinked_dirs_and_do_not_cycle() {
+        let d = scratch("symlinkcycle");
+        fs::create_dir_all(d.join("real")).unwrap();
+        fs::write(d.join("real").join("target.txt"), b"needle").unwrap();
+        // Create a symlink 'loop' -> the scratch root itself (a cycle). Skip the test where symlink
+        // creation is unprivileged (Windows without Developer Mode / admin) — the fix still compiles
+        // and the non-symlink paths are covered elsewhere.
+        #[cfg(windows)]
+        let made = std::os::windows::fs::symlink_dir(&d, d.join("loop")).is_ok();
+        #[cfg(unix)]
+        let made = std::os::unix::fs::symlink(&d, d.join("loop")).is_ok();
+        if !made {
+            let _ = fs::remove_dir_all(&d);
+            return;
+        }
+
+        // Without the symlink skip, the 'loop' link re-enters the root forever until the 50k-dir cap
+        // (truncated=true, dirs_scanned huge). With it, the walk terminates immediately.
+        let r = find_files_by_name(d.to_string_lossy().to_string(), "target".into()).unwrap();
+        assert!(!r.truncated, "walk hit its cap — the symlink cycle was not skipped");
+        assert!(r.dirs_scanned < 100, "walked too many dirs ({}) — cycle not skipped", r.dirs_scanned);
+        assert!(r.matches.iter().any(|m| m.name == "target.txt"));
+
+        let c = search_file_contents(d.to_string_lossy().to_string(), "needle".into(), false).unwrap();
+        assert!(!c.truncated, "content search hit its cap — symlink cycle not skipped");
+        assert!(c.matches.iter().any(|m| m.path.replace('\\', "/").ends_with("real/target.txt")));
+
+        // remove_dir_all removes the symlink itself without following it.
         let _ = fs::remove_dir_all(&d);
     }
 
