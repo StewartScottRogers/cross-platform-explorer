@@ -549,6 +549,59 @@ fn entries_for_paths(paths: Vec<String>) -> Vec<DirEntry> {
     paths.iter().filter_map(|p| entry_for_path(p)).collect()
 }
 
+/// The volume root of a Windows path for same-volume comparison (CPE-668): the drive (`C:`) or the UNC
+/// share (`\\server\share`), or `None` if neither. Pure string logic — kept always-compiled (and unit
+/// tested on every OS) even though only the Windows `same_volume` path calls it.
+#[cfg_attr(not(windows), allow(dead_code))]
+fn windows_volume_root(path: &str) -> Option<String> {
+    let p = path.replace('/', "\\");
+    if let Some(rest) = p.strip_prefix("\\\\") {
+        // UNC: \\server\share\...  → \\server\share (case-insensitive).
+        let mut parts = rest.splitn(3, '\\');
+        let server = parts.next().filter(|s| !s.is_empty())?;
+        let share = parts.next().filter(|s| !s.is_empty())?;
+        return Some(format!("\\\\{server}\\{share}").to_lowercase());
+    }
+    let bytes = p.as_bytes();
+    if bytes.len() >= 2 && bytes[1] == b':' && bytes[0].is_ascii_alphabetic() {
+        return Some(format!("{}:", (bytes[0] as char).to_ascii_uppercase()));
+    }
+    None
+}
+
+#[cfg(windows)]
+fn paths_same_volume(a: &str, b: &str) -> bool {
+    match (windows_volume_root(a), windows_volume_root(b)) {
+        (Some(x), Some(y)) => x == y,
+        _ => false, // unknown volume → treat as different so the caller copies (the safe default)
+    }
+}
+
+#[cfg(not(windows))]
+fn paths_same_volume(a: &str, b: &str) -> bool {
+    use std::os::unix::fs::MetadataExt;
+    // Compare device ids; when a path doesn't exist yet, fall back to its parent folder's device.
+    fn dev(path: &str) -> Option<u64> {
+        let p = Path::new(path);
+        fs::metadata(p)
+            .ok()
+            .map(|m| m.dev())
+            .or_else(|| p.parent().and_then(|pp| fs::metadata(pp).ok()).map(|m| m.dev()))
+    }
+    match (dev(a), dev(b)) {
+        (Some(x), Some(y)) => x == y,
+        _ => false,
+    }
+}
+
+/// Whether two paths live on the same volume/device, for the drag copy-vs-move rule (CPE-668, epic
+/// CPE-661): same volume → move, different → copy. Best-effort — any uncertainty yields `false` so the
+/// caller falls back to copy (which never loses the source).
+#[tauri::command]
+fn same_volume(a: String, b: String) -> bool {
+    paths_same_volume(&a, &b)
+}
+
 // ---------------------------------------------------------------------------
 // Mutating file operations (CPE-030)
 //
@@ -5513,6 +5566,7 @@ pub fn run() {
             list_dir_stream,
             cancel_dir_stream,
             entries_for_paths,
+            same_volume,
             find_files_by_name_stream,
             dir_size,
             folder_stats,
@@ -6381,6 +6435,31 @@ mod tests {
         let f = d.join("x.parquet");
         fs::write(&f, b"not a parquet file").unwrap();
         assert!(parquet_info(&f.to_string_lossy()).is_err());
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn windows_volume_root_extracts_drive_and_unc() {
+        assert_eq!(windows_volume_root(r"C:\Users\a\file.txt"), Some("C:".into()));
+        assert_eq!(windows_volume_root("c:/users/a"), Some("C:".into())); // forward slashes + lowercase
+        assert_eq!(windows_volume_root(r"D:\"), Some("D:".into()));
+        assert_eq!(windows_volume_root(r"\\server\share\dir\f"), Some(r"\\server\share".to_lowercase()));
+        assert_eq!(windows_volume_root(r"\\Server\Share"), Some(r"\\server\share".into()));
+        assert_eq!(windows_volume_root("relative/path"), None);
+        assert_eq!(windows_volume_root(r"\\server"), None); // share missing
+    }
+
+    #[test]
+    fn same_volume_true_for_a_path_and_itself() {
+        // Two paths under the same scratch dir are on one volume on every platform.
+        let d = scratch("samevol");
+        fs::write(d.join("a.txt"), b"x").unwrap();
+        fs::write(d.join("b.txt"), b"y").unwrap();
+        let a = d.join("a.txt").to_string_lossy().to_string();
+        let b = d.join("b.txt").to_string_lossy().to_string();
+        assert!(same_volume(a.clone(), b));
+        // A path vs itself is trivially the same volume.
+        assert!(same_volume(a.clone(), a));
         let _ = fs::remove_dir_all(&d);
     }
 
