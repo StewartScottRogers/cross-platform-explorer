@@ -59,7 +59,8 @@
   import PropertiesDialog from "./lib/components/PropertiesDialog.svelte";
   import BatchRenameDialog from "./lib/components/BatchRenameDialog.svelte";
   import TagEditor from "./lib/components/TagEditor.svelte";
-  import { initTags, tags, retagPath } from "./lib/tags";
+  import { initTags, tags, retagPath, renameTag, deleteTag } from "./lib/tags";
+  import TagMenu from "./lib/components/TagMenu.svelte";
   import { filterEntriesByTag, tagCounts } from "./lib/tagFilter";
   import type { RenameItem } from "./lib/batchRename";
 
@@ -186,6 +187,8 @@
   let search = "";
   /** Active sidebar Tags filter — show only entries carrying this tag (CPE-639); "" = off. */
   let selectedTag = "";
+  /** Right-click menu for a sidebar tag (rename/delete), or null (CPE-653). */
+  let tagMenu: { x: number; y: number; tag: string } | null = null;
   let editingPath = false;
 
   let renamingPath = "";
@@ -2266,6 +2269,7 @@
       {tagList}
       {selectedTag}
       on:filterTag={(e) => (selectedTag = selectedTag === e.detail ? "" : e.detail)}
+      on:tagMenu={(e) => (tagMenu = e.detail)}
       on:navigate={(e) => { if (archive) exitArchive(); navigate(e.detail); }}
       on:openFile={(e) => openRecent(e.detail)}
       on:home={() => { if (archive) exitArchive(); navigate(HOME); }}
@@ -2684,6 +2688,17 @@
     on:closeOne={(e) => closeOneConsole(e.detail)}
     on:open={(e) => { openSession(e.detail); agentMenu = null; }}
     on:close={() => (agentMenu = null)}
+  />
+{/if}
+
+{#if tagMenu}
+  <TagMenu
+    x={tagMenu.x}
+    y={tagMenu.y}
+    tag={tagMenu.tag}
+    on:rename={(e) => { const old = tagMenu?.tag ?? ""; if (selectedTag === old) selectedTag = e.detail; renameTag(old, e.detail).catch((err) => showNotice(String(err), true)); tagMenu = null; }}
+    on:remove={() => { const tg = tagMenu?.tag ?? ""; if (selectedTag === tg) selectedTag = ""; deleteTag(tg).catch((err) => showNotice(String(err), true)); tagMenu = null; }}
+    on:close={() => (tagMenu = null)}
   />
 {/if}
 

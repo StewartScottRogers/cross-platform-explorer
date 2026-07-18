@@ -42,6 +42,7 @@
     openSession: { sessionId: string; cwd: string };
     drop: { paths: string[]; dest: string; copy: boolean };
     filterTag: string;
+    tagMenu: { x: number; y: number; tag: string };
   }>();
 
   /** Favorites section collapse state (transient, like the Home twisties). */
@@ -248,8 +249,9 @@
           <button
             class="nav-item fav-item"
             class:active={selectedTag === tag}
-            title={`${count} item${count === 1 ? "" : "s"} tagged “${tag}” — click to filter`}
+            title={`${count} item${count === 1 ? "" : "s"} tagged “${tag}” — click to filter, right-click to rename/delete`}
             on:click={() => dispatch("filterTag", tag)}
+            on:contextmenu|preventDefault={(e) => dispatch("tagMenu", { x: e.clientX, y: e.clientY, tag })}
           >
             <span class="twisty hidden" />
             <Icon name="tag" />
