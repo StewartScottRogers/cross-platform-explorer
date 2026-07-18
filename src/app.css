@@ -78,6 +78,8 @@ button:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
   display: flex; align-items: center; gap: 2px;
   padding: 6px 8px 0;
   background: var(--bg);
+  /* Baseline the active tab sits on and covers, so it connects to the content pane below. */
+  border-bottom: 1px solid var(--border);
 }
 .tab {
   display: flex; align-items: center; gap: 8px;
@@ -95,8 +97,9 @@ button:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
   background: var(--surface);
   color: var(--text);
   font-weight: 600;
-  /* Conventional active tab: an accent bar along the top + a 3-sided border that lifts it onto the
-     content surface below (no bottom edge, so it visually connects to the pane). */
+  /* Conventional active tab: an accent bar along the top + a 3-sided border, pulled down 1px so it
+     covers the tab-bar baseline and merges seamlessly into the content pane below (no hairline). */
+  margin-bottom: -1px;
   box-shadow: inset 0 2px 0 0 var(--accent),
               0 -1px 0 var(--border), 1px 0 0 var(--border), -1px 0 0 var(--border);
 }
