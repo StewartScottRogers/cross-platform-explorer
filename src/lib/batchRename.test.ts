@@ -13,6 +13,14 @@ describe("planFindReplace", () => {
     expect(item.to).toBe("pic.JPG");
   });
 
+  it("treats the replacement as literal — `$` is not a group reference (CPE-630)", () => {
+    // "$1" would be an (empty) group ref with a string replacer → "photo_00.jpg"; must stay literal.
+    expect(planFindReplace(["photo_v1.jpg"], "v1", "$100")[0].to).toBe("photo_$100.jpg");
+    // "$&" would insert the match; "US$" keeps its dollar.
+    expect(planFindReplace(["aXb"], "X", "$&")[0].to).toBe("a$&b");
+    expect(planFindReplace(["USD5.txt"], "USD", "US$")[0].to).toBe("US$5.txt");
+  });
+
   it("respects the case-sensitive flag", () => {
     const [item] = planFindReplace(["Photo.jpg"], "photo", "pic", true);
     expect(item.to).toBe("Photo.jpg");

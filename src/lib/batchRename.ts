@@ -122,7 +122,10 @@ export function planFindReplace(
     let to = from;
     if (find) {
       const re = new RegExp(escapeRegExp(find), caseSensitive ? "g" : "gi");
-      to = from.replace(re, replace);
+      // Use a function replacer so `replace` is treated as a LITERAL string — a plain string replacer
+      // would interpret `$&`, `$1`, `$$` etc. as patterns, mangling names like "US$5" or "v1"→"$100"
+      // (CPE-630).
+      to = from.replace(re, () => replace);
     }
     return { from, to, changed: to !== from, conflict: false };
   });
