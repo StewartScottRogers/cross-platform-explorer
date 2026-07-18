@@ -79,6 +79,16 @@ describe("sortEntries", () => {
     ]);
   });
 
+  it("breaks a modified-time tie with natural name order (CPE-612)", () => {
+    const es = [
+      entry({ name: "file10", modified: 5000 }),
+      entry({ name: "file2", modified: 5000 }),
+      entry({ name: "file1", modified: 5000 }),
+    ];
+    // Same timestamp → deterministic natural-name order (file1 < file2 < file10), not backend order.
+    expect(names(sortEntries(es, "modified", "asc"))).toEqual(["file1", "file2", "file10"]);
+  });
+
   it("reverses order for descending", () => {
     const es = [entry({ name: "a" }), entry({ name: "b" }), entry({ name: "c" })];
     expect(names(sortEntries(es, "name", "desc"))).toEqual(["c", "b", "a"]);

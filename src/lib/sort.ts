@@ -37,7 +37,9 @@ export function compareEntries(
       cmp = compareNames(a.name, b.name);
       break;
     case "modified":
-      cmp = (a.modified ?? 0) - (b.modified ?? 0);
+      // Files that share a timestamp (copied/extracted together) fall back to natural name order,
+      // matching the type/size keys — otherwise they'd appear in arbitrary backend order (CPE-612).
+      cmp = ((a.modified ?? 0) - (b.modified ?? 0)) || compareNames(a.name, b.name);
       break;
     case "type":
       cmp = collator.compare(typeName(a), typeName(b)) || compareNames(a.name, b.name);
