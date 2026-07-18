@@ -38,9 +38,15 @@ const drives: Place[] = [
 
 // vi.mock is hoisted above every declaration, so the mock fn must be created
 // inside vi.hoisted or the factory closes over an uninitialised binding.
-const { invoke } = vi.hoisted(() => ({ invoke: vi.fn() }));
+const { invoke, Channel } = vi.hoisted(() => ({
+  invoke: vi.fn(),
+  // Minimal stand-in for Tauri's IPC Channel (CPE-664): the mocked list_dir_stream calls onmessage.
+  Channel: class {
+    onmessage: (batch: unknown) => void = () => {};
+  },
+}));
 
-vi.mock("@tauri-apps/api/core", () => ({ invoke, convertFileSrc: (p: string) => `asset://${p}` }));
+vi.mock("@tauri-apps/api/core", () => ({ invoke, convertFileSrc: (p: string) => `asset://${p}`, Channel }));
 vi.mock("@tauri-apps/plugin-updater", () => ({ check: vi.fn(async () => null) }));
 vi.mock("@tauri-apps/plugin-process", () => ({ relaunch: vi.fn() }));
 vi.mock("@tauri-apps/plugin-opener", () => ({ openPath: vi.fn() }));
@@ -51,13 +57,18 @@ beforeEach(() => {
   Element.prototype.scrollIntoView = vi.fn();
 
   invoke.mockReset();
-  invoke.mockImplementation(async (cmd: string) => {
+  invoke.mockImplementation(async (cmd: string, args?: Record<string, unknown>) => {
     switch (cmd) {
       case "special_folders": return [];
       case "list_drives": return drives;
       case "home_dir": return "C:\\Users\\t";
       case "can_restore_from_trash": return true;
       case "list_dir": return entries;
+      case "list_dir_stream": {
+        const ch = args?.onEntry as { onmessage: (b: unknown) => void };
+        if (entries.length) ch.onmessage(entries);
+        return entries.length;
+      }
       case "parent_dir": return null;
       default: return null;
     }

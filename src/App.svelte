@@ -1,7 +1,8 @@
 <script lang="ts">
   import { onMount, onDestroy } from "svelte";
-  import { convertFileSrc } from "@tauri-apps/api/core";
+  import { convertFileSrc, Channel } from "@tauri-apps/api/core";
   import { invoke } from "./lib/invoke";
+  import { rawInvoke } from "./lib/invoke";
   import { open as openFolderDialog, save as saveFileDialog } from "@tauri-apps/plugin-dialog";
   import { check, type Update } from "@tauri-apps/plugin-updater";
   import { relaunch, exit } from "@tauri-apps/plugin-process";
@@ -119,6 +120,9 @@
 
   let error = "";
   let loading = false;
+  // Monotonic token identifying the current folder load (CPE-664). A new load bumps it; batches from a
+  // superseded stream carry a stale token and are dropped, so navigating away mid-load can't bleed rows.
+  let loadGen = 0;
   let notice = "";
   let noticeIsError = false;
   let noticeTimer: ReturnType<typeof setTimeout> | undefined;
@@ -738,15 +742,31 @@
       return;
     }
 
+    // Stream the listing (CPE-664): paint the first batch immediately instead of blocking on the whole
+    // directory. A generation token supersedes an in-flight stream when the user navigates away, and the
+    // reactive `visible` pipeline re-sorts each time `entries` grows, so the final order is unchanged.
+    const gen = ++loadGen;
+    entries = [];
     loading = true;
     try {
-      entries = await withBusy(() => invoke<DirEntry[]>("list_dir", { path }));
+      const channel = new Channel<DirEntry[]>();
+      channel.onmessage = (batch) => {
+        if (gen !== loadGen) return; // superseded by a newer navigation — drop stale rows
+        entries = entries.concat(batch);
+        loading = false; // first real rows are in — reveal them (drop the "Loading…" placeholder)
+      };
+      await rawInvoke("list_dir_stream", { path, onEntry: channel });
     } catch (e) {
-      entries = [];
-      error = friendlyError(String(e));
+      if (gen === loadGen) {
+        entries = [];
+        error = friendlyError(String(e));
+      }
     } finally {
-      loading = false;
+      if (gen === loadGen) loading = false;
     }
+    // A stream superseded mid-flight already had its state handed to the newer load — stop here so the
+    // post-load hooks below (recent-folder, selection remap, pending rename/select) don't fire stale.
+    if (gen !== loadGen) return;
 
     // A folder we actually opened joins the recently-visited MRU (CPE-342). The
     // error guard means an unreadable path (or a file mistaken for a folder, e.g.

@@ -16,6 +16,9 @@ The explorer is the core of the app and is tuned to stay **fast, small, and pred
 
 ## Files
 
+- **Progressive loading** — folders stream in: the first rows appear almost immediately and the rest fill
+  in as they're read, so even a huge or slow (network) folder stays interactive instead of blocking on a
+  blank pane. Changing folders mid-load cleanly abandons the previous listing.
 - **Preview** — select a file to see it in the side pane; text is editable in place.
 - **Thumbnails** — in the **icons** view, image files (JPEG, PNG, GIF, WebP, BMP, TIFF, AVIF) show a real
   downscaled thumbnail instead of a generic icon. They load lazily as tiles scroll into view, so a folder

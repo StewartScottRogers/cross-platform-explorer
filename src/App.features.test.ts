@@ -33,10 +33,17 @@ const file = (name: string, extension: string): DirEntry => ({
 
 const drives: Place[] = [{ name: "Local Disk (C:)", path: "C:\\d", kind: "drive" }];
 
-const { invoke } = vi.hoisted(() => ({ invoke: vi.fn() }));
+const { invoke, Channel } = vi.hoisted(() => ({
+  invoke: vi.fn(),
+  // Minimal stand-in for Tauri's IPC Channel (CPE-664): the mocked list_dir_stream calls onmessage.
+  Channel: class {
+    onmessage: (batch: unknown) => void = () => {};
+  },
+}));
 vi.mock("@tauri-apps/api/core", () => ({
   invoke,
   convertFileSrc: (p: string) => `asset://${p}`,
+  Channel,
 }));
 vi.mock("@tauri-apps/plugin-updater", () => ({ check: vi.fn(async () => null) }));
 vi.mock("@tauri-apps/plugin-process", () => ({ relaunch: vi.fn() }));
@@ -51,6 +58,11 @@ function mockBackend(listing: DirEntry[]) {
       case "home_dir": return "C:\\Users\\t";
       case "can_restore_from_trash": return true;
       case "list_dir": return listing;
+      case "list_dir_stream": {
+        const ch = args?.onEntry as { onmessage: (b: unknown) => void };
+        if (listing.length) ch.onmessage(listing);
+        return listing.length;
+      }
       case "parent_dir": return null;
       case "create_dir": return `${args?.path}\\${args?.name}`;
       case "rename_entry": return `${args?.path}.renamed`;
