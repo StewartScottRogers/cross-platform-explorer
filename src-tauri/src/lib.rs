@@ -1232,6 +1232,12 @@ fn rename_entry(path: String, new_name: String) -> Result<String, String> {
     if new_name.is_empty() {
         return Err("Name cannot be empty".to_string());
     }
+    // A rename is name-only. Reject a "name" containing a path separator or `.`/`..`, which would move
+    // the file out of its folder via `parent.join(..)` rather than rename it — defense in depth, since
+    // the rename UI validates too but this command is directly invokable (CPE-631).
+    if new_name.contains('/') || new_name.contains('\\') || new_name == "." || new_name == ".." {
+        return Err("Name can't contain a path separator".to_string());
+    }
     let src = Path::new(&path);
     let parent = src
         .parent()
@@ -5758,6 +5764,20 @@ mod tests {
         assert!(r.is_err(), "renaming onto an existing file must fail");
         // b.txt must be untouched.
         assert_eq!(fs::read(d.join("b.txt")).unwrap(), b"b");
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn rename_refuses_a_path_separator_or_traversal() {
+        let d = scratch("rename_sep");
+        fs::write(d.join("a.txt"), b"a").unwrap();
+        let p = d.join("a.txt").to_string_lossy().to_string();
+        for bad in ["../evil.txt", "sub/b.txt", "a\\b.txt", "..", "."] {
+            assert!(rename_entry(p.clone(), bad.into()).is_err(), "must reject {bad:?}");
+        }
+        // The file stays put and nothing escaped the folder.
+        assert!(d.join("a.txt").exists());
+        assert!(!d.parent().unwrap().join("evil.txt").exists());
         let _ = fs::remove_dir_all(&d);
     }
 
