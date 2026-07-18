@@ -51,7 +51,8 @@
   import ContentSearchDialog from "./lib/components/ContentSearchDialog.svelte";
   import FileNameSearchDialog from "./lib/components/FileNameSearchDialog.svelte";
   import TransferPanel from "./lib/components/TransferPanel.svelte";
-  import { initTransfers, startTransfer, type TransferReport } from "./lib/transfers";
+  import TransferConflictDialog from "./lib/components/TransferConflictDialog.svelte";
+  import { initTransfers, startTransfer, collidingNames, type TransferReport, type ConflictPolicy } from "./lib/transfers";
   import DuplicatesDialog from "./lib/components/DuplicatesDialog.svelte";
   import { namesList, detailList, csvList } from "./lib/listing";
   import { parentDir as parentOfPath, baseName } from "./lib/contentSearch";
@@ -409,6 +410,8 @@
   /** Teardown for the Agent Watch session listener (CPE-396). */
   let unlistenSessions: (() => void) | null = null;
   let unlistenTransferDone: (() => void) | null = null;
+  /** A copy-paste awaiting the user's conflict choice (CPE-624). */
+  let pendingCopy: { sources: string[]; count: number } | null = null;
   // Agent Watch view (CPE-399): the Project folder currently being watched (or ""), and the
   // teardown for its activity listener. Watching turns on only while the explorer is inside a
   // running agent's project, and off the moment it leaves — off means off (AGENT-WATCH.md).
@@ -1228,6 +1231,22 @@
     }
   }
 
+  /** Start a copy of `sources` into the current folder with the chosen conflict policy (CPE-624). */
+  async function startCopyWithPolicy(sources: string[], policy: ConflictPolicy) {
+    try {
+      await startTransfer(sources, currentPath, "copy", policy);
+    } catch (e) {
+      showNotice(String(e), true);
+    }
+  }
+
+  /** The conflict dialog's choice: run the pending copy with that policy (CPE-624). */
+  function resolveCopyConflict(policy: ConflictPolicy) {
+    const p = pendingCopy;
+    pendingCopy = null;
+    if (p) startCopyWithPolicy(p.sources, policy);
+  }
+
   async function doPaste() {
     if (isHome || blockedInArchive() || clipEmpty(clipboard)) return;
     if (!pasteCheck.allowed) {
@@ -1239,13 +1258,15 @@
 
     // COPY → the transfer engine (CPE-613): progress shows in the operations panel and the
     // transfer://done listener refreshes the folder + reports. Copies aren't undoable, so there's no
-    // undo coupling; conflict policy "keepboth" preserves the old auto-rename-on-collision behaviour.
+    // undo coupling. If names would collide, ask how to resolve the batch (CPE-624); otherwise
+    // "keepboth" preserves the old auto-rename-on-collision behaviour.
     if (!wasCut) {
-      try {
-        await startTransfer(sources, currentPath, "copy", "keepboth");
-      } catch (e) {
-        showNotice(String(e), true);
+      const collisions = collidingNames(sources, entries.map((e) => e.name));
+      if (collisions.length > 0) {
+        pendingCopy = { sources, count: collisions.length };
+        return; // the conflict dialog resumes via startCopyWithPolicy
       }
+      startCopyWithPolicy(sources, "keepboth");
       return;
     }
 
@@ -2603,6 +2624,14 @@
 {/if}
 
 <TransferPanel />
+
+{#if pendingCopy}
+  <TransferConflictDialog
+    count={pendingCopy.count}
+    on:choose={(e) => resolveCopyConflict(e.detail)}
+    on:cancel={() => (pendingCopy = null)}
+  />
+{/if}
 
 {#if paletteOpen}
   <CommandPalette commands={paletteCommands} on:close={() => (paletteOpen = false)} />
