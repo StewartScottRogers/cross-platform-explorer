@@ -52,6 +52,29 @@
   textarea { font: inherit; width: 100%; padding: 6px 9px; background: Field; color: FieldText;
              border: 1px solid var(--line); border-radius: 6px; resize: vertical; min-height: 30px; }
   select:focus, input:focus, textarea:focus { outline: none; border-color: var(--accent); }
+
+  /* Live swarm coordination panel (CPE-592). */
+  #swarm-panel { border: 1px solid var(--line); border-radius: 8px; margin: 6px 0; overflow: hidden; }
+  .sw-bar { display: flex; align-items: center; justify-content: space-between; padding: 6px 10px;
+            background: rgba(128,128,128,0.12); font-size: 12px; }
+  .sw-title { font-weight: 600; }
+  .sw-mission { opacity: 0.55; font-weight: 400; margin-left: 6px; }
+  .sw-bar button { height: 22px; padding: 0 10px; font-size: 11px; }
+  .sw-cols { display: flex; }
+  .sw-col { flex: 1 1 0; min-width: 0; border-right: 1px solid var(--line); }
+  .sw-col:last-child { border-right: 0; }
+  .sw-head { padding: 5px 10px; font-size: 11px; text-transform: uppercase; letter-spacing: .05em;
+             opacity: 0.7; border-bottom: 1px solid var(--line); }
+  .sw-count { opacity: 0.55; }
+  .sw-feed { max-height: 150px; overflow-y: auto; padding: 3px 0; }
+  .sw-msg { display: flex; gap: 6px; align-items: baseline; padding: 3px 10px; font-size: 12px; }
+  /* Pill: keep on one line, never shrink (tick-tack rule). */
+  .sw-kind { flex: 0 0 auto; white-space: nowrap; font-size: 10px; text-transform: uppercase;
+             padding: 1px 7px; border-radius: 999px; background: rgba(128,128,128,0.22); }
+  .sw-route { flex: 0 0 auto; opacity: 0.7; white-space: nowrap; }
+  .sw-body { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .sw-note { padding: 4px 10px; font-size: 12px; border-bottom: 1px solid rgba(128,128,128,0.12); white-space: pre-wrap; word-break: break-word; }
+  .sw-empty { padding: 8px 10px; opacity: 0.5; font-size: 12px; }
   button { font: inherit; height: 30px; padding: 0 14px; border-radius: 6px; cursor: pointer;
            border: 1px solid var(--line); background: ButtonFace; color: ButtonText; font-weight: 500; }
   button.primary { height: 34px; min-width: 130px; padding: 0 20px; background: var(--accent);
@@ -357,6 +380,23 @@ docs/** :: document the CSV options"></textarea>
     </div>
   </div>
   <div id="msg">Pick an agent, provider and model, then Launch.</div>
+  <!-- Live swarm coordination feed (CPE-592): the shared mailbox + memory, updating as agents work. -->
+  <div id="swarm-panel" hidden>
+    <div class="sw-bar">
+      <span class="sw-title">Swarm coordination <span id="sw-mission" class="sw-mission"></span></span>
+      <button id="sw-close" type="button" title="Hide this panel (the swarm keeps running)">Hide</button>
+    </div>
+    <div class="sw-cols">
+      <div class="sw-col">
+        <div class="sw-head">Mailbox <span id="sw-mbox-count" class="sw-count"></span></div>
+        <div id="sw-mailbox" class="sw-feed"></div>
+      </div>
+      <div class="sw-col">
+        <div class="sw-head">Shared memory <span id="sw-mem-count" class="sw-count"></span></div>
+        <div id="sw-memory" class="sw-feed"></div>
+      </div>
+    </div>
+  </div>
   <div id="view-bar"><button id="view-toggle" type="button" title="Show all agents in a grid">▦ Grid</button></div>
   <div id="tabs"></div>
   <div id="terms">
@@ -1268,8 +1308,59 @@ async function runSwarm(mission) {
   try {
     const res = await withBusy(() => api("/api/swarm/run", { method: "POST", body: JSON.stringify(mission) }));
     setMsg("Swarm started — its agents appear in Agent Watch as they launch and coordinate over the shared MCP host.", true);
+    if (res && res.mission) startSwarmPanel(res.mission); // open the live coordination feed (CPE-592)
     return res && res.ok !== false;
   } catch (e) { setMsg("Swarm failed: " + e.message, false); return false; }
+}
+
+// --- Live swarm coordination panel (CPE-592) ------------------------------------------------------
+// Tail the running mission's shared mailbox + memory so you can watch agents coordinate on screen,
+// instead of digging through files. Polls /api/swarm/activity for the mission id.
+let swarmMission = null, swarmActivityTimer = null;
+function startSwarmPanel(missionPath) {
+  const id = String(missionPath || "").split(/[\\/]/).filter(Boolean).pop(); // mission dir basename
+  if (!id) return;
+  swarmMission = id;
+  $("sw-mission").textContent = id;
+  $("swarm-panel").hidden = false;
+  pollSwarmActivity();
+  if (swarmActivityTimer) clearInterval(swarmActivityTimer);
+  swarmActivityTimer = setInterval(pollSwarmActivity, 2000);
+}
+function closeSwarmPanel() {
+  $("swarm-panel").hidden = true;
+  swarmMission = null;
+  if (swarmActivityTimer) { clearInterval(swarmActivityTimer); swarmActivityTimer = null; }
+}
+async function pollSwarmActivity() {
+  if (!swarmMission) return;
+  try { renderSwarmActivity(await api("/api/swarm/activity?mission=" + encodeURIComponent(swarmMission))); }
+  catch (_) { /* transient */ }
+}
+function renderSwarmActivity(d) {
+  const posts = (d && d.mailbox) || [], notes = (d && d.memory) || [];
+  $("sw-mbox-count").textContent = posts.length ? "(" + posts.length + ")" : "";
+  $("sw-mem-count").textContent = notes.length ? "(" + notes.length + ")" : "";
+  const mbox = $("sw-mailbox");
+  mbox.textContent = "";
+  if (!posts.length) { mbox.innerHTML = '<div class="sw-empty">no messages yet…</div>'; }
+  for (const p of posts) {
+    const to = p.to && typeof p.to === "object" ? JSON.stringify(p.to) : (p.to || "?");
+    const row = document.createElement("div"); row.className = "sw-msg";
+    const k = document.createElement("span"); k.className = "sw-kind"; k.textContent = p.kind || "note";
+    const r = document.createElement("span"); r.className = "sw-route"; r.textContent = (p.from || "?") + " → " + to;
+    const b = document.createElement("span"); b.className = "sw-body"; b.textContent = p.body || ""; b.title = p.body || "";
+    row.append(k, r, b); mbox.appendChild(row);
+  }
+  const mem = $("sw-memory");
+  mem.textContent = "";
+  if (!notes.length) { mem.innerHTML = '<div class="sw-empty">no notes yet…</div>'; }
+  for (const n of notes) {
+    const row = document.createElement("div"); row.className = "sw-note";
+    const tags = n.tags && n.tags.length ? "   [" + n.tags.join(", ") + "]" : "";
+    row.textContent = (n.body || "") + tags;
+    mem.appendChild(row);
+  }
 }
 
 // Build a minimal mission from the current form (a coordinator + a builder of the selected agent) and
@@ -1676,6 +1767,7 @@ $("onboard-addkey").addEventListener("click", () => { dismissOnboarding(); openK
 $("launch").addEventListener("click", launch);
 $("run-swarm").addEventListener("click", runSwarmFromForm);
 $("swarm-go").addEventListener("click", runSwarmFromForm);
+$("sw-close").addEventListener("click", closeSwarmPanel);
 $("view-toggle").addEventListener("click", toggleView); // Agent Grid Tabs⇄Grid (CPE-506)
 updateViewToggle(); // reflect the (empty) initial state so the bar is explicitly hidden
 // Recompute the width-aware grid columns as the window resizes (CPE-510).

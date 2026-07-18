@@ -253,6 +253,33 @@ describe("AI Console launcher — live swarm trigger (CPE-541)", () => {
     });
   });
 
+  it("opens the coordination panel and renders mailbox + memory from /api/swarm/activity (CPE-592)", async () => {
+    const { w } = await mountLauncher((path) => {
+      if (path === "/api/swarm/run") return { data: { ok: true, mission: "C:\\Temp\\cpe-swarm-42" } };
+      if (path.startsWith("/api/swarm/activity")) {
+        return { data: { ok: true,
+          mailbox: [{ from: "claude#builder1", to: "broadcast", kind: "done", body: "builder1 done" }],
+          memory: [{ id: "note-1", tags: ["greeting"], body: "Hello from builder1" }] } };
+      }
+      return {};
+    });
+    const doc = w.document;
+    expect(doc.getElementById("swarm-panel").hidden).toBe(true);
+    const mission = {
+      team: { name: "s", description: "", roles: [{ role: "builder", agent: "claude", count: 1 }] },
+      tasks: [{ id: "t1", description: "x", role: "builder", globs: ["**"], gate: "none" }],
+      provider: "native",
+    };
+    await w.runSwarm(mission);
+    expect(doc.getElementById("swarm-panel").hidden).toBe(false); // panel opened for the mission
+    await w.pollSwarmActivity();
+    expect(doc.getElementById("sw-mailbox").textContent).toContain("builder1 done");
+    expect(doc.getElementById("sw-mailbox").textContent).toContain("done"); // the kind pill
+    expect(doc.getElementById("sw-memory").textContent).toContain("Hello from builder1");
+    w.closeSwarmPanel(); // stop the poll timer so it doesn't leak past the test
+    expect(doc.getElementById("swarm-panel").hidden).toBe(true);
+  });
+
   it("adopts a server-created swarm session into a tab on poll, from a fresh console (CPE-586)", async () => {
     let sessionsResp: any = { sessions: [] }; // empty at boot; a swarm launches afterwards
     const { w } = await mountLauncher((path) => {

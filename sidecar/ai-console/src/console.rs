@@ -742,6 +742,40 @@ impl ConsoleState {
         Response::json(json!({ "ok": true, "mission": mission_dir.to_string_lossy() }).to_string())
     }
 
+    /// `GET /api/swarm/activity?mission=cpe-swarm-<id>` — the live coordination feed for a mission
+    /// (CPE-592): the shared **mailbox** posts + **memory** notes, so the launcher can show agents
+    /// coordinating in real time (poll it). `mission` is a bare `cpe-swarm-<digits>` id resolved under the
+    /// OS temp dir only — no separators, no traversal.
+    fn handle_swarm_activity(&self, req: &Request) -> Response {
+        let mission = req.query("mission").unwrap_or("");
+        let id_ok = mission
+            .strip_prefix("cpe-swarm-")
+            .map(|s| !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit()))
+            .unwrap_or(false);
+        if !id_ok {
+            return bad("invalid mission id");
+        }
+        let dir = std::env::temp_dir().join(mission);
+        // Mailbox: the append-only post log, oldest first (skip any unparseable line).
+        let mailbox: Vec<Value> = std::fs::read_to_string(dir.join("mailbox.jsonl"))
+            .unwrap_or_default()
+            .lines()
+            .filter_map(|l| serde_json::from_str::<Value>(l.trim()).ok())
+            .collect();
+        // Memory: parse each note into { id, tags, body }, sorted by filename for a stable order.
+        let mut memory: Vec<Value> = Vec::new();
+        if let Ok(rd) = std::fs::read_dir(dir.join("memory")) {
+            let mut paths: Vec<_> = rd.flatten().map(|e| e.path()).collect();
+            paths.sort();
+            for p in paths {
+                if let Some(note) = std::fs::read_to_string(&p).ok().and_then(|md| crate::agent_memory::parse_note(&md)) {
+                    memory.push(json!({ "id": note.id, "tags": note.tags, "body": note.body }));
+                }
+            }
+        }
+        Response::json(json!({ "ok": true, "mailbox": mailbox, "memory": memory }).to_string())
+    }
+
     /// Wire a session's I/O into the console: spawn the reader pipeline that fans the engine's output
     /// channel into the replay ring + the live WebSocket, taps reads (CPE-405) + usage (CPE-311), and
     /// on stream-close records history + announces "ended"; then insert the `Session`. Shared by a
@@ -1452,6 +1486,7 @@ pub fn route(state: &ConsoleState, req: &Request) -> Response {
         ("GET", "/api/catalog") => Response::json(state.catalog().to_string()),
         ("POST", "/api/launch") => state.handle_launch(&req.body),
         ("POST", "/api/swarm/run") => state.handle_swarm_run(&req.body),
+        ("GET", p) if p.starts_with("/api/swarm/activity") => state.handle_swarm_activity(req),
         ("POST", "/api/close-all") => state.handle_close_all(),
         ("POST", p) if p.starts_with("/api/session/") && p.ends_with("/close") => {
             state.handle_close(p)
@@ -1684,6 +1719,44 @@ mod tests {
         let msgs = seen.lock().unwrap().clone();
         assert!(msgs.iter().any(|m| m.contains("\"started\"") && m.contains("t1")), "started announced: {msgs:?}");
         assert!(msgs.iter().any(|m| m.contains("\"ended\"") && m.contains("t1")), "ended announced: {msgs:?}");
+    }
+
+    #[test]
+    fn swarm_activity_returns_the_mailbox_and_memory_and_rejects_traversal() {
+        use std::fs;
+        // A real mission dir under the OS temp dir (the only place the endpoint will read).
+        let id = format!("cpe-swarm-{}", now_millis());
+        let dir = std::env::temp_dir().join(&id);
+        fs::create_dir_all(dir.join("memory")).unwrap();
+        fs::write(
+            dir.join("mailbox.jsonl"),
+            "{\"from\":\"claude#builder1\",\"to\":\"broadcast\",\"kind\":\"done\",\"body\":\"builder1 done\",\"ts\":1}\n",
+        )
+        .unwrap();
+        crate::agent_memory::save_note(
+            &dir.join("memory"),
+            &crate::agent_memory::Note {
+                id: "note-abc".into(),
+                tags: vec!["greeting".into()],
+                links: vec![],
+                body: "Hello from builder1.".into(),
+            },
+        )
+        .unwrap();
+
+        let r = get(&state(), &format!("/api/swarm/activity?mission={id}"));
+        assert_eq!(r.status, 200);
+        let v: Value = serde_json::from_slice(&r.body).unwrap();
+        assert_eq!(v["mailbox"][0]["kind"], "done");
+        assert_eq!(v["mailbox"][0]["body"], "builder1 done");
+        assert_eq!(v["memory"][0]["id"], "note-abc");
+        assert_eq!(v["memory"][0]["body"], "Hello from builder1.");
+
+        // Security: only a bare cpe-swarm-<digits> id is accepted; anything else is a 400 (no traversal).
+        assert_eq!(get(&state(), "/api/swarm/activity?mission=../secrets").status, 400);
+        assert_eq!(get(&state(), "/api/swarm/activity?mission=cpe-swarm-x/..").status, 400);
+
+        let _ = fs::remove_dir_all(dir);
     }
 
     #[test]
