@@ -2,7 +2,7 @@
 id: CPE-580
 title: "EPIC: Launch the GUI with command-line window-geometry options (x / y / width / height)"
 type: Task
-status: Proposed
+status: In Progress
 priority: Medium
 component: Backend
 tags: [epic, big-design]
@@ -80,5 +80,24 @@ Fits the codebase's proven **pure-core + live-tail** shape: a fully-tested geome
 live apply layer that needs GUI QA. `big-design` — the design work is the foolproofing/precedence rules,
 not the plumbing. Dormant brief until activated with `/ticketing-epic activate CPE-580`.
 
+## Decisions (activation 2026-07-17)
+- **CLI parser:** `tauri-plugin-cli` (schema-driven, auto `--help`, capability-gated).
+- **Bad input:** non-numeric / zero / negative → clear message + **non-zero exit**; out-of-range /
+  off-screen → **clamp onto the work area + warn** (never a stranded window).
+- **Unit:** logical pixels are the contract; `--physical` opts out.
+- **Preset vs explicit:** an explicit `--x/--y/--width/--height` **wins** over `--position <preset>`.
+- **Single-instance:** geometry flags on a **second** launch are **ignored** in v1 (don't reposition the
+  running window).
+- Convenience flags (`--position`, `--monitor`, `--maximized`, `--fullscreen`) **resolve down to the four
+  scalars** in the pure resolver, not as special cases.
+
+## Child tickets (created at activation)
+- [[CPE-598]] — Pure geometry resolver: args+monitors+defaults → rect, clamp/precedence/DPI (2-3h) — the brain
+- [[CPE-599]] — CLI surface via tauri-plugin-cli + capability + flag schema (1-2h) — needs 598
+- [[CPE-600]] — Apply the resolved rect at window creation (saved-state + single-instance) + GUI QA (1-2h)
+- [[CPE-601]] — Docs: README launch options + in-app docs entry (30m)
+
 ## Work Log
 2026-07-17 — Filed as a dormant `Proposed` brief on request. Not decomposed; activate to plan.
+2026-07-17 — **Activated.** Resolved the open questions with the user (see Decisions) and decomposed into
+CPE-598…CPE-601. Suggested order: 598 (pure core) → 599 (flags) → 600 (apply + GUI QA) → 601 (docs).

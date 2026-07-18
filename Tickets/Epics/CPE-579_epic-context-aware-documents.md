@@ -2,7 +2,7 @@
 id: CPE-579
 title: "EPIC: Context-aware Documents — open the docs viewer to the page for the section you're in"
 type: Task
-status: Proposed
+status: In Progress
 priority: Medium
 component: Frontend
 tags: [epic, big-design]
@@ -89,7 +89,24 @@ exhaustiveness test + light UI entry points — mostly design (entry-point ergon
 self-maintaining discipline), not plumbing, hence `big-design`. Fits the codebase's pure-core + thin-UI
 shape. Dormant brief until activated with `/ticketing-epic activate CPE-579`.
 
+## Decisions (activation 2026-07-17)
+- **Entry point:** a **"?" button in each section header + F1** (opens the current section's doc). No
+  per-section menu items in v1.
+- **Coverage:** **every surface** — all modes (AI Console, Workbench, Board, Grid, Swarms, Repositories)
+  and the base surfaces (Home, Explorer).
+- **Keying:** reuse the existing mode/view id enum as the registry key.
+- **Global open:** Application → Documents opens the active mode's page, else Overview.
+- **Deep-linking:** page-only for v1 (scroll-to-anchor deferred).
+
+## Child tickets (created at activation)
+- [[CPE-594]] — DocsView takes an optional initial slug (30m)
+- [[CPE-595]] — Section→doc registry + exhaustiveness guard test (1h) — the one source of truth
+- [[CPE-596]] — Contextual Help entry points: "?" header button + F1 (1-2h) — needs 594 + 595
+- [[CPE-597]] — Self-maintaining docs rule in CLAUDE.md + docs library (30m)
+
 ## Work Log
 2026-07-17 — Filed as a dormant `Proposed` brief on request (user: "make Documents openable from the
 section it addresses, with that section's page pre-selected; remember this as a standing rule that new
 features add their documentation"). Not decomposed; activate to plan.
+2026-07-17 — **Activated.** Resolved the open questions with the user (see Decisions) and decomposed into
+CPE-594…CPE-597. Suggested order: 594 → 595 → 596 → 597.
