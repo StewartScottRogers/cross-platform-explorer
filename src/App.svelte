@@ -10,6 +10,7 @@
   import { getVersion } from "@tauri-apps/api/app";
   import { WebviewWindow } from "@tauri-apps/api/webviewWindow";
   import { emit, once, listen } from "@tauri-apps/api/event";
+  import { getCurrentWebview } from "@tauri-apps/api/webview";
 
   import Icon from "./lib/components/Icon.svelte";
   import ContextBar from "./lib/components/ContextBar.svelte";
@@ -459,6 +460,9 @@
   /** Teardown for the Agent Watch session listener (CPE-396). */
   let unlistenSessions: (() => void) | null = null;
   let unlistenTransferDone: (() => void) | null = null;
+  // OS file drop-in (CPE-670): overlay shown while OS files are dragged over the window.
+  let osDragActive = false;
+  let unlistenOsDrop: (() => void) | null = null;
   /** A copy-paste awaiting the user's conflict choice (CPE-624). */
   let pendingCopy: { sources: string[]; count: number } | null = null;
   // Agent Watch view (CPE-399): the Project folder currently being watched (or ""), and the
@@ -1633,6 +1637,33 @@
   }
 
   /** Move `paths` into `dest` (drag & drop). Ctrl-drag copies instead. */
+  /** The drop-path of the folder row / sidebar place under a physical cursor position, or "" (CPE-670).
+      Physical pixels → CSS pixels via the device pixel ratio before hit-testing the DOM. */
+  function folderUnderCursor(pos: { x: number; y: number }): string {
+    const dpr = window.devicePixelRatio || 1;
+    const el = document.elementFromPoint(pos.x / dpr, pos.y / dpr);
+    const target = el?.closest?.("[data-drop-path]") as HTMLElement | null;
+    return target?.dataset.dropPath ?? "";
+  }
+
+  /** Copy OS files dropped onto the window (CPE-670) into the folder under the cursor, else the current
+      folder. Always a COPY — the external originals must stay put. */
+  async function importDroppedFiles(paths: string[], pos: { x: number; y: number }) {
+    if (!paths || paths.length === 0) return;
+    const dest = folderUnderCursor(pos) || (isHome || archive || smartFolder ? "" : currentPath);
+    if (!dest) {
+      showNotice($t("dnd.openFolderToImport"), true);
+      return;
+    }
+    try {
+      const results = await invoke<OpResult[]>("copy_entries", { paths, dest });
+      reportResults(results, "Imported");
+      await loadPath(currentPath);
+    } catch (e) {
+      showNotice(String(e), true);
+    }
+  }
+
   async function dropInto(paths: string[], dest: string, mods: { ctrlKey: boolean; shiftKey: boolean }) {
     if (paths.length === 0 || !dest) return;
 
@@ -2241,6 +2272,27 @@
       else showNotice(`Copied ${r.transferred} item${r.transferred === 1 ? "" : "s"}.`);
     }).then((un) => (unlistenTransferDone = un)).catch(() => {});
 
+    // OS file drop-in (CPE-670): files dragged from the desktop/Explorer onto the window are copied into
+    // the folder under the cursor (else the current folder). A themed overlay shows while dragging over.
+    // Guarded: outside a Tauri webview (e.g. the jsdom test env) this API is absent — drop-in is then
+    // simply unavailable and must not break startup.
+    try {
+      getCurrentWebview()
+        .onDragDropEvent((e) => {
+          const p = e.payload;
+          if (p.type === "enter" || p.type === "over") osDragActive = true;
+          else if (p.type === "leave") osDragActive = false;
+          else if (p.type === "drop") {
+            osDragActive = false;
+            importDroppedFiles(p.paths, p.position);
+          }
+        })
+        .then((un) => (unlistenOsDrop = un))
+        .catch(() => {});
+    } catch {
+      /* no webview API available — OS drop-in unavailable */
+    }
+
     try {
       const [p, d, h, canRestore] = await Promise.all([
         invoke<Place[]>("special_folders"),
@@ -2274,6 +2326,7 @@
   onDestroy(() => {
     unlistenSessions?.();
     unlistenTransferDone?.();
+    unlistenOsDrop?.();
     unlistenActivity?.();
     if (watchRefreshTimer) clearTimeout(watchRefreshTimer);
     if (autoMirrorTimer) clearInterval(autoMirrorTimer);
@@ -2896,6 +2949,16 @@
   />
 {/if}
 
+{#if osDragActive}
+  <!-- OS file drop-in overlay (CPE-670): shown while files are dragged in from the desktop/Explorer. -->
+  <div class="os-drop-overlay" aria-hidden="true">
+    <div class="os-drop-card">
+      <Icon name="folder" size={30} />
+      <span>{$t("dnd.dropToImport")}</span>
+    </div>
+  </div>
+{/if}
+
 {#if showUpdate}
   <UpdateDialog
     state={updateState}
@@ -2912,6 +2975,31 @@
 {/if}
 
 <style>
+  /* OS file drop-in overlay (CPE-670): a themed full-window affordance while dragging files in. */
+  .os-drop-overlay {
+    position: fixed;
+    inset: 0;
+    z-index: 300;
+    display: grid;
+    place-items: center;
+    background: color-mix(in srgb, var(--accent) 12%, transparent);
+    border: 3px dashed var(--accent);
+    pointer-events: none;
+  }
+  .os-drop-card {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 14px 22px;
+    border-radius: 12px;
+    background: var(--surface);
+    border: 1px solid var(--border-strong);
+    box-shadow: 0 12px 40px rgba(0, 0, 0, 0.25);
+    color: var(--text);
+    font-size: 15px;
+    font-weight: 600;
+  }
+
   /* Agent Watch activity strip (CPE-399) — a thin live banner above the file list, shown only
      while the explorer is inside a running agent's Project folder. */
   .agent-strip {

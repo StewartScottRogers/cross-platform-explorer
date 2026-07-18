@@ -336,6 +336,7 @@
         class="nav-item"
         class:active={isMarked(place.path)}
         class:droptarget={dropPath === place.path}
+        data-drop-path={place.path}
         on:dragover={(e) => onDragOver(e, place.path)}
         on:dragleave={() => (dropPath = dropPath === place.path ? "" : dropPath)}
         on:drop={(e) => onDrop(e, place.path)}

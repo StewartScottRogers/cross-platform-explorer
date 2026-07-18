@@ -306,6 +306,7 @@
         class:tagged={!!tagEntry.label}
         style={tagEntry.label ? `--label-color: ${labelColor(tagEntry.label)}` : ""}
         data-agent-kind={activity[entry.path]?.kind ?? ""}
+        data-drop-path={entry.is_dir ? entry.path : null}
         bind:this={rowEls[i]}
         role="button"
         tabindex="0"
