@@ -2500,6 +2500,13 @@ fn normalize_git_url(raw: &str) -> String {
 /// file types. For an executable (.exe/.cmd/.bat/…) this runs it.
 #[tauri::command]
 fn open_external(path: String) -> Result<(), String> {
+    // On Windows this hands `path` to `cmd /C start`, which re-parses its arguments — a `"` in the
+    // path could break out of the quoting and inject a command. Real Windows paths can't contain `"`
+    // (it's a reserved character) and neither URLs nor paths need raw control characters, so refuse
+    // them: this closes the injection surface without changing how anything legitimate opens (CPE-629).
+    if path.contains('"') || path.chars().any(char::is_control) {
+        return Err("refusing to open a path with invalid characters".into());
+    }
     #[cfg(target_os = "windows")]
     let spawned = std::process::Command::new("cmd")
         .args(["/C", "start", "", &path])
@@ -5383,6 +5390,16 @@ mod tests {
             "beta"
         );
         let _ = fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn open_external_refuses_shell_injection_characters() {
+        // A `"` (impossible in a real Windows path) or a control char is refused before reaching the
+        // shell — these are the only characters that could break `cmd /C start`'s quoting. We only
+        // assert the rejection path; a normal path would actually launch the OS opener (a side effect).
+        assert!(open_external("a\" & calc.exe & \"b".into()).is_err());
+        assert!(open_external("x\ny".into()).is_err());
+        assert!(open_external("tab\there".into()).is_err());
     }
 
     #[test]
