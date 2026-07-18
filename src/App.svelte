@@ -37,8 +37,7 @@
   import type { Command } from "./lib/commandPalette";
   import AgentMenu from "./lib/components/AgentMenu.svelte";
   import Toolbar from "./lib/components/Toolbar.svelte";
-  import FileList from "./lib/components/FileList.svelte";
-  import HomeView from "./lib/components/HomeView.svelte";
+  import ExplorerPane from "./lib/components/ExplorerPane.svelte";
   import DetailsPane from "./lib/components/DetailsPane.svelte";
   import PreviewPane from "./lib/components/PreviewPane.svelte";
   import type { ArchiveEntry } from "./lib/preview/provider";
@@ -2542,79 +2541,47 @@
    </Toolbar>
    <ContextBar contexts={folderContexts} on:action={(e) => handleContextAction(e.detail)} />
    <div class="filelist-pane" role="region" aria-label={$t("tb.fileList")}>
-    {#if isHome && !smartFolder}
-      <HomeView
-        {places}
-        {drives}
-        {pins}
-        {recents}
-        {favorites}
-        {recentFolders}
-        on:navigate={(e) => navigate(e.detail)}
-        on:openFile={(e) => openRecent(e.detail)}
-        on:unpin={(e) => { pins = settings.togglePin(pins, e.detail); settings.savePins(pins); }}
-        on:unfavorite={(e) => { favorites = favorites.filter((f) => f.path !== e.detail); settings.saveFavorites(favorites); }}
-        on:removeRecent={(e) => { recents = settings.removeRecent(recents, e.detail); settings.saveRecents(recents); }}
-        on:removeRecentFolder={(e) => { recentFolders = settings.removeRecent(recentFolders, e.detail); settings.saveRecentFolders(recentFolders); }}
-        on:clearRecents={() => { recents = []; settings.saveRecents(recents); }}
-      />
-    {:else}
-      {#if activeWatchCwd}
-        <div class="agent-strip" role="status">
-          <span class="agent-dot" />
-          <span class="agent-strip-label">{$t("agent.watch", { name: watchedAgentName })}</span>
-          {#each recentChanges as c (c.path)}
-            <span class="agent-chip {c.kind}" title={c.path}>{c.kind === "removed" ? "−" : c.kind === "created" ? "+" : "~"} {baseName(c.path)}</span>
-          {/each}
-          {#if recentChanges.length === 0}
-            <span class="agent-strip-idle">{$t("agent.watching")}</span>
-          {/if}
-          <button class="agent-log-btn" on:click={() => (showTimeline = !showTimeline)} title={$t("agent.showLog")}>
-            {$t("agent.log")} {$agentTimeline.length ? `(${$agentTimeline.length})` : ""}
-          </button>
-        </div>
-      {/if}
-      {#if selectedTag}
-        <div class="tag-filter-bar">
-          <Icon name="tag" size={13} />
-          <span class="tf-label">{selectedTag}</span>
-          <span class="tf-count">{visible.length}</span>
-          <button class="tf-clear" title="Clear tag filter" aria-label="Clear tag filter" on:click={() => (selectedTag = "")}>
-            <Icon name="close" size={12} />
-          </button>
-        </div>
-      {/if}
-      <FileList
-        entries={visible}
-        activity={activeWatchCwd ? $fsActivity : {}}
-        {selection}
-        {sortKey}
-        {sortDir}
-        {view}
-        {error}
-        {loading}
-        {searching}
-        {cutPaths}
-        {renamingPath}
-        canDrag={!archive}
-        {renameValue}
-        {columnWidths}
-        on:resizeColumns={(e) => { columnWidths = e.detail; settings.saveColumnWidths(columnWidths); }}
-        bind:rowEls
-        bind:draggedPaths
-        on:click={(e) => (selection = selClick(selection, e.detail.index, e.detail))}
-        on:open={(e) => open(e.detail)}
-        on:sort={(e) => {
-          sortKey = e.detail.key; sortDir = e.detail.dir;
-          settings.saveSortKey(sortKey); settings.saveSortDir(sortDir);
-        }}
-        on:context={(e) => onRowContext(e.detail)}
-        on:contextEmpty={(e) => (ctx = { x: e.detail.x, y: e.detail.y, target: "empty" })}
-        on:commitRename={(e) => commitRename(e.detail)}
-        on:cancelRename={() => (renamingPath = "")}
-        on:drop={(e) => dropInto(e.detail.paths, e.detail.dest, e.detail)}
-      />
-    {/if}
+    <ExplorerPane
+      inHome={isHome && !smartFolder}
+      {places}
+      {drives}
+      {pins}
+      {recents}
+      {favorites}
+      {recentFolders}
+      {activeWatchCwd}
+      {watchedAgentName}
+      {recentChanges}
+      bind:showTimeline
+      {visible}
+      bind:selectedTag
+      {error}
+      {loading}
+      {searching}
+      {cutPaths}
+      bind:renamingPath
+      {renameValue}
+      canDrag={!archive}
+      {view}
+      bind:sortKey
+      bind:sortDir
+      bind:columnWidths
+      bind:selection
+      bind:draggedPaths
+      bind:rowEls
+      on:navigate={(e) => navigate(e.detail)}
+      on:openRecent={(e) => openRecent(e.detail)}
+      on:unpin={(e) => { pins = settings.togglePin(pins, e.detail); settings.savePins(pins); }}
+      on:unfavorite={(e) => { favorites = favorites.filter((f) => f.path !== e.detail); settings.saveFavorites(favorites); }}
+      on:removeRecent={(e) => { recents = settings.removeRecent(recents, e.detail); settings.saveRecents(recents); }}
+      on:removeRecentFolder={(e) => { recentFolders = settings.removeRecent(recentFolders, e.detail); settings.saveRecentFolders(recentFolders); }}
+      on:clearRecents={() => { recents = []; settings.saveRecents(recents); }}
+      on:open={(e) => open(e.detail)}
+      on:rowContext={(e) => onRowContext(e.detail)}
+      on:contextEmpty={(e) => (ctx = { x: e.detail.x, y: e.detail.y, target: "empty" })}
+      on:commitRename={(e) => commitRename(e.detail)}
+      on:drop={(e) => dropInto(e.detail.paths, e.detail.dest, e.detail)}
+    />
    </div>
   </div>
 
@@ -3008,74 +2975,6 @@
     font-size: 15px;
     font-weight: 600;
   }
-
-  /* Agent Watch activity strip (CPE-399) — a thin live banner above the file list, shown only
-     while the explorer is inside a running agent's Project folder. */
-  .agent-strip {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-    padding: 4px 12px;
-    font-size: 12px;
-    background: color-mix(in srgb, var(--accent) 10%, var(--surface));
-    border-bottom: 1px solid var(--border);
-    overflow: hidden;
-    white-space: nowrap;
-  }
-  .agent-dot {
-    width: 8px;
-    height: 8px;
-    border-radius: 50%;
-    background: #3a9d4a;
-    flex: 0 0 auto;
-    animation: agent-dot-pulse 1.6s ease-in-out infinite;
-  }
-  @keyframes agent-dot-pulse {
-    0%, 100% { opacity: 1; }
-    50% { opacity: 0.35; }
-  }
-  .agent-strip-label { font-weight: 600; flex: 0 0 auto; }
-  .agent-strip-idle { opacity: 0.6; }
-  .agent-chip {
-    flex: 0 0 auto;
-    padding: 1px 7px;
-    border-radius: 999px;
-    font-size: 11px;
-    color: #fff;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    max-width: 180px;
-  }
-  .agent-chip.created { background: #3a9d4a; }
-  .agent-chip.modified { background: #b5872b; }
-  .agent-chip.renamed { background: #3a72b5; }
-  .agent-chip.removed { background: #b5433a; }
-  .agent-log-btn {
-    flex: 0 0 auto;
-    margin-left: auto;
-    height: 20px;
-    padding: 0 9px;
-    border: 1px solid var(--border);
-    border-radius: 999px;
-    background: var(--surface);
-    color: var(--text);
-    font-size: 11px;
-    font-weight: 600;
-    cursor: pointer;
-  }
-  .agent-log-btn:hover { background: var(--surface-alt); }
-
-  /* Active tag-filter indicator above the list (CPE-655). */
-  .tag-filter-bar {
-    display: flex; align-items: center; gap: 6px;
-    padding: 4px 10px; margin: 4px 6px 0; border-radius: 6px;
-    background: var(--surface-alt); border: 1px solid var(--border);
-    font-size: 12px; color: var(--text);
-  }
-  .tf-label { font-weight: 600; }
-  .tf-count { color: var(--text-faint); font-variant-numeric: tabular-nums; }
-  .tf-clear { margin-left: auto; width: 20px; height: 20px; display: grid; place-items: center; border-radius: 4px; color: var(--text-dim); }
-  .tf-clear:hover { background: var(--surface); color: var(--text); }
 
   /* AI Console toolbar button (CPE-351) — sits next to the settings gear. */
   .tb-console {

@@ -4,8 +4,8 @@ title: Extract an <ExplorerPane> component from App.svelte
 type: refactor
 component: Frontend
 priority: low
-status: Deferred
-tags: deferred-internal
+status: In Progress
+tags: ready
 created: 2026-07-18
 epic: CPE-617
 estimate: 4h+
@@ -27,3 +27,7 @@ dual-pane can render two. App becomes a thin shell (window chrome, layout, share
 deferred-on: this is a large, high-regression-surface refactor of the app core — it must be done
 **attended with live GUI verification**, not shipped blind in an unattended nightshift. revisit-when: an
 attended session dedicated to the extraction. It's the gating prereq for CPE-677/678/679.
+
+## Work Log
+2026-07-18 — Picked up (attended, user chose big-bang). On a branch; merge only if check+full suite+build green so main stays safe.
+2026-07-18 — Slice 1 landed: extracted the file-listing region (Home/agent-strip/tag-bar/FileList) into ExplorerPane.svelte (presentational; App owns state via props/binds/events). check clean; 669 tests pass; build clean. Next slices push per-pane state ownership down into ExplorerPane. Still In Progress (multi-slice).
