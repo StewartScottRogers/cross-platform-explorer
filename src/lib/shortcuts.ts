@@ -77,7 +77,14 @@ export const SHORTCUT_GROUPS: ShortcutGroup[] = [
     items: [
       { keys: "Alt+P", description: "Toggle the details panel" },
       { keys: "Ctrl+Shift+O", description: "Pop out the preview" },
-      { keys: "F1", description: "Show this shortcuts list" },
+    ],
+  },
+  {
+    title: "General",
+    items: [
+      { keys: "Ctrl+Shift+P", description: "Command palette — find and run any action" },
+      { keys: "F1", description: "Documentation for the current section" },
+      { keys: "?", description: "Show this shortcuts list" },
     ],
   },
 ];

@@ -31,6 +31,8 @@
   import WorkbenchView from "./lib/components/WorkbenchView.svelte";
   import DocsView from "./lib/components/DocsView.svelte";
   import { docSlugForSection, type Section } from "./lib/sectionDocs";
+  import CommandPalette from "./lib/components/CommandPalette.svelte";
+  import type { Command } from "./lib/commandPalette";
   import AgentMenu from "./lib/components/AgentMenu.svelte";
   import Toolbar from "./lib/components/Toolbar.svelte";
   import FileList from "./lib/components/FileList.svelte";
@@ -223,6 +225,44 @@
     if (showWorkbench) return "workbench";
     return isHome ? "home" : "explorer";
   }
+
+  // Command Palette (CPE-602): Ctrl+Shift+P. The command list reuses existing handlers — nothing is
+  // duplicated; `enabled` closures read live state so context-invalid commands grey out.
+  let paletteOpen = false;
+  const inFolder = () => !isHome && !archive;
+  const hasSelection = () => selectedEntries.length > 0;
+  $: paletteCommands = [
+    { id: "nav.home", group: "Go", label: "Home", shortcut: "", run: () => { if (archive) exitArchive(); navigate(HOME); } },
+    { id: "nav.back", group: "Go", label: "Back", shortcut: "Alt+←", run: goBack, enabled: () => canGoBack(activeTab.history) },
+    { id: "nav.forward", group: "Go", label: "Forward", shortcut: "Alt+→", run: goForward, enabled: () => canGoForward(activeTab.history) },
+    { id: "nav.up", group: "Go", label: "Up one folder", shortcut: "Alt+↑", run: goUp, enabled: inFolder },
+    { id: "nav.refresh", group: "Go", label: "Refresh", shortcut: "F5", run: refresh },
+    { id: "tab.new", group: "Go", label: "New tab", shortcut: "Ctrl+T", run: newTab },
+    { id: "file.newFolder", group: "File", label: "New folder", keywords: "create directory mkdir", run: newFolder, enabled: inFolder },
+    { id: "file.newFile", group: "File", label: "New file", keywords: "create", run: newFile, enabled: inFolder },
+    { id: "file.copy", group: "File", label: "Copy", shortcut: "Ctrl+C", run: doCopy, enabled: hasSelection },
+    { id: "file.cut", group: "File", label: "Cut", shortcut: "Ctrl+X", run: doCut, enabled: hasSelection },
+    { id: "file.paste", group: "File", label: "Paste", shortcut: "Ctrl+V", run: doPaste, enabled: inFolder },
+    { id: "file.copyPath", group: "File", label: "Copy as path", shortcut: "Ctrl+Shift+C", run: doCopyPath, enabled: hasSelection },
+    { id: "file.copyName", group: "File", label: "Copy name", run: doCopyName, enabled: hasSelection },
+    { id: "view.details", group: "View", label: "View: Details", run: () => { view = "details"; settings.saveView(view); } },
+    { id: "view.list", group: "View", label: "View: List", run: () => { view = "list"; settings.saveView(view); } },
+    { id: "view.icons", group: "View", label: "View: Large icons", run: () => { view = "icons"; settings.saveView(view); } },
+    { id: "sort.name", group: "View", label: "Sort by name", run: () => (sortKey = "name") },
+    { id: "sort.modified", group: "View", label: "Sort by date modified", run: () => (sortKey = "modified") },
+    { id: "sort.type", group: "View", label: "Sort by type", run: () => (sortKey = "type") },
+    { id: "sort.size", group: "View", label: "Sort by size", run: () => (sortKey = "size") },
+    { id: "sort.dir", group: "View", label: "Toggle sort direction", run: () => (sortDir = sortDir === "asc" ? "desc" : "asc") },
+    { id: "view.hidden", group: "View", label: showHidden ? "Hide hidden files" : "Show hidden files", run: () => { showHidden = !showHidden; settings.saveShowHidden(showHidden); } },
+    { id: "view.foldersFirst", group: "View", label: foldersFirst ? "Mix folders and files" : "Group folders first", run: () => { foldersFirst = !foldersFirst; settings.saveFoldersFirst(foldersFirst); } },
+    { id: "tool.searchInFiles", group: "Tools", label: "Search in files…", shortcut: "Ctrl+Shift+F", run: () => (contentSearchOpen = true), enabled: inFolder },
+    { id: "tool.findDuplicates", group: "Tools", label: "Find duplicate files…", run: () => (duplicatesOpen = true), enabled: inFolder },
+    { id: "tool.aiConsole", group: "Tools", label: "Open AI Console", run: () => openAiConsole(), enabled: () => aiConsoleAvailable },
+    { id: "app.settings", group: "App", label: "Settings…", run: () => (showSettings = true) },
+    { id: "app.documents", group: "App", label: "Documents", shortcut: "F1", run: () => openDocs(currentSection()) },
+    { id: "app.shortcuts", group: "App", label: "Keyboard shortcuts", shortcut: "?", run: () => (shortcutsOpen = true) },
+    { id: "app.about", group: "App", label: "About", run: () => (showAbout = true) },
+  ] satisfies Command[];
 
   /** Open a URL in a dedicated browser webview window (CPE-527) — safe under the strict CSP since it's
       a separate webview, not an iframe in the main window. The URL is validated http/https in-view. */
@@ -1593,6 +1633,7 @@
     if (ctrl && event.shiftKey && event.key.toLowerCase() === "o") { event.preventDefault(); popOutPreview(); return; }
     if (ctrl && event.shiftKey && event.key.toLowerCase() === "t") { event.preventDefault(); reopenClosedTab(); return; }
     if (ctrl && event.shiftKey && event.key.toLowerCase() === "f") { event.preventDefault(); if (!isHome && !archive) contentSearchOpen = true; return; }
+    if (ctrl && event.shiftKey && event.key.toLowerCase() === "p") { event.preventDefault(); paletteOpen = true; return; } // command palette (CPE-602)
     if (ctrl && event.key.toLowerCase() === "t") { event.preventDefault(); newTab(); return; }
     if (ctrl && event.key.toLowerCase() === "w") { event.preventDefault(); closeTab(activeId); return; }
     if (ctrl && event.key === "Tab") { event.preventDefault(); cycleTab(event.shiftKey ? -1 : 1); return; }
@@ -2498,6 +2539,10 @@
 
 {#if showDocs}
   <DocsView initialSlug={docsSlug} on:close={() => (showDocs = false)} />
+{/if}
+
+{#if paletteOpen}
+  <CommandPalette commands={paletteCommands} on:close={() => (paletteOpen = false)} />
 {/if}
 
 {#if agentMenu}
