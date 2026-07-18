@@ -159,7 +159,7 @@ describe("FileList rendering", () => {
     expect(screen.getByText("pic.png")).toBeTruthy();
   });
 
-  it("gives image tiles a thumbnail slot in icons view, but not other files (CPE-257)", () => {
+  it("gives image tiles a thumbnail in icons view, but not other files (CPE-257/CPE-643)", () => {
     const { container } = render(FileList, {
       ...base,
       view: "icons",
@@ -169,8 +169,8 @@ describe("FileList rendering", () => {
         entry({ name: "docs", path: "/x/docs", is_dir: true, extension: "" }),
       ],
     });
-    // Exactly one thumbnail slot — the image. The .txt and the folder keep icons.
-    expect(container.querySelectorAll(".thumb-slot")).toHaveLength(1);
+    // Exactly one ThumbnailImage — the image. The .txt and the folder keep plain icons.
+    expect(container.querySelectorAll(".thumb")).toHaveLength(1);
     expect(screen.getByText("notes.txt")).toBeTruthy();
     expect(screen.getByText("docs")).toBeTruthy();
   });
@@ -194,13 +194,13 @@ describe("FileList rendering", () => {
     expect(resized.mock.calls[0][0][0]).toBeGreaterThan(320); // Name column widened from its default
   });
 
-  it("does not use thumbnail slots in details view (CPE-257)", () => {
+  it("does not use thumbnails in details view (CPE-257/CPE-643)", () => {
     const { container } = render(FileList, {
       ...base,
       view: "details",
       entries: [entry({ name: "pic.png", path: "/x/pic.png", extension: "png" })],
     });
-    expect(container.querySelector(".thumb-slot")).toBeNull();
+    expect(container.querySelector(".thumb")).toBeNull();
   });
 
   /**

@@ -17,6 +17,9 @@ The explorer is the core of the app and is tuned to stay **fast, small, and pred
 ## Files
 
 - **Preview** — select a file to see it in the side pane; text is editable in place.
+- **Thumbnails** — in the **icons** view, image files (JPEG, PNG, GIF, WebP, BMP, TIFF, AVIF) show a real
+  downscaled thumbnail instead of a generic icon. They load lazily as tiles scroll into view, so a folder
+  of hundreds of photos stays responsive; non-image files and the list/details views are unchanged.
 - **Sort & filter** — order by name, size, date, or type; filter the list by a pattern.
 - **Search** — three complementary tools:
   - a quick **name filter** for the current folder (Ctrl+F; supports `*`/`?` wildcards),

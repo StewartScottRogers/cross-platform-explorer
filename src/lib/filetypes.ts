@@ -213,6 +213,25 @@ const ICON_BY_EXT: Record<string, string> = {
   html: "web", htm: "web",
 };
 
+/**
+ * Extensions we render a real image thumbnail for in the Icons view (CPE-643,
+ * epic CPE-615) — the raster formats the backend `image` crate decodes. SVG/ICO
+ * are excluded (vector / multi-frame) and HEIC/RAW stay Blocked on decode libs.
+ */
+const THUMBNAIL_IMAGE_EXTS = new Set([
+  "jpg", "jpeg", "png", "gif", "webp", "bmp", "tif", "tiff", "avif",
+]);
+
+/**
+ * True when `name` is an image file we can show a thumbnail for, judged by its
+ * extension. Pure — extensionless names and dotfiles (".png") are not images.
+ */
+export function isImage(name: string): boolean {
+  const dot = name.lastIndexOf(".");
+  if (dot <= 0 || dot === name.length - 1) return false;
+  return THUMBNAIL_IMAGE_EXTS.has(name.slice(dot + 1).toLowerCase());
+}
+
 /** Extensions treated as executable — eligible for Execute / Run as admin (CPE-241). */
 const EXECUTABLE_EXTS = new Set(["exe", "cmd", "bat", "msi", "com", "ps1", "scr", "vbs"]);
 

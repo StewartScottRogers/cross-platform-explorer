@@ -1,11 +1,11 @@
 <script lang="ts">
   import { createEventDispatcher, tick } from "svelte";
   import Icon from "./Icon.svelte";
+  import ThumbnailImage from "./ThumbnailImage.svelte";
   import { t } from "../i18n";
   import { formatSize } from "../format";
   import { formatDate } from "../datetime";
-  import { iconFor, typeName } from "../filetypes";
-  import { canThumbnail, thumbKey, cachedThumb, makeThumbnail } from "../thumbnails";
+  import { iconFor, typeName, isImage } from "../filetypes";
   import { columnsTemplate, resizeColumnTo, boundaryOffsets, COLUMN_DEFAULTS } from "../columns";
   import { isSelected } from "../selection";
   import type { Selection } from "../selection";
@@ -95,54 +95,6 @@
   /** Paths being dragged, and the folder row currently hovered as a target. */
   export let draggedPaths: string[] = [];
 
-  /** Maps a filesystem path to a URL the WebView can load (Tauri convertFileSrc).
-      Used to draw image thumbnails in the Icons view (CPE-257). */
-  export let assetUrl: (path: string) => string = (p) => p;
-
-  // Ready thumbnails, keyed by path. Populated lazily as image tiles scroll in.
-  let thumbs: Record<string, string> = {};
-
-  /** Decode + cache a thumbnail for one image entry, then show it. Failures keep
-      the generic icon — a broken image must never blank the tile. */
-  function loadThumb(entry: DirEntry): void {
-    const key = thumbKey(entry.path, entry.modified);
-    const hit = cachedThumb(key);
-    if (hit) {
-      thumbs[entry.path] = hit;
-      thumbs = thumbs;
-      return;
-    }
-    makeThumbnail(assetUrl(entry.path), key)
-      .then((data) => {
-        thumbs[entry.path] = data;
-        thumbs = thumbs;
-      })
-      .catch(() => {});
-  }
-
-  /** Svelte action: load an image tile's thumbnail once it scrolls into view.
-      Falls back to an eager load where IntersectionObserver is unavailable
-      (e.g. jsdom in tests), so the feature still works everywhere. */
-  function lazyThumb(node: HTMLElement, entry: DirEntry) {
-    if (typeof IntersectionObserver === "undefined") {
-      loadThumb(entry);
-      return;
-    }
-    const io = new IntersectionObserver(
-      (obs) => {
-        for (const o of obs) {
-          if (o.isIntersecting) {
-            loadThumb(entry);
-            io.disconnect();
-            break;
-          }
-        }
-      },
-      { rootMargin: "150px" },
-    );
-    io.observe(node);
-    return { destroy: () => io.disconnect() };
-  }
   let dropIndex = -1;
 
   // Double-click vs drag (CPE-236): in a webview the second press of a double-
@@ -361,14 +313,8 @@
         }}
       >
         <span class="cell name">
-          {#if view === "icons" && !entry.is_dir && canThumbnail(entry.extension)}
-            <span class="thumb-slot" use:lazyThumb={entry}>
-              {#if thumbs[entry.path]}
-                <img class="thumb" src={thumbs[entry.path]} alt="" draggable="false" />
-              {:else}
-                <Icon name={iconFor(entry)} size={40} />
-              {/if}
-            </span>
+          {#if view === "icons" && !entry.is_dir && isImage(entry.name)}
+            <ThumbnailImage path={entry.path} size={48} fallback={iconFor(entry)} />
           {:else}
             <Icon name={iconFor(entry)} size={view === "icons" ? 40 : 16} />
           {/if}
@@ -539,20 +485,6 @@
   .col-resize:hover {
     background: var(--accent);
     opacity: 0.5;
-  }
-
-  .thumb-slot {
-    width: 48px;
-    height: 48px;
-    display: grid;
-    place-items: center;
-  }
-  .thumb {
-    max-width: 48px;
-    max-height: 48px;
-    object-fit: contain;
-    border-radius: 4px;
-    box-shadow: 0 1px 3px rgba(0, 0, 0, 0.25);
   }
 
   .row.view-icons .ellip {
