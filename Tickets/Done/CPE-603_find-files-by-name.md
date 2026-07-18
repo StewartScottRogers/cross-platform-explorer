@@ -59,3 +59,7 @@ Verified: cargo tests + clippy (default and sidecar-platform) clean; `npm run ch
 2026-07-17 (Nightshift Loop 2) — Built and verified. Chose Ctrl+P (Go-to-File) as the idiomatic
 shortcut; it was free. Matcher reuses the same substring/glob rules as the in-folder filter so
 behaviour is consistent. GUI verification pending the next Nightshift build.
+
+2026-07-18 — GUI-verified live in the shipped 0.45.0 build: in Z:\repos\cross-platform-explorer\src,
+Ctrl+P opened "Find files by name"; "*.svelte" returned 41 recursive matches across subfolders with
+parent paths shown. Confirmed working.

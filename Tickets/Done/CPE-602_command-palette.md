@@ -58,3 +58,6 @@ Frontend 66 files + `npm run check` green. GUI verification pending the next Nig
 selection stats, undo, collision-safe naming, folder tree all present). The clear high-value gap was a
 searchable command palette. Built + tested it. Labels are English-first (i18n of the palette is a small
 follow-up).
+
+2026-07-18 — GUI-verified live in the shipped 0.45.0 build: Ctrl+Shift+P opened the palette, typing
+"new fold" filtered to the "New folder" command (FILE group tag shown). Confirmed working.
