@@ -29,6 +29,10 @@ The explorer is the core of the app and is tuned to stay **fast, small, and pred
 - **Selection** — multi-select with Shift/Ctrl; the status bar shows the count and total size.
 - **Operations** — copy, cut, paste, rename, delete (to the trash, restorable), new folder, and batch
   rename. Filesystem operations skip entries they can't read rather than failing the whole listing.
+- **File transfers** — a paste that **copies** runs through the transfer manager: a small panel appears
+  in the bottom-right showing the progress bar, file count, and any errors, and lets you **cancel**
+  mid-copy. It stays hidden when nothing is transferring. (Moves are near-instant same-folder-volume
+  renames, so they don't need the panel.)
 
 ## Command palette
 
