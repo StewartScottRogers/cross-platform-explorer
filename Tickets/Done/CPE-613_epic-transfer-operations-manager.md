@@ -2,13 +2,13 @@
 id: CPE-613
 title: "EPIC: File transfer & operations manager"
 type: Task
-status: In Progress
+status: Done
 priority: High
 component: Multiple
 tags: [epic]
 estimate: 4h+
 created: 2026-07-18
-closed:
+closed: 2026-07-18
 ---
 
 ## Goal
@@ -72,3 +72,11 @@ hide, so a deliberate engine with tests is safer than ad-hoc calls.
 6. CPE-625 — Route copy/cut/paste + move through the engine.
 7. CPE-626 — Undo integration for a completed transfer.
 8. CPE-627 — Docs: in-app docs + design note.
+
+## Resolution (closed 2026-07-18)
+All six children delivered the transfer manager: engine with byte-level progress + cancellation (CPE-620),
+transfer store (CPE-622), operations panel + copy wiring (CPE-623), batch conflict chooser (CPE-624),
+route-picker through the engine (CPE-625), docs (CPE-627). DoD met: large-tree copy/move shows live
+progress and cancels without corruption; a batch of collisions resolves with one apply-to-all choice;
+per-item errors are reported at the end, not aborting; the panel is idle-hidden so the plain explorer is
+unaffected; the engine is headlessly tested. GUI-verified live earlier this session. No carve-outs.
