@@ -2,13 +2,14 @@
 id: CPE-599
 title: "CLI surface for window geometry via tauri-plugin-cli (--x/--y/--width/--height + presets)"
 type: Feature
-status: Open
+status: Done
 priority: Medium
 component: Backend
 tags: [ready]
 epic: CPE-580
 estimate: 1-2h
 created: 2026-07-17
+closed: 2026-07-17
 ---
 
 ## Summary
@@ -21,15 +22,22 @@ The command-line front door: define the geometry flags with **tauri-plugin-cli**
   by the resolver's clamp+warn.
 
 ## Acceptance Criteria
-- [ ] `tauri-plugin-cli` added; flags declared in the config schema with help text: core `--x --y
+- [x] `tauri-plugin-cli` added; flags declared in the config schema with help text: core `--x --y
       --width --height`, plus `--position <preset>`, `--monitor <n>`, `--maximized`, `--fullscreen`,
       `--physical`.
-- [ ] A capability entry authorises the CLI plugin (`src-tauri/capabilities/default.json`).
-- [ ] Parsed args map into the resolver's input type; `--help` lists every flag with its meaning + the
+- [x] A capability entry authorises the CLI plugin (`src-tauri/capabilities/default.json`).
+- [x] Parsed args map into the resolver's input type; `--help` lists every flag with its meaning + the
       pixel-unit contract.
-- [ ] Non-numeric/zero/negative geometry → a clear stderr message + non-zero exit (never a mangled
+- [x] Non-numeric/zero/negative geometry → a clear stderr message + non-zero exit (never a mangled
       window); tests for the parse→resolver mapping.
-- [ ] `cargo check`/`clippy` green.
+- [x] `cargo check`/`clippy` green.
 
 ## Notes
 Keep parsing thin — the logic is all in the resolver ([[CPE-598]]). Apply step is [[CPE-600]].
+
+## Resolution
+`tauri-plugin-cli` added (dep + `.plugin(tauri_plugin_cli::init())` + `cli:default` capability);
+`tauri.conf.json` declares the flag schema (`--x/--y/--width/--height --position --monitor --maximized
+--fullscreen --physical`) with help text + the logical-pixel contract. `geometry::parse_args` maps the
+plugin's value map into `GeometryArgs`; a present-but-unparseable numeric (or bad preset) is a hard error
+→ non-zero exit. `cargo check` + clippy clean.

@@ -40,6 +40,21 @@
     "createUpdaterArtifacts": true
   },
   "plugins": {
+    "cli": {
+      "description": "Cross-Platform Explorer — window geometry launch options (CPE-580).",
+      "longDescription": "Position and size the window at launch. Values are logical pixels (stable across DPI) unless --physical. Precedence: CLI flag > saved window state > default. Off-screen/oversized values are clamped onto the monitor with a warning.",
+      "args": [
+        { "name": "x", "takesValue": true, "description": "Window left position (logical px)" },
+        { "name": "y", "takesValue": true, "description": "Window top position (logical px)" },
+        { "name": "width", "takesValue": true, "description": "Window width (logical px)" },
+        { "name": "height", "takesValue": true, "description": "Window height (logical px)" },
+        { "name": "position", "takesValue": true, "description": "Preset: top-left|top-right|bottom-left|bottom-right|center (explicit --x/--y override it)" },
+        { "name": "monitor", "takesValue": true, "description": "Target monitor index (0-based)" },
+        { "name": "maximized", "takesValue": false, "description": "Start maximized" },
+        { "name": "fullscreen", "takesValue": false, "description": "Start fullscreen" },
+        { "name": "physical", "takesValue": false, "description": "Treat --x/--y/--width/--height as physical pixels" }
+      ]
+    },
     "updater": {
       "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDUyMUU1NzRGNjhFMjU2MUEKUldRYVZ1Sm9UMWNlVXYvc283NmRaeHVhYkQrNGpQKzZ5aitWL1ErWWRxUGFWRXlQdXJDTkNENG4K",
       "endpoints": [

@@ -2,12 +2,13 @@
 id: CPE-579
 title: "EPIC: Context-aware Documents — open the docs viewer to the page for the section you're in"
 type: Task
-status: In Progress
+status: Done
 priority: Medium
 component: Frontend
 tags: [epic, big-design]
 estimate: 4h+
 created: 2026-07-17
+closed: 2026-07-17
 ---
 
 ## Summary
@@ -110,3 +111,12 @@ section it addresses, with that section's page pre-selected; remember this as a 
 features add their documentation"). Not decomposed; activate to plan.
 2026-07-17 — **Activated.** Resolved the open questions with the user (see Decisions) and decomposed into
 CPE-594…CPE-597. Suggested order: 594 → 595 → 596 → 597.
+
+## Resolution (Done — 2026-07-17)
+Documents is now context-aware. [[CPE-594]] gave `DocsView` an optional `initialSlug`; [[CPE-595]] added
+the one-source-of-truth `sectionDocs.ts` registry + an exhaustiveness guard test; [[CPE-596]] wired F1 +
+a toolbar "?" (and Application→Documents) to open the current section's page; [[CPE-597]] recorded the
+self-maintaining rule in CLAUDE.md (new section ⇒ doc page + registry entry, enforced by the guard test).
+DoD met: opening from a section lands on its page; one registry drives both the open + the guard;
+theme-correct entry points. Per-section header "?" for the additive modes that live in other surfaces
+reuse the same registry as those headers are touched.

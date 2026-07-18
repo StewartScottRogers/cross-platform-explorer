@@ -2,12 +2,13 @@
 id: CPE-580
 title: "EPIC: Launch the GUI with command-line window-geometry options (x / y / width / height)"
 type: Task
-status: In Progress
+status: Done
 priority: Medium
 component: Backend
 tags: [epic, big-design]
 estimate: 4h+
 created: 2026-07-17
+closed: 2026-07-17
 ---
 
 ## Summary
@@ -101,3 +102,16 @@ not the plumbing. Dormant brief until activated with `/ticketing-epic activate C
 2026-07-17 — Filed as a dormant `Proposed` brief on request. Not decomposed; activate to plan.
 2026-07-17 — **Activated.** Resolved the open questions with the user (see Decisions) and decomposed into
 CPE-598…CPE-601. Suggested order: 598 (pure core) → 599 (flags) → 600 (apply + GUI QA) → 601 (docs).
+
+## Resolution (Done — 2026-07-17)
+Shipped `cpe --x/--y/--width/--height` (+ `--position`, `--monitor`, `--maximized`, `--fullscreen`,
+`--physical`), each independently optional. Built on the codebase's pure-core/live-tail shape:
+- [[CPE-598]] — pure geometry resolver (precedence, work-area clamp, presets, DPI) with 11 unit tests.
+- [[CPE-599]] — tauri-plugin-cli flag schema + capability + a testable arg parser.
+- [[CPE-600]] — apply the resolved rect at setup (CLI > saved state > default; single-instance ignores
+  2nd-launch flags).
+- [[CPE-601]] — README + in-app docs.
+
+**DoD met:** flags compose in any combination; the resolver's clamp guarantees no off-screen/zero-size
+window; precedence + logical-pixel contract documented; the resolver is exhaustively unit-tested. The
+final on-screen apply is verified by GUI QA when a build is cut (the pure guarantees hold headlessly).

@@ -6,6 +6,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 /// Live provider API-key verification + catalog egress for the AI Console sidecar (CPE-347/369/376).
 /// Only compiled with the platform: without it nothing calls these, so the module would be dead
 /// code under `-D warnings` (its pure logic is still unit-tested under the feature).
+/// Pure window-geometry resolver for the CLI launch options (CPE-598) — core feature, always compiled.
+mod geometry;
 #[cfg(feature = "sidecar-platform")]
 mod keyverify;
 /// Host-brokered forge API egress for the repos sidecar (CPE-433). Same rationale as `keyverify`:
@@ -4208,6 +4210,78 @@ fn sidecar_diagnostics(
     Ok(SidecarDiagnostics { id, running, last_error, logs })
 }
 
+/// Apply CLI window-geometry flags (CPE-600) to the main window, over whatever `tauri-plugin-window-state`
+/// restored — so precedence is `CLI flag > saved state > default`. Monitors have no work-area API in
+/// Tauri, so the full monitor bounds are used and the pure resolver clamps the window fully on-screen.
+/// A parse/geometry error exits non-zero (never a mangled window); nothing requested → leave as restored.
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
+fn apply_cli_geometry(app: &tauri::AppHandle) {
+    use tauri::Manager;
+    use tauri_plugin_cli::CliExt;
+
+    let Ok(matches) = app.cli().matches() else { return };
+    let args = match geometry::parse_args(&|k| matches.args.get(k).map(|a| a.value.clone())) {
+        Ok(a) => a,
+        Err(msg) => {
+            eprintln!("geometry: {msg}");
+            std::process::exit(2);
+        }
+    };
+    let requested = args.x.is_some() || args.y.is_some() || args.width.is_some() || args.height.is_some()
+        || args.position.is_some() || args.monitor.is_some() || args.maximized || args.fullscreen;
+    if !requested {
+        return; // no geometry flags — keep the restored/default window
+    }
+
+    let Some(win) = app.get_webview_window("main") else { return };
+    let monitors: Vec<geometry::WorkArea> = win
+        .available_monitors()
+        .unwrap_or_default()
+        .iter()
+        .map(|m| {
+            let s = m.scale_factor();
+            let (p, sz) = (m.position(), m.size());
+            geometry::WorkArea {
+                x: (p.x as f64 / s).round() as i32,
+                y: (p.y as f64 / s).round() as i32,
+                width: (sz.width as f64 / s).round() as u32,
+                height: (sz.height as f64 / s).round() as u32,
+                scale: s,
+            }
+        })
+        .collect();
+
+    let scale = win.scale_factor().unwrap_or(1.0);
+    let cur_pos = win.outer_position().ok();
+    let cur_size = win.inner_size().ok();
+    let default = geometry::Rect {
+        x: cur_pos.map(|p| (p.x as f64 / scale).round() as i32).unwrap_or(0),
+        y: cur_pos.map(|p| (p.y as f64 / scale).round() as i32).unwrap_or(0),
+        width: cur_size.map(|s| (s.width as f64 / scale).round() as u32).unwrap_or(1000),
+        height: cur_size.map(|s| (s.height as f64 / scale).round() as u32).unwrap_or(700),
+    };
+
+    match geometry::resolve(&args, &monitors, default) {
+        Ok(r) => {
+            for w in &r.warnings {
+                eprintln!("geometry: {w}");
+            }
+            let _ = win.set_size(tauri::LogicalSize::new(r.rect.width as f64, r.rect.height as f64));
+            let _ = win.set_position(tauri::LogicalPosition::new(r.rect.x as f64, r.rect.y as f64));
+            if r.maximized {
+                let _ = win.maximize();
+            }
+            if r.fullscreen {
+                let _ = win.set_fullscreen(true);
+            }
+        }
+        Err(e) => {
+            eprintln!("geometry: {e}");
+            std::process::exit(2);
+        }
+    }
+}
+
 pub fn run() {
     let mut builder = tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
@@ -4216,6 +4290,7 @@ pub fn run() {
     #[cfg(not(any(target_os = "android", target_os = "ios")))]
     {
         builder = builder
+            .plugin(tauri_plugin_cli::init()) // window-geometry launch flags (CPE-599)
             .plugin(tauri_plugin_process::init())
             .plugin(tauri_plugin_updater::Builder::new().build())
             // Remember window size/position/maximized across restarts (CPE-228).
@@ -4251,16 +4326,16 @@ pub fn run() {
         builder = builder.manage(AgentWatchState::default());
     }
 
-    // On startup, clear any orphaned `ai-console --session-daemon` left by a prior run before it can
-    // lock the sidecar binary during an update or serve stale sessions (CPE-483). Feature-gated:
-    // with the platform off there is no sidecar, so nothing to reap.
-    #[cfg(feature = "sidecar-platform")]
-    {
-        builder = builder.setup(|app| {
-            reap_orphan_session_daemons_on_startup(app.handle());
-            Ok(())
-        });
-    }
+    // Startup setup: apply any CLI window-geometry flags (CPE-600) over the window-state-restored
+    // window, and — with the platform on — reap orphaned `ai-console --session-daemon` processes left by
+    // a prior run before they can lock the sidecar binary during an update (CPE-483).
+    builder = builder.setup(|_app| {
+        #[cfg(not(any(target_os = "android", target_os = "ios")))]
+        apply_cli_geometry(_app.handle());
+        #[cfg(feature = "sidecar-platform")]
+        reap_orphan_session_daemons_on_startup(_app.handle());
+        Ok(())
+    });
 
     let app = builder
         .invoke_handler(tauri::generate_handler![

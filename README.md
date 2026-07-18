@@ -53,6 +53,32 @@ sidecar-free by default.)*
   On Linux you also need `libwebkit2gtk-4.1-dev` and friends (see the release
   workflow for the exact list).
 
+## Launch options — window geometry
+
+Position and size the window from the command line (CPE-580). Every flag is independently optional;
+omit one and that dimension keeps its default.
+
+```bash
+cpe --x 100 --y 100 --width 1200 --height 800   # 1200×800 at (100,100)
+cpe --position center --width 1000              # centred, 1000 wide, default height
+cpe --monitor 1 --maximized                     # maximized on the second display
+```
+
+| Flag | Meaning |
+|------|---------|
+| `--x` / `--y` | Window position (left / top) |
+| `--width` / `--height` | Window size |
+| `--position <preset>` | `top-left` \| `top-right` \| `bottom-left` \| `bottom-right` \| `center` (explicit `--x`/`--y` override it) |
+| `--monitor <n>` | Target display, 0-based |
+| `--maximized` / `--fullscreen` | Start maximized / fullscreen |
+| `--physical` | Treat sizes/positions as physical pixels |
+
+- **Units:** **logical pixels** by default (stable across DPI); `--physical` opts out.
+- **Precedence:** `CLI flag > saved window state > config default`.
+- **Foolproof:** an off-screen or oversized request is **clamped onto the monitor** (with a warning) so
+  the window is always visible and grabbable; non-numeric / zero / negative values exit with an error.
+- `cpe --help` lists every flag.
+
 ## Develop
 
 ```bash

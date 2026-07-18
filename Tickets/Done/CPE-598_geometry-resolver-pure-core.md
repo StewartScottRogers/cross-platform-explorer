@@ -2,13 +2,14 @@
 id: CPE-598
 title: "Pure window-geometry resolver: (args, monitors, defaults) → final rect (clamp/precedence/DPI)"
 type: Feature
-status: Open
+status: Done
 priority: Medium
 component: Backend
 tags: [ready]
 epic: CPE-580
 estimate: 2-3h
 created: 2026-07-17
+closed: 2026-07-17
 ---
 
 ## Summary
@@ -28,13 +29,20 @@ resolution, precedence, DPI/unit handling — so it can be exhaustively unit-tes
   the same four scalars**, not special cases.
 
 ## Acceptance Criteria
-- [ ] `resolve_geometry(args, monitors, defaults) -> Result<WindowRect, GeometryError>` (or clamp-with-
+- [x] `resolve_geometry(args, monitors, defaults) -> Result<WindowRect, GeometryError>` (or clamp-with-
       warnings return) implementing the decisions above; no Tauri/window deps (pure).
-- [ ] Each of x/y/width/height is independently optional; omitted fields take the default; any subset
+- [x] Each of x/y/width/height is independently optional; omitted fields take the default; any subset
       composes.
-- [ ] Exhaustive tests: clamping onto the work area, precedence, preset resolution, `--monitor` offset,
+- [x] Exhaustive tests: clamping onto the work area, precedence, preset resolution, `--monitor` offset,
       DPI logical↔physical, and junk-input errors.
-- [ ] `cargo test` + `cargo clippy --all-targets -D warnings` green.
+- [x] `cargo test` + `cargo clippy --all-targets -D warnings` green.
 
 ## Notes
 Mirrors the swarm pure-core/live-tail split; the apply step is [[CPE-600]].
+
+## Resolution
+`src-tauri/src/geometry.rs` — pure `resolve(args, monitors, default) -> Result<Resolved, GeometryError>`
+implementing precedence (explicit > preset > default per-axis), work-area clamping (size + position, so
+the window is always fully on-screen/grabbable), preset resolution, `--monitor` selection, and
+physical→logical conversion. Plus `parse_args` (a testable value-map parser) + `Preset::parse`. 11 unit
+tests (clamp, precedence, presets, monitor, DPI, junk-input, parse). clippy clean (both feature modes).
