@@ -1655,10 +1655,10 @@
       showNotice($t("dnd.openFolderToImport"), true);
       return;
     }
+    // Through the transfer engine (CPE-671) so a large OS import shows tracked progress; keepboth
+    // auto-renames on collision. The transfer://done listener refreshes the folder + reports.
     try {
-      const results = await invoke<OpResult[]>("copy_entries", { paths, dest });
-      reportResults(results, "Imported");
-      await loadPath(currentPath);
+      await startTransfer(paths, dest, "copy", "keepboth");
     } catch (e) {
       showNotice(String(e), true);
     }
@@ -1688,25 +1688,33 @@
       }
     }
 
+    // COPY → the transfer engine (CPE-671), mirroring paste: tracked progress in the operations panel,
+    // the transfer://done listener refreshes + reports, and "keepboth" auto-renames on collision. (Copies
+    // aren't undoable.)
+    if (copy) {
+      try {
+        await startTransfer(paths, dest, "copy", "keepboth");
+      } catch (e) {
+        showNotice(String(e), true);
+      }
+      return;
+    }
+
+    // MOVE → synchronous path (fast same-folder-volume renames) so undo + tag-follow stay intact.
     try {
-      const results = await invoke<OpResult[]>(
-        copy ? "copy_entries" : "move_entries",
-        { paths, dest },
-      );
-      reportResults(results, copy ? "Copied" : "Moved");
-      if (!copy) {
-        const moves = results
-          .map((r, i) => ({ from: paths[i], to: r.path, ok: r.ok }))
-          .filter((m) => m.ok)
-          .map(({ from, to }) => ({ from, to }));
-        if (moves.length > 0) {
-          undoStack = pushUndo(undoStack, {
-            kind: "move",
-            moves,
-            label: `Move ${moves.length} item${moves.length === 1 ? "" : "s"}`,
-          });
-          retagMoves(moves); // tags follow the moved files (CPE-657)
-        }
+      const results = await invoke<OpResult[]>("move_entries", { paths, dest });
+      reportResults(results, "Moved");
+      const moves = results
+        .map((r, i) => ({ from: paths[i], to: r.path, ok: r.ok }))
+        .filter((m) => m.ok)
+        .map(({ from, to }) => ({ from, to }));
+      if (moves.length > 0) {
+        undoStack = pushUndo(undoStack, {
+          kind: "move",
+          moves,
+          label: `Move ${moves.length} item${moves.length === 1 ? "" : "s"}`,
+        });
+        retagMoves(moves); // tags follow the moved files (CPE-657)
       }
       await loadPath(currentPath);
     } catch (e) {
