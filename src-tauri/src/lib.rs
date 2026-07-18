@@ -450,6 +450,17 @@ fn list_dir(path: String) -> Result<Vec<DirEntry>, String> {
 //     failure.
 // ---------------------------------------------------------------------------
 
+/// Reject a "name" that isn't a plain filename — a path separator or `.`/`..` would create/rename an
+/// entry *outside* its folder via `join(..)` rather than in place. Defense in depth (the UI validates
+/// too, but these commands are directly invokable). Shared by create_dir/create_file/rename_entry
+/// (CPE-631/651).
+fn valid_entry_name(name: &str) -> Result<(), String> {
+    if name.contains('/') || name.contains('\\') || name == "." || name == ".." {
+        return Err("Name can't contain a path separator".to_string());
+    }
+    Ok(())
+}
+
 /// Create a new directory `name` inside `path`.
 #[tauri::command]
 fn create_dir(path: String, name: String) -> Result<String, String> {
@@ -457,6 +468,7 @@ fn create_dir(path: String, name: String) -> Result<String, String> {
     if name.is_empty() {
         return Err("Name cannot be empty".to_string());
     }
+    valid_entry_name(name)?;
     let target = Path::new(&path).join(name);
     if target.exists() {
         return Err(format!("\"{name}\" already exists"));
@@ -473,6 +485,7 @@ fn create_file(path: String, name: String) -> Result<String, String> {
     if name.is_empty() {
         return Err("Name cannot be empty".to_string());
     }
+    valid_entry_name(name)?;
     let target = Path::new(&path).join(name);
     if target.exists() {
         return Err(format!("\"{name}\" already exists"));
@@ -1348,12 +1361,8 @@ fn rename_entry(path: String, new_name: String) -> Result<String, String> {
     if new_name.is_empty() {
         return Err("Name cannot be empty".to_string());
     }
-    // A rename is name-only. Reject a "name" containing a path separator or `.`/`..`, which would move
-    // the file out of its folder via `parent.join(..)` rather than rename it — defense in depth, since
-    // the rename UI validates too but this command is directly invokable (CPE-631).
-    if new_name.contains('/') || new_name.contains('\\') || new_name == "." || new_name == ".." {
-        return Err("Name can't contain a path separator".to_string());
-    }
+    // A rename is name-only — reject a separator/traversal (CPE-631, shared guard).
+    valid_entry_name(new_name)?;
     let src = Path::new(&path);
     let parent = src
         .parent()
@@ -6250,6 +6259,22 @@ mod tests {
         let d = scratch("create_empty");
         let r = create_dir(d.to_string_lossy().to_string(), "   ".to_string());
         assert!(r.is_err());
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn create_rejects_path_separators_and_traversal() {
+        let d = scratch("create_sep");
+        fs::create_dir_all(&d).unwrap();
+        let dir = d.to_string_lossy().to_string();
+        for bad in ["../evil", "sub/x", "a\\b", "..", "."] {
+            assert!(create_dir(dir.clone(), bad.to_string()).is_err(), "create_dir must reject {bad:?}");
+            assert!(create_file(dir.clone(), bad.to_string()).is_err(), "create_file must reject {bad:?}");
+        }
+        // Nothing escaped the folder.
+        assert!(!d.parent().unwrap().join("evil").exists());
+        // A normal name still works.
+        assert!(create_dir(dir.clone(), "ok".to_string()).is_ok());
         let _ = fs::remove_dir_all(&d);
     }
 
