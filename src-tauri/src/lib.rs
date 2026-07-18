@@ -411,30 +411,72 @@ fn copy_dir_all(src: &Path, dst: &Path) -> std::io::Result<()> {
 #[tauri::command]
 fn list_dir(path: String) -> Result<Vec<DirEntry>, String> {
     let mut out = Vec::new();
-    let read = fs::read_dir(&path).map_err(|e| format!("{path}: {e}"))?;
-    for entry in read {
-        // Skip entries we can't read rather than failing the whole listing.
-        let Ok(entry) = entry else { continue };
-        let Ok(meta) = entry.metadata() else { continue };
-
-        let entry_path = entry.path();
-        let is_dir = meta.is_dir();
-
-        out.push(DirEntry {
-            hidden: is_hidden(&entry_path, &meta),
-            name: entry.file_name().to_string_lossy().to_string(),
-            path: entry_path.to_string_lossy().to_string(),
-            is_dir,
-            size: if is_dir { 0 } else { meta.len() },
-            modified: meta.modified().ok().and_then(to_epoch_ms),
-            extension: if is_dir {
-                String::new()
-            } else {
-                extension_of(&entry_path)
-            },
-        });
-    }
+    stream_dir_entries(&path, LIST_DIR_BATCH, |batch| out.extend(batch))?;
     Ok(out)
+}
+
+/// Map one directory entry to a `DirEntry`, or `None` if it can't be read — the caller skips those
+/// rather than failing the whole listing. Shared by `list_dir` and `list_dir_stream` (CPE-663) so the
+/// two can never diverge.
+fn dir_entry_from(entry: &fs::DirEntry) -> Option<DirEntry> {
+    let meta = entry.metadata().ok()?;
+    let entry_path = entry.path();
+    let is_dir = meta.is_dir();
+    Some(DirEntry {
+        hidden: is_hidden(&entry_path, &meta),
+        name: entry.file_name().to_string_lossy().to_string(),
+        path: entry_path.to_string_lossy().to_string(),
+        is_dir,
+        size: if is_dir { 0 } else { meta.len() },
+        modified: meta.modified().ok().and_then(to_epoch_ms),
+        extension: if is_dir { String::new() } else { extension_of(&entry_path) },
+    })
+}
+
+/// Number of entries per streamed batch — small enough that the first rows paint within a frame or two
+/// on a big folder, large enough that a tiny folder is one flush (CPE-662).
+const LIST_DIR_BATCH: usize = 256;
+
+/// Walk `path`, invoking `flush` with each batch of up to `batch` readable entries as they're read.
+/// Unreadable entries are skipped (never fail the listing). Returns the total number of entries emitted.
+/// This is the single directory walker behind both the synchronous `list_dir` and the streaming
+/// `list_dir_stream` command, so their contents and skip behaviour stay identical.
+fn stream_dir_entries(
+    path: &str,
+    batch: usize,
+    mut flush: impl FnMut(Vec<DirEntry>),
+) -> Result<usize, String> {
+    let read = fs::read_dir(path).map_err(|e| format!("{path}: {e}"))?;
+    let cap = batch.min(1024);
+    let mut buf: Vec<DirEntry> = Vec::with_capacity(cap);
+    let mut total = 0usize;
+    for entry in read {
+        let Ok(entry) = entry else { continue };
+        let Some(de) = dir_entry_from(&entry) else { continue };
+        buf.push(de);
+        if buf.len() >= batch {
+            total += buf.len();
+            flush(std::mem::replace(&mut buf, Vec::with_capacity(cap)));
+        }
+    }
+    if !buf.is_empty() {
+        total += buf.len();
+        flush(buf);
+    }
+    Ok(total)
+}
+
+/// Streaming variant of `list_dir` (CPE-663, epic CPE-662): pushes `DirEntry` batches over an IPC channel
+/// as the directory is read, so the frontend paints the first rows immediately instead of waiting for the
+/// whole listing. Returns the total entry count once the walk completes.
+#[tauri::command]
+fn list_dir_stream(
+    path: String,
+    on_entry: tauri::ipc::Channel<Vec<DirEntry>>,
+) -> Result<usize, String> {
+    stream_dir_entries(&path, LIST_DIR_BATCH, |batch| {
+        let _ = on_entry.send(batch);
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -5314,6 +5356,7 @@ pub fn run() {
             move_exact,
             entry_info,
             image_meta,
+            list_dir_stream,
             dir_size,
             folder_stats,
             hash_file,
@@ -5616,6 +5659,41 @@ mod tests {
     fn list_dir_lists_a_real_directory() {
         let dir = std::env::temp_dir();
         assert!(list_dir(dir.to_string_lossy().to_string()).is_ok());
+    }
+
+    #[test]
+    fn stream_dir_entries_batches_and_flushes_all() {
+        let d = scratch("streamdir");
+        for i in 0..500 {
+            fs::write(d.join(format!("f{i:03}.txt")), b"x").unwrap();
+        }
+        let mut batch_sizes = Vec::new();
+        let n = stream_dir_entries(d.to_str().unwrap(), 256, |b| batch_sizes.push(b.len())).unwrap();
+        assert_eq!(n, 500);
+        assert_eq!(batch_sizes.iter().sum::<usize>(), 500);
+        assert!(batch_sizes.len() >= 2, "500 entries at batch 256 should flush more than once");
+        assert!(batch_sizes.iter().all(|&s| s <= 256), "no batch exceeds the cap");
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn stream_dir_entries_matches_list_dir_contents() {
+        let d = scratch("streameq");
+        for n in ["a.txt", "b.rs", "c.png"] {
+            fs::write(d.join(n), b"x").unwrap();
+        }
+        fs::create_dir(d.join("sub")).unwrap();
+        // A tiny batch of 2 exercises the mid-walk flush path.
+        let mut streamed = Vec::new();
+        stream_dir_entries(d.to_str().unwrap(), 2, |b| streamed.extend(b)).unwrap();
+        let listed = list_dir(d.to_string_lossy().to_string()).unwrap();
+        let mut a: Vec<_> = streamed.iter().map(|e| e.name.clone()).collect();
+        let mut b: Vec<_> = listed.iter().map(|e| e.name.clone()).collect();
+        a.sort();
+        b.sort();
+        assert_eq!(a, b);
+        assert_eq!(a, vec!["a.txt", "b.rs", "c.png", "sub"]);
+        let _ = fs::remove_dir_all(&d);
     }
 
     #[test]
