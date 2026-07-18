@@ -18,11 +18,25 @@ The explorer is the core of the app and is tuned to stay **fast, small, and pred
 
 - **Preview** — select a file to see it in the side pane; text is editable in place.
 - **Sort & filter** — order by name, size, date, or type; filter the list by a pattern.
-- **Search** — a quick name filter, plus **Search in files** (Tools) to grep folder contents; matches are
-  highlighted in each result line, and your recent queries autocomplete.
+- **Search** — three complementary tools:
+  - a quick **name filter** for the current folder (Ctrl+F; supports `*`/`?` wildcards),
+  - **Find files by name** (Ctrl+P) to search the whole tree below the current folder for a name or
+    glob and jump straight to a hit,
+  - **Search in files** (Ctrl+Shift+F) to grep folder contents, with matches highlighted in each result
+    line.
+
+  Your recent queries autocomplete in each.
 - **Selection** — multi-select with Shift/Ctrl; the status bar shows the count and total size.
 - **Operations** — copy, cut, paste, rename, delete (to the trash, restorable), new folder, and batch
   rename. Filesystem operations skip entries they can't read rather than failing the whole listing.
+
+## Command palette
+
+Press **Ctrl+Shift+P** to open the command palette — a searchable list of every action in the app
+(navigation, file operations, view and sort options, tools, and settings). Type to filter, use the
+arrow keys and Enter to run, or Esc to dismiss. Actions that don't apply right now (e.g. Paste with an
+empty clipboard) appear greyed out. The palette also lists your **recently-visited folders** so you can
+jump back to one by name. It's the fastest way to reach anything without hunting through menus.
 
 ## Details & properties
 
