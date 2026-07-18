@@ -2,7 +2,7 @@
 id: CPE-616
 title: "EPIC: Remote & cloud filesystems"
 type: Task
-status: Proposed
+status: In Progress
 priority: Medium
 component: Multiple
 tags: [epic]
@@ -52,3 +52,27 @@ the local explorer is unchanged.
 - Credentials are stored in the OS secure store; host keys are verified.
 - The local explorer is byte-for-byte unaffected when no remote is configured (fast/small/predictable).
 - The filesystem-provider abstraction is documented and unit-tested with a fake provider.
+
+## Decisions (activated 2026-07-18, nightshift no-questions — best-guess logged)
+- **Auth v1:** SFTP with password + SSH key; defer OAuth cloud providers (Drive/Dropbox) to a later epic.
+- **Architecture:** in core for v1 (not a per-provider sidecar) — simpler; revisit if it bloats the core.
+- **Providers, phased:** SFTP first, then SMB/UNC, WebDAV, S3.
+- **Foundation order:** a pure **location model + URI parser** first (CPE-680, classify local vs remote by
+  scheme, no network) — the least-speculative, headlessly-testable base — then the provider trait +
+  Local/Fake providers (CPE-681), then the SFTP provider + connections + keychain.
+- **Safety:** credentials only in the OS keychain (never plaintext); host-key verification before any
+  remote op; a security review child gates the SFTP provider.
+
+## Child tickets
+1. **CPE-680** — Location model + URI parser (pure, unit-tested): classify a location string as local
+   (incl. Windows drive/UNC paths) or a remote scheme (`sftp/ssh/smb/webdav/s3`), parsed into
+   `{scheme,user,host,port,path}`. Safe/headless foundation — buildable now.
+2. **CPE-681** — `FileSystemProvider` trait (list/stat/read/write/mkdir/delete) + a `LocalProvider`
+   wrapping today's fs ops + a `FakeProvider` for tests; route local commands through it. **Large refactor
+   — attended, GUI-verified.** *(prereq: 680)*
+3. **CPE-682** — SFTP provider (connect/list/stat/read via an ssh crate) + host-key verification. **Needs
+   network + attended.** *(prereq: 681)*
+4. **CPE-683** — Connections sidebar section + add/edit/remove UI + OS-keychain credential storage.
+   **Needs GUI + keychain + attended.** *(prereq: 681)*
+5. **CPE-684** — Async, cancellable remote listing + latency/error states; transfer-queue integration for
+   to/from-remote copies (CPE-613). *(prereq: 682/683; attended)*
