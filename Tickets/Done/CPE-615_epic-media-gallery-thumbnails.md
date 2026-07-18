@@ -2,13 +2,13 @@
 id: CPE-615
 title: "EPIC: Media gallery & thumbnails"
 type: Task
-status: In Progress
+status: Done
 priority: Medium
 component: Multiple
 tags: [epic]
 estimate: 4h+
 created: 2026-07-18
-closed:
+closed: 2026-07-18
 ---
 
 ## Goal
@@ -65,3 +65,19 @@ tiebreaker while adding high-visible value for the media case.
 2. CPE-643 — Frontend: lazy thumbnail loading in the icon view (image files show real thumbnails).
 3. CPE-644 — On-disk thumbnail cache (path+mtime keyed, size-capped).
 4. CPE-645 — Gallery mode (bigger tiles) + spacebar quick-look.
+
+## Resolution (closed 2026-07-18)
+All six children delivered the media gallery:
+- CPE-642 — backend `thumbnail(path, max_edge)` PNG data URL.
+- CPE-643 — lazy thumbnails in the icon view.
+- CPE-644 — on-disk, size-capped, mtime-keyed thumbnail cache.
+- CPE-645 — spacebar quick-look overlay (←/→ navigation).
+- CPE-648 — post-thumbnail cleanup.
+- CPE-658 — gallery view mode (large photo tiles).
+- CPE-659 — image dimensions + EXIF in Properties (also enabled JPEG/GIF/WebP/BMP
+  decoding, which fixed real-photo thumbnails).
+
+DoD gates met: real thumbnails in icon/gallery view (lazy, non-janking); gallery mode +
+quick-look; dimensions + basic EXIF in Properties; bounded stale-aware cache; plain views
+untouched (additive mode). No carve-outs. GPS EXIF was left out of v1 (marked optional "?"
+in the brief) — a candidate follow-up if wanted.
