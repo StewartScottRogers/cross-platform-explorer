@@ -257,6 +257,8 @@ describe("i18n migration guard (CPE-481)", () => {
     "./components/SidecarManager.svelte": ["No sidecars registered.", ">Checking…<", "no capabilities</span>"],
     "./components/FileList.svelte": ["This folder is empty", "No items match your search", "Sort by {col.label}"],
     "./components/PreviewPane.svelte": ["Loading preview…", "Can't preview this image", ">Select all<"],
+    "./components/ContentSearchDialog.svelte": ["Text to find inside files", "No matches in this folder.", "Filter files…"],
+    "./components/FileNameSearchDialog.svelte": ["No files or folders match under this folder.", "Name to find — try"],
     "./components/Toolbar.svelte": ['"{label} settings"'],
     "../App.svelte": ["Reset all settings to defaults", "Show details/preview pane", "watching for changes…", "Resize navigation pane"],
   };

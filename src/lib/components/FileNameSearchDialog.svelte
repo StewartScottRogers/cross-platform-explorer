@@ -8,6 +8,7 @@
   import { createEventDispatcher } from "svelte";
   import { invoke } from "../invoke";
   import Icon from "./Icon.svelte";
+  import { t } from "../i18n";
   import { baseName, parentDir, pushRecentSearch } from "../contentSearch";
   import { sortNameMatches, type NameSearchResult } from "../fileNameSearch";
   import { lsGet, lsSet } from "../persist";
@@ -66,16 +67,16 @@
   <!-- svelte-ignore a11y-click-events-have-key-events a11y-no-static-element-interactions a11y-no-noninteractive-element-interactions -->
   <div class="dialog" role="dialog" aria-modal="true" on:click|stopPropagation>
     <header>
-      <h2>Find files by name</h2>
+      <h2>{$t("search.findByNameTitle")}</h2>
       <span class="root" title={root}>{baseName(root) || root}</span>
-      <button class="x" title="Close" on:click={() => dispatch("close")}><Icon name="close" size={14} /></button>
+      <button class="x" title={$t("common.close")} on:click={() => dispatch("close")}><Icon name="close" size={14} /></button>
     </header>
 
     <form class="query-row" on:submit|preventDefault={run}>
       <!-- svelte-ignore a11y-autofocus -->
       <input
         class="q"
-        placeholder="Name to find — try *.png or report?"
+        placeholder={$t("search.byNamePlaceholder")}
         bind:value={query}
         autofocus
         spellcheck="false"
@@ -85,20 +86,20 @@
       <datalist id="ns-recents">
         {#each recents as r}<option value={r}></option>{/each}
       </datalist>
-      <button class="btn primary" type="submit" disabled={!query.trim() || loading}>Search</button>
+      <button class="btn primary" type="submit" disabled={!query.trim() || loading}>{$t("search.button")}</button>
     </form>
 
     <div class="results">
       {#if loading}
-        <p class="dim">Searching…</p>
+        <p class="dim">{$t("search.searching")}</p>
       {:else if error}
         <p class="err">{error}</p>
       {:else if searched && hits.length === 0}
-        <p class="dim">No files or folders match under this folder.</p>
+        <p class="dim">{$t("search.noNameMatches")}</p>
       {:else if hits.length > 0}
         <p class="summary">
-          {hits.length} match{hits.length === 1 ? "" : "es"}
-          {#if result.truncated}<span class="dim"> (showing the first results)</span>{/if}
+          {hits.length === 1 ? $t("search.matchOne", { count: hits.length }) : $t("search.matchMany", { count: hits.length })}
+          {#if result.truncated}<span class="dim"> {$t("search.truncated")}</span>{/if}
         </p>
         {#each hits as h (h.path)}
           <button class="hit" on:click={() => goTo(h.path)} title={h.path}>
