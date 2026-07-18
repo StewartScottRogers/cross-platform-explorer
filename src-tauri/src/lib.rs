@@ -1158,10 +1158,25 @@ fn parquet_info(path: &str) -> Result<String, String> {
     Ok(out)
 }
 
+/// Preview-info readers (PE/MIDI/wasm/torrent/docx/…) parse the WHOLE file, so refuse an absurdly
+/// large one up front rather than slurping it into memory (CPE-634). Generous — these are metadata
+/// previews of normally-small files. A missing/unreadable file is left for the reader to report.
+const PREVIEW_INFO_MAX_BYTES: u64 = 128 * 1024 * 1024;
+
+fn ensure_previewable_size(path: &str, cap: u64) -> Result<(), String> {
+    match fs::metadata(path) {
+        Ok(m) if m.len() > cap => {
+            Err(format!("File is too large to preview ({} bytes; limit {cap}).", m.len()))
+        }
+        _ => Ok(()),
+    }
+}
+
 /// Return a human-readable text summary of a binary file, dispatched by
 /// extension. Rendered read-only by the preview pane's "info" provider.
 #[tauri::command]
 fn read_preview_info(path: String) -> Result<String, String> {
+    ensure_previewable_size(&path, PREVIEW_INFO_MAX_BYTES)?;
     let ext = extension_of(Path::new(&path));
     match ext.as_str() {
         "exe" | "dll" | "sys" | "efi" | "ocx" | "scr" | "cpl" => pe_info(&path),
@@ -1189,6 +1204,7 @@ fn read_image_data_url(path: String) -> Result<String, String> {
     use base64::Engine;
     use std::io::Cursor;
 
+    ensure_previewable_size(&path, PREVIEW_INFO_MAX_BYTES)?;
     let ext = extension_of(Path::new(&path));
     // Produce PNG bytes from the source format.
     let png: Vec<u8> = if ext == "psd" {
@@ -6045,6 +6061,18 @@ mod tests {
         // A directory and a missing path are errors, not panics.
         assert!(hash_file(d.to_string_lossy().to_string()).is_err());
         assert!(hash_file(d.join("nope.txt").to_string_lossy().to_string()).is_err());
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn ensure_previewable_size_rejects_oversized_files() {
+        let d = scratch("previewcap");
+        fs::write(d.join("f"), vec![0u8; 2000]).unwrap();
+        let p = d.join("f").to_string_lossy().to_string();
+        assert!(ensure_previewable_size(&p, 1000).is_err(), "2000 > 1000 must be refused");
+        assert!(ensure_previewable_size(&p, 5000).is_ok(), "2000 < 5000 is fine");
+        // A missing file is the reader's problem, not this guard's.
+        assert!(ensure_previewable_size(&d.join("nope").to_string_lossy(), 1000).is_ok());
         let _ = fs::remove_dir_all(&d);
     }
 
