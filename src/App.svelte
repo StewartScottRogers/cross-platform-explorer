@@ -1204,28 +1204,34 @@
       return; // dialog unavailable / errored — no-op
     }
     if (!dest || typeof dest !== "string") return; // cancelled
-    try {
-      const results = await invoke<OpResult[]>(move ? "move_entries" : "copy_entries", {
-        paths: sources,
-        dest,
-      });
-      reportResults(results, move ? "Moved" : "Copied");
-      if (move) {
-        const moves = results
-          .map((r, i) => ({ from: sources[i], to: r.path, ok: r.ok }))
-          .filter((m) => m.ok)
-          .map(({ from, to }) => ({ from, to }));
-        if (moves.length > 0) {
-          undoStack = pushUndo(undoStack, {
-            kind: "move",
-            moves,
-            label: `Move ${moves.length} item${moves.length === 1 ? "" : "s"}`,
-          });
-        }
-        await loadPath(currentPath);
-      } else if (dest === currentPath) {
-        await loadPath(currentPath);
+
+    // COPY → the transfer engine (CPE-625): shows the operations panel; the transfer://done listener
+    // refreshes + reports. keep-both preserves auto-rename. (Copies aren't undoable.)
+    if (!move) {
+      try {
+        await startTransfer(sources, dest, "copy", "keepboth");
+      } catch (e) {
+        showNotice(String(e), true);
       }
+      return;
+    }
+
+    // MOVE → existing synchronous path (keeps undo).
+    try {
+      const results = await invoke<OpResult[]>("move_entries", { paths: sources, dest });
+      reportResults(results, "Moved");
+      const moves = results
+        .map((r, i) => ({ from: sources[i], to: r.path, ok: r.ok }))
+        .filter((m) => m.ok)
+        .map(({ from, to }) => ({ from, to }));
+      if (moves.length > 0) {
+        undoStack = pushUndo(undoStack, {
+          kind: "move",
+          moves,
+          label: `Move ${moves.length} item${moves.length === 1 ? "" : "s"}`,
+        });
+      }
+      await loadPath(currentPath);
     } catch (e) {
       showNotice(String(e), true);
     }
