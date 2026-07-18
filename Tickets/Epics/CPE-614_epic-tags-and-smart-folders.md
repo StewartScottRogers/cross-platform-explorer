@@ -2,7 +2,7 @@
 id: CPE-614
 title: "EPIC: Tags, labels & smart folders"
 type: Task
-status: Proposed
+status: In Progress
 priority: Medium
 component: Multiple
 tags: [epic]
@@ -50,3 +50,25 @@ lightweight organiser — a clear differentiator that stays additive (off = plai
 - The tag store survives restart, is exportable, and has a documented story for moved/renamed files.
 - Zero weight on the plain explorer when nothing is tagged and no smart folder is open.
 - Core query/matching logic is headlessly tested.
+
+## Decisions (2026-07-18, activated in dayshift — best-guess, user away)
+- **Persistence:** an app-side JSON store (`tags.json` in the app config dir, like settings) mapping
+  path → { tags: [..], label: "" }. The filesystem is never touched. **Path-keyed** for v1 — a move or
+  rename *outside* the app orphans the entry; a re-link tool is a future follow-up (logged, not v1).
+- **Colour labels:** a small fixed palette (none/red/orange/yellow/green/blue/purple/grey); one label
+  per entry; tints the row.
+- **Tags UI:** assign/remove via context menu + a tag editor popover; chips on tagged rows (reflowing
+  tick-tack convention). A "Tags" sidebar section lists every tag with a count; clicking filters the
+  current view to that tag.
+- **Smart folders:** v1 = filter the current view by a single tag (reuses the filter pipeline). A full
+  saved-query language is deferred to a follow-up child once tags exist.
+- **OS-native tags:** no — app-local (Windows has none).
+
+## Child tickets (created just-in-time as worked)
+1. CPE-635 — Backend tag store: persisted JSON + pure core (get/set/all/rename-path) + commands, cargo-tested.
+2. CPE-636 — Frontend tag store/service consuming the commands (pure + tested).
+3. CPE-637 — Assign/remove tags + colour label via context menu + a tag editor popover.
+4. CPE-638 — Tag chips on entries + row label tint.
+5. CPE-639 — "Tags" sidebar section (all tags + counts) → filter the view by a tag.
+6. CPE-640 — Import/export the tag store.
+7. CPE-641 — Docs + i18n for the tags feature.
