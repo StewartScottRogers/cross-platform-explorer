@@ -8,15 +8,19 @@
   import { t } from "../i18n";
   import { tags as tagStore, entryFor, setEntryTags, LABEL_COLORS } from "../tags";
 
-  /** Absolute path of the entry being tagged. */
-  export let path: string;
-  /** Display name, shown in the heading so the user knows what they're tagging. */
+  /** Absolute paths being tagged (one = edit that entry; many = batch add). */
+  export let paths: string[] = [];
+  /** Display name, shown in the heading for a single entry. */
   export let name = "";
+  /** How many entries are selected (for the batch heading). */
+  export let count = 1;
 
   const dispatch = createEventDispatcher<{ close: void }>();
 
-  // Seed from the current store entry — a working copy, committed only on Apply.
-  const initial = entryFor(get(tagStore), path);
+  // Single: seed from the entry (edit its tags). Batch: start empty — tags entered are ADDED to every
+  // selected file (union, non-destructive), and a chosen colour sets the label on all (CPE-656).
+  const batch = count > 1;
+  const initial = batch ? { tags: [] as string[], label: "" } : entryFor(get(tagStore), paths[0] ?? "");
   let tags: string[] = [...initial.tags];
   let label: string = initial.label;
   let draft = "";
@@ -56,7 +60,17 @@
     saving = true;
     addTag(); // fold any half-typed tag in before saving
     try {
-      await setEntryTags(path, tags, label);
+      if (batch) {
+        // Add the entered tags to each file's existing set; only overwrite the label if one was picked.
+        const store = get(tagStore);
+        for (const p of paths) {
+          const cur = entryFor(store, p);
+          const merged = [...new Set([...cur.tags, ...tags])];
+          await setEntryTags(p, merged, label !== "" ? label : cur.label);
+        }
+      } else {
+        await setEntryTags(paths[0], tags, label);
+      }
       dispatch("close");
     } finally {
       saving = false;
@@ -71,7 +85,7 @@
   <!-- svelte-ignore a11y-click-events-have-key-events a11y-no-static-element-interactions a11y-no-noninteractive-element-interactions -->
   <div class="dialog" role="dialog" aria-modal="true" aria-label={$t("tags.title")} on:click|stopPropagation>
     <h2>{$t("tags.title")}</h2>
-    {#if name}<p class="subject" title={name}>{name}</p>{/if}
+    {#if batch}<p class="subject">{$t("status.items", { count })}</p>{:else if name}<p class="subject" title={name}>{name}</p>{/if}
 
     <div class="field">
       <div class="chips">

@@ -207,7 +207,7 @@
   let propsFor: DirEntry[] | null = null;
   let batchRenameFor: DirEntry[] | null = null;
   /** The entry whose tags/label are being edited (CPE-637), or null when the editor is closed. */
-  let tagEditorFor: DirEntry | null = null;
+  let tagEditorFor: DirEntry[] | null = null;
 
   // ---- Application menu (CPE-229) ----
   const REPO_URL = "https://github.com/StewartScottRogers/cross-platform-explorer";
@@ -1685,7 +1685,7 @@
       case "batch-rename": beginBatchRename(); break;
       case "delete": askDelete(false); break;
       case "properties": openProperties(); break;
-      case "tags": if (selectedEntries.length === 1) tagEditorFor = selectedEntries[0]; break;
+      case "tags": if (selectedEntries.length >= 1) tagEditorFor = [...selectedEntries]; break;
       case "new-folder": newFolder(); break;
       case "new-file": newFile(); break;
       case "select-all": selection = selectAll(visible.length); break;
@@ -2611,8 +2611,9 @@
 
 {#if tagEditorFor}
   <TagEditor
-    path={tagEditorFor.path}
-    name={tagEditorFor.name}
+    paths={tagEditorFor.map((e) => e.path)}
+    name={tagEditorFor.length === 1 ? tagEditorFor[0].name : ""}
+    count={tagEditorFor.length}
     on:close={() => (tagEditorFor = null)}
   />
 {/if}

@@ -163,10 +163,11 @@
       <button class="row" role="menuitem" on:click={() => run("favorite")}>
         <Icon name="star" size={15} /> {favorited ? $t('ctx.removeFavorite') : $t('ctx.addFavorite')}
       </button>
-      <button class="row" role="menuitem" on:click={() => run("tags")}>
-        <Icon name="tag" size={15} /> {$t('ctx.tags')}
-      </button>
     {/if}
+    <!-- Tags apply to a single item or a whole multi-selection (batch add, CPE-656). -->
+    <button class="row" role="menuitem" on:click={() => run("tags")}>
+      <Icon name="tag" size={15} /> {$t('ctx.tags')}
+    </button>
     <div class="sep" />
     <button class="row" role="menuitem" on:click={() => run("reveal")}>
       <Icon name="folder" size={15} /> {$t('ctx.reveal')}
