@@ -170,6 +170,43 @@ pub struct LoadWarning {
     pub reason: String,
 }
 
+/// Merge a downloaded manifest (`overlay_text`) onto a bundled `base` (CPE-591): the overlay's fields
+/// win per key, but fields the overlay omits are kept from the base — so an older catalog can't drop a
+/// newer bundled field. `providers` is treated as a **set** (union) so neither source's providers are
+/// lost. Returns `None` if either side won't round-trip through JSON (caller falls back to the overlay).
+fn merge_manifest(base: &AgentManifest, overlay_text: &str) -> Option<AgentManifest> {
+    let mut merged = serde_json::to_value(base).ok()?;
+    let overlay: serde_json::Value = serde_json::from_str(overlay_text).ok()?;
+    let base_providers = merged.get("providers").cloned();
+    deep_merge(&mut merged, &overlay);
+    // Union providers (a set): the download's list plus any bundled-only provider it didn't carry.
+    if let (Some(serde_json::Value::Array(base_p)), Some(serde_json::Value::Array(cur_p))) =
+        (base_providers, merged.get("providers").cloned())
+    {
+        let mut union = cur_p;
+        for p in base_p {
+            if !union.contains(&p) {
+                union.push(p);
+            }
+        }
+        merged["providers"] = serde_json::Value::Array(union);
+    }
+    serde_json::from_value(merged).ok()
+}
+
+/// Recursively overlay `overlay` onto `base`: objects merge key-by-key; every other kind (arrays,
+/// scalars) is replaced by the overlay. Keys present only in `base` are untouched.
+fn deep_merge(base: &mut serde_json::Value, overlay: &serde_json::Value) {
+    match (base, overlay) {
+        (serde_json::Value::Object(b), serde_json::Value::Object(o)) => {
+            for (k, v) in o {
+                deep_merge(b.entry(k.clone()).or_insert(serde_json::Value::Null), v);
+            }
+        }
+        (b, o) => *b = o.clone(),
+    }
+}
+
 /// The loaded, validated set of agent manifests, keyed by id.
 #[derive(Debug, Default, Clone)]
 pub struct AgentRegistry {
@@ -273,7 +310,18 @@ impl AgentRegistry {
                 }
             };
             match Self::parse_and_validate(&text) {
-                Ok(manifest) => self.insert_from(&path, manifest),
+                // Field-wise merge onto the bundled manifest (CPE-591): a downloaded catalog that
+                // predates a new bundled field (e.g. CPE-583's `swarm` recipe, or a new provider) must
+                // not silently drop it. The download's values still win per field; bundled fields the
+                // download omits survive. Falls back to a plain override if there's no bundled base.
+                Ok(manifest) => {
+                    let merged = self
+                        .by_id
+                        .get(&manifest.id)
+                        .and_then(|base| merge_manifest(base, &text))
+                        .unwrap_or(manifest);
+                    self.insert_from(&path, merged);
+                }
                 Err(reason) => self.warn(&path, reason),
             }
         }
@@ -333,6 +381,30 @@ mod tests {
           "providers": ["native", "openrouter", "lmstudio-local"],
           "default_model": "claude-sonnet-4-5"
         }"#
+    }
+
+    #[test]
+    fn merge_manifest_keeps_bundled_only_fields_and_unions_providers() {
+        // Bundled manifest with a swarm recipe + an extra provider that a stale download predates.
+        let base = AgentManifest {
+            id: "claude".into(),
+            name: "Claude Code".into(),
+            swarm: Some(SwarmRecipe { args: vec!["-p".into(), "{task}".into()] }),
+            providers: vec!["native".into(), "openrouter".into(), "lmstudio-local".into()],
+            default_model: Some("old-model".into()),
+            ..AgentManifest::default()
+        };
+        // A downloaded manifest without `swarm`, missing lmstudio, but updating the model.
+        let overlay = r#"{
+            "schema_version": 1, "id": "claude", "name": "Claude Code",
+            "providers": ["native", "openrouter"],
+            "default_model": "new-model"
+        }"#;
+        let m = merge_manifest(&base, overlay).expect("merge round-trips");
+        assert!(m.swarm.is_some(), "bundled-only swarm recipe survives the stale download");
+        assert_eq!(m.default_model.as_deref(), Some("new-model"), "the download's field wins");
+        assert!(m.providers.contains(&"lmstudio-local".to_string()), "bundled provider not dropped");
+        assert!(m.providers.contains(&"openrouter".to_string()));
     }
 
     #[test]

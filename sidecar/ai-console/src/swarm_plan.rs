@@ -35,23 +35,6 @@ fn sanitize(id: &str) -> String {
     id.chars().map(|c| if c.is_ascii_alphanumeric() || c == '-' || c == '_' { c } else { '-' }).collect()
 }
 
-/// Make a swarm task safe to pass as a **command-line argument** to a launched agent (CPE-587). On
-/// Windows the launch goes through `cmd /c <shim>` (CPE-326, because `claude` is a `.cmd` shim), and
-/// `portable_pty` MSVC-quotes each arg (`"` → `\"`) — which `cmd` then mis-parses, splitting the prompt
-/// and making the agent error (it echoes the mangled text in red instead of working the task). Neutralise
-/// the offenders: double-quotes become typographic quotes (identical meaning to the model) and any
-/// newlines/control chars collapse to spaces (a multi-line arg also breaks the `cmd` re-parse). A
-/// follow-up will deliver the task verbatim via stdin/file so nothing is rewritten at all.
-fn cmd_safe_task(task: &str) -> String {
-    task.chars()
-        .map(|c| match c {
-            '"' => '\u{2019}',                       // → ’  (right single quote; reads the same)
-            c if c.is_control() => ' ',              // newlines/tabs/etc. → space
-            c => c,
-        })
-        .collect()
-}
-
 /// Builds real agent launches for a swarm mission, wiring each agent to the shared MCP host.
 pub struct ProductionPlanner {
     registry: Arc<AgentRegistry>,
@@ -110,35 +93,44 @@ impl ProductionPlanner {
         out
     }
 
-    /// The run args that attach the swarm MCP host and the task to this agent, from the agent's manifest
-    /// **`swarm` recipe** (CPE-583) — its non-interactive/print-mode invocation, templated with the
-    /// `{task}` and `{mcp_config}` placeholders. This is what makes the agent run the task to completion
-    /// and **exit**, so the driver detects completion. Keeping the exact flags in the manifest (data)
-    /// means they're tunable during QA without a rebuild — this replaced the hardcoded v1 form.
+    /// The run args that attach the swarm MCP host + the task to this agent, from the agent's manifest
+    /// **`swarm` recipe** (CPE-583; a variadic-safe print-mode fallback when absent, CPE-590), with the
+    /// `{mcp_config}` placeholder filled.
     ///
-    /// Fallback (agent without a `swarm` recipe): the pre-CPE-583 positional `--mcp-config <file> <task>`
-    /// form. That launches the agent *interactively*, which won't self-terminate — so the driver can't
-    /// detect completion; such an agent needs a `swarm` recipe before it works in a mission.
-    fn swarm_args(agent: &AgentManifest, config_path: &str, task: &str) -> Vec<String> {
-        let task = cmd_safe_task(task);
-        match &agent.swarm {
-            Some(recipe) => recipe
-                .args
-                .iter()
-                .map(|a| a.replace("{task}", &task).replace("{mcp_config}", config_path))
-                .collect(),
-            // Fallback when the manifest has no `swarm` recipe (e.g. an auto-updated catalog that
-            // predates CPE-583). It MUST be variadic-safe: `claude`'s `--mcp-config <configs...>` is
-            // greedy, so the task can never follow the config path (or it's slurped as a second config —
-            // CPE-590). Mirror the print-mode recipe: task via `-p`, then `--mcp-config <cfg>` terminated
-            // by a trailing flag so only the config is consumed.
+    /// **Task delivery (CPE-588)** — the task reaches the agent **verbatim**, never rewritten:
+    /// - **Windows**: the launch goes through `cmd /c <shim>`, which mangles quotes/specials in an argv
+    ///   ([CPE-587]). So the `{task}` argv is dropped and the task is written to `<mission>/task-*.txt`
+    ///   fed into the agent's **stdin** (`claude -p` reads its prompt from stdin) via an appended `<`
+    ///   redirect — a file's bytes never touch the command line. `portable_pty` passes a bare `<`
+    ///   un-quoted, so `cmd` performs the redirect.
+    /// - **Unix**: launched directly (no shell), so `{task}` is safe **verbatim in argv**.
+    fn swarm_args(&self, agent: &AgentManifest, config_path: &str, task: &str, agent_instance: &str) -> Result<Vec<String>, String> {
+        let recipe: Vec<String> = match &agent.swarm {
+            Some(r) => r.args.clone(),
             None => vec![
-                "-p".to_string(),
-                task,
-                "--mcp-config".to_string(),
-                config_path.to_string(),
-                "--dangerously-skip-permissions".to_string(),
+                "-p".into(),
+                "{task}".into(),
+                "--mcp-config".into(),
+                "{mcp_config}".into(),
+                "--dangerously-skip-permissions".into(),
             ],
+        };
+        if cfg!(windows) {
+            let task_file = self.mission_dir.join(format!("task-{}.txt", sanitize(agent_instance)));
+            std::fs::write(&task_file, task).map_err(|e| format!("write task file: {e}"))?;
+            let mut out: Vec<String> = recipe
+                .iter()
+                .filter(|a| !a.contains("{task}")) // the task is delivered via stdin, not argv
+                .map(|a| a.replace("{mcp_config}", config_path))
+                .collect();
+            out.push("<".to_string());
+            out.push(task_file.to_string_lossy().into_owned());
+            Ok(out)
+        } else {
+            Ok(recipe
+                .iter()
+                .map(|a| a.replace("{task}", task).replace("{mcp_config}", config_path))
+                .collect())
         }
     }
 
@@ -172,7 +164,7 @@ impl LaunchPlanner for ProductionPlanner {
             .ok_or_else(|| format!("unknown agent '{}'", spec.agent))?;
 
         let config_path = self.write_mcp_config(&assignment.agent_id)?;
-        let extra_args = Self::swarm_args(&agent, &config_path.to_string_lossy(), &spec.task);
+        let extra_args = self.swarm_args(&agent, &config_path.to_string_lossy(), &spec.task, &assignment.agent_id)?;
 
         let ctx = LaunchContext {
             model: spec.model.clone(),
@@ -227,14 +219,20 @@ mod tests {
         let launch = p.plan(&assignment, &spec).expect("plan a claude launch");
         assert_eq!(launch.program, "claude");
         assert!(launch.args.contains(&"--mcp-config".to_string()), "MCP config flag injected");
-        assert!(launch.args.contains(&"build the parser".to_string()), "task passed as a run arg");
-        // CPE-583: from claude's `swarm` recipe — print mode so the agent completes + exits, and a
-        // non-interactive permission posture so tool calls don't block.
         assert!(launch.args.contains(&"-p".to_string()), "print mode injected so the agent exits");
         assert!(launch.args.contains(&"--dangerously-skip-permissions".to_string()), "non-interactive permissions");
-        let p_at = launch.args.iter().position(|a| a == "-p").unwrap();
-        assert_eq!(launch.args.get(p_at + 1), Some(&"build the parser".to_string()), "task is the print prompt");
         assert_eq!(launch.cwd.as_deref(), Some("/repo"));
+        // CPE-588: the task reaches the agent verbatim — in argv on Unix, or via a stdin-redirected file
+        // on Windows (where argv goes through cmd).
+        if cfg!(windows) {
+            let lt = launch.args.iter().position(|a| a == "<").expect("stdin redirect on Windows");
+            let task_file = &launch.args[lt + 1];
+            assert_eq!(std::fs::read_to_string(task_file).unwrap(), "build the parser", "task file is byte-for-byte");
+            assert!(!launch.args.contains(&"build the parser".to_string()), "task is not on the command line");
+        } else {
+            let p_at = launch.args.iter().position(|a| a == "-p").unwrap();
+            assert_eq!(launch.args.get(p_at + 1), Some(&"build the parser".to_string()), "task is the print prompt");
+        }
 
         // The per-agent MCP config file exists and points the agent at its shared host.
         let cfg_path = mission.path().join("mcp-claude-builder1.json");
@@ -246,49 +244,42 @@ mod tests {
     }
 
     #[test]
-    fn swarm_recipe_templates_task_and_mcp_config() {
+    fn swarm_args_delivers_the_task_verbatim() {
+        let mission = tempfile::tempdir().unwrap();
+        let p = planner(mission.path().to_path_buf());
         let agent = AgentManifest {
             swarm: Some(crate::agents::SwarmRecipe {
                 args: vec!["-p".into(), "{task}".into(), "--mcp-config".into(), "{mcp_config}".into()],
             }),
             ..AgentManifest::default()
         };
-        let args = ProductionPlanner::swarm_args(&agent, "/m/mcp-x.json", "do the thing");
-        assert_eq!(args, vec!["-p", "do the thing", "--mcp-config", "/m/mcp-x.json"]);
+        // A task full of characters that a cmd re-parse would mangle.
+        let task = "post a \"done\" note; keep 100% of it & don't edit.";
+        let args = p.swarm_args(&agent, "/m/x.json", task, "claude#builder1").unwrap();
+        assert!(args.contains(&"--mcp-config".to_string()) && args.contains(&"/m/x.json".to_string()));
+        if cfg!(windows) {
+            assert!(!args.iter().any(|a| a.contains("done")), "the raw task never touches the command line: {args:?}");
+            let lt = args.iter().position(|a| a == "<").expect("stdin redirect");
+            assert_eq!(std::fs::read_to_string(&args[lt + 1]).unwrap(), task, "task file is byte-for-byte");
+        } else {
+            assert!(args.contains(&task.to_string()), "task verbatim in argv on Unix: {args:?}");
+        }
     }
 
     #[test]
-    fn cmd_safe_task_neutralises_argv_breaking_characters() {
-        // Double-quotes (which break the Windows `cmd /c` re-parse) become typographic quotes; control
-        // chars collapse to spaces. Ordinary punctuation (commas, semicolons, periods) is untouched.
-        let out = cmd_safe_task("post a \"done\" message; then stop.\nnext line");
-        assert!(!out.contains('"'), "no straight double-quotes remain: {out}");
-        assert!(!out.contains('\n'), "newlines collapsed: {out}");
-        assert!(out.contains("post a \u{2019}done\u{2019} message; then stop. next line"));
-        // A quote-free task is unchanged.
-        assert_eq!(cmd_safe_task("build the parser"), "build the parser");
-    }
-
-    #[test]
-    fn swarm_args_sanitises_a_task_with_quotes_for_argv() {
-        let agent = AgentManifest {
-            swarm: Some(crate::agents::SwarmRecipe { args: vec!["-p".into(), "{task}".into()] }),
-            ..AgentManifest::default()
-        };
-        let args = ProductionPlanner::swarm_args(&agent, "/m/x.json", "say \"hi\"");
-        assert_eq!(args, vec!["-p", "say \u{2019}hi\u{2019}"]); // quotes neutralised before argv
-    }
-
-    #[test]
-    fn without_a_swarm_recipe_the_fallback_is_variadic_safe() {
-        // No recipe (e.g. a stale catalog) → the fallback must NOT put the task after --mcp-config, or
-        // claude's greedy `--mcp-config <configs...>` slurps it as a second config file (CPE-590).
-        let agent = AgentManifest::default();
-        let args = ProductionPlanner::swarm_args(&agent, "/m/mcp-x.json", "do the thing");
-        assert_eq!(args, vec!["-p", "do the thing", "--mcp-config", "/m/mcp-x.json", "--dangerously-skip-permissions"]);
-        // The config path is the last token before a flag — nothing the variadic option can swallow.
+    fn without_a_swarm_recipe_the_fallback_never_lets_mcp_config_swallow_the_task() {
+        // No recipe (e.g. a stale catalog) → the variadic-safe fallback (CPE-590) is used, and the task
+        // is still delivered verbatim (CPE-588). Either way the token after the config path is a flag or
+        // the `<` redirect — never the task (which claude's greedy `--mcp-config` would slurp).
+        let mission = tempfile::tempdir().unwrap();
+        let p = planner(mission.path().to_path_buf());
+        let agent = AgentManifest::default(); // no swarm recipe
+        let args = p.swarm_args(&agent, "/m/mcp-x.json", "do the thing", "claude#builder1").unwrap();
+        assert!(args.contains(&"-p".to_string()) && args.contains(&"--dangerously-skip-permissions".to_string()));
         let cfg_at = args.iter().position(|a| a == "--mcp-config").unwrap();
-        assert!(args[cfg_at + 2].starts_with("--"), "a flag must follow the config path, not the task");
+        assert_eq!(args[cfg_at + 1], "/m/mcp-x.json");
+        let after = args.get(cfg_at + 2).map(String::as_str).unwrap_or("");
+        assert!(after.starts_with("--") || after == "<", "config path is not followed by the task: {args:?}");
     }
 
     #[test]
