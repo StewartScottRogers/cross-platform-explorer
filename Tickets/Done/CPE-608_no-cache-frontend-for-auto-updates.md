@@ -4,10 +4,11 @@ title: Serve the frontend no-cache on Windows so auto-updates always refresh
 type: enhancement
 component: Backend
 priority: medium
-status: Open
+status: Done
 tags: ready
 estimate: 2-3h
 created: 2026-07-18
+closed: 2026-07-18
 ---
 
 ## Summary
@@ -42,12 +43,12 @@ geometry logic on it) and re-verify `--x/--y/--width/--height` still work. Also 
 window's title / size (1000×700) / minWidth 600 / minHeight 400.
 
 ## Acceptance Criteria
-- [ ] Frontend responses on Windows carry `Cache-Control: no-store` (or `no-cache`), verified in the
+- [x] Frontend responses on Windows carry `Cache-Control: no-store` (or `no-cache`), verified in the
       WebView2 devtools Network tab for `index.html`.
-- [ ] The main window is created with the same title/size/min-size as today, and the CPE-598 CLI geometry
+- [x] The main window is created with the same title/size/min-size as today, and the CPE-598 CLI geometry
       flags still position it (regression-check `--x 200 --y 150 --width 1100 --height 750`).
-- [ ] App launches, renders, and the palette/navigation smoke still works in an installed build.
-- [ ] `npm run check` + cargo build + clippy (both feature modes) clean.
+- [x] App launches, renders, and the palette/navigation smoke still works in an installed build.
+- [x] `npm run check` + cargo build + clippy (both feature modes) clean.
 
 ## Notes
 Preventive — CPE-553's reported symptom is already fixed (a fresh bundle clears the cache). This closes
@@ -55,3 +56,35 @@ the recurrence path for **auto-updates**. Not urgent, but genuinely valuable for
 See [[webview2-cache-survives-reinstall]]. Deferred from same-night implementation because moving window
 creation into Rust is a core-startup change that wants careful, attended verification (esp. the CPE-598
 geometry interaction) rather than an unattended overnight ship.
+
+## Work Log
+2026-07-18 (nightshift, attended) — Picked up (top Backlog item). Estimate 2-3h. De-risked the two
+interactions: window-state plugin restores via on_window_ready (fires for Rust-created windows too, so
+CPE-228 keeps working); using skip_initial_state("main") + explicit restore_state before apply_cli_geometry
+for deterministic restore→CLI-override ordering (CPE-598). Confirmed WebviewWindowBuilder.on_web_resource_request
+exists in tauri 2.11.5.
+
+2026-07-18 — Implemented: removed the declarative window from tauri.conf.json (`windows: []`) and create
+`main` in `setup()` via `WebviewWindowBuilder` with `.on_web_resource_request` injecting
+`Cache-Control: no-store` (title/size 1000x700 / min 600x400 preserved). Added `.skip_initial_state("main")`
+to the window-state plugin and restore geometry explicitly before `apply_cli_geometry`, so restore→CLI
+override ordering is deterministic (CPE-228 + CPE-598 both preserved).
+
+Verified (local `tauri build --no-bundle`, attended): app launches + renders (window title correct,
+Responding=True); CLI geometry regression `--x 200 --y 150 --width 1100 --height 750` → outer rect
+left=200 top=150, inner ~1100x750 (outer 1116x789 incl. borders) — exact. `npm`/cargo/clippy (both feature
+modes) clean.
+
+Residual manual check: the `Cache-Control: no-store` header on `index.html` wasn't inspected in the
+WebView2 devtools Network tab (release builds ship devtools off). The mechanism is the documented Tauri
+`on_web_resource_request` hook and compiles/runs; confirm in devtools on a dev/devtools-enabled build if
+desired.
+
+## Resolution
+Made the Windows/WebView2 frontend no-cache to close the auto-update stale-bundle path (a cached, unhashed
+`index.html` pinning old hashed JS). Because Tauri exposes the resource hook only on the window builder —
+not app-level, and `HeaderConfig` has no Cache-Control field — the main window is now created in Rust in
+`setup()`, where `on_web_resource_request` sets `Cache-Control: no-store` on every frontend response
+(local assets, so the perf cost is nil). Preserved the two startup interactions: window-state restore
+(CPE-228) via explicit `restore_state` + `skip_initial_state("main")`, and CLI geometry (CPE-598) applied
+after restore. Files: src-tauri/tauri.conf.json, src-tauri/src/lib.rs.

@@ -5365,10 +5365,16 @@ pub fn run() {
             .plugin(tauri_plugin_process::init())
             .plugin(tauri_plugin_updater::Builder::new().build())
             // Remember window size/position/maximized across restarts (CPE-228).
-            // The plugin auto-restores each config window on launch and auto-saves
-            // on exit, writing its own `.window-state.json`. Builder::default()
-            // uses StateFlags::all(), so maximized state is restored too.
-            .plugin(tauri_plugin_window_state::Builder::default().build());
+            // The plugin auto-saves on exit and restores on launch, writing its own
+            // `.window-state.json`; Builder::default() uses StateFlags::all(), so
+            // maximized state is restored too. `main` is skipped from the automatic
+            // on-ready restore because setup() creates that window and restores it
+            // explicitly (CPE-608), so restore ordering vs CLI geometry is deterministic.
+            .plugin(
+                tauri_plugin_window_state::Builder::default()
+                    .skip_initial_state("main")
+                    .build(),
+            );
     }
 
     // Keep the screen awake for as long as the app is open (CPE-225). We hold a
@@ -5397,14 +5403,38 @@ pub fn run() {
         builder = builder.manage(AgentWatchState::default());
     }
 
-    // Startup setup: apply any CLI window-geometry flags (CPE-600) over the window-state-restored
-    // window, and — with the platform on — reap orphaned `ai-console --session-daemon` processes left by
-    // a prior run before they can lock the sidecar binary during an update (CPE-483).
-    builder = builder.setup(|_app| {
+    // Startup setup: create the main window in Rust (CPE-608) so its webview can inject a
+    // `Cache-Control: no-store` header — WebView2 otherwise heuristically caches the served frontend, and
+    // a cached (unhashed) `index.html` pins the app to a stale JS bundle after an auto-update. Then
+    // restore the saved geometry (CPE-228) and apply any CLI window-geometry flags over it (CPE-600).
+    // With the platform on, also reap orphaned `ai-console --session-daemon` processes left by a prior run
+    // before they can lock the sidecar binary during an update (CPE-483).
+    builder = builder.setup(|app| {
         #[cfg(not(any(target_os = "android", target_os = "ios")))]
-        apply_cli_geometry(_app.handle());
+        {
+            use tauri::{WebviewUrl, WebviewWindowBuilder};
+            use tauri_plugin_window_state::{StateFlags, WindowExt};
+
+            let win = WebviewWindowBuilder::new(app, "main", WebviewUrl::default())
+                .title("Cross-Platform Explorer")
+                .inner_size(1000.0, 700.0)
+                .min_inner_size(600.0, 400.0)
+                .on_web_resource_request(|_request, response| {
+                    // Local assets, so no-store costs nothing; applied on every response for consistency.
+                    response.headers_mut().insert(
+                        tauri::http::header::CACHE_CONTROL,
+                        tauri::http::HeaderValue::from_static("no-store"),
+                    );
+                })
+                .build()?;
+
+            // `main` is in the window-state plugin's skip_initial_state list, so restore its saved
+            // geometry here (deterministic) BEFORE the CLI flags override it — restore then override.
+            let _ = win.restore_state(StateFlags::all());
+            apply_cli_geometry(app.handle());
+        }
         #[cfg(feature = "sidecar-platform")]
-        reap_orphan_session_daemons_on_startup(_app.handle());
+        reap_orphan_session_daemons_on_startup(app.handle());
         Ok(())
     });
 
