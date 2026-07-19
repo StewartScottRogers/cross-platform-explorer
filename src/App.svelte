@@ -144,7 +144,6 @@
   // for our own changes. Purely a latency win — orthogonal to list *rendering* (virtualization, CPE-690).
   const dirCache = new Map<string, DirEntry[]>(); // insertion order == LRU recency
   const DIR_CACHE_MAX = 48;
-  const prefetchInflight = new Set<string>();
   function cacheGet(path: string): DirEntry[] | undefined {
     const v = dirCache.get(path);
     if (v) { dirCache.delete(path); dirCache.set(path, v); } // bump to most-recent
@@ -157,32 +156,29 @@
   }
   const sameListing = (a: DirEntry[], b: DirEntry[]): boolean =>
     a.length === b.length && a.every((e, i) => e.path === b[i].path && e.size === b[i].size && e.modified === b[i].modified);
-  /** Re-list a folder we served from cache; swap the fresh rows in only if it changed and it's still the
-   *  active view (stale-while-revalidate). Uses the plain (non-streaming) command — it's a background call. */
+  /** Background revalidate of a cache-served folder — via rawInvoke (no busy cursor) so it can never make
+   *  navigation feel blocked; swaps fresh rows in only if the listing changed and it's still the active view.
+   *  (The aggressive subfolder prefetch was removed in CPE-757: its many concurrent `list_dir` calls piled up
+   *  and stalled the *next* navigation. Re-add only once the backend fs commands run off the main thread.) */
   async function revalidateDir(path: string, gen: number): Promise<void> {
     try {
-      const fresh = await invoke<DirEntry[]>("list_dir", { path });
+      const fresh = await rawInvoke<DirEntry[]>("list_dir", { path });
       cachePut(path, fresh);
       if (gen === loadGen && !sameListing(entries, fresh)) entries = fresh;
     } catch { /* keep the cached view */ }
   }
-  function prefetchOne(p: string): void {
-    if (!p || prefetchInflight.has(p) || dirCache.has(p)) return;
-    prefetchInflight.add(p);
-    invoke<DirEntry[]>("list_dir", { path: p })
-      .then((list) => cachePut(p, list))
-      .catch(() => {})
-      .finally(() => prefetchInflight.delete(p));
-  }
-  /** Warm the cache for the parent (for Up) and the largest few subfolders (for drill-down). */
-  function prefetchDirs(path: string): void {
-    invoke<string | null>("parent_dir", { path }).then((par) => par && prefetchOne(par)).catch(() => {});
-    let n = 0;
-    for (const e of entries) {
-      if (n >= 12) break;
-      if (e.is_dir) { prefetchOne(e.path); n++; }
-    }
-  }
+  // ---------------------------------------------------------------------------------------------------
+
+  // --- Navigation perf readout (CPE-757, temporary on-screen diagnostic) ------------------------------
+  // Release builds have no devtools, so surface the last navigation's timing breakdown on screen. Lets us
+  // see whether the cost is the listing, git status, disk space, or something else — instead of guessing.
+  let perfCached = false;
+  let perfPaint = 0; // ms to first row painted (cold load)
+  let perfSettle = 0; // ms to the folder fully listed
+  let perfItems = 0;
+  let perfGit = 0; // ms for forge_repo_status (git status)
+  let perfDisk = 0; // ms for disk_space
+  const showPerf = true; // temporary: always visible while diagnosing
   // ---------------------------------------------------------------------------------------------------
 
   let notice = "";
@@ -416,11 +412,14 @@
   /** Refresh the git sync status when the folder changes (read-only, best-effort). The dry-run
       preview honours this repo's saved on-diverge policy so the status bar and the Sync dialog agree. */
   async function refreshGitStatus(path: string) {
-    if (!path || isHome || archive) { gitStatus = null; return; }
+    if (!path || isHome || archive) { gitStatus = null; perfGit = 0; return; }
+    const t0 = performance.now();
     try {
       const s = await invoke<typeof gitStatus>("forge_repo_status", { path, onDiverge: loadSyncPolicy(path) });
+      perfGit = Math.round(performance.now() - t0);
       gitStatus = s && (s as { is_repo?: boolean }).is_repo ? s : null;
     } catch {
+      perfGit = Math.round(performance.now() - t0);
       gitStatus = null; // plain build (command absent) or git unavailable
     }
   }
@@ -587,11 +586,13 @@
   }
   $: updateDiskSpace(currentPath, isHome, !!archive);
   async function updateDiskSpace(path: string, home: boolean, inArchive: boolean) {
-    if (home || inArchive || !path) { diskFree = null; diskTotal = null; return; }
+    if (home || inArchive || !path) { diskFree = null; diskTotal = null; perfDisk = 0; return; }
+    const t0 = performance.now();
     try {
       const d = await invoke<{ free: number; total: number }>("disk_space", { path });
+      perfDisk = Math.round(performance.now() - t0);
       if (currentPath === path) { diskFree = d.free; diskTotal = d.total; }
-    } catch { if (currentPath === path) { diskFree = null; diskTotal = null; } }
+    } catch { perfDisk = Math.round(performance.now() - t0); if (currentPath === path) { diskFree = null; diskTotal = null; } }
   }
 
   const AI_CONSOLE_LABEL = "ai-console";
@@ -864,13 +865,18 @@
     if (servedFromCache) {
       entries = servedFromCache;
       loading = false;
+      perfCached = true;
+      perfPaint = 0;
+      perfSettle = 0;
+      perfItems = servedFromCache.length;
       await tick(); // let the reactive `visible` derive before the post-load hooks read it
     } else {
     entries = [];
     loading = true;
-    // Perf instrumentation (CPE-691): time-to-first-paint and time-to-settled, dev-only so it's free in
-    // production. Makes the 10× target (CPE-688) a measured before/after rather than a vibe.
-    const perfStart = import.meta.env.DEV ? performance.now() : 0;
+    // Perf instrumentation (CPE-691/757): time-to-first-paint / time-to-settled, surfaced on-screen while
+    // we diagnose the reported slowness (no devtools in the release build).
+    perfCached = false;
+    const perfStart = performance.now();
     let perfPainted = false;
     try {
       // Coalesce stream batches (CPE-689): buffer incoming batches and flush to `entries` once per
@@ -889,9 +895,9 @@
         entries = entries.concat(buffer);
         buffer = [];
         loading = false; // first real rows are in the DOM — drop the "Loading…" placeholder
-        if (import.meta.env.DEV && !perfPainted) {
+        if (!perfPainted) {
           perfPainted = true;
-          console.debug(`[perf] first paint "${path}" ${Math.round(performance.now() - perfStart)}ms`);
+          perfPaint = Math.round(performance.now() - perfStart);
         }
       };
       channel.onmessage = (batch) => {
@@ -913,11 +919,13 @@
     } finally {
       if (gen === loadGen) loading = false;
     }
-    if (import.meta.env.DEV && gen === loadGen) {
-      console.debug(`[perf] settled "${path}" ${Math.round(performance.now() - perfStart)}ms — ${entries.length} entries`);
-    }
-      // Cache the freshly-streamed listing so a later navigation back here paints instantly (CPE-756).
-      if (gen === loadGen) cachePut(path, entries);
+      // Cache the freshly-streamed listing so a later navigation back here paints instantly (CPE-756),
+      // and record the settle time for the on-screen perf readout (CPE-757).
+      if (gen === loadGen) {
+        perfSettle = Math.round(performance.now() - perfStart);
+        perfItems = entries.length;
+        cachePut(path, entries);
+      }
     }
 
     // A stream superseded mid-flight already had its state handed to the newer load — stop here so the
@@ -951,10 +959,9 @@
       pendingSelectPath = "";
     }
 
-    // Stale-while-revalidate + prefetch (CPE-756): if we painted from cache, re-list in the background and
-    // swap in only if it changed; either way warm the neighbours (parent + top subfolders) for the next hop.
-    if (servedFromCache && !error) void revalidateDir(path, gen);
-    if (!error) prefetchDirs(path);
+    // Stale-while-revalidate (CPE-756): a cache-served folder re-lists in the background — deferred a beat
+    // and via rawInvoke so it can't make the just-painted navigation feel blocked. Prefetch removed (CPE-757).
+    if (servedFromCache && !error) setTimeout(() => revalidateDir(path, gen), 300);
   }
 
   async function navigate(path: string) {
@@ -2841,6 +2848,13 @@
   />
 {/if}
 
+<!-- Temporary on-screen perf readout (CPE-757): last navigation's timing, so we can pinpoint the slowness. -->
+{#if showPerf}
+  <div class="perf-readout" title="Last navigation timing (CPE-757 diagnostic)">
+    ⏱ {perfCached ? "cache" : `paint ${perfPaint}ms · settle ${perfSettle}ms`} · {perfItems} items · git {perfGit}ms · disk {perfDisk}ms
+  </div>
+{/if}
+
 {#if batchRenameFor}
   <BatchRenameDialog
     names={batchRenameFor.map((e) => e.name)}
@@ -3095,5 +3109,21 @@
     font-size: 10px;
     font-weight: 700;
     line-height: 1;
+  }
+  /* Temporary nav-perf readout (CPE-757). */
+  .perf-readout {
+    position: fixed;
+    left: 8px;
+    bottom: 8px;
+    z-index: 300;
+    padding: 4px 9px;
+    border-radius: 6px;
+    background: rgba(0, 0, 0, 0.72);
+    color: #7fe0a0;
+    border: 1px solid rgba(255, 255, 255, 0.15);
+    font-family: var(--mono, ui-monospace, Consolas, monospace);
+    font-size: 11px;
+    pointer-events: none;
+    white-space: nowrap;
   }
 </style>
