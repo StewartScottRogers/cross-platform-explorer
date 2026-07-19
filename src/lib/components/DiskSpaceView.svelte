@@ -11,6 +11,7 @@
   import { invoke } from "../invoke";
   import { squarify, type Tile } from "../treemap";
   import { formatSize } from "../format";
+  import { baseName } from "../contentSearch";
   import Icon from "./Icon.svelte";
 
   export let path: string;
@@ -30,51 +31,37 @@
   let cur = path;
   let trail: string[] = [];
   let children: Child[] = [];
-  let byKey: Record<string, Child> = {};
-  let tiles: Tile[] = [];
-  let total = 0;
   let loading = true; // a *cold* scan (no cached data to show) is in progress
-  let refreshing = false; // background revalidate / prefetch is running (we already show something)
   let error = "";
   let gen = 0;
   // Per-path cache of scanned children. Navigation reads the cache so Up / re-drill is instant — never
-  // a re-walk (the TreeSize model). Combined with background revalidation + prefetch below, this makes
-  // liveness first-order: show now, refresh quietly (CPE-754).
+  // a re-walk (the TreeSize model); each path is scanned once while the modal is open.
   const cache: Record<string, Child[]> = {};
-  // Paths with a fetch in flight (cold, revalidate, or prefetch) — dedupes work + drives `refreshing`.
-  const inflight = new Set<string>();
 
-  function applyChildren(kids: Child[]) {
-    children = kids;
-    total = kids.reduce((s, c) => s + c.size, 0);
-    byKey = Object.fromEntries(kids.map((c) => [c.path, c]));
-    tiles = squarify(
-      kids.map((c) => ({ key: c.path, size: c.size })),
-      0,
-      0,
-      W,
-      H,
-    );
-  }
+  // Everything the treemap draws is a pure function of `children` — let Svelte keep them in lockstep
+  // rather than recomputing all three by hand on every assignment.
+  $: total = children.reduce((s, c) => s + c.size, 0);
+  $: byKey = Object.fromEntries(children.map((c) => [c.path, c])) as Record<string, Child>;
+  $: tiles = squarify(
+    children.map((c) => ({ key: c.path, size: c.size })),
+    0,
+    0,
+    W,
+    H,
+  );
 
   async function fetchChildren(dir: string): Promise<Child[]> {
     const kids = await invoke<Child[]>("dir_children_sizes", { path: dir });
     return kids.slice().sort((a, b) => b.size - a.size);
   }
 
-  const sameChildren = (a: Child[], b: Child[]): boolean =>
-    a.length === b.length && a.every((c, i) => c.path === b[i].path && c.size === b[i].size);
-
   async function scan(dir: string) {
     const cached = cache[dir];
     if (cached) {
-      // Stale-while-revalidate: paint the cached tree instantly (no spinner), then refresh in the
-      // background and prefetch children so drilling in is instant too.
+      // Cache hit: paint the cached tree instantly — Up / re-drill never re-walks (TreeSize model).
       error = "";
       loading = false;
-      applyChildren(cached);
-      void revalidate(dir);
-      prefetch(cached);
+      children = cached;
       return;
     }
     const g = ++gen;
@@ -84,61 +71,17 @@
       const sorted = await fetchChildren(dir);
       if (g !== gen) return; // a newer navigation superseded this cold scan
       cache[dir] = sorted;
-      applyChildren(sorted);
-      prefetch(sorted);
+      children = sorted;
     } catch (e) {
       if (g !== gen) return;
       error = String(e);
       children = [];
-      tiles = [];
-      total = 0;
     } finally {
       if (g === gen) loading = false;
     }
   }
 
-  // Re-scan a cached path in the background; swap in fresh data only if it actually changed and we're
-  // still viewing it (so an old folder's refresh never clobbers the current view).
-  async function revalidate(dir: string) {
-    if (inflight.has(dir)) return;
-    inflight.add(dir);
-    refreshing = true;
-    try {
-      const sorted = await fetchChildren(dir);
-      const prev = cache[dir];
-      cache[dir] = sorted;
-      if (cur === dir && (!prev || !sameChildren(prev, sorted))) applyChildren(sorted);
-      if (cur === dir) prefetch(sorted);
-    } catch {
-      /* keep showing the stale view */
-    } finally {
-      inflight.delete(dir);
-      refreshing = inflight.size > 0;
-    }
-  }
-
-  // Preemptively scan the largest child folders into the cache so the likely next drill-in is instant.
-  // Bounded so a background sweep can't saturate the walker.
-  function prefetch(kids: Child[]) {
-    const LIMIT = 8;
-    let started = 0;
-    for (const c of kids) {
-      if (started >= LIMIT) break;
-      if (!c.is_dir || c.size === 0 || cache[c.path] || inflight.has(c.path)) continue;
-      started++;
-      inflight.add(c.path);
-      refreshing = true;
-      fetchChildren(c.path)
-        .then((sorted) => {
-          cache[c.path] = sorted;
-        })
-        .catch(() => {})
-        .finally(() => {
-          inflight.delete(c.path);
-          refreshing = inflight.size > 0;
-        });
-    }
-  }
+  onMount(() => scan(cur));
 
   function drill(c: Child) {
     if (!c.is_dir || c.size === 0) return;
@@ -153,7 +96,6 @@
     scan(cur);
   }
 
-  const baseOf = (p: string) => p.replace(/\\/g, "/").replace(/\/+$/, "").split("/").pop() || p;
   const pct = (n: number) => (total > 0 ? Math.round((n / total) * 100) : 0);
   const labelable = (t: Tile) => t.w > 48 && t.h > 22;
   // Bigger share => more saturated fill; folders and files get a subtly different hue.
@@ -177,8 +119,8 @@
       >
         <Icon name="up" size={14} />
       </button>
-      <span class="sp-path" title={cur}>{baseOf(cur)}</span>
-      <span class="sp-total">{formatSize(total)}{loading ? " · scanning…" : refreshing ? " · refreshing…" : ""}</span>
+      <span class="sp-path" title={cur}>{baseName(cur)}</span>
+      <span class="sp-total">{formatSize(total)}{loading ? " · scanning…" : ""}</span>
       <button class="sp-close" title="Close" on:click={() => dispatch("close")}>
         <Icon name="close" size={14} />
       </button>
