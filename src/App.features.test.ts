@@ -110,6 +110,44 @@ describe("wildcard search (CPE-052)", () => {
   });
 });
 
+describe("show hidden toggle (CPE-676 net)", () => {
+  it("hides hidden entries by default and reveals them when toggled", async () => {
+    mockBackend([file("visible.txt", "txt"), { ...file(".secret", "secret"), hidden: true }]);
+    await enterDrive();
+    await waitFor(() => expect(screen.getByText("visible.txt")).toBeTruthy());
+    // Hidden by default (the `shown` pipeline filter).
+    expect(screen.queryByText(".secret")).toBeNull();
+
+    // The view controls live in the file-list toolbar's gear popover.
+    await fireEvent.click(screen.getByLabelText("File list settings"));
+    const checkbox = screen.getByText("Show hidden files").parentElement!.querySelector(
+      'input[type="checkbox"]',
+    ) as HTMLInputElement;
+    await fireEvent.click(checkbox);
+
+    await waitFor(() => expect(screen.getByText(".secret")).toBeTruthy());
+    expect(screen.getByText("visible.txt")).toBeTruthy(); // still there
+  });
+});
+
+describe("sort direction (CPE-676 net)", () => {
+  it("reverses the listing order when direction is switched to descending", async () => {
+    mockBackend([file("apple.txt", "txt"), file("cherry.txt", "txt"), file("banana.txt", "txt")]);
+    await enterDrive();
+    await waitFor(() => expect(screen.getByText("banana.txt")).toBeTruthy());
+
+    // File names in DOM order (testing-library returns matches in document order).
+    const names = () => screen.getAllByText(/\.txt$/).map((e) => e.textContent!.trim());
+    await waitFor(() => expect(names()).toEqual(["apple.txt", "banana.txt", "cherry.txt"]));
+
+    await fireEvent.click(screen.getByLabelText("File list settings"));
+    const dir = screen.getByText("Direction").parentElement!.querySelector("select") as HTMLSelectElement;
+    await fireEvent.change(dir, { target: { value: "desc" } });
+
+    await waitFor(() => expect(names()).toEqual(["cherry.txt", "banana.txt", "apple.txt"]));
+  });
+});
+
 describe("new folder auto-numbering (CPE-050)", () => {
   it("asks the backend for 'New folder (2)' when 'New folder' already exists", async () => {
     mockBackend([file("alpha.md", "md"), dir("New folder")]);
