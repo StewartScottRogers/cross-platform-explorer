@@ -163,6 +163,23 @@ describe("selection + status bar (CPE-676 net)", () => {
   });
 });
 
+describe("file-type filter (CPE-676 net)", () => {
+  it("narrows the list to a category via the type filter", async () => {
+    mockBackend([file("photo.png", "png"), file("notes.txt", "txt")]);
+    await enterDrive();
+    await waitFor(() => expect(screen.getByText("photo.png")).toBeTruthy());
+    expect(screen.getByText("notes.txt")).toBeTruthy();
+
+    await fireEvent.click(screen.getByTitle("Filter by type"));
+    await fireEvent.click(screen.getByText("Images"));
+
+    await waitFor(() => {
+      expect(screen.getByText("photo.png")).toBeTruthy(); // an image passes
+      expect(screen.queryByText("notes.txt")).toBeNull(); // a text file is filtered out
+    });
+  });
+});
+
 describe("new folder auto-numbering (CPE-050)", () => {
   it("asks the backend for 'New folder (2)' when 'New folder' already exists", async () => {
     mockBackend([file("alpha.md", "md"), dir("New folder")]);
