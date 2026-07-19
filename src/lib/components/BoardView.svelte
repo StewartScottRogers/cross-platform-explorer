@@ -8,6 +8,7 @@
   import { invoke } from "../invoke";
   import { lsGet, lsSet, lsBool } from "../persist";
   import Icon from "./Icon.svelte";
+  import HelpButton from "./HelpButton.svelte";
   import {
     BOARD_LANES, groupByLane, isValidMove, ticketTask,
     clampBoardSize, loadBoardSize, saveBoardSize,
@@ -228,6 +229,7 @@
         <button class="board-btn" class:active={viewMode === "epics"} on:click={() => (viewMode = "epics")} title="Organize by epic">◧ Epics</button>
         <button class="board-btn" on:click={chooseProject} title={"Project: " + boardRoot + "\nChoose a different project folder"}>📁 Project</button>
         <button class="board-btn" on:click={refresh} title="Refresh from the Tickets/ folders">Refresh</button>
+        <HelpButton section="agent-board" on:help />
         <button class="board-x" title="Close" aria-label="Close" on:click={() => dispatch("close")}>×</button>
       </div>
     </div>

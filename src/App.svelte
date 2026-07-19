@@ -2822,6 +2822,7 @@
   <DiskSpaceView
     path={spacePath}
     on:navigate={(e) => { spacePath = null; navigate(e.detail); }}
+    on:help={(e) => openDocs(e.detail)}
     on:close={() => (spacePath = null)}
   />
 {/if}
@@ -2918,6 +2919,7 @@
   <BoardView
     root={currentPath}
     on:launch={(e) => openAiConsole({ cwd: currentPath, task: e.detail.task })}
+    on:help={(e) => openDocs(e.detail)}
     on:close={() => (showBoard = false)}
   />
 {/if}
@@ -2927,6 +2929,7 @@
     root={currentPath}
     on:browse={(e) => openBrowserWindow(e.detail)}
     on:edit={(e) => { openRecent(e.detail); showWorkbench = false; }}
+    on:help={(e) => openDocs(e.detail)}
     on:close={() => (showWorkbench = false)}
   />
 {/if}

@@ -1,6 +1,8 @@
 ---
 title: Agent Board
 order: 6
+category: AI Console
+categoryOrder: 3
 ---
 
 # Agent Board

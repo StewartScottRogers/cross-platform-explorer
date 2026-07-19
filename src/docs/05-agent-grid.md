@@ -1,6 +1,8 @@
 ---
 title: Agent Grid
 order: 5
+category: AI Console
+categoryOrder: 3
 ---
 
 # Agent Grid

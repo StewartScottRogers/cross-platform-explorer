@@ -13,6 +13,7 @@
   import { formatSize } from "../format";
   import { baseName } from "../contentSearch";
   import Icon from "./Icon.svelte";
+  import HelpButton from "./HelpButton.svelte";
 
   export let path: string;
 
@@ -121,6 +122,7 @@
       </button>
       <span class="sp-path" title={cur}>{baseName(cur)}</span>
       <span class="sp-total">{formatSize(total)}{loading ? " · scanning…" : ""}</span>
+      <HelpButton section="disk-usage" on:help />
       <button class="sp-close" title="Close" on:click={() => dispatch("close")}>
         <Icon name="close" size={14} />
       </button>

@@ -2,9 +2,9 @@
   // Application → Documents viewer (CPE-537): a TOC sidebar over the built-in docs library (CPE-536),
   // the selected doc rendered as sanitized markdown (reuse the preview renderer), and a search box.
   // Offline — the docs are bundled into the app at build time.
-  import { createEventDispatcher } from "svelte";
+  import { createEventDispatcher, onMount, tick } from "svelte";
   import Icon from "./Icon.svelte";
-  import { DOCS, searchDocs, type Doc } from "../docs";
+  import { DOCS, searchDocs, groupDocs, type Doc } from "../docs";
   import { renderMarkdown } from "../preview/markdown";
 
   const dispatch = createEventDispatcher<{ close: void }>();
@@ -17,15 +17,33 @@
   let query = "";
   let selected: Doc | null = (initialSlug ? DOCS.find((d) => d.slug === initialSlug) : null) ?? DOCS[0] ?? null;
   let html = "";
+  // Per-category collapse state (name → collapsed?). Unset = open, so the whole library shows by default;
+  // the left pane groups docs into expandable sections so it scales to many more pages (CPE-763).
+  let collapsed: Record<string, boolean> = {};
+  // Element per TOC item so a deep-link can scroll its section into view.
+  let itemEls: Record<string, HTMLElement> = {};
 
   $: results = searchDocs(DOCS, query);
+  $: groups = groupDocs(results);
+  $: searching = query.trim().length > 0;
   // Keep the selection valid as the filter narrows.
   $: if (selected && !results.some((d) => d.slug === selected!.slug) && results.length) selected = results[0];
   $: render(selected);
 
+  // While searching, force every group open so a match is never hidden behind a collapsed header.
+  const isExpanded = (name: string): boolean => searching || !collapsed[name];
+  const toggle = (name: string) => (collapsed = { ...collapsed, [name]: !collapsed[name] });
+
   async function render(doc: Doc | null) {
     html = doc ? await renderMarkdown(doc.content) : "";
   }
+
+  // Deep-link (CPE-596/763): opened on a specific section, scroll its TOC item into view so "open into
+  // any section from anywhere" actually lands you there (its category is expanded by default).
+  onMount(async () => {
+    await tick();
+    if (selected) itemEls[selected.slug]?.scrollIntoView({ block: "nearest" });
+  });
 </script>
 
 <svelte:window on:keydown={(e) => e.key === "Escape" && dispatch("close")} />
@@ -44,9 +62,32 @@
       <div class="docs-body">
         <aside class="docs-toc">
           <input class="docs-search" placeholder="Search the docs…" bind:value={query} spellcheck="false" />
-          {#each results as d (d.slug)}
-            <!-- svelte-ignore a11y-no-static-element-interactions a11y-click-events-have-key-events -->
-            <div class="toc-item" class:sel={selected?.slug === d.slug} on:click={() => (selected = d)}>{d.title}</div>
+          {#each groups as g (g.name)}
+            <div class="toc-group">
+              <button
+                class="toc-cat"
+                aria-expanded={isExpanded(g.name)}
+                on:click={() => toggle(g.name)}
+                title={isExpanded(g.name) ? "Collapse section" : "Expand section"}
+              >
+                <Icon name={isExpanded(g.name) ? "chev-down" : "chev-right"} size={12} />
+                <span class="toc-cat-name">{g.name}</span>
+                <span class="toc-cat-count">{g.docs.length}</span>
+              </button>
+              {#if isExpanded(g.name)}
+                {#each g.docs as d (d.slug)}
+                  <!-- svelte-ignore a11y-no-static-element-interactions a11y-click-events-have-key-events -->
+                  <div
+                    class="toc-item"
+                    class:sel={selected?.slug === d.slug}
+                    bind:this={itemEls[d.slug]}
+                    on:click={() => (selected = d)}
+                  >
+                    {d.title}
+                  </div>
+                {/each}
+              {/if}
+            </div>
           {/each}
           {#if results.length === 0}<div class="toc-empty">No matches.</div>{/if}
         </aside>
@@ -83,7 +124,15 @@
   .docs-search { width: 100%; height: 30px; padding: 0 9px; margin-bottom: 8px; box-sizing: border-box;
     border: 1px solid var(--border); border-radius: 6px; background: var(--surface); color: var(--text); font: inherit; }
   .docs-search:focus { outline: none; border-color: var(--accent); }
-  .toc-item { padding: 7px 9px; border-radius: 6px; cursor: pointer; font-size: 13px; }
+  .toc-group { margin-bottom: 2px; }
+  .toc-cat { display: flex; align-items: center; gap: 6px; width: 100%; padding: 6px 8px; border: 0;
+    background: transparent; color: var(--text-dim); cursor: pointer; border-radius: 6px; font: inherit;
+    font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.04em; }
+  .toc-cat:hover { background: rgba(128,128,128,0.10); color: var(--text); }
+  .toc-cat-name { flex: 1; text-align: left; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .toc-cat-count { flex: 0 0 auto; font-size: 10px; font-weight: 600; opacity: 0.6;
+    font-variant-numeric: tabular-nums; }
+  .toc-item { padding: 7px 9px 7px 24px; border-radius: 6px; cursor: pointer; font-size: 13px; }
   .toc-item:hover { background: rgba(128,128,128,0.12); }
   .toc-item.sel { background: var(--selection, rgba(128,128,128,0.22)); font-weight: 600; }
   .toc-empty { padding: 10px 9px; color: var(--text-faint); font-size: 12px; }

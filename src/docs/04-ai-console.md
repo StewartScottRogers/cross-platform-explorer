@@ -1,6 +1,8 @@
 ---
 title: AI Console
 order: 4
+category: AI Console
+categoryOrder: 3
 ---
 
 # AI Console

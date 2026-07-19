@@ -11,6 +11,7 @@ import { DOCS } from "./docs";
 export type Section =
   | "home"
   | "explorer"
+  | "disk-usage"
   | "ai-console"
   | "agent-grid"
   | "agent-board"
@@ -22,6 +23,7 @@ export type Section =
 const SECTION_DOC: Record<Section, string> = {
   home: "01-overview",
   explorer: "03-explorer",
+  "disk-usage": "11-disk-usage",
   "ai-console": "04-ai-console",
   "agent-grid": "05-agent-grid",
   "agent-board": "06-agent-board",

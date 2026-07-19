@@ -1,6 +1,8 @@
 ---
 title: Overview
 order: 1
+category: Getting started
+categoryOrder: 1
 ---
 
 # Cross-Platform Explorer

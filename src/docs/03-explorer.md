@@ -1,6 +1,8 @@
 ---
 title: The Explorer
 order: 3
+category: Explorer
+categoryOrder: 2
 ---
 
 # The Explorer

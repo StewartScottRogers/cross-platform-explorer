@@ -1,6 +1,8 @@
 ---
 title: Swarms
 order: 9
+category: AI Console
+categoryOrder: 3
 ---
 
 # Swarms

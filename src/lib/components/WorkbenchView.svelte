@@ -6,6 +6,7 @@
   import { createEventDispatcher, onMount } from "svelte";
   import { invoke } from "../invoke";
   import Icon from "./Icon.svelte";
+  import HelpButton from "./HelpButton.svelte";
   import { parseDiff, diffStats, fileStats, fileLabel, annotateInline, toPatch, type DiffFile } from "../diff";
   import { lsGet, lsSet } from "../persist";
   import { isBrowsableUrl, normalizeUrl, workbenchState } from "../workbench";
@@ -97,6 +98,7 @@
           <button class="wb-btn" on:click={expandAll} title="Expand every file">Expand all</button>
         {/if}
         <button class="wb-btn" on:click={load} title="Re-run git diff">Refresh</button>
+        <HelpButton section="workbench" on:help />
         <button class="wb-x" title="Close" aria-label="Close" on:click={() => dispatch("close")}>×</button>
       </div>
     </div>

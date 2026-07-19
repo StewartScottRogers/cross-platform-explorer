@@ -1,6 +1,8 @@
 ---
 title: Repositories
 order: 8
+category: Development
+categoryOrder: 4
 ---
 
 # Repositories

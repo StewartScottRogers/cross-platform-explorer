@@ -1,6 +1,8 @@
 ---
 title: Getting Started
 order: 2
+category: Getting started
+categoryOrder: 1
 ---
 
 # Getting Started
