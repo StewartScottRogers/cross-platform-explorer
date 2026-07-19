@@ -166,6 +166,26 @@ describe("selection + status bar (CPE-676 net)", () => {
   });
 });
 
+describe("rename commit (CPE-676 net)", () => {
+  it("F2 then Enter renames the selected file via the backend", async () => {
+    mockBackend([file("old.txt", "txt")]);
+    await enterDrive();
+    await waitFor(() => expect(screen.getByText("old.txt")).toBeTruthy());
+    await fireEvent.click(screen.getByText("old.txt"));
+    await fireEvent.keyDown(window, { key: "F2" });
+
+    const input = await screen.findByDisplayValue("old.txt");
+    await fireEvent.input(input, { target: { value: "new.txt" } });
+    await fireEvent.keyDown(input, { key: "Enter" });
+
+    await waitFor(() => {
+      const call = invoke.mock.calls.find((c) => c[0] === "rename_entry");
+      expect(call).toBeTruthy();
+      expect((call![1] as { newName: string }).newName).toBe("new.txt");
+    });
+  });
+});
+
 describe("delete + undo (CPE-676 net)", () => {
   it("Delete trashes the selection and Ctrl+Z restores it", async () => {
     mockBackend([file("doomed.txt", "txt"), file("keep.txt", "txt")]);
