@@ -278,6 +278,21 @@ describe("file-type filter (CPE-676 net)", () => {
   });
 });
 
+describe("refresh (CPE-676 net)", () => {
+  it("F5 reloads the current folder", async () => {
+    mockBackend([file("a.txt", "txt")]);
+    await enterDrive();
+    await waitFor(() => expect(screen.getByText("a.txt")).toBeTruthy());
+    const before = invoke.mock.calls.filter((c) => c[0] === "list_dir_stream").length;
+
+    await fireEvent.keyDown(window, { key: "F5" });
+
+    await waitFor(() =>
+      expect(invoke.mock.calls.filter((c) => c[0] === "list_dir_stream").length).toBeGreaterThan(before),
+    );
+  });
+});
+
 describe("new folder auto-numbering (CPE-050)", () => {
   it("asks the backend for 'New folder (2)' when 'New folder' already exists", async () => {
     mockBackend([file("alpha.md", "md"), dir("New folder")]);
