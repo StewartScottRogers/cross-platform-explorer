@@ -278,6 +278,18 @@ describe("file-type filter (CPE-676 net)", () => {
   });
 });
 
+describe("select all (CPE-676 net)", () => {
+  it("Ctrl+A selects every visible item", async () => {
+    mockBackend([file("a.txt", "txt"), file("b.txt", "txt"), file("c.txt", "txt")]);
+    await enterDrive();
+    await waitFor(() => expect(screen.getByText("a.txt")).toBeTruthy());
+
+    await fireEvent.keyDown(window, { key: "a", ctrlKey: true });
+
+    await waitFor(() => expect(screen.getByText(/^3 selected/)).toBeTruthy());
+  });
+});
+
 describe("refresh (CPE-676 net)", () => {
   it("F5 reloads the current folder", async () => {
     mockBackend([file("a.txt", "txt")]);
