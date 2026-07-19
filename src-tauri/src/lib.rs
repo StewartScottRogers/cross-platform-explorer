@@ -21,6 +21,11 @@ mod forge_egress;
 #[cfg(feature = "sidecar-platform")]
 mod models_egress;
 
+/// Agent Watch shadow-content store (CPE-743, epic CPE-727): a bounded, text-only baseline of files
+/// under the watched tree, used to pair each write with its "before" content for Edit Diff Peek.
+#[cfg(feature = "sidecar-platform")]
+mod agent_shadow;
+
 /// Agent Board backend (CPE-520): read the repo's `Tickets/` folders as Kanban cards + move a card
 /// between columns. Pure card/frontmatter logic lives here; the commands below do the file I/O.
 mod ticket_board;
@@ -4375,33 +4380,41 @@ fn classify_fs_event(kind: &notify::EventKind) -> Option<&'static str> {
     }
 }
 
+/// Read a file as UTF-8 text for shadowing (CPE-743), or `None` if it isn't a suitable text file:
+/// not a regular file, larger than `cap` bytes, unreadable, or not valid UTF-8 (binary). Cheap
+/// bail-outs first (metadata is one stat) so the pump never slurps a huge or binary file.
+#[cfg(feature = "sidecar-platform")]
+fn read_text_capped(path: &str, cap: usize) -> Option<String> {
+    let meta = std::fs::metadata(path).ok()?;
+    if !meta.is_file() || meta.len() as usize > cap {
+        return None;
+    }
+    String::from_utf8(std::fs::read(path).ok()?).ok()
+}
+
 /// Coalescing emitter: fold raw watcher events per-path over a short window and flush batches to
 /// the frontend as `ai-console://fs-activity`. Bounded so a big refactor can't flood the UI — the
 /// pending set is capped and flushed early when full. Ends when the channel closes (watcher dropped).
+///
+/// Alongside the activity batch it maintains a [`agent_shadow::ShadowStore`] and, at each flush,
+/// pairs every created/modified path with its cached "before" content, emitting `{path, before,
+/// after}` records on `ai-console://fs-diff` (CPE-743) so the frontend can show what each write
+/// changed (Edit Diff Peek, epic CPE-727). The store lives for the pump's lifetime and is freed when
+/// the watcher is dropped — off means off.
 #[cfg(feature = "sidecar-platform")]
 fn fs_activity_pump(
     app: tauri::AppHandle,
     rx: std::sync::mpsc::Receiver<notify::Result<notify::Event>>,
 ) {
-    use serde_json::json;
     use std::collections::HashMap;
     use std::sync::mpsc::RecvTimeoutError;
     use std::time::{Duration, Instant};
-    use tauri::Emitter;
 
     const FLUSH: Duration = Duration::from_millis(200);
     const CAP: usize = 500;
     let mut pending: HashMap<String, &'static str> = HashMap::new();
+    let mut shadow = agent_shadow::ShadowStore::new();
     let mut last_flush = Instant::now();
-
-    let flush = |app: &tauri::AppHandle, pending: &mut HashMap<String, &'static str>| {
-        if pending.is_empty() {
-            return;
-        }
-        let items: Vec<_> =
-            pending.drain().map(|(path, kind)| json!({ "kind": kind, "path": path })).collect();
-        let _ = app.emit("ai-console://fs-activity", items);
-    };
 
     loop {
         match rx.recv_timeout(FLUSH) {
@@ -4418,21 +4431,68 @@ fn fs_activity_pump(
                     }
                 }
                 if pending.len() >= CAP {
-                    flush(&app, &mut pending);
+                    flush_fs_batch(&app, &mut pending, &mut shadow);
                     last_flush = Instant::now();
                 }
             }
             Ok(Err(_)) => {} // a watch error — ignore, keep pumping
             Err(RecvTimeoutError::Timeout) => {}
             Err(RecvTimeoutError::Disconnected) => {
-                flush(&app, &mut pending);
+                flush_fs_batch(&app, &mut pending, &mut shadow);
                 break;
             }
         }
         if last_flush.elapsed() >= FLUSH {
-            flush(&app, &mut pending);
+            flush_fs_batch(&app, &mut pending, &mut shadow);
             last_flush = Instant::now();
         }
+    }
+}
+
+/// Flush the coalesced window: emit the `fs-activity` batch, and — for created/modified paths — read
+/// their current text, pair it with the shadow baseline, and emit any `fs-diff` records (CPE-743). A
+/// removed/renamed-away path (or one that became binary/oversized) drops its baseline. Drains
+/// `pending`.
+#[cfg(feature = "sidecar-platform")]
+fn flush_fs_batch(
+    app: &tauri::AppHandle,
+    pending: &mut std::collections::HashMap<String, &'static str>,
+    shadow: &mut agent_shadow::ShadowStore,
+) {
+    use serde_json::json;
+    use tauri::Emitter;
+
+    if pending.is_empty() {
+        return;
+    }
+    let mut activity = Vec::with_capacity(pending.len());
+    let mut diffs = Vec::new();
+    for (path, kind) in pending.drain() {
+        // Diff bookkeeping first (borrows `path`), then move `path` into the activity item below.
+        let record = match kind {
+            "created" | "modified" => match read_text_capped(&path, agent_shadow::MAX_FILE_BYTES) {
+                Some(content) if kind == "created" => shadow.on_created(&path, content),
+                Some(content) => shadow.on_modified(&path, content),
+                None => {
+                    // Gone, binary, or oversized: drop any stale baseline, emit no diff.
+                    shadow.forget(&path);
+                    None
+                }
+            },
+            "removed" => {
+                shadow.forget(&path);
+                None
+            }
+            _ => None,
+        };
+        if let Some(r) = record {
+            diffs.push(json!({ "path": r.path, "before": r.before, "after": r.after }));
+        }
+        activity.push(json!({ "kind": kind, "path": path }));
+    }
+    let _ = app.emit("ai-console://fs-activity", activity);
+    if !diffs.is_empty() {
+        let _ = app.emit("ai-console://fs-diff", diffs);
     }
 }
 
