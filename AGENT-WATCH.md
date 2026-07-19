@@ -1,8 +1,10 @@
 # Agent Watch (mode)
 
-**Status:** built (CPE-396–402, 2026-07-14). Mutations are surfaced live; file *reads* are the one
-remaining piece (CPE-405) — a Windows filesystem watcher can't see reads, so they need the agent's
-own tool-output stream.
+**Status:** built (CPE-396–405, 2026-07-14). Mutations are surfaced live by the filesystem watcher;
+file *reads* — which a Windows filesystem watcher can't see — are surfaced too, parsed from the agent's
+own tool-output stream and styled distinctly as "consulted" (CPE-405, Done). Remaining read-visibility
+polish (a durable per-session consulted-files panel; read-vs-write contrast in the folder heat-map) is
+tracked under CPE-726.
 
 Agent Watch is a mode of Cross-Platform Explorer, not the app's reason for
 existing. The app is a general cross-platform file explorer; Agent Watch is the
