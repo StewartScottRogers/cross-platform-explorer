@@ -16,7 +16,7 @@
   export let recentPaths: string[] = [];
 
   const dispatch = createEventDispatcher<{
-    back: void; forward: void; up: void; refresh: void; browse: void; help: void;
+    back: void; forward: void; up: void; refresh: void; browse: void; help: void; diskusage: void;
     navigate: string; search: string; pathError: string;
   }>();
 
@@ -81,6 +81,9 @@
   </button>
   <button class="iconbtn" title="{$t('nav.refresh')} (F5)" on:click={() => dispatch("refresh")}>
     <Icon name="refresh" />
+  </button>
+  <button class="iconbtn" title="Disk usage — analyze folder sizes" aria-label="Disk usage" on:click={() => dispatch("diskusage")}>
+    <Icon name="disk" size={18} />
   </button>
   <button class="iconbtn" title="Documents for this section (F1)" aria-label="Documents for this section" on:click={() => dispatch("help")}>
     <Icon name="book" size={18} />

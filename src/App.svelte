@@ -23,6 +23,7 @@
   import { initAgentActivity, fsActivity, recentActivities, agentTimeline, affectsListing } from "./lib/agentActivity";
   import { initAgentDiffs } from "./lib/agentDiffs";
   import AgentTimeline from "./lib/components/AgentTimeline.svelte";
+  import DiskSpaceView from "./lib/components/DiskSpaceView.svelte";
   import UpdateDialog from "./lib/components/UpdateDialog.svelte";
   import TabBar from "./lib/components/TabBar.svelte";
   import NavToolbar from "./lib/components/NavToolbar.svelte";
@@ -473,6 +474,9 @@
   let unlistenDiffs: (() => void) | null = null;
   /** Whether the Agent Watch activity timeline drawer is open (CPE-400). */
   let showTimeline = false;
+
+  /** Folder whose disk-usage treemap is open (CPE-751), or null when the Space view is closed. */
+  let spacePath: string | null = null;
 
   /** Debounce handle for live folder re-list while watching (CPE-401). */
   let watchRefreshTimer: ReturnType<typeof setTimeout> | null = null;
@@ -2455,6 +2459,7 @@
   on:refresh={refresh}
   on:browse={browseForFolder}
   on:help={() => openDocs(currentSection())}
+  on:diskusage={() => { if (inFolder()) spacePath = currentPath; }}
   on:navigate={(e) => onCrumbNavigate(e.detail)}
   on:search={(e) => { search = e.detail; selection = emptySelection(); }}
 />
@@ -2756,6 +2761,14 @@
     agentName={watchedAgentName}
     on:navigate={(e) => navigate(e.detail)}
     on:close={() => (showTimeline = false)}
+  />
+{/if}
+
+{#if spacePath}
+  <DiskSpaceView
+    path={spacePath}
+    on:navigate={(e) => { spacePath = null; navigate(e.detail); }}
+    on:close={() => (spacePath = null)}
   />
 {/if}
 
