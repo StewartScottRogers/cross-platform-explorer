@@ -8,6 +8,7 @@
   import { createEventDispatcher } from "svelte";
   import Icon from "./Icon.svelte";
   import DiffPeek from "./DiffPeek.svelte";
+  import DiffSideBySide from "./DiffSideBySide.svelte";
   import type { TimelineEntry } from "../agentActivity";
   import { agentDiffs, diffFor, diffLineStats } from "../agentDiffs";
 
@@ -18,6 +19,8 @@
 
   /** Which entry's before/after peek is currently revealed (hover/focus), or null (CPE-745). */
   let openId: number | null = null;
+  /** The write whose full side-by-side diff is open in the modal, or null (CPE-746). */
+  let sbs: { path: string; before: string; after: string } | null = null;
   /** A write (created/modified) can carry a captured before/after diff; reads/renames/removes don't. */
   const isWrite = (k: TimelineEntry["kind"]) => k === "created" || k === "modified";
 
@@ -71,13 +74,23 @@
             <span class="tl-time">{clock(e.at)}</span>
           </button>
           {#if diff && openId === e.id}
-            <DiffPeek before={diff.before} after={diff.after} />
+            <div class="tl-peek">
+              <button
+                class="tl-expand"
+                on:click={() => (sbs = { path: e.path, before: diff.before, after: diff.after })}
+              >Open full diff ⤢</button>
+              <DiffPeek before={diff.before} after={diff.after} />
+            </div>
           {/if}
         </li>
       {/each}
     </ul>
   {/if}
 </aside>
+
+{#if sbs}
+  <DiffSideBySide path={sbs.path} before={sbs.before} after={sbs.after} on:close={() => (sbs = null)} />
+{/if}
 
 <style>
   .timeline {
@@ -202,6 +215,23 @@
   .has-diff .tl-row {
     /* Hint that this row has more to show on hover/focus. */
     cursor: help;
+  }
+  .tl-peek {
+    padding: 0 8px 2px 8px;
+  }
+  .tl-expand {
+    display: inline-block;
+    margin: 0 0 3px;
+    padding: 1px 8px;
+    border: 1px solid var(--border, #3a3a3a);
+    border-radius: 4px;
+    background: var(--surface-alt, transparent);
+    color: var(--accent, #2f6fed);
+    font-size: 10.5px;
+    cursor: pointer;
+  }
+  .tl-expand:hover {
+    background: rgba(128, 128, 128, 0.14);
   }
   .tl-time {
     flex: 0 0 auto;

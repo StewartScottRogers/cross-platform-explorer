@@ -141,6 +141,46 @@ export function compactLineDiff(before: string, after: string, context = 3): Dif
   return rows;
 }
 
+/** One aligned row of a side-by-side diff (CPE-746): `left`/`right` are line text or `null` for a
+ *  blank cell (a line present on only one side); `changed` marks the differing middle. */
+export interface SideRow {
+  left: string | null;
+  right: string | null;
+  changed: boolean;
+}
+
+/**
+ * A side-by-side (before | after) alignment of `before` → `after` for the full diff view (CPE-746).
+ * Same cheap prefix/suffix **line** scan as {@link compactLineDiff}: common context lines align on
+ * both sides; the differing middle pairs removed with added line-by-line (extra removals get a blank
+ * right cell, extra additions a blank left cell). `context` unchanged lines are kept either side.
+ */
+export function sideBySideRows(before: string, after: string, context = 3): SideRow[] {
+  const a = before.length ? before.split("\n") : [];
+  const b = after.length ? after.split("\n") : [];
+  let start = 0;
+  while (start < a.length && start < b.length && a[start] === b[start]) start++;
+  let endA = a.length;
+  let endB = b.length;
+  while (endA > start && endB > start && a[endA - 1] === b[endB - 1]) {
+    endA--;
+    endB--;
+  }
+  const rows: SideRow[] = [];
+  for (let i = Math.max(0, start - context); i < start; i++)
+    rows.push({ left: a[i], right: a[i], changed: false });
+  const delN = endA - start;
+  const addN = endB - start;
+  const pair = Math.min(delN, addN);
+  for (let i = 0; i < pair; i++)
+    rows.push({ left: a[start + i], right: b[start + i], changed: true });
+  for (let i = pair; i < delN; i++) rows.push({ left: a[start + i], right: null, changed: true });
+  for (let i = pair; i < addN; i++) rows.push({ left: null, right: b[start + i], changed: true });
+  for (let i = endA; i < Math.min(a.length, endA + context); i++)
+    rows.push({ left: a[i], right: a[i], changed: false });
+  return rows;
+}
+
 /** Added/removed line counts for a path's latest write (for a compact "+a −d" summary), or `null`. */
 export function diffLineStats(state: DiffState, path: string): { add: number; del: number } | null {
   const d = state.byPath[path];

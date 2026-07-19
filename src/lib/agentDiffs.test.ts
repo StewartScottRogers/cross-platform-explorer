@@ -5,6 +5,7 @@ import {
   diffFor,
   diffSegs,
   compactLineDiff,
+  sideBySideRows,
   diffLineStats,
   emptyDiffState,
   ingestDiff,
@@ -116,6 +117,33 @@ describe("compactLineDiff", () => {
     const rows = compactLineDiff("same\ntext", "same\ntext", 0);
     expect(rows.every((r) => r.kind === "context")).toBe(true);
     expect(rows.filter((r) => r.kind !== "context")).toHaveLength(0);
+  });
+});
+
+describe("sideBySideRows", () => {
+  it("aligns a one-line change on both sides", () => {
+    const rows = sideBySideRows("a\nb\nc", "a\nB\nc", 1);
+    expect(rows).toEqual([
+      { left: "a", right: "a", changed: false },
+      { left: "b", right: "B", changed: true },
+      { left: "c", right: "c", changed: false },
+    ]);
+  });
+
+  it("gives a blank right cell for a pure deletion and blank left for a pure addition", () => {
+    // before has an extra line 'x'; after has an extra line 'y' plus 'z'
+    const del = sideBySideRows("a\nx\nb", "a\nb", 0);
+    expect(del).toContainEqual({ left: "x", right: null, changed: true });
+    const add = sideBySideRows("a\nb", "a\ny\nz\nb", 0);
+    expect(add.filter((r) => r.left === null && r.changed)).toHaveLength(2);
+  });
+
+  it("renders a created file as all-right (blank left)", () => {
+    const rows = sideBySideRows("", "n1\nn2");
+    expect(rows).toEqual([
+      { left: null, right: "n1", changed: true },
+      { left: null, right: "n2", changed: true },
+    ]);
   });
 });
 
