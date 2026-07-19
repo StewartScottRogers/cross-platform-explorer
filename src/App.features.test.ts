@@ -9,6 +9,7 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { render, screen, fireEvent, waitFor } from "@testing-library/svelte";
 import App from "./App.svelte";
+import { resetSettings } from "./lib/settings";
 import type { DirEntry, Place } from "./lib/types";
 
 const dir = (name: string): DirEntry => ({
@@ -94,6 +95,8 @@ async function enterDrive() {
 
 beforeEach(() => {
   localStorage.clear();
+  resetSettings(); // settings live in an in-memory singleton, not localStorage — reset so view/sort
+                   // prefs don't leak between tests (would otherwise flake order-dependent assertions).
   Element.prototype.scrollIntoView = vi.fn();
   invoke.mockReset();
 });
@@ -275,6 +278,25 @@ describe("file-type filter (CPE-676 net)", () => {
       expect(screen.getByText("photo.png")).toBeTruthy(); // an image passes
       expect(screen.queryByText("notes.txt")).toBeNull(); // a text file is filtered out
     });
+  });
+});
+
+describe("column-header sort (CPE-676 net)", () => {
+  it("clicking the Size column header sorts the list by size", async () => {
+    // Sizes chosen so name-asc, size-asc, and name-desc are all distinct orders.
+    mockBackend([
+      { ...file("apple.txt", "txt"), size: 500 },
+      { ...file("mango.txt", "txt"), size: 100 },
+      { ...file("zebra.txt", "txt"), size: 300 },
+    ]);
+    await enterDrive();
+    await waitFor(() => expect(screen.getByText("apple.txt")).toBeTruthy());
+    const names = () => screen.getAllByText(/\.txt$/).map((e) => e.textContent!.trim());
+    await waitFor(() => expect(names()).toEqual(["apple.txt", "mango.txt", "zebra.txt"])); // name-asc
+
+    await fireEvent.click(screen.getByRole("button", { name: /Size/ }));
+
+    await waitFor(() => expect(names()).toEqual(["mango.txt", "zebra.txt", "apple.txt"])); // size-asc
   });
 });
 

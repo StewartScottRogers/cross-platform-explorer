@@ -9,6 +9,7 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { render, screen, fireEvent, waitFor } from "@testing-library/svelte";
 import App from "./App.svelte";
+import { resetSettings } from "./lib/settings";
 import type { DirEntry, Place } from "./lib/types";
 
 const entries: DirEntry[] = [
@@ -53,6 +54,7 @@ vi.mock("@tauri-apps/plugin-opener", () => ({ openPath: vi.fn() }));
 
 beforeEach(() => {
   localStorage.clear();
+  resetSettings(); // in-memory settings singleton — reset so prefs don't leak between tests.
   // jsdom has no layout engine.
   Element.prototype.scrollIntoView = vi.fn();
 
