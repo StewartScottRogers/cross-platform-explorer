@@ -5,7 +5,8 @@ type: feature
 component: Frontend
 tags: ready
 created: 2026-07-19
-status: Open
+closed: 2026-07-19
+status: Done
 priority: medium
 estimate: 1h
 ---
@@ -37,11 +38,27 @@ is read-only (`pointer-events:none`) — you'd have to transcribe the numbers by
 - Include a rolling per-command aggregate (count / total / max) in the copied text, or just the raw list?
 
 ## Acceptance
-- [ ] One action copies the current diagnostics (recent OS calls + durations + slowest + app/OS header) to
-  the clipboard as readable text.
-- [ ] The overlay stays click-through except for the copy control.
-- [ ] Pasted output is self-describing (version/OS/timestamp) and easy to read.
+- [x] A **Copy** button on the overlay header copies the whole recent-call buffer (all calls, not just the
+  visible window) as readable text via `navigator.clipboard.writeText`, with a transient "Copied ✓".
+- [x] The overlay stays click-through (`pointer-events:none`); only the Copy button is interactive
+  (`pointer-events:auto`).
+- [x] The pasted report is self-describing: `Cross-Platform Explorer diagnostics — v<version>` + timestamp
+  + call count + slowest + platform, then `Xms  <cmd>` rows.
 
 ## Notes
 Extends CPE-758 (Diagnostics mode). Requested so diagnostic output can be pasted back quickly. See
 [[diagnostics-mode-instrument-os-calls]].
+
+## Resolution
+Added a **Copy** button to the Diagnostics overlay header. It writes the full recent-call buffer as a
+readable report to the OS clipboard (same `navigator.clipboard.writeText` the "Copy as path" action uses),
+and flashes "Copied ✓". The overlay stays click-through; only the button takes pointer events.
+
+**Files changed:**
+- `src/lib/components/DiagnosticsOverlay.svelte` — `version` prop; `buildReport()` (header
+  `… — v<version>` + `<timestamp> · N calls · slowest … · <platform>`, then `Xms  cmd` rows for the whole
+  buffer); `copyReport()` (clipboard write + transient confirm); a `pointer-events:auto` Copy button.
+- `src/App.svelte` — passes `version={appVersion}` to the overlay.
+
+Menu palette/shortcut triggers (also floated in scope) weren't needed — the on-overlay button is the most
+discoverable, and it's right where the numbers are. Verified: `npm run check` clean; App + MenuBar suites pass.
