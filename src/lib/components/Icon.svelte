@@ -78,6 +78,9 @@
     <path d="M14 3v4h4" stroke="#4f46e5" />
     <ellipse cx="12" cy="11.8" rx="3.2" ry="1.2" stroke="#4f46e5" />
     <path d="M8.8 11.8v3.6c0 .7 1.4 1.2 3.2 1.2s3.2-.5 3.2-1.2v-3.6" stroke="#4f46e5" />
+  {:else if name === "book"}
+    <path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20" />
+    <path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z" />
   {:else if name === "ebook"}
     <path d="M6 3h8l4 4v14H6z" fill="#fdf0e0" stroke="#b45309" />
     <path d="M14 3v4h4" stroke="#b45309" />
