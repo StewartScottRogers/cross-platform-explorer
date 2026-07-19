@@ -30,8 +30,8 @@
   $: if (selected && !results.some((d) => d.slug === selected!.slug) && results.length) selected = results[0];
   $: render(selected);
 
-  // While searching, force every group open so a match is never hidden behind a collapsed header.
-  const isExpanded = (name: string): boolean => searching || !collapsed[name];
+  // Toggle a category's collapse state (unset = open). The template forces every group open while
+  // searching (see the `{@const expanded}` in the TOC) so a match is never hidden behind a collapsed header.
   const toggle = (name: string) => (collapsed = { ...collapsed, [name]: !collapsed[name] });
 
   async function render(doc: Doc | null) {
@@ -63,18 +63,21 @@
         <aside class="docs-toc">
           <input class="docs-search" placeholder="Search the docs…" bind:value={query} spellcheck="false" />
           {#each groups as g (g.name)}
+            <!-- Reference `collapsed`/`searching` directly here so Svelte re-renders the group on toggle;
+                 a call to isExpanded(g.name) alone wouldn't be tracked as a dependency. -->
+            {@const expanded = searching || !collapsed[g.name]}
             <div class="toc-group">
               <button
                 class="toc-cat"
-                aria-expanded={isExpanded(g.name)}
+                aria-expanded={expanded}
                 on:click={() => toggle(g.name)}
-                title={isExpanded(g.name) ? "Collapse section" : "Expand section"}
+                title={expanded ? "Collapse section" : "Expand section"}
               >
-                <Icon name={isExpanded(g.name) ? "chev-down" : "chev-right"} size={12} />
+                <Icon name={expanded ? "chev-down" : "chev-right"} size={12} />
                 <span class="toc-cat-name">{g.name}</span>
                 <span class="toc-cat-count">{g.docs.length}</span>
               </button>
-              {#if isExpanded(g.name)}
+              {#if expanded}
                 {#each g.docs as d (d.slug)}
                   <!-- svelte-ignore a11y-no-static-element-interactions a11y-click-events-have-key-events -->
                   <div
