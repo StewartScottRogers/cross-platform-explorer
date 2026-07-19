@@ -148,6 +148,21 @@ describe("sort direction (CPE-676 net)", () => {
   });
 });
 
+describe("selection + status bar (CPE-676 net)", () => {
+  it("reports the item and selected counts as rows are picked", async () => {
+    mockBackend([file("apple.txt", "txt"), file("banana.txt", "txt"), file("cherry.txt", "txt")]);
+    await enterDrive();
+    await waitFor(() => expect(screen.getByText("apple.txt")).toBeTruthy());
+    expect(screen.getByText(/^3 items$/)).toBeTruthy(); // itemCount from the pipeline
+
+    await fireEvent.click(screen.getByText("apple.txt"));
+    await waitFor(() => expect(screen.getByText(/^1 selected/)).toBeTruthy());
+
+    await fireEvent.click(screen.getByText("banana.txt"), { ctrlKey: true });
+    await waitFor(() => expect(screen.getByText(/^2 selected/)).toBeTruthy());
+  });
+});
+
 describe("new folder auto-numbering (CPE-050)", () => {
   it("asks the backend for 'New folder (2)' when 'New folder' already exists", async () => {
     mockBackend([file("alpha.md", "md"), dir("New folder")]);
