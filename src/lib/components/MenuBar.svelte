@@ -15,9 +15,14 @@
 
   const dispatch = createEventDispatcher<{ select: string }>();
 
+  /** Whether Diagnostics mode is on — shows a check on the Application → Diagnostics toggle (CPE-758). */
+  export let diagnostics = false;
+
   // Item labels are i18n keys (CPE-481) resolved via `$t` at render; `hint` is a key combo (not
   // translated). A `sep` is a divider.
-  type Item = { id: string; labelKey: string; hint?: string; icon?: string } | { sep: true };
+  // `labelKey` is an i18n key; `label` is a plain, non-translated label (for dev/diagnostic items that
+  // don't warrant the 12-locale gate). One of the two is set.
+  type Item = { id: string; labelKey?: string; label?: string; hint?: string; icon?: string; checked?: boolean } | { sep: true };
   interface Menu {
     id: string;
     /** i18n key for the top-level title (falls back to English/key). */
@@ -25,7 +30,8 @@
     items: Item[];
   }
 
-  const menus: Menu[] = [
+  // Reactive so the Diagnostics toggle's check reflects the `diagnostics` prop live (CPE-758).
+  $: menus = [
     {
       id: "file",
       labelKey: "menu.file",
@@ -49,13 +55,14 @@
       items: [
         { id: "check-updates", labelKey: "mi.checkUpdates", icon: "refresh" },
         { id: "settings", labelKey: "mi.settings", icon: "settings" },
+        { id: "diagnostics", label: "Diagnostics", icon: "activity", checked: diagnostics },
         { sep: true },
         { id: "shortcuts", labelKey: "mi.shortcuts", hint: "F1", icon: "keyboard" },
         { id: "documents", labelKey: "mi.documents", icon: "documents" },
         { id: "about", labelKey: "mi.about", icon: "info" },
       ],
     },
-  ];
+  ] satisfies Menu[];
 
   function pickLocale(code: Locale) {
     locale.set(code);
@@ -126,8 +133,9 @@
                 <span class="mi-icon" aria-hidden="true">
                   {#if item.icon}<Icon name={item.icon} size={15} />{/if}
                 </span>
-                {$t(item.labelKey)}
+                {item.label ?? (item.labelKey ? $t(item.labelKey) : "")}
                 {#if item.hint}<span class="hint">{item.hint}</span>{/if}
+                {#if item.checked}<span class="mb-check" aria-hidden="true">✓</span>{/if}
               </button>
             {/if}
           {/each}
@@ -257,6 +265,12 @@
     margin-left: auto;
     color: var(--text-faint);
     font-size: 12px;
+  }
+  /* Check on a toggle menu item (e.g. Diagnostics, CPE-758). Right-aligned like the hint. */
+  .mb-check {
+    margin-left: auto;
+    color: var(--accent, #2f6fed);
+    font-weight: 700;
   }
   .check {
     display: inline-block;

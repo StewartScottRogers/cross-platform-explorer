@@ -31,6 +31,7 @@ export const KEYS = {
   favorites: "cpe.favorites",
   recentFolders: "cpe.recentFolders",
   columnWidths: "cpe.columnWidths",
+  diagnostics: "cpe.diagnostics",
 } as const;
 
 const MAX_RECENTS = 20;
@@ -148,6 +149,11 @@ export const saveView = (v: ViewMode) => write(KEYS.view, v);
 
 export const loadShowHidden = (): boolean => read(KEYS.showHidden, false, isBool);
 export const saveShowHidden = (v: boolean) => write(KEYS.showHidden, v);
+
+// Diagnostics mode (CPE-758): on-screen timing of every backend/OS call. Off by default; user-toggled
+// from the Application menu. Set `localStorage["cpe.diagnostics"] = "true"` to force it on from a console.
+export const loadDiagnostics = (): boolean => read(KEYS.diagnostics, false, isBool);
+export const saveDiagnostics = (v: boolean) => write(KEYS.diagnostics, v);
 
 export const loadFoldersFirst = (): boolean => read(KEYS.foldersFirst, true, isBool);
 export const saveFoldersFirst = (v: boolean) => write(KEYS.foldersFirst, v);

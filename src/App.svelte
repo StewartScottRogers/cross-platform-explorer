@@ -24,6 +24,8 @@
   import { initAgentDiffs } from "./lib/agentDiffs";
   import AgentTimeline from "./lib/components/AgentTimeline.svelte";
   import DiskSpaceView from "./lib/components/DiskSpaceView.svelte";
+  import DiagnosticsOverlay from "./lib/components/DiagnosticsOverlay.svelte";
+  import { setDiagnosticsEnabled } from "./lib/diagnostics";
   import UpdateDialog from "./lib/components/UpdateDialog.svelte";
   import TabBar from "./lib/components/TabBar.svelte";
   import NavToolbar from "./lib/components/NavToolbar.svelte";
@@ -169,16 +171,13 @@
   }
   // ---------------------------------------------------------------------------------------------------
 
-  // --- Navigation perf readout (CPE-757, temporary on-screen diagnostic) ------------------------------
-  // Release builds have no devtools, so surface the last navigation's timing breakdown on screen. Lets us
-  // see whether the cost is the listing, git status, disk space, or something else — instead of guessing.
-  let perfCached = false;
-  let perfPaint = 0; // ms to first row painted (cold load)
-  let perfSettle = 0; // ms to the folder fully listed
-  let perfItems = 0;
-  let perfGit = 0; // ms for forge_repo_status (git status)
-  let perfDisk = 0; // ms for disk_space
-  const showPerf = true; // temporary: always visible while diagnosing
+  // --- Diagnostics mode (CPE-758) --------------------------------------------------------------------
+  // On-screen timing of EVERY backend/OS call, captured by the instrumented invoke wrapper (src/lib/
+  // diagnostics.ts). Toggled by the user from Application → Diagnostics, persisted across sessions.
+  // `setDiagnosticsEnabled` gates recording so it costs nothing when off. (I can force it on for testing
+  // via `localStorage["cpe.diagnostics"] = "true"`.)
+  let diagnostics = settings.loadDiagnostics();
+  $: setDiagnosticsEnabled(diagnostics);
   // ---------------------------------------------------------------------------------------------------
 
   let notice = "";
@@ -412,14 +411,11 @@
   /** Refresh the git sync status when the folder changes (read-only, best-effort). The dry-run
       preview honours this repo's saved on-diverge policy so the status bar and the Sync dialog agree. */
   async function refreshGitStatus(path: string) {
-    if (!path || isHome || archive) { gitStatus = null; perfGit = 0; return; }
-    const t0 = performance.now();
+    if (!path || isHome || archive) { gitStatus = null; return; }
     try {
       const s = await invoke<typeof gitStatus>("forge_repo_status", { path, onDiverge: loadSyncPolicy(path) });
-      perfGit = Math.round(performance.now() - t0);
       gitStatus = s && (s as { is_repo?: boolean }).is_repo ? s : null;
     } catch {
-      perfGit = Math.round(performance.now() - t0);
       gitStatus = null; // plain build (command absent) or git unavailable
     }
   }
@@ -586,13 +582,11 @@
   }
   $: updateDiskSpace(currentPath, isHome, !!archive);
   async function updateDiskSpace(path: string, home: boolean, inArchive: boolean) {
-    if (home || inArchive || !path) { diskFree = null; diskTotal = null; perfDisk = 0; return; }
-    const t0 = performance.now();
+    if (home || inArchive || !path) { diskFree = null; diskTotal = null; return; }
     try {
       const d = await invoke<{ free: number; total: number }>("disk_space", { path });
-      perfDisk = Math.round(performance.now() - t0);
       if (currentPath === path) { diskFree = d.free; diskTotal = d.total; }
-    } catch { perfDisk = Math.round(performance.now() - t0); if (currentPath === path) { diskFree = null; diskTotal = null; } }
+    } catch { if (currentPath === path) { diskFree = null; diskTotal = null; } }
   }
 
   const AI_CONSOLE_LABEL = "ai-console";
@@ -865,19 +859,10 @@
     if (servedFromCache) {
       entries = servedFromCache;
       loading = false;
-      perfCached = true;
-      perfPaint = 0;
-      perfSettle = 0;
-      perfItems = servedFromCache.length;
       await tick(); // let the reactive `visible` derive before the post-load hooks read it
     } else {
     entries = [];
     loading = true;
-    // Perf instrumentation (CPE-691/757): time-to-first-paint / time-to-settled, surfaced on-screen while
-    // we diagnose the reported slowness (no devtools in the release build).
-    perfCached = false;
-    const perfStart = performance.now();
-    let perfPainted = false;
     try {
       // Coalesce stream batches (CPE-689): buffer incoming batches and flush to `entries` once per
       // animation frame, so the reactive `visible = sortEntries(entries…)` re-sorts a handful of times
@@ -895,10 +880,6 @@
         entries = entries.concat(buffer);
         buffer = [];
         loading = false; // first real rows are in the DOM — drop the "Loading…" placeholder
-        if (!perfPainted) {
-          perfPainted = true;
-          perfPaint = Math.round(performance.now() - perfStart);
-        }
       };
       channel.onmessage = (batch) => {
         if (gen !== loadGen) return; // superseded by a newer navigation — drop stale rows
@@ -921,11 +902,7 @@
     }
       // Cache the freshly-streamed listing so a later navigation back here paints instantly (CPE-756),
       // and record the settle time for the on-screen perf readout (CPE-757).
-      if (gen === loadGen) {
-        perfSettle = Math.round(performance.now() - perfStart);
-        perfItems = entries.length;
-        cachePut(path, entries);
-      }
+      if (gen === loadGen) cachePut(path, entries);
     }
 
     // A stream superseded mid-flight already had its state handed to the newer load — stop here so the
@@ -2170,6 +2147,7 @@
       case "settings": showSettings = true; break;
       case "shortcuts": shortcutsOpen = true; break;
       case "documents": openDocs(currentSection()); break;
+      case "diagnostics": diagnostics = !diagnostics; settings.saveDiagnostics(diagnostics); break;
       case "about": showAbout = true; break;
       case "content-search": if (!isHome && !archive) contentSearchOpen = true; break;
       case "find-duplicates": if (!isHome && !archive) duplicatesOpen = true; break;
@@ -2461,7 +2439,7 @@
 
 <svelte:window on:keydown={handleKeydown} />
 
-<MenuBar on:select={(e) => onMenuSelect(e.detail)} />
+<MenuBar {diagnostics} on:select={(e) => onMenuSelect(e.detail)} />
 
 <Toolbar label={$t("tb.application")}>
   <svelte:fragment slot="actions">
@@ -2848,11 +2826,9 @@
   />
 {/if}
 
-<!-- Temporary on-screen perf readout (CPE-757): last navigation's timing, so we can pinpoint the slowness. -->
-{#if showPerf}
-  <div class="perf-readout" title="Last navigation timing (CPE-757 diagnostic)">
-    ⏱ {perfCached ? "cache" : `paint ${perfPaint}ms · settle ${perfSettle}ms`} · {perfItems} items · git {perfGit}ms · disk {perfDisk}ms
-  </div>
+<!-- Diagnostics overlay (CPE-758): on-screen timing of every OS call, toggled from Application → Diagnostics. -->
+{#if diagnostics}
+  <DiagnosticsOverlay />
 {/if}
 
 {#if batchRenameFor}
@@ -3109,21 +3085,5 @@
     font-size: 10px;
     font-weight: 700;
     line-height: 1;
-  }
-  /* Temporary nav-perf readout (CPE-757). */
-  .perf-readout {
-    position: fixed;
-    left: 8px;
-    bottom: 8px;
-    z-index: 300;
-    padding: 4px 9px;
-    border-radius: 6px;
-    background: rgba(0, 0, 0, 0.72);
-    color: #7fe0a0;
-    border: 1px solid rgba(255, 255, 255, 0.15);
-    font-family: var(--mono, ui-monospace, Consolas, monospace);
-    font-size: 11px;
-    pointer-events: none;
-    white-space: nowrap;
   }
 </style>

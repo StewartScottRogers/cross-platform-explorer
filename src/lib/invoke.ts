@@ -10,13 +10,27 @@
 // already show their own progress import `rawInvoke` instead, so they don't double-signal (see CPE-550).
 import { invoke as coreInvoke } from "@tauri-apps/api/core";
 import { withBusy } from "./busy";
+import { diagnosticsEnabled, recordCall } from "./diagnostics";
+
+/** Time a backend call for Diagnostics (CPE-758) when it's on — no-op / zero overhead when off. The
+ *  command name is the first invoke arg. Records on both resolve and reject so failures still show. */
+function timed<T>(cmd: unknown, p: Promise<T>): Promise<T> {
+  if (!diagnosticsEnabled()) return p;
+  const t0 = performance.now();
+  return p.then(
+    (v) => { recordCall(String(cmd), performance.now() - t0, true); return v; },
+    (e) => { recordCall(String(cmd), performance.now() - t0, false); throw e; },
+  );
+}
 
 /**
- * The untracked Tauri invoke — identical to `@tauri-apps/api/core`'s `invoke`, with NO busy-cursor
- * tracking. Use this only for streaming / self-progress operations that opt out of the global wait
- * cursor (CPE-550). Everywhere else, prefer the default {@link invoke} export.
+ * The untracked Tauri invoke — like `@tauri-apps/api/core`'s `invoke`, with NO busy-cursor tracking.
+ * Use this only for streaming / self-progress operations that opt out of the global wait cursor
+ * (CPE-550). Everywhere else, prefer the default {@link invoke} export. Still Diagnostics-timed (CPE-758).
  */
-export const rawInvoke = coreInvoke;
+export function rawInvoke<T = unknown>(...args: Parameters<typeof coreInvoke>): Promise<T> {
+  return timed(args[0], coreInvoke<T>(...args));
+}
 
 /**
  * Tauri `invoke`, wrapped so a long-running call raises the app-wide busy cursor (CPE-547). A drop-in
@@ -25,5 +39,5 @@ export const rawInvoke = coreInvoke;
  * never leave the cursor stuck.
  */
 export function invoke<T = unknown>(...args: Parameters<typeof coreInvoke>): Promise<T> {
-  return withBusy(() => coreInvoke<T>(...args));
+  return withBusy(() => timed(args[0], coreInvoke<T>(...args)));
 }
