@@ -71,6 +71,8 @@ function mockBackend(listing: DirEntry[]) {
       case "delete_to_trash":
       case "restore_from_trash":
         return (args?.paths as string[]).map((p) => ({ path: p, ok: true, error: "" }));
+      case "read_archive_entries":
+        return [{ name: "inside.txt", size: 10, is_dir: false }];
       case "read_file_text": return "FILE PREVIEW CONTENT";
       case "find_files_by_name": return { matches: [], dirs_scanned: 1, truncated: false };
       case "find_files_by_name_stream": {
@@ -163,6 +165,19 @@ describe("selection + status bar (CPE-676 net)", () => {
 
     await fireEvent.click(screen.getByText("banana.txt"), { ctrlKey: true });
     await waitFor(() => expect(screen.getByText(/^2 selected/)).toBeTruthy());
+  });
+});
+
+describe("archive browsing (CPE-676 net)", () => {
+  it("opens a zip into a read-only archive view showing its contents", async () => {
+    mockBackend([file("bundle.zip", "zip")]);
+    await enterDrive();
+    await waitFor(() => expect(screen.getByText("bundle.zip")).toBeTruthy());
+
+    await fireEvent.dblClick(screen.getByText("bundle.zip"));
+
+    await waitFor(() => expect(screen.getByText("inside.txt")).toBeTruthy());
+    expect(invoke.mock.calls.some((c) => c[0] === "read_archive_entries")).toBe(true);
   });
 });
 
