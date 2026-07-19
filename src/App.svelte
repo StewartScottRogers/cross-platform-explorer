@@ -21,6 +21,7 @@
   import { initAgentSessions, agentSessions, watchTargetFor, normalizePath, clearAgentSessions } from "./lib/agentSessions";
   import { startAgentWatch, stopAgentWatch, type FsActivity } from "./lib/sidecar";
   import { initAgentActivity, fsActivity, recentActivities, agentTimeline, affectsListing } from "./lib/agentActivity";
+  import { initAgentDiffs } from "./lib/agentDiffs";
   import AgentTimeline from "./lib/components/AgentTimeline.svelte";
   import UpdateDialog from "./lib/components/UpdateDialog.svelte";
   import TabBar from "./lib/components/TabBar.svelte";
@@ -468,6 +469,8 @@
   // running agent's project, and off the moment it leaves — off means off (AGENT-WATCH.md).
   let activeWatchCwd = "";
   let unlistenActivity: (() => void) | null = null;
+  /** Teardown for the before/after diff listener (CPE-744); paired with the activity listener. */
+  let unlistenDiffs: (() => void) | null = null;
   /** Whether the Agent Watch activity timeline drawer is open (CPE-400). */
   let showTimeline = false;
 
@@ -488,10 +491,13 @@
     activeWatchCwd = cwd;
     unlistenActivity?.();
     unlistenActivity = null;
+    unlistenDiffs?.();
+    unlistenDiffs = null;
     if (watchRefreshTimer) { clearTimeout(watchRefreshTimer); watchRefreshTimer = null; }
     await stopAgentWatch();
     if (cwd) {
       unlistenActivity = await initAgentActivity(onAgentBatch);
+      unlistenDiffs = await initAgentDiffs();
       await startAgentWatch(cwd);
     } else {
       showTimeline = false; // no watched project ⇒ close the timeline drawer (CPE-400)

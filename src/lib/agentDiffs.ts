@@ -1,0 +1,144 @@
+import { writable, type Readable } from "svelte/store";
+import { listen } from "@tauri-apps/api/event";
+import { inlineDiff, type InlineSeg } from "./diff";
+
+/**
+ * Per-path before/after store for Agent Watch "Edit Diff Peek" (CPE-744, epic CPE-727).
+ *
+ * The host emits `ai-console://fs-diff` records — `{path, before, after}` — for each agent write it
+ * shadowed (CPE-743; `before` is "" for a newly-created file). Here we fold them into a bounded,
+ * newest-first, per-path store the touched rows + timeline (CPE-745/746) look up to show what changed.
+ * The diff itself is computed on demand via `diff.ts` (`inlineDiff`) — the host stays dumb and ships
+ * only the two strings. Strictly additive + idle-by-default: the store is empty and no listener runs
+ * until watching starts, and it clears on stop (AGENT-WATCH.md: "off means off").
+ */
+
+/** One before/after record for a file the agent wrote. `before` is "" for a created file (all-added). */
+export interface FsDiff {
+  path: string;
+  before: string;
+  after: string;
+}
+
+/** How many per-file diffs to retain (newest-first). Bounded so a big refactor can't grow the store. */
+export const DIFF_CAP = 200;
+/** Total character budget across retained before+after content; oldest entries evict when exceeded. */
+export const DIFF_CHAR_CAP = 4_000_000;
+
+/** The store state: the latest diff per path, plus newest-first order + a running char total for
+ *  bounded eviction. */
+export interface DiffState {
+  byPath: Record<string, FsDiff>;
+  order: string[];
+  chars: number;
+}
+
+/** A fresh, empty state (the idle/off value). */
+export const emptyDiffState = (): DiffState => ({ byPath: {}, order: [], chars: 0 });
+
+const cost = (d: FsDiff): number => d.before.length + d.after.length;
+
+/**
+ * Fold a batch of diffs into the previous state (pure). Latest-per-path wins and moves to the front;
+ * the store is then evicted from the oldest end until within both the count cap and the char cap.
+ */
+export function foldDiffs(
+  prev: DiffState,
+  items: FsDiff[],
+  cap = DIFF_CAP,
+  charCap = DIFF_CHAR_CAP,
+): DiffState {
+  const byPath = { ...prev.byPath };
+  let order = prev.order.slice();
+  let chars = prev.chars;
+  for (const it of items) {
+    const existing = byPath[it.path];
+    if (existing) {
+      chars -= cost(existing);
+      order = order.filter((p) => p !== it.path);
+    }
+    byPath[it.path] = it;
+    chars += cost(it);
+    order.unshift(it.path);
+  }
+  while (order.length > cap || chars > charCap) {
+    const victim = order.pop();
+    if (victim === undefined) break;
+    const d = byPath[victim];
+    if (d) {
+      chars -= cost(d);
+      delete byPath[victim];
+    }
+  }
+  return { byPath, order, chars };
+}
+
+/** Normalize an `ai-console://fs-diff` payload into a clean, typed list, dropping anything malformed.
+ *  Pure so the host→UI wire format is unit-testable headlessly (sibling of `normalizeFsActivity`). */
+export function normalizeFsDiff(payload: unknown): FsDiff[] {
+  if (!Array.isArray(payload)) return [];
+  const out: FsDiff[] = [];
+  for (const item of payload) {
+    const path = (item as { path?: unknown })?.path;
+    const before = (item as { before?: unknown })?.before;
+    const after = (item as { after?: unknown })?.after;
+    if (
+      typeof path === "string" &&
+      path &&
+      typeof before === "string" &&
+      typeof after === "string"
+    ) {
+      out.push({ path, before, after });
+    }
+  }
+  return out;
+}
+
+/** The latest before/after for a path, or `null` if none is recorded. */
+export function diffFor(state: DiffState, path: string): FsDiff | null {
+  return state.byPath[path] ?? null;
+}
+
+/** Intra-content diff segments (old/new) for a path's latest write via `diff.ts`, or `null` if none. */
+export function diffSegs(
+  state: DiffState,
+  path: string,
+): { old: InlineSeg[]; new: InlineSeg[] } | null {
+  const d = state.byPath[path];
+  return d ? inlineDiff(d.before, d.after) : null;
+}
+
+const store = writable<DiffState>(emptyDiffState());
+
+/** Reactive per-path diff state (empty when not watching). */
+export const agentDiffs: Readable<DiffState> = store;
+
+/** Fold a raw `ai-console://fs-diff` payload into the store (exposed for headless tests). */
+export function ingestDiff(payload: unknown): void {
+  const items = normalizeFsDiff(payload);
+  if (items.length) store.update((prev) => foldDiffs(prev, items));
+}
+
+/** Test/introspection helper: the current diff state synchronously. */
+export function currentDiffs(): DiffState {
+  let snapshot = emptyDiffState();
+  store.subscribe((v) => (snapshot = v))();
+  return snapshot;
+}
+
+/** Clear the diff store (on stop-watching), so a stale session never bleeds into a new one. */
+export function clearDiffs(): void {
+  store.set(emptyDiffState());
+}
+
+/**
+ * Start consuming `ai-console://fs-diff` events. Returns a teardown that unlistens and clears the
+ * store. Call when watching begins; call the teardown when it ends (mirrors `initAgentActivity`).
+ */
+export async function initAgentDiffs(): Promise<() => void> {
+  const unlisten = await listen("ai-console://fs-diff", (e) => ingestDiff(e.payload));
+  return () => {
+    unlisten();
+    clearDiffs();
+  };
+}
