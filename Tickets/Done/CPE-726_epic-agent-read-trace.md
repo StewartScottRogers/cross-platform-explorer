@@ -2,14 +2,23 @@
 id: CPE-726
 title: "EPIC: Agent read-trace — surface the reads the watcher can't see"
 type: Task
-status: In Progress
+status: Done
 priority: High
 component: Frontend
 tags: [epic]
 estimate: 4h+
 created: 2026-07-18
-closed:
+closed: 2026-07-19
 ---
+
+## Resolution
+Closed 2026-07-19 — all children delivered and merged to `main` (aa12b17). Reads are now first-class in
+Agent Watch: they already streamed from the agent's tool-output (CPE-405), and this epic added the two
+missing visibility surfaces — **CPE-741** (a durable per-session "Consulted files" panel in the timeline
+drawer) and **CPE-742** (read-vs-write contrast in the folder heat-map, a cooler tint for read-only
+subtrees). Re-scoped at activation once research showed CPE-405 had already shipped the pipeline + inline
+annotation (see Decisions). DoD met: reads appear as a distinct durable set; read vs. write is visually
+distinguishable in the heat-map; off-means-off preserved (all logic idle/empty when not watching).
 
 ## Goal
 Surface the file *reads* the filesystem watcher can't observe (the acknowledged CPE-405 gap) as a

@@ -2,14 +2,24 @@
 id: CPE-727
 title: "EPIC: Edit diff peek — see what each agent write changed"
 type: Task
-status: In Progress
+status: Done
 priority: High
 component: Multiple
 tags: [epic, big-design]
 estimate: 4h+
 created: 2026-07-18
-closed:
+closed: 2026-07-19
 ---
+
+## Resolution
+Closed 2026-07-19 — all four children delivered and merged to `main` (aa12b17). Agent Watch can now show
+*what each agent write changed*, end to end: **CPE-743** (host shadow-content store pairs each write with its
+cached "before", emitted on `ai-console://fs-diff`) → **CPE-744** (frontend per-path diff store) → **CPE-745**
+(inline diff peek on hover of a write-touched timeline entry, with a "+a −d" summary) → **CPE-746** (full
+side-by-side before/after modal). DoD met: hovering a write shows the exact hunks, click opens side-by-side;
+snapshots are bounded (LRU by bytes/entries) and text-only; off-means-off (feature-gated, freed on stop).
+Follow-up (documented, not blocking): the FileList-row peek was deferred (virtualized list — needs the
+CPE-707 column work + a GUI pass); the timeline is the review surface today.
 
 ## Goal
 Capture a before/after snapshot per mutation and render an inline, scrubbing-friendly diff: hover a touched
