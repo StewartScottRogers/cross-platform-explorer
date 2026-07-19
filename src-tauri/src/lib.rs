@@ -33,7 +33,12 @@ mod ticket_board;
 /// Read every ticket under `<root>/Tickets/{Backlog,Doing,Blocked,Deferred,Done}/CPE-*.md` into board
 /// cards (CPE-520). Read-only; a malformed file is skipped, never fails the listing.
 #[tauri::command]
-fn board_cards(root: String) -> Vec<ticket_board::Card> {
+async fn board_cards(root: String) -> Vec<ticket_board::Card> {
+    tauri::async_runtime::spawn_blocking(move || board_cards_impl(root))
+        .await.unwrap()
+}
+
+fn board_cards_impl(root: String) -> Vec<ticket_board::Card> {
     let tickets = std::path::Path::new(&root).join("Tickets");
     let mut cards = Vec::new();
     for col in ticket_board::COLUMNS {
@@ -57,7 +62,12 @@ fn board_cards(root: String) -> Vec<ticket_board::Card> {
 /// Find the nearest project root at/above `start` — the closest ancestor dir with a `Tickets/` folder —
 /// so the Agent Board can auto-open the project you're inside (CPE-554). `None` if none is found.
 #[tauri::command]
-fn find_project_root(start: String) -> Option<String> {
+async fn find_project_root(start: String) -> Option<String> {
+    tauri::async_runtime::spawn_blocking(move || find_project_root_impl(start))
+        .await.unwrap()
+}
+
+fn find_project_root_impl(start: String) -> Option<String> {
     ticket_board::nearest_project_root(std::path::Path::new(&start))
         .map(|p| p.to_string_lossy().into_owned())
 }
@@ -66,7 +76,12 @@ fn find_project_root(start: String) -> Option<String> {
 /// file into that folder. The only writer. Refuses an unknown id/column and never clobbers an existing
 /// file. A move to the current column is a no-op.
 #[tauri::command]
-fn board_move(root: String, id: String, to_column: String) -> Result<(), String> {
+async fn board_move(root: String, id: String, to_column: String) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || board_move_impl(root, id, to_column))
+        .await.map_err(|e| e.to_string())?
+}
+
+fn board_move_impl(root: String, id: String, to_column: String) -> Result<(), String> {
     let folder =
         ticket_board::folder_for_column(&to_column).ok_or_else(|| format!("unknown column '{to_column}'"))?;
     let status = ticket_board::status_for_column(&to_column).unwrap_or(folder);
@@ -132,7 +147,12 @@ fn collect_archived(dir: &std::path::Path, top_level: bool, out: &mut Vec<ticket
 /// The archived Done tickets (in dated `Done/**` subfolders) for the board's "show archived" affordance
 /// (CPE-531). Kept separate from `board_cards` so the default board stays fast as Done grows.
 #[tauri::command]
-fn board_archived(root: String) -> Vec<ticket_board::Card> {
+async fn board_archived(root: String) -> Vec<ticket_board::Card> {
+    tauri::async_runtime::spawn_blocking(move || board_archived_impl(root))
+        .await.unwrap()
+}
+
+fn board_archived_impl(root: String) -> Vec<ticket_board::Card> {
     let done = std::path::Path::new(&root).join("Tickets").join("Done");
     let mut out = Vec::new();
     collect_archived(&done, true, &mut out);
@@ -142,7 +162,12 @@ fn board_archived(root: String) -> Vec<ticket_board::Card> {
 /// List the repo's epics for the board's epic-organized view (CPE-530): active/proposed epics from
 /// `Tickets/Epics/` + closed epics from `Tickets/Done/` (top level), each `epic`-tagged. Read-only.
 #[tauri::command]
-fn board_epics(root: String) -> Vec<ticket_board::Epic> {
+async fn board_epics(root: String) -> Vec<ticket_board::Epic> {
+    tauri::async_runtime::spawn_blocking(move || board_epics_impl(root))
+        .await.unwrap()
+}
+
+fn board_epics_impl(root: String) -> Vec<ticket_board::Epic> {
     let tickets = std::path::Path::new(&root).join("Tickets");
     let mut epics = Vec::new();
     for sub in ["Epics", "Done"] {
@@ -182,7 +207,12 @@ fn find_ticket_file(root: &str, id: &str) -> Option<std::path::PathBuf> {
 
 /// Toggle the `review` tag on ticket `id` (CPE-523) — drives the board's virtual Review lane.
 #[tauri::command]
-fn board_review(root: String, id: String, on: bool) -> Result<(), String> {
+async fn board_review(root: String, id: String, on: bool) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || board_review_impl(root, id, on))
+        .await.map_err(|e| e.to_string())?
+}
+
+fn board_review_impl(root: String, id: String, on: bool) -> Result<(), String> {
     let path = find_ticket_file(&root, &id).ok_or_else(|| format!("ticket {id} not found"))?;
     let md = std::fs::read_to_string(&path).map_err(|e| e.to_string())?;
     std::fs::write(&path, ticket_board::set_review(&md, on)).map_err(|e| e.to_string())
@@ -191,7 +221,12 @@ fn board_review(root: String, id: String, on: bool) -> Result<(), String> {
 /// Append a finding note to ticket `id` (CPE-523) — the affordance a dispatched agent (or the UI) uses
 /// to record progress on a card.
 #[tauri::command]
-fn board_note(root: String, id: String, note: String) -> Result<(), String> {
+async fn board_note(root: String, id: String, note: String) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || board_note_impl(root, id, note))
+        .await.map_err(|e| e.to_string())?
+}
+
+fn board_note_impl(root: String, id: String, note: String) -> Result<(), String> {
     let path = find_ticket_file(&root, &id).ok_or_else(|| format!("ticket {id} not found"))?;
     let md = std::fs::read_to_string(&path).map_err(|e| e.to_string())?;
     std::fs::write(&path, ticket_board::append_finding(&md, &note)).map_err(|e| e.to_string())
@@ -209,7 +244,12 @@ struct WorkbenchDiff {
 /// (CPE-535): a non-repo folder is a normal `is_repo:false` result (not an error), git-not-installed is
 /// a distinct error, and an empty `root` is refused. An optional `path` limits it to one file. Read-only.
 #[tauri::command]
-fn workbench_diff(root: String, path: Option<String>) -> Result<WorkbenchDiff, String> {
+async fn workbench_diff(root: String, path: Option<String>) -> Result<WorkbenchDiff, String> {
+    tauri::async_runtime::spawn_blocking(move || workbench_diff_impl(root, path))
+        .await.map_err(|e| e.to_string())?
+}
+
+fn workbench_diff_impl(root: String, path: Option<String>) -> Result<WorkbenchDiff, String> {
     if root.trim().is_empty() {
         return Err("no-folder".to_string()); // opened on Home / no folder
     }
@@ -571,7 +611,12 @@ fn entry_for_path(path: &str) -> Option<DirEntry> {
 /// no longer exist or can't be read are silently skipped, so a smart folder self-heals as files move or
 /// are deleted rather than showing dead rows.
 #[tauri::command]
-fn entries_for_paths(paths: Vec<String>) -> Vec<DirEntry> {
+async fn entries_for_paths(paths: Vec<String>) -> Vec<DirEntry> {
+    tauri::async_runtime::spawn_blocking(move || entries_for_paths_impl(paths))
+        .await.unwrap()
+}
+
+fn entries_for_paths_impl(paths: Vec<String>) -> Vec<DirEntry> {
     paths.iter().filter_map(|p| entry_for_path(p)).collect()
 }
 
@@ -624,7 +669,12 @@ fn paths_same_volume(a: &str, b: &str) -> bool {
 /// CPE-661): same volume → move, different → copy. Best-effort — any uncertainty yields `false` so the
 /// caller falls back to copy (which never loses the source).
 #[tauri::command]
-fn same_volume(a: String, b: String) -> bool {
+async fn same_volume(a: String, b: String) -> bool {
+    tauri::async_runtime::spawn_blocking(move || same_volume_impl(a, b))
+        .await.unwrap()
+}
+
+fn same_volume_impl(a: String, b: String) -> bool {
     paths_same_volume(&a, &b)
 }
 
@@ -654,7 +704,12 @@ fn valid_entry_name(name: &str) -> Result<(), String> {
 
 /// Create a new directory `name` inside `path`.
 #[tauri::command]
-fn create_dir(path: String, name: String) -> Result<String, String> {
+async fn create_dir(path: String, name: String) -> Result<String, String> {
+    tauri::async_runtime::spawn_blocking(move || create_dir_impl(path, name))
+        .await.map_err(|e| e.to_string())?
+}
+
+fn create_dir_impl(path: String, name: String) -> Result<String, String> {
     let name = name.trim();
     if name.is_empty() {
         return Err("Name cannot be empty".to_string());
@@ -671,7 +726,12 @@ fn create_dir(path: String, name: String) -> Result<String, String> {
 /// Create a new empty file `name` inside `path` (CPE-254). Mirrors `create_dir`:
 /// `create_new` fails atomically rather than clobbering an existing file.
 #[tauri::command]
-fn create_file(path: String, name: String) -> Result<String, String> {
+async fn create_file(path: String, name: String) -> Result<String, String> {
+    tauri::async_runtime::spawn_blocking(move || create_file_impl(path, name))
+        .await.map_err(|e| e.to_string())?
+}
+
+fn create_file_impl(path: String, name: String) -> Result<String, String> {
     let name = name.trim();
     if name.is_empty() {
         return Err("Name cannot be empty".to_string());
@@ -692,7 +752,12 @@ fn create_file(path: String, name: String) -> Result<String, String> {
 /// Write UTF-8 text back to a file, replacing its contents — for the content
 /// editor. Returns the new byte length.
 #[tauri::command]
-fn write_file_text(path: String, contents: String) -> Result<u64, String> {
+async fn write_file_text(path: String, contents: String) -> Result<u64, String> {
+    tauri::async_runtime::spawn_blocking(move || write_file_text_impl(path, contents))
+        .await.map_err(|e| e.to_string())?
+}
+
+fn write_file_text_impl(path: String, contents: String) -> Result<u64, String> {
     fs::write(&path, contents.as_bytes()).map_err(|e| e.to_string())?;
     Ok(contents.len() as u64)
 }
@@ -834,7 +899,12 @@ fn iso_entries(path: &str) -> Result<Vec<ArchiveEntry>, String> {
 /// gzip-compressed TAR (.tar.gz/.tgz), single-file gzip (.gz), 7-Zip, and ISO.
 /// Reads only the archive directory, so it stays cheap even for large archives.
 #[tauri::command]
-fn read_archive_entries(path: String) -> Result<Vec<ArchiveEntry>, String> {
+async fn read_archive_entries(path: String) -> Result<Vec<ArchiveEntry>, String> {
+    tauri::async_runtime::spawn_blocking(move || read_archive_entries_impl(path))
+        .await.map_err(|e| e.to_string())?
+}
+
+fn read_archive_entries_impl(path: String) -> Result<Vec<ArchiveEntry>, String> {
     let lower = path.to_lowercase();
     if lower.ends_with(".tar") {
         let file = fs::File::open(&path).map_err(|e| e.to_string())?;
@@ -1379,7 +1449,12 @@ fn ensure_previewable_size(path: &str, cap: u64) -> Result<(), String> {
 /// Return a human-readable text summary of a binary file, dispatched by
 /// extension. Rendered read-only by the preview pane's "info" provider.
 #[tauri::command]
-fn read_preview_info(path: String) -> Result<String, String> {
+async fn read_preview_info(path: String) -> Result<String, String> {
+    tauri::async_runtime::spawn_blocking(move || read_preview_info_impl(path))
+        .await.map_err(|e| e.to_string())?
+}
+
+fn read_preview_info_impl(path: String) -> Result<String, String> {
     ensure_previewable_size(&path, PREVIEW_INFO_MAX_BYTES)?;
     let ext = extension_of(Path::new(&path));
     match ext.as_str() {
@@ -1404,7 +1479,12 @@ fn read_preview_info(path: String) -> Result<String, String> {
 /// flattened composite; TIFF uses the image crate. Capped by the source reader,
 /// and errors (rather than hangs) on a corrupt file.
 #[tauri::command]
-fn read_image_data_url(path: String) -> Result<String, String> {
+async fn read_image_data_url(path: String) -> Result<String, String> {
+    tauri::async_runtime::spawn_blocking(move || read_image_data_url_impl(path))
+        .await.map_err(|e| e.to_string())?
+}
+
+fn read_image_data_url_impl(path: String) -> Result<String, String> {
     use base64::Engine;
     use std::io::Cursor;
 
@@ -1532,7 +1612,12 @@ fn thumbnail(app: tauri::AppHandle, path: String, max_edge: u32) -> Result<Strin
 /// when the file is too large, unreadable, or not valid UTF-8 — the frontend
 /// shows a "can't preview" state in that case.
 #[tauri::command]
-fn read_file_text(path: String, max_bytes: u64) -> Result<String, String> {
+async fn read_file_text(path: String, max_bytes: u64) -> Result<String, String> {
+    tauri::async_runtime::spawn_blocking(move || read_file_text_impl(path, max_bytes))
+        .await.map_err(|e| e.to_string())?
+}
+
+fn read_file_text_impl(path: String, max_bytes: u64) -> Result<String, String> {
     let p = Path::new(&path);
     let meta = fs::metadata(p).map_err(|e| e.to_string())?;
     if meta.len() > max_bytes {
@@ -1547,7 +1632,12 @@ fn read_file_text(path: String, max_bytes: u64) -> Result<String, String> {
 
 /// Rename a single entry in place. Returns the new path.
 #[tauri::command]
-fn rename_entry(path: String, new_name: String) -> Result<String, String> {
+async fn rename_entry(path: String, new_name: String) -> Result<String, String> {
+    tauri::async_runtime::spawn_blocking(move || rename_entry_impl(path, new_name))
+        .await.map_err(|e| e.to_string())?
+}
+
+fn rename_entry_impl(path: String, new_name: String) -> Result<String, String> {
     let new_name = new_name.trim();
     if new_name.is_empty() {
         return Err("Name cannot be empty".to_string());
@@ -1572,7 +1662,12 @@ fn rename_entry(path: String, new_name: String) -> Result<String, String> {
 
 /// Move entries to the OS Recycle Bin / Trash. Recoverable by the user.
 #[tauri::command]
-fn delete_to_trash(paths: Vec<String>) -> Vec<OpResult> {
+async fn delete_to_trash(paths: Vec<String>) -> Vec<OpResult> {
+    tauri::async_runtime::spawn_blocking(move || delete_to_trash_impl(paths))
+        .await.unwrap()
+}
+
+fn delete_to_trash_impl(paths: Vec<String>) -> Vec<OpResult> {
     paths
         .iter()
         .map(|p| {
@@ -1592,14 +1687,25 @@ fn delete_to_trash(paths: Vec<String>) -> Vec<OpResult> {
 /// delete at all. Offering an Undo that silently does nothing on one platform is
 /// worse than not offering it — so we tell the truth instead of guessing.
 #[tauri::command]
-fn can_restore_from_trash() -> bool {
+async fn can_restore_from_trash() -> bool {
+    tauri::async_runtime::spawn_blocking(can_restore_from_trash_impl)
+        .await.unwrap()
+}
+
+fn can_restore_from_trash_impl() -> bool {
     cfg!(any(target_os = "windows", target_os = "linux"))
 }
 
 /// Restore previously-trashed items to their original paths.
 #[cfg(any(target_os = "windows", target_os = "linux"))]
 #[tauri::command]
-fn restore_from_trash(paths: Vec<String>) -> Vec<OpResult> {
+async fn restore_from_trash(paths: Vec<String>) -> Vec<OpResult> {
+    tauri::async_runtime::spawn_blocking(move || restore_from_trash_impl(paths))
+        .await.unwrap()
+}
+
+#[cfg(any(target_os = "windows", target_os = "linux"))]
+fn restore_from_trash_impl(paths: Vec<String>) -> Vec<OpResult> {
     use trash::os_limited::{list, restore_all};
 
     let all = match list() {
@@ -1661,11 +1767,11 @@ fn restore_from_trash(paths: Vec<String>) -> Vec<OpResult> {
 
 /// macOS has no trash listing/restore API in the `trash` crate. Rather than
 /// pretend, this returns a clear error — and the UI never reaches here, because
-/// `can_restore_from_trash()` is false so delete is never pushed onto the undo
+/// `can_restore_from_trash_impl()` is false so delete is never pushed onto the undo
 /// stack in the first place.
 #[cfg(not(any(target_os = "windows", target_os = "linux")))]
 #[tauri::command]
-fn restore_from_trash(paths: Vec<String>) -> Vec<OpResult> {
+fn restore_from_trash_impl(paths: Vec<String>) -> Vec<OpResult> {
     paths
         .iter()
         .map(|p| {
@@ -1680,7 +1786,12 @@ fn restore_from_trash(paths: Vec<String>) -> Vec<OpResult> {
 /// Permanently delete entries. Irreversible — the UI must confirm explicitly
 /// before ever calling this.
 #[tauri::command]
-fn delete_permanent(paths: Vec<String>) -> Vec<OpResult> {
+async fn delete_permanent(paths: Vec<String>) -> Vec<OpResult> {
+    tauri::async_runtime::spawn_blocking(move || delete_permanent_impl(paths))
+        .await.unwrap()
+}
+
+fn delete_permanent_impl(paths: Vec<String>) -> Vec<OpResult> {
     paths
         .iter()
         .map(|p| {
@@ -1700,7 +1811,12 @@ fn delete_permanent(paths: Vec<String>) -> Vec<OpResult> {
 
 /// Copy entries into `dest`, auto-renaming on collision.
 #[tauri::command]
-fn copy_entries(paths: Vec<String>, dest: String) -> Vec<OpResult> {
+async fn copy_entries(paths: Vec<String>, dest: String) -> Vec<OpResult> {
+    tauri::async_runtime::spawn_blocking(move || copy_entries_impl(paths, dest))
+        .await.unwrap()
+}
+
+fn copy_entries_impl(paths: Vec<String>, dest: String) -> Vec<OpResult> {
     let dest_dir = PathBuf::from(&dest);
     paths
         .iter()
@@ -1730,7 +1846,12 @@ fn copy_entries(paths: Vec<String>, dest: String) -> Vec<OpResult> {
 /// copy-then-delete when the move crosses a filesystem boundary (`fs::rename`
 /// fails across volumes, e.g. C: -> Z:).
 #[tauri::command]
-fn move_entries(paths: Vec<String>, dest: String) -> Vec<OpResult> {
+async fn move_entries(paths: Vec<String>, dest: String) -> Vec<OpResult> {
+    tauri::async_runtime::spawn_blocking(move || move_entries_impl(paths, dest))
+        .await.unwrap()
+}
+
+fn move_entries_impl(paths: Vec<String>, dest: String) -> Vec<OpResult> {
     let dest_dir = PathBuf::from(&dest);
     paths
         .iter()
@@ -2098,7 +2219,12 @@ fn cancel_transfer(id: u64) {
 /// Refuses to overwrite: if `to` already exists, the undo fails loudly rather
 /// than clobbering whatever now occupies that name.
 #[tauri::command]
-fn move_exact(pairs: Vec<(String, String)>) -> Vec<OpResult> {
+async fn move_exact(pairs: Vec<(String, String)>) -> Vec<OpResult> {
+    tauri::async_runtime::spawn_blocking(move || move_exact_impl(pairs))
+        .await.unwrap()
+}
+
+fn move_exact_impl(pairs: Vec<(String, String)>) -> Vec<OpResult> {
     pairs
         .iter()
         .map(|(from, to)| {
@@ -2128,7 +2254,12 @@ fn move_exact(pairs: Vec<(String, String)>) -> Vec<OpResult> {
 
 /// Detailed metadata for the Properties dialog.
 #[tauri::command]
-fn entry_info(path: String) -> Result<EntryInfo, String> {
+async fn entry_info(path: String) -> Result<EntryInfo, String> {
+    tauri::async_runtime::spawn_blocking(move || entry_info_impl(path))
+        .await.map_err(|e| e.to_string())?
+}
+
+fn entry_info_impl(path: String) -> Result<EntryInfo, String> {
     let p = Path::new(&path);
     let meta = fs::metadata(p).map_err(|e| format!("{path}: {e}"))?;
     Ok(EntryInfo {
@@ -2169,7 +2300,12 @@ fn read_exif(path: &str) -> Result<exif::Exif, exif::Error> {
 }
 
 #[tauri::command]
-fn image_meta(path: String) -> Result<ImageMeta, String> {
+async fn image_meta(path: String) -> Result<ImageMeta, String> {
+    tauri::async_runtime::spawn_blocking(move || image_meta_impl(path))
+        .await.map_err(|e| e.to_string())?
+}
+
+fn image_meta_impl(path: String) -> Result<ImageMeta, String> {
     use exif::{In, Tag};
     let mut meta = ImageMeta::default();
 
@@ -2225,7 +2361,12 @@ struct FolderStats {
 const FOLDER_STATS_MAX_ENTRIES: u64 = 500_000;
 
 #[tauri::command]
-fn folder_stats(path: String) -> Result<FolderStats, String> {
+async fn folder_stats(path: String) -> Result<FolderStats, String> {
+    tauri::async_runtime::spawn_blocking(move || folder_stats_impl(path))
+        .await.map_err(|e| e.to_string())?
+}
+
+fn folder_stats_impl(path: String) -> Result<FolderStats, String> {
     let root = Path::new(&path);
     if !root.is_dir() {
         return Err(format!("{path}: not a folder"));
@@ -2284,7 +2425,12 @@ fn dir_size_walk(p: &Path) -> u64 {
 }
 
 #[tauri::command]
-fn dir_size(path: String) -> Result<u64, String> {
+async fn dir_size(path: String) -> Result<u64, String> {
+    tauri::async_runtime::spawn_blocking(move || dir_size_impl(path))
+        .await.map_err(|e| e.to_string())?
+}
+
+fn dir_size_impl(path: String) -> Result<u64, String> {
     let p = Path::new(&path);
     if !p.exists() {
         return Err(format!("{path}: not found"));
@@ -2308,7 +2454,12 @@ struct ChildSize {
 /// the `list_dir` skip-don't-fail rule). Synchronous; the frontend supersedes a stale scan by generation
 /// (true mid-walk backend cancellation is deferred to CPE-751 if huge trees warrant it).
 #[tauri::command]
-fn dir_children_sizes(path: String) -> Result<Vec<ChildSize>, String> {
+async fn dir_children_sizes(path: String) -> Result<Vec<ChildSize>, String> {
+    tauri::async_runtime::spawn_blocking(move || dir_children_sizes_impl(path))
+        .await.map_err(|e| e.to_string())?
+}
+
+fn dir_children_sizes_impl(path: String) -> Result<Vec<ChildSize>, String> {
     use rayon::prelude::*;
     let p = Path::new(&path);
     if !p.is_dir() {
@@ -2385,7 +2536,12 @@ fn sha256_file(path: &Path) -> std::io::Result<String> {
 }
 
 #[tauri::command]
-fn hash_file(path: String) -> Result<String, String> {
+async fn hash_file(path: String) -> Result<String, String> {
+    tauri::async_runtime::spawn_blocking(move || hash_file_impl(path))
+        .await.map_err(|e| e.to_string())?
+}
+
+fn hash_file_impl(path: String) -> Result<String, String> {
     let p = Path::new(&path);
     if p.is_dir() {
         return Err(format!("{path}: is a folder"));
@@ -2409,7 +2565,12 @@ struct TextStats {
 const TEXT_STATS_MAX_BYTES: u64 = 25 * 1024 * 1024;
 
 #[tauri::command]
-fn text_stats(path: String) -> Result<TextStats, String> {
+async fn text_stats(path: String) -> Result<TextStats, String> {
+    tauri::async_runtime::spawn_blocking(move || text_stats_impl(path))
+        .await.map_err(|e| e.to_string())?
+}
+
+fn text_stats_impl(path: String) -> Result<TextStats, String> {
     let p = Path::new(&path);
     let meta = fs::metadata(p).map_err(|e| format!("{path}: {e}"))?;
     if meta.is_dir() {
@@ -2431,7 +2592,12 @@ fn text_stats(path: String) -> Result<TextStats, String> {
 /// otherwise the bytes are streamed and compared with an early exit on the first difference — cheaper
 /// and collision-free versus hashing both. A directory or unreadable path is an `Err`, never a panic.
 #[tauri::command]
-fn files_identical(a: String, b: String) -> Result<bool, String> {
+async fn files_identical(a: String, b: String) -> Result<bool, String> {
+    tauri::async_runtime::spawn_blocking(move || files_identical_impl(a, b))
+        .await.map_err(|e| e.to_string())?
+}
+
+fn files_identical_impl(a: String, b: String) -> Result<bool, String> {
     use std::io::Read;
     let (pa, pb) = (Path::new(&a), Path::new(&b));
     let (ma, mb) = (
@@ -2500,7 +2666,16 @@ fn looks_binary(bytes: &[u8]) -> bool {
 /// (reporting `truncated`). Unreadable entries are skipped, never failing the whole search — the
 /// same resilience as `list_dir`. Empty/whitespace `query` returns nothing.
 #[tauri::command]
-fn search_file_contents(
+async fn search_file_contents(
+    root: String,
+    query: String,
+    case_sensitive: bool,
+) -> Result<ContentSearchResult, String> {
+    tauri::async_runtime::spawn_blocking(move || search_file_contents_impl(root, query, case_sensitive))
+        .await.map_err(|e| e.to_string())?
+}
+
+fn search_file_contents_impl(
     root: String,
     query: String,
     case_sensitive: bool,
@@ -2801,7 +2976,12 @@ fn walk_name_matches(
 }
 
 #[tauri::command]
-fn find_files_by_name(root: String, query: String) -> Result<NameSearchResult, String> {
+async fn find_files_by_name(root: String, query: String) -> Result<NameSearchResult, String> {
+    tauri::async_runtime::spawn_blocking(move || find_files_by_name_impl(root, query))
+        .await.map_err(|e| e.to_string())?
+}
+
+fn find_files_by_name_impl(root: String, query: String) -> Result<NameSearchResult, String> {
     let mut matches = Vec::new();
     let stats = walk_name_matches(&root, &query, usize::MAX, |b| {
         matches.extend(b);
@@ -2855,7 +3035,12 @@ const DUP_MAX_FILES: u64 = 50_000;
 /// stops at a file cap (reporting `truncated`). Groups are sorted by reclaimable space (largest
 /// first). A non-folder root is an `Err`.
 #[tauri::command]
-fn find_duplicates(root: String) -> Result<DupResult, String> {
+async fn find_duplicates(root: String) -> Result<DupResult, String> {
+    tauri::async_runtime::spawn_blocking(move || find_duplicates_impl(root))
+        .await.map_err(|e| e.to_string())?
+}
+
+fn find_duplicates_impl(root: String) -> Result<DupResult, String> {
     use std::collections::HashMap;
     let root_path = Path::new(&root);
     if !root_path.is_dir() {
@@ -3143,7 +3328,12 @@ fn import_tags(app: tauri::AppHandle, json: String) -> Result<TagStore, String> 
 
 /// Return the user's home directory.
 #[tauri::command]
-fn home_dir() -> Result<String, String> {
+async fn home_dir() -> Result<String, String> {
+    tauri::async_runtime::spawn_blocking(home_dir_impl)
+        .await.map_err(|e| e.to_string())?
+}
+
+fn home_dir_impl() -> Result<String, String> {
     dirs_home()
         .map(|p| p.to_string_lossy().to_string())
         .ok_or_else(|| "could not determine home directory".to_string())
@@ -3151,7 +3341,12 @@ fn home_dir() -> Result<String, String> {
 
 /// Return the parent of `path`, or null if already at a root.
 #[tauri::command]
-fn parent_dir(path: String) -> Option<String> {
+async fn parent_dir(path: String) -> Option<String> {
+    tauri::async_runtime::spawn_blocking(move || parent_dir_impl(path))
+        .await.unwrap()
+}
+
+fn parent_dir_impl(path: String) -> Option<String> {
     Path::new(&path)
         .parent()
         .map(|p| p.to_string_lossy().to_string())
@@ -3159,7 +3354,12 @@ fn parent_dir(path: String) -> Option<String> {
 
 /// Available drives (Windows) or filesystem roots (Unix).
 #[tauri::command]
-fn list_drives() -> Vec<Place> {
+async fn list_drives() -> Vec<Place> {
+    tauri::async_runtime::spawn_blocking(list_drives_impl)
+        .await.unwrap()
+}
+
+fn list_drives_impl() -> Vec<Place> {
     let mut drives = Vec::new();
 
     #[cfg(target_os = "windows")]
@@ -3266,7 +3466,12 @@ fn resolve_known_folder(home: &Path, folder: &str, registry_name: &str) -> Optio
 /// The user's well-known folders. Only folders that actually exist are returned,
 /// so the sidebar never shows a link that leads nowhere.
 #[tauri::command]
-fn special_folders() -> Vec<Place> {
+async fn special_folders() -> Vec<Place> {
+    tauri::async_runtime::spawn_blocking(special_folders_impl)
+        .await.unwrap()
+}
+
+fn special_folders_impl() -> Vec<Place> {
     let Some(home) = dirs_home() else {
         return Vec::new();
     };
@@ -3338,7 +3543,12 @@ fn normalize_git_url(raw: &str) -> String {
 /// more reliable than the opener plugin, which wasn't launching apps for several
 /// file types. For an executable (.exe/.cmd/.bat/…) this runs it.
 #[tauri::command]
-fn open_external(path: String) -> Result<(), String> {
+async fn open_external(path: String) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || open_external_impl(path))
+        .await.map_err(|e| e.to_string())?
+}
+
+fn open_external_impl(path: String) -> Result<(), String> {
     // On Windows this hands `path` to `cmd /C start`, which re-parses its arguments — a `"` in the
     // path could break out of the quoting and inject a command. Real Windows paths can't contain `"`
     // (it's a reserved character) and neither URLs nor paths need raw control characters, so refuse
@@ -3362,7 +3572,12 @@ fn open_external(path: String) -> Result<(), String> {
 /// (CPE-253). Windows prefers Windows Terminal and falls back to a fresh cmd
 /// window; macOS uses Terminal.app; Linux tries the common emulators in turn.
 #[tauri::command]
-fn open_terminal(path: String) -> Result<(), String> {
+async fn open_terminal(path: String) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || open_terminal_impl(path))
+        .await.map_err(|e| e.to_string())?
+}
+
+fn open_terminal_impl(path: String) -> Result<(), String> {
     use std::process::Command;
 
     #[cfg(target_os = "windows")]
@@ -3407,7 +3622,12 @@ fn open_terminal(path: String) -> Result<(), String> {
 /// can be opened with its default app while browsing inside the archive
 /// (CPE-242). Read-only: the temp copy is what opens, not the archived bytes.
 #[tauri::command]
-fn extract_archive_entry(zip: String, inner: String) -> Result<String, String> {
+async fn extract_archive_entry(zip: String, inner: String) -> Result<String, String> {
+    tauri::async_runtime::spawn_blocking(move || extract_archive_entry_impl(zip, inner))
+        .await.map_err(|e| e.to_string())?
+}
+
+fn extract_archive_entry_impl(zip: String, inner: String) -> Result<String, String> {
     let file = fs::File::open(&zip).map_err(|e| e.to_string())?;
     let mut archive = zip::ZipArchive::new(file).map_err(|e| e.to_string())?;
     // The frontend uses "/"; some zips store "\" — try the given name then the
@@ -3492,7 +3712,12 @@ fn zip_add_path(
 /// Each top-level selection keeps its own name at the archive root; folders are
 /// added recursively. Returns the created zip path.
 #[tauri::command]
-fn compress_to_zip(paths: Vec<String>, dest: String) -> Result<String, String> {
+async fn compress_to_zip(paths: Vec<String>, dest: String) -> Result<String, String> {
+    tauri::async_runtime::spawn_blocking(move || compress_to_zip_impl(paths, dest))
+        .await.map_err(|e| e.to_string())?
+}
+
+fn compress_to_zip_impl(paths: Vec<String>, dest: String) -> Result<String, String> {
     if paths.is_empty() {
         return Err("nothing to compress".into());
     }
@@ -3556,7 +3781,12 @@ fn extract_7z_safe(src: &Path, dest: &Path) -> Result<(), String> {
 /// path traversal: zip via the crate's `enclosed_name`, tar via the crate's checked `unpack`, and 7z
 /// via `extract_7z_safe` (the sevenz crate itself doesn't check — CPE-628).
 #[tauri::command]
-fn extract_archive(path: String, dest: String) -> Result<String, String> {
+async fn extract_archive(path: String, dest: String) -> Result<String, String> {
+    tauri::async_runtime::spawn_blocking(move || extract_archive_impl(path, dest))
+        .await.map_err(|e| e.to_string())?
+}
+
+fn extract_archive_impl(path: String, dest: String) -> Result<String, String> {
     fs::create_dir_all(&dest).map_err(|e| e.to_string())?;
     let dest_path = std::path::Path::new(&dest);
     let lower = path.to_lowercase();
@@ -3593,7 +3823,12 @@ fn extract_archive(path: String, dest: String) -> Result<String, String> {
 /// `Start-Process -Verb RunAs`, which shows the UAC prompt. On other platforms
 /// there is no standard per-launch elevation prompt, so it runs normally.
 #[tauri::command]
-fn run_as_admin(path: String) -> Result<(), String> {
+async fn run_as_admin(path: String) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || run_as_admin_impl(path))
+        .await.map_err(|e| e.to_string())?
+}
+
+fn run_as_admin_impl(path: String) -> Result<(), String> {
     #[cfg(target_os = "windows")]
     {
         // Single-quote the path for PowerShell; escape any embedded quote.
@@ -3610,7 +3845,7 @@ fn run_as_admin(path: String) -> Result<(), String> {
     }
     #[cfg(not(target_os = "windows"))]
     {
-        open_external(path)
+        open_external_impl(path)
     }
 }
 
@@ -3618,7 +3853,12 @@ fn run_as_admin(path: String) -> Result<(), String> {
 /// URL (folder-context plugins, CPE-235). A cheap single file read; returns None
 /// if the folder isn't a repo or has no remote.
 #[tauri::command]
-fn git_remote_url(path: String) -> Option<String> {
+async fn git_remote_url(path: String) -> Option<String> {
+    tauri::async_runtime::spawn_blocking(move || git_remote_url_impl(path))
+        .await.unwrap()
+}
+
+fn git_remote_url_impl(path: String) -> Option<String> {
     let cfg = std::path::Path::new(&path).join(".git").join("config");
     let text = std::fs::read_to_string(cfg).ok()?;
 
@@ -4890,7 +5130,18 @@ struct SidecarDiagnostics {
 /// the root). Returns folders-first entries, or an actionable error message.
 #[cfg(feature = "sidecar-platform")]
 #[tauri::command]
-fn forge_browse(
+async fn forge_browse(
+    provider: String,
+    repo: String,
+    path: Option<String>,
+    token: Option<String>,
+) -> Result<Vec<forge_egress::RepoEntry>, String> {
+    tauri::async_runtime::spawn_blocking(move || forge_browse_impl(provider, repo, path, token))
+        .await.map_err(|e| e.to_string())?
+}
+
+#[cfg(feature = "sidecar-platform")]
+fn forge_browse_impl(
     provider: String,
     repo: String,
     path: Option<String>,
@@ -5010,7 +5261,18 @@ fn build_git_clone(
 /// the URL for git and is NEVER logged — and is scrubbed from any git error text before it is returned.
 #[cfg(feature = "sidecar-platform")]
 #[tauri::command]
-fn forge_clone(
+async fn forge_clone(
+    provider: String,
+    repo: String,
+    target_dir: String,
+    token: Option<String>,
+) -> Result<String, String> {
+    tauri::async_runtime::spawn_blocking(move || forge_clone_impl(provider, repo, target_dir, token))
+        .await.map_err(|e| e.to_string())?
+}
+
+#[cfg(feature = "sidecar-platform")]
+fn forge_clone_impl(
     provider: String,
     repo: String,
     target_dir: String,
@@ -5240,7 +5502,13 @@ const FORGE_TOKEN_SERVICE: &str = "com.cross-platform-explorer.forge";
 /// Service). The token is never logged.
 #[cfg(feature = "sidecar-platform")]
 #[tauri::command]
-fn forge_set_token(provider: String, token: String) -> Result<(), String> {
+async fn forge_set_token(provider: String, token: String) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || forge_set_token_impl(provider, token))
+        .await.map_err(|e| e.to_string())?
+}
+
+#[cfg(feature = "sidecar-platform")]
+fn forge_set_token_impl(provider: String, token: String) -> Result<(), String> {
     use sidecar_host::providers::secrets::{KeyringBackend, SecretBackend};
     if provider.trim().is_empty() {
         return Err("missing provider".into());
@@ -5252,7 +5520,13 @@ fn forge_set_token(provider: String, token: String) -> Result<(), String> {
 /// the app's own frontend over the IPC boundary; it is never logged.
 #[cfg(feature = "sidecar-platform")]
 #[tauri::command]
-fn forge_get_token(provider: String) -> Result<Option<String>, String> {
+async fn forge_get_token(provider: String) -> Result<Option<String>, String> {
+    tauri::async_runtime::spawn_blocking(move || forge_get_token_impl(provider))
+        .await.map_err(|e| e.to_string())?
+}
+
+#[cfg(feature = "sidecar-platform")]
+fn forge_get_token_impl(provider: String) -> Result<Option<String>, String> {
     use sidecar_host::providers::secrets::{KeyringBackend, SecretBackend};
     KeyringBackend.get(FORGE_TOKEN_SERVICE, &provider)
 }
@@ -5260,7 +5534,13 @@ fn forge_get_token(provider: String) -> Result<Option<String>, String> {
 /// Forget a provider's stored forge token (CPE-439).
 #[cfg(feature = "sidecar-platform")]
 #[tauri::command]
-fn forge_delete_token(provider: String) -> Result<(), String> {
+async fn forge_delete_token(provider: String) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || forge_delete_token_impl(provider))
+        .await.map_err(|e| e.to_string())?
+}
+
+#[cfg(feature = "sidecar-platform")]
+fn forge_delete_token_impl(provider: String) -> Result<(), String> {
     use sidecar_host::providers::secrets::{KeyringBackend, SecretBackend};
     KeyringBackend.delete(FORGE_TOKEN_SERVICE, &provider)
 }
@@ -5358,7 +5638,13 @@ fn forge_repo_status_impl(path: String, on_diverge: Option<String>) -> RepoSyncS
 /// diverged histories surface in `forge_repo_status` for the user to resolve. Returns git's output.
 #[cfg(feature = "sidecar-platform")]
 #[tauri::command]
-fn forge_sync(path: String, action: String) -> Result<String, String> {
+async fn forge_sync(path: String, action: String) -> Result<String, String> {
+    tauri::async_runtime::spawn_blocking(move || forge_sync_impl(path, action))
+        .await.map_err(|e| e.to_string())?
+}
+
+#[cfg(feature = "sidecar-platform")]
+fn forge_sync_impl(path: String, action: String) -> Result<String, String> {
     let args: Vec<&str> = match action.as_str() {
         // Safe pulls: fast-forward only never risks local work; merge/rebase reconcile a divergence and
         // MAY conflict — git returns non-zero and we surface its output for the user to resolve
@@ -5418,7 +5704,13 @@ fn merge_operation(path: &str) -> &'static str {
 /// `git status --porcelain=v2` and detects any in-progress merge/rebase.
 #[cfg(feature = "sidecar-platform")]
 #[tauri::command]
-fn forge_conflict_state(path: String) -> ConflictState {
+async fn forge_conflict_state(path: String) -> ConflictState {
+    tauri::async_runtime::spawn_blocking(move || forge_conflict_state_impl(path))
+        .await.unwrap()
+}
+
+#[cfg(feature = "sidecar-platform")]
+fn forge_conflict_state_impl(path: String) -> ConflictState {
     let out = std::process::Command::new("git")
         .args(["-C", &path, "status", "--porcelain=v2"])
         .output();
@@ -5474,7 +5766,13 @@ fn read_stage(path: &str, stage: u8, file: &str, truncated: &mut bool) -> Option
 
 #[cfg(feature = "sidecar-platform")]
 #[tauri::command]
-fn forge_conflict_versions(path: String, file: String) -> ConflictVersions {
+async fn forge_conflict_versions(path: String, file: String) -> ConflictVersions {
+    tauri::async_runtime::spawn_blocking(move || forge_conflict_versions_impl(path, file))
+        .await.unwrap()
+}
+
+#[cfg(feature = "sidecar-platform")]
+fn forge_conflict_versions_impl(path: String, file: String) -> ConflictVersions {
     let mut truncated = false;
     let base = read_stage(&path, 1, &file, &mut truncated);
     let ours = read_stage(&path, 2, &file, &mut truncated);
@@ -5510,7 +5808,13 @@ fn is_safe_repo_relative(file: &str) -> bool {
 /// confined to the repo — a `..`/absolute `file` is refused so a resolution can't write outside it.
 #[cfg(feature = "sidecar-platform")]
 #[tauri::command]
-fn forge_resolve_file(path: String, file: String, content: String) -> Result<(), String> {
+async fn forge_resolve_file(path: String, file: String, content: String) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || forge_resolve_file_impl(path, file, content))
+        .await.map_err(|e| e.to_string())?
+}
+
+#[cfg(feature = "sidecar-platform")]
+fn forge_resolve_file_impl(path: String, file: String, content: String) -> Result<(), String> {
     if !is_safe_repo_relative(&file) {
         return Err("Refusing an unsafe file path.".to_string());
     }
@@ -5532,7 +5836,13 @@ fn forge_resolve_file(path: String, file: String, content: String) -> Result<(),
 /// message) if files remain unmerged.
 #[cfg(feature = "sidecar-platform")]
 #[tauri::command]
-fn forge_conflict_continue(path: String) -> Result<String, String> {
+async fn forge_conflict_continue(path: String) -> Result<String, String> {
+    tauri::async_runtime::spawn_blocking(move || forge_conflict_continue_impl(path))
+        .await.map_err(|e| e.to_string())?
+}
+
+#[cfg(feature = "sidecar-platform")]
+fn forge_conflict_continue_impl(path: String) -> Result<String, String> {
     let op = merge_operation(&path);
     let args: Vec<&str> = match op {
         "rebase" => vec!["-C", &path, "rebase", "--continue"],
@@ -5554,7 +5864,13 @@ fn forge_conflict_continue(path: String) -> Result<String, String> {
 /// Abort the in-progress merge/rebase (CPE-496), restoring the pre-sync state so **no work is lost**.
 #[cfg(feature = "sidecar-platform")]
 #[tauri::command]
-fn forge_conflict_abort(path: String) -> Result<String, String> {
+async fn forge_conflict_abort(path: String) -> Result<String, String> {
+    tauri::async_runtime::spawn_blocking(move || forge_conflict_abort_impl(path))
+        .await.map_err(|e| e.to_string())?
+}
+
+#[cfg(feature = "sidecar-platform")]
+fn forge_conflict_abort_impl(path: String) -> Result<String, String> {
     let op = merge_operation(&path);
     let args: Vec<&str> = match op {
         "rebase" => vec!["-C", &path, "rebase", "--abort"],
@@ -6102,14 +6418,14 @@ mod tests {
     #[test]
     fn parent_dir_returns_the_parent() {
         assert_eq!(
-            parent_dir("/home/user/docs".to_string()),
+            parent_dir_impl("/home/user/docs".to_string()),
             Some("/home/user".to_string())
         );
     }
 
     #[test]
     fn parent_dir_at_root_returns_none() {
-        assert_eq!(parent_dir("/".to_string()), None);
+        assert_eq!(parent_dir_impl("/".to_string()), None);
     }
 
     #[test]
@@ -6134,7 +6450,7 @@ mod tests {
         fs::create_dir_all(&deep).unwrap();
         fs::write(deep.join("y"), b"abcd").unwrap(); // 4  => sub recursive = 7
 
-        let kids = dir_children_sizes(d.to_string_lossy().to_string()).unwrap();
+        let kids = dir_children_sizes_impl(d.to_string_lossy().to_string()).unwrap();
         assert_eq!(kids.len(), 2);
         let a = kids.iter().find(|c| c.name == "a.txt").expect("a.txt present");
         assert!(!a.is_dir);
@@ -6147,11 +6463,11 @@ mod tests {
 
     #[test]
     fn dir_children_sizes_errors_on_missing_or_a_file() {
-        assert!(dir_children_sizes("/definitely/not/a/real/path/xyz".to_string()).is_err());
+        assert!(dir_children_sizes_impl("/definitely/not/a/real/path/xyz".to_string()).is_err());
         let d = scratch("children_notdir");
         let f = d.join("f.txt");
         fs::write(&f, b"x").unwrap();
-        assert!(dir_children_sizes(f.to_string_lossy().to_string()).is_err()); // a file, not a folder
+        assert!(dir_children_sizes_impl(f.to_string_lossy().to_string()).is_err()); // a file, not a folder
         let _ = fs::remove_dir_all(&d);
     }
 
@@ -6250,7 +6566,7 @@ mod tests {
 
     #[test]
     fn home_dir_resolves() {
-        assert!(home_dir().is_ok());
+        assert!(home_dir_impl().is_ok());
     }
 
     #[test]
@@ -6278,7 +6594,7 @@ mod tests {
 
     #[test]
     fn list_drives_returns_at_least_one_root() {
-        assert!(!list_drives().is_empty(), "there is always at least one root");
+        assert!(!list_drives_impl().is_empty(), "there is always at least one root");
     }
 
     #[test]
@@ -6291,7 +6607,7 @@ mod tests {
 
     #[test]
     fn special_folders_all_exist_and_are_labelled() {
-        for place in special_folders() {
+        for place in special_folders_impl() {
             assert!(Path::new(&place.path).is_dir(), "{} should exist", place.path);
             assert!(!place.kind.is_empty());
             assert!(!place.name.is_empty());
@@ -6355,7 +6671,7 @@ mod tests {
         let d = scratch("read_ok");
         let f = d.join("note.txt");
         fs::write(&f, b"hello world").unwrap();
-        let r = read_file_text(f.to_string_lossy().to_string(), 1024);
+        let r = read_file_text_impl(f.to_string_lossy().to_string(), 1024);
         assert_eq!(r.unwrap(), "hello world");
         let _ = fs::remove_dir_all(&d);
     }
@@ -6365,7 +6681,7 @@ mod tests {
         let d = scratch("read_big");
         let f = d.join("big.txt");
         fs::write(&f, vec![b'x'; 200]).unwrap();
-        let r = read_file_text(f.to_string_lossy().to_string(), 100);
+        let r = read_file_text_impl(f.to_string_lossy().to_string(), 100);
         assert!(r.is_err(), "a file over the cap must error, not truncate");
         let _ = fs::remove_dir_all(&d);
     }
@@ -6375,7 +6691,7 @@ mod tests {
         let d = scratch("read_bin");
         let f = d.join("blob.bin");
         fs::write(&f, [0xff, 0xfe, 0x00, 0x01]).unwrap();
-        let r = read_file_text(f.to_string_lossy().to_string(), 1024);
+        let r = read_file_text_impl(f.to_string_lossy().to_string(), 1024);
         assert!(r.is_err(), "non-UTF-8 content must error");
         let _ = fs::remove_dir_all(&d);
     }
@@ -6385,7 +6701,7 @@ mod tests {
         let d = scratch("write_txt");
         let f = d.join("note.txt");
         fs::write(&f, b"old text").unwrap();
-        let n = write_file_text(f.to_string_lossy().to_string(), "brand new".to_string()).unwrap();
+        let n = write_file_text_impl(f.to_string_lossy().to_string(), "brand new".to_string()).unwrap();
         assert_eq!(n, 9);
         assert_eq!(fs::read_to_string(&f).unwrap(), "brand new");
         let _ = fs::remove_dir_all(&d);
@@ -6408,7 +6724,7 @@ mod tests {
         }
 
         let entries =
-            read_archive_entries(zip_path.to_string_lossy().to_string()).unwrap();
+            read_archive_entries_impl(zip_path.to_string_lossy().to_string()).unwrap();
         let names: Vec<&str> = entries.iter().map(|e| e.name.as_str()).collect();
         assert!(names.contains(&"hello.txt"), "should list the file entry");
         let file = entries.iter().find(|e| e.name == "hello.txt").unwrap();
@@ -6426,7 +6742,7 @@ mod tests {
         let d = scratch("zip_bad");
         let f = d.join("notazip.zip");
         fs::write(&f, b"this is not a zip file").unwrap();
-        assert!(read_archive_entries(f.to_string_lossy().to_string()).is_err());
+        assert!(read_archive_entries_impl(f.to_string_lossy().to_string()).is_err());
         let _ = fs::remove_dir_all(&d);
     }
 
@@ -6443,7 +6759,7 @@ mod tests {
 
         // Compress both selections into one zip.
         let zip_path = d.join("out.zip");
-        compress_to_zip(
+        compress_to_zip_impl(
             vec![
                 top.to_string_lossy().to_string(),
                 sub.to_string_lossy().to_string(),
@@ -6453,7 +6769,7 @@ mod tests {
         .unwrap();
 
         // The archive lists the expected entries at the right paths.
-        let names: Vec<String> = read_archive_entries(zip_path.to_string_lossy().to_string())
+        let names: Vec<String> = read_archive_entries_impl(zip_path.to_string_lossy().to_string())
             .unwrap()
             .into_iter()
             .map(|e| e.name)
@@ -6464,7 +6780,7 @@ mod tests {
 
         // Extract it back out and confirm the bytes survived.
         let out = d.join("unpacked");
-        extract_archive(
+        extract_archive_impl(
             zip_path.to_string_lossy().to_string(),
             out.to_string_lossy().to_string(),
         )
@@ -6483,9 +6799,9 @@ mod tests {
         // A `"` (impossible in a real Windows path) or a control char is refused before reaching the
         // shell — these are the only characters that could break `cmd /C start`'s quoting. We only
         // assert the rejection path; a normal path would actually launch the OS opener (a side effect).
-        assert!(open_external("a\" & calc.exe & \"b".into()).is_err());
-        assert!(open_external("x\ny".into()).is_err());
-        assert!(open_external("tab\there".into()).is_err());
+        assert!(open_external_impl("a\" & calc.exe & \"b".into()).is_err());
+        assert!(open_external_impl("x\ny".into()).is_err());
+        assert!(open_external_impl("tab\there".into()).is_err());
     }
 
     #[test]
@@ -6507,7 +6823,7 @@ mod tests {
     fn compress_to_zip_rejects_an_empty_selection() {
         let d = scratch("zip_empty");
         let zip_path = d.join("empty.zip");
-        assert!(compress_to_zip(vec![], zip_path.to_string_lossy().to_string()).is_err());
+        assert!(compress_to_zip_impl(vec![], zip_path.to_string_lossy().to_string()).is_err());
         let _ = fs::remove_dir_all(&d);
     }
 
@@ -6518,7 +6834,7 @@ mod tests {
         fs::write(d.join("folder").join("a.txt"), b"a").unwrap();
         // The output .zip lives INSIDE the folder being compressed.
         let dest = d.join("folder").join("out.zip");
-        let r = compress_to_zip(
+        let r = compress_to_zip_impl(
             vec![d.join("folder").to_string_lossy().to_string()],
             dest.to_string_lossy().to_string(),
         );
@@ -6552,7 +6868,7 @@ mod tests {
             b.into_inner().unwrap().finish().unwrap();
         }
         let out = d.join("out");
-        extract_archive(
+        extract_archive_impl(
             tgz.to_string_lossy().to_string(),
             out.to_string_lossy().to_string(),
         )
@@ -6576,7 +6892,7 @@ mod tests {
             b.append_data(&mut header, "hello.txt", &data[..]).unwrap();
             b.finish().unwrap();
         }
-        let entries = read_archive_entries(tar_path.to_string_lossy().to_string()).unwrap();
+        let entries = read_archive_entries_impl(tar_path.to_string_lossy().to_string()).unwrap();
         let file = entries.iter().find(|e| e.name == "hello.txt").unwrap();
         assert_eq!(file.size, 8, "size is the uncompressed length");
         assert!(!file.is_dir);
@@ -6596,7 +6912,7 @@ mod tests {
             enc.write_all(b"hello world").unwrap();
             enc.finish().unwrap();
         }
-        let entries = read_archive_entries(gz_path.to_string_lossy().to_string()).unwrap();
+        let entries = read_archive_entries_impl(gz_path.to_string_lossy().to_string()).unwrap();
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].name, "note.txt", "name is the archive name minus .gz");
         assert_eq!(entries[0].size, 11, "ISIZE trailer is the uncompressed length");
@@ -6761,9 +7077,9 @@ mod tests {
         fs::write(d.join("b.txt"), b"y").unwrap();
         let a = d.join("a.txt").to_string_lossy().to_string();
         let b = d.join("b.txt").to_string_lossy().to_string();
-        assert!(same_volume(a.clone(), b));
+        assert!(same_volume_impl(a.clone(), b));
         // A path vs itself is trivially the same volume.
-        assert!(same_volume(a.clone(), a));
+        assert!(same_volume_impl(a.clone(), a));
         let _ = fs::remove_dir_all(&d);
     }
 
@@ -6775,7 +7091,7 @@ mod tests {
         let a = d.join("a.txt").to_string_lossy().to_string();
         let sub = d.join("sub").to_string_lossy().to_string();
         let gone = d.join("nope.txt").to_string_lossy().to_string();
-        let out = entries_for_paths(vec![a.clone(), sub.clone(), gone]);
+        let out = entries_for_paths_impl(vec![a.clone(), sub.clone(), gone]);
         // The missing path is skipped; the two real ones come back with correct kinds.
         assert_eq!(out.len(), 2);
         assert!(out.iter().any(|e| e.name == "a.txt" && !e.is_dir && e.extension == "txt"));
@@ -6788,7 +7104,7 @@ mod tests {
         let d = scratch("imgmeta");
         let f = d.join("p.png");
         image::RgbImage::from_pixel(24, 16, image::Rgb([9u8, 9, 9])).save(&f).unwrap();
-        let m = image_meta(f.to_string_lossy().to_string()).unwrap();
+        let m = image_meta_impl(f.to_string_lossy().to_string()).unwrap();
         assert_eq!(m.width, Some(24));
         assert_eq!(m.height, Some(16));
         let _ = fs::remove_dir_all(&d);
@@ -6799,7 +7115,7 @@ mod tests {
         let d = scratch("imgmeta-txt");
         let f = d.join("x.txt");
         fs::write(&f, b"not an image").unwrap();
-        let m = image_meta(f.to_string_lossy().to_string()).unwrap();
+        let m = image_meta_impl(f.to_string_lossy().to_string()).unwrap();
         assert!(m.width.is_none() && m.camera.is_none() && m.taken.is_none());
         let _ = fs::remove_dir_all(&d);
     }
@@ -6867,7 +7183,7 @@ mod tests {
         let mut img = image::RgbaImage::new(2, 2);
         img.put_pixel(0, 0, image::Rgba([255, 0, 0, 255]));
         img.save_with_format(&f, image::ImageFormat::Tiff).unwrap();
-        let url = read_image_data_url(f.to_string_lossy().to_string()).unwrap();
+        let url = read_image_data_url_impl(f.to_string_lossy().to_string()).unwrap();
         assert!(url.starts_with("data:image/png;base64,"), "returns a PNG data URL");
         assert!(url.len() > 40, "carries encoded bytes");
         let _ = fs::remove_dir_all(&d);
@@ -6878,7 +7194,7 @@ mod tests {
         let d = scratch("psd_bad");
         let f = d.join("a.psd");
         fs::write(&f, b"not a real psd").unwrap();
-        assert!(read_image_data_url(f.to_string_lossy().to_string()).is_err());
+        assert!(read_image_data_url_impl(f.to_string_lossy().to_string()).is_err());
         let _ = fs::remove_dir_all(&d);
     }
 
@@ -6887,7 +7203,7 @@ mod tests {
         let d = scratch("iso_bad");
         let f = d.join("x.iso");
         fs::write(&f, vec![0u8; 4096]).unwrap();
-        assert!(read_archive_entries(f.to_string_lossy().to_string()).is_err());
+        assert!(read_archive_entries_impl(f.to_string_lossy().to_string()).is_err());
         let _ = fs::remove_dir_all(&d);
     }
 
@@ -6896,7 +7212,7 @@ mod tests {
         let d = scratch("sevenz_bad");
         let f = d.join("x.7z");
         fs::write(&f, b"not a 7z archive").unwrap();
-        assert!(read_archive_entries(f.to_string_lossy().to_string()).is_err());
+        assert!(read_archive_entries_impl(f.to_string_lossy().to_string()).is_err());
         let _ = fs::remove_dir_all(&d);
     }
 
@@ -6906,7 +7222,7 @@ mod tests {
         let f = d.join("thing.bin");
         fs::write(&f, b"\x01\x02\x03").unwrap();
         // .bin -> hex dump path
-        let out = read_preview_info(f.to_string_lossy().to_string()).unwrap();
+        let out = read_preview_info_impl(f.to_string_lossy().to_string()).unwrap();
         assert!(out.contains("01 02 03"));
         let _ = fs::remove_dir_all(&d);
     }
@@ -7015,7 +7331,7 @@ mod tests {
     #[test]
     fn create_dir_rejects_an_empty_name() {
         let d = scratch("create_empty");
-        let r = create_dir(d.to_string_lossy().to_string(), "   ".to_string());
+        let r = create_dir_impl(d.to_string_lossy().to_string(), "   ".to_string());
         assert!(r.is_err());
         let _ = fs::remove_dir_all(&d);
     }
@@ -7026,13 +7342,13 @@ mod tests {
         fs::create_dir_all(&d).unwrap();
         let dir = d.to_string_lossy().to_string();
         for bad in ["../evil", "sub/x", "a\\b", "..", "."] {
-            assert!(create_dir(dir.clone(), bad.to_string()).is_err(), "create_dir must reject {bad:?}");
-            assert!(create_file(dir.clone(), bad.to_string()).is_err(), "create_file must reject {bad:?}");
+            assert!(create_dir_impl(dir.clone(), bad.to_string()).is_err(), "create_dir must reject {bad:?}");
+            assert!(create_file_impl(dir.clone(), bad.to_string()).is_err(), "create_file must reject {bad:?}");
         }
         // Nothing escaped the folder.
         assert!(!d.parent().unwrap().join("evil").exists());
         // A normal name still works.
-        assert!(create_dir(dir.clone(), "ok".to_string()).is_ok());
+        assert!(create_dir_impl(dir.clone(), "ok".to_string()).is_ok());
         let _ = fs::remove_dir_all(&d);
     }
 
@@ -7040,8 +7356,8 @@ mod tests {
     fn create_dir_refuses_to_clobber_an_existing_name() {
         let d = scratch("create_dup");
         let p = d.to_string_lossy().to_string();
-        assert!(create_dir(p.clone(), "thing".into()).is_ok());
-        let second = create_dir(p, "thing".into());
+        assert!(create_dir_impl(p.clone(), "thing".into()).is_ok());
+        let second = create_dir_impl(p, "thing".into());
         assert!(second.is_err(), "must not silently overwrite");
         let _ = fs::remove_dir_all(&d);
     }
@@ -7050,7 +7366,7 @@ mod tests {
     fn create_file_makes_an_empty_file() {
         let d = scratch("create_file");
         let created =
-            create_file(d.to_string_lossy().to_string(), "New Text Document.txt".into()).unwrap();
+            create_file_impl(d.to_string_lossy().to_string(), "New Text Document.txt".into()).unwrap();
         assert!(std::path::Path::new(&created).is_file());
         assert_eq!(fs::metadata(&created).unwrap().len(), 0, "file starts empty");
         let _ = fs::remove_dir_all(&d);
@@ -7062,7 +7378,7 @@ mod tests {
         let p = d.to_string_lossy().to_string();
         // Pre-existing file with content must not be truncated by a New file.
         fs::write(d.join("note.txt"), b"important").unwrap();
-        assert!(create_file(p, "note.txt".into()).is_err());
+        assert!(create_file_impl(p, "note.txt".into()).is_err());
         assert_eq!(fs::read_to_string(d.join("note.txt")).unwrap(), "important");
         let _ = fs::remove_dir_all(&d);
     }
@@ -7073,7 +7389,7 @@ mod tests {
         fs::write(d.join("a.txt"), b"a").unwrap();
         fs::write(d.join("b.txt"), b"b").unwrap();
 
-        let r = rename_entry(
+        let r = rename_entry_impl(
             d.join("a.txt").to_string_lossy().to_string(),
             "b.txt".into(),
         );
@@ -7089,7 +7405,7 @@ mod tests {
         fs::write(d.join("a.txt"), b"a").unwrap();
         let p = d.join("a.txt").to_string_lossy().to_string();
         for bad in ["../evil.txt", "sub/b.txt", "a\\b.txt", "..", "."] {
-            assert!(rename_entry(p.clone(), bad.into()).is_err(), "must reject {bad:?}");
+            assert!(rename_entry_impl(p.clone(), bad.into()).is_err(), "must reject {bad:?}");
         }
         // The file stays put and nothing escaped the folder.
         assert!(d.join("a.txt").exists());
@@ -7101,7 +7417,7 @@ mod tests {
     fn rename_moves_the_file() {
         let d = scratch("rename_ok");
         fs::write(d.join("a.txt"), b"a").unwrap();
-        let r = rename_entry(
+        let r = rename_entry_impl(
             d.join("a.txt").to_string_lossy().to_string(),
             "c.txt".into(),
         );
@@ -7138,7 +7454,7 @@ mod tests {
         let d = scratch("copy_same");
         fs::write(d.join("f.txt"), b"original").unwrap();
 
-        let results = copy_entries(
+        let results = copy_entries_impl(
             vec![d.join("f.txt").to_string_lossy().to_string()],
             d.to_string_lossy().to_string(),
         );
@@ -7156,7 +7472,7 @@ mod tests {
         fs::create_dir_all(inner.join("deep")).unwrap();
 
         // inner -> inner/deep  is a descendant: must be refused, not recursed.
-        let results = copy_entries(
+        let results = copy_entries_impl(
             vec![inner.to_string_lossy().to_string()],
             inner.join("deep").to_string_lossy().to_string(),
         );
@@ -7268,7 +7584,7 @@ mod tests {
         fs::create_dir_all(&to).unwrap();
         fs::write(from.join("m.txt"), b"m").unwrap();
 
-        let results = move_entries(
+        let results = move_entries_impl(
             vec![from.join("m.txt").to_string_lossy().to_string()],
             to.to_string_lossy().to_string(),
         );
@@ -7285,7 +7601,7 @@ mod tests {
         fs::create_dir_all(&to).unwrap();
         fs::write(d.join("good.txt"), b"g").unwrap();
 
-        let results = copy_entries(
+        let results = copy_entries_impl(
             vec![
                 d.join("good.txt").to_string_lossy().to_string(),
                 d.join("missing.txt").to_string_lossy().to_string(),
@@ -7302,7 +7618,7 @@ mod tests {
     fn entry_info_reports_metadata() {
         let d = scratch("info");
         fs::write(d.join("i.txt"), b"12345").unwrap();
-        let info = entry_info(d.join("i.txt").to_string_lossy().to_string()).unwrap();
+        let info = entry_info_impl(d.join("i.txt").to_string_lossy().to_string()).unwrap();
         assert_eq!(info.name, "i.txt");
         assert!(!info.is_dir);
         assert_eq!(info.size, 5);
@@ -7314,11 +7630,11 @@ mod tests {
         let d = scratch("hash");
         // The canonical SHA-256("abc") test vector.
         fs::write(d.join("abc.txt"), b"abc").unwrap();
-        let hex = hash_file(d.join("abc.txt").to_string_lossy().to_string()).unwrap();
+        let hex = hash_file_impl(d.join("abc.txt").to_string_lossy().to_string()).unwrap();
         assert_eq!(hex, "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad");
         // A directory and a missing path are errors, not panics.
-        assert!(hash_file(d.to_string_lossy().to_string()).is_err());
-        assert!(hash_file(d.join("nope.txt").to_string_lossy().to_string()).is_err());
+        assert!(hash_file_impl(d.to_string_lossy().to_string()).is_err());
+        assert!(hash_file_impl(d.join("nope.txt").to_string_lossy().to_string()).is_err());
         let _ = fs::remove_dir_all(&d);
     }
 
@@ -7351,15 +7667,15 @@ mod tests {
         let d = scratch("stats");
         // 2 lines, 3 words, 16 chars (incl. 2 newlines), 16 bytes (all ASCII).
         fs::write(d.join("t.txt"), b"hello world\nfoo\n").unwrap();
-        let s = text_stats(d.join("t.txt").to_string_lossy().to_string()).unwrap();
+        let s = text_stats_impl(d.join("t.txt").to_string_lossy().to_string()).unwrap();
         assert_eq!((s.lines, s.words, s.chars, s.bytes), (2, 3, 16, 16));
         // A final unterminated line still counts (str::lines semantics).
         fs::write(d.join("u.txt"), b"a\nb").unwrap();
-        assert_eq!(text_stats(d.join("u.txt").to_string_lossy().to_string()).unwrap().lines, 2);
+        assert_eq!(text_stats_impl(d.join("u.txt").to_string_lossy().to_string()).unwrap().lines, 2);
         // Non-UTF-8 (binary) and a folder are errors, not panics.
         fs::write(d.join("bin"), [0xff, 0xfe, 0x00]).unwrap();
-        assert!(text_stats(d.join("bin").to_string_lossy().to_string()).is_err());
-        assert!(text_stats(d.to_string_lossy().to_string()).is_err());
+        assert!(text_stats_impl(d.join("bin").to_string_lossy().to_string()).is_err());
+        assert!(text_stats_impl(d.to_string_lossy().to_string()).is_err());
         let _ = fs::remove_dir_all(&d);
     }
 
@@ -7375,7 +7691,7 @@ mod tests {
         fs::create_dir_all(d.join(".git")).unwrap();
         fs::write(d.join(".git").join("x"), b"needle in git").unwrap();
 
-        let r = search_file_contents(d.to_string_lossy().to_string(), "needle".into(), false).unwrap();
+        let r = search_file_contents_impl(d.to_string_lossy().to_string(), "needle".into(), false).unwrap();
         let paths: Vec<String> = r.matches.iter().map(|m| m.path.replace('\\', "/")).collect();
         // Case-insensitive: matches "NEEDLE" (a.txt) and "needle" (sub/b.md); NOT the binary or .git.
         assert_eq!(r.matches.len(), 2, "got {paths:?}");
@@ -7388,13 +7704,13 @@ mod tests {
         assert_eq!(a.line, "NEEDLE here");
 
         // Case-sensitive excludes the uppercase hit.
-        let cs = search_file_contents(d.to_string_lossy().to_string(), "needle".into(), true).unwrap();
+        let cs = search_file_contents_impl(d.to_string_lossy().to_string(), "needle".into(), true).unwrap();
         assert_eq!(cs.matches.len(), 1);
         assert!(cs.matches[0].path.replace('\\', "/").ends_with("sub/b.md"));
 
         // Empty query and a non-folder root behave sanely.
-        assert_eq!(search_file_contents(d.to_string_lossy().to_string(), "  ".into(), false).unwrap().matches.len(), 0);
-        assert!(search_file_contents(d.join("a.txt").to_string_lossy().to_string(), "x".into(), false).is_err());
+        assert_eq!(search_file_contents_impl(d.to_string_lossy().to_string(), "  ".into(), false).unwrap().matches.len(), 0);
+        assert!(search_file_contents_impl(d.join("a.txt").to_string_lossy().to_string(), "x".into(), false).is_err());
         let _ = fs::remove_dir_all(&d);
     }
 
@@ -7475,7 +7791,7 @@ mod tests {
         fs::create_dir_all(d.join(".git")).unwrap();
         fs::write(d.join(".git").join("report.log"), b"").unwrap();
 
-        let r = find_files_by_name(d.to_string_lossy().to_string(), "report".into()).unwrap();
+        let r = find_files_by_name_impl(d.to_string_lossy().to_string(), "report".into()).unwrap();
         let names: Vec<&str> = r.matches.iter().map(|m| m.name.as_str()).collect();
         // report.txt, sub/report-2.txt, and the "reports" folder — never anything under .git.
         assert_eq!(r.matches.len(), 3, "got {names:?}");
@@ -7485,13 +7801,13 @@ mod tests {
         assert!(!r.matches.iter().any(|m| m.path.contains(".git")));
 
         // Glob query.
-        let g = find_files_by_name(d.to_string_lossy().to_string(), "*.txt".into()).unwrap();
+        let g = find_files_by_name_impl(d.to_string_lossy().to_string(), "*.txt".into()).unwrap();
         assert_eq!(g.matches.len(), 2);
         assert!(g.matches.iter().all(|m| m.name.ends_with(".txt")));
 
         // Empty query and a non-folder root behave sanely.
-        assert_eq!(find_files_by_name(d.to_string_lossy().to_string(), "  ".into()).unwrap().matches.len(), 0);
-        assert!(find_files_by_name(d.join("report.txt").to_string_lossy().to_string(), "x".into()).is_err());
+        assert_eq!(find_files_by_name_impl(d.to_string_lossy().to_string(), "  ".into()).unwrap().matches.len(), 0);
+        assert!(find_files_by_name_impl(d.join("report.txt").to_string_lossy().to_string(), "x".into()).is_err());
 
         // The streaming walk (CPE-666) yields the same matches as the collected command, in batches.
         let mut streamed = Vec::new();
@@ -7527,12 +7843,12 @@ mod tests {
 
         // Without the symlink skip, the 'loop' link re-enters the root forever until the 50k-dir cap
         // (truncated=true, dirs_scanned huge). With it, the walk terminates immediately.
-        let r = find_files_by_name(d.to_string_lossy().to_string(), "target".into()).unwrap();
+        let r = find_files_by_name_impl(d.to_string_lossy().to_string(), "target".into()).unwrap();
         assert!(!r.truncated, "walk hit its cap — the symlink cycle was not skipped");
         assert!(r.dirs_scanned < 100, "walked too many dirs ({}) — cycle not skipped", r.dirs_scanned);
         assert!(r.matches.iter().any(|m| m.name == "target.txt"));
 
-        let c = search_file_contents(d.to_string_lossy().to_string(), "needle".into(), false).unwrap();
+        let c = search_file_contents_impl(d.to_string_lossy().to_string(), "needle".into(), false).unwrap();
         assert!(!c.truncated, "content search hit its cap — symlink cycle not skipped");
         assert!(c.matches.iter().any(|m| m.path.replace('\\', "/").ends_with("real/target.txt")));
 
@@ -7541,11 +7857,11 @@ mod tests {
         // stack overflows and aborts the whole test binary. Don't assert an exact byte count: it isn't
         // portable (Linux counts the symlink entry's target-path length, ~31 bytes; Windows reports 0),
         // so bound it instead: at least the real file (6 bytes), and nowhere near a runaway.
-        let sz = dir_size(d.to_string_lossy().to_string()).unwrap();
+        let sz = dir_size_impl(d.to_string_lossy().to_string()).unwrap();
         assert!((6..100_000).contains(&sz), "dir_size should terminate small on a cycle, got {sz}");
 
         // find_duplicates likewise terminates (one file, no dupes, not truncated).
-        let dup = find_duplicates(d.to_string_lossy().to_string()).unwrap();
+        let dup = find_duplicates_impl(d.to_string_lossy().to_string()).unwrap();
         assert!(!dup.truncated, "find_duplicates hit its cap — symlink cycle not skipped");
 
         // remove_dir_all removes the symlink itself without following it.
@@ -7560,15 +7876,15 @@ mod tests {
         fs::write(d.join("c"), b"same content HERE").unwrap(); // same length, different bytes
         fs::write(d.join("e"), b"different length entirely").unwrap();
         let p = |n: &str| d.join(n).to_string_lossy().to_string();
-        assert_eq!(files_identical(p("a"), p("b")), Ok(true));
-        assert_eq!(files_identical(p("a"), p("c")), Ok(false)); // same size, differing byte
-        assert_eq!(files_identical(p("a"), p("e")), Ok(false)); // different size
+        assert_eq!(files_identical_impl(p("a"), p("b")), Ok(true));
+        assert_eq!(files_identical_impl(p("a"), p("c")), Ok(false)); // same size, differing byte
+        assert_eq!(files_identical_impl(p("a"), p("e")), Ok(false)); // different size
         // Empty files are identical; a folder or missing path errors.
         fs::write(d.join("z1"), b"").unwrap();
         fs::write(d.join("z2"), b"").unwrap();
-        assert_eq!(files_identical(p("z1"), p("z2")), Ok(true));
-        assert!(files_identical(p("a"), d.to_string_lossy().to_string()).is_err());
-        assert!(files_identical(p("a"), p("nope")).is_err());
+        assert_eq!(files_identical_impl(p("z1"), p("z2")), Ok(true));
+        assert!(files_identical_impl(p("a"), d.to_string_lossy().to_string()).is_err());
+        assert!(files_identical_impl(p("a"), p("nope")).is_err());
         let _ = fs::remove_dir_all(&d);
     }
 
@@ -7588,7 +7904,7 @@ mod tests {
         fs::write(d.join("empty1"), b"").unwrap();
         fs::write(d.join("empty2"), b"").unwrap();
 
-        let r = find_duplicates(d.to_string_lossy().to_string()).unwrap();
+        let r = find_duplicates_impl(d.to_string_lossy().to_string()).unwrap();
         assert_eq!(r.groups.len(), 1, "exactly one duplicate group");
         let g = &r.groups[0];
         assert_eq!(g.paths.len(), 3, "the 3-way group");
@@ -7601,8 +7917,8 @@ mod tests {
         // No-duplicate folder → empty; a non-folder root → Err.
         let d2 = scratch("nodups");
         fs::write(d2.join("only.txt"), b"solo").unwrap();
-        assert!(find_duplicates(d2.to_string_lossy().to_string()).unwrap().groups.is_empty());
-        assert!(find_duplicates(d.join("one.txt").to_string_lossy().to_string()).is_err());
+        assert!(find_duplicates_impl(d2.to_string_lossy().to_string()).unwrap().groups.is_empty());
+        assert!(find_duplicates_impl(d.join("one.txt").to_string_lossy().to_string()).is_err());
         let _ = fs::remove_dir_all(&d);
         let _ = fs::remove_dir_all(&d2);
     }
@@ -7614,7 +7930,7 @@ mod tests {
         fs::write(d.join("a.bin"), vec![0u8; 100]).unwrap();
         fs::write(d.join("sub/b.bin"), vec![0u8; 50]).unwrap();
 
-        let total = dir_size(d.to_string_lossy().to_string()).unwrap();
+        let total = dir_size_impl(d.to_string_lossy().to_string()).unwrap();
         assert_eq!(total, 150);
         let _ = fs::remove_dir_all(&d);
     }
@@ -7626,10 +7942,10 @@ mod tests {
         fs::write(d.join("a.bin"), vec![0u8; 100]).unwrap();
         fs::write(d.join("sub/b.bin"), vec![0u8; 50]).unwrap();
         fs::write(d.join("sub/deep/c.bin"), vec![0u8; 7]).unwrap();
-        let s = folder_stats(d.to_string_lossy().to_string()).unwrap();
+        let s = folder_stats_impl(d.to_string_lossy().to_string()).unwrap();
         assert_eq!((s.files, s.dirs, s.bytes, s.truncated), (3, 2, 157, false));
         // A non-folder is an error.
-        assert!(folder_stats(d.join("a.bin").to_string_lossy().to_string()).is_err());
+        assert!(folder_stats_impl(d.join("a.bin").to_string_lossy().to_string()).is_err());
         let _ = fs::remove_dir_all(&d);
     }
 
@@ -7638,7 +7954,7 @@ mod tests {
         let d = scratch("move_exact");
         fs::write(d.join("b.txt"), b"x").unwrap();
 
-        let results = move_exact(vec![(
+        let results = move_exact_impl(vec![(
             d.join("b.txt").to_string_lossy().to_string(),
             d.join("a.txt").to_string_lossy().to_string(),
         )]);
@@ -7654,7 +7970,7 @@ mod tests {
         fs::write(d.join("a.txt"), b"keep").unwrap();
         fs::write(d.join("b.txt"), b"other").unwrap();
 
-        let results = move_exact(vec![(
+        let results = move_exact_impl(vec![(
             d.join("b.txt").to_string_lossy().to_string(),
             d.join("a.txt").to_string_lossy().to_string(),
         )]);
