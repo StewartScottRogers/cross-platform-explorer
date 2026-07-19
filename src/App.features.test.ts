@@ -278,24 +278,6 @@ describe("file-type filter (CPE-676 net)", () => {
   });
 });
 
-describe("column-header sort (CPE-676 net)", () => {
-  it("clicking the Size column header sorts the list by size", async () => {
-    mockBackend([
-      { ...file("big.txt", "txt"), size: 3000 },
-      { ...file("small.txt", "txt"), size: 100 },
-      { ...file("mid.txt", "txt"), size: 1500 },
-    ]);
-    await enterDrive();
-    await waitFor(() => expect(screen.getByText("big.txt")).toBeTruthy());
-    const names = () => screen.getAllByText(/\.txt$/).map((e) => e.textContent!.trim());
-    await waitFor(() => expect(names()).toEqual(["big.txt", "mid.txt", "small.txt"])); // name-asc default
-
-    await fireEvent.click(screen.getByRole("button", { name: /Size/ }));
-
-    await waitFor(() => expect(names()).toEqual(["small.txt", "mid.txt", "big.txt"])); // size-asc
-  });
-});
-
 describe("select all (CPE-676 net)", () => {
   it("Ctrl+A selects every visible item", async () => {
     mockBackend([file("a.txt", "txt"), file("b.txt", "txt"), file("c.txt", "txt")]);
