@@ -9,16 +9,29 @@
  *
  * An empty/whitespace query matches everything (callers usually gate on this).
  */
-export function matchesQuery(name: string, query: string): boolean {
-  const q = query.trim().toLowerCase();
-  if (q === "") return true;
 
-  const n = name.toLowerCase();
+/** A compiled predicate that tests a single name against a fixed query. */
+export type Matcher = (name: string) => boolean;
+
+/**
+ * Compile `query` **once** into a reusable predicate. Filtering a folder calls the matcher per entry, so
+ * the query normalization and — crucially — the glob→RegExp compilation must happen here, not per entry:
+ * otherwise a glob search recompiles the RegExp N times per keystroke (CPE-695, epic CPE-688).
+ */
+export function makeMatcher(query: string): Matcher {
+  const q = query.trim().toLowerCase();
+  if (q === "") return () => true;
 
   if (q.includes("*") || q.includes("?")) {
-    return globToRegExp(q).test(n);
+    const re = globToRegExp(q);
+    return (name) => re.test(name.toLowerCase());
   }
-  return n.includes(q);
+  return (name) => name.toLowerCase().includes(q);
+}
+
+/** Single-shot match — convenience over {@link makeMatcher} for callers testing one name. */
+export function matchesQuery(name: string, query: string): boolean {
+  return makeMatcher(query)(name);
 }
 
 /** Convert a glob (already lowercased) to an anchored RegExp. */

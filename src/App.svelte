@@ -80,7 +80,7 @@
   import { sortEntries } from "./lib/sort";
   import { uniqueName, uniqueNameWithExt } from "./lib/naming";
   import { validateFileName } from "./lib/filename";
-  import { matchesQuery } from "./lib/search";
+  import { makeMatcher } from "./lib/search";
   import { matchesGlob } from "./lib/glob";
   import PatternSelectDialog from "./lib/components/PatternSelectDialog.svelte";
   import { firstMatchIndex } from "./lib/typeahead";
@@ -1097,9 +1097,10 @@
   $: baseEntries = smartFolder ? smartEntries : entries;
   $: shown = baseEntries.filter((e) => showHidden || !e.hidden);
 
-  $: filtered = searching
-    ? shown.filter((e) => matchesQuery(e.name, search))
-    : shown;
+  // Compile the search matcher once per query change (CPE-695) — filtering per entry then costs only the
+  // match, not a fresh glob→RegExp compile for every entry on every keystroke.
+  $: searchMatcher = makeMatcher(search);
+  $: filtered = searching ? shown.filter((e) => searchMatcher(e.name)) : shown;
 
   // File-type filter (CPE-358): narrows to a category, applied after search/hidden.
   $: typeFiltered = fileFilter === "all"

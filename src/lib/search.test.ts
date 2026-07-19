@@ -1,5 +1,5 @@
-import { describe, it, expect } from "vitest";
-import { matchesQuery } from "./search";
+import { describe, it, expect, vi } from "vitest";
+import { matchesQuery, makeMatcher } from "./search";
 
 describe("matchesQuery", () => {
   it("matches everything for an empty query", () => {
@@ -35,5 +35,40 @@ describe("matchesQuery", () => {
     expect(matchesQuery("a+b.txt", "a+b.*")).toBe(true);
     expect(matchesQuery("axb.txt", "a+b.*")).toBe(false); // '+' is literal, not "one or more"
     expect(matchesQuery("file(1).txt", "file(1)*")).toBe(true);
+  });
+});
+
+describe("makeMatcher (compile once, CPE-695)", () => {
+  it("matches identically to matchesQuery for plain, glob, and empty queries", () => {
+    const cases: [string, string][] = [
+      ["Report-2026.pdf", "report"],
+      ["notes.txt", "*.txt"],
+      ["a.txtx", "*.txt"],
+      ["report1.md", "report?.md"],
+      ["PHOTO.JPG", "*.jpg"],
+      ["a+b.txt", "a+b.*"],
+      ["anything", ""],
+    ];
+    for (const [name, query] of cases) {
+      expect(makeMatcher(query)(name)).toBe(matchesQuery(name, query));
+    }
+  });
+
+  it("compiles a glob's RegExp once regardless of how many names it tests", () => {
+    const spy = vi.spyOn(globalThis, "RegExp");
+    const match = makeMatcher("*.txt");
+    ["a.txt", "b.txt", "c.md", "d.txt", "e.png"].forEach(match);
+    // globToRegExp's `.replace(/…/g)` calls use regex *literals* (not the constructor); only the single
+    // `new RegExp(pattern)` inside makeMatcher counts — proving no per-entry recompile.
+    expect(spy).toHaveBeenCalledTimes(1);
+    spy.mockRestore();
+  });
+
+  it("does not construct a RegExp for a plain (non-glob) query", () => {
+    const spy = vi.spyOn(globalThis, "RegExp");
+    const match = makeMatcher("report");
+    ["report.md", "budget.md"].forEach(match);
+    expect(spy).not.toHaveBeenCalled();
+    spy.mockRestore();
   });
 });
