@@ -232,7 +232,11 @@
     dispatch("contextEmpty", { x: e.clientX, y: e.clientY });
   }
 
-  const isCut = (p: string) => cutPaths.includes(p);
+  // Membership sets recomputed only when the source arrays change, so each of the ~30–50 on-screen
+  // rows (post-virtualization, CPE-692) does an O(1) lookup instead of an O(n) Array.includes scan —
+  // the drag case in particular was O(rows × selection) on every re-render.
+  $: cutSet = new Set(cutPaths);
+  $: draggedSet = new Set(draggedPaths);
 </script>
 
 {#if view === "details" && !error && !loading && entries.length > 0}
@@ -299,18 +303,19 @@
       -->
       {@const insideActive = entry.is_dir && folderHasActivity(activityPaths, entry.path)}
       {@const tagEntry = entryFor($tags, entry.path)}
+      {@const act = activity[entry.path]}
       <div
         class="row view-{view}"
         class:selected={isSelected(selection, i)}
-        class:cut={isCut(entry.path)}
+        class:cut={cutSet.has(entry.path)}
         class:lead={selection.lead === i}
         class:droptarget={dropIndex === i}
-        class:dragging={draggedPaths.includes(entry.path)}
-        class:agent-active={!!activity[entry.path]}
+        class:dragging={draggedSet.has(entry.path)}
+        class:agent-active={!!act}
         class:agent-inside={insideActive}
         class:tagged={!!tagEntry.label}
         style={tagEntry.label ? `--label-color: ${labelColor(tagEntry.label)}` : ""}
-        data-agent-kind={activity[entry.path]?.kind ?? ""}
+        data-agent-kind={act?.kind ?? ""}
         data-drop-path={entry.is_dir ? entry.path : null}
         bind:this={rowEls[i]}
         role="button"
@@ -361,8 +366,8 @@
               {/each}
             </span>
           {/if}
-          {#if activity[entry.path]}
-            <span class="agent-badge {activity[entry.path].kind}">{$t(ACTIVITY_LABEL_KEY[activity[entry.path].kind])}</span>
+          {#if act}
+            <span class="agent-badge {act.kind}">{$t(ACTIVITY_LABEL_KEY[act.kind])}</span>
           {:else if insideActive}
             <span class="agent-inside-dot" title={$t("fl.agentInside")}>●</span>
           {/if}
