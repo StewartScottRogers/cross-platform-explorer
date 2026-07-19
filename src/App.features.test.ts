@@ -163,6 +163,25 @@ describe("selection + status bar (CPE-676 net)", () => {
   });
 });
 
+describe("navigation history (CPE-676 net)", () => {
+  it("navigates into a folder and Back returns to the parent", async () => {
+    mockBackend([dir("sub"), file("a.txt", "txt")]);
+    await enterDrive();
+    await waitFor(() => expect(screen.getByText("sub")).toBeTruthy());
+
+    const streamedPaths = () =>
+      invoke.mock.calls.filter((c) => c[0] === "list_dir_stream").map((c) => (c[1] as { path: string }).path);
+
+    // Enter the subfolder.
+    await fireEvent.dblClick(screen.getByText("sub"));
+    await waitFor(() => expect(streamedPaths()).toContain("C:\\d\\sub"));
+
+    // Back → the parent folder is loaded again.
+    await fireEvent.click(screen.getByTitle(/^Back/));
+    await waitFor(() => expect(streamedPaths().at(-1)).toBe("C:\\d"));
+  });
+});
+
 describe("file-type filter (CPE-676 net)", () => {
   it("narrows the list to a category via the type filter", async () => {
     mockBackend([file("photo.png", "png"), file("notes.txt", "txt")]);
