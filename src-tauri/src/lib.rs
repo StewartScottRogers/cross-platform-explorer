@@ -2524,16 +2524,98 @@ fn glob_is_match(name: &str, pattern: &str) -> bool {
     j == p.len()
 }
 
+/// Safety cap on the number of patterns one query's brace expansion may produce, so a pathological
+/// query like `{a,b}{a,b}…` can't blow up into an exponential pattern list.
+const BRACE_EXPANSION_CAP: usize = 1024;
+
+/// Expand bash-style brace groups `{a,b}` in a glob into the flat list of concrete globs they denote
+/// (CPE-697), mirroring the frontend `globToRegExp` group handling: `*.{jpg,png}` → `["*.jpg","*.png"]`,
+/// and multiple/nested groups expand as a cartesian product (`{a,b}.{x,y}` → 4 patterns). A brace with
+/// no matching `}` or no top-level comma is left literal. The returned patterns contain only `*`/`?`
+/// wildcards (no braces), so each can be fed to `glob_is_match`.
+fn expand_braces(pattern: &str) -> Vec<String> {
+    let chars: Vec<char> = pattern.chars().collect();
+    let mut out = Vec::new();
+    expand_braces_into(&chars, &mut out);
+    out
+}
+
+fn expand_braces_into(chars: &[char], out: &mut Vec<String>) {
+    if out.len() > BRACE_EXPANSION_CAP {
+        return;
+    }
+    match first_brace_group(chars) {
+        Some((open, close, alts)) => {
+            for alt in alts {
+                let mut combined: Vec<char> = Vec::with_capacity(chars.len());
+                combined.extend_from_slice(&chars[..open]);
+                combined.extend(alt);
+                combined.extend_from_slice(&chars[close + 1..]);
+                expand_braces_into(&combined, out);
+                if out.len() > BRACE_EXPANSION_CAP {
+                    return;
+                }
+            }
+        }
+        None => out.push(chars.iter().collect()),
+    }
+}
+
+/// Find the first real brace group in `chars`: a `{` with a matching `}` and at least one top-level
+/// comma. Returns `(open_index, close_index, alternatives)` where each alternative is the character
+/// slice between top-level commas (nested `{…}` are kept intact for a later recursion). A `{` that is
+/// unmatched or has no top-level comma is skipped (treated as a literal), so scanning continues past it.
+fn first_brace_group(chars: &[char]) -> Option<(usize, usize, Vec<Vec<char>>)> {
+    for open in 0..chars.len() {
+        if chars[open] != '{' {
+            continue;
+        }
+        let mut depth = 0usize;
+        let mut start = open + 1;
+        let mut alts: Vec<Vec<char>> = Vec::new();
+        let mut saw_top_comma = false;
+        for i in open..chars.len() {
+            match chars[i] {
+                '{' => depth += 1,
+                '}' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        alts.push(chars[start..i].to_vec());
+                        if saw_top_comma {
+                            return Some((open, i, alts));
+                        }
+                        break; // comma-less group → literal; resume scanning after this `{`
+                    }
+                }
+                ',' if depth == 1 => {
+                    alts.push(chars[start..i].to_vec());
+                    start = i + 1;
+                    saw_top_comma = true;
+                }
+                _ => {}
+            }
+        }
+    }
+    None
+}
+
 /// Case-insensitive name match mirroring the frontend `matchesQuery` (CPE-603): a query containing
-/// `*`/`?` is an anchored glob over the whole name; otherwise a plain substring. `query_lower` must
-/// already be lowercased and non-empty (an empty query matches nothing — the caller gates on it).
+/// `*`/`?` or a brace group `{a,b}` (CPE-697) is an anchored glob over the whole name; otherwise a plain
+/// substring. `query_lower` must already be lowercased and non-empty (an empty query matches nothing —
+/// the caller gates on it).
 fn name_matches(name: &str, query_lower: &str) -> bool {
     if query_lower.is_empty() {
         return false;
     }
     let n = name.to_lowercase();
-    if query_lower.contains('*') || query_lower.contains('?') {
-        glob_is_match(&n, query_lower)
+    let has_group = query_lower.contains('{')
+        && first_brace_group(&query_lower.chars().collect::<Vec<_>>()).is_some();
+    if query_lower.contains('*') || query_lower.contains('?') || has_group {
+        // Expand any brace groups, then match the name against each concrete glob — a hit on ANY
+        // alternative is a match (bash brace-expansion semantics). No braces → a single pattern.
+        expand_braces(query_lower)
+            .iter()
+            .any(|p| glob_is_match(&n, p))
     } else {
         n.contains(query_lower)
     }
@@ -7132,6 +7214,55 @@ mod tests {
         assert!(name_matches("IMG_2024.jpg", "img_*.jpg")); // case-insensitive glob
         // Empty query matches nothing (caller gates).
         assert!(!name_matches("x", ""));
+    }
+
+    #[test]
+    fn name_matches_expands_brace_groups() {
+        // A {a,b} group matches any of its alternatives (CPE-697). Queries are pre-lowercased.
+        assert!(name_matches("photo.jpg", "*.{jpg,png}"));
+        assert!(name_matches("photo.png", "*.{jpg,png}"));
+        assert!(!name_matches("photo.gif", "*.{jpg,png}"));
+        assert!(name_matches("photo.gif", "*.{jpg,png,gif}"));
+        // Case-insensitive, like the rest of glob matching.
+        assert!(name_matches("PHOTO.JPG", "*.{jpg,png}"));
+        // `*`/`?` work inside a group.
+        assert!(name_matches("archive.tar.gz", "*.{tar.*,zip}"));
+        assert!(name_matches("data.zip", "*.{tar.*,zip}"));
+        assert!(name_matches("report1.md", "report{?,10}.md"));
+        assert!(name_matches("report10.md", "report{?,10}.md"));
+        assert!(!name_matches("reportxx.md", "report{?,10}.md"));
+        // Multiple + nested groups expand as a cartesian product.
+        assert!(name_matches("img.jpg", "{img,pic}.{jpg,png}"));
+        assert!(name_matches("pic.png", "{img,pic}.{jpg,png}"));
+        assert!(!name_matches("doc.jpg", "{img,pic}.{jpg,png}"));
+        assert!(name_matches("a1.txt", "{a{1,2},b}.txt"));
+        assert!(name_matches("b.txt", "{a{1,2},b}.txt"));
+        assert!(!name_matches("a3.txt", "{a{1,2},b}.txt"));
+    }
+
+    #[test]
+    fn name_matches_treats_lone_braces_and_commas_literally() {
+        // No top-level comma → braces are literal (not a group); this stays a plain substring query.
+        assert!(name_matches("{x}.txt", "{x}.txt"));
+        assert!(!name_matches("x.txt", "{x}.txt"));
+        // Unmatched opening brace → literal substring.
+        assert!(name_matches("a{b.txt", "a{b"));
+        assert!(!name_matches("axb.txt", "a{b"));
+        // A comma outside any group is a literal comma (query has `*`, so it's a glob).
+        assert!(name_matches("a,b.txt", "a,b*"));
+        assert!(!name_matches("ab.txt", "a,b*"));
+    }
+
+    #[test]
+    fn expand_braces_produces_expected_pattern_lists() {
+        assert_eq!(expand_braces("*.{jpg,png}"), vec!["*.jpg", "*.png"]);
+        assert_eq!(
+            expand_braces("{a,b}.{x,y}"),
+            vec!["a.x", "a.y", "b.x", "b.y"]
+        );
+        // No group → the pattern is returned unchanged.
+        assert_eq!(expand_braces("*.txt"), vec!["*.txt"]);
+        assert_eq!(expand_braces("{x}.txt"), vec!["{x}.txt"]); // comma-less → literal
     }
 
     #[test]
