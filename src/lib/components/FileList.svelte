@@ -12,7 +12,7 @@
   import type { Selection } from "../selection";
   import type { DirEntry, SortKey, SortDir, ViewMode } from "../types";
   import type { AgentActivity } from "../agentActivity";
-  import { folderHasActivityNorm, normalizeActivityPaths } from "../agentActivity";
+  import { folderActivityKindNorm, normalizeActivityByKind } from "../agentActivity";
   import { tags, entryFor, labelColor } from "../tags";
 
   export let entries: DirEntry[] = [];
@@ -27,10 +27,11 @@
     renamed: "fl.badgeMoved",
     read: "fl.badgeRead", // CPE-405: consulted, not changed
   };
-  // The active paths, recomputed only when the activity map changes — used to light up folder rows
-  // whose subtree the agent is changing (CPE-402). Normalized once here (not per folder row) so the
-  // per-row descendant check is a cheap prefix test (CPE-698).
-  $: activityPaths = normalizeActivityPaths(Object.keys(activity));
+  // The active paths, split into writes vs reads and recomputed only when the activity map changes —
+  // used to light up folder rows whose subtree the agent is changing (CPE-402), with a cooler tint for
+  // subtrees it has only *read* (CPE-742). Normalized once here (not per folder row) so the per-row
+  // descendant check is a cheap prefix test (CPE-698).
+  $: activitySets = normalizeActivityByKind(activity);
   export let selection: Selection;
   export let sortKey: SortKey = "name";
   export let sortDir: SortDir = "asc";
@@ -302,7 +303,7 @@
         clipped every row to nothing. The list rendered 18 blank strips while
         the status bar correctly reported "18 items". Shipped in v0.5.0. CPE-045.
       -->
-      {@const insideActive = entry.is_dir && folderHasActivityNorm(activityPaths, entry.path)}
+      {@const insideKind = entry.is_dir ? folderActivityKindNorm(activitySets, entry.path) : null}
       {@const tagEntry = entryFor($tags, entry.path)}
       {@const act = activity[entry.path]}
       <div
@@ -313,7 +314,8 @@
         class:droptarget={dropIndex === i}
         class:dragging={draggedSet.has(entry.path)}
         class:agent-active={!!act}
-        class:agent-inside={insideActive}
+        class:agent-inside={!!insideKind}
+        class:agent-inside-read={insideKind === "read"}
         class:tagged={!!tagEntry.label}
         style={tagEntry.label ? `--label-color: ${labelColor(tagEntry.label)}` : ""}
         data-agent-kind={act?.kind ?? ""}
@@ -369,7 +371,7 @@
           {/if}
           {#if act}
             <span class="agent-badge {act.kind}">{$t(ACTIVITY_LABEL_KEY[act.kind])}</span>
-          {:else if insideActive}
+          {:else if insideKind}
             <span class="agent-inside-dot" title={$t("fl.agentInside")}>●</span>
           {/if}
         </span>
@@ -454,6 +456,12 @@
   .row.agent-inside:not(.agent-active) {
     box-shadow: inset 3px 0 0 color-mix(in srgb, var(--accent, #2f6fed) 55%, transparent);
   }
+  /* CPE-742: a subtree the agent has ONLY read (not changed) gets a cooler, dimmer tint than the write
+     heat above — consistent with CPE-405's "a read is the weakest signal". Write outranks read, so a
+     folder being edited keeps the accent bar. */
+  .row.agent-inside-read:not(.agent-active) {
+    box-shadow: inset 3px 0 0 color-mix(in srgb, var(--text-muted, #6b6b6b) 45%, transparent);
+  }
   .agent-inside-dot {
     flex: 0 0 auto;
     margin-left: 8px;
@@ -461,6 +469,10 @@
     line-height: 1;
     color: var(--accent, #2f6fed);
     opacity: 0.8;
+  }
+  .row.agent-inside-read .agent-inside-dot {
+    color: var(--text-muted, #6b6b6b);
+    opacity: 0.6;
   }
 
   /* Tags (CPE-638): a tagged file gets a small colour dot before its name and its tags as chips

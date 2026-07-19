@@ -182,6 +182,46 @@ export function folderHasActivityNorm(normPaths: string[], dir: string): boolean
   return normPaths.some((p) => p.startsWith(prefix));
 }
 
+/** A kind counts as a change unless it's a `read` — reads are the weakest signal (CPE-405). */
+const isWriteKind = (k: FsActivity["kind"]): boolean => k !== "read";
+
+/** Normalized activity paths split into writes vs reads (CPE-742). Built once from the activity map so
+ *  the per-folder-row heat check ({@link folderActivityKindNorm}) is a cheap prefix test per side and
+ *  never re-normalizes the set per row (preserves the CPE-698 optimization). */
+export interface ActivitySets {
+  writes: string[];
+  reads: string[];
+}
+
+/** Split the activity map into normalized write-paths and read-paths (CPE-742). */
+export function normalizeActivityByKind(
+  activity: Record<string, { kind: FsActivity["kind"] }>,
+): ActivitySets {
+  const writes: string[] = [];
+  const reads: string[] = [];
+  for (const [path, a] of Object.entries(activity)) {
+    const n = normalizePath(path);
+    if (!n) continue;
+    (isWriteKind(a.kind) ? writes : reads).push(n);
+  }
+  return { writes, reads };
+}
+
+/**
+ * The heat kind for a folder's subtree (CPE-742): `"write"` if the agent has *changed* anything inside
+ * it, else `"read"` if it has *only consulted* files inside, else `null`. Write outranks read, so a
+ * folder the agent is editing never looks like a merely-read one. Takes already-split, already-normalized
+ * sets (from {@link normalizeActivityByKind}) so it's a cheap prefix scan per row. Excludes `dir` itself.
+ */
+export function folderActivityKindNorm(sets: ActivitySets, dir: string): "write" | "read" | null {
+  const d = normalizePath(dir);
+  if (!d) return null;
+  const prefix = d + "/";
+  if (sets.writes.some((p) => p.startsWith(prefix))) return "write";
+  if (sets.reads.some((p) => p.startsWith(prefix))) return "read";
+  return null;
+}
+
 /**
  * Whether a batch changes which rows belong in `folder` — i.e. a create/remove/rename of a DIRECT
  * child (CPE-401). Drives a live re-list so new files appear and deleted ones vanish. A `modified`

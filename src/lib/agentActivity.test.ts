@@ -11,6 +11,8 @@ import {
   ingestActivity,
   clearActivity,
   foldConsulted,
+  normalizeActivityByKind,
+  folderActivityKindNorm,
   fsActivity,
   agentTimeline,
   ACTIVITY_TTL_MS,
@@ -207,5 +209,36 @@ describe("foldConsulted", () => {
   it("bounds the set to the cap (drops the oldest)", () => {
     const s = foldConsulted([], reads("/a", "/b", "/c"), 1, 2);
     expect(s.map((e) => e.path)).toEqual(["/c", "/b"]);
+  });
+});
+
+describe("folderActivityKindNorm (read-vs-write heat, CPE-742)", () => {
+  const mk = (m: Record<string, AgentActivity["kind"]>) =>
+    normalizeActivityByKind(Object.fromEntries(Object.entries(m).map(([p, kind]) => [p, { kind }])));
+
+  it("reports write when the subtree has any change", () => {
+    const sets = mk({ "Z:/r/src/a.ts": "modified", "Z:/r/docs/b.md": "read" });
+    expect(folderActivityKindNorm(sets, "Z:/r/src")).toBe("write");
+  });
+
+  it("reports read when the subtree has only reads", () => {
+    const sets = mk({ "Z:/r/docs/b.md": "read" });
+    expect(folderActivityKindNorm(sets, "Z:/r/docs")).toBe("read");
+  });
+
+  it("write outranks read when both are inside the same folder", () => {
+    const sets = mk({ "Z:/r/x/a.ts": "read", "Z:/r/x/b.ts": "created" });
+    expect(folderActivityKindNorm(sets, "Z:/r/x")).toBe("write");
+  });
+
+  it("returns null when nothing is inside (and excludes the folder itself)", () => {
+    const sets = mk({ "Z:/r/x": "modified", "Z:/r/other/a": "read" });
+    expect(folderActivityKindNorm(sets, "Z:/r/x")).toBeNull();
+  });
+
+  it("treats created/modified/removed/renamed as writes, read as read", () => {
+    const sets = mk({ "Z:/r/w/a": "removed", "Z:/r/rd/b": "read" });
+    expect(folderActivityKindNorm(sets, "Z:/r/w")).toBe("write");
+    expect(folderActivityKindNorm(sets, "Z:/r/rd")).toBe("read");
   });
 });
