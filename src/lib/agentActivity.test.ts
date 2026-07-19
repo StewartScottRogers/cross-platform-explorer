@@ -6,6 +6,8 @@ import {
   mergeTimeline,
   affectsListing,
   folderHasActivity,
+  folderHasActivityNorm,
+  normalizeActivityPaths,
   ingestActivity,
   clearActivity,
   fsActivity,
@@ -153,5 +155,28 @@ describe("folderHasActivity (CPE-402 — is the agent working inside this folder
     expect(folderHasActivity(["Z:/repos/app-2/x.ts"], "Z:/repos/app")).toBe(false); // prefix ≠ descendant
     expect(folderHasActivity([], "Z:/repos/app")).toBe(false);
     expect(folderHasActivity(["Z:/repos/app/x.ts"], "")).toBe(false);
+  });
+});
+
+describe("folderHasActivityNorm + normalizeActivityPaths (CPE-698 — normalize once, not per row)", () => {
+  it("normalizeActivityPaths normalizes each path (separators + case) and drops empties", () => {
+    // normalizePath lowercases and forward-slashes for cross-platform comparison.
+    expect(normalizeActivityPaths(["Z:\\repos\\app\\x.ts", "", "Z:/repos/app/y.ts"])).toEqual([
+      "z:/repos/app/x.ts",
+      "z:/repos/app/y.ts",
+    ]);
+  });
+
+  it("gives the same answers as folderHasActivity when fed pre-normalized paths", () => {
+    const raw = ["Z:\\repos\\app\\src\\lib\\x.ts", "Z:/repos/app-2/y.ts"];
+    const norm = normalizeActivityPaths(raw);
+    for (const dir of ["Z:\\repos\\app\\src", "Z:/repos/app", "Z:/repos/app-2", "Z:/nope", ""]) {
+      expect(folderHasActivityNorm(norm, dir)).toBe(folderHasActivity(raw, dir));
+    }
+  });
+
+  it("excludes the folder itself and prefix-siblings", () => {
+    const norm = normalizeActivityPaths(["Z:/repos/app", "Z:/repos/app-2/x.ts"]);
+    expect(folderHasActivityNorm(norm, "Z:/repos/app")).toBe(false);
   });
 });

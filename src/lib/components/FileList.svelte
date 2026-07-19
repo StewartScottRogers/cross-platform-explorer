@@ -12,7 +12,7 @@
   import type { Selection } from "../selection";
   import type { DirEntry, SortKey, SortDir, ViewMode } from "../types";
   import type { AgentActivity } from "../agentActivity";
-  import { folderHasActivity } from "../agentActivity";
+  import { folderHasActivityNorm, normalizeActivityPaths } from "../agentActivity";
   import { tags, entryFor, labelColor } from "../tags";
 
   export let entries: DirEntry[] = [];
@@ -28,8 +28,9 @@
     read: "fl.badgeRead", // CPE-405: consulted, not changed
   };
   // The active paths, recomputed only when the activity map changes — used to light up folder rows
-  // whose subtree the agent is changing (CPE-402).
-  $: activityPaths = Object.keys(activity);
+  // whose subtree the agent is changing (CPE-402). Normalized once here (not per folder row) so the
+  // per-row descendant check is a cheap prefix test (CPE-698).
+  $: activityPaths = normalizeActivityPaths(Object.keys(activity));
   export let selection: Selection;
   export let sortKey: SortKey = "name";
   export let sortDir: SortDir = "asc";
@@ -301,7 +302,7 @@
         clipped every row to nothing. The list rendered 18 blank strips while
         the status bar correctly reported "18 items". Shipped in v0.5.0. CPE-045.
       -->
-      {@const insideActive = entry.is_dir && folderHasActivity(activityPaths, entry.path)}
+      {@const insideActive = entry.is_dir && folderHasActivityNorm(activityPaths, entry.path)}
       {@const tagEntry = entryFor($tags, entry.path)}
       {@const act = activity[entry.path]}
       <div

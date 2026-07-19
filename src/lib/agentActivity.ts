@@ -113,10 +113,28 @@ export function ingestActivity(payload: unknown, now = Date.now()): void {
  * tree. Excludes `dir` itself. Cross-platform (case/separator-normalized).
  */
 export function folderHasActivity(paths: string[], dir: string): boolean {
+  return folderHasActivityNorm(normalizeActivityPaths(paths), dir);
+}
+
+/** Normalize a list of activity paths once, so the per-row folder check (below) doesn't re-normalize
+    the whole list for every folder row (CPE-698). Empty results are dropped — they never match. */
+export function normalizeActivityPaths(paths: string[]): string[] {
+  const out: string[] = [];
+  for (const p of paths) {
+    const n = normalizePath(p);
+    if (n) out.push(n);
+  }
+  return out;
+}
+
+/** Like {@link folderHasActivity} but takes **already-normalized** paths (from
+    {@link normalizeActivityPaths}), so a whole file list normalizes the activity set once instead of
+    once per folder row (CPE-698). */
+export function folderHasActivityNorm(normPaths: string[], dir: string): boolean {
   const d = normalizePath(dir);
   if (!d) return false;
   const prefix = d + "/";
-  return paths.some((p) => normalizePath(p).startsWith(prefix));
+  return normPaths.some((p) => p.startsWith(prefix));
 }
 
 /**
