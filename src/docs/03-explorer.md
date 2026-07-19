@@ -31,7 +31,8 @@ The explorer is the core of the app and is tuned to stay **fast, small, and pred
   the folder's images and **Esc** (or Space again) closes it.
 - **Sort & filter** — order by name, size, date, or type; filter the list by a pattern.
 - **Search** — three complementary tools:
-  - a quick **name filter** for the current folder (Ctrl+F; supports `*`/`?` wildcards),
+  - a quick **name filter** for the current folder (Ctrl+F; supports `*`/`?` wildcards and `{a,b}`
+    brace groups),
   - **Find files by name** (Ctrl+P) to search the whole tree below the current folder for a name or
     glob and jump straight to a hit — results stream in as they're found, so a big tree lists matches
     progressively instead of waiting for the whole walk,
@@ -39,6 +40,11 @@ The explorer is the core of the app and is tuned to stay **fast, small, and pred
     line.
 
   Your recent queries autocomplete in each.
+
+  Both name searches understand the same glob syntax: `*` matches any run of characters, `?` exactly one,
+  and a **brace group** `{a,b,c}` matches any one of the comma-separated alternatives — so `*.{jpg,png,gif}`
+  finds all three image types at once. Wildcards work inside a group, and groups combine (`{img,pic}.{jpg,png}`).
+  A brace with no comma inside (or an unmatched brace) is treated as a literal character.
 - **Tags & labels** — right-click a file or folder and choose **Tags…** to attach free-text tags and a
   single colour label. Tagged rows show their tags as small chips, and a labelled row gets a colour dot
   and a soft accent bar in its label's colour. Tags persist across sessions; untagged items look exactly

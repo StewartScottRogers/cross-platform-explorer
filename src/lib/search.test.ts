@@ -36,6 +36,42 @@ describe("matchesQuery", () => {
     expect(matchesQuery("axb.txt", "a+b.*")).toBe(false); // '+' is literal, not "one or more"
     expect(matchesQuery("file(1).txt", "file(1)*")).toBe(true);
   });
+
+  it("expands a {a,b} brace group to any of its alternatives (CPE-697)", () => {
+    expect(matchesQuery("photo.jpg", "*.{jpg,png}")).toBe(true);
+    expect(matchesQuery("photo.png", "*.{jpg,png}")).toBe(true);
+    expect(matchesQuery("photo.gif", "*.{jpg,png}")).toBe(false);
+    expect(matchesQuery("photo.gif", "*.{jpg,png,gif}")).toBe(true);
+  });
+
+  it("supports * and ? inside a brace group", () => {
+    expect(matchesQuery("archive.tar.gz", "*.{tar.*,zip}")).toBe(true);
+    expect(matchesQuery("data.zip", "*.{tar.*,zip}")).toBe(true);
+    expect(matchesQuery("report1.md", "report{?,10}.md")).toBe(true);
+    expect(matchesQuery("report10.md", "report{?,10}.md")).toBe(true);
+    expect(matchesQuery("reportXX.md", "report{?,10}.md")).toBe(false);
+  });
+
+  it("expands nested and multiple brace groups", () => {
+    expect(matchesQuery("img.jpg", "{img,pic}.{jpg,png}")).toBe(true);
+    expect(matchesQuery("pic.png", "{img,pic}.{jpg,png}")).toBe(true);
+    expect(matchesQuery("doc.jpg", "{img,pic}.{jpg,png}")).toBe(false);
+    expect(matchesQuery("a1.txt", "{a{1,2},b}.txt")).toBe(true);
+    expect(matchesQuery("b.txt", "{a{1,2},b}.txt")).toBe(true);
+    expect(matchesQuery("a3.txt", "{a{1,2},b}.txt")).toBe(false);
+  });
+
+  it("treats an unmatched brace or a comma-less group literally", () => {
+    // No top-level comma → the braces are literal characters in the name.
+    expect(matchesQuery("{x}.txt", "{x}.txt")).toBe(true);
+    expect(matchesQuery("x.txt", "{x}.txt")).toBe(false);
+    // Unmatched opening brace → literal (and, lacking * ? or a group, a plain substring query).
+    expect(matchesQuery("a{b.txt", "a{b")).toBe(true);
+    expect(matchesQuery("axb.txt", "a{b")).toBe(false);
+    // A comma outside any group is a literal comma.
+    expect(matchesQuery("a,b.txt", "a,b*")).toBe(true);
+    expect(matchesQuery("ab.txt", "a,b*")).toBe(false);
+  });
 });
 
 describe("makeMatcher (compile once, CPE-695)", () => {
