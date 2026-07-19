@@ -168,6 +168,24 @@ describe("selection + status bar (CPE-676 net)", () => {
   });
 });
 
+describe("view mode (CPE-676 net)", () => {
+  it("switches the listing to the icons grid layout", async () => {
+    mockBackend([file("a.png", "png"), file("b.png", "png")]);
+    await enterDrive();
+    await waitFor(() => expect(screen.getByText("a.png")).toBeTruthy());
+    expect(document.querySelector(".rows.grid")).toBeNull(); // details view is not a grid
+
+    await fireEvent.click(screen.getByLabelText("File list settings"));
+    // The view <select> is the one offering an "icons" option.
+    const viewSelect = [...document.querySelectorAll("select")].find((s) =>
+      [...(s as HTMLSelectElement).options].some((o) => o.value === "icons"),
+    ) as HTMLSelectElement;
+    await fireEvent.change(viewSelect, { target: { value: "icons" } });
+
+    await waitFor(() => expect(document.querySelector(".rows.grid")).toBeTruthy());
+  });
+});
+
 describe("archive browsing (CPE-676 net)", () => {
   it("opens a zip into a read-only archive view showing its contents", async () => {
     mockBackend([file("bundle.zip", "zip")]);
