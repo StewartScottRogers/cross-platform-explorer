@@ -5875,6 +5875,27 @@ mod tests {
     }
 
     #[test]
+    #[ignore] // profiling only (CPE-693) — run with: cargo test walk_profile -- --ignored --nocapture
+    fn stream_dir_entries_walk_profile() {
+        let d = scratch("walkprofile");
+        let n = 5000;
+        for i in 0..n {
+            fs::write(d.join(format!("f{i:05}.txt")), b"x").unwrap();
+        }
+        let start = std::time::Instant::now();
+        let mut count = 0usize;
+        stream_dir_entries(d.to_str().unwrap(), LIST_DIR_BATCH, |b| {
+            count += b.len();
+            std::ops::ControlFlow::Continue(())
+        })
+        .unwrap();
+        let ms = start.elapsed().as_secs_f64() * 1000.0;
+        println!("[profile] walked {count} entries in {ms:.1} ms ({:.0} entries/ms)", count as f64 / ms.max(0.001));
+        assert_eq!(count, n);
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    #[test]
     fn stream_dir_entries_batches_and_flushes_all() {
         let d = scratch("streamdir");
         for i in 0..500 {
