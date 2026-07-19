@@ -33,8 +33,23 @@ export interface TimelineEntry {
   at: number;
 }
 
+/** One file the agent has READ this session (CPE-741) — the durable "consulted" set. Unlike the
+ *  transient activity map (which fades) and the interleaved timeline, this is a deduped, newest-first
+ *  list of just the reads, so you can see the context the agent gathered. */
+export interface ConsultedEntry {
+  path: string;
+  /** When it was most recently read (epoch ms). */
+  at: number;
+  /** How many times it's been read this session. */
+  count: number;
+}
+
+/** How many consulted files to retain (newest-first), bounded like the timeline. */
+export const CONSULTED_CAP = 500;
+
 const store = writable<Record<string, AgentActivity>>({});
 const timeline = writable<TimelineEntry[]>([]);
+const consulted = writable<ConsultedEntry[]>([]);
 let nextId = 0;
 
 /** Reactive per-path activity map (keyed by absolute path). Empty when not watching. */
@@ -42,6 +57,35 @@ export const fsActivity: Readable<Record<string, AgentActivity>> = store;
 
 /** Reactive, newest-first, bounded session activity history for the timeline panel (CPE-400). */
 export const agentTimeline: Readable<TimelineEntry[]> = timeline;
+
+/** Reactive, newest-first, deduped set of files the agent has READ this session (CPE-741). Empty when
+ *  not watching / when the agent reports no reads. */
+export const agentConsulted: Readable<ConsultedEntry[]> = consulted;
+
+/** Fold a batch into the consulted set (pure): each `read` dedupes by path, bumps its count + recency,
+ *  and moves to the front; non-reads are ignored. Bounded to `cap`. Returns `prev` when unchanged. */
+export function foldConsulted(
+  prev: ConsultedEntry[],
+  items: FsActivity[],
+  now: number,
+  cap = CONSULTED_CAP,
+): ConsultedEntry[] {
+  let next = prev;
+  let changed = false;
+  for (const it of items) {
+    if (it.kind !== "read") continue;
+    if (!changed) {
+      next = prev.slice();
+      changed = true;
+    }
+    const i = next.findIndex((e) => e.path === it.path);
+    const count = i >= 0 ? next[i].count + 1 : 1;
+    if (i >= 0) next.splice(i, 1);
+    next.unshift({ path: it.path, at: now, count });
+  }
+  if (changed && next.length > cap) next = next.slice(0, cap);
+  return changed ? next : prev;
+}
 
 /** Prepend a batch to the timeline, newest-first, capped (pure). `baseId` seeds unique keys. */
 export function mergeTimeline(
@@ -98,6 +142,7 @@ export function recentActivities(
 function applyItems(items: FsActivity[], now: number): void {
   store.update((prev) => foldActivities(prev, items, now));
   timeline.update((prev) => mergeTimeline(prev, items, now, nextId));
+  consulted.update((prev) => foldConsulted(prev, items, now));
   nextId += items.length;
 }
 
@@ -158,6 +203,7 @@ export function affectsListing(items: FsActivity[], folder: string): boolean {
 export function clearActivity(): void {
   store.set({});
   timeline.set([]);
+  consulted.set([]);
 }
 
 /**

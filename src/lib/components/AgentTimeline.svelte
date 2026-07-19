@@ -9,6 +9,7 @@
   import Icon from "./Icon.svelte";
   import DiffPeek from "./DiffPeek.svelte";
   import DiffSideBySide from "./DiffSideBySide.svelte";
+  import ConsultedFiles from "./ConsultedFiles.svelte";
   import type { TimelineEntry } from "../agentActivity";
   import { agentDiffs, diffFor, diffLineStats } from "../agentDiffs";
 
@@ -49,6 +50,8 @@
       <Icon name="close" size={14} />
     </button>
   </header>
+  <!-- Files the agent has READ this session (CPE-741) — a durable consulted set above the activity log. -->
+  <ConsultedFiles on:navigate />
   {#if entries.length === 0}
     <div class="tl-empty">No activity yet — changes appear here as the agent works.</div>
   {:else}

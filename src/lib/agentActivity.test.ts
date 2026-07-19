@@ -10,6 +10,7 @@ import {
   normalizeActivityPaths,
   ingestActivity,
   clearActivity,
+  foldConsulted,
   fsActivity,
   agentTimeline,
   ACTIVITY_TTL_MS,
@@ -178,5 +179,33 @@ describe("folderHasActivityNorm + normalizeActivityPaths (CPE-698 — normalize 
   it("excludes the folder itself and prefix-siblings", () => {
     const norm = normalizeActivityPaths(["Z:/repos/app", "Z:/repos/app-2/x.ts"]);
     expect(folderHasActivityNorm(norm, "Z:/repos/app")).toBe(false);
+  });
+});
+
+describe("foldConsulted", () => {
+  const reads = (...p: string[]): FsActivity[] => p.map((path) => ({ kind: "read", path }));
+
+  it("accumulates reads newest-first, ignoring non-reads", () => {
+    let s = foldConsulted([], [...reads("/a"), { kind: "modified", path: "/w" }, ...reads("/b")], 100);
+    expect(s.map((e) => e.path)).toEqual(["/b", "/a"]);
+    expect(s.every((e) => e.count === 1)).toBe(true);
+  });
+
+  it("dedupes by path, bumping count + recency and moving to the front", () => {
+    let s = foldConsulted([], reads("/a", "/b"), 10);
+    s = foldConsulted(s, reads("/a"), 20);
+    expect(s.map((e) => e.path)).toEqual(["/a", "/b"]);
+    expect(s[0]).toEqual({ path: "/a", at: 20, count: 2 });
+  });
+
+  it("returns the same reference when the batch has no reads", () => {
+    const s = foldConsulted([], reads("/a"), 1);
+    const again = foldConsulted(s, [{ kind: "modified", path: "/w" }], 2);
+    expect(again).toBe(s);
+  });
+
+  it("bounds the set to the cap (drops the oldest)", () => {
+    const s = foldConsulted([], reads("/a", "/b", "/c"), 1, 2);
+    expect(s.map((e) => e.path)).toEqual(["/c", "/b"]);
   });
 });
