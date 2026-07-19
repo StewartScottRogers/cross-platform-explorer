@@ -251,16 +251,18 @@ describe("navigation history (CPE-676 net)", () => {
     await enterDrive();
     await waitFor(() => expect(screen.getByText("sub")).toBeTruthy());
 
-    const streamedPaths = () =>
-      invoke.mock.calls.filter((c) => c[0] === "list_dir_stream").map((c) => (c[1] as { path: string }).path);
+    // The current folder is the last breadcrumb (aria-current="page"). Assert the navigation OUTCOME, not
+    // the mechanism: CPE-756 serves Up/Back/re-drill from the listing cache, so a navigation no longer
+    // necessarily re-streams the folder (that instant, cache-served hop is the whole point).
+    const currentCrumb = () => document.querySelector('[aria-current="page"]')?.textContent;
 
-    // Enter the subfolder.
+    // Enter the subfolder → it becomes the current folder.
     await fireEvent.dblClick(screen.getByText("sub"));
-    await waitFor(() => expect(streamedPaths()).toContain("C:\\d\\sub"));
+    await waitFor(() => expect(currentCrumb()).toBe("sub"));
 
-    // Back → the parent folder is loaded again.
+    // Back → we've returned to the parent (no longer inside the subfolder).
     await fireEvent.click(screen.getByTitle(/^Back/));
-    await waitFor(() => expect(streamedPaths().at(-1)).toBe("C:\\d"));
+    await waitFor(() => expect(currentCrumb()).not.toBe("sub"));
   });
 });
 

@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { onMount, onDestroy } from "svelte";
+  import { onMount, onDestroy, tick } from "svelte";
   import { convertFileSrc, Channel } from "@tauri-apps/api/core";
   import { invoke } from "./lib/invoke";
   import { rawInvoke } from "./lib/invoke";
@@ -134,6 +134,57 @@
   // Monotonic token identifying the current folder load (CPE-664). A new load bumps it; batches from a
   // superseded stream carry a stale token and are dropped, so navigating away mid-load can't bleed rows.
   let loadGen = 0;
+
+  // --- Directory-listing cache (CPE-756) -------------------------------------------------------------
+  // Navigating up/down the tree re-listed every folder from scratch, so Up / Back / re-open of a folder
+  // you were just in felt slow. This bounded LRU cache lets a *navigation* paint the folder's cached rows
+  // instantly (stale-while-revalidate: we re-list in the background and swap in only if it changed), and
+  // prefetches the parent + top subfolders so the likely next step is instant too. Reloads after a
+  // mutation (refresh / file ops) always go fresh (useCache=false), so the cache never shows stale content
+  // for our own changes. Purely a latency win — orthogonal to list *rendering* (virtualization, CPE-690).
+  const dirCache = new Map<string, DirEntry[]>(); // insertion order == LRU recency
+  const DIR_CACHE_MAX = 48;
+  const prefetchInflight = new Set<string>();
+  function cacheGet(path: string): DirEntry[] | undefined {
+    const v = dirCache.get(path);
+    if (v) { dirCache.delete(path); dirCache.set(path, v); } // bump to most-recent
+    return v;
+  }
+  function cachePut(path: string, list: DirEntry[]): void {
+    dirCache.delete(path);
+    dirCache.set(path, list);
+    while (dirCache.size > DIR_CACHE_MAX) dirCache.delete(dirCache.keys().next().value as string);
+  }
+  const sameListing = (a: DirEntry[], b: DirEntry[]): boolean =>
+    a.length === b.length && a.every((e, i) => e.path === b[i].path && e.size === b[i].size && e.modified === b[i].modified);
+  /** Re-list a folder we served from cache; swap the fresh rows in only if it changed and it's still the
+   *  active view (stale-while-revalidate). Uses the plain (non-streaming) command — it's a background call. */
+  async function revalidateDir(path: string, gen: number): Promise<void> {
+    try {
+      const fresh = await invoke<DirEntry[]>("list_dir", { path });
+      cachePut(path, fresh);
+      if (gen === loadGen && !sameListing(entries, fresh)) entries = fresh;
+    } catch { /* keep the cached view */ }
+  }
+  function prefetchOne(p: string): void {
+    if (!p || prefetchInflight.has(p) || dirCache.has(p)) return;
+    prefetchInflight.add(p);
+    invoke<DirEntry[]>("list_dir", { path: p })
+      .then((list) => cachePut(p, list))
+      .catch(() => {})
+      .finally(() => prefetchInflight.delete(p));
+  }
+  /** Warm the cache for the parent (for Up) and the largest few subfolders (for drill-down). */
+  function prefetchDirs(path: string): void {
+    invoke<string | null>("parent_dir", { path }).then((par) => par && prefetchOne(par)).catch(() => {});
+    let n = 0;
+    for (const e of entries) {
+      if (n >= 12) break;
+      if (e.is_dir) { prefetchOne(e.path); n++; }
+    }
+  }
+  // ---------------------------------------------------------------------------------------------------
+
   let notice = "";
   let noticeIsError = false;
   let noticeTimer: ReturnType<typeof setTimeout> | undefined;
@@ -779,7 +830,7 @@
     tabs = tabs.map((t) => (t.id === activeId ? { ...t, history: h } : t));
   }
 
-  async function loadPath(path: string, keepSelection = false) {
+  async function loadPath(path: string, keepSelection = false, useCache = false) {
     const previouslySelected = keepSelection
       ? selectedIndices(selection).map((i) => visible[i]?.path).filter(Boolean)
       : [];
@@ -806,6 +857,15 @@
     // Tell the backend to stop walking the folder we just left (CPE-665) so a huge/slow previous stream
     // doesn't keep churning after we've moved on. No-op if it already finished.
     if (gen > 1) rawInvoke("cancel_dir_stream", { streamId: gen - 1 }).catch(() => {});
+
+    // Navigation cache-hit (CPE-756): paint the cached rows instantly; revalidate + prefetch after the
+    // post-load hooks below. Only navigations pass useCache — reloads after a mutation always go fresh.
+    const servedFromCache = useCache ? cacheGet(path) : undefined;
+    if (servedFromCache) {
+      entries = servedFromCache;
+      loading = false;
+      await tick(); // let the reactive `visible` derive before the post-load hooks read it
+    } else {
     entries = [];
     loading = true;
     // Perf instrumentation (CPE-691): time-to-first-paint and time-to-settled, dev-only so it's free in
@@ -856,6 +916,10 @@
     if (import.meta.env.DEV && gen === loadGen) {
       console.debug(`[perf] settled "${path}" ${Math.round(performance.now() - perfStart)}ms — ${entries.length} entries`);
     }
+      // Cache the freshly-streamed listing so a later navigation back here paints instantly (CPE-756).
+      if (gen === loadGen) cachePut(path, entries);
+    }
+
     // A stream superseded mid-flight already had its state handed to the newer load — stop here so the
     // post-load hooks below (recent-folder, selection remap, pending rename/select) don't fire stale.
     if (gen !== loadGen) return;
@@ -886,11 +950,16 @@
       if (i >= 0) selection = selectOnly(i);
       pendingSelectPath = "";
     }
+
+    // Stale-while-revalidate + prefetch (CPE-756): if we painted from cache, re-list in the background and
+    // swap in only if it changed; either way warm the neighbours (parent + top subfolders) for the next hop.
+    if (servedFromCache && !error) void revalidateDir(path, gen);
+    if (!error) prefetchDirs(path);
   }
 
   async function navigate(path: string) {
     setHistory(visit(activeTab.history, path));
-    await loadPath(path);
+    await loadPath(path, false, true); // navigation uses the listing cache (CPE-756)
   }
 
   /** Navigate to a file's folder and select + scroll to the file itself (CPE-423). Used by the
@@ -906,14 +975,14 @@
     if (!canGoBack(activeTab.history)) return;
     const h = back(activeTab.history);
     setHistory(h);
-    await loadPath(current(h) as string);
+    await loadPath(current(h) as string, false, true); // CPE-756: instant from cache
   }
 
   async function goForward() {
     if (!canGoForward(activeTab.history)) return;
     const h = forward(activeTab.history);
     setHistory(h);
-    await loadPath(current(h) as string);
+    await loadPath(current(h) as string, false, true); // CPE-756: instant from cache
   }
 
   async function goUp() {
