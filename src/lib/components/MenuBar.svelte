@@ -8,6 +8,7 @@
    * closes on Escape, click-away, or after a choice.
    */
   import { createEventDispatcher } from "svelte";
+  import Icon from "./Icon.svelte";
   import { t, locale, filterLocales, localeCoverage, type Locale } from "../i18n";
 
   let langQuery = ""; // search filter for the language picker (CPE-533)
@@ -16,7 +17,7 @@
 
   // Item labels are i18n keys (CPE-481) resolved via `$t` at render; `hint` is a key combo (not
   // translated). A `sep` is a divider.
-  type Item = { id: string; labelKey: string; hint?: string } | { sep: true };
+  type Item = { id: string; labelKey: string; hint?: string; icon?: string } | { sep: true };
   interface Menu {
     id: string;
     /** i18n key for the top-level title (falls back to English/key). */
@@ -28,30 +29,30 @@
     {
       id: "file",
       labelKey: "menu.file",
-      items: [{ id: "exit", labelKey: "mi.exit", hint: "Alt+F4" }],
+      items: [{ id: "exit", labelKey: "mi.exit", hint: "Alt+F4", icon: "close" }],
     },
     {
       id: "tools",
       labelKey: "menu.tools",
       items: [
-        { id: "content-search", labelKey: "mi.searchInFiles", hint: "Ctrl+Shift+F" },
-        { id: "find-duplicates", labelKey: "mi.findDuplicates" },
+        { id: "content-search", labelKey: "mi.searchInFiles", hint: "Ctrl+Shift+F", icon: "search" },
+        { id: "find-duplicates", labelKey: "mi.findDuplicates", icon: "copy" },
         { sep: true },
-        { id: "copy-file-names", labelKey: "mi.copyFileNames" },
-        { id: "copy-file-list", labelKey: "mi.copyFileList" },
-        { id: "save-file-list", labelKey: "mi.saveFileList" },
+        { id: "copy-file-names", labelKey: "mi.copyFileNames", icon: "rename" },
+        { id: "copy-file-list", labelKey: "mi.copyFileList", icon: "copy" },
+        { id: "save-file-list", labelKey: "mi.saveFileList", icon: "document" },
       ],
     },
     {
       id: "app",
       labelKey: "menu.application",
       items: [
-        { id: "check-updates", labelKey: "mi.checkUpdates" },
-        { id: "settings", labelKey: "mi.settings" },
+        { id: "check-updates", labelKey: "mi.checkUpdates", icon: "refresh" },
+        { id: "settings", labelKey: "mi.settings", icon: "settings" },
         { sep: true },
-        { id: "shortcuts", labelKey: "mi.shortcuts", hint: "F1" },
-        { id: "documents", labelKey: "mi.documents" },
-        { id: "about", labelKey: "mi.about" },
+        { id: "shortcuts", labelKey: "mi.shortcuts", hint: "F1", icon: "keyboard" },
+        { id: "documents", labelKey: "mi.documents", icon: "documents" },
+        { id: "about", labelKey: "mi.about", icon: "info" },
       ],
     },
   ];
@@ -122,6 +123,9 @@
                 role="menuitem"
                 on:click={() => choose(item.id)}
               >
+                <span class="mi-icon" aria-hidden="true">
+                  {#if item.icon}<Icon name={item.icon} size={15} />{/if}
+                </span>
                 {$t(item.labelKey)}
                 {#if item.hint}<span class="hint">{item.hint}</span>{/if}
               </button>
@@ -237,6 +241,15 @@
     padding: 0 10px;
     text-align: left;
     border-radius: var(--radius);
+    color: var(--text);
+  }
+  /* Fixed-width leading icon slot so labels line up whether or not an item has an icon (CPE-748). */
+  .mi-icon {
+    flex: 0 0 auto;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 15px;
     color: var(--text);
   }
   .hint {
