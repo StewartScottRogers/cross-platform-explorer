@@ -26,3 +26,4 @@ scroll-into-view, rename-in-place, and drag/drop working with windowed rows (the
 Attended: windowed rows vs. selection/DnD/rename/keyboard interactions need live GUI verification.
 
 ## Work Log
+2026-07-18 (dayshift) — Landed the safe headless foundation: pure windowing math in src/lib/virtualize.ts (windowRange + totalHeight; visible index range + overscan + spacer heights; list & grid via a columns param), 7 unit tests (caught+fixed a past-end-scroll edge bug). The FileList render integration — windowed rows coexisting with keyboard nav / selection / scroll-into-view / rename / DnD — remains the attended, GUI-verified part.
