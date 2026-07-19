@@ -2,7 +2,7 @@
 id: CPE-688
 title: "EPIC: Explorer performance — 10× faster directory open & all file-list operations"
 type: Task
-status: Proposed
+status: In Progress
 priority: High
 component: Frontend
 tags: [epic, big-design]
@@ -98,3 +98,23 @@ activated with `/ticketing-epic activate CPE-688`.
 multiple seconds — improve all file-explorer operations 10×"). Diagnosed the open path: backend is
 streamed+lean; the cost is the un-virtualized file list (`FileList.svelte:291`) plus an O(n²) re-sort per
 stream batch. Not decomposed; activate to plan.
+
+## Decisions (activated 2026-07-18, dayshift — user away, best-guess logged)
+- **Order:** the safe, headless win first — coalesce stream batches to kill the per-batch re-sort
+  (CPE-689) — then the headline **virtualization** (CPE-690, attended GUI verify), a **benchmark harness**
+  (CPE-691), row-template slimming (CPE-692), and a backend profile pass (CPE-693).
+- **Virtualization approach:** hand-rolled windowing (zero-dep, full control over selection/DnD/rename).
+- **Row heights:** fixed-height per view (details/icons/gallery each a constant), simplest + fast.
+- **10× baseline:** a ~10k-entry folder as the reference case.
+- **Batch coalescing:** flush buffered stream batches once per animation frame (rAF) — first batch still
+  paints immediately (liveness), but the O(n²)-ish re-sort cascade collapses to ~one per frame.
+
+## Child tickets
+1. **CPE-689** — Coalesce stream batches (rAF) so the reactive re-sort runs per-frame, not per-batch.
+   Safe/headless. *(build first)*
+2. **CPE-690** — Virtualize the file list (details/icons/gallery): render only the visible window +
+   overscan, keeping keyboard nav / selection / scroll-into-view / rename / DnD working. **Attended GUI.**
+3. **CPE-691** — Perf benchmark harness (time-to-first-paint / time-to-settle for 100/1k/10k/50k) + a
+   regression budget guarding against full-list rendering.
+4. **CPE-692** — Slim the row template (fewer per-row handlers/bindings; hoist shared work). *(prereq: 690)*
+5. **CPE-693** — Backend profiling pass; optimize Rust only if the profile warrants.

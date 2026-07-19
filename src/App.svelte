@@ -799,13 +799,34 @@
     entries = [];
     loading = true;
     try {
+      // Coalesce stream batches (CPE-689): buffer incoming batches and flush to `entries` once per
+      // animation frame, so the reactive `visible = sortEntries(entries…)` re-sorts a handful of times
+      // instead of once per 256-row batch (the O(n²)-ish cascade on big folders). The first frame's rows
+      // still paint immediately, preserving the streaming-liveness contract (STREAMING.md / CPE-662).
       const channel = new Channel<DirEntry[]>();
+      let buffer: DirEntry[] = [];
+      let flushQueued = false;
+      const flush = () => {
+        flushQueued = false;
+        if (gen !== loadGen || buffer.length === 0) {
+          buffer = [];
+          return;
+        }
+        entries = entries.concat(buffer);
+        buffer = [];
+        loading = false; // first real rows are in the DOM — drop the "Loading…" placeholder
+      };
       channel.onmessage = (batch) => {
         if (gen !== loadGen) return; // superseded by a newer navigation — drop stale rows
-        entries = entries.concat(batch);
-        loading = false; // first real rows are in — reveal them (drop the "Loading…" placeholder)
+        buffer.push(...batch);
+        if (!flushQueued) {
+          flushQueued = true;
+          requestAnimationFrame(flush);
+        }
       };
       await rawInvoke("list_dir_stream", { path, streamId: gen, onEntry: channel });
+      // Settle: flush any rows still buffered when the walk completes (also covers test/no-rAF envs).
+      if (gen === loadGen && buffer.length > 0) flush();
     } catch (e) {
       if (gen === loadGen) {
         entries = [];
