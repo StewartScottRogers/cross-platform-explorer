@@ -51,3 +51,10 @@ trailing dot/space, Windows-reserved CON/NUL/COM#/LPT#); `previewRename` zips th
 platform-specific validity, composed recipe). `npm run check` 0/0; full JS suite 726 pass. Pure/tree-
 shakeable — plain explorer pays nothing. No Rust touched (clippy/cargo unaffected). Next: CPE-701 backend
 `rename_many` (headless ordering/cycle logic), then CPE-702 GUI panel (attended).
+
+## Reverted (2026-07-19)
+Removed as a **duplicate**. This engine (`src/lib/rename.ts`) duplicated the pre-existing, shipped
+`src/lib/batchRename.ts` used by `BatchRenameDialog.svelte`. Filed during the nightshift on the false
+premise that the app only renamed one file at a time (frontend feature not checked). Per the user's
+decision, `src/lib/rename.ts` + `rename.test.ts` were deleted. Superseded by the existing feature; see
+CPE-702 (Duplicate) and the batch-rename-exists memory.

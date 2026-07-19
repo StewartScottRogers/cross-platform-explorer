@@ -50,3 +50,10 @@ this landed fully tested unattended — only the GUI panel (CPE-702) remains att
   (nothing moved); duplicate-target and path-separator rejected. `cargo test` 141 pass; clippy
   `--all-targets -D warnings` clean in default + `sidecar-platform`. No frontend touched.
 Next: CPE-702 wires the GUI panel over CPE-700's engine + this command (attended GUI verify).
+
+## Reverted (2026-07-19)
+Removed as a **duplicate**. The `rename_many` command + `plan_renames` helper duplicated the pre-existing
+`move_exact` backend used by the shipped batch-rename dialog. Per the user's decision, the command,
+its types/helpers, its `generate_handler!` entry, and its tests were deleted from `src-tauri/src/lib.rs`.
+Note: `rename_many` added swap/cycle-safe ordering that `move_exact` lacks — see CPE-702 resolution for
+context if that capability is ever wanted as a real upgrade. Superseded; see CPE-702 (Duplicate).

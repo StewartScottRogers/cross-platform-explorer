@@ -2,7 +2,9 @@
 id: CPE-699
 title: "EPIC: Advanced batch rename"
 type: Task
-status: In Progress
+status: Done
+resolution: Duplicate
+closed: 2026-07-19
 priority: Medium
 component: Multiple
 tags: [epic]
@@ -102,3 +104,12 @@ nightshift-mode). Rationale above. Decomposed into the children below; building 
    *(prereq: CPE-700's pair shape)*
 3. **CPE-702** — Batch Rename panel (GUI): operation rows add/remove/reorder, live preview table with
    collision highlighting, apply/cancel + undo; docs section + `sectionDocs.ts` mapping. **Attended GUI.**
+
+## Closed — Duplicate (2026-07-19)
+This epic was filed **and** activated during the autonomous nightshift on the false premise that the app
+"only renames one entry in-place." That was wrong: a full batch-rename feature already ships
+(`BatchRenameDialog.svelte` + `batchRename.ts` + the `move_exact` backend, from CPE-424/426/427/481/630).
+The frontend was never checked before filing. Its children — CPE-700 (engine), CPE-701 (`rename_many`),
+CPE-702 (panel) — were all duplicates. Per the user's decision (2026-07-19), the duplicate code was
+reverted; CPE-702 is closed Duplicate; CPE-700/701 annotated Reverted. Nothing to build. The only kept
+nightshift change is the unrelated CPE-697 (brace-expansion glob).
