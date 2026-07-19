@@ -64,3 +64,29 @@ export function totalHeight(rowHeight: number, itemCount: number, columns = 1): 
   if (rowHeight <= 0 || itemCount <= 0) return 0;
   return Math.ceil(itemCount / cols) * rowHeight;
 }
+
+/**
+ * The scrollTop needed to bring item `index` into view (window-aware scroll-into-view, CPE-690): with
+ * virtualization an off-screen row isn't in the DOM, so `element.scrollIntoView` can't be used — the
+ * container's scrollTop is computed instead. Returns the current `scrollTop` when the item is already
+ * fully visible; otherwise scrolls minimally, aligning the item to the top (if it's above the window) or
+ * the bottom (if below). Pure.
+ */
+export function ensureVisibleOffset(
+  index: number,
+  scrollTop: number,
+  viewportHeight: number,
+  rowHeight: number,
+  itemCount: number,
+  columns = 1,
+): number {
+  const cols = Math.max(1, Math.floor(columns));
+  if (rowHeight <= 0 || itemCount <= 0 || viewportHeight <= 0) return Math.max(0, scrollTop);
+  const clampedIndex = Math.max(0, Math.min(index, itemCount - 1));
+  const row = Math.floor(clampedIndex / cols);
+  const itemTop = row * rowHeight;
+  const itemBottom = itemTop + rowHeight;
+  if (itemTop < scrollTop) return itemTop; // above the window → align to top
+  if (itemBottom > scrollTop + viewportHeight) return itemBottom - viewportHeight; // below → align to bottom
+  return scrollTop; // already fully visible
+}

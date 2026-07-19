@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { windowRange, totalHeight } from "./virtualize";
+import { windowRange, totalHeight, ensureVisibleOffset } from "./virtualize";
 
 describe("virtualize windowing (CPE-690)", () => {
   it("returns an empty window for empty or degenerate input", () => {
@@ -54,5 +54,34 @@ describe("virtualize windowing (CPE-690)", () => {
     expect(totalHeight(20, 100, 1)).toBe(2000);
     expect(totalHeight(120, 10, 4)).toBe(360); // 10 items / 4 cols = 3 rows
     expect(totalHeight(20, 0, 1)).toBe(0);
+  });
+
+  describe("ensureVisibleOffset (window-aware scroll-into-view)", () => {
+    const H = 20, VP = 200, N = 1000; // 20px rows, 200px viewport (10 rows), 1000 items
+
+    it("leaves scroll unchanged when the item is already visible", () => {
+      // scrolled to row 100 (2000px); rows 100..109 visible. Item 105 is on screen.
+      expect(ensureVisibleOffset(105, 2000, VP, H, N)).toBe(2000);
+    });
+
+    it("aligns to the top when the item is above the window", () => {
+      // scrolled to 2000; item 50 (top 1000) is above → scroll up to its top.
+      expect(ensureVisibleOffset(50, 2000, VP, H, N)).toBe(1000);
+    });
+
+    it("aligns to the bottom when the item is below the window", () => {
+      // scrolled to 0 (rows 0..9 visible); item 20 (top 400, bottom 420) is below → bottom-align.
+      expect(ensureVisibleOffset(20, 0, VP, H, N)).toBe(420 - VP); // 220
+    });
+
+    it("clamps out-of-range indices and degenerate geometry", () => {
+      expect(ensureVisibleOffset(99999, 0, VP, H, N)).toBe(totalHeight(H, N) - VP); // last item bottom-aligned
+      expect(ensureVisibleOffset(5, 500, 0, H, N)).toBe(500); // no viewport → unchanged
+    });
+
+    it("is row-aligned for grids (columns = N)", () => {
+      // 4 cols, 120px rows, 240px viewport (2 rows). Item 30 is on row 7 (top 840) → below the top window.
+      expect(ensureVisibleOffset(30, 0, 240, 120, 100, 4)).toBe((7 + 1) * 120 - 240); // 720
+    });
   });
 });
