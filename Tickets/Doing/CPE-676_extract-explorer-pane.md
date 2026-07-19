@@ -32,3 +32,10 @@ attended session dedicated to the extraction. It's the gating prereq for CPE-677
 2026-07-18 — Picked up (attended, user chose big-bang). On a branch; merge only if check+full suite+build green so main stays safe.
 2026-07-18 — Slice 1 landed: extracted the file-listing region (Home/agent-strip/tag-bar/FileList) into ExplorerPane.svelte (presentational; App owns state via props/binds/events). check clean; 669 tests pass; build clean. Next slices push per-pane state ownership down into ExplorerPane. Still In Progress (multi-slice).
 2026-07-18 — Slice 2 landed: moved the view/sort toolbar + context bar into ExplorerPane, so it now owns the whole middle column. check clean; 669 tests; build clean. Still presentational (App owns state). Next: push per-pane state ownership down.
+2026-07-18 (nightshift) — Paused at slice 2. Confirmed hands-on that the remaining work is the all-at-once
+state-ownership move (derivation pipeline + view/selection state), whose outputs feed the top NavToolbar,
+bottom StatusBar, the sidebar, and ~40 App operations/keyboard handlers. It needs live GUI verification the
+test suite doesn't fully cover (selection timing, keyboard routing, archive/smart-folder transitions), so it
+is NOT safe to land autonomously overnight. Slices 1-2 (middle-column extraction) are landed + green on main.
+Resume attended: do the state move with a running app to verify. NavToolbar/StatusBar stay app-level until
+CPE-677 (they become per-pane when the split is added).
