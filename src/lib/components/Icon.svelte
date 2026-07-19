@@ -79,8 +79,10 @@
     <ellipse cx="12" cy="11.8" rx="3.2" ry="1.2" stroke="#4f46e5" />
     <path d="M8.8 11.8v3.6c0 .7 1.4 1.2 3.2 1.2s3.2-.5 3.2-1.2v-3.6" stroke="#4f46e5" />
   {:else if name === "book"}
-    <path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20" />
-    <path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z" />
+    <!-- Open book / manual: two facing pages meeting at a centre spine (CPE-753). -->
+    <path d="M12 6.4C10.2 5.2 7.9 4.6 5.4 4.6c-.9 0-1.7.1-2.4.3v12.8c.7-.2 1.5-.3 2.4-.3 2.5 0 4.8.6 6.6 1.8" />
+    <path d="M12 6.4c1.8-1.2 4.1-1.8 6.6-1.8.9 0 1.7.1 2.4.3v12.8c-.7-.2-1.5-.3-2.4-.3-2.5 0-4.8.6-6.6 1.8" />
+    <path d="M12 6.4v12.6" />
   {:else if name === "ebook"}
     <path d="M6 3h8l4 4v14H6z" fill="#fdf0e0" stroke="#b45309" />
     <path d="M14 3v4h4" stroke="#b45309" />

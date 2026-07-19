@@ -242,6 +242,7 @@
     text-align: left;
     border-radius: var(--radius);
     color: var(--text);
+    white-space: nowrap; /* menu items are always one line — the drop grows to fit (CPE-753) */
   }
   /* Fixed-width leading icon slot so labels line up whether or not an item has an icon (CPE-748). */
   .mi-icon {

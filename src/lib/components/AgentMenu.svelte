@@ -85,6 +85,7 @@
     padding: 0 10px;
     text-align: left;
     border-radius: var(--radius);
+    white-space: nowrap; /* one line always (CPE-753) */
   }
   /* Item text uses the theme's --text (never a hard-coded colour); hover comes from the global
      `button:hover → var(--hover)` (app.css), matching ContextMenu/TabMenu. See docs/design/MENUS.md. */

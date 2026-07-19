@@ -36,24 +36,41 @@
   let loading = true;
   let error = "";
   let gen = 0;
+  // Cache scanned children per path so climbing back Up (or re-drilling a visited folder) is instant —
+  // a recursive re-scan of the parent was the "Up is slow" cause (CPE-753).
+  const cache: Record<string, Child[]> = {};
+
+  function applyChildren(kids: Child[]) {
+    children = kids;
+    total = kids.reduce((s, c) => s + c.size, 0);
+    byKey = Object.fromEntries(kids.map((c) => [c.path, c]));
+    tiles = squarify(
+      kids.map((c) => ({ key: c.path, size: c.size })),
+      0,
+      0,
+      W,
+      H,
+    );
+  }
 
   async function scan(dir: string) {
+    const cached = cache[dir];
+    if (cached) {
+      // Instant: we already scanned this folder (e.g. the parent we just drilled out of).
+      error = "";
+      loading = false;
+      applyChildren(cached);
+      return;
+    }
     const g = ++gen;
     loading = true;
     error = "";
     try {
       const kids = await invoke<Child[]>("dir_children_sizes", { path: dir });
       if (g !== gen) return; // a newer scan superseded this one
-      children = kids.slice().sort((a, b) => b.size - a.size);
-      total = children.reduce((s, c) => s + c.size, 0);
-      byKey = Object.fromEntries(children.map((c) => [c.path, c]));
-      tiles = squarify(
-        children.map((c) => ({ key: c.path, size: c.size })),
-        0,
-        0,
-        W,
-        H,
-      );
+      const sorted = kids.slice().sort((a, b) => b.size - a.size);
+      cache[dir] = sorted;
+      applyChildren(sorted);
     } catch (e) {
       if (g !== gen) return;
       error = String(e);
@@ -93,7 +110,13 @@
   <div class="dialog" role="dialog" aria-modal="true" aria-label="Disk usage" on:click|stopPropagation>
     <header class="sp-head">
       <Icon name="disk" size={16} />
-      <button class="crumb up" disabled={trail.length === 0} on:click={up} title="Up one level">
+      <button
+        class="crumb up"
+        class:off={trail.length === 0}
+        aria-disabled={trail.length === 0}
+        on:click={up}
+        title="Go up to the parent folder"
+      >
         <Icon name="up" size={14} />
       </button>
       <span class="sp-path" title={cur}>{baseOf(cur)}</span>
@@ -199,7 +222,7 @@
     background: var(--surface-alt, transparent);
     cursor: pointer;
   }
-  .crumb.up:disabled {
+  .crumb.up.off {
     opacity: 0.4;
     cursor: default;
   }

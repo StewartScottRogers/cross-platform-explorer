@@ -79,6 +79,7 @@
     padding: 0 10px;
     text-align: left;
     border-radius: var(--radius);
+    white-space: nowrap; /* one line always (CPE-753) */
   }
   .row:disabled { opacity: 0.5; }
 </style>
