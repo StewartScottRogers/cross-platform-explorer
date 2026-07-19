@@ -4,6 +4,8 @@ import {
   normalizeFsDiff,
   diffFor,
   diffSegs,
+  compactLineDiff,
+  diffLineStats,
   emptyDiffState,
   ingestDiff,
   currentDiffs,
@@ -77,6 +79,53 @@ describe("diffSegs", () => {
     expect(segs!.old.map((x) => x.text).join("")).toBe("hello world");
     expect(segs!.new.map((x) => x.text).join("")).toBe("hello there");
     expect(diffSegs(s, "/missing")).toBeNull();
+  });
+});
+
+describe("compactLineDiff", () => {
+  it("renders a created file (empty before) as all-added", () => {
+    const rows = compactLineDiff("", "l1\nl2");
+    expect(rows).toEqual([
+      { kind: "add", text: "l1" },
+      { kind: "add", text: "l2" },
+    ]);
+  });
+
+  it("shows the changed middle as del-then-add with surrounding context", () => {
+    const before = "a\nb\nc\nd";
+    const after = "a\nB\nc\nd";
+    const rows = compactLineDiff(before, after, 1);
+    expect(rows).toEqual([
+      { kind: "context", text: "a" },
+      { kind: "del", text: "b" },
+      { kind: "add", text: "B" },
+      { kind: "context", text: "c" },
+    ]);
+  });
+
+  it("limits surrounding context to the requested number of lines", () => {
+    const before = "1\n2\n3\n4\n5\nX\n6\n7\n8\n9";
+    const after = "1\n2\n3\n4\n5\nY\n6\n7\n8\n9";
+    const rows = compactLineDiff(before, after, 2);
+    expect(rows.filter((r) => r.kind === "context")).toHaveLength(4); // 2 each side
+    expect(rows.filter((r) => r.kind === "del")).toEqual([{ kind: "del", text: "X" }]);
+    expect(rows.filter((r) => r.kind === "add")).toEqual([{ kind: "add", text: "Y" }]);
+  });
+
+  it("produces no add/del rows for identical content", () => {
+    const rows = compactLineDiff("same\ntext", "same\ntext", 0);
+    expect(rows.every((r) => r.kind === "context")).toBe(true);
+    expect(rows.filter((r) => r.kind !== "context")).toHaveLength(0);
+  });
+});
+
+describe("diffLineStats", () => {
+  it("counts added and removed lines for a stored path", () => {
+    let s = emptyDiffState();
+    s = foldDiffs(s, [d("/a", "a\nb\nc", "a\nB\nC\nd")]);
+    // b,c removed; B,C,d added
+    expect(diffLineStats(s, "/a")).toEqual({ add: 3, del: 2 });
+    expect(diffLineStats(s, "/missing")).toBeNull();
   });
 });
 

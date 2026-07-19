@@ -7,12 +7,19 @@
    */
   import { createEventDispatcher } from "svelte";
   import Icon from "./Icon.svelte";
+  import DiffPeek from "./DiffPeek.svelte";
   import type { TimelineEntry } from "../agentActivity";
+  import { agentDiffs, diffFor, diffLineStats } from "../agentDiffs";
 
   export let entries: TimelineEntry[] = [];
   export let agentName = "agent";
 
   const dispatch = createEventDispatcher<{ navigate: string; close: void }>();
+
+  /** Which entry's before/after peek is currently revealed (hover/focus), or null (CPE-745). */
+  let openId: number | null = null;
+  /** A write (created/modified) can carry a captured before/after diff; reads/renames/removes don't. */
+  const isWrite = (k: TimelineEntry["kind"]) => k === "created" || k === "modified";
 
   const KIND_LABEL: Record<TimelineEntry["kind"], string> = {
     created: "new",
@@ -44,12 +51,28 @@
   {:else}
     <ul class="tl-list">
       {#each entries as e (e.id)}
-        <li>
-          <button class="tl-row" title={e.path} on:click={() => dispatch("navigate", dirOf(e.path))}>
+        {@const diff = isWrite(e.kind) ? diffFor($agentDiffs, e.path) : null}
+        {@const stats = diff ? diffLineStats($agentDiffs, e.path) : null}
+        <li
+          class:has-diff={!!diff}
+          on:mouseenter={() => { if (diff) openId = e.id; }}
+          on:mouseleave={() => { if (openId === e.id) openId = null; }}
+        >
+          <button
+            class="tl-row"
+            title={diff ? `${e.path} — hover to see what changed` : e.path}
+            on:click={() => dispatch("navigate", dirOf(e.path))}
+            on:focus={() => { if (diff) openId = e.id; }}
+            on:blur={() => { if (openId === e.id) openId = null; }}
+          >
             <span class="tl-badge {e.kind}">{KIND_LABEL[e.kind]}</span>
             <span class="tl-name">{baseOf(e.path)}</span>
+            {#if stats}<span class="tl-stat" aria-label="lines added and removed">+{stats.add} −{stats.del}</span>{/if}
             <span class="tl-time">{clock(e.at)}</span>
           </button>
+          {#if diff && openId === e.id}
+            <DiffPeek before={diff.before} after={diff.after} />
+          {/if}
         </li>
       {/each}
     </ul>
@@ -167,6 +190,18 @@
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
+  }
+  /* A subtle changed-lines summary on write rows that carry a captured diff (CPE-745). */
+  .tl-stat {
+    flex: 0 0 auto;
+    font-size: 10.5px;
+    opacity: 0.7;
+    font-variant-numeric: tabular-nums;
+    letter-spacing: 0.02em;
+  }
+  .has-diff .tl-row {
+    /* Hint that this row has more to show on hover/focus. */
+    cursor: help;
   }
   .tl-time {
     flex: 0 0 auto;

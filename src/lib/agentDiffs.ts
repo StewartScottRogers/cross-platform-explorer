@@ -108,6 +108,52 @@ export function diffSegs(
   return d ? inlineDiff(d.before, d.after) : null;
 }
 
+/** One rendered line of a compact diff peek: unchanged context, an added line, or a removed line. */
+export interface DiffRow {
+  kind: "context" | "add" | "del";
+  text: string;
+}
+
+/**
+ * A compact line-level diff of `before` → `after` for the peek (CPE-745). Cheap + deterministic —
+ * a common-prefix / common-suffix **line** scan (not a full LCS), matching `diff.ts`'s philosophy:
+ * good enough for the localized edits an agent typically makes. The differing middle is shown as
+ * removed lines then added lines, wrapped in up to `context` unchanged lines each side. A `created`
+ * file (empty `before`) renders as all-added.
+ */
+export function compactLineDiff(before: string, after: string, context = 3): DiffRow[] {
+  const a = before.length ? before.split("\n") : [];
+  const b = after.length ? after.split("\n") : [];
+  let start = 0;
+  while (start < a.length && start < b.length && a[start] === b[start]) start++;
+  let endA = a.length;
+  let endB = b.length;
+  while (endA > start && endB > start && a[endA - 1] === b[endB - 1]) {
+    endA--;
+    endB--;
+  }
+  const rows: DiffRow[] = [];
+  for (let i = Math.max(0, start - context); i < start; i++) rows.push({ kind: "context", text: a[i] });
+  for (let i = start; i < endA; i++) rows.push({ kind: "del", text: a[i] });
+  for (let i = start; i < endB; i++) rows.push({ kind: "add", text: b[i] });
+  for (let i = endA; i < Math.min(a.length, endA + context); i++)
+    rows.push({ kind: "context", text: a[i] });
+  return rows;
+}
+
+/** Added/removed line counts for a path's latest write (for a compact "+a −d" summary), or `null`. */
+export function diffLineStats(state: DiffState, path: string): { add: number; del: number } | null {
+  const d = state.byPath[path];
+  if (!d) return null;
+  let add = 0;
+  let del = 0;
+  for (const r of compactLineDiff(d.before, d.after, 0)) {
+    if (r.kind === "add") add++;
+    else if (r.kind === "del") del++;
+  }
+  return { add, del };
+}
+
 const store = writable<DiffState>(emptyDiffState());
 
 /** Reactive per-path diff state (empty when not watching). */
