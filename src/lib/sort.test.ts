@@ -108,6 +108,19 @@ describe("compareEntries", () => {
   });
 });
 
+describe("type sort (CPE-694 cached key)", () => {
+  it("orders by type name, folders first, with a natural-name tiebreaker", () => {
+    // Gibberish extensions so typeName is the predictable `${EXT} File` (not a mapped label).
+    const es = [
+      entry({ name: "b", extension: "zzx" }), // "ZZX File"
+      entry({ name: "a", extension: "zzx" }), // "ZZX File" — tiebreak by name → a before b
+      entry({ name: "c", extension: "aax" }), // "AAX File" — sorts before ZZX
+      entry({ name: "sub", is_dir: true }), // "File folder" — but folders float regardless
+    ];
+    expect(names(sortEntries(es, "type", "asc"))).toEqual(["sub", "c", "a", "b"]);
+  });
+});
+
 describe("foldersFirst toggle (CPE-359)", () => {
   const items = [
     entry({ name: "banana.txt", is_dir: false }),
