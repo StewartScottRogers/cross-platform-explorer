@@ -798,6 +798,10 @@
     if (gen > 1) rawInvoke("cancel_dir_stream", { streamId: gen - 1 }).catch(() => {});
     entries = [];
     loading = true;
+    // Perf instrumentation (CPE-691): time-to-first-paint and time-to-settled, dev-only so it's free in
+    // production. Makes the 10× target (CPE-688) a measured before/after rather than a vibe.
+    const perfStart = import.meta.env.DEV ? performance.now() : 0;
+    let perfPainted = false;
     try {
       // Coalesce stream batches (CPE-689): buffer incoming batches and flush to `entries` once per
       // animation frame, so the reactive `visible = sortEntries(entries…)` re-sorts a handful of times
@@ -815,6 +819,10 @@
         entries = entries.concat(buffer);
         buffer = [];
         loading = false; // first real rows are in the DOM — drop the "Loading…" placeholder
+        if (import.meta.env.DEV && !perfPainted) {
+          perfPainted = true;
+          console.debug(`[perf] first paint "${path}" ${Math.round(performance.now() - perfStart)}ms`);
+        }
       };
       channel.onmessage = (batch) => {
         if (gen !== loadGen) return; // superseded by a newer navigation — drop stale rows
@@ -834,6 +842,9 @@
       }
     } finally {
       if (gen === loadGen) loading = false;
+    }
+    if (import.meta.env.DEV && gen === loadGen) {
+      console.debug(`[perf] settled "${path}" ${Math.round(performance.now() - perfStart)}ms — ${entries.length} entries`);
     }
     // A stream superseded mid-flight already had its state handed to the newer load — stop here so the
     // post-load hooks below (recent-folder, selection remap, pending rename/select) don't fire stale.
