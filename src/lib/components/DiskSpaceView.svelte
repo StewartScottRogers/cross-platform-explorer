@@ -33,12 +33,16 @@
   let byKey: Record<string, Child> = {};
   let tiles: Tile[] = [];
   let total = 0;
-  let loading = true;
+  let loading = true; // a *cold* scan (no cached data to show) is in progress
+  let refreshing = false; // background revalidate / prefetch is running (we already show something)
   let error = "";
   let gen = 0;
-  // Cache scanned children per path so climbing back Up (or re-drilling a visited folder) is instant —
-  // a recursive re-scan of the parent was the "Up is slow" cause (CPE-753).
+  // Per-path cache of scanned children. Navigation reads the cache so Up / re-drill is instant — never
+  // a re-walk (the TreeSize model). Combined with background revalidation + prefetch below, this makes
+  // liveness first-order: show now, refresh quietly (CPE-754).
   const cache: Record<string, Child[]> = {};
+  // Paths with a fetch in flight (cold, revalidate, or prefetch) — dedupes work + drives `refreshing`.
+  const inflight = new Set<string>();
 
   function applyChildren(kids: Child[]) {
     children = kids;
@@ -53,24 +57,35 @@
     );
   }
 
+  async function fetchChildren(dir: string): Promise<Child[]> {
+    const kids = await invoke<Child[]>("dir_children_sizes", { path: dir });
+    return kids.slice().sort((a, b) => b.size - a.size);
+  }
+
+  const sameChildren = (a: Child[], b: Child[]): boolean =>
+    a.length === b.length && a.every((c, i) => c.path === b[i].path && c.size === b[i].size);
+
   async function scan(dir: string) {
     const cached = cache[dir];
     if (cached) {
-      // Instant: we already scanned this folder (e.g. the parent we just drilled out of).
+      // Stale-while-revalidate: paint the cached tree instantly (no spinner), then refresh in the
+      // background and prefetch children so drilling in is instant too.
       error = "";
       loading = false;
       applyChildren(cached);
+      void revalidate(dir);
+      prefetch(cached);
       return;
     }
     const g = ++gen;
     loading = true;
     error = "";
     try {
-      const kids = await invoke<Child[]>("dir_children_sizes", { path: dir });
-      if (g !== gen) return; // a newer scan superseded this one
-      const sorted = kids.slice().sort((a, b) => b.size - a.size);
+      const sorted = await fetchChildren(dir);
+      if (g !== gen) return; // a newer navigation superseded this cold scan
       cache[dir] = sorted;
       applyChildren(sorted);
+      prefetch(sorted);
     } catch (e) {
       if (g !== gen) return;
       error = String(e);
@@ -79,6 +94,49 @@
       total = 0;
     } finally {
       if (g === gen) loading = false;
+    }
+  }
+
+  // Re-scan a cached path in the background; swap in fresh data only if it actually changed and we're
+  // still viewing it (so an old folder's refresh never clobbers the current view).
+  async function revalidate(dir: string) {
+    if (inflight.has(dir)) return;
+    inflight.add(dir);
+    refreshing = true;
+    try {
+      const sorted = await fetchChildren(dir);
+      const prev = cache[dir];
+      cache[dir] = sorted;
+      if (cur === dir && (!prev || !sameChildren(prev, sorted))) applyChildren(sorted);
+      if (cur === dir) prefetch(sorted);
+    } catch {
+      /* keep showing the stale view */
+    } finally {
+      inflight.delete(dir);
+      refreshing = inflight.size > 0;
+    }
+  }
+
+  // Preemptively scan the largest child folders into the cache so the likely next drill-in is instant.
+  // Bounded so a background sweep can't saturate the walker.
+  function prefetch(kids: Child[]) {
+    const LIMIT = 8;
+    let started = 0;
+    for (const c of kids) {
+      if (started >= LIMIT) break;
+      if (!c.is_dir || c.size === 0 || cache[c.path] || inflight.has(c.path)) continue;
+      started++;
+      inflight.add(c.path);
+      refreshing = true;
+      fetchChildren(c.path)
+        .then((sorted) => {
+          cache[c.path] = sorted;
+        })
+        .catch(() => {})
+        .finally(() => {
+          inflight.delete(c.path);
+          refreshing = inflight.size > 0;
+        });
     }
   }
 
@@ -120,7 +178,7 @@
         <Icon name="up" size={14} />
       </button>
       <span class="sp-path" title={cur}>{baseOf(cur)}</span>
-      <span class="sp-total">{formatSize(total)}{loading ? " · scanning…" : ""}</span>
+      <span class="sp-total">{formatSize(total)}{loading ? " · scanning…" : refreshing ? " · refreshing…" : ""}</span>
       <button class="sp-close" title="Close" on:click={() => dispatch("close")}>
         <Icon name="close" size={14} />
       </button>

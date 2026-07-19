@@ -2244,19 +2244,24 @@ fn folder_stats(path: String) -> Result<FolderStats, String> {
 /// would recurse until the thread stack overflows. Unreadable entries are skipped rather than failing
 /// the whole calculation. Shared by `dir_size` and `dir_children_sizes` (CPE-749).
 fn dir_size_walk(p: &Path) -> u64 {
+    use rayon::prelude::*;
     let Ok(read) = fs::read_dir(p) else { return 0 };
-    let mut total = 0u64;
+    // Sum file lengths inline (cheap) and collect only the sub-directories, whose recursive walks are
+    // the real cost — then fan those across cores (CPE-754). Work-stealing means one huge subtree
+    // doesn't stall the others. Symlinked dirs are still skipped (CPE-611).
+    let mut file_total = 0u64;
+    let mut subdirs: Vec<std::path::PathBuf> = Vec::new();
     for entry in read.flatten() {
         let Ok(meta) = entry.metadata() else { continue };
         if meta.is_dir() {
             if !entry_is_symlink(&entry) {
-                total += dir_size_walk(&entry.path());
+                subdirs.push(entry.path());
             }
         } else {
-            total += meta.len();
+            file_total += meta.len();
         }
     }
-    total
+    file_total + subdirs.par_iter().map(|d| dir_size_walk(d)).sum::<u64>()
 }
 
 #[tauri::command]
@@ -2285,27 +2290,50 @@ struct ChildSize {
 /// (true mid-walk backend cancellation is deferred to CPE-751 if huge trees warrant it).
 #[tauri::command]
 fn dir_children_sizes(path: String) -> Result<Vec<ChildSize>, String> {
+    use rayon::prelude::*;
     let p = Path::new(&path);
     if !p.is_dir() {
         return Err(format!("not a folder: {path}"));
     }
     let read = fs::read_dir(p).map_err(|e| e.to_string())?;
-    let mut out = Vec::new();
-    for entry in read.flatten() {
-        let Ok(meta) = entry.metadata() else { continue }; // skip unreadable child
-        let is_dir = meta.is_dir();
-        let size = if is_dir {
-            if entry_is_symlink(&entry) { 0 } else { dir_size_walk(&entry.path()) }
-        } else {
-            meta.len()
-        };
-        out.push(ChildSize {
-            name: entry.file_name().to_string_lossy().into_owned(),
-            path: entry.path().to_string_lossy().into_owned(),
-            is_dir,
-            size,
-        });
+    // Read the immediate children (cheap, single-threaded), then compute each folder's recursive size
+    // in parallel (CPE-754) — the per-child subtree walks are the cost and are independent.
+    struct Pre {
+        name: String,
+        path: std::path::PathBuf,
+        is_dir: bool,
+        own: u64,
+        symlink: bool,
     }
+    let pre: Vec<Pre> = read
+        .flatten()
+        .filter_map(|entry| {
+            let meta = entry.metadata().ok()?; // skip unreadable child
+            Some(Pre {
+                name: entry.file_name().to_string_lossy().into_owned(),
+                path: entry.path(),
+                is_dir: meta.is_dir(),
+                own: meta.len(),
+                symlink: entry_is_symlink(&entry),
+            })
+        })
+        .collect();
+    let out = pre
+        .into_par_iter()
+        .map(|e| {
+            let size = if e.is_dir {
+                if e.symlink { 0 } else { dir_size_walk(&e.path) }
+            } else {
+                e.own
+            };
+            ChildSize {
+                name: e.name,
+                path: e.path.to_string_lossy().into_owned(),
+                is_dir: e.is_dir,
+                size,
+            }
+        })
+        .collect();
     Ok(out)
 }
 

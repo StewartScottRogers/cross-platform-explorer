@@ -25,6 +25,10 @@ serde_json = "1"
 zip = "2"
 # Streaming SHA-256 for the file-checksum feature (CPE-412). Pure-Rust, tiny, no system libs.
 sha2 = "0.10"
+# Work-stealing parallelism for the recursive directory-size walk (CPE-754): the disk-usage scan
+# fans subtree walks across cores (the eDirStat approach), turning a single-threaded walk into a
+# parallel one. Already in the dependency tree transitively — this just makes it a direct dep.
+rayon = "1"
 
 # Optional: the sidecar platform host (ADR 0001), a standalone crate under ../sidecar.
 # Compiled ONLY with the `sidecar-platform` feature, so the plain explorer builds and
