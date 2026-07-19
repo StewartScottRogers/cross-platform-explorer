@@ -862,6 +862,7 @@ dependencies = [
  "notify",
  "parquet",
  "psd",
+ "rayon",
  "repos",
  "rusqlite",
  "rust_xlsxwriter",
