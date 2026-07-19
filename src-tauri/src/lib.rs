@@ -415,8 +415,15 @@ fn copy_dir_all(src: &Path, dst: &Path) -> std::io::Result<()> {
 }
 
 /// List the immediate children of `path`.
+// Async so a listing on a slow drive runs off the main thread (CPE-760).
 #[tauri::command]
-fn list_dir(path: String) -> Result<Vec<DirEntry>, String> {
+async fn list_dir(path: String) -> Result<Vec<DirEntry>, String> {
+    tauri::async_runtime::spawn_blocking(move || list_dir_impl(path))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+fn list_dir_impl(path: String) -> Result<Vec<DirEntry>, String> {
     let mut out = Vec::new();
     stream_dir_entries(&path, LIST_DIR_BATCH, |batch| {
         out.extend(batch);
@@ -497,8 +504,20 @@ fn dir_stream_registry(
 /// whole listing. `stream_id` (frontend-supplied, monotonic) registers a cancel flag polled each batch, so
 /// a superseded walk stops promptly instead of reading a huge folder to completion (CPE-665). Returns the
 /// total entry count once the walk completes (or is cancelled).
+// Async so a listing on a slow/network drive streams from a blocking thread and never freezes the main
+// thread (CPE-760). The `Channel` batches still arrive live; only the walk moves off the UI thread.
 #[tauri::command]
-fn list_dir_stream(
+async fn list_dir_stream(
+    path: String,
+    stream_id: u64,
+    on_entry: tauri::ipc::Channel<Vec<DirEntry>>,
+) -> Result<usize, String> {
+    tauri::async_runtime::spawn_blocking(move || list_dir_stream_impl(path, stream_id, on_entry))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+fn list_dir_stream_impl(
     path: String,
     stream_id: u64,
     on_entry: tauri::ipc::Channel<Vec<DirEntry>>,
@@ -3179,8 +3198,15 @@ struct DiskSpace {
 /// Report free/total space on the volume that holds `path` (CPE-403). `free` is what's available to
 /// the user (respects quotas). Non-fatal: returns an error string the frontend degrades on rather
 /// than surfacing — a status-bar nicety must never break navigation.
+// Async so `disk_space` on a slow/network drive runs off the main thread (CPE-760).
 #[tauri::command]
-fn disk_space(path: String) -> Result<DiskSpace, String> {
+async fn disk_space(path: String) -> Result<DiskSpace, String> {
+    tauri::async_runtime::spawn_blocking(move || disk_space_impl(path))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+fn disk_space_impl(path: String) -> Result<DiskSpace, String> {
     let free = fs4::available_space(&path).map_err(|e| e.to_string())?;
     let total = fs4::total_space(&path).map_err(|e| e.to_string())?;
     Ok(DiskSpace { free, total })
@@ -5266,9 +5292,18 @@ struct RepoSyncStatus {
 /// --branch`, parses it (`repos::parse_status`), and plans a **safe** two-way sync
 /// (`repos::plan_sync`, never force). Used by the explorer's status bar to show ahead/behind and
 /// offer Pull/Push. A non-repo (or no `git`) returns `is_repo:false`.
+// Async so a slow `git status` (e.g. a repo on a slow/network drive) runs on a blocking thread instead of
+// freezing the main thread and every other command queued behind it (CPE-760).
 #[cfg(feature = "sidecar-platform")]
 #[tauri::command]
-fn forge_repo_status(path: String, on_diverge: Option<String>) -> RepoSyncStatus {
+async fn forge_repo_status(path: String, on_diverge: Option<String>) -> RepoSyncStatus {
+    tauri::async_runtime::spawn_blocking(move || forge_repo_status_impl(path, on_diverge))
+        .await
+        .unwrap_or_default()
+}
+
+#[cfg(feature = "sidecar-platform")]
+fn forge_repo_status_impl(path: String, on_diverge: Option<String>) -> RepoSyncStatus {
     use repos::SyncAction;
     let output = std::process::Command::new("git")
         .args(["-C", &path, "status", "--porcelain=v2", "--branch"])
@@ -6079,13 +6114,13 @@ mod tests {
 
     #[test]
     fn list_dir_errors_on_a_missing_path() {
-        assert!(list_dir("/definitely/not/a/real/path/xyz".to_string()).is_err());
+        assert!(list_dir_impl("/definitely/not/a/real/path/xyz".to_string()).is_err());
     }
 
     #[test]
     fn list_dir_lists_a_real_directory() {
         let dir = std::env::temp_dir();
-        assert!(list_dir(dir.to_string_lossy().to_string()).is_ok());
+        assert!(list_dir_impl(dir.to_string_lossy().to_string()).is_ok());
     }
 
     #[test]
@@ -6203,7 +6238,7 @@ mod tests {
             std::ops::ControlFlow::Continue(())
         })
         .unwrap();
-        let listed = list_dir(d.to_string_lossy().to_string()).unwrap();
+        let listed = list_dir_impl(d.to_string_lossy().to_string()).unwrap();
         let mut a: Vec<_> = streamed.iter().map(|e| e.name.clone()).collect();
         let mut b: Vec<_> = listed.iter().map(|e| e.name.clone()).collect();
         a.sort();
@@ -6249,7 +6284,7 @@ mod tests {
     #[test]
     fn disk_space_reports_sensible_free_and_total() {
         // The temp dir always exists on any runner; free must never exceed total (CPE-403).
-        let d = disk_space(std::env::temp_dir().to_string_lossy().into_owned()).unwrap();
+        let d = disk_space_impl(std::env::temp_dir().to_string_lossy().into_owned()).unwrap();
         assert!(d.total > 0, "a real volume has non-zero capacity");
         assert!(d.free <= d.total, "free ({}) cannot exceed total ({})", d.free, d.total);
     }
