@@ -146,4 +146,23 @@ describe("selection", () => {
     const inv = invertSelection(selectAll(4), 4);
     expect(selectedCount(inv)).toBe(0);
   });
+
+  it("handles a very large index array without a stack overflow (CPE-696)", () => {
+    // Regression: Math.min(...clean) threw RangeError on big folders; both "Select all of this type"
+    // and "Invert selection" feed ~N indices through selectIndices.
+    const n = 200_000;
+    const idx = Array.from({ length: n }, (_, i) => i);
+    let s!: ReturnType<typeof selectIndices>;
+    expect(() => (s = selectIndices(idx))).not.toThrow();
+    expect(s.anchor).toBe(0);
+    expect(s.lead).toBe(n - 1);
+    expect(selectedCount(s)).toBe(n);
+  });
+
+  it("inverts across a large folder without throwing (CPE-696)", () => {
+    const inv = invertSelection(selectIndices([0, 5]), 150_000);
+    expect(selectedCount(inv)).toBe(150_000 - 2);
+    expect(inv.anchor).toBe(1); // lowest not-previously-selected index
+    expect(inv.lead).toBe(150_000 - 1);
+  });
 });

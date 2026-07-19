@@ -92,11 +92,16 @@ export function selectAll(count: number): Selection {
 export function selectIndices(indices: number[]): Selection {
   const clean = indices.filter((i) => i >= 0);
   if (clean.length === 0) return emptySelection();
-  return {
-    indices: new Set(clean),
-    anchor: Math.min(...clean),
-    lead: Math.max(...clean),
-  };
+  // Min/max via a loop, NOT `Math.min(...clean)`: spreading a large array into a call overflows the
+  // argument-count limit and throws on big folders (CPE-696) — the case "Invert selection" and
+  // "Select all of this type" hit on the large folders CPE-688 targets.
+  let anchor = clean[0];
+  let lead = clean[0];
+  for (const i of clean) {
+    if (i < anchor) anchor = i;
+    if (i > lead) lead = i;
+  }
+  return { indices: new Set(clean), anchor, lead };
 }
 
 /** Flip the selection across `count` visible rows: every row not currently
