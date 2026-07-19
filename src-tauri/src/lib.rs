@@ -2235,30 +2235,73 @@ fn folder_stats(path: String) -> Result<FolderStats, String> {
 
 /// Total size of a directory tree. Unreadable subtrees are skipped rather than
 /// failing the whole calculation.
+/// Recursive size of a directory tree in bytes. Symlinked dirs are NOT followed (CPE-611): a cycle
+/// would recurse until the thread stack overflows. Unreadable entries are skipped rather than failing
+/// the whole calculation. Shared by `dir_size` and `dir_children_sizes` (CPE-749).
+fn dir_size_walk(p: &Path) -> u64 {
+    let Ok(read) = fs::read_dir(p) else { return 0 };
+    let mut total = 0u64;
+    for entry in read.flatten() {
+        let Ok(meta) = entry.metadata() else { continue };
+        if meta.is_dir() {
+            if !entry_is_symlink(&entry) {
+                total += dir_size_walk(&entry.path());
+            }
+        } else {
+            total += meta.len();
+        }
+    }
+    total
+}
+
 #[tauri::command]
 fn dir_size(path: String) -> Result<u64, String> {
-    fn walk(p: &Path) -> u64 {
-        let Ok(read) = fs::read_dir(p) else { return 0 };
-        let mut total = 0u64;
-        for entry in read.flatten() {
-            let Ok(meta) = entry.metadata() else { continue };
-            if meta.is_dir() {
-                // Don't recurse into symlinked dirs (CPE-611): a cycle would recurse until the thread
-                // stack overflows and crashes the app. Matches `du`, which doesn't follow symlinks.
-                if !entry_is_symlink(&entry) {
-                    total += walk(&entry.path());
-                }
-            } else {
-                total += meta.len();
-            }
-        }
-        total
-    }
     let p = Path::new(&path);
     if !p.exists() {
         return Err(format!("{path}: not found"));
     }
-    Ok(walk(p))
+    Ok(dir_size_walk(p))
+}
+
+/// One direct child of a folder with its size, for the space analyzer's treemap + drill-down (CPE-749,
+/// epic CPE-706). A folder's `size` is its recursive subtree total ([`dir_size_walk`]); a file's is its
+/// own length. A symlinked dir contributes `0` (not followed, matching `dir_size`/`du`).
+#[derive(serde::Serialize)]
+struct ChildSize {
+    name: String,
+    path: String,
+    is_dir: bool,
+    size: u64,
+}
+
+/// The immediate children of `path`, each with its recursive size — the per-child breakdown the treemap
+/// needs (`dir_size` gives only the grand total). Unreadable children are skipped, not fatal (preserving
+/// the `list_dir` skip-don't-fail rule). Synchronous; the frontend supersedes a stale scan by generation
+/// (true mid-walk backend cancellation is deferred to CPE-751 if huge trees warrant it).
+#[tauri::command]
+fn dir_children_sizes(path: String) -> Result<Vec<ChildSize>, String> {
+    let p = Path::new(&path);
+    if !p.is_dir() {
+        return Err(format!("not a folder: {path}"));
+    }
+    let read = fs::read_dir(p).map_err(|e| e.to_string())?;
+    let mut out = Vec::new();
+    for entry in read.flatten() {
+        let Ok(meta) = entry.metadata() else { continue }; // skip unreadable child
+        let is_dir = meta.is_dir();
+        let size = if is_dir {
+            if entry_is_symlink(&entry) { 0 } else { dir_size_walk(&entry.path()) }
+        } else {
+            meta.len()
+        };
+        out.push(ChildSize {
+            name: entry.file_name().to_string_lossy().into_owned(),
+            path: entry.path().to_string_lossy().into_owned(),
+            is_dir,
+            size,
+        });
+    }
+    Ok(out)
 }
 
 /// Compute the SHA-256 checksum of a file, returned as lowercase hex (CPE-412). Streamed in fixed
@@ -5653,6 +5696,7 @@ pub fn run() {
             same_volume,
             find_files_by_name_stream,
             dir_size,
+            dir_children_sizes,
             folder_stats,
             hash_file,
             text_stats,
@@ -5954,6 +5998,38 @@ mod tests {
     fn list_dir_lists_a_real_directory() {
         let dir = std::env::temp_dir();
         assert!(list_dir(dir.to_string_lossy().to_string()).is_ok());
+    }
+
+    #[test]
+    fn dir_children_sizes_reports_per_child_recursive_size() {
+        let d = scratch("children_sizes");
+        fs::write(d.join("a.txt"), b"hello").unwrap(); // file, 5 bytes
+        let sub = d.join("sub");
+        fs::create_dir_all(&sub).unwrap();
+        fs::write(sub.join("x"), b"abc").unwrap(); // 3
+        let deep = sub.join("deep");
+        fs::create_dir_all(&deep).unwrap();
+        fs::write(deep.join("y"), b"abcd").unwrap(); // 4  => sub recursive = 7
+
+        let kids = dir_children_sizes(d.to_string_lossy().to_string()).unwrap();
+        assert_eq!(kids.len(), 2);
+        let a = kids.iter().find(|c| c.name == "a.txt").expect("a.txt present");
+        assert!(!a.is_dir);
+        assert_eq!(a.size, 5); // file's own length (deterministic; not a block count)
+        let s = kids.iter().find(|c| c.name == "sub").expect("sub present");
+        assert!(s.is_dir);
+        assert_eq!(s.size, 7); // recursive sum of file bytes 3 + 4
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn dir_children_sizes_errors_on_missing_or_a_file() {
+        assert!(dir_children_sizes("/definitely/not/a/real/path/xyz".to_string()).is_err());
+        let d = scratch("children_notdir");
+        let f = d.join("f.txt");
+        fs::write(&f, b"x").unwrap();
+        assert!(dir_children_sizes(f.to_string_lossy().to_string()).is_err()); // a file, not a folder
+        let _ = fs::remove_dir_all(&d);
     }
 
     #[test]
