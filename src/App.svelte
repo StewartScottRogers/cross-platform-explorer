@@ -2828,7 +2828,7 @@
 
 <!-- Diagnostics overlay (CPE-758): on-screen timing of every OS call, toggled from Application → Diagnostics. -->
 {#if diagnostics}
-  <DiagnosticsOverlay />
+  <DiagnosticsOverlay version={appVersion} />
 {/if}
 
 {#if batchRenameFor}

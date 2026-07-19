@@ -8,17 +8,47 @@
    */
   import { diagCalls, type DiagCall } from "../diagnostics";
 
+  /** App version, for the copied report header (CPE-759). */
+  export let version = "";
+
   const SHOWN = 12;
   $: recent = $diagCalls.slice(0, SHOWN);
   $: slowest = $diagCalls.reduce<DiagCall | null>((m, c) => (!m || c.ms > m.ms ? c : m), null);
   // Colour bands: green (fast) → amber (noticeable) → red (slow), so the eye lands on the costly calls.
   const band = (ms: number) => (ms >= 500 ? "slow" : ms >= 100 ? "warn" : "ok");
+
+  // Copy the WHOLE recent-call buffer as readable text so it can be pasted straight back (CPE-759).
+  let copied = false;
+  function buildReport(): string {
+    const calls = $diagCalls;
+    const stamp = new Date().toISOString().replace("T", " ").slice(0, 19);
+    const plat = typeof navigator !== "undefined" && navigator.platform ? ` · ${navigator.platform}` : "";
+    const head = `Cross-Platform Explorer diagnostics — v${version || "?"}`;
+    const meta = `${stamp} · ${calls.length} calls${slowest ? ` · slowest ${slowest.cmd} ${slowest.ms}ms` : ""}${plat}`;
+    const rows = calls.map((c) => `${String(c.ms).padStart(6)}ms  ${c.cmd}${c.ok ? "" : "  (failed)"}`);
+    return [head, meta, "─".repeat(30), ...rows].join("\n");
+  }
+  async function copyReport() {
+    try {
+      await navigator.clipboard.writeText(buildReport());
+      copied = true;
+      setTimeout(() => (copied = false), 1600);
+    } catch {
+      /* clipboard blocked — nothing we can surface here */
+    }
+  }
 </script>
 
 <aside class="diag" aria-label="Diagnostics — backend call timings">
   <div class="diag-head">
     <span>⏱ Diagnostics</span>
     {#if slowest}<span class="diag-slowest {band(slowest.ms)}">slowest {slowest.cmd} {slowest.ms}ms</span>{/if}
+    <button
+      class="diag-copy"
+      title="Copy the diagnostics to the clipboard"
+      disabled={$diagCalls.length === 0}
+      on:click={copyReport}
+    >{copied ? "Copied ✓" : "Copy"}</button>
   </div>
   {#if recent.length === 0}
     <div class="diag-empty">Navigate or load something — OS calls appear here.</div>
@@ -65,12 +95,33 @@
     color: #7fe0a0;
   }
   .diag-slowest {
+    flex: 1;
     font-weight: 500;
     font-size: 10px;
     opacity: 0.85;
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
+  }
+  /* The Copy control is interactive even though the overlay itself is click-through (CPE-759). */
+  .diag-copy {
+    flex: 0 0 auto;
+    pointer-events: auto;
+    cursor: pointer;
+    padding: 1px 8px;
+    border-radius: 4px;
+    border: 1px solid rgba(255, 255, 255, 0.25);
+    background: rgba(255, 255, 255, 0.08);
+    color: #d8d8d8;
+    font: inherit;
+    font-size: 10px;
+  }
+  .diag-copy:hover:not(:disabled) {
+    background: rgba(255, 255, 255, 0.18);
+  }
+  .diag-copy:disabled {
+    opacity: 0.4;
+    cursor: default;
   }
   .diag-empty {
     padding: 8px;
