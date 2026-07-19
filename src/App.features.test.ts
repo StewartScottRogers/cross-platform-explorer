@@ -68,6 +68,9 @@ function mockBackend(listing: DirEntry[]) {
       case "rename_entry": return `${args?.path}.renamed`;
       case "copy_entries":
         return (args?.paths as string[]).map((p) => ({ path: `${p} (copy)`, ok: true, error: "" }));
+      case "delete_to_trash":
+      case "restore_from_trash":
+        return (args?.paths as string[]).map((p) => ({ path: p, ok: true, error: "" }));
       case "read_file_text": return "FILE PREVIEW CONTENT";
       case "find_files_by_name": return { matches: [], dirs_scanned: 1, truncated: false };
       case "find_files_by_name_stream": {
@@ -160,6 +163,29 @@ describe("selection + status bar (CPE-676 net)", () => {
 
     await fireEvent.click(screen.getByText("banana.txt"), { ctrlKey: true });
     await waitFor(() => expect(screen.getByText(/^2 selected/)).toBeTruthy());
+  });
+});
+
+describe("delete + undo (CPE-676 net)", () => {
+  it("Delete trashes the selection and Ctrl+Z restores it", async () => {
+    mockBackend([file("doomed.txt", "txt"), file("keep.txt", "txt")]);
+    await enterDrive();
+    await waitFor(() => expect(screen.getByText("doomed.txt")).toBeTruthy());
+    await fireEvent.click(screen.getByText("doomed.txt"));
+    await waitFor(() => expect(screen.getByText(/^1 selected/)).toBeTruthy());
+
+    await fireEvent.keyDown(window, { key: "Delete" });
+    await waitFor(() => {
+      const call = invoke.mock.calls.find((c) => c[0] === "delete_to_trash");
+      expect(call).toBeTruthy();
+      expect((call![1] as { paths: string[] }).paths).toContain("C:\\d\\doomed.txt");
+    });
+
+    // Ctrl+Z restores the trashed item (undo of a recoverable delete).
+    await fireEvent.keyDown(window, { key: "z", ctrlKey: true });
+    await waitFor(() =>
+      expect(invoke.mock.calls.some((c) => c[0] === "restore_from_trash")).toBe(true),
+    );
   });
 });
 
