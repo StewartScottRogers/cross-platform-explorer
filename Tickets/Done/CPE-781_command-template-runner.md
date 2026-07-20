@@ -2,12 +2,12 @@
 id: CPE-781
 title: Pure command-template runner ({path}/{name}/{dir}/{ext}/{stem})
 type: feature
-status: In Progress
+status: Done
 priority: medium
 component: Frontend
 tags: ready
 created: 2026-07-20
-closed:
+closed: 2026-07-20
 epic: CPE-711
 estimate: 1h
 ---
