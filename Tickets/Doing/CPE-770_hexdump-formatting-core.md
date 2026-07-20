@@ -2,7 +2,7 @@
 id: CPE-770
 title: Pure hex-dump formatting + magic-byte signature detection
 type: feature
-status: Open
+status: In Progress
 priority: low
 component: Frontend
 tags: ready
@@ -29,11 +29,20 @@ file formats by their magic bytes — no DOM, no IO, fully unit-tested, so the l
 - Helpers kept pure and total (empty input, partial final row, offsets past 0 all handled).
 
 ## Acceptance Criteria
-- [ ] `hexRows` produces correctly offset/padded/grouped rows incl. a short final row and a non-zero
+- [x] `hexRows` produces correctly offset/padded/grouped rows incl. a short final row and a non-zero
       `baseOffset`; ASCII gutter maps printable vs non-printable correctly.
-- [ ] `detectSignature` identifies each format in the starter set and returns null for unknown/short input.
-- [ ] Pure + dependency-free; unit tests cover the above incl. edge cases (empty, 1 byte, exactly one row,
+- [x] `detectSignature` identifies each format in the starter set and returns null for unknown/short input.
+- [x] Pure + dependency-free; unit tests cover the above incl. edge cases (empty, 1 byte, exactly one row,
       row+1); `npm run check` + suite green.
 
 ## Notes
 Foundation for CPE-773 (HexView). Sibling of CPE-771 (data-inspector decoders). No GUI — headless.
+
+## Resolution
+Added `src/lib/hexdump.ts` (pure, no DOM/IO): `hexRows(bytes, baseOffset, bytesPerRow)` → canonical
+offset/hex/ascii rows (short final row padded so columns align; non-printable → `.`), and
+`detectSignature(bytes)` → magic-byte match for PNG/JPEG/GIF/PDF/ZIP/GZIP/ELF/WASM/Java-class/WAV/PE (null
+otherwise). 17 unit tests (`hexdump.test.ts`) cover empty/1-byte/full-row/short-row/baseOffset/bogus-per-row
+and every signature + the WAV-needs-WAVE-at-8 and too-short cases. `npm run check` 0/0; suite 765 pass.
+Foundation for CPE-773 (HexView). No existing code touched — headless.
+
