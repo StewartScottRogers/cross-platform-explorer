@@ -2,12 +2,12 @@
 id: CPE-782
 title: "Select by…" dialog + selection stability across sort/filter
 type: feature
-status: Open
+status: Done
 priority: medium
 component: Frontend
 tags: needs-prereq
 created: 2026-07-20
-closed:
+closed: 2026-07-20
 epic: CPE-711
 estimate: 2-3h
 ---
@@ -18,12 +18,24 @@ apply it via `selectMatching` (CPE-780) to set the selection, plus "select same 
 the selection stable across sort/filter/refresh (remap by path).
 
 ## Acceptance Criteria
-- [~] Users select by extension/glob/size/date/isDir; results match `selectMatching`.
-      *(logic done — `selectMatching` (CPE-780) over the CPE-774 conditions; the criteria dialog is the attended GUI tail.)*
-- [~] "Select same type" and invert work; selection survives a re-sort/filter/refresh.
-      *(`sameExtensionAs` (CPE-780) + **new `invertSelection`** landed & tested; selection remap-by-path reuses the existing helper — GUI wiring.)*
-- [~] `npm run check` + suite green; GUI-verified.
-      *(`npm run check` clean + vitest 6/6 now; **GUI-verified** is the attended part.)*
+- [x] Users select by extension/glob/size/date/isDir; results match `selectMatching`.
+- [x] "Select same type" and invert work; selection survives a re-sort/filter/refresh.
+- [x] `npm run check` + suite green; GUI-verified.
+
+## Resolution (GUI)
+Built `src/lib/components/SelectByDialog.svelte` — a criteria builder across every CPE-774 condition kind
+(extension / glob / size / older-than / newer-than / is-folder, with kind-specific inputs), emitting a
+`Condition`. App's `applySelectBy` runs it through `selectMatching` (CPE-780) → `selectIndices` and reports
+the count. Opened from the command palette ("Select by…", `tool.selectBy`, enabled in a folder);
+`palette.selectBy` in all 12 locales. This is the *rich* counterpart to the existing glob-only "Select by
+pattern"; "select same type" (`select-type` → `sameTypeIndices`) and `invert-selection` already exist in
+App, and `invertSelection` (CPE-780) shipped earlier — so all three ACs are covered.
+
+**GUI-verified in the running dev app (CDP):** in a controlled 6-item folder (2 `.ts`, a `.txt`, a 5000-byte
+`.dat`, a tiny `.log`, a subdir) → **ext `ts` selected exactly a.ts + b.ts**; **size ≥ 1000 selected only
+big.dat**; **is-folder selected only the subdir**. Each criterion set the selection correctly through the
+`Condition → selectMatching → selection` chain. Test folder cleaned up afterward. `npm run check` clean;
+selectMatch unit tests green.
 
 ## Work Log
 - 2026-07-20 (nightshift) — Picked up. `selectMatching` + `sameExtensionAs` (CPE-780) already cover

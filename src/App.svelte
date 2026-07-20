@@ -115,6 +115,9 @@
   import CompareDialog from "./lib/components/CompareDialog.svelte";
   import IntegrityDialog from "./lib/components/IntegrityDialog.svelte";
   import type { ChecksumEntry } from "./lib/integrity";
+  import SelectByDialog from "./lib/components/SelectByDialog.svelte";
+  import { selectMatching } from "./lib/selectMatch";
+  import type { Condition } from "./lib/colorRules";
   import {
     pushUndo, popUndo, canUndo, peekLabel, invert, deletedPaths, type UndoEntry,
   } from "./lib/undo";
@@ -273,6 +276,7 @@
   let compareRight = "";
   let integrityOpen = false;
   let integrityBaselines: Record<string, ChecksumEntry[]> = settings.loadIntegrityBaselines();
+  let selectByOpen = false;
   let search = "";
   /** Active sidebar Tags filter — show only entries carrying this tag (CPE-639); "" = off. */
   let selectedTag = "";
@@ -419,6 +423,7 @@
     { id: "tool.sessionHistory", group: $t("palette.groupTools"), label: $t("palette.sessionHistory"), keywords: "audit log history export sessions activity", run: () => (sessionHistoryOpen = true) },
     { id: "tool.compareFolders", group: $t("palette.groupTools"), label: $t("palette.compareFolders"), keywords: "diff compare folders directories tree", run: openCompare },
     { id: "tool.integrity", group: $t("palette.groupTools"), label: $t("palette.integrity"), keywords: "integrity checksum bitrot corruption verify baseline", run: () => (integrityOpen = true) },
+    { id: "tool.selectBy", group: $t("palette.groupTools"), label: $t("palette.selectBy"), keywords: "select by criteria extension size date filter", run: () => (selectByOpen = true), enabled: inFolder },
     { id: "tool.aiConsole", group: $t("palette.groupTools"), label: $t("palette.openAiConsole"), run: () => openAiConsole(), enabled: () => aiConsoleAvailable },
     { id: "app.settings", group: $t("palette.groupApp"), label: $t("palette.settings"), run: () => (showSettings = true) },
     { id: "app.documents", group: $t("palette.groupApp"), label: $t("palette.documents"), shortcut: "F1", run: () => openDocs(currentSection()) },
@@ -1200,6 +1205,18 @@
   }
 
   /** Select every visible entry whose name matches the glob (CPE-360). */
+  /** Apply a rich "Select by…" criterion (CPE-782) to the visible list via the shared matcher. */
+  function applySelectBy(condition: Condition) {
+    selectByOpen = false;
+    const idx = selectMatching(visible, condition, Date.now());
+    selection = selectIndices(idx);
+    showNotice(
+      idx.length === 0
+        ? "No items match that criterion."
+        : `Selected ${idx.length} item${idx.length === 1 ? "" : "s"}.`,
+    );
+  }
+
   function selectByPattern(pattern: string) {
     patternSelectOpen = false;
     const idx = visible
@@ -3163,6 +3180,13 @@
     initialLeft={compareLeft}
     initialRight={compareRight}
     on:cancel={() => (compareOpen = false)}
+  />
+{/if}
+
+{#if selectByOpen}
+  <SelectByDialog
+    on:submit={(e) => applySelectBy(e.detail)}
+    on:cancel={() => (selectByOpen = false)}
   />
 {/if}
 
