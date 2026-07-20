@@ -241,41 +241,87 @@
   $: cutSet = new Set(cutPaths);
   $: draggedSet = new Set(draggedPaths);
 
-  // ── Virtualization (CPE-690, epic CPE-688) ────────────────────────────────────────────────────
-  // Render only the visible window of the DETAILS view for large folders, so a 10k-file folder paints
-  // in fixed cost instead of building a DOM node per entry. Grid views (icons/gallery) and folders below
-  // the threshold render in FULL, exactly as before — the common case pays nothing (PURPOSE.md). The
-  // `.rows` block keeps its true height via top/bottom spacer divs, so the ancestor `.filelist-pane`
-  // scroller and its sticky header behave unchanged. Rows carry their ABSOLUTE index, so every
-  // selection / rowEls / DnD / rename path below is untouched.
+  // ── Virtualization (CPE-690 details, CPE-766 icons/gallery grids; epic CPE-688) ─────────────────
+  // Render only the visible window for large folders across every uniform-row view — details/list
+  // (columns = 1) and the icon/gallery grids (columns = N) — so a 10k-file folder paints in fixed cost
+  // instead of building a DOM node per entry. Folders below the threshold render in FULL, exactly as
+  // before — the common case pays nothing (PURPOSE.md). The `.rows` block keeps its true scroll height
+  // via top/bottom spacer divs (full-width via `grid-column` in the grids), so the ancestor
+  // `.filelist-pane` scroller and its sticky header behave unchanged. Rows carry their ABSOLUTE index, so
+  // every selection / rowEls / DnD / rename path below is untouched. Grid tiles are made uniform-height
+  // (fixed 2-line name; tag chips hidden in grid) so the fixed-row-height math holds; column count and
+  // tile pitch are measured from the live grid so they survive pane resize and view switches.
   const VIRTUALIZE_THRESHOLD = 100;
   const OVERSCAN_ROWS = 6;
   let rowsEl: HTMLDivElement | undefined;
   let scrollEl: HTMLElement | null = null;
   let effScroll = 0; // px of `.rows` content scrolled above the scroller's top fold
   let viewportH = 0;
-  let rowH = 30; // measured details row height (falls back to the --row-h default)
+  let rowH = 30; // measured row/tile pitch (row height, + row-gap for grids); falls back to --row-h
+  let cols = 1; // measured items-per-row (1 for details/list, N for the auto-fill grids)
+  let rowGapPx = 0; // measured grid row-gap, to compensate the spacers' own gap inside the grid
   let rafPending = false;
 
-  $: virtualizeDetails = view === "details" && entries.length >= VIRTUALIZE_THRESHOLD;
+  $: isGrid = view === "icons" || view === "gallery";
+  $: virtualize = entries.length >= VIRTUALIZE_THRESHOLD;
 
   $: win =
-    virtualizeDetails && rowH > 0 && viewportH > 0
-      ? windowRange(effScroll, viewportH, rowH, entries.length, 1, OVERSCAN_ROWS)
+    virtualize && rowH > 0 && viewportH > 0
+      ? windowRange(effScroll, viewportH, rowH, entries.length, cols, OVERSCAN_ROWS)
       : { start: 0, end: entries.length, padTop: 0, padBottom: 0 };
 
-  $: windowed = virtualizeDetails
+  $: windowed = virtualize
     ? entries.slice(win.start, win.end).map((entry, k) => ({ entry, i: win.start + k }))
     : entries.map((entry, i) => ({ entry, i }));
 
-  function measureGeometry() {
+  // Spacer heights. In the grids each spacer is itself a full-width grid row, so it introduces one
+  // row-gap of its own above/below the rendered slice — subtract it back out so the tiles land exactly
+  // at their absolute row position. In the (block) list/details views there is no gap to compensate.
+  $: topPad = virtualize ? (isGrid ? Math.max(0, win.padTop - rowGapPx) : win.padTop) : 0;
+  $: botPad = virtualize ? (isGrid ? Math.max(0, win.padBottom - rowGapPx) : win.padBottom) : 0;
+
+  let roInstance: ResizeObserver | undefined;
+  let scrollerWired = false;
+
+  // The `.filelist-pane` scroller (and thus `.rows`) often isn't in the DOM yet when this component
+  // first mounts — the folder is still loading, or we arrived from an empty/Home state — so acquire it
+  // LAZILY the first time `.rows` exists and wire the scroll/resize listeners then. A one-shot capture in
+  // onMount silently left virtualization disabled after a Home→folder navigation (found GUI-verifying
+  // CPE-766; also repairs that path for the CPE-690 details view).
+  function wireScroller() {
+    if (scrollerWired || !rowsEl) return;
+    scrollEl = rowsEl.closest<HTMLElement>(".filelist-pane") ?? null;
     if (!scrollEl) return;
+    scrollEl.addEventListener("scroll", onScrollOrResize, { passive: true });
+    // ResizeObserver isn't present in every environment (e.g. jsdom) — guard so wiring never throws.
+    if (typeof ResizeObserver !== "undefined") {
+      roInstance = new ResizeObserver(onScrollOrResize);
+      roInstance.observe(scrollEl);
+    }
+    scrollerWired = true;
+  }
+
+  function measureGeometry() {
+    wireScroller();
+    if (!scrollEl || !rowsEl) return;
     const cRect = scrollEl.getBoundingClientRect();
     viewportH = cRect.height;
-    if (rowsEl) {
-      const rRect = rowsEl.getBoundingClientRect();
-      effScroll = Math.max(0, cRect.top - rRect.top);
-      const firstRow = rowsEl.querySelector<HTMLElement>(".row.view-details");
+    const rRect = rowsEl.getBoundingClientRect();
+    effScroll = Math.max(0, cRect.top - rRect.top);
+    // First rendered tile/row (never a spacer — those are `.vspacer`).
+    const firstRow = rowsEl.querySelector<HTMLElement>(".row");
+    if (isGrid) {
+      const cs = getComputedStyle(rowsEl);
+      // The computed `grid-template-columns` resolves `auto-fill` to concrete tracks — count them.
+      cols = Math.max(1, cs.gridTemplateColumns.split(" ").filter((s) => s && s !== "none").length);
+      rowGapPx = parseFloat(cs.rowGap) || 0;
+      if (firstRow) {
+        const h = firstRow.getBoundingClientRect().height;
+        if (h > 0) rowH = h + rowGapPx;
+      }
+    } else {
+      cols = 1;
+      rowGapPx = 0;
       if (firstRow) {
         const h = firstRow.getBoundingClientRect().height;
         if (h > 0) rowH = h;
@@ -293,18 +339,12 @@
   }
 
   onMount(() => {
-    scrollEl = rowsEl?.closest<HTMLElement>(".filelist-pane") ?? null;
+    // May be too early (`.rows` not rendered yet) — measureGeometry()/wireScroller() are idempotent and
+    // the reactive re-measure below picks it up once `.rows` exists.
     measureGeometry();
-    scrollEl?.addEventListener("scroll", onScrollOrResize, { passive: true });
-    // ResizeObserver isn't present in every environment (e.g. jsdom) — guard so mounting never throws.
-    let ro: ResizeObserver | undefined;
-    if (scrollEl && typeof ResizeObserver !== "undefined") {
-      ro = new ResizeObserver(onScrollOrResize);
-      ro.observe(scrollEl);
-    }
     return () => {
       scrollEl?.removeEventListener("scroll", onScrollOrResize);
-      ro?.disconnect();
+      roInstance?.disconnect();
     };
   });
 
@@ -317,12 +357,12 @@
 
   // When virtualizing, an OFF-window lead row isn't in the DOM, so App's `rowEls[lead].scrollIntoView`
   // can't reach it — scroll the container to it instead. In-window leads are left to that existing
-  // scrollIntoView; non-virtualized behaviour is entirely untouched.
-  $: if (virtualizeDetails && rowH > 0 && viewportH > 0) ensureLeadVisibleVirtual(selection.lead);
+  // scrollIntoView; non-virtualized behaviour is entirely untouched. Grid-aware via the measured `cols`.
+  $: if (virtualize && rowH > 0 && viewportH > 0) ensureLeadVisibleVirtual(selection.lead);
   function ensureLeadVisibleVirtual(lead: number) {
     if (lead < 0 || !scrollEl) return;
     if (lead >= win.start && lead < win.end) return; // in window → existing scrollIntoView handles it
-    const target = ensureVisibleOffset(lead, effScroll, viewportH, rowH, entries.length, 1);
+    const target = ensureVisibleOffset(lead, effScroll, viewportH, rowH, entries.length, cols);
     if (target !== effScroll) scrollEl.scrollTop += target - effScroll;
   }
 </script>
@@ -380,8 +420,8 @@
 {:else}
   <!-- svelte-ignore a11y-no-static-element-interactions -->
   <div bind:this={rowsEl} class="rows" class:grid={view === "icons" || view === "gallery"} class:gallery={view === "gallery"} style="--filelist-cols: {colTemplate}" on:contextmenu={emptyContext}>
-    {#if virtualizeDetails && win.padTop > 0}
-      <div class="vspacer" style="height: {win.padTop}px" aria-hidden="true" />
+    {#if topPad > 0}
+      <div class="vspacer" style="height: {topPad}px" aria-hidden="true" />
     {/if}
     {#each windowed as { entry, i } (entry.path)}
       <!--
@@ -472,8 +512,8 @@
         {/if}
       </div>
     {/each}
-    {#if virtualizeDetails && win.padBottom > 0}
-      <div class="vspacer" style="height: {win.padBottom}px" aria-hidden="true" />
+    {#if botPad > 0}
+      <div class="vspacer" style="height: {botPad}px" aria-hidden="true" />
     {/if}
   </div>
 {/if}
@@ -643,7 +683,20 @@
     gap: 10px;
   }
 
-  .row.view-icons {
+  /* A virtualization spacer spans the full grid width so it stands in for whole tile rows
+     above/below the rendered window (CPE-766); in the block list/details views grid-column is
+     simply ignored and it behaves as a plain-height block (CPE-690). */
+  .vspacer {
+    grid-column: 1 / -1;
+    width: 100%;
+  }
+
+  /* Icon + gallery tiles share one column-tile layout (CPE-766 gives gallery the layout it was
+     missing). Fixed tile geometry keeps every tile the SAME height, which the fixed-row-height
+     windowing math depends on: a fixed 2-line name below, chips hidden in grid (the colour dot still
+     signals a tag), and overflow clipped so a stray badge can't grow one tile taller than its row. */
+  .row.view-icons,
+  .row.view-gallery {
     display: flex;
     flex-direction: column;
     align-items: center;
@@ -651,12 +704,20 @@
     height: auto;
     padding: 12px 6px;
     text-align: center;
+    overflow: hidden;
   }
 
-  .row.view-icons :global(.cell.name) {
+  .row.view-icons :global(.cell.name),
+  .row.view-gallery :global(.cell.name) {
     flex-direction: column;
     gap: 6px;
     width: 100%;
+  }
+
+  /* Tag chips reflow to variable heights, which would break uniform tile height; in the grids the
+     colour dot before the name is enough to flag a tag, and the full chips remain in details/list. */
+  .rows.grid .tag-chips {
+    display: none;
   }
 
   /* Column resize handles — thin hit-targets straddling each column's right edge (CPE-350).
@@ -675,7 +736,11 @@
     opacity: 0.5;
   }
 
-  .row.view-icons .ellip {
+  /* The name box occupies a FIXED two lines (not just a max) so every tile is the same height
+     regardless of filename length — the precondition for fixed-row-height windowing (CPE-766).
+     Longer names clamp with an ellipsis; shorter ones keep the reserved second line. */
+  .row.view-icons .ellip,
+  .row.view-gallery .ellip {
     width: 100%;
     white-space: normal;
     overflow: hidden;
@@ -684,5 +749,6 @@
     line-clamp: 2;
     -webkit-box-orient: vertical;
     line-height: 1.25;
+    height: 2.5em; /* 2 lines × 1.25 line-height */
   }
 </style>
