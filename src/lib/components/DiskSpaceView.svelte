@@ -24,7 +24,12 @@
     size: number;
   }
 
-  const dispatch = createEventDispatcher<{ navigate: string; close: void }>();
+  const dispatch = createEventDispatcher<{
+    navigate: string;
+    close: void;
+    /** Reveal this item in the explorer (navigate to its folder + select it) — CPE-752. */
+    reveal: string;
+  }>();
 
   const W = 900;
   const H = 520;
@@ -168,7 +173,7 @@
         <div class="sp-largest-head">Largest</div>
         <ul>
           {#each children.slice(0, 14) as c (c.path)}
-            <li>
+            <li class="lg-item">
               <button
                 class="lg-row"
                 title={c.path}
@@ -177,6 +182,15 @@
                 <Icon name={c.is_dir ? "folder" : "document"} size={14} />
                 <span class="lg-name">{c.name}</span>
                 <span class="lg-size">{formatSize(c.size)}</span>
+              </button>
+              <!-- Reveal in explorer: jump to this item and select it (CPE-752). Shown on hover/focus. -->
+              <button
+                class="lg-action"
+                title="Reveal in explorer"
+                aria-label={`Reveal ${c.name} in explorer`}
+                on:click|stopPropagation={() => dispatch("reveal", c.path)}
+              >
+                <Icon name="forward" size={14} />
               </button>
             </li>
           {/each}
@@ -319,11 +333,18 @@
     margin: 0;
     padding: 0;
   }
+  /* A largest-items entry: the drill/navigate row plus a hover-revealed action button (CPE-752). */
+  .lg-item {
+    display: flex;
+    align-items: center;
+    gap: 2px;
+  }
   .lg-row {
     display: flex;
     align-items: center;
     gap: 8px;
-    width: 100%;
+    flex: 1 1 auto;
+    min-width: 0;
     padding: 5px 8px;
     border: 0;
     background: none;
@@ -333,6 +354,28 @@
     border-radius: 5px;
     font: inherit;
     font-size: 12.5px;
+  }
+  /* Hidden until the row is hovered or the action itself is focused (keyboard-reachable). */
+  .lg-action {
+    flex: 0 0 auto;
+    display: grid;
+    place-items: center;
+    width: 26px;
+    height: 26px;
+    border: 0;
+    border-radius: 5px;
+    background: none;
+    color: var(--text-dim);
+    cursor: pointer;
+    opacity: 0;
+  }
+  .lg-item:hover .lg-action,
+  .lg-action:focus-visible {
+    opacity: 1;
+  }
+  .lg-action:hover {
+    background: rgba(128, 128, 128, 0.2);
+    color: var(--text);
   }
   .lg-row:hover {
     background: rgba(128, 128, 128, 0.14);

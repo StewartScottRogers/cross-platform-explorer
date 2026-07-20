@@ -30,3 +30,18 @@ refresh the map so freed space is reflected. Closes the loop from "find the big 
 
 ## Notes
 Prereq: CPE-751 (the treemap surface). Reuses the existing delete-to-recycle + undo (CPE-033/044).
+
+## Work Log
+2026-07-19 (nightshift, 23:31 MST) — Picked up (prereq CPE-751 is Done). Estimate: 2-3h (kept). Plan:
+slice it — Reveal first (non-destructive, reuses App's proven `revealFileInApp`), then Delete + map-refresh
+(destructive → verify against a throwaway folder only). Surface: the "Largest" items list rows (cleaner
+than treemap-tile context menus).
+
+2026-07-19 (nightshift, 23:35 MST) — **Slice 1 (Reveal) implemented.** `DiskSpaceView` largest-items rows
+gain a hover/focus "Reveal in explorer" action (forward icon) that dispatches `reveal(path)`; App wires
+`on:reveal={(e) => { spacePath = null; revealFileInApp(e.detail); }}` — the same navigate-to-parent+select
+helper the content-search and file-search reveal already use (proven). Headless green: `npm run check` 0/0;
+suite **748 pass**. Live GUI drive was blocked tonight by CDP/dev-app address-bar flakiness (the app
+reloaded clean per the vite log, but address-edit wouldn't trigger via synthetic events after ~4 tries) —
+NOT merged. Will do the combined reveal+delete GUI verify on a freshly-relaunched dev app in the Delete
+slice. Remaining: Slice 2 (Delete + map refresh + confirm).

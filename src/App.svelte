@@ -2863,6 +2863,7 @@
   <DiskSpaceView
     path={spacePath}
     on:navigate={(e) => { spacePath = null; navigate(e.detail); }}
+    on:reveal={(e) => { spacePath = null; revealFileInApp(e.detail); }}
     on:help={(e) => openDocs(e.detail)}
     on:close={() => (spacePath = null)}
   />
