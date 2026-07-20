@@ -2,7 +2,7 @@
 id: CPE-722
 title: "EPIC: Compare studio (image / binary / folder-tree)"
 type: Task
-status: Proposed
+status: In Progress
 priority: Medium
 component: Multiple
 tags: [epic]
@@ -35,3 +35,21 @@ common real task the app can't do; a unified compare shell makes CPE a genuine c
 - Selecting two files/folders opens a compare view appropriate to their type.
 - Image, binary, and recursive folder-tree comparison all work with clear status/visuals.
 - Text pairs reuse the existing diff renderer; large inputs stay responsive.
+
+## Work Log
+2026-07-20 (nightshift, 00:53 MST) — Activated. Open questions resolved (autonomous): folder compare by
+**name + size + mtime** (no content hash — cheap on big trees; a "deep content" mode is a later option);
+**image compare deferred** to a follow-up (pixel-diff is GUI/perf-heavy); dual-pane integration deferred
+(CPE-617 not landed). Text pairs reuse the existing `diff.ts` renderer. Foundation-first: the two pure
+comparison cores land + unit-tested before the compare shell.
+
+## Child tickets
+1. **CPE-777** — Pure recursive folder-tree diff (`src/lib/treeDiff.ts`): two trees → per-node
+   added/removed/changed/identical (files by size+mtime; a dir is "changed" iff any descendant differs).
+   Unit-tested. **Foundation, headless.**
+2. **CPE-778** — Pure binary/byte diff (`src/lib/byteDiff.ts`): first-difference offset + differing byte
+   ranges between two buffers; reused by the hex compare over `read_file_range` (CPE-772). Unit-tested.
+   **Headless.** *(independent of 777)*
+3. **CPE-779** — Unified compare shell launched from a two-item selection: folder-tree view (consumes 777)
+   + binary/hex view (consumes 778 + CPE-770/772); text pairs reuse `diff.ts`. **Attended GUI.** Image
+   compare = future follow-up. *(prereq: 777, 778)*
