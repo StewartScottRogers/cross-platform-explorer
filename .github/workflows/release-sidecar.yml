@@ -94,14 +94,20 @@ jobs:
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         with:
           tagName: ${{ inputs.tag }}
-          releaseName: "Cross-Platform Explorer ${{ inputs.tag }} (sidecar preview)"
+          releaseName: "Cross-Platform Explorer ${{ inputs.tag }} (sidecar)"
           releaseBody: |
-            Preview build with the sidecar platform + AI Console bundled in.
-            Opt-in / draft channel — not part of the auto-update stream. See the assets below.
+            Build with the sidecar platform + AI Console bundled in — this is the shipping,
+            auto-updating channel (the build `/run` installs). Publish the draft to release it;
+            once public, installed apps pick it up on their next update check.
+          # Created as a draft so it can be reviewed before going public, but NOT a prerelease:
+          # GitHub's `/releases/latest/` (the updater endpoint) skips prereleases, so the sidecar
+          # channel must be non-prerelease to serve auto-updates (CPE-768).
           releaseDraft: true
-          prerelease: true
+          prerelease: false
           # Build with the sidecar feature + the base overlay (product identity) + the per-OS
           # overlay (which bundles the correctly-named sidecar binary + manifest + agent catalog).
           args: --features sidecar-platform --config src-tauri/tauri.sidecar.conf.json --config src-tauri/tauri.sidecar.${{ matrix.overlay }}.conf.json
-          # Keep this channel out of the auto-update manifest (it's a manual preview).
-          includeUpdaterJson: false
+          # This IS the auto-update channel (CPE-768): emit + upload latest.json. Combined with
+          # createUpdaterArtifacts:true in tauri.sidecar.conf.json, the manifest references the
+          # correctly-named `…Sidecar…` installers, signed with the shared updater key.
+          includeUpdaterJson: true
