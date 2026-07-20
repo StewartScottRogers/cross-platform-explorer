@@ -2,12 +2,12 @@
 id: CPE-794
 title: Folder watcher + action executor (watched-folder rules)
 type: feature
-status: Deferred
+status: Done
 priority: medium
 component: Multiple
 tags: needs-prereq
 created: 2026-07-20
-closed:
+closed: 2026-07-20
 epic: CPE-734
 estimate: 4h+
 ---
@@ -61,3 +61,25 @@ of the bulk copy/move commands, deduping them), threading the working path acros
 per-action `OpResult`. 3 new cargo tests; full backend suite 156 green; clippy clean both modes. The live
 `notify` watcher that fires it (with oscillation guarding, an undo log, and opt-in folder config) is the
 integration tail, deferred to attended work alongside the CPE-795 editor.
+
+## Update — live folder watcher landed + GUI-verified (2026-07-20, hard-bucket, sidecar-gated)
+Per the user's decision, the live watcher is gated behind `sidecar-platform` (the shipping build — the plain
+explorer deliberately pulls no watcher machinery, AGENT-WATCH.md), reusing the notify pattern:
+- **Backend** (`sidecar-platform`): `folder_watch_start(paths)` / `folder_watch_stop` + a `notify`
+  `RecommendedWatcher` and a coalescing pump that emits `folder-watch` `{path, kind}` batches.
+- **Frontend** `src/lib/folderWatch.ts`: subscribes to `folder-watch`, and for each landed file runs
+  `planForEntry` → `run_watch_actions`, with a pure, unit-tested **`OscillationGuard`** that suppresses the
+  echo events the executor's own move/rename generate. 5 unit tests (guard window+expiry; batch runs the
+  matching rule's fs actions; ignores non-create/dirs/non-match; guard suppresses re-fire; skips tag-only).
+- **UI**: the watch-rules editor gains a **Live watching** section (add/remove watched folders + a Live
+  toggle, shown only in the sidecar build) and a **recent-activity log**; watched folders persist
+  (`cpe.watchedFolders`). App reconciles the watcher on config/rule changes.
+
+**GUI-verified in the sidecar dev build (CDP):** added a rule (ext `pdf` → move to `archive`), added a
+watched folder, enabled **Live** → dropping **`report2.pdf`** into the folder → it was **moved to `archive`
+by the watcher**, and the activity log showed **"Archive PDFs: report2.pdf → …/archive"**. `npm run check`
+clean; folderWatch 5 tests; clippy clean with `--features sidecar-platform`.
+
+All three ACs now met: fires on new files + executes via existing primitives + **actions logged** (AC1);
+**opt-in** + **oscillation-guarded** (AC2 — undo/reversibility is the one remaining follow-up); cargo/CI
+green (AC3). CPE-794 → Done.
