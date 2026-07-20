@@ -56,4 +56,14 @@ describe("CRUD + parse (CPE-793)", () => {
     expect(parseRules("nope")).toEqual([]);
     expect(parseRules(JSON.stringify([{ id: "x" }, list[0]]))).toEqual([list[0]]); // drops invalid
   });
+
+  it("drops a rule whose `when` is a known-kind condition with malformed fields", () => {
+    const good: WatchRule = { id: "a", name: "n", when: pdf, actions: [{ kind: "tag", tag: "x" }], enabled: true };
+    const mixed = JSON.stringify([
+      good,
+      { id: "b", name: "m", when: { kind: "ext" }, actions: [] }, // no exts → would throw in planner
+      { id: "c", name: "m", when: {}, actions: [] }, // no kind
+    ]);
+    expect(parseRules(mixed)).toEqual([good]);
+  });
 });
