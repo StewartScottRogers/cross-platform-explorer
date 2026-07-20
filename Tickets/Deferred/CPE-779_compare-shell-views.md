@@ -41,6 +41,11 @@ Prereq: CPE-777, CPE-778. Attended GUI. Launch from a two-item selection (contex
   view, where a dir whose `path` is in `collapsed` yields its own row but not its descendants (drill-in
   without re-diffing). Pure/recursive. 4 vitest cases (mixed+nested+added-subtree summary; empty summary;
   depth-first flatten with path/depth/hasChildren; collapse hides descendants). `npm run check` clean.
+- 2026-07-20 (nightshift) — Self-review before merge caught a bug in the first cut of `summarizeDiff`: it
+  only counted `!isDir` nodes, so a file↔dir **type change** (which `diffTrees` emits as `changed` with
+  `isDir:true` and no children) was silently dropped from the tally, as was an empty added/removed folder.
+  Fixed to count any **childless** node as a leaf; added a regression test (type change → `changed:1`,
+  empty added dir → `added:1`). 11 treeDiff cases now.
 - 2026-07-20 (nightshift) — **Deferred.** The folder-compare render-prep is done and headlessly green; the
   remaining scope is the three **views** — folder tree (render `flattenDiff` rows with status + expand/
   collapse + drill-into-pair, header from `summarizeDiff`), binary hex-compare (highlight `byteDiff` ranges

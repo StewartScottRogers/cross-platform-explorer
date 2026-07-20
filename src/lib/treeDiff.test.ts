@@ -82,6 +82,15 @@ describe("summarizeDiff (CPE-779)", () => {
   it("is all-zero for an empty diff", () => {
     expect(summarizeDiff([])).toEqual({ added: 0, removed: 0, changed: 0, identical: 0 });
   });
+
+  it("counts a file↔dir type change and an empty added dir as single leaves", () => {
+    // "x" is a file on the left, a dir on the right → diffTrees emits a childless `changed` node.
+    const typeChange = summarizeDiff(diffTrees([f("x", 1, 1)], [d("x", [f("c", 1, 1)])]));
+    expect(typeChange).toEqual({ added: 0, removed: 0, changed: 1, identical: 0 });
+    // A brand-new empty folder counts as one added leaf (not zero).
+    const emptyAdded = summarizeDiff(diffTrees([], [d("newdir")]));
+    expect(emptyAdded).toEqual({ added: 1, removed: 0, changed: 0, identical: 0 });
+  });
 });
 
 describe("flattenDiff (CPE-779)", () => {

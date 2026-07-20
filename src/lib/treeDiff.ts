@@ -85,16 +85,17 @@ export interface DiffSummary {
 }
 
 /**
- * Count the **files** (leaves) in a diff tree by status — dirs are containers, so an added/removed dir
- * contributes its file descendants (which `diffTrees` already marked), not itself. This is what the
- * compare header reports ("12 added, 3 changed…"). Pure and recursive.
+ * Count the **leaves** of a diff tree by status for the compare header ("12 added, 3 changed…"). A dir with
+ * children is a container — it contributes its descendants (which `diffTrees` already marked), not itself —
+ * but a *childless* node counts as one: a plain file, an empty added/removed folder, or a file↔dir **type
+ * change** (which `diffTrees` emits as `changed` with no children). Pure and recursive.
  */
 export function summarizeDiff(nodes: DiffNode[]): DiffSummary {
   const s: DiffSummary = { added: 0, removed: 0, changed: 0, identical: 0 };
   const walk = (list: DiffNode[]): void => {
     for (const n of list) {
-      if (n.isDir) walk(n.children ?? []);
-      else s[n.status] += 1;
+      if (n.isDir && n.children && n.children.length > 0) walk(n.children);
+      else s[n.status] += 1; // leaf: file, empty dir, or type-change node
     }
   };
   walk(nodes);
