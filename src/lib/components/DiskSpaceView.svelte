@@ -29,7 +29,21 @@
     close: void;
     /** Reveal this item in the explorer (navigate to its folder + select it) — CPE-752. */
     reveal: string;
+    /** Delete this item (App confirms + recycles + undo); the map refreshes via `refreshToken` — CPE-752. */
+    delete: { path: string; name: string };
   }>();
+
+  /** Bumped by App after a delete completes — re-scan the current folder so the freed space shows
+      (bust its cache so it's a real re-walk, not the stale cached tree). CPE-752. */
+  export let refreshToken = 0;
+  let lastRefresh = 0;
+  $: if (refreshToken !== lastRefresh) {
+    lastRefresh = refreshToken;
+    if (refreshToken > 0) {
+      delete cache[cur];
+      scan(cur);
+    }
+  }
 
   const W = 900;
   const H = 520;
@@ -183,7 +197,9 @@
                 <span class="lg-name">{c.name}</span>
                 <span class="lg-size">{formatSize(c.size)}</span>
               </button>
-              <!-- Reveal in explorer: jump to this item and select it (CPE-752). Shown on hover/focus. -->
+              <!-- Reveal / Delete actions (CPE-752). Shown on hover/focus; stopPropagation keeps them
+                   off the row's drill/navigate click. Delete goes through App (confirm + recycle + undo),
+                   then the map refreshes via refreshToken. -->
               <button
                 class="lg-action"
                 title="Reveal in explorer"
@@ -191,6 +207,14 @@
                 on:click|stopPropagation={() => dispatch("reveal", c.path)}
               >
                 <Icon name="forward" size={14} />
+              </button>
+              <button
+                class="lg-action lg-del"
+                title="Delete to Recycle Bin"
+                aria-label={`Delete ${c.name}`}
+                on:click|stopPropagation={() => dispatch("delete", { path: c.path, name: c.name })}
+              >
+                <Icon name="delete" size={14} />
               </button>
             </li>
           {/each}

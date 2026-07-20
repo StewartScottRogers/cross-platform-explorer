@@ -552,6 +552,40 @@
 
   /** Folder whose disk-usage treemap is open (CPE-751), or null when the Space view is closed. */
   let spacePath: string | null = null;
+  // Bumped after a delete from the Space analyzer so it re-scans and the freed space shows (CPE-752).
+  let spaceRefresh = 0;
+
+  /** Delete an item chosen in the Space analyzer to the Recycle Bin, then refresh the map. Confirms
+      first (a treemap delete is a deliberate, possibly-large removal). Reuses delete_to_trash + the undo
+      stack like the file-list delete, but leaves the explorer listing alone (the modal owns the refresh).
+      Kept separate from doDelete so the file-list delete path is untouched (CPE-752). */
+  function spaceDelete(item: { path: string; name: string }) {
+    confirm = {
+      title: "Delete to Recycle Bin?",
+      message: `"${item.name}" will be moved to the Recycle Bin. You can undo this.`,
+      label: "Delete",
+      onYes: async () => {
+        confirm = null;
+        try {
+          const results = await invoke<OpResult[]>("delete_to_trash", { paths: [item.path] });
+          reportResults(results, "Moved to Recycle Bin:");
+          if (canRestoreTrash) {
+            const restored = results.filter((r) => r.ok).map((r) => ({ from: r.path, to: "" }));
+            if (restored.length > 0) {
+              undoStack = pushUndo(undoStack, {
+                kind: "delete",
+                moves: restored,
+                label: `Delete "${item.name}"`,
+              });
+            }
+          }
+          spaceRefresh += 1; // tell DiskSpaceView to re-scan so the map reflects the freed space
+        } catch (e) {
+          showNotice(String(e), true);
+        }
+      },
+    };
+  }
 
   /** Debounce handle for live folder re-list while watching (CPE-401). */
   let watchRefreshTimer: ReturnType<typeof setTimeout> | null = null;
@@ -2862,8 +2896,10 @@
 {#if spacePath}
   <DiskSpaceView
     path={spacePath}
+    refreshToken={spaceRefresh}
     on:navigate={(e) => { spacePath = null; navigate(e.detail); }}
     on:reveal={(e) => { spacePath = null; revealFileInApp(e.detail); }}
+    on:delete={(e) => spaceDelete(e.detail)}
     on:help={(e) => openDocs(e.detail)}
     on:close={() => (spacePath = null)}
   />
