@@ -21,6 +21,8 @@ import { parseManifest } from "./integrity";
 import type { ChecksumEntry } from "./integrity";
 import { parseRules as parseWatchRules, serializeRules as serializeWatchRules } from "./watchRules";
 import type { WatchRule } from "./watchRules";
+import { parseWorkspaces, serializeWorkspaces } from "./workspaces";
+import type { Workspace } from "./workspaces";
 
 export const KEYS = {
   view: "cpe.view",
@@ -41,6 +43,7 @@ export const KEYS = {
   colorRules: "cpe.colorRules",
   integrityBaselines: "cpe.integrityBaselines",
   watchRules: "cpe.watchRules",
+  workspaces: "cpe.workspaces",
 } as const;
 
 const MAX_RECENTS = 20;
@@ -236,6 +239,14 @@ export const loadWatchRules = (): WatchRule[] => {
   return v === undefined ? [] : parseWatchRules(serializeWatchRules(v as WatchRule[]));
 };
 export const saveWatchRules = (v: WatchRule[]): void => write(KEYS.watchRules, v);
+
+// Saved workspaces (CPE-788, epic CPE-708): named window states (tab paths + view/sort/filter), loaded
+// through the tolerant `parseWorkspaces` so a corrupt entry degrades rather than crashing.
+export const loadWorkspaces = (): Workspace[] => {
+  const v = state[KEYS.workspaces];
+  return v === undefined ? [] : parseWorkspaces(serializeWorkspaces(v as Workspace[]));
+};
+export const saveWorkspaces = (v: Workspace[]): void => write(KEYS.workspaces, v);
 
 /** Reset every stored preference to its default (used by the app Settings gear). */
 export function resetSettings(): void {
