@@ -2,7 +2,7 @@
 id: CPE-708
 title: "EPIC: Workspaces & layout sessions"
 type: Task
-status: Proposed
+status: In Progress
 priority: Medium
 component: Frontend
 tags: [epic]
@@ -35,3 +35,18 @@ three-folder setup" a keystroke builds on existing tabs/columns/settings persist
 - A user can save the current window state as a named workspace and switch between workspaces in one click.
 - Auto-restore reopens the last session on launch and tolerates moved/missing paths.
 - No change to default single-tab startup behaviour when workspaces are unused.
+
+## Work Log
+2026-07-20 (autonomous) — Activated. Open questions resolved: **explicit named workspaces** for v1 (auto-save
+of last session is a separate restore child); **skip missing paths** on restore (graceful degrade, keep the
+valid tabs); dual-pane layout field reserved but not required (CPE-617 unlanded). Reuse the existing tab +
+settings persistence rather than a parallel store. Pure model lands first.
+
+## Child tickets
+1. **CPE-787** — Pure workspace model (`src/lib/workspaces.ts`): `Workspace`/`WorkspaceTab` types, tolerant
+   parse/serialize, CRUD (add/rename/remove/update), and `pruneMissing(ws, exists)` to drop moved/missing
+   tabs on restore. Unit-tested. **Foundation, headless.**
+2. **CPE-788** — Workspace switcher UI: save the current tabs/views as a named workspace, switch / rename /
+   delete, apply on select. **GUI.** *(prereq: 787)*
+3. **CPE-789** — Launch-time auto-restore of the last session, tolerating moved/missing paths; no change to
+   default single-tab startup. **GUI/integration.** *(prereq: 787)*
