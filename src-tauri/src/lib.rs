@@ -1771,6 +1771,12 @@ fn restore_from_trash_impl(paths: Vec<String>) -> Vec<OpResult> {
 /// stack in the first place.
 #[cfg(not(any(target_os = "windows", target_os = "linux")))]
 #[tauri::command]
+async fn restore_from_trash(paths: Vec<String>) -> Vec<OpResult> {
+    tauri::async_runtime::spawn_blocking(move || restore_from_trash_impl(paths))
+        .await.unwrap()
+}
+
+#[cfg(not(any(target_os = "windows", target_os = "linux")))]
 fn restore_from_trash_impl(paths: Vec<String>) -> Vec<OpResult> {
     paths
         .iter()
