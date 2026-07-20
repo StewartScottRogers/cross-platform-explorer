@@ -5,6 +5,7 @@
   import { parseCsv } from "../preview/csv";
   import { highlightForFile, ensureLanguageForName } from "../preview/highlight";
   import { renderMarkdown } from "../preview/markdown";
+  import HexView from "./HexView.svelte";
   import { t } from "../i18n";
   import { formatSize } from "../format";
   import { lsBool, lsSet } from "../persist";
@@ -402,6 +403,8 @@
     {:else}
       <pre class="preview-text" bind:this={textContentEl}>{info}</pre>
     {/if}
+  {:else if provider.kind === "hex" && entry}
+    <HexView path={entry.path} size={entry.size} />
   {:else if needsText && entry}
     {#if textState === "loading"}
       <p class="preview-note">{$t("pv.loading")}</p>

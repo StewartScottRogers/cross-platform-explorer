@@ -129,10 +129,14 @@ describe("pickProvider", () => {
     expect(pickProvider(entry({ name: "a.png", extension: "png" })).kind).toBe("image");
   });
 
-  it("falls back to metadata for folders, nothing, and unknown types", () => {
+  it("falls back to metadata for folders and nothing selected", () => {
     expect(pickProvider(entry({ name: "dir", is_dir: true, extension: "" })).kind).toBe("none");
     expect(pickProvider(null).kind).toBe("none");
     expect(pickProvider(undefined).kind).toBe("none");
-    expect(pickProvider(entry({ name: "a.qqq", extension: "qqq" })).kind).toBe("none");
+  });
+
+  it("opens an unrecognised (binary) file type in the hex view (CPE-773)", () => {
+    expect(pickProvider(entry({ name: "a.qqq", extension: "qqq" })).kind).toBe("hex");
+    expect(pickProvider(entry({ name: "noext", extension: "" })).kind).toBe("hex");
   });
 });

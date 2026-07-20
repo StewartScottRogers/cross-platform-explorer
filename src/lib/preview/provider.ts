@@ -23,6 +23,7 @@ export type PreviewKind =
   | "text"
   | "info"
   | "font"
+  | "hex"
   | "none";
 
 /** One entry inside an archive (mirrors the Rust `ArchiveEntry`). */
@@ -180,6 +181,16 @@ export const providers: PreviewProvider[] = [
     editable: true,
     canPreview: (e) =>
       !e.is_dir && (categoryOf(e) === "text" || categoryOf(e) === "code"),
+  },
+  // Last resort for any file no richer provider claimed (unrecognised binary): a paged hex/ASCII view
+  // (CPE-773) — more useful than the metadata fallback for binary content. Folders still fall through to
+  // FALLBACK via pickProvider's dir guard.
+  {
+    id: "hex",
+    label: "Hex",
+    kind: "hex",
+    editable: false,
+    canPreview: (e) => !e.is_dir,
   },
 ];
 
