@@ -120,6 +120,7 @@
   import type { Condition } from "./lib/colorRules";
   import WatchRulesDialog from "./lib/components/WatchRulesDialog.svelte";
   import type { WatchRule } from "./lib/watchRules";
+  import { startFolderWatch, stopFolderWatch } from "./lib/folderWatch";
   import WorkspacesDialog from "./lib/components/WorkspacesDialog.svelte";
   import type { Workspace, WorkspaceTab } from "./lib/workspaces";
   import BackupDashboard from "./lib/components/BackupDashboard.svelte";
@@ -286,6 +287,11 @@
   let selectByOpen = false;
   let watchRulesOpen = false;
   let watchRules: WatchRule[] = settings.loadWatchRules();
+  // Live watched-folder rules (CPE-794, sidecar-only). Watched folders + on/off persist; the log is
+  // an in-memory ring of recent executed rules.
+  let watchedFolders: string[] = settings.loadWatchedFolders();
+  let watchLive = false;
+  let watchLog: string[] = [];
   let workspacesOpen = false;
   let workspaces: Workspace[] = settings.loadWorkspaces();
   let backupOpen = false;
@@ -2248,6 +2254,27 @@
     loadPath((current(tabs[0].history) ?? HOME) as string);
   }
 
+  /** (Re)start or stop the live watched-folder watcher to match the current config (CPE-794). Only the
+      sidecar build has the backend; a no-op fails soft elsewhere. */
+  async function reconcileWatch() {
+    if (watchLive && watchedFolders.length && aiConsoleAvailable) {
+      await startFolderWatch(watchedFolders, () => watchRules, (msg) => {
+        watchLog = [msg, ...watchLog].slice(0, 50);
+        showNotice(`Watch: ${msg}`);
+      });
+    } else {
+      await stopFolderWatch();
+    }
+  }
+
+  /** Persist + apply watched-folder config from the editor (CPE-794). */
+  function applyWatchConfig(folders: string[], live: boolean) {
+    watchedFolders = folders;
+    watchLive = live;
+    settings.saveWatchedFolders(folders);
+    void reconcileWatch();
+  }
+
   /** Open the file-attributes editor (CPE-786) for the single selected entry. */
   function openAttributes() {
     if (selectedEntries.length !== 1) {
@@ -3250,7 +3277,12 @@
 {#if watchRulesOpen}
   <WatchRulesDialog
     rules={watchRules}
-    on:save={(e) => { watchRules = e.detail; settings.saveWatchRules(watchRules); watchRulesOpen = false; }}
+    {watchedFolders}
+    {watchLive}
+    {watchLog}
+    watchAvailable={aiConsoleAvailable}
+    on:save={(e) => { watchRules = e.detail; settings.saveWatchRules(watchRules); void reconcileWatch(); watchRulesOpen = false; }}
+    on:watchConfig={(e) => applyWatchConfig(e.detail.folders, e.detail.live)}
     on:cancel={() => (watchRulesOpen = false)}
   />
 {/if}

@@ -13,10 +13,40 @@
   import type { DirEntry } from "../types";
 
   export let rules: WatchRule[] = [];
+  /** Live watcher config (CPE-794): the folders monitored + whether live watching is on. */
+  export let watchedFolders: string[] = [];
+  export let watchLive = false;
+  /** Recent executed-rule log lines (newest first) from the live watcher. */
+  export let watchLog: string[] = [];
+  /** Whether the live watcher backend is available (sidecar build only). */
+  export let watchAvailable = false;
 
-  const dispatch = createEventDispatcher<{ save: WatchRule[]; cancel: void }>();
+  const dispatch = createEventDispatcher<{
+    save: WatchRule[];
+    cancel: void;
+    watchConfig: { folders: string[]; live: boolean };
+  }>();
 
   let list: WatchRule[] = rules.map((r) => ({ ...r }));
+  let folders: string[] = [...watchedFolders];
+  let live = watchLive;
+  let newFolder = "";
+
+  function emitWatch() {
+    dispatch("watchConfig", { folders, live });
+  }
+  function addFolder() {
+    const f = newFolder.trim();
+    if (f && !folders.includes(f)) { folders = [...folders, f]; newFolder = ""; emitWatch(); }
+  }
+  function removeFolder(f: string) {
+    folders = folders.filter((x) => x !== f);
+    emitWatch();
+  }
+  function toggleLive() {
+    live = !live;
+    emitWatch();
+  }
 
   // New-rule form.
   let ruleName = "";
@@ -181,6 +211,31 @@
       </span>
     </div>
 
+    <div class="watch" data-testid="watch-live">
+      <div class="watch-head">
+        <span class="lbl">Live watching</span>
+        {#if watchAvailable}
+          <label class="lbl"><input type="checkbox" checked={live} data-testid="watch-live-toggle" on:change={toggleLive} /> run rules on new files in watched folders</label>
+        {:else}
+          <span class="lbl dim">needs the sidecar build (the shipping app)</span>
+        {/if}
+      </div>
+      {#if watchAvailable}
+        <div class="folder-add">
+          <input class="grow" placeholder="Folder to watch…" bind:value={newFolder} aria-label="Watch folder" on:keydown={(e) => e.key === "Enter" && addFolder()} />
+          <button class="btn" data-testid="add-folder-btn" on:click={addFolder}>Add folder</button>
+        </div>
+        {#each folders as f (f)}
+          <div class="wfolder" data-testid="watched-folder"><span class="wf-path">{f}</span><button class="mini danger" aria-label="Unwatch" on:click={() => removeFolder(f)}>✕</button></div>
+        {/each}
+        {#if watchLog.length}
+          <div class="wlog" data-testid="watch-log">
+            {#each watchLog.slice(0, 6) as line (line)}<div class="wlog-line">▸ {line}</div>{/each}
+          </div>
+        {/if}
+      {/if}
+    </div>
+
     <div class="actions">
       <button class="btn" on:click={() => dispatch("cancel")}>Cancel</button>
       <button class="btn primary" data-testid="done-btn" on:click={() => dispatch("save", list)}>Done</button>
@@ -211,6 +266,15 @@
   .preview { display: flex; align-items: center; gap: 8px; margin-top: 12px; }
   .preview .grow { flex: 0 1 220px; height: 30px; padding: 0 8px; font: inherit; color: var(--text); background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); }
   .result { font-size: 12.5px; color: var(--text); }
+  .watch { margin-top: 12px; border: 1px solid var(--border); border-radius: var(--radius); padding: 10px; display: flex; flex-direction: column; gap: 6px; }
+  .watch-head { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+  .dim { opacity: 0.7; }
+  .folder-add { display: flex; gap: 8px; }
+  .folder-add .grow { flex: 1 1 auto; height: 30px; padding: 0 8px; font: inherit; color: var(--text); background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); min-width: 0; }
+  .wfolder { display: flex; align-items: center; gap: 8px; font-size: 12px; }
+  .wf-path { flex: 1 1 auto; font-family: ui-monospace, monospace; color: var(--text-dim); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .wlog { margin-top: 4px; border-top: 1px solid var(--border); padding-top: 6px; font-size: 11.5px; color: #2e9e4f; font-family: ui-monospace, monospace; }
+  .wlog-line { padding: 1px 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   .mini { width: 24px; height: 24px; border: 1px solid var(--border); border-radius: var(--radius); background: var(--surface); color: var(--text); }
   .mini:disabled { opacity: 0.35; }
   .actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 16px; }

@@ -5629,6 +5629,108 @@ fn agent_watch_stop(state: tauri::State<AgentWatchState>) {
     *state.current.lock().unwrap() = None;
 }
 
+// ---- Watched-folder rules: live folder watcher (CPE-794, epic CPE-734) ----------------------------
+// A separate notify watcher over the user's configured folders that emits coarse `folder-watch` events
+// {path, kind} so the frontend can run watch rules (planForEntry → run_watch_actions) on a landed file.
+// Sidecar-gated for the same reason as Agent Watch — the plain explorer pulls no watcher machinery. The
+// executor (`run_watch_actions`) and rule matching stay in the plain build; only the live *trigger* is here.
+
+#[cfg(feature = "sidecar-platform")]
+#[derive(Default)]
+struct FolderWatchState {
+    current: std::sync::Mutex<Option<notify::RecommendedWatcher>>,
+}
+
+/// Coalescing emitter for the folder watcher: fold raw events per-path over a short window and flush
+/// `folder-watch` batches of `{path, kind}` to the frontend. Ends when the channel closes (watcher dropped).
+#[cfg(feature = "sidecar-platform")]
+fn folder_watch_pump(app: tauri::AppHandle, rx: std::sync::mpsc::Receiver<notify::Result<notify::Event>>) {
+    use std::collections::HashMap;
+    use std::sync::mpsc::RecvTimeoutError;
+    use std::time::{Duration, Instant};
+    use serde_json::json;
+    use tauri::Emitter;
+
+    const FLUSH: Duration = Duration::from_millis(250);
+    let mut pending: HashMap<String, &'static str> = HashMap::new();
+    let mut last_flush = Instant::now();
+    let flush = |app: &tauri::AppHandle, pending: &mut HashMap<String, &'static str>| {
+        if pending.is_empty() {
+            return;
+        }
+        let batch: Vec<_> = pending
+            .drain()
+            .map(|(path, kind)| json!({ "path": path, "kind": kind }))
+            .collect();
+        let _ = app.emit("folder-watch", batch);
+    };
+
+    loop {
+        match rx.recv_timeout(FLUSH) {
+            Ok(Ok(event)) => {
+                if let Some(kind) = classify_fs_event(&event.kind) {
+                    for p in event.paths {
+                        let path = p.to_string_lossy().into_owned();
+                        let slot = pending.entry(path).or_insert(kind);
+                        if kind == "removed" || *slot != "removed" {
+                            *slot = kind;
+                        }
+                    }
+                }
+            }
+            Ok(Err(_)) => {}
+            Err(RecvTimeoutError::Timeout) => {}
+            Err(RecvTimeoutError::Disconnected) => {
+                flush(&app, &mut pending);
+                break;
+            }
+        }
+        if last_flush.elapsed() >= FLUSH {
+            flush(&app, &mut pending);
+            last_flush = Instant::now();
+        }
+    }
+}
+
+/// Start (or replace) the watched-folder watcher over `paths` (CPE-794). Missing folders are skipped;
+/// an empty/all-missing set is a no-op stop. Non-recursive-safe: each folder is watched recursively.
+#[cfg(feature = "sidecar-platform")]
+#[tauri::command]
+fn folder_watch_start(
+    app: tauri::AppHandle,
+    state: tauri::State<FolderWatchState>,
+    paths: Vec<String>,
+) -> Result<usize, String> {
+    use notify::{RecursiveMode, Watcher};
+    let (tx, rx) = std::sync::mpsc::channel();
+    let mut watcher = notify::recommended_watcher(move |res| {
+        let _ = tx.send(res);
+    })
+    .map_err(|e| e.to_string())?;
+    let mut watched = 0usize;
+    for p in &paths {
+        if std::path::Path::new(p).is_dir()
+            && watcher.watch(std::path::Path::new(p), RecursiveMode::Recursive).is_ok()
+        {
+            watched += 1;
+        }
+    }
+    if watched == 0 {
+        *state.current.lock().unwrap() = None; // nothing to watch → ensure stopped
+        return Ok(0);
+    }
+    std::thread::spawn(move || folder_watch_pump(app, rx));
+    *state.current.lock().unwrap() = Some(watcher);
+    Ok(watched)
+}
+
+/// Stop the watched-folder watcher (CPE-794). Idempotent.
+#[cfg(feature = "sidecar-platform")]
+#[tauri::command]
+fn folder_watch_stop(state: tauri::State<FolderWatchState>) {
+    *state.current.lock().unwrap() = None;
+}
+
 #[cfg(feature = "sidecar-platform")]
 impl Default for AiConsoleState {
     fn default() -> Self {
@@ -6809,6 +6911,8 @@ pub fn run() {
         builder = builder.manage(AiConsoleState::default());
         // Agent Watch's filesystem watcher lives here (CPE-398); empty until a folder is watched.
         builder = builder.manage(AgentWatchState::default());
+        // The watched-folder rules watcher (CPE-794); empty until the user configures watched folders.
+        builder = builder.manage(FolderWatchState::default());
     }
 
     // Startup setup: create the main window in Rust (CPE-608) so its webview can inject a
@@ -6955,6 +7059,10 @@ pub fn run() {
             agent_watch_start,
             #[cfg(feature = "sidecar-platform")]
             agent_watch_stop,
+            #[cfg(feature = "sidecar-platform")]
+            folder_watch_start,
+            #[cfg(feature = "sidecar-platform")]
+            folder_watch_stop,
             #[cfg(feature = "sidecar-platform")]
             forge_browse,
             #[cfg(feature = "sidecar-platform")]

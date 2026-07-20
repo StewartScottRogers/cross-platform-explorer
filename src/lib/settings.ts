@@ -47,6 +47,7 @@ export const KEYS = {
   watchRules: "cpe.watchRules",
   workspaces: "cpe.workspaces",
   backupJobs: "cpe.backupJobs",
+  watchedFolders: "cpe.watchedFolders",
 } as const;
 
 const MAX_RECENTS = 20;
@@ -257,6 +258,11 @@ export const loadBackupJobs = (): BackupJob[] => {
   return v === undefined ? [] : parseJobs(serializeJobs(v as BackupJob[]));
 };
 export const saveBackupJobs = (v: BackupJob[]): void => write(KEYS.backupJobs, v);
+
+// Watched folders for live watch-rules (CPE-794): the folders the live watcher monitors. Opt-in — empty
+// means nothing is watched. Stored as a plain string[]; degrades to [] if corrupt.
+export const loadWatchedFolders = (): string[] => read(KEYS.watchedFolders, [], isStringArray);
+export const saveWatchedFolders = (v: string[]): void => write(KEYS.watchedFolders, v);
 
 /** Reset every stored preference to its default (used by the app Settings gear). */
 export function resetSettings(): void {
