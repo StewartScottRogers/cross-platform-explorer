@@ -100,6 +100,7 @@
     selectedIndices, selectedCount, remapByPath, invertSelection, selectIndices,
     type Selection,
   } from "./lib/selection";
+  import { arrowDelta } from "./lib/gridnav";
   import {
     emptyClipboard, stage, isEmpty as clipEmpty, canPaste as clipCanPaste,
     type Clipboard,
@@ -215,6 +216,17 @@
   $: gridCols = showDetails
     ? `${sidebarWidth}px 6px 1fr 6px ${rightWidth}px`
     : `${sidebarWidth}px 6px 1fr`;
+
+  /** Live column count of the file grid, for 2-D arrow-key nav (CPE-769). 1 for list/details; for the
+      icons/gallery grid, read the resolved `grid-template-columns` off the live `.rows.grid` (the same
+      source of truth FileList windows against), so it tracks pane width / view without extra plumbing. */
+  function currentGridCols(): number {
+    if (view !== "icons" && view !== "gallery") return 1;
+    const el = document.querySelector<HTMLElement>(".rows.grid");
+    if (!el) return 1;
+    const tracks = getComputedStyle(el).gridTemplateColumns.split(" ").filter((s) => s && s !== "none").length;
+    return Math.max(1, tracks);
+  }
 
   function startResize(which: "left" | "right", e: MouseEvent) {
     resizing = which;
@@ -2057,12 +2069,23 @@
         break;
       case "ArrowDown":
         event.preventDefault();
-        selection = moveLead(selection, 1, visible.length, event.shiftKey);
+        selection = moveLead(selection, arrowDelta("ArrowDown", currentGridCols()), visible.length, event.shiftKey);
         break;
       case "ArrowUp":
         event.preventDefault();
-        selection = moveLead(selection, -1, visible.length, event.shiftKey);
+        selection = moveLead(selection, arrowDelta("ArrowUp", currentGridCols()), visible.length, event.shiftKey);
         break;
+      case "ArrowRight":
+      case "ArrowLeft": {
+        // 2-D grid nav (CPE-769): in icons/gallery, Left/Right move the lead by one tile (moveLead wraps
+        // across rows + clamps). In list/details (single column) they're left unhandled — no horizontal move.
+        const gcols = currentGridCols();
+        if (gcols > 1) {
+          event.preventDefault();
+          selection = moveLead(selection, arrowDelta(event.key, gcols), visible.length, event.shiftKey);
+        }
+        break;
+      }
       case "Home":
         event.preventDefault();
         selection = moveLead(selection, -visible.length, visible.length, event.shiftKey);
