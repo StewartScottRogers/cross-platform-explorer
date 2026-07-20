@@ -296,6 +296,14 @@
   let workspaces: Workspace[] = settings.loadWorkspaces();
   let backupOpen = false;
   let backupJobs: BackupJob[] = settings.loadBackupJobs();
+  let backupHistory: Record<string, settings.BackupRunRecord[]> = settings.loadBackupHistory();
+
+  /** Record a completed backup/restore run in the per-job history (CPE-798), capped + persisted. */
+  function recordBackupRun(jobId: string, status: settings.BackupRunRecord) {
+    const prev = backupHistory[jobId] ?? [];
+    backupHistory = { ...backupHistory, [jobId]: [status, ...prev].slice(0, 8) };
+    settings.saveBackupHistory(backupHistory);
+  }
   let attributesOpen = false;
   let attrTarget: { path: string; name: string } = { path: "", name: "" };
   let search = "";
@@ -3300,7 +3308,9 @@
 {#if backupOpen}
   <BackupDashboard
     jobs={backupJobs}
+    history={backupHistory}
     on:change={(e) => { backupJobs = e.detail; settings.saveBackupJobs(backupJobs); }}
+    on:run={(e) => recordBackupRun(e.detail.jobId, e.detail.status)}
     on:cancel={() => (backupOpen = false)}
   />
 {/if}

@@ -48,6 +48,7 @@ export const KEYS = {
   workspaces: "cpe.workspaces",
   backupJobs: "cpe.backupJobs",
   watchedFolders: "cpe.watchedFolders",
+  backupHistory: "cpe.backupHistory",
 } as const;
 
 const MAX_RECENTS = 20;
@@ -258,6 +259,29 @@ export const loadBackupJobs = (): BackupJob[] => {
   return v === undefined ? [] : parseJobs(serializeJobs(v as BackupJob[]));
 };
 export const saveBackupJobs = (v: BackupJob[]): void => write(KEYS.backupJobs, v);
+
+// Per-job backup run history (CPE-798): a small ring of recent runs keyed by job id. Loosely validated —
+// a corrupt shape degrades to {}. Capped by the writer, not here.
+export interface BackupRunRecord { when: number; ok: number; failed: number; label: string; }
+export const loadBackupHistory = (): Record<string, BackupRunRecord[]> => {
+  const v = state[KEYS.backupHistory];
+  if (!v || typeof v !== "object") return {};
+  const out: Record<string, BackupRunRecord[]> = {};
+  for (const [id, runs] of Object.entries(v as Record<string, unknown>)) {
+    if (Array.isArray(runs)) {
+      out[id] = runs.filter(
+        (r): r is BackupRunRecord =>
+          !!r && typeof r === "object" &&
+          typeof (r as BackupRunRecord).when === "number" &&
+          typeof (r as BackupRunRecord).ok === "number" &&
+          typeof (r as BackupRunRecord).failed === "number" &&
+          typeof (r as BackupRunRecord).label === "string",
+      );
+    }
+  }
+  return out;
+};
+export const saveBackupHistory = (m: Record<string, BackupRunRecord[]>): void => write(KEYS.backupHistory, m);
 
 // Watched folders for live watch-rules (CPE-794): the folders the live watcher monitors. Opt-in — empty
 // means nothing is watched. Stored as a plain string[]; degrades to [] if corrupt.

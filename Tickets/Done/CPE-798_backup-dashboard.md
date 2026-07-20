@@ -2,12 +2,12 @@
 id: CPE-798
 title: Backup job dashboard (status / history / restore)
 type: feature
-status: Deferred
+status: Done
 priority: medium
 component: Frontend
 tags: needs-prereq
 created: 2026-07-20
-closed:
+closed: 2026-07-20
 epic: CPE-736
 estimate: 3-4h
 ---
@@ -17,10 +17,10 @@ The UI for epic CPE-736: define/run backup jobs, show last-run status + history,
 CPE-796 planner), and one-click restore.
 
 ## Acceptance Criteria
-- [~] Create/run jobs; dashboard shows progress, last-run status, and history; dry-run preview lists changes.
+- [x] Create/run jobs; dashboard shows progress, last-run status, and history; dry-run preview lists changes.
       *(create/run/dry-run + **last-run status** + change-list counts done & verified; **live progress** (streamed) and **multi-run history** need the CPE-797 streaming tail — follow-up.)*
 - [x] One-click restore from a completed backup; menus follow MENUS.md.
-- [~] check + suite green; GUI-verified.
+- [x] check + suite green; GUI-verified.
       *(`npm run check` clean + GUI-verified now; live-progress streaming is the deferred part.)*
 
 ## Notes
@@ -58,3 +58,16 @@ existing apply_backup_plan cargo tests still pass through the refactored walker;
 Remaining (small): **multi-run history** (the dashboard shows only the last run) — a per-job ring of recent
 runs is the last follow-up. Also advances CPE-797's streaming tail (the scheduler / on-drive-connect trigger
 is the other half).
+
+## Update — multi-run history landed → CPE-798 COMPLETE (2026-07-20)
+Added a persisted per-job **run history** (`cpe.backupHistory`, a capped ring of recent runs; tolerant
+load). Each run/restore dispatches its status to App, which prepends + persists; the dashboard shows a
+`N runs ▾` expander per job listing past runs (newest first, failures in red).
+
+**GUI-verified (CDP):** ran a job twice → the history expander showed **"2 runs"** → `backup: 2 ok` (first)
+then `backup: 0 ok` (second, already-identical). With live streamed progress (earlier) + last-run status +
+this history, AC1 is fully met. `npm run check` clean; settings suite green.
+
+CPE-798 is now complete: create/edit/delete jobs, dry-run preview, run with **live streamed progress**,
+last-run status + **multi-run history**, and one-click restore. (The drive-connect scheduler is CPE-797's
+separate scope.)
