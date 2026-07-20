@@ -10,6 +10,7 @@
   import { invoke } from "../invoke";
   import { diffTrees, summarizeDiff, flattenDiff, type CompareNode, type DiffRow } from "../treeDiff";
   import { byteDiff, type ByteDiff } from "../byteDiff";
+  import { lineDiff, type LineDiffResult } from "../lineDiff";
 
   export let initialLeft = "";
   export let initialRight = "";
@@ -28,12 +29,22 @@
   let loading = false;
   let error = "";
   let compared = false;
-  let mode: "folder" | "file" = "folder";
+  let mode: "folder" | "file" | "text" = "folder";
   let fileDiff: ByteDiff | null = null;
+  let textDiff: LineDiffResult | null = null;
 
   async function readBytes(path: string): Promise<Uint8Array> {
     const arr = await invoke<number[]>("read_file_range", { path, offset: 0, len: FILE_CMP_CAP });
     return new Uint8Array(arr);
+  }
+
+  /** Read a file as UTF-8 text, or `null` if it's binary (read_file_text rejects invalid UTF-8). */
+  async function readTextMaybe(path: string): Promise<string | null> {
+    try {
+      return await invoke<string>("read_file_text", { path, maxBytes: FILE_CMP_CAP });
+    } catch {
+      return null;
+    }
   }
 
   async function compare() {
@@ -41,8 +52,9 @@
     loading = true;
     error = "";
     fileDiff = null;
+    textDiff = null;
     try {
-      // Folders scan; a file makes scan_tree error ("not a folder") — fall through to the byte compare.
+      // Folders scan; a file makes scan_tree error ("not a folder") — fall through to the file compare.
       const [l, r] = await Promise.all([
         invoke<CompareNode[]>("scan_tree", { path: left.trim(), maxDepth: 32 }),
         invoke<CompareNode[]>("scan_tree", { path: right.trim(), maxDepth: 32 }),
@@ -55,9 +67,16 @@
       compared = true;
     } catch (folderErr) {
       try {
-        const [a, b] = await Promise.all([readBytes(left.trim()), readBytes(right.trim())]);
-        fileDiff = byteDiff(a, b);
-        mode = "file";
+        // Two files: prefer a text line-diff when both decode as UTF-8, else a byte compare.
+        const [ta, tb] = await Promise.all([readTextMaybe(left.trim()), readTextMaybe(right.trim())]);
+        if (ta !== null && tb !== null) {
+          textDiff = lineDiff(ta, tb);
+          mode = "text";
+        } else {
+          const [a, b] = await Promise.all([readBytes(left.trim()), readBytes(right.trim())]);
+          fileDiff = byteDiff(a, b);
+          mode = "file";
+        }
         compared = true;
       } catch {
         error = String(folderErr); // neither two folders nor two readable files
@@ -120,6 +139,17 @@
         <div class="empty">Comparing…</div>
       {:else if !compared}
         <div class="empty">Enter two folders (or two files) and press Compare.</div>
+      {:else if mode === "text" && textDiff}
+        <div class="textcmp" data-testid="text-compare">
+          <div class="tc-head" data-testid="text-summary">+{textDiff.added} added · −{textDiff.removed} removed</div>
+          {#if textDiff.added === 0 && textDiff.removed === 0}
+            <div class="fc-equal" data-testid="text-equal">✓ Files are identical.</div>
+          {:else}
+            {#each textDiff.rows as row, i (i)}
+              <div class="tline tl-{row.op}"><span class="tl-sign">{row.op === "add" ? "+" : row.op === "del" ? "−" : " "}</span>{row.text}</div>
+            {/each}
+          {/if}
+        </div>
       {:else if mode === "file" && fileDiff}
         <div class="filecmp" data-testid="file-compare">
           {#if fileDiff.equal}
@@ -178,6 +208,14 @@
   .status-removed .nname { color: #c0392b; }
   .status-changed .nname { color: #b8860b; }
   .status-identical .nname { color: var(--text-dim); }
+  .textcmp { padding: 8px 0; font-family: ui-monospace, monospace; font-size: 12px; }
+  .tc-head { padding: 4px 10px; color: var(--text-dim); font-family: system-ui, sans-serif; font-size: 12px; border-bottom: 1px solid var(--border); margin-bottom: 4px; }
+  .tline { display: block; padding: 0 10px; white-space: pre-wrap; word-break: break-word; }
+  .tl-sign { display: inline-block; width: 1ch; color: var(--text-dim); }
+  .tl-add { background: color-mix(in srgb, #2e9e4f 14%, transparent); }
+  .tl-add .tl-sign { color: #2e9e4f; }
+  .tl-del { background: color-mix(in srgb, #c0392b 14%, transparent); }
+  .tl-del .tl-sign { color: #c0392b; }
   .filecmp { padding: 12px; font-size: 13px; }
   .fc-equal { color: #2e9e4f; }
   .fc-row { display: flex; gap: 12px; padding: 3px 0; }

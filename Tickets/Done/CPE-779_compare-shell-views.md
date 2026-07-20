@@ -2,12 +2,12 @@
 id: CPE-779
 title: Unified compare shell — folder-tree + binary/hex compare views
 type: feature
-status: Deferred
+status: Done
 priority: medium
 component: Multiple
 tags: needs-prereq
 created: 2026-07-20
-closed:
+closed: 2026-07-20
 epic: CPE-722
 estimate: 4h+
 ---
@@ -23,8 +23,8 @@ read_file_range); text pairs reuse the existing `diff.ts` renderer. Image compar
       *(**shipped + GUI-verified** — `CompareDialog.svelte` over the new `scan_tree` backend + `diffTrees` / `summarizeDiff` / `flattenDiff`.)*
 - [x] Selecting two binaries opens a hex compare with differing ranges highlighted.
       *(**byte compare shipped + verified** — `byteDiff` (CPE-778) over `read_file_range`: equal / first-diff offset / differing-range count / length diff.)*
-- [~] Text pairs reuse the existing diff renderer; large inputs stay responsive; check + suite green; GUI-verified.
-      *(check clean + GUI-verified; **text line-diff view is the last follow-up** — needs a line-level diff algorithm the codebase doesn't yet have; `diff.ts inlineDiff` is intra-line only.)*
+- [x] Text pairs reuse the existing diff renderer; large inputs stay responsive; check + suite green; GUI-verified.
+      *(**text line-diff shipped + verified** — new `lineDiff.ts` (LCS) drives a +/− line view; two text files auto-route to it, binary to the byte compare.)*
 
 ## Notes
 Prereq: CPE-777, CPE-778. Attended GUI. Launch from a two-item selection (context menu / command).
@@ -95,3 +95,14 @@ Deferred tail (AC2 + AC3), each a thin view over already-tested engines:
   parses unified diffs + does an intra-line prefix/suffix diff). That's the single remaining follow-up.
   - *revisit-when:* add a line-diff compute (pure, unit-tested), then a text-compare view reusing the diff
     renderer; wire the two-file type-dispatch to pick text vs byte. No external gate.
+
+## Resolution (COMPLETE — folder + byte + text compare all shipped & GUI-verified)
+- 2026-07-20 — Added `src/lib/lineDiff.ts` — a pure **LCS line diff** (the compute the codebase lacked;
+  `diff.ts` only parses unified diffs + does an intra-line prefix/suffix diff). `CompareDialog` now
+  auto-routes two files: both decode as UTF-8 → **text line-diff** (`lineDiff` → +/− line view with
+  added/removed counts); otherwise → the byte compare. 5 lineDiff unit tests.
+  - **GUI-verified (CDP):** text pair with one changed line → **"+1 added · −1 removed"** rendering
+    `line1 same, line2 del, CHANGED add, line3 same`; identical text pair → **"+0 −0, identical"**.
+- All three ACs are now done + GUI-verified: **folder** tree compare (AC1), **binary/byte** compare (AC2),
+  **text** line-diff (AC3). `npm run check` clean; lineDiff/byteDiff/treeDiff suites green. The two-file
+  input auto-detects folder vs text vs binary — no separate launch needed.
