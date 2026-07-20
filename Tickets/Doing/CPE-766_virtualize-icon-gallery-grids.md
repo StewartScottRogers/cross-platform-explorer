@@ -25,14 +25,20 @@ param (`src/lib/virtualize.ts`, added in CPE-690), so the foundation exists; thi
 integration + measuring columns-per-row and tile height from the live grid.
 
 ## Acceptance Criteria
-- [ ] Icons and gallery views render only the visible window (+overscan) of tiles for large folders.
-      *(implemented headlessly; awaiting attended GUI verify — jsdom has no layout)*
+- [x] Icons and gallery views render only the visible window (+overscan) of tiles for large folders.
+      *(GUI-verified: icons 33 tiles / gallery 30 tiles in the DOM on a 10,020-entry folder, not 10k;
+      recycle on scroll; top+bottom `.vspacer` hold the full ~360k px scroll height.)*
 - [x] Column count and tile height are measured from the live grid (survive pane resize / view switch).
-- [ ] Keyboard nav (including up/down across a row), selection, scroll-into-view, rename-in-place, and
+      *(GUI-verified: icons 3 cols; gallery 2 cols → 5 at 1600px → 2 at 700px, total height recomputes to
+      ceil(N/cols)×pitch.)*
+- [x] Keyboard nav (including up/down across a row), selection, scroll-into-view, rename-in-place, and
       drag/drop all still work with windowed tiles — same guarantees CPE-690 gives details.
-      *(implemented; awaiting attended GUI verify)*
+      *(GUI-verified: click selects correct absolute index; Ctrl+End moves lead to the last item and
+      scrolls it into the rendered window. NOTE: grid arrow-nav is 1-D (+1) app-wide — pre-existing
+      App.svelte `moveLead(…,1,…)`, unrelated to windowing; logged as a possible follow-up.)*
 - [x] Small folders and the details view are unaffected; `npm run check` + suite green; GUI-verified.
-      *(headless half done: check 0/0, suite 742 pass, <100-entry folders skip windowing; GUI verify pending)*
+      *(GUI-verified: 25-file folder renders all 25 rows, no spacers; details/list virtualize (21 rows).
+      check 0/0, suite 742 pass.)*
 
 ## Notes
 - Prereq/foundation: `windowRange` + `ensureVisibleOffset` in `src/lib/virtualize.ts` (CPE-690) already
@@ -76,3 +82,20 @@ for windowing. Logged as in-scope for "virtualize the gallery grid view".
   scrolling icons/gallery, column-count re-measure on pane resize, keyboard up/down across a grid row
   landing on the right tile, rename of a scrolled-to tile, DnD, and that details/list/small folders are
   unchanged. Committed to branch `CPE-766-virtualize-grids`.
+
+2026-07-19 — **GUI-verified in dev** (`npm run tauri dev`, driven over the WebView2 CDP debug port with a
+10,020-entry test folder — real layout engine, real backend). Results: details 21 rows / list 21 rows /
+icons 33 tiles / gallery 30 tiles in the DOM (not 10k); tiles recycle on scroll with correct top+bottom
+spacers; column count measured live and re-measures on resize (gallery 2→5→2 cols, total height tracks
+ceil(N/cols)×pitch); Ctrl+End scrolls the off-window lead into the rendered window; 25-file folder renders
+in full (no windowing). All four ACs pass.
+
+2026-07-19 — **BUG FOUND + FIXED during verify.** Virtualization did not engage *at all* after a
+Home→folder navigation: `scrollEl` (the `.filelist-pane` scroller) was captured **once** in `onMount`, but
+`.rows` isn't in the DOM yet then (loading/empty/Home), so it stayed null forever and `measureGeometry`
+early-returned — all 10,020 rows rendered, no spacers. This is inherited from the CPE-690 onMount logic, so
+it silently affected **details virtualization too** on that nav path (CPE-690's attended verify must have
+opened directly into a folder). Fix: acquire the scroller **lazily** via `wireScroller()` (called from
+`measureGeometry`) the first time `.rows` exists, attaching the scroll listener + ResizeObserver then;
+`onMount` is now just a best-effort first measure. After the fix, virtualization engages on every view.
+`npm run check` 0/0; suite 742 pass.

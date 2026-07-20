@@ -280,7 +280,29 @@
   $: topPad = virtualize ? (isGrid ? Math.max(0, win.padTop - rowGapPx) : win.padTop) : 0;
   $: botPad = virtualize ? (isGrid ? Math.max(0, win.padBottom - rowGapPx) : win.padBottom) : 0;
 
+  let roInstance: ResizeObserver | undefined;
+  let scrollerWired = false;
+
+  // The `.filelist-pane` scroller (and thus `.rows`) often isn't in the DOM yet when this component
+  // first mounts — the folder is still loading, or we arrived from an empty/Home state — so acquire it
+  // LAZILY the first time `.rows` exists and wire the scroll/resize listeners then. A one-shot capture in
+  // onMount silently left virtualization disabled after a Home→folder navigation (found GUI-verifying
+  // CPE-766; also repairs that path for the CPE-690 details view).
+  function wireScroller() {
+    if (scrollerWired || !rowsEl) return;
+    scrollEl = rowsEl.closest<HTMLElement>(".filelist-pane") ?? null;
+    if (!scrollEl) return;
+    scrollEl.addEventListener("scroll", onScrollOrResize, { passive: true });
+    // ResizeObserver isn't present in every environment (e.g. jsdom) — guard so wiring never throws.
+    if (typeof ResizeObserver !== "undefined") {
+      roInstance = new ResizeObserver(onScrollOrResize);
+      roInstance.observe(scrollEl);
+    }
+    scrollerWired = true;
+  }
+
   function measureGeometry() {
+    wireScroller();
     if (!scrollEl || !rowsEl) return;
     const cRect = scrollEl.getBoundingClientRect();
     viewportH = cRect.height;
@@ -317,18 +339,12 @@
   }
 
   onMount(() => {
-    scrollEl = rowsEl?.closest<HTMLElement>(".filelist-pane") ?? null;
+    // May be too early (`.rows` not rendered yet) — measureGeometry()/wireScroller() are idempotent and
+    // the reactive re-measure below picks it up once `.rows` exists.
     measureGeometry();
-    scrollEl?.addEventListener("scroll", onScrollOrResize, { passive: true });
-    // ResizeObserver isn't present in every environment (e.g. jsdom) — guard so mounting never throws.
-    let ro: ResizeObserver | undefined;
-    if (scrollEl && typeof ResizeObserver !== "undefined") {
-      ro = new ResizeObserver(onScrollOrResize);
-      ro.observe(scrollEl);
-    }
     return () => {
       scrollEl?.removeEventListener("scroll", onScrollOrResize);
-      ro?.disconnect();
+      roInstance?.disconnect();
     };
   });
 
