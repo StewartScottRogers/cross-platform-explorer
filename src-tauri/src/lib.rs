@@ -2800,6 +2800,46 @@ fn create_hard_link_impl(target: String, link_path: String) -> Result<(), String
     fs::hard_link(&target, &link_path).map_err(|e| e.to_string())
 }
 
+/// Classify the drive a path lives on (CPE-805, epic CPE-716) — fixed / removable / network / cdrom / ram
+/// / unknown — so the sidebar can badge removable & network drives. Windows uses `GetDriveTypeW`; unix
+/// returns a best-effort `fixed` for now (richer classification is a follow-up).
+#[tauri::command]
+async fn drive_type(path: String) -> Result<String, String> {
+    tauri::async_runtime::spawn_blocking(move || drive_type_impl(&path))
+        .await
+        .map_err(|e| e.to_string())
+}
+
+#[cfg(windows)]
+fn drive_type_impl(path: &str) -> String {
+    use windows::core::HSTRING;
+    use windows::Win32::Storage::FileSystem::GetDriveTypeW;
+    // GetDriveTypeW wants a root like "C:\"; derive it from a drive-letter path, else pass the path.
+    let root = if path.len() >= 2 && path.as_bytes()[1] == b':' {
+        format!("{}:\\", &path[..1])
+    } else {
+        path.to_string()
+    };
+    let wide = HSTRING::from(root);
+    // SAFETY: `wide` is a valid NUL-terminated wide string for the call. The returned values are the
+    // stable, documented DRIVE_* Win32 constants (2=removable, 3=fixed, 4=remote, 5=cdrom, 6=ramdisk).
+    match unsafe { GetDriveTypeW(&wide) } {
+        2 => "removable",
+        3 => "fixed",
+        4 => "network",
+        5 => "cdrom",
+        6 => "ram",
+        _ => "unknown",
+    }
+    .to_string()
+}
+
+#[cfg(not(windows))]
+fn drive_type_impl(_path: &str) -> String {
+    // Best-effort until unix mount-type classification lands (a follow-up).
+    "fixed".to_string()
+}
+
 /// Line / word / character / byte counts for a text file (CPE-414). Lines follow `str::lines`
 /// (a final unterminated line still counts); words are whitespace-separated; characters are Unicode
 /// scalar values. Capped so analysing a file stays predictable; a non-UTF-8 (binary) file, a
@@ -6398,6 +6438,7 @@ pub fn run() {
             checksum_folder,
             create_symlink,
             create_hard_link,
+            drive_type,
             text_stats,
             search_file_contents,
             find_files_by_name,
@@ -7010,6 +7051,19 @@ mod tests {
         create_hard_link_impl(target.to_string_lossy().to_string(), link.to_string_lossy().to_string()).unwrap();
         assert_eq!(fs::read(&link).unwrap(), b"linked"); // same data via the hardlink
         let _ = fs::remove_dir_all(&d);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn drive_type_classifies_system_drive_as_fixed() {
+        let cwd = std::env::current_dir().unwrap();
+        assert_eq!(drive_type_impl(&cwd.to_string_lossy()), "fixed");
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn drive_type_unix_fallback() {
+        assert_eq!(drive_type_impl("/"), "fixed");
     }
 
     #[cfg(unix)]
