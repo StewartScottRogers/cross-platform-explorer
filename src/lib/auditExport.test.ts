@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { filterEvents, toJson, toCsv, toMarkdown, type AuditEvent } from "./auditExport";
+import { filterEvents, redactEvents, toJson, toCsv, toMarkdown, type AuditEvent } from "./auditExport";
 
 const ev = (over: Partial<AuditEvent> = {}): AuditEvent => ({
   ts: 1000,
@@ -21,6 +21,48 @@ describe("filterEvents (CPE-799)", () => {
     expect(filterEvents(events, { pathIncludes: "/SRC/" }).map((e) => e.ts)).toEqual([100, 200]);
     expect(filterEvents(events, { kinds: ["created", "modified"], pathIncludes: "y." }).map((e) => e.ts)).toEqual([200]);
     expect(filterEvents(events, {})).toHaveLength(3);
+  });
+});
+
+describe("redactEvents (CPE-801)", () => {
+  it("collapses the home dir to ~ (case-insensitive, separator-aware, only at start)", () => {
+    const events = [
+      ev({ path: "C:\\Users\\alice\\secret.txt" }),
+      ev({ path: "C:\\Users\\alice" }), // exact home, no trailing sep
+      ev({ path: "D:\\Users\\alicebob\\x" }), // must NOT match: alice is not a full segment
+    ];
+    const out = redactEvents(events, { home: "C:\\Users\\alice" });
+    expect(out.map((e) => e.path)).toEqual([
+      "~\\secret.txt",
+      "~",
+      "D:\\Users\\alicebob\\x",
+    ]);
+  });
+
+  it("masks usernames and custom patterns in path and detail; does not mutate input", () => {
+    const events = [ev({ path: "/home/alice/k.txt", detail: "token=alice-KEY-123" })];
+    const out = redactEvents(events, {
+      home: "/home/alice",
+      usernames: ["alice"],
+      patterns: ["KEY-\\d+"],
+    });
+    expect(out[0].path).toBe("~/k.txt");
+    expect(out[0].detail).toBe("token=<user>-<redacted>"); // username + pattern both masked
+    expect(events[0].path).toBe("/home/alice/k.txt"); // original untouched
+  });
+
+  it("respects redactDetail:false and skips invalid regex patterns", () => {
+    const events = [ev({ path: "/home/alice/x", detail: "/home/alice/x" })];
+    const out = redactEvents(events, { home: "/home/alice", redactDetail: false, patterns: ["("] });
+    expect(out[0].path).toBe("~/x");
+    expect(out[0].detail).toBe("/home/alice/x"); // detail left alone
+  });
+
+  it("is a no-op with empty options and preserves undefined detail", () => {
+    const events = [ev({ path: "/a/b", detail: undefined })];
+    const out = redactEvents(events, {});
+    expect(out[0].path).toBe("/a/b");
+    expect(out[0].detail).toBeUndefined();
   });
 });
 
