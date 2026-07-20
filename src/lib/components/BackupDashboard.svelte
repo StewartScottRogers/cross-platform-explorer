@@ -15,8 +15,16 @@
   interface RunStatus { when: number; ok: number; failed: number; label: string; }
 
   export let jobs: BackupJob[] = [];
+  /** Per-job run history (CPE-798), newest first — App owns + persists it. */
+  export let history: Record<string, RunStatus[]> = {};
 
-  const dispatch = createEventDispatcher<{ change: BackupJob[]; cancel: void }>();
+  const dispatch = createEventDispatcher<{
+    change: BackupJob[];
+    run: { jobId: string; status: RunStatus };
+    cancel: void;
+  }>();
+
+  let showHistory = "";
 
   let list: BackupJob[] = jobs.map((j) => ({ ...j }));
   let name = "";
@@ -86,12 +94,9 @@
         onResult: channel,
       });
       const failed = results.filter((r) => !r.ok).length;
-      lastRun[job.id] = {
-        when: Date.now(),
-        ok: results.length - failed,
-        failed,
-        label: reverse ? "restore" : "backup",
-      };
+      const status = { when: Date.now(), ok: results.length - failed, failed, label: reverse ? "restore" : "backup" };
+      lastRun[job.id] = status;
+      dispatch("run", { jobId: job.id, status });
     } catch (e) { error = String(e); } finally { busyId = ""; progress = 0; total = 0; }
   }
 
@@ -120,6 +125,18 @@
               <span class="status" data-testid="job-status" class:bad={lastRun[job.id].failed > 0}>
                 {lastRun[job.id].label}: {lastRun[job.id].ok} ok{lastRun[job.id].failed ? `, ${lastRun[job.id].failed} failed` : ""} · {fmtTime(lastRun[job.id].when)}
               </span>
+            {/if}
+            {#if (history[job.id]?.length ?? 0) > 0}
+              <button class="hist-toggle" data-testid="history-toggle" on:click={() => (showHistory = showHistory === job.id ? "" : job.id)}>
+                {history[job.id].length} run{history[job.id].length === 1 ? "" : "s"} {showHistory === job.id ? "▾" : "▸"}
+              </button>
+            {/if}
+            {#if showHistory === job.id}
+              <div class="history" data-testid="job-history">
+                {#each history[job.id] as run (run.when)}
+                  <div class="hist-row" class:bad={run.failed > 0}>{run.label}: {run.ok} ok{run.failed ? `, ${run.failed} failed` : ""} · {fmtTime(run.when)}</div>
+                {/each}
+              </div>
             {/if}
           </div>
           <div class="jbtns">
@@ -169,6 +186,10 @@
   .status { font-size: 11.5px; color: #2e9e4f; }
   .status.bad { color: #c0392b; }
   .status.running { color: var(--accent); }
+  .hist-toggle { font-size: 11px; padding: 0 6px; border: 1px solid var(--border); border-radius: 999px; background: var(--surface); color: var(--text-dim); }
+  .history { flex-basis: 100%; margin-top: 4px; padding-left: 4px; }
+  .hist-row { font-size: 11px; color: var(--text-dim); font-variant-numeric: tabular-nums; padding: 1px 0; }
+  .hist-row.bad { color: #c0392b; }
   .jbtns { flex: 0 0 auto; display: flex; gap: 6px; }
   .plan { margin-top: 10px; padding: 8px 10px; border: 1px solid var(--border); border-radius: var(--radius); font-size: 12.5px; background: var(--surface-alt); }
   .err { margin-top: 10px; padding: 8px 10px; color: #c0392b; font-size: 12.5px; }
