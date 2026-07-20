@@ -17,6 +17,8 @@ import type { ViewMode, SortKey, SortDir, RecentFile, Favorite } from "./types";
 import { COLUMN_DEFAULTS } from "./columns";
 import { parseRules, serializeRules } from "./colorRulesStore";
 import type { ColorRule } from "./colorRules";
+import { parseManifest } from "./integrity";
+import type { ChecksumEntry } from "./integrity";
 
 export const KEYS = {
   view: "cpe.view",
@@ -35,6 +37,7 @@ export const KEYS = {
   columnWidths: "cpe.columnWidths",
   diagnostics: "cpe.diagnostics",
   colorRules: "cpe.colorRules",
+  integrityBaselines: "cpe.integrityBaselines",
 } as const;
 
 const MAX_RECENTS = 20;
@@ -207,6 +210,21 @@ export const loadColorRules = (): ColorRule[] => {
   return v === undefined ? [] : parseRules(serializeRules(v as ColorRule[]));
 };
 export const saveColorRules = (v: ColorRule[]): void => write(KEYS.colorRules, v);
+
+// Integrity baselines (CPE-792, epic CPE-737): a per-folder checksum manifest, keyed by folder path.
+// Each manifest is loaded through the tolerant `parseManifest` so a corrupt entry degrades to a shorter
+// (or empty) baseline rather than crashing. Opt-in — only folders the user baselines appear here.
+export const loadIntegrityBaselines = (): Record<string, ChecksumEntry[]> => {
+  const v = state[KEYS.integrityBaselines];
+  if (!v || typeof v !== "object") return {};
+  const out: Record<string, ChecksumEntry[]> = {};
+  for (const [path, entries] of Object.entries(v as Record<string, unknown>)) {
+    out[path] = parseManifest(JSON.stringify(entries));
+  }
+  return out;
+};
+export const saveIntegrityBaselines = (m: Record<string, ChecksumEntry[]>): void =>
+  write(KEYS.integrityBaselines, m);
 
 /** Reset every stored preference to its default (used by the app Settings gear). */
 export function resetSettings(): void {
