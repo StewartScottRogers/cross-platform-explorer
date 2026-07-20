@@ -2,19 +2,17 @@
 id: CPE-810
 title: "EPIC: Decoupled Rust Server + transport-neutral typed contract + pluggable security"
 type: Task
-status: Proposed
+status: In Progress
 priority: High
 component: Multiple
-tags: [epic, next-up]
+tags: [epic]
 estimate: 4h+
 created: 2026-07-20
 closed:
 ---
 
-> **Next epic up (queued 2026-07-20).** Designated the next epic to activate. Still `Proposed` (a
-> dormant brief) — activate with `/ticketing-epic activate CPE-810` to research + decompose into child
-> tickets just-in-time. Coordinate the "Server decoupled from Tauri" pillar with CPE-676 (in Doing) so
-> the two don't reshape `App.svelte`/`lib.rs` in conflicting directions.
+> **Activated 2026-07-20.** Decomposed into children CPE-811–820 (below). Coordinate the "Server
+> decoupled from Tauri" pillar (CPE-814/815) with CPE-676 (in Doing) — both touch `App.svelte`/`lib.rs`.
 
 ## Goal
 
@@ -145,3 +143,44 @@ the later pillars need a rewrite.
   versioned-contract-between-processes pattern, generalized across a network.
 - **Absorbs** the earlier informal "add `tauri-specta` typed bindings" scoping (Tauri v2, 113 commands,
   ~41 serde types, 3 streaming channels, no existing codegen) as its first slice.
+
+## Decisions (activated 2026-07-20)
+
+- **Server model:** *both, single-user first* — design the contract envelope + security for multi-client
+  (reserve a `principal`/`session` slot), but ship single-user in v1.
+- **Wire format:** *own serde-JSON RPC envelope*, reusing the `sidecar/contract` `ContractVersion` +
+  `negotiate()` + Hello/Welcome + `schema_version` pattern. No new heavy RPC dep; `tauri-specta` still
+  generates the local TS. (Rejected gRPC/protobuf and Cap'n Proto for dependency weight / tooling.)
+- **First slice:** *local typed bindings first* (CPE-812/813) — ship value + kill the ~118 duplicated TS
+  interfaces + drift-CI, while building the seams for the rest.
+- **Security v1:** *full stack now* — multiple providers up front: AuthN (token + mTLS + OAuth/OIDC),
+  AuthZ (path-scope + capability), transport security (TLS/mTLS), all behind the composable chain.
+- **Research findings:** Tauri coupling is deep — 45 commands take `AppHandle`, 29 take
+  `Window`/`State`/`Manager`, 6 emit events — so the decoupling is staged behind a `ServerCtx` trait
+  (CPE-814) before the crate extraction (CPE-815). Coordinate with CPE-676.
+
+## Child tickets
+1. **CPE-811** — Transport-neutral contract envelope (serde-JSON RPC; reuse sidecar version/negotiate;
+   reserve principal/session). Pure crate, headless. *Foundation — buildable now.*
+2. **CPE-812** — tauri-specta typed bindings: derive/annotate the 113 commands + ~41 types, generate
+   `commands.ts`, wire busy-cursor, codegen with `sidecar-platform` ON. **First shippable slice — now.**
+3. **CPE-813** — Adopt generated bindings at the 9 invoke sites, delete duplicated TS interfaces, add
+   drift CI. *(prereq: 812)*
+4. **CPE-814** — `ServerCtx` trait abstracting `AppHandle`/`Window`/`State`/emit off the 45+29 coupled
+   commands. **Large refactor — coordinate with CPE-676.**
+5. **CPE-815** — Extract a pure `server` crate (Tauri-free domain logic behind `ServerCtx` + envelope);
+   Tauri becomes a thin adapter. **Large refactor.** *(prereq: 814, 811)*
+6. **CPE-816** — Security core: 3-plane traits + composable interceptor chain (combine policies) +
+   default-deny + null/passthrough local + audit hook. *(prereq: 811)*
+7. **CPE-817** — AuthN providers: API token + mTLS identity + OAuth/OIDC; prove `any-passes`. *(prereq: 816)*
+8. **CPE-818** — AuthZ (path-scope + capability, `all-must-pass`) + transport security (TLS/mTLS). *(prereq: 816)*
+9. **CPE-819** — Frontend pluggable transport seam (local IPC vs remote RPC) + streaming equivalent for
+   the 3 Channel producers. *(prereq: 811, 815)*
+10. **CPE-820** — Client(Rust) proxy + reference headless Server + end-to-end remote loop with security
+    enforcing; local-fast benchmark + conformance guards. *(prereq: 815, 816, 819)*
+
+## Work Log
+- **2026-07-20** — Activated. Researched Tauri coupling depth (45 `AppHandle` / 29 `Window`/`State` / 6
+  emit; 113 commands, ~41 serde types, 3 `ipc::Channel`, 140 items behind `sidecar-platform`) and the
+  reusable `sidecar/contract` versioning. Resolved 4 decisions (above) with the user; decomposed into
+  CPE-811–820. Suggested start: CPE-811 (foundation) or CPE-812 (first user-visible slice).
