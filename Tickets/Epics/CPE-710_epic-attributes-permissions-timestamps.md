@@ -2,7 +2,7 @@
 id: CPE-710
 title: "EPIC: File attributes, permissions & timestamps editor"
 type: Task
-status: Proposed
+status: In Progress
 priority: Medium
 component: Multiple
 tags: [epic]
@@ -35,3 +35,19 @@ respecting each OS's conventions rather than a lowest-common-denominator abstrac
 - Permissions/ownership/attributes and timestamps can be edited on a single file and batch-applied.
 - Each OS shows its native model (POSIX mode vs. ACLs/attributes) with a clear, safe UI.
 - Reversible changes are undoable; recursive applies show progress and can be cancelled.
+
+## Work Log
+2026-07-20 (nightshift, 02:00 MST) — Activated. Open questions resolved (autonomous): Windows = common
+attribute toggles (hidden/read-only/system/archive) + take-ownership via `run_as_admin` (full ACL editor
+deferred to a follow-up); recursive apply uses the transfer-queue conventions (GUI child); reversible =
+chmod + attribute toggles + timestamps (store prior state for undo). POSIX permission model lands pure first.
+
+## Child tickets
+1. **CPE-784** — Pure POSIX permission model (`src/lib/permissions.ts`): mode ↔ symbolic `rwxr-xr-x` ↔
+   octal, parse/format both ways, `describePermissions` + `setPermission` bit toggles. Unit-tested.
+   **Foundation, headless.**
+2. **CPE-785** — Backend commands: `set_permissions(path, mode)` (POSIX chmod), Windows attribute toggles,
+   `set_file_times(path, …)` (async + spawn_blocking; cargo-tested). **Backend, CI-verified.**
+3. **CPE-786** — Attributes/permissions/timestamps editor dialog: per-OS UI (POSIX mode grid vs. Windows
+   attribute toggles), batch apply with a change preview, undo for reversible changes. **Attended GUI.**
+   *(prereq: 784, 785)*
