@@ -2,7 +2,7 @@
 id: CPE-733
 title: "EPIC: Session audit log & export"
 type: Task
-status: Proposed
+status: In Progress
 priority: Medium
 component: Multiple
 tags: [epic]
@@ -35,3 +35,17 @@ artifact turns Agent Watch into a system of record for what agents did to a code
 - Every session's filesystem activity is journaled durably and survives restart.
 - Past sessions can be browsed and exported to JSON/Markdown/CSV with filtering.
 - With Agent Watch off, no journaling occurs.
+
+## Work Log
+2026-07-20 (autonomous) — Activated. Open questions resolved: journal = append-only **JSON-lines** per
+session on disk (backend child); export foundation is **pure** (events → JSON/CSV/Markdown + filtering);
+shares the event model with replay (CPE-728); redaction of exported content deferred to the export UI.
+Pure export/filter lands first.
+
+## Child tickets
+1. **CPE-799** — Pure audit export + filter (`src/lib/auditExport.ts`): `AuditEvent` model,
+   `filterEvents(events, opts)`, and `toJson`/`toCsv`/`toMarkdown` with correct escaping. Unit-tested.
+   **Foundation, headless.**
+2. **CPE-800** — On-disk append-only per-session journal (survives restart) + read-back. **Backend.**
+   *(prereq: 799 model)*
+3. **CPE-801** — Session-history browser + filtered export UI. **GUI.** *(prereq: 799, 800)*
