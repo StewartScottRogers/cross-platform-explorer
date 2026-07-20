@@ -2,7 +2,7 @@
 id: CPE-799
 title: Pure audit-log export (JSON / CSV / Markdown) + filter
 type: feature
-status: Open
+status: In Progress
 priority: medium
 component: Frontend
 tags: ready
@@ -25,9 +25,15 @@ browser + export UI (CPE-801) is a thin render.
 - Pure + total (empty list, special chars, missing detail).
 
 ## Acceptance Criteria
-- [ ] `filterEvents` honours kinds/time-range/path filters (and combinations).
-- [ ] CSV escapes comma/quote/newline correctly; Markdown escapes pipes; JSON round-trips.
-- [ ] Pure + dependency-free; unit tests cover filtering + all three formats incl. escaping; check + suite green.
+- [x] `filterEvents` honours kinds/time-range/path filters (and combinations).
+- [x] CSV escapes comma/quote/newline correctly; Markdown escapes pipes; JSON round-trips.
+- [x] Pure + dependency-free; unit tests cover filtering + all three formats incl. escaping; check + suite green.
 
 ## Notes
 Shares the event model with replay (CPE-728). Foundation for CPE-800/801. Headless.
+
+## Resolution
+Added `src/lib/auditExport.ts` (pure): `AuditEvent` model, `filterEvents(events, {kinds?, since?, until?,
+pathIncludes?})`, and `toJson`/`toCsv`/`toMarkdown` with correct escaping (CSV RFC-4180 quoting, Markdown
+pipe/newline escaping). 5 tests incl. escaping + empty-list. check 0/0. Headless. Foundation for CPE-800/801.
+
