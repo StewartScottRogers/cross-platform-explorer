@@ -2,12 +2,12 @@
 id: CPE-769
 title: 2-D arrow-key navigation in the icons/gallery grid views
 type: feature
-status: In Progress
+status: Done
 priority: low
 component: Frontend
 tags: ready
 created: 2026-07-19
-closed:
+closed: 2026-07-19
 epic: CPE-688
 estimate: 1-2h
 ---
