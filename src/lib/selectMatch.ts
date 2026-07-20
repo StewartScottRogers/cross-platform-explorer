@@ -14,6 +14,19 @@ export function selectMatching(entries: DirEntry[], condition: Condition, now: n
   return out;
 }
 
+/**
+ * Invert a selection over a list of `count` items: every index in `[0, count)` that is NOT currently
+ * selected, ascending. Out-of-range members of `selected` are ignored. Pure — the "Invert selection" move.
+ */
+export function invertSelection(count: number, selected: Iterable<number>): number[] {
+  const sel = new Set(selected);
+  const out: number[] = [];
+  for (let i = 0; i < count; i++) {
+    if (!sel.has(i)) out.push(i);
+  }
+  return out;
+}
+
 /** Lowercased extension without the dot, or "" for dotfiles / no extension. */
 function extOf(name: string): string {
   const dot = name.lastIndexOf(".");

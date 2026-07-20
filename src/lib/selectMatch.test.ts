@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { selectMatching, sameExtensionAs } from "./selectMatch";
+import { selectMatching, sameExtensionAs, invertSelection } from "./selectMatch";
 import type { Condition } from "./colorRules";
 import type { DirEntry } from "./types";
 
@@ -36,5 +36,18 @@ describe("sameExtensionAs (CPE-780)", () => {
     expect(sameExtensionAs(entries, [4])).toEqual([]); // seed is a dir
     expect(sameExtensionAs(entries, [5])).toEqual([]); // seed has no extension
     expect(sameExtensionAs(entries, [99])).toEqual([]); // out of range
+  });
+});
+
+describe("invertSelection (CPE-782)", () => {
+  it("returns the unselected indices, ascending", () => {
+    expect(invertSelection(5, [1, 3])).toEqual([0, 2, 4]);
+    expect(invertSelection(3, [])).toEqual([0, 1, 2]); // nothing selected → all
+    expect(invertSelection(3, [0, 1, 2])).toEqual([]); // all selected → none
+  });
+
+  it("ignores out-of-range and duplicate members of the selection", () => {
+    expect(invertSelection(3, [1, 1, 99, -1])).toEqual([0, 2]);
+    expect(invertSelection(0, [0])).toEqual([]); // empty list
   });
 });
