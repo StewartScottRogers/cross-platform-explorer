@@ -120,14 +120,13 @@ mod tests {
     use super::*;
 
     fn tmp() -> PathBuf {
-        let d = std::env::temp_dir().join(format!(
-            "cpe-audit-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
+        // A process-wide atomic counter guarantees a unique dir per call. Time-based names are NOT safe
+        // here: cargo runs tests in parallel and `process::id()` is shared, so on a platform with a coarse
+        // clock (macOS) two tests can mint the same nanos and clobber each other's `s1.jsonl`.
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static SEQ: AtomicU64 = AtomicU64::new(0);
+        let n = SEQ.fetch_add(1, Ordering::Relaxed);
+        let d = std::env::temp_dir().join(format!("cpe-audit-{}-{}", std::process::id(), n));
         fs::create_dir_all(&d).unwrap();
         d
     }
