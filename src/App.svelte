@@ -122,6 +122,8 @@
   import type { WatchRule } from "./lib/watchRules";
   import WorkspacesDialog from "./lib/components/WorkspacesDialog.svelte";
   import type { Workspace, WorkspaceTab } from "./lib/workspaces";
+  import BackupDashboard from "./lib/components/BackupDashboard.svelte";
+  import type { BackupJob } from "./lib/backup";
   import {
     pushUndo, popUndo, canUndo, peekLabel, invert, deletedPaths, type UndoEntry,
   } from "./lib/undo";
@@ -285,6 +287,8 @@
   let watchRules: WatchRule[] = settings.loadWatchRules();
   let workspacesOpen = false;
   let workspaces: Workspace[] = settings.loadWorkspaces();
+  let backupOpen = false;
+  let backupJobs: BackupJob[] = settings.loadBackupJobs();
   let search = "";
   /** Active sidebar Tags filter — show only entries carrying this tag (CPE-639); "" = off. */
   let selectedTag = "";
@@ -434,6 +438,7 @@
     { id: "tool.selectBy", group: $t("palette.groupTools"), label: $t("palette.selectBy"), keywords: "select by criteria extension size date filter", run: () => (selectByOpen = true), enabled: inFolder },
     { id: "tool.watchRules", group: $t("palette.groupTools"), label: $t("palette.watchRules"), keywords: "watch rules folder automation move copy tag rename", run: () => (watchRulesOpen = true) },
     { id: "tool.workspaces", group: $t("palette.groupGo"), label: $t("palette.workspaces"), keywords: "workspace layout tabs save session restore", run: () => (workspacesOpen = true) },
+    { id: "tool.backup", group: $t("palette.groupTools"), label: $t("palette.backup"), keywords: "backup jobs copy mirror restore sync", run: () => (backupOpen = true) },
     { id: "tool.aiConsole", group: $t("palette.groupTools"), label: $t("palette.openAiConsole"), run: () => openAiConsole(), enabled: () => aiConsoleAvailable },
     { id: "app.settings", group: $t("palette.groupApp"), label: $t("palette.settings"), run: () => (showSettings = true) },
     { id: "app.documents", group: $t("palette.groupApp"), label: $t("palette.documents"), shortcut: "F1", run: () => openDocs(currentSection()) },
@@ -3242,6 +3247,14 @@
     on:change={(e) => { workspaces = e.detail; settings.saveWorkspaces(workspaces); }}
     on:switch={(e) => switchWorkspace(e.detail)}
     on:cancel={() => (workspacesOpen = false)}
+  />
+{/if}
+
+{#if backupOpen}
+  <BackupDashboard
+    jobs={backupJobs}
+    on:change={(e) => { backupJobs = e.detail; settings.saveBackupJobs(backupJobs); }}
+    on:cancel={() => (backupOpen = false)}
   />
 {/if}
 

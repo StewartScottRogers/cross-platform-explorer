@@ -23,6 +23,8 @@ import { parseRules as parseWatchRules, serializeRules as serializeWatchRules } 
 import type { WatchRule } from "./watchRules";
 import { parseWorkspaces, serializeWorkspaces } from "./workspaces";
 import type { Workspace } from "./workspaces";
+import { parseJobs, serializeJobs } from "./backup";
+import type { BackupJob } from "./backup";
 
 export const KEYS = {
   view: "cpe.view",
@@ -44,6 +46,7 @@ export const KEYS = {
   integrityBaselines: "cpe.integrityBaselines",
   watchRules: "cpe.watchRules",
   workspaces: "cpe.workspaces",
+  backupJobs: "cpe.backupJobs",
 } as const;
 
 const MAX_RECENTS = 20;
@@ -247,6 +250,13 @@ export const loadWorkspaces = (): Workspace[] => {
   return v === undefined ? [] : parseWorkspaces(serializeWorkspaces(v as Workspace[]));
 };
 export const saveWorkspaces = (v: Workspace[]): void => write(KEYS.workspaces, v);
+
+// Backup jobs (CPE-798, epic CPE-736): source→dest definitions, loaded through the tolerant `parseJobs`.
+export const loadBackupJobs = (): BackupJob[] => {
+  const v = state[KEYS.backupJobs];
+  return v === undefined ? [] : parseJobs(serializeJobs(v as BackupJob[]));
+};
+export const saveBackupJobs = (v: BackupJob[]): void => write(KEYS.backupJobs, v);
 
 /** Reset every stored preference to its default (used by the app Settings gear). */
 export function resetSettings(): void {
