@@ -75,3 +75,63 @@ export function diffTrees(left: CompareNode[], right: CompareNode[]): DiffNode[]
 
   return ordered(out);
 }
+
+/** Per-status file counts for a diff, for the compare header. */
+export interface DiffSummary {
+  added: number;
+  removed: number;
+  changed: number;
+  identical: number;
+}
+
+/**
+ * Count the **leaves** of a diff tree by status for the compare header ("12 added, 3 changed…"). A dir with
+ * children is a container — it contributes its descendants (which `diffTrees` already marked), not itself —
+ * but a *childless* node counts as one: a plain file, an empty added/removed folder, or a file↔dir **type
+ * change** (which `diffTrees` emits as `changed` with no children). Pure and recursive.
+ */
+export function summarizeDiff(nodes: DiffNode[]): DiffSummary {
+  const s: DiffSummary = { added: 0, removed: 0, changed: 0, identical: 0 };
+  const walk = (list: DiffNode[]): void => {
+    for (const n of list) {
+      if (n.isDir && n.children && n.children.length > 0) walk(n.children);
+      else s[n.status] += 1; // leaf: file, empty dir, or type-change node
+    }
+  };
+  walk(nodes);
+  return s;
+}
+
+/** One flattened, indented row for the (virtualized) tree-compare view. */
+export interface DiffRow {
+  node: DiffNode;
+  /** Nesting depth; roots are 0. */
+  depth: number;
+  /** `/`-joined path from the root, used as the collapse key and a stable row id. */
+  path: string;
+  /** A dir with at least one child (so it can be collapsed/expanded). */
+  hasChildren: boolean;
+}
+
+/**
+ * Flatten a diff tree to the rows a tree view renders top-to-bottom. A directory whose `path` is in
+ * `collapsed` still yields its own row but not its descendants (so the view can hide subtrees without
+ * rebuilding the diff). Pure and recursive.
+ */
+export function flattenDiff(
+  nodes: DiffNode[],
+  collapsed: Set<string> = new Set(),
+  prefix = "",
+  depth = 0,
+): DiffRow[] {
+  const rows: DiffRow[] = [];
+  for (const n of nodes) {
+    const path = prefix ? `${prefix}/${n.name}` : n.name;
+    const hasChildren = n.isDir && (n.children?.length ?? 0) > 0;
+    rows.push({ node: n, depth, path, hasChildren });
+    if (hasChildren && !collapsed.has(path)) {
+      rows.push(...flattenDiff(n.children ?? [], collapsed, path, depth + 1));
+    }
+  }
+  return rows;
+}
