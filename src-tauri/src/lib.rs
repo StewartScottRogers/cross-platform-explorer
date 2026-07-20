@@ -2880,37 +2880,40 @@ fn copy_one_verified(src: &Path, dst: &Path, verify: bool) -> Result<(), String>
 /// Apply a backup plan under two roots. `copy`/`update` are relative file paths to write from source to
 /// dest; `delete` are relative dest paths to remove (mirror mode — the frontend only populates it then).
 /// Returns one `OpResult` per attempted file, keyed by its dest path.
-fn apply_backup_plan_impl(
-    source_root: String,
-    dest_root: String,
-    copy: Vec<String>,
-    update: Vec<String>,
-    delete: Vec<String>,
+/// Shared plan executor: runs the copy/update/mirror-delete plan, invoking `emit` with each per-file
+/// `OpResult` as it completes. The collect command and the streaming command (CPE-798 live progress) both
+/// drive this — one walker, two surfaces (per docs/design/STREAMING.md).
+fn apply_backup_plan_walk(
+    source_root: &str,
+    dest_root: &str,
+    copy: &[String],
+    update: &[String],
+    delete: &[String],
     verify: bool,
-) -> Vec<OpResult> {
-    let src_root = PathBuf::from(&source_root);
-    let dst_root = PathBuf::from(&dest_root);
-    let mut out = Vec::with_capacity(copy.len() + update.len() + delete.len());
+    mut emit: impl FnMut(OpResult),
+) {
+    let src_root = PathBuf::from(source_root);
+    let dst_root = PathBuf::from(dest_root);
 
     for rel in copy.iter().chain(update.iter()) {
         let (src, dst) = match (safe_join(&src_root, rel), safe_join(&dst_root, rel)) {
             (Ok(s), Ok(d)) => (s, d),
             (Err(e), _) | (_, Err(e)) => {
-                out.push(OpResult::err(Path::new(rel), e));
+                emit(OpResult::err(Path::new(rel), e));
                 continue;
             }
         };
         match copy_one_verified(&src, &dst, verify) {
-            Ok(()) => out.push(OpResult::ok(&dst)),
-            Err(e) => out.push(OpResult::err(&dst, e)),
+            Ok(()) => emit(OpResult::ok(&dst)),
+            Err(e) => emit(OpResult::err(&dst, e)),
         }
     }
 
-    for rel in &delete {
+    for rel in delete {
         let dst = match safe_join(&dst_root, rel) {
             Ok(d) => d,
             Err(e) => {
-                out.push(OpResult::err(Path::new(rel), e));
+                emit(OpResult::err(Path::new(rel), e));
                 continue;
             }
         };
@@ -2920,12 +2923,55 @@ fn apply_backup_plan_impl(
             fs::remove_file(&dst)
         };
         match result {
-            Ok(()) => out.push(OpResult::ok(&dst)),
-            Err(e) => out.push(OpResult::err(&dst, e)),
+            Ok(()) => emit(OpResult::ok(&dst)),
+            Err(e) => emit(OpResult::err(&dst, e)),
         }
     }
+}
 
+fn apply_backup_plan_impl(
+    source_root: String,
+    dest_root: String,
+    copy: Vec<String>,
+    update: Vec<String>,
+    delete: Vec<String>,
+    verify: bool,
+) -> Vec<OpResult> {
+    let mut out = Vec::with_capacity(copy.len() + update.len() + delete.len());
+    apply_backup_plan_walk(&source_root, &dest_root, &copy, &update, &delete, verify, |r| out.push(r));
     out
+}
+
+/// Streamed backup run (CPE-798 live progress): same plan as `apply_backup_plan`, but sends each file's
+/// `OpResult` over `on_result` in small batches as it completes, so the dashboard shows live progress
+/// instead of one blocking round-trip. Returns the total number of results emitted.
+#[tauri::command]
+async fn apply_backup_plan_stream(
+    source_root: String,
+    dest_root: String,
+    copy: Vec<String>,
+    update: Vec<String>,
+    delete: Vec<String>,
+    verify: bool,
+    on_result: tauri::ipc::Channel<Vec<OpResult>>,
+) -> Result<usize, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let mut batch: Vec<OpResult> = Vec::new();
+        let mut total = 0usize;
+        apply_backup_plan_walk(&source_root, &dest_root, &copy, &update, &delete, verify, |r| {
+            total += 1;
+            batch.push(r);
+            if batch.len() >= 16 {
+                let _ = on_result.send(std::mem::take(&mut batch));
+            }
+        });
+        if !batch.is_empty() {
+            let _ = on_result.send(batch);
+        }
+        total
+    })
+    .await
+    .map_err(|e| e.to_string())
 }
 
 /// Execute a backup plan (CPE-797). See `apply_backup_plan_impl`. Async per the async-commands rule.
@@ -6862,6 +6908,7 @@ pub fn run() {
             folder_stats,
             hash_file,
             apply_backup_plan,
+            apply_backup_plan_stream,
             checksum_folder,
             scan_tree,
             create_symlink,

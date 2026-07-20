@@ -6,7 +6,8 @@
    * over the tested planner + the copy-engine backend; jobs persist via settings (App owns the store).
    */
   import { createEventDispatcher } from "svelte";
-  import { invoke } from "../invoke";
+  import { Channel } from "@tauri-apps/api/core";
+  import { invoke, rawInvoke } from "../invoke";
   import { addJob, removeJob, planBackup, type BackupJob, type BackupPlan } from "../backup";
   import type { CompareNode } from "../treeDiff";
 
@@ -26,6 +27,9 @@
   let busyId = "";
   let plan: (BackupPlan & { jobId: string }) | null = null;
   let error = "";
+  // Live-progress counters for the running job (CPE-798): files completed / total planned.
+  let progress = 0;
+  let total = 0;
   const lastRun: Record<string, RunStatus> = {};
 
   function persist() {
@@ -63,14 +67,23 @@
   }
 
   async function apply(job: BackupJob, reverse: boolean) {
-    busyId = job.id; error = ""; plan = null;
+    busyId = job.id; error = ""; plan = null; progress = 0; total = 0;
     const srcRoot = reverse ? job.dest : job.source;
     const dstRoot = reverse ? job.source : job.dest;
     try {
       const p = await computePlan(job, reverse);
-      const results = await invoke<OpResult[]>("apply_backup_plan", {
+      total = p.copy.length + p.update.length + p.delete.length;
+      // Stream per-file results so the row shows live progress instead of one blocking round-trip.
+      const results: OpResult[] = [];
+      const channel = new Channel<OpResult[]>();
+      channel.onmessage = (batch) => {
+        for (const r of batch) results.push(r);
+        progress = results.length;
+      };
+      await rawInvoke("apply_backup_plan_stream", {
         sourceRoot: srcRoot, destRoot: dstRoot,
         copy: p.copy, update: p.update, delete: p.delete, verify: true,
+        onResult: channel,
       });
       const failed = results.filter((r) => !r.ok).length;
       lastRun[job.id] = {
@@ -79,7 +92,7 @@
         failed,
         label: reverse ? "restore" : "backup",
       };
-    } catch (e) { error = String(e); } finally { busyId = ""; }
+    } catch (e) { error = String(e); } finally { busyId = ""; progress = 0; total = 0; }
   }
 
   const fmtTime = (ms: number) => new Date(ms).toLocaleTimeString();
@@ -101,7 +114,9 @@
             <span class="jname">{job.name}</span>
             {#if job.mirror}<span class="mirror">mirror</span>{/if}
             <span class="paths">{job.source} → {job.dest}</span>
-            {#if lastRun[job.id]}
+            {#if busyId === job.id}
+              <span class="status running" data-testid="job-progress">running… {progress}{total ? ` / ${total}` : ""}</span>
+            {:else if lastRun[job.id]}
               <span class="status" data-testid="job-status" class:bad={lastRun[job.id].failed > 0}>
                 {lastRun[job.id].label}: {lastRun[job.id].ok} ok{lastRun[job.id].failed ? `, ${lastRun[job.id].failed} failed` : ""} · {fmtTime(lastRun[job.id].when)}
               </span>
@@ -153,6 +168,7 @@
   .paths { font-size: 11.5px; color: var(--text-dim); font-family: ui-monospace, monospace; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .status { font-size: 11.5px; color: #2e9e4f; }
   .status.bad { color: #c0392b; }
+  .status.running { color: var(--accent); }
   .jbtns { flex: 0 0 auto; display: flex; gap: 6px; }
   .plan { margin-top: 10px; padding: 8px 10px; border: 1px solid var(--border); border-radius: var(--radius); font-size: 12.5px; background: var(--surface-alt); }
   .err { margin-top: 10px; padding: 8px 10px; color: #c0392b; font-size: 12.5px; }

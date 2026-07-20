@@ -43,3 +43,18 @@ ok"** and all 3 files (incl. the nested one) appeared in dest on disk → delete
 Deferred tail (AC1 remainder): **live streamed progress** during a run (a big job currently returns one
 `OpResult[]` at the end — the streamed variant is the CPE-797 tail) and **multi-run history** (only the last
 run is shown). Build both alongside the CPE-797 streaming/scheduler tail. No external gate.
+
+## Update — live streamed progress landed (2026-07-20, hard-bucket)
+Added `apply_backup_plan_stream` (backend): refactored the plan executor into a shared `apply_backup_plan_walk`
+that invokes a per-result callback — the collect command and the new streaming command both drive it (one
+walker, per docs/design/STREAMING.md). The streaming command sends each file's `OpResult` over an
+`ipc::Channel` in batches of 16 as it completes. `BackupDashboard` runs via `rawInvoke` + a `Channel` and
+shows **live `running… N / M`** progress, then the final status.
+
+**GUI-verified (CDP):** a 30-file backup showed a mid-run sample of **"running… 16 / 30"** (the first batch
+flushed before completion) → final **"backup: 30 ok"** with 30 files on disk. `npm run check` clean; the
+existing apply_backup_plan cargo tests still pass through the refactored walker; clippy clean both modes.
+
+Remaining (small): **multi-run history** (the dashboard shows only the last run) — a per-job ring of recent
+runs is the last follow-up. Also advances CPE-797's streaming tail (the scheduler / on-drive-connect trigger
+is the other half).
