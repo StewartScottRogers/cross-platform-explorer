@@ -2,12 +2,12 @@
 id: CPE-772
 title: Backend streaming byte-range read command (read_file_range)
 type: feature
-status: In Progress
+status: Done
 priority: low
 component: Backend
 tags: needs-prereq
 created: 2026-07-19
-closed:
+closed: 2026-07-20
 epic: CPE-719
 estimate: 1-2h
 ---
