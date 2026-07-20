@@ -2,12 +2,12 @@
 id: CPE-774
 title: Pure rule-evaluation engine for file coloring & labels
 type: feature
-status: In Progress
+status: Done
 priority: low
 component: Frontend
 tags: ready
 created: 2026-07-20
-closed:
+closed: 2026-07-20
 epic: CPE-709
 estimate: 1-2h
 ---
