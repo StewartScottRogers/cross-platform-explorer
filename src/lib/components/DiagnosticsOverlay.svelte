@@ -54,7 +54,7 @@
     <div class="diag-empty">Navigate or load something — OS calls appear here.</div>
   {:else}
     <ul class="diag-list">
-      {#each recent as c (c.at + c.cmd)}
+      {#each recent as c, i (`${c.at}-${c.cmd}-${i}`)}
         <li class:err={!c.ok}>
           <span class="diag-ms {band(c.ms)}">{c.ms}ms</span>
           <span class="diag-cmd">{c.cmd}</span>
