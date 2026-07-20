@@ -2763,6 +2763,43 @@ fn checksum_walk(dir: &Path, out: &mut Vec<ChecksumEntry>) {
     }
 }
 
+/// Create a symbolic link at `link_path` pointing to `target` (CPE-802, epic CPE-715). On Windows a
+/// directory target makes a dir-symlink, else a file-symlink; the OS error is returned on failure (e.g.
+/// Windows symlink creation without Developer Mode / admin), so the UI can prompt for elevation.
+#[tauri::command]
+async fn create_symlink(target: String, link_path: String) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || create_symlink_impl(target, link_path))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+#[cfg(unix)]
+fn create_symlink_impl(target: String, link_path: String) -> Result<(), String> {
+    std::os::unix::fs::symlink(&target, &link_path).map_err(|e| e.to_string())
+}
+
+#[cfg(windows)]
+fn create_symlink_impl(target: String, link_path: String) -> Result<(), String> {
+    let res = if Path::new(&target).is_dir() {
+        std::os::windows::fs::symlink_dir(&target, &link_path)
+    } else {
+        std::os::windows::fs::symlink_file(&target, &link_path)
+    };
+    res.map_err(|e| format!("{e} (Windows symbolic links require Developer Mode or elevation)"))
+}
+
+/// Create a hardlink at `link_path` for the same file data as `target` (CPE-802). Cross-platform.
+#[tauri::command]
+async fn create_hard_link(target: String, link_path: String) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || create_hard_link_impl(target, link_path))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+fn create_hard_link_impl(target: String, link_path: String) -> Result<(), String> {
+    fs::hard_link(&target, &link_path).map_err(|e| e.to_string())
+}
+
 /// Line / word / character / byte counts for a text file (CPE-414). Lines follow `str::lines`
 /// (a final unterminated line still counts); words are whitespace-separated; characters are Unicode
 /// scalar values. Capped so analysing a file stays predictable; a non-UTF-8 (binary) file, a
@@ -6359,6 +6396,8 @@ pub fn run() {
             folder_stats,
             hash_file,
             checksum_folder,
+            create_symlink,
+            create_hard_link,
             text_stats,
             search_file_contents,
             find_files_by_name,
@@ -6959,6 +6998,30 @@ mod tests {
         let a = manifest.iter().find(|e| e.path.ends_with("a.txt")).unwrap();
         assert_eq!(a.size, 5);
         assert!(a.modified.is_some());
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn create_hard_link_shares_file_data() {
+        let d = scratch("hardlink");
+        let target = d.join("orig.txt");
+        let link = d.join("link.txt");
+        fs::write(&target, b"linked").unwrap();
+        create_hard_link_impl(target.to_string_lossy().to_string(), link.to_string_lossy().to_string()).unwrap();
+        assert_eq!(fs::read(&link).unwrap(), b"linked"); // same data via the hardlink
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn create_symlink_points_at_target() {
+        let d = scratch("symlink");
+        let target = d.join("orig.txt");
+        let link = d.join("link.txt");
+        fs::write(&target, b"data").unwrap();
+        create_symlink_impl(target.to_string_lossy().to_string(), link.to_string_lossy().to_string()).unwrap();
+        assert!(fs::symlink_metadata(&link).unwrap().file_type().is_symlink());
+        assert_eq!(fs::read(&link).unwrap(), b"data"); // reads through the symlink
         let _ = fs::remove_dir_all(&d);
     }
 
