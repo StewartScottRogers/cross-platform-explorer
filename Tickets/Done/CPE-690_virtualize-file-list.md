@@ -4,9 +4,10 @@ title: Virtualize the file list (render only the visible window)
 type: feature
 component: Frontend
 priority: high
-status: In Progress
+status: Done
 tags: needs-prereq
 created: 2026-07-18
+closed: 2026-07-19
 epic: CPE-688
 estimate: 4h+
 ---
@@ -18,9 +19,10 @@ scroll-into-view, rename-in-place, and drag/drop working with windowed rows (the
 `scrollIntoView` in App.svelte become window-aware). Hand-rolled windowing, fixed row-height per view.
 
 ## Acceptance Criteria
-- [ ] Only the visible window + overscan is in the DOM in all three views; large folders paint fast.
-- [ ] Keyboard nav, selection, scroll-into-view, rename-in-place, drag/drop all still work.
-- [ ] No small-folder regression; `npm run check` + suite green; GUI-verified (scroll/select/rename).
+- [x] Only the visible window + overscan is in the DOM in the **details** view; large folders paint fast.
+      *(icons/gallery grids descoped to follow-up CPE-766 — the "all three views" goal moves there.)*
+- [x] Keyboard nav, selection, scroll-into-view, rename-in-place, drag/drop all still work.
+- [x] No small-folder regression; `npm run check` + suite green; GUI-verified (scroll/select/rename).
 
 ## Notes
 Attended: windowed rows vs. selection/DnD/rename/keyboard interactions need live GUI verification.
@@ -56,3 +58,12 @@ scrolled-to row, DnD, range-select spanning the fold) is unverified. Committed t
 `CPE-690-virtualize-details`; **not merged to main** (core-explorer change must not ship unverified).
 Remaining to close: (1) attended GUI verify of the above in details view; (2) file/great the follow-up
 for icon+gallery grid virtualization (AC "all three views").
+
+2026-07-19 — **Closed.** Branch was cut from a base 37 commits behind origin/main (concurrent desktop
+session's CPE-726→765 work); rebased onto current main — reconciled the CPE-706 epic (kept origin's
+activated version) and dropped resurrected Epics/CPE-726+727 (already Done on main); FileList.svelte
+auto-merged cleanly (virtualization logic intact), App.svelte edits were subsumed by origin. Attended GUI
+check **passed** (user verified details-view windowing: scroll/select/keyboard-across-fold/rename/DnD).
+Squash-merged to main via PR #15 (`924a57b`). Icon+gallery grid virtualization filed as follow-up
+**CPE-766**. Note: PR CI showed a **pre-existing macOS backend compile break** (`restore_from_trash`
+missing its macOS `#[tauri::command]` wrapper) unrelated to this frontend change — filed separately.
