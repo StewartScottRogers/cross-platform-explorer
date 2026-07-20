@@ -15,6 +15,8 @@
 import { invoke } from "./invoke";
 import type { ViewMode, SortKey, SortDir, RecentFile, Favorite } from "./types";
 import { COLUMN_DEFAULTS } from "./columns";
+import { parseRules, serializeRules } from "./colorRulesStore";
+import type { ColorRule } from "./colorRules";
 
 export const KEYS = {
   view: "cpe.view",
@@ -32,6 +34,7 @@ export const KEYS = {
   recentFolders: "cpe.recentFolders",
   columnWidths: "cpe.columnWidths",
   diagnostics: "cpe.diagnostics",
+  colorRules: "cpe.colorRules",
 } as const;
 
 const MAX_RECENTS = 20;
@@ -196,6 +199,14 @@ const isColumnWidths = (v: unknown): v is number[] =>
 export const loadColumnWidths = (): number[] =>
   read(KEYS.columnWidths, COLUMN_DEFAULTS.slice(), isColumnWidths);
 export const saveColumnWidths = (v: number[]) => write(KEYS.columnWidths, v);
+
+// Rule-based file coloring & labels (CPE-776, epic CPE-709). Stored as the raw `ColorRule[]`; loaded
+// through the tolerant `parseRules` so a corrupt/hand-edited value degrades to `[]` rather than crashing.
+export const loadColorRules = (): ColorRule[] => {
+  const v = state[KEYS.colorRules];
+  return v === undefined ? [] : parseRules(serializeRules(v as ColorRule[]));
+};
+export const saveColorRules = (v: ColorRule[]): void => write(KEYS.colorRules, v);
 
 /** Reset every stored preference to its default (used by the app Settings gear). */
 export function resetSettings(): void {

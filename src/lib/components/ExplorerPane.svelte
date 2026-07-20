@@ -17,6 +17,7 @@
   import { click as selClick, type Selection } from "../selection";
   import type { FolderAction, FolderContext } from "../folderContext";
   import type { DirEntry, Place, SortKey, SortDir, ViewMode, RecentFile, Favorite } from "../types";
+  import type { ColorRule } from "../colorRules";
 
   /** True when the Home screen should show (App: `isHome && !smartFolder`). */
   export let inHome = false;
@@ -45,6 +46,8 @@
   export let renamingPath = "";
   export let renameValue = "";
   export let canDrag = true;
+  /** Rule-based coloring rule set (CPE-776), threaded through to the FileList rows. */
+  export let colorRules: ColorRule[] = [];
   export let view: ViewMode = "details";
   export let sortKey: SortKey = "name";
   export let sortDir: SortDir = "asc";
@@ -161,6 +164,7 @@
     {canDrag}
     {renameValue}
     {columnWidths}
+    {colorRules}
     on:resizeColumns={(e) => { columnWidths = e.detail; settings.saveColumnWidths(columnWidths); }}
     bind:rowEls
     bind:draggedPaths
