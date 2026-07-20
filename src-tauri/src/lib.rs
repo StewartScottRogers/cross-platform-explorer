@@ -2710,6 +2710,59 @@ fn hash_file_impl(path: String) -> Result<String, String> {
     sha256_file(p).map_err(|e| format!("{path}: {e}"))
 }
 
+/// A file's checksum baseline entry (CPE-791, epic CPE-737) — matches the frontend `ChecksumEntry`
+/// (CPE-790). `modified` is epoch-ms.
+#[derive(serde::Serialize)]
+struct ChecksumEntry {
+    path: String,
+    sha256: String,
+    size: u64,
+    modified: Option<u64>,
+}
+
+/// Recursively checksum every file under `path` into a baseline manifest — the on-demand baseline for the
+/// integrity guard (CPE-791). Symlinks are not followed and unreadable files are skipped (matching
+/// `dir_size`/`list_dir`); the result is sorted by path for a stable diff.
+#[tauri::command]
+async fn checksum_folder(path: String) -> Result<Vec<ChecksumEntry>, String> {
+    tauri::async_runtime::spawn_blocking(move || checksum_folder_impl(path))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+fn checksum_folder_impl(path: String) -> Result<Vec<ChecksumEntry>, String> {
+    let p = Path::new(&path);
+    if !p.is_dir() {
+        return Err(format!("{path}: not a folder"));
+    }
+    let mut out = Vec::new();
+    checksum_walk(p, &mut out);
+    out.sort_by(|a, b| a.path.cmp(&b.path));
+    Ok(out)
+}
+
+fn checksum_walk(dir: &Path, out: &mut Vec<ChecksumEntry>) {
+    let Ok(entries) = fs::read_dir(dir) else { return }; // skip folders we can't read
+    for entry in entries.flatten() {
+        // DirEntry::metadata() does not traverse symlinks, so a symlink is neither a dir nor a file here
+        // and is skipped — matching `dir_size`'s "don't follow symlinks" behaviour.
+        let Ok(meta) = entry.metadata() else { continue };
+        let path = entry.path();
+        if meta.is_dir() {
+            checksum_walk(&path, out);
+        } else if meta.is_file() {
+            if let Ok(sha256) = sha256_file(&path) {
+                out.push(ChecksumEntry {
+                    path: path.to_string_lossy().to_string(),
+                    sha256,
+                    size: meta.len(),
+                    modified: meta.modified().ok().and_then(to_epoch_ms),
+                });
+            }
+        }
+    }
+}
+
 /// Line / word / character / byte counts for a text file (CPE-414). Lines follow `str::lines`
 /// (a final unterminated line still counts); words are whitespace-separated; characters are Unicode
 /// scalar values. Capped so analysing a file stays predictable; a non-UTF-8 (binary) file, a
@@ -6305,6 +6358,7 @@ pub fn run() {
             dir_children_sizes,
             folder_stats,
             hash_file,
+            checksum_folder,
             text_stats,
             search_file_contents,
             find_files_by_name,
@@ -6886,6 +6940,25 @@ mod tests {
         // clear it; prior was read-only (true)
         assert!(set_readonly_impl(p, false).unwrap());
         assert!(!fs::metadata(&f).unwrap().permissions().readonly());
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn checksum_folder_hashes_files_recursively() {
+        let d = scratch("cksum");
+        fs::write(d.join("a.txt"), b"hello").unwrap();
+        fs::create_dir(d.join("sub")).unwrap();
+        fs::write(d.join("sub").join("b.txt"), b"world!!").unwrap();
+        let manifest = checksum_folder_impl(d.to_string_lossy().to_string()).unwrap();
+        assert_eq!(manifest.len(), 2, "one entry per file, recursing into subfolders");
+        // sorted by path, and each hash matches sha256_file for that path
+        assert!(manifest.windows(2).all(|w| w[0].path <= w[1].path));
+        for e in &manifest {
+            assert_eq!(e.sha256, sha256_file(Path::new(&e.path)).unwrap());
+        }
+        let a = manifest.iter().find(|e| e.path.ends_with("a.txt")).unwrap();
+        assert_eq!(a.size, 5);
+        assert!(a.modified.is_some());
         let _ = fs::remove_dir_all(&d);
     }
 
