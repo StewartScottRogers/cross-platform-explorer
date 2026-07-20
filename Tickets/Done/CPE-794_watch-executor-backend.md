@@ -19,8 +19,10 @@ CPE-793 plan through the existing move/copy/tag/rename primitives, logging each 
 ## Acceptance Criteria
 - [~] A watched folder fires on new/changed files; the plan executes via existing primitives; actions logged.
       *(**executor landed & cargo-tested** — `run_watch_actions` runs the CPE-793 resolved plan (move/copy/rename) via the shared FS primitives; the live `notify` firing + logging is the integration tail.)*
-- [~] Opt-in (nothing watches unless configured); loop/oscillation guarded; actions reversible where possible.
-      *(executor is inert until called (opt-in by construction); per-action `OpResult` never all-or-nothing; **oscillation guard + reversibility log** belong with the live watcher — deferred.)*
+- [x] Opt-in (nothing watches unless configured); loop/oscillation guarded; actions reversible where possible.
+      *(executor is inert until called (opt-in by construction); per-action `OpResult` never all-or-nothing;
+      oscillation guard landed with the live watcher; **reversibility via undo landed 2026-07-20** — each fire
+      is a `WatchFire` record and `undoFire` moves the file back / deletes copies.)*
 - [x] cargo/CI green.
 
 ## Notes
@@ -83,3 +85,23 @@ clean; folderWatch 5 tests; clippy clean with `--features sidecar-platform`.
 All three ACs now met: fires on new files + executes via existing primitives + **actions logged** (AC1);
 **opt-in** + **oscillation-guarded** (AC2 — undo/reversibility is the one remaining follow-up); cargo/CI
 green (AC3). CPE-794 → Done.
+
+## Update — reversibility via undo landed + GUI-verified (2026-07-20, hard-bucket)
+Completes AC2's "actions reversible where possible":
+- `folderWatch.ts` now records each fire as a structured **`WatchFire`** `{id, rule, source, finalPath,
+  copies, summary}` instead of a display string. `handleFolderBatch` folds the executor's per-action
+  `OpResult` paths into it — a move/rename sets `finalPath`, a copy pushes to `copies`.
+- Pure **`undoPlan(fire)`** → `{moveBack, deletes}`; **`undoFire(fire)`** reverses it via `move_exact`
+  (file back to `source`) + `delete_permanent` (each copy), guarding both so the reversal's own FS echo
+  doesn't re-trigger a rule.
+- **UI**: the activity log renders each fire with an **Undo** button (`WatchRulesDialog` dispatches `undo`;
+  App's `undoWatchFire` reverses + drops the entry). `watchLog` is now `WatchFire[]`.
+- **Tests**: `folderWatch.test.ts` grew to **8** — `undoPlan` (move-back vs copy-delete) + `handleFolderBatch`
+  now asserting the reversible `WatchFire` (finalPath from the OpResult path, copies for copy rules).
+  Full frontend suite **877 green**; `npm run check` clean.
+
+**GUI-verified end-to-end in the sidecar dev build (CDP):** ran the real frontend `handleFolderBatch`
+(→ live `run_watch_actions`) on a dropped `invoice.pdf` → moved to `archive` (`srcExists:false`,
+`archExists:true`), the `WatchFire.finalPath` = the real backend result path; then the real frontend
+`undoFire` → the file **returned to source** (`srcExists:true`, `archExists:false`, no error). AC2 fully
+met. CPE-794 → Done.

@@ -1,8 +1,9 @@
 // Watched-folder rules driver (CPE-794, epic CPE-734). Subscribes to the backend `folder-watch` FS-event
 // stream (sidecar-gated live watcher), and for each landed file runs the CPE-793 planner
 // (`planForEntry`) → the CPE-794 executor (`run_watch_actions`). An oscillation guard suppresses the
-// events the executor's own moves/renames generate, so a rule can't ping-pong a file forever. The rule
-// matching + execution stay platform-agnostic; only the live trigger is sidecar-only.
+// events the executor's own moves/renames generate, so a rule can't ping-pong a file forever. Each fire is
+// recorded as a reversible `WatchFire` so the activity log can offer **undo** (move the file back / delete
+// copies). The rule matching + execution stay platform-agnostic; only the live trigger is sidecar-only.
 
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { invoke } from "./invoke";
@@ -14,6 +15,37 @@ export interface FolderWatchEvent {
   kind: string;
 }
 
+interface OpResult {
+  path: string;
+  ok: boolean;
+  error: string;
+}
+
+/** One executed rule, with enough to reverse it: where the file ended (move/rename) + any copies made. */
+export interface WatchFire {
+  id: string;
+  rule: string;
+  /** The file's original path when the rule fired. */
+  source: string;
+  /** Where the file ended after move/rename (equals `source` if the rule only copied). */
+  finalPath: string;
+  /** Paths of copies the rule produced (deleted on undo). */
+  copies: string[];
+  /** Display line for the activity log. */
+  summary: string;
+}
+
+/** The reverse operations for a fire: move the file back (if it moved) + delete any copies. Pure. */
+export function undoPlan(fire: WatchFire): { moveBack: { from: string; to: string } | null; deletes: string[] } {
+  return {
+    moveBack: fire.finalPath !== fire.source ? { from: fire.finalPath, to: fire.source } : null,
+    deletes: [...fire.copies],
+  };
+}
+
+let fireSeq = 0;
+const newFireId = () => `wf_${Date.now().toString(36)}_${fireSeq++}`;
+
 /**
  * Suppresses re-processing of paths the executor itself just wrote (source + resolved destinations),
  * for a short window — so a `move`/`rename` rule doesn't re-fire on the file it just produced. Pure and
@@ -23,13 +55,10 @@ export class OscillationGuard {
   private until = new Map<string, number>();
   constructor(private windowMs = 3000) {}
 
-  /** Mark `path` as executor-touched at `now`; events for it are ignored until `now + windowMs`. */
   guard(path: string, now: number): void {
     this.until.set(path, now + this.windowMs);
   }
 
-  /** Whether an event for `path` at `now` should be ignored (recently executor-touched). Expired
-      entries are pruned as a side effect so the map can't grow without bound. */
   isGuarded(path: string, now: number): boolean {
     const exp = this.until.get(path);
     if (exp === undefined) return false;
@@ -41,7 +70,6 @@ export class OscillationGuard {
   }
 }
 
-/** A ready-to-run action for `run_watch_actions` (fs kinds only; `tag` is app metadata, handled elsewhere). */
 const FS_ACTION_KINDS = new Set(["move", "copy", "rename"]);
 
 let unlisten: UnlistenFn | null = null;
@@ -49,17 +77,17 @@ const guard = new OscillationGuard();
 
 /**
  * Handle one coalesced `folder-watch` batch: for each created/modified file not currently guarded, stat
- * it, run the rules, and execute the fs actions — guarding the source + resolved destinations first.
- * `onFire` reports each executed rule for the activity log. Exposed for testing with injected deps.
+ * it, run the rules, execute the fs actions (guarding source + results), and report a reversible
+ * `WatchFire`. Exposed for testing with injected deps.
  */
 export async function handleFolderBatch(
   batch: FolderWatchEvent[],
   rules: WatchRule[],
-  onFire: (msg: string) => void,
+  onFire: (fire: WatchFire) => void,
   deps: {
     now: () => number;
     stat: (path: string) => Promise<Pick<DirEntry, "name" | "is_dir" | "size" | "modified">>;
-    run: (path: string, actions: { kind: string; resolved: string }[]) => Promise<unknown>;
+    run: (path: string, actions: { kind: string; resolved: string }[]) => Promise<OpResult[]>;
     guard?: OscillationGuard;
   },
 ): Promise<void> {
@@ -74,18 +102,48 @@ export async function handleFolderBatch(
       const entry = { name: info.name, path: ev.path, is_dir: false, size: info.size, modified: info.modified } as DirEntry;
       const plan = planForEntry(entry, rules, now);
       if (!plan) continue;
-      const actions = plan.actions
-        .filter((a) => FS_ACTION_KINDS.has(a.action.kind))
-        .map((a) => ({ kind: a.action.kind, resolved: a.resolved }));
+      const fsActions = plan.actions.filter((a) => FS_ACTION_KINDS.has(a.action.kind));
+      const actions = fsActions.map((a) => ({ kind: a.action.kind, resolved: a.resolved }));
       if (actions.length === 0) continue;
-      // Guard the source + destinations before executing so their echo events are ignored.
+      // Guard the source + planned dests before executing so their echo events are ignored.
       g.guard(ev.path, now);
       for (const a of actions) g.guard(a.resolved, now);
-      await deps.run(ev.path, actions);
-      onFire(`${plan.rule.name}: ${entry.name} → ${actions.map((a) => a.resolved).join(", ")}`);
+      const results = await deps.run(ev.path, actions);
+      // Fold the results into a reversible record: track where the file ended (move/rename) + copies made.
+      let finalPath = ev.path;
+      const copies: string[] = [];
+      actions.forEach((a, i) => {
+        const outPath = results[i]?.path ?? a.resolved;
+        g.guard(outPath, now); // the result path's echo event is the executor's own
+        if (a.kind === "copy") copies.push(outPath);
+        else finalPath = outPath; // move / rename relocates the file
+      });
+      onFire({
+        id: newFireId(),
+        rule: plan.rule.name,
+        source: ev.path,
+        finalPath,
+        copies,
+        summary: `${plan.rule.name}: ${entry.name} → ${actions.map((a) => a.resolved).join(", ")}`,
+      });
     } catch {
       // File gone / stat failed / exec error — skip this one, keep watching.
     }
+  }
+}
+
+/** Reverse a fire (CPE-794): move the file back to its original path and delete any copies it made. */
+export async function undoFire(fire: WatchFire): Promise<void> {
+  const plan = undoPlan(fire);
+  const now = Date.now();
+  if (plan.moveBack) {
+    guard.guard(plan.moveBack.from, now);
+    guard.guard(plan.moveBack.to, now);
+    await invoke("move_exact", { pairs: [[plan.moveBack.from, plan.moveBack.to]] });
+  }
+  for (const p of plan.deletes) {
+    guard.guard(p, now);
+    await invoke("delete_permanent", { paths: [p] });
   }
 }
 
@@ -94,13 +152,13 @@ export async function handleFolderBatch(
 export async function startFolderWatch(
   paths: string[],
   rulesFn: () => WatchRule[],
-  onFire: (msg: string) => void,
+  onFire: (fire: WatchFire) => void,
 ): Promise<number> {
   let count = 0;
   try {
     count = await invoke<number>("folder_watch_start", { paths });
   } catch {
-    return 0; // plain build (no watcher) or backend error
+    return 0;
   }
   if (!unlisten) {
     unlisten = await listen<FolderWatchEvent[]>("folder-watch", (e) =>

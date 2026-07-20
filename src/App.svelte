@@ -120,7 +120,7 @@
   import type { Condition } from "./lib/colorRules";
   import WatchRulesDialog from "./lib/components/WatchRulesDialog.svelte";
   import type { WatchRule } from "./lib/watchRules";
-  import { startFolderWatch, stopFolderWatch } from "./lib/folderWatch";
+  import { startFolderWatch, stopFolderWatch, undoFire, type WatchFire } from "./lib/folderWatch";
   import WorkspacesDialog from "./lib/components/WorkspacesDialog.svelte";
   import type { Workspace, WorkspaceTab } from "./lib/workspaces";
   import BackupDashboard from "./lib/components/BackupDashboard.svelte";
@@ -291,7 +291,7 @@
   // an in-memory ring of recent executed rules.
   let watchedFolders: string[] = settings.loadWatchedFolders();
   let watchLive = false;
-  let watchLog: string[] = [];
+  let watchLog: WatchFire[] = [];
   let workspacesOpen = false;
   let workspaces: Workspace[] = settings.loadWorkspaces();
   let backupOpen = false;
@@ -2266,12 +2266,23 @@
       sidecar build has the backend; a no-op fails soft elsewhere. */
   async function reconcileWatch() {
     if (watchLive && watchedFolders.length && aiConsoleAvailable) {
-      await startFolderWatch(watchedFolders, () => watchRules, (msg) => {
-        watchLog = [msg, ...watchLog].slice(0, 50);
-        showNotice(`Watch: ${msg}`);
+      await startFolderWatch(watchedFolders, () => watchRules, (fire) => {
+        watchLog = [fire, ...watchLog].slice(0, 50);
+        showNotice(`Watch: ${fire.summary}`);
       });
     } else {
       await stopFolderWatch();
+    }
+  }
+
+  /** Undo a watched-folder rule fire (CPE-794): reverse the move/copy, then drop it from the log. */
+  async function undoWatchFire(fire: WatchFire) {
+    try {
+      await undoFire(fire);
+      watchLog = watchLog.filter((f) => f.id !== fire.id);
+      showNotice(`Undid: ${fire.rule}`);
+    } catch (e) {
+      showNotice(String(e), true);
     }
   }
 
@@ -3291,6 +3302,7 @@
     watchAvailable={aiConsoleAvailable}
     on:save={(e) => { watchRules = e.detail; settings.saveWatchRules(watchRules); void reconcileWatch(); watchRulesOpen = false; }}
     on:watchConfig={(e) => applyWatchConfig(e.detail.folders, e.detail.live)}
+    on:undo={(e) => void undoWatchFire(e.detail)}
     on:cancel={() => (watchRulesOpen = false)}
   />
 {/if}
