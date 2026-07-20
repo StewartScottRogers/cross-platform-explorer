@@ -124,6 +124,7 @@
   import type { Workspace, WorkspaceTab } from "./lib/workspaces";
   import BackupDashboard from "./lib/components/BackupDashboard.svelte";
   import type { BackupJob } from "./lib/backup";
+  import AttributesDialog from "./lib/components/AttributesDialog.svelte";
   import {
     pushUndo, popUndo, canUndo, peekLabel, invert, deletedPaths, type UndoEntry,
   } from "./lib/undo";
@@ -289,6 +290,8 @@
   let workspaces: Workspace[] = settings.loadWorkspaces();
   let backupOpen = false;
   let backupJobs: BackupJob[] = settings.loadBackupJobs();
+  let attributesOpen = false;
+  let attrTarget: { path: string; name: string } = { path: "", name: "" };
   let search = "";
   /** Active sidebar Tags filter — show only entries carrying this tag (CPE-639); "" = off. */
   let selectedTag = "";
@@ -439,6 +442,7 @@
     { id: "tool.watchRules", group: $t("palette.groupTools"), label: $t("palette.watchRules"), keywords: "watch rules folder automation move copy tag rename", run: () => (watchRulesOpen = true) },
     { id: "tool.workspaces", group: $t("palette.groupGo"), label: $t("palette.workspaces"), keywords: "workspace layout tabs save session restore", run: () => (workspacesOpen = true) },
     { id: "tool.backup", group: $t("palette.groupTools"), label: $t("palette.backup"), keywords: "backup jobs copy mirror restore sync", run: () => (backupOpen = true) },
+    { id: "tool.attributes", group: $t("palette.groupTools"), label: $t("palette.attributes"), keywords: "attributes permissions readonly hidden mode chmod", run: openAttributes },
     { id: "tool.aiConsole", group: $t("palette.groupTools"), label: $t("palette.openAiConsole"), run: () => openAiConsole(), enabled: () => aiConsoleAvailable },
     { id: "app.settings", group: $t("palette.groupApp"), label: $t("palette.settings"), run: () => (showSettings = true) },
     { id: "app.documents", group: $t("palette.groupApp"), label: $t("palette.documents"), shortcut: "F1", run: () => openDocs(currentSection()) },
@@ -2244,6 +2248,17 @@
     loadPath((current(tabs[0].history) ?? HOME) as string);
   }
 
+  /** Open the file-attributes editor (CPE-786) for the single selected entry. */
+  function openAttributes() {
+    if (selectedEntries.length !== 1) {
+      showNotice("Select a single item to edit its attributes.");
+      return;
+    }
+    const e = selectedEntries[0];
+    attrTarget = { path: e.path, name: e.name };
+    attributesOpen = true;
+  }
+
   /** Open the folder-compare view (CPE-779). Pre-fills the two paths when exactly two folders are
       selected; otherwise the user types/pastes them in the dialog. */
   function openCompare() {
@@ -3255,6 +3270,15 @@
     jobs={backupJobs}
     on:change={(e) => { backupJobs = e.detail; settings.saveBackupJobs(backupJobs); }}
     on:cancel={() => (backupOpen = false)}
+  />
+{/if}
+
+{#if attributesOpen}
+  <AttributesDialog
+    path={attrTarget.path}
+    name={attrTarget.name}
+    on:applied={() => { attributesOpen = false; refresh(); }}
+    on:cancel={() => (attributesOpen = false)}
   />
 {/if}
 
