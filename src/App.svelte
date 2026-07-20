@@ -113,6 +113,8 @@
   import ColorRulesDialog from "./lib/components/ColorRulesDialog.svelte";
   import SessionHistoryDialog from "./lib/components/SessionHistoryDialog.svelte";
   import CompareDialog from "./lib/components/CompareDialog.svelte";
+  import IntegrityDialog from "./lib/components/IntegrityDialog.svelte";
+  import type { ChecksumEntry } from "./lib/integrity";
   import {
     pushUndo, popUndo, canUndo, peekLabel, invert, deletedPaths, type UndoEntry,
   } from "./lib/undo";
@@ -269,6 +271,8 @@
   let compareOpen = false;
   let compareLeft = "";
   let compareRight = "";
+  let integrityOpen = false;
+  let integrityBaselines: Record<string, ChecksumEntry[]> = settings.loadIntegrityBaselines();
   let search = "";
   /** Active sidebar Tags filter — show only entries carrying this tag (CPE-639); "" = off. */
   let selectedTag = "";
@@ -414,6 +418,7 @@
     { id: "tool.colorRules", group: $t("palette.groupTools"), label: $t("palette.colorRules"), keywords: "color rules highlight label", run: () => (colorRulesOpen = true) },
     { id: "tool.sessionHistory", group: $t("palette.groupTools"), label: $t("palette.sessionHistory"), keywords: "audit log history export sessions activity", run: () => (sessionHistoryOpen = true) },
     { id: "tool.compareFolders", group: $t("palette.groupTools"), label: $t("palette.compareFolders"), keywords: "diff compare folders directories tree", run: openCompare },
+    { id: "tool.integrity", group: $t("palette.groupTools"), label: $t("palette.integrity"), keywords: "integrity checksum bitrot corruption verify baseline", run: () => (integrityOpen = true) },
     { id: "tool.aiConsole", group: $t("palette.groupTools"), label: $t("palette.openAiConsole"), run: () => openAiConsole(), enabled: () => aiConsoleAvailable },
     { id: "app.settings", group: $t("palette.groupApp"), label: $t("palette.settings"), run: () => (showSettings = true) },
     { id: "app.documents", group: $t("palette.groupApp"), label: $t("palette.documents"), shortcut: "F1", run: () => openDocs(currentSection()) },
@@ -3158,6 +3163,18 @@
     initialLeft={compareLeft}
     initialRight={compareRight}
     on:cancel={() => (compareOpen = false)}
+  />
+{/if}
+
+{#if integrityOpen}
+  <IntegrityDialog
+    initialPath={isHome || archive ? "" : currentPath}
+    baselines={integrityBaselines}
+    on:baseline={(e) => {
+      integrityBaselines = { ...integrityBaselines, [e.detail.path]: e.detail.entries };
+      settings.saveIntegrityBaselines(integrityBaselines);
+    }}
+    on:cancel={() => (integrityOpen = false)}
   />
 {/if}
 
