@@ -2,12 +2,12 @@
 id: CPE-766
 title: Virtualize the icons & gallery grid views (variable tile height + auto-fill columns)
 type: feature
-status: In Progress
+status: Done
 priority: medium
 component: Frontend
 tags: needs-prereq
 created: 2026-07-19
-closed:
+closed: 2026-07-19
 epic: CPE-688
 estimate: 3-4h
 ---
@@ -39,6 +39,20 @@ integration + measuring columns-per-row and tile height from the live grid.
 - [x] Small folders and the details view are unaffected; `npm run check` + suite green; GUI-verified.
       *(GUI-verified: 25-file folder renders all 25 rows, no spacers; details/list virtualize (21 rows).
       check 0/0, suite 742 pass.)*
+
+## Resolution
+Extended CPE-690's details windowing to every uniform-row view in `src/lib/components/FileList.svelte`:
+`virtualize` triggers on entry count (≥100) across details/list (cols=1) and the icon/gallery grids
+(cols=N), driving `windowRange`/`ensureVisibleOffset` with a live-measured column count (from the grid's
+computed `grid-template-columns`) and tile pitch (tile height + row-gap). Full-width spacers
+(`grid-column: 1/-1`, row-gap-compensated) preserve scroll height; grid tiles were made uniform-height
+(fixed 2-line name, chips hidden in grid) so the fixed-row math holds; gallery got the tile layout it was
+missing (latent CPE-658 gap). A GUI-verify bug fix: the scroller is now acquired lazily (`wireScroller`)
+the first time `.rows` exists, instead of a one-shot `onMount` capture that silently disabled virtualization
+after a Home→folder nav (also repaired CPE-690's details path). GUI-verified end-to-end over the WebView2
+CDP port on a 10,020-entry folder; `npm run check` 0/0; suite 742 pass. Shipped via PR #17 (squash-merged
+to main). Surfaced two unrelated items while verifying: CPE-768 (updater endpoint 404) and a note that grid
+arrow-nav is 1-D app-wide (possible future UX follow-up).
 
 ## Notes
 - Prereq/foundation: `windowRange` + `ensureVisibleOffset` in `src/lib/virtualize.ts` (CPE-690) already
