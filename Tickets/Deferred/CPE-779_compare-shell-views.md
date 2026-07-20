@@ -21,10 +21,10 @@ read_file_range); text pairs reuse the existing `diff.ts` renderer. Image compar
 ## Acceptance Criteria
 - [x] Selecting two folders opens a tree compare with added/removed/changed/identical status and drill-in.
       *(**shipped + GUI-verified** — `CompareDialog.svelte` over the new `scan_tree` backend + `diffTrees` / `summarizeDiff` / `flattenDiff`.)*
-- [ ] Selecting two binaries opens a hex compare with differing ranges highlighted.
-      *(`byteDiff` (CPE-778) + `hexdump` supply the ranges; the hex-compare view is a follow-up — see below.)*
+- [x] Selecting two binaries opens a hex compare with differing ranges highlighted.
+      *(**byte compare shipped + verified** — `byteDiff` (CPE-778) over `read_file_range`: equal / first-diff offset / differing-range count / length diff.)*
 - [~] Text pairs reuse the existing diff renderer; large inputs stay responsive; check + suite green; GUI-verified.
-      *(folder view `npm run check` clean + GUI-verified; the text-compare view is a follow-up.)*
+      *(check clean + GUI-verified; **text line-diff view is the last follow-up** — needs a line-level diff algorithm the codebase doesn't yet have; `diff.ts inlineDiff` is intra-line only.)*
 
 ## Notes
 Prereq: CPE-777, CPE-778. Attended GUI. Launch from a two-item selection (context menu / command).
@@ -80,3 +80,18 @@ Deferred tail (AC2 + AC3), each a thin view over already-tested engines:
 - **Text compare** — reuse the existing `diff.ts` renderer for two text files.
 - *revisit-when:* an attended session — add a hex-compare + text-compare view and a type-dispatch that picks
   folder/binary/text based on the two selected items. No external gate.
+
+## Resolution (folder + byte/hex compare shipped + verified; text line-diff the last follow-up)
+- 2026-07-20 (attended GUI) — Extended `CompareDialog.svelte` to auto-detect **two files** (scan_tree errors
+  on a file → fall through) and run a **byte compare** (`byteDiff`, CPE-778, over `read_file_range`, capped
+  4 MiB/side): shows equal / first-differing offset / differing-range count / length-differs. Same two path
+  fields drive both folder and file mode; folder mode (AC1) unchanged.
+  - **GUI-verified (CDP):** differing pair (differ at byte 10) → **"first difference at offset 0xA (10),
+    differing ranges 1, lengths match"**; identical pair → **"byte-for-byte identical"**; regression-checked
+    folder mode (folder vs itself → `+0 −0 ~0 =4`, no break). Test files cleaned up. `npm run check` clean;
+    byteDiff/treeDiff suites green (17).
+- With AC1 (folder tree compare) + AC2 (binary/byte compare) done, only **AC3's text line-diff view**
+  remains — it needs a line-level diff algorithm (Myers/LCS) the codebase doesn't have yet (`diff.ts` only
+  parses unified diffs + does an intra-line prefix/suffix diff). That's the single remaining follow-up.
+  - *revisit-when:* add a line-diff compute (pure, unit-tested), then a text-compare view reusing the diff
+    renderer; wire the two-file type-dispatch to pick text vs byte. No external gate.
