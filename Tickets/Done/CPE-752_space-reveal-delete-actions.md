@@ -4,8 +4,9 @@ title: Space analyzer — reveal / delete actions from the treemap
 type: feature
 component: Frontend
 priority: low
-status: needs-prereq
+status: Done
 created: 2026-07-19
+closed: 2026-07-19
 tags: needs-prereq
 epic: CPE-706
 estimate: 2-3h
