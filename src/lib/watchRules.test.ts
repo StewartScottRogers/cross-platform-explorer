@@ -5,6 +5,7 @@ import {
   removeRule,
   renameRule,
   setRuleEnabled,
+  moveRule,
   parseRules,
   serializeRules,
   type WatchRule,
@@ -55,6 +56,18 @@ describe("CRUD + parse (CPE-793)", () => {
     expect(parseRules(null)).toEqual([]);
     expect(parseRules("nope")).toEqual([]);
     expect(parseRules(JSON.stringify([{ id: "x" }, list[0]]))).toEqual([list[0]]); // drops invalid
+  });
+
+  it("reorders rules one step, clamped at the ends", () => {
+    let list: WatchRule[] = [];
+    for (const n of ["a", "b", "c"]) list = addRule(list, n, pdf, [{ kind: "tag", tag: "x" }]);
+    const [a, b, c] = list.map((r) => r.id);
+    expect(moveRule(list, b, -1).map((r) => r.id)).toEqual([b, a, c]);
+    expect(moveRule(list, b, 1).map((r) => r.id)).toEqual([a, c, b]);
+    expect(moveRule(list, a, -1).map((r) => r.id)).toEqual([a, b, c]); // clamp
+    expect(moveRule(list, c, 1).map((r) => r.id)).toEqual([a, b, c]); // clamp
+    expect(moveRule(list, "nope", -1).map((r) => r.id)).toEqual([a, b, c]);
+    expect(moveRule(list, a, 1)).not.toBe(list); // new array
   });
 
   it("drops a rule whose `when` is a known-kind condition with malformed fields", () => {
