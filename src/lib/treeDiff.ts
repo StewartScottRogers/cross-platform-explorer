@@ -75,3 +75,62 @@ export function diffTrees(left: CompareNode[], right: CompareNode[]): DiffNode[]
 
   return ordered(out);
 }
+
+/** Per-status file counts for a diff, for the compare header. */
+export interface DiffSummary {
+  added: number;
+  removed: number;
+  changed: number;
+  identical: number;
+}
+
+/**
+ * Count the **files** (leaves) in a diff tree by status — dirs are containers, so an added/removed dir
+ * contributes its file descendants (which `diffTrees` already marked), not itself. This is what the
+ * compare header reports ("12 added, 3 changed…"). Pure and recursive.
+ */
+export function summarizeDiff(nodes: DiffNode[]): DiffSummary {
+  const s: DiffSummary = { added: 0, removed: 0, changed: 0, identical: 0 };
+  const walk = (list: DiffNode[]): void => {
+    for (const n of list) {
+      if (n.isDir) walk(n.children ?? []);
+      else s[n.status] += 1;
+    }
+  };
+  walk(nodes);
+  return s;
+}
+
+/** One flattened, indented row for the (virtualized) tree-compare view. */
+export interface DiffRow {
+  node: DiffNode;
+  /** Nesting depth; roots are 0. */
+  depth: number;
+  /** `/`-joined path from the root, used as the collapse key and a stable row id. */
+  path: string;
+  /** A dir with at least one child (so it can be collapsed/expanded). */
+  hasChildren: boolean;
+}
+
+/**
+ * Flatten a diff tree to the rows a tree view renders top-to-bottom. A directory whose `path` is in
+ * `collapsed` still yields its own row but not its descendants (so the view can hide subtrees without
+ * rebuilding the diff). Pure and recursive.
+ */
+export function flattenDiff(
+  nodes: DiffNode[],
+  collapsed: Set<string> = new Set(),
+  prefix = "",
+  depth = 0,
+): DiffRow[] {
+  const rows: DiffRow[] = [];
+  for (const n of nodes) {
+    const path = prefix ? `${prefix}/${n.name}` : n.name;
+    const hasChildren = n.isDir && (n.children?.length ?? 0) > 0;
+    rows.push({ node: n, depth, path, hasChildren });
+    if (hasChildren && !collapsed.has(path)) {
+      rows.push(...flattenDiff(n.children ?? [], collapsed, path, depth + 1));
+    }
+  }
+  return rows;
+}

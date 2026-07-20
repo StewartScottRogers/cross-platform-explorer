@@ -1,5 +1,11 @@
 import { describe, it, expect } from "vitest";
-import { diffTrees, type CompareNode, type DiffNode } from "./treeDiff";
+import {
+  diffTrees,
+  summarizeDiff,
+  flattenDiff,
+  type CompareNode,
+  type DiffNode,
+} from "./treeDiff";
 
 const f = (name: string, size = 0, modified = 0): CompareNode => ({ name, isDir: false, size, modified });
 const d = (name: string, children: CompareNode[] = []): CompareNode => ({ name, isDir: true, children });
@@ -51,5 +57,50 @@ describe("diffTrees (CPE-777)", () => {
     const diff = diffTrees([f("z.txt"), d("a-dir")], [f("z.txt"), d("a-dir")]);
     expect(diff.map((n) => n.name)).toEqual(["a-dir", "z.txt"]);
     expect(diffTrees([], [])).toEqual([]);
+  });
+});
+
+describe("summarizeDiff (CPE-779)", () => {
+  it("counts files by status, recursing into dirs (dirs not counted themselves)", () => {
+    // left/right chosen to yield each status, including nested + a whole added subtree.
+    const left = [
+      f("same.txt", 1, 1),
+      f("edited.txt", 1, 1),
+      f("gone.txt", 1, 1),
+      d("sub", [f("a.txt", 1, 1), f("b.txt", 1, 1)]),
+    ];
+    const right = [
+      f("same.txt", 1, 1),
+      f("edited.txt", 2, 2),
+      d("sub", [f("a.txt", 1, 1), f("b.txt", 9, 9)]),
+      d("fresh", [f("x.txt", 1, 1), f("y.txt", 1, 1)]), // whole added subtree → 2 added files
+    ];
+    const s = summarizeDiff(diffTrees(left, right));
+    expect(s).toEqual({ added: 2, removed: 1, changed: 2, identical: 2 });
+  });
+
+  it("is all-zero for an empty diff", () => {
+    expect(summarizeDiff([])).toEqual({ added: 0, removed: 0, changed: 0, identical: 0 });
+  });
+});
+
+describe("flattenDiff (CPE-779)", () => {
+  const tree = diffTrees(
+    [d("dir", [f("deep.txt", 1, 1)]), f("root.txt", 1, 1)],
+    [d("dir", [f("deep.txt", 2, 2)]), f("root.txt", 1, 1)],
+  );
+
+  it("flattens depth-first with depth, path, and hasChildren", () => {
+    const rows = flattenDiff(tree);
+    expect(rows.map((r) => [r.path, r.depth, r.hasChildren])).toEqual([
+      ["dir", 0, true], // dirs first
+      ["dir/deep.txt", 1, false],
+      ["root.txt", 0, false],
+    ]);
+  });
+
+  it("hides descendants of a collapsed dir (its own row stays)", () => {
+    const rows = flattenDiff(tree, new Set(["dir"]));
+    expect(rows.map((r) => r.path)).toEqual(["dir", "root.txt"]); // dir/deep.txt hidden
   });
 });
