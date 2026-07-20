@@ -2,12 +2,12 @@
 id: CPE-793
 title: Pure watched-folder rule model + planner
 type: feature
-status: In Progress
+status: Done
 priority: medium
 component: Frontend
 tags: ready
 created: 2026-07-20
-closed:
+closed: 2026-07-20
 epic: CPE-734
 estimate: 1-2h
 ---

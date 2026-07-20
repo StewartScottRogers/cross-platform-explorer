@@ -2,12 +2,12 @@
 id: CPE-796
 title: Pure backup model + incremental planner
 type: feature
-status: In Progress
+status: Done
 priority: medium
 component: Frontend
 tags: ready
 created: 2026-07-20
-closed:
+closed: 2026-07-20
 epic: CPE-736
 estimate: 1-2h
 ---
