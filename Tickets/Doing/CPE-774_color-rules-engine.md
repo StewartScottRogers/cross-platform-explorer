@@ -2,7 +2,7 @@
 id: CPE-774
 title: Pure rule-evaluation engine for file coloring & labels
 type: feature
-status: Open
+status: In Progress
 priority: low
 component: Frontend
 tags: ready
@@ -27,11 +27,21 @@ no DOM, unit-tested — so the renderer (CPE-775) is a thin apply and the editor
 - Pure + total: null `modified`, empty rules, disabled rules, no-extension names all handled.
 
 ## Acceptance Criteria
-- [ ] Each condition kind matches correctly (incl. case-insensitive extension, glob, size bounds, age
+- [x] Each condition kind matches correctly (incl. case-insensitive extension, glob, size bounds, age
       both directions, isDir); disabled rules are skipped.
-- [ ] `evaluateRules` returns the first matching enabled rule's style; `{}` when none match.
-- [ ] Pure + dependency-light; unit tests cover each kind + first-match precedence + edge cases;
+- [x] `evaluateRules` returns the first matching enabled rule's style; `{}` when none match.
+- [x] Pure + dependency-light; unit tests cover each kind + first-match precedence + edge cases;
       `npm run check` + suite green.
 
 ## Notes
 Foundation for CPE-775 (renderer) / CPE-776 (editor). Reuses `src/lib/glob.ts`. Headless.
+
+## Resolution
+Added `src/lib/colorRules.ts` (pure): a `Condition` union (ext / glob / size / olderThan / newerThan /
+isDir), `ColorRule = {id, when, color?, label?, enabled?}`, `matchesCondition(entry, cond, now)` and
+`evaluateRules(entry, rules, now)` → the first enabled matching rule's `{color?, label?}` (or `{}`).
+Reuses `matchesGlob`; extension match is case-insensitive with an optional leading dot and treats dotfiles
+as extension-less; age conditions read `entry.modified` (epoch-ms, null never matches). 7 tests cover every
+condition kind + first-match precedence + disabled-skip + empty-rules. check 0/0; suite 783. Headless; no
+existing code touched. Foundation for CPE-775 (renderer) / CPE-776 (editor).
+
