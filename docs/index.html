@@ -3,131 +3,306 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>Cross-Platform Explorer — a fast, tiny file explorer</title>
+    <title>Cross-Platform Explorer — a fast file explorer, with an AI agent view</title>
     <meta
       name="description"
-      content="A cross-platform desktop file explorer built with Tauri and Svelte. One-click install, automatic updates, tiny footprint."
+      content="A fast, tiny cross-platform desktop file explorer for Windows, macOS, and Linux — with a live view of what your AI coding agents are doing. One-click install, signed auto-updates, built with Tauri + Svelte."
     />
     <link rel="icon" href="icon.png" />
     <style>
+      /* Light + dark, keyed off the visitor's OS theme. */
       :root {
-        --bg: #1e1e2e;
-        --bg-alt: #27273a;
-        --card: #2b2b40;
-        --fg: #cdd6f4;
-        --fg-dim: #9399b2;
-        --accent: #89b4fa;
-        --accent-deep: #4a5fc8;
-        --border: #313244;
+        --bg: #f6f7fb; --bg-2: #eef0f7; --card: #ffffff; --fg: #1c2030; --fg-dim: #5a6072;
+        --accent: #3a63f0; --accent-fg: #ffffff; --border: #e2e5ee; --code-bg: #f0f2f8; --shadow: rgba(30,40,80,.10);
+      }
+      @media (prefers-color-scheme: dark) {
+        :root {
+          --bg: #12131a; --bg-2: #171927; --card: #1c1f2e; --fg: #e7e9f3; --fg-dim: #9aa0b8;
+          --accent: #7d9bff; --accent-fg: #10121c; --border: #2a2e42; --code-bg: #14161f; --shadow: rgba(0,0,0,.4);
+        }
       }
       * { box-sizing: border-box; margin: 0; padding: 0; }
       body {
         font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
-        color: var(--fg);
-        background: radial-gradient(1200px 600px at 50% -10%, #2a2a44, var(--bg));
-        line-height: 1.6;
-        min-height: 100vh;
+        color: var(--fg); background: var(--bg); line-height: 1.6; min-height: 100vh;
+        -webkit-font-smoothing: antialiased;
       }
-      .wrap { max-width: 960px; margin: 0 auto; padding: 0 1.5rem; }
-      header { text-align: center; padding: 5rem 0 3rem; }
-      header img { width: 120px; height: 120px; border-radius: 26px; box-shadow: 0 12px 40px rgba(0,0,0,.4); }
-      h1 { font-size: 2.6rem; margin: 1.2rem 0 .4rem; letter-spacing: -.02em; }
-      .tagline { font-size: 1.2rem; color: var(--fg-dim); max-width: 620px; margin: 0 auto; }
-      .cta { display: flex; gap: .8rem; justify-content: center; flex-wrap: wrap; margin-top: 2rem; }
+      a { color: var(--accent); text-decoration: none; }
+      a:hover { text-decoration: underline; }
+      .wrap { max-width: 980px; margin: 0 auto; padding: 0 1.4rem; }
+
+      /* Hero */
+      header { text-align: center; padding: 4.5rem 0 2.5rem;
+        background: radial-gradient(900px 420px at 50% -8%, var(--bg-2), var(--bg)); }
+      header img { width: 104px; height: 104px; border-radius: 24px; box-shadow: 0 14px 40px var(--shadow); }
+      h1 { font-size: clamp(2rem, 5vw, 2.8rem); margin: 1.1rem 0 .5rem; letter-spacing: -.02em; }
+      .tagline { font-size: 1.15rem; color: var(--fg-dim); max-width: 640px; margin: 0 auto; }
+      .cta { display: flex; gap: .7rem; justify-content: center; flex-wrap: wrap; margin: 2rem 0 .5rem; }
       .btn {
-        display: inline-flex; align-items: center; gap: .5rem;
-        background: var(--accent); color: #10101c; font-weight: 600;
-        padding: .8rem 1.4rem; border-radius: 10px; text-decoration: none;
-        transition: transform .1s ease, background .2s ease;
+        display: inline-flex; align-items: center; gap: .5rem; background: var(--accent); color: var(--accent-fg);
+        font-weight: 600; padding: .8rem 1.5rem; border-radius: 10px; border: 1px solid transparent;
+        transition: transform .1s ease, filter .2s ease; cursor: pointer; font-size: 1rem;
       }
-      .btn:hover { transform: translateY(-2px); }
-      .btn.secondary { background: var(--card); color: var(--fg); border: 1px solid var(--border); }
-      .platforms { color: var(--fg-dim); font-size: .9rem; margin-top: 1rem; }
-      section { padding: 2.5rem 0; }
-      h2 { font-size: 1.5rem; margin-bottom: 1.4rem; text-align: center; }
-      .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 1rem; }
-      .feature {
-        background: var(--card); border: 1px solid var(--border);
-        border-radius: 14px; padding: 1.4rem;
-      }
-      .feature h3 { font-size: 1.05rem; margin-bottom: .4rem; }
-      .feature p { color: var(--fg-dim); font-size: .95rem; }
-      .icon-badge {
-        display: inline-grid; place-items: center; width: 42px; height: 42px;
-        border-radius: 10px; background: linear-gradient(160deg, var(--accent), var(--accent-deep));
-        font-size: 1.3rem; margin-bottom: .8rem;
-      }
-      pre {
-        background: #16161f; border: 1px solid var(--border); border-radius: 12px;
-        padding: 1.1rem 1.3rem; overflow-x: auto; font-size: .9rem;
-        color: #d7e0ff; font-family: ui-monospace, "SF Mono", Menlo, monospace;
-      }
-      footer {
-        text-align: center; color: var(--fg-dim); font-size: .85rem;
-        padding: 3rem 0 4rem; border-top: 1px solid var(--border); margin-top: 2rem;
-      }
-      a { color: var(--accent); }
+      .btn:hover { transform: translateY(-2px); text-decoration: none; filter: brightness(1.05); }
+      .btn.secondary { background: var(--card); color: var(--fg); border-color: var(--border); }
+      .subcta { color: var(--fg-dim); font-size: .9rem; margin-top: .8rem; min-height: 1.3em; }
+      .subcta a { font-weight: 600; }
+
+      section { padding: 2.8rem 0; border-top: 1px solid var(--border); }
+      section h2 { font-size: 1.55rem; margin-bottom: .4rem; text-align: center; }
+      section .lead { text-align: center; color: var(--fg-dim); max-width: 640px; margin: 0 auto 1.8rem; }
+
+      /* Quickstart */
+      .steps { display: grid; grid-template-columns: repeat(auto-fit, minmax(250px, 1fr)); gap: 1rem; }
+      .step { background: var(--card); border: 1px solid var(--border); border-radius: 14px; padding: 1.3rem; }
+      .step .n { display: inline-grid; place-items: center; width: 30px; height: 30px; border-radius: 8px;
+        background: var(--accent); color: var(--accent-fg); font-weight: 700; margin-bottom: .7rem; }
+      .step h3 { font-size: 1.05rem; margin-bottom: .3rem; }
+      .step p { color: var(--fg-dim); font-size: .95rem; }
+
+      /* Feature grid */
+      .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 1rem; }
+      .feature { background: var(--card); border: 1px solid var(--border); border-radius: 14px; padding: 1.3rem; }
+      .feature .badge { display: inline-grid; place-items: center; width: 40px; height: 40px; border-radius: 10px;
+        background: color-mix(in srgb, var(--accent) 16%, transparent); font-size: 1.25rem; margin-bottom: .7rem; }
+      .feature h3 { font-size: 1.05rem; margin-bottom: .35rem; }
+      .feature p { color: var(--fg-dim); font-size: .93rem; }
+      .feature .tag { display: inline-block; font-size: .68rem; font-weight: 700; letter-spacing: .04em;
+        text-transform: uppercase; color: var(--accent); border: 1px solid var(--accent); border-radius: 999px;
+        padding: 1px 7px; margin-left: .4rem; vertical-align: middle; }
+
+      /* AI highlight band */
+      .band { background: var(--bg-2); }
+      .band .grid { margin-top: 1.4rem; }
+
+      pre { background: var(--code-bg); border: 1px solid var(--border); border-radius: 12px; padding: 1rem 1.2rem;
+        overflow-x: auto; font-size: .9rem; font-family: ui-monospace, "SF Mono", Menlo, monospace; }
+      .devlink { text-align: center; }
+      .devlink .btn { margin-top: .3rem; }
+
+      footer { text-align: center; color: var(--fg-dim); font-size: .85rem; padding: 2.6rem 0 3.5rem;
+        border-top: 1px solid var(--border); }
     </style>
   </head>
   <body>
-    <div class="wrap">
-      <header>
+    <header>
+      <div class="wrap">
         <img src="icon.png" alt="Cross-Platform Explorer icon" />
         <h1>Cross-Platform Explorer</h1>
         <p class="tagline">
-          A fast, tiny desktop file explorer for Windows, macOS, and Linux.
-          One-click install, automatic updates, built with Tauri&nbsp;+&nbsp;Svelte.
+          A fast, tiny file explorer for Windows, macOS, and Linux — with a live view of what your
+          AI coding agents are doing to your files.
         </p>
         <div class="cta">
-          <a class="btn" href="https://github.com/StewartScottRogers/cross-platform-explorer/releases/latest">
-            ⬇ Download latest
+          <a class="btn" id="download-primary"
+             href="https://github.com/StewartScottRogers/cross-platform-explorer/releases">
+            ⬇ Download
           </a>
-          <a class="btn secondary" href="https://github.com/StewartScottRogers/cross-platform-explorer">
-            View on GitHub
-          </a>
+          <a class="btn secondary" href="#quickstart">Get started</a>
         </div>
-        <p class="platforms">Windows&nbsp;·&nbsp;macOS&nbsp;·&nbsp;Linux&nbsp;— installers built automatically for every release.</p>
-      </header>
+        <p class="subcta" id="download-note">
+          Windows · macOS · Linux —
+          <a href="https://github.com/StewartScottRogers/cross-platform-explorer/releases">all downloads &amp; versions</a>
+        </p>
+      </div>
+    </header>
 
-      <section>
-        <h2>Why it's different</h2>
-        <div class="grid">
-          <div class="feature">
-            <div class="icon-badge">🪶</div>
-            <h3>Tiny footprint</h3>
-            <p>Native binaries in the single-digit megabytes — no bundled browser engine.</p>
+    <main class="wrap">
+      <!-- Quickstart -->
+      <section id="quickstart">
+        <h2>Get up and working in a minute</h2>
+        <p class="lead">No account, no setup. Download, open a folder, and go.</p>
+        <div class="steps">
+          <div class="step">
+            <div class="n">1</div>
+            <h3>Install</h3>
+            <p>Grab the installer for your OS above and run it — a proper native installer
+              (<code>.msi</code>/<code>.exe</code>, <code>.dmg</code>, <code>.AppImage</code>/<code>.deb</code>).
+              It updates itself from then on.</p>
           </div>
-          <div class="feature">
-            <div class="icon-badge">🔄</div>
-            <h3>Auto-updates</h3>
-            <p>Cryptographically signed updates install themselves on the next launch.</p>
+          <div class="step">
+            <div class="n">2</div>
+            <h3>Browse</h3>
+            <p>It opens at your home folder. Double-click to dive in, use the breadcrumb or
+              <b>↑ / ← / →</b> to move around, and open tabs or a second pane for side-by-side work.</p>
           </div>
-          <div class="feature">
-            <div class="icon-badge">🖱️</div>
-            <h3>One-click install</h3>
-            <p>Proper native installers: .msi/.exe, .dmg, and .AppImage/.deb.</p>
-          </div>
-          <div class="feature">
-            <div class="icon-badge">🤖</div>
-            <h3>AI-maintainable</h3>
-            <p>Documented architecture and build pipeline so an assistant can extend it safely.</p>
+          <div class="step">
+            <div class="n">3</div>
+            <h3>Do more</h3>
+            <p>Search and filter, batch-rename, tag, extract archives, see a <b>disk-usage treemap</b>,
+              and press <b>F1</b> anywhere for the built-in docs. Every section has its own help button.</p>
           </div>
         </div>
       </section>
 
+      <!-- Core features -->
       <section>
-        <h2>Build it yourself</h2>
+        <h2>Everything you expect from a file manager</h2>
+        <p class="lead">Fast, small, and predictable — the plain explorer stays that way whether or not
+          you use the AI features.</p>
+        <div class="grid">
+          <div class="feature">
+            <div class="badge">🗂️</div>
+            <h3>Browse &amp; navigate</h3>
+            <p>Tabs, an optional dual-pane commander, breadcrumb path bar, full keyboard navigation, and
+              back / forward / up history.</p>
+          </div>
+          <div class="feature">
+            <div class="badge">🔎</div>
+            <h3>Find &amp; organize</h3>
+            <p>Content search, filename search with glob patterns, a duplicates finder, saved smart
+              folders, tags, favorites, and batch rename.</p>
+          </div>
+          <div class="feature">
+            <div class="badge">📦</div>
+            <h3>Files &amp; archives</h3>
+            <p>Copy, move, cut/paste, duplicate, trash, new file/folder, plus zip compress and extract —
+              and drag files in and out of the OS.</p>
+          </div>
+          <div class="feature">
+            <div class="badge">👁️</div>
+            <h3>Preview &amp; insight</h3>
+            <p>Inline previews for images, PDF, markdown, code, audio &amp; video, universal thumbnails,
+              a <b>disk-usage Space analyzer</b>, and a compare studio.</p>
+          </div>
+          <div class="feature">
+            <div class="badge">🎨</div>
+            <h3>Fast &amp; native</h3>
+            <p>Light/dark themes, instant streaming of large folders, a diagnostics mode, and a built-in
+              contextual documentation library.</p>
+          </div>
+          <div class="feature">
+            <div class="badge">🔄</div>
+            <h3>Installs &amp; updates itself</h3>
+            <p>Small native binaries (single-digit MB, no bundled browser), proper OS installers, and
+              cryptographically signed auto-updates.</p>
+          </div>
+        </div>
+      </section>
+
+      <!-- AI differentiator -->
+      <section class="band" style="border-radius:0;">
+        <div class="wrap" style="padding:0;">
+          <h2><span class="tag" style="margin:0 .5rem 0 0;">what makes it different</span></h2>
+          <h2 style="margin-top:.2rem;">See what your AI agents are doing</h2>
+          <p class="lead">Coding agents touch your filesystem constantly. This explorer makes that
+            visible — and lets you run them right where your files live.</p>
+          <div class="grid">
+            <div class="feature">
+              <div class="badge">🛰️</div>
+              <h3>Agent Watch</h3>
+              <p>A live view in the left pane of an AI coding agent's filesystem activity — the files it
+                reads and the edits it makes, as it works, with diff peeks.</p>
+            </div>
+            <div class="feature">
+              <div class="badge">🤖</div>
+              <h3>AI Console</h3>
+              <p>Launch and manage agentic coding CLIs (Claude Code, aider, …) as sandboxed sidecars
+                against any folder — pick any provider and model.</p>
+            </div>
+            <div class="feature">
+              <div class="badge">🧩</div>
+              <h3>Grid, Board &amp; Swarms</h3>
+              <p>Tile every running agent in a grid, track work on a ticket board, or run a coordinated
+                multi-agent swarm on one project.</p>
+            </div>
+            <div class="feature">
+              <div class="badge">🔗</div>
+              <h3>Repositories &amp; Workbench</h3>
+              <p>Browse and clone GitHub and other forges in-app (host-brokered, allow-listed), and
+                review the working tree's git diff in the Workbench.</p>
+            </div>
+          </div>
+          <p class="lead" style="margin-top:1.4rem; font-size:.9rem;">
+            The AI features are opt-in — with them switched off, the plain explorer stays fast, small,
+            and predictable.
+          </p>
+        </div>
+      </section>
+
+      <!-- For developers -->
+      <section class="devlink">
+        <h2>Building on it?</h2>
+        <p class="lead">It's a Tauri&nbsp;v2 app — Rust backend, Svelte&nbsp;+&nbsp;TypeScript frontend.
+          The README has everything a developer needs: build, run, architecture, updater setup, and
+          releasing.</p>
         <pre><code>git clone https://github.com/StewartScottRogers/cross-platform-explorer.git
 cd cross-platform-explorer
 npm install
 npm run tauri dev</code></pre>
+        <a class="btn secondary" href="https://github.com/StewartScottRogers/cross-platform-explorer#for-developers">
+          For developers →
+        </a>
       </section>
-    </div>
+    </main>
 
     <footer>
-      Built with <a href="https://v2.tauri.app">Tauri</a> and
-      <a href="https://svelte.dev">Svelte</a>.
-      © 2026 Stewart Rogers.
+      <div class="wrap">
+        Built with <a href="https://v2.tauri.app">Tauri</a> and <a href="https://svelte.dev">Svelte</a>.
+        · <a href="https://github.com/StewartScottRogers/cross-platform-explorer">Source on GitHub</a>
+        · © 2026 Stewart Rogers
+      </div>
     </footer>
+
+    <script>
+      // One-click, OS-aware download (CPE-765). We fetch the latest published release's assets from the
+      // GitHub API and point the button straight at the installer for the visitor's OS. This works even
+      // though /releases/latest 404s for a prerelease-only channel, and keeps working after any release.
+      const REPO = "StewartScottRogers/cross-platform-explorer";
+      const RELEASES_URL = "https://github.com/" + REPO + "/releases";
+
+      function detectOS() {
+        const p = (navigator.userAgentData && navigator.userAgentData.platform) || navigator.platform || navigator.userAgent;
+        const s = p.toLowerCase();
+        if (s.includes("win")) return "windows";
+        if (s.includes("mac") || s.includes("darwin")) return "macos";
+        if (s.includes("linux") || s.includes("x11") || s.includes("ubuntu")) return "linux";
+        return "unknown";
+      }
+
+      const MATCH = {
+        windows: (n) => /x64[-_]setup\.exe$/i.test(n) || /\.exe$/i.test(n) || /\.msi$/i.test(n),
+        macos:   (n) => /\.dmg$/i.test(n) || /\.app\.tar\.gz$/i.test(n),
+        linux:   (n) => /\.appimage$/i.test(n) || /\.deb$/i.test(n) || /\.rpm$/i.test(n),
+        unknown: () => false,
+      };
+      const OS_LABEL = { windows: "Windows", macos: "macOS", linux: "Linux", unknown: "your OS" };
+
+      async function setupDownload() {
+        const os = detectOS();
+        const btn = document.getElementById("download-primary");
+        const note = document.getElementById("download-note");
+        try {
+          const res = await fetch("https://api.github.com/repos/" + REPO + "/releases?per_page=10", {
+            headers: { Accept: "application/vnd.github+json" },
+          });
+          if (!res.ok) throw new Error("api " + res.status);
+          const releases = await res.json();
+          const rel = releases.find((r) => !r.draft); // latest published (prereleases included)
+          if (!rel) throw new Error("no release");
+
+          const assets = rel.assets || [];
+          const asset = assets.find((a) => MATCH[os](a.name));
+          const preview = rel.prerelease ? " (preview)" : "";
+
+          if (asset) {
+            btn.textContent = "⬇ Download for " + OS_LABEL[os];
+            btn.href = asset.browser_download_url;
+          } else {
+            btn.textContent = "⬇ Download";
+            btn.href = rel.html_url || RELEASES_URL;
+          }
+          note.innerHTML =
+            OS_LABEL[os] + " · <b>" + rel.tag_name + "</b>" + preview +
+            ' · <a href="' + (rel.html_url || RELEASES_URL) + '">all downloads &amp; versions</a>';
+        } catch (e) {
+          // Offline / rate-limited / API down: leave the button pointing at the releases page.
+          note.innerHTML =
+            "Windows · macOS · Linux — " +
+            '<a href="' + RELEASES_URL + '">all downloads &amp; versions</a>';
+        }
+      }
+      setupDownload();
+    </script>
   </body>
 </html>

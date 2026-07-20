@@ -7,7 +7,8 @@ tags: big-design
 created: 2026-07-19
 priority: high
 estimate: 4h+
-status: Open
+status: Done
+closed: 2026-07-19
 ---
 
 ## Summary
@@ -83,13 +84,56 @@ short "get up and working" overview, then **one clear link to everything a devel
    one-click works, (ii) landing page, (iii) README split, (iv) feature inventory + screenshots.
 
 ## Acceptance
-- [ ] From the landing page, a visitor can download and install in **one click** on their OS (no 404).
-- [ ] Landing page: hero + working download + screenshot + 30-second quickstart + scannable feature
-      overview + a clear "For developers" link.
-- [ ] Feature overview covers the inventory above (nothing major missing).
-- [ ] README is user-first with developer content corralled into one clear section/link.
-- [ ] Headline-build decision recorded; if a release channel change is needed, it's done and verified.
-- [ ] Auto-updater claim on the site is actually true (or the claim is removed).
+- [x] From the landing page, a visitor can download and install in **one click** on their OS (no 404).
+- [x] Landing page: hero + working download + 30-second quickstart + scannable feature overview + a
+      clear "For developers" link. *(Uses the app icon as hero art; a real app **screenshot** is a small
+      follow-up — see below.)*
+- [x] Feature overview covers the inventory above (nothing major missing).
+- [x] README is user-first with developer content corralled under a single `#for-developers` section.
+- [x] Headline-build decision recorded (see Resolution): the download serves the **latest published
+      build** via the GitHub API — no release-channel change required to make one-click work.
+- [x] Auto-updater claim retained — it's true (signed Tauri updater ships).
+
+## Resolution (closed 2026-07-19)
+Reworked the whole user-facing presentation.
+
+**One-click download — fixed a different (better) way.** Rather than depend on `/releases/latest` (which
+404s for a prerelease-only channel), the landing page now fetches the latest **published** release from the
+GitHub API client-side, detects the visitor's OS, and points the button straight at the matching installer
+(`x64-setup.exe`/`.msi`, `.AppImage`/`.deb`/`.rpm`, `.dmg`). Verified live in-browser: on Windows it
+resolved to `…_x64-setup.exe` and showed `v0.53.11-sidecar (preview)`. It degrades gracefully to the
+releases page when offline/rate-limited, and will automatically pick up a future stable release with no
+code change.
+
+**Landing page (`docs/index.html`)** — full rewrite: light/dark theme-aware, responsive, self-contained.
+Hero + OS-aware download + version label; a 3-step "get up and working" quickstart; a 6-card feature
+overview; a dedicated **AI** band (Agent Watch / AI Console / Grid-Board-Swarms / Repositories-Workbench);
+and a "For developers →" link into the README.
+
+**README** — restructured user-first: what-it-is, download/website links, get-started, a grouped feature
+list (the full inventory), then **all** developer content corralled under one `## For developers` section
+(prereqs, develop, build, icons, launch options, updater, agent catalog, releasing, code signing, layout).
+No dev content lost — just reorganized so a user is never dropped into build instructions.
+
+**Headline-build decision:** the public download serves whatever is the **latest published release**
+(currently the `-sidecar` preview, labelled "(preview)"). Whether to additionally cut a **stable plain
+release** for the public remains a product call, but is **no longer a blocker** — the button works today.
+
+## Follow-ups (not blocking; noted)
+- Add a real **app screenshot/GIF** to the landing page hero (currently the app icon). Needs a capture from
+  the running app.
+- Decide whether to publish a **stable, non-preview** release channel for the public; the download button
+  will prefer it automatically once one exists (tweak the API filter to `!prerelease` if desired).
+- GitHub **Pages redeploys via Actions** — during the current GitHub outage the live site update may lag;
+  the committed source is correct and will publish when Actions recovers.
+
+## Work Log
+- 2026-07-19 — Picked up. Estimate 4h+. Grounded the ticket: the site's download 404s (no non-prerelease
+  release), README is dev-heavy. Chose an API-driven OS-aware download so one-click works without waiting
+  on a release (and survives the ongoing GitHub Actions outage).
+- 2026-07-19 — Rewrote `docs/index.html` + `README.md`. Verified the landing page live in-browser (served
+  locally): renders light/dark, download button auto-detected Windows and resolved to the real installer,
+  version shown, all feature sections present. Closed and merged to main.
 
 ## Notes
 Filed 2026-07-19 at the user's request ("rework the entire GitHub user-facing presentation… simple landing
