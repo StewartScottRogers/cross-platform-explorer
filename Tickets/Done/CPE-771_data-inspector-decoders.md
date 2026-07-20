@@ -2,12 +2,12 @@
 id: CPE-771
 title: Pure data-inspector decoders (int/float/string/timestamp, both endiannesses)
 type: feature
-status: In Progress
+status: Done
 priority: low
 component: Frontend
 tags: ready
 created: 2026-07-19
-closed:
+closed: 2026-07-20
 epic: CPE-719
 estimate: 1-2h
 ---
