@@ -2,12 +2,12 @@
 id: CPE-797
 title: Incremental backup copy engine + verification + scheduler
 type: feature
-status: Deferred
+status: Done
 priority: medium
 component: Multiple
 tags: needs-prereq
 created: 2026-07-20
-closed:
+closed: 2026-07-20
 epic: CPE-736
 estimate: 4h+
 ---
@@ -19,8 +19,10 @@ transfer + sha256 primitives.
 
 ## Acceptance Criteria
 - [x] A job copies/updates changed files, optionally deletes extraneous (mirror), verifies by checksum.
-- [~] Streamed progress; opt-in; no background cost when no job is scheduled; errors surfaced per file.
-      *(Per-file `OpResult` errors surfaced ✓ and opt-in/no-background-cost ✓; **streamed progress not yet** — see Deferred note.)*
+- [x] Streamed progress; opt-in; no background cost when no job is scheduled; errors surfaced per file.
+      *(Per-file `OpResult` errors ✓; opt-in/no-background-cost ✓; **streamed progress** landed with the
+      CPE-798 dashboard (`apply_backup_plan_stream` over an `ipc::Channel`); the **drive-connect scheduler**
+      landed 2026-07-20 — polls only when a job opts into auto-run.)*
 - [x] cargo/CI green.
 
 ## Notes
@@ -55,3 +57,27 @@ returns a per-file `OpResult`. `safe_join` prevents any plan path from escaping 
 existing `sha256_file`. Three tempdir cargo tests cover the happy path, mirror-delete + per-file error
 reporting, and path-escape rejection. Streamed progress + the scheduler are deferred to CPE-798 (see Work
 Log) so they're built with the dashboard that consumes them.
+
+## Update — streamed progress + drive-connect scheduler landed + GUI-verified (2026-07-20)
+Both deferred tails are done, completing all three ACs:
+- **Streamed progress** (with the CPE-798 dashboard): `apply_backup_plan_stream` batches per-file
+  `OpResult`s over an `ipc::Channel` (docs/design/STREAMING.md); the dashboard row shows live `n / total`.
+- **Drive-connect scheduler** `src/lib/driveScheduler.ts`: pure `driveRoot` / `newlyConnected` /
+  `jobsForConnect` / `anyAutoRun`, plus a poller that reads `list_drives` every 15s and runs an **auto-run**
+  job when its destination drive transitions absent→present. Only the *connect* fires (drives present at
+  startup are seeded; a drive that stays plugged in doesn't re-run), and the poller stays **off** unless a
+  job opts in (`BackupJob.autoRun`) — honouring "no background cost when no job is scheduled". App wires
+  `runBackupJobNow` (the same streamed apply the dashboard uses → history + notice) and reconciles the
+  scheduler on job changes / at startup; the dashboard grows a per-job **"auto-run on connect"** toggle +
+  an `auto` pill. 7 unit tests (`driveScheduler.test.ts`).
+
+**GUI-verified end-to-end in the sidecar dev build (CDP):** live `list_drives` → `["C:\\","Z:\\"]`; simulating
+a `C:\` connect transition, `jobsForConnect` returned **only the auto-run job** (the opted-out one was
+skipped), and a drive **already** connected produced **no** fire; the selected job then ran through the real
+`apply_backup_plan` → both files (incl. nested `sub/b.txt`) copied `ok` with checksum verify, landing in
+dest. Frontend suite **884 green**; `npm run check` clean.
+
+## Resolution
+Backend copy engine (`apply_backup_plan` / `apply_backup_plan_stream` + `safe_join`) executes a `planBackup`
+result with per-file `OpResult` + sha256 verify + streamed progress; the frontend `driveScheduler.ts` runs
+an opted-in job automatically when its destination drive connects. All ACs met; CI green. CPE-797 → Done.
