@@ -2,7 +2,7 @@
 id: CPE-737
 title: "EPIC: Integrity guard (bitrot detection)"
 type: Task
-status: Proposed
+status: In Progress
 priority: Low
 component: Multiple
 tags: [epic]
@@ -34,3 +34,18 @@ protecting archives, photo libraries, and backups from silent bitrot the OS won'
 - Users baseline chosen folders and the verifier flags files that changed unexpectedly or went missing.
 - Reports classify changes and allow acknowledge / rebaseline.
 - Opt-in; no background verification runs unless configured.
+
+## Work Log
+2026-07-20 (autonomous) — Activated. Open questions resolved: **edit-vs-corruption = mtime heuristic**
+(hash changed + mtime changed → intended edit; hash changed + mtime UNCHANGED → silent bitrot); **on-demand
+verify** for v1 (background scheduler is a later child; opt-in, fast-when-off); reuses the existing sha256
+checksum backend. Pure classifier lands first.
+
+## Child tickets
+1. **CPE-790** — Pure integrity model (`src/lib/integrity.ts`): `verifyManifest(baseline, current)` →
+   intact/edited/corrupted/missing/new via the mtime heuristic + tolerant serialize/parse + `hasIssues`.
+   Unit-tested. **Foundation, headless.**
+2. **CPE-791** — Baseline store + on-demand verify: persist a folder's checksum baseline (reuse the sha256
+   backend), re-scan and diff via CPE-790. **Backend/integration.** *(prereq: 790)*
+3. **CPE-792** — Report view: "N files changed unexpectedly" with acknowledge / rebaseline. **GUI.**
+   *(prereq: 790, 791)*
