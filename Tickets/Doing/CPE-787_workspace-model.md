@@ -2,7 +2,7 @@
 id: CPE-787
 title: Pure workspace / layout-session model
 type: feature
-status: Open
+status: In Progress
 priority: medium
 component: Frontend
 tags: ready
@@ -26,9 +26,17 @@ moved/missing paths — so the switcher (CPE-788) and auto-restore (CPE-789) are
 - `pruneMissing(ws, exists: (path)=>boolean)` → a copy with only still-existing tabs (graceful restore).
 
 ## Acceptance Criteria
-- [ ] Parse tolerates malformed input and drops invalid entries; serialize round-trips.
-- [ ] CRUD add/rename/remove/update behave correctly and immutably.
-- [ ] `pruneMissing` keeps only existing-path tabs; unit tests cover all; check + suite green.
+- [x] Parse tolerates malformed input and drops invalid entries; serialize round-trips.
+- [x] CRUD add/rename/remove/update behave correctly and immutably.
+- [x] `pruneMissing` keeps only existing-path tabs; unit tests cover all; check + suite green.
 
 ## Notes
 Mirror the `smartFolders.ts` list-store shape. Foundation for CPE-788/789. Headless.
+
+## Resolution
+Added `src/lib/workspaces.ts` (pure): `Workspace`/`WorkspaceTab` types, tolerant `parseWorkspaces`
+(bad JSON/shape → [], invalid entries + tabs dropped) + `serializeWorkspaces`, immutable CRUD
+(add/rename/remove/update), and `pruneMissing(ws, exists)` for graceful restore of moved/absent paths.
+Mirrors the smartFolders list-store shape (`ws_` ids). 4 tests. check 0/0. Headless; no existing code
+touched. Foundation for CPE-788/789.
+
