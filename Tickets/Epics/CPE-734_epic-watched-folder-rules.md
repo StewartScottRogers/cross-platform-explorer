@@ -2,7 +2,7 @@
 id: CPE-734
 title: "EPIC: Watched-folder rules (when/then automation)"
 type: Task
-status: Proposed
+status: In Progress
 priority: Medium
 component: Multiple
 tags: [epic]
@@ -35,3 +35,18 @@ and reuses the app's existing move/rename/tag primitives and the FS watcher.
 - Users define trigger->action rules on watched folders with a dry-run preview.
 - Matching files are processed through the action pipeline with a visible activity log.
 - Rules are opt-in and add no cost when none are defined; actions are reversible where possible.
+
+## Work Log
+2026-07-20 (autonomous) — Activated. Open questions resolved: triggers **reuse the CPE-774 `Condition`
+model** (pattern/size/age/type); actions are an ordered pipeline (move/copy/tag/rename) with rename using
+**CPE-781 templates**; **first-match** rule precedence (one rule handles a landed file, avoiding conflicting
+moves); **dry-run = the pure planner** produces the planned actions without executing; **runs while the app
+is open** v1 (background service deferred, delete-test); reversible via the existing undo. Pure planner first.
+
+## Child tickets
+1. **CPE-793** — Pure rule model + planner (`src/lib/watchRules.ts`): `WatchRule { when: Condition,
+   actions: Action[] }`, `planForEntry(entry, rules, now)` → first matching rule's resolved actions (rename
+   via CPE-781), CRUD + tolerant parse/serialize. Unit-tested. **Foundation, headless.**
+2. **CPE-794** — Backend folder watcher (notify) + action executor reusing move/copy/tag primitives +
+   activity log. **Backend/integration.** *(prereq: 793)*
+3. **CPE-795** — Rule editor UI + dry-run preview + activity log. **GUI.** *(prereq: 793, 794)*
