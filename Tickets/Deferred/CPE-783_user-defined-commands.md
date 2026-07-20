@@ -20,8 +20,8 @@ before launching any external process**. Commands persist in settings.
 ## Acceptance Criteria
 - [~] Users define/edit/remove templated commands and choose where they surface; they run over the selection.
       *(**define/edit/remove/reorder + surface-binding + selection-resolve core landed & tested** — `userCommands.ts`; the toolbar/context/palette + editor rendering is the attended GUI tail.)*
-- [ ] External processes are confirmed before launch; no regression to built-in actions; persistence works.
-      *(Persistence core (serialize/parse) landed & tested; the **backend exec + confirm dialog** remain — deliberately not built unattended, since spawning external processes is the high-blast-radius part.)*
+- [~] External processes are confirmed before launch; no regression to built-in actions; persistence works.
+      *(persistence core done; **backend exec `run_command` now landed & cargo-tested** (output/exit capture, capped, empty-guard) — the frontend **confirm dialog** before launch is the remaining GUI gate.)*
 - [~] `npm run check` + suite green; GUI-verified.
       *(`npm run check` clean + vitest 8/8 now; **GUI-verified** + the exec path are the attended part.)*
 
@@ -51,10 +51,27 @@ Menus follow MENUS.md + CPE-748 icons.
   - *revisit-when:* an attended session — add the backend exec (confirm in the UI first), then build the
     editor + surface bindings over `userCommands` + `resolveCommand`, and GUI-verify. No external gate.
 
-## Resolution (partial — store core landed, exec + GUI deferred)
-Landed `src/lib/userCommands.ts` — the pure user-command list store (immutable CRUD, precedence reorder,
-surface filtering, tolerant serialize/parse) plus `resolveCommand`, which turns a command + selection into
-the concrete command line(s) the confirm dialog will show (delegating to the CPE-781 expander so there's a
-single runner). With it and `cmdTemplate.ts`, the entire command-definition + resolution logic is complete
-and unit-tested (8 cases); only the confirmed backend exec and the attended GUI remain. Deferred with a
-turnkey revisit note.
+- 2026-07-20 (nightshift, backend authorized) — Re-picked from Deferred to build the **backend exec**.
+  Added `run_command(command, cwd?) -> CommandOutput{stdout,stderr,code,truncated}` (+ `_impl`,
+  `capped_string`) in `lib.rs`, registered in `generate_handler!`. Runs the resolved command line through
+  the platform shell (`cmd /C` / `sh -c`) so a normal command with pipes/quotes works; captures output
+  (capped at 1 MiB/stream, truncation flagged) + exit code; rejects an empty command. A module comment
+  states the hard contract: **the frontend must confirm the resolved command before calling** — this is the
+  thin, gated executor, never invoked implicitly. 4 cargo tests (stdout+zero exit; non-zero exit code;
+  empty rejected; `capped_string` byte-cap). Full backend suite green; clippy clean both feature modes.
+- 2026-07-20 (nightshift) — **Deferred again** (GUI-only now). Both headless halves are done: the command
+  store (`userCommands.ts`, #46) and the backend exec (`run_command`, this PR). Remaining is purely the
+  attended GUI — the editor dialog, surfacing commands on the toolbar/context-menu/palette (MENUS.md +
+  CPE-748 icons), and the **confirm dialog** that shows `resolveCommand`'s output and calls `run_command`
+  on approval.
+  - *deferred-on:* the attended GUI (editor + surfacing + confirm dialog) and its GUI verification.
+  - *revisit-when:* an attended session — build the editor over `userCommands`, wire the confirm dialog →
+    `run_command`, surface commands via `commandsForSurface`, and GUI-verify. No external gate.
+
+## Resolution (partial — store + backend exec landed, GUI deferred)
+Both headless halves of the feature are done and CI-green: the pure command store `userCommands.ts` (CRUD,
+reorder, surface filtering, `resolveCommand`, tolerant persist — #46) and the backend executor
+`run_command` (shell-run a resolved command line, capped output + exit code capture, empty-guard — this
+PR). The frontend confirms the command before invoking `run_command` (enforced by design, per the ticket).
+Only the attended GUI remains: the editor dialog, surfacing on toolbar/context/palette, and the confirm
+dialog. Deferred with a turnkey revisit note.
