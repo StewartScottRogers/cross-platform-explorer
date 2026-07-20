@@ -1,0 +1,33 @@
+---
+id: CPE-771
+title: Pure data-inspector decoders (int/float/string/timestamp, both endiannesses)
+type: feature
+status: Open
+priority: low
+component: Frontend
+tags: ready
+created: 2026-07-19
+closed:
+epic: CPE-719
+estimate: 1-2h
+---
+
+## Summary
+The data-inspector logic for the hex inspector (epic CPE-719): a pure module (`src/lib/hexinspect.ts`)
+that, given a byte buffer and an offset, decodes the bytes as the common scalar types in both
+endiannesses. No DOM/IO — fully unit-tested — so the inspector panel (CPE-773/-774) is a thin render.
+
+## Scope
+- `inspect(bytes: Uint8Array, offset: number, littleEndian: boolean): InspectRow[]` returning, where enough
+  bytes remain: int8/uint8, int16/uint16, int32/uint32, int64/uint64 (BigInt), float32, float64,
+  a short ASCII string preview, and Unix (32-bit seconds) + Windows FILETIME timestamps as ISO strings.
+- Gracefully omit rows that would read past the end of the buffer (no throwing).
+- Endianness applied consistently; use `DataView` for the numeric reads.
+
+## Acceptance Criteria
+- [ ] Each type decodes correctly for known byte patterns in both LE and BE (table-driven tests).
+- [ ] Reads past the buffer end are omitted, not errors; offset at the last byte still yields int8/uint8.
+- [ ] Timestamps convert to sensible ISO strings; pure + dependency-free; `npm run check` + suite green.
+
+## Notes
+Independent of CPE-770. Consumed by the inspector panel in CPE-773. Headless.
