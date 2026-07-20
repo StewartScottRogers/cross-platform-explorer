@@ -2,12 +2,12 @@
 id: CPE-768
 title: Auto-updater endpoint 404s — latest stable release carries no latest.json
 type: Bug
-status: In Progress
+status: Done
 priority: Medium
 component: Updater
 tags: ready
 created: 2026-07-19
-closed:
+closed: 2026-07-19
 estimate: 1-2h
 ---
 
