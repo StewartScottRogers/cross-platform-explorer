@@ -109,6 +109,8 @@
   import { isExecutable, iconFor, sameTypeIndices, matchesFileFilter, isImage } from "./lib/filetypes";
   import QuickLook from "./lib/components/QuickLook.svelte";
   import * as settings from "./lib/settings";
+  import type { ColorRule } from "./lib/colorRules";
+  import ColorRulesDialog from "./lib/components/ColorRulesDialog.svelte";
   import {
     pushUndo, popUndo, canUndo, peekLabel, invert, deletedPaths, type UndoEntry,
   } from "./lib/undo";
@@ -258,6 +260,9 @@
   let favorites: Favorite[] = [];
   let recentFolders: RecentFile[] = [];
   let columnWidths: number[] = settings.loadColumnWidths();
+  /** Active rule-based coloring rule set (CPE-776, epic CPE-709); empty ⇒ rows unstyled. */
+  let colorRules: ColorRule[] = settings.loadColorRules();
+  let colorRulesOpen = false;
   let search = "";
   /** Active sidebar Tags filter — show only entries carrying this tag (CPE-639); "" = off. */
   let selectedTag = "";
@@ -400,6 +405,7 @@
     { id: "tool.findByName", group: $t("palette.groupTools"), label: $t("palette.findByName"), shortcut: "Ctrl+P", run: () => (fileSearchOpen = true), enabled: inFolder },
     { id: "tool.searchInFiles", group: $t("palette.groupTools"), label: $t("palette.searchInFiles"), shortcut: "Ctrl+Shift+F", run: () => (contentSearchOpen = true), enabled: inFolder },
     { id: "tool.findDuplicates", group: $t("palette.groupTools"), label: $t("palette.findDuplicates"), run: () => (duplicatesOpen = true), enabled: inFolder },
+    { id: "tool.colorRules", group: $t("palette.groupTools"), label: $t("palette.colorRules"), keywords: "color rules highlight label", run: () => (colorRulesOpen = true) },
     { id: "tool.aiConsole", group: $t("palette.groupTools"), label: $t("palette.openAiConsole"), run: () => openAiConsole(), enabled: () => aiConsoleAvailable },
     { id: "app.settings", group: $t("palette.groupApp"), label: $t("palette.settings"), run: () => (showSettings = true) },
     { id: "app.documents", group: $t("palette.groupApp"), label: $t("palette.documents"), shortcut: "F1", run: () => openDocs(currentSection()) },
@@ -1999,6 +2005,7 @@
       case "select-all": selection = selectAll(visible.length); break;
       case "invert-selection": selection = invertSelection(selection, visible.length); break;
       case "select-pattern": patternSelectOpen = true; break;
+      case "color-rules": colorRulesOpen = true; break;
       case "select-type": {
         const e = selectedEntries[0];
         if (e && !e.is_dir) selection = selectIndices(sameTypeIndices(visible, e.extension));
@@ -2156,6 +2163,13 @@
     favorites = settings.loadFavorites();
     recentFolders = settings.loadRecentFolders();
     columnWidths = settings.loadColumnWidths();
+    colorRules = settings.loadColorRules();
+  }
+
+  /** Persist + apply an edited rule set from the color-rules editor (CPE-776). */
+  function applyColorRules(rules: ColorRule[]) {
+    colorRules = rules;
+    settings.saveColorRules(rules);
   }
 
   /** Record a successfully-opened folder in the recently-visited MRU (CPE-342). */
@@ -2697,6 +2711,7 @@
       {loading}
       {searching}
       {cutPaths}
+      {colorRules}
       bind:renamingPath
       {renameValue}
       canDrag={!archive}
@@ -3081,6 +3096,15 @@
   <PatternSelectDialog
     on:submit={(e) => selectByPattern(e.detail)}
     on:cancel={() => (patternSelectOpen = false)}
+  />
+{/if}
+
+{#if colorRulesOpen}
+  <ColorRulesDialog
+    rules={colorRules}
+    on:change={(e) => (colorRules = e.detail)}
+    on:save={(e) => { applyColorRules(e.detail); colorRulesOpen = false; }}
+    on:cancel={() => { colorRules = settings.loadColorRules(); colorRulesOpen = false; }}
   />
 {/if}
 

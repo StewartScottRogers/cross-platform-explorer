@@ -2,12 +2,12 @@
 id: CPE-776
 title: Rules editor UI + persistence for file coloring & labels
 type: feature
-status: Deferred
+status: Done
 priority: low
 component: Frontend
 tags: needs-prereq
 created: 2026-07-20
-closed:
+closed: 2026-07-20
 epic: CPE-709
 estimate: 3-4h
 ---
@@ -17,12 +17,9 @@ The user-facing rules editor for epic CPE-709: an ordered list of rules (conditi
 edit / remove / enable-disable / reorder, with a live preview, persisted as a global rule set in settings.
 
 ## Acceptance Criteria
-- [~] Users create/edit/remove/reorder/enable rules across the CPE-774 condition kinds; live preview.
-      *(**CRUD + reorder + enable core landed & tested** — `colorRulesStore.ts`; the editor dialog + live preview are the attended GUI tail.)*
-- [~] The rule set persists in settings and reloads on startup; menus follow MENUS.md + CPE-748 icons.
-      *(**serialize/parse core landed & tested** (tolerant); wiring to the settings module + reload-on-startup is the GUI tail.)*
-- [~] `npm run check` + suite green; GUI-verified.
-      *(`npm run check` clean + vitest 7/7 now; **GUI-verified** is the attended part.)*
+- [x] Users create/edit/remove/reorder/enable rules across the CPE-774 condition kinds; live preview.
+- [x] The rule set persists in settings and reloads on startup; menus follow MENUS.md + CPE-748 icons.
+- [x] `npm run check` + suite green; GUI-verified.
 
 ## Notes
 Prereq: CPE-774, CPE-775. Attended GUI. Persistence via the existing settings module.
@@ -50,9 +47,30 @@ Prereq: CPE-774, CPE-775. Attended GUI. Persistence via the existing settings mo
     persistence through the settings module, add any new `Section`→doc entry (CPE-579 guard) if it becomes
     its own section, and GUI-verify. No external gate; pickable anytime.
 
-## Resolution (partial — store core landed, editor UI deferred)
-Landed `src/lib/colorRulesStore.ts` — the pure ordered-rule-list store (immutable CRUD, precedence reorder
-with end-clamping, enable-toggle, and tolerant serialize/parse) that the rules editor and settings
-persistence are thin layers over. With it and the existing `evaluateRules` engine, the entire CPE-776
-logic path is complete and unit-tested (7 cases); only the attended editor dialog + live preview + settings
-wiring + GUI verification remain. Deferred with a turnkey revisit note.
+- 2026-07-20 (attended GUI, dev-app verify) — Built the editor + wired the whole feature, then verified
+  live in the running dev app via CDP:
+  - `src/lib/components/ColorRulesDialog.svelte` — a thin CRUD over `colorRulesStore` (add across all six
+    condition kinds via a kind picker + kind-specific inputs; per-rule colour, label, enable toggle, up/down
+    reorder, delete). Emits `change` live (preview), `save` (persist), `cancel` (revert).
+  - `FileList.svelte` applies `evaluateRules` per row → tints the name (and shows a rule label pill),
+    threaded App → `ExplorerPane` → `FileList` via a new `colorRules` prop.
+  - `settings.ts` gains `loadColorRules`/`saveColorRules` (KEY `cpe.colorRules`) reusing the tolerant
+    `parseRules`; App loads at startup and saves on Done.
+  - Opened from the command palette ("Color rules…", `tool.colorRules`); `palette.colorRules` added to all
+    12 locales (i18n 100%-coverage gate).
+  - **Live verification (CDP):** opened the editor from the palette → added an `isDir` rule → all 36 folder
+    rows rendered `color: #e2504b` (the rule colour); toggling the rule off reverted them, on restored them;
+    clicking Done then **reloading the whole app** and re-navigating kept the folders coloured (persistence
+    across restart). Cleaned up the test rule afterward.
+  - While verifying, found + fixed an unrelated pre-existing crash (diagnostics overlay duplicate `{#each}`
+    key) that was aborting Svelte's flush with diagnostics on — split out as **CPE-809**.
+  - `npm run check` clean; full vitest suite 862 green.
+
+## Resolution
+Shipped the full rule-based coloring/labels feature. The pure store (`colorRulesStore.ts`, 8 tests) + the
+existing `evaluateRules` engine back a new editor dialog (`ColorRulesDialog.svelte`) opened from the command
+palette; `FileList` applies `evaluateRules` to tint each row's name and show a rule label; the rule set
+persists via `settings.ts` (`cpe.colorRules`, tolerant load) and reloads on startup. GUI-verified end-to-end
+in the running dev app (add rule → live coloring → enable/disable → persistence across a full reload).
+`npm run check` + 862-test suite green. (Found + fixed a blocking pre-existing diagnostics crash en route —
+CPE-809.)

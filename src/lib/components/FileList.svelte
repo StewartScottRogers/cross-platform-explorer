@@ -15,6 +15,7 @@
   import type { AgentActivity } from "../agentActivity";
   import { folderActivityKindNorm, normalizeActivityByKind } from "../agentActivity";
   import { tags, entryFor, labelColor } from "../tags";
+  import { evaluateRules, type ColorRule } from "../colorRules";
 
   export let entries: DirEntry[] = [];
   /** Agent Watch (CPE-399): per-path live activity, keyed by absolute path. Empty ⇒ no
@@ -41,6 +42,16 @@
   export let loading = false;
   export let searching = false;
   export let cutPaths: string[] = [];
+  /** Rule-based coloring/labels (CPE-776): the active, ordered rule set. Empty ⇒ rows are unstyled, so
+      the list looks identical when no rules exist. `evaluateRules` takes the first enabled matching rule. */
+  export let colorRules: ColorRule[] = [];
+  // A single timestamp so olderThan/newerThan rules evaluate consistently across all rows; recomputed
+  // whenever the rule set changes (referencing `colorRules` makes this reactive block depend on it).
+  let rulesNow = Date.now();
+  $: {
+    colorRules;
+    rulesNow = Date.now();
+  }
 
   /** Path currently being renamed inline, or "" for none. */
   export let renamingPath = "";
@@ -435,6 +446,7 @@
       {@const insideKind = entry.is_dir ? folderActivityKindNorm(activitySets, entry.path) : null}
       {@const tagEntry = entryFor($tags, entry.path)}
       {@const act = activity[entry.path]}
+      {@const ruleStyle = colorRules.length ? evaluateRules(entry, colorRules, rulesNow) : {}}
       <div
         class="row view-{view}"
         class:selected={isSelected(selection, i)}
@@ -489,7 +501,10 @@
               on:blur={(e) => dispatch("commitRename", e.currentTarget.value)}
             />
           {:else}
-            <span class="ellip">{entry.name}</span>
+            <span class="ellip" style={ruleStyle.color ? `color: ${ruleStyle.color}` : ""}>{entry.name}</span>
+          {/if}
+          {#if ruleStyle.label && renamingPath !== entry.path}
+            <span class="rule-label" style={ruleStyle.color ? `background: ${ruleStyle.color}` : ""}>{ruleStyle.label}</span>
           {/if}
           {#if tagEntry.tags.length > 0 && renamingPath !== entry.path}
             <span class="tag-chips">
@@ -648,6 +663,22 @@
   .row.view-icons .tag-chips {
     justify-content: center;
     width: 100%;
+  }
+  /* Rule label (CPE-776): a small pill next to the name, tinted by the rule's colour. Follows the
+     tick-tacks rule — one line, never wraps its own text (max-width + ellipsis). */
+  .rule-label {
+    flex: 0 0 auto;
+    max-width: 140px;
+    margin-left: 6px;
+    padding: 0 6px;
+    border-radius: 999px;
+    font-size: 10.5px;
+    line-height: 16px;
+    background: var(--accent);
+    color: #fff;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
   }
 
   .row.lead:not(.selected) {
