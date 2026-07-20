@@ -2,7 +2,7 @@
 id: CPE-780
 title: Pure selection-criteria engine (Select by…)
 type: feature
-status: Open
+status: In Progress
 priority: medium
 component: Frontend
 tags: ready
@@ -25,9 +25,16 @@ indices of entries matching a criteria, reusing the CPE-774 `Condition` model (n
 - Pure + total (empty entries, seed with dirs / out-of-range indices).
 
 ## Acceptance Criteria
-- [ ] `selectMatching` returns exactly the matching indices for each `Condition` kind.
-- [ ] `sameExtensionAs` unions all files matching any seed file's extension; ignores dirs / bad indices.
-- [ ] Pure + dependency-light; unit tests cover both; `npm run check` + suite green.
+- [x] `selectMatching` returns exactly the matching indices for each `Condition` kind.
+- [x] `sameExtensionAs` unions all files matching any seed file's extension; ignores dirs / bad indices.
+- [x] Pure + dependency-light; unit tests cover both; `npm run check` + suite green.
 
 ## Notes
 Reuses `src/lib/colorRules.ts` (CPE-774). Foundation for CPE-782. Headless.
+
+## Resolution
+Added `src/lib/selectMatch.ts` (pure): `selectMatching(entries, condition, now)` → matching indices via the
+CPE-774 `matchesCondition` (no parallel matcher), and `sameExtensionAs(entries, seed)` → all files sharing
+an extension with any seed file (dirs / extension-less / out-of-range seeds ignored; sorted). 4 tests. check
+0/0. Headless; reuses colorRules. Foundation for CPE-782.
+
