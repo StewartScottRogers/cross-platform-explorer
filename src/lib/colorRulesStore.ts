@@ -4,9 +4,7 @@
 // first enabled matching rule — so `moveRule` is how a user changes precedence. No DOM/IO; unit-tested.
 // Mirrors the job-list store in backup.ts and the other CPE-77x/79x models.
 
-import type { ColorRule, Condition } from "./colorRules";
-
-const KNOWN_KINDS = ["ext", "glob", "size", "olderThan", "newerThan", "isDir"] as const;
+import { isValidCondition, type ColorRule, type Condition } from "./colorRules";
 
 function newId(): string {
   return `cr_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 7)}`;
@@ -55,16 +53,10 @@ export function moveRule(list: ColorRule[], id: string, dir: number): ColorRule[
   return next;
 }
 
-function isCondition(x: unknown): x is Condition {
-  if (!x || typeof x !== "object") return false;
-  const kind = (x as Record<string, unknown>).kind;
-  return typeof kind === "string" && (KNOWN_KINDS as readonly string[]).includes(kind);
-}
-
 function isRule(x: unknown): x is ColorRule {
   if (!x || typeof x !== "object") return false;
   const o = x as Record<string, unknown>;
-  return typeof o.id === "string" && isCondition(o.when);
+  return typeof o.id === "string" && isValidCondition(o.when);
 }
 
 /** Serialize a rule set for the settings store. */

@@ -4,7 +4,7 @@
 // dry-run editor (CPE-795) are thin. First enabled matching rule wins, so one rule handles a file.
 
 import type { DirEntry } from "./types";
-import { matchesCondition, type Condition } from "./colorRules";
+import { matchesCondition, isValidCondition, type Condition } from "./colorRules";
 import { expandTemplate } from "./cmdTemplate";
 
 /** One step in a rule's action pipeline. */
@@ -82,7 +82,14 @@ export function updateRule(list: WatchRule[], id: string, patch: Partial<Omit<Wa
 const isRule = (x: unknown): x is WatchRule => {
   if (!x || typeof x !== "object") return false;
   const o = x as Record<string, unknown>;
-  return typeof o.id === "string" && typeof o.name === "string" && !!o.when && Array.isArray(o.actions);
+  // Validate `when` structurally (not just truthy): a known-kind condition with missing fields would
+  // otherwise survive parse and throw later in the planner's `matchesCondition`.
+  return (
+    typeof o.id === "string" &&
+    typeof o.name === "string" &&
+    isValidCondition(o.when) &&
+    Array.isArray(o.actions)
+  );
 };
 
 /** Parse persisted rules. Tolerant: bad JSON / wrong shape → `[]`, invalid entries dropped. */

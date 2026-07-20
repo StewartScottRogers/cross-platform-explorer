@@ -38,6 +38,35 @@ function extensionOf(name: string): string {
   return dot > 0 ? name.slice(dot + 1).toLowerCase() : "";
 }
 
+/**
+ * Structural guard for a persisted `Condition` — validates the *fields* for the kind, not just that `kind`
+ * is known. The tolerant rule parsers (colorRulesStore, watchRules) use this so a corrupted/hand-edited
+ * setting like `{kind:"ext"}` (no `exts`) is dropped rather than kept as a landmine that later throws in
+ * `matchesCondition` (`cond.exts.some(...)`). Pure.
+ */
+export function isValidCondition(x: unknown): x is Condition {
+  if (!x || typeof x !== "object") return false;
+  const o = x as Record<string, unknown>;
+  switch (o.kind) {
+    case "ext":
+      return Array.isArray(o.exts) && o.exts.every((e) => typeof e === "string");
+    case "glob":
+      return typeof o.pattern === "string";
+    case "size":
+      return (
+        (o.min === undefined || typeof o.min === "number") &&
+        (o.max === undefined || typeof o.max === "number")
+      );
+    case "olderThan":
+    case "newerThan":
+      return typeof o.days === "number";
+    case "isDir":
+      return typeof o.value === "boolean";
+    default:
+      return false;
+  }
+}
+
 /** Whether `entry` satisfies `cond`, evaluated against wall-clock `now` (epoch ms). Pure. */
 export function matchesCondition(entry: DirEntry, cond: Condition, now: number): boolean {
   switch (cond.kind) {

@@ -87,4 +87,18 @@ describe("colorRulesStore persistence (CPE-776)", () => {
     ]);
     expect(parseRules(mixed)).toEqual([good]);
   });
+
+  it("drops a known-kind condition with malformed fields (would crash the renderer)", () => {
+    const good: ColorRule = { id: "cr_ok", when: { kind: "size", min: 1 }, enabled: true };
+    const mixed = JSON.stringify([
+      good,
+      { id: "cr_1", when: { kind: "ext" } }, // no exts → matchesCondition would throw on .some
+      { id: "cr_2", when: { kind: "ext", exts: [1, 2] } }, // exts not strings
+      { id: "cr_3", when: { kind: "glob" } }, // no pattern
+      { id: "cr_4", when: { kind: "size", min: "big" } }, // min not a number
+      { id: "cr_5", when: { kind: "olderThan" } }, // no days
+      { id: "cr_6", when: { kind: "isDir", value: "yes" } }, // value not boolean
+    ]);
+    expect(parseRules(mixed)).toEqual([good]);
+  });
 });
