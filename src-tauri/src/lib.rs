@@ -1630,6 +1630,40 @@ fn read_file_text_impl(path: String, max_bytes: u64) -> Result<String, String> {
     String::from_utf8(bytes).map_err(|_| "File is not valid UTF-8 text.".to_string())
 }
 
+/// Read a byte range of a file without loading the whole file — backs the hex inspector's paging
+/// (CPE-772, epic CPE-719). Seeks to `offset` (past EOF yields an empty slice, not an error, so the
+/// viewer can page freely) and reads up to `len` bytes, clamped to EOF.
+#[tauri::command]
+async fn read_file_range(path: String, offset: u64, len: u64) -> Result<Vec<u8>, String> {
+    tauri::async_runtime::spawn_blocking(move || read_file_range_impl(path, offset, len))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+fn read_file_range_impl(path: String, offset: u64, len: u64) -> Result<Vec<u8>, String> {
+    use std::io::{Read, Seek, SeekFrom};
+    let mut f = fs::File::open(&path).map_err(|e| e.to_string())?;
+    let total = f.metadata().map_err(|e| e.to_string())?.len();
+    if offset >= total {
+        return Ok(Vec::new());
+    }
+    let want = len.min(total - offset);
+    f.seek(SeekFrom::Start(offset)).map_err(|e| e.to_string())?;
+    let mut buf = vec![0u8; want as usize];
+    f.read_exact(&mut buf).map_err(|e| e.to_string())?;
+    Ok(buf)
+}
+
+/// Total byte length of a file (CPE-772) — lets the hex viewer size its scrollbar without reading.
+#[tauri::command]
+async fn file_len(path: String) -> Result<u64, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        fs::metadata(&path).map(|m| m.len()).map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
 /// Rename a single entry in place. Returns the new path.
 #[tauri::command]
 async fn rename_entry(path: String, new_name: String) -> Result<String, String> {
@@ -6109,6 +6143,8 @@ pub fn run() {
             special_folders,
             create_dir,
             read_file_text,
+            read_file_range,
+            file_len,
             write_file_text,
             read_archive_entries,
             read_preview_info,
@@ -6689,6 +6725,27 @@ mod tests {
         fs::write(&f, vec![b'x'; 200]).unwrap();
         let r = read_file_text_impl(f.to_string_lossy().to_string(), 100);
         assert!(r.is_err(), "a file over the cap must error, not truncate");
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn read_file_range_reads_and_clamps() {
+        let d = scratch("read_range");
+        let f = d.join("bin.dat");
+        fs::write(&f, b"0123456789").unwrap(); // 10 bytes
+        let p = f.to_string_lossy().to_string();
+        // exact interior range
+        assert_eq!(read_file_range_impl(p.clone(), 2, 3).unwrap(), b"234".to_vec());
+        // len past EOF clamps to what's left
+        assert_eq!(read_file_range_impl(p.clone(), 8, 100).unwrap(), b"89".to_vec());
+        // whole file
+        assert_eq!(read_file_range_impl(p.clone(), 0, 10).unwrap(), b"0123456789".to_vec());
+        // offset AT eof -> empty (not an error)
+        assert_eq!(read_file_range_impl(p.clone(), 10, 5).unwrap(), Vec::<u8>::new());
+        // offset PAST eof -> empty (not an error)
+        assert_eq!(read_file_range_impl(p.clone(), 999, 5).unwrap(), Vec::<u8>::new());
+        // zero len -> empty
+        assert_eq!(read_file_range_impl(p, 0, 0).unwrap(), Vec::<u8>::new());
         let _ = fs::remove_dir_all(&d);
     }
 
