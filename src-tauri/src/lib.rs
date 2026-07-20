@@ -1707,6 +1707,84 @@ fn set_readonly_impl(path: String, readonly: bool) -> Result<bool, String> {
     Ok(prior)
 }
 
+fn ft_from_ms(ms: i64) -> filetime::FileTime {
+    let secs = ms.div_euclid(1000);
+    let nanos = (ms.rem_euclid(1000) * 1_000_000) as u32;
+    filetime::FileTime::from_unix_time(secs, nanos)
+}
+fn ms_from_ft(ft: filetime::FileTime) -> i64 {
+    ft.unix_seconds() * 1000 + i64::from(ft.nanoseconds() / 1_000_000)
+}
+
+/// Set a file's modified/accessed timestamps (CPE-785). Each is optional (unchanged when `None`); returns
+/// the prior `(modified, accessed)` as epoch-ms for undo. Cross-platform via the `filetime` crate.
+#[tauri::command]
+async fn set_file_times(
+    path: String,
+    modified_ms: Option<i64>,
+    accessed_ms: Option<i64>,
+) -> Result<(i64, i64), String> {
+    tauri::async_runtime::spawn_blocking(move || set_file_times_impl(path, modified_ms, accessed_ms))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+fn set_file_times_impl(
+    path: String,
+    modified_ms: Option<i64>,
+    accessed_ms: Option<i64>,
+) -> Result<(i64, i64), String> {
+    let meta = fs::metadata(&path).map_err(|e| e.to_string())?;
+    let prior_m = filetime::FileTime::from_last_modification_time(&meta);
+    let prior_a = filetime::FileTime::from_last_access_time(&meta);
+    let m = modified_ms.map(ft_from_ms).unwrap_or(prior_m);
+    let a = accessed_ms.map(ft_from_ms).unwrap_or(prior_a);
+    filetime::set_file_times(&path, a, m).map_err(|e| e.to_string())?;
+    Ok((ms_from_ft(prior_m), ms_from_ft(prior_a)))
+}
+
+/// Toggle a Windows file attribute (`hidden` / `system` / `archive`), returning the prior state for undo
+/// (CPE-785). Windows only.
+#[cfg(windows)]
+#[tauri::command]
+async fn set_file_attribute(path: String, attr: String, value: bool) -> Result<bool, String> {
+    tauri::async_runtime::spawn_blocking(move || set_file_attribute_impl(path, attr, value))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+#[cfg(windows)]
+fn set_file_attribute_impl(path: String, attr: String, value: bool) -> Result<bool, String> {
+    use windows::core::HSTRING;
+    use windows::Win32::Storage::FileSystem::{
+        GetFileAttributesW, SetFileAttributesW, FILE_ATTRIBUTE_ARCHIVE, FILE_ATTRIBUTE_HIDDEN,
+        FILE_ATTRIBUTE_SYSTEM, FILE_FLAGS_AND_ATTRIBUTES,
+    };
+    let flag = match attr.as_str() {
+        "hidden" => FILE_ATTRIBUTE_HIDDEN.0,
+        "system" => FILE_ATTRIBUTE_SYSTEM.0,
+        "archive" => FILE_ATTRIBUTE_ARCHIVE.0,
+        other => return Err(format!("unknown attribute: {other}")),
+    };
+    let wide = HSTRING::from(path.as_str());
+    // SAFETY: `wide` is a valid, NUL-terminated wide string for the duration of both calls.
+    let cur = unsafe { GetFileAttributesW(&wide) };
+    if cur == u32::MAX {
+        return Err("couldn't read file attributes".to_string());
+    }
+    let prior = cur & flag != 0;
+    let next = if value { cur | flag } else { cur & !flag };
+    unsafe { SetFileAttributesW(&wide, FILE_FLAGS_AND_ATTRIBUTES(next)) }.map_err(|e| e.to_string())?;
+    Ok(prior)
+}
+
+#[cfg(not(windows))]
+#[tauri::command]
+async fn set_file_attribute(path: String, attr: String, value: bool) -> Result<bool, String> {
+    let _ = (path, attr, value);
+    Err("Windows file attributes aren't available on this platform.".to_string())
+}
+
 /// Rename a single entry in place. Returns the new path.
 #[tauri::command]
 async fn rename_entry(path: String, new_name: String) -> Result<String, String> {
@@ -6190,6 +6268,8 @@ pub fn run() {
             file_len,
             set_permissions,
             set_readonly,
+            set_file_times,
+            set_file_attribute,
             write_file_text,
             read_archive_entries,
             read_preview_info,
@@ -6821,6 +6901,38 @@ mod tests {
         // chmod 600; prior mode returned is 0o644
         assert_eq!(set_permissions_impl(p, 0o600).unwrap(), 0o644);
         assert_eq!(fs::metadata(&f).unwrap().permissions().mode() & 0o777, 0o600);
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn set_file_times_sets_modified_and_returns_prior() {
+        let d = scratch("set_times");
+        let f = d.join("f.txt");
+        fs::write(&f, b"x").unwrap();
+        let p = f.to_string_lossy().to_string();
+        let target_ms = 1_600_000_000_000i64; // 2020-09-13
+        let (prior_m, _prior_a) = set_file_times_impl(p, Some(target_ms), None).unwrap();
+        assert!(prior_m > 0, "prior modified time should be the file's original mtime");
+        let meta = fs::metadata(&f).unwrap();
+        let now_m = ms_from_ft(filetime::FileTime::from_last_modification_time(&meta));
+        // allow slack for filesystem timestamp resolution
+        assert!((now_m - target_ms).abs() < 2000, "modified time not set (got {now_m})");
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn set_file_attribute_toggles_hidden_and_returns_prior() {
+        let d = scratch("set_attr");
+        let f = d.join("f.txt");
+        fs::write(&f, b"x").unwrap();
+        let p = f.to_string_lossy().to_string();
+        // set hidden; prior was not hidden
+        assert!(!set_file_attribute_impl(p.clone(), "hidden".to_string(), true).unwrap());
+        // clear hidden; prior was hidden
+        assert!(set_file_attribute_impl(p.clone(), "hidden".to_string(), false).unwrap());
+        // unknown attribute errors cleanly
+        assert!(set_file_attribute_impl(p, "bogus".to_string(), true).is_err());
         let _ = fs::remove_dir_all(&d);
     }
 

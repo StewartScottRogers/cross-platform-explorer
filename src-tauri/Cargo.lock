@@ -851,6 +851,7 @@ version = "0.52.0"
 dependencies = [
  "base64 0.22.1",
  "calamine",
+ "filetime",
  "flate2",
  "fs4",
  "goblin",
@@ -886,6 +887,7 @@ dependencies = [
  "trash",
  "ureq",
  "wasmprinter",
+ "windows 0.56.0",
  "winreg 0.52.0",
  "zip 2.4.2",
 ]
