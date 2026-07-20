@@ -3,13 +3,18 @@ id: CPE-810
 title: "EPIC: Decoupled Rust Server + transport-neutral typed contract + pluggable security"
 type: Task
 status: Proposed
-priority: Medium
+priority: High
 component: Multiple
-tags: [epic]
+tags: [epic, next-up]
 estimate: 4h+
 created: 2026-07-20
 closed:
 ---
+
+> **Next epic up (queued 2026-07-20).** Designated the next epic to activate. Still `Proposed` (a
+> dormant brief) — activate with `/ticketing-epic activate CPE-810` to research + decompose into child
+> tickets just-in-time. Coordinate the "Server decoupled from Tauri" pillar with CPE-676 (in Doing) so
+> the two don't reshape `App.svelte`/`lib.rs` in conflicting directions.
 
 ## Goal
 
