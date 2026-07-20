@@ -1,6 +1,32 @@
 import { describe, it, expect } from "vitest";
-import { addRecent, removeRecent, togglePin, toggleFavorite, mergeLegacy } from "./settings";
+import {
+  addRecent, removeRecent, togglePin, toggleFavorite, mergeLegacy,
+  loadAutoRestore, saveAutoRestore, loadLastSession, saveLastSession,
+} from "./settings";
 import type { RecentFile, Favorite } from "./types";
+import type { WorkspaceTab } from "./workspaces";
+
+describe("auto-restore session settings (CPE-789)", () => {
+  it("defaults to off with no saved session", () => {
+    expect(loadAutoRestore()).toBe(false);
+    expect(loadLastSession()).toEqual([]);
+  });
+
+  it("round-trips the flag and the captured tabs", () => {
+    saveAutoRestore(true);
+    expect(loadAutoRestore()).toBe(true);
+    const tabs: WorkspaceTab[] = [{ path: "/a", view: "list" }, { path: "/b" }];
+    saveLastSession(tabs);
+    expect(loadLastSession()).toEqual(tabs);
+    saveAutoRestore(false); // reset module state for other tests
+  });
+
+  it("drops corrupt tabs from a persisted session (tolerant parse)", () => {
+    saveLastSession([{ path: "/ok" }, { path: "" }, { bogus: 1 } as unknown as WorkspaceTab]);
+    expect(loadLastSession()).toEqual([{ path: "/ok" }]);
+    saveLastSession([]); // reset
+  });
+});
 
 describe("mergeLegacy (localStorage → settings.json migration, CPE-226)", () => {
   it("backfills keys the file lacks from legacy localStorage values", () => {

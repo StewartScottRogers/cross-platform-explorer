@@ -22,7 +22,7 @@ import type { ChecksumEntry } from "./integrity";
 import { parseRules as parseWatchRules, serializeRules as serializeWatchRules } from "./watchRules";
 import type { WatchRule } from "./watchRules";
 import { parseWorkspaces, serializeWorkspaces } from "./workspaces";
-import type { Workspace } from "./workspaces";
+import type { Workspace, WorkspaceTab } from "./workspaces";
 import { parseJobs, serializeJobs } from "./backup";
 import type { BackupJob } from "./backup";
 
@@ -49,6 +49,8 @@ export const KEYS = {
   backupJobs: "cpe.backupJobs",
   watchedFolders: "cpe.watchedFolders",
   backupHistory: "cpe.backupHistory",
+  autoRestore: "cpe.autoRestore",
+  lastSession: "cpe.lastSession",
 } as const;
 
 const MAX_RECENTS = 20;
@@ -252,6 +254,18 @@ export const loadWorkspaces = (): Workspace[] => {
   return v === undefined ? [] : parseWorkspaces(serializeWorkspaces(v as Workspace[]));
 };
 export const saveWorkspaces = (v: Workspace[]): void => write(KEYS.workspaces, v);
+
+// Launch-time auto-restore (CPE-789, epic CPE-708): opt-in flag + the last window session (the tabs open
+// at last save). Off by default so single-tab startup is unchanged. `lastSession` is parsed through the
+// tolerant workspace tab sanitiser (wrapping it in a throwaway workspace) so a corrupt entry degrades to [].
+export const loadAutoRestore = (): boolean => read(KEYS.autoRestore, false, isBool);
+export const saveAutoRestore = (v: boolean): void => write(KEYS.autoRestore, v);
+export const loadLastSession = (): WorkspaceTab[] => {
+  const v = state[KEYS.lastSession];
+  if (v === undefined) return [];
+  return parseWorkspaces(serializeWorkspaces([{ id: "s", name: "s", tabs: v as WorkspaceTab[] }]))[0]?.tabs ?? [];
+};
+export const saveLastSession = (tabs: WorkspaceTab[]): void => write(KEYS.lastSession, tabs);
 
 // Backup jobs (CPE-798, epic CPE-736): source→dest definitions, loaded through the tolerant `parseJobs`.
 export const loadBackupJobs = (): BackupJob[] => {
