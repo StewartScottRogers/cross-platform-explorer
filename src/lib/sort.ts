@@ -32,6 +32,7 @@ export function compareEntries(
   dir: SortDir,
   foldersFirst = true,
   typeNameOf: (e: DirEntry) => string = typeName,
+  sizeOf: (e: DirEntry) => number = (e) => e.size,
 ): number {
   // Directories float to the top unless the user opted into mixed sorting (CPE-359).
   if (foldersFirst && a.is_dir !== b.is_dir) return a.is_dir ? -1 : 1;
@@ -50,7 +51,10 @@ export function compareEntries(
       cmp = collator.compare(typeNameOf(a), typeNameOf(b)) || compareNames(a.name, b.name);
       break;
     case "size":
-      cmp = a.size - b.size || compareNames(a.name, b.name);
+      // `sizeOf` lets the recursive-folder-size mode (CPE-750) sort folders by their computed subtree
+      // size; by default it's each entry's own byte size. A pending folder (size not yet computed) resolves
+      // to a sentinel via `sizeOf`, so those cluster and fall back to name order — stable while filling.
+      cmp = sizeOf(a) - sizeOf(b) || compareNames(a.name, b.name);
       break;
   }
 
@@ -68,12 +72,17 @@ export function sortEntries(
   key: SortKey,
   dir: SortDir,
   foldersFirst = true,
+  sizeOf?: (e: DirEntry) => number,
 ): DirEntry[] {
   if (key === "type") {
     const typeCache = new Map<DirEntry, string>();
     for (const e of entries) typeCache.set(e, typeName(e));
     const typeNameOf = (e: DirEntry) => typeCache.get(e) ?? typeName(e);
     return [...entries].sort((a, b) => compareEntries(a, b, key, dir, foldersFirst, typeNameOf));
+  }
+  // For size sort, `sizeOf` (when given) lets folders compare by recursive subtree size (CPE-750).
+  if (key === "size" && sizeOf) {
+    return [...entries].sort((a, b) => compareEntries(a, b, key, dir, foldersFirst, typeName, sizeOf));
   }
   return [...entries].sort((a, b) => compareEntries(a, b, key, dir, foldersFirst));
 }

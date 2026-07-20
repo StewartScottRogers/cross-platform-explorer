@@ -29,6 +29,7 @@ import type { BackupJob } from "./backup";
 export const KEYS = {
   view: "cpe.view",
   showHidden: "cpe.showHidden",
+  showFolderSizes: "cpe.showFolderSizes",
   foldersFirst: "cpe.foldersFirst",
   sortKey: "cpe.sortKey",
   sortDir: "cpe.sortDir",
@@ -168,6 +169,11 @@ export const saveView = (v: ViewMode) => write(KEYS.view, v);
 
 export const loadShowHidden = (): boolean => read(KEYS.showHidden, false, isBool);
 export const saveShowHidden = (v: boolean) => write(KEYS.showHidden, v);
+
+// Recursive folder-size column (CPE-750): opt-in, off by default so a plain listing pulls no dir_size
+// walks. When on, the details Size column fills each folder's computed subtree size lazily.
+export const loadShowFolderSizes = (): boolean => read(KEYS.showFolderSizes, false, isBool);
+export const saveShowFolderSizes = (v: boolean) => write(KEYS.showFolderSizes, v);
 
 // Diagnostics mode (CPE-758): on-screen timing of every backend/OS call. Off by default; user-toggled
 // from the Application menu. Set `localStorage["cpe.diagnostics"] = "true"` to force it on from a console.

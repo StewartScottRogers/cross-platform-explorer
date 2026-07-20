@@ -48,6 +48,9 @@
   export let canDrag = true;
   /** Rule-based coloring rule set (CPE-776), threaded through to the FileList rows. */
   export let colorRules: ColorRule[] = [];
+  /** Recursive folder-size column (CPE-750). */
+  export let showFolderSizes = false;
+  export let folderSizes: Map<string, number> = new Map();
   export let view: ViewMode = "details";
   export let sortKey: SortKey = "name";
   export let sortDir: SortDir = "asc";
@@ -165,6 +168,9 @@
     {renameValue}
     {columnWidths}
     {colorRules}
+    {showFolderSizes}
+    {folderSizes}
+    on:needSizes
     on:resizeColumns={(e) => { columnWidths = e.detail; settings.saveColumnWidths(columnWidths); }}
     bind:rowEls
     bind:draggedPaths
