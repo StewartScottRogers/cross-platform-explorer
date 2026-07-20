@@ -120,6 +120,8 @@
   import type { Condition } from "./lib/colorRules";
   import WatchRulesDialog from "./lib/components/WatchRulesDialog.svelte";
   import type { WatchRule } from "./lib/watchRules";
+  import WorkspacesDialog from "./lib/components/WorkspacesDialog.svelte";
+  import type { Workspace, WorkspaceTab } from "./lib/workspaces";
   import {
     pushUndo, popUndo, canUndo, peekLabel, invert, deletedPaths, type UndoEntry,
   } from "./lib/undo";
@@ -281,6 +283,8 @@
   let selectByOpen = false;
   let watchRulesOpen = false;
   let watchRules: WatchRule[] = settings.loadWatchRules();
+  let workspacesOpen = false;
+  let workspaces: Workspace[] = settings.loadWorkspaces();
   let search = "";
   /** Active sidebar Tags filter — show only entries carrying this tag (CPE-639); "" = off. */
   let selectedTag = "";
@@ -429,6 +433,7 @@
     { id: "tool.integrity", group: $t("palette.groupTools"), label: $t("palette.integrity"), keywords: "integrity checksum bitrot corruption verify baseline", run: () => (integrityOpen = true) },
     { id: "tool.selectBy", group: $t("palette.groupTools"), label: $t("palette.selectBy"), keywords: "select by criteria extension size date filter", run: () => (selectByOpen = true), enabled: inFolder },
     { id: "tool.watchRules", group: $t("palette.groupTools"), label: $t("palette.watchRules"), keywords: "watch rules folder automation move copy tag rename", run: () => (watchRulesOpen = true) },
+    { id: "tool.workspaces", group: $t("palette.groupGo"), label: $t("palette.workspaces"), keywords: "workspace layout tabs save session restore", run: () => (workspacesOpen = true) },
     { id: "tool.aiConsole", group: $t("palette.groupTools"), label: $t("palette.openAiConsole"), run: () => openAiConsole(), enabled: () => aiConsoleAvailable },
     { id: "app.settings", group: $t("palette.groupApp"), label: $t("palette.settings"), run: () => (showSettings = true) },
     { id: "app.documents", group: $t("palette.groupApp"), label: $t("palette.documents"), shortcut: "F1", run: () => openDocs(currentSection()) },
@@ -2207,6 +2212,33 @@
     settings.saveColorRules(rules);
   }
 
+  /** Capture the current window's tabs as workspace tabs (CPE-788): each open tab's path + the current
+      view/sort/filter (which are global in this app's model). */
+  function captureCurrentTabs(): WorkspaceTab[] {
+    return tabs.map((t) => ({
+      path: (current(t.history) ?? HOME) as string,
+      view,
+      sortKey,
+      sortDir,
+      filter: search,
+    }));
+  }
+
+  /** Apply a saved workspace (CPE-788): reopen its tabs and adopt the first tab's view/sort/filter. */
+  function switchWorkspace(ws: Workspace) {
+    workspacesOpen = false;
+    if (ws.tabs.length === 0) return;
+    if (archive) exitArchive();
+    tabs = ws.tabs.map((wt) => ({ id: nextTabId++, history: createHistory(wt.path) }));
+    activeId = tabs[0].id;
+    const first = ws.tabs[0];
+    if (first.view) { view = first.view; settings.saveView(view); }
+    if (first.sortKey) { sortKey = first.sortKey; settings.saveSortKey(sortKey); }
+    if (first.sortDir) { sortDir = first.sortDir; settings.saveSortDir(sortDir); }
+    search = first.filter ?? "";
+    loadPath((current(tabs[0].history) ?? HOME) as string);
+  }
+
   /** Open the folder-compare view (CPE-779). Pre-fills the two paths when exactly two folders are
       selected; otherwise the user types/pastes them in the dialog. */
   function openCompare() {
@@ -3200,6 +3232,16 @@
     rules={watchRules}
     on:save={(e) => { watchRules = e.detail; settings.saveWatchRules(watchRules); watchRulesOpen = false; }}
     on:cancel={() => (watchRulesOpen = false)}
+  />
+{/if}
+
+{#if workspacesOpen}
+  <WorkspacesDialog
+    {workspaces}
+    currentTabs={captureCurrentTabs()}
+    on:change={(e) => { workspaces = e.detail; settings.saveWorkspaces(workspaces); }}
+    on:switch={(e) => switchWorkspace(e.detail)}
+    on:cancel={() => (workspacesOpen = false)}
   />
 {/if}
 
