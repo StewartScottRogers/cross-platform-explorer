@@ -112,6 +112,7 @@
   import type { ColorRule } from "./lib/colorRules";
   import ColorRulesDialog from "./lib/components/ColorRulesDialog.svelte";
   import SessionHistoryDialog from "./lib/components/SessionHistoryDialog.svelte";
+  import CompareDialog from "./lib/components/CompareDialog.svelte";
   import {
     pushUndo, popUndo, canUndo, peekLabel, invert, deletedPaths, type UndoEntry,
   } from "./lib/undo";
@@ -265,6 +266,9 @@
   let colorRules: ColorRule[] = settings.loadColorRules();
   let colorRulesOpen = false;
   let sessionHistoryOpen = false;
+  let compareOpen = false;
+  let compareLeft = "";
+  let compareRight = "";
   let search = "";
   /** Active sidebar Tags filter — show only entries carrying this tag (CPE-639); "" = off. */
   let selectedTag = "";
@@ -409,6 +413,7 @@
     { id: "tool.findDuplicates", group: $t("palette.groupTools"), label: $t("palette.findDuplicates"), run: () => (duplicatesOpen = true), enabled: inFolder },
     { id: "tool.colorRules", group: $t("palette.groupTools"), label: $t("palette.colorRules"), keywords: "color rules highlight label", run: () => (colorRulesOpen = true) },
     { id: "tool.sessionHistory", group: $t("palette.groupTools"), label: $t("palette.sessionHistory"), keywords: "audit log history export sessions activity", run: () => (sessionHistoryOpen = true) },
+    { id: "tool.compareFolders", group: $t("palette.groupTools"), label: $t("palette.compareFolders"), keywords: "diff compare folders directories tree", run: openCompare },
     { id: "tool.aiConsole", group: $t("palette.groupTools"), label: $t("palette.openAiConsole"), run: () => openAiConsole(), enabled: () => aiConsoleAvailable },
     { id: "app.settings", group: $t("palette.groupApp"), label: $t("palette.settings"), run: () => (showSettings = true) },
     { id: "app.documents", group: $t("palette.groupApp"), label: $t("palette.documents"), shortcut: "F1", run: () => openDocs(currentSection()) },
@@ -2175,6 +2180,20 @@
     settings.saveColorRules(rules);
   }
 
+  /** Open the folder-compare view (CPE-779). Pre-fills the two paths when exactly two folders are
+      selected; otherwise the user types/pastes them in the dialog. */
+  function openCompare() {
+    const dirs = selectedEntries.filter((e) => e.is_dir);
+    if (selectedEntries.length === 2 && dirs.length === 2) {
+      compareLeft = dirs[0].path;
+      compareRight = dirs[1].path;
+    } else {
+      compareLeft = "";
+      compareRight = "";
+    }
+    compareOpen = true;
+  }
+
   /** Save an audit-log export (CPE-801) to a user-chosen file, reusing the tags-export save flow. */
   async function exportAuditToFile(payload: { format: string; ext: string; content: string }) {
     try {
@@ -3131,6 +3150,14 @@
     home={homePath}
     on:export={(e) => exportAuditToFile(e.detail)}
     on:cancel={() => (sessionHistoryOpen = false)}
+  />
+{/if}
+
+{#if compareOpen}
+  <CompareDialog
+    initialLeft={compareLeft}
+    initialRight={compareRight}
+    on:cancel={() => (compareOpen = false)}
   />
 {/if}
 

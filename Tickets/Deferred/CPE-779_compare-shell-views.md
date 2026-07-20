@@ -4,7 +4,7 @@ title: Unified compare shell — folder-tree + binary/hex compare views
 type: feature
 status: Deferred
 priority: medium
-component: Frontend
+component: Multiple
 tags: needs-prereq
 created: 2026-07-20
 closed:
@@ -19,12 +19,12 @@ binary pairs → a hex compare highlighting differences (consuming CPE-778 + CPE
 read_file_range); text pairs reuse the existing `diff.ts` renderer. Image compare is a future follow-up.
 
 ## Acceptance Criteria
-- [~] Selecting two folders opens a tree compare with added/removed/changed/identical status and drill-in.
-      *(diff engine `diffTrees` (CPE-777) + **new render-prep** `summarizeDiff` (header counts) & `flattenDiff` (virtualized rows + collapse/drill-in) landed & tested; the tree view that renders them is the attended GUI tail.)*
+- [x] Selecting two folders opens a tree compare with added/removed/changed/identical status and drill-in.
+      *(**shipped + GUI-verified** — `CompareDialog.svelte` over the new `scan_tree` backend + `diffTrees` / `summarizeDiff` / `flattenDiff`.)*
 - [ ] Selecting two binaries opens a hex compare with differing ranges highlighted.
-      *(`byteDiff` (CPE-778) + `hexdump` already supply the differing ranges; the hex-compare view is the GUI tail.)*
+      *(`byteDiff` (CPE-778) + `hexdump` supply the ranges; the hex-compare view is a follow-up — see below.)*
 - [~] Text pairs reuse the existing diff renderer; large inputs stay responsive; check + suite green; GUI-verified.
-      *(`npm run check` clean + vitest 10/10 now; the views + **GUI-verified** are attended.)*
+      *(folder view `npm run check` clean + GUI-verified; the text-compare view is a follow-up.)*
 
 ## Notes
 Prereq: CPE-777, CPE-778. Attended GUI. Launch from a two-item selection (context menu / command).
@@ -55,10 +55,28 @@ Prereq: CPE-777, CPE-778. Attended GUI. Launch from a two-item selection (contex
   - *revisit-when:* an attended session — build the tree view over `flattenDiff`/`summarizeDiff`, the hex
     compare over `byteDiff`, wire the two-item-selection launch, and GUI-verify. No external gate.
 
-## Resolution (partial — folder-compare render-prep landed, views deferred)
-Added `summarizeDiff` + `flattenDiff` to `src/lib/treeDiff.ts` — the pure render-prep the folder-tree
-compare view is a thin layer over: header status counts and a flatten-to-rows (depth + `/`-joined path +
-`hasChildren`) that honors a `collapsed` set for expand/collapse & drill-in without re-diffing. With the
-existing `diffTrees`/`byteDiff`/`hexdump` engines, the compare *logic* is complete and unit-tested (10
-cases in treeDiff); only the three attended views + the two-item-selection launch + GUI verification remain.
-Deferred with a turnkey revisit note.
+- 2026-07-20 (attended GUI, dev-app verify) — Built + verified the **folder-tree compare view** (AC1):
+  - Backend `scan_tree(path, max_depth)` — recursive scan into a `CompareNode`-shaped tree (files carry
+    size + epoch-ms mtime; dirs carry children; symlinks skipped; depth-capped). 2 cargo tests; clippy
+    clean both modes.
+  - `src/lib/components/CompareDialog.svelte` — two editable folder-path fields (pre-filled from a
+    two-folder selection via `openCompare`, else typed) → scans both (`scan_tree`) → `diffTrees` →
+    renders `flattenDiff` rows with per-node status colour + a `summarizeDiff` header, dir rows
+    expand/collapse (drill-in). Opened from the command palette ("Compare folders…", all 12 locales).
+  - **GUI-verified (CDP):** built a controlled pair on disk (identical file w/ matched mtime, a
+    size-changed file, an only-A and an only-B file, an identical nested file) → the header showed
+    `+1 −1 ~1 =2` (exact) and every node carried the right status (added/removed/changed/identical,
+    dirs-first); collapsing `sub` hid its child and re-expanding restored it. Cleaned up the test pair.
+  - `npm run check` clean; treeDiff 11 tests; full suite green.
+
+## Resolution (partial — folder-tree compare shipped + verified; hex/text views follow-up)
+Shipped the **folder-tree compare** (AC1): the new `scan_tree` backend feeds `CompareDialog.svelte`, which
+diffs two folders (`diffTrees`), renders the classified tree (`flattenDiff` rows + per-node status), heads
+it with `summarizeDiff` counts, and supports expand/collapse drill-in. Opened from the palette (pre-filled
+from a two-folder selection). GUI-verified end-to-end in the running app with a controlled diff pair.
+
+Deferred tail (AC2 + AC3), each a thin view over already-tested engines:
+- **Binary hex compare** — highlight `byteDiff` (CPE-778) differing ranges over `hexdump` + `read_file_range`.
+- **Text compare** — reuse the existing `diff.ts` renderer for two text files.
+- *revisit-when:* an attended session — add a hex-compare + text-compare view and a type-dispatch that picks
+  folder/binary/text based on the two selected items. No external gate.
