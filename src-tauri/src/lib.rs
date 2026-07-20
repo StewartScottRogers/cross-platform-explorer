@@ -1664,6 +1664,49 @@ async fn file_len(path: String) -> Result<u64, String> {
     .map_err(|e| e.to_string())?
 }
 
+/// Set POSIX permission bits (chmod) on a file, returning the prior low-9-bit mode for undo (CPE-785).
+/// Unix only — Windows uses attribute toggles (`set_readonly` + future attrs) instead.
+#[cfg(unix)]
+#[tauri::command]
+async fn set_permissions(path: String, mode: u32) -> Result<u32, String> {
+    tauri::async_runtime::spawn_blocking(move || set_permissions_impl(path, mode))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+#[cfg(unix)]
+fn set_permissions_impl(path: String, mode: u32) -> Result<u32, String> {
+    use std::os::unix::fs::PermissionsExt;
+    let mut perms = fs::metadata(&path).map_err(|e| e.to_string())?.permissions();
+    let prior = perms.mode() & 0o777;
+    perms.set_mode((perms.mode() & !0o777) | (mode & 0o777));
+    fs::set_permissions(&path, perms).map_err(|e| e.to_string())?;
+    Ok(prior)
+}
+
+#[cfg(not(unix))]
+#[tauri::command]
+async fn set_permissions(path: String, mode: u32) -> Result<u32, String> {
+    let _ = (path, mode);
+    Err("POSIX permissions aren't available on this platform.".to_string())
+}
+
+/// Toggle a file's read-only flag (cross-platform), returning the prior state for undo (CPE-785).
+#[tauri::command]
+async fn set_readonly(path: String, readonly: bool) -> Result<bool, String> {
+    tauri::async_runtime::spawn_blocking(move || set_readonly_impl(path, readonly))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+fn set_readonly_impl(path: String, readonly: bool) -> Result<bool, String> {
+    let mut perms = fs::metadata(&path).map_err(|e| e.to_string())?.permissions();
+    let prior = perms.readonly();
+    perms.set_readonly(readonly);
+    fs::set_permissions(&path, perms).map_err(|e| e.to_string())?;
+    Ok(prior)
+}
+
 /// Rename a single entry in place. Returns the new path.
 #[tauri::command]
 async fn rename_entry(path: String, new_name: String) -> Result<String, String> {
@@ -6145,6 +6188,8 @@ pub fn run() {
             read_file_text,
             read_file_range,
             file_len,
+            set_permissions,
+            set_readonly,
             write_file_text,
             read_archive_entries,
             read_preview_info,
@@ -6746,6 +6791,36 @@ mod tests {
         assert_eq!(read_file_range_impl(p.clone(), 999, 5).unwrap(), Vec::<u8>::new());
         // zero len -> empty
         assert_eq!(read_file_range_impl(p, 0, 0).unwrap(), Vec::<u8>::new());
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn set_readonly_toggles_and_returns_prior() {
+        let d = scratch("set_ro");
+        let f = d.join("f.txt");
+        fs::write(&f, b"x").unwrap();
+        let p = f.to_string_lossy().to_string();
+        // set read-only; prior was writable (false)
+        assert!(!set_readonly_impl(p.clone(), true).unwrap());
+        assert!(fs::metadata(&f).unwrap().permissions().readonly());
+        // clear it; prior was read-only (true)
+        assert!(set_readonly_impl(p, false).unwrap());
+        assert!(!fs::metadata(&f).unwrap().permissions().readonly());
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn set_permissions_chmods_and_returns_prior_mode() {
+        use std::os::unix::fs::PermissionsExt;
+        let d = scratch("set_perm");
+        let f = d.join("f.txt");
+        fs::write(&f, b"x").unwrap();
+        fs::set_permissions(&f, fs::Permissions::from_mode(0o644)).unwrap();
+        let p = f.to_string_lossy().to_string();
+        // chmod 600; prior mode returned is 0o644
+        assert_eq!(set_permissions_impl(p, 0o600).unwrap(), 0o644);
+        assert_eq!(fs::metadata(&f).unwrap().permissions().mode() & 0o777, 0o600);
         let _ = fs::remove_dir_all(&d);
     }
 
