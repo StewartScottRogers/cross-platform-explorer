@@ -1982,26 +1982,64 @@ async fn copy_entries(paths: Vec<String>, dest: String) -> Vec<OpResult> {
         .await.unwrap()
 }
 
+/// Copy `src` into `dest_dir` (auto-renaming on collision), returning the path actually written. The
+/// single source of truth for a copy-into-folder, shared by the bulk copy command and the watch executor.
+fn do_copy_into(src: &Path, dest_dir: &Path) -> Result<PathBuf, String> {
+    let file_name = src
+        .file_name()
+        .and_then(|n| n.to_str())
+        .ok_or_else(|| "Invalid file name".to_string())?;
+    if src.is_dir() && is_self_or_descendant(src, dest_dir) {
+        return Err("Cannot copy a folder into itself".to_string());
+    }
+    let target = unique_target(dest_dir, file_name);
+    let result = if src.is_dir() {
+        copy_dir_all(src, &target)
+    } else {
+        fs::copy(src, &target).map(|_| ())
+    };
+    result.map(|()| target).map_err(|e| e.to_string())
+}
+
+/// Move `src` into `dest_dir` (auto-renaming on collision), returning the path actually written. Falls
+/// back to copy-then-delete across filesystem boundaries (never deletes the source on a failed copy).
+/// Shared by the bulk move command and the watch executor.
+fn do_move_into(src: &Path, dest_dir: &Path) -> Result<PathBuf, String> {
+    let file_name = src
+        .file_name()
+        .and_then(|n| n.to_str())
+        .ok_or_else(|| "Invalid file name".to_string())?;
+    if src.is_dir() && is_self_or_descendant(src, dest_dir) {
+        return Err("Cannot move a folder into itself".to_string());
+    }
+    let target = unique_target(dest_dir, file_name);
+    if fs::rename(src, &target).is_ok() {
+        return Ok(target);
+    }
+    // Cross-volume move: copy, then remove the original only if the copy fully succeeded.
+    let copied = if src.is_dir() {
+        copy_dir_all(src, &target)
+    } else {
+        fs::copy(src, &target).map(|_| ())
+    };
+    copied.map_err(|e| e.to_string())?;
+    let removed = if src.is_dir() {
+        fs::remove_dir_all(src)
+    } else {
+        fs::remove_file(src)
+    };
+    removed.map_err(|e| format!("Copied, but could not remove original: {e}"))?;
+    Ok(target)
+}
+
 fn copy_entries_impl(paths: Vec<String>, dest: String) -> Vec<OpResult> {
     let dest_dir = PathBuf::from(&dest);
     paths
         .iter()
         .map(|p| {
             let src = Path::new(p);
-            let Some(file_name) = src.file_name().and_then(|n| n.to_str()) else {
-                return OpResult::err(src, "Invalid file name");
-            };
-            if src.is_dir() && is_self_or_descendant(src, &dest_dir) {
-                return OpResult::err(src, "Cannot copy a folder into itself");
-            }
-            let target = unique_target(&dest_dir, file_name);
-            let result = if src.is_dir() {
-                copy_dir_all(src, &target)
-            } else {
-                fs::copy(src, &target).map(|_| ())
-            };
-            match result {
-                Ok(()) => OpResult::ok(&target),
+            match do_copy_into(src, &dest_dir) {
+                Ok(target) => OpResult::ok(&target),
                 Err(e) => OpResult::err(src, e),
             }
         })
@@ -2023,41 +2061,62 @@ fn move_entries_impl(paths: Vec<String>, dest: String) -> Vec<OpResult> {
         .iter()
         .map(|p| {
             let src = Path::new(p);
-            let Some(file_name) = src.file_name().and_then(|n| n.to_str()) else {
-                return OpResult::err(src, "Invalid file name");
-            };
-            if src.is_dir() && is_self_or_descendant(src, &dest_dir) {
-                return OpResult::err(src, "Cannot move a folder into itself");
-            }
-            let target = unique_target(&dest_dir, file_name);
-
-            if fs::rename(src, &target).is_ok() {
-                return OpResult::ok(&target);
-            }
-
-            // Cross-volume move: copy, then remove the original only if the
-            // copy fully succeeded. Never delete the source on a failed copy.
-            let copied = if src.is_dir() {
-                copy_dir_all(src, &target)
-            } else {
-                fs::copy(src, &target).map(|_| ())
-            };
-            match copied {
-                Ok(()) => {
-                    let removed = if src.is_dir() {
-                        fs::remove_dir_all(src)
-                    } else {
-                        fs::remove_file(src)
-                    };
-                    match removed {
-                        Ok(()) => OpResult::ok(&target),
-                        Err(e) => OpResult::err(src, format!("Copied, but could not remove original: {e}")),
-                    }
-                }
+            match do_move_into(src, &dest_dir) {
+                Ok(target) => OpResult::ok(&target),
                 Err(e) => OpResult::err(src, e),
             }
         })
         .collect()
+}
+
+// ---- Watched-folder action executor (CPE-794, epic CPE-734) ---------------------------------------
+// Executes the resolved action pipeline the frontend planner (watchRules.planForEntry, CPE-793) produced
+// for a file that landed in a watched folder — deterministic filesystem moves only (move / copy / rename;
+// the `tag` action is app metadata applied via the tag store, not here). Actions run in order over the
+// file, so a `move`/`rename` updates the working path for later steps and a `copy` leaves the original in
+// place; each step yields a per-action `OpResult` (never all-or-nothing). Reuses `do_move_into` /
+// `do_copy_into` / `rename_entry_impl`. The live `notify` watcher that *fires* this (with oscillation
+// guarding) is the integration tail — this is the headless, unit-tested core.
+
+/// One resolved watch action to execute: `kind` is `move` | `copy` | `rename`; `resolved` is the
+/// destination directory (move/copy) or the new file name (rename), already expanded by the planner.
+#[derive(serde::Deserialize)]
+struct WatchAction {
+    kind: String,
+    resolved: String,
+}
+
+/// Execute a landed file's resolved action pipeline. See the module comment. Async per the commands rule.
+#[tauri::command]
+async fn run_watch_actions(path: String, actions: Vec<WatchAction>) -> Vec<OpResult> {
+    tauri::async_runtime::spawn_blocking(move || run_watch_actions_impl(path, actions))
+        .await
+        .unwrap_or_default()
+}
+
+fn run_watch_actions_impl(path: String, actions: Vec<WatchAction>) -> Vec<OpResult> {
+    let mut current = PathBuf::from(&path);
+    let mut out = Vec::with_capacity(actions.len());
+    for action in &actions {
+        let result: Result<PathBuf, String> = match action.kind.as_str() {
+            "move" => do_move_into(&current, Path::new(&action.resolved)),
+            "copy" => do_copy_into(&current, Path::new(&action.resolved)),
+            "rename" => rename_entry_impl(current.to_string_lossy().to_string(), action.resolved.clone())
+                .map(PathBuf::from),
+            other => Err(format!("unknown watch action: {other}")),
+        };
+        match result {
+            Ok(new_path) => {
+                out.push(OpResult::ok(&new_path));
+                // move/rename relocate the file; a copy leaves the original where it is.
+                if action.kind == "move" || action.kind == "rename" {
+                    current = new_path;
+                }
+            }
+            Err(e) => out.push(OpResult::err(&current, e)),
+        }
+    }
+    out
 }
 
 // ---- Transfer engine (CPE-620, epic CPE-613) -------------------------------------------------
@@ -6586,6 +6645,7 @@ pub fn run() {
             restore_from_trash,
             copy_entries,
             move_entries,
+            run_watch_actions,
             start_transfer,
             cancel_transfer,
             move_exact,
@@ -8100,6 +8160,77 @@ mod tests {
         let dst = d.join("dst");
         copy_dir_all(&src, &dst).unwrap();
         assert_eq!(fs::read(dst.join("a/b/leaf.txt")).unwrap(), b"leaf");
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    fn wa(kind: &str, resolved: &str) -> WatchAction {
+        WatchAction { kind: kind.to_string(), resolved: resolved.to_string() }
+    }
+
+    #[test]
+    fn watch_actions_move_copy_rename_over_a_landed_file() {
+        let d = scratch("watch_exec");
+        let src_dir = d.join("in");
+        let sorted = d.join("sorted");
+        fs::create_dir_all(&src_dir).unwrap();
+        fs::create_dir_all(&sorted).unwrap();
+
+        // move: file lands in `in/`, rule moves it into `sorted/`.
+        let f = src_dir.join("a.txt");
+        fs::write(&f, b"hi").unwrap();
+        let r = run_watch_actions_impl(f.to_string_lossy().to_string(), vec![wa("move", &sorted.to_string_lossy())]);
+        assert!(r.iter().all(|x| x.ok), "{r:?}");
+        assert!(!f.exists() && sorted.join("a.txt").exists()); // moved, original gone
+
+        // copy: original stays put, a copy appears in `sorted/`.
+        let g = src_dir.join("b.txt");
+        fs::write(&g, b"yo").unwrap();
+        run_watch_actions_impl(g.to_string_lossy().to_string(), vec![wa("copy", &sorted.to_string_lossy())]);
+        assert!(g.exists() && sorted.join("b.txt").exists()); // both exist
+
+        // rename: in place, new name in same dir.
+        let h = src_dir.join("c.log");
+        fs::write(&h, b"x").unwrap();
+        run_watch_actions_impl(h.to_string_lossy().to_string(), vec![wa("rename", "c.txt")]);
+        assert!(!h.exists() && src_dir.join("c.txt").exists());
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn watch_actions_pipeline_threads_the_updated_path() {
+        // rename → move: the move must act on the *renamed* file, so the pipeline threads the new path.
+        let d = scratch("watch_pipe");
+        let src_dir = d.join("in");
+        let dest = d.join("out");
+        fs::create_dir_all(&src_dir).unwrap();
+        fs::create_dir_all(&dest).unwrap();
+        let f = src_dir.join("raw.dat");
+        fs::write(&f, b"data").unwrap();
+
+        let r = run_watch_actions_impl(
+            f.to_string_lossy().to_string(),
+            vec![wa("rename", "final.dat"), wa("move", &dest.to_string_lossy())],
+        );
+        assert!(r.iter().all(|x| x.ok), "{r:?}");
+        assert!(dest.join("final.dat").exists()); // renamed THEN moved under the new name
+        assert!(!src_dir.join("raw.dat").exists() && !src_dir.join("final.dat").exists());
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn watch_actions_report_unknown_action_per_step_without_aborting() {
+        let d = scratch("watch_unknown");
+        fs::create_dir_all(&d).unwrap();
+        let f = d.join("a.txt");
+        fs::write(&f, b"z").unwrap();
+        let r = run_watch_actions_impl(
+            f.to_string_lossy().to_string(),
+            vec![wa("frobnicate", "whatever"), wa("rename", "b.txt")],
+        );
+        assert_eq!(r.len(), 2);
+        assert!(!r[0].ok); // unknown action errored
+        assert!(r[1].ok); // but the pipeline continued and the rename still ran
+        assert!(d.join("b.txt").exists());
         let _ = fs::remove_dir_all(&d);
     }
 
