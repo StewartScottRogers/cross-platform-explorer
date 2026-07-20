@@ -19,6 +19,8 @@ import { parseRules, serializeRules } from "./colorRulesStore";
 import type { ColorRule } from "./colorRules";
 import { parseManifest } from "./integrity";
 import type { ChecksumEntry } from "./integrity";
+import { parseRules as parseWatchRules, serializeRules as serializeWatchRules } from "./watchRules";
+import type { WatchRule } from "./watchRules";
 
 export const KEYS = {
   view: "cpe.view",
@@ -38,6 +40,7 @@ export const KEYS = {
   diagnostics: "cpe.diagnostics",
   colorRules: "cpe.colorRules",
   integrityBaselines: "cpe.integrityBaselines",
+  watchRules: "cpe.watchRules",
 } as const;
 
 const MAX_RECENTS = 20;
@@ -225,6 +228,14 @@ export const loadIntegrityBaselines = (): Record<string, ChecksumEntry[]> => {
 };
 export const saveIntegrityBaselines = (m: Record<string, ChecksumEntry[]>): void =>
   write(KEYS.integrityBaselines, m);
+
+// Watched-folder rules (CPE-795, epic CPE-734): the ordered rule set, loaded through the tolerant
+// watchRules parser so a corrupt entry degrades rather than crashing. Opt-in — empty until the user adds one.
+export const loadWatchRules = (): WatchRule[] => {
+  const v = state[KEYS.watchRules];
+  return v === undefined ? [] : parseWatchRules(serializeWatchRules(v as WatchRule[]));
+};
+export const saveWatchRules = (v: WatchRule[]): void => write(KEYS.watchRules, v);
 
 /** Reset every stored preference to its default (used by the app Settings gear). */
 export function resetSettings(): void {

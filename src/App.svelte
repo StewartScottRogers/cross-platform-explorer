@@ -118,6 +118,8 @@
   import SelectByDialog from "./lib/components/SelectByDialog.svelte";
   import { selectMatching } from "./lib/selectMatch";
   import type { Condition } from "./lib/colorRules";
+  import WatchRulesDialog from "./lib/components/WatchRulesDialog.svelte";
+  import type { WatchRule } from "./lib/watchRules";
   import {
     pushUndo, popUndo, canUndo, peekLabel, invert, deletedPaths, type UndoEntry,
   } from "./lib/undo";
@@ -277,6 +279,8 @@
   let integrityOpen = false;
   let integrityBaselines: Record<string, ChecksumEntry[]> = settings.loadIntegrityBaselines();
   let selectByOpen = false;
+  let watchRulesOpen = false;
+  let watchRules: WatchRule[] = settings.loadWatchRules();
   let search = "";
   /** Active sidebar Tags filter — show only entries carrying this tag (CPE-639); "" = off. */
   let selectedTag = "";
@@ -424,6 +428,7 @@
     { id: "tool.compareFolders", group: $t("palette.groupTools"), label: $t("palette.compareFolders"), keywords: "diff compare folders directories tree", run: openCompare },
     { id: "tool.integrity", group: $t("palette.groupTools"), label: $t("palette.integrity"), keywords: "integrity checksum bitrot corruption verify baseline", run: () => (integrityOpen = true) },
     { id: "tool.selectBy", group: $t("palette.groupTools"), label: $t("palette.selectBy"), keywords: "select by criteria extension size date filter", run: () => (selectByOpen = true), enabled: inFolder },
+    { id: "tool.watchRules", group: $t("palette.groupTools"), label: $t("palette.watchRules"), keywords: "watch rules folder automation move copy tag rename", run: () => (watchRulesOpen = true) },
     { id: "tool.aiConsole", group: $t("palette.groupTools"), label: $t("palette.openAiConsole"), run: () => openAiConsole(), enabled: () => aiConsoleAvailable },
     { id: "app.settings", group: $t("palette.groupApp"), label: $t("palette.settings"), run: () => (showSettings = true) },
     { id: "app.documents", group: $t("palette.groupApp"), label: $t("palette.documents"), shortcut: "F1", run: () => openDocs(currentSection()) },
@@ -3187,6 +3192,14 @@
   <SelectByDialog
     on:submit={(e) => applySelectBy(e.detail)}
     on:cancel={() => (selectByOpen = false)}
+  />
+{/if}
+
+{#if watchRulesOpen}
+  <WatchRulesDialog
+    rules={watchRules}
+    on:save={(e) => { watchRules = e.detail; settings.saveWatchRules(watchRules); watchRulesOpen = false; }}
+    on:cancel={() => (watchRulesOpen = false)}
   />
 {/if}
 

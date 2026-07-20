@@ -36,3 +36,4 @@ catalog-out/
 
 # Bundled sidecar binary staged for release (built in CI / locally)
 src-tauri/sidecars/
+.aider*

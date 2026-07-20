@@ -78,6 +78,17 @@ export function setRuleEnabled(list: WatchRule[], id: string, enabled: boolean):
 export function updateRule(list: WatchRule[], id: string, patch: Partial<Omit<WatchRule, "id">>): WatchRule[] {
   return list.map((r) => (r.id === id ? { ...r, ...patch } : r));
 }
+/** Move a rule one step earlier (`dir < 0`) / later (`dir > 0`) — precedence order (first match wins).
+    Clamped at the ends; unknown id / `dir === 0` → a no-op copy. */
+export function moveRule(list: WatchRule[], id: string, dir: number): WatchRule[] {
+  const i = list.findIndex((r) => r.id === id);
+  if (i === -1 || dir === 0) return [...list];
+  const j = dir < 0 ? i - 1 : i + 1;
+  if (j < 0 || j >= list.length) return [...list];
+  const next = [...list];
+  [next[i], next[j]] = [next[j], next[i]];
+  return next;
+}
 
 const isRule = (x: unknown): x is WatchRule => {
   if (!x || typeof x !== "object") return false;
