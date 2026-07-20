@@ -4133,6 +4133,78 @@ fn open_terminal_impl(path: String) -> Result<(), String> {
     }
 }
 
+// ---- User-defined command exec (CPE-783, epic CPE-711) --------------------------------------------
+// Runs a user's resolved command line (built by userCommands.resolveCommand / cmdTemplate, CPE-781) and
+// returns its captured output + exit code. Executed through the platform shell (`cmd /C` on Windows,
+// `sh -c` elsewhere) so a normal command string with pipes/quotes works as the user expects. This is an
+// external-process launch, so the frontend MUST confirm the resolved command with the user BEFORE calling
+// (the ticket's hard requirement) — this backend is the thin, gated executor, never invoked implicitly.
+// Output is capped per stream so a chatty command can't balloon memory.
+
+/// Captured result of a user command run.
+#[derive(serde::Serialize)]
+struct CommandOutput {
+    stdout: String,
+    stderr: String,
+    /// Process exit code, or `None` if it was terminated by a signal.
+    code: Option<i32>,
+    /// True when either stream was truncated at the cap.
+    truncated: bool,
+}
+
+/// Max bytes captured per stream (stdout/stderr) before truncation.
+const COMMAND_OUTPUT_CAP: usize = 1024 * 1024;
+
+/// Truncate raw bytes to `cap` then lossily decode (a split multibyte at the cut becomes U+FFFD, never a
+/// panic). Returns the string and whether it was truncated.
+fn capped_string(mut bytes: Vec<u8>, cap: usize) -> (String, bool) {
+    let truncated = bytes.len() > cap;
+    if truncated {
+        bytes.truncate(cap);
+    }
+    (String::from_utf8_lossy(&bytes).into_owned(), truncated)
+}
+
+/// Run a resolved user command line through the platform shell and capture its output (CPE-783). The
+/// frontend confirms the command with the user first — see the module comment. Async per the commands rule.
+#[tauri::command]
+async fn run_command(command: String, cwd: Option<String>) -> Result<CommandOutput, String> {
+    tauri::async_runtime::spawn_blocking(move || run_command_impl(command, cwd))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+fn run_command_impl(command: String, cwd: Option<String>) -> Result<CommandOutput, String> {
+    if command.trim().is_empty() {
+        return Err("Command is empty".to_string());
+    }
+    use std::process::Command;
+    #[cfg(windows)]
+    let mut cmd = {
+        let mut c = Command::new("cmd");
+        c.args(["/C", &command]);
+        c
+    };
+    #[cfg(not(windows))]
+    let mut cmd = {
+        let mut c = Command::new("sh");
+        c.args(["-c", &command]);
+        c
+    };
+    if let Some(dir) = cwd.as_deref().filter(|d| !d.is_empty()) {
+        cmd.current_dir(dir);
+    }
+    let output = cmd.output().map_err(|e| e.to_string())?;
+    let (stdout, o_trunc) = capped_string(output.stdout, COMMAND_OUTPUT_CAP);
+    let (stderr, e_trunc) = capped_string(output.stderr, COMMAND_OUTPUT_CAP);
+    Ok(CommandOutput {
+        stdout,
+        stderr,
+        code: output.status.code(),
+        truncated: o_trunc || e_trunc,
+    })
+}
+
 /// Extract a single entry from a ZIP to a temp file and return its path, so it
 /// can be opened with its default app while browsing inside the archive
 /// (CPE-242). Read-only: the temp copy is what opens, not the archived bytes.
@@ -6680,6 +6752,7 @@ pub fn run() {
             compress_to_zip,
             extract_archive,
             open_terminal,
+            run_command,
             create_file,
             #[cfg(feature = "sidecar-platform")]
             sidecar_registry_ids,
@@ -8165,6 +8238,37 @@ mod tests {
 
     fn wa(kind: &str, resolved: &str) -> WatchAction {
         WatchAction { kind: kind.to_string(), resolved: resolved.to_string() }
+    }
+
+    #[test]
+    fn run_command_captures_stdout_and_zero_exit() {
+        // `echo hello` works under both cmd /C and sh -c; output has a trailing newline (\r\n or \n).
+        let out = run_command_impl("echo hello".to_string(), None).unwrap();
+        assert!(out.stdout.contains("hello"), "stdout was {:?}", out.stdout);
+        assert_eq!(out.code, Some(0));
+        assert!(!out.truncated);
+    }
+
+    #[test]
+    fn run_command_reports_a_nonzero_exit_code() {
+        // `exit 3` sets the shell's exit status on both platforms.
+        let out = run_command_impl("exit 3".to_string(), None).unwrap();
+        assert_eq!(out.code, Some(3));
+    }
+
+    #[test]
+    fn run_command_rejects_an_empty_command() {
+        assert!(run_command_impl("   ".to_string(), None).is_err());
+    }
+
+    #[test]
+    fn capped_string_truncates_at_the_byte_cap() {
+        let (s, trunc) = capped_string(vec![b'a'; 100], 10);
+        assert_eq!(s.len(), 10);
+        assert!(trunc);
+        let (s2, trunc2) = capped_string(vec![b'a'; 5], 10);
+        assert_eq!(s2, "aaaaa");
+        assert!(!trunc2);
     }
 
     #[test]
