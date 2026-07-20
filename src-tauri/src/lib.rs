@@ -26,6 +26,11 @@ mod models_egress;
 #[cfg(feature = "sidecar-platform")]
 mod agent_shadow;
 
+/// On-disk append-only session audit journal (CPE-800, epic CPE-733): durably records Agent Watch
+/// filesystem-activity events per session as JSON-lines, bounded/rotated, and reads past sessions back.
+/// Pure helpers over a base dir; the `audit_*` commands below are the thin I/O shell around it.
+mod audit_journal;
+
 /// Agent Board backend (CPE-520): read the repo's `Tickets/` folders as Kanban cards + move a card
 /// between columns. Pure card/frontmatter logic lives here; the commands below do the file I/O.
 mod ticket_board;
@@ -2838,6 +2843,60 @@ fn drive_type_impl(path: &str) -> String {
 fn drive_type_impl(_path: &str) -> String {
     // Best-effort until unix mount-type classification lands (a follow-up).
     "fixed".to_string()
+}
+
+// ---- Session audit journal (CPE-800, epic CPE-733) ------------------------------------------------
+// Thin I/O shell over the `audit_journal` module: record an Agent Watch activity event to a durable
+// per-session JSON-lines journal under the app-data dir, and list / read past sessions back for the
+// history browser + export (CPE-799 / CPE-801). Async (spawn_blocking) per the async-commands rule; the
+// journal is only touched when the frontend records activity, so it costs nothing when Agent Watch is off.
+
+/// Resolve (and create) the journal directory under the app-data dir.
+fn audit_dir(app: &tauri::AppHandle) -> Result<std::path::PathBuf, String> {
+    use tauri::Manager;
+    let dir = app.path().app_data_dir().map_err(|e| e.to_string())?.join("audit");
+    Ok(dir)
+}
+
+/// Append one filesystem-activity event to its session journal (bounded/rotated). `ts` is stamped here
+/// (server-side epoch ms) so callers can't skew the log.
+#[tauri::command]
+async fn audit_record(
+    app: tauri::AppHandle,
+    session: String,
+    kind: String,
+    path: String,
+    detail: Option<String>,
+) -> Result<(), String> {
+    let dir = audit_dir(&app)?;
+    let ts = to_epoch_ms(SystemTime::now()).unwrap_or(0);
+    let event = audit_journal::AuditEvent { ts, session, kind, path, detail };
+    tauri::async_runtime::spawn_blocking(move || {
+        audit_journal::record(&dir, &event, audit_journal::MAX_EVENTS_PER_SESSION)
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+/// List the session ids that have a persisted journal (most useful sorted; newest-first is the UI's job).
+#[tauri::command]
+async fn audit_sessions(app: tauri::AppHandle) -> Result<Vec<String>, String> {
+    let dir = audit_dir(&app)?;
+    tauri::async_runtime::spawn_blocking(move || audit_journal::list_sessions(&dir))
+        .await
+        .map_err(|e| e.to_string())
+}
+
+/// Read every event for one past session back (append order; malformed lines skipped).
+#[tauri::command]
+async fn audit_read(
+    app: tauri::AppHandle,
+    session: String,
+) -> Result<Vec<audit_journal::AuditEvent>, String> {
+    let dir = audit_dir(&app)?;
+    tauri::async_runtime::spawn_blocking(move || audit_journal::read_session(&dir, &session))
+        .await
+        .map_err(|e| e.to_string())
 }
 
 /// Line / word / character / byte counts for a text file (CPE-414). Lines follow `str::lines`
@@ -6439,6 +6498,9 @@ pub fn run() {
             create_symlink,
             create_hard_link,
             drive_type,
+            audit_record,
+            audit_sessions,
+            audit_read,
             text_stats,
             search_file_contents,
             find_files_by_name,
