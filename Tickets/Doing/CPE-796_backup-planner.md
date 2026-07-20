@@ -2,7 +2,7 @@
 id: CPE-796
 title: Pure backup model + incremental planner
 type: feature
-status: Open
+status: In Progress
 priority: medium
 component: Frontend
 tags: ready
@@ -25,9 +25,16 @@ folder-tree diff — so the copy engine (CPE-797) and dashboard (CPE-798, dry-ru
 - Pure + total.
 
 ## Acceptance Criteria
-- [ ] `planBackup` classifies copy/update/delete/unchanged correctly incl. nested dirs; delete only in mirror mode.
-- [ ] `BackupJob` CRUD immutable; parse tolerant; serialize round-trips.
-- [ ] Pure + dependency-light; unit tests cover planning + CRUD + parse; check + suite green.
+- [x] `planBackup` classifies copy/update/delete/unchanged correctly incl. nested dirs; delete only in mirror mode.
+- [x] `BackupJob` CRUD immutable; parse tolerant; serialize round-trips.
+- [x] Pure + dependency-light; unit tests cover planning + CRUD + parse; check + suite green.
 
 ## Notes
 Reuses `treeDiff.ts` (CPE-777). Foundation for CPE-797/798. Headless.
+
+## Resolution
+Added `src/lib/backup.ts` (pure): `planBackup(source, dest, mirror)` reuses CPE-777 `diffTrees` (dest→source)
+to produce `{copy, update, delete, unchanged}` relative-path lists (delete only in mirror mode; recurses
+into subdirs; whole new subtrees copied); `BackupJob` CRUD + tolerant parse/serialize. 6 tests. check 0/0.
+Headless; reuses treeDiff. Foundation for CPE-797/798.
+
