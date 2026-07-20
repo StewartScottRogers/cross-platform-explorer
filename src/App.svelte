@@ -111,6 +111,7 @@
   import * as settings from "./lib/settings";
   import type { ColorRule } from "./lib/colorRules";
   import ColorRulesDialog from "./lib/components/ColorRulesDialog.svelte";
+  import SessionHistoryDialog from "./lib/components/SessionHistoryDialog.svelte";
   import {
     pushUndo, popUndo, canUndo, peekLabel, invert, deletedPaths, type UndoEntry,
   } from "./lib/undo";
@@ -263,6 +264,7 @@
   /** Active rule-based coloring rule set (CPE-776, epic CPE-709); empty ⇒ rows unstyled. */
   let colorRules: ColorRule[] = settings.loadColorRules();
   let colorRulesOpen = false;
+  let sessionHistoryOpen = false;
   let search = "";
   /** Active sidebar Tags filter — show only entries carrying this tag (CPE-639); "" = off. */
   let selectedTag = "";
@@ -406,6 +408,7 @@
     { id: "tool.searchInFiles", group: $t("palette.groupTools"), label: $t("palette.searchInFiles"), shortcut: "Ctrl+Shift+F", run: () => (contentSearchOpen = true), enabled: inFolder },
     { id: "tool.findDuplicates", group: $t("palette.groupTools"), label: $t("palette.findDuplicates"), run: () => (duplicatesOpen = true), enabled: inFolder },
     { id: "tool.colorRules", group: $t("palette.groupTools"), label: $t("palette.colorRules"), keywords: "color rules highlight label", run: () => (colorRulesOpen = true) },
+    { id: "tool.sessionHistory", group: $t("palette.groupTools"), label: $t("palette.sessionHistory"), keywords: "audit log history export sessions activity", run: () => (sessionHistoryOpen = true) },
     { id: "tool.aiConsole", group: $t("palette.groupTools"), label: $t("palette.openAiConsole"), run: () => openAiConsole(), enabled: () => aiConsoleAvailable },
     { id: "app.settings", group: $t("palette.groupApp"), label: $t("palette.settings"), run: () => (showSettings = true) },
     { id: "app.documents", group: $t("palette.groupApp"), label: $t("palette.documents"), shortcut: "F1", run: () => openDocs(currentSection()) },
@@ -2172,6 +2175,21 @@
     settings.saveColorRules(rules);
   }
 
+  /** Save an audit-log export (CPE-801) to a user-chosen file, reusing the tags-export save flow. */
+  async function exportAuditToFile(payload: { format: string; ext: string; content: string }) {
+    try {
+      const path = await saveFileDialog({
+        defaultPath: `audit.${payload.ext}`,
+        filters: [{ name: payload.format.toUpperCase(), extensions: [payload.ext] }],
+      });
+      if (!path) return;
+      await invoke("write_file_text", { path, contents: payload.content });
+      showNotice(`Exported ${path.split(/[\\/]/).pop()}.`);
+    } catch (e) {
+      showNotice(String(e), true);
+    }
+  }
+
   /** Record a successfully-opened folder in the recently-visited MRU (CPE-342). */
   function recordRecentFolder(path: string) {
     const name = path.split(/[\\/]/).filter(Boolean).pop() ?? path;
@@ -3105,6 +3123,14 @@
     on:change={(e) => (colorRules = e.detail)}
     on:save={(e) => { applyColorRules(e.detail); colorRulesOpen = false; }}
     on:cancel={() => { colorRules = settings.loadColorRules(); colorRulesOpen = false; }}
+  />
+{/if}
+
+{#if sessionHistoryOpen}
+  <SessionHistoryDialog
+    home={homePath}
+    on:export={(e) => exportAuditToFile(e.detail)}
+    on:cancel={() => (sessionHistoryOpen = false)}
   />
 {/if}
 
