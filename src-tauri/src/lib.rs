@@ -1790,6 +1790,71 @@ async fn set_file_attribute(path: String, attr: String, value: bool) -> Result<b
     Err("Windows file attributes aren't available on this platform.".to_string())
 }
 
+// ---- Read a file's editable attributes (CPE-786, epic CPE-710) ------------------------------------
+// Current state for the attributes editor: Windows readonly/hidden/system/archive from GetFileAttributesW;
+// POSIX readonly (owner-write bit) + the octal mode string. The write side (set_readonly /
+// set_file_attribute / set_permissions, CPE-785) already exists — this is the missing read so the editor
+// can show current values before toggling.
+
+/// A file's editable attributes. Windows fills the four flag bits; POSIX fills `mode` (octal) + readonly.
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct FileAttributes {
+    readonly: bool,
+    hidden: bool,
+    system: bool,
+    archive: bool,
+    /// POSIX permission bits as an octal string (e.g. "644"); `None` on Windows.
+    mode: Option<String>,
+}
+
+#[tauri::command]
+async fn read_attributes(path: String) -> Result<FileAttributes, String> {
+    tauri::async_runtime::spawn_blocking(move || read_attributes_impl(&path))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+#[cfg(windows)]
+fn read_attributes_impl(path: &str) -> Result<FileAttributes, String> {
+    use windows::core::HSTRING;
+    use windows::Win32::Storage::FileSystem::GetFileAttributesW;
+    // Documented FILE_ATTRIBUTE_* bits (stable Win32 constants): READONLY=0x1, HIDDEN=0x2, SYSTEM=0x4,
+    // ARCHIVE=0x20 — matched numerically to avoid the windows-crate feature-gated const imports.
+    let wide = HSTRING::from(path);
+    // SAFETY: `wide` is a valid NUL-terminated wide string for the call.
+    let attrs = unsafe { GetFileAttributesW(&wide) };
+    if attrs == u32::MAX {
+        return Err("couldn't read file attributes".to_string());
+    }
+    Ok(FileAttributes {
+        readonly: attrs & 0x1 != 0,
+        hidden: attrs & 0x2 != 0,
+        system: attrs & 0x4 != 0,
+        archive: attrs & 0x20 != 0,
+        mode: None,
+    })
+}
+
+#[cfg(not(windows))]
+fn read_attributes_impl(path: &str) -> Result<FileAttributes, String> {
+    use std::os::unix::fs::PermissionsExt;
+    let meta = fs::metadata(path).map_err(|e| e.to_string())?;
+    let mode = meta.permissions().mode() & 0o777;
+    let hidden = Path::new(path)
+        .file_name()
+        .and_then(|n| n.to_str())
+        .map(|n| n.starts_with('.'))
+        .unwrap_or(false);
+    Ok(FileAttributes {
+        readonly: mode & 0o200 == 0, // no owner-write bit
+        hidden,
+        system: false,
+        archive: false,
+        mode: Some(format!("{mode:o}")),
+    })
+}
+
 /// Rename a single entry in place. Returns the new path.
 #[tauri::command]
 async fn rename_entry(path: String, new_name: String) -> Result<String, String> {
@@ -6759,6 +6824,7 @@ pub fn run() {
             set_readonly,
             set_file_times,
             set_file_attribute,
+            read_attributes,
             write_file_text,
             read_archive_entries,
             read_preview_info,
@@ -8302,6 +8368,24 @@ mod tests {
 
     fn wa(kind: &str, resolved: &str) -> WatchAction {
         WatchAction { kind: kind.to_string(), resolved: resolved.to_string() }
+    }
+
+    #[test]
+    fn read_attributes_reflects_readonly_toggle() {
+        let d = scratch("attrs");
+        let f = d.join("a.txt");
+        fs::write(&f, b"x").unwrap();
+        let p = f.to_string_lossy().to_string();
+        // a fresh file is writable (not readonly)
+        let before = read_attributes_impl(&p).unwrap();
+        assert!(!before.readonly);
+        // make it read-only via the platform-appropriate write path, then re-read
+        set_readonly_impl(p.clone(), true).unwrap();
+        assert!(read_attributes_impl(&p).unwrap().readonly);
+        // a normal file isn't hidden by a leading dot / attribute
+        assert!(!before.hidden);
+        set_readonly_impl(p.clone(), false).unwrap(); // restore so cleanup can delete it
+        let _ = fs::remove_dir_all(&d);
     }
 
     #[test]
