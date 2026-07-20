@@ -2,12 +2,12 @@
 id: CPE-802
 title: Backend link creation (symlink + hardlink)
 type: feature
-status: Open
+status: Done
 priority: low
 component: Backend
 tags: ready
 created: 2026-07-20
-closed:
+closed: 2026-07-20
 epic: CPE-715
 estimate: 1-2h
 ---
@@ -24,9 +24,18 @@ so the "New Link…" UI (CPE-803) is a thin call. Junctions and repair are a fol
 - Registered in `generate_handler!`; async + spawn_blocking.
 
 ## Acceptance Criteria
-- [ ] `create_hard_link` makes a working hardlink (same content); `create_symlink` makes a symlink to the target.
-- [ ] Failures return a clear OS error (esp. Windows symlink privilege); async (spawn_blocking).
-- [ ] cargo-tested (hardlink cross-platform; symlink on unix) on the CI matrix.
+- [x] `create_hard_link` makes a working hardlink (same content); `create_symlink` makes a symlink to the target.
+- [x] Failures return a clear OS error (esp. Windows symlink privilege); async (spawn_blocking).
+- [x] cargo-tested (hardlink cross-platform; symlink on unix) on the CI matrix.
 
 ## Notes
 Windows junctions deferred to CPE-804 (needs a reparse-point DeviceIoControl). Wired through lib/invoke by CPE-803.
+
+## Resolution
+Added `create_symlink(target, link_path)` (unix `symlink`; Windows `symlink_dir`/`symlink_file` with a
+clear "needs Developer Mode/elevation" error) and `create_hard_link(target, link_path)` (`fs::hard_link`),
+both async + spawn_blocking, registered in generate_handler. cargo tests: hardlink shares data
+(cross-platform), symlink points at target (`#[cfg(unix)]` to avoid Windows-privilege CI flakiness; the
+Windows path is compile-checked). clippy clean. Backend foundation for CPE-803 (New Link UI); junctions +
+repair are CPE-804.
+
