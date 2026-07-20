@@ -1,5 +1,6 @@
 <script lang="ts">
-  import { createEventDispatcher, tick } from "svelte";
+  import { createEventDispatcher, tick, onMount } from "svelte";
+  import { windowRange, ensureVisibleOffset } from "../virtualize";
   import Icon from "./Icon.svelte";
   import ThumbnailImage from "./ThumbnailImage.svelte";
   import { t } from "../i18n";
@@ -239,6 +240,91 @@
   // the drag case in particular was O(rows × selection) on every re-render.
   $: cutSet = new Set(cutPaths);
   $: draggedSet = new Set(draggedPaths);
+
+  // ── Virtualization (CPE-690, epic CPE-688) ────────────────────────────────────────────────────
+  // Render only the visible window of the DETAILS view for large folders, so a 10k-file folder paints
+  // in fixed cost instead of building a DOM node per entry. Grid views (icons/gallery) and folders below
+  // the threshold render in FULL, exactly as before — the common case pays nothing (PURPOSE.md). The
+  // `.rows` block keeps its true height via top/bottom spacer divs, so the ancestor `.filelist-pane`
+  // scroller and its sticky header behave unchanged. Rows carry their ABSOLUTE index, so every
+  // selection / rowEls / DnD / rename path below is untouched.
+  const VIRTUALIZE_THRESHOLD = 100;
+  const OVERSCAN_ROWS = 6;
+  let rowsEl: HTMLDivElement | undefined;
+  let scrollEl: HTMLElement | null = null;
+  let effScroll = 0; // px of `.rows` content scrolled above the scroller's top fold
+  let viewportH = 0;
+  let rowH = 30; // measured details row height (falls back to the --row-h default)
+  let rafPending = false;
+
+  $: virtualizeDetails = view === "details" && entries.length >= VIRTUALIZE_THRESHOLD;
+
+  $: win =
+    virtualizeDetails && rowH > 0 && viewportH > 0
+      ? windowRange(effScroll, viewportH, rowH, entries.length, 1, OVERSCAN_ROWS)
+      : { start: 0, end: entries.length, padTop: 0, padBottom: 0 };
+
+  $: windowed = virtualizeDetails
+    ? entries.slice(win.start, win.end).map((entry, k) => ({ entry, i: win.start + k }))
+    : entries.map((entry, i) => ({ entry, i }));
+
+  function measureGeometry() {
+    if (!scrollEl) return;
+    const cRect = scrollEl.getBoundingClientRect();
+    viewportH = cRect.height;
+    if (rowsEl) {
+      const rRect = rowsEl.getBoundingClientRect();
+      effScroll = Math.max(0, cRect.top - rRect.top);
+      const firstRow = rowsEl.querySelector<HTMLElement>(".row.view-details");
+      if (firstRow) {
+        const h = firstRow.getBoundingClientRect().height;
+        if (h > 0) rowH = h;
+      }
+    }
+  }
+
+  function onScrollOrResize() {
+    if (rafPending) return;
+    rafPending = true;
+    requestAnimationFrame(() => {
+      rafPending = false;
+      measureGeometry();
+    });
+  }
+
+  onMount(() => {
+    scrollEl = rowsEl?.closest<HTMLElement>(".filelist-pane") ?? null;
+    measureGeometry();
+    scrollEl?.addEventListener("scroll", onScrollOrResize, { passive: true });
+    // ResizeObserver isn't present in every environment (e.g. jsdom) — guard so mounting never throws.
+    let ro: ResizeObserver | undefined;
+    if (scrollEl && typeof ResizeObserver !== "undefined") {
+      ro = new ResizeObserver(onScrollOrResize);
+      ro.observe(scrollEl);
+    }
+    return () => {
+      scrollEl?.removeEventListener("scroll", onScrollOrResize);
+      ro?.disconnect();
+    };
+  });
+
+  // Re-measure after the folder/view changes (rows re-laid-out) so the window is correct on the next paint.
+  $: if (rowsEl) {
+    void entries.length;
+    void view;
+    tick().then(measureGeometry);
+  }
+
+  // When virtualizing, an OFF-window lead row isn't in the DOM, so App's `rowEls[lead].scrollIntoView`
+  // can't reach it — scroll the container to it instead. In-window leads are left to that existing
+  // scrollIntoView; non-virtualized behaviour is entirely untouched.
+  $: if (virtualizeDetails && rowH > 0 && viewportH > 0) ensureLeadVisibleVirtual(selection.lead);
+  function ensureLeadVisibleVirtual(lead: number) {
+    if (lead < 0 || !scrollEl) return;
+    if (lead >= win.start && lead < win.end) return; // in window → existing scrollIntoView handles it
+    const target = ensureVisibleOffset(lead, effScroll, viewportH, rowH, entries.length, 1);
+    if (target !== effScroll) scrollEl.scrollTop += target - effScroll;
+  }
 </script>
 
 {#if view === "details" && !error && !loading && entries.length > 0}
@@ -293,8 +379,11 @@
   </div>
 {:else}
   <!-- svelte-ignore a11y-no-static-element-interactions -->
-  <div class="rows" class:grid={view === "icons" || view === "gallery"} class:gallery={view === "gallery"} style="--filelist-cols: {colTemplate}" on:contextmenu={emptyContext}>
-    {#each entries as entry, i (entry.path)}
+  <div bind:this={rowsEl} class="rows" class:grid={view === "icons" || view === "gallery"} class:gallery={view === "gallery"} style="--filelist-cols: {colTemplate}" on:contextmenu={emptyContext}>
+    {#if virtualizeDetails && win.padTop > 0}
+      <div class="vspacer" style="height: {win.padTop}px" aria-hidden="true" />
+    {/if}
+    {#each windowed as { entry, i } (entry.path)}
       <!--
         The view class MUST stay namespaced as "view-{view}".
         Interpolating the bare view name gave every row the class `details`,
@@ -383,6 +472,9 @@
         {/if}
       </div>
     {/each}
+    {#if virtualizeDetails && win.padBottom > 0}
+      <div class="vspacer" style="height: {win.padBottom}px" aria-hidden="true" />
+    {/if}
   </div>
 {/if}
 
