@@ -122,7 +122,7 @@
   import type { WatchRule } from "./lib/watchRules";
   import { startFolderWatch, stopFolderWatch, undoFire, type WatchFire } from "./lib/folderWatch";
   import WorkspacesDialog from "./lib/components/WorkspacesDialog.svelte";
-  import type { Workspace, WorkspaceTab } from "./lib/workspaces";
+  import { pruneMissing, type Workspace, type WorkspaceTab } from "./lib/workspaces";
   import BackupDashboard from "./lib/components/BackupDashboard.svelte";
   import { planBackup, type BackupJob } from "./lib/backup";
   import type { CompareNode } from "./lib/treeDiff";
@@ -296,6 +296,10 @@
   let watchLog: WatchFire[] = [];
   let workspacesOpen = false;
   let workspaces: Workspace[] = settings.loadWorkspaces();
+  /** CPE-789: opt-in launch-time auto-restore of the last session. `sessionReady` gates capture until
+      after the restore attempt so the reactive save never clobbers the saved session with the default tab. */
+  let autoRestore = settings.loadAutoRestore();
+  let sessionReady = false;
   let backupOpen = false;
   let backupJobs: BackupJob[] = settings.loadBackupJobs();
   let backupHistory: Record<string, settings.BackupRunRecord[]> = settings.loadBackupHistory();
@@ -2295,6 +2299,46 @@
     loadPath((current(tabs[0].history) ?? HOME) as string);
   }
 
+  /** Launch-time auto-restore (CPE-789): if enabled and a last session was saved, reopen its tabs —
+      dropping any whose path no longer exists (moved/deleted) via `pruneMissing`, so restore never fails.
+      Returns whether it actually restored anything (so startup can fall back to the default HOME tab). */
+  async function restoreLastSession(): Promise<boolean> {
+    if (!autoRestore) return false;
+    const saved = settings.loadLastSession();
+    if (saved.length === 0) return false;
+    const existing = new Set<string>();
+    await Promise.all(
+      saved.map(async (t) => {
+        try {
+          await rawInvoke("entry_info", { path: t.path }); // rawInvoke: startup restore shows no busy cursor
+          existing.add(t.path);
+        } catch {
+          // path gone — pruneMissing drops it
+        }
+      }),
+    );
+    const pruned = pruneMissing({ id: "last", name: "last", tabs: saved }, (p) => existing.has(p));
+    if (pruned.tabs.length === 0) return false;
+    switchWorkspace(pruned); // reuses the workspace restore path (sets tabs + view/sort/filter + loads)
+    return true;
+  }
+
+  /** Enable/disable auto-restore (CPE-789). Turning it on immediately captures the current session so a
+      crash/close before the next navigation still has something to restore. */
+  function setAutoRestore(on: boolean) {
+    autoRestore = on;
+    settings.saveAutoRestore(on);
+    if (on) settings.saveLastSession(captureCurrentTabs());
+  }
+
+  // Continuously persist the open session once startup restore has run — but only while the feature is on,
+  // so with it off startup is byte-for-byte unchanged. Referencing the tab/view/sort/filter vars makes this
+  // reactive block re-run whenever any of them change.
+  $: if (sessionReady && autoRestore) {
+    void [tabs, currentPath, view, sortKey, sortDir, search];
+    settings.saveLastSession(captureCurrentTabs());
+  }
+
   /** (Re)start or stop the live watched-folder watcher to match the current config (CPE-794). Only the
       sidecar build has the backend; a no-op fails soft elsewhere. */
   async function reconcileWatch() {
@@ -2701,7 +2745,9 @@
       // Version is cosmetic (About dialog) — a failure must not break startup.
     }
 
-    await loadPath(HOME);
+    const restored = await restoreLastSession();
+    if (!restored) await loadPath(HOME);
+    sessionReady = true; // from here on, session changes are captured (CPE-789)
     checkForUpdates();
 
     // Auto-mirror scheduler (CPE-497): a 60s tick + a window-focus check. Both funnel through
@@ -3347,9 +3393,11 @@
 {#if workspacesOpen}
   <WorkspacesDialog
     {workspaces}
+    {autoRestore}
     currentTabs={captureCurrentTabs()}
     on:change={(e) => { workspaces = e.detail; settings.saveWorkspaces(workspaces); }}
     on:switch={(e) => switchWorkspace(e.detail)}
+    on:autoRestore={(e) => setAutoRestore(e.detail)}
     on:cancel={() => (workspacesOpen = false)}
   />
 {/if}

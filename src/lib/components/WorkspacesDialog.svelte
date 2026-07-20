@@ -11,8 +11,10 @@
   export let workspaces: Workspace[] = [];
   /** The current window's tabs, captured by App when the dialog opened. */
   export let currentTabs: WorkspaceTab[] = [];
+  /** CPE-789: whether the app reopens the last session on launch. */
+  export let autoRestore = false;
 
-  const dispatch = createEventDispatcher<{ change: Workspace[]; switch: Workspace; cancel: void }>();
+  const dispatch = createEventDispatcher<{ change: Workspace[]; switch: Workspace; cancel: void; autoRestore: boolean }>();
 
   let list: Workspace[] = workspaces.map((w) => ({ ...w, tabs: [...w.tabs] }));
   let newName = "";
@@ -77,6 +79,12 @@
       {/each}
     </div>
 
+    <label class="restore-row" title="Reopen the tabs you had open when you last closed the app">
+      <input type="checkbox" data-testid="autorestore-toggle" checked={autoRestore}
+             on:change={(e) => dispatch('autoRestore', e.currentTarget.checked)} />
+      Reopen last session on launch
+    </label>
+
     <div class="actions">
       <button class="btn primary" on:click={() => dispatch('cancel')}>Close</button>
     </div>
@@ -97,6 +105,7 @@
   .name:hover { background: var(--surface); }
   .count { flex: 0 0 auto; font-size: 11.5px; color: var(--text-dim); }
   .mini { width: 24px; height: 24px; border: 1px solid var(--border); border-radius: var(--radius); background: var(--surface); color: var(--text); }
+  .restore-row { display: flex; align-items: center; gap: 6px; margin-top: 14px; font-size: 12.5px; color: var(--text-dim); }
   .actions { display: flex; justify-content: flex-end; margin-top: 16px; }
   .btn { height: 32px; padding: 0 16px; border: 1px solid var(--border-strong); border-radius: var(--radius); background: var(--surface-alt); color: var(--text); }
   .btn:disabled { opacity: 0.4; }
