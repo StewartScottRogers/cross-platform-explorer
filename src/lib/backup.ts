@@ -59,6 +59,8 @@ export interface BackupJob {
   source: string;
   dest: string;
   mirror?: boolean;
+  /** Auto-run this job when its destination drive connects (CPE-797 drive-connect scheduler). */
+  autoRun?: boolean;
 }
 
 function newId(): string {

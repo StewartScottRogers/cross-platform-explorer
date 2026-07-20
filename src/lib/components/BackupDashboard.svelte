@@ -8,7 +8,7 @@
   import { createEventDispatcher } from "svelte";
   import { Channel } from "@tauri-apps/api/core";
   import { invoke, rawInvoke } from "../invoke";
-  import { addJob, removeJob, planBackup, type BackupJob, type BackupPlan } from "../backup";
+  import { addJob, removeJob, updateJob, planBackup, type BackupJob, type BackupPlan } from "../backup";
   import type { CompareNode } from "../treeDiff";
 
   interface OpResult { path: string; ok: boolean; error: string; }
@@ -53,6 +53,10 @@
   function del(id: string) {
     list = removeJob(list, id);
     if (plan?.jobId === id) plan = null;
+    persist();
+  }
+  function toggleAutoRun(id: string, on: boolean) {
+    list = updateJob(list, id, { autoRun: on });
     persist();
   }
 
@@ -118,7 +122,13 @@
           <div class="jinfo">
             <span class="jname">{job.name}</span>
             {#if job.mirror}<span class="mirror">mirror</span>{/if}
+            {#if job.autoRun}<span class="mirror auto" data-testid="auto-pill">auto</span>{/if}
             <span class="paths">{job.source} → {job.dest}</span>
+            <label class="chk autorun" title="Run automatically when the destination drive connects">
+              <input type="checkbox" data-testid="autorun-toggle" checked={!!job.autoRun}
+                     on:change={(e) => toggleAutoRun(job.id, e.currentTarget.checked)} />
+              auto-run on connect
+            </label>
             {#if busyId === job.id}
               <span class="status running" data-testid="job-progress">running… {progress}{total ? ` / ${total}` : ""}</span>
             {:else if lastRun[job.id]}
@@ -197,6 +207,8 @@
   .builder .grow { flex: 1 1 130px; }
   input:not([type=checkbox]) { height: 30px; padding: 0 8px; font: inherit; color: var(--text); background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); min-width: 0; }
   .chk { font-size: 12px; color: var(--text-dim); }
+  .mirror.auto { background: var(--accent-2, #2a7); }
+  .autorun { display: inline-flex; align-items: center; gap: 4px; }
   .mini { width: 24px; height: 24px; border: 1px solid var(--border); border-radius: var(--radius); background: var(--surface); color: var(--text); }
   .actions { display: flex; justify-content: flex-end; margin-top: 16px; }
   .btn { height: 28px; padding: 0 12px; border: 1px solid var(--border-strong); border-radius: var(--radius); background: var(--surface-alt); color: var(--text); font-size: 12px; }

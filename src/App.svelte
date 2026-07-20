@@ -124,7 +124,9 @@
   import WorkspacesDialog from "./lib/components/WorkspacesDialog.svelte";
   import type { Workspace, WorkspaceTab } from "./lib/workspaces";
   import BackupDashboard from "./lib/components/BackupDashboard.svelte";
-  import type { BackupJob } from "./lib/backup";
+  import { planBackup, type BackupJob } from "./lib/backup";
+  import type { CompareNode } from "./lib/treeDiff";
+  import { startDriveScheduler, stopDriveScheduler } from "./lib/driveScheduler";
   import AttributesDialog from "./lib/components/AttributesDialog.svelte";
   import {
     pushUndo, popUndo, canUndo, peekLabel, invert, deletedPaths, type UndoEntry,
@@ -303,6 +305,37 @@
     const prev = backupHistory[jobId] ?? [];
     backupHistory = { ...backupHistory, [jobId]: [status, ...prev].slice(0, 8) };
     settings.saveBackupHistory(backupHistory);
+  }
+
+  /** Run a backup job now (used by the drive-connect scheduler, CPE-797). Same streamed apply the
+      dashboard uses; records the run in history and shows a notice. */
+  async function runBackupJobNow(job: BackupJob) {
+    try {
+      const [s, d] = await Promise.all([
+        rawInvoke<CompareNode[]>("scan_tree", { path: job.source, maxDepth: 32 }),
+        rawInvoke<CompareNode[]>("scan_tree", { path: job.dest, maxDepth: 32 }),
+      ]);
+      const p = planBackup(s, d, job.mirror);
+      const results: OpResult[] = [];
+      const channel = new Channel<OpResult[]>();
+      channel.onmessage = (batch) => { for (const r of batch) results.push(r); };
+      await rawInvoke("apply_backup_plan_stream", {
+        sourceRoot: job.source, destRoot: job.dest,
+        copy: p.copy, update: p.update, delete: p.delete, verify: true,
+        onResult: channel,
+      });
+      const failed = results.filter((r) => !r.ok).length;
+      recordBackupRun(job.id, { when: Date.now(), ok: results.length - failed, failed, label: "auto" });
+      showNotice(`Auto-backup "${job.name}": ${results.length - failed} copied${failed ? `, ${failed} failed` : ""}`);
+    } catch (e) {
+      showNotice(`Auto-backup "${job.name}" failed: ${e}`, true);
+    }
+  }
+
+  /** Start/stop the drive-connect scheduler to match the current jobs (CPE-797). No poll unless a job
+      opts into auto-run. */
+  function reconcileDriveScheduler() {
+    void startDriveScheduler(() => backupJobs, runBackupJobNow);
   }
   let attributesOpen = false;
   let attrTarget: { path: string; name: string } = { path: "", name: "" };
@@ -2675,6 +2708,9 @@
     // maybeAutoSync, which no-ops unless the current repo opted in and its interval has elapsed.
     autoMirrorTimer = setInterval(maybeAutoSync, 60_000);
     window.addEventListener("focus", maybeAutoSync);
+
+    // Drive-connect scheduler (CPE-797): starts polling only if a backup job opted into auto-run.
+    reconcileDriveScheduler();
   });
 
   onDestroy(() => {
@@ -2685,6 +2721,7 @@
     if (watchRefreshTimer) clearTimeout(watchRefreshTimer);
     if (autoMirrorTimer) clearInterval(autoMirrorTimer);
     window.removeEventListener("focus", maybeAutoSync);
+    stopDriveScheduler();
   });
 </script>
 
@@ -3321,7 +3358,7 @@
   <BackupDashboard
     jobs={backupJobs}
     history={backupHistory}
-    on:change={(e) => { backupJobs = e.detail; settings.saveBackupJobs(backupJobs); }}
+    on:change={(e) => { backupJobs = e.detail; settings.saveBackupJobs(backupJobs); reconcileDriveScheduler(); }}
     on:run={(e) => recordBackupRun(e.detail.jobId, e.detail.status)}
     on:cancel={() => (backupOpen = false)}
   />
