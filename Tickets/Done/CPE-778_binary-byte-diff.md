@@ -2,12 +2,12 @@
 id: CPE-778
 title: Pure binary/byte diff (first-difference + differing ranges)
 type: feature
-status: In Progress
+status: Done
 priority: medium
 component: Frontend
 tags: ready
 created: 2026-07-20
-closed:
+closed: 2026-07-20
 epic: CPE-722
 estimate: 1-2h
 ---
