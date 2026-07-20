@@ -159,6 +159,31 @@ describe("FileList rendering", () => {
     expect(screen.getByText("pic.png")).toBeTruthy();
   });
 
+  it("tints + labels a row matching a colour rule, leaving non-matching rows plain (CPE-775)", () => {
+    const entries = [
+      entry({ name: "photo.png", path: "/x/photo.png", extension: "png" }),
+      entry({ name: "notes.txt", path: "/x/notes.txt", extension: "txt" }),
+    ];
+    const { container } = render(FileList, {
+      ...base,
+      entries,
+      colorRules: [{ id: "r1", when: { kind: "ext", exts: ["png"] }, color: "#e03b3b", label: "Image" }],
+    });
+    const tinted = container.querySelectorAll(".row.rule-tinted");
+    expect(tinted.length).toBe(1); // only the .png row
+    expect((tinted[0] as HTMLElement).style.getPropertyValue("--rule-color")).toBe("#e03b3b");
+    expect(screen.getByText("Image")).toBeTruthy(); // the rule label chip
+  });
+
+  it("leaves every row plain when the rule set is empty — off means off (CPE-775)", () => {
+    const { container } = render(FileList, {
+      ...base,
+      entries: [entry({ name: "photo.png", path: "/x/photo.png", extension: "png" })],
+      colorRules: [],
+    });
+    expect(container.querySelectorAll(".row.rule-tinted").length).toBe(0);
+  });
+
   it("gives image tiles a thumbnail in icons view, but not other files (CPE-257/CPE-643)", () => {
     const { container } = render(FileList, {
       ...base,

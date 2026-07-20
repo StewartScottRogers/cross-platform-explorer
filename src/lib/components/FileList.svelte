@@ -458,7 +458,8 @@
         class:agent-inside={!!insideKind}
         class:agent-inside-read={insideKind === "read"}
         class:tagged={!!tagEntry.label}
-        style={tagEntry.label ? `--label-color: ${labelColor(tagEntry.label)}` : ""}
+        class:rule-tinted={!!ruleStyle.color}
+        style={`${tagEntry.label ? `--label-color: ${labelColor(tagEntry.label)};` : ""}${ruleStyle.color ? `--rule-color: ${ruleStyle.color};` : ""}`}
         data-agent-kind={act?.kind ?? ""}
         data-drop-path={entry.is_dir ? entry.path : null}
         bind:this={rowEls[i]}
@@ -628,6 +629,20 @@
      label tint so a live change is never masked. */
   .row.tagged:not(.agent-active):not(.agent-inside) {
     box-shadow: inset 3px 0 0 var(--label-color);
+  }
+  /* Rule-based row tint (CPE-775): a matched row gets a soft wash of the rule's colour, blended with
+     `color-mix` so it reads identically in light/dark on top of the list surface. It sits *under*
+     selection/hover — those paint their own opaque background, so the tint only shows on a resting row
+     (and never masks a live Agent Watch row). An untinted row (no rule matched) is byte-for-byte the
+     old row, so an empty rule set costs nothing. */
+  .row.rule-tinted:not(.selected):not(:hover):not(.agent-active):not(.agent-inside) {
+    background: color-mix(in srgb, var(--rule-color) 14%, transparent);
+  }
+  /* A thin left accent bar keeps the rule visible even while the row is selected/hovered — mirrors the
+     CPE-638 `.tagged` bar, and yields to a tag label bar (tag wins the bar; the rule keeps the wash + chip)
+     and to Agent Watch. */
+  .row.rule-tinted:not(.tagged):not(.agent-active):not(.agent-inside) {
+    box-shadow: inset 3px 0 0 var(--rule-color);
   }
   .label-dot {
     flex: 0 0 auto;
