@@ -2,7 +2,7 @@
 id: CPE-784
 title: Pure POSIX permission model (mode ↔ rwx ↔ octal)
 type: feature
-status: Open
+status: In Progress
 priority: medium
 component: Frontend
 tags: ready
@@ -26,9 +26,16 @@ read/write/execute breakdown + bit toggles — so the editor (CPE-786) is a thin
 - Pure + total; round-trips (`octalToMode(modeToOctal(m)) === m & 0o777`, same for symbolic).
 
 ## Acceptance Criteria
-- [ ] symbolic/octal formatting + parsing are correct and round-trip; malformed input → null.
-- [ ] `describePermissions` and `setPermission` operate on the right owner/group/other bits.
-- [ ] Pure + dependency-free; unit tests cover formatting/parsing/round-trip/toggle/edge cases; check + suite green.
+- [x] symbolic/octal formatting + parsing are correct and round-trip; malformed input → null.
+- [x] `describePermissions` and `setPermission` operate on the right owner/group/other bits.
+- [x] Pure + dependency-free; unit tests cover formatting/parsing/round-trip/toggle/edge cases; check + suite green.
 
 ## Notes
 POSIX low 9 bits (special bits out of scope for v1). Foundation for CPE-786. Headless.
+
+## Resolution
+Added `src/lib/permissions.ts` (pure): `modeToSymbolic`/`modeToOctal` format the low-9-bit POSIX mode;
+`octalToMode`/`symbolicToMode` parse (null on malformed); `describePermissions` breaks it into
+owner/group/other rwx; `setPermission` toggles one bit. Round-trips verified. 5 tests. check 0/0. Headless;
+no existing code touched. Foundation for CPE-786.
+
