@@ -2,7 +2,7 @@
 id: CPE-777
 title: Pure recursive folder-tree diff
 type: feature
-status: Open
+status: In Progress
 priority: medium
 component: Frontend
 tags: ready
@@ -28,9 +28,18 @@ directory trees and classifies every node as added / removed / changed / identic
 - Deterministic order (dirs first, then name). Pure + total (empty sides, deep nesting).
 
 ## Acceptance Criteria
-- [ ] Each case (added/removed/changed/identical, nested dirs, type mismatch) classifies correctly.
-- [ ] A dir with any differing descendant is `changed`; a dir whose whole subtree matches is `identical`.
-- [ ] Pure + dependency-free; unit tests cover the above incl. empty trees + nesting; check + suite green.
+- [x] Each case (added/removed/changed/identical, nested dirs, type mismatch) classifies correctly.
+- [x] A dir with any differing descendant is `changed`; a dir whose whole subtree matches is `identical`.
+- [x] Pure + dependency-free; unit tests cover the above incl. empty trees + nesting; check + suite green.
 
 ## Notes
 Compares by name+size+mtime (no content hash) per the epic. Foundation for CPE-779. Headless.
+
+## Resolution
+Added `src/lib/treeDiff.ts` (pure, recursive): `diffTrees(left, right)` over `CompareNode` trees →
+per-node `added`/`removed`/`changed`/`identical`. Matched by name per level; files compared by size+mtime;
+a dir is `changed` iff any descendant differs (else `identical`); added/removed dirs mark their whole
+subtree; file-vs-dir at a name is `changed`. Deterministic order (dirs first, then name). 6 tests cover
+every case + nesting + added-subtree recursion + type mismatch + ordering + empty. check 0/0. Headless; no
+existing code touched. Foundation for CPE-779.
+
