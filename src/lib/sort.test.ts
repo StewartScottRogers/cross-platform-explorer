@@ -66,6 +66,27 @@ describe("sortEntries", () => {
     expect(names(sortEntries(es, "size", "asc"))).toEqual(["c", "a", "b"]);
   });
 
+  it("sorts folders by recursive size via sizeOf, pending (-1) clustered by name (CPE-750)", () => {
+    const es = [
+      entry({ name: "big", path: "/big", is_dir: true }),
+      entry({ name: "small", path: "/small", is_dir: true }),
+      entry({ name: "pendingB", path: "/pb", is_dir: true }),
+      entry({ name: "pendingA", path: "/pa", is_dir: true }),
+      entry({ name: "file.txt", size: 10 }),
+    ];
+    const sizes = new Map([["/big", 900], ["/small", 20]]); // pending dirs absent
+    const sizeOf = (e: DirEntry) => (e.is_dir ? (sizes.get(e.path) ?? -1) : e.size);
+    // folders first; among folders: pending (-1) first, name-ordered, then small(20), big(900).
+    expect(names(sortEntries(es, "size", "asc", true, sizeOf))).toEqual([
+      "pendingA", "pendingB", "small", "big", "file.txt",
+    ]);
+  });
+
+  it("without sizeOf, folders compare by their own (zero) byte size — unchanged (CPE-750)", () => {
+    const es = [entry({ name: "d2", is_dir: true }), entry({ name: "d1", is_dir: true })];
+    expect(names(sortEntries(es, "size", "asc"))).toEqual(["d1", "d2"]); // name tiebreaker, no recursion
+  });
+
   it("sorts by modified time, treating null as 0", () => {
     const es = [
       entry({ name: "new", modified: 2000 }),

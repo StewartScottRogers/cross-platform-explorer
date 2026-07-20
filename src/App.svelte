@@ -272,6 +272,11 @@
     resizing = null;
   }
   let showHidden = false;
+  /** Recursive folder-size column (CPE-750): opt-in toggle + a per-path cache of computed subtree sizes,
+      filled lazily for visible folders. `pendingSizes` dedups in-flight `dir_size` calls. */
+  let showFolderSizes = settings.loadShowFolderSizes();
+  let folderSizes = new Map<string, number>();
+  const pendingSizes = new Set<string>();
   let pins: string[] = [];
   let recents: RecentFile[] = [];
   let favorites: Favorite[] = [];
@@ -481,6 +486,7 @@
     { id: "view.toggleDetails", group: $t("palette.groupView"), label: showDetails ? $t("palette.hideDetails") : $t("palette.showDetails"), shortcut: "Alt+P", run: () => { showDetails = !showDetails; settings.saveShowDetails(showDetails); } },
     { id: "view.popOut", group: $t("palette.groupView"), label: $t("palette.popOut"), shortcut: "Ctrl+Shift+O", run: popOutPreview },
     { id: "view.hidden", group: $t("palette.groupView"), label: showHidden ? $t("palette.hideHidden") : $t("palette.showHidden"), run: () => { showHidden = !showHidden; settings.saveShowHidden(showHidden); } },
+    { id: "view.folderSizes", group: $t("palette.groupView"), label: showFolderSizes ? $t("palette.hideFolderSizes") : $t("palette.showFolderSizes"), keywords: "folder size recursive subtree column", run: toggleFolderSizes },
     { id: "view.foldersFirst", group: $t("palette.groupView"), label: foldersFirst ? $t("palette.mixFolders") : $t("palette.groupFolders"), run: () => { foldersFirst = !foldersFirst; settings.saveFoldersFirst(foldersFirst); } },
     { id: "tool.findByName", group: $t("palette.groupTools"), label: $t("palette.findByName"), shortcut: "Ctrl+P", run: () => (fileSearchOpen = true), enabled: inFolder },
     { id: "tool.searchInFiles", group: $t("palette.groupTools"), label: $t("palette.searchInFiles"), shortcut: "Ctrl+Shift+F", run: () => (contentSearchOpen = true), enabled: inFolder },
@@ -996,6 +1002,10 @@
     }
     error = "";
 
+    // A new listing (or a refresh) invalidates the recursive-size cache so sizes recompute (CPE-750).
+    if (folderSizes.size > 0) folderSizes = new Map();
+    pendingSizes.clear();
+
     if (path === HOME) {
       entries = [];
       loading = false;
@@ -1341,9 +1351,14 @@
 
   // Narrow to a single tag when the sidebar Tags filter is active (CPE-639); cleared when leaving a folder.
   $: tagFiltered = selectedTag ? filterEntriesByTag(typeFiltered, $tags, selectedTag) : typeFiltered;
+  // When the recursive-size column is on, folders sort by their computed subtree size; a not-yet-computed
+  // folder resolves to -1 so pending folders cluster (name-ordered) and settle as fills land (CPE-750).
+  $: sizeOf = showFolderSizes
+    ? (e: DirEntry) => (e.is_dir ? (folderSizes.get(e.path) ?? -1) : e.size)
+    : undefined;
   $: visible = archive
-    ? sortEntries(archiveChildren(archive), sortKey, sortDir, foldersFirst)
-    : sortEntries(tagFiltered, sortKey, sortDir, foldersFirst);
+    ? sortEntries(archiveChildren(archive), sortKey, sortDir, foldersFirst, sizeOf)
+    : sortEntries(tagFiltered, sortKey, sortDir, foldersFirst, sizeOf);
 
   /** All tags with counts, for the sidebar Tags section. */
   $: tagList = tagCounts($tags);
@@ -2323,6 +2338,32 @@
     return true;
   }
 
+  /** Fill recursive sizes for the given folder paths on demand (CPE-750). Called by FileList for the
+      folders currently on screen that aren't cached yet; dedups in-flight `dir_size` calls and reassigns
+      the Map so the column + size-sort react. rawInvoke so the lazy fill never raises the busy cursor. */
+  async function fillFolderSizes(paths: string[]) {
+    for (const path of paths) {
+      if (folderSizes.has(path) || pendingSizes.has(path)) continue;
+      pendingSizes.add(path);
+      rawInvoke<number>("dir_size", { path })
+        .then((size) => {
+          folderSizes.set(path, size);
+          folderSizes = folderSizes; // trigger Svelte reactivity on the Map
+        })
+        .catch(() => {
+          folderSizes.set(path, 0); // unreadable subtree → 0, so the row stops showing "…"
+          folderSizes = folderSizes;
+        })
+        .finally(() => pendingSizes.delete(path));
+    }
+  }
+
+  /** Toggle the recursive folder-size column (CPE-750), persisting the choice. */
+  function toggleFolderSizes() {
+    showFolderSizes = !showFolderSizes;
+    settings.saveShowFolderSizes(showFolderSizes);
+  }
+
   /** Enable/disable auto-restore (CPE-789). Turning it on immediately captures the current session so a
       crash/close before the next navigation still has something to restore. */
   function setAutoRestore(on: boolean) {
@@ -2807,6 +2848,11 @@
       on:change={() => settings.saveShowHidden(showHidden)} />
   </div>
   <div class="settings-row">
+    <span>{$t("cmd.folderSizes")}</span>
+    <input type="checkbox" data-testid="folder-sizes-toggle" bind:checked={showFolderSizes}
+      on:change={() => settings.saveShowFolderSizes(showFolderSizes)} />
+  </div>
+  <div class="settings-row">
     <button class="settings-btn" on:click={resetAllSettings}>{$t("tb.resetSettings")}</button>
   </div>
 </Toolbar>
@@ -2957,6 +3003,9 @@
       {searching}
       {cutPaths}
       {colorRules}
+      {showFolderSizes}
+      {folderSizes}
+      on:needSizes={(e) => fillFolderSizes(e.detail)}
       bind:renamingPath
       {renameValue}
       canDrag={!archive}

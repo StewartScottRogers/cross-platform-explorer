@@ -74,7 +74,14 @@
     cancelRename: void;
     drop: { paths: string[]; dest: string; ctrlKey: boolean; shiftKey: boolean };
     resizeColumns: number[];
+    needSizes: string[];
   }>();
+
+  /** Recursive folder-size column (CPE-750): when on, folder rows show their computed subtree size from
+      `folderSizes` (or "…" while pending), and the component asks the parent to fill sizes for visible
+      folders that aren't cached yet. Off ⇒ folders show blank in the Size column, exactly as before. */
+  export let showFolderSizes = false;
+  export let folderSizes: Map<string, number> = new Map();
 
   /** Details-view column widths (Name/Date/Type/Size), bound from the parent so they
       persist; the trailing spacer is implicit (CPE-350). */
@@ -284,6 +291,17 @@
   $: windowed = virtualize
     ? entries.slice(win.start, win.end).map((entry, k) => ({ entry, i: win.start + k }))
     : entries.map((entry, i) => ({ entry, i }));
+
+  // Ask the parent to fill recursive sizes for the folders currently on screen that aren't cached yet
+  // (CPE-750). Runs only when the column is on, and only for the virtualized/visible window — so scrolling
+  // pulls sizes in on demand and an off column costs nothing. `folderSizes` in the deps re-checks as fills
+  // land, shrinking the request to [] once the visible folders are covered.
+  $: if (showFolderSizes) {
+    const need = windowed
+      .filter((w) => w.entry.is_dir && !folderSizes.has(w.entry.path))
+      .map((w) => w.entry.path);
+    if (need.length) dispatch("needSizes", need);
+  }
 
   // Spacer heights. In the grids each spacer is itself a full-width grid row, so it introduces one
   // row-gap of its own above/below the rendered slice — subtract it back out so the tiles land exactly
@@ -524,7 +542,13 @@
         {#if view === "details"}
           <span class="cell dim">{formatDate(entry.modified)}</span>
           <span class="cell dim">{typeName(entry)}</span>
-          <span class="cell num">{entry.is_dir ? "" : formatSize(entry.size)}</span>
+          <span class="cell num">
+            {#if entry.is_dir}
+              {#if showFolderSizes}{folderSizes.has(entry.path) ? formatSize(folderSizes.get(entry.path) ?? 0) : "…"}{/if}
+            {:else}
+              {formatSize(entry.size)}
+            {/if}
+          </span>
         {/if}
       </div>
     {/each}
