@@ -3,6 +3,6 @@
   "productName": "Cross-Platform Explorer (Sidecar)",
   "identifier": "com.example.crossplatformexplorer.sidecar",
   "bundle": {
-    "createUpdaterArtifacts": false
+    "createUpdaterArtifacts": true
   }
 }

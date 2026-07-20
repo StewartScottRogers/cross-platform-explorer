@@ -31,6 +31,40 @@ To publish the draft once the build is green:
 gh release edit v0.2.0 --draft=false
 ```
 
+## Auto-update channel — the sidecar release is the update stream (CPE-768)
+
+The app the installer/`/run` puts on disk is the **sidecar** build (`Cross-Platform Explorer
+(Sidecar)`), so that is the channel auto-update follows. The updater endpoint in
+`src-tauri/tauri.conf.json` is:
+
+```
+https://github.com/StewartScottRogers/cross-platform-explorer/releases/latest/download/latest.json
+```
+
+GitHub's `/releases/latest/` resolves to the newest **non-prerelease, non-draft** release, so for
+auto-update to work the sidecar release must be **non-prerelease** and must carry a signed
+`latest.json`. That is now wired up:
+
+- `.github/workflows/release-sidecar.yml` — `prerelease: false`, `includeUpdaterJson: true`
+  (still `releaseDraft: true` so you review before publishing).
+- `src-tauri/tauri.sidecar.conf.json` — `bundle.createUpdaterArtifacts: true`, so `latest.json`
+  references the correctly-named `…Sidecar…` installers, signed with the shared updater key.
+
+So the flow is: dispatch **Release (sidecar-enabled)** with a new `vX.Y.Z-sidecar` tag → review the
+draft → **publish it** → installed apps pick up the update on their next check. Publishing is what
+makes it the `/releases/latest/` the updater sees.
+
+**Gotchas:**
+- A sidecar release left as a **prerelease** (or draft) is invisible to `/releases/latest/` — the
+  endpoint will fall through to an older release (or 404 if none carries `latest.json`). Don't mark
+  sidecar releases prerelease.
+- Bump the version in the three manifests (see below) before cutting, or `latest.json` will report the
+  same version and every install just says "up to date".
+- The plain `release.yml` channel (`vX.Y.Z` tags) also publishes non-prerelease with `latest.json`; if
+  you ever cut a plain release it competes with the sidecar release for `/releases/latest/`. The
+  shipping strategy is sidecar-only, so avoid cutting plain releases unless you intend to switch
+  channels.
+
 ## Check build / CI status
 
 ```powershell
