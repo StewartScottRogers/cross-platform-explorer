@@ -40,6 +40,63 @@ export function filterEvents(events: AuditEvent[], opts: FilterOptions = {}): Au
   });
 }
 
+export interface RedactOptions {
+  /** Absolute home-dir prefix to collapse to `~` in paths (e.g. "C:\\Users\\alice" or "/home/alice"). */
+  home?: string;
+  /** Literal substrings (e.g. the OS username) to mask with `<user>` wherever they appear. */
+  usernames?: string[];
+  /** Regex sources (matched case-insensitively, globally) to mask with `<redacted>`. Invalid ones skipped. */
+  patterns?: string[];
+  /** Also redact the `detail` field, not just `path` (default: true). */
+  redactDetail?: boolean;
+}
+
+function escapeRegExp(s: string): string {
+  return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+/** Apply redaction to a single string. Pure. */
+function redactString(value: string, opts: RedactOptions, compiled: RegExp[]): string {
+  let out = value;
+  // Collapse the home-dir prefix to `~` (path-separator agnostic; only at the start).
+  if (opts.home) {
+    const home = opts.home.replace(/[/\\]+$/, "");
+    // Match the home prefix followed by a separator or end-of-string, case-insensitively (Windows paths).
+    const re = new RegExp("^" + escapeRegExp(home) + "(?=[/\\\\]|$)", "i");
+    out = out.replace(re, "~");
+  }
+  for (const name of opts.usernames ?? []) {
+    if (!name) continue;
+    out = out.replace(new RegExp(escapeRegExp(name), "gi"), "<user>");
+  }
+  for (const re of compiled) {
+    out = out.replace(re, "<redacted>");
+  }
+  return out;
+}
+
+/**
+ * Redact sensitive content from a copy of the events before export (CPE-801): collapse the home dir to
+ * `~`, mask usernames, and apply custom patterns — to `path` and (by default) `detail`. Pure; never
+ * mutates the input. Compose as filter → redact → export.
+ */
+export function redactEvents(events: AuditEvent[], opts: RedactOptions = {}): AuditEvent[] {
+  const compiled: RegExp[] = [];
+  for (const src of opts.patterns ?? []) {
+    try {
+      compiled.push(new RegExp(src, "gi"));
+    } catch {
+      // Skip an invalid pattern rather than throwing — a bad rule shouldn't block the whole export.
+    }
+  }
+  const doDetail = opts.redactDetail !== false;
+  return events.map((e) => ({
+    ...e,
+    path: redactString(e.path, opts, compiled),
+    detail: doDetail && e.detail !== undefined ? redactString(e.detail, opts, compiled) : e.detail,
+  }));
+}
+
 export function toJson(events: AuditEvent[]): string {
   return JSON.stringify(events, null, 2);
 }
