@@ -2,7 +2,7 @@
 id: CPE-709
 title: "EPIC: Rules-based file coloring & labels"
 type: Task
-status: Proposed
+status: In Progress
 priority: Low
 component: Frontend
 tags: [epic]
@@ -34,3 +34,21 @@ power users rely on. Reuses the smart-folder predicate model rather than inventi
 - Users define rules that colour rows/icons and add labels by file criteria, with a live preview.
 - Styling is theme-variable driven (identical light/dark) and applied within the virtualized list.
 - Rules persist and add no measurable per-row cost when none are defined.
+
+## Work Log
+2026-07-20 (nightshift, 00:20 MST) — Activated. Open questions resolved (autonomous best-guess): **first-
+match precedence** (the first enabled matching rule supplies the row's style; simplest + predictable);
+rule styling sits *under* selection/hover (theme-var tint, like the existing tag label accent); **global
+rule set** persisted in settings (per-folder deferred). Reuse note: smartFolders is tag-based, not a
+file-criteria predicate matcher, so the engine defines its own small condition model (reusing `matchesGlob`
+for name patterns) rather than forcing a fit.
+
+## Child tickets
+1. **CPE-774** — Pure rule-evaluation engine (`src/lib/colorRules.ts`): a condition model (extension /
+   name-glob / size / age / is-dir) + `evaluateRules(entry, rules, now)` → first-match `{color?, label?}`.
+   Unit-tested. **Foundation, headless.**
+2. **CPE-775** — Apply the resolved style in the FileList renderer: row tint + label chip from the engine,
+   reusing the CPE-638 label rendering; theme-variable driven (light/dark parity); zero per-row cost when
+   no rules. **GUI.** *(prereq: 774)*
+3. **CPE-776** — Rules editor UI (ordered rules, enable/disable, live preview) + persistence in settings.
+   **GUI.** *(prereq: 774, 775)*
