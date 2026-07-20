@@ -176,6 +176,10 @@
       <Icon name="info" size={15} /> {$t('ctx.properties')}
       <span class="hint">Alt+Enter</span>
     </button>
+    <div class="sep" />
+    <button class="row" role="menuitem" on:click={() => run("help-docs")}>
+      <Icon name="book" size={15} /> Documents for this view
+    </button>
   {:else}
     <button class="row" role="menuitem" on:click={() => run("new-folder")}>
       <Icon name="folder" size={15} /> {$t('ctx.newFolder')}
@@ -214,6 +218,10 @@
     {/if}
     <button class="row" role="menuitem" on:click={() => run("reveal")}>
       <Icon name="folder" size={15} /> {$t('ctx.reveal')}
+    </button>
+    <div class="sep" />
+    <button class="row" role="menuitem" on:click={() => run("help-docs")}>
+      <Icon name="book" size={15} /> Documents for this view
     </button>
   {/if}
 </div>

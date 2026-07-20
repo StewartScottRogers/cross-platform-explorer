@@ -85,8 +85,8 @@
   <button class="iconbtn" title="Disk usage — analyze folder sizes" aria-label="Disk usage" on:click={() => dispatch("diskusage")}>
     <Icon name="disk" size={18} />
   </button>
-  <button class="iconbtn" title="Documents for this section (F1)" aria-label="Documents for this section" on:click={() => dispatch("help")}>
-    <Icon name="book" size={18} />
+  <button class="iconbtn docsbtn" title="Documents for this section (F1)" aria-label="Documents for this section" on:click={() => dispatch("help")}>
+    <Icon name="book" size={18} /><span class="docsbtn-label">Docs</span>
   </button>
   <button class="iconbtn" title="Browse for a folder…" aria-label="Browse for a folder" on:click={() => dispatch("browse")}>
     <Icon name="folder" />

@@ -324,6 +324,18 @@
     if (showWorkbench) return "workbench";
     return isHome ? "home" : "explorer";
   }
+  /** Every documented section + a friendly label, for per-section jump-links (palette, menus) — CPE-764. */
+  const DOC_SECTIONS: { section: Section; label: string }[] = [
+    { section: "home", label: "Overview" },
+    { section: "explorer", label: "Explorer" },
+    { section: "disk-usage", label: "Disk usage" },
+    { section: "workbench", label: "Workbench" },
+    { section: "agent-board", label: "Agent Board" },
+    { section: "ai-console", label: "AI Console" },
+    { section: "agent-grid", label: "Agent Grid" },
+    { section: "repositories", label: "Repositories" },
+    { section: "swarms", label: "Swarms" },
+  ];
 
   // Command Palette (CPE-602): Ctrl+Shift+P. The command list reuses existing handlers — nothing is
   // duplicated; `enabled` closures read live state so context-invalid commands grey out.
@@ -387,6 +399,11 @@
     // part of it matches, while the label stays the short folder name.
     ...recentPaths(activeTab.history).map((p) => ({
       id: `recent:${p}`, group: $t("palette.groupRecent"), label: baseName(p) || p, keywords: p, run: () => navigate(p),
+    })),
+    // Per-section docs jump-links (CPE-764): open Documents straight to any section's page from anywhere.
+    ...DOC_SECTIONS.map((s) => ({
+      id: `docs:${s.section}`, group: "Documents", label: `Docs: ${s.label}`, keywords: "documentation help guide",
+      run: () => openDocs(s.section),
     })),
   ] satisfies Command[];
 
@@ -1942,6 +1959,7 @@
         break;
       }
       case "refresh": refresh(); break;
+      case "help-docs": openDocs(currentSection()); break;
     }
   }
 

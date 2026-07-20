@@ -226,6 +226,9 @@
      ~116px and shoves the label into a wrapping column — keep menu checkboxes their natural size. */
   .menu-item input[type="checkbox"] { flex: 0 0 auto; width: auto; height: auto; min-width: 0; margin: 0; }
   #help-btn { width: 30px; padding: 0; font-weight: 700; }
+  /* Per-area "?" — direct docs access from the Grid / Swarm areas (CPE-764). */
+  .area-help { width: 22px; height: 22px; padding: 0; margin-left: 4px; font-weight: 700; border-radius: 6px; opacity: .75; flex: 0 0 auto; }
+  .area-help:hover { opacity: 1; }
   #help-overlay { position: fixed; inset: 0; background: rgba(0,0,0,.4); display: grid;
                   place-items: center; z-index: 65; }
   #help-overlay[hidden] { display: none; }
@@ -353,6 +356,7 @@
       <button id="help-btn" type="button" title="How the AI Console works — a quick guide">?</button>
       <button id="launch" class="primary">Launch</button>
       <button id="run-swarm" type="button" title="Run a multi-agent swarm — a coordinator plus one builder per task line — experimental (CPE-541)">Run swarm ▾</button>
+      <button id="swarm-help" type="button" class="area-help" title="Documents: how swarms work">?</button>
     </div>
     <div class="row" id="swarm-row" hidden>
       <div class="field" style="flex:1">
@@ -406,7 +410,7 @@ docs/** :: document the CSV options"></textarea>
       </div>
     </div>
   </div>
-  <div id="view-bar"><button id="view-toggle" type="button" title="Show all agents in a grid">▦ Grid</button></div>
+  <div id="view-bar"><button id="view-toggle" type="button" title="Show all agents in a grid">▦ Grid</button><button id="grid-help" type="button" class="area-help" title="Documents: the Agent Grid">?</button></div>
   <div id="tabs"></div>
   <div id="terms">
   </div>
@@ -503,11 +507,16 @@ docs/** :: document the CSV options"></textarea>
         <h3>6 · Recent sessions — “Recent…”</h3>
         <p>Lists past sessions (kept across restarts). <b>Relaunch</b> reopens one with the same agent/provider/model/folder; or view its (secret-redacted) transcript.</p>
 
-        <h3>See several agents at once — Grid</h3>
+        <h3 id="help-grid">See several agents at once — Grid</h3>
         <p>With sessions open, click <b>▦ Grid</b> to tile every agent side by side (they auto-arrange);
           click <b>▤ Tabs</b> to go back to one at a time. In grid view, click a tile to focus it, or
           press <b>Ctrl+Alt+Arrow</b> to move between tiles. Each tile shows the agent's colour chip,
           name, and usage. Nothing about the single-tab view changes.</p>
+
+        <h3 id="help-swarm">Run a multi-agent swarm — “Run swarm”</h3>
+        <p>Click <b>Run swarm ▾</b> to start a <b>coordinator</b> plus one <b>builder</b> per task line —
+          several agents working the same folder together (experimental, CPE-541). The swarm panel lists
+          each member and its status; <b>Hide</b> tucks the panel away while the swarm keeps running.</p>
 
         <h3>Permissions</h3>
         <p>The console runs as its own sandboxed process and only gets what you allow. <b>Secrets</b> is the permission that lets it store your API keys — if you skip it, saving keys won't work and you'll simply be asked again next time you open the console. Review or revoke permissions in the app's sidecar settings.</p>
@@ -1643,7 +1652,15 @@ $("advanced-btn").addEventListener("click", () => {
   const r = $("advanced-row"); r.hidden = !r.hidden;
   $("advanced-btn").textContent = r.hidden ? "Advanced ▾" : "Advanced ▴";
 });
-$("help-btn").addEventListener("click", () => { $("help-overlay").hidden = false; });
+// Open the help panel, optionally jumping to a specific section anchor (CPE-764): each console area's
+// "?" gives direct access to its own docs, not just the top-bar button.
+function openHelp(anchor) {
+  $("help-overlay").hidden = false;
+  if (anchor) { const el = document.getElementById(anchor); if (el) setTimeout(() => el.scrollIntoView({ block: "start" }), 0); }
+}
+$("help-btn").addEventListener("click", () => openHelp());
+$("grid-help").addEventListener("click", () => openHelp("help-grid"));
+$("swarm-help").addEventListener("click", () => openHelp("help-swarm"));
 $("help-close").addEventListener("click", () => { $("help-overlay").hidden = true; });
 $("help-overlay").addEventListener("click", (e) => { if (e.target === $("help-overlay")) $("help-overlay").hidden = true; });
 $("auto-update").addEventListener("change", async (e) => {
