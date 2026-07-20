@@ -2,12 +2,12 @@
 id: CPE-767
 title: Fix macOS backend compile break — restore_from_trash command missing on macOS
 type: Bug
-status: In Progress
+status: Done
 priority: High
 component: Backend
 tags: ready
 created: 2026-07-19
-closed:
+closed: 2026-07-19
 estimate: 15m
 ---
 
@@ -37,9 +37,9 @@ existing "not supported on this platform" error.
 macOS compile error: `cannot find macro __cmd__restore_from_trash in this scope` — build fails.
 
 ## Acceptance Criteria
-- [ ] macOS backend `cargo check` / clippy / test pass in CI.
-- [ ] Windows + Linux backend remain green (no regression).
-- [ ] `restore_from_trash` on macOS returns the same clear "not supported" `OpResult::err` as before.
+- [x] macOS backend `cargo check` / clippy / test pass in CI.
+- [x] Windows + Linux backend remain green (no regression).
+- [x] `restore_from_trash` on macOS returns the same clear "not supported" `OpResult::err` as before.
 
 ## Resolution
 Give macOS its own `#[tauri::command] async fn restore_from_trash` wrapper (mirroring the Windows/Linux
@@ -52,6 +52,10 @@ filesystem command async + `spawn_blocking` per the async-all-commands conventio
 sat on `restore_from_trash_impl` under the macOS cfg instead of on a `restore_from_trash` wrapper. Added the
 macOS async command wrapper + plain impl. Windows/Linux paths unchanged. macOS verified by CI (no local Apple
 toolchain).
+
+2026-07-19 — **Closed.** PR #16 CI all green — `Backend (macos-latest)` passed (7m6s), the exact job that
+was red; Windows/Linux backend + Frontend + all Sidecar jobs green, no regression. Squash-merged to main
+(`be3b67b`). macOS build restored.
 
 ## Notes
 Surfaced while merging CPE-690. Pre-existing on `main`, not introduced by that PR.
