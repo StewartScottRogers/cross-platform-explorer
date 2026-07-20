@@ -11,13 +11,14 @@
   import { addRule, removeRule, setRuleEnabled, moveRule, planForEntry, type WatchRule, type Action } from "../watchRules";
   import type { Condition } from "../colorRules";
   import type { DirEntry } from "../types";
+  import type { WatchFire } from "../folderWatch";
 
   export let rules: WatchRule[] = [];
   /** Live watcher config (CPE-794): the folders monitored + whether live watching is on. */
   export let watchedFolders: string[] = [];
   export let watchLive = false;
   /** Recent executed-rule log lines (newest first) from the live watcher. */
-  export let watchLog: string[] = [];
+  export let watchLog: WatchFire[] = [];
   /** Whether the live watcher backend is available (sidecar build only). */
   export let watchAvailable = false;
 
@@ -25,6 +26,7 @@
     save: WatchRule[];
     cancel: void;
     watchConfig: { folders: string[]; live: boolean };
+    undo: WatchFire;
   }>();
 
   let list: WatchRule[] = rules.map((r) => ({ ...r }));
@@ -230,7 +232,12 @@
         {/each}
         {#if watchLog.length}
           <div class="wlog" data-testid="watch-log">
-            {#each watchLog.slice(0, 6) as line (line)}<div class="wlog-line">▸ {line}</div>{/each}
+            {#each watchLog.slice(0, 6) as fire (fire.id)}
+              <div class="wlog-line" data-testid="watch-log-line">
+                <span class="wlog-text">▸ {fire.summary}</span>
+                <button class="mini" data-testid="undo-btn" aria-label="Undo" on:click={() => dispatch("undo", fire)}>Undo</button>
+              </div>
+            {/each}
           </div>
         {/if}
       {/if}
@@ -274,7 +281,8 @@
   .wfolder { display: flex; align-items: center; gap: 8px; font-size: 12px; }
   .wf-path { flex: 1 1 auto; font-family: ui-monospace, monospace; color: var(--text-dim); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .wlog { margin-top: 4px; border-top: 1px solid var(--border); padding-top: 6px; font-size: 11.5px; color: #2e9e4f; font-family: ui-monospace, monospace; }
-  .wlog-line { padding: 1px 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .wlog-line { padding: 1px 0; display: flex; align-items: center; gap: 6px; }
+  .wlog-text { flex: 1 1 auto; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0; }
   .mini { width: 24px; height: 24px; border: 1px solid var(--border); border-radius: var(--radius); background: var(--surface); color: var(--text); }
   .mini:disabled { opacity: 0.35; }
   .actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 16px; }
