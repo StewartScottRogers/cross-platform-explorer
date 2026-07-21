@@ -100,3 +100,12 @@ scan, CPE-420) → `cpe_server::duplicates` (leans on the extracted `fsutil` `sh
 regression test kept in the app, repointed to `cpe_server::duplicates::find_duplicates` (exposed
 `DupResult` fields `pub` for that cross-crate read). Verified: `cpe-server` **64 tests** green; app
 `cargo test` **105 passed / 0 failed**; clippy clean **both** modes. `cpe-server` now holds **16 modules**.
+2026-07-20 — **Slice 10 (streaming split):** extracted the filename-search domain (glob/`?`/`*` +
+brace-group matching + the shared `walk_name_matches` walker + types, CPE-603/697/666) →
+`cpe_server::name_search`. Key pattern: the walker takes a `flush(Vec<NameMatch>) -> ControlFlow`
+callback, so the collect command dispatches to `find_files_by_name` while the **streaming** command
+keeps its `tauri::ipc::Channel` in the app adapter and feeds the same extracted walker — the transport
+stays in the app, the walk is pure. Ported the thorough brace-matching test suite into the crate.
+Verified: `cpe-server` **70 tests** green; app `cargo test` **100 passed / 0 failed**; clippy clean
+**both** modes. `cpe-server` now holds **17 modules**. (Proves the streaming-liveness convention survives
+the extraction — the groundwork CPE-819 generalizes over the wire.)

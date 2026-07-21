@@ -66,3 +66,6 @@ pub mod disk_usage;
 
 /// Duplicate-file finder — size-then-hash two-pass scan (CPE-420).
 pub mod duplicates;
+
+/// Filename search — substring/glob/brace-group matching + the shared streaming walker (CPE-603/697/666).
+pub mod name_search;
