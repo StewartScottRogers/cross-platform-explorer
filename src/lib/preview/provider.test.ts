@@ -104,9 +104,9 @@ describe("pickProvider", () => {
     }
   });
 
-  it("previews SQLite, spreadsheets and parquet as info text (CPE-088/089/090/091)", () => {
+  it("previews SQLite, spreadsheets and parquet in the interactive data-grid (CPE-849)", () => {
     for (const ext of ["sqlite", "db", "xlsx", "ods", "parquet"]) {
-      expect(pickProvider(entry({ name: `a.${ext}`, extension: ext })).kind).toBe("info");
+      expect(pickProvider(entry({ name: `a.${ext}`, extension: ext })).kind).toBe("data-grid");
     }
   });
 

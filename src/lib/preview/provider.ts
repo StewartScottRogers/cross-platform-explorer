@@ -22,6 +22,7 @@ export type PreviewKind =
   | "markdown"
   | "text"
   | "info"
+  | "data-grid"
   | "font"
   | "hex"
   | "none";
@@ -63,10 +64,17 @@ const INFO_EXT = new Set([
   "exe", "dll", "sys", "efi", "ocx", "scr", "cpl", // PE headers
   "wasm", "torrent", "mid", "midi",
   "rtf", "docx", "odt", "epub", // document text extraction
-  "sqlite", "sqlite3", "db", // SQLite schema + row counts
-  "xlsx", "xlsm", "ods", // spreadsheet grid
-  "parquet", // parquet schema + row count
   "bin", "dat", // generic binary -> hex dump
+]);
+
+/**
+ * Structured data files opened in the interactive data-grid (schema + paged rows, table/sheet
+ * navigation, and a read-only SQL console for SQLite) instead of a text summary. CPE-849 (epic CPE-721).
+ */
+const DATA_GRID_EXT = new Set([
+  "sqlite", "sqlite3", "db", // SQLite tables/views
+  "xlsx", "xlsm", "xlsb", "xls", "ods", // spreadsheet sheets
+  "parquet", // parquet
 ]);
 
 /**
@@ -159,6 +167,13 @@ export const providers: PreviewProvider[] = [
     kind: "font",
     editable: false,
     canPreview: (e) => !e.is_dir && FONT_EXT.has(e.extension),
+  },
+  {
+    id: "data-grid",
+    label: "Data",
+    kind: "data-grid",
+    editable: false,
+    canPreview: (e) => !e.is_dir && DATA_GRID_EXT.has(e.extension),
   },
   {
     id: "info",
