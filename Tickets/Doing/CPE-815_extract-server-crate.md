@@ -117,3 +117,11 @@ Verified: `cpe-server` **71 tests** green; app `cargo test` **99 passed / 0 fail
 **both** modes. `cpe-server` now holds **18 modules**. Both "search" domains (name + content) are now
 extracted; remaining `lib.rs` bulk is the heavy-dep groups (previews/archives/DB), `list_dir` (core +
 streaming), the backup engine, and properties/metadata.
+2026-07-20 — **Slice 12 (shared model types):** extracted the core filesystem model — `DirEntry`,
+`EntryInfo`, `Place`, `OpResult` (+ its `ok`/`err` constructors) and the `extension_of` / `is_hidden`
+(platform-cfg) helpers — into `cpe_server::model`, re-exported into the app via
+`use cpe_server::model::{…};` so all construction sites (fields made `pub`) + the 26 `OpResult::` call
+sites resolve unchanged. This is the foundation the remaining file-op/`list_dir`/properties extractions
+key off. Verified: `cpe-server` **74 tests** green; app `cargo test` **97 passed / 0 failed**; clippy
+clean **both** modes (fixed a Windows-only unused-var in the ported `is_hidden` test). `cpe-server` now
+holds **19 modules**.

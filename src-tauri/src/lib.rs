@@ -291,101 +291,10 @@ fn workbench_diff_impl(root: String, path: Option<String>) -> Result<WorkbenchDi
     }
 }
 
-#[derive(Serialize)]
-pub struct DirEntry {
-    name: String,
-    path: String,
-    is_dir: bool,
-    size: u64,
-    /// Last-modified time as milliseconds since the Unix epoch.
-    /// `None` when the platform or filesystem does not report one.
-    modified: Option<u64>,
-    /// Lowercased file extension without the dot ("png"), empty for directories
-    /// and extensionless files.
-    extension: String,
-    /// Hidden per the OS convention: the hidden attribute on Windows, a leading
-    /// dot on POSIX.
-    hidden: bool,
-}
-
-/// Per-item outcome of a bulk operation. Bulk file operations must NOT be
-/// all-or-nothing and must not abort on the first failure: if 9 of 10 files
-/// copy and one is locked, the user needs to know exactly which one failed.
-#[derive(Serialize, Debug)]
-pub struct OpResult {
-    path: String,
-    ok: bool,
-    error: String,
-}
-
-impl OpResult {
-    fn ok(path: &Path) -> Self {
-        Self {
-            path: path.to_string_lossy().to_string(),
-            ok: true,
-            error: String::new(),
-        }
-    }
-    fn err(path: &Path, e: impl std::fmt::Display) -> Self {
-        Self {
-            path: path.to_string_lossy().to_string(),
-            ok: false,
-            error: e.to_string(),
-        }
-    }
-}
-
-/// Detailed metadata for the Properties dialog.
-#[derive(Serialize)]
-pub struct EntryInfo {
-    name: String,
-    path: String,
-    is_dir: bool,
-    size: u64,
-    modified: Option<u64>,
-    created: Option<u64>,
-    readonly: bool,
-    hidden: bool,
-}
-
-#[derive(Serialize)]
-pub struct Place {
-    /// Display name, e.g. "Documents" or "Local Disk (C:)".
-    name: String,
-    path: String,
-    /// Logical kind, used by the UI to pick an icon:
-    /// "desktop" | "documents" | "downloads" | "pictures" | "music" | "videos" | "drive" | "home".
-    kind: String,
-}
-
-/// Lowercased extension without the dot; empty when there is none.
-fn extension_of(path: &Path) -> String {
-    path.extension()
-        .and_then(|e| e.to_str())
-        .map(|e| e.to_lowercase())
-        .unwrap_or_default()
-}
-
-/// Hidden per OS convention: the FILE_ATTRIBUTE_HIDDEN bit on Windows,
-/// a leading dot on POSIX.
-fn is_hidden(path: &Path, meta: &fs::Metadata) -> bool {
-    #[cfg(windows)]
-    {
-        use std::os::windows::fs::MetadataExt;
-        const FILE_ATTRIBUTE_HIDDEN: u32 = 0x2;
-        if meta.file_attributes() & FILE_ATTRIBUTE_HIDDEN != 0 {
-            return true;
-        }
-    }
-    #[cfg(not(windows))]
-    {
-        let _ = meta;
-    }
-    path.file_name()
-        .and_then(|n| n.to_str())
-        .map(|n| n.starts_with('.'))
-        .unwrap_or(false)
-}
+// The shared filesystem model types (DirEntry / OpResult / EntryInfo / Place) and the `extension_of` /
+// `is_hidden` helpers now live in `cpe_server::model` (CPE-815); re-export them so the many
+// construction/usage sites resolve unchanged.
+use cpe_server::model::{extension_of, is_hidden, DirEntry, EntryInfo, OpResult, Place};
 
 /// Would moving/copying `src` into `dest` put a directory inside itself?
 /// Copying a folder into its own descendant recurses forever and shreds data —
@@ -6536,16 +6445,7 @@ mod tests {
         assert!(home_dir_impl().is_ok());
     }
 
-    #[test]
-    fn extension_is_lowercased_and_dotless() {
-        assert_eq!(extension_of(Path::new("/a/b/Photo.PNG")), "png");
-        assert_eq!(extension_of(Path::new("/a/b/archive.tar.gz")), "gz");
-    }
-
-    #[test]
-    fn extension_is_empty_when_absent() {
-        assert_eq!(extension_of(Path::new("/a/b/README")), "");
-    }
+    // extension_of / is_hidden tests moved with the code to `cpe_server::model` (CPE-815).
 
     // epoch-ms conversion tests moved with `to_epoch_ms` to `cpe_server::fsutil` (CPE-815).
 

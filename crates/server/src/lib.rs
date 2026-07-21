@@ -72,3 +72,6 @@ pub mod name_search;
 
 /// Content search — recursive line search in text files, bounded + binary-skipping (CPE-416).
 pub mod content_search;
+
+/// Shared filesystem model types (DirEntry / EntryInfo / Place / OpResult) + extension/hidden helpers.
+pub mod model;
