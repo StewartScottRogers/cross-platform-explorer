@@ -43,3 +43,14 @@ before migrating command bodies.
   modules were runtime-unreferenced; `TauriCtx` unchanged). **Remaining (later slices): migrate the ~117
   command bodies' domain logic into `cpe-server` behind `ServerCtx`, leaving the `#[tauri::command]` fns as
   thin dispatchers.** Ticket stays In Progress until that bulk lands + GUI-verified.
+2026-07-20 — **Slice 2 (first real command-body migration):** moved the tag-store domain (CPE-635/614)
+into `cpe-server/src/tags.rs` — the `TagEntry`/`TagStore` model + all pure helpers + `read/write` +
+new `ServerCtx`-based entry points (`load`/`set`/`counts`/`rename_tag`/`delete_tag`/`retag`/`import`).
+The 7 Tauri tag commands (`load_tags`/`set_tags`/`tag_counts`/`rename_tag`/`delete_tag`/`retag_path`/
+`import_tags`) are now **one-line dispatchers** (`cpe_server::tags::…(&TauriCtx::new(&app))`). Moved the
+6 model tests + added a ctx-entry-point test (over `HeadlessCtx`). Proves the "app is a thin shim
+dispatching to the server crate" AC for a real, GUI-facing command group.
+  Verified: `cpe-server` **19 tests** green; app `cargo test` **148 passed / 0 failed**; clippy
+  `-D warnings` clean on **both** modes. Behaviour-preserving (identical helpers/JSON; `ServerCtx`
+  resolves the same config dir). **Awaiting user GUI smoke-test of Tags** (assign/label/filter/import)
+  before merge, then the remaining command groups migrate the same way.
