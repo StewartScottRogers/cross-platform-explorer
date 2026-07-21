@@ -205,6 +205,9 @@
   let noticeTimer: ReturnType<typeof setTimeout> | undefined;
 
   let selection: Selection = emptySelection();
+  // Owned+derived inside <ExplorerPane> (CPE-676); bound back here so App's ops keep reading it. When the
+  // split lands (CPE-677) this comes from the active pane instead of a single binding.
+  let selectedEntries: DirEntry[] = [];
   let rowEls: HTMLElement[] = [];
   // Type-ahead find: accumulated prefix and the time of the last keystroke.
   let typeAheadBuffer = "";
@@ -1423,10 +1426,7 @@
         ? [{ name: "Home", path: HOME }]
         : [{ name: "Home", path: HOME }, ...splitPath(currentPath)];
 
-  $: selectedEntries = selectedIndices(selection)
-    .map((i) => visible[i])
-    .filter(Boolean);
-
+  // `selectedEntries` is derived and owned by <ExplorerPane> now (bound above); App only consumes it.
   $: selectedSize = selectedEntries.reduce((n, e) => n + (e.is_dir ? 0 : e.size), 0);
   $: itemCount = (isHome && !smartFolder) ? places.length + drives.length + pins.length : visible.length;
   // The folder's pre-filter total, so the status bar can read "X of Y items" (CPE-407).
@@ -3091,6 +3091,7 @@
       bind:sortDir
       bind:columnWidths
       bind:selection
+      bind:selectedEntries
       bind:draggedPaths
       bind:rowEls
       on:contextAction={(e) => handleContextAction(e.detail)}

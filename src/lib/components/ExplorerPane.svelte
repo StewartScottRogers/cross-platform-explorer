@@ -14,7 +14,7 @@
   import * as settings from "../settings";
   import { baseName } from "../contentSearch";
   import { fsActivity, agentTimeline } from "../agentActivity";
-  import { click as selClick, type Selection } from "../selection";
+  import { click as selClick, selectedIndices, type Selection } from "../selection";
   import type { FolderAction, FolderContext } from "../folderContext";
   import type { DirEntry, Place, SortKey, SortDir, ViewMode, RecentFile, Favorite } from "../types";
   import type { ColorRule } from "../colorRules";
@@ -58,6 +58,12 @@
   export let selection: Selection;
   export let draggedPaths: string[] = [];
   export let rowEls: HTMLElement[] = [];
+  /** The entries under the current selection, derived from `selection` + `visible` and owned here (CPE-676).
+   * Bound back out to App so its file/nav operations read the active pane's selection. */
+  export let selectedEntries: DirEntry[] = [];
+  $: selectedEntries = selectedIndices(selection)
+    .map((i) => visible[i])
+    .filter(Boolean);
 
   const dispatch = createEventDispatcher<{
     navigate: string;

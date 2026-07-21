@@ -39,3 +39,25 @@ test suite doesn't fully cover (selection timing, keyboard routing, archive/smar
 is NOT safe to land autonomously overnight. Slices 1-2 (middle-column extraction) are landed + green on main.
 Resume attended: do the state move with a running app to verify. NavToolbar/StatusBar stay app-level until
 CPE-677 (they become per-pane when the split is added).
+
+2026-07-20 (attended, scoping only — salvaged from the now-stale `CPE-676-pane-state` branch, which is far
+behind main and must NOT be merged) — Measured the redirect surface: **~340 references to per-pane state**
+in App.svelte (selectedEntries ×74, currentPath ×66, selection ×51, visible ×41, entries ×34, loadPath ×27,
+activeTab ×12), spread across ops, keyboard handlers, palette commands, the derivation pipeline, and render.
+No clean sub-slice: `visible` (sort/hidden/search/type/tag derivation) feeds `selectedEntries`, read by ~40
+ops, whose mutations drive `entries`/`selection`/`history`. **Target architecture (least-churn):** the pane
+owns history/path, entries, loading, the full derivation, selection + selectedEntries, and view/sort/search/
+showHidden, exposed via `bind:` + a `bind:this` method surface (navigate/back/forward/refresh/openEntry/
+selection setters). App keeps its op *logic* but sources selectedEntries/currentPath from the active pane and
+calls that pane's refresh(); NavToolbar/StatusBar/palette/keyboard route to the active pane.
+
+2026-07-21 (attended, resumed) — Approach: instead of one atomic big-bang, move ownership **one domino at a
+time**, keeping `npm run check` + the full suite green after each and GUI-verifying the risky ones. Branch
+`cpe-676-state-move` off current main (the old branch is abandoned — it predates crates/server, the
+agent-board sidecar, the data browser, etc. and would revert ~19k lines).
+- **Domino 1 (done, green):** moved `selectedEntries` (the ×74 var) into ExplorerPane. The pane already had
+  both inputs — `selection` (bound) + `visible` (prop) — so it needs no new props: it computes
+  `selectedEntries` and binds it back to App, leaving App's 74 read-sites untouched. Removed App's `$:`
+  derivation; added `let selectedEntries` + `bind:selectedEntries`. No new timing risk vs today (the async
+  `$:` boundary already existed; read-after-write in one sync handler was already unsafe). check clean; 902
+  tests pass. GUI verify pending (selection → status-bar count/size, preview pop-out enable, multi-select).
