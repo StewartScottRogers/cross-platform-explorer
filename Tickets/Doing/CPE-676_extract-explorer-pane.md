@@ -61,3 +61,13 @@ agent-board sidecar, the data browser, etc. and would revert ~19k lines).
   derivation; added `let selectedEntries` + `bind:selectedEntries`. No new timing risk vs today (the async
   `$:` boundary already existed; read-after-write in one sync handler was already unsafe). check clean; 902
   tests pass. GUI verify pending (selection → status-bar count/size, preview pop-out enable, multi-select).
+- **Domino 2 (done, green):** moved the whole display-derivation pipeline (`shown → filtered → typeFiltered
+  → tagFiltered → sizeOf → visible`, plus `searching`) into ExplorerPane. App resolves the base list +
+  archive/smart mode and passes them down as props (`baseEntries`, `rawList`, `search`, `fileFilter`,
+  `foldersFirst`); the pane computes `visible` + `shown` and binds them back for App's status bar (`X of Y`)
+  and ~41 read-sites. Archive stays in App (local `ArchiveView`/`archiveChildren`) — App passes the resolved
+  archive children + `rawList=true`, and the pane skips filters in that mode. `folderName`/`crumbs`/
+  `folderContexts` stay app-level. Pruned now-unused App imports (`sortEntries`, `makeMatcher`,
+  `matchesFileFilter`, `filterEntriesByTag`). check clean (0/0); 902 tests pass incl. wildcard-search +
+  folder-nav. GUI verify pending: hidden toggle, search, type filter, tag filter, sort dirs/folders-first,
+  folder-size column, archive browsing, status-bar totals.
