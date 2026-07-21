@@ -28,14 +28,10 @@ mod models_egress;
 #[cfg(feature = "sidecar-platform")]
 mod agent_shadow;
 
-/// The session audit journal (CPE-800) + pure window-geometry resolver (CPE-598) now live in the
-/// `cpe-server` crate (CPE-815); re-export their module paths so existing `audit_journal::` /
-/// `geometry::` references resolve unchanged.
-use cpe_server::{audit_journal, geometry};
-
-/// Agent Board backend (CPE-520): read the repo's `Tickets/` folders as Kanban cards + move a card
-/// between columns. Pure card/frontmatter logic lives here; the commands below do the file I/O.
-mod ticket_board;
+/// The session audit journal (CPE-800), pure window-geometry resolver (CPE-598), and Agent Board
+/// backend (CPE-520) now live in the `cpe-server` crate (CPE-815); re-export their module paths so
+/// existing `audit_journal::` / `geometry::` / `ticket_board::` references resolve unchanged.
+use cpe_server::{audit_journal, geometry, ticket_board};
 
 /// Read every ticket under `<root>/Tickets/{Backlog,Doing,Blocked,Deferred,Done}/CPE-*.md` into board
 /// cards (CPE-520). Read-only; a malformed file is skipped, never fails the listing.
