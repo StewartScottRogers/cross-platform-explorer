@@ -40,6 +40,10 @@ pub mod native_meta;
 /// store and a path's native metadata, plus CPE's portable `{tags,label}` blob (CPE-827, epic CPE-717).
 pub mod native_tags;
 
+/// macOS Finder-tag codec: `_kMDItemUserTags` binary plist ⇄ `Vec<FinderTag>` (name + colour), for
+/// Finder interop (CPE-829, epic CPE-717). Cross-platform, round-trip-testable everywhere.
+pub mod finder_tags;
+
 /// Settings store: the single on-disk `settings.json` document (CPE-226). Pure helpers +
 /// `ServerCtx`-based entry points (CPE-815 migration).
 pub mod settings;
