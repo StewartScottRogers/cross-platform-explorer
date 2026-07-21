@@ -19,6 +19,11 @@
   /** The folder the board scans (`<root>/Tickets/…`) — defaults to the folder being browsed. */
   export let root: string;
 
+  /** Render as a dedicated window filling its viewport (CPE-843): drops the modal dim-backdrop and the
+      centred floating panel so the board fills the standalone Agent Board window. Default `false` keeps
+      the embedded overlay behaviour unchanged. */
+  export let windowed = false;
+
   const dispatch = createEventDispatcher<{ close: void; launch: { id: string; task: string } }>();
 
   // The board is a *project* tool: it stays pointed at the last project you chose (persisted), so it
@@ -219,8 +224,8 @@
 </script>
 
 <!-- svelte-ignore a11y-click-events-have-key-events a11y-no-static-element-interactions -->
-<div class="board-overlay" on:click={(e) => { if (e.target === e.currentTarget) dispatch("close"); }}>
-  <div class="board-panel" style="width: {panelW}px; height: {panelH}px;">
+<div class="board-overlay" class:windowed on:click={(e) => { if (e.target === e.currentTarget) dispatch("close"); }}>
+  <div class="board-panel" style={windowed ? "width: 100%; height: 100%;" : `width: ${panelW}px; height: ${panelH}px;`}>
     <div class="board-titlebar">
       <span class="board-title"><Icon name="code" size={15} /> Agent Board</span>
       <div class="board-tools">
@@ -354,6 +359,11 @@
 <style>
   .board-overlay { position: fixed; inset: 0; background: rgba(0,0,0,0.45); display: flex;
     align-items: center; justify-content: center; z-index: 60; }
+  /* Windowed mode (CPE-843): the board IS the window — no dim backdrop, no centring, fill the viewport. */
+  .board-overlay.windowed { position: static; inset: auto; background: transparent; height: 100vh; padding: 0; }
+  .board-overlay.windowed .board-panel {
+    max-width: none; max-height: none; border: 0; border-radius: 0; box-shadow: none;
+  }
   /* Size comes from inline width/height (CPE-529 resizable); max keeps it inside the viewport. */
   .board-panel { max-width: 98vw; max-height: 96vh; display: flex; flex-direction: column; position: relative;
     background: var(--surface); color: var(--text); border: 1px solid var(--border-strong);

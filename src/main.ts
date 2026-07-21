@@ -2,23 +2,30 @@ import "./app.css";
 import "highlight.js/styles/github.css"; // token colours for code previews (CPE-065)
 import App from "./App.svelte";
 import FloatPreview from "./lib/components/FloatPreview.svelte";
+import AgentBoardApp from "./lib/components/AgentBoardApp.svelte";
+import { bootMode } from "./lib/bootMode";
 import { initSettings } from "./lib/settings";
 
 const target = document.getElementById("app")!;
 
-// The torn-off preview window (CPE-234) loads the same bundle with ?float=1 and
-// renders only the floating tabbed preview — no explorer, no settings load.
-const isFloat = new URLSearchParams(location.search).has("float");
+// The same bundle backs three windows, chosen by a URL marker (see bootMode): the torn-off preview
+// (?float, CPE-234), the standalone Agent Board (?board, CPE-841), or the full explorer.
+const mode = bootMode(location.search);
 
 async function bootstrap(): Promise<void> {
-  if (isFloat) {
+  // The float preview is transient and needs no settings load (CPE-234).
+  if (mode === "float") {
     new FloatPreview({ target });
     return;
   }
-  // Load the single on-disk settings file (and migrate any legacy prefs) BEFORE
-  // the app reads settings synchronously at init (CPE-226). A failure here is
-  // non-fatal — the app falls back to defaults.
+  // Load the single on-disk settings file (and migrate any legacy prefs) BEFORE the app reads settings
+  // synchronously at init (CPE-226). A failure here is non-fatal — the app falls back to defaults. The
+  // board window loads it too so it picks up the theme.
   await initSettings().catch(() => {});
+  if (mode === "board") {
+    new AgentBoardApp({ target });
+    return;
+  }
   new App({ target });
 }
 
