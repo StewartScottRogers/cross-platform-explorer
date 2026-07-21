@@ -45,3 +45,12 @@ pub mod audit_journal;
 /// Agent Board backend (CPE-520): read the repo's `Tickets/` folders as Kanban cards + move a card
 /// between columns. Pure card/frontmatter logic (the Tauri commands do the file I/O).
 pub mod ticket_board;
+
+/// Small shared filesystem utilities: epoch-ms time conversion + streaming SHA-256 (CPE-815).
+pub mod fsutil;
+
+/// Text statistics — line/word/char/byte counts for a text file (CPE-414).
+pub mod text_stats;
+
+/// File + folder-tree SHA-256 checksums (CPE-412) and the integrity-baseline manifest (CPE-791).
+pub mod checksum;

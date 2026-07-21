@@ -1,7 +1,7 @@
 use serde::Serialize;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::SystemTime;
 
 /// Live provider API-key verification + catalog egress for the AI Console sidecar (CPE-347/369/376).
 /// Only compiled with the platform: without it nothing calls these, so the module would be dead
@@ -32,6 +32,9 @@ mod agent_shadow;
 /// backend (CPE-520) now live in the `cpe-server` crate (CPE-815); re-export their module paths so
 /// existing `audit_journal::` / `geometry::` / `ticket_board::` references resolve unchanged.
 use cpe_server::{audit_journal, geometry, ticket_board};
+/// Shared FS utils (epoch-ms + streaming SHA-256) also live in `cpe-server` (CPE-815); re-export them
+/// so the many `to_epoch_ms(…)` / `sha256_file(…)` call sites resolve unchanged.
+use cpe_server::fsutil::{sha256_file, to_epoch_ms};
 
 /// Read every ticket under `<root>/Tickets/{Backlog,Doing,Blocked,Deferred,Done}/CPE-*.md` into board
 /// cards (CPE-520). Read-only; a malformed file is skipped, never fails the listing.
@@ -353,11 +356,6 @@ pub struct Place {
     /// Logical kind, used by the UI to pick an icon:
     /// "desktop" | "documents" | "downloads" | "pictures" | "music" | "videos" | "drive" | "home".
     kind: String,
-}
-
-/// Convert a `SystemTime` into epoch milliseconds, if representable.
-fn to_epoch_ms(t: SystemTime) -> Option<u64> {
-    t.duration_since(UNIX_EPOCH).ok().map(|d| d.as_millis() as u64)
 }
 
 /// Lowercased extension without the dot; empty when there is none.
@@ -2797,43 +2795,10 @@ fn dir_children_sizes_impl(path: String) -> Result<Vec<ChildSize>, String> {
 /// Compute the SHA-256 checksum of a file, returned as lowercase hex (CPE-412). Streamed in fixed
 /// chunks so a multi-GB file never loads into memory. A directory, missing, or unreadable path is an
 /// `Err`, never a panic. Opt-in from the UI (hashing is I/O-bound) — never run automatically.
-/// Stream a file through SHA-256 and return the lowercase hex digest. Shared by `hash_file` (CPE-412)
-/// and the duplicate finder (CPE-420). 64 KiB chunks — a multi-GB file never loads into memory.
-fn sha256_file(path: &Path) -> std::io::Result<String> {
-    use sha2::{Digest, Sha256};
-    use std::io::Read;
-    let mut file = fs::File::open(path)?;
-    let mut hasher = Sha256::new();
-    let mut buf = [0u8; 64 * 1024];
-    loop {
-        let n = file.read(&mut buf)?;
-        if n == 0 {
-            break;
-        }
-        hasher.update(&buf[..n]);
-    }
-    let digest = hasher.finalize();
-    // Lowercase hex — one dependency fewer than pulling in `hex` for three lines.
-    let mut hex = String::with_capacity(digest.len() * 2);
-    for b in digest {
-        use std::fmt::Write as _;
-        let _ = write!(hex, "{b:02x}");
-    }
-    Ok(hex)
-}
-
 #[tauri::command]
 async fn hash_file(path: String) -> Result<String, String> {
-    tauri::async_runtime::spawn_blocking(move || hash_file_impl(path))
+    tauri::async_runtime::spawn_blocking(move || cpe_server::checksum::hash_file(&path))
         .await.map_err(|e| e.to_string())?
-}
-
-fn hash_file_impl(path: String) -> Result<String, String> {
-    let p = Path::new(&path);
-    if p.is_dir() {
-        return Err(format!("{path}: is a folder"));
-    }
-    sha256_file(p).map_err(|e| format!("{path}: {e}"))
 }
 
 // ---- Backup copy engine (CPE-797, epic CPE-736) ---------------------------------------------------
@@ -2988,57 +2953,14 @@ async fn apply_backup_plan(
     .unwrap_or_default()
 }
 
-/// A file's checksum baseline entry (CPE-791, epic CPE-737) — matches the frontend `ChecksumEntry`
-/// (CPE-790). `modified` is epoch-ms.
-#[derive(serde::Serialize)]
-struct ChecksumEntry {
-    path: String,
-    sha256: String,
-    size: u64,
-    modified: Option<u64>,
-}
-
-/// Recursively checksum every file under `path` into a baseline manifest — the on-demand baseline for the
-/// integrity guard (CPE-791). Symlinks are not followed and unreadable files are skipped (matching
-/// `dir_size`/`list_dir`); the result is sorted by path for a stable diff.
+/// Recursively checksum every file under `path` into a baseline manifest — the on-demand baseline for
+/// the integrity guard (CPE-791). Symlinks are not followed and unreadable files are skipped; the result
+/// is sorted by path for a stable diff. Model lives in `cpe_server::checksum` (CPE-815).
 #[tauri::command]
-async fn checksum_folder(path: String) -> Result<Vec<ChecksumEntry>, String> {
-    tauri::async_runtime::spawn_blocking(move || checksum_folder_impl(path))
+async fn checksum_folder(path: String) -> Result<Vec<cpe_server::checksum::ChecksumEntry>, String> {
+    tauri::async_runtime::spawn_blocking(move || cpe_server::checksum::checksum_folder(&path))
         .await
         .map_err(|e| e.to_string())?
-}
-
-fn checksum_folder_impl(path: String) -> Result<Vec<ChecksumEntry>, String> {
-    let p = Path::new(&path);
-    if !p.is_dir() {
-        return Err(format!("{path}: not a folder"));
-    }
-    let mut out = Vec::new();
-    checksum_walk(p, &mut out);
-    out.sort_by(|a, b| a.path.cmp(&b.path));
-    Ok(out)
-}
-
-fn checksum_walk(dir: &Path, out: &mut Vec<ChecksumEntry>) {
-    let Ok(entries) = fs::read_dir(dir) else { return }; // skip folders we can't read
-    for entry in entries.flatten() {
-        // DirEntry::metadata() does not traverse symlinks, so a symlink is neither a dir nor a file here
-        // and is skipped — matching `dir_size`'s "don't follow symlinks" behaviour.
-        let Ok(meta) = entry.metadata() else { continue };
-        let path = entry.path();
-        if meta.is_dir() {
-            checksum_walk(&path, out);
-        } else if meta.is_file() {
-            if let Ok(sha256) = sha256_file(&path) {
-                out.push(ChecksumEntry {
-                    path: path.to_string_lossy().to_string(),
-                    sha256,
-                    size: meta.len(),
-                    modified: meta.modified().ok().and_then(to_epoch_ms),
-                });
-            }
-        }
-    }
 }
 
 // ---- Folder-tree scan for the compare view (CPE-779, epic CPE-722) --------------------------------
@@ -3238,39 +3160,11 @@ async fn audit_read(
 /// (a final unterminated line still counts); words are whitespace-separated; characters are Unicode
 /// scalar values. Capped so analysing a file stays predictable; a non-UTF-8 (binary) file, a
 /// directory, or an over-cap file is an `Err`. Opt-in from the UI, never automatic.
-#[derive(serde::Serialize)]
-struct TextStats {
-    lines: u64,
-    words: u64,
-    chars: u64,
-    bytes: u64,
-}
-
-/// Largest file the text-stats command will read into memory (keeps it fast/predictable).
-const TEXT_STATS_MAX_BYTES: u64 = 25 * 1024 * 1024;
-
+/// Model lives in `cpe_server::text_stats` (CPE-815); this is a thin `spawn_blocking` dispatcher.
 #[tauri::command]
-async fn text_stats(path: String) -> Result<TextStats, String> {
-    tauri::async_runtime::spawn_blocking(move || text_stats_impl(path))
+async fn text_stats(path: String) -> Result<cpe_server::text_stats::TextStats, String> {
+    tauri::async_runtime::spawn_blocking(move || cpe_server::text_stats::compute(&path))
         .await.map_err(|e| e.to_string())?
-}
-
-fn text_stats_impl(path: String) -> Result<TextStats, String> {
-    let p = Path::new(&path);
-    let meta = fs::metadata(p).map_err(|e| format!("{path}: {e}"))?;
-    if meta.is_dir() {
-        return Err(format!("{path}: is a folder"));
-    }
-    if meta.len() > TEXT_STATS_MAX_BYTES {
-        return Err("file is too large to analyze (25 MB limit)".into());
-    }
-    let content = fs::read_to_string(p).map_err(|_| format!("{path}: not a text file"))?;
-    Ok(TextStats {
-        lines: content.lines().count() as u64,
-        words: content.split_whitespace().count() as u64,
-        chars: content.chars().count() as u64,
-        bytes: content.len() as u64,
-    })
 }
 
 /// Whether two files have identical content (CPE-418). Different sizes short-circuit to `false`;
@@ -7304,17 +7198,7 @@ mod tests {
         assert_eq!(extension_of(Path::new("/a/b/README")), "");
     }
 
-    #[test]
-    fn epoch_ms_of_unix_epoch_is_zero() {
-        assert_eq!(to_epoch_ms(UNIX_EPOCH), Some(0));
-    }
-
-    #[test]
-    fn epoch_ms_is_monotonic_for_later_times() {
-        use std::time::Duration;
-        let later = UNIX_EPOCH + Duration::from_millis(1_500);
-        assert_eq!(to_epoch_ms(later), Some(1_500));
-    }
+    // epoch-ms conversion tests moved with `to_epoch_ms` to `cpe_server::fsutil` (CPE-815).
 
     #[test]
     fn list_drives_returns_at_least_one_root() {
@@ -7446,24 +7330,7 @@ mod tests {
         let _ = fs::remove_dir_all(&d);
     }
 
-    #[test]
-    fn checksum_folder_hashes_files_recursively() {
-        let d = scratch("cksum");
-        fs::write(d.join("a.txt"), b"hello").unwrap();
-        fs::create_dir(d.join("sub")).unwrap();
-        fs::write(d.join("sub").join("b.txt"), b"world!!").unwrap();
-        let manifest = checksum_folder_impl(d.to_string_lossy().to_string()).unwrap();
-        assert_eq!(manifest.len(), 2, "one entry per file, recursing into subfolders");
-        // sorted by path, and each hash matches sha256_file for that path
-        assert!(manifest.windows(2).all(|w| w[0].path <= w[1].path));
-        for e in &manifest {
-            assert_eq!(e.sha256, sha256_file(Path::new(&e.path)).unwrap());
-        }
-        let a = manifest.iter().find(|e| e.path.ends_with("a.txt")).unwrap();
-        assert_eq!(a.size, 5);
-        assert!(a.modified.is_some());
-        let _ = fs::remove_dir_all(&d);
-    }
+    // checksum-folder tests moved with the code to `cpe_server::checksum` (CPE-815).
 
     #[test]
     fn create_hard_link_shares_file_data() {
@@ -8622,18 +8489,7 @@ mod tests {
         let _ = fs::remove_dir_all(&d);
     }
 
-    #[test]
-    fn hash_file_matches_the_known_sha256_vector_and_rejects_folders() {
-        let d = scratch("hash");
-        // The canonical SHA-256("abc") test vector.
-        fs::write(d.join("abc.txt"), b"abc").unwrap();
-        let hex = hash_file_impl(d.join("abc.txt").to_string_lossy().to_string()).unwrap();
-        assert_eq!(hex, "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad");
-        // A directory and a missing path are errors, not panics.
-        assert!(hash_file_impl(d.to_string_lossy().to_string()).is_err());
-        assert!(hash_file_impl(d.join("nope.txt").to_string_lossy().to_string()).is_err());
-        let _ = fs::remove_dir_all(&d);
-    }
+    // hash_file tests moved with the code to `cpe_server::checksum` (CPE-815).
 
     #[test]
     fn ensure_previewable_size_rejects_oversized_files() {
@@ -8659,22 +8515,7 @@ mod tests {
         let _ = fs::remove_dir_all(&d);
     }
 
-    #[test]
-    fn text_stats_counts_lines_words_chars_bytes() {
-        let d = scratch("stats");
-        // 2 lines, 3 words, 16 chars (incl. 2 newlines), 16 bytes (all ASCII).
-        fs::write(d.join("t.txt"), b"hello world\nfoo\n").unwrap();
-        let s = text_stats_impl(d.join("t.txt").to_string_lossy().to_string()).unwrap();
-        assert_eq!((s.lines, s.words, s.chars, s.bytes), (2, 3, 16, 16));
-        // A final unterminated line still counts (str::lines semantics).
-        fs::write(d.join("u.txt"), b"a\nb").unwrap();
-        assert_eq!(text_stats_impl(d.join("u.txt").to_string_lossy().to_string()).unwrap().lines, 2);
-        // Non-UTF-8 (binary) and a folder are errors, not panics.
-        fs::write(d.join("bin"), [0xff, 0xfe, 0x00]).unwrap();
-        assert!(text_stats_impl(d.join("bin").to_string_lossy().to_string()).is_err());
-        assert!(text_stats_impl(d.to_string_lossy().to_string()).is_err());
-        let _ = fs::remove_dir_all(&d);
-    }
+    // text-stats tests moved with the code to `cpe_server::text_stats` (CPE-815).
 
     #[test]
     fn search_file_contents_finds_matches_recursively_and_skips_noise() {
