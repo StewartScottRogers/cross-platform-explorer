@@ -33,6 +33,7 @@
   import Sidebar from "./lib/components/Sidebar.svelte";
   import RepoBrowser from "./lib/components/RepoBrowser.svelte";
   import BoardView from "./lib/components/BoardView.svelte";
+  import { BOARD_MIN_W, BOARD_MIN_H } from "./lib/board";
   import WorkbenchView from "./lib/components/WorkbenchView.svelte";
   import DocsView from "./lib/components/DocsView.svelte";
   import { docSlugForSection, type Section } from "./lib/sectionDocs";
@@ -501,6 +502,7 @@
     { id: "tool.backup", group: $t("palette.groupTools"), label: $t("palette.backup"), keywords: "backup jobs copy mirror restore sync", run: () => (backupOpen = true) },
     { id: "tool.attributes", group: $t("palette.groupTools"), label: $t("palette.attributes"), keywords: "attributes permissions readonly hidden mode chmod", run: openAttributes },
     { id: "tool.aiConsole", group: $t("palette.groupTools"), label: $t("palette.openAiConsole"), run: () => openAiConsole(), enabled: () => aiConsoleAvailable },
+    { id: "tool.agentBoardWindow", group: $t("palette.groupTools"), label: $t("palette.openAgentBoardWindow"), keywords: "agent board kanban tickets window pop out", run: () => openAgentBoard() },
     { id: "app.settings", group: $t("palette.groupApp"), label: $t("palette.settings"), run: () => (showSettings = true) },
     { id: "app.documents", group: $t("palette.groupApp"), label: $t("palette.documents"), shortcut: "F1", run: () => openDocs(currentSection()) },
     { id: "app.shortcuts", group: $t("palette.groupApp"), label: $t("palette.shortcuts"), shortcut: "?", run: () => (shortcutsOpen = true) },
@@ -807,6 +809,35 @@
       win.once("tauri://error", () => showNotice("Couldn't open the AI Console window.", true));
     } catch {
       showNotice("Couldn't open the AI Console window.", true);
+    }
+  }
+
+  /** Open the Agent Board in its own window (CPE-844, epic CPE-841) — an app-wide singleton, mirroring
+      the AI Console window. A second launch focuses the existing window instead of opening another. The
+      window loads the same bundle with `?board` (CPE-843) so it renders only the board; its label is in
+      `capabilities/default.json`, so unlike the isolated AI Console window it can invoke the ticket_board
+      commands. Size/position persist via the window-state plugin. */
+  const AGENT_BOARD_LABEL = "agent-board";
+  async function openAgentBoard() {
+    const existing = await WebviewWindow.getByLabel(AGENT_BOARD_LABEL);
+    if (existing) {
+      await existing.setFocus();
+      return;
+    }
+    try {
+      const win = new WebviewWindow(AGENT_BOARD_LABEL, {
+        url: "index.html?board=1",
+        title: "Agent Board",
+        width: 1100,
+        height: 720,
+        minWidth: BOARD_MIN_W,
+        minHeight: BOARD_MIN_H,
+        resizable: true,
+        center: true,
+      });
+      win.once("tauri://error", () => showNotice("Couldn't open the Agent Board window.", true));
+    } catch {
+      showNotice("Couldn't open the Agent Board window.", true);
     }
   }
 
@@ -3306,6 +3337,7 @@
     root={currentPath}
     on:launch={(e) => openAiConsole({ cwd: currentPath, task: e.detail.task })}
     on:help={(e) => openDocs(e.detail)}
+    on:popout={() => { showBoard = false; void openAgentBoard(); }}
     on:close={() => (showBoard = false)}
   />
 {/if}
