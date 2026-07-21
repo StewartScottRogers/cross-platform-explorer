@@ -17,7 +17,7 @@
   import AboutDialog from "./lib/components/AboutDialog.svelte";
   import SettingsDialog from "./lib/components/SettingsDialog.svelte";
   import ConsentSheet from "./lib/components/ConsentSheet.svelte";
-  import { startAiConsole, consoleUrlWith, platformActive, consentState, setConsent, type Capability, type ConsentState } from "./lib/sidecar";
+  import { startAiConsole, startAgentBoard, consoleUrlWith, platformActive, consentState, setConsent, type Capability, type ConsentState } from "./lib/sidecar";
   import { initAgentSessions, agentSessions, watchTargetFor, normalizePath, clearAgentSessions } from "./lib/agentSessions";
   import { startAgentWatch, stopAgentWatch, type FsActivity } from "./lib/sidecar";
   import { initAgentActivity, fsActivity, recentActivities, agentTimeline, affectsListing } from "./lib/agentActivity";
@@ -812,29 +812,51 @@
     }
   }
 
-  /** Open the Agent Board in its own window (CPE-844, epic CPE-841) — an app-wide singleton, mirroring
-      the AI Console window. A second launch focuses the existing window instead of opening another. The
-      window loads the same bundle with `?board` (CPE-843) so it renders only the board; its label is in
-      `capabilities/default.json`, so unlike the isolated AI Console window it can invoke the ticket_board
-      commands. Size/position persist via the window-state plugin. */
+  /** Open the Agent Board in its own window — an app-wide singleton. When the sidecar platform is present
+      it prefers the **out-of-process** board sidecar (CPE-850/853): it starts the `agent-board` sidecar
+      and frames its own served UI in an **isolated** window (label `agent-board-sidecar`, in no
+      capability — the untrusted sidecar UI talks to its own loopback HTTP API, not Tauri). Otherwise it
+      falls back to the in-process window (CPE-844): the same bundle with `?board` (CPE-843), whose label
+      `agent-board` IS in `capabilities/default.json` so the trusted BoardView can invoke ticket_board. A
+      second launch focuses the existing window; size/position persist via the window-state plugin. */
   const AGENT_BOARD_LABEL = "agent-board";
+  const AGENT_BOARD_SIDECAR_LABEL = "agent-board-sidecar";
+  const AGENT_BOARD_WIN = {
+    title: "Agent Board",
+    width: 1100,
+    height: 720,
+    minWidth: BOARD_MIN_W,
+    minHeight: BOARD_MIN_H,
+    resizable: true,
+    center: true,
+  };
   async function openAgentBoard() {
+    // Out-of-process sidecar path (preferred when the platform is available).
+    if (aiConsoleAvailable) {
+      const running = await WebviewWindow.getByLabel(AGENT_BOARD_SIDECAR_LABEL);
+      if (running) { await running.setFocus(); return; }
+      const base = await startAgentBoard(isHome ? undefined : currentPath);
+      if (base) {
+        try {
+          const win = new WebviewWindow(AGENT_BOARD_SIDECAR_LABEL, { url: base, ...AGENT_BOARD_WIN });
+          win.once("tauri://error", () => showNotice("Couldn't open the Agent Board window.", true));
+          return;
+        } catch {
+          showNotice("Couldn't open the Agent Board window.", true);
+          return;
+        }
+      }
+      // Sidecar unavailable — fall through to the in-process window.
+    }
+
+    // In-process window fallback (also the only path in the plain build).
     const existing = await WebviewWindow.getByLabel(AGENT_BOARD_LABEL);
     if (existing) {
       await existing.setFocus();
       return;
     }
     try {
-      const win = new WebviewWindow(AGENT_BOARD_LABEL, {
-        url: "index.html?board=1",
-        title: "Agent Board",
-        width: 1100,
-        height: 720,
-        minWidth: BOARD_MIN_W,
-        minHeight: BOARD_MIN_H,
-        resizable: true,
-        center: true,
-      });
+      const win = new WebviewWindow(AGENT_BOARD_LABEL, { url: "index.html?board=1", ...AGENT_BOARD_WIN });
       win.once("tauri://error", () => showNotice("Couldn't open the Agent Board window.", true));
     } catch {
       showNotice("Couldn't open the Agent Board window.", true);

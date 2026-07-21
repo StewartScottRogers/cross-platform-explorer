@@ -3828,6 +3828,91 @@ fn sidecar_start_ai_console(
     Ok(url)
 }
 
+/// Resolve the Agent Board sidecar binary (CPE-853): `CPE_AGENTBOARD_BIN`, then the bundled
+/// `sidecars/agent-board[.exe]` resource, then a dev fallback next to this crate. Mirrors
+/// `resolve_ai_console_bin`.
+#[cfg(feature = "sidecar-platform")]
+fn resolve_agent_board_bin(app: &tauri::AppHandle) -> Result<String, String> {
+    use tauri::Manager;
+    let exe = if cfg!(windows) { "agent-board.exe" } else { "agent-board" };
+
+    if let Ok(p) = std::env::var("CPE_AGENTBOARD_BIN") {
+        if Path::new(&p).exists() {
+            return Ok(p);
+        }
+    }
+    if let Ok(resource) = app.path().resource_dir() {
+        let p = resource.join("sidecars").join(exe);
+        if p.exists() {
+            return Ok(p.to_string_lossy().into_owned());
+        }
+    }
+    let manifest = Path::new(env!("CARGO_MANIFEST_DIR"));
+    for profile in ["debug", "release"] {
+        for base in [manifest.join("../sidecar/agent-board/target"), PathBuf::from("sidecar/agent-board/target")] {
+            let p = base.join(profile).join(exe);
+            if p.exists() {
+                return Ok(p.to_string_lossy().into_owned());
+            }
+        }
+    }
+    Err(format!("agent-board binary ('{exe}') not found"))
+}
+
+/// Spawn the Agent Board sidecar, complete the handshake, and return the URL of the Kanban UI it serves
+/// so the frontend can frame it in a window (CPE-853, epic CPE-850). The board reads `Tickets/` under
+/// `root` (passed as `CPE_BOARD_ROOT`; falls back to the sidecar's own cwd when absent). The window
+/// singleton (by label) prevents duplicate launches, so this deliberately keeps the connection alive on a
+/// detached servicing thread rather than a managed reuse state. Non-fatal: returns an error string the UI
+/// surfaces.
+#[cfg(feature = "sidecar-platform")]
+#[tauri::command]
+fn sidecar_start_agent_board(app: tauri::AppHandle, root: Option<String>) -> Result<String, String> {
+    use sidecar_contract::{Event, Message, CONTRACT_VERSION};
+    use sidecar_host::conformance::SidecarChannel; // brings `.recv()` into scope
+    use sidecar_host::supervisor::{handshake, spawn_process_with_env};
+
+    if !sidecar_host::enablement::EnablementStore::load(&consent_dir(&app)?).is_enabled("agent-board") {
+        return Err("the Agent Board sidecar is disabled".to_string());
+    }
+
+    let bin = resolve_agent_board_bin(&app)?;
+    let root = root.unwrap_or_default();
+    let env: Vec<(&str, &str)> = if root.is_empty() { vec![] } else { vec![("CPE_BOARD_ROOT", root.as_str())] };
+
+    let mut conn = spawn_process_with_env(&bin, &[], &env).map_err(|e| format!("spawn failed: {e}"))?;
+    let token = conn.launch_token().to_string();
+    let consented = sidecar_host::consent::ConsentStore::load(&consent_dir(&app)?).granted("agent-board");
+    handshake(&mut conn, CONTRACT_VERSION, &consented, Some(&token))
+        .map_err(|e| format!("handshake failed: {e:?}"))?;
+
+    // Read a bounded number of frames for the `ui:<url>` announcement.
+    let mut url = None;
+    for _ in 0..20 {
+        match conn.recv() {
+            Ok(env) => {
+                if let Message::Event(Event::Status { state }) = env.message {
+                    if let Some(u) = state.strip_prefix("ui:") {
+                        url = Some(u.to_string());
+                        break;
+                    }
+                }
+            }
+            Err(_) => break,
+        }
+    }
+    let url = url.ok_or_else(|| "the Agent Board sidecar did not announce a UI".to_string())?;
+
+    // Keep the connection alive for the sidecar's lifetime on a detached thread (dropping it would close
+    // the sidecar's stdin and stop it serving). The board makes no host requests, so we just drain frames
+    // until it exits.
+    std::thread::spawn(move || {
+        while conn.recv().is_ok() {}
+    });
+
+    Ok(url)
+}
+
 /// One redacted log line in a diagnostics response (CPE-323).
 #[cfg(feature = "sidecar-platform")]
 #[derive(serde::Serialize)]
@@ -4926,6 +5011,8 @@ pub fn run() {
             sidecar_set_enabled,
             #[cfg(feature = "sidecar-platform")]
             sidecar_start_ai_console,
+            #[cfg(feature = "sidecar-platform")]
+            sidecar_start_agent_board,
             #[cfg(feature = "sidecar-platform")]
             sidecar_diagnostics,
             #[cfg(feature = "sidecar-platform")]

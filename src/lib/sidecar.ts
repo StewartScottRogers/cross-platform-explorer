@@ -54,6 +54,20 @@ export async function startAiConsole(): Promise<string | null> {
 }
 
 /**
+ * Start the Agent Board sidecar and return the loopback URL of the Kanban UI it serves (CPE-853), or
+ * `null` when unavailable (plain build / start failed) so the caller can fall back. `root` scopes which
+ * project's `Tickets/` the board reads.
+ */
+export async function startAgentBoard(root?: string): Promise<string | null> {
+  try {
+    const url = await invoke<string>("sidecar_start_agent_board", { root: root ?? null });
+    return typeof url === "string" && url.length > 0 ? url : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
  * Extract the mount URL from a sidecar's `ui:<url>` Status announcement (CPE-271), or
  * `null` if it isn't one. Only loopback URLs are accepted — a sidecar must not point the
  * host's iframe at an off-machine address.
