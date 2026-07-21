@@ -24,7 +24,7 @@
       the embedded overlay behaviour unchanged. */
   export let windowed = false;
 
-  const dispatch = createEventDispatcher<{ close: void; launch: { id: string; task: string } }>();
+  const dispatch = createEventDispatcher<{ close: void; launch: { id: string; task: string }; popout: void }>();
 
   // The board is a *project* tool: it stays pointed at the last project you chose (persisted), so it
   // doesn't reset to wherever you happen to be browsing. Falls back to the current folder (CPE-551).
@@ -235,6 +235,9 @@
         <button class="board-btn" on:click={chooseProject} title={"Project: " + boardRoot + "\nChoose a different project folder"}>📁 Project</button>
         <button class="board-btn" on:click={refresh} title="Refresh from the Tickets/ folders">Refresh</button>
         <HelpButton section="agent-board" on:help />
+        {#if !windowed}
+          <button class="board-x board-popout" title="Open in its own window" aria-label="Open Agent Board in its own window" on:click={() => dispatch("popout")}>⧉</button>
+        {/if}
         <button class="board-x" title="Close" aria-label="Close" on:click={() => dispatch("close")}>×</button>
       </div>
     </div>
@@ -404,6 +407,7 @@
   .board-x { border: 0; background: transparent; color: var(--text-dim); font-size: 20px; cursor: pointer;
     line-height: 1; padding: 0 4px; border-radius: 4px; }
   .board-x:hover { background: rgba(128,128,128,0.18); color: var(--text); }
+  .board-popout { font-size: 15px; }
 
   .board-status { padding: 6px 14px; font-size: 12px; border-bottom: 1px solid var(--border); }
   .board-status.error { color: #e0706b; }
