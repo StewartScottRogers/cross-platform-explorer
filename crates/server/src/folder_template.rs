@@ -16,6 +16,8 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
+use crate::ctx::ServerCtx;
+
 /// Placeholder files up to this size have their contents captured (as boilerplate); larger or non-UTF-8
 /// files become empty placeholders, keeping a template small and text-only.
 const MAX_CAPTURED_FILE: u64 = 64 * 1024;
@@ -181,9 +183,121 @@ fn stamp_nodes(
     Ok(())
 }
 
+// ---------------------------------------------------------------------------
+// The template store (CPE-836) — a `templates.json` catalog in the config dir, reached through a
+// `ServerCtx`, following the `tags`/`settings` store pattern so the Tauri commands (CPE-837) are
+// one-line dispatchers.
+// ---------------------------------------------------------------------------
+
+/// The stored template catalog: name → [`Template`]. `BTreeMap` for a stable, diff-friendly on-disk
+/// order.
+pub type Catalog = BTreeMap<String, Template>;
+
+/// A gallery summary of one stored template: its name and how many dirs/files it stamps.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TemplateSummary {
+    pub name: String,
+    pub dirs: usize,
+    pub files: usize,
+}
+
+fn templates_path(dir: &Path) -> PathBuf {
+    dir.join("templates.json")
+}
+
+/// Read the catalog from `templates.json` in `dir`; an absent or corrupt file yields an empty catalog.
+pub fn read_catalog_from(dir: &Path) -> Catalog {
+    fs::read_to_string(templates_path(dir))
+        .ok()
+        .and_then(|s| serde_json::from_str(&s).ok())
+        .unwrap_or_default()
+}
+
+/// Persist the catalog to `templates.json` in `dir`, creating `dir` if needed.
+pub fn write_catalog_to(dir: &Path, catalog: &Catalog) -> Result<(), String> {
+    fs::create_dir_all(dir).map_err(|e| e.to_string())?;
+    let json = serde_json::to_string_pretty(catalog).map_err(|e| e.to_string())?;
+    fs::write(templates_path(dir), json.as_bytes()).map_err(|e| e.to_string())
+}
+
+fn count_nodes(nodes: &[Node], dirs: &mut usize, files: &mut usize) {
+    for n in nodes {
+        match n {
+            Node::Dir { children, .. } => {
+                *dirs += 1;
+                count_nodes(children, dirs, files);
+            }
+            Node::File { .. } => *files += 1,
+        }
+    }
+}
+
+/// Save (insert or replace by `name`) a template and persist. Returns the updated catalog.
+pub fn save(ctx: &dyn ServerCtx, template: Template) -> Result<Catalog, String> {
+    let dir = ctx.app_config_dir()?;
+    let mut catalog = read_catalog_from(&dir);
+    catalog.insert(template.name.clone(), template);
+    write_catalog_to(&dir, &catalog)?;
+    Ok(catalog)
+}
+
+/// Every stored template's name + node counts, name-sorted (for the gallery).
+pub fn list(ctx: &dyn ServerCtx) -> Result<Vec<TemplateSummary>, String> {
+    let catalog = read_catalog_from(&ctx.app_config_dir()?);
+    Ok(catalog
+        .values()
+        .map(|t| {
+            let (mut dirs, mut files) = (0, 0);
+            count_nodes(&t.nodes, &mut dirs, &mut files);
+            TemplateSummary {
+                name: t.name.clone(),
+                dirs,
+                files,
+            }
+        })
+        .collect())
+}
+
+/// One template by name (`None` if absent).
+pub fn load(ctx: &dyn ServerCtx, name: &str) -> Result<Option<Template>, String> {
+    Ok(read_catalog_from(&ctx.app_config_dir()?).get(name).cloned())
+}
+
+/// Remove a template by name and persist. Returns the updated catalog.
+pub fn delete(ctx: &dyn ServerCtx, name: &str) -> Result<Catalog, String> {
+    let dir = ctx.app_config_dir()?;
+    let mut catalog = read_catalog_from(&dir);
+    catalog.remove(name);
+    write_catalog_to(&dir, &catalog)?;
+    Ok(catalog)
+}
+
+/// A single template's JSON, for sharing/export. `import` accepts exactly this.
+pub fn export(template: &Template) -> Result<String, String> {
+    serde_json::to_string_pretty(template).map_err(|e| e.to_string())
+}
+
+/// Import a template — either a single [`Template`] JSON or a whole [`Catalog`] JSON — merged into the
+/// store **by name** (a same-named template is replaced). Returns the updated catalog.
+pub fn import(ctx: &dyn ServerCtx, json: &str) -> Result<Catalog, String> {
+    let dir = ctx.app_config_dir()?;
+    let mut catalog = read_catalog_from(&dir);
+    // Try a single template first (a catalog fails this because its values aren't a bare template).
+    if let Ok(t) = serde_json::from_str::<Template>(json) {
+        catalog.insert(t.name.clone(), t);
+    } else if let Ok(incoming) = serde_json::from_str::<Catalog>(json) {
+        catalog.extend(incoming);
+    } else {
+        return Err("invalid template JSON".to_string());
+    }
+    write_catalog_to(&dir, &catalog)?;
+    Ok(catalog)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ctx::HeadlessCtx;
 
     fn scratch(tag: &str) -> PathBuf {
         use std::sync::atomic::{AtomicU64, Ordering};
@@ -289,5 +403,72 @@ mod tests {
         fs::write(&f, b"x").unwrap();
         assert!(capture(&f, "x").is_err());
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    fn sample(name: &str) -> Template {
+        Template {
+            name: name.into(),
+            nodes: vec![Node::Dir {
+                name: "src".into(),
+                children: vec![Node::File {
+                    name: "main.rs".into(),
+                    contents: String::new(),
+                }],
+            }],
+        }
+    }
+
+    #[test]
+    fn store_save_list_load_delete_round_trip() {
+        let base = scratch("store");
+        let ctx = HeadlessCtx::new(&base);
+        assert!(list(&ctx).unwrap().is_empty());
+
+        let t = sample("proj");
+        save(&ctx, t.clone()).unwrap();
+
+        let summaries = list(&ctx).unwrap();
+        assert_eq!(summaries.len(), 1);
+        assert_eq!(summaries[0], TemplateSummary { name: "proj".into(), dirs: 1, files: 1 });
+        assert_eq!(load(&ctx, "proj").unwrap(), Some(t.clone()));
+
+        // Save replaces a same-named template.
+        let mut t2 = t.clone();
+        t2.nodes.clear();
+        save(&ctx, t2).unwrap();
+        assert_eq!(load(&ctx, "proj").unwrap().unwrap().nodes.len(), 0);
+
+        delete(&ctx, "proj").unwrap();
+        assert!(load(&ctx, "proj").unwrap().is_none());
+        assert!(list(&ctx).unwrap().is_empty());
+        let _ = fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn export_import_round_trips_and_rejects_garbage() {
+        let base = scratch("io");
+        let ctx = HeadlessCtx::new(&base);
+        let t = sample("x");
+        let json = export(&t).unwrap();
+        import(&ctx, &json).unwrap();
+        assert_eq!(load(&ctx, "x").unwrap(), Some(t));
+
+        // Import also accepts a whole catalog JSON.
+        let catalog: Catalog = [("a".to_string(), sample("a")), ("b".to_string(), sample("b"))]
+            .into_iter()
+            .collect();
+        import(&ctx, &serde_json::to_string(&catalog).unwrap()).unwrap();
+        let names: Vec<String> = list(&ctx).unwrap().into_iter().map(|s| s.name).collect();
+        assert_eq!(names, vec!["a".to_string(), "b".to_string(), "x".to_string()]);
+
+        assert!(import(&ctx, "not json").is_err());
+        let _ = fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn missing_catalog_reads_as_empty() {
+        let ctx = HeadlessCtx::new(scratch("empty"));
+        assert!(list(&ctx).unwrap().is_empty());
+        assert!(load(&ctx, "nope").unwrap().is_none());
     }
 }
