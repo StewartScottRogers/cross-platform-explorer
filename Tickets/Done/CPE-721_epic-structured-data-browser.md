@@ -2,13 +2,13 @@
 id: CPE-721
 title: "EPIC: Structured-data browser (SQLite / Parquet / Excel)"
 type: Task
-status: In Progress
+status: Done
 priority: Medium
 component: Multiple
 tags: [epic]
 estimate: 4h+
 created: 2026-07-18
-closed:
+closed: 2026-07-21
 ---
 
 > **Activated 2026-07-21** (autonomous — best-guess decisions logged, PM delegated). Chosen for its
@@ -65,3 +65,15 @@ and today must open a separate tool to peek inside.
 - **2026-07-21** — Activated. Confirmed `cpe-server` already carries rusqlite/calamine/parquet (used for
   the `*_info` summaries), so the readers extend cleanly with no new deps. Resolved the crate/read-only/
   coexistence questions (above) and decomposed into CPE-847/848 (headless) + CPE-849 (GUI). DBF deferred.
+
+## Resolution (closed 2026-07-21)
+Delivered by **CPE-847 + 848 + 849** (all Done): the structured-data browser ships. The `cpe-server::
+data_browser` reader exposes schema + paged rows for SQLite / Parquet / Excel-ODS and a read-only SQLite
+SQL console (reusing the crates already in the tree — no new dependency), and the frontend `DataBrowser`
+component renders it as an interactive preview grid (table/sheet navigation, paging, client-side sort +
+filter, a read-only SQL box), wired via a new `data-grid` preview kind.
+
+**DoD:** ✅ SQLite/Parquet/Excel-ODS open in a paged, typed, sortable/filterable grid · ✅ large sets page
+without loading fully (server offset/limit) · ✅ multi-table/sheet navigation · ✅ SQLite read-only queries ·
+✅ existing CSV/JSON previews unaffected. DBF was scoped out at activation (a new crate) and can be a future
+follow-up. End-to-end GUI verification rides a deploy; the code is CI-green.
