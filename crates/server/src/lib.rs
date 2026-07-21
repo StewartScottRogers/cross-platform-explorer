@@ -91,6 +91,10 @@ pub mod name_search;
 /// relevance. Backend-agnostic; reused by the index engine (CPE-831, epic CPE-703).
 pub mod index_query;
 
+/// Folder templates — capture a folder structure as a reusable template and stamp it out with `{token}`
+/// substitution, path-safe and non-destructive (CPE-835, epic CPE-740).
+pub mod folder_template;
+
 /// Content search — recursive line search in text files, bounded + binary-skipping (CPE-416).
 pub mod content_search;
 
