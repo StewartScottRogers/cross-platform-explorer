@@ -2848,6 +2848,16 @@
 
 <Toolbar label={$t("tb.application")}>
   <svelte:fragment slot="actions">
+    <!-- Agent Board — opens the standalone board window (CPE-846). Always shown (the board works in
+         every build), and sits just left of the AI Console button. -->
+    <button
+      class="tb-board"
+      type="button"
+      title={$t("palette.openAgentBoardWindow")}
+      on:click={() => openAgentBoard()}
+    >
+      <Icon name="documents" size={15} /> Agent Board
+    </button>
     {#if aiConsoleAvailable}
       <button
         class="tb-console"
@@ -3563,8 +3573,10 @@
     font-weight: 600;
   }
 
-  /* AI Console toolbar button (CPE-351) — sits next to the settings gear. */
-  .tb-console {
+  /* AI Console toolbar button (CPE-351) — sits next to the settings gear. The Agent Board button
+     (CPE-846) sits just left of it and shares the same toolbar-action styling. */
+  .tb-console,
+  .tb-board {
     display: inline-flex;
     align-items: center;
     gap: 6px;
@@ -3577,7 +3589,8 @@
     color: var(--text);
     font-size: 12px;
   }
-  .tb-console:hover {
+  .tb-console:hover,
+  .tb-board:hover {
     background: var(--surface-alt);
   }
   /* Live count of running agent sessions (CPE-404) — visible even with the console window closed. */
