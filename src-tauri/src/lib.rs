@@ -10,6 +10,11 @@ use std::time::{SystemTime, UNIX_EPOCH};
 mod geometry;
 mod location;
 mod provider;
+/// Runtime seam (`ServerCtx`) abstracting the app-data/config/cache dir resolution + event emit off
+/// concrete Tauri types, so command logic no longer reaches for `AppHandle` directly (CPE-814, epic
+/// CPE-810). `TauriCtx` is the real impl; the pure `server` crate extraction behind it is CPE-815.
+mod server_ctx;
+use server_ctx::ServerCtx;
 #[cfg(feature = "sidecar-platform")]
 mod keyverify;
 /// Host-brokered forge API egress for the repos sidecar (CPE-433). Same rationale as `keyverify`:
@@ -1603,9 +1608,8 @@ fn thumbnail_cached(cache_dir: &Path, path: &Path, max_edge: u32) -> Result<Vec<
 #[tauri::command]
 fn thumbnail(app: tauri::AppHandle, path: String, max_edge: u32) -> Result<String, String> {
     use base64::Engine;
-    use tauri::Manager;
     ensure_previewable_size(&path, PREVIEW_INFO_MAX_BYTES)?;
-    let png = match app.path().app_cache_dir() {
+    let png = match server_ctx::TauriCtx::new(&app).app_cache_dir() {
         Ok(dir) => thumbnail_cached(&dir.join("thumbnails"), Path::new(&path), max_edge)?,
         Err(_) => make_thumbnail_png(Path::new(&path), max_edge)?, // no cache dir — generate fresh
     };
@@ -2482,12 +2486,12 @@ fn start_transfer(
     transfer_registry().lock().unwrap().insert(id, cancel.clone());
     let srcs: Vec<PathBuf> = sources.iter().map(PathBuf::from).collect();
     let dest_dir = PathBuf::from(dest);
+    let ctx = server_ctx::TauriCtx::new(&app);
     std::thread::spawn(move || {
-        use tauri::Emitter;
         let report = run_transfer(id, &srcs, &dest_dir, kind, policy, &cancel, |p| {
-            let _ = app.emit("transfer://progress", p);
+            let _ = ctx.emit_json("transfer://progress", serde_json::to_value(p).unwrap_or_default());
         });
-        let _ = app.emit("transfer://done", &report);
+        let _ = ctx.emit_json("transfer://done", serde_json::to_value(&report).unwrap_or_default());
         transfer_registry().lock().unwrap().remove(&id);
     });
     id
@@ -3192,8 +3196,7 @@ fn drive_type_impl(_path: &str) -> String {
 
 /// Resolve (and create) the journal directory under the app-data dir.
 fn audit_dir(app: &tauri::AppHandle) -> Result<std::path::PathBuf, String> {
-    use tauri::Manager;
-    let dir = app.path().app_data_dir().map_err(|e| e.to_string())?.join("audit");
+    let dir = server_ctx::TauriCtx::new(app).app_data_dir()?.join("audit");
     Ok(dir)
 }
 
@@ -3809,8 +3812,7 @@ fn write_settings_to(dir: &Path, contents: &str) -> Result<(), String> {
 /// defaults on a fresh install (CPE-226).
 #[tauri::command]
 fn read_settings(app: tauri::AppHandle) -> Result<String, String> {
-    use tauri::Manager;
-    let dir = app.path().app_config_dir().map_err(|e| e.to_string())?;
+    let dir = server_ctx::TauriCtx::new(&app).app_config_dir()?;
     Ok(read_settings_from(&dir))
 }
 
@@ -3818,8 +3820,7 @@ fn read_settings(app: tauri::AppHandle) -> Result<String, String> {
 /// (CPE-226). `contents` is the full settings JSON document.
 #[tauri::command]
 fn write_settings(app: tauri::AppHandle, contents: String) -> Result<(), String> {
-    use tauri::Manager;
-    let dir = app.path().app_config_dir().map_err(|e| e.to_string())?;
+    let dir = server_ctx::TauriCtx::new(&app).app_config_dir()?;
     write_settings_to(&dir, &contents)
 }
 
@@ -3939,16 +3940,14 @@ fn write_tags_to(dir: &Path, store: &TagStore) -> Result<(), String> {
 /// The whole tag store (path → {tags,label}); `{}` on a fresh install.
 #[tauri::command]
 fn load_tags(app: tauri::AppHandle) -> Result<TagStore, String> {
-    use tauri::Manager;
-    let dir = app.path().app_config_dir().map_err(|e| e.to_string())?;
+    let dir = server_ctx::TauriCtx::new(&app).app_config_dir()?;
     Ok(read_tags_from(&dir))
 }
 
 /// Replace one path's tags + label and persist. Returns the updated whole store.
 #[tauri::command]
 fn set_tags(app: tauri::AppHandle, path: String, tags: Vec<String>, label: String) -> Result<TagStore, String> {
-    use tauri::Manager;
-    let dir = app.path().app_config_dir().map_err(|e| e.to_string())?;
+    let dir = server_ctx::TauriCtx::new(&app).app_config_dir()?;
     let mut store = read_tags_from(&dir);
     tag_store_set(&mut store, &path, tags, label);
     write_tags_to(&dir, &store)?;
@@ -3958,16 +3957,14 @@ fn set_tags(app: tauri::AppHandle, path: String, tags: Vec<String>, label: Strin
 /// Every tag with its usage count (most-used first).
 #[tauri::command]
 fn tag_counts(app: tauri::AppHandle) -> Result<Vec<(String, usize)>, String> {
-    use tauri::Manager;
-    let dir = app.path().app_config_dir().map_err(|e| e.to_string())?;
+    let dir = server_ctx::TauriCtx::new(&app).app_config_dir()?;
     Ok(tag_store_counts(&read_tags_from(&dir)))
 }
 
 /// Rename a tag across every path (CPE-646); an empty `new` deletes it. Returns the updated store.
 #[tauri::command]
 fn rename_tag(app: tauri::AppHandle, old: String, new: String) -> Result<TagStore, String> {
-    use tauri::Manager;
-    let dir = app.path().app_config_dir().map_err(|e| e.to_string())?;
+    let dir = server_ctx::TauriCtx::new(&app).app_config_dir()?;
     let mut store = read_tags_from(&dir);
     tag_store_rename_tag(&mut store, &old, &new);
     tag_store_prune_empty(&mut store);
@@ -3978,8 +3975,7 @@ fn rename_tag(app: tauri::AppHandle, old: String, new: String) -> Result<TagStor
 /// Remove a tag from every path (CPE-646). Returns the updated store.
 #[tauri::command]
 fn delete_tag(app: tauri::AppHandle, tag: String) -> Result<TagStore, String> {
-    use tauri::Manager;
-    let dir = app.path().app_config_dir().map_err(|e| e.to_string())?;
+    let dir = server_ctx::TauriCtx::new(&app).app_config_dir()?;
     let mut store = read_tags_from(&dir);
     tag_store_delete_tag(&mut store, &tag);
     tag_store_prune_empty(&mut store);
@@ -3991,8 +3987,7 @@ fn delete_tag(app: tauri::AppHandle, tag: String) -> Result<TagStore, String> {
 /// Returns the updated store. A no-op when the old path had no tags.
 #[tauri::command]
 fn retag_path(app: tauri::AppHandle, from: String, to: String) -> Result<TagStore, String> {
-    use tauri::Manager;
-    let dir = app.path().app_config_dir().map_err(|e| e.to_string())?;
+    let dir = server_ctx::TauriCtx::new(&app).app_config_dir()?;
     let mut store = read_tags_from(&dir);
     if store.contains_key(&from) {
         tag_store_rename(&mut store, &from, &to);
@@ -4006,9 +4001,8 @@ fn retag_path(app: tauri::AppHandle, from: String, to: String) -> Result<TagStor
 /// is just `load_tags` + `JSON.stringify` on the frontend.)
 #[tauri::command]
 fn import_tags(app: tauri::AppHandle, json: String) -> Result<TagStore, String> {
-    use tauri::Manager;
     let incoming: TagStore = serde_json::from_str(&json).map_err(|e| format!("invalid tags file: {e}"))?;
-    let dir = app.path().app_config_dir().map_err(|e| e.to_string())?;
+    let dir = server_ctx::TauriCtx::new(&app).app_config_dir()?;
     let mut store = read_tags_from(&dir);
     tag_store_merge(&mut store, incoming);
     write_tags_to(&dir, &store)?;
@@ -4728,11 +4722,9 @@ fn reap_orphan_session_daemons_on_startup(app: &tauri::AppHandle) {
 /// Directory holding the persisted capability-consent store (CPE-296).
 #[cfg(feature = "sidecar-platform")]
 fn consent_dir(app: &tauri::AppHandle) -> Result<PathBuf, String> {
-    use tauri::Manager;
-    app.path()
+    server_ctx::TauriCtx::new(app)
         .app_config_dir()
         .map(|c| c.join("sidecars"))
-        .map_err(|e| e.to_string())
 }
 
 /// List the ids of sidecars registered in the bundled + user registry directories.
@@ -5063,8 +5055,7 @@ const CATALOG_TRUSTED_KEYS: &[&str] =
 /// where the sidecar loads them from. Both the fetch handler and the sidecar (via env) agree on it.
 #[cfg(feature = "sidecar-platform")]
 fn catalog_dir(app: &tauri::AppHandle) -> PathBuf {
-    use tauri::Manager;
-    app.path()
+    server_ctx::TauriCtx::new(app)
         .app_data_dir()
         .map(|d| d.join("ai-console-catalog"))
         .unwrap_or_else(|_| std::env::temp_dir().join("cpe-ai-console-catalog"))
@@ -6171,8 +6162,9 @@ fn forge_clone_impl(
 /// no silent admission (threat-model Q5).
 #[cfg(feature = "sidecar-platform")]
 fn admitted_hosts_path(app: &tauri::AppHandle) -> Result<std::path::PathBuf, String> {
-    use tauri::Manager;
-    let dir = app.path().app_data_dir().map_err(|_| "no app data dir".to_string())?;
+    let dir = server_ctx::TauriCtx::new(app)
+        .app_data_dir()
+        .map_err(|_| "no app data dir".to_string())?;
     Ok(dir.join("forge-admitted-hosts.json"))
 }
 
