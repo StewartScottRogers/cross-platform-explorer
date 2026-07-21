@@ -36,7 +36,7 @@ mod tests {
     use std::net::{SocketAddr, TcpListener};
     use std::sync::atomic::{AtomicU64, Ordering};
     use std::sync::Arc;
-    use std::time::Instant;
+    use std::time::{Duration, Instant};
 
     use cpe_contract::{ContractVersion, ErrorCode, RejectCode, Request, CONTRACT_VERSION};
     use cpe_security::SecurityChain;
@@ -158,42 +158,56 @@ mod tests {
     /// it is stable across the 3-OS CI matrix regardless of how loaded a runner is: the
     /// loopback path does everything the in-process path does *plus* the network round-trip, so
     /// it is structurally slower.
+    ///
+    /// Each path is timed **best-of-`TRIALS`** and compared on its minimum batch time. A single
+    /// batch sum can be spiked by one scheduler stall on a loaded runner (which made the naive
+    /// `in_process < loopback` comparison flaky); the minimum over several trials is a stable
+    /// lower-bound estimator that filters those one-off stalls, so only a genuine regression —
+    /// the local path being consistently as slow as the networked one — trips the assert.
     #[test]
     fn in_process_dispatch_is_not_taxed_by_the_remote_path() {
         let dir = scratch("bench");
         std::fs::write(dir.join("a.txt"), b"hi").unwrap();
         let params = serde_json::json!({ "path": dir.to_string_lossy() });
         const N: usize = 200;
+        const TRIALS: usize = 5;
 
         // In-process: direct dispatch, no socket — the local fast path.
         let ctx = HeadlessCtx::new(scratch("benchbase"));
         let dispatcher = Dispatcher::with_builtins();
-        let t0 = Instant::now();
-        for _ in 0..N {
-            let resp = dispatcher.dispatch(
-                &ctx,
-                Request {
-                    method: "list_dir".to_string(),
-                    params: params.clone(),
-                },
-            );
-            assert!(resp.result.is_ok());
-        }
-        let in_process = t0.elapsed();
-
         // Over loopback: the identical calls through the client/server.
         let addr = start_server(SecurityChain::local());
         let mut client = Client::connect(addr).unwrap();
-        let t1 = Instant::now();
-        for _ in 0..N {
-            client.call("list_dir", params.clone()).unwrap();
-        }
-        let loopback = t1.elapsed();
 
-        println!("local-fast guard: in_process={in_process:?} loopback={loopback:?} (N={N})");
+        let mut best_in = Duration::MAX;
+        let mut best_loop = Duration::MAX;
+        for _ in 0..TRIALS {
+            let t0 = Instant::now();
+            for _ in 0..N {
+                let resp = dispatcher.dispatch(
+                    &ctx,
+                    Request {
+                        method: "list_dir".to_string(),
+                        params: params.clone(),
+                    },
+                );
+                assert!(resp.result.is_ok());
+            }
+            best_in = best_in.min(t0.elapsed());
+
+            let t1 = Instant::now();
+            for _ in 0..N {
+                client.call("list_dir", params.clone()).unwrap();
+            }
+            best_loop = best_loop.min(t1.elapsed());
+        }
+
+        println!(
+            "local-fast guard: best_in_process={best_in:?} best_loopback={best_loop:?} (N={N}, trials={TRIALS})"
+        );
         assert!(
-            in_process < loopback,
-            "the in-process path must stay faster than the remote path: in_process={in_process:?} loopback={loopback:?}"
+            best_in < best_loop,
+            "the in-process path must stay faster than the remote path: best_in_process={best_in:?} best_loopback={best_loop:?}"
         );
     }
 }
