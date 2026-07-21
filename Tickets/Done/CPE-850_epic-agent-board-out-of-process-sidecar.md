@@ -2,13 +2,13 @@
 id: CPE-850
 title: "EPIC: Agent Board as an out-of-process sidecar (like AI Console / Repositories)"
 type: Task
-status: In Progress
+status: Done
 priority: Medium
 component: Multiple
 tags: [epic, big-design]
 estimate: 4h+
 created: 2026-07-21
-closed:
+closed: 2026-07-21
 ---
 
 > **Activated on creation 2026-07-21** (user directive: "make the Agent Board out of process like the AI
@@ -75,3 +75,20 @@ and the delete-test (no sidecar code in the plain build).
   registry, `repos`/`ai-console` template, the scaffolder, `SidecarManager`, release bundling). Scaffolded
   `sidecar/agent-board` and decomposed into CPE-851 (foundation) → 852 (data/UI) → 853 (host launch) → 854
   (bundle + settings). Starting CPE-851.
+
+## Resolution (closed 2026-07-21)
+Delivered by **CPE-851 + 852 + 853 + 854** (all Done). The Agent Board now ships as a first-class
+out-of-process sidecar on the ADR-0001 platform, alongside AI Console / Repositories:
+- **851** — the `sidecar/agent-board` crate (handshake, own loopback UI, manifest), depends only on
+  `sidecar-contract`.
+- **852** — a real Kanban over `Tickets/` served by the sidecar: read cards + drag-to-move (file move +
+  `status:` rewrite), via `GET /api/cards` + `POST /api/move`.
+- **853** — host launch (`sidecar_start_agent_board`) + `openAgentBoard()` prefers the sidecar, framing its
+  UI in an isolated window; in-process window (CPE-841) remains the fallback.
+- **854** — bundled (binary + manifest) in `release-sidecar.yml` + both overlays; discovered by the host
+  registry → appears in **Settings → SidecarManager** (version, capabilities, enable/disable, diagnostics).
+
+**DoD:** ✅ registered sidecar in the sidecar manager · ✅ runs out-of-process serving its own board UI ·
+✅ depends only on the contract (delete-test holds) · ✅ documented (`docs/design/STANDALONE-WINDOWS.md`).
+End-to-end **GUI verification** (it shows in Settings + launches out-of-process) rides the next sidecar
+deploy — the code/config is complete and CI-green.
