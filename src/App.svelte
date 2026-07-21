@@ -16,8 +16,7 @@
   import MenuBar from "./lib/components/MenuBar.svelte";
   import AboutDialog from "./lib/components/AboutDialog.svelte";
   import SettingsDialog from "./lib/components/SettingsDialog.svelte";
-  import ConsentSheet from "./lib/components/ConsentSheet.svelte";
-  import { startAiConsole, startAgentBoard, consoleUrlWith, platformActive, consentState, setConsent, type Capability, type ConsentState } from "./lib/sidecar";
+  import { startAiConsole, startAgentBoard, consoleUrlWith, platformActive, consentState, setConsent, CAPABILITY_INFO } from "./lib/sidecar";
   import { initAgentSessions, agentSessions, watchTargetFor, normalizePath, clearAgentSessions } from "./lib/agentSessions";
   import { startAgentWatch, stopAgentWatch, type FsActivity } from "./lib/sidecar";
   import { initAgentActivity, fsActivity, recentActivities, agentTimeline, affectsListing } from "./lib/agentActivity";
@@ -755,15 +754,15 @@
   }
 
   const AI_CONSOLE_LABEL = "ai-console";
-  let consentPrompt: ConsentState | null = null;
 
   /** Open the Agent Deck in its own OS window (CPE-335) — native title bar (drag it around
       the screen), resize borders, and frame, independent of the explorer's focus. Only
-      meaningful in a `sidecar-platform` build. Gated by capability consent (CPE-296). The
-      window loads the sidecar's loopback URL directly and has NO Tauri API (its label is
-      in no capability), so the untrusted sidecar UI stays isolated. */
+      meaningful in a `sidecar-platform` build. The window loads the sidecar's loopback URL
+      directly and has NO Tauri API (its label is in no capability), so the untrusted sidecar
+      UI stays isolated. Capability consent is managed in Settings → Platform, not at launch
+      (CPE-860). */
   /** Pending explorer→console hand-off (CPE-313): folder to scope to and a task hint,
-      consumed by launchAiConsole once consent (if any) is resolved. */
+      consumed by launchAiConsole. */
   let consoleContext: { cwd?: string; task?: string; session?: string } = {};
 
   async function openAiConsole(ctx: { cwd?: string; task?: string; session?: string } = {}) {
@@ -776,10 +775,17 @@
       else if (ctx.cwd) showNotice("Agent Deck is already open — set the working folder in its toolbar.", false);
       return;
     }
+    // CPE-860: open directly — no launch-time consent popup. On first launch grant the
+    // non-sensitive requested capabilities silently (matching the old sheet's defaults) and
+    // leave sensitive ones (secrets, network) ungranted for a deliberate grant in Settings →
+    // Platform. Sensitive capabilities are still never granted without an explicit user action.
     const state = await consentState("ai-console");
-    if (state && state.undecided.length > 0) {
-      consentPrompt = state; // launch continues in onConsentDecision
-      return;
+    if (state) {
+      const defaults = state.undecided.filter((c) => !CAPABILITY_INFO[c].sensitive);
+      if (defaults.length > 0) {
+        const granted = [...state.granted, ...defaults];
+        await setConsent("ai-console", granted, granted);
+      }
     }
     await launchAiConsole();
   }
@@ -863,14 +869,6 @@
     }
   }
 
-  /** Persist the consent decision from the sheet, then launch the console. */
-  async function onConsentDecision(
-    e: CustomEvent<{ granted: Capability[]; decided: Capability[] }>,
-  ) {
-    await setConsent("ai-console", e.detail.granted, e.detail.decided);
-    consentPrompt = null;
-    await launchAiConsole();
-  }
   let appVersion = "";
 
   // ---- In-app updates (CPE-230) ----
@@ -3326,15 +3324,6 @@
     on:reset={resetAllSettings}
     on:openConsole={() => openAiConsole()}
     on:close={() => (showSettings = false)}
-  />
-{/if}
-
-{#if consentPrompt}
-  <ConsentSheet
-    sidecarId="ai-console"
-    state={consentPrompt}
-    on:decide={onConsentDecision}
-    on:cancel={() => (consentPrompt = null)}
   />
 {/if}
 

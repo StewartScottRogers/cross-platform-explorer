@@ -13,6 +13,7 @@
     setEnabled,
     stopSidecar,
     revokeCapability,
+    setConsent,
     sidecarDiagnostics,
     CAPABILITY_INFO,
     type SidecarInfo,
@@ -59,6 +60,14 @@
     await revokeCapability(row.id, cap);
     await refresh();
   }
+
+  // Grant a denied/undecided capability from Settings (CPE-860) — this is now the place consent is
+  // given, instead of a launch-time popup. Takes effect on the sidecar's next launch.
+  async function grant(row: SidecarInfo, cap: Capability) {
+    const granted = [...row.granted, cap];
+    await setConsent(row.id, granted, granted);
+    await refresh();
+  }
 </script>
 
 <div class="mgr">
@@ -92,7 +101,7 @@
               {#if isGranted}
                 <button class="revoke" title={$t("mgr.revoke")} on:click={() => revoke(row, cap)}>×</button>
               {:else}
-                <span class="denied">{$t("mgr.denied")}</span>
+                <button class="grant" title={$t("mgr.grantTip")} on:click={() => grant(row, cap)}>{$t("mgr.grant")}</button>
               {/if}
             </span>
           {/each}
@@ -224,6 +233,20 @@
     font-size: 10px;
     text-transform: uppercase;
     color: var(--text-dim, #888);
+  }
+  .grant {
+    border: 1px solid var(--accent, #3a7d3a);
+    background: transparent;
+    color: var(--text, #eaeaea);
+    cursor: pointer;
+    font-size: 10px;
+    line-height: 1;
+    padding: 1px 6px;
+    border-radius: 999px;
+  }
+  .grant:hover {
+    background: var(--accent, #3a7d3a);
+    color: #fff;
   }
   .revoke {
     border: 0;
