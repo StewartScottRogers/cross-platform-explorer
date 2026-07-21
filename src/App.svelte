@@ -2859,6 +2859,16 @@
       <Icon name="documents" size={15} /> Agent Board
     </button>
     {#if aiConsoleAvailable}
+      <!-- Repositories — the repos sidecar UI (CPE-855). Grouped with the other out-of-process apps;
+           shown only when the sidecar platform is active, like the AI Console button. -->
+      <button
+        class="tb-repos"
+        type="button"
+        title={$t("sidebar.repositories")}
+        on:click={() => (showRepos = true)}
+      >
+        <Icon name="code" size={15} /> {$t("sidebar.repositories")}
+      </button>
       <button
         class="tb-console"
         type="button"
@@ -3573,10 +3583,11 @@
     font-weight: 600;
   }
 
-  /* AI Console toolbar button (CPE-351) — sits next to the settings gear. The Agent Board button
-     (CPE-846) sits just left of it and shares the same toolbar-action styling. */
+  /* Out-of-process app buttons on the Application toolbar — AI Console (CPE-351), Agent Board
+     (CPE-846), Repositories (CPE-855) — all share one toolbar-action style. */
   .tb-console,
-  .tb-board {
+  .tb-board,
+  .tb-repos {
     display: inline-flex;
     align-items: center;
     gap: 6px;
@@ -3590,7 +3601,8 @@
     font-size: 12px;
   }
   .tb-console:hover,
-  .tb-board:hover {
+  .tb-board:hover,
+  .tb-repos:hover {
     background: var(--surface-alt);
   }
   /* Live count of running agent sessions (CPE-404) — visible even with the console window closed. */
