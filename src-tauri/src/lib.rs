@@ -631,191 +631,9 @@ async fn read_archive_entries(path: String) -> Result<Vec<cpe_server::archive::A
 // hanging.
 // ---------------------------------------------------------------------------
 
-/// Classic hex + ASCII dump of the first `max` bytes (CPE-214).
-fn hex_dump(path: &str, max: usize) -> Result<String, String> {
-    use std::io::Read;
-    // Read at most `max` bytes — never slurp a whole (possibly multi-GB) binary into memory just to
-    // show its first bytes (CPE-633). `take` bounds the read regardless of file size.
-    let mut bytes = Vec::new();
-    fs::File::open(path)
-        .map_err(|e| e.to_string())?
-        .take(max as u64)
-        .read_to_end(&mut bytes)
-        .map_err(|e| e.to_string())?;
-    let n = bytes.len();
-    let mut out = String::new();
-    for (i, chunk) in bytes[..n].chunks(16).enumerate() {
-        let mut hex = String::new();
-        let mut ascii = String::new();
-        for (j, b) in chunk.iter().enumerate() {
-            hex.push_str(&format!("{b:02x} "));
-            if j == 7 {
-                hex.push(' ');
-            }
-            ascii.push(if b.is_ascii_graphic() || *b == b' ' {
-                *b as char
-            } else {
-                '.'
-            });
-        }
-        out.push_str(&format!("{:08x}  {hex:<49}|{ascii}|\n", i * 16));
-    }
-    if bytes.len() > n {
-        out.push_str(&format!(
-            "\n… {} more bytes (showing first {n}).\n",
-            bytes.len() - n
-        ));
-    }
-    Ok(out)
-}
+// The structured binary previews (hex / PE / MIDI / wasm / torrent) now live in
+// `cpe_server::binary_preview` (CPE-815); the `read_preview_info` dispatcher below calls into them.
 
-/// Summary of a Windows PE image (EXE/DLL) via goblin (CPE-216).
-fn pe_info(path: &str) -> Result<String, String> {
-    let bytes = fs::read(path).map_err(|e| e.to_string())?;
-    let pe = goblin::pe::PE::parse(&bytes).map_err(|e| e.to_string())?;
-    let mut out = String::new();
-    out.push_str(if pe.is_64 {
-        "PE32+ image (64-bit)\n"
-    } else {
-        "PE32 image (32-bit)\n"
-    });
-    out.push_str(&format!(
-        "Machine: 0x{:04x}\n",
-        pe.header.coff_header.machine
-    ));
-    out.push_str(&format!("Entry point: 0x{:x}\n", pe.entry));
-    out.push_str(&format!("Sections: {}\n", pe.sections.len()));
-    out.push_str(&format!(
-        "Imports: {} symbols from {} libraries\n",
-        pe.imports.len(),
-        pe.libraries.len()
-    ));
-    out.push_str("\nSections:\n");
-    for s in &pe.sections {
-        let name = String::from_utf8_lossy(&s.name);
-        out.push_str(&format!(
-            "  {:<9} vaddr 0x{:08x}  vsize {}\n",
-            name.trim_end_matches('\0'),
-            s.virtual_address,
-            s.virtual_size
-        ));
-    }
-    if !pe.libraries.is_empty() {
-        out.push_str("\nLinked libraries:\n");
-        for lib in &pe.libraries {
-            out.push_str(&format!("  {lib}\n"));
-        }
-    }
-    Ok(out)
-}
-
-/// Summary of a MIDI file via midly (CPE-210).
-fn midi_info(path: &str) -> Result<String, String> {
-    let bytes = fs::read(path).map_err(|e| e.to_string())?;
-    let smf = midly::Smf::parse(&bytes).map_err(|e| e.to_string())?;
-    let mut out = String::new();
-    out.push_str(&format!("MIDI format: {:?}\n", smf.header.format));
-    out.push_str(&format!("Timing: {:?}\n", smf.header.timing));
-    out.push_str(&format!("Tracks: {}\n", smf.tracks.len()));
-    let total: usize = smf.tracks.iter().map(|t| t.len()).sum();
-    out.push_str(&format!("Total events: {total}\n\n"));
-    for (i, t) in smf.tracks.iter().enumerate() {
-        let mut name = String::new();
-        for ev in t.iter() {
-            if let midly::TrackEventKind::Meta(midly::MetaMessage::TrackName(n)) = ev.kind {
-                name = String::from_utf8_lossy(n).to_string();
-                break;
-            }
-        }
-        let suffix = if name.is_empty() {
-            String::new()
-        } else {
-            format!(" — {name}")
-        };
-        out.push_str(&format!("  Track {}: {} events{suffix}\n", i + 1, t.len()));
-    }
-    Ok(out)
-}
-
-/// Disassemble a WebAssembly binary to its text form (WAT) via wasmprinter,
-/// capped so a huge module can't flood the pane (CPE-215).
-fn wasm_info(path: &str, max: usize) -> Result<String, String> {
-    let bytes = fs::read(path).map_err(|e| e.to_string())?;
-    let wat = wasmprinter::print_bytes(&bytes).map_err(|e| e.to_string())?;
-    if wat.len() > max {
-        let mut cut = max;
-        while cut > 0 && !wat.is_char_boundary(cut) {
-            cut -= 1;
-        }
-        Ok(format!(
-            "{}\n\n… truncated ({cut} of {} bytes shown).\n",
-            &wat[..cut],
-            wat.len()
-        ))
-    } else {
-        Ok(wat)
-    }
-}
-
-/// Summary of a .torrent's bencode metadata via serde_bencode (CPE-218).
-fn torrent_info(path: &str) -> Result<String, String> {
-    use serde_bencode::value::Value;
-    use std::collections::HashMap;
-
-    let bytes = fs::read(path).map_err(|e| e.to_string())?;
-    let val: Value = serde_bencode::from_bytes(&bytes).map_err(|e| e.to_string())?;
-    let Value::Dict(top) = &val else {
-        return Err("Not a bencode dictionary".to_string());
-    };
-    let get = |d: &'_ HashMap<Vec<u8>, Value>, k: &str| -> Option<Value> { d.get(k.as_bytes()).cloned() };
-    let as_str = |v: &Value| match v {
-        Value::Bytes(b) => String::from_utf8_lossy(b).into_owned(),
-        _ => String::new(),
-    };
-    let as_int = |v: &Value| match v {
-        Value::Int(i) => *i,
-        _ => 0,
-    };
-
-    let mut out = String::new();
-    if let Some(a) = get(top, "announce") {
-        out.push_str(&format!("Announce: {}\n", as_str(&a)));
-    }
-    if let Some(Value::Dict(info)) = get(top, "info") {
-        if let Some(n) = get(&info, "name") {
-            out.push_str(&format!("Name: {}\n", as_str(&n)));
-        }
-        if let Some(pl) = get(&info, "piece length") {
-            out.push_str(&format!("Piece length: {} bytes\n", as_int(&pl)));
-        }
-        match get(&info, "files") {
-            Some(Value::List(files)) => {
-                out.push_str(&format!("Files: {}\n", files.len()));
-                let mut total = 0i64;
-                for f in &files {
-                    if let Value::Dict(fd) = f {
-                        let len = get(fd, "length").map(|v| as_int(&v)).unwrap_or(0);
-                        total += len;
-                        let parts = match get(fd, "path") {
-                            Some(Value::List(ps)) => {
-                                ps.iter().map(as_str).collect::<Vec<_>>().join("/")
-                            }
-                            _ => String::new(),
-                        };
-                        out.push_str(&format!("  {parts} ({len} bytes)\n"));
-                    }
-                }
-                out.push_str(&format!("Total size: {total} bytes\n"));
-            }
-            _ => {
-                if let Some(l) = get(&info, "length") {
-                    out.push_str(&format!("Size: {} bytes (single file)\n", as_int(&l)));
-                }
-            }
-        }
-    }
-    Ok(out)
-}
 
 // ---- Document text extraction (CPE-070/071/072/077) ----
 
@@ -1156,10 +974,10 @@ fn read_preview_info_impl(path: String) -> Result<String, String> {
     ensure_previewable_size(&path, PREVIEW_INFO_MAX_BYTES)?;
     let ext = extension_of(Path::new(&path));
     match ext.as_str() {
-        "exe" | "dll" | "sys" | "efi" | "ocx" | "scr" | "cpl" => pe_info(&path),
-        "torrent" => torrent_info(&path),
-        "wasm" => wasm_info(&path, 256 * 1024),
-        "mid" | "midi" => midi_info(&path),
+        "exe" | "dll" | "sys" | "efi" | "ocx" | "scr" | "cpl" => cpe_server::binary_preview::pe_info(&path),
+        "torrent" => cpe_server::binary_preview::torrent_info(&path),
+        "wasm" => cpe_server::binary_preview::wasm_info(&path, 256 * 1024),
+        "mid" | "midi" => cpe_server::binary_preview::midi_info(&path),
         "rtf" => rtf_text(&path),
         "docx" => docx_text(&path),
         "odt" => odt_text(&path),
@@ -1168,7 +986,7 @@ fn read_preview_info_impl(path: String) -> Result<String, String> {
         "xlsx" | "xlsm" | "ods" => spreadsheet_info(&path),
         "parquet" => parquet_info(&path),
         // generic binary (.bin/.dat) and anything else routed here: hex dump
-        _ => hex_dump(&path, 64 * 1024),
+        _ => cpe_server::binary_preview::hex_dump(&path, 64 * 1024),
     }
 }
 
@@ -6542,7 +6360,7 @@ mod tests {
         let d = scratch("hex");
         let f = d.join("blob.bin");
         fs::write(&f, b"AB\x00\xff").unwrap();
-        let dump = hex_dump(&f.to_string_lossy(), 64).unwrap();
+        let dump = cpe_server::binary_preview::hex_dump(&f.to_string_lossy(), 64).unwrap();
         assert!(dump.contains("00000000"), "has an offset column");
         assert!(dump.contains("41 42 00 ff"), "has the hex bytes");
         assert!(dump.contains("|AB..|"), "has the ASCII gutter with dots for non-print");
@@ -6555,7 +6373,7 @@ mod tests {
         let f = d.join("m.wasm");
         // The 8-byte empty WebAssembly module: magic "\0asm" + version 1.
         fs::write(&f, [0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00]).unwrap();
-        let wat = wasm_info(&f.to_string_lossy(), 4096).unwrap();
+        let wat = cpe_server::binary_preview::wasm_info(&f.to_string_lossy(), 4096).unwrap();
         assert!(wat.contains("module"), "prints the (module) wat form");
         let _ = fs::remove_dir_all(&d);
     }
@@ -6567,7 +6385,7 @@ mod tests {
         // d8:announce9:http://t/4:infod6:lengthi100e4:name3:foo12:piece lengthi16384eee
         let bytes = b"d8:announce9:http://t/4:infod6:lengthi100e4:name3:foo12:piece lengthi16384eee";
         fs::write(&f, bytes).unwrap();
-        let info = torrent_info(&f.to_string_lossy()).unwrap();
+        let info = cpe_server::binary_preview::torrent_info(&f.to_string_lossy()).unwrap();
         assert!(info.contains("Name: foo"), "extracts the name");
         assert!(info.contains("http://t/"), "extracts the announce URL");
         assert!(info.contains("single file"), "reports the single-file length");
@@ -6579,7 +6397,7 @@ mod tests {
         let d = scratch("pe_bad");
         let f = d.join("notpe.exe");
         fs::write(&f, b"MZ but not really a PE").unwrap();
-        assert!(pe_info(&f.to_string_lossy()).is_err());
+        assert!(cpe_server::binary_preview::pe_info(&f.to_string_lossy()).is_err());
         let _ = fs::remove_dir_all(&d);
     }
 
@@ -6588,7 +6406,7 @@ mod tests {
     fn pe_info_parses_a_real_windows_binary() {
         // The test executable itself is a PE on Windows.
         let exe = std::env::current_exe().unwrap();
-        let info = pe_info(&exe.to_string_lossy()).unwrap();
+        let info = cpe_server::binary_preview::pe_info(&exe.to_string_lossy()).unwrap();
         assert!(info.contains("PE32"), "identifies the PE image");
         assert!(info.contains("Sections:"), "lists sections");
     }
@@ -7353,7 +7171,7 @@ mod tests {
         let d = scratch("hexcap");
         fs::write(d.join("f.bin"), vec![0xABu8; 10_000]).unwrap();
         // 32 bytes = two 16-byte rows; a third row offset (00000020) must not appear.
-        let out = hex_dump(&d.join("f.bin").to_string_lossy(), 32).unwrap();
+        let out = cpe_server::binary_preview::hex_dump(&d.join("f.bin").to_string_lossy(), 32).unwrap();
         assert!(out.contains("00000000") && out.contains("00000010"));
         assert!(!out.contains("00000020"), "dumped past the max");
         assert!(out.contains("ab ab"), "bytes rendered");

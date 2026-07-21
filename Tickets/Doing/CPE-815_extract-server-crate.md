@@ -153,3 +153,10 @@ going + pull heavy crates in" decision). The `read_archive_entries` command disp
 repointed. **Slimmed the plain explorer:** dropped the now-app-unused `iso9660` dep from `src-tauri`.
 Verified: `cpe-server` **84 tests** green; app `cargo test` **90 passed / 0 failed**; clippy clean **both**
 modes (removed the now-unused app `use serde::Serialize`). `cpe-server` now holds **22 modules**.
+2026-07-20 — **Slice 17:** extracted the structured **binary previews** (hex dump + PE via goblin + MIDI
+via midly + wasm→WAT via wasmprinter + torrent via serde_bencode, CPE-210/214/215/216/218) into
+`cpe_server::binary_preview`. The `read_preview_info` dispatcher stays in the app but calls the extracted
+functions for those extensions (doc-text + structured-data formats remain app-local for now). Tests
+repointed. **Slimmed the plain explorer:** dropped all four now-app-unused deps (`goblin`/`midly`/
+`wasmprinter`/`serde_bencode`) from `src-tauri`. Verified: `cpe-server` **86 tests** green; app `cargo
+test` **90 passed / 0 failed**; clippy clean **both** modes. `cpe-server` now holds **23 modules**.

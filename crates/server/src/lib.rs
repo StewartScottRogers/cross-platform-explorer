@@ -84,3 +84,6 @@ pub mod links;
 
 /// Archive listing — browse into zip/tar/gzip/7z/iso without extracting (CPE-064/109/110/113).
 pub mod archive;
+
+/// Structured binary previews — hex / PE / MIDI / wasm / torrent text summaries (CPE-210/214/215/216/218).
+pub mod binary_preview;
