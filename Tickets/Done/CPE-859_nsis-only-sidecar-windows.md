@@ -4,10 +4,10 @@ title: Build the sidecar Windows release NSIS-only (drop flaky WiX MSI target)
 type: bug
 component: Release
 priority: high
-status: In Progress
+status: Done
 tags: ready
 created: 2026-07-21
-closed:
+closed: 2026-07-21
 ---
 
 ## Summary
@@ -28,8 +28,11 @@ updater artifacts (`createUpdaterArtifacts: true`), so auto-update is unaffected
 
 ## Acceptance Criteria
 - [x] `tauri.sidecar.windows.conf.json` sets `bundle.targets: ["nsis"]`.
-- [ ] A re-dispatched `v0.57.4-sidecar` Windows build produces the NSIS `_x64-setup.exe` + `.sig`.
+- [x] A re-dispatched `v0.57.4-sidecar` Windows build produces the NSIS `_x64-setup.exe` + `.sig`.
 - [x] Base `tauri.conf.json` and the non-sidecar build path are unchanged.
 
 ## Work Log
 - 2026-07-21 — light.exe MSI crash blocked v0.57.4 twice; scoping Windows sidecar bundle to NSIS.
+- 2026-07-21 — Fix merged to main via PR #135 (commit 8ead548), CI green. Re-dispatched sidecar release
+  succeeded; the published `v0.57.4-sidecar` release now carries `..._0.57.4_x64-setup.exe` + `.sig`
+  (NSIS) and **no MSI**. All acceptance criteria met. Closing.
