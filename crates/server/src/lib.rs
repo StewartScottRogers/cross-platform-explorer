@@ -99,3 +99,6 @@ pub mod thumbnail;
 
 /// Image preview — TIFF/PSD → PNG data-URL transcode + dimensions/EXIF metadata (CPE-099/101/659).
 pub mod image_preview;
+
+/// Backup copy engine — plan executor (copy/update/mirror-delete) with per-file results (CPE-797).
+pub mod backup;

@@ -33,7 +33,7 @@ mod agent_shadow;
 use cpe_server::{audit_journal, geometry, ticket_board};
 /// Shared FS utils (epoch-ms + streaming SHA-256) also live in `cpe-server` (CPE-815); re-export them
 /// so the many `to_epoch_ms(…)` / `sha256_file(…)` call sites resolve unchanged.
-use cpe_server::fsutil::{sha256_file, to_epoch_ms};
+use cpe_server::fsutil::to_epoch_ms;
 
 /// Read every ticket under `<root>/Tickets/{Backlog,Doing,Blocked,Deferred,Done}/CPE-*.md` into board
 /// cards (CPE-520). Read-only; a malformed file is skipped, never fails the listing.
@@ -1704,104 +1704,12 @@ async fn hash_file(path: String) -> Result<String, String> {
 // single locked file doesn't sink the whole run. Reuses `sha256_file` for verification. This is the
 // headless, deterministic core — streamed progress + the on-drive-connect scheduler are a follow-up child.
 
-/// Join a `dest_root` with a plan-relative path, rejecting anything that would escape the root (`..`,
-/// absolute, or a Windows drive prefix) so a malformed plan can't reach outside the backup target.
-fn safe_join(root: &Path, rel: &str) -> Result<PathBuf, String> {
-    let candidate = Path::new(rel);
-    for comp in candidate.components() {
-        use std::path::Component;
-        match comp {
-            Component::Normal(_) | Component::CurDir => {}
-            _ => return Err(format!("unsafe path in plan: {rel}")),
-        }
-    }
-    Ok(root.join(candidate))
-}
+// The backup copy engine (safe-join, verified copy, the plan executor) now lives in `cpe_server::backup`
+// (CPE-821). The two commands below are thin dispatchers; the streaming one keeps its `ipc::Channel` in
+// this adapter and feeds the extracted walker.
 
-/// Copy one file from `src` to `dst`, creating parent dirs, then optionally verify by sha256.
-fn copy_one_verified(src: &Path, dst: &Path, verify: bool) -> Result<(), String> {
-    if let Some(parent) = dst.parent() {
-        fs::create_dir_all(parent).map_err(|e| e.to_string())?;
-    }
-    fs::copy(src, dst).map_err(|e| e.to_string())?;
-    if verify {
-        let a = sha256_file(src).map_err(|e| e.to_string())?;
-        let b = sha256_file(dst).map_err(|e| e.to_string())?;
-        if a != b {
-            return Err("checksum mismatch after copy".into());
-        }
-    }
-    Ok(())
-}
-
-/// Apply a backup plan under two roots. `copy`/`update` are relative file paths to write from source to
-/// dest; `delete` are relative dest paths to remove (mirror mode — the frontend only populates it then).
-/// Returns one `OpResult` per attempted file, keyed by its dest path.
-/// Shared plan executor: runs the copy/update/mirror-delete plan, invoking `emit` with each per-file
-/// `OpResult` as it completes. The collect command and the streaming command (CPE-798 live progress) both
-/// drive this — one walker, two surfaces (per docs/design/STREAMING.md).
-fn apply_backup_plan_walk(
-    source_root: &str,
-    dest_root: &str,
-    copy: &[String],
-    update: &[String],
-    delete: &[String],
-    verify: bool,
-    mut emit: impl FnMut(OpResult),
-) {
-    let src_root = PathBuf::from(source_root);
-    let dst_root = PathBuf::from(dest_root);
-
-    for rel in copy.iter().chain(update.iter()) {
-        let (src, dst) = match (safe_join(&src_root, rel), safe_join(&dst_root, rel)) {
-            (Ok(s), Ok(d)) => (s, d),
-            (Err(e), _) | (_, Err(e)) => {
-                emit(OpResult::err(Path::new(rel), e));
-                continue;
-            }
-        };
-        match copy_one_verified(&src, &dst, verify) {
-            Ok(()) => emit(OpResult::ok(&dst)),
-            Err(e) => emit(OpResult::err(&dst, e)),
-        }
-    }
-
-    for rel in delete {
-        let dst = match safe_join(&dst_root, rel) {
-            Ok(d) => d,
-            Err(e) => {
-                emit(OpResult::err(Path::new(rel), e));
-                continue;
-            }
-        };
-        let result = if dst.is_dir() {
-            fs::remove_dir_all(&dst)
-        } else {
-            fs::remove_file(&dst)
-        };
-        match result {
-            Ok(()) => emit(OpResult::ok(&dst)),
-            Err(e) => emit(OpResult::err(&dst, e)),
-        }
-    }
-}
-
-fn apply_backup_plan_impl(
-    source_root: String,
-    dest_root: String,
-    copy: Vec<String>,
-    update: Vec<String>,
-    delete: Vec<String>,
-    verify: bool,
-) -> Vec<OpResult> {
-    let mut out = Vec::with_capacity(copy.len() + update.len() + delete.len());
-    apply_backup_plan_walk(&source_root, &dest_root, &copy, &update, &delete, verify, |r| out.push(r));
-    out
-}
-
-/// Streamed backup run (CPE-798 live progress): same plan as `apply_backup_plan`, but sends each file's
-/// `OpResult` over `on_result` in small batches as it completes, so the dashboard shows live progress
-/// instead of one blocking round-trip. Returns the total number of results emitted.
+/// Streamed backup run (CPE-798 live progress): sends each file's `OpResult` over `on_result` in small
+/// batches as it completes. Returns the total number of results emitted.
 #[tauri::command]
 async fn apply_backup_plan_stream(
     source_root: String,
@@ -1815,7 +1723,7 @@ async fn apply_backup_plan_stream(
     tauri::async_runtime::spawn_blocking(move || {
         let mut batch: Vec<OpResult> = Vec::new();
         let mut total = 0usize;
-        apply_backup_plan_walk(&source_root, &dest_root, &copy, &update, &delete, verify, |r| {
+        cpe_server::backup::apply_backup_plan_walk(&source_root, &dest_root, &copy, &update, &delete, verify, |r| {
             total += 1;
             batch.push(r);
             if batch.len() >= 16 {
@@ -1831,7 +1739,7 @@ async fn apply_backup_plan_stream(
     .map_err(|e| e.to_string())
 }
 
-/// Execute a backup plan (CPE-797). See `apply_backup_plan_impl`. Async per the async-commands rule.
+/// Execute a backup plan (CPE-797). Model lives in `cpe_server::backup` (CPE-821); thin dispatcher.
 #[tauri::command]
 async fn apply_backup_plan(
     source_root: String,
@@ -1842,7 +1750,7 @@ async fn apply_backup_plan(
     verify: bool,
 ) -> Vec<OpResult> {
     tauri::async_runtime::spawn_blocking(move || {
-        apply_backup_plan_impl(source_root, dest_root, copy, update, delete, verify)
+        cpe_server::backup::apply_backup_plan(&source_root, &dest_root, &copy, &update, &delete, verify)
     })
     .await
     .unwrap_or_default()
@@ -6309,81 +6217,7 @@ mod tests {
 
     // scan_tree tests moved with the code to `cpe_server::compare` (CPE-815).
 
-    #[test]
-    fn apply_backup_plan_copies_updates_and_verifies() {
-        let d = scratch("backup_apply");
-        let src = d.join("src");
-        let dst = d.join("dst");
-        fs::create_dir_all(src.join("sub")).unwrap();
-        fs::create_dir_all(&dst).unwrap();
-        fs::write(src.join("new.txt"), b"brand new").unwrap();
-        fs::write(src.join("sub/edited.txt"), b"fresh contents").unwrap();
-        fs::write(dst.join("edited.txt.placeholder"), b"x").unwrap(); // unrelated, must survive
-
-        let results = apply_backup_plan_impl(
-            src.to_string_lossy().to_string(),
-            dst.to_string_lossy().to_string(),
-            vec!["new.txt".into()],
-            vec!["sub/edited.txt".into()],
-            vec![],
-            true, // verify by checksum
-        );
-        assert!(results.iter().all(|r| r.ok), "all files should copy+verify: {results:?}");
-        assert_eq!(fs::read(dst.join("new.txt")).unwrap(), b"brand new");
-        assert_eq!(fs::read(dst.join("sub/edited.txt")).unwrap(), b"fresh contents"); // parent dir created
-        assert!(dst.join("edited.txt.placeholder").exists());
-        let _ = fs::remove_dir_all(&d);
-    }
-
-    #[test]
-    fn apply_backup_plan_mirror_deletes_and_reports_per_file() {
-        let d = scratch("backup_mirror");
-        let src = d.join("src");
-        let dst = d.join("dst");
-        fs::create_dir_all(&src).unwrap();
-        fs::create_dir_all(&dst).unwrap();
-        fs::write(dst.join("stale.txt"), b"old").unwrap();
-
-        let results = apply_backup_plan_impl(
-            src.to_string_lossy().to_string(),
-            dst.to_string_lossy().to_string(),
-            vec![],
-            vec![],
-            vec!["stale.txt".into(), "never-existed.txt".into()],
-            false,
-        );
-        assert!(!dst.join("stale.txt").exists()); // mirror-delete removed the extraneous file
-        // Two results: the real delete succeeds, the missing one is reported (not a panic, not all-or-nothing).
-        assert_eq!(results.len(), 2);
-        assert!(results.iter().any(|r| r.ok));
-        assert!(results.iter().any(|r| !r.ok));
-        let _ = fs::remove_dir_all(&d);
-    }
-
-    #[test]
-    fn apply_backup_plan_rejects_paths_escaping_the_root() {
-        let d = scratch("backup_escape");
-        let src = d.join("src");
-        let dst = d.join("dst");
-        fs::create_dir_all(&src).unwrap();
-        fs::create_dir_all(&dst).unwrap();
-        let escapes = ["../evil.txt", "sub/../../evil.txt"];
-        for esc in escapes {
-            let results = apply_backup_plan_impl(
-                src.to_string_lossy().to_string(),
-                dst.to_string_lossy().to_string(),
-                vec![esc.to_string()],
-                vec![],
-                vec![],
-                false,
-            );
-            assert_eq!(results.len(), 1);
-            assert!(!results[0].ok, "{esc} should be rejected");
-        }
-        // Nothing was written outside dst.
-        assert!(!d.join("evil.txt").exists());
-        let _ = fs::remove_dir_all(&d);
-    }
+    // backup-engine tests moved with the code to `cpe_server::backup` (CPE-821).
 
     #[test]
     fn run_transfer_copies_a_tree_and_reports_byte_progress() {
