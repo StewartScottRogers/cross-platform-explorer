@@ -2385,29 +2385,12 @@ fn move_exact_impl(pairs: Vec<(String, String)>) -> Vec<OpResult> {
         .collect()
 }
 
-/// Detailed metadata for the Properties dialog.
+/// Detailed metadata for the Properties dialog. Model lives in `cpe_server::model` (CPE-815); this is a
+/// thin `spawn_blocking` dispatcher.
 #[tauri::command]
 async fn entry_info(path: String) -> Result<EntryInfo, String> {
-    tauri::async_runtime::spawn_blocking(move || entry_info_impl(path))
+    tauri::async_runtime::spawn_blocking(move || cpe_server::model::entry_info(&path))
         .await.map_err(|e| e.to_string())?
-}
-
-fn entry_info_impl(path: String) -> Result<EntryInfo, String> {
-    let p = Path::new(&path);
-    let meta = fs::metadata(p).map_err(|e| format!("{path}: {e}"))?;
-    Ok(EntryInfo {
-        name: p
-            .file_name()
-            .map(|n| n.to_string_lossy().to_string())
-            .unwrap_or_else(|| path.clone()),
-        path: path.clone(),
-        is_dir: meta.is_dir(),
-        size: if meta.is_dir() { 0 } else { meta.len() },
-        modified: meta.modified().ok().and_then(to_epoch_ms),
-        created: meta.created().ok().and_then(to_epoch_ms),
-        readonly: meta.permissions().readonly(),
-        hidden: is_hidden(p, &meta),
-    })
 }
 
 /// Image dimensions + basic EXIF for the Properties dialog (CPE-659, epic CPE-615). Best-effort:
@@ -7540,16 +7523,7 @@ mod tests {
         let _ = fs::remove_dir_all(&d);
     }
 
-    #[test]
-    fn entry_info_reports_metadata() {
-        let d = scratch("info");
-        fs::write(d.join("i.txt"), b"12345").unwrap();
-        let info = entry_info_impl(d.join("i.txt").to_string_lossy().to_string()).unwrap();
-        assert_eq!(info.name, "i.txt");
-        assert!(!info.is_dir);
-        assert_eq!(info.size, 5);
-        let _ = fs::remove_dir_all(&d);
-    }
+    // entry_info tests moved with the code to `cpe_server::model` (CPE-815).
 
     // hash_file tests moved with the code to `cpe_server::checksum` (CPE-815).
 
