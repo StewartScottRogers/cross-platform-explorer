@@ -96,6 +96,37 @@ jobs:
         working-directory: src-tauri
         run: cargo clippy --all-targets --features sidecar-platform -- -D warnings
 
+  contract:
+    # The GUI↔Server wire contract (crates/contract, pkg `cpe-contract`) is a standalone,
+    # Tauri-free crate (CPE-810/811) — deliberately NOT in the app's cargo workspace, so the
+    # `backend` job above doesn't cover it. `src-tauri` will `path`-depend on it later
+    # (CPE-815), mirroring `sidecar/contract`. It's pure serde with no platform-specific code,
+    # but we lint+test it on every shipped OS to match the rest of the Rust matrix.
+    name: Contract (${{ matrix.os }}) — clippy + test
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      - name: Rust cache
+        uses: swatinem/rust-cache@v2
+        with:
+          workspaces: "./crates/contract -> target"
+
+      - name: contract — clippy + test
+        working-directory: crates/contract
+        run: |
+          cargo clippy --all-targets -- -D warnings
+          cargo test
+
   sidecar:
     # The sidecar platform crates (sidecar/contract, sidecar/host) are standalone —
     # deliberately NOT part of the app's cargo workspace, so the `backend` job above
