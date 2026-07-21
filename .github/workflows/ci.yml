@@ -96,13 +96,14 @@ jobs:
         working-directory: src-tauri
         run: cargo clippy --all-targets --features sidecar-platform -- -D warnings
 
-  contract:
-    # The GUI↔Server wire contract (crates/contract, pkg `cpe-contract`) is a standalone,
-    # Tauri-free crate (CPE-810/811) — deliberately NOT in the app's cargo workspace, so the
-    # `backend` job above doesn't cover it. `src-tauri` will `path`-depend on it later
-    # (CPE-815), mirroring `sidecar/contract`. It's pure serde with no platform-specific code,
-    # but we lint+test it on every shipped OS to match the rest of the Rust matrix.
-    name: Contract (${{ matrix.os }}) — clippy + test
+  crates:
+    # The GUI↔Server "server-side" crates under crates/ (the Decoupled Server epic CPE-810):
+    # cpe-contract (the wire contract, CPE-811) and cpe-security (the pluggable security core,
+    # CPE-816). Standalone and Tauri-free — deliberately NOT in the app's cargo workspace, so
+    # the `backend` job above doesn't cover them. `src-tauri` will `path`-depend on them later
+    # (CPE-815), mirroring `sidecar/contract`. Pure Rust with no platform-specific code, but we
+    # lint+test on every shipped OS to match the rest of the Rust matrix.
+    name: Server crates (${{ matrix.os }}) — clippy + test
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -119,10 +120,18 @@ jobs:
       - name: Rust cache
         uses: swatinem/rust-cache@v2
         with:
-          workspaces: "./crates/contract -> target"
+          workspaces: |
+            ./crates/contract -> target
+            ./crates/security -> target
 
       - name: contract — clippy + test
         working-directory: crates/contract
+        run: |
+          cargo clippy --all-targets -- -D warnings
+          cargo test
+
+      - name: security — clippy + test
+        working-directory: crates/security
         run: |
           cargo clippy --all-targets -- -D warnings
           cargo test
