@@ -1,7 +1,7 @@
 # Adding an AI model reseller (CPE-467 / CPE-479)
 
 A **reseller** is an OpenRouter-like gateway: one API key fronting many models over a
-protocol-compatible endpoint. The AI Console treats resellers as **data** — adding one is (almost)
+protocol-compatible endpoint. The Agent Deck treats resellers as **data** — adding one is (almost)
 just a manifest, no host or per-agent code. This guide shows exactly what to touch.
 
 There are two capabilities a reseller can have, and you opt into each with data:

@@ -1,7 +1,7 @@
 //! The Agent Board sidecar's own served UI (CPE-851/852, epic CPE-850).
 //!
 //! Per ADR 0001 each sidecar serves its **own** UI; the host frames it. A minimal, dependency-free HTTP
-//! server (mirroring `sidecar/repos` and the AI Console) on an ephemeral loopback port, upgraded here
+//! server (mirroring `sidecar/repos` and the Agent Deck) on an ephemeral loopback port, upgraded here
 //! into a tiny router over the [`crate::board`] model:
 //!
 //! - `GET /`            → the Kanban page (HTML + JS).

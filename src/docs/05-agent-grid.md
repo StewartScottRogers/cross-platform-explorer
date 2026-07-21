@@ -1,7 +1,7 @@
 ---
 title: Agent Grid
 order: 5
-category: AI Console
+category: Agent Deck
 categoryOrder: 3
 ---
 
@@ -12,7 +12,7 @@ one tab at a time.
 
 ## Tabs vs Grid
 
-Use the **Tabs ⇄ Grid** toggle in the AI Console toolbar. **Tabs** is the default single-pane view;
+Use the **Tabs ⇄ Grid** toggle in the Agent Deck toolbar. **Tabs** is the default single-pane view;
 **Grid** tiles every live session. The tiles **auto-arrange** into a near-square layout and reflow as you
 add or close agents (2 side by side, 4 in a 2×2, and so on).
 

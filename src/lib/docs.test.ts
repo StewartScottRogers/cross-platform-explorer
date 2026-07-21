@@ -6,13 +6,13 @@ describe("docs library (CPE-536)", () => {
   it("parses frontmatter title/order/category + body; falls back sensibly", () => {
     const d = parseDoc(
       "06-board",
-      "---\ntitle: Agent Board\norder: 6\ncategory: AI Console\ncategoryOrder: 3\n---\n\n# Board\nDrag cards.",
+      "---\ntitle: Agent Board\norder: 6\ncategory: Agent Deck\ncategoryOrder: 3\n---\n\n# Board\nDrag cards.",
     );
     expect(d).toEqual({
       slug: "06-board",
       title: "Agent Board",
       order: 6,
-      category: "AI Console",
+      category: "Agent Deck",
       categoryOrder: 3,
       content: "# Board\nDrag cards.",
     });

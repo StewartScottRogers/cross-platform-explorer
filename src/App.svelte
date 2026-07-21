@@ -434,7 +434,7 @@
     { section: "disk-usage", label: "Disk usage" },
     { section: "workbench", label: "Workbench" },
     { section: "agent-board", label: "Agent Board" },
-    { section: "ai-console", label: "AI Console" },
+    { section: "ai-console", label: "Agent Deck" },
     { section: "agent-grid", label: "Agent Grid" },
     { section: "repositories", label: "Repositories" },
     { section: "swarms", label: "Swarms" },
@@ -607,11 +607,11 @@
       autoSyncRunning = false;
     }
   }
-  /** Right-click "close the AI Console" menu (CPE-457), shown from an Agents leaf or the AI
+  /** Right-click "close the Agent Deck" menu (CPE-457), shown from an Agents leaf or the AI
       Console button. `label` differs per source; confirming stops the console + clears the leaves. */
   let agentMenu: { x: number; y: number; label: string; sessionId?: string; sessionLabel?: string } | null = null;
 
-  /** Close the AI Console entirely (all running agents) and clear the Agents leaves. The console
+  /** Close the Agent Deck entirely (all running agents) and clear the Agents leaves. The console
       process is reaped, so no per-session `ended` arrives — clear the leaves here (CPE-457). */
   async function closeAllConsoles() {
     agentMenu = null;
@@ -622,7 +622,7 @@
     }
     clearAgentSessions();
   }
-  /** Close a single agent session (CPE-489) — routes to the AI Console's per-session close endpoint
+  /** Close a single agent session (CPE-489) — routes to the Agent Deck's per-session close endpoint
       via the host. The console emits an `ended` for it, which prunes the leaf; the others keep running. */
   async function closeOneConsole(sessionId: string) {
     agentMenu = null;
@@ -632,7 +632,7 @@
       console.debug("close session failed:", e);
     }
   }
-  /** True in sidecar-platform builds — gates the AI Console toolbar button (CPE-351). */
+  /** True in sidecar-platform builds — gates the Agent Deck toolbar button (CPE-351). */
   let aiConsoleAvailable = false;
   /** Teardown for the Agent Watch session listener (CPE-396). */
   let unlistenSessions: (() => void) | null = null;
@@ -757,7 +757,7 @@
   const AI_CONSOLE_LABEL = "ai-console";
   let consentPrompt: ConsentState | null = null;
 
-  /** Open the AI Console in its own OS window (CPE-335) — native title bar (drag it around
+  /** Open the Agent Deck in its own OS window (CPE-335) — native title bar (drag it around
       the screen), resize borders, and frame, independent of the explorer's focus. Only
       meaningful in a `sidecar-platform` build. Gated by capability consent (CPE-296). The
       window loads the sidecar's loopback URL directly and has NO Tauri API (its label is
@@ -772,8 +772,8 @@
     const existing = await WebviewWindow.getByLabel(AI_CONSOLE_LABEL);
     if (existing) {
       await existing.setFocus(); // can't re-scope a live window without disrupting sessions
-      if (ctx.session) showNotice("AI Console is already open — click the agent's tab to focus it.", false);
-      else if (ctx.cwd) showNotice("AI Console is already open — set the working folder in its toolbar.", false);
+      if (ctx.session) showNotice("Agent Deck is already open — click the agent's tab to focus it.", false);
+      else if (ctx.cwd) showNotice("Agent Deck is already open — set the working folder in its toolbar.", false);
       return;
     }
     const state = await consentState("ai-console");
@@ -784,7 +784,7 @@
     await launchAiConsole();
   }
 
-  /** Open the AI Console focused on a specific agent session's tab (CPE-532) — from double-clicking an
+  /** Open the Agent Deck focused on a specific agent session's tab (CPE-532) — from double-clicking an
       Agents leaf or its context-menu "Open". Scopes to the agent's folder + passes the session id so
       the launcher activates that tab after reattach. */
   function openSession(sessionId: string, cwd?: string) {
@@ -793,12 +793,12 @@
 
   async function launchAiConsole() {
     const base = await startAiConsole();
-    if (!base) { showNotice("AI Console isn't available in this build.", true); return; }
+    if (!base) { showNotice("Agent Deck isn't available in this build.", true); return; }
     const url = consoleUrlWith(base, consoleContext.cwd, consoleContext.task, consoleContext.session);
     try {
       const win = new WebviewWindow(AI_CONSOLE_LABEL, {
         url,
-        title: "AI Console",
+        title: "Agent Deck",
         width: 1100,
         height: 760,
         minWidth: 640,
@@ -806,9 +806,9 @@
         resizable: true,
         center: true,
       });
-      win.once("tauri://error", () => showNotice("Couldn't open the AI Console window.", true));
+      win.once("tauri://error", () => showNotice("Couldn't open the Agent Deck window.", true));
     } catch {
-      showNotice("Couldn't open the AI Console window.", true);
+      showNotice("Couldn't open the Agent Deck window.", true);
     }
   }
 
@@ -1839,7 +1839,7 @@
     showNotice(wasPinned ? `Unpinned "${entry.name}" from Home.` : `Pinned "${entry.name}" to Home.`);
   }
 
-  /** "Work on this" — open the AI Console scoped to the selection (CPE-313). A single
+  /** "Work on this" — open the Agent Deck scoped to the selection (CPE-313). A single
       folder scopes to itself; files scope to the current folder with a task naming them;
       no selection just opens the current folder. Degrades cleanly when the console is
       absent (launchAiConsole shows a notice). */
@@ -2776,7 +2776,7 @@
 
   onMount(async () => {
     applySettings();
-    // Reveal the AI Console button only when the sidecar platform is present (CPE-351).
+    // Reveal the Agent Deck button only when the sidecar platform is present (CPE-351).
     platformActive().then((v) => (aiConsoleAvailable = v)).catch(() => {});
     // Listen for coding-agent sessions launched from the console so the explorer can surface
     // them (Agent Watch, CPE-396). Idle until a session announces itself; unlistened on teardown.
@@ -2871,7 +2871,7 @@
 <Toolbar label={$t("tb.application")}>
   <svelte:fragment slot="actions">
     <!-- Agent Board — opens the standalone board window (CPE-846). Always shown (the board works in
-         every build), and sits just left of the AI Console button. -->
+         every build), and sits just left of the Agent Deck button. -->
     <button
       class="tb-board"
       type="button"
@@ -2882,7 +2882,7 @@
     </button>
     {#if aiConsoleAvailable}
       <!-- Repositories — the repos sidecar UI (CPE-855). Grouped with the other out-of-process apps;
-           shown only when the sidecar platform is active, like the AI Console button. -->
+           shown only when the sidecar platform is active, like the Agent Deck button. -->
       <button
         class="tb-repos"
         type="button"
@@ -3605,7 +3605,7 @@
     font-weight: 600;
   }
 
-  /* Out-of-process app buttons on the Application toolbar — AI Console (CPE-351), Agent Board
+  /* Out-of-process app buttons on the Application toolbar — Agent Deck (CPE-351), Agent Board
      (CPE-846), Repositories (CPE-855) — all share one toolbar-action style. */
   .tb-console,
   .tb-board,

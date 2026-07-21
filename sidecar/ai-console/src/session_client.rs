@@ -1,7 +1,7 @@
 //! Session daemon client (CPE-309 slice 3 foundation).
 //!
 //! The counterpart to [`crate::session_server`]: connects to a running session daemon over its
-//! loopback socket and drives the line protocol, so a caller (the AI Console UI server — the eventual
+//! loopback socket and drives the line protocol, so a caller (the Agent Deck UI server — the eventual
 //! `console.rs` swap) can `launch`/`attach`/`input`/`resize`/`kill`/`list` sessions that live in the
 //! **daemon process**, not in the caller. Because the sessions outlive the connection, a UI process
 //! that restarts just reconnects and `attach`es again — receiving the replay then live output. This

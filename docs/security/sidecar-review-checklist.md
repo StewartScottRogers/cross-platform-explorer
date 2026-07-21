@@ -41,7 +41,7 @@ box. Anything unchecked is a blocker.
 - [ ] Reviewer + date recorded; any gap filed as a blocker ticket and linked here.
 
 ### Tenant sign-off log
-- **AI Console (CPE-261)** — reviewed 2026-07-14 (CPE-304 final pass). All boxes pass on
+- **Agent Deck (CPE-261)** — reviewed 2026-07-14 (CPE-304 final pass). All boxes pass on
   **Windows** (bundled first-party manifests only; keychain round-trip verified). Cross-OS
   secret-store persistence pending runtime QA on real macOS/Linux hardware → blocker
   **CPE-322**. Windows-first sign-off: **granted**. Cross-OS sign-off: **deferred** to

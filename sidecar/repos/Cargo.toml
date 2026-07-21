@@ -7,7 +7,7 @@ license = "MIT"
 
 # A sidecar depends ONLY on the contract (ADR 0001 one-way rule). This crate starts as the
 # provider-agnostic domain library (provider registry, per-forge manifests); the process entry and
-# contract wiring land in CPE-432. Modelled on the AI Console (CPE-261).
+# contract wiring land in CPE-432. Modelled on the Agent Deck (CPE-261).
 
 [dependencies]
 sidecar-contract = { path = "../contract" }

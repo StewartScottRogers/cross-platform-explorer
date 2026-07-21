@@ -1,14 +1,14 @@
 ---
-title: AI Console
+title: Agent Deck
 order: 4
-category: AI Console
+category: Agent Deck
 categoryOrder: 3
 ---
 
-# AI Console
+# Agent Deck
 
-The AI Console runs **coding agents** (Claude Code, aider, and others) against a folder, using the
-provider and model you choose. It opens in its own window from the AI Console button.
+The Agent Deck runs **coding agents** (Claude Code, aider, and others) against a folder, using the
+provider and model you choose. It opens in its own window from the Agent Deck button.
 
 ## Launch an agent
 

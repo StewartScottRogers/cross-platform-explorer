@@ -1,6 +1,6 @@
 # Model resellers — research dossier + threat model (CPE-453)
 
-Supports the dynamic model catalog (CPE-444): let the AI Console select **any** model a reseller
+Supports the dynamic model catalog (CPE-444): let the Agent Deck select **any** model a reseller
 offers, kept fresh via a signed GitHub snapshot. This dossier captures **who** the resellers are and
 **how** to reach their model lists, and the **threat model** for pulling that data + keys safely.
 
@@ -36,7 +36,7 @@ CPE-445/448); adding one is data, not host code.
 
 ## Threat model (STRIDE — extends CPE-304 + `forge-threat-model.md`)
 
-**New surfaces vs. the AI Console's single key-check:** many outbound model-list hosts; untrusted
+**New surfaces vs. the Agent Deck's single key-check:** many outbound model-list hosts; untrusted
 model **metadata** landing in the picker; per-reseller **keys**; and a **signed GitHub snapshot** as
 the default source.
 

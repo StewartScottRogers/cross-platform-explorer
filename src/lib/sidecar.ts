@@ -24,12 +24,12 @@ export async function listSidecars(): Promise<string[]> {
 }
 
 /**
- * Start (or reuse) the AI Console sidecar and return the URL of the UI it serves, so the
+ * Start (or reuse) the Agent Deck sidecar and return the URL of the UI it serves, so the
  * caller can mount it in an iframe pane (CPE-271). Returns `null` when the platform is off
  * or the sidecar couldn't start — never throws.
  */
 /**
- * Append an explorer "work on this" context to the AI Console loopback URL as query
+ * Append an explorer "work on this" context to the Agent Deck loopback URL as query
  * params (CPE-313). The console page reads `cwd`/`task` client-side to pre-scope a
  * session — a decoupled hand-off: the explorer never touches console internals, it just
  * opens a URL. Empty/absent values are omitted so the plain open is unchanged.
@@ -82,7 +82,7 @@ export function parseUiAnnouncement(state: string): string | null {
 
 // --- Agent Watch: active session registry (CPE-396) -----------------------------------
 
-/** A live coding-agent session launched from the AI Console, as surfaced to the explorer.
+/** A live coding-agent session launched from the Agent Deck, as surfaced to the explorer.
  *  `cwd` is the agent's Project folder — the anchor the explorer navigates to / watches. */
 export interface AgentSession {
   sessionId: string;

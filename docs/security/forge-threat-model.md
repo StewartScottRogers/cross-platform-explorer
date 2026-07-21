@@ -20,19 +20,19 @@ Re-run per the [`sidecar-review-checklist.md`](sidecar-review-checklist.md).
 > mitigations below. Until then every row marked ✅ describes an invariant already true in reusable
 > shared code; 🟡/⛔ rows are requirements on the not-yet-built forge code.
 
-## What the forge tenant changes vs. the AI Console (CPE-304)
+## What the forge tenant changes vs. the Agent Deck (CPE-304)
 
-The AI Console's single outbound path is a **narrow, host-chosen key-check** to one of three fixed
+The Agent Deck's single outbound path is a **narrow, host-chosen key-check** to one of three fixed
 endpoints (`threat-model.md` §7). The forge tenant is fundamentally broader and therefore riskier:
 
 1. **Many egress hosts, some user-supplied.** ~14 providers (`sidecar/repos/providers/*.json`), and
    self-hosted kinds (GitHub Enterprise, GitLab self-managed, Gitea/Forgejo, generic-git) take a
    **user-entered host** — a much larger SSRF surface than three fixed URLs.
 2. **A general read surface** (browse arbitrary repos/paths), not a single boolean key-check.
-3. **Untrusted content lands on the user's disk** (clone/pull), where the AI Console only ran a
+3. **Untrusted content lands on the user's disk** (clone/pull), where the Agent Deck only ran a
    user-chosen agent.
 4. **An outbound *write* path** (push / two-way sync) — exfiltration and destructive-history risk
-   the AI Console simply doesn't have.
+   the Agent Deck simply doesn't have.
 
 ## Assets & trust boundaries (delta)
 
@@ -70,7 +70,7 @@ components and performs the call. The sidecar never supplies a URL.
 ## C. Clone / pull brings untrusted content to disk — CPE-436
 
 A cloned repository is **attacker-controlled data**. Writing it to disk is the forge tenant's most
-dangerous act and is treated like the AI Console's "untrusted executable content" stance (CPE-304
+dangerous act and is treated like the Agent Deck's "untrusted executable content" stance (CPE-304
 §4/§6): **surface it, consent it, never auto-run it.**
 
 | STRIDE | Threat | Mitigation | Status |
@@ -79,7 +79,7 @@ dangerous act and is treated like the AI Console's "untrusted executable content
 | **Tampering** (path traversal) | Crafted paths/symlinks write outside the target directory. | Clone only into an **explicit, user-chosen empty target dir** (host-validated absolute path, must be inside a user-approved root; refuse `.git` nesting/overwrite). Git itself rejects `..`/absolute entries in trees; symlink following is constrained to the worktree. | ⛔ CPE-436 |
 | **Consent** | User doesn't realise they're materialising untrusted content locally. | Cloning requires **explicit consent** naming the source + target ("this downloads untrusted content to `<path>`; it will not be executed"). Mirrors the manifest untrusted-content consent (CPE-296). | ⛔ CPE-436 (+ CPE-435 UI) |
 | **D**oS (disk) | Zip-bomb / huge repo fills the disk. | Optional `--depth`/size guidance surfaced; the clone is a child process (own kill domain) and cancellable; failures clean up the partial target. | ⛔ CPE-436 |
-| **Non-execution** | The cloned code is later run by the app. | The forge tenant **never executes** cloned content. Running it (e.g. via the AI Console on that folder) is a separate, explicitly user-initiated act with its own consent. | ✅ (design invariant) |
+| **Non-execution** | The cloned code is later run by the app. | The forge tenant **never executes** cloned content. Running it (e.g. via the Agent Deck on that folder) is a separate, explicitly user-initiated act with its own consent. | ✅ (design invariant) |
 
 ## D. Two-way sync / push (outbound write) — reuses CPE-438 planner
 
@@ -191,7 +191,7 @@ refuses it unless it is in a **consent-based egress allow-list** persisted at
 - **CPE-439** — forge credentials via the secrets broker + login (§A/§G). **Blocks sign-off.**
 - **CPE-435** — the consent/confirm surfaces live in the left-pane UI (§C/§D). **Blocks sign-off.**
 - **CPE-322** (inherited) — macOS/Linux OS-keychain runtime QA still gates *cross-OS* credential
-  persistence, exactly as for the AI Console.
+  persistence, exactly as for the Agent Deck.
 
 ## I. Sign-off record
 
@@ -199,7 +199,7 @@ refuses it unless it is in a **consent-based egress allow-list** persisted at
 |-------|----------|------|-------|
 | **Forge tenant (browse/clone/sync)** | **Not signed off — design-stage** | 2026-07-15 | This review pins the invariants (§G) before the egress/clone/credential code. Sign-off requires a runtime-verifiable vertical slice (CPE-433/434/436/439/435) demonstrated against §A–§E, after which a row is added here and the outcome recorded in [`docs/adr/0001-sidecar-platform.md`](../adr/0001-sidecar-platform.md) (CPE-440 AC3). |
 | **Forge v2 — push execution + Generic-Git host admission** | **Invariants implemented + unit-verified; runtime/GUI QA deferred** | 2026-07-16 | v2 turned on the two surfaces v1 deferred (§J): **push/two-way-sync execution** (`forge_sync`, CPE-495) and **Generic-Git arbitrary-host egress** (`forge_clone_url` + the consent allow-list, CPE-498). Every §D/§A invariant with code is implemented + unit-tested: `forge_sync` has **no force arm**; push uses the repo's own upstream with **no injected token**; the Generic-Git host reaches git **only** via consent-based, no-wildcard, fail-closed admission (`forge_admit_host`, `repos::parse_remote`, `build_generic_clone` tests); the same hardened clone builder + token-scrub apply. **Residual (accepted, §J.3):** token persists in `.git/config` for a token-clone (on-disk, user-profile, never logged); private-range/self-hosted hosts permitted **by design** under explicit host-naming consent (not IP-blocked). **Deferred:** live-network/GUI runtime QA + a credential-helper follow-up. |
-| **Forge — implementation review (native path)** | **Invariants implemented + unit-verified; runtime QA + two-way-mirror deferred** | 2026-07-15 | The slice shipped as a **native explorer feature** (not a sidecar — see CPE-429 decision): `forge_browse`/`forge_clone`/`forge_*_token` over `forge_egress` + `RepoBrowser.svelte`. Every §G invariant that has code is now **implemented and unit-tested**: host-side allow-listed URL building + no-sidecar-URL (`forge_egress`), private/loopback/metadata IP refusal (`is_blocked_ip`), total non-executing browse parsing (`parse_github_contents`/`parse_gitlab_tree`), hardened clone args (`repos::build_clone_args` §C flags) into a user-picked target (folder dialog = the "untrusted content to disk" consent), keychain-namespaced token never logged (CPE-439), and offline/proxy honoured (reuses `keyverify` `is_offline`/`resolve_proxy`). **Deferred:** two-way **push/mirror** (planner `sync.rs` built, not wired) and **runtime/GUI QA** of live network+git — same shape as the AI Console's Windows-first sign-off with cross-OS runtime deferred (CPE-304 §11). |
+| **Forge — implementation review (native path)** | **Invariants implemented + unit-verified; runtime QA + two-way-mirror deferred** | 2026-07-15 | The slice shipped as a **native explorer feature** (not a sidecar — see CPE-429 decision): `forge_browse`/`forge_clone`/`forge_*_token` over `forge_egress` + `RepoBrowser.svelte`. Every §G invariant that has code is now **implemented and unit-tested**: host-side allow-listed URL building + no-sidecar-URL (`forge_egress`), private/loopback/metadata IP refusal (`is_blocked_ip`), total non-executing browse parsing (`parse_github_contents`/`parse_gitlab_tree`), hardened clone args (`repos::build_clone_args` §C flags) into a user-picked target (folder dialog = the "untrusted content to disk" consent), keychain-namespaced token never logged (CPE-439), and offline/proxy honoured (reuses `keyverify` `is_offline`/`resolve_proxy`). **Deferred:** two-way **push/mirror** (planner `sync.rs` built, not wired) and **runtime/GUI QA** of live network+git — same shape as the Agent Deck's Windows-first sign-off with cross-OS runtime deferred (CPE-304 §11). |
 
 Reviewer: CPE-440 design-stage review, extending CPE-304. When the vertical slice is verifiable,
 re-run this document via `sidecar-review-checklist.md`, flip §G to ✅, and record ADR sign-off.

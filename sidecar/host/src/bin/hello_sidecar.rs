@@ -2,7 +2,7 @@
 //!
 //! This is the canonical, copy-me example of a sidecar that speaks the whole
 //! `sidecar-contract` protocol and exercises **all four** brokered capabilities
-//! (Context, Secrets, Storage, Events) end-to-end — without the AI Console, proving
+//! (Context, Secrets, Storage, Events) end-to-end — without the Agent Deck, proving
 //! the platform pattern in isolation. It doubles as the fixture the supervisor,
 //! broker, and conformance tests spawn as a real process.
 //!

@@ -1,12 +1,12 @@
 # ADR 0001 — Sidecar platform architecture
 
 **Status:** Accepted (foundation) · **Date:** 2026-07-13 · **Tickets:** CPE-259 (this
-ADR), CPE-260 (platform epic), CPE-261 (AI Console epic).
+ADR), CPE-260 (platform epic), CPE-261 (Agent Deck epic).
 
 ## Context
 
 Cross-Platform Explorer is a fast, small, predictable file explorer. We want to host
-large, fast-moving "Mega-Features" — the first being an **AI Console** (an agentic
+large, fast-moving "Mega-Features" — the first being an **Agent Deck** (an agentic
 CLI manager + embedded terminal) — without letting them compromise the core app.
 These features will be huge and will need continuous extension to track the coding-
 agent market. A tightly-coupled feature would ripple change through the explorer and
@@ -96,7 +96,7 @@ rule).
 ## Relationship to Agent Watch
 
 Agent Watch (`AGENT-WATCH.md`) **observes** filesystem activity and has "no control
-surface." The AI Console **drives** an agent. They are complementary, distinct
+surface." The Agent Deck **drives** an agent. They are complementary, distinct
 surfaces and should integrate (CPE-305): launching an agent in the console can light
 up Agent Watch on that repo.
 
@@ -104,7 +104,7 @@ up Agent Watch on that repo.
 
 - **Host** — the explorer, running the sidecar platform.
 - **Sidecar** — an isolated process implementing the contract.
-- **Tenant** — a Mega-Feature realised as a sidecar (e.g. the AI Console).
+- **Tenant** — a Mega-Feature realised as a sidecar (e.g. the Agent Deck).
 - **Contract** — the `sidecar-contract` crate: the only shared surface.
 - **Capability** — a scoped, brokered permission a sidecar requests.
 - **Manifest** — declarative data describing a sidecar (or, inside a tenant, an agent).

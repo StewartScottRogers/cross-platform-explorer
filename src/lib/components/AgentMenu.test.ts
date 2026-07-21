@@ -1,6 +1,6 @@
 /**
- * AgentMenu render test (CPE-457) — the right-click "close the AI Console" menu shown on an Agents
- * leaf / the AI Console button. Verifies the label is shown and confirming dispatches `confirm`.
+ * AgentMenu render test (CPE-457) — the right-click "close the Agent Deck" menu shown on an Agents
+ * leaf / the Agent Deck button. Verifies the label is shown and confirming dispatches `confirm`.
  */
 import { render, screen, fireEvent } from "@testing-library/svelte";
 import { describe, it, expect, vi } from "vitest";
@@ -21,8 +21,8 @@ describe("AgentMenu", () => {
   });
 
   it("uses a per-leaf label when given one", () => {
-    render(AgentMenu, { props: { label: "Close AI Console" } });
-    expect(screen.getByRole("menuitem", { name: /close ai console/i })).toBeTruthy();
+    render(AgentMenu, { props: { label: "Close Agent Deck" } });
+    expect(screen.getByRole("menuitem", { name: /close agent deck/i })).toBeTruthy();
   });
 
   it("offers a per-session close that dispatches closeOne with the id (CPE-489)", async () => {

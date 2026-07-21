@@ -1,5 +1,5 @@
 <script lang="ts">
-  /** Right-click menu for closing AI Console sessions (CPE-457, CPE-489). On a specific Agents leaf it
+  /** Right-click menu for closing Agent Deck sessions (CPE-457, CPE-489). On a specific Agents leaf it
       offers "Close <this session>" AND "Close all"; on the toolbar button (no `sessionId`) just the
       close-all action. The owner decides what each action does; this only positions + dispatches. */
   import { createEventDispatcher, onMount } from "svelte";
@@ -9,7 +9,7 @@
   export let x = 0;
   export let y = 0;
   /** The close-all action's label (e.g. "Close all consoles"). */
-  export let label = "Close AI Console";
+  export let label = "Close Agent Deck";
   /** When set, a per-session close is offered for this session id (CPE-489). */
   export let sessionId: string | undefined = undefined;
   /** Human label for the per-session close item (e.g. "claude · sonnet-4.5"). */
@@ -47,7 +47,7 @@
   on:contextmenu|stopPropagation|preventDefault
 >
   {#if sessionId}
-    <!-- Open the AI Console focused on this session's tab (CPE-532). -->
+    <!-- Open the Agent Deck focused on this session's tab (CPE-532). -->
     <button class="row" role="menuitem" on:click={() => { dispatch("open", sessionId); dispatch("close"); }}>
       <span class="menu-chip" style="background:{sessionColor(sessionId)}">{sessionNum(sessionId)}</span>
       Open {sessionLabel}
@@ -90,7 +90,7 @@
   /* Item text uses the theme's --text (never a hard-coded colour); hover comes from the global
      `button:hover → var(--hover)` (app.css), matching ContextMenu/TabMenu. See docs/design/MENUS.md. */
   .sep { height: 1px; margin: 4px 6px; background: var(--border); }
-  /* Same session-identity chip as the left-pane leaf + the AI Console tab (CPE-490/493). */
+  /* Same session-identity chip as the left-pane leaf + the Agent Deck tab (CPE-490/493). */
   .menu-chip {
     flex: 0 0 auto;
     display: inline-grid;

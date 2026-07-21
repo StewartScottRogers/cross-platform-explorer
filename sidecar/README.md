@@ -70,7 +70,7 @@ cargo test                                   # unit + real-process E2E
 cargo clippy --all-targets -- -D warnings
 ```
 
-## AI Console — extending it
+## Agent Deck — extending it
 
 Add a coding agent, provider, or plugin by manifest (no code): see [ai-console/docs/adding-an-agent.md](ai-console/docs/adding-an-agent.md).
 
@@ -78,7 +78,7 @@ Add a coding agent, provider, or plugin by manifest (no code): see [ai-console/d
 
 Sidecars are **bundled, never downloaded** (ADR 0001). The default app build is
 sidecar-free (the delete-test). To build the explorer *with* the platform and the
-AI Console bundled in:
+Agent Deck bundled in:
 
 ```
 # 1. build the sidecar release binary

@@ -47,12 +47,12 @@ pub fn serve(html: String) -> Result<UiServer, String> {
     Ok(UiServer { port, _handle: handle })
 }
 
-/// The AI Console's placeholder UI page. Replaced by the real console UI later; for now
+/// The Agent Deck's placeholder UI page. Replaced by the real console UI later; for now
 /// it proves the sidecar serves a page the host can embed.
 pub fn placeholder_ui() -> String {
     r#"<!doctype html>
 <html lang="en">
-<head><meta charset="utf-8"><title>AI Console</title>
+<head><meta charset="utf-8"><title>Agent Deck</title>
 <style>
   :root { color-scheme: light dark; }
   body { font: 14px system-ui, sans-serif; margin: 0; display: grid; place-items: center;
@@ -60,7 +60,7 @@ pub fn placeholder_ui() -> String {
   .card { text-align: center; opacity: 0.85; }
   h1 { font-size: 18px; margin: 0 0 6px; }
 </style></head>
-<body><div class="card"><h1>AI Console</h1><p>Sidecar UI mounted.</p></div></body>
+<body><div class="card"><h1>Agent Deck</h1><p>Sidecar UI mounted.</p></div></body>
 </html>
 "#
     .to_string()
@@ -90,6 +90,6 @@ mod tests {
     fn placeholder_is_valid_html() {
         let html = placeholder_ui();
         assert!(html.contains("<!doctype html>"));
-        assert!(html.contains("AI Console"));
+        assert!(html.contains("Agent Deck"));
     }
 }

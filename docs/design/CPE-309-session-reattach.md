@@ -5,7 +5,7 @@ remaining implementation.
 
 ## Problem
 
-An agent session (a PTY running a coding CLI) today lives **in-process** in the AI Console sidecar
+An agent session (a PTY running a coding CLI) today lives **in-process** in the Agent Deck sidecar
 (`ConsoleState.sessions`). If that process restarts — a crash, an app update that swaps the sidecar
 binary, or the user toggling the mode off/on — every running agent dies. CPE-461 fixed the *UI-only*
 close/reopen (the launcher iframe is destroyed but the sidecar keeps running, so it reattaches). This

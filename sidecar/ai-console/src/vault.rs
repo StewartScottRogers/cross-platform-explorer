@@ -1,6 +1,6 @@
 //! Secret vault & credential profiles (CPE-279).
 //!
-//! Provider keys and **environment login profiles** for the AI Console. A
+//! Provider keys and **environment login profiles** for the Agent Deck. A
 //! [`CredentialProfile`] is a named, switchable set of env-var → vault-key *references*
 //! — it stores key NAMES, never secret values, so profiles are safe to persist and
 //! serialize. The actual values live only in the OS keychain, reached through the

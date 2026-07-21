@@ -2,7 +2,7 @@
 //!
 //! Slice 1 ([`crate::session_daemon`]) made agent PTY sessions outlive any attached client. This
 //! slice runs a [`SessionDaemon`] in its **own long-lived process** behind a loopback TCP socket, so
-//! the AI Console UI server (a separate, restartable process — slice 3) can connect, drop, and
+//! the Agent Deck UI server (a separate, restartable process — slice 3) can connect, drop, and
 //! **re-connect** to a still-running agent. The wire protocol is one JSON object per line
 //! (newline-delimited), with binary PTY bytes base64-encoded:
 //!

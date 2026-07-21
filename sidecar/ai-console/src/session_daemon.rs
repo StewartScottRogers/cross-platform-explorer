@@ -1,6 +1,6 @@
 //! Session reattach engine (CPE-309).
 //!
-//! The AI Console UI process (the WebSocket server in [`crate::console`]) can be restarted
+//! The Agent Deck UI process (the WebSocket server in [`crate::console`]) can be restarted
 //! — a crash, an app update that swaps the sidecar binary, or the user toggling the mode
 //! off and on. Today each agent PTY is owned directly by that process, so a restart kills
 //! every running agent. This engine is the piece that makes a session **survive**: it owns

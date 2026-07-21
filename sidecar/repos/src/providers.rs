@@ -4,7 +4,7 @@
 //! identify it, which VCS backend drives it, how you authenticate, what it can do, and which API
 //! host(s) it needs (so the host can build an **allow-listed** egress set, CPE-433). The
 //! [`ProviderRegistry`] loads bundled + user manifests so adding a provider is **data, not code**.
-//! Modelled on the AI Console's agent registry (CPE-278).
+//! Modelled on the Agent Deck's agent registry (CPE-278).
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};

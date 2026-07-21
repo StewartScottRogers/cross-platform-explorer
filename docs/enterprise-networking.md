@@ -1,6 +1,6 @@
 # Enterprise networking — proxy, offline & air-gapped (CPE-310)
 
-How the AI Console sidecar behaves on real-world corporate networks: behind an HTTP(S)
+How the Agent Deck sidecar behaves on real-world corporate networks: behind an HTTP(S)
 proxy, when offline, and in a locked-down / air-gapped deployment. Every outbound path is
 either **proxy-aware** or **local-only**, and a single switch (`CPE_OFFLINE`) turns off all
 remote calls. This is a reference for operators; the mechanisms are implemented and unit-tested

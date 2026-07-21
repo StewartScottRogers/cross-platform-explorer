@@ -34,14 +34,14 @@ centred panel) when it *is* the window — see `BoardView`'s `windowed`.
 
 ## The one security distinction: trusted vs isolated
 
-Both the **AI Console** window and the **Agent Board** window are singleton `WebviewWindow`s created the
+Both the **Agent Deck** window and the **Agent Board** window are singleton `WebviewWindow`s created the
 same way — but they sit on opposite sides of the trust boundary, and that shows up in
 `src-tauri/capabilities/default.json`'s `windows` list:
 
 | Window | Loads | In a capability? | Tauri API (`invoke`)? |
 |--------|-------|------------------|------------------------|
 | **Agent Board** (`agent-board`) | our **own** trusted `BoardView` (bundled frontend) | **yes** — listed in `default.json` | **yes** — it needs to `invoke` `ticket_board` to read/move cards |
-| **AI Console** (`ai-console`) | the **untrusted** sidecar's loopback URL | **no** — in no capability by design | **no** — the untrusted UI is denied all Tauri APIs |
+| **Agent Deck** (`ai-console`) | the **untrusted** sidecar's loopback URL | **no** — in no capability by design | **no** — the untrusted UI is denied all Tauri APIs |
 
 So: a window that renders our own code and must call the backend is **added to a capability**; a window
 that hosts untrusted content is **kept out of every capability** so it cannot reach the Tauri API. Adding
@@ -55,16 +55,16 @@ The Agent Board exists in **two** forms, and `openAgentBoard()` prefers the heav
 | | In-process window (CPE-841) | Out-of-process **sidecar** (CPE-850) |
 |--|--|--|
 | What runs | the app's own `BoardView` in a `?board` webview | a separate `agent-board` process serving its own Kanban UI |
-| Window label | `agent-board` (**in** a capability — trusted, uses Tauri `invoke`) | `agent-board-sidecar` (**in no** capability — isolated, like the AI Console window) |
+| Window label | `agent-board` (**in** a capability — trusted, uses Tauri `invoke`) | `agent-board-sidecar` (**in no** capability — isolated, like the Agent Deck window) |
 | Data path | `ticket_board` Tauri commands | the sidecar reads/writes `Tickets/` itself and serves a loopback HTTP API |
 | Availability | every build | only the `sidecar-platform` build |
 
 `openAgentBoard()` starts the sidecar (`sidecar_start_agent_board` → spawn, handshake, read `ui:<url>`) and
 frames its announced loopback URL when the platform is present; otherwise it falls back to the in-process
 window. The sidecar is a first-class platform tenant — a `sidecar/agent-board` crate depending only on
-`sidecar-contract` (ADR 0001), discovered via its `sidecar.json` manifest, bundled next to the AI Console
+`sidecar-contract` (ADR 0001), discovered via its `sidecar.json` manifest, bundled next to the Agent Deck
 (`tauri.sidecar.*.conf.json` → `sidecars/agent-board*`), and managed in **Settings → SidecarManager** like
-AI Console / Repositories. See the `sidecar/agent-board` crate and epic CPE-850.
+Agent Deck / Repositories. See the `sidecar/agent-board` crate and epic CPE-850.
 
 ## Related
 
