@@ -6,6 +6,8 @@
 //! in CPE-852) which the host frames. The stdio side effects live in `main`; the decisions here are pure
 //! and unit-tested.
 
+/// The Kanban model over Tickets/ (read + move cards).
+pub mod board;
 /// The sidecar's own served UI (a dependency-free loopback HTTP server).
 pub mod ui;
 
@@ -13,6 +15,23 @@ use sidecar_contract::{Capability, Envelope, Hello, Message, Response, CONTRACT_
 
 /// This sidecar's stable id, matching `sidecar.json` and the `Hello`.
 pub const SIDECAR_ID: &str = "agent-board";
+
+/// Env var overriding the project root whose `Tickets/` the board reads.
+pub const BOARD_ROOT_ENV: &str = "CPE_BOARD_ROOT";
+
+/// Resolve the project root the board reads `Tickets/` under: the `CPE_BOARD_ROOT` env var if set, else
+/// the nearest ancestor of the current directory that has a `Tickets/` folder, else the current
+/// directory. Host-brokered `context` will supply this properly in CPE-853; this keeps the sidecar
+/// functional when launched from a project.
+pub fn board_root() -> std::path::PathBuf {
+    if let Ok(p) = std::env::var(BOARD_ROOT_ENV) {
+        if !p.is_empty() {
+            return std::path::PathBuf::from(p);
+        }
+    }
+    let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+    board::nearest_project_root(&cwd).unwrap_or(cwd)
+}
 
 /// The opening `Hello` this sidecar announces: its id/version, the contract version it speaks, and the
 /// capabilities it requests — `context`, to learn the project root whose `Tickets/` it reads (CPE-852).

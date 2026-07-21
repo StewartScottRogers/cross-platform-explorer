@@ -5,7 +5,7 @@
 
 use std::io::{BufRead, Write};
 
-use agent_board::{hello, on_message, ui, Reaction};
+use agent_board::{board_root, hello, on_message, ui, Reaction};
 use sidecar_contract::{Envelope, Event, Lifecycle, Message};
 
 fn emit(out: &mut impl Write, env: &Envelope) {
@@ -37,7 +37,7 @@ fn main() {
         match on_message(&env) {
             Reaction::Ready => {
                 emit(&mut stdout, &Envelope::new(0, Message::Lifecycle(Lifecycle::Ready)));
-                if let Ok(server) = ui::serve(ui::board_ui()) {
+                if let Ok(server) = ui::serve(board_root()) {
                     emit(
                         &mut stdout,
                         &Envelope::new(0, Message::Event(Event::Status { state: format!("ui:{}", server.url()) })),
