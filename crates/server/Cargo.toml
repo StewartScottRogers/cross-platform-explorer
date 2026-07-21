@@ -45,6 +45,12 @@ psd = "0.3"
 kamadak-exif = "0.6"
 base64 = "0.22"
 
+# POSIX extended attributes for the native-metadata bridge (CPE-826, epic CPE-717). Pure-Rust (libc
+# syscalls, no system libs); Unix-only — Windows uses NTFS alternate data streams via std file I/O,
+# which needs no dependency.
+[target.'cfg(unix)'.dependencies]
+xattr = "1"
+
 [dev-dependencies]
 # Temp dirs for the ticket-board tests (moved from the app with the module, CPE-815).
 tempfile = "3"
