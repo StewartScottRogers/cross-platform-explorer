@@ -23,15 +23,19 @@ made it *lighter* — 17 heavy format/preview crates moved out of the app binary
 
 ## The crates
 
-Three standalone, **Tauri-free** crates under `crates/`, deliberately **not** in the app's cargo
-workspace (the same one-way-boundary discipline as `sidecar/`). `src-tauri` `path`-depends on them; they
-never depend on `src-tauri`. CI's `Server crates` job builds + lints + tests each on all 3 shipped OSes.
+Four standalone, **Tauri-free** crates under `crates/`, deliberately **not** in the app's cargo
+workspace (the same one-way-boundary discipline as `sidecar/`). `src-tauri` `path`-depends on `cpe-server`;
+they never depend on `src-tauri`. CI's `Server crates` job builds + lints + tests each on all 3 shipped OSes.
 
 | Crate | Owns | Deps |
 |-------|------|------|
 | **`cpe-contract`** (CPE-811) | the wire envelope: `ContractVersion` + `negotiate()`, `Hello`/`Welcome` handshake, `Envelope { schema_version, id, session, message }`, `Request`/`Response`, streaming frames, error taxonomy | serde only |
 | **`cpe-security`** (CPE-816–818) | the pluggable security core (below) | `cpe-contract`, serde |
-| **`cpe-server`** (CPE-815/821/822) | the entire filesystem + preview **domain logic** | `cpe-contract`, serde + pure-Rust format crates; **no Tauri** |
+| **`cpe-server`** (CPE-815/821/822/824) | the entire filesystem + preview **domain logic** + the `Dispatcher` | `cpe-contract`, serde + pure-Rust format crates; **no Tauri** |
+| **`cpe-net`** (CPE-825) | the headless network loop: wire framing, the `ServerRuntime`, the `Client(Rust)` proxy, the reference Server binary | `cpe-contract` + `cpe-server` + `cpe-security`; std sockets |
+
+`cpe-net` is the composition layer *above* the pure Server, so `cpe-server` never gains a transport or
+security dependency — the one-way boundary points `cpe-net → {contract, server, security}`, never back.
 
 `cpe-server` is the big one — **27 domain modules**: `listing` (core `list_dir`), `name_search` + `content_search`,
 `model` (DirEntry/EntryInfo/Place/OpResult + properties), `checksum`, `duplicates`, `text_stats`,
@@ -115,15 +119,51 @@ Step 4 is the payoff: **17 dependencies** — `zip · tar · flate2 · sevenz-ru
 wasmprinter · serde_bencode · rusqlite · calamine · parquet · rust_xlsxwriter · image · psd · kamadak-exif
 · sha2` — now live behind the Server, so the plain explorer is *smaller*, not larger.
 
+## The network transport loop (`cpe-net`)
+
+The remote half of the epic runs **entirely in Rust, no frontend**, closing `Client(Rust) → Server(Rust)`
+over a socket. It's built from two pieces that meet at the contract:
+
+- **`Dispatcher`** (CPE-824, in `cpe-server`) is the Server-side method registry: a `BTreeMap<String,
+  Handler>` that turns a `Request { method, params }` into a `Response`. An unknown method is a structural
+  `NotFound`, params that don't deserialize are a `BadRequest`, a domain `Err(String)` is `Internal` — the
+  boundary error taxonomy, with no transport in sight, so it's fully unit-testable. Adding a method is
+  registering a handler; no core change.
+- **`cpe-net`** (CPE-825) wraps a transport around it. `wire` frames the `Envelope` as JSON-lines over any
+  `Read`/`Write`; `ServerRuntime` accepts a connection, runs the `Hello`/`Welcome` handshake (`negotiate`),
+  and drives each request through the dispatcher; `Client` is the Rust proxy (connect → handshake → `call`).
+
+```
+Client::call(method, params)
+  → Envelope{ Request } ──(TCP, JSON-line)──► ServerRuntime.handle
+      → SecurityChain.evaluate(ctx)            // Transport → AuthN → AuthZ, at the boundary
+          Allow → Dispatcher.dispatch(&ServerCtx, req) → Response
+          Deny  → Response{ Err(Unauthorized | Unauthenticated) }   // never dispatched
+  ◄── Envelope{ Response } ──
+```
+
+**Security enforces here, once, for all methods.** Every request is evaluated through the chain *before* it
+can reach the dispatcher, so a denied request is never dispatched — the domain logic stays
+security-agnostic. `default_deny()` refuses at the boundary; `local()` passes through. This is the
+structural default-deny made real over a wire.
+
+**The local path is untaxed.** `cpe-net` is std-only, thread-per-connection — no async runtime, no heavy
+deps — and the app doesn't depend on it at all. A CI benchmark guard asserts the in-process dispatch path
+stays strictly faster than the same calls over loopback, measured in-run (relative, not an absolute budget,
+so it's stable across the 3-OS matrix). The reference Server, `cpe-server-ref`, makes the loop runnable:
+`cargo run -p cpe-net --bin cpe-server-ref` starts a live Server a `Client(Rust)` can drive.
+
 ## What's shipped vs planned
 
-- **Shipped:** the contract crate, the security planes, the `ServerCtx` seam, and the full `cpe-server`
-  domain extraction driving the **local** in-process topology.
-- **Planned:** the frontend pluggable transport seam (local IPC vs remote RPC, **CPE-819**) and the
-  Client(Rust) proxy + reference headless Server that closes the remote loop (**CPE-820**), plus the
-  `tauri-specta` typed bindings that make the contract the single source of truth for the frontend
-  (**CPE-812/813**). The Server is already headless-runnable; those pillars add the network transport
-  around it.
+- **Shipped:** the contract crate, the security planes, the `ServerCtx` seam, the full `cpe-server` domain
+  extraction driving the **local** in-process topology, the `Dispatcher` (CPE-824), and the **headless
+  network loop** — `Client(Rust)` proxy + `ServerRuntime` + reference Server over loopback, with security
+  enforcing and version negotiation proven end-to-end in Rust (**CPE-825**).
+- **Planned:** the frontend pluggable transport seam (local IPC vs remote RPC, **CPE-819**), the
+  GUI-verified end-to-end remote loop + one real non-loopback remote (**CPE-820**, which now sits on the
+  `cpe-net` plumbing), and the `tauri-specta` typed bindings that make the contract the single source of
+  truth for the frontend (**CPE-812/813**, deferred on an RC-crate Windows loader issue). The transport,
+  dispatcher, and security are done; those pillars wire the GUI onto them.
 
 ## What stays in the Tauri adapter (by design)
 

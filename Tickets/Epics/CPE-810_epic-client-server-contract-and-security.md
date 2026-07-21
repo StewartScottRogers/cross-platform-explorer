@@ -179,7 +179,20 @@ the later pillars need a rewrite.
 10. **CPE-820** — Client(Rust) proxy + reference headless Server + end-to-end remote loop with security
     enforcing; local-fast benchmark + conformance guards. *(prereq: 815, 816, 819)*
 
+### Added during build
+- **CPE-823** — Architecture doc (`docs/design/SERVER-ARCHITECTURE.md`) for the decoupled Server. *Done.*
+- **CPE-824** — Server-side contract `Dispatcher` (method registry: `Request` → `Response`, boundary error
+  taxonomy) in `cpe-server`. *Done.* Feeds the remote loop.
+- **CPE-825** — **Headless network transport loop** (`cpe-net`): `Client(Rust)` proxy + `ServerRuntime` +
+  reference Server over loopback, security enforcing + version negotiation, local-fast + conformance
+  guards. Carved from CPE-820 as its fully headless-verifiable half. *Done.*
+
 ## Work Log
+- **2026-07-21** — Network pillar advanced headlessly. CPE-824 (`Dispatcher`) and CPE-825 (`cpe-net`
+  transport loop) landed: `Client(Rust) → ServerRuntime → Dispatcher` proven end-to-end over loopback with
+  the `SecurityChain` enforcing at the boundary and version negotiation working — all under `cargo test`,
+  no GUI. Remaining remote work (CPE-819 frontend seam, CPE-820 GUI end-to-end + real remote) is
+  GUI-gated + attended; CPE-812/813 typed bindings deferred on an RC-crate Windows loader issue.
 - **2026-07-20** — Activated. Researched Tauri coupling depth (45 `AppHandle` / 29 `Window`/`State` / 6
   emit; 113 commands, ~41 serde types, 3 `ipc::Channel`, 140 items behind `sidecar-platform`) and the
   reusable `sidecar/contract` versioning. Resolved 4 decisions (above) with the user; decomposed into

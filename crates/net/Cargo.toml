@@ -1,0 +1,30 @@
+[package]
+name = "cpe-net"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.77.2"
+description = "Headless network transport loop for the Cross-Platform Explorer: a Client(Rust) proxy + reference Server over the CPE-811 contract, guarded by the CPE-816 security chain (CPE-810/825)."
+license = "MIT"
+
+# The composition layer of the client/server epic (CPE-810): it wires the wire contract
+# (`cpe-contract`), the domain dispatcher (`cpe-server`), and the security chain
+# (`cpe-security`) into a runnable network loop — a Client(Rust) proxy and a reference
+# headless Server over a loopback socket. It sits *above* the pure Server so `cpe-server`
+# never gains a security or transport dependency (the one-way boundary). std-only sockets,
+# thread-per-connection: no async runtime, no new heavy deps. Standalone (out of any
+# workspace), like the sibling crates.
+
+[dependencies]
+cpe-contract = { path = "../contract" }
+cpe-server = { path = "../server" }
+cpe-security = { path = "../security" }
+serde_json = "1"
+
+[dev-dependencies]
+tempfile = "3"
+
+# The deployable reference Server: the dispatcher + a configurable security chain over a
+# loopback TCP listener. Proves the loop is runnable, not just testable.
+[[bin]]
+name = "cpe-server-ref"
+path = "src/bin/cpe-server-ref.rs"
