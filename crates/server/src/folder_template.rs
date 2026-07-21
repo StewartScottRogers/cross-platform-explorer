@@ -92,35 +92,35 @@ fn capture_children(dir: &Path) -> Vec<Node> {
     nodes
 }
 
-/// Replace `{key}` tokens in `s` from `vars`. An unknown `{token}` is left verbatim (a template author may
-/// want literal braces for a downstream tool). Applies uniformly to names and contents.
+/// Replace `{key}` tokens in `s` from `vars`. A **token** is `{` + an identifier (ASCII letters, digits,
+/// `_`) + `}`; an unknown token is left verbatim (a template author may want literal braces downstream).
+/// Any other `{` — a code brace like `fn main() {`, a `{` followed by a space, an unmatched brace — is
+/// literal, so tokens embedded inside braced content (e.g. `println!("{name}")`) are still substituted.
 pub fn substitute(s: &str, vars: &BTreeMap<String, String>) -> String {
+    let chars: Vec<char> = s.chars().collect();
     let mut out = String::with_capacity(s.len());
-    let mut rest = s;
-    while let Some(open) = rest.find('{') {
-        out.push_str(&rest[..open]);
-        match rest[open + 1..].find('}') {
-            Some(close_rel) => {
-                let key = &rest[open + 1..open + 1 + close_rel];
-                match vars.get(key) {
-                    Some(v) => out.push_str(v),
-                    None => {
-                        // Unknown token — emit it verbatim, braces included.
-                        out.push('{');
-                        out.push_str(key);
-                        out.push('}');
-                    }
-                }
-                rest = &rest[open + 1 + close_rel + 1..];
+    let mut i = 0;
+    while i < chars.len() {
+        if chars[i] == '{' {
+            // Read a run of identifier characters after the '{'.
+            let mut j = i + 1;
+            while j < chars.len() && (chars[j].is_ascii_alphanumeric() || chars[j] == '_') {
+                j += 1;
             }
-            None => {
-                // No closing brace: the remainder is literal.
-                out.push_str(&rest[open..]);
-                return out;
+            // A token needs a non-empty identifier immediately closed by '}'.
+            if j > i + 1 && j < chars.len() && chars[j] == '}' {
+                let key: String = chars[i + 1..j].iter().collect();
+                match vars.get(&key) {
+                    Some(v) => out.push_str(v),
+                    None => out.extend(&chars[i..=j]), // unknown {token} verbatim
+                }
+                i = j + 1;
+                continue;
             }
         }
+        out.push(chars[i]);
+        i += 1;
     }
-    out.push_str(rest);
     out
 }
 
@@ -319,6 +319,22 @@ mod tests {
         assert_eq!(substitute("{name}/{unknown}", &v), "Acme/{unknown}");
         assert_eq!(substitute("no tokens here", &v), "no tokens here");
         assert_eq!(substitute("dangling {brace", &v), "dangling {brace");
+    }
+
+    #[test]
+    fn substitute_handles_tokens_inside_code_braces() {
+        // Regression (CPE-839): a token embedded in braced content — like source code — must still be
+        // substituted; the surrounding `{`/`}` are literal, not a giant "unknown token" that swallows it.
+        let v = vars(&[("name", "Acme")]);
+        assert_eq!(
+            substitute("fn main() { println!(\"{name}\"); }", &v),
+            "fn main() { println!(\"Acme\"); }"
+        );
+        // A brace immediately followed by a space (or non-identifier) is literal.
+        assert_eq!(substitute("if x { {name} } else {}", &v), "if x { Acme } else {}");
+        // A `{...}` whose inside isn't a bare identifier is left untouched.
+        assert_eq!(substitute("{a-b}", &v), "{a-b}");
+        assert_eq!(substitute("{ name }", &v), "{ name }");
     }
 
     #[test]
