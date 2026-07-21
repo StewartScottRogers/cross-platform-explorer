@@ -4,10 +4,10 @@ title: Move Agent Deck capability consent from a launch-time popup into the Sett
 type: enhancement
 component: Frontend
 priority: medium
-status: In Progress
+status: Done
 tags: ready
 created: 2026-07-21
-closed:
+closed: 2026-07-21
 ---
 
 ## Summary
@@ -35,11 +35,18 @@ Security posture is unchanged: sensitive capabilities are still never granted wi
 action — the action just moves from a launch-time sheet to the Settings panel.
 
 ## Acceptance Criteria
-- [ ] Clicking Agent Deck opens the console with **no** consent popup.
-- [ ] Sensitive capabilities are not auto-granted; they start denied and can be granted in Settings.
-- [ ] Settings → Platform (`SidecarManager`) can both **grant** and **revoke** each capability.
-- [ ] `ConsentSheet` is no longer wired into the launch flow.
-- [ ] `npm run check` + full suite green; GUI-verified (Deck opens directly; grant/revoke works in Settings).
+- [x] Clicking Agent Deck opens the console with **no** consent popup.
+- [x] Sensitive capabilities are not auto-granted; they start denied and can be granted in Settings.
+- [x] Settings → Platform (`SidecarManager`) can both **grant** and **revoke** each capability.
+- [x] `ConsentSheet` is no longer wired into the launch flow.
+- [x] `npm run check` + full suite green; GUI-verified (Deck opens directly; grant/revoke works in Settings).
 
 ## Work Log
 - 2026-07-21 — Filed from attended session. Branch `cpe-860-consent-in-settings` off main.
+- 2026-07-21 — Implemented (frontend-only, reuses existing `sidecar_set_consent`): removed the
+  `ConsentSheet` launch wiring from App (`openAiConsole` opens directly, silently granting non-sensitive
+  defaults); added a **Grant** control to `SidecarManager` beside the existing Revoke; added
+  `mgr.grant`/`mgr.grantTip` across all 12 locales. `ConsentSheet.svelte` retained (still valid + tested
+  by the i18n migration guard) but unwired. check clean; 902 tests pass.
+- 2026-07-21 — **GUI-verified** in the sidecar dev build: Agent Deck opens directly (no popup); Settings →
+  Platform shows Grant/Revoke per capability and toggling works. User confirmed. Closing.
