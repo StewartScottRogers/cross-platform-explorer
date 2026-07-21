@@ -30,10 +30,8 @@ cpe-server = { path = "../crates/server" }
 zip = "2"
 # Streaming SHA-256 for the file-checksum feature (CPE-412). Pure-Rust, tiny, no system libs.
 sha2 = "0.10"
-# Work-stealing parallelism for the recursive directory-size walk (CPE-754): the disk-usage scan
-# fans subtree walks across cores (the eDirStat approach), turning a single-threaded walk into a
-# parallel one. Already in the dependency tree transitively — this just makes it a direct dep.
-rayon = "1"
+# (The recursive directory-size walk that used rayon moved to `cpe-server` (CPE-815, disk_usage);
+# rayon is no longer a direct app dependency.)
 
 # Editable file timestamps (CPE-785). Pure-Rust, already in the tree transitively — this makes it direct.
 filetime = "0.2"
