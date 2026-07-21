@@ -2,14 +2,35 @@
 id: CPE-841
 title: "EPIC: Agent Board as a standalone singleton sidecar app (like the AI Console)"
 type: Task
-status: In Progress
+status: Done
 priority: Medium
 component: Multiple
 tags: [epic]
 estimate: 4h+
 created: 2026-07-21
-closed:
+closed: 2026-07-21
 ---
+
+## Resolution (closed 2026-07-21)
+Delivered by **CPE-843 + CPE-844 + CPE-845** (all Done). The Agent Board now opens in its **own singleton
+`WebviewWindow`**, launched from the explorer (a ⧉ pop-out button in the board title bar + a command-
+palette entry), focusing the existing window on relaunch; the embedded in-app view is kept ("both").
+`bootMode`'s `?board` marker mounts a chrome-less `BoardView windowed`; the window's label is in
+`capabilities/default.json` so it can `invoke` `ticket_board` (the trusted-vs-isolated distinction from the
+AI Console window is documented in `docs/design/STANDALONE-WINDOWS.md`). Window size/position persist via
+`tauri-plugin-window-state`.
+
+**DoD, as reframed by the activation decision (light window path, not a separate OS process):**
+- ✅ Own window, launched from the explorer, app-wide singleton (CPE-843/844).
+- ✅ Embedded view kept; both surfaces work (CPE-844).
+- ✅ Architecture documented under `docs/design/` (CPE-845).
+- **N/A — sidecar-platform gating / host-supervised process:** moot under the chosen light path. The board
+  is a lightweight window in the base app (not a heavy sidecar process), so there is nothing to gate — it
+  costs nothing until the user opens it. The heavier "separate OS process, host-supervised over the
+  contract" framing in the original brief was explicitly **declined** at activation.
+- **GUI-verify** of runtime behaviour (invoke works, card move, focus-on-relaunch, persistence) is
+  implemented against the proven AI Console pattern and headless-verified (`npm run check` + full suite);
+  on-screen confirmation rides the next install of a build carrying CPE-844.
 
 > **Activated 2026-07-21** (`/ticketing-epic activate CPE-841`). Researched the AI Console architecture and
 > resolved the open questions with the user (below). The `big-design` tag was dropped: the user chose the
