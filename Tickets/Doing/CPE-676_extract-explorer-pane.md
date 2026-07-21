@@ -39,3 +39,23 @@ test suite doesn't fully cover (selection timing, keyboard routing, archive/smar
 is NOT safe to land autonomously overnight. Slices 1-2 (middle-column extraction) are landed + green on main.
 Resume attended: do the state move with a running app to verify. NavToolbar/StatusBar stay app-level until
 CPE-677 (they become per-pane when the split is added).
+
+2026-07-20 (attended, user chose to resume) — Scoped the remaining big-bang concretely on branch
+`CPE-676-pane-state`. Measured the redirect surface in the 3566-line App.svelte: **~340 references to
+per-pane state** — selectedEntries ×74, currentPath ×66, selection ×51, visible ×41, entries ×34,
+loadPath ×27, activeTab ×12 — spread across operations, keyboard handlers, palette commands, the derivation
+pipeline, and the render. There is **no clean sub-slice**: `visible` (the sort/hidden/search/tag/type
+derivation) feeds `selectedEntries`, which the ~40 file/nav operations read, and whose mutations drive
+`entries`/`selection`/`history`. Moving ownership into ExplorerPane means every one of those ~340 sites must
+resolve to the *active* pane while keeping single-pane byte-for-byte identical.
+- **Target architecture** (least-churn): ExplorerPane owns history/path, entries, loading, the full
+  derivation (`visible`, `folderName`, `crumbs`, `searching`, `folderContexts`), selection +
+  `selectedEntries`, and view/sort/search/showHidden; it exposes these via `bind:` + a `bind:this` method
+  surface (`navigate`, `back`, `forward`, `refresh`, `openEntry`, selection setters). App keeps its
+  operation *logic* but sources `selectedEntries`/`currentPath` from `panes[activePaneIndex]` and calls that
+  pane's `refresh()`; NavToolbar/StatusBar/palette/keyboard route to the active pane. Tabs move per-pane.
+- **Assessment:** this is a genuine ~2k-line, ~340-site core refactor with regression risk concentrated in
+  exactly the untested-by-suite areas. It wants a **dedicated focused pass** with continuous GUI checks, not
+  the tail of a session that already shipped 7 tickets + 2 releases. Branch + plan are ready; execute the
+  move step-by-step (state → bind surface → redirect ops → keyboard/palette → verify single-pane identical),
+  merging only when the full suite + a GUI sweep are green.
