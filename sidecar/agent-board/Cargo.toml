@@ -1,0 +1,11 @@
+[package]
+name = "agent-board"
+version = "0.1.0"
+edition = "2021"
+description = "The Agent Board sidecar (CPE-850): a Kanban over Tickets/, out of process."
+
+# A sidecar depends ONLY on the contract — never on the host or the explorer
+# (ADR 0001). Adjust the path if this crate is moved.
+[dependencies]
+sidecar-contract = { path = "../contract" }
+serde_json = "1"
