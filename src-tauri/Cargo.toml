@@ -52,13 +52,8 @@ repos = { path = "../sidecar/repos", optional = true }
 tar = "0.4"
 flate2 = "1"
 
-# Structured binary previews (CPE-210/214/215/216/218). All pure-Rust, no system
-# libs: goblin (PE headers), midly (MIDI), wasmprinter (wasm->wat), serde_bencode
-# (torrent metadata).
-goblin = "0.8"
-midly = "0.5"
-wasmprinter = "0.2"
-serde_bencode = "0.2"
+# (The structured binary previews goblin/midly/wasmprinter/serde_bencode moved to `cpe-server` with the
+# binary_preview domain, CPE-815 — no longer direct app deps.)
 calamine = "0.26"
 rusqlite = { version = "0.32", features = ["bundled"] }
 parquet = { version = "53", default-features = false }
