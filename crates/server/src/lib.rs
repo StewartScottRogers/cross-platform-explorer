@@ -102,3 +102,7 @@ pub mod image_preview;
 
 /// Backup copy engine — plan executor (copy/update/mirror-delete) with per-file results (CPE-797).
 pub mod backup;
+
+/// Server-side contract dispatch — route `Request` envelopes to domain functions (CPE-824, the Server
+/// half of the remote RPC loop CPE-820).
+pub mod dispatch;
