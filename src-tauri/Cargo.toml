@@ -22,6 +22,11 @@ tauri-plugin-opener = "2"
 tauri-plugin-process = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+# The Cross-Platform Explorer Server: Tauri-free domain logic behind the `ServerCtx` seam +
+# the wire contract (CPE-810/815). A normal (non-optional) dependency — it pulls only
+# serde/serde_json/cpe-contract, all already in the tree, so it adds no weight to the plain
+# explorer. The app is the thin adapter that provides `TauriCtx` and dispatches to it.
+cpe-server = { path = "../crates/server" }
 zip = "2"
 # Streaming SHA-256 for the file-checksum feature (CPE-412). Pure-Rust, tiny, no system libs.
 sha2 = "0.10"

@@ -1,0 +1,18 @@
+[package]
+name = "cpe-server"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.77.2"
+description = "The Cross-Platform Explorer Server: Tauri-free domain logic behind the ServerCtx runtime seam + the contract envelope (CPE-810/815)."
+license = "MIT"
+
+# The pure Server (CPE-810). Holds domain logic that depends only on the runtime
+# seam (`ctx::ServerCtx`, CPE-814) and the wire contract (`cpe-contract`, CPE-811) —
+# never on Tauri — so it is headless- and remote-runnable. The Tauri app is a thin
+# adapter that provides a `TauriCtx` and dispatches to this crate. Standalone (out of
+# any workspace) to keep that one-way boundary, like `sidecar/contract`.
+
+[dependencies]
+cpe-contract = { path = "../contract" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"

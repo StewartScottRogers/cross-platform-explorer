@@ -8,13 +8,12 @@ use std::time::{SystemTime, UNIX_EPOCH};
 /// code under `-D warnings` (its pure logic is still unit-tested under the feature).
 /// Pure window-geometry resolver for the CLI launch options (CPE-598) — core feature, always compiled.
 mod geometry;
-mod location;
-mod provider;
-/// Runtime seam (`ServerCtx`) abstracting the app-data/config/cache dir resolution + event emit off
-/// concrete Tauri types, so command logic no longer reaches for `AppHandle` directly (CPE-814, epic
-/// CPE-810). `TauriCtx` is the real impl; the pure `server` crate extraction behind it is CPE-815.
+/// Tauri adapter (`TauriCtx`) for the Server runtime seam. The `ServerCtx` trait itself and the
+/// Tauri-free domain logic (location model, filesystem-provider abstraction) now live in the pure
+/// `cpe-server` crate (CPE-815); this app is the thin adapter that supplies `TauriCtx` and dispatches
+/// to it. `ServerCtx` is imported from the crate so `TauriCtx`'s methods resolve at call sites.
 mod server_ctx;
-use server_ctx::ServerCtx;
+use cpe_server::ctx::ServerCtx;
 #[cfg(feature = "sidecar-platform")]
 mod keyverify;
 /// Host-brokered forge API egress for the repos sidecar (CPE-433). Same rationale as `keyverify`:
