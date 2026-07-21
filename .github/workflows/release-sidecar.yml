@@ -56,6 +56,7 @@ jobs:
           workspaces: |
             ./src-tauri -> target
             ./sidecar/ai-console -> target
+            ./sidecar/agent-board -> target
 
       - name: Install Linux system dependencies
         if: matrix.platform == 'ubuntu-latest'
@@ -82,6 +83,12 @@ jobs:
       # exist before tauri-action packages the app. Native-arch per runner.
       - name: Build the AI Console sidecar
         working-directory: sidecar/ai-console
+        run: cargo build --release
+
+      # The Agent Board sidecar (CPE-854) — bundled next to the AI Console; the overlays reference its
+      # release binary + manifest, so it must be built before tauri-action packages the app.
+      - name: Build the Agent Board sidecar
+        working-directory: sidecar/agent-board
         run: cargo build --release
 
       - name: Build and publish sidecar-enabled release
