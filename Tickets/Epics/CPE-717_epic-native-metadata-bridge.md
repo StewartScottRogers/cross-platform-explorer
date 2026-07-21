@@ -70,6 +70,10 @@ versa. Bridging to native metadata makes labels portable and interoperable with 
 4. **CPE-829** — macOS Finder-tag bplist codec (`_kMDItemUserTags`): `Vec<FinderTag> ⇄ binary plist`,
    round-trip cargo-tested. Split from CPE-827 because byte-compat with real Finder can only be verified on
    a Mac (attended). *(prereq: 826)*
+5. **CPE-830** — Native bridge orchestration (`native_bridge::{pull,push,native_name}`): the per-OS glue
+   wiring `native_meta` + the codecs + reconciliation into one `pull`/`push` — macOS co-opts the Finder
+   tags xattr, Windows/Linux use CPE's own JSON blob. End-to-end round-trip cargo-tested (real native I/O).
+   *Headless. (prereq: 826, 827, 829)*
 
 ## Work Log
 - **2026-07-21** — Activated (dayshift, autonomous). Resolved the three open questions (above) with logged

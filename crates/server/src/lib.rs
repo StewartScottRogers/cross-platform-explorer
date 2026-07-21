@@ -44,6 +44,10 @@ pub mod native_tags;
 /// Finder interop (CPE-829, epic CPE-717). Cross-platform, round-trip-testable everywhere.
 pub mod finder_tags;
 
+/// Native bridge orchestration: the per-OS `pull`/`push` glue wiring native_meta + the codecs +
+/// reconciliation into a working bridge between native file metadata and the tag store (CPE-830).
+pub mod native_bridge;
+
 /// Settings store: the single on-disk `settings.json` document (CPE-226). Pure helpers +
 /// `ServerCtx`-based entry points (CPE-815 migration).
 pub mod settings;
