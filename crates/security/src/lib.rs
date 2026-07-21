@@ -49,6 +49,14 @@ pub use cpe_contract::Principal;
 /// the [`Authenticator`] plane (CPE-817).
 pub mod authn;
 
+/// Concrete authorization providers (path-scope, capability grant) that plug into the
+/// [`Authorizer`] plane (CPE-818).
+pub mod authz;
+
+/// Concrete transport-security policy providers (require TLS / mutual TLS) that plug into the
+/// [`TransportSecurity`] plane (CPE-818).
+pub mod transport;
+
 // ---------------------------------------------------------------------------
 // Core decision types
 // ---------------------------------------------------------------------------
