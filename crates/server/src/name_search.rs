@@ -134,8 +134,10 @@ fn first_brace_group(chars: &[char]) -> Option<(usize, usize, Vec<Vec<char>>)> {
 }
 
 /// Case-insensitive name match: a query containing `*`/`?` or a brace group `{a,b}` is an anchored glob
-/// over the whole name; otherwise a plain substring. `query_lower` must already be lowercased.
-fn name_matches(name: &str, query_lower: &str) -> bool {
+/// over the whole name; otherwise a plain substring. `query_lower` must already be lowercased. Shared
+/// with the instant-search query core ([`crate::index_query`], CPE-831) so folder search and instant
+/// search use one matching semantics.
+pub fn name_matches(name: &str, query_lower: &str) -> bool {
     if query_lower.is_empty() {
         return false;
     }
