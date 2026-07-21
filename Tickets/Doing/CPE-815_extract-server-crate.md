@@ -125,3 +125,11 @@ sites resolve unchanged. This is the foundation the remaining file-op/`list_dir`
 key off. Verified: `cpe-server` **74 tests** green; app `cargo test` **97 passed / 0 failed**; clippy
 clean **both** modes (fixed a Windows-only unused-var in the ported `is_hidden` test). `cpe-server` now
 holds **19 modules**.
+2026-07-20 — **Slice 13 (core listing):** extracted `list_dir` — the app's beating heart — into
+`cpe_server::listing`: the pure `dir_entry_from` mapper (uses the extracted `model` +
+`fsutil::to_epoch_ms`), `LIST_DIR_BATCH`, the shared `stream_dir_entries` walker, and a `list_dir`
+collect helper. Same **streaming split** as name-search: `list_dir` dispatches; the streaming
+`list_dir_stream` command keeps its `ipc::Channel` **and** the `DIR_STREAM_CANCELS` cancel registry in
+the app adapter and feeds the extracted walker. Walker tests moved; the `cancel_dir_stream` registry
+test stays in the app. Verified: `cpe-server` **79 tests** green; app `cargo test` **92 passed / 0
+failed**; clippy clean **both** modes. `cpe-server` now holds **20 modules**.
