@@ -123,6 +123,7 @@ jobs:
           workspaces: |
             ./crates/contract -> target
             ./crates/security -> target
+            ./crates/server -> target
 
       - name: contract — clippy + test
         working-directory: crates/contract
@@ -132,6 +133,12 @@ jobs:
 
       - name: security — clippy + test
         working-directory: crates/security
+        run: |
+          cargo clippy --all-targets -- -D warnings
+          cargo test
+
+      - name: server — clippy + test
+        working-directory: crates/server
         run: |
           cargo clippy --all-targets -- -D warnings
           cargo test
