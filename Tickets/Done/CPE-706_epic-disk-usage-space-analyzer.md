@@ -2,13 +2,13 @@
 id: CPE-706
 title: "EPIC: Disk usage & space analyzer"
 type: Task
-status: In Progress
+status: Done
 priority: Medium
 component: Multiple
 tags: [epic]
 estimate: 4h+
 created: 2026-07-18
-closed:
+closed: 2026-07-21
 ---
 
 ## Goal
@@ -66,3 +66,8 @@ breakdown for the treemap, and (b) the frontend surfaces (column + treemap). Sco
 `folder_stats` already provide recursive size, so re-scoped from "new streaming size walker" to a per-child
 breakdown command + frontend surfaces. Decomposed into CPE-749–752 (backend foundation → column → treemap →
 actions). Set In Progress.
+
+## Resolution (closed 2026-07-21)
+All child tickets are **Done** — the epic's Definition of Done is delivered by recursive folder sizes (CPE-749/750), the treemap analyzer (751), and reveal/delete-from-here (752). Closed as part of the
+epic-queue tidy-up: every planned child shipped, no remaining scope. Feature verification lives in each
+child's Resolution.

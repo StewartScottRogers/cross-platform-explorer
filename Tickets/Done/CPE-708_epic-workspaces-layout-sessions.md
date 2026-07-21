@@ -2,13 +2,13 @@
 id: CPE-708
 title: "EPIC: Workspaces & layout sessions"
 type: Task
-status: In Progress
+status: Done
 priority: Medium
 component: Frontend
 tags: [epic]
 estimate: 4h+
 created: 2026-07-18
-closed:
+closed: 2026-07-21
 ---
 
 ## Goal
@@ -50,3 +50,8 @@ settings persistence rather than a parallel store. Pure model lands first.
    delete, apply on select. **GUI.** *(prereq: 787)*
 3. **CPE-789** — Launch-time auto-restore of the last session, tolerating moved/missing paths; no change to
    default single-tab startup. **GUI/integration.** *(prereq: 787)*
+
+## Resolution (closed 2026-07-21)
+All child tickets are **Done** — the epic's Definition of Done is delivered by workspace save/restore of tab + pane layouts (CPE-787/788/789). Closed as part of the
+epic-queue tidy-up: every planned child shipped, no remaining scope. Feature verification lives in each
+child's Resolution.

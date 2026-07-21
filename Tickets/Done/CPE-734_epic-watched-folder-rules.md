@@ -2,13 +2,13 @@
 id: CPE-734
 title: "EPIC: Watched-folder rules (when/then automation)"
 type: Task
-status: In Progress
+status: Done
 priority: Medium
 component: Multiple
 tags: [epic]
 estimate: 4h+
 created: 2026-07-18
-closed:
+closed: 2026-07-21
 ---
 
 ## Goal
@@ -50,3 +50,8 @@ is open** v1 (background service deferred, delete-test); reversible via the exis
 2. **CPE-794** — Backend folder watcher (notify) + action executor reusing move/copy/tag primitives +
    activity log. **Backend/integration.** *(prereq: 793)*
 3. **CPE-795** — Rule editor UI + dry-run preview + activity log. **GUI.** *(prereq: 793, 794)*
+
+## Resolution (closed 2026-07-21)
+All child tickets are **Done** — the epic's Definition of Done is delivered by watched-folder when/then rules (CPE-793/794/795). Closed as part of the
+epic-queue tidy-up: every planned child shipped, no remaining scope. Feature verification lives in each
+child's Resolution.

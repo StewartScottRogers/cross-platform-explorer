@@ -2,13 +2,13 @@
 id: CPE-736
 title: "EPIC: Backup jobs"
 type: Task
-status: In Progress
+status: Done
 priority: Medium
 component: Multiple
 tags: [epic]
 estimate: 4h+
 created: 2026-07-18
-closed:
+closed: 2026-07-21
 ---
 
 ## Goal
@@ -48,3 +48,8 @@ while the app is open v1 (scheduler-while-closed deferred); versioned/retention 
 2. **CPE-797** — Incremental copy engine + checksum verification + drive-connect scheduler (reuse transfer +
    checksum primitives). **Backend.** *(prereq: 796)*
 3. **CPE-798** — Job dashboard: last-run status, history, one-click restore. **GUI.** *(prereq: 796, 797)*
+
+## Resolution (closed 2026-07-21)
+All child tickets are **Done** — the epic's Definition of Done is delivered by the backup-jobs engine (CPE-796/797/798). Closed as part of the
+epic-queue tidy-up: every planned child shipped, no remaining scope. Feature verification lives in each
+child's Resolution.

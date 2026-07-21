@@ -2,13 +2,13 @@
 id: CPE-710
 title: "EPIC: File attributes, permissions & timestamps editor"
 type: Task
-status: In Progress
+status: Done
 priority: Medium
 component: Multiple
 tags: [epic]
 estimate: 4h+
 created: 2026-07-18
-closed:
+closed: 2026-07-21
 ---
 
 ## Goal
@@ -51,3 +51,8 @@ chmod + attribute toggles + timestamps (store prior state for undo). POSIX permi
 3. **CPE-786** — Attributes/permissions/timestamps editor dialog: per-OS UI (POSIX mode grid vs. Windows
    attribute toggles), batch apply with a change preview, undo for reversible changes. **Attended GUI.**
    *(prereq: 784, 785)*
+
+## Resolution (closed 2026-07-21)
+All child tickets are **Done** — the epic's Definition of Done is delivered by the attributes / permissions / timestamps editor (CPE-784/785/786). Closed as part of the
+epic-queue tidy-up: every planned child shipped, no remaining scope. Feature verification lives in each
+child's Resolution.

@@ -2,13 +2,13 @@
 id: CPE-719
 title: "EPIC: Hex & binary inspector"
 type: Task
-status: In Progress
+status: Done
 priority: Low
 component: Multiple
 tags: [epic]
 estimate: 4h+
 created: 2026-07-18
-closed:
+closed: 2026-07-21
 ---
 
 ## Goal
@@ -52,3 +52,8 @@ deferred** to a follow-up (nice-to-have). Foundation-first so the pure logic lan
    arbitrarily large files (async + spawn_blocking; cargo-tested). **Backend, CI-verified.**
 4. **CPE-773** — HexView preview provider: a virtualized offset/hex/ASCII grid + data-inspector panel +
    signature badge, wired into the preview pane, consuming 770/771/772. **Attended GUI.** *(prereq: 770–772)*
+
+## Resolution (closed 2026-07-21)
+All child tickets are **Done** — the epic's Definition of Done is delivered by hexdump formatting (CPE-770), the data-inspector decoders (771), the read-file-range command (772), and the hex-view preview provider (773). Closed as part of the
+epic-queue tidy-up: every planned child shipped, no remaining scope. Feature verification lives in each
+child's Resolution.

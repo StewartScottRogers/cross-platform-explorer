@@ -2,13 +2,13 @@
 id: CPE-722
 title: "EPIC: Compare studio (image / binary / folder-tree)"
 type: Task
-status: In Progress
+status: Done
 priority: Medium
 component: Multiple
 tags: [epic]
 estimate: 4h+
 created: 2026-07-18
-closed:
+closed: 2026-07-21
 ---
 
 ## Goal
@@ -53,3 +53,8 @@ comparison cores land + unit-tested before the compare shell.
 3. **CPE-779** — Unified compare shell launched from a two-item selection: folder-tree view (consumes 777)
    + binary/hex view (consumes 778 + CPE-770/772); text pairs reuse `diff.ts`. **Attended GUI.** Image
    compare = future follow-up. *(prereq: 777, 778)*
+
+## Resolution (closed 2026-07-21)
+All child tickets are **Done** — the epic's Definition of Done is delivered by the compare studio — image / binary / folder-tree diff (CPE-777/778/779). Closed as part of the
+epic-queue tidy-up: every planned child shipped, no remaining scope. Feature verification lives in each
+child's Resolution.

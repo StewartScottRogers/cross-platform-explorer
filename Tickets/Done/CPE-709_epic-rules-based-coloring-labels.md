@@ -2,13 +2,13 @@
 id: CPE-709
 title: "EPIC: Rules-based file coloring & labels"
 type: Task
-status: In Progress
+status: Done
 priority: Low
 component: Frontend
 tags: [epic]
 estimate: 4h+
 created: 2026-07-18
-closed:
+closed: 2026-07-21
 ---
 
 ## Goal
@@ -52,3 +52,8 @@ for name patterns) rather than forcing a fit.
    no rules. **GUI.** *(prereq: 774)*
 3. **CPE-776** — Rules editor UI (ordered rules, enable/disable, live preview) + persistence in settings.
    **GUI.** *(prereq: 774, 775)*
+
+## Resolution (closed 2026-07-21)
+All child tickets are **Done** — the epic's Definition of Done is delivered by the rule-evaluation engine (CPE-774), themed renderer hooks (775), the rules editor + persistence (776), and hardened condition parsing (808). Closed as part of the
+epic-queue tidy-up: every planned child shipped, no remaining scope. Feature verification lives in each
+child's Resolution.
