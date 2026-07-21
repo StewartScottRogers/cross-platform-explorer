@@ -2,14 +2,19 @@
 id: CPE-841
 title: "EPIC: Agent Board as a standalone singleton sidecar app (like the AI Console)"
 type: Task
-status: Proposed
+status: In Progress
 priority: Medium
 component: Multiple
-tags: [epic, big-design]
+tags: [epic]
 estimate: 4h+
 created: 2026-07-21
 closed:
 ---
+
+> **Activated 2026-07-21** (`/ticketing-epic activate CPE-841`). Researched the AI Console architecture and
+> resolved the open questions with the user (below). The `big-design` tag was dropped: the user chose the
+> **lightweight** path — a singleton `WebviewWindow`, not a separate OS process — so this is a mostly-
+> frontend epic, not a sidecar-platform-scale build. Decomposed into CPE-843/844/845.
 
 ## Goal
 Turn the **Agent Board** (today an in-app view — `BoardView.svelte` / `board.ts` over the
@@ -84,5 +89,39 @@ explorer. Making it a sidecar app gives it:
   (CPE-398) for live ticket updates.
 - Inherits the `CREATE_NO_WINDOW` discipline from **CPE-840** for any helper processes it spawns.
 
+## Decisions (activated 2026-07-21 — resolved with the user)
+Research finding: the AI Console is **two** things — a singleton **window** (a Tauri `WebviewWindow`,
+`App.svelte openAiConsole`: `getByLabel` → focus-or-create with a fixed label) **and** a separate
+`ai-console.exe` process for its heavy backend (pty / sessions / swarm). The Agent Board only reads
+`Tickets/` via the existing `ticket_board` backend, so it does not need the heavy process.
+
+- **Process model → separate *window*, not a separate process.** A singleton `WebviewWindow` rendering the
+  board (own resizable window, focus-on-relaunch). This mirrors the AI Console's *window* exactly and is
+  lightweight — no new binary/host machinery. (The heavier separate-OS-process option was offered and
+  declined.)
+- **Embedded view → keep both.** The in-app `BoardView` stays; the standalone window is an addition (a
+  pop-out), not a replacement.
+- **Singleton scope → one, app-wide.** A single board window across the app; a second launch focuses the
+  existing one (exactly like the AI Console).
+- **Trust difference (important):** unlike the AI Console window (which loads an *untrusted* sidecar URL
+  and is deliberately in no capability), the board window renders our **own trusted BoardView** and needs
+  Tauri `invoke` — so its window label must be added to `capabilities/default.json` (CPE-844).
+
+These supersede the heavier "extract a sidecar binary" framing in the Rough scope above.
+
 ## Child tickets
-_None yet — dormant brief. Decompose at activation (`/ticketing-epic activate CPE-841`)._
+1. **CPE-843** — Standalone Agent Board page: render `BoardView` chrome-less when the app is loaded with an
+   `agent-board` marker; reuse `board.ts` + `ticket_board`. Unit-tested. *Foundation — buildable now.*
+2. **CPE-844** — Singleton Agent Board window + launcher: `openAgentBoard()` (`getByLabel` focus-or-create
+   `WebviewWindow`, app-wide singleton) + a pop-out/menu launcher (keep the embedded view) + the
+   `default.json` capability entry so the window can invoke + window-state persistence. **GUI-verified.**
+   *(prereq: 843)*
+3. **CPE-845** — Docs: the in-app Agent Board page + a design note on the standalone-window pattern (mirror
+   of, and trust difference from, the AI Console window). *(prereq: 844)*
+
+## Work Log
+- **2026-07-21** — Activated. Researched the AI Console window/process split (`WebviewWindow` + `getByLabel`
+  singleton vs the `ai-console.exe` sidecar) and the current embedded `BoardView`. Resolved the three open
+  questions with the user (separate window / keep both / one app-wide singleton), dropped `big-design`
+  (light path chosen), and decomposed into CPE-843 (foundation), CPE-844 (window+launcher, GUI), CPE-845
+  (docs). Children are ordinary Backlog work now; the epic itself is not worked directly.
