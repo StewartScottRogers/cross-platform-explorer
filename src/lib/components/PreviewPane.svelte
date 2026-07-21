@@ -6,6 +6,7 @@
   import { highlightForFile, ensureLanguageForName } from "../preview/highlight";
   import { renderMarkdown } from "../preview/markdown";
   import HexView from "./HexView.svelte";
+  import DataBrowser from "./DataBrowser.svelte";
   import { t } from "../i18n";
   import { formatSize } from "../format";
   import { lsBool, lsSet } from "../persist";
@@ -405,6 +406,8 @@
     {/if}
   {:else if provider.kind === "hex" && entry}
     <HexView path={entry.path} size={entry.size} />
+  {:else if provider.kind === "data-grid" && entry}
+    <DataBrowser {entry} />
   {:else if needsText && entry}
     {#if textState === "loading"}
       <p class="preview-note">{$t("pv.loading")}</p>

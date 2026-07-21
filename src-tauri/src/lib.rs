@@ -703,6 +703,37 @@ fn read_preview_info_impl(path: String) -> Result<String, String> {
     }
 }
 
+// Structured-data browser (CPE-849, epic CPE-721): list a data file's sources (SQLite tables/views,
+// Excel/ODS sheets), read a page of typed rows, and run a read-only SQLite query — the interactive-grid
+// counterparts to `read_preview_info`'s text summary. Thin async dispatchers into `cpe_server::data_browser`.
+#[tauri::command]
+async fn data_browser_sources(path: String) -> Result<Vec<String>, String> {
+    tauri::async_runtime::spawn_blocking(move || cpe_server::data_browser::sources(&path))
+        .await.map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+async fn data_browser_page(
+    path: String,
+    source: String,
+    offset: usize,
+    limit: usize,
+) -> Result<cpe_server::data_browser::Page, String> {
+    tauri::async_runtime::spawn_blocking(move || cpe_server::data_browser::page(&path, &source, offset, limit))
+        .await.map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+async fn data_browser_query(
+    path: String,
+    sql: String,
+    offset: usize,
+    limit: usize,
+) -> Result<cpe_server::data_browser::Page, String> {
+    tauri::async_runtime::spawn_blocking(move || cpe_server::data_browser::query(&path, &sql, offset, limit))
+        .await.map_err(|e| e.to_string())?
+}
+
 /// Decode an image the webview can't render natively (TIFF, PSD) to a PNG
 /// `data:` URL the <img> tag can show (CPE-099/101). PSD uses the psd crate's
 /// flattened composite; TIFF uses the image crate. Capped by the source reader,
@@ -4940,6 +4971,9 @@ pub fn run() {
             write_file_text,
             read_archive_entries,
             read_preview_info,
+            data_browser_sources,
+            data_browser_page,
+            data_browser_query,
             read_image_data_url,
             thumbnail,
             read_settings,
