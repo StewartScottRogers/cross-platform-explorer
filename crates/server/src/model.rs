@@ -75,6 +75,26 @@ pub struct Place {
     pub kind: String,
 }
 
+/// Detailed metadata for the Properties dialog: name/size/dir + modified/created (epoch-ms) + the
+/// readonly/hidden flags. A missing/unreadable path is an `Err`.
+pub fn entry_info(path: &str) -> Result<EntryInfo, String> {
+    let p = Path::new(path);
+    let meta = fs::metadata(p).map_err(|e| format!("{path}: {e}"))?;
+    Ok(EntryInfo {
+        name: p
+            .file_name()
+            .map(|n| n.to_string_lossy().to_string())
+            .unwrap_or_else(|| path.to_string()),
+        path: path.to_string(),
+        is_dir: meta.is_dir(),
+        size: if meta.is_dir() { 0 } else { meta.len() },
+        modified: meta.modified().ok().and_then(crate::fsutil::to_epoch_ms),
+        created: meta.created().ok().and_then(crate::fsutil::to_epoch_ms),
+        readonly: meta.permissions().readonly(),
+        hidden: is_hidden(p, &meta),
+    })
+}
+
 /// Lowercased extension without the dot; empty when there is none.
 pub fn extension_of(path: &Path) -> String {
     path.extension()
@@ -112,6 +132,19 @@ mod tests {
         assert_eq!(extension_of(Path::new("/a/b/Photo.PNG")), "png");
         assert_eq!(extension_of(Path::new("/a/b/archive.tar.gz")), "gz");
         assert_eq!(extension_of(Path::new("/a/b/README")), "");
+    }
+
+    #[test]
+    fn entry_info_reports_metadata_and_errors_on_missing() {
+        let dir = std::env::temp_dir().join(format!("cpe-entryinfo-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let f = dir.join("x.txt");
+        std::fs::write(&f, b"hello").unwrap();
+        let info = entry_info(&f.to_string_lossy()).unwrap();
+        assert_eq!(info.name, "x.txt");
+        assert!(!info.is_dir && info.size == 5);
+        assert!(entry_info(&dir.join("nope").to_string_lossy()).is_err());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

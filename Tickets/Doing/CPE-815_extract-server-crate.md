@@ -133,3 +133,11 @@ collect helper. Same **streaming split** as name-search: `list_dir` dispatches; 
 the app adapter and feeds the extracted walker. Walker tests moved; the `cancel_dir_stream` registry
 test stays in the app. Verified: `cpe-server` **79 tests** green; app `cargo test` **92 passed / 0
 failed**; clippy clean **both** modes. `cpe-server` now holds **20 modules**.
+2026-07-20 — **Slice 14:** extracted the Properties `entry_info` into `cpe_server::model::entry_info`
+(uses the extracted `EntryInfo`/`is_hidden` + `fsutil::to_epoch_ms`); the `entry_info` command
+dispatches. Test moved. Verified: `cpe-server` **80 tests**; app `cargo test` **91 passed / 0 failed**;
+clippy clean **both** modes. **This exhausts the clean, pure-domain extractions.** Remaining in
+`lib.rs`: heavy-dependency **previews** (image/office/pdf/rusqlite/parquet/…) and **archives**
+(zip/tar/7z) — pulling those into `cpe-server` is a deliberate design decision — plus OS-coupled bits
+(file ops via `trash`, `special_folders`, `drive_type`, link forge, thumbnails) that arguably belong in
+the Tauri adapter.
