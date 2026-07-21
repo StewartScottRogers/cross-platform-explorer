@@ -3107,266 +3107,44 @@ fn search_file_contents_impl(
     Ok(result)
 }
 
-/// One filename-search hit (CPE-603): the full path, the bare name, and whether it's a folder.
-#[derive(serde::Serialize)]
-struct NameMatch {
-    path: String,
-    name: String,
-    is_dir: bool,
-}
+// The filename-search domain (types, glob/brace matching, and the shared streaming walker) now lives in
+// `cpe_server::name_search` (CPE-815); the two commands below dispatch to it.
 
-/// The result of a filename search: the hits, how many directories were walked, and whether a cap
-/// was hit (so the UI can say "showing the first results").
-#[derive(serde::Serialize)]
-struct NameSearchResult {
-    matches: Vec<NameMatch>,
-    dirs_scanned: u64,
-    truncated: bool,
-}
-
-const NAME_SEARCH_MAX_MATCHES: usize = 2000;
-const NAME_SEARCH_MAX_DIRS: u64 = 50_000;
-
-/// Anchored wildcard match: `*` matches any run of characters, `?` exactly one. Both `name` and
-/// `pattern` are assumed already lowercased. Iterative two-pointer backtracking — no regex
-/// dependency, linear-ish, and pure so it's unit-testable.
-fn glob_is_match(name: &str, pattern: &str) -> bool {
-    let n: Vec<char> = name.chars().collect();
-    let p: Vec<char> = pattern.chars().collect();
-    let (mut i, mut j) = (0usize, 0usize);
-    let (mut star, mut mark) = (None, 0usize);
-    while i < n.len() {
-        if j < p.len() && (p[j] == '?' || p[j] == n[i]) {
-            i += 1;
-            j += 1;
-        } else if j < p.len() && p[j] == '*' {
-            star = Some(j);
-            mark = i;
-            j += 1;
-        } else if let Some(s) = star {
-            j = s + 1;
-            mark += 1;
-            i = mark;
-        } else {
-            return false;
-        }
-    }
-    while j < p.len() && p[j] == '*' {
-        j += 1;
-    }
-    j == p.len()
-}
-
-/// Safety cap on the number of patterns one query's brace expansion may produce, so a pathological
-/// query like `{a,b}{a,b}…` can't blow up into an exponential pattern list.
-const BRACE_EXPANSION_CAP: usize = 1024;
-
-/// Expand bash-style brace groups `{a,b}` in a glob into the flat list of concrete globs they denote
-/// (CPE-697), mirroring the frontend `globToRegExp` group handling: `*.{jpg,png}` → `["*.jpg","*.png"]`,
-/// and multiple/nested groups expand as a cartesian product (`{a,b}.{x,y}` → 4 patterns). A brace with
-/// no matching `}` or no top-level comma is left literal. The returned patterns contain only `*`/`?`
-/// wildcards (no braces), so each can be fed to `glob_is_match`.
-fn expand_braces(pattern: &str) -> Vec<String> {
-    let chars: Vec<char> = pattern.chars().collect();
-    let mut out = Vec::new();
-    expand_braces_into(&chars, &mut out);
-    out
-}
-
-fn expand_braces_into(chars: &[char], out: &mut Vec<String>) {
-    if out.len() > BRACE_EXPANSION_CAP {
-        return;
-    }
-    match first_brace_group(chars) {
-        Some((open, close, alts)) => {
-            for alt in alts {
-                let mut combined: Vec<char> = Vec::with_capacity(chars.len());
-                combined.extend_from_slice(&chars[..open]);
-                combined.extend(alt);
-                combined.extend_from_slice(&chars[close + 1..]);
-                expand_braces_into(&combined, out);
-                if out.len() > BRACE_EXPANSION_CAP {
-                    return;
-                }
-            }
-        }
-        None => out.push(chars.iter().collect()),
-    }
-}
-
-/// Find the first real brace group in `chars`: a `{` with a matching `}` and at least one top-level
-/// comma. Returns `(open_index, close_index, alternatives)` where each alternative is the character
-/// slice between top-level commas (nested `{…}` are kept intact for a later recursion). A `{` that is
-/// unmatched or has no top-level comma is skipped (treated as a literal), so scanning continues past it.
-fn first_brace_group(chars: &[char]) -> Option<(usize, usize, Vec<Vec<char>>)> {
-    for open in 0..chars.len() {
-        if chars[open] != '{' {
-            continue;
-        }
-        let mut depth = 0usize;
-        let mut start = open + 1;
-        let mut alts: Vec<Vec<char>> = Vec::new();
-        let mut saw_top_comma = false;
-        for i in open..chars.len() {
-            match chars[i] {
-                '{' => depth += 1,
-                '}' => {
-                    depth -= 1;
-                    if depth == 0 {
-                        alts.push(chars[start..i].to_vec());
-                        if saw_top_comma {
-                            return Some((open, i, alts));
-                        }
-                        break; // comma-less group → literal; resume scanning after this `{`
-                    }
-                }
-                ',' if depth == 1 => {
-                    alts.push(chars[start..i].to_vec());
-                    start = i + 1;
-                    saw_top_comma = true;
-                }
-                _ => {}
-            }
-        }
-    }
-    None
-}
-
-/// Case-insensitive name match mirroring the frontend `matchesQuery` (CPE-603): a query containing
-/// `*`/`?` or a brace group `{a,b}` (CPE-697) is an anchored glob over the whole name; otherwise a plain
-/// substring. `query_lower` must already be lowercased and non-empty (an empty query matches nothing —
-/// the caller gates on it).
-fn name_matches(name: &str, query_lower: &str) -> bool {
-    if query_lower.is_empty() {
-        return false;
-    }
-    let n = name.to_lowercase();
-    let has_group = query_lower.contains('{')
-        && first_brace_group(&query_lower.chars().collect::<Vec<_>>()).is_some();
-    if query_lower.contains('*') || query_lower.contains('?') || has_group {
-        // Expand any brace groups, then match the name against each concrete glob — a hit on ANY
-        // alternative is a match (bash brace-expansion semantics). No braces → a single pattern.
-        expand_braces(query_lower)
-            .iter()
-            .any(|p| glob_is_match(&n, p))
-    } else {
-        n.contains(query_lower)
-    }
-}
-
-/// Whether a directory entry is a symlink, without following it (CPE-609). Recursive walks use this to
-/// avoid descending into symlinked directories: a symlink cycle (a link pointing at an ancestor) would
-/// otherwise spin until the walk's caps, wasting work and truncating real results. Matches ripgrep's
-/// default of not following symlinks. Symlinked *files* are unaffected — only descent is skipped.
-/// Find files and folders under `root` whose NAME matches `query` (CPE-603). Recursive, but bounded
-/// like `search_file_contents`: skips dot-directories, stops at match/dir caps (reporting
-/// `truncated`), and skips unreadable directories rather than failing the whole search. Empty query
-/// returns nothing; a non-folder root is an `Err`.
-/// Directories scanned + whether a cap truncated the walk — the non-match part of a name search.
-struct NameWalkStats {
-    dirs_scanned: u64,
-    truncated: bool,
-}
-
-/// The shared filename-search walk behind both `find_files_by_name` (collect-to-vec) and
-/// `find_files_by_name_stream` (progressive, CPE-666). Invokes `flush` with each batch of ≤`batch`
-/// matches as they're found; `flush` returns `ControlFlow` so a streaming caller could stop early. Same
-/// bounds as before: skips dot-dirs + symlinks, caps dirs/matches (reporting `truncated`), skips
-/// unreadable dirs. Empty query yields nothing; a non-folder root is an `Err`.
-fn walk_name_matches(
-    root: &str,
-    query: &str,
-    batch: usize,
-    mut flush: impl FnMut(Vec<NameMatch>) -> std::ops::ControlFlow<()>,
-) -> Result<NameWalkStats, String> {
-    let q = query.trim().to_lowercase();
-    let mut stats = NameWalkStats { dirs_scanned: 0, truncated: false };
-    if q.is_empty() {
-        return Ok(stats);
-    }
-    let root_path = Path::new(root);
-    if !root_path.is_dir() {
-        return Err(format!("{root}: not a folder"));
-    }
-
-    let mut buf: Vec<NameMatch> = Vec::new();
-    let mut total_matches = 0usize;
-    // Explicit stack, not recursion — bounded memory, and matches `list_dir`'s skip-on-error ethos.
-    let mut stack = vec![root_path.to_path_buf()];
-    'walk: while let Some(dir) = stack.pop() {
-        let Ok(entries) = fs::read_dir(&dir) else { continue };
-        stats.dirs_scanned += 1;
-        if stats.dirs_scanned > NAME_SEARCH_MAX_DIRS {
-            stats.truncated = true;
-            break;
-        }
-        for entry in entries.flatten() {
-            let path = entry.path();
-            let name = entry.file_name();
-            let name = name.to_string_lossy();
-            let Ok(meta) = entry.metadata() else { continue };
-            let is_dir = meta.is_dir();
-            if name_matches(&name, &q) {
-                buf.push(NameMatch {
-                    path: path.to_string_lossy().into_owned(),
-                    name: name.to_string(),
-                    is_dir,
-                });
-                total_matches += 1;
-                if buf.len() >= batch && flush(std::mem::take(&mut buf)).is_break() {
-                    break 'walk;
-                }
-                if total_matches >= NAME_SEARCH_MAX_MATCHES {
-                    stats.truncated = true;
-                    break 'walk;
-                }
-            }
-            // Descend into real sub-directories, skipping dot-dirs (.git, .venv, …) and symlinks
-            // (avoid cycles) to stay fast. A symlinked dir is still reported as a match above.
-            if is_dir && !name.starts_with('.') && !entry_is_symlink(&entry) {
-                stack.push(path);
-            }
-        }
-    }
-    if !buf.is_empty() {
-        let _ = flush(buf);
-    }
-    Ok(stats)
-}
-
+/// Find files/folders under `root` whose name matches `query`. Model lives in
+/// `cpe_server::name_search` (CPE-815); this is a thin `spawn_blocking` dispatcher.
 #[tauri::command]
-async fn find_files_by_name(root: String, query: String) -> Result<NameSearchResult, String> {
-    tauri::async_runtime::spawn_blocking(move || find_files_by_name_impl(root, query))
+async fn find_files_by_name(
+    root: String,
+    query: String,
+) -> Result<cpe_server::name_search::NameSearchResult, String> {
+    tauri::async_runtime::spawn_blocking(move || cpe_server::name_search::find_files_by_name(&root, &query))
         .await.map_err(|e| e.to_string())?
 }
 
-fn find_files_by_name_impl(root: String, query: String) -> Result<NameSearchResult, String> {
-    let mut matches = Vec::new();
-    let stats = walk_name_matches(&root, &query, usize::MAX, |b| {
-        matches.extend(b);
-        std::ops::ControlFlow::Continue(())
-    })?;
-    Ok(NameSearchResult { matches, dirs_scanned: stats.dirs_scanned, truncated: stats.truncated })
-}
-
-/// How many matches to buffer before flushing a batch over the channel — small so hits appear live.
-const NAME_SEARCH_BATCH: usize = 32;
-
 /// Streaming variant of `find_files_by_name` (CPE-666, epic CPE-662): pushes batches of hits over an IPC
-/// channel as the tree is walked, so a search over a big tree lists results progressively instead of
-/// blocking on the whole walk. The returned `NameSearchResult` carries the final `dirs_scanned` +
-/// `truncated` flags with an empty `matches` (those were streamed).
+/// channel as the tree is walked. The transport (`ipc::Channel`) stays in this adapter; the walk itself
+/// is the shared `cpe_server::name_search::walk_name_matches` (CPE-815). The returned result carries the
+/// final `dirs_scanned` + `truncated` with empty `matches` (those were streamed).
 #[tauri::command]
 fn find_files_by_name_stream(
     root: String,
     query: String,
-    on_match: tauri::ipc::Channel<Vec<NameMatch>>,
-) -> Result<NameSearchResult, String> {
-    let stats = walk_name_matches(&root, &query, NAME_SEARCH_BATCH, |batch| {
-        let _ = on_match.send(batch);
-        std::ops::ControlFlow::Continue(())
-    })?;
-    Ok(NameSearchResult { matches: Vec::new(), dirs_scanned: stats.dirs_scanned, truncated: stats.truncated })
+    on_match: tauri::ipc::Channel<Vec<cpe_server::name_search::NameMatch>>,
+) -> Result<cpe_server::name_search::NameSearchResult, String> {
+    let stats = cpe_server::name_search::walk_name_matches(
+        &root,
+        &query,
+        cpe_server::name_search::NAME_SEARCH_BATCH,
+        |batch| {
+            let _ = on_match.send(batch);
+            std::ops::ControlFlow::Continue(())
+        },
+    )?;
+    Ok(cpe_server::name_search::NameSearchResult {
+        matches: Vec::new(),
+        dirs_scanned: stats.dirs_scanned,
+        truncated: stats.truncated,
+    })
 }
 
 /// Find duplicate files under `root` (CPE-420) — size-then-hash two-pass scan. Model lives in
@@ -8185,115 +7963,8 @@ mod tests {
         let _ = fs::remove_dir_all(&d);
     }
 
-    #[test]
-    fn name_matches_does_substring_and_glob() {
-        // Plain query = case-insensitive substring.
-        assert!(name_matches("Report.pdf", "report"));
-        assert!(name_matches("Report.pdf", "port"));
-        assert!(!name_matches("Report.pdf", "xls"));
-        // Glob = anchored over the whole name.
-        assert!(name_matches("photo.png", "*.png"));
-        assert!(!name_matches("photo.pngx", "*.png")); // anchored: trailing chars fail
-        assert!(name_matches("a1b2.txt", "a?b?.txt"));
-        assert!(!name_matches("ab.txt", "a?b?.txt")); // '?' needs exactly one char
-        assert!(name_matches("anything", "*")); // lone star matches all
-        assert!(name_matches("IMG_2024.jpg", "img_*.jpg")); // case-insensitive glob
-        // Empty query matches nothing (caller gates).
-        assert!(!name_matches("x", ""));
-    }
-
-    #[test]
-    fn name_matches_expands_brace_groups() {
-        // A {a,b} group matches any of its alternatives (CPE-697). Queries are pre-lowercased.
-        assert!(name_matches("photo.jpg", "*.{jpg,png}"));
-        assert!(name_matches("photo.png", "*.{jpg,png}"));
-        assert!(!name_matches("photo.gif", "*.{jpg,png}"));
-        assert!(name_matches("photo.gif", "*.{jpg,png,gif}"));
-        // Case-insensitive, like the rest of glob matching.
-        assert!(name_matches("PHOTO.JPG", "*.{jpg,png}"));
-        // `*`/`?` work inside a group.
-        assert!(name_matches("archive.tar.gz", "*.{tar.*,zip}"));
-        assert!(name_matches("data.zip", "*.{tar.*,zip}"));
-        assert!(name_matches("report1.md", "report{?,10}.md"));
-        assert!(name_matches("report10.md", "report{?,10}.md"));
-        assert!(!name_matches("reportxx.md", "report{?,10}.md"));
-        // Multiple + nested groups expand as a cartesian product.
-        assert!(name_matches("img.jpg", "{img,pic}.{jpg,png}"));
-        assert!(name_matches("pic.png", "{img,pic}.{jpg,png}"));
-        assert!(!name_matches("doc.jpg", "{img,pic}.{jpg,png}"));
-        assert!(name_matches("a1.txt", "{a{1,2},b}.txt"));
-        assert!(name_matches("b.txt", "{a{1,2},b}.txt"));
-        assert!(!name_matches("a3.txt", "{a{1,2},b}.txt"));
-    }
-
-    #[test]
-    fn name_matches_treats_lone_braces_and_commas_literally() {
-        // No top-level comma → braces are literal (not a group); this stays a plain substring query.
-        assert!(name_matches("{x}.txt", "{x}.txt"));
-        assert!(!name_matches("x.txt", "{x}.txt"));
-        // Unmatched opening brace → literal substring.
-        assert!(name_matches("a{b.txt", "a{b"));
-        assert!(!name_matches("axb.txt", "a{b"));
-        // A comma outside any group is a literal comma (query has `*`, so it's a glob).
-        assert!(name_matches("a,b.txt", "a,b*"));
-        assert!(!name_matches("ab.txt", "a,b*"));
-    }
-
-    #[test]
-    fn expand_braces_produces_expected_pattern_lists() {
-        assert_eq!(expand_braces("*.{jpg,png}"), vec!["*.jpg", "*.png"]);
-        assert_eq!(
-            expand_braces("{a,b}.{x,y}"),
-            vec!["a.x", "a.y", "b.x", "b.y"]
-        );
-        // No group → the pattern is returned unchanged.
-        assert_eq!(expand_braces("*.txt"), vec!["*.txt"]);
-        assert_eq!(expand_braces("{x}.txt"), vec!["{x}.txt"]); // comma-less → literal
-    }
-
-    #[test]
-    fn find_files_by_name_walks_recursively_and_skips_dot_dirs() {
-        let d = scratch("namesearch");
-        fs::write(d.join("report.txt"), b"").unwrap();
-        fs::create_dir_all(d.join("sub")).unwrap();
-        fs::write(d.join("sub").join("report-2.txt"), b"").unwrap();
-        fs::create_dir_all(d.join("reports")).unwrap(); // a matching FOLDER
-        // A dot-dir with a matching file — both dir and file must be skipped.
-        fs::create_dir_all(d.join(".git")).unwrap();
-        fs::write(d.join(".git").join("report.log"), b"").unwrap();
-
-        let r = find_files_by_name_impl(d.to_string_lossy().to_string(), "report".into()).unwrap();
-        let names: Vec<&str> = r.matches.iter().map(|m| m.name.as_str()).collect();
-        // report.txt, sub/report-2.txt, and the "reports" folder — never anything under .git.
-        assert_eq!(r.matches.len(), 3, "got {names:?}");
-        assert!(names.contains(&"report.txt"));
-        assert!(names.contains(&"report-2.txt"));
-        assert!(r.matches.iter().any(|m| m.name == "reports" && m.is_dir));
-        assert!(!r.matches.iter().any(|m| m.path.contains(".git")));
-
-        // Glob query.
-        let g = find_files_by_name_impl(d.to_string_lossy().to_string(), "*.txt".into()).unwrap();
-        assert_eq!(g.matches.len(), 2);
-        assert!(g.matches.iter().all(|m| m.name.ends_with(".txt")));
-
-        // Empty query and a non-folder root behave sanely.
-        assert_eq!(find_files_by_name_impl(d.to_string_lossy().to_string(), "  ".into()).unwrap().matches.len(), 0);
-        assert!(find_files_by_name_impl(d.join("report.txt").to_string_lossy().to_string(), "x".into()).is_err());
-
-        // The streaming walk (CPE-666) yields the same matches as the collected command, in batches.
-        let mut streamed = Vec::new();
-        let mut batches = 0;
-        let stats = walk_name_matches(&d.to_string_lossy(), "report", 1, |b| {
-            batches += 1;
-            streamed.extend(b);
-            std::ops::ControlFlow::Continue(())
-        })
-        .unwrap();
-        assert_eq!(streamed.len(), 3, "streamed the same 3 hits");
-        assert!(batches >= 3, "batch size 1 flushes per hit");
-        assert!(!stats.truncated);
-        let _ = fs::remove_dir_all(&d);
-    }
+    // name_matches / expand_braces / find_files_by_name tests moved with the code to
+    // `cpe_server::name_search` (CPE-815).
 
     #[test]
     fn recursive_walks_skip_symlinked_dirs_and_do_not_cycle() {
@@ -8314,7 +7985,7 @@ mod tests {
 
         // Without the symlink skip, the 'loop' link re-enters the root forever until the 50k-dir cap
         // (truncated=true, dirs_scanned huge). With it, the walk terminates immediately.
-        let r = find_files_by_name_impl(d.to_string_lossy().to_string(), "target".into()).unwrap();
+        let r = cpe_server::name_search::find_files_by_name(&d.to_string_lossy(), "target").unwrap();
         assert!(!r.truncated, "walk hit its cap — the symlink cycle was not skipped");
         assert!(r.dirs_scanned < 100, "walked too many dirs ({}) — cycle not skipped", r.dirs_scanned);
         assert!(r.matches.iter().any(|m| m.name == "target.txt"));
