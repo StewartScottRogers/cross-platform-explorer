@@ -54,9 +54,8 @@ flate2 = "1"
 
 # (The structured binary previews goblin/midly/wasmprinter/serde_bencode moved to `cpe-server` with the
 # binary_preview domain, CPE-815 — no longer direct app deps.)
-calamine = "0.26"
-rusqlite = { version = "0.32", features = ["bundled"] }
-parquet = { version = "53", default-features = false }
+# (The structured-data previews calamine/rusqlite/parquet moved to `cpe-server` with the data_preview
+# domain, CPE-815 — no longer direct app deps.)
 sevenz-rust = "0.6"
 image = { version = "0.25", default-features = false, features = ["tiff", "png", "jpeg", "gif", "webp", "bmp"] }
 kamadak-exif = "0.6"
@@ -108,8 +107,7 @@ winreg = "0.52"
 windows = { version = "0.56", features = ["Win32_Foundation", "Win32_Storage_FileSystem"] }
 
 [dev-dependencies]
-# Author a real .xlsx in the spreadsheet-preview test (write side; calamine reads).
-rust_xlsxwriter = "0.79"
+# (rust_xlsxwriter moved to `cpe-server` dev-deps with the spreadsheet-preview test, CPE-815.)
 # Temp dirs for filesystem tests (e.g. the Agent Board project-root walk-up, CPE-554).
 tempfile = "3"
 
