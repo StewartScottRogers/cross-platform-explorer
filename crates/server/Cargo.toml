@@ -38,6 +38,8 @@ serde_bencode = "0.2"
 rusqlite = { version = "0.32", features = ["bundled"] }
 calamine = "0.26"
 parquet = { version = "53", default-features = false }
+# Image decode/thumbnail (CPE-642/644/099/101). Pure-Rust decoders only (no system libs).
+image = { version = "0.25", default-features = false, features = ["tiff", "png", "jpeg", "gif", "webp", "bmp"] }
 
 [dev-dependencies]
 # Temp dirs for the ticket-board tests (moved from the app with the module, CPE-815).

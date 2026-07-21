@@ -174,3 +174,10 @@ via calamine + Parquet via the parquet crate, CPE-088/089/090/091) into `cpe_ser
 Verified: `cpe-server` **91 tests** green; app `cargo test` **85 passed / 0 failed**; clippy clean
 **both** modes. `cpe-server` now holds **25 modules**. All three preview sub-domains (binary / doc-text /
 structured-data) are extracted; the `read_preview_info` dispatcher is now a thin router into `cpe-server`.
+2026-07-20 — **Slice 20:** extracted the **image thumbnail** sub-domain (`make_thumbnail_png` +
+`thumb_cache_key`/`file_mtime_secs`/`prune_thumb_cache`/`thumbnail_cached` mtime-keyed disk cache,
+CPE-642/644) into `cpe_server::thumbnail` (pulls the pure-Rust `image` crate). The `thumbnail` command
+resolves the cache dir via `ServerCtx` then dispatches. Tests moved. (`image` stays an app dep for now —
+the TIFF/PSD transcode + EXIF metadata still use it; extracting those is the follow-up that slims it.)
+Verified: `cpe-server` **95 tests** green; app `cargo test` **81 passed / 0 failed**; clippy clean
+**both** modes. `cpe-server` now holds **26 modules**.

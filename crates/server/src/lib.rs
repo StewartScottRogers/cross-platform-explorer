@@ -93,3 +93,6 @@ pub mod doc_text;
 
 /// Structured-data previews — SQLite / spreadsheet / Parquet summaries (CPE-088/089/090/091).
 pub mod data_preview;
+
+/// Image thumbnails — downscaled PNG generation + mtime-keyed disk cache (CPE-642/644).
+pub mod thumbnail;
