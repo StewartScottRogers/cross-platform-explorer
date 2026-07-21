@@ -75,3 +75,8 @@ now dispatchers. Moved/ported the epoch-ms, text-stats, checksum, and hash_file 
 `cpe-server` deps. Verified: `cpe-server` **57 tests** green; app `cargo test` **113 passed / 0 failed**;
 clippy `-D warnings` clean **both** modes. Behaviour-preserving (identical helpers/JSON). `cpe-server`
 now holds 12 modules.
+2026-07-20 — **Slice 6:** moved the shared `entry_is_symlink` helper (7 call sites) into
+`cpe_server::fsutil` (re-exported), then extracted `folder_stats` (CPE-649) → `cpe_server::folder_stats`
+and byte-identical `files_identical` (CPE-418) → `cpe_server::compare`; both commands are now
+dispatchers. Tests moved. Verified: `cpe-server` **59 tests** green; app `cargo test` **111 passed /
+0 failed**; clippy clean **both** modes. `cpe-server` now holds **14 modules**.

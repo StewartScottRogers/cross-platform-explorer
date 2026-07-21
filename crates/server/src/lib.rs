@@ -54,3 +54,9 @@ pub mod text_stats;
 
 /// File + folder-tree SHA-256 checksums (CPE-412) and the integrity-baseline manifest (CPE-791).
 pub mod checksum;
+
+/// Folder statistics — recursive file/dir/byte totals (CPE-649).
+pub mod folder_stats;
+
+/// File comparison — byte-identical check (CPE-418).
+pub mod compare;

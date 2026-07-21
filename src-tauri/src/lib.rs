@@ -34,7 +34,7 @@ mod agent_shadow;
 use cpe_server::{audit_journal, geometry, ticket_board};
 /// Shared FS utils (epoch-ms + streaming SHA-256) also live in `cpe-server` (CPE-815); re-export them
 /// so the many `to_epoch_ms(…)` / `sha256_file(…)` call sites resolve unchanged.
-use cpe_server::fsutil::{sha256_file, to_epoch_ms};
+use cpe_server::fsutil::{entry_is_symlink, sha256_file, to_epoch_ms};
 
 /// Read every ticket under `<root>/Tickets/{Backlog,Doing,Blocked,Deferred,Done}/CPE-*.md` into board
 /// cards (CPE-520). Read-only; a malformed file is skipped, never fails the listing.
@@ -2635,52 +2635,11 @@ fn image_meta_impl(path: String) -> Result<ImageMeta, String> {
 /// Recursive counts + size of a directory tree, for the Properties dialog (CPE-649): number of files,
 /// number of sub-folders, and total bytes. Cycle-safe (doesn't follow symlinked dirs) and bounded —
 /// stops at a large entry cap (reporting `truncated`) so it can't spin on a pathological tree.
-#[derive(serde::Serialize, Default)]
-struct FolderStats {
-    files: u64,
-    dirs: u64,
-    bytes: u64,
-    truncated: bool,
-}
-
-const FOLDER_STATS_MAX_ENTRIES: u64 = 500_000;
-
+/// Model lives in `cpe_server::folder_stats` (CPE-815); this is a thin `spawn_blocking` dispatcher.
 #[tauri::command]
-async fn folder_stats(path: String) -> Result<FolderStats, String> {
-    tauri::async_runtime::spawn_blocking(move || folder_stats_impl(path))
+async fn folder_stats(path: String) -> Result<cpe_server::folder_stats::FolderStats, String> {
+    tauri::async_runtime::spawn_blocking(move || cpe_server::folder_stats::compute(&path))
         .await.map_err(|e| e.to_string())?
-}
-
-fn folder_stats_impl(path: String) -> Result<FolderStats, String> {
-    let root = Path::new(&path);
-    if !root.is_dir() {
-        return Err(format!("{path}: not a folder"));
-    }
-    let mut stats = FolderStats::default();
-    let mut seen = 0u64;
-    let mut stack = vec![root.to_path_buf()];
-    while let Some(dir) = stack.pop() {
-        let Ok(entries) = fs::read_dir(&dir) else { continue };
-        for entry in entries.flatten() {
-            seen += 1;
-            if seen > FOLDER_STATS_MAX_ENTRIES {
-                stats.truncated = true;
-                return Ok(stats);
-            }
-            let Ok(meta) = entry.metadata() else { continue };
-            if meta.is_dir() {
-                stats.dirs += 1;
-                // Skip symlinked dirs to avoid cycles (CPE-609/611).
-                if !entry_is_symlink(&entry) {
-                    stack.push(entry.path());
-                }
-            } else {
-                stats.files += 1;
-                stats.bytes += meta.len();
-            }
-        }
-    }
-    Ok(stats)
 }
 
 /// Total size of a directory tree. Unreadable subtrees are skipped rather than
@@ -3170,46 +3129,11 @@ async fn text_stats(path: String) -> Result<cpe_server::text_stats::TextStats, S
 /// Whether two files have identical content (CPE-418). Different sizes short-circuit to `false`;
 /// otherwise the bytes are streamed and compared with an early exit on the first difference — cheaper
 /// and collision-free versus hashing both. A directory or unreadable path is an `Err`, never a panic.
+/// Model lives in `cpe_server::compare` (CPE-815); this is a thin `spawn_blocking` dispatcher.
 #[tauri::command]
 async fn files_identical(a: String, b: String) -> Result<bool, String> {
-    tauri::async_runtime::spawn_blocking(move || files_identical_impl(a, b))
+    tauri::async_runtime::spawn_blocking(move || cpe_server::compare::files_identical(&a, &b))
         .await.map_err(|e| e.to_string())?
-}
-
-fn files_identical_impl(a: String, b: String) -> Result<bool, String> {
-    use std::io::Read;
-    let (pa, pb) = (Path::new(&a), Path::new(&b));
-    let (ma, mb) = (
-        fs::metadata(pa).map_err(|e| format!("{a}: {e}"))?,
-        fs::metadata(pb).map_err(|e| format!("{b}: {e}"))?,
-    );
-    if ma.is_dir() || mb.is_dir() {
-        return Err("folders can't be compared".into());
-    }
-    if ma.len() != mb.len() {
-        return Ok(false); // different size ⇒ different content, no need to read
-    }
-    let mut fa = fs::File::open(pa).map_err(|e| format!("{a}: {e}"))?;
-    let mut fb = fs::File::open(pb).map_err(|e| format!("{b}: {e}"))?;
-    let (mut ba, mut bb) = ([0u8; 64 * 1024], [0u8; 64 * 1024]);
-    loop {
-        let na = fa.read(&mut ba).map_err(|e| format!("{a}: {e}"))?;
-        // Same length overall, so read the same count from b (loop until filled or EOF).
-        let mut nb = 0;
-        while nb < na {
-            let r = fb.read(&mut bb[nb..na]).map_err(|e| format!("{b}: {e}"))?;
-            if r == 0 {
-                break;
-            }
-            nb += r;
-        }
-        if na != nb || ba[..na] != bb[..nb] {
-            return Ok(false);
-        }
-        if na == 0 {
-            return Ok(true);
-        }
-    }
 }
 
 /// One content-search hit: the file, the 1-based line number, and the (trimmed, truncated) line.
@@ -3474,10 +3398,6 @@ fn name_matches(name: &str, query_lower: &str) -> bool {
 /// avoid descending into symlinked directories: a symlink cycle (a link pointing at an ancestor) would
 /// otherwise spin until the walk's caps, wasting work and truncating real results. Matches ripgrep's
 /// default of not following symlinks. Symlinked *files* are unaffected — only descent is skipped.
-fn entry_is_symlink(entry: &fs::DirEntry) -> bool {
-    entry.file_type().map(|t| t.is_symlink()).unwrap_or(false)
-}
-
 /// Find files and folders under `root` whose NAME matches `query` (CPE-603). Recursive, but bounded
 /// like `search_file_contents`: skips dot-directories, stops at match/dir caps (reporting
 /// `truncated`), and skips unreadable directories rather than failing the whole search. Empty query
@@ -8706,25 +8626,7 @@ mod tests {
         let _ = fs::remove_dir_all(&d);
     }
 
-    #[test]
-    fn files_identical_compares_content_and_short_circuits_on_size() {
-        let d = scratch("cmp");
-        fs::write(d.join("a"), b"same content here").unwrap();
-        fs::write(d.join("b"), b"same content here").unwrap();
-        fs::write(d.join("c"), b"same content HERE").unwrap(); // same length, different bytes
-        fs::write(d.join("e"), b"different length entirely").unwrap();
-        let p = |n: &str| d.join(n).to_string_lossy().to_string();
-        assert_eq!(files_identical_impl(p("a"), p("b")), Ok(true));
-        assert_eq!(files_identical_impl(p("a"), p("c")), Ok(false)); // same size, differing byte
-        assert_eq!(files_identical_impl(p("a"), p("e")), Ok(false)); // different size
-        // Empty files are identical; a folder or missing path errors.
-        fs::write(d.join("z1"), b"").unwrap();
-        fs::write(d.join("z2"), b"").unwrap();
-        assert_eq!(files_identical_impl(p("z1"), p("z2")), Ok(true));
-        assert!(files_identical_impl(p("a"), d.to_string_lossy().to_string()).is_err());
-        assert!(files_identical_impl(p("a"), p("nope")).is_err());
-        let _ = fs::remove_dir_all(&d);
-    }
+    // files_identical tests moved with the code to `cpe_server::compare` (CPE-815).
 
     #[test]
     fn find_duplicates_groups_identical_files_and_ignores_unique_sizes() {
@@ -8773,19 +8675,7 @@ mod tests {
         let _ = fs::remove_dir_all(&d);
     }
 
-    #[test]
-    fn folder_stats_counts_files_dirs_and_bytes() {
-        let d = scratch("folderstats");
-        fs::create_dir_all(d.join("sub/deep")).unwrap();
-        fs::write(d.join("a.bin"), vec![0u8; 100]).unwrap();
-        fs::write(d.join("sub/b.bin"), vec![0u8; 50]).unwrap();
-        fs::write(d.join("sub/deep/c.bin"), vec![0u8; 7]).unwrap();
-        let s = folder_stats_impl(d.to_string_lossy().to_string()).unwrap();
-        assert_eq!((s.files, s.dirs, s.bytes, s.truncated), (3, 2, 157, false));
-        // A non-folder is an error.
-        assert!(folder_stats_impl(d.join("a.bin").to_string_lossy().to_string()).is_err());
-        let _ = fs::remove_dir_all(&d);
-    }
+    // folder_stats tests moved with the code to `cpe_server::folder_stats` (CPE-815).
 
     #[test]
     fn move_exact_restores_to_the_original_name() {
