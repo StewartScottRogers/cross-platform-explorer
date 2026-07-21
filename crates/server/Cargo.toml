@@ -18,6 +18,8 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 # Streaming SHA-256 for file checksums / integrity baselines (CPE-412/791). Pure-Rust, no system libs.
 sha2 = "0.10"
+# Work-stealing parallelism for the recursive directory-size walk (CPE-754). Pure-Rust.
+rayon = "1"
 
 [dev-dependencies]
 # Temp dirs for the ticket-board tests (moved from the app with the module, CPE-815).

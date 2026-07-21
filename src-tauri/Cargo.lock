@@ -825,6 +825,7 @@ name = "cpe-server"
 version = "0.1.0"
 dependencies = [
  "cpe-contract",
+ "rayon",
  "serde",
  "serde_json",
  "sha2",
@@ -882,7 +883,6 @@ dependencies = [
  "notify",
  "parquet",
  "psd",
- "rayon",
  "repos",
  "rusqlite",
  "rust_xlsxwriter",

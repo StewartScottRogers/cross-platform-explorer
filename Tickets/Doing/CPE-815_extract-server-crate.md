@@ -80,3 +80,9 @@ now holds 12 modules.
 and byte-identical `files_identical` (CPE-418) → `cpe_server::compare`; both commands are now
 dispatchers. Tests moved. Verified: `cpe-server` **59 tests** green; app `cargo test` **111 passed /
 0 failed**; clippy clean **both** modes. `cpe-server` now holds **14 modules**.
+2026-07-20 — **Slice 7:** extracted the disk-usage domain — `dir_size` + `dir_children_sizes` +
+`dir_size_walk` + `ChildSize` (CPE-749/754) → `cpe_server::disk_usage` (moved the `rayon` dep with it,
+and **dropped `rayon` as a direct app dependency** since nothing else in the app used it). Both commands
+are now dispatchers. Tests moved (the symlink-cycle regression test kept in the app, repointed to
+`cpe_server::disk_usage::dir_size`). Verified: `cpe-server` **61 tests** green; app `cargo test` **108
+passed / 0 failed**; clippy clean **both** modes. `cpe-server` now holds **15 modules**.

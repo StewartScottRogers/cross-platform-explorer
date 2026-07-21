@@ -60,3 +60,6 @@ pub mod folder_stats;
 
 /// File comparison — byte-identical check (CPE-418).
 pub mod compare;
+
+/// Disk-usage scanning — recursive directory size + per-child breakdown (CPE-749/754).
+pub mod disk_usage;
