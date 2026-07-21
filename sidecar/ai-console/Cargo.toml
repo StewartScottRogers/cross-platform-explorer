@@ -2,7 +2,7 @@
 name = "ai-console"
 version = "0.1.0"
 edition = "2021"
-description = "The AI Console sidecar for Cross-Platform Explorer — an agentic CLI manager (CPE-261)."
+description = "The Agent Deck sidecar for Cross-Platform Explorer — an agentic CLI manager (CPE-261)."
 license = "MIT"
 
 # A sidecar depends ONLY on the contract (ADR 0001 one-way rule) — never on the host

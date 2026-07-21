@@ -1,13 +1,13 @@
 # Tab bars — one standard
 
-Every tab strip in the app (the main explorer window's `.tabbar`, the AI Console launcher's `#tabs`,
+Every tab strip in the app (the main explorer window's `.tabbar`, the Agent Deck launcher's `#tabs`,
 and any future one) uses the **same conventional active-tab treatment** so the selected tab is
 unmistakable and the look is consistent everywhere.
 
 ## The rules
 
 - **Active tab** is unmistakable:
-  - an **accent bar along its top edge** — `box-shadow: inset 0 2px 0 0 var(--accent)` (the AI Console
+  - an **accent bar along its top edge** — `box-shadow: inset 0 2px 0 0 var(--accent)` (the Agent Deck
     uses the system `AccentColor`-derived `var(--accent)`),
   - the **content surface** background (`--surface` / `Canvas`) so it lifts out of the bar and connects
     to the pane below (**no bottom border** — it merges with the content),
@@ -22,7 +22,7 @@ unmistakable and the look is consistent everywhere.
 ## Where it lives
 
 - Main window: `src/app.css` → `.tabbar` / `.tab` / `.tab.active` (used by `src/lib/components/TabBar.svelte`).
-- AI Console: `sidecar/ai-console/src/launcher.html` → `#tabs` / `.tab` / `.tab.active`.
+- Agent Deck: `sidecar/ai-console/src/launcher.html` → `#tabs` / `.tab` / `.tab.active`.
 
 Keep the two in sync — a change to one is a change to both. New tab strips reuse these classes rather
 than inventing their own active style.

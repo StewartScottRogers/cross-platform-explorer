@@ -25,10 +25,10 @@ and sorting are on the toolbar; hidden files can be toggled from the menu.
 
 ## Run a coding agent
 
-Open the **AI Console** to run a coding agent (Claude Code, aider, and others) against a folder, using
+Open the **Agent Deck** to run a coding agent (Claude Code, aider, and others) against a folder, using
 the provider and model you choose. Launch several at once, then view them side by side in the **Agent
 Grid** — or use **Run swarm** to put a small team of agents on one task together (see the **Swarms**
-page). See the **AI Console** and **Agent Grid** pages for details.
+page). See the **Agent Deck** and **Agent Grid** pages for details.
 
 ## Language
 
@@ -45,5 +45,5 @@ Ctrl+F to search. Press **?** for the full keyboard-shortcuts list. The menu lis
 ## Getting help
 
 Every section has its own page in these docs. Press **F1** — or click the **?** button in the toolbar —
-and Documents opens straight to the page for whatever you're looking at (the AI Console, the Workbench,
+and Documents opens straight to the page for whatever you're looking at (the Agent Deck, the Workbench,
 Swarms, and so on). Opening Documents from the Application menu does the same for your current section.

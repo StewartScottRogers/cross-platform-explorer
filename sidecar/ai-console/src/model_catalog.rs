@@ -2,7 +2,7 @@
 //! **reseller registry** ([`ResellerRegistry`], CPE-445), and the **OpenRouter** model-list
 //! normalizer ([`parse_openrouter_models`], CPE-446).
 //!
-//! The AI Console should let a user pick *any* model a reseller offers, not the small static set
+//! The Agent Deck should let a user pick *any* model a reseller offers, not the small static set
 //! baked into agent manifests. That list changes constantly, so it is **data**: each reseller is a
 //! declarative manifest (mirroring the agent registry `agents.rs` and the forge providers
 //! `repos/providers.rs`), and the actual list is fetched + normalized to the common `Model` shape.

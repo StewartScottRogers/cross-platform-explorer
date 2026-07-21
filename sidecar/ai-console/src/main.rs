@@ -1,4 +1,4 @@
-//! The AI Console sidecar process (CPE-277/271). A thin stdio wrapper around the pure
+//! The Agent Deck sidecar process (CPE-277/271). A thin stdio wrapper around the pure
 //! protocol loop in the library: emit `Hello`, then read JSON-line envelopes and act on
 //! each. On `Welcome` it also starts its **own UI** server (CPE-271) and announces the
 //! loopback URL to the host via a `Status` event (`ui:<url>`), which the host embeds in

@@ -17,7 +17,7 @@
   export let drives: Place[] = [];
   /** User-starred files and folders, shown in the quick-access section (CPE-340). */
   export let favorites: Favorite[] = [];
-  /** Live coding-agent sessions from the AI Console (Agent Watch, CPE-397). Each row
+  /** Live coding-agent sessions from the Agent Deck (Agent Watch, CPE-397). Each row
       navigates the explorer to the agent's Project folder. Empty ⇒ the section is hidden. */
   export let sessions: AgentSession[] = [];
   /** Free/total bytes per drive path for the usage bars (CPE-406). Absent ⇒ no bar. */
@@ -447,7 +447,7 @@
   .agent-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .agent-model { opacity: 0.6; }
   .agent-folder { font-size: 11px; opacity: 0.6; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  /* Shared session-identity chip (CPE-490): same colour+number as the AI Console tab, so a leaf and
+  /* Shared session-identity chip (CPE-490): same colour+number as the Agent Deck tab, so a leaf and
      its tab correlate at a glance. */
   .agent-chip {
     flex: 0 0 auto;

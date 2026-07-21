@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
-<title>AI Console</title>
+<title>Agent Deck</title>
 <style>/*__XTERM_CSS__*/</style>
 <style>
   :root { color-scheme: light dark; --line: rgba(128,128,128,0.26); --accent: #2f6fed; }
@@ -294,9 +294,9 @@
 </head>
 <body class="booting">
   <!-- Boot loader (CPE-561): pretty animated liveness indicator until the launcher is interactive. -->
-  <div id="boot-overlay" class="boot-overlay" role="status" aria-label="Starting the AI Console">
+  <div id="boot-overlay" class="boot-overlay" role="status" aria-label="Starting the Agent Deck">
     <div class="boot-ring" aria-hidden="true"></div>
-    <div class="boot-label">Starting the AI Console…</div>
+    <div class="boot-label">Starting the Agent Deck…</div>
   </div>
   <div class="brandbar" title="Cross-Platform Explorer" style="display:flex;align-items:center;gap:8px;padding:6px 12px;border-bottom:1px solid var(--line);font-size:12px">
     <svg viewBox="0 0 1024 1024" width="20" height="20" aria-hidden="true" style="flex:0 0 auto">
@@ -306,7 +306,7 @@
       <circle cx="512" cy="512" r="92" fill="url(#cpe-brandmark)"/><circle cx="512" cy="512" r="34" fill="#fff"/>
     </svg>
     <span style="font-weight:700">Cross-Platform Explorer</span>
-    <span style="opacity:.55">AI Console</span>
+    <span style="opacity:.55">Agent Deck</span>
   </div>
   <div class="toolbar">
     <div class="row">
@@ -353,7 +353,7 @@
         </div>
       </div>
       <button id="advanced-btn" type="button" title="Optional extras: reusable setups, a fast model, a per-launch key">Advanced ▾</button>
-      <button id="help-btn" type="button" title="How the AI Console works — a quick guide">?</button>
+      <button id="help-btn" type="button" title="How the Agent Deck works — a quick guide">?</button>
       <button id="launch" class="primary">Launch</button>
       <button id="run-swarm" type="button" title="Run a multi-agent swarm — a coordinator plus one builder per task line — experimental (CPE-541)">Run swarm ▾</button>
       <button id="swarm-help" type="button" class="area-help" title="Documents: how swarms work">?</button>
@@ -486,7 +486,7 @@ docs/** :: document the CSV options"></textarea>
   <div id="help-overlay" hidden>
     <div id="help-panel">
       <div class="keys-head">
-        <span>How the AI Console works</span>
+        <span>How the Agent Deck works</span>
         <button id="help-close" type="button" class="keys-x" title="Close">×</button>
       </div>
       <div id="help-body">
@@ -1435,7 +1435,7 @@ function keysMsg(m, ok) { const e = $("keys-msg"); e.textContent = m || ""; e.st
 // cryptic message into an action (CPE-386).
 function permHint(msg) {
   return /not granted|secrets/i.test(msg || "")
-    ? "Saving keys needs the Secrets permission, which is off. Close and reopen the AI Console, choose Allow for Secrets when asked, then try again."
+    ? "Saving keys needs the Secrets permission, which is off. Close and reopen the Agent Deck, choose Allow for Secrets when asked, then try again."
     : msg;
 }
 function allProviders() {

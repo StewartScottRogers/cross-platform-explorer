@@ -1,6 +1,6 @@
 //! The Repositories sidecar's base protocol skeleton (CPE-432).
 //!
-//! Mirrors the AI Console's CPE-277 skeleton: the opening `Hello` (identity + requested
+//! Mirrors the Agent Deck's CPE-277 skeleton: the opening `Hello` (identity + requested
 //! capabilities), and a **pure** `on_message` reaction so the process loop is unit-testable without
 //! stdio. The stdio driver in `main.rs` just pumps envelopes through here. Later slices extend the
 //! request handling (forge browse/clone/sync) on top.

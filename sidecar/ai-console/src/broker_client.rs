@@ -1,4 +1,4 @@
-//! Outbound capability client for the AI Console sidecar (CPE-344).
+//! Outbound capability client for the Agent Deck sidecar (CPE-344).
 //!
 //! The sidecar talks to the host over the stdio envelope channel. To *use* a granted
 //! capability (e.g. `secrets.*`, CPE-268) it must send a [`Request`] and await the matching

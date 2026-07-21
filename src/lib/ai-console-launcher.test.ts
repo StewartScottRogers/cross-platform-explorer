@@ -1,5 +1,5 @@
 /**
- * AI Console launcher UI harness (CPE-388).
+ * Agent Deck launcher UI harness (CPE-388).
  *
  * The launcher is an inline HTML/JS page embedded in the ai-console sidecar and rendered in a
  * WebView2 pane we can't drive headlessly — so its rendering + wiring had no automated coverage,
@@ -75,16 +75,16 @@ async function mountLauncher(routes: (path: string, opts: any) => any = () => ({
   return { w, fetchMock };
 }
 
-describe("AI Console launcher — Keys panel error hints (CPE-386)", () => {
+describe("Agent Deck launcher — Keys panel error hints (CPE-386)", () => {
   it("turns a 'Secrets not granted' error into an actionable message; passes others through", async () => {
     const { w } = await mountLauncher();
-    expect(w.permHint("Secrets is not granted to 'ai-console'")).toMatch(/reopen the AI Console/i);
+    expect(w.permHint("Secrets is not granted to 'ai-console'")).toMatch(/reopen the Agent Deck/i);
     expect(w.permHint("secrets denied")).toMatch(/Allow for Secrets/i);
     expect(w.permHint("bad json: x")).toBe("bad json: x");
   });
 });
 
-describe("AI Console launcher — Agent Grid view (CPE-506)", () => {
+describe("Agent Deck launcher — Agent Grid view (CPE-506)", () => {
   it("gridDims gives a near-square, cols-first best fit that reflows", async () => {
     const { w } = await mountLauncher();
     expect(w.gridDims(1)).toEqual({ rows: 1, cols: 1 });
@@ -138,12 +138,12 @@ describe("AI Console launcher — Agent Grid view (CPE-506)", () => {
   });
 });
 
-describe("AI Console launcher — boot loader (CPE-561, supersedes CPE-552)", () => {
+describe("Agent Deck launcher — boot loader (CPE-561, supersedes CPE-552)", () => {
   it("ships an animated boot overlay + spinner + label (pre-JS coverage)", () => {
     expect(HTML).toMatch(/<div id="boot-overlay"[^>]*class="boot-overlay"/);
     expect(HTML).toMatch(/class="boot-ring"/);
     expect(HTML).toMatch(/\.boot-ring[\s\S]*?animation:\s*boot-spin/);
-    expect(HTML).toMatch(/Starting the AI Console/);
+    expect(HTML).toMatch(/Starting the Agent Deck/);
     // The ugly progress-cursor boot rule is gone (the overlay is the indicator now).
     expect(HTML).not.toMatch(/body\.booting[\s\S]*?cursor:\s*progress/);
   });
@@ -170,7 +170,7 @@ describe("AI Console launcher — boot loader (CPE-561, supersedes CPE-552)", ()
   });
 });
 
-describe("AI Console launcher — live swarm trigger (CPE-541)", () => {
+describe("Agent Deck launcher — live swarm trigger (CPE-541)", () => {
   it("runSwarm POSTs the mission to /api/swarm/run and reports success", async () => {
     const calls: Array<{ path: string; body: any }> = [];
     const { w } = await mountLauncher((path, opts) => {
@@ -297,7 +297,7 @@ describe("AI Console launcher — live swarm trigger (CPE-541)", () => {
   });
 });
 
-describe("AI Console launcher — grid pane identity + keyboard nav (CPE-507)", () => {
+describe("Agent Deck launcher — grid pane identity + keyboard nav (CPE-507)", () => {
   it("nextPaneId moves row-major in a cols-wide grid and clamps at edges", async () => {
     const { w } = await mountLauncher();
     const ids = ["a", "b", "c", "d", "e"]; // 5 panes → gridDims cols = 3 (rows 2×3)
@@ -344,7 +344,7 @@ describe("AI Console launcher — grid pane identity + keyboard nav (CPE-507)", 
   });
 });
 
-describe("AI Console launcher — 16-pane throttling (CPE-508)", () => {
+describe("Agent Deck launcher — 16-pane throttling (CPE-508)", () => {
   it("paneWritePolicy: focused writes now, tiles coalesce, hidden defers", async () => {
     const { w } = await mountLauncher();
     expect(w.paneWritePolicy("focused")).toBe("sync");
@@ -373,7 +373,7 @@ describe("AI Console launcher — 16-pane throttling (CPE-508)", () => {
   });
 });
 
-describe("AI Console launcher — grid layout persistence (CPE-509)", () => {
+describe("Agent Deck launcher — grid layout persistence (CPE-509)", () => {
   it("serializeLayout/parseLayout round-trip and tolerate garbage", async () => {
     const { w } = await mountLauncher();
     const s = w.serializeLayout({ viewMode: "grid", activeId: "a" });
@@ -410,7 +410,7 @@ describe("AI Console launcher — grid layout persistence (CPE-509)", () => {
   });
 });
 
-describe("AI Console launcher — responsive grid columns (CPE-510)", () => {
+describe("Agent Deck launcher — responsive grid columns (CPE-510)", () => {
   it("colsForWidth caps columns so tiles never drop below the legible minimum", async () => {
     const { w } = await mountLauncher();
     // Wide enough for the near-square ideal.
@@ -431,7 +431,7 @@ describe("AI Console launcher — responsive grid columns (CPE-510)", () => {
   });
 });
 
-describe("AI Console launcher — agent-state awareness (CPE-512)", () => {
+describe("Agent Deck launcher — agent-state awareness (CPE-512)", () => {
   it("agentStateFromText classifies blocked / done / working / idle by priority", async () => {
     const { w } = await mountLauncher();
     // Blocked: an input prompt awaiting the user (outranks everything).
@@ -485,7 +485,7 @@ describe("AI Console launcher — agent-state awareness (CPE-512)", () => {
   });
 });
 
-describe("AI Console launcher — named sets / presets (the reported confusion)", () => {
+describe("Agent Deck launcher — named sets / presets (the reported confusion)", () => {
   it("renders the current agent's sets into the dropdown, with a blank placeholder", async () => {
     const { w } = await mountLauncher();
     w.eval(`catalog = ${JSON.stringify({ ...defaultCatalog(), presets: { agents: { claude: { presets: [{ name: "Work", provider: "openrouter", model: "sonnet" }] } } } })}`);
@@ -521,7 +521,7 @@ describe("AI Console launcher — named sets / presets (the reported confusion)"
   });
 });
 
-describe("AI Console launcher — catalog controls", () => {
+describe("Agent Deck launcher — catalog controls", () => {
   it("renderCatalogControls reflects the persisted auto-update + pin state", async () => {
     const { w } = await mountLauncher();
     w.eval(`catalog = ${JSON.stringify({ ...defaultCatalog(), presets: { agents: { claude: {} }, autoUpdateCatalog: true, pinnedAgents: ["claude"] } })}`);
@@ -575,7 +575,7 @@ describe("AI Console launcher — catalog controls", () => {
   });
 });
 
-describe("AI Console launcher — Help panel + Manage menu (CPE-390)", () => {
+describe("Agent Deck launcher — Help panel + Manage menu (CPE-390)", () => {
   it("the ? button opens the Help panel and × closes it", async () => {
     const { w } = await mountLauncher();
     const overlay = w.document.getElementById("help-overlay");
@@ -606,7 +606,7 @@ describe("AI Console launcher — Help panel + Manage menu (CPE-390)", () => {
   });
 });
 
-describe("AI Console launcher — inexperienced-user goal (CPE-392/393/394)", () => {
+describe("Agent Deck launcher — inexperienced-user goal (CPE-392/393/394)", () => {
   it("optional fields are collapsed under Advanced ▾ by default; the toggle reveals them", async () => {
     const { w } = await mountLauncher();
     const adv = w.document.getElementById("advanced-row");
@@ -651,7 +651,7 @@ describe("AI Console launcher — inexperienced-user goal (CPE-392/393/394)", ()
   });
 });
 
-describe("AI Console launcher — Browse ↔ Project folder sync (CPE-395)", () => {
+describe("Agent Deck launcher — Browse ↔ Project folder sync (CPE-395)", () => {
   it("Browse opens the picker at the typed Project folder, and writes the choice back", async () => {
     const posts: any[] = [];
     const { w } = await mountLauncher((path, opts) => {
@@ -668,7 +668,7 @@ describe("AI Console launcher — Browse ↔ Project folder sync (CPE-395)", () 
   });
 });
 
-describe("AI Console launcher — Close all + reclaim resources (CPE-442)", () => {
+describe("Agent Deck launcher — Close all + reclaim resources (CPE-442)", () => {
   it("closing a pane also tells the backend to reclaim that session's process", async () => {
     const posts: string[] = [];
     const { w } = await mountLauncher((path, opts) => {
@@ -717,7 +717,7 @@ describe("AI Console launcher — Close all + reclaim resources (CPE-442)", () =
   });
 });
 
-describe("AI Console launcher — reattach tabs on reopen (CPE-461)", () => {
+describe("Agent Deck launcher — reattach tabs on reopen (CPE-461)", () => {
   it("recreates a tab for each still-running session on boot", async () => {
     const { w } = await mountLauncher((path) => {
       if (path === "/api/sessions") return { sessions: [{ id: "s7", name: "Claude · openrouter · sonnet" }] };
@@ -737,7 +737,7 @@ describe("AI Console launcher — reattach tabs on reopen (CPE-461)", () => {
   });
 });
 
-describe("AI Console launcher — reseller keys in the Keys panel (CPE-452)", () => {
+describe("Agent Deck launcher — reseller keys in the Keys panel (CPE-452)", () => {
   it("offers resellers in the key dropdown and routes save to the reseller endpoint", async () => {
     const posts: { path: string; body: any }[] = [];
     const { w } = await mountLauncher((path, opts) => {
@@ -760,7 +760,7 @@ describe("AI Console launcher — reseller keys in the Keys panel (CPE-452)", ()
   });
 });
 
-describe("AI Console launcher — Model picker combobox (CPE-454/460)", () => {
+describe("Agent Deck launcher — Model picker combobox (CPE-454/460)", () => {
   const catalog = {
     reseller: "openrouter",
     models: [
@@ -837,7 +837,7 @@ describe("AI Console launcher — Model picker combobox (CPE-454/460)", () => {
   });
 });
 
-describe("AI Console launcher — session tabs match the main window (CPE-466)", () => {
+describe("Agent Deck launcher — session tabs match the main window (CPE-466)", () => {
   // The main explorer tab bar (src/app.css .tab) is a rounded-top raised "folder" tab: 34px tall,
   // 6px top-corner radius, and the active tab lifted onto the page background with a 3-sided border
   // box-shadow. The console tabs must adopt the same treatment (using system colors).
@@ -857,7 +857,7 @@ describe("AI Console launcher — session tabs match the main window (CPE-466)",
   });
 });
 
-describe("AI Console launcher — per-session usage/cost (CPE-311)", () => {
+describe("Agent Deck launcher — per-session usage/cost (CPE-311)", () => {
   it("formats cost-leading, then tokens, and blanks when nothing was reported", async () => {
     const { w } = await mountLauncher(() => ({}));
     expect(w.fmtUsage({ costUsd: 0.1234, inputTokens: 1200, outputTokens: 800 })).toBe("$0.123 · 2.0k tok");
@@ -889,7 +889,7 @@ describe("AI Console launcher — per-session usage/cost (CPE-311)", () => {
   });
 });
 
-describe("AI Console launcher — reseller providers in the dropdown (CPE-469)", () => {
+describe("Agent Deck launcher — reseller providers in the dropdown (CPE-469)", () => {
   it("offers every reseller whose protocol the agent speaks, as an extra provider option", async () => {
     const { w } = await mountLauncher();
     // A catalog: an openai-protocol agent + two resellers (one openai, one anthropic).
@@ -915,7 +915,7 @@ describe("AI Console launcher — reseller providers in the dropdown (CPE-469)",
   });
 });
 
-describe("AI Console launcher — busy/wait cursor (CPE-482)", () => {
+describe("Agent Deck launcher — busy/wait cursor (CPE-482)", () => {
   it("maps body.busy to the OS progress cursor", () => {
     expect(HTML).toMatch(/body\.busy[\s\S]*?cursor:\s*progress\s*!important/);
   });

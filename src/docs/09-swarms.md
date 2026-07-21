@@ -1,14 +1,14 @@
 ---
 title: Swarms
 order: 9
-category: AI Console
+category: Agent Deck
 categoryOrder: 3
 ---
 
 # Swarms
 
 A **swarm** runs *several* coding agents on one task at once, coordinating through a shared mailbox and a
-shared memory instead of you shepherding each agent by hand. It builds on the AI Console: a **coordinator**
+shared memory instead of you shepherding each agent by hand. It builds on the Agent Deck: a **coordinator**
 agent plans and dispatches, and one or more **builder** agents do the work.
 
 > **Preview feature.** Swarms are new and evolving. The coordination pieces are in place and tested; the
@@ -16,7 +16,7 @@ agent plans and dispatches, and one or more **builder** agents do the work.
 
 ## Run a swarm
 
-1. Open the **AI Console**.
+1. Open the **Agent Deck**.
 2. Pick an **Agent**, **Provider**, and **Model** as you would for a single launch, and set the **Working
    folder** (the repo the swarm works in). Make sure a provider **key** is set.
 3. Click **Run swarm ▾**, type the **task** (e.g. *"add unit tests for the CSV parser"*), and click
@@ -44,7 +44,7 @@ folded back so the next piece of work is launched — on to completion.
   independent work runs in parallel.
 - **Budgets and retries** — a mission can carry token/cost caps and a retry limit; when a cap is hit the
   affected agent (or the whole mission) is paused rather than running up spend.
-- **You stay in control** — every agent is an ordinary AI Console session in its own tab, so you can watch
+- **You stay in control** — every agent is an ordinary Agent Deck session in its own tab, so you can watch
   it, type into it, or close it at any time.
 
 ## Tips
@@ -52,8 +52,8 @@ folded back so the next piece of work is launched — on to completion.
 - Start with a **small, well-scoped task** and a repo you don't mind an agent editing.
 - Keep an eye on the **Agents** entries in the explorer's left sidebar and the per-tab usage to see what
   each agent is spending.
-- Swarms share the AI Console's trust model — an agent only gets the working folder and the credentials
+- Swarms share the Agent Deck's trust model — an agent only gets the working folder and the credentials
   you granted.
 
-See also: **AI Console** (launching agents), **Agent Grid** (watching several at once), and **Agent
+See also: **Agent Deck** (launching agents), **Agent Grid** (watching several at once), and **Agent
 Board** (the tickets a swarm can work from).

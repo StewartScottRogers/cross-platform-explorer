@@ -1,7 +1,7 @@
 //! The Agent Board sidecar process (CPE-851, epic CPE-850). A thin stdio wrapper around the pure protocol
 //! in the library (`agent_board`): emit `Hello`, then read JSON-line envelopes; on `Welcome` reach
 //! `Ready` and serve the board UI on a loopback port, announcing its URL to the host (`ui:<url>` Status
-//! event) — exactly as `sidecar/repos` and the AI Console do. Depends only on `sidecar-contract`.
+//! event) — exactly as `sidecar/repos` and the Agent Deck do. Depends only on `sidecar-contract`.
 
 use std::io::{BufRead, Write};
 

@@ -5,8 +5,8 @@ click-open dropdowns alike. New menus follow this; existing ones are brought int
 that a user can't tell which component drew a menu: they all look and behave identically.
 
 Applies to: `ContextMenu` (file right-click, the canonical reference), `AgentMenu` (Agents leaf /
-AI Console button), `TabMenu` (tab right-click), `MenuBar` dropdowns, `CommandBar` sort/view/filter
-menus, and the AI Console's own menus in `sidecar/ai-console/src/launcher.html`.
+Agent Deck button), `TabMenu` (tab right-click), `MenuBar` dropdowns, `CommandBar` sort/view/filter
+menus, and the Agent Deck's own menus in `sidecar/ai-console/src/launcher.html`.
 
 > Not covered: the **CLI** action menus (the ASCII boxes in `.claude/commands/*`), which have their
 > own spec in `.claude/commands/menu-render.md`. Different medium, different rules.

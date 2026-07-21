@@ -2,7 +2,7 @@
 //!
 //! Bundling + wiring "behind the sidecar-platform feature" means the host's generic registry
 //! discovers the repos manifest and accepts it (right contract major, well-formed capabilities), so
-//! it shows up in the management panel (enable/disable, compat) exactly like the AI Console — no
+//! it shows up in the management panel (enable/disable, compat) exactly like the Agent Deck — no
 //! bespoke per-sidecar code. This loads the source-tree manifest the app also points at in dev.
 
 use std::path::{Path, PathBuf};

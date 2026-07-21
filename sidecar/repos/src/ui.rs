@@ -1,7 +1,7 @@
 //! The Repositories sidecar's own served UI (CPE-432, AC2).
 //!
 //! Per ADR 0001 each sidecar serves its **own** UI; the host embeds it in a frame. This mirrors the
-//! AI Console's `ui.rs` (CPE-271): a minimal, dependency-free HTTP server that serves one HTML page
+//! Agent Deck's `ui.rs` (CPE-271): a minimal, dependency-free HTTP server that serves one HTML page
 //! on an ephemeral loopback port. The sidecar starts it after the handshake and announces the URL to
 //! the host via a `Status` event (`ui:<url>`), which the host then points an iframe pane at.
 //! Loopback-only, so it isn't reachable off the machine.

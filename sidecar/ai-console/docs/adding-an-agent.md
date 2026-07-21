@@ -1,6 +1,6 @@
 # Adding a coding agent, provider, or plugin — no code required
 
-The AI Console is **CLI-agnostic and manifest-extensible**: agents, providers, and
+The Agent Deck is **CLI-agnostic and manifest-extensible**: agents, providers, and
 plugins are described by declarative JSON that the console loads at runtime. Adding one
 is dropping a file into your user registry — no rebuild. This guide shows how.
 

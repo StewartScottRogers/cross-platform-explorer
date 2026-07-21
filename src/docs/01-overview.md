@@ -16,7 +16,7 @@ and layers optional **AI Agent Workspace** modes on top for developers who run c
 - **The explorer** — the core file manager. It is deliberately lean: with every optional mode switched
   off, it stays fast to launch, light on memory, and behaves the way you expect a file explorer to.
 - **The Agent Workspace** — optional, additive views for running and coordinating AI coding agents:
-  the **AI Console**, the **Agent Grid**, the **Agent Board**, **Swarms** (several agents on one task),
+  the **Agent Deck**, the **Agent Grid**, the **Agent Board**, **Swarms** (several agents on one task),
   the **Workbench**, and shared agent memory. These appear as entries in the left sidebar and the
   Application menu.
 

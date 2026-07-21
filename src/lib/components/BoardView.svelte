@@ -206,7 +206,7 @@
     await load(); // reconcile with the folders (also picks up CLI changes)
   }
 
-  /** Dispatch a card to an agent (CPE-522): move it to Doing, then hand off to the AI Console scoped
+  /** Dispatch a card to an agent (CPE-522): move it to Doing, then hand off to the Agent Deck scoped
       to this folder with the ticket injected as its task (CPE-313). The console's own launcher is the
       agent chooser and defaults to the last-used agent/provider/model. Explicit action — never on a drag. */
   async function dispatchCard(card: Card) {

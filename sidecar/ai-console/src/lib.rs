@@ -1,6 +1,6 @@
 //! # ai-console
 //!
-//! The **AI Console** sidecar (CPE-261): an agentic CLI manager that installs/manages
+//! The **Agent Deck** sidecar (CPE-261): an agentic CLI manager that installs/manages
 //! any coding-agent CLI with any provider and any model, and runs the native CLI in an
 //! in-app console. This crate holds the sidecar's **backend/domain logic**; the process
 //! entry point is `src/main.rs`. It depends ONLY on `sidecar-contract` (ADR 0001).
@@ -123,7 +123,7 @@ use sidecar_contract::{
 /// The sidecar's stable id (matches its manifest).
 pub const SIDECAR_ID: &str = "ai-console";
 
-/// Capabilities the AI Console requests at handshake:
+/// Capabilities the Agent Deck requests at handshake:
 /// - [`Capability::Context`] — scope a session to the open repo,
 /// - [`Capability::Secrets`] — store provider keys / credential profiles,
 /// - [`Capability::Storage`] — its own settings, catalog cache, session history,

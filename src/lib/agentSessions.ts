@@ -7,7 +7,7 @@ import {
 } from "./sidecar";
 
 /**
- * Live registry of coding-agent sessions launched from the AI Console (Agent Watch, CPE-396).
+ * Live registry of coding-agent sessions launched from the Agent Deck (Agent Watch, CPE-396).
  *
  * The host forwards each `session:<json>` Status the console emits as an `ai-console://session`
  * Tauri event; here we decode it and fold it into a reactive list the left pane (CPE-397) renders
@@ -56,7 +56,7 @@ export function ingestSessionState(state: string): void {
   if (ann) store.update((list) => applySessionAnnouncement(list, ann));
 }
 
-/** Clear every active-session leaf at once — used when the whole AI Console is stopped from the
+/** Clear every active-session leaf at once — used when the whole Agent Deck is stopped from the
  *  explorer (its process is reaped, so no per-session `ended` announcements arrive). CPE-457. */
 export function clearAgentSessions(): void {
   store.set([]);

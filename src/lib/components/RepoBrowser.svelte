@@ -2,7 +2,7 @@
   // Repositories browser (CPE-434/435): connect to a forge (GitHub first) and browse a repo's tree
   // in-app. Backed by the host-brokered, allow-listed `forge_browse` command (no SSRF). Public repos
   // need no token; a token unlocks private ones. This is the visible surface of the forge epic.
-  // CPE-484: restyled to match the AI Console launcher — labeled toolbar, unified status line, header
+  // CPE-484: restyled to match the Agent Deck launcher — labeled toolbar, unified status line, header
   // + status bar — a polished mini-app rather than a bare form.
   import { createEventDispatcher, onMount } from "svelte";
   import { invoke } from "../invoke";
@@ -166,7 +166,7 @@
 
   const fmtSize = (n: number) => (n < 1024 ? `${n} B` : n < 1048576 ? `${(n / 1024).toFixed(1)} KB` : `${(n / 1048576).toFixed(1)} MB`);
 
-  // The single status line, mirroring the AI Console's #msg: errors win, then clone progress, then
+  // The single status line, mirroring the Agent Deck's #msg: errors win, then clone progress, then
   // loading, then a resting hint.
   $: statusText = error
     ? error
@@ -298,7 +298,7 @@
 <style>
   .repo-overlay { position: fixed; inset: 0; background: rgba(0,0,0,0.45); display: flex;
     align-items: center; justify-content: center; z-index: 60; }
-  /* A polished mini-app window matching the AI Console launcher: header · toolbar · status · body ·
+  /* A polished mini-app window matching the Agent Deck launcher: header · toolbar · status · body ·
      status bar. Uses the explorer theme tokens (app.css) so it is legible on the light theme. */
   .repo-panel { width: min(760px, 94vw); height: min(620px, 88vh); display: flex; flex-direction: column;
     background: var(--surface); color: var(--text); border: 1px solid var(--border-strong);
@@ -311,7 +311,7 @@
     line-height: 1; padding: 0 4px; border-radius: 4px; }
   .repo-x:hover { background: rgba(128,128,128,0.18); color: var(--text); }
 
-  /* Toolbar — mirrors the AI Console: subtle-grey band, labeled fields, 30px rounded controls. */
+  /* Toolbar — mirrors the Agent Deck: subtle-grey band, labeled fields, 30px rounded controls. */
   .repo-toolbar { padding: 11px 14px; display: flex; flex-direction: column; gap: 9px;
     background: var(--surface-alt); border-bottom: 1px solid var(--border); }
   .repo-row { display: flex; gap: 12px; align-items: flex-end; }

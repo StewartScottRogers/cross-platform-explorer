@@ -1,4 +1,4 @@
-// Shared session-identity chip (CPE-490). A running AI Console session is shown in two places — the
+// Shared session-identity chip (CPE-490). A running Agent Deck session is shown in two places — the
 // console's own tab strip and the explorer's left-pane "Agents" list — and with several same-agent
 // sessions they're otherwise indistinguishable. The console assigns each session a stable id (`s1`,
 // `s2`, …) that flows to both surfaces, so both can derive an IDENTICAL chip (a colour + a number)

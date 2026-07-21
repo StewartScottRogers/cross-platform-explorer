@@ -1,4 +1,4 @@
-//! The AI Console launcher: HTTP API + served page that ties the agent registry, provider
+//! The Agent Deck launcher: HTTP API + served page that ties the agent registry, provider
 //! routing, lifecycle, and PTY into the "agent × provider × model" launch surface
 //! (CPE-289). The sidecar serves this on a loopback port; the host embeds it in a
 //! sandboxed iframe (ADR 0001). All heavy lifting is delegated to the already-tested
@@ -32,7 +32,7 @@ struct Session {
     /// The attached terminal's output channel, if any (one pane at a time).
     live: Arc<Mutex<Option<mpsc::Sender<Vec<u8>>>>>,
     /// The tab label (agent · provider · model), so the launcher can **reattach** a tab to this
-    /// still-running session when the AI Console is closed and reopened (CPE-461).
+    /// still-running session when the Agent Deck is closed and reopened (CPE-461).
     name: String,
     /// Provider-reported token/cost usage for this session, accumulated from the output stream by the
     /// reader thread (CPE-311). Surfaced via `/api/sessions`; never sent anywhere.
@@ -861,7 +861,7 @@ impl ConsoleState {
     }
 
     /// `GET /api/sessions` → the running sessions `[{id, name}]`, so the launcher can **reattach** a
-    /// tab to each still-running session when the AI Console is closed and reopened (CPE-461). The
+    /// tab to each still-running session when the Agent Deck is closed and reopened (CPE-461). The
     /// sessions live in this process independent of the (destroyed-on-close) launcher UI.
     fn handle_sessions_list(&self) -> Response {
         let sessions = self.sessions.lock().unwrap();
@@ -1618,7 +1618,7 @@ mod tests {
         let r = get(&state(), "/");
         assert_eq!(r.status, 200);
         let body = String::from_utf8_lossy(&r.body);
-        assert!(body.contains("AI Console"));
+        assert!(body.contains("Agent Deck"));
     }
 
     #[test]

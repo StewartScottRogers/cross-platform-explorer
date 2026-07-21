@@ -1,6 +1,6 @@
 //! Orphan session-daemon reaper (CPE-483).
 //!
-//! The AI Console can run a long-lived `ai-console --session-daemon` process so agent PTYs survive
+//! The Agent Deck can run a long-lived `ai-console --session-daemon` process so agent PTYs survive
 //! a console restart (CPE-309). By design those daemons **outlive** the app — which bit us twice:
 //! a leftover daemon held `sidecars/ai-console.exe` file-locked so the NSIS installer silently
 //! skipped updating the sidecar (a new host left running a *stale* sidecar), and a surviving daemon

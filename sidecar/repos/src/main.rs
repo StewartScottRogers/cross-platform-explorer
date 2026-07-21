@@ -1,7 +1,7 @@
 //! The Repositories sidecar process (CPE-432). A thin stdio wrapper around the pure protocol loop
 //! in the library: emit `Hello`, then read JSON-line envelopes and act on each. On `Welcome` it
 //! reaches `Ready`, then serves its **own** loopback UI and announces the URL to the host
-//! (`ui:<url>` Status event, CPE-432 AC2) — exactly as the AI Console's `main.rs` does. Host-brokered
+//! (`ui:<url>` Status event, CPE-432 AC2) — exactly as the Agent Deck's `main.rs` does. Host-brokered
 //! forge egress (CPE-433) and the browse/clone/sync request methods layer onto the `Request` arm in
 //! later slices. Depends only on `sidecar-contract` + this crate's own modules.
 
