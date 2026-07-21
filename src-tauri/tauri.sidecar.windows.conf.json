@@ -1,6 +1,7 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "bundle": {
+    "targets": ["nsis"],
     "resources": {
       "../sidecar/ai-console/target/release/ai-console.exe": "sidecars/ai-console.exe",
       "../sidecar/ai-console/sidecar.json": "sidecars/sidecar.json",
