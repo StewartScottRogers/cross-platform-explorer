@@ -27,9 +27,8 @@ serde_json = "1"
 # serde/serde_json/cpe-contract, all already in the tree, so it adds no weight to the plain
 # explorer. The app is the thin adapter that provides `TauriCtx` and dispatches to it.
 cpe-server = { path = "../crates/server" }
-zip = "2"
-# Streaming SHA-256 for the file-checksum feature (CPE-412). Pure-Rust, tiny, no system libs.
-sha2 = "0.10"
+# (sha2 moved to `cpe-server` with the checksum/backup/thumbnail domains, CPE-815/821 — no longer a
+# direct app dep.)
 # (The recursive directory-size walk that used rayon moved to `cpe-server` (CPE-815, disk_usage);
 # rayon is no longer a direct app dependency.)
 
@@ -47,16 +46,9 @@ sidecar-contract = { path = "../sidecar/contract", optional = true }
 # so the plain explorer still ships with zero repos/clone code (the delete-test).
 repos = { path = "../sidecar/repos", optional = true }
 
-# Archive previews beyond zip (CPE-109/112/217). tar is pure-Rust; flate2 uses
-# the pure-Rust miniz_oxide backend by default, so neither needs system libs in CI.
-tar = "0.4"
-flate2 = "1"
-
-# (The structured binary previews goblin/midly/wasmprinter/serde_bencode moved to `cpe-server` with the
-# binary_preview domain, CPE-815 — no longer direct app deps.)
-# (The structured-data previews calamine/rusqlite/parquet moved to `cpe-server` with the data_preview
-# domain, CPE-815 — no longer direct app deps.)
-sevenz-rust = "0.6"
+# (Archive listing + create/extract — zip/tar/flate2/sevenz-rust — moved to `cpe-server` with the
+# `archive` domain, CPE-815/822 — no longer direct app deps. Also gone: the binary/data preview crates
+# goblin/midly/wasmprinter/serde_bencode/calamine/rusqlite/parquet, CPE-815.)
 # (image/kamadak-exif/psd moved to `cpe-server` with the thumbnail + image_preview domains, CPE-815 —
 # no longer direct app deps. base64 stays: the thumbnail command still encodes the PNG as a data URL.)
 base64 = "0.22"
