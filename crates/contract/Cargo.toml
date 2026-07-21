@@ -1,0 +1,18 @@
+[package]
+name = "cpe-contract"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.77.2"
+description = "The transport-neutral, versioned wire contract between the Cross-Platform Explorer GUI/Client and its Server (CPE-810/811)."
+license = "MIT"
+
+# Deliberately standalone and Tauri-free (CPE-810): this crate is the single shared
+# surface between the GUI/Client and the Server. Both the local in-process path and
+# the future network Client(Rust) speak it, and it depends on nothing of theirs — so
+# it stays headless-testable and the Server can be extracted (CPE-815) without dragging
+# Tauri in. `src-tauri` will `path`-depend on it later, mirroring how it depends on
+# `sidecar/contract`. Kept out of any workspace to preserve that one-way boundary.
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
