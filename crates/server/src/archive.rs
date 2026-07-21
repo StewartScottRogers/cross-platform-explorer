@@ -150,6 +150,154 @@ pub fn read_archive_entries(path: &str) -> Result<Vec<ArchiveEntry>, String> {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Archive creation & extraction (CPE-251/252/242)
+// ---------------------------------------------------------------------------
+
+/// Extract a single entry of a zip to a temp file and return its path (CPE-242). Read-only: the temp
+/// copy is what opens, not the archived bytes.
+pub fn extract_archive_entry(zip: &str, inner: &str) -> Result<String, String> {
+    let file = fs::File::open(zip).map_err(|e| e.to_string())?;
+    let mut archive = zip::ZipArchive::new(file).map_err(|e| e.to_string())?;
+    // The frontend uses "/"; some zips store "\" — try the given name then the backslash variant.
+    let backslashed = inner.replace('/', "\\");
+    let idx = archive
+        .index_for_name(inner)
+        .or_else(|| archive.index_for_name(&backslashed))
+        .ok_or_else(|| format!("entry not found: {inner}"))?;
+    let mut entry = archive.by_index(idx).map_err(|e| e.to_string())?;
+
+    let base = Path::new(inner)
+        .file_name()
+        .map(|s| s.to_string_lossy().to_string())
+        .ok_or_else(|| "invalid entry name".to_string())?;
+    let dir = std::env::temp_dir().join("cpe-archive");
+    fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    let out = dir.join(&base);
+    let mut w = fs::File::create(&out).map_err(|e| e.to_string())?;
+    std::io::copy(&mut entry, &mut w).map_err(|e| e.to_string())?;
+    Ok(out.to_string_lossy().to_string())
+}
+
+/// Recursively add `src` to an open zip under the archive path `name_in_zip`. Directories become explicit
+/// entries so empty folders survive the round trip. Never packs the output archive into itself (CPE-632).
+fn zip_add_path(
+    writer: &mut zip::ZipWriter<fs::File>,
+    src: &Path,
+    name_in_zip: &str,
+    opts: zip::write::SimpleFileOptions,
+    skip: Option<&Path>,
+) -> Result<(), String> {
+    if let (Some(skip), Ok(canon)) = (skip, src.canonicalize()) {
+        if canon == skip {
+            return Ok(());
+        }
+    }
+    let meta = fs::symlink_metadata(src).map_err(|e| e.to_string())?;
+    if meta.is_dir() {
+        writer.add_directory(format!("{name_in_zip}/"), opts).map_err(|e| e.to_string())?;
+        let mut children: Vec<_> = fs::read_dir(src).map_err(|e| e.to_string())?.filter_map(|e| e.ok()).collect();
+        children.sort_by_key(|e| e.file_name());
+        for child in children {
+            let child_name = child.file_name().to_string_lossy().to_string();
+            zip_add_path(writer, &child.path(), &format!("{name_in_zip}/{child_name}"), opts, skip)?;
+        }
+    } else {
+        writer.start_file(name_in_zip, opts).map_err(|e| e.to_string())?;
+        let mut f = fs::File::open(src).map_err(|e| e.to_string())?;
+        std::io::copy(&mut f, writer).map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}
+
+/// Pack the given files/folders into a new deflated `.zip` at `dest` (CPE-251). Returns the created path.
+pub fn compress_to_zip(paths: &[String], dest: &str) -> Result<String, String> {
+    if paths.is_empty() {
+        return Err("nothing to compress".into());
+    }
+    let file = fs::File::create(dest).map_err(|e| e.to_string())?;
+    let mut writer = zip::ZipWriter::new(file);
+    let opts = zip::write::SimpleFileOptions::default().compression_method(zip::CompressionMethod::Deflated);
+    // Canonical path of the output archive so the walk can skip it if it sits inside a source (CPE-632).
+    let dest_canon = Path::new(dest).canonicalize().ok();
+    for p in paths {
+        let src = Path::new(p);
+        let name = src
+            .file_name()
+            .map(|s| s.to_string_lossy().to_string())
+            .ok_or_else(|| format!("invalid path: {p}"))?;
+        zip_add_path(&mut writer, src, &name, opts, dest_canon.as_deref())?;
+    }
+    writer.finish().map_err(|e| e.to_string())?;
+    Ok(dest.to_string())
+}
+
+/// Unpack a tar stream into `dest`.
+fn tar_unpack<R: std::io::Read>(reader: R, dest: &Path) -> Result<(), String> {
+    let mut archive = tar::Archive::new(reader);
+    archive.unpack(dest).map_err(|e| e.to_string())
+}
+
+/// True if an archive entry name is a plain relative path that cannot escape the extraction root — the
+/// shared "zip-slip" guard for extractors that don't provide one (CPE-628). `\` is normalised to `/`.
+fn entry_name_is_safe(name: &str) -> bool {
+    use std::path::Component;
+    if name.is_empty() {
+        return false;
+    }
+    let normalized = name.replace('\\', "/");
+    let p = Path::new(&normalized);
+    !p.is_absolute() && p.components().all(|c| matches!(c, Component::Normal(_) | Component::CurDir))
+}
+
+/// Extract a `.7z` into `dest` **safely**: `sevenz-rust` 0.6 doesn't check path traversal, so validate
+/// each entry with [`entry_name_is_safe`] and skip any that isn't a plain relative path (CPE-628).
+fn extract_7z_safe(src: &Path, dest: &Path) -> Result<(), String> {
+    sevenz_rust::decompress_file_with_extract_fn(src, dest, |entry, reader, entry_dest| {
+        if entry_name_is_safe(entry.name()) {
+            sevenz_rust::default_entry_extract_fn(entry, reader, entry_dest)
+        } else {
+            Ok(true) // skip the unsafe entry; keep extracting the rest
+        }
+    })
+    .map_err(|e| e.to_string())
+}
+
+/// Extract an archive into `dest`, which is created if missing (CPE-252). Dispatched by extension. Every
+/// format is guarded against zip-slip: zip via `enclosed_name`, tar via the crate's checked `unpack`, 7z
+/// via [`extract_7z_safe`].
+pub fn extract_archive(path: &str, dest: &str) -> Result<String, String> {
+    fs::create_dir_all(dest).map_err(|e| e.to_string())?;
+    let dest_path = Path::new(dest);
+    let lower = path.to_lowercase();
+
+    if lower.ends_with(".tar") {
+        let file = fs::File::open(path).map_err(|e| e.to_string())?;
+        tar_unpack(file, dest_path)?;
+    } else if lower.ends_with(".tar.gz") || lower.ends_with(".tgz") {
+        let file = fs::File::open(path).map_err(|e| e.to_string())?;
+        tar_unpack(flate2::read::GzDecoder::new(file), dest_path)?;
+    } else if lower.ends_with(".gz") {
+        // A bare .gz holds a single file; its name is the archive name minus .gz.
+        let stem = Path::new(path)
+            .file_stem()
+            .map(|s| s.to_string_lossy().to_string())
+            .unwrap_or_else(|| "extracted".to_string());
+        let file = fs::File::open(path).map_err(|e| e.to_string())?;
+        let mut decoder = flate2::read::GzDecoder::new(file);
+        let mut out = fs::File::create(dest_path.join(stem)).map_err(|e| e.to_string())?;
+        std::io::copy(&mut decoder, &mut out).map_err(|e| e.to_string())?;
+    } else if lower.ends_with(".7z") {
+        extract_7z_safe(Path::new(path), dest_path)?;
+    } else {
+        // zip family: the crate's extractor guards against traversal via ZipFile::enclosed_name.
+        let file = fs::File::open(path).map_err(|e| e.to_string())?;
+        let mut archive = zip::ZipArchive::new(file).map_err(|e| e.to_string())?;
+        archive.extract(dest_path).map_err(|e| e.to_string())?;
+    }
+    Ok(dest.to_string())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -192,6 +340,131 @@ mod tests {
         let f = d.join("not.zip");
         fs::write(&f, b"this is not a zip").unwrap();
         assert!(read_archive_entries(&f.to_string_lossy()).is_err());
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn entry_name_is_safe_rejects_traversal() {
+        assert!(entry_name_is_safe("a/b/c.txt"));
+        assert!(entry_name_is_safe("./x.txt"));
+        assert!(entry_name_is_safe("folder/leaf"));
+        assert!(!entry_name_is_safe("../evil"));
+        assert!(!entry_name_is_safe("a/../../evil"));
+        assert!(!entry_name_is_safe("..\\evil")); // backslash traversal, normalised
+        assert!(!entry_name_is_safe("a\\..\\..\\evil"));
+        assert!(!entry_name_is_safe("/etc/passwd"));
+        assert!(!entry_name_is_safe(""));
+    }
+
+    #[test]
+    fn compress_to_zip_then_extract_round_trips() {
+        let d = scratch("roundtrip");
+        // Build a small source tree.
+        fs::create_dir_all(d.join("src/sub")).unwrap();
+        fs::write(d.join("src/a.txt"), b"alpha").unwrap();
+        fs::write(d.join("src/sub/b.txt"), b"beta").unwrap();
+
+        let zip_path = d.join("out.zip");
+        // Empty selection errors.
+        assert!(compress_to_zip(&[], &zip_path.to_string_lossy()).is_err());
+        // Pack the folder.
+        compress_to_zip(&[d.join("src").to_string_lossy().to_string()], &zip_path.to_string_lossy()).unwrap();
+        // The listing sees both files.
+        let names: Vec<String> = read_archive_entries(&zip_path.to_string_lossy())
+            .unwrap()
+            .iter()
+            .map(|e| e.name.replace('\\', "/"))
+            .collect();
+        assert!(names.iter().any(|n| n.ends_with("a.txt")));
+        assert!(names.iter().any(|n| n.ends_with("sub/b.txt")));
+
+        // Extract it back out and verify contents.
+        let out = d.join("unpacked");
+        extract_archive(&zip_path.to_string_lossy(), &out.to_string_lossy()).unwrap();
+        assert_eq!(fs::read(out.join("src/a.txt")).unwrap(), b"alpha");
+        assert_eq!(fs::read(out.join("src/sub/b.txt")).unwrap(), b"beta");
+
+        // Extract a single entry to a temp file.
+        let tmp = extract_archive_entry(&zip_path.to_string_lossy(), "src/a.txt").unwrap();
+        assert_eq!(fs::read(&tmp).unwrap(), b"alpha");
+        let _ = fs::remove_file(&tmp);
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn compress_skips_the_output_archive_inside_a_source() {
+        let d = scratch("zip_self");
+        fs::create_dir_all(d.join("folder")).unwrap();
+        fs::write(d.join("folder").join("a.txt"), b"a").unwrap();
+        // The output .zip lives INSIDE the folder being compressed (CPE-632).
+        let dest = d.join("folder").join("out.zip");
+        compress_to_zip(&[d.join("folder").to_string_lossy().to_string()], &dest.to_string_lossy()).unwrap();
+        let names: Vec<String> = zip_entries(&dest.to_string_lossy()).unwrap().into_iter().map(|e| e.name).collect();
+        assert!(names.iter().any(|n| n.ends_with("a.txt")), "should contain the real file: {names:?}");
+        assert!(!names.iter().any(|n| n.contains("out.zip")), "must not contain itself: {names:?}");
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn extract_archive_unpacks_a_tar_gz() {
+        use flate2::write::GzEncoder;
+        use flate2::Compression;
+        let d = scratch("targz");
+        let tgz = d.join("bundle.tar.gz");
+        {
+            let f = fs::File::create(&tgz).unwrap();
+            let enc = GzEncoder::new(f, Compression::default());
+            let mut b = tar::Builder::new(enc);
+            let data = b"packed";
+            let mut header = tar::Header::new_gnu();
+            header.set_size(data.len() as u64);
+            header.set_entry_type(tar::EntryType::Regular);
+            header.set_cksum();
+            b.append_data(&mut header, "note.txt", &data[..]).unwrap();
+            b.into_inner().unwrap().finish().unwrap();
+        }
+        let out = d.join("out");
+        extract_archive(&tgz.to_string_lossy(), &out.to_string_lossy()).unwrap();
+        assert_eq!(fs::read_to_string(out.join("note.txt")).unwrap(), "packed");
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn read_archive_entries_lists_tar_contents() {
+        let d = scratch("tar_list");
+        let tar_path = d.join("bundle.tar");
+        {
+            let f = fs::File::create(&tar_path).unwrap();
+            let mut b = tar::Builder::new(f);
+            let data = b"hi there";
+            let mut header = tar::Header::new_gnu();
+            header.set_size(data.len() as u64);
+            header.set_entry_type(tar::EntryType::Regular);
+            header.set_cksum();
+            b.append_data(&mut header, "hello.txt", &data[..]).unwrap();
+            b.finish().unwrap();
+        }
+        let names: Vec<String> = read_archive_entries(&tar_path.to_string_lossy()).unwrap().into_iter().map(|e| e.name).collect();
+        assert!(names.iter().any(|n| n == "hello.txt"));
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn read_archive_entries_lists_gzip_single_file() {
+        use flate2::write::GzEncoder;
+        use flate2::Compression;
+        let d = scratch("gz_single");
+        let gz_path = d.join("note.txt.gz");
+        {
+            let f = fs::File::create(&gz_path).unwrap();
+            let mut enc = GzEncoder::new(f, Compression::default());
+            enc.write_all(b"hello world").unwrap();
+            enc.finish().unwrap();
+        }
+        let entries = read_archive_entries(&gz_path.to_string_lossy()).unwrap();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].name, "note.txt", "name is the archive name minus .gz");
+        assert_eq!(entries[0].size, 11, "ISIZE trailer is the uncompressed length");
         let _ = fs::remove_dir_all(&d);
     }
 }

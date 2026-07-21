@@ -887,18 +887,14 @@ dependencies = [
  "base64 0.22.1",
  "cpe-server",
  "filetime",
- "flate2",
  "fs4",
  "keepawake",
  "notify",
  "repos",
  "serde",
  "serde_json",
- "sevenz-rust",
- "sha2",
  "sidecar-contract",
  "sidecar-host",
- "tar",
  "tauri",
  "tauri-build",
  "tauri-plugin-cli",
@@ -912,7 +908,6 @@ dependencies = [
  "ureq",
  "windows 0.56.0",
  "winreg 0.52.0",
- "zip 2.4.2",
 ]
 
 [[package]]
