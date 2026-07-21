@@ -1,6 +1,19 @@
 <script lang="ts">
   import { createEventDispatcher } from "svelte";
+  import { getCurrentWindow } from "@tauri-apps/api/window";
   import { formatSize, formatDiskFree } from "../format";
+
+  /** Begin an OS-window resize from the bottom-right corner when the grip is pressed (CPE-842).
+      Guarded so it's a harmless no-op outside Tauri (e.g. the jsdom test harness). */
+  async function startCornerResize(e: MouseEvent) {
+    if (e.button !== 0) return; // left button only
+    e.preventDefault();
+    try {
+      await getCurrentWindow().startResizeDragging("SouthEast");
+    } catch {
+      /* not running under Tauri, or the window can't be resized — ignore */
+    }
+  }
 
   /** Git sync status of the current folder (CPE-462), or null when it isn't a repo. Shape mirrors
       the host `forge_repo_status` command: { is_repo, branch, upstream, ahead, behind, dirty, ... }. */
@@ -69,6 +82,18 @@
   {#if diskLabel}
     <span class="dim disk" title="Free space on this drive">{diskLabel}</span>
   {/if}
+
+  <!-- Bottom-right sizing grip: drag to resize the window (CPE-842). A pure mouse-drag affordance
+       (the OS window edges remain keyboard/other-input resizable), so the a11y interaction rule is
+       intentionally suppressed. -->
+  <!-- svelte-ignore a11y-no-noninteractive-element-interactions -->
+  <div
+    class="resize-grip"
+    role="separator"
+    aria-label="Resize window"
+    title="Drag to resize the window"
+    on:mousedown={startCornerResize}
+  ></div>
 </div>
 
 <style>
@@ -84,4 +109,23 @@
              background: transparent; color: inherit; border-radius: 4px; }
   .git-btn:hover { background: var(--selection, rgba(128,128,128,0.2)); }
   .disk { margin-left: 12px; }
+
+  /* Classic bottom-right sizing grip: three diagonal strokes in the corner, clipped to the
+     lower-right triangle. Theme-variable coloured so it reads identically light/dark (CPE-842). */
+  .resize-grip {
+    position: absolute;
+    right: 0;
+    bottom: 0;
+    width: 16px;
+    height: 16px;
+    cursor: nwse-resize;
+    background-image: repeating-linear-gradient(
+      -45deg,
+      var(--text-faint) 0 1.5px,
+      transparent 1.5px 4px
+    );
+    clip-path: polygon(100% 0, 100% 100%, 0 100%);
+    opacity: 0.7;
+  }
+  .resize-grip:hover { opacity: 1; }
 </style>
