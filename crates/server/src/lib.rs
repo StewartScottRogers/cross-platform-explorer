@@ -36,6 +36,10 @@ pub mod tags;
 /// (CPE-826, epic CPE-717).
 pub mod native_meta;
 
+/// Tag reconciliation + portable metadata codec: the pure push/pull policy bridging the internal tag
+/// store and a path's native metadata, plus CPE's portable `{tags,label}` blob (CPE-827, epic CPE-717).
+pub mod native_tags;
+
 /// Settings store: the single on-disk `settings.json` document (CPE-226). Pure helpers +
 /// `ServerCtx`-based entry points (CPE-815 migration).
 pub mod settings;

@@ -62,11 +62,14 @@ versa. Bridging to native metadata makes labels portable and interoperable with 
    blob per OS — NTFS ADS (Windows) + POSIX xattr (Unix) — with a graceful `Unsupported` outcome on
    filesystems that lack them. Pure + cargo-tested on the native OS (all three via CI). *Headless —
    buildable now.*
-2. **CPE-827** — Reconciliation + format layer: pure two-way mapping native ⇄ internal `TagStore` under the
-   push/pull conflict policy, plus the macOS Finder-tag plist codec (`_kMDItemUserTags`). Pure, cargo-tested.
-   *Headless. (prereq: 826)*
+2. **CPE-827** — Reconciliation + portable codec: pure two-way mapping native ⇄ internal `TagStore` under
+   the push/pull conflict policy, plus CPE's own portable metadata blob (JSON `{tags,label}`) for the
+   Windows-ADS / Linux-xattr case. Pure, no new dep, fully cargo-tested. *Headless. (prereq: 826)*
 3. **CPE-828** — Wire into commands + surface in Properties / as a column + the opt-in bridge toggle; push
    on tag edit, pull on demand. Frontend + adapter. **GUI-verified — attended.** *(prereq: 826, 827)*
+4. **CPE-829** — macOS Finder-tag bplist codec (`_kMDItemUserTags`): `Vec<FinderTag> ⇄ binary plist`,
+   round-trip cargo-tested. Split from CPE-827 because byte-compat with real Finder can only be verified on
+   a Mac (attended). *(prereq: 826)*
 
 ## Work Log
 - **2026-07-21** — Activated (dayshift, autonomous). Resolved the three open questions (above) with logged

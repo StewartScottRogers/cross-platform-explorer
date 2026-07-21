@@ -23,6 +23,18 @@ pub struct TagEntry {
     label: String,
 }
 
+impl TagEntry {
+    /// The path's tags (normalized: trimmed, de-duped, sorted when set through the store).
+    pub fn tags(&self) -> &[String] {
+        &self.tags
+    }
+
+    /// The path's colour label (empty when none).
+    pub fn label(&self) -> &str {
+        &self.label
+    }
+}
+
 /// The whole store: path → entry. `BTreeMap` for a stable, diff-friendly on-disk order.
 pub type TagStore = BTreeMap<String, TagEntry>;
 
