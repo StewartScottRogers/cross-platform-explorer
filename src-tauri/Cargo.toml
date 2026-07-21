@@ -57,9 +57,8 @@ flate2 = "1"
 # (The structured-data previews calamine/rusqlite/parquet moved to `cpe-server` with the data_preview
 # domain, CPE-815 — no longer direct app deps.)
 sevenz-rust = "0.6"
-image = { version = "0.25", default-features = false, features = ["tiff", "png", "jpeg", "gif", "webp", "bmp"] }
-kamadak-exif = "0.6"
-psd = "0.3"
+# (image/kamadak-exif/psd moved to `cpe-server` with the thumbnail + image_preview domains, CPE-815 —
+# no longer direct app deps. base64 stays: the thumbnail command still encodes the PNG as a data URL.)
 base64 = "0.22"
 # (iso9660 moved to `cpe-server` with the archive-listing domain, CPE-815 — no longer a direct app dep.)
 

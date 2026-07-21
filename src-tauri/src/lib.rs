@@ -687,41 +687,16 @@ fn read_preview_info_impl(path: String) -> Result<String, String> {
 /// `data:` URL the <img> tag can show (CPE-099/101). PSD uses the psd crate's
 /// flattened composite; TIFF uses the image crate. Capped by the source reader,
 /// and errors (rather than hangs) on a corrupt file.
+/// Transcode TIFF/PSD to a PNG `data:` URL. Model lives in `cpe_server::image_preview` (CPE-815); the
+/// command caps the source size first, then dispatches.
 #[tauri::command]
 async fn read_image_data_url(path: String) -> Result<String, String> {
-    tauri::async_runtime::spawn_blocking(move || read_image_data_url_impl(path))
-        .await.map_err(|e| e.to_string())?
-}
-
-fn read_image_data_url_impl(path: String) -> Result<String, String> {
-    use base64::Engine;
-    use std::io::Cursor;
-
-    ensure_previewable_size(&path, PREVIEW_INFO_MAX_BYTES)?;
-    let ext = extension_of(Path::new(&path));
-    // Produce PNG bytes from the source format.
-    let png: Vec<u8> = if ext == "psd" {
-        let bytes = fs::read(&path).map_err(|e| e.to_string())?;
-        let psd = psd::Psd::from_bytes(&bytes).map_err(|e| e.to_string())?;
-        let rgba = psd.rgba();
-        let buf = image::RgbaImage::from_raw(psd.width(), psd.height(), rgba)
-            .ok_or("PSD pixel buffer size mismatch")?;
-        let mut out = Cursor::new(Vec::new());
-        image::DynamicImage::ImageRgba8(buf)
-            .write_to(&mut out, image::ImageFormat::Png)
-            .map_err(|e| e.to_string())?;
-        out.into_inner()
-    } else {
-        // TIFF (and any other image-crate-decodable format routed here)
-        let img = image::open(&path).map_err(|e| e.to_string())?;
-        let mut out = Cursor::new(Vec::new());
-        img.write_to(&mut out, image::ImageFormat::Png)
-            .map_err(|e| e.to_string())?;
-        out.into_inner()
-    };
-
-    let b64 = base64::engine::general_purpose::STANDARD.encode(&png);
-    Ok(format!("data:image/png;base64,{b64}"))
+    tauri::async_runtime::spawn_blocking(move || {
+        ensure_previewable_size(&path, PREVIEW_INFO_MAX_BYTES)?;
+        cpe_server::image_preview::read_image_data_url(&path)
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 
@@ -1677,74 +1652,12 @@ async fn entry_info(path: String) -> Result<EntryInfo, String> {
         .await.map_err(|e| e.to_string())?
 }
 
-/// Image dimensions + basic EXIF for the Properties dialog (CPE-659, epic CPE-615). Best-effort:
-/// every field is optional and a non-image / EXIF-less file yields an all-`None` struct rather than an
-/// error, so the frontend simply omits the rows it has no data for.
-#[derive(serde::Serialize, Default)]
-struct ImageMeta {
-    width: Option<u32>,
-    height: Option<u32>,
-    camera: Option<String>,
-    lens: Option<String>,
-    taken: Option<String>,
-    iso: Option<String>,
-    aperture: Option<String>,
-    exposure: Option<String>,
-    focal_length: Option<String>,
-}
-
-fn read_exif(path: &str) -> Result<exif::Exif, exif::Error> {
-    let file = fs::File::open(path)?;
-    let mut reader = std::io::BufReader::new(&file);
-    exif::Reader::new().read_from_container(&mut reader)
-}
-
+/// Image dimensions + basic EXIF for the Properties dialog (CPE-659). Model lives in
+/// `cpe_server::image_preview` (CPE-815); this is a thin `spawn_blocking` dispatcher.
 #[tauri::command]
-async fn image_meta(path: String) -> Result<ImageMeta, String> {
-    tauri::async_runtime::spawn_blocking(move || image_meta_impl(path))
+async fn image_meta(path: String) -> Result<cpe_server::image_preview::ImageMeta, String> {
+    tauri::async_runtime::spawn_blocking(move || cpe_server::image_preview::image_meta(&path))
         .await.map_err(|e| e.to_string())?
-}
-
-fn image_meta_impl(path: String) -> Result<ImageMeta, String> {
-    use exif::{In, Tag};
-    let mut meta = ImageMeta::default();
-
-    // Dimensions come cheaply from the header without a full decode.
-    if let Ok((w, h)) = image::image_dimensions(&path) {
-        meta.width = Some(w);
-        meta.height = Some(h);
-    }
-
-    if let Ok(exif) = read_exif(&path) {
-        // A human-readable value for a tag, with unit (e.g. "f/2.8", "1/200 s", "50 mm"), trimmed of
-        // the quotes kamadak wraps ASCII strings in; `None` when the tag is absent or empty.
-        let field = |tag: Tag| {
-            exif.get_field(tag, In::PRIMARY)
-                .map(|f| f.display_value().with_unit(&exif).to_string())
-                .map(|s| s.trim().trim_matches('"').trim().to_string())
-                .filter(|s| !s.is_empty())
-        };
-
-        // Model usually already includes the make ("NIKON D750"); don't duplicate it.
-        meta.camera = match (field(Tag::Make), field(Tag::Model)) {
-            (Some(mk), Some(md)) => Some(if md.starts_with(&mk) { md } else { format!("{mk} {md}") }),
-            (mk, md) => mk.or(md),
-        };
-        meta.lens = field(Tag::LensModel);
-        meta.taken = field(Tag::DateTimeOriginal);
-        meta.iso = field(Tag::PhotographicSensitivity);
-        meta.aperture = field(Tag::FNumber);
-        meta.exposure = field(Tag::ExposureTime);
-        meta.focal_length = field(Tag::FocalLength);
-
-        // JPEGs the `image` crate couldn't size still carry pixel dimensions in EXIF.
-        if meta.width.is_none() {
-            meta.width = exif.get_field(Tag::PixelXDimension, In::PRIMARY).and_then(|f| f.value.get_uint(0));
-            meta.height = exif.get_field(Tag::PixelYDimension, In::PRIMARY).and_then(|f| f.value.get_uint(0));
-        }
-    }
-
-    Ok(meta)
 }
 
 /// Recursive counts + size of a directory tree, for the Properties dialog (CPE-649): number of files,
@@ -6073,50 +5986,8 @@ mod tests {
         let _ = fs::remove_dir_all(&d);
     }
 
-    #[test]
-    fn image_meta_reports_dimensions() {
-        let d = scratch("imgmeta");
-        let f = d.join("p.png");
-        image::RgbImage::from_pixel(24, 16, image::Rgb([9u8, 9, 9])).save(&f).unwrap();
-        let m = image_meta_impl(f.to_string_lossy().to_string()).unwrap();
-        assert_eq!(m.width, Some(24));
-        assert_eq!(m.height, Some(16));
-        let _ = fs::remove_dir_all(&d);
-    }
-
-    #[test]
-    fn image_meta_non_image_is_all_none() {
-        let d = scratch("imgmeta-txt");
-        let f = d.join("x.txt");
-        fs::write(&f, b"not an image").unwrap();
-        let m = image_meta_impl(f.to_string_lossy().to_string()).unwrap();
-        assert!(m.width.is_none() && m.camera.is_none() && m.taken.is_none());
-        let _ = fs::remove_dir_all(&d);
-    }
-
-    // thumbnail tests moved with the code to `cpe_server::thumbnail` (CPE-815).
-
-    #[test]
-    fn read_image_data_url_transcodes_tiff_to_png() {
-        let d = scratch("tiff");
-        let f = d.join("a.tiff");
-        let mut img = image::RgbaImage::new(2, 2);
-        img.put_pixel(0, 0, image::Rgba([255, 0, 0, 255]));
-        img.save_with_format(&f, image::ImageFormat::Tiff).unwrap();
-        let url = read_image_data_url_impl(f.to_string_lossy().to_string()).unwrap();
-        assert!(url.starts_with("data:image/png;base64,"), "returns a PNG data URL");
-        assert!(url.len() > 40, "carries encoded bytes");
-        let _ = fs::remove_dir_all(&d);
-    }
-
-    #[test]
-    fn read_image_data_url_errors_on_a_corrupt_psd() {
-        let d = scratch("psd_bad");
-        let f = d.join("a.psd");
-        fs::write(&f, b"not a real psd").unwrap();
-        assert!(read_image_data_url_impl(f.to_string_lossy().to_string()).is_err());
-        let _ = fs::remove_dir_all(&d);
-    }
+    // image-preview (transcode + metadata/EXIF) tests moved with the code to `cpe_server::image_preview`
+    // (CPE-815).
 
     #[test]
     fn read_archive_entries_errors_on_a_non_iso() {
