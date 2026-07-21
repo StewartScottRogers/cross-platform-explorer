@@ -201,6 +201,7 @@ jobs:
             ./sidecar/host -> target
             ./sidecar/ai-console -> target
             ./sidecar/repos -> target
+            ./sidecar/agent-board -> target
 
       - name: contract — clippy + test
         working-directory: sidecar/contract
@@ -243,6 +244,13 @@ jobs:
 
       - name: repos — clippy + test
         working-directory: sidecar/repos
+        run: |
+          cargo clippy --all-targets -- -D warnings
+          cargo test
+
+      - name: agent-board — clippy + test
+        # The Agent Board sidecar (CPE-851, epic CPE-850): out-of-process Kanban over Tickets/.
+        working-directory: sidecar/agent-board
         run: |
           cargo clippy --all-targets -- -D warnings
           cargo test
