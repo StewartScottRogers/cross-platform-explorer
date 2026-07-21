@@ -1,0 +1,18 @@
+[package]
+name = "cpe-security"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.77.2"
+description = "Pluggable, composable security core (Transport/AuthN/AuthZ planes + default-deny chain) at the Cross-Platform Explorer contract boundary (CPE-810/816)."
+license = "MIT"
+
+# Deliberately standalone and Tauri-free (CPE-810): the security layer sits at the
+# contract boundary as a distinct, swappable layer — the Server logic stays
+# security-agnostic and receives an already-authorized request. Depends only on the
+# wire contract (`cpe-contract`) for the Principal/session identity, so it stays
+# headless-testable and out of any workspace (preserving the one-way boundary).
+
+[dependencies]
+cpe-contract = { path = "../contract" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
