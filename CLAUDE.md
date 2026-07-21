@@ -39,6 +39,12 @@ plugin, and CI builds/signs releases through GitHub Actions.
   `generate_handler![]`, then call it from Svelte with `invoke`.
 - **Permissions:** any plugin capability the frontend uses must be listed in
   `src-tauri/capabilities/default.json`, or the call is denied at runtime.
+- **The domain logic lives in `crates/server` (`cpe-server`), not in `lib.rs`.** The Tauri-free
+  `cpe-server` crate owns the whole filesystem + preview domain behind a `ServerCtx` seam + the
+  `cpe-contract` envelope; a `#[tauri::command]` is a **thin one-line dispatcher** into it (any
+  `ipc::Channel` stays in the app adapter). New domain logic goes in `cpe-server`; new format crates go
+  there too (the app is deliberately kept lean). Full architecture + the extraction recipe:
+  [docs/design/SERVER-ARCHITECTURE.md](docs/design/SERVER-ARCHITECTURE.md) (epic CPE-810).
 
 ## Versioning â€” keep three files in sync
 
