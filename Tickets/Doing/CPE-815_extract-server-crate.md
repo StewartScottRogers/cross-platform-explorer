@@ -146,3 +146,10 @@ the Tauri adapter.
 logic; the 3-OS CI compiles both branches). Both commands dispatch. Tests moved. Verified: `cpe-server`
 **82 tests** green; app `cargo test` **90 passed / 0 failed**; clippy clean **both** modes. `cpe-server`
 now holds **21 modules**.
+2026-07-20 — **Slice 16 (first heavy-dep domain):** extracted the archive-listing domain (`ArchiveEntry`
++ zip/tar/gzip/7z/iso listers + the extension dispatcher, CPE-064/109/110/113) into `cpe_server::archive`,
+pulling the pure-Rust `zip`/`tar`/`flate2`/`sevenz-rust`/`iso9660` crates into the Server (per the "keep
+going + pull heavy crates in" decision). The `read_archive_entries` command dispatches; archive tests
+repointed. **Slimmed the plain explorer:** dropped the now-app-unused `iso9660` dep from `src-tauri`.
+Verified: `cpe-server` **84 tests** green; app `cargo test` **90 passed / 0 failed**; clippy clean **both**
+modes (removed the now-unused app `use serde::Serialize`). `cpe-server` now holds **22 modules**.

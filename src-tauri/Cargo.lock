@@ -825,10 +825,15 @@ name = "cpe-server"
 version = "0.1.0"
 dependencies = [
  "cpe-contract",
+ "flate2",
+ "iso9660",
  "rayon",
  "serde",
  "serde_json",
+ "sevenz-rust",
  "sha2",
+ "tar",
+ "zip 2.4.2",
 ]
 
 [[package]]
@@ -876,7 +881,6 @@ dependencies = [
  "fs4",
  "goblin",
  "image",
- "iso9660",
  "kamadak-exif",
  "keepawake",
  "midly",

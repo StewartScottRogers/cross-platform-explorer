@@ -20,6 +20,13 @@ serde_json = "1"
 sha2 = "0.10"
 # Work-stealing parallelism for the recursive directory-size walk (CPE-754). Pure-Rust.
 rayon = "1"
+# Archive listing (CPE-064/109/110/113) — browse into an archive's directory without extracting. All
+# pure-Rust, no system libs: zip, tar, flate2 (miniz_oxide backend), sevenz-rust, iso9660.
+zip = "2"
+tar = "0.4"
+flate2 = "1"
+sevenz-rust = "0.6"
+iso9660 = "0.1"
 
 [dev-dependencies]
 # Temp dirs for the ticket-board tests (moved from the app with the module, CPE-815).
