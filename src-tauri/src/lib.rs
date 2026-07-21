@@ -2,6 +2,26 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
+/// Build a `std::process::Command` that never flashes a console window on Windows (CPE-840).
+///
+/// Every helper process we run for its **output or side-effect** — `git status`/`diff`/`clone`, the
+/// external opener (`cmd /C start`), `run_command`, the elevation `powershell` — must be spawned with
+/// `CREATE_NO_WINDOW`, or Windows blinks a transient black console each time. The most visible symptom
+/// was a console flashing on **every folder navigation** (the per-folder `git status` in
+/// `forge_repo_status`). Use this instead of `Command::new` for those. Do **not** use it for commands
+/// that are *meant* to open a window (`open_terminal`).
+fn quiet_command(program: &str) -> std::process::Command {
+    // `mut` is only used on Windows (below); on other targets the cfg block compiles out.
+    #[allow(unused_mut)]
+    let mut cmd = std::process::Command::new(program);
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        cmd.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
+    }
+    cmd
+}
+
 /// Live provider API-key verification + catalog egress for the AI Console sidecar (CPE-347/369/376).
 /// Only compiled with the platform: without it nothing calls these, so the module would be dead
 /// code under `-D warnings` (its pure logic is still unit-tested under the feature).
@@ -259,14 +279,14 @@ fn workbench_diff_impl(root: String, path: Option<String>) -> Result<WorkbenchDi
         return Err("no-folder".to_string()); // opened on Home / no folder
     }
     // Is this a git work tree? Distinguishes not-a-repo (friendly) from git-missing (error).
-    let inside = std::process::Command::new("git")
+    let inside = quiet_command("git")
         .args(["-C", &root, "rev-parse", "--is-inside-work-tree"])
         .output()
         .map_err(|e| format!("git-missing: {e}"))?;
     if !inside.status.success() {
         return Ok(WorkbenchDiff { is_repo: false, branch: None, diff: String::new() });
     }
-    let branch = std::process::Command::new("git")
+    let branch = quiet_command("git")
         .args(["-C", &root, "rev-parse", "--abbrev-ref", "HEAD"])
         .output()
         .ok()
@@ -279,7 +299,7 @@ fn workbench_diff_impl(root: String, path: Option<String>) -> Result<WorkbenchDi
         args.push("--".to_string());
         args.push(p);
     }
-    let out = std::process::Command::new("git")
+    let out = quiet_command("git")
         .args(&args)
         .output()
         .map_err(|e| format!("Couldn't run git: {e}"))?;
@@ -2275,13 +2295,13 @@ fn open_external_impl(path: String) -> Result<(), String> {
         return Err("refusing to open a path with invalid characters".into());
     }
     #[cfg(target_os = "windows")]
-    let spawned = std::process::Command::new("cmd")
+    let spawned = quiet_command("cmd")
         .args(["/C", "start", "", &path])
         .spawn();
     #[cfg(target_os = "macos")]
-    let spawned = std::process::Command::new("open").arg(&path).spawn();
+    let spawned = quiet_command("open").arg(&path).spawn();
     #[cfg(all(unix, not(target_os = "macos")))]
-    let spawned = std::process::Command::new("xdg-open").arg(&path).spawn();
+    let spawned = quiet_command("xdg-open").arg(&path).spawn();
 
     spawned.map(|_| ()).map_err(|e| e.to_string())
 }
@@ -2381,16 +2401,15 @@ fn run_command_impl(command: String, cwd: Option<String>) -> Result<CommandOutpu
     if command.trim().is_empty() {
         return Err("Command is empty".to_string());
     }
-    use std::process::Command;
     #[cfg(windows)]
     let mut cmd = {
-        let mut c = Command::new("cmd");
+        let mut c = quiet_command("cmd");
         c.args(["/C", &command]);
         c
     };
     #[cfg(not(windows))]
     let mut cmd = {
-        let mut c = Command::new("sh");
+        let mut c = quiet_command("sh");
         c.args(["-c", &command]);
         c
     };
@@ -2450,7 +2469,7 @@ fn run_as_admin_impl(path: String) -> Result<(), String> {
     {
         // Single-quote the path for PowerShell; escape any embedded quote.
         let escaped = path.replace('\'', "''");
-        std::process::Command::new("powershell")
+        quiet_command("powershell")
             .args([
                 "-NoProfile",
                 "-Command",
@@ -3995,7 +4014,7 @@ fn forge_clone_impl(
     token: Option<String>,
 ) -> Result<String, String> {
     let args = build_git_clone(&provider, &repo, &target_dir, token.as_deref())?;
-    let output = std::process::Command::new("git")
+    let output = quiet_command("git")
         .args(&args)
         .output()
         .map_err(|e| format!("Couldn't run git: {e}"))?;
@@ -4189,7 +4208,7 @@ fn forge_clone_url(
         .map(|r| load_admitted_hosts(&app).contains(&r.host))
         .unwrap_or(false);
     let args = build_generic_clone(&url, &target_dir, token.as_deref(), admitted)?;
-    let output = std::process::Command::new("git")
+    let output = quiet_command("git")
         .args(&args)
         .output()
         .map_err(|e| format!("Couldn't run git: {e}"))?;
@@ -4302,7 +4321,7 @@ async fn forge_repo_status(path: String, on_diverge: Option<String>) -> RepoSync
 #[cfg(feature = "sidecar-platform")]
 fn forge_repo_status_impl(path: String, on_diverge: Option<String>) -> RepoSyncStatus {
     use repos::SyncAction;
-    let output = std::process::Command::new("git")
+    let output = quiet_command("git")
         .args(["-C", &path, "status", "--porcelain=v2", "--branch"])
         .output();
     let out = match output {
@@ -4372,7 +4391,7 @@ fn forge_sync_impl(path: String, action: String) -> Result<String, String> {
         "push" => vec!["-C", &path, "push"],
         other => return Err(format!("unsupported sync action '{other}'")),
     };
-    let out = std::process::Command::new("git").args(&args).output().map_err(|e| e.to_string())?;
+    let out = quiet_command("git").args(&args).output().map_err(|e| e.to_string())?;
     if out.status.success() {
         let s = String::from_utf8_lossy(&out.stdout);
         Ok(if s.trim().is_empty() { format!("{action} ok") } else { s.trim().to_string() })
@@ -4428,7 +4447,7 @@ async fn forge_conflict_state(path: String) -> ConflictState {
 
 #[cfg(feature = "sidecar-platform")]
 fn forge_conflict_state_impl(path: String) -> ConflictState {
-    let out = std::process::Command::new("git")
+    let out = quiet_command("git")
         .args(["-C", &path, "status", "--porcelain=v2"])
         .output();
     let files = match out {
@@ -4467,7 +4486,7 @@ const CONFLICT_MAX_BYTES: usize = 512 * 1024;
 /// Read one git stage of a path as UTF-8 text, or `None` if that stage is absent, binary, or too big.
 #[cfg(feature = "sidecar-platform")]
 fn read_stage(path: &str, stage: u8, file: &str, truncated: &mut bool) -> Option<String> {
-    let out = std::process::Command::new("git")
+    let out = quiet_command("git")
         .args(["-C", path, "show", &format!(":{stage}:{file}")])
         .output()
         .ok()?;
@@ -4537,7 +4556,7 @@ fn forge_resolve_file_impl(path: String, file: String, content: String) -> Resul
     }
     let full = std::path::Path::new(&path).join(&file);
     std::fs::write(&full, content).map_err(|e| format!("Couldn't write the file: {e}"))?;
-    let out = std::process::Command::new("git")
+    let out = quiet_command("git")
         .args(["-C", &path, "add", "--", &file])
         .output()
         .map_err(|e| format!("Couldn't run git: {e}"))?;
@@ -4566,7 +4585,7 @@ fn forge_conflict_continue_impl(path: String) -> Result<String, String> {
         "merge" => vec!["-C", &path, "commit", "--no-edit"],
         _ => return Err("No merge or rebase is in progress.".to_string()),
     };
-    let out = std::process::Command::new("git")
+    let out = quiet_command("git")
         .args(&args)
         .env("GIT_EDITOR", "true") // never open an interactive editor
         .output()
@@ -4594,7 +4613,7 @@ fn forge_conflict_abort_impl(path: String) -> Result<String, String> {
         "merge" => vec!["-C", &path, "merge", "--abort"],
         _ => return Err("No merge or rebase is in progress.".to_string()),
     };
-    let out = std::process::Command::new("git")
+    let out = quiet_command("git")
         .args(&args)
         .output()
         .map_err(|e| format!("Couldn't run git: {e}"))?;
