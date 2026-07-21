@@ -30,3 +30,14 @@ pub mod provider;
 /// Tag store: user tags + a colour label per path, persisted as `tags.json` (CPE-635). Pure model
 /// helpers + `ServerCtx`-based command entry points (CPE-815 migration).
 pub mod tags;
+
+/// Settings store: the single on-disk `settings.json` document (CPE-226). Pure helpers +
+/// `ServerCtx`-based entry points (CPE-815 migration).
+pub mod settings;
+
+/// Pure window-geometry resolver for the CLI launch options (CPE-598).
+pub mod geometry;
+
+/// On-disk append-only session audit journal (CPE-800, epic CPE-733): durable per-session
+/// JSON-lines of Agent Watch filesystem activity, bounded/rotated. Pure helpers over a base dir.
+pub mod audit_journal;

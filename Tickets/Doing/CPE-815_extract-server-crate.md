@@ -54,3 +54,9 @@ dispatching to the server crate" AC for a real, GUI-facing command group.
   `-D warnings` clean on **both** modes. Behaviour-preserving (identical helpers/JSON; `ServerCtx`
   resolves the same config dir). **Awaiting user GUI smoke-test of Tags** (assign/label/filter/import)
   before merge, then the remaining command groups migrate the same way.
+2026-07-20 — **Slice 3:** moved the **settings** domain (CPE-226) into `cpe-server/src/settings.rs`
+(pure helpers + `load`/`save` ctx entry points; `read_settings`/`write_settings` now dispatchers), and
+relocated the two already-pure standalone modules **`geometry`** (CPE-598) and **`audit_journal`**
+(CPE-800) into `cpe-server`, re-exported into the app via `use cpe_server::{audit_journal, geometry};`
+so existing call sites resolve unchanged. Verified: `cpe-server` **39 tests** green; app `cargo test`
+**129 passed / 0 failed**; clippy `-D warnings` clean on **both** modes. Behaviour-preserving.
