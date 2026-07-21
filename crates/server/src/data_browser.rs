@@ -146,6 +146,48 @@ fn sqlite_page(path: &str, source: &str, offset: usize, limit: usize) -> Result<
     Ok(Page { columns, rows, total })
 }
 
+/// Run a **read-only** SQL query against a SQLite file and return a page of results (CPE-848). The
+/// connection is opened read-only, and a guard refuses anything but a single `SELECT`/`WITH` statement, so
+/// the console can never mutate the database. Paging is lazy (`skip`/`take` on the row cursor), so a large
+/// result set doesn't load fully; `total` is left `None` (unknown without exhausting the query).
+pub fn query(path: &str, sql: &str, offset: usize, limit: usize) -> Result<Page, String> {
+    let trimmed = sql.trim().trim_end_matches(';').trim();
+    if trimmed.is_empty() {
+        return Err("empty query".to_string());
+    }
+    // Only a single read-only SELECT/WITH statement is permitted.
+    let first = trimmed.split_whitespace().next().unwrap_or("").to_ascii_lowercase();
+    if first != "select" && first != "with" {
+        return Err("only read-only SELECT queries are allowed".to_string());
+    }
+    if let Some(idx) = trimmed.find(';') {
+        if !trimmed[idx + 1..].trim().is_empty() {
+            return Err("only a single statement is allowed".to_string());
+        }
+    }
+
+    let conn = sqlite_open(path)?; // SQLITE_OPEN_READ_ONLY — a write fails even if the guard were bypassed.
+    let mut stmt = conn.prepare(trimmed).map_err(|e| e.to_string())?;
+    let columns: Vec<Column> = stmt
+        .column_names()
+        .iter()
+        .map(|n| Column { name: n.to_string(), type_: String::new() })
+        .collect();
+    let ncol = stmt.column_count();
+    let iter = stmt
+        .query_map([], |r| {
+            let mut cells = Vec::with_capacity(ncol);
+            for i in 0..ncol {
+                cells.push(r.get_ref(i).map(value_ref_to_string).unwrap_or_default());
+            }
+            Ok(cells)
+        })
+        .map_err(|e| e.to_string())?;
+    let rows: Vec<Vec<String>> = iter.filter_map(|r| r.ok()).skip(offset).take(limit).collect();
+
+    Ok(Page { columns, rows, total: None })
+}
+
 fn value_ref_to_string(v: rusqlite::types::ValueRef<'_>) -> String {
     use rusqlite::types::ValueRef;
     match v {
@@ -341,5 +383,39 @@ mod tests {
     fn unsupported_extension_errors() {
         assert!(sources("/x/notes.txt").is_err());
         assert!(page("/x/notes.txt", "", 0, 10).is_err());
+    }
+
+    #[test]
+    fn sql_query_selects_and_refuses_writes() {
+        use rusqlite::Connection;
+        let d = scratch("sql");
+        let f = d.join("q.db");
+        {
+            let conn = Connection::open(&f).unwrap();
+            conn.execute_batch(
+                "CREATE TABLE t (id INTEGER PRIMARY KEY, n TEXT);
+                 INSERT INTO t (n) VALUES ('a'),('b'),('c'),('d');",
+            )
+            .unwrap();
+        }
+        let p = f.to_string_lossy().to_string();
+
+        // A SELECT returns typed columns + a paged window.
+        let pg = query(&p, "SELECT id, n FROM t ORDER BY id", 1, 2).unwrap();
+        assert_eq!(pg.columns.iter().map(|c| c.name.as_str()).collect::<Vec<_>>(), vec!["id", "n"]);
+        assert_eq!(pg.rows, vec![vec!["2".to_string(), "b".into()], vec!["3".into(), "c".into()]]);
+
+        // WITH (CTE) is allowed.
+        assert!(query(&p, "WITH x AS (SELECT * FROM t) SELECT n FROM x", 0, 10).is_ok());
+
+        // Writes / DDL / multi-statement are refused.
+        assert!(query(&p, "INSERT INTO t (n) VALUES ('z')", 0, 10).is_err());
+        assert!(query(&p, "UPDATE t SET n='z'", 0, 10).is_err());
+        assert!(query(&p, "DROP TABLE t", 0, 10).is_err());
+        assert!(query(&p, "SELECT 1; DROP TABLE t", 0, 10).is_err());
+
+        // The database is unchanged (still 4 rows).
+        assert_eq!(page(&p, "t", 0, 100).unwrap().rows.len(), 4);
+        let _ = std::fs::remove_dir_all(&d);
     }
 }
