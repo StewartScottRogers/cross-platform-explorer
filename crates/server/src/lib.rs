@@ -87,6 +87,10 @@ pub mod duplicates;
 /// Filename search — substring/glob/brace-group matching + the shared streaming walker (CPE-603/697/666).
 pub mod name_search;
 
+/// Instant-search query core — parse `ext:`/`path:`/name-term queries, match candidates, rank by
+/// relevance. Backend-agnostic; reused by the index engine (CPE-831, epic CPE-703).
+pub mod index_query;
+
 /// Content search — recursive line search in text files, bounded + binary-skipping (CPE-416).
 pub mod content_search;
 
