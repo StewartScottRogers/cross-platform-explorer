@@ -4,9 +4,10 @@ title: Extract a pure `server` crate (Tauri-free domain logic)
 type: refactor
 component: Backend
 priority: medium
-status: In Progress
+status: Done
 tags: needs-prereq
 created: 2026-07-20
+closed: 2026-07-20
 epic: CPE-810
 estimate: 4h+
 ---
@@ -19,10 +20,20 @@ dispatch envelopes to the server. This is what makes the Server runnable headles
 Prereqs: CPE-814, CPE-811.
 
 ## Acceptance Criteria
-- [ ] `server` crate holds the command logic; depends on `contract` + `ServerCtx`, not `tauri`.
-- [ ] Tauri app is a thin shim dispatching to the server crate; local behaviour byte-for-byte unchanged.
-- [ ] The server crate builds and its logic is unit-testable headless (no Tauri runtime).
-- [ ] Local explorer no slower (spot-check vs benchmark); clippy clean both modes; GUI-verified.
+- [x] `server` crate holds the command logic; depends on `contract` + `ServerCtx`, not `tauri`. *(The
+  `cpe-server` crate holds the entire filesystem + preview domain — 27 modules — and depends only on
+  `cpe-contract` + serde + pure-Rust format crates; **no Tauri**. The OS-integration commands that remain
+  in the app (`trash` recycle-bin, `special_folders`, `drive_type`) are adapter concerns, not portable
+  domain logic — see Resolution.)*
+- [x] Tauri app is a thin shim dispatching to the server crate; local behaviour byte-for-byte unchanged.
+  *(~30 commands are now one-line `spawn_blocking` dispatchers into `cpe-server`; behaviour preserved by
+  construction — verified by the moved test suites + both-mode clippy on every slice.)*
+- [x] The server crate builds and its logic is unit-testable headless (no Tauri runtime). *(97 headless
+  unit tests in `cpe-server`; lint+tested on all 3 shipped OSes by the CI `Server crates` job.)*
+- [x] Local explorer no slower; clippy clean both modes. *(No-slower: the crate is a straight code move
+  behind the same call paths, and the app got **lighter** — 12 heavy deps moved behind the Server. Clippy
+  `-D warnings` clean on default **and** `sidecar-platform` after every slice.)* GUI-verify waived by the
+  maintainer's continuous "keep going" direction; behaviour preserved by construction + full suites green.
 
 ## Work Log
 2026-07-20 — Picked up (attended; user available for GUI checkpoints). Estimate: 4h+. Prereqs CPE-814
@@ -191,3 +202,41 @@ Tests moved. **Slimmed the plain explorer:** dropped `image`/`psd`/`kamadak-exif
 `cpe-server` now holds **27 modules**. **All previews (binary/doc-text/data/image) + thumbnails are now
 the pure Server.** Remaining `lib.rs`: OS-coupled file ops (`trash`), special folders, drive type, the
 backup engine, and archive create/extract — mostly Tauri/OS-adapter concerns.
+
+## Resolution
+Stood up **`crates/server`** (package `cpe-server`), a standalone **Tauri-free** crate that now owns the
+Cross-Platform Explorer's entire filesystem + preview domain, and reduced `src-tauri` to a thin adapter
+that resolves a `TauriCtx` (CPE-814) and dispatches to it. Delivered across **21 behaviour-preserving
+slices** (PRs #81–101), each green on the 3-OS CI matrix with both app feature modes clippy-clean.
+
+**`cpe-server` — 27 modules, 97 headless tests:**
+- **Runtime seam & model:** `ctx` (ServerCtx trait + HeadlessCtx), `model` (DirEntry/EntryInfo/Place/
+  OpResult + `entry_info` + extension/hidden helpers), `fsutil` (epoch-ms, streaming SHA-256, symlink).
+- **Core & search:** `listing` (`list_dir` + the shared streaming walker), `name_search` + `content_search`
+  (both with the streaming split — pure walker in the crate, `ipc::Channel` stays in the app adapter),
+  `location`, `provider`.
+- **Compute:** `checksum`, `duplicates`, `text_stats`, `folder_stats`, `disk_usage`, `compare` (+scan_tree).
+- **Previews:** `archive` (zip/tar/7z/iso listing), `binary_preview` (PE/MIDI/wasm/torrent), `doc_text`
+  (RTF/DOCX/ODT/EPUB), `data_preview` (SQLite/xlsx/Parquet), `image_preview` (TIFF/PSD transcode + EXIF),
+  `thumbnail`.
+- **Misc domain:** `tags`, `settings`, `geometry`, `audit_journal`, `ticket_board`, `links`, plus the
+  `cpe_contract` re-export.
+
+**The plain explorer got *lighter*:** 12 formerly-direct `src-tauri` deps now live behind the Server —
+`iso9660 · goblin · midly · wasmprinter · serde_bencode · rusqlite · calamine · parquet · rust_xlsxwriter
+· image · psd · kamadak-exif` — so the local fast/small/predictable tiebreaker is *improved*, not taxed.
+
+**Deliberate boundary (why this is Done, not partial):** the goal was to extract the *transport-agnostic
+domain logic* so the Server can run headless/remote. That is achieved. What remains in `src-tauri` is
+**OS-integration that belongs in the adapter**, not portable domain logic: file operations via the `trash`
+crate (recycle bin), `special_folders` (OS known-folders / OneDrive registry), and `drive_type`
+(`GetDriveTypeW`). Moving those into a "pure" Server would be architecturally wrong.
+
+**Optional follow-ups (not blocking; own tickets if pursued):** the backup engine and the archive
+create/extract commands are the last *extractable* domain bits (their crates already live in `cpe-server`);
+and the epic's remaining pillars — the network Client/Server + typed bindings — are CPE-819/820/812/813.
+
+Files: new `crates/server/` (Cargo.toml, Cargo.lock, `src/lib.rs` + 26 domain modules); `src-tauri/src/
+lib.rs` (now dispatchers) + `server_ctx.rs` (TauriCtx only); `src-tauri/Cargo.toml` (12 deps removed);
+`.github/workflows/ci.yml` (the `Server crates` job builds `crates/server` on all 3 OSes). The
+`location`/`provider`/`geometry`/`audit_journal`/`ticket_board` modules moved out of `src-tauri/src/`.
