@@ -290,6 +290,7 @@ dependencies = [
  "tar",
  "tempfile",
  "wasmprinter",
+ "xattr",
  "zip",
 ]
 

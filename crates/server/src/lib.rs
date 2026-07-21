@@ -31,6 +31,11 @@ pub mod provider;
 /// helpers + `ServerCtx`-based command entry points (CPE-815 migration).
 pub mod tags;
 
+/// Native metadata I/O: read/write/remove a named blob via NTFS ADS (Windows) or POSIX xattr (Unix),
+/// with graceful `Unsupported` degradation — the storage primitive of the native-metadata bridge
+/// (CPE-826, epic CPE-717).
+pub mod native_meta;
+
 /// Settings store: the single on-disk `settings.json` document (CPE-226). Pure helpers +
 /// `ServerCtx`-based entry points (CPE-815 migration).
 pub mod settings;
