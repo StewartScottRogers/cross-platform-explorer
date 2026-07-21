@@ -160,3 +160,9 @@ functions for those extensions (doc-text + structured-data formats remain app-lo
 repointed. **Slimmed the plain explorer:** dropped all four now-app-unused deps (`goblin`/`midly`/
 `wasmprinter`/`serde_bencode`) from `src-tauri`. Verified: `cpe-server` **86 tests** green; app `cargo
 test` **90 passed / 0 failed**; clippy clean **both** modes. `cpe-server` now holds **23 modules**.
+2026-07-20 — **Slice 18:** extracted the **document-text extraction** domain (RTF/DOCX/ODT/EPUB → plain
+text + the shared `strip_markup_to_text`/`decode_xml_entities`/`collapse_blank_lines`/`zip_read_text`
+helpers, CPE-070/071/072/077) into `cpe_server::doc_text` (reuses the `zip` reader already in the Server;
+RTF is a hand-rolled reader). The `read_preview_info` dispatcher calls into it. Tests moved. Verified:
+`cpe-server` **88 tests** green; app `cargo test` **88 passed / 0 failed**; clippy clean **both** modes.
+`cpe-server` now holds **24 modules**.
