@@ -3369,95 +3369,12 @@ fn find_files_by_name_stream(
     Ok(NameSearchResult { matches: Vec::new(), dirs_scanned: stats.dirs_scanned, truncated: stats.truncated })
 }
 
-/// A set of byte-identical files (CPE-420): their shared size + hash and every path.
-#[derive(serde::Serialize)]
-struct DupGroup {
-    size: u64,
-    hash: String,
-    paths: Vec<String>,
-}
-
-/// The result of a duplicate scan: the groups (largest reclaimable space first), how many files were
-/// considered, and whether the file cap was hit.
-#[derive(serde::Serialize)]
-struct DupResult {
-    groups: Vec<DupGroup>,
-    files_scanned: u64,
-    truncated: bool,
-}
-
-const DUP_MAX_FILES: u64 = 50_000;
-
-/// Find duplicate files under `root` (CPE-420). Efficient: group by size first (a unique size can't
-/// be a duplicate), then SHA-256 only the size-collision candidates — most files are never read.
-/// Skips dot-directories and empty files; unreadable entries are skipped (never failing the scan);
-/// stops at a file cap (reporting `truncated`). Groups are sorted by reclaimable space (largest
-/// first). A non-folder root is an `Err`.
+/// Find duplicate files under `root` (CPE-420) — size-then-hash two-pass scan. Model lives in
+/// `cpe_server::duplicates` (CPE-815); this is a thin `spawn_blocking` dispatcher.
 #[tauri::command]
-async fn find_duplicates(root: String) -> Result<DupResult, String> {
-    tauri::async_runtime::spawn_blocking(move || find_duplicates_impl(root))
+async fn find_duplicates(root: String) -> Result<cpe_server::duplicates::DupResult, String> {
+    tauri::async_runtime::spawn_blocking(move || cpe_server::duplicates::find_duplicates(&root))
         .await.map_err(|e| e.to_string())?
-}
-
-fn find_duplicates_impl(root: String) -> Result<DupResult, String> {
-    use std::collections::HashMap;
-    let root_path = Path::new(&root);
-    if !root_path.is_dir() {
-        return Err(format!("{root}: not a folder"));
-    }
-
-    // Pass 1: group candidate files by size (skip-on-error like `list_dir`).
-    let mut by_size: HashMap<u64, Vec<std::path::PathBuf>> = HashMap::new();
-    let mut files_scanned = 0u64;
-    let mut truncated = false;
-    let mut stack = vec![root_path.to_path_buf()];
-    'walk: while let Some(dir) = stack.pop() {
-        let Ok(entries) = fs::read_dir(&dir) else { continue };
-        for entry in entries.flatten() {
-            let path = entry.path();
-            let name = entry.file_name();
-            let Ok(meta) = entry.metadata() else { continue };
-            if meta.is_dir() {
-                // Skip dot-dirs and symlinked dirs (avoid cycles, CPE-611).
-                if !name.to_string_lossy().starts_with('.') && !entry_is_symlink(&entry) {
-                    stack.push(path);
-                }
-                continue;
-            }
-            if !meta.is_file() || meta.len() == 0 {
-                continue; // empty files are all "equal" — not useful to report
-            }
-            if files_scanned >= DUP_MAX_FILES {
-                truncated = true;
-                break 'walk;
-            }
-            files_scanned += 1;
-            by_size.entry(meta.len()).or_default().push(path);
-        }
-    }
-
-    // Pass 2: within each size collision, hash the candidates and group identical content.
-    let mut groups: Vec<DupGroup> = Vec::new();
-    for (size, paths) in by_size {
-        if paths.len() < 2 {
-            continue;
-        }
-        let mut by_hash: HashMap<String, Vec<String>> = HashMap::new();
-        for p in &paths {
-            if let Ok(h) = sha256_file(p) {
-                by_hash.entry(h).or_default().push(p.to_string_lossy().into_owned());
-            }
-        }
-        for (hash, group_paths) in by_hash {
-            if group_paths.len() > 1 {
-                groups.push(DupGroup { size, hash, paths: group_paths });
-            }
-        }
-    }
-
-    // Largest reclaimable space first: size × (copies − 1).
-    groups.sort_by_key(|g| std::cmp::Reverse(g.size * (g.paths.len() as u64 - 1)));
-    Ok(DupResult { groups, files_scanned, truncated })
 }
 
 /// Read `settings.json` from `dir`, returning `{}` when it's absent or
@@ -8415,7 +8332,7 @@ mod tests {
         assert!((6..100_000).contains(&sz), "dir_size should terminate small on a cycle, got {sz}");
 
         // find_duplicates likewise terminates (one file, no dupes, not truncated).
-        let dup = find_duplicates_impl(d.to_string_lossy().to_string()).unwrap();
+        let dup = cpe_server::duplicates::find_duplicates(&d.to_string_lossy()).unwrap();
         assert!(!dup.truncated, "find_duplicates hit its cap — symlink cycle not skipped");
 
         // remove_dir_all removes the symlink itself without following it.
@@ -8424,40 +8341,7 @@ mod tests {
 
     // files_identical tests moved with the code to `cpe_server::compare` (CPE-815).
 
-    #[test]
-    fn find_duplicates_groups_identical_files_and_ignores_unique_sizes() {
-        let d = scratch("dups");
-        fs::create_dir_all(d.join("sub")).unwrap();
-        // Three identical files across subfolders (a 3-way group).
-        for n in ["one.txt", "sub/two.txt", "sub/three.txt"] {
-            fs::write(d.join(n), b"duplicate payload").unwrap();
-        }
-        // A same-SIZE-but-different file — must NOT group with the above.
-        fs::write(d.join("decoy.txt"), b"DUPLICATE payloaD").unwrap(); // 17 bytes, like the others
-        // A unique file — never hashed, never grouped.
-        fs::write(d.join("unique.txt"), b"i am one of a kind").unwrap();
-        // Empty files are ignored.
-        fs::write(d.join("empty1"), b"").unwrap();
-        fs::write(d.join("empty2"), b"").unwrap();
-
-        let r = find_duplicates_impl(d.to_string_lossy().to_string()).unwrap();
-        assert_eq!(r.groups.len(), 1, "exactly one duplicate group");
-        let g = &r.groups[0];
-        assert_eq!(g.paths.len(), 3, "the 3-way group");
-        assert_eq!(g.size, 17);
-        let names: Vec<String> = g.paths.iter().map(|p| p.replace('\\', "/")).collect();
-        assert!(names.iter().any(|p| p.ends_with("one.txt")));
-        assert!(names.iter().any(|p| p.ends_with("sub/two.txt")));
-        assert!(!names.iter().any(|p| p.ends_with("decoy.txt")));
-
-        // No-duplicate folder → empty; a non-folder root → Err.
-        let d2 = scratch("nodups");
-        fs::write(d2.join("only.txt"), b"solo").unwrap();
-        assert!(find_duplicates_impl(d2.to_string_lossy().to_string()).unwrap().groups.is_empty());
-        assert!(find_duplicates_impl(d.join("one.txt").to_string_lossy().to_string()).is_err());
-        let _ = fs::remove_dir_all(&d);
-        let _ = fs::remove_dir_all(&d2);
-    }
+    // find_duplicates tests moved with the code to `cpe_server::duplicates` (CPE-815).
 
     // dir_size / dir_children_sizes tests moved with the code to `cpe_server::disk_usage` (CPE-815).
 

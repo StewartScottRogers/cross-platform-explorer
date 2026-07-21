@@ -63,3 +63,6 @@ pub mod compare;
 
 /// Disk-usage scanning — recursive directory size + per-child breakdown (CPE-749/754).
 pub mod disk_usage;
+
+/// Duplicate-file finder — size-then-hash two-pass scan (CPE-420).
+pub mod duplicates;

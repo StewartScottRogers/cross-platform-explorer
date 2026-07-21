@@ -94,3 +94,9 @@ Verified: `cpe-server` **63 tests** green; app `cargo test` **106 passed / 0 fai
 remaining `lib.rs` bulk is the heavy-dependency command groups (previews via image/office/pdf, archives
 via zip/tar/7z, DB via rusqlite/parquet, content/name search, and the 3 `ipc::Channel` streamers — the
 streamers wait on CPE-819's network-streaming equivalent).
+2026-07-20 — **Slice 9:** extracted the duplicate-finder domain (DupGroup/DupResult + size-then-hash
+scan, CPE-420) → `cpe_server::duplicates` (leans on the extracted `fsutil` `sha256_file`/
+`entry_is_symlink`); the `find_duplicates` command dispatches. Dedicated test moved; the symlink-cycle
+regression test kept in the app, repointed to `cpe_server::duplicates::find_duplicates` (exposed
+`DupResult` fields `pub` for that cross-crate read). Verified: `cpe-server` **64 tests** green; app
+`cargo test` **105 passed / 0 failed**; clippy clean **both** modes. `cpe-server` now holds **16 modules**.
