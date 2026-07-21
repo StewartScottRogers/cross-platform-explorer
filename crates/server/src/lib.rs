@@ -78,3 +78,6 @@ pub mod model;
 
 /// Directory listing — the shared walker behind `list_dir` + its streaming variant (CPE-663/662).
 pub mod listing;
+
+/// Link forge — create symbolic + hard links (CPE-802).
+pub mod links;

@@ -2681,36 +2681,18 @@ async fn scan_tree(path: String, max_depth: u32) -> Result<Vec<cpe_server::compa
 /// Windows symlink creation without Developer Mode / admin), so the UI can prompt for elevation.
 #[tauri::command]
 async fn create_symlink(target: String, link_path: String) -> Result<(), String> {
-    tauri::async_runtime::spawn_blocking(move || create_symlink_impl(target, link_path))
+    tauri::async_runtime::spawn_blocking(move || cpe_server::links::create_symlink(&target, &link_path))
         .await
         .map_err(|e| e.to_string())?
-}
-
-#[cfg(unix)]
-fn create_symlink_impl(target: String, link_path: String) -> Result<(), String> {
-    std::os::unix::fs::symlink(&target, &link_path).map_err(|e| e.to_string())
-}
-
-#[cfg(windows)]
-fn create_symlink_impl(target: String, link_path: String) -> Result<(), String> {
-    let res = if Path::new(&target).is_dir() {
-        std::os::windows::fs::symlink_dir(&target, &link_path)
-    } else {
-        std::os::windows::fs::symlink_file(&target, &link_path)
-    };
-    res.map_err(|e| format!("{e} (Windows symbolic links require Developer Mode or elevation)"))
 }
 
 /// Create a hardlink at `link_path` for the same file data as `target` (CPE-802). Cross-platform.
+/// Model lives in `cpe_server::links` (CPE-815); this is a thin `spawn_blocking` dispatcher.
 #[tauri::command]
 async fn create_hard_link(target: String, link_path: String) -> Result<(), String> {
-    tauri::async_runtime::spawn_blocking(move || create_hard_link_impl(target, link_path))
+    tauri::async_runtime::spawn_blocking(move || cpe_server::links::create_hard_link(&target, &link_path))
         .await
         .map_err(|e| e.to_string())?
-}
-
-fn create_hard_link_impl(target: String, link_path: String) -> Result<(), String> {
-    fs::hard_link(&target, &link_path).map_err(|e| e.to_string())
 }
 
 /// Classify the drive a path lives on (CPE-805, epic CPE-716) — fixed / removable / network / cdrom / ram
@@ -6411,16 +6393,7 @@ mod tests {
 
     // checksum-folder tests moved with the code to `cpe_server::checksum` (CPE-815).
 
-    #[test]
-    fn create_hard_link_shares_file_data() {
-        let d = scratch("hardlink");
-        let target = d.join("orig.txt");
-        let link = d.join("link.txt");
-        fs::write(&target, b"linked").unwrap();
-        create_hard_link_impl(target.to_string_lossy().to_string(), link.to_string_lossy().to_string()).unwrap();
-        assert_eq!(fs::read(&link).unwrap(), b"linked"); // same data via the hardlink
-        let _ = fs::remove_dir_all(&d);
-    }
+    // link-forge (symlink/hardlink) tests moved with the code to `cpe_server::links` (CPE-815).
 
     #[cfg(windows)]
     #[test]
@@ -6433,19 +6406,6 @@ mod tests {
     #[test]
     fn drive_type_unix_fallback() {
         assert_eq!(drive_type_impl("/"), "fixed");
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn create_symlink_points_at_target() {
-        let d = scratch("symlink");
-        let target = d.join("orig.txt");
-        let link = d.join("link.txt");
-        fs::write(&target, b"data").unwrap();
-        create_symlink_impl(target.to_string_lossy().to_string(), link.to_string_lossy().to_string()).unwrap();
-        assert!(fs::symlink_metadata(&link).unwrap().file_type().is_symlink());
-        assert_eq!(fs::read(&link).unwrap(), b"data"); // reads through the symlink
-        let _ = fs::remove_dir_all(&d);
     }
 
     #[cfg(unix)]

@@ -141,3 +141,8 @@ clippy clean **both** modes. **This exhausts the clean, pure-domain extractions.
 (zip/tar/7z) — pulling those into `cpe-server` is a deliberate design decision — plus OS-coupled bits
 (file ops via `trash`, `special_folders`, `drive_type`, link forge, thumbnails) that arguably belong in
 the Tauri adapter.
+2026-07-20 — **Slice 15:** extracted the link forge (`create_symlink` + `create_hard_link`, CPE-802) into
+`cpe_server::links` — pure `std::os` cfg branches, no new deps (OS-specific but filesystem *domain*
+logic; the 3-OS CI compiles both branches). Both commands dispatch. Tests moved. Verified: `cpe-server`
+**82 tests** green; app `cargo test` **90 passed / 0 failed**; clippy clean **both** modes. `cpe-server`
+now holds **21 modules**.
