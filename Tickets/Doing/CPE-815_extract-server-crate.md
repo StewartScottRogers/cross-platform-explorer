@@ -181,3 +181,13 @@ resolves the cache dir via `ServerCtx` then dispatches. Tests moved. (`image` st
 the TIFF/PSD transcode + EXIF metadata still use it; extracting those is the follow-up that slims it.)
 Verified: `cpe-server` **95 tests** green; app `cargo test` **81 passed / 0 failed**; clippy clean
 **both** modes. `cpe-server` now holds **26 modules**.
+2026-07-20 — **Slice 21 (finish the image domain):** extracted the TIFF/PSD → PNG data-URL **transcode**
+(`read_image_data_url`) and the image **dimensions + EXIF metadata** (`image_meta`, `ImageMeta`,
+`read_exif`, CPE-099/101/659) into `cpe_server::image_preview` (pulls `psd`/`kamadak-exif`/`base64`
+alongside the already-present `image`). Commands dispatch (the transcode command keeps the size cap).
+Tests moved. **Slimmed the plain explorer:** dropped `image`/`psd`/`kamadak-exif` from `src-tauri` deps
+(all now app-unused; `base64` stays for the thumbnail command's data-URL encoding). Verified:
+`cpe-server` **97 tests** green; app `cargo test` **77 passed / 0 failed**; clippy clean **both** modes.
+`cpe-server` now holds **27 modules**. **All previews (binary/doc-text/data/image) + thumbnails are now
+the pure Server.** Remaining `lib.rs`: OS-coupled file ops (`trash`), special folders, drive type, the
+backup engine, and archive create/extract — mostly Tauri/OS-adapter concerns.
