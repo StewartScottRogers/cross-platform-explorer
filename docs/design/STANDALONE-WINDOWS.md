@@ -48,6 +48,24 @@ that hosts untrusted content is **kept out of every capability** so it cannot re
 a new trusted window means adding its label to `windows` in `default.json` — omit that and its `invoke`
 calls are denied at runtime.
 
+## The Agent Board also has an out-of-process form (the sidecar)
+
+The Agent Board exists in **two** forms, and `openAgentBoard()` prefers the heavier one when it can:
+
+| | In-process window (CPE-841) | Out-of-process **sidecar** (CPE-850) |
+|--|--|--|
+| What runs | the app's own `BoardView` in a `?board` webview | a separate `agent-board` process serving its own Kanban UI |
+| Window label | `agent-board` (**in** a capability — trusted, uses Tauri `invoke`) | `agent-board-sidecar` (**in no** capability — isolated, like the AI Console window) |
+| Data path | `ticket_board` Tauri commands | the sidecar reads/writes `Tickets/` itself and serves a loopback HTTP API |
+| Availability | every build | only the `sidecar-platform` build |
+
+`openAgentBoard()` starts the sidecar (`sidecar_start_agent_board` → spawn, handshake, read `ui:<url>`) and
+frames its announced loopback URL when the platform is present; otherwise it falls back to the in-process
+window. The sidecar is a first-class platform tenant — a `sidecar/agent-board` crate depending only on
+`sidecar-contract` (ADR 0001), discovered via its `sidecar.json` manifest, bundled next to the AI Console
+(`tauri.sidecar.*.conf.json` → `sidecars/agent-board*`), and managed in **Settings → SidecarManager** like
+AI Console / Repositories. See the `sidecar/agent-board` crate and epic CPE-850.
+
 ## Related
 
 - Boot-mode selection: `src/lib/bootMode.ts` (+ `bootMode.test.ts`).
