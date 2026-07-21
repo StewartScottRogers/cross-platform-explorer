@@ -10,6 +10,12 @@ pub fn to_epoch_ms(t: SystemTime) -> Option<u64> {
     t.duration_since(UNIX_EPOCH).ok().map(|d| d.as_millis() as u64)
 }
 
+/// Whether a directory entry is a symlink (without following it). Used to avoid symlink cycles in the
+/// recursive walks (CPE-609/611).
+pub fn entry_is_symlink(entry: &std::fs::DirEntry) -> bool {
+    entry.file_type().map(|t| t.is_symlink()).unwrap_or(false)
+}
+
 /// Stream a file through SHA-256 and return the lowercase hex digest. Shared by `hash_file` (CPE-412),
 /// the folder checksum baseline (CPE-791), and the backup verifier. 64 KiB chunks — a multi-GB file
 /// never loads into memory.
