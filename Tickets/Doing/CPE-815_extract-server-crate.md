@@ -109,3 +109,11 @@ stays in the app, the walk is pure. Ported the thorough brace-matching test suit
 Verified: `cpe-server` **70 tests** green; app `cargo test` **100 passed / 0 failed**; clippy clean
 **both** modes. `cpe-server` now holds **17 modules**. (Proves the streaming-liveness convention survives
 the extraction — the groundwork CPE-819 generalizes over the wire.)
+2026-07-20 — **Slice 11:** extracted the content-search domain (ContentMatch/ContentSearchResult +
+bounds + `looks_binary` + the recursive line search, CPE-416) → `cpe_server::content_search`; the
+`search_file_contents` command dispatches. Dedicated test moved; the symlink-cycle test repointed. This
+retired the last app user of `entry_is_symlink`, so dropped it from the app's fsutil re-export.
+Verified: `cpe-server` **71 tests** green; app `cargo test` **99 passed / 0 failed**; clippy clean
+**both** modes. `cpe-server` now holds **18 modules**. Both "search" domains (name + content) are now
+extracted; remaining `lib.rs` bulk is the heavy-dep groups (previews/archives/DB), `list_dir` (core +
+streaming), the backup engine, and properties/metadata.

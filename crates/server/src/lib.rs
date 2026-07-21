@@ -69,3 +69,6 @@ pub mod duplicates;
 
 /// Filename search — substring/glob/brace-group matching + the shared streaming walker (CPE-603/697/666).
 pub mod name_search;
+
+/// Content search — recursive line search in text files, bounded + binary-skipping (CPE-416).
+pub mod content_search;
