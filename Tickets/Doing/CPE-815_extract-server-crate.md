@@ -86,3 +86,11 @@ and **dropped `rayon` as a direct app dependency** since nothing else in the app
 are now dispatchers. Tests moved (the symlink-cycle regression test kept in the app, repointed to
 `cpe_server::disk_usage::dir_size`). Verified: `cpe-server` **61 tests** green; app `cargo test` **108
 passed / 0 failed**; clippy clean **both** modes. `cpe-server` now holds **15 modules**.
+2026-07-20 — **Slice 8:** extracted the folder-tree `scan_tree` domain (TreeNode + scan_children,
+CPE-779, compare view) into `cpe_server::compare`; the `scan_tree` command dispatches. Tests moved.
+Verified: `cpe-server` **63 tests** green; app `cargo test` **106 passed / 0 failed**; clippy clean
+**both** modes. **8 slices landed** — the standalone modules + the light/self-contained command domains
+(tags, settings, checksum, text-stats, folder-stats, compare, disk-usage) are now in `cpe-server`. The
+remaining `lib.rs` bulk is the heavy-dependency command groups (previews via image/office/pdf, archives
+via zip/tar/7z, DB via rusqlite/parquet, content/name search, and the 3 `ipc::Channel` streamers — the
+streamers wait on CPE-819's network-streaming equivalent).
