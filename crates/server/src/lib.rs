@@ -87,3 +87,6 @@ pub mod archive;
 
 /// Structured binary previews — hex / PE / MIDI / wasm / torrent text summaries (CPE-210/214/215/216/218).
 pub mod binary_preview;
+
+/// Document text extraction — RTF / DOCX / ODT / EPUB → plain text (CPE-070/071/072/077).
+pub mod doc_text;
