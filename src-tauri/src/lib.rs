@@ -3824,175 +3824,45 @@ fn write_settings(app: tauri::AppHandle, contents: String) -> Result<(), String>
 }
 
 // ---- Tag store (CPE-635, epic CPE-614) -------------------------------------------------------
-// An app-side organisational layer: user tags + a colour label per path, persisted as `tags.json`
-// in the config dir (the filesystem is never touched). Pure helpers do the model work and are
-// unit-tested; the commands are thin I/O around them. Path-keyed for v1 — a move/rename outside the
-// app orphans the entry (a re-link tool is a future follow-up).
-
-/// The tags + colour label attached to one path.
-#[derive(Debug, Default, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
-struct TagEntry {
-    #[serde(default)]
-    tags: Vec<String>,
-    #[serde(default)]
-    label: String,
-}
-
-/// The whole store: path → entry. `BTreeMap` for a stable, diff-friendly on-disk order.
-type TagStore = std::collections::BTreeMap<String, TagEntry>;
-
-/// Set (replace) a path's tags + label. Tags are trimmed, de-duplicated and sorted; an entry that
-/// ends up with no tags and no label is removed entirely so the store stays tidy. Pure.
-fn tag_store_set(store: &mut TagStore, path: &str, tags: Vec<String>, label: String) {
-    let mut tags: Vec<String> = tags.into_iter().map(|t| t.trim().to_string()).filter(|t| !t.is_empty()).collect();
-    tags.sort();
-    tags.dedup();
-    let label = label.trim().to_string();
-    if tags.is_empty() && label.is_empty() {
-        store.remove(path);
-    } else {
-        store.insert(path.to_string(), TagEntry { tags, label });
-    }
-}
-
-/// Every tag with the number of paths carrying it, most-used first then alphabetical. Pure.
-fn tag_store_counts(store: &TagStore) -> Vec<(String, usize)> {
-    let mut counts: std::collections::BTreeMap<String, usize> = std::collections::BTreeMap::new();
-    for e in store.values() {
-        for t in &e.tags {
-            *counts.entry(t.clone()).or_default() += 1;
-        }
-    }
-    let mut v: Vec<(String, usize)> = counts.into_iter().collect();
-    v.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
-    v
-}
-
-/// Rename tag `old` → `new` across every path (CPE-646). De-dupes if a path already has `new`; an
-/// empty `new` just removes `old` (same as delete). Pure.
-fn tag_store_rename_tag(store: &mut TagStore, old: &str, new: &str) {
-    let new = new.trim();
-    for e in store.values_mut() {
-        if let Some(pos) = e.tags.iter().position(|t| t == old) {
-            e.tags.remove(pos);
-            if !new.is_empty() && !e.tags.iter().any(|t| t == new) {
-                e.tags.push(new.to_string());
-            }
-            e.tags.sort();
-        }
-    }
-}
-
-/// Remove tag `tag` from every path (CPE-646). Pure.
-fn tag_store_delete_tag(store: &mut TagStore, tag: &str) {
-    for e in store.values_mut() {
-        e.tags.retain(|t| t != tag);
-    }
-}
-
-/// Drop entries left with no tags and no label, so the store stays tidy after bulk edits. Pure.
-fn tag_store_prune_empty(store: &mut TagStore) {
-    store.retain(|_, e| !e.tags.is_empty() || !e.label.is_empty());
-}
-
-/// Re-key an entry from `from` → `to` so its tags/label follow an in-app rename or move (CPE-650). A
-/// no-op when `from` has no entry. Pure.
-fn tag_store_rename(store: &mut TagStore, from: &str, to: &str) {
-    if let Some(e) = store.remove(from) {
-        store.insert(to.to_string(), e);
-    }
-}
-
-/// Merge `incoming` into `store` (CPE-640, import): union each path's tags; take a non-empty imported
-/// label over an existing one. Non-destructive — existing tags are never dropped. Pure.
-fn tag_store_merge(store: &mut TagStore, incoming: TagStore) {
-    for (path, e) in incoming {
-        let cur = store.entry(path).or_default();
-        for t in e.tags {
-            if !cur.tags.contains(&t) {
-                cur.tags.push(t);
-            }
-        }
-        cur.tags.sort();
-        cur.tags.dedup();
-        if !e.label.trim().is_empty() {
-            cur.label = e.label;
-        }
-    }
-}
-
-/// Load the tag store from `tags.json` in `dir`, returning an empty store when absent or corrupt.
-fn read_tags_from(dir: &Path) -> TagStore {
-    fs::read_to_string(dir.join("tags.json"))
-        .ok()
-        .and_then(|s| serde_json::from_str(&s).ok())
-        .unwrap_or_default()
-}
-
-/// Persist the tag store to `tags.json` in `dir`, creating `dir` if needed.
-fn write_tags_to(dir: &Path, store: &TagStore) -> Result<(), String> {
-    fs::create_dir_all(dir).map_err(|e| e.to_string())?;
-    let json = serde_json::to_string_pretty(store).map_err(|e| e.to_string())?;
-    fs::write(dir.join("tags.json"), json.as_bytes()).map_err(|e| e.to_string())
-}
+// The model + persistence now live in the pure Server crate (`cpe_server::tags`, CPE-815); the
+// commands below are one-line dispatchers that build a `TauriCtx` and call into it.
+use cpe_server::tags::TagStore;
 
 /// The whole tag store (path → {tags,label}); `{}` on a fresh install.
 #[tauri::command]
 fn load_tags(app: tauri::AppHandle) -> Result<TagStore, String> {
-    let dir = server_ctx::TauriCtx::new(&app).app_config_dir()?;
-    Ok(read_tags_from(&dir))
+    cpe_server::tags::load(&server_ctx::TauriCtx::new(&app))
 }
 
 /// Replace one path's tags + label and persist. Returns the updated whole store.
 #[tauri::command]
 fn set_tags(app: tauri::AppHandle, path: String, tags: Vec<String>, label: String) -> Result<TagStore, String> {
-    let dir = server_ctx::TauriCtx::new(&app).app_config_dir()?;
-    let mut store = read_tags_from(&dir);
-    tag_store_set(&mut store, &path, tags, label);
-    write_tags_to(&dir, &store)?;
-    Ok(store)
+    cpe_server::tags::set(&server_ctx::TauriCtx::new(&app), &path, tags, label)
 }
 
 /// Every tag with its usage count (most-used first).
 #[tauri::command]
 fn tag_counts(app: tauri::AppHandle) -> Result<Vec<(String, usize)>, String> {
-    let dir = server_ctx::TauriCtx::new(&app).app_config_dir()?;
-    Ok(tag_store_counts(&read_tags_from(&dir)))
+    cpe_server::tags::counts(&server_ctx::TauriCtx::new(&app))
 }
 
 /// Rename a tag across every path (CPE-646); an empty `new` deletes it. Returns the updated store.
 #[tauri::command]
 fn rename_tag(app: tauri::AppHandle, old: String, new: String) -> Result<TagStore, String> {
-    let dir = server_ctx::TauriCtx::new(&app).app_config_dir()?;
-    let mut store = read_tags_from(&dir);
-    tag_store_rename_tag(&mut store, &old, &new);
-    tag_store_prune_empty(&mut store);
-    write_tags_to(&dir, &store)?;
-    Ok(store)
+    cpe_server::tags::rename_tag(&server_ctx::TauriCtx::new(&app), &old, &new)
 }
 
 /// Remove a tag from every path (CPE-646). Returns the updated store.
 #[tauri::command]
 fn delete_tag(app: tauri::AppHandle, tag: String) -> Result<TagStore, String> {
-    let dir = server_ctx::TauriCtx::new(&app).app_config_dir()?;
-    let mut store = read_tags_from(&dir);
-    tag_store_delete_tag(&mut store, &tag);
-    tag_store_prune_empty(&mut store);
-    write_tags_to(&dir, &store)?;
-    Ok(store)
+    cpe_server::tags::delete_tag(&server_ctx::TauriCtx::new(&app), &tag)
 }
 
 /// Re-key a path's tags/label after an in-app rename or move (CPE-650), so tags follow the file.
 /// Returns the updated store. A no-op when the old path had no tags.
 #[tauri::command]
 fn retag_path(app: tauri::AppHandle, from: String, to: String) -> Result<TagStore, String> {
-    let dir = server_ctx::TauriCtx::new(&app).app_config_dir()?;
-    let mut store = read_tags_from(&dir);
-    if store.contains_key(&from) {
-        tag_store_rename(&mut store, &from, &to);
-        write_tags_to(&dir, &store)?;
-    }
-    Ok(store)
+    cpe_server::tags::retag(&server_ctx::TauriCtx::new(&app), &from, &to)
 }
 
 /// Import a previously-exported tag store (JSON), merged into the current one (CPE-640). Non-
@@ -4000,12 +3870,7 @@ fn retag_path(app: tauri::AppHandle, from: String, to: String) -> Result<TagStor
 /// is just `load_tags` + `JSON.stringify` on the frontend.)
 #[tauri::command]
 fn import_tags(app: tauri::AppHandle, json: String) -> Result<TagStore, String> {
-    let incoming: TagStore = serde_json::from_str(&json).map_err(|e| format!("invalid tags file: {e}"))?;
-    let dir = server_ctx::TauriCtx::new(&app).app_config_dir()?;
-    let mut store = read_tags_from(&dir);
-    tag_store_merge(&mut store, incoming);
-    write_tags_to(&dir, &store)?;
-    Ok(store)
+    cpe_server::tags::import(&server_ctx::TauriCtx::new(&app), &json)
 }
 
 /// Return the user's home directory.
@@ -8266,85 +8131,7 @@ mod tests {
         let _ = fs::remove_dir_all(d.parent().unwrap().parent().unwrap());
     }
 
-    #[test]
-    fn tag_store_set_normalises_and_prunes_entries() {
-        let mut s = TagStore::new();
-        // Trims, de-dupes, sorts; blanks dropped.
-        tag_store_set(&mut s, "/a", vec!["  Zeta ".into(), "alpha".into(), "alpha".into(), "  ".into()], "red".into());
-        assert_eq!(s["/a"].tags, vec!["Zeta".to_string(), "alpha".to_string()]);
-        assert_eq!(s["/a"].label, "red");
-        // Setting to no tags + no label removes the entry entirely.
-        tag_store_set(&mut s, "/a", vec![], "".into());
-        assert!(!s.contains_key("/a"));
-        // A label alone keeps the entry.
-        tag_store_set(&mut s, "/b", vec![], "blue".into());
-        assert_eq!(s["/b"].label, "blue");
-    }
-
-    #[test]
-    fn tag_store_bulk_rename_and_delete() {
-        let mut s = TagStore::new();
-        tag_store_set(&mut s, "/a", vec!["wrk".into(), "urgent".into()], "".into());
-        tag_store_set(&mut s, "/b", vec!["wrk".into(), "work".into()], "".into());
-        // Rename wrk -> work everywhere; /b already had work → de-duped.
-        tag_store_rename_tag(&mut s, "wrk", "work");
-        assert_eq!(s["/a"].tags, vec!["urgent".to_string(), "work".to_string()]);
-        assert_eq!(s["/b"].tags, vec!["work".to_string()]);
-        // Delete "work" everywhere; /b becomes empty and is pruned.
-        tag_store_delete_tag(&mut s, "work");
-        tag_store_prune_empty(&mut s);
-        assert_eq!(s["/a"].tags, vec!["urgent".to_string()]);
-        assert!(!s.contains_key("/b"), "an entry with no tags/label is pruned");
-    }
-
-    #[test]
-    fn tag_store_rename_carries_tags_to_the_new_path() {
-        let mut s = TagStore::new();
-        tag_store_set(&mut s, "/old", vec!["keep".into()], "red".into());
-        tag_store_rename(&mut s, "/old", "/new");
-        assert!(!s.contains_key("/old") && s.contains_key("/new"));
-        assert_eq!(s["/new"].tags, vec!["keep".to_string()]);
-        assert_eq!(s["/new"].label, "red");
-        // Renaming an untagged path is a no-op.
-        tag_store_rename(&mut s, "/nothing", "/elsewhere");
-        assert!(!s.contains_key("/elsewhere"));
-    }
-
-    #[test]
-    fn tag_store_merge_is_non_destructive() {
-        let mut s = TagStore::new();
-        tag_store_set(&mut s, "/a", vec!["keep".into()], "red".into());
-        let mut incoming = TagStore::new();
-        tag_store_set(&mut incoming, "/a", vec!["added".into()], "blue".into());
-        tag_store_set(&mut incoming, "/b", vec!["new".into()], "".into());
-        tag_store_merge(&mut s, incoming);
-        // /a: tags unioned (keep + added), imported non-empty label wins.
-        assert_eq!(s["/a"].tags, vec!["added".to_string(), "keep".to_string()]);
-        assert_eq!(s["/a"].label, "blue");
-        // /b: brought in fresh.
-        assert_eq!(s["/b"].tags, vec!["new".to_string()]);
-    }
-
-    #[test]
-    fn tag_store_counts_most_used_first() {
-        let mut s = TagStore::new();
-        tag_store_set(&mut s, "/a", vec!["work".into(), "urgent".into()], "".into());
-        tag_store_set(&mut s, "/b", vec!["work".into()], "".into());
-        // "work" (2) before "urgent" (1); count desc then alphabetical.
-        assert_eq!(tag_store_counts(&s), vec![("work".to_string(), 2), ("urgent".to_string(), 1)]);
-    }
-
-    #[test]
-    fn tag_store_round_trips_through_disk() {
-        let d = scratch("tags_io");
-        let mut s = TagStore::new();
-        tag_store_set(&mut s, "/x", vec!["keep".into()], "green".into());
-        write_tags_to(&d, &s).unwrap();
-        assert_eq!(read_tags_from(&d), s);
-        // A missing/corrupt file yields an empty store, never an error.
-        assert!(read_tags_from(&scratch("tags_none")).is_empty());
-        let _ = fs::remove_dir_all(&d);
-    }
+    // The tag-store model + persistence tests moved with the code to `cpe_server::tags` (CPE-815).
 
     #[test]
     fn create_dir_rejects_an_empty_name() {

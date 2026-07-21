@@ -26,3 +26,7 @@ pub mod location;
 /// Filesystem-provider abstraction: the trait every location backend implements — local disk
 /// today, remote backends later — plus a `LocalProvider` and an in-memory `FakeProvider` (CPE-681).
 pub mod provider;
+
+/// Tag store: user tags + a colour label per path, persisted as `tags.json` (CPE-635). Pure model
+/// helpers + `ServerCtx`-based command entry points (CPE-815 migration).
+pub mod tags;
