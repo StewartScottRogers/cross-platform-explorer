@@ -347,7 +347,7 @@
     void startDriveScheduler(() => backupJobs, runBackupJobNow);
   }
   let attributesOpen = false;
-  let attrTarget: { path: string; name: string } = { path: "", name: "" };
+  let attrTargets: { path: string; name: string; modifiedMs: number | null }[] = [];
   let search = "";
   /** Active sidebar Tags filter — show only entries carrying this tag (CPE-639); "" = off. */
   let selectedTag = "";
@@ -2414,12 +2414,11 @@
 
   /** Open the file-attributes editor (CPE-786) for the single selected entry. */
   function openAttributes() {
-    if (selectedEntries.length !== 1) {
-      showNotice("Select a single item to edit its attributes.");
+    if (selectedEntries.length === 0) {
+      showNotice("Select one or more items to edit their attributes.");
       return;
     }
-    const e = selectedEntries[0];
-    attrTarget = { path: e.path, name: e.name };
+    attrTargets = selectedEntries.map((e) => ({ path: e.path, name: e.name, modifiedMs: e.modified }));
     attributesOpen = true;
   }
 
@@ -3463,9 +3462,8 @@
 
 {#if attributesOpen}
   <AttributesDialog
-    path={attrTarget.path}
-    name={attrTarget.name}
-    on:applied={() => { attributesOpen = false; refresh(); }}
+    targets={attrTargets}
+    on:applied={() => refresh()}
     on:cancel={() => (attributesOpen = false)}
   />
 {/if}
