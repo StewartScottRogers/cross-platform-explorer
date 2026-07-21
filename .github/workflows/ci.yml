@@ -98,11 +98,13 @@ jobs:
 
   crates:
     # The GUI↔Server "server-side" crates under crates/ (the Decoupled Server epic CPE-810):
-    # cpe-contract (the wire contract, CPE-811) and cpe-security (the pluggable security core,
-    # CPE-816). Standalone and Tauri-free — deliberately NOT in the app's cargo workspace, so
-    # the `backend` job above doesn't cover them. `src-tauri` will `path`-depend on them later
-    # (CPE-815), mirroring `sidecar/contract`. Pure Rust with no platform-specific code, but we
-    # lint+test on every shipped OS to match the rest of the Rust matrix.
+    # cpe-contract (the wire contract, CPE-811), cpe-security (the pluggable security core,
+    # CPE-816), cpe-server (the Tauri-free domain logic + dispatcher, CPE-815/824), and cpe-net
+    # (the headless network transport loop — Client(Rust) proxy + reference Server, CPE-825).
+    # Standalone and Tauri-free — deliberately NOT in the app's cargo workspace, so the
+    # `backend` job above doesn't cover them (`src-tauri` path-depends on cpe-server, mirroring
+    # `sidecar/contract`). Pure Rust, but we lint+test on every shipped OS to match the rest of
+    # the Rust matrix.
     name: Server crates (${{ matrix.os }}) — clippy + test
     runs-on: ${{ matrix.os }}
     strategy:
@@ -124,6 +126,7 @@ jobs:
             ./crates/contract -> target
             ./crates/security -> target
             ./crates/server -> target
+            ./crates/net -> target
 
       - name: contract — clippy + test
         working-directory: crates/contract
@@ -139,6 +142,14 @@ jobs:
 
       - name: server — clippy + test
         working-directory: crates/server
+        run: |
+          cargo clippy --all-targets -- -D warnings
+          cargo test
+
+      - name: net — clippy + test
+        # The headless network transport loop (Client(Rust) proxy + reference Server,
+        # CPE-825): composes contract + server + security into a loopback client/server.
+        working-directory: crates/net
         run: |
           cargo clippy --all-targets -- -D warnings
           cargo test
