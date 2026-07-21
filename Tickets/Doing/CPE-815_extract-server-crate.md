@@ -60,3 +60,8 @@ relocated the two already-pure standalone modules **`geometry`** (CPE-598) and *
 (CPE-800) into `cpe-server`, re-exported into the app via `use cpe_server::{audit_journal, geometry};`
 so existing call sites resolve unchanged. Verified: `cpe-server` **39 tests** green; app `cargo test`
 **129 passed / 0 failed**; clippy `-D warnings` clean on **both** modes. Behaviour-preserving.
+2026-07-20 — **Slice 4:** relocated the **`ticket_board`** module (Agent Board backend, CPE-520) into
+`cpe-server`, re-exported via `use cpe_server::{audit_journal, geometry, ticket_board};` (all 19 board
+call sites resolve unchanged). Added `tempfile` as a `cpe-server` dev-dep (moved with the module's
+tests). Verified: `cpe-server` **50 tests** green; app `cargo test` **118 passed / 0 failed**; clippy
+clean **both** modes. Behaviour-preserving.

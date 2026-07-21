@@ -41,3 +41,7 @@ pub mod geometry;
 /// On-disk append-only session audit journal (CPE-800, epic CPE-733): durable per-session
 /// JSON-lines of Agent Watch filesystem activity, bounded/rotated. Pure helpers over a base dir.
 pub mod audit_journal;
+
+/// Agent Board backend (CPE-520): read the repo's `Tickets/` folders as Kanban cards + move a card
+/// between columns. Pure card/frontmatter logic (the Tauri commands do the file I/O).
+pub mod ticket_board;
