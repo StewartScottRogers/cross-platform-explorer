@@ -81,3 +81,6 @@ pub mod listing;
 
 /// Link forge — create symbolic + hard links (CPE-802).
 pub mod links;
+
+/// Archive listing — browse into zip/tar/gzip/7z/iso without extracting (CPE-064/109/110/113).
+pub mod archive;

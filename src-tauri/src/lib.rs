@@ -1,4 +1,3 @@
-use serde::Serialize;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
@@ -611,165 +610,15 @@ fn write_file_text_impl(path: String, contents: String) -> Result<u64, String> {
     Ok(contents.len() as u64)
 }
 
-/// One entry inside an archive, for the archive preview.
-#[derive(Serialize)]
-pub struct ArchiveEntry {
-    name: String,
-    size: u64,
-    is_dir: bool,
-}
+// The archive-listing domain (ArchiveEntry + per-format listers + the extension dispatcher) now lives
+// in `cpe_server::archive` (CPE-815); the `read_archive_entries` command below dispatches to it.
 
-/// List the entries of a ZIP archive without extracting it.
-fn zip_entries(path: &str) -> Result<Vec<ArchiveEntry>, String> {
-    let file = fs::File::open(path).map_err(|e| e.to_string())?;
-    let mut zip = zip::ZipArchive::new(file).map_err(|e| e.to_string())?;
-    let mut out = Vec::with_capacity(zip.len());
-    for i in 0..zip.len() {
-        let entry = zip.by_index(i).map_err(|e| e.to_string())?;
-        out.push(ArchiveEntry {
-            name: entry.name().to_string(),
-            size: entry.size(),
-            is_dir: entry.is_dir(),
-        });
-    }
-    Ok(out)
-}
-
-/// List the entries of a TAR stream (optionally gzip-decompressed by the caller).
-fn tar_entries<R: std::io::Read>(reader: R) -> Result<Vec<ArchiveEntry>, String> {
-    let mut archive = tar::Archive::new(reader);
-    let mut out = Vec::new();
-    for entry in archive.entries().map_err(|e| e.to_string())? {
-        let entry = entry.map_err(|e| e.to_string())?;
-        let header = entry.header();
-        let is_dir = header.entry_type().is_dir();
-        let size = header.size().unwrap_or(0);
-        let name = entry
-            .path()
-            .map(|p| p.to_string_lossy().to_string())
-            .unwrap_or_default();
-        out.push(ArchiveEntry { name, size, is_dir });
-    }
-    Ok(out)
-}
-
-/// A single-file gzip (not a .tar.gz) has no directory. Report the decompressed
-/// file as one entry: its name is the archive name minus `.gz`, and its size is
-/// the gzip trailer's ISIZE (uncompressed length modulo 2^32).
-fn gzip_single_entry(path: &str) -> Result<Vec<ArchiveEntry>, String> {
-    let bytes = fs::read(path).map_err(|e| e.to_string())?;
-    let name = Path::new(path)
-        .file_stem()
-        .map(|s| s.to_string_lossy().to_string())
-        .unwrap_or_default();
-    let size = if bytes.len() >= 4 {
-        let n = bytes.len();
-        u32::from_le_bytes([bytes[n - 4], bytes[n - 3], bytes[n - 2], bytes[n - 1]]) as u64
-    } else {
-        0
-    };
-    Ok(vec![ArchiveEntry {
-        name,
-        size,
-        is_dir: false,
-    }])
-}
-
-/// List the entries of a 7-Zip archive via sevenz-rust (CPE-110).
-fn sevenz_entries(path: &str) -> Result<Vec<ArchiveEntry>, String> {
-    let mut file = fs::File::open(path).map_err(|e| e.to_string())?;
-    let len = file.metadata().map_err(|e| e.to_string())?.len();
-    let archive = sevenz_rust::Archive::read(&mut file, len, &[]).map_err(|e| e.to_string())?;
-    Ok(archive
-        .files
-        .iter()
-        .map(|f| ArchiveEntry {
-            name: f.name().to_string(),
-            size: f.size(),
-            is_dir: f.is_directory(),
-        })
-        .collect())
-}
-
-/// List the files in an ISO 9660 disc image (bounded), via iso9660 (CPE-113).
-fn iso_entries(path: &str) -> Result<Vec<ArchiveEntry>, String> {
-    use iso9660::{DirectoryEntry, ISODirectory, ISO9660};
-    let file = fs::File::open(path).map_err(|e| e.to_string())?;
-    let iso = ISO9660::new(file).map_err(|e| e.to_string())?;
-
-    let mut out = Vec::new();
-    let mut stack: Vec<(String, ISODirectory<fs::File>)> = vec![(String::new(), iso.root)];
-    while let Some((prefix, dir)) = stack.pop() {
-        if out.len() >= 2000 {
-            break;
-        }
-        for entry in dir.contents() {
-            let entry = match entry {
-                Ok(e) => e,
-                Err(_) => continue,
-            };
-            match entry {
-                DirectoryEntry::Directory(d) => {
-                    if d.identifier == "." || d.identifier == ".." {
-                        continue;
-                    }
-                    let full = if prefix.is_empty() {
-                        d.identifier.clone()
-                    } else {
-                        format!("{prefix}/{}", d.identifier)
-                    };
-                    out.push(ArchiveEntry {
-                        name: format!("{full}/"),
-                        size: 0,
-                        is_dir: true,
-                    });
-                    stack.push((full, d));
-                }
-                DirectoryEntry::File(f) => {
-                    let full = if prefix.is_empty() {
-                        f.identifier.clone()
-                    } else {
-                        format!("{prefix}/{}", f.identifier)
-                    };
-                    out.push(ArchiveEntry {
-                        name: full,
-                        size: f.size() as u64,
-                        is_dir: false,
-                    });
-                }
-            }
-        }
-    }
-    Ok(out)
-}
-
-/// List an archive's entries without extracting it, for the preview pane.
-/// Dispatches by extension: ZIP family (zip/jar/apk/war/ear/ipa/xpi), TAR,
-/// gzip-compressed TAR (.tar.gz/.tgz), single-file gzip (.gz), 7-Zip, and ISO.
-/// Reads only the archive directory, so it stays cheap even for large archives.
+/// List an archive's entries without extracting it, for the preview pane. Model lives in
+/// `cpe_server::archive` (CPE-815); this is a thin `spawn_blocking` dispatcher.
 #[tauri::command]
-async fn read_archive_entries(path: String) -> Result<Vec<ArchiveEntry>, String> {
-    tauri::async_runtime::spawn_blocking(move || read_archive_entries_impl(path))
+async fn read_archive_entries(path: String) -> Result<Vec<cpe_server::archive::ArchiveEntry>, String> {
+    tauri::async_runtime::spawn_blocking(move || cpe_server::archive::read_archive_entries(&path))
         .await.map_err(|e| e.to_string())?
-}
-
-fn read_archive_entries_impl(path: String) -> Result<Vec<ArchiveEntry>, String> {
-    let lower = path.to_lowercase();
-    if lower.ends_with(".tar") {
-        let file = fs::File::open(&path).map_err(|e| e.to_string())?;
-        tar_entries(file)
-    } else if lower.ends_with(".tar.gz") || lower.ends_with(".tgz") {
-        let file = fs::File::open(&path).map_err(|e| e.to_string())?;
-        tar_entries(flate2::read::GzDecoder::new(file))
-    } else if lower.ends_with(".gz") {
-        gzip_single_entry(&path)
-    } else if lower.ends_with(".7z") {
-        sevenz_entries(&path)
-    } else if lower.ends_with(".iso") {
-        iso_entries(&path)
-    } else {
-        zip_entries(&path)
-    }
 }
 
 // ---------------------------------------------------------------------------
@@ -6493,7 +6342,7 @@ mod tests {
         }
 
         let entries =
-            read_archive_entries_impl(zip_path.to_string_lossy().to_string()).unwrap();
+            cpe_server::archive::read_archive_entries(&zip_path.to_string_lossy()).unwrap();
         let names: Vec<&str> = entries.iter().map(|e| e.name.as_str()).collect();
         assert!(names.contains(&"hello.txt"), "should list the file entry");
         let file = entries.iter().find(|e| e.name == "hello.txt").unwrap();
@@ -6511,7 +6360,7 @@ mod tests {
         let d = scratch("zip_bad");
         let f = d.join("notazip.zip");
         fs::write(&f, b"this is not a zip file").unwrap();
-        assert!(read_archive_entries_impl(f.to_string_lossy().to_string()).is_err());
+        assert!(cpe_server::archive::read_archive_entries(&f.to_string_lossy()).is_err());
         let _ = fs::remove_dir_all(&d);
     }
 
@@ -6538,7 +6387,7 @@ mod tests {
         .unwrap();
 
         // The archive lists the expected entries at the right paths.
-        let names: Vec<String> = read_archive_entries_impl(zip_path.to_string_lossy().to_string())
+        let names: Vec<String> = cpe_server::archive::read_archive_entries(&zip_path.to_string_lossy())
             .unwrap()
             .into_iter()
             .map(|e| e.name)
@@ -6608,7 +6457,7 @@ mod tests {
             dest.to_string_lossy().to_string(),
         );
         assert!(r.is_ok(), "{r:?}");
-        let names: Vec<String> = zip_entries(&dest.to_string_lossy())
+        let names: Vec<String> = cpe_server::archive::zip_entries(&dest.to_string_lossy())
             .unwrap()
             .into_iter()
             .map(|e| e.name)
@@ -6661,7 +6510,7 @@ mod tests {
             b.append_data(&mut header, "hello.txt", &data[..]).unwrap();
             b.finish().unwrap();
         }
-        let entries = read_archive_entries_impl(tar_path.to_string_lossy().to_string()).unwrap();
+        let entries = cpe_server::archive::read_archive_entries(&tar_path.to_string_lossy()).unwrap();
         let file = entries.iter().find(|e| e.name == "hello.txt").unwrap();
         assert_eq!(file.size, 8, "size is the uncompressed length");
         assert!(!file.is_dir);
@@ -6681,7 +6530,7 @@ mod tests {
             enc.write_all(b"hello world").unwrap();
             enc.finish().unwrap();
         }
-        let entries = read_archive_entries_impl(gz_path.to_string_lossy().to_string()).unwrap();
+        let entries = cpe_server::archive::read_archive_entries(&gz_path.to_string_lossy()).unwrap();
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].name, "note.txt", "name is the archive name minus .gz");
         assert_eq!(entries[0].size, 11, "ISIZE trailer is the uncompressed length");
@@ -6972,7 +6821,7 @@ mod tests {
         let d = scratch("iso_bad");
         let f = d.join("x.iso");
         fs::write(&f, vec![0u8; 4096]).unwrap();
-        assert!(read_archive_entries_impl(f.to_string_lossy().to_string()).is_err());
+        assert!(cpe_server::archive::read_archive_entries(&f.to_string_lossy()).is_err());
         let _ = fs::remove_dir_all(&d);
     }
 
@@ -6981,7 +6830,7 @@ mod tests {
         let d = scratch("sevenz_bad");
         let f = d.join("x.7z");
         fs::write(&f, b"not a 7z archive").unwrap();
-        assert!(read_archive_entries_impl(f.to_string_lossy().to_string()).is_err());
+        assert!(cpe_server::archive::read_archive_entries(&f.to_string_lossy()).is_err());
         let _ = fs::remove_dir_all(&d);
     }
 
