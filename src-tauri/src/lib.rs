@@ -6,8 +6,6 @@ use std::time::{SystemTime, UNIX_EPOCH};
 /// Live provider API-key verification + catalog egress for the AI Console sidecar (CPE-347/369/376).
 /// Only compiled with the platform: without it nothing calls these, so the module would be dead
 /// code under `-D warnings` (its pure logic is still unit-tested under the feature).
-/// Pure window-geometry resolver for the CLI launch options (CPE-598) — core feature, always compiled.
-mod geometry;
 /// Tauri adapter (`TauriCtx`) for the Server runtime seam. The `ServerCtx` trait itself and the
 /// Tauri-free domain logic (location model, filesystem-provider abstraction) now live in the pure
 /// `cpe-server` crate (CPE-815); this app is the thin adapter that supplies `TauriCtx` and dispatches
@@ -30,10 +28,10 @@ mod models_egress;
 #[cfg(feature = "sidecar-platform")]
 mod agent_shadow;
 
-/// On-disk append-only session audit journal (CPE-800, epic CPE-733): durably records Agent Watch
-/// filesystem-activity events per session as JSON-lines, bounded/rotated, and reads past sessions back.
-/// Pure helpers over a base dir; the `audit_*` commands below are the thin I/O shell around it.
-mod audit_journal;
+/// The session audit journal (CPE-800) + pure window-geometry resolver (CPE-598) now live in the
+/// `cpe-server` crate (CPE-815); re-export their module paths so existing `audit_journal::` /
+/// `geometry::` references resolve unchanged.
+use cpe_server::{audit_journal, geometry};
 
 /// Agent Board backend (CPE-520): read the repo's `Tickets/` folders as Kanban cards + move a card
 /// between columns. Pure card/frontmatter logic lives here; the commands below do the file I/O.
@@ -3794,33 +3792,19 @@ fn find_duplicates_impl(root: String) -> Result<DupResult, String> {
 
 /// Read `settings.json` from `dir`, returning `{}` when it's absent or
 /// unreadable so the frontend always starts from a valid document.
-fn read_settings_from(dir: &Path) -> String {
-    fs::read_to_string(dir.join("settings.json")).unwrap_or_else(|_| "{}".to_string())
-}
-
-/// Write the settings document to `settings.json` in `dir`, creating `dir` if
-/// needed.
-fn write_settings_to(dir: &Path, contents: &str) -> Result<(), String> {
-    fs::create_dir_all(dir).map_err(|e| e.to_string())?;
-    fs::write(dir.join("settings.json"), contents.as_bytes()).map_err(|e| e.to_string())?;
-    Ok(())
-}
-
-/// Read the single on-disk settings file (`settings.json` in the app config
-/// dir). Returns `{}` when it doesn't exist yet, so the frontend can start from
-/// defaults on a fresh install (CPE-226).
+/// Read the single on-disk settings file (`settings.json` in the app config dir). Returns `{}` when it
+/// doesn't exist yet, so the frontend can start from defaults on a fresh install (CPE-226). The model
+/// lives in `cpe_server::settings` (CPE-815); this is a thin dispatcher.
 #[tauri::command]
 fn read_settings(app: tauri::AppHandle) -> Result<String, String> {
-    let dir = server_ctx::TauriCtx::new(&app).app_config_dir()?;
-    Ok(read_settings_from(&dir))
+    cpe_server::settings::load(&server_ctx::TauriCtx::new(&app))
 }
 
-/// Write the single on-disk settings file, creating the config dir if needed
-/// (CPE-226). `contents` is the full settings JSON document.
+/// Write the single on-disk settings file, creating the config dir if needed (CPE-226). `contents` is
+/// the full settings JSON document.
 #[tauri::command]
 fn write_settings(app: tauri::AppHandle, contents: String) -> Result<(), String> {
-    let dir = server_ctx::TauriCtx::new(&app).app_config_dir()?;
-    write_settings_to(&dir, &contents)
+    cpe_server::settings::save(&server_ctx::TauriCtx::new(&app), &contents)
 }
 
 // ---- Tag store (CPE-635, epic CPE-614) -------------------------------------------------------
@@ -8110,28 +8094,8 @@ mod tests {
         let _ = fs::remove_dir_all(&d);
     }
 
-    #[test]
-    fn settings_round_trip_and_default_to_empty_object() {
-        let d = scratch("settings");
-        // Absent file → "{}" default (never errors on a fresh install).
-        assert_eq!(read_settings_from(&d), "{}");
-        // Write then read back the exact document.
-        let doc = r#"{"cpe.view":"list","cpe.showHidden":true}"#;
-        write_settings_to(&d, doc).unwrap();
-        assert_eq!(read_settings_from(&d), doc);
-        let _ = fs::remove_dir_all(&d);
-    }
-
-    #[test]
-    fn write_settings_creates_the_config_dir() {
-        let d = scratch("settings_mkdir").join("nested/config");
-        assert!(!d.exists());
-        write_settings_to(&d, "{}").unwrap();
-        assert!(d.join("settings.json").exists());
-        let _ = fs::remove_dir_all(d.parent().unwrap().parent().unwrap());
-    }
-
-    // The tag-store model + persistence tests moved with the code to `cpe_server::tags` (CPE-815).
+    // The settings + tag-store model/persistence tests moved with the code to `cpe_server::settings`
+    // and `cpe_server::tags` (CPE-815).
 
     #[test]
     fn create_dir_rejects_an_empty_name() {
