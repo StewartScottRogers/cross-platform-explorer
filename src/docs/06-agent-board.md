@@ -13,6 +13,18 @@ the board and the command-line flow never drift.
 
 Open it from **Agent Board** in the left sidebar.
 
+## Its own window
+
+The board can also live in **its own window**, separate from the file explorer — handy on a second
+monitor while you browse files in the main window. Open it two ways:
+
+- the **⧉** button in the board's title bar (pops the board out into a window), or
+- the command palette → **Open Agent Board in a window**.
+
+It's a **singleton**: there is only ever one board window — opening it again just focuses the one you
+already have. The embedded in-board view still works too, so you can use whichever fits. The window
+remembers its size and position between runs.
+
 ## Choosing a project
 
 The board reads a project's `Tickets/` folder. When you open it inside a repo, it **finds the project
