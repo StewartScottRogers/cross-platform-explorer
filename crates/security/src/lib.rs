@@ -45,6 +45,10 @@ use serde::{Deserialize, Serialize};
 
 pub use cpe_contract::Principal;
 
+/// Concrete authentication providers (API token, mTLS identity, OAuth/OIDC) that plug into
+/// the [`Authenticator`] plane (CPE-817).
+pub mod authn;
+
 // ---------------------------------------------------------------------------
 // Core decision types
 // ---------------------------------------------------------------------------
