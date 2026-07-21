@@ -65,3 +65,13 @@ so existing call sites resolve unchanged. Verified: `cpe-server` **39 tests** gr
 call sites resolve unchanged). Added `tempfile` as a `cpe-server` dev-dep (moved with the module's
 tests). Verified: `cpe-server` **50 tests** green; app `cargo test` **118 passed / 0 failed**; clippy
 clean **both** modes. Behaviour-preserving.
+2026-07-20 — **Slice 5 (shared-helper untangle):** extracted the shared FS utils into
+`cpe-server/src/fsutil.rs` — `to_epoch_ms` (7 call sites) + `sha256_file` (5 call sites), re-exported
+into the app via `use cpe_server::fsutil::{sha256_file, to_epoch_ms};` so every existing call resolves
+unchanged (dropped the now-unused `UNIX_EPOCH` import). Then moved the two self-contained domains that
+depended on them: `text_stats` (CPE-414) → `cpe_server::text_stats` and file/folder `checksum` (CPE-412/
+791) → `cpe_server::checksum`; their 3 Tauri commands (`text_stats`/`hash_file`/`checksum_folder`) are
+now dispatchers. Moved/ported the epoch-ms, text-stats, checksum, and hash_file tests. Added `sha2` to
+`cpe-server` deps. Verified: `cpe-server` **57 tests** green; app `cargo test` **113 passed / 0 failed**;
+clippy `-D warnings` clean **both** modes. Behaviour-preserving (identical helpers/JSON). `cpe-server`
+now holds 12 modules.
