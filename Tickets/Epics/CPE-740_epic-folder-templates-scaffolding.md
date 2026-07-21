@@ -57,7 +57,9 @@ structure — developers, photographers, accountants. Small, self-contained, hig
 1. **CPE-835** — Folder-template core (`cpe-server::folder_template`): the `Template`/`Node` model, real-fs
    `capture(folder)`, `{key}` `substitute`, and `stamp(template, dest, vars)` with path-safety + no-clobber.
    Pure model + real-fs, cargo-tested via a capture→stamp round-trip. *Headless — buildable now.*
-2. **CPE-836** — Persistence + Tauri commands: store/list/import/export templates in the config dir; the
-   thin `#[tauri::command]` dispatchers over the core. *(prereq: 835)*
-3. **CPE-837** — Template gallery + "New from template…" flow (frontend): capture-from-folder, manage,
-   stamp with a token-fill dialog. **GUI-verified — attended.** *(prereq: 835, 836)*
+2. **CPE-836** — Template **store** (persistence): `ServerCtx`-based save/list/load/delete + import/export
+   of named templates in the config dir (`templates.json`), following the `tags`/`settings` store pattern.
+   Headless, cargo-tested via `HeadlessCtx`. *(prereq: 835)*
+3. **CPE-837** — Tauri commands + template gallery + "New from template…" flow (frontend): capture-from-
+   folder, manage, stamp with a token-fill dialog; the thin `#[tauri::command]` dispatchers over the store
+   and core. **GUI-verified — attended.** *(prereq: 835, 836)*
