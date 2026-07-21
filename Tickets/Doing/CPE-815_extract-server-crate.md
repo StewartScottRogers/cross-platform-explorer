@@ -166,3 +166,11 @@ helpers, CPE-070/071/072/077) into `cpe_server::doc_text` (reuses the `zip` read
 RTF is a hand-rolled reader). The `read_preview_info` dispatcher calls into it. Tests moved. Verified:
 `cpe-server` **88 tests** green; app `cargo test` **88 passed / 0 failed**; clippy clean **both** modes.
 `cpe-server` now holds **24 modules**.
+2026-07-20 — **Slice 19:** extracted the **structured-data previews** (SQLite via rusqlite + spreadsheet
+via calamine + Parquet via the parquet crate, CPE-088/089/090/091) into `cpe_server::data_preview`. The
+`read_preview_info` dispatcher calls into it. Tests moved (incl. the real-xlsx round-trip — added
+`rust_xlsxwriter` to `cpe-server` dev-deps). **Slimmed the plain explorer:** dropped `rusqlite`/
+`calamine`/`parquet` from `src-tauri` deps and `rust_xlsxwriter` from its dev-deps (all now app-unused).
+Verified: `cpe-server` **91 tests** green; app `cargo test` **85 passed / 0 failed**; clippy clean
+**both** modes. `cpe-server` now holds **25 modules**. All three preview sub-domains (binary / doc-text /
+structured-data) are extracted; the `read_preview_info` dispatcher is now a thin router into `cpe-server`.

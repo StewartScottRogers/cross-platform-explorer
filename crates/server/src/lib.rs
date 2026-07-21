@@ -90,3 +90,6 @@ pub mod binary_preview;
 
 /// Document text extraction — RTF / DOCX / ODT / EPUB → plain text (CPE-070/071/072/077).
 pub mod doc_text;
+
+/// Structured-data previews — SQLite / spreadsheet / Parquet summaries (CPE-088/089/090/091).
+pub mod data_preview;

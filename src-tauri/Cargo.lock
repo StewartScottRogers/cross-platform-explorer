@@ -824,12 +824,15 @@ dependencies = [
 name = "cpe-server"
 version = "0.1.0"
 dependencies = [
+ "calamine",
  "cpe-contract",
  "flate2",
  "goblin",
  "iso9660",
  "midly",
+ "parquet",
  "rayon",
+ "rusqlite",
  "serde",
  "serde_bencode",
  "serde_json",
@@ -878,7 +881,6 @@ name = "cross-platform-explorer"
 version = "0.56.1"
 dependencies = [
  "base64 0.22.1",
- "calamine",
  "cpe-server",
  "filetime",
  "flate2",
@@ -887,11 +889,8 @@ dependencies = [
  "kamadak-exif",
  "keepawake",
  "notify",
- "parquet",
  "psd",
  "repos",
- "rusqlite",
- "rust_xlsxwriter",
  "serde",
  "serde_json",
  "sevenz-rust",
@@ -4103,15 +4102,6 @@ dependencies = [
  "hashlink",
  "libsqlite3-sys",
  "smallvec",
-]
-
-[[package]]
-name = "rust_xlsxwriter"
-version = "0.79.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c743cb9f2a4524676020e26ee5f298445a82d882b09956811b1e78ca7e42b440"
-dependencies = [
- "zip 2.4.2",
 ]
 
 [[package]]

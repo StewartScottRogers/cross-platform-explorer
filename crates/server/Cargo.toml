@@ -33,7 +33,14 @@ goblin = "0.8"
 midly = "0.5"
 wasmprinter = "0.2"
 serde_bencode = "0.2"
+# Structured-data previews (CPE-088/089/090/091). rusqlite bundles SQLite (no system lib); calamine and
+# parquet are pure-Rust (parquet with default features off to avoid pulling arrow/compression stacks).
+rusqlite = { version = "0.32", features = ["bundled"] }
+calamine = "0.26"
+parquet = { version = "53", default-features = false }
 
 [dev-dependencies]
 # Temp dirs for the ticket-board tests (moved from the app with the module, CPE-815).
 tempfile = "3"
+# Author a real .xlsx in the spreadsheet-preview test (write side; calamine reads).
+rust_xlsxwriter = "0.79"
