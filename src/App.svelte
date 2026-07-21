@@ -2870,6 +2870,10 @@
 
 <Toolbar label={$t("tb.application")}>
   <svelte:fragment slot="actions">
+    <!-- The out-of-process apps (Agent Board / Repositories / Agent Deck) live in their own toolbar
+         section (CPE-857): a `role="group"` cluster delimited by a leading divider, so future
+         non-app toolbar buttons stay visibly separate from the apps. -->
+    <div class="tb-sidecar-group" role="group" aria-label="Apps">
     <!-- Agent Board — opens the standalone board window (CPE-846). Always shown (the board works in
          every build), and sits just left of the Agent Deck button. -->
     <button
@@ -2908,6 +2912,7 @@
         {/if}
       </button>
     {/if}
+    </div>
   </svelte:fragment>
   <div class="settings-row">
     <span>{$t("tb.showDetailsPane")}</span>
@@ -3603,6 +3608,17 @@
     color: var(--text);
     font-size: 15px;
     font-weight: 600;
+  }
+
+  /* The out-of-process apps form one delimited toolbar section (CPE-857): a leading divider marks the
+     section boundary so future non-app toolbar buttons stay visibly separate from the apps. The first
+     button keeps its own margin-left; the divider + padding give the section its edge. */
+  .tb-sidecar-group {
+    display: inline-flex;
+    align-items: center;
+    padding-left: 8px;
+    margin-left: 6px;
+    border-left: 1px solid var(--border-strong);
   }
 
   /* Out-of-process app buttons on the Application toolbar — Agent Deck (CPE-351), Agent Board
