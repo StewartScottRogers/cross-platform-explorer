@@ -44,6 +44,10 @@ image = { version = "0.25", default-features = false, features = ["tiff", "png",
 psd = "0.3"
 kamadak-exif = "0.6"
 base64 = "0.22"
+# macOS Finder-tag interop: the `_kMDItemUserTags` extended attribute is a binary property list
+# (CPE-829, epic CPE-717). Pure-Rust plist (binary + XML) reader/writer, no system libs. The codec is
+# cross-platform (round-trip-testable everywhere); only the storage side is macOS-specific.
+plist = "1"
 
 # POSIX extended attributes for the native-metadata bridge (CPE-826, epic CPE-717). Pure-Rust (libc
 # syscalls, no system libs); Unix-only — Windows uses NTFS alternate data streams via std file I/O,
