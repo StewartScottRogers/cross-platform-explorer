@@ -119,6 +119,10 @@ pub mod doc_text;
 /// Structured-data previews — SQLite / spreadsheet / Parquet summaries (CPE-088/089/090/091).
 pub mod data_preview;
 
+/// Structured-data browser — schema + paged rows for SQLite / Parquet / Excel-ODS, the reader behind the
+/// data-grid (CPE-847, epic CPE-721).
+pub mod data_browser;
+
 /// Image thumbnails — downscaled PNG generation + mtime-keyed disk cache (CPE-642/644).
 pub mod thumbnail;
 
