@@ -75,3 +75,6 @@ pub mod content_search;
 
 /// Shared filesystem model types (DirEntry / EntryInfo / Place / OpResult) + extension/hidden helpers.
 pub mod model;
+
+/// Directory listing — the shared walker behind `list_dir` + its streaming variant (CPE-663/662).
+pub mod listing;
