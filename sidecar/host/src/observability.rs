@@ -62,8 +62,13 @@ impl Redactor {
 
     /// Replace every occurrence of every registered secret in `input` with [`REDACTED`].
     pub fn redact_str(&self, input: &str) -> String {
+        // Longest secrets first: a shorter secret that is a substring of a longer one would otherwise
+        // rewrite part of the longer secret before it can be matched whole, leaking the remaining
+        // fragment (e.g. redacting "SECRET" out of "SECRETLONGER" would leave "LONGER").
+        let mut ordered: Vec<&String> = self.secrets.iter().collect();
+        ordered.sort_by_key(|s| std::cmp::Reverse(s.len()));
         let mut out = input.to_string();
-        for secret in &self.secrets {
+        for secret in ordered {
             if out.contains(secret.as_str()) {
                 out = out.replace(secret.as_str(), REDACTED);
             }
@@ -321,6 +326,17 @@ mod tests {
     fn an_empty_secret_is_ignored() {
         let r = Redactor::new().with_secret("");
         assert_eq!(r.redact_str("nothing changes"), "nothing changes");
+    }
+
+    #[test]
+    fn overlapping_secrets_are_redacted_longest_first_without_leaking_a_fragment() {
+        // A shorter registered secret that is a prefix of a longer one must not leave the longer
+        // one's tail exposed. Registered shortest-first on purpose — the fix must not depend on order.
+        let r = Redactor::new().with_secret("SECRET").with_secret("SECRETLONGER");
+        let out = r.redact_str("token=SECRETLONGER done");
+        assert!(!out.contains("SECRET"), "no secret text remains: {out}");
+        assert!(!out.contains("LONGER"), "no fragment of the longer secret leaks: {out}");
+        assert_eq!(out, "token=*** done");
     }
 
     #[test]
