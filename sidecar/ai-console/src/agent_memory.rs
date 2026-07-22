@@ -193,11 +193,17 @@ pub fn save_note(dir: &std::path::Path, note: &Note) -> std::io::Result<std::pat
 pub fn load_dir(dir: &std::path::Path) -> MemoryGraph {
     let mut g = MemoryGraph::new();
     let Ok(entries) = std::fs::read_dir(dir) else { return g };
-    for e in entries.flatten() {
-        let p = e.path();
-        if p.extension().and_then(|s| s.to_str()) != Some("md") {
-            continue;
-        }
+    // Sort by path so content-hash dedup is deterministic across platforms. `read_dir` yields entries in
+    // arbitrary OS order, and `add` keeps the FIRST note seen for a given content hash — so without a
+    // stable order, which of two identical-content notes (e.g. `a-…md` vs `dup-…md`) survives (and thus
+    // its id + links) would depend on the filesystem. This bit Linux CI, where `dup` was read before `a`.
+    let mut paths: Vec<std::path::PathBuf> = entries
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| p.extension().and_then(|s| s.to_str()) == Some("md"))
+        .collect();
+    paths.sort();
+    for p in paths {
         if let Ok(md) = std::fs::read_to_string(&p) {
             if let Some(n) = parse_note(&md) {
                 g.add(n);
