@@ -118,6 +118,11 @@ fn percent_decode(s: &str) -> String {
     String::from_utf8_lossy(&out).into_owned()
 }
 
+/// Largest request body we buffer. The sidecar's API only takes small JSON payloads; this bound exists
+/// so an attacker-supplied `Content-Length` can't drive an unbounded `vec![0u8; n]` whose allocation
+/// failure aborts the whole process.
+pub const MAX_REQUEST_BODY: usize = 16 * 1024 * 1024;
+
 /// Read and parse one HTTP request from a buffered reader. Returns `None` on a malformed or
 /// empty request.
 pub fn read_request<R: BufRead>(reader: &mut R) -> Option<Request> {
@@ -149,6 +154,11 @@ pub fn read_request<R: BufRead>(reader: &mut R) -> Option<Request> {
         }
     }
 
+    // Refuse an over-large declared body BEFORE allocating, so a hostile Content-Length can't abort the
+    // process on allocation failure (same class as the WebSocket frame cap).
+    if content_length > MAX_REQUEST_BODY {
+        return None;
+    }
     let mut body = String::new();
     if content_length > 0 {
         let mut buf = vec![0u8; content_length];
@@ -450,6 +460,19 @@ mod tests {
         assert!(f.fin);
         assert_eq!(f.opcode, ws_op::TEXT);
         assert_eq!(f.payload, payload);
+    }
+
+    #[test]
+    fn read_request_refuses_an_over_large_content_length() {
+        // A hostile Content-Length must be rejected before allocating its body (no process-aborting
+        // giant allocation). Only headers are supplied — no gigantic body ever arrives.
+        let raw = "POST /api HTTP/1.1\r\nContent-Length: 999999999999\r\n\r\n";
+        let mut reader = std::io::BufReader::new(std::io::Cursor::new(raw.as_bytes().to_vec()));
+        assert!(read_request(&mut reader).is_none(), "over-large Content-Length must be refused");
+        // A normal small body still parses.
+        let ok = "POST /api HTTP/1.1\r\nContent-Length: 5\r\n\r\nhello";
+        let mut reader = std::io::BufReader::new(std::io::Cursor::new(ok.as_bytes().to_vec()));
+        assert_eq!(read_request(&mut reader).unwrap().body, "hello");
     }
 
     #[test]
