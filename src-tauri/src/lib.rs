@@ -1847,6 +1847,27 @@ async fn verify_folder(
     .map_err(|e| e.to_string())?
 }
 
+/// Verify every baselined folder in one pass (CPE-871, epic CPE-737): re-scan + classify each against its
+/// stored baseline, returning a report per folder. A folder that can't be scanned (deleted/unmounted) is
+/// skipped rather than failing the whole sweep — the "monitor all my folders" one-shot behind the
+/// "Verify all baselined folders" action. Returns only the compact reports.
+#[tauri::command]
+async fn verify_all_baselines(
+    baselines: std::collections::HashMap<String, Vec<cpe_server::checksum::ChecksumEntry>>,
+) -> Result<std::collections::HashMap<String, cpe_server::checksum::IntegrityReport>, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let mut out = std::collections::HashMap::new();
+        for (path, baseline) in baselines {
+            if let Ok(current) = cpe_server::checksum::checksum_folder(&path) {
+                out.insert(path, cpe_server::checksum::verify_manifest(&baseline, &current));
+            }
+        }
+        out
+    })
+    .await
+    .map_err(|e| e.to_string())
+}
+
 // ---- Folder-tree scan for the compare view (CPE-779, epic CPE-722) --------------------------------
 // Recursively scan a folder into a nested tree the frontend `diffTrees` (CPE-777) consumes: files carry
 // size + epoch-ms mtime (what the diff compares on), dirs carry children. Symlinks aren't followed and
@@ -5264,6 +5285,7 @@ pub fn run() {
             apply_backup_plan_stream,
             checksum_folder,
             verify_folder,
+            verify_all_baselines,
             scan_tree,
             create_symlink,
             create_hard_link,

@@ -112,7 +112,7 @@
   import SessionHistoryDialog from "./lib/components/SessionHistoryDialog.svelte";
   import CompareDialog from "./lib/components/CompareDialog.svelte";
   import IntegrityDialog from "./lib/components/IntegrityDialog.svelte";
-  import type { ChecksumEntry } from "./lib/integrity";
+  import type { ChecksumEntry, IntegrityReport } from "./lib/integrity";
   import SelectByDialog from "./lib/components/SelectByDialog.svelte";
   import { selectMatching } from "./lib/selectMatch";
   import type { Condition } from "./lib/colorRules";
@@ -263,6 +263,25 @@
   let compareRight = "";
   let integrityOpen = false;
   let integrityBaselines: Record<string, ChecksumEntry[]> = settings.loadIntegrityBaselines();
+  /** Verify every baselined folder at once (CPE-871) and surface a one-line summary — the integrity
+   *  guard's "check all my monitored folders" action. Silent corruption / missing files raise an error
+   *  notice; a clean sweep confirms. */
+  async function verifyAllBaselines() {
+    const paths = Object.keys(integrityBaselines);
+    if (paths.length === 0) return;
+    try {
+      const reports = await invoke<Record<string, IntegrityReport>>("verify_all_baselines", { baselines: integrityBaselines });
+      const flagged = Object.values(reports).filter((r) => r.corrupted.length > 0 || r.missing.length > 0);
+      if (flagged.length === 0) {
+        showNotice(`All ${paths.length} baselined folder${paths.length === 1 ? "" : "s"} verified — no issues.`, false);
+      } else {
+        const bad = flagged.reduce((n, r) => n + r.corrupted.length + r.missing.length, 0);
+        showNotice(`${flagged.length} of ${paths.length} baselined folders have issues — ${bad} file${bad === 1 ? "" : "s"} corrupted or missing. Open Integrity to review.`, true);
+      }
+    } catch (e) {
+      showNotice(`Verify all failed: ${e}`, true);
+    }
+  }
   let selectByOpen = false;
   let watchRulesOpen = false;
   let watchRules: WatchRule[] = settings.loadWatchRules();
@@ -469,6 +488,7 @@
     { id: "tool.sessionHistory", group: $t("palette.groupTools"), label: $t("palette.sessionHistory"), keywords: "audit log history export sessions activity", run: () => (sessionHistoryOpen = true) },
     { id: "tool.compareFolders", group: $t("palette.groupTools"), label: $t("palette.compareFolders"), keywords: "diff compare folders directories tree", run: openCompare },
     { id: "tool.integrity", group: $t("palette.groupTools"), label: $t("palette.integrity"), keywords: "integrity checksum bitrot corruption verify baseline", run: () => (integrityOpen = true) },
+    { id: "tool.verifyAll", group: $t("palette.groupTools"), label: $t("palette.verifyAll"), keywords: "integrity verify all baselined folders bitrot corruption monitor check", run: verifyAllBaselines, enabled: () => Object.keys(integrityBaselines).length > 0 },
     { id: "tool.selectBy", group: $t("palette.groupTools"), label: $t("palette.selectBy"), keywords: "select by criteria extension size date filter", run: () => (selectByOpen = true), enabled: inFolder },
     { id: "tool.watchRules", group: $t("palette.groupTools"), label: $t("palette.watchRules"), keywords: "watch rules folder automation move copy tag rename", run: () => (watchRulesOpen = true) },
     { id: "tool.workspaces", group: $t("palette.groupGo"), label: $t("palette.workspaces"), keywords: "workspace layout tabs save session restore", run: () => (workspacesOpen = true) },
