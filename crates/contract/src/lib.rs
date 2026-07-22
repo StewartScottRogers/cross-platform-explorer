@@ -107,6 +107,33 @@ pub fn negotiate(
     ))
 }
 
+/// The server's handshake decision for an incoming [`Hello`] (CPE-820): negotiate the wire version and
+/// either accept — a [`Welcome`] carrying the agreed [`negotiated_version`](Welcome::negotiated_version)
+/// and the established [`Session`] — or refuse — a [`Rejected`] with
+/// [`RejectCode::IncompatibleVersion`]. Pure and total (never panics on a mismatch), so the full
+/// client/server version-compatibility matrix is **conformance-tested without a socket**; the real
+/// Server binary calls this at the top of its connection handler with its own [`CONTRACT_VERSION`].
+pub fn handshake(
+    hello: &Hello,
+    server_contract: ContractVersion,
+    server_id: impl Into<String>,
+    server_version: impl Into<String>,
+    session: Session,
+) -> Result<Welcome, Rejected> {
+    match negotiate(hello.contract_version, server_contract) {
+        Ok(negotiated) => Ok(Welcome {
+            server_id: server_id.into(),
+            server_version: server_version.into(),
+            negotiated_version: negotiated,
+            session,
+        }),
+        Err(e) => Err(Rejected {
+            code: RejectCode::IncompatibleVersion,
+            reason: e.to_string(),
+        }),
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Principal / session (CPE-810: reserve the multi-client slot; default local)
 // ---------------------------------------------------------------------------
@@ -398,6 +425,47 @@ mod tests {
         // The Display impl names both sides for a legible handshake failure.
         assert!(err.to_string().contains("2.0"));
         assert!(err.to_string().contains("1.9"));
+    }
+
+    // CPE-820 conformance: the handshake decision across the full client/server version matrix — accept
+    // with the correctly-negotiated version, or reject cleanly with IncompatibleVersion. No socket needed.
+    #[test]
+    fn handshake_conformance_matrix() {
+        let hello = |v: ContractVersion| Hello {
+            client_id: "client".into(),
+            client_version: "0.1".into(),
+            contract_version: v,
+            principal: None,
+        };
+        let go = |client: ContractVersion, server: ContractVersion| {
+            handshake(&hello(client), server, "srv", "0.1", Session::local())
+        };
+
+        // Same version → welcome, negotiated to that version.
+        let w = go(ContractVersion::new(1, 0), ContractVersion::new(1, 0)).expect("same version accepts");
+        assert_eq!(w.negotiated_version, ContractVersion::new(1, 0));
+        assert_eq!(w.server_id, "srv");
+
+        // Mismatched minors (either direction) → welcome, negotiated DOWN to the lower minor both grok.
+        assert_eq!(
+            go(ContractVersion::new(1, 5), ContractVersion::new(1, 2)).unwrap().negotiated_version,
+            ContractVersion::new(1, 2),
+        );
+        assert_eq!(
+            go(ContractVersion::new(1, 2), ContractVersion::new(1, 5)).unwrap().negotiated_version,
+            ContractVersion::new(1, 2),
+        );
+
+        // Major mismatch (either direction) → rejected cleanly with IncompatibleVersion + a legible reason.
+        for (c, s) in [(ContractVersion::new(2, 0), ContractVersion::new(1, 0)),
+                       (ContractVersion::new(1, 9), ContractVersion::new(2, 3))] {
+            let r = go(c, s).expect_err("major mismatch must reject");
+            assert_eq!(r.code, RejectCode::IncompatibleVersion);
+            assert!(r.reason.contains(&c.to_string()) && r.reason.contains(&s.to_string()), "reason: {}", r.reason);
+        }
+
+        // A real client against THIS build's CONTRACT_VERSION is accepted (the live single-user path).
+        assert!(go(CONTRACT_VERSION, CONTRACT_VERSION).is_ok());
     }
 
     #[test]
