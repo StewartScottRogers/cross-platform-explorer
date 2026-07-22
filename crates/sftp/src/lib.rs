@@ -205,6 +205,30 @@ impl SftpProvider {
     }
 }
 
+/// Connect an [`SftpProvider`] from a parsed [`cpe_server::location::Location`] (must be `Sftp`) plus an
+/// auth method — the bridge from a user-typed `sftp://user@host[:port]/path` to a live provider. Port
+/// defaults to 22; a username is required (SFTP has no anonymous mode).
+pub fn connect_location(
+    loc: &cpe_server::location::Location,
+    auth: SftpAuth,
+    known: Vec<KnownHost>,
+    policy: HostKeyPolicy,
+) -> Result<SftpProvider, String> {
+    use cpe_server::location::Scheme;
+    if loc.scheme != Scheme::Sftp {
+        return Err(format!("sftp: not an SFTP location (scheme {:?})", loc.scheme));
+    }
+    let host = loc.host.as_deref().ok_or("sftp: location has no host")?;
+    let user = loc.user.as_deref().ok_or("sftp: location has no user (use sftp://user@host/…)")?;
+    let config = SftpConfig {
+        host: host.to_string(),
+        port: loc.port.unwrap_or(22),
+        user: user.to_string(),
+        auth,
+    };
+    SftpProvider::connect(&config, known, policy)
+}
+
 /// Turn a failed `connect` into a legible error, upgrading a host-key refusal into a specific message
 /// (the raw russh error for a rejected key is opaque).
 fn connect_error(seen: &Mutex<Option<(HostKeyVerdict, KeyFields)>>, err: russh::Error) -> String {
@@ -544,6 +568,38 @@ mod tests {
             Err(e) => e,
         };
         assert!(err.contains("authentication failed"), "got: {err}");
+    }
+
+    #[test]
+    fn connect_location_bridges_an_sftp_url_to_a_provider() {
+        let (addr, hostkey) = spawn_server();
+        let url = format!("sftp://user@127.0.0.1:{}/", addr.port());
+        let loc = cpe_server::location::parse(&url);
+        let provider = connect_location(
+            &loc,
+            SftpAuth::Password("pw".into()),
+            known_for(addr.port(), &hostkey),
+            HostKeyPolicy::Strict,
+        )
+        .expect("connect_location should succeed for a valid sftp URL");
+        assert_eq!(provider.list("/").expect("list").len(), 2);
+    }
+
+    #[test]
+    fn connect_location_rejects_a_non_sftp_or_userless_location() {
+        let err_of = |loc: &cpe_server::location::Location| match connect_location(
+            loc,
+            SftpAuth::Password("p".into()),
+            vec![],
+            HostKeyPolicy::Tofu,
+        ) {
+            Ok(_) => panic!("expected an error"),
+            Err(e) => e,
+        };
+        // A local path is not an SFTP location.
+        assert!(err_of(&cpe_server::location::parse("/home/x")).contains("not an SFTP location"));
+        // An sftp URL with no user is refused (before any connection).
+        assert!(err_of(&cpe_server::location::parse("sftp://host.example.com/path")).contains("no user"));
     }
 
     #[test]

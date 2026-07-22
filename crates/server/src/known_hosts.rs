@@ -142,6 +142,22 @@ pub fn verify_host_key(
     }
 }
 
+/// The default `~/.ssh/known_hosts` path for the current user, from `$HOME` (or `%USERPROFILE%` on
+/// Windows). `None` if neither is set.
+pub fn default_known_hosts_path() -> Option<std::path::PathBuf> {
+    let home = std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE"))?;
+    Some(std::path::Path::new(&home).join(".ssh").join("known_hosts"))
+}
+
+/// Load + parse a `known_hosts` file. A missing or unreadable file yields an **empty** list (first-use
+/// TOFU), never an error — the safe default for host-key verification.
+pub fn load_known_hosts(path: &std::path::Path) -> Vec<KnownHost> {
+    match std::fs::read_to_string(path) {
+        Ok(contents) => parse_known_hosts(&contents),
+        Err(_) => Vec::new(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -263,5 +279,31 @@ malformed-line-only-two-fields ssh-rsa
             verify_host_key(&k, "host.example.com", 22, "ssh-ed25519", "AAAAIMPOSTOR"),
             HostKeyVerdict::Changed,
         );
+    }
+
+    #[test]
+    fn load_known_hosts_reads_and_parses_a_file() {
+        let dir = std::env::temp_dir().join(format!("cpe-kh-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join("known_hosts");
+        std::fs::write(&path, SAMPLE).unwrap();
+        let loaded = load_known_hosts(&path);
+        assert_eq!(loaded.len(), 4, "same entries as parse_known_hosts(SAMPLE)");
+        assert_eq!(loaded[3].marker, Some(Marker::Revoked));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn load_known_hosts_of_a_missing_file_is_empty_not_an_error() {
+        // A missing file ⇒ empty (first-use TOFU), never a panic/error.
+        assert!(load_known_hosts(std::path::Path::new("/no/such/cpe/known_hosts")).is_empty());
+    }
+
+    #[test]
+    fn default_known_hosts_path_ends_in_ssh_known_hosts() {
+        // CI always sets HOME (Unix) or USERPROFILE (Windows); if neither, the fn returns None (also fine).
+        if let Some(p) = default_known_hosts_path() {
+            assert!(p.ends_with(std::path::Path::new(".ssh").join("known_hosts")), "got {p:?}");
+        }
     }
 }
