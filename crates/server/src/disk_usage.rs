@@ -125,6 +125,45 @@ mod tests {
         let _ = fs::remove_dir_all(&d);
     }
 
+    /// Create a directory symlink; returns false on unprivileged Windows so the test can skip.
+    fn symlink_dir(target: &Path, link: &Path) -> bool {
+        #[cfg(unix)]
+        { std::os::unix::fs::symlink(target, link).is_ok() }
+        #[cfg(windows)]
+        { std::os::windows::fs::symlink_dir(target, link).is_ok() }
+    }
+
+    // The anti-cycle guarantee (CPE-611): symlinked directories are NOT followed. Without this, a symlink
+    // that points back up its own tree would send the recursive walk into an infinite loop (a production
+    // hang). We build a cycle (a symlink pointing back at its own parent) plus a large file reachable only
+    // *through* the symlink, and assert the scan terminates and never counts the through-symlink bytes.
+    // Sizes aren't asserted exactly: a symlink's own reported length is 0 on Windows but the target-path
+    // string length on Linux, so we assert the invariant (huge target uncounted) not a byte total.
+    #[test]
+    fn dir_size_does_not_follow_symlinked_dirs() {
+        let d = scratch("symlink_cycle");
+        fs::write(d.join("real.bin"), vec![0u8; 42]).unwrap();
+        // A big file that is ONLY reachable by following the symlink cycle back into d.
+        const BIG: usize = 500_000;
+        fs::write(d.join("big.bin"), vec![0u8; BIG]).unwrap();
+        // `loop` -> d : following it would re-scan d (incl. big.bin) forever.
+        if !symlink_dir(&d, &d.join("loop")) {
+            let _ = fs::remove_dir_all(&d);
+            return; // unprivileged Windows: symlink creation gated — skip
+        }
+        // Terminates (no hang). The tree's real bytes are counted exactly once — never re-counted through
+        // the loop — so the total is the two real files plus at most the symlink's own tiny length.
+        let total = dir_size(&d.to_string_lossy()).unwrap();
+        assert!((42 + BIG as u64..42 + BIG as u64 + 4096).contains(&total),
+            "symlink must not be followed (no re-count); got {total}");
+        // The per-child breakdown never recurses through the symlink: its child size stays tiny, nowhere
+        // near BIG (which it would reach if the loop were followed back into d).
+        let kids = dir_children_sizes(&d.to_string_lossy()).unwrap();
+        let looped = kids.iter().find(|c| c.name == "loop").unwrap();
+        assert!(looped.size < BIG as u64, "symlinked dir must not be walked; got {}", looped.size);
+        let _ = fs::remove_dir_all(&d);
+    }
+
     #[test]
     fn children_sizes_break_down_per_child() {
         let d = scratch("children");
