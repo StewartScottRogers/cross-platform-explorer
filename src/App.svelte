@@ -153,41 +153,8 @@
   let loading = false;
   // Monotonic token identifying the current folder load (CPE-664). A new load bumps it; batches from a
   // superseded stream carry a stale token and are dropped, so navigating away mid-load can't bleed rows.
-  let loadGen = 0;
-
-  // --- Directory-listing cache (CPE-756) -------------------------------------------------------------
-  // Navigating up/down the tree re-listed every folder from scratch, so Up / Back / re-open of a folder
-  // you were just in felt slow. This bounded LRU cache lets a *navigation* paint the folder's cached rows
-  // instantly (stale-while-revalidate: we re-list in the background and swap in only if it changed), and
-  // prefetches the parent + top subfolders so the likely next step is instant too. Reloads after a
-  // mutation (refresh / file ops) always go fresh (useCache=false), so the cache never shows stale content
-  // for our own changes. Purely a latency win — orthogonal to list *rendering* (virtualization, CPE-690).
-  const dirCache = new Map<string, DirEntry[]>(); // insertion order == LRU recency
-  const DIR_CACHE_MAX = 48;
-  function cacheGet(path: string): DirEntry[] | undefined {
-    const v = dirCache.get(path);
-    if (v) { dirCache.delete(path); dirCache.set(path, v); } // bump to most-recent
-    return v;
-  }
-  function cachePut(path: string, list: DirEntry[]): void {
-    dirCache.delete(path);
-    dirCache.set(path, list);
-    while (dirCache.size > DIR_CACHE_MAX) dirCache.delete(dirCache.keys().next().value as string);
-  }
-  const sameListing = (a: DirEntry[], b: DirEntry[]): boolean =>
-    a.length === b.length && a.every((e, i) => e.path === b[i].path && e.size === b[i].size && e.modified === b[i].modified);
-  /** Background revalidate of a cache-served folder — via rawInvoke (no busy cursor) so it can never make
-   *  navigation feel blocked; swaps fresh rows in only if the listing changed and it's still the active view.
-   *  (The aggressive subfolder prefetch was removed in CPE-757: its many concurrent `list_dir` calls piled up
-   *  and stalled the *next* navigation. Re-add only once the backend fs commands run off the main thread.) */
-  async function revalidateDir(path: string, gen: number): Promise<void> {
-    try {
-      const fresh = await rawInvoke<DirEntry[]>("list_dir", { path });
-      cachePut(path, fresh);
-      if (gen === loadGen && !sameListing(entries, fresh)) entries = fresh;
-    } catch { /* keep the cached view */ }
-  }
-  // ---------------------------------------------------------------------------------------------------
+  // Directory-listing fetch + LRU cache moved into <ExplorerPane> (CPE-676 domino 3b) — the pane owns
+  // fetching its own listing via `explorerPane.loadListing(path, useCache)`.
 
   // --- Diagnostics mode (CPE-758) --------------------------------------------------------------------
   // On-screen timing of EVERY backend/OS call, captured by the instrumented invoke wrapper (src/lib/
@@ -1030,6 +997,8 @@
   }
 
   let navToolbar: NavToolbar;
+  /** The pane instance — App calls `explorerPane.loadListing(path)` to fetch a folder (CPE-676 domino 3b). */
+  let explorerPane: ExplorerPane;
 
   $: activeTab = tabs.find((t) => t.id === activeId) as Tab;
   $: currentPath = current(activeTab.history) ?? HOME;
@@ -1070,69 +1039,11 @@
       return;
     }
 
-    // Stream the listing (CPE-664): paint the first batch immediately instead of blocking on the whole
-    // directory. A generation token supersedes an in-flight stream when the user navigates away, and the
-    // reactive `visible` pipeline re-sorts each time `entries` grows, so the final order is unchanged.
-    const gen = ++loadGen;
-    // Tell the backend to stop walking the folder we just left (CPE-665) so a huge/slow previous stream
-    // doesn't keep churning after we've moved on. No-op if it already finished.
-    if (gen > 1) rawInvoke("cancel_dir_stream", { streamId: gen - 1 }).catch(() => {});
-
-    // Navigation cache-hit (CPE-756): paint the cached rows instantly; revalidate + prefetch after the
-    // post-load hooks below. Only navigations pass useCache — reloads after a mutation always go fresh.
-    const servedFromCache = useCache ? cacheGet(path) : undefined;
-    if (servedFromCache) {
-      entries = servedFromCache;
-      loading = false;
-      await tick(); // let the reactive `visible` derive before the post-load hooks read it
-    } else {
-    entries = [];
-    loading = true;
-    try {
-      // Coalesce stream batches (CPE-689): buffer incoming batches and flush to `entries` once per
-      // animation frame, so the reactive `visible = sortEntries(entries…)` re-sorts a handful of times
-      // instead of once per 256-row batch (the O(n²)-ish cascade on big folders). The first frame's rows
-      // still paint immediately, preserving the streaming-liveness contract (STREAMING.md / CPE-662).
-      const channel = new Channel<DirEntry[]>();
-      let buffer: DirEntry[] = [];
-      let flushQueued = false;
-      const flush = () => {
-        flushQueued = false;
-        if (gen !== loadGen || buffer.length === 0) {
-          buffer = [];
-          return;
-        }
-        entries = entries.concat(buffer);
-        buffer = [];
-        loading = false; // first real rows are in the DOM — drop the "Loading…" placeholder
-      };
-      channel.onmessage = (batch) => {
-        if (gen !== loadGen) return; // superseded by a newer navigation — drop stale rows
-        buffer.push(...batch);
-        if (!flushQueued) {
-          flushQueued = true;
-          requestAnimationFrame(flush);
-        }
-      };
-      await rawInvoke("list_dir_stream", { path, streamId: gen, onEntry: channel });
-      // Settle: flush any rows still buffered when the walk completes (also covers test/no-rAF envs).
-      if (gen === loadGen && buffer.length > 0) flush();
-    } catch (e) {
-      if (gen === loadGen) {
-        entries = [];
-        error = friendlyError(String(e));
-      }
-    } finally {
-      if (gen === loadGen) loading = false;
-    }
-      // Cache the freshly-streamed listing so a later navigation back here paints instantly (CPE-756),
-      // and record the settle time for the on-screen perf readout (CPE-757).
-      if (gen === loadGen) cachePut(path, entries);
-    }
-
-    // A stream superseded mid-flight already had its state handed to the newer load — stop here so the
-    // post-load hooks below (recent-folder, selection remap, pending rename/select) don't fire stale.
-    if (gen !== loadGen) return;
+    // The pane owns the streaming fetch + directory cache now (CPE-676 domino 3b) and supersedes stale
+    // navigations itself, populating the bound `entries`/`loading`/`error`. A `false` return means a newer
+    // navigation took over, so we skip the post-load hooks below.
+    const applied = await explorerPane.loadListing(path, useCache);
+    if (!applied) return;
 
     // A folder we actually opened joins the recently-visited MRU (CPE-342). The
     // error guard means an unreadable path (or a file mistaken for a folder, e.g.
@@ -1160,10 +1071,6 @@
       if (i >= 0) selection = selectOnly(i);
       pendingSelectPath = "";
     }
-
-    // Stale-while-revalidate (CPE-756): a cache-served folder re-lists in the background — deferred a beat
-    // and via rawInvoke so it can't make the just-painted navigation feel blocked. Prefetch removed (CPE-757).
-    if (servedFromCache && !error) setTimeout(() => revalidateDir(path, gen), 300);
   }
 
   async function navigate(path: string) {
@@ -3045,6 +2952,7 @@
   <!-- File List Pane (middle column) -->
   <div class="pane-col">
     <ExplorerPane
+      bind:this={explorerPane}
       inHome={isHome && !smartFolder}
       {places}
       {drives}
@@ -3065,8 +2973,8 @@
       bind:visible
       bind:shown
       bind:selectedTag
-      {error}
-      {loading}
+      bind:error
+      bind:loading
       {cutPaths}
       {colorRules}
       {showFolderSizes}
