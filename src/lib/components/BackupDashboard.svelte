@@ -6,8 +6,7 @@
    * over the tested planner + the copy-engine backend; jobs persist via settings (App owns the store).
    */
   import { createEventDispatcher } from "svelte";
-  import { Channel } from "@tauri-apps/api/core";
-  import { invoke, rawInvoke } from "../invoke";
+  import { invoke, rawInvoke, createChannel } from "../invoke";
   import { addJob, removeJob, updateJob, planBackup, type BackupJob, type BackupPlan } from "../backup";
   import type { CompareNode } from "../treeDiff";
 
@@ -87,7 +86,7 @@
       total = p.copy.length + p.update.length + p.delete.length;
       // Stream per-file results so the row shows live progress instead of one blocking round-trip.
       const results: OpResult[] = [];
-      const channel = new Channel<OpResult[]>();
+      const channel = createChannel<OpResult[]>();
       channel.onmessage = (batch) => {
         for (const r of batch) results.push(r);
         progress = results.length;

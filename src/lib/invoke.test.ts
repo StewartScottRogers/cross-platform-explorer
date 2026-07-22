@@ -5,7 +5,12 @@ import { get } from "svelte/store";
 
 // Hoisted so the mock factory can reference it (vi.mock is hoisted above imports).
 const { coreInvoke } = vi.hoisted(() => ({ coreInvoke: vi.fn() }));
-vi.mock("@tauri-apps/api/core", () => ({ invoke: coreInvoke }));
+vi.mock("@tauri-apps/api/core", () => ({
+  invoke: coreInvoke,
+  Channel: class {
+    onmessage: ((v: unknown) => void) | null = null;
+  },
+}));
 
 import { invoke, rawInvoke, setTransport, isRemoteTransport, type Transport } from "./invoke";
 import { busy, _resetBusy, SHOW_AFTER_MS } from "./busy";
@@ -92,6 +97,7 @@ describe("transport seam (CPE-819)", () => {
     const seen: string[] = [];
     const remote: Transport = {
       invoke: async <T>(cmd: unknown) => { seen.push(String(cmd)); return `remote:${cmd}` as unknown as T; },
+      createChannel: () => ({ onmessage: null }),
     };
     setTransport(remote);
     expect(isRemoteTransport()).toBe(true);
@@ -102,7 +108,7 @@ describe("transport seam (CPE-819)", () => {
   });
 
   it("setTransport(null) restores the local transport", async () => {
-    setTransport({ invoke: async () => "remote" as never });
+    setTransport({ invoke: async () => "remote" as never, createChannel: () => ({ onmessage: null }) });
     expect(isRemoteTransport()).toBe(true);
     setTransport(null);
     expect(isRemoteTransport()).toBe(false);
@@ -111,7 +117,7 @@ describe("transport seam (CPE-819)", () => {
   });
 
   it("propagates a rejection from the active transport unchanged", async () => {
-    setTransport({ invoke: async () => { throw new Error("boom"); } });
+    setTransport({ invoke: async () => { throw new Error("boom"); }, createChannel: () => ({ onmessage: null }) });
     await expect(invoke("x")).rejects.toThrow("boom");
     expect(get(busy)).toBe(false); // busy still released on a remote error
   });

@@ -1,8 +1,8 @@
 <script lang="ts">
   import { onMount, onDestroy, tick } from "svelte";
-  import { convertFileSrc, Channel } from "@tauri-apps/api/core";
+  import { convertFileSrc } from "@tauri-apps/api/core";
   import { invoke } from "./lib/invoke";
-  import { rawInvoke } from "./lib/invoke";
+  import { rawInvoke, createChannel } from "./lib/invoke";
   import { open as openFolderDialog, save as saveFileDialog } from "@tauri-apps/plugin-dialog";
   import { check, type Update } from "@tauri-apps/plugin-updater";
   import { relaunch, exit } from "@tauri-apps/plugin-process";
@@ -343,7 +343,7 @@
       ]);
       const p = planBackup(s, d, job.mirror);
       const results: OpResult[] = [];
-      const channel = new Channel<OpResult[]>();
+      const channel = createChannel<OpResult[]>();
       channel.onmessage = (batch) => { for (const r of batch) results.push(r); };
       await rawInvoke("apply_backup_plan_stream", {
         sourceRoot: job.source, destRoot: job.dest,

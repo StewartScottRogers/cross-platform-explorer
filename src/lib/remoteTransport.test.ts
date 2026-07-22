@@ -2,9 +2,11 @@ import { describe, it, expect } from "vitest";
 import { RemoteTransport, RemoteCallError, type SocketLike } from "./remoteTransport";
 
 // A fake `cpe-net` server: it answers the Hello with a Welcome, then routes each `request` envelope
-// through `respond`, which returns the reply envelope's `message` (or null to stay silent). This proves
-// the handshake + id-correlation logic without a real socket, exactly as the browser would drive it.
-type Respond = (method: string, params: unknown, id: number) => Record<string, unknown> | null;
+// through `respond`, which returns the reply envelope's `message` — or an **array** of messages (a stream:
+// `stream_item`s then `stream_end`), or null to stay silent. This proves the handshake, id-correlation,
+// and streaming routing without a real socket, exactly as the browser would drive it.
+type Reply = Record<string, unknown>;
+type Respond = (method: string, params: unknown, id: number) => Reply | Reply[] | null;
 
 class MockSocket implements SocketLike {
   onopen: ((ev?: unknown) => void) | null = null;
@@ -36,7 +38,8 @@ class MockSocket implements SocketLike {
     }
     if (msg.type === "request") {
       const out = this.respond(msg.method, msg.params, env.id);
-      if (out) reply(out);
+      if (Array.isArray(out)) out.forEach(reply);
+      else if (out) reply(out);
     }
   }
 
@@ -120,5 +123,53 @@ describe("RemoteTransport", () => {
     await new Promise((r) => setTimeout(r, 10));
     sock!.close();
     await expect(pending).rejects.toThrow(/connection closed/);
+  });
+
+  it("routes stream_item frames to a channel and resolves with the StreamEnd value", async () => {
+    // A streaming call: the server sends two stream_item frames then a stream_end carrying the terminal
+    // stats. Each item is wrapped as a one-element batch (matching the Tauri Channel shape the call site
+    // expects), and the invoke resolves with StreamEnd.result.
+    const t = transportWith((method) =>
+      method === "list_dir_stream"
+        ? [
+            { type: "stream_item", name: "a.txt" },
+            { type: "stream_item", name: "b.txt" },
+            { type: "stream_end", result: { total: 2 } },
+          ]
+        : ok(null),
+    );
+    const ch = t.createChannel<Array<{ name: string }>>();
+    const batches: Array<Array<{ name: string }>> = [];
+    ch.onmessage = (b) => batches.push(b);
+
+    const final = await t.invoke("list_dir_stream", { path: "/x", onEntry: ch });
+    expect(batches).toEqual([[{ name: "a.txt" }], [{ name: "b.txt" }]]);
+    expect(final).toEqual({ total: 2 });
+  });
+
+  it("strips the channel from the wire params of a streaming call", async () => {
+    let sentParams: unknown;
+    const t = transportWith((method, params) => {
+      sentParams = params;
+      return method === "list_dir_stream" ? [{ type: "stream_end", result: null }] : ok(null);
+    });
+    const ch = t.createChannel();
+    ch.onmessage = () => {};
+    await t.invoke("list_dir_stream", { path: "/x", onEntry: ch });
+    // The channel is not serialized onto the wire — the server streams by protocol, not a channel handle.
+    expect(sentParams).toEqual({ path: "/x" });
+  });
+
+  it("rejects a streaming call when the server denies it mid-stream", async () => {
+    // A Response (not stream_end) on a streaming call is a denial/handler error.
+    const t = transportWith((method) =>
+      method === "list_dir_stream" ? err("unauthorized", "denied", false) : ok(null),
+    );
+    const ch = t.createChannel();
+    ch.onmessage = () => {};
+    await expect(t.invoke("list_dir_stream", { path: "/x", onEntry: ch })).rejects.toMatchObject({
+      name: "RemoteCallError",
+      code: "unauthorized",
+    });
   });
 });

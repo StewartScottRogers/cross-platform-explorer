@@ -6,8 +6,7 @@
    * which searches file *contents* instead.
    */
   import { createEventDispatcher, onMount } from "svelte";
-  import { Channel } from "@tauri-apps/api/core";
-  import { rawInvoke } from "../invoke";
+  import { rawInvoke, createChannel } from "../invoke";
   import Icon from "./Icon.svelte";
   import { t } from "../i18n";
   import { baseName, parentDir, pushRecentSearch } from "../contentSearch";
@@ -53,7 +52,7 @@
     // progressively instead of blocking on the whole walk; the reactive `hits` re-sorts each batch.
     const gen = ++searchGen;
     try {
-      const channel = new Channel<NameMatch[]>();
+      const channel = createChannel<NameMatch[]>();
       channel.onmessage = (batch) => {
         if (gen !== searchGen) return; // superseded by a newer search — drop stale hits
         result = { ...result, matches: result.matches.concat(batch) };

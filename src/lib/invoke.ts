@@ -8,7 +8,7 @@
 //
 // Streaming / self-progress call sites (agent sessions, updater downloads, sidecar streaming) that
 // already show their own progress import `rawInvoke` instead, so they don't double-signal (see CPE-550).
-import { invoke as coreInvoke } from "@tauri-apps/api/core";
+import { invoke as coreInvoke, Channel as TauriChannel } from "@tauri-apps/api/core";
 import { withBusy } from "./busy";
 import { diagnosticsEnabled, recordCall } from "./diagnostics";
 
@@ -22,14 +22,24 @@ import { diagnosticsEnabled, recordCall } from "./diagnostics";
 // the streaming (`ipc::Channel`) equivalents land with the reference server (CPE-820); this is the seam
 // they plug into, and it defaults to local so single-user/in-process behaviour is byte-for-byte unchanged.
 
-/** A backend-call transport — same call shape as Tauri's `invoke`. */
+/** A streaming sink: the caller sets `onmessage`, the transport pushes batches to it. Both a Tauri
+ *  `ipc::Channel` (local) and the remote transport's `RemoteChannel` satisfy this shape, so a streaming
+ *  call site is transport-agnostic (CPE-819). Create one via {@link createChannel}, never `new Channel()`. */
+export interface StreamChannel<T = unknown> {
+  onmessage: ((message: T) => void) | null;
+}
+
+/** A backend-call transport — same call shape as Tauri's `invoke`, plus a matching streaming channel. */
 export interface Transport {
   invoke<T = unknown>(...args: Parameters<typeof coreInvoke>): Promise<T>;
+  /** A streaming channel bound to this transport (local → Tauri `ipc::Channel`; remote → `RemoteChannel`). */
+  createChannel<T = unknown>(): StreamChannel<T>;
 }
 
 /** The local transport: historical in-process Tauri IPC. The default; zero overhead. */
 export const localTransport: Transport = {
   invoke: <T = unknown>(...args: Parameters<typeof coreInvoke>): Promise<T> => coreInvoke<T>(...args),
+  createChannel: <T = unknown>(): StreamChannel<T> => new TauriChannel<T>() as unknown as StreamChannel<T>,
 };
 
 let activeTransport: Transport = localTransport;
@@ -64,6 +74,16 @@ function timed<T>(cmd: unknown, p: Promise<T>): Promise<T> {
  */
 export function rawInvoke<T = unknown>(...args: Parameters<typeof coreInvoke>): Promise<T> {
   return timed(args[0], activeTransport.invoke<T>(...args));
+}
+
+/**
+ * Create a streaming {@link StreamChannel} bound to the active {@link Transport} (CPE-819). Under the
+ * local transport this is a real Tauri `ipc::Channel` (native streaming, byte-for-byte the historical
+ * path); under a remote transport it's a channel the transport feeds from `stream_item` frames. Streaming
+ * call sites use this instead of `new Channel()` so they work over either transport unchanged.
+ */
+export function createChannel<T = unknown>(): StreamChannel<T> {
+  return activeTransport.createChannel<T>();
 }
 
 /**
