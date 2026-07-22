@@ -15,8 +15,10 @@
   /** All stored baselines keyed by folder path. App supplies + persists; the entry for the current
       `path` is used, so switching folders in the field updates what Verify compares against. */
   export let baselines: Record<string, ChecksumEntry[]> = {};
+  /** Opt-in: verify all baselined folders once at startup (CPE-872). Two-way via the toggle below. */
+  export let verifyOnStartup = false;
 
-  const dispatch = createEventDispatcher<{ baseline: { path: string; entries: ChecksumEntry[] }; cancel: void }>();
+  const dispatch = createEventDispatcher<{ baseline: { path: string; entries: ChecksumEntry[] }; cancel: void; setVerifyOnStartup: boolean }>();
 
   let path = initialPath;
   let report: IntegrityReport | null = null;
@@ -114,6 +116,10 @@
       {/if}
     </div>
 
+    <label class="startup-opt" title="When on, all baselined folders are checked once each time the app starts.">
+      <input type="checkbox" checked={verifyOnStartup} on:change={(e) => dispatch("setVerifyOnStartup", e.currentTarget.checked)} />
+      Verify all baselined folders on startup
+    </label>
     <div class="actions">
       <button class="btn" data-testid="rebaseline-btn" disabled={loading || !path.trim()} on:click={rebaseline}>Rebaseline (accept current)</button>
       <button class="btn primary" on:click={() => dispatch("cancel")}>Close</button>
@@ -146,6 +152,7 @@
   .empty, .err { padding: 12px; color: var(--text-dim); font-size: 12.5px; }
   .err { color: #c0392b; }
   .actions { display: flex; justify-content: space-between; align-items: center; margin-top: 14px; }
+  .startup-opt { display: flex; align-items: center; gap: 8px; margin-top: 12px; font-size: 12.5px; color: var(--text-dim, #a0a0a0); cursor: pointer; }
   .btn { height: 30px; padding: 0 14px; border: 1px solid var(--border-strong); border-radius: var(--radius); background: var(--surface-alt); color: var(--text); }
   .btn:disabled { opacity: 0.4; }
   .btn.primary { background: var(--accent); border-color: var(--accent); color: #fff; }

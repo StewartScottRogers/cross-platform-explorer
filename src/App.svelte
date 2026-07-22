@@ -263,6 +263,8 @@
   let compareRight = "";
   let integrityOpen = false;
   let integrityBaselines: Record<string, ChecksumEntry[]> = settings.loadIntegrityBaselines();
+  /** Opt-in: verify all baselined folders once at startup (CPE-872). Off by default. */
+  let verifyOnStartup = settings.loadVerifyOnStartup();
   /** Verify every baselined folder at once (CPE-871) and surface a one-line summary — the integrity
    *  guard's "check all my monitored folders" action. Silent corruption / missing files raise an error
    *  notice; a clean sweep confirms. */
@@ -2682,6 +2684,11 @@
 
   onMount(async () => {
     applySettings();
+    // Opt-in integrity monitor (CPE-872): if enabled, verify all baselined folders once, a beat after
+    // startup so it never blocks first paint. Reuses the tested verify + summary-notice path.
+    if (verifyOnStartup && Object.keys(integrityBaselines).length > 0) {
+      setTimeout(() => { void verifyAllBaselines(); }, 1500);
+    }
     // Reveal the Agent Deck button only when the sidecar platform is present (CPE-351).
     platformActive().then((v) => (aiConsoleAvailable = v)).catch(() => {});
     // Listen for coding-agent sessions launched from the console so the explorer can surface
@@ -3461,10 +3468,12 @@
   <IntegrityDialog
     initialPath={isHome || archive ? "" : currentPath}
     baselines={integrityBaselines}
+    {verifyOnStartup}
     on:baseline={(e) => {
       integrityBaselines = { ...integrityBaselines, [e.detail.path]: e.detail.entries };
       settings.saveIntegrityBaselines(integrityBaselines);
     }}
+    on:setVerifyOnStartup={(e) => { verifyOnStartup = e.detail; settings.saveVerifyOnStartup(verifyOnStartup); }}
     on:cancel={() => (integrityOpen = false)}
   />
 {/if}
