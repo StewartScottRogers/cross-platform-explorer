@@ -25,13 +25,12 @@ notice with no way to diagnose.
 ## Layers (decomposed just-in-time)
 - **L1 — Diagnose + Repair** *(active, CPE-863)*: startup health sweep; per-sidecar status + real reason
   in Settings → Platform; a one-click **Repair**; specific launch-failure messages; bundle `repos`.
-- **L2 — Auto-repair (true self-heal)** *(planned)*: bundle a never-executed `.pristine` copy of each
-  sidecar; on startup/launch-failure auto-restore any missing/stale/wrong-version binary from it (reaping
-  a holding daemon first) — zero user action.
-- **L3 — Resilient launch** *(planned)*: retry spawn/handshake with backoff; auto-restart a crashed
+- **L2 — Auto-repair (true self-heal)** *(done, CPE-867)*: never-executed `.pristine` copy of each sidecar;
+  startup sweep restores a missing/stale exe from it (after reaping a holding daemon) — zero user action.
+- **L3 — Resilient launch** *(active, CPE-868)*: retry spawn/handshake with backoff; auto-restart a crashed
   sidecar; re-check health after.
 
 ## Children
-- CPE-863 — Sidecar health diagnosis + Repair button (L1) + bundle repos — **Done** (shipped via #138)
-- (L2) Auto-repair from a bundled pristine copy — not yet ticketed
-- (L3) Resilient launch: retry + auto-restart — not yet ticketed
+- CPE-863 — Sidecar health diagnosis + Repair button (L1) + bundle repos — **Done** (#138)
+- CPE-867 — Auto-restore from a bundled pristine copy (L2) — **Done** (#145)
+- CPE-868 — Resilient launch: retry with backoff (L3) — In Progress
