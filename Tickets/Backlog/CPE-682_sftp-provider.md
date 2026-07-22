@@ -21,6 +21,11 @@ host-key verification. Needs network + attended testing against a real server. P
 - [ ] cargo-tested where possible (parsing/error paths); clippy clean both modes.
 
 ## Work Log
+- 2026-07-22 — **Provider built + auth complete (CPE-899 + CPE-900).** `crates/sftp` (`cpe-sftp`): SFTP
+  `FileSystemProvider` over russh (ring backend), host-key verification via `known_hosts` at connect,
+  **password + SSH-key auth**, list/stat/read/write/mkdir/delete — all proven against an in-process
+  russh-sftp test server (no Docker; 3-OS CI green). AC #1/#2/#3 met. Remaining is app-facing: the
+  connections UI + keychain (CPE-683) and streaming/async transfers (CPE-684).
 - 2026-07-22 (nightshift) — **Host-key verification core landed headlessly (CPE-897).** New
   `cpe-server::known_hosts` parses a `known_hosts` file and decides `Trusted`/`Unknown`/`Changed` for a
   presented host key (TOFU + loud changed-key refusal — AC #2's security heart), decoupled from any ssh
