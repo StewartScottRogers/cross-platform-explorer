@@ -12,7 +12,7 @@
 //! establishes the implicit local [`Session`]); the per-request security evaluation is where
 //! the multi-client principal will flow once AuthN providers land (CPE-817).
 
-use std::io::{BufReader, BufWriter};
+use std::io::{self, BufRead, BufReader, BufWriter, Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::sync::Arc;
 
@@ -25,6 +25,78 @@ use cpe_server::ctx::ServerCtx;
 use cpe_server::dispatch::Dispatcher;
 
 use crate::wire::{read_envelope, write_envelope};
+use crate::ws;
+
+/// Reads/writes CPE-811 [`Envelope`]s over some framing, so the session loop is transport-agnostic
+/// (CPE-819): raw length-prefixed TCP for a `Client(Rust)`, or WebSocket text frames for the browser.
+trait EnvelopeIo {
+    fn read_env(&mut self) -> io::Result<Option<Envelope>>;
+    fn write_env(&mut self, env: &Envelope) -> io::Result<()>;
+}
+
+/// Raw length-prefixed wire (the historical `Client(Rust)` transport).
+struct WireIo<R, W> {
+    reader: R,
+    writer: W,
+}
+impl<R: BufRead, W: Write> EnvelopeIo for WireIo<R, W> {
+    fn read_env(&mut self) -> io::Result<Option<Envelope>> {
+        read_envelope(&mut self.reader)
+    }
+    fn write_env(&mut self, env: &Envelope) -> io::Result<()> {
+        write_envelope(&mut self.writer, env)
+    }
+}
+
+/// WebSocket transport: the envelope JSON rides as a text frame's payload (CPE-819). Ping/pong and other
+/// control frames are skipped; a close frame (or EOF) ends the session.
+struct WsIo<R, W> {
+    reader: R,
+    writer: W,
+}
+impl<R: Read, W: Write> EnvelopeIo for WsIo<R, W> {
+    fn read_env(&mut self) -> io::Result<Option<Envelope>> {
+        loop {
+            match ws::read_frame(&mut self.reader)? {
+                None => return Ok(None),
+                Some(f) if f.opcode == ws::op::CLOSE => return Ok(None),
+                Some(f) if f.opcode == ws::op::TEXT || f.opcode == ws::op::BINARY => {
+                    let s = String::from_utf8_lossy(&f.payload);
+                    return Envelope::from_json(&s)
+                        .map(Some)
+                        .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e));
+                }
+                Some(_) => continue, // ping/pong/continuation — ignore, read the next frame
+            }
+        }
+    }
+    fn write_env(&mut self, env: &Envelope) -> io::Result<()> {
+        let json = env.to_json().map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+        ws::write_text(&mut self.writer, &json)
+    }
+}
+
+/// Read the WebSocket upgrade request's headers and return the `Sec-WebSocket-Key` (empty if absent).
+/// The request line was already peeked; this consumes through the blank line that ends the headers.
+fn read_ws_key(reader: &mut impl BufRead) -> io::Result<String> {
+    let mut key = String::new();
+    loop {
+        let mut line = String::new();
+        if reader.read_line(&mut line)? == 0 {
+            break;
+        }
+        let trimmed = line.trim_end();
+        if trimmed.is_empty() {
+            break; // blank line ends the headers
+        }
+        if let Some((name, value)) = trimmed.split_once(':') {
+            if name.trim().eq_ignore_ascii_case("sec-websocket-key") {
+                key = value.trim().to_string();
+            }
+        }
+    }
+    Ok(key)
+}
 
 /// A streaming method handler (CPE-819/820): produces a series of JSON items to be sent as
 /// `StreamItem`s over the wire, terminated by `StreamEnd`. This is the over-the-wire equivalent of the
@@ -185,35 +257,55 @@ impl ServerRuntime {
         let mut reader = BufReader::new(stream.try_clone()?);
         let mut writer = BufWriter::new(stream);
 
+        // Pick the transport from the first bytes without consuming them (CPE-819): a browser opens with
+        // an HTTP `GET …` upgrade; a Client(Rust) sends a length-prefixed envelope. WebSocket clients get
+        // the RFC 6455 101 handshake; then both speak CPE-811 envelopes through the shared session loop.
+        if reader.fill_buf()?.starts_with(b"GET ") {
+            let key = read_ws_key(&mut reader)?;
+            let accept = ws::accept_key(&key);
+            write!(
+                writer,
+                "HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n\
+                 Sec-WebSocket-Accept: {accept}\r\n\r\n"
+            )?;
+            writer.flush()?;
+            self.run_session(&mut WsIo { reader, writer })
+        } else {
+            self.run_session(&mut WireIo { reader, writer })
+        }
+    }
+
+    /// Drive one already-transported session: handshake, then the request/stream loop until the peer
+    /// closes — over whatever [`EnvelopeIo`] framing (raw wire or WebSocket).
+    fn run_session(&self, io: &mut dyn EnvelopeIo) -> std::io::Result<()> {
         // --- Handshake: expect a Hello, reply Welcome or Rejected. ---
-        let first = match read_envelope(&mut reader)? {
+        let first = match io.read_env()? {
             Some(env) => env,
             None => return Ok(()), // peer left before saying hello
         };
         let (reply, principal) = self.handshake(first.message);
         let rejected = matches!(reply, Message::Rejected(_));
-        write_envelope(&mut writer, &Envelope::new(first.id, reply))?;
+        io.write_env(&Envelope::new(first.id, reply))?;
         if rejected {
             return Ok(());
         }
 
         // --- Request loop. ---
-        while let Some(env) = read_envelope(&mut reader)? {
+        while let Some(env) = io.read_env()? {
             match env.message {
                 Message::Request(req) if self.stream_handlers.contains_key(&req.method) => {
                     // Streaming method (CPE-819): security-check, then let the handler push StreamItems
-                    // to the socket *as produced* (incremental), all correlated by the request's
-                    // envelope id, terminated by StreamEnd. A denial or handler error is a single
-                    // Response instead — the client's `call_stream` surfaces it as the stream's error.
+                    // to the peer *as produced* (incremental), correlated by the request's envelope id,
+                    // terminated by StreamEnd. A denial/handler error is a single Response instead.
                     let id = env.id;
                     if let Err(e) = self.security_decision(&principal, &req) {
-                        write_envelope(&mut writer, &Envelope::new(id, Message::Response(Response { result: Err(e) })))?;
+                        io.write_env(&Envelope::new(id, Message::Response(Response { result: Err(e) })))?;
                     } else {
                         let handler = &self.stream_handlers[&req.method];
                         let mut io_err: Option<std::io::Error> = None;
                         let outcome = {
                             let mut emit = |item: serde_json::Value| -> std::ops::ControlFlow<()> {
-                                match write_envelope(&mut writer, &Envelope::new(id, Message::StreamItem(item))) {
+                                match io.write_env(&Envelope::new(id, Message::StreamItem(item))) {
                                     Ok(()) => std::ops::ControlFlow::Continue(()),
                                     Err(e) => {
                                         io_err = Some(e);
@@ -227,14 +319,14 @@ impl ServerRuntime {
                             return Err(e); // the peer's write failed — drop the connection
                         }
                         match outcome {
-                            Ok(()) => write_envelope(&mut writer, &Envelope::new(id, Message::StreamEnd))?,
-                            Err(e) => write_envelope(&mut writer, &Envelope::new(id, Message::Response(Response { result: Err(e) })))?,
+                            Ok(()) => io.write_env(&Envelope::new(id, Message::StreamEnd))?,
+                            Err(e) => io.write_env(&Envelope::new(id, Message::Response(Response { result: Err(e) })))?,
                         }
                     }
                 }
                 Message::Request(req) => {
                     let resp = self.dispatch_guarded(&principal, req);
-                    write_envelope(&mut writer, &Envelope::new(env.id, Message::Response(resp)))?;
+                    io.write_env(&Envelope::new(env.id, Message::Response(resp)))?;
                 }
                 // A re-sent Hello is tolerated (no-op); anything else ends the session.
                 Message::Hello(_) => {}

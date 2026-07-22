@@ -39,7 +39,12 @@ mod tests {
     use std::sync::Arc;
     use std::time::{Duration, Instant};
 
-    use cpe_contract::{ContractVersion, ErrorCode, Principal, RejectCode, Request, CONTRACT_VERSION};
+    use cpe_contract::{
+        ContractVersion, Envelope, ErrorCode, Hello, Message, Principal, RejectCode, Request,
+        CONTRACT_VERSION,
+    };
+    use crate::ws;
+    use std::io::{BufRead as _, Write as _};
     use cpe_security::authn::ApiTokenAuthenticator;
     use cpe_security::authz::{CapabilityAuthorizer, PathScopeAuthorizer};
     use cpe_security::{
@@ -94,6 +99,81 @@ mod tests {
             .map(|e| e["name"].as_str().unwrap().to_string())
             .collect();
         assert!(names.iter().any(|n| n == "a.txt"), "got {names:?}");
+    }
+
+    #[test]
+    fn a_websocket_client_handshakes_and_browses_over_the_wire() {
+        // Prove the browser transport (CPE-819): an HTTP upgrade → 101 → then CPE-811 envelopes ride as
+        // WebSocket text frames through the same handshake + dispatch loop the raw Client(Rust) uses.
+        let dir = scratch("wsbrowse");
+        std::fs::write(dir.join("w.txt"), b"hi").unwrap();
+        let addr = start_server(SecurityChain::local());
+
+        let mut stream = std::net::TcpStream::connect(addr).unwrap();
+        stream
+            .write_all(
+                b"GET / HTTP/1.1\r\nHost: x\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n\
+                  Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\n\r\n",
+            )
+            .unwrap();
+        let mut reader = std::io::BufReader::new(stream.try_clone().unwrap());
+        let mut status = String::new();
+        reader.read_line(&mut status).unwrap();
+        assert!(status.contains("101"), "expected a 101 upgrade, got {status:?}");
+        loop {
+            let mut l = String::new();
+            reader.read_line(&mut l).unwrap();
+            if l.trim().is_empty() {
+                break; // end of the 101 response headers
+            }
+        }
+
+        // A client frame is masked (RFC 6455); encode the length in the 7-bit or 16-bit extended form.
+        let send = |s: &mut std::net::TcpStream, env: &Envelope| {
+            let payload = env.to_json().unwrap().into_bytes();
+            let mask = [0x12u8, 0x34, 0x56, 0x78];
+            let mut frame = vec![0x80 | ws::op::TEXT];
+            let len = payload.len();
+            if len < 126 {
+                frame.push(0x80 | len as u8);
+            } else {
+                frame.push(0x80 | 126);
+                frame.extend_from_slice(&(len as u16).to_be_bytes());
+            }
+            frame.extend_from_slice(&mask);
+            for (i, b) in payload.iter().enumerate() {
+                frame.push(b ^ mask[i & 3]);
+            }
+            s.write_all(&frame).unwrap();
+        };
+        let recv = |r: &mut std::io::BufReader<std::net::TcpStream>| -> Envelope {
+            let f = ws::read_frame(r).unwrap().unwrap();
+            Envelope::from_json(&String::from_utf8_lossy(&f.payload)).unwrap()
+        };
+
+        // Handshake over WS: Hello → Welcome.
+        send(&mut stream, &Envelope::new(0, Message::Hello(Hello {
+            client_id: "browser".into(),
+            client_version: "0".into(),
+            contract_version: CONTRACT_VERSION,
+            principal: None,
+        })));
+        assert!(matches!(recv(&mut reader).message, Message::Welcome(_)), "expected a Welcome frame");
+
+        // A request over WS: list_dir returns the folder's entries.
+        send(&mut stream, &Envelope::new(1, Message::Request(Request {
+            method: "list_dir".into(),
+            params: serde_json::json!({ "path": dir.to_string_lossy() }),
+        })));
+        match recv(&mut reader).message {
+            Message::Response(r) => {
+                let val = r.result.expect("list_dir over WS should succeed");
+                let names: Vec<String> =
+                    val.as_array().unwrap().iter().map(|e| e["name"].as_str().unwrap().to_string()).collect();
+                assert!(names.iter().any(|n| n == "w.txt"), "got {names:?}");
+            }
+            other => panic!("expected a Response frame, got {other:?}"),
+        }
     }
 
     #[test]
