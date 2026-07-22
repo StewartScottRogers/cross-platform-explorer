@@ -170,6 +170,14 @@
   let noticeTimer: ReturnType<typeof setTimeout> | undefined;
 
   let selection: Selection = emptySelection();
+
+  // Dual-pane / commander mode (CPE-677, epic CPE-617). Pane B is a second <ExplorerPane> rendered beside
+  // pane A when `dualPane` is on, navigating independently via navigateB/openB. Single-pane (default) is
+  // unchanged. `activePane` drives the focus ring + Tab switch.
+  let dualPane = settings.loadDualPane();
+  let paneBPath = settings.loadPaneBPath();
+  let explorerPaneB: ExplorerPane | undefined;
+
   // Owned+derived inside <ExplorerPane> (CPE-676); bound back here so App's ops keep reading it. When the
   // split lands (CPE-677) this comes from the active pane instead of a single binding.
   let selectedEntries: DirEntry[] = [];
@@ -486,6 +494,7 @@
     { id: "view.hidden", group: $t("palette.groupView"), label: showHidden ? $t("palette.hideHidden") : $t("palette.showHidden"), run: () => { showHidden = !showHidden; settings.saveShowHidden(showHidden); } },
     { id: "view.folderSizes", group: $t("palette.groupView"), label: showFolderSizes ? $t("palette.hideFolderSizes") : $t("palette.showFolderSizes"), keywords: "folder size recursive subtree column", run: toggleFolderSizes },
     { id: "view.foldersFirst", group: $t("palette.groupView"), label: foldersFirst ? $t("palette.mixFolders") : $t("palette.groupFolders"), run: () => { foldersFirst = !foldersFirst; settings.saveFoldersFirst(foldersFirst); } },
+    { id: "view.dualPane", group: $t("palette.groupView"), label: dualPane ? $t("palette.singlePane") : $t("palette.dualPane"), keywords: "dual pane split commander two side by side", run: toggleDualPane },
     { id: "tool.findByName", group: $t("palette.groupTools"), label: $t("palette.findByName"), shortcut: "Ctrl+P", run: () => (fileSearchOpen = true), enabled: inFolder },
     { id: "tool.searchInFiles", group: $t("palette.groupTools"), label: $t("palette.searchInFiles"), shortcut: "Ctrl+Shift+F", run: () => (contentSearchOpen = true), enabled: inFolder },
     { id: "tool.findDuplicates", group: $t("palette.groupTools"), label: $t("palette.findDuplicates"), run: () => (duplicatesOpen = true), enabled: inFolder },
@@ -1101,6 +1110,20 @@
   async function navigate(path: string) {
     setHistory(visit(activeTab.history, path));
     await loadPath(path, false, true); // navigation uses the listing cache (CPE-756)
+  }
+
+  /** Navigate pane B independently of pane A (dual-pane, CPE-677); persists its folder. */
+  async function navigateB(path: string) {
+    paneBPath = path;
+    settings.savePaneBPath(path);
+    await explorerPaneB?.loadListing(path, true);
+  }
+
+  /** Toggle single ⇄ dual pane (CPE-677); persists. On first enable pane B opens pane A's folder. */
+  function toggleDualPane() {
+    dualPane = !dualPane;
+    settings.saveDualPane(dualPane);
+    if (dualPane) void navigateB(paneBPath || currentPath || homePath);
   }
 
   /** Navigate to a file's folder and select + scroll to the file itself (CPE-423). Used by the
