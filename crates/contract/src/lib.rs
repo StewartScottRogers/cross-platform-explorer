@@ -326,8 +326,15 @@ pub enum Message {
     Response(Response),
     /// server → client: one streamed item, correlated by the envelope `id`.
     StreamItem(serde_json::Value),
-    /// server → client: the stream for this envelope `id` has completed.
-    StreamEnd,
+    /// server → client: the stream for this envelope `id` has completed, carrying the producer's terminal
+    /// value — the stats/summary a local `*_stream` command returns alongside its `ipc::Channel` (total
+    /// count, `truncated`, …). A **struct** variant, not a newtype: an internally-tagged enum (`tag =
+    /// "type"`) cannot serialize a newtype variant wrapping a scalar/array, but the struct's field can hold
+    /// any JSON. `result` defaults to `null` so an older peer that sent a bare `stream_end` still decodes.
+    StreamEnd {
+        #[serde(default)]
+        result: serde_json::Value,
+    },
     Error(ContractError),
 }
 
@@ -471,7 +478,7 @@ mod tests {
     #[test]
     fn local_envelope_omits_the_session_slot() {
         // The single-user local frame must not carry session bytes (fast/small path).
-        let env = Envelope::new(1, Message::StreamEnd);
+        let env = Envelope::new(1, Message::StreamEnd { result: serde_json::Value::Null });
         let json = env.to_json().unwrap();
         assert!(!json.contains("session"), "local frame should omit session: {json}");
         // …but it still round-trips back to the default local session.
@@ -571,7 +578,9 @@ mod tests {
                 params: serde_json::json!({ "path": "a.txt" }),
             }),
             Message::StreamItem(serde_json::json!({ "name": "a.txt" })),
-            Message::StreamEnd,
+            // A bare number as the terminal value proves the struct variant serializes a scalar result —
+            // a newtype `StreamEnd(Value)` would fail here under the internally-tagged enum.
+            Message::StreamEnd { result: serde_json::json!(7) },
             Message::Error(ContractError::new(ErrorCode::Transport, "pipe closed", true)),
         ];
         for m in msgs {
