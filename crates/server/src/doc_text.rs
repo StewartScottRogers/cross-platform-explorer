@@ -5,6 +5,17 @@
 
 use std::fs;
 
+/// Value of a single ASCII hex digit, or `None`. Used to decode RTF `\'XX` byte escapes without slicing
+/// the source `str` (which would panic if `\'` were followed by a multi-byte UTF-8 char in malformed RTF).
+fn hex_digit(b: u8) -> Option<u8> {
+    match b {
+        b'0'..=b'9' => Some(b - b'0'),
+        b'a'..=b'f' => Some(b - b'a' + 10),
+        b'A'..=b'F' => Some(b - b'A' + 10),
+        _ => None,
+    }
+}
+
 /// Decode the five predefined XML entities. Applied after tag stripping.
 fn decode_xml_entities(s: &str) -> String {
     s.replace("&lt;", "<")
@@ -148,9 +159,11 @@ pub fn rtf_text(path: &str) -> Result<String, String> {
                 }
                 let n = bytes[i];
                 if n == b'\'' && i + 2 < bytes.len() {
+                    // `\'XX` = one byte in the current code page. Decode from the two raw bytes directly —
+                    // slicing `raw` here would panic if `\'` were followed by a multi-byte UTF-8 char.
                     if skip_depth < 0 {
-                        if let Ok(v) = u8::from_str_radix(&raw[i + 1..i + 3], 16) {
-                            out.push(v as char);
+                        if let (Some(h), Some(l)) = (hex_digit(bytes[i + 1]), hex_digit(bytes[i + 2])) {
+                            out.push((h * 16 + l) as char);
                         }
                     }
                     i += 3;
@@ -230,6 +243,21 @@ mod tests {
         assert!(text.contains("Second line."), "second paragraph present");
         assert!(!text.contains("fonttbl"), "font table dropped");
         assert!(!text.contains("Arial"), "font table contents dropped");
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn rtf_text_decodes_hex_escapes_and_survives_malformed_ones() {
+        let d = scratch("rtf_hex");
+        let f = d.join("hex.rtf");
+        // Valid `\'41` = 'A'. Then a MALFORMED `\'` immediately followed by a 3-byte UTF-8 char (€):
+        // the old code sliced `raw[i+1..i+3]`, splitting the '€' mid-byte and panicking. It must instead
+        // skip the bad escape and keep going.
+        let rtf = "{\\rtf1 start\\'41\\'\u{20AC}end}";
+        fs::write(&f, rtf).unwrap();
+        let text = rtf_text(&f.to_string_lossy()).unwrap(); // must not panic
+        assert!(text.contains("startA"), "valid \\'41 decodes to A: {text:?}");
+        assert!(text.contains("end"), "parsing continues past the malformed escape: {text:?}");
         let _ = fs::remove_dir_all(&d);
     }
 
