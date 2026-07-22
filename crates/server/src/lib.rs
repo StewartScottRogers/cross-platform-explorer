@@ -31,6 +31,10 @@ pub mod provider;
 /// core of the future SFTP provider, decoupled from any ssh crate so it's headless-testable (CPE-682).
 pub mod known_hosts;
 
+/// Saved remote-connection profiles (the persisted list behind the "Connections" sidebar, secrets
+/// excluded — those live in the OS keychain). Pure data + JSON persistence (CPE-683).
+pub mod connections;
+
 /// Tag store: user tags + a colour label per path, persisted as `tags.json` (CPE-635). Pure model
 /// helpers + `ServerCtx`-based command entry points (CPE-815 migration).
 pub mod tags;
