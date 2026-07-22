@@ -507,7 +507,7 @@
     { id: "view.hidden", group: $t("palette.groupView"), label: showHidden ? $t("palette.hideHidden") : $t("palette.showHidden"), run: () => { showHidden = !showHidden; settings.saveShowHidden(showHidden); } },
     { id: "view.folderSizes", group: $t("palette.groupView"), label: showFolderSizes ? $t("palette.hideFolderSizes") : $t("palette.showFolderSizes"), keywords: "folder size recursive subtree column", run: toggleFolderSizes },
     { id: "view.foldersFirst", group: $t("palette.groupView"), label: foldersFirst ? $t("palette.mixFolders") : $t("palette.groupFolders"), run: () => { foldersFirst = !foldersFirst; settings.saveFoldersFirst(foldersFirst); } },
-    { id: "view.dualPane", group: $t("palette.groupView"), label: dualPane ? "Single pane" : "Dual pane", keywords: "dual pane split commander two side by side", run: toggleDualPane },
+    { id: "view.dualPane", group: $t("palette.groupView"), label: dualPane ? $t("palette.singlePane") : $t("palette.dualPane"), keywords: "dual pane split commander two side by side", run: toggleDualPane },
     { id: "view.paneCopy", group: $t("palette.groupView"), label: "Copy to other pane (F5)", keywords: "commander copy other pane f5", run: commanderCopy, enabled: () => dualPane },
     { id: "view.paneMove", group: $t("palette.groupView"), label: "Move to other pane (F6)", keywords: "commander move other pane f6", run: commanderMove, enabled: () => dualPane },
     { id: "view.paneSwap", group: $t("palette.groupView"), label: "Swap panes (Ctrl+U)", keywords: "commander swap panes exchange", run: swapPanes, enabled: () => dualPane },
