@@ -2,14 +2,22 @@
 id: CPE-617
 title: "EPIC: Dual-pane commander mode"
 type: Task
-status: In Progress
+status: Done
 priority: Low
 component: Frontend
 tags: [epic]
 estimate: 4h+
 created: 2026-07-18
-closed:
+closed: 2026-07-22
 ---
+
+## Closed — 2026-07-22 (nightshift)
+All four children Done: **CPE-676** (extract `<ExplorerPane>`), **CPE-677** (dual-pane toggle + split +
+active-pane ring + Tab), **CPE-679** (persist/restore each pane's path), **CPE-678** (commander keys — F5
+copy / F6 move / Ctrl+U swap / mirror, via the transfer queue). Opt-in, OFF by default; single-pane
+unchanged. Definition of Done met (visual confirmation deferred to user review; single-pane provably
+unaffected). Follow-ups tracked: i18n-ify the hardcoded palette/key labels; pane-B DnD/context-menu +
+per-pane history are future refinements.
 
 ## Goal
 
