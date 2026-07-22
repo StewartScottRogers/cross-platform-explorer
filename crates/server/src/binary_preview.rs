@@ -10,10 +10,12 @@ use std::fs;
 /// binary is never slurped into memory (CPE-633).
 pub fn hex_dump(path: &str, max: usize) -> Result<String, String> {
     use std::io::Read;
+    let file = fs::File::open(path).map_err(|e| e.to_string())?;
+    // The file's true length, captured before the capped read, so we can tell the user when the dump is
+    // partial. (Reading with `.take(max)` alone can't reveal that more bytes exist.)
+    let total = file.metadata().map_err(|e| e.to_string())?.len();
     let mut bytes = Vec::new();
-    fs::File::open(path)
-        .map_err(|e| e.to_string())?
-        .take(max as u64)
+    file.take(max as u64)
         .read_to_end(&mut bytes)
         .map_err(|e| e.to_string())?;
     let n = bytes.len();
@@ -30,8 +32,8 @@ pub fn hex_dump(path: &str, max: usize) -> Result<String, String> {
         }
         out.push_str(&format!("{:08x}  {hex:<49}|{ascii}|\n", i * 16));
     }
-    if bytes.len() > n {
-        out.push_str(&format!("\n… {} more bytes (showing first {n}).\n", bytes.len() - n));
+    if total > n as u64 {
+        out.push_str(&format!("\n… {} more bytes (showing first {n} of {total}).\n", total - n as u64));
     }
     Ok(out)
 }
@@ -201,6 +203,28 @@ mod tests {
         assert!(out.contains("00000000") && out.contains("00000010"));
         assert!(!out.contains("00000020"), "dumped past the max");
         assert!(out.contains("ab ab"), "bytes rendered");
+        // A partial dump MUST tell the user the file continues (this notice was previously dead code —
+        // `n == bytes.len()` made the "more bytes" branch unreachable, so a huge file looked complete).
+        assert!(out.contains("9968 more bytes"), "truncation notice with the remaining count: {out}");
+        assert!(out.contains("first 32 of 10000"), "notice states shown/total: {out}");
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn hex_dump_of_a_fully_shown_file_has_no_truncation_notice() {
+        let d = scratch("hexfull");
+        fs::write(d.join("s.bin"), [0x41u8, 0x42, 0x43]).unwrap(); // 3 bytes, cap far above
+        let out = hex_dump(&d.join("s.bin").to_string_lossy(), 64 * 1024).unwrap();
+        assert!(!out.contains("more bytes"), "a complete dump must not claim there's more: {out}");
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn hex_dump_of_an_empty_file_is_empty_and_safe() {
+        let d = scratch("hexempty");
+        fs::write(d.join("e.bin"), b"").unwrap();
+        let out = hex_dump(&d.join("e.bin").to_string_lossy(), 1024).unwrap();
+        assert!(out.is_empty(), "no rows, no truncation notice for a 0-byte file: {out:?}");
         let _ = fs::remove_dir_all(&d);
     }
 }
