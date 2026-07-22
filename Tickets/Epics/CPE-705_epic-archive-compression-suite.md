@@ -2,7 +2,7 @@
 id: CPE-705
 title: "EPIC: Archive & compression suite"
 type: Task
-status: Proposed
+status: In Progress
 priority: Medium
 component: Multiple
 tags: [epic]
@@ -34,3 +34,18 @@ compressing a selection, and extracting are core file-manager expectations the a
 - A user can open an archive, browse its tree, and preview files inside it.
 - Compressing a selection and extracting (here / to) both work through the transfer queue with progress.
 - Password-protected archives can be read and created; no regression to the existing archive preview.
+
+## Work Log
+2026-07-22 (nightshift) — **Activated.** Grep-first: the Rust foundation is **largely already built** —
+`archive.rs` has archive reading (CPE-064), `compress_to_zip`, `extract_archive` (here / to, with a
+zip-slip guard), and `extract_archive_entry` (CPE-251/252/242). Open questions resolved (best-guess):
+**crate choices** = the existing `zip` / `tar` + `flate2` / `sevenz-rust` (all pure-Rust, no sys libs; 7z
+create deferred — read only for now); **edit model** = extract-modify-repack only (no in-place); **depth**
+= browse + preview already work, this epic adds create/extract/navigate. First slice shipped:
+**CPE-908** — tar.gz creation (`compress_to_targz`) + a format-dispatching `compress_archive`.
+
+## Children
+- CPE-908 — tar.gz creation + `compress_archive` dispatcher (backend) — **Done**.
+- (next) Compress-selection + extract-here/extract-to context actions with conflict handling — **GUI + command wiring**.
+- (next) Navigate-into-archive routing (an archive as a browsable location) — **GUI**.
+- (next) Password-protected archive read + create — **backend + GUI**.
