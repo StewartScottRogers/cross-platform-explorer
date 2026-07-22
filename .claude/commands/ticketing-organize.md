@@ -4,7 +4,21 @@ Scan the `Done/` folder and subdivide any directory that exceeds the file thresh
 by moving its tickets one level deeper. Safe to run at any time — already-compliant
 folders are untouched.
 
-Then present an action menu following the rules in menu-render.md.
+## How to run (CPE-865)
+
+The algorithm below is implemented once, canonically, in **`scripts/organize-done.mjs`** — the same script
+`/ticketing-work` runs on close and the `SessionStart` hook runs automatically. Don't re-implement it in
+prose; just run it and report its summary:
+
+```
+npm run organize:done      # (= node scripts/organize-done.mjs)
+```
+
+It's idempotent (only moves when a folder exceeds the threshold), only *moves* files (never edits), and
+prints `RESULT moved=… created=… skipped=… warned=…`. For a `dry-run` argument, describe what it would do
+without running it. Then present an action menu following the rules in menu-render.md.
+
+The spec the script implements (kept for reference):
 
 ---
 

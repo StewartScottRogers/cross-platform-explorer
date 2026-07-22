@@ -11,6 +11,7 @@
     "check": "svelte-check --tsconfig ./tsconfig.json",
     "test": "vitest run",
     "test:watch": "vitest",
+    "organize:done": "node scripts/organize-done.mjs",
     "tauri": "tauri"
   },
   "dependencies": {
