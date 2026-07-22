@@ -112,20 +112,13 @@ fn board_move_impl(root: String, id: String, to_column: String) -> Result<(), St
     let status = ticket_board::status_for_column(&to_column).unwrap_or(folder);
     let tickets = std::path::Path::new(&root).join("Tickets");
 
-    // Locate the ticket file: `<id>_*.md` in one of the columns.
+    // Locate the ticket file: `<id>_*.md` in one of the columns. Recursive, so an archived Done ticket
+    // (in a dated `Done/YYYY/…` subfolder) can still be reopened/moved (CPE-864).
     let prefix = format!("{id}_");
     let mut found: Option<(std::path::PathBuf, &'static str)> = None;
     for col in ticket_board::COLUMNS {
-        let Ok(entries) = std::fs::read_dir(tickets.join(col)) else { continue };
-        for e in entries.flatten() {
-            let p = e.path();
-            let name = p.file_name().and_then(|s| s.to_str()).unwrap_or("");
-            if name.starts_with(&prefix) && name.ends_with(".md") {
-                found = Some((p, col));
-                break;
-            }
-        }
-        if found.is_some() {
+        if let Some(p) = find_ticket_file_recursive(&tickets.join(col), &prefix) {
+            found = Some((p, col));
             break;
         }
     }
@@ -145,6 +138,26 @@ fn board_move_impl(root: String, id: String, to_column: String) -> Result<(), St
     std::fs::write(&src, ticket_board::set_status(&md, status)).map_err(|e| e.to_string())?;
     std::fs::rename(&src, &dest).map_err(|e| e.to_string())?;
     Ok(())
+}
+
+/// Find a ticket file `<prefix>*.md` anywhere under `dir` (recursively), so an archived Done ticket in a
+/// dated subfolder is still locatable for a move/reopen (CPE-864).
+fn find_ticket_file_recursive(dir: &std::path::Path, prefix: &str) -> Option<std::path::PathBuf> {
+    let entries = std::fs::read_dir(dir).ok()?;
+    for e in entries.flatten() {
+        let p = e.path();
+        if p.is_dir() {
+            if let Some(hit) = find_ticket_file_recursive(&p, prefix) {
+                return Some(hit);
+            }
+        } else {
+            let name = p.file_name().and_then(|s| s.to_str()).unwrap_or("");
+            if name.starts_with(prefix) && name.ends_with(".md") {
+                return Some(p);
+            }
+        }
+    }
+    None
 }
 
 /// Collect archived Done tickets — those in **subdirectories** of `Tickets/Done/` (the dated
