@@ -27,6 +27,10 @@ pub mod location;
 /// today, remote backends later — plus a `LocalProvider` and an in-memory `FakeProvider` (CPE-681).
 pub mod provider;
 
+/// SSH `known_hosts` parsing + host-key verification (TOFU / changed-key detection) — the pure security
+/// core of the future SFTP provider, decoupled from any ssh crate so it's headless-testable (CPE-682).
+pub mod known_hosts;
+
 /// Tag store: user tags + a colour label per path, persisted as `tags.json` (CPE-635). Pure model
 /// helpers + `ServerCtx`-based command entry points (CPE-815 migration).
 pub mod tags;
