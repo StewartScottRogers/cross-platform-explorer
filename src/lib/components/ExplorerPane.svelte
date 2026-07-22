@@ -4,7 +4,10 @@
   // first step toward a reusable pane that can be instantiated twice for dual-pane commander mode. For now
   // it is presentational: App still owns the explorer state and passes it in via props/binds and receives
   // actions via events. Subsequent slices push state ownership down into this component.
-  import { createEventDispatcher } from "svelte";
+  import { createEventDispatcher, tick } from "svelte";
+  import { Channel } from "@tauri-apps/api/core";
+  import { rawInvoke } from "../invoke";
+  import { friendlyError } from "../format";
   import Icon from "./Icon.svelte";
   import HomeView from "./HomeView.svelte";
   import FileList from "./FileList.svelte";
@@ -101,6 +104,84 @@
   $: selectedEntries = selectedIndices(selection)
     .map((i) => visible[i])
     .filter(Boolean);
+
+  // ---- listing fetch + directory cache (CPE-676 domino 3b) — the pane owns fetching its own listing.
+  // A generation token supersedes an in-flight stream when the caller navigates away; the LRU cache
+  // (CPE-756) lets a navigation paint instantly and revalidates in the background. Reloads after a
+  // mutation pass useCache=false so our own changes never show stale. Populates the bound `entries`
+  // (+ `loading`/`error`); returns whether this load is still the current one (false = superseded).
+  let loadGen = 0;
+  const dirCache = new Map<string, DirEntry[]>(); // insertion order == LRU recency
+  const DIR_CACHE_MAX = 48;
+  function cacheGet(path: string): DirEntry[] | undefined {
+    const v = dirCache.get(path);
+    if (v) { dirCache.delete(path); dirCache.set(path, v); }
+    return v;
+  }
+  function cachePut(path: string, list: DirEntry[]): void {
+    dirCache.delete(path);
+    dirCache.set(path, list);
+    while (dirCache.size > DIR_CACHE_MAX) dirCache.delete(dirCache.keys().next().value as string);
+  }
+  const sameListing = (a: DirEntry[], b: DirEntry[]): boolean =>
+    a.length === b.length && a.every((e, i) => e.path === b[i].path && e.size === b[i].size && e.modified === b[i].modified);
+  async function revalidateDir(path: string, gen: number): Promise<void> {
+    try {
+      const fresh = await rawInvoke<DirEntry[]>("list_dir", { path });
+      cachePut(path, fresh);
+      if (gen === loadGen && !sameListing(entries, fresh)) entries = fresh;
+    } catch { /* keep the cached view */ }
+  }
+
+  /** Fetch + stream `path` into `entries`. Owns supersede + cache. Returns false if superseded (the caller
+   *  must then skip its post-load work). App keeps the navigation orchestration + HOME handling. */
+  export async function loadListing(path: string, useCache = false): Promise<boolean> {
+    const gen = ++loadGen;
+    // Stop the backend walking the folder we just left (CPE-665); no-op if it already finished.
+    if (gen > 1) rawInvoke("cancel_dir_stream", { streamId: gen - 1 }).catch(() => {});
+
+    const servedFromCache = useCache ? cacheGet(path) : undefined;
+    if (servedFromCache) {
+      entries = servedFromCache;
+      loading = false;
+      await tick(); // let the reactive `visible` derive before the caller's post-load hooks read it
+    } else {
+      entries = [];
+      loading = true;
+      try {
+        // Coalesce stream batches (CPE-689): buffer and flush once per animation frame so `visible`
+        // re-sorts a handful of times, not once per 256-row batch; the first frame still paints live.
+        const channel = new Channel<DirEntry[]>();
+        let buffer: DirEntry[] = [];
+        let flushQueued = false;
+        const flush = () => {
+          flushQueued = false;
+          if (gen !== loadGen || buffer.length === 0) { buffer = []; return; }
+          entries = entries.concat(buffer);
+          buffer = [];
+          loading = false;
+        };
+        channel.onmessage = (batch) => {
+          if (gen !== loadGen) return; // superseded — drop stale rows
+          buffer.push(...batch);
+          if (!flushQueued) { flushQueued = true; requestAnimationFrame(flush); }
+        };
+        await rawInvoke("list_dir_stream", { path, streamId: gen, onEntry: channel });
+        if (gen === loadGen && buffer.length > 0) flush();
+      } catch (e) {
+        if (gen === loadGen) { entries = []; error = friendlyError(String(e)); }
+      } finally {
+        if (gen === loadGen) loading = false;
+      }
+      if (gen === loadGen) cachePut(path, entries);
+    }
+
+    if (gen !== loadGen) return false; // a newer navigation superseded this one
+
+    // Stale-while-revalidate (CPE-756): a cache-served folder re-lists in the background.
+    if (servedFromCache && !error) setTimeout(() => revalidateDir(path, gen), 300);
+    return true;
+  }
 
   const dispatch = createEventDispatcher<{
     navigate: string;
