@@ -14,6 +14,7 @@
     stopSidecar,
     revokeCapability,
     setConsent,
+    repairSidecar,
     sidecarDiagnostics,
     CAPABILITY_INFO,
     type SidecarInfo,
@@ -28,6 +29,19 @@
   let diags: Record<string, SidecarDiagnostics> = {};
   // Which sidecars have their log panel expanded.
   let logsOpen: Record<string, boolean> = {};
+  // Transient per-sidecar repair outcome message (CPE-863), keyed by id.
+  let repairMsg: Record<string, string> = {};
+
+  /** A sidecar's health status (CPE-863) — a status key + tone, worst-first, derived from binary
+   *  presence, contract compat, enablement, the last error, and running state. */
+  function statusOf(row: SidecarInfo, diag?: SidecarDiagnostics): { key: string; tone: string } {
+    if (!row.binary_ok) return { key: "stMissing", tone: "bad" };
+    if (!row.compatible) return { key: "stIncompatible", tone: "bad" };
+    if (!row.enabled) return { key: "disabled", tone: "idle" }; // reuse mgr.disabled
+    if (diag?.last_error && !row.running) return { key: "stError", tone: "warn" };
+    if (row.running) return { key: "running", tone: "ok" }; // reuse mgr.running
+    return { key: "stReady", tone: "idle" };
+  }
 
   async function loadDiag(id: string) {
     diags = { ...diags, [id]: await sidecarDiagnostics(id) };
@@ -68,6 +82,14 @@
     await setConsent(row.id, granted, granted);
     await refresh();
   }
+
+  // One-click repair (CPE-863): reap orphan daemons, clear a wedged connection + stored error, re-check
+  // the binary. Shows the steps taken, then refreshes so the status pill reflects the new state.
+  async function repair(row: SidecarInfo) {
+    const r = await repairSidecar(row.id);
+    repairMsg = { ...repairMsg, [row.id]: r ? r.actions.join("; ") : $t("mgr.repairFailed") };
+    await refresh();
+  }
 </script>
 
 <div class="mgr">
@@ -78,11 +100,13 @@
   {:else}
     {#each rows as row (row.id)}
       {@const diag = diags[row.id]}
+      {@const health = statusOf(row, diag)}
       <div class="sidecar" class:disabled={!row.enabled}>
         <div class="head">
           <span class="dot" class:on={row.running} title={row.running ? $t("mgr.running") : $t("mgr.stopped")} />
           <span class="name">{row.name}</span>
           <span class="ver">v{row.version}</span>
+          <span class="status {health.tone}">{$t("mgr." + health.key)}</span>
           <span class="compat" class:bad={!row.compatible} title={$t("mgr.contractTip")}>
             {row.compatible ? $t("mgr.contractOk", { v: row.contract }) : $t("mgr.contractBad", { v: row.contract })}
           </span>
@@ -117,6 +141,7 @@
             <span class="muted">{$t("mgr.notRunning")}</span>
           {/if}
           <span class="spacer" />
+          <button class="logs-toggle repair" on:click={() => repair(row)}>{$t("mgr.repair")}</button>
           {#if diag && diag.logs.length > 0}
             <button class="logs-toggle" on:click={() => toggleLogs(row)}>
               {logsOpen[row.id] ? $t("mgr.hideLogs") : $t("mgr.viewLogs", { count: diag.logs.length })}
@@ -125,6 +150,10 @@
             <span class="muted small">{$t("mgr.noLogs")}</span>
           {/if}
         </div>
+
+        {#if repairMsg[row.id]}
+          <div class="repair-msg" role="status">{$t("mgr.repairDid")}: {repairMsg[row.id]}</div>
+        {/if}
 
         {#if logsOpen[row.id] && diag}
           <pre class="logs">{#each diag.logs as line}<span class="log-line log-{line.level}">{line.level}: {line.message}
@@ -196,6 +225,41 @@
   }
   .compat.bad {
     color: var(--warn, #d08b2b);
+  }
+  .status {
+    flex: 0 0 auto;
+    white-space: nowrap;
+    font-size: 10px;
+    text-transform: uppercase;
+    letter-spacing: 0.02em;
+    padding: 1px 7px;
+    border-radius: 999px;
+    border: 1px solid var(--border, #3a3a3a);
+    color: var(--text-dim, #a0a0a0);
+  }
+  .status.ok {
+    color: #3a9d4a;
+    border-color: #3a9d4a;
+  }
+  .status.warn {
+    color: var(--warn, #d08b2b);
+    border-color: var(--warn, #d08b2b);
+  }
+  .status.bad {
+    color: #fff;
+    background: var(--danger, #c0392b);
+    border-color: var(--danger, #c0392b);
+  }
+  .logs-toggle.repair {
+    color: var(--accent, #3a7d3a);
+    border-color: var(--accent, #3a7d3a);
+  }
+  .repair-msg {
+    margin-top: 6px;
+    font-size: 11px;
+    color: var(--text-dim, #a0a0a0);
+    border-left: 2px solid var(--accent, #3a7d3a);
+    padding-left: 8px;
   }
   .spacer {
     flex: 1;

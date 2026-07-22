@@ -292,6 +292,8 @@ export interface SidecarInfo {
   compatible: boolean;
   running: boolean;
   enabled: boolean;
+  /** Whether the sidecar's launchable binary actually resolves (CPE-863) — false = missing binary. */
+  binary_ok: boolean;
   requested: Capability[];
   granted: Capability[];
 }
@@ -303,6 +305,23 @@ export async function sidecarDetails(): Promise<SidecarInfo[]> {
     return Array.isArray(rows) ? rows : [];
   } catch {
     return [];
+  }
+}
+
+/** The outcome of a repair attempt (CPE-863): the re-checked binary presence + the steps taken. */
+export interface SidecarRepair {
+  id: string;
+  binary_ok: boolean;
+  actions: string[];
+}
+
+/** Best-effort self-heal for a sidecar (CPE-863): reap orphan daemons, clear a wedged connection + the
+ *  stored error, and re-check the binary. `null` when the platform is off or the call failed. */
+export async function repairSidecar(id: string): Promise<SidecarRepair | null> {
+  try {
+    return await invoke<SidecarRepair>("sidecar_repair", { id });
+  } catch {
+    return null;
   }
 }
 

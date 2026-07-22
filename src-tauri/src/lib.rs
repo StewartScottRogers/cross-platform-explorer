@@ -2707,6 +2707,34 @@ fn sidecar_revoke_capability(
     store.revoke(&id, capability).map_err(|e| e.to_string())
 }
 
+/// Whether a sidecar `id`'s launchable binary actually resolves — the "missing binary" health signal
+/// (CPE-863). Generic over id (the exe name equals the sidecar id): checks the bundled resource copy,
+/// then the dev source-tree targets, mirroring the per-sidecar resolvers. Returns the path if found.
+#[cfg(feature = "sidecar-platform")]
+fn resolve_sidecar_bin(app: &tauri::AppHandle, id: &str) -> Option<PathBuf> {
+    use tauri::Manager;
+    let exe = if cfg!(windows) { format!("{id}.exe") } else { id.to_string() };
+    if let Ok(resource) = app.path().resource_dir() {
+        let p = resource.join("sidecars").join(&exe);
+        if p.exists() {
+            return Some(p);
+        }
+    }
+    let manifest = Path::new(env!("CARGO_MANIFEST_DIR"));
+    for profile in ["debug", "release"] {
+        for base in [
+            manifest.join(format!("../sidecar/{id}/target")),
+            PathBuf::from(format!("sidecar/{id}/target")),
+        ] {
+            let p = base.join(profile).join(&exe);
+            if p.exists() {
+                return Some(p);
+            }
+        }
+    }
+    None
+}
+
 /// One row in the platform management UI (CPE-274): a registered sidecar with its
 /// identity, contract compatibility, running/enabled state, and consent picture.
 #[cfg(feature = "sidecar-platform")]
@@ -2719,6 +2747,8 @@ struct SidecarInfo {
     compatible: bool,
     running: bool,
     enabled: bool,
+    /// Whether the sidecar's launchable binary actually resolves (CPE-863) — false = missing binary.
+    binary_ok: bool,
     requested: Vec<sidecar_contract::Capability>,
     granted: Vec<sidecar_contract::Capability>,
 }
@@ -2746,6 +2776,7 @@ fn sidecar_details(app: tauri::AppHandle, state: tauri::State<AiConsoleState>) -
                 compatible: cv.major == CONTRACT_VERSION.major && cv.minor <= CONTRACT_VERSION.minor,
                 running: m.id == "ai-console" && ai_running,
                 enabled: enablement.is_enabled(&m.id),
+                binary_ok: resolve_sidecar_bin(&app, &m.id).is_some(),
                 requested: m.capabilities.clone(),
                 granted: consent.granted(&m.id).into_iter().collect(),
             }
@@ -2764,6 +2795,52 @@ fn sidecar_stop(id: String, state: tauri::State<AiConsoleState>) -> Result<(), S
         state.log(sidecar_host::observability::LogLevel::Info, "stopped by user");
     }
     Ok(())
+}
+
+/// What a repair attempt did, for the management panel (CPE-863). `binary_ok` is the re-checked binary
+/// presence after the repair; `actions` are the plain-language steps taken.
+#[cfg(feature = "sidecar-platform")]
+#[derive(serde::Serialize)]
+struct SidecarRepair {
+    id: String,
+    binary_ok: bool,
+    actions: Vec<String>,
+}
+
+/// Best-effort self-heal for a sidecar (CPE-863, epic CPE-862 L1): reap orphan session-daemons that may
+/// be holding the binary/port, drop a wedged connection, and clear the stored last-error so a stuck
+/// sidecar can start clean — then re-check whether its binary resolves. A genuinely missing binary can't
+/// be restored here (that's L2); it is reported honestly via `binary_ok = false` so the UI can say so.
+#[cfg(feature = "sidecar-platform")]
+#[tauri::command]
+fn sidecar_repair(
+    app: tauri::AppHandle,
+    id: String,
+    state: tauri::State<AiConsoleState>,
+) -> Result<SidecarRepair, String> {
+    let mut actions = Vec::new();
+    if id == "ai-console" {
+        // Orphan `--session-daemon` processes survive the UI and file-lock the binary (CPE-483); reaping
+        // them clears the most common "stale / won't update / won't start" cause.
+        reap_orphan_session_daemons_on_startup(&app);
+        actions.push("reaped orphan session daemons".into());
+        if let Ok(mut g) = state.conn.lock() {
+            if g.is_some() {
+                *g = None;
+                actions.push("dropped a wedged connection".into());
+            }
+        }
+        if let Ok(mut g) = state.url.lock() {
+            *g = None;
+        }
+        state.clear_error();
+        actions.push("cleared the last error".into());
+    }
+    let binary_ok = resolve_sidecar_bin(&app, &id).is_some();
+    if !binary_ok {
+        actions.push("binary is missing — reinstall required (auto-restore is coming in L2)".into());
+    }
+    Ok(SidecarRepair { id, binary_ok, actions })
 }
 
 /// Close a single AI Console session (CPE-489) — the left-pane Agents "Close this session". Routes to
@@ -5043,6 +5120,8 @@ pub fn run() {
             sidecar_details,
             #[cfg(feature = "sidecar-platform")]
             sidecar_stop,
+            #[cfg(feature = "sidecar-platform")]
+            sidecar_repair,
             #[cfg(feature = "sidecar-platform")]
             sidecar_close_session,
             #[cfg(feature = "sidecar-platform")]

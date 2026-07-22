@@ -799,7 +799,7 @@
 
   async function launchAiConsole() {
     const base = await startAiConsole();
-    if (!base) { showNotice("Agent Deck isn't available in this build.", true); return; }
+    if (!base) { showNotice("Agent Deck couldn't start — open Settings → Platform to see why and Repair it.", true); return; }
     const url = consoleUrlWith(base, consoleContext.cwd, consoleContext.task, consoleContext.session);
     try {
       const win = new WebviewWindow(AI_CONSOLE_LABEL, {
