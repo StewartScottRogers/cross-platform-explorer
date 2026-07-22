@@ -75,16 +75,14 @@
   } from "./lib/smartFolders";
   import TagMenu from "./lib/components/TagMenu.svelte";
   import SmartFolderMenu from "./lib/components/SmartFolderMenu.svelte";
-  import { filterEntriesByTag, tagCounts } from "./lib/tagFilter";
+  import { tagCounts } from "./lib/tagFilter";
   import type { RenameItem } from "./lib/batchRename";
 
   import { t } from "./lib/i18n";
   import { friendlyError, splitPath, formatPathsForClipboard } from "./lib/format";
   import { withBusy } from "./lib/busy";
-  import { sortEntries } from "./lib/sort";
   import { uniqueName, uniqueNameWithExt } from "./lib/naming";
   import { validateFileName } from "./lib/filename";
-  import { makeMatcher } from "./lib/search";
   import { matchesGlob } from "./lib/glob";
   import PatternSelectDialog from "./lib/components/PatternSelectDialog.svelte";
   import { firstMatchIndex } from "./lib/typeahead";
@@ -106,7 +104,7 @@
     type Clipboard,
   } from "./lib/clipboard";
   import { detectContexts, type FolderAction } from "./lib/folderContext";
-  import { isExecutable, iconFor, sameTypeIndices, matchesFileFilter, isImage } from "./lib/filetypes";
+  import { isExecutable, iconFor, sameTypeIndices, isImage } from "./lib/filetypes";
   import QuickLook from "./lib/components/QuickLook.svelte";
   import * as settings from "./lib/settings";
   import type { ColorRule } from "./lib/colorRules";
@@ -205,6 +203,13 @@
   let noticeTimer: ReturnType<typeof setTimeout> | undefined;
 
   let selection: Selection = emptySelection();
+  // Owned+derived inside <ExplorerPane> (CPE-676); bound back here so App's ops keep reading it. When the
+  // split lands (CPE-677) this comes from the active pane instead of a single binding.
+  let selectedEntries: DirEntry[] = [];
+  // `visible` (the sort/hidden/search/type/tag pipeline) + its pre-filter `shown` are derived + owned in
+  // <ExplorerPane> now (CPE-676 domino 2); bound back here so App's ops + status bar keep reading them.
+  let visible: DirEntry[] = [];
+  let shown: DirEntry[] = [];
   let rowEls: HTMLElement[] = [];
   // Type-ahead find: accumulated prefix and the time of the last keystroke.
   let typeAheadBuffer = "";
@@ -1379,37 +1384,14 @@
     ? (archive.inner ? archive.inner.split("/").at(-1)! : archive.zipName)
     : smartFolder ? smartFolder.name
     : isHome ? "Home" : (splitPath(currentPath).at(-1)?.name ?? currentPath);
-  $: searching = search.trim().length > 0;
 
   // Folder-context detection (CPE-235): runs on the RAW listing (so hidden
   // markers like `.git` are seen regardless of the show-hidden setting).
   $: folderContexts = (isHome || archive || smartFolder) ? [] : detectContexts({ path: currentPath, entries });
 
-  // A smart folder swaps the base listing for its statted matches; everything downstream (hidden/search/
-  // type filters, sort) is unchanged (CPE-667).
-  $: baseEntries = smartFolder ? smartEntries : entries;
-  $: shown = baseEntries.filter((e) => showHidden || !e.hidden);
-
-  // Compile the search matcher once per query change (CPE-695) — filtering per entry then costs only the
-  // match, not a fresh glob→RegExp compile for every entry on every keystroke.
-  $: searchMatcher = makeMatcher(search);
-  $: filtered = searching ? shown.filter((e) => searchMatcher(e.name)) : shown;
-
-  // File-type filter (CPE-358): narrows to a category, applied after search/hidden.
-  $: typeFiltered = fileFilter === "all"
-    ? filtered
-    : filtered.filter((e) => matchesFileFilter(e, fileFilter));
-
-  // Narrow to a single tag when the sidebar Tags filter is active (CPE-639); cleared when leaving a folder.
-  $: tagFiltered = selectedTag ? filterEntriesByTag(typeFiltered, $tags, selectedTag) : typeFiltered;
-  // When the recursive-size column is on, folders sort by their computed subtree size; a not-yet-computed
-  // folder resolves to -1 so pending folders cluster (name-ordered) and settle as fills land (CPE-750).
-  $: sizeOf = showFolderSizes
-    ? (e: DirEntry) => (e.is_dir ? (folderSizes.get(e.path) ?? -1) : e.size)
-    : undefined;
-  $: visible = archive
-    ? sortEntries(archiveChildren(archive), sortKey, sortDir, foldersFirst, sizeOf)
-    : sortEntries(tagFiltered, sortKey, sortDir, foldersFirst, sizeOf);
+  // The sort/hidden/search/type/tag pipeline that turns the base listing into `visible` (+ its pre-filter
+  // `shown`) now lives in <ExplorerPane> (CPE-676 domino 2). App resolves the base list + archive/smart
+  // mode and passes them down; `visible`/`shown` are bound back for the status bar + operations.
 
   /** All tags with counts, for the sidebar Tags section. */
   $: tagList = tagCounts($tags);
@@ -1423,10 +1405,7 @@
         ? [{ name: "Home", path: HOME }]
         : [{ name: "Home", path: HOME }, ...splitPath(currentPath)];
 
-  $: selectedEntries = selectedIndices(selection)
-    .map((i) => visible[i])
-    .filter(Boolean);
-
+  // `selectedEntries` is derived and owned by <ExplorerPane> now (bound above); App only consumes it.
   $: selectedSize = selectedEntries.reduce((n, e) => n + (e.is_dir ? 0 : e.size), 0);
   $: itemCount = (isHome && !smartFolder) ? places.length + drives.length + pins.length : visible.length;
   // The folder's pre-filter total, so the status bar can read "X of Y items" (CPE-407).
@@ -3071,11 +3050,16 @@
       {watchedAgentName}
       {recentChanges}
       bind:showTimeline
-      {visible}
+      baseEntries={archive ? archiveChildren(archive) : (smartFolder ? smartEntries : entries)}
+      rawList={!!archive}
+      {search}
+      {fileFilter}
+      {foldersFirst}
+      bind:visible
+      bind:shown
       bind:selectedTag
       {error}
       {loading}
-      {searching}
       {cutPaths}
       {colorRules}
       {showFolderSizes}
@@ -3091,6 +3075,7 @@
       bind:sortDir
       bind:columnWidths
       bind:selection
+      bind:selectedEntries
       bind:draggedPaths
       bind:rowEls
       on:contextAction={(e) => handleContextAction(e.detail)}

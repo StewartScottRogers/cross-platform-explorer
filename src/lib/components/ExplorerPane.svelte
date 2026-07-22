@@ -14,7 +14,12 @@
   import * as settings from "../settings";
   import { baseName } from "../contentSearch";
   import { fsActivity, agentTimeline } from "../agentActivity";
-  import { click as selClick, type Selection } from "../selection";
+  import { click as selClick, selectedIndices, type Selection } from "../selection";
+  import { sortEntries } from "../sort";
+  import { makeMatcher } from "../search";
+  import { matchesFileFilter } from "../filetypes";
+  import { filterEntriesByTag } from "../tagFilter";
+  import { tags } from "../tags";
   import type { FolderAction, FolderContext } from "../folderContext";
   import type { DirEntry, Place, SortKey, SortDir, ViewMode, RecentFile, Favorite } from "../types";
   import type { ColorRule } from "../colorRules";
@@ -37,11 +42,21 @@
   // The listing + its display state.
   export let showHidden = false;
   export let folderContexts: FolderContext[] = [];
+  // Base listing App resolves (archive children, smart-folder matches, or the real dir). The pane owns the
+  // sort/hidden/search/type/tag pipeline that turns it into `visible` (CPE-676 domino 2).
+  export let baseEntries: DirEntry[] = [];
+  // Archive mode: show `baseEntries` as-is (no hidden/search/type/tag filter), only sorted.
+  export let rawList = false;
+  export let search = "";
+  export let fileFilter = "all";
+  export let foldersFirst = true;
+  /** The filtered + sorted listing shown in the FileList. Derived + owned here; bound back to App. */
   export let visible: DirEntry[] = [];
+  /** The pre-filter (hidden-only) listing, bound back to App for the status-bar "X of Y" total. */
+  export let shown: DirEntry[] = [];
   export let selectedTag = "";
   export let error = "";
   export let loading = false;
-  export let searching = false;
   export let cutPaths: string[] = [];
   export let renamingPath = "";
   export let renameValue = "";
@@ -58,6 +73,29 @@
   export let selection: Selection;
   export let draggedPaths: string[] = [];
   export let rowEls: HTMLElement[] = [];
+  /** The entries under the current selection, derived from `selection` + `visible` and owned here (CPE-676).
+   * Bound back out to App so its file/nav operations read the active pane's selection. */
+  export let selectedEntries: DirEntry[] = [];
+
+  // ---- derived listing (CPE-676 domino 2) — the sort/hidden/search/type/tag pipeline, owned here.
+  // In `rawList` mode (archive browsing) none of the filters apply: the base list is only sorted.
+  $: searching = search.trim().length > 0;
+  $: shown = rawList ? baseEntries : baseEntries.filter((e) => showHidden || !e.hidden);
+  $: searchMatcher = makeMatcher(search);
+  $: filtered = !rawList && searching ? shown.filter((e) => searchMatcher(e.name)) : shown;
+  $: typeFiltered =
+    !rawList && fileFilter !== "all" ? filtered.filter((e) => matchesFileFilter(e, fileFilter)) : filtered;
+  $: tagFiltered =
+    !rawList && selectedTag ? filterEntriesByTag(typeFiltered, $tags, selectedTag) : typeFiltered;
+  // Recursive-size sort key (CPE-750): a not-yet-computed folder resolves to -1 so pending folders cluster.
+  $: sizeOf = showFolderSizes
+    ? (e: DirEntry) => (e.is_dir ? (folderSizes.get(e.path) ?? -1) : e.size)
+    : undefined;
+  $: visible = sortEntries(tagFiltered, sortKey, sortDir, foldersFirst, sizeOf);
+  // `selectedEntries` depends on `visible`; Svelte orders these reactive blocks by dependency.
+  $: selectedEntries = selectedIndices(selection)
+    .map((i) => visible[i])
+    .filter(Boolean);
 
   const dispatch = createEventDispatcher<{
     navigate: string;
