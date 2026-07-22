@@ -147,6 +147,52 @@ impl Client {
             )),
         }
     }
+
+    /// Call a **streaming** method (CPE-819): send the request, then collect `StreamItem`s until the
+    /// `StreamEnd` that terminates the stream, returning them in arrival order. A `Response` frame
+    /// instead of items carries a denial / handler error, which is surfaced as the stream's error. This
+    /// is the over-the-wire equivalent of the app's `ipc::Channel` producers; a caller wanting live rows
+    /// can push each item as it arrives (a future callback variant), but v1 collects for simplicity.
+    pub fn call_stream(
+        &mut self,
+        method: impl Into<String>,
+        params: serde_json::Value,
+    ) -> Result<Vec<serde_json::Value>, ContractError> {
+        let id = self.next_id;
+        self.next_id += 1;
+
+        let req = Envelope::new(id, Message::Request(Request { method: method.into(), params }));
+        write_envelope(&mut self.writer, &req).map_err(transport_err)?;
+
+        let mut items = Vec::new();
+        loop {
+            match read_envelope(&mut self.reader).map_err(transport_err)? {
+                Some(env) => match env.message {
+                    Message::StreamItem(v) => items.push(v),
+                    Message::StreamEnd => return Ok(items),
+                    // A Response mid-stream is an error (security denial or handler failure).
+                    Message::Response(resp) => {
+                        resp.result?;
+                        return Ok(items);
+                    }
+                    other => {
+                        return Err(ContractError::new(
+                            ErrorCode::Internal,
+                            format!("unexpected frame during stream: {other:?}"),
+                            false,
+                        ))
+                    }
+                },
+                None => {
+                    return Err(ContractError::new(
+                        ErrorCode::Transport,
+                        "server closed the connection mid-stream",
+                        true,
+                    ))
+                }
+            }
+        }
+    }
 }
 
 fn transport_err(e: std::io::Error) -> ContractError {

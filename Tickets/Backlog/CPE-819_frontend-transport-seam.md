@@ -33,3 +33,14 @@ busy-cursor wiring. Prereqs: CPE-811, CPE-815.
   remote rejection still releases the busy cursor (invoke.test.ts 9/9). **AC #1 + #3 done.** Remaining
   (gated on CPE-820's reference server): a concrete remote `Transport` speaking the CPE-811 envelope, the
   3 streaming commands' over-the-wire form (AC #2), and GUI-verify against a loopback server (AC #4).
+- 2026-07-22 (nightshift) — **Streaming wire mechanism landed (AC #2 core).** cpe-net now carries the
+  streaming form over the socket: `ServerRuntime::with_stream_handler(method, fn)` registers a streaming
+  method whose items are emitted as `StreamItem`s correlated by the request's envelope id, terminated by
+  `StreamEnd`; the security chain is enforced on the stream exactly like a unary call (a denial/handler
+  error arrives as a single `Response`). Client gains `call_stream(method, params) -> Vec<Value>` which
+  collects items until `StreamEnd` and surfaces a denial as the stream's error. Tests: 3-item round-trip,
+  empty stream (immediate end), and a default-deny stream that errors (net suite 14/14; clippy clean).
+  Remaining for full AC #2: register the 3 real `ipc::Channel` producers (dir listing, name search) as
+  incremental stream handlers, and wire the frontend remote `Transport` to `call_stream` (with 815's
+  shared walkers yielding rather than collecting, for true first-rows-immediately). Frontend GUI-verify
+  (AC #4) still needs a running server.

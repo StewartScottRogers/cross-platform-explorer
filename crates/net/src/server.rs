@@ -26,6 +26,16 @@ use cpe_server::dispatch::Dispatcher;
 
 use crate::wire::{read_envelope, write_envelope};
 
+/// A streaming method handler (CPE-819/820): produces a series of JSON items to be sent as
+/// `StreamItem`s over the wire, terminated by `StreamEnd`. This is the over-the-wire equivalent of the
+/// app's `ipc::Channel` producers (directory listings, recursive search) — a request that yields many
+/// results, correlated by the request's envelope id, so the client paints rows as they arrive.
+pub type StreamHandler = Box<
+    dyn Fn(&dyn ServerCtx, serde_json::Value) -> Result<Vec<serde_json::Value>, ContractError>
+        + Send
+        + Sync,
+>;
+
 /// Everything one Server needs: the method registry, the security chain guarding the
 /// boundary, and the runtime context handed to domain logic. Cheap to share across
 /// connection threads behind an [`Arc`] (all three parts are `Send + Sync`).
@@ -34,6 +44,7 @@ pub struct ServerRuntime {
     chain: SecurityChain,
     ctx: Arc<dyn ServerCtx>,
     server_id: String,
+    stream_handlers: std::collections::BTreeMap<String, StreamHandler>,
 }
 
 impl ServerRuntime {
@@ -44,12 +55,26 @@ impl ServerRuntime {
             chain,
             ctx,
             server_id: "cpe-server-ref".to_string(),
+            stream_handlers: std::collections::BTreeMap::new(),
         }
     }
 
     /// Override the `server_id` reported in the [`Welcome`] handshake.
     pub fn with_server_id(mut self, id: impl Into<String>) -> Self {
         self.server_id = id.into();
+        self
+    }
+
+    /// Register a streaming method (CPE-819): a request for `method` runs `handler` and streams its
+    /// items back as `StreamItem`s + a final `StreamEnd`, all security-checked exactly like a unary call.
+    pub fn with_stream_handler<F>(mut self, method: impl Into<String>, handler: F) -> Self
+    where
+        F: Fn(&dyn ServerCtx, serde_json::Value) -> Result<Vec<serde_json::Value>, ContractError>
+            + Send
+            + Sync
+            + 'static,
+    {
+        self.stream_handlers.insert(method.into(), Box::new(handler));
         self
     }
 
@@ -88,6 +113,26 @@ impl ServerRuntime {
         // --- Request loop. ---
         while let Some(env) = read_envelope(&mut reader)? {
             match env.message {
+                Message::Request(req) if self.stream_handlers.contains_key(&req.method) => {
+                    // Streaming method (CPE-819): security-check, then emit StreamItems + StreamEnd, all
+                    // correlated by the request's envelope id. A denial or handler error is a single
+                    // Response instead — the client's `call_stream` surfaces it as the stream's error.
+                    let reply = self
+                        .security_decision(&principal, &req)
+                        .and_then(|()| self.stream_handlers[&req.method](self.ctx.as_ref(), req.params));
+                    match reply {
+                        Ok(items) => {
+                            for item in items {
+                                write_envelope(&mut writer, &Envelope::new(env.id, Message::StreamItem(item)))?;
+                            }
+                            write_envelope(&mut writer, &Envelope::new(env.id, Message::StreamEnd))?;
+                        }
+                        Err(e) => write_envelope(
+                            &mut writer,
+                            &Envelope::new(env.id, Message::Response(Response { result: Err(e) })),
+                        )?,
+                    }
+                }
                 Message::Request(req) => {
                     let resp = self.dispatch_guarded(&principal, req);
                     write_envelope(&mut writer, &Envelope::new(env.id, Message::Response(resp)))?;
@@ -127,17 +172,17 @@ impl ServerRuntime {
         }
     }
 
-    /// Evaluate a request through the security chain, and only then dispatch it. A denial is
-    /// mapped to a security [`ContractError`] and the request is *not* dispatched.
-    fn dispatch_guarded(&self, principal: &Principal, req: Request) -> Response {
+    /// Run a request through the security chain. `Ok(())` = admitted (proceed to dispatch/stream);
+    /// `Err` = a denial mapped to the security [`ContractError`] (the request is never dispatched).
+    /// Shared by the unary and streaming paths so both enforce the boundary identically.
+    fn security_decision(&self, principal: &Principal, req: &Request) -> Result<(), ContractError> {
         let mut sctx = SecurityContext::new(principal.clone(), req.method.clone());
         // The resource an authorizer keys off, when the call names a filesystem path.
         if let Some(path) = req.params.get("path").and_then(|v| v.as_str()) {
             sctx = sctx.with_resource(path.to_string());
         }
-
         match self.chain.evaluate(&mut sctx) {
-            Decision::Allow(_authorized) => self.dispatcher.dispatch(self.ctx.as_ref(), req),
+            Decision::Allow(_authorized) => Ok(()),
             Decision::Deny(denial) => {
                 // AuthZ failures are "authenticated but not permitted" (Unauthorized);
                 // transport / authentication failures are "not admitted" (Unauthenticated).
@@ -145,14 +190,21 @@ impl ServerRuntime {
                     Plane::Authorization => ErrorCode::Unauthorized,
                     Plane::Transport | Plane::Authentication => ErrorCode::Unauthenticated,
                 };
-                Response {
-                    result: Err(ContractError::new(
-                        code,
-                        format!("{:?} denied: {}", denial.plane, denial.reason),
-                        false,
-                    )),
-                }
+                Err(ContractError::new(
+                    code,
+                    format!("{:?} denied: {}", denial.plane, denial.reason),
+                    false,
+                ))
             }
+        }
+    }
+
+    /// Evaluate a request through the security chain, and only then dispatch it. A denial is
+    /// mapped to a security [`ContractError`] and the request is *not* dispatched.
+    fn dispatch_guarded(&self, principal: &Principal, req: Request) -> Response {
+        match self.security_decision(principal, &req) {
+            Ok(()) => self.dispatcher.dispatch(self.ctx.as_ref(), req),
+            Err(e) => Response { result: Err(e) },
         }
     }
 }
