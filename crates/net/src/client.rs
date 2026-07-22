@@ -42,6 +42,14 @@ impl std::fmt::Display for ConnectError {
 
 impl std::error::Error for ConnectError {}
 
+/// The result of a streaming [`call`](Client::call_stream): every `StreamItem` in arrival order, plus the
+/// producer's terminal value from `StreamEnd` (stats/summary — `Value::Null` if the producer had none).
+#[derive(Debug, Clone, PartialEq)]
+pub struct StreamOutcome {
+    pub items: Vec<serde_json::Value>,
+    pub result: serde_json::Value,
+}
+
 /// A connected proxy to a Server. Holds the socket (split into a buffered reader/writer) plus
 /// the negotiated version and session established at handshake.
 pub struct Client {
@@ -149,15 +157,16 @@ impl Client {
     }
 
     /// Call a **streaming** method (CPE-819): send the request, then collect `StreamItem`s until the
-    /// `StreamEnd` that terminates the stream, returning them in arrival order. A `Response` frame
-    /// instead of items carries a denial / handler error, which is surfaced as the stream's error. This
-    /// is the over-the-wire equivalent of the app's `ipc::Channel` producers; a caller wanting live rows
-    /// can push each item as it arrives (a future callback variant), but v1 collects for simplicity.
+    /// `StreamEnd` that terminates the stream. Returns the items in arrival order **plus the producer's
+    /// terminal value** (the stats/summary carried on `StreamEnd` — the wire equivalent of the value a
+    /// local `*_stream` command returns alongside its `ipc::Channel`). A `Response` frame instead of items
+    /// carries a denial / handler error, surfaced as the stream's error. A caller wanting live rows can
+    /// push each item as it arrives (a future callback variant), but v1 collects for simplicity.
     pub fn call_stream(
         &mut self,
         method: impl Into<String>,
         params: serde_json::Value,
-    ) -> Result<Vec<serde_json::Value>, ContractError> {
+    ) -> Result<StreamOutcome, ContractError> {
         let id = self.next_id;
         self.next_id += 1;
 
@@ -169,11 +178,11 @@ impl Client {
             match read_envelope(&mut self.reader).map_err(transport_err)? {
                 Some(env) => match env.message {
                     Message::StreamItem(v) => items.push(v),
-                    Message::StreamEnd => return Ok(items),
+                    Message::StreamEnd { result } => return Ok(StreamOutcome { items, result }),
                     // A Response mid-stream is an error (security denial or handler failure).
                     Message::Response(resp) => {
                         resp.result?;
-                        return Ok(items);
+                        return Ok(StreamOutcome { items, result: serde_json::Value::Null });
                     }
                     other => {
                         return Err(ContractError::new(

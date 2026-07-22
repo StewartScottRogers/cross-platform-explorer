@@ -113,8 +113,11 @@ fn read_ws_key(reader: &mut impl BufRead) -> io::Result<String> {
 /// (or cancels), so the producer stops walking at the next batch boundary.
 pub type StreamSink<'a> = dyn FnMut(serde_json::Value) -> std::ops::ControlFlow<()> + 'a;
 
+/// A handler returns its **terminal value** (the stats/summary — total count, `truncated`, …) on success;
+/// it rides back on `StreamEnd`, mirroring the value a local `*_stream` command returns alongside its
+/// `ipc::Channel`. `Value::Null` is fine for a producer with no summary.
 pub type StreamHandler = Box<
-    dyn Fn(&dyn ServerCtx, serde_json::Value, &mut StreamSink) -> Result<(), ContractError>
+    dyn Fn(&dyn ServerCtx, serde_json::Value, &mut StreamSink) -> Result<serde_json::Value, ContractError>
         + Send
         + Sync,
 >;
@@ -152,7 +155,7 @@ impl ServerRuntime {
     /// items back as `StreamItem`s + a final `StreamEnd`, all security-checked exactly like a unary call.
     pub fn with_stream_handler<F>(mut self, method: impl Into<String>, handler: F) -> Self
     where
-        F: Fn(&dyn ServerCtx, serde_json::Value, &mut StreamSink) -> Result<(), ContractError>
+        F: Fn(&dyn ServerCtx, serde_json::Value, &mut StreamSink) -> Result<serde_json::Value, ContractError>
             + Send
             + Sync
             + 'static,
@@ -182,7 +185,7 @@ impl ServerRuntime {
                 }
                 std::ops::ControlFlow::Continue(())
             })
-            .map(|_total| ())
+            .map(|total| serde_json::json!({ "total": total }))
             .map_err(|e| ContractError::new(ErrorCode::Internal, e, false))
         })
         .with_stream_handler("name_search_stream", |_ctx, params, emit| {
@@ -209,7 +212,7 @@ impl ServerRuntime {
                     std::ops::ControlFlow::Continue(())
                 },
             )
-            .map(|_stats| ())
+            .map(|stats| serde_json::json!({ "dirs_scanned": stats.dirs_scanned, "truncated": stats.truncated }))
             .map_err(|e| ContractError::new(ErrorCode::Internal, e, false))
         })
         .with_stream_handler("content_search_stream", |_ctx, params, emit| {
@@ -238,7 +241,7 @@ impl ServerRuntime {
                     std::ops::ControlFlow::Continue(())
                 },
             )
-            .map(|_stats| ())
+            .map(|stats| serde_json::json!({ "files_scanned": stats.files_scanned, "truncated": stats.truncated }))
             .map_err(|e| ContractError::new(ErrorCode::Internal, e, false))
         })
     }
@@ -325,7 +328,9 @@ impl ServerRuntime {
                             return Err(e); // the peer's write failed — drop the connection
                         }
                         match outcome {
-                            Ok(()) => io.write_env(&Envelope::new(id, Message::StreamEnd))?,
+                            // The handler's terminal value (stats/summary) rides on StreamEnd, mirroring
+                            // the value a local `*_stream` command returns alongside its Channel.
+                            Ok(result) => io.write_env(&Envelope::new(id, Message::StreamEnd { result }))?,
                             Err(e) => io.write_env(&Envelope::new(id, Message::Response(Response { result: Err(e) })))?,
                         }
                     }

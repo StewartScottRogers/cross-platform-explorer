@@ -25,7 +25,7 @@ pub mod server;
 pub mod wire;
 pub mod ws;
 
-pub use client::{Client, ConnectError};
+pub use client::{Client, ConnectError, StreamOutcome};
 pub use server::ServerRuntime;
 
 /// The wire contract, re-exported so a consumer reaches it through the network layer.
@@ -369,7 +369,7 @@ mod tests {
                         break;
                     }
                 }
-                Ok(())
+                Ok(serde_json::json!({ "count": n }))
             }),
         );
         std::thread::spawn(move || {
@@ -381,14 +381,18 @@ mod tests {
     #[test]
     fn streaming_method_delivers_items_then_ends_over_the_wire() {
         let mut client = Client::connect(start_streaming_server(SecurityChain::local())).unwrap();
-        let items = client
+        let out = client
             .call_stream("count_stream", serde_json::json!({ "n": 3 }))
             .expect("stream should complete");
-        assert_eq!(items.len(), 3, "three StreamItems before StreamEnd");
-        assert_eq!(items[0]["i"], 1);
-        assert_eq!(items[2]["i"], 3);
-        // An empty stream is just an immediate StreamEnd (no items).
-        assert!(client.call_stream("count_stream", serde_json::json!({ "n": 0 })).unwrap().is_empty());
+        assert_eq!(out.items.len(), 3, "three StreamItems before StreamEnd");
+        assert_eq!(out.items[0]["i"], 1);
+        assert_eq!(out.items[2]["i"], 3);
+        // StreamEnd carries the handler's terminal value (the wire equivalent of a *_stream return).
+        assert_eq!(out.result, serde_json::json!({ "count": 3 }));
+        // An empty stream is just an immediate StreamEnd (no items), still carrying the terminal value.
+        let empty = client.call_stream("count_stream", serde_json::json!({ "n": 0 })).unwrap();
+        assert!(empty.items.is_empty());
+        assert_eq!(empty.result, serde_json::json!({ "count": 0 }));
     }
 
     #[test]
@@ -413,12 +417,14 @@ mod tests {
         });
 
         let mut client = Client::connect(addr).unwrap();
-        let items = client
+        let out = client
             .call_stream("list_dir_stream", serde_json::json!({ "path": dir.to_string_lossy() }))
             .expect("list_dir_stream should stream");
         let names: Vec<String> =
-            items.iter().map(|e| e["name"].as_str().unwrap().to_string()).collect();
+            out.items.iter().map(|e| e["name"].as_str().unwrap().to_string()).collect();
         assert!(names.contains(&"a.txt".to_string()) && names.contains(&"b.txt".to_string()), "got {names:?}");
+        // StreamEnd carries the total the local `list_dir_stream` returns — it matches what streamed.
+        assert_eq!(out.result["total"], out.items.len(), "StreamEnd total should match items streamed");
     }
 
     #[test]
@@ -444,14 +450,14 @@ mod tests {
         });
 
         let mut client = Client::connect(addr).unwrap();
-        let items = client
+        let out = client
             .call_stream(
                 "name_search_stream",
                 serde_json::json!({ "path": dir.to_string_lossy(), "query": "report" }),
             )
             .expect("name_search_stream should stream");
         let names: Vec<String> =
-            items.iter().map(|e| e["name"].as_str().unwrap().to_string()).collect();
+            out.items.iter().map(|e| e["name"].as_str().unwrap().to_string()).collect();
         assert_eq!(names.iter().filter(|n| n.starts_with("report_")).count(), 2, "got {names:?}");
         assert!(!names.iter().any(|n| n == "notes.md"), "non-match must not stream: {names:?}");
     }
@@ -478,15 +484,15 @@ mod tests {
         });
 
         let mut client = Client::connect(addr).unwrap();
-        let items = client
+        let out = client
             .call_stream(
                 "content_search_stream",
                 serde_json::json!({ "path": dir.to_string_lossy(), "query": "needle" }),
             )
             .expect("content_search_stream should stream");
-        assert_eq!(items.len(), 1, "one line match (case-insensitive); got {items:?}");
-        assert_eq!(items[0]["line_number"], 2);
-        assert!(items[0]["path"].as_str().unwrap().ends_with("a.txt"));
+        assert_eq!(out.items.len(), 1, "one line match (case-insensitive); got {:?}", out.items);
+        assert_eq!(out.items[0]["line_number"], 2);
+        assert!(out.items[0]["path"].as_str().unwrap().ends_with("a.txt"));
     }
 
     #[test]
