@@ -28,10 +28,23 @@ pub struct DupResult {
 
 const DUP_MAX_FILES: u64 = 50_000;
 
-/// Find duplicate files under `root`. Skips dot-directories, symlinked dirs (cycle-safe), and empty
-/// files; unreadable entries are skipped (never failing the scan); stops at a file cap (reporting
-/// `truncated`). Groups are sorted by reclaimable space (largest first). A non-folder root is an `Err`.
-pub fn find_duplicates(root: &str) -> Result<DupResult, String> {
+/// The non-group part of a duplicate scan: files scanned + whether the file cap truncated it.
+pub struct DupWalkStats {
+    pub files_scanned: u64,
+    pub truncated: bool,
+}
+
+/// The shared duplicate-finding walk (CPE-420, streaming-liveness convention): `flush` is invoked with
+/// each **confirmed** batch of [`DupGroup`]s (the duplicate sets found within one size collision) as pass
+/// 2 hashes them, so a slow scan surfaces groups progressively; `flush` returns a `ControlFlow` so a
+/// streaming caller can stop early. Skips dot-dirs, symlinked dirs (cycle-safe), and empty files; caps
+/// files (reporting `truncated`); unreadable entries are skipped. A non-folder root is an `Err`. Batches
+/// arrive in discovery order (unsorted) — the collect [`find_duplicates`] applies the reclaimable-space
+/// sort. Backs both that and the streaming command.
+pub fn stream_duplicates(
+    root: &str,
+    mut flush: impl FnMut(Vec<DupGroup>) -> std::ops::ControlFlow<()>,
+) -> Result<DupWalkStats, String> {
     let root_path = Path::new(root);
     if !root_path.is_dir() {
         return Err(format!("{root}: not a folder"));
@@ -67,8 +80,7 @@ pub fn find_duplicates(root: &str) -> Result<DupResult, String> {
         }
     }
 
-    // Pass 2: within each size collision, hash the candidates and group identical content.
-    let mut groups: Vec<DupGroup> = Vec::new();
+    // Pass 2: within each size collision, hash the candidates and flush the identical-content groups.
     for (size, paths) in by_size {
         if paths.len() < 2 {
             continue;
@@ -79,16 +91,30 @@ pub fn find_duplicates(root: &str) -> Result<DupResult, String> {
                 by_hash.entry(h).or_default().push(p.to_string_lossy().into_owned());
             }
         }
+        let mut found: Vec<DupGroup> = Vec::new();
         for (hash, group_paths) in by_hash {
             if group_paths.len() > 1 {
-                groups.push(DupGroup { size, hash, paths: group_paths });
+                found.push(DupGroup { size, hash, paths: group_paths });
             }
         }
+        if !found.is_empty() && flush(found).is_break() {
+            break;
+        }
     }
+    Ok(DupWalkStats { files_scanned, truncated })
+}
 
+/// Collect-to-vec duplicate finder. Groups are sorted by reclaimable space (largest first).
+/// See [`stream_duplicates`].
+pub fn find_duplicates(root: &str) -> Result<DupResult, String> {
+    let mut groups: Vec<DupGroup> = Vec::new();
+    let stats = stream_duplicates(root, |batch| {
+        groups.extend(batch);
+        std::ops::ControlFlow::Continue(())
+    })?;
     // Largest reclaimable space first: size × (copies − 1).
     groups.sort_by_key(|g| std::cmp::Reverse(g.size * (g.paths.len() as u64 - 1)));
-    Ok(DupResult { groups, files_scanned, truncated })
+    Ok(DupResult { groups, files_scanned: stats.files_scanned, truncated: stats.truncated })
 }
 
 #[cfg(test)]
@@ -138,5 +164,35 @@ mod tests {
         assert!(find_duplicates(&d.join("one.txt").to_string_lossy()).is_err());
         let _ = fs::remove_dir_all(&d);
         let _ = fs::remove_dir_all(&d2);
+    }
+
+    #[test]
+    fn stream_duplicates_flushes_confirmed_groups_and_stops_early() {
+        let d = scratch("streamdups");
+        // Two independent duplicate sets (different sizes → two size collisions → two batches).
+        fs::write(d.join("a1.txt"), b"first payload").unwrap();
+        fs::write(d.join("a2.txt"), b"first payload").unwrap();
+        fs::write(d.join("b1.txt"), b"second, longer payload here").unwrap();
+        fs::write(d.join("b2.txt"), b"second, longer payload here").unwrap();
+
+        let mut seen = 0;
+        let stats = stream_duplicates(&d.to_string_lossy(), |batch| {
+            assert!(batch.iter().all(|g| g.paths.len() >= 2), "only confirmed groups flush");
+            seen += batch.len();
+            std::ops::ControlFlow::Continue(())
+        })
+        .unwrap();
+        assert_eq!(seen, 2, "two duplicate groups streamed");
+        assert!(!stats.truncated);
+
+        // A `Break` from `flush` stops after the first group.
+        let mut count = 0;
+        stream_duplicates(&d.to_string_lossy(), |_batch| {
+            count += 1;
+            std::ops::ControlFlow::Break(())
+        })
+        .unwrap();
+        assert_eq!(count, 1, "Break stops after the first flush");
+        let _ = fs::remove_dir_all(&d);
     }
 }
