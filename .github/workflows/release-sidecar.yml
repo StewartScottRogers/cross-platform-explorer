@@ -98,6 +98,17 @@ jobs:
         working-directory: sidecar/repos
         run: cargo build --release
 
+      # Stage a never-executed `.pristine` copy of each sidecar (CPE-867 L2): the overlays bundle it as
+      # `sidecars/<id>.pristine`, and the host self-heals a missing/stale exe from it on startup. Because
+      # nothing ever runs a `.pristine`, a locked-file install skip (CPE-483) can't leave it stale.
+      - name: Stage pristine sidecar copies
+        shell: bash
+        run: |
+          for s in ai-console agent-board repos; do
+            f=$(ls "sidecar/$s/target/release/$s" "sidecar/$s/target/release/$s.exe" 2>/dev/null | head -1)
+            cp "$f" "sidecar/$s/target/release/$s.pristine"
+          done
+
       - name: Build and publish sidecar-enabled release
         uses: tauri-apps/tauri-action@v0
         env:
