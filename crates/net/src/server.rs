@@ -17,8 +17,8 @@ use std::net::{TcpListener, TcpStream};
 use std::sync::Arc;
 
 use cpe_contract::{
-    negotiate, ContractError, Envelope, ErrorCode, Hello, Message, Principal, Rejected, RejectCode,
-    Request, Response, Session, Welcome, CONTRACT_VERSION,
+    handshake, ContractError, Envelope, ErrorCode, Message, Principal, Rejected, RejectCode, Request,
+    Response, Session, CONTRACT_VERSION,
 };
 use cpe_security::{Decision, Plane, SecurityChain, SecurityContext};
 use cpe_server::ctx::ServerCtx;
@@ -100,40 +100,30 @@ impl ServerRuntime {
         Ok(())
     }
 
-    /// Decide the handshake reply and the session principal from the opening message.
+    /// Decide the handshake reply and the session principal from the opening message. The version
+    /// decision (negotiate → Welcome / Rejected) is the shared `cpe_contract::handshake` (CPE-820), so
+    /// this crate and its conformance tests agree with one source of truth; here we only add the
+    /// transport-side concerns: a non-Hello opener is a policy denial, and on accept the session acts as
+    /// the client's proposed principal (v1 single-user; per-request AuthN lands in CPE-817).
     fn handshake(&self, opening: Message) -> (Message, Principal) {
-        match opening {
-            Message::Hello(Hello {
-                contract_version,
-                principal,
-                ..
-            }) => match negotiate(contract_version, CONTRACT_VERSION) {
-                Ok(agreed) => (
-                    Message::Welcome(Welcome {
-                        server_id: self.server_id.clone(),
-                        server_version: env!("CARGO_PKG_VERSION").to_string(),
-                        negotiated_version: agreed,
-                        // v1 single-user: the implicit local session. AuthN establishes a
-                        // real principal per request (CPE-817).
-                        session: Session::local(),
-                    }),
-                    principal.unwrap_or_else(Principal::local),
-                ),
-                Err(e) => (
-                    Message::Rejected(Rejected {
-                        code: RejectCode::IncompatibleVersion,
-                        reason: e.to_string(),
-                    }),
-                    Principal::local(),
-                ),
-            },
-            _ => (
+        let Message::Hello(hello) = opening else {
+            return (
                 Message::Rejected(Rejected {
                     code: RejectCode::PolicyDenied,
                     reason: "handshake: expected Hello".to_string(),
                 }),
                 Principal::local(),
-            ),
+            );
+        };
+        match handshake(
+            &hello,
+            CONTRACT_VERSION,
+            self.server_id.clone(),
+            env!("CARGO_PKG_VERSION"),
+            Session::local(),
+        ) {
+            Ok(welcome) => (Message::Welcome(welcome), hello.principal.unwrap_or_else(Principal::local)),
+            Err(rejected) => (Message::Rejected(rejected), Principal::local()),
         }
     }
 
