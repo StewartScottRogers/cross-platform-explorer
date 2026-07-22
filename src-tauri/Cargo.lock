@@ -884,7 +884,7 @@ dependencies = [
 
 [[package]]
 name = "cross-platform-explorer"
-version = "0.57.5"
+version = "0.57.6"
 dependencies = [
  "base64 0.22.1",
  "cpe-server",
