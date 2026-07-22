@@ -51,3 +51,9 @@ busy-cursor wiring. Prereqs: CPE-811, CPE-815.
   a large directory paints its first rows immediately instead of collecting the whole listing first. net
   suite 15/15; clippy clean. AC #2 is now substantially complete over the wire; remaining is wiring the
   frontend remote `Transport` to `call_stream` (needs the RemoteTransport impl) + GUI-verify (AC #4).
+- 2026-07-22 (nightshift) — **All 3 stream producers now over the wire.** Added content_search_stream
+  (drives CPE-662's new stream_file_contents walker) alongside list_dir_stream + name_search_stream, all
+  incremental + security-guarded. AC #2's producer coverage is complete server-side (net suite 17/17).
+  What remains for full AC #2/#4: the frontend remote Transport speaking these over a browser-reachable
+  transport (WebSocket bridge — cpe-net is raw TCP) + GUI-verify against a live server. Those need an
+  architecture decision (WS vs the CPE-812 bindings) + a running server — user-facing, not headless.

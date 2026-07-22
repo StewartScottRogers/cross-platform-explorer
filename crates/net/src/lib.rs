@@ -336,6 +336,39 @@ mod tests {
     }
 
     #[test]
+    fn content_search_stream_streams_line_matches_over_the_wire() {
+        // The builtin `content_search_stream` producer streams line matches under a root as found.
+        let dir = scratch("contentstream");
+        std::fs::write(dir.join("a.txt"), b"alpha\nhas NEEDLE here\nbeta\n").unwrap();
+        std::fs::write(dir.join("b.txt"), b"nothing to see\n").unwrap();
+
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let rt = Arc::new(
+            ServerRuntime::new(
+                Dispatcher::with_builtins(),
+                SecurityChain::local(),
+                Arc::new(HeadlessCtx::new(scratch("contentstreambase"))),
+            )
+            .with_builtin_streams(),
+        );
+        std::thread::spawn(move || {
+            let _ = rt.serve(listener);
+        });
+
+        let mut client = Client::connect(addr).unwrap();
+        let items = client
+            .call_stream(
+                "content_search_stream",
+                serde_json::json!({ "path": dir.to_string_lossy(), "query": "needle" }),
+            )
+            .expect("content_search_stream should stream");
+        assert_eq!(items.len(), 1, "one line match (case-insensitive); got {items:?}");
+        assert_eq!(items[0]["line_number"], 2);
+        assert!(items[0]["path"].as_str().unwrap().ends_with("a.txt"));
+    }
+
+    #[test]
     fn a_streaming_call_is_security_guarded_over_the_wire() {
         // The same stream method under a default-deny boundary yields no items — the denial arrives as
         // the stream's error, proving streaming enforces the security chain exactly like a unary call.
