@@ -8,7 +8,8 @@
    * actions are CPE-752.
    */
   import { createEventDispatcher, onMount } from "svelte";
-  import { invoke } from "../invoke";
+  import { rawInvoke } from "../invoke";
+  import { Channel } from "@tauri-apps/api/core";
   import { squarify, type Tile } from "../treemap";
   import { formatSize } from "../format";
   import { baseName } from "../contentSearch";
@@ -70,11 +71,6 @@
     H,
   );
 
-  async function fetchChildren(dir: string): Promise<Child[]> {
-    const kids = await invoke<Child[]>("dir_children_sizes", { path: dir });
-    return kids.slice().sort((a, b) => b.size - a.size);
-  }
-
   async function scan(dir: string) {
     const cached = cache[dir];
     if (cached) {
@@ -87,11 +83,19 @@
     const g = ++gen;
     loading = true;
     error = "";
+    children = [];
+    // Stream each child's recursive size as it's computed (CPE-706) so a big folder's treemap fills in
+    // progressively; each arrival is appended + re-sorted by size and the reactive treemap re-lays-out.
     try {
-      const sorted = await fetchChildren(dir);
-      if (g !== gen) return; // a newer navigation superseded this cold scan
-      cache[dir] = sorted;
-      children = sorted;
+      const channel = new Channel<Child[]>();
+      channel.onmessage = (batch) => {
+        if (g !== gen) return; // a newer navigation superseded this cold scan
+        children = [...children, ...batch].sort((a, b) => b.size - a.size);
+        loading = false; // first children are in — reveal the treemap
+      };
+      await rawInvoke("dir_children_sizes_stream", { path: dir, onChild: channel });
+      if (g !== gen) return;
+      cache[dir] = children; // the fully-scanned tree — re-drill / Up is now instant
     } catch (e) {
       if (g !== gen) return;
       error = String(e);
