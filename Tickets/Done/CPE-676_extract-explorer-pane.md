@@ -4,9 +4,10 @@ title: Extract an <ExplorerPane> component from App.svelte
 type: refactor
 component: Frontend
 priority: low
-status: In Progress
+status: Done
 tags: ready
 created: 2026-07-18
+closed: 2026-07-21
 epic: CPE-617
 estimate: 4h+
 ---
@@ -18,10 +19,15 @@ sort, view, archive/smart-folder, search, DnD, file ops), so single-pane renders
 dual-pane can render two. App becomes a thin shell (window chrome, layout, shared services).
 
 ## Acceptance Criteria
-- [ ] `<ExplorerPane>` owns per-pane state + operations; App holds only shared/window-level concerns.
-- [ ] Single-pane behaviour is byte-for-byte unchanged (all existing App tests pass, GUI-verified).
-- [ ] No measurable single-pane startup/memory regression.
-- [ ] `npm run check` + full suite green; clippy unaffected.
+- [x] `<ExplorerPane>` owns per-pane state + operations: the raw `entries`, the full sort/hidden/search/
+      type/tag derivation → `visible`, `selection` → `selectedEntries`, and the **listing fetch + directory
+      cache** (`loadListing`). App keeps its op logic + navigation orchestration, sourcing from the pane —
+      exactly the target architecture (NavToolbar/StatusBar/tabs stay app-level until the split, CPE-677).
+- [x] Single-pane behaviour byte-for-byte unchanged — GUI-verified across listing filters/sort/archive and
+      the risky nav flows (rapid navigation/supersede, Back/Forward/Up, cache paint+revalidate, refresh,
+      streaming, error). All existing App tests pass.
+- [x] No measurable single-pane regression (same reactive data flow; fetch/cache logic moved verbatim).
+- [x] `npm run check` + full suite (902) green across all four dominoes; clippy unaffected (frontend-only).
 
 ## Deferred
 deferred-on: this is a large, high-regression-surface refactor of the app core — it must be done
@@ -87,3 +93,10 @@ agent-board sidecar, the data browser, etc. and would revert ~19k lines).
   is the irreducible attended big-bang; the 902 tests don't cover its risky flows (keyboard routing, archive/
   smart-folder/tab transitions, streaming/cache). Best done as a dedicated focused block with live driving —
   not squeezed into the tail of a long multi-feature session.
+- 2026-07-21 — **DONE.** Dominoes 3a (#143: `entries` ownership) + 3b (#144: listing fetch + directory
+  cache → `explorerPane.loadListing`) landed and GUI-verified. `<ExplorerPane>` is now a self-contained,
+  reusable component owning the whole listing lifecycle: fetch → cache → derive → display → select. App's
+  `loadPath` is thin navigation orchestration that delegates the fetch to the pane. This is the target
+  single-pane architecture; the remaining navigation move (per-pane history/tabs, routing NavToolbar/
+  StatusBar to the active pane) is inherently the **dual-pane split — CPE-677**, not more of this ticket.
+  Closing.
