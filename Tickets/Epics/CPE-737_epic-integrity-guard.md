@@ -49,3 +49,5 @@ checksum backend. Pure classifier lands first.
    backend), re-scan and diff via CPE-790. **Backend/integration.** *(prereq: 790)*
 3. **CPE-792** — Report view: "N files changed unexpectedly" with acknowledge / rebaseline. **GUI.**
    *(prereq: 790, 791)*
+
+2026-07-21 (autonomous) — **v1 COMPLETE.** All three children done: CPE-790 (integrity model), CPE-791 (baseline store + on-demand verify — reconciled Deferred → Done, its frontend glue shipped with 792), CPE-792 (report view). Users baseline a folder, verify on demand, see changes classified (intact/edited/corrupted/missing/new) via the mtime heuristic, and rebaseline — reachable from the palette (`tool.integrity`). Remaining epic scope is the OPTIONAL scheduled/background verifier (a later child; opt-in, fast-when-off) — file it if/when wanted.

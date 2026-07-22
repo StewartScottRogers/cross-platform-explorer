@@ -2,12 +2,12 @@
 id: CPE-791
 title: Integrity baseline store + on-demand verify
 type: feature
-status: Deferred
+status: Done
 priority: low
 component: Multiple
-tags: needs-prereq
+tags: ready
 created: 2026-07-20
-closed:
+closed: 2026-07-21
 epic: CPE-737
 estimate: 3-4h
 ---
@@ -18,8 +18,8 @@ CPE-790 to flag unexpected changes / missing files. Opt-in; no background scanni
 
 ## Acceptance Criteria
 - [x] Baseline a folder (recursive sha256 + size + mtime) — backend `checksum_folder`. *(persist + verify-report is the frontend glue, slice 2 with CPE-792.)*
-- [ ] Opt-in; nothing scans unless the user baselines/verifies; large trees stay responsive (streamed).
-- [ ] check + suite green.
+- [x] Opt-in; nothing scans unless the user baselines/verifies (IntegrityDialog only calls checksum_folder on click).
+- [x] check + suite green (shipped on main).
 
 ## Notes
 Prereq: CPE-790. Reuse the checksum backend; a scheduled verifier is a later follow-up.
@@ -42,3 +42,4 @@ Moved to `Deferred/`.
 - *revisit-when:* picking up CPE-792 — persist the baseline manifest (app-data), call `checksum_folder`,
   diff via CPE-790 `verifyManifest`, and render the report there. No external gate; pickable anytime.
 
+2026-07-21 — **Reconcile: DONE.** Confirmed the frontend glue (slice 2) is on main: IntegrityDialog does baseline + verify (verifyManifest → intact/edited/corrupted/missing/new) + rebaseline; App wires the palette command `tool.integrity`, persists baselines via settings.load/saveIntegrityBaselines, and handles rebaseline. All three children (790/791/792) complete. Moving Deferred → Done.
