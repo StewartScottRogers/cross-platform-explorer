@@ -5,16 +5,28 @@
 //! OpenSSH uses, which is what actually defends an SFTP session against a man-in-the-middle.
 //!
 //! Scope of this slice: plain host patterns and the `[host]:port` token OpenSSH writes for non-default
-//! ports, with comma-separated pattern lists. **Not yet:** hashed hostnames (`|1|salt|hash`), wildcard
-//! (`*.example.com`) / negated (`!host`) patterns, and `@revoked`/`@cert-authority` markers — a
-//! non-matching or marker line simply doesn't establish trust, so the safe default is `Unknown` (prompt),
-//! never a false `Trusted`. Hashed-hostname support can layer on hmac-sha1 as a follow-up.
+//! ports, with comma-separated pattern lists, plus the `@revoked` / `@cert-authority` line markers. **Not
+//! yet:** hashed hostnames (`|1|salt|hash`) and wildcard (`*.example.com`) / negated (`!host`) patterns —
+//! a non-matching line simply doesn't establish trust, so the safe default is `Unknown` (prompt), never a
+//! false `Trusted`. Hashed-hostname support can layer on hmac-sha1 as a follow-up.
 
 #![allow(dead_code)] // consumed once the SFTP provider is wired (CPE-682 network half); compiled + tested now.
 
-/// One parsed non-comment `known_hosts` entry: `patterns keytype base64key`.
+/// An optional leading marker on a `known_hosts` line.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Marker {
+    /// `@revoked` — this key is explicitly revoked; it must be refused even if it would otherwise match.
+    Revoked,
+    /// `@cert-authority` — a CA key used to verify host *certificates*, not a host key itself. Excluded
+    /// from normal host-key matching in this slice (certificate validation is out of scope).
+    CertAuthority,
+}
+
+/// One parsed non-comment `known_hosts` entry: `[@marker] patterns keytype base64key`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct KnownHost {
+    /// A leading `@revoked` / `@cert-authority` marker, if present.
+    pub marker: Option<Marker>,
     /// The host patterns this line applies to (a comma-separated list in the file), e.g. `["host", "1.2.3.4"]`
     /// or `["[host]:2222"]`.
     pub patterns: Vec<String>,
@@ -35,23 +47,40 @@ pub enum HostKeyVerdict {
     /// A stored entry for this host + key-type exists but the key **differs** — a possible MITM (or a
     /// legitimately rekeyed server). Refuse loudly; never silently proceed.
     Changed,
+    /// The presented key matches a `@revoked` entry for this host — explicitly refused.
+    Revoked,
 }
 
-/// Parse the lines of a `known_hosts` file into entries, skipping blanks, `#` comments, `@`-marker lines
-/// (revoked / cert-authority — not honoured in this slice), and malformed lines (fewer than 3 fields).
+/// Parse the lines of a `known_hosts` file into entries, skipping blanks, `#` comments, and malformed
+/// lines. A leading `@revoked` / `@cert-authority` marker is honoured; an unknown `@marker` line is
+/// skipped (rather than mis-parsed).
 pub fn parse_known_hosts(contents: &str) -> Vec<KnownHost> {
     let mut out = Vec::new();
     for raw in contents.lines() {
         let line = raw.trim();
-        if line.is_empty() || line.starts_with('#') || line.starts_with('@') {
+        if line.is_empty() || line.starts_with('#') {
             continue;
         }
         let mut fields = line.split_whitespace();
-        let (Some(patterns), Some(key_type), Some(key_b64)) = (fields.next(), fields.next(), fields.next())
-        else {
-            continue; // a well-formed entry has at least: patterns keytype key
+        // An optional leading @marker shifts the remaining fields by one.
+        let mut first = fields.next();
+        let marker = match first {
+            Some("@revoked") => {
+                first = fields.next();
+                Some(Marker::Revoked)
+            }
+            Some("@cert-authority") => {
+                first = fields.next();
+                Some(Marker::CertAuthority)
+            }
+            Some(tok) if tok.starts_with('@') => continue, // unknown marker — skip rather than mis-parse
+            _ => None,
+        };
+        let (Some(patterns), Some(key_type), Some(key_b64)) = (first, fields.next(), fields.next()) else {
+            continue; // a well-formed entry has at least: [@marker] patterns keytype key
         };
         out.push(KnownHost {
+            marker,
             patterns: patterns.split(',').filter(|p| !p.is_empty()).map(str::to_string).collect(),
             key_type: key_type.to_string(),
             key_b64: key_b64.to_string(),
@@ -72,7 +101,8 @@ pub fn host_token(host: &str, port: u16) -> String {
 
 /// Decide whether to trust the `(key_type, key_b64)` a server at `host:port` presents, given the parsed
 /// `known_hosts`. See [`HostKeyVerdict`]. Matching is per host-token **and** key-type: a stored key of a
-/// *different* type never triggers `Changed` (OpenSSH would just add the new type).
+/// *different* type never triggers `Changed` (OpenSSH would just add the new type). A `@revoked` match
+/// wins over everything; `@cert-authority` entries are not host keys and are ignored here.
 pub fn verify_host_key(
     known: &[KnownHost],
     host: &str,
@@ -81,9 +111,23 @@ pub fn verify_host_key(
     key_b64: &str,
 ) -> HostKeyVerdict {
     let token = host_token(host, port);
+    let matches_host_type =
+        |e: &KnownHost| e.key_type == key_type && e.patterns.iter().any(|p| p == &token);
+
+    // Revocation wins: a presented key listed under `@revoked` for this host is refused outright,
+    // even if a separate (non-revoked) entry would otherwise trust it.
+    if known
+        .iter()
+        .any(|e| e.marker == Some(Marker::Revoked) && matches_host_type(e) && e.key_b64 == key_b64)
+    {
+        return HostKeyVerdict::Revoked;
+    }
+
     let mut saw_host_and_type = false;
     for entry in known {
-        if entry.key_type != key_type || !entry.patterns.iter().any(|p| p == &token) {
+        // Only normal host-key entries establish trust; skip markers (revoked already handled, CA is not
+        // a host key).
+        if entry.marker.is_some() || !matches_host_type(entry) {
             continue;
         }
         saw_host_and_type = true;
@@ -115,13 +159,54 @@ malformed-line-only-two-fields ssh-rsa
     #[test]
     fn parses_entries_and_skips_noise() {
         let hosts = parse_known_hosts(SAMPLE);
-        // 3 real entries; the comment, blank, @revoked marker, and 2-field line are all skipped.
-        assert_eq!(hosts.len(), 3);
+        // 4 entries (incl. the @revoked one); the comment, blank, and 2-field lines are skipped.
+        assert_eq!(hosts.len(), 4);
         assert_eq!(hosts[0].patterns, vec!["host.example.com"]);
         assert_eq!(hosts[0].key_type, "ssh-ed25519");
+        assert_eq!(hosts[0].marker, None);
         assert_eq!(hosts[1].patterns, vec!["[host.example.com]:2222"]);
         // A comma list splits into multiple patterns.
         assert_eq!(hosts[2].patterns, vec!["nas", "10.0.0.5"]);
+        // The @revoked marker is parsed, with its fields shifted past the marker.
+        assert_eq!(hosts[3].marker, Some(Marker::Revoked));
+        assert_eq!(hosts[3].patterns, vec!["evil.example.com"]);
+        assert_eq!(hosts[3].key_b64, "AAAABADKEY");
+    }
+
+    #[test]
+    fn a_revoked_key_is_refused_over_everything() {
+        // A key both trusted AND revoked for the same host must be refused (revocation wins).
+        let k = parse_known_hosts(
+            "h ssh-ed25519 AAAAGOOD\n@revoked h ssh-ed25519 AAAABAD\n",
+        );
+        assert_eq!(verify_host_key(&k, "h", 22, "ssh-ed25519", "AAAABAD"), HostKeyVerdict::Revoked);
+        // A different, non-revoked key for the same host is still trusted.
+        assert_eq!(verify_host_key(&k, "h", 22, "ssh-ed25519", "AAAAGOOD"), HostKeyVerdict::Trusted);
+        // The revoked key from SAMPLE is refused.
+        let s = parse_known_hosts(SAMPLE);
+        assert_eq!(
+            verify_host_key(&s, "evil.example.com", 22, "ssh-ed25519", "AAAABADKEY"),
+            HostKeyVerdict::Revoked,
+        );
+    }
+
+    #[test]
+    fn a_cert_authority_line_is_not_a_host_key() {
+        // A @cert-authority entry is parsed but never establishes host-key trust (it's a CA, not a host
+        // key) — a host presenting that key material is still Unknown, not Trusted.
+        let k = parse_known_hosts("@cert-authority ca.example.com ssh-ed25519 AAAACAKEY\n");
+        assert_eq!(k[0].marker, Some(Marker::CertAuthority));
+        assert_eq!(
+            verify_host_key(&k, "ca.example.com", 22, "ssh-ed25519", "AAAACAKEY"),
+            HostKeyVerdict::Unknown,
+        );
+    }
+
+    #[test]
+    fn an_unknown_marker_line_is_skipped() {
+        let k = parse_known_hosts("@bogus h ssh-ed25519 AAAAKEY\nh2 ssh-rsa AAAARSA\n");
+        assert_eq!(k.len(), 1, "the @bogus line is skipped, not mis-parsed");
+        assert_eq!(k[0].patterns, vec!["h2"]);
     }
 
     #[test]
