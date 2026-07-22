@@ -231,6 +231,51 @@ mod tests {
         );
     }
 
+    /// Start a Server that also exposes a `count_stream` streaming method yielding `n` items.
+    fn start_streaming_server(chain: SecurityChain) -> SocketAddr {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let rt = Arc::new(
+            ServerRuntime::new(
+                Dispatcher::with_builtins(),
+                chain,
+                Arc::new(HeadlessCtx::new(scratch("streambase"))),
+            )
+            .with_stream_handler("count_stream", |_ctx, params| {
+                let n = params.get("n").and_then(|v| v.as_u64()).unwrap_or(0);
+                Ok((1..=n).map(|i| serde_json::json!({ "i": i })).collect())
+            }),
+        );
+        std::thread::spawn(move || {
+            let _ = rt.serve(listener);
+        });
+        addr
+    }
+
+    #[test]
+    fn streaming_method_delivers_items_then_ends_over_the_wire() {
+        let mut client = Client::connect(start_streaming_server(SecurityChain::local())).unwrap();
+        let items = client
+            .call_stream("count_stream", serde_json::json!({ "n": 3 }))
+            .expect("stream should complete");
+        assert_eq!(items.len(), 3, "three StreamItems before StreamEnd");
+        assert_eq!(items[0]["i"], 1);
+        assert_eq!(items[2]["i"], 3);
+        // An empty stream is just an immediate StreamEnd (no items).
+        assert!(client.call_stream("count_stream", serde_json::json!({ "n": 0 })).unwrap().is_empty());
+    }
+
+    #[test]
+    fn a_streaming_call_is_security_guarded_over_the_wire() {
+        // The same stream method under a default-deny boundary yields no items — the denial arrives as
+        // the stream's error, proving streaming enforces the security chain exactly like a unary call.
+        let mut client = Client::connect(start_streaming_server(SecurityChain::default_deny())).unwrap();
+        let err = client
+            .call_stream("count_stream", serde_json::json!({ "n": 3 }))
+            .expect_err("a denied stream must error, not stream items");
+        assert!(matches!(err.code, ErrorCode::Unauthenticated | ErrorCode::Unauthorized));
+    }
+
     #[test]
     fn mismatched_major_is_rejected_cleanly() {
         let addr = start_server(SecurityChain::local());
