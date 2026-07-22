@@ -101,6 +101,54 @@ pub fn dir_children_sizes(path: &str) -> Result<Vec<ChildSize>, String> {
     Ok(out)
 }
 
+/// Streaming variant of [`dir_children_sizes`] (CPE-706, streaming-liveness convention): computes each
+/// direct child's recursive size in parallel and hands it to `on_child` as soon as it's ready, so a
+/// space-analyzer treemap of a big folder fills in progressively instead of blocking on the whole scan.
+/// `on_child` must be `Sync` — it's called from rayon worker threads, in completion (not directory)
+/// order; the UI re-lays-out each arrival. Unreadable children are skipped; a non-folder `path` is an `Err`.
+pub fn stream_children_sizes(path: &str, on_child: impl Fn(ChildSize) + Sync) -> Result<(), String> {
+    use rayon::prelude::*;
+    let p = Path::new(path);
+    if !p.is_dir() {
+        return Err(format!("not a folder: {path}"));
+    }
+    let read = fs::read_dir(p).map_err(|e| e.to_string())?;
+    struct Pre {
+        name: String,
+        path: std::path::PathBuf,
+        is_dir: bool,
+        own: u64,
+        symlink: bool,
+    }
+    let pre: Vec<Pre> = read
+        .flatten()
+        .filter_map(|entry| {
+            let meta = entry.metadata().ok()?; // skip unreadable child
+            Some(Pre {
+                name: entry.file_name().to_string_lossy().into_owned(),
+                path: entry.path(),
+                is_dir: meta.is_dir(),
+                own: meta.len(),
+                symlink: entry_is_symlink(&entry),
+            })
+        })
+        .collect();
+    pre.into_par_iter().for_each(|e| {
+        let size = if e.is_dir {
+            if e.symlink { 0 } else { dir_size_walk(&e.path) }
+        } else {
+            e.own
+        };
+        on_child(ChildSize {
+            name: e.name,
+            path: e.path.to_string_lossy().into_owned(),
+            is_dir: e.is_dir,
+            size,
+        });
+    });
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -177,6 +225,29 @@ mod tests {
         assert!(sub.is_dir && sub.size == 50);
         let top = kids.iter().find(|c| c.name == "top.bin").unwrap();
         assert!(!top.is_dir && top.size == 10);
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn stream_children_sizes_emits_each_child_with_its_size() {
+        let d = scratch("streamkids");
+        fs::create_dir_all(d.join("sub")).unwrap();
+        fs::write(d.join("sub/b.bin"), vec![0u8; 50]).unwrap();
+        fs::write(d.join("top.bin"), vec![0u8; 10]).unwrap();
+
+        // Collect the streamed children from the rayon workers (arrival order varies).
+        let seen = std::sync::Mutex::new(Vec::new());
+        stream_children_sizes(&d.to_string_lossy(), |cs| seen.lock().unwrap().push(cs)).unwrap();
+        let mut kids = seen.into_inner().unwrap();
+        kids.sort_by(|a, b| a.name.cmp(&b.name));
+        assert_eq!(kids.len(), 2);
+        let sub = kids.iter().find(|c| c.name == "sub").unwrap();
+        assert!(sub.is_dir && sub.size == 50);
+        let top = kids.iter().find(|c| c.name == "top.bin").unwrap();
+        assert!(!top.is_dir && top.size == 10);
+
+        // A non-folder path is an error.
+        assert!(stream_children_sizes(&d.join("top.bin").to_string_lossy(), |_| {}).is_err());
         let _ = fs::remove_dir_all(&d);
     }
 }
