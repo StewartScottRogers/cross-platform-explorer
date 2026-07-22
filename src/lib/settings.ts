@@ -43,6 +43,7 @@ export const KEYS = {
   recentFolders: "cpe.recentFolders",
   columnWidths: "cpe.columnWidths",
   diagnostics: "cpe.diagnostics",
+  verifyOnStartup: "cpe.verifyOnStartup",
   colorRules: "cpe.colorRules",
   integrityBaselines: "cpe.integrityBaselines",
   watchRules: "cpe.watchRules",
@@ -179,6 +180,11 @@ export const saveShowFolderSizes = (v: boolean) => write(KEYS.showFolderSizes, v
 // from the Application menu. Set `localStorage["cpe.diagnostics"] = "true"` to force it on from a console.
 export const loadDiagnostics = (): boolean => read(KEYS.diagnostics, false, isBool);
 export const saveDiagnostics = (v: boolean) => write(KEYS.diagnostics, v);
+
+// Integrity: opt-in auto-verify of all baselined folders on app startup (CPE-872). Off by default
+// (fast-when-off / no background scanning unless the user asks). When on, the app verifies once at launch.
+export const loadVerifyOnStartup = (): boolean => read(KEYS.verifyOnStartup, false, isBool);
+export const saveVerifyOnStartup = (v: boolean) => write(KEYS.verifyOnStartup, v);
 
 export const loadFoldersFirst = (): boolean => read(KEYS.foldersFirst, true, isBool);
 export const saveFoldersFirst = (v: boolean) => write(KEYS.foldersFirst, v);
