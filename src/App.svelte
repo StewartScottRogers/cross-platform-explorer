@@ -265,6 +265,9 @@
   let integrityBaselines: Record<string, ChecksumEntry[]> = settings.loadIntegrityBaselines();
   /** Opt-in: verify all baselined folders once at startup (CPE-872). Off by default. */
   let verifyOnStartup = settings.loadVerifyOnStartup();
+  /** Periodic re-verify timer while the app stays open (CPE-875); cleared on teardown. */
+  let verifyTimer: ReturnType<typeof setInterval> | undefined;
+  const VERIFY_INTERVAL_MS = 6 * 60 * 60 * 1000; // every 6 hours
   /** Verify every baselined folder at once (CPE-871) and surface a one-line summary — the integrity
    *  guard's "check all my monitored folders" action. Silent corruption / missing files raise an error
    *  notice; a clean sweep confirms. */
@@ -2689,6 +2692,13 @@
     if (verifyOnStartup && Object.keys(integrityBaselines).length > 0) {
       setTimeout(() => { void verifyAllBaselines(); }, 1500);
     }
+    // …and re-check periodically while the app stays open (CPE-875) — same opt-in toggle, so a long-running
+    // session still catches silent corruption without a restart.
+    if (verifyOnStartup) {
+      verifyTimer = setInterval(() => {
+        if (Object.keys(integrityBaselines).length > 0) void verifyAllBaselines();
+      }, VERIFY_INTERVAL_MS);
+    }
     // Reveal the Agent Deck button only when the sidecar platform is present (CPE-351).
     platformActive().then((v) => (aiConsoleAvailable = v)).catch(() => {});
     // Listen for coding-agent sessions launched from the console so the explorer can surface
@@ -2766,6 +2776,7 @@
   });
 
   onDestroy(() => {
+    if (verifyTimer) clearInterval(verifyTimer); // CPE-875: stop the periodic integrity re-verify
     unlistenSessions?.();
     unlistenTransferDone?.();
     unlistenOsDrop?.();
