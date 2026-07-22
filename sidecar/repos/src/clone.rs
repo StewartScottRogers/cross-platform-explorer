@@ -43,14 +43,26 @@ pub fn is_allowed_clone_url(url: &str) -> bool {
     if u.is_empty() || u.contains(['\n', '\r', ' ']) || u.starts_with('-') {
         return false;
     }
+    // The host must never begin with '-'. Git hands the hostname to `ssh`, which parses a leading-dash
+    // host as an OPTION (`-oProxyCommand=…` ⇒ arbitrary command execution — the CVE-2017-1000117 class).
+    // Reject it here as defence-in-depth rather than trusting git's own guard, since a leading-dash host
+    // isn't caught by the whole-URL `starts_with('-')` check above once a scheme/user prefixes it.
+    let host_ok = |authority: &str| {
+        let host = authority.rsplit('@').next().unwrap_or(""); // drop an optional `user@`
+        !host.is_empty() && !host.starts_with('-')
+    };
     if let Some(rest) = u.strip_prefix("https://").or_else(|| u.strip_prefix("ssh://")) {
-        return !rest.is_empty() && !rest.starts_with('/'); // must have a host
+        if rest.is_empty() || rest.starts_with('/') {
+            return false; // must have a host
+        }
+        return host_ok(rest.split('/').next().unwrap_or("")); // authority = up to the first '/'
     }
     // scp-like `git@github.com:owner/repo.git` — an `@host:` before any slash, no scheme.
     if !u.contains("://") {
         if let Some((userhost, path)) = u.split_once(':') {
             return userhost.contains('@')
                 && !userhost.contains('/')
+                && host_ok(userhost)
                 && !path.is_empty()
                 && !path.starts_with('/'); // a leading '/' after ':' would be an absolute local path
         }
@@ -159,6 +171,25 @@ mod tests {
         ] {
             assert!(!is_allowed_clone_url(bad), "{bad:?} must be refused");
         }
+    }
+
+    #[test]
+    fn a_leading_dash_host_is_refused_ssh_argument_injection() {
+        // Git passes an ssh:// hostname to `ssh`; a host starting with '-' is parsed as an option
+        // (`-oProxyCommand=…` ⇒ RCE, the CVE-2017-1000117 class). Every shape must be refused.
+        for bad in [
+            "ssh://-oProxyCommand=evil/path",   // scheme host starts with '-'
+            "ssh://git@-evil/path",             // user@ then a '-' host
+            "git@-evil:owner/repo.git",         // scp-like, host after '@' starts with '-'
+            "https://-evil/x",                  // https host (defence-in-depth, symmetric)
+            "ssh://git@/path",                  // empty host after user@
+        ] {
+            assert!(!is_allowed_clone_url(bad), "{bad:?} (leading-dash/empty host) must be refused");
+        }
+        // The legitimate shapes still pass.
+        assert!(is_allowed_clone_url("ssh://git@github.com/o/r.git"));
+        assert!(is_allowed_clone_url("https://github.com/o/r.git"));
+        assert!(is_allowed_clone_url("git@github.com:o/r.git"));
     }
 
     #[test]
