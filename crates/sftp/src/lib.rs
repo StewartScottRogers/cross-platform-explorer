@@ -374,6 +374,9 @@ mod tests {
         let pub_fields = openssh_fields(key.public_key());
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let addr = listener.local_addr().unwrap();
+        // `tokio::net::TcpListener::from_std` requires the socket already be non-blocking on Unix (Windows
+        // is lenient) — without this the server thread panics on Linux/macOS.
+        listener.set_nonblocking(true).unwrap();
 
         std::thread::spawn(move || {
             let rt = tokio::runtime::Builder::new_multi_thread().enable_all().build().unwrap();
@@ -392,14 +395,9 @@ mod tests {
         parse_known_hosts(&format!("{} {} {}", host_token("127.0.0.1", port), key.0, key.1))
     }
 
-    // NOTE (CPE-899): the happy path (connect → list/stat/read) is blocked by a russh-sftp channel-data
-    // delivery quirk in this in-process fixture — the server writes+flushes the SFTP VERSION reply but it
-    // doesn't reach the client (cargo resolved russh-sftp 2.1.1 against russh 0.54; the SSH layer —
-    // handshake, host-key verification, auth, channel, subsystem — all round-trip correctly, proven by the
-    // refusal tests below which exercise the same stack). Ignored until the version alignment is sorted;
-    // the provider's list/stat/read logic itself is straightforward over a working session.
+    // Full happy path over a real in-process SSH/SFTP handshake: host-key verification (Trusted) →
+    // list → stat → read, plus a TOFU accept of an unknown host.
     #[test]
-    #[ignore = "russh-sftp 2.1.1 / russh 0.54 fixture: SFTP VERSION reply not delivered in-process (CPE-899 follow-up)"]
     fn connects_to_a_trusted_host_then_lists_stats_and_reads() {
         let (addr, hostkey) = spawn_server();
         let cfg = SftpConfig::new("127.0.0.1", addr.port(), "user", "pw");

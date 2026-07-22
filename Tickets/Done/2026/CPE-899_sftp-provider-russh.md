@@ -30,23 +30,21 @@ Key decisions (made per the green-light; see the research the user requested):
 
 ## Status / what's proven
 - Provider: `connect` (password auth) + `list`/`stat`/`read`/`write`/`mkdir`/`delete` over `SftpSession`.
-- **Host-key verification proven end-to-end over a real SSH handshake** (in-process fixture): a **changed**
-  key is refused (test passes in 0.01s), an **unknown** key is refused under `Strict`. The trusted path
-  reaches SFTP init (so the Trusted verdict + accept is correct).
-- **Known follow-up (test-only):** the happy-path `connect → list/stat/read` test is `#[ignore]`d — a
-  russh-sftp channel-data delivery quirk in the in-process fixture (server writes+flushes the SFTP VERSION
-  reply but it isn't delivered to the client; cargo resolved russh-sftp 2.1.1 against russh 0.54). The SSH
-  layer (handshake, host-key, auth, channel, subsystem) all round-trip; the provider's list/read logic is
-  straightforward over a working session. Resolve by aligning russh/russh-sftp versions (or isolating with
-  a raw-channel echo) next.
+- **Full happy path proven end-to-end over a real in-process SSH/SFTP handshake:** host-key verification
+  (Trusted) → `list` → `stat` → `read`, plus a **TOFU accept** of an unknown host that surfaces its key.
+- **Host-key security proven:** a **changed** key is refused (MITM), an **unknown** key is refused under
+  `Strict`. All three tests pass on the 3-OS CI matrix.
 
 ## Acceptance Criteria
 - [x] `crates/sftp` builds on the 3-OS matrix with the `ring` backend (no NASM/Docker); wired into CI.
 - [x] `SftpProvider` implements `FileSystemProvider`; `connect` verifies the host key via `known_hosts`.
-- [x] Changed / Unknown(Strict) host keys are refused end-to-end (2 passing in-process tests).
-- [ ] Happy-path list/stat/read over the in-process server (ignored — fixture data-flow follow-up).
+- [x] Changed / Unknown(Strict) host keys are refused end-to-end.
+- [x] Happy-path list/stat/read over the in-process server passes (all 3 OSes).
 
 ## Work Log
 - 2026-07-22 — Built the crate + provider + canned in-process russh-sftp fixture. Confirmed cargo can fetch
-  russh here; switched aws-lc-rs→ring for Windows. Security path green; happy-path fixture data-flow
-  deferred (documented on the ignored test).
+  russh here; switched aws-lc-rs→ring for Windows. Initial fixture hang / Linux failure both traced to one
+  cause: `tokio::TcpListener::from_std` needs the socket set **non-blocking first** (Windows tolerated a
+  blocking socket, which also stalled the async I/O pump so the SFTP VERSION reply never reached the
+  client; Linux/macOS panicked outright). Adding `set_nonblocking(true)` fixed both — full connect →
+  list/stat/read now green everywhere.
