@@ -2794,9 +2794,62 @@ fn restore_stale_sidecars_on_startup(app: &tauri::AppHandle) {
     }
 }
 
+/// Run `op(attempt)` up to `attempts` times, sleeping `base_delay * attempt` between tries (linear
+/// backoff), returning the first `Ok` or the last `Err` (CPE-868 L3). `sleep` is injected so this is pure
+/// to unit-test. Sleeps *between* attempts, never after the last one.
+#[cfg(feature = "sidecar-platform")]
+fn retry_with_backoff<T, E>(
+    attempts: usize,
+    base_delay: std::time::Duration,
+    mut sleep: impl FnMut(std::time::Duration),
+    mut op: impl FnMut(usize) -> Result<T, E>,
+) -> Result<T, E> {
+    let attempts = attempts.max(1);
+    let mut last_err = None;
+    for attempt in 1..=attempts {
+        match op(attempt) {
+            Ok(v) => return Ok(v),
+            Err(e) => {
+                last_err = Some(e);
+                if attempt < attempts {
+                    sleep(base_delay.saturating_mul(attempt as u32));
+                }
+            }
+        }
+    }
+    Err(last_err.expect("at least one attempt ran"))
+}
+
 #[cfg(all(test, feature = "sidecar-platform"))]
 mod restore_tests {
-    use super::restore_sidecar_from_pristine;
+    use super::{restore_sidecar_from_pristine, retry_with_backoff};
+
+    #[test]
+    fn retry_returns_first_ok_and_sleeps_between_tries() {
+        let (mut sleeps, mut tries) = (0u32, 0u32);
+        let r: Result<&str, &str> = retry_with_backoff(
+            5,
+            std::time::Duration::from_millis(1),
+            |_| sleeps += 1,
+            |attempt| { tries += 1; if attempt >= 3 { Ok("ok") } else { Err("transient") } },
+        );
+        assert_eq!(r, Ok("ok"));
+        assert_eq!(tries, 3);
+        assert_eq!(sleeps, 2); // slept after attempts 1 and 2, not after the successful 3rd
+    }
+
+    #[test]
+    fn retry_returns_last_err_after_exhausting_attempts() {
+        let mut sleeps = 0u32;
+        let r: Result<&str, i32> = retry_with_backoff(
+            3,
+            std::time::Duration::from_millis(1),
+            |_| sleeps += 1,
+            |attempt| Err(attempt as i32),
+        );
+        assert_eq!(r, Err(3)); // the last error is surfaced
+        assert_eq!(sleeps, 2); // no sleep after the final attempt
+    }
 
     #[test]
     fn restores_when_missing_or_stale_and_noops_when_current() {
@@ -3971,17 +4024,24 @@ fn sidecar_start_ai_console(
     if let Some(addr) = daemon_addr.as_deref() {
         cat_env.push(("CPE_AICONSOLE_SESSION_DAEMON_ADDR", addr));
     }
-    let mut conn =
-        spawn_process_with_env(&bin, &[], &cat_env).map_err(|e| state.fail(format!("spawn failed: {e}")))?;
-    let token = conn.launch_token().to_string();
-
-    // Grant only what the user consented to (CPE-296). The frontend prompts for any
-    // undecided capability before calling this; whatever isn't granted is simply withheld,
-    // and the sidecar degrades gracefully (it still serves its UI, capability calls are
-    // denied by the broker).
+    // Grant only what the user consented to (CPE-296). The frontend prompts for any undecided capability
+    // before calling this; whatever isn't granted is withheld, and the sidecar degrades gracefully.
     let consented = sidecar_host::consent::ConsentStore::load(&consent_dir(&app)?).granted("ai-console");
-    handshake(&mut conn, CONTRACT_VERSION, &consented, Some(&token))
-        .map_err(|e| state.fail(format!("handshake failed: {e:?}")))?;
+    // Retry a transient spawn/handshake hiccup a few times before surfacing an error (CPE-868 L3). A failed
+    // attempt drops its `conn` (killing the process) before the next try, so no orphan is left behind.
+    let mut conn = retry_with_backoff(
+        3,
+        std::time::Duration::from_millis(150),
+        std::thread::sleep,
+        |_attempt| {
+            let mut conn = spawn_process_with_env(&bin, &[], &cat_env)
+                .map_err(|e| state.fail(format!("spawn failed: {e}")))?;
+            let token = conn.launch_token().to_string();
+            handshake(&mut conn, CONTRACT_VERSION, &consented, Some(&token))
+                .map_err(|e| state.fail(format!("handshake failed: {e:?}")))?;
+            Ok::<_, String>(conn)
+        },
+    )?;
     state.log(LogLevel::Info, "handshake ok");
 
     // Read a bounded number of frames for the `ui:<url>` announcement.
@@ -4077,11 +4137,21 @@ fn sidecar_start_agent_board(app: tauri::AppHandle, root: Option<String>) -> Res
     let root = root.unwrap_or_default();
     let env: Vec<(&str, &str)> = if root.is_empty() { vec![] } else { vec![("CPE_BOARD_ROOT", root.as_str())] };
 
-    let mut conn = spawn_process_with_env(&bin, &[], &env).map_err(|e| format!("spawn failed: {e}"))?;
-    let token = conn.launch_token().to_string();
     let consented = sidecar_host::consent::ConsentStore::load(&consent_dir(&app)?).granted("agent-board");
-    handshake(&mut conn, CONTRACT_VERSION, &consented, Some(&token))
-        .map_err(|e| format!("handshake failed: {e:?}"))?;
+    // Retry a transient spawn/handshake hiccup a few times before surfacing an error (CPE-868 L3). A failed
+    // attempt drops its `conn` (killing the process) before the next try, so no orphan is left behind.
+    let mut conn = retry_with_backoff(
+        3,
+        std::time::Duration::from_millis(150),
+        std::thread::sleep,
+        |_attempt| {
+            let mut conn = spawn_process_with_env(&bin, &[], &env).map_err(|e| format!("spawn failed: {e}"))?;
+            let token = conn.launch_token().to_string();
+            handshake(&mut conn, CONTRACT_VERSION, &consented, Some(&token))
+                .map_err(|e| format!("handshake failed: {e:?}"))?;
+            Ok::<_, String>(conn)
+        },
+    )?;
 
     // Read a bounded number of frames for the `ui:<url>` announcement.
     let mut url = None;
