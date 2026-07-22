@@ -23,9 +23,14 @@ pub const REDACTED: &str = "***";
 /// Scrub each known secret value out of `text`. Empty secrets are ignored. Used on
 /// every transcript before it is stored, so an echoed key never lands on disk.
 pub fn redact(text: &str, secrets: &[String]) -> String {
+    // Redact the longest secrets first. Otherwise a shorter secret that is a substring of a longer one
+    // rewrites part of the longer secret before it can be matched as a whole, leaking the remaining
+    // fragment to disk (e.g. redacting "SECRET" out of "SECRETLONGER" leaves "LONGER" exposed).
+    let mut ordered: Vec<&String> = secrets.iter().filter(|s| !s.is_empty()).collect();
+    ordered.sort_by_key(|s| std::cmp::Reverse(s.len()));
     let mut out = text.to_string();
-    for s in secrets {
-        if !s.is_empty() && out.contains(s.as_str()) {
+    for s in ordered {
+        if out.contains(s.as_str()) {
             out = out.replace(s.as_str(), REDACTED);
         }
     }
@@ -165,6 +170,16 @@ mod tests {
         h.record(rec("1", "auth with sk-or-supersecret ok"), &["sk-or-supersecret".into()]);
         assert!(h.sessions[0].transcript.contains("***"));
         assert!(!h.sessions[0].transcript.contains("supersecret"));
+    }
+
+    #[test]
+    fn redacts_overlapping_secrets_longest_first_without_leaking_a_fragment() {
+        // A shorter secret that is a prefix of a longer one must not leave the longer one's tail
+        // exposed. Passed shortest-first on purpose — the fix must not depend on input order.
+        let out = redact("token=SECRETLONGER done", &["SECRET".into(), "SECRETLONGER".into()]);
+        assert!(!out.contains("SECRET"), "no secret text remains: {out}");
+        assert!(!out.contains("LONGER"), "no fragment of the longer secret leaks: {out}");
+        assert_eq!(out, "token=*** done");
     }
 
     #[test]
