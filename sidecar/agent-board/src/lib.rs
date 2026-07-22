@@ -19,18 +19,28 @@ pub const SIDECAR_ID: &str = "agent-board";
 /// Env var overriding the project root whose `Tickets/` the board reads.
 pub const BOARD_ROOT_ENV: &str = "CPE_BOARD_ROOT";
 
-/// Resolve the project root the board reads `Tickets/` under: the `CPE_BOARD_ROOT` env var if set, else
-/// the nearest ancestor of the current directory that has a `Tickets/` folder, else the current
-/// directory. Host-brokered `context` will supply this properly in CPE-853; this keeps the sidecar
-/// functional when launched from a project.
+/// Resolve the project root the board reads `Tickets/` under, from an explicit host-supplied root (the
+/// explorer's current folder, via `CPE_BOARD_ROOT`) plus a fallback cwd. Walks **up** from the start path
+/// to the nearest ancestor that actually has a `Tickets/` folder, so the board finds the project whether
+/// it's pointed at the project root OR a subfolder within it (CPE-861). This mirrors the in-process board,
+/// which resolves its root via `find_project_root` (walk-up) before reading cards. Pure, so it's
+/// unit-testable without mutating env/cwd.
+pub fn resolve_board_root(explicit: Option<&str>, cwd: std::path::PathBuf) -> std::path::PathBuf {
+    let start = explicit
+        .filter(|p| !p.is_empty())
+        .map(std::path::PathBuf::from)
+        .unwrap_or(cwd);
+    board::nearest_project_root(&start).unwrap_or(start)
+}
+
+/// The project root the board reads `Tickets/` under: the `CPE_BOARD_ROOT` env var if set, else the
+/// sidecar's cwd — in both cases walking up to the nearest ancestor with a `Tickets/` folder (CPE-861).
+/// Host-brokered `context` will supply the root properly in CPE-853; this keeps the sidecar functional
+/// when launched from anywhere inside a project.
 pub fn board_root() -> std::path::PathBuf {
-    if let Ok(p) = std::env::var(BOARD_ROOT_ENV) {
-        if !p.is_empty() {
-            return std::path::PathBuf::from(p);
-        }
-    }
+    let explicit = std::env::var(BOARD_ROOT_ENV).ok();
     let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
-    board::nearest_project_root(&cwd).unwrap_or(cwd)
+    resolve_board_root(explicit.as_deref(), cwd)
 }
 
 /// The opening `Hello` this sidecar announces: its id/version, the contract version it speaks, and the
@@ -81,6 +91,24 @@ pub fn on_message(env: &Envelope) -> Reaction {
 mod tests {
     use super::*;
     use sidecar_contract::{Lifecycle, Request, Welcome};
+
+    #[test]
+    fn resolve_board_root_walks_up_from_explicit_subfolder_root() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        std::fs::create_dir_all(root.join("Tickets/Backlog")).unwrap();
+        // Host points the board at a SUBFOLDER of the project (CPE-861) → still resolves to the project root.
+        let sub = root.join("Tickets/Doing");
+        assert_eq!(
+            resolve_board_root(Some(sub.to_str().unwrap()), std::path::PathBuf::from(".")).as_path(),
+            root,
+        );
+        // Empty / absent explicit root → fall back to a cwd walk-up (unchanged behavior).
+        let deep = root.join("a/b");
+        std::fs::create_dir_all(&deep).unwrap();
+        assert_eq!(resolve_board_root(None, deep.clone()).as_path(), root);
+        assert_eq!(resolve_board_root(Some(""), deep).as_path(), root);
+    }
 
     #[test]
     fn hello_announces_the_agent_board_id_and_context_capability() {
