@@ -27,10 +27,16 @@ notice with no way to diagnose.
   in Settings → Platform; a one-click **Repair**; specific launch-failure messages; bundle `repos`.
 - **L2 — Auto-repair (true self-heal)** *(done, CPE-867)*: never-executed `.pristine` copy of each sidecar;
   startup sweep restores a missing/stale exe from it (after reaping a holding daemon) — zero user action.
-- **L3 — Resilient launch** *(active, CPE-868)*: retry spawn/handshake with backoff; auto-restart a crashed
-  sidecar; re-check health after.
+- **L3 — Resilient launch** *(done, CPE-868)*: retry spawn/handshake with backoff. (Crash **auto-restart**
+  while running is a further, optional piece — not yet needed; file a follow-up if crashes are observed.)
+
+## Status
+All three planned layers are shipped (L1 #138, L2 #145, L3 #146). Sidecars now diagnose + one-click Repair,
+self-restore a missing/stale binary from a pristine copy, and retry a transient launch hiccup. **Epic
+effectively complete** — only the optional crash-auto-restart remains, deferred until there's evidence it's
+needed.
 
 ## Children
 - CPE-863 — Sidecar health diagnosis + Repair button (L1) + bundle repos — **Done** (#138)
 - CPE-867 — Auto-restore from a bundled pristine copy (L2) — **Done** (#145)
-- CPE-868 — Resilient launch: retry with backoff (L3) — In Progress
+- CPE-868 — Resilient launch: retry with backoff (L3) — **Done** (#146)
