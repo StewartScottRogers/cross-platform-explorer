@@ -405,6 +405,77 @@ mod tests {
         let _ = fs::remove_dir_all(&d);
     }
 
+    /// CRC-32 (IEEE), so the hand-built malicious zip below has a valid checksum the extractor accepts.
+    fn crc32(data: &[u8]) -> u32 {
+        let mut crc: u32 = 0xFFFF_FFFF;
+        for &byte in data {
+            crc ^= byte as u32;
+            for _ in 0..8 {
+                if crc & 1 != 0 {
+                    crc = (crc >> 1) ^ 0xEDB8_8320;
+                } else {
+                    crc >>= 1;
+                }
+            }
+        }
+        !crc
+    }
+
+    /// A minimal single-entry STORED zip whose filename is `name` verbatim — used to smuggle a `../`
+    /// traversal name past the zip *writer* (which rejects it), so we can test the *extractor's* guard.
+    fn craft_zip_with_entry_name(name: &str, data: &[u8]) -> Vec<u8> {
+        let name = name.as_bytes();
+        let crc = crc32(data);
+        let (nlen, dlen) = (name.len() as u16, data.len() as u32);
+        let mut z = Vec::new();
+        let u16le = |v: u16, z: &mut Vec<u8>| z.extend_from_slice(&v.to_le_bytes());
+        let u32le = |v: u32, z: &mut Vec<u8>| z.extend_from_slice(&v.to_le_bytes());
+        // Local file header.
+        u32le(0x0403_4b50, &mut z);
+        u16le(20, &mut z); u16le(0, &mut z); u16le(0, &mut z); // ver, flags, method(stored)
+        u16le(0, &mut z); u16le(0, &mut z);                     // mod time/date
+        u32le(crc, &mut z); u32le(dlen, &mut z); u32le(dlen, &mut z); // crc, comp, uncomp
+        u16le(nlen, &mut z); u16le(0, &mut z);                  // name len, extra len
+        z.extend_from_slice(name);
+        z.extend_from_slice(data);
+        let cd_offset = z.len() as u32;
+        // Central directory header.
+        u32le(0x0201_4b50, &mut z);
+        u16le(20, &mut z); u16le(20, &mut z); u16le(0, &mut z); u16le(0, &mut z); // made-by, needed, flags, method
+        u16le(0, &mut z); u16le(0, &mut z);                     // mod time/date
+        u32le(crc, &mut z); u32le(dlen, &mut z); u32le(dlen, &mut z);
+        u16le(nlen, &mut z); u16le(0, &mut z); u16le(0, &mut z); // name, extra, comment len
+        u16le(0, &mut z); u16le(0, &mut z); u32le(0, &mut z);    // disk start, internal attrs, external attrs
+        u32le(0, &mut z);                                        // local header offset
+        z.extend_from_slice(name);
+        let cd_size = z.len() as u32 - cd_offset;
+        // End of central directory.
+        u32le(0x0605_4b50, &mut z);
+        u16le(0, &mut z); u16le(0, &mut z); u16le(1, &mut z); u16le(1, &mut z); // disks, entries
+        u32le(cd_size, &mut z); u32le(cd_offset, &mut z); u16le(0, &mut z);     // cd size/offset, comment len
+        z
+    }
+
+    // End-to-end zip-slip guard: a zip carrying a `../escape.txt` entry must NOT write outside the
+    // extraction root. `extract_archive` leans on the zip crate's `enclosed_name`; this pins that the
+    // guard actually holds, so a future crate bump that regressed it would fail CI (the 7z path has its
+    // own `entry_name_is_safe` unit test; this covers the far more common zip format end-to-end).
+    #[test]
+    fn zip_extraction_does_not_escape_the_destination() {
+        let d = scratch("zip_slip");
+        let zip_path = d.join("evil.zip");
+        // Hand-crafted because the zip *writer* refuses a `../` name — we're testing the extractor.
+        fs::write(&zip_path, craft_zip_with_entry_name("../escape.txt", b"pwned")).unwrap();
+
+        let dest = d.join("out");
+        // The guard may either reject the archive (Err) or skip the unsafe entry (Ok) — both are safe.
+        // The invariant we care about is that the traversal entry is NEVER written outside `dest`.
+        let _ = extract_archive(&zip_path.to_string_lossy(), &dest.to_string_lossy());
+        assert!(!d.join("escape.txt").exists(), "traversal entry escaped the extraction root");
+        assert!(!dest.parent().unwrap().join("escape.txt").exists(), "traversal entry escaped the extraction root");
+        let _ = fs::remove_dir_all(&d);
+    }
+
     #[test]
     fn extract_archive_unpacks_a_tar_gz() {
         use flate2::write::GzEncoder;
