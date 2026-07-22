@@ -8,30 +8,57 @@
 //! `check_server_key` hook), so a changed/revoked key is refused before any filesystem op — the whole
 //! point of SFTP over a bare TCP transport.
 //!
-//! Auth is password-only in this slice; SSH-key auth is a follow-up. Testing runs against an in-process
-//! `russh-sftp` server (see the tests) — no Docker, so it runs identically on all three CI OSes.
+//! Auth is by password or an OpenSSH private key (optionally passphrase-protected). Testing runs against
+//! an in-process `russh-sftp` server (see the tests) — no Docker, so it runs identically on all three CI OSes.
 
 use std::sync::{Arc, Mutex};
 
 use cpe_server::known_hosts::{verify_host_key, HostKeyVerdict, KnownHost};
 use cpe_server::provider::{FileSystemProvider, ProviderEntry};
 use russh::client;
-use russh::keys::ssh_key;
+use russh::keys::{ssh_key, PrivateKey, PrivateKeyWithHashAlg};
 use russh_sftp::client::SftpSession;
 use tokio::runtime::Runtime;
 
-/// How to connect to a remote SFTP host. Password auth only in this slice.
+/// How to authenticate to the SSH server.
+#[derive(Debug, Clone)]
+pub enum SftpAuth {
+    /// A plaintext password.
+    Password(String),
+    /// An OpenSSH-format private key (the contents of e.g. `~/.ssh/id_ed25519`), with an optional
+    /// passphrase if the key is encrypted.
+    PrivateKey { pem: String, passphrase: Option<String> },
+}
+
+/// How to connect to a remote SFTP host.
 #[derive(Debug, Clone)]
 pub struct SftpConfig {
     pub host: String,
     pub port: u16,
     pub user: String,
-    pub password: String,
+    pub auth: SftpAuth,
 }
 
 impl SftpConfig {
-    pub fn new(host: impl Into<String>, port: u16, user: impl Into<String>, password: impl Into<String>) -> Self {
-        Self { host: host.into(), port, user: user.into(), password: password.into() }
+    /// Connect with password authentication.
+    pub fn password(
+        host: impl Into<String>,
+        port: u16,
+        user: impl Into<String>,
+        password: impl Into<String>,
+    ) -> Self {
+        Self { host: host.into(), port, user: user.into(), auth: SftpAuth::Password(password.into()) }
+    }
+
+    /// Connect with an OpenSSH private key (optionally passphrase-protected).
+    pub fn key(
+        host: impl Into<String>,
+        port: u16,
+        user: impl Into<String>,
+        pem: impl Into<String>,
+        passphrase: Option<String>,
+    ) -> Self {
+        Self { host: host.into(), port, user: user.into(), auth: SftpAuth::PrivateKey { pem: pem.into(), passphrase } }
     }
 }
 
@@ -89,6 +116,17 @@ fn openssh_fields(key: &ssh_key::PublicKey) -> KeyFields {
     }
 }
 
+/// Parse an OpenSSH-format private key, decrypting it with `passphrase` if it is encrypted.
+fn decode_private_key(pem: &str, passphrase: Option<&str>) -> Result<PrivateKey, String> {
+    let key = PrivateKey::from_openssh(pem).map_err(|e| format!("sftp: invalid private key: {e}"))?;
+    if key.is_encrypted() {
+        let pass = passphrase.ok_or_else(|| "sftp: private key is encrypted but no passphrase was given".to_string())?;
+        key.decrypt(pass).map_err(|e| format!("sftp: wrong passphrase or undecryptable key: {e}"))
+    } else {
+        Ok(key)
+    }
+}
+
 /// A connected SFTP session presented as a synchronous [`FileSystemProvider`]. Owns its tokio runtime;
 /// dropping it tears down the connection.
 pub struct SftpProvider {
@@ -123,12 +161,24 @@ impl SftpProvider {
                 let mut session = client::connect(ssh_config, (config.host.as_str(), config.port), handler)
                     .await
                     .map_err(|e| connect_error(&seen, e))?;
-                if !session
-                    .authenticate_password(&config.user, &config.password)
-                    .await
-                    .map_err(|e| format!("sftp auth: {e}"))?
-                    .success()
-                {
+                let authed = match &config.auth {
+                    SftpAuth::Password(pw) => session
+                        .authenticate_password(&config.user, pw)
+                        .await
+                        .map_err(|e| format!("sftp auth: {e}"))?
+                        .success(),
+                    SftpAuth::PrivateKey { pem, passphrase } => {
+                        let key = decode_private_key(pem, passphrase.as_deref())?;
+                        // The RSA signature hash to negotiate (ignored for non-RSA keys like Ed25519).
+                        let hash = session.best_supported_rsa_hash().await.ok().flatten().flatten();
+                        session
+                            .authenticate_publickey(&config.user, PrivateKeyWithHashAlg::new(Arc::new(key), hash))
+                            .await
+                            .map_err(|e| format!("sftp auth: {e}"))?
+                            .success()
+                    }
+                };
+                if !authed {
                     return Err("sftp: authentication failed".to_string());
                 }
                 let channel = session.channel_open_session().await.map_err(|e| format!("sftp channel: {e}"))?;
@@ -325,19 +375,23 @@ mod tests {
         }
     }
 
-    // The SSH layer: accept any password, hand the `sftp` subsystem to the canned handler.
+    // The SSH layer: accept any password (or, if configured, only a specific public key), then hand the
+    // `sftp` subsystem to the canned handler.
     #[derive(Clone)]
-    struct TestServer;
+    struct TestServer {
+        accept_pubkey: Option<ssh_key::PublicKey>,
+    }
 
     impl russh::server::Server for TestServer {
         type Handler = SshSession;
         fn new_client(&mut self, _: Option<SocketAddr>) -> SshSession {
-            SshSession { channel: None }
+            SshSession { channel: None, accept_pubkey: self.accept_pubkey.clone() }
         }
     }
 
     struct SshSession {
         channel: Option<Channel<Msg>>,
+        accept_pubkey: Option<ssh_key::PublicKey>,
     }
 
     impl russh::server::Handler for SshSession {
@@ -345,6 +399,13 @@ mod tests {
 
         async fn auth_password(&mut self, _user: &str, _password: &str) -> Result<Auth, Self::Error> {
             Ok(Auth::Accept)
+        }
+
+        async fn auth_publickey(&mut self, _user: &str, key: &ssh_key::PublicKey) -> Result<Auth, Self::Error> {
+            Ok(match &self.accept_pubkey {
+                Some(expected) if key == expected => Auth::Accept,
+                _ => Auth::reject(),
+            })
         }
 
         async fn channel_open_session(&mut self, channel: Channel<Msg>, _s: &mut Session) -> Result<bool, Self::Error> {
@@ -368,8 +429,9 @@ mod tests {
     }
 
     /// Spawn the canned server on an ephemeral loopback port (its own thread + runtime), returning the
-    /// address and the host public key as `known_hosts` fields `(key_type, key_b64)`.
-    fn spawn_server() -> (SocketAddr, KeyFields) {
+    /// address and the host public key as `known_hosts` fields `(key_type, key_b64)`. If `accept_pubkey`
+    /// is set, the server only accepts publickey auth with that exact key (else it accepts any password).
+    fn spawn_server_with(accept_pubkey: Option<ssh_key::PublicKey>) -> (SocketAddr, KeyFields) {
         let key = PrivateKey::random(&mut rand_core::OsRng, Algorithm::Ed25519).expect("gen host key");
         let pub_fields = openssh_fields(key.public_key());
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
@@ -384,10 +446,14 @@ mod tests {
                 let config = Arc::new(russh::server::Config { keys: vec![key], ..Default::default() });
                 let listener = tokio::net::TcpListener::from_std(listener).unwrap();
                 // run_on_socket drives the full accept + per-connection session lifecycle.
-                let _ = TestServer.run_on_socket(config, &listener).await;
+                let _ = TestServer { accept_pubkey }.run_on_socket(config, &listener).await;
             });
         });
         (addr, pub_fields)
+    }
+
+    fn spawn_server() -> (SocketAddr, KeyFields) {
+        spawn_server_with(None)
     }
 
     /// A `known_hosts` list trusting `(key_type, key_b64)` at `127.0.0.1:port`.
@@ -400,7 +466,7 @@ mod tests {
     #[test]
     fn connects_to_a_trusted_host_then_lists_stats_and_reads() {
         let (addr, hostkey) = spawn_server();
-        let cfg = SftpConfig::new("127.0.0.1", addr.port(), "user", "pw");
+        let cfg = SftpConfig::password("127.0.0.1", addr.port(), "user", "pw");
         let provider = SftpProvider::connect(&cfg, known_for(addr.port(), &hostkey), HostKeyPolicy::Strict)
             .expect("connect to a trusted host should succeed");
         assert_eq!(provider.host_key_verdict(), HostKeyVerdict::Trusted);
@@ -426,7 +492,7 @@ mod tests {
         let (addr, _hostkey) = spawn_server();
         // Same host+type, DIFFERENT key material → Changed → connection must be refused.
         let wrong = ("ssh-ed25519".to_string(), "AAAAthisisnottherealkey".to_string());
-        let cfg = SftpConfig::new("127.0.0.1", addr.port(), "user", "pw");
+        let cfg = SftpConfig::password("127.0.0.1", addr.port(), "user", "pw");
         let err = match SftpProvider::connect(&cfg, known_for(addr.port(), &wrong), HostKeyPolicy::Strict) {
             Ok(_) => panic!("a changed host key must be refused"),
             Err(e) => e,
@@ -438,11 +504,56 @@ mod tests {
     fn an_unknown_host_is_refused_under_strict() {
         // No known_hosts entry → Unknown → Strict refuses at the handshake (before any SFTP op).
         let (addr, _hostkey) = spawn_server();
-        let cfg = SftpConfig::new("127.0.0.1", addr.port(), "user", "pw");
+        let cfg = SftpConfig::password("127.0.0.1", addr.port(), "user", "pw");
         let err = match SftpProvider::connect(&cfg, vec![], HostKeyPolicy::Strict) {
             Ok(_) => panic!("an unknown host must be refused under Strict"),
             Err(e) => e,
         };
         assert!(err.contains("unknown host key"), "got: {err}");
+    }
+
+    /// A fresh OpenSSH Ed25519 keypair: (public key, private-key PEM string).
+    fn client_keypair() -> (ssh_key::PublicKey, String) {
+        let key = PrivateKey::random(&mut rand_core::OsRng, Algorithm::Ed25519).unwrap();
+        let pem = key.to_openssh(ssh_key::LineEnding::LF).unwrap().to_string();
+        (key.public_key().clone(), pem)
+    }
+
+    #[test]
+    fn authenticates_with_an_ssh_key_then_lists() {
+        // The server accepts only this client public key; the provider auths with the matching private key.
+        let (client_pub, pem) = client_keypair();
+        let (addr, hostkey) = spawn_server_with(Some(client_pub));
+        let cfg = SftpConfig::key("127.0.0.1", addr.port(), "user", pem, None);
+        let provider = SftpProvider::connect(&cfg, known_for(addr.port(), &hostkey), HostKeyPolicy::Strict)
+            .expect("key auth should succeed");
+        assert_eq!(provider.host_key_verdict(), HostKeyVerdict::Trusted);
+        assert_eq!(provider.list("/").expect("list").len(), 2);
+    }
+
+    #[test]
+    fn a_wrong_ssh_key_is_rejected() {
+        // Server accepts one key; the provider offers a different one → auth fails (after the host key,
+        // which is still Trusted, was verified).
+        let (accepted_pub, _accepted_pem) = client_keypair();
+        let (_wrong_pub, wrong_pem) = client_keypair();
+        let (addr, hostkey) = spawn_server_with(Some(accepted_pub));
+        let cfg = SftpConfig::key("127.0.0.1", addr.port(), "user", wrong_pem, None);
+        let err = match SftpProvider::connect(&cfg, known_for(addr.port(), &hostkey), HostKeyPolicy::Strict) {
+            Ok(_) => panic!("a wrong key must be rejected"),
+            Err(e) => e,
+        };
+        assert!(err.contains("authentication failed"), "got: {err}");
+    }
+
+    #[test]
+    fn an_invalid_private_key_is_a_clear_error() {
+        let (addr, hostkey) = spawn_server_with(Some(client_keypair().0));
+        let cfg = SftpConfig::key("127.0.0.1", addr.port(), "user", "not a real key", None);
+        let err = match SftpProvider::connect(&cfg, known_for(addr.port(), &hostkey), HostKeyPolicy::Strict) {
+            Ok(_) => panic!("an invalid key must error"),
+            Err(e) => e,
+        };
+        assert!(err.contains("invalid private key"), "got: {err}");
     }
 }
