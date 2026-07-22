@@ -12,6 +12,39 @@ import { invoke as coreInvoke } from "@tauri-apps/api/core";
 import { withBusy } from "./busy";
 import { diagnosticsEnabled, recordCall } from "./diagnostics";
 
+// ---- Transport seam (CPE-819, epic CPE-810) -----------------------------------------------------
+//
+// `invoke`/`rawInvoke` are the single chokepoint every backend call flows through, so this is the one
+// place to make the whole GUI run either against **local in-process Tauri IPC** (the default) or a
+// **remote server** speaking the contract envelope — chosen by config, with every call site unchanged
+// (they just import `invoke`/`rawInvoke`). Only the active transport differs; busy-cursor + Diagnostics
+// timing wrap the transport, so both behaviours survive the swap. The remote transport implementation +
+// the streaming (`ipc::Channel`) equivalents land with the reference server (CPE-820); this is the seam
+// they plug into, and it defaults to local so single-user/in-process behaviour is byte-for-byte unchanged.
+
+/** A backend-call transport — same call shape as Tauri's `invoke`. */
+export interface Transport {
+  invoke<T = unknown>(...args: Parameters<typeof coreInvoke>): Promise<T>;
+}
+
+/** The local transport: historical in-process Tauri IPC. The default; zero overhead. */
+export const localTransport: Transport = {
+  invoke: <T = unknown>(...args: Parameters<typeof coreInvoke>): Promise<T> => coreInvoke<T>(...args),
+};
+
+let activeTransport: Transport = localTransport;
+
+/** Select the active transport (CPE-819). Pass `null` to reset to local IPC. Called once at startup from
+ *  config; until then, and whenever local, behaviour is exactly the pre-seam in-process path. */
+export function setTransport(t: Transport | null): void {
+  activeTransport = t ?? localTransport;
+}
+
+/** Whether a non-local (remote) transport is currently active. */
+export function isRemoteTransport(): boolean {
+  return activeTransport !== localTransport;
+}
+
 /** Time a backend call for Diagnostics (CPE-758) when it's on — no-op / zero overhead when off. The
  *  command name is the first invoke arg. Records on both resolve and reject so failures still show. */
 function timed<T>(cmd: unknown, p: Promise<T>): Promise<T> {
@@ -24,20 +57,21 @@ function timed<T>(cmd: unknown, p: Promise<T>): Promise<T> {
 }
 
 /**
- * The untracked Tauri invoke — like `@tauri-apps/api/core`'s `invoke`, with NO busy-cursor tracking.
+ * The untracked invoke — like `@tauri-apps/api/core`'s `invoke`, with NO busy-cursor tracking.
  * Use this only for streaming / self-progress operations that opt out of the global wait cursor
- * (CPE-550). Everywhere else, prefer the default {@link invoke} export. Still Diagnostics-timed (CPE-758).
+ * (CPE-550). Everywhere else, prefer the default {@link invoke} export. Still Diagnostics-timed (CPE-758)
+ * and routed through the active {@link Transport} (CPE-819).
  */
 export function rawInvoke<T = unknown>(...args: Parameters<typeof coreInvoke>): Promise<T> {
-  return timed(args[0], coreInvoke<T>(...args));
+  return timed(args[0], activeTransport.invoke<T>(...args));
 }
 
 /**
- * Tauri `invoke`, wrapped so a long-running call raises the app-wide busy cursor (CPE-547). A drop-in
+ * `invoke`, wrapped so a long-running call raises the app-wide busy cursor (CPE-547). A drop-in
  * replacement for `@tauri-apps/api/core`'s `invoke`: same arguments, same return value, and errors
  * propagate unchanged. The busy guard is released on BOTH resolve and reject, so a failing command can
- * never leave the cursor stuck.
+ * never leave the cursor stuck. Routed through the active {@link Transport} (CPE-819).
  */
 export function invoke<T = unknown>(...args: Parameters<typeof coreInvoke>): Promise<T> {
-  return withBusy(() => timed(args[0], coreInvoke<T>(...args)));
+  return withBusy(() => timed(args[0], activeTransport.invoke<T>(...args)));
 }

@@ -25,3 +25,11 @@ busy-cursor wiring. Prereqs: CPE-811, CPE-815.
 - [ ] GUI-verified against a local server through the remote path (loopback).
 
 ## Work Log
+- 2026-07-22 (nightshift) — **Seam landed (foundation).** `invoke.ts` now routes every call through a
+  pluggable `Transport` (interface + `localTransport` default + `setTransport`/`isRemoteTransport`); busy
+  cursor + Diagnostics timing wrap the transport, so both survive the swap. Default is local Tauri IPC →
+  in-process behaviour byte-for-byte unchanged. Unit tests: default→local passes args through; a swapped
+  transport routes both `invoke` + `rawInvoke` and bypasses local IPC; `setTransport(null)` resets; a
+  remote rejection still releases the busy cursor (invoke.test.ts 9/9). **AC #1 + #3 done.** Remaining
+  (gated on CPE-820's reference server): a concrete remote `Transport` speaking the CPE-811 envelope, the
+  3 streaming commands' over-the-wire form (AC #2), and GUI-verify against a loopback server (AC #4).
