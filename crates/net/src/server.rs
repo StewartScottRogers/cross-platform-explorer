@@ -30,8 +30,13 @@ use crate::wire::{read_envelope, write_envelope};
 /// `StreamItem`s over the wire, terminated by `StreamEnd`. This is the over-the-wire equivalent of the
 /// app's `ipc::Channel` producers (directory listings, recursive search) — a request that yields many
 /// results, correlated by the request's envelope id, so the client paints rows as they arrive.
+/// The sink a [`StreamHandler`] pushes each item into — writing it to the socket as a `StreamItem`
+/// immediately. Returns [`ControlFlow::Break`](std::ops::ControlFlow::Break) when the peer has gone
+/// (or cancels), so the producer stops walking at the next batch boundary.
+pub type StreamSink<'a> = dyn FnMut(serde_json::Value) -> std::ops::ControlFlow<()> + 'a;
+
 pub type StreamHandler = Box<
-    dyn Fn(&dyn ServerCtx, serde_json::Value) -> Result<Vec<serde_json::Value>, ContractError>
+    dyn Fn(&dyn ServerCtx, serde_json::Value, &mut StreamSink) -> Result<(), ContractError>
         + Send
         + Sync,
 >;
@@ -69,7 +74,7 @@ impl ServerRuntime {
     /// items back as `StreamItem`s + a final `StreamEnd`, all security-checked exactly like a unary call.
     pub fn with_stream_handler<F>(mut self, method: impl Into<String>, handler: F) -> Self
     where
-        F: Fn(&dyn ServerCtx, serde_json::Value) -> Result<Vec<serde_json::Value>, ContractError>
+        F: Fn(&dyn ServerCtx, serde_json::Value, &mut StreamSink) -> Result<(), ContractError>
             + Send
             + Sync
             + 'static,
@@ -83,19 +88,24 @@ impl ServerRuntime {
     /// tests share this so the streaming path is exercised against real domain data, not a stub. (v1
     /// collects then emits; swapping in the shared incremental walker is a follow-up.)
     pub fn with_builtin_streams(self) -> Self {
-        self.with_stream_handler("list_dir_stream", |_ctx, params| {
+        self.with_stream_handler("list_dir_stream", |_ctx, params, emit| {
             let path = params.get("path").and_then(|v| v.as_str()).ok_or_else(|| {
                 ContractError::new(ErrorCode::BadRequest, "list_dir_stream: missing 'path'", false)
             })?;
-            let entries = cpe_server::listing::list_dir(path)
-                .map_err(|e| ContractError::new(ErrorCode::Internal, e, false))?;
-            entries
-                .into_iter()
-                .map(|e| {
-                    serde_json::to_value(e)
-                        .map_err(|e| ContractError::new(ErrorCode::Internal, e.to_string(), false))
-                })
-                .collect()
+            // Emit each batch as the walker reads it (incremental — first rows land immediately),
+            // stopping early if the peer has gone.
+            cpe_server::listing::stream_dir_entries(path, 64, |batch| {
+                for de in batch {
+                    if let Ok(v) = serde_json::to_value(de) {
+                        if emit(v).is_break() {
+                            return std::ops::ControlFlow::Break(());
+                        }
+                    }
+                }
+                std::ops::ControlFlow::Continue(())
+            })
+            .map(|_total| ())
+            .map_err(|e| ContractError::new(ErrorCode::Internal, e, false))
         })
     }
 
@@ -135,23 +145,35 @@ impl ServerRuntime {
         while let Some(env) = read_envelope(&mut reader)? {
             match env.message {
                 Message::Request(req) if self.stream_handlers.contains_key(&req.method) => {
-                    // Streaming method (CPE-819): security-check, then emit StreamItems + StreamEnd, all
-                    // correlated by the request's envelope id. A denial or handler error is a single
+                    // Streaming method (CPE-819): security-check, then let the handler push StreamItems
+                    // to the socket *as produced* (incremental), all correlated by the request's
+                    // envelope id, terminated by StreamEnd. A denial or handler error is a single
                     // Response instead — the client's `call_stream` surfaces it as the stream's error.
-                    let reply = self
-                        .security_decision(&principal, &req)
-                        .and_then(|()| self.stream_handlers[&req.method](self.ctx.as_ref(), req.params));
-                    match reply {
-                        Ok(items) => {
-                            for item in items {
-                                write_envelope(&mut writer, &Envelope::new(env.id, Message::StreamItem(item)))?;
-                            }
-                            write_envelope(&mut writer, &Envelope::new(env.id, Message::StreamEnd))?;
+                    let id = env.id;
+                    if let Err(e) = self.security_decision(&principal, &req) {
+                        write_envelope(&mut writer, &Envelope::new(id, Message::Response(Response { result: Err(e) })))?;
+                    } else {
+                        let handler = &self.stream_handlers[&req.method];
+                        let mut io_err: Option<std::io::Error> = None;
+                        let outcome = {
+                            let mut emit = |item: serde_json::Value| -> std::ops::ControlFlow<()> {
+                                match write_envelope(&mut writer, &Envelope::new(id, Message::StreamItem(item))) {
+                                    Ok(()) => std::ops::ControlFlow::Continue(()),
+                                    Err(e) => {
+                                        io_err = Some(e);
+                                        std::ops::ControlFlow::Break(())
+                                    }
+                                }
+                            };
+                            handler(self.ctx.as_ref(), req.params, &mut emit)
+                        };
+                        if let Some(e) = io_err {
+                            return Err(e); // the peer's write failed — drop the connection
                         }
-                        Err(e) => write_envelope(
-                            &mut writer,
-                            &Envelope::new(env.id, Message::Response(Response { result: Err(e) })),
-                        )?,
+                        match outcome {
+                            Ok(()) => write_envelope(&mut writer, &Envelope::new(id, Message::StreamEnd))?,
+                            Err(e) => write_envelope(&mut writer, &Envelope::new(id, Message::Response(Response { result: Err(e) })))?,
+                        }
                     }
                 }
                 Message::Request(req) => {

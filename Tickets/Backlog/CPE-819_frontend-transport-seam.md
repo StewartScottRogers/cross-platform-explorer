@@ -44,3 +44,10 @@ busy-cursor wiring. Prereqs: CPE-811, CPE-815.
   incremental stream handlers, and wire the frontend remote `Transport` to `call_stream` (with 815's
   shared walkers yielding rather than collecting, for true first-rows-immediately). Frontend GUI-verify
   (AC #4) still needs a running server.
+- 2026-07-22 (nightshift) — **Incremental streaming (AC #2 "first rows immediately").** Evolved the
+  `StreamHandler` from Vec-returning to an emit-callback (`&mut StreamSink`) that writes each `StreamItem`
+  to the socket *as produced*; the server pushes items live and stops early (ControlFlow::Break) if the
+  peer disconnects. `list_dir_stream` now drives cpe-server's incremental `stream_dir_entries` walker, so
+  a large directory paints its first rows immediately instead of collecting the whole listing first. net
+  suite 15/15; clippy clean. AC #2 is now substantially complete over the wire; remaining is wiring the
+  frontend remote `Transport` to `call_stream` (needs the RemoteTransport impl) + GUI-verify (AC #4).
