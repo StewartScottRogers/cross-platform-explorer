@@ -128,6 +128,7 @@ jobs:
             ./crates/server -> target
             ./crates/net -> target
             ./crates/sftp -> target
+            ./crates/webdav -> target
 
       - name: contract — clippy + test
         working-directory: crates/contract
@@ -160,6 +161,15 @@ jobs:
         # cpe-server::known_hosts. Uses the `ring` crypto backend (self-contained — no NASM/cmake),
         # and an in-process russh-sftp test server, so it runs on all three OSes with no Docker.
         working-directory: crates/sftp
+        run: |
+          cargo clippy --all-targets -- -D warnings
+          cargo test
+
+      - name: webdav — clippy + test
+        # The WebDAV FileSystemProvider (CPE-616): a 2nd remote backend over HTTP/WebDAV. Sync (ureq +
+        # rustls/ring — pure Rust, no C tooling), tested against an in-process tiny_http server, so it runs
+        # on all three OSes with no Docker.
+        working-directory: crates/webdav
         run: |
           cargo clippy --all-targets -- -D warnings
           cargo test

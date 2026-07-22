@@ -1,0 +1,24 @@
+[package]
+name = "cpe-webdav"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.77.2"
+description = "WebDAV FileSystemProvider for the Cross-Platform Explorer (epic CPE-616): a remote backend over HTTP/WebDAV. Sync (ureq), pure-Rust TLS (rustls) — no async runtime, no C build tooling."
+license = "MIT"
+
+# A second remote backend alongside cpe-sftp, over HTTP/WebDAV (Nextcloud/ownCloud/NAS). Depends on
+# cpe-server for the FileSystemProvider trait. Sync HTTP via ureq (rustls TLS — pure Rust, no NASM/cmake),
+# so unlike SFTP no internal tokio runtime is needed. Standalone (out of any workspace), like the siblings.
+
+[dependencies]
+cpe-server = { path = "../server" }
+# Sync HTTP client with pure-Rust TLS (rustls) — no C build tooling, builds identically on all 3 CI OSes.
+ureq = { version = "2", default-features = false, features = ["tls", "gzip"] }
+# Read-only XML DOM for parsing PROPFIND multistatus responses.
+roxmltree = "0.20"
+# Basic-auth header encoding.
+base64 = "0.22"
+
+[dev-dependencies]
+# A tiny sync HTTP server for the in-process WebDAV test fixture (no Docker; runs on every CI OS).
+tiny_http = "0.12"
