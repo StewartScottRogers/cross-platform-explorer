@@ -1751,6 +1751,25 @@ async fn dir_children_sizes(path: String) -> Result<Vec<cpe_server::disk_usage::
         .await.map_err(|e| e.to_string())?
 }
 
+/// Streaming variant of `dir_children_sizes` (CPE-706, streaming-liveness convention): pushes each direct
+/// child's recursive size over an IPC channel as it's computed (in parallel), so the space-analyzer
+/// treemap fills in progressively instead of blocking on the whole scan. Async + `spawn_blocking` so the
+/// scan never freezes the UI thread (CPE-760); the walk is the shared `cpe_server::disk_usage::
+/// stream_children_sizes` (CPE-815). Children arrive in completion order; the reactive treemap re-lays-out.
+#[tauri::command]
+async fn dir_children_sizes_stream(
+    path: String,
+    on_child: tauri::ipc::Channel<Vec<cpe_server::disk_usage::ChildSize>>,
+) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        cpe_server::disk_usage::stream_children_sizes(&path, |cs| {
+            let _ = on_child.send(vec![cs]);
+        })
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
 /// Compute the SHA-256 checksum of a file, returned as lowercase hex (CPE-412). Streamed in fixed
 /// chunks so a multi-GB file never loads into memory. A directory, missing, or unreadable path is an
 /// `Err`, never a panic. Opt-in from the UI (hashing is I/O-bound) — never run automatically.
@@ -5348,6 +5367,7 @@ pub fn run() {
             search_file_contents_stream,
             dir_size,
             dir_children_sizes,
+            dir_children_sizes_stream,
             folder_stats,
             hash_file,
             apply_backup_plan,
