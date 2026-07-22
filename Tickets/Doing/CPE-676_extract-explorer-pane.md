@@ -79,3 +79,11 @@ agent-board sidecar, the data browser, etc. and would revert ~19k lines).
   gets `baseEntries`, so binding `entries` in adds nothing). It must be done with the running app driven
   through nav/keyboard/archive/smart-folder/tab flows — the 902 tests don't cover those. Do NOT merge it
   blind. Next: a focused attended pass (this, or fold into CPE-677 when the split lands).
+- 2026-07-21 — **Domino 3a landed (#143), GUI-verified.** The pane now owns the raw `entries` listing too
+  (bound back; App's `loadPath` still writes it) and resolves the base list from `smartOverride`/
+  `archiveOverride` props. So the pane now owns: entries → the whole sort/hidden/search/type/tag pipeline →
+  `visible` → `selectedEntries` (dominoes 1/2/3a). **Remaining = the `loadPath` navigation engine** (streaming
+  fetch + generation tokens + nav cache + smart-folder/archive/history/tabs + the ~40 nav/op callers). This
+  is the irreducible attended big-bang; the 902 tests don't cover its risky flows (keyboard routing, archive/
+  smart-folder/tab transitions, streaming/cache). Best done as a dedicated focused block with live driving —
+  not squeezed into the tail of a long multi-feature session.
