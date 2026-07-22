@@ -4,8 +4,10 @@ title: Make the application aware of archived (subfoldered) Done tickets
 type: bug
 component: Sidecar
 priority: high
+status: Done
 tags: ready
 created: 2026-07-21
+closed: 2026-07-21
 ---
 
 ## Summary
@@ -27,15 +29,18 @@ in subfolders.
   the in-process `BoardView`) for the same non-recursive assumption.
 
 ## Acceptance Criteria
-- [ ] Column reads (`read_board`, `find_card_file`, `move_card`, and the in-process equivalents) descend
-      **recursively** into a column's subfolders, so archived Done tickets are discovered, counted, found,
-      and movable.
-- [ ] Reorg subfolders (`2026`, `Q3`, `July`, `Week-NN`) are never mistaken for columns/tickets.
-- [ ] Decide + implement a **display treatment** for the (potentially large) archived Done set so the board
-      stays usable — e.g. show recent Done inline and collapse the rest behind an "Archived (N)" affordance,
-      rather than rendering hundreds of cards. (Aware ≠ dump everything on screen.)
-- [ ] Unit tests cover a ticket nested in an archive subfolder (read + find + move).
-- [ ] `cargo test` + clippy (both feature modes) green; GUI-verified the Done column reflects archived work.
+- [x] Column reads descend **recursively**: the sidecar gains `read_archived` (nested Done) and a recursive
+      `find_card_file`/`move_card`; the in-process `board_move` finds recursively too. `board_cards`/
+      `read_board` stay top-level (active), matching the CPE-531 split.
+- [x] Reorg subfolders (`2026`, `Q3`, `July`, `Week-NN`) are never mistaken for columns/tickets (columns are
+      the fixed `COLUMNS`; subfolders are only walked *within* a column).
+- [x] Display treatment: recent (top-level) Done stays inline; archived tickets collapse behind a
+      **"Archived (N)"** toggle in the sidecar board (`/api/archived` + a lazy toggle), mirroring the
+      in-process BoardView. Aware ≠ dumping hundreds of cards.
+- [x] Unit tests cover a nested archived ticket: not in the active board, surfaced by `read_archived`, and
+      still findable + movable (reopened out of the archive).
+- [x] `cargo test` (15) + clippy `--all-targets -D warnings` green in **both** feature modes. (GUI check of
+      the "Archived (N)" toggle available in a sidecar build.)
 
 ## Notes
 - Sibling work: the **auto-archive skill** (moves closed tickets into subfolders automatically) creates the

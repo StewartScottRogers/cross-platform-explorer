@@ -171,16 +171,28 @@ pub fn read_board(root: &Path) -> Vec<Card> {
     cards
 }
 
-/// Find the file backing ticket `id` under `root/Tickets/<column>/`, returning `(path, column)`.
+/// Find the file backing ticket `id` under `root/Tickets/<column>/`, returning `(path, column)`. Searches
+/// **recursively** so an archived Done ticket (in a dated `Done/YYYY/…` subfolder) is still found and can
+/// be moved/reopened (CPE-864).
 fn find_card_file(root: &Path, id: &str) -> Option<(PathBuf, &'static str)> {
     for column in COLUMNS {
         let dir = root.join("Tickets").join(column);
-        let Ok(entries) = fs::read_dir(&dir) else { continue };
-        for entry in entries.flatten() {
-            let path = entry.path();
-            if path.extension().and_then(|e| e.to_str()) != Some("md") {
-                continue;
+        if let Some(hit) = find_in_dir(&dir, id, column) {
+            return Some(hit);
+        }
+    }
+    None
+}
+
+fn find_in_dir(dir: &Path, id: &str, column: &'static str) -> Option<(PathBuf, &'static str)> {
+    let entries = fs::read_dir(dir).ok()?;
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            if let Some(hit) = find_in_dir(&path, id, column) {
+                return Some(hit);
             }
+        } else if path.extension().and_then(|e| e.to_str()) == Some("md") {
             if let Ok(md) = fs::read_to_string(&path) {
                 if card_from(&md, column).map(|c| c.id == id).unwrap_or(false) {
                     return Some((path, column));
@@ -189,6 +201,34 @@ fn find_card_file(root: &Path, id: &str) -> Option<(PathBuf, &'static str)> {
         }
     }
     None
+}
+
+/// Collect archived Done tickets — those in **subdirectories** of `Tickets/Done/` (the dated `YYYY/QN/…`
+/// folders `/ticketing-organize` produces). Top-level files are "recent" and come from [`read_board`];
+/// anything nested is archived (CPE-864, mirroring the in-process board's CPE-531).
+fn collect_archived(dir: &Path, top_level: bool, column: &str, out: &mut Vec<Card>) {
+    let Ok(entries) = fs::read_dir(dir) else { return };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            collect_archived(&path, false, column, out);
+        } else if !top_level && path.extension().and_then(|e| e.to_str()) == Some("md") {
+            if let Ok(md) = fs::read_to_string(&path) {
+                if let Some(card) = card_from(&md, column) {
+                    out.push(card);
+                }
+            }
+        }
+    }
+}
+
+/// The archived Done tickets (in dated `Done/**` subfolders) — the board's "show archived" affordance
+/// (CPE-864). Kept separate from [`read_board`] so the default board stays fast as Done grows. Id-sorted.
+pub fn read_archived(root: &Path) -> Vec<Card> {
+    let mut out = Vec::new();
+    collect_archived(&root.join("Tickets").join("Done"), true, "Done", &mut out);
+    out.sort_by(|a, b| a.id.cmp(&b.id));
+    out
 }
 
 /// Move card `id` to `to_column`: rewrite its `status:` to match, and move the file into that column's
@@ -299,5 +339,46 @@ mod tests {
         let deep = root.join("a/b");
         fs::create_dir_all(&deep).unwrap();
         assert_eq!(nearest_project_root(&deep).as_deref(), Some(root));
+    }
+
+    // Write a ticket into a nested archive subfolder of Done/ (CPE-864).
+    fn write_archived(root: &Path, sub: &str, id: &str) {
+        let dir = root.join("Tickets/Done").join(sub);
+        fs::create_dir_all(&dir).unwrap();
+        let md = format!(
+            "---\nid: {id}\ntitle: \"{id} title\"\ntype: feature\nstatus: Done\npriority: low\ntags: [ready]\nclosed: 2026-07-21\n---\n\nbody\n"
+        );
+        fs::write(dir.join(format!("{id}_x.md")), md).unwrap();
+    }
+
+    #[test]
+    fn archived_tickets_are_aware_but_not_in_the_active_board() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        write_ticket(root, "Done", "CPE-100", "Done"); // top-level (recent) Done
+        write_archived(root, "2026/Q3/July/Week-30", "CPE-200"); // archived
+
+        // The active board shows the recent one, NOT the archived one.
+        let active = read_board(root);
+        assert!(active.iter().any(|c| c.id == "CPE-100"));
+        assert!(!active.iter().any(|c| c.id == "CPE-200"), "archived must not clutter the active board");
+
+        // The archived accessor surfaces the nested one (the app is aware of it).
+        let archived = read_archived(root);
+        assert_eq!(archived.len(), 1);
+        assert_eq!(archived[0].id, "CPE-200");
+    }
+
+    #[test]
+    fn an_archived_ticket_can_still_be_found_and_moved() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        write_archived(root, "2026/Q3/July/Week-30", "CPE-300");
+        // Reopen the archived ticket: move recursively finds it and relocates it to the target column root.
+        let col = move_card(root, "CPE-300", "Doing").unwrap();
+        assert_eq!(col, "Doing");
+        assert!(root.join("Tickets/Doing/CPE-300_x.md").exists());
+        assert!(!root.join("Tickets/Done/2026/Q3/July/Week-30/CPE-300_x.md").exists());
+        assert_eq!(read_board(root).iter().find(|c| c.id == "CPE-300").unwrap().column, "Doing");
     }
 }

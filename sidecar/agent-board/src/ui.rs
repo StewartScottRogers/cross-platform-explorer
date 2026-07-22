@@ -98,6 +98,12 @@ fn route(method: &str, path: &str, body: &[u8], root: &Path) -> (&'static str, &
             "application/json",
             serde_json::to_vec(&board::read_board(root)).unwrap_or_default(),
         ),
+        // Archived Done tickets (dated Done/** subfolders) for the "show archived" affordance (CPE-864).
+        ("GET", "/api/archived") => (
+            "200 OK",
+            "application/json",
+            serde_json::to_vec(&board::read_archived(root)).unwrap_or_default(),
+        ),
         ("POST", "/api/move") => {
             #[derive(serde::Deserialize)]
             struct MoveReq {
@@ -144,6 +150,11 @@ pub fn board_html() -> String {
   .card .id { font-weight: 600; }
   .card .title { color: GrayText; }
   .empty { color: GrayText; text-align: center; padding: 20px 0; }
+  .archtoggle { margin-top: 8px; background: transparent; border: 1px dashed GrayText; color: GrayText;
+                border-radius: 6px; padding: 4px 8px; cursor: pointer; font: inherit; text-align: left; }
+  .archtoggle:hover { color: CanvasText; }
+  .archlist { display: flex; flex-direction: column; gap: 6px; margin-top: 6px; }
+  .archlist .card { opacity: 0.8; }
 </style></head>
 <body>
   <header>Agent Board <span class="note">running out of process · drag a card to move it</span></header>
@@ -151,17 +162,26 @@ pub fn board_html() -> String {
 <script>
 const COLUMNS = ["Backlog","Doing","Blocked","Deferred","Done"];
 let dragId = null;
+let archivedCards = [];   // archived Done tickets (CPE-864), fetched once, shown behind a toggle
+let showArchived = false;
+let activeCards = [];
 
 async function load() {
-  const res = await fetch("/api/cards");
-  render(res.ok ? await res.json() : []);
+  const [cardsRes, archRes] = await Promise.all([fetch("/api/cards"), fetch("/api/archived")]);
+  archivedCards = archRes.ok ? await archRes.json() : [];
+  render(cardsRes.ok ? await cardsRes.json() : []);
 }
 async function move(id, to) {
   const res = await fetch("/api/move", { method: "POST", headers: {"Content-Type":"application/json"},
                                          body: JSON.stringify({ id, to }) });
-  if (res.ok) render(await res.json());
+  if (res.ok) { archivedCards = archivedCards.filter(c => c.id !== id); render(await res.json()); }
+}
+function cardHtml(c) {
+  return `<div class="card" draggable="true" data-id="${c.id}"><div class="id">${c.id}</div>` +
+         `<div class="title">${(c.title||"").replace(/</g,"&lt;")}</div></div>`;
 }
 function render(cards) {
+  activeCards = cards;
   const byCol = {}; COLUMNS.forEach(c => byCol[c] = []);
   cards.forEach(c => (byCol[c.column] || (byCol[c.column] = [])).push(c));
   const root = document.getElementById("cols");
@@ -172,16 +192,23 @@ function render(cards) {
     el.addEventListener("dragleave", () => el.classList.remove("over"));
     el.addEventListener("drop", e => { e.preventDefault(); el.classList.remove("over"); if (dragId) move(dragId, col); });
     const list = byCol[col] || [];
-    const cardsHtml = list.map(c =>
-      `<div class="card" draggable="true" data-id="${c.id}"><div class="id">${c.id}</div><div class="title">${(c.title||"").replace(/</g,"&lt;")}</div></div>`
-    ).join("") || `<div class="empty">—</div>`;
-    el.innerHTML = `<h2>${col}<span>${list.length}</span></h2><div class="cards">${cardsHtml}</div>`;
+    const cardsHtml = list.map(cardHtml).join("") || `<div class="empty">—</div>`;
+    // Done keeps its recent (top-level) cards inline; archived tickets collapse behind a toggle (CPE-864).
+    let archHtml = "";
+    if (col === "Done" && archivedCards.length) {
+      const items = showArchived ? archivedCards.map(cardHtml).join("") : "";
+      archHtml = `<button class="archtoggle" id="archtoggle">${showArchived ? "▾" : "▸"} Archived (${archivedCards.length})</button>` +
+                 `<div class="archlist">${items}</div>`;
+    }
+    el.innerHTML = `<h2>${col}<span>${list.length}</span></h2><div class="cards">${cardsHtml}${archHtml}</div>`;
     el.querySelectorAll(".card").forEach(card => {
       card.addEventListener("dragstart", () => { dragId = card.dataset.id; });
       card.addEventListener("dragend", () => { dragId = null; });
     });
     root.appendChild(el);
   }
+  const t = document.getElementById("archtoggle");
+  if (t) t.addEventListener("click", () => { showArchived = !showArchived; render(activeCards); });
 }
 load();
 </script>
