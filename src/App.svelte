@@ -508,6 +508,10 @@
     { id: "view.folderSizes", group: $t("palette.groupView"), label: showFolderSizes ? $t("palette.hideFolderSizes") : $t("palette.showFolderSizes"), keywords: "folder size recursive subtree column", run: toggleFolderSizes },
     { id: "view.foldersFirst", group: $t("palette.groupView"), label: foldersFirst ? $t("palette.mixFolders") : $t("palette.groupFolders"), run: () => { foldersFirst = !foldersFirst; settings.saveFoldersFirst(foldersFirst); } },
     { id: "view.dualPane", group: $t("palette.groupView"), label: dualPane ? "Single pane" : "Dual pane", keywords: "dual pane split commander two side by side", run: toggleDualPane },
+    { id: "view.paneCopy", group: $t("palette.groupView"), label: "Copy to other pane (F5)", keywords: "commander copy other pane f5", run: commanderCopy, enabled: () => dualPane },
+    { id: "view.paneMove", group: $t("palette.groupView"), label: "Move to other pane (F6)", keywords: "commander move other pane f6", run: commanderMove, enabled: () => dualPane },
+    { id: "view.paneSwap", group: $t("palette.groupView"), label: "Swap panes (Ctrl+U)", keywords: "commander swap panes exchange", run: swapPanes, enabled: () => dualPane },
+    { id: "view.paneMirror", group: $t("palette.groupView"), label: "Mirror path to other pane", keywords: "commander mirror equal pane path", run: mirrorPane, enabled: () => dualPane },
     { id: "tool.findByName", group: $t("palette.groupTools"), label: $t("palette.findByName"), shortcut: "Ctrl+P", run: () => (fileSearchOpen = true), enabled: inFolder },
     { id: "tool.searchInFiles", group: $t("palette.groupTools"), label: $t("palette.searchInFiles"), shortcut: "Ctrl+Shift+F", run: () => (contentSearchOpen = true), enabled: inFolder },
     { id: "tool.findDuplicates", group: $t("palette.groupTools"), label: $t("palette.findDuplicates"), run: () => (duplicatesOpen = true), enabled: inFolder },
@@ -1150,6 +1154,59 @@
     settings.saveDualPane(dualPane);
     if (dualPane) { activePane = 1; void navigateB(paneBPath || currentPath || homePath); }
     else activePane = 0;
+  }
+
+  // Commander keybindings (CPE-678): the active pane's selection + folder, and the opposite pane's folder.
+  function commanderContext() {
+    const sel = activePane === 0 ? selectedEntries : selectedEntriesB;
+    return {
+      sources: sel.map((e) => e.path),
+      from: activePane === 0 ? currentPath : paneBPath,
+      to: activePane === 0 ? paneBPath : currentPath,
+    };
+  }
+
+  /** Refresh both panes after a cross-pane mutation (a move changes both folders). */
+  async function refreshBothPanes() {
+    await loadPath(currentPath, true);
+    if (dualPane && paneBPath) void explorerPaneB?.loadListing(paneBPath, false);
+  }
+
+  /** F5: copy the active pane's selection into the other pane's folder via the transfer engine (CPE-678). */
+  async function commanderCopy() {
+    const { sources, to } = commanderContext();
+    if (sources.length === 0 || !to) return;
+    try { await startTransfer(sources, to, "copy", "keepboth"); } catch (e) { showNotice(String(e), true); }
+  }
+
+  /** F6: move the active pane's selection into the other pane's folder (CPE-678). */
+  async function commanderMove() {
+    const { sources, to } = commanderContext();
+    if (sources.length === 0 || !to) return;
+    try {
+      const results = await invoke<OpResult[]>("move_entries", { paths: sources, dest: to });
+      reportResults(results, "Moved");
+      const moves = results
+        .map((r, i) => ({ from: sources[i], to: r.path, ok: r.ok }))
+        .filter((m) => m.ok)
+        .map(({ from, to }) => ({ from, to }));
+      if (moves.length > 0) retagMoves(moves); // tags follow the moved files (CPE-657)
+      await refreshBothPanes();
+    } catch (e) { showNotice(String(e), true); }
+  }
+
+  /** Swap the two panes' folders (CPE-678). */
+  async function swapPanes() {
+    const a = currentPath, b = paneBPath;
+    if (!b) return;
+    await navigateB(a);
+    await navigate(b);
+  }
+
+  /** Mirror: point the inactive pane at the active pane's folder (CPE-678). */
+  async function mirrorPane() {
+    if (activePane === 0) await navigateB(currentPath);
+    else if (paneBPath) await navigate(paneBPath);
   }
 
   /** Navigate to a file's folder and select + scroll to the file itself (CPE-423). Used by the
@@ -2173,6 +2230,10 @@
       activePane = activePane === 0 ? 1 : 0;
       return;
     }
+    // Commander keys (CPE-678): F5 copy / F6 move the active selection to the other pane; Ctrl+U swaps.
+    if (dualPane && !ctrl && !event.altKey && event.key === "F5") { event.preventDefault(); void commanderCopy(); return; }
+    if (dualPane && !ctrl && !event.altKey && event.key === "F6") { event.preventDefault(); void commanderMove(); return; }
+    if (dualPane && ctrl && !event.altKey && event.key.toLowerCase() === "u") { event.preventDefault(); void swapPanes(); return; }
     // Space quick-looks the selected image (CPE-645).
     if (!ctrl && !event.altKey && !event.shiftKey && event.key === " " && openQuickLook()) { event.preventDefault(); return; }
 
