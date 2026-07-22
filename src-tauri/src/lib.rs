@@ -1902,6 +1902,15 @@ async fn create_hard_link(target: String, link_path: String) -> Result<(), Strin
         .map_err(|e| e.to_string())?
 }
 
+/// Inspect `path` — is it a symlink, its target, and whether that target is missing (a broken link)
+/// (CPE-804, epic CPE-715). Never fails. Model in `cpe_server::links` (CPE-815).
+#[tauri::command]
+async fn link_status(path: String) -> cpe_server::links::LinkStatus {
+    tauri::async_runtime::spawn_blocking(move || cpe_server::links::link_status(&path))
+        .await
+        .unwrap_or_default()
+}
+
 /// Classify the drive a path lives on (CPE-805, epic CPE-716) — fixed / removable / network / cdrom / ram
 /// / unknown — so the sidebar can badge removable & network drives. Windows uses `GetDriveTypeW`; unix
 /// returns a best-effort `fixed` for now (richer classification is a follow-up).
@@ -5289,6 +5298,7 @@ pub fn run() {
             scan_tree,
             create_symlink,
             create_hard_link,
+            link_status,
             drive_type,
             audit_record,
             audit_sessions,
