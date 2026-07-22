@@ -53,6 +53,8 @@ export const KEYS = {
   backupHistory: "cpe.backupHistory",
   autoRestore: "cpe.autoRestore",
   lastSession: "cpe.lastSession",
+  dualPane: "cpe.dualPane",
+  paneBPath: "cpe.paneBPath",
 } as const;
 
 const MAX_RECENTS = 20;
@@ -142,6 +144,7 @@ const isSortKey = (v: unknown): v is SortKey =>
   v === "name" || v === "modified" || v === "type" || v === "size";
 const isSortDir = (v: unknown): v is SortDir => v === "asc" || v === "desc";
 const isBool = (v: unknown): v is boolean => typeof v === "boolean";
+const isString = (v: unknown): v is string => typeof v === "string";
 const isStringArray = (v: unknown): v is string[] =>
   Array.isArray(v) && v.every((x) => typeof x === "string");
 const isRecentArray = (v: unknown): v is RecentFile[] =>
@@ -197,6 +200,13 @@ export const saveSortDir = (v: SortDir) => write(KEYS.sortDir, v);
 
 export const loadShowDetails = (): boolean => read(KEYS.showDetails, true, isBool);
 export const saveShowDetails = (v: boolean) => write(KEYS.showDetails, v);
+
+// Dual-pane / commander mode (CPE-677, epic CPE-617): the layout toggle + pane B's own folder,
+// persisted so the split survives a restart. OFF by default — single-pane is the unchanged default.
+export const loadDualPane = (): boolean => read(KEYS.dualPane, false, isBool);
+export const saveDualPane = (v: boolean) => write(KEYS.dualPane, v);
+export const loadPaneBPath = (): string => read(KEYS.paneBPath, "", isString);
+export const savePaneBPath = (v: string) => write(KEYS.paneBPath, v);
 
 export const loadShowPreview = (): boolean => read(KEYS.showPreview, true, isBool);
 export const saveShowPreview = (v: boolean) => write(KEYS.showPreview, v);
