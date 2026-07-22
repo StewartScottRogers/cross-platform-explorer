@@ -237,7 +237,7 @@ pub fn read_archived(root: &Path) -> Vec<Card> {
 pub fn move_card(root: &Path, id: &str, to_column: &str) -> Result<String, String> {
     let to = folder_for_column(to_column).ok_or_else(|| format!("unknown column: {to_column}"))?;
     let status = status_for_column(to).ok_or_else(|| format!("no status for column: {to}"))?;
-    let (src, from) = find_card_file(root, id).ok_or_else(|| format!("no such card: {id}"))?;
+    let (src, _from) = find_card_file(root, id).ok_or_else(|| format!("no such card: {id}"))?;
 
     let md = fs::read_to_string(&src).map_err(|e| e.to_string())?;
     let updated = set_status(&md, status);
@@ -248,8 +248,11 @@ pub fn move_card(root: &Path, id: &str, to_column: &str) -> Result<String, Strin
     let dest = dest_dir.join(file_name);
 
     fs::write(&dest, updated).map_err(|e| e.to_string())?;
-    if from != to {
-        // Remove the old file only after the new one is written (never lose the ticket).
+    // Remove the old file whenever we wrote to a DIFFERENT path — only after the new one is written, so
+    // the ticket is never lost. This covers a cross-column move AND an archived Done ticket (nested
+    // `Done/YYYY/…`) moved to top-level Done: there `from == to == "Done"` but the paths differ, so
+    // gating on `from != to` would leave the nested original in place and duplicate the ticket.
+    if src != dest {
         let _ = fs::remove_file(&src);
     }
     Ok(to.to_string())
@@ -380,5 +383,24 @@ mod tests {
         assert!(root.join("Tickets/Doing/CPE-300_x.md").exists());
         assert!(!root.join("Tickets/Done/2026/Q3/July/Week-30/CPE-300_x.md").exists());
         assert_eq!(read_board(root).iter().find(|c| c.id == "CPE-300").unwrap().column, "Doing");
+    }
+
+    #[test]
+    fn moving_an_archived_ticket_to_done_does_not_duplicate_it() {
+        // Regression: an archived Done ticket (nested Done/YYYY/…) moved to the Done column has
+        // from == to == "Done" but src != dest. Gating removal on `from != to` left the nested original
+        // behind, so the ticket existed twice (active board + archived). It must exist exactly once.
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        write_archived(root, "2026/Q3/July/Week-30", "CPE-400");
+
+        let col = move_card(root, "CPE-400", "Done").unwrap();
+        assert_eq!(col, "Done");
+        // The nested archived original is gone…
+        assert!(!root.join("Tickets/Done/2026/Q3/July/Week-30/CPE-400_x.md").exists(), "nested original removed");
+        // …and the ticket now backs exactly one file across the active board + the archive.
+        let active = read_board(root).into_iter().filter(|c| c.id == "CPE-400").count();
+        let archived = read_archived(root).into_iter().filter(|c| c.id == "CPE-400").count();
+        assert_eq!(active + archived, 1, "ticket must exist exactly once, not duplicated");
     }
 }
