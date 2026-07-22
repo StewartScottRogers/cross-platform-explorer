@@ -2121,6 +2121,32 @@ async fn find_duplicates(root: String) -> Result<cpe_server::duplicates::DupResu
         .await.map_err(|e| e.to_string())?
 }
 
+/// Streaming variant of `find_duplicates` (CPE-420, streaming-liveness convention): pushes each confirmed
+/// batch of duplicate groups over an IPC channel as pass 2 hashes them, so a slow scan surfaces groups
+/// progressively instead of blocking on the whole size-then-hash sweep. Async + `spawn_blocking` so the
+/// scan never freezes the UI thread (CPE-760); the walk is the shared `cpe_server::duplicates::
+/// stream_duplicates` (CPE-815). The returned result carries the final `files_scanned` + `truncated` with
+/// empty `groups` (those streamed, in discovery order — the frontend re-sorts each batch).
+#[tauri::command]
+async fn find_duplicates_stream(
+    root: String,
+    on_group: tauri::ipc::Channel<Vec<cpe_server::duplicates::DupGroup>>,
+) -> Result<cpe_server::duplicates::DupResult, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let stats = cpe_server::duplicates::stream_duplicates(&root, |batch| {
+            let _ = on_group.send(batch);
+            std::ops::ControlFlow::Continue(())
+        })?;
+        Ok(cpe_server::duplicates::DupResult {
+            groups: Vec::new(),
+            files_scanned: stats.files_scanned,
+            truncated: stats.truncated,
+        })
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
 /// Read `settings.json` from `dir`, returning `{}` when it's absent or
 /// unreadable so the frontend always starts from a valid document.
 /// Read the single on-disk settings file (`settings.json` in the app config dir). Returns `{}` when it
@@ -5342,6 +5368,7 @@ pub fn run() {
             find_files_by_name,
             files_identical,
             find_duplicates,
+            find_duplicates_stream,
             git_remote_url,
             open_external,
             run_as_admin,
