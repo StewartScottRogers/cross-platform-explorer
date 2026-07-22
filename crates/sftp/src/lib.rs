@@ -337,6 +337,10 @@ impl FileSystemProvider for SftpProvider {
             }
         })
     }
+
+    fn rename(&mut self, from: &str, to: &str) -> Result<(), String> {
+        self.rt.block_on(async { self.sftp.rename(from, to).await.map_err(|e| format!("{from} -> {to}: {e}")) })
+    }
 }
 
 #[cfg(test)]
@@ -508,6 +512,11 @@ mod tests {
 
         async fn rmdir(&mut self, id: u32, path: String) -> Result<Status, Self::Error> {
             std::fs::remove_dir_all(self.real(&path)).map_err(io_err)?;
+            Ok(ok_status(id))
+        }
+
+        async fn rename(&mut self, id: u32, oldpath: String, newpath: String) -> Result<Status, Self::Error> {
+            std::fs::rename(self.real(&oldpath), self.real(&newpath)).map_err(io_err)?;
             Ok(ok_status(id))
         }
     }
@@ -736,6 +745,17 @@ mod tests {
             })
             .unwrap();
         assert_eq!((visited, count), (1, 1), "should stop right after the first entry");
+    }
+
+    #[test]
+    fn rename_moves_a_file_over_sftp() {
+        let (addr, hostkey) = spawn_server();
+        let cfg = SftpConfig::password("127.0.0.1", addr.port(), "user", "pw");
+        let mut provider =
+            SftpProvider::connect(&cfg, known_for(addr.port(), &hostkey), HostKeyPolicy::Strict).unwrap();
+        provider.rename("/readme.txt", "/renamed.txt").expect("rename");
+        assert_eq!(provider.read("/renamed.txt").unwrap(), FILE_BODY);
+        assert!(provider.read("/readme.txt").is_err(), "old path should be gone");
     }
 
     #[test]
