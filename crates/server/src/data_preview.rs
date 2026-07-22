@@ -76,6 +76,11 @@ pub fn spreadsheet_info(path: &str) -> Result<String, String> {
             if h > MAX_ROWS {
                 out.push_str(&format!("… {} more rows\n", h - MAX_ROWS));
             }
+            if w > MAX_COLS {
+                // Same reason as the row notice: without this, a wide sheet silently shows only the
+                // first MAX_COLS columns and looks complete.
+                out.push_str(&format!("… {} more columns\n", w - MAX_COLS));
+            }
         }
     }
     Ok(out)
@@ -154,6 +159,25 @@ mod tests {
         assert!(info.contains("Workbook — 1 sheet"), "sheet count: {info:?}");
         assert!(info.contains("Name\tAge"), "header row rendered tab-separated");
         assert!(info.contains("Ann\t30"), "data row rendered");
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn spreadsheet_info_notes_truncated_columns() {
+        use rust_xlsxwriter::Workbook;
+        let d = scratch("xlsxwide");
+        let f = d.join("wide.xlsx");
+        {
+            let mut wb = Workbook::new();
+            let sheet = wb.add_worksheet();
+            // 25 columns > MAX_COLS (20): the preview shows the first 20 and must say so.
+            for c in 0..25u16 {
+                sheet.write_string(0, c, format!("c{c}")).unwrap();
+            }
+            wb.save(&f).unwrap();
+        }
+        let info = spreadsheet_info(&f.to_string_lossy()).unwrap();
+        assert!(info.contains("… 5 more columns"), "wide sheet notes hidden columns: {info:?}");
         let _ = fs::remove_dir_all(&d);
     }
 
