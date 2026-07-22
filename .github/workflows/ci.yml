@@ -127,6 +127,7 @@ jobs:
             ./crates/security -> target
             ./crates/server -> target
             ./crates/net -> target
+            ./crates/sftp -> target
 
       - name: contract — clippy + test
         working-directory: crates/contract
@@ -150,6 +151,15 @@ jobs:
         # The headless network transport loop (Client(Rust) proxy + reference Server,
         # CPE-825): composes contract + server + security into a loopback client/server.
         working-directory: crates/net
+        run: |
+          cargo clippy --all-targets -- -D warnings
+          cargo test
+
+      - name: sftp — clippy + test
+        # The SFTP FileSystemProvider (CPE-616): russh + host-key verification via
+        # cpe-server::known_hosts. Uses the `ring` crypto backend (self-contained — no NASM/cmake),
+        # and an in-process russh-sftp test server, so it runs on all three OSes with no Docker.
+        working-directory: crates/sftp
         run: |
           cargo clippy --all-targets -- -D warnings
           cargo test
