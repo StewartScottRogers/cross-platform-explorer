@@ -39,7 +39,11 @@ mod tests {
     use std::time::{Duration, Instant};
 
     use cpe_contract::{ContractVersion, ErrorCode, RejectCode, Request, CONTRACT_VERSION};
-    use cpe_security::SecurityChain;
+    use cpe_security::authz::PathScopeAuthorizer;
+    use cpe_security::{
+        CombinePolicy, NullAudit, PlaneConfig, ProviderRegistry, SecurityChain, SecurityConfig,
+        PASSTHROUGH,
+    };
     use cpe_server::ctx::HeadlessCtx;
     use cpe_server::dispatch::Dispatcher;
 
@@ -117,6 +121,48 @@ mod tests {
         assert!(
             matches!(err.code, ErrorCode::Unauthenticated | ErrorCode::Unauthorized),
             "expected a security error, got {:?}: {}",
+            err.code,
+            err.message
+        );
+    }
+
+    /// A chain that passes transport + authn (passthrough) but authorizes only paths under `root`
+    /// (path-scope, all-must-pass), so it is *authorization* — not default-deny — that refuses an
+    /// out-of-root call.
+    fn path_scoped_chain(root: String) -> SecurityChain {
+        let mut reg = ProviderRegistry::with_builtins();
+        reg.register_authz("path_scope", move || Box::new(PathScopeAuthorizer::new([root.clone()])));
+        let pass = |p: CombinePolicy, providers: Vec<String>| PlaneConfig { policy: p, providers };
+        let config = SecurityConfig {
+            transport: pass(CombinePolicy::FirstMatch, vec![PASSTHROUGH.into()]),
+            authentication: pass(CombinePolicy::FirstMatch, vec![PASSTHROUGH.into()]),
+            authorization: pass(CombinePolicy::AllMustPass, vec!["path_scope".into()]),
+        };
+        reg.build(&config, Box::new(NullAudit)).expect("path-scoped chain builds")
+    }
+
+    #[test]
+    fn path_scope_authorizer_denies_out_of_root_over_the_wire() {
+        // Distinct from default-deny: transport + authn pass, and the *authorizer* is what enforces —
+        // proving the AuthZ plane (not just an unconfigured boundary) holds over the remote path.
+        let root = scratch("scoped");
+        std::fs::write(root.join("ok.txt"), b"x").unwrap();
+        let addr = start_server(path_scoped_chain(root.to_string_lossy().into_owned()));
+        let mut client = Client::connect(addr).unwrap();
+
+        // A path under the granted root is authorized → dispatched (a real listing comes back).
+        client
+            .call("list_dir", serde_json::json!({ "path": root.to_string_lossy() }))
+            .expect("in-scope path must be allowed and dispatched");
+
+        // A path outside the root is refused at the authorization plane over the wire — the request
+        // never reaches the filesystem, so a non-existent out-of-scope path denies (not NotFound).
+        let err = client
+            .call("list_dir", serde_json::json!({ "path": "/definitely/outside/the/root" }))
+            .expect_err("out-of-scope path must be denied by the authorizer");
+        assert!(
+            matches!(err.code, ErrorCode::Unauthorized | ErrorCode::Unauthenticated),
+            "expected an authorization denial, got {:?}: {}",
             err.code,
             err.message
         );
