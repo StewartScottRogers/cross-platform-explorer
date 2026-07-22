@@ -8,7 +8,7 @@
    */
   import { createEventDispatcher } from "svelte";
   import { invoke } from "../invoke";
-  import { verifyManifest, hasIssues, type ChecksumEntry, type IntegrityReport } from "../integrity";
+  import { hasIssues, type ChecksumEntry, type IntegrityReport } from "../integrity";
 
   /** Folder to check (pre-filled with the current folder by App). */
   export let initialPath = "";
@@ -46,8 +46,9 @@
     if (!path.trim()) return;
     loading = true; error = ""; note = "";
     try {
-      const current = await scan();
-      report = verifyManifest(baseline, current);
+      // Diff in the backend (CPE-870): it re-scans + classifies and returns only the compact report, so a
+      // large folder never ships its whole manifest across the IPC boundary just to be diffed here.
+      report = await invoke<IntegrityReport>("verify_folder", { path: path.trim(), baseline });
       if (!hasBaseline) note = "No baseline yet — everything shows as new. Baseline first.";
     } catch (e) { error = String(e); } finally { loading = false; }
   }

@@ -1830,6 +1830,23 @@ async fn checksum_folder(path: String) -> Result<Vec<cpe_server::checksum::Check
         .map_err(|e| e.to_string())?
 }
 
+/// Re-scan `path` and classify it against a stored `baseline` in one backend pass (CPE-870, epic CPE-737):
+/// returns only the compact integrity report (changed paths) instead of shipping the whole manifest to the
+/// webview to diff — so large trees stay responsive, and verification can run headlessly. Model in
+/// `cpe_server::checksum` (CPE-815).
+#[tauri::command]
+async fn verify_folder(
+    path: String,
+    baseline: Vec<cpe_server::checksum::ChecksumEntry>,
+) -> Result<cpe_server::checksum::IntegrityReport, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let current = cpe_server::checksum::checksum_folder(&path)?;
+        Ok(cpe_server::checksum::verify_manifest(&baseline, &current))
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
 // ---- Folder-tree scan for the compare view (CPE-779, epic CPE-722) --------------------------------
 // Recursively scan a folder into a nested tree the frontend `diffTrees` (CPE-777) consumes: files carry
 // size + epoch-ms mtime (what the diff compares on), dirs carry children. Symlinks aren't followed and
@@ -5246,6 +5263,7 @@ pub fn run() {
             apply_backup_plan,
             apply_backup_plan_stream,
             checksum_folder,
+            verify_folder,
             scan_tree,
             create_symlink,
             create_hard_link,
