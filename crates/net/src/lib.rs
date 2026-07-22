@@ -38,12 +38,14 @@ mod tests {
     use std::sync::Arc;
     use std::time::{Duration, Instant};
 
-    use cpe_contract::{ContractVersion, ErrorCode, RejectCode, Request, CONTRACT_VERSION};
-    use cpe_security::authz::PathScopeAuthorizer;
+    use cpe_contract::{ContractVersion, ErrorCode, Principal, RejectCode, Request, CONTRACT_VERSION};
+    use cpe_security::authn::ApiTokenAuthenticator;
+    use cpe_security::authz::{CapabilityAuthorizer, PathScopeAuthorizer};
     use cpe_security::{
         CombinePolicy, NullAudit, PlaneConfig, ProviderRegistry, SecurityChain, SecurityConfig,
         PASSTHROUGH,
     };
+    use std::collections::BTreeMap;
     use cpe_server::ctx::HeadlessCtx;
     use cpe_server::dispatch::Dispatcher;
 
@@ -163,6 +165,67 @@ mod tests {
         assert!(
             matches!(err.code, ErrorCode::Unauthorized | ErrorCode::Unauthenticated),
             "expected an authorization denial, got {:?}: {}",
+            err.code,
+            err.message
+        );
+    }
+
+    /// Plane config helper for the security-over-the-wire tests.
+    fn plane(policy: CombinePolicy, providers: &[&str]) -> PlaneConfig {
+        PlaneConfig { policy, providers: providers.iter().map(|s| s.to_string()).collect() }
+    }
+
+    #[test]
+    fn capability_authorizer_denies_a_missing_capability_over_the_wire() {
+        // Passthrough transport + authn; a capability authorizer that requires `fs.read` for `list_dir`
+        // but grants it to nobody → the local principal is refused at the authorization plane remotely.
+        let mut reg = ProviderRegistry::with_builtins();
+        reg.register_authz("capability", || {
+            let mut required = BTreeMap::new();
+            required.insert("list_dir".to_string(), "fs.read".to_string());
+            Box::new(CapabilityAuthorizer::new(required, BTreeMap::new())) // no grants
+        });
+        let config = SecurityConfig {
+            transport: plane(CombinePolicy::FirstMatch, &[PASSTHROUGH]),
+            authentication: plane(CombinePolicy::FirstMatch, &[PASSTHROUGH]),
+            authorization: plane(CombinePolicy::AllMustPass, &["capability"]),
+        };
+        let addr = start_server(reg.build(&config, Box::new(NullAudit)).unwrap());
+        let mut client = Client::connect(addr).unwrap();
+        let err = client
+            .call("list_dir", serde_json::json!({ "path": "/anything" }))
+            .expect_err("a method needing an ungranted capability must be denied");
+        assert!(
+            matches!(err.code, ErrorCode::Unauthorized | ErrorCode::Unauthenticated),
+            "expected an authorization denial, got {:?}: {}",
+            err.code,
+            err.message
+        );
+    }
+
+    #[test]
+    fn api_token_authn_refuses_an_unauthenticated_request_over_the_wire() {
+        // AuthN requires a known API token (none is presented over the v1 wire) → the request is refused
+        // at the authentication plane, distinct from a path/capability authorization denial.
+        let mut reg = ProviderRegistry::with_builtins();
+        reg.register_authn("api_token", || {
+            let mut tokens = BTreeMap::new();
+            tokens.insert("s3cr3t".to_string(), Principal { id: "alice".into(), display_name: None });
+            Box::new(ApiTokenAuthenticator::new(tokens))
+        });
+        let config = SecurityConfig {
+            transport: plane(CombinePolicy::FirstMatch, &[PASSTHROUGH]),
+            authentication: plane(CombinePolicy::AnyPasses, &["api_token"]), // no passthrough authn
+            authorization: plane(CombinePolicy::FirstMatch, &[PASSTHROUGH]),
+        };
+        let addr = start_server(reg.build(&config, Box::new(NullAudit)).unwrap());
+        let mut client = Client::connect(addr).unwrap();
+        let err = client
+            .call("list_dir", serde_json::json!({ "path": "/anything" }))
+            .expect_err("no credential must be refused at the authN plane");
+        assert!(
+            matches!(err.code, ErrorCode::Unauthenticated | ErrorCode::Unauthorized),
+            "expected an authentication denial, got {:?}: {}",
             err.code,
             err.message
         );
