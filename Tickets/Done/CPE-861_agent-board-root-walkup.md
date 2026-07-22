@@ -4,10 +4,10 @@ title: Agent Board sidecar finds no tickets — walk up from CPE_BOARD_ROOT like
 type: bug
 component: Sidecar
 priority: high
-status: In Progress
+status: Done
 tags: ready
 created: 2026-07-21
-closed:
+closed: 2026-07-21
 ---
 
 ## Summary
@@ -39,3 +39,5 @@ var + cwd.
 - 2026-07-21 — Surfaced attended after building `agent-board.exe` (which routed the button to the
   out-of-process board). Root cause: `board_root()` uses `CPE_BOARD_ROOT` directly; the in-process board
   walks up via `find_project_root`. Branch `cpe-861-board-root-walkup` off main.
+- 2026-07-21 — Merged via PR #137; **shipped in release 0.57.5-sidecar**. cargo test + clippy green.
+  Closing.

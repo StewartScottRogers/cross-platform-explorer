@@ -4,10 +4,11 @@ title: Sidecar health diagnosis + Repair button (L1) + bundle repos
 type: feature
 component: Sidecar
 priority: high
-status: In Progress
+status: Done
 tags: ready
 epic: CPE-862
 created: 2026-07-21
+closed: 2026-07-21
 ---
 
 ## Summary
@@ -30,12 +31,16 @@ give a one-click Repair, instead of the current vague "isn't available" dead-end
    ("see why + Repair") instead of "isn't available in this build".
 
 ## Acceptance Criteria
-- [ ] `repos` is bundled in both sidecar configs.
-- [ ] `sidecar_details` returns `binary_ok`; `SidecarManager` shows the status + reason per sidecar.
-- [ ] `sidecar_repair` reaps daemons + clears error/connection; a Repair button invokes it and refreshes.
-- [ ] Launch-failure notices direct to Settings → Platform.
-- [ ] `cargo test` + clippy (both feature modes) green; `npm run check` + suite green; GUI-verified.
+- [x] `repos` is bundled in both sidecar configs.
+- [x] `sidecar_details` returns `binary_ok`; `SidecarManager` shows the status + reason per sidecar.
+- [x] `sidecar_repair` reaps daemons + clears error/connection; a Repair button invokes it and refreshes.
+- [x] Launch-failure notices direct to Settings → Platform.
+- [x] `cargo test` + clippy (both feature modes) green; `npm run check` + suite green; GUI-verified.
 
 ## Work Log
 - 2026-07-21 — Filed under epic CPE-862 after the sidecar flakiness this session. User chose L1
   (diagnose + Repair) first. Branch `cpe-863-sidecar-health-repair` off main.
+- 2026-07-21 — Implemented: bundled repos (+ its release build step); generic `resolve_sidecar_bin` +
+  `binary_ok`; per-sidecar status pill + Repair button in `SidecarManager`; `sidecar_repair` command;
+  clearer launch-failure notice; `mgr.st*`/`mgr.repair*` across all 12 locales. check clean; 902 tests;
+  clippy green both feature modes. Merged via PR #138. Closing.

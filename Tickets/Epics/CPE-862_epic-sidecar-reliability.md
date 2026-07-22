@@ -32,4 +32,6 @@ notice with no way to diagnose.
   sidecar; re-check health after.
 
 ## Children
-- CPE-863 — Sidecar health diagnosis + Repair button (L1) + bundle repos — In Progress
+- CPE-863 — Sidecar health diagnosis + Repair button (L1) + bundle repos — **Done** (shipped via #138)
+- (L2) Auto-repair from a bundled pristine copy — not yet ticketed
+- (L3) Resilient launch: retry + auto-restart — not yet ticketed
