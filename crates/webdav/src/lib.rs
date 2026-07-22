@@ -130,6 +130,17 @@ impl FileSystemProvider for WebdavProvider {
         self.request("DELETE", path).call().map_err(|e| http_err(path, e))?;
         Ok(())
     }
+
+    fn rename(&mut self, from: &str, to: &str) -> Result<(), String> {
+        // WebDAV MOVE: the target is the absolute URL of `to` in the Destination header.
+        let dest = self.url_for(to);
+        self.request("MOVE", from)
+            .set("Destination", &dest)
+            .set("Overwrite", "T")
+            .call()
+            .map_err(|e| http_err(from, e))?;
+        Ok(())
+    }
 }
 
 /// Parse a PROPFIND `multistatus` XML body into provider entries. If `skip_path` is set, the entry whose
@@ -287,6 +298,19 @@ mod tests {
                 };
                 let _ = req.respond(tiny_http::Response::empty(if r.is_ok() { 204 } else { 404 }));
             }
+            "MOVE" => {
+                // The Destination header is an absolute URL; map its path under `root`.
+                let dest_path = req
+                    .headers()
+                    .iter()
+                    .find(|h| h.field.equiv("Destination"))
+                    .map(|h| h.value.as_str().to_string())
+                    .and_then(|u| u.rsplit_once("://").map(|(_, rest)| rest.split_once('/').map(|(_, p)| format!("/{p}")).unwrap_or_default()))
+                    .unwrap_or_default();
+                let dest_real = root.join(dest_path.trim_start_matches('/'));
+                let code = if std::fs::rename(&real, &dest_real).is_ok() { 201 } else { 404 };
+                let _ = req.respond(tiny_http::Response::empty(code));
+            }
             _ => {
                 let _ = req.respond(tiny_http::Response::empty(405));
             }
@@ -341,6 +365,15 @@ mod tests {
 
         provider.delete("/notes.txt").expect("delete");
         assert!(provider.read("/notes.txt").is_err(), "deleted file should 404");
+    }
+
+    #[test]
+    fn rename_moves_a_file_over_webdav() {
+        let base = spawn_webdav_server();
+        let mut provider = WebdavProvider::connect(&WebdavConfig::new(&base));
+        provider.rename("/readme.txt", "/renamed.txt").expect("MOVE");
+        assert_eq!(provider.read("/renamed.txt").unwrap(), FILE_BODY);
+        assert!(provider.read("/readme.txt").is_err(), "old path should be gone");
     }
 
     #[test]

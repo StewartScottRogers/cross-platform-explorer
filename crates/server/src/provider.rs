@@ -25,6 +25,8 @@ pub trait FileSystemProvider {
     fn write(&mut self, path: &str, data: &[u8]) -> Result<(), String>;
     fn mkdir(&mut self, path: &str) -> Result<(), String>;
     fn delete(&mut self, path: &str) -> Result<(), String>;
+    /// Rename/move `from` to `to` within the same backend (a file or a whole directory subtree).
+    fn rename(&mut self, from: &str, to: &str) -> Result<(), String>;
 }
 
 /// The local disk, over `std::fs`. A thin wrapper so the existing behaviour (skip-unreadable, etc.) can be
@@ -76,6 +78,10 @@ impl FileSystemProvider for LocalProvider {
         let p = std::path::Path::new(path);
         let r = if p.is_dir() { std::fs::remove_dir_all(p) } else { std::fs::remove_file(p) };
         r.map_err(|e| format!("{path}: {e}"))
+    }
+
+    fn rename(&mut self, from: &str, to: &str) -> Result<(), String> {
+        std::fs::rename(from, to).map_err(|e| format!("{from} -> {to}: {e}"))
     }
 }
 
@@ -194,6 +200,35 @@ impl FileSystemProvider for FakeProvider {
             Err(format!("{path}: not found"))
         }
     }
+
+    fn rename(&mut self, from: &str, to: &str) -> Result<(), String> {
+        let (from, to) = (norm(from), norm(to));
+        // A file: move the single key.
+        if let Some(data) = self.files.remove(&from) {
+            self.ensure_ancestors(&to);
+            self.files.insert(to, data);
+            return Ok(());
+        }
+        // A directory: move the dir marker + everything under `from/` to `to/`.
+        if self.dirs.remove(&from) {
+            self.ensure_ancestors(&to);
+            self.dirs.insert(to.clone());
+            let (old_prefix, new_prefix) = (format!("{from}/"), format!("{to}/"));
+            let remap = |k: &str| format!("{new_prefix}{}", &k[old_prefix.len()..]);
+            let files: Vec<_> = self.files.keys().filter(|k| k.starts_with(&old_prefix)).cloned().collect();
+            for k in files {
+                let data = self.files.remove(&k).unwrap();
+                self.files.insert(remap(&k), data);
+            }
+            let dirs: Vec<_> = self.dirs.iter().filter(|k| k.starts_with(&old_prefix)).cloned().collect();
+            for k in dirs {
+                self.dirs.remove(&k);
+                self.dirs.insert(remap(&k));
+            }
+            return Ok(());
+        }
+        Err(format!("{from}: not found"))
+    }
 }
 
 #[cfg(test)]
@@ -215,6 +250,28 @@ mod tests {
         let mut names: Vec<_> = fs.list("a").unwrap().into_iter().map(|e| (e.name, e.is_dir)).collect();
         names.sort();
         assert_eq!(names, vec![("b".to_string(), true), ("top.txt".to_string(), false)]);
+    }
+
+    #[test]
+    fn fake_provider_rename_moves_a_file_and_a_subtree() {
+        let mut fs = FakeProvider::new();
+        fs.write("a.txt", b"hi").unwrap();
+        fs.write("d/x.txt", b"1").unwrap();
+        fs.write("d/e/y.txt", b"2").unwrap();
+
+        // File rename.
+        fs.rename("a.txt", "b.txt").unwrap();
+        assert!(fs.read("a.txt").is_err());
+        assert_eq!(fs.read("b.txt").unwrap(), b"hi");
+
+        // Directory rename moves the whole subtree.
+        fs.rename("d", "moved").unwrap();
+        assert!(fs.stat("d").is_err());
+        assert!(fs.stat("moved").unwrap().is_dir);
+        assert_eq!(fs.read("moved/x.txt").unwrap(), b"1");
+        assert_eq!(fs.read("moved/e/y.txt").unwrap(), b"2");
+
+        assert!(fs.rename("nope", "x").is_err());
     }
 
     #[test]
