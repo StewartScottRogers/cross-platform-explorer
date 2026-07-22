@@ -23,6 +23,7 @@
 pub mod client;
 pub mod server;
 pub mod wire;
+pub mod ws;
 
 pub use client::{Client, ConnectError};
 pub use server::ServerRuntime;

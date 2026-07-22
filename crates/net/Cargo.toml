@@ -19,6 +19,10 @@ cpe-contract = { path = "../contract" }
 cpe-server = { path = "../server" }
 cpe-security = { path = "../security" }
 serde_json = "1"
+# Tiny, std-adjacent crates for the WebSocket handshake (RFC 6455 Sec-WebSocket-Accept = base64(sha1(…)));
+# the browser transport for the frontend RemoteTransport (CPE-819). No async runtime — still thread-per-conn.
+sha1 = "0.10"
+base64 = "0.22"
 
 [dev-dependencies]
 tempfile = "3"
