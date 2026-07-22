@@ -5,10 +5,11 @@
    * containing folder. An overlay so it stays out of the plain folder listing.
    */
   import { createEventDispatcher } from "svelte";
-  import { invoke } from "../invoke";
+  import { rawInvoke } from "../invoke";
+  import { Channel } from "@tauri-apps/api/core";
   import Icon from "./Icon.svelte";
   import { t } from "../i18n";
-  import { groupMatches, baseName, highlightSegments, pushRecentSearch, type ContentSearchResult } from "../contentSearch";
+  import { groupMatches, baseName, highlightSegments, pushRecentSearch, type ContentSearchResult, type ContentMatch } from "../contentSearch";
   import { lsGet, lsSet, lsBool } from "../persist";
 
   const RECENTS_KEY = "cpe.contentSearchRecents";
@@ -32,6 +33,7 @@
   let loading = false;
   let error = "";
   let searched = false;
+  let searchGen = 0; // supersede a stale stream when a newer search starts (CPE-662)
   // The query + case setting actually searched, so highlighting matches the results (not a later edit).
   let searchedQuery = "";
   let searchedCase = false;
@@ -63,13 +65,31 @@
     searchedCase = caseSensitive;
     recents = pushRecentSearch(recents, q);
     saveRecents(recents);
+    result = { matches: [], files_scanned: 0, truncated: false };
+    // Stream matches as the tree is walked (CPE-662) so a slow content search lists results
+    // progressively instead of blocking on the whole scan; a generation token drops stale batches.
+    const gen = ++searchGen;
     try {
-      result = await invoke<ContentSearchResult>("search_file_contents", { root, query: q, caseSensitive });
+      const channel = new Channel<ContentMatch[]>();
+      channel.onmessage = (batch) => {
+        if (gen !== searchGen) return; // superseded by a newer search — drop stale matches
+        result = { ...result, matches: result.matches.concat(batch) };
+        loading = false; // first matches are in — reveal them
+      };
+      const final = await rawInvoke<ContentSearchResult>("search_file_contents_stream", {
+        root,
+        query: q,
+        caseSensitive,
+        onMatch: channel,
+      });
+      if (gen === searchGen) result = { ...result, files_scanned: final.files_scanned, truncated: final.truncated };
     } catch (e) {
-      error = String(e);
-      result = { matches: [], files_scanned: 0, truncated: false };
+      if (gen === searchGen) {
+        error = String(e);
+        result = { matches: [], files_scanned: 0, truncated: false };
+      }
     } finally {
-      loading = false;
+      if (gen === searchGen) loading = false;
     }
   }
 
