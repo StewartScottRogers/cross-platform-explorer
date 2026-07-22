@@ -87,3 +87,23 @@ The details pane and the Properties dialog show size, dates, type, and (where re
 duplicate detection. For image files the Properties dialog also shows **dimensions** and any embedded
 **EXIF** — camera, lens, date taken, ISO, aperture, exposure, and focal length — omitting whatever the
 photo doesn't carry.
+
+## Dual-pane (commander) mode
+
+Turn on **Dual pane** from the command palette (Ctrl/Cmd+K → *Dual pane*) to split the file list into two
+independent panes side by side — a classic two-pane file-manager layout for copying and moving between
+folders. It's **off by default**; toggling it off returns to the normal single-pane view unchanged, and
+the layout (plus each pane's folder) is remembered across restarts.
+
+The **active pane** carries an accent ring — click a pane, or press **Tab**, to switch which one is active.
+Commander keys act on the active pane's selection:
+
+| Key | Action |
+|---|---|
+| **F5** | Copy the selection to the other pane's folder |
+| **F6** | Move the selection to the other pane's folder |
+| **Ctrl+U** | Swap the two panes' folders |
+| **Tab** | Switch the active pane |
+
+The same actions (plus **Mirror path to other pane**) are in the command palette under *View*. Copies and
+moves run through the transfer manager, so large operations show progress and can be cancelled.
