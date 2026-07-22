@@ -89,17 +89,20 @@ length can't drive an unbounded allocation.
 Landed & CI-green (headless): the codec, the WS-accepting server, `RemoteTransport`'s unary
 request/response path, security enforcing remotely, the local-fast guard, and version conformance.
 
-**Not yet built — the streaming slice.** The local `*_stream` commands (list_dir, name search, content
-search) stream batches through a Tauri `ipc::Channel` **and return a final stats value**. Two gaps block
-routing these over the remote transport:
+**Streaming — half built.** The local `*_stream` commands (list_dir, name search, content search) stream
+batches through a Tauri `ipc::Channel` **and return a final stats value**. Two gaps blocked routing these
+over the remote transport:
 
-1. The wire ends a stream with a **payload-less `StreamEnd`**, so the final stats can't be delivered.
-   Fix: give `StreamEnd` a final value — as a **struct variant** `StreamEnd { result }`, *not* a newtype
-   wrapping the value: an internally-tagged enum cannot serialize a newtype variant around a scalar/array.
-   The `StreamHandler` must then return that terminal value, and the client's `call_stream` return it.
-2. Components import Tauri's `Channel`, which **can't run in a real browser**. A seam-owned channel
-   abstraction (created via the transport, routing `stream_item` frames to `onmessage` and `stream_end`
-   to the terminal resolve) is needed, and the ~5 streaming call sites refactored onto it.
+1. ~~The wire ends a stream with a **payload-less `StreamEnd`**, so the final stats can't be delivered.~~
+   **Done (CPE-895).** `StreamEnd { result }` now carries the producer's terminal value — a **struct
+   variant**, not a newtype wrapping the value (an internally-tagged enum cannot serialize a newtype around
+   a scalar/array). The `StreamHandler` returns that value, and the client's `call_stream` yields
+   `StreamOutcome { items, result }`.
+2. **Still to build.** Components import Tauri's `Channel`, which **can't run in a real browser**. A
+   seam-owned channel abstraction (`createChannel` in `invoke.ts`, returning a real Tauri `Channel` under
+   `localTransport` but a `RemoteChannel` under `RemoteTransport`) is needed, with `RemoteTransport`
+   routing `stream_item` frames to the channel's `onmessage` and resolving the `invoke` with
+   `StreamEnd.result`; then the ~5 streaming call sites repointed onto it.
 
 Also user-gated: browse/preview against one **real remote** host (not loopback) and an attended
 end-to-end GUI verification.
