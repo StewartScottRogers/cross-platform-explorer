@@ -6,7 +6,8 @@
    * deletes anything — the user decides what to remove.
    */
   import { createEventDispatcher } from "svelte";
-  import { invoke } from "../invoke";
+  import { invoke, rawInvoke } from "../invoke";
+  import { Channel } from "@tauri-apps/api/core";
   import Icon from "./Icon.svelte";
   import { t } from "../i18n";
   import { formatSize } from "../format";
@@ -56,17 +57,35 @@
   // Reclaimable = for each group, the redundant copies × size (keep one copy per group).
   $: reclaimable = result.groups.reduce((n, g) => n + g.size * (g.paths.length - 1), 0);
 
+  let searchGen = 0; // supersede a stale scan when a newer one starts (CPE-420)
+
   async function run() {
     loading = true;
     error = "";
     started = true;
+    result = { groups: [], files_scanned: 0, truncated: false };
+    // Stream confirmed groups as pass 2 hashes them (CPE-420) so a slow scan surfaces duplicates
+    // progressively; each batch is appended and re-sorted by reclaimable space (streamed unsorted).
+    const gen = ++searchGen;
     try {
-      result = await invoke<DupResult>("find_duplicates", { root });
+      const channel = new Channel<DupGroup[]>();
+      channel.onmessage = (batch) => {
+        if (gen !== searchGen) return; // superseded by a newer scan — drop stale groups
+        const groups = [...result.groups, ...batch].sort(
+          (a, b) => b.size * (b.paths.length - 1) - a.size * (a.paths.length - 1),
+        );
+        result = { ...result, groups };
+        loading = false; // first groups are in — reveal them
+      };
+      const final = await rawInvoke<DupResult>("find_duplicates_stream", { root, onGroup: channel });
+      if (gen === searchGen) result = { ...result, files_scanned: final.files_scanned, truncated: final.truncated };
     } catch (e) {
-      error = String(e);
-      result = { groups: [], files_scanned: 0, truncated: false };
+      if (gen === searchGen) {
+        error = String(e);
+        result = { groups: [], files_scanned: 0, truncated: false };
+      }
     } finally {
-      loading = false;
+      if (gen === searchGen) loading = false;
     }
   }
 
