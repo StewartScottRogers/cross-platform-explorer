@@ -266,6 +266,36 @@ mod tests {
     }
 
     #[test]
+    fn list_dir_stream_streams_real_entries_over_the_wire() {
+        // The builtin `list_dir_stream` producer streams one StreamItem per real DirEntry.
+        let dir = scratch("liststream");
+        std::fs::write(dir.join("a.txt"), b"a").unwrap();
+        std::fs::write(dir.join("b.txt"), b"b").unwrap();
+
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let rt = Arc::new(
+            ServerRuntime::new(
+                Dispatcher::with_builtins(),
+                SecurityChain::local(),
+                Arc::new(HeadlessCtx::new(scratch("liststreambase"))),
+            )
+            .with_builtin_streams(),
+        );
+        std::thread::spawn(move || {
+            let _ = rt.serve(listener);
+        });
+
+        let mut client = Client::connect(addr).unwrap();
+        let items = client
+            .call_stream("list_dir_stream", serde_json::json!({ "path": dir.to_string_lossy() }))
+            .expect("list_dir_stream should stream");
+        let names: Vec<String> =
+            items.iter().map(|e| e["name"].as_str().unwrap().to_string()).collect();
+        assert!(names.contains(&"a.txt".to_string()) && names.contains(&"b.txt".to_string()), "got {names:?}");
+    }
+
+    #[test]
     fn a_streaming_call_is_security_guarded_over_the_wire() {
         // The same stream method under a default-deny boundary yields no items — the denial arrives as
         // the stream's error, proving streaming enforces the security chain exactly like a unary call.
