@@ -71,3 +71,11 @@ agent-board sidecar, the data browser, etc. and would revert ~19k lines).
   `matchesFileFilter`, `filterEntriesByTag`). check clean (0/0); 902 tests pass incl. wildcard-search +
   folder-nav. GUI verify pending: hidden toggle, search, type filter, tag filter, sort dirs/folders-first,
   folder-size column, archive browsing, status-bar totals.
+- 2026-07-21 — **Dominoes 1+2 landed on main via PR #141** (squash `fccac06`). The display-derivation is
+  now owned by ExplorerPane. **Remaining = the navigation big-bang:** `loadPath` (streaming + generation
+  tokens + nav cache + smart-folder/archive transitions + selection/search/tag reset + folder-size
+  invalidation + post-load git/disk/agent-watch hooks) plus `entries`/`currentPath`(×67)/`history`(×33)/tabs
+  and the ~40 callers. This is ONE coupled unit; no further safe bind-back sub-slice exists (the pane already
+  gets `baseEntries`, so binding `entries` in adds nothing). It must be done with the running app driven
+  through nav/keyboard/archive/smart-folder/tab flows — the 902 tests don't cover those. Do NOT merge it
+  blind. Next: a focused attended pass (this, or fold into CPE-677 when the split lands).
