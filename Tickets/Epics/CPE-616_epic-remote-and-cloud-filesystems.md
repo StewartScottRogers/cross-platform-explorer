@@ -76,3 +76,12 @@ the local explorer is unchanged.
    **Needs GUI + keychain + attended.** *(prereq: 681)*
 5. **CPE-684** — Async, cancellable remote listing + latency/error states; transfer-queue integration for
    to/from-remote copies (CPE-613). *(prereq: 682/683; attended)*
+
+2026-07-22 (nightshift) — **Headless surface COMPLETE + documented.** Shipped end-to-end: the
+`FileSystemProvider` op-set incl. rename (CPE-907), the URI model (CPE-680), host-key verification
+(CPE-897/898), the connections model (CPE-683), the scheme router `cpe-vfs` (CPE-906), generic walk +
+bidirectional transfer (CPE-684/905), and **two remote providers** — `cpe-sftp` (russh, CPE-682/899-903)
+and `cpe-webdav` (ureq, CPE-904). Architecture written up in
+[docs/design/REMOTE-FILESYSTEMS.md](../../docs/design/REMOTE-FILESYSTEMS.md). Remaining is app/attended:
+the Connections sidebar UI + OS keychain, the transfer-manager UI, and wiring `vfs::open` into the app's
+commands (SMB/S3 providers are a further, impedance-heavy follow-up).
