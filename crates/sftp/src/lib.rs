@@ -11,6 +11,7 @@
 //! Auth is by password or an OpenSSH private key (optionally passphrase-protected). Testing runs against
 //! an in-process `russh-sftp` server (see the tests) — no Docker, so it runs identically on all three CI OSes.
 
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 use cpe_server::known_hosts::{verify_host_key, HostKeyVerdict, KnownHost};
@@ -205,6 +206,92 @@ impl SftpProvider {
     pub fn presented_key(&self) -> &(String, String) {
         &self.presented_key
     }
+
+    /// Recursively walk the tree under `root` (depth-first), invoking `on_entry` for every file and
+    /// directory. `cancel` is checked before each directory listing and before each entry, so a slow or
+    /// large remote enumeration can be stopped promptly (CPE-684). Returns the number of entries visited.
+    /// A directory that can't be listed (permissions, races) is skipped rather than aborting the whole
+    /// walk — mirroring the local walkers' skip-unreadable behaviour.
+    pub fn walk(
+        &self,
+        root: &str,
+        cancel: &AtomicBool,
+        mut on_entry: impl FnMut(WalkEntry),
+    ) -> Result<usize, String> {
+        let mut stack = vec![root.to_string()];
+        let mut visited = 0usize;
+        while let Some(dir) = stack.pop() {
+            if cancel.load(Ordering::Relaxed) {
+                break;
+            }
+            // Skip a directory we can't read rather than failing the whole walk.
+            let Ok(entries) = self.list(&dir) else { continue };
+            for entry in entries {
+                if cancel.load(Ordering::Relaxed) {
+                    return Ok(visited);
+                }
+                let path = join_remote(&dir, &entry.name);
+                visited += 1;
+                let is_dir = entry.is_dir;
+                on_entry(WalkEntry { path: path.clone(), name: entry.name, is_dir, size: entry.size });
+                if is_dir {
+                    stack.push(path);
+                }
+            }
+        }
+        Ok(visited)
+    }
+
+    /// Download the remote tree under `remote_root` into `local_dir`, recreating the directory structure.
+    /// Returns the number of files written. Cancellable via `cancel` (CPE-684). Builds on [`walk`] +
+    /// [`read`](FileSystemProvider::read) — the enumeration + fetch primitives for a remote→local copy.
+    pub fn download_tree(
+        &self,
+        remote_root: &str,
+        local_dir: &std::path::Path,
+        cancel: &AtomicBool,
+    ) -> Result<usize, String> {
+        let base = remote_root.trim_end_matches('/').to_string();
+        let mut entries = Vec::new();
+        self.walk(remote_root, cancel, |e| entries.push(e))?;
+
+        std::fs::create_dir_all(local_dir).map_err(|e| format!("{}: {e}", local_dir.display()))?;
+        let mut files = 0usize;
+        for entry in &entries {
+            if cancel.load(Ordering::Relaxed) {
+                break;
+            }
+            // The path relative to remote_root, mapped under local_dir.
+            let rel = entry.path.strip_prefix(&base).unwrap_or(&entry.path).trim_start_matches('/');
+            let local = local_dir.join(rel);
+            if entry.is_dir {
+                std::fs::create_dir_all(&local).map_err(|e| format!("{}: {e}", local.display()))?;
+            } else {
+                if let Some(parent) = local.parent() {
+                    std::fs::create_dir_all(parent).map_err(|e| format!("{}: {e}", parent.display()))?;
+                }
+                let data = self.read(&entry.path)?;
+                std::fs::write(&local, data).map_err(|e| format!("{}: {e}", local.display()))?;
+                files += 1;
+            }
+        }
+        Ok(files)
+    }
+}
+
+/// One entry yielded by [`SftpProvider::walk`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WalkEntry {
+    /// Full remote path (`/`-separated).
+    pub path: String,
+    pub name: String,
+    pub is_dir: bool,
+    pub size: u64,
+}
+
+/// Join a remote directory + child name with a single `/` (remote paths are always `/`-separated).
+fn join_remote(dir: &str, name: &str) -> String {
+    format!("{}/{}", dir.trim_end_matches('/'), name)
 }
 
 /// Connect an [`SftpProvider`] from a parsed [`cpe_server::location::Location`] (must be `Sftp`) plus an
@@ -316,7 +403,7 @@ mod tests {
     use std::io::{Read as _, Seek as _, SeekFrom, Write as _};
     use std::net::SocketAddr;
     use std::path::PathBuf;
-    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
     use std::sync::Arc;
 
     // --- A real filesystem-backed in-process SFTP server, rooted at a temp dir. It maps SFTP ops onto
@@ -549,6 +636,7 @@ mod tests {
         let root = std::env::temp_dir().join(format!("cpe-sftp-srv-{}-{}", std::process::id(), n));
         std::fs::create_dir_all(root.join(DIR_NAME)).unwrap();
         std::fs::write(root.join(FILE_NAME), FILE_BODY).unwrap();
+        std::fs::write(root.join(DIR_NAME).join("nested.txt"), b"deep").unwrap();
 
         std::thread::spawn(move || {
             let rt = tokio::runtime::Builder::new_multi_thread().enable_all().build().unwrap();
@@ -622,6 +710,58 @@ mod tests {
         assert!(provider.stat("/notes.txt").is_err(), "file should be gone");
         provider.delete("/newdir").expect("delete dir");
         assert!(provider.stat("/newdir").is_err(), "dir should be gone");
+    }
+
+    #[test]
+    fn walk_recurses_the_remote_tree() {
+        let (addr, hostkey) = spawn_server();
+        let cfg = SftpConfig::password("127.0.0.1", addr.port(), "user", "pw");
+        let provider =
+            SftpProvider::connect(&cfg, known_for(addr.port(), &hostkey), HostKeyPolicy::Strict).unwrap();
+        let cancel = AtomicBool::new(false);
+        let mut paths = Vec::new();
+        let n = provider.walk("/", &cancel, |e| paths.push((e.path, e.is_dir))).unwrap();
+        paths.sort();
+        assert_eq!(n, 3, "readme.txt + sub + sub/nested.txt; got {paths:?}");
+        assert!(paths.contains(&("/readme.txt".to_string(), false)));
+        assert!(paths.contains(&("/sub".to_string(), true)));
+        assert!(paths.contains(&("/sub/nested.txt".to_string(), false)));
+    }
+
+    #[test]
+    fn download_tree_recreates_the_remote_files_locally() {
+        let (addr, hostkey) = spawn_server();
+        let cfg = SftpConfig::password("127.0.0.1", addr.port(), "user", "pw");
+        let provider =
+            SftpProvider::connect(&cfg, known_for(addr.port(), &hostkey), HostKeyPolicy::Strict).unwrap();
+
+        let out = std::env::temp_dir().join(format!("cpe-sftp-dl-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&out);
+        let cancel = AtomicBool::new(false);
+        let files = provider.download_tree("/", &out, &cancel).expect("download");
+
+        assert_eq!(files, 2, "readme.txt + sub/nested.txt");
+        assert_eq!(std::fs::read(out.join("readme.txt")).unwrap(), FILE_BODY);
+        assert_eq!(std::fs::read(out.join("sub").join("nested.txt")).unwrap(), b"deep");
+        let _ = std::fs::remove_dir_all(&out);
+    }
+
+    #[test]
+    fn walk_stops_promptly_when_cancelled() {
+        let (addr, hostkey) = spawn_server();
+        let cfg = SftpConfig::password("127.0.0.1", addr.port(), "user", "pw");
+        let provider =
+            SftpProvider::connect(&cfg, known_for(addr.port(), &hostkey), HostKeyPolicy::Strict).unwrap();
+        let cancel = AtomicBool::new(false);
+        let mut count = 0;
+        // Cancel from inside the callback after the very first entry → the walk stops immediately.
+        let visited = provider
+            .walk("/", &cancel, |_| {
+                count += 1;
+                cancel.store(true, Ordering::Relaxed);
+            })
+            .unwrap();
+        assert_eq!((visited, count), (1, 1), "should stop right after the first entry");
     }
 
     #[test]
