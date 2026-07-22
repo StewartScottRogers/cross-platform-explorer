@@ -57,3 +57,23 @@ busy-cursor wiring. Prereqs: CPE-811, CPE-815.
   What remains for full AC #2/#4: the frontend remote Transport speaking these over a browser-reachable
   transport (WebSocket bridge — cpe-net is raw TCP) + GUI-verify against a live server. Those need an
   architecture decision (WS vs the CPE-812 bindings) + a running server — user-facing, not headless.
+- 2026-07-22 (nightshift) — **Browser transport chosen + built, unary path end-to-end (slices 1-3).**
+  Decision (logged, per go-with-recommendation): **WebSocket** is the remote transport — the only
+  browser-native bidirectional channel that carries both requests and `StreamItem` streaming (SSE is
+  one-way, gRPC needs a proxy, raw TCP is impossible in a browser). Shipped:
+  - **Slice 1 (#192):** `cpe-net::ws` — RFC 6455 codec (`accept_key`, masked `read_frame`/`write_text`,
+    `MAX_WS_PAYLOAD` DoS cap). sha1+base64 the only new deps; still thread-per-conn, no async runtime.
+  - **Slice 2 (#193):** the reference server **accepts WebSocket clients** on the same listener — peek the
+    first bytes (`GET ` ⇒ 101 upgrade, else raw wire), then both transports speak CPE-811 envelopes
+    through one shared `run_session` behind an `EnvelopeIo` seam (`WireIo`/`WsIo`). Integration test drives
+    the full browser path (upgrade→Hello→Welcome→list_dir→Response); 17 raw-wire tests unchanged (22/22).
+  - **Slice 3 (#195, CPE-892):** frontend **`RemoteTransport implements Transport`** — Hello→Welcome
+    handshake, each `invoke` → a `request` text frame correlated by monotonic id, `Err`→typed
+    `RemoteCallError`, close rejects in-flight. Injectable socket factory; 5 headless tests.
+  - **AC #1/#3 done; AC #2 unary path done end-to-end.** **Remaining (next slice):** streaming over the
+    remote transport. Blocker to design first: the local `*_stream` commands **return a final stats value**
+    (files_scanned/truncated/total) alongside the Channel, but the wire protocol ends a stream with a
+    payload-less `StreamEnd` — so remote streaming currently can't deliver those stats. Needs a
+    contract-touching decision (give `StreamEnd` a final-value payload, or emit a terminal `Response` after
+    the items) + a seam-owned channel abstraction (Tauri's `Channel` can't run in a real browser). Left in
+    Backlog. AC #4 (GUI-verify vs a loopback server) still needs a running server + browser (user-facing).
