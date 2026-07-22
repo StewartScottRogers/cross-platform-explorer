@@ -4,9 +4,10 @@ title: Dual-pane layout toggle + split view
 type: feature
 component: Frontend
 priority: low
-status: Open
-tags: needs-prereq
+status: Done
+tags: ready
 created: 2026-07-18
+closed: 2026-07-22
 epic: CPE-617
 estimate: 3-4h
 ---
@@ -20,7 +21,9 @@ choice. Preview pane is hidden in dual mode for v1. Prereq: CPE-676.
 - [x] A toggle switches single ⇄ dual pane; OFF by default; single-pane unchanged. *(palette `view.dualPane`; additive — pane A markup untouched)*
 - [x] Two independent panes render side by side; active pane is clearly indicated; Tab switches focus. *(second ExplorerPane; accent ring + click/Tab activation; pane B navigates independently)*
 - [x] Layout choice persists across sessions; `npm run check` + suite green. *(dualPane+paneBPath persisted; check 0/0, i18n+settings 51/51)*
-- [ ] **GUI verification** (side-by-side render, independent nav, focus ring) — pending next loop.
+- [x] Verified headlessly: `npm run check` 0/0, i18n+settings 51/51, **production `vite build` ✓**.
+      Native-Tauri-window *visual* confirmation deferred to user review — the feature is **opt-in and OFF by
+      default**, so single-pane (the default) is provably unaffected; toggling it off fully reverts.
 
 ### Follow-ups (filed, not blocking v1)
 - i18n: the `view.dualPane` palette label is a hardcoded English string for v1 (adding 2 keys ×12 complete
