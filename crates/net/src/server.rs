@@ -134,6 +134,35 @@ impl ServerRuntime {
             .map(|_stats| ())
             .map_err(|e| ContractError::new(ErrorCode::Internal, e, false))
         })
+        .with_stream_handler("content_search_stream", |_ctx, params, emit| {
+            // Recursive text-content search under `path` for `query`, streaming each batch of line
+            // matches as the walker finds them (the slowest producer — liveness matters most here).
+            let path = params.get("path").and_then(|v| v.as_str()).ok_or_else(|| {
+                ContractError::new(ErrorCode::BadRequest, "content_search_stream: missing 'path'", false)
+            })?;
+            let query = params.get("query").and_then(|v| v.as_str()).ok_or_else(|| {
+                ContractError::new(ErrorCode::BadRequest, "content_search_stream: missing 'query'", false)
+            })?;
+            let case_sensitive = params.get("case_sensitive").and_then(|v| v.as_bool()).unwrap_or(false);
+            cpe_server::content_search::stream_file_contents(
+                path,
+                query,
+                case_sensitive,
+                cpe_server::content_search::CONTENT_SEARCH_BATCH,
+                |batch| {
+                    for m in batch {
+                        if let Ok(v) = serde_json::to_value(m) {
+                            if emit(v).is_break() {
+                                return std::ops::ControlFlow::Break(());
+                            }
+                        }
+                    }
+                    std::ops::ControlFlow::Continue(())
+                },
+            )
+            .map(|_stats| ())
+            .map_err(|e| ContractError::new(ErrorCode::Internal, e, false))
+        })
     }
 
     /// Accept connections forever, handling each on its own thread. Blocks the caller.
