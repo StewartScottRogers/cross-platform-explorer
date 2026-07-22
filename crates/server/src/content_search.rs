@@ -36,32 +36,47 @@ fn looks_binary(bytes: &[u8]) -> bool {
     bytes.iter().take(8192).any(|&b| b == 0)
 }
 
-/// Search text files under `root` for lines containing `query`. Skips dot-dirs, symlinked dirs, and
-/// binary/oversized files; stops at match/file caps (reporting `truncated`); unreadable entries are
-/// skipped. Empty/whitespace `query` returns nothing; a non-folder root is an `Err`.
-pub fn search_file_contents(
+/// How many matches to buffer before flushing a batch to a streaming caller — small so hits appear live.
+pub const CONTENT_SEARCH_BATCH: usize = 32;
+
+/// The non-match part of a content search: files scanned + whether a cap truncated the walk.
+pub struct ContentWalkStats {
+    pub files_scanned: u64,
+    pub truncated: bool,
+}
+
+/// The shared content-search walk (CPE-662): invoke `flush` with each batch of ≤`batch` [`ContentMatch`]es
+/// as they're found; `flush` returns a `ControlFlow` so a streaming caller can stop early. Skips dot-dirs,
+/// symlinked dirs (cycle-safe), and binary/oversized files; caps matches + files (reporting `truncated`);
+/// unreadable entries are skipped. Empty/whitespace `query` yields nothing; a non-folder root is an `Err`.
+/// Backs both [`search_file_contents`] (collect) and the streaming command.
+pub fn stream_file_contents(
     root: &str,
     query: &str,
     case_sensitive: bool,
-) -> Result<ContentSearchResult, String> {
+    batch: usize,
+    mut flush: impl FnMut(Vec<ContentMatch>) -> std::ops::ControlFlow<()>,
+) -> Result<ContentWalkStats, String> {
     let needle = if case_sensitive { query.to_string() } else { query.to_lowercase() };
-    let mut result = ContentSearchResult { matches: Vec::new(), files_scanned: 0, truncated: false };
+    let mut stats = ContentWalkStats { files_scanned: 0, truncated: false };
     if needle.trim().is_empty() {
-        return Ok(result);
+        return Ok(stats);
     }
     let root_path = Path::new(root);
     if !root_path.is_dir() {
         return Err(format!("{root}: not a folder"));
     }
 
+    let mut buf: Vec<ContentMatch> = Vec::new();
+    let mut total_matches = 0usize;
     // Explicit stack, not recursion — bounded memory, and matches `list_dir`'s skip-on-error ethos.
     let mut stack = vec![root_path.to_path_buf()];
-    while let Some(dir) = stack.pop() {
+    'walk: while let Some(dir) = stack.pop() {
         let Ok(entries) = std::fs::read_dir(&dir) else { continue };
         for entry in entries.flatten() {
-            if result.matches.len() >= SEARCH_MAX_MATCHES || result.files_scanned >= SEARCH_MAX_FILES {
-                result.truncated = true;
-                return Ok(result);
+            if total_matches >= SEARCH_MAX_MATCHES || stats.files_scanned >= SEARCH_MAX_FILES {
+                stats.truncated = true;
+                break 'walk;
             }
             let path = entry.path();
             let name = entry.file_name();
@@ -81,7 +96,7 @@ pub fn search_file_contents(
             if looks_binary(&bytes) {
                 continue;
             }
-            result.files_scanned += 1;
+            stats.files_scanned += 1;
             let text = String::from_utf8_lossy(&bytes);
             let path_str = path.to_string_lossy().into_owned();
             for (i, line) in text.lines().enumerate() {
@@ -91,20 +106,41 @@ pub fn search_file_contents(
                     if snippet.chars().count() > SEARCH_SNIPPET_MAX {
                         snippet = snippet.chars().take(SEARCH_SNIPPET_MAX).collect::<String>() + "…";
                     }
-                    result.matches.push(ContentMatch {
+                    buf.push(ContentMatch {
                         path: path_str.clone(),
                         line_number: (i + 1) as u64,
                         line: snippet,
                     });
-                    if result.matches.len() >= SEARCH_MAX_MATCHES {
-                        result.truncated = true;
-                        return Ok(result);
+                    total_matches += 1;
+                    if buf.len() >= batch && flush(std::mem::take(&mut buf)).is_break() {
+                        break 'walk;
+                    }
+                    if total_matches >= SEARCH_MAX_MATCHES {
+                        stats.truncated = true;
+                        break 'walk;
                     }
                 }
             }
         }
     }
-    Ok(result)
+    if !buf.is_empty() {
+        let _ = flush(buf);
+    }
+    Ok(stats)
+}
+
+/// Collect-to-vec content search: every match under `root` for `query`. See [`stream_file_contents`].
+pub fn search_file_contents(
+    root: &str,
+    query: &str,
+    case_sensitive: bool,
+) -> Result<ContentSearchResult, String> {
+    let mut matches = Vec::new();
+    let stats = stream_file_contents(root, query, case_sensitive, usize::MAX, |b| {
+        matches.extend(b);
+        std::ops::ControlFlow::Continue(())
+    })?;
+    Ok(ContentSearchResult { matches, files_scanned: stats.files_scanned, truncated: stats.truncated })
 }
 
 #[cfg(test)]
@@ -153,6 +189,35 @@ mod tests {
         // Empty query and a non-folder root behave sanely.
         assert_eq!(search_file_contents(&d.to_string_lossy(), "  ", false).unwrap().matches.len(), 0);
         assert!(search_file_contents(&d.join("a.txt").to_string_lossy(), "x", false).is_err());
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn stream_file_contents_flushes_batches_and_stops_early() {
+        let d = scratch("stream");
+        for i in 0..10 {
+            fs::write(d.join(format!("f{i}.txt")), b"has NEEDLE line\n").unwrap();
+        }
+        // Batch size 1 → a flush per match; all ten stream through, no truncation.
+        let (mut batches, mut total) = (0, 0);
+        let stats = stream_file_contents(&d.to_string_lossy(), "needle", false, 1, |b| {
+            batches += 1;
+            total += b.len();
+            std::ops::ControlFlow::Continue(())
+        })
+        .unwrap();
+        assert_eq!(total, 10, "one match per file");
+        assert!(batches >= 10);
+        assert!(!stats.truncated);
+
+        // A `Break` from `flush` stops the walk at the batch boundary (cancellation).
+        let mut seen = 0;
+        stream_file_contents(&d.to_string_lossy(), "needle", false, 1, |b| {
+            seen += b.len();
+            std::ops::ControlFlow::Break(())
+        })
+        .unwrap();
+        assert_eq!(seen, 1, "Break after the first batch stops early");
         let _ = fs::remove_dir_all(&d);
     }
 }
