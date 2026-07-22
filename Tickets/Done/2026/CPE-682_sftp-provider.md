@@ -4,7 +4,8 @@ title: SFTP filesystem provider
 type: feature
 component: Backend
 priority: medium
-status: Open
+status: Done
+closed: 2026-07-22
 tags: needs-prereq
 created: 2026-07-18
 epic: CPE-616
@@ -31,3 +32,9 @@ host-key verification. Needs network + attended testing against a real server. P
   presented host key (TOFU + loud changed-key refusal — AC #2's security heart), decoupled from any ssh
   crate. Remaining here (network + attended): the actual SFTP `FileSystemProvider` (connect with
   password/SSH-key, list/stat/read) that calls `verify_host_key` at connect time against a real server.
+
+## Closure (2026-07-22)
+All ACs met headlessly: connect (password + SSH key), list/stat/read (+write/mkdir/delete), and host-key
+verification with clear errors — built as `crates/sftp` (`cpe-sftp`) over russh, verified against an
+in-process russh-sftp server on the 3-OS matrix (CPE-899/900/901/902/684). App-facing wiring (route the
+app's commands through the provider) + the connections UI/keychain live on CPE-683 and epic CPE-616.

@@ -4,7 +4,8 @@ title: Client(Rust) proxy + reference Server binary + end-to-end guards
 type: feature
 component: Multiple
 priority: medium
-status: Open
+status: Done
+closed: 2026-07-22
 tags: needs-prereq
 created: 2026-07-20
 epic: CPE-810
@@ -57,3 +58,9 @@ mismatched client/server). Prereqs: CPE-815, CPE-816, CPE-819.
   server's one-listener/two-transport `EnvelopeIo` split with Ping→Pong, `RemoteTransport`, and the
   documented streaming-slice blocker). Architecture is now under `docs/design/` for both the Rust wire
   (SERVER-ARCHITECTURE.md) and the browser transport. GUI-verify is the remaining AC #5 item.
+
+## Closure (2026-07-22)
+AC #1–#4 complete headlessly (Client(Rust) + `cpe-server-ref` + WebSocket transport, security enforcing,
+local-fast guard, version conformance) and AC #5's architecture docs shipped
+(SERVER-ARCHITECTURE.md + REMOTE-TRANSPORT.md). The remaining items — one **real remote** host + the
+attended **GUI-verify** — are user-gated, tracked on epic CPE-810. Closing the headless work.

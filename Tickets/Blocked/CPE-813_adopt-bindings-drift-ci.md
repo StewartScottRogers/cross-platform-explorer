@@ -4,7 +4,7 @@ title: Adopt generated bindings + delete duplicated types + drift CI
 type: refactor
 component: Frontend
 priority: medium
-status: Open
+status: Blocked
 tags: needs-prereq
 created: 2026-07-20
 epic: CPE-810
@@ -25,3 +25,8 @@ never silently drift again. Prereq: CPE-812.
 - [ ] GUI-verified: no behavioural change; busy cursor + streaming still work.
 
 ## Work Log
+
+## Blocked (2026-07-22)
+Blocked on **CPE-812** (tauri-specta typed bindings), which is itself Deferred on an RC-crate
+**Windows-loader** build failure. Can't adopt/diff generated `commands.ts` until the generator exists.
+Unblocks when CPE-812 lands.

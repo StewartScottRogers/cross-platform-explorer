@@ -4,7 +4,8 @@ title: Frontend pluggable transport seam (local IPC vs remote RPC) + streaming
 type: feature
 component: Frontend
 priority: medium
-status: Open
+status: Done
+closed: 2026-07-22
 tags: needs-prereq
 created: 2026-07-20
 epic: CPE-810
@@ -97,3 +98,9 @@ busy-cursor wiring. Prereqs: CPE-811, CPE-815.
   `StreamEnd.result`; then repoint the ~5 `*_stream` call sites (list_dir, name/content search, duplicates,
   disk usage) at `createChannel`. That's a production-component refactor (local path must stay byte-for-byte
   identical) — its own slice. AC #4 GUI-verify still user-gated.
+
+## Closure (2026-07-22)
+AC #1/#2/#3 complete: the `invoke.ts` transport seam (local IPC vs remote), the 3 streaming producers
+over the wire, and busy-cursor/Diagnostics preserved — end-to-end including remote streaming via the
+seam-owned `createChannel`. **AC #4 (attended GUI-verify against a live loopback server) is the only
+remainder — user-gated**, tracked on epic CPE-810. Closing the headless work.
