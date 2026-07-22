@@ -18,6 +18,8 @@ use cpe_server::provider::{FileSystemProvider, ProviderEntry};
 use russh::client;
 use russh::keys::{ssh_key, PrivateKey, PrivateKeyWithHashAlg};
 use russh_sftp::client::SftpSession;
+use russh_sftp::protocol::OpenFlags;
+use tokio::io::AsyncWriteExt as _;
 use tokio::runtime::Runtime;
 
 /// How to authenticate to the SSH server.
@@ -271,7 +273,18 @@ impl FileSystemProvider for SftpProvider {
     }
 
     fn write(&mut self, path: &str, data: &[u8]) -> Result<(), String> {
-        self.rt.block_on(async { self.sftp.write(path, data).await.map_err(|e| format!("{path}: {e}")) })
+        // Create-or-overwrite semantics (the convenience `SftpSession::write` opens WRITE-only and fails
+        // if the file doesn't exist), so a provider write behaves like a local one.
+        self.rt.block_on(async {
+            let mut file = self
+                .sftp
+                .open_with_flags(path, OpenFlags::CREATE | OpenFlags::TRUNCATE | OpenFlags::WRITE)
+                .await
+                .map_err(|e| format!("{path}: {e}"))?;
+            file.write_all(data).await.map_err(|e| format!("{path}: {e}"))?;
+            file.shutdown().await.map_err(|e| format!("{path}: {e}"))?;
+            Ok(())
+        })
     }
 
     fn mkdir(&mut self, path: &str) -> Result<(), String> {
@@ -297,41 +310,66 @@ mod tests {
     use russh::server::{Auth, Msg, Server as _, Session};
     use russh::{Channel, ChannelId};
     use russh_sftp::protocol::{
-        Data, File, FileAttributes, Handle, Name, Status, StatusCode, Version,
+        Attrs, Data, File, FileAttributes, Handle, Name, OpenFlags, Status, StatusCode, Version,
     };
     use std::collections::{HashMap, HashSet};
+    use std::io::{Read as _, Seek as _, SeekFrom, Write as _};
     use std::net::SocketAddr;
+    use std::path::PathBuf;
+    use std::sync::atomic::{AtomicU64, Ordering};
     use std::sync::Arc;
 
-    // --- A canned in-process SFTP server: one file `readme.txt` ("hello world") + one dir `sub`. It
-    // exercises the provider's connect/host-key/list/stat/read path over a real SSH handshake, without a
-    // filesystem-backed server (that's a heavier follow-up). ---
+    // --- A real filesystem-backed in-process SFTP server, rooted at a temp dir. It maps SFTP ops onto
+    // `std::fs`, so the provider's full surface — list/stat/read AND write/mkdir/delete — round-trips
+    // against actual files over a real SSH handshake. Reads/writes are offset-based (open+seek+op per
+    // call), so no open-file table is needed; only dir-read state is tracked (to return EOF). ---
 
     const FILE_NAME: &str = "readme.txt";
     const FILE_BODY: &[u8] = b"hello world"; // 11 bytes
     const DIR_NAME: &str = "sub";
 
-    fn file_attrs(size: u64) -> FileAttributes {
-        let mut a = FileAttributes::default();
-        a.set_regular(true);
-        a.size = Some(size);
-        a
-    }
-    fn dir_attrs() -> FileAttributes {
-        let mut a = FileAttributes::default();
-        a.set_dir(true);
-        a
-    }
     fn ok_status(id: u32) -> Status {
         Status { id, status_code: StatusCode::Ok, error_message: String::new(), language_tag: String::new() }
     }
-
-    #[derive(Default)]
-    struct CannedSftp {
-        dirs_read: HashSet<String>, // handles whose entries have already been returned (→ EOF next)
+    fn io_err(e: std::io::Error) -> StatusCode {
+        match e.kind() {
+            std::io::ErrorKind::NotFound => StatusCode::NoSuchFile,
+            std::io::ErrorKind::PermissionDenied => StatusCode::PermissionDenied,
+            _ => StatusCode::Failure,
+        }
+    }
+    fn attrs_of(meta: &std::fs::Metadata) -> FileAttributes {
+        let mut a = FileAttributes::default();
+        if meta.is_dir() {
+            a.set_dir(true);
+        } else {
+            a.set_regular(true);
+            a.size = Some(meta.len());
+        }
+        a
     }
 
-    impl russh_sftp::server::Handler for CannedSftp {
+    struct FsSftp {
+        root: PathBuf,
+        dirs_read: HashSet<String>, // dir handles whose entries were already returned (→ EOF next)
+    }
+
+    impl FsSftp {
+        fn new(root: PathBuf) -> Self {
+            Self { root, dirs_read: HashSet::new() }
+        }
+        /// Map an SFTP path (server-absolute, `/`-rooted) to a real path under `root`.
+        fn real(&self, sftp_path: &str) -> PathBuf {
+            let rel = sftp_path.trim_start_matches('/');
+            if rel.is_empty() || rel == "." {
+                self.root.clone()
+            } else {
+                self.root.join(rel)
+            }
+        }
+    }
+
+    impl russh_sftp::server::Handler for FsSftp {
         type Error = StatusCode;
         fn unimplemented(&self) -> Self::Error {
             StatusCode::OpUnsupported
@@ -347,55 +385,93 @@ mod tests {
         }
 
         async fn opendir(&mut self, id: u32, path: String) -> Result<Handle, Self::Error> {
+            if !self.real(&path).is_dir() {
+                return Err(StatusCode::NoSuchFile);
+            }
             self.dirs_read.remove(&path);
             Ok(Handle { id, handle: path })
         }
 
         async fn readdir(&mut self, id: u32, handle: String) -> Result<Name, Self::Error> {
-            if !self.dirs_read.insert(handle) {
+            if !self.dirs_read.insert(handle.clone()) {
                 return Err(StatusCode::Eof); // already returned this dir's entries
             }
-            Ok(Name {
-                id,
-                files: vec![
-                    File::new(FILE_NAME, file_attrs(FILE_BODY.len() as u64)),
-                    File::new(DIR_NAME, dir_attrs()),
-                ],
-            })
+            let mut files = Vec::new();
+            for entry in std::fs::read_dir(self.real(&handle)).map_err(io_err)?.flatten() {
+                let Ok(meta) = entry.metadata() else { continue };
+                files.push(File::new(entry.file_name().to_string_lossy().to_string(), attrs_of(&meta)));
+            }
+            Ok(Name { id, files })
         }
 
         async fn close(&mut self, id: u32, _handle: String) -> Result<Status, Self::Error> {
             Ok(ok_status(id))
         }
 
-        async fn stat(&mut self, id: u32, path: String) -> Result<russh_sftp::protocol::Attrs, Self::Error> {
-            let attrs = if path.ends_with(FILE_NAME) { file_attrs(FILE_BODY.len() as u64) } else { dir_attrs() };
-            Ok(russh_sftp::protocol::Attrs { id, attrs })
+        async fn stat(&mut self, id: u32, path: String) -> Result<Attrs, Self::Error> {
+            let meta = std::fs::metadata(self.real(&path)).map_err(io_err)?;
+            Ok(Attrs { id, attrs: attrs_of(&meta) })
         }
 
-        async fn lstat(&mut self, id: u32, path: String) -> Result<russh_sftp::protocol::Attrs, Self::Error> {
-            self.stat(id, path).await
+        async fn lstat(&mut self, id: u32, path: String) -> Result<Attrs, Self::Error> {
+            let meta = std::fs::symlink_metadata(self.real(&path)).map_err(io_err)?;
+            Ok(Attrs { id, attrs: attrs_of(&meta) })
         }
 
         async fn open(
             &mut self,
             id: u32,
             filename: String,
-            _pflags: russh_sftp::protocol::OpenFlags,
+            pflags: OpenFlags,
             _attrs: FileAttributes,
         ) -> Result<Handle, Self::Error> {
+            let real = self.real(&filename);
+            if pflags.contains(OpenFlags::CREATE) {
+                // Create (and truncate if asked) up front; the seek-based write() ops fill it in.
+                std::fs::OpenOptions::new()
+                    .create(true)
+                    .write(true)
+                    .truncate(pflags.contains(OpenFlags::TRUNCATE))
+                    .open(&real)
+                    .map_err(io_err)?;
+            } else if !real.exists() {
+                return Err(StatusCode::NoSuchFile);
+            }
             Ok(Handle { id, handle: filename })
         }
 
-        async fn read(&mut self, id: u32, handle: String, offset: u64, _len: u32) -> Result<Data, Self::Error> {
-            if !handle.ends_with(FILE_NAME) {
-                return Err(StatusCode::NoSuchFile);
-            }
-            let off = offset as usize;
-            if off >= FILE_BODY.len() {
+        async fn read(&mut self, id: u32, handle: String, offset: u64, len: u32) -> Result<Data, Self::Error> {
+            let mut f = std::fs::File::open(self.real(&handle)).map_err(io_err)?;
+            f.seek(SeekFrom::Start(offset)).map_err(io_err)?;
+            let mut buf = vec![0u8; len as usize];
+            let n = f.read(&mut buf).map_err(io_err)?;
+            if n == 0 {
                 return Err(StatusCode::Eof);
             }
-            Ok(Data { id, data: FILE_BODY[off..].to_vec() })
+            buf.truncate(n);
+            Ok(Data { id, data: buf })
+        }
+
+        async fn write(&mut self, id: u32, handle: String, offset: u64, data: Vec<u8>) -> Result<Status, Self::Error> {
+            let mut f = std::fs::OpenOptions::new().write(true).open(self.real(&handle)).map_err(io_err)?;
+            f.seek(SeekFrom::Start(offset)).map_err(io_err)?;
+            f.write_all(&data).map_err(io_err)?;
+            Ok(ok_status(id))
+        }
+
+        async fn mkdir(&mut self, id: u32, path: String, _attrs: FileAttributes) -> Result<Status, Self::Error> {
+            std::fs::create_dir_all(self.real(&path)).map_err(io_err)?;
+            Ok(ok_status(id))
+        }
+
+        async fn remove(&mut self, id: u32, filename: String) -> Result<Status, Self::Error> {
+            std::fs::remove_file(self.real(&filename)).map_err(io_err)?;
+            Ok(ok_status(id))
+        }
+
+        async fn rmdir(&mut self, id: u32, path: String) -> Result<Status, Self::Error> {
+            std::fs::remove_dir_all(self.real(&path)).map_err(io_err)?;
+            Ok(ok_status(id))
         }
     }
 
@@ -403,18 +479,20 @@ mod tests {
     // `sftp` subsystem to the canned handler.
     #[derive(Clone)]
     struct TestServer {
+        root: PathBuf,
         accept_pubkey: Option<ssh_key::PublicKey>,
     }
 
     impl russh::server::Server for TestServer {
         type Handler = SshSession;
         fn new_client(&mut self, _: Option<SocketAddr>) -> SshSession {
-            SshSession { channel: None, accept_pubkey: self.accept_pubkey.clone() }
+            SshSession { channel: None, root: self.root.clone(), accept_pubkey: self.accept_pubkey.clone() }
         }
     }
 
     struct SshSession {
         channel: Option<Channel<Msg>>,
+        root: PathBuf,
         accept_pubkey: Option<ssh_key::PublicKey>,
     }
 
@@ -444,7 +522,7 @@ mod tests {
                 // The handler is called inline on the session's message loop, so it must NOT block on the
                 // SFTP I/O (that loop is what pumps the channel data the SFTP server reads/writes) — spawn
                 // it and return immediately.
-                tokio::spawn(russh_sftp::server::run(channel.into_stream(), CannedSftp::default()));
+                tokio::spawn(russh_sftp::server::run(channel.into_stream(), FsSftp::new(self.root.clone())));
             } else {
                 session.channel_failure(id)?;
             }
@@ -456,6 +534,7 @@ mod tests {
     /// address and the host public key as `known_hosts` fields `(key_type, key_b64)`. If `accept_pubkey`
     /// is set, the server only accepts publickey auth with that exact key (else it accepts any password).
     fn spawn_server_with(accept_pubkey: Option<ssh_key::PublicKey>) -> (SocketAddr, KeyFields) {
+        static SEQ: AtomicU64 = AtomicU64::new(0);
         let key = PrivateKey::random(&mut rand_core::OsRng, Algorithm::Ed25519).expect("gen host key");
         let pub_fields = openssh_fields(key.public_key());
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
@@ -464,13 +543,20 @@ mod tests {
         // is lenient) — without this the server thread panics on Linux/macOS.
         listener.set_nonblocking(true).unwrap();
 
+        // Seed a temp root: one file `readme.txt` ("hello world") + one empty dir `sub` (the OS reaper
+        // cleans temp; each server gets a unique dir).
+        let n = SEQ.fetch_add(1, Ordering::Relaxed);
+        let root = std::env::temp_dir().join(format!("cpe-sftp-srv-{}-{}", std::process::id(), n));
+        std::fs::create_dir_all(root.join(DIR_NAME)).unwrap();
+        std::fs::write(root.join(FILE_NAME), FILE_BODY).unwrap();
+
         std::thread::spawn(move || {
             let rt = tokio::runtime::Builder::new_multi_thread().enable_all().build().unwrap();
             rt.block_on(async move {
                 let config = Arc::new(russh::server::Config { keys: vec![key], ..Default::default() });
                 let listener = tokio::net::TcpListener::from_std(listener).unwrap();
                 // run_on_socket drives the full accept + per-connection session lifecycle.
-                let _ = TestServer { accept_pubkey }.run_on_socket(config, &listener).await;
+                let _ = TestServer { root, accept_pubkey }.run_on_socket(config, &listener).await;
             });
         });
         (addr, pub_fields)
@@ -509,6 +595,33 @@ mod tests {
         let tofu = SftpProvider::connect(&cfg, vec![], HostKeyPolicy::Tofu).expect("TOFU should accept");
         assert_eq!(tofu.host_key_verdict(), HostKeyVerdict::Unknown);
         assert_eq!(tofu.presented_key(), &hostkey);
+    }
+
+    #[test]
+    fn writes_mkdirs_lists_and_deletes_round_trip() {
+        let (addr, hostkey) = spawn_server();
+        let cfg = SftpConfig::password("127.0.0.1", addr.port(), "user", "pw");
+        let mut provider = SftpProvider::connect(&cfg, known_for(addr.port(), &hostkey), HostKeyPolicy::Strict)
+            .expect("connect");
+
+        // Write a new file, read it back verbatim.
+        provider.write("/notes.txt", b"remote write works").expect("write");
+        assert_eq!(provider.read("/notes.txt").unwrap(), b"remote write works");
+
+        // Make a directory; stat sees it as a dir.
+        provider.mkdir("/newdir").expect("mkdir");
+        assert!(provider.stat("/newdir").unwrap().is_dir);
+
+        // Both new entries appear in the listing (alongside the seeded readme.txt + sub).
+        let names: Vec<String> = provider.list("/").unwrap().into_iter().map(|e| e.name).collect();
+        assert!(names.contains(&"notes.txt".to_string()), "got {names:?}");
+        assert!(names.contains(&"newdir".to_string()), "got {names:?}");
+
+        // Delete the file, then the dir — both gone afterwards.
+        provider.delete("/notes.txt").expect("delete file");
+        assert!(provider.stat("/notes.txt").is_err(), "file should be gone");
+        provider.delete("/newdir").expect("delete dir");
+        assert!(provider.stat("/newdir").is_err(), "dir should be gone");
     }
 
     #[test]
