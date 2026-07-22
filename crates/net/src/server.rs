@@ -107,6 +107,33 @@ impl ServerRuntime {
             .map(|_total| ())
             .map_err(|e| ContractError::new(ErrorCode::Internal, e, false))
         })
+        .with_stream_handler("name_search_stream", |_ctx, params, emit| {
+            // Recursive filename search under `path` for `query`, streaming each batch of matches as the
+            // walker finds them (the canonical streaming case — results arrive live).
+            let path = params.get("path").and_then(|v| v.as_str()).ok_or_else(|| {
+                ContractError::new(ErrorCode::BadRequest, "name_search_stream: missing 'path'", false)
+            })?;
+            let query = params.get("query").and_then(|v| v.as_str()).ok_or_else(|| {
+                ContractError::new(ErrorCode::BadRequest, "name_search_stream: missing 'query'", false)
+            })?;
+            cpe_server::name_search::walk_name_matches(
+                path,
+                query,
+                cpe_server::name_search::NAME_SEARCH_BATCH,
+                |batch| {
+                    for m in batch {
+                        if let Ok(v) = serde_json::to_value(m) {
+                            if emit(v).is_break() {
+                                return std::ops::ControlFlow::Break(());
+                            }
+                        }
+                    }
+                    std::ops::ControlFlow::Continue(())
+                },
+            )
+            .map(|_stats| ())
+            .map_err(|e| ContractError::new(ErrorCode::Internal, e, false))
+        })
     }
 
     /// Accept connections forever, handling each on its own thread. Blocks the caller.
