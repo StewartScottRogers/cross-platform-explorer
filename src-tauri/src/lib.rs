@@ -2080,6 +2080,39 @@ fn find_files_by_name_stream(
     })
 }
 
+/// Streaming variant of `search_file_contents` (CPE-662, streaming-liveness convention): pushes batches of
+/// line matches over an IPC channel as the tree is walked, so a slow content search shows results live
+/// instead of blocking on the whole scan. Async + `spawn_blocking` so the walk never freezes the UI thread
+/// (CPE-760); the walk is the shared `cpe_server::content_search::stream_file_contents` (CPE-815). The
+/// returned result carries the final `files_scanned` + `truncated` with empty `matches` (those streamed).
+#[tauri::command]
+async fn search_file_contents_stream(
+    root: String,
+    query: String,
+    case_sensitive: bool,
+    on_match: tauri::ipc::Channel<Vec<cpe_server::content_search::ContentMatch>>,
+) -> Result<cpe_server::content_search::ContentSearchResult, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let stats = cpe_server::content_search::stream_file_contents(
+            &root,
+            &query,
+            case_sensitive,
+            cpe_server::content_search::CONTENT_SEARCH_BATCH,
+            |batch| {
+                let _ = on_match.send(batch);
+                std::ops::ControlFlow::Continue(())
+            },
+        )?;
+        Ok(cpe_server::content_search::ContentSearchResult {
+            matches: Vec::new(),
+            files_scanned: stats.files_scanned,
+            truncated: stats.truncated,
+        })
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
 /// Find duplicate files under `root` (CPE-420) — size-then-hash two-pass scan. Model lives in
 /// `cpe_server::duplicates` (CPE-815); this is a thin `spawn_blocking` dispatcher.
 #[tauri::command]
@@ -5286,6 +5319,7 @@ pub fn run() {
             entries_for_paths,
             same_volume,
             find_files_by_name_stream,
+            search_file_contents_stream,
             dir_size,
             dir_children_sizes,
             folder_stats,
