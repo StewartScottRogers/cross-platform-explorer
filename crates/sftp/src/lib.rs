@@ -277,6 +277,46 @@ impl SftpProvider {
         }
         Ok(files)
     }
+
+    /// Upload the local tree under `local_dir` into `remote_root` (recreating the directory structure),
+    /// the symmetric counterpart to [`download_tree`](Self::download_tree). Returns the number of files
+    /// written. Cancellable via `cancel`. Local paths are made remote by mapping `\` → `/` (so a Windows
+    /// source produces POSIX remote paths).
+    pub fn upload_tree(
+        &mut self,
+        local_dir: &std::path::Path,
+        remote_root: &str,
+        cancel: &AtomicBool,
+    ) -> Result<usize, String> {
+        let remote_base = remote_root.trim_end_matches('/').to_string();
+        self.mkdir(&remote_base)?; // ensure the remote root exists
+        let mut stack = vec![local_dir.to_path_buf()];
+        let mut files = 0usize;
+        while let Some(dir) = stack.pop() {
+            if cancel.load(Ordering::Relaxed) {
+                break;
+            }
+            let Ok(read_dir) = std::fs::read_dir(&dir) else { continue };
+            for entry in read_dir.flatten() {
+                if cancel.load(Ordering::Relaxed) {
+                    return Ok(files);
+                }
+                let local = entry.path();
+                let Ok(rel) = local.strip_prefix(local_dir) else { continue };
+                let remote = format!("{remote_base}/{}", rel.to_string_lossy().replace('\\', "/"));
+                let Ok(meta) = entry.metadata() else { continue };
+                if meta.is_dir() {
+                    self.mkdir(&remote)?;
+                    stack.push(local);
+                } else {
+                    let data = std::fs::read(&local).map_err(|e| format!("{}: {e}", local.display()))?;
+                    self.write(&remote, &data)?;
+                    files += 1;
+                }
+            }
+        }
+        Ok(files)
+    }
 }
 
 /// One entry yielded by [`SftpProvider::walk`].
@@ -744,6 +784,30 @@ mod tests {
         assert_eq!(std::fs::read(out.join("readme.txt")).unwrap(), FILE_BODY);
         assert_eq!(std::fs::read(out.join("sub").join("nested.txt")).unwrap(), b"deep");
         let _ = std::fs::remove_dir_all(&out);
+    }
+
+    #[test]
+    fn upload_tree_recreates_local_files_on_the_remote() {
+        let (addr, hostkey) = spawn_server();
+        let cfg = SftpConfig::password("127.0.0.1", addr.port(), "user", "pw");
+        let mut provider =
+            SftpProvider::connect(&cfg, known_for(addr.port(), &hostkey), HostKeyPolicy::Strict).unwrap();
+
+        // Build a local tree: a.txt + inner/b.txt.
+        let src = std::env::temp_dir().join(format!("cpe-sftp-up-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&src);
+        std::fs::create_dir_all(src.join("inner")).unwrap();
+        std::fs::write(src.join("a.txt"), b"alpha").unwrap();
+        std::fs::write(src.join("inner").join("b.txt"), b"bravo").unwrap();
+
+        let cancel = AtomicBool::new(false);
+        let files = provider.upload_tree(&src, "/up", &cancel).expect("upload");
+        assert_eq!(files, 2);
+
+        // Read them back over SFTP to confirm they landed with the right structure + content.
+        assert_eq!(provider.read("/up/a.txt").unwrap(), b"alpha");
+        assert_eq!(provider.read("/up/inner/b.txt").unwrap(), b"bravo");
+        let _ = std::fs::remove_dir_all(&src);
     }
 
     #[test]
