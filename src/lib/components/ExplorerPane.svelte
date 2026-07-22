@@ -42,11 +42,16 @@
   // The listing + its display state.
   export let showHidden = false;
   export let folderContexts: FolderContext[] = [];
-  // Base listing App resolves (archive children, smart-folder matches, or the real dir). The pane owns the
-  // sort/hidden/search/type/tag pipeline that turns it into `visible` (CPE-676 domino 2).
-  export let baseEntries: DirEntry[] = [];
-  // Archive mode: show `baseEntries` as-is (no hidden/search/type/tag filter), only sorted.
-  export let rawList = false;
+  // The raw directory listing — owned here now (CPE-676 domino 3), bound back to App (whose loadPath still
+  // populates it). The pane derives the whole sort/hidden/search/type/tag pipeline down to `visible`.
+  export let entries: DirEntry[] = [];
+  // Overrides App supplies for the non-plain views: the smart-folder matches, or the archive children.
+  // Archive mode disables the hidden/search/type/tag filters (raw list, only sorted).
+  export let smartOverride: DirEntry[] | null = null;
+  export let archiveOverride: DirEntry[] | null = null;
+  // The base list the pipeline runs on, resolved from the plain listing + the active-view overrides.
+  $: baseEntries = archiveOverride ?? smartOverride ?? entries;
+  $: rawList = archiveOverride != null;
   export let search = "";
   export let fileFilter = "all";
   export let foldersFirst = true;

@@ -3056,8 +3056,9 @@
       {watchedAgentName}
       {recentChanges}
       bind:showTimeline
-      baseEntries={archive ? archiveChildren(archive) : (smartFolder ? smartEntries : entries)}
-      rawList={!!archive}
+      bind:entries
+      smartOverride={smartFolder ? smartEntries : null}
+      archiveOverride={archive ? archiveChildren(archive) : null}
       {search}
       {fileFilter}
       {foldersFirst}
