@@ -177,6 +177,46 @@ mod tests {
     }
 
     #[test]
+    fn a_websocket_ping_is_answered_with_a_pong() {
+        // RFC 6455 §5.5.2: the server must answer a client Ping with a Pong echoing its payload — a
+        // browser/proxy keepalive that goes unanswered drops the connection mid-session. The server
+        // handles control frames while awaiting the next envelope, so a Ping right after upgrade replies.
+        let addr = start_server(SecurityChain::local());
+        let mut stream = std::net::TcpStream::connect(addr).unwrap();
+        stream
+            .write_all(
+                b"GET / HTTP/1.1\r\nHost: x\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n\
+                  Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\n\r\n",
+            )
+            .unwrap();
+        let mut reader = std::io::BufReader::new(stream.try_clone().unwrap());
+        let mut line = String::new();
+        reader.read_line(&mut line).unwrap();
+        assert!(line.contains("101"), "expected a 101 upgrade, got {line:?}");
+        loop {
+            let mut l = String::new();
+            reader.read_line(&mut l).unwrap();
+            if l.trim().is_empty() {
+                break;
+            }
+        }
+
+        // A masked client Ping carrying "hi".
+        let payload = b"hi";
+        let mask = [0xA1u8, 0xB2, 0xC3, 0xD4];
+        let mut frame = vec![0x80 | ws::op::PING, 0x80 | payload.len() as u8];
+        frame.extend_from_slice(&mask);
+        for (i, b) in payload.iter().enumerate() {
+            frame.push(b ^ mask[i & 3]);
+        }
+        stream.write_all(&frame).unwrap();
+
+        let pong = ws::read_frame(&mut reader).unwrap().unwrap();
+        assert_eq!(pong.opcode, ws::op::PONG, "server must answer a Ping with a Pong");
+        assert_eq!(pong.payload, payload, "the Pong must echo the Ping payload");
+    }
+
+    #[test]
     fn two_calls_reuse_one_connection() {
         let dir = scratch("twocalls");
         std::fs::write(dir.join("x.txt"), b"1").unwrap();

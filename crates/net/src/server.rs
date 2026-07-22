@@ -66,7 +66,13 @@ impl<R: Read, W: Write> EnvelopeIo for WsIo<R, W> {
                         .map(Some)
                         .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e));
                 }
-                Some(_) => continue, // ping/pong/continuation — ignore, read the next frame
+                // RFC 6455 §5.5.2: a Ping MUST be answered with a Pong echoing its payload — otherwise a
+                // browser/proxy keepalive goes unanswered and the connection is dropped mid-session.
+                Some(f) if f.opcode == ws::op::PING => {
+                    ws::write_frame(&mut self.writer, ws::op::PONG, &f.payload)?;
+                    continue;
+                }
+                Some(_) => continue, // pong/continuation — nothing to do, read the next frame
             }
         }
     }
