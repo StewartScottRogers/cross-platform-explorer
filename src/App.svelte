@@ -177,6 +177,16 @@
   let dualPane = settings.loadDualPane();
   let paneBPath = settings.loadPaneBPath();
   let explorerPaneB: ExplorerPane | undefined;
+  let activePane: 0 | 1 = 0;
+  // Pane B's own listing/selection state (ExplorerPane self-owns the derived pipeline + fetch; these are
+  // bound back). Config (view/sort/hidden/colour rules/…) is shared with pane A for v1.
+  let entriesB: DirEntry[] = [];
+  let visibleB: DirEntry[] = [];
+  let shownB: DirEntry[] = [];
+  let loadingB = false;
+  let errorB = "";
+  let selectionB: Selection = emptySelection();
+  let selectedEntriesB: DirEntry[] = [];
 
   // Owned+derived inside <ExplorerPane> (CPE-676); bound back here so App's ops keep reading it. When the
   // split lands (CPE-677) this comes from the active pane instead of a single binding.
@@ -215,6 +225,9 @@
   $: gridCols = showDetails
     ? `${sidebarWidth}px 6px 1fr 6px ${rightWidth}px`
     : `${sidebarWidth}px 6px 1fr`;
+
+  // Dual-pane (CPE-677): two equal file columns, preview suppressed; reuses the preview grid slot.
+  $: effectiveGridCols = dualPane ? `${sidebarWidth}px 6px 1fr 6px 1fr` : gridCols;
 
   /** Live column count of the file grid, for 2-D arrow-key nav (CPE-769). 1 for list/details; for the
       icons/gallery grid, read the resolved `grid-template-columns` off the live `.rows.grid` (the same
@@ -1119,11 +1132,24 @@
     await explorerPaneB?.loadListing(path, true);
   }
 
+  /** Open an entry in pane B: descend into a folder, or open a file with the OS default (CPE-677). */
+  async function openB(entry: DirEntry) {
+    if (entry.is_dir) { await navigateB(entry.path); return; }
+    try {
+      await invoke("open_external", { path: entry.path });
+      recents = settings.addRecent(recents, { path: entry.path, name: entry.name });
+      settings.saveRecents(recents);
+    } catch {
+      showNotice(`Can't open "${entry.name}" — no app is associated with this file type.`, true);
+    }
+  }
+
   /** Toggle single ⇄ dual pane (CPE-677); persists. On first enable pane B opens pane A's folder. */
   function toggleDualPane() {
     dualPane = !dualPane;
     settings.saveDualPane(dualPane);
-    if (dualPane) void navigateB(paneBPath || currentPath || homePath);
+    if (dualPane) { activePane = 1; void navigateB(paneBPath || currentPath || homePath); }
+    else activePane = 0;
   }
 
   /** Navigate to a file's folder and select + scroll to the file itself (CPE-423). Used by the
@@ -2952,7 +2978,7 @@
   class="main"
   class:with-details={showDetails}
   class:resizing
-  style="grid-template-columns: {gridCols}"
+  style="grid-template-columns: {effectiveGridCols}"
 >
   <div class="pane-col">
     <Toolbar label={$t("tb.navigation")}>
@@ -3011,7 +3037,8 @@
   ></div>
 
   <!-- File List Pane (middle column) -->
-  <div class="pane-col">
+  <!-- svelte-ignore a11y-click-events-have-key-events a11y-no-static-element-interactions -->
+  <div class="pane-col" class:pane-active={dualPane && activePane === 0} on:click={() => (activePane = 0)}>
     <ExplorerPane
       bind:this={explorerPane}
       inHome={isHome && !smartFolder}
@@ -3070,7 +3097,40 @@
     />
   </div>
 
-  {#if showDetails}
+  {#if dualPane}
+    <!-- Dual-pane (CPE-677): pane B reuses the preview grid slot; inert divider (both columns 1fr). -->
+    <div class="resizer" aria-hidden="true"></div>
+    <!-- svelte-ignore a11y-click-events-have-key-events a11y-no-static-element-interactions -->
+    <div class="pane-col" class:pane-active={activePane === 1} on:click={() => (activePane = 1)}>
+      <ExplorerPane
+        bind:this={explorerPaneB}
+        bind:entries={entriesB}
+        bind:visible={visibleB}
+        bind:shown={shownB}
+        bind:loading={loadingB}
+        bind:error={errorB}
+        bind:selection={selectionB}
+        bind:selectedEntries={selectedEntriesB}
+        {places}
+        {drives}
+        {pins}
+        {recents}
+        {favorites}
+        {recentFolders}
+        {colorRules}
+        {folderContexts}
+        {view}
+        {sortKey}
+        {sortDir}
+        {foldersFirst}
+        {showHidden}
+        canDrag={false}
+        on:open={(e) => openB(e.detail)}
+        on:navigate={(e) => navigateB(e.detail)}
+        on:openRecent={(e) => openRecent(e.detail)}
+      />
+    </div>
+  {:else if showDetails}
     <!-- svelte-ignore a11y-no-noninteractive-element-interactions -->
     <div
       class="resizer"
@@ -3538,6 +3598,20 @@
 {/if}
 
 <style>
+  /* Dual-pane (CPE-677): the focused pane gets an accent inset ring so it's clear which pane the
+     toolbar/keyboard acts on. The ::after is pointer-events:none so it never blocks clicks. */
+  .pane-col {
+    position: relative;
+  }
+  .pane-active::after {
+    content: "";
+    position: absolute;
+    inset: 0;
+    pointer-events: none;
+    box-shadow: inset 0 0 0 2px var(--accent, #4a8cff);
+    z-index: 5;
+  }
+
   /* OS file drop-in overlay (CPE-670): a themed full-window affordance while dragging files in. */
   .os-drop-overlay {
     position: fixed;
