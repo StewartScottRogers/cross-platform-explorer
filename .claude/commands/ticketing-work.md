@@ -42,22 +42,13 @@ pick up -> implement -> close.
 
 12. Verify every Acceptance Criterion is checked [x]. If any remain, complete them first.
 13. Write the Resolution section: what changed, which files, why, any tradeoffs.
-14. Determine the destination path inside Done/ using depth-detection:
-
-    Inspect Done/ for existing subdirectory structure and match today's date:
-
-    - No subdirectories in Done/           -> place in  Done/
-    - Year dirs exist (e.g. Done/2026/)    -> place in  Done/YYYY/
-    - Quarter dirs exist inside year       -> place in  Done/YYYY/QN/
-    - Month dirs exist inside quarter      -> place in  Done/YYYY/QN/MonthName/
-    - Week dirs exist inside month         -> place in  Done/YYYY/QN/MonthName/Week-NN/
-
-    Quarter boundaries: Q1 Jan-Mar, Q2 Apr-Jun, Q3 Jul-Sep, Q4 Oct-Dec.
-    Week: ISO week number, zero-padded (Week-03, Week-24).
-    Create the destination directory if it does not exist.
-
-15. Move the file from Doing/ to the destination path.
-16. Update frontmatter: status -> "Done", closed -> today's date (YYYY-MM-DD).
+14. Update frontmatter: status -> "Done", closed -> today's date (YYYY-MM-DD).
+15. Move the file from Doing/ to `Done/` (top level).
+16. **Auto-archive (CPE-865):** run `npm run organize:done` (= `node scripts/organize-done.mjs`). It files
+    the just-closed ticket into the correct dated `Done/YYYY/QN/MonthName/Week-NN/` subfolder *if* `Done/`
+    now exceeds the 50-file threshold, honoring its `closed:` date — idempotent, a no-op otherwise, and it
+    only moves files. Stage any resulting moves so they land in this ticket's close commit. (Don't hand-roll
+    the depth math; the script is the one source of truth.)
 17. Report a concise summary: what changed, which files were affected.
 
 ## Post-Close Menu
