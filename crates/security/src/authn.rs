@@ -31,10 +31,14 @@ pub const ATTR_CLIENT_CERT_SUBJECT: &str = "tls.client_cert.subject";
 /// Default context-attribute key an OAuth/OIDC bearer token is presented under.
 pub const ATTR_BEARER: &str = "auth.bearer";
 
-/// Best-effort constant-time byte comparison, so token verification does not leak length or
-/// content through timing. Compares over the max length to avoid an early-out on length.
+/// Best-effort constant-time byte comparison, so token verification does not leak content
+/// through timing. Compares over the max length to avoid an early-out on the *content* scan.
 fn ct_eq(a: &[u8], b: &[u8]) -> bool {
-    let mut diff = (a.len() ^ b.len()) as u8;
+    // Fold any length difference to a single bit. Truncating `a.len() ^ b.len()` to `u8` (as an
+    // earlier version did) let lengths differing by a multiple of 256 alias to 0, so e.g.
+    // `ct_eq(b"A", &[b'A', 0, 0, …256 zeros])` wrongly compared equal. Branching on *length* (not
+    // on secret byte content) leaks nothing sensitive; the content scan below stays branch-free.
+    let mut diff: u8 = if a.len() == b.len() { 0 } else { 1 };
     let n = a.len().max(b.len());
     for i in 0..n {
         let x = *a.get(i).unwrap_or(&0);
@@ -462,5 +466,23 @@ mod tests {
         assert!(!ct_eq(b"abc", b"abd"));
         assert!(!ct_eq(b"abc", b"abcd"));
         assert!(!ct_eq(b"", b"x"));
+    }
+
+    #[test]
+    fn ct_eq_does_not_alias_lengths_differing_by_a_multiple_of_256() {
+        // Regression: the old `(a.len() ^ b.len()) as u8` truncation made a 256-length delta
+        // vanish, so a short token + zero-padding wrongly compared equal. `"A"` vs `"A" + 256
+        // zero bytes` (len 1 vs 257, 1 ^ 257 = 256 → 0 as u8) must NOT be equal.
+        let mut padded = vec![b'A'];
+        padded.extend(std::iter::repeat(0u8).take(256));
+        assert!(!ct_eq(b"A", &padded), "length delta of 256 must not alias to equal");
+        // End-to-end: with a 1-byte known token "A", presenting "A"+256 NULs must NOT authenticate
+        // (against the old truncation it aliased to a match).
+        let mut table = BTreeMap::new();
+        table.insert("A".to_string(), principal("alice"));
+        let a = ApiTokenAuthenticator::new(table);
+        let mut ctx = SecurityContext::new(Principal::local(), "op")
+            .with_attribute(ATTR_API_TOKEN, String::from_utf8(padded).unwrap());
+        assert!(matches!(a.authenticate(&mut ctx), Verdict::Deny(_)), "padded token must not authenticate");
     }
 }
