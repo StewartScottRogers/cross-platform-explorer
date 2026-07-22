@@ -2820,6 +2820,13 @@
     const restored = await restoreLastSession();
     if (!restored) await loadPath(HOME);
     sessionReady = true; // from here on, session changes are captured (CPE-789)
+    // Dual-pane (CPE-679): when the split was last active, restore pane B to its persisted folder so the
+    // layout comes back where the user left it (pane A is covered by restoreLastSession above). Reuses the
+    // `paneBPath` persistence from CPE-677.
+    if (dualPane) {
+      await tick(); // pane B's `{#if dualPane}` block is rendered → explorerPaneB is bound
+      void navigateB(paneBPath || homePath);
+    }
     checkForUpdates();
 
     // Auto-mirror scheduler (CPE-497): a 60s tick + a window-focus check. Both funnel through
