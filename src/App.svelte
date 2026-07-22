@@ -408,6 +408,8 @@
   let contentSearchOpen = false;
   /** "Find files by name" recursive name-search overlay (Ctrl+P), scoped to the current folder (CPE-603). */
   let fileSearchOpen = false;
+  /** Query the toolbar Search hands to the recursive find dialog on Enter (CPE-866). */
+  let deepSearchQuery = "";
   /** "Find duplicate files" overlay, scoped to the current folder (CPE-421). */
   let duplicatesOpen = false;
   let patternSelectOpen = false;
@@ -2950,6 +2952,10 @@
   on:diskusage={() => { if (inFolder()) spacePath = currentPath; }}
   on:navigate={(e) => onCrumbNavigate(e.detail)}
   on:search={(e) => { search = e.detail; selection = emptySelection(); }}
+  on:searchDeep={(e) => {
+    if (isHome) { showNotice("Open a folder first — Search looks inside the current folder and its subfolders.", false); return; }
+    deepSearchQuery = e.detail; fileSearchOpen = true;
+  }}
 />
 
 <CommandBar
@@ -3336,8 +3342,9 @@
 {#if fileSearchOpen}
   <FileNameSearchDialog
     root={currentPath}
+    initialQuery={deepSearchQuery}
     on:navigate={(e) => { fileSearchOpen = false; revealFileInApp(e.detail); }}
-    on:close={() => (fileSearchOpen = false)}
+    on:close={() => { fileSearchOpen = false; deepSearchQuery = ""; }}
   />
 {/if}
 

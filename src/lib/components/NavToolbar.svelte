@@ -17,7 +17,7 @@
 
   const dispatch = createEventDispatcher<{
     back: void; forward: void; up: void; refresh: void; browse: void; help: void; diskusage: void;
-    navigate: string; search: string; pathError: string;
+    navigate: string; search: string; pathError: string; searchDeep: string;
   }>();
 
   let pathInput: HTMLInputElement | undefined;
@@ -140,9 +140,12 @@
       bind:this={searchInput}
       placeholder="{$t('nav.search')} {searchScope}"
       aria-label="{$t('nav.search')} {searchScope}"
+      title={$t("nav.searchHint")}
       value={search}
       on:keydown|stopPropagation={(e) => {
         if (e.key === "Escape") { dispatch("search", ""); e.currentTarget.blur(); }
+        // Enter escalates to a recursive, wildcard-capable search of this folder + subfolders (CPE-866).
+        else if (e.key === "Enter") { const v = e.currentTarget.value.trim(); if (v) dispatch("searchDeep", v); }
       }}
       on:input={(e) => dispatch("search", e.currentTarget.value)}
     />

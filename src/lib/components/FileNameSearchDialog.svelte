@@ -5,7 +5,7 @@
    * lists the hits (folders first), and reveals the chosen one. A sibling of ContentSearchDialog,
    * which searches file *contents* instead.
    */
-  import { createEventDispatcher } from "svelte";
+  import { createEventDispatcher, onMount } from "svelte";
   import { Channel } from "@tauri-apps/api/core";
   import { rawInvoke } from "../invoke";
   import Icon from "./Icon.svelte";
@@ -25,6 +25,8 @@
   let recents: string[] = loadRecents();
 
   export let root = "";
+  /** When opened from the toolbar Search (CPE-866), pre-fill this query and run it immediately. */
+  export let initialQuery = "";
 
   const dispatch = createEventDispatcher<{ close: void; navigate: string }>();
 
@@ -68,6 +70,14 @@
       if (gen === searchGen) loading = false;
     }
   }
+
+  // Opened from the toolbar Search with a query already typed (CPE-866): pre-fill + search at once.
+  onMount(() => {
+    if (initialQuery.trim()) {
+      query = initialQuery;
+      run();
+    }
+  });
 
   function goTo(path: string) {
     // Dispatch the entry path — the host reveals it (navigates to its folder AND selects it).
