@@ -52,3 +52,8 @@ mismatched client/server). Prereqs: CPE-815, CPE-816, CPE-819.
     design note + the **GUI-verify end-to-end** are the genuinely user-gated remainder.
   Net of this: CPE-820 is **headless-complete**; what's left (real-remote browse, GUI-verify) needs a
   running server + the GUI, i.e. the user. Left in Backlog rather than closed for that reason.
+- 2026-07-22 (nightshift) — **AC #5 doc:** wrote `docs/design/REMOTE-TRANSPORT.md` — the WebSocket
+  transport design (the one `invoke.ts` seam, why WS over SSE/gRPC/raw-TCP, envelope-over-text-frame, the
+  server's one-listener/two-transport `EnvelopeIo` split with Ping→Pong, `RemoteTransport`, and the
+  documented streaming-slice blocker). Architecture is now under `docs/design/` for both the Rust wire
+  (SERVER-ARCHITECTURE.md) and the browser transport. GUI-verify is the remaining AC #5 item.
