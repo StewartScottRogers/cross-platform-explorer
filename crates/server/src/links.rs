@@ -27,6 +27,33 @@ pub fn create_hard_link(target: &str, link_path: &str) -> Result<(), String> {
     std::fs::hard_link(target, link_path).map_err(|e| e.to_string())
 }
 
+/// A path's link status for the file list + link tooling (CPE-804, epic CPE-715): whether it's a symlink,
+/// where it points, and whether that target is currently missing (a broken link).
+#[derive(serde::Serialize, Default, PartialEq, Debug)]
+pub struct LinkStatus {
+    pub is_symlink: bool,
+    /// The link's stored target (may be relative). `None` for a non-symlink or an unreadable link.
+    pub target: Option<String>,
+    /// True only for a symlink whose target does not currently resolve.
+    pub broken: bool,
+}
+
+/// Inspect `path`: is it a symlink, what does it point at, and is its target missing (broken)? Never fails
+/// — an unreadable/absent path reports as a non-symlink. `broken` follows the link via `metadata()` and is
+/// true only when that resolution fails for a symlink.
+pub fn link_status(path: &str) -> LinkStatus {
+    let p = std::path::Path::new(path);
+    let is_symlink = std::fs::symlink_metadata(p)
+        .map(|m| m.file_type().is_symlink())
+        .unwrap_or(false);
+    if !is_symlink {
+        return LinkStatus::default();
+    }
+    let target = std::fs::read_link(p).ok().map(|t| t.to_string_lossy().into_owned());
+    let broken = std::fs::metadata(p).is_err(); // metadata follows the link; err ⇒ target gone
+    LinkStatus { is_symlink: true, target, broken }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -65,6 +92,30 @@ mod tests {
         match create_symlink(&target.to_string_lossy(), &link.to_string_lossy()) {
             Ok(()) => assert_eq!(fs::read(&link).unwrap(), b"data"),
             Err(_) => { /* unprivileged Windows — the error path is what we return to the UI */ }
+        }
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn link_status_detects_symlink_and_broken_target() {
+        let d = scratch();
+        let target = d.join("t.txt");
+        fs::write(&target, b"data").unwrap();
+        // A plain file is not a symlink.
+        let plain = link_status(&target.to_string_lossy());
+        assert!(!plain.is_symlink && !plain.broken && plain.target.is_none());
+
+        let link = d.join("l.txt");
+        match create_symlink(&target.to_string_lossy(), &link.to_string_lossy()) {
+            Ok(()) => {
+                let intact = link_status(&link.to_string_lossy());
+                assert!(intact.is_symlink && !intact.broken, "target exists → not broken");
+                // Remove the target → the symlink is now broken.
+                fs::remove_file(&target).unwrap();
+                let broken = link_status(&link.to_string_lossy());
+                assert!(broken.is_symlink && broken.broken, "target removed → broken link");
+            }
+            Err(_) => { /* unprivileged Windows — skip (symlink creation gated) */ }
         }
         let _ = fs::remove_dir_all(&d);
     }
