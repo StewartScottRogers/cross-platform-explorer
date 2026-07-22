@@ -77,6 +77,14 @@ busy-cursor wiring. Prereqs: CPE-811, CPE-815.
     contract-touching decision (give `StreamEnd` a final-value payload, or emit a terminal `Response` after
     the items) + a seam-owned channel abstraction (Tauri's `Channel` can't run in a real browser). Left in
     Backlog. AC #4 (GUI-verify vs a loopback server) still needs a running server + browser (user-facing).
+- 2026-07-22 (nightshift) — **Frontend remote streaming landed (CPE-896, #199) — AC #2 complete.** Added
+  the seam-owned channel: `createChannel()` on the `Transport` (local → real Tauri `Channel`, byte-for-byte
+  unchanged; remote → `RemoteChannel`). `RemoteTransport` detects a `RemoteChannel` arg, strips it from the
+  wire params, routes `stream_item` frames to its `onmessage` (one-element batches), and resolves the
+  `invoke` with `StreamEnd.result`. Migrated all 7 channel call sites (list_dir, name/content search,
+  duplicates, disk usage, op-progress) off `new Channel()`. `npm run check` clean; vitest 914 (3 new
+  RemoteTransport streaming tests). **CPE-819 is now headless-complete: AC #1/#2/#3 all met.** Only **AC #4**
+  (attended GUI-verify against a live loopback server) remains — user-gated. Kept in Backlog for that tail.
 - 2026-07-22 (nightshift) — **Wire+net streaming stats landed (CPE-895, #198).** Resolved the blocker
   above: `Message::StreamEnd` now carries a JSON `result` (a **struct** variant — a newtype wrapping a
   scalar can't serialize under the internally-tagged enum); the `StreamHandler` returns its terminal value,

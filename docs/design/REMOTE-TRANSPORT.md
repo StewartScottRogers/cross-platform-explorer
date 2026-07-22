@@ -89,20 +89,29 @@ length can't drive an unbounded allocation.
 Landed & CI-green (headless): the codec, the WS-accepting server, `RemoteTransport`'s unary
 request/response path, security enforcing remotely, the local-fast guard, and version conformance.
 
-**Streaming — half built.** The local `*_stream` commands (list_dir, name search, content search) stream
-batches through a Tauri `ipc::Channel` **and return a final stats value**. Two gaps blocked routing these
-over the remote transport:
+**Streaming — built (unit-verified).** The local `*_stream` commands (list_dir, name search, content
+search) stream batches through a Tauri `ipc::Channel` **and return a final stats value**. Two gaps that
+blocked routing these over the remote transport are both closed:
 
-1. ~~The wire ends a stream with a **payload-less `StreamEnd`**, so the final stats can't be delivered.~~
-   **Done (CPE-895).** `StreamEnd { result }` now carries the producer's terminal value — a **struct
-   variant**, not a newtype wrapping the value (an internally-tagged enum cannot serialize a newtype around
-   a scalar/array). The `StreamHandler` returns that value, and the client's `call_stream` yields
-   `StreamOutcome { items, result }`.
-2. **Still to build.** Components import Tauri's `Channel`, which **can't run in a real browser**. A
-   seam-owned channel abstraction (`createChannel` in `invoke.ts`, returning a real Tauri `Channel` under
-   `localTransport` but a `RemoteChannel` under `RemoteTransport`) is needed, with `RemoteTransport`
-   routing `stream_item` frames to the channel's `onmessage` and resolving the `invoke` with
-   `StreamEnd.result`; then the ~5 streaming call sites repointed onto it.
+1. **Done (CPE-895).** The wire no longer ends a stream with a payload-less frame — `StreamEnd { result }`
+   carries the producer's terminal value, a **struct variant** (an internally-tagged enum cannot serialize
+   a newtype wrapping a scalar/array). The `StreamHandler` returns that value; the client's `call_stream`
+   yields `StreamOutcome { items, result }`.
+2. **Done (CPE-896).** A seam-owned channel: `createChannel()` in `invoke.ts` returns a real Tauri
+   `Channel` under `localTransport` (native, unchanged) but a `RemoteChannel` under `RemoteTransport`.
+   `RemoteTransport` detects a `RemoteChannel` arg (`instanceof`), strips it from the wire params, routes
+   `stream_item` frames to its `onmessage` (un-flattening the item from the tagged frame, wrapping it as a
+   one-element batch), and resolves the `invoke` with `StreamEnd.result`. All 7 channel call sites use
+   `createChannel`; none import Tauri's `Channel`.
+
+The one **remaining** item is user-gated: an attended **GUI-verify** browsing/searching against a live
+loopback server (and one real remote host).
+
+> **StreamItem note:** items ride as an internally-tagged *newtype* `StreamItem(Value)`, so the item's
+> fields are flattened next to `"type":"stream_item"`. That's safe for today's producers (their structs
+> are `type`-field-free objects). A future producer streaming a scalar/array — or an object with its own
+> `type` field — would need `StreamItem` promoted to a struct variant (`{ item }`), exactly as CPE-895
+> did for `StreamEnd`.
 
 Also user-gated: browse/preview against one **real remote** host (not loopback) and an attended
 end-to-end GUI verification.
