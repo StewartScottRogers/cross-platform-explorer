@@ -129,6 +129,7 @@ jobs:
             ./crates/net -> target
             ./crates/sftp -> target
             ./crates/webdav -> target
+            ./crates/vfs -> target
 
       - name: contract — clippy + test
         working-directory: crates/contract
@@ -170,6 +171,14 @@ jobs:
         # rustls/ring — pure Rust, no C tooling), tested against an in-process tiny_http server, so it runs
         # on all three OSes with no Docker.
         working-directory: crates/webdav
+        run: |
+          cargo clippy --all-targets -- -D warnings
+          cargo test
+
+      - name: vfs — clippy + test
+        # The scheme router (CPE-616): open(connection, secret, …) -> boxed FileSystemProvider, dispatching
+        # to cpe-sftp / cpe-webdav. Ties the connections model to the concrete remote providers.
+        working-directory: crates/vfs
         run: |
           cargo clippy --all-targets -- -D warnings
           cargo test
