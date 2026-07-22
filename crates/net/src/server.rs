@@ -78,6 +78,27 @@ impl ServerRuntime {
         self
     }
 
+    /// Register the standard streaming producers over the wire (CPE-819): the directory listing as
+    /// `list_dir_stream`, emitting one `StreamItem` per [`DirEntry`]. The reference Server and its
+    /// tests share this so the streaming path is exercised against real domain data, not a stub. (v1
+    /// collects then emits; swapping in the shared incremental walker is a follow-up.)
+    pub fn with_builtin_streams(self) -> Self {
+        self.with_stream_handler("list_dir_stream", |_ctx, params| {
+            let path = params.get("path").and_then(|v| v.as_str()).ok_or_else(|| {
+                ContractError::new(ErrorCode::BadRequest, "list_dir_stream: missing 'path'", false)
+            })?;
+            let entries = cpe_server::listing::list_dir(path)
+                .map_err(|e| ContractError::new(ErrorCode::Internal, e, false))?;
+            entries
+                .into_iter()
+                .map(|e| {
+                    serde_json::to_value(e)
+                        .map_err(|e| ContractError::new(ErrorCode::Internal, e.to_string(), false))
+                })
+                .collect()
+        })
+    }
+
     /// Accept connections forever, handling each on its own thread. Blocks the caller.
     pub fn serve(self: Arc<Self>, listener: TcpListener) -> std::io::Result<()> {
         for stream in listener.incoming() {

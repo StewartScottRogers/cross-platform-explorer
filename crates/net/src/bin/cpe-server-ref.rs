@@ -25,10 +25,13 @@ fn main() -> std::io::Result<()> {
     println!("cpe-server-ref listening on {local}");
 
     let base = std::env::temp_dir().join("cpe-server-ref");
-    let runtime = Arc::new(ServerRuntime::new(
-        Dispatcher::with_builtins(),
-        SecurityChain::local(),
-        Arc::new(HeadlessCtx::new(base)),
-    ));
+    let runtime = Arc::new(
+        ServerRuntime::new(
+            Dispatcher::with_builtins(),
+            SecurityChain::local(),
+            Arc::new(HeadlessCtx::new(base)),
+        )
+        .with_builtin_streams(), // list_dir_stream over the wire (CPE-819)
+    );
     runtime.serve(listener)
 }
