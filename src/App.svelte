@@ -507,7 +507,7 @@
     { id: "view.hidden", group: $t("palette.groupView"), label: showHidden ? $t("palette.hideHidden") : $t("palette.showHidden"), run: () => { showHidden = !showHidden; settings.saveShowHidden(showHidden); } },
     { id: "view.folderSizes", group: $t("palette.groupView"), label: showFolderSizes ? $t("palette.hideFolderSizes") : $t("palette.showFolderSizes"), keywords: "folder size recursive subtree column", run: toggleFolderSizes },
     { id: "view.foldersFirst", group: $t("palette.groupView"), label: foldersFirst ? $t("palette.mixFolders") : $t("palette.groupFolders"), run: () => { foldersFirst = !foldersFirst; settings.saveFoldersFirst(foldersFirst); } },
-    { id: "view.dualPane", group: $t("palette.groupView"), label: dualPane ? $t("palette.singlePane") : $t("palette.dualPane"), keywords: "dual pane split commander two side by side", run: toggleDualPane },
+    { id: "view.dualPane", group: $t("palette.groupView"), label: dualPane ? "Single pane" : "Dual pane", keywords: "dual pane split commander two side by side", run: toggleDualPane },
     { id: "tool.findByName", group: $t("palette.groupTools"), label: $t("palette.findByName"), shortcut: "Ctrl+P", run: () => (fileSearchOpen = true), enabled: inFolder },
     { id: "tool.searchInFiles", group: $t("palette.groupTools"), label: $t("palette.searchInFiles"), shortcut: "Ctrl+Shift+F", run: () => (contentSearchOpen = true), enabled: inFolder },
     { id: "tool.findDuplicates", group: $t("palette.groupTools"), label: $t("palette.findDuplicates"), run: () => (duplicatesOpen = true), enabled: inFolder },
@@ -2166,6 +2166,13 @@
     }
 
     const ctrl = event.ctrlKey || event.metaKey;
+    // Dual-pane (CPE-677): plain Tab switches the active pane. Single-pane (dualPane off) leaves Tab's
+    // default focus traversal untouched.
+    if (dualPane && !ctrl && !event.altKey && event.key === "Tab") {
+      event.preventDefault();
+      activePane = activePane === 0 ? 1 : 0;
+      return;
+    }
     // Space quick-looks the selected image (CPE-645).
     if (!ctrl && !event.altKey && !event.shiftKey && event.key === " " && openQuickLook()) { event.preventDefault(); return; }
 

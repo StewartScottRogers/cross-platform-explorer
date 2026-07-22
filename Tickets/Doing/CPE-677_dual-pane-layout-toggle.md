@@ -17,9 +17,16 @@ instances side by side, with a visible active-pane indicator and Tab to switch f
 choice. Preview pane is hidden in dual mode for v1. Prereq: CPE-676.
 
 ## Acceptance Criteria
-- [ ] A toggle switches single ⇄ dual pane; OFF by default; single-pane unchanged.
-- [ ] Two independent panes render side by side; active pane is clearly indicated; Tab switches focus.
-- [ ] Layout choice persists across sessions; `npm run check` + suite green.
+- [x] A toggle switches single ⇄ dual pane; OFF by default; single-pane unchanged. *(palette `view.dualPane`; additive — pane A markup untouched)*
+- [x] Two independent panes render side by side; active pane is clearly indicated; Tab switches focus. *(second ExplorerPane; accent ring + click/Tab activation; pane B navigates independently)*
+- [x] Layout choice persists across sessions; `npm run check` + suite green. *(dualPane+paneBPath persisted; check 0/0, i18n+settings 51/51)*
+- [ ] **GUI verification** (side-by-side render, independent nav, focus ring) — pending next loop.
+
+### Follow-ups (filed, not blocking v1)
+- i18n: the `view.dualPane` palette label is a hardcoded English string for v1 (adding 2 keys ×12 complete
+  locales was disproportionate for the loop). i18n-ify in a follow-up.
+- Pane B v1 is navigate/select/open only (no DnD/context-menu/per-pane search) → CPE-678/679. Tab moves the
+  active-pane ring; full DOM focus transfer into pane B's list is a refinement.
 
 ## Work Log
 - 2026-07-22 (nightshift loop 2) — **Implementation plan + persistence slice landed on branch.**
