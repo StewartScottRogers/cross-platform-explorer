@@ -77,3 +77,15 @@ busy-cursor wiring. Prereqs: CPE-811, CPE-815.
     contract-touching decision (give `StreamEnd` a final-value payload, or emit a terminal `Response` after
     the items) + a seam-owned channel abstraction (Tauri's `Channel` can't run in a real browser). Left in
     Backlog. AC #4 (GUI-verify vs a loopback server) still needs a running server + browser (user-facing).
+- 2026-07-22 (nightshift) — **Wire+net streaming stats landed (CPE-895, #198).** Resolved the blocker
+  above: `Message::StreamEnd` now carries a JSON `result` (a **struct** variant — a newtype wrapping a
+  scalar can't serialize under the internally-tagged enum); the `StreamHandler` returns its terminal value,
+  the 3 builtin handlers return their stats, and the client's `call_stream` surfaces
+  `StreamOutcome { items, result }`. contract 10/10, net 23/23. **AC #2 is now complete over the wire in
+  Rust** (items stream incrementally + the terminal stats arrive on StreamEnd). **The only remaining piece
+  is frontend-only:** a seam-owned channel abstraction in `invoke.ts` (`createChannel`) that returns a real
+  Tauri `Channel` under `localTransport` but a `RemoteChannel` under `RemoteTransport`, plus teaching
+  `RemoteTransport` to route `stream_item` frames → the channel's `onmessage` and resolve the `invoke` with
+  `StreamEnd.result`; then repoint the ~5 `*_stream` call sites (list_dir, name/content search, duplicates,
+  disk usage) at `createChannel`. That's a production-component refactor (local path must stay byte-for-byte
+  identical) — its own slice. AC #4 GUI-verify still user-gated.
