@@ -2748,6 +2748,78 @@ fn resolve_sidecar_bin(app: &tauri::AppHandle, id: &str) -> Option<PathBuf> {
     None
 }
 
+/// The sidecars we ship a pristine restore copy for (CPE-867). Matches the `.pristine` bundle entries.
+#[cfg(feature = "sidecar-platform")]
+const RESTORABLE_SIDECARS: [&str; 3] = ["ai-console", "agent-board", "repos"];
+
+/// Restore a sidecar's executable from its never-executed `.pristine` copy when the exe is missing or its
+/// bytes differ from the pristine (CPE-867 L2). Because nothing ever *runs* a `.pristine`, a locked-file
+/// install skip (CPE-483) can't leave *it* stale — so it's a trustworthy restore source that self-heals a
+/// missing/stale exe. Pure enough to unit-test. Returns `Ok(true)` if it restored; `Ok(false)` when the exe
+/// is already current or there is no pristine (e.g. dev builds, where this is a no-op).
+#[cfg(feature = "sidecar-platform")]
+fn restore_sidecar_from_pristine(exe: &Path, pristine: &Path) -> std::io::Result<bool> {
+    if !pristine.exists() {
+        return Ok(false);
+    }
+    let pristine_bytes = std::fs::read(pristine)?;
+    if exe.exists() {
+        if let Ok(current) = std::fs::read(exe) {
+            if current == pristine_bytes {
+                return Ok(false); // already current — nothing to heal
+            }
+        }
+    }
+    std::fs::write(exe, &pristine_bytes)?;
+    Ok(true)
+}
+
+/// Startup self-heal (CPE-867 L2): for each bundled sidecar, restore its runtime exe from the pristine copy
+/// if it's missing or stale. Best-effort — a failure only logs. Runs AFTER the orphan-daemon reap so a
+/// daemon that was file-locking the exe is already gone.
+#[cfg(feature = "sidecar-platform")]
+fn restore_stale_sidecars_on_startup(app: &tauri::AppHandle) {
+    use tauri::Manager;
+    let Ok(resource) = app.path().resource_dir() else { return };
+    let dir = resource.join("sidecars");
+    for id in RESTORABLE_SIDECARS {
+        let exe_name = if cfg!(windows) { format!("{id}.exe") } else { id.to_string() };
+        let exe = dir.join(&exe_name);
+        let pristine = dir.join(format!("{id}.pristine"));
+        match restore_sidecar_from_pristine(&exe, &pristine) {
+            Ok(true) => eprintln!("cpe: self-healed sidecar '{id}' from its pristine copy (CPE-867)"),
+            Ok(false) => {}
+            Err(e) => eprintln!("cpe: could not restore sidecar '{id}': {e}"),
+        }
+    }
+}
+
+#[cfg(all(test, feature = "sidecar-platform"))]
+mod restore_tests {
+    use super::restore_sidecar_from_pristine;
+
+    #[test]
+    fn restores_when_missing_or_stale_and_noops_when_current() {
+        let tmp = tempfile::tempdir().unwrap();
+        let exe = tmp.path().join("ai-console.exe");
+        let pristine = tmp.path().join("ai-console.pristine");
+
+        // No pristine (e.g. a dev build) → no-op.
+        assert!(!restore_sidecar_from_pristine(&exe, &pristine).unwrap());
+
+        std::fs::write(&pristine, b"NEW-BINARY-BYTES").unwrap();
+        // Exe missing → restored from pristine.
+        assert!(restore_sidecar_from_pristine(&exe, &pristine).unwrap());
+        assert_eq!(std::fs::read(&exe).unwrap(), b"NEW-BINARY-BYTES");
+        // Exe already current → no-op.
+        assert!(!restore_sidecar_from_pristine(&exe, &pristine).unwrap());
+        // Exe stale (a locked-file install skip left old bytes) → restored.
+        std::fs::write(&exe, b"OLD-STALE-BYTES").unwrap();
+        assert!(restore_sidecar_from_pristine(&exe, &pristine).unwrap());
+        assert_eq!(std::fs::read(&exe).unwrap(), b"NEW-BINARY-BYTES");
+    }
+}
+
 /// One row in the platform management UI (CPE-274): a registered sidecar with its
 /// identity, contract compatibility, running/enabled state, and consent picture.
 #[cfg(feature = "sidecar-platform")]
@@ -5030,6 +5102,10 @@ pub fn run() {
         }
         #[cfg(feature = "sidecar-platform")]
         reap_orphan_session_daemons_on_startup(app.handle());
+        // Self-heal a missing/stale sidecar from its pristine copy (CPE-867 L2) — after the reap, so a
+        // daemon that was file-locking the exe is gone before we rewrite it.
+        #[cfg(feature = "sidecar-platform")]
+        restore_stale_sidecars_on_startup(app.handle());
         Ok(())
     });
 
