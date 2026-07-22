@@ -196,7 +196,7 @@ fn percent_decode(s: &str) -> String {
 mod tests {
     use super::*;
     use std::path::{Path, PathBuf};
-    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
     const FILE_BODY: &[u8] = b"hello webdav"; // 12 bytes
 
@@ -341,6 +341,34 @@ mod tests {
 
         provider.delete("/notes.txt").expect("delete");
         assert!(provider.read("/notes.txt").is_err(), "deleted file should 404");
+    }
+
+    #[test]
+    fn generic_transfer_walks_downloads_and_uploads_over_webdav() {
+        // The provider-agnostic cpe_server::transfer works over the WebDAV transport too.
+        let base = spawn_webdav_server();
+        let mut provider = WebdavProvider::connect(&WebdavConfig::new(&base));
+        let cancel = AtomicBool::new(false);
+
+        // walk the seeded tree.
+        let mut paths = Vec::new();
+        let n = cpe_server::transfer::walk(&provider, "/", &cancel, |e| paths.push((e.path, e.is_dir))).unwrap();
+        paths.sort();
+        assert_eq!(n, 3, "readme.txt + sub + sub/nested.txt; got {paths:?}");
+        assert!(paths.contains(&("/readme.txt".to_string(), false)));
+        assert!(paths.contains(&("/sub/nested.txt".to_string(), false)));
+
+        // download the tree locally.
+        let out = std::env::temp_dir().join(format!("cpe-webdav-dl-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&out);
+        let files = cpe_server::transfer::download_tree(&provider, "/", &out, &cancel).unwrap();
+        assert_eq!(files, 2);
+        assert_eq!(std::fs::read(out.join("readme.txt")).unwrap(), FILE_BODY);
+
+        // upload it back under a new remote root, then read one file over WebDAV to confirm it landed.
+        cpe_server::transfer::upload_tree(&mut provider, &out, "/copied", &cancel).unwrap();
+        assert_eq!(provider.read("/copied/readme.txt").unwrap(), FILE_BODY);
+        let _ = std::fs::remove_dir_all(&out);
     }
 
     #[test]

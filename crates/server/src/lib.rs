@@ -35,6 +35,10 @@ pub mod known_hosts;
 /// excluded — those live in the OS keychain). Pure data + JSON persistence (CPE-683).
 pub mod connections;
 
+/// Provider-agnostic recursive walk + bidirectional tree transfer over the `FileSystemProvider` trait,
+/// so every backend (local/SFTP/WebDAV) shares one cancellable enumeration + copy (CPE-905).
+pub mod transfer;
+
 /// Tag store: user tags + a colour label per path, persisted as `tags.json` (CPE-635). Pure model
 /// helpers + `ServerCtx`-based command entry points (CPE-815 migration).
 pub mod tags;
