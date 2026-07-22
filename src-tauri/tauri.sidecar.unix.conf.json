@@ -6,7 +6,9 @@
       "../sidecar/ai-console/sidecar.json": "sidecars/sidecar.json",
       "../sidecar/ai-console/agents/*.json": "sidecars/agents/",
       "../sidecar/agent-board/target/release/agent-board": "sidecars/agent-board",
-      "../sidecar/agent-board/sidecar.json": "sidecars/agent-board.json"
+      "../sidecar/agent-board/sidecar.json": "sidecars/agent-board.json",
+      "../sidecar/repos/target/release/repos": "sidecars/repos",
+      "../sidecar/repos/sidecar.json": "sidecars/repos.json"
     }
   }
 }

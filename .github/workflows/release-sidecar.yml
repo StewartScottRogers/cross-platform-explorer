@@ -57,6 +57,7 @@ jobs:
             ./src-tauri -> target
             ./sidecar/ai-console -> target
             ./sidecar/agent-board -> target
+            ./sidecar/repos -> target
 
       - name: Install Linux system dependencies
         if: matrix.platform == 'ubuntu-latest'
@@ -89,6 +90,12 @@ jobs:
       # release binary + manifest, so it must be built before tauri-action packages the app.
       - name: Build the Agent Board sidecar
         working-directory: sidecar/agent-board
+        run: cargo build --release
+
+      # The Repositories sidecar (CPE-863) — bundled alongside the others so it isn't a missing binary;
+      # the overlays reference its release binary + manifest, so it must be built before packaging.
+      - name: Build the Repositories sidecar
+        working-directory: sidecar/repos
         run: cargo build --release
 
       - name: Build and publish sidecar-enabled release
