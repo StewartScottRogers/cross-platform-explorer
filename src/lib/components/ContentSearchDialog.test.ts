@@ -5,19 +5,24 @@ import ContentSearchDialog from "./ContentSearchDialog.svelte";
 // The dialog persists recent queries + the Match-case toggle (CPE-558/576); isolate localStorage.
 beforeEach(() => { try { localStorage.clear(); } catch { /* ignore */ } });
 
+// The dialog now streams matches (CPE-662): it calls `search_file_contents_stream` with an `onMatch`
+// Channel and appends batches as they arrive, then applies the final stats. The mock pushes the matches
+// through that Channel and returns the terminal `{ files_scanned, truncated }`.
+const MATCHES = [
+  { path: "/repo/a.txt", line_number: 3, line: "the needle is here" },
+  { path: "/repo/sub/b.md", line_number: 7, line: "found the needle deep" },
+];
 const invoke = vi.fn(async (_cmd: string, args: any) => {
-  if (args.query === "needle")
-    return {
-      matches: [
-        { path: "/repo/a.txt", line_number: 3, line: "the needle is here" },
-        { path: "/repo/sub/b.md", line_number: 7, line: "found the needle deep" },
-      ],
-      files_scanned: 2,
-      truncated: false,
-    };
-  return { matches: [], files_scanned: 5, truncated: false };
+  const hit = args.query === "needle";
+  args.onMatch?.onmessage?.(hit ? MATCHES : []);
+  return { files_scanned: hit ? 2 : 5, truncated: false };
 });
-vi.mock("@tauri-apps/api/core", () => ({ invoke: (...a: unknown[]) => invoke(...(a as [string, any])) }));
+vi.mock("@tauri-apps/api/core", () => {
+  class Channel<T> {
+    onmessage: ((v: T) => void) | null = null;
+  }
+  return { invoke: (...a: unknown[]) => invoke(...(a as [string, any])), Channel };
+});
 
 describe("ContentSearchDialog (CPE-417)", () => {
   it("searches the current folder and groups results; a hit navigates to its folder", async () => {
@@ -29,8 +34,11 @@ describe("ContentSearchDialog (CPE-417)", () => {
     await fireEvent.click(screen.getByText("Search"));
 
     await waitFor(() => expect(screen.getByText(/2 matches in 2 files/)).toBeTruthy());
-    // Passes the current folder as root + the camelCase caseSensitive arg.
-    expect(invoke).toHaveBeenCalledWith("search_file_contents", { root: "/repo", query: "needle", caseSensitive: false });
+    // Passes the current folder as root + the camelCase caseSensitive arg (plus the onMatch Channel).
+    expect(invoke).toHaveBeenCalledWith(
+      "search_file_contents_stream",
+      expect.objectContaining({ root: "/repo", query: "needle", caseSensitive: false }),
+    );
     expect(screen.getByText("a.txt")).toBeTruthy();
     // The line text is split across <mark>/text nodes now (CPE-557 highlighting), so match on the
     // <code> element's full textContent.

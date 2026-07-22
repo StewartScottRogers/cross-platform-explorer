@@ -7,8 +7,22 @@ let response: any = {
   files_scanned: 42,
   truncated: false,
 };
-const invoke = vi.fn(async (_cmd: string, _args?: unknown) => response);
-vi.mock("@tauri-apps/api/core", () => ({ invoke: (cmd: string, args?: unknown) => invoke(cmd, args) }));
+// The dialog now streams groups (CPE-420): `find_duplicates_stream` pushes batches through an `onGroup`
+// Channel, then returns the terminal `{ files_scanned, truncated }`. The mock feeds `response.groups`
+// through that Channel; other commands (delete_to_trash) fall through to `response`.
+const invoke = vi.fn(async (cmd: string, args?: any) => {
+  if (cmd === "find_duplicates_stream") {
+    args?.onGroup?.onmessage?.(response.groups);
+    return { files_scanned: response.files_scanned, truncated: response.truncated };
+  }
+  return response;
+});
+vi.mock("@tauri-apps/api/core", () => {
+  class Channel<T> {
+    onmessage: ((v: T) => void) | null = null;
+  }
+  return { invoke: (cmd: string, args?: unknown) => invoke(cmd, args), Channel };
+});
 
 describe("DuplicatesDialog (CPE-421)", () => {
   it("scans on demand, lists a duplicate group, and navigates on click", async () => {
@@ -22,7 +36,7 @@ describe("DuplicatesDialog (CPE-421)", () => {
     await fireEvent.click(screen.getByText("Scan for duplicates"));
 
     await waitFor(() => expect(screen.getByText(/1 duplicate set/)).toBeTruthy());
-    expect(invoke).toHaveBeenCalledWith("find_duplicates", { root: "/repo" });
+    expect(invoke).toHaveBeenCalledWith("find_duplicates_stream", expect.objectContaining({ root: "/repo" }));
     // 2 copies × 1 KB, so ~1 KB reclaimable (formatSize → "1.0 KB"; text is split by an inline icon).
     expect(screen.getByText(/reclaimable/)).toBeTruthy();
     expect(screen.getByText(/2 copies/)).toBeTruthy();
