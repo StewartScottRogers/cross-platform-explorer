@@ -5,8 +5,7 @@
   // it is presentational: App still owns the explorer state and passes it in via props/binds and receives
   // actions via events. Subsequent slices push state ownership down into this component.
   import { createEventDispatcher, tick } from "svelte";
-  import { Channel } from "@tauri-apps/api/core";
-  import { rawInvoke } from "../invoke";
+  import { rawInvoke, createChannel } from "../invoke";
   import { friendlyError } from "../format";
   import Icon from "./Icon.svelte";
   import HomeView from "./HomeView.svelte";
@@ -151,7 +150,7 @@
       try {
         // Coalesce stream batches (CPE-689): buffer and flush once per animation frame so `visible`
         // re-sorts a handful of times, not once per 256-row batch; the first frame still paints live.
-        const channel = new Channel<DirEntry[]>();
+        const channel = createChannel<DirEntry[]>();
         let buffer: DirEntry[] = [];
         let flushQueued = false;
         const flush = () => {

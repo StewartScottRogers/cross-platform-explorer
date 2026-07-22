@@ -5,8 +5,7 @@
    * containing folder. An overlay so it stays out of the plain folder listing.
    */
   import { createEventDispatcher } from "svelte";
-  import { rawInvoke } from "../invoke";
-  import { Channel } from "@tauri-apps/api/core";
+  import { rawInvoke, createChannel } from "../invoke";
   import Icon from "./Icon.svelte";
   import { t } from "../i18n";
   import { groupMatches, baseName, highlightSegments, pushRecentSearch, type ContentSearchResult, type ContentMatch } from "../contentSearch";
@@ -70,7 +69,7 @@
     // progressively instead of blocking on the whole scan; a generation token drops stale batches.
     const gen = ++searchGen;
     try {
-      const channel = new Channel<ContentMatch[]>();
+      const channel = createChannel<ContentMatch[]>();
       channel.onmessage = (batch) => {
         if (gen !== searchGen) return; // superseded by a newer search — drop stale matches
         result = { ...result, matches: result.matches.concat(batch) };

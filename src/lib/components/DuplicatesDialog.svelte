@@ -6,8 +6,7 @@
    * deletes anything — the user decides what to remove.
    */
   import { createEventDispatcher } from "svelte";
-  import { invoke, rawInvoke } from "../invoke";
-  import { Channel } from "@tauri-apps/api/core";
+  import { invoke, rawInvoke, createChannel } from "../invoke";
   import Icon from "./Icon.svelte";
   import { t } from "../i18n";
   import { formatSize } from "../format";
@@ -68,7 +67,7 @@
     // progressively; each batch is appended and re-sorted by reclaimable space (streamed unsorted).
     const gen = ++searchGen;
     try {
-      const channel = new Channel<DupGroup[]>();
+      const channel = createChannel<DupGroup[]>();
       channel.onmessage = (batch) => {
         if (gen !== searchGen) return; // superseded by a newer scan — drop stale groups
         const groups = [...result.groups, ...batch].sort(

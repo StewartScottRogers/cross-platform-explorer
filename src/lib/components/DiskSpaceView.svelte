@@ -8,8 +8,7 @@
    * actions are CPE-752.
    */
   import { createEventDispatcher, onMount } from "svelte";
-  import { rawInvoke } from "../invoke";
-  import { Channel } from "@tauri-apps/api/core";
+  import { rawInvoke, createChannel } from "../invoke";
   import { squarify, type Tile } from "../treemap";
   import { formatSize } from "../format";
   import { baseName } from "../contentSearch";
@@ -87,7 +86,7 @@
     // Stream each child's recursive size as it's computed (CPE-706) so a big folder's treemap fills in
     // progressively; each arrival is appended + re-sorted by size and the reactive treemap re-lays-out.
     try {
-      const channel = new Channel<Child[]>();
+      const channel = createChannel<Child[]>();
       channel.onmessage = (batch) => {
         if (g !== gen) return; // a newer navigation superseded this cold scan
         children = [...children, ...batch].sort((a, b) => b.size - a.size);

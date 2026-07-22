@@ -12,7 +12,7 @@
 // std-only on the server side, and here just the browser-native `WebSocket` — no extra deps. The socket
 // factory is injectable so the handshake + correlation logic is unit-testable headlessly against a mock.
 
-import type { Transport } from "./invoke";
+import type { StreamChannel, Transport } from "./invoke";
 
 /** The frame schema + contract version this client speaks (mirrors `cpe_contract`). */
 const SCHEMA_VERSION = 1;
@@ -46,6 +46,16 @@ interface Pending {
   reject: (reason: unknown) => void;
 }
 
+/**
+ * A {@link StreamChannel} for the remote transport. The transport recognises it in an `invoke`'s args
+ * (an `instanceof` check), registers it against the request id, and drives its `onmessage` from the
+ * server's `stream_item` frames. Mirrors a Tauri `ipc::Channel`'s shape so streaming call sites are
+ * transport-agnostic. Created via {@link RemoteTransport.createChannel} (or the seam's `createChannel`).
+ */
+export class RemoteChannel<T = unknown> implements StreamChannel<T> {
+  onmessage: ((message: T) => void) | null = null;
+}
+
 /** An `Error` that keeps the contract error code + retryable flag so call sites can branch on them. */
 export class RemoteCallError extends Error {
   readonly code: string;
@@ -70,6 +80,7 @@ export class RemoteTransport implements Transport {
   private handshaked = false;
   private nextId = 1;
   private readonly pending = new Map<number, Pending>();
+  private readonly streams = new Map<number, RemoteChannel<unknown>>();
 
   constructor(
     url: string,
@@ -138,11 +149,31 @@ export class RemoteTransport implements Transport {
 
     const id = env.id;
     if (typeof id !== "number") return;
+
+    // A streamed batch: forward it to the call's channel and keep the request open (no resolve yet). The
+    // envelope carries the item's fields flat next to `type` (internally-tagged `StreamItem`); strip the
+    // tag to recover the item, and wrap it as a one-element batch to match the Tauri `Channel` shape a
+    // streaming call site expects (its `onmessage` takes a batch array).
+    if (msg.type === "stream_item") {
+      const ch = this.streams.get(id);
+      if (ch?.onmessage) {
+        const { type: _t, ...item } = msg;
+        ch.onmessage([item]);
+      }
+      return;
+    }
+
     const p = this.pending.get(id);
     if (!p) return;
     this.pending.delete(id);
+    this.streams.delete(id);
 
-    if (msg.type === "response") {
+    if (msg.type === "stream_end") {
+      // The stream completed cleanly; resolve the call with the producer's terminal value (stats/summary).
+      p.resolve(msg.result);
+    } else if (msg.type === "response") {
+      // A Response (instead of stream_end) on a streaming call is a denial/handler error; on a unary call
+      // it's the reply.
       const result = msg.result as { Ok?: unknown; Err?: RemoteError } | undefined;
       if (result && "Ok" in result) {
         p.resolve(result.Ok);
@@ -159,24 +190,47 @@ export class RemoteTransport implements Transport {
   private failAll(err: Error): void {
     for (const p of this.pending.values()) p.reject(err);
     this.pending.clear();
+    this.streams.clear();
     this.ready = null;
     this.handshaked = false;
     this.socket = null;
   }
 
-  /** Same shape as Tauri's `invoke`: send a `request` and resolve with its `response` result. */
+  /** A {@link RemoteChannel} the transport routes `stream_item` frames into (CPE-819). */
+  createChannel<T = unknown>(): StreamChannel<T> {
+    return new RemoteChannel<T>();
+  }
+
+  /**
+   * Same shape as Tauri's `invoke`: send a `request` and resolve with its reply. If an arg is a
+   * {@link RemoteChannel} (a streaming call), it's registered against the request id and fed from the
+   * server's `stream_item` frames; the promise then resolves with the terminal `stream_end` value (the
+   * stats a local `*_stream` command returns). The channel itself is stripped from the wire params — the
+   * server streams by protocol, not by a serialized channel handle.
+   */
   async invoke<T = unknown>(cmd: string, args?: Record<string, unknown>): Promise<T> {
     await this.connect();
     const socket = this.socket;
     if (!socket) throw new Error("remote transport: not connected");
     const id = this.nextId++;
+
+    let channel: RemoteChannel<unknown> | undefined;
+    const params: Record<string, unknown> = {};
+    if (args) {
+      for (const [k, v] of Object.entries(args)) {
+        if (v instanceof RemoteChannel) channel = v;
+        else params[k] = v;
+      }
+    }
+
     return new Promise<T>((resolve, reject) => {
       this.pending.set(id, { resolve: resolve as (v: unknown) => void, reject });
+      if (channel) this.streams.set(id, channel);
       socket.send(
         JSON.stringify({
           schema_version: SCHEMA_VERSION,
           id,
-          message: { type: "request", method: cmd, params: args ?? {} },
+          message: { type: "request", method: cmd, params },
         }),
       );
     });
