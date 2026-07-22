@@ -5,7 +5,7 @@
 
 use std::path::Path;
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use crate::fsutil::{sha256_file, to_epoch_ms};
 
@@ -20,7 +20,7 @@ pub fn hash_file(path: &str) -> Result<String, String> {
 
 /// A file's checksum baseline entry (CPE-791) — matches the frontend `ChecksumEntry` (CPE-790).
 /// `modified` is epoch-ms.
-#[derive(Serialize)]
+#[derive(Serialize, Deserialize)]
 pub struct ChecksumEntry {
     path: String,
     sha256: String,
@@ -63,10 +63,72 @@ fn checksum_walk(dir: &Path, out: &mut Vec<ChecksumEntry>) {
     }
 }
 
+/// Paths grouped by how a fresh scan changed relative to a baseline (CPE-870, epic CPE-737). Mirrors the
+/// frontend `verifyManifest` (CPE-790): hash + mtime both moved → intended `edited`; hash moved but mtime
+/// did NOT → silent `corrupted` (bitrot); baseline-only → `missing`; scan-only → `new`.
+#[derive(Serialize, Default)]
+pub struct IntegrityReport {
+    pub intact: Vec<String>,
+    pub edited: Vec<String>,
+    pub corrupted: Vec<String>,
+    pub missing: Vec<String>,
+    pub new: Vec<String>,
+}
+
+/// Classify a fresh `current` scan against `baseline`, matched by path. Pure — the same heuristic as the
+/// frontend model, so verification can run headlessly and ship only the (small) report instead of the whole
+/// manifest across the IPC boundary.
+pub fn verify_manifest(baseline: &[ChecksumEntry], current: &[ChecksumEntry]) -> IntegrityReport {
+    use std::collections::{HashMap, HashSet};
+    let cur: HashMap<&str, &ChecksumEntry> = current.iter().map(|e| (e.path.as_str(), e)).collect();
+    let base_paths: HashSet<&str> = baseline.iter().map(|e| e.path.as_str()).collect();
+    let mut report = IntegrityReport::default();
+    for b in baseline {
+        match cur.get(b.path.as_str()) {
+            None => report.missing.push(b.path.clone()),
+            Some(c) if c.sha256 == b.sha256 => report.intact.push(b.path.clone()),
+            Some(c) if c.modified != b.modified => report.edited.push(b.path.clone()),
+            Some(_) => report.corrupted.push(b.path.clone()),
+        }
+    }
+    for c in current {
+        if !base_paths.contains(c.path.as_str()) {
+            report.new.push(c.path.clone());
+        }
+    }
+    report
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::fs;
+
+    fn entry(path: &str, sha: &str, modified: Option<u64>) -> ChecksumEntry {
+        ChecksumEntry { path: path.into(), sha256: sha.into(), size: 0, modified }
+    }
+
+    #[test]
+    fn verify_manifest_classifies_by_the_bitrot_heuristic() {
+        let baseline = vec![
+            entry("a", "h1", Some(10)), // unchanged
+            entry("b", "h2", Some(20)), // edited: hash + mtime both move
+            entry("c", "h3", Some(30)), // corrupted: hash moves, mtime does NOT
+            entry("d", "h4", Some(40)), // missing from the new scan
+        ];
+        let current = vec![
+            entry("a", "h1", Some(10)),
+            entry("b", "h2b", Some(21)),
+            entry("c", "h3b", Some(30)),
+            entry("e", "h5", Some(50)), // new
+        ];
+        let r = verify_manifest(&baseline, &current);
+        assert_eq!(r.intact, ["a"]);
+        assert_eq!(r.edited, ["b"]);
+        assert_eq!(r.corrupted, ["c"]);
+        assert_eq!(r.missing, ["d"]);
+        assert_eq!(r.new, ["e"]);
+    }
 
     fn scratch(tag: &str) -> std::path::PathBuf {
         use std::sync::atomic::{AtomicU64, Ordering};
