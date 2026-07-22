@@ -268,10 +268,12 @@ dependencies = [
 name = "cpe-net"
 version = "0.1.0"
 dependencies = [
+ "base64",
  "cpe-contract",
  "cpe-security",
  "cpe-server",
  "serde_json",
+ "sha1",
  "tempfile",
 ]
 
