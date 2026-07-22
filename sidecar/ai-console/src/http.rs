@@ -261,6 +261,11 @@ pub fn ws_write_frame(w: &mut impl Write, opcode: u8, payload: &[u8]) -> io::Res
     w.flush()
 }
 
+/// Largest inbound WebSocket payload we accept in one frame. A terminal only carries keystrokes,
+/// resizes, and pastes, so this is generous; the point is that an attacker-declared 64-bit length can't
+/// drive an unbounded `vec![0u8; len]` that aborts the process on allocation failure.
+pub const MAX_WS_PAYLOAD: usize = 64 * 1024 * 1024;
+
 /// One decoded inbound frame.
 pub struct WsFrame {
     pub fin: bool,
@@ -290,6 +295,14 @@ pub fn ws_read_frame(r: &mut impl Read) -> io::Result<Option<WsFrame>> {
             return Ok(None);
         }
         len = u64::from_be_bytes(e) as usize;
+    }
+    // Reject an over-large declared length BEFORE allocating: an attacker-controlled 64-bit length
+    // would otherwise drive a giant `vec![0u8; len]` whose allocation failure aborts the whole sidecar.
+    if len > MAX_WS_PAYLOAD {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "websocket frame exceeds maximum payload size",
+        ));
     }
     let mut mask = [0u8; 4];
     if masked && fill(r, &mut mask)? {
@@ -437,6 +450,20 @@ mod tests {
         assert!(f.fin);
         assert_eq!(f.opcode, ws_op::TEXT);
         assert_eq!(f.payload, payload);
+    }
+
+    #[test]
+    fn ws_read_frame_rejects_an_over_large_declared_length() {
+        // A 64-bit length header declaring a huge payload must be refused BEFORE allocating, so a
+        // single crafted frame can't drive an unbounded allocation that aborts the sidecar. We only
+        // supply the 10-byte header (opcode + 127 + 8-byte length) — a real giant body never arrives.
+        let mut frame = vec![0x80 | ws_op::BINARY, 127];
+        frame.extend_from_slice(&(u64::MAX).to_be_bytes()); // absurd declared length
+        let mut cur = std::io::Cursor::new(frame);
+        match ws_read_frame(&mut cur) {
+            Err(e) => assert_eq!(e.kind(), std::io::ErrorKind::InvalidData),
+            Ok(_) => panic!("an over-large frame length must be rejected, not allocated"),
+        }
     }
 
     #[test]
