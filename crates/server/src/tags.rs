@@ -273,6 +273,18 @@ mod tests {
     }
 
     #[test]
+    fn tag_store_rename_tag_self_rename_is_noop_and_merges_into_existing() {
+        let mut s = TagStore::new();
+        // Renaming a tag to itself must leave the path untouched (not drop or duplicate it).
+        tag_store_set(&mut s, "/a", vec!["work".into(), "urgent".into()], "".into());
+        tag_store_rename_tag(&mut s, "work", "work");
+        assert_eq!(s["/a"].tags, vec!["urgent".to_string(), "work".to_string()], "self-rename is a no-op");
+        // Renaming into a tag the path already carries collapses to one (no duplicate).
+        tag_store_rename_tag(&mut s, "urgent", "work");
+        assert_eq!(s["/a"].tags, vec!["work".to_string()], "merge into existing tag de-dupes");
+    }
+
+    #[test]
     fn tag_store_counts_most_used_first() {
         let mut s = TagStore::new();
         tag_store_set(&mut s, "/a", vec!["work".into(), "urgent".into()], "".into());
@@ -307,6 +319,40 @@ mod tests {
         retag(&ctx, "/p", "/q").unwrap();
         let s = load(&ctx).unwrap();
         assert!(s.contains_key("/q") && !s.contains_key("/p"));
+        let _ = fs::remove_dir_all(&base);
+    }
+
+    // A malformed import must fail *without* touching the persisted store — the parse happens before
+    // any read/write, so a bad file can never clobber the user's tags. Locks that ordering in.
+    #[test]
+    fn import_rejects_malformed_json_and_leaves_the_store_intact() {
+        let base = scratch("tags_import_bad");
+        let ctx = HeadlessCtx::new(&base);
+        set(&ctx, "/keep", vec!["mine".into()], "red".into()).unwrap();
+
+        let err = import(&ctx, "{ this is not json ]").unwrap_err();
+        assert!(err.contains("invalid tags file"), "surfaces a clear parse error, got: {err}");
+        // The pre-existing entry is still exactly as it was.
+        let after = load(&ctx).unwrap();
+        assert_eq!(after["/keep"].tags, vec!["mine".to_string()]);
+        assert_eq!(after["/keep"].label, "red");
+        let _ = fs::remove_dir_all(&base);
+    }
+
+    // A valid import unions into the current store (non-destructive) and persists the merge.
+    #[test]
+    fn import_merges_valid_json_into_the_current_store() {
+        let base = scratch("tags_import_ok");
+        let ctx = HeadlessCtx::new(&base);
+        set(&ctx, "/a", vec!["keep".into()], "red".into()).unwrap();
+
+        let json = r#"{"/a":{"tags":["added"],"label":"blue"},"/b":{"tags":["new"],"label":""}}"#;
+        import(&ctx, json).unwrap();
+
+        let s = load(&ctx).unwrap();
+        assert_eq!(s["/a"].tags, vec!["added".to_string(), "keep".to_string()], "existing tag kept, import unioned");
+        assert_eq!(s["/a"].label, "blue", "non-empty imported label wins");
+        assert_eq!(s["/b"].tags, vec!["new".to_string()]);
         let _ = fs::remove_dir_all(&base);
     }
 }
