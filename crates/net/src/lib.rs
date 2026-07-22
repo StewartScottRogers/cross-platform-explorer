@@ -301,6 +301,41 @@ mod tests {
     }
 
     #[test]
+    fn name_search_stream_streams_matches_over_the_wire() {
+        // The builtin `name_search_stream` producer streams filename matches under a root as found.
+        let dir = scratch("searchstream");
+        std::fs::write(dir.join("report_q1.txt"), b"x").unwrap();
+        std::fs::write(dir.join("report_q2.txt"), b"x").unwrap();
+        std::fs::write(dir.join("notes.md"), b"x").unwrap();
+
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let rt = Arc::new(
+            ServerRuntime::new(
+                Dispatcher::with_builtins(),
+                SecurityChain::local(),
+                Arc::new(HeadlessCtx::new(scratch("searchstreambase"))),
+            )
+            .with_builtin_streams(),
+        );
+        std::thread::spawn(move || {
+            let _ = rt.serve(listener);
+        });
+
+        let mut client = Client::connect(addr).unwrap();
+        let items = client
+            .call_stream(
+                "name_search_stream",
+                serde_json::json!({ "path": dir.to_string_lossy(), "query": "report" }),
+            )
+            .expect("name_search_stream should stream");
+        let names: Vec<String> =
+            items.iter().map(|e| e["name"].as_str().unwrap().to_string()).collect();
+        assert_eq!(names.iter().filter(|n| n.starts_with("report_")).count(), 2, "got {names:?}");
+        assert!(!names.iter().any(|n| n == "notes.md"), "non-match must not stream: {names:?}");
+    }
+
+    #[test]
     fn a_streaming_call_is_security_guarded_over_the_wire() {
         // The same stream method under a default-deny boundary yields no items — the denial arrives as
         // the stream's error, proving streaming enforces the security chain exactly like a unary call.
