@@ -241,9 +241,14 @@ mod tests {
                 chain,
                 Arc::new(HeadlessCtx::new(scratch("streambase"))),
             )
-            .with_stream_handler("count_stream", |_ctx, params| {
+            .with_stream_handler("count_stream", |_ctx, params, emit| {
                 let n = params.get("n").and_then(|v| v.as_u64()).unwrap_or(0);
-                Ok((1..=n).map(|i| serde_json::json!({ "i": i })).collect())
+                for i in 1..=n {
+                    if emit(serde_json::json!({ "i": i })).is_break() {
+                        break;
+                    }
+                }
+                Ok(())
             }),
         );
         std::thread::spawn(move || {
