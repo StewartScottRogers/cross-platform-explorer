@@ -2,7 +2,7 @@
 id: CPE-714
 title: "EPIC: Terminal dock — embedded terminal panel"
 type: Task
-status: Proposed
+status: In Progress
 priority: Medium
 component: Multiple
 tags: [epic]
@@ -35,3 +35,8 @@ embedded.
 - A terminal pane opens rooted at the current folder and can follow navigation.
 - Shell selection works per OS; input/output/resize behave like a normal terminal.
 - With the panel closed there is no PTY or background cost; core explorer unchanged.
+
+## Work Log
+2026-07-23 (dayshift) — **Activated.** First slice: **CPE-947** — `terminal_tabs::TerminalDock`: the pure
+open/close/activate/rename tab model with active-tab fixup. Remaining: PTY/shell spawning, xterm rendering,
+and the dock layout.
