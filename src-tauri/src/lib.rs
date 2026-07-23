@@ -277,6 +277,42 @@ fn board_note_impl(root: String, id: String, note: String) -> Result<(), String>
     std::fs::write(&path, ticket_board::append_finding(&md, &note)).map_err(|e| e.to_string())
 }
 
+/// Full detail for one Agent Board card (CPE-959): its ordered frontmatter fields + markdown body + the
+/// folder under `Tickets/` it lives in — for the card-detail popup. Works for tickets and epics alike.
+#[derive(serde::Serialize)]
+#[cfg_attr(feature = "specta-bindings", derive(specta::Type))]
+struct CardDetail {
+    id: String,
+    /// Folder under `Tickets/` (e.g. "Backlog", "Epics", "Done/2026/Q3/July/Week-30").
+    location: String,
+    /// Ordered frontmatter `(key, value)` pairs.
+    fields: Vec<(String, String)>,
+    /// The markdown body after the frontmatter.
+    body: String,
+}
+
+/// Read one card's full detail by id, from anywhere under `Tickets/` (CPE-959). `None` if not found.
+#[tauri::command]
+#[cfg_attr(feature = "specta-bindings", specta::specta)]
+async fn board_card_detail(root: String, id: String) -> Option<CardDetail> {
+    tauri::async_runtime::spawn_blocking(move || board_card_detail_impl(root, id))
+        .await
+        .unwrap_or(None)
+}
+
+fn board_card_detail_impl(root: String, id: String) -> Option<CardDetail> {
+    let path = find_ticket_file(&root, &id)?;
+    let md = std::fs::read_to_string(&path).ok()?;
+    let (fields, body) = ticket_board::detail_from(&md);
+    let tickets = std::path::Path::new(&root).join("Tickets");
+    let location = path
+        .parent()
+        .and_then(|par| par.strip_prefix(&tickets).ok())
+        .map(|rel| rel.to_string_lossy().replace('\\', "/"))
+        .unwrap_or_default();
+    Some(CardDetail { id, location, fields, body })
+}
+
 /// The workbench's view of a folder (CPE-526/535): whether it's a git repo, the branch, and the diff.
 #[derive(serde::Serialize)]
 #[cfg_attr(feature = "specta-bindings", derive(specta::Type))]
@@ -5490,6 +5526,7 @@ pub fn run() {
             board_move,
             board_review,
             board_note,
+            board_card_detail,
             workbench_diff,
             home_dir,
             parent_dir,
@@ -5868,6 +5905,7 @@ pub fn export_bindings(out: &std::path::Path) -> Result<(), String> {
         board_move,
         board_review,
         board_note,
+        board_card_detail,
         workbench_diff,
         home_dir,
         parent_dir,

@@ -85,6 +85,12 @@ async boardNote(root: string, id: string, note: string) : Promise<Result<null, s
 }
 },
 /**
+ * Read one card's full detail by id, from anywhere under `Tickets/` (CPE-959). `None` if not found.
+ */
+async boardCardDetail(root: string, id: string) : Promise<CardDetail | null> {
+    return await TAURI_INVOKE("board_card_detail", { root, id });
+},
+/**
  * `git diff` (working tree vs HEAD) in `root` for the integrated workbench, with friendly edge cases
  * (CPE-535): a non-repo folder is a normal `is_repo:false` result (not an error), git-not-installed is
  * a distinct error, and an empty `root` is refused. An optional `path` limits it to one file. Read-only.
@@ -1453,6 +1459,23 @@ export type Card = { id: string; title: string; ticket_type: string; priority: s
  * The column this card is in (its folder).
  */
 column: string }
+/**
+ * Full detail for one Agent Board card (CPE-959): its ordered frontmatter fields + markdown body + the
+ * folder under `Tickets/` it lives in — for the card-detail popup. Works for tickets and epics alike.
+ */
+export type CardDetail = { id: string; 
+/**
+ * Folder under `Tickets/` (e.g. "Backlog", "Epics", "Done/2026/Q3/July/Week-30").
+ */
+location: string; 
+/**
+ * Ordered frontmatter `(key, value)` pairs.
+ */
+fields: ([string, string])[]; 
+/**
+ * The markdown body after the frontmatter.
+ */
+body: string }
 /**
  * A file's checksum baseline entry (CPE-791) — matches the frontend `ChecksumEntry` (CPE-790).
  * `modified` is epoch-ms.
