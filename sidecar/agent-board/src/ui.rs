@@ -150,6 +150,7 @@ pub fn board_html() -> String {
   .card .id { font-weight: 600; }
   .card .title { color: GrayText; }
   .empty { color: GrayText; text-align: center; padding: 20px 0; }
+  button { white-space: nowrap; } /* button labels stay on one line (CPE-928) */
   .archtoggle { margin-top: 8px; background: transparent; border: 1px dashed GrayText; color: GrayText;
                 border-radius: 6px; padding: 4px 8px; cursor: pointer; font: inherit; text-align: left; }
   .archtoggle:hover { color: CanvasText; }

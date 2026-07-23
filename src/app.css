@@ -57,6 +57,9 @@ button {
   border: none;
   cursor: pointer;
   border-radius: var(--radius);
+  /* Button labels stay on one line — never wrap/clip mid-word (CPE-928). A button that needs to wrap
+     must opt back in explicitly with `white-space: normal`. */
+  white-space: nowrap;
 }
 button:disabled { opacity: 0.38; cursor: default; }
 button:not(:disabled):hover { background: var(--hover); }
