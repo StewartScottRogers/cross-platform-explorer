@@ -440,6 +440,12 @@
     docsSlug = section ? docSlugForSection(section) : null;
     showDocs = true;
   }
+  /** Open Documents on a specific doc slug — for surfaces that aren't a `Section` (e.g. the search boxes
+   * linking to the search-options page, CPE-921). */
+  function openDocsSlug(slug: string) {
+    docsSlug = slug;
+    showDocs = true;
+  }
   /** The section the user is currently in, for F1 / the global Documents open (CPE-596). */
   function currentSection(): Section {
     if (showWorkbench) return "workbench";
@@ -3439,6 +3445,7 @@
 {#if contentSearchOpen}
   <ContentSearchDialog
     root={currentPath}
+    on:help={() => openDocsSlug("12-search")}
     on:navigate={(e) => { contentSearchOpen = false; revealFileInApp(e.detail); }}
     on:close={() => (contentSearchOpen = false)}
   />
@@ -3448,6 +3455,7 @@
   <FileNameSearchDialog
     root={currentPath}
     initialQuery={deepSearchQuery}
+    on:help={() => openDocsSlug("12-search")}
     on:navigate={(e) => { fileSearchOpen = false; revealFileInApp(e.detail); }}
     on:close={() => { fileSearchOpen = false; deepSearchQuery = ""; }}
   />
