@@ -867,9 +867,15 @@
     resizable: true,
     center: true,
   };
+  // The out-of-process sidecar board (CPE-850/853) is a barer reimplementation — a plain text header,
+  // columns + drag, but NO toolbar and NO Board⇄Epics kanban toggle. Since CPE-920 made its binary
+  // reliably bundled, preferring it hid the full-featured board (missing top / can't select Epics).
+  // So the Agent Board now opens the in-process BoardView (toolbar + CPE-922 epics kanban + filter +
+  // archive). Flip this to re-enable the sidecar board once it reaches feature parity (CPE-926).
+  const PREFER_SIDECAR_BOARD = false;
   async function openAgentBoard() {
-    // Out-of-process sidecar path (preferred when the platform is available).
-    if (aiConsoleAvailable) {
+    // Out-of-process sidecar path — disabled until the sidecar board reaches parity (CPE-926).
+    if (PREFER_SIDECAR_BOARD && aiConsoleAvailable) {
       const running = await WebviewWindow.getByLabel(AGENT_BOARD_SIDECAR_LABEL);
       if (running) { await running.setFocus(); return; }
       const base = await startAgentBoard(isHome ? undefined : currentPath);
