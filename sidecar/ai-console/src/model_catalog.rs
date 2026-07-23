@@ -21,6 +21,21 @@ pub struct Pricing {
     pub completion: Option<f64>,
 }
 
+impl Pricing {
+    /// Estimate the USD cost of a run from its token counts + this per-token pricing (CPE-731): the cost
+    /// dashboard shows this when an agent reports tokens but not its own `cost_usd`. `prompt`/`completion`
+    /// are per-*token* prices (as normalized from the reseller manifest). Returns `None` if **both** prices
+    /// are missing (nothing to estimate); a missing side counts as 0 so a partial price still estimates.
+    pub fn estimate_cost(&self, input_tokens: u64, output_tokens: u64) -> Option<f64> {
+        if self.prompt.is_none() && self.completion.is_none() {
+            return None;
+        }
+        let input = input_tokens as f64 * self.prompt.unwrap_or(0.0);
+        let output = output_tokens as f64 * self.completion.unwrap_or(0.0);
+        Some(input + output)
+    }
+}
+
 /// One selectable model, normalized across resellers. This is what the picker renders and the launch
 /// flow consumes.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -323,6 +338,23 @@ pub fn parse_github_models(json: &str) -> Vec<Model> {
 mod tests {
     use super::*;
     use std::io::Write;
+
+    #[test]
+    fn pricing_estimate_cost() {
+        // $3 / 1M prompt tokens, $15 / 1M completion tokens → per-token prices.
+        let p = Pricing { prompt: Some(3.0 / 1_000_000.0), completion: Some(15.0 / 1_000_000.0) };
+        let cost = p.estimate_cost(1_000_000, 500_000).unwrap();
+        assert!((cost - (3.0 + 7.5)).abs() < 1e-9, "got {cost}");
+
+        // A partial price still estimates (the missing side is 0).
+        let prompt_only = Pricing { prompt: Some(2.0 / 1_000_000.0), completion: None };
+        assert!((prompt_only.estimate_cost(1_000_000, 999).unwrap() - 2.0).abs() < 1e-9);
+
+        // No prices at all → nothing to estimate.
+        assert_eq!(Pricing::default().estimate_cost(100, 100), None);
+        // Zero tokens with a price → $0, not None.
+        assert_eq!(p.estimate_cost(0, 0), Some(0.0));
+    }
 
     fn write_manifest(dir: &Path, name: &str, json: &str) {
         let mut f = std::fs::File::create(dir.join(name)).unwrap();
