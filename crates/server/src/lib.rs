@@ -77,6 +77,7 @@ pub mod geometry;
 
 /// Activity timeline bucketing (scrubbable replay view) over recorded audit events (CPE-916).
 pub mod activity_timeline;
+pub mod batch_media;
 pub mod spotlight;
 pub mod metadata_column;
 pub mod restore_plan;
