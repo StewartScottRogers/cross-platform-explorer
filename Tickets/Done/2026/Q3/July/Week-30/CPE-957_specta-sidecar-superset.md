@@ -4,9 +4,10 @@ title: tauri-specta superset codegen — type the sidecar-platform commands too
 type: feature
 component: Multiple
 priority: low
-status: Open
+status: Done
 tags: ready
 created: 2026-07-23
+closed: 2026-07-23
 epic: CPE-810
 estimate: 2-3h
 ---
@@ -33,6 +34,20 @@ rejects `#[cfg]` entries, so the whole export must be dual-feature). Regenerate 
 `cargo run --bin export_bindings --features "specta-bindings sidecar-platform"`.
 
 ## Acceptance Criteria
-- [ ] `specta::Type` (feature-gated) on the sidecar command types across `sidecar-contract`/`repos`/`sidecar-host`.
-- [ ] `export_bindings` builds with both features and emits a superset `bindings.gen.ts` incl. the sidecar commands.
-- [ ] Default builds/`cargo test` still never compile specta (all OFF by default); clippy clean; `npm run check` 0/0.
+- [x] `specta::Type` (feature-gated) on the sidecar command types: `sidecar-contract` (optional `specta`
+      feature w/ `derive`+`serde_json`; bulk-derived, excluding the wire-envelope chain
+      `Request`/`Response`/`Message`/`Envelope` — `Response.result: Result<Value,_>` isn't representable and
+      they aren't command types) + `repos` (optional `specta` feature, pulls `sidecar-contract/specta`) +
+      the app modules (`forge_egress.rs` `RepoEntry` etc.). No `sidecar-host` changes were needed.
+- [x] `export_bindings` gated on **both** `specta-bindings`+`sidecar-platform` (bin `required-features`);
+      app `specta-bindings` enables the crate specta via weak-deps (`sidecar-contract?/specta`,
+      `repos?/specta`); sidecar commands added unconditionally to `collect_commands!`. Superset
+      `bindings.gen.ts` now types **125 commands** (92 non-sidecar + 33 sidecar).
+- [x] Default builds/`cargo test` never compile specta (all OFF by default): default + `sidecar-platform`
+      builds clean; default `cargo test` 67 pass + loads clean; clippy clean default + `sidecar-platform` +
+      dual-feature bin; `npm run check` 0/0.
+
+## Resolution
+Superset shipped. Regenerate with `cargo run --bin export_bindings --features "specta-bindings
+sidecar-platform"`. The sidecar crates each carry an OFF-by-default `specta` feature, so normal sidecar
+builds are byte-for-byte unchanged. Completes the CPE-953 arc: the whole 125-command surface is now typed.

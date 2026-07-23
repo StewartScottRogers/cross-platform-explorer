@@ -15,7 +15,7 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 # build/`cargo test` never compiles it (nor the specta deps it links).
 [[bin]]
 name = "export_bindings"
-required-features = ["specta-bindings"]
+required-features = ["specta-bindings", "sidecar-platform"]
 
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
@@ -124,4 +124,4 @@ sidecar-platform = ["dep:sidecar-host", "dep:sidecar-contract", "dep:ureq", "dep
 # never compiles specta/tauri-specta — keeping the default lean AND avoiding the Windows loader failure
 # they trigger in a libtest binary. Enabled only for `cargo run --bin export_bindings --features
 # specta-bindings`, which regenerates `src/lib/bindings.gen.ts`.
-specta-bindings = ["dep:specta", "dep:specta-typescript", "dep:tauri-specta", "cpe-server/specta"]
+specta-bindings = ["dep:specta", "dep:specta-typescript", "dep:tauri-specta", "cpe-server/specta", "sidecar-contract?/specta", "repos?/specta"]

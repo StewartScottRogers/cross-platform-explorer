@@ -9,6 +9,7 @@ use serde::Serialize;
 
 /// One entry in a remote repo listing — a file or a folder, provider-agnostic.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[cfg_attr(feature = "specta", derive(specta::Type))]
 pub struct RemoteEntry {
     pub name: String,
     /// Path within the repo (e.g. `src/lib.rs`).

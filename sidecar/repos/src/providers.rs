@@ -16,6 +16,7 @@ pub const PROVIDER_SCHEMA_VERSION: u16 = 1;
 
 /// A declarative description of a forge / VCS provider.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "specta", derive(specta::Type))]
 pub struct ProviderManifest {
     pub schema_version: u16,
     /// Stable id, e.g. `"github"`.

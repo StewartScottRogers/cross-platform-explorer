@@ -41,6 +41,7 @@ pub const AUTH_TOKEN_ENV: &str = "CPE_SIDECAR_TOKEN";
 /// Semantic version of the wire contract. Same `major` = compatible; a higher
 /// `minor` only adds messages a peer may ignore.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "specta", derive(specta::Type))]
 pub struct ContractVersion {
     pub major: u16,
     pub minor: u16,
@@ -60,6 +61,7 @@ impl ContractVersion {
 
 /// Why a handshake could not agree on a version.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "specta", derive(specta::Type))]
 pub enum VersionError {
     /// Different majors can never interoperate.
     MajorMismatch {
@@ -86,6 +88,7 @@ pub fn negotiate(
 
 /// A brokered permission a sidecar may request. No capability = no access.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[cfg_attr(feature = "specta", derive(specta::Type))]
 #[serde(rename_all = "snake_case")]
 pub enum Capability {
     /// Read the explorer's current folder/repo/selection (CPE-267).
@@ -106,6 +109,7 @@ pub enum Capability {
 
 /// The supervisor's view of a sidecar's lifecycle.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "specta", derive(specta::Type))]
 #[serde(rename_all = "snake_case")]
 pub enum Lifecycle {
     Starting,
@@ -122,6 +126,7 @@ pub enum Lifecycle {
 /// Stable error categories carried across the boundary so failures propagate
 /// predictably instead of as opaque strings.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "specta", derive(specta::Type))]
 #[serde(rename_all = "snake_case")]
 pub enum ErrorCode {
     Handshake,
@@ -138,6 +143,7 @@ pub enum ErrorCode {
 /// A structured error with a stable code, a human message, and whether retrying may
 /// help. Never carries secret values.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "specta", derive(specta::Type))]
 pub struct ContractError {
     pub code: ErrorCode,
     pub message: String,
@@ -161,6 +167,7 @@ impl ContractError {
 /// sidecar → host: the opening message declaring identity, contract version, and the
 /// capabilities it wants.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "specta", derive(specta::Type))]
 pub struct Hello {
     pub sidecar_id: String,
     pub sidecar_version: String,
@@ -176,6 +183,7 @@ pub struct Hello {
 /// host → sidecar: handshake accepted, with the negotiated version and the subset of
 /// capabilities actually granted (after consent, CPE-296).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "specta", derive(specta::Type))]
 pub struct Welcome {
     pub negotiated_version: ContractVersion,
     pub capabilities_granted: Vec<Capability>,
@@ -183,6 +191,7 @@ pub struct Welcome {
 
 /// Why the host refused to mount a sidecar.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "specta", derive(specta::Type))]
 #[serde(rename_all = "snake_case")]
 pub enum RejectCode {
     IncompatibleVersion,
@@ -192,6 +201,7 @@ pub enum RejectCode {
 
 /// host → sidecar: handshake refused.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "specta", derive(specta::Type))]
 pub struct Rejected {
     pub code: RejectCode,
     pub reason: String,
@@ -204,6 +214,7 @@ pub struct Rejected {
 /// A method call over a granted capability, e.g. `secrets.get`. Params/results are
 /// free-form JSON so capability providers evolve without changing this crate.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "specta", derive(specta::Type))]
 pub struct Request {
     pub method: String,
     pub params: serde_json::Value,
@@ -217,6 +228,7 @@ pub struct Response {
 
 /// Severity for a [`Event::Notify`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "specta", derive(specta::Type))]
 #[serde(rename_all = "snake_case")]
 pub enum Level {
     Info,
@@ -226,6 +238,7 @@ pub enum Level {
 
 /// A fire-and-forget message a sidecar emits to the host (CPE-270).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "specta", derive(specta::Type))]
 #[serde(tag = "event", rename_all = "snake_case")]
 pub enum Event {
     Notify { level: Level, message: String },
@@ -235,6 +248,7 @@ pub enum Event {
 
 /// A lifecycle signal the host sends *to* a sidecar (CPE-270). Added in contract 1.1.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "specta", derive(specta::Type))]
 #[serde(tag = "signal", rename_all = "snake_case")]
 pub enum HostSignal {
     /// The sidecar's pane gained focus.
