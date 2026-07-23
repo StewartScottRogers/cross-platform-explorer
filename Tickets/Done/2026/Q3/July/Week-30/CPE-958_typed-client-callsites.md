@@ -4,9 +4,10 @@ title: Migrate core call sites to the typed client (CPE-953 GUI-verify)
 type: feature
 component: Frontend
 priority: medium
-status: Doing
+status: Done
 tags: ready
 created: 2026-07-23
+closed: 2026-07-23
 epic: CPE-810
 ---
 
@@ -23,8 +24,15 @@ navigation and the Agent Board exercise it end-to-end against the live backend, 
       → "Can't find" notice preserved).
 - [x] `BoardView.load()` uses `commands.boardCards()` (returns `Card[]` directly).
 - [x] `npm run check` 0/0; vitest **929 pass** (BoardView test still green); default `cargo test` + clippy clean.
-- [ ] GUI-verify in the installed 0.57.23: typing a valid/invalid path navigates / shows the notice; the
-      Agent Board lists cards — both through the typed client. *(the attended step, done together)*
+- [x] GUI-verify in the installed 0.57.23: typing a valid/invalid path navigates / shows the notice; the
+      Agent Board lists cards — both through the typed client. **Confirmed by the user (2026-07-23): "client
+      is verified end-to-end against the live backend."**
+
+## Resolution
+The generated typed client (`bindings.gen.ts`) is verified end-to-end: `commands.listDir()` (folder
+navigation, success + error paths) and `commands.boardCards()` (Agent Board) run against the real Tauri
+backend in the installed 0.57.23 build, user-confirmed. This closes the CPE-953/957 GUI-verify tail — the
+whole 125-command typed surface is landed AND proven live.
 
 ## Notes
 `commands.listDir(path)` returns `Result<DirEntry[], string>` (unwrap `.status`/`.data`/`.error`);
