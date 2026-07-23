@@ -2,7 +2,7 @@
 id: CPE-704
 title: "EPIC: Global quick-launch spotlight overlay"
 type: Task
-status: Proposed
+status: In Progress
 priority: Medium
 component: Multiple
 tags: [epic]
@@ -34,3 +34,8 @@ system-level tool, and it is the natural front-end for the instant index ([[CPE-
 - A global hotkey opens the overlay in well under a second, even with the main window hidden.
 - The overlay finds files/folders/actions and executes them (open, reveal, run action).
 - Disabling the feature unregisters the hotkey and adds no background cost.
+
+## Work Log
+2026-07-23 (dayshift) — **Activated.** First slice: **CPE-937** — `spotlight::fuzzy_score` + `rank`: the
+pure fuzzy-match/ranking core the overlay lists results with. Remaining: the system-wide hotkey, the
+lightweight overlay window, and feeding real files/folders/actions in.

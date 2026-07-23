@@ -19,6 +19,10 @@ pub use cpe_contract as contract;
 /// the domain logic (CPE-814).
 pub mod ctx;
 
+/// Scriptable-action / user-macro model: a named sequence of rename/move/tag/convert steps, its
+/// validation, and a filesystem-free expansion (`plan`) over a selection of inputs (CPE-938, epic CPE-739).
+pub mod action_macro;
+
 /// Location model + URI parser: classify a location as local vs. a remote scheme
 /// (`sftp`/`smb`/`webdav`/`s3`) broken into `{scheme,user,host,port,path}` (CPE-680).
 pub mod location;
@@ -74,6 +78,7 @@ pub mod geometry;
 /// Activity timeline bucketing (scrubbable replay view) over recorded audit events (CPE-916).
 pub mod activity_timeline;
 pub mod batch_media;
+pub mod spotlight;
 pub mod metadata_column;
 pub mod restore_plan;
 
@@ -147,6 +152,10 @@ pub mod data_browser;
 
 /// Image thumbnails — downscaled PNG generation + mtime-keyed disk cache (CPE-642/644).
 pub mod thumbnail;
+
+/// Thumbnail cache core — stable cache keys + LRU eviction (count + byte budgets) + request coalescing,
+/// the pure cache-management model the universal thumbnail pipeline sits on (CPE-939, epic CPE-718).
+pub mod thumb_cache;
 
 /// Image preview — TIFF/PSD → PNG data-URL transcode + dimensions/EXIF metadata (CPE-099/101/659).
 pub mod image_preview;
