@@ -2,7 +2,7 @@
 id: CPE-728
 title: "EPIC: Activity replay & scrub — a time machine for agent activity"
 type: Task
-status: Proposed
+status: In Progress
 priority: Medium
 component: Multiple
 tags: [epic]
@@ -35,3 +35,8 @@ powerful way to understand and review an agent's work, not just watch it live.
 - A transport bar scrubs the session's history and the folder view reflects state at any point.
 - Create/modify/move/delete/read replay in order with variable speed.
 - The full ordered event log persists beyond the transient timeline cap.
+
+## Work Log
+2026-07-22 (nightshift) — **Activated.** First slice: **CPE-916** — `activity_timeline::bucketize` +
+`summarize` over the existing `audit_journal::AuditEvent` stream (the scrub view's compute core). Remaining:
+the timeline/minimap UI, playback scrubber, and state-at-cursor reconstruction.
