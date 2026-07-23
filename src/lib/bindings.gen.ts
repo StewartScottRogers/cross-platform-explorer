@@ -75,6 +75,69 @@ async renameEntry(path: string, newName: string) : Promise<Result<string, string
  */
 async canRestoreFromTrash() : Promise<boolean> {
     return await TAURI_INVOKE("can_restore_from_trash");
+},
+/**
+ * List the immediate children of `path`.
+ * List a directory's entries. Model + the shared walker live in `cpe_server::listing` (CPE-815); this
+ * is a thin `spawn_blocking` dispatcher.
+ */
+async listDir(path: string) : Promise<Result<DirEntry[], string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("list_dir", { path }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * Detailed metadata for the Properties dialog. Model lives in `cpe_server::model` (CPE-815); this is a
+ * thin `spawn_blocking` dispatcher.
+ */
+async entryInfo(path: string) : Promise<Result<EntryInfo, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("entry_info", { path }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * Move entries to the OS Recycle Bin / Trash. Recoverable by the user.
+ */
+async deleteToTrash(paths: string[]) : Promise<OpResult[]> {
+    return await TAURI_INVOKE("delete_to_trash", { paths });
+},
+/**
+ * Permanently delete entries. Irreversible — the UI must confirm explicitly
+ * before ever calling this.
+ */
+async deletePermanent(paths: string[]) : Promise<OpResult[]> {
+    return await TAURI_INVOKE("delete_permanent", { paths });
+},
+/**
+ * Copy entries into `dest`, auto-renaming on collision.
+ */
+async copyEntries(paths: string[], dest: string) : Promise<OpResult[]> {
+    return await TAURI_INVOKE("copy_entries", { paths, dest });
+},
+/**
+ * Move entries into `dest`, auto-renaming on collision. Falls back to
+ * copy-then-delete when the move crosses a filesystem boundary (`fs::rename`
+ * fails across volumes, e.g. C: -> Z:).
+ */
+async moveEntries(paths: string[], dest: string) : Promise<OpResult[]> {
+    return await TAURI_INVOKE("move_entries", { paths, dest });
+},
+/**
+ * Move each `from` to an EXACT `to` path. Used by undo, which must restore an
+ * item to its original name — auto-renaming here would defeat the point (undo
+ * of "rename a -> b" must produce "a", not "a - Copy").
+ * 
+ * Refuses to overwrite: if `to` already exists, the undo fails loudly rather
+ * than clobbering whatever now occupies that name.
+ */
+async moveExact(pairs: ([string, string])[]) : Promise<OpResult[]> {
+    return await TAURI_INVOKE("move_exact", { pairs });
 }
 }
 
@@ -100,6 +163,33 @@ code: number | null;
  * True when either stream was truncated at the cap.
  */
 truncated: boolean }
+/**
+ * One entry in a directory listing. Fields serialize by name to match the frontend `DirEntry`.
+ */
+export type DirEntry = { name: string; path: string; is_dir: boolean; size: number; 
+/**
+ * Last-modified time as milliseconds since the Unix epoch. `None` when the platform or filesystem
+ * does not report one.
+ */
+modified: number | null; 
+/**
+ * Lowercased file extension without the dot ("png"), empty for directories and extensionless files.
+ */
+extension: string; 
+/**
+ * Hidden per the OS convention: the hidden attribute on Windows, a leading dot on POSIX.
+ */
+hidden: boolean }
+/**
+ * Detailed metadata for the Properties dialog.
+ */
+export type EntryInfo = { name: string; path: string; is_dir: boolean; size: number; modified: number | null; created: number | null; readonly: boolean; hidden: boolean }
+/**
+ * Per-item outcome of a bulk operation. Bulk file operations must NOT be all-or-nothing and must not
+ * abort on the first failure: if 9 of 10 files copy and one is locked, the user needs to know exactly
+ * which one failed.
+ */
+export type OpResult = { path: string; ok: boolean; error: string }
 
 /** tauri-specta globals **/
 
