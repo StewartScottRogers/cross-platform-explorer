@@ -123,6 +123,10 @@ pub mod tray_quick;
 /// Duplicate-file finder — size-then-hash two-pass scan (CPE-420).
 pub mod duplicates;
 
+/// Spotlight frecency — rank recently+frequently used items (count × recency-decay) for the overlay's
+/// default empty-query view (CPE-952, epic CPE-704). Pure + deterministic.
+pub mod spotlight_frecency;
+
 /// Filename search — substring/glob/brace-group matching + the shared streaming walker (CPE-603/697/666).
 pub mod name_search;
 
