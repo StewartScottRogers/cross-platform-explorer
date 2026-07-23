@@ -971,3 +971,30 @@ describe("Agent Deck launcher — busy/wait cursor (CPE-482)", () => {
     expect(w.document.body.classList.contains("busy")).toBe(false);
   });
 });
+
+describe("Agent Deck launcher — area '?' opens the regular Documents dialog (CPE-929)", () => {
+  it("swarm '?' emits open-docs for the swarms section instead of the inline panel", async () => {
+    const { w } = await mountLauncher();
+    const emit = vi.fn();
+    w.__TAURI__ = { event: { emit } };
+    w.document.getElementById("swarm-help").click();
+    expect(emit).toHaveBeenCalledWith("open-docs", { slug: "09-swarms" });
+    // The inline help overlay stays closed — it went to the real docs, not the panel.
+    expect(w.document.getElementById("help-overlay").hidden).toBe(true);
+  });
+
+  it("grid '?' emits open-docs for the agent-grid section", async () => {
+    const { w } = await mountLauncher();
+    const emit = vi.fn();
+    w.__TAURI__ = { event: { emit } };
+    w.document.getElementById("grid-help").click();
+    expect(emit).toHaveBeenCalledWith("open-docs", { slug: "05-agent-grid" });
+  });
+
+  it("falls back to the inline help panel when Tauri events are unavailable", async () => {
+    const { w } = await mountLauncher();
+    expect(w.document.getElementById("help-overlay").hidden).toBe(true);
+    w.document.getElementById("swarm-help").click(); // no __TAURI__ → inline panel
+    expect(w.document.getElementById("help-overlay").hidden).toBe(false);
+  });
+});

@@ -1713,9 +1713,19 @@ function openHelp(anchor) {
   $("help-overlay").hidden = false;
   if (anchor) { const el = document.getElementById(anchor); if (el) setTimeout(() => el.scrollIntoView({ block: "start" }), 0); }
 }
+// The area "?" buttons are "Documents: …" affordances — they open the app's REGULAR Documents dialog at
+// the right section (CPE-929) by asking the host window via a Tauri `open-docs` event, instead of this
+// launcher's own inline help panel. If Tauri events aren't reachable (e.g. opened as a bare page / test),
+// fall back to the inline panel so help is never dead.
+function openDocsSection(slug, anchor) {
+  const ev = window.__TAURI__ && window.__TAURI__.event;
+  if (ev && ev.emit) { try { ev.emit("open-docs", { slug }); return; } catch (_) {} }
+  openHelp(anchor);
+}
+// The top-bar "?" is a quick in-launcher guide, so it keeps the inline panel.
 $("help-btn").addEventListener("click", () => openHelp());
-$("grid-help").addEventListener("click", () => openHelp("help-grid"));
-$("swarm-help").addEventListener("click", () => openHelp("help-swarm"));
+$("grid-help").addEventListener("click", () => openDocsSection("05-agent-grid", "help-grid"));
+$("swarm-help").addEventListener("click", () => openDocsSection("09-swarms", "help-swarm"));
 $("help-close").addEventListener("click", () => { $("help-overlay").hidden = true; });
 $("help-overlay").addEventListener("click", (e) => { if (e.target === $("help-overlay")) $("help-overlay").hidden = true; });
 $("auto-update").addEventListener("change", async (e) => {

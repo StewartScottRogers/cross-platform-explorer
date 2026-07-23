@@ -11,6 +11,7 @@
   import { WebviewWindow } from "@tauri-apps/api/webviewWindow";
   import { emit, once, listen } from "@tauri-apps/api/event";
   import { getCurrentWebview } from "@tauri-apps/api/webview";
+  import { getCurrentWindow } from "@tauri-apps/api/window";
 
   import Icon from "./lib/components/Icon.svelte";
   import MenuBar from "./lib/components/MenuBar.svelte";
@@ -667,6 +668,7 @@
   /** Teardown for the Agent Watch session listener (CPE-396). */
   let unlistenSessions: (() => void) | null = null;
   let unlistenTransferDone: (() => void) | null = null;
+  let unlistenOpenDocs: (() => void) | null = null;
   // OS file drop-in (CPE-670): overlay shown while OS files are dragged over the window.
   let osDragActive = false;
   let unlistenOsDrop: (() => void) | null = null;
@@ -2848,6 +2850,15 @@
       else showNotice(`Copied ${r.transferred} item${r.transferred === 1 ? "" : "s"}.`);
     }).then((un) => (unlistenTransferDone = un)).catch(() => {});
 
+    // Open the regular Documents dialog when another window (e.g. the Agent Deck's area "?" help) asks
+    // for a specific doc section, instead of that window showing its own inline help panel (CPE-929).
+    // Bring the main window forward so the dialog is actually visible.
+    listen<{ slug?: string }>("open-docs", (e) => {
+      const slug = e.payload?.slug;
+      if (slug) openDocsSlug(slug);
+      getCurrentWindow().setFocus().catch(() => {});
+    }).then((un) => (unlistenOpenDocs = un)).catch(() => {});
+
     // OS file drop-in (CPE-670): files dragged from the desktop/Explorer onto the window are copied into
     // the folder under the cursor (else the current folder). A themed overlay shows while dragging over.
     // Guarded: outside a Tauri webview (e.g. the jsdom test env) this API is absent — drop-in is then
@@ -2915,6 +2926,7 @@
     if (verifyTimer) clearInterval(verifyTimer); // CPE-875: stop the periodic integrity re-verify
     unlistenSessions?.();
     unlistenTransferDone?.();
+    unlistenOpenDocs?.();
     unlistenOsDrop?.();
     unlistenActivity?.();
     if (watchRefreshTimer) clearTimeout(watchRefreshTimer);
