@@ -731,6 +731,9 @@ impl ConsoleState {
         let seed_tasks: Vec<(String, String)> =
             tasks.iter().map(|t| (t.description.clone(), t.globs.join(", "))).collect();
         crate::swarm_mcp_server::seed_kickoff(&mission_dir, &roster, &seed_tasks);
+        // Also seed the shared-memory graph with a mission brief (CPE-956) so the Shared Memory column shows
+        // a note immediately, not just the Mailbox.
+        crate::swarm_mcp_server::seed_memory(&mission_dir, &roster, &seed_tasks);
         let driver = match crate::swarm_live::SwarmDriver::new(
             team,
             tasks,
