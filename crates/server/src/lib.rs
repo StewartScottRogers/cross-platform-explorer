@@ -39,6 +39,10 @@ pub mod connections;
 /// so every backend (local/SFTP/WebDAV) shares one cancellable enumeration + copy (CPE-905).
 pub mod transfer;
 
+/// Lightweight, dependency-free source-symbol outline (functions/types/classes/headings per language) for
+/// a jump-to-symbol code preview (CPE-910, epic CPE-724).
+pub mod code_outline;
+
 /// Tag store: user tags + a colour label per path, persisted as `tags.json` (CPE-635). Pure model
 /// helpers + `ServerCtx`-based command entry points (CPE-815 migration).
 pub mod tags;

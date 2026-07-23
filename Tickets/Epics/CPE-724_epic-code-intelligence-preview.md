@@ -2,7 +2,7 @@
 id: CPE-724
 title: "EPIC: Code intelligence preview"
 type: Task
-status: Proposed
+status: In Progress
 priority: Low
 component: Frontend
 tags: [epic]
@@ -35,3 +35,11 @@ is a natural, high-value extension for the developer audience that runs coding a
 - Large source files show a minimap and a symbol outline with working jump-to-symbol.
 - Folding and indent guides work across the top languages; blame gutter is optional.
 - No regression to the existing preview/edit for plain text; extra features are lazy.
+
+## Work Log
+2026-07-22 (nightshift) — **Activated.** Open questions resolved (best-guess): symbol extraction is a
+**dependency-free heuristic line scanner** (no tree-sitter → no native grammars / C build / bundle cost),
+covering the top languages; the renderer is **extended** (not swapped for an editor component); blame is a
+lazy, optional later child. First slice shipped: **CPE-910** — `cpe_server::code_outline` symbol
+extraction for Rust / JS-TS / Python / Go / Markdown. Remaining children are GUI: minimap, outline/
+breadcrumb with jump-to-symbol, code folding + indent guides, optional git-blame gutter.
