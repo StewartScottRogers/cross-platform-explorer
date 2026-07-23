@@ -2,7 +2,7 @@
 id: CPE-739
 title: "EPIC: Scriptable actions / user macros"
 type: Task
-status: Proposed
+status: In Progress
 priority: Medium
 component: Multiple
 tags: [epic]
@@ -35,3 +35,10 @@ multi-step actions is what makes CPE deeply customizable without shell scripting
 - Users can create parameterized multi-step actions and bind them to menus/hotkeys/rules.
 - Actions run over existing primitives with undo support and can be imported/exported.
 - No action can run without user confirmation where it shells out or is destructive.
+
+## Work Log
+
+- 2026-07-23: Activated (Proposed → In Progress). First slice CPE-938 — the pure headless action-macro
+  model (`crates/server/src/action_macro.rs`): `MacroStep`/`ActionMacro`/`PlannedOp` + `validate` + a
+  filesystem-free `plan` expansion, std-only, 14 tests. Foundation the parameter-prompt UI, action library,
+  and menu/hotkey/rule bindings will build on.
