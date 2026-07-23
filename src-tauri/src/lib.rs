@@ -402,6 +402,7 @@ fn copy_dir_all(src: &Path, dst: &Path) -> std::io::Result<()> {
 /// is a thin `spawn_blocking` dispatcher.
 #[tauri::command]
 async fn list_dir(path: String) -> Result<Vec<DirEntry>, String> {
+    cpe_server::fs_route::require_local(&path)?;
     tauri::async_runtime::spawn_blocking(move || cpe_server::listing::list_dir(&path))
         .await
         .map_err(|e| e.to_string())?
@@ -433,6 +434,7 @@ async fn list_dir_stream(
     stream_id: u64,
     on_entry: tauri::ipc::Channel<Vec<DirEntry>>,
 ) -> Result<usize, String> {
+    cpe_server::fs_route::require_local(&path)?;
     tauri::async_runtime::spawn_blocking(move || list_dir_stream_impl(path, stream_id, on_entry))
         .await
         .map_err(|e| e.to_string())?
@@ -591,6 +593,7 @@ async fn create_dir(path: String, name: String) -> Result<String, String> {
 }
 
 fn create_dir_impl(path: String, name: String) -> Result<String, String> {
+    cpe_server::fs_route::require_local(&path)?;
     let name = name.trim();
     if name.is_empty() {
         return Err("Name cannot be empty".to_string());
@@ -613,6 +616,7 @@ async fn create_file(path: String, name: String) -> Result<String, String> {
 }
 
 fn create_file_impl(path: String, name: String) -> Result<String, String> {
+    cpe_server::fs_route::require_local(&path)?;
     let name = name.trim();
     if name.is_empty() {
         return Err("Name cannot be empty".to_string());
@@ -639,6 +643,7 @@ async fn write_file_text(path: String, contents: String) -> Result<u64, String> 
 }
 
 fn write_file_text_impl(path: String, contents: String) -> Result<u64, String> {
+    cpe_server::fs_route::require_local(&path)?;
     fs::write(&path, contents.as_bytes()).map_err(|e| e.to_string())?;
     Ok(contents.len() as u64)
 }
@@ -789,6 +794,7 @@ async fn read_file_text(path: String, max_bytes: u64) -> Result<String, String> 
 }
 
 fn read_file_text_impl(path: String, max_bytes: u64) -> Result<String, String> {
+    cpe_server::fs_route::require_local(&path)?;
     let p = Path::new(&path);
     let meta = fs::metadata(p).map_err(|e| e.to_string())?;
     if meta.len() > max_bytes {
@@ -812,6 +818,7 @@ async fn read_file_range(path: String, offset: u64, len: u64) -> Result<Vec<u8>,
 }
 
 fn read_file_range_impl(path: String, offset: u64, len: u64) -> Result<Vec<u8>, String> {
+    cpe_server::fs_route::require_local(&path)?;
     use std::io::{Read, Seek, SeekFrom};
     let mut f = fs::File::open(&path).map_err(|e| e.to_string())?;
     let total = f.metadata().map_err(|e| e.to_string())?.len();
@@ -1029,6 +1036,7 @@ async fn rename_entry(path: String, new_name: String) -> Result<String, String> 
 }
 
 fn rename_entry_impl(path: String, new_name: String) -> Result<String, String> {
+    cpe_server::fs_route::require_local(&path)?;
     let new_name = new_name.trim();
     if new_name.is_empty() {
         return Err("Name cannot be empty".to_string());
@@ -1063,6 +1071,9 @@ fn delete_to_trash_impl(paths: Vec<String>) -> Vec<OpResult> {
         .iter()
         .map(|p| {
             let path = Path::new(p);
+            if let Err(e) = cpe_server::fs_route::require_local(p) {
+                return OpResult::err(path, e);
+            }
             match trash::delete(path) {
                 Ok(()) => OpResult::ok(path),
                 Err(e) => OpResult::err(path, e),
@@ -1193,6 +1204,9 @@ fn delete_permanent_impl(paths: Vec<String>) -> Vec<OpResult> {
         .iter()
         .map(|p| {
             let path = Path::new(p);
+            if let Err(e) = cpe_server::fs_route::require_local(p) {
+                return OpResult::err(path, e);
+            }
             let result = if path.is_dir() {
                 fs::remove_dir_all(path)
             } else {
@@ -1269,6 +1283,11 @@ fn copy_entries_impl(paths: Vec<String>, dest: String) -> Vec<OpResult> {
         .iter()
         .map(|p| {
             let src = Path::new(p);
+            if let Err(e) =
+                cpe_server::fs_route::require_local(p).and(cpe_server::fs_route::require_local(&dest))
+            {
+                return OpResult::err(src, e);
+            }
             match do_copy_into(src, &dest_dir) {
                 Ok(target) => OpResult::ok(&target),
                 Err(e) => OpResult::err(src, e),
@@ -1292,6 +1311,11 @@ fn move_entries_impl(paths: Vec<String>, dest: String) -> Vec<OpResult> {
         .iter()
         .map(|p| {
             let src = Path::new(p);
+            if let Err(e) =
+                cpe_server::fs_route::require_local(p).and(cpe_server::fs_route::require_local(&dest))
+            {
+                return OpResult::err(src, e);
+            }
             match do_move_into(src, &dest_dir) {
                 Ok(target) => OpResult::ok(&target),
                 Err(e) => OpResult::err(src, e),
@@ -1686,6 +1710,11 @@ fn move_exact_impl(pairs: Vec<(String, String)>) -> Vec<OpResult> {
         .map(|(from, to)| {
             let src = Path::new(from);
             let dst = Path::new(to);
+            if let Err(e) =
+                cpe_server::fs_route::require_local(from).and(cpe_server::fs_route::require_local(to))
+            {
+                return OpResult::err(src, e);
+            }
             if dst.exists() {
                 return OpResult::err(
                     src,
