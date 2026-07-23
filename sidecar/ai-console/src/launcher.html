@@ -62,6 +62,17 @@
   textarea { font: inherit; width: 100%; padding: 6px 9px; background: Field; color: FieldText;
              border: 1px solid var(--line); border-radius: 6px; resize: vertical; min-height: 30px; }
   select:focus, input:focus, textarea:focus { outline: none; border-color: var(--accent); }
+  /* Swarm tasks pane resize (CPE-935): the textarea uses a full-width drag handle instead of the tiny
+     native corner grip, so you can grab the whole bottom edge and drag it down into the console. */
+  #swarm-task { resize: none; }
+  .swarm-resize {
+    height: 10px; margin-top: 2px; cursor: ns-resize; border-radius: 5px;
+    background: rgba(128,128,128,0.14);
+    /* a centred grip hint */
+    background-image: repeating-linear-gradient(90deg, transparent 0 3px, rgba(128,128,128,0.55) 3px 4px);
+    background-size: 26px 2px; background-position: center; background-repeat: no-repeat;
+  }
+  .swarm-resize:hover { background-color: rgba(128,128,128,0.24); }
 
   /* Live swarm coordination panel (CPE-592). */
   #swarm-panel { border: 1px solid var(--line); border-radius: 8px; margin: 6px 0; overflow: hidden; }
@@ -404,6 +415,9 @@
         <textarea id="swarm-task" rows="2" placeholder="e.g.
 src/** :: add unit tests for the CSV parser
 docs/** :: document the CSV options"></textarea>
+        <!-- Drag this full-width handle to grow/shrink the tasks pane down into the console (CPE-935). -->
+        <div class="swarm-resize" id="swarm-resize" role="separator" aria-orientation="horizontal"
+             title="Drag to resize the tasks pane"></div>
       </div>
       <button id="swarm-go" type="button" class="primary" title="Start the swarm">Start</button>
     </div>
@@ -1943,6 +1957,30 @@ $("run-swarm").addEventListener("click", runSwarmFromForm);
 $("swarm-demo").addEventListener("click", demoSwarm);
 $("demo-select").addEventListener("change", loadSelectedDemo);
 $("swarm-go").addEventListener("click", runSwarmFromForm);
+// Drag the full-width handle to grow/shrink the swarm-tasks pane down into the console (CPE-935). The
+// taller textarea grows the toolbar, which shrinks the terminal below — so the tasks view expands into it.
+function resizeSwarmTasks(startY, startH) {
+  const ta = $("swarm-task");
+  const maxH = Math.max(120, window.innerHeight - 220); // keep some console visible
+  return function (clientY) {
+    ta.style.height = Math.max(30, Math.min(maxH, startH + (clientY - startY))) + "px";
+  };
+}
+$("swarm-resize").addEventListener("mousedown", (e) => {
+  e.preventDefault();
+  const ta = $("swarm-task");
+  const startH = parseInt(ta.style.height, 10) || ta.getBoundingClientRect().height || 48;
+  const move = resizeSwarmTasks(e.clientY, startH);
+  const onMove = (ev) => move(ev.clientY);
+  const onUp = () => {
+    document.removeEventListener("mousemove", onMove);
+    document.removeEventListener("mouseup", onUp);
+    document.body.style.userSelect = "";
+  };
+  document.body.style.userSelect = "none";
+  document.addEventListener("mousemove", onMove);
+  document.addEventListener("mouseup", onUp);
+});
 $("sw-close").addEventListener("click", closeSwarmPanel);
 $("view-toggle").addEventListener("click", toggleView); // Agent Grid Tabs⇄Grid (CPE-506)
 updateViewToggle(); // reflect the (empty) initial state so the bar is explicitly hidden
