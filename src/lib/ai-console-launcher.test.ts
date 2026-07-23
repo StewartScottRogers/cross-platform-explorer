@@ -256,11 +256,32 @@ describe("Agent Deck launcher — live swarm trigger (CPE-541)", () => {
     expect(tidy.toLowerCase()).toContain("not"); // proposes but does NOT perform
     expect(w.parseSwarmTasks(tidy)).toHaveLength(1);
 
-    // Picking "docs" loads two doc-scaffold tasks.
+    // Changing the dropdown reloads the tasks (change handler), no re-click needed.
     select.value = "docs";
-    w.demoSwarm();
+    select.dispatchEvent(new w.Event("change"));
     expect(w.parseSwarmTasks(doc.getElementById("swarm-task").value).map((t: any) => t.globs[0]))
       .toEqual(["DEMO-README.md", "DEMO-CONTRIBUTING.md"]);
+  });
+
+  it("hides the demo dropdown until 'Load demo', then shows it inside the revealed swarm area (CPE-931)", async () => {
+    const { w } = await mountLauncher();
+    const doc = w.document;
+    const picker = doc.getElementById("demo-picker");
+    const select = doc.getElementById("demo-select");
+    // The dropdown lives inside the swarm row (the revealed area), and is hidden at first.
+    expect(select.closest("#swarm-row")).toBeTruthy();
+    expect(picker.hidden).toBe(true);
+    expect(doc.getElementById("swarm-row").hidden).toBe(true);
+
+    // "Run swarm" reveals the task row but NOT the demo picker.
+    w.runSwarmFromForm();
+    expect(doc.getElementById("swarm-row").hidden).toBe(false);
+    expect(picker.hidden).toBe(true);
+
+    // "Load demo" reveals the demo picker (in the freshly-shown area) and loads the default demo.
+    w.demoSwarm();
+    expect(picker.hidden).toBe(false);
+    expect(doc.getElementById("swarm-task").value).toContain("README-DEMO.md");
   });
 
   it("staffs one builder per task line — two lines → two builders + two tasks", async () => {
