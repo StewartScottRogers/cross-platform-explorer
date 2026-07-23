@@ -118,6 +118,10 @@ pub mod duplicates;
 /// Filename search — substring/glob/brace-group matching + the shared streaming walker (CPE-603/697/666).
 pub mod name_search;
 
+/// Embedded terminal dock tab model — open/close/activate/rename terminal tabs with active-tab fixup, the
+/// pure bookkeeping behind the terminal panel (CPE-947, epic CPE-714). No PTY here.
+pub mod terminal_tabs;
+
 /// Instant-search query core — parse `ext:`/`path:`/name-term queries, match candidates, rank by
 /// relevance. Backend-agnostic; reused by the index engine (CPE-831, epic CPE-703).
 pub mod index_query;
