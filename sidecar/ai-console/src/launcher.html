@@ -410,6 +410,9 @@
               <option value="tour">Codebase tour — 3 agents</option>
               <option value="testplan">Test plan + checklist — 2 agents</option>
             </optgroup>
+            <optgroup label="Messaging · watch the Mailbox">
+              <option value="teamchat">Team chatter — 3 agents message constantly</option>
+            </optgroup>
           </select>
         </div>
         <textarea id="swarm-task" rows="2" placeholder="e.g.
@@ -1508,6 +1511,14 @@ async function runSwarmFromForm() {
 // show (CPE-936): a banner when it starts, a "→ " line for each concrete step + what it found, and a
 // "✓ done" summary. `{F}` is replaced with the builder's target filename when the task is loaded.
 const LIVE = " Make the console a live show: FIRST print a banner line '=== {F}: starting ==='. For EVERY step, print a '→ ' line saying what you're doing and what you found (e.g. '→ scanning files… found 12'). When finished, print '✓ {F}: done — <one-line result>'. Print these narration lines to the terminal even though the document content goes into the file.";
+// Heavy-messaging instruction (CPE-954): tells a builder to talk to the whole team over the shared swarm
+// Mailbox constantly, so the "Swarm coordination → Mailbox" panel fills up and the messaging is impossible
+// to miss. Uses the mailbox MCP tools every agent has: `mailbox.post { to, kind, body }` (broadcast) and
+// `mailbox.read`. `{F}` is replaced with the builder's target filename at load time.
+const MSG = " IMPORTANT — keep the team Mailbox busy the WHOLE time using your `mailbox.post` and `mailbox.read` tools (this is the point of the demo): (1) FIRST call mailbox.post { to: \"broadcast\", kind: \"hello\", body: \"{F} here — starting now\" }. (2) Before each step, call mailbox.post { to: \"broadcast\", kind: \"status\", body: \"→ <what I'm about to do>\" } — do this for EVERY step, at least 4-6 posts total. (3) Every couple of steps call mailbox.read and, if a teammate posted anything, mailbox.post { to: \"broadcast\", kind: \"ack\", body: \"got it @<their file> — <one-line reaction>\" }. (4) When finished, call mailbox.post { to: \"broadcast\", kind: \"done\", body: \"✓ {F} finished — <one-line result>\" }. Post short, frequent, human-readable messages; never go quiet.";
+// A lighter version for the existing complex demos: a start + a done broadcast, so coordination shows there
+// too without turning every demo into a chatter demo.
+const MSG_LITE = " Also use your `mailbox.post` tool to keep the team in the loop: broadcast mailbox.post { to: \"broadcast\", kind: \"hello\", body: \"{F} starting\" } before you begin, and mailbox.post { to: \"broadcast\", kind: \"done\", body: \"{F} done\" } when finished.";
 const DEMOS = {
   // — Simple —
   hello: {
@@ -1541,24 +1552,35 @@ const DEMOS = {
   inventory: {
     note: "THREE builders build a coordinated inventory (files → sizes → an index that links them), live",
     tasks: [
-      "INVENTORY-DEMO.md :: Write INVENTORY-DEMO.md: every file in this folder grouped by extension, with a count per group." + LIVE,
-      "SIZES-DEMO.md :: Write SIZES-DEMO.md: the largest files ranked, each with its size in bytes/KB." + LIVE,
-      "INDEX-DEMO.md :: Write INDEX-DEMO.md: a 3-sentence summary of this folder that links to INVENTORY-DEMO.md and SIZES-DEMO.md." + LIVE,
+      "INVENTORY-DEMO.md :: Write INVENTORY-DEMO.md: every file in this folder grouped by extension, with a count per group." + LIVE + MSG_LITE,
+      "SIZES-DEMO.md :: Write SIZES-DEMO.md: the largest files ranked, each with its size in bytes/KB." + LIVE + MSG_LITE,
+      "INDEX-DEMO.md :: Write INDEX-DEMO.md: a 3-sentence summary of this folder that links to INVENTORY-DEMO.md and SIZES-DEMO.md." + LIVE + MSG_LITE,
     ],
   },
   tour: {
     note: "THREE builders write a mini onboarding guide (architecture, glossary, getting-started), thinking out loud",
     tasks: [
-      "ARCHITECTURE-DEMO.md :: Write ARCHITECTURE-DEMO.md: infer and describe this folder's structure and purpose (what the main parts are and how they relate)." + LIVE,
-      "GLOSSARY-DEMO.md :: Write GLOSSARY-DEMO.md: define 5 key terms you actually find in this folder's files, each in one sentence." + LIVE,
-      "ONBOARDING-DEMO.md :: Write ONBOARDING-DEMO.md: a short 'getting started here' guide for a newcomer to this folder (3-5 numbered steps)." + LIVE,
+      "ARCHITECTURE-DEMO.md :: Write ARCHITECTURE-DEMO.md: infer and describe this folder's structure and purpose (what the main parts are and how they relate)." + LIVE + MSG_LITE,
+      "GLOSSARY-DEMO.md :: Write GLOSSARY-DEMO.md: define 5 key terms you actually find in this folder's files, each in one sentence." + LIVE + MSG_LITE,
+      "ONBOARDING-DEMO.md :: Write ONBOARDING-DEMO.md: a short 'getting started here' guide for a newcomer to this folder (3-5 numbered steps)." + LIVE + MSG_LITE,
     ],
   },
   testplan: {
     note: "two builders draft a test plan + a release checklist (nothing is executed), narrating their thinking",
     tasks: [
-      "TEST-PLAN-DEMO.md :: Write TEST-PLAN-DEMO.md: PROPOSE (do not run anything) a test plan for whatever code or content is in this folder — list cases and what each would verify." + LIVE,
-      "CHECKLIST-DEMO.md :: Write CHECKLIST-DEMO.md: a release checklist of concrete pre-release steps." + LIVE,
+      "TEST-PLAN-DEMO.md :: Write TEST-PLAN-DEMO.md: PROPOSE (do not run anything) a test plan for whatever code or content is in this folder — list cases and what each would verify." + LIVE + MSG_LITE,
+      "CHECKLIST-DEMO.md :: Write CHECKLIST-DEMO.md: a release checklist of concrete pre-release steps." + LIVE + MSG_LITE,
+    ],
+  },
+  // — Messaging · watch the Mailbox (CPE-954) —
+  // A messaging-FIRST demo: three builders that talk to the whole team over the shared Mailbox the entire
+  // time, so the "Swarm coordination → Mailbox" panel fills up and the coordination is impossible to miss.
+  teamchat: {
+    note: "THREE builders chatter constantly over the shared Mailbox — watch the 'Swarm coordination → Mailbox' panel fill up",
+    tasks: [
+      "ROLLCALL-DEMO.md :: Write ROLLCALL-DEMO.md: a friendly team roll-call — list every file in this folder as if introducing teammates, one line each." + MSG + LIVE,
+      "AGENDA-DEMO.md :: Write AGENDA-DEMO.md: a short 'what this team should work on next' agenda (3-5 bullet ideas inferred from the folder)." + MSG + LIVE,
+      "STANDUP-DEMO.md :: Write STANDUP-DEMO.md: a stand-up summary that references what your teammates announced over the Mailbox (read it!) — who is doing what, in 3-5 lines." + MSG + LIVE,
     ],
   },
 };
