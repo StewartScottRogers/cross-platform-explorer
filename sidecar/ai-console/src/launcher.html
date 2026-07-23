@@ -412,6 +412,13 @@
             </optgroup>
             <optgroup label="Messaging · watch the Mailbox">
               <option value="teamchat">Team chatter — 3 agents message constantly</option>
+              <option value="standup">Live stand-up — 3 agents</option>
+              <option value="relay">Relay hand-off — 3 agents</option>
+            </optgroup>
+            <optgroup label="Shared memory · watch the Memory">
+              <option value="knowledge">Shared knowledge base — 3 agents</option>
+              <option value="research">Linked research notes — 3 agents</option>
+              <option value="glossarymem">Living glossary — 2 agents</option>
             </optgroup>
           </select>
         </div>
@@ -1519,6 +1526,13 @@ const MSG = " IMPORTANT — keep the team Mailbox busy the WHOLE time using your
 // A lighter version for the existing complex demos: a start + a done broadcast, so coordination shows there
 // too without turning every demo into a chatter demo.
 const MSG_LITE = " Also use your `mailbox.post` tool to keep the team in the loop: broadcast mailbox.post { to: \"broadcast\", kind: \"hello\", body: \"{F} starting\" } before you begin, and mailbox.post { to: \"broadcast\", kind: \"done\", body: \"{F} done\" } when finished.";
+// Heavy shared-MEMORY instruction (CPE-956): tells a builder to build up the team's shared knowledge graph
+// the whole time, so the "Swarm coordination → Shared memory" panel fills with linked notes. Uses the
+// memory MCP tools every agent has: `memory.write { body, tags }` (body may contain [[Wiki Links]]) and
+// `memory.recall { query }`. `{F}` is replaced with the builder's target filename at load time.
+const MEM = " IMPORTANT — build up the team's SHARED MEMORY the WHOLE time using your `memory.write` and `memory.recall` tools (this is the point of the demo): (1) As you discover EACH fact, call memory.write { body: \"<the concise fact>\", tags: [\"finding\"] } — write at least 4-6 notes, one per finding, never batch them at the end. (2) In a note's body connect related notes with [[Wiki Links]] (e.g. \"relates to [[File Types]]\") so the notes form a graph. (3) BEFORE writing a note, call memory.recall { query: \"<what you're about to note>\" } to see what teammates already recorded, and build on it — reference their note by name. Keep the Shared Memory panel filling with short, linked notes.";
+// A lighter version to fold into other demos: a couple of notes, so the Shared Memory panel populates too.
+const MEM_LITE = " Also record what you learn in the team's SHARED MEMORY: as you work, call memory.write { body: \"<a key fact you found>\", tags: [\"finding\"] } at least twice, using [[Wiki Links]] to connect related notes.";
 const DEMOS = {
   // — Simple —
   hello: {
@@ -1552,35 +1566,77 @@ const DEMOS = {
   inventory: {
     note: "THREE builders build a coordinated inventory (files → sizes → an index that links them), live",
     tasks: [
-      "INVENTORY-DEMO.md :: Write INVENTORY-DEMO.md: every file in this folder grouped by extension, with a count per group." + LIVE + MSG_LITE,
-      "SIZES-DEMO.md :: Write SIZES-DEMO.md: the largest files ranked, each with its size in bytes/KB." + LIVE + MSG_LITE,
-      "INDEX-DEMO.md :: Write INDEX-DEMO.md: a 3-sentence summary of this folder that links to INVENTORY-DEMO.md and SIZES-DEMO.md." + LIVE + MSG_LITE,
+      "INVENTORY-DEMO.md :: Write INVENTORY-DEMO.md: every file in this folder grouped by extension, with a count per group." + LIVE + MSG_LITE + MEM_LITE,
+      "SIZES-DEMO.md :: Write SIZES-DEMO.md: the largest files ranked, each with its size in bytes/KB." + LIVE + MSG_LITE + MEM_LITE,
+      "INDEX-DEMO.md :: Write INDEX-DEMO.md: a 3-sentence summary of this folder that links to INVENTORY-DEMO.md and SIZES-DEMO.md." + LIVE + MSG_LITE + MEM_LITE,
     ],
   },
   tour: {
     note: "THREE builders write a mini onboarding guide (architecture, glossary, getting-started), thinking out loud",
     tasks: [
-      "ARCHITECTURE-DEMO.md :: Write ARCHITECTURE-DEMO.md: infer and describe this folder's structure and purpose (what the main parts are and how they relate)." + LIVE + MSG_LITE,
-      "GLOSSARY-DEMO.md :: Write GLOSSARY-DEMO.md: define 5 key terms you actually find in this folder's files, each in one sentence." + LIVE + MSG_LITE,
-      "ONBOARDING-DEMO.md :: Write ONBOARDING-DEMO.md: a short 'getting started here' guide for a newcomer to this folder (3-5 numbered steps)." + LIVE + MSG_LITE,
+      "ARCHITECTURE-DEMO.md :: Write ARCHITECTURE-DEMO.md: infer and describe this folder's structure and purpose (what the main parts are and how they relate)." + LIVE + MSG_LITE + MEM_LITE,
+      "GLOSSARY-DEMO.md :: Write GLOSSARY-DEMO.md: define 5 key terms you actually find in this folder's files, each in one sentence." + LIVE + MSG_LITE + MEM_LITE,
+      "ONBOARDING-DEMO.md :: Write ONBOARDING-DEMO.md: a short 'getting started here' guide for a newcomer to this folder (3-5 numbered steps)." + LIVE + MSG_LITE + MEM_LITE,
     ],
   },
   testplan: {
     note: "two builders draft a test plan + a release checklist (nothing is executed), narrating their thinking",
     tasks: [
-      "TEST-PLAN-DEMO.md :: Write TEST-PLAN-DEMO.md: PROPOSE (do not run anything) a test plan for whatever code or content is in this folder — list cases and what each would verify." + LIVE + MSG_LITE,
-      "CHECKLIST-DEMO.md :: Write CHECKLIST-DEMO.md: a release checklist of concrete pre-release steps." + LIVE + MSG_LITE,
+      "TEST-PLAN-DEMO.md :: Write TEST-PLAN-DEMO.md: PROPOSE (do not run anything) a test plan for whatever code or content is in this folder — list cases and what each would verify." + LIVE + MSG_LITE + MEM_LITE,
+      "CHECKLIST-DEMO.md :: Write CHECKLIST-DEMO.md: a release checklist of concrete pre-release steps." + LIVE + MSG_LITE + MEM_LITE,
     ],
   },
-  // — Messaging · watch the Mailbox (CPE-954) —
-  // A messaging-FIRST demo: three builders that talk to the whole team over the shared Mailbox the entire
-  // time, so the "Swarm coordination → Mailbox" panel fills up and the coordination is impossible to miss.
+  // — Messaging · watch the Mailbox (CPE-954/956) —
+  // Messaging-FIRST demos: builders that talk to the whole team over the shared Mailbox the entire time, so
+  // the "Swarm coordination → Mailbox" panel fills up and the coordination is impossible to miss.
   teamchat: {
     note: "THREE builders chatter constantly over the shared Mailbox — watch the 'Swarm coordination → Mailbox' panel fill up",
     tasks: [
       "ROLLCALL-DEMO.md :: Write ROLLCALL-DEMO.md: a friendly team roll-call — list every file in this folder as if introducing teammates, one line each." + MSG + LIVE,
       "AGENDA-DEMO.md :: Write AGENDA-DEMO.md: a short 'what this team should work on next' agenda (3-5 bullet ideas inferred from the folder)." + MSG + LIVE,
       "STANDUP-DEMO.md :: Write STANDUP-DEMO.md: a stand-up summary that references what your teammates announced over the Mailbox (read it!) — who is doing what, in 3-5 lines." + MSG + LIVE,
+    ],
+  },
+  standup: {
+    note: "THREE agents run a live stand-up over the Mailbox — status, blockers, and plans, all broadcast",
+    tasks: [
+      "STANDUP-A-DEMO.md :: Write STANDUP-A-DEMO.md: your stand-up update about this folder — what you looked at, what you found, what's next." + MSG + LIVE,
+      "STANDUP-B-DEMO.md :: Write STANDUP-B-DEMO.md: your stand-up update, explicitly reacting to what teammates posted to the Mailbox (read it first)." + MSG + LIVE,
+      "STANDUP-C-DEMO.md :: Write STANDUP-C-DEMO.md: a stand-up summary compiled from everyone's Mailbox posts — who is doing what." + MSG + LIVE,
+    ],
+  },
+  relay: {
+    note: "THREE agents run a relay — each reads the Mailbox, does its leg, and broadcasts a hand-off to the next",
+    tasks: [
+      "RELAY-1-DEMO.md :: Write RELAY-1-DEMO.md: leg 1 — list the files in this folder, then broadcast a Mailbox hand-off telling leg 2 what you found and what to do next." + MSG + LIVE,
+      "RELAY-2-DEMO.md :: Write RELAY-2-DEMO.md: leg 2 — read the Mailbox for leg 1's hand-off, add file details, then broadcast a hand-off to leg 3." + MSG + LIVE,
+      "RELAY-3-DEMO.md :: Write RELAY-3-DEMO.md: leg 3 — read the Mailbox for leg 2's hand-off, write the final summary, then broadcast 'relay complete'." + MSG + LIVE,
+    ],
+  },
+  // — Shared memory · watch the Memory (CPE-956) —
+  // Memory-FIRST demos: builders that build a shared knowledge graph via memory.write/memory.recall, so the
+  // "Swarm coordination → Shared memory" panel fills with linked notes.
+  knowledge: {
+    note: "THREE builders build a shared knowledge base — watch the 'Swarm coordination → Shared memory' panel fill with linked notes",
+    tasks: [
+      "KB-FILES-DEMO.md :: Write KB-FILES-DEMO.md: catalog the files in this folder — what each one is." + MEM + LIVE,
+      "KB-TOPICS-DEMO.md :: Write KB-TOPICS-DEMO.md: the main topics/themes this folder covers." + MEM + LIVE,
+      "KB-INDEX-DEMO.md :: Write KB-INDEX-DEMO.md: an index that ties the team's findings together — recall teammates' notes first." + MEM + LIVE,
+    ],
+  },
+  research: {
+    note: "THREE builders write linked research notes into shared memory, recalling teammates' notes before adding",
+    tasks: [
+      "RESEARCH-A-DEMO.md :: Write RESEARCH-A-DEMO.md: findings about this folder's structure and layout." + MEM + LIVE,
+      "RESEARCH-B-DEMO.md :: Write RESEARCH-B-DEMO.md: findings about the file contents and formats present." + MEM + LIVE,
+      "RESEARCH-SYNTH-DEMO.md :: Write RESEARCH-SYNTH-DEMO.md: synthesize the team's shared-memory notes into conclusions — recall them first, then link to them." + MEM + LIVE,
+    ],
+  },
+  glossarymem: {
+    note: "TWO builders grow a living glossary in shared memory, each recalling before adding a linked term",
+    tasks: [
+      "GLOSSARY-A-DEMO.md :: Write GLOSSARY-A-DEMO.md: define key terms you find in this folder — and memory.write each term as its own note." + MEM + LIVE,
+      "GLOSSARY-B-DEMO.md :: Write GLOSSARY-B-DEMO.md: add MORE terms, recalling the first set and linking to them with [[Wiki Links]]." + MEM + LIVE,
     ],
   },
 };

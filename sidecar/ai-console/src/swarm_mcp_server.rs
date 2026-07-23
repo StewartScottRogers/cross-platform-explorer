@@ -229,6 +229,29 @@ pub fn seed_kickoff(dir: &Path, members: &[(String, Role)], tasks: &[(String, St
     }
 }
 
+/// Seed the shared **memory** graph with a coordinator "mission brief" note (CPE-956) so the Shared Memory
+/// panel shows a real note the instant a mission starts — instead of "no notes yet…" until an agent chooses
+/// to `memory.write`. Agents' own notes build on it. Reuses the tested `memory.write` persist path, so the
+/// note lands as a `<mission>/memory/*.md` file `/api/swarm/activity` parses. Best-effort.
+pub fn seed_memory(dir: &Path, members: &[(String, Role)], tasks: &[(String, String)]) {
+    let _ = std::fs::create_dir_all(dir);
+    let team = members.iter().map(|(id, _)| id.as_str()).collect::<Vec<_>>().join(", ");
+    let goals = tasks
+        .iter()
+        .enumerate()
+        .map(|(i, (desc, _))| format!("{}. {}", i + 1, desc))
+        .collect::<Vec<_>>()
+        .join("  ");
+    let body = format!("Mission brief — team: {team}. Goals: {goals}");
+    let store = FileStore::new(dir.to_path_buf());
+    let _ = store.dispatch(
+        "coordinator",
+        "memory.write",
+        &json!({ "body": body, "tags": ["mission", "brief"] }),
+        now_secs(),
+    );
+}
+
 fn now_secs() -> u64 {
     SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0)
 }
@@ -316,6 +339,26 @@ mod tests {
         let recs = store.mailbox_records();
         assert_eq!(recs.len(), 3, "kickoff + assign + the agent's post");
         assert_eq!(recs[2]["kind"], json!("hello"));
+    }
+
+    #[test]
+    fn seed_memory_writes_a_mission_brief_note_agents_can_recall() {
+        let dir = tempfile::tempdir().unwrap();
+        let members = [("claude#builder1".to_string(), Role::Builder)];
+        let tasks = [("Catalog the files".to_string(), String::new())];
+        seed_memory(dir.path(), &members, &tasks);
+
+        // The activity endpoint parses <mission>/memory/*.md notes; a builder can recall the brief.
+        let store = FileStore::new(dir.path().to_path_buf());
+        let recalled = call(&store, "claude#builder1", "memory.recall", json!({ "query": "mission brief", "n": 5 }));
+        let notes = recalled["notes"].as_array().cloned().unwrap_or_default();
+        assert!(!notes.is_empty(), "the seeded brief is recallable from shared memory");
+        assert!(
+            notes.iter().any(|n| n["body"].as_str().unwrap_or("").contains("Catalog the files")),
+            "the brief names the mission goals"
+        );
+        // And it lands as a real note file the panel reads.
+        assert!(dir.path().join("memory").read_dir().unwrap().next().is_some(), "a note file exists on disk");
     }
 
     #[test]
