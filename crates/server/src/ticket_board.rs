@@ -58,6 +58,32 @@ fn frontmatter(md: &str) -> std::collections::HashMap<String, String> {
     map
 }
 
+/// Split a ticket's markdown into its **ordered** frontmatter fields (`(key, value)`, quotes stripped) and
+/// its **body** (everything after the closing `---`), for the Agent Board's card-detail popup (CPE-959).
+/// Tolerant: no frontmatter ⇒ empty fields + the whole input (trimmed) as the body.
+pub fn detail_from(md: &str) -> (Vec<(String, String)>, String) {
+    let trimmed = md.trim_start();
+    let Some(rest) = trimmed.strip_prefix("---") else {
+        return (Vec::new(), md.trim().to_string());
+    };
+    let Some(end) = rest.find("\n---") else {
+        return (Vec::new(), md.trim().to_string());
+    };
+    let mut fields = Vec::new();
+    for line in rest[..end].lines() {
+        if let Some((k, v)) = line.split_once(':') {
+            let k = k.trim();
+            if !k.is_empty() {
+                fields.push((k.to_string(), unquote(v.trim())));
+            }
+        }
+    }
+    // `rest[end..]` is "\n---…\n<body>"; the body is everything after that closing delimiter line.
+    let tail = &rest[end + 1..]; // drop the leading '\n' → "---…\n<body>"
+    let body = tail.splitn(2, '\n').nth(1).unwrap_or("").trim().to_string();
+    (fields, body)
+}
+
 /// Strip one layer of surrounding single/double quotes.
 fn unquote(s: &str) -> String {
     let s = s.trim();
@@ -246,6 +272,24 @@ mod tests {
     use super::*;
 
     const TICKET: &str = "---\nid: CPE-520\ntitle: \"Board — read + move\"\ntype: Feature\nstatus: Open\npriority: Medium\ntags: [ready, backend]\nepic: CPE-503\nsprint: SPR-03\n---\n\n## Summary\nbody\n";
+
+    #[test]
+    fn detail_from_splits_ordered_fields_and_body() {
+        let (fields, body) = detail_from(TICKET);
+        // Ordered, first-to-last, quotes stripped.
+        assert_eq!(fields.first(), Some(&("id".to_string(), "CPE-520".to_string())));
+        assert_eq!(fields[1], ("title".to_string(), "Board — read + move".to_string()));
+        assert!(fields.iter().any(|(k, v)| k == "epic" && v == "CPE-503"));
+        assert!(fields.iter().any(|(k, v)| k == "sprint" && v == "SPR-03"));
+        assert_eq!(body, "## Summary\nbody");
+    }
+
+    #[test]
+    fn detail_from_tolerates_no_frontmatter() {
+        let (fields, body) = detail_from("just a note\nwith lines");
+        assert!(fields.is_empty());
+        assert_eq!(body, "just a note\nwith lines");
+    }
 
     #[test]
     fn nearest_project_root_walks_up_to_the_tickets_folder() {

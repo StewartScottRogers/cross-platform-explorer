@@ -10,6 +10,7 @@
   import { lsGet, lsSet, lsBool } from "../persist";
   import Icon from "./Icon.svelte";
   import HelpButton from "./HelpButton.svelte";
+  import CardDetailDialog from "./CardDetailDialog.svelte";
   import {
     BOARD_LANES, groupByLane, isValidMove, ticketTask,
     clampBoardSize, loadBoardSize, saveBoardSize,
@@ -93,6 +94,10 @@
   $: epicDoneDisplay = showArchived ? [...epicCols.Done, ...archivedEpicList] : epicCols.Done;
   /** Click an epic card → jump to the Board filtered to that epic's tickets (filterCards matches epic). */
   function drillEpic(id: string) { boardQuery = id; viewMode = "board"; }
+
+  // Card-detail popup (CPE-959): clicking a ticket/epic card opens a read-only view of the full ticket.
+  let detailCard: { id: string; isEpic: boolean } | null = null;
+  const openDetail = (id: string, isEpic: boolean) => (detailCard = { id, isEpic });
 
   // --- Resizable panel (CPE-529): drag the corner grip; size clamped + persisted. -----------------
   const saved = loadBoardSize();
@@ -274,9 +279,9 @@
               {#each list as e (e.id)}
                 {@const p = epicProgress(cards, e.id)}
                 <!-- svelte-ignore a11y-no-static-element-interactions a11y-click-events-have-key-events -->
-                <div class="card epic-card" class:is-done={col === "Done"} on:click={() => drillEpic(e.id)}
-                  role="button" tabindex="0" on:keydown={(ev) => (ev.key === "Enter" || ev.key === " ") && drillEpic(e.id)}
-                  title={"Show " + e.id + "’s tickets on the board"}>
+                <div class="card epic-card" class:is-done={col === "Done"} on:click={() => openDetail(e.id, true)}
+                  role="button" tabindex="0" on:keydown={(ev) => (ev.key === "Enter" || ev.key === " ") && openDetail(e.id, true)}
+                  title={"Open " + e.id + " — details"}>
                   <div class="card-top">
                     <span class="card-id">{e.id}</span>
                     <button class="card-copy" title="Copy id" aria-label={"Copy " + e.id}
@@ -317,8 +322,11 @@
             </div>
             <div class="board-col-body">
               {#each list as c (c.id)}
-                <!-- svelte-ignore a11y-no-static-element-interactions -->
-                <div class="card" draggable="true" on:dragstart={(e) => onDragStart(e, c.id)} title={c.title}>
+                <!-- svelte-ignore a11y-no-static-element-interactions a11y-click-events-have-key-events -->
+                <div class="card" draggable="true" on:dragstart={(e) => onDragStart(e, c.id)}
+                  on:click={() => openDetail(c.id, false)} role="button" tabindex="0"
+                  on:keydown={(ev) => (ev.key === "Enter" || ev.key === " ") && openDetail(c.id, false)}
+                  title={"Open " + c.id + " — details"}>
                   <div class="card-top">
                     <span class="card-id">{c.id}</span>
                     <button class="card-copy" title="Copy id" aria-label={"Copy " + c.id}
@@ -360,6 +368,12 @@
     <div class="board-grip" title="Drag to resize" on:mousedown={startResize}></div>
   </div>
 </div>
+
+{#if detailCard}
+  <CardDetailDialog root={boardRoot} id={detailCard.id} isEpic={detailCard.isEpic}
+    on:close={() => (detailCard = null)}
+    on:drill={(e) => { drillEpic(e.detail); detailCard = null; }} />
+{/if}
 
 <style>
   .board-overlay { position: fixed; inset: 0; background: rgba(0,0,0,0.45); display: flex;
