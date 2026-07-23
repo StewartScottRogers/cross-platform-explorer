@@ -5984,7 +5984,6 @@ pub fn export_bindings(out: &std::path::Path) -> Result<(), String> {
         forge_conflict_versions,
         forge_resolve_file,
         forge_conflict_continue,
-        list_dir,
     ]);
     let tmp = std::env::temp_dir().join("cpe_bindings_export.ts");
     // u64 byte-counts (e.g. write_file_text) map to `number` — matches how the frontend already treats

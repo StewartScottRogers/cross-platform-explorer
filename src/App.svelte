@@ -1320,7 +1320,10 @@
       return _m;
     });
     try {
-      await invoke<DirEntry[]>("list_dir", { path: expanded });
+      // Verify the path exists through the typed client (CPE-958). `listDir` returns a Result, so an
+      // unreadable/missing path comes back as `status: "error"` rather than throwing — handle both.
+      const r = await commands.listDir(expanded);
+      if (r.status !== "ok") throw new Error(r.error);
       await navigate(expanded);
     } catch {
       showNotice(`Can't find "${raw}". Check the spelling and try again.`, true);
