@@ -165,3 +165,7 @@ pub mod backup;
 /// Server-side contract dispatch — route `Request` envelopes to domain functions (CPE-824, the Server
 /// half of the remote RPC loop CPE-820).
 pub mod dispatch;
+
+/// Secure-delete pass planner — overwrite-pass schedules + honest SSD/copy-on-write erasure caveats
+/// (CPE-941, epic CPE-738). Pure planning; the shred engine executes the passes.
+pub mod secure_delete;
