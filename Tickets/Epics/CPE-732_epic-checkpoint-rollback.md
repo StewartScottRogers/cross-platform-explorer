@@ -2,7 +2,7 @@
 id: CPE-732
 title: "EPIC: Checkpoint & rollback of agent work"
 type: Task
-status: Proposed
+status: In Progress
 priority: High
 component: Multiple
 tags: [epic]
@@ -34,3 +34,9 @@ audit by making the history not just visible but reversible.
 - Users can checkpoint the watched tree and one-click revert the agent's changes to any checkpoint.
 - A single mutation can be cherry-reverted from the timeline.
 - Snapshots are bounded/deduped; revert respects unreadable-entry handling.
+
+## Work Log
+2026-07-22 (nightshift) — **Activated.** First slice: **CPE-917** — `restore_plan::plan_restore` /
+`revert_one` / `summarize_plan`: the pure diff that turns a checkpoint snapshot + current tree state into the
+minimal Create/Overwrite/Delete revert ops (+ cherry-revert of one path). Remaining: content-addressed
+snapshot capture/store (dedup, bounded), the revert engine, and the timeline checkpoint-marker + restore UI.

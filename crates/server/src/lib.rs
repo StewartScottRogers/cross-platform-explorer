@@ -73,6 +73,7 @@ pub mod geometry;
 
 /// Activity timeline bucketing (scrubbable replay view) over recorded audit events (CPE-916).
 pub mod activity_timeline;
+pub mod restore_plan;
 
 /// On-disk append-only session audit journal (CPE-800, epic CPE-733): durable per-session
 /// JSON-lines of Agent Watch filesystem activity, bounded/rotated. Pure helpers over a base dir.
