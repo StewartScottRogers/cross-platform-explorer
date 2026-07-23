@@ -2,7 +2,7 @@
 id: CPE-723
 title: "EPIC: Batch media operations"
 type: Task
-status: Proposed
+status: In Progress
 priority: Medium
 component: Multiple
 tags: [epic]
@@ -35,3 +35,8 @@ to WebP" is a common chore that currently forces users out to another app.
 - Users can run resize/convert/rotate/compress/watermark over a multi-selection with live preview.
 - Transforms run through a progress panel and default to non-destructive output.
 - Pattern-based rename integrates; no regression to single-file preview/edit.
+
+## Work Log
+2026-07-23 (dayshift) — **Activated.** First slice: **CPE-940** — `batch_media::plan` / `validate`: the pure
+planner turning media ops + a selection into collision-safe, non-destructive output paths + summaries.
+Remaining: the actual transforms (resize/convert/rotate/…), the before/after preview, and the progress panel.
