@@ -725,6 +725,12 @@ impl ConsoleState {
         if let Err(e) = planner.init_mission(&roster) {
             return bad(e);
         }
+        // Seed the shared mailbox with the coordinator's kickoff + per-task assignments (CPE-955) so the
+        // live coordination panel shows real messages the instant the mission starts, instead of staying
+        // empty until an agent chooses to post. Built before `tasks` moves into the driver below.
+        let seed_tasks: Vec<(String, String)> =
+            tasks.iter().map(|t| (t.description.clone(), t.globs.join(", "))).collect();
+        crate::swarm_mcp_server::seed_kickoff(&mission_dir, &roster, &seed_tasks);
         let driver = match crate::swarm_live::SwarmDriver::new(
             team,
             tasks,

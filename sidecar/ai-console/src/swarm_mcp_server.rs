@@ -197,6 +197,38 @@ pub fn write_members(dir: &Path, members: &[(String, Role)]) -> std::io::Result<
     std::fs::write(dir.join("members.json"), serde_json::to_string_pretty(&recs).unwrap_or_default())
 }
 
+/// Seed the shared mailbox with the coordinator's opening posts (CPE-955) so the live coordination panel
+/// shows real activity the instant a mission starts — a `kickoff` broadcast naming the team + a `→` `assign`
+/// post per task — instead of "no messages yet…" until an agent chooses to post. Agents' own `mailbox.post`
+/// chatter (incl. the CPE-954 teamchat demo) then appends after these. Records match the `{from,to,kind,
+/// body,ts}` shape `/api/swarm/activity` reads. Best-effort: a write failure is ignored (the mission still
+/// runs); posts are appended, never clobbering an existing log.
+pub fn seed_kickoff(dir: &Path, members: &[(String, Role)], tasks: &[(String, String)]) {
+    let _ = std::fs::create_dir_all(dir);
+    let ts = now_secs();
+    let team = members.iter().map(|(id, _)| id.as_str()).collect::<Vec<_>>().join(", ");
+    let mut recs: Vec<Value> = Vec::with_capacity(tasks.len() + 1);
+    let n = tasks.len();
+    recs.push(json!({
+        "from": "coordinator", "to": "broadcast", "kind": "kickoff",
+        "body": format!("Mission started — {} task{}. Team: {}", n, if n == 1 { "" } else { "s" }, team),
+        "ts": ts,
+    }));
+    for (i, (desc, scope)) in tasks.iter().enumerate() {
+        let body = if scope.is_empty() {
+            format!("→ task {}: {}", i + 1, desc)
+        } else {
+            format!("→ task {}: {} (scope: {})", i + 1, desc, scope)
+        };
+        recs.push(json!({ "from": "coordinator", "to": "broadcast", "kind": "assign", "body": body, "ts": ts }));
+    }
+    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(dir.join("mailbox.jsonl")) {
+        for r in recs {
+            let _ = writeln!(f, "{r}");
+        }
+    }
+}
+
 fn now_secs() -> u64 {
     SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0)
 }
@@ -245,6 +277,45 @@ mod tests {
         // Unwrap the MCP content envelope back to the tool's JSON.
         let text = resp["result"]["content"][0]["text"].as_str().unwrap();
         serde_json::from_str(text).unwrap()
+    }
+
+    #[test]
+    fn seed_kickoff_writes_a_kickoff_plus_one_assign_per_task() {
+        let dir = tempfile::tempdir().unwrap();
+        let members = [("claude#builder1".to_string(), Role::Builder), ("claude#builder2".to_string(), Role::Builder)];
+        let tasks = [
+            ("Write README".to_string(), "docs/**".to_string()),
+            ("Add tests".to_string(), String::new()),
+        ];
+        seed_kickoff(dir.path(), &members, &tasks);
+
+        // The activity endpoint reads mailbox.jsonl line-by-line as {from,to,kind,body,ts}.
+        let store = FileStore::new(dir.path().to_path_buf());
+        let recs = store.mailbox_records();
+        assert_eq!(recs.len(), 3, "one kickoff + one assign per task");
+        assert_eq!(recs[0]["kind"], json!("kickoff"));
+        assert_eq!(recs[0]["from"], json!("coordinator"));
+        assert_eq!(recs[0]["to"], json!("broadcast"));
+        assert!(recs[0]["body"].as_str().unwrap().contains("2 tasks"), "names the task count");
+        assert!(recs[0]["body"].as_str().unwrap().contains("builder1"), "names the team");
+        assert_eq!(recs[1]["kind"], json!("assign"));
+        assert!(recs[1]["body"].as_str().unwrap().contains("Write README"));
+        assert!(recs[1]["body"].as_str().unwrap().contains("docs/**"), "includes the scope when present");
+        assert!(recs[2]["body"].as_str().unwrap().contains("Add tests"));
+        assert!(!recs[2]["body"].as_str().unwrap().contains("scope:"), "no scope note when globs are empty");
+    }
+
+    #[test]
+    fn seed_kickoff_appends_and_agent_posts_follow() {
+        // The seed must not clobber later agent posts — they append after it.
+        let dir = tempfile::tempdir().unwrap();
+        seed_kickoff(dir.path(), &[("claude#b1".to_string(), Role::Builder)], &[("do it".to_string(), String::new())]);
+        write_members(dir.path(), &[("claude#b1".to_string(), Role::Builder)]).unwrap();
+        let store = FileStore::new(dir.path().to_path_buf());
+        call(&store, "claude#b1", "mailbox.post", json!({ "to": "broadcast", "kind": "hello", "body": "b1 here" }));
+        let recs = store.mailbox_records();
+        assert_eq!(recs.len(), 3, "kickoff + assign + the agent's post");
+        assert_eq!(recs[2]["kind"], json!("hello"));
     }
 
     #[test]
