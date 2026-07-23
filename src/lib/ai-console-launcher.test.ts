@@ -222,7 +222,7 @@ describe("Agent Deck launcher — live swarm trigger (CPE-541)", () => {
     expect(posted[0].provider).toBeDefined();
   });
 
-  it("the demo button reveals + pre-fills the swarm form, then Start runs the demo tasks (CPE-924)", async () => {
+  it("Load demo reveals + pre-fills the swarm form for the selected demo, then Start runs it (CPE-924/925)", async () => {
     const posted: any[] = [];
     const { w } = await mountLauncher((path, opts) => {
       if (path === "/api/swarm/run") { posted.push(JSON.parse(opts.body)); return { ok: true, data: { ok: true } }; }
@@ -230,7 +230,7 @@ describe("Agent Deck launcher — live swarm trigger (CPE-541)", () => {
     });
     const doc = w.document;
     expect(doc.getElementById("swarm-row").hidden).toBe(true);
-    // Try a demo: reveals the field, fills it with the ready-made tasks, and runs nothing yet.
+    // Default demo (first option = "hello"): reveals the field, fills the ready-made tasks, runs nothing yet.
     w.demoSwarm();
     expect(doc.getElementById("swarm-row").hidden).toBe(false);
     expect(doc.getElementById("swarm-task").value).toContain("README-DEMO.md");
@@ -238,10 +238,29 @@ describe("Agent Deck launcher — live swarm trigger (CPE-541)", () => {
     // Pressing Start launches the pre-filled demo — two disjoint, parallel builder tasks.
     await w.runSwarmFromForm();
     expect(posted).toHaveLength(1);
-    const m = posted[0];
-    expect(m.tasks).toHaveLength(2);
-    expect(m.tasks.map((t: any) => t.globs[0])).toEqual(["README-DEMO.md", "NOTES-DEMO.md"]);
-    expect(m.team.roles.find((r: any) => r.role === "builder").count).toBe(2);
+    expect(posted[0].tasks.map((t: any) => t.globs[0])).toEqual(["README-DEMO.md", "NOTES-DEMO.md"]);
+    expect(posted[0].team.roles.find((r: any) => r.role === "builder").count).toBe(2);
+  });
+
+  it("the demo dropdown offers ≥4 types, and each loads its own safe tasks (CPE-925)", async () => {
+    const { w } = await mountLauncher();
+    const doc = w.document;
+    const select = doc.getElementById("demo-select") as HTMLSelectElement;
+    expect(select.options.length).toBeGreaterThanOrEqual(4);
+
+    // Picking "tidy" loads a single, non-destructive proposal task.
+    select.value = "tidy";
+    w.demoSwarm();
+    const tidy = doc.getElementById("swarm-task").value;
+    expect(tidy).toContain("CLEANUP-PLAN.md");
+    expect(tidy.toLowerCase()).toContain("not"); // proposes but does NOT perform
+    expect(w.parseSwarmTasks(tidy)).toHaveLength(1);
+
+    // Picking "docs" loads two doc-scaffold tasks.
+    select.value = "docs";
+    w.demoSwarm();
+    expect(w.parseSwarmTasks(doc.getElementById("swarm-task").value).map((t: any) => t.globs[0]))
+      .toEqual(["DEMO-README.md", "DEMO-CONTRIBUTING.md"]);
   });
 
   it("staffs one builder per task line — two lines → two builders + two tasks", async () => {

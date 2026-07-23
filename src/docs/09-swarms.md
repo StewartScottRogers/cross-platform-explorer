@@ -27,11 +27,18 @@ session per role, and each agent opens in its own tab, just like a normal launch
 
 ## Try a demo (fastest way to see it)
 
-New to swarms? Click **Try a demo** next to *Run swarm*. It fills in a ready-made two-task example —
-creating a couple of small files (`README-DEMO.md`, `NOTES-DEMO.md`) in the current folder — so you can
-watch a swarm work end-to-end **without writing any tasks yourself**. Just pick your agent and press
-**Start**; nothing else in the folder is touched. It's the quickest way to understand what a coordinator
-and its builders actually do.
+New to swarms? Next to *Run swarm* there's a **demo dropdown** — pick one and click **Load demo**. It fills
+in a ready-made example (all tasks only **create** files — nothing is deleted or moved) so you can watch a
+swarm work end-to-end **without writing any tasks yourself**. Just pick your agent and press **Start**.
+
+The demos:
+
+- **Hello swarm** — two builders create `README-DEMO.md` and `NOTES-DEMO.md`.
+- **Explain this folder** — writes a short `FOLDER-REPORT.md` + a `FILE-TYPES.md` breakdown.
+- **Docs starter** — scaffolds `DEMO-README.md` and `DEMO-CONTRIBUTING.md` skeletons.
+- **Cleanup plan (safe)** — *proposes* tidy-up steps in `CLEANUP-PLAN.md`; deletes nothing.
+
+It's the quickest way to understand what a coordinator and its builders actually do.
 
 ## How the agents coordinate
 

@@ -356,7 +356,13 @@
       <button id="help-btn" type="button" title="How the Agent Deck works — a quick guide">?</button>
       <button id="launch" class="primary">Launch</button>
       <button id="run-swarm" type="button" title="Run a multi-agent swarm — a coordinator plus one builder per task line — experimental (CPE-541)">Run swarm ▾</button>
-      <button id="swarm-demo" type="button" title="Fill in a ready-made example swarm you can run in one click — a guided how-to demo (CPE-924)">Try a demo</button>
+      <select id="demo-select" title="Pick a ready-made demo swarm to load (CPE-925)">
+        <option value="hello">Demo: Hello swarm</option>
+        <option value="folder">Demo: Explain this folder</option>
+        <option value="docs">Demo: Docs starter</option>
+        <option value="tidy">Demo: Cleanup plan (safe)</option>
+      </select>
+      <button id="swarm-demo" type="button" title="Load the selected demo into the swarm tasks, then press Start — a guided how-to demo (CPE-924/925)">Load demo</button>
       <button id="swarm-help" type="button" class="area-help" title="Documents: how swarms work">?</button>
     </div>
     <div class="row" id="swarm-row" hidden>
@@ -1433,20 +1439,47 @@ async function runSwarmFromForm() {
   return runSwarm(mission);
 }
 
-// --- How-To-Demo (CPE-924): a one-click guided demo so you can watch a swarm work without knowing the
-// task syntax. Reveals the swarm task field pre-filled with two small, safe, disjoint example tasks (so
-// they run in parallel) + a plain-language note of what will happen; you press Start to launch it with
-// your selected agent (the "native" provider needs no API key). Teaching by doing.
-const DEMO_SWARM_TASKS = [
-  "README-DEMO.md :: Create a file named README-DEMO.md that greets the user and explains in 3 short bullet points what an agent swarm is",
-  "NOTES-DEMO.md :: Create a file named NOTES-DEMO.md that lists the files in this folder with a one-line description of each",
-].join("\n");
+// --- How-To-Demo (CPE-924/925): one-click guided demos so you can watch a swarm work without knowing
+// the task syntax. Pick a demo from the dropdown; "Load demo" reveals the swarm task field pre-filled
+// with that demo's small, safe, file-creating-only tasks (disjoint globs → they run in parallel) + a
+// plain-language note. Press Start to launch with your selected agent (the "native" provider needs no
+// API key). Every demo only CREATES files — nothing is deleted or moved. Teaching by doing.
+const DEMOS = {
+  hello: {
+    note: "two builders will create two small files (README-DEMO.md, NOTES-DEMO.md) in this folder",
+    tasks: [
+      "README-DEMO.md :: Create a file named README-DEMO.md that greets the user and explains in 3 short bullet points what an agent swarm is",
+      "NOTES-DEMO.md :: Create a file named NOTES-DEMO.md that lists the files in this folder with a one-line description of each",
+    ],
+  },
+  folder: {
+    note: "two builders will write a short report describing this folder (FOLDER-REPORT.md, FILE-TYPES.md)",
+    tasks: [
+      "FOLDER-REPORT.md :: Write FOLDER-REPORT.md summarising what this folder contains and its likely purpose in a few sentences",
+      "FILE-TYPES.md :: Write FILE-TYPES.md grouping the files in this folder by extension with a count of each",
+    ],
+  },
+  docs: {
+    note: "two builders will scaffold starter documentation (DEMO-README.md, DEMO-CONTRIBUTING.md)",
+    tasks: [
+      "DEMO-README.md :: Write DEMO-README.md — a starter README skeleton with Title, Overview, Getting Started, and Usage headings",
+      "DEMO-CONTRIBUTING.md :: Write DEMO-CONTRIBUTING.md — a short contributing-guide skeleton with Setup, Branching, and Pull Requests headings",
+    ],
+  },
+  tidy: {
+    note: "one builder will PROPOSE a cleanup plan in CLEANUP-PLAN.md — nothing is deleted or moved",
+    tasks: [
+      "CLEANUP-PLAN.md :: Review this folder and write CLEANUP-PLAN.md that PROPOSES (but does NOT perform) tidy-up steps — list candidate temp/duplicate/stale files and a suggested action for each. Do not delete or move anything.",
+    ],
+  },
+};
 
 function demoSwarm() {
-  const row = $("swarm-row");
-  row.hidden = false;
-  $("swarm-task").value = DEMO_SWARM_TASKS;
-  setMsg("Demo ready — a coordinator plus two builders will create two small files (README-DEMO.md, NOTES-DEMO.md) in this folder. Pick your agent above, then press Start to watch the swarm work. Nothing else is touched.", true);
+  const sel = $("demo-select");
+  const demo = DEMOS[(sel && sel.value) || "hello"] || DEMOS.hello;
+  $("swarm-row").hidden = false;
+  $("swarm-task").value = demo.tasks.join("\n");
+  setMsg("Demo ready — " + demo.note + ". Pick your agent above, then press Start to watch the swarm work. Nothing else is touched.", true);
   $("swarm-go").focus();
   return true;
 }
