@@ -91,7 +91,7 @@ export async function retagPath(from: string, to: string): Promise<void> {
 
 /** Rename tag `old` → `next` across every path (CPE-653). An empty `next` deletes it. */
 export async function renameTag(old: string, next: string): Promise<void> {
-  const updated = await invoke<TagStore>("rename_tag", { old, new: next });
+  const updated = await invoke<TagStore>("rename_tag", { old, newName: next });
   store.set(updated ?? {});
 }
 

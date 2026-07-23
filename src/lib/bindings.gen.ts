@@ -390,6 +390,17 @@ async tagCounts() : Promise<Result<([string, number])[], string>> {
 }
 },
 /**
+ * Rename a tag across every path (CPE-646); an empty `new` deletes it. Returns the updated store.
+ */
+async renameTag(old: string, newName: string) : Promise<Result<Partial<{ [key in string]: TagEntry }>, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("rename_tag", { old, newName }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
  * Remove a tag from every path (CPE-646). Returns the updated store.
  */
 async deleteTag(tag: string) : Promise<Result<Partial<{ [key in string]: TagEntry }>, string>> {
@@ -535,6 +546,28 @@ async imageMeta(path: string) : Promise<Result<ImageMeta, string>> {
 }
 },
 /**
+ * Streaming variant of `list_dir` (CPE-663, epic CPE-662): pushes `DirEntry` batches over an IPC channel
+ * as the directory is read, so the frontend paints the first rows immediately instead of waiting for the
+ * whole listing. `stream_id` (frontend-supplied, monotonic) registers a cancel flag polled each batch, so
+ * a superseded walk stops promptly instead of reading a huge folder to completion (CPE-665). Returns the
+ * total entry count once the walk completes (or is cancelled).
+ */
+async listDirStream(path: string, streamId: number, onEntry: TAURI_CHANNEL<DirEntry[]>) : Promise<Result<number, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("list_dir_stream", { path, streamId, onEntry }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * Signal an in-flight `list_dir_stream` to stop at the next batch boundary (CPE-665). A no-op if the
+ * stream already finished (its id is gone from the registry).
+ */
+async cancelDirStream(streamId: number) : Promise<void> {
+    await TAURI_INVOKE("cancel_dir_stream", { streamId });
+},
+/**
  * Stat a set of paths into `DirEntry` rows for a virtual listing (smart folders, CPE-667). Paths that
  * no longer exist or can't be read are silently skipped, so a smart folder self-heals as files move or
  * are deleted rather than showing dead rows.
@@ -549,6 +582,35 @@ async entriesForPaths(paths: string[]) : Promise<DirEntry[]> {
  */
 async sameVolume(a: string, b: string) : Promise<boolean> {
     return await TAURI_INVOKE("same_volume", { a, b });
+},
+/**
+ * Streaming variant of `find_files_by_name` (CPE-666, epic CPE-662): pushes batches of hits over an IPC
+ * channel as the tree is walked. The transport (`ipc::Channel`) stays in this adapter; the walk itself
+ * is the shared `cpe_server::name_search::walk_name_matches` (CPE-815). The returned result carries the
+ * final `dirs_scanned` + `truncated` with empty `matches` (those were streamed).
+ */
+async findFilesByNameStream(root: string, query: string, onMatch: TAURI_CHANNEL<NameMatch[]>) : Promise<Result<NameSearchResult, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("find_files_by_name_stream", { root, query, onMatch }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * Streaming variant of `search_file_contents` (CPE-662, streaming-liveness convention): pushes batches of
+ * line matches over an IPC channel as the tree is walked, so a slow content search shows results live
+ * instead of blocking on the whole scan. Async + `spawn_blocking` so the walk never freezes the UI thread
+ * (CPE-760); the walk is the shared `cpe_server::content_search::stream_file_contents` (CPE-815). The
+ * returned result carries the final `files_scanned` + `truncated` with empty `matches` (those streamed).
+ */
+async searchFileContentsStream(root: string, query: string, caseSensitive: boolean, onMatch: TAURI_CHANNEL<ContentMatch[]>) : Promise<Result<ContentSearchResult, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("search_file_contents_stream", { root, query, caseSensitive, onMatch }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
 },
 /**
  * Total recursive size of a directory tree in bytes. Model lives in `cpe_server::disk_usage`
@@ -576,6 +638,21 @@ async dirChildrenSizes(path: string) : Promise<Result<ChildSize[], string>> {
 }
 },
 /**
+ * Streaming variant of `dir_children_sizes` (CPE-706, streaming-liveness convention): pushes each direct
+ * child's recursive size over an IPC channel as it's computed (in parallel), so the space-analyzer
+ * treemap fills in progressively instead of blocking on the whole scan. Async + `spawn_blocking` so the
+ * scan never freezes the UI thread (CPE-760); the walk is the shared `cpe_server::disk_usage::
+ * stream_children_sizes` (CPE-815). Children arrive in completion order; the reactive treemap re-lays-out.
+ */
+async dirChildrenSizesStream(path: string, onChild: TAURI_CHANNEL<ChildSize[]>) : Promise<Result<null, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("dir_children_sizes_stream", { path, onChild }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
  * Recursive counts + size of a directory tree, for the Properties dialog (CPE-649): number of files,
  * number of sub-folders, and total bytes. Cycle-safe (doesn't follow symlinked dirs) and bounded —
  * stops at a large entry cap (reporting `truncated`) so it can't spin on a pathological tree.
@@ -597,6 +674,24 @@ async folderStats(path: string) : Promise<Result<FolderStats, string>> {
 async hashFile(path: string) : Promise<Result<string, string>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("hash_file", { path }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * Execute a backup plan (CPE-797). Model lives in `cpe_server::backup` (CPE-821); thin dispatcher.
+ */
+async applyBackupPlan(sourceRoot: string, destRoot: string, copy: string[], update: string[], deletePaths: string[], verify: boolean) : Promise<OpResult[]> {
+    return await TAURI_INVOKE("apply_backup_plan", { sourceRoot, destRoot, copy, update, deletePaths, verify });
+},
+/**
+ * Streamed backup run (CPE-798 live progress): sends each file's `OpResult` over `on_result` in small
+ * batches as it completes. Returns the total number of results emitted.
+ */
+async applyBackupPlanStream(sourceRoot: string, destRoot: string, copy: string[], update: string[], deletePaths: string[], verify: boolean, onResult: TAURI_CHANNEL<OpResult[]>) : Promise<Result<number, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("apply_backup_plan_stream", { sourceRoot, destRoot, copy, update, deletePaths, verify, onResult }) };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
@@ -794,6 +889,22 @@ async filesIdentical(a: string, b: string) : Promise<Result<boolean, string>> {
 async findDuplicates(root: string) : Promise<Result<DupResult, string>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("find_duplicates", { root }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * Streaming variant of `find_duplicates` (CPE-420, streaming-liveness convention): pushes each confirmed
+ * batch of duplicate groups over an IPC channel as pass 2 hashes them, so a slow scan surfaces groups
+ * progressively instead of blocking on the whole size-then-hash sweep. Async + `spawn_blocking` so the
+ * scan never freezes the UI thread (CPE-760); the walk is the shared `cpe_server::duplicates::
+ * stream_duplicates` (CPE-815). The returned result carries the final `files_scanned` + `truncated` with
+ * empty `groups` (those streamed, in discovery order — the frontend re-sorts each batch).
+ */
+async findDuplicatesStream(root: string, onGroup: TAURI_CHANNEL<DupGroup[]>) : Promise<Result<DupResult, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("find_duplicates_stream", { root, onGroup }) };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
@@ -1114,6 +1225,7 @@ name: string; path: string;
  * "desktop" | "documents" | "downloads" | "pictures" | "music" | "videos" | "drive" | "home".
  */
 kind: string }
+export type TAURI_CHANNEL<TSend> = null
 /**
  * The tags + colour label attached to one path.
  */

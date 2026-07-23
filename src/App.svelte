@@ -3,6 +3,9 @@
   import { convertFileSrc } from "@tauri-apps/api/core";
   import { invoke } from "./lib/invoke";
   import { rawInvoke, createChannel } from "./lib/invoke";
+  // Generated typed command client (CPE-953). First migrated call site — proves the typed surface works
+  // end-to-end (routes through the busy-cursor invoke); the broader migration is incremental.
+  import { commands } from "./lib/bindings.gen";
   import { open as openFolderDialog, save as saveFileDialog } from "@tauri-apps/plugin-dialog";
   import { check, type Update } from "@tauri-apps/plugin-updater";
   import { relaunch, exit } from "@tauri-apps/plugin-process";
@@ -351,7 +354,7 @@
       channel.onmessage = (batch) => { for (const r of batch) results.push(r); };
       await rawInvoke("apply_backup_plan_stream", {
         sourceRoot: job.source, destRoot: job.dest,
-        copy: p.copy, update: p.update, delete: p.delete, verify: true,
+        copy: p.copy, update: p.update, deletePaths: p.delete, verify: true,
         onResult: channel,
       });
       const failed = results.filter((r) => !r.ok).length;
@@ -2922,7 +2925,7 @@
         invoke<Place[]>("special_folders"),
         invoke<Place[]>("list_drives"),
         invoke<string>("home_dir"),
-        invoke<boolean>("can_restore_from_trash"),
+        commands.canRestoreFromTrash(),
       ]);
       places = p;
       drives = d;
