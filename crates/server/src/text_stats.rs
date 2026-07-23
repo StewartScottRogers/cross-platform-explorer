@@ -8,6 +8,7 @@ use serde::Serialize;
 
 /// Counts for a text file. Serialized to match the frontend `TextStats`.
 #[derive(Serialize)]
+#[cfg_attr(feature = "specta", derive(specta::Type))]
 pub struct TextStats {
     lines: u64,
     words: u64,

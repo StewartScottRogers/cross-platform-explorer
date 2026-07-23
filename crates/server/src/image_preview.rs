@@ -41,6 +41,7 @@ pub fn read_image_data_url(path: &str) -> Result<String, String> {
 /// Image dimensions + basic EXIF for the Properties dialog. Best-effort: every field is optional and a
 /// non-image / EXIF-less file yields an all-`None` struct rather than an error.
 #[derive(Serialize, Default)]
+#[cfg_attr(feature = "specta", derive(specta::Type))]
 pub struct ImageMeta {
     width: Option<u32>,
     height: Option<u32>,

@@ -9,6 +9,7 @@
 
 /// The kind of a source symbol (drives the outline icon).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[cfg_attr(feature = "specta", derive(specta::Type))]
 #[serde(rename_all = "snake_case")]
 pub enum SymbolKind {
     Function,
@@ -26,6 +27,7 @@ pub enum SymbolKind {
 
 /// One symbol in the outline.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[cfg_attr(feature = "specta", derive(specta::Type))]
 pub struct Symbol {
     pub name: String,
     pub kind: SymbolKind,

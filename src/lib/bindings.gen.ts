@@ -8,16 +8,137 @@
 
 export const commands = {
 /**
- * Run a resolved user command line through the platform shell and capture its output (CPE-783). The
- * frontend confirms the command with the user first — see the module comment. Async per the commands rule.
+ * List the immediate children of `path`.
+ * List a directory's entries. Model + the shared walker live in `cpe_server::listing` (CPE-815); this
+ * is a thin `spawn_blocking` dispatcher.
  */
-async runCommand(command: string, cwd: string | null) : Promise<Result<CommandOutput, string>> {
+async listDir(path: string) : Promise<Result<DirEntry[], string>> {
     try {
-    return { status: "ok", data: await TAURI_INVOKE("run_command", { command, cwd }) };
+    return { status: "ok", data: await TAURI_INVOKE("list_dir", { path }) };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
 }
+},
+/**
+ * Find the nearest project root at/above `start` — the closest ancestor dir with a `Tickets/` folder —
+ * so the Agent Board can auto-open the project you're inside (CPE-554). `None` if none is found.
+ */
+async findProjectRoot(start: string) : Promise<string | null> {
+    return await TAURI_INVOKE("find_project_root", { start });
+},
+/**
+ * Read every ticket under `<root>/Tickets/{Backlog,Doing,Blocked,Deferred,Done}/CPE-*.md` into board
+ * cards (CPE-520). Read-only; a malformed file is skipped, never fails the listing.
+ */
+async boardCards(root: string) : Promise<Card[]> {
+    return await TAURI_INVOKE("board_cards", { root });
+},
+/**
+ * List the repo's epics for the board's epic-organized view (CPE-530): active/proposed epics from
+ * `Tickets/Epics/` + closed epics from `Tickets/Done/` (top level), each `epic`-tagged. Read-only.
+ */
+async boardEpics(root: string) : Promise<Epic[]> {
+    return await TAURI_INVOKE("board_epics", { root });
+},
+/**
+ * The archived Done tickets (in dated `Done/**` subfolders) for the board's "show archived" affordance
+ * (CPE-531). Kept separate from `board_cards` so the default board stays fast as Done grows.
+ */
+async boardArchived(root: string) : Promise<Card[]> {
+    return await TAURI_INVOKE("board_archived", { root });
+},
+/**
+ * Move ticket `id` to `to_column` (CPE-520): rewrite its `status:` frontmatter to match, then move the
+ * file into that folder. The only writer. Refuses an unknown id/column and never clobbers an existing
+ * file. A move to the current column is a no-op.
+ */
+async boardMove(root: string, id: string, toColumn: string) : Promise<Result<null, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("board_move", { root, id, toColumn }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * Toggle the `review` tag on ticket `id` (CPE-523) — drives the board's virtual Review lane.
+ */
+async boardReview(root: string, id: string, on: boolean) : Promise<Result<null, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("board_review", { root, id, on }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * Append a finding note to ticket `id` (CPE-523) — the affordance a dispatched agent (or the UI) uses
+ * to record progress on a card.
+ */
+async boardNote(root: string, id: string, note: string) : Promise<Result<null, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("board_note", { root, id, note }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * `git diff` (working tree vs HEAD) in `root` for the integrated workbench, with friendly edge cases
+ * (CPE-535): a non-repo folder is a normal `is_repo:false` result (not an error), git-not-installed is
+ * a distinct error, and an empty `root` is refused. An optional `path` limits it to one file. Read-only.
+ */
+async workbenchDiff(root: string, path: string | null) : Promise<Result<WorkbenchDiff, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("workbench_diff", { root, path }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * Return the user's home directory.
+ */
+async homeDir() : Promise<Result<string, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("home_dir") };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * Return the parent of `path`, or null if already at a root.
+ */
+async parentDir(path: string) : Promise<string | null> {
+    return await TAURI_INVOKE("parent_dir", { path });
+},
+/**
+ * Available drives (Windows) or filesystem roots (Unix).
+ */
+async listDrives() : Promise<Place[]> {
+    return await TAURI_INVOKE("list_drives");
+},
+/**
+ * Report free/total space on the volume that holds `path` (CPE-403). `free` is what's available to
+ * the user (respects quotas). Non-fatal: returns an error string the frontend degrades on rather
+ * than surfacing — a status-bar nicety must never break navigation.
+ */
+async diskSpace(path: string) : Promise<Result<DiskSpace, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("disk_space", { path }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * The user's well-known folders. Only folders that actually exist are returned,
+ * so the sidebar never shows a link that leads nowhere.
+ */
+async specialFolders() : Promise<Place[]> {
+    return await TAURI_INVOKE("special_folders");
 },
 /**
  * Create a new directory `name` inside `path`.
@@ -31,12 +152,89 @@ async createDir(path: string, name: string) : Promise<Result<string, string>> {
 }
 },
 /**
- * Create a new empty file `name` inside `path` (CPE-254). Mirrors `create_dir`:
- * `create_new` fails atomically rather than clobbering an existing file.
+ * Read a text file's contents for the preview pane, capped at `max_bytes` so a
+ * huge file can never be slurped into memory. Errors (rather than truncating)
+ * when the file is too large, unreadable, or not valid UTF-8 — the frontend
+ * shows a "can't preview" state in that case.
  */
-async createFile(path: string, name: string) : Promise<Result<string, string>> {
+async readFileText(path: string, maxBytes: number) : Promise<Result<string, string>> {
     try {
-    return { status: "ok", data: await TAURI_INVOKE("create_file", { path, name }) };
+    return { status: "ok", data: await TAURI_INVOKE("read_file_text", { path, maxBytes }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * Read a byte range of a file without loading the whole file — backs the hex inspector's paging
+ * (CPE-772, epic CPE-719). Seeks to `offset` (past EOF yields an empty slice, not an error, so the
+ * viewer can page freely) and reads up to `len` bytes, clamped to EOF.
+ */
+async readFileRange(path: string, offset: number, len: number) : Promise<Result<number[], string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("read_file_range", { path, offset, len }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * Total byte length of a file (CPE-772) — lets the hex viewer size its scrollbar without reading.
+ */
+async fileLen(path: string) : Promise<Result<number, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("file_len", { path }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async setPermissions(path: string, mode: number) : Promise<Result<number, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("set_permissions", { path, mode }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * Toggle a file's read-only flag (cross-platform), returning the prior state for undo (CPE-785).
+ */
+async setReadonly(path: string, readonly: boolean) : Promise<Result<boolean, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("set_readonly", { path, readonly }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * Set a file's modified/accessed timestamps (CPE-785). Each is optional (unchanged when `None`); returns
+ * the prior `(modified, accessed)` as epoch-ms for undo. Cross-platform via the `filetime` crate.
+ */
+async setFileTimes(path: string, modifiedMs: number | null, accessedMs: number | null) : Promise<Result<[number, number], string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("set_file_times", { path, modifiedMs, accessedMs }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * Toggle a Windows file attribute (`hidden` / `system` / `archive`), returning the prior state for undo
+ * (CPE-785). Windows only.
+ */
+async setFileAttribute(path: string, attr: string, value: boolean) : Promise<Result<boolean, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("set_file_attribute", { path, attr, value }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async readAttributes(path: string) : Promise<Result<FileAttributes, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("read_attributes", { path }) };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
@@ -55,47 +253,184 @@ async writeFileText(path: string, contents: string) : Promise<Result<number, str
 }
 },
 /**
+ * List an archive's entries without extracting it, for the preview pane. Model lives in
+ * `cpe_server::archive` (CPE-815); this is a thin `spawn_blocking` dispatcher.
+ */
+async readArchiveEntries(path: string) : Promise<Result<ArchiveEntry[], string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("read_archive_entries", { path }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * Return a human-readable text summary of a binary file, dispatched by
+ * extension. Rendered read-only by the preview pane's "info" provider.
+ */
+async readPreviewInfo(path: string) : Promise<Result<string, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("read_preview_info", { path }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async dataBrowserSources(path: string) : Promise<Result<string[], string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("data_browser_sources", { path }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async dataBrowserPage(path: string, source: string, offset: number, limit: number) : Promise<Result<Page, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("data_browser_page", { path, source, offset, limit }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async dataBrowserQuery(path: string, sql: string, offset: number, limit: number) : Promise<Result<Page, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("data_browser_query", { path, sql, offset, limit }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * Decode an image the webview can't render natively (TIFF, PSD) to a PNG
+ * `data:` URL the <img> tag can show (CPE-099/101). PSD uses the psd crate's
+ * flattened composite; TIFF uses the image crate. Capped by the source reader,
+ * and errors (rather than hangs) on a corrupt file.
+ * Transcode TIFF/PSD to a PNG `data:` URL. Model lives in `cpe_server::image_preview` (CPE-815); the
+ * command caps the source size first, then dispatches.
+ */
+async readImageDataUrl(path: string) : Promise<Result<string, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("read_image_data_url", { path }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * A PNG thumbnail of an image file as a `data:` URL the `<img>` tag can show (CPE-642), served from
+ * an mtime-keyed on-disk cache (CPE-644). Bounded by the preview size cap so a huge image can't
+ * exhaust memory. Errors (rather than hangs) on a non-image, so the frontend falls back to an icon.
+ */
+async thumbnail(path: string, maxEdge: number) : Promise<Result<string, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("thumbnail", { path, maxEdge }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * Read `settings.json` from `dir`, returning `{}` when it's absent or
+ * unreadable so the frontend always starts from a valid document.
+ * Read the single on-disk settings file (`settings.json` in the app config dir). Returns `{}` when it
+ * doesn't exist yet, so the frontend can start from defaults on a fresh install (CPE-226). The model
+ * lives in `cpe_server::settings` (CPE-815); this is a thin dispatcher.
+ */
+async readSettings() : Promise<Result<string, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("read_settings") };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * Write the single on-disk settings file, creating the config dir if needed (CPE-226). `contents` is
+ * the full settings JSON document.
+ */
+async writeSettings(contents: string) : Promise<Result<null, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("write_settings", { contents }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * The whole tag store (path → {tags,label}); `{}` on a fresh install.
+ */
+async loadTags() : Promise<Result<Partial<{ [key in string]: TagEntry }>, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("load_tags") };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * Replace one path's tags + label and persist. Returns the updated whole store.
+ */
+async setTags(path: string, tags: string[], label: string) : Promise<Result<Partial<{ [key in string]: TagEntry }>, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("set_tags", { path, tags, label }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * Every tag with its usage count (most-used first).
+ */
+async tagCounts() : Promise<Result<([string, number])[], string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("tag_counts") };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * Remove a tag from every path (CPE-646). Returns the updated store.
+ */
+async deleteTag(tag: string) : Promise<Result<Partial<{ [key in string]: TagEntry }>, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("delete_tag", { tag }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * Import a previously-exported tag store (JSON), merged into the current one (CPE-640). Non-
+ * destructive: existing tags are kept, imported tags unioned in. Returns the merged store. (Export
+ * is just `load_tags` + `JSON.stringify` on the frontend.)
+ */
+async importTags(json: string) : Promise<Result<Partial<{ [key in string]: TagEntry }>, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("import_tags", { json }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * Re-key a path's tags/label after an in-app rename or move (CPE-650), so tags follow the file.
+ * Returns the updated store. A no-op when the old path had no tags.
+ */
+async retagPath(from: string, to: string) : Promise<Result<Partial<{ [key in string]: TagEntry }>, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("retag_path", { from, to }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
  * Rename a single entry in place. Returns the new path.
  */
 async renameEntry(path: string, newName: string) : Promise<Result<string, string>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("rename_entry", { path, newName }) };
-} catch (e) {
-    if(e instanceof Error) throw e;
-    else return { status: "error", error: e  as any };
-}
-},
-/**
- * Can this platform restore items from the OS trash?
- * 
- * `trash::os_limited` (list + restore) is implemented on Windows and Linux but
- * NOT on macOS. The UI calls this so it can decide whether to offer undo-of-
- * delete at all. Offering an Undo that silently does nothing on one platform is
- * worse than not offering it — so we tell the truth instead of guessing.
- */
-async canRestoreFromTrash() : Promise<boolean> {
-    return await TAURI_INVOKE("can_restore_from_trash");
-},
-/**
- * List the immediate children of `path`.
- * List a directory's entries. Model + the shared walker live in `cpe_server::listing` (CPE-815); this
- * is a thin `spawn_blocking` dispatcher.
- */
-async listDir(path: string) : Promise<Result<DirEntry[], string>> {
-    try {
-    return { status: "ok", data: await TAURI_INVOKE("list_dir", { path }) };
-} catch (e) {
-    if(e instanceof Error) throw e;
-    else return { status: "error", error: e  as any };
-}
-},
-/**
- * Detailed metadata for the Properties dialog. Model lives in `cpe_server::model` (CPE-815); this is a
- * thin `spawn_blocking` dispatcher.
- */
-async entryInfo(path: string) : Promise<Result<EntryInfo, string>> {
-    try {
-    return { status: "ok", data: await TAURI_INVOKE("entry_info", { path }) };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
@@ -115,6 +450,23 @@ async deletePermanent(paths: string[]) : Promise<OpResult[]> {
     return await TAURI_INVOKE("delete_permanent", { paths });
 },
 /**
+ * Can this platform restore items from the OS trash?
+ * 
+ * `trash::os_limited` (list + restore) is implemented on Windows and Linux but
+ * NOT on macOS. The UI calls this so it can decide whether to offer undo-of-
+ * delete at all. Offering an Undo that silently does nothing on one platform is
+ * worse than not offering it — so we tell the truth instead of guessing.
+ */
+async canRestoreFromTrash() : Promise<boolean> {
+    return await TAURI_INVOKE("can_restore_from_trash");
+},
+/**
+ * Restore previously-trashed items to their original paths.
+ */
+async restoreFromTrash(paths: string[]) : Promise<OpResult[]> {
+    return await TAURI_INVOKE("restore_from_trash", { paths });
+},
+/**
  * Copy entries into `dest`, auto-renaming on collision.
  */
 async copyEntries(paths: string[], dest: string) : Promise<OpResult[]> {
@@ -129,6 +481,25 @@ async moveEntries(paths: string[], dest: string) : Promise<OpResult[]> {
     return await TAURI_INVOKE("move_entries", { paths, dest });
 },
 /**
+ * Execute a landed file's resolved action pipeline. See the module comment. Async per the commands rule.
+ */
+async runWatchActions(path: string, actions: WatchAction[]) : Promise<OpResult[]> {
+    return await TAURI_INVOKE("run_watch_actions", { path, actions });
+},
+/**
+ * Start a copy/move on a background thread, returning its id immediately. Progress is emitted as
+ * `transfer://progress` events and the final `TransferReport` as `transfer://done` (CPE-620).
+ */
+async startTransfer(sources: string[], dest: string, kind: TransferKind, policy: ConflictPolicy) : Promise<number> {
+    return await TAURI_INVOKE("start_transfer", { sources, dest, kind, policy });
+},
+/**
+ * Signal a running transfer to stop at the next chunk boundary (CPE-620).
+ */
+async cancelTransfer(id: number) : Promise<void> {
+    await TAURI_INVOKE("cancel_transfer", { id });
+},
+/**
  * Move each `from` to an EXACT `to` path. Used by undo, which must restore an
  * item to its original name — auto-renaming here would defeat the point (undo
  * of "rename a -> b" must produce "a", not "a - Copy").
@@ -138,6 +509,404 @@ async moveEntries(paths: string[], dest: string) : Promise<OpResult[]> {
  */
 async moveExact(pairs: ([string, string])[]) : Promise<OpResult[]> {
     return await TAURI_INVOKE("move_exact", { pairs });
+},
+/**
+ * Detailed metadata for the Properties dialog. Model lives in `cpe_server::model` (CPE-815); this is a
+ * thin `spawn_blocking` dispatcher.
+ */
+async entryInfo(path: string) : Promise<Result<EntryInfo, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("entry_info", { path }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * Image dimensions + basic EXIF for the Properties dialog (CPE-659). Model lives in
+ * `cpe_server::image_preview` (CPE-815); this is a thin `spawn_blocking` dispatcher.
+ */
+async imageMeta(path: string) : Promise<Result<ImageMeta, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("image_meta", { path }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * Stat a set of paths into `DirEntry` rows for a virtual listing (smart folders, CPE-667). Paths that
+ * no longer exist or can't be read are silently skipped, so a smart folder self-heals as files move or
+ * are deleted rather than showing dead rows.
+ */
+async entriesForPaths(paths: string[]) : Promise<DirEntry[]> {
+    return await TAURI_INVOKE("entries_for_paths", { paths });
+},
+/**
+ * Whether two paths live on the same volume/device, for the drag copy-vs-move rule (CPE-668, epic
+ * CPE-661): same volume → move, different → copy. Best-effort — any uncertainty yields `false` so the
+ * caller falls back to copy (which never loses the source).
+ */
+async sameVolume(a: string, b: string) : Promise<boolean> {
+    return await TAURI_INVOKE("same_volume", { a, b });
+},
+/**
+ * Total recursive size of a directory tree in bytes. Model lives in `cpe_server::disk_usage`
+ * (CPE-815); this is a thin `spawn_blocking` dispatcher.
+ */
+async dirSize(path: string) : Promise<Result<number, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("dir_size", { path }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * The immediate children of `path`, each with its recursive size — the per-child breakdown the treemap
+ * needs for the space analyzer (CPE-749). Model lives in `cpe_server::disk_usage` (CPE-815); this is a
+ * thin `spawn_blocking` dispatcher.
+ */
+async dirChildrenSizes(path: string) : Promise<Result<ChildSize[], string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("dir_children_sizes", { path }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * Recursive counts + size of a directory tree, for the Properties dialog (CPE-649): number of files,
+ * number of sub-folders, and total bytes. Cycle-safe (doesn't follow symlinked dirs) and bounded —
+ * stops at a large entry cap (reporting `truncated`) so it can't spin on a pathological tree.
+ * Model lives in `cpe_server::folder_stats` (CPE-815); this is a thin `spawn_blocking` dispatcher.
+ */
+async folderStats(path: string) : Promise<Result<FolderStats, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("folder_stats", { path }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * Compute the SHA-256 checksum of a file, returned as lowercase hex (CPE-412). Streamed in fixed
+ * chunks so a multi-GB file never loads into memory. A directory, missing, or unreadable path is an
+ * `Err`, never a panic. Opt-in from the UI (hashing is I/O-bound) — never run automatically.
+ */
+async hashFile(path: string) : Promise<Result<string, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("hash_file", { path }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * Recursively checksum every file under `path` into a baseline manifest — the on-demand baseline for
+ * the integrity guard (CPE-791). Symlinks are not followed and unreadable files are skipped; the result
+ * is sorted by path for a stable diff. Model lives in `cpe_server::checksum` (CPE-815).
+ */
+async checksumFolder(path: string) : Promise<Result<ChecksumEntry[], string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("checksum_folder", { path }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * Re-scan `path` and classify it against a stored `baseline` in one backend pass (CPE-870, epic CPE-737):
+ * returns only the compact integrity report (changed paths) instead of shipping the whole manifest to the
+ * webview to diff — so large trees stay responsive, and verification can run headlessly. Model in
+ * `cpe_server::checksum` (CPE-815).
+ */
+async verifyFolder(path: string, baseline: ChecksumEntry[]) : Promise<Result<IntegrityReport, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("verify_folder", { path, baseline }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * Verify every baselined folder in one pass (CPE-871, epic CPE-737): re-scan + classify each against its
+ * stored baseline, returning a report per folder. A folder that can't be scanned (deleted/unmounted) is
+ * skipped rather than failing the whole sweep — the "monitor all my folders" one-shot behind the
+ * "Verify all baselined folders" action. Returns only the compact reports.
+ */
+async verifyAllBaselines(baselines: Partial<{ [key in string]: ChecksumEntry[] }>) : Promise<Result<Partial<{ [key in string]: IntegrityReport }>, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("verify_all_baselines", { baselines }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * Scan the children of `path` into a `CompareNode`-shaped tree (CPE-779). Model lives in
+ * `cpe_server::compare` (CPE-815); this is a thin `spawn_blocking` dispatcher.
+ */
+async scanTree(path: string, maxDepth: number) : Promise<Result<TreeNode[], string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("scan_tree", { path, maxDepth }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * Create a symbolic link at `link_path` pointing to `target` (CPE-802, epic CPE-715). On Windows a
+ * directory target makes a dir-symlink, else a file-symlink; the OS error is returned on failure (e.g.
+ * Windows symlink creation without Developer Mode / admin), so the UI can prompt for elevation.
+ */
+async createSymlink(target: string, linkPath: string) : Promise<Result<null, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("create_symlink", { target, linkPath }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * Create a hardlink at `link_path` for the same file data as `target` (CPE-802). Cross-platform.
+ * Model lives in `cpe_server::links` (CPE-815); this is a thin `spawn_blocking` dispatcher.
+ */
+async createHardLink(target: string, linkPath: string) : Promise<Result<null, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("create_hard_link", { target, linkPath }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * Inspect `path` — is it a symlink, its target, and whether that target is missing (a broken link)
+ * (CPE-804, epic CPE-715). Never fails. Model in `cpe_server::links` (CPE-815).
+ */
+async linkStatus(path: string) : Promise<LinkStatus> {
+    return await TAURI_INVOKE("link_status", { path });
+},
+/**
+ * Classify the drive a path lives on (CPE-805, epic CPE-716) — fixed / removable / network / cdrom / ram
+ * / unknown — so the sidebar can badge removable & network drives. Windows uses `GetDriveTypeW`; unix
+ * returns a best-effort `fixed` for now (richer classification is a follow-up).
+ */
+async driveType(path: string) : Promise<Result<string, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("drive_type", { path }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * Append one filesystem-activity event to its session journal (bounded/rotated). `ts` is stamped here
+ * (server-side epoch ms) so callers can't skew the log.
+ */
+async auditRecord(session: string, kind: string, path: string, detail: string | null) : Promise<Result<null, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("audit_record", { session, kind, path, detail }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * List the session ids that have a persisted journal (most useful sorted; newest-first is the UI's job).
+ */
+async auditSessions() : Promise<Result<string[], string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("audit_sessions") };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * Read every event for one past session back (append order; malformed lines skipped).
+ */
+async auditRead(session: string) : Promise<Result<AuditEvent[], string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("audit_read", { session }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * Line / word / character / byte counts for a text file (CPE-414). Lines follow `str::lines`
+ * (a final unterminated line still counts); words are whitespace-separated; characters are Unicode
+ * scalar values. Capped so analysing a file stays predictable; a non-UTF-8 (binary) file, a
+ * directory, or an over-cap file is an `Err`. Opt-in from the UI, never automatic.
+ * Model lives in `cpe_server::text_stats` (CPE-815); this is a thin `spawn_blocking` dispatcher.
+ */
+async textStats(path: string) : Promise<Result<TextStats, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("text_stats", { path }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * Search text files under `root` for lines containing `query` (CPE-416). Model lives in
+ * `cpe_server::content_search` (CPE-815); this is a thin `spawn_blocking` dispatcher.
+ */
+async searchFileContents(root: string, query: string, caseSensitive: boolean) : Promise<Result<ContentSearchResult, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("search_file_contents", { root, query, caseSensitive }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * Find files/folders under `root` whose name matches `query`. Model lives in
+ * `cpe_server::name_search` (CPE-815); this is a thin `spawn_blocking` dispatcher.
+ */
+async findFilesByName(root: string, query: string) : Promise<Result<NameSearchResult, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("find_files_by_name", { root, query }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * Whether two files have identical content (CPE-418). Different sizes short-circuit to `false`;
+ * otherwise the bytes are streamed and compared with an early exit on the first difference — cheaper
+ * and collision-free versus hashing both. A directory or unreadable path is an `Err`, never a panic.
+ * Model lives in `cpe_server::compare` (CPE-815); this is a thin `spawn_blocking` dispatcher.
+ */
+async filesIdentical(a: string, b: string) : Promise<Result<boolean, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("files_identical", { a, b }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * Find duplicate files under `root` (CPE-420) — size-then-hash two-pass scan. Model lives in
+ * `cpe_server::duplicates` (CPE-815); this is a thin `spawn_blocking` dispatcher.
+ */
+async findDuplicates(root: string) : Promise<Result<DupResult, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("find_duplicates", { root }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * Read a repo's `.git/config` and return its origin remote as a browsable https
+ * URL (folder-context plugins, CPE-235). A cheap single file read; returns None
+ * if the folder isn't a repo or has no remote.
+ */
+async gitRemoteUrl(path: string) : Promise<string | null> {
+    return await TAURI_INVOKE("git_remote_url", { path });
+},
+/**
+ * Open a file or folder with its default OS application (CPE-240). Uses the OS
+ * shell opener directly (Windows `start`, macOS `open`, Linux `xdg-open`) —
+ * more reliable than the opener plugin, which wasn't launching apps for several
+ * file types. For an executable (.exe/.cmd/.bat/…) this runs it.
+ */
+async openExternal(path: string) : Promise<Result<null, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("open_external", { path }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * Run an executable with elevation (CPE-241). On Windows this uses
+ * `Start-Process -Verb RunAs`, which shows the UAC prompt. On other platforms
+ * there is no standard per-launch elevation prompt, so it runs normally.
+ */
+async runAsAdmin(path: string) : Promise<Result<null, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("run_as_admin", { path }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * Extract a single entry from a ZIP to a temp file and return its path, so it
+ * can be opened with its default app while browsing inside the archive
+ * (CPE-242). Read-only: the temp copy is what opens, not the archived bytes.
+ */
+async extractArchiveEntry(zip: string, inner: string) : Promise<Result<string, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("extract_archive_entry", { zip, inner }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * Pack the given files/folders into a new deflated `.zip` at `dest` (CPE-251). Model lives in
+ * `cpe_server::archive` (CPE-822); thin dispatcher.
+ */
+async compressToZip(paths: string[], dest: string) : Promise<Result<string, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("compress_to_zip", { paths, dest }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * Extract an archive into `dest` (CPE-252), guarded against zip-slip for every format. Model lives in
+ * `cpe_server::archive` (CPE-822); thin dispatcher.
+ */
+async extractArchive(path: string, dest: string) : Promise<Result<string, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("extract_archive", { path, dest }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * Open the platform's terminal with its working directory set to `path`
+ * (CPE-253). Windows prefers Windows Terminal and falls back to a fresh cmd
+ * window; macOS uses Terminal.app; Linux tries the common emulators in turn.
+ */
+async openTerminal(path: string) : Promise<Result<null, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("open_terminal", { path }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * Run a resolved user command line through the platform shell and capture its output (CPE-783). The
+ * frontend confirms the command with the user first — see the module comment. Async per the commands rule.
+ */
+async runCommand(command: string, cwd: string | null) : Promise<Result<CommandOutput, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("run_command", { command, cwd }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * Create a new empty file `name` inside `path` (CPE-254). Mirrors `create_dir`:
+ * `create_new` fails atomically rather than clobbering an existing file.
+ */
+async createFile(path: string, name: string) : Promise<Result<string, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("create_file", { path, name }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
 }
 }
 
@@ -152,6 +921,57 @@ async moveExact(pairs: ([string, string])[]) : Promise<OpResult[]> {
 /** user-defined types **/
 
 /**
+ * One entry inside an archive, for the archive preview.
+ */
+export type ArchiveEntry = { name: string; size: number; is_dir: boolean }
+/**
+ * One filesystem-activity event. Mirrors the frontend `AuditEvent` (`src/lib/auditExport.ts`).
+ */
+export type AuditEvent = { 
+/**
+ * Epoch milliseconds.
+ */
+ts: number; 
+/**
+ * Session id.
+ */
+session: string; 
+/**
+ * Activity kind (created / modified / removed / renamed / read).
+ */
+kind: string; 
+/**
+ * Absolute path the activity touched.
+ */
+path: string; 
+/**
+ * Optional extra detail (rename target, diff summary, ...).
+ */
+detail?: string | null }
+/**
+ * A board card — a ticket flattened for the Kanban UI.
+ */
+export type Card = { id: string; title: string; ticket_type: string; priority: string; tags: string[]; epic: string | null; sprint: string | null; 
+/**
+ * The column this card is in (its folder).
+ */
+column: string }
+/**
+ * A file's checksum baseline entry (CPE-791) — matches the frontend `ChecksumEntry` (CPE-790).
+ * `modified` is epoch-ms.
+ */
+export type ChecksumEntry = { path: string; sha256: string; size: number; modified: number | null }
+/**
+ * One direct child of a folder with its recursive size, for the treemap + drill-down (CPE-749). A
+ * symlinked dir contributes `0` (not followed). Serialized to match the frontend `ChildSize`.
+ */
+export type ChildSize = { name: string; path: string; is_dir: boolean; size: number }
+/**
+ * One column of a result grid: its name and a best-effort type label (the declared SQLite type, the
+ * Parquet physical type; empty for spreadsheet headers, which carry no type).
+ */
+export type Column = { name: string; type: string }
+/**
  * Captured result of a user command run.
  */
 export type CommandOutput = { stdout: string; stderr: string; 
@@ -163,6 +983,30 @@ code: number | null;
  * True when either stream was truncated at the cap.
  */
 truncated: boolean }
+/**
+ * How a name collision at the destination is resolved for the whole batch.
+ */
+export type ConflictPolicy = 
+/**
+ * Replace the existing entry.
+ */
+"overwrite" | 
+/**
+ * Leave the existing entry; don't transfer this source.
+ */
+"skip" | 
+/**
+ * Keep both — auto-number the new one ("name (2)").
+ */
+"keepboth"
+/**
+ * One content-search hit: the file, the 1-based line number, and the (trimmed, truncated) line.
+ */
+export type ContentMatch = { path: string; line_number: number; line: string }
+/**
+ * The result of a content search: the hits, how many files were scanned, and whether a cap was hit.
+ */
+export type ContentSearchResult = { matches: ContentMatch[]; files_scanned: number; truncated: boolean }
 /**
  * One entry in a directory listing. Fields serialize by name to match the frontend `DirEntry`.
  */
@@ -181,15 +1025,121 @@ extension: string;
  */
 hidden: boolean }
 /**
+ * Free + total bytes on the volume containing `path`, for the status bar (CPE-403).
+ */
+export type DiskSpace = { free: number; total: number }
+/**
+ * A set of byte-identical files: their shared size + hash and every path.
+ */
+export type DupGroup = { size: number; hash: string; paths: string[] }
+/**
+ * The result of a duplicate scan: the groups (largest reclaimable space first), how many files were
+ * considered, and whether the file cap was hit.
+ */
+export type DupResult = { groups: DupGroup[]; files_scanned: number; truncated: boolean }
+/**
  * Detailed metadata for the Properties dialog.
  */
 export type EntryInfo = { name: string; path: string; is_dir: boolean; size: number; modified: number | null; created: number | null; readonly: boolean; hidden: boolean }
+/**
+ * An epic for the board's epic-organized left pane (CPE-530).
+ */
+export type Epic = { id: string; title: string; status: string; tags: string[] }
+/**
+ * A file's editable attributes. Windows fills the four flag bits; POSIX fills `mode` (octal) + readonly.
+ */
+export type FileAttributes = { readonly: boolean; hidden: boolean; system: boolean; archive: boolean; 
+/**
+ * POSIX permission bits as an octal string (e.g. "644"); `None` on Windows.
+ */
+mode: string | null }
+/**
+ * Recursive folder totals. Serialized to match the frontend `FolderStats`.
+ */
+export type FolderStats = { files: number; dirs: number; bytes: number; truncated: boolean }
+/**
+ * Image dimensions + basic EXIF for the Properties dialog. Best-effort: every field is optional and a
+ * non-image / EXIF-less file yields an all-`None` struct rather than an error.
+ */
+export type ImageMeta = { width: number | null; height: number | null; camera: string | null; lens: string | null; taken: string | null; iso: string | null; aperture: string | null; exposure: string | null; focal_length: string | null }
+/**
+ * Paths grouped by how a fresh scan changed relative to a baseline (CPE-870, epic CPE-737). Mirrors the
+ * frontend `verifyManifest` (CPE-790): hash + mtime both moved → intended `edited`; hash moved but mtime
+ * did NOT → silent `corrupted` (bitrot); baseline-only → `missing`; scan-only → `new`.
+ */
+export type IntegrityReport = { intact: string[]; edited: string[]; corrupted: string[]; missing: string[]; new: string[] }
+/**
+ * A path's link status for the file list + link tooling (CPE-804, epic CPE-715): whether it's a symlink,
+ * where it points, and whether that target is currently missing (a broken link).
+ */
+export type LinkStatus = { is_symlink: boolean; 
+/**
+ * The link's stored target (may be relative). `None` for a non-symlink or an unreadable link.
+ */
+target: string | null; 
+/**
+ * True only for a symlink whose target does not currently resolve.
+ */
+broken: boolean }
+/**
+ * One filename-search hit: the full path, the bare name, and whether it's a folder.
+ */
+export type NameMatch = { path: string; name: string; is_dir: boolean }
+/**
+ * The result of a filename search: the hits, how many directories were walked, and whether a cap was
+ * hit (so the UI can say "showing the first results").
+ */
+export type NameSearchResult = { matches: NameMatch[]; dirs_scanned: number; truncated: boolean }
 /**
  * Per-item outcome of a bulk operation. Bulk file operations must NOT be all-or-nothing and must not
  * abort on the first failure: if 9 of 10 files copy and one is locked, the user needs to know exactly
  * which one failed.
  */
 export type OpResult = { path: string; ok: boolean; error: string }
+/**
+ * A window of rows from a data source: the columns, the row window (each cell stringified), and the
+ * total row count when known (so the UI can size a scrollbar without loading everything).
+ */
+export type Page = { columns: Column[]; rows: string[][]; total?: number | null }
+/**
+ * A sidebar quick-access location (special folder or drive).
+ */
+export type Place = { 
+/**
+ * Display name, e.g. "Documents" or "Local Disk (C:)".
+ */
+name: string; path: string; 
+/**
+ * Logical kind, used by the UI to pick an icon:
+ * "desktop" | "documents" | "downloads" | "pictures" | "music" | "videos" | "drive" | "home".
+ */
+kind: string }
+/**
+ * The tags + colour label attached to one path.
+ */
+export type TagEntry = { tags?: string[]; label?: string }
+/**
+ * Counts for a text file. Serialized to match the frontend `TextStats`.
+ */
+export type TextStats = { lines: number; words: number; chars: number; bytes: number }
+/**
+ * Whether a batch copies or moves its sources.
+ */
+export type TransferKind = "copy" | "move"
+/**
+ * One node of a scanned tree (CPE-779). Serialized camelCase to match the frontend `CompareNode`
+ * (`isDir`).
+ */
+export type TreeNode = { name: string; isDir: boolean; size?: number | null; modified?: number | null; children?: TreeNode[] | null }
+/**
+ * One resolved watch action to execute: `kind` is `move` | `copy` | `rename`; `resolved` is the
+ * destination directory (move/copy) or the new file name (rename), already expanded by the planner.
+ */
+export type WatchAction = { kind: string; resolved: string }
+/**
+ * The workbench's view of a folder (CPE-526/535): whether it's a git repo, the branch, and the diff.
+ */
+export type WorkbenchDiff = { is_repo: boolean; branch: string | null; diff: string }
 
 /** tauri-specta globals **/
 

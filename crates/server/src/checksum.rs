@@ -21,6 +21,7 @@ pub fn hash_file(path: &str) -> Result<String, String> {
 /// A file's checksum baseline entry (CPE-791) — matches the frontend `ChecksumEntry` (CPE-790).
 /// `modified` is epoch-ms.
 #[derive(Serialize, Deserialize)]
+#[cfg_attr(feature = "specta", derive(specta::Type))]
 pub struct ChecksumEntry {
     path: String,
     sha256: String,
@@ -67,6 +68,7 @@ fn checksum_walk(dir: &Path, out: &mut Vec<ChecksumEntry>) {
 /// frontend `verifyManifest` (CPE-790): hash + mtime both moved → intended `edited`; hash moved but mtime
 /// did NOT → silent `corrupted` (bitrot); baseline-only → `missing`; scan-only → `new`.
 #[derive(Serialize, Default)]
+#[cfg_attr(feature = "specta", derive(specta::Type))]
 pub struct IntegrityReport {
     pub intact: Vec<String>,
     pub edited: Vec<String>,

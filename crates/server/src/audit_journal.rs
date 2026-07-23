@@ -17,6 +17,7 @@ use std::path::{Path, PathBuf};
 
 /// One filesystem-activity event. Mirrors the frontend `AuditEvent` (`src/lib/auditExport.ts`).
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[cfg_attr(feature = "specta", derive(specta::Type))]
 pub struct AuditEvent {
     /// Epoch milliseconds.
     pub ts: u64,

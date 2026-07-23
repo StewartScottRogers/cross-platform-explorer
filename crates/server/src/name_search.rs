@@ -13,6 +13,7 @@ use crate::fsutil::entry_is_symlink;
 
 /// One filename-search hit: the full path, the bare name, and whether it's a folder.
 #[derive(Serialize)]
+#[cfg_attr(feature = "specta", derive(specta::Type))]
 pub struct NameMatch {
     pub path: String,
     pub name: String,
@@ -22,6 +23,7 @@ pub struct NameMatch {
 /// The result of a filename search: the hits, how many directories were walked, and whether a cap was
 /// hit (so the UI can say "showing the first results").
 #[derive(Serialize)]
+#[cfg_attr(feature = "specta", derive(specta::Type))]
 pub struct NameSearchResult {
     pub matches: Vec<NameMatch>,
     pub dirs_scanned: u64,

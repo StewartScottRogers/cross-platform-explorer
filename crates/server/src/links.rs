@@ -30,6 +30,7 @@ pub fn create_hard_link(target: &str, link_path: &str) -> Result<(), String> {
 /// A path's link status for the file list + link tooling (CPE-804, epic CPE-715): whether it's a symlink,
 /// where it points, and whether that target is currently missing (a broken link).
 #[derive(serde::Serialize, Default, PartialEq, Debug)]
+#[cfg_attr(feature = "specta", derive(specta::Type))]
 pub struct LinkStatus {
     pub is_symlink: bool,
     /// The link's stored target (may be relative). `None` for a non-symlink or an unreadable link.

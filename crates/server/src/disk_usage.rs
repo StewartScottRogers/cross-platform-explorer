@@ -46,6 +46,7 @@ pub fn dir_size(path: &str) -> Result<u64, String> {
 /// One direct child of a folder with its recursive size, for the treemap + drill-down (CPE-749). A
 /// symlinked dir contributes `0` (not followed). Serialized to match the frontend `ChildSize`.
 #[derive(Serialize)]
+#[cfg_attr(feature = "specta", derive(specta::Type))]
 pub struct ChildSize {
     name: String,
     path: String,

@@ -14,6 +14,7 @@ use std::path::{Path, PathBuf};
 /// How a saved connection authenticates. **No secret material** — a password's value and a key's
 /// passphrase live in the OS keychain, not in the profile.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "specta", derive(specta::Type))]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum AuthMethod {
     /// Password auth; the password itself is stored in the keychain, keyed by the connection.
@@ -24,6 +25,7 @@ pub enum AuthMethod {
 
 /// A saved remote connection profile. `name` is the stable display name / identity (unique in a store).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "specta", derive(specta::Type))]
 pub struct Connection {
     pub name: String,
     /// Scheme, e.g. `"sftp"` (matches [`crate::location::Scheme`] lower-cased).

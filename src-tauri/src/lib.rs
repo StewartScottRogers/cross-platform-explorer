@@ -58,6 +58,7 @@ use cpe_server::fsutil::to_epoch_ms;
 /// Read every ticket under `<root>/Tickets/{Backlog,Doing,Blocked,Deferred,Done}/CPE-*.md` into board
 /// cards (CPE-520). Read-only; a malformed file is skipped, never fails the listing.
 #[tauri::command]
+#[cfg_attr(feature = "specta-bindings", specta::specta)]
 async fn board_cards(root: String) -> Vec<ticket_board::Card> {
     tauri::async_runtime::spawn_blocking(move || board_cards_impl(root))
         .await.unwrap()
@@ -87,6 +88,7 @@ fn board_cards_impl(root: String) -> Vec<ticket_board::Card> {
 /// Find the nearest project root at/above `start` — the closest ancestor dir with a `Tickets/` folder —
 /// so the Agent Board can auto-open the project you're inside (CPE-554). `None` if none is found.
 #[tauri::command]
+#[cfg_attr(feature = "specta-bindings", specta::specta)]
 async fn find_project_root(start: String) -> Option<String> {
     tauri::async_runtime::spawn_blocking(move || find_project_root_impl(start))
         .await.unwrap()
@@ -101,6 +103,7 @@ fn find_project_root_impl(start: String) -> Option<String> {
 /// file into that folder. The only writer. Refuses an unknown id/column and never clobbers an existing
 /// file. A move to the current column is a no-op.
 #[tauri::command]
+#[cfg_attr(feature = "specta-bindings", specta::specta)]
 async fn board_move(root: String, id: String, to_column: String) -> Result<(), String> {
     tauri::async_runtime::spawn_blocking(move || board_move_impl(root, id, to_column))
         .await.map_err(|e| e.to_string())?
@@ -185,6 +188,7 @@ fn collect_archived(dir: &std::path::Path, top_level: bool, out: &mut Vec<ticket
 /// The archived Done tickets (in dated `Done/**` subfolders) for the board's "show archived" affordance
 /// (CPE-531). Kept separate from `board_cards` so the default board stays fast as Done grows.
 #[tauri::command]
+#[cfg_attr(feature = "specta-bindings", specta::specta)]
 async fn board_archived(root: String) -> Vec<ticket_board::Card> {
     tauri::async_runtime::spawn_blocking(move || board_archived_impl(root))
         .await.unwrap()
@@ -200,6 +204,7 @@ fn board_archived_impl(root: String) -> Vec<ticket_board::Card> {
 /// List the repo's epics for the board's epic-organized view (CPE-530): active/proposed epics from
 /// `Tickets/Epics/` + closed epics from `Tickets/Done/` (top level), each `epic`-tagged. Read-only.
 #[tauri::command]
+#[cfg_attr(feature = "specta-bindings", specta::specta)]
 async fn board_epics(root: String) -> Vec<ticket_board::Epic> {
     tauri::async_runtime::spawn_blocking(move || board_epics_impl(root))
         .await.unwrap()
@@ -245,6 +250,7 @@ fn find_ticket_file(root: &str, id: &str) -> Option<std::path::PathBuf> {
 
 /// Toggle the `review` tag on ticket `id` (CPE-523) — drives the board's virtual Review lane.
 #[tauri::command]
+#[cfg_attr(feature = "specta-bindings", specta::specta)]
 async fn board_review(root: String, id: String, on: bool) -> Result<(), String> {
     tauri::async_runtime::spawn_blocking(move || board_review_impl(root, id, on))
         .await.map_err(|e| e.to_string())?
@@ -259,6 +265,7 @@ fn board_review_impl(root: String, id: String, on: bool) -> Result<(), String> {
 /// Append a finding note to ticket `id` (CPE-523) — the affordance a dispatched agent (or the UI) uses
 /// to record progress on a card.
 #[tauri::command]
+#[cfg_attr(feature = "specta-bindings", specta::specta)]
 async fn board_note(root: String, id: String, note: String) -> Result<(), String> {
     tauri::async_runtime::spawn_blocking(move || board_note_impl(root, id, note))
         .await.map_err(|e| e.to_string())?
@@ -272,6 +279,7 @@ fn board_note_impl(root: String, id: String, note: String) -> Result<(), String>
 
 /// The workbench's view of a folder (CPE-526/535): whether it's a git repo, the branch, and the diff.
 #[derive(serde::Serialize)]
+#[cfg_attr(feature = "specta-bindings", derive(specta::Type))]
 struct WorkbenchDiff {
     is_repo: bool,
     branch: Option<String>,
@@ -282,6 +290,7 @@ struct WorkbenchDiff {
 /// (CPE-535): a non-repo folder is a normal `is_repo:false` result (not an error), git-not-installed is
 /// a distinct error, and an empty `root` is refused. An optional `path` limits it to one file. Read-only.
 #[tauri::command]
+#[cfg_attr(feature = "specta-bindings", specta::specta)]
 async fn workbench_diff(root: String, path: Option<String>) -> Result<WorkbenchDiff, String> {
     tauri::async_runtime::spawn_blocking(move || workbench_diff_impl(root, path))
         .await.map_err(|e| e.to_string())?
@@ -430,6 +439,7 @@ fn dir_stream_registry(
 // Async so a listing on a slow/network drive streams from a blocking thread and never freezes the main
 // thread (CPE-760). The `Channel` batches still arrive live; only the walk moves off the UI thread.
 #[tauri::command]
+#[cfg_attr(feature = "specta-bindings", specta::specta)]
 async fn list_dir_stream(
     path: String,
     stream_id: u64,
@@ -464,6 +474,7 @@ fn list_dir_stream_impl(
 /// Signal an in-flight `list_dir_stream` to stop at the next batch boundary (CPE-665). A no-op if the
 /// stream already finished (its id is gone from the registry).
 #[tauri::command]
+#[cfg_attr(feature = "specta-bindings", specta::specta)]
 fn cancel_dir_stream(stream_id: u64) {
     use std::sync::atomic::Ordering;
     if let Some(flag) = dir_stream_registry().lock().unwrap().get(&stream_id) {
@@ -495,6 +506,7 @@ fn entry_for_path(path: &str) -> Option<DirEntry> {
 /// no longer exist or can't be read are silently skipped, so a smart folder self-heals as files move or
 /// are deleted rather than showing dead rows.
 #[tauri::command]
+#[cfg_attr(feature = "specta-bindings", specta::specta)]
 async fn entries_for_paths(paths: Vec<String>) -> Vec<DirEntry> {
     tauri::async_runtime::spawn_blocking(move || entries_for_paths_impl(paths))
         .await.unwrap()
@@ -553,6 +565,7 @@ fn paths_same_volume(a: &str, b: &str) -> bool {
 /// CPE-661): same volume → move, different → copy. Best-effort — any uncertainty yields `false` so the
 /// caller falls back to copy (which never loses the source).
 #[tauri::command]
+#[cfg_attr(feature = "specta-bindings", specta::specta)]
 async fn same_volume(a: String, b: String) -> bool {
     tauri::async_runtime::spawn_blocking(move || same_volume_impl(a, b))
         .await.unwrap()
@@ -658,6 +671,7 @@ fn write_file_text_impl(path: String, contents: String) -> Result<u64, String> {
 /// List an archive's entries without extracting it, for the preview pane. Model lives in
 /// `cpe_server::archive` (CPE-815); this is a thin `spawn_blocking` dispatcher.
 #[tauri::command]
+#[cfg_attr(feature = "specta-bindings", specta::specta)]
 async fn read_archive_entries(path: String) -> Result<Vec<cpe_server::archive::ArchiveEntry>, String> {
     tauri::async_runtime::spawn_blocking(move || cpe_server::archive::read_archive_entries(&path))
         .await.map_err(|e| e.to_string())?
@@ -700,6 +714,7 @@ fn ensure_previewable_size(path: &str, cap: u64) -> Result<(), String> {
 /// Return a human-readable text summary of a binary file, dispatched by
 /// extension. Rendered read-only by the preview pane's "info" provider.
 #[tauri::command]
+#[cfg_attr(feature = "specta-bindings", specta::specta)]
 async fn read_preview_info(path: String) -> Result<String, String> {
     tauri::async_runtime::spawn_blocking(move || read_preview_info_impl(path))
         .await.map_err(|e| e.to_string())?
@@ -729,12 +744,14 @@ fn read_preview_info_impl(path: String) -> Result<String, String> {
 // Excel/ODS sheets), read a page of typed rows, and run a read-only SQLite query — the interactive-grid
 // counterparts to `read_preview_info`'s text summary. Thin async dispatchers into `cpe_server::data_browser`.
 #[tauri::command]
+#[cfg_attr(feature = "specta-bindings", specta::specta)]
 async fn data_browser_sources(path: String) -> Result<Vec<String>, String> {
     tauri::async_runtime::spawn_blocking(move || cpe_server::data_browser::sources(&path))
         .await.map_err(|e| e.to_string())?
 }
 
 #[tauri::command]
+#[cfg_attr(feature = "specta-bindings", specta::specta)]
 async fn data_browser_page(
     path: String,
     source: String,
@@ -746,6 +763,7 @@ async fn data_browser_page(
 }
 
 #[tauri::command]
+#[cfg_attr(feature = "specta-bindings", specta::specta)]
 async fn data_browser_query(
     path: String,
     sql: String,
@@ -763,6 +781,7 @@ async fn data_browser_query(
 /// Transcode TIFF/PSD to a PNG `data:` URL. Model lives in `cpe_server::image_preview` (CPE-815); the
 /// command caps the source size first, then dispatches.
 #[tauri::command]
+#[cfg_attr(feature = "specta-bindings", specta::specta)]
 async fn read_image_data_url(path: String) -> Result<String, String> {
     tauri::async_runtime::spawn_blocking(move || {
         ensure_previewable_size(&path, PREVIEW_INFO_MAX_BYTES)?;
@@ -777,6 +796,7 @@ async fn read_image_data_url(path: String) -> Result<String, String> {
 /// an mtime-keyed on-disk cache (CPE-644). Bounded by the preview size cap so a huge image can't
 /// exhaust memory. Errors (rather than hangs) on a non-image, so the frontend falls back to an icon.
 #[tauri::command]
+#[cfg_attr(feature = "specta-bindings", specta::specta)]
 fn thumbnail(app: tauri::AppHandle, path: String, max_edge: u32) -> Result<String, String> {
     use base64::Engine;
     ensure_previewable_size(&path, PREVIEW_INFO_MAX_BYTES)?;
@@ -792,6 +812,7 @@ fn thumbnail(app: tauri::AppHandle, path: String, max_edge: u32) -> Result<Strin
 /// when the file is too large, unreadable, or not valid UTF-8 — the frontend
 /// shows a "can't preview" state in that case.
 #[tauri::command]
+#[cfg_attr(feature = "specta-bindings", specta::specta)]
 async fn read_file_text(path: String, max_bytes: u64) -> Result<String, String> {
     tauri::async_runtime::spawn_blocking(move || read_file_text_impl(path, max_bytes))
         .await.map_err(|e| e.to_string())?
@@ -815,6 +836,7 @@ fn read_file_text_impl(path: String, max_bytes: u64) -> Result<String, String> {
 /// (CPE-772, epic CPE-719). Seeks to `offset` (past EOF yields an empty slice, not an error, so the
 /// viewer can page freely) and reads up to `len` bytes, clamped to EOF.
 #[tauri::command]
+#[cfg_attr(feature = "specta-bindings", specta::specta)]
 async fn read_file_range(path: String, offset: u64, len: u64) -> Result<Vec<u8>, String> {
     tauri::async_runtime::spawn_blocking(move || read_file_range_impl(path, offset, len))
         .await
@@ -838,6 +860,7 @@ fn read_file_range_impl(path: String, offset: u64, len: u64) -> Result<Vec<u8>, 
 
 /// Total byte length of a file (CPE-772) — lets the hex viewer size its scrollbar without reading.
 #[tauri::command]
+#[cfg_attr(feature = "specta-bindings", specta::specta)]
 async fn file_len(path: String) -> Result<u64, String> {
     tauri::async_runtime::spawn_blocking(move || {
         fs::metadata(&path).map(|m| m.len()).map_err(|e| e.to_string())
@@ -850,6 +873,7 @@ async fn file_len(path: String) -> Result<u64, String> {
 /// Unix only — Windows uses attribute toggles (`set_readonly` + future attrs) instead.
 #[cfg(unix)]
 #[tauri::command]
+#[cfg_attr(feature = "specta-bindings", specta::specta)]
 async fn set_permissions(path: String, mode: u32) -> Result<u32, String> {
     tauri::async_runtime::spawn_blocking(move || set_permissions_impl(path, mode))
         .await
@@ -868,6 +892,7 @@ fn set_permissions_impl(path: String, mode: u32) -> Result<u32, String> {
 
 #[cfg(not(unix))]
 #[tauri::command]
+#[cfg_attr(feature = "specta-bindings", specta::specta)]
 async fn set_permissions(path: String, mode: u32) -> Result<u32, String> {
     let _ = (path, mode);
     Err("POSIX permissions aren't available on this platform.".to_string())
@@ -875,6 +900,7 @@ async fn set_permissions(path: String, mode: u32) -> Result<u32, String> {
 
 /// Toggle a file's read-only flag (cross-platform), returning the prior state for undo (CPE-785).
 #[tauri::command]
+#[cfg_attr(feature = "specta-bindings", specta::specta)]
 async fn set_readonly(path: String, readonly: bool) -> Result<bool, String> {
     tauri::async_runtime::spawn_blocking(move || set_readonly_impl(path, readonly))
         .await
@@ -901,6 +927,7 @@ fn ms_from_ft(ft: filetime::FileTime) -> i64 {
 /// Set a file's modified/accessed timestamps (CPE-785). Each is optional (unchanged when `None`); returns
 /// the prior `(modified, accessed)` as epoch-ms for undo. Cross-platform via the `filetime` crate.
 #[tauri::command]
+#[cfg_attr(feature = "specta-bindings", specta::specta)]
 async fn set_file_times(
     path: String,
     modified_ms: Option<i64>,
@@ -929,6 +956,7 @@ fn set_file_times_impl(
 /// (CPE-785). Windows only.
 #[cfg(windows)]
 #[tauri::command]
+#[cfg_attr(feature = "specta-bindings", specta::specta)]
 async fn set_file_attribute(path: String, attr: String, value: bool) -> Result<bool, String> {
     tauri::async_runtime::spawn_blocking(move || set_file_attribute_impl(path, attr, value))
         .await
@@ -962,6 +990,7 @@ fn set_file_attribute_impl(path: String, attr: String, value: bool) -> Result<bo
 
 #[cfg(not(windows))]
 #[tauri::command]
+#[cfg_attr(feature = "specta-bindings", specta::specta)]
 async fn set_file_attribute(path: String, attr: String, value: bool) -> Result<bool, String> {
     let _ = (path, attr, value);
     Err("Windows file attributes aren't available on this platform.".to_string())
@@ -975,6 +1004,7 @@ async fn set_file_attribute(path: String, attr: String, value: bool) -> Result<b
 
 /// A file's editable attributes. Windows fills the four flag bits; POSIX fills `mode` (octal) + readonly.
 #[derive(serde::Serialize)]
+#[cfg_attr(feature = "specta-bindings", derive(specta::Type))]
 #[serde(rename_all = "camelCase")]
 struct FileAttributes {
     readonly: bool,
@@ -986,6 +1016,7 @@ struct FileAttributes {
 }
 
 #[tauri::command]
+#[cfg_attr(feature = "specta-bindings", specta::specta)]
 async fn read_attributes(path: String) -> Result<FileAttributes, String> {
     tauri::async_runtime::spawn_blocking(move || read_attributes_impl(&path))
         .await
@@ -1108,6 +1139,7 @@ fn can_restore_from_trash_impl() -> bool {
 /// Restore previously-trashed items to their original paths.
 #[cfg(any(target_os = "windows", target_os = "linux"))]
 #[tauri::command]
+#[cfg_attr(feature = "specta-bindings", specta::specta)]
 async fn restore_from_trash(paths: Vec<String>) -> Vec<OpResult> {
     tauri::async_runtime::spawn_blocking(move || restore_from_trash_impl(paths))
         .await.unwrap()
@@ -1180,6 +1212,7 @@ fn restore_from_trash_impl(paths: Vec<String>) -> Vec<OpResult> {
 /// stack in the first place.
 #[cfg(not(any(target_os = "windows", target_os = "linux")))]
 #[tauri::command]
+#[cfg_attr(feature = "specta-bindings", specta::specta)]
 async fn restore_from_trash(paths: Vec<String>) -> Vec<OpResult> {
     tauri::async_runtime::spawn_blocking(move || restore_from_trash_impl(paths))
         .await.unwrap()
@@ -1346,6 +1379,7 @@ fn move_entries_impl(paths: Vec<String>, dest: String) -> Vec<OpResult> {
 /// One resolved watch action to execute: `kind` is `move` | `copy` | `rename`; `resolved` is the
 /// destination directory (move/copy) or the new file name (rename), already expanded by the planner.
 #[derive(serde::Deserialize)]
+#[cfg_attr(feature = "specta-bindings", derive(specta::Type))]
 struct WatchAction {
     kind: String,
     resolved: String,
@@ -1353,6 +1387,7 @@ struct WatchAction {
 
 /// Execute a landed file's resolved action pipeline. See the module comment. Async per the commands rule.
 #[tauri::command]
+#[cfg_attr(feature = "specta-bindings", specta::specta)]
 async fn run_watch_actions(path: String, actions: Vec<WatchAction>) -> Vec<OpResult> {
     tauri::async_runtime::spawn_blocking(move || run_watch_actions_impl(path, actions))
         .await
@@ -1392,6 +1427,7 @@ fn run_watch_actions_impl(path: String, actions: Vec<WatchAction>) -> Vec<OpResu
 
 /// Whether a batch copies or moves its sources.
 #[derive(Clone, Copy, PartialEq, serde::Deserialize)]
+#[cfg_attr(feature = "specta-bindings", derive(specta::Type))]
 #[serde(rename_all = "lowercase")]
 enum TransferKind {
     Copy,
@@ -1400,6 +1436,7 @@ enum TransferKind {
 
 /// How a name collision at the destination is resolved for the whole batch.
 #[derive(Clone, Copy, PartialEq, serde::Deserialize)]
+#[cfg_attr(feature = "specta-bindings", derive(specta::Type))]
 #[serde(rename_all = "lowercase")]
 enum ConflictPolicy {
     /// Replace the existing entry.
@@ -1412,6 +1449,7 @@ enum ConflictPolicy {
 
 /// A progress snapshot emitted while a transfer runs.
 #[derive(Clone, serde::Serialize)]
+#[cfg_attr(feature = "specta-bindings", derive(specta::Type))]
 struct TransferProgress {
     id: u64,
     total_bytes: u64,
@@ -1423,6 +1461,7 @@ struct TransferProgress {
 
 /// The final outcome of a transfer.
 #[derive(Clone, Default, serde::Serialize)]
+#[cfg_attr(feature = "specta-bindings", derive(specta::Type))]
 struct TransferReport {
     id: u64,
     transferred: u64,
@@ -1669,6 +1708,7 @@ fn transfer_registry(
 /// Start a copy/move on a background thread, returning its id immediately. Progress is emitted as
 /// `transfer://progress` events and the final `TransferReport` as `transfer://done` (CPE-620).
 #[tauri::command]
+#[cfg_attr(feature = "specta-bindings", specta::specta)]
 fn start_transfer(
     app: tauri::AppHandle,
     sources: Vec<String>,
@@ -1695,6 +1735,7 @@ fn start_transfer(
 
 /// Signal a running transfer to stop at the next chunk boundary (CPE-620).
 #[tauri::command]
+#[cfg_attr(feature = "specta-bindings", specta::specta)]
 fn cancel_transfer(id: u64) {
     use std::sync::atomic::Ordering;
     if let Some(flag) = transfer_registry().lock().unwrap().get(&id) {
@@ -1760,6 +1801,7 @@ async fn entry_info(path: String) -> Result<EntryInfo, String> {
 /// Image dimensions + basic EXIF for the Properties dialog (CPE-659). Model lives in
 /// `cpe_server::image_preview` (CPE-815); this is a thin `spawn_blocking` dispatcher.
 #[tauri::command]
+#[cfg_attr(feature = "specta-bindings", specta::specta)]
 async fn image_meta(path: String) -> Result<cpe_server::image_preview::ImageMeta, String> {
     tauri::async_runtime::spawn_blocking(move || cpe_server::image_preview::image_meta(&path))
         .await.map_err(|e| e.to_string())?
@@ -1770,6 +1812,7 @@ async fn image_meta(path: String) -> Result<cpe_server::image_preview::ImageMeta
 /// stops at a large entry cap (reporting `truncated`) so it can't spin on a pathological tree.
 /// Model lives in `cpe_server::folder_stats` (CPE-815); this is a thin `spawn_blocking` dispatcher.
 #[tauri::command]
+#[cfg_attr(feature = "specta-bindings", specta::specta)]
 async fn folder_stats(path: String) -> Result<cpe_server::folder_stats::FolderStats, String> {
     tauri::async_runtime::spawn_blocking(move || cpe_server::folder_stats::compute(&path))
         .await.map_err(|e| e.to_string())?
@@ -1778,6 +1821,7 @@ async fn folder_stats(path: String) -> Result<cpe_server::folder_stats::FolderSt
 /// Total recursive size of a directory tree in bytes. Model lives in `cpe_server::disk_usage`
 /// (CPE-815); this is a thin `spawn_blocking` dispatcher.
 #[tauri::command]
+#[cfg_attr(feature = "specta-bindings", specta::specta)]
 async fn dir_size(path: String) -> Result<u64, String> {
     tauri::async_runtime::spawn_blocking(move || cpe_server::disk_usage::dir_size(&path))
         .await.map_err(|e| e.to_string())?
@@ -1787,6 +1831,7 @@ async fn dir_size(path: String) -> Result<u64, String> {
 /// needs for the space analyzer (CPE-749). Model lives in `cpe_server::disk_usage` (CPE-815); this is a
 /// thin `spawn_blocking` dispatcher.
 #[tauri::command]
+#[cfg_attr(feature = "specta-bindings", specta::specta)]
 async fn dir_children_sizes(path: String) -> Result<Vec<cpe_server::disk_usage::ChildSize>, String> {
     tauri::async_runtime::spawn_blocking(move || cpe_server::disk_usage::dir_children_sizes(&path))
         .await.map_err(|e| e.to_string())?
@@ -1798,6 +1843,7 @@ async fn dir_children_sizes(path: String) -> Result<Vec<cpe_server::disk_usage::
 /// scan never freezes the UI thread (CPE-760); the walk is the shared `cpe_server::disk_usage::
 /// stream_children_sizes` (CPE-815). Children arrive in completion order; the reactive treemap re-lays-out.
 #[tauri::command]
+#[cfg_attr(feature = "specta-bindings", specta::specta)]
 async fn dir_children_sizes_stream(
     path: String,
     on_child: tauri::ipc::Channel<Vec<cpe_server::disk_usage::ChildSize>>,
@@ -1815,6 +1861,7 @@ async fn dir_children_sizes_stream(
 /// chunks so a multi-GB file never loads into memory. A directory, missing, or unreadable path is an
 /// `Err`, never a panic. Opt-in from the UI (hashing is I/O-bound) — never run automatically.
 #[tauri::command]
+#[cfg_attr(feature = "specta-bindings", specta::specta)]
 async fn hash_file(path: String) -> Result<String, String> {
     tauri::async_runtime::spawn_blocking(move || cpe_server::checksum::hash_file(&path))
         .await.map_err(|e| e.to_string())?
@@ -1835,6 +1882,7 @@ async fn hash_file(path: String) -> Result<String, String> {
 /// Streamed backup run (CPE-798 live progress): sends each file's `OpResult` over `on_result` in small
 /// batches as it completes. Returns the total number of results emitted.
 #[tauri::command]
+#[cfg_attr(feature = "specta-bindings", specta::specta)]
 async fn apply_backup_plan_stream(
     source_root: String,
     dest_root: String,
@@ -1865,6 +1913,7 @@ async fn apply_backup_plan_stream(
 
 /// Execute a backup plan (CPE-797). Model lives in `cpe_server::backup` (CPE-821); thin dispatcher.
 #[tauri::command]
+#[cfg_attr(feature = "specta-bindings", specta::specta)]
 async fn apply_backup_plan(
     source_root: String,
     dest_root: String,
@@ -1884,6 +1933,7 @@ async fn apply_backup_plan(
 /// the integrity guard (CPE-791). Symlinks are not followed and unreadable files are skipped; the result
 /// is sorted by path for a stable diff. Model lives in `cpe_server::checksum` (CPE-815).
 #[tauri::command]
+#[cfg_attr(feature = "specta-bindings", specta::specta)]
 async fn checksum_folder(path: String) -> Result<Vec<cpe_server::checksum::ChecksumEntry>, String> {
     tauri::async_runtime::spawn_blocking(move || cpe_server::checksum::checksum_folder(&path))
         .await
@@ -1895,6 +1945,7 @@ async fn checksum_folder(path: String) -> Result<Vec<cpe_server::checksum::Check
 /// webview to diff — so large trees stay responsive, and verification can run headlessly. Model in
 /// `cpe_server::checksum` (CPE-815).
 #[tauri::command]
+#[cfg_attr(feature = "specta-bindings", specta::specta)]
 async fn verify_folder(
     path: String,
     baseline: Vec<cpe_server::checksum::ChecksumEntry>,
@@ -1912,6 +1963,7 @@ async fn verify_folder(
 /// skipped rather than failing the whole sweep — the "monitor all my folders" one-shot behind the
 /// "Verify all baselined folders" action. Returns only the compact reports.
 #[tauri::command]
+#[cfg_attr(feature = "specta-bindings", specta::specta)]
 async fn verify_all_baselines(
     baselines: std::collections::HashMap<String, Vec<cpe_server::checksum::ChecksumEntry>>,
 ) -> Result<std::collections::HashMap<String, cpe_server::checksum::IntegrityReport>, String> {
@@ -1937,6 +1989,7 @@ async fn verify_all_baselines(
 /// Scan the children of `path` into a `CompareNode`-shaped tree (CPE-779). Model lives in
 /// `cpe_server::compare` (CPE-815); this is a thin `spawn_blocking` dispatcher.
 #[tauri::command]
+#[cfg_attr(feature = "specta-bindings", specta::specta)]
 async fn scan_tree(path: String, max_depth: u32) -> Result<Vec<cpe_server::compare::TreeNode>, String> {
     tauri::async_runtime::spawn_blocking(move || cpe_server::compare::scan_tree(&path, max_depth))
         .await
@@ -1947,6 +2000,7 @@ async fn scan_tree(path: String, max_depth: u32) -> Result<Vec<cpe_server::compa
 /// directory target makes a dir-symlink, else a file-symlink; the OS error is returned on failure (e.g.
 /// Windows symlink creation without Developer Mode / admin), so the UI can prompt for elevation.
 #[tauri::command]
+#[cfg_attr(feature = "specta-bindings", specta::specta)]
 async fn create_symlink(target: String, link_path: String) -> Result<(), String> {
     tauri::async_runtime::spawn_blocking(move || cpe_server::links::create_symlink(&target, &link_path))
         .await
@@ -1956,6 +2010,7 @@ async fn create_symlink(target: String, link_path: String) -> Result<(), String>
 /// Create a hardlink at `link_path` for the same file data as `target` (CPE-802). Cross-platform.
 /// Model lives in `cpe_server::links` (CPE-815); this is a thin `spawn_blocking` dispatcher.
 #[tauri::command]
+#[cfg_attr(feature = "specta-bindings", specta::specta)]
 async fn create_hard_link(target: String, link_path: String) -> Result<(), String> {
     tauri::async_runtime::spawn_blocking(move || cpe_server::links::create_hard_link(&target, &link_path))
         .await
@@ -1965,6 +2020,7 @@ async fn create_hard_link(target: String, link_path: String) -> Result<(), Strin
 /// Inspect `path` — is it a symlink, its target, and whether that target is missing (a broken link)
 /// (CPE-804, epic CPE-715). Never fails. Model in `cpe_server::links` (CPE-815).
 #[tauri::command]
+#[cfg_attr(feature = "specta-bindings", specta::specta)]
 async fn link_status(path: String) -> cpe_server::links::LinkStatus {
     tauri::async_runtime::spawn_blocking(move || cpe_server::links::link_status(&path))
         .await
@@ -1975,6 +2031,7 @@ async fn link_status(path: String) -> cpe_server::links::LinkStatus {
 /// / unknown — so the sidebar can badge removable & network drives. Windows uses `GetDriveTypeW`; unix
 /// returns a best-effort `fixed` for now (richer classification is a follow-up).
 #[tauri::command]
+#[cfg_attr(feature = "specta-bindings", specta::specta)]
 async fn drive_type(path: String) -> Result<String, String> {
     tauri::async_runtime::spawn_blocking(move || drive_type_impl(&path))
         .await
@@ -2026,6 +2083,7 @@ fn audit_dir(app: &tauri::AppHandle) -> Result<std::path::PathBuf, String> {
 /// Append one filesystem-activity event to its session journal (bounded/rotated). `ts` is stamped here
 /// (server-side epoch ms) so callers can't skew the log.
 #[tauri::command]
+#[cfg_attr(feature = "specta-bindings", specta::specta)]
 async fn audit_record(
     app: tauri::AppHandle,
     session: String,
@@ -2045,6 +2103,7 @@ async fn audit_record(
 
 /// List the session ids that have a persisted journal (most useful sorted; newest-first is the UI's job).
 #[tauri::command]
+#[cfg_attr(feature = "specta-bindings", specta::specta)]
 async fn audit_sessions(app: tauri::AppHandle) -> Result<Vec<String>, String> {
     let dir = audit_dir(&app)?;
     tauri::async_runtime::spawn_blocking(move || audit_journal::list_sessions(&dir))
@@ -2054,6 +2113,7 @@ async fn audit_sessions(app: tauri::AppHandle) -> Result<Vec<String>, String> {
 
 /// Read every event for one past session back (append order; malformed lines skipped).
 #[tauri::command]
+#[cfg_attr(feature = "specta-bindings", specta::specta)]
 async fn audit_read(
     app: tauri::AppHandle,
     session: String,
@@ -2070,6 +2130,7 @@ async fn audit_read(
 /// directory, or an over-cap file is an `Err`. Opt-in from the UI, never automatic.
 /// Model lives in `cpe_server::text_stats` (CPE-815); this is a thin `spawn_blocking` dispatcher.
 #[tauri::command]
+#[cfg_attr(feature = "specta-bindings", specta::specta)]
 async fn text_stats(path: String) -> Result<cpe_server::text_stats::TextStats, String> {
     tauri::async_runtime::spawn_blocking(move || cpe_server::text_stats::compute(&path))
         .await.map_err(|e| e.to_string())?
@@ -2080,6 +2141,7 @@ async fn text_stats(path: String) -> Result<cpe_server::text_stats::TextStats, S
 /// and collision-free versus hashing both. A directory or unreadable path is an `Err`, never a panic.
 /// Model lives in `cpe_server::compare` (CPE-815); this is a thin `spawn_blocking` dispatcher.
 #[tauri::command]
+#[cfg_attr(feature = "specta-bindings", specta::specta)]
 async fn files_identical(a: String, b: String) -> Result<bool, String> {
     tauri::async_runtime::spawn_blocking(move || cpe_server::compare::files_identical(&a, &b))
         .await.map_err(|e| e.to_string())?
@@ -2088,6 +2150,7 @@ async fn files_identical(a: String, b: String) -> Result<bool, String> {
 /// Search text files under `root` for lines containing `query` (CPE-416). Model lives in
 /// `cpe_server::content_search` (CPE-815); this is a thin `spawn_blocking` dispatcher.
 #[tauri::command]
+#[cfg_attr(feature = "specta-bindings", specta::specta)]
 async fn search_file_contents(
     root: String,
     query: String,
@@ -2106,6 +2169,7 @@ async fn search_file_contents(
 /// Find files/folders under `root` whose name matches `query`. Model lives in
 /// `cpe_server::name_search` (CPE-815); this is a thin `spawn_blocking` dispatcher.
 #[tauri::command]
+#[cfg_attr(feature = "specta-bindings", specta::specta)]
 async fn find_files_by_name(
     root: String,
     query: String,
@@ -2119,6 +2183,7 @@ async fn find_files_by_name(
 /// is the shared `cpe_server::name_search::walk_name_matches` (CPE-815). The returned result carries the
 /// final `dirs_scanned` + `truncated` with empty `matches` (those were streamed).
 #[tauri::command]
+#[cfg_attr(feature = "specta-bindings", specta::specta)]
 fn find_files_by_name_stream(
     root: String,
     query: String,
@@ -2146,6 +2211,7 @@ fn find_files_by_name_stream(
 /// (CPE-760); the walk is the shared `cpe_server::content_search::stream_file_contents` (CPE-815). The
 /// returned result carries the final `files_scanned` + `truncated` with empty `matches` (those streamed).
 #[tauri::command]
+#[cfg_attr(feature = "specta-bindings", specta::specta)]
 async fn search_file_contents_stream(
     root: String,
     query: String,
@@ -2176,6 +2242,7 @@ async fn search_file_contents_stream(
 /// Find duplicate files under `root` (CPE-420) — size-then-hash two-pass scan. Model lives in
 /// `cpe_server::duplicates` (CPE-815); this is a thin `spawn_blocking` dispatcher.
 #[tauri::command]
+#[cfg_attr(feature = "specta-bindings", specta::specta)]
 async fn find_duplicates(root: String) -> Result<cpe_server::duplicates::DupResult, String> {
     tauri::async_runtime::spawn_blocking(move || cpe_server::duplicates::find_duplicates(&root))
         .await.map_err(|e| e.to_string())?
@@ -2188,6 +2255,7 @@ async fn find_duplicates(root: String) -> Result<cpe_server::duplicates::DupResu
 /// stream_duplicates` (CPE-815). The returned result carries the final `files_scanned` + `truncated` with
 /// empty `groups` (those streamed, in discovery order — the frontend re-sorts each batch).
 #[tauri::command]
+#[cfg_attr(feature = "specta-bindings", specta::specta)]
 async fn find_duplicates_stream(
     root: String,
     on_group: tauri::ipc::Channel<Vec<cpe_server::duplicates::DupGroup>>,
@@ -2213,6 +2281,7 @@ async fn find_duplicates_stream(
 /// doesn't exist yet, so the frontend can start from defaults on a fresh install (CPE-226). The model
 /// lives in `cpe_server::settings` (CPE-815); this is a thin dispatcher.
 #[tauri::command]
+#[cfg_attr(feature = "specta-bindings", specta::specta)]
 fn read_settings(app: tauri::AppHandle) -> Result<String, String> {
     cpe_server::settings::load(&server_ctx::TauriCtx::new(&app))
 }
@@ -2220,6 +2289,7 @@ fn read_settings(app: tauri::AppHandle) -> Result<String, String> {
 /// Write the single on-disk settings file, creating the config dir if needed (CPE-226). `contents` is
 /// the full settings JSON document.
 #[tauri::command]
+#[cfg_attr(feature = "specta-bindings", specta::specta)]
 fn write_settings(app: tauri::AppHandle, contents: String) -> Result<(), String> {
     cpe_server::settings::save(&server_ctx::TauriCtx::new(&app), &contents)
 }
@@ -2231,30 +2301,35 @@ use cpe_server::tags::TagStore;
 
 /// The whole tag store (path → {tags,label}); `{}` on a fresh install.
 #[tauri::command]
+#[cfg_attr(feature = "specta-bindings", specta::specta)]
 fn load_tags(app: tauri::AppHandle) -> Result<TagStore, String> {
     cpe_server::tags::load(&server_ctx::TauriCtx::new(&app))
 }
 
 /// Replace one path's tags + label and persist. Returns the updated whole store.
 #[tauri::command]
+#[cfg_attr(feature = "specta-bindings", specta::specta)]
 fn set_tags(app: tauri::AppHandle, path: String, tags: Vec<String>, label: String) -> Result<TagStore, String> {
     cpe_server::tags::set(&server_ctx::TauriCtx::new(&app), &path, tags, label)
 }
 
 /// Every tag with its usage count (most-used first).
 #[tauri::command]
+#[cfg_attr(feature = "specta-bindings", specta::specta)]
 fn tag_counts(app: tauri::AppHandle) -> Result<Vec<(String, usize)>, String> {
     cpe_server::tags::counts(&server_ctx::TauriCtx::new(&app))
 }
 
 /// Rename a tag across every path (CPE-646); an empty `new` deletes it. Returns the updated store.
 #[tauri::command]
+#[cfg_attr(feature = "specta-bindings", specta::specta)]
 fn rename_tag(app: tauri::AppHandle, old: String, new: String) -> Result<TagStore, String> {
     cpe_server::tags::rename_tag(&server_ctx::TauriCtx::new(&app), &old, &new)
 }
 
 /// Remove a tag from every path (CPE-646). Returns the updated store.
 #[tauri::command]
+#[cfg_attr(feature = "specta-bindings", specta::specta)]
 fn delete_tag(app: tauri::AppHandle, tag: String) -> Result<TagStore, String> {
     cpe_server::tags::delete_tag(&server_ctx::TauriCtx::new(&app), &tag)
 }
@@ -2262,6 +2337,7 @@ fn delete_tag(app: tauri::AppHandle, tag: String) -> Result<TagStore, String> {
 /// Re-key a path's tags/label after an in-app rename or move (CPE-650), so tags follow the file.
 /// Returns the updated store. A no-op when the old path had no tags.
 #[tauri::command]
+#[cfg_attr(feature = "specta-bindings", specta::specta)]
 fn retag_path(app: tauri::AppHandle, from: String, to: String) -> Result<TagStore, String> {
     cpe_server::tags::retag(&server_ctx::TauriCtx::new(&app), &from, &to)
 }
@@ -2270,12 +2346,14 @@ fn retag_path(app: tauri::AppHandle, from: String, to: String) -> Result<TagStor
 /// destructive: existing tags are kept, imported tags unioned in. Returns the merged store. (Export
 /// is just `load_tags` + `JSON.stringify` on the frontend.)
 #[tauri::command]
+#[cfg_attr(feature = "specta-bindings", specta::specta)]
 fn import_tags(app: tauri::AppHandle, json: String) -> Result<TagStore, String> {
     cpe_server::tags::import(&server_ctx::TauriCtx::new(&app), &json)
 }
 
 /// Return the user's home directory.
 #[tauri::command]
+#[cfg_attr(feature = "specta-bindings", specta::specta)]
 async fn home_dir() -> Result<String, String> {
     tauri::async_runtime::spawn_blocking(home_dir_impl)
         .await.map_err(|e| e.to_string())?
@@ -2289,6 +2367,7 @@ fn home_dir_impl() -> Result<String, String> {
 
 /// Return the parent of `path`, or null if already at a root.
 #[tauri::command]
+#[cfg_attr(feature = "specta-bindings", specta::specta)]
 async fn parent_dir(path: String) -> Option<String> {
     tauri::async_runtime::spawn_blocking(move || parent_dir_impl(path))
         .await.unwrap()
@@ -2302,6 +2381,7 @@ fn parent_dir_impl(path: String) -> Option<String> {
 
 /// Available drives (Windows) or filesystem roots (Unix).
 #[tauri::command]
+#[cfg_attr(feature = "specta-bindings", specta::specta)]
 async fn list_drives() -> Vec<Place> {
     tauri::async_runtime::spawn_blocking(list_drives_impl)
         .await.unwrap()
@@ -2338,6 +2418,7 @@ fn list_drives_impl() -> Vec<Place> {
 
 /// Free + total bytes on the volume containing `path`, for the status bar (CPE-403).
 #[derive(serde::Serialize)]
+#[cfg_attr(feature = "specta-bindings", derive(specta::Type))]
 struct DiskSpace {
     free: u64,
     total: u64,
@@ -2348,6 +2429,7 @@ struct DiskSpace {
 /// than surfacing — a status-bar nicety must never break navigation.
 // Async so `disk_space` on a slow/network drive runs off the main thread (CPE-760).
 #[tauri::command]
+#[cfg_attr(feature = "specta-bindings", specta::specta)]
 async fn disk_space(path: String) -> Result<DiskSpace, String> {
     tauri::async_runtime::spawn_blocking(move || disk_space_impl(path))
         .await
@@ -2414,6 +2496,7 @@ fn resolve_known_folder(home: &Path, folder: &str, registry_name: &str) -> Optio
 /// The user's well-known folders. Only folders that actually exist are returned,
 /// so the sidebar never shows a link that leads nowhere.
 #[tauri::command]
+#[cfg_attr(feature = "specta-bindings", specta::specta)]
 async fn special_folders() -> Vec<Place> {
     tauri::async_runtime::spawn_blocking(special_folders_impl)
         .await.unwrap()
@@ -2491,6 +2574,7 @@ fn normalize_git_url(raw: &str) -> String {
 /// more reliable than the opener plugin, which wasn't launching apps for several
 /// file types. For an executable (.exe/.cmd/.bat/…) this runs it.
 #[tauri::command]
+#[cfg_attr(feature = "specta-bindings", specta::specta)]
 async fn open_external(path: String) -> Result<(), String> {
     tauri::async_runtime::spawn_blocking(move || open_external_impl(path))
         .await.map_err(|e| e.to_string())?
@@ -2520,6 +2604,7 @@ fn open_external_impl(path: String) -> Result<(), String> {
 /// (CPE-253). Windows prefers Windows Terminal and falls back to a fresh cmd
 /// window; macOS uses Terminal.app; Linux tries the common emulators in turn.
 #[tauri::command]
+#[cfg_attr(feature = "specta-bindings", specta::specta)]
 async fn open_terminal(path: String) -> Result<(), String> {
     tauri::async_runtime::spawn_blocking(move || open_terminal_impl(path))
         .await.map_err(|e| e.to_string())?
@@ -2643,6 +2728,7 @@ fn run_command_impl(command: String, cwd: Option<String>) -> Result<CommandOutpu
 /// can be opened with its default app while browsing inside the archive
 /// (CPE-242). Read-only: the temp copy is what opens, not the archived bytes.
 #[tauri::command]
+#[cfg_attr(feature = "specta-bindings", specta::specta)]
 async fn extract_archive_entry(zip: String, inner: String) -> Result<String, String> {
     tauri::async_runtime::spawn_blocking(move || cpe_server::archive::extract_archive_entry(&zip, &inner))
         .await.map_err(|e| e.to_string())?
@@ -2654,6 +2740,7 @@ async fn extract_archive_entry(zip: String, inner: String) -> Result<String, Str
 /// Pack the given files/folders into a new deflated `.zip` at `dest` (CPE-251). Model lives in
 /// `cpe_server::archive` (CPE-822); thin dispatcher.
 #[tauri::command]
+#[cfg_attr(feature = "specta-bindings", specta::specta)]
 async fn compress_to_zip(paths: Vec<String>, dest: String) -> Result<String, String> {
     tauri::async_runtime::spawn_blocking(move || cpe_server::archive::compress_to_zip(&paths, &dest))
         .await.map_err(|e| e.to_string())?
@@ -2662,6 +2749,7 @@ async fn compress_to_zip(paths: Vec<String>, dest: String) -> Result<String, Str
 /// Extract an archive into `dest` (CPE-252), guarded against zip-slip for every format. Model lives in
 /// `cpe_server::archive` (CPE-822); thin dispatcher.
 #[tauri::command]
+#[cfg_attr(feature = "specta-bindings", specta::specta)]
 async fn extract_archive(path: String, dest: String) -> Result<String, String> {
     tauri::async_runtime::spawn_blocking(move || cpe_server::archive::extract_archive(&path, &dest))
         .await.map_err(|e| e.to_string())?
@@ -2671,6 +2759,7 @@ async fn extract_archive(path: String, dest: String) -> Result<String, String> {
 /// `Start-Process -Verb RunAs`, which shows the UAC prompt. On other platforms
 /// there is no standard per-launch elevation prompt, so it runs normally.
 #[tauri::command]
+#[cfg_attr(feature = "specta-bindings", specta::specta)]
 async fn run_as_admin(path: String) -> Result<(), String> {
     tauri::async_runtime::spawn_blocking(move || run_as_admin_impl(path))
         .await.map_err(|e| e.to_string())?
@@ -2701,6 +2790,7 @@ fn run_as_admin_impl(path: String) -> Result<(), String> {
 /// URL (folder-context plugins, CPE-235). A cheap single file read; returns None
 /// if the folder isn't a repo or has no remote.
 #[tauri::command]
+#[cfg_attr(feature = "specta-bindings", specta::specta)]
 async fn git_remote_url(path: String) -> Option<String> {
     tauri::async_runtime::spawn_blocking(move || git_remote_url_impl(path))
         .await.unwrap()
@@ -2827,6 +2917,7 @@ fn consent_dir(app: &tauri::AppHandle) -> Result<PathBuf, String> {
 /// List the ids of sidecars registered in the bundled + user registry directories.
 #[cfg(feature = "sidecar-platform")]
 #[tauri::command]
+#[cfg_attr(feature = "specta-bindings", specta::specta)]
 fn sidecar_registry_ids(app: tauri::AppHandle) -> Vec<String> {
     sidecar_host::registry::Registry::load_from_dirs(&sidecar_dirs(&app))
         .all()
@@ -2838,6 +2929,7 @@ fn sidecar_registry_ids(app: tauri::AppHandle) -> Vec<String> {
 /// which are already granted, and which are still undecided (need a consent prompt).
 #[cfg(feature = "sidecar-platform")]
 #[derive(serde::Serialize)]
+#[cfg_attr(feature = "specta-bindings", derive(specta::Type))]
 struct ConsentState {
     requested: Vec<sidecar_contract::Capability>,
     granted: Vec<sidecar_contract::Capability>,
@@ -2846,6 +2938,7 @@ struct ConsentState {
 
 #[cfg(feature = "sidecar-platform")]
 #[tauri::command]
+#[cfg_attr(feature = "specta-bindings", specta::specta)]
 fn sidecar_consent_state(app: tauri::AppHandle, id: String) -> Result<ConsentState, String> {
     let reg = sidecar_host::registry::Registry::load_from_dirs(&sidecar_dirs(&app));
     let requested = reg
@@ -2862,6 +2955,7 @@ fn sidecar_consent_state(app: tauri::AppHandle, id: String) -> Result<ConsentSta
 /// capabilities are denied. Persisted so the user is asked once per capability (CPE-296).
 #[cfg(feature = "sidecar-platform")]
 #[tauri::command]
+#[cfg_attr(feature = "specta-bindings", specta::specta)]
 fn sidecar_set_consent(
     app: tauri::AppHandle,
     id: String,
@@ -2879,6 +2973,7 @@ fn sidecar_set_consent(
 /// the sidecar's next launch.
 #[cfg(feature = "sidecar-platform")]
 #[tauri::command]
+#[cfg_attr(feature = "specta-bindings", specta::specta)]
 fn sidecar_revoke_capability(
     app: tauri::AppHandle,
     id: String,
@@ -3045,6 +3140,7 @@ mod restore_tests {
 /// identity, contract compatibility, running/enabled state, and consent picture.
 #[cfg(feature = "sidecar-platform")]
 #[derive(serde::Serialize)]
+#[cfg_attr(feature = "specta-bindings", derive(specta::Type))]
 struct SidecarInfo {
     id: String,
     name: String,
@@ -3063,6 +3159,7 @@ struct SidecarInfo {
 /// and granted capabilities — the data behind the management panel (CPE-274).
 #[cfg(feature = "sidecar-platform")]
 #[tauri::command]
+#[cfg_attr(feature = "specta-bindings", specta::specta)]
 fn sidecar_details(app: tauri::AppHandle, state: tauri::State<AiConsoleState>) -> Result<Vec<SidecarInfo>, String> {
     use sidecar_contract::CONTRACT_VERSION;
     let reg = sidecar_host::registry::Registry::load_from_dirs(&sidecar_dirs(&app));
@@ -3094,6 +3191,7 @@ fn sidecar_details(app: tauri::AppHandle, state: tauri::State<AiConsoleState>) -
 /// Only the AI Console is currently spawnable; a no-op for others.
 #[cfg(feature = "sidecar-platform")]
 #[tauri::command]
+#[cfg_attr(feature = "specta-bindings", specta::specta)]
 fn sidecar_stop(id: String, state: tauri::State<AiConsoleState>) -> Result<(), String> {
     if id == "ai-console" {
         *state.conn.lock().map_err(|_| "state lock poisoned")? = None;
@@ -3107,6 +3205,7 @@ fn sidecar_stop(id: String, state: tauri::State<AiConsoleState>) -> Result<(), S
 /// presence after the repair; `actions` are the plain-language steps taken.
 #[cfg(feature = "sidecar-platform")]
 #[derive(serde::Serialize)]
+#[cfg_attr(feature = "specta-bindings", derive(specta::Type))]
 struct SidecarRepair {
     id: String,
     binary_ok: bool,
@@ -3119,6 +3218,7 @@ struct SidecarRepair {
 /// be restored here (that's L2); it is reported honestly via `binary_ok = false` so the UI can say so.
 #[cfg(feature = "sidecar-platform")]
 #[tauri::command]
+#[cfg_attr(feature = "specta-bindings", specta::specta)]
 fn sidecar_repair(
     app: tauri::AppHandle,
     id: String,
@@ -3155,6 +3255,7 @@ fn sidecar_repair(
 /// leaf while the others keep running. A no-op if the console isn't running (no URL yet).
 #[cfg(feature = "sidecar-platform")]
 #[tauri::command]
+#[cfg_attr(feature = "specta-bindings", specta::specta)]
 fn sidecar_close_session(session_id: String, state: tauri::State<AiConsoleState>) -> Result<(), String> {
     // Session ids are simple tokens (`s1`, `s12`). Refuse anything else so it can never reshape the
     // loopback URL path (no traversal / injection into the request line).
@@ -3178,6 +3279,7 @@ fn sidecar_close_session(session_id: String, state: tauri::State<AiConsoleState>
 /// from starting until re-enabled. Independent per sidecar — never touches others.
 #[cfg(feature = "sidecar-platform")]
 #[tauri::command]
+#[cfg_attr(feature = "specta-bindings", specta::specta)]
 fn sidecar_set_enabled(
     app: tauri::AppHandle,
     state: tauri::State<AiConsoleState>,
@@ -3889,6 +3991,7 @@ fn flush_fs_batch(
 /// (e.g. a since-deleted path) is rejected rather than silently watching nothing.
 #[cfg(feature = "sidecar-platform")]
 #[tauri::command]
+#[cfg_attr(feature = "specta-bindings", specta::specta)]
 fn agent_watch_start(
     app: tauri::AppHandle,
     state: tauri::State<AgentWatchState>,
@@ -3915,6 +4018,7 @@ fn agent_watch_start(
 /// Stop watching (CPE-398). Dropping the stored watcher ends its emitter thread. Idempotent.
 #[cfg(feature = "sidecar-platform")]
 #[tauri::command]
+#[cfg_attr(feature = "specta-bindings", specta::specta)]
 fn agent_watch_stop(state: tauri::State<AgentWatchState>) {
     *state.current.lock().unwrap() = None;
 }
@@ -3986,6 +4090,7 @@ fn folder_watch_pump(app: tauri::AppHandle, rx: std::sync::mpsc::Receiver<notify
 /// an empty/all-missing set is a no-op stop. Non-recursive-safe: each folder is watched recursively.
 #[cfg(feature = "sidecar-platform")]
 #[tauri::command]
+#[cfg_attr(feature = "specta-bindings", specta::specta)]
 fn folder_watch_start(
     app: tauri::AppHandle,
     state: tauri::State<FolderWatchState>,
@@ -4017,6 +4122,7 @@ fn folder_watch_start(
 /// Stop the watched-folder watcher (CPE-794). Idempotent.
 #[cfg(feature = "sidecar-platform")]
 #[tauri::command]
+#[cfg_attr(feature = "specta-bindings", specta::specta)]
 fn folder_watch_stop(state: tauri::State<FolderWatchState>) {
     *state.current.lock().unwrap() = None;
 }
@@ -4141,6 +4247,7 @@ fn resolve_ai_console_bin(app: &tauri::AppHandle) -> Result<String, String> {
 /// returns an error string that the UI surfaces, never panicking the explorer.
 #[cfg(feature = "sidecar-platform")]
 #[tauri::command]
+#[cfg_attr(feature = "specta-bindings", specta::specta)]
 fn sidecar_start_ai_console(
     app: tauri::AppHandle,
     state: tauri::State<AiConsoleState>,
@@ -4292,6 +4399,7 @@ fn resolve_agent_board_bin(app: &tauri::AppHandle) -> Result<String, String> {
 /// surfaces.
 #[cfg(feature = "sidecar-platform")]
 #[tauri::command]
+#[cfg_attr(feature = "specta-bindings", specta::specta)]
 fn sidecar_start_agent_board(app: tauri::AppHandle, root: Option<String>) -> Result<String, String> {
     use sidecar_contract::{Event, Message, CONTRACT_VERSION};
     use sidecar_host::conformance::SidecarChannel; // brings `.recv()` into scope
@@ -4351,6 +4459,7 @@ fn sidecar_start_agent_board(app: tauri::AppHandle, root: Option<String>) -> Res
 /// One redacted log line in a diagnostics response (CPE-323).
 #[cfg(feature = "sidecar-platform")]
 #[derive(serde::Serialize)]
+#[cfg_attr(feature = "specta-bindings", derive(specta::Type))]
 struct DiagLogLine {
     /// Severity, snake_case (`info` / `warn` / `error` / …).
     level: String,
@@ -4362,6 +4471,7 @@ struct DiagLogLine {
 /// that stopped it (if any), and recent log lines. Every string here is redacted.
 #[cfg(feature = "sidecar-platform")]
 #[derive(serde::Serialize)]
+#[cfg_attr(feature = "specta-bindings", derive(specta::Type))]
 struct SidecarDiagnostics {
     id: String,
     running: bool,
@@ -4385,6 +4495,7 @@ struct SidecarDiagnostics {
 /// the root). Returns folders-first entries, or an actionable error message.
 #[cfg(feature = "sidecar-platform")]
 #[tauri::command]
+#[cfg_attr(feature = "specta-bindings", specta::specta)]
 async fn forge_browse(
     provider: String,
     repo: String,
@@ -4516,6 +4627,7 @@ fn build_git_clone(
 /// the URL for git and is NEVER logged — and is scrubbed from any git error text before it is returned.
 #[cfg(feature = "sidecar-platform")]
 #[tauri::command]
+#[cfg_attr(feature = "specta-bindings", specta::specta)]
 async fn forge_clone(
     provider: String,
     repo: String,
@@ -4602,6 +4714,7 @@ fn save_admitted_hosts(
 /// and whether the host is already admitted.
 #[cfg(feature = "sidecar-platform")]
 #[derive(serde::Serialize)]
+#[cfg_attr(feature = "specta-bindings", derive(specta::Type))]
 struct GenericRemoteInfo {
     host: String,
     /// "https" | "ssh".
@@ -4616,6 +4729,7 @@ struct GenericRemoteInfo {
 /// never admits anything. An unsupported transport is an error the UI can show.
 #[cfg(feature = "sidecar-platform")]
 #[tauri::command]
+#[cfg_attr(feature = "specta-bindings", specta::specta)]
 fn forge_generic_remote(app: tauri::AppHandle, url: String) -> Result<GenericRemoteInfo, String> {
     let r = repos::parse_remote(&url)
         .ok_or_else(|| "Not a supported git URL (use https://, ssh://, or user@host:path).".to_string())?;
@@ -4635,6 +4749,7 @@ fn forge_generic_remote(app: tauri::AppHandle, url: String) -> Result<GenericRem
 /// The Generic-Git egress allow-list — hosts the user has consented to reach (CPE-498).
 #[cfg(feature = "sidecar-platform")]
 #[tauri::command]
+#[cfg_attr(feature = "specta-bindings", specta::specta)]
 fn forge_admitted_hosts(app: tauri::AppHandle) -> Vec<String> {
     load_admitted_hosts(&app).into_iter().collect()
 }
@@ -4643,6 +4758,7 @@ fn forge_admitted_hosts(app: tauri::AppHandle) -> Vec<String> {
 /// normalized host is stored, so consenting to `a.example.com` never admits `b.example.com`. Idempotent.
 #[cfg(feature = "sidecar-platform")]
 #[tauri::command]
+#[cfg_attr(feature = "specta-bindings", specta::specta)]
 fn forge_admit_host(app: tauri::AppHandle, host: String) -> Result<(), String> {
     let host = repos::normalize_host(&host);
     if host.is_empty()
@@ -4660,6 +4776,7 @@ fn forge_admit_host(app: tauri::AppHandle, host: String) -> Result<(), String> {
 /// Revoke a host from the Generic-Git allow-list (management; CPE-498).
 #[cfg(feature = "sidecar-platform")]
 #[tauri::command]
+#[cfg_attr(feature = "specta-bindings", specta::specta)]
 fn forge_forget_host(app: tauri::AppHandle, host: String) -> Result<(), String> {
     let host = repos::normalize_host(&host);
     let mut hosts = load_admitted_hosts(&app);
@@ -4718,6 +4835,7 @@ fn build_generic_clone(
 /// injected for a private clone and is scrubbed from any error text.
 #[cfg(feature = "sidecar-platform")]
 #[tauri::command]
+#[cfg_attr(feature = "specta-bindings", specta::specta)]
 fn forge_clone_url(
     app: tauri::AppHandle,
     url: String,
@@ -4758,6 +4876,7 @@ const FORGE_TOKEN_SERVICE: &str = "com.cross-platform-explorer.forge";
 /// Service). The token is never logged.
 #[cfg(feature = "sidecar-platform")]
 #[tauri::command]
+#[cfg_attr(feature = "specta-bindings", specta::specta)]
 async fn forge_set_token(provider: String, token: String) -> Result<(), String> {
     tauri::async_runtime::spawn_blocking(move || forge_set_token_impl(provider, token))
         .await.map_err(|e| e.to_string())?
@@ -4776,6 +4895,7 @@ fn forge_set_token_impl(provider: String, token: String) -> Result<(), String> {
 /// the app's own frontend over the IPC boundary; it is never logged.
 #[cfg(feature = "sidecar-platform")]
 #[tauri::command]
+#[cfg_attr(feature = "specta-bindings", specta::specta)]
 async fn forge_get_token(provider: String) -> Result<Option<String>, String> {
     tauri::async_runtime::spawn_blocking(move || forge_get_token_impl(provider))
         .await.map_err(|e| e.to_string())?
@@ -4790,6 +4910,7 @@ fn forge_get_token_impl(provider: String) -> Result<Option<String>, String> {
 /// Forget a provider's stored forge token (CPE-439).
 #[cfg(feature = "sidecar-platform")]
 #[tauri::command]
+#[cfg_attr(feature = "specta-bindings", specta::specta)]
 async fn forge_delete_token(provider: String) -> Result<(), String> {
     tauri::async_runtime::spawn_blocking(move || forge_delete_token_impl(provider))
         .await.map_err(|e| e.to_string())?
@@ -4806,6 +4927,7 @@ fn forge_delete_token_impl(provider: String) -> Result<(), String> {
 /// non-repo (or when `git` isn't available).
 #[cfg(feature = "sidecar-platform")]
 #[derive(Default, serde::Serialize)]
+#[cfg_attr(feature = "specta-bindings", derive(specta::Type))]
 struct RepoSyncStatus {
     is_repo: bool,
     branch: Option<String>,
@@ -4832,6 +4954,7 @@ struct RepoSyncStatus {
 // freezing the main thread and every other command queued behind it (CPE-760).
 #[cfg(feature = "sidecar-platform")]
 #[tauri::command]
+#[cfg_attr(feature = "specta-bindings", specta::specta)]
 async fn forge_repo_status(path: String, on_diverge: Option<String>) -> RepoSyncStatus {
     tauri::async_runtime::spawn_blocking(move || forge_repo_status_impl(path, on_diverge))
         .await
@@ -4894,6 +5017,7 @@ fn forge_repo_status_impl(path: String, on_diverge: Option<String>) -> RepoSyncS
 /// diverged histories surface in `forge_repo_status` for the user to resolve. Returns git's output.
 #[cfg(feature = "sidecar-platform")]
 #[tauri::command]
+#[cfg_attr(feature = "specta-bindings", specta::specta)]
 async fn forge_sync(path: String, action: String) -> Result<String, String> {
     tauri::async_runtime::spawn_blocking(move || forge_sync_impl(path, action))
         .await.map_err(|e| e.to_string())?
@@ -4925,6 +5049,7 @@ fn forge_sync_impl(path: String, action: String) -> Result<String, String> {
 /// One conflicted file for the resolver UI.
 #[cfg(feature = "sidecar-platform")]
 #[derive(serde::Serialize)]
+#[cfg_attr(feature = "specta-bindings", derive(specta::Type))]
 struct ConflictFile {
     path: String,
     /// snake_case kind (`both_modified`, `added_by_us`, …).
@@ -4937,6 +5062,7 @@ struct ConflictFile {
 /// `rebase` / `none`) and the list of unmerged files with their kind.
 #[cfg(feature = "sidecar-platform")]
 #[derive(serde::Serialize)]
+#[cfg_attr(feature = "specta-bindings", derive(specta::Type))]
 struct ConflictState {
     /// "merge" | "rebase" | "none".
     operation: String,
@@ -4960,6 +5086,7 @@ fn merge_operation(path: &str) -> &'static str {
 /// `git status --porcelain=v2` and detects any in-progress merge/rebase.
 #[cfg(feature = "sidecar-platform")]
 #[tauri::command]
+#[cfg_attr(feature = "specta-bindings", specta::specta)]
 async fn forge_conflict_state(path: String) -> ConflictState {
     tauri::async_runtime::spawn_blocking(move || forge_conflict_state_impl(path))
         .await.unwrap()
@@ -4990,6 +5117,7 @@ fn forge_conflict_state_impl(path: String) -> ConflictState {
 /// is capped so a huge/binary file can't wedge the UI.
 #[cfg(feature = "sidecar-platform")]
 #[derive(serde::Serialize)]
+#[cfg_attr(feature = "specta-bindings", derive(specta::Type))]
 struct ConflictVersions {
     base: Option<String>,
     ours: Option<String>,
@@ -5022,6 +5150,7 @@ fn read_stage(path: &str, stage: u8, file: &str, truncated: &mut bool) -> Option
 
 #[cfg(feature = "sidecar-platform")]
 #[tauri::command]
+#[cfg_attr(feature = "specta-bindings", specta::specta)]
 async fn forge_conflict_versions(path: String, file: String) -> ConflictVersions {
     tauri::async_runtime::spawn_blocking(move || forge_conflict_versions_impl(path, file))
         .await.unwrap()
@@ -5064,6 +5193,7 @@ fn is_safe_repo_relative(file: &str) -> bool {
 /// confined to the repo — a `..`/absolute `file` is refused so a resolution can't write outside it.
 #[cfg(feature = "sidecar-platform")]
 #[tauri::command]
+#[cfg_attr(feature = "specta-bindings", specta::specta)]
 async fn forge_resolve_file(path: String, file: String, content: String) -> Result<(), String> {
     tauri::async_runtime::spawn_blocking(move || forge_resolve_file_impl(path, file, content))
         .await.map_err(|e| e.to_string())?
@@ -5092,6 +5222,7 @@ fn forge_resolve_file_impl(path: String, file: String, content: String) -> Resul
 /// message) if files remain unmerged.
 #[cfg(feature = "sidecar-platform")]
 #[tauri::command]
+#[cfg_attr(feature = "specta-bindings", specta::specta)]
 async fn forge_conflict_continue(path: String) -> Result<String, String> {
     tauri::async_runtime::spawn_blocking(move || forge_conflict_continue_impl(path))
         .await.map_err(|e| e.to_string())?
@@ -5120,6 +5251,7 @@ fn forge_conflict_continue_impl(path: String) -> Result<String, String> {
 /// Abort the in-progress merge/rebase (CPE-496), restoring the pre-sync state so **no work is lost**.
 #[cfg(feature = "sidecar-platform")]
 #[tauri::command]
+#[cfg_attr(feature = "specta-bindings", specta::specta)]
 async fn forge_conflict_abort(path: String) -> Result<String, String> {
     tauri::async_runtime::spawn_blocking(move || forge_conflict_abort_impl(path))
         .await.map_err(|e| e.to_string())?
@@ -5146,6 +5278,7 @@ fn forge_conflict_abort_impl(path: String) -> Result<String, String> {
 
 #[cfg(feature = "sidecar-platform")]
 #[tauri::command]
+#[cfg_attr(feature = "specta-bindings", specta::specta)]
 fn sidecar_diagnostics(
     id: String,
     state: tauri::State<AiConsoleState>,
@@ -5718,20 +5851,97 @@ mod agent_watch_tests {
 #[cfg(feature = "specta-bindings")]
 pub fn export_bindings(out: &std::path::Path) -> Result<(), String> {
     use tauri_specta::{collect_commands, Builder};
+    // The typed surface: the non-streaming, non-sidecar commands (CPE-953). Deliberately excluded:
+    //  - the `ipc::Channel` streamers (Channel typing is a separate CPE-953 AC);
+    //  - the `sidecar-platform`-gated commands (this bin doesn't enable that feature — the superset
+    //    `sidecar-platform` codegen is a follow-up);
+    //  - `rename_tag` (param `new`) + `apply_backup_plan` (param `delete`) — their Rust params are JS
+    //    reserved words, which tauri-specta would emit verbatim as a syntax error; renaming the params
+    //    would break existing callers, so they keep working through `generate_handler!` only.
     let builder = Builder::<tauri::Wry>::new().commands(collect_commands![
-        run_command,
-        create_dir,
-        create_file,
-        write_file_text,
-        rename_entry,
-        can_restore_from_trash,
         list_dir,
-        entry_info,
+        find_project_root,
+        board_cards,
+        board_epics,
+        board_archived,
+        board_move,
+        board_review,
+        board_note,
+        workbench_diff,
+        home_dir,
+        parent_dir,
+        list_drives,
+        disk_space,
+        special_folders,
+        create_dir,
+        read_file_text,
+        read_file_range,
+        file_len,
+        set_permissions,
+        set_readonly,
+        set_file_times,
+        set_file_attribute,
+        read_attributes,
+        write_file_text,
+        read_archive_entries,
+        read_preview_info,
+        data_browser_sources,
+        data_browser_page,
+        data_browser_query,
+        read_image_data_url,
+        thumbnail,
+        read_settings,
+        write_settings,
+        load_tags,
+        set_tags,
+        tag_counts,
+        delete_tag,
+        import_tags,
+        retag_path,
+        rename_entry,
         delete_to_trash,
         delete_permanent,
+        can_restore_from_trash,
+        restore_from_trash,
         copy_entries,
         move_entries,
+        run_watch_actions,
+        start_transfer,
+        cancel_transfer,
         move_exact,
+        entry_info,
+        image_meta,
+        entries_for_paths,
+        same_volume,
+        dir_size,
+        dir_children_sizes,
+        folder_stats,
+        hash_file,
+        checksum_folder,
+        verify_folder,
+        verify_all_baselines,
+        scan_tree,
+        create_symlink,
+        create_hard_link,
+        link_status,
+        drive_type,
+        audit_record,
+        audit_sessions,
+        audit_read,
+        text_stats,
+        search_file_contents,
+        find_files_by_name,
+        files_identical,
+        find_duplicates,
+        git_remote_url,
+        open_external,
+        run_as_admin,
+        extract_archive_entry,
+        compress_to_zip,
+        extract_archive,
+        open_terminal,
+        run_command,
+        create_file,
     ]);
     let tmp = std::env::temp_dir().join("cpe_bindings_export.ts");
     // u64 byte-counts (e.g. write_file_text) map to `number` — matches how the frontend already treats

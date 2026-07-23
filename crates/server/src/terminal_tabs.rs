@@ -5,6 +5,7 @@
 
 /// One terminal tab.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[cfg_attr(feature = "specta", derive(specta::Type))]
 pub struct TermTab {
     pub id: u64,
     pub title: String,
@@ -13,6 +14,7 @@ pub struct TermTab {
 
 /// The dock's tab strip + which tab is active.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, Default)]
+#[cfg_attr(feature = "specta", derive(specta::Type))]
 pub struct TerminalDock {
     tabs: Vec<TermTab>,
     active: usize,

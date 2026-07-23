@@ -11,6 +11,7 @@ use crate::fsutil::entry_is_symlink;
 
 /// One content-search hit: the file, the 1-based line number, and the (trimmed, truncated) line.
 #[derive(Serialize)]
+#[cfg_attr(feature = "specta", derive(specta::Type))]
 pub struct ContentMatch {
     pub path: String,
     pub line_number: u64,
@@ -19,6 +20,7 @@ pub struct ContentMatch {
 
 /// The result of a content search: the hits, how many files were scanned, and whether a cap was hit.
 #[derive(Serialize)]
+#[cfg_attr(feature = "specta", derive(specta::Type))]
 pub struct ContentSearchResult {
     pub matches: Vec<ContentMatch>,
     pub files_scanned: u64,

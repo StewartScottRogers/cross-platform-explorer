@@ -16,6 +16,7 @@ use crate::ctx::ServerCtx;
 
 /// The tags + colour label attached to one path.
 #[derive(Debug, Default, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "specta", derive(specta::Type))]
 pub struct TagEntry {
     #[serde(default)]
     tags: Vec<String>,

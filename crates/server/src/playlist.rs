@@ -5,6 +5,7 @@
 
 /// How playback loops.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[cfg_attr(feature = "specta", derive(specta::Type))]
 #[serde(rename_all = "snake_case")]
 pub enum RepeatMode {
     /// Stop at the ends (`next()` past the last track returns `None`).
@@ -18,6 +19,7 @@ pub enum RepeatMode {
 /// An ordered playlist with a cursor. `order` is the play sequence (indices into `items`); it's the
 /// identity until shuffled.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[cfg_attr(feature = "specta", derive(specta::Type))]
 pub struct Playlist {
     items: Vec<String>,
     order: Vec<usize>,

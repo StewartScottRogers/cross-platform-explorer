@@ -11,6 +11,7 @@ use crate::fsutil::{entry_is_symlink, sha256_file};
 
 /// A set of byte-identical files: their shared size + hash and every path.
 #[derive(Serialize)]
+#[cfg_attr(feature = "specta", derive(specta::Type))]
 pub struct DupGroup {
     size: u64,
     hash: String,
@@ -20,6 +21,7 @@ pub struct DupGroup {
 /// The result of a duplicate scan: the groups (largest reclaimable space first), how many files were
 /// considered, and whether the file cap was hit.
 #[derive(Serialize)]
+#[cfg_attr(feature = "specta", derive(specta::Type))]
 pub struct DupResult {
     pub groups: Vec<DupGroup>,
     pub files_scanned: u64,

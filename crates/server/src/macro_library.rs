@@ -6,6 +6,7 @@ use crate::action_macro::{validate, ActionMacro};
 
 /// An ordered collection of saved macros, keyed by their (unique, case-insensitive) name.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize, Default)]
+#[cfg_attr(feature = "specta", derive(specta::Type))]
 pub struct MacroLibrary {
     macros: Vec<ActionMacro>,
 }

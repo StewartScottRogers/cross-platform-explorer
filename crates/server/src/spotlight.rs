@@ -8,6 +8,7 @@
 /// One ranked candidate: its text, score (higher is better), and the matched character indices (into
 /// `text`, by `char`) so the UI can highlight them.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[cfg_attr(feature = "specta", derive(specta::Type))]
 pub struct SpotlightMatch {
     pub text: String,
     pub score: i32,

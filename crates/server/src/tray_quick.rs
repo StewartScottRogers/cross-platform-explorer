@@ -5,6 +5,7 @@
 
 /// One quick-access entry (a folder or file the tray offers a one-click jump to).
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[cfg_attr(feature = "specta", derive(specta::Type))]
 pub struct QuickEntry {
     pub path: String,
     pub label: String,
@@ -14,6 +15,7 @@ pub struct QuickEntry {
 /// The tray's quick-access state: pinned entries (in pin order) followed by recents (most-recent first),
 /// with a cap on how many recents are retained.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[cfg_attr(feature = "specta", derive(specta::Type))]
 pub struct QuickAccess {
     pinned: Vec<QuickEntry>,
     recent: Vec<QuickEntry>,

@@ -7,6 +7,7 @@ use crate::media_meta_edit::{apply_edits, EditResult, MetaEdit, MetaField};
 
 /// A file in the selection with its current metadata fields.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[cfg_attr(feature = "specta", derive(specta::Type))]
 pub struct FileMeta {
     pub path: String,
     pub fields: Vec<MetaField>,
@@ -14,6 +15,7 @@ pub struct FileMeta {
 
 /// The result of applying the shared edits to one file.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[cfg_attr(feature = "specta", derive(specta::Type))]
 pub struct FileEditResult {
     pub path: String,
     pub result: EditResult,
@@ -21,6 +23,7 @@ pub struct FileEditResult {
 
 /// A run summary across the selection.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, Default)]
+#[cfg_attr(feature = "specta", derive(specta::Type))]
 pub struct BatchSummary {
     pub files: usize,
     /// Files where at least one edit applied.

@@ -17,7 +17,18 @@ Follow-up to **CPE-812**, which landed the codegen **foundation**: the `specta-b
 This ticket completes the rollout so the whole app can call backend commands through the typed client.
 
 ## Work Log
-- 2026-07-23 (dayshift) — **Foundation increment landed** (the hard cross-crate part): added an optional
+- 2026-07-23 (dayshift, increment 2) — **Bulk rollout: 13 → 83 typed commands.** Derived `specta::Type`
+  (feature-gated) on **every** `cpe-server` serde type (all 38 files compile under `--features specta` with
+  zero problem types) and on the app-local serde types; annotated every non-sidecar `#[tauri::command]`;
+  built `collect_commands!` from the full non-sidecar, non-stream handler list. Excluded (documented in
+  `export_bindings`): the 7 `ipc::Channel` streamers (separate AC), the `sidecar-platform`-gated commands
+  (bin doesn't enable that feature), and `rename_tag`/`apply_backup_plan` (params `new`/`delete` are JS
+  reserved words tauri-specta emits verbatim — renaming would break callers). Verified: `bindings.gen.ts`
+  now types **83 commands**, `npm run check` 0/0; default `cargo test` 67 pass + loads clean (specta off);
+  cpe-server 311 pass; clippy clean default + `specta-bindings`. `generate_handler!` still owns dispatch.
+  **Remaining:** Channel typing, the `sidecar-platform` superset codegen, the 2 reserved-param commands,
+  the optional runtime `Builder` switch, call-site migration, GUI-verify.
+- 2026-07-23 (dayshift, increment 1) — **Foundation increment landed** (the hard cross-crate part): added an optional
   `specta` dep + OFF-by-default `specta` feature to **`cpe-server`**, and `#[cfg_attr(feature = "specta",
   derive(specta::Type))]` on the core `model.rs` types (`DirEntry`/`OpResult`/`EntryInfo`/`Place`). Wired the
   app's `specta-bindings` feature to enable `cpe-server/specta`, so cpe-server types now flow into the typed

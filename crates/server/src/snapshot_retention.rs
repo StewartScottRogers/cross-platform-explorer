@@ -7,6 +7,7 @@ use std::collections::BTreeSet;
 
 /// One taken snapshot: an opaque id + when it was taken (epoch seconds).
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[cfg_attr(feature = "specta", derive(specta::Type))]
 pub struct Snapshot {
     pub id: String,
     pub epoch_s: u64,
@@ -14,6 +15,7 @@ pub struct Snapshot {
 
 /// How many buckets to keep at each granularity. `0` disables a tier.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[cfg_attr(feature = "specta", derive(specta::Type))]
 pub struct RetentionPolicy {
     pub hourly: usize,
     pub daily: usize,
@@ -30,6 +32,7 @@ impl Default for RetentionPolicy {
 
 /// The thinning decision: ids to keep and ids to prune (disjoint; together = every input snapshot).
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, Default)]
+#[cfg_attr(feature = "specta", derive(specta::Type))]
 pub struct RetentionResult {
     pub keep: Vec<String>,
     pub prune: Vec<String>,

@@ -22,6 +22,7 @@ use crate::tags::{tag_store_set, TagStore};
 /// CPE's portable native-metadata representation of a path's organisational labels: its tags + colour
 /// label, stored as a JSON blob in native file metadata so they survive outside `tags.json`.
 #[derive(Debug, Default, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "specta", derive(specta::Type))]
 pub struct NativeTags {
     #[serde(default)]
     pub tags: Vec<String>,

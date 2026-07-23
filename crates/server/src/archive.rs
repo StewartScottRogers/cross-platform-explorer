@@ -11,6 +11,7 @@ use serde::Serialize;
 
 /// One entry inside an archive, for the archive preview.
 #[derive(Serialize)]
+#[cfg_attr(feature = "specta", derive(specta::Type))]
 pub struct ArchiveEntry {
     pub name: String,
     pub size: u64,

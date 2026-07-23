@@ -5,6 +5,7 @@
 
 /// What kind of selection a verb applies to.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[cfg_attr(feature = "specta", derive(specta::Type))]
 #[serde(tag = "applies", rename_all = "snake_case")]
 pub enum AppliesTo {
     /// Only when every selected item is a file.
@@ -19,6 +20,7 @@ pub enum AppliesTo {
 
 /// A registered context-menu verb.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[cfg_attr(feature = "specta", derive(specta::Type))]
 pub struct MenuVerb {
     pub id: String,
     pub label: String,
@@ -29,6 +31,7 @@ pub struct MenuVerb {
 
 /// A selected item — just what applicability needs.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[cfg_attr(feature = "specta", derive(specta::Type))]
 pub struct SelItem {
     pub path: String,
     pub is_dir: bool,
