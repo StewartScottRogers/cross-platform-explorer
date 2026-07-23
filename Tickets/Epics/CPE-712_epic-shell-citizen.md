@@ -2,7 +2,7 @@
 id: CPE-712
 title: "EPIC: Shell citizen — OS context-menu & default file manager"
 type: Task
-status: Proposed
+status: In Progress
 priority: Medium
 component: Multiple
 tags: [epic]
@@ -34,3 +34,8 @@ stakes for daily-driver use and makes CPE reachable from everywhere the OS offer
 - "Open in CPE" appears in the native context menu on each OS after opt-in.
 - Users can set CPE as the default file manager where the OS allows it.
 - Disabling the integration removes every registered entry with no residue.
+
+## Work Log
+2026-07-23 (dayshift) — **Activated.** First slice: **CPE-945** — `shell_menu::verbs_for`: the pure
+applicability core deciding which registered context-menu verbs to show for a selection. Remaining: the
+per-OS shell registration glue and the default-file-manager handshake.
