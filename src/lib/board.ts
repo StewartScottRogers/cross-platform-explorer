@@ -37,6 +37,7 @@ export function filterCards(cards: Card[], query: string): Card[] {
       c.title.toLowerCase().includes(q) ||
       c.ticket_type.toLowerCase().includes(q) ||
       c.priority.toLowerCase().includes(q) ||
+      (c.epic ?? "").toLowerCase().includes(q) ||
       c.tags.some((t) => t.toLowerCase().includes(q)),
   );
 }
@@ -107,6 +108,51 @@ export function todoDone(cards: Card[]): { todo: Card[]; done: Card[] } {
 export function epicProgress(cards: Card[], epicId: string): { done: number; total: number } {
   const mine = cards.filter((c) => (c.epic || NO_EPIC) === epicId);
   return { done: mine.filter((c) => c.column === "Done").length, total: mine.length };
+}
+
+// --- Epics-as-kanban (CPE-922): lay epics out across ticket-style columns instead of a list+detail, so
+// the Epics view reads like the tickets board. Epics flow Proposed → In Progress → Done. -------------
+
+/** The Epics view's columns — the epic lifecycle mapped onto the tickets board's Backlog/Doing/Done. */
+export const EPIC_COLUMNS = ["Backlog", "Doing", "Done"] as const;
+export type EpicColumn = (typeof EPIC_COLUMNS)[number];
+
+/** Map an epic's `status:` frontmatter to its board column. `In Progress`/`Active` → Doing,
+ *  `Done`/`Closed` → Done; anything else (Proposed, blank, unknown) is not-yet-started → Backlog. */
+export function epicColumn(status: string): EpicColumn {
+  const s = status.trim().toLowerCase();
+  if (s === "done" || s === "closed" || s === "complete") return "Done";
+  if (s === "in progress" || s === "active" || s === "doing") return "Doing";
+  return "Backlog";
+}
+
+/** Group epics into the Epics-view columns, each id-ordered (CPE-9 before CPE-100). */
+export function groupEpicsByColumn(epics: Epic[]): Record<EpicColumn, Epic[]> {
+  const out = { Backlog: [], Doing: [], Done: [] } as Record<EpicColumn, Epic[]>;
+  for (const e of epics) out[epicColumn(e.status)].push(e);
+  for (const c of EPIC_COLUMNS) out[c].sort((a, b) => idNum(a.id) - idNum(b.id));
+  return out;
+}
+
+/** The epics hiding in the archive: `epic`-tagged cards from the dated `Done/**` subfolders (which come
+ *  back as {@link Card}s, not epics), mapped to {@link Epic}s for the Done column's archive toggle. */
+export function archivedEpics(archived: Card[]): Epic[] {
+  return archived
+    .filter((c) => c.tags.includes("epic"))
+    .map((c) => ({ id: c.id, title: c.title, status: "Done", tags: c.tags }))
+    .sort((a, b) => idNum(a.id) - idNum(b.id));
+}
+
+/** Filter epics by a free-text query — id, title, or any tag (case-insensitive). Blank → all. */
+export function filterEpics(epics: Epic[], query: string): Epic[] {
+  const q = query.trim().toLowerCase();
+  if (!q) return epics;
+  return epics.filter(
+    (e) =>
+      e.id.toLowerCase().includes(q) ||
+      e.title.toLowerCase().includes(q) ||
+      e.tags.some((t) => t.toLowerCase().includes(q)),
+  );
 }
 
 /** Per-column counts, for the column headers. */
