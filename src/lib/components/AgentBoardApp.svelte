@@ -10,10 +10,16 @@
   // events are intentionally no-ops for now (the board's read/move workflow is fully functional).
   import { getCurrentWindow } from "@tauri-apps/api/window";
   import BoardView from "./BoardView.svelte";
+  import DocsView from "./DocsView.svelte";
+  import { docSlugForSection } from "../sectionDocs";
 
   function closeWindow() {
     void getCurrentWindow().close();
   }
+
+  // In-window docs (CPE-927): the standalone board window has no App shell to forward `help` to, so it
+  // opens the Agent Board doc page in an overlay right here — otherwise the board's Docs button is dead.
+  let showDocs = false;
 </script>
 
 <BoardView
@@ -21,5 +27,9 @@
   root=""
   on:close={closeWindow}
   on:launch={() => {/* cross-window agent launch: CPE-844 */}}
-  on:help={() => {/* in-window docs: CPE-845 */}}
+  on:help={() => (showDocs = true)}
 />
+
+{#if showDocs}
+  <DocsView initialSlug={docSlugForSection("agent-board")} on:close={() => (showDocs = false)} />
+{/if}
