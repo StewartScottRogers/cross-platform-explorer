@@ -2,7 +2,7 @@
 id: CPE-730
 title: "EPIC: Multi-agent conflict radar"
 type: Task
-status: Proposed
+status: In Progress
 priority: Medium
 component: Multiple
 tags: [epic]
@@ -35,3 +35,10 @@ of visibility Agent Watch exists for, and it becomes essential as Swarms scale.
 - Overlapping edits/deletes/renames across sessions are detected and flagged live.
 - Each contended file shows which agents are involved; the heat-map colours by owner.
 - No cost when only one session is running.
+
+## Work Log
+2026-07-22 (nightshift) — **Activated.** Open questions resolved (best-guess): "conflict" v1 = **edit-edit**
+(2+ agents edit one file) + **edit-delete** (one deletes what another edits), ignoring same-agent
+self-overlap; competing renames deferred (need source→target pairs); temporal windowing is a UI concern
+layered later. First slice shipped: **CPE-914** — `conflict::detect_conflicts`. Remaining: reliable
+per-session activity attribution feed + the radar UI (banner, "who else is here", owner-coloured heat-map).
