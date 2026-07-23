@@ -1018,6 +1018,381 @@ async createFile(path: string, name: string) : Promise<Result<string, string>> {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
 }
+},
+/**
+ * List the ids of sidecars registered in the bundled + user registry directories.
+ */
+async sidecarRegistryIds() : Promise<string[]> {
+    return await TAURI_INVOKE("sidecar_registry_ids");
+},
+async sidecarConsentState(id: string) : Promise<Result<ConsentState, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("sidecar_consent_state", { id }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * Record the user's consent decision: `granted` are approved, the remaining `decided`
+ * capabilities are denied. Persisted so the user is asked once per capability (CPE-296).
+ */
+async sidecarSetConsent(id: string, granted: Capability[], decided: Capability[]) : Promise<Result<null, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("sidecar_set_consent", { id, granted, decided }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * Revoke a previously-granted capability (management UI, CPE-274/296). Takes effect on
+ * the sidecar's next launch.
+ */
+async sidecarRevokeCapability(id: string, capability: Capability) : Promise<Result<null, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("sidecar_revoke_capability", { id, capability }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * List registered sidecars with version, contract compatibility, running/enabled state,
+ * and granted capabilities — the data behind the management panel (CPE-274).
+ */
+async sidecarDetails() : Promise<Result<SidecarInfo[], string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("sidecar_details") };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * Stop a running sidecar (management UI). Dropping the connection reaps the process.
+ * Only the AI Console is currently spawnable; a no-op for others.
+ */
+async sidecarStop(id: string) : Promise<Result<null, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("sidecar_stop", { id }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * Best-effort self-heal for a sidecar (CPE-863, epic CPE-862 L1): reap orphan session-daemons that may
+ * be holding the binary/port, drop a wedged connection, and clear the stored last-error so a stuck
+ * sidecar can start clean — then re-check whether its binary resolves. A genuinely missing binary can't
+ * be restored here (that's L2); it is reported honestly via `binary_ok = false` so the UI can say so.
+ */
+async sidecarRepair(id: string) : Promise<Result<SidecarRepair, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("sidecar_repair", { id }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * Close a single AI Console session (CPE-489) — the left-pane Agents "Close this session". Routes to
+ * the console's own per-session close endpoint over its loopback UI server
+ * (`{url}/api/session/{id}/close`); the console then emits an `ended` for that session, pruning its
+ * leaf while the others keep running. A no-op if the console isn't running (no URL yet).
+ */
+async sidecarCloseSession(sessionId: string) : Promise<Result<null, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("sidecar_close_session", { sessionId }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * Enable or disable a sidecar (CPE-274). Disabling stops it (if running) and prevents it
+ * from starting until re-enabled. Independent per sidecar — never touches others.
+ */
+async sidecarSetEnabled(id: string, enabled: boolean) : Promise<Result<null, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("sidecar_set_enabled", { id, enabled }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * Spawn (or reuse) the AI Console sidecar, complete the handshake, and return the URL of
+ * the UI it serves so the frontend can mount it in an iframe pane (CPE-271). Non-fatal:
+ * returns an error string that the UI surfaces, never panicking the explorer.
+ */
+async sidecarStartAiConsole() : Promise<Result<string, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("sidecar_start_ai_console") };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * Spawn the Agent Board sidecar, complete the handshake, and return the URL of the Kanban UI it serves
+ * so the frontend can frame it in a window (CPE-853, epic CPE-850). The board reads `Tickets/` under
+ * `root` (passed as `CPE_BOARD_ROOT`; falls back to the sidecar's own cwd when absent). The window
+ * singleton (by label) prevents duplicate launches, so this deliberately keeps the connection alive on a
+ * detached servicing thread rather than a managed reuse state. Non-fatal: returns an error string the UI
+ * surfaces.
+ */
+async sidecarStartAgentBoard(root: string | null) : Promise<Result<string, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("sidecar_start_agent_board", { root }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async sidecarDiagnostics(id: string) : Promise<Result<SidecarDiagnostics, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("sidecar_diagnostics", { id }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * Start watching an agent's Project folder for filesystem activity (CPE-398). Replaces any
+ * existing watch. Non-fatal: returns an error string the caller can surface. A missing folder
+ * (e.g. a since-deleted path) is rejected rather than silently watching nothing.
+ */
+async agentWatchStart(path: string) : Promise<Result<null, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("agent_watch_start", { path }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * Stop watching (CPE-398). Dropping the stored watcher ends its emitter thread. Idempotent.
+ */
+async agentWatchStop() : Promise<void> {
+    await TAURI_INVOKE("agent_watch_stop");
+},
+/**
+ * Start (or replace) the watched-folder watcher over `paths` (CPE-794). Missing folders are skipped;
+ * an empty/all-missing set is a no-op stop. Non-recursive-safe: each folder is watched recursively.
+ */
+async folderWatchStart(paths: string[]) : Promise<Result<number, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("folder_watch_start", { paths }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * Stop the watched-folder watcher (CPE-794). Idempotent.
+ */
+async folderWatchStop() : Promise<void> {
+    await TAURI_INVOKE("folder_watch_stop");
+},
+/**
+ * Return a sidecar's last error and recent, REDACTED log lines for the management panel
+ * (CPE-323). Only the AI Console currently produces live logs; other registered sidecars
+ * return an empty (but valid) diagnostics record so the panel can render uniformly.
+ * 
+ * Redaction is defence-in-depth: every message runs through
+ * [`Redactor::redact_log_line`], which masks registered secrets *and* heuristic secret
+ * shapes (API-key prefixes, bearer tokens, `sensitive_key=value`), so a secret can never
+ * surface here even if one reached a log line.
+ * Browse a remote repo's tree for the Repositories left-pane view (CPE-434/435). Uses the
+ * host-brokered, allow-listed forge egress (`forge_egress`) — public GitHub needs no token; an
+ * optional token enables private repos. `repo` is `owner/name`, `path` is a subfolder (or empty for
+ * the root). Returns folders-first entries, or an actionable error message.
+ */
+async forgeBrowse(provider: string, repo: string, path: string | null, token: string | null) : Promise<Result<RepoEntry[], string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("forge_browse", { provider, repo, path, token }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * Clone a remote repo (CPE-436) from a known forge `provider` into `target_dir`. The clone URL is
+ * built host-side from the provider allow-list (`clone_host`) — the caller supplies only `owner/name`,
+ * never a scheme or host (SSRF hygiene, as in `forge_egress`). git runs with the hardened argv from
+ * the repos crate (threat-model §C). An optional `token` clones a private repo: it is injected into
+ * the URL for git and is NEVER logged — and is scrubbed from any git error text before it is returned.
+ */
+async forgeClone(provider: string, repo: string, targetDir: string, token: string | null) : Promise<Result<string, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("forge_clone", { provider, repo, targetDir, token }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * Parse an arbitrary git URL for the Generic-Git add flow (CPE-498): returns its host + a
+ * credential-stripped URL + whether that host is already in the consent allow-list. Read-only — it
+ * never admits anything. An unsupported transport is an error the UI can show.
+ */
+async forgeGenericRemote(url: string) : Promise<Result<GenericRemoteInfo, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("forge_generic_remote", { url }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * The Generic-Git egress allow-list — hosts the user has consented to reach (CPE-498).
+ */
+async forgeAdmittedHosts() : Promise<string[]> {
+    return await TAURI_INVOKE("forge_admitted_hosts");
+},
+/**
+ * Admit ONE host after explicit user consent (CPE-498). Never a wildcard and never a URL: exactly the
+ * normalized host is stored, so consenting to `a.example.com` never admits `b.example.com`. Idempotent.
+ */
+async forgeAdmitHost(host: string) : Promise<Result<null, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("forge_admit_host", { host }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * Revoke a host from the Generic-Git allow-list (management; CPE-498).
+ */
+async forgeForgetHost(host: string) : Promise<Result<null, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("forge_forget_host", { host }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * Clone an ARBITRARY https/ssh git URL into `target_dir` (Generic Git, CPE-498) — the self-hosted /
+ * unknown-forge path. Gated on the URL's host being in the consent allow-list; a non-admitted host is
+ * refused (no silent admission). git runs with the repos crate's hardened argv; an https `token` is
+ * injected for a private clone and is scrubbed from any error text.
+ */
+async forgeCloneUrl(url: string, targetDir: string, token: string | null) : Promise<Result<string, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("forge_clone_url", { url, targetDir, token }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * Store a forge access token in the OS keychain so browse/clone don't need it re-typed (CPE-439).
+ * Reuses the host's `KeyringBackend` (Windows Credential Manager / macOS Keychain / Linux Secret
+ * Service). The token is never logged.
+ */
+async forgeSetToken(provider: string, token: string) : Promise<Result<null, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("forge_set_token", { provider, token }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * Fetch the stored forge token for `provider` (CPE-439), or `None`. The value is returned only to
+ * the app's own frontend over the IPC boundary; it is never logged.
+ */
+async forgeGetToken(provider: string) : Promise<Result<string | null, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("forge_get_token", { provider }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * Forget a provider's stored forge token (CPE-439).
+ */
+async forgeDeleteToken(provider: string) : Promise<Result<null, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("forge_delete_token", { provider }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * Report the git sync status of `path` (CPE-462) — read-only. Runs `git status --porcelain=v2
+ * --branch`, parses it (`repos::parse_status`), and plans a **safe** two-way sync
+ * (`repos::plan_sync`, never force). Used by the explorer's status bar to show ahead/behind and
+ * offer Pull/Push. A non-repo (or no `git`) returns `is_repo:false`.
+ */
+async forgeRepoStatus(path: string, onDiverge: string | null) : Promise<RepoSyncStatus> {
+    return await TAURI_INVOKE("forge_repo_status", { path, onDiverge });
+},
+/**
+ * Execute one **safe** sync step on `path` (CPE-462): `pull` fast-forwards only (never clobbers
+ * local work), `push` pushes without force. Anything that could rewrite history is refused —
+ * diverged histories surface in `forge_repo_status` for the user to resolve. Returns git's output.
+ */
+async forgeSync(path: string, action: string) : Promise<Result<string, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("forge_sync", { path, action }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * Report the current conflict state (CPE-496) — read-only. Lists unmerged files from
+ * `git status --porcelain=v2` and detects any in-progress merge/rebase.
+ */
+async forgeConflictState(path: string) : Promise<ConflictState> {
+    return await TAURI_INVOKE("forge_conflict_state", { path });
+},
+async forgeConflictVersions(path: string, file: string) : Promise<ConflictVersions> {
+    return await TAURI_INVOKE("forge_conflict_versions", { path, file });
+},
+/**
+ * Stage a resolved file (CPE-496): write `content` to `<repo>/<file>` and `git add` it. The path is
+ * confined to the repo — a `..`/absolute `file` is refused so a resolution can't write outside it.
+ */
+async forgeResolveFile(path: string, file: string, content: string) : Promise<Result<null, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("forge_resolve_file", { path, file, content }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * Continue the in-progress merge/rebase after conflicts are staged (CPE-496). Runs the right
+ * continuation with `GIT_EDITOR=true` so it never blocks on an editor. Fails (surfacing git's
+ * message) if files remain unmerged.
+ */
+async forgeConflictContinue(path: string) : Promise<Result<string, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("forge_conflict_continue", { path }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * List the immediate children of `path`.
+ * List a directory's entries. Model + the shared walker live in `cpe_server::listing` (CPE-815); this
+ * is a thin `spawn_blocking` dispatcher.
+ */
+async listDir(path: string) : Promise<Result<DirEntry[], string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("list_dir", { path }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
 }
 }
 
@@ -1060,6 +1435,30 @@ path: string;
  */
 detail?: string | null }
 /**
+ * A brokered permission a sidecar may request. No capability = no access.
+ */
+export type Capability = 
+/**
+ * Read the explorer's current folder/repo/selection (CPE-267).
+ */
+"context" | 
+/**
+ * Brokered access to the OS secret store, own namespace (CPE-268).
+ */
+"secrets" | 
+/**
+ * A private, host-assigned storage directory (CPE-269).
+ */
+"storage" | 
+/**
+ * Emit notifications / receive host lifecycle signals (CPE-270).
+ */
+"events" | 
+/**
+ * Make outbound network requests (installs, provider APIs).
+ */
+"network"
+/**
  * A board card — a ticket flattened for the Kanban UI.
  */
 export type Card = { id: string; title: string; ticket_type: string; priority: string; tags: string[]; epic: string | null; sprint: string | null; 
@@ -1095,6 +1494,18 @@ code: number | null;
  */
 truncated: boolean }
 /**
+ * One conflicted file for the resolver UI.
+ */
+export type ConflictFile = { path: string; 
+/**
+ * snake_case kind (`both_modified`, `added_by_us`, …).
+ */
+code: string; 
+/**
+ * Human label ("both modified", …).
+ */
+label: string }
+/**
  * How a name collision at the destination is resolved for the whole batch.
  */
 export type ConflictPolicy = 
@@ -1111,6 +1522,31 @@ export type ConflictPolicy =
  */
 "keepboth"
 /**
+ * The repo's conflict state for the resolver (CPE-496): which reconcile is in progress (`merge` /
+ * `rebase` / `none`) and the list of unmerged files with their kind.
+ */
+export type ConflictState = { 
+/**
+ * "merge" | "rebase" | "none".
+ */
+operation: string; files: ConflictFile[] }
+/**
+ * The three stage versions of a conflicted file (CPE-496): `base` (stage 1, the common ancestor),
+ * `ours` (stage 2), `theirs` (stage 3), plus `merged` — the current working-tree content **with**
+ * conflict markers. A stage absent for this conflict kind (e.g. add/add has no base) is `None`. Each
+ * is capped so a huge/binary file can't wedge the UI.
+ */
+export type ConflictVersions = { base: string | null; ours: string | null; theirs: string | null; merged: string | null; 
+/**
+ * True when any side was omitted for being binary or over the size cap.
+ */
+truncated: boolean }
+/**
+ * A sidecar's requested capabilities plus the persisted consent decision (CPE-296):
+ * which are already granted, and which are still undecided (need a consent prompt).
+ */
+export type ConsentState = { requested: Capability[]; granted: Capability[]; undecided: Capability[] }
+/**
  * One content-search hit: the file, the 1-based line number, and the (trimmed, truncated) line.
  */
 export type ContentMatch = { path: string; line_number: number; line: string }
@@ -1118,6 +1554,18 @@ export type ContentMatch = { path: string; line_number: number; line: string }
  * The result of a content search: the hits, how many files were scanned, and whether a cap was hit.
  */
 export type ContentSearchResult = { matches: ContentMatch[]; files_scanned: number; truncated: boolean }
+/**
+ * One redacted log line in a diagnostics response (CPE-323).
+ */
+export type DiagLogLine = { 
+/**
+ * Severity, snake_case (`info` / `warn` / `error` / …).
+ */
+level: string; 
+/**
+ * The log message, run through the redactor — never contains a secret.
+ */
+message: string }
 /**
  * One entry in a directory listing. Fields serialize by name to match the frontend `DirEntry`.
  */
@@ -1168,6 +1616,19 @@ mode: string | null }
  * Recursive folder totals. Serialized to match the frontend `FolderStats`.
  */
 export type FolderStats = { files: number; dirs: number; bytes: number; truncated: boolean }
+/**
+ * What the Generic-Git consent prompt needs: the parsed host, transport, credential-stripped URL,
+ * and whether the host is already admitted.
+ */
+export type GenericRemoteInfo = { host: string; 
+/**
+ * "https" | "ssh".
+ */
+scheme: string; 
+/**
+ * The remote with any embedded credentials stripped — safe to display.
+ */
+url: string; admitted: boolean }
 /**
  * Image dimensions + basic EXIF for the Properties dialog. Best-effort: every field is optional and a
  * non-image / EXIF-less file yields an all-`None` struct rather than an error.
@@ -1225,6 +1686,53 @@ name: string; path: string;
  * "desktop" | "documents" | "downloads" | "pictures" | "music" | "videos" | "drive" | "home".
  */
 kind: string }
+/**
+ * One entry in a browsed remote repo tree (CPE-434/435) — a file or folder, for the Repositories
+ * left-pane view. Serialised to the frontend.
+ */
+export type RepoEntry = { name: string; path: string; is_dir: boolean; size: number }
+/**
+ * The git sync state of a local folder for the two-way-mirror status bar (CPE-462), flattened from
+ * the repos crate's `RepoState` + safe `SyncPlan` for the frontend. `is_repo` is false for a
+ * non-repo (or when `git` isn't available).
+ */
+export type RepoSyncStatus = { is_repo: boolean; branch: string | null; upstream: string | null; ahead: number; behind: number; dirty: boolean; 
+/**
+ * Planned safe steps: any of `pull-ff` / `pull-merge` / `pull-rebase` / `push`.
+ */
+actions: string[]; up_to_date: boolean; conflicts_possible: boolean; blocked: string | null; warnings: string[]; 
+/**
+ * True when the working tree currently has unmerged files (a merge/rebase left conflicts) — the
+ * status bar surfaces a "Resolve…" entry into the CPE-496 resolver.
+ */
+conflicted: boolean }
+/**
+ * A sidecar's health for the management panel (CPE-323): running state, the last error
+ * that stopped it (if any), and recent log lines. Every string here is redacted.
+ */
+export type SidecarDiagnostics = { id: string; running: boolean; 
+/**
+ * The last start/crash error, redacted, or `None` if the sidecar is healthy.
+ */
+last_error: string | null; 
+/**
+ * Recent log lines, oldest first, already redacted.
+ */
+logs: DiagLogLine[] }
+/**
+ * One row in the platform management UI (CPE-274): a registered sidecar with its
+ * identity, contract compatibility, running/enabled state, and consent picture.
+ */
+export type SidecarInfo = { id: string; name: string; version: string; contract: string; compatible: boolean; running: boolean; enabled: boolean; 
+/**
+ * Whether the sidecar's launchable binary actually resolves (CPE-863) — false = missing binary.
+ */
+binary_ok: boolean; requested: Capability[]; granted: Capability[] }
+/**
+ * What a repair attempt did, for the management panel (CPE-863). `binary_ok` is the re-checked binary
+ * presence after the repair; `actions` are the plain-language steps taken.
+ */
+export type SidecarRepair = { id: string; binary_ok: boolean; actions: string[] }
 export type TAURI_CHANNEL<TSend> = null
 /**
  * The tags + colour label attached to one path.

@@ -5848,15 +5848,17 @@ mod agent_watch_tests {
 /// `generate_handler!` (this only emits the client), so behaviour is unchanged. Called from the
 /// `export_bindings` bin — a plain exe, which loads where a libtest binary linking tauri-specta would fail
 /// (`STATUS_ENTRYPOINT_NOT_FOUND`, a WebView2 entrypoint skew), so codegen never runs under `cargo test`.
-/// Regenerate: `cargo run --bin export_bindings --features specta-bindings`.
-#[cfg(feature = "specta-bindings")]
+/// Requires **both** `specta-bindings` and `sidecar-platform` so `bindings.gen.ts` is the one superset
+/// contract covering the sidecar commands too (CPE-957). Regenerate:
+///   cargo run --bin export_bindings --features "specta-bindings sidecar-platform"
+#[cfg(all(feature = "specta-bindings", feature = "sidecar-platform"))]
 pub fn export_bindings(out: &std::path::Path) -> Result<(), String> {
     use tauri_specta::{collect_commands, Builder};
-    // The full non-sidecar typed surface (CPE-953): every `#[tauri::command]` not gated behind
-    // `sidecar-platform`, INCLUDING the `ipc::Channel` streamers (their `Channel<T>` methods bind
-    // `TAURI_CHANNEL` from `./invoke`, which re-exports `Channel`). The `sidecar-platform` superset
-    // (sidecar commands) is a follow-up — it needs `specta::Type` on the sidecar-contract/repos/host crate
-    // types those commands use (chained across crates), tracked in CPE-953.
+    // The full SUPERSET typed surface (CPE-953 + CPE-957): every `#[tauri::command]` — the non-sidecar
+    // ones (incl. the `ipc::Channel` streamers, whose `Channel<T>` methods bind `TAURI_CHANNEL` from
+    // `./invoke`, which re-exports `Channel`) AND the `sidecar-platform` commands (this bin requires both
+    // features). Their types derive `specta::Type` across `cpe-server` + the app modules + the sidecar
+    // crates (`sidecar-contract`/`repos`, behind their own OFF-by-default `specta` features).
     let builder = Builder::<tauri::Wry>::new().commands(collect_commands![
         list_dir,
         find_project_root,
@@ -5950,6 +5952,39 @@ pub fn export_bindings(out: &std::path::Path) -> Result<(), String> {
         open_terminal,
         run_command,
         create_file,
+        sidecar_registry_ids,
+        sidecar_consent_state,
+        sidecar_set_consent,
+        sidecar_revoke_capability,
+        sidecar_details,
+        sidecar_stop,
+        sidecar_repair,
+        sidecar_close_session,
+        sidecar_set_enabled,
+        sidecar_start_ai_console,
+        sidecar_start_agent_board,
+        sidecar_diagnostics,
+        agent_watch_start,
+        agent_watch_stop,
+        folder_watch_start,
+        folder_watch_stop,
+        forge_browse,
+        forge_clone,
+        forge_generic_remote,
+        forge_admitted_hosts,
+        forge_admit_host,
+        forge_forget_host,
+        forge_clone_url,
+        forge_set_token,
+        forge_get_token,
+        forge_delete_token,
+        forge_repo_status,
+        forge_sync,
+        forge_conflict_state,
+        forge_conflict_versions,
+        forge_resolve_file,
+        forge_conflict_continue,
+        list_dir,
     ]);
     let tmp = std::env::temp_dir().join("cpe_bindings_export.ts");
     // u64 byte-counts (e.g. write_file_text) map to `number` — matches how the frontend already treats

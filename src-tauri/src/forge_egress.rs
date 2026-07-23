@@ -302,6 +302,7 @@ fn read_response(resp: ureq::Response) -> Result<(u16, String), EgressError> {
 /// One entry in a browsed remote repo tree (CPE-434/435) — a file or folder, for the Repositories
 /// left-pane view. Serialised to the frontend.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[cfg_attr(feature = "specta-bindings", derive(specta::Type))]
 pub struct RepoEntry {
     pub name: String,
     pub path: String,
