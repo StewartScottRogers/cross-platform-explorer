@@ -80,7 +80,7 @@ pub fn detail_from(md: &str) -> (Vec<(String, String)>, String) {
     }
     // `rest[end..]` is "\n---…\n<body>"; the body is everything after that closing delimiter line.
     let tail = &rest[end + 1..]; // drop the leading '\n' → "---…\n<body>"
-    let body = tail.splitn(2, '\n').nth(1).unwrap_or("").trim().to_string();
+    let body = tail.split_once('\n').map(|x| x.1).unwrap_or("").trim().to_string();
     (fields, body)
 }
 
