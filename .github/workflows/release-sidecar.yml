@@ -108,13 +108,33 @@ jobs:
           # `bash -e -o pipefail`, `ls existing missing` exits non-zero on the missing candidate,
           # pipefail propagates it, and set -e aborts the step before the copy runs — leaving no
           # `.pristine` and failing the tauri build on the missing resource (CPE-919).
+          #
+          # Also self-heal a MISSING binary (CPE-920): swatinem/rust-cache prunes each workspace's own
+          # final binaries before saving the cache, so on a cache hit `cargo build` can report "Finished"
+          # (fingerprint fresh) without relinking the pruned exe. If the expected binary isn't there,
+          # force a relink; if it still isn't, fail loudly with a listing instead of silently shipping a
+          # broken bundle.
+          bin_path() {
+            local s="$1"
+            if [ -f "sidecar/$s/target/release/$s.exe" ]; then echo "sidecar/$s/target/release/$s.exe";
+            elif [ -f "sidecar/$s/target/release/$s" ]; then echo "sidecar/$s/target/release/$s"; fi
+          }
           for s in ai-console agent-board repos; do
-            for cand in "sidecar/$s/target/release/$s" "sidecar/$s/target/release/$s.exe"; do
-              if [ -f "$cand" ]; then
-                cp "$cand" "sidecar/$s/target/release/$s.pristine"
-                break
-              fi
-            done
+            bin="$(bin_path "$s")"
+            if [ -z "$bin" ]; then
+              echo "::warning::sidecar '$s' binary missing after build (likely rust-cache prune) — forcing a relink"
+              # Touch the sources so cargo's fingerprint is stale and it MUST rebuild the pruned binary
+              # (a plain `cargo build` would just report "Finished" again on a fresh fingerprint).
+              find "sidecar/$s/src" -name '*.rs' -exec touch {} +
+              ( cd "sidecar/$s" && cargo build --release )
+              bin="$(bin_path "$s")"
+            fi
+            if [ -z "$bin" ]; then
+              echo "::error::sidecar '$s' binary still missing after forced rebuild; release/ contents:"
+              ls -la "sidecar/$s/target/release/" || true
+              exit 1
+            fi
+            cp "$bin" "sidecar/$s/target/release/$s.pristine"
           done
 
       - name: Build and publish sidecar-enabled release
