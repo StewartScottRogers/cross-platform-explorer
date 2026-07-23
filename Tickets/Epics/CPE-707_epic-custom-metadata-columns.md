@@ -2,7 +2,7 @@
 id: CPE-707
 title: "EPIC: Custom & metadata columns"
 type: Task
-status: Proposed
+status: In Progress
 priority: Medium
 component: Multiple
 tags: [epic]
@@ -35,3 +35,10 @@ sort infra (CPE-017, columns.ts) to build on; this is the natural next layer.
 - Users can add metadata columns from a picker; they sort and format correctly.
 - Metadata is extracted lazily for visible rows only, with no regression to open/scroll speed.
 - Column choices persist per folder (or per configured scope).
+
+## Work Log
+2026-07-22 (nightshift) — **Activated.** First slice: **CPE-918** — `metadata_column::CellValue` + `compare`
+/ `sort_rows` / `display`: the typed cell every metadata column produces, with uniform type-aware sort
+(numeric, not lexical; Dimensions by area; Empty pinned last both directions) and human formatting. This is
+the "sort/format like built-ins" seam. Remaining: per-family Rust extractors (image/audio/video/doc, lazy
+for visible rows only), the column-picker UI (add/remove/reorder), and per-folder persistence.
