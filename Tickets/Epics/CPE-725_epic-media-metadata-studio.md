@@ -2,7 +2,7 @@
 id: CPE-725
 title: "EPIC: Media metadata studio (editable EXIF / IPTC / ID3)"
 type: Task
-status: Proposed
+status: In Progress
 priority: Medium
 component: Multiple
 tags: [epic]
@@ -35,3 +35,8 @@ bulk, geotag, and strip sensitive metadata for privacy — content-level editing
 - Users can edit and write back EXIF/IPTC/XMP/ID3/video/PDF metadata safely, with undo.
 - Batch metadata operations (shift timestamps, strip, find/replace) work across a selection.
 - GPS-tagged photos can be plotted; Properties' read-only EXIF continues to work.
+
+## Work Log
+2026-07-23 (dayshift) — **Activated.** First slice: **CPE-942** — `media_meta_edit::apply_edits`: the pure
+set/clear edit policy over EXIF/IPTC/ID3 fields (refusing read-only ones, reporting applied/rejected).
+Remaining: the per-format read/write codecs and the studio editor UI.
