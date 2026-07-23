@@ -42,6 +42,21 @@ Search is **case-insensitive** and supports the same wildcards you know from Win
 - With **no** wildcards, the query is a plain **substring** match (like typing part of a name).
 - A wildcard query is **anchored** — `*.md` means "ends with `.md`", not "contains `.md` somewhere".
 
+## Searching inside files (content search)
+
+Besides finding files by **name**, you can search their **contents**. Both search boxes carry a small
+**book (Docs) button** in their header that opens this page.
+
+- **Find files by name** (**Ctrl+P**) — the recursive name/glob find described above, in its own panel.
+- **Search in files** — searches the **text inside** files under the current folder and groups the hits by
+  file; click a hit to jump to its file.
+  - **Match case (`Aa`)** — off by default (case-insensitive). Toggle it on to match capitalisation
+    exactly; the choice is remembered across searches.
+  - **Filter files** — when many files match, a filter box narrows the *result* list by file name.
+
+Both boxes remember your **recent queries** — start typing to pick one from the drop-down. Results
+**stream in** as the folder tree is walked, so matches appear immediately even on large trees.
+
 ## Tips
 
 - Very large trees are **capped** for responsiveness; if a search is truncated the results panel says so —

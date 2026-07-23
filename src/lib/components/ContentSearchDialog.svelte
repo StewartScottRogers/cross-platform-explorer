@@ -23,7 +23,7 @@
 
   export let root = "";
 
-  const dispatch = createEventDispatcher<{ close: void; navigate: string }>();
+  const dispatch = createEventDispatcher<{ close: void; navigate: string; help: void }>();
 
   let query = "";
   // Remember the Match-case choice across opens (CPE-576).
@@ -108,6 +108,7 @@
     <header>
       <h2>{$t("search.inFilesTitle")}</h2>
       <span class="root" title={root}>{baseName(root) || root}</span>
+      <button class="docs" title={$t("search.docsTitle")} aria-label={$t("search.docsTitle")} on:click={() => dispatch("help")}><Icon name="book" size={15} /></button>
       <button class="x" title={$t("common.close")} on:click={() => dispatch("close")}><Icon name="close" size={14} /></button>
     </header>
 
@@ -186,6 +187,8 @@
   h2 { font-size: 16px; }
   .root { color: var(--text-dim); font-size: 12px; flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .x { width: 28px; height: 28px; display: grid; place-items: center; }
+  .docs { width: 28px; height: 28px; display: grid; place-items: center; color: var(--text-dim); }
+  .docs:hover { color: var(--text); }
   .query-row { display: flex; gap: 8px; align-items: center; }
   .q { flex: 1; height: 32px; padding: 0 10px; border: 1px solid var(--border-strong); border-radius: var(--radius); background: var(--surface-alt); }
   .case { display: inline-flex; align-items: center; gap: 4px; font-size: 12px; color: var(--text-dim); }
