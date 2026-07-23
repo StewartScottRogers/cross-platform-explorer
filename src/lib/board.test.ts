@@ -1,6 +1,6 @@
 // CPE-521: Agent Board model — column grouping, ordering, counts, and move validation.
 import { describe, it, expect } from "vitest";
-import { groupByColumn, columnCounts, isValidMove, isColumn, ticketTask, groupByLane, laneFor, clampBoardSize, BOARD_MIN_W, BOARD_MIN_H, groupByEpic, todoDone, epicProgress, doneWithArchived, filterCards, type Card } from "./board";
+import { groupByColumn, columnCounts, isValidMove, isColumn, ticketTask, groupByLane, laneFor, clampBoardSize, BOARD_MIN_W, BOARD_MIN_H, groupByEpic, todoDone, epicProgress, doneWithArchived, filterCards, epicColumn, groupEpicsByColumn, archivedEpics, filterEpics, type Card, type Epic } from "./board";
 
 function card(id: string, column: string, extra: Partial<Card> = {}): Card {
   return { id, title: `t ${id}`, ticket_type: "Feature", priority: "Medium", tags: [], column, ...extra };
@@ -129,5 +129,49 @@ describe("board model (CPE-521)", () => {
     expect(clampBoardSize(5000, 5000, 1200, 800)).toEqual({ w: 1200, h: 800 });
     // A tiny viewport never goes below the legible minimum.
     expect(clampBoardSize(500, 500, 300, 300)).toEqual({ w: BOARD_MIN_W, h: BOARD_MIN_H });
+  });
+});
+
+describe("epics-as-kanban (CPE-922)", () => {
+  const ep = (id: string, status: string): Epic => ({ id, title: `Epic ${id}`, status, tags: ["epic"] });
+
+  it("maps epic status onto Backlog/Doing/Done columns", () => {
+    expect(epicColumn("Proposed")).toBe("Backlog");
+    expect(epicColumn("")).toBe("Backlog");
+    expect(epicColumn("whatever")).toBe("Backlog");
+    expect(epicColumn("In Progress")).toBe("Doing");
+    expect(epicColumn("active")).toBe("Doing");
+    expect(epicColumn("Done")).toBe("Done");
+    expect(epicColumn("CLOSED")).toBe("Done");
+  });
+
+  it("groups epics into columns, id-ordered", () => {
+    const g = groupEpicsByColumn([ep("CPE-100", "Proposed"), ep("CPE-9", "Proposed"), ep("CPE-3", "In Progress"), ep("CPE-2", "Done")]);
+    expect(g.Backlog.map((e) => e.id)).toEqual(["CPE-9", "CPE-100"]); // numeric order, not lexical
+    expect(g.Doing.map((e) => e.id)).toEqual(["CPE-3"]);
+    expect(g.Done.map((e) => e.id)).toEqual(["CPE-2"]);
+  });
+
+  it("derives archived epics from epic-tagged Done cards, dropping non-epics", () => {
+    const archived: Card[] = [
+      card("CPE-50", "Done", { tags: ["epic"] }),
+      card("CPE-51", "Done", { tags: ["ready"] }), // not an epic → dropped
+      card("CPE-40", "Done", { tags: ["epic", "big-design"] }),
+    ];
+    const a = archivedEpics(archived);
+    expect(a.map((e) => e.id)).toEqual(["CPE-40", "CPE-50"]); // id-ordered, epic-tagged only
+    expect(a.every((e) => e.status === "Done")).toBe(true);
+  });
+
+  it("filters epics by id, title, or tag", () => {
+    const es = [ep("CPE-1", "Proposed"), { id: "CPE-2", title: "Thumbnail pipeline", status: "Done", tags: ["epic"] }];
+    expect(filterEpics(es, "thumbnail").map((e) => e.id)).toEqual(["CPE-2"]);
+    expect(filterEpics(es, "cpe-1").map((e) => e.id)).toEqual(["CPE-1"]);
+    expect(filterEpics(es, "").length).toBe(2);
+  });
+
+  it("filterCards also matches the epic field (drill-down)", () => {
+    const rows: Card[] = [card("CPE-11", "Doing", { epic: "CPE-503" }), card("CPE-12", "Backlog", { epic: "CPE-999" })];
+    expect(filterCards(rows, "CPE-503").map((c) => c.id)).toEqual(["CPE-11"]);
   });
 });

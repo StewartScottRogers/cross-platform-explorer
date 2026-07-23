@@ -54,7 +54,13 @@ says so rather than showing empty columns.
 
 ## Epics view
 
-Toggle **Epics** to organize by epic: pick an epic on the left and see its tickets with **to-do on top
-and done on the bottom**. The Done column keeps only recent items; older ones are archived (shown behind
-a **+N archived** toggle). Your view choice (Board or Epics) and the archived toggle are **remembered**
-between opens.
+Toggle **Epics** to see your epics as their own **kanban** — laid out just like the ticket board. Each
+epic is a card in the column that matches its status:
+
+- **Backlog** — proposed (dormant) epics, not yet started.
+- **Doing** — activated epics that are in progress.
+- **Done** — closed epics. Like the ticket board, older ones are archived behind a **+N archived** toggle.
+
+Every epic card shows its **id**, **status**, and a **progress bar** (how many of its tickets are done).
+**Click an epic card** to jump to the Board filtered to that epic's tickets. Your view choice (Board or
+Epics) and the archived toggle are **remembered** between opens.
