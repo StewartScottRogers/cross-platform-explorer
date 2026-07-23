@@ -263,22 +263,26 @@ describe("Agent Deck launcher — live swarm trigger (CPE-541)", () => {
       .toEqual(["DEMO-README.md", "DEMO-CONTRIBUTING.md"]);
   });
 
-  it("hides the demo dropdown until 'Load demo', then shows it inside the revealed swarm area (CPE-931)", async () => {
+  it("keeps the demo controls inside the swarm pane: Run swarm drops the panel, then Load demo shows the picker (CPE-931/932)", async () => {
     const { w } = await mountLauncher();
     const doc = w.document;
     const picker = doc.getElementById("demo-picker");
-    const select = doc.getElementById("demo-select");
-    // The dropdown lives inside the swarm row (the revealed area), and is hidden at first.
-    expect(select.closest("#swarm-row")).toBeTruthy();
-    expect(picker.hidden).toBe(true);
+    // Both the "Load a demo" trigger AND the dropdown live inside the swarm row (the pane), not the toolbar.
+    expect(doc.getElementById("swarm-demo").closest("#swarm-row")).toBeTruthy();
+    expect(doc.getElementById("demo-select").closest("#swarm-row")).toBeTruthy();
+    // The Load-a-demo trigger is NOT in the top toolbar button row (it moved into the swarm pane).
+    const topRow = doc.querySelector(".toolbar > .row");
+    expect(topRow?.contains(doc.getElementById("swarm-demo"))).toBe(false);
+    // Everything hidden until the panel drops.
     expect(doc.getElementById("swarm-row").hidden).toBe(true);
+    expect(picker.hidden).toBe(true);
 
-    // "Run swarm" reveals the task row but NOT the demo picker.
+    // "Run swarm" drops the panel (revealing the Load-a-demo trigger) but NOT the demo picker.
     w.runSwarmFromForm();
     expect(doc.getElementById("swarm-row").hidden).toBe(false);
     expect(picker.hidden).toBe(true);
 
-    // "Load demo" reveals the demo picker (in the freshly-shown area) and loads the default demo.
+    // "Load a demo" reveals the demo picker and loads the default demo.
     w.demoSwarm();
     expect(picker.hidden).toBe(false);
     expect(doc.getElementById("swarm-task").value).toContain("README-DEMO.md");
