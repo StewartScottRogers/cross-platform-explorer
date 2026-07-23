@@ -38,6 +38,9 @@
   import DocsView from "./lib/components/DocsView.svelte";
   import { docSlugForSection, type Section } from "./lib/sectionDocs";
   import CommandPalette from "./lib/components/CommandPalette.svelte";
+  import UserCommandsDialog from "./lib/components/UserCommandsDialog.svelte";
+  import RunCommandConfirm from "./lib/components/RunCommandConfirm.svelte";
+  import { commandsForSurface, resolveCommand, type UserCommand } from "./lib/userCommands";
   import type { Command } from "./lib/commandPalette";
   import AgentMenu from "./lib/components/AgentMenu.svelte";
   import Toolbar from "./lib/components/Toolbar.svelte";
@@ -416,6 +419,19 @@
   const REPO_URL = "https://github.com/StewartScottRogers/cross-platform-explorer";
   let showAbout = false;
   let showSettings = false;
+
+  // User-defined commands (CPE-783): the persisted list, the manager dialog, and the confirm-before-launch
+  // state. Running a command always goes through RunCommandConfirm — nothing spawns without an explicit OK.
+  let userCommands: UserCommand[] = [];
+  let showUserCommands = false;
+  let runConfirm: { title: string; commands: string[]; cwd: string } | null = null;
+  function persistUserCommands(list: UserCommand[]) {
+    userCommands = list;
+    settings.saveUserCommands(list);
+  }
+  function openRunCommand(cmd: UserCommand) {
+    runConfirm = { title: cmd.name, commands: resolveCommand(cmd, selectedEntries), cwd: isHome ? "" : currentPath };
+  }
   let shortcutsOpen = false;
   /** "Search in files" content-search overlay (Ctrl+Shift+F), scoped to the current folder (CPE-417). */
   let contentSearchOpen = false;
@@ -535,6 +551,7 @@
     { id: "tool.aiConsole", group: $t("palette.groupTools"), label: $t("palette.openAiConsole"), run: () => openAiConsole(), enabled: () => aiConsoleAvailable },
     { id: "tool.agentBoardWindow", group: $t("palette.groupTools"), label: $t("palette.openAgentBoardWindow"), keywords: "agent board kanban tickets window pop out", run: () => openAgentBoard() },
     { id: "app.settings", group: $t("palette.groupApp"), label: $t("palette.settings"), run: () => (showSettings = true) },
+    { id: "app.userCommands", group: $t("palette.groupApp"), label: "Manage user commands…", keywords: "custom command run external", run: () => (showUserCommands = true) },
     { id: "app.documents", group: $t("palette.groupApp"), label: $t("palette.documents"), shortcut: "F1", run: () => openDocs(currentSection()) },
     { id: "app.shortcuts", group: $t("palette.groupApp"), label: $t("palette.shortcuts"), shortcut: "?", run: () => (shortcutsOpen = true) },
     { id: "app.exportTags", group: $t("palette.groupApp"), label: $t("palette.exportTags"), keywords: "tags backup", run: exportTagsToFile },
@@ -549,6 +566,10 @@
     ...DOC_SECTIONS.map((s) => ({
       id: `docs:${s.section}`, group: "Documents", label: `Docs: ${s.label}`, keywords: "documentation help guide",
       run: () => openDocs(s.section),
+    })),
+    // Palette-surfaced user commands (CPE-783): run each via the confirm-before-launch dialog.
+    ...commandsForSurface(userCommands, "palette").map((c) => ({
+      id: `uc:${c.id}`, group: "Commands", label: c.name, keywords: c.template, run: () => openRunCommand(c),
     })),
   ] satisfies Command[];
 
@@ -2833,6 +2854,7 @@
 
   onMount(async () => {
     applySettings();
+    userCommands = settings.loadUserCommands(); // CPE-783: user-defined commands
     // Opt-in integrity monitor (CPE-872): if enabled, verify all baselined folders once, a beat after
     // startup so it never blocks first paint. Reuses the tested verify + summary-notice path.
     if (verifyOnStartup && Object.keys(integrityBaselines).length > 0) {
@@ -3556,6 +3578,23 @@
 
 {#if paletteOpen}
   <CommandPalette commands={paletteCommands} on:close={() => (paletteOpen = false)} />
+{/if}
+
+{#if showUserCommands}
+  <UserCommandsDialog
+    commands={userCommands}
+    on:change={(e) => persistUserCommands(e.detail)}
+    on:close={() => (showUserCommands = false)}
+  />
+{/if}
+
+{#if runConfirm}
+  <RunCommandConfirm
+    title={runConfirm.title}
+    commands={runConfirm.commands}
+    cwd={runConfirm.cwd}
+    on:close={() => (runConfirm = null)}
+  />
 {/if}
 
 {#if agentMenu}

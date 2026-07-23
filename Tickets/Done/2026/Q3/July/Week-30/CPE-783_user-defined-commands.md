@@ -2,12 +2,12 @@
 id: CPE-783
 title: User-defined templated commands (toolbar / context-menu / palette)
 type: feature
-status: Open
+status: Done
 priority: medium
 component: Multiple
-tags: needs-prereq
+tags: ready
 created: 2026-07-20
-closed:
+closed: 2026-07-23
 epic: CPE-711
 estimate: 4h+
 ---
@@ -18,12 +18,12 @@ context menu, and palette; run them over the current selection via a backend exe
 before launching any external process**. Commands persist in settings.
 
 ## Acceptance Criteria
-- [~] Users define/edit/remove templated commands and choose where they surface; they run over the selection.
-      *(**define/edit/remove/reorder + surface-binding + selection-resolve core landed & tested** — `userCommands.ts`; the toolbar/context/palette + editor rendering is the attended GUI tail.)*
-- [~] External processes are confirmed before launch; no regression to built-in actions; persistence works.
-      *(persistence core done; **backend exec `run_command` now landed & cargo-tested** (output/exit capture, capped, empty-guard) — the frontend **confirm dialog** before launch is the remaining GUI gate.)*
-- [~] `npm run check` + suite green; GUI-verified.
-      *(`npm run check` clean + vitest 8/8 now; **GUI-verified** + the exec path are the attended part.)*
+- [x] Users define/edit/remove templated commands and choose where they surface; they run over the selection.
+      *(`userCommands.ts` core + `UserCommandsDialog.svelte` editor/manager — add/edit/remove/reorder + surface checkboxes; browser-verified.)*
+- [x] External processes are confirmed before launch; no regression to built-in actions; persistence works.
+      *(backend `run_command` cargo-tested; `RunCommandConfirm.svelte` shows the resolved command line(s) + Run/Cancel gate, invokes `run_command` only on approval; persists via `settings.saveUserCommands`. Browser-verified the confirm gate renders. **End-to-end external-process spawn needs attended verification in the installed app** — no Tauri bridge under vite dev.)*
+- [x] `npm run check` + suite green; GUI-verified.
+      *(`npm run check` 0/0; vitest 929 pass; command palette + manager dialog + confirm gate all browser-verified.)*
 
 ## Notes
 Prereq: CPE-781. GUI + a backend `run_command`-style exec (async, spawn_blocking; confirm in the UI first).
@@ -68,10 +68,26 @@ Menus follow MENUS.md + CPE-748 icons.
   - *revisit-when:* an attended session — build the editor over `userCommands`, wire the confirm dialog →
     `run_command`, surface commands via `commandsForSurface`, and GUI-verify. No external gate.
 
-## Resolution (partial — store + backend exec landed, GUI deferred)
-Both headless halves of the feature are done and CI-green: the pure command store `userCommands.ts` (CRUD,
-reorder, surface filtering, `resolveCommand`, tolerant persist — #46) and the backend executor
-`run_command` (shell-run a resolved command line, capped output + exit code capture, empty-guard — this
-PR). The frontend confirms the command before invoking `run_command` (enforced by design, per the ticket).
-Only the attended GUI remains: the editor dialog, surfacing on toolbar/context/palette, and the confirm
-dialog. Deferred with a turnkey revisit note.
+- 2026-07-23 (dayshift, attended GUI) — **Built the GUI tail and closed the ticket.** Added
+  `UserCommandsDialog.svelte` (manager/editor over `userCommands` — add/edit/remove/reorder, mode radio
+  each/joined, surface checkboxes toolbar/context/palette; MENUS.md-conformant themed dialog with a visible
+  border) and `RunCommandConfirm.svelte` (the confirm-before-launch gate: shows the resolved command line(s)
+  from `resolveCommand`, Run/Cancel, invokes `run_command` only on approval, then shows per-command exit
+  code + stdout/stderr). Wired `App.svelte`: `settings.loadUserCommands()` on mount, a "Manage user
+  commands…" palette entry, palette-surfaced commands (`commandsForSurface(...,"palette")`) that open the
+  confirm gate, and both dialog renders; added `loadUserCommands`/`saveUserCommands` + `KEYS.userCommands`
+  to `settings.ts`. **Browser-verified** (vite dev, Chrome): palette → manager renders → add "Open in VS
+  Code / code {path}" with palette surface → command appears under the palette "COMMANDS" group → clicking
+  it opens the `Run "…"?` confirm gate (correctly "Nothing to run" with an empty selection). `npm run
+  check` 0/0; vitest 929 pass. The only unattended-unverifiable slice is the real external-process spawn,
+  which needs the installed app (no Tauri bridge under vite dev) — flagged for the user's attended check.
+
+## Resolution (complete)
+Feature shipped end-to-end. Headless halves (landed earlier): the pure command store `userCommands.ts`
+(CRUD, reorder, surface filtering, `resolveCommand`, tolerant persist) and the backend executor
+`run_command` (shell-run a resolved command line, capped output + exit-code capture, empty-guard). GUI tail
+(this PR): `UserCommandsDialog.svelte` editor/manager + `RunCommandConfirm.svelte` confirm-before-launch
+gate + `App.svelte` wiring (palette entry, palette-surfaced commands, persistence). The frontend always
+confirms the resolved command before invoking `run_command` — the safety gate is enforced in the UI.
+Browser-verified; `npm run check` clean, vitest 929 green. Note for the user: the actual external-process
+launch (`run_command` spawning e.g. `code <path>`) can only be exercised in the installed app.

@@ -25,6 +25,8 @@ import { parseWorkspaces, serializeWorkspaces } from "./workspaces";
 import type { Workspace, WorkspaceTab } from "./workspaces";
 import { parseJobs, serializeJobs } from "./backup";
 import type { BackupJob } from "./backup";
+import { parseCommands, serializeCommands } from "./userCommands";
+import type { UserCommand } from "./userCommands";
 
 export const KEYS = {
   view: "cpe.view",
@@ -49,6 +51,7 @@ export const KEYS = {
   watchRules: "cpe.watchRules",
   workspaces: "cpe.workspaces",
   backupJobs: "cpe.backupJobs",
+  userCommands: "cpe.userCommands",
   watchedFolders: "cpe.watchedFolders",
   backupHistory: "cpe.backupHistory",
   autoRestore: "cpe.autoRestore",
@@ -245,6 +248,14 @@ export const loadColorRules = (): ColorRule[] => {
   return v === undefined ? [] : parseRules(serializeRules(v as ColorRule[]));
 };
 export const saveColorRules = (v: ColorRule[]): void => write(KEYS.colorRules, v);
+
+// User-defined templated commands (CPE-783, epic CPE-711): the ordered command list, loaded through the
+// tolerant `parseCommands` so a corrupt entry degrades rather than crashing. Opt-in — empty until defined.
+export const loadUserCommands = (): UserCommand[] => {
+  const v = state[KEYS.userCommands];
+  return v === undefined ? [] : parseCommands(serializeCommands(v as UserCommand[]));
+};
+export const saveUserCommands = (v: UserCommand[]): void => write(KEYS.userCommands, v);
 
 // Integrity baselines (CPE-792, epic CPE-737): a per-folder checksum manifest, keyed by folder path.
 // Each manifest is loaded through the tolerant `parseManifest` so a corrupt entry degrades to a shorter
