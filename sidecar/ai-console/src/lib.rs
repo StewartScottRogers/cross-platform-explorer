@@ -42,6 +42,7 @@ pub mod aggregate;
 pub mod agents;
 pub mod broker_client;
 pub mod catalog;
+pub mod cost;
 pub mod console;
 pub mod history;
 pub mod http;
