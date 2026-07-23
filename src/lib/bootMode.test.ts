@@ -17,7 +17,13 @@ describe("bootMode", () => {
     expect(bootMode("?board")).toBe("board");
   });
 
-  it("prefers float when both markers are present", () => {
+  it("selects a card window on ?card", () => {
+    expect(bootMode("?card=CPE-520")).toBe("card");
+    expect(bootMode("?card=CPE-520&root=%2Frepo")).toBe("card");
+  });
+
+  it("prefers float, then board, then card when several markers are present", () => {
     expect(bootMode("?float=1&board=1")).toBe("float");
+    expect(bootMode("?board=1&card=CPE-1")).toBe("board");
   });
 });

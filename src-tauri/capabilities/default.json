@@ -1,8 +1,8 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
-  "description": "Default capabilities for the main window, the torn-off preview window, and the standalone Agent Board window.",
-  "windows": ["main", "preview-float", "agent-board"],
+  "description": "Default capabilities for the main window, the torn-off preview window, the standalone Agent Board window, and torn-off card-detail windows.",
+  "windows": ["main", "preview-float", "agent-board", "card-detail-*"],
   "permissions": [
     "core:default",
     "core:app:allow-version",
