@@ -222,6 +222,28 @@ describe("Agent Deck launcher — live swarm trigger (CPE-541)", () => {
     expect(posted[0].provider).toBeDefined();
   });
 
+  it("the demo button reveals + pre-fills the swarm form, then Start runs the demo tasks (CPE-924)", async () => {
+    const posted: any[] = [];
+    const { w } = await mountLauncher((path, opts) => {
+      if (path === "/api/swarm/run") { posted.push(JSON.parse(opts.body)); return { ok: true, data: { ok: true } }; }
+      return {};
+    });
+    const doc = w.document;
+    expect(doc.getElementById("swarm-row").hidden).toBe(true);
+    // Try a demo: reveals the field, fills it with the ready-made tasks, and runs nothing yet.
+    w.demoSwarm();
+    expect(doc.getElementById("swarm-row").hidden).toBe(false);
+    expect(doc.getElementById("swarm-task").value).toContain("README-DEMO.md");
+    expect(posted).toHaveLength(0);
+    // Pressing Start launches the pre-filled demo — two disjoint, parallel builder tasks.
+    await w.runSwarmFromForm();
+    expect(posted).toHaveLength(1);
+    const m = posted[0];
+    expect(m.tasks).toHaveLength(2);
+    expect(m.tasks.map((t: any) => t.globs[0])).toEqual(["README-DEMO.md", "NOTES-DEMO.md"]);
+    expect(m.team.roles.find((r: any) => r.role === "builder").count).toBe(2);
+  });
+
   it("staffs one builder per task line — two lines → two builders + two tasks", async () => {
     const posted: any[] = [];
     const { w } = await mountLauncher((path, opts) => {

@@ -25,6 +25,14 @@ agent plans and dispatches, and one or more **builder** agents do the work.
 The console staffs a small team from your selected agent — a coordinator plus a builder — launches a real
 session per role, and each agent opens in its own tab, just like a normal launch.
 
+## Try a demo (fastest way to see it)
+
+New to swarms? Click **Try a demo** next to *Run swarm*. It fills in a ready-made two-task example —
+creating a couple of small files (`README-DEMO.md`, `NOTES-DEMO.md`) in the current folder — so you can
+watch a swarm work end-to-end **without writing any tasks yourself**. Just pick your agent and press
+**Start**; nothing else in the folder is touched. It's the quickest way to understand what a coordinator
+and its builders actually do.
+
 ## How the agents coordinate
 
 Every agent in a swarm is wired to a shared **swarm MCP host** scoped to the mission:

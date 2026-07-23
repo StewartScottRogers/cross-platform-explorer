@@ -356,6 +356,7 @@
       <button id="help-btn" type="button" title="How the Agent Deck works — a quick guide">?</button>
       <button id="launch" class="primary">Launch</button>
       <button id="run-swarm" type="button" title="Run a multi-agent swarm — a coordinator plus one builder per task line — experimental (CPE-541)">Run swarm ▾</button>
+      <button id="swarm-demo" type="button" title="Fill in a ready-made example swarm you can run in one click — a guided how-to demo (CPE-924)">Try a demo</button>
       <button id="swarm-help" type="button" class="area-help" title="Documents: how swarms work">?</button>
     </div>
     <div class="row" id="swarm-row" hidden>
@@ -517,6 +518,9 @@ docs/** :: document the CSV options"></textarea>
         <p>Click <b>Run swarm ▾</b> to start a <b>coordinator</b> plus one <b>builder</b> per task line —
           several agents working the same folder together (experimental, CPE-541). The swarm panel lists
           each member and its status; <b>Hide</b> tucks the panel away while the swarm keeps running.</p>
+        <p><b>New to swarms? Click “Try a demo.”</b> It fills in a ready-made two-task example (creating a
+          couple of small files in the current folder) so you can watch a swarm work end-to-end without
+          writing any tasks yourself — pick your agent, then press <b>Start</b>. Nothing else is touched.</p>
 
         <h3>Permissions</h3>
         <p>The console runs as its own sandboxed process and only gets what you allow. <b>Secrets</b> is the permission that lets it store your API keys — if you skip it, saving keys won't work and you'll simply be asked again next time you open the console. Review or revoke permissions in the app's sidecar settings.</p>
@@ -1429,6 +1433,24 @@ async function runSwarmFromForm() {
   return runSwarm(mission);
 }
 
+// --- How-To-Demo (CPE-924): a one-click guided demo so you can watch a swarm work without knowing the
+// task syntax. Reveals the swarm task field pre-filled with two small, safe, disjoint example tasks (so
+// they run in parallel) + a plain-language note of what will happen; you press Start to launch it with
+// your selected agent (the "native" provider needs no API key). Teaching by doing.
+const DEMO_SWARM_TASKS = [
+  "README-DEMO.md :: Create a file named README-DEMO.md that greets the user and explains in 3 short bullet points what an agent swarm is",
+  "NOTES-DEMO.md :: Create a file named NOTES-DEMO.md that lists the files in this folder with a one-line description of each",
+].join("\n");
+
+function demoSwarm() {
+  const row = $("swarm-row");
+  row.hidden = false;
+  $("swarm-task").value = DEMO_SWARM_TASKS;
+  setMsg("Demo ready — a coordinator plus two builders will create two small files (README-DEMO.md, NOTES-DEMO.md) in this folder. Pick your agent above, then press Start to watch the swarm work. Nothing else is touched.", true);
+  $("swarm-go").focus();
+  return true;
+}
+
 // --- Provider credential manager (CPE-346) --------------------------------------------
 function keysMsg(m, ok) { const e = $("keys-msg"); e.textContent = m || ""; e.style.color = ok ? "#3a9d4a" : "#d05656"; }
 // A "Secrets not granted" broker error means the sensitive Secrets permission is off — turn the
@@ -1792,6 +1814,7 @@ $("onboard-go").addEventListener("click", dismissOnboarding);
 $("onboard-addkey").addEventListener("click", () => { dismissOnboarding(); openKeys(); });
 $("launch").addEventListener("click", launch);
 $("run-swarm").addEventListener("click", runSwarmFromForm);
+$("swarm-demo").addEventListener("click", demoSwarm);
 $("swarm-go").addEventListener("click", runSwarmFromForm);
 $("sw-close").addEventListener("click", closeSwarmPanel);
 $("view-toggle").addEventListener("click", toggleView); // Agent Grid Tabs⇄Grid (CPE-506)
