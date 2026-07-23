@@ -153,7 +153,7 @@
       class="search-docs"
       type="button"
       title="Search options — open documentation"
-      aria-label="Search options documentation"
+      aria-label="Open the search-options documentation"
       on:click={() => dispatch("searchDocs")}
     >
       <Icon name="book" size={13} />
