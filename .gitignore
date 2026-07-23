@@ -37,3 +37,6 @@ catalog-out/
 # Bundled sidecar binary staged for release (built in CI / locally)
 src-tauri/sidecars/
 .aider*
+
+# Swarm how-to-demo output files created when running demos in the repo folder (CPE-954/956)
+*-DEMO.md
