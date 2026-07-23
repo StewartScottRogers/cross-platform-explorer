@@ -11,6 +11,12 @@ rust-version = "1.77.2"
 name = "app_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
 
+# Typed-binding codegen entry (CPE-812). Built only with the `specta-bindings` feature, so a normal
+# build/`cargo test` never compiles it (nor the specta deps it links).
+[[bin]]
+name = "export_bindings"
+required-features = ["specta-bindings"]
+
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
 
@@ -22,6 +28,12 @@ tauri-plugin-opener = "2"
 tauri-plugin-process = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+# Typed-binding codegen (CPE-812, epic CPE-810), all OPTIONAL behind the `specta-bindings` feature so a
+# normal build/`cargo test` never compiles them. Version set: tauri-specta docs pin rc.21; specta-typescript
+# 0.0.9 requires specta rc.22; tauri-specta rc.22 doesn't exist.
+specta = { version = "=2.0.0-rc.22", optional = true }
+specta-typescript = { version = "0.0.9", optional = true }
+tauri-specta = { version = "=2.0.0-rc.21", features = ["derive", "typescript"], optional = true }
 # The Cross-Platform Explorer Server: Tauri-free domain logic behind the `ServerCtx` seam +
 # the wire contract (CPE-810/815). A normal (non-optional) dependency — it pulls only
 # serde/serde_json/cpe-contract, all already in the tree, so it adds no weight to the plain
@@ -108,3 +120,8 @@ default = []
 # Opt-in sidecar platform integration (ADR 0001 / CPE-260). OFF by default so the plain
 # explorer compiles and ships with no sidecar code whatsoever — the delete-test (CPE-272).
 sidecar-platform = ["dep:sidecar-host", "dep:sidecar-contract", "dep:ureq", "dep:notify", "dep:repos"]
+# Opt-in typed-binding codegen (CPE-812, epic CPE-810). OFF by default so a normal build/`cargo test`
+# never compiles specta/tauri-specta — keeping the default lean AND avoiding the Windows loader failure
+# they trigger in a libtest binary. Enabled only for `cargo run --bin export_bindings --features
+# specta-bindings`, which regenerates `src/lib/bindings.gen.ts`.
+specta-bindings = ["dep:specta", "dep:specta-typescript", "dep:tauri-specta"]

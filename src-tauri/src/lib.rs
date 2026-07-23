@@ -585,6 +585,7 @@ fn valid_entry_name(name: &str) -> Result<(), String> {
 
 /// Create a new directory `name` inside `path`.
 #[tauri::command]
+#[cfg_attr(feature = "specta-bindings", specta::specta)]
 async fn create_dir(path: String, name: String) -> Result<String, String> {
     tauri::async_runtime::spawn_blocking(move || create_dir_impl(path, name))
         .await.map_err(|e| e.to_string())?
@@ -607,6 +608,7 @@ fn create_dir_impl(path: String, name: String) -> Result<String, String> {
 /// Create a new empty file `name` inside `path` (CPE-254). Mirrors `create_dir`:
 /// `create_new` fails atomically rather than clobbering an existing file.
 #[tauri::command]
+#[cfg_attr(feature = "specta-bindings", specta::specta)]
 async fn create_file(path: String, name: String) -> Result<String, String> {
     tauri::async_runtime::spawn_blocking(move || create_file_impl(path, name))
         .await.map_err(|e| e.to_string())?
@@ -633,6 +635,7 @@ fn create_file_impl(path: String, name: String) -> Result<String, String> {
 /// Write UTF-8 text back to a file, replacing its contents — for the content
 /// editor. Returns the new byte length.
 #[tauri::command]
+#[cfg_attr(feature = "specta-bindings", specta::specta)]
 async fn write_file_text(path: String, contents: String) -> Result<u64, String> {
     tauri::async_runtime::spawn_blocking(move || write_file_text_impl(path, contents))
         .await.map_err(|e| e.to_string())?
@@ -1023,6 +1026,7 @@ fn read_attributes_impl(path: &str) -> Result<FileAttributes, String> {
 
 /// Rename a single entry in place. Returns the new path.
 #[tauri::command]
+#[cfg_attr(feature = "specta-bindings", specta::specta)]
 async fn rename_entry(path: String, new_name: String) -> Result<String, String> {
     tauri::async_runtime::spawn_blocking(move || rename_entry_impl(path, new_name))
         .await.map_err(|e| e.to_string())?
@@ -1078,6 +1082,7 @@ fn delete_to_trash_impl(paths: Vec<String>) -> Vec<OpResult> {
 /// delete at all. Offering an Undo that silently does nothing on one platform is
 /// worse than not offering it — so we tell the truth instead of guessing.
 #[tauri::command]
+#[cfg_attr(feature = "specta-bindings", specta::specta)]
 async fn can_restore_from_trash() -> bool {
     tauri::async_runtime::spawn_blocking(can_restore_from_trash_impl)
         .await.unwrap()
@@ -2535,6 +2540,7 @@ fn open_terminal_impl(path: String) -> Result<(), String> {
 
 /// Captured result of a user command run.
 #[derive(serde::Serialize)]
+#[cfg_attr(feature = "specta-bindings", derive(specta::Type))]
 struct CommandOutput {
     stdout: String,
     stderr: String,
@@ -2560,6 +2566,7 @@ fn capped_string(mut bytes: Vec<u8>, cap: usize) -> (String, bool) {
 /// Run a resolved user command line through the platform shell and capture its output (CPE-783). The
 /// frontend confirms the command with the user first — see the module comment. Async per the commands rule.
 #[tauri::command]
+#[cfg_attr(feature = "specta-bindings", specta::specta)]
 async fn run_command(command: String, cwd: Option<String>) -> Result<CommandOutput, String> {
     tauri::async_runtime::spawn_blocking(move || run_command_impl(command, cwd))
         .await
@@ -5666,9 +5673,67 @@ mod agent_watch_tests {
     }
 }
 
+/// CPE-812 (epic CPE-810): generate the typed TypeScript command client for the `#[specta::specta]`-
+/// annotated commands into `out`, routed through the busy-cursor `invoke` wrapper (`src/lib/invoke.ts`) so
+/// every typed call flips the app-wide wait cursor for free (CPE-547). Runtime dispatch still uses
+/// `generate_handler!` (this only emits the client), so behaviour is unchanged. Called from the
+/// `export_bindings` bin — a plain exe, which loads where a libtest binary linking tauri-specta would fail
+/// (`STATUS_ENTRYPOINT_NOT_FOUND`, a WebView2 entrypoint skew), so codegen never runs under `cargo test`.
+#[cfg(feature = "specta-bindings")]
+pub fn export_bindings(out: &std::path::Path) -> Result<(), String> {
+    use tauri_specta::{collect_commands, Builder};
+    let builder = Builder::<tauri::Wry>::new().commands(collect_commands![
+        run_command,
+        create_dir,
+        create_file,
+        write_file_text,
+        rename_entry,
+        can_restore_from_trash,
+    ]);
+    let tmp = std::env::temp_dir().join("cpe_bindings_export.ts");
+    // u64 byte-counts (e.g. write_file_text) map to `number` — matches how the frontend already treats
+    // these returns and how serde_json emits them; specta forbids BigInt types without an explicit policy.
+    let ts = specta_typescript::Typescript::default()
+        .bigint(specta_typescript::BigIntExportBehavior::Number);
+    builder
+        .export(ts, &tmp)
+        .map_err(|e| format!("specta export: {e}"))?;
+    let raw = std::fs::read_to_string(&tmp).map_err(|e| e.to_string())?;
+    let _ = std::fs::remove_file(&tmp);
+    // Repoint the generated `invoke` at our busy-cursor wrapper (same signature) instead of core, so every
+    // typed call raises the app-wide wait cursor for free (CPE-547). `@ts-nocheck` because this is a
+    // machine-generated file with tauri-specta's event scaffolding unused in a commands-only export.
+    let generated = format!(
+        "// @ts-nocheck\n/* eslint-disable */\n{}",
+        raw.replace("@tauri-apps/api/core\"", "./invoke\"")
+    );
+    std::fs::write(out, generated).map_err(|e| e.to_string())?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// CPE-812 (epic CPE-810): guard the committed typed client `src/lib/bindings.gen.ts`. This is a
+    /// **pure-fs** test — it must NOT reference `tauri_specta`/`tauri`'s runtime, or linking those into the
+    /// libtest binary makes it fail to LOAD on Windows (`STATUS_ENTRYPOINT_NOT_FOUND`, a WebView2 entrypoint
+    /// skew). Regeneration therefore lives in the separate `export_bindings` bin (`cargo run --bin
+    /// export_bindings`), which loads fine because it's a plain exe like the app. Here we just assert the
+    /// committed output exists, routes through the busy-cursor wrapper, and covers the annotated commands.
+    #[test]
+    fn typed_bindings_are_committed_and_routed_through_busy_cursor() {
+        let src = fs::read_to_string("../src/lib/bindings.gen.ts")
+            .expect("src/lib/bindings.gen.ts is missing — run `cargo run --bin export_bindings`");
+        assert!(
+            src.contains("./invoke"),
+            "generated client must import the busy-cursor invoke wrapper, not @tauri-apps/api/core"
+        );
+        assert!(!src.contains("@tauri-apps/api/core"), "core invoke import must be rewritten to ./invoke");
+        for cmd in ["runCommand", "createDir", "createFile", "writeFileText", "renameEntry", "canRestoreFromTrash"] {
+            assert!(src.contains(cmd), "typed client should expose `{cmd}`");
+        }
+    }
 
     #[test]
     fn parent_dir_returns_the_parent() {
