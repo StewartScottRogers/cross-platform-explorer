@@ -142,6 +142,10 @@ pub mod listing;
 /// Link forge — create symbolic + hard links (CPE-802).
 pub mod links;
 
+/// Shell context-menu model — registered verbs + which apply to a given selection, the pure core behind
+/// "CPE as a shell citizen" (CPE-945, epic CPE-712). Per-OS shell registration is separate glue.
+pub mod shell_menu;
+
 /// Archive listing — browse into zip/tar/gzip/7z/iso without extracting (CPE-064/109/110/113).
 pub mod archive;
 
