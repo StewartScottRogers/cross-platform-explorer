@@ -154,6 +154,10 @@ pub mod image_preview;
 /// Backup copy engine — plan executor (copy/update/mirror-delete) with per-file results (CPE-797).
 pub mod backup;
 
+/// Editable media-metadata model — apply set/clear edits to EXIF/IPTC/ID3 fields, refusing read-only ones
+/// (CPE-942, epic CPE-725). Pure edit policy; the codec layer reads/writes the real files.
+pub mod media_meta_edit;
+
 /// Server-side contract dispatch — route `Request` envelopes to domain functions (CPE-824, the Server
 /// half of the remote RPC loop CPE-820).
 pub mod dispatch;
