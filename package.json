@@ -1,7 +1,7 @@
 {
   "name": "cross-platform-explorer",
   "private": true,
-  "version": "0.57.21",
+  "version": "0.57.22",
   "type": "module",
   "description": "A cross-platform file explorer built with Tauri + Svelte, with one-click install and automatic updates.",
   "scripts": {
