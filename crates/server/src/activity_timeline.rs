@@ -7,6 +7,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 /// One time-window of activity.
 #[derive(Debug, Clone, PartialEq, Eq, Default, serde::Serialize)]
+#[cfg_attr(feature = "specta", derive(specta::Type))]
 pub struct TimelineBucket {
     /// Bucket start (epoch ms), aligned down to a multiple of the window.
     pub start_ms: u64,
@@ -35,6 +36,7 @@ pub fn bucketize(events: &[AuditEvent], window_ms: u64) -> Vec<TimelineBucket> {
 
 /// A whole-run summary of an activity stream.
 #[derive(Debug, Clone, PartialEq, Eq, Default, serde::Serialize)]
+#[cfg_attr(feature = "specta", derive(specta::Type))]
 pub struct ActivitySummary {
     pub total: usize,
     pub by_kind: BTreeMap<String, usize>,

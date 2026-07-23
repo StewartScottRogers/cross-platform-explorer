@@ -11,6 +11,7 @@ use crate::fsutil::entry_is_symlink;
 
 /// Recursive folder totals. Serialized to match the frontend `FolderStats`.
 #[derive(Serialize, Default)]
+#[cfg_attr(feature = "specta", derive(specta::Type))]
 pub struct FolderStats {
     files: u64,
     dirs: u64,

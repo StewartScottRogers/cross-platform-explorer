@@ -14,6 +14,7 @@ use serde::Serialize;
 /// One column of a result grid: its name and a best-effort type label (the declared SQLite type, the
 /// Parquet physical type; empty for spreadsheet headers, which carry no type).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[cfg_attr(feature = "specta", derive(specta::Type))]
 pub struct Column {
     pub name: String,
     #[serde(rename = "type")]
@@ -23,6 +24,7 @@ pub struct Column {
 /// A window of rows from a data source: the columns, the row window (each cell stringified), and the
 /// total row count when known (so the UI can size a scrollbar without loading everything).
 #[derive(Debug, Clone, PartialEq, Serialize)]
+#[cfg_attr(feature = "specta", derive(specta::Type))]
 pub struct Page {
     pub columns: Vec<Column>,
     pub rows: Vec<Vec<String>>,

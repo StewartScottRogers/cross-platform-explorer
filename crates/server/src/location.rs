@@ -8,6 +8,7 @@
 
 /// The kind of backend a location targets.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[cfg_attr(feature = "specta", derive(specta::Type))]
 #[serde(rename_all = "lowercase")]
 pub enum Scheme {
     Local,
@@ -20,6 +21,7 @@ pub enum Scheme {
 /// A parsed location. For `Local`, only `path` is meaningful (the whole input); remote schemes fill in
 /// the authority parts where present.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[cfg_attr(feature = "specta", derive(specta::Type))]
 pub struct Location {
     pub scheme: Scheme,
     pub user: Option<String>,

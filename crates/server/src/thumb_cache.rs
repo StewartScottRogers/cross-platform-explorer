@@ -19,6 +19,7 @@ use serde::Serialize;
 /// The identity a thumbnail is keyed on: source path + its mtime (ms) + size (bytes) + the requested
 /// target edge in pixels. Any change to these means a different thumbnail, hence a different key.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize)]
+#[cfg_attr(feature = "specta", derive(specta::Type))]
 pub struct ThumbKey {
     pub path: String,
     pub mtime_ms: u64,
@@ -65,6 +66,7 @@ pub fn thumb_key(path: &str, mtime_ms: u64, size_bytes: u64, target_px: u32) -> 
 /// (the stored PNG size, or a handle's footprint). The actual bytes live on disk / elsewhere; this
 /// tracks only what the cache needs for eviction.
 #[derive(Debug, Clone, Serialize)]
+#[cfg_attr(feature = "specta", derive(specta::Type))]
 pub struct ThumbEntry {
     pub key: String,
     pub bytes: u64,
@@ -79,6 +81,7 @@ pub struct ThumbEntry {
 ///
 /// [`finish`]: ThumbCache::finish
 #[derive(Debug, Clone, Serialize)]
+#[cfg_attr(feature = "specta", derive(specta::Type))]
 pub struct ThumbCache {
     max_entries: usize,
     max_bytes: u64,

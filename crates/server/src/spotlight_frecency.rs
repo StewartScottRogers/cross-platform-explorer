@@ -4,6 +4,7 @@
 
 /// A tracked item's usage: how many times it's been opened and when it was last opened (epoch seconds).
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[cfg_attr(feature = "specta", derive(specta::Type))]
 pub struct Visit {
     pub path: String,
     pub count: u32,

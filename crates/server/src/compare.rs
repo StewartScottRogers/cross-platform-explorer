@@ -11,6 +11,7 @@ use crate::fsutil::to_epoch_ms;
 /// One node of a scanned tree (CPE-779). Serialized camelCase to match the frontend `CompareNode`
 /// (`isDir`).
 #[derive(Serialize)]
+#[cfg_attr(feature = "specta", derive(specta::Type))]
 #[serde(rename_all = "camelCase")]
 pub struct TreeNode {
     name: String,

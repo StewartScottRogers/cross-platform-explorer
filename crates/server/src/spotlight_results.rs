@@ -6,6 +6,7 @@ use crate::spotlight::rank;
 
 /// The source a result came from. Declaration order is the section priority (actions first).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, serde::Serialize)]
+#[cfg_attr(feature = "specta", derive(specta::Type))]
 #[serde(rename_all = "snake_case")]
 pub enum ResultKind {
     Action,
@@ -16,6 +17,7 @@ pub enum ResultKind {
 
 /// One aggregated result: the matched text, its kind, fuzzy score, and matched positions (for highlight).
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[cfg_attr(feature = "specta", derive(specta::Type))]
 pub struct SpotResult {
     pub text: String,
     pub kind: ResultKind,
@@ -25,6 +27,7 @@ pub struct SpotResult {
 
 /// A kind-grouped section of results (for a sectioned overlay).
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[cfg_attr(feature = "specta", derive(specta::Type))]
 pub struct SpotSection {
     pub kind: ResultKind,
     pub results: Vec<SpotResult>,

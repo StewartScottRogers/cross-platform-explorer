@@ -8,6 +8,7 @@
 
 /// One step in a macro. Each variant maps to an existing op primitive.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[cfg_attr(feature = "specta", derive(specta::Type))]
 #[serde(rename_all = "snake_case")]
 pub enum MacroStep {
     /// Rename each input using a template with `{name}` (full filename), `{stem}` (name without extension),
@@ -23,6 +24,7 @@ pub enum MacroStep {
 
 /// A named, reusable multi-step action.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[cfg_attr(feature = "specta", derive(specta::Type))]
 pub struct ActionMacro {
     pub name: String,
     pub steps: Vec<MacroStep>,
@@ -32,6 +34,7 @@ pub struct ActionMacro {
 /// (`rename`/`move`/`tag`/`convert`); `detail` is the resolved argument (the new name, dest, label, or
 /// target extension).
 #[derive(Debug, Clone, PartialEq, serde::Serialize)]
+#[cfg_attr(feature = "specta", derive(specta::Type))]
 pub struct PlannedOp {
     pub input: String,
     pub kind: String,

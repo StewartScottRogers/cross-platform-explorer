@@ -26,6 +26,7 @@ pub fn status_for_column(column: &str) -> Option<&'static str> {
 
 /// A board card — a ticket flattened for the Kanban UI.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[cfg_attr(feature = "specta", derive(specta::Type))]
 pub struct Card {
     pub id: String,
     pub title: String,
@@ -99,6 +100,7 @@ pub fn card_from(md: &str, column: &str) -> Option<Card> {
 
 /// An epic for the board's epic-organized left pane (CPE-530).
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[cfg_attr(feature = "specta", derive(specta::Type))]
 pub struct Epic {
     pub id: String,
     pub title: String,

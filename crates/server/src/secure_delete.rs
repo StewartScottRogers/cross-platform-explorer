@@ -5,6 +5,7 @@
 
 /// What a single overwrite pass writes across the file's bytes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[cfg_attr(feature = "specta", derive(specta::Type))]
 #[serde(tag = "pattern", rename_all = "snake_case")]
 pub enum PassPattern {
     /// All 0x00.
@@ -19,6 +20,7 @@ pub enum PassPattern {
 
 /// An overwrite scheme — how many passes and with what patterns.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[cfg_attr(feature = "specta", derive(specta::Type))]
 #[serde(rename_all = "snake_case")]
 pub enum ShredScheme {
     /// One zero pass — fast; fine for most needs on spinning disks.
@@ -52,6 +54,7 @@ pub fn passes(scheme: ShredScheme) -> Vec<PassPattern> {
 
 /// A full shred plan for one file: the passes to run + the honest caveats for the target medium.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[cfg_attr(feature = "specta", derive(specta::Type))]
 pub struct ShredPlan {
     pub path: String,
     pub size_bytes: u64,

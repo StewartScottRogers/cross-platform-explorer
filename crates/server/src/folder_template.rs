@@ -24,6 +24,7 @@ const MAX_CAPTURED_FILE: u64 = 64 * 1024;
 
 /// A node in a template tree: a directory (with children) or a file (with placeholder contents).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "specta", derive(specta::Type))]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum Node {
     Dir {
@@ -40,6 +41,7 @@ pub enum Node {
 
 /// A captured folder structure that can be stamped out on demand.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "specta", derive(specta::Type))]
 pub struct Template {
     pub name: String,
     #[serde(default)]
@@ -195,6 +197,7 @@ pub type Catalog = BTreeMap<String, Template>;
 
 /// A gallery summary of one stored template: its name and how many dirs/files it stamps.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "specta", derive(specta::Type))]
 pub struct TemplateSummary {
     pub name: String,
     pub dirs: usize,

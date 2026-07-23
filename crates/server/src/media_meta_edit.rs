@@ -7,6 +7,7 @@
 /// One metadata field. `editable` gates whether the studio may change it (e.g. camera-set intrinsics like
 /// image dimensions are read-only; a caption or artist tag is editable).
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[cfg_attr(feature = "specta", derive(specta::Type))]
 pub struct MetaField {
     /// The metadata group/namespace, e.g. `"exif"`, `"iptc"`, `"id3"`.
     pub group: String,
@@ -17,6 +18,7 @@ pub struct MetaField {
 
 /// An edit the user asked for.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[cfg_attr(feature = "specta", derive(specta::Type))]
 #[serde(tag = "edit", rename_all = "snake_case")]
 pub enum MetaEdit {
     /// Set (update or add) a field's value.
@@ -27,6 +29,7 @@ pub enum MetaEdit {
 
 /// The outcome of applying edits: the resulting fields plus human-readable applied/rejected notes.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, Default)]
+#[cfg_attr(feature = "specta", derive(specta::Type))]
 pub struct EditResult {
     pub fields: Vec<MetaField>,
     pub applied: Vec<String>,

@@ -7,6 +7,7 @@ use std::collections::{HashMap, VecDeque};
 
 /// Request priority, highest first. `Visible` = an on-screen row the user is looking at now.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, serde::Serialize)]
+#[cfg_attr(feature = "specta", derive(specta::Type))]
 #[serde(rename_all = "snake_case")]
 pub enum Priority {
     Visible,
