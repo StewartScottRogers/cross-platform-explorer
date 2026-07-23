@@ -122,6 +122,10 @@ pub mod index_query;
 /// substitution, path-safe and non-destructive (CPE-835, epic CPE-740).
 pub mod folder_template;
 
+/// Media playlist / queue model — ordered tracks + a cursor with repeat (off/one/all) + seeded shuffle
+/// navigation, the pure core behind the audio/video player pane (CPE-943, epic CPE-720).
+pub mod playlist;
+
 /// Content search — recursive line search in text files, bounded + binary-skipping (CPE-416).
 pub mod content_search;
 

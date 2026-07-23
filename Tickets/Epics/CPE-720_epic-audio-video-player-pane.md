@@ -2,7 +2,7 @@
 id: CPE-720
 title: "EPIC: Audio & video player pane"
 type: Task
-status: Proposed
+status: In Progress
 priority: Medium
 component: Multiple
 tags: [epic]
@@ -35,3 +35,8 @@ folder of clips) is a basic expectation for a general explorer.
 - Audio and video play in the preview pane with a working transport and scrub.
 - A full-screen quick-look player steps through the folder's media with the keyboard.
 - Unsupported formats degrade gracefully; no cost when no media is selected.
+
+## Work Log
+2026-07-23 (dayshift) — **Activated.** First slice: **CPE-943** — `playlist::Playlist`: ordered tracks + a
+cursor with repeat (off/one/all) + seeded-shuffle navigation. Remaining: the audio/video decode + transport
+UI and format support.
