@@ -31,6 +31,11 @@ pub mod location;
 /// today, remote backends later — plus a `LocalProvider` and an in-memory `FakeProvider` (CPE-681).
 pub mod provider;
 
+/// Scheme-based routing seam: classify a location by scheme and pick its `FileSystemProvider` — local
+/// today, remote schemes cleanly rejected until wired in. The single dispatch point the FS commands guard
+/// through so remote URIs fail consistently and local behaviour is unchanged (CPE-685, epic CPE-616).
+pub mod fs_route;
+
 /// SSH `known_hosts` parsing + host-key verification (TOFU / changed-key detection) — the pure security
 /// core of the future SFTP provider, decoupled from any ssh crate so it's headless-testable (CPE-682).
 pub mod known_hosts;
