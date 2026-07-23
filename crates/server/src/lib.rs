@@ -102,6 +102,10 @@ pub mod checksum;
 /// Folder statistics — recursive file/dir/byte totals (CPE-649).
 pub mod folder_stats;
 
+/// Thumbnail request queue — priority scheduler (Visible > Prefetch > Background) with dedupe + promotion,
+/// the pure scheduling core of the thumbnail pipeline (CPE-950, epic CPE-718). Pairs with thumb_cache.
+pub mod thumb_queue;
+
 /// File comparison — byte-identical check (CPE-418).
 pub mod compare;
 
