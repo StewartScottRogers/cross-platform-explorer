@@ -108,6 +108,10 @@ pub mod compare;
 /// Disk-usage scanning — recursive directory size + per-child breakdown (CPE-749/754).
 pub mod disk_usage;
 
+/// Tray quick-access list — bounded pinned + recent entries (add/pin/unpin/remove) for the system-tray
+/// menu, the pure model behind the tray-resident quick-access (CPE-946, epic CPE-713).
+pub mod tray_quick;
+
 /// Duplicate-file finder — size-then-hash two-pass scan (CPE-420).
 pub mod duplicates;
 

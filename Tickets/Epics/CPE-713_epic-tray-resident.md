@@ -2,7 +2,7 @@
 id: CPE-713
 title: "EPIC: Tray resident — system tray & background quick-access"
 type: Task
-status: Proposed
+status: In Progress
 priority: Low
 component: Multiple
 tags: [epic]
@@ -34,3 +34,8 @@ launch-on-login turns CPE into an always-available utility — additive and full
 - An opt-in tray icon exposes pinned/recent folders and quick actions.
 - Close-to-tray and launch-on-login work per OS and are cleanly reversible.
 - With the feature off, no tray icon or background residency exists.
+
+## Work Log
+2026-07-23 (dayshift) — **Activated.** First slice: **CPE-946** — `tray_quick::QuickAccess`: the pinned +
+recent quick-access list model for the tray menu. Remaining: the tray icon/menu, minimize-to-tray, and
+background quick-launch.
