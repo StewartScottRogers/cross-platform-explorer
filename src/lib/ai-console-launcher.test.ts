@@ -286,6 +286,31 @@ describe("Agent Deck launcher — live swarm trigger (CPE-541)", () => {
     }
   });
 
+  it("the swarm tasks pane has a drag handle that grows/shrinks the textarea (CPE-935)", async () => {
+    const { w } = await mountLauncher();
+    const doc = w.document;
+    w.runSwarmFromForm(); // reveal the pane
+    const grip = doc.getElementById("swarm-resize");
+    const ta = doc.getElementById("swarm-task") as HTMLTextAreaElement;
+    expect(grip).toBeTruthy();
+    ta.style.height = "48px";
+
+    // Drag the handle down ~160px → the textarea grows.
+    grip.dispatchEvent(new w.MouseEvent("mousedown", { clientY: 100, bubbles: true }));
+    doc.dispatchEvent(new w.MouseEvent("mousemove", { clientY: 260, bubbles: true }));
+    doc.dispatchEvent(new w.MouseEvent("mouseup", { bubbles: true }));
+    const grown = parseInt(ta.style.height, 10);
+    expect(grown).toBeGreaterThan(150);
+
+    // Drag back up → it shrinks (never below the 30px floor).
+    grip.dispatchEvent(new w.MouseEvent("mousedown", { clientY: 260, bubbles: true }));
+    doc.dispatchEvent(new w.MouseEvent("mousemove", { clientY: 40, bubbles: true }));
+    doc.dispatchEvent(new w.MouseEvent("mouseup", { bubbles: true }));
+    const shrunk = parseInt(ta.style.height, 10);
+    expect(shrunk).toBeLessThan(grown);
+    expect(shrunk).toBeGreaterThanOrEqual(30);
+  });
+
   it("keeps the demo controls inside the swarm pane: Run swarm drops the panel, then Load demo shows the picker (CPE-931/932)", async () => {
     const { w } = await mountLauncher();
     const doc = w.document;
