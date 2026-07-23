@@ -147,6 +147,10 @@ pub mod data_browser;
 /// Image thumbnails — downscaled PNG generation + mtime-keyed disk cache (CPE-642/644).
 pub mod thumbnail;
 
+/// Thumbnail cache core — stable cache keys + LRU eviction (count + byte budgets) + request coalescing,
+/// the pure cache-management model the universal thumbnail pipeline sits on (CPE-939, epic CPE-718).
+pub mod thumb_cache;
+
 /// Image preview — TIFF/PSD → PNG data-URL transcode + dimensions/EXIF metadata (CPE-099/101/659).
 pub mod image_preview;
 

@@ -2,7 +2,7 @@
 id: CPE-718
 title: "EPIC: Universal thumbnail pipeline"
 type: Task
-status: Proposed
+status: In Progress
 priority: Medium
 component: Multiple
 tags: [epic]
@@ -35,3 +35,10 @@ and gallery views genuinely useful for mixed folders and is the visual backbone 
 - Video/PDF/SVG/font/office thumbnails render in icons and gallery views, cached across sessions.
 - Thumbnails are generated off the UI thread and streamed in; scrolling stays smooth.
 - With the feature disabled, views fall back to type icons and incur no thumbnail cost.
+
+## Work Log
+
+- 2026-07-23: Activated. First slice CPE-939 — the pure, std-only thumbnail cache core in `cpe-server`
+  (`thumb_cache.rs`): stable collision-resistant cache key (path+mtime+size+target_px), dual-budget
+  (count + bytes) LRU cache, and request coalescing. Headless-testable; the per-format extractors +
+  frontend streaming client build on top of it.
