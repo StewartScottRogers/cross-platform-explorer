@@ -10,6 +10,7 @@ use serde::Serialize;
 
 /// One entry in a directory listing. Fields serialize by name to match the frontend `DirEntry`.
 #[derive(Serialize)]
+#[cfg_attr(feature = "specta", derive(specta::Type))]
 pub struct DirEntry {
     pub name: String,
     pub path: String,
@@ -28,6 +29,7 @@ pub struct DirEntry {
 /// abort on the first failure: if 9 of 10 files copy and one is locked, the user needs to know exactly
 /// which one failed.
 #[derive(Serialize, Debug)]
+#[cfg_attr(feature = "specta", derive(specta::Type))]
 pub struct OpResult {
     pub path: String,
     pub ok: bool,
@@ -53,6 +55,7 @@ impl OpResult {
 
 /// Detailed metadata for the Properties dialog.
 #[derive(Serialize)]
+#[cfg_attr(feature = "specta", derive(specta::Type))]
 pub struct EntryInfo {
     pub name: String,
     pub path: String,
@@ -66,6 +69,7 @@ pub struct EntryInfo {
 
 /// A sidebar quick-access location (special folder or drive).
 #[derive(Serialize)]
+#[cfg_attr(feature = "specta", derive(specta::Type))]
 pub struct Place {
     /// Display name, e.g. "Documents" or "Local Disk (C:)".
     pub name: String,

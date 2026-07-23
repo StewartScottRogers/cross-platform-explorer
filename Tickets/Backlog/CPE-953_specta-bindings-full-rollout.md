@@ -16,11 +16,24 @@ Follow-up to **CPE-812**, which landed the codegen **foundation**: the `specta-b
 `export_bindings` bin, the busy-cursor-routed `src/lib/bindings.gen.ts`, and a proving set of 6 commands.
 This ticket completes the rollout so the whole app can call backend commands through the typed client.
 
+## Work Log
+- 2026-07-23 (dayshift) — **Foundation increment landed** (the hard cross-crate part): added an optional
+  `specta` dep + OFF-by-default `specta` feature to **`cpe-server`**, and `#[cfg_attr(feature = "specta",
+  derive(specta::Type))]` on the core `model.rs` types (`DirEntry`/`OpResult`/`EntryInfo`/`Place`). Wired the
+  app's `specta-bindings` feature to enable `cpe-server/specta`, so cpe-server types now flow into the typed
+  client. Annotated + exported the first cpe-server-typed commands — `list_dir`, `entry_info`,
+  `delete_to_trash`, `delete_permanent`, `copy_entries`, `move_entries`, `move_exact` (6→13 total). Verified:
+  default `cargo test` loads + passes (specta gated off), cpe-server 311 pass (both feature modes compile),
+  clippy clean default + `specta-bindings`, `npm run check` 0/0 (generated `bindings.gen.ts` now includes
+  `DirEntry`/`OpResult`/`EntryInfo`). Remaining: the long tail of commands + their types across the other
+  ~34 cpe-server files, Channel typing, runtime Builder, call-site migration, GUI-verify.
+
 ## Acceptance Criteria
-- [ ] `#[cfg_attr(feature = "specta-bindings", specta::specta)]` on **all** `#[tauri::command]` fns; `Type`
+- [~] `#[cfg_attr(feature = "specta-bindings", specta::specta)]` on **all** `#[tauri::command]` fns; `Type`
       derived (feature-gated) on **every** serde type they use — including the `cpe-server` types (add an
       optional `specta` dep + a `bindings`/`typescript` feature to `cpe-server`, keeping it OFF by default so
-      the lean crate is unchanged in normal builds).
+      the lean crate is unchanged in normal builds). *(cpe-server `specta` feature + core model types DONE;
+      13 commands exported; remaining commands/types across ~34 files are the tail.)*
 - [ ] The 3 `ipc::Channel` streamers are typed, not raw; streaming call sites keep using `rawInvoke` /
       `createChannel` (CPE-547/550), not the busy-cursor path.
 - [ ] Codegen runs with **`sidecar-platform` ON** too, so the feature-gated commands/types get types (one

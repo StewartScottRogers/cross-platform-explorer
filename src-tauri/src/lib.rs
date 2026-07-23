@@ -401,6 +401,7 @@ fn copy_dir_all(src: &Path, dst: &Path) -> std::io::Result<()> {
 /// List a directory's entries. Model + the shared walker live in `cpe_server::listing` (CPE-815); this
 /// is a thin `spawn_blocking` dispatcher.
 #[tauri::command]
+#[cfg_attr(feature = "specta-bindings", specta::specta)]
 async fn list_dir(path: String) -> Result<Vec<DirEntry>, String> {
     cpe_server::fs_route::require_local(&path)?;
     tauri::async_runtime::spawn_blocking(move || cpe_server::listing::list_dir(&path))
@@ -1065,6 +1066,7 @@ fn rename_entry_impl(path: String, new_name: String) -> Result<String, String> {
 
 /// Move entries to the OS Recycle Bin / Trash. Recoverable by the user.
 #[tauri::command]
+#[cfg_attr(feature = "specta-bindings", specta::specta)]
 async fn delete_to_trash(paths: Vec<String>) -> Vec<OpResult> {
     tauri::async_runtime::spawn_blocking(move || delete_to_trash_impl(paths))
         .await.unwrap()
@@ -1199,6 +1201,7 @@ fn restore_from_trash_impl(paths: Vec<String>) -> Vec<OpResult> {
 /// Permanently delete entries. Irreversible — the UI must confirm explicitly
 /// before ever calling this.
 #[tauri::command]
+#[cfg_attr(feature = "specta-bindings", specta::specta)]
 async fn delete_permanent(paths: Vec<String>) -> Vec<OpResult> {
     tauri::async_runtime::spawn_blocking(move || delete_permanent_impl(paths))
         .await.unwrap()
@@ -1227,6 +1230,7 @@ fn delete_permanent_impl(paths: Vec<String>) -> Vec<OpResult> {
 
 /// Copy entries into `dest`, auto-renaming on collision.
 #[tauri::command]
+#[cfg_attr(feature = "specta-bindings", specta::specta)]
 async fn copy_entries(paths: Vec<String>, dest: String) -> Vec<OpResult> {
     tauri::async_runtime::spawn_blocking(move || copy_entries_impl(paths, dest))
         .await.unwrap()
@@ -1305,6 +1309,7 @@ fn copy_entries_impl(paths: Vec<String>, dest: String) -> Vec<OpResult> {
 /// copy-then-delete when the move crosses a filesystem boundary (`fs::rename`
 /// fails across volumes, e.g. C: -> Z:).
 #[tauri::command]
+#[cfg_attr(feature = "specta-bindings", specta::specta)]
 async fn move_entries(paths: Vec<String>, dest: String) -> Vec<OpResult> {
     tauri::async_runtime::spawn_blocking(move || move_entries_impl(paths, dest))
         .await.unwrap()
@@ -1704,6 +1709,7 @@ fn cancel_transfer(id: u64) {
 /// Refuses to overwrite: if `to` already exists, the undo fails loudly rather
 /// than clobbering whatever now occupies that name.
 #[tauri::command]
+#[cfg_attr(feature = "specta-bindings", specta::specta)]
 async fn move_exact(pairs: Vec<(String, String)>) -> Vec<OpResult> {
     tauri::async_runtime::spawn_blocking(move || move_exact_impl(pairs))
         .await.unwrap()
@@ -1745,6 +1751,7 @@ fn move_exact_impl(pairs: Vec<(String, String)>) -> Vec<OpResult> {
 /// Detailed metadata for the Properties dialog. Model lives in `cpe_server::model` (CPE-815); this is a
 /// thin `spawn_blocking` dispatcher.
 #[tauri::command]
+#[cfg_attr(feature = "specta-bindings", specta::specta)]
 async fn entry_info(path: String) -> Result<EntryInfo, String> {
     tauri::async_runtime::spawn_blocking(move || cpe_server::model::entry_info(&path))
         .await.map_err(|e| e.to_string())?
@@ -5718,6 +5725,13 @@ pub fn export_bindings(out: &std::path::Path) -> Result<(), String> {
         write_file_text,
         rename_entry,
         can_restore_from_trash,
+        list_dir,
+        entry_info,
+        delete_to_trash,
+        delete_permanent,
+        copy_entries,
+        move_entries,
+        move_exact,
     ]);
     let tmp = std::env::temp_dir().join("cpe_bindings_export.ts");
     // u64 byte-counts (e.g. write_file_text) map to `number` — matches how the frontend already treats
@@ -5759,9 +5773,15 @@ mod tests {
             "generated client must import the busy-cursor invoke wrapper, not @tauri-apps/api/core"
         );
         assert!(!src.contains("@tauri-apps/api/core"), "core invoke import must be rewritten to ./invoke");
-        for cmd in ["runCommand", "createDir", "createFile", "writeFileText", "renameEntry", "canRestoreFromTrash"] {
+        for cmd in [
+            "runCommand", "createDir", "createFile", "writeFileText", "renameEntry", "canRestoreFromTrash",
+            "listDir", "entryInfo", "deleteToTrash", "deletePermanent", "copyEntries", "moveEntries", "moveExact",
+        ] {
             assert!(src.contains(cmd), "typed client should expose `{cmd}`");
         }
+        // The cross-crate cpe-server types now flow into the generated client.
+        assert!(src.contains("DirEntry") && src.contains("OpResult") && src.contains("EntryInfo"),
+            "cpe-server types should be exported into the typed client");
     }
 
     #[test]

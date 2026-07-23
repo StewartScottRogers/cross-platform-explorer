@@ -16,6 +16,10 @@ license = "MIT"
 cpe-contract = { path = "../contract" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+# Optional TypeScript-binding type derives (CPE-953, epic CPE-810). OFF by default so normal builds/tests
+# never compile specta and the lean crate is unchanged; the app's `export_bindings` bin turns it on via
+# `cpe-server/specta` to derive `specta::Type` on the serde types that appear in command signatures.
+specta = { version = "=2.0.0-rc.22", features = ["derive"], optional = true }
 # Streaming SHA-256 for file checksums / integrity baselines (CPE-412/791). Pure-Rust, no system libs.
 sha2 = "0.10"
 # Work-stealing parallelism for the recursive directory-size walk (CPE-754). Pure-Rust.
@@ -54,6 +58,10 @@ plist = "1"
 # which needs no dependency.
 [target.'cfg(unix)'.dependencies]
 xattr = "1"
+
+[features]
+# Opt-in `specta::Type` derives for the TypeScript-binding codegen (CPE-953). OFF by default.
+specta = ["dep:specta"]
 
 [dev-dependencies]
 # Temp dirs for the ticket-board tests (moved from the app with the module, CPE-815).
