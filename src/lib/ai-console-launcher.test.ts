@@ -286,6 +286,32 @@ describe("Agent Deck launcher — live swarm trigger (CPE-541)", () => {
     }
   });
 
+  it("every demo is well-formed and narrates live — banner/steps/summary, disjoint files, no leftover {F} (CPE-936)", async () => {
+    const { w } = await mountLauncher();
+    const doc = w.document;
+    const select = doc.getElementById("demo-select") as HTMLSelectElement;
+    const expected: Record<string, number> = { hello: 2, folder: 2, docs: 2, tidy: 1, inventory: 3, tour: 3, testplan: 2 };
+    for (const [key, count] of Object.entries(expected)) {
+      select.value = key;
+      w.demoSwarm();
+      const text = doc.getElementById("swarm-task").value;
+      // The {F} filename placeholder is fully substituted.
+      expect(text, key).not.toContain("{F}");
+      const tasks = w.parseSwarmTasks(text);
+      expect(tasks.length, key).toBe(count);
+      // Each builder targets a distinct .md file (disjoint scopes → parallel).
+      const globs = tasks.map((t: any) => t.globs[0]);
+      expect(new Set(globs).size, key).toBe(globs.length);
+      globs.forEach((g: string) => expect(g).toMatch(/\.md$/));
+      // Live narration markers present: start banner, per-step arrows, done summary.
+      expect(text, key).toContain("===");
+      expect(text, key).toContain("→");
+      expect(text, key).toContain("✓");
+      // Each task names its own file in the banner (verifies the {F} substitution is per-task).
+      tasks.forEach((t: any) => expect(t.description).toContain(t.globs[0]));
+    }
+  });
+
   it("the swarm tasks pane has a drag handle that grows/shrinks the textarea (CPE-935)", async () => {
     const { w } = await mountLauncher();
     const doc = w.document;
