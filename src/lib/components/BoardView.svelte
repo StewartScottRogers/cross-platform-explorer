@@ -6,6 +6,7 @@
   import { createEventDispatcher, onMount } from "svelte";
   import { open as openFolderDialog } from "@tauri-apps/plugin-dialog";
   import { invoke } from "../invoke";
+  import { commands } from "../bindings.gen"; // typed client (CPE-958)
   import { lsGet, lsSet, lsBool } from "../persist";
   import Icon from "./Icon.svelte";
   import HelpButton from "./HelpButton.svelte";
@@ -117,7 +118,7 @@
     loading = true;
     error = "";
     try {
-      cards = await invoke<Card[]>("board_cards", { root: boardRoot });
+      cards = await commands.boardCards(boardRoot);
     } catch (e) {
       error = e instanceof Error ? e.message : String(e);
       cards = [];

@@ -1380,19 +1380,6 @@ async forgeConflictContinue(path: string) : Promise<Result<string, string>> {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
 }
-},
-/**
- * List the immediate children of `path`.
- * List a directory's entries. Model + the shared walker live in `cpe_server::listing` (CPE-815); this
- * is a thin `spawn_blocking` dispatcher.
- */
-async listDir(path: string) : Promise<Result<DirEntry[], string>> {
-    try {
-    return { status: "ok", data: await TAURI_INVOKE("list_dir", { path }) };
-} catch (e) {
-    if(e instanceof Error) throw e;
-    else return { status: "error", error: e  as any };
-}
 }
 }
 
