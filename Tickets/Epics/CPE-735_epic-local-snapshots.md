@@ -2,7 +2,7 @@
 id: CPE-735
 title: "EPIC: Local snapshots / time-machine-lite"
 type: Task
-status: Proposed
+status: In Progress
 priority: Medium
 component: Multiple
 tags: [epic]
@@ -35,3 +35,8 @@ ordinary users that the current session-scoped undo can't provide.
 - Chosen folders can be snapshotted (manually and on a schedule) space-efficiently.
 - Users can browse the timeline, diff, and restore a file or whole folder to an earlier state.
 - Retention prunes to budget; the feature is opt-in with no cost when unused.
+
+## Work Log
+2026-07-23 (dayshift) — **Activated.** First slice: **CPE-944** — `snapshot_retention::thin`: the
+grandfather-father-son (hourly/daily/weekly/monthly) keep-vs-prune policy. Remaining: the snapshot capture
+engine (content-addressed, deduped) and the timeline/restore UI.

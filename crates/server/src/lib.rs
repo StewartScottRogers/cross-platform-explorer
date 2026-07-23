@@ -105,6 +105,10 @@ pub mod folder_stats;
 /// File comparison — byte-identical check (CPE-418).
 pub mod compare;
 
+/// Snapshot retention / thinning — grandfather-father-son (hourly/daily/weekly/monthly) keep-vs-prune
+/// policy over a list of local snapshots (CPE-944, epic CPE-735). Pure; the engine takes/deletes them.
+pub mod snapshot_retention;
+
 /// Disk-usage scanning — recursive directory size + per-child breakdown (CPE-749/754).
 pub mod disk_usage;
 
