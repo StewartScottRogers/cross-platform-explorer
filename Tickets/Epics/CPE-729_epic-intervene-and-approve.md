@@ -2,7 +2,7 @@
 id: CPE-729
 title: "EPIC: Intervene & approve — gate high-impact agent actions"
 type: Task
-status: Proposed
+status: In Progress
 priority: Medium
 component: Multiple
 tags: [epic, big-design]
@@ -35,3 +35,9 @@ drive" boundary — a scoped, opt-in exception — so it's its own epic and its 
 - Users can define rules that pause an agent before high-impact actions and approve/reject/edit-scope.
 - Every gate decision is audited; defaults are safe and the feature is fully opt-in.
 - With the feature off, Agent Watch observes only (no gating), per its stated boundary.
+
+## Work Log
+2026-07-22 (nightshift) — **Activated.** First slice: **CPE-915** — `guardrail::assess_command` runtime
+action risk classifier (Low/Medium/High + reasons) + `needs_approval` policy threshold, complementing the
+existing launch-flag detection. Remaining: the approve/reject/edit-scope prompt UI + wiring into the
+agent's pre-exec/filesystem-op hook + user-defined rules.

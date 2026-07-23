@@ -45,6 +45,7 @@ pub mod catalog;
 pub mod conflict;
 pub mod cost;
 pub mod console;
+pub mod guardrail;
 pub mod history;
 pub mod http;
 pub mod keycheck;
