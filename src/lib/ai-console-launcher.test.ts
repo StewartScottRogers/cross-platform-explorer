@@ -991,10 +991,26 @@ describe("Agent Deck launcher — area '?' opens the regular Documents dialog (C
     expect(emit).toHaveBeenCalledWith("open-docs", { slug: "05-agent-grid" });
   });
 
-  it("falls back to the inline help panel when Tauri events are unavailable", async () => {
+  it("falls back to a FOCUSED inline topic when Tauri events are unavailable (CPE-930)", async () => {
     const { w } = await mountLauncher();
-    expect(w.document.getElementById("help-overlay").hidden).toBe(true);
-    w.document.getElementById("swarm-help").click(); // no __TAURI__ → inline panel
-    expect(w.document.getElementById("help-overlay").hidden).toBe(false);
+    const doc = w.document;
+    expect(doc.getElementById("help-overlay").hidden).toBe(true);
+    doc.getElementById("swarm-help").click(); // no __TAURI__ → focused inline topic
+    expect(doc.getElementById("help-overlay").hidden).toBe(false);
+    // Only the swarm topic shows, titled "Swarms" — not the whole manual.
+    expect(doc.getElementById("help-title").textContent).toBe("Swarms");
+    const shown = (t: string) => !doc.querySelector(`.help-topic[data-topic="${t}"]`).hidden;
+    expect(shown("swarm")).toBe(true);
+    expect(shown("deck")).toBe(false);
+    expect(shown("grid")).toBe(false);
+  });
+
+  it("the top-bar '?' shows the full guide with every topic (CPE-930)", async () => {
+    const { w } = await mountLauncher();
+    const doc = w.document;
+    doc.getElementById("help-btn").click();
+    expect(doc.getElementById("help-title").textContent).toBe("How the Agent Deck works");
+    const shown = (t: string) => !doc.querySelector(`.help-topic[data-topic="${t}"]`).hidden;
+    expect(shown("deck") && shown("grid") && shown("swarm")).toBe(true);
   });
 });

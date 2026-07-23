@@ -229,17 +229,25 @@
   /* Per-area "?" — direct docs access from the Grid / Swarm areas (CPE-764). */
   .area-help { width: 22px; height: 22px; padding: 0; margin-left: 4px; font-weight: 700; border-radius: 6px; opacity: .75; flex: 0 0 auto; }
   .area-help:hover { opacity: 1; }
-  #help-overlay { position: fixed; inset: 0; background: rgba(0,0,0,.4); display: grid;
+  #help-overlay { position: fixed; inset: 0; background: rgba(0,0,0,.45); display: grid;
                   place-items: center; z-index: 65; }
   #help-overlay[hidden] { display: none; }
-  #help-panel { width: 640px; max-width: 94vw; max-height: 86vh; overflow: auto; background: Canvas;
-                color: CanvasText; border: 1px solid rgba(128,128,128,.55); border-radius: 10px;
-                padding: 18px 22px; box-shadow: 0 20px 50px rgba(0,0,0,.35); }
-  #help-body h3 { font-size: 13.5px; margin: 15px 0 3px; }
-  #help-body p { font-size: 12.5px; line-height: 1.5; margin: 0 0 6px; opacity: .92; }
-  #help-body b { font-weight: 600; }
+  /* Focused docs card: a sticky titled header + a comfortably-spaced body (CPE-930). */
+  #help-panel { width: 600px; max-width: 94vw; max-height: 84vh; display: flex; flex-direction: column;
+                background: Canvas; color: CanvasText; border: 1px solid var(--line); border-radius: 12px;
+                box-shadow: 0 24px 64px rgba(0,0,0,.4); overflow: hidden; }
+  #help-panel .keys-head { padding: 15px 22px; margin: 0; border-bottom: 1px solid var(--line);
+                           font-size: 15px; flex: 0 0 auto; }
+  #help-body { padding: 6px 24px 22px; overflow: auto; }
+  #help-body h3 { font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: .05em;
+                  color: var(--accent); margin: 20px 0 6px; }
+  .help-topic:first-child > h3:first-child, .help-topic > p:first-child { margin-top: 14px; }
+  #help-body p { font-size: 13px; line-height: 1.62; margin: 0 0 10px; opacity: .9; max-width: 62ch; }
+  #help-body b { font-weight: 600; opacity: 1; }
   #help-body code { font-family: ui-monospace, monospace; background: rgba(128,128,128,.15);
-                    padding: 1px 5px; border-radius: 4px; font-size: 11.5px; }
+                    padding: 1px 5px; border-radius: 4px; font-size: 12px; }
+  .help-more { margin-top: 18px; padding-top: 12px; border-top: 1px solid var(--line);
+               font-size: 12px; opacity: .8; }
   /* Provider credential manager (CPE-346) */
   #keys-overlay { position: fixed; inset: 0; background: rgba(0,0,0,.35); display: grid;
                   place-items: center; z-index: 50; }
@@ -493,43 +501,53 @@ docs/** :: document the CSV options"></textarea>
   <div id="help-overlay" hidden>
     <div id="help-panel">
       <div class="keys-head">
-        <span>How the Agent Deck works</span>
+        <span id="help-title">How the Agent Deck works</span>
         <button id="help-close" type="button" class="keys-x" title="Close">×</button>
       </div>
       <div id="help-body">
-        <p>It all does one job: <b>run a coding agent (Claude Code, aider, …) against a folder, using the provider and model you choose.</b></p>
+        <!-- The area "?" buttons show one focused topic (CPE-930); the top-bar "?" shows them all. -->
+        <div class="help-topic" data-topic="deck">
+          <p>It all does one job: <b>run a coding agent (Claude Code, aider, …) against a folder, using the provider and model you choose.</b></p>
 
-        <h3>1 · Start an agent</h3>
-        <p>Pick an <b>Agent</b>, a <b>Provider</b>, and a <b>Model</b> (leave Model blank for the agent's default), set the <b>Working folder</b>, then click <b>Launch</b>. Each Launch opens its own tab; the sidecar runs them all at once.</p>
+          <h3>1 · Start an agent</h3>
+          <p>Pick an <b>Agent</b>, a <b>Provider</b>, and a <b>Model</b> (leave Model blank for the agent's default), set the <b>Working folder</b>, then click <b>Launch</b>. Each Launch opens its own tab; the sidecar runs them all at once.</p>
 
-        <h3>2 · Use your own API key — “Keys…”</h3>
-        <p>Click <b>Keys…</b> to save a provider key. It's stored in your OS keychain, never in a file, and never shown again. Give it a <b>label</b> (e.g. “work”) to keep several keys per provider — a labelled key then appears in the <b>Account</b> picker. <b>Check</b> verifies a key with the provider before you save it.</p>
+          <h3>2 · Use your own API key — “Keys…”</h3>
+          <p>Click <b>Keys…</b> to save a provider key. It's stored in your OS keychain, never in a file, and never shown again. Give it a <b>label</b> (e.g. “work”) to keep several keys per provider — a labelled key then appears in the <b>Account</b> picker. <b>Check</b> verifies a key with the provider before you save it.</p>
 
-        <h3>3 · Save a reusable setup — “Save setup”</h3>
-        <p>A <b>setup</b> remembers your <b>provider + model</b> choice under a name. It does <b>not</b> save your key — keys live in <b>Keys…</b>. Type a name, click <b>Save setup</b>, then pick it later from the <b>Setup</b> dropdown. Setups are per-agent.</p>
+          <h3>3 · Save a reusable setup — “Save setup”</h3>
+          <p>A <b>setup</b> remembers your <b>provider + model</b> choice under a name. It does <b>not</b> save your key — keys live in <b>Keys…</b>. Type a name, click <b>Save setup</b>, then pick it later from the <b>Setup</b> dropdown. Setups are per-agent.</p>
 
-        <h3>4 · Keep agents current — “Manage agents ▾”</h3>
-        <p><b>Check for updates now</b> fetches new/updated agents (signed); <b>Auto-update on open</b> does it automatically; <b>Pin this agent</b> freezes one agent's version; <b>Reset to the shipped agents</b> undoes updates.</p>
+          <h3>4 · Keep agents current — “Manage agents ▾”</h3>
+          <p><b>Check for updates now</b> fetches new/updated agents (signed); <b>Auto-update on open</b> does it automatically; <b>Pin this agent</b> freezes one agent's version; <b>Reset to the shipped agents</b> undoes updates.</p>
 
-        <h3>6 · Recent sessions — “Recent…”</h3>
-        <p>Lists past sessions (kept across restarts). <b>Relaunch</b> reopens one with the same agent/provider/model/folder; or view its (secret-redacted) transcript.</p>
+          <h3>5 · Recent sessions — “Recent…”</h3>
+          <p>Lists past sessions (kept across restarts). <b>Relaunch</b> reopens one with the same agent/provider/model/folder; or view its (secret-redacted) transcript.</p>
 
-        <h3 id="help-grid">See several agents at once — Grid</h3>
-        <p>With sessions open, click <b>▦ Grid</b> to tile every agent side by side (they auto-arrange);
-          click <b>▤ Tabs</b> to go back to one at a time. In grid view, click a tile to focus it, or
-          press <b>Ctrl+Alt+Arrow</b> to move between tiles. Each tile shows the agent's colour chip,
-          name, and usage. Nothing about the single-tab view changes.</p>
+          <h3>Permissions</h3>
+          <p>The console runs as its own sandboxed process and only gets what you allow. <b>Secrets</b> is the permission that lets it store your API keys — if you skip it, saving keys won't work and you'll simply be asked again next time you open the console. Review or revoke permissions in the app's sidecar settings.</p>
+        </div>
 
-        <h3 id="help-swarm">Run a multi-agent swarm — “Run swarm”</h3>
-        <p>Click <b>Run swarm ▾</b> to start a <b>coordinator</b> plus one <b>builder</b> per task line —
-          several agents working the same folder together (experimental, CPE-541). The swarm panel lists
-          each member and its status; <b>Hide</b> tucks the panel away while the swarm keeps running.</p>
-        <p><b>New to swarms? Click “Try a demo.”</b> It fills in a ready-made two-task example (creating a
-          couple of small files in the current folder) so you can watch a swarm work end-to-end without
-          writing any tasks yourself — pick your agent, then press <b>Start</b>. Nothing else is touched.</p>
+        <div class="help-topic" data-topic="grid">
+          <h3 id="help-grid">See several agents at once</h3>
+          <p>With sessions open, click <b>▦ Grid</b> to tile every agent side by side (they auto-arrange);
+            click <b>▤ Tabs</b> to go back to one at a time. In grid view, click a tile to focus it, or
+            press <b>Ctrl+Alt+Arrow</b> to move between tiles. Each tile shows the agent's colour chip,
+            name, and usage. Nothing about the single-tab view changes.</p>
+        </div>
 
-        <h3>Permissions</h3>
-        <p>The console runs as its own sandboxed process and only gets what you allow. <b>Secrets</b> is the permission that lets it store your API keys — if you skip it, saving keys won't work and you'll simply be asked again next time you open the console. Review or revoke permissions in the app's sidecar settings.</p>
+        <div class="help-topic" data-topic="swarm">
+          <h3 id="help-swarm">What a swarm is</h3>
+          <p>A <b>swarm</b> is several agents working the same folder together: a <b>coordinator</b> plans
+            and dispatches, and one <b>builder</b> per task line does the work (experimental).</p>
+          <h3>Running one</h3>
+          <p>Click <b>Run swarm ▾</b>, enter one task per line, then <b>Start</b>. The swarm panel lists
+            each member and its status; <b>Hide</b> tucks it away while the swarm keeps running.</p>
+          <h3>New to swarms?</h3>
+          <p>Pick a demo from the <b>dropdown</b> and click <b>Load demo</b> — it fills in a ready-made,
+            safe example (it only creates files, nothing is deleted). Choose your agent, press <b>Start</b>,
+            and watch a swarm work end-to-end without writing any tasks yourself.</p>
+        </div>
       </div>
     </div>
   </div>
@@ -1707,25 +1725,29 @@ $("advanced-btn").addEventListener("click", () => {
   const r = $("advanced-row"); r.hidden = !r.hidden;
   $("advanced-btn").textContent = r.hidden ? "Advanced ▾" : "Advanced ▴";
 });
-// Open the help panel, optionally jumping to a specific section anchor (CPE-764): each console area's
-// "?" gives direct access to its own docs, not just the top-bar button.
-function openHelp(anchor) {
+// Open the help card showing ONE focused topic (from an area "?") or the whole guide (top-bar "?") —
+// a titled, docs-style card, not the whole manual scrolled to an anchor (CPE-764/930).
+const HELP_TITLES = { swarm: "Swarms", grid: "Agent Grid" };
+function openHelp(topic) {
+  const body = $("help-body");
+  body.querySelectorAll(".help-topic").forEach((t) => { t.hidden = topic ? t.dataset.topic !== topic : false; });
+  $("help-title").textContent = HELP_TITLES[topic] || "How the Agent Deck works";
   $("help-overlay").hidden = false;
-  if (anchor) { const el = document.getElementById(anchor); if (el) setTimeout(() => el.scrollIntoView({ block: "start" }), 0); }
+  body.scrollTop = 0;
 }
-// The area "?" buttons are "Documents: …" affordances — they open the app's REGULAR Documents dialog at
-// the right section (CPE-929) by asking the host window via a Tauri `open-docs` event, instead of this
-// launcher's own inline help panel. If Tauri events aren't reachable (e.g. opened as a bare page / test),
-// fall back to the inline panel so help is never dead.
-function openDocsSection(slug, anchor) {
+// The area "?" buttons are "Documents: …" affordances (CPE-929): they try to open the app's REGULAR
+// Documents dialog at the right section via a Tauri `open-docs` event. When Tauri isn't reachable (the
+// common case — the console is a remote-URL sidecar window), they fall back to the focused inline topic
+// above, so the help always looks like a proper docs card.
+function openDocsSection(slug, topic) {
   const ev = window.__TAURI__ && window.__TAURI__.event;
   if (ev && ev.emit) { try { ev.emit("open-docs", { slug }); return; } catch (_) {} }
-  openHelp(anchor);
+  openHelp(topic);
 }
 // The top-bar "?" is a quick in-launcher guide, so it keeps the inline panel.
 $("help-btn").addEventListener("click", () => openHelp());
-$("grid-help").addEventListener("click", () => openDocsSection("05-agent-grid", "help-grid"));
-$("swarm-help").addEventListener("click", () => openDocsSection("09-swarms", "help-swarm"));
+$("grid-help").addEventListener("click", () => openDocsSection("05-agent-grid", "grid"));
+$("swarm-help").addEventListener("click", () => openDocsSection("09-swarms", "swarm"));
 $("help-close").addEventListener("click", () => { $("help-overlay").hidden = true; });
 $("help-overlay").addEventListener("click", (e) => { if (e.target === $("help-overlay")) $("help-overlay").hidden = true; });
 $("auto-update").addEventListener("change", async (e) => {
