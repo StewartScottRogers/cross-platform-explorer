@@ -387,11 +387,18 @@
         <!-- The demo picker appears here only after "Load a demo" is clicked (CPE-931). -->
         <div class="demo-picker" id="demo-picker" hidden>
           <label for="demo-select">Demo</label>
-          <select id="demo-select" title="Pick a ready-made demo swarm to load (CPE-925)">
-            <option value="hello">Hello swarm</option>
-            <option value="folder">Explain this folder</option>
-            <option value="docs">Docs starter</option>
-            <option value="tidy">Cleanup plan (safe)</option>
+          <select id="demo-select" title="Pick a ready-made demo swarm to load — every one narrates to the console as it runs (CPE-925/934)">
+            <optgroup label="Simple">
+              <option value="hello">Hello swarm — 2 agents</option>
+              <option value="folder">Explain this folder — 2 agents</option>
+              <option value="docs">Docs starter — 2 agents</option>
+              <option value="tidy">Cleanup plan (safe) — 1 agent</option>
+            </optgroup>
+            <optgroup label="Complex · multi-agent">
+              <option value="inventory">Folder inventory — 3 agents</option>
+              <option value="tour">Codebase tour — 3 agents</option>
+              <option value="testplan">Test plan + checklist — 2 agents</option>
+            </optgroup>
           </select>
         </div>
         <textarea id="swarm-task" rows="2" placeholder="e.g.
@@ -1480,32 +1487,61 @@ async function runSwarmFromForm() {
 // with that demo's small, safe, file-creating-only tasks (disjoint globs → they run in parallel) + a
 // plain-language note. Press Start to launch with your selected agent (the "native" provider needs no
 // API key). Every demo only CREATES files — nothing is deleted or moved. Teaching by doing.
+// Every demo tells its agents to NARRATE verbosely to the console, so you can watch the swarm think and
+// work in the terminal it runs in — and to only CREATE files (nothing is deleted/moved). The "complex"
+// demos staff THREE coordinated builders on disjoint files, to show what a real swarm can do (CPE-934).
+const NARRATE = "As you work, print a short line to the console for each step you take, so the terminal shows your progress in real time.";
 const DEMOS = {
+  // — Simple —
   hello: {
-    note: "two builders will create two small files (README-DEMO.md, NOTES-DEMO.md) in this folder",
+    note: "two builders create two small files and narrate every step to the console",
     tasks: [
-      "README-DEMO.md :: Create a file named README-DEMO.md that greets the user and explains in 3 short bullet points what an agent swarm is",
-      "NOTES-DEMO.md :: Create a file named NOTES-DEMO.md that lists the files in this folder with a one-line description of each",
+      "README-DEMO.md :: Create README-DEMO.md that greets the user and explains in 3 short bullet points what an agent swarm is. " + NARRATE,
+      "NOTES-DEMO.md :: Create NOTES-DEMO.md listing the files in this folder with a one-line description of each; echo each file to the console as you inspect it. " + NARRATE,
     ],
   },
   folder: {
-    note: "two builders will write a short report describing this folder (FOLDER-REPORT.md, FILE-TYPES.md)",
+    note: "two builders describe this folder, logging what they find as they go",
     tasks: [
-      "FOLDER-REPORT.md :: Write FOLDER-REPORT.md summarising what this folder contains and its likely purpose in a few sentences",
-      "FILE-TYPES.md :: Write FILE-TYPES.md grouping the files in this folder by extension with a count of each",
+      "FOLDER-REPORT.md :: Write FOLDER-REPORT.md summarising what this folder contains and its likely purpose; talk through your reasoning in the console. " + NARRATE,
+      "FILE-TYPES.md :: Write FILE-TYPES.md grouping the files in this folder by extension with a count of each; print each group to the console as you tally it. " + NARRATE,
     ],
   },
   docs: {
-    note: "two builders will scaffold starter documentation (DEMO-README.md, DEMO-CONTRIBUTING.md)",
+    note: "two builders scaffold starter docs, announcing each section they add",
     tasks: [
-      "DEMO-README.md :: Write DEMO-README.md — a starter README skeleton with Title, Overview, Getting Started, and Usage headings",
-      "DEMO-CONTRIBUTING.md :: Write DEMO-CONTRIBUTING.md — a short contributing-guide skeleton with Setup, Branching, and Pull Requests headings",
+      "DEMO-README.md :: Write DEMO-README.md — a starter README skeleton with Title, Overview, Getting Started, and Usage headings; announce each heading in the console. " + NARRATE,
+      "DEMO-CONTRIBUTING.md :: Write DEMO-CONTRIBUTING.md — a contributing-guide skeleton with Setup, Branching, and Pull Requests headings. " + NARRATE,
     ],
   },
   tidy: {
-    note: "one builder will PROPOSE a cleanup plan in CLEANUP-PLAN.md — nothing is deleted or moved",
+    note: "one builder PROPOSES a cleanup plan (nothing is deleted), explaining each candidate live",
     tasks: [
-      "CLEANUP-PLAN.md :: Review this folder and write CLEANUP-PLAN.md that PROPOSES (but does NOT perform) tidy-up steps — list candidate temp/duplicate/stale files and a suggested action for each. Do not delete or move anything.",
+      "CLEANUP-PLAN.md :: Review this folder and write CLEANUP-PLAN.md that PROPOSES (but does NOT perform) tidy-up steps — list candidate temp/duplicate/stale files and a suggested action for each. Do not delete or move anything; explain each candidate in the console. " + NARRATE,
+    ],
+  },
+  // — Complex · multi-agent —
+  inventory: {
+    note: "THREE builders build a coordinated inventory (files → sizes → an index that links them), each logging progress live",
+    tasks: [
+      "INVENTORY-DEMO.md :: List every file in this folder grouped by extension in INVENTORY-DEMO.md; print each extension group to the console as you find it. " + NARRATE,
+      "SIZES-DEMO.md :: Write SIZES-DEMO.md ranking the largest files with their sizes; log each file and size to the console as you measure it. " + NARRATE,
+      "INDEX-DEMO.md :: Write INDEX-DEMO.md that links to INVENTORY-DEMO.md and SIZES-DEMO.md and summarises what this folder contains in 3 sentences. " + NARRATE,
+    ],
+  },
+  tour: {
+    note: "THREE builders write a mini onboarding guide (architecture, glossary, getting-started), thinking out loud",
+    tasks: [
+      "ARCHITECTURE-DEMO.md :: Infer this folder's structure and purpose and write ARCHITECTURE-DEMO.md describing it; explain each conclusion in the console as you reach it. " + NARRATE,
+      "GLOSSARY-DEMO.md :: Write GLOSSARY-DEMO.md defining 5 key terms you find in this folder's files; print each term to the console as you add it. " + NARRATE,
+      "ONBOARDING-DEMO.md :: Write ONBOARDING-DEMO.md — a short 'getting started here' guide for a newcomer to this folder. " + NARRATE,
+    ],
+  },
+  testplan: {
+    note: "two builders draft a test plan + a release checklist (nothing is executed), narrating their thinking",
+    tasks: [
+      "TEST-PLAN-DEMO.md :: PROPOSE (do not run anything) a test plan for this folder in TEST-PLAN-DEMO.md; talk through each proposed test in the console. " + NARRATE,
+      "CHECKLIST-DEMO.md :: Write CHECKLIST-DEMO.md — a release checklist; echo each item to the console as you add it. " + NARRATE,
     ],
   },
 };
