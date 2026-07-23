@@ -665,6 +665,21 @@
   }
   /** True in sidecar-platform builds — gates the Agent Deck toolbar button (CPE-351). */
   let aiConsoleAvailable = false;
+  /** Keep the out-of-process app buttons ALPHABETICAL within their toolbar section (CPE-933): a CSS
+   *  `order` per app derived from its (localised) label, so the section stays sorted regardless of markup
+   *  order. To add an app: add its label here and set `style="order: {appOrder.<key>}"` on its button. */
+  $: appOrder = (() => {
+    const labels: Record<string, string> = {
+      board: "Agent Board",
+      console: $t("tb.aiConsole"),
+      repos: $t("sidebar.repositories"),
+    };
+    const order: Record<string, number> = {};
+    Object.keys(labels)
+      .sort((a, b) => labels[a].localeCompare(labels[b]))
+      .forEach((k, i) => (order[k] = i));
+    return order;
+  })();
   /** Teardown for the Agent Watch session listener (CPE-396). */
   let unlistenSessions: (() => void) | null = null;
   let unlistenTransferDone: (() => void) | null = null;
@@ -2951,6 +2966,7 @@
     <button
       class="tb-board"
       type="button"
+      style="order: {appOrder.board}"
       title={$t("palette.openAgentBoardWindow")}
       on:click={() => openAgentBoard()}
     >
@@ -2962,6 +2978,7 @@
       <button
         class="tb-repos"
         type="button"
+        style="order: {appOrder.repos}"
         title={$t("sidebar.repositories")}
         on:click={() => (showRepos = true)}
       >
@@ -2970,6 +2987,7 @@
       <button
         class="tb-console"
         type="button"
+        style="order: {appOrder.console}"
         title={$agentSessions.length === 0
           ? $t("tb.openConsole")
           : $agentSessions.length === 1
