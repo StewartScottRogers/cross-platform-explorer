@@ -48,4 +48,4 @@ create deferred — read only for now); **edit model** = extract-modify-repack o
 - CPE-908 — tar.gz creation + `compress_archive` dispatcher (backend) — **Done**.
 - (next) Compress-selection + extract-here/extract-to context actions with conflict handling — **GUI + command wiring**.
 - (next) Navigate-into-archive routing (an archive as a browsable location) — **GUI**.
-- (next) Password-protected archive read + create — **backend + GUI**.
+- CPE-909 — Password-protected (AES-256) zip create + extract (backend) — **Done**; the password prompt UI remains.

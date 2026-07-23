@@ -185,7 +185,7 @@ fn zip_add_path(
     writer: &mut zip::ZipWriter<fs::File>,
     src: &Path,
     name_in_zip: &str,
-    opts: zip::write::SimpleFileOptions,
+    opts: zip::write::FileOptions<'_, ()>,
     skip: Option<&Path>,
 ) -> Result<(), String> {
     if let (Some(skip), Ok(canon)) = (skip, src.canonicalize()) {
@@ -229,6 +229,122 @@ pub fn compress_to_zip(paths: &[String], dest: &str) -> Result<String, String> {
         zip_add_path(&mut writer, src, &name, opts, dest_canon.as_deref())?;
     }
     writer.finish().map_err(|e| e.to_string())?;
+    Ok(dest.to_string())
+}
+
+/// Recursively add `src` to a tar builder as `name_in_tar`, adding directory entries so empty folders
+/// survive. Never packs the output archive into itself (CPE-632) — mirrors [`zip_add_path`].
+fn tar_add_path<W: std::io::Write>(
+    builder: &mut tar::Builder<W>,
+    src: &Path,
+    name_in_tar: &str,
+    skip: Option<&Path>,
+) -> Result<(), String> {
+    if let (Some(skip), Ok(canon)) = (skip, src.canonicalize()) {
+        if canon == skip {
+            return Ok(());
+        }
+    }
+    let meta = fs::symlink_metadata(src).map_err(|e| e.to_string())?;
+    if meta.is_dir() {
+        builder.append_dir(name_in_tar, src).map_err(|e| e.to_string())?;
+        let mut children: Vec<_> = fs::read_dir(src).map_err(|e| e.to_string())?.filter_map(|e| e.ok()).collect();
+        children.sort_by_key(|e| e.file_name());
+        for child in children {
+            let child_name = child.file_name().to_string_lossy().to_string();
+            tar_add_path(builder, &child.path(), &format!("{name_in_tar}/{child_name}"), skip)?;
+        }
+    } else {
+        builder.append_path_with_name(src, name_in_tar).map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}
+
+/// Pack the given files/folders into a new gzip-compressed tarball at `dest` (CPE-908). Returns the path.
+pub fn compress_to_targz(paths: &[String], dest: &str) -> Result<String, String> {
+    if paths.is_empty() {
+        return Err("nothing to compress".into());
+    }
+    let file = fs::File::create(dest).map_err(|e| e.to_string())?;
+    let encoder = flate2::write::GzEncoder::new(file, flate2::Compression::default());
+    let mut builder = tar::Builder::new(encoder);
+    let dest_canon = Path::new(dest).canonicalize().ok();
+    for p in paths {
+        let src = Path::new(p);
+        let name = src
+            .file_name()
+            .map(|s| s.to_string_lossy().to_string())
+            .ok_or_else(|| format!("invalid path: {p}"))?;
+        tar_add_path(&mut builder, src, &name, dest_canon.as_deref())?;
+    }
+    builder.into_inner().map_err(|e| e.to_string())?.finish().map_err(|e| e.to_string())?;
+    Ok(dest.to_string())
+}
+
+/// Pack files/folders into `dest`, choosing the format by `dest`'s extension: `.zip` → zip,
+/// `.tar.gz`/`.tgz` → gzip tarball (CPE-908). An unrecognised extension is a clear error.
+pub fn compress_archive(paths: &[String], dest: &str) -> Result<String, String> {
+    let lower = dest.to_ascii_lowercase();
+    if lower.ends_with(".zip") {
+        compress_to_zip(paths, dest)
+    } else if lower.ends_with(".tar.gz") || lower.ends_with(".tgz") {
+        compress_to_targz(paths, dest)
+    } else {
+        Err(format!("unsupported archive format for '{dest}' (use .zip or .tar.gz)"))
+    }
+}
+
+/// Pack files/folders into a **password-protected** (AES-256) `.zip` at `dest` (CPE-909). Returns the path.
+/// Reading it back requires the same password — see [`extract_zip_encrypted`].
+pub fn compress_to_zip_encrypted(paths: &[String], dest: &str, password: &str) -> Result<String, String> {
+    if paths.is_empty() {
+        return Err("nothing to compress".into());
+    }
+    if password.is_empty() {
+        return Err("a password is required for an encrypted archive".into());
+    }
+    let file = fs::File::create(dest).map_err(|e| e.to_string())?;
+    let mut writer = zip::ZipWriter::new(file);
+    let opts = zip::write::SimpleFileOptions::default()
+        .compression_method(zip::CompressionMethod::Deflated)
+        .with_aes_encryption(zip::AesMode::Aes256, password);
+    let dest_canon = Path::new(dest).canonicalize().ok();
+    for p in paths {
+        let src = Path::new(p);
+        let name = src
+            .file_name()
+            .map(|s| s.to_string_lossy().to_string())
+            .ok_or_else(|| format!("invalid path: {p}"))?;
+        zip_add_path(&mut writer, src, &name, opts, dest_canon.as_deref())?;
+    }
+    writer.finish().map_err(|e| e.to_string())?;
+    Ok(dest.to_string())
+}
+
+/// Extract a password-protected `.zip` at `path` into `dest` with `password` (CPE-909). A wrong password
+/// is a clear error; entries are zip-slip-guarded ([`entry_name_is_safe`]) like the plain extractor.
+pub fn extract_zip_encrypted(path: &str, dest: &str, password: &str) -> Result<String, String> {
+    let file = fs::File::open(path).map_err(|e| e.to_string())?;
+    let mut archive = zip::ZipArchive::new(file).map_err(|e| e.to_string())?;
+    let dest_path = Path::new(dest);
+    fs::create_dir_all(dest_path).map_err(|e| e.to_string())?;
+    for i in 0..archive.len() {
+        let mut entry = archive.by_index_decrypt(i, password.as_bytes()).map_err(|e| e.to_string())?;
+        let name = entry.name().to_string();
+        if !entry_name_is_safe(&name) {
+            continue; // skip a zip-slip entry, keep extracting the rest
+        }
+        let out = dest_path.join(&name);
+        if entry.is_dir() {
+            fs::create_dir_all(&out).map_err(|e| e.to_string())?;
+        } else {
+            if let Some(parent) = out.parent() {
+                fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+            }
+            let mut f = fs::File::create(&out).map_err(|e| e.to_string())?;
+            std::io::copy(&mut entry, &mut f).map_err(|e| e.to_string())?;
+        }
+    }
     Ok(dest.to_string())
 }
 
@@ -388,6 +504,77 @@ mod tests {
         let tmp = extract_archive_entry(&zip_path.to_string_lossy(), "src/a.txt").unwrap();
         assert_eq!(fs::read(&tmp).unwrap(), b"alpha");
         let _ = fs::remove_file(&tmp);
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn compress_to_targz_then_extract_round_trips() {
+        let d = scratch("targz-roundtrip");
+        fs::create_dir_all(d.join("src/sub")).unwrap();
+        fs::write(d.join("src/a.txt"), b"alpha").unwrap();
+        fs::write(d.join("src/sub/b.txt"), b"beta").unwrap();
+
+        let tgz = d.join("out.tar.gz");
+        assert!(compress_to_targz(&[], &tgz.to_string_lossy()).is_err(), "empty selection errors");
+        compress_to_targz(&[d.join("src").to_string_lossy().to_string()], &tgz.to_string_lossy()).unwrap();
+
+        // The listing (via the existing reader) sees both files.
+        let names: Vec<String> = read_archive_entries(&tgz.to_string_lossy())
+            .unwrap()
+            .iter()
+            .map(|e| e.name.replace('\\', "/"))
+            .collect();
+        assert!(names.iter().any(|n| n.ends_with("a.txt")), "got {names:?}");
+        assert!(names.iter().any(|n| n.ends_with("sub/b.txt")), "got {names:?}");
+
+        // Extract it back out and verify contents.
+        let out = d.join("unpacked");
+        extract_archive(&tgz.to_string_lossy(), &out.to_string_lossy()).unwrap();
+        assert_eq!(fs::read(out.join("src/a.txt")).unwrap(), b"alpha");
+        assert_eq!(fs::read(out.join("src/sub/b.txt")).unwrap(), b"beta");
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn compress_archive_dispatches_by_extension() {
+        let d = scratch("dispatch");
+        fs::write(d.join("f.txt"), b"x").unwrap();
+        let src = d.join("f.txt").to_string_lossy().to_string();
+
+        // .zip and .tar.gz both work; both list the file back.
+        for ext in ["out.zip", "out.tar.gz", "out.tgz"] {
+            let dest = d.join(ext).to_string_lossy().to_string();
+            compress_archive(std::slice::from_ref(&src), &dest).unwrap_or_else(|e| panic!("{ext}: {e}"));
+            let names: Vec<_> = read_archive_entries(&dest).unwrap().iter().map(|e| e.name.clone()).collect();
+            assert!(names.iter().any(|n| n.ends_with("f.txt")), "{ext}: got {names:?}");
+        }
+        // An unrecognised extension is a clear error.
+        assert!(compress_archive(&[src], &d.join("out.rar").to_string_lossy()).unwrap_err().contains("unsupported"));
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn encrypted_zip_round_trips_and_rejects_a_wrong_password() {
+        let d = scratch("encrypted");
+        fs::write(d.join("secret.txt"), b"top secret").unwrap();
+        let src = d.join("secret.txt").to_string_lossy().to_string();
+        let zip = d.join("locked.zip");
+
+        assert!(compress_to_zip_encrypted(&[], &zip.to_string_lossy(), "pw").is_err(), "empty selection errors");
+        assert!(
+            compress_to_zip_encrypted(std::slice::from_ref(&src), &zip.to_string_lossy(), "").is_err(),
+            "an empty password errors"
+        );
+        compress_to_zip_encrypted(&[src], &zip.to_string_lossy(), "hunter2").unwrap();
+
+        // The right password extracts the file byte-exact.
+        let out = d.join("out");
+        extract_zip_encrypted(&zip.to_string_lossy(), &out.to_string_lossy(), "hunter2").unwrap();
+        assert_eq!(fs::read(out.join("secret.txt")).unwrap(), b"top secret");
+
+        // A wrong password is a clear error, not a silent garbage extraction.
+        let bad = d.join("bad");
+        assert!(extract_zip_encrypted(&zip.to_string_lossy(), &bad.to_string_lossy(), "wrong").is_err());
         let _ = fs::remove_dir_all(&d);
     }
 
