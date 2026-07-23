@@ -12,6 +12,11 @@ import { invoke as coreInvoke, Channel as TauriChannel } from "@tauri-apps/api/c
 import { withBusy } from "./busy";
 import { diagnosticsEnabled, recordCall } from "./diagnostics";
 
+// Re-exported for the generated typed client (CPE-953), whose streaming methods bind `Channel as
+// TAURI_CHANNEL` from here (the export repoints tauri-specta's core import at `./invoke`). Streaming opts
+// out of the busy cursor by design (CPE-550), so the raw Channel is the correct primitive there.
+export { Channel } from "@tauri-apps/api/core";
+
 // ---- Transport seam (CPE-819, epic CPE-810) -----------------------------------------------------
 //
 // `invoke`/`rawInvoke` are the single chokepoint every backend call flows through, so this is the one

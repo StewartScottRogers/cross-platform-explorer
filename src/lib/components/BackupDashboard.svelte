@@ -93,7 +93,7 @@
       };
       await rawInvoke("apply_backup_plan_stream", {
         sourceRoot: srcRoot, destRoot: dstRoot,
-        copy: p.copy, update: p.update, delete: p.delete, verify: true,
+        copy: p.copy, update: p.update, deletePaths: p.delete, verify: true,
         onResult: channel,
       });
       const failed = results.filter((r) => !r.ok).length;

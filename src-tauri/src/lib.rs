@@ -1888,14 +1888,14 @@ async fn apply_backup_plan_stream(
     dest_root: String,
     copy: Vec<String>,
     update: Vec<String>,
-    delete: Vec<String>,
+    delete_paths: Vec<String>,
     verify: bool,
     on_result: tauri::ipc::Channel<Vec<OpResult>>,
 ) -> Result<usize, String> {
     tauri::async_runtime::spawn_blocking(move || {
         let mut batch: Vec<OpResult> = Vec::new();
         let mut total = 0usize;
-        cpe_server::backup::apply_backup_plan_walk(&source_root, &dest_root, &copy, &update, &delete, verify, |r| {
+        cpe_server::backup::apply_backup_plan_walk(&source_root, &dest_root, &copy, &update, &delete_paths, verify, |r| {
             total += 1;
             batch.push(r);
             if batch.len() >= 16 {
@@ -1919,11 +1919,11 @@ async fn apply_backup_plan(
     dest_root: String,
     copy: Vec<String>,
     update: Vec<String>,
-    delete: Vec<String>,
+    delete_paths: Vec<String>,
     verify: bool,
 ) -> Vec<OpResult> {
     tauri::async_runtime::spawn_blocking(move || {
-        cpe_server::backup::apply_backup_plan(&source_root, &dest_root, &copy, &update, &delete, verify)
+        cpe_server::backup::apply_backup_plan(&source_root, &dest_root, &copy, &update, &delete_paths, verify)
     })
     .await
     .unwrap_or_default()
@@ -2323,8 +2323,8 @@ fn tag_counts(app: tauri::AppHandle) -> Result<Vec<(String, usize)>, String> {
 /// Rename a tag across every path (CPE-646); an empty `new` deletes it. Returns the updated store.
 #[tauri::command]
 #[cfg_attr(feature = "specta-bindings", specta::specta)]
-fn rename_tag(app: tauri::AppHandle, old: String, new: String) -> Result<TagStore, String> {
-    cpe_server::tags::rename_tag(&server_ctx::TauriCtx::new(&app), &old, &new)
+fn rename_tag(app: tauri::AppHandle, old: String, new_name: String) -> Result<TagStore, String> {
+    cpe_server::tags::rename_tag(&server_ctx::TauriCtx::new(&app), &old, &new_name)
 }
 
 /// Remove a tag from every path (CPE-646). Returns the updated store.
@@ -5848,16 +5848,15 @@ mod agent_watch_tests {
 /// `generate_handler!` (this only emits the client), so behaviour is unchanged. Called from the
 /// `export_bindings` bin — a plain exe, which loads where a libtest binary linking tauri-specta would fail
 /// (`STATUS_ENTRYPOINT_NOT_FOUND`, a WebView2 entrypoint skew), so codegen never runs under `cargo test`.
+/// Regenerate: `cargo run --bin export_bindings --features specta-bindings`.
 #[cfg(feature = "specta-bindings")]
 pub fn export_bindings(out: &std::path::Path) -> Result<(), String> {
     use tauri_specta::{collect_commands, Builder};
-    // The typed surface: the non-streaming, non-sidecar commands (CPE-953). Deliberately excluded:
-    //  - the `ipc::Channel` streamers (Channel typing is a separate CPE-953 AC);
-    //  - the `sidecar-platform`-gated commands (this bin doesn't enable that feature — the superset
-    //    `sidecar-platform` codegen is a follow-up);
-    //  - `rename_tag` (param `new`) + `apply_backup_plan` (param `delete`) — their Rust params are JS
-    //    reserved words, which tauri-specta would emit verbatim as a syntax error; renaming the params
-    //    would break existing callers, so they keep working through `generate_handler!` only.
+    // The full non-sidecar typed surface (CPE-953): every `#[tauri::command]` not gated behind
+    // `sidecar-platform`, INCLUDING the `ipc::Channel` streamers (their `Channel<T>` methods bind
+    // `TAURI_CHANNEL` from `./invoke`, which re-exports `Channel`). The `sidecar-platform` superset
+    // (sidecar commands) is a follow-up — it needs `specta::Type` on the sidecar-contract/repos/host crate
+    // types those commands use (chained across crates), tracked in CPE-953.
     let builder = Builder::<tauri::Wry>::new().commands(collect_commands![
         list_dir,
         find_project_root,
@@ -5895,6 +5894,7 @@ pub fn export_bindings(out: &std::path::Path) -> Result<(), String> {
         load_tags,
         set_tags,
         tag_counts,
+        rename_tag,
         delete_tag,
         import_tags,
         retag_path,
@@ -5911,12 +5911,19 @@ pub fn export_bindings(out: &std::path::Path) -> Result<(), String> {
         move_exact,
         entry_info,
         image_meta,
+        list_dir_stream,
+        cancel_dir_stream,
         entries_for_paths,
         same_volume,
+        find_files_by_name_stream,
+        search_file_contents_stream,
         dir_size,
         dir_children_sizes,
+        dir_children_sizes_stream,
         folder_stats,
         hash_file,
+        apply_backup_plan,
+        apply_backup_plan_stream,
         checksum_folder,
         verify_folder,
         verify_all_baselines,
@@ -5933,6 +5940,7 @@ pub fn export_bindings(out: &std::path::Path) -> Result<(), String> {
         find_files_by_name,
         files_identical,
         find_duplicates,
+        find_duplicates_stream,
         git_remote_url,
         open_external,
         run_as_admin,
