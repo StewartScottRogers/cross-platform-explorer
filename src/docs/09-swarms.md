@@ -31,14 +31,25 @@ New to swarms? Next to *Run swarm* there's a **demo dropdown** — pick one and 
 in a ready-made example (all tasks only **create** files — nothing is deleted or moved) so you can watch a
 swarm work end-to-end **without writing any tasks yourself**. Just pick your agent and press **Start**.
 
-The demos:
+Every demo tells its agents to **narrate to the console** as they work, so you can watch the swarm think
+and progress in each agent's terminal tab.
+
+**Simple** (2 agents or fewer):
 
 - **Hello swarm** — two builders create `README-DEMO.md` and `NOTES-DEMO.md`.
 - **Explain this folder** — writes a short `FOLDER-REPORT.md` + a `FILE-TYPES.md` breakdown.
 - **Docs starter** — scaffolds `DEMO-README.md` and `DEMO-CONTRIBUTING.md` skeletons.
 - **Cleanup plan (safe)** — *proposes* tidy-up steps in `CLEANUP-PLAN.md`; deletes nothing.
 
-It's the quickest way to understand what a coordinator and its builders actually do.
+**Complex · multi-agent** (three coordinated builders on disjoint files — a taste of what a real swarm can do):
+
+- **Folder inventory** — one agent lists files, one ranks them by size, one writes an `INDEX-DEMO.md` that links the two.
+- **Codebase tour** — builds `ARCHITECTURE-DEMO.md`, `GLOSSARY-DEMO.md`, and `ONBOARDING-DEMO.md` — a mini onboarding guide.
+- **Test plan + checklist** — *proposes* a test plan + release checklist (nothing is executed).
+
+The complex demos are the best way to see how to structure **your own** swarms: give each builder a
+disjoint file scope (`file :: task`) so they run in parallel, and ask them to narrate. It's the quickest
+way to understand what a coordinator and its builders actually do.
 
 ## How the agents coordinate
 

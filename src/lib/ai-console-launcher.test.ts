@@ -263,6 +263,29 @@ describe("Agent Deck launcher — live swarm trigger (CPE-541)", () => {
       .toEqual(["DEMO-README.md", "DEMO-CONTRIBUTING.md"]);
   });
 
+  it("offers complex multi-agent demos, and every demo narrates verbosely to the console (CPE-934)", async () => {
+    const { w } = await mountLauncher();
+    const doc = w.document;
+    const select = doc.getElementById("demo-select") as HTMLSelectElement;
+    // More examples now (simple + complex), grouped.
+    expect(select.options.length).toBeGreaterThanOrEqual(7);
+    expect(doc.querySelectorAll("#demo-select optgroup").length).toBeGreaterThanOrEqual(2);
+
+    // A complex demo staffs THREE coordinated builders on disjoint files.
+    select.value = "inventory";
+    w.demoSwarm();
+    const inv = w.parseSwarmTasks(doc.getElementById("swarm-task").value);
+    expect(inv).toHaveLength(3);
+    expect(inv.map((t: any) => t.globs[0])).toEqual(["INVENTORY-DEMO.md", "SIZES-DEMO.md", "INDEX-DEMO.md"]);
+
+    // Every demo instructs the agents to narrate to the console (verbose).
+    for (const key of ["hello", "folder", "docs", "tidy", "inventory", "tour", "testplan"]) {
+      select.value = key;
+      w.demoSwarm();
+      expect(doc.getElementById("swarm-task").value.toLowerCase()).toContain("console");
+    }
+  });
+
   it("keeps the demo controls inside the swarm pane: Run swarm drops the panel, then Load demo shows the picker (CPE-931/932)", async () => {
     const { w } = await mountLauncher();
     const doc = w.document;
