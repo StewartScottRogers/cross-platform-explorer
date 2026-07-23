@@ -7,7 +7,7 @@
 //! drive. Nothing here touches disk — `plan` is a pure function of `(macro, inputs)` so it's fully testable.
 
 /// One step in a macro. Each variant maps to an existing op primitive.
-#[derive(Debug, Clone, PartialEq, serde::Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum MacroStep {
     /// Rename each input using a template with `{name}` (full filename), `{stem}` (name without extension),
@@ -22,7 +22,7 @@ pub enum MacroStep {
 }
 
 /// A named, reusable multi-step action.
-#[derive(Debug, Clone, PartialEq, serde::Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct ActionMacro {
     pub name: String,
     pub steps: Vec<MacroStep>,

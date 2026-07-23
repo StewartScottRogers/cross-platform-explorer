@@ -149,6 +149,10 @@ pub mod playlist;
 /// Content search — recursive line search in text files, bounded + binary-skipping (CPE-416).
 pub mod content_search;
 
+/// User macro library — a persisted, ordered store of named action-macros with CRUD + validation +
+/// reordering, built on action_macro (CPE-951, epic CPE-739). Pure model, JSON round-trips.
+pub mod macro_library;
+
 /// Shared filesystem model types (DirEntry / EntryInfo / Place / OpResult) + extension/hidden helpers.
 pub mod model;
 
