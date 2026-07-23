@@ -126,6 +126,10 @@ pub mod name_search;
 /// relevance. Backend-agnostic; reused by the index engine (CPE-831, epic CPE-703).
 pub mod index_query;
 
+/// Spotlight result aggregation — merge fuzzy-ranked hits from several sources (actions/folders/files/
+/// recents) into grouped, per-kind-capped, best-first results for the overlay (CPE-948, epic CPE-704).
+pub mod spotlight_results;
+
 /// Folder templates — capture a folder structure as a reusable template and stamp it out with `{token}`
 /// substitution, path-safe and non-destructive (CPE-835, epic CPE-740).
 pub mod folder_template;
