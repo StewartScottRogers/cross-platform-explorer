@@ -46,8 +46,13 @@
   .field.grow { flex: 1; }
   .field label { font-size: 10px; text-transform: uppercase; letter-spacing: .06em;
                  opacity: .55; font-weight: 600; }
-  /* Demo picker (CPE-931): shown only inside the revealed swarm area, after "Load demo". */
-  .demo-picker { display: flex; align-items: center; gap: 8px; margin-bottom: 8px; }
+  /* Tasks header (CPE-932): the label on the left + the "Load a demo" trigger on the right, inside the
+     swarm pane so it only shows once "Run swarm" drops the panel. */
+  .swarm-tasks-head { display: flex; align-items: baseline; justify-content: space-between; gap: 10px; }
+  .demo-trigger { height: 22px; padding: 0 9px; font-size: 11px; border-radius: 5px; flex: 0 0 auto;
+                  border: 1px solid var(--line); background: rgba(128,128,128,0.10); font-weight: 500; }
+  /* Demo picker (CPE-931): shown only after the "Load a demo" trigger is clicked. */
+  .demo-picker { display: flex; align-items: center; gap: 8px; margin: 8px 0 6px; }
   .demo-picker[hidden] { display: none; } /* beat the flex so `hidden` works */
   .demo-picker label { flex: 0 0 auto; margin: 0; }
   .demo-picker select { width: auto; min-width: 180px; flex: 0 0 auto; }
@@ -369,13 +374,17 @@
       <button id="help-btn" type="button" title="How the Agent Deck works — a quick guide">?</button>
       <button id="launch" class="primary">Launch</button>
       <button id="run-swarm" type="button" title="Run a multi-agent swarm — a coordinator plus one builder per task line — experimental (CPE-541)">Run swarm ▾</button>
-      <button id="swarm-demo" type="button" title="Reveal a ready-made demo swarm you can run in one click — a guided how-to demo (CPE-924/925)">Load demo ▾</button>
       <button id="swarm-help" type="button" class="area-help" title="Documents: how swarms work">?</button>
     </div>
     <div class="row" id="swarm-row" hidden>
       <div class="field" style="flex:1">
-        <!-- The demo picker lives here, in the freshly-revealed swarm area, and only appears after
-             "Load demo" (not when "Run swarm" reveals this row) — CPE-931. -->
+        <!-- Tasks header: the label + the "Load a demo" trigger. Both live INSIDE the swarm pane, so they
+             only appear once "Run swarm" drops this panel (CPE-931/932). -->
+        <div class="swarm-tasks-head">
+          <label for="swarm-task" title="One task per line — each line becomes a builder the coordinator runs. Optional scope: 'glob :: task' (comma-separated globs) lets disjoint tasks run in parallel; same/overlapping scopes run in turn.">Swarm tasks — one per line</label>
+          <button id="swarm-demo" type="button" class="demo-trigger" title="Fill in a ready-made demo swarm — a guided how-to demo (CPE-924/925)">Load a demo ▾</button>
+        </div>
+        <!-- The demo picker appears here only after "Load a demo" is clicked (CPE-931). -->
         <div class="demo-picker" id="demo-picker" hidden>
           <label for="demo-select">Demo</label>
           <select id="demo-select" title="Pick a ready-made demo swarm to load (CPE-925)">
@@ -385,7 +394,6 @@
             <option value="tidy">Cleanup plan (safe)</option>
           </select>
         </div>
-        <label for="swarm-task" title="One task per line — each line becomes a builder the coordinator runs. Optional scope: 'glob :: task' (comma-separated globs) lets disjoint tasks run in parallel; same/overlapping scopes run in turn.">Swarm tasks — one per line</label>
         <textarea id="swarm-task" rows="2" placeholder="e.g.
 src/** :: add unit tests for the CSV parser
 docs/** :: document the CSV options"></textarea>
