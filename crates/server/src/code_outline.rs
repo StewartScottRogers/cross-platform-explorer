@@ -46,6 +46,9 @@ pub fn outline(source: &str, lang: &str) -> Vec<Symbol> {
             Lang::Js => scan_js,
             Lang::Python => scan_python,
             Lang::Go => scan_go,
+            Lang::Ruby => scan_ruby,
+            Lang::Php => scan_php,
+            Lang::Clike => scan_clike,
             Lang::Markdown => scan_markdown,
             Lang::Other => return Vec::new(),
         };
@@ -62,6 +65,11 @@ enum Lang {
     Js,
     Python,
     Go,
+    Ruby,
+    Php,
+    /// C / C++ / C# / Java / Kotlin / Swift — keyword-declared **types** (functions/methods in these are
+    /// keyword-less and too ambiguous to detect heuristically, so they're intentionally skipped).
+    Clike,
     Markdown,
     Other,
 }
@@ -72,6 +80,10 @@ fn normalize(lang: &str) -> Lang {
         "typescript" | "ts" | "tsx" | "javascript" | "js" | "jsx" | "mjs" | "cjs" => Lang::Js,
         "python" | "py" | "pyi" => Lang::Python,
         "go" => Lang::Go,
+        "ruby" | "rb" => Lang::Ruby,
+        "php" => Lang::Php,
+        "c" | "h" | "cpp" | "cc" | "cxx" | "hpp" | "c++" | "csharp" | "cs" | "java" | "kotlin" | "kt"
+        | "swift" => Lang::Clike,
         "markdown" | "md" | "markdn" | "mdown" => Lang::Markdown,
         _ => Lang::Other,
     }
@@ -212,6 +224,70 @@ fn scan_go(raw: &str) -> Option<(String, SymbolKind)> {
     None
 }
 
+fn scan_ruby(raw: &str) -> Option<(String, SymbolKind)> {
+    let indented = raw.starts_with(char::is_whitespace);
+    let s = raw.trim_start();
+    if let Some(name) = ident_after(s, "def") {
+        return Some((name, if indented { SymbolKind::Method } else { SymbolKind::Function }));
+    }
+    if let Some(name) = ident_after(s, "class") {
+        return Some((name, SymbolKind::Class));
+    }
+    if let Some(name) = ident_after(s, "module") {
+        return Some((name, SymbolKind::Module));
+    }
+    None
+}
+
+fn scan_php(raw: &str) -> Option<(String, SymbolKind)> {
+    let mut s = raw.trim_start();
+    for m in ["public ", "private ", "protected ", "static ", "final ", "abstract "] {
+        if let Some(rest) = s.strip_prefix(m) {
+            s = rest.trim_start();
+        }
+    }
+    if let Some(name) = ident_after(s, "function") {
+        return Some((name, SymbolKind::Function));
+    }
+    if let Some(name) = ident_after(s, "class") {
+        return Some((name, SymbolKind::Class));
+    }
+    if let Some(name) = ident_after(s, "interface") {
+        return Some((name, SymbolKind::Interface));
+    }
+    if let Some(name) = ident_after(s, "trait") {
+        return Some((name, SymbolKind::Trait));
+    }
+    if let Some(name) = ident_after(s, "enum") {
+        return Some((name, SymbolKind::Enum));
+    }
+    None
+}
+
+/// C-family **types** only (functions/methods are keyword-less here — too ambiguous to detect).
+fn scan_clike(raw: &str) -> Option<(String, SymbolKind)> {
+    let mut s = raw.trim_start();
+    for m in ["public ", "private ", "protected ", "internal ", "static ", "final ", "abstract ", "sealed ", "typedef "] {
+        if let Some(rest) = s.strip_prefix(m) {
+            s = rest.trim_start();
+        }
+    }
+    for (kw, kind) in [
+        ("class", SymbolKind::Class),
+        ("struct", SymbolKind::Struct),
+        ("interface", SymbolKind::Interface),
+        ("enum", SymbolKind::Enum),
+        ("union", SymbolKind::Struct),
+        ("namespace", SymbolKind::Module),
+        ("record", SymbolKind::Class),
+    ] {
+        if let Some(name) = ident_after(s, kw) {
+            return Some((name, kind));
+        }
+    }
+    None
+}
+
 fn scan_markdown(raw: &str) -> Option<(String, SymbolKind)> {
     let s = raw.trim_start();
     if s.starts_with('#') {
@@ -315,6 +391,37 @@ type Config struct {}
         assert_eq!(got[1], ("Section".into(), SymbolKind::Heading, 4));
         assert_eq!(got[2], ("Sub".into(), SymbolKind::Heading, 5));
         assert_eq!(got.len(), 3, "an inline ## mid-line is not a heading");
+    }
+
+    #[test]
+    fn ruby_defs_classes_and_modules() {
+        let src = "module App\n  class Server\n    def start\n    end\n  end\nend\ndef top\nend\n";
+        let got = names(src, "rb");
+        assert_eq!(got[0], ("App".into(), SymbolKind::Module, 1));
+        assert_eq!(got[1], ("Server".into(), SymbolKind::Class, 2));
+        assert_eq!(got[2], ("start".into(), SymbolKind::Method, 3)); // indented → method
+        assert_eq!(got[3], ("top".into(), SymbolKind::Function, 7));
+    }
+
+    #[test]
+    fn php_functions_classes_and_traits() {
+        let src = "<?php\nclass Widget {}\ninterface Renderable {}\ntrait Sized {}\npublic function build() {}\n";
+        let got = names(src, "php");
+        assert_eq!(got[0], ("Widget".into(), SymbolKind::Class, 2));
+        assert_eq!(got[1], ("Renderable".into(), SymbolKind::Interface, 3));
+        assert_eq!(got[2], ("Sized".into(), SymbolKind::Trait, 4));
+        assert_eq!(got[3], ("build".into(), SymbolKind::Function, 5));
+    }
+
+    #[test]
+    fn clike_types_java_cpp_csharp() {
+        let src = "public class Main {}\nstruct Point {};\nenum Color { RED }\nnamespace app {}\nrecord Pair() {}\n";
+        let got = names(src, "java");
+        assert_eq!(got[0], ("Main".into(), SymbolKind::Class, 1));
+        assert_eq!(got[1], ("Point".into(), SymbolKind::Struct, 2));
+        assert_eq!(got[2], ("Color".into(), SymbolKind::Enum, 3));
+        assert_eq!(got[3], ("app".into(), SymbolKind::Module, 4));
+        assert_eq!(got[4], ("Pair".into(), SymbolKind::Class, 5));
     }
 
     #[test]
