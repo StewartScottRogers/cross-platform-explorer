@@ -17,7 +17,7 @@
 
   const dispatch = createEventDispatcher<{
     back: void; forward: void; up: void; refresh: void; browse: void; help: void; diskusage: void;
-    navigate: string; search: string; pathError: string; searchDeep: string;
+    navigate: string; search: string; pathError: string; searchDeep: string; searchDocs: void;
   }>();
 
   let pathInput: HTMLInputElement | undefined;
@@ -149,10 +149,26 @@
       }}
       on:input={(e) => dispatch("search", e.currentTarget.value)}
     />
+    <button
+      class="search-docs"
+      type="button"
+      title="Search options — open documentation"
+      aria-label="Search options documentation"
+      on:click={() => dispatch("searchDocs")}
+    >
+      <Icon name="book" size={13} />
+    </button>
   </div>
 </div>
 
 <style>
+  /* Docs affordance inside the search box (CPE-927): opens the search-options page. */
+  .search-docs {
+    flex: 0 0 auto; display: inline-flex; align-items: center; justify-content: center;
+    width: 20px; height: 20px; padding: 0; border: none; border-radius: 4px;
+    background: transparent; color: var(--text-dim); cursor: pointer;
+  }
+  .search-docs:hover { background: rgba(128, 128, 128, 0.18); color: var(--text); }
   .pathedit {
     flex: 1;
     height: 34px;

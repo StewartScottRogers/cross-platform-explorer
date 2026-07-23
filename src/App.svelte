@@ -3033,6 +3033,7 @@
   on:diskusage={() => { if (inFolder()) spacePath = currentPath; }}
   on:navigate={(e) => onCrumbNavigate(e.detail)}
   on:search={(e) => { search = e.detail; selection = emptySelection(); }}
+  on:searchDocs={() => openDocsSlug("12-search")}
   on:searchDeep={(e) => {
     if (isHome) { showNotice("Open a folder first — Search looks inside the current folder and its subfolders.", false); return; }
     deepSearchQuery = e.detail; fileSearchOpen = true;
