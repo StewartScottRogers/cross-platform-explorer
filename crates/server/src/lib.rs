@@ -195,6 +195,10 @@ pub mod backup;
 /// (CPE-942, epic CPE-725). Pure edit policy; the codec layer reads/writes the real files.
 pub mod media_meta_edit;
 
+/// Batch metadata apply — apply one shared set of edits to a whole selection of files, with a per-file
+/// result + run summary; builds on media_meta_edit (CPE-949, epic CPE-725).
+pub mod media_meta_batch;
+
 /// Server-side contract dispatch — route `Request` envelopes to domain functions (CPE-824, the Server
 /// half of the remote RPC loop CPE-820).
 pub mod dispatch;
