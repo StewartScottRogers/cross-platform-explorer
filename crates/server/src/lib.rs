@@ -228,6 +228,10 @@ pub mod media_meta_edit;
 /// codec: ID3v2 audio tags (CPE-970, epic CPE-725; also feeds CPE-707 columns). Pure, std-only.
 pub mod media_meta_read;
 
+/// Audio-metadata column extractor — map read ID3 [`media_meta_edit::MetaField`]s to typed
+/// [`metadata_column::CellValue`]s so Track/Year columns sort numerically (CPE-971, epic CPE-707). Pure.
+pub mod media_column;
+
 /// Batch metadata apply — apply one shared set of edits to a whole selection of files, with a per-file
 /// result + run summary; builds on media_meta_edit (CPE-949, epic CPE-725).
 pub mod media_meta_batch;
