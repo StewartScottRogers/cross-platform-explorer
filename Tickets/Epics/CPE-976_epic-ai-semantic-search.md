@@ -86,3 +86,5 @@ hard rule as CPE-703).
   See [[headless-frontier-and-cpe-net]], [[prefer-streaming-liveness]].
 
 2026-07-24 (dayshift) — **CPE-982** landed the embedder seam: `embedder::Embedder` (object-safe trait) + a dependency-free deterministic `FakeEmbedder` (feature-hashed bag-of-words, stable FNV-1a). Proven end-to-end with `vector_index` (token-overlap retrieval). CPE-983 (pipeline) / CPE-984 (query blend) can now build against a real `Embedder` with zero model weight; the **real backend stays the deferred big-design call** (user: "build the seam now, decide later").
+
+2026-07-24 (dayshift) — **CPE-983** landed the document pipeline: `semantic_index::{chunk_text, SemanticIndex}` — chunk (overlapping word windows) → `embed_batch` → `vector_index`, with `upsert_document`/`remove_document` (exact chunk bookkeeping) and per-document `search` (best chunk per doc, only positive-similarity docs). 7 tests via FakeEmbedder. Next: CPE-984 blend with lexical hits; then CPE-985 UI (attended) + the deferred real embedder.
