@@ -59,3 +59,16 @@ guard (CPE-813) keeps the generated types honest while this proceeds.
   try/catch. Verified the 6 generated types (`Capability`, `ConsentState`, `SidecarInfo`, `SidecarRepair`,
   `SidecarDiagnostics`, `DiagLogLine`) are structurally identical to the local hand-declared ones. sidecar
   now has zero raw `invoke`. npm check 0/0; sidecar tests 17; full suite 930 green.
+- 2026-07-23 — Increment 7 (Nightshift): migrated the bulk of **App.svelte** — ~29 sites across ~30
+  commands: file ops (`move_entries`/`move_exact`/`copy_entries`/`delete_to_trash`/`delete_permanent`/
+  `restore_from_trash`/`rename_entry`/`create_dir`/`create_file`), preview loaders (`read_file_text`/
+  `read_archive_entries`/`read_preview_info`/`read_image_data_url` via `.then(unwrap)`), archive
+  (`extract_archive_entry`/`extract_archive`/`compress_to_zip`), external (`open_external`×4/`open_terminal`/
+  `run_as_admin`), disk/nav (`disk_space`/`entries_for_paths`/`parent_dir`/`special_folders`/`list_drives`/
+  `home_dir`), sync (`forge_sync`), sidecar (`sidecar_stop`/`sidecar_close_session`), write/misc
+  (`write_file_text`×4/`files_identical`/`same_volume`/`git_remote_url`). Dropped 2 redundant `withBusy`
+  wrappers + the import; handled a dynamic command name (`permanent ? delete_permanent : delete_to_trash`)
+  by splitting into two typed calls; `same_volume`'s `.catch(()=>false)` preserved (plain return).
+  **Deferred to increment 8** (local-type friction): `verify_all_baselines` (Record vs Partial + local
+  IntegrityReport) and `forge_repo_status` ×2 (RepoSyncStatus vs local gitStatus null/undefined) — 3 sites
+  still on raw `invoke`. npm check 0/0; full suite 930 green.
