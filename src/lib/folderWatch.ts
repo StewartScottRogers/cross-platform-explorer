@@ -6,7 +6,8 @@
 // copies). The rule matching + execution stay platform-agnostic; only the live trigger is sidecar-only.
 
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
-import { invoke } from "./invoke";
+import { unwrap } from "./invoke";
+import { commands } from "./bindings.gen"; // typed client (CPE-964)
 import { planForEntry, type WatchRule } from "./watchRules";
 import type { DirEntry } from "./types";
 
@@ -139,11 +140,11 @@ export async function undoFire(fire: WatchFire): Promise<void> {
   if (plan.moveBack) {
     guard.guard(plan.moveBack.from, now);
     guard.guard(plan.moveBack.to, now);
-    await invoke("move_exact", { pairs: [[plan.moveBack.from, plan.moveBack.to]] });
+    await commands.moveExact([[plan.moveBack.from, plan.moveBack.to]]);
   }
   for (const p of plan.deletes) {
     guard.guard(p, now);
-    await invoke("delete_permanent", { paths: [p] });
+    await commands.deletePermanent([p]);
   }
 }
 
@@ -156,7 +157,7 @@ export async function startFolderWatch(
 ): Promise<number> {
   let count = 0;
   try {
-    count = await invoke<number>("folder_watch_start", { paths });
+    count = unwrap(await commands.folderWatchStart(paths));
   } catch {
     return 0;
   }
@@ -164,8 +165,8 @@ export async function startFolderWatch(
     unlisten = await listen<FolderWatchEvent[]>("folder-watch", (e) =>
       handleFolderBatch(e.payload, rulesFn(), onFire, {
         now: () => Date.now(),
-        stat: (path) => invoke("entry_info", { path }),
-        run: (path, actions) => invoke("run_watch_actions", { path, actions }),
+        stat: (path) => commands.entryInfo(path).then(unwrap),
+        run: (path, actions) => commands.runWatchActions(path, actions),
       }),
     );
   }
@@ -175,7 +176,7 @@ export async function startFolderWatch(
 /** Stop watching and drop the event subscription. Idempotent. */
 export async function stopFolderWatch(): Promise<void> {
   try {
-    await invoke("folder_watch_stop");
+    await commands.folderWatchStop();
   } catch {
     // ignore
   }
