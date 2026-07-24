@@ -5,7 +5,8 @@
 // the plain explorer is unaffected until a path is actually tagged.
 
 import { writable, get, type Readable } from "svelte/store";
-import { invoke } from "./invoke";
+import { commands } from "./bindings.gen"; // typed client (CPE-964)
+import { unwrap } from "./invoke";
 
 /** One path's tags plus its single colour label (mirror of the Rust `TagEntry`). */
 export interface TagEntry {
@@ -66,7 +67,7 @@ let loaded = false;
 export async function initTags(): Promise<void> {
   if (loaded) return;
   loaded = true;
-  const s = await invoke<TagStore>("load_tags");
+  const s = unwrap(await commands.loadTags()) as TagStore;
   // The backend always returns a map; guard against a nullish response so the store is never null
   // (an empty map keeps the plain explorer untouched).
   store.set(s ?? {});
@@ -74,36 +75,36 @@ export async function initTags(): Promise<void> {
 
 /** Replace one path's tags + label; the store is updated from the returned whole store. */
 export async function setEntryTags(path: string, tags: string[], label: string): Promise<void> {
-  const updated = await invoke<TagStore>("set_tags", { path, tags, label });
+  const updated = unwrap(await commands.setTags(path, tags, label)) as TagStore;
   store.set(updated ?? {});
 }
 
 /** Tag usage counts, most-used first (`[tag, count][]`), straight from the backend. */
 export function tagCounts(): Promise<[string, number][]> {
-  return invoke<[string, number][]>("tag_counts");
+  return commands.tagCounts().then(unwrap);
 }
 
 /** Re-key a path's tags after an in-app rename/move so they follow the file (CPE-652). No-op if untagged. */
 export async function retagPath(from: string, to: string): Promise<void> {
-  const updated = await invoke<TagStore>("retag_path", { from, to });
+  const updated = unwrap(await commands.retagPath(from, to)) as TagStore;
   store.set(updated ?? {});
 }
 
 /** Rename tag `old` → `next` across every path (CPE-653). An empty `next` deletes it. */
 export async function renameTag(old: string, next: string): Promise<void> {
-  const updated = await invoke<TagStore>("rename_tag", { old, newName: next });
+  const updated = unwrap(await commands.renameTag(old, next)) as TagStore;
   store.set(updated ?? {});
 }
 
 /** Remove a tag from every path (CPE-653). */
 export async function deleteTag(tag: string): Promise<void> {
-  const updated = await invoke<TagStore>("delete_tag", { tag });
+  const updated = unwrap(await commands.deleteTag(tag)) as TagStore;
   store.set(updated ?? {});
 }
 
 /** Merge an exported tag store (JSON) into the current one (CPE-654). */
 export async function importTags(json: string): Promise<void> {
-  const updated = await invoke<TagStore>("import_tags", { json });
+  const updated = unwrap(await commands.importTags(json)) as TagStore;
   store.set(updated ?? {});
 }
 
