@@ -1,22 +1,32 @@
-//! Instant-search **index engine** (CPE-832, epic CPE-703): the compact per-volume filename index that
-//! CPE-831's query core ([`crate::index_query`]) runs against.
+//! Instant-search **index engine** (CPE-832/833, epic CPE-703): the compact per-volume filename index that
+//! CPE-831's query core ([`crate::index_query`]) runs against, kept live incrementally as files change.
 //!
-//! This is the storage half of the Everything-style instant search. [`crate::index_query`] owns the query
-//! grammar, `matches`, and `rank`; this module owns the *candidate feed*: an initial crawl ([`Index::build`]),
-//! a persistent per-volume on-disk store ([`Index::save`] / [`Index::load`]), and a fast [`Index::search`]
-//! that prunes candidates with a trigram map before handing survivors to `index_query::matches`/`score`.
+//! [`crate::index_query`] owns the query grammar, `matches`, and `rank`; this module owns the *candidate
+//! feed*: an initial crawl ([`Index::build`]), a persistent on-disk store ([`Index::save`] /
+//! [`Index::load`]), a fast [`Index::search`] that prunes candidates with a trigram map before handing
+//! survivors to `index_query::matches`/`score`, and — new in CPE-833 — incremental mutation primitives
+//! ([`Index::apply_create`] / [`Index::apply_remove`] / [`Index::apply_rename`]) so a change source can keep
+//! the index current in O(depth) instead of re-crawling.
 //!
 //! ## Design (Option A — roll-our-own, chosen in the CPE-832 big-design writeup)
 //! - **Feature-gated OFF** (`index` cargo feature): the plain build compiles zero indexer — the delete-test.
 //! - **Zero new dependencies.** The on-disk format is a hand-rolled versioned binary layout (no
 //!   bincode/rkyv/mmap crate), keeping the `cpe-server` lean-core rule. Load reads the file into memory and
-//!   **rebuilds trigram postings** rather than persisting them — smaller disk (filenames only), and load is
-//!   a cold one-time cost, not the <100ms *warm query* path (`index_query::rank` owns that).
+//!   **rebuilds** the auxiliary maps (trigram postings, name interner, child adjacency) rather than
+//!   persisting them — smaller disk (filenames only), and load is a cold one-time cost, not the <100ms
+//!   *warm query* path (`index_query::rank` owns that).
+//! - **Absolute-path roots (CPE-833).** The root entry stores the absolute crawl-root path, so reconstructed
+//!   hit paths are absolute + openable, and change events (which carry absolute paths) resolve against the
+//!   same strings.
 //! - **Interned names + parent pointers.** Each entry stores a name id and its parent's entry index, so a
 //!   full path is reconstructed on demand and unique names are stored once.
+//! - **Tombstoning, not physical delete (CPE-833).** Entries are addressed by index (parents + trigram
+//!   postings point at ids), so a remove **marks the entry + its subtree dead** rather than shifting the
+//!   vec; `search`, `path_of`, and `resolve` skip dead entries. [`Index::to_bytes`] **compacts** (drops dead
+//!   entries + remaps ids), so tombstones never persist and the on-disk format stays v1.
 //! - **Trigram pruning is an optimisation, never a correctness gate.** Trigrams only narrow the candidate
-//!   set for plain substring terms (len ≥ 3); the final say is always `index_query::matches`, so globs,
-//!   short terms, and `ext:`/`path:`-only queries fall back to a full scan and still return correct results.
+//!   set for plain substring terms; the final say is always `index_query::matches`, so globs, short terms,
+//!   and `ext:`/`path:`-only queries fall back to a full scan and still return correct results.
 //!
 //! The crawl reuses the `list_dir` skip-on-error discipline (unreadable dirs skipped, dot-dirs + symlinks
 //! not descended) shared with [`crate::name_search`], so the plain explorer and the index agree on what a
@@ -42,19 +52,23 @@ const MAX_DIRS: u64 = 5_000_000;
 const NO_PARENT: u32 = u32::MAX;
 
 /// One indexed filesystem entry. `name` and `parent` are indices (into [`Index::names`] and
-/// [`Index::entries`] respectively); `is_dir` distinguishes folders. Deliberately tiny — the whole point of
-/// Option A is that a filename index costs only interned names + ids.
+/// [`Index::entries`] respectively); `is_dir` distinguishes folders; `dead` tombstones a removed entry
+/// (never persisted — [`Index::to_bytes`] compacts dead entries away). Deliberately tiny — the whole point
+/// of Option A is that a filename index costs only interned names + ids.
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct Entry {
-    /// Index into [`Index::names`] — the entry's bare file name.
+    /// Index into [`Index::names`] — the entry's bare file name (the absolute path for a crawl root).
     name: u32,
     /// Index into [`Index::entries`] of the containing directory, or [`NO_PARENT`] for a crawl root.
     parent: u32,
     is_dir: bool,
+    /// In-memory tombstone: a removed entry is marked dead (subtree included) rather than physically
+    /// deleted, so parent + trigram indices stay valid. Compacted away on [`Index::to_bytes`].
+    dead: bool,
 }
 
-/// A single instant-search hit: the reconstructed full path, the bare name, whether it's a folder, and its
-/// `index_query::score` relevance (higher = better). Owned so callers can stream/serialise freely.
+/// A single instant-search hit: the reconstructed absolute path, the bare name, whether it's a folder, and
+/// its `index_query::score` relevance (higher = better). Owned so callers can stream/serialise freely.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct IndexHit {
     pub path: String,
@@ -93,7 +107,8 @@ pub struct BuildStats {
 }
 
 /// A compact per-volume filename index. Build it from a root with [`Index::build`], persist with
-/// [`Index::save`], reload with [`Index::load`], and query with [`Index::search`].
+/// [`Index::save`], reload with [`Index::load`], query with [`Index::search`], and keep it live with the
+/// `apply_*` mutation primitives.
 #[derive(Debug, Clone, Default)]
 pub struct Index {
     /// An opaque id for the volume/root this index describes (e.g. a hash of the root path). Stored in the
@@ -104,9 +119,15 @@ pub struct Index {
     names: Vec<String>,
     /// The flat entry table. An entry's `parent` indexes back into this vec.
     entries: Vec<Entry>,
-    /// Case-folded trigram → sorted entry-id posting list, rebuilt on [`Index::load`] and after
-    /// [`Index::build`]. Used only to prune candidates for plain substring terms; not persisted.
+    /// Case-folded trigram → entry-id posting list. Aux (rebuilt on load); used only to prune candidates
+    /// for plain substring terms. Mutations only ever *add* postings — correctness comes from `matches`.
     trigrams: HashMap<u32, Vec<u32>>,
+    /// name → id interner. Aux (rebuilt on load); lets [`Index::resolve`] turn a path component into a
+    /// name id in O(1) and keeps interning cheap during mutation.
+    name_ids: HashMap<String, u32>,
+    /// parent entry id → its child entry ids. Aux (rebuilt on load); the adjacency backing path resolution
+    /// and subtree removal. May list dead ids — every read checks [`Entry::dead`].
+    children: HashMap<u32, Vec<u32>>,
     /// Whether the crawl that produced this index was truncated (cap or cancel).
     truncated: bool,
 }
@@ -117,14 +138,14 @@ impl Index {
         self.volume_id
     }
 
-    /// How many entries the index holds.
+    /// How many **live** entries the index holds (tombstones excluded).
     pub fn len(&self) -> usize {
-        self.entries.len()
+        self.entries.iter().filter(|e| !e.dead).count()
     }
 
-    /// Whether the index is empty.
+    /// Whether the index has no live entries.
     pub fn is_empty(&self) -> bool {
-        self.entries.is_empty()
+        self.len() == 0
     }
 
     /// Whether the crawl that produced this index stopped early (cap or cancel).
@@ -132,10 +153,10 @@ impl Index {
         self.truncated
     }
 
-    /// Crawl `root` into a fresh index. `volume_id` is stored verbatim in the header (callers typically
-    /// pass a hash of the canonical root path). `cancel` is polled between directories so a caller can
-    /// abort a long crawl; a cancelled crawl returns the partial index it built so far, with
-    /// [`BuildStats::truncated`] set.
+    /// Crawl `root` into a fresh index. `root` should be an **absolute** path; it is stored (trailing
+    /// separators trimmed) as the root entry so reconstructed hit paths are absolute. `volume_id` is stored
+    /// verbatim in the header. `cancel` is polled between directories so a caller can abort a long crawl; a
+    /// cancelled crawl returns the partial index built so far, with [`BuildStats::truncated`] set.
     ///
     /// Mirrors [`crate::name_search::walk_name_matches`]: an explicit stack (bounded memory), skip
     /// unreadable dirs, don't descend dot-dirs or symlinks. A non-folder root is an `Err`.
@@ -146,15 +167,12 @@ impl Index {
         }
 
         let mut idx = Index { volume_id, ..Index::default() };
-        let mut interner: HashMap<String, u32> = HashMap::new();
         let mut stats = BuildStats::default();
 
-        // The root itself is entry 0 (its own parent), so children can point at it.
-        let root_name = root_path
-            .file_name()
-            .map(|n| n.to_string_lossy().into_owned())
-            .unwrap_or_else(|| root.to_string());
-        let root_id = idx.push_entry(&mut interner, &root_name, NO_PARENT, true);
+        // The root itself is entry 0 (its own parent), storing the *absolute* root path so descendants
+        // reconstruct to absolute, openable paths.
+        let root_name = root.trim_end_matches(std::path::MAIN_SEPARATOR);
+        let root_id = idx.push_entry(root_name, NO_PARENT, true);
 
         // Stack of (directory path, its entry id) to expand.
         let mut stack = vec![(root_path.to_path_buf(), root_id)];
@@ -174,7 +192,7 @@ impl Index {
                 let name = name.to_string_lossy();
                 let Ok(meta) = entry.metadata() else { continue };
                 let is_dir = meta.is_dir();
-                let id = idx.push_entry(&mut interner, &name, dir_id, is_dir);
+                let id = idx.push_entry(&name, dir_id, is_dir);
                 if is_dir && !name.starts_with('.') && !entry_is_symlink(&entry) {
                     stack.push((entry.path(), id));
                 }
@@ -186,23 +204,29 @@ impl Index {
         Ok((idx, stats))
     }
 
-    /// Intern `name` and append an [`Entry`], returning its id. Names are deduped so repeats are free.
-    fn push_entry(&mut self, interner: &mut HashMap<String, u32>, name: &str, parent: u32, is_dir: bool) -> u32 {
-        let name_id = match interner.get(name) {
-            Some(&id) => id,
-            None => {
-                let id = self.names.len() as u32;
-                self.names.push(name.to_string());
-                interner.insert(name.to_string(), id);
-                id
-            }
-        };
-        let id = self.entries.len() as u32;
-        self.entries.push(Entry { name: name_id, parent, is_dir });
+    /// Intern `name`, returning its id (deduped so repeats are free).
+    fn intern(&mut self, name: &str) -> u32 {
+        if let Some(&id) = self.name_ids.get(name) {
+            return id;
+        }
+        let id = self.names.len() as u32;
+        self.names.push(name.to_string());
+        self.name_ids.insert(name.to_string(), id);
         id
     }
 
-    /// Reconstruct an entry's full path by walking parent pointers up to a root. Uses the platform path
+    /// Append a fresh [`Entry`] under `parent`, maintaining the interner + child adjacency. Returns its id.
+    /// Trigrams are added in bulk by [`Index::rebuild_trigrams`] after a crawl, or per-entry by
+    /// [`Index::add_trigrams`] during mutation.
+    fn push_entry(&mut self, name: &str, parent: u32, is_dir: bool) -> u32 {
+        let name_id = self.intern(name);
+        let id = self.entries.len() as u32;
+        self.entries.push(Entry { name: name_id, parent, is_dir, dead: false });
+        self.children.entry(parent).or_default().push(id);
+        id
+    }
+
+    /// Reconstruct an entry's absolute path by walking parent pointers up to a root. Uses the platform path
     /// separator so the string matches what the explorer shows. Guards against a corrupt parent cycle by
     /// bounding the climb to the entry count.
     fn path_of(&self, mut id: u32) -> String {
@@ -223,11 +247,146 @@ impl Index {
         parts.join(std::path::MAIN_SEPARATOR_STR)
     }
 
-    /// Rebuild the trigram posting map from the current names + entries. Called after a build and after a
-    /// load (trigrams aren't persisted). Each entry contributes the trigrams of its lowercased name.
+    /// The id of the **live** child of `parent` named `name_id`, or `None`. O(fan-out) over the adjacency.
+    fn child_by_name(&self, parent: u32, name_id: u32) -> Option<u32> {
+        self.children.get(&parent)?.iter().copied().find(|&c| {
+            let e = &self.entries[c as usize];
+            !e.dead && e.name == name_id
+        })
+    }
+
+    /// Resolve an absolute path to its live entry id, or `None` if it isn't indexed. Finds the crawl root
+    /// whose stored path prefixes `path`, then descends component by component via the child adjacency.
+    fn resolve(&self, path: &str) -> Option<u32> {
+        let sep = std::path::MAIN_SEPARATOR;
+        let target = path.trim_end_matches(sep);
+        // Roots are entries with no parent; usually one per index.
+        for (id, entry) in self.entries.iter().enumerate() {
+            if entry.parent != NO_PARENT || entry.dead {
+                continue;
+            }
+            let root_name = &self.names[entry.name as usize];
+            if target == root_name {
+                return Some(id as u32);
+            }
+            let prefix = format!("{root_name}{sep}");
+            let Some(rest) = target.strip_prefix(&prefix) else { continue };
+            let mut cur = id as u32;
+            let mut ok = true;
+            for comp in rest.split(sep).filter(|c| !c.is_empty()) {
+                let Some(&name_id) = self.name_ids.get(comp) else {
+                    ok = false;
+                    break;
+                };
+                match self.child_by_name(cur, name_id) {
+                    Some(child) => cur = child,
+                    None => {
+                        ok = false;
+                        break;
+                    }
+                }
+            }
+            if ok {
+                return Some(cur);
+            }
+        }
+        None
+    }
+
+    /// Split an absolute path into `(parent_dir, leaf_name)`, or `None` if it has no separator (a bare
+    /// root). Trailing separators are ignored.
+    fn split_leaf(path: &str) -> Option<(&str, &str)> {
+        let sep = std::path::MAIN_SEPARATOR;
+        let trimmed = path.trim_end_matches(sep);
+        let pos = trimmed.rfind(sep)?;
+        Some((&trimmed[..pos], &trimmed[pos + 1..]))
+    }
+
+    /// Record that `path` (a file or folder) now exists. Its **parent directory must already be indexed**;
+    /// if not, the event is ignored (`None`) — the change source can trigger a subtree rebuild. Reviving a
+    /// previously-removed entry of the same name is handled. Returns the entry id on success.
+    pub fn apply_create(&mut self, path: &str, is_dir: bool) -> Option<u32> {
+        let (parent_path, leaf) = Self::split_leaf(path)?;
+        let parent_id = self.resolve(parent_path)?;
+        let leaf_id = self.intern(leaf);
+        // An existing *live* child → just refresh its kind. A tombstoned one → revive in place.
+        if let Some(&existing) = self
+            .children
+            .get(&parent_id)
+            .and_then(|v| v.iter().find(|&&c| self.entries[c as usize].name == leaf_id))
+        {
+            let e = &mut self.entries[existing as usize];
+            e.is_dir = is_dir;
+            e.dead = false;
+            self.add_trigrams(existing);
+            return Some(existing);
+        }
+        let id = self.push_entry(leaf, parent_id, is_dir);
+        self.add_trigrams(id);
+        Some(id)
+    }
+
+    /// Record that `path` no longer exists: tombstone the entry and its whole subtree. A path that isn't
+    /// indexed is a no-op (returns `false`); returns `true` when something was removed.
+    pub fn apply_remove(&mut self, path: &str) -> bool {
+        let Some(root) = self.resolve(path) else { return false };
+        // DFS the subtree via the child adjacency, marking every node dead.
+        let mut stack = vec![root];
+        while let Some(id) = stack.pop() {
+            if self.entries[id as usize].dead {
+                continue;
+            }
+            self.entries[id as usize].dead = true;
+            if let Some(kids) = self.children.get(&id) {
+                stack.extend(kids.iter().copied());
+            }
+        }
+        true
+    }
+
+    /// Record that `from` was renamed/moved to `to`. Reparents the entry (its subtree follows automatically
+    /// via parent pointers) and updates its leaf name. Both endpoints' directories must be indexed; an
+    /// unresolvable `from` or `to`-parent is a no-op (`false`). Returns `true` on success.
+    pub fn apply_rename(&mut self, from: &str, to: &str) -> bool {
+        let Some(id) = self.resolve(from) else { return false };
+        let Some((to_parent_path, to_leaf)) = Self::split_leaf(to) else { return false };
+        let Some(new_parent) = self.resolve(to_parent_path) else { return false };
+        let old_parent = self.entries[id as usize].parent;
+        // Reparent (roots keep their special NO_PARENT — a renamed crawl root just changes its stored path).
+        if old_parent != NO_PARENT && new_parent != old_parent {
+            if let Some(v) = self.children.get_mut(&old_parent) {
+                v.retain(|&c| c != id);
+            }
+            self.children.entry(new_parent).or_default().push(id);
+            self.entries[id as usize].parent = new_parent;
+        }
+        let new_name_id = self.intern(to_leaf);
+        self.entries[id as usize].name = new_name_id;
+        self.add_trigrams(id);
+        true
+    }
+
+    /// Add `id`'s current name's trigrams to the posting map (keeping each posting list sorted + deduped).
+    /// Only ever *adds* — stale postings from an old name are harmless (every candidate is re-checked by
+    /// `index_query::matches`) and are cleaned up by compaction on save.
+    fn add_trigrams(&mut self, id: u32) {
+        let lower = self.names[self.entries[id as usize].name as usize].to_lowercase();
+        for tri in trigrams_of(&lower) {
+            let postings = self.trigrams.entry(tri).or_default();
+            if let Err(pos) = postings.binary_search(&id) {
+                postings.insert(pos, id);
+            }
+        }
+    }
+
+    /// Rebuild the trigram posting map from the current (live) names + entries. Called after a build and
+    /// after a load. Each live entry contributes the trigrams of its lowercased name.
     fn rebuild_trigrams(&mut self) {
         let mut map: HashMap<u32, Vec<u32>> = HashMap::new();
         for (id, entry) in self.entries.iter().enumerate() {
+            if entry.dead {
+                continue;
+            }
             let lower = self.names[entry.name as usize].to_lowercase();
             for tri in trigrams_of(&lower) {
                 map.entry(tri).or_default().push(id as u32);
@@ -237,9 +396,25 @@ impl Index {
         self.trigrams = map;
     }
 
+    /// Rebuild every auxiliary map (interner, child adjacency, trigrams) from `names` + `entries`. Used by
+    /// [`Index::from_bytes`], which materialises entries directly rather than through [`Index::push_entry`].
+    fn rebuild_aux(&mut self) {
+        self.name_ids = self
+            .names
+            .iter()
+            .enumerate()
+            .map(|(i, n)| (n.clone(), i as u32))
+            .collect();
+        self.children.clear();
+        for (id, entry) in self.entries.iter().enumerate() {
+            self.children.entry(entry.parent).or_default().push(id as u32);
+        }
+        self.rebuild_trigrams();
+    }
+
     /// Search the index with a parsed [`Query`], returning up to `limit` hits best-first. Trigram pruning
     /// narrows the candidate set for plain substring name terms; every survivor is still confirmed by
-    /// `index_query::matches`, so correctness never depends on the trigram map.
+    /// `index_query::matches`, so correctness never depends on the trigram map. Dead entries are skipped.
     pub fn search(&self, query: &Query, limit: usize) -> Vec<IndexHit> {
         if query.is_empty() {
             return Vec::new();
@@ -248,6 +423,9 @@ impl Index {
         let mut hits: Vec<IndexHit> = Vec::new();
         let push_if_match = |id: u32, hits: &mut Vec<IndexHit>| {
             let entry = &self.entries[id as usize];
+            if entry.dead {
+                return;
+            }
             let name = &self.names[entry.name as usize];
             let path = self.path_of(id);
             let ext = ext_of(name);
@@ -289,10 +467,7 @@ impl Index {
         // The most selective usable term drives pruning; intersecting several plain terms would be even
         // tighter, but one solid term already collapses the scan and keeps the logic simple + obviously
         // correct (matches() re-checks every survivor anyway).
-        let term = query
-            .name_terms
-            .iter()
-            .find(|t| t.len() >= 3 && !is_glob(t))?;
+        let term = query.name_terms.iter().find(|t| t.len() >= 3 && !is_glob(t))?;
 
         let tris: Vec<u32> = trigrams_of(term);
         if tris.is_empty() {
@@ -314,23 +489,42 @@ impl Index {
         acc
     }
 
-    /// Serialise to the hand-rolled binary format: header, interned names, entry table. Trigrams are not
-    /// persisted (rebuilt on load). Little-endian throughout.
+    /// Serialise to the hand-rolled binary format, **compacting** dead entries away (so tombstones never
+    /// persist and the format stays v1): header, interned names, live entry table with parent ids remapped.
+    /// Trigrams + aux maps are not persisted (rebuilt on load). Little-endian throughout.
     pub fn to_bytes(&self) -> Vec<u8> {
+        // Compact: assign each live entry a new dense id; a live entry's parent is always live (removal
+        // tombstones whole subtrees), so the remap is closed.
+        let mut remap = vec![NO_PARENT; self.entries.len()];
+        let mut live: Vec<Entry> = Vec::new();
+        for (old, e) in self.entries.iter().enumerate() {
+            if e.dead {
+                continue;
+            }
+            remap[old] = live.len() as u32;
+            live.push(e.clone());
+        }
+        for e in live.iter_mut() {
+            if e.parent != NO_PARENT {
+                e.parent = remap[e.parent as usize];
+            }
+        }
+
         let mut out = Vec::new();
         out.extend_from_slice(MAGIC);
         out.extend_from_slice(&FORMAT_VERSION.to_le_bytes());
         out.extend_from_slice(&self.volume_id.to_le_bytes());
         out.push(self.truncated as u8);
-        // Names: count, then each as (u32 len + utf8 bytes).
+        // Names: count, then each as (u32 len + utf8 bytes). Names are kept as-is; a few now-unreferenced
+        // strings from removed entries are harmless and cheap (filenames only).
         out.extend_from_slice(&(self.names.len() as u32).to_le_bytes());
         for name in &self.names {
             out.extend_from_slice(&(name.len() as u32).to_le_bytes());
             out.extend_from_slice(name.as_bytes());
         }
-        // Entries: count, then each as (u32 name, u32 parent, u8 is_dir).
-        out.extend_from_slice(&(self.entries.len() as u32).to_le_bytes());
-        for e in &self.entries {
+        // Entries (live only): count, then each as (u32 name, u32 parent, u8 is_dir).
+        out.extend_from_slice(&(live.len() as u32).to_le_bytes());
+        for e in &live {
             out.extend_from_slice(&e.name.to_le_bytes());
             out.extend_from_slice(&e.parent.to_le_bytes());
             out.push(e.is_dir as u8);
@@ -338,7 +532,7 @@ impl Index {
         out
     }
 
-    /// Parse the binary format produced by [`Index::to_bytes`], rebuilding trigrams. A wrong magic or
+    /// Parse the binary format produced by [`Index::to_bytes`], rebuilding the aux maps. A wrong magic or
     /// format version → [`IndexError::Stale`] (rebuild); any short/garbled body → [`IndexError::Io`].
     pub fn from_bytes(bytes: &[u8]) -> Result<Index, IndexError> {
         let mut r = Reader::new(bytes);
@@ -371,16 +565,16 @@ impl Index {
             if name as usize >= names.len() {
                 return Err(IndexError::Io("entry name id out of range".into()));
             }
-            entries.push(Entry { name, parent, is_dir });
+            entries.push(Entry { name, parent, is_dir, dead: false });
         }
 
-        let mut idx = Index { volume_id, names, entries, trigrams: HashMap::new(), truncated };
-        idx.rebuild_trigrams();
+        let mut idx = Index { volume_id, names, entries, truncated, ..Index::default() };
+        idx.rebuild_aux();
         Ok(idx)
     }
 
-    /// Persist to `path` (via [`Index::to_bytes`]). Writes atomically-ish: to a temp sibling then rename,
-    /// so a crash never leaves a half-written index that would look valid.
+    /// Persist to `path` (via [`Index::to_bytes`]). Writes to a temp sibling then renames, so a crash never
+    /// leaves a half-written index that would look valid.
     pub fn save(&self, path: &Path) -> Result<(), IndexError> {
         let bytes = self.to_bytes();
         let tmp = path.with_extension("cpeidx.tmp");
@@ -411,10 +605,10 @@ fn is_glob(term: &str) -> bool {
     term.contains('*') || term.contains('?') || term.contains('{')
 }
 
-/// Pack the case-folded trigrams of `s` (already-lowercased for query terms; [`Index::rebuild_trigrams`]
-/// lowercases names first) into u32 keys. Each key holds three bytes of the (lossy) byte stream; non-ASCII
-/// bytes still pack deterministically, so multibyte names index + match consistently. Fewer than 3 bytes
-/// yields no trigram (callers fall back to a full scan).
+/// Pack the case-folded trigrams of `s` (already-lowercased for query terms; callers lowercase names
+/// first) into u32 keys. Each key holds three bytes of the (lossy) byte stream; non-ASCII bytes still pack
+/// deterministically, so multibyte names index + match consistently. Fewer than 3 bytes yields no trigram
+/// (callers fall back to a full scan).
 fn trigrams_of(s: &str) -> Vec<u32> {
     let bytes = s.as_bytes();
     if bytes.len() < 3 {
@@ -429,7 +623,7 @@ fn trigrams_of(s: &str) -> Vec<u32> {
     out
 }
 
-/// Intersect two ascending, deduped id lists. Both posting lists are built in id order, so this is a linear
+/// Intersect two ascending, deduped id lists. Both posting lists are kept in id order, so this is a linear
 /// merge.
 fn intersect_sorted(a: &[u32], b: &[u32]) -> Vec<u32> {
     let mut out = Vec::new();
@@ -508,57 +702,59 @@ mod tests {
         hits.iter().map(|h| h.name.as_str()).collect()
     }
 
+    fn sorted_names(hits: &[IndexHit]) -> Vec<&str> {
+        let mut v = names_of(hits);
+        v.sort();
+        v
+    }
+
+    fn build(root: &std::path::Path) -> Index {
+        Index::build(&root.to_string_lossy(), 1, &AtomicBool::new(false)).unwrap().0
+    }
+
     #[test]
     fn build_indexes_recursively_and_skips_dot_dirs() {
         let d = sample_tree();
         let (idx, stats) = Index::build(&d.to_string_lossy(), 42, &AtomicBool::new(false)).unwrap();
         assert_eq!(idx.volume_id(), 42);
         assert!(!stats.truncated);
-        // A plain substring term.
         let hits = idx.search(&index_query::parse("report"), 100);
-        let mut got = names_of(&hits);
-        got.sort();
-        assert_eq!(got, vec!["report.md", "report.rs"]);
-        // The dot-dir's file is never indexed.
-        assert!(!hits.iter().any(|h| h.name == "report_hidden.rs"));
+        assert_eq!(sorted_names(&hits), vec!["report.md", "report.rs"]);
+        assert!(!hits.iter().any(|h| h.name == "report_hidden.rs")); // dot-dir never indexed
         let _ = fs::remove_dir_all(&d);
     }
 
     #[test]
     fn search_respects_ext_and_path_filters_and_globs() {
         let d = sample_tree();
-        let (idx, _) = Index::build(&d.to_string_lossy(), 1, &AtomicBool::new(false)).unwrap();
-        // ext: filter narrows to .rs — note report.md is excluded.
+        let idx = build(&d);
         let rs = idx.search(&index_query::parse("report ext:rs"), 100);
         assert_eq!(names_of(&rs), vec!["report.rs"]);
-        // path: filter — only the docs copy.
         let docs = idx.search(&index_query::parse("report path:docs"), 100);
         assert_eq!(names_of(&docs), vec!["report.md"]);
-        // Glob term (can't be trigram-pruned) still matches via the full-scan fallback.
         let globbed = idx.search(&index_query::parse("*.rs"), 100);
-        let mut g = names_of(&globbed);
-        g.sort();
-        assert_eq!(g, vec!["main.rs", "report.rs"]);
+        assert_eq!(sorted_names(&globbed), vec!["main.rs", "report.rs"]);
         let _ = fs::remove_dir_all(&d);
     }
 
     #[test]
-    fn search_reconstructs_full_paths() {
+    fn search_reconstructs_absolute_paths() {
         let d = sample_tree();
-        let (idx, _) = Index::build(&d.to_string_lossy(), 1, &AtomicBool::new(false)).unwrap();
+        let idx = build(&d);
         let hits = idx.search(&index_query::parse("main"), 10);
         assert_eq!(hits.len(), 1);
-        // The reconstructed path ends with the on-disk relative path (platform separator).
+        // The path is absolute: it starts with the crawl root and ends with the on-disk relative path.
+        let root = d.to_string_lossy();
+        assert!(hits[0].path.starts_with(root.as_ref()), "path was {}", hits[0].path);
         let want_tail: String = ["src", "main.rs"].join(std::path::MAIN_SEPARATOR_STR);
         assert!(hits[0].path.ends_with(&want_tail), "path was {}", hits[0].path);
-        assert!(hits[0].path.contains(&*d.file_name().unwrap().to_string_lossy()));
         let _ = fs::remove_dir_all(&d);
     }
 
     #[test]
     fn empty_query_returns_nothing() {
         let d = sample_tree();
-        let (idx, _) = Index::build(&d.to_string_lossy(), 1, &AtomicBool::new(false)).unwrap();
+        let idx = build(&d);
         assert!(idx.search(&index_query::parse("   "), 10).is_empty());
         let _ = fs::remove_dir_all(&d);
     }
@@ -566,25 +762,19 @@ mod tests {
     #[test]
     fn save_reload_roundtrips_and_still_queries() {
         let d = sample_tree();
-        let (idx, _) = Index::build(&d.to_string_lossy(), 7, &AtomicBool::new(false)).unwrap();
+        let idx = Index::build(&d.to_string_lossy(), 7, &AtomicBool::new(false)).unwrap().0;
         let file = d.join("volume.cpeidx");
         idx.save(&file).unwrap();
         let reloaded = Index::load(&file).unwrap();
         assert_eq!(reloaded.volume_id(), 7);
         assert_eq!(reloaded.len(), idx.len());
-        // Trigram pruning was rebuilt on load — the same query still works.
-        let hits = reloaded.search(&index_query::parse("report"), 100);
-        let mut got = names_of(&hits);
-        got.sort();
-        assert_eq!(got, vec!["report.md", "report.rs"]);
+        assert_eq!(sorted_names(&reloaded.search(&index_query::parse("report"), 100)), vec!["report.md", "report.rs"]);
         let _ = fs::remove_dir_all(&d);
     }
 
     #[test]
     fn load_rejects_bad_magic_and_wrong_version_as_stale() {
-        // Bad magic.
         assert!(matches!(Index::from_bytes(b"not-an-index"), Err(IndexError::Stale)));
-        // Right magic, wrong version → Stale (transparent rebuild), not Io.
         let mut bytes = Vec::new();
         bytes.extend_from_slice(MAGIC);
         bytes.extend_from_slice(&(FORMAT_VERSION + 1).to_le_bytes());
@@ -593,7 +783,6 @@ mod tests {
 
     #[test]
     fn from_bytes_reports_io_on_truncated_body() {
-        // Valid header + version but a truncated names section → Io, not a panic.
         let mut bytes = Vec::new();
         bytes.extend_from_slice(MAGIC);
         bytes.extend_from_slice(&FORMAT_VERSION.to_le_bytes());
@@ -629,20 +818,141 @@ mod tests {
         assert_eq!(ext_of("report.md"), "md");
         assert_eq!(ext_of("archive.tar.gz"), "gz");
         assert_eq!(ext_of("Makefile"), "");
-        assert_eq!(ext_of(".gitignore"), ""); // leading-dot name has no extension
+        assert_eq!(ext_of(".gitignore"), "");
     }
 
     #[test]
     fn trigram_pruning_matches_full_scan_results() {
         let d = sample_tree();
-        let (idx, _) = Index::build(&d.to_string_lossy(), 1, &AtomicBool::new(false)).unwrap();
-        // A term long enough to trigram-prune ("report") must give the same set as a term too short to
-        // prune ("re"), proving pruning doesn't drop real matches.
+        let idx = build(&d);
         let pruned = idx.search(&index_query::parse("report"), 100);
         let scanned = idx.search(&index_query::parse("re"), 100);
         for h in &pruned {
             assert!(scanned.iter().any(|s| s.path == h.path), "pruning dropped {}", h.path);
         }
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    // ---- CPE-833: incremental mutation ----
+
+    /// Path under the crawl root, using the platform separator, for feeding the apply_* primitives.
+    fn abs(root: &std::path::Path, rel: &[&str]) -> String {
+        let mut p = root.to_path_buf();
+        for c in rel {
+            p.push(c);
+        }
+        p.to_string_lossy().into_owned()
+    }
+
+    #[test]
+    fn apply_create_adds_a_findable_entry_under_an_indexed_dir() {
+        let d = sample_tree();
+        let mut idx = build(&d);
+        assert!(idx.search(&index_query::parse("newfile"), 10).is_empty());
+        let id = idx.apply_create(&abs(&d, &["src", "newfile.rs"]), false);
+        assert!(id.is_some());
+        let hits = idx.search(&index_query::parse("newfile"), 10);
+        assert_eq!(names_of(&hits), vec!["newfile.rs"]);
+        assert!(hits[0].path.ends_with(&["src", "newfile.rs"].join(std::path::MAIN_SEPARATOR_STR)));
+        // A create whose parent isn't indexed is ignored.
+        assert!(idx.apply_create(&abs(&d, &["nope", "ghost.rs"]), false).is_none());
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn apply_remove_tombstones_the_whole_subtree() {
+        let d = sample_tree();
+        let mut idx = build(&d);
+        // Removing the src/ dir must drop both files under it.
+        assert!(idx.apply_remove(&abs(&d, &["src"])));
+        let report = idx.search(&index_query::parse("report"), 10);
+        assert_eq!(names_of(&report), vec!["report.md"]); // only the docs one survives
+        assert!(idx.search(&index_query::parse("main"), 10).is_empty()); // src/main.rs gone
+        // Removing something not indexed is a no-op.
+        assert!(!idx.apply_remove(&abs(&d, &["does", "not", "exist"])));
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn apply_rename_in_place_and_across_dirs() {
+        let d = sample_tree();
+        let mut idx = build(&d);
+        // In-place rename README.md -> CHANGES.md.
+        assert!(idx.apply_rename(&abs(&d, &["README.md"]), &abs(&d, &["CHANGES.md"])));
+        assert!(idx.search(&index_query::parse("readme"), 10).is_empty());
+        assert_eq!(names_of(&idx.search(&index_query::parse("changes"), 10)), vec!["CHANGES.md"]);
+        // Move src/main.rs -> docs/main.rs; its reconstructed path must now be under docs/.
+        assert!(idx.apply_rename(&abs(&d, &["src", "main.rs"]), &abs(&d, &["docs", "main.rs"])));
+        let hits = idx.search(&index_query::parse("main"), 10);
+        assert_eq!(hits.len(), 1);
+        assert!(hits[0].path.ends_with(&["docs", "main.rs"].join(std::path::MAIN_SEPARATOR_STR)), "{}", hits[0].path);
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn moving_a_directory_carries_its_subtree() {
+        let d = sample_tree();
+        let mut idx = build(&d);
+        // Move the whole src/ dir to docs/src — report.rs under it must follow to the new path.
+        assert!(idx.apply_rename(&abs(&d, &["src"]), &abs(&d, &["docs", "src"])));
+        let hits = idx.search(&index_query::parse("report.rs"), 10);
+        assert_eq!(hits.len(), 1);
+        let tail = ["docs", "src", "report.rs"].join(std::path::MAIN_SEPARATOR_STR);
+        assert!(hits[0].path.ends_with(&tail), "subtree didn't follow: {}", hits[0].path);
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn incremental_mutations_match_a_fresh_rebuild() {
+        // Build A, mutate it; build B directly on the equivalent on-disk shape; assert same search results.
+        let d = sample_tree();
+        let mut a = build(&d);
+        // Apply: add src/extra.rs, remove docs/report.md, rename README.md -> TOP.md — mirror on disk for B.
+        a.apply_create(&abs(&d, &["src", "extra.rs"]), false);
+        fs::write(d.join("src/extra.rs"), b"x").unwrap();
+        a.apply_remove(&abs(&d, &["docs", "report.md"]));
+        fs::remove_file(d.join("docs/report.md")).unwrap();
+        a.apply_rename(&abs(&d, &["README.md"]), &abs(&d, &["TOP.md"]));
+        fs::rename(d.join("README.md"), d.join("TOP.md")).unwrap();
+        let b = build(&d);
+
+        for q in ["report", "extra", "top", "*.rs", "ext:md", "main"] {
+            let query = index_query::parse(q);
+            let ap: Vec<String> = a.search(&query, 999).into_iter().map(|h| h.path).collect();
+            let bp: Vec<String> = b.search(&query, 999).into_iter().map(|h| h.path).collect();
+            assert_eq!(ap, bp, "query {q:?}: incremental != rebuild");
+        }
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn to_bytes_compacts_tombstones_away() {
+        let d = sample_tree();
+        let mut idx = build(&d);
+        let before = idx.len();
+        idx.apply_remove(&abs(&d, &["src"])); // tombstones src, main.rs, report.rs
+        let after_remove = idx.len();
+        assert!(after_remove < before);
+        // Reload from serialised bytes: dead entries are gone, and the survivors still query correctly.
+        let reloaded = Index::from_bytes(&idx.to_bytes()).unwrap();
+        assert_eq!(reloaded.len(), after_remove);
+        assert_eq!(names_of(&reloaded.search(&index_query::parse("report"), 10)), vec!["report.md"]);
+        // And a fresh rebuild after mirroring the delete on disk agrees.
+        fs::remove_dir_all(d.join("src")).unwrap();
+        let fresh = build(&d);
+        assert_eq!(reloaded.len(), fresh.len());
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn create_revives_a_removed_entry_in_place() {
+        let d = sample_tree();
+        let mut idx = build(&d);
+        idx.apply_remove(&abs(&d, &["docs", "report.md"]));
+        assert_eq!(names_of(&idx.search(&index_query::parse("report"), 10)), vec!["report.rs"]);
+        // Re-create the same path → it's findable again.
+        idx.apply_create(&abs(&d, &["docs", "report.md"]), false);
+        assert_eq!(sorted_names(&idx.search(&index_query::parse("report"), 10)), vec!["report.md", "report.rs"]);
         let _ = fs::remove_dir_all(&d);
     }
 }
