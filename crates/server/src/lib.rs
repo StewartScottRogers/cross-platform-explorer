@@ -236,6 +236,11 @@ pub mod media_column;
 /// [`metadata_column::CellValue::Dimensions`] cell for a Dimensions column (CPE-974, epic CPE-707).
 pub mod image_column;
 
+/// Metadata-column dispatcher — route a file's bytes + extension + a [`column_extract::MetaColumn`] to the
+/// right per-family extractor (audio codecs / image header), the one entry point the column system calls
+/// (CPE-975, epic CPE-707). Pure.
+pub mod column_extract;
+
 /// Batch metadata apply — apply one shared set of edits to a whole selection of files, with a per-file
 /// result + run summary; builds on media_meta_edit (CPE-949, epic CPE-725).
 pub mod media_meta_batch;

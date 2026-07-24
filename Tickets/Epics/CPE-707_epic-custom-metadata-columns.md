@@ -49,3 +49,5 @@ read ID3 tags (via CPE-970) to typed `CellValue`s so Track/Year columns sort num
 video / doc extractors, the column-picker UI, and per-folder persistence.
 
 2026-07-24 (dayshift) — **CPE-974** added the image-family extractor: `image_column::image_dimensions_cell` (header-only read → `CellValue::Dimensions`, sorts by area). With audio (CPE-971) + image, the two commonest per-family extractors are covered. Remaining: video/doc extractors, the column-picker UI (GUI), and per-folder persistence.
+
+2026-07-24 (dayshift) — **CPE-975** added the dispatcher `column_extract::extract_column(ext, bytes, MetaColumn)` — the single seam routing a file to its per-family extractor (audio ID3/FLAC/OGG → typed audio cell; image header → Dimensions). Adding video/doc later is one more arm. Remaining: video/doc extractors, the column-picker UI (GUI), per-folder persistence.
