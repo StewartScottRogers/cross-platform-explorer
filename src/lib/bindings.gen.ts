@@ -209,14 +209,6 @@ async fileLen(path: string) : Promise<Result<number, string>> {
     else return { status: "error", error: e  as any };
 }
 },
-async setPermissions(path: string, mode: number) : Promise<Result<number, string>> {
-    try {
-    return { status: "ok", data: await TAURI_INVOKE("set_permissions", { path, mode }) };
-} catch (e) {
-    if(e instanceof Error) throw e;
-    else return { status: "error", error: e  as any };
-}
-},
 /**
  * Toggle a file's read-only flag (cross-platform), returning the prior state for undo (CPE-785).
  */
@@ -235,18 +227,6 @@ async setReadonly(path: string, readonly: boolean) : Promise<Result<boolean, str
 async setFileTimes(path: string, modifiedMs: number | null, accessedMs: number | null) : Promise<Result<[number, number], string>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("set_file_times", { path, modifiedMs, accessedMs }) };
-} catch (e) {
-    if(e instanceof Error) throw e;
-    else return { status: "error", error: e  as any };
-}
-},
-/**
- * Toggle a Windows file attribute (`hidden` / `system` / `archive`), returning the prior state for undo
- * (CPE-785). Windows only.
- */
-async setFileAttribute(path: string, attr: string, value: boolean) : Promise<Result<boolean, string>> {
-    try {
-    return { status: "ok", data: await TAURI_INVOKE("set_file_attribute", { path, attr, value }) };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };

@@ -5915,6 +5915,10 @@ pub fn export_bindings(out: &std::path::Path) -> Result<(), String> {
     // `./invoke`, which re-exports `Channel`) AND the `sidecar-platform` commands (this bin requires both
     // features). Their types derive `specta::Type` across `cpe-server` + the app modules + the sidecar
     // crates (`sidecar-contract`/`repos`, behind their own OFF-by-default `specta` features).
+    // Deliberately EXCLUDED: the single-OS commands `set_permissions` (`#[cfg(unix)]`) and
+    // `set_file_attribute` (`#[cfg(windows)]`) — they exist on only one platform, so including them would
+    // make `bindings.gen.ts` OS-dependent and break the drift guard (CPE-813), which regenerates on Linux.
+    // Callers use raw `invoke` for those two.
     let builder = Builder::<tauri::Wry>::new().commands(collect_commands![
         list_dir,
         find_project_root,
@@ -5936,10 +5940,8 @@ pub fn export_bindings(out: &std::path::Path) -> Result<(), String> {
         read_file_text,
         read_file_range,
         file_len,
-        set_permissions,
         set_readonly,
         set_file_times,
-        set_file_attribute,
         read_attributes,
         write_file_text,
         read_archive_entries,
