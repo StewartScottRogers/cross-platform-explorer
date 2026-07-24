@@ -7,7 +7,8 @@
    * line-diff is a follow-up (needs a line-level diff algorithm the codebase doesn't yet have).
    */
   import { createEventDispatcher } from "svelte";
-  import { invoke } from "../invoke";
+  import { unwrap } from "../invoke";
+  import { commands } from "../bindings.gen"; // typed client (CPE-964)
   import { diffTrees, summarizeDiff, flattenDiff, type CompareNode, type DiffRow } from "../treeDiff";
   import { byteDiff, type ByteDiff } from "../byteDiff";
   import { lineDiff, type LineDiffResult } from "../lineDiff";
@@ -34,14 +35,14 @@
   let textDiff: LineDiffResult | null = null;
 
   async function readBytes(path: string): Promise<Uint8Array> {
-    const arr = await invoke<number[]>("read_file_range", { path, offset: 0, len: FILE_CMP_CAP });
+    const arr = unwrap(await commands.readFileRange(path, 0, FILE_CMP_CAP));
     return new Uint8Array(arr);
   }
 
   /** Read a file as UTF-8 text, or `null` if it's binary (read_file_text rejects invalid UTF-8). */
   async function readTextMaybe(path: string): Promise<string | null> {
     try {
-      return await invoke<string>("read_file_text", { path, maxBytes: FILE_CMP_CAP });
+      return unwrap(await commands.readFileText(path, FILE_CMP_CAP));
     } catch {
       return null;
     }
@@ -55,9 +56,11 @@
     textDiff = null;
     try {
       // Folders scan; a file makes scan_tree error ("not a folder") — fall through to the file compare.
+      // scan_tree returns the generated TreeNode[]; CompareNode is assignable to it, so the cast is
+      // sound and preserves the previous behaviour (the old invoke<CompareNode[]> generic assumed the same).
       const [l, r] = await Promise.all([
-        invoke<CompareNode[]>("scan_tree", { path: left.trim(), maxDepth: 32 }),
-        invoke<CompareNode[]>("scan_tree", { path: right.trim(), maxDepth: 32 }),
+        commands.scanTree(left.trim(), 32).then(unwrap) as Promise<CompareNode[]>,
+        commands.scanTree(right.trim(), 32).then(unwrap) as Promise<CompareNode[]>,
       ]);
       diff = diffTrees(l, r);
       summary = summarizeDiff(diff);
