@@ -246,6 +246,11 @@ pub mod column_extract;
 /// separate + feature-gated (CPE-982).
 pub mod vector_index;
 
+/// Embedding seam — the `Embedder` trait that turns text into vectors for [`vector_index`], plus a
+/// dependency-free deterministic `FakeEmbedder` so the pipeline is testable before a real model is chosen
+/// (CPE-982, epic CPE-976). A real backend is deferred + feature-gated.
+pub mod embedder;
+
 /// Batch metadata apply — apply one shared set of edits to a whole selection of files, with a per-file
 /// result + run summary; builds on media_meta_edit (CPE-949, epic CPE-725).
 pub mod media_meta_batch;
