@@ -2,7 +2,7 @@
 id: CPE-979
 title: "EPIC: AI auto-organize & declutter"
 type: Task
-status: Proposed
+status: In Progress
 priority: Medium
 component: Multiple
 tags: [epic, big-design]
@@ -24,6 +24,18 @@ reorganization — and can undo it — is genuinely useful and distinctly *smart
 built: `duplicates` (exact-dupe detection), `folder_stats`/`disk_usage` (what's here), `folder_template`
 (target scaffolds), `restore_plan`/[[CPE-732]] (undo), and the [[CPE-977]] plan/preview/confirm loop. Rules
 first keeps it honest and testable; the AI layer only *suggests*, never auto-moves.
+
+> **Activated 2026-07-24** (workshift, Foreman — user away, decisions logged). First slice = the **pure
+> `plan_organize` rules engine** (CPE-987) in `cpe-server` (Rust) — deterministic, filesystem-free, no AI.
+> The opt-in AI classification layer needs a model backend (user resource) and is skipped-and-noted for now;
+> the preview/apply/undo UI is attended.
+
+## Child tickets
+1. **CPE-987** — Pure organization planner (`cpe-server::organize`): `plan_organize(entries, ruleset) ->
+   MovePlan` grouping a folder's entries into target subfolders by kind/ext/date/size (declarative rules).
+   Deterministic, cargo-tested, no deps. *Headless — buildable now.*
+2. **CPE-989+** — Junk/clutter heuristics (reuse `duplicates`), the opt-in AI classifier (**needs a model
+   backend — user resource**), and the preview/apply/undo UI (checkpoint via CPE-732). **GUI/attended.**
 
 ## Rough scope (areas, not child tickets)
 - A **pure organization planner**: `plan_organize(listing, ruleset) -> MovePlan` — given a folder's entries
