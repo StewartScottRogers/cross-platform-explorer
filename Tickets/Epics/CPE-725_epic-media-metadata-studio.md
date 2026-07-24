@@ -40,3 +40,8 @@ bulk, geotag, and strip sensitive metadata for privacy — content-level editing
 2026-07-23 (dayshift) — **Activated.** First slice: **CPE-942** — `media_meta_edit::apply_edits`: the pure
 set/clear edit policy over EXIF/IPTC/ID3 fields (refusing read-only ones, reporting applied/rejected).
 Remaining: the per-format read/write codecs and the studio editor UI.
+
+2026-07-24 (dayshift) — **CPE-970** landed the first read codec: `media_meta_read::read_id3v2` — parses
+ID3v2.2/2.3/2.4 audio tags (all 4 text encodings + COMM) into `MetaField`s, robust to malformed input, pure
+std. Also feeds CPE-707 columns. Remaining: the **write-back** codec, sibling read codecs (EXIF/Vorbis/FLAC/
+video/PDF), and the studio editor UI.
