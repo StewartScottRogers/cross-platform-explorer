@@ -79,6 +79,27 @@ export async function setEntryTags(path: string, tags: string[], label: string):
   store.set(updated ?? {});
 }
 
+// --- Native tag sync (CPE-828, epic CPE-717) -------------------------------------------------------
+// Sync a path's tags with the OS-native store (macOS Finder tags / Windows NTFS ADS / Linux xattr). A
+// filesystem that can't hold native metadata degrades to a silent no-op in the backend.
+
+/** The OS-native tag store's display name (e.g. "NTFS alternate data streams", "Finder tags"). */
+export function nativeTagStoreName(): Promise<string> {
+  return commands.nativeTagsName();
+}
+
+/** Pull a path's native tags into the store (non-destructive union); the store is updated from the
+ *  returned whole store, so any open editor can re-seed from it. */
+export async function pullNativeTags(path: string): Promise<void> {
+  const updated = unwrap(await commands.nativeTagsPull(path)) as TagStore;
+  store.set(updated ?? {});
+}
+
+/** Push a path's current tags out to native file metadata (the internal store is authoritative). */
+export async function pushNativeTags(path: string): Promise<void> {
+  await commands.nativeTagsPush(path).then(unwrap);
+}
+
 /** Tag usage counts, most-used first (`[tag, count][]`), straight from the backend. */
 export function tagCounts(): Promise<[string, number][]> {
   return commands.tagCounts().then(unwrap);

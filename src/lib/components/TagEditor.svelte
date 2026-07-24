@@ -6,7 +6,15 @@
   import { get } from "svelte/store";
   import Icon from "./Icon.svelte";
   import { t } from "../i18n";
-  import { tags as tagStore, entryFor, setEntryTags, LABEL_COLORS } from "../tags";
+  import {
+    tags as tagStore,
+    entryFor,
+    setEntryTags,
+    LABEL_COLORS,
+    nativeTagStoreName,
+    pullNativeTags,
+    pushNativeTags,
+  } from "../tags";
 
   /** Absolute paths being tagged (one = edit that entry; many = batch add). */
   export let paths: string[] = [];
@@ -30,9 +38,48 @@
   // The selectable labels: "" (none) first, then each colour key.
   const LABELS: string[] = Object.keys(LABEL_COLORS);
 
+  // Native tag sync (CPE-828): per-file only (native metadata is per-path), so hidden in batch mode.
+  let nativeName = "";
+  let syncing = false;
+  let syncNote = "";
+
   onMount(() => {
     input?.focus();
+    if (!batch) nativeTagStoreName().then((n) => (nativeName = n)).catch(() => {});
   });
+
+  /** Pull the file's OS-native tags into the store, then re-seed this editor from the merged result. */
+  async function pullNative() {
+    if (syncing || batch) return;
+    syncing = true; syncNote = "";
+    try {
+      await pullNativeTags(paths[0]);
+      const cur = entryFor(get(tagStore), paths[0]);
+      tags = [...cur.tags];
+      label = cur.label;
+      syncNote = "pulled";
+    } catch (e) {
+      syncNote = e instanceof Error ? e.message : String(e);
+    } finally {
+      syncing = false;
+    }
+  }
+
+  /** Persist the current edits, then push them out to the file's OS-native metadata. */
+  async function pushNative() {
+    if (syncing || batch) return;
+    syncing = true; syncNote = "";
+    addTag();
+    try {
+      await setEntryTags(paths[0], tags, label);
+      await pushNativeTags(paths[0]);
+      syncNote = "pushed";
+    } catch (e) {
+      syncNote = e instanceof Error ? e.message : String(e);
+    } finally {
+      syncing = false;
+    }
+  }
 
   function addTag() {
     const value = draft.trim();
@@ -130,6 +177,17 @@
         {/each}
       </div>
     </div>
+
+    {#if !batch && nativeName}
+      <div class="field native" data-testid="native-sync">
+        <span class="section-label">{nativeName}</span>
+        <div class="native-row">
+          <button class="btn small" data-testid="native-pull" disabled={syncing} on:click={pullNative}>{$t("tags.pullNative")}</button>
+          <button class="btn small" data-testid="native-push" disabled={syncing} on:click={pushNative}>{$t("tags.pushNative")}</button>
+          {#if syncNote}<span class="sync-note" data-testid="sync-note">{syncNote}</span>{/if}
+        </div>
+      </div>
+    {/if}
 
     <div class="actions">
       <button class="btn" on:click={() => dispatch("close")}>{$t("tags.cancel")}</button>
@@ -242,6 +300,10 @@
     border-color: var(--text);
     box-shadow: 0 0 0 2px var(--surface), 0 0 0 4px var(--accent);
   }
+  .native { border-top: 1px solid var(--border); padding-top: 12px; }
+  .native-row { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+  .btn.small { height: 26px; padding: 0 12px; font-size: 12px; }
+  .sync-note { font-size: 12px; color: var(--text-dim); }
   .actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 4px; }
   .btn {
     height: 32px;

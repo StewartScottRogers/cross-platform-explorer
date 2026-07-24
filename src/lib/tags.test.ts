@@ -1,5 +1,28 @@
-import { describe, it, expect } from "vitest";
-import { entryFor, hasTag, allTags, labelColor, LABEL_COLORS, type TagStore } from "./tags";
+import { describe, it, expect, vi, beforeEach } from "vitest";
+import { get } from "svelte/store";
+import {
+  entryFor,
+  hasTag,
+  allTags,
+  labelColor,
+  LABEL_COLORS,
+  tags as tagStore,
+  nativeTagStoreName,
+  pullNativeTags,
+  pushNativeTags,
+  type TagStore,
+} from "./tags";
+
+// The typed `commands.*` client routes through `./invoke`; mock it so the native-sync functions
+// (CPE-828) drive off predictable command results.
+const invokeMock = vi.fn(async (_cmd: string, _args?: unknown): Promise<unknown> => null);
+vi.mock("./invoke", () => ({
+  invoke: (...a: unknown[]) => (invokeMock as (...x: unknown[]) => unknown)(...a),
+  unwrap: <T>(r: { status: string; data?: T; error?: unknown }): T => {
+    if (r.status === "ok") return r.data as T;
+    throw r.error instanceof Error ? r.error : new Error(String(r.error));
+  },
+}));
 
 const store: TagStore = {
   "/a/one": { tags: ["work", "urgent"], label: "red" },
@@ -35,5 +58,29 @@ describe("tags helpers (CPE-636)", () => {
     expect(labelColor("green")).toBe("#4ca65a");
     expect(labelColor("")).toBe("");
     expect(labelColor("chartreuse")).toBe("");
+  });
+});
+
+describe("native tag sync (CPE-828)", () => {
+  beforeEach(() => invokeMock.mockReset());
+
+  it("nativeTagStoreName returns the OS store's display name", async () => {
+    invokeMock.mockImplementation(async (cmd) => (cmd === "native_tags_name" ? "NTFS alternate data streams" : null));
+    expect(await nativeTagStoreName()).toBe("NTFS alternate data streams");
+    expect(invokeMock).toHaveBeenCalledWith("native_tags_name");
+  });
+
+  it("pullNativeTags calls the command and updates the store from the returned whole store", async () => {
+    const returned: TagStore = { "/f": { tags: ["report", "q3"], label: "red" } };
+    invokeMock.mockImplementation(async (cmd) => (cmd === "native_tags_pull" ? returned : null));
+    await pullNativeTags("/f");
+    expect(invokeMock).toHaveBeenCalledWith("native_tags_pull", { path: "/f" });
+    expect(get(tagStore)["/f"]).toEqual({ tags: ["report", "q3"], label: "red" });
+  });
+
+  it("pushNativeTags calls the push command for the path", async () => {
+    invokeMock.mockImplementation(async () => null);
+    await pushNativeTags("/f");
+    expect(invokeMock).toHaveBeenCalledWith("native_tags_push", { path: "/f" });
   });
 });
