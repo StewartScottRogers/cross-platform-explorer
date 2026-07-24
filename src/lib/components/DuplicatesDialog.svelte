@@ -6,7 +6,8 @@
    * deletes anything — the user decides what to remove.
    */
   import { createEventDispatcher } from "svelte";
-  import { invoke, rawInvoke, createChannel } from "../invoke";
+  import { rawInvoke, createChannel } from "../invoke";
+  import { commands } from "../bindings.gen"; // typed client (CPE-964)
   import Icon from "./Icon.svelte";
   import { t } from "../i18n";
   import { formatSize } from "../format";
@@ -43,7 +44,7 @@
     const paths = [...selected];
     deleting = true;
     try {
-      await invoke("delete_to_trash", { paths });
+      await commands.deleteToTrash(paths);
       result = { ...result, groups: pruneGroups(result.groups, selected) };
       selected = new Set();
     } catch (e) {

@@ -6,7 +6,9 @@
    * running, it shows each command's exit code + captured stdout/stderr.
    */
   import { createEventDispatcher } from "svelte";
-  import { invoke } from "../invoke";
+  import { unwrap } from "../invoke";
+  // Aliased: this component already has a `commands` prop (the command lines to run).
+  import { commands as api } from "../bindings.gen"; // typed client (CPE-964)
   import Icon from "./Icon.svelte";
 
   /** The command's display name. */
@@ -29,7 +31,7 @@
     const out: Result[] = [];
     for (const command of commands) {
       try {
-        const r = await invoke<CmdOut>("run_command", { command, cwd: cwd || null });
+        const r = unwrap(await api.runCommand(command, cwd || null));
         out.push({ command, ...r });
       } catch (e) {
         out.push({ command, stdout: "", stderr: "", code: null, truncated: false, error: String(e) });

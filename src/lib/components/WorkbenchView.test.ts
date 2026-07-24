@@ -6,7 +6,16 @@ import { describe, it, expect, vi, beforeEach } from "vitest";
 import { render, screen, fireEvent, waitFor } from "@testing-library/svelte";
 
 const invokeMock = vi.fn(async (_cmd: string, _args?: unknown): Promise<unknown> => ({}));
-vi.mock("../invoke", () => ({ invoke: (...a: unknown[]) => (invokeMock as (...x: unknown[]) => unknown)(...a) }));
+// The typed `commands.*` client (bindings.gen) routes through this same `invoke`, so mocking it here also
+// drives the typed workbench_diff call. `unwrap` is the throw-on-error helper the Result-returning typed
+// calls use — provide the real behaviour.
+vi.mock("../invoke", () => ({
+  invoke: (...a: unknown[]) => (invokeMock as (...x: unknown[]) => unknown)(...a),
+  unwrap: <T>(r: { status: string; data?: T; error?: unknown }): T => {
+    if (r.status === "ok") return r.data as T;
+    throw r.error instanceof Error ? r.error : new Error(String(r.error));
+  },
+}));
 
 import WorkbenchView from "./WorkbenchView.svelte";
 

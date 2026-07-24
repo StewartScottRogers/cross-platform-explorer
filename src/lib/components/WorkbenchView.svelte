@@ -4,7 +4,8 @@
   // command and renders it per-file with add/del/context styling. The editor + embedded browser panes
   // are wave 2 (CPE-527).
   import { createEventDispatcher, onMount } from "svelte";
-  import { invoke } from "../invoke";
+  import { unwrap } from "../invoke";
+  import { commands } from "../bindings.gen"; // typed client (CPE-964)
   import Icon from "./Icon.svelte";
   import HelpButton from "./HelpButton.svelte";
   import { parseDiff, diffStats, fileStats, fileLabel, annotateInline, toPatch, type DiffFile } from "../diff";
@@ -65,7 +66,7 @@
     loading = true;
     error = "";
     try {
-      const r = await invoke<WorkbenchDiff>("workbench_diff", { root });
+      const r = unwrap(await commands.workbenchDiff(root, null));
       isRepo = r.is_repo;
       branch = r.branch;
       files = r.is_repo ? parseDiff(r.diff) : [];

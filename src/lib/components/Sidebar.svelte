@@ -1,6 +1,7 @@
 <script lang="ts">
   import { createEventDispatcher } from "svelte";
-  import { invoke } from "../invoke";
+  import { unwrap } from "../invoke";
+  import { commands } from "../bindings.gen"; // typed client (CPE-964)
   import Icon from "./Icon.svelte";
   import SidebarNode from "./SidebarNode.svelte";
   import { iconFor } from "../filetypes";
@@ -111,7 +112,7 @@
     loadingPaths.add(path);
     loadingPaths = loadingPaths;
     try {
-      const entries = await invoke<DirEntry[]>("list_dir", { path });
+      const entries = unwrap(await commands.listDir(path));
       children[path] = entries
         .filter((e) => e.is_dir)
         .sort((a, b) => a.name.localeCompare(b.name));

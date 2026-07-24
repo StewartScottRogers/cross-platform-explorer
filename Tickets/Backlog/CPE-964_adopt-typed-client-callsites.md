@@ -93,3 +93,15 @@ guard (CPE-813) keeps the generated types honest while this proceeds.
   `.then(unwrap) as Promise<CompareNode[]>` — local `CompareNode` is assignable to generated `TreeNode`, so
   the cast is sound and behaviour-identical to the old `invoke<CompareNode[]>` generic). npm check 0/0;
   suite 930 green.
+- 2026-07-23 — Increment 11 (Nightshift): **clean dialogs & modules cluster** — 8 sites across 7 files:
+  IntegrityDialog (checksum_folder/verify_folder), Sidebar (list_dir), DuplicatesDialog (delete_to_trash),
+  BackupDashboard (scan_tree → CompareNode cast), WorkbenchView (workbench_diff — now passes the required
+  2nd arg `null` the generated sig added), RunCommandConfirm (run_command; **import aliased to `api`** — the
+  component already has a `commands: string[]` prop), driveScheduler.ts (list_drives, plain). Two test/type
+  fixes: WorkbenchView.test's `../invoke` mock now also exports `unwrap`; confirmed CommandOutput≡CmdOut,
+  WorkbenchDiff≡ exactly, AuditEvent differs only in `detail` null/undefined (cast-safe). npm check 0/0;
+  suite 930 green.
+  - **Discovered:** `forge_conflict_abort` is called by ConflictDialog via raw `invoke` but is NOT in the
+    typed bindings (only `forge_conflict_continue` is) — it's missing from `collect_commands!`. Filed as a
+    follow-up; ConflictDialog's migration is blocked on it. Also still on raw invoke: SyncDialog (Status
+    cast), transfers.ts, SessionHistoryDialog, and AttributesDialog (2 platform-excluded commands).
