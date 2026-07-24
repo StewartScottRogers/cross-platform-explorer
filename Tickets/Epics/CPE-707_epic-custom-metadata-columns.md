@@ -42,3 +42,8 @@ sort infra (CPE-017, columns.ts) to build on; this is the natural next layer.
 (numeric, not lexical; Dimensions by area; Empty pinned last both directions) and human formatting. This is
 the "sort/format like built-ins" seam. Remaining: per-family Rust extractors (image/audio/video/doc, lazy
 for visible rows only), the column-picker UI (add/remove/reorder), and per-folder persistence.
+
+2026-07-24 (dayshift) — **CPE-971** landed the first per-family extractor: `media_column::audio_cell` maps
+read ID3 tags (via CPE-970) to typed `CellValue`s so Track/Year columns sort numerically. Establishes the
+`*_cell -> CellValue` pattern. Remaining: image (a dimensions primitive already exists in `image_preview`) /
+video / doc extractors, the column-picker UI, and per-folder persistence.
