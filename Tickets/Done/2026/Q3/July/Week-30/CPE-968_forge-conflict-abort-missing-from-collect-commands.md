@@ -4,9 +4,10 @@ title: forge_conflict_abort is registered but missing from collect_commands! (ty
 type: bug
 component: Backend
 priority: medium
-status: Open
+status: Done
 tags: ready
 created: 2026-07-23
+closed: 2026-07-23
 epic: CPE-810
 estimate: 30m
 ---
@@ -24,11 +25,11 @@ raw `invoke("forge_conflict_abort", …)`.
 Discovered during CPE-964 increment 11 (2026-07-23) while migrating the dialogs cluster.
 
 ## Acceptance Criteria
-- [ ] Add `forge_conflict_abort` to the `collect_commands!` macro list (next to `forge_conflict_continue`).
-- [ ] Regenerate bindings: `cargo run --bin export_bindings --features "specta-bindings sidecar-platform"`;
+- [x] Add `forge_conflict_abort` to the `collect_commands!` macro list (next to `forge_conflict_continue`).
+- [x] Regenerate bindings: `cargo run --bin export_bindings --features "specta-bindings sidecar-platform"`;
       `commands.forgeConflictAbort(path): Promise<Result<string, string>>` now exists in `bindings.gen.ts`.
-- [ ] Drift guard (`git diff --exit-code src/lib/bindings.gen.ts`) is clean after regen + commit.
-- [ ] (Follow-on, may be same PR) migrate ConflictDialog's dynamic `cmd` ternary
+- [x] Drift guard (`git diff --exit-code src/lib/bindings.gen.ts`) is clean after regen + commit.
+- [x] (Follow-on, may be same PR) migrate ConflictDialog's dynamic `cmd` ternary
       (`forge_conflict_continue` / `forge_conflict_abort`) to the typed `commands.*` client, closing the
       last ConflictDialog raw-invoke sites for CPE-964.
 
@@ -37,3 +38,13 @@ Discovered during CPE-964 increment 11 (2026-07-23) while migrating the dialogs 
   client + drift guard so the generate_handler / collect_commands lists stop drifting.
 - Worth a quick audit: are any OTHER `generate_handler!` commands missing from `collect_commands!`? A short
   diff of the two lists would catch the whole class. If several are missing, list them here and fix together.
+
+## Work Log
+- 2026-07-23 (Nightshift) — Added `forge_conflict_abort` to `collect_commands!` (src-tauri/src/lib.rs) and
+  regenerated `src/lib/bindings.gen.ts` (`cargo run --bin export_bindings --features "specta-bindings
+  sidecar-platform"`, exit 0) — diff is exactly the one new `forgeConflictAbort` command (+11 lines).
+  Audited the whole `generate_handler!` vs `collect_commands!` diff: the only other absentees are
+  `set_file_attribute` / `set_permissions` (deliberately excluded — single-OS commands that would make the
+  bindings platform-dependent), so no further gaps. Then migrated ConflictDialog fully to the typed client
+  (forge_conflict_state/versions plain; forge_resolve_file/continue/abort via unwrap) — closes CPE-964's
+  ConflictDialog holdout. npm check 0/0; full suite 930 green.

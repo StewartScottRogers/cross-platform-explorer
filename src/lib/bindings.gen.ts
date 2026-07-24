@@ -1380,6 +1380,17 @@ async forgeConflictContinue(path: string) : Promise<Result<string, string>> {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
 }
+},
+/**
+ * Abort the in-progress merge/rebase (CPE-496), restoring the pre-sync state so **no work is lost**.
+ */
+async forgeConflictAbort(path: string) : Promise<Result<string, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("forge_conflict_abort", { path }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
 }
 }
 

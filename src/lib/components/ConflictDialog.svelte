@@ -4,7 +4,8 @@
   // (ours / theirs / base) or edit the resolution per file, stages it, then Continue or Abort. Abort
   // restores the pre-sync state — work is never lost. Backed by the host forge_conflict_* commands.
   import { createEventDispatcher, onMount } from "svelte";
-  import { invoke } from "../invoke";
+  import { unwrap } from "../invoke";
+  import { commands } from "../bindings.gen"; // typed client (CPE-964)
   import Icon from "./Icon.svelte";
 
   export let path: string;
@@ -26,7 +27,7 @@
 
   async function loadState() {
     try {
-      const s = await invoke<{ operation: string; files: ConflictFile[] }>("forge_conflict_state", { path });
+      const s = await commands.forgeConflictState(path);
       operation = s.operation;
       files = s.files;
       if (selected && !files.some((f) => f.path === selected)) { selected = null; versions = null; }
@@ -42,7 +43,7 @@
     versions = null;
     error = "";
     try {
-      versions = await invoke<Versions>("forge_conflict_versions", { path, file });
+      versions = await commands.forgeConflictVersions(path, file);
       // Start the resolution from the working-tree merge (markers included) so the user edits in place.
       resolution = versions.merged ?? versions.ours ?? versions.theirs ?? "";
     } catch (e) {
@@ -59,7 +60,7 @@
     if (!selected) return;
     busy = true; error = ""; note = "";
     try {
-      await invoke("forge_resolve_file", { path, file: selected, content: resolution });
+      unwrap(await commands.forgeResolveFile(path, selected, resolution));
       note = `Staged ${selected}`;
       selected = null;
       await loadState(); // resolved file drops off the list; auto-selects the next
@@ -73,8 +74,11 @@
   async function finish(kind: "continue" | "abort") {
     busy = true; error = "";
     try {
-      const cmd = kind === "continue" ? "forge_conflict_continue" : "forge_conflict_abort";
-      const msg = await invoke<string>(cmd, { path });
+      const msg = unwrap(
+        kind === "continue"
+          ? await commands.forgeConflictContinue(path)
+          : await commands.forgeConflictAbort(path),
+      );
       note = msg;
       dispatch("done");
       dispatch("close");
