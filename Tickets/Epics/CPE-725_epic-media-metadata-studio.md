@@ -47,3 +47,5 @@ std. Also feeds CPE-707 columns. Remaining: the **write-back** codec, sibling re
 video/PDF), and the studio editor UI.
 
 2026-07-24 (dayshift) — **CPE-972** added the second read codec: `media_meta_read::read_flac` + `parse_vorbis_comment` — FLAC/Vorbis tags into `MetaField`s under the **same** friendly keys as ID3, so `media_column::audio_cell` handles FLAC unchanged. Remaining: OGG framing (reuses `parse_vorbis_comment`), write-back codecs, studio UI.
+
+2026-07-24 (dayshift) — **CPE-973** completed the Vorbis codec for OGG: `media_meta_read::read_ogg` reuses `parse_vorbis_comment` via the `vorbis` comment-header signature. The audio read arc (ID3/FLAC/OGG → typed audio columns) now covers the common formats. Remaining: multi-page Ogg reassembly, EXIF/PDF/video read codecs, write-back, and the studio UI.

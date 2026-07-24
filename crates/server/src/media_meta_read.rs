@@ -230,6 +230,31 @@ pub fn read_flac(bytes: &[u8]) -> Vec<MetaField> {
     Vec::new()
 }
 
+/// Parse an OGG stream's Vorbis-comment tags into [`MetaField`]s (group `"vorbis"`). Returns empty when the
+/// `OggS` magic is absent or no comment header is found. The Vorbis *comment header* packet always begins
+/// with the 7-byte signature `\x03vorbis`; we locate it and hand the bytes that follow to
+/// [`parse_vorbis_comment`], which reads exactly its declared entries and ignores the trailing framing.
+///
+/// This is a pragmatic reader: it assumes the comment header isn't split across Ogg pages (true for typical
+/// tag sizes). Full multi-page packet reassembly is a later refinement; the shared [`parse_vorbis_comment`]
+/// stays the codec.
+pub fn read_ogg(bytes: &[u8]) -> Vec<MetaField> {
+    if bytes.len() < 4 || &bytes[0..4] != b"OggS" {
+        return Vec::new();
+    }
+    const SIG: &[u8] = b"\x03vorbis";
+    let Some(idx) = find_subslice(bytes, SIG) else { return Vec::new() };
+    parse_vorbis_comment(&bytes[idx + SIG.len()..])
+}
+
+/// The index of the first occurrence of `needle` in `haystack`, or `None`.
+fn find_subslice(haystack: &[u8], needle: &[u8]) -> Option<usize> {
+    if needle.is_empty() || haystack.len() < needle.len() {
+        return None;
+    }
+    haystack.windows(needle.len()).position(|w| w == needle)
+}
+
 /// Parse a raw Vorbis-comment block into [`MetaField`]s. Layout (all lengths little-endian): vendor length +
 /// vendor string, comment count, then each as length + `KEY=VALUE` (UTF-8). Malformed/truncated input stops
 /// the parse with whatever was read — never a panic. Shared by FLAC and (later) OGG.
@@ -409,6 +434,39 @@ mod tests {
         let flac = build_flac(&build_vorbis(&["TITLE=X"]));
         for cut in 4..flac.len() {
             let _ = read_flac(&flac[..cut]); // must never panic on any truncation
+        }
+    }
+
+    /// Wrap a Vorbis-comment block in a minimal OGG stream: the `OggS` magic + a stub page header + the
+    /// `\x03vorbis` comment-header signature + the block + a trailing framing byte.
+    fn build_ogg(comment_block: &[u8]) -> Vec<u8> {
+        let mut o = Vec::new();
+        o.extend_from_slice(b"OggS");
+        o.extend_from_slice(&[0u8; 22]); // version + flags + granule + serial + seqno + crc (stubbed)
+        o.push(1); // one segment (contents irrelevant to the scan-based reader)
+        o.push(0xFF);
+        o.extend_from_slice(b"\x03vorbis");
+        o.extend_from_slice(comment_block);
+        o.push(0x01); // framing bit — parse_vorbis_comment stops before this
+        o
+    }
+
+    #[test]
+    fn read_ogg_extracts_comment_header() {
+        let ogg = build_ogg(&build_vorbis(&["TITLE=Weightless", "ARTIST=Marconi Union", "TRACKNUMBER=1"]));
+        let f = read_ogg(&ogg);
+        assert_eq!(get(&f, "Title"), Some("Weightless"));
+        assert_eq!(get(&f, "Artist"), Some("Marconi Union"));
+        assert_eq!(get(&f, "Track"), Some("1"));
+    }
+
+    #[test]
+    fn read_ogg_rejects_non_ogg_and_tolerates_truncation() {
+        assert!(read_ogg(b"fLaC....").is_empty());
+        assert!(read_ogg(b"OggS-no-vorbis-marker-here").is_empty()); // magic but no comment header
+        let ogg = build_ogg(&build_vorbis(&["TITLE=T"]));
+        for cut in 4..ogg.len() {
+            let _ = read_ogg(&ogg[..cut]); // no panic on any truncation
         }
     }
 
