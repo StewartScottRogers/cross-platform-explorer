@@ -163,6 +163,10 @@ jobs:
         run: |
           cargo clippy --all-targets -- -D warnings
           cargo test
+          # The opt-in instant-search index engine (CPE-832) — lint + test it too; the default build
+          # above stays indexer-free (the "small when off" delete-test).
+          cargo clippy --all-targets --features index -- -D warnings
+          cargo test --features index
 
       - name: net — clippy + test
         # The headless network transport loop (Client(Rust) proxy + reference Server,

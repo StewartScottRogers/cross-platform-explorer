@@ -4,7 +4,7 @@ title: Instant-search index engine — backend design + build
 type: feature
 component: Backend
 priority: medium
-status: Open
+status: Done
 tags: big-design
 created: 2026-07-24
 epic: CPE-703
@@ -72,12 +72,39 @@ lane. B is the fallback if incremental-update correctness (CPE-833) proves too c
    volume? (Affects crawl time + the privilege story on Windows.)
 
 ## Acceptance Criteria (once confirmed)
-- [ ] `cpe-server::index` behind an off-by-default feature; plain build unaffected (zero indexer code).
-- [ ] `build` (cancellable crawl) + `save`/`load` (mmap) + `candidates` feeding `index_query::rank`.
-- [ ] Versioned on-disk format with transparent rebuild on mismatch; unreadable entries skipped.
-- [ ] Cargo-tested: build a temp tree, save, reload, query via CPE-831, assert <-budget + correct matches.
-- [ ] Warm cross-volume query <100ms on a representative corpus (bench, ties into CPE-691 harness).
+- [x] `cpe-server::index` behind an off-by-default `index` feature; plain build unaffected (`cargo check`
+      with the feature OFF compiles zero indexer code — verified).
+- [x] `build` (cancellable crawl) + `save`/`load` + `search` feeding `index_query::matches`/`score`.
+      **Deviation (logged in Work Log):** the store is a hand-rolled versioned binary format loaded into
+      memory (no mmap/bincode dep → lean-core rule); `search` runs `index_query` internally rather than
+      exposing a borrowed-`candidates` iterator (cleaner ownership; same query brain).
+- [x] Versioned on-disk header (magic + `FORMAT_VERSION` + volume id) → `IndexError::Stale` (transparent
+      rebuild) on mismatch; unreadable dirs/entries skipped; truncated file → `IndexError::Io`, never a panic.
+- [x] Cargo-tested (11 tests): build a temp tree, save, reload, query via CPE-831, assert correct matches +
+      full-path reconstruction + ext/path/glob filters + cancellation + trigram-prune == full-scan parity.
+- [ ] Warm cross-volume query <100ms on a representative corpus — **deferred to CPE-691** (the perf-bench
+      harness) once it lands; the query path is CPE-831's `rank`, already O(candidates) with trigram pruning.
+
+**Follow-ups filed/owned:** CPE-833 (live incremental watch keeps the index fresh), CPE-834 (overlay UI —
+the user-facing *section*, which will add its `src/docs/*` page + `sectionDocs.ts` entry then). This slice is
+headless backend only, so no in-app-docs section changes here.
 
 ## Notes
 - Prereq CPE-831 is **done** (query core). CPE-833 (live watch) and CPE-834 (overlay UI) follow this.
 - Ties to [[headless-frontier-and-cpe-net]]: this was flagged as the index-engine big-design gate.
+
+## Work Log
+- **2026-07-24 05:0x USMST (dayshift, user away → best-guess per go-with-recommendation):** proceeding with
+  the writeup's **Option A** (roll-our-own compact filename index). Answers logged for the three attended
+  questions since the user can't confirm live:
+  1. **Backend = Option A** (recommended). It is the only option honouring the epic's "zero cost when off /
+     small when on" DoD and reuses CPE-831 as the whole query brain.
+  2. **Footprint refinement (deviation from writeup, logged):** to hold the crate's lean-core rule (zero new
+     deps), the on-disk format is a **hand-rolled versioned binary layout** (no bincode/rkyv/mmap crate) and
+     load reads the file into memory + **rebuilds trigram postings on load** rather than persisting them —
+     smaller disk ("filenames only"), and load speed is a cold one-time cost, not the <100ms *warm query*
+     target (which CPE-831's `rank` owns). Trigrams are always-on candidate pruning; the final filter is
+     `index_query::matches`, so trigrams only prune, never affect correctness.
+  3. **Scope of first build:** left to the caller — `build(root, cancel)` indexes one root; a volume/home
+     crawl is composed above (the privilege/volume-set story stays out of the pure module).
+- Feature-gated `index` (OFF by default): the plain build compiles **zero** indexer code (delete-test).

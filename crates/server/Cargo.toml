@@ -68,6 +68,10 @@ path = "src/bin/ticket_mcp.rs"
 [features]
 # Opt-in `specta::Type` derives for the TypeScript-binding codegen (CPE-953). OFF by default.
 specta = ["dep:specta"]
+# Opt-in instant-search index engine (CPE-832, epic CPE-703). OFF by default so the plain build compiles
+# **zero** indexer code (the "small when off" delete-test) — the `index` module needs no extra crates, only
+# this gate. Turn on with `--features index` (or from the app adapter that exposes the index commands).
+index = []
 
 [dev-dependencies]
 # Temp dirs for the ticket-board tests (moved from the app with the module, CPE-815).
