@@ -45,3 +45,5 @@ Remaining: the per-format read/write codecs and the studio editor UI.
 ID3v2.2/2.3/2.4 audio tags (all 4 text encodings + COMM) into `MetaField`s, robust to malformed input, pure
 std. Also feeds CPE-707 columns. Remaining: the **write-back** codec, sibling read codecs (EXIF/Vorbis/FLAC/
 video/PDF), and the studio editor UI.
+
+2026-07-24 (dayshift) — **CPE-972** added the second read codec: `media_meta_read::read_flac` + `parse_vorbis_comment` — FLAC/Vorbis tags into `MetaField`s under the **same** friendly keys as ID3, so `media_column::audio_cell` handles FLAC unchanged. Remaining: OGG framing (reuses `parse_vorbis_comment`), write-back codecs, studio UI.

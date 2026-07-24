@@ -193,6 +193,112 @@ fn be_u24(b: &[u8]) -> u32 {
     ((b[0] as u32) << 16) | ((b[1] as u32) << 8) | (b[2] as u32)
 }
 
+/// Read a little-endian u32 from 4 bytes (Vorbis-comment lengths/counts).
+fn le_u32(b: &[u8]) -> u32 {
+    u32::from_le_bytes([b[0], b[1], b[2], b[3]])
+}
+
+// ---- FLAC / Vorbis comments (CPE-972) ----
+
+/// Parse a FLAC stream's Vorbis-comment tags into [`MetaField`]s (group `"vorbis"`). Returns empty when the
+/// `fLaC` magic is absent or there is no comment block. Reuses [`parse_vorbis_comment`] for the block body.
+pub fn read_flac(bytes: &[u8]) -> Vec<MetaField> {
+    if bytes.len() < 4 || &bytes[0..4] != b"fLaC" {
+        return Vec::new();
+    }
+    // FLAC metadata blocks follow the magic: a 1-byte header (bit7 = last-block flag, bits0-6 = block type)
+    // + a 3-byte big-endian length + the block data. The Vorbis comment is block type 4.
+    let mut pos = 4usize;
+    while pos + 4 <= bytes.len() {
+        let header = bytes[pos];
+        let is_last = header & 0x80 != 0;
+        let block_type = header & 0x7F;
+        let len = be_u24(&bytes[pos + 1..pos + 4]) as usize;
+        let data_start = pos + 4;
+        let data_end = data_start + len;
+        if data_end > bytes.len() {
+            break; // truncated block — stop rather than over-read
+        }
+        if block_type == 4 {
+            return parse_vorbis_comment(&bytes[data_start..data_end]);
+        }
+        if is_last {
+            break;
+        }
+        pos = data_end;
+    }
+    Vec::new()
+}
+
+/// Parse a raw Vorbis-comment block into [`MetaField`]s. Layout (all lengths little-endian): vendor length +
+/// vendor string, comment count, then each as length + `KEY=VALUE` (UTF-8). Malformed/truncated input stops
+/// the parse with whatever was read — never a panic. Shared by FLAC and (later) OGG.
+pub fn parse_vorbis_comment(block: &[u8]) -> Vec<MetaField> {
+    let mut fields = Vec::new();
+    // vendor string
+    if block.len() < 4 {
+        return fields;
+    }
+    let vendor_len = le_u32(&block[0..4]) as usize;
+    let mut pos = 4 + vendor_len;
+    if pos + 4 > block.len() {
+        return fields;
+    }
+    let count = le_u32(&block[pos..pos + 4]) as usize;
+    pos += 4;
+    for _ in 0..count {
+        if pos + 4 > block.len() {
+            break;
+        }
+        let len = le_u32(&block[pos..pos + 4]) as usize;
+        pos += 4;
+        let Some(raw) = block.get(pos..pos + len) else { break };
+        pos += len;
+        let Ok(text) = std::str::from_utf8(raw) else { continue };
+        let Some((key, value)) = text.split_once('=') else { continue };
+        let value = value.trim();
+        if value.is_empty() {
+            continue;
+        }
+        if let Some(friendly) = vorbis_key(key) {
+            fields.push(MetaField { group: "vorbis".to_string(), key: friendly, value: value.to_string(), editable: true });
+        }
+    }
+    fields
+}
+
+/// Map a Vorbis-comment field name (case-insensitive) to a friendly key — the **same** names the ID3 codec
+/// emits, so a downstream column/studio consumer treats FLAC and MP3 tags identically. An unrecognised key
+/// passes through capitalised as-is (nothing useful dropped).
+fn vorbis_key(name: &str) -> Option<String> {
+    let friendly = match name.to_ascii_uppercase().as_str() {
+        "TITLE" => "Title",
+        "ARTIST" => "Artist",
+        "ALBUM" => "Album",
+        "ALBUMARTIST" | "ALBUM ARTIST" => "Album Artist",
+        "TRACKNUMBER" | "TRACKNUM" | "TRACK" => "Track",
+        "DISCNUMBER" | "DISC" => "Disc",
+        "GENRE" => "Genre",
+        "DATE" | "YEAR" => "Year",
+        "COMPOSER" => "Composer",
+        "ORGANIZATION" | "PUBLISHER" | "LABEL" => "Publisher",
+        "DESCRIPTION" | "COMMENT" => "Comment",
+        "BPM" => "BPM",
+        "COPYRIGHT" => "Copyright",
+        other => return Some(capitalise(other)),
+    };
+    Some(friendly.to_string())
+}
+
+/// Title-case an unknown Vorbis key (`REPLAYGAIN_TRACK_GAIN` → `Replaygain_track_gain`) for display.
+fn capitalise(s: &str) -> String {
+    let mut chars = s.chars();
+    match chars.next() {
+        Some(first) => first.to_uppercase().chain(chars.flat_map(|c| c.to_lowercase())).collect(),
+        None => String::new(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -234,6 +340,86 @@ mod tests {
 
     fn get<'a>(fields: &'a [MetaField], key: &str) -> Option<&'a str> {
         fields.iter().find(|f| f.key == key).map(|f| f.value.as_str())
+    }
+
+    /// Build a raw Vorbis-comment block from `KEY=VALUE` comments (empty vendor).
+    fn build_vorbis(comments: &[&str]) -> Vec<u8> {
+        let mut b = Vec::new();
+        b.extend_from_slice(&0u32.to_le_bytes()); // vendor length 0
+        b.extend_from_slice(&(comments.len() as u32).to_le_bytes());
+        for c in comments {
+            b.extend_from_slice(&(c.len() as u32).to_le_bytes());
+            b.extend_from_slice(c.as_bytes());
+        }
+        b
+    }
+
+    /// Wrap a Vorbis-comment block in a minimal FLAC stream (magic + a STREAMINFO stub + the comment block).
+    fn build_flac(comment_block: &[u8]) -> Vec<u8> {
+        let mut f = Vec::new();
+        f.extend_from_slice(b"fLaC");
+        // Block 0: STREAMINFO (type 0), not last — 4 bytes of filler data.
+        f.push(0x00);
+        f.extend_from_slice(&[0, 0, 4]);
+        f.extend_from_slice(&[0u8; 4]);
+        // Block 1: VORBIS_COMMENT (type 4), last block (0x80 | 4).
+        f.push(0x84);
+        let len = comment_block.len() as u32;
+        f.extend_from_slice(&len.to_be_bytes()[1..]); // 3-byte big-endian length
+        f.extend_from_slice(comment_block);
+        f
+    }
+
+    #[test]
+    fn parse_vorbis_maps_keys_to_friendly_names() {
+        let block = build_vorbis(&["TITLE=Redshift", "ARTIST=Tycho", "TRACKNUMBER=3", "DATE=2011-05-01", "REPLAYGAIN_TRACK_GAIN=-6.5 dB"]);
+        let f = parse_vorbis_comment(&block);
+        assert_eq!(get(&f, "Title"), Some("Redshift"));
+        assert_eq!(get(&f, "Artist"), Some("Tycho"));
+        assert_eq!(get(&f, "Track"), Some("3"));
+        assert_eq!(get(&f, "Year"), Some("2011-05-01"));
+        // Unknown key passes through, capitalised.
+        assert_eq!(get(&f, "Replaygain_track_gain"), Some("-6.5 dB"));
+        assert!(f.iter().all(|x| x.group == "vorbis" && x.editable));
+    }
+
+    #[test]
+    fn parse_vorbis_is_case_insensitive_and_skips_blank_and_malformed() {
+        let block = build_vorbis(&["title=lower", "ARTIST=", "no-equals-sign", "ALBUM=Dive"]);
+        let f = parse_vorbis_comment(&block);
+        assert_eq!(get(&f, "Title"), Some("lower")); // case-insensitive key
+        assert_eq!(get(&f, "Artist"), None); // blank value dropped
+        assert_eq!(get(&f, "Album"), Some("Dive"));
+        assert_eq!(f.len(), 2); // the "no-equals-sign" entry is skipped
+    }
+
+    #[test]
+    fn read_flac_finds_the_comment_block() {
+        let flac = build_flac(&build_vorbis(&["TITLE=Awake", "ARTIST=Tycho", "TRACKNUMBER=1/10"]));
+        let f = read_flac(&flac);
+        assert_eq!(get(&f, "Title"), Some("Awake"));
+        assert_eq!(get(&f, "Artist"), Some("Tycho"));
+        assert_eq!(get(&f, "Track"), Some("1/10"));
+    }
+
+    #[test]
+    fn read_flac_rejects_non_flac_and_tolerates_truncation() {
+        assert!(read_flac(b"OggS....").is_empty());
+        assert!(read_flac(b"fLaC").is_empty()); // magic only, no blocks
+        let flac = build_flac(&build_vorbis(&["TITLE=X"]));
+        for cut in 4..flac.len() {
+            let _ = read_flac(&flac[..cut]); // must never panic on any truncation
+        }
+    }
+
+    #[test]
+    fn flac_friendly_keys_line_up_with_id3_for_audio_cell() {
+        // Same friendly keys as ID3 → the CPE-971 audio_cell extractor works on FLAC tags unchanged.
+        use crate::media_column::{audio_cell, AudioColumn};
+        use crate::metadata_column::CellValue;
+        let f = read_flac(&build_flac(&build_vorbis(&["TRACKNUMBER=7/12", "DATE=1999"])));
+        assert_eq!(audio_cell(&f, AudioColumn::Track), CellValue::Int(7));
+        assert_eq!(audio_cell(&f, AudioColumn::Year), CellValue::Int(1999));
     }
 
     #[test]
