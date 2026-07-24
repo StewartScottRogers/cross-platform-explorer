@@ -4,7 +4,8 @@
   // it re-plans whenever the policy changes and runs each planned step via forge_sync. Never
   // force-pushes — a divergence under the "manual" policy surfaces for the user instead of reconciling.
   import { createEventDispatcher, onMount } from "svelte";
-  import { invoke } from "../invoke";
+  import { unwrap } from "../invoke";
+  import { commands } from "../bindings.gen"; // typed client (CPE-964)
   import { type OnDiverge, loadSyncPolicy, saveSyncPolicy, syncActionLabel } from "../syncPolicy";
   import { type AutoMirror, loadAutoMirror, saveAutoMirror, INTERVAL_CHOICES } from "../autoMirror";
 
@@ -44,7 +45,7 @@
   async function replan() {
     planning = true;
     try {
-      status = await invoke<Status>("forge_repo_status", { path, onDiverge: policy });
+      status = (await commands.forgeRepoStatus(path, policy)) as unknown as Status;
     } catch (e) {
       status = null;
       log = ["Could not read repo status: " + (e instanceof Error ? e.message : String(e))];
@@ -77,7 +78,7 @@
     log = [];
     for (const action of steps) {
       try {
-        const out = await invoke<string>("forge_sync", { path, action });
+        const out = unwrap(await commands.forgeSync(path, action));
         log = [...log, `✓ ${syncActionLabel(action)} — ${out}`];
       } catch (e) {
         log = [...log, `✗ ${syncActionLabel(action)} — ${e instanceof Error ? e.message : String(e)}`];

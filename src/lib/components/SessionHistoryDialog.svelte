@@ -6,7 +6,8 @@
    * JSON / CSV / Markdown. A thin render over the tested logic — the file save is delegated to App.
    */
   import { createEventDispatcher, onMount } from "svelte";
-  import { invoke } from "../invoke";
+  import { unwrap } from "../invoke";
+  import { commands } from "../bindings.gen"; // typed client (CPE-964)
   import {
     filterEvents,
     redactEvents,
@@ -47,7 +48,7 @@
 
   onMount(async () => {
     try {
-      sessions = await invoke<string[]>("audit_sessions");
+      sessions = unwrap(await commands.auditSessions());
       if (sessions.length) select(sessions[sessions.length - 1]);
     } catch (e) {
       error = String(e);
@@ -59,7 +60,7 @@
     loading = true;
     error = "";
     try {
-      events = await invoke<AuditEvent[]>("audit_read", { session: s });
+      events = unwrap(await commands.auditRead(s)) as AuditEvent[];
     } catch (e) {
       error = String(e);
       events = [];
