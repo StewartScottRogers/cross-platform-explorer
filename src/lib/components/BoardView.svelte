@@ -93,7 +93,9 @@
   $: archivedEpicList = archivedEpics(filterCards(archived, boardQuery));
   $: epicDoneDisplay = showArchived ? [...epicCols.Done, ...archivedEpicList] : epicCols.Done;
   /** Click an epic card → jump to the Board filtered to that epic's tickets (filterCards matches epic). */
-  function drillEpic(id: string) { boardQuery = id; viewMode = "board"; }
+  // Filter the board to an epic's tickets. Also reveal archived Done tickets: a closed epic's children
+  // live in the dated Done/** subfolders, so without this "View tickets" could show an empty board (CPE-960).
+  function drillEpic(id: string) { boardQuery = id; viewMode = "board"; showArchived = true; }
 
   // Card-detail popup (CPE-959): clicking a ticket/epic card opens a read-only view of the full ticket.
   let detailCard: { id: string; isEpic: boolean } | null = null;

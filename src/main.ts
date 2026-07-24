@@ -3,6 +3,7 @@ import "highlight.js/styles/github.css"; // token colours for code previews (CPE
 import App from "./App.svelte";
 import FloatPreview from "./lib/components/FloatPreview.svelte";
 import AgentBoardApp from "./lib/components/AgentBoardApp.svelte";
+import AgentCardApp from "./lib/components/AgentCardApp.svelte";
 import { bootMode } from "./lib/bootMode";
 import { initSettings } from "./lib/settings";
 
@@ -24,6 +25,11 @@ async function bootstrap(): Promise<void> {
   await initSettings().catch(() => {});
   if (mode === "board") {
     new AgentBoardApp({ target });
+    return;
+  }
+  // A torn-off card-detail window (CPE-960): render just the card, full-frame.
+  if (mode === "card") {
+    new AgentCardApp({ target });
     return;
   }
   new App({ target });
