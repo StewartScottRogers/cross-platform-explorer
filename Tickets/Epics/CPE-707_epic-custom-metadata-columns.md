@@ -47,3 +47,5 @@ for visible rows only), the column-picker UI (add/remove/reorder), and per-folde
 read ID3 tags (via CPE-970) to typed `CellValue`s so Track/Year columns sort numerically. Establishes the
 `*_cell -> CellValue` pattern. Remaining: image (a dimensions primitive already exists in `image_preview`) /
 video / doc extractors, the column-picker UI, and per-folder persistence.
+
+2026-07-24 (dayshift) — **CPE-974** added the image-family extractor: `image_column::image_dimensions_cell` (header-only read → `CellValue::Dimensions`, sorts by area). With audio (CPE-971) + image, the two commonest per-family extractors are covered. Remaining: video/doc extractors, the column-picker UI (GUI), and per-folder persistence.
