@@ -437,6 +437,95 @@ async retagPath(from: string, to: string) : Promise<Result<Partial<{ [key in str
 }
 },
 /**
+ * Capture a folder's structure into a reusable template (not yet saved to the catalog).
+ */
+async templateCapture(path: string, name: string) : Promise<Result<Template, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("template_capture", { path, name }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * Save (insert or replace by name) a template and persist. Returns the updated catalog.
+ */
+async templateSave(template: Template) : Promise<Result<Partial<{ [key in string]: Template }>, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("template_save", { template }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * Every stored template's name + node counts, for the gallery.
+ */
+async templateList() : Promise<Result<TemplateSummary[], string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("template_list") };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * One stored template by name (`None` if absent).
+ */
+async templateLoad(name: string) : Promise<Result<Template | null, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("template_load", { name }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * Delete a stored template by name and persist. Returns the updated catalog.
+ */
+async templateDelete(name: string) : Promise<Result<Partial<{ [key in string]: Template }>, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("template_delete", { name }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * Stamp `template` into `dest` with `{token}` variable substitution. Returns the created paths.
+ * Path-safe and never clobbers an existing file (enforced in the core).
+ */
+async templateStamp(template: Template, dest: string, vars: Partial<{ [key in string]: string }>) : Promise<Result<string[], string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("template_stamp", { template, dest, vars }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * A single template's JSON, for sharing/export.
+ */
+async templateExport(template: Template) : Promise<Result<string, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("template_export", { template }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * Import a template (or a whole catalog) from JSON, merged by name. Returns the updated catalog.
+ */
+async templateImport(json: string) : Promise<Result<Partial<{ [key in string]: Template }>, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("template_import", { json }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
  * Rename a single entry in place. Returns the new path.
  */
 async renameEntry(path: string, newName: string) : Promise<Result<string, string>> {
@@ -1678,6 +1767,10 @@ export type NameMatch = { path: string; name: string; is_dir: boolean }
  */
 export type NameSearchResult = { matches: NameMatch[]; dirs_scanned: number; truncated: boolean }
 /**
+ * A node in a template tree: a directory (with children) or a file (with placeholder contents).
+ */
+export type Node = { kind: "dir"; name: string; children?: Node[] } | { kind: "file"; name: string; contents?: string }
+/**
  * Per-item outcome of a bulk operation. Bulk file operations must NOT be all-or-nothing and must not
  * abort on the first failure: if 9 of 10 files copy and one is locked, the user needs to know exactly
  * which one failed.
@@ -1753,6 +1846,14 @@ export type TAURI_CHANNEL<TSend> = null
  * The tags + colour label attached to one path.
  */
 export type TagEntry = { tags?: string[]; label?: string }
+/**
+ * A captured folder structure that can be stamped out on demand.
+ */
+export type Template = { name: string; nodes?: Node[] }
+/**
+ * A gallery summary of one stored template: its name and how many dirs/files it stamps.
+ */
+export type TemplateSummary = { name: string; dirs: number; files: number }
 /**
  * Counts for a text file. Serialized to match the frontend `TextStats`.
  */

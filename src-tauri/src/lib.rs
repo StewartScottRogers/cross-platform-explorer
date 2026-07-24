@@ -2397,6 +2397,82 @@ fn import_tags(app: tauri::AppHandle, json: String) -> Result<TagStore, String> 
     cpe_server::tags::import(&server_ctx::TauriCtx::new(&app), &json)
 }
 
+// ---- Folder templates (CPE-837, epic CPE-740) ------------------------------------------------
+// Thin dispatchers into `cpe_server::folder_template` (core + store built in CPE-835/836). `capture`
+// and `stamp` do real filesystem work → async + `spawn_blocking`; the config-store ops match the sync
+// tag-store pattern (a small `templates.json` in the config dir, reached via `TauriCtx`).
+use cpe_server::folder_template::{Catalog as TemplateCatalog, Template, TemplateSummary};
+
+/// Capture a folder's structure into a reusable template (not yet saved to the catalog).
+#[tauri::command]
+#[cfg_attr(feature = "specta-bindings", specta::specta)]
+async fn template_capture(path: String, name: String) -> Result<Template, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        cpe_server::folder_template::capture(std::path::Path::new(&path), name)
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+/// Save (insert or replace by name) a template and persist. Returns the updated catalog.
+#[tauri::command]
+#[cfg_attr(feature = "specta-bindings", specta::specta)]
+fn template_save(app: tauri::AppHandle, template: Template) -> Result<TemplateCatalog, String> {
+    cpe_server::folder_template::save(&server_ctx::TauriCtx::new(&app), template)
+}
+
+/// Every stored template's name + node counts, for the gallery.
+#[tauri::command]
+#[cfg_attr(feature = "specta-bindings", specta::specta)]
+fn template_list(app: tauri::AppHandle) -> Result<Vec<TemplateSummary>, String> {
+    cpe_server::folder_template::list(&server_ctx::TauriCtx::new(&app))
+}
+
+/// One stored template by name (`None` if absent).
+#[tauri::command]
+#[cfg_attr(feature = "specta-bindings", specta::specta)]
+fn template_load(app: tauri::AppHandle, name: String) -> Result<Option<Template>, String> {
+    cpe_server::folder_template::load(&server_ctx::TauriCtx::new(&app), &name)
+}
+
+/// Delete a stored template by name and persist. Returns the updated catalog.
+#[tauri::command]
+#[cfg_attr(feature = "specta-bindings", specta::specta)]
+fn template_delete(app: tauri::AppHandle, name: String) -> Result<TemplateCatalog, String> {
+    cpe_server::folder_template::delete(&server_ctx::TauriCtx::new(&app), &name)
+}
+
+/// Stamp `template` into `dest` with `{token}` variable substitution. Returns the created paths.
+/// Path-safe and never clobbers an existing file (enforced in the core).
+#[tauri::command]
+#[cfg_attr(feature = "specta-bindings", specta::specta)]
+async fn template_stamp(
+    template: Template,
+    dest: String,
+    vars: std::collections::BTreeMap<String, String>,
+) -> Result<Vec<String>, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        cpe_server::folder_template::stamp(&template, std::path::Path::new(&dest), &vars)
+            .map(|paths| paths.into_iter().map(|p| p.display().to_string()).collect())
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+/// A single template's JSON, for sharing/export.
+#[tauri::command]
+#[cfg_attr(feature = "specta-bindings", specta::specta)]
+fn template_export(template: Template) -> Result<String, String> {
+    cpe_server::folder_template::export(&template)
+}
+
+/// Import a template (or a whole catalog) from JSON, merged by name. Returns the updated catalog.
+#[tauri::command]
+#[cfg_attr(feature = "specta-bindings", specta::specta)]
+fn template_import(app: tauri::AppHandle, json: String) -> Result<TemplateCatalog, String> {
+    cpe_server::folder_template::import(&server_ctx::TauriCtx::new(&app), &json)
+}
+
 /// Return the user's home directory.
 #[tauri::command]
 #[cfg_attr(feature = "specta-bindings", specta::specta)]
@@ -5570,6 +5646,14 @@ pub fn run() {
             delete_tag,
             import_tags,
             retag_path,
+            template_capture,
+            template_save,
+            template_list,
+            template_load,
+            template_delete,
+            template_stamp,
+            template_export,
+            template_import,
             rename_entry,
             delete_to_trash,
             delete_permanent,
@@ -5952,6 +6036,14 @@ pub fn export_bindings(out: &std::path::Path) -> Result<(), String> {
         delete_tag,
         import_tags,
         retag_path,
+        template_capture,
+        template_save,
+        template_list,
+        template_load,
+        template_delete,
+        template_stamp,
+        template_export,
+        template_import,
         rename_entry,
         delete_to_trash,
         delete_permanent,
