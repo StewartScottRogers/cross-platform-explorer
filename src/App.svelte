@@ -2,7 +2,7 @@
   import { onMount, onDestroy, tick } from "svelte";
   import { convertFileSrc } from "@tauri-apps/api/core";
   import { invoke } from "./lib/invoke";
-  import { rawInvoke, createChannel } from "./lib/invoke";
+  import { rawInvoke, createChannel, unwrap } from "./lib/invoke";
   // Generated typed command client (CPE-953). First migrated call site — proves the typed surface works
   // end-to-end (routes through the busy-cursor invoke); the broader migration is incremental.
   import { commands } from "./lib/bindings.gen";
@@ -87,7 +87,6 @@
 
   import { t } from "./lib/i18n";
   import { friendlyError, splitPath, formatPathsForClipboard } from "./lib/format";
-  import { withBusy } from "./lib/busy";
   import { uniqueName, uniqueNameWithExt } from "./lib/naming";
   import { validateFileName } from "./lib/filename";
   import { matchesGlob } from "./lib/glob";
@@ -610,7 +609,7 @@
   /** Run a safe sync step (Pull = ff-only, Push = no-force) via the host, then re-list (CPE-462). */
   async function doSync(action: "pull" | "push") {
     try {
-      await withBusy(() => invoke("forge_sync", { path: currentPath, action }));
+      unwrap(await commands.forgeSync(currentPath, action));
       await refreshGitStatus(currentPath);
       refresh();
     } catch (e) {
@@ -648,7 +647,7 @@
         return; // nothing safe to do (or diverged) — don't hammer; wait the interval out
       }
       for (const action of actions) {
-        await invoke("forge_sync", { path, action });
+        unwrap(await commands.forgeSync(path, action));
       }
       lastAutoSync.set(path, Date.now());
       if (currentPath === path) { await refreshGitStatus(path); refresh(); }
@@ -671,7 +670,7 @@
   async function closeAllConsoles() {
     agentMenu = null;
     try {
-      await invoke("sidecar_stop", { id: "ai-console" });
+      unwrap(await commands.sidecarStop("ai-console"));
     } catch (e) {
       console.debug("close consoles failed:", e);
     }
@@ -682,7 +681,7 @@
   async function closeOneConsole(sessionId: string) {
     agentMenu = null;
     try {
-      await invoke("sidecar_close_session", { sessionId });
+      unwrap(await commands.sidecarCloseSession(sessionId));
     } catch (e) {
       console.debug("close session failed:", e);
     }
@@ -740,7 +739,7 @@
       onYes: async () => {
         confirm = null;
         try {
-          const results = await invoke<OpResult[]>("delete_to_trash", { paths: [item.path] });
+          const results = await commands.deleteToTrash([item.path]);
           reportResults(results, "Moved to Recycle Bin:");
           if (canRestoreTrash) {
             const restored = results.filter((r) => r.ok).map((r) => ({ from: r.path, to: "" }));
@@ -808,7 +807,7 @@
     await Promise.all(
       list.map(async (d) => {
         try {
-          const s = await invoke<{ free: number; total: number }>("disk_space", { path: d.path });
+          const s = unwrap(await commands.diskSpace(d.path));
           driveUsage = { ...driveUsage, [d.path]: s };
         } catch {
           /* skip a drive we can't stat (e.g. an empty card reader) */
@@ -820,7 +819,7 @@
   async function updateDiskSpace(path: string, home: boolean, inArchive: boolean) {
     if (home || inArchive || !path) { diskFree = null; diskTotal = null; return; }
     try {
-      const d = await invoke<{ free: number; total: number }>("disk_space", { path });
+      const d = unwrap(await commands.diskSpace(path));
       if (currentPath === path) { diskFree = d.free; diskTotal = d.total; }
     } catch { if (currentPath === path) { diskFree = null; diskTotal = null; } }
   }
@@ -976,7 +975,7 @@
   async function loadSmartEntries(sf: SmartFolder | null, paths: string[]) {
     if (!sf) { smartEntries = []; return; }
     try {
-      smartEntries = await invoke<DirEntry[]>("entries_for_paths", { paths });
+      smartEntries = await commands.entriesForPaths(paths);
     } catch {
       smartEntries = [];
     }
@@ -1031,7 +1030,7 @@
 
   async function enterArchive(entry: DirEntry) {
     try {
-      const entries = await invoke<ArchiveEntry[]>("read_archive_entries", { path: entry.path });
+      const entries = unwrap(await commands.readArchiveEntries(entry.path));
       archive = { zipPath: entry.path, zipName: entry.name, entries, inner: "" };
       selection = emptySelection();
       search = "";
@@ -1067,10 +1066,8 @@
     }
     try {
       const zipPath = archive.zipPath;
-      const temp = await withBusy(() =>
-        invoke<string>("extract_archive_entry", { zip: zipPath, inner: entry.path }),
-      );
-      await invoke("open_external", { path: temp });
+      const temp = unwrap(await commands.extractArchiveEntry(zipPath, entry.path));
+      unwrap(await commands.openExternal(temp));
     } catch {
       showNotice(`Couldn't open "${entry.name}" from the archive.`, true);
     }
@@ -1193,7 +1190,7 @@
   async function openB(entry: DirEntry) {
     if (entry.is_dir) { await navigateB(entry.path); return; }
     try {
-      await invoke("open_external", { path: entry.path });
+      unwrap(await commands.openExternal(entry.path));
       recents = settings.addRecent(recents, { path: entry.path, name: entry.name });
       settings.saveRecents(recents);
     } catch {
@@ -1237,7 +1234,7 @@
     const { sources, to } = commanderContext();
     if (sources.length === 0 || !to) return;
     try {
-      const results = await invoke<OpResult[]>("move_entries", { paths: sources, dest: to });
+      const results = await commands.moveEntries(sources, to);
       reportResults(results, "Moved");
       const moves = results
         .map((r, i) => ({ from: sources[i], to: r.path, ok: r.ok }))
@@ -1293,7 +1290,7 @@
     }
     if (isHome) return;
     try {
-      const parent = await invoke<string | null>("parent_dir", { path: currentPath });
+      const parent = await commands.parentDir(currentPath);
       await navigate(parent ?? HOME);
     } catch {
       await navigate(HOME);
@@ -1303,7 +1300,7 @@
   async function refresh() {
     if (archive) {
       try {
-        const entries = await invoke<ArchiveEntry[]>("read_archive_entries", { path: archive.zipPath });
+        const entries = unwrap(await commands.readArchiveEntries(archive.zipPath));
         archive = { ...archive, entries };
       } catch { /* keep current view */ }
       return;
@@ -1342,7 +1339,7 @@
     try {
       // open_external runs it through the OS shell — reliably launches the
       // default app, and executes .exe/.cmd/.bat (CPE-240).
-      await invoke("open_external", { path: entry.path });
+      unwrap(await commands.openExternal(entry.path));
       recents = settings.addRecent(recents, { path: entry.path, name: entry.name });
       settings.saveRecents(recents);
     } catch (e) {
@@ -1353,7 +1350,7 @@
 
   async function openRecent(path: string) {
     try {
-      await invoke("open_external", { path });
+      unwrap(await commands.openExternal(path));
     } catch {
       // A recent file that no longer opens is removed rather than nagging forever.
       recents = recents.filter((r) => r.path !== path);
@@ -1559,7 +1556,7 @@
       joinPath(dir, it.to),
     ]);
     try {
-      const results = await invoke<OpResult[]>("move_exact", { pairs });
+      const results = await commands.moveExact(pairs);
       reportResults(results, "Renamed");
       const moves = results
         .map((r, i) => ({ from: pairs[i][0], to: r.path, ok: r.ok }))
@@ -1593,7 +1590,7 @@
     }
 
     try {
-      const to = await invoke<string>("rename_entry", { path, newName });
+      const to = unwrap(await commands.renameEntry(path, newName));
       // Carry any tags to the new path so they follow the file (CPE-652); best-effort.
       retagPath(path, to).catch(() => {});
       undoStack = pushUndo(undoStack, {
@@ -1621,12 +1618,10 @@
       if (entry.kind === "delete") {
         // Only ever pushed onto the stack when the platform can restore, so we
         // never reach here on macOS.
-        results = await invoke<OpResult[]>("restore_from_trash", {
-          paths: deletedPaths(entry),
-        });
+        results = await commands.restoreFromTrash(deletedPaths(entry));
       } else {
         const pairs = invert(entry).map((m) => [m.from, m.to] as [string, string]);
-        results = await invoke<OpResult[]>("move_exact", { pairs });
+        results = await commands.moveExact(pairs);
       }
 
       const failed = results.filter((r) => !r.ok);
@@ -1648,10 +1643,7 @@
     if (isHome || blockedInArchive()) return;
     try {
       const name = uniqueName("New folder", entries.map((e) => e.name));
-      const created = await invoke<string>("create_dir", {
-        path: currentPath,
-        name,
-      });
+      const created = unwrap(await commands.createDir(currentPath, name));
       pendingRenamePath = created; // select + inline-rename it once the list reloads
       await loadPath(currentPath);
     } catch (e) {
@@ -1667,10 +1659,7 @@
         ".txt",
         entries.map((e) => e.name),
       );
-      const created = await invoke<string>("create_file", {
-        path: currentPath,
-        name,
-      });
+      const created = unwrap(await commands.createFile(currentPath, name));
       pendingRenamePath = created; // select + inline-rename it once the list reloads
       await loadPath(currentPath);
     } catch (e) {
@@ -1742,7 +1731,7 @@
 
     // MOVE → existing synchronous path (keeps undo).
     try {
-      const results = await invoke<OpResult[]>("move_entries", { paths: sources, dest });
+      const results = await commands.moveEntries(sources, dest);
       reportResults(results, "Moved");
       const moves = results
         .map((r, i) => ({ from: sources[i], to: r.path, ok: r.ok }))
@@ -1809,7 +1798,7 @@
 
     // MOVE → the existing synchronous path: instant same-volume rename and undo support.
     try {
-      const results = await invoke<OpResult[]>("move_entries", { paths: sources, dest: currentPath });
+      const results = await commands.moveEntries(sources, currentPath);
       reportResults(results, "Moved");
       const moves = results
         .map((r, i) => ({ from: sources[i], to: r.path, ok: r.ok }))
@@ -1832,27 +1821,27 @@
 
   /** Fetch a text file's contents for the preview pane (size-capped backend). */
   function loadPreviewText(path: string): Promise<string> {
-    return invoke<string>("read_file_text", { path, maxBytes: PREVIEW_MAX_BYTES });
+    return commands.readFileText(path, PREVIEW_MAX_BYTES).then(unwrap);
   }
 
   /** List an archive's entries for the preview pane. */
   function loadArchiveEntries(path: string): Promise<ArchiveEntry[]> {
-    return invoke<ArchiveEntry[]>("read_archive_entries", { path });
+    return commands.readArchiveEntries(path).then(unwrap);
   }
 
   /** Read a read-only text summary of a binary file for the preview pane. */
   function loadPreviewInfo(path: string): Promise<string> {
-    return invoke<string>("read_preview_info", { path });
+    return commands.readPreviewInfo(path).then(unwrap);
   }
 
   /** Decode a non-native image (TIFF/PSD) to a data: URL for the preview pane. */
   function loadImageData(path: string): Promise<string> {
-    return invoke<string>("read_image_data_url", { path });
+    return commands.readImageDataUrl(path).then(unwrap);
   }
 
   /** Save edited text back to a file, then refresh so size/date update. */
   async function savePreviewText(path: string, contents: string): Promise<void> {
-    await invoke("write_file_text", { path, contents });
+    unwrap(await commands.writeFileText(path, contents));
     await loadPath(currentPath);
   }
 
@@ -1896,7 +1885,7 @@
   async function openTerminal(path: string) {
     if (isHome || archive || !path) return;
     try {
-      await invoke("open_terminal", { path });
+      unwrap(await commands.openTerminal(path));
     } catch {
       showNotice("Couldn't open a terminal here.", true);
     }
@@ -1948,10 +1937,7 @@
     if (isHome || blockedInArchive() || selectedEntries.length === 0) return;
     const sources = selectedEntries.map((e) => e.path);
     try {
-      const results = await invoke<OpResult[]>("copy_entries", {
-        paths: sources,
-        dest: currentPath,
-      });
+      const results = await commands.copyEntries(sources, currentPath);
       reportResults(results, "Duplicated");
       await loadPath(currentPath);
     } catch (e) {
@@ -1964,7 +1950,7 @@
     if (selectedEntries.length !== 2 || selectedEntries.some((e) => e.is_dir)) return;
     const [a, b] = selectedEntries;
     try {
-      const same = await invoke<boolean>("files_identical", { a: a.path, b: b.path });
+      const same = unwrap(await commands.filesIdentical(a.path, b.path));
       showNotice(
         same
           ? `"${a.name}" and "${b.name}" are identical.`
@@ -2010,10 +1996,7 @@
     const dest = joinPath(currentPath, name);
     const n = selectedEntries.length;
     try {
-      const created = await invoke<string>("compress_to_zip", {
-        paths: selectedEntries.map((e) => e.path),
-        dest,
-      });
+      const created = unwrap(await commands.compressToZip(selectedEntries.map((e) => e.path), dest));
       pendingSelectPath = created;
       showNotice(`Compressed ${n} item${n === 1 ? "" : "s"} to "${name}".`);
       await loadPath(currentPath);
@@ -2031,7 +2014,7 @@
     const name = uniqueName(archiveBaseName(entry.name), entries.map((e) => e.name));
     const dest = joinPath(currentPath, name);
     try {
-      await invoke<string>("extract_archive", { path: entry.path, dest });
+      unwrap(await commands.extractArchive(entry.path, dest));
       pendingSelectPath = dest;
       showNotice(`Extracted "${entry.name}" to "${name}".`);
       await loadPath(currentPath);
@@ -2075,7 +2058,7 @@
     // cross-volume copies. same_volume is best-effort — on error it returns false → copy (never loses src).
     let sameVolume: boolean | null = null;
     if (!mods.ctrlKey && !mods.shiftKey) {
-      sameVolume = await invoke<boolean>("same_volume", { a: paths[0], b: dest }).catch(() => false);
+      sameVolume = await commands.sameVolume(paths[0], dest).catch(() => false);
     }
     const copy = resolveEffect(mods, sameVolume) === "copy";
 
@@ -2106,7 +2089,7 @@
 
     // MOVE → synchronous path (fast same-folder-volume renames) so undo + tag-follow stay intact.
     try {
-      const results = await invoke<OpResult[]>("move_entries", { paths, dest });
+      const results = await commands.moveEntries(paths, dest);
       reportResults(results, "Moved");
       const moves = results
         .map((r, i) => ({ from: paths[i], to: r.path, ok: r.ok }))
@@ -2149,10 +2132,9 @@
     const paths = selectedEntries.map((e) => e.path);
     if (paths.length === 0) return;
     try {
-      const results = await invoke<OpResult[]>(
-        permanent ? "delete_permanent" : "delete_to_trash",
-        { paths },
-      );
+      const results = permanent
+        ? await commands.deletePermanent(paths)
+        : await commands.deleteToTrash(paths);
       reportResults(results, permanent ? "Permanently deleted" : "Moved to Recycle Bin:");
 
       // A trashed delete is undoable — but ONLY where the platform can actually
@@ -2194,7 +2176,7 @@
     const entry = selectedEntries[0];
     if (!entry || !isExecutable(entry)) return;
     try {
-      await invoke("open_external", { path: entry.path });
+      unwrap(await commands.openExternal(entry.path));
     } catch {
       showNotice(`Couldn't run "${entry.name}".`, true);
     }
@@ -2205,7 +2187,7 @@
     const entry = selectedEntries[0];
     if (!entry || !isExecutable(entry)) return;
     try {
-      await invoke("run_as_admin", { path: entry.path });
+      unwrap(await commands.runAsAdmin(entry.path));
     } catch {
       showNotice(`Couldn't run "${entry.name}" as administrator.`, true);
     }
@@ -2581,7 +2563,7 @@
         filters: [{ name: payload.format.toUpperCase(), extensions: [payload.ext] }],
       });
       if (!path) return;
-      await invoke("write_file_text", { path, contents: payload.content });
+      unwrap(await commands.writeFileText(path, payload.content));
       showNotice(`Exported ${path.split(/[\\/]/).pop()}.`);
     } catch (e) {
       showNotice(String(e), true);
@@ -2678,7 +2660,7 @@
       });
       if (!path) return; // cancelled
       const text = path.toLowerCase().endsWith(".txt") ? detailList(visible) : csvList(visible);
-      await invoke("write_file_text", { path, contents: text });
+      unwrap(await commands.writeFileText(path, text));
       showNotice(`Saved ${visible.length} rows to ${path.split(/[\\/]/).pop()}.`);
     } catch (e) {
       showNotice(String(e), true);
@@ -2690,7 +2672,7 @@
     try {
       const path = await saveFileDialog({ defaultPath: "tags.json", filters: [{ name: "JSON", extensions: ["json"] }] });
       if (!path) return;
-      await invoke("write_file_text", { path, contents: exportTags() });
+      unwrap(await commands.writeFileText(path, exportTags()));
       showNotice(`Tags exported to ${path.split(/[\\/]/).pop()}.`);
     } catch (e) {
       showNotice(String(e), true);
@@ -2702,7 +2684,7 @@
     try {
       const picked = await openFolderDialog({ directory: false, multiple: false, filters: [{ name: "JSON", extensions: ["json"] }] });
       if (!picked || typeof picked !== "string") return;
-      const json = await invoke<string>("read_file_text", { path: picked, maxBytes: 16 * 1024 * 1024 });
+      const json = unwrap(await commands.readFileText(picked, 16 * 1024 * 1024));
       await importTags(json);
       showNotice("Tags imported.");
     } catch (e) {
@@ -2748,10 +2730,10 @@
   async function handleContextAction(a: FolderAction) {
     try {
       if (a.kind === "open-path") {
-        await invoke("open_external", { path: a.target });
+        unwrap(await commands.openExternal(a.target));
         showNotice(`${a.label}…`);
       } else if (a.kind === "open-github") {
-        const url = await invoke<string | null>("git_remote_url", { path: a.target });
+        const url = await commands.gitRemoteUrl(a.target);
         if (url) await openUrl(url);
         else showNotice("This repository has no remote URL configured.", true);
       }
@@ -2925,9 +2907,9 @@
 
     try {
       const [p, d, h, canRestore] = await Promise.all([
-        invoke<Place[]>("special_folders"),
-        invoke<Place[]>("list_drives"),
-        invoke<string>("home_dir"),
+        commands.specialFolders(),
+        commands.listDrives(),
+        commands.homeDir().then(unwrap),
         commands.canRestoreFromTrash(),
       ]);
       places = p;
