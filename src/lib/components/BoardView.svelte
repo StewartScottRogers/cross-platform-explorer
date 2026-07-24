@@ -5,7 +5,7 @@
   // truth. Read + drag only — agent dispatch is wave 2 (CPE-522). Backed by the CPE-520 commands.
   import { createEventDispatcher, onMount } from "svelte";
   import { open as openFolderDialog } from "@tauri-apps/plugin-dialog";
-  import { invoke } from "../invoke";
+  import { unwrap } from "../invoke";
   import { commands } from "../bindings.gen"; // typed client (CPE-958)
   import { lsGet, lsSet, lsBool } from "../persist";
   import Icon from "./Icon.svelte";
@@ -141,14 +141,14 @@
   }
   async function loadEpics() {
     try {
-      epics = await invoke<Epic[]>("board_epics", { root: boardRoot });
+      epics = await commands.boardEpics(boardRoot);
     } catch {
       epics = [];
     }
   }
   async function loadArchived() {
     try {
-      archived = await invoke<Card[]>("board_archived", { root: boardRoot });
+      archived = await commands.boardArchived(boardRoot);
     } catch {
       archived = [];
     }
@@ -159,7 +159,7 @@
     // browsed folder that has a Tickets/ folder (CPE-554) — before scanning. A saved/chosen root wins.
     if (!savedRoot()) {
       try {
-        const detected = await invoke<string | null>("find_project_root", { start: root });
+        const detected = await commands.findProjectRoot(root);
         if (detected) boardRoot = detected;
       } catch { /* ignore — fall back to the current folder (→ empty-state) */ }
     }
@@ -203,12 +203,12 @@
     try {
       if (lane === "Review") {
         // The virtual Review lane is the `review` tag on a Doing card — send it there.
-        if (card.column !== "Doing") await invoke("board_move", { root, id, toColumn: "Doing" });
-        await invoke("board_review", { root, id, on: true });
+        if (card.column !== "Doing") unwrap(await commands.boardMove(root, id, "Doing"));
+        unwrap(await commands.boardReview(root, id, true));
       } else {
         // A real column: clear any review mark, then move if the folder actually changes.
-        if (card.tags.includes("review")) await invoke("board_review", { root, id, on: false });
-        if (card.column !== lane) await invoke("board_move", { root, id, toColumn: lane });
+        if (card.tags.includes("review")) unwrap(await commands.boardReview(root, id, false));
+        if (card.column !== lane) unwrap(await commands.boardMove(root, id, lane));
       }
       note = lane === "Review" ? `Sent ${id} to review` : `Moved ${id} → ${lane}`;
       error = "";
@@ -225,7 +225,7 @@
     if (card.column !== "Doing" && isValidMove(cards, card.id, "Doing")) {
       cards = cards.map((c) => (c.id === card.id ? { ...c, column: "Doing" } : c));
       try {
-        await invoke("board_move", { root, id: card.id, toColumn: "Doing" });
+        unwrap(await commands.boardMove(root, card.id, "Doing"));
       } catch (e) {
         error = `Couldn't move ${card.id}: ` + (e instanceof Error ? e.message : String(e));
       }
