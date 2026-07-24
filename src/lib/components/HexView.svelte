@@ -5,7 +5,8 @@
    * (`detectSignature`, CPE-770) and a data-inspector panel decoding the byte under the cursor
    * (`inspect`, CPE-771). Read-only v1; thin render over the tested pure helpers.
    */
-  import { invoke } from "../invoke";
+  import { unwrap } from "../invoke";
+  import { commands } from "../bindings.gen"; // typed client (CPE-964)
   import { hexRows, detectSignature, type HexRow, type Signature } from "../hexdump";
   import { inspect, type InspectRow } from "../hexinspect";
 
@@ -38,7 +39,7 @@
     state = "loading";
     error = "";
     try {
-      const arr = await invoke<number[]>("read_file_range", { path, offset, len: PAGE });
+      const arr = unwrap(await commands.readFileRange(path, offset, PAGE));
       bytes = new Uint8Array(arr);
       rows = hexRows(bytes, offset);
       if (offset === 0) sig = detectSignature(bytes);
