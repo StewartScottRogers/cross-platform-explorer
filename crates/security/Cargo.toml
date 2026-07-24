@@ -16,3 +16,12 @@ license = "MIT"
 cpe-contract = { path = "../contract" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+# Concrete HS256 JWT verifier (CPE-965), OFF by default so the security CORE stays dependency-light — the
+# JWT/crypto machinery is opt-in, as CPE-816/817 intended. All pure-Rust, no system libs.
+hmac = { version = "0.12", optional = true }
+sha2 = { version = "0.10", optional = true }
+base64 = { version = "0.22", optional = true }
+
+[features]
+# Opt-in concrete `HmacJwtVerifier` (HS256) implementing the AuthN `TokenVerifier` trait (CPE-965).
+jwt = ["dep:hmac", "dep:sha2", "dep:base64"]

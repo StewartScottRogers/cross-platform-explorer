@@ -154,6 +154,9 @@ jobs:
         run: |
           cargo clippy --all-targets -- -D warnings
           cargo test
+          # The opt-in JWT verifier (CPE-965) — lint + test it too; default build above stays crypto-free.
+          cargo clippy --all-targets --features jwt -- -D warnings
+          cargo test --features jwt
 
       - name: server — clippy + test
         working-directory: crates/server

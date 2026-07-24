@@ -57,6 +57,11 @@ pub mod authz;
 /// [`TransportSecurity`] plane (CPE-818).
 pub mod transport;
 
+/// Concrete HS256 JWT [`authn::TokenVerifier`] for the OIDC authenticator — feature-gated (`jwt`) + OFF by
+/// default so the security core stays crypto-free; the JWT machinery is opt-in (CPE-965).
+#[cfg(feature = "jwt")]
+pub mod jwt;
+
 // ---------------------------------------------------------------------------
 // Core decision types
 // ---------------------------------------------------------------------------
