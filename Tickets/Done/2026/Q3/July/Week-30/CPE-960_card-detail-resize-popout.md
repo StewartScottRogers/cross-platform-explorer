@@ -4,8 +4,9 @@ title: Card-detail popup — resizable + statusbar + thumb, pop out to its own w
 type: feature
 component: Multiple
 priority: medium
-status: Doing
+status: Done
 tags: ready
+closed: 2026-07-23
 created: 2026-07-23
 epic: CPE-503
 ---

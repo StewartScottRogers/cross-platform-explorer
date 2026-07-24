@@ -4,8 +4,9 @@ title: Agent Board — click a ticket/epic card to open a details popup
 type: feature
 component: Multiple
 priority: medium
-status: Doing
+status: Done
 tags: ready
+closed: 2026-07-23
 created: 2026-07-23
 epic: CPE-503
 ---
@@ -34,3 +35,9 @@ Reuse `renderMarkdown` (src/lib/preview/markdown.ts, marked+DOMPurify). Register
 `generate_handler!` + `collect_commands!` and regenerate `bindings.gen.ts`
 (`cargo run --bin export_bindings --features "specta-bindings sidecar-platform"`). Dialogs get a visible
 border (per the dialogs-need-visible-border convention).
+
+## Agent Directives
+_Machine-readable: an agent acts on an `open` directive, appends a reply, then flips it to `done`._
+
+### ▸ open · to `any` · 2026-07-24T01:48:22.842Z
+Summarize the risks in this ticket
