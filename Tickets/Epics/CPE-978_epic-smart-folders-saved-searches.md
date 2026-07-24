@@ -2,7 +2,7 @@
 id: CPE-978
 title: "EPIC: Smart folders & saved searches"
 type: Task
-status: Proposed
+status: In Progress
 priority: Medium
 component: Multiple
 tags: [epic]
@@ -10,6 +10,18 @@ estimate: 4h+
 created: 2026-07-24
 closed:
 ---
+
+> **Activated 2026-07-24** (workshift, Foreman — user away, decisions logged). First slice = the **pure
+> saved-query model + evaluator** (CPE-986), in **TypeScript** (`src/lib/`) reusing the existing
+> `Condition` matcher (`selectMatch.ts`/`colorRules.ts`) — NOT a parallel Rust matcher. Live-refresh wiring,
+> the sidebar UI, and persistence follow; a semantic saved query composes with CPE-976 later.
+
+## Child tickets
+1. **CPE-986** — Pure saved-query model + evaluator (`src/lib/savedSearch.ts`): a serialisable `SavedSearch`
+   (named set of `Condition`s + scope/sort) + `evaluateSavedSearch(entries, search, now)` reusing
+   `matchesCondition`. Vitest. *Headless (TS) — buildable now.*
+2. **CPE-988+** — Live refresh on change (reuse folder-watch/CPE-833 signals), the sidebar smart-folder
+   surface + "Save search…", and persistence. **GUI.**
 
 ## Goal
 Save a search as a **live virtual folder**: define it once (filters — name/glob, type, size, date, tag,
