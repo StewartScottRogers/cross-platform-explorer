@@ -8,13 +8,20 @@
 //! supplies.
 
 use std::collections::BTreeMap;
+use std::path::Path;
 
 use crate::embedder::Embedder;
-use crate::vector_index::VectorIndex;
+use crate::vector_index::{VectorIndex, VectorIndexError};
 
 /// Separator between a document id and its chunk index in the vector index's item ids. NUL never appears in
 /// a path/id, so `split_once('\0')` recovers the document id unambiguously.
 const CHUNK_SEP: char = '\u{0}';
+
+/// On-disk magic + format version for a persisted [`SemanticIndex`] (CPE-995). A magic/version mismatch →
+/// [`SemanticIndexError::Stale`] (rebuild), mirroring [`crate::vector_index`]'s discipline. Distinct from the
+/// inner `VectorIndex` magic, which independently guards its own appended region.
+const SEM_MAGIC: &[u8; 8] = b"SEMIDX\x00\x00";
+const SEM_FORMAT_VERSION: u32 = 1;
 
 /// Default chunking: how many words per chunk, and how many overlap between consecutive chunks.
 const DEFAULT_MAX_WORDS: usize = 120;
@@ -153,6 +160,136 @@ impl SemanticIndex {
         docs.truncate(k);
         docs
     }
+
+    /// Serialise to the hand-rolled binary format: header (magic + version + `max_words` + `overlap` +
+    /// doc count), then each document's id (`u32` len + utf8) and chunk count (`u32`), then the underlying
+    /// [`VectorIndex`] bytes appended verbatim. The embedder is **not** serialised — it is supplied on
+    /// [`SemanticIndex::load`].
+    pub fn to_bytes(&self) -> Vec<u8> {
+        let mut out = Vec::new();
+        out.extend_from_slice(SEM_MAGIC);
+        out.extend_from_slice(&SEM_FORMAT_VERSION.to_le_bytes());
+        out.extend_from_slice(&(self.max_words as u32).to_le_bytes());
+        out.extend_from_slice(&(self.overlap as u32).to_le_bytes());
+        out.extend_from_slice(&(self.docs.len() as u32).to_le_bytes());
+        for (id, count) in &self.docs {
+            out.extend_from_slice(&(id.len() as u32).to_le_bytes());
+            out.extend_from_slice(id.as_bytes());
+            out.extend_from_slice(&(*count as u32).to_le_bytes());
+        }
+        // The inner index carries its own magic/version, so its region is self-describing.
+        out.extend_from_slice(&self.index.to_bytes());
+        out
+    }
+
+    /// Parse the format from [`SemanticIndex::to_bytes`], attaching `embedder` (which can't be serialised).
+    /// Wrong magic/version → [`SemanticIndexError::Stale`] (rebuild); a short/garbled body →
+    /// [`SemanticIndexError::Io`] (never a panic — every read is bounds-checked). The `embedder.dim()` **must**
+    /// match the persisted vector index's `dim()`; a mismatch means a different embedding model produced the
+    /// vectors, so they are meaningless → [`SemanticIndexError::Stale`] (rebuild).
+    pub fn from_bytes(bytes: &[u8], embedder: Box<dyn Embedder>) -> Result<SemanticIndex, SemanticIndexError> {
+        let mut r = SemReader::new(bytes);
+        let magic = r.take(8).ok_or(SemanticIndexError::Stale)?;
+        if magic != SEM_MAGIC {
+            return Err(SemanticIndexError::Stale);
+        }
+        if r.u32().ok_or(SemanticIndexError::Stale)? != SEM_FORMAT_VERSION {
+            return Err(SemanticIndexError::Stale);
+        }
+        let max_words = r.u32().ok_or_else(|| SemanticIndexError::Io("truncated header".into()))? as usize;
+        let overlap = r.u32().ok_or_else(|| SemanticIndexError::Io("truncated header".into()))? as usize;
+        let doc_count = r.u32().ok_or_else(|| SemanticIndexError::Io("truncated header".into()))? as usize;
+        let mut docs = BTreeMap::new();
+        for _ in 0..doc_count {
+            let len = r.u32().ok_or_else(|| SemanticIndexError::Io("truncated doc id len".into()))? as usize;
+            let raw = r.take(len).ok_or_else(|| SemanticIndexError::Io("truncated doc id".into()))?;
+            let id = std::str::from_utf8(raw)
+                .map_err(|_| SemanticIndexError::Io("non-utf8 doc id".into()))?
+                .to_string();
+            let count = r.u32().ok_or_else(|| SemanticIndexError::Io("truncated chunk count".into()))? as usize;
+            docs.insert(id, count);
+        }
+        // Whatever remains is the inner VectorIndex region; it validates its own magic/version.
+        let index = VectorIndex::from_bytes(r.rest())?;
+        // A different embedding model ⇒ the saved vectors mean nothing for this embedder ⇒ rebuild.
+        if embedder.dim() != index.dim() {
+            return Err(SemanticIndexError::Stale);
+        }
+        Ok(SemanticIndex { index, embedder, docs, max_words, overlap })
+    }
+
+    /// Persist to `path` via a temp sibling + rename, so a crash never leaves a half-written index.
+    pub fn save(&self, path: &Path) -> Result<(), SemanticIndexError> {
+        let tmp = path.with_extension("semidx.tmp");
+        std::fs::write(&tmp, self.to_bytes()).map_err(|e| SemanticIndexError::Io(e.to_string()))?;
+        std::fs::rename(&tmp, path).map_err(|e| SemanticIndexError::Io(e.to_string()))?;
+        Ok(())
+    }
+
+    /// Load from `path`, attaching `embedder`. Missing/unreadable → [`SemanticIndexError::Io`]; format or
+    /// embedder-dim mismatch → [`SemanticIndexError::Stale`] so the caller rebuilds transparently.
+    pub fn load(path: &Path, embedder: Box<dyn Embedder>) -> Result<SemanticIndex, SemanticIndexError> {
+        let bytes = std::fs::read(path).map_err(|e| SemanticIndexError::Io(e.to_string()))?;
+        SemanticIndex::from_bytes(&bytes, embedder)
+    }
+}
+
+/// Why a [`SemanticIndex::load`] didn't return a usable index. Mirrors [`VectorIndexError`]'s two-arm style.
+#[derive(Debug)]
+pub enum SemanticIndexError {
+    /// The file couldn't be read / is short or garbled. Carries the OS or parse message.
+    Io(String),
+    /// The file is a different magic/format version, or its vectors were made by a different embedding model
+    /// (`dim` mismatch) — rebuild rather than surface an error. Also how a format/model change is absorbed.
+    Stale,
+}
+
+impl std::fmt::Display for SemanticIndexError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            SemanticIndexError::Io(m) => write!(f, "semantic index io error: {m}"),
+            SemanticIndexError::Stale => {
+                write!(f, "semantic index is stale (format/model mismatch); rebuild")
+            }
+        }
+    }
+}
+impl std::error::Error for SemanticIndexError {}
+
+impl From<VectorIndexError> for SemanticIndexError {
+    /// Fold the inner vector-index failure into the matching semantic-index arm, so an appended-region
+    /// format mismatch is a transparent rebuild and a truncated region is an io error.
+    fn from(e: VectorIndexError) -> Self {
+        match e {
+            VectorIndexError::Io(m) => SemanticIndexError::Io(m),
+            VectorIndexError::Stale => SemanticIndexError::Stale,
+        }
+    }
+}
+
+/// A tiny bounds-checked cursor over the index bytes — every read returns `None` past the end, so a
+/// truncated file degrades to an error instead of panicking (same discipline as [`crate::vector_index`]).
+struct SemReader<'a> {
+    buf: &'a [u8],
+    pos: usize,
+}
+impl<'a> SemReader<'a> {
+    fn new(buf: &'a [u8]) -> Self {
+        SemReader { buf, pos: 0 }
+    }
+    fn take(&mut self, n: usize) -> Option<&'a [u8]> {
+        let end = self.pos.checked_add(n)?;
+        let s = self.buf.get(self.pos..end)?;
+        self.pos = end;
+        Some(s)
+    }
+    fn u32(&mut self) -> Option<u32> {
+        self.take(4).map(|b| u32::from_le_bytes([b[0], b[1], b[2], b[3]]))
+    }
+    /// The unread remainder (the appended `VectorIndex` region).
+    fn rest(&self) -> &'a [u8] {
+        &self.buf[self.pos.min(self.buf.len())..]
+    }
 }
 
 #[cfg(test)]
@@ -241,5 +378,73 @@ mod tests {
         assert!(si.contains("empty"));
         assert_eq!(si.document_count(), 1);
         assert!(si.search("empty", 5).is_empty());
+    }
+
+    /// A unique temp path per test process/name, cleaned up by the caller.
+    fn temp_path(name: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!("cpe-semidx-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir.join(name)
+    }
+
+    #[test]
+    fn save_load_roundtrips_docs_params_and_search() {
+        let file = temp_path("roundtrip.semidx");
+        let mut si = fake_index().with_chunking(4, 1);
+        si.upsert_document("fox.txt", "the quick brown fox jumps over things");
+        si.upsert_document("dog.txt", "a lazy sleeping dog in the sun");
+        let before = si.search("quick fox", 3);
+        assert_eq!(doc_ids(&before)[0], "fox.txt");
+        si.save(&file).unwrap();
+
+        // Load with a FRESH embedder box (same dim) — the embedder isn't serialised.
+        let re = SemanticIndex::load(&file, Box::new(FakeEmbedder::new(1024))).unwrap();
+        assert_eq!(re.document_count(), 2); // doc count preserved
+        assert_eq!(re.max_words, 4); // chunking params preserved
+        assert_eq!(re.overlap, 1);
+        assert!(re.contains("fox.txt") && re.contains("dog.txt"));
+        // The same top document comes back from the reloaded index.
+        assert_eq!(doc_ids(&re.search("quick fox", 3))[0], "fox.txt");
+
+        let _ = std::fs::remove_file(&file);
+    }
+
+    #[test]
+    fn load_with_wrong_dim_embedder_is_stale_not_panic() {
+        let file = temp_path("wrongdim.semidx");
+        let mut si = fake_index(); // dim 1024
+        si.upsert_document("d", "alpha beta gamma");
+        si.save(&file).unwrap();
+        // A different embedding model (dim) ⇒ saved vectors are meaningless ⇒ Stale (rebuild), not a panic.
+        let got = SemanticIndex::load(&file, Box::new(FakeEmbedder::new(256)));
+        assert!(matches!(got, Err(SemanticIndexError::Stale)));
+        let _ = std::fs::remove_file(&file);
+    }
+
+    #[test]
+    fn bad_magic_is_stale() {
+        let got = SemanticIndex::from_bytes(b"not a semidx buffer", Box::new(FakeEmbedder::new(8)));
+        assert!(matches!(got, Err(SemanticIndexError::Stale)));
+    }
+
+    #[test]
+    fn truncated_body_is_io_not_panic() {
+        let mut si = fake_index();
+        si.upsert_document("a", "one two three four five");
+        let full = si.to_bytes();
+        // Every prefix either errors cleanly or (for a valid smaller header) reconstructs — never panics.
+        for cut in 0..full.len() {
+            let _ = SemanticIndex::from_bytes(&full[..cut], Box::new(FakeEmbedder::new(1024)));
+        }
+        // A header that claims a doc id longer than the remaining bytes → Io.
+        let mut b = Vec::new();
+        b.extend_from_slice(SEM_MAGIC);
+        b.extend_from_slice(&SEM_FORMAT_VERSION.to_le_bytes());
+        b.extend_from_slice(&4u32.to_le_bytes()); // max_words
+        b.extend_from_slice(&1u32.to_le_bytes()); // overlap
+        b.extend_from_slice(&1u32.to_le_bytes()); // 1 doc
+        b.extend_from_slice(&99u32.to_le_bytes()); // id len 99, but no bytes follow
+        let got = SemanticIndex::from_bytes(&b, Box::new(FakeEmbedder::new(1024)));
+        assert!(matches!(got, Err(SemanticIndexError::Io(_))));
     }
 }
