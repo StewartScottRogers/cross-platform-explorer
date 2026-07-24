@@ -14,9 +14,10 @@
 
 use std::path::Path;
 
+use crate::ctx::ServerCtx;
 use crate::native_meta::{self, MetaError};
 use crate::native_tags::{self, NativeTags};
-use crate::tags::TagStore;
+use crate::tags::{read_tags_from, write_tags_to, TagStore};
 
 /// The native attribute/stream name CPE reads and writes a path's tags under, per OS.
 pub fn native_name() -> String {
@@ -96,6 +97,29 @@ pub fn push(store: &TagStore, path: &Path) -> Result<(), String> {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Command entry points (CPE-828) — resolve the tag store's config dir via `ServerCtx`, run the
+// pull/push, and persist. The Tauri `#[tauri::command]` fns are one-line dispatchers over these,
+// mirroring `crate::tags`'s command-entry pattern.
+// ---------------------------------------------------------------------------
+
+/// Pull `path`'s native tags into the persisted tag store (non-destructive) and save if anything
+/// changed. Returns the updated whole store (so the frontend can refresh its tag view in one round-trip).
+pub fn pull_ctx(ctx: &dyn ServerCtx, path: &Path) -> Result<TagStore, String> {
+    let dir = ctx.app_config_dir()?;
+    let mut store = read_tags_from(&dir);
+    if pull(&mut store, path)? {
+        write_tags_to(&dir, &store)?;
+    }
+    Ok(store)
+}
+
+/// Push `path`'s internal tags out to native file metadata (the internal store is authoritative). Reads
+/// the persisted store via `ctx`; a filesystem that can't store native metadata degrades to a no-op.
+pub fn push_ctx(ctx: &dyn ServerCtx, path: &Path) -> Result<(), String> {
+    push(&read_tags_from(&ctx.app_config_dir()?), path)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -136,6 +160,34 @@ mod tests {
         assert_eq!(dst[&f.to_string_lossy().to_string()].tags(), &["q3".to_string(), "report".to_string()]);
         // A second pull is a no-op (already reconciled).
         assert!(!pull(&mut dst, &f).unwrap());
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn pull_ctx_and_push_ctx_round_trip_through_the_config_store() {
+        let dir = scratch("ctx");
+        let f = dir.join("file.txt");
+        std::fs::write(&f, b"x").unwrap();
+        if !native_meta::is_supported(&f) {
+            let _ = std::fs::remove_dir_all(&dir);
+            return;
+        }
+
+        // A ctx whose config dir holds the tag store: tag the file, then push out to native metadata.
+        let ctx = crate::ctx::HeadlessCtx::new(dir.join("home1"));
+        crate::tags::set(&ctx, &f.to_string_lossy(), vec!["report".into(), "q3".into()], "red".into()).unwrap();
+        push_ctx(&ctx, &f).unwrap();
+
+        // A DIFFERENT (empty) config store pulls the native tags back in and persists them.
+        let ctx2 = crate::ctx::HeadlessCtx::new(dir.join("home2"));
+        let store = pull_ctx(&ctx2, &f).unwrap();
+        assert_eq!(
+            store[&f.to_string_lossy().to_string()].tags(),
+            &["q3".to_string(), "report".to_string()]
+        );
+        // Persisted: reloading ctx2's store sees them without re-reading native.
+        assert_eq!(crate::tags::load(&ctx2).unwrap().len(), 1);
 
         let _ = std::fs::remove_dir_all(&dir);
     }

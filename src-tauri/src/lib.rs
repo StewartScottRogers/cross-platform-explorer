@@ -2473,6 +2473,32 @@ fn template_import(app: tauri::AppHandle, json: String) -> Result<TemplateCatalo
     cpe_server::folder_template::import(&server_ctx::TauriCtx::new(&app), &json)
 }
 
+// ---- Native tags bridge (CPE-828, epic CPE-717) ----------------------------------------------
+// Sync a path's CPE tags with the OS-native store (macOS Finder tags / Windows NTFS ADS / Linux xattr)
+// via the tested `cpe_server::native_bridge` orchestration (CPE-830). Thin dispatchers over its ctx
+// entry points; both degrade to a no-op on a filesystem that can't store native metadata.
+
+/// The human name of this OS's native tag store ("Finder tags" / "NTFS alternate data streams" / …).
+#[tauri::command]
+#[cfg_attr(feature = "specta-bindings", specta::specta)]
+fn native_tags_name() -> String {
+    cpe_server::native_bridge::native_name()
+}
+
+/// Pull `path`'s native tags into the CPE store (non-destructive) and persist. Returns the updated store.
+#[tauri::command]
+#[cfg_attr(feature = "specta-bindings", specta::specta)]
+fn native_tags_pull(app: tauri::AppHandle, path: String) -> Result<TagStore, String> {
+    cpe_server::native_bridge::pull_ctx(&server_ctx::TauriCtx::new(&app), std::path::Path::new(&path))
+}
+
+/// Push `path`'s CPE tags out to native file metadata (the CPE store is authoritative).
+#[tauri::command]
+#[cfg_attr(feature = "specta-bindings", specta::specta)]
+fn native_tags_push(app: tauri::AppHandle, path: String) -> Result<(), String> {
+    cpe_server::native_bridge::push_ctx(&server_ctx::TauriCtx::new(&app), std::path::Path::new(&path))
+}
+
 /// Return the user's home directory.
 #[tauri::command]
 #[cfg_attr(feature = "specta-bindings", specta::specta)]
@@ -5654,6 +5680,9 @@ pub fn run() {
             template_stamp,
             template_export,
             template_import,
+            native_tags_name,
+            native_tags_pull,
+            native_tags_push,
             rename_entry,
             delete_to_trash,
             delete_permanent,
@@ -6044,6 +6073,9 @@ pub fn export_bindings(out: &std::path::Path) -> Result<(), String> {
         template_stamp,
         template_export,
         template_import,
+        native_tags_name,
+        native_tags_pull,
+        native_tags_push,
         rename_entry,
         delete_to_trash,
         delete_permanent,
