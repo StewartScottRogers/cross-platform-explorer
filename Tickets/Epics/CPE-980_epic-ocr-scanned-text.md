@@ -2,7 +2,7 @@
 id: CPE-980
 title: "EPIC: OCR & scanned-document text"
 type: Task
-status: Proposed
+status: In Progress
 priority: Medium
 component: Multiple
 tags: [epic, big-design]
@@ -49,3 +49,15 @@ so the lean core pulls in no OCR engine unless enabled.
   text-cache + pipeline wiring** headless first (a `FakeOcr` in tests proves the flow with zero engine
   weight, mirroring `provider::FakeProvider`), then integrate a real engine behind the feature. See
   [[headless-frontier-and-cpe-net]].
+
+## Activation (2026-07-24, workshift Foreman — user away, decisions logged)
+First slice = the **pure `OcrEngine` seam + a `FakeOcr` + a content-hash text cache** (CPE-991) in
+`cpe-server` (Rust), so the pipeline is testable with zero engine weight (mirrors `provider::FakeProvider`).
+A **real OCR engine** (bundled model / external service) is the big-design + user-resource call → deferred +
+noted. Preview/highlight UI is attended.
+
+### Child tickets
+1. **CPE-991** — Pure `cpe-server::ocr`: `trait OcrEngine { recognize(bytes) -> String }` + `FakeOcr` +
+   `OcrCache` (content-hash → text, so a page is OCR'd once). Cargo-tested. *Headless — buildable now.*
+2. **CPE-993+** — a real engine behind a feature gate (**needs a bundled model / external service — user
+   resource**) + preview/hit-highlight UI + feeding the semantic index. **Attended.**

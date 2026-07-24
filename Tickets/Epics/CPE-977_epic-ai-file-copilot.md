@@ -2,7 +2,7 @@
 id: CPE-977
 title: "EPIC: AI file copilot — natural-language file operations"
 type: Task
-status: Proposed
+status: In Progress
 priority: High
 component: Multiple
 tags: [epic, big-design]
@@ -56,3 +56,16 @@ tight preview/confirm/undo loop. High leverage, and it composes every batch capa
   `action_macro`/`restore_plan`), then the pluggable `LlmPlanner` seam, then the preview/confirm UI. Leans on
   [[CPE-729]], [[CPE-732]], [[CPE-739]]. See [[avoid-modal-permission-popups]] for where consent controls
   live.
+
+## Activation (2026-07-24, workshift Foreman — user away, decisions logged)
+First slice = the **pure structured op-plan model + validator + dry-run** (CPE-990) in `cpe-server` (Rust),
+reusing `action_macro`/`restore_plan` concepts — a typed, inspectable, filesystem-free plan the UI previews.
+The **NL→plan translator** needs an LLM backend (user resource / big-design) → deferred + noted. Preview/
+confirm/execute UI is attended.
+
+### Child tickets
+1. **CPE-990** — Pure `cpe-server::op_plan`: a typed `FileOpPlan` (whitelisted ops: move/rename/delete/
+   mkdir/copy) + `validate` (path-scope confinement, caps, no free-form) + a dry-run `summary`. Cargo-tested.
+   *Headless — buildable now.*
+2. **CPE-992+** — the `LlmPlanner` seam (**needs a model backend — user resource**), risk-gate via CPE-729,
+   preview/execute/undo via CPE-732. **Attended.**
