@@ -72,3 +72,11 @@ guard (CPE-813) keeps the generated types honest while this proceeds.
   **Deferred to increment 8** (local-type friction): `verify_all_baselines` (Record vs Partial + local
   IntegrityReport) and `forge_repo_status` ×2 (RepoSyncStatus vs local gitStatus null/undefined) — 3 sites
   still on raw `invoke`. npm check 0/0; full suite 930 green.
+- 2026-07-23 — Increment 8 (Nightshift): migrated App.svelte's final 3 type-friction sites, completing the
+  file (**App.svelte now has zero raw `invoke`**; dead `invoke` import removed). Confirmed local
+  `ChecksumEntry`/`IntegrityReport` (lib/integrity) are structurally identical to the generated types, so
+  `verify_all_baselines` needed only one `as Record<…>` cast to narrow the generated `Partial<{[k]:…}>`
+  return (the arg `Record` passes as-is; every key read was just sent in). `forge_repo_status` ×2 cast the
+  generated `RepoSyncStatus` to the local structural `gitStatus` type (`loadSyncPolicy`'s `OnDiverge` union
+  is assignable to `string|null`); both are plain-return commands that reject on the plain build → identical
+  try/catch → `null` fallback as before. npm check 0/0; full suite 930 green.

@@ -1,7 +1,6 @@
 <script lang="ts">
   import { onMount, onDestroy, tick } from "svelte";
   import { convertFileSrc } from "@tauri-apps/api/core";
-  import { invoke } from "./lib/invoke";
   import { rawInvoke, createChannel, unwrap } from "./lib/invoke";
   // Generated typed command client (CPE-953). First migrated call site — proves the typed surface works
   // end-to-end (routes through the busy-cursor invoke); the broader migration is incremental.
@@ -302,7 +301,9 @@
     const paths = Object.keys(integrityBaselines);
     if (paths.length === 0) return;
     try {
-      const reports = await invoke<Record<string, IntegrityReport>>("verify_all_baselines", { baselines: integrityBaselines });
+      // Generated return is Partial<{[k]: IntegrityReport}>; every key we read was just sent in
+      // `integrityBaselines`, so narrow the Partial back to a dense Record for the callers below.
+      const reports = unwrap(await commands.verifyAllBaselines(integrityBaselines)) as Record<string, IntegrityReport>;
       const flagged = Object.values(reports).filter((r) => r.corrupted.length > 0 || r.missing.length > 0);
       if (flagged.length === 0) {
         showNotice(`All ${paths.length} baselined folder${paths.length === 1 ? "" : "s"} verified — no issues.`, false);
@@ -598,7 +599,7 @@
   async function refreshGitStatus(path: string) {
     if (!path || isHome || archive) { gitStatus = null; return; }
     try {
-      const s = await invoke<typeof gitStatus>("forge_repo_status", { path, onDiverge: loadSyncPolicy(path) });
+      const s = (await commands.forgeRepoStatus(path, loadSyncPolicy(path))) as unknown as typeof gitStatus;
       gitStatus = s && (s as { is_repo?: boolean }).is_repo ? s : null;
     } catch {
       gitStatus = null; // plain build (command absent) or git unavailable
@@ -638,7 +639,7 @@
 
     autoSyncRunning = true;
     try {
-      const plan = await invoke<typeof gitStatus>("forge_repo_status", { path, onDiverge: loadSyncPolicy(path) });
+      const plan = (await commands.forgeRepoStatus(path, loadSyncPolicy(path))) as unknown as typeof gitStatus;
       if (!plan || !(plan as { is_repo?: boolean }).is_repo) return;
       const actions = autoSyncActions(plan as Parameters<typeof autoSyncActions>[0]);
       if (actions.length === 0) {
