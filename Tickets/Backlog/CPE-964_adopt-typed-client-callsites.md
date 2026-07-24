@@ -105,3 +105,10 @@ guard (CPE-813) keeps the generated types honest while this proceeds.
     typed bindings (only `forge_conflict_continue` is) — it's missing from `collect_commands!`. Filed as a
     follow-up; ConflictDialog's migration is blocked on it. Also still on raw invoke: SyncDialog (Status
     cast), transfers.ts, SessionHistoryDialog, and AttributesDialog (2 platform-excluded commands).
+- 2026-07-23 — Increment 12 (Nightshift): **ConflictDialog** fully migrated, after fixing [[CPE-968]] (added
+  the registered-but-unlisted `forge_conflict_abort` to `collect_commands!` + regenerated bindings). All 5
+  sites: forge_conflict_state / forge_conflict_versions (both **plain** returns, direct await — no unwrap) +
+  forge_resolve_file / forge_conflict_continue / forge_conflict_abort (Result, via unwrap; the old dynamic
+  `cmd` string ternary is now a typed-call ternary). Confirmed ConflictState/ConflictFile/ConflictVersions
+  are structurally identical to the local types. npm check 0/0; suite 930 green. Remaining on raw invoke:
+  SyncDialog (Status cast), transfers.ts, SessionHistoryDialog, AttributesDialog.
