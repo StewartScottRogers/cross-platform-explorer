@@ -84,3 +84,5 @@ hard rule as CPE-703).
   (backend/model-agnostic, cargo-tested), then the embedder seam, then the pipeline + UI. Composes with
   [[CPE-978]] (a semantic query can back a smart folder) and [[CPE-980]] (OCR feeds scanned docs in).
   See [[headless-frontier-and-cpe-net]], [[prefer-streaming-liveness]].
+
+2026-07-24 (dayshift) — **CPE-982** landed the embedder seam: `embedder::Embedder` (object-safe trait) + a dependency-free deterministic `FakeEmbedder` (feature-hashed bag-of-words, stable FNV-1a). Proven end-to-end with `vector_index` (token-overlap retrieval). CPE-983 (pipeline) / CPE-984 (query blend) can now build against a real `Embedder` with zero model weight; the **real backend stays the deferred big-design call** (user: "build the seam now, decide later").
