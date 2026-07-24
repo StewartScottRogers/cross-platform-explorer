@@ -5,10 +5,10 @@
   // CPE-484: restyled to match the Agent Deck launcher — labeled toolbar, unified status line, header
   // + status bar — a polished mini-app rather than a bare form.
   import { createEventDispatcher, onMount } from "svelte";
-  import { invoke } from "../invoke";
+  import { unwrap } from "../invoke";
+  import { commands } from "../bindings.gen"; // typed client (CPE-964)
   import { open as openFolderDialog } from "@tauri-apps/plugin-dialog";
   import Icon from "./Icon.svelte";
-  import { withBusy } from "../busy";
 
   interface RepoEntry { name: string; path: string; is_dir: boolean; size: number }
 
@@ -31,9 +31,7 @@
     repo = r;
     loading = true; error = "";
     try {
-      entries = await withBusy(() => invoke<RepoEntry[]>("forge_browse", {
-        provider, repo: r, path: toPath, token: token.trim() || null,
-      }));
+      entries = unwrap(await commands.forgeBrowse(provider, r, toPath, token.trim() || null));
       path = toPath;
       loaded = true;
       syncToken(); // a successful browse means the token (if any) works — persist per Remember
@@ -52,7 +50,7 @@
   // Load any saved token for this provider (CPE-439) so browse/clone don't need it re-typed.
   async function loadToken(): Promise<void> {
     try {
-      const saved = await invoke<string | null>("forge_get_token", { provider });
+      const saved = unwrap(await commands.forgeGetToken(provider));
       if (saved) { token = saved; remember = true; }
     } catch { /* no host / no saved token — leave the field blank */ }
   }
@@ -61,8 +59,8 @@
   /** Persist or forget the token per the Remember checkbox (CPE-439). Best-effort. */
   async function syncToken(): Promise<void> {
     try {
-      if (remember && token.trim()) await invoke("forge_set_token", { provider, token: token.trim() });
-      else if (!remember) await invoke("forge_delete_token", { provider });
+      if (remember && token.trim()) unwrap(await commands.forgeSetToken(provider, token.trim()));
+      else if (!remember) unwrap(await commands.forgeDeleteToken(provider));
     } catch { /* keychain unavailable — ignore */ }
   }
 
@@ -78,7 +76,7 @@
     const target = dir.replace(/[\\/]$/, "") + "/" + name;
     cloning = true; cloneMsg = `Cloning ${r} → ${target}…`; error = "";
     try {
-      await withBusy(() => invoke("forge_clone", { provider, repo: r, targetDir: target, token: token.trim() || null }));
+      unwrap(await commands.forgeClone(provider, r, target, token.trim() || null));
       cloneMsg = `Cloned to ${target}`;
     } catch (e) {
       cloneMsg = "";
@@ -109,7 +107,7 @@
     error = ""; cloneMsg = "";
     let info: { host: string; scheme: string; url: string; admitted: boolean };
     try {
-      info = await invoke("forge_generic_remote", { url });
+      info = unwrap(await commands.forgeGenericRemote(url));
     } catch (e) {
       error = e instanceof Error ? e.message : String(e);
       return;
@@ -132,7 +130,7 @@
     const c = consent;
     consent = null;
     try {
-      await invoke("forge_admit_host", { host: c.host });
+      unwrap(await commands.forgeAdmitHost(c.host));
     } catch (e) {
       error = "Couldn't grant access: " + (e instanceof Error ? e.message : String(e));
       return;
@@ -143,11 +141,11 @@
   async function runGenericClone(host: string, url: string, target: string, tok: string | null): Promise<void> {
     cloning = true; cloneMsg = `Cloning → ${target}…`; error = "";
     try {
-      await withBusy(() => invoke("forge_clone_url", { url, targetDir: target, token: tok }));
+      unwrap(await commands.forgeCloneUrl(url, target, tok));
       cloneMsg = `Cloned to ${target}`;
       // Per-connection credential: remember the token keyed by host (CPE-439/498). Best-effort.
       try {
-        if (remember && tok) await invoke("forge_set_token", { provider: host, token: tok });
+        if (remember && tok) unwrap(await commands.forgeSetToken(host, tok));
       } catch { /* keychain unavailable */ }
     } catch (e) {
       cloneMsg = "";
