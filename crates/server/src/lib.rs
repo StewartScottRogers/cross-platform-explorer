@@ -123,6 +123,11 @@ pub mod compare;
 /// policy over a list of local snapshots (CPE-944, epic CPE-735). Pure; the engine takes/deletes them.
 pub mod snapshot_retention;
 
+/// Content-addressed snapshot store — a refcounted, deduplicated, bounded blob store + capture/release
+/// lifecycle behind checkpoint & rollback (CPE-969, epic CPE-732; also CPE-735). Pure; feeds
+/// [`restore_plan`]'s revert diff. The bytes behind each hash are the caller's to persist.
+pub mod snapshot;
+
 /// Disk-usage scanning — recursive directory size + per-child breakdown (CPE-749/754).
 pub mod disk_usage;
 
