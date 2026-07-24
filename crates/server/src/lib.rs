@@ -148,6 +148,12 @@ pub mod terminal_tabs;
 /// relevance. Backend-agnostic; reused by the index engine (CPE-831, epic CPE-703).
 pub mod index_query;
 
+/// Instant-search **index engine** — the compact per-volume filename index (crawl + on-disk store + trigram
+/// pruning) that feeds [`index_query`]. Feature-gated OFF by default (`index`) so the plain build compiles
+/// zero indexer code (CPE-832, epic CPE-703).
+#[cfg(feature = "index")]
+pub mod index;
+
 /// Spotlight result aggregation — merge fuzzy-ranked hits from several sources (actions/folders/files/
 /// recents) into grouped, per-kind-capped, best-first results for the overlay (CPE-948, epic CPE-704).
 pub mod spotlight_results;
