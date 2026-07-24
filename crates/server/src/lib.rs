@@ -290,3 +290,9 @@ pub mod secure_delete;
 /// move/rename/delete/mkdir/copy ops) an NL instruction compiles to, plus its scope+cap validator and a
 /// dry-run summary (CPE-990, epic CPE-977). No LLM, no I/O; the safe, inspectable middle of the copilot.
 pub mod op_plan;
+
+/// Perceptual-hash + similarity-clustering core — dHash over decoded image bytes + Hamming-distance
+/// single-link clustering, the pure engine behind near-duplicate / similar-image detection (CPE-998, epic
+/// CPE-997). The complement of [`duplicates`] (byte-identical); this finds visually-similar images. Pure
+/// over bytes; no filesystem I/O, no new dependencies.
+pub mod perceptual;
