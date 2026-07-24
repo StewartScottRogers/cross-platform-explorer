@@ -233,19 +233,11 @@ fn board_epics_impl(root: String) -> Vec<ticket_board::Epic> {
 
 /// Find a ticket's file `<id>_*.md` across the board columns.
 fn find_ticket_file(root: &str, id: &str) -> Option<std::path::PathBuf> {
+    // Search ALL of Tickets/ recursively, so a card in Epics/ or Sprints/ or an archived Done/** subfolder
+    // resolves too — not just the five workflow columns (CPE-966). The `{id}_` prefix (with the underscore)
+    // keeps `CPE-6` from matching `CPE-616`.
     let tickets = std::path::Path::new(root).join("Tickets");
-    let prefix = format!("{id}_");
-    for col in ticket_board::COLUMNS {
-        let Ok(entries) = std::fs::read_dir(tickets.join(col)) else { continue };
-        for e in entries.flatten() {
-            let p = e.path();
-            let name = p.file_name().and_then(|s| s.to_str()).unwrap_or("");
-            if name.starts_with(&prefix) && name.ends_with(".md") {
-                return Some(p);
-            }
-        }
-    }
-    None
+    find_ticket_file_recursive(&tickets, &format!("{id}_"))
 }
 
 /// Toggle the `review` tag on ticket `id` (CPE-523) — drives the board's virtual Review lane.
@@ -6094,6 +6086,30 @@ mod tests {
         // The cross-crate cpe-server types now flow into the generated client.
         assert!(src.contains("DirEntry") && src.contains("OpResult") && src.contains("EntryInfo"),
             "cpe-server types should be exported into the typed client");
+    }
+
+    #[test]
+    fn find_ticket_file_locates_epics_sprints_and_archived() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        let t = root.join("Tickets");
+        for (dir, name) in [
+            ("Backlog", "CPE-10_a.md"),
+            ("Epics", "CPE-616_epic-remote.md"),
+            ("Sprints", "SPR-01_x.md"),
+            ("Done/2026/Q3/July/Week-30", "CPE-1_done.md"),
+        ] {
+            let d = t.join(dir);
+            std::fs::create_dir_all(&d).unwrap();
+            std::fs::write(d.join(name), "---\nid: x\n---\n").unwrap();
+        }
+        let rs = root.to_string_lossy();
+        assert!(find_ticket_file(&rs, "CPE-616").unwrap().ends_with("CPE-616_epic-remote.md"), "epic found");
+        assert!(find_ticket_file(&rs, "CPE-1").unwrap().ends_with("CPE-1_done.md"), "archived Done ticket found");
+        assert!(find_ticket_file(&rs, "SPR-01").unwrap().ends_with("SPR-01_x.md"), "sprint found");
+        assert!(find_ticket_file(&rs, "CPE-999").is_none(), "missing id → None");
+        // Prefix precision: `CPE-6` must not match `CPE-616`.
+        assert!(find_ticket_file(&rs, "CPE-6").is_none(), "CPE-6 does not match CPE-616");
     }
 
     #[test]
