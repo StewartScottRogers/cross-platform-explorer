@@ -4,9 +4,10 @@ title: Folder templates — Tauri command layer + "New from template" UI
 type: feature
 component: Multiple
 priority: medium
-status: Doing
+status: Done
 tags: ready
 created: 2026-07-24
+closed: 2026-07-24
 epic: CPE-740
 estimate: 3-4h
 ---
