@@ -247,14 +247,18 @@ pub fn append_directive(md: &str, when: &str, to: &str, text: &str) -> String {
         if t.is_empty() { "any" } else { t }
     };
     let entry = format!("### ▸ open · to `{to}` · {when}\n{text}\n");
-    if let Some(pos) = md.find("## Agent Directives") {
-        // Insert the entry right after the heading line (newest-first).
-        let after_heading = md[pos..].find('\n').map(|n| pos + n + 1).unwrap_or(md.len());
-        let mut out = String::with_capacity(md.len() + entry.len() + 2);
-        out.push_str(&md[..after_heading]);
-        out.push('\n');
+    if let Some((sec_start, body)) = directives_section(md) {
+        // Insert BEFORE the first existing directive (newest-first), keeping the intro note under the
+        // heading. If there are no directives yet, append at the section's end.
+        let insert_at = body
+            .find("### ▸ ")
+            .map(|i| sec_start + i)
+            .unwrap_or(sec_start + body.len());
+        let mut out = String::with_capacity(md.len() + entry.len() + 1);
+        out.push_str(&md[..insert_at]);
         out.push_str(&entry);
-        out.push_str(&md[after_heading..]);
+        out.push('\n');
+        out.push_str(&md[insert_at..]);
         out
     } else {
         let sep = if md.ends_with('\n') { "" } else { "\n" };
@@ -263,6 +267,124 @@ pub fn append_directive(md: &str, when: &str, to: &str, text: &str) -> String {
              _Machine-readable: an agent acts on an `open` directive, appends a reply, then flips it to `done`._\n\n{entry}"
         )
     }
+}
+
+/// The ticket's `id` frontmatter value (e.g. `CPE-520`), or `None` if absent (CPE-962).
+pub fn ticket_id(md: &str) -> Option<String> {
+    let id = frontmatter(md).get("id").map(|s| unquote(s))?;
+    if id.is_empty() { None } else { Some(id) }
+}
+
+/// One parsed directive from a ticket's `## Agent Directives` section (CPE-962).
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[cfg_attr(feature = "specta", derive(specta::Type))]
+pub struct Directive {
+    pub status: String,
+    pub to: String,
+    pub when: String,
+    pub text: String,
+}
+
+/// The slice of `md` that is the `## Agent Directives` section body (between its heading and the next
+/// top-level `## ` heading or EOF), plus the byte offset where that body starts. `None` if there's no
+/// such section.
+fn directives_section(md: &str) -> Option<(usize, &str)> {
+    let head = md.find("## Agent Directives")?;
+    let after_head = md[head..].find('\n').map(|n| head + n + 1).unwrap_or(md.len());
+    // The section ends at the next line that begins a top-level heading (`## `), scanning line starts.
+    let mut end = md.len();
+    let mut scan = after_head;
+    while scan < md.len() {
+        let line_end = md[scan..].find('\n').map(|n| scan + n + 1).unwrap_or(md.len());
+        if md[scan..].starts_with("## ") {
+            end = scan;
+            break;
+        }
+        scan = line_end;
+    }
+    Some((after_head, &md[after_head..end]))
+}
+
+/// Parse the directives in a ticket, newest-first as authored (CPE-962). Each entry is a
+/// `### ▸ <status> · to \`<target>\` · <when>` header + the text lines under it.
+pub fn parse_directives(md: &str) -> Vec<Directive> {
+    let Some((_, body)) = directives_section(md) else { return Vec::new() };
+    let mut out: Vec<Directive> = Vec::new();
+    let mut cur: Option<Directive> = None;
+    for line in body.lines() {
+        if let Some(rest) = line.strip_prefix("### ▸ ") {
+            if let Some(d) = cur.take() {
+                out.push(d);
+            }
+            // "<status> · to `<to>` · <when>"
+            let parts: Vec<&str> = rest.split(" · ").collect();
+            let status = parts.first().map(|s| s.trim().to_string()).unwrap_or_default();
+            let to = parts
+                .get(1)
+                .and_then(|s| s.split('`').nth(1))
+                .map(|s| s.to_string())
+                .unwrap_or_else(|| "any".to_string());
+            let when = parts.get(2).map(|s| s.trim().to_string()).unwrap_or_default();
+            cur = Some(Directive { status, to, when, text: String::new() });
+        } else if let Some(d) = cur.as_mut() {
+            if !d.text.is_empty() {
+                d.text.push('\n');
+            }
+            d.text.push_str(line);
+        }
+    }
+    if let Some(d) = cur.take() {
+        out.push(d);
+    }
+    for d in &mut out {
+        d.text = d.text.trim().to_string();
+    }
+    out
+}
+
+/// Append a `reply` under the directive whose header carries `when`, and optionally flip its `open` status
+/// to `done` (CPE-962). Returns the rewritten markdown, or `None` if no directive matches `when`.
+pub fn reply_to_directive(md: &str, when: &str, reply: &str, mark_done: bool) -> Option<String> {
+    let reply = reply.trim();
+    let head = md.find("## Agent Directives")?;
+    // Find the `### ▸` header line (at/after the section) whose text contains `when`.
+    let mut idx = head;
+    let mut header_start = None;
+    while idx < md.len() {
+        let line_end = md[idx..].find('\n').map(|n| idx + n + 1).unwrap_or(md.len());
+        let line = &md[idx..line_end];
+        if line.starts_with("### ▸ ") && line.contains(when) {
+            header_start = Some(idx);
+            break;
+        }
+        idx = line_end;
+    }
+    let header_start = header_start?;
+    let header_end = md[header_start..].find('\n').map(|n| header_start + n + 1).unwrap_or(md.len());
+    // The directive's block ends at the next `### ` header or the next top-level `## ` heading or EOF.
+    let mut block_end = md.len();
+    let mut scan = header_end;
+    while scan < md.len() {
+        let line_end = md[scan..].find('\n').map(|n| scan + n + 1).unwrap_or(md.len());
+        if md[scan..].starts_with("### ") || md[scan..].starts_with("## ") {
+            block_end = scan;
+            break;
+        }
+        scan = line_end;
+    }
+    // Rewrite: header (optionally open→done) + existing block + the reply line, then the rest.
+    let header_line = &md[header_start..header_end];
+    let new_header = if mark_done { header_line.replacen("▸ open ", "▸ done ", 1) } else { header_line.to_string() };
+    let block_body = &md[header_end..block_end];
+    let reply_line = if reply.is_empty() { String::new() } else { format!("> reply: {reply}\n") };
+    let mut out = String::with_capacity(md.len() + new_header.len() + reply_line.len() + 8);
+    out.push_str(&md[..header_start]);
+    out.push_str(&new_header);
+    out.push_str(block_body.trim_end());
+    out.push('\n');
+    out.push_str(&reply_line);
+    out.push_str(&md[block_end..]);
+    Some(out)
 }
 
 pub fn append_finding(md: &str, note: &str) -> String {
@@ -331,6 +453,37 @@ mod tests {
         let i_old = two.find("Summarize the risks.").unwrap();
         assert!(i_new < i_old, "newest directive comes first");
         assert!(two.contains("to `claude`"));
+    }
+
+    #[test]
+    fn parse_directives_reads_entries_and_reply_resolves_by_when() {
+        let base = "---\nid: CPE-1\n---\n\n## Summary\nhi\n";
+        let a = append_directive(base, "2026-07-23T09:00:00Z", "any", "First task.");
+        let b = append_directive(&a, "2026-07-23T10:00:00Z", "claude", "Second task.");
+        let ds = parse_directives(&b);
+        assert_eq!(ds.len(), 2);
+        // Newest-first (append_directive prepends).
+        assert_eq!(ds[0].when, "2026-07-23T10:00:00Z");
+        assert_eq!(ds[0].to, "claude");
+        assert_eq!(ds[0].status, "open");
+        assert_eq!(ds[0].text, "Second task.");
+        assert_eq!(ds[1].text, "First task.");
+
+        // Reply to the first (by its timestamp) and mark it done.
+        let replied = reply_to_directive(&b, "2026-07-23T09:00:00Z", "Done — see PR.", true).unwrap();
+        assert!(replied.contains("> reply: Done — see PR."));
+        let after = parse_directives(&replied);
+        let first = after.iter().find(|d| d.when == "2026-07-23T09:00:00Z").unwrap();
+        assert_eq!(first.status, "done", "resolved directive flips to done");
+        // The other directive is untouched + still open.
+        assert!(after.iter().any(|d| d.when == "2026-07-23T10:00:00Z" && d.status == "open"));
+    }
+
+    #[test]
+    fn reply_to_directive_returns_none_when_no_match() {
+        let md = append_directive("## Summary\nx\n", "t1", "any", "do it");
+        assert!(reply_to_directive(&md, "nope", "hi", false).is_none());
+        assert!(parse_directives("## Summary\nno directives here").is_empty());
     }
 
     #[test]

@@ -59,6 +59,12 @@ plist = "1"
 [target.'cfg(unix)'.dependencies]
 xattr = "1"
 
+# The ticket-directives MCP server (CPE-962): a stdio MCP server an external agent launches to
+# list/reply to Agent Board directives. `ticket-mcp <repo-root>`.
+[[bin]]
+name = "ticket-mcp"
+path = "src/bin/ticket_mcp.rs"
+
 [features]
 # Opt-in `specta::Type` derives for the TypeScript-binding codegen (CPE-953). OFF by default.
 specta = ["dep:specta"]

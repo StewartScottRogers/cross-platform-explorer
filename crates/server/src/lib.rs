@@ -95,6 +95,11 @@ pub mod audit_journal;
 /// between columns. Pure card/frontmatter logic (the Tauri commands do the file I/O).
 pub mod ticket_board;
 
+/// Ticket-directives MCP surface (CPE-962): expose the board's `## Agent Directives` over the Model
+/// Context Protocol so any MCP agent can list + reply to directives. Pure dispatch; the `ticket-mcp` bin
+/// serves it over stdio.
+pub mod ticket_mcp;
+
 /// Small shared filesystem utilities: epoch-ms time conversion + streaming SHA-256 (CPE-815).
 pub mod fsutil;
 
