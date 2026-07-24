@@ -33,3 +33,8 @@ guard (CPE-813) keeps the generated types honest while this proceeds.
   `unwrap` helper (restores throw-on-error). npm check 0/0; vitest 930. ~89 prod sites remain.
 - 2026-07-23 — Increment 2: migrated the **settings** module (read_settings/write_settings) to the typed
   `commands.*`. npm check 0/0; settings tests 19.
+- 2026-07-23 — Increment 3: migrated the **BoardView** module — all 8 sites: `board_move`/`board_review`
+  (Result-returning, via `unwrap` to preserve throw-on-error) + `board_epics`/`board_archived`/
+  `find_project_root` (plain returns, direct). BoardView now has zero raw `invoke` calls. Updated the
+  test's `../invoke` mock to also export `unwrap` (the typed client routes through the same mocked
+  `invoke`, so the existing assertions hold). npm check 0/0; full suite 930 green.
