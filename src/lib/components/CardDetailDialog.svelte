@@ -88,6 +88,28 @@
   $: title = detail?.fields.find(([k]) => k === "title")?.[1] ?? id;
   $: metaFields = (detail?.fields ?? []).filter(([k]) => k !== "title");
   $: bodyLines = detail?.body ? detail.body.split("\n").length : 0;
+
+  // "Send directive" (CPE-961): write a machine-readable instruction into the ticket for an agent to act on.
+  let directiveText = "";
+  let directiveTarget = "any";
+  let sending = false;
+  async function sendDirective() {
+    const t = directiveText.trim();
+    if (!t || sending) return;
+    sending = true;
+    try {
+      const r = await commands.boardDirective(root, id, directiveTarget.trim() || "any", t, new Date().toISOString());
+      if (r.status !== "ok") throw new Error(r.error);
+      directiveText = "";
+      // Re-read the ticket so the new directive shows in the rendered body.
+      const d = (await commands.boardCardDetail(root, id)) as Detail | null;
+      if (d) { detail = d; bodyHtml = d.body ? await renderMarkdown(d.body) : ""; }
+    } catch (e) {
+      error = e instanceof Error ? e.message : String(e);
+    } finally {
+      sending = false;
+    }
+  }
 </script>
 
 <svelte:window on:keydown={(e) => e.key === "Escape" && dispatch("close")} />
@@ -132,6 +154,15 @@
       {/if}
     </div>
 
+    {#if detail}
+      <div class="cd-directive" title="Write a directive an agent can act on (it lands under ## Agent Directives in the ticket)">
+        <input class="cd-dir-text" bind:value={directiveText} placeholder="Send a directive to an agent…"
+          spellcheck="false" on:keydown={(e) => e.key === "Enter" && sendDirective()} />
+        <input class="cd-dir-to" bind:value={directiveTarget} placeholder="any" title="Target agent (blank = any)" spellcheck="false" />
+        <button class="cd-dir-send" on:click={sendDirective} disabled={sending || !directiveText.trim()} title="Append this directive to the ticket">{sending ? "…" : "Send ▸"}</button>
+      </div>
+    {/if}
+
     <footer class="cd-statusbar">
       <span class="sb-loc"><Icon name="folder" size={12} /> {detail?.location || "Tickets"}</span>
       <span class="sb-meta">{metaFields.length} field{metaFields.length === 1 ? "" : "s"} · {bodyLines} line{bodyLines === 1 ? "" : "s"}</span>
@@ -173,6 +204,12 @@
   .cd-msg { color: var(--text-dim); padding: 14px 0; font-size: 13px; }
   .cd-msg.err { color: #d05656; }
   .cd-msg.dim { color: var(--text-faint); }
+  .cd-directive { flex: 0 0 auto; display: flex; gap: 6px; padding: 8px 0; border-top: 1px solid var(--border); }
+  .cd-dir-text { flex: 1; min-width: 0; height: 30px; padding: 0 10px; border: 1px solid var(--border-strong); border-radius: 6px; background: var(--surface-alt); color: var(--text); font: inherit; font-size: 12.5px; }
+  .cd-dir-to { width: 84px; flex: 0 0 auto; height: 30px; padding: 0 8px; border: 1px solid var(--border-strong); border-radius: 6px; background: var(--surface-alt); color: var(--text); font: inherit; font-size: 12px; }
+  .cd-dir-text:focus, .cd-dir-to:focus { outline: none; border-color: var(--accent); }
+  .cd-dir-send { flex: 0 0 auto; height: 30px; padding: 0 12px; font-size: 12.5px; border: 1px solid var(--accent); border-radius: 6px; background: var(--accent); color: #fff; }
+  .cd-dir-send:disabled { opacity: 0.5; }
   .cd-statusbar { flex: 0 0 auto; display: flex; align-items: center; gap: 14px; height: 26px; margin: 0 -18px 0; padding: 0 12px 0 18px; border-top: 1px solid var(--border); font-size: 11.5px; color: var(--text-dim); }
   .sb-loc { display: flex; align-items: center; gap: 4px; }
   .sb-meta { margin-left: auto; font-variant-numeric: tabular-nums; }

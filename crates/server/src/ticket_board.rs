@@ -232,6 +232,39 @@ pub fn set_review(md: &str, on: bool) -> String {
 
 /// Append a finding bullet under a `## Findings` section (creating it at the end if absent) — the
 /// affordance a dispatched agent (or the UI) uses to record progress on a card (CPE-523). Pure.
+/// Append an agent **directive** to a ticket (CPE-961) — a structured, machine-readable instruction the
+/// board emits for an agent (local or external) to act on. Newest-first under `## Agent Directives` (the
+/// section is created if absent). Each entry names a target + timestamp + an `open` status an agent flips
+/// to `done` once it has appended a reply. `when` is an ISO-8601 timestamp supplied by the caller, so this
+/// stays clock-free + pure. An empty `text` is a no-op; an empty `to` defaults to `any`.
+pub fn append_directive(md: &str, when: &str, to: &str, text: &str) -> String {
+    let text = text.trim();
+    if text.is_empty() {
+        return md.to_string();
+    }
+    let to = {
+        let t = to.trim();
+        if t.is_empty() { "any" } else { t }
+    };
+    let entry = format!("### ▸ open · to `{to}` · {when}\n{text}\n");
+    if let Some(pos) = md.find("## Agent Directives") {
+        // Insert the entry right after the heading line (newest-first).
+        let after_heading = md[pos..].find('\n').map(|n| pos + n + 1).unwrap_or(md.len());
+        let mut out = String::with_capacity(md.len() + entry.len() + 2);
+        out.push_str(&md[..after_heading]);
+        out.push('\n');
+        out.push_str(&entry);
+        out.push_str(&md[after_heading..]);
+        out
+    } else {
+        let sep = if md.ends_with('\n') { "" } else { "\n" };
+        format!(
+            "{md}{sep}\n## Agent Directives\n\
+             _Machine-readable: an agent acts on an `open` directive, appends a reply, then flips it to `done`._\n\n{entry}"
+        )
+    }
+}
+
 pub fn append_finding(md: &str, note: &str) -> String {
     let note = note.trim();
     if note.is_empty() {
@@ -282,6 +315,30 @@ mod tests {
         assert!(fields.iter().any(|(k, v)| k == "epic" && v == "CPE-503"));
         assert!(fields.iter().any(|(k, v)| k == "sprint" && v == "SPR-03"));
         assert_eq!(body, "## Summary\nbody");
+    }
+
+    #[test]
+    fn append_directive_creates_the_section_then_prepends_newest_first() {
+        let base = "---\nid: CPE-1\n---\n\n## Summary\nhi\n";
+        let one = append_directive(base, "2026-07-23T10:00:00Z", "any", "Summarize the risks.");
+        assert!(one.contains("## Agent Directives"));
+        assert!(one.contains("### ▸ open · to `any` · 2026-07-23T10:00:00Z"));
+        assert!(one.contains("Summarize the risks."));
+        // A second directive lands ABOVE the first (newest-first) within the same section.
+        let two = append_directive(&one, "2026-07-23T11:00:00Z", "claude", "Now draft a fix.");
+        assert_eq!(two.matches("## Agent Directives").count(), 1, "reuses the section");
+        let i_new = two.find("Now draft a fix.").unwrap();
+        let i_old = two.find("Summarize the risks.").unwrap();
+        assert!(i_new < i_old, "newest directive comes first");
+        assert!(two.contains("to `claude`"));
+    }
+
+    #[test]
+    fn append_directive_ignores_empty_and_defaults_target() {
+        let base = "## Summary\nx\n";
+        assert_eq!(append_directive(base, "t", "any", "   "), base, "empty text is a no-op");
+        let out = append_directive(base, "t", "  ", "do it");
+        assert!(out.contains("to `any`"), "blank target defaults to any");
     }
 
     #[test]

@@ -277,6 +277,24 @@ fn board_note_impl(root: String, id: String, note: String) -> Result<(), String>
     std::fs::write(&path, ticket_board::append_finding(&md, &note)).map_err(|e| e.to_string())
 }
 
+/// Emit a machine-readable **directive** into ticket `id` (CPE-961) — the board→agent communication seam:
+/// an instruction an agent (local or an external one sharing the repo/folder) can read, act on, and answer
+/// in the ticket. `target` is the intended agent (`any` if blank); `when` is an ISO-8601 timestamp from the
+/// caller. Appends under `## Agent Directives`.
+#[tauri::command]
+#[cfg_attr(feature = "specta-bindings", specta::specta)]
+async fn board_directive(root: String, id: String, target: String, text: String, when: String) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || board_directive_impl(root, id, target, text, when))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+fn board_directive_impl(root: String, id: String, target: String, text: String, when: String) -> Result<(), String> {
+    let path = find_ticket_file(&root, &id).ok_or_else(|| format!("ticket {id} not found"))?;
+    let md = std::fs::read_to_string(&path).map_err(|e| e.to_string())?;
+    std::fs::write(&path, ticket_board::append_directive(&md, &when, &target, &text)).map_err(|e| e.to_string())
+}
+
 /// Full detail for one Agent Board card (CPE-959): its ordered frontmatter fields + markdown body + the
 /// folder under `Tickets/` it lives in — for the card-detail popup. Works for tickets and epics alike.
 #[derive(serde::Serialize)]
@@ -5527,6 +5545,7 @@ pub fn run() {
             board_review,
             board_note,
             board_card_detail,
+            board_directive,
             workbench_diff,
             home_dir,
             parent_dir,
@@ -5906,6 +5925,7 @@ pub fn export_bindings(out: &std::path::Path) -> Result<(), String> {
         board_review,
         board_note,
         board_card_detail,
+        board_directive,
         workbench_diff,
         home_dir,
         parent_dir,
