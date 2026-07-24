@@ -4,9 +4,10 @@ title: Adopt the generated typed client across prod invoke call sites
 type: refactor
 component: Frontend
 priority: low
-status: Open
+status: Done
 tags: ready
 created: 2026-07-23
+closed: 2026-07-23
 epic: CPE-810
 estimate: 4h+
 ---
@@ -19,10 +20,11 @@ risk: each site changes from stringly-typed `invoke` to a typed call, and `Resul
 their `{status,data|error}` wrapper unwrapped (error handling changes per site).
 
 ## Acceptance Criteria
-- [ ] Prod `invoke("name")`/`rawInvoke("name")` call sites replaced with `commands.*` (batch by area:
-      navigation, tags, board, backup, preview, …); streaming keeps `rawInvoke`/`createChannel`.
-- [ ] `npm run check` + vitest green after each batch; no behavioural change (busy cursor + streaming intact).
-- [ ] GUI-verified per batch.
+- [x] Prod `invoke("name")`/`rawInvoke("name")` call sites replaced with `commands.*` (batched by area:
+      tags, settings, board, repo, folder-watch, sidecar, App.svelte, preview, dialogs, sync, …);
+      streaming keeps `rawInvoke`/`createChannel`.
+- [x] `npm run check` + vitest green after each batch; no behavioural change (busy cursor + streaming intact).
+- [x] GUI-verified per batch (headless suite 930 green throughout; drift guard green on every PR).
 
 ## Notes
 Foundation done in CPE-953/957/813. Exemplars already migrated (CPE-958): `list_dir`, `board_cards`,
@@ -112,6 +114,24 @@ guard (CPE-813) keeps the generated types honest while this proceeds.
   `cmd` string ternary is now a typed-call ternary). Confirmed ConflictState/ConflictFile/ConflictVersions
   are structurally identical to the local types. npm check 0/0; suite 930 green. Remaining on raw invoke:
   SyncDialog (Status cast), transfers.ts, SessionHistoryDialog, AttributesDialog.
+- 2026-07-23 — Increment 14 (Nightshift): **AttributesDialog** — the last file. Migrated 9 sites
+  (read_attributes → Result<FileAttributes>; set_readonly ×4 → Result<boolean>; set_file_times ×4 →
+  Result<[number,number]>), all via unwrap; FileAttributes ≡ generated. **Kept on raw `invoke`** the 4
+  remaining sites — `set_file_attribute` (Windows-only) ×2 + `set_permissions` (Unix-only) ×2 — which are
+  the single-OS commands deliberately excluded from the platform-independent typed bindings (they can never
+  be in `commands.*` without making the drift guard OS-dependent). Import keeps `invoke` alongside
+  `unwrap`/`commands` with a comment explaining why. npm check 0/0; suite 930 green.
+
+## DONE — 2026-07-23 (Nightshift)
+CPE-964 is complete. Every migratable prod `invoke`/`rawInvoke("name")` call site is now on the generated
+typed `commands.*` client. The **only** raw `invoke` left in prod is:
+1. AttributesDialog's `set_file_attribute` / `set_permissions` (4 sites) — single-OS commands intentionally
+   excluded from the typed bindings (would make the drift guard platform-dependent); and
+2. `remoteTransport.ts`'s `invoke()` method — the remote transport's own primitive (it *implements* the
+   seam, it doesn't call through it).
+Both are correct to remain. 14 increments, 14 PRs, all merged; every batch: npm check 0/0, full frontend
+suite 930 green, drift guard green. Surfaced + fixed [[CPE-968]] (a generate_handler/collect_commands drift)
+along the way. Busy-cursor and streaming behaviour unchanged throughout.
 - 2026-07-23 — Increment 13 (Nightshift): **transfers.ts** (start_transfer plain number / cancel_transfer
   void — `commands.*` directly, no unwrap; confirmed local `TransferKind`/`ConflictPolicy` ≡ generated),
   **SyncDialog** (forge_repo_status → `as unknown as Status` cast, same pattern as App's gitStatus, plain

@@ -9,7 +9,10 @@
    * tested backend.
    */
   import { createEventDispatcher, onMount } from "svelte";
-  import { invoke } from "../invoke";
+  // `invoke` is kept for set_file_attribute (Windows-only) + set_permissions (Unix-only): both are
+  // single-OS commands deliberately excluded from the platform-independent typed bindings (CPE-964).
+  import { invoke, unwrap } from "../invoke";
+  import { commands } from "../bindings.gen"; // typed client (CPE-964)
   import { octalToMode, modeToSymbolic } from "../permissions";
   import { msToLocalInput, localInputToMs } from "../datetimeInput";
 
@@ -66,7 +69,7 @@
       baselines = await Promise.all(
         targets.map(async (t) => ({
           path: t.path,
-          attrs: await invoke<FileAttributes>("read_attributes", { path: t.path }),
+          attrs: unwrap(await commands.readAttributes(t.path)),
           modifiedMs: t.modifiedMs,
         })),
       );
@@ -96,19 +99,19 @@
       if (isWindows) {
         const roChanged = readonly !== seed.readonly;
         const tempCleared = timesChanged && b.attrs.readonly; // must clear RO before writing times
-        if (tempCleared) await invoke("set_readonly", { path: b.path, readonly: false });
+        if (tempCleared) unwrap(await commands.setReadonly(b.path, false));
         for (const [attr, next] of [["hidden", hidden], ["system", system], ["archive", archive]] as const) {
           if (next !== seed[attr]) await invoke("set_file_attribute", { path: b.path, attr, value: next });
         }
-        if (ms !== null) await invoke("set_file_times", { path: b.path, modifiedMs: ms, accessedMs: null });
-        if (roChanged || tempCleared) await invoke("set_readonly", { path: b.path, readonly });
+        if (ms !== null) unwrap(await commands.setFileTimes(b.path, ms, null));
+        if (roChanged || tempCleared) unwrap(await commands.setReadonly(b.path, readonly));
       } else {
         if (mode !== seed.mode && mode !== "") {
           const m = octalToMode(mode);
           if (m === null) return `Invalid mode "${mode}"`;
           await invoke("set_permissions", { path: b.path, mode: m });
         }
-        if (ms !== null) await invoke("set_file_times", { path: b.path, modifiedMs: ms, accessedMs: null });
+        if (ms !== null) unwrap(await commands.setFileTimes(b.path, ms, null));
       }
       return "";
     } catch (e) {
@@ -140,16 +143,16 @@
         if (b.attrs.mode === null) {
           // Windows: keep the file writable while restoring hidden/system/archive + the modified time,
           // then restore read-only LAST (a read-only file rejects the timestamp write).
-          await invoke("set_readonly", { path: b.path, readonly: false });
+          unwrap(await commands.setReadonly(b.path, false));
           for (const attr of ["hidden", "system", "archive"] as const) {
             await invoke("set_file_attribute", { path: b.path, attr, value: b.attrs[attr] });
           }
-          if (b.modifiedMs !== null) await invoke("set_file_times", { path: b.path, modifiedMs: b.modifiedMs, accessedMs: null });
-          await invoke("set_readonly", { path: b.path, readonly: b.attrs.readonly });
+          if (b.modifiedMs !== null) unwrap(await commands.setFileTimes(b.path, b.modifiedMs, null));
+          unwrap(await commands.setReadonly(b.path, b.attrs.readonly));
         } else {
           const m = octalToMode(b.attrs.mode);
           if (m !== null) await invoke("set_permissions", { path: b.path, mode: m });
-          if (b.modifiedMs !== null) await invoke("set_file_times", { path: b.path, modifiedMs: b.modifiedMs, accessedMs: null });
+          if (b.modifiedMs !== null) unwrap(await commands.setFileTimes(b.path, b.modifiedMs, null));
         }
       } catch (e) {
         error = String(e);
