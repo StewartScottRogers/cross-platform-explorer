@@ -48,8 +48,14 @@
   // Free-text card filter (CPE-555): narrows the visible cards by id/title/tag/type/priority. Empty = all.
   let boardQuery = "";
   $: filtered = filterCards(cards, boardQuery);
-  // The filter excludes everything (but there ARE cards) — show a hint, not blank lanes (CPE-560).
-  $: noMatch = !loading && !error && cards.length > 0 && boardQuery.trim() !== "" && filtered.length === 0;
+  const clearFilter = () => (boardQuery = "");
+  // The filter excludes everything — show a hint, not blank lanes (CPE-560). Board-view specific and
+  // archive-aware: a closed epic whose children are all archived still has cards (in `doneDisplay`), so it
+  // is NOT a no-match (CPE-967). The Epics view has its own `noEpicMatch` so toggling views never dead-ends.
+  $: noMatch = !loading && !error && boardQuery.trim() !== "" && filtered.length === 0 && doneDisplay.length === 0;
+  $: noEpicMatch =
+    !loading && !error && boardQuery.trim() !== "" &&
+    epicCols.Backlog.length === 0 && epicCols.Doing.length === 0 && epicDoneDisplay.length === 0;
   function onSearchKeydown(e: KeyboardEvent) {
     if (e.key === "Escape") { boardQuery = ""; e.stopPropagation(); }
   }
@@ -252,14 +258,22 @@
 
     {#if loading}
       <div class="board-empty">Loading the board…</div>
-    {:else if noMatch}
-      <div class="board-empty">No cards match “{boardQuery.trim()}”.</div>
     {:else if isEmpty}
       <div class="board-empty board-noproject">
         <p class="np-title">No tickets found here.</p>
         <p class="np-body">The board reads a project's <code>Tickets/</code> folder, but none was found in:</p>
         <p class="np-path">{boardRoot}</p>
         <button class="board-btn np-choose" on:click={chooseProject}>📁 Choose a project folder…</button>
+      </div>
+    {:else if viewMode === "epics" && noEpicMatch}
+      <div class="board-empty">
+        <p>No epics match “{boardQuery.trim()}”.</p>
+        <button class="board-btn" on:click={clearFilter}>✕ Clear filter</button>
+      </div>
+    {:else if viewMode !== "epics" && noMatch}
+      <div class="board-empty">
+        <p>No cards match “{boardQuery.trim()}”.</p>
+        <button class="board-btn" on:click={clearFilter}>✕ Clear filter</button>
       </div>
     {:else if viewMode === "epics"}
       <!-- Epics kanban (CPE-922): epics as cards across Backlog/Doing/Done, mirroring the tickets board;
