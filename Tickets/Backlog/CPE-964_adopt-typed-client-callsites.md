@@ -28,3 +28,6 @@ their `{status,data|error}` wrapper unwrapped (error handling changes per site).
 Foundation done in CPE-953/957/813. Exemplars already migrated (CPE-958): `list_dir`, `board_cards`,
 `can_restore_from_trash`. The typed client routes through the busy-cursor `invoke` (CPE-547). The drift
 guard (CPE-813) keeps the generated types honest while this proceeds.
+
+- 2026-07-23 — Increment 1: migrated the **tags** module (7 sites) to the typed `commands.*` via a new
+  `unwrap` helper (restores throw-on-error). npm check 0/0; vitest 930. ~89 prod sites remain.

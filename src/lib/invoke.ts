@@ -17,6 +17,14 @@ import { diagnosticsEnabled, recordCall } from "./diagnostics";
 // out of the busy cursor by design (CPE-550), so the raw Channel is the correct primitive there.
 export { Channel } from "@tauri-apps/api/core";
 
+/** Unwrap a generated `Result` command's outcome to its value, throwing its error on failure — restoring
+ *  the throw-on-error semantics of the raw `invoke` at call sites migrated to the typed `commands.*` client
+ *  (CPE-964), so existing `try/catch` handlers keep working unchanged. */
+export function unwrap<T>(r: { status: "ok"; data: T } | { status: "error"; error: unknown }): T {
+  if (r.status === "ok") return r.data;
+  throw r.error instanceof Error ? r.error : new Error(String(r.error));
+}
+
 // ---- Transport seam (CPE-819, epic CPE-810) -----------------------------------------------------
 //
 // `invoke`/`rawInvoke` are the single chokepoint every backend call flows through, so this is the one
