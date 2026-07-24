@@ -80,3 +80,10 @@ guard (CPE-813) keeps the generated types honest while this proceeds.
   generated `RepoSyncStatus` to the local structural `gitStatus` type (`loadSyncPolicy`'s `OnDiverge` union
   is assignable to `string|null`); both are plain-return commands that reject on the plain build → identical
   try/catch → `null` fallback as before. npm check 0/0; full suite 930 green.
+- 2026-07-23 — Increment 9 (Nightshift): **preview & inspection cluster** — 11 sites across 3 files:
+  `preview/loaders.ts` (read_file_text/read_archive_entries/read_preview_info/read_image_data_url via
+  `.then(unwrap)`; savePreviewText keeps its `Promise<void>` via `.then((r)=>void unwrap(r))`),
+  `HexView.svelte` (read_file_range), `PropertiesDialog.svelte` (text_stats/hash_file/entry_info/image_meta/
+  dir_size). Confirmed local `Stats`≡`TextStats`, `Info`≡`EntryInfo`, `ImageMeta`≡`ImageMeta` structurally,
+  so no casts needed. **Deferred**: DataBrowser (`Page.total` number vs number|null) + CompareDialog
+  (`CompareNode` vs generated `TreeNode`) — real type friction, next increment. npm check 0/0; suite 930.

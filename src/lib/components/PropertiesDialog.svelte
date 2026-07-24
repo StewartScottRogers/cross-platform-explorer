@@ -1,6 +1,7 @@
 <script lang="ts">
   import { createEventDispatcher, onMount } from "svelte";
-  import { invoke } from "../invoke";
+  import { unwrap } from "../invoke";
+  import { commands } from "../bindings.gen"; // typed client (CPE-964)
   import Icon from "./Icon.svelte";
   import { t } from "../i18n";
   import { formatSize } from "../format";
@@ -53,7 +54,7 @@
     statError = "";
     stats = null;
     try {
-      stats = await invoke<Stats>("text_stats", { path: single.path });
+      stats = unwrap(await commands.textStats(single.path));
     } catch (e) {
       statError = String(e);
     } finally {
@@ -67,7 +68,7 @@
     hashError = "";
     checksum = "";
     try {
-      checksum = await invoke<string>("hash_file", { path: single.path });
+      checksum = unwrap(await commands.hashFile(single.path));
     } catch (e) {
       hashError = String(e);
     } finally {
@@ -121,14 +122,14 @@
   onMount(async () => {
     if (!single) return;
     try {
-      info = await invoke<Info>("entry_info", { path: single.path });
+      info = unwrap(await commands.entryInfo(single.path));
     } catch (e) {
       error = String(e);
     }
     // Image metadata is best-effort — a failure just leaves the rows off, never blocks the dialog.
     if (!single.is_dir && isImage(single.name)) {
       try {
-        imageMeta = await invoke<ImageMeta>("image_meta", { path: single.path });
+        imageMeta = unwrap(await commands.imageMeta(single.path));
       } catch {
         /* leave imageMeta null; the dialog just omits the media rows */
       }
@@ -138,7 +139,7 @@
     if (single.is_dir) {
       sizing = true;
       try {
-        const n = await invoke<number>("dir_size", { path: single.path });
+        const n = unwrap(await commands.dirSize(single.path));
         if (!cancelled) folderSize = n;
       } catch {
         /* leave folderSize null; the dialog just omits it */
