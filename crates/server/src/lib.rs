@@ -259,6 +259,11 @@ pub mod semantic_index;
 /// carrying per-source provenance (CPE-984, epic CPE-976). Pure.
 pub mod search_fusion;
 
+/// OCR seam + content-addressed text cache — the `OcrEngine` trait, a dependency-free `FakeOcr`, and an
+/// `OcrCache` that recognises a given image once (SHA-256 content key). Zero engine weight; a real engine is
+/// deferred + feature-gated (CPE-991, epic CPE-980). Pure std (+ existing sha2).
+pub mod ocr;
+
 /// Batch metadata apply — apply one shared set of edits to a whole selection of files, with a per-file
 /// result + run summary; builds on media_meta_edit (CPE-949, epic CPE-725).
 pub mod media_meta_batch;
