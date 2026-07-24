@@ -44,3 +44,9 @@ guard (CPE-813) keeps the generated types honest while this proceeds.
   3 explicit `withBusy(() => invoke(...))` wrappers — redundant now, since the typed client routes through
   the busy-tracking `invoke` which already wraps in `withBusy`; removed the now-unused `withBusy` import.
   RepoBrowser now has zero raw `invoke`. npm check 0/0; forge tests 7; full suite 930 green.
+- 2026-07-23 — Increment 5: migrated the **folderWatch** module (Agent Watch driver) — all 6 sites:
+  `move_exact`/`delete_permanent`/`run_watch_actions`/`folder_watch_stop` (plain returns, direct) +
+  `folder_watch_start`/`entry_info` (Result, via `unwrap`). The injected `stat`/`run` deps of
+  `handleFolderBatch` now call `commands.entryInfo(path).then(unwrap)` / `commands.runWatchActions(...)`;
+  generated `EntryInfo`/`OpResult`/`WatchAction` are structurally compatible with the deps' types.
+  folderWatch now has zero raw `invoke`. npm check 0/0; folderWatch tests 8; full suite 930 green.
