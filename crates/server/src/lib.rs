@@ -269,6 +269,11 @@ pub mod search_fusion;
 /// deferred + feature-gated (CPE-991, epic CPE-980). Pure std (+ existing sha2).
 pub mod ocr;
 
+/// OCR → semantic ingest glue — recognise an image's text via an [`ocr::OcrEngine`] (with optional
+/// [`ocr::OcrCache`]) and index it into a [`semantic_index::SemanticIndex`], so an image-only file becomes
+/// semantically searchable (CPE-996, epic CPE-980 ↔ CPE-976). Pure glue, no I/O.
+pub mod semantic_ingest;
+
 /// Batch metadata apply — apply one shared set of edits to a whole selection of files, with a per-file
 /// result + run summary; builds on media_meta_edit (CPE-949, epic CPE-725).
 pub mod media_meta_batch;
