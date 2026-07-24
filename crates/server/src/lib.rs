@@ -255,6 +255,10 @@ pub mod embedder;
 /// [`vector_index`], and search per document (best chunk wins) (CPE-983, epic CPE-976). Pure.
 pub mod semantic_index;
 
+/// Search result fusion — blend semantic + lexical hits into one ranked list via Reciprocal Rank Fusion,
+/// carrying per-source provenance (CPE-984, epic CPE-976). Pure.
+pub mod search_fusion;
+
 /// Batch metadata apply — apply one shared set of edits to a whole selection of files, with a per-file
 /// result + run summary; builds on media_meta_edit (CPE-949, epic CPE-725).
 pub mod media_meta_batch;
