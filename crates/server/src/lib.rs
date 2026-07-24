@@ -138,6 +138,11 @@ pub mod tray_quick;
 /// Duplicate-file finder — size-then-hash two-pass scan (CPE-420).
 pub mod duplicates;
 
+/// Organization / declutter rules engine — pure, deterministic, filesystem-free planner that maps each
+/// file to a proposed destination subfolder under a chosen rule (by kind / extension / modified-year /
+/// size). No AI, no I/O (CPE-987, epic CPE-979); a later move engine executes the proposals.
+pub mod organize;
+
 /// Spotlight frecency — rank recently+frequently used items (count × recency-decay) for the overlay's
 /// default empty-query view (CPE-952, epic CPE-704). Pure + deterministic.
 pub mod spotlight_frecency;
