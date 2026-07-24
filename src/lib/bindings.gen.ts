@@ -91,6 +91,20 @@ async boardCardDetail(root: string, id: string) : Promise<CardDetail | null> {
     return await TAURI_INVOKE("board_card_detail", { root, id });
 },
 /**
+ * Emit a machine-readable **directive** into ticket `id` (CPE-961) — the board→agent communication seam:
+ * an instruction an agent (local or an external one sharing the repo/folder) can read, act on, and answer
+ * in the ticket. `target` is the intended agent (`any` if blank); `when` is an ISO-8601 timestamp from the
+ * caller. Appends under `## Agent Directives`.
+ */
+async boardDirective(root: string, id: string, target: string, text: string, when: string) : Promise<Result<null, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("board_directive", { root, id, target, text, when }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
  * `git diff` (working tree vs HEAD) in `root` for the integrated workbench, with friendly edge cases
  * (CPE-535): a non-repo folder is a normal `is_repo:false` result (not an error), git-not-installed is
  * a distinct error, and an empty `root` is refused. An optional `path` limits it to one file. Read-only.
