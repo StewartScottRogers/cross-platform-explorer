@@ -12,7 +12,8 @@
  * defensive — a corrupt or hand-edited value degrades to its default rather than
  * crashing the app on launch.
  */
-import { invoke } from "./invoke";
+import { commands } from "./bindings.gen"; // typed client (CPE-964)
+import { unwrap } from "./invoke";
 import type { ViewMode, SortKey, SortDir, RecentFile, Favorite } from "./types";
 import { COLUMN_DEFAULTS } from "./columns";
 import { parseRules, serializeRules } from "./colorRulesStore";
@@ -73,8 +74,9 @@ let persistTimer: ReturnType<typeof setTimeout> | undefined;
 function schedulePersist(): void {
   if (persistTimer) clearTimeout(persistTimer);
   persistTimer = setTimeout(() => {
-    void invoke("write_settings", { contents: JSON.stringify(state) }).catch(() => {
-      // A failed settings save must never break the app.
+    void commands.writeSettings(JSON.stringify(state)).catch(() => {
+      // A failed settings save must never break the app (transport throw swallowed; a backend
+      // Result error is likewise ignored — best-effort persist).
     });
   }, 150);
 }
@@ -109,7 +111,7 @@ export function mergeLegacy(
 export async function initSettings(): Promise<void> {
   let fileObj: Record<string, unknown> = {};
   try {
-    const raw = await invoke<string>("read_settings");
+    const raw = unwrap(await commands.readSettings());
     const parsed = JSON.parse(raw);
     if (parsed && typeof parsed === "object") fileObj = parsed as Record<string, unknown>;
   } catch {

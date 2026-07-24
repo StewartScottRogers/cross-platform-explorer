@@ -31,3 +31,5 @@ guard (CPE-813) keeps the generated types honest while this proceeds.
 
 - 2026-07-23 — Increment 1: migrated the **tags** module (7 sites) to the typed `commands.*` via a new
   `unwrap` helper (restores throw-on-error). npm check 0/0; vitest 930. ~89 prod sites remain.
+- 2026-07-23 — Increment 2: migrated the **settings** module (read_settings/write_settings) to the typed
+  `commands.*`. npm check 0/0; settings tests 19.
