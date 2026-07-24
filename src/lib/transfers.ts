@@ -5,7 +5,7 @@
 
 import { writable, type Readable } from "svelte/store";
 import { listen } from "@tauri-apps/api/event";
-import { invoke } from "./invoke";
+import { commands } from "./bindings.gen"; // typed client (CPE-964)
 
 /** A progress snapshot from the backend engine (mirror of the Rust `TransferProgress`). */
 export interface TransferProgress {
@@ -97,10 +97,10 @@ export type ConflictPolicy = "overwrite" | "skip" | "keepboth";
 
 /** Start a copy/move; resolves to the new transfer's id. Progress arrives via the events above. */
 export function startTransfer(sources: string[], dest: string, kind: TransferKind, policy: ConflictPolicy): Promise<number> {
-  return invoke<number>("start_transfer", { sources, dest, kind, policy });
+  return commands.startTransfer(sources, dest, kind, policy);
 }
 
 /** Ask a running transfer to stop at the next chunk boundary. */
 export function cancelTransfer(id: number): Promise<void> {
-  return invoke("cancel_transfer", { id });
+  return commands.cancelTransfer(id);
 }

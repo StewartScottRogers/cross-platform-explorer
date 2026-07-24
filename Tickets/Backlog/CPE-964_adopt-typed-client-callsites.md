@@ -112,3 +112,10 @@ guard (CPE-813) keeps the generated types honest while this proceeds.
   `cmd` string ternary is now a typed-call ternary). Confirmed ConflictState/ConflictFile/ConflictVersions
   are structurally identical to the local types. npm check 0/0; suite 930 green. Remaining on raw invoke:
   SyncDialog (Status cast), transfers.ts, SessionHistoryDialog, AttributesDialog.
+- 2026-07-23 — Increment 13 (Nightshift): **transfers.ts** (start_transfer plain number / cancel_transfer
+  void — `commands.*` directly, no unwrap; confirmed local `TransferKind`/`ConflictPolicy` ≡ generated),
+  **SyncDialog** (forge_repo_status → `as unknown as Status` cast, same pattern as App's gitStatus, plain
+  return; forge_sync → unwrap), **SessionHistoryDialog** (audit_sessions → unwrap; audit_read → unwrap +
+  `as AuditEvent[]`, local AuditEvent differs from generated only in `detail` null/undefined so the cast is
+  sound). 6 sites, 3 files. npm check 0/0; suite 930 green. **Only AttributesDialog remains** (13 sites; 2
+  are the platform-excluded set_file_attribute/set_permissions that must stay on raw invoke).
