@@ -38,3 +38,9 @@ guard (CPE-813) keeps the generated types honest while this proceeds.
   `find_project_root` (plain returns, direct). BoardView now has zero raw `invoke` calls. Updated the
   test's `../invoke` mock to also export `unwrap` (the typed client routes through the same mocked
   `invoke`, so the existing assertions hold). npm check 0/0; full suite 930 green.
+- 2026-07-23 — Increment 4: migrated the **RepoBrowser** module — all 8 forge_* sites (`forge_browse`,
+  `forge_get_token`, `forge_set_token`, `forge_delete_token`, `forge_clone`, `forge_generic_remote`,
+  `forge_admit_host`, `forge_clone_url`) to `commands.*` + `unwrap` (all Result-returning). Dropped the
+  3 explicit `withBusy(() => invoke(...))` wrappers — redundant now, since the typed client routes through
+  the busy-tracking `invoke` which already wraps in `withBusy`; removed the now-unused `withBusy` import.
+  RepoBrowser now has zero raw `invoke`. npm check 0/0; forge tests 7; full suite 930 green.
