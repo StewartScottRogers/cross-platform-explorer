@@ -5,7 +5,7 @@
 // at least one job opts in (`autoRun`), honouring epic CPE-736's "no background cost when no job is
 // scheduled". The diff logic is pure + injectable for unit tests; only the live poll touches the backend.
 
-import { invoke } from "./invoke";
+import { commands } from "./bindings.gen"; // typed client (CPE-964)
 import type { BackupJob } from "./backup";
 import type { Place } from "./types";
 
@@ -53,7 +53,7 @@ export function anyAutoRun(jobs: BackupJob[]): boolean {
 }
 
 const connectedRoots = async (): Promise<string[]> => {
-  const drives = await invoke<Place[]>("list_drives");
+  const drives = await commands.listDrives();
   return drives.filter((d) => d.kind === "drive").map((d) => d.path);
 };
 

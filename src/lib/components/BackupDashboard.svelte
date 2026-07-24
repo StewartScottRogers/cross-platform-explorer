@@ -6,7 +6,8 @@
    * over the tested planner + the copy-engine backend; jobs persist via settings (App owns the store).
    */
   import { createEventDispatcher } from "svelte";
-  import { invoke, rawInvoke, createChannel } from "../invoke";
+  import { rawInvoke, createChannel, unwrap } from "../invoke";
+  import { commands } from "../bindings.gen"; // typed client (CPE-964)
   import { addJob, removeJob, updateJob, planBackup, type BackupJob, type BackupPlan } from "../backup";
   import type { CompareNode } from "../treeDiff";
 
@@ -60,7 +61,7 @@
   }
 
   async function scan(path: string): Promise<CompareNode[]> {
-    return invoke<CompareNode[]>("scan_tree", { path, maxDepth: 32 });
+    return commands.scanTree(path, 32).then(unwrap) as Promise<CompareNode[]>;
   }
 
   async function computePlan(job: BackupJob, reverse = false): Promise<BackupPlan> {

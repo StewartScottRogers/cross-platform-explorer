@@ -7,7 +7,8 @@
    * per-folder baselines persist via settings (App owns the store).
    */
   import { createEventDispatcher } from "svelte";
-  import { invoke } from "../invoke";
+  import { unwrap } from "../invoke";
+  import { commands } from "../bindings.gen"; // typed client (CPE-964)
   import { hasIssues, type ChecksumEntry, type IntegrityReport } from "../integrity";
 
   /** Folder to check (pre-filled with the current folder by App). */
@@ -30,7 +31,7 @@
   $: hasBaseline = baseline.length > 0;
 
   async function scan(): Promise<ChecksumEntry[]> {
-    return invoke<ChecksumEntry[]>("checksum_folder", { path: path.trim() });
+    return commands.checksumFolder(path.trim()).then(unwrap);
   }
 
   async function doBaseline() {
@@ -50,7 +51,7 @@
     try {
       // Diff in the backend (CPE-870): it re-scans + classifies and returns only the compact report, so a
       // large folder never ships its whole manifest across the IPC boundary just to be diffed here.
-      report = await invoke<IntegrityReport>("verify_folder", { path: path.trim(), baseline });
+      report = unwrap(await commands.verifyFolder(path.trim(), baseline));
       if (!hasBaseline) note = "No baseline yet — everything shows as new. Baseline first.";
     } catch (e) { error = String(e); } finally { loading = false; }
   }
