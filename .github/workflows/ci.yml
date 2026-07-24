@@ -96,6 +96,18 @@ jobs:
         working-directory: src-tauri
         run: cargo clippy --all-targets --features sidecar-platform -- -D warnings
 
+      # Typed-bindings drift guard (CPE-813, epic CPE-810): regenerate the superset typed client and fail
+      # if the committed `src/lib/bindings.gen.ts` differs — so the Rust contract and the TS bindings can
+      # never silently drift. Linux only (one OS is enough; webkit deps are installed above so the plain
+      # export bin links + runs). Regenerate locally with the same command if this fails.
+      - name: Typed-bindings drift guard
+        if: matrix.os == 'ubuntu-latest'
+        working-directory: src-tauri
+        run: |
+          cargo run --bin export_bindings --features "specta-bindings sidecar-platform"
+          git diff --exit-code ../src/lib/bindings.gen.ts \
+            || (echo "::error::bindings.gen.ts is stale — run: cargo run --bin export_bindings --features \"specta-bindings sidecar-platform\"" && exit 1)
+
   crates:
     # The GUI↔Server "server-side" crates under crates/ (the Decoupled Server epic CPE-810):
     # cpe-contract (the wire contract, CPE-811), cpe-security (the pluggable security core,

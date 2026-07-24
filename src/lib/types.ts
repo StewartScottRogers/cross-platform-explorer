@@ -1,22 +1,9 @@
-export interface DirEntry {
-  name: string;
-  path: string;
-  is_dir: boolean;
-  size: number;
-  /** Epoch milliseconds, or null when the filesystem reports none. */
-  modified: number | null;
-  /** Lowercase extension without the dot; "" for folders/extensionless files. */
-  extension: string;
-  /** Hidden per OS convention: hidden attribute on Windows, dotfile on POSIX. */
-  hidden: boolean;
-}
-
-export interface Place {
-  name: string;
-  path: string;
-  /** desktop | documents | downloads | pictures | music | videos | drive | home */
-  kind: string;
-}
+// `DirEntry` + `Place` are the Rust `cpe_server::model` structs — the single source of truth is the
+// generated typed client, so these are RE-EXPORTED from it rather than hand-declared (CPE-813, epic
+// CPE-810). Deleting the hand-copies removes the drift surface; the ~26 importers are unchanged (they
+// still import these names from `./types`). The drift-guard CI regenerates `bindings.gen.ts` and fails on
+// any mismatch, so these can never silently diverge from Rust again.
+export type { DirEntry, Place } from "./bindings.gen";
 
 export type SortKey = "name" | "modified" | "type" | "size";
 export type SortDir = "asc" | "desc";
