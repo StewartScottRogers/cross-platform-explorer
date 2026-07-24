@@ -1,0 +1,57 @@
+---
+id: CPE-976
+title: "EPIC: AI semantic search — find files by meaning"
+type: Task
+status: Proposed
+priority: High
+component: Multiple
+tags: [epic, big-design]
+estimate: 4h+
+created: 2026-07-24
+closed:
+---
+
+## Goal
+Find files by **meaning**, not just filename: type "the invoice from the plumber last spring" or "photos of
+the whiteboard from the offsite" and get ranked hits from file *content* (document text, and later image
+captions), independent of whether those words appear in the name. A local, privacy-respecting embedding
+index over the indexed corpus, queried with natural language, complementing the lexical instant-search
+([[CPE-703]] / `index_query`) rather than replacing it.
+
+## Why
+Everyone has files they can't find because they don't remember the name. Lexical/glob search (already strong
+here) can't answer "the doc where I compared the two vendors." Semantic search is the headline capability
+that makes this an **AI** file explorer, and it composes with the pieces already built: the crawl/index
+(CPE-703), content extraction (`doc_text`, `content_search`), and — once OCR ([[CPE-980]]) lands — scanned
+docs too. Delivered as a delete-testable mode: with it off, the plain explorer stays fast/small (the same
+hard rule as CPE-703).
+
+## Rough scope (areas, not child tickets)
+- A **pure vector index**: store `(id, embedding)` per chunk, cosine-similarity top-k, persist per corpus —
+  provider-agnostic (embeddings arrive as `Vec<f32>`), the backend-neutral core that commits to no model,
+  exactly as `index_query` did for CPE-703.
+- An **embedding provider seam** (`trait Embedder`): pluggable — a bundled small local model, or an opt-in
+  external endpoint — behind a feature gate so the plain build pulls in no ML stack (lean-core).
+- A **chunk + extract pipeline**: reuse `doc_text`/`content_search` to turn files into text chunks to embed;
+  incremental (re-embed only changed files, reusing the CPE-833 change signals).
+- A **query pipeline**: embed the NL query → top-k over the index → merge/re-rank with lexical hits into one
+  result list (reuse `spotlight_results`-style grouping).
+- A results surface: NL search box + ranked snippets with why-matched context.
+
+## Open questions (resolve at activation — big-design)
+- **Embedding backend:** bundle a small local model (size/perf/licensing) vs. a pluggable external endpoint
+  vs. both? This is the central big-design call (privacy, binary size, offline, the fast/small tiebreaker).
+- Index footprint + on-disk format for vectors (quantise? budget per corpus, mirroring CPE-832's budget).
+- Chunking granularity (per-file vs per-paragraph) and how semantic + lexical scores combine.
+- Staleness/re-embed policy on change; cost control if an external embedder is used.
+
+## Definition of Done
+- A natural-language query returns meaning-ranked file hits from content, blended with lexical matches.
+- The index stays current as files change; re-embedding is incremental, not a full rescan.
+- With the mode disabled, no embedder/model loads and there is zero measurable startup/memory cost.
+
+## Notes
+- Flagship AI feature. Build order should mirror CPE-703: **the pure vector-index core first**
+  (backend/model-agnostic, cargo-tested), then the embedder seam, then the pipeline + UI. Composes with
+  [[CPE-978]] (a semantic query can back a smart folder) and [[CPE-980]] (OCR feeds scanned docs in).
+  See [[headless-frontier-and-cpe-net]], [[prefer-streaming-liveness]].
