@@ -62,5 +62,52 @@ epic is a card in the column that matches its status:
 - **Done** — closed epics. Like the ticket board, older ones are archived behind a **+N archived** toggle.
 
 Every epic card shows its **id**, **status**, and a **progress bar** (how many of its tickets are done).
-**Click an epic card** to jump to the Board filtered to that epic's tickets. Your view choice (Board or
+**Click an epic card** to open its **details** (below); its popup has a **View tickets →** button that
+filters the Board to that epic's tickets (including closed/archived ones). Your view choice (Board or
 Epics) and the archived toggle are **remembered** between opens.
+
+## Card details
+
+**Click any card** (a ticket or an epic) to open a read-only **details popup** showing the full ticket —
+its frontmatter fields (type, priority, status, tags, epic, sprint, folder) and the rendered body
+(Summary, Acceptance Criteria, Work Log, …).
+
+- **Resize** it by dragging the hatched **thumb** in the bottom-right corner; the size is remembered.
+- The **status bar** along the bottom shows the ticket's folder location and field/line counts.
+- Click the **⧉ pop-out** button to open the card in its **own window**, separate from the board — handy
+  for keeping a ticket open while you work elsewhere. (The copy-id, Dispatch, and drag controls on the
+  card still work — clicking those doesn't open the popup.)
+
+## Directives — talk to an agent
+
+The card popup has a **Send directive** box: type an instruction (optionally naming a target agent,
+default `any`) and press **Send ▸**. It writes a structured, machine-readable entry into the ticket under
+a **`## Agent Directives`** heading:
+
+```
+### ▸ open · to `any` · 2026-07-24T01:48:22Z
+Summarize the risks in this ticket
+```
+
+**The ticket file is the wire.** Because directives live in the ticket's `.md`, any agent that can see the
+repo — local, remote, in CI, or one you don't control — can read `open` directives, do the work, append a
+reply, and flip the status to `done`. No open ports, no live connection required.
+
+### The `ticket-mcp` server (MCP)
+
+For **live, tool-using agents**, a ready-made **MCP server** exposes these directives over the Model
+Context Protocol. Point any MCP client at:
+
+```
+ticket-mcp <path-to-your-repo>
+```
+
+It offers two tools:
+
+- **`directives.list`** — every `open` directive across the project's tickets (ticket id, `when`
+  timestamp, target, and the instruction text).
+- **`directives.reply`** — append a reply to a directive by its `when` timestamp, and optionally resolve
+  it (`open` → `done`).
+
+So an external agent can survey the board's directives and answer them, with every exchange recorded in
+the ticket itself.
