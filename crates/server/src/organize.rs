@@ -123,6 +123,73 @@ fn year_from_epoch_secs(secs: u64) -> i64 {
     if mp >= 10 { y + 1 } else { y }
 }
 
+// ---- Junk / clutter detection (CPE-994, epic CPE-979) ----
+
+/// Why a file is flagged as likely clutter — a *suggestion* for the declutter view, never an auto-action.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ClutterReason {
+    /// A zero-byte file — usually a failed download or a leftover stub.
+    ZeroByte,
+    /// An installer package (`.exe`/`.msi`/`.dmg`/…) — commonly safe to remove once installed.
+    Installer,
+    /// A partial/temporary download (`.part`, `.crdownload`, `.tmp`) — an interrupted or transient file.
+    TempOrPartial,
+    /// A backup or editor lock/leftover (`.bak`, a trailing `~`, an office `~$` lock).
+    Backup,
+}
+
+impl ClutterReason {
+    /// A short human label for the declutter UI.
+    pub fn label(self) -> &'static str {
+        match self {
+            ClutterReason::ZeroByte => "Empty file",
+            ClutterReason::Installer => "Installer (safe to remove after install)",
+            ClutterReason::TempOrPartial => "Partial / temporary download",
+            ClutterReason::Backup => "Backup / leftover",
+        }
+    }
+}
+
+/// One flagged file: its `name` and the [`ClutterReason`] it matched.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ClutterFinding {
+    pub name: String,
+    pub reason: ClutterReason,
+}
+
+/// Scan `entries` for likely-clutter **files**, returning one finding per flagged file in input order
+/// (deterministic). Pure metadata heuristics — no content hashing (exact-duplicate detection is
+/// [`crate::duplicates`]'s job) and no I/O. Directories are never flagged. A file matching several patterns
+/// reports the first (most-definitive) reason.
+pub fn find_clutter(entries: &[OrganizeEntry]) -> Vec<ClutterFinding> {
+    entries
+        .iter()
+        .filter(|e| !e.is_dir)
+        .filter_map(|e| clutter_reason(e).map(|reason| ClutterFinding { name: e.name.clone(), reason }))
+        .collect()
+}
+
+/// The clutter reason for one file, or `None` if it doesn't look like clutter. Checked most-definitive
+/// first: emptiness, then installer, then partial/temp, then backup/leftover.
+fn clutter_reason(entry: &OrganizeEntry) -> Option<ClutterReason> {
+    if entry.size == 0 {
+        return Some(ClutterReason::ZeroByte);
+    }
+    if matches!(entry.ext.as_str(), "exe" | "msi" | "dmg" | "pkg" | "deb" | "rpm" | "appimage") {
+        return Some(ClutterReason::Installer);
+    }
+    let name_lower = entry.name.to_lowercase();
+    if matches!(entry.ext.as_str(), "part" | "crdownload" | "tmp" | "temp" | "download")
+        || name_lower.ends_with(".part")
+    {
+        return Some(ClutterReason::TempOrPartial);
+    }
+    if entry.ext == "bak" || name_lower.ends_with('~') || name_lower.starts_with("~$") {
+        return Some(ClutterReason::Backup);
+    }
+    None
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -243,5 +310,59 @@ mod tests {
             .map(|p| p.name)
             .collect();
         assert_eq!(names, vec!["z.rs", "a.rs", "m.rs"]);
+    }
+
+    // ---- clutter detection (CPE-994) ----
+
+    /// A non-empty file fixture (size 10) so it isn't flagged as zero-byte.
+    fn nonempty(name: &str, ext: &str) -> OrganizeEntry {
+        OrganizeEntry::new(name, false, ext, 10, 0)
+    }
+
+    #[test]
+    fn find_clutter_flags_each_category() {
+        let entries = [
+            OrganizeEntry::new("empty.log", false, "log", 0, 0), // zero byte
+            nonempty("setup.exe", "exe"),                        // installer
+            nonempty("movie.mp4.part", "part"),                  // partial download
+            nonempty("notes.txt.bak", "bak"),                    // backup
+            nonempty("doc.docx~", ""),                           // trailing ~ leftover (ext parsed off by caller)
+            nonempty("~$report.docx", "docx"),                   // office lock
+            nonempty("keep.rs", "rs"),                           // NOT clutter
+        ];
+        let findings = find_clutter(&entries);
+        let found: Vec<(&str, ClutterReason)> =
+            findings.iter().map(|f| (f.name.as_str(), f.reason)).collect();
+        assert_eq!(
+            found,
+            vec![
+                ("empty.log", ClutterReason::ZeroByte),
+                ("setup.exe", ClutterReason::Installer),
+                ("movie.mp4.part", ClutterReason::TempOrPartial),
+                ("notes.txt.bak", ClutterReason::Backup),
+                ("doc.docx~", ClutterReason::Backup),
+                ("~$report.docx", ClutterReason::Backup),
+            ]
+        );
+        // The real file is not flagged.
+        assert!(!find_clutter(&entries).iter().any(|f| f.name == "keep.rs"));
+    }
+
+    #[test]
+    fn find_clutter_skips_directories_and_prefers_zero_byte() {
+        let entries = [
+            OrganizeEntry::new("cache", true, "", 0, 0),   // dir — never flagged even though empty
+            OrganizeEntry::new("stub.exe", false, "exe", 0, 0), // installer ext BUT zero-byte wins
+        ];
+        let found = find_clutter(&entries);
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].name, "stub.exe");
+        assert_eq!(found[0].reason, ClutterReason::ZeroByte); // most-definitive reason first
+    }
+
+    #[test]
+    fn clutter_reason_labels_are_human() {
+        assert_eq!(ClutterReason::ZeroByte.label(), "Empty file");
+        assert!(ClutterReason::Installer.label().contains("Installer"));
     }
 }
