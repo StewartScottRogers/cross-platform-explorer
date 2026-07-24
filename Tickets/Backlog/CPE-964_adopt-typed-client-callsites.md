@@ -87,3 +87,9 @@ guard (CPE-813) keeps the generated types honest while this proceeds.
   dir_size). Confirmed local `Stats`≡`TextStats`, `Info`≡`EntryInfo`, `ImageMeta`≡`ImageMeta` structurally,
   so no casts needed. **Deferred**: DataBrowser (`Page.total` number vs number|null) + CompareDialog
   (`CompareNode` vs generated `TreeNode`) — real type friction, next increment. npm check 0/0; suite 930.
+- 2026-07-23 — Increment 10 (Nightshift): the two friction files — **DataBrowser** (data_browser_sources/
+  query/page; widened local `Page.total` to `number|null` to match generated, then no casts needed;
+  `Column` already ≡) + **CompareDialog** (read_file_range/read_file_text clean; scan_tree ×2 cast
+  `.then(unwrap) as Promise<CompareNode[]>` — local `CompareNode` is assignable to generated `TreeNode`, so
+  the cast is sound and behaviour-identical to the old `invoke<CompareNode[]>` generic). npm check 0/0;
+  suite 930 green.

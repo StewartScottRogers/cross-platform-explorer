@@ -2,12 +2,13 @@
   // Structured-data browser preview (CPE-849, epic CPE-721): opens a SQLite / Parquet / Excel-ODS file in
   // an interactive grid — table/sheet navigation, paged typed rows, client-side sort + filter of the page,
   // and a read-only SQL console for SQLite. Backed by the `data_browser_*` commands over cpe-server.
-  import { invoke } from "../invoke";
+  import { unwrap } from "../invoke";
+  import { commands } from "../bindings.gen"; // typed client (CPE-964)
 
   export let entry: { path: string; extension: string };
 
   interface Column { name: string; type: string }
-  interface Page { columns: Column[]; rows: string[][]; total?: number }
+  interface Page { columns: Column[]; rows: string[][]; total?: number | null }
 
   const LIMIT = 100;
   let sources: string[] = [];
@@ -31,7 +32,7 @@
   async function init() {
     error = ""; sqlMode = false; sql = ""; offset = 0; sortCol = null; filter = ""; page = null;
     try {
-      sources = await invoke<string[]>("data_browser_sources", { path: entry.path });
+      sources = unwrap(await commands.dataBrowserSources(entry.path));
       source = sources[0] ?? "";
       await loadPage();
     } catch (e) {
@@ -43,8 +44,8 @@
     loading = true; error = "";
     try {
       page = sqlMode
-        ? await invoke<Page>("data_browser_query", { path: entry.path, sql, offset, limit: LIMIT })
-        : await invoke<Page>("data_browser_page", { path: entry.path, source, offset, limit: LIMIT });
+        ? unwrap(await commands.dataBrowserQuery(entry.path, sql, offset, LIMIT))
+        : unwrap(await commands.dataBrowserPage(entry.path, source, offset, LIMIT));
     } catch (e) {
       error = String(e); page = null;
     } finally {
