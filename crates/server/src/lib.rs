@@ -270,3 +270,8 @@ pub mod dispatch;
 /// Secure-delete pass planner — overwrite-pass schedules + honest SSD/copy-on-write erasure caveats
 /// (CPE-941, epic CPE-738). Pure planning; the shred engine executes the passes.
 pub mod secure_delete;
+
+/// AI-copilot operation-plan model — the pure, filesystem-free structured plan (a closed, whitelisted set of
+/// move/rename/delete/mkdir/copy ops) an NL instruction compiles to, plus its scope+cap validator and a
+/// dry-run summary (CPE-990, epic CPE-977). No LLM, no I/O; the safe, inspectable middle of the copilot.
+pub mod op_plan;
