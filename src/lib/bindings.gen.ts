@@ -526,6 +526,34 @@ async templateImport(json: string) : Promise<Result<Partial<{ [key in string]: T
 }
 },
 /**
+ * The human name of this OS's native tag store ("Finder tags" / "NTFS alternate data streams" / …).
+ */
+async nativeTagsName() : Promise<string> {
+    return await TAURI_INVOKE("native_tags_name");
+},
+/**
+ * Pull `path`'s native tags into the CPE store (non-destructive) and persist. Returns the updated store.
+ */
+async nativeTagsPull(path: string) : Promise<Result<Partial<{ [key in string]: TagEntry }>, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("native_tags_pull", { path }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * Push `path`'s CPE tags out to native file metadata (the CPE store is authoritative).
+ */
+async nativeTagsPush(path: string) : Promise<Result<null, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("native_tags_push", { path }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
  * Rename a single entry in place. Returns the new path.
  */
 async renameEntry(path: string, newName: string) : Promise<Result<string, string>> {
