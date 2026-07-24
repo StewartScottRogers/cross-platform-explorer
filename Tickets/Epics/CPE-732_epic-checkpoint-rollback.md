@@ -40,3 +40,10 @@ audit by making the history not just visible but reversible.
 `revert_one` / `summarize_plan`: the pure diff that turns a checkpoint snapshot + current tree state into the
 minimal Create/Overwrite/Delete revert ops (+ cherry-revert of one path). Remaining: content-addressed
 snapshot capture/store (dedup, bounded), the revert engine, and the timeline checkpoint-marker + restore UI.
+
+2026-07-24 (dayshift) — **CPE-969** landed the content-addressed **snapshot store**:
+`cpe-server::snapshot` — a refcounted, deduplicated `BlobStore` + `plan_capture`/`apply_capture`/`release`
+under a per-file + whole-store byte `CaptureBudget` (the "bounded, dedup" DoD). Reuses CPE-917's
+`Snapshot`/`FileState`, so a checkpoint = a `Snapshot` + the blobs its hashes resolve to. 11 tests, pure std.
+**Remaining (GUI/attended):** the revert **engine** (execute a `restore_plan`, skip-unreadable) and the
+timeline checkpoint-marker + restore UI.
