@@ -50,3 +50,12 @@ guard (CPE-813) keeps the generated types honest while this proceeds.
   `handleFolderBatch` now call `commands.entryInfo(path).then(unwrap)` / `commands.runWatchActions(...)`;
   generated `EntryInfo`/`OpResult`/`WatchAction` are structurally compatible with the deps' types.
   folderWatch now has zero raw `invoke`. npm check 0/0; folderWatch tests 8; full suite 930 green.
+- 2026-07-23 — Increment 6: migrated the **sidecar** module (the sidecar-platform client) — all 14 sites:
+  `sidecar_registry_ids`/`agent_watch_stop` (plain) + the 12 Result-returning
+  (`sidecar_start_ai_console`/`_agent_board`, `agent_watch_start`, `sidecar_consent_state`/`_set_consent`/
+  `_revoke_capability`/`_details`/`_repair`/`_stop`/`_set_enabled`/`_diagnostics`) via `unwrap`. This module
+  is the graceful-degradation client (every fn try/catches to a safe "off" fallback); that's preserved —
+  `unwrap` throws on a Result error and plain-command rejections propagate, both caught by the existing
+  try/catch. Verified the 6 generated types (`Capability`, `ConsentState`, `SidecarInfo`, `SidecarRepair`,
+  `SidecarDiagnostics`, `DiagLogLine`) are structurally identical to the local hand-declared ones. sidecar
+  now has zero raw `invoke`. npm check 0/0; sidecar tests 17; full suite 930 green.

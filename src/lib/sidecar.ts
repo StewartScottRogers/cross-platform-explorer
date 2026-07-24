@@ -1,4 +1,5 @@
-import { invoke } from "./invoke";
+import { unwrap } from "./invoke";
+import { commands } from "./bindings.gen"; // typed client (CPE-964)
 
 /**
  * Frontend client for the sidecar platform (ADR 0001, docs/adr/0001-sidecar-platform.md).
@@ -16,7 +17,7 @@ import { invoke } from "./invoke";
  *  platform feature is off or the command is otherwise unavailable. */
 export async function listSidecars(): Promise<string[]> {
   try {
-    const ids = await invoke<string[]>("sidecar_registry_ids");
+    const ids = await commands.sidecarRegistryIds();
     return Array.isArray(ids) ? ids : [];
   } catch {
     return [];
@@ -46,7 +47,7 @@ export function consoleUrlWith(baseUrl: string, cwd?: string, task?: string, ses
 
 export async function startAiConsole(): Promise<string | null> {
   try {
-    const url = await invoke<string>("sidecar_start_ai_console");
+    const url = unwrap(await commands.sidecarStartAiConsole());
     return typeof url === "string" && url.length > 0 ? url : null;
   } catch {
     return null;
@@ -60,7 +61,7 @@ export async function startAiConsole(): Promise<string | null> {
  */
 export async function startAgentBoard(root?: string): Promise<string | null> {
   try {
-    const url = await invoke<string>("sidecar_start_agent_board", { root: root ?? null });
+    const url = unwrap(await commands.sidecarStartAgentBoard(root ?? null));
     return typeof url === "string" && url.length > 0 ? url : null;
   } catch {
     return null;
@@ -157,7 +158,7 @@ export interface FsActivity {
  *  when the platform is off or the path can't be watched — never throws. */
 export async function startAgentWatch(path: string): Promise<boolean> {
   try {
-    await invoke("agent_watch_start", { path });
+    unwrap(await commands.agentWatchStart(path));
     return true;
   } catch {
     return false;
@@ -167,7 +168,7 @@ export async function startAgentWatch(path: string): Promise<boolean> {
 /** Stop the active filesystem watch (CPE-398). Safe + idempotent when the platform is off. */
 export async function stopAgentWatch(): Promise<void> {
   try {
-    await invoke("agent_watch_stop");
+    await commands.agentWatchStop();
   } catch {
     /* platform off — nothing to stop */
   }
@@ -192,7 +193,7 @@ export function normalizeFsActivity(payload: unknown): FsActivity[] {
 /** Whether the sidecar platform is active in this build (i.e. the command exists). */
 export async function platformActive(): Promise<boolean> {
   try {
-    await invoke<string[]>("sidecar_registry_ids");
+    await commands.sidecarRegistryIds();
     return true;
   } catch {
     return false;
@@ -249,7 +250,7 @@ export const CAPABILITY_INFO: Record<
  *  platform is off or the sidecar isn't in the registry — never throws. */
 export async function consentState(id: string): Promise<ConsentState | null> {
   try {
-    const s = await invoke<ConsentState>("sidecar_consent_state", { id });
+    const s = unwrap(await commands.sidecarConsentState(id));
     return s && Array.isArray(s.requested) ? s : null;
   } catch {
     return null;
@@ -264,7 +265,7 @@ export async function setConsent(
   decided: Capability[],
 ): Promise<boolean> {
   try {
-    await invoke("sidecar_set_consent", { id, granted, decided });
+    unwrap(await commands.sidecarSetConsent(id, granted, decided));
     return true;
   } catch {
     return false;
@@ -274,7 +275,7 @@ export async function setConsent(
 /** Revoke a previously-granted capability. Takes effect on the sidecar's next launch. */
 export async function revokeCapability(id: string, capability: Capability): Promise<boolean> {
   try {
-    await invoke("sidecar_revoke_capability", { id, capability });
+    unwrap(await commands.sidecarRevokeCapability(id, capability));
     return true;
   } catch {
     return false;
@@ -301,7 +302,7 @@ export interface SidecarInfo {
 /** Details for every registered sidecar (management panel). `[]` when the platform is off. */
 export async function sidecarDetails(): Promise<SidecarInfo[]> {
   try {
-    const rows = await invoke<SidecarInfo[]>("sidecar_details");
+    const rows = unwrap(await commands.sidecarDetails());
     return Array.isArray(rows) ? rows : [];
   } catch {
     return [];
@@ -319,7 +320,7 @@ export interface SidecarRepair {
  *  stored error, and re-check the binary. `null` when the platform is off or the call failed. */
 export async function repairSidecar(id: string): Promise<SidecarRepair | null> {
   try {
-    return await invoke<SidecarRepair>("sidecar_repair", { id });
+    return unwrap(await commands.sidecarRepair(id));
   } catch {
     return null;
   }
@@ -328,7 +329,7 @@ export async function repairSidecar(id: string): Promise<SidecarRepair | null> {
 /** Stop a running sidecar. Resolves `false` if the platform is off or the call failed. */
 export async function stopSidecar(id: string): Promise<boolean> {
   try {
-    await invoke("sidecar_stop", { id });
+    unwrap(await commands.sidecarStop(id));
     return true;
   } catch {
     return false;
@@ -338,7 +339,7 @@ export async function stopSidecar(id: string): Promise<boolean> {
 /** Enable or disable a sidecar (disabling also stops it). */
 export async function setEnabled(id: string, enabled: boolean): Promise<boolean> {
   try {
-    await invoke("sidecar_set_enabled", { id, enabled });
+    unwrap(await commands.sidecarSetEnabled(id, enabled));
     return true;
   } catch {
     return false;
@@ -374,7 +375,7 @@ export function emptyDiagnostics(id: string): SidecarDiagnostics {
  *  record rather than throwing when the platform is off or the sidecar has no diagnostics. */
 export async function sidecarDiagnostics(id: string): Promise<SidecarDiagnostics> {
   try {
-    const d = await invoke<SidecarDiagnostics>("sidecar_diagnostics", { id });
+    const d = unwrap(await commands.sidecarDiagnostics(id));
     if (!d || typeof d !== "object") return emptyDiagnostics(id);
     return {
       id: typeof d.id === "string" ? d.id : id,
