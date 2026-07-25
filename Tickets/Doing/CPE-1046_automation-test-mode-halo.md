@@ -73,3 +73,15 @@ scripts run, no command/gate.
 2026-07-25 (attended) — Filed at user request (approved the two-layer plan: off-screen isolation + an
 obvious halo). Rides the `--open` init-script delivery (CPE-1044) and pairs with the GUI-smoke harness
 (CPE-1045). Both touch `lib.rs` setup — serialize merges.
+
+## REVISED (user feedback, 2026-07-25) — hard requirements
+The user saw an automated test window pop into the **middle** of the screen and **capture their mouse +
+keyboard**. That is unacceptable. Revised design:
+1. **Not a full-screen frame — a small upper-LEFT corner badge**, sized only as big as its content and no
+   bigger (`position: fixed; top: 8px; left: 8px; width: max-content`). No overlay across the center.
+2. **Never captures input:** overlay root + children `pointer-events: none` (click-through); no focusable
+   elements / no autofocus / `tabindex="-1"` — must not steal keyboard focus.
+3. **Window must not steal OS focus:** in `--test-mode`, launch the main Tauri window **non-focused /
+   non-activating** (`WebviewWindowBuilder::focused(false)`) so creating it never grabs the user's mouse or
+   keyboard from their active app. This — plus off-screen launch for automation — is the real "can't
+   interfere" fix; the badge is only the visual cue.
