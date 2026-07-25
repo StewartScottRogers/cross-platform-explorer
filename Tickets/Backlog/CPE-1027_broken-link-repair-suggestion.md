@@ -36,3 +36,20 @@ future "Repair link…" action. Add `suggest_repair` to the EXISTING module `cra
 ## Notes
 Do NOT touch `crates/server/src/volume.rs` or `lib.rs` (a sibling worker owns those). Only `links.rs` + this
 ticket's Work Log. Keep the `list_dir` skip-on-error convention.
+
+## Work Log
+- 2026-07-25: Added `suggest_repair` + a private `find_by_name` helper to `crates/server/src/links.rs`.
+  Grepped `crates/server/src` for an existing bounded recursive-walk helper first (`name_search.rs`'s
+  `walk_name_matches`, `compare.rs`'s `scan_children`, `snapshot_capture.rs`'s `scan_walk`) — none was a
+  clean fit: `walk_name_matches` is batching/streaming-shaped and collects *all* matches across one root
+  rather than short-circuiting on the first match across *multiple* ordered roots, and `scan_children`
+  builds a full tree rather than searching. Hand-rolled a small depth-capped (`REPAIR_SEARCH_MAX_DEPTH =
+  4`) `read_dir` recursion instead, following the same skip-unreadable-dir/never-panic shape as those
+  helpers (and `list_dir`). `DirEntry::file_type()` doesn't follow symlinks, so a symlinked "directory"
+  reports `is_dir() == false` and the walk naturally never descends into a symlink (covers "don't recurse
+  into the broken link" for free). Added 5 unit tests (found-under-nested-root, root-order/first-match,
+  no-match, non-symlink-input, unreadable/missing-root) alongside the existing 3 in `links.rs`, all
+  tolerating ungated Windows symlink creation like the pre-existing tests. `cargo test -q links` → 8/8
+  `links.rs` tests pass (report doesn't separate cleanly from `dangling_links` under substring filtering;
+  confirmed via `--list`). `cargo clippy --all-targets -- -D warnings` and `--all-features` variant both
+  clean.
