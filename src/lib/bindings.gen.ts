@@ -900,6 +900,38 @@ async linkStatus(path: string) : Promise<LinkStatus> {
     return await TAURI_INVOKE("link_status", { path });
 },
 /**
+ * Install the "Open in Cross-Platform Explorer" shell integration for the current user (CPE-1020, epic
+ * CPE-712) — writes the registry entries for the running exe. Windows-only today; other OSes return an
+ * error. Logic in `cpe_server::shell_menu`.
+ */
+async installShellIntegration() : Promise<Result<null, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("install_shell_integration") };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * Remove the "Open in CPE" shell integration for the current user (CPE-1020). Idempotent — safe when
+ * nothing is installed. Logic in `cpe_server::shell_menu`.
+ */
+async uninstallShellIntegration() : Promise<Result<null, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("uninstall_shell_integration") };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * Whether the "Open in CPE" shell integration is currently installed for this user (CPE-1020) — so the
+ * Settings toggle (CPE-1023) can reflect true state. Logic in `cpe_server::shell_menu`.
+ */
+async shellIntegrationInstalled() : Promise<boolean> {
+    return await TAURI_INVOKE("shell_integration_installed");
+},
+/**
  * Classify the drive a path lives on (CPE-805, epic CPE-716) — fixed / removable / network / cdrom / ram
  * / unknown — so the sidebar can badge removable & network drives. Windows uses `GetDriveTypeW`; unix
  * returns a best-effort `fixed` for now (richer classification is a follow-up).
