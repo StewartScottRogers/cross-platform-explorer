@@ -191,8 +191,9 @@ fn expand_template(template: &str, input: &str, n: usize) -> String {
                 continue;
             }
         }
-        out.push(bytes[i] as char);
-        i += 1;
+        let ch = template[i..].chars().next().unwrap();
+        out.push(ch);
+        i += ch.len_utf8();
     }
     out
 }
@@ -390,5 +391,57 @@ mod tests {
             }],
         );
         assert!(plan(&macro_, &[]).is_empty());
+    }
+
+    #[test]
+    fn expand_template_preserves_non_ascii_literals_accented() {
+        // CPE-1013: non-ASCII literal text (accented characters) should be preserved exactly.
+        let macro_ = m(
+            "accented",
+            vec![MacroStep::Rename {
+                template: "café_{n}.txt".into(),
+            }],
+        );
+        let ops = plan(&macro_, &["input.txt".into()]);
+        assert_eq!(ops[0].detail, "café_1.txt");
+    }
+
+    #[test]
+    fn expand_template_preserves_non_ascii_literals_cjk() {
+        // CPE-1013: CJK characters in literal text should be preserved exactly.
+        let macro_ = m(
+            "cjk",
+            vec![MacroStep::Rename {
+                template: "目录_{n}.{ext}".into(),
+            }],
+        );
+        let ops = plan(&macro_, &["file.txt".into()]);
+        assert_eq!(ops[0].detail, "目录_1.txt");
+    }
+
+    #[test]
+    fn expand_template_preserves_non_ascii_literals_emoji() {
+        // CPE-1013: emoji in literal text should be preserved exactly.
+        let macro_ = m(
+            "emoji",
+            vec![MacroStep::Rename {
+                template: "📁_{n}.{ext}".into(),
+            }],
+        );
+        let ops = plan(&macro_, &["photo.jpg".into()]);
+        assert_eq!(ops[0].detail, "📁_1.jpg");
+    }
+
+    #[test]
+    fn expand_template_non_ascii_with_substitution_tokens() {
+        // CPE-1013: ensure substitution tokens work correctly even when surrounded by non-ASCII text.
+        let macro_ = m(
+            "mixed",
+            vec![MacroStep::Rename {
+                template: "café_{stem}_día_{n}.{ext}".into(),
+            }],
+        );
+        let ops = plan(&macro_, &["/path/my_file.pdf".into()]);
+        assert_eq!(ops[0].detail, "café_my_file_día_1.pdf");
     }
 }

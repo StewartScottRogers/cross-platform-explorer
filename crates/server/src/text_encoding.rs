@@ -132,6 +132,9 @@ pub fn detect_encoding(bytes: &[u8]) -> EncodingGuess {
 /// anything else (NULs on both lanes, or just a stray NUL) is [`Binary`](EncodingGuess::Binary).
 fn classify_nul_bytes(bytes: &[u8]) -> EncodingGuess {
     let sniff_len = bytes.len().min(BINARY_SNIFF_LEN);
+    if sniff_len < 2 {
+        return EncodingGuess::Binary;
+    }
     let lane = (sniff_len / 2).max(1); // approx positions per byte-lane in the sniffed prefix
     let mut even_nul = 0usize;
     let mut odd_nul = 0usize;
@@ -317,6 +320,13 @@ mod tests {
             let bytes = vec![0xFFu8; n];
             let _ = detect_encoding(&bytes);
         }
+    }
+
+    #[test]
+    fn single_nul_byte_is_binary_not_utf16() {
+        // CPE-1014: a single [0x00] byte should be classified as Binary, not UTF-16.
+        // A 1-byte file can never be valid UTF-16 (which requires at least 2 bytes).
+        assert_eq!(detect_encoding(&[0x00]), EncodingGuess::Binary);
     }
 
     #[test]
