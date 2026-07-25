@@ -5,7 +5,7 @@ type: test
 component: Backend
 priority: low
 tags: ready
-status: Backlog
+status: Done
 created: 2026-07-25
 epic: CPE-997
 estimate: 30m
