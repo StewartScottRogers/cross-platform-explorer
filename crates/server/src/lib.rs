@@ -275,6 +275,11 @@ pub mod image_column;
 /// duration-in-seconds [`metadata_column::CellValue::Float`] cell (CPE-1028, epic CPE-707). Pure.
 pub mod video_column;
 
+/// MP4/MOV video-metadata read codec — walk the ISO-BMFF `moov/udta/meta/ilst` box tree for iTunes-style
+/// descriptive tags (Title/Artist/Album/…) into [`media_meta_edit::MetaField`]s in group `"video"`
+/// (CPE-1037, epic CPE-725). Pure, std-only, never panics on malformed/truncated input.
+pub mod video_meta_read;
+
 /// Metadata-column dispatcher — route a file's bytes + extension + a [`column_extract::MetaColumn`] to the
 /// right per-family extractor (audio codecs / image header), the one entry point the column system calls
 /// (CPE-975, epic CPE-707). Pure.
