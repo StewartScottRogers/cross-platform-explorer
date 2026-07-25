@@ -309,3 +309,9 @@ pub mod simhash;
 /// formats (`.docx`/`.xlsx`/`.epub`/…) as non-mismatches. Pure over a byte slice; no I/O, no new
 /// dependencies.
 pub mod file_type;
+
+/// Text-encoding + line-ending detection (CPE-1003, epic CPE-1002 "File inspection & safety
+/// utilities"). Guesses a text file's encoding from a leading byte-order mark or UTF-8 validity, and
+/// separately reports which line-ending convention(s) a decoded string uses. Pure over a byte slice
+/// / `&str`; no I/O, no new dependencies.
+pub mod text_encoding;
