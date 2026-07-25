@@ -35,7 +35,29 @@ stakes for daily-driver use and makes CPE reachable from everywhere the OS offer
 - Users can set CPE as the default file manager where the OS allows it.
 - Disabling the integration removes every registered entry with no residue.
 
+## Decisions (2026-07-24, PM take-on — user off-shift, calls made + logged)
+- **Privilege:** register under **user scope** everywhere — Windows `HKCU\Software\Classes` (no UAC),
+  Linux `~/.local/share/applications` (no root), macOS per-user Services. Avoids elevation entirely; a
+  system-wide/default-handler variant can be a later opt-in.
+- **Reversibility:** each per-OS plan is emitted as **data** (install set + remove set) with a unit-tested
+  invariant that every installed key/file is in the remove set — so "no residue" is provable, not hoped.
+- **Entries to register (first wave):** on-folder, folder-background, and on-drive "Open in CPE" verbs
+  (the file-explorer essentials). On-file and the full default-file-manager handshake are deferred to a
+  later slice.
+- **Sequencing:** pure per-OS *plan* models first (headless, fully testable), then the apply glue, then the
+  Settings toggle — mirroring how CPE-945 landed the applicability core before any OS I/O.
+
+## Child tickets (first wave)
+- **CPE-945** — shell-menu applicability model (pure). ✅ Done.
+- **CPE-1019** — Windows shell-registration plan (pure model). Next up.
+- **CPE-1020** — Apply/remove the Windows registration (HKCU glue). Needs CPE-1019.
+- **CPE-1021** — Linux `.desktop` + xdg-mime registration plan (pure). Parallelisable.
+- **CPE-1022** — macOS Services/LSHandlers registration plan (pure). Parallelisable.
+- **CPE-1023** — In-app "Shell integration" Settings toggle. Needs CPE-1020.
+
 ## Work Log
 2026-07-23 (dayshift) — **Activated.** First slice: **CPE-945** — `shell_menu::verbs_for`: the pure
 applicability core deciding which registered context-menu verbs to show for a selection. Remaining: the
 per-OS shell registration glue and the default-file-manager handshake.
+2026-07-24 (PM take-on) — Decomposed the first real wave (CPE-1019–1023) per the Decisions above; user is
+off-shift so the product calls were made and logged rather than asked. Building CPE-1019 next.

@@ -65,6 +65,59 @@ pub fn verbs_for<'a>(verbs: &'a [MenuVerb], selection: &[SelItem]) -> Vec<&'a Me
     verbs.iter().filter(|v| verb_applies(&v.applies, selection)).collect()
 }
 
+// ── Windows shell registration plan (CPE-1019, epic CPE-712) ────────────────────────────────────────
+// Turn the "Open in Cross-Platform Explorer" integration into an explicit list of registry operations, as
+// *data*, so the apply glue (CPE-1020) stays trivial and the reversibility guarantee is unit-testable. No
+// registry I/O here. Everything registers under HKCU\Software\Classes so no elevation is required.
+
+/// One registry value to write when installing the Windows shell integration. `key` is the path **under
+/// HKCU**; an empty `value_name` denotes the key's `(Default)` value.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[cfg_attr(feature = "specta", derive(specta::Type))]
+pub struct RegEntry {
+    pub key: String,
+    pub value_name: String,
+    pub value: String,
+}
+
+/// The Windows shell-registration plan: values to write on install, and the full key paths to delete on
+/// uninstall (deleting a `…\shell\CPE` root removes its `command` subkey with it).
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[cfg_attr(feature = "specta", derive(specta::Type))]
+pub struct WinShellPlan {
+    pub install: Vec<RegEntry>,
+    pub remove: Vec<String>,
+}
+
+/// Build the HKCU registry plan for the "Open in CPE" context-menu integration.
+///
+/// Registers three file-explorer surfaces — on a folder, on the folder background (empty space in a
+/// directory), and on a drive — each as `Software\Classes\<class>\shell\CPE` with a label + `Icon`, and a
+/// `command` subkey invoking `exe_path` with the selected path. Folders/drives pass `"%1"`; the folder
+/// background passes `"%V"` (the current directory). `exe_path` is quoted so spaces are safe.
+pub fn windows_shell_plan(exe_path: &str, app_name: &str) -> WinShellPlan {
+    // (registry class, path placeholder the shell substitutes).
+    let surfaces = [("Directory", "%1"), (r"Directory\Background", "%V"), ("Drive", "%1")];
+    let label = format!("Open in {app_name}");
+
+    let mut install = Vec::new();
+    let mut remove = Vec::new();
+    for (class, placeholder) in surfaces {
+        let root = format!(r"Software\Classes\{class}\shell\CPE");
+        // Label (Default value of the verb key) + the icon shown beside it.
+        install.push(RegEntry { key: root.clone(), value_name: String::new(), value: label.clone() });
+        install.push(RegEntry { key: root.clone(), value_name: "Icon".into(), value: exe_path.to_string() });
+        // The command run when the item is chosen.
+        install.push(RegEntry {
+            key: format!(r"{root}\command"),
+            value_name: String::new(),
+            value: format!(r#""{exe_path}" "{placeholder}""#),
+        });
+        remove.push(root);
+    }
+    WinShellPlan { install, remove }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -106,5 +159,53 @@ mod tests {
     fn registration_order_is_preserved() {
         let vs = [verb("z", AppliesTo::Any), verb("a", AppliesTo::Any)];
         assert_eq!(verbs_for(&vs, &[file("x")]).iter().map(|v| v.id.as_str()).collect::<Vec<_>>(), vec!["z", "a"]);
+    }
+
+    // ── Windows registration plan (CPE-1019) ──
+
+    fn plan() -> WinShellPlan {
+        windows_shell_plan(r"C:\Program Files\Cross-Platform Explorer\cpe.exe", "Cross-Platform Explorer")
+    }
+
+    fn cmd_for(p: &WinShellPlan, class: &str) -> String {
+        let key = format!(r"Software\Classes\{class}\shell\CPE\command");
+        p.install.iter().find(|e| e.key == key && e.value_name.is_empty()).map(|e| e.value.clone()).unwrap_or_default()
+    }
+
+    #[test]
+    fn registers_the_three_explorer_surfaces_with_correct_command_placeholders() {
+        let p = plan();
+        // Folder and drive act on the clicked path (%1); background acts on the current dir (%V).
+        assert_eq!(cmd_for(&p, "Directory"), r#""C:\Program Files\Cross-Platform Explorer\cpe.exe" "%1""#);
+        assert_eq!(cmd_for(&p, "Drive"), r#""C:\Program Files\Cross-Platform Explorer\cpe.exe" "%1""#);
+        assert_eq!(cmd_for(&p, r"Directory\Background"), r#""C:\Program Files\Cross-Platform Explorer\cpe.exe" "%V""#);
+    }
+
+    #[test]
+    fn label_and_icon_come_from_args() {
+        let p = plan();
+        let root = r"Software\Classes\Directory\shell\CPE";
+        let default = p.install.iter().find(|e| e.key == root && e.value_name.is_empty()).unwrap();
+        assert_eq!(default.value, "Open in Cross-Platform Explorer");
+        let icon = p.install.iter().find(|e| e.key == root && e.value_name == "Icon").unwrap();
+        assert_eq!(icon.value, r"C:\Program Files\Cross-Platform Explorer\cpe.exe");
+    }
+
+    #[test]
+    fn every_installed_root_key_is_removed_on_uninstall() {
+        // Reversibility invariant: no residue. Every `…\shell\CPE` root an install entry touches must be in
+        // the remove set (strip a trailing `\command` to get each entry's verb root).
+        let p = plan();
+        for e in &p.install {
+            let root = e.key.strip_suffix(r"\command").unwrap_or(&e.key);
+            assert!(p.remove.contains(&root.to_string()), "install key {} has no matching remove entry", e.key);
+        }
+        assert_eq!(p.remove.len(), 3); // exactly the three surface roots, nothing stray
+    }
+
+    #[test]
+    fn exe_path_is_quoted_so_spaces_are_safe() {
+        // The command string must keep the exe as a single quoted token even with spaces in the path.
+        assert!(cmd_for(&plan(), "Directory").starts_with(r#""C:\Program Files\"#));
     }
 }
