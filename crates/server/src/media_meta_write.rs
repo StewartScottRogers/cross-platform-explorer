@@ -1,14 +1,17 @@
-//! Media-metadata **write codec** (CPE-1035, epic CPE-725): the counterpart to
-//! [`crate::media_meta_read::read_id3v2`]. [`crate::media_meta_edit`] owns the edit *policy* over
+//! Media-metadata **write codecs** (CPE-1035 ID3v2, CPE-1038 FLAC/Vorbis; epic CPE-725): the counterpart
+//! to [`crate::media_meta_read`]'s read side. [`crate::media_meta_edit`] owns the edit *policy* over
 //! [`MetaField`]s but does no file parsing/writing — "the codec layer reads the fields in and writes the
-//! result back." [`crate::media_meta_read`] is that read layer for ID3v2; this module is the write layer:
-//! it builds a fresh, valid **ID3v2.4** tag from the `group == "id3"` fields and prepends it to the
-//! original audio payload, replacing any pre-existing tag rather than stacking on top of it.
+//! result back." [`crate::media_meta_read`] is that read layer; this module is the write layer:
+//! - [`write_id3v2`] builds a fresh, valid **ID3v2.4** tag from the `group == "id3"` fields and prepends it
+//!   to the original audio payload, replacing any pre-existing tag rather than stacking on top of it.
+//! - [`write_flac`] rebuilds a **FLAC** stream with its `VORBIS_COMMENT` metadata block replaced by one
+//!   built from the `group == "vorbis"` fields (via [`write_vorbis_comment`]), preserving STREAMINFO,
+//!   every other metadata block, and the audio frames byte-for-byte.
 //!
 //! Pure + std-only (no new deps): fully cargo-testable by round-tripping through
-//! [`crate::media_meta_read::read_id3v2`] with synthesised inputs, and does no I/O. Bounds-checked
+//! [`crate::media_meta_read`]'s readers with synthesised inputs, and does no I/O. Bounds-checked
 //! throughout — malformed/short/empty input never panics; at worst the whole input is treated as the
-//! audio payload with no pre-existing tag to strip.
+//! audio payload with no pre-existing tag to strip (ID3), or is returned unchanged (FLAC).
 
 use crate::media_meta_edit::MetaField;
 
@@ -143,10 +146,175 @@ fn syncsafe28_decode(b: &[u8]) -> u32 {
     ((b[0] as u32 & 0x7F) << 21) | ((b[1] as u32 & 0x7F) << 14) | ((b[2] as u32 & 0x7F) << 7) | (b[3] as u32 & 0x7F)
 }
 
+// ---- FLAC / Vorbis comment write-back (CPE-1038) ----
+
+/// Build a raw Vorbis-comment block from the `group == "vorbis"` fields in `fields` — the inverse of
+/// [`crate::media_meta_read::parse_vorbis_comment`]. Layout (all lengths little-endian u32): vendor length,
+/// vendor string, comment count, then for each entry: length, then `KEY=value` (UTF-8). Each friendly key
+/// is mapped back to its uppercase Vorbis key via [`vorbis_field_key`]; fields with no known mapping, or a
+/// blank value, are skipped (mirrors [`build_frames`]'s handling of the `"id3"` group).
+pub fn write_vorbis_comment(fields: &[MetaField]) -> Vec<u8> {
+    const VENDOR: &[u8] = b"cpe-server";
+
+    let mut entries: Vec<Vec<u8>> = Vec::new();
+    for f in fields {
+        if f.group != "vorbis" || f.value.is_empty() {
+            continue;
+        }
+        let Some(key) = vorbis_field_key(&f.key) else { continue };
+        let mut entry = Vec::with_capacity(key.len() + 1 + f.value.len());
+        entry.extend_from_slice(key.as_bytes());
+        entry.push(b'=');
+        entry.extend_from_slice(f.value.as_bytes());
+        entries.push(entry);
+    }
+
+    let mut out = Vec::with_capacity(4 + VENDOR.len() + 4 + entries.iter().map(|e| 4 + e.len()).sum::<usize>());
+    out.extend_from_slice(&(VENDOR.len() as u32).to_le_bytes());
+    out.extend_from_slice(VENDOR);
+    out.extend_from_slice(&(entries.len() as u32).to_le_bytes());
+    for e in &entries {
+        out.extend_from_slice(&(e.len() as u32).to_le_bytes());
+        out.extend_from_slice(e);
+    }
+    out
+}
+
+/// Map a friendly key (as produced by [`crate::media_meta_read`]'s private `vorbis_key`) back to its
+/// uppercase raw Vorbis-comment field name. Where the reader folds several raw names onto one friendly key
+/// (e.g. `ORGANIZATION`/`PUBLISHER`/`LABEL` → `Publisher`), this picks the standard Vorbis field name. A
+/// friendly key that isn't one of the known names is passed through uppercased when it's already
+/// plausible as a raw key (letters/digits/underscore) — this inverts the reader's `capitalise` fallback
+/// for an unrecognised comment (e.g. `Replaygain_track_gain` → `REPLAYGAIN_TRACK_GAIN`) so those
+/// round-trip too. Anything else (e.g. a friendly key with spaces, like `"Album Artist"`, is handled by
+/// the explicit match above it) that still doesn't look like a raw key is skipped.
+fn vorbis_field_key(friendly: &str) -> Option<String> {
+    let key = match friendly {
+        "Title" => "TITLE",
+        "Artist" => "ARTIST",
+        "Album" => "ALBUM",
+        "Album Artist" => "ALBUMARTIST",
+        "Track" => "TRACKNUMBER",
+        "Disc" => "DISCNUMBER",
+        "Genre" => "GENRE",
+        "Year" => "DATE",
+        "Composer" => "COMPOSER",
+        "Publisher" => "ORGANIZATION",
+        "Comment" => "COMMENT",
+        "BPM" => "BPM",
+        "Copyright" => "COPYRIGHT",
+        other => {
+            let upper = other.to_ascii_uppercase();
+            let is_plausible_raw_key = !upper.is_empty() && upper.chars().all(|c| c.is_ascii_alphanumeric() || c == '_');
+            return if is_plausible_raw_key { Some(upper) } else { None };
+        }
+    };
+    Some(key.to_string())
+}
+
+/// One parsed FLAC metadata block: its raw type (bits 0-6 of the header byte) and the byte range of its
+/// *data* (header excluded) within the original buffer.
+struct FlacBlock {
+    block_type: u8,
+    data_start: usize,
+    data_end: usize,
+}
+
+/// Parse the FLAC metadata-block chain starting right after the `fLaC` magic (offset 4). Returns the
+/// parsed blocks plus the offset where the audio frames begin (i.e. right after the last metadata block),
+/// or `None` if the chain is malformed/truncated in any way — bounds-checked throughout, never panics.
+fn parse_flac_blocks(bytes: &[u8]) -> Option<(Vec<FlacBlock>, usize)> {
+    let mut blocks = Vec::new();
+    let mut pos = 4usize;
+    loop {
+        if pos + 4 > bytes.len() {
+            return None; // truncated header
+        }
+        let header = bytes[pos];
+        let is_last = header & 0x80 != 0;
+        let block_type = header & 0x7F;
+        let len = be_u24(&bytes[pos + 1..pos + 4]) as usize;
+        let data_start = pos + 4;
+        let data_end = data_start + len;
+        if data_end > bytes.len() {
+            return None; // truncated block data
+        }
+        blocks.push(FlacBlock { block_type, data_start, data_end });
+        pos = data_end;
+        if is_last {
+            break;
+        }
+    }
+    if blocks.is_empty() {
+        return None;
+    }
+    Some((blocks, pos))
+}
+
+/// Read a big-endian u24 from 3 bytes (mirrors `media_meta_read`'s private helper; re-implemented locally
+/// for the same reason as [`syncsafe28_decode`]).
+fn be_u24(b: &[u8]) -> u32 {
+    ((b[0] as u32) << 16) | ((b[1] as u32) << 8) | (b[2] as u32)
+}
+
+/// Rebuild a FLAC stream (`orig`) with its `VORBIS_COMMENT` metadata block (type 4) replaced by a fresh one
+/// built from the `"vorbis"`-group fields in `fields` (via [`write_vorbis_comment`]) — inserted right after
+/// STREAMINFO if none existed yet. STREAMINFO (type 0, kept first) and every other metadata block are
+/// preserved byte-for-byte, as are the audio frames that follow the metadata chain; only the
+/// last-metadata-block flag is recomputed so it lands on the true final block. If `orig` isn't a
+/// well-formed FLAC stream (missing magic, truncated/garbage block chain), it is returned unchanged —
+/// never panics.
+pub fn write_flac(orig: &[u8], fields: &[MetaField]) -> Vec<u8> {
+    if orig.len() < 4 || &orig[0..4] != b"fLaC" {
+        return orig.to_vec();
+    }
+    let Some((blocks, audio_start)) = parse_flac_blocks(orig) else {
+        return orig.to_vec();
+    };
+    let audio = &orig[audio_start..];
+    let comment_data = write_vorbis_comment(fields);
+
+    // Keep every block's raw data as-is except the VORBIS_COMMENT one, which is replaced.
+    let mut new_blocks: Vec<(u8, &[u8])> = Vec::with_capacity(blocks.len() + 1);
+    let mut found_comment = false;
+    for b in &blocks {
+        if b.block_type == 4 {
+            new_blocks.push((4, &comment_data[..]));
+            found_comment = true;
+        } else {
+            new_blocks.push((b.block_type, &orig[b.data_start..b.data_end]));
+        }
+    }
+    if !found_comment {
+        // STREAMINFO (type 0) must be first per the FLAC spec; insert the new comment block right after
+        // it. If the first block somehow isn't STREAMINFO (malformed input we still parsed), fall back to
+        // inserting at the very front rather than guessing further.
+        let insert_at = if new_blocks.first().map(|(t, _)| *t) == Some(0) { 1 } else { 0 };
+        new_blocks.insert(insert_at, (4, &comment_data[..]));
+    }
+
+    let total_len: usize = 4 + new_blocks.iter().map(|(_, data)| 4 + data.len()).sum::<usize>() + audio.len();
+    let mut out = Vec::with_capacity(total_len);
+    out.extend_from_slice(b"fLaC");
+    let last_index = new_blocks.len() - 1;
+    for (i, (block_type, data)) in new_blocks.iter().enumerate() {
+        let mut header = block_type & 0x7F;
+        if i == last_index {
+            header |= 0x80;
+        }
+        out.push(header);
+        let len_bytes = (data.len() as u32).to_be_bytes();
+        out.extend_from_slice(&len_bytes[1..4]); // 3-byte big-endian length
+        out.extend_from_slice(data);
+    }
+    out.extend_from_slice(audio);
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::media_meta_read::read_id3v2;
+    use crate::media_meta_read::{parse_vorbis_comment, read_flac, read_id3v2};
 
     fn field(key: &str, value: &str) -> MetaField {
         MetaField { group: "id3".to_string(), key: key.to_string(), value: value.to_string(), editable: true }
@@ -309,5 +477,236 @@ mod tests {
 
     fn contains_subslice(haystack: &[u8], needle: &[u8]) -> bool {
         needle.is_empty() || haystack.windows(needle.len()).any(|w| w == needle)
+    }
+
+    // ---- FLAC / Vorbis-comment write-back (CPE-1038) ----
+
+    fn vfield(key: &str, value: &str) -> MetaField {
+        MetaField { group: "vorbis".to_string(), key: key.to_string(), value: value.to_string(), editable: true }
+    }
+
+    /// Serialize one raw FLAC metadata block: 1-byte header (last-block flag + type) + 3-byte big-endian
+    /// length + the data.
+    fn flac_block(block_type: u8, data: &[u8], is_last: bool) -> Vec<u8> {
+        let mut b = Vec::with_capacity(4 + data.len());
+        let mut header = block_type & 0x7F;
+        if is_last {
+            header |= 0x80;
+        }
+        b.push(header);
+        b.extend_from_slice(&(data.len() as u32).to_be_bytes()[1..]);
+        b.extend_from_slice(data);
+        b
+    }
+
+    /// 34 dummy bytes standing in for a STREAMINFO block's fixed-size payload (its actual field layout is
+    /// irrelevant to this codec — it's opaque data that must simply survive unchanged).
+    fn streaminfo_data() -> Vec<u8> {
+        vec![0xABu8; 34]
+    }
+
+    /// Concatenate the `fLaC` magic, a sequence of already-serialized metadata blocks, and trailing "audio"
+    /// bytes into one stream.
+    fn build_flac_stream(blocks: &[Vec<u8>], audio: &[u8]) -> Vec<u8> {
+        let mut f = Vec::new();
+        f.extend_from_slice(b"fLaC");
+        for b in blocks {
+            f.extend_from_slice(b);
+        }
+        f.extend_from_slice(audio);
+        f
+    }
+
+    #[test]
+    fn write_vorbis_comment_round_trips_representative_fields() {
+        let fields = vec![
+            vfield("Title", "Awake"),
+            vfield("Artist", "Tycho"),
+            vfield("Album", "Dive"),
+            vfield("Album Artist", "Tycho"),
+            vfield("Track", "3"),
+            vfield("Disc", "1"),
+            vfield("Genre", "Ambient"),
+            vfield("Year", "2011"),
+            vfield("Composer", "Scott Hansen"),
+            vfield("Publisher", "Ghostly International"),
+            vfield("Comment", "Great album"),
+            vfield("BPM", "120"),
+            vfield("Copyright", "2011 Ghostly"),
+        ];
+        let block = write_vorbis_comment(&fields);
+        let parsed = parse_vorbis_comment(&block);
+        for f in &fields {
+            assert_eq!(get(&parsed, &f.key), Some(f.value.as_str()), "key {} did not round-trip", f.key);
+        }
+    }
+
+    #[test]
+    fn write_vorbis_comment_skips_wrong_group_blank_values_and_unmappable_keys() {
+        let fields = vec![
+            vfield("Title", "Kept"),
+            MetaField { group: "id3".to_string(), key: "Artist".to_string(), value: "Ignored".to_string(), editable: true },
+            vfield("Album", ""), // blank value, skipped
+            vfield("Some Random Thing", "value"), // unknown key with a space isn't a plausible raw key
+        ];
+        let block = write_vorbis_comment(&fields);
+        let parsed = parse_vorbis_comment(&block);
+        assert_eq!(parsed.len(), 1);
+        assert_eq!(get(&parsed, "Title"), Some("Kept"));
+    }
+
+    #[test]
+    fn write_vorbis_comment_passes_through_unknown_capitalised_keys() {
+        // Inverse of `parse_vorbis_comment`'s `capitalise` fallback for an unrecognised comment name.
+        let fields = vec![vfield("Replaygain_track_gain", "-6.5 dB")];
+        let block = write_vorbis_comment(&fields);
+        let parsed = parse_vorbis_comment(&block);
+        assert_eq!(get(&parsed, "Replaygain_track_gain"), Some("-6.5 dB"));
+    }
+
+    #[test]
+    fn write_flac_replaces_existing_vorbis_comment_block_without_duplicating() {
+        let streaminfo = flac_block(0, &streaminfo_data(), false);
+        let old_comment = write_vorbis_comment(&[vfield("Title", "Old Title")]);
+        let comment_block = flac_block(4, &old_comment, true);
+        let audio = b"AUDIOFRAMESDATA".to_vec();
+        let orig = build_flac_stream(&[streaminfo.clone(), comment_block], &audio);
+
+        // Sanity: the reader sees the old title before we touch anything.
+        assert_eq!(get(&read_flac(&orig), "Title"), Some("Old Title"));
+
+        let written = write_flac(&orig, &[vfield("Title", "New Title"), vfield("Artist", "New Artist")]);
+
+        // STREAMINFO preserved byte-for-byte (its position/last-flag doesn't change: still block 0 of 2).
+        assert_eq!(&written[4..4 + streaminfo.len()], &streaminfo[..]);
+        // Audio frames preserved byte-for-byte at the tail.
+        assert!(written.ends_with(&audio[..]));
+
+        let read_back = read_flac(&written);
+        assert_eq!(get(&read_back, "Title"), Some("New Title"));
+        assert_eq!(get(&read_back, "Artist"), Some("New Artist"));
+
+        // Exactly one STREAMINFO + one VORBIS_COMMENT block — no duplicate comment block — and the
+        // last-block flag lands on the true final block (parse_flac_blocks itself enforces that shape).
+        let (blocks, audio_start) = parse_flac_blocks(&written).expect("rewritten stream must parse cleanly");
+        assert_eq!(blocks.len(), 2);
+        assert_eq!(blocks[0].block_type, 0);
+        assert_eq!(blocks[1].block_type, 4);
+        assert_eq!(&written[audio_start..], &audio[..]);
+    }
+
+    #[test]
+    fn write_flac_inserts_comment_block_after_streaminfo_when_absent() {
+        let streaminfo = flac_block(0, &streaminfo_data(), true); // only block, and last, initially
+        let audio = b"SOMEAUDIOBYTES".to_vec();
+        let orig = build_flac_stream(&[streaminfo], &audio);
+
+        assert!(read_flac(&orig).is_empty()); // sanity: no comment block yet
+
+        let written = write_flac(&orig, &[vfield("Title", "Fresh Tag")]);
+
+        // STREAMINFO's data preserved byte-for-byte (offset 4 magic + 4 header = 8).
+        assert_eq!(&written[8..8 + 34], &streaminfo_data()[..]);
+
+        let read_back = read_flac(&written);
+        assert_eq!(get(&read_back, "Title"), Some("Fresh Tag"));
+
+        let (blocks, audio_start) = parse_flac_blocks(&written).expect("rewritten stream must parse cleanly");
+        assert_eq!(blocks.len(), 2);
+        assert_eq!(blocks[0].block_type, 0, "STREAMINFO must stay first");
+        assert_eq!(blocks[1].block_type, 4, "comment block inserted right after STREAMINFO");
+        assert_eq!(&written[audio_start..], &audio[..]);
+    }
+
+    #[test]
+    fn write_flac_preserves_other_metadata_blocks_byte_for_byte() {
+        let streaminfo = flac_block(0, &streaminfo_data(), false);
+        let padding_data = vec![0u8; 16];
+        let padding = flac_block(1, &padding_data, false); // PADDING, an arbitrary "other" block type
+        let old_comment = write_vorbis_comment(&[vfield("Title", "Old")]);
+        let comment_block = flac_block(4, &old_comment, true);
+        let audio = b"AUDIO".to_vec();
+        let orig = build_flac_stream(&[streaminfo.clone(), padding.clone(), comment_block], &audio);
+
+        let written = write_flac(&orig, &[vfield("Title", "New")]);
+
+        // Both STREAMINFO and PADDING blocks are byte-identical, headers included (neither is last before
+        // or after the rewrite, and the middle block's data is untouched).
+        assert_eq!(&written[4..4 + streaminfo.len()], &streaminfo[..]);
+        assert_eq!(&written[4 + streaminfo.len()..4 + streaminfo.len() + padding.len()], &padding[..]);
+
+        let read_back = read_flac(&written);
+        assert_eq!(get(&read_back, "Title"), Some("New"));
+        assert!(written.ends_with(&audio[..]));
+
+        let (blocks, _) = parse_flac_blocks(&written).expect("rewritten stream must parse cleanly");
+        assert_eq!(blocks.len(), 3);
+        assert_eq!(blocks[0].block_type, 0);
+        assert_eq!(blocks[1].block_type, 1);
+        assert_eq!(blocks[2].block_type, 4);
+    }
+
+    #[test]
+    fn write_flac_writing_twice_is_idempotent_payload_wise() {
+        let streaminfo = flac_block(0, &streaminfo_data(), true);
+        let audio = b"AUDIODATAHERE".to_vec();
+        let orig = build_flac_stream(&[streaminfo], &audio);
+        let fields = vec![vfield("Title", "A"), vfield("Artist", "B")];
+        let once = write_flac(&orig, &fields);
+        let twice = write_flac(&once, &fields);
+        assert_eq!(once, twice, "re-writing over an already-written FLAC must produce identical bytes");
+    }
+
+    #[test]
+    fn full_round_trip_read_edit_write_read() {
+        use crate::media_meta_edit::{apply_edits, MetaEdit};
+
+        let streaminfo = flac_block(0, &streaminfo_data(), false);
+        let old_comment = write_vorbis_comment(&[vfield("Title", "Old Title"), vfield("Artist", "Old Artist")]);
+        let comment_block = flac_block(4, &old_comment, true);
+        let audio = b"AUDIO-FRAMES".to_vec();
+        let orig = build_flac_stream(&[streaminfo, comment_block], &audio);
+
+        let read_fields = read_flac(&orig);
+        let edit_result = apply_edits(
+            &read_fields,
+            &[MetaEdit::Set { group: "vorbis".to_string(), key: "Title".to_string(), value: "Edited Title".to_string() }],
+        );
+        assert!(edit_result.rejected.is_empty());
+
+        let written = write_flac(&orig, &edit_result.fields);
+        let final_fields = read_flac(&written);
+        assert_eq!(get(&final_fields, "Title"), Some("Edited Title"));
+        assert_eq!(get(&final_fields, "Artist"), Some("Old Artist"));
+    }
+
+    #[test]
+    fn write_flac_falls_back_to_orig_unchanged_on_malformed_or_missing_magic() {
+        let malformed_with_magic: [&[u8]; 4] = [
+            b"fLaC",                 // magic only, no block header at all
+            b"fLaC\x00",             // 1 byte into a block header
+            b"fLaC\x00\x00\x00",     // 3 bytes into a block header
+            b"fLaC\x84\x00\x00\xFF", // last-block flag set, but claims 0xFF bytes of data that aren't there
+        ];
+        for orig in malformed_with_magic {
+            let out = write_flac(orig, &[vfield("Title", "X")]);
+            assert_eq!(out, orig.to_vec(), "malformed FLAC block chain must be returned unchanged");
+        }
+
+        let no_magic: [&[u8]; 4] =
+            [b"", b"f", b"not a flac file at all, just noise", &[0xFFu8, 0xFB, 0x90, 0x00]];
+        for orig in no_magic {
+            let out = write_flac(orig, &[vfield("Title", "X")]);
+            assert_eq!(out, orig.to_vec());
+        }
+    }
+
+    #[test]
+    fn write_flac_never_panics_on_any_truncation_of_a_valid_stream() {
+        let streaminfo = flac_block(0, &streaminfo_data(), true);
+        let valid = build_flac_stream(&[streaminfo], b"audio-bytes-here");
+        for cut in 0..valid.len() {
+            let _ = write_flac(&valid[..cut], &[vfield("Title", "X")]); // must never panic
+        }
     }
 }
