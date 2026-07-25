@@ -35,16 +35,44 @@ Follow the established shape exactly — study `image_column.rs` (`image_dimensi
   `video_cell` when the ext is video else `Empty`.
 
 ## Acceptance Criteria
-- [ ] `video_cell` returns `CellValue::Float(seconds)` for a valid MP4 `moov/mvhd`; `Empty` for
+- [x] `video_cell` returns `CellValue::Float(seconds)` for a valid MP4 `moov/mvhd`; `Empty` for
       truncated/garbage/non-video bytes; never panics on malformed input.
-- [ ] `extract_column(ext, bytes, MetaColumn::VideoDuration)` returns the duration for a `.mp4`, and
+- [x] `extract_column(ext, bytes, MetaColumn::VideoDuration)` returns the duration for a `.mp4`, and
       `Empty` for a non-video ext.
-- [ ] ≥4 unit tests using a **hand-built synthetic box tree** (valid mvhd v0 → known seconds; mvhd v1;
+- [x] ≥4 unit tests using a **hand-built synthetic box tree** (valid mvhd v0 → known seconds; mvhd v1;
       timescale 0 → Empty; truncated → Empty). Do not require a real video file on disk.
-- [ ] `cargo clippy --all-targets -- -D warnings` and the `--all-features` variant both clean.
+- [x] `cargo clippy --all-targets -- -D warnings` and the `--all-features` variant both clean.
 
 ## Notes
 Own **only** `video_column.rs` + your enum/match arm in `column_extract.rs` + the `mod` line in `lib.rs`.
 A sibling worker (CPE-1029) also adds an arm to `column_extract.rs`'s `MetaColumn`/match — keep your arm
 self-contained so the merge conflict is trivial. Do not touch `metadata_column.rs` (`CellValue::Float`
 already exists). Keep the never-panic / skip-on-error convention.
+
+## Work Log
+
+**2026-07-25** — Implemented `crates/server/src/video_column.rs`: a bounds-checked ISO-BMFF box walker
+(`read_box_header` / `find_child_box`) that descends `moov` → `mvhd`, reads `timescale`/`duration` for
+both `mvhd` version 0 (32-bit fields) and version 1 (64-bit fields), guards `timescale == 0`, and returns
+`CellValue::Float(duration / timescale)` seconds — `CellValue::Empty` on any malformed/truncated/non-BMFF
+input (never panics; every slice is bounds-checked before use). Registered `pub mod video_column;` in
+`lib.rs` next to `image_column`. Wired into `column_extract.rs`: added `MetaColumn::VideoDuration`, an
+`is_video_ext` guard (`mp4`/`mov`/`m4v`), and the dispatch arm calling `video_cell` when the extension
+matches, else `Empty`.
+
+Tests: 8 unit tests in `video_column.rs` (valid mvhd v0 → known seconds; mvhd v1 64-bit → known seconds;
+`timescale == 0` → `Empty`; truncated bytes at 8 different cut points → `Empty`, never panics; non-BMFF
+bytes → `Empty`; missing `moov`/`mvhd` → `Empty`; unrecognised `mvhd` version → `Empty`; a box declaring a
+size larger than the available bytes → `Empty`), plus a routing test in `column_extract.rs` covering
+`extract_column` gating by extension.
+
+Verification (Windows, from `src-tauri` workspace root unless noted):
+- `cargo test -q` in `crates/server` (ran directly since `cpe-server` isn't a workspace test member from
+  `src-tauri`): **635 passed, 0 failed** (includes the 8 new `video_column` tests + 1 new
+  `column_extract` routing test).
+- `cargo clippy --all-targets -- -D warnings`: clean, exit 0.
+- `cargo clippy --all-targets --all-features -- -D warnings`: clean, exit 0.
+
+No new dependencies added. Touched only `video_column.rs` (new), the one `pub mod video_column;` line in
+`lib.rs`, the `MetaColumn::VideoDuration` variant + `is_video_ext` + match arm (+ one routing test) in
+`column_extract.rs`, and this Work Log.

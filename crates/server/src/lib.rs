@@ -267,6 +267,10 @@ pub mod media_column;
 /// [`metadata_column::CellValue::Dimensions`] cell for a Dimensions column (CPE-974, epic CPE-707).
 pub mod image_column;
 
+/// Video-metadata column extractor — walk the ISO-BMFF (`MP4`/`MOV`) box tree to `moov/mvhd` for a
+/// duration-in-seconds [`metadata_column::CellValue::Float`] cell (CPE-1028, epic CPE-707). Pure.
+pub mod video_column;
+
 /// Metadata-column dispatcher — route a file's bytes + extension + a [`column_extract::MetaColumn`] to the
 /// right per-family extractor (audio codecs / image header), the one entry point the column system calls
 /// (CPE-975, epic CPE-707). Pure.
