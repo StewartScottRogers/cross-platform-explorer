@@ -123,3 +123,17 @@ plain copy-into-store + copy-out; note that in the work log as a deliberate defe
   - Opened PR `CPE-1011: disk-backed snapshot capture & restore engine` from branch
     `cpe-1011-snapshot-capture-engine`. Status left as `Doing` pending review/merge (this worker doesn't own
     moving the ticket to `Done`).
+- 2026-07-24 (review fix) — Independent review flagged one real defect in `prune()`: it did
+  `release` → `save_store` → `remove_file(manifest)`, so if the final manifest delete failed after the
+  store was already saved, a retry would `load_manifest` (still present) and `release` the same hashes a
+  **second** time, double-decrementing a shared blob's refcount to 0 and deleting content another snapshot
+  still needs (silent data loss — violating the `prune_gcs...keeps_shared_ones` guarantee). Fixed by
+  reordering so the manifest `remove_file` is the **point of no return, done first** (read the manifest into
+  memory, delete the manifest file, then load store / release / remove unreferenced blobs / save store). Now
+  a retry-after-failure is always safe: manifest-delete fails → nothing else changed → clean retry;
+  manifest-delete succeeds but a later step fails → the manifest is already gone so no second `release` can
+  run → residue is only a refcount/space leak, never data loss (the same "leak over corruption" tradeoff
+  `capture` already makes). Added a doc-comment paragraph on `prune` explaining the ordering rationale. Did
+  NOT touch `scan_dir`/`capture`/`restore`/`from_index` (confirmed correct by the review). Re-verified:
+  `cargo test snapshot_capture` 9/9, `cargo test snapshot::` 12/12, `cargo clippy --all-targets -- -D
+  warnings` clean, `cargo clippy --all-targets --all-features -- -D warnings` clean. Pushed to PR #336.

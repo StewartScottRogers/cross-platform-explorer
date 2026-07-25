@@ -218,11 +218,24 @@ pub fn restore(store_dir: &str, manifest_id: &str, dest: &str) -> Result<(), Str
 /// Drop manifest `manifest_id`'s hold on its blobs via [`release`] and remove the now-unreferenced blob
 /// files from disk. Returns the bytes freed. The manifest file itself is deleted; a manifest no longer on
 /// disk cannot be [`restore`]d.
+///
+/// Ordering matters and is deliberate: the manifest file is deleted **first** — that single, atomic
+/// `remove_file` is the point of no return. `release` decrements refcounts, so running it twice on the
+/// same manifest would double-decrement a shared blob to 0 and delete content another snapshot still
+/// needs (silent data loss). Deleting the manifest up front makes a retry-after-failure always safe: if
+/// this `remove_file` fails, nothing else has changed → a clean retry; if it succeeds but a later step
+/// (`load_store`/`release`/`save_store`) fails, the manifest is already gone so no second `release` can
+/// happen — the residue is only a refcount/space leak, never data loss. Same "leak over corruption"
+/// tradeoff [`capture`] makes.
 pub fn prune(store_dir: &str, manifest_id: &str) -> Result<u64, String> {
     let store_path = Path::new(store_dir);
-    let manifest = load_manifest(store_path, manifest_id)?;
-    let mut store = load_store(store_path)?;
+    let manifest = load_manifest(store_path, manifest_id)?; // read what we need before anything mutates
     let hashes: BTreeSet<String> = manifest.files.values().map(|f| f.hash.clone()).collect();
+
+    let mpath = manifest_path(store_path, manifest_id);
+    fs::remove_file(&mpath).map_err(|e| format!("{}: {e}", mpath.display()))?; // point of no return
+
+    let mut store = load_store(store_path)?;
     let freed = release(&mut store, &hashes);
     let blobs_dir_path = blobs_dir(store_path);
     for hash in &hashes {
@@ -231,8 +244,6 @@ pub fn prune(store_dir: &str, manifest_id: &str) -> Result<u64, String> {
         }
     }
     save_store(store_path, &store)?;
-    fs::remove_file(manifest_path(store_path, manifest_id))
-        .map_err(|e| format!("{}: {e}", manifest_path(store_path, manifest_id).display()))?;
     Ok(freed)
 }
 
