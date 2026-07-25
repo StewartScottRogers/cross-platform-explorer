@@ -302,3 +302,10 @@ pub mod perceptual;
 /// per token) instead of an image dHash, reusing [`perceptual::cluster`] for the grouping. Pure; no new
 /// dependencies.
 pub mod simhash;
+
+/// Magic-byte file-type detection + extension-mismatch flagging (CPE-1001, epic CPE-1000). Sniffs a
+/// curated set of common binary formats from their leading magic bytes and flags a claimed extension that
+/// disagrees with them (e.g. a `.jpg` that is actually a PE executable), while treating ZIP-container
+/// formats (`.docx`/`.xlsx`/`.epub`/…) as non-mismatches. Pure over a byte slice; no I/O, no new
+/// dependencies.
+pub mod file_type;
