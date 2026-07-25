@@ -191,11 +191,16 @@ pub struct Mismatch {
 ///
 /// Returns `Some(Mismatch)` only when a type **was** detected and `ext` is not among its
 /// [`FileType::extensions`] — i.e. we can make a judgement and the judgement is "these disagree". Returns
-/// `None` both when the type is unknown (nothing to compare against, so no verdict either way) and when
-/// the extension already matches.
+/// `None` when the type is unknown (nothing to compare against, so no verdict either way), when the
+/// extension already matches, **and when there is no extension at all** (an empty/absent `ext` has nothing
+/// to disagree with — a Linux ELF binary named `myapp` or a `README` must not be flagged).
 pub fn mismatch(bytes: &[u8], ext: &str) -> Option<Mismatch> {
     let detected = detect_type(bytes)?;
     let actual_ext = ext.strip_prefix('.').unwrap_or(ext).to_lowercase();
+    // No claimed extension → nothing to contradict (avoids a false positive on every extensionless file).
+    if actual_ext.is_empty() {
+        return None;
+    }
     if detected.extensions().contains(&actual_ext.as_str()) {
         None
     } else {
@@ -426,6 +431,18 @@ mod tests {
         assert_eq!(mismatch(unknown, "exe"), None);
         assert_eq!(mismatch(unknown, "jpg"), None);
         assert_eq!(mismatch(unknown, ""), None);
+    }
+
+    #[test]
+    fn mismatch_is_none_for_extensionless_files() {
+        // A DETECTED file with no claimed extension must not be flagged — a Linux ELF binary named `myapp`,
+        // a PDF named `report`, a screenshot named with no extension. There is nothing to disagree with.
+        // (These returned Some before the empty-ext guard — this is the regression test for that fix.)
+        assert_eq!(mismatch(&pe_bytes(), ""), None);
+        assert_eq!(mismatch(&[0x7F, 0x45, 0x4C, 0x46, 0x02, 0x01, 0x01, 0x00], ""), None); // ELF binary
+        assert_eq!(mismatch(&jpeg_bytes(), ""), None);
+        // A leading-dot-only ext normalises to empty as well → still no verdict.
+        assert_eq!(mismatch(&pe_bytes(), "."), None);
     }
 
     // ---- label()/extensions() sanity ----
