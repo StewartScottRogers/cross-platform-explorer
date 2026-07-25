@@ -16,6 +16,8 @@ use crate::media_meta_edit::MetaField;
 use crate::media_meta_read::{read_flac, read_id3v2, read_ogg, read_pdf};
 use crate::metadata_column::CellValue;
 use crate::video_column::video_cell;
+use crate::video_meta_read::read_mp4;
+use crate::video_tag_column::{video_tag_cell, VideoTagColumn};
 
 /// A metadata column the details view can add, spanning media families.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -31,6 +33,9 @@ pub enum MetaColumn {
     DocInfo(DocInfoColumn),
     /// The video's duration in seconds, read from the ISO-BMFF `moov/mvhd` box (CPE-1028).
     VideoDuration,
+    /// A typed video-tag column (Title/Artist/Album/Year/…), read from an MP4/MOV's
+    /// `moov/udta/meta/ilst` iTunes-style tags (CPE-1040).
+    VideoTag(VideoTagColumn),
 }
 
 /// Read a file's audio tags, choosing the codec by extension: `mp3` → ID3v2, `flac` → FLAC/Vorbis,
@@ -93,6 +98,13 @@ pub fn extract_column(ext: &str, bytes: &[u8], col: MetaColumn) -> CellValue {
         MetaColumn::VideoDuration => {
             if is_video_ext(ext) {
                 video_cell(bytes)
+            } else {
+                CellValue::Empty
+            }
+        }
+        MetaColumn::VideoTag(col) => {
+            if is_video_ext(ext) {
+                video_tag_cell(&read_mp4(bytes), col)
             } else {
                 CellValue::Empty
             }
@@ -277,6 +289,76 @@ mod tests {
         assert_eq!(extract_column("mp4", &mp4(5), MetaColumn::VideoDuration), CellValue::Float(5.0));
         // A non-video extension is not even attempted → Empty (even if bytes happened to be a video).
         assert_eq!(extract_column("txt", &mp4(5), MetaColumn::VideoDuration), CellValue::Empty);
+    }
+
+    /// Wrap `content` in a box of the given 4-byte `type` (32-bit size — plenty for these fixtures).
+    /// Mirrors `video_meta_read`'s own `make_box` test helper (this file builds a *tagged* MP4, unlike
+    /// the `mp4()` helper above which only carries `moov/mvhd` for duration).
+    fn make_box(box_type: &[u8; 4], content: &[u8]) -> Vec<u8> {
+        let mut b = Vec::new();
+        let total = (8 + content.len()) as u32;
+        b.extend_from_slice(&total.to_be_bytes());
+        b.extend_from_slice(box_type);
+        b.extend_from_slice(content);
+        b
+    }
+
+    /// A `data` box wrapping UTF-8 `text` with the "well-known type = UTF-8 text" flag (1).
+    fn data_box_text(text: &str) -> Vec<u8> {
+        let mut content = Vec::new();
+        content.extend_from_slice(&1u32.to_be_bytes()); // version(0) + flags(1) = UTF-8 text
+        content.extend_from_slice(&0u32.to_be_bytes()); // reserved
+        content.extend_from_slice(text.as_bytes());
+        make_box(b"data", &content)
+    }
+
+    /// A minimal MP4 carrying `moov/udta/meta/ilst` tags: `©nam`(Title) and `©ART`(Artist), each wrapping a
+    /// UTF-8 `data` atom (routing test only — the box-tree parser itself is covered in
+    /// `video_meta_read`'s own tests).
+    fn mp4_with_tags(title: &str, artist: &str) -> Vec<u8> {
+        const NAM: [u8; 4] = [0xA9, b'n', b'a', b'm'];
+        const ART: [u8; 4] = [0xA9, b'A', b'R', b'T'];
+
+        let mut ilst_content = Vec::new();
+        ilst_content.extend_from_slice(&make_box(&NAM, &data_box_text(title)));
+        ilst_content.extend_from_slice(&make_box(&ART, &data_box_text(artist)));
+        let ilst = make_box(b"ilst", &ilst_content);
+
+        let mut meta_content = Vec::new();
+        meta_content.extend_from_slice(&[0, 0, 0, 0]); // meta's version+flags prelude
+        meta_content.extend_from_slice(&ilst);
+        let meta = make_box(b"meta", &meta_content);
+
+        let udta = make_box(b"udta", &meta);
+        let moov = make_box(b"moov", &udta);
+
+        let mut f = Vec::new();
+        f.extend_from_slice(&make_box(b"ftyp", b"isom"));
+        f.extend_from_slice(&moov);
+        f
+    }
+
+    #[test]
+    fn video_tag_route_and_gate_by_extension() {
+        let file = mp4_with_tags("Big Buck Bunny", "Blender Foundation");
+        assert_eq!(
+            extract_column("mp4", &file, MetaColumn::VideoTag(VideoTagColumn::Title)),
+            CellValue::Text("Big Buck Bunny".into())
+        );
+        assert_eq!(
+            extract_column("mp4", &file, MetaColumn::VideoTag(VideoTagColumn::Artist)),
+            CellValue::Text("Blender Foundation".into())
+        );
+        // A non-video extension is not even attempted → Empty (even if bytes happened to be a tagged MP4).
+        assert_eq!(
+            extract_column("txt", &file, MetaColumn::VideoTag(VideoTagColumn::Title)),
+            CellValue::Empty
+        );
+        // An MP4 with no udta/tags at all → Empty.
+        assert_eq!(
+            extract_column("mp4", &mp4(5), MetaColumn::VideoTag(VideoTagColumn::Title)),
+            CellValue::Empty
+        );
     }
 
     #[test]

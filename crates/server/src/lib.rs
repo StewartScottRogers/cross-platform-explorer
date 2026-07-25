@@ -291,6 +291,11 @@ pub mod video_meta_read;
 /// Pure.
 pub mod doc_info_column;
 
+/// Video-tag column extractor — map an MP4/MOV's read iTunes-style [`media_meta_edit::MetaField`]s to
+/// typed [`metadata_column::CellValue`]s so Title/Artist/Year/… columns surface for videos, with Year
+/// sorting numerically (CPE-1040, epic CPE-707). Pure.
+pub mod video_tag_column;
+
 /// Metadata-column dispatcher — route a file's bytes + extension + a [`column_extract::MetaColumn`] to the
 /// right per-family extractor (audio codecs / image header), the one entry point the column system calls
 /// (CPE-975, epic CPE-707). Pure.
