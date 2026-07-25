@@ -1,7 +1,7 @@
 <script lang="ts">
   import { createEventDispatcher, onMount } from "svelte";
   import { unwrap } from "../invoke";
-  import { commands } from "../bindings.gen"; // typed client (CPE-964)
+  import { commands, type FileInspection } from "../bindings.gen"; // typed client (CPE-964)
   import Icon from "./Icon.svelte";
   import { t } from "../i18n";
   import { formatSize } from "../format";
@@ -114,6 +114,17 @@
       ] as [string, string | null][]).filter(([, v]) => v)
     : [];
 
+  // File inspection (CPE-1009) — encoding / line-endings / true type / extension-mismatch for a single
+  // file, auto-loaded best-effort like the image metadata.
+  let inspection: FileInspection | null = null;
+  $: inspectionRows = inspection
+    ? ([
+        [$t("prop.encoding"), inspection.encoding],
+        [$t("prop.lineEndings"), inspection.line_endings],
+        [$t("prop.fileType"), inspection.file_type],
+      ] as [string, string | null][]).filter(([, v]) => v)
+    : [];
+
   $: single = entries.length === 1 ? entries[0] : null;
   $: totalSize = entries.reduce((n, e) => n + (e.is_dir ? 0 : e.size), 0);
   $: folderCount = entries.filter((e) => e.is_dir).length;
@@ -132,6 +143,14 @@
         imageMeta = unwrap(await commands.imageMeta(single.path));
       } catch {
         /* leave imageMeta null; the dialog just omits the media rows */
+      }
+    }
+    // File inspection is best-effort for a single file — a failure just omits the rows.
+    if (!single.is_dir) {
+      try {
+        inspection = unwrap(await commands.inspectFile(single.path));
+      } catch {
+        /* leave inspection null; the dialog just omits the inspection rows */
       }
     }
     // Folder sizes must be computed recursively, which can take a while on a
@@ -207,6 +226,17 @@
           {#each imageRows as [label, value]}
             <div><dt>{label}</dt><dd>{value}</dd></div>
           {/each}
+        {/if}
+        {#if inspectionRows.length}
+          {#each inspectionRows as [label, value]}
+            <div><dt>{label}</dt><dd>{value}</dd></div>
+          {/each}
+        {/if}
+        {#if inspection?.type_mismatch}
+          <div>
+            <dt>{$t("prop.typeMismatch")}</dt>
+            <dd class="warn">⚠ {inspection.type_mismatch}</dd>
+          </div>
         {/if}
         {#if !single.is_dir}
           <div>
@@ -309,6 +339,8 @@
   dt { color: var(--text-dim); width: 110px; flex: none; }
   dd { flex: 1; overflow-wrap: anywhere; }
   dd.path { font-family: ui-monospace, monospace; font-size: 12px; }
+  /* Content/extension mismatch warning — a disguised file (CPE-1009). */
+  dd.warn { color: var(--danger, #c9372c); font-weight: 600; }
   dd.dim { color: var(--text-faint); }
   dd.checksum { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
   .hash { font-family: ui-monospace, monospace; font-size: 11px; overflow-wrap: anywhere; }

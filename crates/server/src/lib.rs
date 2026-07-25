@@ -346,3 +346,8 @@ pub mod folder_similarity;
 /// adapter's job; this module only classifies caller-supplied records. Pure std, no I/O, no new
 /// dependencies.
 pub mod dangling_links;
+
+/// File-inspection composition (CPE-1009, epic CPE-1002): compose the pure detectors (encoding + line
+/// endings + true type + extension mismatch) into one display-ready `FileInspection` for the Properties
+/// panel. Pure over a file's leading bytes + name; the Tauri command reads the bytes.
+pub mod inspect;
