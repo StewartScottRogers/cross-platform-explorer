@@ -4,7 +4,7 @@ title: PDF document-info read codec (Title/Author/… → MetaFields)
 type: feature
 component: Backend
 priority: medium
-status: Doing
+status: Done
 tags: ready
 created: 2026-07-25
 epic: CPE-725
@@ -43,3 +43,11 @@ Add to `crates/server/src/media_meta_read.rs`:
 2026-07-25 (workshift) — Filed + dispatched to a worker. Extends the read-codec arc
 (ID3/FLAC/OGG/EXIF → +PDF documents). Disjoint file scope from CPE-1035 (which owns the new
 `media_meta_write.rs`).
+
+2026-07-25 (workshift) — **DONE, merged PR #354.** `media_meta_read::read_pdf` surfaces a PDF's `/Info`
+dictionary (Title/Author/Subject/Keywords/Creator/Producer/Date Created/Date Modified) as
+`MetaField{group:"pdf",editable:false}`; decodes literal/hex/escaped/octal/UTF-16BE strings; bounded,
+never-panics. **QA gate caught + fixed a real bug:** first review (CHANGES REQUESTED) found the
+object-resolver matched `5 0 obj` inside `15 0 obj` (wrong /Info object) — Foreman applied a token-boundary
+fix + 2 regression tests; independent re-review APPROVED and proved the decoy test has teeth (fails without
+the fix). UAT PASS. Clippy clean both modes. Read arc now: audio + image + video + documents.

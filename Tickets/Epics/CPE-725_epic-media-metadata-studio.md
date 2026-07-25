@@ -75,3 +75,8 @@ PDF documents (CPE-1036) in review. Remaining 725: FLAC/EXIF write-back + the st
 after ID3 (CPE-1035) — the studio can now edit-and-save both MP3 (ID3v2) and FLAC (Vorbis) tags.
 Independently reviewed + UAT-passed. Write-back arc so far: ID3 ✓, FLAC/Vorbis ✓; remaining: OGG
 (deferred, repaging complexity) + EXIF write-back, then the studio editor UI (attended).
+
+2026-07-25 (workshift) — **CPE-1036 DONE (PR #354): PDF document-info read codec.** Read arc now spans
+audio (ID3/FLAC/OGG) + image (EXIF) + video (MP4/MOV) + documents (PDF /Info). QA gate caught a real
+object-resolution bug pre-merge (fixed + regression-tested). Remaining 725: EXIF/OGG write-back (complex),
+studio editor UI (attended).
