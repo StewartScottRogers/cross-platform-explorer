@@ -2182,6 +2182,30 @@ async fn text_stats(path: String) -> Result<cpe_server::text_stats::TextStats, S
         .await.map_err(|e| e.to_string())?
 }
 
+/// Inspect a selected file for the Properties panel: detect its text encoding + line endings, its true
+/// type from the magic bytes, and flag a content/extension mismatch (a disguised file). Reads only the
+/// file's leading bytes (capped). Model lives in `cpe_server::inspect` (CPE-1009); thin `spawn_blocking`
+/// dispatcher that supplies the bytes + name.
+#[tauri::command]
+#[cfg_attr(feature = "specta-bindings", specta::specta)]
+async fn inspect_file(path: String) -> Result<cpe_server::inspect::FileInspection, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        use std::io::Read;
+        let name = std::path::Path::new(&path)
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        let mut f = std::fs::File::open(&path).map_err(|e| e.to_string())?;
+        // A 64 KiB leading sample is plenty for encoding/magic-bytes/line-ending detection.
+        let mut buf = vec![0u8; 64 * 1024];
+        let n = f.read(&mut buf).map_err(|e| e.to_string())?;
+        buf.truncate(n);
+        Ok(cpe_server::inspect::inspect_bytes(&name, &buf))
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
 /// Whether two files have identical content (CPE-418). Different sizes short-circuit to `false`;
 /// otherwise the bytes are streamed and compared with an early exit on the first difference — cheaper
 /// and collision-free versus hashing both. A directory or unreadable path is an `Err`, never a panic.
@@ -5721,6 +5745,7 @@ pub fn run() {
             audit_sessions,
             audit_read,
             text_stats,
+            inspect_file,
             search_file_contents,
             find_files_by_name,
             files_identical,
@@ -6114,6 +6139,7 @@ pub fn export_bindings(out: &std::path::Path) -> Result<(), String> {
         audit_sessions,
         audit_read,
         text_stats,
+        inspect_file,
         search_file_contents,
         find_files_by_name,
         files_identical,

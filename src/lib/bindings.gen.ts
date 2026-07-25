@@ -962,6 +962,20 @@ async textStats(path: string) : Promise<Result<TextStats, string>> {
 }
 },
 /**
+ * Inspect a selected file for the Properties panel: detect its text encoding + line endings, its true
+ * type from the magic bytes, and flag a content/extension mismatch (a disguised file). Reads only the
+ * file's leading bytes (capped). Model lives in `cpe_server::inspect` (CPE-1009); thin `spawn_blocking`
+ * dispatcher that supplies the bytes + name.
+ */
+async inspectFile(path: string) : Promise<Result<FileInspection, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("inspect_file", { path }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
  * Search text files under `root` for lines containing `query` (CPE-416). Model lives in
  * `cpe_server::content_search` (CPE-815); this is a thin `spawn_blocking` dispatcher.
  */
@@ -1744,6 +1758,29 @@ export type FileAttributes = { readonly: boolean; hidden: boolean; system: boole
  * POSIX permission bits as an octal string (e.g. "644"); `None` on Windows.
  */
 mode: string | null }
+/**
+ * A file's inspection result — display-ready strings for the Properties panel. `None` fields are simply
+ * not shown.
+ */
+export type FileInspection = { 
+/**
+ * Detected text encoding label (e.g. `"UTF-8"`, `"UTF-16 LE"`, `"Binary"`).
+ */
+encoding: string; 
+/**
+ * Line-ending summary for text-ish files (e.g. `"LF (Unix)"`, `"CRLF (Windows)"`, `"Mixed"`); `None`
+ * for binary/empty files or text with no line breaks.
+ */
+line_endings: string | null; 
+/**
+ * Detected true file type from the magic bytes (e.g. `"PNG image"`); `None` if unrecognised.
+ */
+file_type: string | null; 
+/**
+ * A human warning when the content doesn't match the extension (a disguised file); `None` when it
+ * matches, the type is unknown, or there is no extension.
+ */
+type_mismatch: string | null }
 /**
  * Recursive folder totals. Serialized to match the frontend `FolderStats`.
  */
