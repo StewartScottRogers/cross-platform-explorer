@@ -4,7 +4,7 @@ title: Document-metadata column family (PDF Title/Author/… via read_pdf)
 type: feature
 component: Backend
 priority: medium
-status: Doing
+status: Done
 tags: ready
 created: 2026-07-25
 epic: CPE-707
@@ -45,3 +45,12 @@ Wire into `crates/server/src/column_extract.rs`:
 2026-07-25 (workshift) — Filed + dispatched. Completes the value chain for CPE-1036 (`read_pdf`) by making
 it reachable/sortable as a column, using the same per-family-extractor pattern as `audio_cell`
 (precedent: DocPages/VideoDuration columns already ship headlessly). The column-picker UI stays attended.
+
+2026-07-25 (workshift) — **DONE, merged PR #356.** New `doc_info_column` module (`DocInfoColumn` +
+`doc_info_cell`) + `MetaColumn::DocInfo` wired into `column_extract` (gated by `is_doc_ext`, dispatched
+via `read_pdf`) — PDFs now expose sortable Title/Author/Subject/Keywords/Creator/Producer/Date columns,
+mirroring the audio-column pattern. Independently reviewed (APPROVE — key() strings verified verbatim
+against read_pdf's output incl. the space-bearing "Date Created"/"Date Modified") + UAT PASS (own
+hand-built PDFs, extension gating, empty-sorts-last). PR was rebased off its stacked base onto main
+(3-file diff). Non-blocking follow-up noted: extend the routing test to cover dates end-to-end. Clippy
+clean both modes. Makes CPE-1036's read_pdf reachable in the details view.

@@ -66,3 +66,9 @@ the column-picker UI (GUI/attended) + per-folder column persistence.
 `ServerCtx`-based, tolerant-read, `HeadlessCtx`-tested), mirroring the CPE-836 template store. The details
 view can now remember a user's chosen columns per folder. Independently reviewed + UAT-passed (PR #349).
 Remaining epic scope: the column-picker UI (GUI/attended) that binds these pieces together.
+
+2026-07-25 (workshift) — **CPE-1039 DONE (PR #356): document-metadata column family.** PDFs now expose
+sortable Title/Author/Subject/Keywords/Creator/Producer/Date Created/Date Modified columns via the new
+`doc_info_column` extractor wired into `column_extract` (reads CPE-1036's `read_pdf`). Same per-family
+`→ CellValue` pattern as `audio_cell`/`image_dimensions_cell`. Independently reviewed + UAT-passed. Next
+column candidate: a video-tag family (Title/Artist/… from CPE-1037's `read_mp4`).
