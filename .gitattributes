@@ -1,0 +1,5 @@
+# Windows batch files must use CRLF line endings. cmd.exe's label scanner
+# (goto/call :label) fails to resolve labels in an LF-only .cmd/.bat, so pin
+# these to CRLF on every checkout regardless of the user's core.autocrlf.
+*.cmd text eol=crlf
+*.bat text eol=crlf
