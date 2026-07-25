@@ -5,7 +5,7 @@ type: feature
 component: Multiple
 priority: medium
 tags: ready
-status: Doing
+status: Done
 created: 2026-07-24
 epic: CPE-1002
 ---
@@ -37,7 +37,7 @@ file). Attended — the visual result is verified by the user in the running app
 - [x] `inspect_file` command + `cpe-server::inspect` composition, tested; bindings generated.
 - [x] Properties dialog shows encoding / line-endings / true-type rows + a mismatch warning; i18n in 12
       locales; type-check + i18n guard green.
-- [ ] **Visual verify (attended):** rows render correctly; the mismatch warning shows on a disguised file.
+- [x] **Visual verify (attended):** rows render correctly; the mismatch warning shows on a disguised file.
 
 ## Notes
 - Folder-level checks (empty-folder / orphaned-sidecar / near-dup-folder / dangling-links) are a later UI
