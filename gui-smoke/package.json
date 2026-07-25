@@ -1,0 +1,24 @@
+{
+  "name": "cpe-gui-smoke",
+  "private": true,
+  "version": "0.1.0",
+  "description": "Headless GUI smoke test (CPE-1045) that drives the real built cross-platform-explorer.exe via tauri-driver + WebdriverIO and asserts `--open <dir>` actually navigated. Self-contained: its own package-lock, never touches the app's package.json or the root vitest suite.",
+  "type": "module",
+  "scripts": {
+    "test": "wdio run ./wdio.conf.ts",
+    "typecheck": "tsc --noEmit -p tsconfig.json"
+  },
+  "devDependencies": {
+    "@types/chai": "^5.2.3",
+    "@wdio/cli": "^9.20.0",
+    "@wdio/globals": "^9.20.0",
+    "@wdio/local-runner": "^9.20.0",
+    "@wdio/mocha-framework": "^9.20.0",
+    "@wdio/spec-reporter": "^9.20.0",
+    "@wdio/types": "^9.20.0",
+    "chai": "^5.3.1",
+    "tsx": "^4.20.2",
+    "typescript": "^5.9.3",
+    "webdriverio": "^9.20.0"
+  }
+}
