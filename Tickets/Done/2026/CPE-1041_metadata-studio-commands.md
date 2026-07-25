@@ -4,7 +4,7 @@ title: Metadata Studio command layer (read all / write edits back)
 type: feature
 component: Multiple
 priority: high
-status: Doing
+status: Done
 tags: ready
 created: 2026-07-25
 epic: CPE-725
@@ -43,3 +43,12 @@ The Metadata Studio dialog (next slice) needs a backend to call — today every 
 2026-07-25 — Filed (user present, directing the Metadata Studio build). First of three slices: commands →
 dialog → GUI verify. Only mp3/flac are writable today; other formats are read-only in the studio until
 their write codecs land (OGG/EXIF/video/PDF write-back are separate, deferred as risky).
+
+2026-07-25 (attended) — **DONE, merged PR #358.** Shipped both slices: the backend command layer
+(`cpe_server::media_meta` dispatcher + `metadata_read`/`metadata_writable`/`metadata_write` commands,
+atomic temp-file+rename save) AND the **Metadata Studio dialog** (tabbed Audio/Image/Document/Video,
+edit + Save for mp3/flac, batch-apply, view-only for other formats; palette + context-menu entry;
+studio.* i18n in all locales). Edit-key logic extracted to tested `src/lib/metaEdits.ts` (Album-Artist
+space-in-key regression). Independent review (caught the missing-test gap → fixed) + independent
+re-review APPROVE + **user GUI-accepted the installed sidecar build ("good")**. 722 backend + 954
+frontend tests green. Remaining CPE-725: OGG/EXIF write-back (risky) + batch/map studio extras.

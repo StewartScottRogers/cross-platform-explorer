@@ -80,3 +80,10 @@ Independently reviewed + UAT-passed. Write-back arc so far: ID3 ✓, FLAC/Vorbis
 audio (ID3/FLAC/OGG) + image (EXIF) + video (MP4/MOV) + documents (PDF /Info). QA gate caught a real
 object-resolution bug pre-merge (fixed + regression-tested). Remaining 725: EXIF/OGG write-back (complex),
 studio editor UI (attended).
+
+2026-07-25 (attended) — **CPE-1041 DONE (PR #358): the Metadata Studio ships.** The editable tabbed
+inspector is live end-to-end — backend commands (read/writable/atomic-write) + the `MetadataStudioDialog`
+(edit+save mp3/flac tags, batch-apply, view-only for pdf/exif/video/ogg). User verified the real installed
+build. This is the studio UI the epic was building toward; audio (ID3/FLAC) is now fully round-trip
+editable in the GUI. Remaining: OGG/EXIF write-back codecs (deferred, format-risky), plus batch-media
+ops + photo-map extras.
