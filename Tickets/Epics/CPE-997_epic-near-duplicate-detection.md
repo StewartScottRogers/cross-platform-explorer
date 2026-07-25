@@ -61,3 +61,10 @@ crate already in the tree — no AI backend, no new deps, delete-testable.
   gradient fixtures; only `column_bands` exercises a non-zero hash and no test pins an exact `u64`, so a
   bit-order/direction swap in packing could go uncaught. Add one golden-value assertion on a structured
   fixture to harden. Non-blocking (code verified correct), captured here.
+
+2026-07-25 (workshift) — **Golden-value dHash test done (CPE-1030, PR #346).** The captured follow-up is
+resolved: a golden `u64` assertion now pins the dHash bit layout. The first attempt used a symmetric
+`column_bands` fixture (all 8 rows identical → hash `0x5555…`, invariant under row-reversal); the
+independent reviewer caught that it left cross-row packing unguarded, and it was replaced with an
+asymmetric `diagonal_staircase` fixture (8 distinct packed bytes, golden `0xe0f0f87c3e1f0f07`) plus
+`hash != hash.swap_bytes()` assertions — so a row-order/packing swap now fails the test. Follow-up closed.

@@ -51,3 +51,18 @@ video / doc extractors, the column-picker UI, and per-folder persistence.
 2026-07-24 (dayshift) — **CPE-974** added the image-family extractor: `image_column::image_dimensions_cell` (header-only read → `CellValue::Dimensions`, sorts by area). With audio (CPE-971) + image, the two commonest per-family extractors are covered. Remaining: video/doc extractors, the column-picker UI (GUI), and per-folder persistence.
 
 2026-07-24 (dayshift) — **CPE-975** added the dispatcher `column_extract::extract_column(ext, bytes, MetaColumn)` — the single seam routing a file to its per-family extractor (audio ID3/FLAC/OGG → typed audio cell; image header → Dimensions). Adding video/doc later is one more arm. Remaining: video/doc extractors, the column-picker UI (GUI), per-folder persistence.
+
+2026-07-25 (workshift) — **CPE-1028 + CPE-1029** added the remaining two per-family extractors:
+`video_column::video_cell` (ISO-BMFF `moov/mvhd` header walk → `CellValue::Float` duration seconds,
+`mp4`/`mov`/`m4v`) and `doc_column::doc_pages_cell` (pure PDF byte-scan of `/Type /Page` objects,
+excluding the `/Pages` tree node → `CellValue::Int` page count). Both wired into
+`column_extract::extract_column` via new `MetaColumn::VideoDuration` / `MetaColumn::DocPages` arms with
+ext guards, both pure + no new deps, each independently reviewed (opus) + UAT-passed (PR #347, #345). With
+audio/image/video/doc all covered, the **per-family extractor layer is complete**. Remaining epic scope:
+the column-picker UI (GUI/attended) + per-folder column persistence.
+
+2026-07-25 (workshift) — **CPE-1032** added the per-folder column-config persistence store
+(`cpe-server::column_config`: `get`/`set`/`clear` over a `column_config.json` catalog keyed by folder path,
+`ServerCtx`-based, tolerant-read, `HeadlessCtx`-tested), mirroring the CPE-836 template store. The details
+view can now remember a user's chosen columns per folder. Independently reviewed + UAT-passed (PR #349).
+Remaining epic scope: the column-picker UI (GUI/attended) that binds these pieces together.

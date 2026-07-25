@@ -5,7 +5,7 @@ type: feature
 component: Backend
 priority: medium
 tags: ready
-status: Backlog
+status: Done
 created: 2026-07-25
 epic: CPE-739
 estimate: 1-2h

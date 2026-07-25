@@ -42,3 +42,11 @@ multi-step actions is what makes CPE deeply customizable without shell scripting
   model (`crates/server/src/action_macro.rs`): `MacroStep`/`ActionMacro`/`PlannedOp` + `validate` + a
   filesystem-free `plan` expansion, std-only, 14 tests. Foundation the parameter-prompt UI, action library,
   and menu/hotkey/rule bindings will build on.
+
+2026-07-25 (workshift) — **CPE-1033** added the action-macro persistence store
+(`cpe-server::macro_store`: `save`/`list`/`load`/`delete`/`import`/`export` over a `macros.json` catalog
+keyed by macro name, `ServerCtx`-based, tolerant-read, `HeadlessCtx`-tested), following the CPE-836 template
+store. A user's macro library now survives restarts. Confirmed distinct from the in-memory
+`macro_library` (CPE-951) — that's CRUD+ordering+validation, this is disk persistence. Independently
+reviewed (redundancy explicitly checked) + UAT-passed (PR #350). Remaining: parameter-prompt UI, action
+library surfacing, and menu/hotkey/watched-folder bindings (GUI/attended).
