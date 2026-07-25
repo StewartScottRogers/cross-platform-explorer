@@ -45,3 +45,17 @@ Added golden-value test `phash_golden_value_column_bands()` using the `column_ba
 Golden hash determined: `0x5555555555555555` (32 set bits, perfect alternating pattern due to the alternating
 left>right comparisons across the vertical bands). Test pins the exact bit layout and includes sanity checks
 to verify non-trivial mixed bits. All 12 perceptual tests pass; clippy clean. Ready for PR.
+
+### 2026-07-25 — Fixture replaced after review (row-order coverage)
+
+Review (PR #346) flagged that `column_bands` varies only in x: its bands span the full image height, so
+after the 9×8 resize all 8 grid rows are pixel-identical (every row's byte = `0x55`). That hash is invariant
+under row-reversal, so a row-major / cross-row packing bug would be invisible — the golden constant only
+constrained intra-row comparison direction, not the packing order the ticket exists to lock.
+
+Replaced it with a new test-module fixture `diagonal_staircase(180, 160)` that varies in **both x and y**: the
+image is 8 horizontal bands (one per output row), each white up to a per-band column then black, so every grid
+row has its transition at a distinct column and yields a **distinct** packed byte. Re-derived golden hash:
+`0xe0f0f87c3e1f0f07` — bytes `e0 f0 f8 7c 3e 1f 0f 07` (all 8 distinct), 34 set bits. Added assertions that
+the 8 bytes are not all equal and that `hash != hash.swap_bytes()` (not row-reversal-symmetric), so row-order
+bugs are now detectable. All 12 perceptual tests pass; `cargo clippy --all-targets -- -D warnings` clean.
