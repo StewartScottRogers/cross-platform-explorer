@@ -296,3 +296,9 @@ pub mod op_plan;
 /// CPE-997). The complement of [`duplicates`] (byte-identical); this finds visually-similar images. Pure
 /// over bytes; no filesystem I/O, no new dependencies.
 pub mod perceptual;
+
+/// SimHash text fingerprinting + near-duplicate document clustering (CPE-999, epic CPE-997). Extends
+/// [`perceptual`]'s clustering core to text: Charikar SimHash over tokenised text (stable 64-bit FNV-1a
+/// per token) instead of an image dHash, reusing [`perceptual::cluster`] for the grouping. Pure; no new
+/// dependencies.
+pub mod simhash;
