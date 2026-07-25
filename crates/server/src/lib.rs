@@ -309,3 +309,8 @@ pub mod simhash;
 /// formats (`.docx`/`.xlsx`/`.epub`/…) as non-mismatches. Pure over a byte slice; no I/O, no new
 /// dependencies.
 pub mod file_type;
+
+/// Archive expansion-ratio / zip-bomb safety score (CPE-1004, epic CPE-1002). Pure per-entry
+/// compressed/uncompressed size scoring against configurable thresholds — no extraction, no I/O, no
+/// new dependencies.
+pub mod archive_safety;
