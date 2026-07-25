@@ -331,3 +331,10 @@ pub mod archive_safety;
 /// are removed, reporting only the topmost directory of each cascade. Pure recursive tree
 /// algorithm; no I/O, no new dependencies.
 pub mod empty_dirs;
+
+/// Near-identical-folder detection via Jaccard similarity over file-content-hash sets (CPE-1007,
+/// epic CPE-1002). A level up from [`duplicates`] (byte-identical *files*): finds folders that are
+/// ~the same even though they aren't identical as a whole (e.g. `Photos/` vs. `Photos (backup)/`
+/// with high file overlap). Pure over caller-supplied (path, hash-set) pairs; no I/O, no new
+/// dependencies.
+pub mod folder_similarity;
