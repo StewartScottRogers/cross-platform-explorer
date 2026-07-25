@@ -1,0 +1,77 @@
+name: GUI smoke
+
+# Headless GUI end-to-end smoke test (CPE-1045): drives the REAL built app via tauri-driver +
+# WebdriverIO and asserts `--open <dir>` (CPE-1043, fixed by CPE-1044) actually navigates. This
+# pins the exact manual "launch the build and eyeball a screenshot" check that used to be the
+# only guard on that flow, so a regression reds this job instead of needing a human to notice.
+#
+# Windows only for this first slice — see gui-smoke/README.md "Follow-ups" for the planned Linux
+# (xvfb-run + webkit2gtk-driver) leg. macOS is unsupported by tauri-driver (no WKWebView
+# WebDriver) and stays attended.
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  gui-smoke:
+    name: GUI smoke (windows-latest) — tauri-driver + WebdriverIO
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Rust cache
+        uses: swatinem/rust-cache@v2
+        with:
+          workspaces: "./src-tauri -> target"
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: "npm"
+
+      - name: Install frontend dependencies
+        run: npm ci
+
+      - name: Build frontend
+        run: npm run build
+
+      # `--no-bundle` skips installer packaging + updater-artifact signing (which needs secrets
+      # this job intentionally does not carry) but is still a real Tauri CLI **build** — the CLI
+      # subcommand that actually matters for embedding `frontendDist` instead of falling back to
+      # `devUrl` (see gui-smoke/README.md and wdio.conf.ts for the CPE-1044 root-cause detail).
+      # This is NOT a `--debug` build and NOT a bare `cargo build` — both of those would load the
+      # dev server and make `--open` silently no-op, which is the exact regression this job exists
+      # to catch.
+      - name: Build release binary (tauri build --no-bundle)
+        run: npm run tauri build -- --no-bundle
+
+      # Install a msedgedriver matching this runner's Edge/WebView2 version.
+      - name: Install msedgedriver-tool
+        run: cargo install --git https://github.com/chippers/msedgedriver-tool
+
+      - name: Run msedgedriver-tool and add its dir to PATH
+        run: |
+          & "$env:USERPROFILE\.cargo\bin\msedgedriver-tool.exe"
+          $PWD.Path | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+
+      # The official WebDriver proxy — version is independent of the Tauri crate version.
+      - name: Install tauri-driver
+        run: cargo install tauri-driver --locked
+
+      - name: Install gui-smoke dependencies
+        working-directory: gui-smoke
+        run: npm ci
+
+      - name: Type-check gui-smoke
+        working-directory: gui-smoke
+        run: npm run typecheck
+
+      - name: Run GUI smoke suite
+        working-directory: gui-smoke
+        run: npm test
