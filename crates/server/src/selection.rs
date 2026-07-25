@@ -21,9 +21,15 @@ pub struct SelEntry {
 }
 
 /// A select-by-pattern query.
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+///
+/// Externally-tagged (serde default) — **not** internally-tagged like `shell_menu::AppliesTo`: this
+/// enum has newtype variants wrapping non-map values (`Glob(String)`, `Extension(Vec<String>)`) and a
+/// recursive variant (`Invert(Box<SelQuery>)`), which internal tagging (`tag = "..."`) can neither
+/// serialize nor even compile a `Serialize` impl for. External tagging handles all of them, so this type
+/// is IPC-ready for a future `#[tauri::command]`.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[cfg_attr(feature = "specta", derive(specta::Type))]
-#[serde(tag = "kind", rename_all = "snake_case")]
+#[serde(rename_all = "snake_case")]
 pub enum SelQuery {
     /// Shell-style `*`/`?` glob over the whole entry name, case-insensitive, anchored to the full name.
     Glob(String),
@@ -163,6 +169,24 @@ mod tests {
         let entries = [dir("d1"), file("f1.txt"), dir("d2")];
         let got = select(&entries, &SelQuery::Invert(Box::new(SelQuery::AllFiles)));
         assert_eq!(names(&entries, &got), vec!["d1", "d2"]);
+    }
+
+    #[test]
+    fn every_query_variant_round_trips_through_serde_json() {
+        // The type is IPC-ready: externally-tagged serde serializes and deserializes every variant,
+        // including the newtype (String/Vec) and recursive (Box<SelQuery>) ones, back to an equal value.
+        let queries = [
+            SelQuery::Glob("*.rs".into()),
+            SelQuery::Extension(vec!["png".into(), "jpg".into()]),
+            SelQuery::AllFiles,
+            SelQuery::AllFolders,
+            SelQuery::Invert(Box::new(SelQuery::Glob("a?b*".into()))),
+        ];
+        for q in queries {
+            let json = serde_json::to_string(&q).expect("serialize");
+            let back: SelQuery = serde_json::from_str(&json).expect("deserialize");
+            assert_eq!(back, q, "round-trip mismatch via {json}");
+        }
     }
 
     #[test]
