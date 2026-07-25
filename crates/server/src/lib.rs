@@ -291,6 +291,10 @@ pub mod dispatch;
 /// (CPE-941, epic CPE-738). Pure planning; the shred engine executes the passes.
 pub mod secure_delete;
 
+/// Secure-delete shred **engine** (CPE-1012, epic CPE-738): executes a `secure_delete` plan against
+/// a real file — overwrite pass by pass, flush + sync, then unlink — and reports what ran.
+pub mod secure_shred;
+
 /// AI-copilot operation-plan model — the pure, filesystem-free structured plan (a closed, whitelisted set of
 /// move/rename/delete/mkdir/copy ops) an NL instruction compiles to, plus its scope+cap validator and a
 /// dry-run summary (CPE-990, epic CPE-977). No LLM, no I/O; the safe, inspectable middle of the copilot.
