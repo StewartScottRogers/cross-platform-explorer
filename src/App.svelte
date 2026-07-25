@@ -27,6 +27,7 @@
   import AgentTimeline from "./lib/components/AgentTimeline.svelte";
   import DiskSpaceView from "./lib/components/DiskSpaceView.svelte";
   import DiagnosticsOverlay from "./lib/components/DiagnosticsOverlay.svelte";
+  import TestModeOverlay from "./lib/components/TestModeOverlay.svelte";
   import { setDiagnosticsEnabled } from "./lib/diagnostics";
   import UpdateDialog from "./lib/components/UpdateDialog.svelte";
   import TabBar from "./lib/components/TabBar.svelte";
@@ -171,6 +172,14 @@
   let diagnostics = settings.loadDiagnostics();
   $: setDiagnosticsEnabled(diagnostics);
   // ---------------------------------------------------------------------------------------------------
+
+  // `--test-mode` automation halo (CPE-1046): the backend injects a synchronous `window.__CPE_TEST_MODE__`
+  // global (set before this script runs — same mechanism as `--open`'s `__CPE_OPEN_DIR__`, CPE-1043), so
+  // reading it here at init needs no command/gate. In a plain browser / test env the global is simply
+  // absent and this is false — zero cost when the app isn't launched in test mode.
+  const testMode =
+    typeof window !== "undefined" &&
+    (window as unknown as { __CPE_TEST_MODE__?: boolean }).__CPE_TEST_MODE__ === true;
 
   let notice = "";
   let noticeIsError = false;
@@ -3468,6 +3477,11 @@
 <!-- Diagnostics overlay (CPE-758): on-screen timing of every OS call, toggled from Application → Diagnostics. -->
 {#if diagnostics}
   <DiagnosticsOverlay version={appVersion} />
+{/if}
+
+<!-- Automation test-mode halo (CPE-1046): only rendered when launched with `--test-mode`. -->
+{#if testMode}
+  <TestModeOverlay />
 {/if}
 
 {#if batchRenameFor}

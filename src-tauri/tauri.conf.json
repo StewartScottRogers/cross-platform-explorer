@@ -45,7 +45,8 @@
         { "name": "maximized", "takesValue": false, "description": "Start maximized" },
         { "name": "fullscreen", "takesValue": false, "description": "Start fullscreen" },
         { "name": "physical", "takesValue": false, "description": "Treat --x/--y/--width/--height as physical pixels" },
-        { "name": "open", "takesValue": true, "description": "Open the explorer at this directory on launch (CPE-1043)" }
+        { "name": "open", "takesValue": true, "description": "Open the explorer at this directory on launch (CPE-1043)" },
+        { "name": "test-mode", "takesValue": false, "description": "Show the automation test-mode halo overlay (CPE-1046)" }
       ]
     },
     "updater": {
