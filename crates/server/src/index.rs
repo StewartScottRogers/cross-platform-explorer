@@ -548,7 +548,12 @@ impl Index {
         let truncated = r.u8().ok_or_else(|| IndexError::Io("truncated header".into()))? != 0;
 
         let name_count = r.u32().ok_or_else(|| IndexError::Io("truncated names".into()))?;
-        let mut names = Vec::with_capacity(name_count as usize);
+        // `name_count` is untrusted (read straight off disk) — never trust it as a `with_capacity` hint,
+        // or a crafted header (huge count, tiny/absent body) triggers a huge up-front allocation before a
+        // single name is validated. Bound the hint by what the remaining buffer could actually supply
+        // (each name needs ≥4 bytes for its length prefix); the per-name read below is already
+        // bounds-checked, so this is purely a sizing hint, never a correctness requirement.
+        let mut names = Vec::with_capacity((name_count as usize).min(r.remaining() / 4));
         for _ in 0..name_count {
             let len = r.u32().ok_or_else(|| IndexError::Io("truncated name len".into()))?;
             let raw = r.take(len as usize).ok_or_else(|| IndexError::Io("truncated name".into()))?;
@@ -557,7 +562,9 @@ impl Index {
         }
 
         let entry_count = r.u32().ok_or_else(|| IndexError::Io("truncated entries".into()))?;
-        let mut entries = Vec::with_capacity(entry_count as usize);
+        // Same untrusted-count concern as `name_count` above — bound by remaining bytes (each entry needs
+        // ≥9 bytes: u32 name + u32 parent + u8 is_dir).
+        let mut entries = Vec::with_capacity((entry_count as usize).min(r.remaining() / 9));
         for _ in 0..entry_count {
             let name = r.u32().ok_or_else(|| IndexError::Io("truncated entry".into()))?;
             let parent = r.u32().ok_or_else(|| IndexError::Io("truncated entry".into()))?;
@@ -651,6 +658,11 @@ struct Reader<'a> {
 impl<'a> Reader<'a> {
     fn new(buf: &'a [u8]) -> Self {
         Reader { buf, pos: 0 }
+    }
+    /// Bytes not yet consumed — used to cap `with_capacity` hints against an untrusted on-disk count
+    /// instead of trusting it outright.
+    fn remaining(&self) -> usize {
+        self.buf.len() - self.pos
     }
     fn take(&mut self, n: usize) -> Option<&'a [u8]> {
         let end = self.pos.checked_add(n)?;
@@ -789,6 +801,33 @@ mod tests {
         bytes.extend_from_slice(&1u64.to_le_bytes()); // volume_id
         bytes.push(0); // truncated flag
         bytes.extend_from_slice(&5u32.to_le_bytes()); // claims 5 names, but none follow
+        assert!(matches!(Index::from_bytes(&bytes), Err(IndexError::Io(_))));
+    }
+
+    /// CPE-1017 regression: a crafted header with a huge `name_count` and no body must return a clean
+    /// `Err`, never attempt a giant `Vec::with_capacity` allocation (which would OOM/abort well before the
+    /// truncation is detected).
+    #[test]
+    fn from_bytes_rejects_huge_name_count_without_giant_alloc() {
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(MAGIC);
+        bytes.extend_from_slice(&FORMAT_VERSION.to_le_bytes());
+        bytes.extend_from_slice(&1u64.to_le_bytes()); // volume_id
+        bytes.push(0); // truncated flag
+        bytes.extend_from_slice(&u32::MAX.to_le_bytes()); // claims ~4.29B names, nothing follows
+        assert!(matches!(Index::from_bytes(&bytes), Err(IndexError::Io(_))));
+    }
+
+    /// Same concern for `entry_count`: a huge count with a valid-but-empty name table and no entry body.
+    #[test]
+    fn from_bytes_rejects_huge_entry_count_without_giant_alloc() {
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(MAGIC);
+        bytes.extend_from_slice(&FORMAT_VERSION.to_le_bytes());
+        bytes.extend_from_slice(&1u64.to_le_bytes()); // volume_id
+        bytes.push(0); // truncated flag
+        bytes.extend_from_slice(&0u32.to_le_bytes()); // 0 names
+        bytes.extend_from_slice(&u32::MAX.to_le_bytes()); // claims ~4.29B entries, nothing follows
         assert!(matches!(Index::from_bytes(&bytes), Err(IndexError::Io(_))));
     }
 

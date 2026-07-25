@@ -196,8 +196,14 @@ impl VectorIndex {
             return Err(VectorIndexError::Io("zero dimensionality".into()));
         }
         let count = r.u32().ok_or_else(|| VectorIndexError::Io("truncated header".into()))? as usize;
-        let mut ids = Vec::with_capacity(count);
-        let mut vectors = Vec::with_capacity(count * dim);
+        // `count`/`dim` are untrusted (read straight off disk) — never trust them as a `with_capacity`
+        // hint, or a crafted header (e.g. count = dim = u32::MAX) triggers a capacity-overflow panic or a
+        // huge up-front allocation before a single byte of body is validated. Bound the hint by what the
+        // remaining buffer could actually supply (each id needs ≥4 bytes for its length prefix; each
+        // vector needs ≥4 bytes per `f32`); every per-item read below is already bounds-checked, so this
+        // is purely a sizing hint, never a correctness requirement.
+        let mut ids = Vec::with_capacity(count.min(r.remaining() / 4));
+        let mut vectors = Vec::with_capacity(count.saturating_mul(dim).min(r.remaining() / 4));
         for _ in 0..count {
             let len = r.u32().ok_or_else(|| VectorIndexError::Io("truncated id len".into()))? as usize;
             let raw = r.take(len).ok_or_else(|| VectorIndexError::Io("truncated id".into()))?;
@@ -250,6 +256,11 @@ struct Reader<'a> {
 impl<'a> Reader<'a> {
     fn new(buf: &'a [u8]) -> Self {
         Reader { buf, pos: 0 }
+    }
+    /// Bytes not yet consumed — used to cap `with_capacity` hints against an untrusted on-disk count
+    /// instead of trusting it outright.
+    fn remaining(&self) -> usize {
+        self.buf.len() - self.pos
     }
     fn take(&mut self, n: usize) -> Option<&'a [u8]> {
         let end = self.pos.checked_add(n)?;
@@ -404,6 +415,32 @@ mod tests {
         b.extend_from_slice(&1u32.to_le_bytes()); // 1 item
         b.extend_from_slice(&1u32.to_le_bytes()); // id len 1
         b.push(b'a'); // id, but no vector floats follow
+        assert!(matches!(VectorIndex::from_bytes(&b), Err(VectorIndexError::Io(_))));
+    }
+
+    /// CPE-1016 regression: a crafted 20-byte header with huge `dim`/`count` must return a clean `Err`,
+    /// never panic. Before the fix, `Vec::with_capacity(count * dim)` computed a capacity whose byte size
+    /// overflowed `isize::MAX`, so `RawVec` called `capacity_overflow()` and panicked deterministically —
+    /// no file body needed at all.
+    #[test]
+    fn from_bytes_rejects_huge_dim_and_count_without_panicking() {
+        let mut b = Vec::new();
+        b.extend_from_slice(MAGIC);
+        b.extend_from_slice(&FORMAT_VERSION.to_le_bytes());
+        b.extend_from_slice(&u32::MAX.to_le_bytes()); // dim = u32::MAX
+        b.extend_from_slice(&u32::MAX.to_le_bytes()); // count = u32::MAX
+        assert!(matches!(VectorIndex::from_bytes(&b), Err(VectorIndexError::Io(_))));
+    }
+
+    /// Same concern with a large-but-not-overflowing count paired with a truncated body: must be a clean
+    /// `Err`, not a giant up-front allocation.
+    #[test]
+    fn from_bytes_rejects_large_count_with_truncated_body() {
+        let mut b = Vec::new();
+        b.extend_from_slice(MAGIC);
+        b.extend_from_slice(&FORMAT_VERSION.to_le_bytes());
+        b.extend_from_slice(&4u32.to_le_bytes()); // dim = 4 (plausible)
+        b.extend_from_slice(&1_000_000u32.to_le_bytes()); // claims 1M items, no body follows
         assert!(matches!(VectorIndex::from_bytes(&b), Err(VectorIndexError::Io(_))));
     }
 }
