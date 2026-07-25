@@ -1894,8 +1894,14 @@ async fn metadata_write(
             .extension().and_then(|e| e.to_str()).unwrap_or("").to_string();
         let out = cpe_server::media_meta::write_back(&ext, &bytes, &edits)?;
         // Atomic save: write a sibling temp file, then rename over the original (same dir → rename is
-        // atomic on all three OSes). A crash mid-write leaves the original intact.
-        let tmp = format!("{path}.cpe-meta-tmp");
+        // atomic on all three OSes). A crash mid-write leaves the original intact. The temp name carries a
+        // per-write nanosecond stamp so two concurrent saves (or a stale temp from a prior crash) can't
+        // collide on the same sibling path.
+        let stamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+        let tmp = format!("{path}.{stamp}.cpe-meta-tmp");
         std::fs::write(&tmp, &out).map_err(|e| e.to_string())?;
         std::fs::rename(&tmp, &path).map_err(|e| {
             let _ = std::fs::remove_file(&tmp); // don't leave the temp behind on a failed rename

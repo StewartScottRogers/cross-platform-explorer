@@ -5,7 +5,8 @@
   // land. Follows the dialog convention (visible border) and the tab standard (accent active tab).
   import { createEventDispatcher, onMount } from "svelte";
   import { unwrap } from "../invoke";
-  import { commands, type MetaField, type MetaEdit } from "../bindings.gen";
+  import { commands, type MetaField } from "../bindings.gen";
+  import { joinFieldKey, buildMetaEdits } from "../metaEdits";
   import Icon from "./Icon.svelte";
   import { t } from "../i18n";
   import type { DirEntry } from "../types";
@@ -38,7 +39,7 @@
 
   // Pending edits keyed by "group\0key"; absent = untouched.
   let edited: Record<string, string> = {};
-  const ekey = (f: MetaField) => `${f.group}\u0000${f.key}`;
+  const ekey = (f: MetaField) => joinFieldKey(f.group, f.key);
 
   $: groups = Array.from(new Set(fields.map((f) => f.group)));
   let activeGroup = "";
@@ -83,14 +84,7 @@
     }
   }
 
-  function buildEdits(): MetaEdit[] {
-    return Object.entries(edited).map(([k, value]) => {
-      const [group, key] = k.split("\u0000");
-      return value.trim() === ""
-        ? ({ edit: "clear", group, key } as MetaEdit)
-        : ({ edit: "set", group, key, value } as MetaEdit);
-    });
-  }
+  const buildEdits = () => buildMetaEdits(edited);
 
   async function save() {
     if (!primary || !dirty || saving) return;
