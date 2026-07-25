@@ -19,7 +19,7 @@ explicit `--open` folder takes precedence over last-session restore for that lau
 - New CLI arg `open` (declared in `tauri.conf.json` `plugins.cli.args`, alongside the geometry flags).
 - Pure resolver `cpe_server::launch::resolve_open_dir(raw, is_dir)` — returns the trimmed path only when it
   names an existing directory (filesystem check injected, so it's unit-testable). Empty/missing → None.
-- Command `startup_dir() -> Option<String>` — reads the `--open` CLI match, resolves + canonicalizes it,
+- Command `startup_dir() -> Option<String>` — reads the `--open` CLI match, resolves it (absolutizing a relative value against CWD; no canonicalize, to avoid Windows \? prefixes),
   returns the folder (or None). Registered in both `generate_handler!` and `collect_commands!`; bindings
   regenerated.
 - Frontend: at boot, if `startup_dir()` returns a folder, open it (overriding session restore); else the

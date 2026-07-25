@@ -5595,7 +5595,16 @@ fn startup_dir(app: tauri::AppHandle) -> Option<String> {
         let matches = app.cli().matches().ok()?;
         let raw = matches.args.get("open").and_then(|a| a.value.as_str().map(str::to_owned));
         let dir = cpe_server::launch::resolve_open_dir(raw.as_deref(), |p| p.is_dir())?;
-        return Some(dir.to_string_lossy().into_owned());
+        // Return an absolute path so a relative `--open` value (e.g. `--open .` from a script) resolves
+        // against the launch CWD rather than surfacing a raw "." in breadcrumbs/tabs/session state. We
+        // deliberately do NOT `canonicalize()` — on Windows that prepends a `\\?\` verbatim prefix that
+        // would leak into every displayed path.
+        let abs = if dir.is_absolute() {
+            dir
+        } else {
+            std::env::current_dir().map(|cwd| cwd.join(&dir)).unwrap_or(dir)
+        };
+        return Some(abs.to_string_lossy().into_owned());
     }
     #[cfg(any(target_os = "android", target_os = "ios"))]
     {
