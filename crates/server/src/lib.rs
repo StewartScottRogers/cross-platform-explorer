@@ -310,6 +310,12 @@ pub mod simhash;
 /// dependencies.
 pub mod file_type;
 
+/// Text-encoding + line-ending detection (CPE-1003, epic CPE-1002 "File inspection & safety
+/// utilities"). Guesses a text file's encoding from a leading byte-order mark or UTF-8 validity, and
+/// separately reports which line-ending convention(s) a decoded string uses. Pure over a byte slice
+/// / `&str`; no I/O, no new dependencies.
+pub mod text_encoding;
+
 /// Archive expansion-ratio / zip-bomb safety score (CPE-1004, epic CPE-1002). Pure per-entry
 /// compressed/uncompressed size scoring against configurable thresholds — no extraction, no I/O, no
 /// new dependencies.
