@@ -118,6 +118,73 @@ pub fn windows_shell_plan(exe_path: &str, app_name: &str) -> WinShellPlan {
     WinShellPlan { install, remove }
 }
 
+// ── Apply / remove the Windows plan against the real registry (CPE-1020, epic CPE-712) ──────────────
+// Thin glue over `windows_shell_plan`: write every entry under HKCU on install, delete every root key on
+// uninstall. All decision logic lives in the plan; this only executes it. Windows-only (behind `winreg`);
+// other OSes get stubs so the contract compiles cross-platform (the 3-OS CI builds both branches).
+
+#[cfg(windows)]
+fn apply_entries(hkcu: &winreg::RegKey, entries: &[RegEntry]) -> Result<(), String> {
+    for e in entries {
+        let (key, _) = hkcu.create_subkey(&e.key).map_err(|err| format!("create {}: {err}", e.key))?;
+        key.set_value(&e.value_name, &e.value)
+            .map_err(|err| format!(r"set {}\{}: {err}", e.key, e.value_name))?;
+    }
+    Ok(())
+}
+
+#[cfg(windows)]
+fn remove_keys(hkcu: &winreg::RegKey, keys: &[String]) -> Result<(), String> {
+    for key in keys {
+        match hkcu.delete_subkey_all(key) {
+            Ok(()) => {}
+            // Uninstall is idempotent: an already-absent key is success, not an error.
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => return Err(format!("delete {key}: {e}")),
+        }
+    }
+    Ok(())
+}
+
+/// Install the Windows "Open in CPE" shell integration: write the plan for `exe_path` / `app_name` under
+/// `HKCU\Software\Classes` (no elevation). Idempotent — re-installing overwrites the same values.
+#[cfg(windows)]
+pub fn install_shell_integration(exe_path: &str, app_name: &str) -> Result<(), String> {
+    let hkcu = winreg::RegKey::predef(winreg::enums::HKEY_CURRENT_USER);
+    apply_entries(&hkcu, &windows_shell_plan(exe_path, app_name).install)
+}
+
+/// Remove the Windows "Open in CPE" shell integration — delete every registered verb key (recursively).
+/// Tolerates already-absent keys, so it's safe to call when nothing is installed.
+#[cfg(windows)]
+pub fn uninstall_shell_integration() -> Result<(), String> {
+    let hkcu = winreg::RegKey::predef(winreg::enums::HKEY_CURRENT_USER);
+    // The remove set is independent of exe/app name, so placeholders are fine.
+    remove_keys(&hkcu, &windows_shell_plan("", "").remove)
+}
+
+/// Whether the integration is currently installed (the on-folder verb key exists).
+#[cfg(windows)]
+pub fn shell_integration_installed() -> bool {
+    let hkcu = winreg::RegKey::predef(winreg::enums::HKEY_CURRENT_USER);
+    windows_shell_plan("", "").remove.first().is_some_and(|k| hkcu.open_subkey(k).is_ok())
+}
+
+#[cfg(not(windows))]
+pub fn install_shell_integration(_exe_path: &str, _app_name: &str) -> Result<(), String> {
+    Err("shell-menu integration is only implemented on Windows so far".into())
+}
+
+#[cfg(not(windows))]
+pub fn uninstall_shell_integration() -> Result<(), String> {
+    Err("shell-menu integration is only implemented on Windows so far".into())
+}
+
+#[cfg(not(windows))]
+pub fn shell_integration_installed() -> bool {
+    false
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -207,5 +274,35 @@ mod tests {
     fn exe_path_is_quoted_so_spaces_are_safe() {
         // The command string must keep the exe as a single quoted token even with spaces in the path.
         assert!(cmd_for(&plan(), "Directory").starts_with(r#""C:\Program Files\"#));
+    }
+
+    // ── apply / remove glue (CPE-1020) ── Exercises real winreg mechanics under an isolated scratch key
+    // (never the live `…\shell\CPE` entries), so it neither pollutes the real shell menu nor needs elevation.
+    #[cfg(windows)]
+    #[test]
+    fn apply_then_remove_roundtrips_and_is_idempotent() {
+        use winreg::enums::HKEY_CURRENT_USER;
+        use winreg::RegKey;
+        let hkcu = RegKey::predef(HKEY_CURRENT_USER);
+        let base = format!(r"Software\CPE-test-{}", std::process::id());
+        let root = format!(r"{base}\shell\CPE");
+        let entries = vec![
+            RegEntry { key: root.clone(), value_name: String::new(), value: "Open in Test".into() },
+            RegEntry { key: root.clone(), value_name: "Icon".into(), value: r"x.exe".into() },
+            RegEntry { key: format!(r"{root}\command"), value_name: String::new(), value: r#""x.exe" "%1""#.into() },
+        ];
+
+        // Install writes the values...
+        apply_entries(&hkcu, &entries).expect("apply");
+        let k = hkcu.open_subkey(&root).expect("root key exists after apply");
+        let label: String = k.get_value("").expect("default value");
+        let cmd: String = hkcu.open_subkey(format!(r"{root}\command")).unwrap().get_value("").unwrap();
+        assert_eq!(label, "Open in Test");
+        assert_eq!(cmd, r#""x.exe" "%1""#);
+
+        // ...uninstall removes the whole subtree, and a second remove is a no-op (idempotent).
+        remove_keys(&hkcu, std::slice::from_ref(&base)).expect("remove");
+        remove_keys(&hkcu, std::slice::from_ref(&base)).expect("remove is idempotent when absent");
+        assert!(hkcu.open_subkey(&base).is_err(), "scratch key should be gone after remove");
     }
 }

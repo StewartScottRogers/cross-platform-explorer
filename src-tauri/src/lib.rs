@@ -2073,6 +2073,40 @@ async fn link_status(path: String) -> cpe_server::links::LinkStatus {
         .unwrap_or_default()
 }
 
+/// Install the "Open in Cross-Platform Explorer" shell integration for the current user (CPE-1020, epic
+/// CPE-712) — writes the registry entries for the running exe. Windows-only today; other OSes return an
+/// error. Logic in `cpe_server::shell_menu`.
+#[tauri::command]
+#[cfg_attr(feature = "specta-bindings", specta::specta)]
+async fn install_shell_integration() -> Result<(), String> {
+    let exe = std::env::current_exe().map_err(|e| e.to_string())?.to_string_lossy().into_owned();
+    tauri::async_runtime::spawn_blocking(move || {
+        cpe_server::shell_menu::install_shell_integration(&exe, "Cross-Platform Explorer")
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+/// Remove the "Open in CPE" shell integration for the current user (CPE-1020). Idempotent — safe when
+/// nothing is installed. Logic in `cpe_server::shell_menu`.
+#[tauri::command]
+#[cfg_attr(feature = "specta-bindings", specta::specta)]
+async fn uninstall_shell_integration() -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(cpe_server::shell_menu::uninstall_shell_integration)
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+/// Whether the "Open in CPE" shell integration is currently installed for this user (CPE-1020) — so the
+/// Settings toggle (CPE-1023) can reflect true state. Logic in `cpe_server::shell_menu`.
+#[tauri::command]
+#[cfg_attr(feature = "specta-bindings", specta::specta)]
+async fn shell_integration_installed() -> bool {
+    tauri::async_runtime::spawn_blocking(cpe_server::shell_menu::shell_integration_installed)
+        .await
+        .unwrap_or(false)
+}
+
 /// Classify the drive a path lives on (CPE-805, epic CPE-716) — fixed / removable / network / cdrom / ram
 /// / unknown — so the sidebar can badge removable & network drives. Windows uses `GetDriveTypeW`; unix
 /// returns a best-effort `fixed` for now (richer classification is a follow-up).
@@ -5740,6 +5774,9 @@ pub fn run() {
             create_symlink,
             create_hard_link,
             link_status,
+            install_shell_integration,
+            uninstall_shell_integration,
+            shell_integration_installed,
             drive_type,
             audit_record,
             audit_sessions,
@@ -6134,6 +6171,9 @@ pub fn export_bindings(out: &std::path::Path) -> Result<(), String> {
         create_symlink,
         create_hard_link,
         link_status,
+        install_shell_integration,
+        uninstall_shell_integration,
+        shell_integration_installed,
         drive_type,
         audit_record,
         audit_sessions,

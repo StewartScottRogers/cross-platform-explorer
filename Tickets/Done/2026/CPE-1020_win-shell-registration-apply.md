@@ -7,7 +7,8 @@ priority: medium
 tags: needs-prereq
 epic: CPE-712
 created: 2026-07-24
-status: Backlog
+closed: 2026-07-25
+status: Done
 ---
 
 ## Summary
@@ -30,3 +31,16 @@ stubbed "not supported here yet" arm so the contract compiles cross-platform.
 ## Work Log
 - 2026-07-24 (PM take-on) — Filed. Blocked on CPE-1019's plan model; kept as pure-apply glue so all
   decision logic stays in the tested plan.
+- 2026-07-25 — **Done.** Added `apply_entries` / `remove_keys` glue + public `install_shell_integration`
+  / `uninstall_shell_integration` / `shell_integration_installed` to `cpe_server::shell_menu` (Windows-only
+  behind `winreg = "0.52"`, added as a `[target.'cfg(windows)'.dependencies]` mirroring the `xattr` unix
+  pattern; cross-platform stubs so the 3-OS contract compiles). Uninstall deletes only our `…\shell\CPE`
+  verb subkeys — never the shared `Directory\shell` containers — and tolerates already-absent keys
+  (idempotent). Wired three thin async `spawn_blocking` `#[tauri::command]`s (install/uninstall/installed;
+  `install` resolves `current_exe`) and registered them in both `generate_handler!`/`collect_commands`
+  lists. **Checks:** 9/9 server tests (new Windows round-trip runs under an isolated scratch hive, no real
+  keys touched); clippy clean both feature modes; `src-tauri` compiles. **Independent review:** correct
+  scoping of the delete (no collateral to other apps' verbs), idempotent uninstall, async-guardrail
+  compliant — no findings. **UAT:** installed against real HKCU → `reg query` confirmed all three verbs +
+  command subkeys; uninstalled → `reg query` "key not found" (no residue); `installed()` flips true→false.
+  Next: CPE-1023 surfaces this as a Settings toggle (with GUI verify by right-clicking a folder).

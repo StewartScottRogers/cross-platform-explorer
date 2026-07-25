@@ -49,8 +49,8 @@ stakes for daily-driver use and makes CPE reachable from everywhere the OS offer
 
 ## Child tickets (first wave)
 - **CPE-945** — shell-menu applicability model (pure). ✅ Done.
-- **CPE-1019** — Windows shell-registration plan (pure model). Next up.
-- **CPE-1020** — Apply/remove the Windows registration (HKCU glue). Needs CPE-1019.
+- **CPE-1019** — Windows shell-registration plan (pure model). ✅ Done.
+- **CPE-1020** — Apply/remove the Windows registration (HKCU glue). ✅ Done.
 - **CPE-1021** — Linux `.desktop` + xdg-mime registration plan (pure). Parallelisable.
 - **CPE-1022** — macOS Services/LSHandlers registration plan (pure). Parallelisable.
 - **CPE-1023** — In-app "Shell integration" Settings toggle. Needs CPE-1020.
@@ -61,3 +61,8 @@ applicability core deciding which registered context-menu verbs to show for a se
 per-OS shell registration glue and the default-file-manager handshake.
 2026-07-24 (PM take-on) — Decomposed the first real wave (CPE-1019–1023) per the Decisions above; user is
 off-shift so the product calls were made and logged rather than asked. Building CPE-1019 next.
+2026-07-25 — **CPE-1019 + CPE-1020 done.** The Windows path is now functional end-to-end at the backend:
+the pure plan (1019) + the HKCU apply/remove glue (1020), exposed as `install_shell_integration` /
+`uninstall_shell_integration` / `shell_integration_installed` commands. UAT-verified against the real
+registry (install → verbs present via `reg query`; uninstall → no residue). Remaining: CPE-1021/1022
+(Linux/macOS plans), CPE-1023 (Settings toggle + GUI verify).

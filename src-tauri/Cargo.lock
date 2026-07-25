@@ -852,6 +852,7 @@ dependencies = [
  "specta",
  "tar",
  "wasmprinter",
+ "winreg 0.52.0",
  "xattr",
  "zip 2.4.2",
 ]
@@ -891,7 +892,7 @@ dependencies = [
 
 [[package]]
 name = "cross-platform-explorer"
-version = "0.57.31"
+version = "0.57.33"
 dependencies = [
  "base64 0.22.1",
  "cpe-server",

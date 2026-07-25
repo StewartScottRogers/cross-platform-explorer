@@ -59,6 +59,12 @@ plist = "1"
 [target.'cfg(unix)'.dependencies]
 xattr = "1"
 
+# Windows registry access for the shell-citizen integration — writing/removing the "Open in CPE"
+# context-menu entries under HKCU (CPE-1020, epic CPE-712). Windows-only; same version the app adapter
+# already uses. The registration *decision* is pure (`shell_menu::windows_shell_plan`); this only applies it.
+[target.'cfg(windows)'.dependencies]
+winreg = "0.52"
+
 # The ticket-directives MCP server (CPE-962): a stdio MCP server an external agent launches to
 # list/reply to Agent Board directives. `ticket-mcp <repo-root>`.
 [[bin]]
