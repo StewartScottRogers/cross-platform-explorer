@@ -46,8 +46,18 @@ crate already in the tree — no AI backend, no new deps, delete-testable.
 - The perceptual core is pure + cargo-tested; with the feature unused there is no cost.
 
 ## Child tickets
-1. **CPE-998** — Pure perceptual-hash + clustering core (`cpe-server`): `phash` (image → u64 fingerprint via
-   the `image` crate), `hamming`, `cluster(items, max_distance)`. Cargo-tested, no new deps.
-   *Headless — buildable now.*
-2. **CPE-999+** — Folder/selection hashing pipeline (reuse decode/thumbnail paths) + the side-by-side review
-   & safe-cleanup UI. **GUI/attended.**
+1. **CPE-998** — Pure perceptual-hash + clustering core (`cpe-server::perceptual`): `phash` (image → u64
+   dHash via the `image` crate), `hamming`, `cluster(items, max_distance)` (union-find, 2+-member groups,
+   deterministic). ✅ **Done + independently reviewed (workshift QA gate: opus reviewer APPROVED — re-ran
+   tests + both clippy clean, verified logic + adversarial edges). PR #318.**
+2. **CPE-999** — SimHash near-duplicate **text/documents**: `simhash(text) -> u64` (token-shingle SimHash)
+   which reuses CPE-998's `cluster`/`hamming` directly (a u64 fingerprint is a u64 fingerprint) to group
+   near-identical documents. Pure, no deps. *Headless — buildable now.*
+3. **CPE-1000+** — Folder/selection hashing pipeline (reuse decode/thumbnail paths) + the side-by-side
+   review & safe-cleanup UI. **GUI/attended.**
+
+## Follow-ups noted
+- **Golden-value dHash test (from the CPE-998 review):** the deterministic/near tests run on all-zero-hash
+  gradient fixtures; only `column_bands` exercises a non-zero hash and no test pins an exact `u64`, so a
+  bit-order/direction swap in packing could go uncaught. Add one golden-value assertion on a structured
+  fixture to harden. Non-blocking (code verified correct), captured here.
