@@ -5792,6 +5792,14 @@ pub fn run() {
             if let Some(script) = startup_init_script(app.handle()) {
                 wb = wb.initialization_script(script);
             }
+            // `--test-mode` (CPE-1046) also launches the window UNFOCUSED: the halo overlay is the visual
+            // half of "don't touch me", but the actual fix for an automated run stealing the user's
+            // keyboard/mouse focus is not grabbing OS focus at all. `.focused(false)` only changes launch
+            // behavior — the automation (WebDriver etc.) still drives the DOM/window regardless of OS
+            // focus, and the user's own foreground app is left alone.
+            if resolve_startup_test_mode(app.handle()) {
+                wb = wb.focused(false);
+            }
             let win = wb.build()?;
 
             // `main` is in the window-state plugin's skip_initial_state list, so restore its saved

@@ -173,7 +173,7 @@
   $: setDiagnosticsEnabled(diagnostics);
   // ---------------------------------------------------------------------------------------------------
 
-  // `--test-mode` automation halo (CPE-1046): the backend injects a synchronous `window.__CPE_TEST_MODE__`
+  // `--test-mode` automation badge (CPE-1046): the backend injects a synchronous `window.__CPE_TEST_MODE__`
   // global (set before this script runs — same mechanism as `--open`'s `__CPE_OPEN_DIR__`, CPE-1043), so
   // reading it here at init needs no command/gate. In a plain browser / test env the global is simply
   // absent and this is false — zero cost when the app isn't launched in test mode.
@@ -3479,7 +3479,7 @@
   <DiagnosticsOverlay version={appVersion} />
 {/if}
 
-<!-- Automation test-mode halo (CPE-1046): only rendered when launched with `--test-mode`. -->
+<!-- Automation test-mode badge (CPE-1046): only rendered when launched with `--test-mode`. -->
 {#if testMode}
   <TestModeOverlay />
 {/if}
