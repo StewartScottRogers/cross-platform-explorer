@@ -14,8 +14,8 @@ pinned by a CI/guard job (must never regress).
 
 | # | App aspect | Automated coverage today | Status | Automation to build (retires the manual step) | Ticket |
 |---|-----------|--------------------------|--------|-----------------------------------------------|--------|
-| 1 | **GUI end-to-end** (real Tauri/WebView2 app: navigate, click, dialogs, menus behave) | none headless — clicked by hand | ⛰ manual | `tauri-driver` + WebDriver (Edge WebDriver on Win, WebKitWebDriver on Linux) driving the built app in CI; assert core flows | _unfiled_ |
-| 2 | **Build → deploy → run smoke** (installer installs, app launches + responds) | done by hand each GUI verify | ⛰ manual | CI smoke job: install the **sidecar build** artifact, launch, assert it answers a health/ping | _unfiled_ |
+| 1 | **GUI end-to-end** (real Tauri/WebView2 app: navigate, click, dialogs, menus behave) | none headless — clicked by hand | 🔧 in progress | `tauri-driver` + WebDriver (Edge WebDriver on Win, WebKitWebDriver on Linux) driving the built app in CI; assert core flows. First slice: `--open <tmpdir>` → breadcrumb navigated | CPE-1045 |
+| 2 | **Build → deploy → run smoke** (installer installs, app launches + responds) | done by hand each GUI verify | 🔧 in progress | CI smoke job: launch the built app, assert it answers a health/ping (folded into the CPE-1045 harness: window + `<body>` render check) | CPE-1045 |
 | 3 | **Visual / theme regression** (light+dark, menus per MENUS.md, tabs per TABS.md, pill reflow) | none | ⛰ manual | Screenshot-diff harness over key screens in both themes; fail on unexpected pixel delta | _unfiled_ |
 | 4 | **Cross-OS GUI** (macOS + Linux app behaviour, not just backend) | backend only (3-OS matrix) | ⛰ manual | macOS/Linux CI runners driving the headless GUI harness from #1 | _unfiled_ |
 | 5 | **macOS Finder tag byte-interop** (Finder actually reads CPE's tag bytes) | codec round-trips in unit tests; real Finder unverified | ⛰ manual | macOS runner asserting via `mdls`/Finder that written tags are read back by the OS | CPE-828 (attended) |
