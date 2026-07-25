@@ -189,8 +189,8 @@ pub fn resolve(args: &GeometryArgs, monitors: &[WorkArea], default: Rect) -> Res
     let want_y = args.y.map(li).or(preset.map(|(_, py)| py)).unwrap_or(default.y);
 
     // Off-screen protection: clamp so the whole window sits inside the work area (never ungrabbable).
-    let max_x = wa.x + (wa.width - width) as i32;
-    let max_y = wa.y + (wa.height - height) as i32;
+    let max_x = wa.x + wa.width.saturating_sub(width) as i32;
+    let max_y = wa.y + wa.height.saturating_sub(height) as i32;
     let x = want_x.clamp(wa.x, max_x);
     let y = want_y.clamp(wa.y, max_y);
     if x != want_x || y != want_y {
@@ -276,6 +276,30 @@ mod tests {
         assert_eq!(resolve(&z, &[mon(0, 0, 800, 600)], dflt()), Err(GeometryError::ZeroSize));
         let any = GeometryArgs::default();
         assert_eq!(resolve(&any, &[], dflt()), Err(GeometryError::NoMonitors));
+    }
+
+    #[test]
+    fn zero_width_work_area_does_not_panic() {
+        // Regression test for CPE-1015: zero-width monitor work area should not cause underflow panic.
+        let args = GeometryArgs::default();
+        let r = resolve(&args, &[mon(100, 200, 0, 600)], dflt()).unwrap();
+        // Position should be clamped onto the work-area origin.
+        assert_eq!(r.rect.x, 100, "x should be at work-area origin");
+        assert_eq!(r.rect.y, 200, "y should be at work-area origin");
+        // Size is clamped up to 1 due to the floor, then fit into work area.
+        assert!(r.warnings.iter().any(|w| w.contains("size clamped")));
+    }
+
+    #[test]
+    fn zero_height_work_area_does_not_panic() {
+        // Regression test for CPE-1015: zero-height monitor work area should not cause underflow panic.
+        let args = GeometryArgs::default();
+        let r = resolve(&args, &[mon(50, 75, 800, 0)], dflt()).unwrap();
+        // Position should be clamped onto the work-area origin.
+        assert_eq!(r.rect.x, 50, "x should be at work-area origin");
+        assert_eq!(r.rect.y, 75, "y should be at work-area origin");
+        // Size is clamped up to 1 due to the floor, then fit into work area.
+        assert!(r.warnings.iter().any(|w| w.contains("size clamped")));
     }
 
     #[test]
