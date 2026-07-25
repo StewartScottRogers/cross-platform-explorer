@@ -118,6 +118,104 @@ pub fn windows_shell_plan(exe_path: &str, app_name: &str) -> WinShellPlan {
     WinShellPlan { install, remove }
 }
 
+// ── Linux .desktop + xdg-mime registration plan (CPE-1021, epic CPE-712) ────────────────────────────
+// The Linux analogue of `windows_shell_plan`, emitted as data: the `.desktop` entry to install under
+// `~/.local/share/applications` (user scope, no root) and the `inode/directory` default association to set
+// via `xdg-mime`, plus the files to remove on uninstall. No filesystem or `xdg-mime` process calls here.
+
+/// The Linux shell-registration plan (pure). `home` is passed in (not read from the env) so it's testable.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[cfg_attr(feature = "specta", derive(specta::Type))]
+pub struct LinuxShellPlan {
+    /// Absolute path of the `.desktop` file to write.
+    pub desktop_path: String,
+    /// Full contents of that `.desktop` file.
+    pub desktop_contents: String,
+    /// The desktop-file id (basename) `xdg-mime default <id> <mime>` registers.
+    pub desktop_id: String,
+    /// The mimetype whose default handler this sets (so uninstall knows which association it owns).
+    pub mime_type: String,
+    /// Filesystem paths to delete on uninstall.
+    pub remove_paths: Vec<String>,
+}
+
+/// Build the Linux "Open in CPE" registration plan: a `.desktop` launcher that opens folders (`%F`,
+/// `MimeType=inode/directory`) with an "Open in <app>" desktop action, installed in the user's
+/// applications dir and set as the default `inode/directory` handler.
+pub fn linux_shell_plan(exe_path: &str, app_name: &str, home: &str) -> LinuxShellPlan {
+    let desktop_id = "cross-platform-explorer.desktop".to_string();
+    let desktop_path = format!("{home}/.local/share/applications/{desktop_id}");
+    let desktop_contents = format!(
+        "[Desktop Entry]\n\
+         Type=Application\n\
+         Name={app_name}\n\
+         Exec={exe_path} %F\n\
+         Icon={exe_path}\n\
+         Terminal=false\n\
+         NoDisplay=false\n\
+         MimeType=inode/directory;\n\
+         Categories=Utility;System;FileManager;\n\
+         Actions=OpenInCPE;\n\
+         \n\
+         [Desktop Action OpenInCPE]\n\
+         Name=Open in {app_name}\n\
+         Exec={exe_path} %F\n"
+    );
+    LinuxShellPlan {
+        remove_paths: vec![desktop_path.clone()],
+        desktop_path,
+        desktop_contents,
+        desktop_id,
+        mime_type: "inode/directory".to_string(),
+    }
+}
+
+// ── macOS Services / LSHandlers registration plan (CPE-1022, epic CPE-712) ──────────────────────────
+// macOS integration is largely declared in the app bundle's Info.plist (Services are read from it), so the
+// "plan" here is the plist fragments to include: an `NSServices` entry that puts "Open in <app>" in the
+// Services menu for file/folder selections, plus an optional `LSHandlerRoleAll` folder-viewer association.
+// Pure/data only — writing the bundle plist + `defaults`/`lsregister` glue (and real-macOS verification)
+// is a follow-up slice that needs a Mac.
+
+/// The macOS shell-registration plan (pure): plist fragments to add + the keys to strip on uninstall.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[cfg_attr(feature = "specta", derive(specta::Type))]
+pub struct MacShellPlan {
+    /// The `NSServices` array-entry `<dict>` (XML plist fragment) for the "Open in <app>" Services item.
+    pub ns_service: String,
+    /// The `LSHandlers` association `<dict>` making the app a folder ("public.folder") viewer handler.
+    pub ls_handler: String,
+    /// Identifiers of the fragments to remove on uninstall (the service menu title + the handler content type).
+    pub remove_keys: Vec<String>,
+}
+
+/// Build the macOS "Open in CPE" plan: an `NSServices` entry (menu title + folder/file send-types +
+/// handler method) and an `LSHandlers` folder-viewer association, keyed by `bundle_id`.
+pub fn macos_shell_plan(app_name: &str, bundle_id: &str) -> MacShellPlan {
+    let menu_title = format!("Open in {app_name}");
+    let ns_service = format!(
+        "<dict>\n\
+         \t<key>NSMenuItem</key>\n\
+         \t<dict><key>default</key><string>{menu_title}</string></dict>\n\
+         \t<key>NSMessage</key><string>openSelection</string>\n\
+         \t<key>NSPortName</key><string>{app_name}</string>\n\
+         \t<key>NSSendFileTypes</key>\n\
+         \t<array><string>public.folder</string><string>public.item</string></array>\n\
+         </dict>\n"
+    );
+    let ls_handler = format!(
+        "<dict>\n\
+         \t<key>LSHandlerContentType</key><string>public.folder</string>\n\
+         \t<key>LSHandlerRoleAll</key><string>{bundle_id}</string>\n\
+         </dict>\n"
+    );
+    MacShellPlan {
+        ns_service,
+        ls_handler,
+        remove_keys: vec![menu_title, "public.folder".to_string()],
+    }
+}
+
 // ── Apply / remove the Windows plan against the real registry (CPE-1020, epic CPE-712) ──────────────
 // Thin glue over `windows_shell_plan`: write every entry under HKCU on install, delete every root key on
 // uninstall. All decision logic lives in the plan; this only executes it. Windows-only (behind `winreg`);
@@ -274,6 +372,51 @@ mod tests {
     fn exe_path_is_quoted_so_spaces_are_safe() {
         // The command string must keep the exe as a single quoted token even with spaces in the path.
         assert!(cmd_for(&plan(), "Directory").starts_with(r#""C:\Program Files\"#));
+    }
+
+    // ── Linux plan (CPE-1021) ──
+
+    #[test]
+    fn linux_plan_writes_a_folder_desktop_entry_under_user_applications() {
+        let p = linux_shell_plan("/opt/cpe/cpe", "Cross-Platform Explorer", "/home/sam");
+        assert_eq!(p.desktop_path, "/home/sam/.local/share/applications/cross-platform-explorer.desktop");
+        assert_eq!(p.mime_type, "inode/directory");
+        // A valid launcher for folders, with the "Open in …" action.
+        assert!(p.desktop_contents.contains("[Desktop Entry]"));
+        assert!(p.desktop_contents.contains("Exec=/opt/cpe/cpe %F"));
+        assert!(p.desktop_contents.contains("MimeType=inode/directory;"));
+        assert!(p.desktop_contents.contains("[Desktop Action OpenInCPE]"));
+        assert!(p.desktop_contents.contains("Name=Open in Cross-Platform Explorer"));
+    }
+
+    #[test]
+    fn linux_plan_is_reversible() {
+        let p = linux_shell_plan("/opt/cpe/cpe", "CPE", "/home/sam");
+        // Everything installed (the one .desktop file) is in the remove set → no residue.
+        assert!(p.remove_paths.contains(&p.desktop_path));
+        assert_eq!(p.remove_paths.len(), 1);
+    }
+
+    // ── macOS plan (CPE-1022) ──
+
+    #[test]
+    fn macos_plan_emits_service_and_handler_fragments() {
+        let p = macos_shell_plan("Cross-Platform Explorer", "com.cpe.app");
+        // The Services entry carries the menu title + folder/file send-types.
+        assert!(p.ns_service.contains("<string>Open in Cross-Platform Explorer</string>"));
+        assert!(p.ns_service.contains("public.folder"));
+        assert!(p.ns_service.contains("NSMessage"));
+        // The LSHandlers association points folder-viewing at our bundle id.
+        assert!(p.ls_handler.contains("<string>com.cpe.app</string>"));
+        assert!(p.ls_handler.contains("public.folder"));
+    }
+
+    #[test]
+    fn macos_plan_names_what_to_remove() {
+        let p = macos_shell_plan("CPE", "com.cpe.app");
+        // Uninstall must name the service menu title + the handler content type it added.
+        assert!(p.remove_keys.contains(&"Open in CPE".to_string()));
+        assert!(p.remove_keys.contains(&"public.folder".to_string()));
     }
 
     // ── apply / remove glue (CPE-1020) ── Exercises real winreg mechanics under an isolated scratch key

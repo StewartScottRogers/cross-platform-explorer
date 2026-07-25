@@ -7,7 +7,8 @@ priority: low
 tags: ready
 epic: CPE-712
 created: 2026-07-24
-status: Backlog
+closed: 2026-07-25
+status: Done
 ---
 
 ## Summary
@@ -26,3 +27,9 @@ process calls or bundle mutation here; that glue is a later slice.
 ## Work Log
 - 2026-07-24 (PM take-on) — Filed as the macOS plan mirror; the actual bundle/`defaults` glue + real-macOS
   verification will be a follow-up slice (needs a Mac, per the cross-OS-verify escalation).
+- 2026-07-25 — **Done (pure plan).** Added `macos_shell_plan` + `MacShellPlan` to `cpe_server::shell_menu`.
+  Emits the `NSServices` `<dict>` for an "Open in <app>" Services item (menu title + `public.folder` /
+  `public.item` send-types + `NSMessage`) and an `LSHandlers` folder-viewer association keyed to the bundle
+  id, plus the remove keys (menu title + content type). 2 unit tests; part of 13/13 suite; clippy clean.
+  **Deferred (needs a Mac — user test territory):** writing these into the app bundle's Info.plist +
+  `lsregister`/`defaults` glue and verifying the Services item actually appears.

@@ -7,7 +7,8 @@ priority: low
 tags: ready
 epic: CPE-712
 created: 2026-07-24
-status: Backlog
+closed: 2026-07-25
+status: Done
 ---
 
 ## Summary
@@ -26,3 +27,9 @@ slice. User-scope (`~/.local`) so no root needed.
 
 ## Work Log
 - 2026-07-24 (PM take-on) — Filed as the Linux plan mirror of the Windows plan; parallelisable with CPE-1019.
+- 2026-07-25 — **Done.** Added `linux_shell_plan` + `LinuxShellPlan` to `cpe_server::shell_menu` (pure,
+  `home` injected for testability). Emits a `.desktop` launcher (`Exec=… %F`, `MimeType=inode/directory;`,
+  an "Open in <app>" desktop Action) targeted at `~/.local/share/applications/cross-platform-explorer.desktop`,
+  the `inode/directory` default association, and a single-file remove set (reversible). 2 unit tests; part
+  of the 13/13 module suite; clippy clean both modes. Applying the plan (write file + `xdg-mime default`)
+  and real-Linux verification are a follow-up slice.
