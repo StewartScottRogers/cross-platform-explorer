@@ -320,3 +320,9 @@ pub mod text_encoding;
 /// compressed/uncompressed size scoring against configurable thresholds — no extraction, no I/O, no
 /// new dependencies.
 pub mod archive_safety;
+
+/// Cascade-aware empty-folder finder (CPE-1005, epic CPE-1002). Given a caller-supplied directory
+/// tree, finds directories that are empty or would become empty once nested-empty subdirectories
+/// are removed, reporting only the topmost directory of each cascade. Pure recursive tree
+/// algorithm; no I/O, no new dependencies.
+pub mod empty_dirs;
