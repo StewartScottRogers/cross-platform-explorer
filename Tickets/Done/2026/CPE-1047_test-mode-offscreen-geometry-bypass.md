@@ -4,7 +4,7 @@ title: "Test-mode bypasses the on-screen geometry clamp so automation windows la
 type: feature
 component: Backend
 priority: medium
-status: Doing
+status: Done
 tags: ready
 created: 2026-07-25
 epic: CPE-616
@@ -31,3 +31,10 @@ regardless of position, so off-screen is fully functional; the badge + non-focus
 ## Work Log
 2026-07-25 — Filed as the CPE-1046 follow-up (the geometry clamp defeats off-screen launch, found during
 CPE-1045). Closes the last gap in "automation never touches the user's screen."
+
+2026-07-25 (attended) — **DONE, merged PR #365.** `geometry::resolve` gains `allow_offscreen` (passed from
+`--test-mode`); when set it skips the CPE-600 on-screen clamp. Reviewed APPROVE (normal clamp byte-for-byte
+unchanged; 14/14 geometry tests). **Foreman-verified in a real build:** `--x=-3000` (normal) clamps to L=0;
+`--test-mode --x=-3000` lands at L=-3000 (fully off-screen). **IMPORTANT launch detail:** negative geometry
+values MUST use the `=` form (`--x=-4000`) — `--x -4000` fails clap parsing (leading `-` read as a flag), so
+the window falls to default. Off-screen automation launches use `--test-mode --x=-4000 …`.
