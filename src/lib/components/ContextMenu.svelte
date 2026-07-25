@@ -176,6 +176,9 @@
       <Icon name="info" size={15} /> {$t('ctx.properties')}
       <span class="hint">Alt+Enter</span>
     </button>
+    <button class="row" role="menuitem" on:click={() => run("metadataStudio")}>
+      <Icon name="info" size={15} /> {$t('studio.menu')}
+    </button>
     <div class="sep" />
     <button class="row" role="menuitem" on:click={() => run("help-docs")}>
       <Icon name="book" size={15} /> Documents for this view
