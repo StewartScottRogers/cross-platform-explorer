@@ -61,6 +61,16 @@ Grounded in what the repo already runs (extend these before inventing new stacks
 - **Headless GUI driving** — the biggest lever. Stand up **`tauri-driver` + WebDriver** (WebView2 via Edge
   WebDriver on Windows, WebKitWebDriver on Linux) so the *real* built app can be clicked and asserted in
   CI. Alternative/complement: Playwright against the webview.
+  - **Off-screen + test-mode launch convention (CPE-1046):** automated GUI runs launch the real app with
+    `--test-mode --x -4000 <other flags> --open <tmpdir>` (the geometry flags are CPE-600, `--open` is
+    CPE-1043). `--x -4000` moves the window off the interactive monitor — WebDriver drives the DOM
+    regardless of window position, so the automation works fully while nothing ever appears in front of
+    the user. `--test-mode` additionally (a) renders a small, upper-left "🤖 automated test — don't
+    touch" badge (`TestModeOverlay.svelte`, `pointer-events: none`, never a full-window frame) for the
+    rarer case where a test window *is* on-screen (e.g. a manual reproduction of a CI run), and (b)
+    launches the window itself unfocused (`.focused(false)` in `lib.rs`'s `setup()`) so it never steals
+    OS-level mouse/keyboard focus from whatever the user is actively doing. Both flags are launch-only
+    and cost nothing when absent.
 - **Visual / theme regression** — screenshot-diff the GUI (light/dark, menus per `docs/design/MENUS.md`,
   tabs per `TABS.md`) so appearance rules are checked without human eyes.
 - **Smoke-install job** — a CI job that installs the **sidecar build** artifact, launches it, and asserts

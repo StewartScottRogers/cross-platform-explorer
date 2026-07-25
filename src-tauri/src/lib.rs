@@ -5604,6 +5604,40 @@ fn resolve_startup_open_dir(app: &tauri::AppHandle) -> Option<String> {
     Some(abs.to_string_lossy().into_owned())
 }
 
+/// Read the `--test-mode` launch flag (CPE-1046): when passed, the frontend renders an unmistakable
+/// "automated test" halo + banner overlay so a human never worries about (or interferes with) an
+/// automated GUI run. Same `CliExt` read as `resolve_startup_open_dir`, just a bare boolean.
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
+fn resolve_startup_test_mode(app: &tauri::AppHandle) -> bool {
+    use tauri_plugin_cli::CliExt;
+    let Ok(matches) = app.cli().matches() else { return false };
+    matches!(
+        matches.args.get("test-mode").map(|a| &a.value),
+        Some(serde_json::Value::Bool(true))
+    )
+}
+
+/// Build the combined startup `initialization_script` (CPE-1043 `--open` + CPE-1046 `--test-mode`):
+/// both deliver a value to the frontend as a `window` global set **before** the app's own scripts run,
+/// so neither needs a command or a Tauri-presence gate at startup. Returns `None` when neither flag is
+/// present, so a plain launch injects nothing — identical to pre-CPE-1046 behavior.
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
+fn startup_init_script(app: &tauri::AppHandle) -> Option<String> {
+    let mut script = String::new();
+    if let Some(dir) = resolve_startup_open_dir(app) {
+        let json = serde_json::to_string(&dir).unwrap_or_else(|_| "null".to_string());
+        script.push_str(&format!("window.__CPE_OPEN_DIR__ = {json};"));
+    }
+    if resolve_startup_test_mode(app) {
+        script.push_str("window.__CPE_TEST_MODE__ = true;");
+    }
+    if script.is_empty() {
+        None
+    } else {
+        Some(script)
+    }
+}
+
 /// Apply CLI window-geometry flags (CPE-600) to the main window, over whatever `tauri-plugin-window-state`
 /// restored — so precedence is `CLI flag > saved state > default`. Monitors have no work-area API in
 /// Tauri, so the full monitor bounds are used and the pure resolver clamps the window fully on-screen.
@@ -5751,11 +5785,20 @@ pub fn run() {
                         tauri::http::HeaderValue::from_static("no-store"),
                     );
                 });
-            // `--open <dir>` (CPE-1043): inject the resolved folder as a global the frontend reads
-            // synchronously at startup — runs before the app's own scripts, so no command/gate is needed.
-            if let Some(dir) = resolve_startup_open_dir(app.handle()) {
-                let json = serde_json::to_string(&dir).unwrap_or_else(|_| "null".to_string());
-                wb = wb.initialization_script(format!("window.__CPE_OPEN_DIR__ = {json};"));
+            // `--open <dir>` (CPE-1043) + `--test-mode` (CPE-1046): inject both as globals the frontend
+            // reads synchronously at startup — one combined script that runs before the app's own scripts,
+            // so no command/gate is needed for either. Nothing requested → nothing injected (unchanged
+            // pre-CPE-1046 behavior).
+            if let Some(script) = startup_init_script(app.handle()) {
+                wb = wb.initialization_script(script);
+            }
+            // `--test-mode` (CPE-1046) also launches the window UNFOCUSED: the halo overlay is the visual
+            // half of "don't touch me", but the actual fix for an automated run stealing the user's
+            // keyboard/mouse focus is not grabbing OS focus at all. `.focused(false)` only changes launch
+            // behavior — the automation (WebDriver etc.) still drives the DOM/window regardless of OS
+            // focus, and the user's own foreground app is left alone.
+            if resolve_startup_test_mode(app.handle()) {
+                wb = wb.focused(false);
             }
             let win = wb.build()?;
 
