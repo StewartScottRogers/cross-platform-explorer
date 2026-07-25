@@ -1,0 +1,598 @@
+//! Disk-backed snapshot capture & restore engine (CPE-1011, epic CPE-735 "local snapshots").
+//!
+//! [`crate::snapshot`] (CPE-969) is only the **pure in-memory bookkeeping half** — a refcounted
+//! [`crate::snapshot::BlobStore`] plus `plan_capture`/`apply_capture`/`release` — and its own docs say
+//! "the bytes behind each hash are the caller's to persist." Nothing persisted them until this module:
+//! it walks a folder ([`scan_dir`]), hashes each file (reusing [`crate::checksum::hash_file`], sha256),
+//! plans the capture against a disk-persisted [`crate::snapshot::BlobStore`], writes new blobs
+//! content-addressed under `store_dir/blobs/<hash>` (a blob whose file already exists is a no-op — the
+//! dedup win extends to disk, not just the in-memory index), and records a JSON manifest of
+//! `path → {hash,size}` plus the skipped-file list. [`restore`] replays a manifest back onto a directory
+//! byte-for-byte.
+//!
+//! On-disk layout under a store directory:
+//! ```text
+//! store_dir/
+//!   blobs/<hash>              one file per unique content hash
+//!   index.json                the persisted BlobStore (hash -> {size,refs})
+//!   manifests/<manifest_id>.json   one per capture: id, time, path->hash map, skipped files
+//! ```
+//!
+//! Std + serde only (serde_json is already a workspace dependency) — no new crates, not feature-gated,
+//! always available like `snapshot`/`snapshot_retention`/`restore_plan`.
+//!
+//! Design notes (documented deliberate choices):
+//! - **Symlinks are not followed.** [`scan_dir`] uses the same technique as [`crate::checksum`]'s
+//!   `checksum_folder`: `DirEntry::metadata()` does not traverse symlinks, so a symlinked file or
+//!   directory is neither `is_dir()` nor `is_file()` and is skipped outright — loop-safe by
+//!   construction, with no separate cycle check needed.
+//! - **Skip-on-error.** An entry the walk can't `read_dir`/`metadata`/hash is skipped, not fatal —
+//!   mirrors `list_dir`'s guardrail. A file that becomes unreadable between `scan_dir` and the blob-copy
+//!   step in [`capture`] *does* fail that capture (rather than silently persisting a manifest that
+//!   references a blob nothing ever wrote); this only matters for a narrow race, and no writes to the
+//!   index/manifest happen until every blob copy for this capture has already succeeded.
+//! - **Manifest ids** are the capture's wall-clock epoch-ms, with a `-N` suffix appended on collision
+//!   (two captures inside the same millisecond) so ids stay both sortable and unique.
+//! - CoW/reflink/hardlink store optimisation is **out of scope for v1** — blobs are plain-copied in and
+//!   out; a later ticket can swap the copy primitive without touching this module's public API.
+
+use std::collections::{BTreeMap, BTreeSet};
+use std::fs;
+use std::path::{Path, PathBuf};
+use std::time::SystemTime;
+
+use serde::{Deserialize, Serialize};
+
+use crate::checksum::hash_file;
+use crate::fsutil::to_epoch_ms;
+use crate::restore_plan::{FileState, Snapshot};
+use crate::snapshot::{apply_capture, plan_capture, release, BlobMeta, BlobStore, CaptureBudget, SkipReason, SkippedFile};
+
+/// Walk `root` recursively into a [`Snapshot`]: every regular file, keyed by its path relative to `root`
+/// with forward-slash separators (stable across OSes, sorted by [`Snapshot`]'s `BTreeMap` iteration).
+/// `root` must be a directory. Unreadable directories/entries/files are skipped rather than failing the
+/// whole walk (mirrors `list_dir`'s guardrail); symlinked files and directories are not followed (see the
+/// module doc).
+pub fn scan_dir(root: &str) -> Result<Snapshot, String> {
+    let root_path = Path::new(root);
+    if !root_path.is_dir() {
+        return Err(format!("{root}: not a folder"));
+    }
+    let mut out = Snapshot::new();
+    scan_walk(root_path, root_path, &mut out);
+    Ok(out)
+}
+
+fn scan_walk(root: &Path, dir: &Path, out: &mut Snapshot) {
+    let Ok(entries) = fs::read_dir(dir) else { return }; // unreadable dir: skip, don't fail the walk
+    for entry in entries.flatten() {
+        // DirEntry::metadata() does not traverse symlinks, so a symlinked file or directory is neither
+        // is_dir() nor is_file() here and simply falls through unhandled below (matches checksum.rs).
+        let Ok(meta) = entry.metadata() else { continue }; // unreadable entry: skip, don't fail the walk
+        let path = entry.path();
+        if meta.is_dir() {
+            scan_walk(root, &path, out);
+        } else if meta.is_file() {
+            let Some(rel) = relative_slash_path(root, &path) else { continue };
+            if let Ok(hash) = hash_file(&path.to_string_lossy()) {
+                out.insert(rel, FileState::new(hash, meta.len()));
+            }
+            // else: became unreadable between listing and hashing — skip, don't fail the walk
+        }
+    }
+}
+
+/// `path`, relative to `root`, joined with `/` regardless of the host OS's native separator. `None` if
+/// `path` isn't under `root` or is `root` itself.
+fn relative_slash_path(root: &Path, path: &Path) -> Option<String> {
+    let rel = path.strip_prefix(root).ok()?;
+    let parts: Vec<String> =
+        rel.components().map(|c| c.as_os_str().to_string_lossy().into_owned()).collect();
+    if parts.is_empty() {
+        None
+    } else {
+        Some(parts.join("/"))
+    }
+}
+
+/// The inverse of [`relative_slash_path`]: rebuild an absolute path under `root` from a `/`-joined
+/// relative path, using the host OS's native separator.
+fn root_relative_to_abs(root: &Path, rel: &str) -> PathBuf {
+    let mut p = root.to_path_buf();
+    for part in rel.split('/') {
+        p.push(part);
+    }
+    p
+}
+
+/// The outcome of one [`capture`]: which manifest it produced, how many blobs were newly written vs.
+/// reused (the dedup win), the bytes added to the store, and which files were left out (never silently
+/// dropped — surfaced so the caller can warn that a checkpoint is incomplete).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CaptureOutcome {
+    /// The id of the manifest this capture wrote — pass to [`restore`] or [`prune`].
+    pub manifest_id: String,
+    /// New blobs written to `store_dir/blobs/`.
+    pub new_blobs: usize,
+    /// Blobs already present in the store — nothing written (dedup).
+    pub reused_blobs: usize,
+    /// Bytes this capture added to the store's footprint.
+    pub added_bytes: u64,
+    /// Files whose content was skipped (oversize or over budget) and so isn't in this manifest.
+    pub skipped: Vec<SkippedFile>,
+}
+
+/// Capture `root` into the content-addressed store at `store_dir` under `budget`: [`scan_dir`] → plan
+/// against the store loaded from disk → write each new blob's bytes to `store_dir/blobs/<hash>` (a blob
+/// already on disk is a no-op) → commit the plan to the store index → persist the index and a new
+/// manifest. Returns a summary; see [`CaptureOutcome`].
+///
+/// Transactional-ish: blob bytes are written *before* the store index or manifest are persisted, so a
+/// mid-capture I/O failure (e.g. disk full) never leaves a persisted index/manifest referencing a blob
+/// that was never actually written. It may leave stray blob files on disk from a partial write — those
+/// aren't referenced by any manifest, so a later [`prune`]-style GC pass (or just retrying the capture)
+/// cleans them up naturally.
+pub fn capture(root: &str, store_dir: &str, budget: &CaptureBudget) -> Result<CaptureOutcome, String> {
+    let root_path = Path::new(root);
+    let store_path = Path::new(store_dir);
+
+    let scan = scan_dir(root)?;
+    let mut store = load_store(store_path)?;
+    let plan = plan_capture(&store, &scan, budget);
+
+    // Map each new blob's hash to a source path holding that content (first one seen in the scan; any
+    // other path sharing the hash is byte-identical content, so any source works).
+    let mut source_for_hash: BTreeMap<&str, &str> = BTreeMap::new();
+    for (path, state) in &scan {
+        source_for_hash.entry(state.hash.as_str()).or_insert(path.as_str());
+    }
+
+    let blobs_dir_path = blobs_dir(store_path);
+    fs::create_dir_all(&blobs_dir_path).map_err(|e| format!("{}: {e}", blobs_dir_path.display()))?;
+    for blob in &plan.to_store {
+        let dest = blobs_dir_path.join(&blob.hash);
+        if dest.exists() {
+            continue; // already on disk (e.g. left over from a prior capture of the same content)
+        }
+        let Some(rel) = source_for_hash.get(blob.hash.as_str()) else {
+            return Err(format!("internal: no source path recorded for new blob {}", blob.hash));
+        };
+        let src = root_relative_to_abs(root_path, rel);
+        fs::copy(&src, &dest).map_err(|e| format!("{}: {e}", src.display()))?;
+    }
+
+    apply_capture(&mut store, &plan);
+    save_store(store_path, &store)?;
+
+    // A path's content is retrievable iff its hash ended up new or reused (never skipped) — this also
+    // correctly excludes *every* path sharing a skipped hash, not just the one `plan.skipped` blames.
+    let referenced = plan.referenced_hashes();
+    let files: BTreeMap<String, PersistedFileState> = scan
+        .iter()
+        .filter(|(_, state)| referenced.contains(&state.hash))
+        .map(|(p, state)| (p.clone(), PersistedFileState { hash: state.hash.clone(), size: state.size }))
+        .collect();
+
+    let manifest_id = fresh_manifest_id(store_path)?;
+    let manifest = PersistedManifest {
+        id: manifest_id.clone(),
+        created_ms: to_epoch_ms(SystemTime::now()).unwrap_or(0),
+        files,
+        skipped: plan
+            .skipped
+            .iter()
+            .map(|s| PersistedSkipped { path: s.path.clone(), size: s.size, reason: skip_reason_str(s.reason).to_string() })
+            .collect(),
+    };
+    save_manifest(store_path, &manifest)?;
+
+    Ok(CaptureOutcome {
+        manifest_id,
+        new_blobs: plan.to_store.len(),
+        reused_blobs: plan.reused.len(),
+        added_bytes: plan.added_bytes,
+        skipped: plan.skipped,
+    })
+}
+
+/// Recreate every file recorded in manifest `manifest_id` (from the store at `store_dir`) under `dest`,
+/// byte-for-byte, creating parent directories as needed. `dest` need not exist yet. Files the original
+/// capture skipped (oversize/budget) are absent from the manifest and so are not recreated.
+pub fn restore(store_dir: &str, manifest_id: &str, dest: &str) -> Result<(), String> {
+    let store_path = Path::new(store_dir);
+    let dest_path = Path::new(dest);
+    let manifest = load_manifest(store_path, manifest_id)?;
+    fs::create_dir_all(dest_path).map_err(|e| format!("{}: {e}", dest_path.display()))?;
+    let blobs_dir_path = blobs_dir(store_path);
+    for (rel, file) in &manifest.files {
+        let target = root_relative_to_abs(dest_path, rel);
+        if let Some(parent) = target.parent() {
+            fs::create_dir_all(parent).map_err(|e| format!("{}: {e}", parent.display()))?;
+        }
+        let blob = blobs_dir_path.join(&file.hash);
+        fs::copy(&blob, &target).map_err(|e| format!("{}: {e}", blob.display()))?;
+    }
+    Ok(())
+}
+
+/// Drop manifest `manifest_id`'s hold on its blobs via [`release`] and remove the now-unreferenced blob
+/// files from disk. Returns the bytes freed. The manifest file itself is deleted; a manifest no longer on
+/// disk cannot be [`restore`]d.
+pub fn prune(store_dir: &str, manifest_id: &str) -> Result<u64, String> {
+    let store_path = Path::new(store_dir);
+    let manifest = load_manifest(store_path, manifest_id)?;
+    let mut store = load_store(store_path)?;
+    let hashes: BTreeSet<String> = manifest.files.values().map(|f| f.hash.clone()).collect();
+    let freed = release(&mut store, &hashes);
+    let blobs_dir_path = blobs_dir(store_path);
+    for hash in &hashes {
+        if !store.contains(hash) {
+            let _ = fs::remove_file(blobs_dir_path.join(hash)); // best-effort; index is the source of truth
+        }
+    }
+    save_store(store_path, &store)?;
+    fs::remove_file(manifest_path(store_path, manifest_id))
+        .map_err(|e| format!("{}: {e}", manifest_path(store_path, manifest_id).display()))?;
+    Ok(freed)
+}
+
+// ---- on-disk layout + persistence -----------------------------------------------------------------
+
+fn blobs_dir(store_dir: &Path) -> PathBuf {
+    store_dir.join("blobs")
+}
+
+fn index_path(store_dir: &Path) -> PathBuf {
+    store_dir.join("index.json")
+}
+
+fn manifests_dir(store_dir: &Path) -> PathBuf {
+    store_dir.join("manifests")
+}
+
+fn manifest_path(store_dir: &Path, id: &str) -> PathBuf {
+    manifests_dir(store_dir).join(format!("{id}.json"))
+}
+
+/// The persisted shape of a [`BlobStore`]'s index — hash → `{size,refs}` — since `BlobStore`'s fields
+/// aren't `Serialize`. Reloaded via [`BlobStore::from_index`].
+#[derive(Serialize, Deserialize)]
+struct PersistedIndex {
+    blobs: BTreeMap<String, PersistedBlobMeta>,
+}
+
+#[derive(Serialize, Deserialize)]
+struct PersistedBlobMeta {
+    size: u64,
+    refs: u32,
+}
+
+/// The persisted shape of one capture's manifest.
+#[derive(Serialize, Deserialize)]
+struct PersistedManifest {
+    id: String,
+    created_ms: u64,
+    /// Path (relative, `/`-joined) → content identity, for every file this capture actually stored or
+    /// reused. A path whose content was skipped is absent (see [`capture`]'s filtering).
+    files: BTreeMap<String, PersistedFileState>,
+    skipped: Vec<PersistedSkipped>,
+}
+
+#[derive(Serialize, Deserialize)]
+struct PersistedFileState {
+    hash: String,
+    size: u64,
+}
+
+#[derive(Serialize, Deserialize)]
+struct PersistedSkipped {
+    path: String,
+    size: u64,
+    reason: String,
+}
+
+fn skip_reason_str(reason: SkipReason) -> &'static str {
+    match reason {
+        SkipReason::Oversize => "oversize",
+        SkipReason::Budget => "budget",
+    }
+}
+
+/// Load the store index from `store_dir/index.json`. A store directory that doesn't exist yet (first
+/// capture) yields an empty store, not an error.
+fn load_store(store_dir: &Path) -> Result<BlobStore, String> {
+    let path = index_path(store_dir);
+    if !path.is_file() {
+        return Ok(BlobStore::new());
+    }
+    let data = fs::read_to_string(&path).map_err(|e| format!("{}: {e}", path.display()))?;
+    let persisted: PersistedIndex =
+        serde_json::from_str(&data).map_err(|e| format!("{}: {e}", path.display()))?;
+    let blobs = persisted.blobs.into_iter().map(|(h, m)| (h, BlobMeta { size: m.size, refs: m.refs })).collect();
+    Ok(BlobStore::from_index(blobs))
+}
+
+fn save_store(store_dir: &Path, store: &BlobStore) -> Result<(), String> {
+    fs::create_dir_all(store_dir).map_err(|e| format!("{}: {e}", store_dir.display()))?;
+    let blobs: BTreeMap<String, PersistedBlobMeta> =
+        store.iter().map(|(h, m)| (h.clone(), PersistedBlobMeta { size: m.size, refs: m.refs })).collect();
+    let json = serde_json::to_string_pretty(&PersistedIndex { blobs }).map_err(|e| e.to_string())?;
+    let path = index_path(store_dir);
+    fs::write(&path, json).map_err(|e| format!("{}: {e}", path.display()))
+}
+
+fn save_manifest(store_dir: &Path, manifest: &PersistedManifest) -> Result<(), String> {
+    let dir = manifests_dir(store_dir);
+    fs::create_dir_all(&dir).map_err(|e| format!("{}: {e}", dir.display()))?;
+    let json = serde_json::to_string_pretty(manifest).map_err(|e| e.to_string())?;
+    let path = manifest_path(store_dir, &manifest.id);
+    fs::write(&path, json).map_err(|e| format!("{}: {e}", path.display()))
+}
+
+fn load_manifest(store_dir: &Path, manifest_id: &str) -> Result<PersistedManifest, String> {
+    let path = manifest_path(store_dir, manifest_id);
+    let data = fs::read_to_string(&path).map_err(|e| format!("{}: {e}", path.display()))?;
+    serde_json::from_str(&data).map_err(|e| format!("{}: {e}", path.display()))
+}
+
+/// A fresh, unique manifest id for a capture happening now: the wall-clock epoch-ms, with a `-N` suffix
+/// appended if a manifest with that id already exists (two captures inside the same millisecond) — keeps
+/// ids both roughly time-sortable and guaranteed unique.
+fn fresh_manifest_id(store_dir: &Path) -> Result<String, String> {
+    let dir = manifests_dir(store_dir);
+    fs::create_dir_all(&dir).map_err(|e| format!("{}: {e}", dir.display()))?;
+    let ms = to_epoch_ms(SystemTime::now()).unwrap_or(0);
+    let mut candidate = ms.to_string();
+    let mut n = 0u32;
+    while manifest_path(store_dir, &candidate).exists() {
+        n += 1;
+        candidate = format!("{ms}-{n}");
+    }
+    Ok(candidate)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn scratch(tag: &str) -> PathBuf {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static SEQ: AtomicU64 = AtomicU64::new(0);
+        let n = SEQ.fetch_add(1, Ordering::Relaxed);
+        let d = std::env::temp_dir().join(format!("cpe-snapcap-{}-{}-{}", tag, std::process::id(), n));
+        fs::create_dir_all(&d).unwrap();
+        d
+    }
+
+    /// Create a symlink at `link` pointing at `target`; returns false when creation isn't permitted (e.g.
+    /// unprivileged Windows), so the test can skip gracefully — same pattern as `disk_usage`'s tests.
+    fn symlink_dir(target: &Path, link: &Path) -> bool {
+        #[cfg(unix)]
+        {
+            std::os::unix::fs::symlink(target, link).is_ok()
+        }
+        #[cfg(windows)]
+        {
+            std::os::windows::fs::symlink_dir(target, link).is_ok()
+        }
+    }
+
+    fn symlink_file(target: &Path, link: &Path) -> bool {
+        #[cfg(unix)]
+        {
+            std::os::unix::fs::symlink(target, link).is_ok()
+        }
+        #[cfg(windows)]
+        {
+            std::os::windows::fs::symlink_file(target, link).is_ok()
+        }
+    }
+
+    // ---- scan_dir ------------------------------------------------------------------------------
+
+    #[test]
+    fn scan_dir_rejects_a_non_folder_or_missing_root() {
+        let d = scratch("scan-bad-root");
+        assert!(scan_dir(&d.join("nope").to_string_lossy()).is_err());
+        let file = d.join("f.txt");
+        fs::write(&file, b"x").unwrap();
+        assert!(scan_dir(&file.to_string_lossy()).is_err());
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn scan_dir_keys_by_forward_slash_relative_path() {
+        let d = scratch("scan-rel");
+        fs::create_dir_all(d.join("nested/deeper")).unwrap();
+        fs::write(d.join("a.txt"), b"top").unwrap();
+        fs::write(d.join("nested/deeper/b.txt"), b"deep").unwrap();
+        let scan = scan_dir(&d.to_string_lossy()).unwrap();
+        assert_eq!(scan.len(), 2);
+        assert!(scan.contains_key("a.txt"));
+        assert!(scan.contains_key("nested/deeper/b.txt"));
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn scan_does_not_follow_symlinked_directories() {
+        let d = scratch("scan-symloop");
+        fs::write(d.join("real.txt"), b"data").unwrap();
+        fs::create_dir_all(d.join("sub")).unwrap();
+        if !symlink_dir(&d, &d.join("sub").join("loop")) {
+            let _ = fs::remove_dir_all(&d);
+            return; // unprivileged Windows: symlink creation gated — skip
+        }
+        // Without the no-follow guard, `sub/loop` -> d would send the walk back into d forever (a hang)
+        // and, if it terminated, would double-count real.txt under sub/loop/real.txt.
+        let scan = scan_dir(&d.to_string_lossy()).unwrap();
+        assert_eq!(scan.len(), 1, "the symlinked loop back to the root is never descended");
+        assert!(scan.contains_key("real.txt"));
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn scan_skips_dangling_symlinks_without_failing_the_walk() {
+        let d = scratch("scan-dangling");
+        fs::write(d.join("real.txt"), b"kept").unwrap();
+        if !symlink_file(&d.join("does-not-exist"), &d.join("broken-link")) {
+            let _ = fs::remove_dir_all(&d);
+            return; // unprivileged Windows: symlink creation gated — skip
+        }
+        let scan = scan_dir(&d.to_string_lossy()).unwrap();
+        assert_eq!(scan.len(), 1, "the dangling symlink is skipped, not fatal to the walk");
+        assert!(scan.contains_key("real.txt"));
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn scan_skips_unreadable_files_without_failing_the_whole_scan() {
+        use std::os::unix::fs::PermissionsExt;
+        let d = scratch("scan-unreadable");
+        fs::write(d.join("ok.txt"), b"visible").unwrap();
+        let blocked = d.join("blocked.txt");
+        fs::write(&blocked, b"secret").unwrap();
+        fs::set_permissions(&blocked, fs::Permissions::from_mode(0o000)).unwrap();
+
+        let scan = scan_dir(&d.to_string_lossy()).unwrap();
+
+        // Restore perms before asserting/cleanup so a failing assert never leaves an undeletable file.
+        let _ = fs::set_permissions(&blocked, fs::Permissions::from_mode(0o644));
+
+        assert!(scan.contains_key("ok.txt"));
+        assert!(!scan.contains_key("blocked.txt"), "unreadable file is skipped, not fatal to the scan");
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    // ---- capture / restore round trip -----------------------------------------------------------
+
+    #[test]
+    fn capture_then_restore_round_trips_a_nested_tree_byte_for_byte() {
+        let src = scratch("rt-src");
+        let store = scratch("rt-store");
+        let dest = scratch("rt-dest");
+        fs::write(src.join("a.txt"), b"hello world").unwrap();
+        fs::create_dir_all(src.join("nested/deeper")).unwrap();
+        fs::write(src.join("nested/b.txt"), b"nested content").unwrap();
+        fs::write(src.join("nested/deeper/c.bin"), vec![7u8; 300]).unwrap();
+
+        let outcome =
+            capture(&src.to_string_lossy(), &store.to_string_lossy(), &CaptureBudget::UNLIMITED).unwrap();
+        assert_eq!(outcome.new_blobs, 3);
+        assert_eq!(outcome.reused_blobs, 0);
+        assert!(outcome.skipped.is_empty());
+
+        restore(&store.to_string_lossy(), &outcome.manifest_id, &dest.to_string_lossy()).unwrap();
+
+        assert_eq!(fs::read(dest.join("a.txt")).unwrap(), b"hello world");
+        assert_eq!(fs::read(dest.join("nested").join("b.txt")).unwrap(), b"nested content");
+        assert_eq!(fs::read(dest.join("nested").join("deeper").join("c.bin")).unwrap(), vec![7u8; 300]);
+
+        let _ = fs::remove_dir_all(&src);
+        let _ = fs::remove_dir_all(&store);
+        let _ = fs::remove_dir_all(&dest);
+    }
+
+    #[test]
+    fn restore_of_an_unknown_manifest_is_an_error() {
+        let store = scratch("rt-unknown");
+        let dest = scratch("rt-unknown-dest");
+        assert!(restore(&store.to_string_lossy(), "does-not-exist", &dest.to_string_lossy()).is_err());
+        let _ = fs::remove_dir_all(&store);
+        let _ = fs::remove_dir_all(&dest);
+    }
+
+    // ---- dedup -----------------------------------------------------------------------------------
+
+    #[test]
+    fn capture_dedups_identical_content_and_a_recapture_writes_nothing_new() {
+        let src = scratch("dedup-src");
+        let store = scratch("dedup-store");
+        fs::write(src.join("a.txt"), b"same bytes").unwrap();
+        fs::write(src.join("b.txt"), b"same bytes").unwrap();
+        fs::write(src.join("c.txt"), b"different").unwrap();
+
+        let first =
+            capture(&src.to_string_lossy(), &store.to_string_lossy(), &CaptureBudget::UNLIMITED).unwrap();
+        assert_eq!(first.new_blobs, 2, "a.txt+b.txt share one blob; c.txt is a second");
+        assert_eq!(first.reused_blobs, 0);
+        let footprint_after_first = load_store(&store).unwrap().total_bytes();
+        let blob_count_after_first = load_store(&store).unwrap().blob_count();
+        assert_eq!(blob_count_after_first, 2);
+
+        // Re-capture the *unchanged* tree: everything reused, nothing new written, footprint unchanged.
+        let second =
+            capture(&src.to_string_lossy(), &store.to_string_lossy(), &CaptureBudget::UNLIMITED).unwrap();
+        assert_eq!(second.new_blobs, 0);
+        assert_eq!(second.reused_blobs, 2);
+        assert_eq!(load_store(&store).unwrap().total_bytes(), footprint_after_first);
+        assert_eq!(load_store(&store).unwrap().blob_count(), blob_count_after_first);
+        assert_ne!(first.manifest_id, second.manifest_id, "each capture gets its own manifest id");
+
+        let _ = fs::remove_dir_all(&src);
+        let _ = fs::remove_dir_all(&store);
+    }
+
+    // ---- budget / skip -----------------------------------------------------------------------------
+
+    #[test]
+    fn oversize_file_is_skipped_but_the_rest_of_the_capture_succeeds() {
+        let src = scratch("budget-src");
+        let store = scratch("budget-store");
+        fs::write(src.join("small.txt"), b"tiny").unwrap();
+        fs::write(src.join("huge.bin"), vec![9u8; 5_000]).unwrap();
+
+        let budget = CaptureBudget { max_blob_bytes: 1_000, max_total_bytes: 0 };
+        let outcome = capture(&src.to_string_lossy(), &store.to_string_lossy(), &budget).unwrap();
+
+        assert_eq!(outcome.new_blobs, 1, "only small.txt's content is stored");
+        assert_eq!(outcome.skipped.len(), 1);
+        assert_eq!(outcome.skipped[0].path, "huge.bin");
+        assert_eq!(outcome.skipped[0].reason, SkipReason::Oversize);
+
+        // Restoring still recreates whatever WAS captured; the skipped file is simply absent.
+        let dest = scratch("budget-dest");
+        restore(&store.to_string_lossy(), &outcome.manifest_id, &dest.to_string_lossy()).unwrap();
+        assert_eq!(fs::read(dest.join("small.txt")).unwrap(), b"tiny");
+        assert!(!dest.join("huge.bin").exists(), "skipped file has no stored content to restore");
+
+        let _ = fs::remove_dir_all(&src);
+        let _ = fs::remove_dir_all(&store);
+        let _ = fs::remove_dir_all(&dest);
+    }
+
+    // ---- prune -------------------------------------------------------------------------------------
+
+    #[test]
+    fn prune_gcs_blobs_no_longer_referenced_and_keeps_shared_ones() {
+        let src = scratch("prune-src");
+        let store = scratch("prune-store");
+        fs::write(src.join("shared.txt"), b"shared").unwrap();
+        fs::write(src.join("only-in-first.txt"), b"first only").unwrap();
+
+        let first =
+            capture(&src.to_string_lossy(), &store.to_string_lossy(), &CaptureBudget::UNLIMITED).unwrap();
+
+        fs::remove_file(src.join("only-in-first.txt")).unwrap();
+        let second =
+            capture(&src.to_string_lossy(), &store.to_string_lossy(), &CaptureBudget::UNLIMITED).unwrap();
+        assert_eq!(second.new_blobs, 0, "shared.txt's content is reused, nothing new");
+
+        let blobs_before = load_store(&store).unwrap().blob_count();
+        let freed = prune(&store.to_string_lossy(), &first.manifest_id).unwrap();
+        assert!(freed > 0, "only-in-first.txt's blob, held only by the pruned manifest, is freed");
+        let blobs_after = load_store(&store).unwrap().blob_count();
+        assert_eq!(blobs_after, blobs_before - 1, "only the unique blob is GC'd; shared.txt's survives");
+
+        // The pruned manifest is gone; the surviving one still restores fine.
+        assert!(restore(&store.to_string_lossy(), &first.manifest_id, &scratch("prune-gone").to_string_lossy())
+            .is_err());
+        let dest = scratch("prune-dest");
+        restore(&store.to_string_lossy(), &second.manifest_id, &dest.to_string_lossy()).unwrap();
+        assert_eq!(fs::read(dest.join("shared.txt")).unwrap(), b"shared");
+
+        let _ = fs::remove_dir_all(&src);
+        let _ = fs::remove_dir_all(&store);
+        let _ = fs::remove_dir_all(&dest);
+    }
+}

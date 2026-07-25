@@ -128,6 +128,12 @@ pub mod snapshot_retention;
 /// [`restore_plan`]'s revert diff. The bytes behind each hash are the caller's to persist.
 pub mod snapshot;
 
+/// Disk-backed snapshot capture & restore engine (CPE-1011, epic CPE-735) — the persistence half
+/// [`snapshot`] leaves to the caller: walk a folder into a [`restore_plan::Snapshot`], write new blobs
+/// content-addressed under a store directory (deduped), and restore a captured manifest back to a
+/// directory byte-for-byte. Std + serde only; not feature-gated.
+pub mod snapshot_capture;
+
 /// Disk-usage scanning — recursive directory size + per-child breakdown (CPE-749/754).
 pub mod disk_usage;
 
