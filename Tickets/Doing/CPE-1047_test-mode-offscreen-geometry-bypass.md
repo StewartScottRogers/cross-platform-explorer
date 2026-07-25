@@ -4,7 +4,7 @@ title: "Test-mode bypasses the on-screen geometry clamp so automation windows la
 type: feature
 component: Backend
 priority: medium
-status: Backlog
+status: Doing
 tags: ready
 created: 2026-07-25
 epic: CPE-616
