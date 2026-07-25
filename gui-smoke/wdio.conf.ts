@@ -116,27 +116,41 @@ export const config: WebdriverIO.Config = {
         // machine's own username, confirmed via the same process-inspection probe). So do NOT split
         // `--open` and its value into two array entries.
         args: [] as string[],
+        // CPE-1048: a Tauri maintainer reported (tauri discussion #10122) that adding an empty
+        // `webviewOptions: {}` here — with a recent tauri-driver — resolved a Windows "session not
+        // created" failure; it nudges the driver into proper WebView2 mode. Cheap, zero-risk,
+        // shipped alongside the WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS env var in gui-smoke.yml
+        // (the actual DevToolsActivePort fix) rather than instead of it.
+        webviewOptions: {},
       },
     } as WebdriverIO.Capabilities,
   ],
   logLevel: "info",
   framework: "mocha",
+  // CPE-1048: modest bump for a slow first WebView2 cold start in CI (no GPU / restricted session)
+  // — not a fix for a hard sandbox/GPU crash on its own, just headroom so a slow-but-successful
+  // session isn't misread as a failure.
+  connectionRetryTimeout: 180_000,
   reporters: ["spec"],
   mochaOpts: {
     ui: "bdd",
-    timeout: 60_000,
+    timeout: 90_000,
   },
 
-  // Seed the temp dir + marker file BEFORE any session starts, and wire the launch arg (capability
-  // `tauri:options.args`) so the app opens directly into it via `--open=<dir>` — the exact path
-  // CPE-1043 shipped and CPE-1044 fixed (see the single-token comment above for why it's one
-  // `--open=<dir>` token here rather than the two-token `--open <dir>` form a human would type).
+  // Seed the temp dir + marker file BEFORE any session starts, and wire the launch args (capability
+  // `tauri:options.args`) so the app opens off-screen and non-focused (CPE-1046/1047 — can't grab a
+  // CI display) directly into the seeded dir via `--open=<dir>` — the exact path CPE-1043 shipped and
+  // CPE-1044 fixed (see the single-token comment above for why it's one `--open=<dir>` token here
+  // rather than the two-token `--open <dir>` form a human would type). Negative geometry MUST use the
+  // `=` form too — `--x -4000` fails clap parsing, `--x=-4000` doesn't. Only real app flags
+  // (clap-parsed) go here — Chromium browser flags belong in the WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS
+  // env var (gui-smoke.yml), never in this array.
   onPrepare: (_config, capabilities) => {
     const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "cpe-gui-smoke-"));
     fs.writeFileSync(path.join(tmpDir, MARKER_NAME), "CPE-1045 smoke marker\n", "utf-8");
 
     const caps = capabilities as unknown as Array<{ "tauri:options": { args: string[] } }>;
-    caps[0]["tauri:options"].args = [`--open=${tmpDir}`];
+    caps[0]["tauri:options"].args = ["--test-mode", "--x=-4000", `--open=${tmpDir}`];
 
     fs.writeFileSync(STATE_FILE, JSON.stringify({ tmpDir }), "utf-8");
   },

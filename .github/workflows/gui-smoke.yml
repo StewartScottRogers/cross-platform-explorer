@@ -18,6 +18,16 @@ jobs:
   gui-smoke:
     name: GUI smoke (windows-latest) — tauri-driver + WebdriverIO
     runs-on: windows-latest
+    # CPE-1048: on stock windows-latest the WebView2 browser process crashes at startup (no GPU,
+    # restricted CI session) before it can write the DevToolsActivePort file, so WebDriver session
+    # creation fails with "session not created: DevToolsActivePort file doesn't exist" — the harness
+    # runs green on a real desktop, only CI needs this. WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS is read
+    # by the WebView2 Runtime itself and merged into the *browser* process command line, so setting it
+    # here at job level flows down the whole chain: wdio -> tauri-driver -> msedgedriver -> the app ->
+    # WebView2. This is the correct channel for Chromium flags — do NOT put them in wdio.conf.ts's
+    # `tauri:options.args`, which lands on the app exe's clap-parsed argv and would reject them.
+    env:
+      WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS: "--disable-gpu --no-sandbox --disable-dev-shm-usage"
     steps:
       - uses: actions/checkout@v4
 

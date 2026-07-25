@@ -50,15 +50,11 @@ Self-contained: its own `package.json`/lockfile/`tsconfig.json`. Nothing here to
 
 ## Running this locally — read before you `npm test`
 
-**This launches a real, visible, focus-stealing window.** There is currently no way to run it
-headless-and-invisible on a real desktop session: an off-screen `--x`/`--y` launch position was
-tried and doesn't work — this app's own CPE-600 window-geometry code deliberately clamps the window
-fully onto the monitor ("off-screen protection... never ungrabbable", see
-`crates/server/src/geometry.rs::resolve()`), so an off-screen position is silently pulled back
-on-screen. A real fix (a non-activating / off-screen / `--test-mode` launch) is tracked as a
-follow-up on the app side (CPE-1046). **Until that lands, only run this suite on a machine nobody
-is actively using** — CI (`windows-latest`, no interactive user) is the intended place, not your
-own foreground desktop.
+**This launches a real window**, though as of CPE-1046/1047 the harness now launches it with
+`--test-mode --x=-4000` (alongside `--open=<dir>`) — off-screen and non-focused, so it can't grab
+your display or steal focus. It is still **shown** (not `visible(false)`), so WebView2 initializes
+fully; it just shouldn't disrupt an interactive desktop the way an on-screen focus-stealing window
+would. CI (`windows-latest`, no interactive user) remains the intended place to run this.
 
 ```
 cd gui-smoke
@@ -69,11 +65,12 @@ npm test
 `npm test` runs `wdio run ./wdio.conf.ts`, which:
 - verifies the release binary exists (see above) and errors with setup instructions if not;
 - creates a temp dir seeded with `CPE-1045-marker.txt`;
-- spawns `tauri-driver`, launches the app with `--open=<tmpdir>` via the
+- spawns `tauri-driver`, launches the app with `--test-mode --x=-4000 --open=<tmpdir>` via the
   `'tauri:options': { application, args }` capability (note: **one** `--open=<dir>` token, not the
   two-token `--open <dir>` a human would type at a shell — see the comment in `wdio.conf.ts` for why:
   msedgedriver's own arg handling silently drops a bare positional token that isn't shaped like a
-  `--switch`);
+  `--switch`; negative geometry has the same trap — `--x -4000` fails clap parsing, `--x=-4000` is
+  required);
 - forces classic WebDriver (`wdio:enforceWebDriverClassic`) rather than the BiDi protocol
   WebdriverIO v9 auto-negotiates — BiDi's `browsingContext` model didn't reliably attach to wry's
   embedded WebView2 control in testing (queries kept returning the driver's own empty
@@ -89,13 +86,34 @@ the frontend, does a `tauri build -- --no-bundle`, installs `msedgedriver` + `ta
 runs this suite — so a regression in launch-or-navigate reds the pipeline instead of needing a
 human to notice.
 
+### CPE-1048 — `DevToolsActivePort file doesn't exist` on `windows-latest`
+
+The harness ran green on a real desktop but red in CI with
+`WebDriverError: session not created: DevToolsActivePort file doesn't exist`. Root cause: the
+WebView2 **browser process** itself crashes at startup on the stock runner (no GPU, restricted CI
+session) before it can write the `DevToolsActivePort` file msedgedriver waits on — a version/timeout
+issue it is not.
+
+Fix, in the correct channel:
+- `gui-smoke.yml` sets a **job-level env var**,
+  `WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS: "--disable-gpu --no-sandbox --disable-dev-shm-usage"`. The
+  WebView2 Runtime itself reads this env var and merges the flags into the *browser* process command
+  line, and it's inherited straight down the chain: wdio → tauri-driver → msedgedriver → the app →
+  WebView2.
+- `wdio.conf.ts` also adds `webviewOptions: {}` to the `tauri:options` capability (a reported fix for
+  a Windows "session not created" — tauri-apps/tauri discussion #10122) and raises
+  `connectionRetryTimeout` / the mocha timeout modestly, for a slow first WebView2 cold start.
+
+**Two distinct arg channels — do not conflate them:** `tauri:options.args` lands on the app exe's
+own **clap-parsed argv** (that's how `--test-mode`/`--x=-4000`/`--open=<dir>` work). Chromium browser
+flags like `--no-sandbox`/`--disable-gpu` must **never** go there — clap would reject them and the
+app would exit, which is worse. They only belong in the `WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS` env
+var. Relatedly, never add `--user-data-dir` to that env var either — msedgedriver owns the
+user-data-dir it watches for `DevToolsActivePort`, and overriding it makes WebView2 write the file
+somewhere the driver isn't looking, reproducing the same failure.
+
 ## Follow-ups (not this ticket — see CPE-1045's "Follow-ups" section)
 
-- **CPE-1046 — non-disruptive local launch**: a `--test-mode` (or similar) app flag that launches
-  the main window non-activating/off-screen/invisible, so this suite can run on someone's
-  interactive desktop without stealing focus. Until it ships, this harness should only be run on a
-  machine nobody is actively using (see "Running this locally" above); once it lands, add
-  `--test-mode` to this harness's `tauri:options.args` alongside `--open=<dir>`.
 - **Linux CI leg**: add an `ubuntu-latest` matrix arm using `webkit2gtk-driver` + `xvfb-run` (no
   app code change needed).
 - **macOS**: stays attended — `tauri-driver` has no WKWebView WebDriver support.
