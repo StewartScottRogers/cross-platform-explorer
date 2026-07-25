@@ -38,9 +38,16 @@ headless slices, and genuinely useful for a cross-platform explorer.
    topmost cascade-empty dirs. Done + reviewed. PR #326.
 4. **CPE-1006** ✅ — **Orphaned-sidecar** detector (`cpe-server::orphan_sidecars`): `find_orphans(entries,
    rules)` → sidecars whose primary is gone. Done + reviewed. PR #327.
-5. **CPE-1007+** — remaining pure detectors from the research sweep: dangling-symlink scanner (walks a tree
-   checking link targets), near-identical-folder detector (Jaccard over file-hash sets). *Headless.*
-6. **UI** — columns / warning badges / cleanup-review surfaces for the above. **GUI/attended.**
+5. **CPE-1007** ✅ — **Near-identical-folder** detection (`cpe-server::folder_similarity`): `jaccard` +
+   `cluster_similar_folders(folders, threshold)` (union-find over file-hash-set overlap). Done + reviewed. PR #329.
+6. **CPE-1008** ✅ — **Dangling / cyclic symlink** classifier (`cpe-server::dangling_links`):
+   `scan_dangling(links)` → Missing / Cyclic (bounded cycle-walk, Cyclic precedence). Done + reviewed. PR #330.
+7. **UI** — columns / warning badges / cleanup-review surfaces for the above. **GUI/attended.**
+
+**Status (2026-07-24):** all six pure detectors from the research sweep are **done + independently reviewed**
+(the QA gate caught + fixed 2 real bugs en route: CPE-1003 NUL-as-UTF-8, CPE-1001-style edge in the sibling
+epic). The research shortlist is **exhausted** — further detectors would need another research pass. What
+remains is the **attended UI** (columns/badges/cleanup views) that surfaces these engines.
 
 ## Definition of Done
 - Each detector is a pure, cargo/vitest-tested `cpe-server`/`src/lib` function with no new deps and no cost
