@@ -29,16 +29,18 @@ whose media was deleted, symlinks pointing nowhere). All are pure algorithms ove
 headless slices, and genuinely useful for a cross-platform explorer.
 
 ## Child tickets
-1. **CPE-1003** — Text **encoding + line-ending** detector (`cpe-server::text_encoding`): `detect_encoding(bytes)
-   -> EncodingGuess` (BOM sniff + UTF-8 validity + heuristic) and `detect_line_endings(text) ->
-   LineEndingReport`. Pure byte-scan, no deps. *Headless — buildable now.*
-2. **CPE-1004** — Archive **expansion-ratio / zip-bomb** score (extend `cpe-server::archive`): read the
-   `zip` crate's already-available `compressed_size`, then `expansion_ratio(entries) -> RatioReport`
-   flagging dangerous ratios. Pure over listed entry metadata (no extraction), no new deps.
-   *Headless — buildable now.*
-3. **CPE-1005+** — further pure detectors from the research sweep: empty-folder cascade finder, orphaned-
-   sidecar detector, dangling-symlink scanner. Each a small pure core. *Headless.*
-4. **UI** — columns / warning badges / cleanup-review surfaces for the above. **GUI/attended.**
+1. **CPE-1003** ✅ — Text **encoding + line-ending** detector (`cpe-server::text_encoding`). Done +
+   independently reviewed (QA gate caught + fixed a NUL/BOM-less-UTF-16 misclassification, re-reviewed).
+   PR #325.
+2. **CPE-1004** ✅ — Archive **expansion-ratio / zip-bomb** score (`cpe-server::archive_safety`): pure
+   per-entry `expansion_ratio(entries, limits) -> RatioReport`, divide-by-zero-safe. Done + reviewed. PR #324.
+3. **CPE-1005** ✅ — **Empty-folder** cascade finder (`cpe-server::empty_dirs`): `cascade_empty(tree)` →
+   topmost cascade-empty dirs. Done + reviewed. PR #326.
+4. **CPE-1006** ✅ — **Orphaned-sidecar** detector (`cpe-server::orphan_sidecars`): `find_orphans(entries,
+   rules)` → sidecars whose primary is gone. Done + reviewed. PR #327.
+5. **CPE-1007+** — remaining pure detectors from the research sweep: dangling-symlink scanner (walks a tree
+   checking link targets), near-identical-folder detector (Jaccard over file-hash sets). *Headless.*
+6. **UI** — columns / warning badges / cleanup-review surfaces for the above. **GUI/attended.**
 
 ## Definition of Done
 - Each detector is a pure, cargo/vitest-tested `cpe-server`/`src/lib` function with no new deps and no cost
