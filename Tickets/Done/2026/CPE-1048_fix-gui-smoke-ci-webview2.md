@@ -4,7 +4,7 @@ title: "Fix gui-smoke CI: WebView2 'session not created / DevToolsActivePort' on
 type: bug
 component: CI
 priority: high
-status: Doing
+status: Done
 tags: ready
 created: 2026-07-25
 epic: CPE-616
@@ -38,3 +38,11 @@ with a clear note, and/or (b) note a self-hosted/attended path — rather than l
 
 ## Work Log
 2026-07-25 — Filed after the gui-smoke job failed on main (DevToolsActivePort). Core pipeline unaffected.
+
+2026-07-25 (attended) — **DONE, merged PR #366.** Applied the researched A–D fixes (Chromium flags via
+WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS env, webviewOptions:{}, off-screen --test-mode --x=-4000 launch,
+longer timeouts) — but the WebView2 DevToolsActivePort crash persisted on stock windows-latest across a CI
+run, so took the pre-agreed **Option E: continue-on-error** (job still runs as a diagnostic + is green on a
+real desktop, but no longer reds main). main pipeline is green again. Burndown #1/#2 remain 🔧 (not ✅) —
+a self-hosted/interactive-session Windows runner is the path to a blocking gate. Research +
+tradeoff options filed in the Library (gui-smoke-devtoolsactiveport-webview2-ci).
