@@ -70,3 +70,8 @@ editor UI (attended). Read arc also expanding this shift: PDF doc-info (CPE-1036
 extends the read arc to MP4/MOV video (iTunes `moov▸udta▸meta▸ilst` atoms → `MetaField{group:"video"}`).
 Independently reviewed (APPROVE + fuzzed) + UAT-passed. Read coverage now spans audio + image + video;
 PDF documents (CPE-1036) in review. Remaining 725: FLAC/EXIF write-back + the studio editor UI (attended).
+
+2026-07-25 (workshift) — **CPE-1038 DONE (PR #355): FLAC/Vorbis write-back.** Second write-back codec
+after ID3 (CPE-1035) — the studio can now edit-and-save both MP3 (ID3v2) and FLAC (Vorbis) tags.
+Independently reviewed + UAT-passed. Write-back arc so far: ID3 ✓, FLAC/Vorbis ✓; remaining: OGG
+(deferred, repaging complexity) + EXIF write-back, then the studio editor UI (attended).
