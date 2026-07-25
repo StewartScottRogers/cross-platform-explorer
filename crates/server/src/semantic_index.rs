@@ -447,4 +447,26 @@ mod tests {
         let got = SemanticIndex::from_bytes(&b, Box::new(FakeEmbedder::new(1024)));
         assert!(matches!(got, Err(SemanticIndexError::Io(_))));
     }
+
+    /// CPE-1016 regression, exercised via the delegating path: a well-formed `SemanticIndex` header (zero
+    /// docs) followed by a crafted inner `VectorIndex` region with huge `dim`/`count` must return a clean
+    /// `Err`, never panic — `SemanticIndex::from_bytes` hands the remainder straight to
+    /// `VectorIndex::from_bytes`, so it inherits that fix.
+    #[test]
+    fn from_bytes_rejects_huge_inner_vector_index_counts_without_panicking() {
+        let mut b = Vec::new();
+        b.extend_from_slice(SEM_MAGIC);
+        b.extend_from_slice(&SEM_FORMAT_VERSION.to_le_bytes());
+        b.extend_from_slice(&4u32.to_le_bytes()); // max_words
+        b.extend_from_slice(&1u32.to_le_bytes()); // overlap
+        b.extend_from_slice(&0u32.to_le_bytes()); // 0 docs
+        // Crafted inner VectorIndex region: valid magic/version (mirrors vector_index::MAGIC/
+        // FORMAT_VERSION, private to that module), then huge dim + count, no body.
+        b.extend_from_slice(b"CPEVEC\x00\x00");
+        b.extend_from_slice(&1u32.to_le_bytes()); // VectorIndex FORMAT_VERSION
+        b.extend_from_slice(&u32::MAX.to_le_bytes()); // dim
+        b.extend_from_slice(&u32::MAX.to_le_bytes()); // count
+        let got = SemanticIndex::from_bytes(&b, Box::new(FakeEmbedder::new(1024)));
+        assert!(matches!(got, Err(SemanticIndexError::Io(_))));
+    }
 }
