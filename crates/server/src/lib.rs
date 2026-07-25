@@ -338,3 +338,11 @@ pub mod empty_dirs;
 /// with high file overlap). Pure over caller-supplied (path, hash-set) pairs; no I/O, no new
 /// dependencies.
 pub mod folder_similarity;
+
+/// Pure broken/dangling + cyclic symlink classifier (CPE-1008, epic CPE-1002). Given a
+/// caller-supplied list of symlink records (path, resolved target, target-existence), classifies
+/// each as healthy, `Missing` (target doesn't exist), or `Cyclic` (the target chain loops back on
+/// itself, incl. a self-loop). No real filesystem symlinks are created or read here — that's the
+/// adapter's job; this module only classifies caller-supplied records. Pure std, no I/O, no new
+/// dependencies.
+pub mod dangling_links;
