@@ -203,6 +203,11 @@ pub mod listing;
 /// Link forge — create symbolic + hard links (CPE-802).
 pub mod links;
 
+/// Same-volume detection (CPE-1026, epic CPE-661): decide whether two paths live on the same
+/// volume — the foundation for copy-vs-move on drag-drop. Pure `std` (device-id compare on Unix,
+/// drive/UNC-prefix compare on Windows); no new dependencies.
+pub mod volume;
+
 /// Network-share address parser (pure model): normalizes a user-typed `smb://`/`nfs://`/`ftp://`/
 /// `sftp://` URL or Windows UNC path into a `{protocol,host,share,path}` struct, so the future
 /// "connect to server" dialog and the mount glue share one tested understanding of an address

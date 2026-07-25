@@ -34,3 +34,12 @@ drag-drop can follow the OS convention (same volume → move, different volume �
 ## Notes
 Do NOT touch `crates/server/src/links.rs` (a sibling worker is editing it). Only `volume.rs` + the one
 `lib.rs` module line + this ticket's Work Log.
+
+## Work Log
+- 2026-07-25: Implemented `crates/server/src/volume.rs` (`same_volume(a, b) -> bool`): Unix arm compares
+  `MetadataExt::dev()` via `metadata()`, missing-path → `false`; Windows arm compares each path's
+  `Component::Prefix` case-insensitively (drive letter / UNC share), no filesystem access, no new deps.
+  Declared `pub mod volume;` in `crates/server/src/lib.rs`. 4 unit tests (Windows cfg branch: same-drive
+  case-insensitive, cross-drive false, UNC-share prefix compare, no-prefix/relative path never confirmed
+  same-volume) all pass; `cargo clippy --all-targets` and `--all-targets --all-features` both clean
+  (`-D warnings`). PR opened against `main`.
