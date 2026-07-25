@@ -377,6 +377,369 @@ pub fn read_exif(bytes: &[u8]) -> Vec<MetaField> {
     fields
 }
 
+// ---- PDF /Info (CPE-1036) ----
+
+/// Standard PDF document-info dictionary keys mapped to friendly names, in the order we emit them.
+const PDF_INFO_KEYS: &[(&str, &str)] = &[
+    ("/Title", "Title"),
+    ("/Author", "Author"),
+    ("/Subject", "Subject"),
+    ("/Keywords", "Keywords"),
+    ("/Creator", "Creator"),
+    ("/Producer", "Producer"),
+    ("/CreationDate", "Date Created"),
+    ("/ModDate", "Date Modified"),
+];
+
+/// Parse a PDF's standard document `/Info` dictionary — Title, Author, Subject, Keywords, Creator,
+/// Producer, CreationDate, ModDate — into read-only [`MetaField`]s in group `"pdf"`.
+///
+/// This is a pragmatic, bounded scanner rather than a full PDF parser (matching the style of
+/// [`read_id3v2`]/[`read_exif`]): it requires a `%PDF-` header, then tries three strategies in order,
+/// each cheaper/more permissive than the last:
+/// 1. Find the **last** `/Info N G R` indirect reference (the active trailer wins over stale ones from
+///    incremental updates), locate `N G obj … endobj`, and extract its `<< … >>` dictionary.
+/// 2. Fall back to an inline `/Info << … >>` dictionary (no indirect object involved).
+/// 3. As a last resort, scan a bounded window of the raw bytes for the known keys directly — this
+///    tolerates compressed/object-stream PDFs where the dictionary can't be located structurally,
+///    though it may miss (never fabricate) fields in that case.
+///
+/// Every scan is bounds-checked and windowed (object bodies and the last-resort scan are capped), so a
+/// lying/huge implied length can't over-read. Returns an empty vec — never a panic — for non-PDF bytes,
+/// truncated/garbage input, or a PDF with no resolvable `/Info`.
+pub fn read_pdf(bytes: &[u8]) -> Vec<MetaField> {
+    if !has_pdf_header(bytes) {
+        return Vec::new();
+    }
+    if let Some((num, gen)) = find_last_info_ref(bytes) {
+        if let Some(dict) = resolve_indirect_dict(bytes, num, gen) {
+            let fields = extract_pdf_fields(dict);
+            if !fields.is_empty() {
+                return fields;
+            }
+        }
+    }
+    if let Some(dict) = find_inline_info_dict(bytes) {
+        let fields = extract_pdf_fields(dict);
+        if !fields.is_empty() {
+            return fields;
+        }
+    }
+    // Last resort: scan a bounded window of the raw bytes for the known keys anywhere.
+    let cap = bytes.len().min(1_048_576);
+    extract_pdf_fields(&bytes[..cap])
+}
+
+/// Whether `bytes` opens with the PDF magic `%PDF-`, allowing a little leading junk (BOM/whitespace) by
+/// scanning only the first KiB rather than requiring it at byte 0.
+fn has_pdf_header(bytes: &[u8]) -> bool {
+    let window = &bytes[..bytes.len().min(1024)];
+    find_subslice(window, b"%PDF-").is_some()
+}
+
+/// Scan for the **last** `/Info N G R` indirect reference in `bytes` (the active trailer, in a PDF with
+/// incremental updates, is the one closest to the end of the file). Returns the object number and
+/// generation, or `None` if no well-formed reference is found.
+fn find_last_info_ref(bytes: &[u8]) -> Option<(u32, u32)> {
+    const NEEDLE: &[u8] = b"/Info";
+    let mut pos = 0usize;
+    let mut found = None;
+    while pos < bytes.len() {
+        let Some(rel) = find_subslice(&bytes[pos..], NEEDLE) else { break };
+        let idx = pos + rel;
+        let after = idx + NEEDLE.len();
+        if let Some(pair) = parse_indirect_ref(bytes, after) {
+            found = Some(pair);
+        }
+        pos = after;
+    }
+    found
+}
+
+/// Parse `<ws>+<digits><ws>+<digits><ws>+R` starting at `start` (i.e. the bit after `/Info` in
+/// `/Info 5 0 R`), within a small bounded window so a pathological input can't force a long scan.
+fn parse_indirect_ref(bytes: &[u8], start: usize) -> Option<(u32, u32)> {
+    let limit = bytes.len().min(start + 64);
+    let i = skip_ws(bytes, start, limit);
+    let (num, i) = parse_uint(bytes, i, limit)?;
+    let i = skip_ws(bytes, i, limit);
+    let (gen, i) = parse_uint(bytes, i, limit)?;
+    let i = skip_ws(bytes, i, limit);
+    let is_r = bytes.get(i) == Some(&b'R') && !bytes.get(i + 1).is_some_and(|&c| c.is_ascii_alphanumeric());
+    if is_r {
+        Some((num, gen))
+    } else {
+        None
+    }
+}
+
+/// Skip PDF whitespace (space/tab/CR/LF) starting at `start`, never advancing past `limit`.
+fn skip_ws(bytes: &[u8], start: usize, limit: usize) -> usize {
+    let mut i = start;
+    while i < limit && bytes.get(i).is_some_and(|&b| b == b' ' || b == b'\t' || b == b'\r' || b == b'\n') {
+        i += 1;
+    }
+    i
+}
+
+/// Parse a run of ASCII digits (capped at 12, far more than any real object/generation number needs) as
+/// a `u32`. Returns `None` (rather than overflowing) if there are no digits or the value doesn't fit.
+fn parse_uint(bytes: &[u8], start: usize, limit: usize) -> Option<(u32, usize)> {
+    let mut i = start;
+    let cap = limit.min(start + 12);
+    while i < cap && bytes.get(i).is_some_and(|&b| b.is_ascii_digit()) {
+        i += 1;
+    }
+    if i == start {
+        return None;
+    }
+    let s = std::str::from_utf8(&bytes[start..i]).ok()?;
+    let n: u32 = s.parse().ok()?;
+    Some((n, i))
+}
+
+/// Resolve an indirect object `num gen obj … endobj` and return the bytes of its `<< … >>` dictionary.
+/// The search for the object body is windowed (64 KiB past the `obj` keyword) so a dangling/huge
+/// reference can't force an unbounded scan; returns `None` if the object or its dictionary isn't found
+/// within that window.
+fn resolve_indirect_dict(bytes: &[u8], num: u32, gen: u32) -> Option<&[u8]> {
+    let pattern = format!("{num} {gen} obj");
+    let obj_start = find_subslice(bytes, pattern.as_bytes())?;
+    let body_start = obj_start + pattern.len();
+    let window_end = bytes.len().min(body_start + 65536);
+    let body = bytes.get(body_start..window_end)?;
+    let endobj_rel = find_subslice(body, b"endobj")?;
+    let obj_body = &body[..endobj_rel];
+    let (ds, de) = find_balanced_dict(obj_body)?;
+    obj_body.get(ds..de)
+}
+
+/// Fallback for an `/Info` value written as an inline dictionary (`/Info << … >>`) rather than an
+/// indirect reference. Finds the last such occurrence and returns its dictionary body, windowed the
+/// same way as [`resolve_indirect_dict`].
+fn find_inline_info_dict(bytes: &[u8]) -> Option<&[u8]> {
+    const NEEDLE: &[u8] = b"/Info";
+    let mut pos = 0usize;
+    let mut result: Option<(usize, usize)> = None;
+    while pos < bytes.len() {
+        let Some(rel) = find_subslice(&bytes[pos..], NEEDLE) else { break };
+        let idx = pos + rel;
+        let after = idx + NEEDLE.len();
+        let ws_limit = bytes.len().min(after + 16);
+        let ws_end = skip_ws(bytes, after, ws_limit);
+        if bytes.get(ws_end) == Some(&b'<') && bytes.get(ws_end + 1) == Some(&b'<') {
+            let window_end = bytes.len().min(ws_end + 65536);
+            if let Some(slice) = bytes.get(ws_end..window_end) {
+                if let Some((ds, de)) = find_balanced_dict(slice) {
+                    result = Some((ws_end + ds, ws_end + de));
+                }
+            }
+        }
+        pos = after;
+    }
+    result.and_then(|(s, e)| bytes.get(s..e))
+}
+
+/// Find the first `<< … >>` dictionary in `bytes`, tracking nesting depth so an inner dictionary value
+/// doesn't prematurely close the outer one. Returns the byte range of the content strictly between the
+/// outermost `<<` and its matching `>>`.
+fn find_balanced_dict(bytes: &[u8]) -> Option<(usize, usize)> {
+    let start = find_subslice(bytes, b"<<")?;
+    let mut i = start + 2;
+    let mut depth = 1i32;
+    while i + 1 < bytes.len() {
+        if bytes[i] == b'<' && bytes[i + 1] == b'<' {
+            depth += 1;
+            i += 2;
+        } else if bytes[i] == b'>' && bytes[i + 1] == b'>' {
+            depth -= 1;
+            i += 2;
+            if depth == 0 {
+                return Some((start + 2, i - 2));
+            }
+        } else {
+            i += 1;
+        }
+    }
+    None
+}
+
+/// Extract the known `/Info` keys from a dictionary's raw bytes into [`MetaField`]s (group `"pdf"`,
+/// read-only). Each key's value must immediately be a literal `( … )` or hex `< … >` string (a nested
+/// dictionary or reference in that slot is skipped, not mis-parsed). Empty decoded values are dropped.
+fn extract_pdf_fields(dict: &[u8]) -> Vec<MetaField> {
+    let mut fields = Vec::new();
+    for &(pdf_key, friendly) in PDF_INFO_KEYS {
+        let Some(rel) = find_subslice(dict, pdf_key.as_bytes()) else { continue };
+        let after = rel + pdf_key.len();
+        let ws_limit = dict.len().min(after + 16);
+        let ws_end = skip_ws(dict, after, ws_limit);
+        let Some(&marker) = dict.get(ws_end) else { continue };
+        let raw = match marker {
+            b'(' => parse_literal_string(dict, ws_end),
+            b'<' if dict.get(ws_end + 1) != Some(&b'<') => parse_hex_string(dict, ws_end),
+            _ => None,
+        };
+        let Some((raw_bytes, _)) = raw else { continue };
+        let value = decode_pdf_string(&raw_bytes).trim().to_string();
+        if value.is_empty() {
+            continue;
+        }
+        fields.push(MetaField { group: "pdf".to_string(), key: friendly.to_string(), value, editable: false });
+    }
+    fields
+}
+
+/// Parse a PDF literal string `( … )` starting at `bytes[start] == '('`, honoring balanced nested
+/// parens and the escapes `\n \r \t \b \f \( \) \\` plus 1–3 digit octal (`\ddd`). An escape at the very
+/// end of the buffer (truncated input) stops the parse and returns `None` rather than panicking.
+/// Returns the decoded raw bytes and the index just past the closing `)`.
+fn parse_literal_string(bytes: &[u8], start: usize) -> Option<(Vec<u8>, usize)> {
+    if bytes.get(start) != Some(&b'(') {
+        return None;
+    }
+    let mut i = start + 1;
+    let mut depth = 1u32;
+    let mut out = Vec::new();
+    let limit = bytes.len();
+    while i < limit {
+        let b = bytes[i];
+        match b {
+            b'\\' => {
+                let &esc = bytes.get(i + 1)?;
+                match esc {
+                    b'n' => {
+                        out.push(b'\n');
+                        i += 2;
+                    }
+                    b'r' => {
+                        out.push(b'\r');
+                        i += 2;
+                    }
+                    b't' => {
+                        out.push(b'\t');
+                        i += 2;
+                    }
+                    b'b' => {
+                        out.push(0x08);
+                        i += 2;
+                    }
+                    b'f' => {
+                        out.push(0x0C);
+                        i += 2;
+                    }
+                    b'(' => {
+                        out.push(b'(');
+                        i += 2;
+                    }
+                    b')' => {
+                        out.push(b')');
+                        i += 2;
+                    }
+                    b'\\' => {
+                        out.push(b'\\');
+                        i += 2;
+                    }
+                    b'\r' => {
+                        // Line continuation \<CR> or \<CR><LF>: emit nothing.
+                        i += 2;
+                        if bytes.get(i) == Some(&b'\n') {
+                            i += 1;
+                        }
+                    }
+                    b'\n' => {
+                        // Line continuation \<LF>: emit nothing.
+                        i += 2;
+                    }
+                    b'0'..=b'7' => {
+                        let mut val: u32 = 0;
+                        let mut n = 0u32;
+                        let mut j = i + 1;
+                        while n < 3 && bytes.get(j).is_some_and(|c| (b'0'..=b'7').contains(c)) {
+                            val = val * 8 + (bytes[j] - b'0') as u32;
+                            j += 1;
+                            n += 1;
+                        }
+                        out.push((val & 0xFF) as u8);
+                        i = j;
+                    }
+                    other => {
+                        // Unrecognised escape: per spec, drop the backslash and keep the char.
+                        out.push(other);
+                        i += 2;
+                    }
+                }
+            }
+            b'(' => {
+                depth += 1;
+                out.push(b'(');
+                i += 1;
+            }
+            b')' => {
+                depth -= 1;
+                i += 1;
+                if depth == 0 {
+                    return Some((out, i));
+                }
+                out.push(b')');
+            }
+            _ => {
+                out.push(b);
+                i += 1;
+            }
+        }
+    }
+    None // unterminated (truncated input) — never over-read, just report nothing
+}
+
+/// Parse a PDF hex string `< … >` starting at `bytes[start] == '<'`. Whitespace between hex digits is
+/// ignored; a stray non-hex character is skipped rather than aborting the whole string. An odd trailing
+/// nibble is padded with a low `0` per the PDF spec. Returns the decoded bytes and the index just past
+/// the closing `>`.
+fn parse_hex_string(bytes: &[u8], start: usize) -> Option<(Vec<u8>, usize)> {
+    if bytes.get(start) != Some(&b'<') {
+        return None;
+    }
+    let mut i = start + 1;
+    let mut nibbles: Vec<u8> = Vec::new();
+    let limit = bytes.len();
+    while i < limit {
+        let b = bytes[i];
+        if b == b'>' {
+            i += 1;
+            let mut out = Vec::with_capacity(nibbles.len() / 2 + 1);
+            let mut k = 0;
+            while k + 1 < nibbles.len() {
+                out.push((nibbles[k] << 4) | nibbles[k + 1]);
+                k += 2;
+            }
+            if k < nibbles.len() {
+                out.push(nibbles[k] << 4); // odd trailing nibble, padded with 0
+            }
+            return Some((out, i));
+        }
+        if b.is_ascii_hexdigit() {
+            nibbles.push((b as char).to_digit(16).unwrap_or(0) as u8);
+        }
+        // Whitespace and any other stray character inside the string are simply skipped.
+        i += 1;
+    }
+    None // unterminated (truncated input)
+}
+
+/// Decode a PDF string's raw bytes to a `String`: a `FE FF` BOM means UTF-16BE, `FF FE` means UTF-16LE
+/// (the latter isn't standard PDFDocEncoding but some writers emit it; tolerate it), and otherwise the
+/// bytes are treated as PDFDocEncoding, approximated here as Latin-1 (each byte is its own codepoint) —
+/// lossy but adequate for the common ASCII+Latin-1-range case, and it's what the acceptance criteria's
+/// octal-escape (`\251` → `©`) needs (reuses [`decode_utf16`], already shared with the ID3 codec).
+fn decode_pdf_string(raw: &[u8]) -> String {
+    match raw {
+        [0xFE, 0xFF, rest @ ..] => decode_utf16(rest, false),
+        [0xFF, 0xFE, rest @ ..] => decode_utf16(rest, true),
+        _ => raw.iter().map(|&b| b as char).collect(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -903,5 +1266,158 @@ mod tests {
         }
         // A cut that keeps only the TIFF header (no IFD body at all) yields nothing.
         assert!(read_exif(&bytes[..8]).is_empty());
+    }
+
+    // ---- PDF /Info fixture builders (CPE-1036) ----
+
+    /// Hex-encode `bytes` as a PDF hex string `<...>` (uppercase, matching how most writers emit it —
+    /// though the reader is case-insensitive).
+    fn hex_string(bytes: &[u8]) -> Vec<u8> {
+        let mut out = vec![b'<'];
+        for b in bytes {
+            out.extend_from_slice(format!("{b:02X}").as_bytes());
+        }
+        out.push(b'>');
+        out
+    }
+
+    /// UTF-16BE-encode `s` with a leading `FE FF` byte-order mark, as a PDF text string would carry it.
+    fn utf16be_with_bom(s: &str) -> Vec<u8> {
+        let mut out = vec![0xFEu8, 0xFF];
+        for u in s.encode_utf16() {
+            out.extend_from_slice(&u.to_be_bytes());
+        }
+        out
+    }
+
+    /// Build an `/Info` dictionary body (`<< /Key value /Key value ... >>`) from key/raw-value pairs;
+    /// each value is already a fully-formed literal `(...)` or hex `<...>` string (built by the caller).
+    fn build_info_dict(entries: &[(&str, Vec<u8>)]) -> Vec<u8> {
+        let mut d = Vec::new();
+        d.extend_from_slice(b"<< ");
+        for (key, val) in entries {
+            d.extend_from_slice(key.as_bytes());
+            d.push(b' ');
+            d.extend_from_slice(val);
+            d.push(b' ');
+        }
+        d.extend_from_slice(b">>");
+        d
+    }
+
+    /// Wrap an `/Info` dictionary as indirect object `5 0 obj`, referenced from the trailer as
+    /// `/Info 5 0 R` — the common real-world shape.
+    fn build_pdf_with_indirect_info(dict: &[u8]) -> Vec<u8> {
+        let mut pdf = Vec::new();
+        pdf.extend_from_slice(b"%PDF-1.4\n");
+        pdf.extend_from_slice(b"5 0 obj\n");
+        pdf.extend_from_slice(dict);
+        pdf.extend_from_slice(b"\nendobj\n");
+        pdf.extend_from_slice(b"trailer\n<< /Size 6 /Root 1 0 R /Info 5 0 R >>\n%%EOF");
+        pdf
+    }
+
+    #[test]
+    fn read_pdf_decodes_indirect_info_dict_all_key_forms() {
+        let dict = build_info_dict(&[
+            ("/Title", b"(Vacation Photos \\) Album \\251)".to_vec()), // escaped ')' + octal \251 (c)
+            ("/Author", hex_string(b"Jane Doe")),                       // hex string
+            ("/Subject", b"(Family Vacation)".to_vec()),                // plain literal
+            ("/Keywords", b"(travel,summer)".to_vec()),
+            ("/Creator", b"(Acme Editor)".to_vec()),
+            ("/Producer", b"(Acme PDF Writer)".to_vec()),
+            ("/CreationDate", b"(D:20240101120000)".to_vec()),
+            ("/ModDate", hex_string(b"D:20240102000000")),
+        ]);
+        let pdf = build_pdf_with_indirect_info(&dict);
+        let f = read_pdf(&pdf);
+
+        assert_eq!(get(&f, "Title"), Some("Vacation Photos ) Album \u{A9}"));
+        assert_eq!(get(&f, "Author"), Some("Jane Doe"));
+        assert_eq!(get(&f, "Subject"), Some("Family Vacation"));
+        assert_eq!(get(&f, "Keywords"), Some("travel,summer"));
+        assert_eq!(get(&f, "Creator"), Some("Acme Editor"));
+        assert_eq!(get(&f, "Producer"), Some("Acme PDF Writer"));
+        assert_eq!(get(&f, "Date Created"), Some("D:20240101120000"));
+        assert_eq!(get(&f, "Date Modified"), Some("D:20240102000000"));
+        assert_eq!(f.len(), 8);
+        assert!(f.iter().all(|x| x.group == "pdf" && !x.editable));
+    }
+
+    #[test]
+    fn read_pdf_decodes_utf16_bom_and_odd_length_hex_string() {
+        // UTF-16BE with BOM.
+        let creator = hex_string(&utf16be_with_bom("Café"));
+        // Odd number of hex digits (5): "41","42","C" -> 0x41, 0x42, 0xC0 (trailing nibble padded).
+        let keywords = b"<4142C>".to_vec();
+        let dict = build_info_dict(&[("/Creator", creator), ("/Keywords", keywords)]);
+        let pdf = build_pdf_with_indirect_info(&dict);
+        let f = read_pdf(&pdf);
+
+        assert_eq!(get(&f, "Creator"), Some("Café"));
+        assert_eq!(get(&f, "Keywords"), Some("AB\u{C0}"));
+    }
+
+    #[test]
+    fn read_pdf_falls_back_to_inline_info_dict_when_no_indirect_object() {
+        let mut pdf = Vec::new();
+        pdf.extend_from_slice(b"%PDF-1.4\n");
+        pdf.extend_from_slice(
+            b"trailer\n<< /Root 1 0 R /Info << /Title (Inline Title) /Author (Inline Author) >> >>\n%%EOF",
+        );
+        let f = read_pdf(&pdf);
+        assert_eq!(get(&f, "Title"), Some("Inline Title"));
+        assert_eq!(get(&f, "Author"), Some("Inline Author"));
+    }
+
+    #[test]
+    fn read_pdf_skips_empty_string_values() {
+        let dict = build_info_dict(&[("/Title", b"()".to_vec()), ("/Author", b"(Someone)".to_vec())]);
+        let pdf = build_pdf_with_indirect_info(&dict);
+        let f = read_pdf(&pdf);
+        assert_eq!(get(&f, "Title"), None); // blank title not surfaced
+        assert_eq!(get(&f, "Author"), Some("Someone"));
+    }
+
+    #[test]
+    fn read_pdf_returns_empty_for_non_pdf_and_garbage_bytes() {
+        assert!(read_pdf(b"").is_empty());
+        assert!(read_pdf(b"just some random text, not a pdf at all").is_empty());
+        assert!(read_pdf(&[0u8; 32]).is_empty());
+        assert!(read_pdf(b"ID3\x03\0\0\0\0\0\0").is_empty()); // a real ID3 tag, but not a PDF
+    }
+
+    #[test]
+    fn read_pdf_returns_empty_when_no_info_present() {
+        let mut pdf = Vec::new();
+        pdf.extend_from_slice(b"%PDF-1.4\n");
+        pdf.extend_from_slice(b"1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n");
+        pdf.extend_from_slice(b"trailer\n<< /Size 2 /Root 1 0 R >>\n%%EOF");
+        assert!(read_pdf(&pdf).is_empty());
+    }
+
+    #[test]
+    fn read_pdf_returns_empty_for_dangling_info_reference() {
+        // /Info points at object 999, which is never defined anywhere in the file.
+        let mut pdf = Vec::new();
+        pdf.extend_from_slice(b"%PDF-1.4\n");
+        pdf.extend_from_slice(b"1 0 obj\n<< /Type /Catalog >>\nendobj\n");
+        pdf.extend_from_slice(b"trailer\n<< /Size 2 /Root 1 0 R /Info 999 0 R >>\n%%EOF");
+        assert!(read_pdf(&pdf).is_empty());
+    }
+
+    #[test]
+    fn read_pdf_tolerates_truncation_without_panicking() {
+        let dict = build_info_dict(&[
+            ("/Title", b"(Full Title \\251)".to_vec()),
+            ("/Author", hex_string(b"Someone")),
+        ]);
+        let pdf = build_pdf_with_indirect_info(&dict);
+        for cut in 0..pdf.len() {
+            let _ = read_pdf(&pdf[..cut]); // must never panic on any truncation
+        }
+        // The untruncated document still yields the title.
+        let f = read_pdf(&pdf);
+        assert_eq!(get(&f, "Title"), Some("Full Title \u{A9}"));
     }
 }
