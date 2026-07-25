@@ -194,6 +194,10 @@ pub mod content_search;
 /// reordering, built on action_macro (CPE-951, epic CPE-739). Pure model, JSON round-trips.
 pub mod macro_library;
 
+/// Action-macro persistence store — a `macros.json` catalog (name → `ActionMacro`) in the app
+/// config dir, mirroring the `folder_template` store pattern (CPE-1033, epic CPE-739).
+pub mod macro_store;
+
 /// Shared filesystem model types (DirEntry / EntryInfo / Place / OpResult) + extension/hidden helpers.
 pub mod model;
 
