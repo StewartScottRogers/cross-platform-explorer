@@ -9,10 +9,11 @@
 //! the column (so it sorts last). Pure: no filesystem, the adapter reads the bytes.
 
 use crate::doc_column::doc_pages_cell;
+use crate::doc_info_column::{doc_info_cell, DocInfoColumn};
 use crate::image_column::image_dimensions_cell;
 use crate::media_column::{audio_cell, AudioColumn};
 use crate::media_meta_edit::MetaField;
-use crate::media_meta_read::{read_flac, read_id3v2, read_ogg};
+use crate::media_meta_read::{read_flac, read_id3v2, read_ogg, read_pdf};
 use crate::metadata_column::CellValue;
 use crate::video_column::video_cell;
 
@@ -25,6 +26,9 @@ pub enum MetaColumn {
     ImageDimensions,
     /// A document's page count (PDF, v1), sorted numerically.
     DocPages,
+    /// A typed document-info column (Title/Author/Subject/…), read from a PDF's `/Info` dictionary
+    /// (CPE-1039).
+    DocInfo(DocInfoColumn),
     /// The video's duration in seconds, read from the ISO-BMFF `moov/mvhd` box (CPE-1028).
     VideoDuration,
 }
@@ -75,6 +79,13 @@ pub fn extract_column(ext: &str, bytes: &[u8], col: MetaColumn) -> CellValue {
         MetaColumn::DocPages => {
             if is_doc_ext(ext) {
                 doc_pages_cell(bytes)
+            } else {
+                CellValue::Empty
+            }
+        }
+        MetaColumn::DocInfo(col) => {
+            if is_doc_ext(ext) {
+                doc_info_cell(&read_pdf(bytes), col)
             } else {
                 CellValue::Empty
             }
@@ -234,6 +245,31 @@ mod tests {
         assert_eq!(extract_column("pdf", &pdf(2), MetaColumn::DocPages), CellValue::Int(2));
         // A non-doc extension is not even attempted → Empty (even if bytes happened to be a PDF).
         assert_eq!(extract_column("txt", &pdf(2), MetaColumn::DocPages), CellValue::Empty);
+    }
+
+    /// A minimal synthetic PDF carrying an inline `/Info << … >>` dictionary (the `pdf()` helper above
+    /// has no `/Info` at all, so DocInfo routing needs its own fixture).
+    fn pdf_with_info(title: &str) -> Vec<u8> {
+        let mut out = Vec::new();
+        out.extend_from_slice(b"%PDF-1.4\n");
+        out.extend_from_slice(format!("/Info << /Title ({title}) >>\n").as_bytes());
+        out.extend_from_slice(b"%%EOF");
+        out
+    }
+
+    #[test]
+    fn doc_info_route_and_gate_by_extension() {
+        assert_eq!(
+            extract_column("pdf", &pdf_with_info("Vacation Photos"), MetaColumn::DocInfo(DocInfoColumn::Title)),
+            CellValue::Text("Vacation Photos".into())
+        );
+        // A non-doc extension is not even attempted → Empty (even if bytes happened to be a PDF).
+        assert_eq!(
+            extract_column("txt", &pdf_with_info("Vacation Photos"), MetaColumn::DocInfo(DocInfoColumn::Title)),
+            CellValue::Empty
+        );
+        // A PDF with no /Info at all → Empty.
+        assert_eq!(extract_column("pdf", &pdf(1), MetaColumn::DocInfo(DocInfoColumn::Title)), CellValue::Empty);
     }
 
     #[test]

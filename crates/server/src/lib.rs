@@ -286,6 +286,11 @@ pub mod video_column;
 /// (CPE-1037, epic CPE-725). Pure, std-only, never panics on malformed/truncated input.
 pub mod video_meta_read;
 
+/// Document-info column extractor — map a PDF's read `/Info` [`media_meta_edit::MetaField`]s to typed
+/// [`metadata_column::CellValue`]s so Title/Author/… columns surface for PDFs (CPE-1039, epic CPE-707).
+/// Pure.
+pub mod doc_info_column;
+
 /// Metadata-column dispatcher — route a file's bytes + extension + a [`column_extract::MetaColumn`] to the
 /// right per-family extractor (audio codecs / image header), the one entry point the column system calls
 /// (CPE-975, epic CPE-707). Pure.
