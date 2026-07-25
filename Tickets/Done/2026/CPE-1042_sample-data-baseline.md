@@ -4,7 +4,7 @@ title: Pristine sample-data baseline + sandbox-copy helper
 type: test
 component: Multiple
 priority: medium
-status: Doing
+status: Done
 tags: ready
 created: 2026-07-25
 estimate: 2-3h
@@ -36,3 +36,9 @@ destructive test (like editing tags and saving).
 ## Work Log
 2026-07-25 — Filed at the user's request: keep a pristine known-baseline sample set, copied into a testing
 dir when modification is needed. Independent of the Metadata Studio branch (PR #358).
+
+2026-07-25 (attended) — **DONE, merged PR #359.** samples/ (12 synthetic known-metadata files) +
+scripts/gen_samples.py (deterministic) + README (baseline + pristine rule) + scripts/new-sample-sandbox.*
+(copy into git-ignored .sandbox/) + .gitattributes (samples/** binary, byte-exact) +
+crates/server/tests/sample_fixtures.rs (7 tests reading each sample via the shipped codecs).
+Independently reviewed (APPROVE — reproducibility + -text attribute verified directly).
