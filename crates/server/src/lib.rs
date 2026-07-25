@@ -203,6 +203,10 @@ pub mod listing;
 /// Link forge — create symbolic + hard links (CPE-802).
 pub mod links;
 
+/// Select-by-pattern engine — glob/extension/kind selection queries over a listing, plus `Invert`
+/// (CPE-1025, epic CPE-711). Pure: no filesystem access.
+pub mod selection;
+
 /// Shell context-menu model — registered verbs + which apply to a given selection, the pure core behind
 /// "CPE as a shell citizen" (CPE-945, epic CPE-712). Per-OS shell registration is separate glue.
 pub mod shell_menu;
