@@ -263,6 +263,12 @@ pub mod media_meta_edit;
 /// codec: ID3v2 audio tags (CPE-970, epic CPE-725; also feeds CPE-707 columns). Pure, std-only.
 pub mod media_meta_read;
 
+/// Media-metadata **write** codec — the counterpart to [`media_meta_read::read_id3v2`]. Builds a valid
+/// ID3v2.4 tag from the `"id3"`-group [`media_meta_edit::MetaField`]s and prepends it to a file's audio
+/// payload, replacing any pre-existing ID3v2 tag rather than stacking on top of it (CPE-1035, epic
+/// CPE-725). Pure, std-only.
+pub mod media_meta_write;
+
 /// Audio-metadata column extractor — map read ID3 [`media_meta_edit::MetaField`]s to typed
 /// [`metadata_column::CellValue`]s so Track/Year columns sort numerically (CPE-971, epic CPE-707). Pure.
 pub mod media_column;
