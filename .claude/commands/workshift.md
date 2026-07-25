@@ -7,8 +7,8 @@ An autonomous "work while you're away" mode. Triggered when the user says **"sta
 The user is away and **cannot answer questions** — make the best reasonable guess, log the assumption in the
 ticket work log, and keep moving until the work is **done** or the user **comes home**. **Never idle.** The
 assignment is whatever "this" refers to when the shift starts; if nothing specific, work the critical path
-(finish `Tickets/Doing/` → clear `Tickets/Backlog/` + pickable `Deferred/` → activate an epic → research +
-file new epics, then build them).
+(finish `Tickets/Doing/` → clear `Tickets/Backlog/` + pickable `Deferred/` → activate an epic → have the
+**Product Manager** task Researchers to find + pitch new epics, pick the highest-impact ones, then build them).
 
 **DO NOT STOP FOR APPROVAL OR STATUS UPDATES.** Never end a turn asking permission to continue; never pause
 for an interim status; a "natural milestone" is not a reason to stop. Report only at the very end (out of
@@ -22,21 +22,23 @@ others** — don't halt the whole shift.
 | Role | Responsibility |
 |------|----------------|
 | **Foreman** | The foreground supervisor (you). Splits work into well-scoped, low-conflict chunks, delegates them, **answers workers' questions**, serialises changes to `main`, tracks each item to Done, and decides the judgment calls so the shift never halts. |
+| **Product Manager** | Owns *what* the shift builds at the epic level. When the critical path runs to fresh epics, the PM **tasks Researchers to find and pitch candidate epics**, then **picks and prioritises** the ones with the best overall product impact — weighing them against [PURPOSE.md](../../PURPOSE.md) and its fast/small/predictable tiebreaker (and the Agent Watch precedence), user value, effort/blast-radius, and fit with what already ships — and hands the chosen epic(s) to the Foreman to activate (`/ticketing-epic`) and decompose. Declines or defers low-impact/off-purpose pitches with a one-line rationale in the epic's work log. The PM decides *which* epics; the Foreman decides *how* they're built. |
 | **Workers** | Sub-agents that implement well-scoped tickets **in parallel** (`isolation: "worktree"` so they don't collide with the shared checkout). Each builds, self-verifies, and opens a PR. |
 | **Researchers** | Sub-agents the Foreman dispatches for genuinely-hard questions — they deeply research (codebase, in-repo docs/tickets, `context7`, web, worktree probes) and return **viable, tradeoff-labelled options**, not essays. |
-| **Reviewer** | An **independent** sub-agent (NOT the author) that re-checks a worker's PR before merge — the QA gate. |
+| **Reviewer** | An **independent** sub-agent (NOT the author) that re-checks a worker's PR before merge — the code QA gate. |
+| **UAT Tester** | An **independent** sub-agent responsible for **user acceptance testing** — it stands in for the end user and checks the change *from the outside*: does it actually do what the user asked, is the behaviour/UX acceptable, does it meet the ticket's acceptance criteria as a person would experience them (not just as unit tests assert)? Distinct from the Reviewer (who scrutinises the code); the UAT Tester exercises the **feature**. For user-facing/GUI changes it drives the real build (see GUI verification below); for headless/backend changes it exercises the command or API surface end-to-end. Signs off `UAT PASS` / `UAT FAIL` with concrete reproduction of what it did. |
 
 Spawning sub-agents is **pre-authorised** during a workshift (this overrides the default "don't spawn agents
 unless asked"). Give each agent enough context (the ticket + acceptance criteria + relevant crates/APIs +
 conventions + the delete-test rule) so it doesn't re-derive from cold.
 
-## The per-ticket pipeline — ≥2 independent checks before "Done"
+## The per-ticket pipeline — ≥2 independent checks + UAT before "Done"
 
 ```
-Worker builds + self-tests  →  INDEPENDENT Reviewer re-checks  →  (CI)  →  Foreman merges → push
+Worker builds + self-tests  →  INDEPENDENT Reviewer re-checks (code)  →  INDEPENDENT UAT Tester exercises the feature  →  (CI)  →  Foreman merges → push
 ```
 
-A ticket is **never** marked Done / merged on the worker's own say-so. Two distinct checks are required:
+A ticket is **never** marked Done / merged on the worker's own say-so. Distinct checks are required:
 
 1. **Worker self-verification** — builds + tests + `clippy` both feature modes + self-review against the
    ticket's acceptance criteria.
@@ -46,10 +48,20 @@ A ticket is **never** marked Done / merged on the worker's own say-so. Two disti
    **convention/guardrail compliance** (clippy both modes, delete-test / lean-core, no new deps, no scope
    creep), **no regressions**, and that the **acceptance criteria are genuinely met**. Prefer the repo's
    `/code-review` skill where it fits; else a `general-purpose`/`Explore` agent briefed to review.
+3. **Independent UAT Tester** — a **separate** sub-agent (neither the worker nor the Reviewer) performs
+   **user acceptance testing**: it stands in for the end user and confirms the change actually delivers what
+   the ticket asked *as experienced from the outside* — the feature behaves acceptably, the UX/output is
+   what a user would want, and every acceptance criterion is genuinely met in practice (not merely asserted
+   by a test). For **user-facing/GUI** changes this means driving the real installed build (build → deploy →
+   run, below); for **headless/backend** changes it means exercising the command / API / CLI surface
+   end-to-end. It returns **`UAT PASS`** / **`UAT FAIL`** with a concrete record of what it did and observed.
+   If UAT can't run without a user resource (interactive cross-OS GUI verification, credentials, etc.), the
+   Foreman applies the skip-and-note escalation rather than faking a pass.
 
-The **Foreman merges only after the Reviewer signs off.** On `CHANGES REQUESTED`, route the findings back to
-the worker (or apply a precise reviewer-prescribed fix), then **re-review** — loop until clean; log the
-outcome in the ticket / PR. **CI green is a further automated check** but does **not** replace the
+The **Foreman merges only after both the Reviewer signs off AND the UAT Tester returns `UAT PASS`.** On
+`CHANGES REQUESTED` or `UAT FAIL`, route the findings back to the worker (or apply a precise
+reviewer-prescribed fix), then **re-review + re-run UAT** — loop until both are clean; log the outcome in the
+ticket / PR. **CI green is a further automated check** but does **not** replace the
 human-style Reviewer — a green build can still ship wrong logic or hollow tests.
 
 Every code change goes through a `CPE-NNN` ticket; **not pushed = not done**. Land each: branch (never
