@@ -385,3 +385,8 @@ pub mod dangling_links;
 /// endings + true type + extension mismatch) into one display-ready `FileInspection` for the Properties
 /// panel. Pure over a file's leading bytes + name; the Tauri command reads the bytes.
 pub mod inspect;
+
+/// Per-folder metadata-column config store (CPE-1032, epic CPE-707): remembers the ordered list of
+/// visible-column ids chosen for a folder, persisted as `column_config.json` in the app config dir.
+/// Mirrors the `folder_template.rs` store; string column-ids only, no dependency on `column_extract`.
+pub mod column_config;
