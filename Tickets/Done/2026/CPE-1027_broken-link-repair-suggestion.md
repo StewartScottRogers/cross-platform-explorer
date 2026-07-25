@@ -7,7 +7,7 @@ priority: low
 tags: ready
 epic: CPE-715
 created: 2026-07-25
-status: Backlog
+status: Done
 ---
 
 ## Summary
