@@ -17,14 +17,14 @@ from a vibe into a number the Foreman can consult.
 ```json
 {
   "ts":         "2026-07-25T20:14:03-07:00",   // when the row was written (agent returned), ISO-8601 local
-  "role":       "worker",                        // worker | reviewer | uat | researcher | janitor | pm
+  "role":       "worker",                        // worker | reviewer | uat | researcher | librarian | qa-architect | janitor | pm
   "ticket":     "CPE-1035",                      // ticket / epic the agent served ("-" if none)
   "class":      "metadata-codec",                // coarse ticket class, for cross-ticket learning
   "model":      "sonnet",                         // haiku | sonnet | opus | fable
   "dispatched": "2026-07-25T20:02:41-07:00",
   "returned":   "2026-07-25T20:14:03-07:00",
   "elapsed_s":  682,                              // MEASURED (returned - dispatched)
-  "outcome":    "merged",                         // merged | changes-requested | uat-fail | skipped | stuck-escalated | failed
+  "outcome":    "merged",                         // merged | changes-requested | uat-fail | skipped | stuck-escalated | failed | library-hit
   "retries":    1,                                // review/UAT round-trips or model escalations (waste signal)
   "cost_proxy": 2728                              // PROXY, not tokens: tier_weight * elapsed_s (see below)
 }
