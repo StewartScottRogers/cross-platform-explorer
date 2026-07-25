@@ -272,6 +272,11 @@ pub mod image_column;
 /// (CPE-975, epic CPE-707). Pure.
 pub mod column_extract;
 
+/// Document-metadata column extractor — count a PDF's pages by scanning raw bytes for `/Type /Page`
+/// object markers (excluding the `/Pages` tree node) into a [`metadata_column::CellValue::Int`] cell for
+/// a Pages column (CPE-1029, epic CPE-707). Pure byte scan; no PDF library, no new dependency.
+pub mod doc_column;
+
 /// Pure vector index — cosine-similarity top-k over stored embeddings + a persistent store, the
 /// backend/model-agnostic core of AI semantic search (CPE-981, epic CPE-976). Pure std; the embedder is
 /// separate + feature-gated (CPE-982).
