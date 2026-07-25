@@ -702,6 +702,15 @@ async metadataWrite(path: string, edits: MetaEdit[]) : Promise<Result<MetaField[
 }
 },
 /**
+ * Resolve the `--open <dir>` launch argument to a folder the frontend should open at startup (CPE-1043).
+ * Reads the CLI match, keeps it only when it names an existing directory (via the pure
+ * [`cpe_server::launch::resolve_open_dir`]), and returns it as a string — or `None` (fall back to normal
+ * startup: session restore / Home) when the flag is absent, blank, or not a directory. No CLI on mobile.
+ */
+async startupDir() : Promise<string | null> {
+    return await TAURI_INVOKE("startup_dir");
+},
+/**
  * Streaming variant of `list_dir` (CPE-663, epic CPE-662): pushes `DirEntry` batches over an IPC channel
  * as the directory is read, so the frontend paints the first rows immediately instead of waiting for the
  * whole listing. `stream_id` (frontend-supplied, monotonic) registers a cancel flag polled each batch, so
