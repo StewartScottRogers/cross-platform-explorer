@@ -1,0 +1,14 @@
+{
+  "schema_version": 1,
+  "id": "mistral",
+  "name": "Mistral La Plateforme",
+  "models_endpoint": "https://api.mistral.ai/v1/models",
+  "auth": "bearer",
+  "api_hosts": [
+    "api.mistral.ai"
+  ],
+  "normalizer": "openai",
+  "web_base": "https://api.mistral.ai/v1",
+  "protocol": "openai",
+  "launch_base_url": "https://api.mistral.ai/v1"
+}

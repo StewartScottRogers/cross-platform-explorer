@@ -1,0 +1,14 @@
+{
+  "schema_version": 1,
+  "id": "sambanova",
+  "name": "SambaNova",
+  "models_endpoint": "https://api.sambanova.ai/v1/models",
+  "auth": "bearer",
+  "api_hosts": [
+    "api.sambanova.ai"
+  ],
+  "normalizer": "openai",
+  "web_base": "https://api.sambanova.ai/v1",
+  "protocol": "openai",
+  "launch_base_url": "https://api.sambanova.ai/v1"
+}

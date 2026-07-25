@@ -27,10 +27,40 @@ others** — don't halt the whole shift.
 | **Researchers** | Sub-agents the Foreman dispatches for genuinely-hard questions — they deeply research (codebase, in-repo docs/tickets, `context7`, web, worktree probes) and return **viable, tradeoff-labelled options**, not essays. |
 | **Reviewer** | An **independent** sub-agent (NOT the author) that re-checks a worker's PR before merge — the code QA gate. |
 | **UAT Tester** | An **independent** sub-agent responsible for **user acceptance testing** — it stands in for the end user and checks the change *from the outside*: does it actually do what the user asked, is the behaviour/UX acceptable, does it meet the ticket's acceptance criteria as a person would experience them (not just as unit tests assert)? Distinct from the Reviewer (who scrutinises the code); the UAT Tester exercises the **feature**. For user-facing/GUI changes it drives the real build (see GUI verification below); for headless/backend changes it exercises the command or API surface end-to-end. Signs off `UAT PASS` / `UAT FAIL` with concrete reproduction of what it did. |
+| **Janitor** | Keeps the workspace clean so the crew stays fast. Between merges it reclaims **abandoned resources** and tidies up (see the Janitor duties section below) — leftover git worktrees from finished workers, merged/stale branches, orphaned `.claude/uat-*` and scratchpad temp dirs, and an overstuffed `Tickets/Done/` (runs `/ticketing-organize`). It works **non-destructively by default** and never touches another live process's resources (worktrees/branches/untracked dirs in use — see [[concurrent-nightshift-coordination]]). For a **deep clean** that would collide with active workers (pruning worktrees, `git gc`, reorganising `Done/`), the Janitor asks the **Foreman to call a break** — quiesce dispatch, let in-flight PRs settle — then cleans on the quiet tree and signals all-clear. |
 
 Spawning sub-agents is **pre-authorised** during a workshift (this overrides the default "don't spawn agents
 unless asked"). Give each agent enough context (the ticket + acceptance criteria + relevant crates/APIs +
 conventions + the delete-test rule) so it doesn't re-derive from cold.
+
+## Shift kickoff — the Foreman introduces the crew, then starts
+
+The **very first message** of a workshift is the Foreman's roll-call. Lead with an ASCII-art banner (per
+[[use-ascii-art-when-addressing-user]]), then introduce the team in one line each — a quick, plain-language
+summary of what every role does — then state the assignment and that work is **starting now**. Keep it brief
+and warm; it sets the shift going. After this message, go straight to work and follow the normal
+"don't stop for status" rule — this roll-call is the *only* scheduled announcement until the end-of-shift
+wrap (or the user returns / a user-resource blocker). Shape:
+
+```
+   ╔════════════════════════════════╗
+   ║   W O R K S H I F T   ·  ON     ║
+   ╚════════════════════════════════╝
+
+Foreman here — the crew's on the clock. Meet the team:
+  • Foreman (me) — supervise, split + hand out the work, answer questions, merge to main.
+  • Product Manager — decides which epics we build and why.
+  • Workers — build the tickets in parallel, each on its own worktree, and open PRs.
+  • Researchers — dig into the genuinely-hard questions and come back with options.
+  • Reviewer — independently re-checks every PR's code before it merges.
+  • UAT Tester — stands in for you and exercises the actual feature, sign-off PASS/FAIL.
+  • Janitor — keeps the workspace clean; calls a break for a deep clean when needed.
+
+Tonight's assignment: <what "this" is / the critical path>.
+Starting work now — I'll report back when it's done or if I need you.
+```
+
+Timestamp it in local time like every on-screen message. Then begin.
 
 ## The per-ticket pipeline — ≥2 independent checks + UAT before "Done"
 
@@ -110,6 +140,8 @@ a stronger model rather than burning loops; prefer many cheap researchers in par
   ────────────────────────────────────────────────────
   • In flight — worker A: CPE-YYY <status>; worker B: CPE-ZZZ <status>
   ────────────────────────────────────────────────────
+  • Janitor — <last clean / "break needed for deep clean" / "clean">
+  ────────────────────────────────────────────────────
   • Next — <next action>
   ────────────────────────────────────────────────────
   • Awaiting you — <user-resource blockers, or "nothing">
@@ -140,6 +172,46 @@ The user is physically away, so the machine is free. If recent human input appea
 came home or are remoting in), do **not** automatically pause. Instead **tell the user I see they're here and
 ASK whether I should yield the machine**, then act on the answer. This is the one sanctioned exception to
 "never stop to ask" — a presence check, not a work checkpoint.
+
+## Janitor — keep the workspace clean (and call a deep-clean break)
+
+A long shift leaves debris: worktrees from finished workers, merged branches, UAT scratch dirs, temp
+files, and a `Tickets/Done/` that keeps growing. Left alone it slows every worker (stale worktrees confuse
+git ops — see [[verify-subagent-merges]]) and buries the queue. The **Janitor** runs a light pass **between
+merges** and a **deep pass on a called break**.
+
+**Light pass (safe, no break needed — do it opportunistically after each merge/push):**
+
+- Prune git worktrees whose worker is **done and merged** (`git worktree prune` + remove the specific
+  finished worktree); delete its now-merged branch.
+- Delete **fully-merged** local branches (never an unmerged or in-flight one).
+- Remove **this shift's own** finished UAT scratch (`.claude/uat-*`) and scratchpad temp files — only ones
+  the shift created and no longer needs.
+- Clear obvious throwaways (build logs, `*.tmp`) from the scratchpad, never from the working tree.
+
+**Deep pass (needs a Foreman-called break — anything that could collide with a live worker):**
+
+- `git worktree prune` across the board + `git gc`, branch sweep, `Tickets/Done/` reorganisation via
+  `/ticketing-organize` (the SessionStart hook warns when `Done/…/Week-NN` overflows — that warning is the
+  Janitor's cue).
+
+**The deep-clean break protocol:**
+
+1. Janitor signals the Foreman it wants a deep clean (queue getting messy, or the `Done/` overflow warning fired).
+2. **Foreman calls the break:** stop dispatching new workers, let in-flight PRs finish merging/pushing, wait
+   for the worktrees to go idle. **Do not kill a mid-flight worker** — drain, don't yank.
+3. Janitor runs the deep pass on the now-quiet tree, then signals **all-clear**.
+4. Foreman resumes dispatch.
+
+A break is a *drain-and-resume*, **not** a hard stop — it never ends the shift, never asks the user, and is
+logged (`Janitor: deep clean — pruned N worktrees, organised Done/, ⏱…`) like any other work. Keep it rare
+and short; the light pass should keep things tidy most of the time.
+
+**Non-destructive default + guardrails:** when in doubt, leave it. Never delete another concurrent process's
+worktree, branch, or untracked dir ([[concurrent-nightshift-coordination]]); never remove anything under the
+working tree that isn't a known throwaway; never touch `.git` internals beyond `prune`/`gc`. Cleanup that
+would itself be a code change (e.g. deleting committed files) goes through a `CPE-NNN` ticket like anything
+else.
 
 ## Honesty over completion + guardrails
 

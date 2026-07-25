@@ -1,0 +1,174 @@
+{
+  "schema_version": 1,
+  "id": "claude",
+  "name": "Claude Code",
+  "detect": {
+    "windows": {
+      "command": "claude",
+      "args": [
+        "--version"
+      ]
+    },
+    "macos": {
+      "command": "claude",
+      "args": [
+        "--version"
+      ]
+    },
+    "linux": {
+      "command": "claude",
+      "args": [
+        "--version"
+      ]
+    }
+  },
+  "install": {
+    "windows": {
+      "command": "npm",
+      "args": [
+        "i",
+        "-g",
+        "@anthropic-ai/claude-code@latest"
+      ]
+    },
+    "macos": {
+      "command": "npm",
+      "args": [
+        "i",
+        "-g",
+        "@anthropic-ai/claude-code@latest"
+      ]
+    },
+    "linux": {
+      "command": "npm",
+      "args": [
+        "i",
+        "-g",
+        "@anthropic-ai/claude-code@latest"
+      ]
+    }
+  },
+  "update": {
+    "windows": {
+      "command": "npm",
+      "args": [
+        "i",
+        "-g",
+        "@anthropic-ai/claude-code@latest"
+      ]
+    },
+    "macos": {
+      "command": "npm",
+      "args": [
+        "i",
+        "-g",
+        "@anthropic-ai/claude-code@latest"
+      ]
+    },
+    "linux": {
+      "command": "npm",
+      "args": [
+        "i",
+        "-g",
+        "@anthropic-ai/claude-code@latest"
+      ]
+    }
+  },
+  "uninstall": {
+    "windows": {
+      "command": "npm",
+      "args": [
+        "rm",
+        "-g",
+        "@anthropic-ai/claude-code"
+      ]
+    },
+    "macos": {
+      "command": "npm",
+      "args": [
+        "rm",
+        "-g",
+        "@anthropic-ai/claude-code"
+      ]
+    },
+    "linux": {
+      "command": "npm",
+      "args": [
+        "rm",
+        "-g",
+        "@anthropic-ai/claude-code"
+      ]
+    }
+  },
+  "run": {
+    "windows": {
+      "command": "claude",
+      "args": []
+    },
+    "macos": {
+      "command": "claude",
+      "args": []
+    },
+    "linux": {
+      "command": "claude",
+      "args": []
+    }
+  },
+  "default_model": "claude-sonnet-4-5",
+  "swarm": {
+    "args": [
+      "-p",
+      "{task}",
+      "--mcp-config",
+      "{mcp_config}",
+      "--dangerously-skip-permissions"
+    ]
+  },
+  "providers": [
+    "native",
+    "openrouter",
+    "lmstudio-local"
+  ],
+  "provider_recipes": {
+    "native": {
+      "env": {},
+      "args": [
+        "--model",
+        "{model}"
+      ],
+      "defaults": {
+        "model": "claude-sonnet-4-5"
+      }
+    },
+    "openrouter": {
+      "env": {
+        "ANTHROPIC_BASE_URL": "https://openrouter.ai/api",
+        "ANTHROPIC_AUTH_TOKEN": "{api_key}",
+        "ANTHROPIC_API_KEY": "",
+        "ANTHROPIC_SMALL_FAST_MODEL": "{small_model}"
+      },
+      "args": [
+        "--model",
+        "{model}"
+      ],
+      "defaults": {
+        "model": "anthropic/claude-sonnet-4.5",
+        "small_model": "anthropic/claude-haiku-4.5"
+      }
+    },
+    "lmstudio-local": {
+      "env": {
+        "ANTHROPIC_BASE_URL": "{base_url}",
+        "ANTHROPIC_AUTH_TOKEN": "lm-studio",
+        "ANTHROPIC_API_KEY": ""
+      },
+      "args": [
+        "--model",
+        "{model}"
+      ],
+      "defaults": {
+        "base_url": "http://127.0.0.1:1234"
+      }
+    }
+  }
+}

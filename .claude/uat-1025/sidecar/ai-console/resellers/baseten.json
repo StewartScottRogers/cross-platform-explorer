@@ -1,0 +1,14 @@
+{
+  "schema_version": 1,
+  "id": "baseten",
+  "name": "Baseten",
+  "models_endpoint": "https://inference.baseten.co/v1/models",
+  "auth": "bearer",
+  "api_hosts": [
+    "inference.baseten.co"
+  ],
+  "normalizer": "openai",
+  "web_base": "https://inference.baseten.co/v1",
+  "protocol": "openai",
+  "launch_base_url": "https://inference.baseten.co/v1"
+}

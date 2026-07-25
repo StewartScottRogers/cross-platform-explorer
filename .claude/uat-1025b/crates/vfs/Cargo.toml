@@ -1,0 +1,17 @@
+[package]
+name = "cpe-vfs"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.77.2"
+description = "Scheme router for the Cross-Platform Explorer (epic CPE-616): opens the right FileSystemProvider (local / SFTP / WebDAV) from a saved connection profile + its secret."
+license = "MIT"
+
+# The integration seam that ties the connections model (cpe-server::connections) to the concrete remote
+# providers: `open(connection, secret, …)` dispatches by scheme to cpe-sftp or cpe-webdav and returns a
+# boxed FileSystemProvider. The app fetches the secret from the OS keychain and calls this. Standalone
+# (out of any workspace), like the sibling crates.
+
+[dependencies]
+cpe-server = { path = "../server" }
+cpe-sftp = { path = "../sftp" }
+cpe-webdav = { path = "../webdav" }

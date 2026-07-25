@@ -1,0 +1,20 @@
+{
+  "schema_version": 1,
+  "id": "codeberg",
+  "name": "Codeberg",
+  "kind": "git",
+  "auth": [
+    "pat",
+    "ssh"
+  ],
+  "api_hosts": [
+    "codeberg.org"
+  ],
+  "capabilities": [
+    "browse",
+    "clone",
+    "pull",
+    "push"
+  ],
+  "web_base": "https://codeberg.org"
+}

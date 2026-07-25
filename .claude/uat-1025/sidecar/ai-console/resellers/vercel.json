@@ -1,0 +1,14 @@
+{
+  "schema_version": 1,
+  "id": "vercel",
+  "name": "Vercel AI Gateway",
+  "models_endpoint": "https://ai-gateway.vercel.sh/v1/models",
+  "auth": "bearer",
+  "api_hosts": [
+    "ai-gateway.vercel.sh"
+  ],
+  "normalizer": "openai",
+  "web_base": "https://ai-gateway.vercel.sh/v1",
+  "protocol": "openai",
+  "launch_base_url": "https://ai-gateway.vercel.sh/v1"
+}

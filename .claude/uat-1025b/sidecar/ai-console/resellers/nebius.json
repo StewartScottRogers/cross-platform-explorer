@@ -1,0 +1,14 @@
+{
+  "schema_version": 1,
+  "id": "nebius",
+  "name": "Nebius AI Studio",
+  "models_endpoint": "https://api.studio.nebius.ai/v1/models",
+  "auth": "bearer",
+  "api_hosts": [
+    "api.studio.nebius.ai"
+  ],
+  "normalizer": "openai",
+  "web_base": "https://api.studio.nebius.ai/v1",
+  "protocol": "openai",
+  "launch_base_url": "https://api.studio.nebius.ai/v1"
+}

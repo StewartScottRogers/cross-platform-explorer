@@ -1,0 +1,14 @@
+{
+  "schema_version": 1,
+  "id": "glama",
+  "name": "Glama",
+  "models_endpoint": "https://glama.ai/api/gateway/openai/v1/models",
+  "auth": "bearer",
+  "api_hosts": [
+    "glama.ai"
+  ],
+  "normalizer": "openai",
+  "web_base": "https://glama.ai/api/gateway/openai/v1",
+  "protocol": "openai",
+  "launch_base_url": "https://glama.ai/api/gateway/openai/v1"
+}

@@ -1,0 +1,159 @@
+{
+  "schema_version": 1,
+  "id": "vtcode",
+  "name": "VTCode",
+  "detect": {
+    "windows": {
+      "command": "vtcode",
+      "args": [
+        "--version"
+      ]
+    },
+    "macos": {
+      "command": "vtcode",
+      "args": [
+        "--version"
+      ]
+    },
+    "linux": {
+      "command": "vtcode",
+      "args": [
+        "--version"
+      ]
+    }
+  },
+  "install": {
+    "windows": {
+      "command": "cargo",
+      "args": [
+        "install",
+        "vtcode"
+      ]
+    },
+    "macos": {
+      "command": "cargo",
+      "args": [
+        "install",
+        "vtcode"
+      ]
+    },
+    "linux": {
+      "command": "cargo",
+      "args": [
+        "install",
+        "vtcode"
+      ]
+    }
+  },
+  "update": {
+    "windows": {
+      "command": "cargo",
+      "args": [
+        "install",
+        "vtcode"
+      ]
+    },
+    "macos": {
+      "command": "cargo",
+      "args": [
+        "install",
+        "vtcode"
+      ]
+    },
+    "linux": {
+      "command": "cargo",
+      "args": [
+        "install",
+        "vtcode"
+      ]
+    }
+  },
+  "uninstall": {
+    "windows": {
+      "command": "cargo",
+      "args": [
+        "uninstall",
+        "vtcode"
+      ]
+    },
+    "macos": {
+      "command": "cargo",
+      "args": [
+        "uninstall",
+        "vtcode"
+      ]
+    },
+    "linux": {
+      "command": "cargo",
+      "args": [
+        "uninstall",
+        "vtcode"
+      ]
+    }
+  },
+  "run": {
+    "windows": {
+      "command": "vtcode",
+      "args": []
+    },
+    "macos": {
+      "command": "vtcode",
+      "args": []
+    },
+    "linux": {
+      "command": "vtcode",
+      "args": []
+    }
+  },
+  "providers": [
+    "native",
+    "openrouter",
+    "lmstudio-local"
+  ],
+  "provider_recipes": {
+    "native": {
+      "env": {},
+      "args": [
+        "--model",
+        "{model}",
+        "chat"
+      ],
+      "defaults": {
+        "model": "qwen/qwen3-coder"
+      }
+    },
+    "openrouter": {
+      "env": {
+        "OPENROUTER_API_KEY": "{api_key}"
+      },
+      "args": [
+        "--provider",
+        "openrouter",
+        "--model",
+        "{model}",
+        "chat"
+      ],
+      "defaults": {
+        "model": "qwen/qwen3-coder"
+      }
+    },
+    "lmstudio-local": {
+      "env": {
+        "OPENAI_API_KEY": "lm-studio",
+        "OPENAI_BASE_URL": "{base_url}/v1"
+      },
+      "args": [
+        "--provider",
+        "openai",
+        "--model",
+        "{model}",
+        "chat"
+      ],
+      "defaults": {
+        "base_url": "http://127.0.0.1:1234",
+        "model": "qwen3-coder-30b"
+      }
+    }
+  },
+  "default_model": "qwen/qwen3-coder"
+}

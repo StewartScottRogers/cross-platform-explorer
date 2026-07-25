@@ -1,0 +1,14 @@
+{
+  "schema_version": 1,
+  "id": "deepseek",
+  "name": "DeepSeek",
+  "models_endpoint": "https://api.deepseek.com/models",
+  "auth": "bearer",
+  "api_hosts": [
+    "api.deepseek.com"
+  ],
+  "normalizer": "openai",
+  "web_base": "https://api.deepseek.com",
+  "protocol": "openai",
+  "launch_base_url": "https://api.deepseek.com"
+}

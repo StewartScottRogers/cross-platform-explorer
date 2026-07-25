@@ -1,0 +1,126 @@
+{
+  "schema_version": 1,
+  "id": "grok",
+  "name": "Grok CLI",
+  "detect": {
+    "windows": {
+      "command": "grok",
+      "args": [
+        "--version"
+      ]
+    },
+    "macos": {
+      "command": "grok",
+      "args": [
+        "--version"
+      ]
+    },
+    "linux": {
+      "command": "grok",
+      "args": [
+        "--version"
+      ]
+    }
+  },
+  "install": {
+    "windows": {
+      "command": "npm",
+      "args": [
+        "i",
+        "-g",
+        "grok-build@latest"
+      ]
+    },
+    "macos": {
+      "command": "npm",
+      "args": [
+        "i",
+        "-g",
+        "grok-build@latest"
+      ]
+    },
+    "linux": {
+      "command": "npm",
+      "args": [
+        "i",
+        "-g",
+        "grok-build@latest"
+      ]
+    }
+  },
+  "update": {
+    "windows": {
+      "command": "npm",
+      "args": [
+        "i",
+        "-g",
+        "grok-build@latest"
+      ]
+    },
+    "macos": {
+      "command": "npm",
+      "args": [
+        "i",
+        "-g",
+        "grok-build@latest"
+      ]
+    },
+    "linux": {
+      "command": "npm",
+      "args": [
+        "i",
+        "-g",
+        "grok-build@latest"
+      ]
+    }
+  },
+  "uninstall": {
+    "windows": {
+      "command": "npm",
+      "args": [
+        "rm",
+        "-g",
+        "grok-build"
+      ]
+    },
+    "macos": {
+      "command": "npm",
+      "args": [
+        "rm",
+        "-g",
+        "grok-build"
+      ]
+    },
+    "linux": {
+      "command": "npm",
+      "args": [
+        "rm",
+        "-g",
+        "grok-build"
+      ]
+    }
+  },
+  "run": {
+    "windows": {
+      "command": "grok",
+      "args": []
+    },
+    "macos": {
+      "command": "grok",
+      "args": []
+    },
+    "linux": {
+      "command": "grok",
+      "args": []
+    }
+  },
+  "providers": [
+    "native"
+  ],
+  "provider_recipes": {
+    "native": {
+      "env": {},
+      "args": []
+    }
+  }
+}

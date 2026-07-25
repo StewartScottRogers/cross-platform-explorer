@@ -1,0 +1,18 @@
+{
+  "schema_version": 1,
+  "id": "mercurial",
+  "name": "Mercurial",
+  "kind": "hg",
+  "auth": [
+    "pat",
+    "ssh",
+    "anonymous"
+  ],
+  "api_hosts": [],
+  "capabilities": [
+    "clone",
+    "pull",
+    "push"
+  ],
+  "experimental": true
+}

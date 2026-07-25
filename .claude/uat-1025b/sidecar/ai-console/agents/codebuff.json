@@ -1,0 +1,126 @@
+{
+  "schema_version": 1,
+  "id": "codebuff",
+  "name": "Codebuff",
+  "detect": {
+    "windows": {
+      "command": "codebuff",
+      "args": [
+        "--version"
+      ]
+    },
+    "macos": {
+      "command": "codebuff",
+      "args": [
+        "--version"
+      ]
+    },
+    "linux": {
+      "command": "codebuff",
+      "args": [
+        "--version"
+      ]
+    }
+  },
+  "install": {
+    "windows": {
+      "command": "npm",
+      "args": [
+        "i",
+        "-g",
+        "codebuff@latest"
+      ]
+    },
+    "macos": {
+      "command": "npm",
+      "args": [
+        "i",
+        "-g",
+        "codebuff@latest"
+      ]
+    },
+    "linux": {
+      "command": "npm",
+      "args": [
+        "i",
+        "-g",
+        "codebuff@latest"
+      ]
+    }
+  },
+  "update": {
+    "windows": {
+      "command": "npm",
+      "args": [
+        "i",
+        "-g",
+        "codebuff@latest"
+      ]
+    },
+    "macos": {
+      "command": "npm",
+      "args": [
+        "i",
+        "-g",
+        "codebuff@latest"
+      ]
+    },
+    "linux": {
+      "command": "npm",
+      "args": [
+        "i",
+        "-g",
+        "codebuff@latest"
+      ]
+    }
+  },
+  "uninstall": {
+    "windows": {
+      "command": "npm",
+      "args": [
+        "rm",
+        "-g",
+        "codebuff"
+      ]
+    },
+    "macos": {
+      "command": "npm",
+      "args": [
+        "rm",
+        "-g",
+        "codebuff"
+      ]
+    },
+    "linux": {
+      "command": "npm",
+      "args": [
+        "rm",
+        "-g",
+        "codebuff"
+      ]
+    }
+  },
+  "run": {
+    "windows": {
+      "command": "codebuff",
+      "args": []
+    },
+    "macos": {
+      "command": "codebuff",
+      "args": []
+    },
+    "linux": {
+      "command": "codebuff",
+      "args": []
+    }
+  },
+  "providers": [
+    "native"
+  ],
+  "provider_recipes": {
+    "native": {
+      "env": {},
+      "args": []
+    }
+  }
+}

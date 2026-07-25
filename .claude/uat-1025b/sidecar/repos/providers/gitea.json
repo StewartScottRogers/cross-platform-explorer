@@ -1,0 +1,17 @@
+{
+  "schema_version": 1,
+  "id": "gitea",
+  "name": "Gitea",
+  "kind": "git",
+  "auth": [
+    "pat",
+    "ssh"
+  ],
+  "api_hosts": [],
+  "capabilities": [
+    "browse",
+    "clone",
+    "pull",
+    "push"
+  ]
+}

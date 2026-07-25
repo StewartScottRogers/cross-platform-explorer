@@ -1,0 +1,14 @@
+{
+  "schema_version": 1,
+  "id": "cohere",
+  "name": "Cohere",
+  "models_endpoint": "https://api.cohere.ai/compatibility/v1/models",
+  "auth": "bearer",
+  "api_hosts": [
+    "api.cohere.ai"
+  ],
+  "normalizer": "openai",
+  "web_base": "https://api.cohere.ai/compatibility/v1",
+  "protocol": "openai",
+  "launch_base_url": "https://api.cohere.ai/compatibility/v1"
+}

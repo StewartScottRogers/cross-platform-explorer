@@ -1,0 +1,14 @@
+{
+  "schema_version": 1,
+  "id": "repos",
+  "name": "Repositories",
+  "version": "0.1.0",
+  "contract_version": { "major": 1, "minor": 2 },
+  "entry": {
+    "windows": { "command": "repos.exe" },
+    "macos": { "command": "repos" },
+    "linux": { "command": "repos" }
+  },
+  "capabilities": ["context", "secrets", "storage", "events", "network"],
+  "ui": { "kind": "local_port", "source": "announced" }
+}

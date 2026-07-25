@@ -57,3 +57,11 @@ and ImageDescription/Artist/Copyright/UserComment editable. Same bounds-checked 
 audio codecs; also feeds CPE-707 image columns. Independently reviewed (fixture legitimacy empirically
 verified) + UAT-passed via an independent EXIF-construction path (PR #351). The read-codec arc now covers
 ID3/FLAC/OGG audio + EXIF images. Remaining CPE-725 scope: write-back codecs + the studio editor UI.
+
+2026-07-25 (workshift) — **CPE-1035 DONE (PR #352): first WRITE-BACK codec.** `media_meta_write::write_id3v2`
+serialises edited `MetaField`s into a fresh ID3v2.4 tag prepended to the audio payload (strip-and-replace,
+idempotent) — the studio can now *edit* audio tags, not just read them. Pairs `read_id3v2` (CPE-970) +
+`apply_edits` (CPE-942); independently reviewed (opus, APPROVE) + UAT-passed (full read→edit→write→read
+chain, audio byte-preserved). Remaining 725 scope: Vorbis/FLAC + EXIF write-back codecs, then the studio
+editor UI (attended). Read arc also expanding this shift: PDF doc-info (CPE-1036) + MP4/MOV video
+(CPE-1037) read codecs in review.
