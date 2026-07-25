@@ -4,7 +4,7 @@ title: MP4/MOV video metadata read codec (iTunes atoms → MetaFields)
 type: feature
 component: Backend
 priority: medium
-status: Doing
+status: Done
 tags: ready
 created: 2026-07-25
 epic: CPE-725
@@ -45,3 +45,11 @@ New module `crates/server/src/video_meta_read.rs`:
 2026-07-25 (workshift) — Filed + dispatched. Disjoint new file (`video_meta_read.rs`) so it runs safely
 in parallel with CPE-1035 (`media_meta_write.rs`) and CPE-1036 (`read_pdf` in `media_meta_read.rs`).
 Completes the read arc: audio (ID3/FLAC/OGG) + images (EXIF) + documents (PDF) + video (MP4/MOV).
+
+2026-07-25 (workshift) — **DONE, merged PR #353.** `video_meta_read::read_mp4` walks the ISO-BMFF box
+tree (moov▸udta▸meta▸ilst) extracting iTunes-style tags (Title/Artist/Album/Year/Comment/Genre/Composer/
+Encoder/Copyright) as `MetaField{group:"video",editable:false}`; bounds-clamped, depth-capped,
+never-panics, `meta` version/flags prelude handled defensively. 12 tests + independent sonnet review
+(APPROVE, incl. adversarial fuzz: 50k header-only boxes, u64::MAX largesize, single-byte mutation sweep —
+no panics) + independent UAT PASS (own box-builder, prelude present/absent, oversize-length). Clippy clean
+both modes. Read arc now: audio(ID3/FLAC/OGG) + image(EXIF) + video(MP4/MOV).

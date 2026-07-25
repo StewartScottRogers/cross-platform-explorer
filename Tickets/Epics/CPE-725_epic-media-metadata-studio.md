@@ -65,3 +65,8 @@ idempotent) — the studio can now *edit* audio tags, not just read them. Pairs 
 chain, audio byte-preserved). Remaining 725 scope: Vorbis/FLAC + EXIF write-back codecs, then the studio
 editor UI (attended). Read arc also expanding this shift: PDF doc-info (CPE-1036) + MP4/MOV video
 (CPE-1037) read codecs in review.
+
+2026-07-25 (workshift) — **CPE-1037 DONE (PR #353): video read codec.** `video_meta_read::read_mp4`
+extends the read arc to MP4/MOV video (iTunes `moov▸udta▸meta▸ilst` atoms → `MetaField{group:"video"}`).
+Independently reviewed (APPROVE + fuzzed) + UAT-passed. Read coverage now spans audio + image + video;
+PDF documents (CPE-1036) in review. Remaining 725: FLAC/EXIF write-back + the studio editor UI (attended).
