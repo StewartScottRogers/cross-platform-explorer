@@ -31,6 +31,9 @@ updater.pw
 # Sub-agent worktrees (transient; never commit)
 .claude/worktrees/
 
+# Workshift raw per-agent metrics (transient/noisy; the distilled history.md IS committed)
+.claude/workshift-metrics/ledger.jsonl
+
 # Generated catalog bundle (produced by CI / catalog-sign)
 catalog-out/
 

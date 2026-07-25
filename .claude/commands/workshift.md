@@ -35,6 +35,10 @@ conventions + the delete-test rule) so it doesn't re-derive from cold.
 
 ## Shift kickoff — the Foreman introduces the crew, then starts
 
+Before announcing, the Foreman **reads the tail of `.claude/workshift-metrics/history.md`** to seed this
+shift's model/parallelism defaults from what past shifts learned (see the ledger teeth below) — no roll-call
+noise about it, just start smarter.
+
 The **very first message** of a workshift is the Foreman's roll-call. Lead with an ASCII-art banner (per
 [[use-ascii-art-when-addressing-user]]), then introduce the team in one line each — a quick, plain-language
 summary of what every role does — then state the assignment and that work is **starting now**. Keep it brief
@@ -121,6 +125,74 @@ debugging, and **deep-reasoning review/research where a wrong answer is costly**
 a stronger model rather than burning loops; prefer many cheap researchers in parallel for breadth, reserving
 `opus` for the one question that needs depth. Note any non-default choice in the work log.
 
+## Capacity & throughput (a Foreman discipline, not a role)
+
+Keep the crew busy without piling up. This is a **discipline the Foreman runs**, not a separate agent — the
+Foreman already holds the whole board *and* the merge lock, so concurrency and cost decisions belong in one
+head. Run a quick **capacity pass at each dispatch** and a **throughput check at each idle checkpoint**; it
+should cost seconds of thought, never a standing sub-agent that watches the other agents (that's overhead
+that rarely pays for itself). The single bottleneck to respect: **only the Foreman merges to `main`, one at a
+time** — size everything else around that.
+
+**At each dispatch:**
+
+- **Right-size parallelism.** Run enough workers to keep the machine busy, but not so many that finished PRs
+  queue up behind the serial merge. Rule of thumb: dispatch as many **independent, low-conflict** tickets as
+  are ready; hold back ones that touch the same files/crate (they'd collide on merge anyway).
+- **Batch the trivial.** Several tiny same-crate/same-file tickets → **one** worker doing them in sequence,
+  not N worktrees each paying spin-up cost.
+- **Cheapest capable model** per the right-sizing tiers above — audit that the tier actually matches the
+  ticket, don't default everything to `sonnet`/`opus` out of habit.
+- **Pipeline the gauntlet, don't serialise it.** Dispatch a PR's **Reviewer and UAT Tester in parallel**,
+  and **start the next worker while a PR is in review** — review/UAT must never idle the build queue. Only
+  the final merge serialises.
+
+**At each idle checkpoint (fold into the `FOREMAN` block):**
+
+- **Idle capacity?** Machine free but few workers running → pull the next ready ticket forward now.
+- **Stuck / looping agent?** Escalate its model or re-scope the task rather than letting it burn loops
+  (per the right-sizing rule) — don't wait for it to fail on its own.
+- **Merge queue backing up?** PRs approved but unmerged → stop dispatching new workers and drain the merge
+  queue first, so reviewed work actually ships (*not pushed = not done*).
+- **Review queue backing up?** PRs waiting on Reviewer/UAT → spin up more reviewers in parallel before
+  adding more builders.
+
+Note any deliberate capacity call (e.g. "held CPE-YYY — same crate as in-flight CPE-XXX") in the work log.
+Bias to **building over optimising**: the passes above are a few seconds of judgment, not an analysis
+project. The ledger below gives them **teeth** — numbers to decide on instead of vibes — but recording a row
+is a one-line append, not a second job.
+
+### Teeth — the per-agent ledger (measure, then optimise)
+
+The capacity/throughput calls above are only as good as the data behind them, so the Foreman **keeps a
+ledger**. Substrate + full schema live in `.claude/workshift-metrics/` (`README.md`); the essentials:
+
+- **Record a row when each sub-agent returns.** Append one JSON line to
+  `.claude/workshift-metrics/ledger.jsonl` (gitignored, transient): role, ticket, ticket *class*, model,
+  dispatched/returned timestamps, **measured `elapsed_s`**, outcome, `retries`, and a `cost_proxy`. Also keep
+  the same rows as a live in-context table so the current shift can reason over them without re-reading the
+  file.
+- **Measure what's real; don't fabricate the rest.** `elapsed_s` is measured straight from wall-clock `date`
+  at dispatch and return — always real. **The `Agent` tool does not reliably return a sub-agent's token
+  count, so never invent token numbers.** Cost is a **labelled proxy**: `tier_weight × elapsed_s`
+  (haiku 1 · sonnet 4 · opus 15 · fable 4), useful only as *relative* spend; `retries` is the companion
+  **waste signal** (rework paid for). Surface both as proxies, not as billing.
+- **Let the numbers drive the two passes.** Concretely: a `(class, tier)` pair with high
+  `retries`/`stuck-escalated` → that class's default model is too weak, **bump the tier**; `opus` elapsed ≈
+  `sonnet` elapsed with the same outcome on a class → **downgrade** it; merge-queue wait > median build time →
+  **reduce parallelism** and drain; review-queue wait rising → **add reviewers** before builders. These
+  replace the earlier rules-of-thumb with a rule keyed to observed data.
+- **Learn across shifts.** At the **end-of-shift wrap**, append a short distilled block to
+  `.claude/workshift-metrics/history.md` (committed, shared CLI↔desktop): tickets shipped + the tuned
+  defaults learned (e.g. `metadata-codec: sonnet, 2-wide, ~11m median, 0 stuck`). At **kickoff**, read the
+  tail of `history.md` to **seed** this shift's model/parallelism defaults instead of relearning cold.
+- **Report it.** Add a compact `• Metrics —` line to the `FOREMAN` block (merged count · median gauntlet ·
+  retries · ~cost-proxy), and print the **full ledger table** in the end-of-shift wrap so the user sees where
+  the time and (proxy) cost went.
+
+This is still lightweight — a one-line append per agent and one distilled block per shift — but it means every
+concurrency and model call is backed by measured throughput, not guesswork.
+
 ## Reporting — ASCII banners + timestamps + FOREMAN blocks
 
 - **Every message that directly addresses the user leads with an ASCII-art banner** (the user is often across
@@ -141,6 +213,8 @@ a stronger model rather than burning loops; prefer many cheap researchers in par
   • In flight — worker A: CPE-YYY <status>; worker B: CPE-ZZZ <status>
   ────────────────────────────────────────────────────
   • Janitor — <last clean / "break needed for deep clean" / "clean">
+  ────────────────────────────────────────────────────
+  • Metrics — <N merged · median gauntlet Xm · Y retries · ~cost Zu (proxy)>
   ────────────────────────────────────────────────────
   • Next — <next action>
   ────────────────────────────────────────────────────
