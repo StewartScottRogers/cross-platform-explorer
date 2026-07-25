@@ -4,7 +4,7 @@ title: Fix --open delivery — inject via init script (CPE-1043 didn't navigate)
 type: bug
 component: Multiple
 priority: high
-status: Doing
+status: Done
 tags: ready
 created: 2026-07-25
 epic: CPE-616
@@ -39,3 +39,10 @@ bundled assets, so `--open` can only be verified in a real `tauri build` bundle.
 ## Work Log
 2026-07-25 — Filed after the reinstall showed --open landing on Home. Backend read confirmed correct via a
 setup-time diagnostic; switched delivery to an init-script global.
+
+2026-07-25 (attended) — **DONE, merged PR #362.** `--open <dir>` now opens the explorer at the folder
+(verified in a local `tauri build` bundle — breadcrumb `…\samples`, listing the sample tree). Fix: backend
+resolves `--open` in setup and injects `window.__CPE_OPEN_DIR__` via `initialization_script`; frontend
+reads it synchronously and calls `navigate()` (not `loadPath`, which left the view on Home). Removed the
+`startup_dir` command + gate. 726 cpe-server tests + full vitest + clippy (all crates) green. Merged at
+user direction; independent review was in flight.
