@@ -8,6 +8,7 @@
 //! the codec by extension and returns the cell — or [`CellValue::Empty`] when the file kind doesn't match
 //! the column (so it sorts last). Pure: no filesystem, the adapter reads the bytes.
 
+use crate::doc_column::doc_pages_cell;
 use crate::image_column::image_dimensions_cell;
 use crate::media_column::{audio_cell, AudioColumn};
 use crate::media_meta_edit::MetaField;
@@ -21,6 +22,8 @@ pub enum MetaColumn {
     Audio(AudioColumn),
     /// The image's pixel dimensions (`w × h`, sorted by area).
     ImageDimensions,
+    /// A document's page count (PDF, v1), sorted numerically.
+    DocPages,
 }
 
 /// Read a file's audio tags, choosing the codec by extension: `mp3` → ID3v2, `flac` → FLAC/Vorbis,
@@ -42,6 +45,11 @@ fn is_image_ext(ext: &str) -> bool {
     )
 }
 
+/// Whether `ext` is a document kind the page-count reader should attempt (PDF only, v1).
+fn is_doc_ext(ext: &str) -> bool {
+    matches!(ext.to_ascii_lowercase().as_str(), "pdf")
+}
+
 /// The typed [`CellValue`] for `col` from a file's `ext` + leading `bytes`, dispatched to the family
 /// extractor. A file whose kind doesn't match the column (e.g. an image path under an audio column, or a
 /// text file under a Dimensions column) yields [`CellValue::Empty`], which sorts last.
@@ -51,6 +59,13 @@ pub fn extract_column(ext: &str, bytes: &[u8], col: MetaColumn) -> CellValue {
         MetaColumn::ImageDimensions => {
             if is_image_ext(ext) {
                 image_dimensions_cell(bytes)
+            } else {
+                CellValue::Empty
+            }
+        }
+        MetaColumn::DocPages => {
+            if is_doc_ext(ext) {
+                doc_pages_cell(bytes)
             } else {
                 CellValue::Empty
             }
@@ -162,6 +177,25 @@ mod tests {
         );
         // A non-image extension is not even attempted → Empty (even if bytes happened to be an image).
         assert_eq!(extract_column("txt", &png(10, 10), MetaColumn::ImageDimensions), CellValue::Empty);
+    }
+
+    /// A minimal synthetic PDF: header + `page_count` `/Type /Page` objects.
+    fn pdf(page_count: usize) -> Vec<u8> {
+        let mut out = Vec::new();
+        out.extend_from_slice(b"%PDF-1.4\n");
+        for n in 0..page_count {
+            out.extend_from_slice(
+                format!("{} 0 obj\n<< /Type /Page /Parent 1 0 R >>\nendobj\n", n + 1).as_bytes(),
+            );
+        }
+        out
+    }
+
+    #[test]
+    fn doc_pages_route_and_gate_by_extension() {
+        assert_eq!(extract_column("pdf", &pdf(2), MetaColumn::DocPages), CellValue::Int(2));
+        // A non-doc extension is not even attempted → Empty (even if bytes happened to be a PDF).
+        assert_eq!(extract_column("txt", &pdf(2), MetaColumn::DocPages), CellValue::Empty);
     }
 
     #[test]

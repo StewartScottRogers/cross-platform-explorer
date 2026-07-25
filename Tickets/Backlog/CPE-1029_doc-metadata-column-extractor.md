@@ -35,17 +35,31 @@ Follow the established shape exactly — study `image_column.rs` (`image_dimensi
   the match arm calling `doc_pages_cell` when the ext is a doc kind else `Empty`.
 
 ## Acceptance Criteria
-- [ ] `doc_pages_cell` returns `CellValue::Int(n)` counting `/Type /Page` objects in a synthetic PDF body,
+- [x] `doc_pages_cell` returns `CellValue::Int(n)` counting `/Type /Page` objects in a synthetic PDF body,
       correctly **excluding** the `/Pages` tree node; `Empty` for non-PDF / no-page-marker bytes; never
       panics.
-- [ ] `extract_column(ext, bytes, MetaColumn::DocPages)` returns the count for a `.pdf`, `Empty` for a
+- [x] `extract_column(ext, bytes, MetaColumn::DocPages)` returns the count for a `.pdf`, `Empty` for a
       non-doc ext.
-- [ ] ≥4 unit tests with hand-built PDF byte fixtures (3 pages → Int(3); a `/Pages` node present but not
+- [x] ≥4 unit tests with hand-built PDF byte fixtures (3 pages → Int(3); a `/Pages` node present but not
       miscounted; non-PDF → Empty; empty input → Empty). No new dependency.
-- [ ] `cargo clippy --all-targets -- -D warnings` and the `--all-features` variant both clean.
+- [x] `cargo clippy --all-targets -- -D warnings` and the `--all-features` variant both clean.
 
 ## Notes
 Own **only** `doc_column.rs` + your enum/match arm in `column_extract.rs` + the `mod` line in `lib.rs`.
 A sibling worker (CPE-1028) also adds an arm to `column_extract.rs`'s `MetaColumn`/match — keep your arm
 self-contained so the merge conflict is trivial. Do not touch `metadata_column.rs` (`CellValue::Int`
 already exists) or the existing `doc_text.rs` text extractors. Keep the never-panic convention.
+
+## Work Log
+- 2026-07-25: Implemented `doc_pages_cell` in `crates/server/src/doc_column.rs` — a pure byte scan (no
+  PDF crate) that requires a `%PDF` header, then counts `/Type` tokens followed (after optional ASCII
+  whitespace) by `/Page` whose next byte isn't `s`/`S`, so `/Pages` tree nodes are excluded. Returns
+  `CellValue::Int(count)` for `count >= 1`, else `CellValue::Empty`. Bounds-checked throughout — no
+  panics, including on truncated `/Type`/`/Page` fragments at the end of the buffer. Registered `pub mod
+  doc_column;` in `lib.rs`; added `MetaColumn::DocPages`, an `is_doc_ext` guard (`pdf` only, v1), and the
+  dispatcher match arm in `column_extract.rs`. 7 unit tests in `doc_column.rs` (3-page count excluding
+  `/Pages`, non-PDF bytes, empty input, no-page-marker PDF, single page, whitespace-tolerant scan,
+  truncated-input panic safety) + 1 routing test in `column_extract.rs`
+  (`doc_pages_route_and_gate_by_extension`) — all pass. `cargo clippy --all-targets -- -D warnings` and
+  the `--all-features` variant both clean in `crates/server`. Scope held to `doc_column.rs` (new), the one
+  `mod` line in `lib.rs`, and the `MetaColumn::DocPages` enum/match arm in `column_extract.rs`.
