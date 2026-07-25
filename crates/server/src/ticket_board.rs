@@ -347,15 +347,18 @@ pub fn parse_directives(md: &str) -> Vec<Directive> {
 pub fn reply_to_directive(md: &str, when: &str, reply: &str, mark_done: bool) -> Option<String> {
     let reply = reply.trim();
     let head = md.find("## Agent Directives")?;
-    // Find the `### ▸` header line (at/after the section) whose text contains `when`.
+    // Find the `### ▸` header line (at/after the section) whose when field exactly matches.
     let mut idx = head;
     let mut header_start = None;
     while idx < md.len() {
         let line_end = md[idx..].find('\n').map(|n| idx + n + 1).unwrap_or(md.len());
         let line = &md[idx..line_end];
-        if line.starts_with("### ▸ ") && line.contains(when) {
-            header_start = Some(idx);
-            break;
+        if let Some(rest) = line.strip_prefix("### ▸ ") {
+            // header body is "<status> · to `<to>` · <when>"; compare the when field exactly (not substring)
+            if rest.rsplit(" · ").next().map(str::trim) == Some(when) {
+                header_start = Some(idx);
+                break;
+            }
         }
         idx = line_end;
     }
@@ -484,6 +487,30 @@ mod tests {
         let md = append_directive("## Summary\nx\n", "t1", "any", "do it");
         assert!(reply_to_directive(&md, "nope", "hi", false).is_none());
         assert!(parse_directives("## Summary\nno directives here").is_empty());
+    }
+
+    #[test]
+    fn reply_to_directive_matches_exact_when_not_substring() {
+        // Regression test for CPE-1018: when two directives have when-values that are substrings
+        // of each other (e.g., "1" and "10"), replying to the shorter one must NOT match the longer.
+        let base = "---\nid: CPE-1\n---\n\n## Summary\nhi\n";
+        // Add two directives: when="10" (the longer one), then when="1" (the shorter one, prepended).
+        let with_longer = append_directive(base, "10", "any", "First task.");
+        let with_both = append_directive(&with_longer, "1", "any", "Second task.");
+
+        // Reply to the shorter when="1" and mark it done.
+        let replied = reply_to_directive(&with_both, "1", "Done.", true).unwrap();
+        let after = parse_directives(&replied);
+
+        // The directive with when="1" is now done with a reply.
+        let short_dir = after.iter().find(|d| d.when == "1").unwrap();
+        assert_eq!(short_dir.status, "done", "the short-when directive should be marked done");
+        assert!(replied.contains("> reply: Done."), "the reply should be appended under when=1");
+
+        // The directive with when="10" is still open and unchanged.
+        let long_dir = after.iter().find(|d| d.when == "10").unwrap();
+        assert_eq!(long_dir.status, "open", "the long-when directive should remain open");
+        assert_eq!(long_dir.text, "First task.", "the long-when directive text is unchanged");
     }
 
     #[test]
