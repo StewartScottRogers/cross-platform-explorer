@@ -504,7 +504,19 @@ fn parse_uint(bytes: &[u8], start: usize, limit: usize) -> Option<(u32, usize)> 
 /// within that window.
 fn resolve_indirect_dict(bytes: &[u8], num: u32, gen: u32) -> Option<&[u8]> {
     let pattern = format!("{num} {gen} obj");
-    let obj_start = find_subslice(bytes, pattern.as_bytes())?;
+    // A raw substring search would let `5 0 obj` match inside `15 0 obj` (the object-number's leading
+    // digit isn't part of our pattern), silently resolving the wrong object. Object numbers aren't
+    // required to be ascending or contiguous, so scan for a match whose preceding byte is not an ASCII
+    // digit (i.e. a real token boundary), starting from the first occurrence.
+    let mut search_from = 0usize;
+    let obj_start = loop {
+        let rel = find_subslice(&bytes[search_from..], pattern.as_bytes())?;
+        let idx = search_from + rel;
+        if idx == 0 || !bytes[idx - 1].is_ascii_digit() {
+            break idx;
+        }
+        search_from = idx + 1; // skip this false match and keep looking
+    };
     let body_start = obj_start + pattern.len();
     let window_end = bytes.len().min(body_start + 65536);
     let body = bytes.get(body_start..window_end)?;
@@ -1419,5 +1431,30 @@ mod tests {
         // The untruncated document still yields the title.
         let f = read_pdf(&pdf);
         assert_eq!(get(&f, "Title"), Some("Full Title \u{A9}"));
+    }
+
+    #[test]
+    fn read_pdf_resolves_exact_object_number_not_a_digit_suffix() {
+        // The trailer points at object `5 0 R`, but an earlier object `15 0 obj` shares the suffix
+        // `5 0 obj`. A raw substring match would resolve the decoy; the real object 5 must win.
+        let mut pdf = Vec::new();
+        pdf.extend_from_slice(b"%PDF-1.4\n");
+        pdf.extend_from_slice(b"15 0 obj\n<< /Title (Decoy Title) >>\nendobj\n");
+        pdf.extend_from_slice(b"5 0 obj\n<< /Title (Real Title) >>\nendobj\n");
+        pdf.extend_from_slice(b"trailer\n<< /Size 16 /Root 1 0 R /Info 5 0 R >>\n%%EOF");
+        assert_eq!(get(&read_pdf(&pdf), "Title"), Some("Real Title"));
+    }
+
+    #[test]
+    fn read_pdf_prefers_the_last_info_reference() {
+        // An incrementally-updated PDF carries two trailers; the later `/Info` reference (the active
+        // one) must win over the stale earlier one.
+        let mut pdf = Vec::new();
+        pdf.extend_from_slice(b"%PDF-1.4\n");
+        pdf.extend_from_slice(b"7 0 obj\n<< /Title (Stale Title) >>\nendobj\n");
+        pdf.extend_from_slice(b"trailer\n<< /Size 8 /Root 1 0 R /Info 7 0 R >>\n");
+        pdf.extend_from_slice(b"8 0 obj\n<< /Title (Current Title) >>\nendobj\n");
+        pdf.extend_from_slice(b"trailer\n<< /Size 9 /Root 1 0 R /Info 8 0 R >>\n%%EOF");
+        assert_eq!(get(&read_pdf(&pdf), "Title"), Some("Current Title"));
     }
 }
