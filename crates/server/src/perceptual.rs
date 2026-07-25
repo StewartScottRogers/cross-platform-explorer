@@ -169,6 +169,28 @@ mod tests {
         buf
     }
 
+    /// A "descending staircase" fixture that varies in **both x and y**: the image is split into
+    /// [`HASH_H`] equal horizontal bands (one per output-grid row), and band `r` is white for its
+    /// left `(r+1)/9` fraction of the width, black for the rest — so the white→black transition sits
+    /// at a **different column in every band**. Unlike [`column_bands`] (which spans the full height
+    /// and so downsamples to 8 *identical* rows), each of the 8 dHash rows here gets a **distinct**
+    /// bit segment. That is what makes the golden hash constrain the *row-major packing order*: any
+    /// row-reversal or cross-row bug changes the value, because the 8 packed bytes differ.
+    fn diagonal_staircase(w: u32, h: u32, format: ImageFormat) -> Vec<u8> {
+        let mut img = RgbImage::new(w, h);
+        let band_h = (h / HASH_H).max(1); // pixels of image height per output-grid row
+        for (x, y, px) in img.enumerate_pixels_mut() {
+            let band = (y / band_h).min(HASH_H - 1); // 0..=7
+            // Transition column grows monotonically with the band index → a distinct crossover per row.
+            let threshold = ((band + 1) * w) / (HASH_H + 1);
+            let v = if x < threshold { 255 } else { 0 };
+            *px = image::Rgb([v, v, v]);
+        }
+        let mut buf = Vec::new();
+        img.write_to(&mut Cursor::new(&mut buf), format).unwrap();
+        buf
+    }
+
     #[test]
     fn phash_is_deterministic() {
         let bytes = horizontal_gradient(200, 150, ImageFormat::Png);
@@ -302,5 +324,41 @@ mod tests {
         // Groups sorted by their own (sorted) first id: "aaa..." group before "mmm..." group.
         assert_eq!(groups[0], vec!["aaa".to_string(), "zzz".to_string()]);
         assert_eq!(groups[1], vec!["mmm".to_string(), "nnn".to_string()]);
+    }
+
+    #[test]
+    fn phash_golden_value_diagonal_staircase() {
+        // A structured fixture that varies in BOTH x and y (see `diagonal_staircase`): every one of
+        // the 8 dHash rows has its white→black transition at a different column, so the 8 packed
+        // bytes DIFFER. This golden value therefore pins the full row-major packing order — not just
+        // the intra-row comparison direction. (A full-height-band fixture like `column_bands`
+        // downsamples to 8 identical rows and is invariant under row-reversal, so it can't catch a
+        // row-order / cross-row packing bug; this one can.) Any intentional change to the packing
+        // order or bit-direction logic requires updating the constant below.
+        let fixture = diagonal_staircase(180, 160, ImageFormat::Png);
+        let hash = phash(&fixture).unwrap();
+
+        // Sanity-check: the hash is non-trivial (mixed bits, not all-zero / all-ones).
+        assert_ne!(hash, 0, "fixture hash must be non-zero (has horizontal structure)");
+        assert_ne!(hash, u64::MAX, "fixture hash must not be all-ones");
+        let bit_count = hash.count_ones();
+        assert!((8..=56).contains(&bit_count), "expected 8–56 set bits, got {}", bit_count);
+
+        // Key property: the 8 packed rows (bytes) are NOT all equal, i.e. the hash is not invariant
+        // under row-reversal. This is what makes the golden constant actually constrain the row-major
+        // packing order — a distinct byte per grid row means a row-order bug flips the value.
+        let bytes = hash.to_be_bytes();
+        assert!(
+            bytes.iter().any(|&b| b != bytes[0]),
+            "fixture rows must differ (found all-equal bytes {bytes:02x?}); row-order bugs would be invisible"
+        );
+        assert_ne!(hash, hash.swap_bytes(), "hash must not be symmetric under full row-reversal");
+
+        // Pin the exact hash value (determined by running the test once and reading the actual value
+        // from the failure output). If this assertion fails after a deliberate bit-order or packing
+        // change, update the constant below.
+        // Byte breakdown: e0 f0 f8 7c 3e 1f 0f 07 — eight distinct row bytes (34 set bits).
+        const GOLDEN_HASH: u64 = 0xe0f0f87c3e1f0f07;
+        assert_eq!(hash, GOLDEN_HASH, "actual hash: {:#018x}", hash);
     }
 }
