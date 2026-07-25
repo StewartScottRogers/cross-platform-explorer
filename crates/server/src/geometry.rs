@@ -150,8 +150,17 @@ fn preset_position(p: Preset, wa: &WorkArea, w: u32, h: u32) -> (i32, i32) {
 
 /// Resolve the final window rect. Precedence per field: **explicit CLI value > preset > default**. The
 /// result is always fully within the target monitor's work area (size clamped to fit, position clamped so
-/// the whole window — and thus its title bar — is grabbable). Errors only on a zero size or no monitors.
-pub fn resolve(args: &GeometryArgs, monitors: &[WorkArea], default: Rect) -> Result<Resolved, GeometryError> {
+/// the whole window — and thus its title bar — is grabbable), **unless** `allow_offscreen` is `true`, in
+/// which case the requested position is honored exactly, even off the visible desktop (CPE-1047: lets
+/// `--test-mode` park automation windows where a human never sees them). Presets/monitor selection/size
+/// clamping still apply as normal either way — only the final off-screen position clamp is skipped.
+/// Errors only on a zero size or no monitors.
+pub fn resolve(
+    args: &GeometryArgs,
+    monitors: &[WorkArea],
+    default: Rect,
+    allow_offscreen: bool,
+) -> Result<Resolved, GeometryError> {
     let wa = match args.monitor {
         Some(n) => monitors.get(n).or_else(|| monitors.first()),
         None => monitors.first(),
@@ -188,14 +197,21 @@ pub fn resolve(args: &GeometryArgs, monitors: &[WorkArea], default: Rect) -> Res
     let want_x = args.x.map(li).or(preset.map(|(px, _)| px)).unwrap_or(default.x);
     let want_y = args.y.map(li).or(preset.map(|(_, py)| py)).unwrap_or(default.y);
 
-    // Off-screen protection: clamp so the whole window sits inside the work area (never ungrabbable).
-    let max_x = wa.x + wa.width.saturating_sub(width) as i32;
-    let max_y = wa.y + wa.height.saturating_sub(height) as i32;
-    let x = want_x.clamp(wa.x, max_x);
-    let y = want_y.clamp(wa.y, max_y);
-    if x != want_x || y != want_y {
-        warnings.push("position clamped onto the monitor work area".into());
-    }
+    // Off-screen protection: clamp so the whole window sits inside the work area (never ungrabbable) —
+    // unless the caller explicitly opted out (`--test-mode`, CPE-1047), in which case the requested
+    // position is honored verbatim so an automation window can be parked truly off-screen.
+    let (x, y) = if allow_offscreen {
+        (want_x, want_y)
+    } else {
+        let max_x = wa.x + wa.width.saturating_sub(width) as i32;
+        let max_y = wa.y + wa.height.saturating_sub(height) as i32;
+        let cx = want_x.clamp(wa.x, max_x);
+        let cy = want_y.clamp(wa.y, max_y);
+        if cx != want_x || cy != want_y {
+            warnings.push("position clamped onto the monitor work area".into());
+        }
+        (cx, cy)
+    };
 
     Ok(Resolved { rect: Rect { x, y, width, height }, maximized: args.maximized, fullscreen: args.fullscreen, warnings })
 }
@@ -214,7 +230,7 @@ mod tests {
     #[test]
     fn explicit_rect_inside_the_monitor_passes_through() {
         let args = GeometryArgs { x: Some(100), y: Some(120), width: Some(1200), height: Some(800), ..Default::default() };
-        let r = resolve(&args, &[mon(0, 0, 1920, 1080)], dflt()).unwrap();
+        let r = resolve(&args, &[mon(0, 0, 1920, 1080)], dflt(), false).unwrap();
         assert_eq!(r.rect, Rect { x: 100, y: 120, width: 1200, height: 800 });
         assert!(r.warnings.is_empty());
     }
@@ -222,22 +238,33 @@ mod tests {
     #[test]
     fn omitted_fields_fall_back_to_the_default_each_independently() {
         let args = GeometryArgs { width: Some(1000), ..Default::default() }; // only width given
-        let r = resolve(&args, &[mon(0, 0, 1920, 1080)], dflt()).unwrap();
+        let r = resolve(&args, &[mon(0, 0, 1920, 1080)], dflt(), false).unwrap();
         assert_eq!(r.rect, Rect { x: 50, y: 50, width: 1000, height: 600 });
     }
 
     #[test]
     fn an_offscreen_position_is_clamped_onto_the_work_area() {
         let args = GeometryArgs { x: Some(99999), y: Some(-500), width: Some(400), height: Some(300), ..Default::default() };
-        let r = resolve(&args, &[mon(0, 0, 1920, 1080)], dflt()).unwrap();
+        let r = resolve(&args, &[mon(0, 0, 1920, 1080)], dflt(), false).unwrap();
         assert_eq!(r.rect, Rect { x: 1920 - 400, y: 0, width: 400, height: 300 });
         assert!(r.warnings.iter().any(|w| w.contains("position clamped")));
     }
 
     #[test]
+    fn allow_offscreen_honors_a_far_offscreen_position_unclamped() {
+        // CPE-1047: `--test-mode` sets `allow_offscreen = true` so an automation window can be parked
+        // truly off the visible desktop — the same request that gets clamped above must pass through
+        // verbatim here, with no "position clamped" warning.
+        let args = GeometryArgs { x: Some(-4000), y: Some(-4000), width: Some(400), height: Some(300), ..Default::default() };
+        let r = resolve(&args, &[mon(0, 0, 1920, 1080)], dflt(), true).unwrap();
+        assert_eq!(r.rect, Rect { x: -4000, y: -4000, width: 400, height: 300 });
+        assert!(!r.warnings.iter().any(|w| w.contains("position clamped")));
+    }
+
+    #[test]
     fn an_oversized_window_is_clamped_to_the_monitor() {
         let args = GeometryArgs { width: Some(5000), height: Some(5000), x: Some(0), y: Some(0), ..Default::default() };
-        let r = resolve(&args, &[mon(0, 0, 1280, 800)], dflt()).unwrap();
+        let r = resolve(&args, &[mon(0, 0, 1280, 800)], dflt(), false).unwrap();
         assert_eq!(r.rect, Rect { x: 0, y: 0, width: 1280, height: 800 });
         assert!(r.warnings.iter().any(|w| w.contains("size clamped")));
     }
@@ -245,11 +272,11 @@ mod tests {
     #[test]
     fn preset_center_centers_and_explicit_x_wins_over_the_preset() {
         let args = GeometryArgs { position: Some(Preset::Center), width: Some(800), height: Some(600), ..Default::default() };
-        let r = resolve(&args, &[mon(0, 0, 1920, 1080)], dflt()).unwrap();
+        let r = resolve(&args, &[mon(0, 0, 1920, 1080)], dflt(), false).unwrap();
         assert_eq!(r.rect, Rect { x: (1920 - 800) / 2, y: (1080 - 600) / 2, width: 800, height: 600 });
 
         let args2 = GeometryArgs { x: Some(10), ..args };
-        let r2 = resolve(&args2, &[mon(0, 0, 1920, 1080)], dflt()).unwrap();
+        let r2 = resolve(&args2, &[mon(0, 0, 1920, 1080)], dflt(), false).unwrap();
         assert_eq!(r2.rect.x, 10, "explicit x overrides the preset");
         assert_eq!(r2.rect.y, (1080 - 600) / 2, "y still from the preset");
     }
@@ -258,14 +285,14 @@ mod tests {
     fn monitor_selection_positions_relative_to_that_display() {
         let monitors = [mon(0, 0, 1920, 1080), mon(1920, 0, 1280, 1024)];
         let args = GeometryArgs { monitor: Some(1), position: Some(Preset::TopLeft), width: Some(400), height: Some(300), ..Default::default() };
-        let r = resolve(&args, &monitors, dflt()).unwrap();
+        let r = resolve(&args, &monitors, dflt(), false).unwrap();
         assert_eq!(r.rect, Rect { x: 1920, y: 0, width: 400, height: 300 });
     }
 
     #[test]
     fn physical_inputs_convert_to_logical_by_the_monitor_scale() {
         let args = GeometryArgs { width: Some(2400), height: Some(1600), x: Some(200), y: Some(100), physical: true, ..Default::default() };
-        let r = resolve(&args, &[WorkArea { x: 0, y: 0, width: 1920, height: 1080, scale: 2.0 }], dflt()).unwrap();
+        let r = resolve(&args, &[WorkArea { x: 0, y: 0, width: 1920, height: 1080, scale: 2.0 }], dflt(), false).unwrap();
         // 2400x1600 physical / 2.0 = 1200x800 logical at (100,50).
         assert_eq!(r.rect, Rect { x: 100, y: 50, width: 1200, height: 800 });
     }
@@ -273,16 +300,16 @@ mod tests {
     #[test]
     fn zero_size_and_no_monitors_are_errors() {
         let z = GeometryArgs { width: Some(0), height: Some(100), ..Default::default() };
-        assert_eq!(resolve(&z, &[mon(0, 0, 800, 600)], dflt()), Err(GeometryError::ZeroSize));
+        assert_eq!(resolve(&z, &[mon(0, 0, 800, 600)], dflt(), false), Err(GeometryError::ZeroSize));
         let any = GeometryArgs::default();
-        assert_eq!(resolve(&any, &[], dflt()), Err(GeometryError::NoMonitors));
+        assert_eq!(resolve(&any, &[], dflt(), false), Err(GeometryError::NoMonitors));
     }
 
     #[test]
     fn zero_width_work_area_does_not_panic() {
         // Regression test for CPE-1015: zero-width monitor work area should not cause underflow panic.
         let args = GeometryArgs::default();
-        let r = resolve(&args, &[mon(100, 200, 0, 600)], dflt()).unwrap();
+        let r = resolve(&args, &[mon(100, 200, 0, 600)], dflt(), false).unwrap();
         // Position should be clamped onto the work-area origin.
         assert_eq!(r.rect.x, 100, "x should be at work-area origin");
         assert_eq!(r.rect.y, 200, "y should be at work-area origin");
@@ -294,7 +321,7 @@ mod tests {
     fn zero_height_work_area_does_not_panic() {
         // Regression test for CPE-1015: zero-height monitor work area should not cause underflow panic.
         let args = GeometryArgs::default();
-        let r = resolve(&args, &[mon(50, 75, 800, 0)], dflt()).unwrap();
+        let r = resolve(&args, &[mon(50, 75, 800, 0)], dflt(), false).unwrap();
         // Position should be clamped onto the work-area origin.
         assert_eq!(r.rect.x, 50, "x should be at work-area origin");
         assert_eq!(r.rect.y, 75, "y should be at work-area origin");
@@ -305,7 +332,7 @@ mod tests {
     #[test]
     fn maximized_and_fullscreen_pass_through() {
         let args = GeometryArgs { maximized: true, fullscreen: true, ..Default::default() };
-        let r = resolve(&args, &[mon(0, 0, 1920, 1080)], dflt()).unwrap();
+        let r = resolve(&args, &[mon(0, 0, 1920, 1080)], dflt(), false).unwrap();
         assert!(r.maximized && r.fullscreen);
     }
 

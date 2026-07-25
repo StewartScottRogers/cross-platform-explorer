@@ -5642,6 +5642,8 @@ fn startup_init_script(app: &tauri::AppHandle) -> Option<String> {
 /// restored — so precedence is `CLI flag > saved state > default`. Monitors have no work-area API in
 /// Tauri, so the full monitor bounds are used and the pure resolver clamps the window fully on-screen.
 /// A parse/geometry error exits non-zero (never a mangled window); nothing requested → leave as restored.
+/// **CPE-1047:** under `--test-mode` the on-screen clamp is skipped (`allow_offscreen`), so an automated
+/// GUI-test window can be positioned truly off the visible desktop; a normal launch is unaffected.
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
 fn apply_cli_geometry(app: &tauri::AppHandle) {
     use tauri::Manager;
@@ -5689,7 +5691,10 @@ fn apply_cli_geometry(app: &tauri::AppHandle) {
         height: cur_size.map(|s| (s.height as f64 / scale).round() as u32).unwrap_or(700),
     };
 
-    match geometry::resolve(&args, &monitors, default) {
+    // CPE-1047: `--test-mode` opts out of the on-screen clamp so an automated GUI-test window can be
+    // positioned truly off-screen (e.g. `--test-mode --x -4000`) and never appear on the user's screen.
+    let allow_offscreen = resolve_startup_test_mode(app);
+    match geometry::resolve(&args, &monitors, default, allow_offscreen) {
         Ok(r) => {
             for w in &r.warnings {
                 eprintln!("geometry: {w}");
