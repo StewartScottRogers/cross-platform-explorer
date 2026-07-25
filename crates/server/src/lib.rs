@@ -315,3 +315,8 @@ pub mod file_type;
 /// separately reports which line-ending convention(s) a decoded string uses. Pure over a byte slice
 /// / `&str`; no I/O, no new dependencies.
 pub mod text_encoding;
+
+/// Archive expansion-ratio / zip-bomb safety score (CPE-1004, epic CPE-1002). Pure per-entry
+/// compressed/uncompressed size scoring against configurable thresholds — no extraction, no I/O, no
+/// new dependencies.
+pub mod archive_safety;
