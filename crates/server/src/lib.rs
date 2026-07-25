@@ -209,6 +209,10 @@ pub mod links;
 /// (CPE-1024, epic CPE-716). No network or mount I/O here.
 pub mod net_share;
 
+/// Select-by-pattern engine — glob/extension/kind selection queries over a listing, plus `Invert`
+/// (CPE-1025, epic CPE-711). Pure: no filesystem access.
+pub mod selection;
+
 /// Shell context-menu model — registered verbs + which apply to a given selection, the pure core behind
 /// "CPE as a shell citizen" (CPE-945, epic CPE-712). Per-OS shell registration is separate glue.
 pub mod shell_menu;
