@@ -84,17 +84,19 @@ fn looks_binary(bytes: &[u8]) -> bool {
 /// 2. A byte-order mark → [`Utf8Bom`](EncodingGuess::Utf8Bom) (`EF BB BF`),
 ///    [`Utf16Le`](EncodingGuess::Utf16Le) (`FF FE`), or [`Utf16Be`](EncodingGuess::Utf16Be)
 ///    (`FE FF`).
-/// 3. Valid UTF-8 (`std::str::from_utf8`) → [`Utf8`](EncodingGuess::Utf8).
-/// 4. Otherwise, [`looks_binary`] → [`Binary`](EncodingGuess::Binary).
-/// 5. Otherwise → [`Latin1`](EncodingGuess::Latin1), a guess of last resort for the remaining
+/// 3. A NUL byte (no BOM) → not plain text: BOM-less UTF-16 or [`Binary`](EncodingGuess::Binary). Runs
+///    **before** the UTF-8 check because a NUL is itself valid UTF-8, so BOM-less UTF-16 ASCII (`h\0i\0`)
+///    would otherwise be mis-reported as plain [`Utf8`](EncodingGuess::Utf8). If the NULs sit cleanly in
+///    one byte-lane it is [`Utf16Le`](EncodingGuess::Utf16Le) (odd offsets) / [`Utf16Be`] (even offsets);
+///    otherwise [`Binary`](EncodingGuess::Binary). See [`classify_nul_bytes`].
+/// 4. Valid UTF-8 (`std::str::from_utf8`) → [`Utf8`](EncodingGuess::Utf8).
+/// 5. Otherwise, [`looks_binary`] (a high ratio of control bytes) → [`Binary`](EncodingGuess::Binary).
+/// 6. Otherwise → [`Latin1`](EncodingGuess::Latin1), a guess of last resort for the remaining
 ///    not-valid-UTF-8, not-binary-looking bytes.
 ///
-/// **Documented limitation:** UTF-16 is only detected via its byte-order mark. UTF-16 text saved
-/// without a BOM (common for plain-ASCII UTF-16LE, e.g. `h\0i\0`) is *not* distinguished here — every
-/// other byte being NUL would normally be a strong hint, but because a NUL byte is itself valid
-/// UTF-8 (`U+0000`), such text still round-trips through `str::from_utf8` and is reported as plain
-/// [`Utf8`](EncodingGuess::Utf8). A heuristic for no-BOM UTF-16 (e.g. alternating-NUL byte patterns)
-/// is deliberately out of scope for this pure, simple sniffer; a future ticket could add it.
+/// **Limitation:** BOM-less UTF-16 detection is heuristic (NUL-lane pattern over a sniffed prefix); a
+/// UTF-16 file dominated by non-ASCII (few NUL high-bytes) may fall through to `Binary`. UTF-32 is not
+/// distinguished (a `FF FE 00 00` BOM reads as UTF-16LE).
 pub fn detect_encoding(bytes: &[u8]) -> EncodingGuess {
     if bytes.is_empty() {
         return EncodingGuess::Empty;
@@ -108,6 +110,13 @@ pub fn detect_encoding(bytes: &[u8]) -> EncodingGuess {
     if bytes.len() >= 2 && bytes[0] == 0xFE && bytes[1] == 0xFF {
         return EncodingGuess::Utf16Be;
     }
+    // A NUL byte means this isn't plain UTF-8/Latin-1 *text* (neither ever contains NUL); classify it as
+    // BOM-less UTF-16 or binary BEFORE the UTF-8 check — a NUL is itself valid UTF-8, so a BOM-less
+    // UTF-16 ASCII file like `h\0i\0` would otherwise round-trip through `from_utf8` and be mis-reported
+    // as plain text (CPE-1003 QA finding).
+    if bytes.contains(&0) {
+        return classify_nul_bytes(bytes);
+    }
     if std::str::from_utf8(bytes).is_ok() {
         return EncodingGuess::Utf8;
     }
@@ -115,6 +124,33 @@ pub fn detect_encoding(bytes: &[u8]) -> EncodingGuess {
         return EncodingGuess::Binary;
     }
     EncodingGuess::Latin1
+}
+
+/// Classify NUL-containing, BOM-less input (called only from [`detect_encoding`]). BOM-less UTF-16 of
+/// ASCII-range text fills one whole byte-lane with NULs — odd offsets for little-endian, even for
+/// big-endian — so a lane that is at least half NUL while the other lane is clear is reported as UTF-16;
+/// anything else (NULs on both lanes, or just a stray NUL) is [`Binary`](EncodingGuess::Binary).
+fn classify_nul_bytes(bytes: &[u8]) -> EncodingGuess {
+    let sniff_len = bytes.len().min(BINARY_SNIFF_LEN);
+    let lane = (sniff_len / 2).max(1); // approx positions per byte-lane in the sniffed prefix
+    let mut even_nul = 0usize;
+    let mut odd_nul = 0usize;
+    for (i, &b) in bytes[..sniff_len].iter().enumerate() {
+        if b == 0 {
+            if i % 2 == 0 {
+                even_nul += 1;
+            } else {
+                odd_nul += 1;
+            }
+        }
+    }
+    if odd_nul * 2 >= lane && even_nul == 0 {
+        EncodingGuess::Utf16Le
+    } else if even_nul * 2 >= lane && odd_nul == 0 {
+        EncodingGuess::Utf16Be
+    } else {
+        EncodingGuess::Binary
+    }
 }
 
 /// A line-ending convention.
@@ -240,6 +276,23 @@ mod tests {
         // valid UTF-8 lead byte — so this fails the UTF-8 check and lands on the binary heuristic.
         let bytes: Vec<u8> = vec![0x00, 0x01, 0x02, 0x03, 0xFF, 0x04, 0x05, 0xFE, b'a', b'b', b'c', b'd'];
         assert_eq!(detect_encoding(&bytes), EncodingGuess::Binary);
+    }
+
+    #[test]
+    fn bom_less_utf16_and_embedded_nul_are_not_utf8() {
+        // QA-finding regression: a NUL is valid UTF-8, so these used to mis-report as `Utf8`. The NUL
+        // check now runs before the UTF-8 check.
+        // BOM-less UTF-16LE ASCII "hi" — NUL high-bytes on odd offsets → Utf16Le.
+        assert_eq!(detect_encoding(&[0x68, 0x00, 0x69, 0x00]), EncodingGuess::Utf16Le);
+        // BOM-less UTF-16BE ASCII "hi" — NUL high-bytes on even offsets → Utf16Be.
+        assert_eq!(detect_encoding(&[0x00, 0x68, 0x00, 0x69]), EncodingGuess::Utf16Be);
+        // A longer BOM-less UTF-16LE run stays Utf16Le.
+        let utf16le: Vec<u8> = "hello".bytes().flat_map(|b| [b, 0]).collect();
+        assert_eq!(detect_encoding(&utf16le), EncodingGuess::Utf16Le);
+        // The key point: none of these are reported as plain UTF-8 text anymore.
+        assert_ne!(detect_encoding(&[0x68, 0x00, 0x69, 0x00]), EncodingGuess::Utf8);
+        // A stray single embedded NUL in otherwise-ASCII text isn't a clean UTF-16 lane → Binary, not Utf8.
+        assert_eq!(detect_encoding(b"hello\0world"), EncodingGuess::Binary);
     }
 
     #[test]
