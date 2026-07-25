@@ -7,7 +7,8 @@ priority: medium
 tags: ready
 epic: CPE-661
 created: 2026-07-25
-status: Backlog
+closed: 2026-07-25
+status: Done
 ---
 
 ## Summary
