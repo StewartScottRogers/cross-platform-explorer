@@ -324,6 +324,59 @@ fn capitalise(s: &str) -> String {
     }
 }
 
+// ---- EXIF (CPE-1034) ----
+
+/// Common EXIF tags mapped to a friendly key + editable flag. Camera-set intrinsics (make/model/
+/// dimensions/exposure/ISO/focal length/orientation/date/lens) are read-only; the handful of
+/// descriptive tags a user legitimately edits are `editable:true`.
+const EXIF_TAGS: &[(exif::Tag, &str, bool)] = &[
+    (exif::Tag::Make, "Make", false),
+    (exif::Tag::Model, "Model", false),
+    (exif::Tag::LensModel, "LensModel", false),
+    (exif::Tag::DateTimeOriginal, "DateTimeOriginal", false),
+    (exif::Tag::ExposureTime, "ExposureTime", false),
+    (exif::Tag::FNumber, "FNumber", false),
+    (exif::Tag::PhotographicSensitivity, "ISO", false),
+    (exif::Tag::FocalLength, "FocalLength", false),
+    (exif::Tag::Orientation, "Orientation", false),
+    (exif::Tag::PixelXDimension, "PixelXDimension", false),
+    (exif::Tag::PixelYDimension, "PixelYDimension", false),
+    (exif::Tag::GPSLatitude, "GPS Latitude", false),
+    (exif::Tag::GPSLongitude, "GPS Longitude", false),
+    (exif::Tag::ImageDescription, "ImageDescription", true),
+    (exif::Tag::Artist, "Artist", true),
+    (exif::Tag::Copyright, "Copyright", true),
+    (exif::Tag::UserComment, "UserComment", true),
+];
+
+/// Parse EXIF metadata from an image's leading bytes into [`MetaField`]s in group `"exif"`. Uses the
+/// `exif` crate (`kamadak-exif`, already a dependency — do not add another) via
+/// `Reader::read_from_container`, which auto-detects TIFF/JPEG/PNG/WebP/HEIF containers and locates the
+/// embedded Exif block. On any error — not an image, no Exif data, or truncated/corrupt bytes — this
+/// returns an empty vec; it **never panics**.
+///
+/// Camera intrinsics (Make/Model/dimensions/exposure/ISO/focal length/orientation/date/lens) are
+/// `editable:false`; the descriptive tags a user legitimately edits (caption/artist/copyright/comment)
+/// are `editable:true`. Values come straight from [`exif::Field::display_value`]`.with_unit(&exif)`, so
+/// e.g. ASCII fields render with surrounding quotes and rationals carry their unit (`"f/2.8"`,
+/// `"1/200 s"`) — this mirrors the crate's own formatting rather than reinventing it. Fields with an
+/// empty display value are skipped.
+pub fn read_exif(bytes: &[u8]) -> Vec<MetaField> {
+    let Ok(exif) = exif::Reader::new().read_from_container(&mut std::io::Cursor::new(bytes)) else {
+        return Vec::new();
+    };
+    let mut fields = Vec::new();
+    for &(tag, key, editable) in EXIF_TAGS {
+        let Some(field) = exif.get_field(tag, exif::In::PRIMARY) else { continue };
+        let value = field.display_value().with_unit(&exif).to_string();
+        if value.trim().is_empty() {
+            continue;
+        }
+        fields.push(MetaField { group: "exif".to_string(), key: key.to_string(), value, editable });
+    }
+    fields
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -608,5 +661,247 @@ mod tests {
         let f = read_id3v2(&tag);
         assert_eq!(get(&f, "Title"), Some("Yesterday"));
         assert_eq!(get(&f, "Artist"), Some("The Beatles"));
+    }
+
+    // ---- EXIF fixture builder (CPE-1034) ----
+    //
+    // A minimal hand-built little-endian TIFF/Exif container: an 8-byte TIFF header + IFD0 (image-level
+    // tags, plus pointers to the Exif and GPS sub-IFDs when needed) + the Exif sub-IFD + the GPS
+    // sub-IFD. `exif::Reader::read_from_container` recognises raw TIFF bytes directly via the `II*\0`
+    // signature, so no JPEG/PNG wrapping is needed for a fixture — this *is* what a `.tif`/`.tiff` file's
+    // header looks like, and it's also byte-for-byte what a JPEG's embedded Exif APP1 payload contains.
+
+    /// One raw IFD entry: tag, TIFF type code, count, and its type-specific value bytes (already
+    /// little-endian encoded). Written inline in the entry's 4-byte value slot when `data.len() <= 4`
+    /// (per the TIFF spec); otherwise placed in this IFD's own overflow area right after its entries.
+    struct RawEntry { tag: u16, typ: u16, count: u32, data: Vec<u8> }
+
+    const T_ASCII: u16 = 2;
+    const T_SHORT: u16 = 3;
+    const T_LONG: u16 = 4;
+    const T_RATIONAL: u16 = 5;
+
+    fn ascii_entry(tag: u16, s: &str) -> RawEntry {
+        let mut data = s.as_bytes().to_vec();
+        data.push(0); // NUL-terminated, per TIFF ASCII fields
+        RawEntry { tag, typ: T_ASCII, count: data.len() as u32, data }
+    }
+    fn short_entry(tag: u16, v: u16) -> RawEntry {
+        RawEntry { tag, typ: T_SHORT, count: 1, data: v.to_le_bytes().to_vec() }
+    }
+    fn long_entry(tag: u16, v: u32) -> RawEntry {
+        RawEntry { tag, typ: T_LONG, count: 1, data: v.to_le_bytes().to_vec() }
+    }
+    fn rational_entry(tag: u16, num: u32, den: u32) -> RawEntry {
+        let mut data = num.to_le_bytes().to_vec();
+        data.extend_from_slice(&den.to_le_bytes());
+        RawEntry { tag, typ: T_RATIONAL, count: 1, data }
+    }
+    fn rational3_entry(tag: u16, vals: [(u32, u32); 3]) -> RawEntry {
+        let mut data = Vec::new();
+        for (n, d) in vals {
+            data.extend_from_slice(&n.to_le_bytes());
+            data.extend_from_slice(&d.to_le_bytes());
+        }
+        RawEntry { tag, typ: T_RATIONAL, count: 3, data }
+    }
+
+    /// Total bytes an IFD's header (count + 12-byte entries + next-IFD offset) plus its own overflow
+    /// data will occupy — used to compute where the *next* IFD in the file must start.
+    fn ifd_block_len(entries: &[RawEntry]) -> u32 {
+        let header = 2 + entries.len() as u32 * 12 + 4;
+        let overflow: u32 = entries.iter().map(|e| if e.data.len() > 4 { e.data.len() as u32 } else { 0 }).sum();
+        header + overflow
+    }
+
+    /// Serialize one IFD at the absolute file offset `start`, given the offset of the next IFD (0 if
+    /// none). Entries whose value doesn't fit inline get their overflow bytes appended right after this
+    /// IFD's own entry table, with the entry pointing at that offset — mirroring how a real TIFF writer
+    /// lays out variable-length field data.
+    fn build_ifd(start: u32, entries: &[RawEntry], next_ifd: u32) -> Vec<u8> {
+        let header_len = 2 + entries.len() as u32 * 12 + 4;
+        let mut overflow_offset = start + header_len;
+        let mut out = Vec::new();
+        let mut overflow = Vec::new();
+        out.extend_from_slice(&(entries.len() as u16).to_le_bytes());
+        for e in entries {
+            out.extend_from_slice(&e.tag.to_le_bytes());
+            out.extend_from_slice(&e.typ.to_le_bytes());
+            out.extend_from_slice(&e.count.to_le_bytes());
+            if e.data.len() <= 4 {
+                let mut inline = [0u8; 4];
+                inline[..e.data.len()].copy_from_slice(&e.data);
+                out.extend_from_slice(&inline);
+            } else {
+                out.extend_from_slice(&overflow_offset.to_le_bytes());
+                overflow.extend_from_slice(&e.data);
+                overflow_offset += e.data.len() as u32;
+            }
+        }
+        out.extend_from_slice(&next_ifd.to_le_bytes());
+        out.extend_from_slice(&overflow);
+        out
+    }
+
+    /// Build a full little-endian TIFF/Exif fixture from IFD0's own entries plus optional Exif-sub-IFD
+    /// and GPS-sub-IFD entries (each skipped, and its pointer omitted from IFD0, when empty).
+    fn build_exif_tiff(mut ifd0: Vec<RawEntry>, exif_ifd: Vec<RawEntry>, gps_ifd: Vec<RawEntry>) -> Vec<u8> {
+        const EXIF_IFD_POINTER: u16 = 0x8769;
+        const GPS_INFO_IFD_POINTER: u16 = 0x8825;
+        if !exif_ifd.is_empty() {
+            ifd0.push(long_entry(EXIF_IFD_POINTER, 0)); // placeholder, patched below
+        }
+        if !gps_ifd.is_empty() {
+            ifd0.push(long_entry(GPS_INFO_IFD_POINTER, 0));
+        }
+        const HEADER_LEN: u32 = 8;
+        let exif_offset = HEADER_LEN + ifd_block_len(&ifd0);
+        let gps_offset = exif_offset + ifd_block_len(&exif_ifd);
+
+        // Now that the sub-IFD offsets are known, patch the pointer entries with their real values.
+        for e in ifd0.iter_mut() {
+            if e.tag == EXIF_IFD_POINTER {
+                e.data = exif_offset.to_le_bytes().to_vec();
+            } else if e.tag == GPS_INFO_IFD_POINTER {
+                e.data = gps_offset.to_le_bytes().to_vec();
+            }
+        }
+
+        let mut buf = Vec::new();
+        buf.extend_from_slice(b"II*\0"); // little-endian TIFF signature
+        buf.extend_from_slice(&HEADER_LEN.to_le_bytes()); // offset of IFD0
+        buf.extend_from_slice(&build_ifd(HEADER_LEN, &ifd0, 0));
+        if !exif_ifd.is_empty() {
+            buf.extend_from_slice(&build_ifd(exif_offset, &exif_ifd, 0));
+        }
+        if !gps_ifd.is_empty() {
+            buf.extend_from_slice(&build_ifd(gps_offset, &gps_ifd, 0));
+        }
+        buf
+    }
+
+    /// A fixture exercising the camera-intrinsic tags (IFD0 + Exif sub-IFD + GPS sub-IFD) plus one
+    /// descriptive (editable) tag, `ImageDescription`.
+    fn full_exif_fixture() -> Vec<u8> {
+        let ifd0 = vec![
+            ascii_entry(0x010E, "Sunset"),        // ImageDescription
+            ascii_entry(0x010F, "Acme"),          // Make
+            ascii_entry(0x0110, "Zenith 3000"),   // Model
+            short_entry(0x0112, 1),               // Orientation
+        ];
+        let exif_ifd = vec![
+            rational_entry(0x829A, 1, 200),               // ExposureTime = 1/200 s
+            rational_entry(0x829D, 28, 10),               // FNumber = f/2.8
+            short_entry(0x8827, 400),                     // PhotographicSensitivity (ISO)
+            ascii_entry(0x9003, "2024:01:02 03:04:05"),   // DateTimeOriginal
+            rational_entry(0x920A, 50, 1),                // FocalLength = 50 mm
+            long_entry(0xA002, 4000),                     // PixelXDimension
+            long_entry(0xA003, 3000),                     // PixelYDimension
+        ];
+        let gps_ifd = vec![
+            ascii_entry(0x0001, "N"),                                  // GPSLatitudeRef
+            rational3_entry(0x0002, [(37, 1), (46, 1), (30, 1)]),      // GPSLatitude
+            ascii_entry(0x0003, "W"),                                  // GPSLongitudeRef
+            rational3_entry(0x0004, [(122, 1), (25, 1), (9, 1)]),      // GPSLongitude
+        ];
+        build_exif_tiff(ifd0, exif_ifd, gps_ifd)
+    }
+
+    #[test]
+    fn read_exif_maps_common_fields_with_editable_flags() {
+        let f = read_exif(&full_exif_fixture());
+
+        // ASCII fields render quoted (the crate's own Display impl for Value::Ascii); numeric/DMS/
+        // datetime fields don't. This test asserts exactly what `display_value().with_unit(&exif)`
+        // produces for our fixture, so it locks in real parsing rather than a hand-guessed string.
+        assert_eq!(get(&f, "Make"), Some("\"Acme\""));
+        assert_eq!(get(&f, "Model"), Some("\"Zenith 3000\""));
+        assert_eq!(get(&f, "ImageDescription"), Some("\"Sunset\""));
+        assert_eq!(get(&f, "Orientation"), Some("row 0 at top and column 0 at left"));
+        assert_eq!(get(&f, "DateTimeOriginal"), Some("2024-01-02 03:04:05"));
+        assert_eq!(get(&f, "PixelXDimension"), Some("4000 pixels"));
+        assert_eq!(get(&f, "PixelYDimension"), Some("3000 pixels"));
+        assert_eq!(get(&f, "ISO"), Some("400"));
+        assert_eq!(get(&f, "ExposureTime"), Some("1/200 s"));
+        assert_eq!(get(&f, "FNumber"), Some("f/2.8"));
+        assert_eq!(get(&f, "FocalLength"), Some("50 mm"));
+        assert_eq!(get(&f, "GPS Latitude"), Some("37 deg 46 min 30 sec N"));
+        assert_eq!(get(&f, "GPS Longitude"), Some("122 deg 25 min 9 sec W"));
+
+        // Camera intrinsics are read-only, and every field lands in the "exif" group.
+        for key in [
+            "Make", "Model", "Orientation", "DateTimeOriginal", "PixelXDimension", "PixelYDimension",
+            "ISO", "ExposureTime", "FNumber", "FocalLength", "GPS Latitude", "GPS Longitude",
+        ] {
+            let field = f.iter().find(|x| x.key == key).unwrap_or_else(|| panic!("missing {key}"));
+            assert_eq!(field.group, "exif");
+            assert!(!field.editable, "{key} should be read-only");
+        }
+        // The one descriptive tag in this fixture is user-editable.
+        let desc = f.iter().find(|x| x.key == "ImageDescription").unwrap();
+        assert_eq!(desc.group, "exif");
+        assert!(desc.editable);
+    }
+
+    #[test]
+    fn read_exif_maps_descriptive_tags_as_editable() {
+        let ifd0 = vec![
+            ascii_entry(0x013B, "Jane Doe"),           // Artist
+            ascii_entry(0x8298, "(c) 2024 Jane Doe"),  // Copyright
+        ];
+        let exif_ifd = vec![
+            ascii_entry(0xA434, "50mm Prime"), // LensModel
+            ascii_entry(0x9286, "Shot at dawn"), // UserComment
+        ];
+        let bytes = build_exif_tiff(ifd0, exif_ifd, Vec::new());
+        let f = read_exif(&bytes);
+
+        // The user-editable descriptive tags.
+        for (key, expected) in [
+            ("Artist", "\"Jane Doe\""),
+            ("Copyright", "\"(c) 2024 Jane Doe\""),
+            ("UserComment", "\"Shot at dawn\""),
+        ] {
+            let field = f.iter().find(|x| x.key == key).unwrap_or_else(|| panic!("missing {key}"));
+            assert_eq!(field.value, expected);
+            assert_eq!(field.group, "exif");
+            assert!(field.editable, "{key} should be editable");
+        }
+        // LensModel is a camera-set intrinsic like Make/Model, not a user-editable descriptive tag.
+        let lens = f.iter().find(|x| x.key == "LensModel").unwrap();
+        assert_eq!(lens.value, "\"50mm Prime\"");
+        assert!(!lens.editable, "LensModel should be read-only");
+    }
+
+    #[test]
+    fn read_exif_skips_absent_gps_and_descriptive_tags() {
+        // Only Make/Model — no GPS sub-IFD, no ImageDescription/Artist/etc.
+        let ifd0 = vec![ascii_entry(0x010F, "Acme"), ascii_entry(0x0110, "Zenith 3000")];
+        let bytes = build_exif_tiff(ifd0, Vec::new(), Vec::new());
+        let f = read_exif(&bytes);
+
+        assert_eq!(get(&f, "Make"), Some("\"Acme\""));
+        assert_eq!(get(&f, "Model"), Some("\"Zenith 3000\""));
+        assert_eq!(f.iter().find(|x| x.key == "GPS Latitude"), None);
+        assert_eq!(f.iter().find(|x| x.key == "ImageDescription"), None);
+        assert_eq!(f.iter().find(|x| x.key == "ExposureTime"), None);
+        assert_eq!(f.len(), 2); // nothing else got surfaced
+    }
+
+    #[test]
+    fn read_exif_returns_empty_for_non_image_bytes() {
+        assert!(read_exif(b"").is_empty());
+        assert!(read_exif(b"not an image at all, just plain text bytes").is_empty());
+        assert!(read_exif(b"ID3\x03\0\0\0\0\0\0").is_empty()); // a real ID3 tag, but not an image
+    }
+
+    #[test]
+    fn read_exif_tolerates_truncation_without_panicking() {
+        let bytes = full_exif_fixture();
+        for cut in 0..bytes.len() {
+            let _ = read_exif(&bytes[..cut]); // must never panic on any truncation
+        }
+        // A cut that keeps only the TIFF header (no IFD body at all) yields nothing.
+        assert!(read_exif(&bytes[..8]).is_empty());
     }
 }
