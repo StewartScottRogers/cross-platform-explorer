@@ -67,6 +67,7 @@
   import { namesList, detailList, csvList } from "./lib/listing";
   import { parentDir as parentOfPath, baseName } from "./lib/contentSearch";
   import PropertiesDialog from "./lib/components/PropertiesDialog.svelte";
+  import MetadataStudioDialog from "./lib/components/MetadataStudioDialog.svelte";
   import BatchRenameDialog from "./lib/components/BatchRenameDialog.svelte";
   import TagEditor from "./lib/components/TagEditor.svelte";
   import { initTags, tags, retagPath, renameTag, deleteTag, importTags, exportTags } from "./lib/tags";
@@ -416,6 +417,7 @@
   let ctx: { x: number; y: number; target: "item" | "empty" } | null = null;
   let confirm: { title: string; message: string; label: string; onYes: () => void } | null = null;
   let propsFor: DirEntry[] | null = null;
+  let studioFor: DirEntry[] | null = null;
   let batchRenameFor: DirEntry[] | null = null;
   /** The entry whose tags/label are being edited (CPE-637), or null when the editor is closed. */
   let tagEditorFor: DirEntry[] | null = null;
@@ -519,6 +521,7 @@
     { id: "file.deletePermanent", group: $t("palette.groupFile"), label: $t("palette.deletePermanent"), keywords: "remove", shortcut: "Shift+Delete", run: () => doDelete(true), enabled: hasSelection },
     { id: "file.selectAll", group: $t("palette.groupFile"), label: $t("palette.selectAll"), shortcut: "Ctrl+A", run: selectAllVisible, enabled: inFolder },
     { id: "file.properties", group: $t("palette.groupFile"), label: $t("palette.properties"), shortcut: "Alt+Enter", run: openProperties, enabled: hasSelection },
+    { id: "file.metadataStudio", group: $t("palette.groupFile"), label: $t("studio.menu"), run: openMetadataStudio, enabled: hasSelection },
     { id: "file.reveal", group: $t("palette.groupFile"), label: $t("palette.reveal"), keywords: "explorer finder show os", run: revealInExplorer, enabled: inFolder },
     { id: "file.terminal", group: $t("palette.groupFile"), label: $t("palette.terminal"), keywords: "shell command prompt console", run: () => openTerminal(currentPath), enabled: inFolder },
     { id: "view.details", group: $t("palette.groupView"), label: $t("palette.viewDetails"), run: () => { view = "details"; settings.saveView(view); } },
@@ -2168,6 +2171,11 @@
     propsFor = selectedEntries;
   }
 
+  function openMetadataStudio() {
+    if (selectedEntries.length === 0) return;
+    studioFor = selectedEntries;
+  }
+
   /** Select every visible entry (CPE-605). A named function so the palette command can reference it
       without textually assigning `selection` inside the reactive `paletteCommands` block — that would
       make Svelte see a write and form a selection ⇄ selectedEntries cycle. */
@@ -2226,6 +2234,7 @@
       case "batch-rename": beginBatchRename(); break;
       case "delete": askDelete(false); break;
       case "properties": openProperties(); break;
+      case "metadataStudio": openMetadataStudio(); break;
       case "tags": if (selectedEntries.length >= 1) tagEditorFor = [...selectedEntries]; break;
       case "new-folder": newFolder(); break;
       case "new-file": newFile(); break;
@@ -3457,6 +3466,10 @@
 
 {#if propsFor}
   <PropertiesDialog entries={propsFor} on:close={() => (propsFor = null)} />
+{/if}
+
+{#if studioFor}
+  <MetadataStudioDialog entries={studioFor} on:close={() => (studioFor = null)} />
 {/if}
 
 {#if tagEditorFor}

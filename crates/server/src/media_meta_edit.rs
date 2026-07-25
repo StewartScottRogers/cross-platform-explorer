@@ -17,7 +17,7 @@ pub struct MetaField {
 }
 
 /// An edit the user asked for.
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[cfg_attr(feature = "specta", derive(specta::Type))]
 #[serde(tag = "edit", rename_all = "snake_case")]
 pub enum MetaEdit {

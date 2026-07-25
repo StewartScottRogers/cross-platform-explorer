@@ -663,6 +663,45 @@ async imageMeta(path: string) : Promise<Result<ImageMeta, string>> {
 }
 },
 /**
+ * Read *all* of a file's editable metadata for the Metadata Studio (CPE-1041, epic CPE-725), dispatched by
+ * extension across the read codecs (ID3/Vorbis/EXIF/PDF/video). Thin `spawn_blocking` dispatcher into
+ * `cpe_server::media_meta::read_all`; a kind with no codec yields an empty list.
+ */
+async metadataRead(path: string) : Promise<Result<MetaField[], string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("metadata_read", { path }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * Whether a file's format has a metadata write-back codec today (mp3/flac) — the studio uses this to offer
+ * editing vs read-only view (CPE-1041). Thin dispatcher into `cpe_server::media_meta::is_writable`.
+ */
+async metadataWritable(path: string) : Promise<Result<boolean, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("metadata_writable", { path }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * Apply `edits` to a file's metadata and save them back atomically (CPE-1041, epic CPE-725): read current
+ * fields, apply the edit policy, re-serialise with the format's write codec, then write via a temp file +
+ * rename so a mid-write failure never truncates the original. Returns the re-read fields so the studio
+ * refreshes. `Err` for a format with no writer yet.
+ */
+async metadataWrite(path: string, edits: MetaEdit[]) : Promise<Result<MetaField[], string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("metadata_write", { path, edits }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
  * Streaming variant of `list_dir` (CPE-663, epic CPE-662): pushes `DirEntry` batches over an IPC channel
  * as the directory is read, so the frontend paints the first rows immediately instead of waiting for the
  * whole listing. `stream_id` (frontend-supplied, monotonic) registers a cancel flag polled each batch, so
@@ -1854,6 +1893,27 @@ target: string | null;
  * True only for a symlink whose target does not currently resolve.
  */
 broken: boolean }
+/**
+ * An edit the user asked for.
+ */
+export type MetaEdit = 
+/**
+ * Set (update or add) a field's value.
+ */
+{ edit: "set"; group: string; key: string; value: string } | 
+/**
+ * Remove a field.
+ */
+{ edit: "clear"; group: string; key: string }
+/**
+ * One metadata field. `editable` gates whether the studio may change it (e.g. camera-set intrinsics like
+ * image dimensions are read-only; a caption or artist tag is editable).
+ */
+export type MetaField = { 
+/**
+ * The metadata group/namespace, e.g. `"exif"`, `"iptc"`, `"id3"`.
+ */
+group: string; key: string; value: string; editable: boolean }
 /**
  * One filename-search hit: the full path, the bare name, and whether it's a folder.
  */

@@ -259,6 +259,11 @@ pub mod backup;
 /// (CPE-942, epic CPE-725). Pure edit policy; the codec layer reads/writes the real files.
 pub mod media_meta_edit;
 
+/// Metadata-studio dispatch — read *all* of a file's metadata across the per-format read codecs, and write
+/// edits back for the writable formats (mp3/flac), routed by extension (CPE-1041, epic CPE-725). The one
+/// entry point the app's metadata commands call. Pure.
+pub mod media_meta;
+
 /// Media-metadata read codecs — parse a media file's bytes into [`media_meta_edit::MetaField`]s. First
 /// codec: ID3v2 audio tags (CPE-970, epic CPE-725; also feeds CPE-707 columns). Pure, std-only.
 pub mod media_meta_read;

@@ -1853,6 +1853,65 @@ async fn image_meta(path: String) -> Result<cpe_server::image_preview::ImageMeta
         .await.map_err(|e| e.to_string())?
 }
 
+/// Read *all* of a file's editable metadata for the Metadata Studio (CPE-1041, epic CPE-725), dispatched by
+/// extension across the read codecs (ID3/Vorbis/EXIF/PDF/video). Thin `spawn_blocking` dispatcher into
+/// `cpe_server::media_meta::read_all`; a kind with no codec yields an empty list.
+#[tauri::command]
+#[cfg_attr(feature = "specta-bindings", specta::specta)]
+async fn metadata_read(path: String) -> Result<Vec<cpe_server::media_meta_edit::MetaField>, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let bytes = std::fs::read(&path).map_err(|e| e.to_string())?;
+        let ext = std::path::Path::new(&path)
+            .extension().and_then(|e| e.to_str()).unwrap_or("").to_string();
+        Ok(cpe_server::media_meta::read_all(&ext, &bytes))
+    })
+    .await.map_err(|e| e.to_string())?
+}
+
+/// Whether a file's format has a metadata write-back codec today (mp3/flac) — the studio uses this to offer
+/// editing vs read-only view (CPE-1041). Thin dispatcher into `cpe_server::media_meta::is_writable`.
+#[tauri::command]
+#[cfg_attr(feature = "specta-bindings", specta::specta)]
+async fn metadata_writable(path: String) -> Result<bool, String> {
+    let ext = std::path::Path::new(&path)
+        .extension().and_then(|e| e.to_str()).unwrap_or("").to_string();
+    Ok(cpe_server::media_meta::is_writable(&ext))
+}
+
+/// Apply `edits` to a file's metadata and save them back atomically (CPE-1041, epic CPE-725): read current
+/// fields, apply the edit policy, re-serialise with the format's write codec, then write via a temp file +
+/// rename so a mid-write failure never truncates the original. Returns the re-read fields so the studio
+/// refreshes. `Err` for a format with no writer yet.
+#[tauri::command]
+#[cfg_attr(feature = "specta-bindings", specta::specta)]
+async fn metadata_write(
+    path: String,
+    edits: Vec<cpe_server::media_meta_edit::MetaEdit>,
+) -> Result<Vec<cpe_server::media_meta_edit::MetaField>, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let bytes = std::fs::read(&path).map_err(|e| e.to_string())?;
+        let ext = std::path::Path::new(&path)
+            .extension().and_then(|e| e.to_str()).unwrap_or("").to_string();
+        let out = cpe_server::media_meta::write_back(&ext, &bytes, &edits)?;
+        // Atomic save: write a sibling temp file, then rename over the original (same dir → rename is
+        // atomic on all three OSes). A crash mid-write leaves the original intact. The temp name carries a
+        // per-write nanosecond stamp so two concurrent saves (or a stale temp from a prior crash) can't
+        // collide on the same sibling path.
+        let stamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+        let tmp = format!("{path}.{stamp}.cpe-meta-tmp");
+        std::fs::write(&tmp, &out).map_err(|e| e.to_string())?;
+        std::fs::rename(&tmp, &path).map_err(|e| {
+            let _ = std::fs::remove_file(&tmp); // don't leave the temp behind on a failed rename
+            e.to_string()
+        })?;
+        Ok(cpe_server::media_meta::read_all(&ext, &out))
+    })
+    .await.map_err(|e| e.to_string())?
+}
+
 /// Recursive counts + size of a directory tree, for the Properties dialog (CPE-649): number of files,
 /// number of sub-folders, and total bytes. Cycle-safe (doesn't follow symlinked dirs) and bounded —
 /// stops at a large entry cap (reporting `truncated`) so it can't spin on a pathological tree.
@@ -5754,6 +5813,9 @@ pub fn run() {
             move_exact,
             entry_info,
             image_meta,
+            metadata_read,
+            metadata_writable,
+            metadata_write,
             list_dir_stream,
             cancel_dir_stream,
             entries_for_paths,
@@ -6151,6 +6213,9 @@ pub fn export_bindings(out: &std::path::Path) -> Result<(), String> {
         move_exact,
         entry_info,
         image_meta,
+        metadata_read,
+        metadata_writable,
+        metadata_write,
         list_dir_stream,
         cancel_dir_stream,
         entries_for_paths,
