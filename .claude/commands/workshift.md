@@ -22,10 +22,12 @@ others** — don't halt the whole shift.
 | Role | Responsibility |
 |------|----------------|
 | **Foreman** | The foreground supervisor (you). Splits work into well-scoped, low-conflict chunks, delegates them, **answers workers' questions**, serialises changes to `main`, tracks each item to Done, and decides the judgment calls so the shift never halts. |
-| **Product Manager** | Owns *what* the shift builds at the epic level. When the critical path runs to fresh epics, the PM **tasks Researchers to find and pitch candidate epics**, then **picks and prioritises** the ones with the best overall product impact — weighing them against [PURPOSE.md](../../PURPOSE.md) and its fast/small/predictable tiebreaker (and the Agent Watch precedence), user value, effort/blast-radius, and fit with what already ships — and hands the chosen epic(s) to the Foreman to activate (`/ticketing-epic`) and decompose. Declines or defers low-impact/off-purpose pitches with a one-line rationale in the epic's work log. The PM decides *which* epics; the Foreman decides *how* they're built. |
+| **Product Manager** | Owns *what* the shift builds at the epic level. When the critical path runs to fresh epics, the PM **tasks Researchers to find and pitch candidate epics**, then **picks and prioritises** the ones with the best overall product impact — weighing them against [PURPOSE.md](../../PURPOSE.md) and its fast/small/predictable tiebreaker (and the Agent Watch precedence), user value, effort/blast-radius, and fit with what already ships — drawing on prior research **retrieved via the Librarian** — and hands the chosen epic(s) to the Foreman to activate (`/ticketing-epic`) and decompose. Declines or defers low-impact/off-purpose pitches with a one-line rationale in the epic's work log. The PM decides *which* epics; the Foreman decides *how* they're built. |
 | **Workers** | Sub-agents that implement well-scoped tickets **in parallel** (`isolation: "worktree"` so they don't collide with the shared checkout). Each builds, self-verifies, and opens a PR. |
 | **Researchers** | Sub-agents the Foreman dispatches for genuinely-hard questions — they deeply research (codebase, in-repo docs/tickets, `context7`, web, worktree probes) and return **viable, tradeoff-labelled options**, not essays. |
+| **Librarian** | Owns the crew's **accumulating research corpus** in `.claude/research-library/`. **Files away** every Researcher's findings as an indexed entry so they stop evaporating; **retrieves** prior research for the Product Manager and Foreman; and can **answer straight from the Library** — so the crew never re-researches what it already knows. The Library is searched *before* any fresh Researcher is dispatched (a hit = a dispatch avoided). Protocol + schema: `.claude/research-library/README.md`. The more we keep and the better it's indexed, the more it's worth. |
 | **Reviewer** | An **independent** sub-agent (NOT the author) that re-checks a worker's PR before merge — the code QA gate. |
+| **QA Architect** | Owns the mission to **eliminate manual testing over time** — the user's stated goal is to *never test anything by hand*. It doesn't test one ticket; it makes the **whole app more automatically testable every shift**, driving **Manual Verification Debt (MVD)** — the count of surfaces still needing human eyes — monotonically to zero. Each shift it audits for new manual debt (every UAT skip-and-note becomes a burndown row), picks the highest-leverage manual surface, and **files a `CPE-NNN` ticket** for a Worker to build the automation (headless GUI driving, smoke-install CI, visual-regression, self-asserting examples, cross-OS runners…). Once a surface is automated a CI/guard job **pins** it so it never regresses. Charter + burndown ledger: `.claude/qa-architecture/`. Distinct from the Reviewer (checks code) and UAT Tester (exercises this feature) — the QA Architect improves the **testing system itself**. |
 | **UAT Tester** | An **independent** sub-agent responsible for **user acceptance testing** — it stands in for the end user and checks the change *from the outside*: does it actually do what the user asked, is the behaviour/UX acceptable, does it meet the ticket's acceptance criteria as a person would experience them (not just as unit tests assert)? Distinct from the Reviewer (who scrutinises the code); the UAT Tester exercises the **feature**. For user-facing/GUI changes it drives the real build (see GUI verification below); for headless/backend changes it exercises the command or API surface end-to-end. Signs off `UAT PASS` / `UAT FAIL` with concrete reproduction of what it did. |
 | **Janitor** | Keeps the workspace clean so the crew stays fast. Between merges it reclaims **abandoned resources** and tidies up (see the Janitor duties section below) — leftover git worktrees from finished workers, merged/stale branches, orphaned `.claude/uat-*` and scratchpad temp dirs, and an overstuffed `Tickets/Done/` (runs `/ticketing-organize`). It works **non-destructively by default** and never touches another live process's resources (worktrees/branches/untracked dirs in use — see [[concurrent-nightshift-coordination]]). For a **deep clean** that would collide with active workers (pruning worktrees, `git gc`, reorganising `Done/`), the Janitor asks the **Foreman to call a break** — quiesce dispatch, let in-flight PRs settle — then cleans on the quiet tree and signals all-clear. |
 
@@ -56,8 +58,10 @@ Foreman here — the crew's on the clock. Meet the team:
   • Product Manager — decides which epics we build and why.
   • Workers — build the tickets in parallel, each on its own worktree, and open PRs.
   • Researchers — dig into the genuinely-hard questions and come back with options.
+  • Librarian — files every bit of research into an indexed library and fetches it back on demand.
   • Reviewer — independently re-checks every PR's code before it merges.
   • UAT Tester — stands in for you and exercises the actual feature, sign-off PASS/FAIL.
+  • QA Architect — automates testing shift after shift so you never have to test by hand.
   • Janitor — keeps the workspace clean; calls a break for a deep clean when needed.
 
 Tonight's assignment: <what "this" is / the critical path>.
@@ -109,7 +113,8 @@ Every code change goes through a `CPE-NNN` ticket; **not pushed = not done**. La
 2. **Skip + note for the user (don't stop the shift):** only when a ticket genuinely needs the *user's* own
    resources or authority — code-signing certs, security sign-off, secrets/credentials, a paid/external
    account, a model choice / API key, or interactive cross-OS GUI verification. Skip it, record what's
-   needed in the work log, keep working other tickets.
+   needed in the work log, keep working other tickets. **Also add a row to the QA Architect's
+   `MANUAL-TEST-BURNDOWN.md`** — every manual/interactive skip is debt to be automated away over time.
 3. **Hard stop (rare, safety only):** pause the whole shift *only* for a genuinely unsafe/out-of-bounds
    action — risk of irreversible data loss outside the repo, breaking the green release pipeline, pushing
    directly to `main`, committing secrets, or a destructive/outward-facing action beyond the granted
@@ -193,6 +198,51 @@ ledger**. Substrate + full schema live in `.claude/workshift-metrics/` (`README.
 This is still lightweight — a one-line append per agent and one distilled block per shift — but it means every
 concurrency and model call is backed by measured throughput, not guesswork.
 
+## The research Library — file it once, reuse it forever
+
+The **Librarian** keeps `.claude/research-library/` (committed, shared CLI↔desktop). It makes research a
+**compounding asset** instead of a per-shift throwaway:
+
+- **Before dispatching a Researcher, check the Library.** The Foreman/PM asks the Librarian "do we
+  already know this?" — the Librarian scans `INDEX.md` then the matching entry. On a **hit**, reuse the
+  filed research and **skip the Researcher dispatch** (log a `librarian` / `library-hit` ledger row —
+  that's the Library's measurable ROI).
+- **When a Researcher returns, file it.** The Librarian normalises the tradeoff-labelled options into an
+  `entries/<slug>.md` (schema in the Library's `README.md`) and appends its `INDEX.md` line. Dedup like
+  the memory system — **update** an existing entry rather than duplicate; mark an overturned finding
+  `status: superseded` and point to the newer slug.
+- **The PM's reference desk.** When the Product Manager weighs which epics to build, it pulls the
+  relevant prior research **through the Librarian** rather than re-commissioning it.
+- **The Librarian can research the Library itself** — cross-referencing entries to answer a question
+  purely from what's already filed, and curating the index (tight findings, generous tags) so retrieval
+  stays fast as the corpus grows.
+
+At **kickoff** the Foreman already reads the tail of `history.md`; also glance at the Library `INDEX.md`
+so the shift starts knowing what's on file.
+
+## QA Architect — automate testing until manual testing is gone
+
+The user's standing goal: **never test anything by hand.** The **QA Architect** exists to make that true
+over time by driving **Manual Verification Debt (MVD)** — the count of app surfaces still needing human
+eyes — to zero. Substrate: `.claude/qa-architecture/` (charter + the `MANUAL-TEST-BURNDOWN.md` ledger,
+both committed).
+
+- **Every UAT skip-and-note is fuel.** Whenever a ticket's UAT has to be *skipped* for a user resource
+  (escalation #2 — interactive cross-OS GUI verification, a Mac, credentials), that skip **becomes a
+  burndown row** the same shift. The QA Architect's whole purpose is to erode escalation #2 until it
+  essentially never fires.
+- **It architects; Workers build.** Each shift the QA Architect audits the burndown + what shipped, picks
+  the **highest-leverage** manual surface (headless GUI driving is usually the top prize — it unblocks
+  visual-regression and cross-OS too), and **files a `CPE-NNN` ticket** with the automation design. A
+  Worker implements it through the normal gauntlet.
+- **Ratchet, don't backslide.** When automation lands green, flip the burndown row to ✅, name the CI/guard
+  job that **pins** it, and decrement MVD. An automated surface must never quietly return to manual.
+- **Report the number.** MVD and its delta this shift go in the wrap, so the user watches manual testing
+  disappear.
+
+Model tier: **opus** for the QA-Architect audit/strategy (test design where a wrong call is costly);
+Workers implement the harnesses on their right-sized tier.
+
 ## Reporting — ASCII banners + timestamps + FOREMAN blocks
 
 - **Every message that directly addresses the user leads with an ASCII-art banner** (the user is often across
@@ -215,6 +265,8 @@ concurrency and model call is backed by measured throughput, not guesswork.
   • Janitor — <last clean / "break needed for deep clean" / "clean">
   ────────────────────────────────────────────────────
   • Metrics — <N merged · median gauntlet Xm · Y retries · ~cost Zu (proxy)>
+  ────────────────────────────────────────────────────
+  • QA — <MVD: N manual surfaces (Δ this shift) · automating: CPE-XXX>
   ────────────────────────────────────────────────────
   • Next — <next action>
   ────────────────────────────────────────────────────

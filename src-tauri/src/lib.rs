@@ -5582,35 +5582,26 @@ fn sidecar_diagnostics(
     Ok(SidecarDiagnostics { id, running, last_error, logs })
 }
 
-/// Resolve the `--open <dir>` launch argument to a folder the frontend should open at startup (CPE-1043).
-/// Reads the CLI match, keeps it only when it names an existing directory (via the pure
-/// [`cpe_server::launch::resolve_open_dir`]), and returns it as a string — or `None` (fall back to normal
-/// startup: session restore / Home) when the flag is absent, blank, or not a directory. No CLI on mobile.
-#[tauri::command]
-#[cfg_attr(feature = "specta-bindings", specta::specta)]
-fn startup_dir(app: tauri::AppHandle) -> Option<String> {
-    #[cfg(not(any(target_os = "android", target_os = "ios")))]
-    {
-        use tauri_plugin_cli::CliExt;
-        let matches = app.cli().matches().ok()?;
-        let raw = matches.args.get("open").and_then(|a| a.value.as_str().map(str::to_owned));
-        let dir = cpe_server::launch::resolve_open_dir(raw.as_deref(), |p| p.is_dir())?;
-        // Return an absolute path so a relative `--open` value (e.g. `--open .` from a script) resolves
-        // against the launch CWD rather than surfacing a raw "." in breadcrumbs/tabs/session state. We
-        // deliberately do NOT `canonicalize()` — on Windows that prepends a `\\?\` verbatim prefix that
-        // would leak into every displayed path.
-        let abs = if dir.is_absolute() {
-            dir
-        } else {
-            std::env::current_dir().map(|cwd| cwd.join(&dir)).unwrap_or(dir)
-        };
-        return Some(abs.to_string_lossy().into_owned());
-    }
-    #[cfg(any(target_os = "android", target_os = "ios"))]
-    {
-        let _ = app;
-        None
-    }
+/// Resolve the `--open <dir>` launch argument to a folder to open at startup (CPE-1043). Reads the CLI
+/// match in **setup** (proven reliable, unlike a frontend-initiated command), keeps it only when it names
+/// an existing directory (via the pure [`cpe_server::launch::resolve_open_dir`]), and returns an absolute
+/// path — or `None` (normal startup) when the flag is absent, blank, or not a directory. A relative value
+/// resolves against the launch CWD; we deliberately do NOT `canonicalize()` (on Windows that prepends a
+/// `\\?\` verbatim prefix that would leak into every displayed path). The frontend reads this synchronously
+/// via an injected `window.__CPE_OPEN_DIR__` global, so opening-at-a-folder needs no command or Tauri-
+/// presence gate and can't be perturbed by startup timing.
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
+fn resolve_startup_open_dir(app: &tauri::AppHandle) -> Option<String> {
+    use tauri_plugin_cli::CliExt;
+    let matches = app.cli().matches().ok()?;
+    let raw = matches.args.get("open").and_then(|a| a.value.as_str().map(str::to_owned));
+    let dir = cpe_server::launch::resolve_open_dir(raw.as_deref(), |p| p.is_dir())?;
+    let abs = if dir.is_absolute() {
+        dir
+    } else {
+        std::env::current_dir().map(|cwd| cwd.join(&dir)).unwrap_or(dir)
+    };
+    Some(abs.to_string_lossy().into_owned())
 }
 
 /// Apply CLI window-geometry flags (CPE-600) to the main window, over whatever `tauri-plugin-window-state`
@@ -5749,7 +5740,7 @@ pub fn run() {
             use tauri::{WebviewUrl, WebviewWindowBuilder};
             use tauri_plugin_window_state::{StateFlags, WindowExt};
 
-            let win = WebviewWindowBuilder::new(app, "main", WebviewUrl::default())
+            let mut wb = WebviewWindowBuilder::new(app, "main", WebviewUrl::default())
                 .title("Cross-Platform Explorer")
                 .inner_size(1000.0, 700.0)
                 .min_inner_size(600.0, 400.0)
@@ -5759,8 +5750,14 @@ pub fn run() {
                         tauri::http::header::CACHE_CONTROL,
                         tauri::http::HeaderValue::from_static("no-store"),
                     );
-                })
-                .build()?;
+                });
+            // `--open <dir>` (CPE-1043): inject the resolved folder as a global the frontend reads
+            // synchronously at startup — runs before the app's own scripts, so no command/gate is needed.
+            if let Some(dir) = resolve_startup_open_dir(app.handle()) {
+                let json = serde_json::to_string(&dir).unwrap_or_else(|_| "null".to_string());
+                wb = wb.initialization_script(format!("window.__CPE_OPEN_DIR__ = {json};"));
+            }
+            let win = wb.build()?;
 
             // `main` is in the window-state plugin's skip_initial_state list, so restore its saved
             // geometry here (deterministic) BEFORE the CLI flags override it — restore then override.
@@ -5847,7 +5844,6 @@ pub fn run() {
             metadata_read,
             metadata_writable,
             metadata_write,
-            startup_dir,
             list_dir_stream,
             cancel_dir_stream,
             entries_for_paths,
@@ -6248,7 +6244,6 @@ pub fn export_bindings(out: &std::path::Path) -> Result<(), String> {
         metadata_read,
         metadata_writable,
         metadata_write,
-        startup_dir,
         list_dir_stream,
         cancel_dir_stream,
         entries_for_paths,

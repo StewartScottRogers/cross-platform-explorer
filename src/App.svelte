@@ -2940,19 +2940,17 @@
     }
 
     // A `--open <dir>` launch argument (CPE-1043) opens the explorer at that folder, taking precedence
-    // over last-session restore for this launch. Only probe the CLI when actually running under Tauri
-    // (the desktop app); in a plain browser / test env there is no CLI, so skip straight to the normal
-    // startup — reading it there would be meaningless and only perturb boot.
-    let openArg: string | null = null;
-    if (typeof window !== "undefined" && "__TAURI_INTERNALS__" in window) {
-      try {
-        openArg = await commands.startupDir();
-      } catch {
-        /* CLI not resolvable — fall through to the default startup below */
-      }
-    }
+    // over last-session restore for this launch. The backend injects the resolved folder as a synchronous
+    // `window.__CPE_OPEN_DIR__` global (set before this script runs), so no command/gate is involved — in
+    // a plain browser / test env the global is simply absent and we fall through to the normal startup.
+    const openArg =
+      typeof window !== "undefined"
+        ? (window as unknown as { __CPE_OPEN_DIR__?: string }).__CPE_OPEN_DIR__ ?? null
+        : null;
     if (openArg) {
-      await loadPath(openArg);
+      // Navigate (not just loadPath): the active tab's history drives `currentPath`/the breadcrumb, so we
+      // must push the folder onto it — a bare loadPath would fetch the listing but leave the view on Home.
+      await navigate(openArg);
     } else {
       const restored = await restoreLastSession();
       if (!restored) await loadPath(HOME);
