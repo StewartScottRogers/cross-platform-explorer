@@ -14,6 +14,7 @@ use crate::media_column::{audio_cell, AudioColumn};
 use crate::media_meta_edit::MetaField;
 use crate::media_meta_read::{read_flac, read_id3v2, read_ogg};
 use crate::metadata_column::CellValue;
+use crate::video_column::video_cell;
 
 /// A metadata column the details view can add, spanning media families.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -24,6 +25,8 @@ pub enum MetaColumn {
     ImageDimensions,
     /// A document's page count (PDF, v1), sorted numerically.
     DocPages,
+    /// The video's duration in seconds, read from the ISO-BMFF `moov/mvhd` box (CPE-1028).
+    VideoDuration,
 }
 
 /// Read a file's audio tags, choosing the codec by extension: `mp3` → ID3v2, `flac` → FLAC/Vorbis,
@@ -50,6 +53,12 @@ fn is_doc_ext(ext: &str) -> bool {
     matches!(ext.to_ascii_lowercase().as_str(), "pdf")
 }
 
+/// Whether `ext` is an ISO-BMFF video kind the duration reader should attempt (avoids walking the box
+/// tree of unrelated files).
+fn is_video_ext(ext: &str) -> bool {
+    matches!(ext.to_ascii_lowercase().as_str(), "mp4" | "mov" | "m4v")
+}
+
 /// The typed [`CellValue`] for `col` from a file's `ext` + leading `bytes`, dispatched to the family
 /// extractor. A file whose kind doesn't match the column (e.g. an image path under an audio column, or a
 /// text file under a Dimensions column) yields [`CellValue::Empty`], which sorts last.
@@ -66,6 +75,13 @@ pub fn extract_column(ext: &str, bytes: &[u8], col: MetaColumn) -> CellValue {
         MetaColumn::DocPages => {
             if is_doc_ext(ext) {
                 doc_pages_cell(bytes)
+            } else {
+                CellValue::Empty
+            }
+        }
+        MetaColumn::VideoDuration => {
+            if is_video_ext(ext) {
+                video_cell(bytes)
             } else {
                 CellValue::Empty
             }
@@ -145,6 +161,28 @@ mod tests {
         buf
     }
 
+    /// A minimal synthetic MP4: `moov/mvhd` (version 0) with `timescale`/`duration` chosen so the
+    /// duration is exactly `seconds` (routing test only — the box-tree parser itself is covered in
+    /// `video_column`'s own tests).
+    fn mp4(seconds: u32) -> Vec<u8> {
+        let mut mvhd_content = vec![0u8, 0, 0, 0]; // version 0 + flags
+        mvhd_content.extend_from_slice(&0u32.to_be_bytes()); // creation_time
+        mvhd_content.extend_from_slice(&0u32.to_be_bytes()); // modification_time
+        mvhd_content.extend_from_slice(&1u32.to_be_bytes()); // timescale = 1
+        mvhd_content.extend_from_slice(&seconds.to_be_bytes()); // duration in timescale units
+
+        let mut mvhd = Vec::new();
+        mvhd.extend_from_slice(&((8 + mvhd_content.len()) as u32).to_be_bytes());
+        mvhd.extend_from_slice(b"mvhd");
+        mvhd.extend_from_slice(&mvhd_content);
+
+        let mut moov = Vec::new();
+        moov.extend_from_slice(&((8 + mvhd.len()) as u32).to_be_bytes());
+        moov.extend_from_slice(b"moov");
+        moov.extend_from_slice(&mvhd);
+        moov
+    }
+
     #[test]
     fn routes_audio_by_extension_to_the_right_codec() {
         // mp3 → ID3
@@ -196,6 +234,13 @@ mod tests {
         assert_eq!(extract_column("pdf", &pdf(2), MetaColumn::DocPages), CellValue::Int(2));
         // A non-doc extension is not even attempted → Empty (even if bytes happened to be a PDF).
         assert_eq!(extract_column("txt", &pdf(2), MetaColumn::DocPages), CellValue::Empty);
+    }
+
+    #[test]
+    fn video_duration_route_and_gate_by_extension() {
+        assert_eq!(extract_column("mp4", &mp4(5), MetaColumn::VideoDuration), CellValue::Float(5.0));
+        // A non-video extension is not even attempted → Empty (even if bytes happened to be a video).
+        assert_eq!(extract_column("txt", &mp4(5), MetaColumn::VideoDuration), CellValue::Empty);
     }
 
     #[test]
