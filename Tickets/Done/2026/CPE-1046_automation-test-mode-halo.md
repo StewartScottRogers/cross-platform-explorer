@@ -4,7 +4,7 @@ title: "Automation test-mode — halo overlay + off-screen launch so the user ne
 type: feature
 component: Multiple
 priority: high
-status: Doing
+status: Done
 tags: ready
 created: 2026-07-25
 epic: CPE-616
@@ -85,3 +85,13 @@ keyboard**. That is unacceptable. Revised design:
    non-activating** (`WebviewWindowBuilder::focused(false)`) so creating it never grabs the user's mouse or
    keyboard from their active app. This — plus off-screen launch for automation — is the real "can't
    interfere" fix; the badge is only the visual cue.
+
+2026-07-25 (attended) — **DONE, merged PR #363.** Shipped the REVISED design (small upper-left corner
+badge, not the original full-viewport halo): `--test-mode` flag → `window.__CPE_TEST_MODE__` (combined
+init script with `--open`) → `TestModeOverlay.svelte` (🤖 "AUTOMATED TEST — don't touch", `top/left:8px`,
+`width:max-content`, `pointer-events:none`, `tabindex=-1`, `aria-hidden`), AND `WebviewWindowBuilder
+.focused(false)` in test-mode so the window never steals OS focus. Independently reviewed (APPROVE — all 3
+safety props verified) + Foreman GUI-verified in a real bundle: badge renders top-left, window launched
+non-focused (foreground unchanged), `--open` still navigates. 958 frontend + 726 backend tests green.
+**Follow-up CPE-1047:** off-screen launch is blocked by the CPE-600 geometry on-screen clamp — test-mode
+should bypass it so automation windows are fully hidden (visible-but-non-focused today).
