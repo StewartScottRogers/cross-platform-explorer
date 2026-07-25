@@ -43,3 +43,6 @@ src-tauri/sidecars/
 
 # Swarm how-to-demo output files created when running demos in the repo folder (CPE-954/956)
 *-DEMO.md
+
+# CPE-1042: git-ignored sandbox for editable copies of samples/ (scripts/new-sample-sandbox.*)
+.sandbox/

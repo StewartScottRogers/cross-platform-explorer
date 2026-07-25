@@ -1,0 +1,2 @@
+Baseline sample text file.
+Used to verify plain-text preview + line/word counts.

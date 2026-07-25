@@ -3,3 +3,8 @@
 # these to CRLF on every checkout regardless of the user's core.autocrlf.
 *.cmd text eol=crlf
 *.bat text eol=crlf
+
+# CPE-1042: the sample-data baseline must be byte-exact and reproducible on every
+# platform. Treat all of samples/ as binary so git never applies EOL conversion
+# (a CRLF-munged PDF/MP3/etc. would no longer match the generated baseline).
+samples/** -text

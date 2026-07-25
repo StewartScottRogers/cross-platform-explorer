@@ -1,0 +1,13 @@
+%PDF-1.4
+1 0 obj
+<< /Type /Catalog /Pages 2 0 R >>
+endobj
+2 0 obj
+<< /Type /Pages /Kids [] /Count 0 >>
+endobj
+3 0 obj
+<< /Title (Baseline Sample) /Author (CPE Test Suite) /Subject (Baseline fixture) /Keywords (cpe,sample,baseline) /Creator (gen_samples.py) /Producer (gen_samples.py) /CreationDate (D:20260725110000) /ModDate (D:20260725110000) >>
+endobj
+trailer
+<< /Root 1 0 R /Info 3 0 R /Size 4 >>
+%%EOF
