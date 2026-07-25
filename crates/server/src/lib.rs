@@ -203,6 +203,12 @@ pub mod listing;
 /// Link forge — create symbolic + hard links (CPE-802).
 pub mod links;
 
+/// Network-share address parser (pure model): normalizes a user-typed `smb://`/`nfs://`/`ftp://`/
+/// `sftp://` URL or Windows UNC path into a `{protocol,host,share,path}` struct, so the future
+/// "connect to server" dialog and the mount glue share one tested understanding of an address
+/// (CPE-1024, epic CPE-716). No network or mount I/O here.
+pub mod net_share;
+
 /// Shell context-menu model — registered verbs + which apply to a given selection, the pure core behind
 /// "CPE as a shell citizen" (CPE-945, epic CPE-712). Per-OS shell registration is separate glue.
 pub mod shell_menu;
