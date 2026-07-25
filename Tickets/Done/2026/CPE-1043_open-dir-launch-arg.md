@@ -4,7 +4,7 @@ title: "--open <dir> launch argument (open the explorer at a folder)"
 type: feature
 component: Multiple
 priority: medium
-status: Doing
+status: Done
 tags: ready
 created: 2026-07-25
 estimate: 2h
@@ -40,3 +40,8 @@ Extend to opening a **specific file** in a caller-specified viewer/editor
 ## Work Log
 2026-07-25 — Filed at the user's request (point the app at the just-created `samples/` folder). Builds on
 the existing CPE-598/600 geometry CLI-args plumbing.
+
+2026-07-25 (attended) — **DONE, merged PR #360.** `--open <dir>` launch arg: pure resolver
+`cpe_server::launch::resolve_open_dir` + `open` CLI arg + `startup_dir` command (absolutizes a relative
+value, no canonicalize) + Tauri-gated frontend startup wiring (open-arg > session restore > Home).
+Independently reviewed (APPROVE; relative-path fix applied). 4 launch tests + 954 frontend tests green.
