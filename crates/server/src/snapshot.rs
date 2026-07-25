@@ -39,6 +39,15 @@ impl BlobStore {
         Self::default()
     }
 
+    /// Reconstruct a store from a previously-persisted index (hash → meta) — the load half of the "the
+    /// bytes behind each hash are the caller's to persist" contract above: a disk-backed engine (e.g.
+    /// [`crate::snapshot_capture`]) round-trips [`BlobStore::iter`] out to its own on-disk format and
+    /// rebuilds the store with this constructor on the next load. No validation beyond what the map
+    /// already encodes — the caller owns the persisted format's integrity.
+    pub fn from_index(blobs: BTreeMap<String, BlobMeta>) -> Self {
+        Self { blobs }
+    }
+
     /// Whether the store already holds a blob for `hash` (the dedup test).
     pub fn contains(&self, hash: &str) -> bool {
         self.blobs.contains_key(hash)
@@ -350,6 +359,17 @@ mod tests {
         let plan = plan_capture(&BlobStore::new(), &snap(&[]), &CaptureBudget::UNLIMITED);
         assert!(plan.stores_nothing());
         assert!(plan.referenced_hashes().is_empty());
+    }
+
+    #[test]
+    fn from_index_reconstructs_an_equivalent_store() {
+        let mut store = BlobStore::new();
+        let plan = plan_capture(&store, &snap(&[("a", "h1", 30), ("b", "h2", 12)]), &CaptureBudget::UNLIMITED);
+        apply_capture(&mut store, &plan);
+        // Round-trip through the persisted index shape a disk-backed caller would save/load.
+        let index: BTreeMap<String, BlobMeta> = store.iter().map(|(h, m)| (h.clone(), *m)).collect();
+        let reloaded = BlobStore::from_index(index);
+        assert_eq!(reloaded, store);
     }
 
     #[test]
