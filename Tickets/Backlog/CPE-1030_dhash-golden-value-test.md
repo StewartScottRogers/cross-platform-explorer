@@ -36,3 +36,12 @@ exact bit layout is locked.
 Test-only change to `perceptual.rs`; touch nothing else. Determine the golden value by running the test
 once and reading the actual hash, then pin it (standard golden-test bootstrap) — but sanity-check the
 fixture genuinely has mixed bits first so the constant is meaningful.
+
+## Work Log
+
+### 2026-07-25 — CPE-1030 implemented
+
+Added golden-value test `phash_golden_value_column_bands()` using the `column_bands(9, 20, 100, true)` fixture.
+Golden hash determined: `0x5555555555555555` (32 set bits, perfect alternating pattern due to the alternating
+left>right comparisons across the vertical bands). Test pins the exact bit layout and includes sanity checks
+to verify non-trivial mixed bits. All 12 perceptual tests pass; clippy clean. Ready for PR.

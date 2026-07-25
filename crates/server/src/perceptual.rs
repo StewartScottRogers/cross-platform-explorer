@@ -303,4 +303,28 @@ mod tests {
         assert_eq!(groups[0], vec!["aaa".to_string(), "zzz".to_string()]);
         assert_eq!(groups[1], vec!["mmm".to_string(), "nnn".to_string()]);
     }
+
+    #[test]
+    fn phash_golden_value_column_bands() {
+        // A structured fixture with sharp vertical bands: the left pixel in each pair
+        // alternates between darker and lighter than the right, creating a clean mix of
+        // set and unset bits in the dHash (unlike monotonic gradients, whose adjacent-pixel
+        // comparisons are all the same sign). This golden value pins the exact bit layout;
+        // any intentional change to the packing order or bit-direction logic requires
+        // updating this constant.
+        let fixture = column_bands(9, 20, 100, true, ImageFormat::Png);
+        let hash = phash(&fixture).unwrap();
+
+        // Sanity-check: the hash must be non-trivial (mixed bits, not all-zero or all-ones).
+        assert_ne!(hash, 0, "fixture hash must be non-zero (has horizontal structure)");
+        assert_ne!(hash, u64::MAX, "fixture hash must not be all-ones");
+        let bit_count = hash.count_ones();
+        assert!((8..=56).contains(&bit_count), "expected 8–56 set bits, got {}", bit_count);
+
+        // Pin the exact hash value (determined by running the test once and reading the actual
+        // value from the failure output). If this assertion fails after a deliberate bit-order
+        // or packing change, update the constant below.
+        const GOLDEN_HASH: u64 = 0x5555555555555555;
+        assert_eq!(hash, GOLDEN_HASH, "actual hash: {:#018x}", hash);
+    }
 }
