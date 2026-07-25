@@ -5,7 +5,7 @@ type: feature
 component: Backend
 priority: medium
 tags: ready
-status: Doing
+status: Done
 created: 2026-07-24
 epic: CPE-1002
 ---
