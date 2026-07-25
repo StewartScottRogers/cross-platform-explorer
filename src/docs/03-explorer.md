@@ -107,3 +107,14 @@ Commander keys act on the active pane's selection:
 
 The same actions (plus **Mirror path to other pane**) are in the command palette under *View*. Copies and
 moves run through the transfer manager, so large operations show progress and can be cancelled.
+
+## Shell integration — "Open in Cross-Platform Explorer"
+
+**Settings › Shell integration** adds an **"Open in Cross-Platform Explorer"** item to the operating
+system's right-click menu — on folders, the folder background (empty space inside a folder), and drives —
+so you can jump into CPE from anywhere the OS offers a context menu. It's **off until you turn it on**, and
+turning it off removes every entry it added, with nothing left behind.
+
+The toggle registers under your **user** account only, so enabling it never needs administrator rights.
+It's available on **Windows** today; the macOS and Linux equivalents are on the way, and the toggle shows a
+"coming soon" note on those platforms until then.

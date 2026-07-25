@@ -53,7 +53,8 @@ stakes for daily-driver use and makes CPE reachable from everywhere the OS offer
 - **CPE-1020** — Apply/remove the Windows registration (HKCU glue). ✅ Done.
 - **CPE-1021** — Linux `.desktop` + xdg-mime registration plan (pure). Parallelisable.
 - **CPE-1022** — macOS Services/LSHandlers registration plan (pure). Parallelisable.
-- **CPE-1023** — In-app "Shell integration" Settings toggle. Needs CPE-1020.
+- **CPE-1023** — In-app "Shell integration" Settings toggle. ✅ Done (implementation + headless verify;
+  visual GUI verify via a release build recommended as the epic's closing check).
 
 ## Work Log
 2026-07-23 (dayshift) — **Activated.** First slice: **CPE-945** — `shell_menu::verbs_for`: the pure

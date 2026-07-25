@@ -6,6 +6,7 @@
   import { createEventDispatcher, onMount } from "svelte";
   import { platformActive } from "../sidecar";
   import SidecarManager from "./SidecarManager.svelte";
+  import ShellIntegration from "./ShellIntegration.svelte";
 
   export let showHidden = false;
   export let showDetails = true;
@@ -55,6 +56,8 @@
         Reset all settings to defaults
       </button>
     </div>
+
+    <ShellIntegration />
 
     {#if platformOn}
       <div class="section-title">Sidecar platform</div>
