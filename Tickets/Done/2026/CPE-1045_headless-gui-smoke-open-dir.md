@@ -117,3 +117,11 @@ pipeline. (Windows runners already have Edge + the WebView2 runtime.)
 a no-WebDriver health-ping) captured in Library entry `headless-gui-smoke-test-tauri-driver`.
 Recommended: `tauri-driver` + WebdriverIO driving the `tauri build` release binary on Windows, asserting
 the `[aria-current="page"]` breadcrumb navigated into the temp dir.
+
+2026-07-25 (attended) — **DONE, merged PR #364.** Headless GUI smoke test (`gui-smoke/` WebdriverIO +
+tauri-driver + a windows-latest CI job) drives the real `tauri build` bundle and asserts `--open <dir>`
+navigates (breadcrumb + marker file). Found+fixed 2 real bugs en route (tauri-driver drops two-token args →
+`--open=<dir>`; wdio v9 BiDi → `enforceWebDriverClassic`). Worker ran it 3/3 green locally; independent
+reviewer ran it live PASS + negative-control FAIL (proves it catches an --open→Home regression). Retires
+burndown #1/#2 once the CI job is green on main. Follow-up: pass `--test-mode` + off-screen (CPE-1047) so
+the harness window never shows; Linux/macOS legs later.
