@@ -2939,8 +2939,24 @@
       // Version is cosmetic (About dialog) — a failure must not break startup.
     }
 
-    const restored = await restoreLastSession();
-    if (!restored) await loadPath(HOME);
+    // A `--open <dir>` launch argument (CPE-1043) opens the explorer at that folder, taking precedence
+    // over last-session restore for this launch. Only probe the CLI when actually running under Tauri
+    // (the desktop app); in a plain browser / test env there is no CLI, so skip straight to the normal
+    // startup — reading it there would be meaningless and only perturb boot.
+    let openArg: string | null = null;
+    if (typeof window !== "undefined" && "__TAURI_INTERNALS__" in window) {
+      try {
+        openArg = await commands.startupDir();
+      } catch {
+        /* CLI not resolvable — fall through to the default startup below */
+      }
+    }
+    if (openArg) {
+      await loadPath(openArg);
+    } else {
+      const restored = await restoreLastSession();
+      if (!restored) await loadPath(HOME);
+    }
     sessionReady = true; // from here on, session changes are captured (CPE-789)
     // Dual-pane (CPE-679): when the split was last active, restore pane B to its persisted folder so the
     // layout comes back where the user left it (pane A is covered by restoreLastSession above). Reuses the

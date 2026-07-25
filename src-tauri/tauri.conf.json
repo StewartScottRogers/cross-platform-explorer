@@ -44,7 +44,8 @@
         { "name": "monitor", "takesValue": true, "description": "Target monitor index (0-based)" },
         { "name": "maximized", "takesValue": false, "description": "Start maximized" },
         { "name": "fullscreen", "takesValue": false, "description": "Start fullscreen" },
-        { "name": "physical", "takesValue": false, "description": "Treat --x/--y/--width/--height as physical pixels" }
+        { "name": "physical", "takesValue": false, "description": "Treat --x/--y/--width/--height as physical pixels" },
+        { "name": "open", "takesValue": true, "description": "Open the explorer at this directory on launch (CPE-1043)" }
       ]
     },
     "updater": {

@@ -5582,6 +5582,28 @@ fn sidecar_diagnostics(
     Ok(SidecarDiagnostics { id, running, last_error, logs })
 }
 
+/// Resolve the `--open <dir>` launch argument to a folder the frontend should open at startup (CPE-1043).
+/// Reads the CLI match, keeps it only when it names an existing directory (via the pure
+/// [`cpe_server::launch::resolve_open_dir`]), and returns it as a string — or `None` (fall back to normal
+/// startup: session restore / Home) when the flag is absent, blank, or not a directory. No CLI on mobile.
+#[tauri::command]
+#[cfg_attr(feature = "specta-bindings", specta::specta)]
+fn startup_dir(app: tauri::AppHandle) -> Option<String> {
+    #[cfg(not(any(target_os = "android", target_os = "ios")))]
+    {
+        use tauri_plugin_cli::CliExt;
+        let matches = app.cli().matches().ok()?;
+        let raw = matches.args.get("open").and_then(|a| a.value.as_str().map(str::to_owned));
+        let dir = cpe_server::launch::resolve_open_dir(raw.as_deref(), |p| p.is_dir())?;
+        return Some(dir.to_string_lossy().into_owned());
+    }
+    #[cfg(any(target_os = "android", target_os = "ios"))]
+    {
+        let _ = app;
+        None
+    }
+}
+
 /// Apply CLI window-geometry flags (CPE-600) to the main window, over whatever `tauri-plugin-window-state`
 /// restored — so precedence is `CLI flag > saved state > default`. Monitors have no work-area API in
 /// Tauri, so the full monitor bounds are used and the pure resolver clamps the window fully on-screen.
@@ -5816,6 +5838,7 @@ pub fn run() {
             metadata_read,
             metadata_writable,
             metadata_write,
+            startup_dir,
             list_dir_stream,
             cancel_dir_stream,
             entries_for_paths,
@@ -6216,6 +6239,7 @@ pub fn export_bindings(out: &std::path::Path) -> Result<(), String> {
         metadata_read,
         metadata_writable,
         metadata_write,
+        startup_dir,
         list_dir_stream,
         cancel_dir_stream,
         entries_for_paths,

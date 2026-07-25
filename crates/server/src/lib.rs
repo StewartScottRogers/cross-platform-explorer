@@ -80,6 +80,10 @@ pub mod settings;
 /// Pure window-geometry resolver for the CLI launch options (CPE-598).
 pub mod geometry;
 
+/// Pure resolver for the `--open <dir>` launch argument — open the explorer at a folder on startup
+/// (CPE-1043). Filesystem-free (existence check injected), so it's unit-testable.
+pub mod launch;
+
 /// Activity timeline bucketing (scrubbable replay view) over recorded audit events (CPE-916).
 pub mod activity_timeline;
 pub mod batch_media;
