@@ -147,6 +147,11 @@ pub mod organize;
 /// default empty-query view (CPE-952, epic CPE-704). Pure + deterministic.
 pub mod spotlight_frecency;
 
+/// Orphaned-sidecar-file detector — pure, deterministic scan of a caller-supplied directory listing that
+/// flags companion files (subtitles, metadata sidecars, thumbnails) whose primary media file is gone
+/// (CPE-1006, epic CPE-1002). No AI, no I/O, no new deps.
+pub mod orphan_sidecars;
+
 /// Filename search — substring/glob/brace-group matching + the shared streaming walker (CPE-603/697/666).
 pub mod name_search;
 
