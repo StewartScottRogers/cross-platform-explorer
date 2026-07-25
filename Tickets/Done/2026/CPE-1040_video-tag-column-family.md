@@ -4,7 +4,7 @@ title: Video-tag column family (MP4/MOV Title/Artist/… via read_mp4)
 type: feature
 component: Backend
 priority: medium
-status: Doing
+status: Done
 tags: ready
 created: 2026-07-25
 epic: CPE-707
@@ -48,3 +48,11 @@ Wire into `crates/server/src/column_extract.rs`:
 2026-07-25 (workshift) — Filed + dispatched after CPE-1039 merged (column_extract.rs now free). Completes
 the read→column value chain for CPE-1037's `read_mp4`, same per-family-extractor pattern as `audio_cell`.
 Column-picker UI stays attended.
+
+2026-07-25 (workshift) — **DONE, merged PR #357.** New `video_tag_column` module + `MetaColumn::VideoTag`
+wired into `column_extract` (gated by `is_video_ext`, dispatched via `read_mp4`) — MP4/MOV videos now
+expose sortable Title/Artist/Album/Year/Comment/Genre/Composer/Encoder/Copyright columns; Year is numeric
+(Int, sorts 1999<2001). Faithful mirror of CPE-1039. Independently reviewed (APPROVE — all 9 key() strings
+verified verbatim vs read_mp4, numeric-Year confirmed) + UAT PASS (own MP4 builder, Int(2018) from
+"2018-06", numeric sort). Clippy clean both modes. Read→column value chain now complete for both new
+codecs (PDF + video).

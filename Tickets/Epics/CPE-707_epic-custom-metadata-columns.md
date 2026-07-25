@@ -72,3 +72,8 @@ sortable Title/Author/Subject/Keywords/Creator/Producer/Date Created/Date Modifi
 `doc_info_column` extractor wired into `column_extract` (reads CPE-1036's `read_pdf`). Same per-family
 `→ CellValue` pattern as `audio_cell`/`image_dimensions_cell`. Independently reviewed + UAT-passed. Next
 column candidate: a video-tag family (Title/Artist/… from CPE-1037's `read_mp4`).
+
+2026-07-25 (workshift) — **CPE-1040 DONE (PR #357): video-tag column family.** MP4/MOV videos expose
+sortable Title/Artist/Album/Year(numeric)/… columns via `video_tag_column` reading CPE-1037's `read_mp4`.
+Both new read codecs (PDF /Info, MP4 tags) are now reachable as columns. Column families shipped this
+shift: doc-info (PDF) + video-tag. Remaining 707: the column-picker/persistence UI (attended).
