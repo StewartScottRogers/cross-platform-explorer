@@ -42,6 +42,7 @@ pub mod aggregate;
 pub mod agents;
 pub mod broker_client;
 pub mod catalog;
+pub mod throughput;
 pub mod conflict;
 pub mod conflict_rename;
 pub mod cost;
