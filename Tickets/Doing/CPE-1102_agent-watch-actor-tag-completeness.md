@@ -4,7 +4,7 @@ title: "Agent Watch: extend 'user' actor-tagging to the remaining mutation comma
 type: bug
 component: Backend
 priority: low
-status: Backlog
+status: Doing
 tags: ready
 created: 2026-07-26
 epic: CPE-396

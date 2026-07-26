@@ -4,7 +4,7 @@ title: "Code preview polish: fold-aware jump-to-symbol + doc wording"
 type: bug
 component: Frontend
 priority: low
-status: Backlog
+status: Doing
 tags: ready
 created: 2026-07-26
 epic: CPE-724
