@@ -4,7 +4,7 @@ title: "Agent Watch: replay scrubber over the session activity timeline"
 type: feature
 component: Frontend
 priority: medium
-status: Backlog
+status: Doing
 tags: ready
 created: 2026-07-26
 epic: CPE-396
