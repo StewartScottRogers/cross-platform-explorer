@@ -224,3 +224,38 @@ _(no shifts recorded yet — first real workshift will seed this)_
 - **HEADLESS EPIC FRONTIER REACHED.** After this session, every open epic's remainder is GUI-attended, OS-
   privileged, dep-heavy (user binary-size call), or credential/GUI-runner-gated. Next shift: surface to the
   user for a direction call, don't manufacture low-value tickets.
+
+## 2026-07-26 — GUI shift (code-preview → batch-media, + GUI #3 planned)
+
+**Shipped (6 PRs merged, main green):** CPE-1088 search power-filters (#406) · CPE-1089 code_intel command
+(#407) · CPE-1090 preview outline strip+breadcrumb+jump (#408) · CPE-1091 per-line rows+fold gutter+indent
+guides+minimap (#409) · CPE-1092 batch-media plan/streamed-execute commands (#410) · CPE-1093 batch-media
+dialog (#411). **GUI #1 (code-preview upgrade) + GUI #2 (batch-media dialog) both fully delivered.**
+
+**Tuned defaults learned:**
+- `svelte-gui` frontend tickets: **sonnet worker + opus reviewer** is the right pairing — the opus reviewer
+  caught 2 real DOM-glue bugs sonnet UAT missed (CPE-1090 scroll header-offset; CPE-1093 avif-eligibility +
+  debounce-timer-on-destroy). Keep opus on the reviewer seat for GUI.
+- `svelte-gui-complex` (per-line hljs refactor, CPE-1091): **opus worker** paid off — 0 rework, splitter
+  span-safety + wrap-safety + copy-excludes-gutter all correct first pass. Use opus when the crux is a
+  subtle pure-algorithm (span splitter) or high-blast-radius core render.
+- `rust-command-stream` (CPE-1092): sonnet worker, opus reviewer, 0 rework. Streaming commands = mirror an
+  existing `*_stream` (apply_backup_plan_stream) + one-walker/two-callers (keep the sync fn for tests).
+- **Research spikes before hard tickets pay for themselves**: 3 Explore researchers (hljs-per-line,
+  batch-media surface, agent-watch substrate) turned 3 unknowns into shovel-ready tickets with proven
+  approaches → the CPE-1091 opus worker had zero flailing. Files in `.claude/research-library/`.
+- **Parallelism**: 2 independent builders (frontend CPE-1091 + backend CPE-1092) ran concurrently with zero
+  conflict (different file trees) while the merge lock serialized cleanly. Reviewer+UAT always dispatched in
+  parallel; next worker started while a PR was in review.
+- **Foreman-applied reviewer-prescribed fixes** (2×) were faster than round-tripping the worker for tiny,
+  exactly-specified changes — apply in the worker's idle worktree, re-verify, resume the SAME reviewer for a
+  focused re-check, merge. ~1-2 min vs a full worker cycle.
+
+**Metrics:** ~30 agent-runs (7 workers, 10 reviewer-passes, 8 UAT, 3 researchers, 2 foreman-fixes), 4 rework
+cycles (all reviewer-caught, all fixed+re-approved), cost_proxy ≈ 72k (GUI block). Every merge CI-green.
+
+**Left queued (GUI #3 + polish, all filed with Library-backed designs):** CPE-1094 Agent-Watch replay
+scrubber (pure frontend, build first) · CPE-1097/1098 cost ledger (sidecar `cost:`→host `ai-console://agent-cost`
+bridge, then panel) · CPE-1099/1100 conflict radar (multi-session watch + actor tags [big-design], then panel)
+· CPE-1095 code-preview polish (fold-aware jump + doc wording) · CPE-1096 QA gui-smoke asserts code-preview
+render (burns down CPE-1090/1091/1093 visual debt).
