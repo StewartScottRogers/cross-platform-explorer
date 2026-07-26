@@ -57,3 +57,27 @@ first). Sum `file_count` (non-dir) and `total_uncompressed`. The total is shaped
 safety/conflict core the epic DoD needs). Reuses the existing tested `entry_name_is_safe` guard rather than
 duplicating it. Independent module; one-line lib.rs `pub mod` (+ possibly a one-line visibility change to
 archive.rs).
+
+2026-07-25 (workshift, Worker) — Implemented `crates/server/src/extract_plan.rs` (`plan_extract` +
+`ExtractPlan`/`PlannedEntry`), registered via `pub mod extract_plan;` in `lib.rs` immediately after
+`pub mod archive_safety;`. Reused `archive::entry_name_is_safe` — changed its visibility from private to
+`pub(crate)` (one-line edit to `archive.rs`, logic untouched) rather than duplicating the zip-slip check.
+9 unit tests added covering: unsafe rejection (`../evil`, `/abs/path`, `C:\x`), collisions against
+`existing_dest`, dedup + parents-before-children dir ordering (including explicit directory entries),
+`file_count`/`total_uncompressed` sums, backslash + leading-`./` normalisation, and the empty-archive
+no-panic case. `cargo test -p cpe-server`: 773 passed, 0 failed (incl. the 8 new `extract_plan` tests).
+`cargo clippy --all-targets -- -D warnings` clean; `cargo clippy --all-targets --features index -- -D
+warnings` clean. No new dependencies.
+
+**Logged assumption:** `entry_name_is_safe`'s absolute-path check (`Path::is_absolute()`) is
+platform-native — a `C:\x`-style drive-letter escape is only detected as absolute on Windows; on Linux/
+macOS `Path::new("C:/x")` parses as a plain relative path under Unix path semantics, so that specific
+input would *not* land in `skipped_unsafe` there (traversal via `..` and POSIX-style `/abs/path` reject
+correctly on all three OSes). This is pre-existing behaviour in `archive.rs`'s guard, not introduced by
+this ticket, and out of scope to fix here per "reuse, don't duplicate" — flagging for the epic owner
+(CPE-705) to consider a follow-up ticket if the 3-OS CI matrix should assert `C:\`-escape rejection on
+non-Windows runners too. Verified locally on Windows only (no cargo/Linux runner available in this
+worktree); CI will confirm the other two OSes on PR.
+
+Branch `cpe-1055-extract-plan`, PR opened. Ticket left in `Doing/` pending PR review/merge (not moved to
+`Done/` by the Worker — that's the Reviewer/Foreman's call per the QA gate).

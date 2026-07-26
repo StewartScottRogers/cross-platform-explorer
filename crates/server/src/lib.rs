@@ -406,6 +406,12 @@ pub mod text_encoding;
 /// new dependencies.
 pub mod archive_safety;
 
+/// Extract planner (CPE-1055, epic CPE-705). Given an archive's entry list and the destination's
+/// existing entry names, computes resolved destination paths, zip-slip rejections, name collisions,
+/// directories to create, and totals — without opening the archive or touching the filesystem. Reuses
+/// [`archive::entry_name_is_safe`] rather than duplicating the zip-slip check; no new dependencies.
+pub mod extract_plan;
+
 /// Cascade-aware empty-folder finder (CPE-1005, epic CPE-1002). Given a caller-supplied directory
 /// tree, finds directories that are empty or would become empty once nested-empty subdirectories
 /// are removed, reporting only the topmost directory of each cascade. Pure recursive tree

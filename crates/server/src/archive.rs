@@ -357,7 +357,8 @@ fn tar_unpack<R: std::io::Read>(reader: R, dest: &Path) -> Result<(), String> {
 
 /// True if an archive entry name is a plain relative path that cannot escape the extraction root — the
 /// shared "zip-slip" guard for extractors that don't provide one (CPE-628). `\` is normalised to `/`.
-fn entry_name_is_safe(name: &str) -> bool {
+/// `pub(crate)` so [`crate::extract_plan`] can reuse it rather than duplicating the check (CPE-1055).
+pub(crate) fn entry_name_is_safe(name: &str) -> bool {
     use std::path::Component;
     if name.is_empty() {
         return false;
