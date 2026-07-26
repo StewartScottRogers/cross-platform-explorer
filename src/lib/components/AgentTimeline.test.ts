@@ -7,6 +7,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { render, screen, fireEvent } from "@testing-library/svelte";
 import AgentTimeline from "./AgentTimeline.svelte";
 import type { TimelineEntry } from "../agentActivity";
+import type { AgentSession } from "../sidecar";
 import { ingestDiff, clearDiffs } from "../agentDiffs";
 
 vi.mock("@tauri-apps/api/core", () => ({ invoke: vi.fn() }));
@@ -168,5 +169,64 @@ describe("AgentTimeline Replay tab (CPE-1094)", () => {
     await rerender({ entries, agentName: "Claude Code" });
     const slider = screen.getByLabelText("Replay position") as HTMLInputElement;
     expect(slider.value).toBe("2000"); // back to jump-to-end default, not a stale mid-point
+  });
+});
+
+describe("AgentTimeline Radar tab (CPE-1100)", () => {
+  const sessions: AgentSession[] = [
+    {
+      sessionId: "sess-1",
+      agentId: "claude-code",
+      agentName: "Claude Code",
+      provider: "anthropic",
+      model: "claude",
+      cwd: "/repo",
+    },
+  ];
+
+  it("shows a clean empty state when nothing overlaps", async () => {
+    render(AgentTimeline, { entries: [entry({ id: 1 })], agentName: "Claude Code" });
+    await fireEvent.click(screen.getByRole("tab", { name: "Radar" }));
+    expect(screen.getByText(/No overlapping activity/i)).toBeTruthy();
+  });
+
+  it("lists an overlap with its path, friendly actor pills, and navigates on click", async () => {
+    const entries = [
+      entry({ id: 1, kind: "modified", path: "Z:/repos/app/shared.ts", at: 1_000, actor: "sess-1" }),
+      entry({ id: 2, kind: "modified", path: "Z:/repos/app/shared.ts", at: 1_500, actor: "user" }),
+    ];
+    const { component } = render(AgentTimeline, { entries, agentName: "Claude Code", sessions });
+    const navigate = vi.fn();
+    component.$on("navigate", (e) => navigate(e.detail));
+    await fireEvent.click(screen.getByRole("tab", { name: "Radar" }));
+
+    expect(screen.getByText("shared.ts")).toBeTruthy();
+    expect(screen.getByText("Claude Code")).toBeTruthy(); // sess-1 resolved via `sessions`
+    expect(screen.getByText("You")).toBeTruthy(); // "user" -> "You"
+
+    await fireEvent.click(screen.getByText("shared.ts"));
+    expect(navigate).toHaveBeenCalledWith("Z:/repos/app"); // containing folder
+  });
+
+  it("shows the unresolved-actor hedge note only when an overlap includes 'unknown'", async () => {
+    const entries = [
+      entry({ id: 1, kind: "modified", path: "Z:/repos/app/a.ts", at: 1_000, actor: "sess-1" }),
+      entry({ id: 2, kind: "modified", path: "Z:/repos/app/a.ts", at: 1_500, actor: "unknown" }),
+      entry({ id: 3, kind: "modified", path: "Z:/repos/app/b.ts", at: 2_000, actor: "sess-1" }),
+      entry({ id: 4, kind: "modified", path: "Z:/repos/app/b.ts", at: 2_500, actor: "user" }),
+    ];
+    render(AgentTimeline, { entries, agentName: "Claude Code", sessions });
+    await fireEvent.click(screen.getByRole("tab", { name: "Radar" }));
+    expect(screen.getAllByText(/unresolved actor/i)).toHaveLength(1); // only a.ts's overlap qualifies
+  });
+
+  it("never shows an overlap for a single actor touching a path repeatedly", async () => {
+    const entries = [
+      entry({ id: 1, kind: "modified", path: "Z:/repos/app/solo.ts", at: 1_000, actor: "sess-1" }),
+      entry({ id: 2, kind: "modified", path: "Z:/repos/app/solo.ts", at: 1_500, actor: "sess-1" }),
+    ];
+    render(AgentTimeline, { entries, agentName: "Claude Code", sessions });
+    await fireEvent.click(screen.getByRole("tab", { name: "Radar" }));
+    expect(screen.getByText(/No overlapping activity/i)).toBeTruthy();
   });
 });

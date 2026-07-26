@@ -3543,6 +3543,7 @@
     entries={$agentTimeline}
     agentName={watchedAgentName}
     sessionId={watchedSessionId}
+    sessions={$agentSessions}
     on:navigate={(e) => navigate(e.detail)}
     on:close={() => (showTimeline = false)}
   />
