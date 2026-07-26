@@ -53,3 +53,19 @@ Paths are opaque strings compared by whole/segment equality — NEVER `std::path
 ## Work Log
 2026-07-25 (workshift) — Filed by the Product Manager as a CPE-730 slice. Independent module in the sidecar
 ai-console crate; one-line lib.rs `pub mod` at a distinct anchor. Reuses conflict.rs style, doesn't modify it.
+
+2026-07-25 (workshift, Worker) — Implemented `sidecar/ai-console/src/conflict_rename.rs`:
+`RenameActivity`, `RenameConflictKind` (Divergence/Collision), `RenameConflict`,
+`detect_rename_conflicts`. Registered `pub mod conflict_rename;` in `lib.rs` immediately after
+`pub mod conflict;`. Mirrored `conflict.rs`'s derive stack exactly — plain `Debug`/`Clone`/`Eq`
+derives, no serde/specta — since `conflict.rs` itself carries none (assumption: the ticket's
+"...serialize + specta if that's the crate convention..." resolves to "no derives beyond
+Debug/Clone/PartialEq/Eq" because that's what the file it says to mirror actually does). Divergence
+requires 2+ distinct agents AND 2+ distinct targets on the same `from` (two agents renaming the same
+source to the *same* target isn't a disagreement, so it's correctly not flagged); Collision is the
+symmetric check on `to`. `from == to` no-ops are dropped before folding. 11 new unit tests (disjoint,
+divergence, collision, same-agent double-rename, same-agent repeated-target, no-op ignored, no-op
+mixed with a real conflict, divergence-needs-two-targets edge case, 3-agent sorted-agents, path-sorted
+determinism, both kinds reported together). Verify: `cargo test` (from `sidecar/ai-console`) — 320
+passed, 0 failed, 2 ignored (pre-existing, unrelated); `cargo clippy --all-targets -- -D warnings` —
+clean, no new deps added. No Defender/os-error-225 issues hit this run.
