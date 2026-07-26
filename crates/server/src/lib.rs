@@ -52,6 +52,10 @@ pub mod transfer;
 /// a jump-to-symbol code preview (CPE-910, epic CPE-724).
 pub mod code_outline;
 
+/// Lightweight, dependency-free foldable block-range heuristic (brace nesting / indentation suites /
+/// markdown sections per language) for a code preview's fold gutter (CPE-1050, epic CPE-724).
+pub mod code_folds;
+
 /// Tag store: user tags + a colour label per path, persisted as `tags.json` (CPE-635). Pure model
 /// helpers + `ServerCtx`-based command entry points (CPE-815 migration).
 pub mod tags;
