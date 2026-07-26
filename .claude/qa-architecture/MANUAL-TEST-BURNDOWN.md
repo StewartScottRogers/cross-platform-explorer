@@ -41,3 +41,5 @@ These are **not** MVD; listed so the QA Architect pins them and audits for regre
 - Row 1 (headless GUI) is the **highest-leverage** item — it underlies most skip-to-user escalations and
   unblocks rows 3 and 4. Automate it first.
 - When a row flips to ✅, decrement the MVD count in the header and name the pinning CI job in the row.
+
+| CPE-1090 | Code-preview outline strip / pills reflow / breadcrumb-on-scroll / jump feel | headless UAT only — interactive visual render on installed build still needs human eyes | open | 2026-07-26 |
