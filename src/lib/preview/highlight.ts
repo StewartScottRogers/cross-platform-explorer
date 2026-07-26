@@ -193,3 +193,56 @@ export function highlightForFile(code: string, name: string): string {
   }
   return escapeHtml(code);
 }
+
+/**
+ * Split one highlight.js HTML blob into per-source-line HTML fragments so the preview can render one
+ * DOM row per line (line/fold gutter, indent guides, minimap — CPE-1091, epic CPE-724).
+ *
+ * hljs emits a single flat string in which a multi-line construct (block comment, template literal, …)
+ * is ONE `<span>` whose text contains raw `\n` — the span is NOT closed at line boundaries. This does a
+ * single linear scan tracking the open-`<span>` stack: at each `\n` it closes every open span and ends
+ * the line, then reopens the same stack on the next line, so every returned fragment is independently
+ * valid HTML (balanced spans). It scans ONLY literal `<span…>` / `</span>` / `\n` tokens; the highlighted
+ * text is already entity-escaped (hljs emits `&lt;`/`&gt;`/`&amp;`, never a raw `<` outside a real tag),
+ * so entity content is passed through untouched.
+ *
+ * Pure (string → string[], no DOM). Invariants, for every input:
+ *  - Concatenating the fragments with `\n`, then stripping the injected span tags, reproduces the
+ *    original stripped text (folding aside — folding is a view concern, not this function's).
+ *  - Empty input → `[""]` (a single empty line). A trailing `\n` yields a trailing empty fragment,
+ *    mirroring `String.prototype.split("\n")`.
+ */
+export function splitHighlightedIntoLines(html: string): string[] {
+  const lines: string[] = [];
+  const openStack: string[] = []; // full opening tags, e.g. `<span class="hljs-comment">`
+  let buf = "";
+  let i = 0;
+  const n = html.length;
+  while (i < n) {
+    const ch = html[i];
+    if (ch === "\n") {
+      // Close every open span (innermost first) to end this line as valid HTML…
+      for (let k = 0; k < openStack.length; k++) buf += "</span>";
+      lines.push(buf);
+      // …then reopen the same stack (outermost first) so the next line continues the construct.
+      buf = openStack.join("");
+      i += 1;
+    } else if (ch === "<" && html.startsWith("</span>", i)) {
+      buf += "</span>";
+      openStack.pop();
+      i += 7; // "</span>".length
+    } else if (ch === "<" && html.startsWith("<span", i)) {
+      // Read the whole opening tag up to its '>' (safe: any '>' in text is escaped to `&gt;`).
+      const gt = html.indexOf(">", i);
+      const tag = gt === -1 ? html.slice(i) : html.slice(i, gt + 1);
+      buf += tag;
+      openStack.push(tag);
+      i += tag.length;
+    } else {
+      buf += ch;
+      i += 1;
+    }
+  }
+  lines.push(buf);
+  return lines;
+}
