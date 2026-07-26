@@ -34,6 +34,13 @@ feature-gated behind `sidecar-platform`; with no agent running the plain explore
   the session's activity timeline, showing what was touched up to the chosen moment and (where
   retained) the diff at that point, with play/pause/step/jump transport. Pure frontend over the
   existing timeline + diff stores — no new backend surface.
+- **Cost ledger (CPE-1097/1098):** the drawer's "Cost" tab shows live per-session input/output/total
+  tokens and a USD figure, bridged from the sidecar's best-effort PTY usage scrape. These are
+  **advisory** — scraped from the agent's own printed output, not a billing record — and cover only
+  the 3 fields the scrape captures; the richer `SessionMetrics` ledger (wall-clock, churn, per-model
+  rollup, budget) stays unwired dead code (see
+  `.claude/research-library/entries/sidecar-live-cost-usage-scanner.md`) until a future ticket wires
+  live `RunRecord` capture.
 
 ## What it is for
 

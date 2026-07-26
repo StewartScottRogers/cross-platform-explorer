@@ -12,6 +12,7 @@
   import ConsultedFiles from "./ConsultedFiles.svelte";
   import type { TimelineEntry } from "../agentActivity";
   import { agentDiffs, diffFor, diffLineStats } from "../agentDiffs";
+  import { agentCost, totalTokens, formatTokens, formatUsd } from "../agentCost";
   import {
     sliderRange,
     sliderFraction,
@@ -25,6 +26,9 @@
 
   export let entries: TimelineEntry[] = [];
   export let agentName = "agent";
+  /** sessionId of the agent currently being watched, if any (CPE-1098) — lets the cost tab flag
+   *  which reporting session is the one on screen when several sessions report usage. */
+  export let sessionId = "";
 
   const dispatch = createEventDispatcher<{ navigate: string; close: void }>();
 
@@ -51,9 +55,22 @@
   };
   const clock = (at: number) => new Date(at).toLocaleTimeString();
 
-  // ---------- Replay tab (CPE-1094) ----------
-  /** "Live" (default, today's list) vs "Replay" (scrub through the session's history). */
-  let tab: "live" | "replay" = "live";
+  // ---------- Replay tab (CPE-1094) / Cost tab (CPE-1098) ----------
+  /** "Live" (default, today's list), "Replay" (scrub through the session's history), or "Cost" (live
+   *  per-session token/USD usage). */
+  let tab: "live" | "replay" | "cost" = "live";
+
+  // ---------- Cost ledger tab (CPE-1098) ----------
+  /** Reporting sessions, current-watched one first (if it has reported), then the rest sorted by id
+   *  for a stable order. Advisory — best-effort figures scraped from the agent's own output. */
+  $: costList = (() => {
+    const all = Object.values($agentCost);
+    const mine = all.filter((c) => c.sessionId === sessionId);
+    const others = all
+      .filter((c) => c.sessionId !== sessionId)
+      .sort((a, b) => a.sessionId.localeCompare(b.sessionId));
+    return [...mine, ...others];
+  })();
 
   /** Selected scrub position — an epoch ms timestamp somewhere in `[range.firstAt, range.lastAt]`. */
   let t = 0;
@@ -165,6 +182,13 @@
       aria-selected={tab === "replay"}
       on:click={() => (tab = "replay")}
     ><span class="tab-label">Replay</span></button>
+    <button
+      class="tab"
+      class:active={tab === "cost"}
+      role="tab"
+      aria-selected={tab === "cost"}
+      on:click={() => (tab = "cost")}
+    ><span class="tab-label">Cost</span></button>
   </div>
 
   {#if tab === "live"}
@@ -207,7 +231,7 @@
         {/each}
       </ul>
     {/if}
-  {:else}
+  {:else if tab === "replay"}
     <!-- Replay tab (CPE-1094): scrub back and forth through this session's activity history. -->
     {#if !range}
       <div class="tl-empty">
@@ -290,6 +314,28 @@
               <span class="tl-name">{baseOf(e.path)}</span>
               <span class="tl-time">{clock(e.at)}</span>
             </span>
+          </li>
+        {/each}
+      </ul>
+    {/if}
+  {:else}
+    <!-- Cost tab (CPE-1098): live per-session usage bridged from the sidecar's best-effort PTY usage
+         scrape (CPE-1097) — advisory figures, never billing (see the note below the list). -->
+    {#if costList.length === 0}
+      <div class="tl-empty">No usage reported yet — figures appear here once the agent reports usage.</div>
+    {:else}
+      <div class="cl-note">Best-effort figures scraped from the agent's own output — not billing.</div>
+      <ul class="cl-list">
+        {#each costList as c (c.sessionId)}
+          <li class="cl-card" class:cl-current={c.sessionId === sessionId && sessionId !== ""}>
+            <div class="cl-head">
+              <span class="cl-session" title={c.sessionId}>{c.sessionId}</span>
+              {#if c.sessionId === sessionId && sessionId !== ""}<span class="cl-chip">watched</span>{/if}
+            </div>
+            <div class="cl-row"><span class="cl-label">Input tokens</span><span class="cl-value">{formatTokens(c.inputTokens)}</span></div>
+            <div class="cl-row"><span class="cl-label">Output tokens</span><span class="cl-value">{formatTokens(c.outputTokens)}</span></div>
+            <div class="cl-row"><span class="cl-label">Total tokens</span><span class="cl-value">{formatTokens(totalTokens(c))}</span></div>
+            <div class="cl-row"><span class="cl-label">Cost (USD)</span><span class="cl-value">{formatUsd(c.costUsd)}</span></div>
           </li>
         {/each}
       </ul>
@@ -547,6 +593,82 @@
   .rp-current-row {
     background: color-mix(in srgb, var(--accent, #2f6fed) 14%, transparent);
     border-radius: 5px;
+  }
+
+  /* ---------- Cost ledger tab (CPE-1098) ---------- */
+  .cl-note {
+    margin: 8px 10px 4px;
+    padding: 6px 8px;
+    border-radius: 5px;
+    background: var(--surface-alt, transparent);
+    border: 1px solid var(--border, #3a3a3a);
+    color: var(--text-muted, #9a9a9a);
+    font-size: 10.5px;
+    line-height: 1.4;
+    flex: 0 0 auto;
+  }
+  .cl-list {
+    list-style: none;
+    margin: 0;
+    padding: 6px 10px 10px;
+    overflow-y: auto;
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+  }
+  .cl-card {
+    border: 1px solid var(--border, #3a3a3a);
+    border-radius: 6px;
+    padding: 8px 10px;
+    background: var(--surface-alt, transparent);
+  }
+  .cl-current {
+    border-color: var(--accent, #2f6fed);
+  }
+  .cl-head {
+    display: flex;
+    flex-wrap: wrap; /* tick-tacks: the chip row reflows instead of overflowing the card */
+    align-items: center;
+    gap: 6px;
+    margin-bottom: 4px;
+  }
+  .cl-session {
+    flex: 1 1 auto;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    font-size: 11.5px;
+    font-weight: 600;
+    color: var(--text, inherit);
+  }
+  .cl-chip {
+    flex: 0 0 auto;
+    white-space: nowrap;
+    padding: 1px 7px;
+    border-radius: 999px;
+    font-size: 10px;
+    font-weight: 600;
+    letter-spacing: 0.02em;
+    color: var(--text, inherit);
+    background: color-mix(in srgb, var(--accent, #2f6fed) 22%, transparent);
+  }
+  .cl-row {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    gap: 8px;
+    padding: 2px 0;
+    font-size: 12px;
+  }
+  .cl-label {
+    color: var(--text-muted, #9a9a9a);
+  }
+  .cl-value {
+    color: var(--text, inherit);
+    font-variant-numeric: tabular-nums;
+    font-weight: 600;
   }
 </style>
 
