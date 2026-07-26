@@ -41,14 +41,30 @@ segment-wise prefix of abs's (`/repo-secrets/x` is NOT under `/repo`). No `std::
 Only a `ts` comparison (no arithmetic risk); no recursion. Plain derives (no f64).
 
 ## Acceptance Criteria
-- [ ] `read` excluded; `created`/`modified`/`removed`/`renamed` included; `ts < since_ts` and other-session
+- [x] `read` excluded; `created`/`modified`/`removed`/`renamed` included; `ts < since_ts` and other-session
       excluded.
-- [ ] `\`- and `/`-input map to the same key; **prefix-collision guard**: `root=/repo`, `/repo-secrets/x`
+- [x] `\`- and `/`-input map to the same key; **prefix-collision guard**: `root=/repo`, `/repo-secrets/x`
       → excluded, `/repo/x` → `x`.
-- [ ] `renamed` yields both source + target keys; out-of-root path skipped (not panicked); empty → empty set.
-- [ ] `cargo test -p cpe-server` green; clippy `--all-targets -- -D warnings` clean in default AND
+- [x] `renamed` yields both source + target keys; out-of-root path skipped (not panicked); empty → empty set.
+- [x] `cargo test -p cpe-server` green; clippy `--all-targets -- -D warnings` clean in default AND
       `--features index`; no new deps.
 
 ## Work Log
 2026-07-25 (workshift) — Filed by the Product Manager as the CPE-732 attribution foundation (audit is already
 session-tagged, so this is live-feed-ready). Independent module; distinct lib.rs anchor.
+2026-07-25 (workshift Worker) — Implemented `crates/server/src/revert_attribution.rs`:
+`agent_touched(events, session, since_ts, root)` (pure fold, excludes `read`, includes
+created/modified/removed/renamed, `session` + `ts >= since_ts` filter) and `to_root_relative(root, abs)`
+(cross-OS containment via `/`-segment equality, never `starts_with`; `\`→`/` normalized by splitting on
+both separators). Registered `pub mod revert_attribution;` in `lib.rs` immediately after
+`pub mod audit_journal;`, per the anchor instruction. Reused the `"-> <target>"` rename-detail convention
+from `replay.rs`'s `RENAME_TARGET_MARKER`/`rename_target` — `replay`'s helper is private to that module,
+so this module defines its own private mirror (`RENAME_TARGET_MARKER` + `rename_target`) rather than
+importing it; documented in the module doc comment as an assumption to keep in sync if the convention
+ever changes. 12 new unit tests cover every acceptance-criteria bullet (read exclusion, ts/session
+filtering, backslash/slash equivalence, prefix-collision guard, rename source+target incl. unparseable
+detail, out-of-root skip, empty input, exact-root-match edge case). Full crate suite: `cargo test` →
+950 passed, 0 failed. `cargo clippy --all-targets -- -D warnings` clean; `cargo clippy --all-targets
+--features index -- -D warnings` clean. No new dependencies. PR opened off branch
+`cpe-1079-revert-attribution`; leaving ticket in `Doing/` pending PR merge per repo convention (see
+CPE-1048 history — status moves to Done in a follow-up commit after merge, not at PR-open time).
