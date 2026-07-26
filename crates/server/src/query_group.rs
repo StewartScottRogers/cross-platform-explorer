@@ -22,6 +22,24 @@
 //!   after a skipped `)` is ANDed together).
 //! - **An empty query matches everything**: it parses to `Node::And(vec![])`, and [`eval`] on an empty
 //!   `And`/`Not`-free-of-content node is vacuously true (`Iterator::all` over zero items is `true`).
+//! - **Nesting is depth-bounded, so adversarial input can never blow the call stack.** Both `(` groups and
+//!   stacked `NOT`/`-` prefixes recurse; past [`MAX_DEPTH`] levels the parser stops recursing and instead
+//!   folds the rest of that nesting into ordinary, non-recursive content (see `MAX_DEPTH`'s doc). This
+//!   keeps every real query's shape identical while guaranteeing `parse` always returns — no panic, and no
+//!   stack overflow (which, unlike a panic, is an uncatchable process abort) even on thousands of nested
+//!   parens or `NOT`s. Since `parse` only ever produces a depth-bounded tree, [`eval`]'s recursion over it
+//!   is bounded too; `eval` also carries its own depth cap as a second, independent guard against a
+//!   pathological `Node` built by hand (outside of `parse`) rather than relying solely on that guarantee.
+
+/// Maximum nesting depth `parse` will recurse into — for parenthesised groups and for stacked `NOT`/`-`
+/// prefixes alike — and the matching depth cap `eval` enforces on its own recursion. Far beyond anything a
+/// real, hand-typed (or even hand-nested test) query would ever need; it exists purely to bound the call
+/// stack against adversarial/pasted input (e.g. `"(".repeat(10_000)`), which would otherwise recurse the
+/// parser (or, for a manually-built deep `Node`, `eval`) until the stack overflows — an uncatchable process
+/// abort, not a `panic!` that could be caught. Once a nesting chain hits this cap, `parse` stops recursing
+/// and instead treats the excess `(`/`NOT` as ordinary, non-recursive content (see [`parse_atom`] and
+/// [`parse_not`]); `eval` falls back to a permissive `true` past the same cap.
+const MAX_DEPTH: usize = 128;
 
 /// A parsed boolean query over opaque leaf tokens.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
@@ -104,7 +122,8 @@ fn starts_atom(tok: Option<&Tok>) -> bool {
 }
 
 /// Parse a query string into a predicate tree over opaque leaf tokens. See the module docs for the full
-/// grammar, precedence, and the unbalanced-parens / empty-query rules. Never panics.
+/// grammar, precedence, unbalanced-parens / empty-query rules, and the [`MAX_DEPTH`] nesting bound. Never
+/// panics and never overflows the stack, however deeply nested (or however long) the input is.
 pub fn parse(query: &str) -> Node {
     let tokens = lex(query);
     let mut pos = 0;
@@ -117,7 +136,7 @@ pub fn parse(query: &str) -> Node {
         if pos >= tokens.len() {
             break;
         }
-        parts.push(parse_or(&tokens, &mut pos));
+        parts.push(parse_or(&tokens, &mut pos, 0));
     }
     if parts.len() == 1 {
         parts.into_iter().next().unwrap()
@@ -126,12 +145,13 @@ pub fn parse(query: &str) -> Node {
     }
 }
 
-/// `OR`-level: one or more AND-groups separated by `OR`.
-fn parse_or(tokens: &[Tok], pos: &mut usize) -> Node {
-    let mut parts = vec![parse_and(tokens, pos)];
+/// `OR`-level: one or more AND-groups separated by `OR`. `depth` is the current paren/NOT nesting depth
+/// (see [`MAX_DEPTH`]); it is only ever incremented by [`parse_atom`] opening a new group.
+fn parse_or(tokens: &[Tok], pos: &mut usize, depth: usize) -> Node {
+    let mut parts = vec![parse_and(tokens, pos, depth)];
     while matches!(tokens.get(*pos), Some(Tok::Or)) {
         *pos += 1;
-        parts.push(parse_and(tokens, pos));
+        parts.push(parse_and(tokens, pos, depth));
     }
     if parts.len() == 1 {
         parts.into_iter().next().unwrap()
@@ -141,7 +161,7 @@ fn parse_or(tokens: &[Tok], pos: &mut usize) -> Node {
 }
 
 /// `AND`-level: one or more atoms joined by juxtaposition or the explicit word `AND`.
-fn parse_and(tokens: &[Tok], pos: &mut usize) -> Node {
+fn parse_and(tokens: &[Tok], pos: &mut usize, depth: usize) -> Node {
     let mut parts = Vec::new();
     loop {
         if matches!(tokens.get(*pos), Some(Tok::And)) {
@@ -149,7 +169,7 @@ fn parse_and(tokens: &[Tok], pos: &mut usize) -> Node {
             continue;
         }
         if starts_atom(tokens.get(*pos)) {
-            parts.push(parse_not(tokens, pos));
+            parts.push(parse_not(tokens, pos, depth));
         } else {
             break;
         }
@@ -162,27 +182,44 @@ fn parse_and(tokens: &[Tok], pos: &mut usize) -> Node {
 }
 
 /// `NOT`-level: zero or more `NOT`/`-` prefixes (stacking, so `NOT NOT a` cancels out structurally, though
-/// not simplified) around a single atom.
-fn parse_not(tokens: &[Tok], pos: &mut usize) -> Node {
+/// not simplified) around a single atom. Each prefix recurses and so counts against [`MAX_DEPTH`]: once the
+/// cap is hit, any further `NOT`/`-` tokens are consumed without adding another `Node::Not` wrapper or
+/// another stack frame — tolerant recovery, not a crash, for a pathological run of thousands of `NOT`s.
+fn parse_not(tokens: &[Tok], pos: &mut usize, depth: usize) -> Node {
     if matches!(tokens.get(*pos), Some(Tok::Not)) {
-        *pos += 1;
-        return Node::Not(Box::new(parse_not(tokens, pos)));
+        if depth < MAX_DEPTH {
+            *pos += 1;
+            return Node::Not(Box::new(parse_not(tokens, pos, depth + 1)));
+        }
+        // Cap reached: swallow any further NOT prefixes iteratively (no added recursion/stack growth).
+        while matches!(tokens.get(*pos), Some(Tok::Not)) {
+            *pos += 1;
+        }
     }
-    parse_atom(tokens, pos)
+    parse_atom(tokens, pos, depth)
 }
 
 /// Innermost level: a leaf token, or a parenthesised sub-expression. Tolerates a missing closing paren by
 /// simply not consuming one (the sub-expression's content runs to EOF or to whatever stopped `parse_or`).
-fn parse_atom(tokens: &[Tok], pos: &mut usize) -> Node {
+/// Opening a group recurses and so counts against [`MAX_DEPTH`]: once the cap is hit, a further `(` is
+/// treated as an ordinary (non-grouping) leaf character instead of opening another nested group — tolerant
+/// recovery, not a crash, for pathological input like thousands of nested parens.
+fn parse_atom(tokens: &[Tok], pos: &mut usize, depth: usize) -> Node {
     match tokens.get(*pos) {
-        Some(Tok::LParen) => {
+        Some(Tok::LParen) if depth < MAX_DEPTH => {
             *pos += 1;
-            let inner = parse_or(tokens, pos);
+            let inner = parse_or(tokens, pos, depth + 1);
             if matches!(tokens.get(*pos), Some(Tok::RParen)) {
                 *pos += 1;
             }
             // else: unbalanced "(" with no matching ")" before EOF — auto-close, don't panic.
             inner
+        }
+        Some(Tok::LParen) => {
+            // MAX_DEPTH reached: don't recurse into another parse_or (that's the stack-overflow vector for
+            // adversarial input like "(".repeat(10_000)) — fold this "(" into a literal leaf instead.
+            *pos += 1;
+            Node::Leaf("(".to_string())
         }
         Some(Tok::Word(w)) => {
             let w = w.clone();
@@ -198,12 +235,25 @@ fn parse_atom(tokens: &[Tok], pos: &mut usize) -> Node {
 /// Evaluate the tree; `leaf` decides whether an opaque leaf token matches the item under test. An empty
 /// `And(vec![])` (the empty-query / degenerate case) evaluates to `true`; an empty `Or(vec![])` evaluates to
 /// `false` — each follows from the ordinary identity element of AND / OR over zero operands.
+///
+/// Recursion depth is capped at [`MAX_DEPTH`] as a second, independent guard: a tree produced by [`parse`]
+/// is already bounded to that depth, so this never triggers on a parsed query, but `Node` is a public,
+/// hand-constructible type, so `eval` doesn't rely solely on `parse`'s guarantee. Past the cap, `eval`
+/// stops recursing and falls back to `true` (the same permissive default as an empty `And`) rather than
+/// overflowing the stack.
 pub fn eval(node: &Node, leaf: &impl Fn(&str) -> bool) -> bool {
+    eval_capped(node, leaf, 0)
+}
+
+fn eval_capped(node: &Node, leaf: &impl Fn(&str) -> bool, depth: usize) -> bool {
+    if depth >= MAX_DEPTH {
+        return true; // pathological hand-built tree past the depth cap: permissive fallback, never a crash
+    }
     match node {
         Node::Leaf(s) => leaf(s),
-        Node::Not(inner) => !eval(inner, leaf),
-        Node::And(parts) => parts.iter().all(|n| eval(n, leaf)),
-        Node::Or(parts) => parts.iter().any(|n| eval(n, leaf)),
+        Node::Not(inner) => !eval_capped(inner, leaf, depth + 1),
+        Node::And(parts) => parts.iter().all(|n| eval_capped(n, leaf, depth + 1)),
+        Node::Or(parts) => parts.iter().any(|n| eval_capped(n, leaf, depth + 1)),
     }
 }
 
@@ -418,5 +468,61 @@ mod tests {
         assert_eq!(node, Node::Leaf("Size:>1MB".to_string()));
         assert!(eval(&node, &matcher(&["Size:>1MB"])));
         assert!(!eval(&node, &matcher(&["size:>1mb"])));
+    }
+
+    // --- Regression: adversarial nesting must never overflow the stack (reviewer repro on PR #380) ---
+
+    #[test]
+    fn ten_thousand_open_parens_do_not_overflow_the_stack() {
+        // Before the MAX_DEPTH bound, this recursed once per "(" with no cap: "(".repeat(1_000) parsed
+        // fine but "(".repeat(10_000) crashed a release build with STATUS_STACK_OVERFLOW (an uncatchable
+        // process abort, not a panic). It must now return normally and evaluate without crashing. Past
+        // MAX_DEPTH, the excess "(" fold into literal leaves (an AND of 9,872 "(" tokens here), so the
+        // specific boolean isn't the point — not crashing, on either parse or eval, is.
+        let node = parse(&"(".repeat(10_000));
+        let _ = eval(&node, &matcher(&[]));
+        let _ = eval(&node, &matcher(&["anything"]));
+    }
+
+    #[test]
+    fn ten_thousand_close_parens_do_not_overflow_the_stack() {
+        // All-unmatched close-parens: each is skipped as a no-op at top level; must not recurse at all,
+        // let alone overflow.
+        let node = parse(&")".repeat(10_000));
+        assert_eq!(node, Node::And(vec![]));
+        assert!(eval(&node, &matcher(&[])));
+    }
+
+    #[test]
+    fn ten_thousand_stacked_not_prefixes_do_not_overflow_the_stack() {
+        // The other unbounded-recursion vector: a long run of "NOT NOT NOT ... x" (or "-" chained without
+        // spaces isn't possible since "-" only prefixes once per lexed word, so use the keyword form).
+        let query = "NOT ".repeat(10_000) + "x";
+        let node = parse(&query);
+        // Must not crash to build or to evaluate, whatever the resulting boolean is.
+        let _ = eval(&node, &matcher(&["x"]));
+        let _ = eval(&node, &matcher(&[]));
+    }
+
+    #[test]
+    fn mixed_deep_nesting_does_not_overflow_the_stack() {
+        // Parens and NOTs interleaved, past the cap in both dimensions at once.
+        let query = format!("{}{}x{}", "(".repeat(5_000), "NOT ".repeat(5_000), ")".repeat(5_000));
+        let node = parse(&query);
+        let _ = eval(&node, &matcher(&["x"]));
+    }
+
+    #[test]
+    fn depth_bound_leaves_normal_queries_unaffected() {
+        // Nesting well under MAX_DEPTH must parse exactly as it did before the bound was added.
+        let shallow = "(".repeat(10) + "a" + &")".repeat(10);
+        assert_eq!(parse(&shallow), Node::Leaf("a".to_string()));
+        let not_chain = "NOT ".repeat(3) + "a";
+        assert_eq!(
+            parse(&not_chain),
+            Node::Not(Box::new(Node::Not(Box::new(Node::Not(Box::new(Node::Leaf(
+                "a".to_string()
+            )))))))
+        );
     }
 }
