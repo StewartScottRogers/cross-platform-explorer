@@ -4,7 +4,7 @@ title: "Thumbnail source decode (PSD + bomb-guard + orientation) — cpe_server:
 type: feature
 component: Backend
 priority: medium
-status: Backlog
+status: Doing
 tags: ready
 created: 2026-07-26
 epic: CPE-718
