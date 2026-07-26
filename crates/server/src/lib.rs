@@ -109,6 +109,11 @@ pub mod batch_media;
 /// [`batch_media::MediaOp`]s to an image's bytes (decode once → fold ops → encode) — the executor for
 /// the plan [`batch_media::plan`] computes. Pure bytes→bytes; no filesystem I/O.
 pub mod batch_transform;
+
+/// Batch execute runner (CPE-1084, epic CPE-723): ties [`batch_media::plan`]'s planned outputs to the
+/// [`batch_transform::apply_ops`] engine — reads each planned item's input bytes, transforms them, and
+/// writes the result to its planned output. Skip-on-error, non-destructive, real filesystem I/O.
+pub mod batch_execute;
 pub mod spotlight;
 pub mod type_class;
 pub mod metadata_column;
