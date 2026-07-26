@@ -8,7 +8,7 @@ status: Backlog
 tags: ready
 created: 2026-07-26
 epic: CPE-396
-depends-on: CPE-1099
+depends-on: CPE-1099, CPE-1101
 ---
 
 ## Summary
