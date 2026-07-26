@@ -61,7 +61,17 @@ describe("normalizeFsDiff", () => {
       { path: "/c", after: "y" }, // missing before
       "nope",
     ]);
-    expect(items).toEqual([{ path: "/a", before: "x", after: "y" }]);
+    // A record without `actor` (pre-CPE-1101) stays valid and defaults to "unknown".
+    expect(items).toEqual([{ path: "/a", before: "x", after: "y", actor: "unknown" }]);
+  });
+
+  it("threads a present actor and defaults an absent one to 'unknown' (CPE-1101)", () => {
+    const items = normalizeFsDiff([
+      { path: "/a", before: "x", after: "y", actor: "sess-1" },
+      { path: "/b", before: "x", after: "y", actor: "user" },
+      { path: "/c", before: "x", after: "y" }, // absent → unknown
+    ]);
+    expect(items.map((i) => i.actor)).toEqual(["sess-1", "user", "unknown"]);
   });
 
   it("returns [] for non-array payloads", () => {
@@ -161,7 +171,7 @@ describe("store lifecycle", () => {
   it("ingests a payload and clears back to empty", () => {
     clearDiffs();
     ingestDiff([{ path: "/a", before: "", after: "hi" }]);
-    expect(diffFor(currentDiffs(), "/a")).toEqual({ path: "/a", before: "", after: "hi" });
+    expect(diffFor(currentDiffs(), "/a")).toEqual({ path: "/a", before: "", after: "hi", actor: "unknown" });
     clearDiffs();
     expect(currentDiffs()).toEqual(emptyDiffState());
   });

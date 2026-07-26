@@ -648,7 +648,9 @@ fn valid_entry_name(name: &str) -> Result<(), String> {
 /// Create a new directory `name` inside `path`.
 #[tauri::command]
 #[cfg_attr(feature = "specta-bindings", specta::specta)]
-async fn create_dir(path: String, name: String) -> Result<String, String> {
+async fn create_dir(app: tauri::AppHandle, path: String, name: String) -> Result<String, String> {
+    // Attribute the resulting watcher event to the user, not an agent (CPE-1101). No-op off-feature.
+    note_app_op(&app, || vec![Path::new(&path).join(name.trim()).to_string_lossy().into_owned()]);
     tauri::async_runtime::spawn_blocking(move || create_dir_impl(path, name))
         .await.map_err(|e| e.to_string())?
 }
@@ -672,7 +674,8 @@ fn create_dir_impl(path: String, name: String) -> Result<String, String> {
 /// `create_new` fails atomically rather than clobbering an existing file.
 #[tauri::command]
 #[cfg_attr(feature = "specta-bindings", specta::specta)]
-async fn create_file(path: String, name: String) -> Result<String, String> {
+async fn create_file(app: tauri::AppHandle, path: String, name: String) -> Result<String, String> {
+    note_app_op(&app, || vec![Path::new(&path).join(name.trim()).to_string_lossy().into_owned()]);
     tauri::async_runtime::spawn_blocking(move || create_file_impl(path, name))
         .await.map_err(|e| e.to_string())?
 }
@@ -700,7 +703,8 @@ fn create_file_impl(path: String, name: String) -> Result<String, String> {
 /// editor. Returns the new byte length.
 #[tauri::command]
 #[cfg_attr(feature = "specta-bindings", specta::specta)]
-async fn write_file_text(path: String, contents: String) -> Result<u64, String> {
+async fn write_file_text(app: tauri::AppHandle, path: String, contents: String) -> Result<u64, String> {
+    note_app_op(&app, || vec![path.clone()]);
     tauri::async_runtime::spawn_blocking(move || write_file_text_impl(path, contents))
         .await.map_err(|e| e.to_string())?
 }
@@ -1128,7 +1132,15 @@ fn read_attributes_impl(path: &str) -> Result<FileAttributes, String> {
 /// Rename a single entry in place. Returns the new path.
 #[tauri::command]
 #[cfg_attr(feature = "specta-bindings", specta::specta)]
-async fn rename_entry(path: String, new_name: String) -> Result<String, String> {
+async fn rename_entry(app: tauri::AppHandle, path: String, new_name: String) -> Result<String, String> {
+    // Both the old name (removed) and the new name (created) are the user's doing (CPE-1101).
+    note_app_op(&app, || {
+        let mut targets = vec![path.clone()];
+        if let Some(parent) = Path::new(&path).parent() {
+            targets.push(parent.join(new_name.trim()).to_string_lossy().into_owned());
+        }
+        targets
+    });
     tauri::async_runtime::spawn_blocking(move || rename_entry_impl(path, new_name))
         .await.map_err(|e| e.to_string())?
 }
@@ -1160,7 +1172,8 @@ fn rename_entry_impl(path: String, new_name: String) -> Result<String, String> {
 /// Move entries to the OS Recycle Bin / Trash. Recoverable by the user.
 #[tauri::command]
 #[cfg_attr(feature = "specta-bindings", specta::specta)]
-async fn delete_to_trash(paths: Vec<String>) -> Vec<OpResult> {
+async fn delete_to_trash(app: tauri::AppHandle, paths: Vec<String>) -> Vec<OpResult> {
+    note_app_op(&app, || paths.clone());
     tauri::async_runtime::spawn_blocking(move || delete_to_trash_impl(paths))
         .await.unwrap()
 }
@@ -1326,7 +1339,16 @@ fn delete_permanent_impl(paths: Vec<String>) -> Vec<OpResult> {
 /// Copy entries into `dest`, auto-renaming on collision.
 #[tauri::command]
 #[cfg_attr(feature = "specta-bindings", specta::specta)]
-async fn copy_entries(paths: Vec<String>, dest: String) -> Vec<OpResult> {
+async fn copy_entries(app: tauri::AppHandle, paths: Vec<String>, dest: String) -> Vec<OpResult> {
+    // Best-effort: record each expected `dest/<name>` target (auto-rename on collision may differ) so
+    // the user-copied file reads `actor:"user"` (CPE-1101).
+    note_app_op(&app, || {
+        paths
+            .iter()
+            .filter_map(|p| Path::new(p).file_name().map(|n| Path::new(&dest).join(n)))
+            .map(|t| t.to_string_lossy().into_owned())
+            .collect()
+    });
     tauri::async_runtime::spawn_blocking(move || copy_entries_impl(paths, dest))
         .await.unwrap()
 }
@@ -1405,7 +1427,17 @@ fn copy_entries_impl(paths: Vec<String>, dest: String) -> Vec<OpResult> {
 /// fails across volumes, e.g. C: -> Z:).
 #[tauri::command]
 #[cfg_attr(feature = "specta-bindings", specta::specta)]
-async fn move_entries(paths: Vec<String>, dest: String) -> Vec<OpResult> {
+async fn move_entries(app: tauri::AppHandle, paths: Vec<String>, dest: String) -> Vec<OpResult> {
+    // A move touches both the source (removed) and the `dest/<name>` target (created) (CPE-1101).
+    note_app_op(&app, || {
+        let mut targets: Vec<String> = paths
+            .iter()
+            .filter_map(|p| Path::new(p).file_name().map(|n| Path::new(&dest).join(n)))
+            .map(|t| t.to_string_lossy().into_owned())
+            .collect();
+        targets.extend(paths.iter().cloned());
+        targets
+    });
     tauri::async_runtime::spawn_blocking(move || move_entries_impl(paths, dest))
         .await.unwrap()
 }
@@ -1813,7 +1845,16 @@ fn cancel_transfer(id: u64) {
 /// than clobbering whatever now occupies that name.
 #[tauri::command]
 #[cfg_attr(feature = "specta-bindings", specta::specta)]
-async fn move_exact(pairs: Vec<(String, String)>) -> Vec<OpResult> {
+async fn move_exact(app: tauri::AppHandle, pairs: Vec<(String, String)>) -> Vec<OpResult> {
+    // Undo/redo restores exact names — both the `from` (removed) and `to` (created) are ours (CPE-1101).
+    note_app_op(&app, || {
+        let mut targets = Vec::with_capacity(pairs.len() * 2);
+        for (from, to) in &pairs {
+            targets.push(from.clone());
+            targets.push(to.clone());
+        }
+        targets
+    });
     tauri::async_runtime::spawn_blocking(move || move_exact_impl(pairs))
         .await.unwrap()
 }
@@ -4141,9 +4182,17 @@ fn serve_ai_console_requests(
                             serde_json::from_str::<serde_json::Value>(&state["fs-read:".len()..])
                         {
                             if let Some(path) = v.get("path").and_then(|p| p.as_str()) {
+                                // The reporting session IS the actor for a read (CPE-1101); the
+                                // sidecar now stamps `sessionId` on the announcement (mirrors the
+                                // `cost:` frame). Fall back to "unknown" for an older payload that
+                                // predates the tag, so the read still lands attributed-but-honest.
+                                let actor = v
+                                    .get("sessionId")
+                                    .and_then(|s| s.as_str())
+                                    .unwrap_or("unknown");
                                 let _ = app.emit(
                                     "ai-console://fs-activity",
-                                    serde_json::json!([{ "kind": "read", "path": path }]),
+                                    serde_json::json!([{ "kind": "read", "path": path, "actor": actor }]),
                                 );
                             }
                         }
@@ -4200,6 +4249,14 @@ fn serve_ai_console_requests(
 #[derive(Default)]
 struct AgentWatchState {
     watches: std::sync::Mutex<std::collections::HashMap<String, AgentWatch>>,
+    /// App-op ledger for the per-event **actor** tag (CPE-1101): the explorer records the target
+    /// path(s) of a user-initiated file op here *just before* mutating, so `flush_fs_batch` can tag
+    /// the resulting watcher event `actor:"user"` instead of the owning session id. Entries are
+    /// `(normalized path, when-recorded)` and age out **in-line** during flush (fresh = within
+    /// `APP_OP_TTL`) — deliberately **no background thread and no timer**. Empty when no user op is
+    /// in flight, so it stays a zero-cost Mutex; and `note_app_op` is a compile-time no-op without
+    /// this feature, so the plain explorer never even records.
+    app_ops: std::sync::Mutex<std::collections::VecDeque<(String, std::time::Instant)>>,
 }
 
 #[cfg(feature = "sidecar-platform")]
@@ -4237,6 +4294,104 @@ struct AgentWatch {
     _watcher: notify::RecommendedWatcher,
     #[allow(dead_code)]
     path: String,
+}
+
+// --- Agent Watch: per-event actor tags (CPE-1101) --------------------------------------
+// The conflict radar (CPE-1100) needs to know WHO touched a path — the owning agent session, the
+// user (via the explorer's own file ops), or an unattributable process ("unknown"). We tag every
+// fs-activity / fs-diff item with an `actor` string:
+//   * a `sessionId`  — default: the pump that saw the event owns its session id;
+//   * `"user"`       — the event matches a path the explorer itself just mutated (the app-op ledger);
+//   * `"unknown"`    — the owning session's watch is already gone (a pump-drain race on shutdown).
+
+/// How long an app-op ledger entry stays "fresh": a watcher event within this window of the recorded
+/// mutation is attributed to the user. Long enough to bridge the ~200ms pump coalesce plus disk lag,
+/// short enough that an unrelated later write to the same path is NOT mis-tagged.
+#[cfg(feature = "sidecar-platform")]
+const APP_OP_TTL: std::time::Duration = std::time::Duration::from_millis(2000);
+
+/// Hard cap on the app-op ledger so a burst of file ops can't grow it without bound (it's normally
+/// tiny and drained by matching flushes). Oldest entries are dropped first.
+#[cfg(feature = "sidecar-platform")]
+const APP_OP_CAP: usize = 512;
+
+/// Normalise a path for cross-source comparison: unify separators and (on the case-insensitive
+/// Windows filesystem) fold case, so a ledger entry recorded by the explorer matches the absolute
+/// path the `notify` watcher later emits regardless of `\` vs `/` or casing.
+#[cfg(feature = "sidecar-platform")]
+fn normalize_op_path(p: &str) -> String {
+    let s = p.replace('\\', "/");
+    if cfg!(windows) {
+        s.to_lowercase()
+    } else {
+        s
+    }
+}
+
+/// Record the target path(s) of a user-initiated explorer file op in the app-op ledger, *just before*
+/// the mutation, so the resulting watcher event is attributed to `"user"` (CPE-1101). Called at the
+/// explorer's file-op command sites (rename / delete / copy / move / move_exact / create_dir /
+/// create_file / write_file_text).
+///
+/// `paths` is a **closure** returning the target paths, not an eager slice, on purpose: in the plain
+/// (non-`sidecar-platform`) build this whole function is a no-op that **never calls the closure**, so
+/// the plain explorer pays nothing — not even the cost of computing the target paths. Off means off.
+#[cfg(feature = "sidecar-platform")]
+#[inline]
+fn note_app_op(app: &tauri::AppHandle, paths: impl FnOnce() -> Vec<String>) {
+    use tauri::Manager;
+    let Some(state) = app.try_state::<AgentWatchState>() else {
+        return;
+    };
+    let now = std::time::Instant::now();
+    let mut ledger = state.app_ops.lock().unwrap();
+    // Age out stale entries in-line (no timer) — the front is always the oldest.
+    while let Some((_, t)) = ledger.front() {
+        if now.duration_since(*t) > APP_OP_TTL {
+            ledger.pop_front();
+        } else {
+            break;
+        }
+    }
+    for p in paths() {
+        if ledger.len() >= APP_OP_CAP {
+            ledger.pop_front();
+        }
+        ledger.push_back((normalize_op_path(&p), now));
+    }
+}
+
+/// The plain-build no-op: the closure is **never invoked**, so the target-path computation at the call
+/// site is elided and the explorer pays nothing (AgentWatchState doesn't even exist here).
+#[cfg(not(feature = "sidecar-platform"))]
+#[inline]
+fn note_app_op(_app: &tauri::AppHandle, _paths: impl FnOnce() -> Vec<String>) {}
+
+/// Resolve the `actor` for one watcher event path: a fresh app-op ledger match → `"user"` (the entry
+/// is **consumed** so it can't attribute a second event); otherwise the owning `session_id`, or
+/// `"unknown"` when that session's watch is already gone (a drain race — better than a dead id).
+/// Pure over its inputs so it's unit-testable without any Tauri `AppHandle`.
+#[cfg(feature = "sidecar-platform")]
+fn resolve_actor(
+    ledger: &mut std::collections::VecDeque<(String, std::time::Instant)>,
+    session_present: bool,
+    session_id: &str,
+    path: &str,
+    now: std::time::Instant,
+) -> String {
+    let norm = normalize_op_path(path);
+    if let Some(idx) = ledger
+        .iter()
+        .position(|(p, t)| *p == norm && now.duration_since(*t) <= APP_OP_TTL)
+    {
+        ledger.remove(idx);
+        return "user".to_string();
+    }
+    if session_present {
+        session_id.to_string()
+    } else {
+        "unknown".to_string()
+    }
 }
 
 /// Map a raw `notify` event to the coarse Agent Watch activity kind, or `None` to ignore it.
@@ -4280,6 +4435,7 @@ fn read_text_capped(path: &str, cap: usize) -> Option<String> {
 fn fs_activity_pump(
     app: tauri::AppHandle,
     rx: std::sync::mpsc::Receiver<notify::Result<notify::Event>>,
+    session_id: String,
 ) {
     use std::collections::HashMap;
     use std::sync::mpsc::RecvTimeoutError;
@@ -4306,19 +4462,19 @@ fn fs_activity_pump(
                     }
                 }
                 if pending.len() >= CAP {
-                    flush_fs_batch(&app, &mut pending, &mut shadow);
+                    flush_fs_batch(&app, &mut pending, &mut shadow, &session_id);
                     last_flush = Instant::now();
                 }
             }
             Ok(Err(_)) => {} // a watch error — ignore, keep pumping
             Err(RecvTimeoutError::Timeout) => {}
             Err(RecvTimeoutError::Disconnected) => {
-                flush_fs_batch(&app, &mut pending, &mut shadow);
+                flush_fs_batch(&app, &mut pending, &mut shadow, &session_id);
                 break;
             }
         }
         if last_flush.elapsed() >= FLUSH {
-            flush_fs_batch(&app, &mut pending, &mut shadow);
+            flush_fs_batch(&app, &mut pending, &mut shadow, &session_id);
             last_flush = Instant::now();
         }
     }
@@ -4333,16 +4489,36 @@ fn flush_fs_batch(
     app: &tauri::AppHandle,
     pending: &mut std::collections::HashMap<String, &'static str>,
     shadow: &mut agent_shadow::ShadowStore,
+    session_id: &str,
 ) {
     use serde_json::json;
-    use tauri::Emitter;
+    use tauri::{Emitter, Manager};
 
     if pending.is_empty() {
         return;
     }
+    // Per-event actor tag (CPE-1101). The owning session id is the default; a fresh app-op ledger
+    // match upgrades an event to "user"; and if this pump's session key is already gone (a shutdown
+    // drain race) we emit "unknown" rather than a dead id. State is always managed under this feature,
+    // but we degrade gracefully to the session id if it somehow isn't.
+    let now = std::time::Instant::now();
+    let watch_state = app.try_state::<AgentWatchState>();
+    let session_present = watch_state
+        .as_ref()
+        .map(|s| s.watches.lock().unwrap().contains_key(session_id))
+        .unwrap_or(true);
+
     let mut activity = Vec::with_capacity(pending.len());
     let mut diffs = Vec::new();
     for (path, kind) in pending.drain() {
+        let actor = match watch_state.as_ref() {
+            Some(s) => {
+                let mut ledger = s.app_ops.lock().unwrap();
+                resolve_actor(&mut ledger, session_present, session_id, &path, now)
+            }
+            None if session_present => session_id.to_string(),
+            None => "unknown".to_string(),
+        };
         // Diff bookkeeping first (borrows `path`), then move `path` into the activity item below.
         let record = match kind {
             "created" | "modified" => match read_text_capped(&path, agent_shadow::MAX_FILE_BYTES) {
@@ -4361,9 +4537,9 @@ fn flush_fs_batch(
             _ => None,
         };
         if let Some(r) = record {
-            diffs.push(json!({ "path": r.path, "before": r.before, "after": r.after }));
+            diffs.push(json!({ "path": r.path, "before": r.before, "after": r.after, "actor": actor.clone() }));
         }
-        activity.push(json!({ "kind": kind, "path": path }));
+        activity.push(json!({ "kind": kind, "path": path, "actor": actor }));
     }
     let _ = app.emit("ai-console://fs-activity", activity);
     if !diffs.is_empty() {
@@ -4398,7 +4574,9 @@ fn agent_watch_start(
     watcher.watch(dir, RecursiveMode::Recursive).map_err(|e| e.to_string())?;
     // Dropping the watcher (when this session's key is removed/re-armed, or the map is cleared)
     // closes `rx` and ends this thread — no separate stop signal needed.
-    std::thread::spawn(move || fs_activity_pump(app, rx));
+    // The pump owns its session id so every event it flushes can default `actor` to it (CPE-1101).
+    let pump_session = session_id.clone();
+    std::thread::spawn(move || fs_activity_pump(app, rx, pump_session));
     state.arm(session_id, AgentWatch { _watcher: watcher, path });
     Ok(())
 }
@@ -6219,6 +6397,43 @@ mod agent_watch_tests {
         // stop_all clears the map → back to the zero-watcher invariant.
         state.disarm_all();
         assert!(state.is_empty());
+    }
+
+    // --- Per-event actor tags: app-op ledger + actor resolution (CPE-1101) ----------------
+    use super::{normalize_op_path, resolve_actor, APP_OP_TTL};
+    use std::collections::VecDeque;
+    use std::time::{Duration, Instant};
+
+    #[test]
+    fn actor_is_user_after_a_matching_app_op_then_session_id_otherwise() {
+        let now = Instant::now();
+        // The explorer just wrote this path (as `note_app_op` would, normalized). A separator/case
+        // variant of the *same* path must still match — the watcher emits its own spelling.
+        let mut ledger: VecDeque<(String, Instant)> = VecDeque::new();
+        ledger.push_back((normalize_op_path("Z:/proj/a.txt"), now));
+
+        // The watcher event for that path resolves to "user" AND consumes the ledger entry, so a
+        // second same-path event can't keep claiming "user".
+        let a = resolve_actor(&mut ledger, true, "sess-1", r"Z:\proj\A.TXT", now);
+        assert_eq!(a, "user");
+        assert!(ledger.is_empty(), "a user match must consume its ledger entry");
+
+        // A plain event with no ledger match falls back to the owning session id.
+        let b = resolve_actor(&mut ledger, true, "sess-1", "Z:/proj/b.txt", now);
+        assert_eq!(b, "sess-1");
+
+        // A stale ledger entry (older than the TTL) does NOT match — it can't mis-attribute a much
+        // later unrelated write to the user.
+        let mut stale: VecDeque<(String, Instant)> = VecDeque::new();
+        stale.push_back((normalize_op_path("Z:/proj/c.txt"), now - APP_OP_TTL - Duration::from_millis(1)));
+        let c = resolve_actor(&mut stale, true, "sess-1", "Z:/proj/c.txt", now);
+        assert_eq!(c, "sess-1");
+        assert_eq!(stale.len(), 1, "a non-matching (stale) entry is left in place, not consumed");
+
+        // An event whose owning session's watch is already gone (drain race) is "unknown", not a dead id.
+        let mut empty: VecDeque<(String, Instant)> = VecDeque::new();
+        let d = resolve_actor(&mut empty, false, "sess-gone", "Z:/proj/d.txt", now);
+        assert_eq!(d, "unknown");
     }
 
     // --- Catalog version rollback (CPE-383) --------------------------------------------

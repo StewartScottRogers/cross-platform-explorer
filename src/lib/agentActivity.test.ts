@@ -59,10 +59,28 @@ describe("Agent Watch activity folding (CPE-399)", () => {
     expect(recentActivities(map, 2).map((r) => r.path)).toEqual(["/b", "/c"]);
   });
 
+  it("carries the per-event actor through foldActivities and mergeTimeline (CPE-1101)", () => {
+    // Distinct actors on the same path: the conflict radar (CPE-1100) needs each write attributed.
+    const items: FsActivity[] = [
+      { kind: "modified", path: "/shared.rs", actor: "sess-1" },
+      { kind: "created", path: "/mine.txt", actor: "user" },
+    ];
+    const map = foldActivities({}, items, 100);
+    expect(map["/shared.rs"]).toEqual({ kind: "modified", at: 100, actor: "sess-1" });
+    expect(map["/mine.txt"]).toEqual({ kind: "created", at: 100, actor: "user" });
+
+    const tl = mergeTimeline([], items, 100, 0);
+    expect(tl.map((e) => e.actor)).toEqual(["user", "sess-1"]); // newest-first
+    // A later same-path write by a *different* actor overwrites the annotation's actor.
+    const map2 = foldActivities(map, [{ kind: "modified", path: "/shared.rs", actor: "sess-2" }], 200);
+    expect(map2["/shared.rs"]).toEqual({ kind: "modified", at: 200, actor: "sess-2" });
+  });
+
   it("ingestActivity updates the store and clearActivity empties it", () => {
     clearActivity();
     ingestActivity([{ kind: "created", path: "/store/a" }], 500);
-    expect(read()["/store/a"]).toEqual({ kind: "created", at: 500 });
+    // Via ingest→normalize, an untagged payload folds in with actor "unknown" (CPE-1101).
+    expect(read()["/store/a"]).toEqual({ kind: "created", at: 500, actor: "unknown" });
     ingestActivity("garbage");
     expect(read()["/store/a"]).toBeTruthy(); // malformed ignored, prior state intact
     clearActivity();
@@ -74,7 +92,7 @@ describe("Agent Watch reads (CPE-405)", () => {
   it("ingests a read kind into the map and timeline", () => {
     clearActivity();
     ingestActivity([{ kind: "read", path: "/r/consulted.rs" }], 700);
-    expect(read()["/r/consulted.rs"]).toEqual({ kind: "read", at: 700 });
+    expect(read()["/r/consulted.rs"]).toEqual({ kind: "read", at: 700, actor: "unknown" });
     expect(readTimeline()[0]).toMatchObject({ kind: "read", path: "/r/consulted.rs" });
     clearActivity();
   });

@@ -17,6 +17,11 @@ import { normalizePath } from "./agentSessions";
 export interface AgentActivity {
   kind: FsActivity["kind"];
   at: number;
+  /** Who caused it (CPE-1101): a `sessionId`, `"user"`, or `"unknown"`. Carried through from the
+   *  folded {@link FsActivity} for the conflict radar (CPE-1100); existing annotations ignore it.
+   *  Optional — production activity always arrives normalized (tag present), but a directly-folded
+   *  test activity may omit it. */
+  actor?: string;
 }
 
 /** How long an annotation lingers before it fades out of the map. */
@@ -31,6 +36,10 @@ export interface TimelineEntry {
   kind: FsActivity["kind"];
   path: string;
   at: number;
+  /** Who caused it (CPE-1101): a `sessionId`, `"user"`, or `"unknown"`. Lets the radar fold same-path
+   *  timeline entries across distinct actors; existing timeline rows ignore it. Optional for the same
+   *  reason as {@link AgentActivity.actor}. */
+  actor?: string;
 }
 
 /** One file the agent has READ this session (CPE-741) — the durable "consulted" set. Unlike the
@@ -95,7 +104,13 @@ export function mergeTimeline(
   baseId: number,
   cap = TIMELINE_CAP,
 ): TimelineEntry[] {
-  const created = items.map((it, i) => ({ id: baseId + i, kind: it.kind, path: it.path, at: now }));
+  const created = items.map((it, i) => ({
+    id: baseId + i,
+    kind: it.kind,
+    path: it.path,
+    at: now,
+    actor: it.actor,
+  }));
   return [...created.reverse(), ...prev].slice(0, cap);
 }
 
@@ -111,7 +126,7 @@ export function foldActivities(
   for (const it of items) {
     const existing = next[it.path];
     if (it.kind === "read" && existing && existing.kind !== "read") continue;
-    next[it.path] = { kind: it.kind, at: now };
+    next[it.path] = { kind: it.kind, at: now, actor: it.actor };
   }
   return next;
 }
