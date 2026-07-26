@@ -4,7 +4,7 @@ title: "Updater manifest + signature verification guard (retire manual auto-upda
 type: test
 component: Backend
 priority: medium
-status: Doing
+status: Done
 tags: ready
 created: 2026-07-25
 estimate: 4-6h
