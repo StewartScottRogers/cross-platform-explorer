@@ -4,7 +4,7 @@ title: "Extract planner — cpe_server::extract_plan (paths, collisions, zip-sli
 type: feature
 component: Backend
 priority: medium
-status: Doing
+status: Done
 tags: ready
 created: 2026-07-25
 epic: CPE-705
