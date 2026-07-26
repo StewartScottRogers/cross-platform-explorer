@@ -1310,7 +1310,10 @@ fn restore_from_trash_impl(paths: Vec<String>) -> Vec<OpResult> {
 /// before ever calling this.
 #[tauri::command]
 #[cfg_attr(feature = "specta-bindings", specta::specta)]
-async fn delete_permanent(paths: Vec<String>) -> Vec<OpResult> {
+async fn delete_permanent(app: tauri::AppHandle, paths: Vec<String>) -> Vec<OpResult> {
+    // Same as its sibling `delete_to_trash` — a permanent delete is the user's doing too, not the
+    // owning agent session (CPE-1102, fast-follow on CPE-1101).
+    note_app_op(&app, || paths.clone());
     tauri::async_runtime::spawn_blocking(move || delete_permanent_impl(paths))
         .await.unwrap()
 }
@@ -1482,10 +1485,44 @@ struct WatchAction {
 /// Execute a landed file's resolved action pipeline. See the module comment. Async per the commands rule.
 #[tauri::command]
 #[cfg_attr(feature = "specta-bindings", specta::specta)]
-async fn run_watch_actions(path: String, actions: Vec<WatchAction>) -> Vec<OpResult> {
+async fn run_watch_actions(app: tauri::AppHandle, path: String, actions: Vec<WatchAction>) -> Vec<OpResult> {
+    // This pipeline is app-driven watch automation, not the owning agent session (CPE-1102). Record
+    // each step's planned destination up front, best-effort: a `move`/`rename` updates the simulated
+    // "current" path for the next step (mirroring `run_watch_actions_impl`), while the real executor's
+    // collision auto-rename may pick a different name — a miss there just falls back to the session id.
+    note_app_op(&app, || plan_watch_action_targets(&path, &actions));
     tauri::async_runtime::spawn_blocking(move || run_watch_actions_impl(path, actions))
         .await
         .unwrap_or_default()
+}
+
+/// Pure best-effort planner for `run_watch_actions`' app-op ledger entries (CPE-1102): simulate the
+/// pipeline's resolved destination for each step without touching the filesystem, mirroring
+/// `run_watch_actions_impl`'s `current`-path threading (`move`/`rename` relocate it, `copy` doesn't).
+/// Split out from the command so it's unit-testable without a `tauri::AppHandle`.
+fn plan_watch_action_targets(path: &str, actions: &[WatchAction]) -> Vec<String> {
+    let mut current = PathBuf::from(path);
+    let mut targets = Vec::with_capacity(actions.len());
+    for action in actions {
+        match action.kind.as_str() {
+            "move" | "copy" => {
+                let Some(name) = current.file_name() else { continue };
+                let dest = Path::new(&action.resolved).join(name);
+                targets.push(dest.to_string_lossy().into_owned());
+                if action.kind == "move" {
+                    current = dest;
+                }
+            }
+            "rename" => {
+                let Some(parent) = current.parent() else { continue };
+                let dest = parent.join(action.resolved.trim());
+                targets.push(dest.to_string_lossy().into_owned());
+                current = dest;
+            }
+            _ => {}
+        }
+    }
+    targets
 }
 
 fn run_watch_actions_impl(path: String, actions: Vec<WatchAction>) -> Vec<OpResult> {
@@ -1814,6 +1851,21 @@ fn start_transfer(
     let id = TRANSFER_SEQ.fetch_add(1, Ordering::Relaxed);
     let cancel = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
     transfer_registry().lock().unwrap().insert(id, cancel.clone());
+    // Record the planned per-source destination up front, before the transfer thread starts, so its
+    // watcher events read `actor:"user"` (CPE-1102). Best-effort: the engine's collision auto-rename
+    // (`resolve_conflict`) may pick a different name than `dest/<name>`, in which case the miss just
+    // falls back to the session id — still honest. A Move also removes each source.
+    note_app_op(&app, || {
+        let mut targets: Vec<String> = sources
+            .iter()
+            .filter_map(|p| Path::new(p).file_name().map(|n| Path::new(&dest).join(n)))
+            .map(|t| t.to_string_lossy().into_owned())
+            .collect();
+        if kind == TransferKind::Move {
+            targets.extend(sources.iter().cloned());
+        }
+        targets
+    });
     let srcs: Vec<PathBuf> = sources.iter().map(PathBuf::from).collect();
     let dest_dir = PathBuf::from(dest);
     let ctx = server_ctx::TauriCtx::new(&app);
@@ -2665,13 +2717,21 @@ fn template_delete(app: tauri::AppHandle, name: String) -> Result<TemplateCatalo
 #[tauri::command]
 #[cfg_attr(feature = "specta-bindings", specta::specta)]
 async fn template_stamp(
+    app: tauri::AppHandle,
     template: Template,
     dest: String,
     vars: std::collections::BTreeMap<String, String>,
 ) -> Result<Vec<String>, String> {
     tauri::async_runtime::spawn_blocking(move || {
-        cpe_server::folder_template::stamp(&template, std::path::Path::new(&dest), &vars)
-            .map(|paths| paths.into_iter().map(|p| p.display().to_string()).collect())
+        let result = cpe_server::folder_template::stamp(&template, std::path::Path::new(&dest), &vars)
+            .map(|paths| paths.into_iter().map(|p| p.display().to_string()).collect::<Vec<_>>());
+        // Record the actually-created paths right after the stamp (their exact set — including nested
+        // dirs/files — is only known once `stamp` runs), still well within the ledger's TTL ahead of
+        // the watcher events it just triggered (CPE-1102).
+        if let Ok(created) = &result {
+            note_app_op(&app, || created.clone());
+        }
+        result
     })
     .await
     .map_err(|e| e.to_string())?
@@ -3095,7 +3155,24 @@ fn run_command_impl(command: String, cwd: Option<String>) -> Result<CommandOutpu
 /// (CPE-242). Read-only: the temp copy is what opens, not the archived bytes.
 #[tauri::command]
 #[cfg_attr(feature = "specta-bindings", specta::specta)]
-async fn extract_archive_entry(zip: String, inner: String) -> Result<String, String> {
+async fn extract_archive_entry(app: tauri::AppHandle, zip: String, inner: String) -> Result<String, String> {
+    // Record the exact temp-file target `cpe_server::archive::extract_archive_entry` will write
+    // (mirroring its own `dir.join(base)` — CPE-1102), best-effort: if `inner`'s last path component
+    // can't be read (e.g. an empty name), the write itself will fail too, so skipping the record here
+    // is harmless.
+    note_app_op(&app, || {
+        Path::new(&inner)
+            .file_name()
+            .map(|base| {
+                std::env::temp_dir()
+                    .join("cpe-archive")
+                    .join(base)
+                    .to_string_lossy()
+                    .into_owned()
+            })
+            .into_iter()
+            .collect()
+    });
     tauri::async_runtime::spawn_blocking(move || cpe_server::archive::extract_archive_entry(&zip, &inner))
         .await.map_err(|e| e.to_string())?
 }
@@ -3116,7 +3193,11 @@ async fn compress_to_zip(paths: Vec<String>, dest: String) -> Result<String, Str
 /// `cpe_server::archive` (CPE-822); thin dispatcher.
 #[tauri::command]
 #[cfg_attr(feature = "specta-bindings", specta::specta)]
-async fn extract_archive(path: String, dest: String) -> Result<String, String> {
+async fn extract_archive(app: tauri::AppHandle, path: String, dest: String) -> Result<String, String> {
+    // Coarse best-effort record (CPE-1102): the individual extracted entry paths aren't known until the
+    // archive is actually read, so record just the `dest` root (which `extract_archive` itself
+    // `create_dir_all`s first) rather than trying to enumerate every member up front.
+    note_app_op(&app, || vec![dest.clone()]);
     tauri::async_runtime::spawn_blocking(move || cpe_server::archive::extract_archive(&path, &dest))
         .await.map_err(|e| e.to_string())?
 }
@@ -6436,6 +6517,38 @@ mod agent_watch_tests {
         assert_eq!(d, "unknown");
     }
 
+    /// CPE-1102 (fast-follow on CPE-1101): before this ticket, `delete_permanent` recorded nothing, so a
+    /// Shift+Del permanent-delete's watcher `removed` event fell back to the owning session id — reading
+    /// as the agent even though the explorer itself performed it — while its sibling `delete_to_trash`
+    /// (which already calls `note_app_op(&app, || paths.clone())`) correctly read "user". This test
+    /// exercises the exact ledger primitives `delete_permanent`'s `note_app_op` call now feeds (same
+    /// `Vec<String>` shape as `delete_to_trash`), proving a permanently-deleted path resolves to "user"
+    /// just like a trashed one does.
+    #[test]
+    fn delete_permanent_paths_resolve_to_user_via_the_app_op_ledger() {
+        let now = Instant::now();
+        let paths = vec!["Z:/proj/gone.txt".to_string(), r"Z:\proj\also-gone.txt".to_string()];
+
+        // Mirror `note_app_op`'s body: normalize + record each path just before the mutation.
+        let mut ledger: VecDeque<(String, Instant)> = VecDeque::new();
+        for p in &paths {
+            ledger.push_back((normalize_op_path(p), now));
+        }
+
+        // The `notify` watcher's "removed" event for each permanently-deleted path — in its own
+        // spelling — now resolves to "user", not the owning session id.
+        let a = resolve_actor(&mut ledger, true, "sess-1", "Z:/proj/gone.txt", now);
+        assert_eq!(a, "user");
+        let b = resolve_actor(&mut ledger, true, "sess-1", r"Z:\proj\ALSO-GONE.TXT", now);
+        assert_eq!(b, "user");
+        assert!(ledger.is_empty(), "both matches must consume their ledger entries");
+
+        // An unrelated path deleted in the same batch but never recorded still falls back to the
+        // session id — the ledger doesn't blanket-attribute every delete to "user".
+        let c = resolve_actor(&mut ledger, true, "sess-1", "Z:/proj/unrelated.txt", now);
+        assert_eq!(c, "sess-1");
+    }
+
     // --- Catalog version rollback (CPE-383) --------------------------------------------
     use super::{catalog_url_for_tag, is_safe_release_tag, parse_release_versions};
 
@@ -7521,6 +7634,42 @@ mod tests {
         assert!(dest.join("final.dat").exists()); // renamed THEN moved under the new name
         assert!(!src_dir.join("raw.dat").exists() && !src_dir.join("final.dat").exists());
         let _ = fs::remove_dir_all(&d);
+    }
+
+    /// CPE-1102: `plan_watch_action_targets` is the no-filesystem-touching planner feeding
+    /// `run_watch_actions`'s `note_app_op` ledger record. It must predict exactly the paths
+    /// `run_watch_actions_impl` actually produces for the same pipeline (rename → move: the move's
+    /// destination is computed from the *renamed* name, not the original).
+    #[test]
+    fn plan_watch_action_targets_mirrors_the_pipelines_actual_destination() {
+        let planned = plan_watch_action_targets(
+            "Z:/in/raw.dat",
+            &[wa("rename", "final.dat"), wa("move", "Z:/out")],
+        );
+        assert_eq!(
+            planned,
+            vec![
+                PathBuf::from("Z:/in").join("final.dat").to_string_lossy().into_owned(),
+                PathBuf::from("Z:/out").join("final.dat").to_string_lossy().into_owned(),
+            ]
+        );
+    }
+
+    /// A `copy` step doesn't relocate the working path (unlike `move`/`rename`), so a copy-then-move
+    /// pipeline's move destination is planned from the ORIGINAL name, matching `run_watch_actions_impl`.
+    #[test]
+    fn plan_watch_action_targets_copy_step_does_not_relocate_the_working_path() {
+        let planned = plan_watch_action_targets(
+            "Z:/in/a.txt",
+            &[wa("copy", "Z:/backup"), wa("move", "Z:/sorted")],
+        );
+        assert_eq!(
+            planned,
+            vec![
+                PathBuf::from("Z:/backup").join("a.txt").to_string_lossy().into_owned(),
+                PathBuf::from("Z:/sorted").join("a.txt").to_string_lossy().into_owned(),
+            ]
+        );
     }
 
     #[test]
