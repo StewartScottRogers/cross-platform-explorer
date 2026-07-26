@@ -4,7 +4,7 @@ title: "Agent Watch: cost ledger panel (live tokens + USD per session)"
 type: feature
 component: Frontend
 priority: medium
-status: Backlog
+status: Doing
 tags: ready
 created: 2026-07-26
 epic: CPE-396
