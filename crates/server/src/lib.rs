@@ -96,6 +96,7 @@ pub mod launch;
 pub mod activity_timeline;
 pub mod batch_media;
 pub mod spotlight;
+pub mod type_class;
 pub mod metadata_column;
 pub mod restore_plan;
 
