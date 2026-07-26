@@ -4,7 +4,7 @@ title: "Archive-vs-folder diff — cpe_server::archive_diff (what's new in this 
 type: feature
 component: Backend
 priority: low
-status: Backlog
+status: Doing
 tags: ready
 created: 2026-07-25
 epic: CPE-705
