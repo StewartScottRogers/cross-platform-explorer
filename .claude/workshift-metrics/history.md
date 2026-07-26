@@ -51,3 +51,27 @@ _(no shifts recorded yet — first real workshift will seed this)_
   bz2/xz/zst READ expansion (needs new decompression crates — user call on binary size) + GUI. The clean
   pure-`crates/server` planner/detector veins across both epics are now largely mined; the next headless
   wave likely wants a fresh epic (PM flagged CPE-735 local-snapshots dedup planner as a runner-up vein).
+
+## 2026-07-25 (late) — CPE-703 search power-filter DSL (4 shipped) + CPE-1058 updater-verify
+- Shipped: CPE-1058 (updater manifest+minisign verify crate → burndown #6 download/verify sub-surface
+  automated), then the full **CPE-703** power-filter query DSL — CPE-1059 size_filter, CPE-1060 date_filter,
+  CPE-1061 type_class, CPE-1062 query_group. All pure `crates/server`, no new shipped-app deps.
+- **HEADLINE — independent reviewers caught 4 real defects that workers self-verified clean AND UAT passed.**
+  Do NOT downgrade or skip the code Reviewer; it is the highest-value gate in the pipeline. This shift's catches:
+  1. CPE-1053 code_breadcrumb — fold-less symbol swallowed a sibling (forward), then the mirror-image (backward) after the first fix. Root-cause redesign (drop rule-2 ancestor-fold inheritance).
+  2. CPE-1055 extract_plan — a `C:\x` drive-letter test asserted unconditionally → red the Linux/macOS CI (cfg-gate fix).
+  3. CPE-1060 date_filter — absolute-year path used unchecked arithmetic → `parse("99999999999999999")` panics (debug) / wraps (release), reachable from a search token. Fixed by bounding year length.
+  4. CPE-1062 query_group — unbounded parse/eval recursion → `"(".repeat(10_000)` = STATUS_STACK_OVERFLOW (uncatchable process abort). Fixed with a shared MAX_DEPTH=128 + tolerant recovery (also caught stacked-NOT as a second unbounded vector).
+  Pattern: **UAT confirms the happy path + named cases; the Reviewer is what finds adversarial/overflow/cross-OS/aliasing bugs.** Both are needed. Reviewer stayed on sonnet and caught all four — sonnet reviewers are cost-effective and rigorous; keep them.
+- Adversarial-input lesson for pure parsers on user-typed text (search tokens, query strings): brief workers
+  UP FRONT to (a) use checked arithmetic / bound numeric input (no unchecked `*`/`+` on parsed numbers), and
+  (b) bound recursion depth (or go iterative) in any recursive-descent parser/eval — user text WILL include
+  huge numbers and deep nesting. Add these to the worker brief for future DSL/parser tickets to avoid the rework.
+- Tuned defaults: **search-dsl pure-parser class: sonnet workers, 4-wide, ~6m median build; ~50% needed one
+  rework round (2 of 4) — all reviewer-caught, all fixed one-pass.** Distinct-lib.rs-anchor trick again gave
+  zero merge conflicts across 4 PRs. Combined UAT over the 4 sibling PRs (1 agent, 4 verdicts) worked well.
+- Frontier: CPE-703 remainder = the index engine (CPE-832 big-design/attended) + live watcher (CPE-833) +
+  search overlay GUI (CPE-834) + the integration ticket that grows `Candidate` with size/mtime and wires
+  these filters into `Query::parse` (touches index_query.rs — serial/attended). Two tiny unreachable
+  follow-ups noted but not filed: size_filter saturate-to-MAX on absurd inputs (safe, undocumented);
+  query_group recursive `Drop` on a hand-built million-deep Node (unreachable via public API).

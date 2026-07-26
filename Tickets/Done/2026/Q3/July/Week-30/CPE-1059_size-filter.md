@@ -4,7 +4,7 @@ title: "Search size filter — cpe_server::size_filter (size: query predicate)"
 type: feature
 component: Backend
 priority: high
-status: Doing
+status: Done
 tags: ready
 created: 2026-07-25
 epic: CPE-703
