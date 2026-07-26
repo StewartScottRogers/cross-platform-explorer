@@ -4,7 +4,7 @@ title: "Agent Watch: per-event actor tags (conflict-radar enablement, slice b)"
 type: feature
 component: Backend
 priority: medium
-status: Doing
+status: Done
 tags: ready
 created: 2026-07-26
 epic: CPE-396
