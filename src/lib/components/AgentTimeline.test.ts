@@ -137,6 +137,73 @@ describe("AgentTimeline Replay tab (CPE-1094)", () => {
     expect(screen.getByTitle("Play")).toBeTruthy(); // toggled back from "Pause"
   });
 
+  it("defaults to 1x speed and plays at the base ~400ms cadence", async () => {
+    vi.useFakeTimers();
+    const entries = [
+      entry({ id: 2, kind: "modified", path: "Z:/repos/app/b.ts", at: 2000 }),
+      entry({ id: 1, kind: "created", path: "Z:/repos/app/a.ts", at: 1000 }),
+    ];
+    render(AgentTimeline, { entries, agentName: "Claude Code" });
+    await fireEvent.click(screen.getByRole("tab", { name: "Replay" }));
+    expect(screen.getByRole("button", { name: "1×" }).classList.contains("active")).toBe(true);
+
+    await fireEvent.click(screen.getByTitle("Jump to start"));
+    await fireEvent.click(screen.getByTitle("Play"));
+    const slider = screen.getByLabelText("Replay position") as HTMLInputElement;
+    await vi.advanceTimersByTimeAsync(399);
+    expect(slider.value).toBe("1000"); // not yet — cadence hasn't elapsed
+    await vi.advanceTimersByTimeAsync(1);
+    expect(slider.value).toBe("2000");
+  });
+
+  it("selecting 4x speed while playing restarts the interval at a quarter of the base cadence, without leaking a timer", async () => {
+    vi.useFakeTimers();
+    const clearSpy = vi.spyOn(global, "clearInterval");
+    const entries = [
+      entry({ id: 3, kind: "modified", path: "Z:/repos/app/c.ts", at: 3000 }),
+      entry({ id: 2, kind: "modified", path: "Z:/repos/app/b.ts", at: 2000 }),
+      entry({ id: 1, kind: "created", path: "Z:/repos/app/a.ts", at: 1000 }),
+    ];
+    render(AgentTimeline, { entries, agentName: "Claude Code" });
+    await fireEvent.click(screen.getByRole("tab", { name: "Replay" }));
+    await fireEvent.click(screen.getByTitle("Jump to start"));
+    await fireEvent.click(screen.getByTitle("Play"));
+
+    const callsBeforeSpeedChange = clearSpy.mock.calls.length;
+    await fireEvent.click(screen.getByRole("button", { name: "4×" }));
+    // Switching speed mid-play clears the old interval before starting the new one (no leak).
+    expect(clearSpy.mock.calls.length).toBe(callsBeforeSpeedChange + 1);
+    expect(screen.getByRole("button", { name: "4×" }).classList.contains("active")).toBe(true);
+
+    const slider = screen.getByLabelText("Replay position") as HTMLInputElement;
+    // 400ms / 4 = 100ms per step at 4x.
+    await vi.advanceTimersByTimeAsync(100);
+    expect(slider.value).toBe("2000");
+    await vi.advanceTimersByTimeAsync(100);
+    expect(slider.value).toBe("3000");
+    // Reached the end — still self-stops, same as at 1x.
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(slider.value).toBe("3000");
+    expect(screen.getByTitle("Play")).toBeTruthy();
+  });
+
+  it("choosing a speed while paused does not start playback, only remembers the choice", async () => {
+    vi.useFakeTimers();
+    const entries = [
+      entry({ id: 2, kind: "modified", path: "Z:/repos/app/b.ts", at: 2000 }),
+      entry({ id: 1, kind: "created", path: "Z:/repos/app/a.ts", at: 1000 }),
+    ];
+    render(AgentTimeline, { entries, agentName: "Claude Code" });
+    await fireEvent.click(screen.getByRole("tab", { name: "Replay" }));
+    await fireEvent.click(screen.getByTitle("Jump to start"));
+
+    await fireEvent.click(screen.getByRole("button", { name: "2×" }));
+    expect(screen.getByRole("button", { name: "2×" }).classList.contains("active")).toBe(true);
+    await vi.advanceTimersByTimeAsync(1000);
+    const slider = screen.getByLabelText("Replay position") as HTMLInputElement;
+    expect(slider.value).toBe("1000"); // still at start — no interval running while paused
+  });
+
   it("clears the play interval on unmount so nothing keeps running after the drawer closes", async () => {
     vi.useFakeTimers();
     const clearSpy = vi.spyOn(global, "clearInterval");

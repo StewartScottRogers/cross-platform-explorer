@@ -23,6 +23,7 @@
     prevTimestamp,
     isMultiplyEdited,
     isWriteKind,
+    cadenceForSpeed,
   } from "../agentReplay";
   import { foldOverlaps, overlapHasUnknown, friendlyActor, relativeLabel } from "../agentConflicts";
 
@@ -88,8 +89,12 @@
   let playing = false;
   let playTimer: ReturnType<typeof setInterval> | null = null;
 
-  /** How often play advances to the next entry (ticket: ~1 entry / 400ms). */
+  /** Base cadence at 1× — how often play advances to the next entry (ticket: ~1 entry / 400ms). */
   const PLAY_INTERVAL_MS = 400;
+
+  /** Playback speed multiplier (CPE-1104) — one of `SPEEDS`, default 1×. */
+  let speed = 1;
+  const SPEEDS = [0.5, 1, 2, 4] as const;
 
   const stopPlaying = () => {
     playing = false;
@@ -152,13 +157,9 @@
     stopPlaying();
     t = Number((ev.target as HTMLInputElement).value);
   };
-  const togglePlay = () => {
-    if (playing) {
-      stopPlaying();
-      return;
-    }
-    if (!range || atEnd) return; // nothing to play
-    playing = true;
+  // Creates the play interval at the current `speed`'s cadence. Only ever called while `playing` is
+  // (or is about to become) true — pause/end/unmount/watch-off all go through stopPlaying instead.
+  const startPlaying = () => {
     playTimer = setInterval(() => {
       const nxt = nextTimestamp(entries, t);
       if (nxt === null) {
@@ -166,7 +167,29 @@
         return;
       }
       t = nxt;
-    }, PLAY_INTERVAL_MS);
+    }, cadenceForSpeed(PLAY_INTERVAL_MS, speed));
+  };
+
+  const togglePlay = () => {
+    if (playing) {
+      stopPlaying();
+      return;
+    }
+    if (!range || atEnd) return; // nothing to play
+    playing = true;
+    startPlaying();
+  };
+
+  /** Change playback speed (CPE-1104). Mid-play, this clears + re-creates the interval at the new
+   *  cadence — reusing the same timer field, so there's never more than one interval alive. Not
+   *  playing? Just remember the choice for the next play. */
+  const selectSpeed = (s: number) => {
+    speed = s;
+    if (playing && playTimer !== null) {
+      clearInterval(playTimer);
+      playTimer = null;
+      startPlaying();
+    }
   };
 </script>
 
@@ -287,6 +310,16 @@
           disabled={atEnd}
           on:click={jumpEnd}
         >⏭</button>
+      </div>
+      <div class="rp-speed" role="group" aria-label="Playback speed">
+        {#each SPEEDS as s (s)}
+          <button
+            class="rp-speed-btn"
+            class:active={speed === s}
+            aria-pressed={speed === s}
+            on:click={() => selectSpeed(s)}
+          >{s}×</button>
+        {/each}
       </div>
       <input
         class="rp-slider"
@@ -582,6 +615,41 @@
   .rp-play {
     color: var(--accent, #2f6fed);
     border-color: var(--accent, #2f6fed);
+  }
+  /* Speed selector (CPE-1104): a small segmented control, reflowing per the tick-tack convention
+     (flex-wrap container; each pill keeps its own text on one line and doesn't shrink). */
+  .rp-speed {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    justify-content: center;
+    gap: 4px;
+    padding: 0 10px 6px;
+    flex: 0 0 auto;
+  }
+  .rp-speed-btn {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    white-space: nowrap;
+    flex: 0 0 auto;
+    min-width: 30px;
+    height: 22px;
+    padding: 0 6px;
+    border: 1px solid var(--border, #3a3a3a);
+    border-radius: 5px;
+    background: var(--surface-alt, transparent);
+    color: var(--text, inherit);
+    font-size: 11px;
+    cursor: pointer;
+  }
+  .rp-speed-btn:hover:not(.active) {
+    background: rgba(128, 128, 128, 0.18);
+  }
+  .rp-speed-btn.active {
+    color: var(--accent, #2f6fed);
+    border-color: var(--accent, #2f6fed);
+    font-weight: 600;
   }
   .rp-slider {
     display: block;
