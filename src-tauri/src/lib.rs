@@ -878,6 +878,22 @@ fn read_file_text_impl(path: String, max_bytes: u64) -> Result<String, String> {
     String::from_utf8(bytes).map_err(|_| "File is not valid UTF-8 text.".to_string())
 }
 
+/// Aggregate code-intelligence bundle — outline, fold ranges, indent depths, and minimap rows — for a
+/// file whose text the frontend already has loaded (CPE-1089, epic CPE-724). Pure/in-memory (no fs, no
+/// path); the previewer sends `text` straight from `read_file_text`'s result instead of a second read.
+/// Sync: `cpe_server::code_intel::analyze` is a fast in-memory scan over the already-loaded text, not an
+/// fs/subprocess/network call.
+#[tauri::command]
+#[cfg_attr(feature = "specta-bindings", specta::specta)]
+fn code_intel(
+    text: String,
+    lang: String,
+    tab_width: Option<usize>,
+    minimap_buckets: Option<usize>,
+) -> cpe_server::code_intel::CodeIntel {
+    cpe_server::code_intel::analyze(&text, &lang, tab_width.unwrap_or(4), minimap_buckets.unwrap_or(120))
+}
+
 /// Read a byte range of a file without loading the whole file — backs the hex inspector's paging
 /// (CPE-772, epic CPE-719). Seeks to `offset` (past EOF yields an empty slice, not an error, so the
 /// viewer can page freely) and reads up to `len` bytes, clamped to EOF.
@@ -5842,6 +5858,7 @@ pub fn run() {
             create_dir,
             read_file_text,
             read_file_range,
+            code_intel,
             file_len,
             set_permissions,
             set_readonly,
@@ -6244,6 +6261,7 @@ pub fn export_bindings(out: &std::path::Path) -> Result<(), String> {
         create_dir,
         read_file_text,
         read_file_range,
+        code_intel,
         file_len,
         set_readonly,
         set_file_times,

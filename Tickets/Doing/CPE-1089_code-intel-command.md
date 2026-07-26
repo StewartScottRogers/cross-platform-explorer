@@ -73,3 +73,40 @@ bindings. Backend, `cargo test` + specta export — no GUI in this ticket.
 2026-07-26 (workshift, GUI) — Filed by the Foreman as the backend enablement for the code-preview upgrade
 (GUI #1). The five code-intel modules exist but reach nothing; this one aggregate command + regenerated
 bindings unblock the frontend tickets (CPE-1090 breadcrumb/jump, CPE-1091 minimap/folds/indent).
+
+2026-07-26 (Worker) — Implemented on branch `cpe-1089-code-intel-command`:
+- New `crates/server/src/code_intel.rs`: `CodeIntel { outline, folds, indent, minimap }` +
+  `analyze(text, lang, tab_width, minimap_buckets)`, composing `code_outline::outline`,
+  `code_folds::fold_ranges`, `indent_guides::indent_levels`, `minimap::minimap_rows` unchanged.
+  `pub mod code_intel;` added to `crates/server/src/lib.rs` right after `pub mod code_breadcrumb;`.
+- `#[tauri::command] code_intel(text, lang, tab_width: Option<usize>, minimap_buckets: Option<usize>)
+  -> cpe_server::code_intel::CodeIntel` in `src-tauri/src/lib.rs`, next to `read_file_text`; registered in
+  both `generate_handler![]` and the specta command list.
+- **Assumption — sync, not async.** `read_file_text`/`read_file_range` are async + `spawn_blocking`
+  because they touch the filesystem; `code_intel` takes `text: String` directly (no fs, no path — the
+  frontend already has the text loaded from `read_file_text`), so it's a plain sync fn per the ticket's
+  own guidance ("can be sync (fast, in-memory)"). Matches existing sync, non-fs-blocking commands in the
+  same file (e.g. `tag_counts`, `read_settings`).
+- **Assumption — clamp semantics.** `minimap_buckets` is clamped with `.min(MAX_MINIMAP_BUCKETS)` where
+  `MAX_MINIMAP_BUCKETS = 512` (the ticket's suggested cap), applied before calling `minimap::minimap_rows`
+  — never allocates more than 512 minimap rows regardless of caller input. No special-case branch was
+  needed for empty text: `outline`/`fold_ranges`/`indent_levels`/`minimap_rows` already return empty vecs
+  for empty source (verified by their own test suites + a new `code_intel` test), so `analyze("", ...)`
+  is already panic-free and all-empty without extra code.
+- `code_breadcrumb::enclosing_symbols` intentionally left unwired, per the ticket's note.
+- Tests added in `code_intel.rs` (`#[cfg(test)] mod tests`): non-empty Rust snippet populates every
+  field; empty text → all-empty `CodeIntel`; `minimap_buckets: 100_000` on a 20-line file clamps to 20
+  rows (never allocates 512, since there are fewer lines than the cap); `minimap_buckets: 50_000` on a
+  1000-line file clamps to exactly 512; an unrecognised language still yields indent/minimap (outline/folds
+  empty, since those are language-gated).
+- Bindings regenerated with `cargo run --bin export_bindings --features "specta-bindings sidecar-platform"`
+  from `src-tauri/` (per `src-tauri/src/bin/export_bindings.rs`'s own doc comment) — confirmed `CodeIntel`,
+  `Symbol`, `SymbolKind`, `FoldRange`, `FoldKind`, `MinimapRow` types and an async `codeIntel(...)` binding
+  now appear in `src/lib/bindings.gen.ts`. The drift-guard test
+  `typed_bindings_are_committed_and_routed_through_busy_cursor` passes against the regenerated file.
+- Verified green: `cargo test` in `crates/server` (1004 passed, incl. 5 new `code_intel` tests); `cargo
+  clippy --all-targets -- -D warnings` clean in `crates/server` for default, `--features index`, and
+  `--features specta`; `cargo check`/`cargo clippy --all-targets -- -D warnings` clean in `src-tauri`;
+  `npm run check` clean (0 errors/warnings). No new dependencies added.
+- Left in `Tickets/Doing/` (not moved to Done) — PR opened but not yet merged; move to Done follows the
+  repo's usual post-merge pattern (see CPE-1048's history).
