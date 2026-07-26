@@ -204,3 +204,23 @@ _(no shifts recorded yet — first real workshift will seed this)_
   extractors, bz2/xz/zst archive read, AVIF/HEIC output), or credential/GUI-runner-gated (the MVD burndown
   rows #1-7). No clean cargo-testable pure feature vein remains unmined across the open epics. Next shift
   should surface this to the user for a direction call rather than manufacture low-value tickets.
+
+## 2026-07-25→26 — SESSION SUMMARY (10-epic overnight, "do the next epic always")
+- **39 tickets shipped, all merged + 3-OS-green**, across 10 epics + 2 standalone + 1 reviewer-fast-follow:
+  CPE-724 code-intel (1050-53), CPE-705 archive-planner (1054-57), CPE-703 search-DSL (1059-62), CPE-728
+  replay-engine (1063-66), CPE-730 conflict-radar (1067-70), CPE-731 cost-ledger (1071-74), CPE-729
+  intervene/approve-core (1075-78), CPE-732 checkpoint/rollback (1079-82), CPE-723 batch-media-transform
+  (1083-84), CPE-718 thumbnail PSD+orient (1085-86); + CPE-1049 native-meta test, CPE-1058 updater-verify
+  crate, CPE-1087 PSD-OOM hardening.
+- **Quality: 4 rework cycles across 39 tickets** — every one a reviewer catch UAT+worker missed (sibling-
+  swallow ×2, cross-OS `C:\x` CI-red, year-overflow panic, deep-nesting stack-overflow). **The independent
+  code Reviewer is the highest-value gate — never skip or downgrade it.** Sonnet reviewers caught all of them.
+- **Zero merge conflicts across 39 PRs** via the distinct-lib.rs-anchor-per-worker + one-worker-per-file trick.
+  When an epic's natural unit is one function, don't force op-level parallelism.
+- **The standing worker briefs now paid off reflexively** (7 straight zero-rework waves at the end): saturating/
+  checked arithmetic, bounded recursion + bounded allocation (image::Limits / max_depth), division-safe rates,
+  cross-OS `/`-segment equality (never starts_with, never std::path platform semantics), PartialEq-not-Eq on
+  f64 structs, sidecar plain-derives. Bake these into every future parser/fs/numeric/media ticket.
+- **HEADLESS EPIC FRONTIER REACHED.** After this session, every open epic's remainder is GUI-attended, OS-
+  privileged, dep-heavy (user binary-size call), or credential/GUI-runner-gated. Next shift: surface to the
+  user for a direction call, don't manufacture low-value tickets.
