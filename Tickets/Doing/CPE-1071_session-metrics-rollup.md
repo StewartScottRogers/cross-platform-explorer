@@ -44,12 +44,28 @@ Every sum `saturating_add`. `SessionMetrics` derives `Debug, Clone, PartialEq, D
 it has an f64 field); NO serde/specta (mirror `cost.rs`'s `CostRollup`). No recursion.
 
 ## Acceptance Criteria
-- [ ] N runs sum correctly; two `u64::MAX` records → `u64::MAX` (saturate, no wrap/panic).
-- [ ] Empty session → all-zero `SessionMetrics::default()`; `total_tokens == input+output` (saturating).
-- [ ] `cost_usd` matches `estimate_cost` over the summed tokens (None → 0.0, documented).
-- [ ] From `sidecar/ai-console`: `cargo test` green + `cargo clippy --all-targets -- -D warnings` clean; no new
+- [x] N runs sum correctly; two `u64::MAX` records → `u64::MAX` (saturate, no wrap/panic).
+- [x] Empty session → all-zero `SessionMetrics::default()`; `total_tokens == input+output` (saturating).
+- [x] `cost_usd` matches `estimate_cost` over the summed tokens (None → 0.0, documented).
+- [x] From `sidecar/ai-console`: `cargo test` green + `cargo clippy --all-targets -- -D warnings` clean; no new
       deps.
 
 ## Work Log
 2026-07-25 (workshift) — Filed by the Product Manager as the CPE-731 foundation. Independent module in the
 sidecar ai-console crate; distinct lib.rs anchor. CPE-1072/1074 depend on this module's `SessionMetrics`.
+
+2026-07-25 (workshift, Worker) — Built end-to-end in worktree `agent-a25460a717a9f076a`, branch
+`cpe-1071-session-metrics`. Added `sidecar/ai-console/src/session_metrics.rs` (`RunRecord`, `SessionMetrics`,
+`fold_session`) and registered `pub mod session_metrics;` in `lib.rs` immediately after `pub mod cost;` per the
+anchor instruction (note: the existing file already had `pub mod conflict_window;` right after `cost;`, not
+alphabetical — inserted `session_metrics` between them, before `conflict_window`). Used
+`crate::model_catalog::Pricing` and its `estimate_cost(&self, input_tokens: u64, output_tokens: u64) ->
+Option<f64>`; `None` (no prompt/completion price at all) folds to `cost_usd = 0.0`, documented in the doc
+comment. Every counter sum uses `u64::saturating_add`; `SessionMetrics` derives `Debug, Clone, PartialEq,
+Default` only (no `Eq`, no serde/specta), mirroring `cost::CostRollup`. No `std::path`, no recursion, no
+`#[cfg]`, no new dependencies. `files_touched` implemented as a caller-supplied `u64` count per the ticket's
+primary option (no `&[&str]`/`BTreeSet` dedupe needed since callers already track a running count — flagged
+as an assumption, not blocking).
+6 new unit tests (N-run fold, two-`u64::MAX` saturation, empty→default, `total_tokens` invariant, cost match
+against `estimate_cost`, `None`→0.0 fold) — all pass. Full crate `cargo test` green (no failures anywhere in
+the suite). `cargo clippy --all-targets -- -D warnings` clean. Pushed branch, opened PR.
