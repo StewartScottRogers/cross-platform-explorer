@@ -59,6 +59,7 @@ pub use history::{HistoryBackend, MemHistory, SessionHistory, SessionRecord};
 pub mod lmstudio;
 pub mod mcp;
 pub mod model_catalog;
+pub mod fleet_metrics;
 pub mod model_snapshot;
 pub mod plugins;
 pub mod presets;
