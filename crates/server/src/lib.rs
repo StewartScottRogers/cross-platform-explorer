@@ -379,6 +379,11 @@ pub mod perceptual;
 /// dependencies.
 pub mod simhash;
 
+/// Minimap density rows (CPE-1052, epic CPE-724): downsample a source file's lines into a fixed number
+/// of overview rows (fill density + min indent) for a future scaled-preview minimap. Pure, dependency-
+/// free, integer-only arithmetic for determinism.
+pub mod minimap;
+
 /// Magic-byte file-type detection + extension-mismatch flagging (CPE-1001, epic CPE-1000). Sniffs a
 /// curated set of common binary formats from their leading magic bytes and flags a claimed extension that
 /// disagrees with them (e.g. a `.jpg` that is actually a PE executable), while treating ZIP-container

@@ -58,3 +58,22 @@ O(total chars). Std + serde/specta only; no new deps.
 ## Work Log
 2026-07-25 (workshift) — Filed by the Product Manager as a clean headless CPE-724 slice. Independent module;
 only shared touch is a one-line lib.rs `pub mod` (serial-merge coordination only).
+
+2026-07-25 (workshift, Worker) — Built `crates/server/src/minimap.rs` and registered it in `lib.rs`
+right after `pub mod simhash;`. Implementation note / assumption: the ticket describes grouping as
+"`ceil(n / buckets)` sizing, last group short," but a literal fixed-chunk-size-then-remainder split can
+under-produce the bucket count for some `n`/`buckets` pairs (e.g. `n=4, buckets=3` → chunk size
+`ceil(4/3)=2` yields only 2 groups, not 3; `n=7, buckets=5` → chunk size 2 yields only 4 groups, not 5).
+Implemented instead as the standard even-split: `base = n / buckets`, `extra = n % buckets`, first
+`extra` groups get `base + 1` lines, the rest get `base` — this always yields exactly `buckets` non-empty
+groups when `n > buckets`, matches the "last group(s) may be short" intent, and coincides with the naive
+ceil-chunking result whenever that formulation happens to work out. Covered this exact edge case in a
+dedicated test (`bucket_count_matches_and_partitions_all_lines_n_gt_buckets`).
+
+All fill/indent math is integer-only (round-half-up via `+ divisor/2` before dividing) for bit-for-bit
+determinism — no floats anywhere in the algorithm.
+
+Verified: `cargo test` in `crates/server` — 736 passed (9 new `minimap::tests::*`, 0 failed).
+`cargo clippy --all-targets -- -D warnings` clean; `cargo clippy --all-targets --features index -- -D
+warnings` clean. No new dependencies. Opened PR from branch `cpe-1052-minimap`; ticket stays in `Doing`
+pending review/merge per the CPE-1048 precedent (moves to `Done` once merged).
