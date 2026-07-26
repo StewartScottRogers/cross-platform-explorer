@@ -112,7 +112,7 @@ const messages: Record<Locale, Record<string, string>> = {
     "nav.refresh": "Refresh",
     "nav.home": "Home",
     "nav.search": "Search",
-    "nav.searchHint": "Type to filter this folder; Enter to search subfolders (wildcards: * ?)",
+    "nav.searchHint": "Type to filter this folder; Enter to search subfolders. Wildcards: * ? {a,b} — power-filters: size:>1mb  type:image  modified:<7d  a OR b  -tmp",
     "menu.file": "File",
     "menu.tools": "Tools",
     "cmd.new": "New",
