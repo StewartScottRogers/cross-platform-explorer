@@ -317,6 +317,13 @@ pub mod data_browser;
 /// Image thumbnails — downscaled PNG generation + mtime-keyed disk cache (CPE-642/644).
 pub mod thumbnail;
 
+/// EXIF-orientation correction for thumbnails (CPE-1085, epic CPE-718): read a JPEG's EXIF
+/// `Orientation` tag and bake it into the decoded pixels via the standard 8-value rotate/flip
+/// table, so phone photos thumbnail upright. A documented local copy of the proven logic in
+/// [`batch_transform`] (kept private there), exposed here as public reusable free functions —
+/// same pattern as CPE-1079's rename-marker copy.
+pub mod thumb_orient;
+
 /// Thumbnail cache core — stable cache keys + LRU eviction (count + byte budgets) + request coalescing,
 /// the pure cache-management model the universal thumbnail pipeline sits on (CPE-939, epic CPE-718).
 pub mod thumb_cache;

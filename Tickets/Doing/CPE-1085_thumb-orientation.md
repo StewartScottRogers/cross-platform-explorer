@@ -54,3 +54,16 @@ Copy the proven `jpeg_with_exif_orientation(w, h, orient)` fixture builder from 
 2026-07-26 (workshift) — Filed by the Product Manager as the CPE-718 orientation slice (the reusable home the
 thumbnail path needs). Independent new file; distinct lib.rs anchor. CPE-1086 depends on this module's
 `orient_for_display`.
+
+2026-07-26 (workshift, overnight Worker) — Built `crates/server/src/thumb_orient.rs`: `read_exif_orientation`,
+`apply_orientation`, `orient_for_display`, all public. Logic is a documented local copy of
+`batch_transform::read_exif_orientation` / `normalize_orientation` (both private there) — same
+copy-not-edit pattern as CPE-1079; `batch_transform.rs` untouched. Registered `pub mod thumb_orient;`
+in `lib.rs` immediately after `pub mod thumbnail;`. Tests copy `jpeg_with_exif_orientation` fixture
+builder from batch_transform's tests; cover orientation=6 wide→portrait, orientation=1 unchanged,
+no-EXIF unchanged, all values 1..=8 plus a bogus 99 without panic, and a direct
+`read_exif_orientation` read-back. `cargo test -p cpe-server`: 989 passed, 0 failed (5 new). Clippy
+`--all-targets -- -D warnings` clean and `--features index` clean. No new dependencies (Cargo.toml
+untouched). No blockers, no open assumptions beyond what the ticket already specified. Branch
+`cpe-1085-thumb-orient`, PR opened against `main`; ticket left in `Doing` pending merge (per the
+CPE-1048-style pattern of moving to `Done` only once the PR lands).
