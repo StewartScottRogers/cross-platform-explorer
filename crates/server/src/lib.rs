@@ -94,6 +94,10 @@ pub mod launch;
 
 /// Activity timeline bucketing (scrubbable replay view) over recorded audit events (CPE-916).
 pub mod activity_timeline;
+
+/// Replay projection core (CPE-1063, epic CPE-728): fold the recorded audit-event stream into the live
+/// file-set state at any moment `T`. Pure event-sourcing fold over [`audit_journal::AuditEvent`].
+pub mod replay;
 pub mod batch_media;
 pub mod spotlight;
 pub mod type_class;
