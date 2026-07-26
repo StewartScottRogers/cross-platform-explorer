@@ -24,6 +24,7 @@
   import { startAgentWatch, stopAgentWatch, type FsActivity } from "./lib/sidecar";
   import { initAgentActivity, fsActivity, recentActivities, agentTimeline, affectsListing } from "./lib/agentActivity";
   import { initAgentDiffs } from "./lib/agentDiffs";
+  import { initAgentCost } from "./lib/agentCost";
   import AgentTimeline from "./lib/components/AgentTimeline.svelte";
   import DiskSpaceView from "./lib/components/DiskSpaceView.svelte";
   import DiagnosticsOverlay from "./lib/components/DiagnosticsOverlay.svelte";
@@ -740,6 +741,8 @@
   let unlistenActivity: (() => void) | null = null;
   /** Teardown for the before/after diff listener (CPE-744); paired with the activity listener. */
   let unlistenDiffs: (() => void) | null = null;
+  /** Teardown for the live cost/usage listener (CPE-1098); paired with the activity listener. */
+  let unlistenCost: (() => void) | null = null;
   /** Whether the Agent Watch activity timeline drawer is open (CPE-400). */
   let showTimeline = false;
 
@@ -799,11 +802,14 @@
     unlistenActivity = null;
     unlistenDiffs?.();
     unlistenDiffs = null;
+    unlistenCost?.();
+    unlistenCost = null;
     if (watchRefreshTimer) { clearTimeout(watchRefreshTimer); watchRefreshTimer = null; }
     await stopAgentWatch();
     if (cwd) {
       unlistenActivity = await initAgentActivity(onAgentBatch);
       unlistenDiffs = await initAgentDiffs();
+      unlistenCost = await initAgentCost();
       await startAgentWatch(cwd);
     } else {
       showTimeline = false; // no watched project ⇒ close the timeline drawer (CPE-400)
@@ -814,6 +820,10 @@
   $: syncAgentWatch(watchTargetFor($agentSessions, currentPath));
   $: watchedAgentName =
     $agentSessions.find((s) => normalizePath(s.cwd) === normalizePath(activeWatchCwd))?.agentName || "agent";
+  /** sessionId of the currently-watched agent, if any — lets the cost ledger (CPE-1098) point at the
+   *  session whose Project folder is on screen when several sessions report usage. */
+  $: watchedSessionId =
+    $agentSessions.find((s) => normalizePath(s.cwd) === normalizePath(activeWatchCwd))?.sessionId || "";
   $: recentChanges = activeWatchCwd ? recentActivities($fsActivity, 6) : [];
 
   // Free disk space for the status bar (CPE-403). Refetched on navigation; hidden for Home /
@@ -3499,6 +3509,7 @@
   <AgentTimeline
     entries={$agentTimeline}
     agentName={watchedAgentName}
+    sessionId={watchedSessionId}
     on:navigate={(e) => navigate(e.detail)}
     on:close={() => (showTimeline = false)}
   />
