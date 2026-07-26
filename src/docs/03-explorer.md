@@ -23,12 +23,13 @@ The explorer is the core of the app and is tuned to stay **fast, small, and pred
 - **Progressive loading** — folders stream in: the first rows appear almost immediately and the rest fill
   in as they're read, so even a huge or slow (network) folder stays interactive instead of blocking on a
   blank pane. Changing folders mid-load cleanly abandons the previous listing.
-- **Preview** — select a file to see it in the side pane; text is editable in place. Source-code files get
-  a richer read view: syntax highlighting, a **line-number gutter**, **fold triangles** on collapsible
-  blocks (click to hide a range, click again to expand — it shows a "⋯ N lines" marker while collapsed),
-  faint **indent guides**, and a **minimap** down the right edge whose highlighted box tracks your scroll
-  position — click or drag the minimap to jump. Select-all and copy still yield the whole file as plain
-  text. Above the code, the **symbol outline** strip lets you jump straight to a function or class.
+- **Preview** — select a file to see it in the side pane; text is editable in place. Text files (source
+  code and plain text alike, e.g. `.txt`) get a richer read view: syntax highlighting when a language is
+  recognised, a **line-number gutter**, **fold triangles** on collapsible blocks (click to hide a range,
+  click again to expand — it shows a "⋯ N lines" marker while collapsed), faint **indent guides**, and a
+  **minimap** down the right edge whose highlighted box tracks your scroll position — click or drag the
+  minimap to jump. Select-all and copy still yield the whole file as plain text. Above the code, the
+  **symbol outline** strip lets you jump straight to a function or class when one is recognised.
 - **Thumbnails** — in the **icons** view, image files (JPEG, PNG, GIF, WebP, BMP, TIFF, AVIF) show a real
   downscaled thumbnail instead of a generic icon. They load lazily as tiles scroll into view, so a folder
   of hundreds of photos stays responsive; non-image files and the list/details views are unchanged.
