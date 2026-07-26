@@ -45,7 +45,11 @@ first). Sum `file_count` (non-dir) and `total_uncompressed`. The total is shaped
 `archive_safety::expansion_ratio` for a zip-bomb cross-check (mention it in the doc-comment).
 
 ## Acceptance Criteria
-- [ ] `../evil`, `/abs/path`, `C:\x` (drive-letter) are rejected into `skipped_unsafe`, never planned.
+- [ ] `../evil`, `/abs/path` are rejected into `skipped_unsafe`, never planned, on all three OSes.
+      `C:\x` (drive-letter escape) is rejected too, but **Windows-only**: the reused
+      `entry_name_is_safe` guard's absolute-path check is platform-native (`Path::is_absolute()`), so
+      on Linux/macOS `C:\x` parses as a plain relative path and is NOT rejected there. The
+      Windows-only assertion lives in a `#[cfg(windows)]`-gated test.
 - [ ] A dest name already in `existing_dest` is flagged `collides: true`.
 - [ ] `dirs_to_create` is deduped and ordered parents-before-children; nested entries derive the right set.
 - [ ] `file_count` / `total_uncompressed` sums correct; empty archive → empty plan (no panic).

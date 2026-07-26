@@ -148,14 +148,35 @@ mod tests {
 
     #[test]
     fn unsafe_entries_are_rejected_into_skipped_unsafe() {
-        let entries = vec![file("../evil", 10), file("/abs/path", 10), file("C:\\x", 10), file("ok.txt", 5)];
+        // `../evil` and `/abs/path` are rejected on every OS: `..` traversal and a POSIX-style leading
+        // `/` are both OS-independent in `entry_name_is_safe`. `C:\x` is deliberately NOT asserted here
+        // — see `drive_letter_escape_is_rejected_on_windows` below for why it's Windows-only.
+        let entries = vec![file("../evil", 10), file("/abs/path", 10), file("ok.txt", 5)];
         let plan = plan_extract(&entries, &[]);
 
-        assert_eq!(plan.skipped_unsafe, vec!["../evil", "/abs/path", "C:\\x"]);
+        assert!(plan.skipped_unsafe.contains(&"../evil".to_string()));
+        assert!(plan.skipped_unsafe.contains(&"/abs/path".to_string()));
+        assert_eq!(plan.skipped_unsafe.len(), 2);
         assert_eq!(plan.files.len(), 1);
         assert_eq!(plan.files[0].archive_name, "ok.txt");
         assert_eq!(plan.file_count, 1);
         assert_eq!(plan.total_uncompressed, 5);
+    }
+
+    // `entry_name_is_safe` (reused from `archive.rs`, unmodified) relies on `Path::is_absolute()`,
+    // which is platform-native: a `C:\x`-style drive-letter escape only parses as absolute on Windows.
+    // On Linux/macOS, `Path::new("C:/x")` is just a relative path under Unix path semantics, so it is
+    // NOT rejected there. This is pre-existing `archive.rs` behavior (not introduced by extract_plan),
+    // so this assertion is gated to the one OS where it actually holds — asserting it unconditionally
+    // previously broke the ubuntu/macos CI legs.
+    #[cfg(windows)]
+    #[test]
+    fn drive_letter_escape_is_rejected_on_windows() {
+        let entries = vec![file("C:\\x", 10)];
+        let plan = plan_extract(&entries, &[]);
+
+        assert_eq!(plan.skipped_unsafe, vec!["C:\\x"]);
+        assert!(plan.files.is_empty());
     }
 
     #[test]
