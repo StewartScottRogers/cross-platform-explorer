@@ -1,6 +1,6 @@
 ---
 id: CPE-1097
-title: "Agent Watch: bridge per-session cost metrics to the frontend (agent-cost event)"
+title: "Agent Watch: bridge live per-session usage (tokens + cost) to the frontend (agent-cost event)"
 type: feature
 component: Backend
 priority: medium
@@ -11,41 +11,51 @@ epic: CPE-396
 ---
 
 ## Summary
-GUI #3, cost-ledger slice A (enablement). The sidecar already computes everything a cost ledger needs —
-`sidecar/ai-console/src/session_metrics.rs` (`fold_session → SessionMetrics {input_tokens, output_tokens,
-total_tokens, cost_usd, wall_clock_ms, files_touched, churn_bytes, edit_count}`, CPE-1071), `cost.rs`
-(`rollup`, `budget_status`, CPE-913 — "advisory, never billing"), `efficiency.rs` (CPE-1074) — but **none of
-it reaches the host or frontend**: the host↔sidecar wire vocabulary is only the `session:` and `fs-read:`
-prefixes today. Add the bridge so a per-session cost signal flows to the app. Backend/sidecar only; the panel
-is CPE-1098. Full context: `.claude/research-library/entries/agent-watch-dashboards-substrate.md`.
+GUI #3, cost-ledger slice A (enablement). Bridge the sidecar's **already-live** per-session usage —
+`usage.rs`'s `Usage { input_tokens, output_tokens, cost_usd }`, scraped live from the agent's PTY output —
+through to the host/frontend as a new `ai-console://agent-cost` event, so a cost-ledger panel (CPE-1098) can
+render it. Sidecar + host only. **Scope confirmed by research** (see
+`.claude/research-library/entries/sidecar-live-cost-usage-scanner.md`): bridge the live `usage.rs` data —
+do NOT scope in `session_metrics.rs`/`RunRecord`/`cost.rs`/`fleet_metrics.rs`, which are well-tested but
+**unwired** (no live `RunRecord` is ever constructed; folding them in needs a separate, larger capture effort).
+
+## Context (verified — file:line)
+- Live capture: `sidecar/ai-console/src/usage.rs` — `Usage { input_tokens:u64, output_tokens:u64,
+  cost_usd:f64 }` (:20-28); `UsageScanner::new()` (`console.rs:249`) + `*usage.lock().unwrap() =
+  usage_scan.feed(&text)` (`console.rs:280`) in the per-session reader loop over real agent stdout. Best-effort
+  regex scrape (`usage.rs:144-159`), since agents run in a PTY (no structured API response).
+- Emit seam: `SessionAnnouncer = Arc<dyn Fn(String)+Send+Sync>` (`console.rs:98`); `session:` built at
+  `main.rs:288-293`, `fs-read:` at `console.rs:177-180` + fired at `console.rs:277`. `usage_json`
+  (`console.rs:184-190`) already serializes `inputTokens`/`outputTokens`/`costUsd`.
+- Host bridge: `src-tauri/src/lib.rs` session-announce matcher (~4078-4106) turns `session:`→
+  `ai-console://session` and `fs-read:`→fs-activity (CPE-405). Add a `cost:` arm the same way.
 
 ## Design (buildable)
-1. **Sidecar emit** — confirm `RunRecord`s are populated from real provider responses (verify a live call site
-   exists in `sidecar/ai-console/src`; if only test fixtures construct them, that gap is part of this ticket —
-   populate per-run token/cost/time from the actual API response). Then emit a per-session `Status` frame with
-   a new prefix, e.g. `cost:<json SessionMetrics + rollup/budget>`, keyed by `sessionId`, on a sensible cadence
-   (per run completion and/or throttled).
-2. **Host bridge** — in `src-tauri/src/lib.rs`, in the session-announce matcher (~lines 4078-4106, alongside
-   the existing `session:` → `ai-console://session` and `fs-read:` → fs-activity handlers), match the `cost:`
-   prefix and re-emit as a new Tauri event `ai-console://agent-cost` carrying `{ sessionId, metrics }`. Mirror
-   the CPE-405 `fs-read:` bridge exactly (small, precedented).
-3. **Types** — a serde/specta struct crossing the boundary for the emitted payload (reuse/alias the sidecar
-   `SessionMetrics`/`CostRollup`/`BudgetStatus` shapes; add plain derives where needed for the host side). No
-   billing semantics — carry the "advisory" framing through.
+1. **Sidecar emit** — right after `console.rs:280`, `announce(format!("cost:{}", usage_json(&usage.lock()...)))`
+   (the `announce` closure + session id `record_id`/`diag_id` at `console.rs:242-244` are already in scope).
+   Add a `sessionId` field to the `usage_json` payload (mirror `session_payload` at `console.rs:200-211`) so
+   the host can key by session. Emit on meaningful change (don't spam every chunk — e.g. only when the scanned
+   `Usage` actually changed, or throttled).
+2. **Host bridge** — in `src-tauri/src/lib.rs`, match the `cost:` prefix beside the existing `session:`/
+   `fs-read:` handlers and re-emit as `ai-console://agent-cost` carrying `{ sessionId, inputTokens,
+   outputTokens, costUsd }`. Mirror the CPE-405 `fs-read:` bridge exactly.
+3. **Types** — a small serde/specta struct for the emitted payload on the host side (plain, advisory). No
+   billing semantics.
 
 ## ⚠ Notes / guardrails
-- **Off-means-off is absolute**: the emit path costs nothing when no session runs; the host listener follows
-  the existing gate. No new deps. Event-driven (not STREAMING.md channels) — matches the existing Agent-Watch
-  idiom. Async where any I/O is involved.
-- Advisory data only — never present as billing.
+- **Off-means-off**: the emit only fires inside an active session's reader thread (already gated); nothing new
+  runs when no session is watched. No new deps. Event-driven (not STREAMING.md channels).
+- Advisory data only (best-effort PTY scrape) — never present as billing; the panel must frame it that way.
+- Do NOT wire `RunRecord`/`session_metrics`/`fleet_metrics` — out of scope (unreachable today; separate ticket).
 
 ## Acceptance Criteria
-- [ ] The sidecar emits a `cost:` status per session from real run data (or the RunRecord-population gap is
-      closed as part of this); the host re-emits it as `ai-console://agent-cost` keyed by `sessionId`.
-- [ ] Payload struct is serde/specta-bound; no new deps; clippy clean (default + `--features index` where
-      relevant) + sidecar clippy clean; existing sidecar cost/metrics tests still green.
-- [ ] Zero cost when no session is running (no emit, no listener work).
+- [ ] The sidecar emits `cost:<json {sessionId, inputTokens, outputTokens, costUsd}>` when a session's scanned
+      usage changes; the host re-emits it as `ai-console://agent-cost` keyed by `sessionId`.
+- [ ] Payload struct is serde/specta-bound (host side); no new deps; sidecar + app clippy clean (default +
+      `--features index`/`sidecar-platform` as relevant); existing `usage.rs` tests still green.
+- [ ] Zero new cost when no session runs (emit lives in the existing per-session reader thread only).
 
 ## Work Log
-2026-07-26 (workshift, GUI) — Filed as GUI #3 cost-ledger enablement from the Library substrate brief. Blocks
-CPE-1098 (the ledger panel). Cut just-in-time; larger than the scrubber (CPE-1094), so scrubber ships first.
+2026-07-26 (workshift, GUI) — Filed as GUI #3 cost-ledger enablement; **rescoped after a de-risk spike** (Library
+entry `sidecar-live-cost-usage-scanner.md`) from the unwired `session_metrics`/`RunRecord` stack to the
+actually-live `usage.rs` `UsageScanner`. Blocks CPE-1098 (the panel). Cut just-in-time after the scrubber.
