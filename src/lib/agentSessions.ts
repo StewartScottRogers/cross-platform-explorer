@@ -43,6 +43,17 @@ export function watchTargetFor(sessions: AgentSession[], current: string): strin
   return best;
 }
 
+/**
+ * The set of running-agent sessions to watch: **all of them** (CPE-1099 conflict-radar enablement).
+ * Agent Watch now watches every running session concurrently (keyed by sessionId), not just the one
+ * whose project the explorer is inside — cwd-overlap is the radar's *frontend fold*, not a
+ * watch-selection concern. Kept pure and identity so it stays trivially testable and preserves
+ * off-means-off: no sessions ⇒ empty ⇒ nothing is ever armed.
+ */
+export function watchTargets(sessions: AgentSession[]): AgentSession[] {
+  return sessions;
+}
+
 /** Test/introspection helper: the current session list synchronously. */
 export function currentSessions(): AgentSession[] {
   let snapshot: AgentSession[] = [];

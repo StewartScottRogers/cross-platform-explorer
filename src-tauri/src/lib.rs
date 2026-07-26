@@ -4190,14 +4190,46 @@ fn serve_ai_console_requests(
 
 // --- Agent Watch: filesystem-activity watcher (CPE-398) --------------------------------
 
-/// The live filesystem watcher for Agent Watch — at most one at a time, on the currently-watched
-/// agent's Project folder. Holding the `notify` watcher here keeps it alive; dropping it (a new
-/// watch, or `agent_watch_stop`) stops watching AND ends its emitter thread (the event channel
-/// closes). Off means off (AGENT-WATCH.md): with nothing watched there is no watcher and no thread.
+/// The live filesystem watchers for Agent Watch — one per running agent session, keyed by
+/// `sessionId` (CPE-1099). Watching every running session concurrently backs the conflict radar;
+/// each stored `notify` watcher (plus its pump thread) stays alive only while its key is present.
+/// Removing a key (or clearing the map) drops the watcher AND ends its emitter thread (the event
+/// channel closes). Off means off (AGENT-WATCH.md): an **empty map is zero watchers and zero
+/// threads** — with no session running nothing here is allocated or spinning.
 #[cfg(feature = "sidecar-platform")]
 #[derive(Default)]
 struct AgentWatchState {
-    current: std::sync::Mutex<Option<AgentWatch>>,
+    watches: std::sync::Mutex<std::collections::HashMap<String, AgentWatch>>,
+}
+
+#[cfg(feature = "sidecar-platform")]
+impl AgentWatchState {
+    /// Arm (or re-arm) a session's watch. Re-inserting an existing key drops the old `AgentWatch`
+    /// (its watcher tx closes → pump exits) before storing the new one; a new key leaves the other
+    /// watches running.
+    fn arm(&self, session_id: String, watch: AgentWatch) {
+        self.watches.lock().unwrap().insert(session_id, watch);
+    }
+
+    /// Disarm just one session — drop its watch (pump thread exits on the closed channel). Idempotent.
+    fn disarm(&self, session_id: &str) {
+        self.watches.lock().unwrap().remove(session_id);
+    }
+
+    /// Disarm every session at once (whole Agent Deck stopped). The map is emptied → 0 threads.
+    fn disarm_all(&self) {
+        self.watches.lock().unwrap().clear();
+    }
+
+    #[cfg(test)]
+    fn armed_count(&self) -> usize {
+        self.watches.lock().unwrap().len()
+    }
+
+    #[cfg(test)]
+    fn is_empty(&self) -> bool {
+        self.watches.lock().unwrap().is_empty()
+    }
 }
 
 #[cfg(feature = "sidecar-platform")]
@@ -4339,15 +4371,18 @@ fn flush_fs_batch(
     }
 }
 
-/// Start watching an agent's Project folder for filesystem activity (CPE-398). Replaces any
-/// existing watch. Non-fatal: returns an error string the caller can surface. A missing folder
-/// (e.g. a since-deleted path) is rejected rather than silently watching nothing.
+/// Start watching one agent session's Project folder for filesystem activity (CPE-398/1099). Keyed
+/// by `session_id`: this ADDs a watch (it does not replace the others), so every running session is
+/// watched concurrently. Re-arming the same `session_id` drops that session's prior watch. Non-fatal:
+/// returns an error string the caller can surface. A missing folder (e.g. a since-deleted path) is
+/// rejected rather than silently watching nothing.
 #[cfg(feature = "sidecar-platform")]
 #[tauri::command]
 #[cfg_attr(feature = "specta-bindings", specta::specta)]
 fn agent_watch_start(
     app: tauri::AppHandle,
     state: tauri::State<AgentWatchState>,
+    session_id: String,
     path: String,
 ) -> Result<(), String> {
     use notify::{RecursiveMode, Watcher};
@@ -4361,19 +4396,29 @@ fn agent_watch_start(
     })
     .map_err(|e| e.to_string())?;
     watcher.watch(dir, RecursiveMode::Recursive).map_err(|e| e.to_string())?;
-    // Dropping the watcher (below, when we replace `current`, or on stop) closes `rx` and ends
-    // this thread — no separate stop signal needed.
+    // Dropping the watcher (when this session's key is removed/re-armed, or the map is cleared)
+    // closes `rx` and ends this thread — no separate stop signal needed.
     std::thread::spawn(move || fs_activity_pump(app, rx));
-    *state.current.lock().unwrap() = Some(AgentWatch { _watcher: watcher, path });
+    state.arm(session_id, AgentWatch { _watcher: watcher, path });
     Ok(())
 }
 
-/// Stop watching (CPE-398). Dropping the stored watcher ends its emitter thread. Idempotent.
+/// Stop watching one session (CPE-398/1099). Dropping that session's stored watcher ends its emitter
+/// thread; the other sessions keep watching. Idempotent.
 #[cfg(feature = "sidecar-platform")]
 #[tauri::command]
 #[cfg_attr(feature = "specta-bindings", specta::specta)]
-fn agent_watch_stop(state: tauri::State<AgentWatchState>) {
-    *state.current.lock().unwrap() = None;
+fn agent_watch_stop(state: tauri::State<AgentWatchState>, session_id: String) {
+    state.disarm(&session_id);
+}
+
+/// Stop watching every session at once (CPE-1099) — used when the whole Agent Deck is stopped. Clears
+/// the map, so all watchers drop and all pump threads exit: back to zero threads (off means off).
+#[cfg(feature = "sidecar-platform")]
+#[tauri::command]
+#[cfg_attr(feature = "specta-bindings", specta::specta)]
+fn agent_watch_stop_all(state: tauri::State<AgentWatchState>) {
+    state.disarm_all();
 }
 
 // ---- Watched-folder rules: live folder watcher (CPE-794, epic CPE-734) ----------------------------
@@ -6055,6 +6100,8 @@ pub fn run() {
             #[cfg(feature = "sidecar-platform")]
             agent_watch_stop,
             #[cfg(feature = "sidecar-platform")]
+            agent_watch_stop_all,
+            #[cfg(feature = "sidecar-platform")]
             folder_watch_start,
             #[cfg(feature = "sidecar-platform")]
             folder_watch_stop,
@@ -6129,6 +6176,49 @@ mod agent_watch_tests {
         // …and reads / unknowns are dropped (a Windows watcher can't see reads anyway).
         assert_eq!(classify_fs_event(&EventKind::Access(notify::event::AccessKind::Read)), None);
         assert_eq!(classify_fs_event(&EventKind::Other), None);
+    }
+
+    // --- Multi-session watch: keyed map + zero-watcher invariant (CPE-1099) -------------
+    use super::{AgentWatch, AgentWatchState};
+
+    /// Build a real `notify` watcher over a fresh temp subdir so an `AgentWatch` can be inserted in a
+    /// test without any Tauri machinery. The receiver is dropped immediately: we only assert on the
+    /// map's lifecycle (arm/disarm/clear), not on emitted events.
+    fn make_watch(tag: &str) -> AgentWatch {
+        use notify::{RecursiveMode, Watcher};
+        let dir = std::env::temp_dir().join(format!("cpe1099-{}-{}", std::process::id(), tag));
+        std::fs::create_dir_all(&dir).unwrap();
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut watcher = notify::recommended_watcher(move |res| {
+            let _ = tx.send(res);
+        })
+        .unwrap();
+        watcher.watch(&dir, RecursiveMode::Recursive).unwrap();
+        AgentWatch { _watcher: watcher, path: dir.to_string_lossy().into_owned() }
+    }
+
+    #[test]
+    fn arming_two_sessions_then_stop_all_leaves_zero_watchers() {
+        let state = AgentWatchState::default();
+        // Off means off: nothing armed ⇒ empty map ⇒ zero watcher/pump threads.
+        assert!(state.is_empty());
+
+        // Arm two distinct sessions — both are watched concurrently (keyed by sessionId).
+        state.arm("s1".into(), make_watch("s1"));
+        state.arm("s2".into(), make_watch("s2"));
+        assert_eq!(state.armed_count(), 2);
+
+        // Re-arming an existing key replaces (drops) its prior watch, not add a second — still 2.
+        state.arm("s1".into(), make_watch("s1b"));
+        assert_eq!(state.armed_count(), 2);
+
+        // Disarming one session removes only that key; the other keeps watching.
+        state.disarm("s1");
+        assert_eq!(state.armed_count(), 1);
+
+        // stop_all clears the map → back to the zero-watcher invariant.
+        state.disarm_all();
+        assert!(state.is_empty());
     }
 
     // --- Catalog version rollback (CPE-383) --------------------------------------------
@@ -6443,6 +6533,7 @@ pub fn export_bindings(out: &std::path::Path) -> Result<(), String> {
         sidecar_diagnostics,
         agent_watch_start,
         agent_watch_stop,
+        agent_watch_stop_all,
         folder_watch_start,
         folder_watch_stop,
         forge_browse,

@@ -1401,23 +1401,33 @@ async sidecarDiagnostics(id: string) : Promise<Result<SidecarDiagnostics, string
 }
 },
 /**
- * Start watching an agent's Project folder for filesystem activity (CPE-398). Replaces any
- * existing watch. Non-fatal: returns an error string the caller can surface. A missing folder
- * (e.g. a since-deleted path) is rejected rather than silently watching nothing.
+ * Start watching one agent session's Project folder for filesystem activity (CPE-398/1099). Keyed
+ * by `session_id`: this ADDs a watch (it does not replace the others), so every running session is
+ * watched concurrently. Re-arming the same `session_id` drops that session's prior watch. Non-fatal:
+ * returns an error string the caller can surface. A missing folder (e.g. a since-deleted path) is
+ * rejected rather than silently watching nothing.
  */
-async agentWatchStart(path: string) : Promise<Result<null, string>> {
+async agentWatchStart(sessionId: string, path: string) : Promise<Result<null, string>> {
     try {
-    return { status: "ok", data: await TAURI_INVOKE("agent_watch_start", { path }) };
+    return { status: "ok", data: await TAURI_INVOKE("agent_watch_start", { sessionId, path }) };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
 }
 },
 /**
- * Stop watching (CPE-398). Dropping the stored watcher ends its emitter thread. Idempotent.
+ * Stop watching one session (CPE-398/1099). Dropping that session's stored watcher ends its emitter
+ * thread; the other sessions keep watching. Idempotent.
  */
-async agentWatchStop() : Promise<void> {
-    await TAURI_INVOKE("agent_watch_stop");
+async agentWatchStop(sessionId: string) : Promise<void> {
+    await TAURI_INVOKE("agent_watch_stop", { sessionId });
+},
+/**
+ * Stop watching every session at once (CPE-1099) — used when the whole Agent Deck is stopped. Clears
+ * the map, so all watchers drop and all pump threads exit: back to zero threads (off means off).
+ */
+async agentWatchStopAll() : Promise<void> {
+    await TAURI_INVOKE("agent_watch_stop_all");
 },
 /**
  * Start (or replace) the watched-folder watcher over `paths` (CPE-794). Missing folders are skipped;

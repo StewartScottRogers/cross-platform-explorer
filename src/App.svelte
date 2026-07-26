@@ -20,8 +20,8 @@
   import AboutDialog from "./lib/components/AboutDialog.svelte";
   import SettingsDialog from "./lib/components/SettingsDialog.svelte";
   import { startAiConsole, startAgentBoard, consoleUrlWith, platformActive, consentState, setConsent, CAPABILITY_INFO } from "./lib/sidecar";
-  import { initAgentSessions, agentSessions, watchTargetFor, normalizePath, clearAgentSessions } from "./lib/agentSessions";
-  import { startAgentWatch, stopAgentWatch, type FsActivity } from "./lib/sidecar";
+  import { initAgentSessions, agentSessions, watchTargetFor, watchTargets, currentSessions, normalizePath, clearAgentSessions } from "./lib/agentSessions";
+  import { startAgentWatch, stopAgentWatch, type FsActivity, type AgentSession } from "./lib/sidecar";
   import { initAgentActivity, fsActivity, recentActivities, agentTimeline, affectsListing } from "./lib/agentActivity";
   import { initAgentDiffs } from "./lib/agentDiffs";
   import { initAgentCost } from "./lib/agentCost";
@@ -794,30 +794,63 @@
     watchRefreshTimer = setTimeout(() => refresh(), 400);
   }
 
-  /** Start/stop the filesystem watch as the watched project changes (CPE-398/399). */
-  async function syncAgentWatch(cwd: string) {
-    if (cwd === activeWatchCwd) return;
-    activeWatchCwd = cwd;
-    unlistenActivity?.();
-    unlistenActivity = null;
-    unlistenDiffs?.();
-    unlistenDiffs = null;
-    unlistenCost?.();
-    unlistenCost = null;
-    if (watchRefreshTimer) { clearTimeout(watchRefreshTimer); watchRefreshTimer = null; }
-    await stopAgentWatch();
-    if (cwd) {
-      unlistenActivity = await initAgentActivity(onAgentBatch);
-      unlistenDiffs = await initAgentDiffs();
-      unlistenCost = await initAgentCost();
-      await startAgentWatch(cwd);
-    } else {
-      showTimeline = false; // no watched project ⇒ close the timeline drawer (CPE-400)
+  /** Sessions currently armed (being watched): sessionId → the cwd we started the watch on. Lets the
+   *  reconcile diff the desired running-session set against what's already watching and touch only the
+   *  delta. Off means off: when this empties, the shared listeners below are all torn down (CPE-1099). */
+  const armedWatches = new Map<string, string>();
+  /** Serialise overlapping reconcile runs (a burst of session announcements) so the armed-set diff
+   *  never races its own awaits; a run that arrives mid-flight re-runs once against the latest set. */
+  let reconcileInFlight = false;
+  let reconcilePending = false;
+
+  /** Reconcile the live filesystem watches against the running-session set (CPE-1099): start a watch
+   *  for each newly-arrived (or re-homed) session, stop the ones that ended, and keep exactly ONE
+   *  shared fs-activity + fs-diff (+ cost) listener pair alive while anything is armed — never one per
+   *  session. When the armed set returns to empty, every listener is removed (off means off). */
+  async function reconcileAgentWatch(sessions: AgentSession[]) {
+    if (reconcileInFlight) { reconcilePending = true; return; }
+    reconcileInFlight = true;
+    try {
+      const desired = new Map<string, string>();
+      for (const s of watchTargets(sessions)) if (s.cwd) desired.set(s.sessionId, s.cwd);
+
+      // Start the delta: a new session, or one whose cwd changed (re-arming drops the old watch).
+      for (const [id, cwd] of desired) {
+        if (armedWatches.get(id) !== cwd) {
+          await startAgentWatch(id, cwd);
+          armedWatches.set(id, cwd);
+        }
+      }
+      // Stop the removed: sessions that are no longer running.
+      for (const id of [...armedWatches.keys()]) {
+        if (!desired.has(id)) {
+          await stopAgentWatch(id);
+          armedWatches.delete(id);
+        }
+      }
+      // Exactly one shared listener pair, gated on there being anything armed — independent of N.
+      if (armedWatches.size > 0) {
+        if (!unlistenActivity) unlistenActivity = await initAgentActivity(onAgentBatch);
+        if (!unlistenDiffs) unlistenDiffs = await initAgentDiffs();
+        if (!unlistenCost) unlistenCost = await initAgentCost();
+      } else {
+        unlistenActivity?.(); unlistenActivity = null;
+        unlistenDiffs?.(); unlistenDiffs = null;
+        unlistenCost?.(); unlistenCost = null;
+        if (watchRefreshTimer) { clearTimeout(watchRefreshTimer); watchRefreshTimer = null; }
+      }
+    } finally {
+      reconcileInFlight = false;
+      if (reconcilePending) { reconcilePending = false; reconcileAgentWatch(currentSessions()); }
     }
   }
 
-  // Re-evaluate whenever the session list or the current folder changes.
-  $: syncAgentWatch(watchTargetFor($agentSessions, currentPath));
+  // Watch every running session concurrently (CPE-1099 conflict radar); re-run on any session change.
+  $: reconcileAgentWatch($agentSessions);
+  // The on-screen drawer still describes just the project the explorer is inside (CPE-399); leaving
+  // every watched project closes the timeline (CPE-400) but does NOT stop watching the other sessions.
+  $: activeWatchCwd = watchTargetFor($agentSessions, currentPath);
+  $: if (!activeWatchCwd) showTimeline = false;
   $: watchedAgentName =
     $agentSessions.find((s) => normalizePath(s.cwd) === normalizePath(activeWatchCwd))?.agentName || "agent";
   /** sessionId of the currently-watched agent, if any — lets the cost ledger (CPE-1098) point at the

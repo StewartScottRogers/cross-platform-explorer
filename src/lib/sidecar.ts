@@ -154,21 +154,34 @@ export interface FsActivity {
   path: string;
 }
 
-/** Start watching an agent's Project folder for filesystem activity (CPE-398). Resolves `false`
- *  when the platform is off or the path can't be watched — never throws. */
-export async function startAgentWatch(path: string): Promise<boolean> {
+/** Start watching one agent session's Project folder for filesystem activity (CPE-398/1099). Keyed
+ *  by `sessionId` so every running session is watched concurrently; re-arming the same id re-homes
+ *  that session's watch. Resolves `false` when the platform is off or the path can't be watched —
+ *  never throws. */
+export async function startAgentWatch(sessionId: string, path: string): Promise<boolean> {
   try {
-    unwrap(await commands.agentWatchStart(path));
+    unwrap(await commands.agentWatchStart(sessionId, path));
     return true;
   } catch {
     return false;
   }
 }
 
-/** Stop the active filesystem watch (CPE-398). Safe + idempotent when the platform is off. */
-export async function stopAgentWatch(): Promise<void> {
+/** Stop one session's filesystem watch (CPE-398/1099); the others keep watching. Safe + idempotent
+ *  when the platform is off. */
+export async function stopAgentWatch(sessionId: string): Promise<void> {
   try {
-    await commands.agentWatchStop();
+    await commands.agentWatchStop(sessionId);
+  } catch {
+    /* platform off — nothing to stop */
+  }
+}
+
+/** Stop every agent-session watch at once (CPE-1099) — the whole Agent Deck was stopped. Safe +
+ *  idempotent when the platform is off. */
+export async function stopAllAgentWatch(): Promise<void> {
+  try {
+    await commands.agentWatchStopAll();
   } catch {
     /* platform off — nothing to stop */
   }
