@@ -45,3 +45,4 @@ These are **not** MVD; listed so the QA Architect pins them and audits for regre
 | CPE-1090 | Code-preview outline strip / pills reflow / breadcrumb-on-scroll / jump feel | headless UAT only — interactive visual render on installed build still needs human eyes | open | 2026-07-26 |
 | CPE-1091 | Per-line gutter/fold/minimap/indent-guides visual render | headless UAT+review only — fold animation, minimap drag, gutter alignment on WebView2 need human eyes | open | 2026-07-26 |
 | CPE-1093 | Batch-media dialog: layout/pills/entry | human-verified on installed 0.57.35 build (2026-07-26, user: "looks good"); real image-transform output still worth a spot-check | partially-closed | 2026-07-26 |
+| CPE-1094 | Agent-Watch replay scrubber: tab strip / slider drag / play cadence / diff-on-scrub | headless UAT+review only — needs eyes on a real watched session in the installed build | open | 2026-07-26 |
