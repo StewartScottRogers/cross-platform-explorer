@@ -4,7 +4,7 @@ title: "Fleet aggregation — ai_console::fleet_metrics (cross-session / per-age
 type: feature
 component: Backend
 priority: medium
-status: Doing
+status: Done
 tags: ready
 created: 2026-07-25
 epic: CPE-731

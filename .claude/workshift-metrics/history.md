@@ -111,3 +111,21 @@ _(no shifts recorded yet — first real workshift will seed this)_
   + the live per-session attribution FEED that shapes real events into these detectors' caller-shaped inputs
   (epic notes activity isn't session-tagged yet) — both attended. Standing order "do the next epic always"
   in effect — rolling to the 6th epic.
+
+## 2026-07-25 (deep night) — CPE-731 Agent cost & resource ledger (4 shipped)
+- Shipped the full CPE-731 headless metric layer in the sidecar ai-console crate: CPE-1071 session_metrics
+  (per-session ledger fold, foundation), CPE-1073 throughput (bounded time-bucketed sparkline series),
+  CPE-1072 fleet_metrics (per-agent/model/totals + division-safe averages), CPE-1074 efficiency
+  (division-safe cost-per-progress ratios + deterministic ranking). Pure folds over usage/estimate_cost;
+  no deps.
+- **Zero rework, all 4 one-pass APPROVE — third consecutive zero-rework wave.** The standing briefs are now
+  fully internalised by workers: saturating_add on every counter (fleet totals at u64::MAX), guarded
+  division (0-session averages, all four efficiency ratios → None never inf/NaN), bounded allocation
+  (throughput clamps the bucket index to max_buckets BEFORE sizing the vec — reviewer probed u64::MAX/2),
+  PartialEq-not-Eq on every f64 struct. Workers even self-caught overflow in their own test helpers.
+- Nice pattern this wave: the `None`-ratio ranking in efficiency uses an Option-tuple comparator so a real
+  `Some(0.0)` and a `None` never collide (0.0 placeholder is substituted into the OUTPUT only, after the
+  sort) — a clean way to rank with missing values. Reworth reusing.
+- Frontier: CPE-731 remainder = the dashboard GUI (sparklines/tiles per dataviz conventions) + the live
+  FEED shaping real session events into RunRecord/TimedRun (files-touched/churn not session-tagged yet —
+  same gap CPE-730/728 noted). Both attended. Standing order "do the next epic always" in effect — 7th epic next.
