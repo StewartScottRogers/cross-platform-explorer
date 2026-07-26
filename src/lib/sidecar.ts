@@ -152,6 +152,11 @@ export function applySessionAnnouncement(
 export interface FsActivity {
   kind: "created" | "modified" | "removed" | "renamed" | "read";
   path: string;
+  /** Who caused this event (CPE-1101): the owning agent's `sessionId`, `"user"` (the explorer's own
+   *  file op), or `"unknown"`. Lets the conflict radar (CPE-1100) fold same-path writes across
+   *  *distinct* actors. Optional so a hand-built activity stays valid; `normalizeFsActivity` fills
+   *  `"unknown"` for any wire payload that predates the tag, so real events always carry it. */
+  actor?: string;
 }
 
 /** Start watching one agent session's Project folder for filesystem activity (CPE-398/1099). Keyed
@@ -196,8 +201,14 @@ export function normalizeFsActivity(payload: unknown): FsActivity[] {
   for (const item of payload) {
     const kind = (item as { kind?: unknown })?.kind;
     const path = (item as { path?: unknown })?.path;
+    const actor = (item as { actor?: unknown })?.actor;
     if (typeof kind === "string" && kinds.has(kind) && typeof path === "string" && path) {
-      out.push({ kind: kind as FsActivity["kind"], path });
+      out.push({
+        kind: kind as FsActivity["kind"],
+        path,
+        // Back-compat: a payload without `actor` (pre-CPE-1101) stays valid and reads "unknown".
+        actor: typeof actor === "string" && actor ? actor : "unknown",
+      });
     }
   }
   return out;

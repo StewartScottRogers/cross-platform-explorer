@@ -177,10 +177,12 @@ pub(crate) fn resolve_provider_key(
 /// Build the `fs-read:<json>` announcement for a file the agent reported reading (CPE-405).
 /// The raw captured path (relative or absolute) is resolved against the session's Project folder
 /// (`cwd`) so it matches the absolute paths the host's FS watcher emits (CPE-398); the host forwards
-/// it onto the `ai-console://fs-activity` channel with `kind:"read"`.
-fn read_announcement(cwd: &str, raw: &str) -> String {
+/// it onto the `ai-console://fs-activity` channel with `kind:"read"`. The payload also carries the
+/// reporting `sessionId` (CPE-1101) so the host can tag the read's `actor` with the owning session —
+/// mirrors how [`cost_payload`] stamps its session id.
+fn read_announcement(cwd: &str, raw: &str, session_id: &str) -> String {
     let abs = std::path::Path::new(cwd).join(raw).to_string_lossy().into_owned();
-    format!("fs-read:{}", json!({ "path": abs }))
+    format!("fs-read:{}", json!({ "path": abs, "sessionId": session_id }))
 }
 
 /// JSON view of a session's usage (CPE-311). Omitted fields stay 0; the launcher hides an all-zero
@@ -293,7 +295,7 @@ fn adopt_into(
                 let text = String::from_utf8_lossy(&chunk);
                 // Surface any file the agent reported reading (CPE-405).
                 for raw in reads.feed(&text) {
-                    announce(read_announcement(&read_cwd, &raw));
+                    announce(read_announcement(&read_cwd, &raw, &diag_id));
                 }
                 // Fold provider-reported token/cost usage for this session (CPE-311).
                 let new_usage = usage_scan.feed(&text);
@@ -1743,7 +1745,7 @@ mod tests {
             started_at: "0".into(),
         };
         let session = session_payload("started", "s1", "Claude Code", &meta);
-        let read = read_announcement("Z:/repos/app", "src/main.rs");
+        let read = read_announcement("Z:/repos/app", "src/main.rs", "s1");
         let cost = cost_payload("s1", &crate::usage::Usage::default());
 
         assert!(session.starts_with("session:") && !session.starts_with("session:fs-read:") && !session.starts_with("session:cost:"));
@@ -1917,16 +1919,19 @@ mod tests {
     fn read_announcement_resolves_against_cwd_and_tags_the_channel() {
         // A relative read path is resolved against the session's Project folder, so it matches the
         // absolute paths the FS watcher emits; the payload is a `fs-read:<json>` the host forwards.
-        let s = read_announcement("Z:/repos/app", "src/main.rs");
+        let s = read_announcement("Z:/repos/app", "src/main.rs", "s1");
         let json = s.strip_prefix("fs-read:").expect("fs-read prefix");
         let v: Value = serde_json::from_str(json).unwrap();
         let path = v["path"].as_str().unwrap().replace('\\', "/");
         assert_eq!(path, "Z:/repos/app/src/main.rs");
+        // The reporting session id rides along so the host can tag the read's actor (CPE-1101).
+        assert_eq!(v["sessionId"].as_str().unwrap(), "s1");
         // An already-absolute path is preserved (join replaces the base with an absolute child).
         let abs = if cfg!(windows) { "C:/tmp/x.rs" } else { "/tmp/x.rs" };
-        let s2 = read_announcement("Z:/repos/app", abs);
+        let s2 = read_announcement("Z:/repos/app", abs, "s2");
         let v2: Value = serde_json::from_str(s2.strip_prefix("fs-read:").unwrap()).unwrap();
         assert_eq!(v2["path"].as_str().unwrap().replace('\\', "/"), abs);
+        assert_eq!(v2["sessionId"].as_str().unwrap(), "s2");
     }
 
     #[test]

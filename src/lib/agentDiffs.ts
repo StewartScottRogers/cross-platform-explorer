@@ -18,6 +18,10 @@ export interface FsDiff {
   path: string;
   before: string;
   after: string;
+  /** Who caused the write (CPE-1101): a `sessionId`, `"user"`, or `"unknown"`. Optional so an older
+   *  payload without it stays valid; `normalizeFsDiff` fills `"unknown"` when absent. Carried for the
+   *  conflict radar (CPE-1100); the diff-peek UI ignores it. */
+  actor?: string;
 }
 
 /** How many per-file diffs to retain (newest-first). Bounded so a big refactor can't grow the store. */
@@ -82,13 +86,15 @@ export function normalizeFsDiff(payload: unknown): FsDiff[] {
     const path = (item as { path?: unknown })?.path;
     const before = (item as { before?: unknown })?.before;
     const after = (item as { after?: unknown })?.after;
+    const actor = (item as { actor?: unknown })?.actor;
     if (
       typeof path === "string" &&
       path &&
       typeof before === "string" &&
       typeof after === "string"
     ) {
-      out.push({ path, before, after });
+      // Back-compat: a diff record without `actor` (pre-CPE-1101) stays valid and reads "unknown".
+      out.push({ path, before, after, actor: typeof actor === "string" && actor ? actor : "unknown" });
     }
   }
   return out;

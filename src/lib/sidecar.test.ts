@@ -131,12 +131,24 @@ describe("Agent Watch filesystem activity (CPE-398)", () => {
       { kind: "renamed", path: "/d" },
       "nope", // not an object → dropped
     ]);
+    // A payload without `actor` (pre-CPE-1101) stays valid and defaults to "unknown".
     expect(items).toEqual([
-      { kind: "created", path: "/a.txt" },
-      { kind: "modified", path: "/b.rs" },
-      { kind: "renamed", path: "/d" },
+      { kind: "created", path: "/a.txt", actor: "unknown" },
+      { kind: "modified", path: "/b.rs", actor: "unknown" },
+      { kind: "renamed", path: "/d", actor: "unknown" },
     ]);
     expect(normalizeFsActivity("not an array")).toEqual([]);
+  });
+
+  it("normalizeFsActivity threads a present actor and defaults a blank/absent one to 'unknown' (CPE-1101)", () => {
+    const items = normalizeFsActivity([
+      { kind: "created", path: "/a", actor: "sess-1" }, // owning session
+      { kind: "modified", path: "/b", actor: "user" }, // explorer's own op
+      { kind: "read", path: "/c", actor: "" }, // blank → unknown
+      { kind: "removed", path: "/d" }, // absent → unknown
+      { kind: "modified", path: "/e", actor: 42 }, // non-string → unknown
+    ]);
+    expect(items.map((i) => i.actor)).toEqual(["sess-1", "user", "unknown", "unknown", "unknown"]);
   });
 
   it("startAgentWatch invokes the command (keyed by sessionId) and reports success/failure without throwing", async () => {
