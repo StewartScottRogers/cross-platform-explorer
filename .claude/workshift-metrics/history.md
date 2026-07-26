@@ -170,3 +170,23 @@ _(no shifts recorded yet — first real workshift will seed this)_
   seam only). No architecture decision needed for the pure core (High priority, not big-design). Standing
   order "do the next epic always" in effect — 9th epic next. Clean deep headless veins are thinning but not
   yet exhausted (PM should keep being honest about it).
+
+## 2026-07-26 (early hours) — CPE-723 Batch media transform engine (2 shipped)
+- Shipped the transform ENGINE CPE-940's plan promised (its doc said "the transform engine executes the
+  returned plan" — it didn't exist): CPE-1083 batch_transform (apply_ops bytes→bytes: resize/convert/rotate/
+  flip/strip + EXIF-orientation bake, over the vendored image 0.25) and CPE-1084 batch_execute (execute_plan
+  real-fs runner, skip-on-error, non-destructive, real planner→executor tempdir round-trip). Reuses
+  batch_media::{MediaOp,BatchJob,PlannedItem,plan}; NO new deps.
+- **Zero rework, both one-pass APPROVE — SIXTH consecutive zero-rework wave.** Two sharp worker catches this
+  wave: (1) image 0.25's `thumbnail()` DOES upscale (resize_dimensions fill=false), so apply_ops guards
+  Resize behind an explicit "only if larger" check — correction to the ticket's assumption; (2) decompression-
+  bomb guard via `image::Limits` (max 20k px / 256MiB) rejects a 100k×100k IHDR at header-parse, verified with
+  a hand-built minimal PNG (own CRC-32, no dep). Bake image::Limits into ANY future raster-decode ticket.
+- Structure note: kept this a 2-cohesive-FILE wave (all ops fold into one apply_ops) instead of the PM's
+  4-op-split, because splitting ops across workers = editing the same `apply_ops` match = merge conflict. When
+  an epic's natural unit is one function, don't force op-level parallelism — one worker per file. Preserved the
+  zero-conflict streak (36 tickets, 0 conflicts this session).
+- Frontier: CPE-723 remainder = GUI (before/after preview + progress + batch-op dialog) — attended. Per the
+  PM, the next-thinnest pure vein is CPE-718's PSD/EXIF-orientation thumbnail slice; after that the frontier
+  genuinely closes to GUI/dep-heavy/credential-gated work. Standing order "do the next epic always" in effect
+  — 10th epic next (PM to keep being honest as the veins thin).
