@@ -49,15 +49,15 @@ Ext compares lowercased; pure bytes/`image` API — no `std::path`, no `#[cfg]` 
 are FINE here (crates/server, not sidecar) — but this fn returns `Vec<u8>`, no new public struct likely needed.
 
 ## Acceptance Criteria
-- [ ] 100×40 PNG + Resize max_px=32 → decode output, `width==32` and height in [10,16] (aspect kept); a 20×20
+- [x] 100×40 PNG + Resize max_px=32 → decode output, `width==32` and height in [10,16] (aspect kept); a 20×20
       input is NOT upscaled by Resize max_px=64.
-- [ ] PNG + Convert{jpg} → `image::guess_format(&out) == Jpeg`; unsupported `to_ext` → `Err`.
-- [ ] Rotate{90} on a 10×4 → output decodes to 4×10 (dims swap); Flip{horizontal} moves an asymmetric pixel
+- [x] PNG + Convert{jpg} → `image::guess_format(&out) == Jpeg`; unsupported `to_ext` → `Err`.
+- [x] Rotate{90} on a 10×4 → output decodes to 4×10 (dims swap); Flip{horizontal} moves an asymmetric pixel
       pattern (decode + assert the moved pixel).
-- [ ] StripMetadata drops EXIF (assert via `kamadak-exif` that input has an Orientation/APP1 and output does
+- [x] StripMetadata drops EXIF (assert via `kamadak-exif` that input has an Orientation/APP1 and output does
       not); orientation=6 input → normalized output has the expected rotated dims.
-- [ ] A decompression-bomb (tiny file, huge declared dims) → `Err` via `image::Limits`, not OOM/panic.
-- [ ] `cargo test -p cpe-server` green; clippy `--all-targets -- -D warnings` clean default AND
+- [x] A decompression-bomb (tiny file, huge declared dims) → `Err` via `image::Limits`, not OOM/panic.
+- [x] `cargo test -p cpe-server` green; clippy `--all-targets -- -D warnings` clean default AND
       `--features index`; no new deps.
 
 ## Work Log
@@ -65,3 +65,24 @@ are FINE here (crates/server, not sidecar) — but this fn returns `Vec<u8>`, no
 plan). Reuses `batch_media::MediaOp` + the already-vendored `image`/`kamadak-exif`. CPE-1084 (execute_plan
 runner) depends on this. Kept as one cohesive module (all ops fold into one `apply_ops`) to avoid a shared-
 function merge conflict.
+
+2026-07-26 (workshift Worker, overnight) — Implemented `crates/server/src/batch_transform.rs::apply_ops`,
+registered `pub mod batch_transform;` in `lib.rs` immediately after `batch_media`. Reused
+`batch_media::MediaOp` as-is (Resize/Convert/Rotate/Flip/StripMetadata/Rename — did not touch the enum).
+`Rename` is a no-op in this fn (it's a filename-only concern the planner already owns; this fn only ever
+sees bytes). Decode-once via `ImageReader::with_guessed_format()` + explicit `image::Limits`
+(`max_image_width`/`max_image_height` = 20 000px, `max_alloc` = 256 MiB) so a decompression-bomb PNG (huge
+IHDR dims, no real pixel data) fails fast at header-parse time — covered by a dedicated test that hand-builds
+a minimal IHDR chunk (own tiny CRC-32, no new dep). `Resize` guards `thumbnail()` behind an explicit
+"only if actually larger" check, since `image`'s `thumbnail()` does **not** itself refuse to upscale (its
+`resize_dimensions(..., fill=false)` will scale *up* to fit a larger box) — this is a correction to the
+ticket's assumption that `thumbnail()` alone is upscale-safe; worth relaying upstream to whoever documents the
+`image` crate usage next. `StripMetadata` reads the EXIF `Orientation` tag (`kamadak-exif`, same
+`exif::Reader::read_from_container` pattern as `media_meta_read.rs`/`image_preview.rs`) and bakes the standard
+8-value orientation transform into the pixels before re-encoding (values 5/7 via a rotate+flip compose), so
+dropping the tag doesn't silently re-orient a phone photo. EXIF test fixtures are hand-built minimal
+TIFF-in-APP1 blocks spliced after a JPEG's SOI marker (no camera file needed). All acceptance criteria above
+verified via 11 new unit tests. Full crate suite: `cargo test` → 981 passed, 0 failed. Clippy
+`--all-targets -- -D warnings` clean; `--all-targets --features index -- -D warnings` clean. No new
+dependencies. Branch `cpe-1083-batch-transform`, PR opened for review/merge (ticket stays in Doing until
+merged, per the normal PR-gated workflow).

@@ -104,6 +104,11 @@ pub mod replay;
 /// cursors (`diff_states`), to animate a scrub. Pure projection over [`replay::FsState`].
 pub mod replay_view;
 pub mod batch_media;
+
+/// Batch media **transform engine** (CPE-1083, epic CPE-723): applies an ordered list of
+/// [`batch_media::MediaOp`]s to an image's bytes (decode once → fold ops → encode) — the executor for
+/// the plan [`batch_media::plan`] computes. Pure bytes→bytes; no filesystem I/O.
+pub mod batch_transform;
 pub mod spotlight;
 pub mod type_class;
 pub mod metadata_column;
