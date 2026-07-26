@@ -53,3 +53,27 @@ Normalize `\`→`/` then split into `/`-segments — **no `std::path`**, no `#[c
 ## Work Log
 2026-07-25 (workshift) — Filed by the Product Manager as the CPE-729 pure-core foundation. Independent module
 in the sidecar ai-console crate; distinct lib.rs anchor. CPE-1076 depends on this module's `IgnoreRule`/`matches`.
+
+2026-07-25 (workshift, Worker) — Built `sidecar/ai-console/src/gate_ignore.rs`: `parse_rule` / `matches`,
+registered `pub mod gate_ignore;` immediately after `pub mod guardrail;` in `lib.rs`. Matching is fully
+iterative — an unanchored rule is evaluated by implicitly prefixing it with a `**` segment (rather than
+looping over every start index), then a DP table over (pattern-segment, path-segment) decides reachability;
+within-segment `*`/`?` wildcards use the classic iterative two-pointer scan (last-`*` backtrack pointer).
+Neither matcher recurses, so a deep/adversarial path or pattern only costs more loop iterations, never stack
+depth — covered by `deep_path_and_pattern_do_not_stack_overflow` (3000 path segments x 1000 `**` pattern
+segments, plus a 500-`*` run against a 5000-char segment). A terminal match (pattern consumes every
+remaining path segment) respects `dir_only` against whether the caller's `path` string itself ends in `/`
+(the only way to signal "this candidate is a directory" given the `matches(path: &str, ...)` signature has
+no separate is-dir flag); an ancestor match (pattern fully matches a strict prefix, i.e. something exists
+below it) always counts regardless of `dir_only`, since the matched component is necessarily a directory —
+this is what makes `node_modules/` correctly ignore everything under `node_modules`, not just the directory
+name itself. Assumption logged: only an explicit leading `/` sets `anchored`; unlike real git, a multi-segment
+pattern without a leading `/` is treated as depth-unanchored (not implicitly anchored to the gitignore's own
+directory) — the ticket only specifies the leading-`/` rule, and no acceptance criterion exercises the git
+nuance, so I did not add unspecified behavior.
+
+Verified from `sidecar/ai-console`: `cargo test` — 11/11 new `gate_ignore` tests pass, full crate suite green
+(no regressions). `cargo clippy --all-targets -- -D warnings` — clean, zero warnings. No `Cargo.toml`/
+`Cargo.lock` changes (no new deps). Branch `cpe-1075-gate-ignore`, PR opened; ticket stays in `Doing` pending
+merge per repo convention (moved to `Done` in a follow-up commit once the PR lands, matching CPE-1048's
+pattern).
