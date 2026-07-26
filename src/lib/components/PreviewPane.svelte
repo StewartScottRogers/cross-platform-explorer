@@ -242,13 +242,22 @@
     return resolveLineHeight(style.lineHeight, parseFloat(style.fontSize));
   }
 
+  /** The `<pre>`'s top offset within the scroll container's scroll coordinate space. The container
+   *  (`aside.preview`) scrolls the edit-bar + outline strip *above* the `<pre>`, so the first code line
+   *  sits this many px down — jump/breadcrumb must add/subtract it or they drift by the header's height
+   *  (which itself grows when the pills reflow). `getBoundingClientRect` is used rather than `offsetTop`
+   *  because `aside.preview` is not a positioned `offsetParent`. */
+  function preOffset(container: HTMLElement, pre: HTMLElement): number {
+    return pre.getBoundingClientRect().top - container.getBoundingClientRect().top + container.scrollTop;
+  }
+
   /** Click a symbol pill: scroll the preview so that symbol's line is at (or near) the top. */
   function jumpToSymbol(sym: CodeSymbol) {
     if (!textContentEl) return;
     const container = findScrollContainer(textContentEl);
     if (!container) return;
     const lineHeight = measureLineHeight(textContentEl);
-    const target = lineToScrollTop(sym.line, lineHeight);
+    const target = preOffset(container, textContentEl) + lineToScrollTop(sym.line, lineHeight);
     container.scrollTop = Math.max(0, Math.min(target, container.scrollHeight));
     updateBreadcrumb();
   }
@@ -263,7 +272,7 @@
     const container = findScrollContainer(textContentEl);
     if (!container) return;
     const lineHeight = measureLineHeight(textContentEl);
-    const topLine = scrollTopToLine(container.scrollTop, lineHeight);
+    const topLine = scrollTopToLine(container.scrollTop - preOffset(container, textContentEl), lineHeight);
     breadcrumbSym = enclosingSymbol(outline, topLine);
   }
 
