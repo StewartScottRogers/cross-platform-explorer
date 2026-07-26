@@ -30,6 +30,10 @@ feature-gated behind `sidecar-platform`; with no agent running the plain explore
   subtree, so you can follow it down.
 - **Timeline drawer (CPE-400):** a durable, scrollable history of the session's file activity;
   click an entry to jump to its folder.
+- **Replay scrubber (CPE-1094):** the drawer's "Replay" tab scrubs a slider back and forth through
+  the session's activity timeline, showing what was touched up to the chosen moment and (where
+  retained) the diff at that point, with play/pause/step/jump transport. Pure frontend over the
+  existing timeline + diff stores — no new backend surface.
 
 ## What it is for
 
