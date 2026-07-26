@@ -4,7 +4,7 @@ title: "Agent Watch: bridge live per-session usage (tokens + cost) to the fronte
 type: feature
 component: Backend
 priority: medium
-status: Doing
+status: Done
 tags: ready
 created: 2026-07-26
 epic: CPE-396
@@ -59,3 +59,10 @@ do NOT scope in `session_metrics.rs`/`RunRecord`/`cost.rs`/`fleet_metrics.rs`, w
 2026-07-26 (workshift, GUI) — Filed as GUI #3 cost-ledger enablement; **rescoped after a de-risk spike** (Library
 entry `sidecar-live-cost-usage-scanner.md`) from the unwired `session_metrics`/`RunRecord` stack to the
 actually-live `usage.rs` `UsageScanner`. Blocks CPE-1098 (the panel). Cut just-in-time after the scrubber.
+
+2026-07-26 — Merged (PR #413). Reviewer APPROVE + UAT PASS (after a Foreman fix typing the host payload as
+`AgentCostEvent`). **Bonus fix bundled:** the worker discovered `main.rs` blanket-wrapped every announcement
+in `session:`, so `fs-read:` came out as `session:fs-read:{…}` and never matched the host arm — meaning the
+Agent-Watch "read" activity kind (CPE-405) had been **silently broken in production**. Each announce builder
+now self-prefixes; regression test `distinct_announcement_kinds_never_collide_on_prefix` added. This was a
+genuine prerequisite (cost: would have inherited the same double-prefix).
