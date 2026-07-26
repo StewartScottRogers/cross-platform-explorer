@@ -4,7 +4,7 @@ title: "QA: GUI-smoke asserts the code-preview renders (burn down CPE-1090/1091 
 type: chore
 component: CI
 priority: medium
-status: Backlog
+status: Doing
 tags: ready
 created: 2026-07-26
 epic: CPE-396
