@@ -45,6 +45,7 @@ pub mod catalog;
 pub mod conflict;
 pub mod conflict_rename;
 pub mod cost;
+pub mod session_metrics;
 pub mod conflict_window;
 pub mod console;
 pub mod guardrail;
