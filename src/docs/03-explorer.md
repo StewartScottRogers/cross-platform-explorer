@@ -65,6 +65,12 @@ The explorer is the core of the app and is tuned to stay **fast, small, and pred
 - **Selection** — multi-select with Shift/Ctrl; the status bar shows the count and total size.
 - **Operations** — copy, cut, paste, rename, delete (to the trash, restorable), new folder, and batch
   rename. Filesystem operations skip entries they can't read rather than failing the whole listing.
+- **Batch media** — right-click 2+ selected image files and choose **Batch media…** to queue an ordered
+  list of edits (resize, convert, rotate, flip, rename, strip metadata) and run them across every file at
+  once. Add ops one at a time — they apply in the order shown — and a live preview lists each file's
+  planned output and a one-line summary as you build the list; non-image files in the selection are
+  skipped with a notice. Runs **non-destructively** by default (writes new files alongside the originals)
+  and shows a live progress bar while it applies.
 - **Drag and drop** — drag any selection onto a folder row or a sidebar place/drive to move or copy it.
   The action follows the OS convention: dropping **within the same drive moves**, **across drives copies**,
   and you can force it with a modifier — hold **Ctrl** to copy, **Shift** to move. Dragging more than one
