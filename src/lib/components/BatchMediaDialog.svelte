@@ -150,7 +150,10 @@
     if (activeChannel) activeChannel.onmessage = null;
     activeChannel = null;
   }
-  onDestroy(detachChannel);
+  onDestroy(() => {
+    detachChannel();
+    if (debounceTimer) clearTimeout(debounceTimer);
+  });
 
   async function apply() {
     if (!canApply) return;

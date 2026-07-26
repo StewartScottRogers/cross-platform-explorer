@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { mediaOpLabel, opsToJob, partitionEligible, progressPercent } from "./batchMedia";
+import { mediaOpLabel, opsToJob, partitionEligible, progressPercent, canBatchTransform } from "./batchMedia";
 import type { MediaOp } from "./bindings.gen";
 
 describe("mediaOpLabel", () => {
@@ -48,6 +48,32 @@ describe("partitionEligible", () => {
 
   it("handles an empty selection", () => {
     expect(partitionEligible([])).toEqual({ eligible: [], skipped: 0 });
+  });
+
+  it("excludes decode-only formats the encoder can't write (e.g. avif)", () => {
+    // avif shows a thumbnail (decodes) but batch_transform can't ENCODE it, so it must be pre-filtered
+    // rather than sent to the backend to fail per-file.
+    const entries = [
+      { name: "photo.avif", is_dir: false },
+      { name: "keep.webp", is_dir: false },
+    ];
+    const { eligible, skipped } = partitionEligible(entries);
+    expect(eligible.map((e) => e.name)).toEqual(["keep.webp"]);
+    expect(skipped).toBe(1);
+  });
+});
+
+describe("canBatchTransform", () => {
+  it("accepts exactly the encoder-writable extensions, case-insensitively", () => {
+    for (const ok of ["a.png", "a.jpg", "a.jpeg", "a.gif", "a.webp", "a.bmp", "a.tif", "a.tiff", "A.PNG"]) {
+      expect(canBatchTransform(ok)).toBe(true);
+    }
+  });
+
+  it("rejects decode-only / non-image / extensionless names", () => {
+    for (const no of ["a.avif", "a.heic", "a.psd", "a.svg", "notes.txt", "archive.zip", "README"]) {
+      expect(canBatchTransform(no)).toBe(false);
+    }
   });
 });
 

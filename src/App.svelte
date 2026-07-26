@@ -71,7 +71,7 @@
   import MetadataStudioDialog from "./lib/components/MetadataStudioDialog.svelte";
   import BatchRenameDialog from "./lib/components/BatchRenameDialog.svelte";
   import BatchMediaDialog from "./lib/components/BatchMediaDialog.svelte";
-  import { partitionEligible } from "./lib/batchMedia";
+  import { partitionEligible, canBatchTransform } from "./lib/batchMedia";
   import type { BatchReport } from "./lib/bindings.gen";
   import TagEditor from "./lib/components/TagEditor.svelte";
   import { initTags, tags, retagPath, renameTag, deleteTag, importTags, exportTags } from "./lib/tags";
@@ -3476,7 +3476,7 @@
     extractable={!isHome && !archive && selectedEntries.length === 1 && isExtractable(selectedEntries[0])}
     compressible={!isHome && !archive && selectedEntries.length >= 1}
     comparable={!isHome && !archive && selectedEntries.length === 2 && selectedEntries.every((e) => !e.is_dir)}
-    mediaEligible={selectedEntries.length > 1 && selectedEntries.some((e) => !e.is_dir && isImage(e.name))}
+    mediaEligible={selectedEntries.length > 1 && selectedEntries.some((e) => !e.is_dir && canBatchTransform(e.name))}
     canTerminal={!isHome && !archive}
     sameTypeExt={selectedEntries.length === 1 && !selectedEntries[0].is_dir ? selectedEntries[0].extension : ""}
     on:action={(e) => runAction(e.detail)}

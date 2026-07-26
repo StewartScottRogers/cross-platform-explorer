@@ -6,8 +6,23 @@
  * split between pure planning logic and the component that renders it.
  */
 
-import { isImage } from "./filetypes";
 import type { BatchJob, MediaOp } from "./bindings.gen";
+
+/**
+ * Extensions the batch-media **encoder** can actually write, mirroring `batch_transform.rs`'s
+ * `ext_to_format` set exactly (png/jpg/jpeg/gif/webp/bmp/tif/tiff). This is deliberately **narrower**
+ * than `isImage` (the thumbnail/decode set): e.g. `avif` decodes for a thumbnail but the encoder can't
+ * emit it, so an all-avif batch would be 0-written/all-skipped. Eligibility keys off *encode* support,
+ * not *decode*, so the dialog only offers files a batch can actually transform.
+ */
+const BATCH_MEDIA_EXTS = new Set(["png", "jpg", "jpeg", "gif", "webp", "bmp", "tif", "tiff"]);
+
+/** True when the batch-media engine can re-encode this filename's format (see {@link BATCH_MEDIA_EXTS}). */
+export function canBatchTransform(name: string): boolean {
+  const dot = name.lastIndexOf(".");
+  if (dot < 0) return false;
+  return BATCH_MEDIA_EXTS.has(name.slice(dot + 1).toLowerCase());
+}
 
 /**
  * A short one-line pill label for a single op, in the order it will run, e.g. `"Resize 1024px"`,
@@ -51,15 +66,16 @@ export interface EligibilitySplit<T> {
 /**
  * Split a multi-selection into files the batch-media engine can operate on (images, not folders) vs.
  * the rest — the dialog pre-filters these out with a "N of M files aren't images and will be skipped"
- * notice rather than sending them to the backend and having every op fail per-file. Reuses the same
- * `isImage` extension check the Icons-view thumbnailer and Quick-look already use, so "eligible for
- * batch media" always agrees with "shows a real thumbnail" elsewhere in the app. Pure; generic over
- * any entry shape carrying at least `name`/`is_dir` so it works directly on `DirEntry[]`.
+ * notice rather than sending them to the backend and having every op fail per-file. Keys off
+ * {@link canBatchTransform} (the encoder-writable set), which is narrower than the thumbnail `isImage`
+ * check — a decode-only format like `avif` shows a thumbnail but can't be batch-transformed, so it must
+ * not be offered here. Pure; generic over any entry shape carrying at least `name`/`is_dir` so it works
+ * directly on `DirEntry[]`.
  */
 export function partitionEligible<T extends { name: string; is_dir: boolean }>(
   entries: T[],
 ): EligibilitySplit<T> {
-  const eligible = entries.filter((e) => !e.is_dir && isImage(e.name));
+  const eligible = entries.filter((e) => !e.is_dir && canBatchTransform(e.name));
   return { eligible, skipped: entries.length - eligible.length };
 }
 
