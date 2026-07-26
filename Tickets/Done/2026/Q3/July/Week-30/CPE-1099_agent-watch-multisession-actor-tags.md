@@ -4,7 +4,7 @@ title: "Agent Watch: multi-session watching (conflict-radar enablement, slice a)
 type: feature
 component: Backend
 priority: medium
-status: Doing
+status: Done
 tags: ready
 created: 2026-07-26
 epic: CPE-396
