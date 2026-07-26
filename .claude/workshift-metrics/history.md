@@ -129,3 +129,23 @@ _(no shifts recorded yet — first real workshift will seed this)_
 - Frontier: CPE-731 remainder = the dashboard GUI (sparklines/tiles per dataviz conventions) + the live
   FEED shaping real session events into RunRecord/TimedRun (files-touched/churn not session-tagged yet —
   same gap CPE-730/728 noted). Both attended. Standing order "do the next epic always" in effect — 7th epic next.
+
+## 2026-07-25 (deep night) — CPE-729 Intervene & approve — pure policy core (4 shipped)
+- Shipped the pure rule-eval/scope/audit core of intervene-and-approve in the sidecar ai-console crate:
+  CPE-1075 gate_ignore (gitignore-style matcher — fully ITERATIVE DP glob, no recursion), CPE-1076
+  gate_scope (allow-root segment-guard + deny/secret verdict), CPE-1077 gate_decision (command-risk + scope
+  fusion, strongest-signal-wins), CPE-1078 gate_audit (decision-ledger fold + division-safe rates). Builds
+  on the shipped guardrail.rs; no deps.
+- **Zero rework, all 4 one-pass APPROVE — FOURTH consecutive zero-rework wave.** The standing briefs are now
+  reflexive for workers: iterative/bounded glob (reviewer verified O(1) stack depth on a 3000×1000 deep
+  input — the exact stack-overflow class that bit CPE-1062 earlier), segment-equality scope containment
+  (explicit `/repo` vs `/repo-secrets` prefix-collision test — the class that bit CPE-1055/1065), div-safe
+  rates, PartialEq-not-Eq on f64 structs. The up-front briefing is paying off decisively.
+- big-design handling: CPE-729 is tagged big-design only for the BOUNDARY decision ("the one Agent-Watch
+  mode that DRIVES") + the hold-the-action integration. Those stay attended/flagged; the pure policy core
+  needs no architecture call (same as CPE-915 shipped earlier under this epic). Scoping only the pure core
+  is the right pattern for a big-design epic with a clean headless sub-vein.
+- Frontier: CPE-729 remainder = the big-design boundary decision + the hold-the-action integration (pause a
+  real agent pre-exec through the sidecar contract — epic flags feasibility as open) + the approve/reject/
+  edit-scope GUI + a rule-persistence store (fs, headless-testable — the natural 5th slice). All attended.
+  Standing order "do the next epic always" in effect — 8th epic next.

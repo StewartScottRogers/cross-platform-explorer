@@ -4,7 +4,7 @@ title: "Gate decision fusion — ai_console::gate_decision (command-risk + scope
 type: feature
 component: Backend
 priority: medium
-status: Doing
+status: Done
 tags: ready
 created: 2026-07-25
 epic: CPE-729
