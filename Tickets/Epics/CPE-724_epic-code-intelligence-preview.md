@@ -2,7 +2,7 @@
 id: CPE-724
 title: "EPIC: Code intelligence preview"
 type: Task
-status: In Progress
+status: Done
 priority: Low
 component: Frontend
 tags: [epic]
@@ -43,3 +43,10 @@ covering the top languages; the renderer is **extended** (not swapped for an edi
 lazy, optional later child. First slice shipped: **CPE-910** — `cpe_server::code_outline` symbol
 extraction for Rust / JS-TS / Python / Go / Markdown. Remaining children are GUI: minimap, outline/
 breadcrumb with jump-to-symbol, code folding + indent guides, optional git-blame gutter.
+
+## Closure (2026-07-26)
+**Closed — Definition of Done met.** Delivered across: CPE-910 (code_outline symbol extraction, pre-session),
+CPE-1089 (aggregate `code_intel` command + bindings), CPE-1090 (outline strip + breadcrumb + jump-to-symbol),
+CPE-1091 (per-line rows + line/fold gutter + indent guides + minimap), CPE-1095 (fold-aware jump polish),
+CPE-1096 (gui-smoke render assertion pinning the outline/rows/minimap). Blame gutter was explicitly optional
+in the DoD and correctly not built. Verified by a PM epic-closure assessment (2026-07-26).
