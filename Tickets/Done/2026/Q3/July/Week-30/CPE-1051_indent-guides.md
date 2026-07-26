@@ -4,12 +4,17 @@ title: "Indent guides — cpe_server::indent_guides (per-line guide depth)"
 type: feature
 component: Backend
 priority: medium
-status: Doing
+status: Done
 tags: ready
 created: 2026-07-25
 epic: CPE-724
 estimate: 2h
 ---
+
+> **Done 2026-07-25 (workshift).** PR #368 merged (squash). Reviewer APPROVE (hand-traced tab expansion,
+> min-neighbour bridging, tab_width==0 safety; one non-blocking nit: `col/tab_width as u16` truncates rather
+> than saturates — unreachable for real source, follow-up-optional). UAT PASS (`[0,1,1,1]` bridging verified).
+> CI green on the 3-OS Backend + Server-crates matrix.
 
 ## Summary
 Child of CPE-724 (Code intelligence preview). Add a **pure, dependency-free** heuristic that computes the
