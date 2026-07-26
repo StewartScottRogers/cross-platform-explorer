@@ -57,3 +57,30 @@ derives `Debug, Clone, PartialEq, Default` (**PartialEq NOT Eq** — f64 field);
 2026-07-25 (workshift) — Filed by the Product Manager as an independent CPE-729 pure-core slice (own
 `Resolution` enum, so independent of A/B/C). Distinct lib.rs anchor. Dispatched in the first wave alongside
 CPE-1075.
+
+2026-07-25 (workshift, Worker) — Implemented `sidecar/ai-console/src/gate_audit.rs` exactly to the design:
+`Resolution` (Copy + Eq, 5 variants), `GateRecord` (Eq), `AuditSummary` (`PartialEq, Default`, no `Eq`
+because of the `f64` `approval_rate` field), `summarize_audit(&[GateRecord]) -> AuditSummary`. Registered
+`pub mod gate_audit;` immediately after `pub mod swarm_locks;` in `lib.rs` (line 79/80). No serde/specta, no
+`std::path`, no `#[cfg]`, no recursion, no new deps — matches the `cost.rs`/`conflict_region.rs` rollup
+convention (BTreeMap for deterministic order).
+- **0-denominator approval_rate**: computed from a running `approved`/`rejected` tally (not from
+  `by_resolution`, to avoid a second map lookup); `denom = approved.saturating_add(rejected)`; `None` when
+  `denom == 0`, else `Some(approved as f64 / denom as f64)`. `EditedScope`/`AutoAllowed`/`AutoBlocked` never
+  enter the rate's numerator or denominator (only `Approved`/`Rejected` do) — this is an assumption the
+  design left implicit ("approved / (approved+rejected)" only mentions those two resolutions), confirmed by
+  a dedicated test (`approval_rate_none_when_no_approved_or_rejected`, using only the other three variants).
+- **Saturation**: every counter (`total`, each `by_resolution` entry, each `by_rule` entry, and the internal
+  `approved`/`rejected` tallies) increments via `u64::saturating_add`, so a `u64::MAX`-sized history
+  saturates instead of wrapping/panicking; covered by
+  `counters_saturate_at_u64_max_without_panicking`.
+- **`by_rule`**: records with `rule: None` contribute to `by_resolution`/`total`/the approval tally but add
+  no `by_rule` entry (there's nothing to key on) — covered by
+  `per_rule_rollup_correct_and_ordered_and_skips_none`.
+- 8 new unit tests, all green: empty input, per-resolution counts + BTreeMap ordering, per-rule rollup +
+  ordering + None-skip, rate-is-None on empty denominator, a known-ratio rate (0.75), a never-NaN/inf check
+  (1 rejection only → rate 0.0, finite), saturation, and a mixed end-to-end case.
+- Verify (from `sidecar/ai-console`): `cargo test --lib` → **389 passed, 0 failed, 2 ignored** (whole crate,
+  no regressions; `gate_audit::` subset is 8/8). `cargo clippy --all-targets -- -D warnings` → clean, no
+  warnings. No new dependencies added to `Cargo.toml`.
+- No blockers. PR opened from branch `cpe-1078-gate-audit`.

@@ -77,6 +77,7 @@ pub use session_engine::{DaemonEngine, LocalEngine, SessionEngine, SessionIo};
 pub mod session_server;
 pub mod session_supervisor;
 pub mod swarm_locks;
+pub mod gate_audit;
 pub use swarm_locks::{path_globs_overlap, ClaimOutcome, LockManager};
 pub mod swarm_team;
 pub use swarm_team::{default_team, Role, RoleSpec, TeamError, TeamManifest};
