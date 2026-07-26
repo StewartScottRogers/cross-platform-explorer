@@ -76,9 +76,10 @@ pub struct ConsoleState {
     history: Arc<dyn crate::history::HistoryBackend>,
     /// How to rebuild the registry on reload (CPE-375): the bundled dirs + optional verified source.
     sources: CatalogSources,
-    /// Announce session lifecycle to the host so the explorer can surface it (Agent Watch, CPE-396).
-    /// Each call gets a JSON payload; the wire side (main.rs) turns it into a `session:<json>`
-    /// Status event. Defaults to a no-op so dev/standalone + tests need no host.
+    /// Announce session lifecycle (and other Agent-Watch events) to the host so the explorer can
+    /// surface them (CPE-396). Each call is a fully-prefixed `<kind>:<json>` string (see
+    /// [`SessionAnnouncer`]); the wire side (main.rs) forwards it verbatim as a `Status` event.
+    /// Defaults to a no-op so dev/standalone + tests need no host.
     announce: SessionAnnouncer,
     /// The last **verified** model-catalog snapshot the picker serves from — `(version, models)`
     /// (CPE-451). Downloaded host-mediated, ed25519-verified, and anti-rollback-gated before it lands
@@ -94,7 +95,10 @@ pub struct ConsoleState {
     resellers: Vec<crate::routing::ResellerDescriptor>,
 }
 
-/// Hook the console calls to announce session start/end to the host (CPE-396). No-op by default.
+/// Hook the console calls to announce session start/end (and other Agent-Watch events) to the host
+/// (CPE-396). Each call already carries its own `<kind>:<json>` prefix (`session:`, `fs-read:`,
+/// `cost:`, …) — the wire side (main.rs) forwards it as-is inside a `Status` event, it does not add
+/// or infer a prefix. No-op by default.
 pub type SessionAnnouncer = Arc<dyn Fn(String) + Send + Sync>;
 
 /// The inputs used to (re)build the agent registry, so a catalog update can be hot-reloaded
@@ -189,6 +193,16 @@ fn usage_json(u: &crate::usage::Usage) -> Value {
     })
 }
 
+/// Build the `cost:<json>` announcement for a session's live, best-effort scanned usage (CPE-1097):
+/// the same [`usage_json`] shape used by the console's own `/api/sessions` view, plus a `sessionId`
+/// so the host can key/route it (mirrors [`read_announcement`]'s `fs-read:` shape). Advisory only —
+/// a best-effort PTY-output scrape (see `usage.rs`), never presented as billing.
+fn cost_payload(id: &str, u: &crate::usage::Usage) -> String {
+    let mut v = usage_json(u);
+    v["sessionId"] = json!(id);
+    format!("cost:{v}")
+}
+
 /// Sum one session's usage into an aggregate bucket (per agent / per provider). Across sessions the
 /// figures **add** (each session's cost is independent), unlike the within-session max.
 fn accumulate_usage(acc: &mut crate::usage::Usage, u: &crate::usage::Usage) {
@@ -198,16 +212,18 @@ fn accumulate_usage(acc: &mut crate::usage::Usage, u: &crate::usage::Usage) {
 }
 
 fn session_payload(event: &str, id: &str, agent_name: &str, meta: &SessionMeta) -> String {
-    json!({
-        "event": event,
-        "sessionId": id,
-        "agentId": meta.agent,
-        "agentName": agent_name,
-        "provider": meta.provider,
-        "model": meta.model,
-        "cwd": meta.cwd,
-    })
-    .to_string()
+    format!(
+        "session:{}",
+        json!({
+            "event": event,
+            "sessionId": id,
+            "agentId": meta.agent,
+            "agentName": agent_name,
+            "provider": meta.provider,
+            "model": meta.model,
+            "cwd": meta.cwd,
+        })
+    )
 }
 
 /// Register a session with the console: spawn the reader pipeline that fans the engine's output channel
@@ -247,6 +263,9 @@ fn adopt_into(
             let Some(rx) = out else { return };
             let mut reads = crate::agent_reads::ReadScanner::new();
             let mut usage_scan = crate::usage::UsageScanner::new();
+            // Last usage actually announced (CPE-1097), so the `cost:` emit below only fires on a
+            // real change instead of spamming one per stdout chunk.
+            let mut last_announced_usage = crate::usage::Usage::default();
             // CPE-309 diag hop 3: bytes the console actually consumed from the engine, and whether
             // a live WebSocket was attached to forward them to. "console pump FIRST bytes" present
             // but a black terminal ⇒ the break is the WS/frontend, not the daemon or transport.
@@ -277,7 +296,15 @@ fn adopt_into(
                     announce(read_announcement(&read_cwd, &raw));
                 }
                 // Fold provider-reported token/cost usage for this session (CPE-311).
-                *usage.lock().unwrap() = usage_scan.feed(&text);
+                let new_usage = usage_scan.feed(&text);
+                *usage.lock().unwrap() = new_usage;
+                // Surface it to Agent Watch's cost ledger (CPE-1097), but only when it actually
+                // changed — an agent's PTY output reprints its running total on every turn, and
+                // announcing on every chunk would flood the host with identical frames.
+                if new_usage != last_announced_usage {
+                    last_announced_usage = new_usage;
+                    announce(cost_payload(&diag_id, &new_usage));
+                }
             }
             bt.end("stream closed");
             // Stream closed → the agent exited (or the daemon connection dropped).
@@ -287,7 +314,7 @@ fn adopt_into(
                     record_session_end(&*history, &meta, &record_id, transcript, &injected_secrets);
                     announce(ended_payload); // tell the explorer this session is gone (CPE-396)
                 }
-                None => announce(format!(r#"{{"event":"ended","sessionId":"{record_id}"}}"#)),
+                None => announce(format!(r#"session:{{"event":"ended","sessionId":"{record_id}"}}"#)),
             }
             // Notify a swarm driver (if any) that this session has finished (CPE-574).
             if let Some(cb) = on_end {
@@ -839,7 +866,7 @@ impl ConsoleState {
     /// Minimal `ended` announcement (just the id) so a closed session's Agent-Watch leaf is removed
     /// promptly. The frontend reducer keys removal on `sessionId` alone (CPE-397).
     fn announce_ended(&self, id: &str) {
-        self.announce_session(format!(r#"{{"event":"ended","sessionId":"{id}"}}"#));
+        self.announce_session(format!(r#"session:{{"event":"ended","sessionId":"{id}"}}"#));
     }
 
     /// Close **every** live session at once (CPE-442) — the fan-out teardown behind the launcher's
@@ -1670,7 +1697,12 @@ mod tests {
             cwd: "Z:/repos/app".into(),
             started_at: "0".into(),
         };
-        let v: Value = serde_json::from_str(&session_payload("started", "s1", "Claude Code", &meta)).unwrap();
+        let s = session_payload("started", "s1", "Claude Code", &meta);
+        // Carries its own `session:` prefix (CPE-1097 fix: the wire side no longer adds one, since
+        // that blanket wrap was silently corrupting other prefixed announcements — see
+        // `distinct_announcement_kinds_never_collide_on_prefix` below).
+        let json = s.strip_prefix("session:").expect("session: prefix");
+        let v: Value = serde_json::from_str(json).unwrap();
         assert_eq!(v["event"], "started");
         assert_eq!(v["sessionId"], "s1");
         assert_eq!(v["agentId"], "claude");
@@ -1678,6 +1710,45 @@ mod tests {
         assert_eq!(v["provider"], "openrouter");
         assert_eq!(v["cwd"], "Z:/repos/app");
         assert!(v.get("apiKey").is_none() && v.get("key").is_none() && v.get("secret").is_none());
+    }
+
+    #[test]
+    fn cost_payload_carries_session_id_and_live_usage() {
+        // CPE-1097: the cost-ledger bridge's payload — same shape as the console's own
+        // `/api/sessions` usage view, plus `sessionId` so the host can route it.
+        let u = crate::usage::Usage { input_tokens: 120, output_tokens: 45, cost_usd: 0.0034 };
+        let s = cost_payload("s1", &u);
+        let json = s.strip_prefix("cost:").expect("cost: prefix");
+        let v: Value = serde_json::from_str(json).unwrap();
+        assert_eq!(v["sessionId"], "s1");
+        assert_eq!(v["inputTokens"], 120);
+        assert_eq!(v["outputTokens"], 45);
+        assert_eq!(v["costUsd"], 0.0034);
+    }
+
+    #[test]
+    fn distinct_announcement_kinds_never_collide_on_prefix() {
+        // Regression guard (CPE-1097): `session:`, `fs-read:`, and `cost:` are the three announcement
+        // kinds forwarded verbatim to the host, which dispatches on the wire string's prefix
+        // (src-tauri/src/lib.rs). Before this ticket, main.rs unconditionally re-wrapped every
+        // announcement in `session:{payload}`, so an already-prefixed `fs-read:`/`cost:` payload
+        // silently became unroutable `session:fs-read:{...}` / `session:cost:{...}` — the host's
+        // `fs-read:`/`cost:` match arms would never fire. Guard that every builder's own prefix is
+        // the one and only prefix on the wire.
+        let meta = SessionMeta {
+            agent: "claude".into(),
+            provider: "openrouter".into(),
+            model: "sonnet".into(),
+            cwd: "Z:/repos/app".into(),
+            started_at: "0".into(),
+        };
+        let session = session_payload("started", "s1", "Claude Code", &meta);
+        let read = read_announcement("Z:/repos/app", "src/main.rs");
+        let cost = cost_payload("s1", &crate::usage::Usage::default());
+
+        assert!(session.starts_with("session:") && !session.starts_with("session:fs-read:") && !session.starts_with("session:cost:"));
+        assert!(read.starts_with("fs-read:") && !read.starts_with("session:"));
+        assert!(cost.starts_with("cost:") && !cost.starts_with("session:"));
     }
 
     #[test]
@@ -1728,6 +1799,80 @@ mod tests {
         let msgs = seen.lock().unwrap().clone();
         assert!(msgs.iter().any(|m| m.contains("\"started\"") && m.contains("t1")), "started announced: {msgs:?}");
         assert!(msgs.iter().any(|m| m.contains("\"ended\"") && m.contains("t1")), "ended announced: {msgs:?}");
+    }
+
+    /// A hand-fed [`crate::session_engine::SessionIo`] for tests: no real PTY/shell involved (avoids
+    /// cross-platform shell-quoting entirely), just a channel the test writes bytes into and can close
+    /// (drop the sender) to simulate the agent's stream ending.
+    struct FakeIo(Mutex<Option<mpsc::Receiver<Vec<u8>>>>);
+
+    impl crate::session_engine::SessionIo for FakeIo {
+        fn take_output(&self) -> Option<mpsc::Receiver<Vec<u8>>> {
+            self.0.lock().unwrap().take()
+        }
+        fn write(&self, _bytes: &[u8]) -> Result<(), String> {
+            Ok(())
+        }
+        fn resize(&self, _rows: u16, _cols: u16) -> Result<(), String> {
+            Ok(())
+        }
+        fn kill(&self) -> Result<(), String> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn a_session_printing_usage_announces_cost_exactly_once() {
+        // CPE-1097 end-to-end: drive a real reader thread (real `adopt_into` + real `UsageScanner`)
+        // whose stream prints the SAME recognizable usage line twice, and assert the `cost:` announce
+        // fires once with the right session id + figures — not once per stdout chunk.
+        use std::time::Duration;
+
+        let seen = Arc::new(Mutex::new(Vec::<String>::new()));
+        let sink = seen.clone();
+        let announce: SessionAnnouncer = Arc::new(move |p| sink.lock().unwrap().push(p));
+        let sessions: Arc<Mutex<HashMap<String, Arc<Session>>>> = Arc::new(Mutex::new(HashMap::new()));
+        let history: Arc<dyn crate::history::HistoryBackend> = Arc::new(crate::history::MemHistory::default());
+
+        let (tx, rx) = mpsc::channel::<Vec<u8>>();
+        let io: Arc<dyn crate::session_engine::SessionIo> = Arc::new(FakeIo(Mutex::new(Some(rx))));
+
+        adopt_into(
+            &sessions,
+            &history,
+            &announce,
+            "c1".to_string(),
+            io,
+            "test".to_string(),
+            "claude".to_string(),
+            "native".to_string(),
+            Vec::new(),
+            None,
+            None,
+        );
+
+        tx.send(b"Total cost: $0.05\n".to_vec()).unwrap();
+        tx.send(b"Total cost: $0.05\n".to_vec()).unwrap(); // same figure reprinted — must not re-announce
+        drop(tx); // closes the channel: the reader thread sees EOF and runs the end path
+
+        // Poll until the "ended" announce lands (the reader thread has drained + finished), bounded
+        // so a stuck pipe fails the test instead of hanging CI.
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        loop {
+            if seen.lock().unwrap().iter().any(|m| m.contains("\"ended\"")) {
+                break;
+            }
+            assert!(std::time::Instant::now() < deadline, "session never announced ended: {:?}", seen.lock().unwrap());
+            thread::sleep(Duration::from_millis(20));
+        }
+
+        let msgs = seen.lock().unwrap().clone();
+        let cost_msgs: Vec<&String> = msgs.iter().filter(|m| m.starts_with("cost:")).collect();
+        assert_eq!(cost_msgs.len(), 1, "cost: announced exactly once despite the line repeating: {msgs:?}");
+        let json = cost_msgs[0].strip_prefix("cost:").unwrap();
+        let v: Value = serde_json::from_str(json).unwrap();
+        assert_eq!(v["sessionId"], "c1");
+        assert_eq!(v["costUsd"], 0.05);
     }
 
     #[test]

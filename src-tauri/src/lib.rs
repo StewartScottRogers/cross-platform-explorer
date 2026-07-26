@@ -4148,6 +4148,34 @@ fn serve_ai_console_requests(
                             }
                         }
                     }
+                    // Agent Watch cost ledger (CPE-1097): the console taps its own PTY output for a
+                    // provider-reported usage/cost line (best-effort, advisory — see `usage.rs`) and
+                    // announces it as a `cost:<json {sessionId, inputTokens, outputTokens, costUsd}>`
+                    // Status whenever the scanned figures change. Forward it verbatim as
+                    // `ai-console://agent-cost` so the cost-ledger panel (CPE-1098) can render it.
+                    // Malformed payloads are ignored (never block the terminal).
+                    Message::Event(sidecar_contract::Event::Status { state })
+                        if state.starts_with("cost:") =>
+                    {
+                        use tauri::Emitter;
+                        // Typed, validated payload: parse into a struct so a malformed/partial frame is
+                        // DROPPED rather than forwarded (more defensive than a bare Value), and the
+                        // cost-ledger panel (CPE-1098) has a stable shape to consume. Advisory only
+                        // (best-effort PTY scrape — see `usage.rs`), never billing.
+                        #[derive(Clone, serde::Deserialize, serde::Serialize)]
+                        #[serde(rename_all = "camelCase")]
+                        struct AgentCostEvent {
+                            session_id: String,
+                            input_tokens: u64,
+                            output_tokens: u64,
+                            cost_usd: f64,
+                        }
+                        if let Ok(ev) =
+                            serde_json::from_str::<AgentCostEvent>(&state["cost:".len()..])
+                        {
+                            let _ = app.emit("ai-console://agent-cost", ev);
+                        }
+                    }
                     // Other non-request frames (Lifecycle, other Status) need no reply here.
                     _ => {}
                 }
