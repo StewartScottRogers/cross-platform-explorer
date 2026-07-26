@@ -67,10 +67,18 @@ fn block_extent(
     if let Some(f) = folds.iter().filter(|f| f.start_line == sym_line).max_by_key(|f| f.end_line) {
         return (f.start_line, f.end_line);
     }
-    // Rule 2: the smallest fold range that contains the symbol's line at all.
+    // Rule 2: the smallest fold range that contains the symbol's line at all — but only if it doesn't
+    // also swallow a sibling. A fold-less symbol (e.g. a multi-line signature with a one-line body, so
+    // `code_folds`' brace scanner never opens a range for it) sitting inside a larger block will always
+    // find that block's own fold "containing" its line; accepting it unconditionally would hand the
+    // symbol its ancestor's whole span, wrongly pulling in any sibling declared later in that same span.
+    // So a candidate fold is only accepted if no OTHER symbol is declared strictly after this one and at
+    // or before the fold's end — otherwise it isn't really *this* symbol's own extent, and we fall
+    // through to rule 3's sibling-capped fallback instead.
     if let Some(f) = folds
         .iter()
         .filter(|f| f.start_line <= sym_line && sym_line <= f.end_line)
+        .filter(|f| !syms.iter().any(|s| s.line > sym_line && s.line <= f.end_line))
         .min_by_key(|f| f.end_line - f.start_line)
     {
         return (f.start_line, f.end_line);
@@ -105,6 +113,28 @@ impl Config {
 ";
         let got = enclosing_symbols(src, "rust", 5); // inside `let x = 1;`
         assert_eq!(names(&got), vec![("Config", SymbolKind::Struct), ("start", SymbolKind::Function)]);
+    }
+
+    #[test]
+    fn foldless_sibling_with_multiline_signature_does_not_swallow_the_next_sibling() {
+        // Regression: `fn a` has a multi-line signature whose `{ x }` opens and closes on the same
+        // physical line, so `code_folds` never emits a range for it. Rule 2 must not fall back to the
+        // enclosing `impl`'s fold (which also spans `fn b`) — that would wrongly report `a` as
+        // enclosing line 7, which is inside `fn b` only.
+        let src = "\
+impl Foo {
+    fn a(
+        x: i32,
+    ) -> i32 { x }
+
+    fn b(&self) {
+        y()
+    }
+}
+";
+        let got = enclosing_symbols(src, "rust", 7); // inside `y()`, within `fn b` only
+        assert_eq!(names(&got), vec![("Foo", SymbolKind::Struct), ("b", SymbolKind::Function)]);
+        assert!(!got.iter().any(|s| s.name == "a"), "fn a must not appear: {:?}", got);
     }
 
     #[test]

@@ -86,3 +86,26 @@ tree-sitter-exact) — not exercised by the acceptance-criteria fixtures, which 
 - No new dependencies added.
 
 Branch `cpe-1053-code-breadcrumb`, PR opened against `main`.
+
+2026-07-25 (workshift, Worker) — PR #371 got CHANGES REQUESTED from the independent reviewer: a real
+correctness bug, not the limitation logged above. Rule 2's "smallest containing fold" could swallow an
+unrelated **sibling**: a symbol with a multi-line signature + one-line body (e.g. `fn a(\n x: i32,\n) ->
+i32 { x }`) gets no fold of its own (the brace scanner never opens a range for a same-line `{...}`), so
+rule 2 fell back to the enclosing `impl`'s fold — which also spans a later sibling (`fn b`) — and
+wrongly reported `a` as enclosing lines that were actually inside `b` only.
+
+**Fix:** rule 2 now only accepts a containing fold if no *other* symbol is declared strictly after this
+symbol's line and at-or-before that fold's end line; otherwise the fold isn't really this symbol's own
+extent (it belongs to an ancestor that also contains a sibling), and we fall through to rule 3's
+next-symbol-capped fallback instead. Added regression test
+`foldless_sibling_with_multiline_signature_does_not_swallow_the_next_sibling` reproducing the reviewer's
+exact repro (asserts line 7 → `["Foo", "b"]`, and that `"a"` is absent).
+
+**Re-verification:**
+- `cargo test` (from `crates/server`): 775 passed, 0 failed (10 `code_breadcrumb` tests now, incl. the
+  new regression test).
+- `cargo clippy --all-targets -- -D warnings` — clean.
+- `cargo clippy --all-targets --features index -- -D warnings` — clean.
+- No new dependencies added; `code_outline.rs`/`code_folds.rs` untouched.
+
+Pushed fix to `cpe-1053-code-breadcrumb` — PR #371 updated.
