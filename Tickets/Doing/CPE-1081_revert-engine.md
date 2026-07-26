@@ -57,3 +57,38 @@ stays green. No unchecked arithmetic; no recursion (iterate the plan).
 2026-07-25 (workshift) — Filed by the Product Manager as CPE-732's surgical execution layer (distinct from
 CPE-735's whole-manifest restore). Parallel-independent. Distinct lib.rs anchor. Uses a real tempdir like the
 snapshot_capture tests (process-unique dir + cleanup).
+
+2026-07-25 (workshift, overnight Worker) — Built `crates/server/src/revert_engine.rs` per the design:
+`RestoreReport {applied, skipped}` + `execute_restore(plan, dest_root, store_dir, checkpoint)`. Registered
+`pub mod revert_engine;` immediately after `pub mod snapshot_capture;` in `lib.rs`. Std-only, no new deps;
+`restore_plan`/`snapshot_capture` left untouched (import-only reuse).
+
+Confirmed blob layout from `snapshot_capture.rs` module doc + code: `store_dir/blobs/<hash>`, one file per
+content hash (`blobs_dir()` = `store_dir.join("blobs")`), matching the ticket's assumption exactly.
+
+Path-safety guard: `safe_segments()` splits the plan's `/`-joined `rel` path and rejects (skip, not panic)
+on: empty string, `Path::is_absolute()`, any empty/`.`/`..` segment, or a segment containing `:`/`\` (blocks
+a Windows drive-letter or backslash segment slipping through). Real target rebuilt via `Path::join` over the
+validated segments in `safe_target()` — no string concatenation, no `starts_with`.
+
+Deepest-first deletes: plan partitioned once into writes vs. deletes; deletes sorted by
+`Reverse(segment_depth(path))` (segment count via `rel.split('/').count()`) before applying, so nested files
+are removed before anything above them — matches `restore_plan`'s execution-note doc comment. No recursion
+anywhere; the plan is iterated linearly.
+
+Tests (5, all real-tempdir, process-unique `cpe-revert-<tag>-<pid>-<seq>` dirs, cleaned up): full round-trip
+(edit+delete+add mutation → `plan_restore` → `execute_restore` → `scan_dir` equals checkpoint byte-for-byte);
+missing-blob skip (portable — a checkpoint entry whose blob file was never written, no OS-specific
+permission tricks, so the Windows CI leg stays green) with the rest of the plan still applying; an
+`../escape.txt` plan path refused with nothing written outside `dest_root`; an absolute plan path
+(`/etc/passwd` unix / `C:/evil.txt` windows) refused; deepest-first delete ordering verified directly.
+
+Assumption: the ticket's pseudo-signature omits an explicit escape-guard return type — implemented as
+`Result<Vec<&str>, String>` (segments) / `Result<PathBuf, String>` (target) that `apply_write`/`apply_delete`
+turn into a `skipped` entry via `?` + a `match`, keeping every failure path (path-safety, missing blob, I/O
+error) going through the exact same skip-not-panic funnel.
+
+Verify: `cargo test` (943 passed, 0 failed, incl. the 5 new) green. `cargo clippy --all-targets -- -D
+warnings` clean; `cargo clippy --all-targets --features index -- -D warnings` clean (one
+`needless_borrows_for_generic_args` lint fixed in the test helpers along the way). No new deps —
+`Cargo.toml`/`Cargo.lock` untouched. Opened PR from branch `cpe-1081-revert-engine`.

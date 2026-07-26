@@ -170,6 +170,12 @@ pub mod snapshot;
 /// directory byte-for-byte. Std + serde only; not feature-gated.
 pub mod snapshot_capture;
 
+/// Revert-plan execution engine (CPE-1081, epic CPE-732) — applies a minimal [`restore_plan::RestoreAction`]
+/// plan (Create/Overwrite/Delete) to a REAL directory: the surgical, current-state-aware counterpart to
+/// [`snapshot_capture::restore`]'s whole-manifest replay. Std-only; reuses `restore_plan`/`snapshot_capture`
+/// without modifying them.
+pub mod revert_engine;
+
 /// Disk-usage scanning — recursive directory size + per-child breakdown (CPE-749/754).
 pub mod disk_usage;
 
