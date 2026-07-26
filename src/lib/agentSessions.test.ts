@@ -4,7 +4,7 @@ import {
   applySessionAnnouncement,
   type AgentSession,
 } from "./sidecar";
-import { watchTargetFor } from "./agentSessions";
+import { watchTargetFor, watchTargets } from "./agentSessions";
 import { ingestSessionState, currentSessions } from "./agentSessions";
 
 const started = (id: string, cwd = "Z:/repo") =>
@@ -88,5 +88,20 @@ describe("watchTargetFor (CPE-399 — which project am I in)", () => {
 
   it("returns empty when no agent is running", () => {
     expect(watchTargetFor([], "/anywhere")).toBe("");
+  });
+});
+
+describe("watchTargets (CPE-1099 — watch every running session)", () => {
+  const sess = (id: string, cwd: string): AgentSession => ({ sessionId: id, agentId: "a", agentName: "A", provider: "p", model: "m", cwd });
+
+  it("watches all running sessions, not just the on-screen one", () => {
+    const sessions = [sess("s1", "/work/api"), sess("s2", "/other/web")];
+    // Both sessions are returned regardless of where the explorer is navigated — overlap is the
+    // radar's frontend fold, not a watch-selection concern.
+    expect(watchTargets(sessions)).toEqual(sessions);
+  });
+
+  it("is empty when no agent is running (off means off ⇒ nothing armed)", () => {
+    expect(watchTargets([])).toEqual([]);
   });
 });

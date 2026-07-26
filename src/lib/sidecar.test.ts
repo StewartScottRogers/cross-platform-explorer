@@ -16,6 +16,7 @@ import {
   normalizeFsActivity,
   startAgentWatch,
   stopAgentWatch,
+  stopAllAgentWatch,
 } from "./sidecar";
 
 describe("consoleUrlWith (CPE-313 explorer→console hand-off)", () => {
@@ -138,16 +139,27 @@ describe("Agent Watch filesystem activity (CPE-398)", () => {
     expect(normalizeFsActivity("not an array")).toEqual([]);
   });
 
-  it("startAgentWatch invokes the command and reports success/failure without throwing", async () => {
+  it("startAgentWatch invokes the command (keyed by sessionId) and reports success/failure without throwing", async () => {
     invoke.mockResolvedValueOnce(undefined);
-    expect(await startAgentWatch("Z:/repo")).toBe(true);
-    expect(invoke).toHaveBeenCalledWith("agent_watch_start", { path: "Z:/repo" });
+    expect(await startAgentWatch("s1", "Z:/repo")).toBe(true);
+    expect(invoke).toHaveBeenCalledWith("agent_watch_start", { sessionId: "s1", path: "Z:/repo" });
     invoke.mockRejectedValueOnce(new Error("platform off"));
-    expect(await startAgentWatch("Z:/repo")).toBe(false); // degrades, never throws
+    expect(await startAgentWatch("s1", "Z:/repo")).toBe(false); // degrades, never throws
   });
 
-  it("stopAgentWatch is safe when the platform is off", async () => {
+  it("stopAgentWatch stops just one session and is safe when the platform is off", async () => {
+    invoke.mockResolvedValueOnce(undefined);
+    await stopAgentWatch("s1");
+    expect(invoke).toHaveBeenCalledWith("agent_watch_stop", { sessionId: "s1" });
     invoke.mockRejectedValueOnce(new Error("off"));
-    await expect(stopAgentWatch()).resolves.toBeUndefined();
+    await expect(stopAgentWatch("s1")).resolves.toBeUndefined();
+  });
+
+  it("stopAllAgentWatch clears every watch and is safe when the platform is off", async () => {
+    invoke.mockResolvedValueOnce(undefined);
+    await stopAllAgentWatch();
+    expect(invoke).toHaveBeenCalledWith("agent_watch_stop_all");
+    invoke.mockRejectedValueOnce(new Error("off"));
+    await expect(stopAllAgentWatch()).resolves.toBeUndefined();
   });
 });
