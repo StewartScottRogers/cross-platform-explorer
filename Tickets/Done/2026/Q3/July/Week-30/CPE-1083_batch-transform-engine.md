@@ -4,7 +4,7 @@ title: "Batch media transform engine — cpe_server::batch_transform (apply_ops 
 type: feature
 component: Backend
 priority: medium
-status: Doing
+status: Done
 tags: ready
 created: 2026-07-26
 epic: CPE-723

@@ -4,7 +4,7 @@ title: "Batch execute runner — cpe_server::batch_execute (execute_plan real-fs
 type: feature
 component: Backend
 priority: medium
-status: Backlog
+status: Doing
 tags: ready
 created: 2026-07-26
 epic: CPE-723
