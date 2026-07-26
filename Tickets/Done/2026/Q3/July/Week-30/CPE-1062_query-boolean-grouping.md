@@ -91,3 +91,18 @@ Assumptions (none blocking, logged for the user):
    top-level empty query, for one consistent "nothing here" semantics rather than a special-cased error node.
 
 No blockers. Branch `cpe-1062-query-group`, PR opened targeting `main`.
+
+2026-07-25 (workshift Worker, PR #380 review follow-up) — Reviewer found a real bug in UAT: `parse`'s
+paren-recursion and NOT-prefix recursion had no depth bound, so adversarial input (e.g.
+`"(".repeat(10_000)`) triggered an uncatchable `STATUS_STACK_OVERFLOW` in a release build — worse than a
+panic, and a violation of this module's own "tolerant recovery, never panics" contract. Fixed on the same
+branch: added `const MAX_DEPTH: usize = 128`, threaded as a `depth` param through
+`parse_or`/`parse_and`/`parse_not`/`parse_atom`. Past the cap, a `(` folds into a literal `Leaf("(")`
+instead of opening another group, and a `NOT`/`-` is swallowed instead of wrapping again — tolerant
+recovery, not a crash, consistent with the existing unbalanced-paren handling. Since `parse` now only ever
+produces a depth-bounded tree, `eval`'s recursion is bounded too; `eval` also carries its own independent
+`MAX_DEPTH` guard (falls back to permissive `true`) in case a pathological `Node` is ever hand-built outside
+`parse`. Added 5 regression tests (10k open parens, 10k close parens, 10k stacked `NOT`s, mixed deep
+nesting, depth-under-cap sanity check) — re-verified `cargo test` (836 passed, 0 failed, incl. a
+`--release` run matching the reviewer's repro mode) and both clippy modes clean. Pushed as commit 22584a9;
+PR #380 updated with a summary comment.
