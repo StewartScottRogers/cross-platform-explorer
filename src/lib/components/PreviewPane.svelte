@@ -5,7 +5,16 @@
   import { parseCsv } from "../preview/csv";
   import { highlightForFile, ensureLanguageForName, languageForName, splitHighlightedIntoLines } from "../preview/highlight";
   import { renderMarkdown } from "../preview/markdown";
-  import { lineToScrollTop, scrollTopToLine, enclosingSymbol, resolveLineHeight } from "../preview/outline";
+  import {
+    lineToScrollTop,
+    scrollTopToLine,
+    enclosingSymbol,
+    resolveLineHeight,
+    countHiddenAbove,
+    foldToExpand,
+    lineAtVisibleRow,
+    rowScrollTarget,
+  } from "../preview/outline";
   import { commands } from "../bindings.gen";
   import type { Symbol as CodeSymbol, FoldRange, MinimapRow } from "../bindings.gen";
   import HexView from "./HexView.svelte";
@@ -309,19 +318,43 @@
     return pre.getBoundingClientRect().top - container.getBoundingClientRect().top + container.scrollTop;
   }
 
-  /** Click a symbol pill: scroll the preview so that symbol's line is at (or near) the top. */
-  function jumpToSymbol(sym: CodeSymbol) {
+  /** Click a symbol pill: scroll the preview so that symbol's line is at (or near) the top. Fold-aware
+   *  (CPE-1095): if the target line is currently hidden inside a collapsed fold, expand that fold first
+   *  so the row renders, then scroll to the row's *actual* rendered position
+   *  (`getBoundingClientRect`) — exact regardless of any other collapsed fold above it or word-wrap,
+   *  since a hidden row is removed from the flow entirely rather than just visually hidden. Falls back to
+   *  the uniform-line-height math (corrected for any still-hidden lines above) only if the row still
+   *  isn't rendered for some other reason. */
+  async function jumpToSymbol(sym: CodeSymbol) {
     if (!textContentEl) return;
     const container = findScrollContainer(textContentEl);
     if (!container) return;
+
+    const startToExpand = foldToExpand(sym.line, foldCollapsed, foldByStart);
+    if (startToExpand !== null) {
+      toggleFold(startToExpand);
+      await tick(); // let the newly-unhidden rows render before we query/measure them
+    }
+
     const lineHeight = measureLineHeight(textContentEl);
-    const target = preOffset(container, textContentEl) + lineToScrollTop(sym.line, lineHeight);
+    const fallback =
+      preOffset(container, textContentEl) +
+      lineToScrollTop(sym.line - countHiddenAbove(sym.line, hiddenLines), lineHeight);
+    const row = container.querySelector<HTMLElement>(`[data-line="${sym.line}"]`);
+    const target = rowScrollTarget(
+      row ? row.getBoundingClientRect() : null,
+      container.getBoundingClientRect(),
+      container.scrollTop,
+      fallback,
+    );
     container.scrollTop = Math.max(0, Math.min(target, container.scrollHeight));
     updateBreadcrumb();
   }
 
   /** Recompute the breadcrumb (the enclosing symbol of the top-visible line) from the live scroll
-   *  position. Cheap: `outline` is small, and this is only a linear scan. */
+   *  position. Cheap: `outline` is small, and this is only a linear scan. Fold-aware (CPE-1095): the
+   *  line-height math only knows "the Nth *rendered* row" — `lineAtVisibleRow` maps that back to the real
+   *  source line so the breadcrumb stays correct while a fold above the viewport is collapsed. */
   function updateBreadcrumb() {
     if (!textContentEl || outline.length === 0) {
       breadcrumbSym = null;
@@ -330,7 +363,8 @@
     const container = findScrollContainer(textContentEl);
     if (!container) return;
     const lineHeight = measureLineHeight(textContentEl);
-    const topLine = scrollTopToLine(container.scrollTop - preOffset(container, textContentEl), lineHeight);
+    const visibleRow = scrollTopToLine(container.scrollTop - preOffset(container, textContentEl), lineHeight);
+    const topLine = lineAtVisibleRow(visibleRow, codeLines.length, hiddenLines);
     breadcrumbSym = enclosingSymbol(outline, topLine);
   }
 

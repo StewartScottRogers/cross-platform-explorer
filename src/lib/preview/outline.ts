@@ -4,7 +4,7 @@
  * measures a real `lineHeight` from `getComputedStyle` and reads/writes `scrollTop` lives in
  * `PreviewPane.svelte`; everything here is plain-number math + array scanning.
  */
-import type { Symbol as CodeSymbol } from "../bindings.gen";
+import type { Symbol as CodeSymbol, FoldRange } from "../bindings.gen";
 
 /** Fallback line height (px) when the measured value is missing/invalid — matches the preview's
  *  12px monospace font at a ~1.5 line-height, rounded to a sane constant. */
@@ -60,4 +60,83 @@ export function enclosingSymbol(outline: CodeSymbol[], topLine: number): CodeSym
     if (sym.line <= topLine && (best === null || sym.line > best.line)) best = sym;
   }
   return best;
+}
+
+// ---- fold-aware jump/breadcrumb corrections (CPE-1095) ----
+// A collapsed fold removes its interior lines' `.cl-row` elements from the DOM entirely (see
+// PreviewPane's `{#if !hiddenLines.has(...)}`), so the uniform-line-height math in
+// `lineToScrollTop`/`scrollTopToLine` drifts by the collapsed range's length once any fold above the
+// point of interest is collapsed. The helpers below correct for that: either by counting past the hidden
+// lines (used as a fallback), or — preferred, since it's robust to wrap too — by resolving the actual
+// rendered row's position and only falling back to the count-based math when that row isn't rendered.
+
+/**
+ * How many lines strictly above `line` are currently hidden by a collapsed fold. Used to convert a real
+ * source line into its position among *rendered* rows (`line - countHiddenAbove(line, hiddenLines)`).
+ * Division-safe by construction (pure counting, no math that can produce NaN/Infinity).
+ */
+export function countHiddenAbove(line: number, hiddenLines: ReadonlySet<number>): number {
+  let count = 0;
+  for (const hidden of hiddenLines) {
+    if (hidden < line) count++;
+  }
+  return count;
+}
+
+/**
+ * The 1-based start line of the collapsed fold that currently hides `line`, or `null` when `line` is not
+ * hidden (no fold above it is collapsed, or it isn't inside any fold's range). Used by `jumpToSymbol` to
+ * expand the right fold before scrolling to a target line that's currently folded away.
+ */
+export function foldToExpand(
+  line: number,
+  foldCollapsed: ReadonlySet<number>,
+  foldByStart: ReadonlyMap<number, FoldRange>,
+): number | null {
+  for (const start of foldCollapsed) {
+    const f = foldByStart.get(start);
+    if (f && line > f.start_line && line <= f.end_line) return start;
+  }
+  return null;
+}
+
+/**
+ * Map a 1-based position among *rendered* (non-hidden) rows back to its real 1-based source line number —
+ * the inverse of `countHiddenAbove`. Used by `updateBreadcrumb` to turn the scroll-position estimate (which
+ * only knows "the Nth rendered row") into the actual source line, so the breadcrumb stays correct while a
+ * fold above the viewport is collapsed. Index/division-safe: a non-positive `totalLines` returns `1`, and a
+ * `visibleRow` past the last rendered row clamps to `totalLines` instead of running off the end.
+ */
+export function lineAtVisibleRow(visibleRow: number, totalLines: number, hiddenLines: ReadonlySet<number>): number {
+  if (!Number.isFinite(totalLines) || totalLines <= 0) return 1;
+  const safeRow = Number.isFinite(visibleRow) && visibleRow > 1 ? visibleRow : 1;
+  let count = 0;
+  for (let line = 1; line <= totalLines; line++) {
+    if (hiddenLines.has(line)) continue;
+    count++;
+    if (count >= safeRow) return line;
+  }
+  return totalLines;
+}
+
+/** Minimal shape `rowScrollTarget` needs from a DOM rect — lets tests pass plain objects. */
+export interface RectLike {
+  top: number;
+}
+
+/**
+ * The scrollTop that puts a target row at the top of `container`, given the row's own
+ * `getBoundingClientRect()` (or `null` when that row isn't currently rendered — e.g. it's still inside a
+ * collapsed fold the caller didn't expand). When `row` is available this is exact regardless of folds
+ * above it or word-wrap, since the row's real rendered position already reflects any hidden rows removed
+ * from the flow. When it's not, `fallback` (typically the corrected line-height math) is returned as-is.
+ */
+export function rowScrollTarget(
+  row: RectLike | null,
+  containerRect: RectLike,
+  containerScrollTop: number,
+  fallback: number,
+): number {
+  if (!row) return fallback;
+  return row.top - containerRect.top + containerScrollTop;
 }
