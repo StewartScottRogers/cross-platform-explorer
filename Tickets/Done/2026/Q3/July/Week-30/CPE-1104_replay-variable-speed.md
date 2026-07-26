@@ -4,7 +4,7 @@ title: "Activity replay: variable playback speed"
 type: feature
 component: Frontend
 priority: low
-status: Doing
+status: Done
 tags: ready
 created: 2026-07-26
 epic: CPE-728
