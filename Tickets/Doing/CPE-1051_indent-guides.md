@@ -52,3 +52,13 @@ O(n) with a single forward pass to record non-blank depths + a second pass to br
 ## Work Log
 2026-07-25 (workshift) — Filed by the Product Manager as a clean headless CPE-724 slice. Independent module;
 only shared touch is a one-line lib.rs `pub mod` (serial-merge coordination only).
+
+2026-07-25 (workshift, overnight worker) — Built end-to-end: `crates/server/src/indent_guides.rs` +
+`pub mod indent_guides;` in `lib.rs` right after `pub mod archive;` per the anchor. 12 new tests (nesting,
+tab/space parity, mixed tab+space column math, blank-line bridging incl. leading/trailing/all-blank/
+multi-line runs, `tab_width == 0`, empty input, no-trailing-newline). `cargo test`: 739 passed, 0 failed.
+`cargo clippy --all-targets -- -D warnings` and `--features index` variant: both clean. No new deps.
+Assumption: "leading whitespace" uses `char::is_whitespace()` generically (not just space/tab) for the
+non-tab case, since the ticket only calls out tab vs. space explicitly and this is a superset-safe choice.
+Branch `cpe-1051-indent-guides`, PR #368 opened against `main`. Leaving ticket in `Doing` — not moving to
+`Done` until the PR is reviewed/merged (per the CPE-1048 precedent).
