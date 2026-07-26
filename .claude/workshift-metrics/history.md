@@ -75,3 +75,20 @@ _(no shifts recorded yet — first real workshift will seed this)_
   these filters into `Query::parse` (touches index_query.rs — serial/attended). Two tiny unreachable
   follow-ups noted but not filed: size_filter saturate-to-MAX on absurd inputs (safe, undocumented);
   query_group recursive `Drop` on a hand-built million-deep Node (unreachable via public API).
+
+## 2026-07-25 (night) — CPE-728 Activity Replay & Scrub engine (4 shipped)
+- Shipped the full CPE-728 headless layer: CPE-1063 replay (state_at event-sourcing projection — the
+  foundation), CPE-1064 replay_transport (scrubber step/window/advance, saturating arithmetic), CPE-1065
+  replay_view (children_at + diff_states), CPE-1066 replay_session (journal-backed load_replay). Pure folds
+  over audit_journal::AuditEvent; reused read_session + activity_timeline::summarize; no deps.
+- **Zero rework this wave** — all 4 one-pass APPROVE. The up-front worker briefs added this shift paid off:
+  saturating arithmetic (transport advance verified at u64::MAX), cross-OS string-segment paths (no std::path),
+  and the prefix-collision guard (children_at uses segment-slice equality, not starts_with — reviewer probed
+  `dir="a"` vs `ab/x`, correct). Bake these briefs into every parser/path/numeric ticket.
+- Dependency shape: A (replay) is the foundation; B (transport) parallel-independent; C (view) + D (session)
+  depend on A — dispatched A+B first, merged A, then C+D. Distinct-lib.rs-anchor trick again → zero conflicts.
+- Non-blocking follow-up (unfiled, trivial): add a named `children_at_excludes_sibling_with_dir_name_as_prefix`
+  regression test to replay_view (logic already correct + reviewer-verified).
+- Frontier: CPE-728 remainder is the scrubber/timeline GUI (play/pause/step/speed bar, jump-to-moment) —
+  attended. These 4 modules are exactly the pure data those renderers consume. Standing order "do the next
+  epic always" is in effect — rolling to the 5th epic.
