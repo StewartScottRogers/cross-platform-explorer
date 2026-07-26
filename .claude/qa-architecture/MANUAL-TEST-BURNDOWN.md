@@ -47,3 +47,4 @@ These are **not** MVD; listed so the QA Architect pins them and audits for regre
 | CPE-1093 | Batch-media dialog: layout/pills/entry | human-verified on installed 0.57.35 build (2026-07-26, user: "looks good"); real image-transform output still worth a spot-check | partially-closed | 2026-07-26 |
 | CPE-1094 | Agent-Watch replay scrubber: tab strip / slider drag / play cadence / diff-on-scrub | headless UAT+review only — needs eyes on a real watched session in the installed build | open | 2026-07-26 |
 | CPE-1098 | Agent-Watch cost ledger tab: card layout / theme colours / live token+USD numbers | headless UAT+review only — needs eyes + a real agent session printing usage on the installed build | open | 2026-07-26 |
+| CPE-1100 | Agent-Watch radar tab: overlap rows / actor pills / navigate / live 2-actor race | headless UAT+review only — needs eyes + two concurrent actors racing a file on the installed build | open | 2026-07-26 |
