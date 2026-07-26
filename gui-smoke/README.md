@@ -17,6 +17,14 @@ Self-contained: its own `package.json`/lockfile/`tsconfig.json`. Nothing here to
 2. **Navigation** — the current-folder breadcrumb (`[aria-current="page"]`, the same selector
    `src/App.features.test.ts` uses) shows the temp folder's basename.
 3. **Contents rendered** — the seeded `CPE-1045-marker.txt` entry is visible in the listing.
+4. **Code preview renders (CPE-1096)** — a second fixture, `CPE-1096-fixture.rs` (a struct + two
+   functions), is seeded into the same temp dir. The suite clicks its row (single-selects it, which
+   feeds `PreviewPane`'s `entry` prop) and asserts the code-intelligence UI actually renders:
+   `.cl-row[data-line]` per-line rows, the `.outline-bar` with `.outline-pill`s (outline strip,
+   CPE-1090), the `.minimap`, and the highlighted `pre.preview-text.code-rows > code.cl-code` (no
+   regression on the plain highlighted output). This pins the CPE-1090/1091 render as CI coverage,
+   closing their `MANUAL-TEST-BURNDOWN.md` rows (still non-blocking, like the rest of this job — see
+   CPE-1048 below).
 
 ## Prerequisites
 

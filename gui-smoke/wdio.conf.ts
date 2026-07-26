@@ -70,6 +70,34 @@ const TAURI_DRIVER_BIN = path.resolve(
 export const STATE_FILE = path.resolve(__dirname, ".smoke-state.json");
 export const MARKER_NAME = "CPE-1045-marker.txt";
 
+// CPE-1096: a tiny, known source file seeded into the same temp dir so the smoke suite can select
+// it in the file list and assert the code-preview's code-intelligence UI (outline strip + per-line
+// rows + minimap, CPE-1090/1091) actually renders — burning down the manual visual-verification
+// debt those two tickets shipped with (headless-only coverage until now). Deliberately small but
+// non-trivial: a struct + two functions (>=1 outline pill each) with multi-line bodies (foldable
+// blocks), so `code_intel::analyze` (crates/server/src/code_intel.rs) populates outline, folds, and
+// minimap — the minimap in particular is populated for ANY non-empty text (see
+// `minimap::minimap_rows`), so asserting on it is safe, not just best-effort.
+export const FIXTURE_NAME = "CPE-1096-fixture.rs";
+const FIXTURE_SOURCE = `// CPE-1096 gui-smoke fixture — exercises the code-preview outline/rows/minimap.
+pub struct Widget {
+    pub name: String,
+}
+
+pub fn greet(name: &str) -> String {
+    let msg = format!("Hello, {name}!");
+    msg
+}
+
+pub fn describe(widget: &Widget) -> String {
+    if widget.name.is_empty() {
+        "unnamed".to_string()
+    } else {
+        widget.name.clone()
+    }
+}
+`;
+
 let tauriDriver: ChildProcess | undefined;
 let shuttingDown = false;
 
@@ -148,6 +176,9 @@ export const config: WebdriverIO.Config = {
   onPrepare: (_config, capabilities) => {
     const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "cpe-gui-smoke-"));
     fs.writeFileSync(path.join(tmpDir, MARKER_NAME), "CPE-1045 smoke marker\n", "utf-8");
+    // CPE-1096: seed the code-preview fixture alongside the marker, in the same temp dir, so the
+    // suite can open it in the same session without a second app launch.
+    fs.writeFileSync(path.join(tmpDir, FIXTURE_NAME), FIXTURE_SOURCE, "utf-8");
 
     const caps = capabilities as unknown as Array<{ "tauri:options": { args: string[] } }>;
     caps[0]["tauri:options"].args = ["--test-mode", "--x=-4000", `--open=${tmpDir}`];
