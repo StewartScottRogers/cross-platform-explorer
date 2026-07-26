@@ -56,6 +56,10 @@ pub mod code_outline;
 /// markdown sections per language) for a code preview's fold gutter (CPE-1050, epic CPE-724).
 pub mod code_folds;
 
+/// Enclosing-symbol breadcrumb: combines `code_outline` + `code_folds` to return the outermost→innermost
+/// symbol chain containing a given line, for a jump-to / breadcrumb UI (CPE-1053, epic CPE-724).
+pub mod code_breadcrumb;
+
 /// Tag store: user tags + a colour label per path, persisted as `tags.json` (CPE-635). Pure model
 /// helpers + `ServerCtx`-based command entry points (CPE-815 migration).
 pub mod tags;
