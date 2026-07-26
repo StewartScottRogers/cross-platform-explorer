@@ -14,29 +14,46 @@ use std::path::Path;
 
 use crate::batch_media::{BatchJob, PlannedItem};
 use crate::batch_transform;
+use crate::model::OpResult;
 
 /// Outcome of running a plan: how many items were written successfully, and which were skipped (with a
 /// short human reason each). Skipped items are never fatal to the batch.
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq, Default, serde::Serialize)]
+#[cfg_attr(feature = "specta", derive(specta::Type))]
 pub struct BatchReport {
     pub written: usize,
     pub skipped: Vec<(String /* input */, String /* why */)>,
 }
 
-/// Execute a planned batch: for each `PlannedItem`, read its input bytes, apply `job.ops` via
-/// [`batch_transform::apply_ops`], and write the result to the item's planned output (creating the
-/// output's parent directory as needed). A failing item — unreadable input, a non-image or otherwise
-/// rejected transform, or a failed write — is recorded in `skipped` with a short reason and the batch
-/// continues; it never aborts the run. Input files are never modified.
-pub fn execute_plan(items: &[PlannedItem], job: &BatchJob) -> BatchReport {
+/// Execute a planned batch, calling `flush` with each file's [`OpResult`] as it completes — the shared
+/// walker behind both the blocking [`execute_plan`] (test/no-progress path) and the streaming Tauri
+/// command (`batch_media_execute_stream`), per the "one walker, both callers" streaming convention. For
+/// each `PlannedItem`, reads its input bytes, applies `job.ops` via [`batch_transform::apply_ops`], and
+/// writes the result to the item's planned output (creating the output's parent directory as needed). A
+/// failing item — unreadable input, a non-image or otherwise rejected transform, or a failed write — is
+/// recorded in the returned report and reported to `flush` with a reason; it never aborts the run. Input
+/// files are never modified.
+pub fn execute_plan_walk(items: &[PlannedItem], job: &BatchJob, mut flush: impl FnMut(OpResult)) -> BatchReport {
     let mut report = BatchReport::default();
     for item in items {
         match execute_one(item, job) {
-            Ok(()) => report.written += 1,
-            Err(reason) => report.skipped.push((item.input.clone(), reason)),
+            Ok(()) => {
+                report.written += 1;
+                flush(OpResult::ok(Path::new(&item.output)));
+            }
+            Err(reason) => {
+                flush(OpResult::err(Path::new(&item.input), &reason));
+                report.skipped.push((item.input.clone(), reason));
+            }
         }
     }
     report
+}
+
+/// Execute a planned batch without streaming per-file progress — the cargo-test correctness path.
+/// Delegates to [`execute_plan_walk`] with a no-op flush so there is exactly one implementation.
+pub fn execute_plan(items: &[PlannedItem], job: &BatchJob) -> BatchReport {
+    execute_plan_walk(items, job, |_| {})
 }
 
 fn execute_one(item: &PlannedItem, job: &BatchJob) -> Result<(), String> {
@@ -154,5 +171,74 @@ mod tests {
         let job = BatchJob::new(vec![MediaOp::Resize { max_px: 16 }]);
         let report = execute_plan(&[], &job);
         assert_eq!(report, BatchReport::default());
+    }
+
+    #[test]
+    fn execute_plan_walk_empty_input_never_panics_and_never_flushes() {
+        let job = BatchJob::new(vec![MediaOp::Resize { max_px: 16 }]);
+        let mut flushed = 0usize;
+        let report = execute_plan_walk(&[], &job, |_| flushed += 1);
+        assert_eq!(report, BatchReport::default());
+        assert_eq!(flushed, 0);
+    }
+
+    /// Streamed outcomes (`execute_plan_walk` + a collecting `flush`) must match a direct `execute_plan`
+    /// run byte-for-byte: same written count, same skipped set — proving the streaming command and the
+    /// blocking command run the identical per-file logic (no drift between the two callers).
+    #[test]
+    fn streamed_walk_matches_direct_execute_plan_same_written_and_skips() {
+        let d = scratch("streamed-vs-direct");
+        let a = d.join("a.png");
+        let b = d.join("b.png");
+        let t = d.join("c.txt");
+        fs::write(&a, png_bytes(40, 20)).unwrap();
+        fs::write(&b, png_bytes(30, 30)).unwrap();
+        fs::write(&t, b"not an image").unwrap();
+
+        let job = BatchJob::new(vec![MediaOp::Resize { max_px: 16 }, MediaOp::StripMetadata]);
+        let inputs = vec![
+            a.to_string_lossy().to_string(),
+            b.to_string_lossy().to_string(),
+            t.to_string_lossy().to_string(),
+        ];
+        let items_direct = plan(&job, &inputs);
+        let direct_report = execute_plan(&items_direct, &job);
+
+        // Re-plan into a sibling scratch dir so the streamed run doesn't clash with the direct run's
+        // already-written outputs (both plans are non-destructive but share the same source dir).
+        let d2 = scratch("streamed-vs-direct-2");
+        let a2 = d2.join("a.png");
+        let b2 = d2.join("b.png");
+        let t2 = d2.join("c.txt");
+        fs::write(&a2, png_bytes(40, 20)).unwrap();
+        fs::write(&b2, png_bytes(30, 30)).unwrap();
+        fs::write(&t2, b"not an image").unwrap();
+        let inputs2 = vec![
+            a2.to_string_lossy().to_string(),
+            b2.to_string_lossy().to_string(),
+            t2.to_string_lossy().to_string(),
+        ];
+        let items_streamed = plan(&job, &inputs2);
+
+        let mut streamed_results: Vec<OpResult> = Vec::new();
+        let streamed_report = execute_plan_walk(&items_streamed, &job, |r| streamed_results.push(r));
+
+        assert_eq!(streamed_report.written, direct_report.written);
+        assert_eq!(streamed_report.skipped.len(), direct_report.skipped.len());
+        assert_eq!(streamed_report.written, 2, "the two PNGs should succeed");
+        assert_eq!(streamed_report.skipped.len(), 1, "the .txt should be skipped, not fatal");
+
+        // One OpResult flushed per planned item, and the ok/err split matches the report.
+        assert_eq!(streamed_results.len(), items_streamed.len());
+        let ok_count = streamed_results.iter().filter(|r| r.ok).count();
+        let err_count = streamed_results.iter().filter(|r| !r.ok).count();
+        assert_eq!(ok_count, streamed_report.written);
+        assert_eq!(err_count, streamed_report.skipped.len());
+        for r in streamed_results.iter().filter(|r| !r.ok) {
+            assert!(!r.error.is_empty(), "a skipped OpResult must carry a reason");
+        }
+
+        let _ = fs::remove_dir_all(&d);
+        let _ = fs::remove_dir_all(&d2);
     }
 }
