@@ -51,6 +51,7 @@ pub mod conflict_window;
 pub mod console;
 pub mod guardrail;
 pub mod gate_ignore;
+pub mod gate_scope;
 pub mod history;
 pub mod http;
 pub mod keycheck;
