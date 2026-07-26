@@ -4,11 +4,15 @@ import { expect } from "chai";
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { $, browser } from "@wdio/globals";
+import { $, $$, browser } from "@wdio/globals";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const STATE_FILE = path.resolve(__dirname, "..", ".smoke-state.json");
 const MARKER_NAME = "CPE-1045-marker.txt";
+// CPE-1096: seeded by wdio.conf.ts#onPrepare alongside MARKER_NAME, into the same temp dir. Kept
+// as a literal here (not imported from wdio.conf.ts) to match this file's existing convention of
+// duplicating the seeded filename rather than reaching across the runner/worker boundary.
+const FIXTURE_NAME = "CPE-1096-fixture.rs";
 
 describe("CPE-1045 — headless GUI smoke: --open <dir> navigates", () => {
   let tmpBasename = "";
@@ -61,5 +65,64 @@ describe("CPE-1045 — headless GUI smoke: --open <dir> navigates", () => {
         timeoutMsg: `expected <body> to contain the marker filename "${MARKER_NAME}"`,
       },
     );
+  });
+
+  // CPE-1096 — QA-debt burndown: CPE-1090 (outline strip/breadcrumb) and CPE-1091 (per-line
+  // gutter/fold/indent/minimap) both shipped with headless-only verification. Opening the seeded
+  // code fixture and asserting these selectors render pins that visual debt under CI, closing the
+  // MANUAL-TEST-BURNDOWN.md rows for both tickets.
+  it("selecting a code file renders the code-intelligence preview (CPE-1096)", async () => {
+    // Locate the fixture's row by scanning each rendered row's HTML for the fixture filename,
+    // rather than a text-based `$('=text')` locator — the latter relies on script-injected text
+    // matching that (per the note on the marker-visibility test above) doesn't reliably resolve
+    // against wry's webview under the classic WebDriver protocol this harness forces. `getHTML()`
+    // on a CSS-located element is the same primitive already proven reliable here (`body.getHTML()`
+    // above), just scoped to one row instead of the whole body.
+    const rows = $$(".row");
+    let fixtureRow: WebdriverIO.Element | undefined;
+    for await (const row of rows) {
+      const html = await row.getHTML({ includeSelectorTag: false });
+      if (html.includes(FIXTURE_NAME)) {
+        fixtureRow = row;
+        break;
+      }
+    }
+    expect(fixtureRow, `expected a file row containing "${FIXTURE_NAME}"`).to.not.equal(undefined);
+
+    // A plain click (no ctrl/shift) single-selects the row, which feeds PreviewPane's `entry` prop
+    // and triggers the codeIntel fetch (PreviewPane.svelte's `loadCodeIntelFor`).
+    await fixtureRow!.click();
+
+    // Per-line code rows (CPE-1091): one `.cl-row[data-line]` span per source line inside the
+    // highlighted `<code>` — assert the first line rendered.
+    const firstLine = await $('.cl-row[data-line="1"]');
+    await firstLine.waitForExist({
+      timeout: 15_000,
+      timeoutMsg: "expected .cl-row[data-line=\"1\"] to render for the code fixture",
+    });
+
+    // Outline strip populated (CPE-1090): the fixture declares a struct + two fns, so
+    // `code_outline::outline` must yield >=1 symbol and the pill row must render.
+    const outlineBar = await $(".outline-bar");
+    await outlineBar.waitForExist({
+      timeout: 15_000,
+      timeoutMsg: "expected .outline-bar to render for a file with symbols",
+    });
+    const pills = await $$(".outline-bar .outline-pill");
+    expect(pills.length, "expected at least one .outline-pill in the outline strip").to.be.greaterThan(0);
+
+    // Minimap (CPE-1091): `code_intel::analyze` populates >=1 minimap row for any non-empty text
+    // (crates/server/src/minimap.rs — not gated on file size/language), so this is reliably
+    // present, not merely best-effort.
+    const minimap = await $(".minimap");
+    expect(await minimap.isExisting(), "expected .minimap to render alongside the code rows").to.equal(true);
+
+    // Regression: the highlighted code still renders as real text (not just empty markup) — the
+    // same `.preview-text` class non-code previews use, now on the code-rows `<pre>`/`<code>`.
+    const codeEl = await $(".cl-code");
+    const codeHtml = await codeEl.getHTML({ includeSelectorTag: false });
+    expect(codeHtml).to.include("greet");
+    const pre = await $("pre.preview-text.code-rows");
+    expect(await pre.isExisting(), "expected the highlighted pre.preview-text.code-rows to render").to.equal(true);
   });
 });
