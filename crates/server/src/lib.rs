@@ -185,6 +185,11 @@ pub mod terminal_tabs;
 /// relevance. Backend-agnostic; reused by the index engine (CPE-831, epic CPE-703).
 pub mod index_query;
 
+/// Search size filter — parse human size expressions (`>1mb`, `<=500k`, `1mb..1gb`, `2.5g`) into a
+/// predicate over a candidate's byte count (CPE-1059, epic CPE-703). Standalone; does not touch
+/// [`index_query`] — wiring a `size:` token into that grammar is a separate later ticket.
+pub mod size_filter;
+
 /// Instant-search **index engine** — the compact per-volume filename index (crawl + on-disk store + trigram
 /// pruning) that feeds [`index_query`]. Feature-gated OFF by default (`index`) so the plain build compiles
 /// zero indexer code (CPE-832, epic CPE-703).

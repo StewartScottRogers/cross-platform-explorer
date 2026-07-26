@@ -50,3 +50,36 @@ pub fn matches(f: &SizeFilter, bytes: u64) -> bool;
 ## Work Log
 2026-07-25 (workshift) — Filed by the Product Manager as the first slice of the CPE-703 power-filter query
 DSL (fresh headless vein). Independent module; one-line lib.rs `pub mod` at a distinct anchor.
+
+2026-07-25 (workshift, overnight Worker) — Built `crates/server/src/size_filter.rs` per design: `SizeOp`
+{Gt,Lt,Ge,Le,Eq} + `SizeFilter` {Cmp,Range} with the `serde::Serialize` + `cfg_attr(specta)` derive stack
+matching `code_outline.rs`/`index_query.rs`. `pub mod size_filter;` added immediately after `pub mod
+index_query;` in `lib.rs`. Std-only, no new deps, no `#[cfg]`-dependent behavior, operates only on `u64` +
+ASCII `&str` (no `std::path`).
+
+Assumptions made (no user available overnight):
+- **Units are 1024-based** (k/kb=1024, m/mb=1024², g/gb=1024³, t/tb=1024⁴), case-insensitive suffixes;
+  bare number = bytes. Documented in the module doc-comment and pinned by tests.
+- **Decimal mantissa rounding**: parse mantissa as `f64`, multiply by the unit's byte count, then
+  `f64::round()` (ties away from zero) before casting to `u64`. `2.5g`/`500.5k` land on exact integers
+  (power-of-two arithmetic); `1.1k` → 1126 and `1.5b`/`1.4b` → 2/1 are the tests that actually exercise
+  rounding.
+- **Bare amount with no operator prefix** (e.g. `2.5g`) defaults to `SizeOp::Eq` — the design doc's own
+  example list mixes an explicit `=0` with an operator-less `2.5g`, so `Eq` was the only default that
+  keeps both consistent.
+- Also accept an explicit `b` suffix (bytes) as a harmless superset of the spec's bare-number-only rule;
+  doesn't conflict with any listed unit and isn't relied on by any acceptance criterion.
+- Range `lo..hi`: both sides parsed as plain amounts (no operator), inclusive on both ends, `hi < lo` →
+  `None`, `lo == hi` accepted (single-value "range").
+
+Verification (from `crates/server`, PowerShell with `cargo` added to PATH — no toolchain issue, just a
+non-login shell):
+- `cargo test` (whole crate): all green, including 18 new `size_filter` unit tests.
+- `cargo clippy --all-targets -- -D warnings`: clean, exit 0.
+- `cargo clippy --all-targets --features index -- -D warnings`: clean, exit 0.
+- `cargo build --features specta`: clean, exit 0 (sanity-checked the `specta::Type` derive path even
+  though the ticket only mandated default + `index`).
+- No Defender "os error 225" encountered this run.
+
+Does **not** touch `index_query.rs` per the ticket's explicit scope — `size:` grammar wiring is left for
+a later ticket. Branch `cpe-1059-size-filter` pushed; PR opened for user review.
