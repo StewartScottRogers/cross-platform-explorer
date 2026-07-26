@@ -4,7 +4,7 @@ title: "Conflict-aware restore summary + safe-subset gate — cpe_server::revert
 type: feature
 component: Backend
 priority: high
-status: Doing
+status: Done
 tags: ready
 created: 2026-07-25
 epic: CPE-732

@@ -149,3 +149,24 @@ _(no shifts recorded yet — first real workshift will seed this)_
   real agent pre-exec through the sidecar contract — epic flags feasibility as open) + the approve/reject/
   edit-scope GUI + a rule-persistence store (fs, headless-testable — the natural 5th slice). All attended.
   Standing order "do the next epic always" in effect — 8th epic next.
+
+## 2026-07-26 (past midnight) — CPE-732 Checkpoint & rollback revert-safety layer (4 shipped)
+- Shipped the revert-safety + surgical-execution layer in crates/server: CPE-1079 revert_attribution
+  (agent-touched path set from the session-tagged audit journal — feed-ready NOW), CPE-1080 revert_safety
+  (3-way conflict classifier — the flagged un-mined vein: Safe iff agent-touched, else Conflict-outside-agent),
+  CPE-1081 revert_engine (surgical real-fs Create/Overwrite/Delete restore — escape-guarded, skip-on-error,
+  tempdir round-trip), CPE-1082 conflict summary + safe-subset gate. Builds on shipped restore_plan/snapshot/
+  snapshot_capture/audit_journal; no deps.
+- **Zero rework, all 4 one-pass APPROVE — FIFTH consecutive zero-rework wave.** Notable integration-seam
+  discipline: CPE-1080 and CPE-1079 were built in parallel (agent_touched passed as a plain param), and the
+  reviewer explicitly VERIFIED the key-shape seam matches (both produce root-relative `/`-segment keys) — the
+  parallel-with-a-shared-key-contract pattern held. revert_engine's escape guard even closed the Linux
+  `C:/`-isn't-absolute bypass via a `:`-in-segment check (reviewer probed it).
+- Real-fs testing pattern for future waves: process-unique tempdir + a PORTABLE missing-blob simulation
+  (point at a never-written hash) instead of OS permission tricks → keeps the Windows CI leg green without
+  `#[cfg]`-gating the whole test.
+- Frontier: CPE-732 remainder = attended only — the timeline checkpoint-marker + restore/confirm UI and the
+  thin `#[tauri::command]` wiring execute_restore + the safe/force choice behind the dialog (serde at that
+  seam only). No architecture decision needed for the pure core (High priority, not big-design). Standing
+  order "do the next epic always" in effect — 9th epic next. Clean deep headless veins are thinning but not
+  yet exhausted (PM should keep being honest about it).
