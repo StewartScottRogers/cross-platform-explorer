@@ -4,7 +4,7 @@ title: "Session metrics rollup — ai_console::session_metrics (per-session ledg
 type: feature
 component: Backend
 priority: medium
-status: Doing
+status: Done
 tags: ready
 created: 2026-07-25
 epic: CPE-731

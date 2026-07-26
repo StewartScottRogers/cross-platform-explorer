@@ -4,7 +4,7 @@ title: "Efficiency ratios + ranking — ai_console::efficiency (cost-per-progres
 type: feature
 component: Backend
 priority: medium
-status: Backlog
+status: Doing
 tags: ready
 created: 2026-07-25
 epic: CPE-731
