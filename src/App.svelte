@@ -70,6 +70,9 @@
   import PropertiesDialog from "./lib/components/PropertiesDialog.svelte";
   import MetadataStudioDialog from "./lib/components/MetadataStudioDialog.svelte";
   import BatchRenameDialog from "./lib/components/BatchRenameDialog.svelte";
+  import BatchMediaDialog from "./lib/components/BatchMediaDialog.svelte";
+  import { partitionEligible, canBatchTransform } from "./lib/batchMedia";
+  import type { BatchReport } from "./lib/bindings.gen";
   import TagEditor from "./lib/components/TagEditor.svelte";
   import { initTags, tags, retagPath, renameTag, deleteTag, importTags, exportTags } from "./lib/tags";
   import { resolveEffect } from "./lib/dnd";
@@ -428,6 +431,8 @@
   let propsFor: DirEntry[] | null = null;
   let studioFor: DirEntry[] | null = null;
   let batchRenameFor: DirEntry[] | null = null;
+  /** Eligible (image-only) entries for the Batch-Media dialog (CPE-1093), or null when closed. */
+  let batchMediaFor: DirEntry[] | null = null;
   /** The entry whose tags/label are being edited (CPE-637), or null when the editor is closed. */
   let tagEditorFor: DirEntry[] | null = null;
 
@@ -1591,6 +1596,41 @@
     }
   }
 
+  /** Open the batch-media dialog for the current multi-selection (CPE-1093): pre-filters out any
+   *  non-image/unsupported-extension files (reusing the same `isImage` check the thumbnailer and
+   *  Quick-look use) rather than sending them to the backend and having every op fail per-file. */
+  function beginBatchMedia() {
+    if (blockedInArchive() || selectedEntries.length < 2) return;
+    const { eligible, skipped } = partitionEligible(selectedEntries);
+    if (eligible.length < 2) {
+      showNotice("Not enough image files in the selection for batch media.", true);
+      return;
+    }
+    if (skipped > 0) {
+      showNotice(`${skipped} of ${selectedEntries.length} files aren't images and will be skipped.`);
+    }
+    batchMediaFor = eligible;
+  }
+
+  /** Apply a completed batch-media run (CPE-1093): the dialog itself streams the execute + shows its own
+   *  progress (per BUSY-CURSOR.md), so by the time this fires the job has already finished — report the
+   *  outcome, refresh the listing, and close. */
+  async function applyBatchMedia(report: BatchReport) {
+    batchMediaFor = null;
+    const failed = report.skipped.length;
+    if (failed === 0) {
+      showNotice(`Converted ${report.written} item${report.written === 1 ? "" : "s"}.`);
+    } else {
+      const [firstPath, firstReason] = report.skipped[0];
+      const name = firstPath.split(/[\\/]/).pop();
+      showNotice(
+        `${report.written} converted, ${failed} skipped: first "${name}" — ${firstReason}`,
+        report.written === 0,
+      );
+    }
+    await loadPath(currentPath);
+  }
+
   async function commitRename(newName: string) {
     const path = renamingPath;
     renamingPath = "";
@@ -2241,6 +2281,7 @@
       case "open-folder-in-console": if (!isHome && !archive) openAiConsole({ cwd: currentPath }); break;
       case "rename": if (selectedEntries.length === 1) beginRename(selectedEntries[0]); break;
       case "batch-rename": beginBatchRename(); break;
+      case "batch-media": beginBatchMedia(); break;
       case "delete": askDelete(false); break;
       case "properties": openProperties(); break;
       case "metadataStudio": openMetadataStudio(); break;
@@ -3435,6 +3476,7 @@
     extractable={!isHome && !archive && selectedEntries.length === 1 && isExtractable(selectedEntries[0])}
     compressible={!isHome && !archive && selectedEntries.length >= 1}
     comparable={!isHome && !archive && selectedEntries.length === 2 && selectedEntries.every((e) => !e.is_dir)}
+    mediaEligible={selectedEntries.length > 1 && selectedEntries.some((e) => !e.is_dir && canBatchTransform(e.name))}
     canTerminal={!isHome && !archive}
     sameTypeExt={selectedEntries.length === 1 && !selectedEntries[0].is_dir ? selectedEntries[0].extension : ""}
     on:action={(e) => runAction(e.detail)}
@@ -3489,6 +3531,14 @@
     names={batchRenameFor.map((e) => e.name)}
     on:apply={(e) => applyBatchRename(e.detail)}
     on:cancel={() => (batchRenameFor = null)}
+  />
+{/if}
+
+{#if batchMediaFor}
+  <BatchMediaDialog
+    paths={batchMediaFor.map((e) => e.path)}
+    on:apply={(e) => applyBatchMedia(e.detail.report)}
+    on:cancel={() => (batchMediaFor = null)}
   />
 {/if}
 

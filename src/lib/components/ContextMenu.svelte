@@ -29,6 +29,9 @@
   export let canTerminal = false;
   /** Extension (no dot) to offer "Select all .ext"; empty hides the row (CPE-258). */
   export let sameTypeExt = "";
+  /** True when the selection contains at least one image file (of 2+ selected) — enables "Batch media…"
+   *  (CPE-1093). The dialog itself pre-filters any non-image files out of the eligible set. */
+  export let mediaEligible = false;
 
   const dispatch = createEventDispatcher<{
     action: string;
@@ -132,6 +135,11 @@
     {#if selectionCount > 1}
       <button class="row" role="menuitem" on:click={() => run("batch-rename")}>
         <Icon name="rename" size={15} /> {$t('ctx.rename')}
+      </button>
+    {/if}
+    {#if selectionCount > 1 && mediaEligible}
+      <button class="row" role="menuitem" on:click={() => run("batch-media")}>
+        <Icon name="image" size={15} /> {$t('ctx.batchMedia')}
       </button>
     {/if}
     {#if comparable}

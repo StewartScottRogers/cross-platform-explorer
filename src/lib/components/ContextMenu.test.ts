@@ -60,4 +60,20 @@ describe("ContextMenu Copy to / Move to folder (CPE-355)", () => {
     render(ContextMenu, { props: { ...base, selectionCount: 2, comparable: false } });
     expect(screen.queryByText("Compare files")).toBeNull();
   });
+
+  it("shows Batch media… only for a multi-selection with an eligible image, and dispatches batch-media (CPE-1093)", async () => {
+    const { component } = render(ContextMenu, { props: { ...base, selectionCount: 2, mediaEligible: true } });
+    const action = vi.fn();
+    component.$on("action", (e) => action(e.detail));
+    await fireEvent.click(screen.getByText("Batch media…"));
+    expect(action).toHaveBeenCalledWith("batch-media");
+  });
+
+  it("hides Batch media… when the selection has no eligible image or is a single item", () => {
+    render(ContextMenu, { props: { ...base, selectionCount: 2, mediaEligible: false } });
+    expect(screen.queryByText("Batch media…")).toBeNull();
+
+    render(ContextMenu, { props: { ...base, selectionCount: 1, mediaEligible: true } });
+    expect(screen.queryByText("Batch media…")).toBeNull();
+  });
 });
