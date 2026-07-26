@@ -199,6 +199,16 @@ async readFileRange(path: string, offset: number, len: number) : Promise<Result<
 }
 },
 /**
+ * Aggregate code-intelligence bundle — outline, fold ranges, indent depths, and minimap rows — for a
+ * file whose text the frontend already has loaded (CPE-1089, epic CPE-724). Pure/in-memory (no fs, no
+ * path); the previewer sends `text` straight from `read_file_text`'s result instead of a second read.
+ * Sync: `cpe_server::code_intel::analyze` is a fast in-memory scan over the already-loaded text, not an
+ * fs/subprocess/network call.
+ */
+async codeIntel(text: string, lang: string, tabWidth: number | null, minimapBuckets: number | null) : Promise<CodeIntel> {
+    return await TAURI_INVOKE("code_intel", { text, lang, tabWidth, minimapBuckets });
+},
+/**
  * Total byte length of a file (CPE-772) — lets the hex viewer size its scrollbar without reading.
  */
 async fileLen(path: string) : Promise<Result<number, string>> {
@@ -1694,6 +1704,10 @@ export type ChecksumEntry = { path: string; sha256: string; size: number; modifi
  */
 export type ChildSize = { name: string; path: string; is_dir: boolean; size: number }
 /**
+ * The aggregate code-intelligence bundle for one file's text.
+ */
+export type CodeIntel = { outline: Symbol[]; folds: FoldRange[]; indent: number[]; minimap: MinimapRow[] }
+/**
  * One column of a result grid: its name and a best-effort type label (the declared SQLite type, the
  * Parquet physical type; empty for spreadsheet headers, which carry no type).
  */
@@ -1853,6 +1867,26 @@ file_type: string | null;
  */
 type_mismatch: string | null }
 /**
+ * The kind of a fold range (drives the gutter glyph / default-collapsed heuristics later).
+ */
+export type FoldKind = 
+/**
+ * A `{`…`}` block (Rust / JS-TS / Go / C-family).
+ */
+"block" | 
+/**
+ * A Python (or similarly indentation-delimited) suite.
+ */
+"suite" | 
+/**
+ * A Markdown ATX heading's section.
+ */
+"section"
+/**
+ * One foldable range. Lines are **1-based and inclusive** on both ends.
+ */
+export type FoldRange = { start_line: number; end_line: number; kind: FoldKind }
+/**
  * Recursive folder totals. Serialized to match the frontend `FolderStats`.
  */
 export type FolderStats = { files: number; dirs: number; bytes: number; truncated: boolean }
@@ -1914,6 +1948,18 @@ export type MetaField = {
  * The metadata group/namespace, e.g. `"exif"`, `"iptc"`, `"id3"`.
  */
 group: string; key: string; value: string; editable: boolean }
+/**
+ * One row of the downsampled minimap.
+ */
+export type MinimapRow = { 
+/**
+ * Average non-whitespace character density of the covered lines, scaled 0..=255.
+ */
+fill: number; 
+/**
+ * Min leading indent (in columns; a tab advances to the next multiple of 4) of the covered lines.
+ */
+indent: number }
 /**
  * One filename-search hit: the full path, the bare name, and whether it's a folder.
  */
@@ -1998,6 +2044,18 @@ binary_ok: boolean; requested: Capability[]; granted: Capability[] }
  * presence after the repair; `actions` are the plain-language steps taken.
  */
 export type SidecarRepair = { id: string; binary_ok: boolean; actions: string[] }
+/**
+ * One symbol in the outline.
+ */
+export type Symbol = { name: string; kind: SymbolKind; 
+/**
+ * 1-based source line.
+ */
+line: number }
+/**
+ * The kind of a source symbol (drives the outline icon).
+ */
+export type SymbolKind = "function" | "method" | "struct" | "enum" | "trait" | "interface" | "class" | "module" | "constant" | "type_alias" | "heading"
 export type TAURI_CHANNEL<TSend> = null
 /**
  * The tags + colour label attached to one path.

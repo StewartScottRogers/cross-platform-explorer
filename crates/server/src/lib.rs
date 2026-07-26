@@ -60,6 +60,11 @@ pub mod code_folds;
 /// symbol chain containing a given line, for a jump-to / breadcrumb UI (CPE-1053, epic CPE-724).
 pub mod code_breadcrumb;
 
+/// Aggregate code-intelligence bundle: composes `code_outline` + `code_folds` + `indent_guides` +
+/// `minimap` into one `CodeIntel { outline, folds, indent, minimap }` payload for a single-round-trip
+/// code preview (CPE-1089, epic CPE-724).
+pub mod code_intel;
+
 /// Tag store: user tags + a colour label per path, persisted as `tags.json` (CPE-635). Pure model
 /// helpers + `ServerCtx`-based command entry points (CPE-815 migration).
 pub mod tags;
