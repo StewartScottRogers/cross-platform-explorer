@@ -281,14 +281,16 @@ fn main() {
             let presets = Arc::new(BrokerPresets::new(broker.clone()));
             let dialogs = Arc::new(BrokerDialogs::new(broker.clone()));
             let history = Arc::new(BrokerHistory::new(broker.clone()));
-            // Forward session lifecycle to the host as a `session:<json>` Status event so the
-            // explorer can surface it in Agent Watch (CPE-396). Uses the same shared writer as
-            // the main loop, so frames never interleave.
+            // Forward Agent-Watch announcements (session lifecycle CPE-396, file reads CPE-405,
+            // live cost/usage CPE-1097) to the host as Status events. The console already hands us
+            // a fully-prefixed `<kind>:<json>` string (`session:`, `fs-read:`, `cost:`, …; see
+            // `SessionAnnouncer`) — forward it verbatim. Uses the same shared writer as the main
+            // loop, so frames never interleave.
             let announce_writer = writer.clone();
             let announce: SessionAnnouncer = Arc::new(move |payload: String| {
                 write_env(
                     &announce_writer,
-                    &Envelope::new(0, Message::Event(Event::Status { state: format!("session:{payload}") })),
+                    &Envelope::new(0, Message::Event(Event::Status { state: payload })),
                 );
             });
             let state = console_state(secrets, presets, dialogs, history, announce);
