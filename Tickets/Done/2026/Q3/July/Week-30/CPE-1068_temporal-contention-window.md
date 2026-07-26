@@ -4,7 +4,7 @@ title: "Temporal contention window — ai_console::conflict_window (same-path to
 type: feature
 component: Backend
 priority: medium
-status: Doing
+status: Done
 tags: ready
 created: 2026-07-25
 epic: CPE-730

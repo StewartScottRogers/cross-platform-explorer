@@ -4,7 +4,7 @@ title: "Competing-rename detector — ai_console::conflict_rename (divergence / 
 type: feature
 component: Backend
 priority: medium
-status: Doing
+status: Done
 tags: ready
 created: 2026-07-25
 epic: CPE-730
