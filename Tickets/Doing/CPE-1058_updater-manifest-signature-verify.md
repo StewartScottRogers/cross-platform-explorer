@@ -4,20 +4,17 @@ title: "Updater manifest + signature verification guard (retire manual auto-upda
 type: test
 component: Backend
 priority: medium
-status: Backlog
+status: Doing
 tags: ready
 created: 2026-07-25
 estimate: 4-6h
 burndown: "MANUAL-TEST-BURNDOWN row #6 (auto-update flow)"
 ---
 
-## ⚠ Needs a user decision before building
-This ticket (a) adds ONE new dependency — the **`minisign` crate** (the same library Tauri's updater uses),
-confined to a new **test/release-only** crate that is **NOT linked into the shipped app**, and (b) adds a
-verification **step to `release.yml`** (the green release pipeline). Both are defensible but touch guardrail
-areas (new dep + release pipeline), so it was filed — not built — during the workshift, pending a green-light.
-Slice A (hermetic verify crate + unit tests + Server-crates CI) is safe to build alone; slice B (release.yml
-guard) is the pipeline-touching part.
+## ✅ User-approved 2026-07-25 (workshift)
+User green-lit building this ("do it"): the new **test/release-only `minisign` dep** (NOT linked into the
+shipped app) and the **`release.yml` guard step** are both approved. The `release.yml` step MUST degrade
+cleanly (skip, not fail) when signing secrets are absent, so it never breaks the green pipeline on forks/PRs.
 
 ## Summary
 Retire the CI-automatable part of manual-test burndown **#6** (auto-update flow), which today has **zero**
