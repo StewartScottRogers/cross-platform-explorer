@@ -102,6 +102,7 @@ pub mod ui;
 pub use ui::{serve as serve_ui, UiServer};
 pub mod usage;
 pub mod conflict_owner;
+pub mod conflict_region;
 pub use usage::{Usage, UsageScanner};
 pub mod vault;
 
