@@ -395,6 +395,11 @@ pub mod perceptual;
 /// dependencies.
 pub mod simhash;
 
+/// Archive-vs-folder diff (CPE-1057, epic CPE-705): classify an archive's entries against a
+/// destination folder's listing — "what's in this zip I don't already have" before extracting.
+/// Pure, no new deps.
+pub mod archive_diff;
+
 /// Minimap density rows (CPE-1052, epic CPE-724): downsample a source file's lines into a fixed number
 /// of overview rows (fill density + min indent) for a future scaled-preview minimap. Pure, dependency-
 /// free, integer-only arithmetic for determinism.
