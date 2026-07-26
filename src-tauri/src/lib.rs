@@ -1851,6 +1851,50 @@ fn move_exact_impl(pairs: Vec<(String, String)>) -> Vec<OpResult> {
         .collect()
 }
 
+/// Plan a batch-media job (CPE-1092, epic CPE-723): the backend enablement for the Batch-Media dialog
+/// (GUI #2). Validates the job (rejects an empty op list, a bad rotate angle, an empty convert extension
+/// or rename template) and, when valid, computes each input's collision-safe planned output path + a
+/// one-line summary — this IS the dialog's live preview data. Pure/in-memory; thin dispatcher into
+/// `cpe_server::batch_media`, kept `async` for convention parity with the other filesystem commands.
+#[tauri::command]
+#[cfg_attr(feature = "specta-bindings", specta::specta)]
+async fn batch_media_plan(
+    job: cpe_server::batch_media::BatchJob,
+    inputs: Vec<String>,
+) -> Result<Vec<cpe_server::batch_media::PlannedItem>, String> {
+    cpe_server::batch_media::validate(&job)?;
+    Ok(cpe_server::batch_media::plan(&job, &inputs))
+}
+
+/// Streamed batch-media execute (CPE-1092): runs a previously computed plan on a blocking thread and
+/// sends each file's `OpResult` over `on_result` in batches of 16 as it completes, mirroring
+/// `apply_backup_plan_stream` above. `on_result` is a raw transport channel — the Batch-Media dialog
+/// renders its own progress, so this is not routed through the busy-cursor wrapper. Returns the aggregate
+/// `BatchReport` once every item has run. No cancellation in v1.
+#[tauri::command]
+#[cfg_attr(feature = "specta-bindings", specta::specta)]
+async fn batch_media_execute_stream(
+    items: Vec<cpe_server::batch_media::PlannedItem>,
+    job: cpe_server::batch_media::BatchJob,
+    on_result: tauri::ipc::Channel<Vec<OpResult>>,
+) -> Result<cpe_server::batch_execute::BatchReport, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let mut batch: Vec<OpResult> = Vec::new();
+        let report = cpe_server::batch_execute::execute_plan_walk(&items, &job, |r| {
+            batch.push(r);
+            if batch.len() >= 16 {
+                let _ = on_result.send(std::mem::take(&mut batch));
+            }
+        });
+        if !batch.is_empty() {
+            let _ = on_result.send(batch);
+        }
+        report
+    })
+    .await
+    .map_err(|e| e.to_string())
+}
+
 /// Detailed metadata for the Properties dialog. Model lives in `cpe_server::model` (CPE-815); this is a
 /// thin `spawn_blocking` dispatcher.
 #[tauri::command]
@@ -5904,6 +5948,8 @@ pub fn run() {
             start_transfer,
             cancel_transfer,
             move_exact,
+            batch_media_plan,
+            batch_media_execute_stream,
             entry_info,
             image_meta,
             metadata_read,
@@ -6305,6 +6351,8 @@ pub fn export_bindings(out: &std::path::Path) -> Result<(), String> {
         start_transfer,
         cancel_transfer,
         move_exact,
+        batch_media_plan,
+        batch_media_execute_stream,
         entry_info,
         image_meta,
         metadata_read,

@@ -649,6 +649,36 @@ async moveExact(pairs: ([string, string])[]) : Promise<OpResult[]> {
     return await TAURI_INVOKE("move_exact", { pairs });
 },
 /**
+ * Plan a batch-media job (CPE-1092, epic CPE-723): the backend enablement for the Batch-Media dialog
+ * (GUI #2). Validates the job (rejects an empty op list, a bad rotate angle, an empty convert extension
+ * or rename template) and, when valid, computes each input's collision-safe planned output path + a
+ * one-line summary — this IS the dialog's live preview data. Pure/in-memory; thin dispatcher into
+ * `cpe_server::batch_media`, kept `async` for convention parity with the other filesystem commands.
+ */
+async batchMediaPlan(job: BatchJob, inputs: string[]) : Promise<Result<PlannedItem[], string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("batch_media_plan", { job, inputs }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * Streamed batch-media execute (CPE-1092): runs a previously computed plan on a blocking thread and
+ * sends each file's `OpResult` over `on_result` in batches of 16 as it completes, mirroring
+ * `apply_backup_plan_stream` above. `on_result` is a raw transport channel — the Batch-Media dialog
+ * renders its own progress, so this is not routed through the busy-cursor wrapper. Returns the aggregate
+ * `BatchReport` once every item has run. No cancellation in v1.
+ */
+async batchMediaExecuteStream(items: PlannedItem[], job: BatchJob, onResult: TAURI_CHANNEL<OpResult[]>) : Promise<Result<BatchReport, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("batch_media_execute_stream", { items, job, onResult }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
  * Detailed metadata for the Properties dialog. Model lives in `cpe_server::model` (CPE-815); this is a
  * thin `spawn_blocking` dispatcher.
  */
@@ -1645,6 +1675,20 @@ path: string;
  */
 detail?: string | null }
 /**
+ * A batch job: the ordered ops + whether to write to new files (default) or overwrite in place.
+ */
+export type BatchJob = { ops: MediaOp[]; 
+/**
+ * When true (the default/safe mode) outputs never overwrite an input — a suffix is added so the
+ * output name differs, and same-target collisions are disambiguated.
+ */
+non_destructive: boolean }
+/**
+ * Outcome of running a plan: how many items were written successfully, and which were skipped (with a
+ * short human reason each). Skipped items are never fatal to the batch.
+ */
+export type BatchReport = { written: number; skipped: ([string, string])[] }
+/**
  * A brokered permission a sidecar may request. No capability = no access.
  */
 export type Capability = 
@@ -1928,6 +1972,34 @@ target: string | null;
  */
 broken: boolean }
 /**
+ * One media transform in a batch. Order matters (ops apply left-to-right).
+ */
+export type MediaOp = 
+/**
+ * Downscale so the longest side is at most `max_px` (never upscales — engine's job).
+ */
+{ op: "resize"; max_px: number } | 
+/**
+ * Re-encode to a different container/format (changes the output extension).
+ */
+{ op: "convert"; to_ext: string } | 
+/**
+ * Rotate clockwise; only 90 / 180 / 270 are valid.
+ */
+{ op: "rotate"; degrees: number } | 
+/**
+ * Mirror horizontally (`true`) or vertically (`false`).
+ */
+{ op: "flip"; horizontal: boolean } | 
+/**
+ * Rename the stem from a template — tokens `{stem}` `{n}` (1-based index) `{ext}`.
+ */
+{ op: "rename"; template: string } | 
+/**
+ * Drop all embedded metadata (EXIF/IPTC/XMP).
+ */
+{ op: "strip_metadata" }
+/**
  * An edit the user asked for.
  */
 export type MetaEdit = 
@@ -1997,6 +2069,10 @@ name: string; path: string;
  * "desktop" | "documents" | "downloads" | "pictures" | "music" | "videos" | "drive" | "home".
  */
 kind: string }
+/**
+ * One planned output: where `input` will be written and a one-line summary of what happens to it.
+ */
+export type PlannedItem = { input: string; output: string; summary: string }
 /**
  * One entry in a browsed remote repo tree (CPE-434/435) — a file or folder, for the Repositories
  * left-pane view. Serialised to the frontend.

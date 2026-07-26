@@ -7,7 +7,7 @@
 use std::collections::HashSet;
 
 /// One media transform in a batch. Order matters (ops apply left-to-right).
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[cfg_attr(feature = "specta", derive(specta::Type))]
 #[serde(tag = "op", rename_all = "snake_case")]
 pub enum MediaOp {
@@ -26,7 +26,7 @@ pub enum MediaOp {
 }
 
 /// A batch job: the ordered ops + whether to write to new files (default) or overwrite in place.
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[cfg_attr(feature = "specta", derive(specta::Type))]
 pub struct BatchJob {
     pub ops: Vec<MediaOp>,
@@ -42,7 +42,7 @@ impl BatchJob {
 }
 
 /// One planned output: where `input` will be written and a one-line summary of what happens to it.
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[cfg_attr(feature = "specta", derive(specta::Type))]
 pub struct PlannedItem {
     pub input: String,
