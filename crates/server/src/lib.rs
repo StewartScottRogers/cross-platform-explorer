@@ -98,6 +98,11 @@ pub mod activity_timeline;
 /// Replay projection core (CPE-1063, epic CPE-728): fold the recorded audit-event stream into the live
 /// file-set state at any moment `T`. Pure event-sourcing fold over [`audit_journal::AuditEvent`].
 pub mod replay;
+
+/// Replay folder-view projection + transition diff (CPE-1065, epic CPE-728): direct children of a
+/// folder at moment `T` (`children_at`) and the added/removed/modified diff between two scrub
+/// cursors (`diff_states`), to animate a scrub. Pure projection over [`replay::FsState`].
+pub mod replay_view;
 pub mod batch_media;
 pub mod spotlight;
 pub mod type_class;
