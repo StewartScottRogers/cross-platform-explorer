@@ -177,6 +177,12 @@ pub mod orphan_sidecars;
 /// Filename search — substring/glob/brace-group matching + the shared streaming walker (CPE-603/697/666).
 pub mod name_search;
 
+/// Search date/age filter — parse relative (`<7d`, `today`, `yesterday`) and absolute (`2024`,
+/// `2024-07`, `2024-07-25`) date expressions into a [`date_filter::DateFilter`] and test a modified-time
+/// against it. Pure, UTC-epoch-seconds only, `now` injected for deterministic tests (CPE-1060, epic
+/// CPE-703). Standalone — does not touch [`index_query`].
+pub mod date_filter;
+
 /// Embedded terminal dock tab model — open/close/activate/rename terminal tabs with active-tab fixup, the
 /// pure bookkeeping behind the terminal panel (CPE-947, epic CPE-714). No PTY here.
 pub mod terminal_tabs;
