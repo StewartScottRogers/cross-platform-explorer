@@ -108,6 +108,7 @@ pub mod spotlight;
 pub mod type_class;
 pub mod metadata_column;
 pub mod restore_plan;
+pub mod revert_safety;
 
 /// On-disk append-only session audit journal (CPE-800, epic CPE-733): durable per-session
 /// JSON-lines of Agent Watch filesystem activity, bounded/rotated. Pure helpers over a base dir.
