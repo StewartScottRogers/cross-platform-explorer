@@ -112,6 +112,7 @@ pub mod restore_plan;
 /// On-disk append-only session audit journal (CPE-800, epic CPE-733): durable per-session
 /// JSON-lines of Agent Watch filesystem activity, bounded/rotated. Pure helpers over a base dir.
 pub mod audit_journal;
+pub mod revert_attribution;
 
 /// Scrubber transport model for activity replay: step to next/previous distinct event ts, slice a
 /// half-open playback window, and advance the playhead by a speed-scaled delta (CPE-1064, epic
