@@ -12,6 +12,7 @@
 
 use std::io::Cursor;
 
+use image::codecs::jpeg::JpegEncoder;
 use image::{DynamicImage, ImageFormat, ImageReader, Limits};
 
 use crate::batch_media::MediaOp;
@@ -91,6 +92,14 @@ fn normalize_orientation(img: DynamicImage, orientation: u32) -> DynamicImage {
 ///   so stripping the tag doesn't silently re-orient the image for viewers that no longer see it.
 /// - **Rename { .. }** — a filename-only concern the planner (`batch_media::plan`) already handles; a
 ///   no-op here since this function only ever sees bytes, never a path.
+/// - **Compress { quality }** — affects the ENCODE step, not the pixel data: it sets the re-encode
+///   quality applied at the end, for whichever format is the *target* at that point (so ordering with
+///   `Convert` matters — a `Convert` after a `Compress` re-targets which encoder the quality applies to;
+///   a `Convert` before it is the common case: "convert to jpeg, then compress it"). Only the JPEG
+///   encoder in this crate's enabled feature set exposes a quality knob (`JpegEncoder::new_with_quality`)
+///   — the vendored WebP encoder here is lossless-only, and png/gif/bmp/tif have no quality parameter at
+///   all — so on every other target format this is a graceful no-op: it still succeeds, it just re-encodes
+///   at that format's normal (lossless-for-that-format) settings.
 pub fn apply_ops(input: &[u8], ops: &[MediaOp]) -> Result<Vec<u8>, String> {
     let mut reader = ImageReader::new(Cursor::new(input))
         .with_guessed_format()
@@ -102,6 +111,8 @@ pub fn apply_ops(input: &[u8], ops: &[MediaOp]) -> Result<Vec<u8>, String> {
         .ok_or_else(|| "unrecognized image format".to_string())?;
     let mut img = reader.decode().map_err(|e| e.to_string())?;
     let mut target_format = source_format;
+    // Set by `Compress`; only consulted for encoders that expose a quality knob (currently JPEG).
+    let mut encode_quality: Option<u8> = None;
 
     for op in ops {
         match op {
@@ -134,11 +145,26 @@ pub fn apply_ops(input: &[u8], ops: &[MediaOp]) -> Result<Vec<u8>, String> {
                 // carries EXIF/IPTC/XMP along — the re-encode itself is the "strip".
             }
             MediaOp::Rename { .. } => {} // filename concern; the planner handles it, not this fn
+            MediaOp::Compress { quality } => {
+                // Saturating/validated: the planner's `validate()` already rejects 0/>100, but clamp
+                // defensively so this never panics even if called past that guard.
+                encode_quality = Some((*quality).clamp(1, 100));
+            }
         }
     }
 
     let mut out = Cursor::new(Vec::new());
-    img.write_to(&mut out, target_format).map_err(|e| e.to_string())?;
+    match (target_format, encode_quality) {
+        (ImageFormat::Jpeg, Some(quality)) => {
+            let encoder = JpegEncoder::new_with_quality(&mut out, quality);
+            img.write_with_encoder(encoder).map_err(|e| e.to_string())?;
+        }
+        // Every other target (including WebP, whose vendored encoder here is lossless-only) has no
+        // quality knob to apply — encode normally; `Compress` is a graceful no-op for these formats.
+        _ => {
+            img.write_to(&mut out, target_format).map_err(|e| e.to_string())?;
+        }
+    }
     Ok(out.into_inner())
 }
 
@@ -292,6 +318,61 @@ mod tests {
         let out = apply_ops(&input, &[MediaOp::StripMetadata]).unwrap();
         let decoded = image::load_from_memory(&out).unwrap();
         assert_eq!((decoded.width(), decoded.height()), (4, 10));
+    }
+
+    /// A JPEG fixture with enough tonal variation that quality actually changes the encoded byte size —
+    /// a flat solid-color image compresses to (near) the same tiny size at any quality, which would make
+    /// this test flaky/meaningless.
+    fn noisy_jpeg_bytes(w: u32, h: u32) -> Vec<u8> {
+        let img = image::RgbImage::from_fn(w, h, |x, y| {
+            image::Rgb([(x * 37 % 256) as u8, (y * 53 % 256) as u8, ((x + y) * 29 % 256) as u8])
+        });
+        let mut out = Cursor::new(Vec::new());
+        img.write_to(&mut out, ImageFormat::Jpeg).unwrap();
+        out.into_inner()
+    }
+
+    #[test]
+    fn compress_lower_quality_jpeg_is_smaller_and_still_decodes() {
+        let input = noisy_jpeg_bytes(64, 64);
+        let q60 = apply_ops(&input, &[MediaOp::Compress { quality: 60 }]).unwrap();
+        let q100 = apply_ops(&input, &[MediaOp::Compress { quality: 100 }]).unwrap();
+
+        assert!(q60.len() <= q100.len(), "q60 ({}) should be <= q100 ({})", q60.len(), q100.len());
+        // Both must still be valid, decodable JPEGs.
+        assert_eq!(image::guess_format(&q60).unwrap(), ImageFormat::Jpeg);
+        assert_eq!(image::guess_format(&q100).unwrap(), ImageFormat::Jpeg);
+        image::load_from_memory(&q60).unwrap();
+        image::load_from_memory(&q100).unwrap();
+    }
+
+    #[test]
+    fn compress_on_a_lossless_target_is_a_graceful_no_op() {
+        let input = png_bytes(16, 16);
+        let out = apply_ops(&input, &[MediaOp::Compress { quality: 10 }]).unwrap();
+        assert_eq!(image::guess_format(&out).unwrap(), ImageFormat::Png);
+        let decoded = image::load_from_memory(&out).unwrap();
+        assert_eq!((decoded.width(), decoded.height()), (16, 16));
+    }
+
+    #[test]
+    fn compress_applies_after_convert_targets_the_new_format() {
+        // Convert to jpeg, then compress — quality should apply to the JPEG encode, not the original PNG.
+        let input = png_bytes(32, 32);
+        let out = apply_ops(
+            &input,
+            &[MediaOp::Convert { to_ext: "jpg".into() }, MediaOp::Compress { quality: 50 }],
+        )
+        .unwrap();
+        assert_eq!(image::guess_format(&out).unwrap(), ImageFormat::Jpeg);
+    }
+
+    #[test]
+    fn compress_never_panics_across_the_full_valid_quality_range() {
+        let input = noisy_jpeg_bytes(8, 8);
+        for quality in [1u8, 25, 50, 75, 100] {
+            apply_ops(&input, &[MediaOp::Compress { quality }]).unwrap();
+        }
     }
 
     #[test]

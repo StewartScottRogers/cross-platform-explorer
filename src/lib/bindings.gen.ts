@@ -2008,7 +2008,12 @@ export type MediaOp =
 /**
  * Drop all embedded metadata (EXIF/IPTC/XMP).
  */
-{ op: "strip_metadata" }
+{ op: "strip_metadata" } | 
+/**
+ * Re-encode at a target quality (1-100) to shrink file size. Affects lossy-capable targets
+ * (jpeg/webp); formats without a quality knob (png/gif/bmp/tif) accept it as a no-op.
+ */
+{ op: "compress"; quality: number }
 /**
  * An edit the user asked for.
  */

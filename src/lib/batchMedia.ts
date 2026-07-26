@@ -43,6 +43,8 @@ export function mediaOpLabel(op: MediaOp): string {
       return `Rename "${op.template}"`;
     case "strip_metadata":
       return "Strip metadata";
+    case "compress":
+      return `Compress q${op.quality}`;
     default: {
       // Exhaustiveness guard: a new MediaOp variant must be given a label above before it compiles.
       const exhaustive: never = op;

@@ -32,6 +32,7 @@
   let rotateDegrees: "90" | "180" | "270" = "90";
   let flipDir: "horizontal" | "vertical" = "horizontal";
   let renameTemplate = "{stem}";
+  let compressQuality = 80;
   /** Placeholder text for the rename-template field — a plain JS string, so the literal `{tokens}` in it
    *  aren't parsed as Svelte template expressions the way they would be if written directly in markup. */
   const renameTemplatePlaceholder = "{stem}-{n}";
@@ -47,6 +48,7 @@
     degrees: "90" | "180" | "270",
     flip: "horizontal" | "vertical",
     template: string,
+    quality: number,
   ): MediaOp | null {
     switch (kind) {
       case "resize":
@@ -65,12 +67,24 @@
       }
       case "strip_metadata":
         return { op: "strip_metadata" };
+      case "compress":
+        return Number.isFinite(quality) && quality >= 1 && quality <= 100
+          ? { op: "compress", quality: Math.round(quality) }
+          : null;
       default:
         return null;
     }
   }
 
-  $: pendingOp = buildOp(opKind, resizeMaxPx, convertExt, rotateDegrees, flipDir, renameTemplate);
+  $: pendingOp = buildOp(
+    opKind,
+    resizeMaxPx,
+    convertExt,
+    rotateDegrees,
+    flipDir,
+    renameTemplate,
+    compressQuality,
+  );
 
   function addOp() {
     if (pendingOp) ops = [...ops, pendingOp];
@@ -213,6 +227,7 @@
           <option value="flip">Flip</option>
           <option value="rename">Rename</option>
           <option value="strip_metadata">Strip metadata</option>
+          <option value="compress">Compress</option>
         </select>
         {#if opKind === "resize"}
           <input class="num" type="number" min="1" bind:value={resizeMaxPx} aria-label="Max size in pixels" />
@@ -232,6 +247,9 @@
           </select>
         {:else if opKind === "rename"}
           <input class="grow" placeholder={renameTemplatePlaceholder} bind:value={renameTemplate} aria-label="Rename template" />
+        {:else if opKind === "compress"}
+          <input class="num" type="number" min="1" max="100" bind:value={compressQuality} aria-label="Compress quality" />
+          <span class="lbl">quality (1-100)</span>
         {/if}
         <button class="btn" disabled={!pendingOp} on:click={addOp}>+ Add</button>
       </div>
