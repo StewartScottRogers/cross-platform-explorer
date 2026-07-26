@@ -4158,8 +4158,22 @@ fn serve_ai_console_requests(
                         if state.starts_with("cost:") =>
                     {
                         use tauri::Emitter;
-                        if let Ok(v) = serde_json::from_str::<serde_json::Value>(&state["cost:".len()..]) {
-                            let _ = app.emit("ai-console://agent-cost", v);
+                        // Typed, validated payload: parse into a struct so a malformed/partial frame is
+                        // DROPPED rather than forwarded (more defensive than a bare Value), and the
+                        // cost-ledger panel (CPE-1098) has a stable shape to consume. Advisory only
+                        // (best-effort PTY scrape — see `usage.rs`), never billing.
+                        #[derive(Clone, serde::Deserialize, serde::Serialize)]
+                        #[serde(rename_all = "camelCase")]
+                        struct AgentCostEvent {
+                            session_id: String,
+                            input_tokens: u64,
+                            output_tokens: u64,
+                            cost_usd: f64,
+                        }
+                        if let Ok(ev) =
+                            serde_json::from_str::<AgentCostEvent>(&state["cost:".len()..])
+                        {
+                            let _ = app.emit("ai-console://agent-cost", ev);
                         }
                     }
                     // Other non-request frames (Lifecycle, other Status) need no reply here.
