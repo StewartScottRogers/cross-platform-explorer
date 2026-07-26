@@ -4,7 +4,7 @@ title: "Gate scope verdict — ai_console::gate_scope (allow-root + deny/secret)
 type: feature
 component: Backend
 priority: medium
-status: Backlog
+status: Doing
 tags: ready
 created: 2026-07-25
 epic: CPE-729

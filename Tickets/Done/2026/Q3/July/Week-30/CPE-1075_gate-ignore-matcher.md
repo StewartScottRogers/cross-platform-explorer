@@ -4,7 +4,7 @@ title: "Gate ignore matcher — ai_console::gate_ignore (gitignore-style path-vs
 type: feature
 component: Backend
 priority: medium
-status: Doing
+status: Done
 tags: ready
 created: 2026-07-25
 epic: CPE-729
