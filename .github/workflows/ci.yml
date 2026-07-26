@@ -150,6 +150,7 @@ jobs:
             ./crates/sftp -> target
             ./crates/webdav -> target
             ./crates/vfs -> target
+            ./crates/updater-verify -> target
 
       - name: contract — clippy + test
         working-directory: crates/contract
@@ -206,6 +207,18 @@ jobs:
         # The scheme router (CPE-616): open(connection, secret, …) -> boxed FileSystemProvider, dispatching
         # to cpe-sftp / cpe-webdav. Ties the connections model to the concrete remote providers.
         working-directory: crates/vfs
+        run: |
+          cargo clippy --all-targets -- -D warnings
+          cargo test
+
+      - name: updater-verify — clippy + test
+        # The headless updater-manifest + minisign signature guard (CPE-1058): parses tauri-action's
+        # latest.json, checks shape + version, and verifies each platform's minisign signature against the
+        # configured pubkey — retiring the CI-automatable part of manual-test burndown #6 (auto-update flow).
+        # Standalone + NOT a dependency of src-tauri (the shipped app keeps using tauri_plugin_updater); the
+        # one crypto dep (minisign) is confined here. The 3-OS matrix is the slice-A pin for the hermetic
+        # tests (valid / tampered / wrong-key / version-mismatch / malformed).
+        working-directory: crates/updater-verify
         run: |
           cargo clippy --all-targets -- -D warnings
           cargo test

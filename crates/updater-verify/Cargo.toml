@@ -1,0 +1,30 @@
+[package]
+name = "cpe-updater-verify"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.77.2"
+description = "Standalone updater-manifest + minisign signature verification guard for Cross-Platform Explorer (CPE-1058): parses tauri-action's latest.json, checks its shape + version, and verifies each platform's minisign signature against the configured pubkey over the real artifact bytes — the same check the runtime updater plugin performs, but headless and app-free."
+license = "MIT"
+
+# Retires the CI-automatable part of the manual auto-update sanity check (manual-test burndown #6).
+# Deliberately STANDALONE — out of the app's cargo workspace, like the sibling crates/* — and NOT a
+# dependency of `src-tauri`: the shipped app keeps using `tauri_plugin_updater` unchanged. The one crypto
+# dependency (`minisign`, the same library Tauri's own signer/verifier uses) is confined here so it never
+# enters the shipped binary. Pure Rust, no async runtime, no C tooling — lints + tests on every shipped OS.
+
+[dependencies]
+# Same minisign library Tauri uses; drives the real key/signature parse + verify path (no hand-rolled crypto).
+minisign = "0.9"
+serde_json = "1"
+# Tauri double-base64-encodes both the config `pubkey` and each manifest `signature`; standard base64.
+base64 = "0.22"
+
+# Slice B — the real-release guard: reads pubkey + version from tauri.conf.json, locates the produced
+# latest.json + updater artifacts, and fails the release on a manifest that wouldn't verify.
+[[bin]]
+name = "verify-release-artifacts"
+path = "src/bin/verify-release-artifacts.rs"
+
+[dev-dependencies]
+# The Slice-B integration test builds a real config + manifest + artifact in a temp dir and runs the bin.
+tempfile = "3"

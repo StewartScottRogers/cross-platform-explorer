@@ -106,6 +106,31 @@ jobs:
           # Emit the updater manifest consumed by tauri.conf.json endpoints.
           includeUpdaterJson: true
 
+      # CPE-1058 — verify the updater manifest we just built, before it ships. Reads pubkey + version from
+      # tauri.conf.json, locates this runner's freshly-built latest.json + updater artifacts under
+      # src-tauri/target, and re-checks each platform's minisign signature against the configured pubkey
+      # over the real artifact bytes — the same check the runtime plugin performs. Fails the release on a
+      # bad manifest (wrong signature / version mismatch / malformed). Guarded by the signing-key secret so
+      # it SKIPS (never fails) when updater signing isn't configured, mirroring the catalog job below and
+      # the OS-code-signing pattern above, keeping fork/PR builds green. The verify crate is standalone and
+      # NOT linked into the app (its minisign dep never enters the shipped binary).
+      - name: Detect updater signing key
+        id: sig
+        shell: bash
+        env:
+          KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+        run: |
+          if [ -n "$KEY" ]; then echo "has=true" >> "$GITHUB_OUTPUT"; else echo "has=false" >> "$GITHUB_OUTPUT"; fi
+
+      - name: Verify updater manifest + signatures (CPE-1058)
+        if: steps.sig.outputs.has == 'true'
+        working-directory: crates/updater-verify
+        shell: bash
+        run: |
+          cargo run --release --bin verify-release-artifacts -- \
+            --conf ../../src-tauri/tauri.conf.json \
+            --search ../../src-tauri/target
+
   # Sign + publish the agent-catalog bundle next to the installer (CPE-377/308), so the AI Console
   # can refresh its agent roster without an app release. Runs once, after the installers. Guarded by
   # the signing-key secret so it SKIPS (never fails) on repos that haven't set up catalog signing —
