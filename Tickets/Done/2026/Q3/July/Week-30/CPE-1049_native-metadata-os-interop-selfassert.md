@@ -4,7 +4,7 @@ title: "Self-asserting native-metadata OS-interop test (retire manual Get-Item -
 type: test
 component: Backend
 priority: medium
-status: Doing
+status: Done
 tags: ready
 created: 2026-07-25
 epic: CPE-717
@@ -38,13 +38,24 @@ A `#[cfg]`-gated integration test in `crates/server/tests/` that, on a temp file
    the manual note for that platform — don't fake it.
 
 ## Acceptance Criteria
-- [ ] A cargo test writes via `native_meta` and reads back via the OS-native path (Windows ADS `path:stream`
-      / Linux+macOS getfattr/getxattr), asserting equality — passing on the `Backend` 3-OS CI matrix.
-- [ ] Unsupported-filesystem case degrades (skips/passes), never a false CI failure.
-- [ ] No new deps; `cargo test -p cpe-server` + clippy clean both modes on all three OSes.
-- [ ] Burndown #8 flips to ✅ once the test is green in the 3-OS matrix, naming that job as the pin.
+- [x] A cargo test writes via `native_meta` and reads back via the OS-native path (Windows ADS `path:stream`
+      / Linux+macOS getfattr/getxattr), asserting equality — passing on the 3-OS CI matrix.
+- [x] Unsupported-filesystem case degrades (skips/passes), never a false CI failure.
+- [x] No new deps; `cargo test -p cpe-server` + clippy clean both modes on all three OSes.
+- [x] Burndown #8 flips to ✅ once the test is green in the 3-OS matrix, naming that job as the pin.
 
 ## Work Log
 2026-07-25 (workshift) — Filed by the QA Architect as the next clean headless MVD win (GUI surfaces #3/#4
 are blocked on a self-hosted runner; this needs no user resource). Builds on the CPE-717 native_meta
 modules + the existing `native_tags_demo` example.
+
+2026-07-25 (workshift, Foreman) — Prior session had built the test (`crates/server/tests/native_meta_os_interop.rs`,
+189 lines) into PR #367, CI-green on the whole 3-OS backend/server matrix but never reviewed. Ran the
+gauntlet: **Reviewer APPROVE** (confirmed Windows `path:stream` read genuinely bypasses `native_meta::read`,
+namespacing correct, degrade branches tight, not hollow) + **UAT PASS** (ran the test locally on Windows:
+`test result: ok. 1 passed`, assertion genuine). Reviewer flagged one non-blocking gap — the `Server crates`
+Linux leg didn't install `attr`, so `getfattr` could be absent and the Linux branch would silently skip.
+Folded in the fix (added `apt-get install -y attr` to the ubuntu leg of the Server-crates CI job) so the
+Linux OS-interop assertion always runs. Re-ran CI: all Backend + Server-crates legs green on ubuntu/windows/
+macos. **Merged (squash) to main.** Burndown #8 → ✅ automated (pinned by the `Backend` + `Server crates`
+3-OS `cargo test` jobs). MVD 8 → 7.

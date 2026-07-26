@@ -4,7 +4,7 @@ The authoritative list of every app aspect that still needs a **human** to verif
 that will retire each one. The QA Architect drives the **still-manual count (MVD) toward zero** and never
 lets an automated row silently regress. Charter + rules: [README.md](README.md).
 
-**MVD (still-manual surfaces): 8** · _baseline seeded 2026-07-25; update the count on every flip._
+**MVD (still-manual surfaces): 7** · _baseline seeded 2026-07-25; row #8 flipped ✅ 2026-07-25 (CPE-1049)._
 
 ## Legend
 `⛰ manual` = still needs human eyes · `🔧 in progress` = automation ticket open · `✅ automated` = retired,
@@ -21,7 +21,7 @@ pinned by a CI/guard job (must never regress).
 | 5 | **macOS Finder tag byte-interop** (Finder actually reads CPE's tag bytes) | codec round-trips in unit tests; real Finder unverified | ⛰ manual | macOS runner asserting via `mdls`/Finder that written tags are read back by the OS | CPE-828 (attended) |
 | 6 | **Auto-update flow** (updater downloads, verifies signature, swaps in place) | none end-to-end | ⛰ manual | Staged updater E2E against a test endpoint + signed test artifact in CI | _unfiled_ |
 | 7 | **Real remote network run** (non-loopback client↔server over the wire) | loopback via `cpe-net` example + unit tests | ⛰ manual | Containerised two-host network E2E in CI (server container + client), asserting listing over a real socket | CPE-819/820 |
-| 8 | **Native OS metadata interop** (ADS on Win, xattr on Linux) verified with OS tools | `native_tags_demo` prints values; human runs `Get-Item -Stream` / `getfattr` to confirm | 🔧 in progress | Make the example **self-assert** by re-reading via the OS tool and comparing, then run it in the 3-OS matrix | CPE-1049 |
+| 8 | **Native OS metadata interop** (ADS on Win, xattr on Linux) verified with OS tools | **self-asserting `cargo test`** (`native_meta_os_interop.rs`) reads back via the OS's own path (`file:stream` on Win / `getfattr` on Linux / `xattr` on macOS) and compares bytes | ✅ automated | Done — pinned by the `Backend` + `Server crates` 3-OS `cargo test` jobs (ubuntu leg now installs `attr` so `getfattr` always runs) | CPE-1049 |
 
 ## Already automated (the ratchet — must never regress to manual)
 
