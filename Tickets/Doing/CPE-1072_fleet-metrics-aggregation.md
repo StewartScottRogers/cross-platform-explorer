@@ -54,3 +54,30 @@ Sums `saturating_add`; averages guarded (count 0 → 0.0). All compute structs `
 ## Work Log
 2026-07-25 (workshift) — Filed by the Product Manager as a CPE-731 slice. Held in Backlog: depends on CPE-1071
 (`SessionMetrics`) landing first.
+
+2026-07-25 (workshift, Worker, overnight) — Built. CPE-1071 (`session_metrics::SessionMetrics`) had already
+merged to `main` by the time this was picked up; branched `cpe-1072-fleet-metrics` off latest `main`. Added
+`sidecar/ai-console/src/fleet_metrics.rs` with `SessionAverages`, `FleetRollup`, a private
+`add_saturating(a, b) -> SessionMetrics` helper (every integer field via `u64::saturating_add`, `cost_usd` via
+plain `f64 +=`), and `aggregate(sessions: &[(String, String, SessionMetrics)]) -> FleetRollup`. Registered
+`pub mod fleet_metrics;` in `lib.rs` immediately after `pub mod model_catalog;` as directed — auto-merged
+cleanly alongside CPE-1073's unrelated `pub mod throughput;` addition that had landed on `main` in the
+meantime.
+
+Division-safe averages: `session_count == 0` short-circuits to `SessionAverages::default()` (all `0.0`)
+before any division is attempted — the `sum / count as f64` path only runs inside the `else` branch where
+`count > 0`, so there is no div-by-zero/NaN/inf path at all, not even a guarded one.
+
+Assumption: the design's `SessionMetrics` has no `Eq`/`Ord`, and `by_model`/`by_agent` values are whole
+`SessionMetrics` structs (not scalars) per the ticket's struct sketch — summed with the same
+`add_saturating` helper as `totals`, keyed by the tuple's `model_id`/`agent_id` strings respectively.
+
+7 new tests: 0-session (zero totals + zero averages, asserted field-by-field), saturating totals across
+mixed agents/models, per-model + per-agent split correctness + sorted-key order, a known-averages case,
+u64::MAX + u64::MAX saturation without panic (also fixed the test helper itself, which initially overflowed
+computing `total_tokens` with plain `+` in debug mode — switched it to `saturating_add`), and a single-session
+identity check.
+
+Verify (from `sidecar/ai-console`): `cargo test` → 371 passed, 0 failed, 2 ignored (up from 362 pre-change +
+7 new + CPE-1073's tests that landed concurrently). `cargo clippy --all-targets -- -D warnings` → clean, no
+new deps added. Pushed `cpe-1072-fleet-metrics`, opened the PR.
