@@ -395,6 +395,11 @@ pub mod perceptual;
 /// dependencies.
 pub mod simhash;
 
+/// Boolean query grouping — `OR`/`NOT`/parentheses over opaque leaf tokens (CPE-1062, epic CPE-703).
+/// Complements the AND-only [`index_query`] grammar with real boolean structure; std-only, no deps,
+/// tested with a stub leaf matcher so it needs none of the sibling filter modules.
+pub mod query_group;
+
 /// Archive-vs-folder diff (CPE-1057, epic CPE-705): classify an archive's entries against a
 /// destination folder's listing — "what's in this zip I don't already have" before extracting.
 /// Pure, no new deps.

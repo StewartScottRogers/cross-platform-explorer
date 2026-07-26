@@ -4,7 +4,7 @@ title: "Search boolean grouping — cpe_server::query_group (OR / NOT / parenthe
 type: feature
 component: Backend
 priority: high
-status: Doing
+status: Done
 tags: ready
 created: 2026-07-25
 epic: CPE-703
@@ -53,3 +53,41 @@ pub fn eval(node: &Node, leaf: &impl Fn(&str) -> bool) -> bool;
 2026-07-25 (workshift) — Filed by the Product Manager as the CPE-703 DSL slice that turns the filters into a
 real query language. Independent of the sibling filter modules (stub leaf matcher). One-line lib.rs `pub mod`
 at a distinct anchor.
+
+2026-07-25 (workshift Worker, overnight, unattended) — Implemented `crates/server/src/query_group.rs`:
+recursive-descent parser (`lex` → `parse_or` → `parse_and` → `parse_not` → `parse_atom`) producing
+`Node::{And,Or,Not,Leaf}`, plus `eval` against a caller-supplied leaf predicate. Registered
+`pub mod query_group;` in `lib.rs` immediately after `pub mod simhash;` per the anchor instruction.
+
+Rules implemented (all documented in the module doc comment):
+- Precedence low→high: `OR` < implicit/explicit `AND` (juxtaposition or the word `AND`) < `NOT`/`-` < `( … )`.
+- `-token` (no space) lexes identically to `NOT token`; `OR`/`AND`/`NOT` keywords are matched
+  case-insensitively; leaf token text itself is preserved verbatim (not lowercased) since a leaf is opaque
+  and a later ticket maps it to a real filter (e.g. `size:>1mb`) where case may matter.
+- Empty/whitespace-only query → `Node::And(vec![])`, which `eval`s to `true` (matches everything) via
+  `Iterator::all` over zero items — no panic.
+- Unbalanced parens tolerated, never a parse error: an unclosed `(` auto-closes at EOF (contents run to
+  end of input); a stray unmatched `)` is skipped as a no-op and parsing continues, ANDing together
+  whatever was parsed before and after it.
+- `eval`: `And` = all(), `Or` = any(), `Not` = negation, `Leaf` = the caller's predicate. Verified De Morgan
+  (`NOT (a OR b)` == `(NOT a) AND (NOT b)`) across all 4 truth combinations in a parametrised test.
+
+Verification (from `crates/server`):
+- `cargo test` — **831 passed; 0 failed** (17 new in `query_group::tests`, no existing test touched or
+  broken; `index_query.rs` untouched as required).
+- `cargo clippy --all-targets -- -D warnings` — clean.
+- `cargo clippy --all-targets --features index -- -D warnings` — clean.
+- No new dependencies added; module is std-only, no `std::path`, no `#[cfg]`-gated behavior — safe across
+  the 3-OS CI matrix.
+
+Assumptions (none blocking, logged for the user):
+1. `OR`/`AND`/`NOT` keywords matched case-insensitively (`or`, `Or`, `OR` all work) — not explicit in the
+   ticket but consistent with common query-DSL conventions and the "tolerate gracefully" spirit; leaf text
+   itself stays case-preserved.
+2. A leaf token never contains `(`/`)` (parens are hard lexical separators regardless of adjacency to a
+   word) — matches the ticket's "opaque leaf tokens" framing (e.g. `size:>1mb`, no parens expected).
+3. Degenerate empty AND-groups that can arise mid-parse from tolerant recovery (e.g. two `OR`s in a row,
+   `a OR OR b`, or a lone stray `)`) fold to the same `And(vec![])` match-everything placeholder as the
+   top-level empty query, for one consistent "nothing here" semantics rather than a special-cased error node.
+
+No blockers. Branch `cpe-1062-query-group`, PR opened targeting `main`.
