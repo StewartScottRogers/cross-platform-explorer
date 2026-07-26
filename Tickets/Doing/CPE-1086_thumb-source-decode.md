@@ -67,3 +67,32 @@ reading the extension. No `#[cfg]`. **Assert dims/aspect, never exact PNG byte l
 2026-07-26 (workshift) — Filed by the Product Manager as the CPE-718 source-decode + integration slice. Held
 in Backlog: depends on CPE-1085 (`thumb_orient`) landing first. The minimal-PSD fixture is the riskiest bit —
 fallback path documented above.
+
+2026-07-26 (workshift, Worker) — Built end-to-end:
+- New `crates/server/src/thumb_source.rs`: `decode_thumb_image(path) -> Result<(DynamicImage, Vec<u8>), String>`.
+  Reads bytes once; `.psd` (lowercased ext via `crate::model::extension_of`) dispatches to
+  `psd::Psd::from_bytes` → RGBA composite → `image::RgbaImage::from_raw` → `DynamicImage::ImageRgba8`
+  (mirrors `image_preview.rs`); everything else decodes via `image::ImageReader` with a local
+  `bounded_limits()` copy of `batch_transform::bounded_limits` (`max_image_width`/`max_image_height` =
+  20,000, `max_alloc` = 256 MiB) — same values, same "documented local copy" precedent `thumb_orient`
+  established. Registered `pub mod thumb_source;` in `lib.rs` immediately after `pub mod thumb_cache;`.
+- `thumbnail.rs::make_thumbnail_png` rewritten to `decode_thumb_image` + `thumb_orient::orient_for_display`
+  + the existing `thumbnail(edge,edge)` downscale + PNG encode. Signature/behavior unchanged; the
+  existing `make_thumbnail_png_downscales_and_preserves_aspect` test still passes untouched.
+- **Minimal-PSD fixture: built successfully, no fallback needed.** Hand-built an uncompressed 8BPS PSD
+  (26-byte header, three empty length-0 sections for color-mode-data/image-resources/layer-and-mask, then
+  a raw-compression planar R/G/B image-data section) by reading the vendored `psd` crate's own section
+  parsers (`sections/file_header_section.rs`, `sections/mod.rs`, `sections/image_data_section.rs`) to get
+  the exact byte layout right (big-endian ints; each "empty" section is just its own zero `u32` length,
+  which every section parser accepts). `decode_thumb_image` on this fixture returns the declared dims and
+  the correct composited (opaque) pixel from the R/G/B planes.
+- Tests added: `thumb_source.rs` (minimal-PSD dims + pixel check, corrupt-`.psd` vs corrupt-raster error
+  paths are distinct, normal PNG decodes, 100k×100k IHDR decompression-bomb PNG → `Err`); `thumbnail.rs`
+  (PSD → downscaled PNG via `make_thumbnail_png`, wide orientation=6 JPEG → portrait thumbnail end-to-end).
+  Assertions are dims/aspect only, never exact PNG byte lengths (3-OS encoder variance per project
+  convention).
+- Verify: `cargo test` — 995 passed, 0 failed (from `crates/server`). `cargo clippy --all-targets -- -D
+  warnings` clean; `cargo clippy --all-targets --features index -- -D warnings` clean. No `Cargo.toml`
+  changes — confirmed no new dependencies (`git diff --stat` touches only the three `.rs` files).
+- Assumption: none beyond the ticket's own design — no ambiguity hit during implementation.
+- No blockers.

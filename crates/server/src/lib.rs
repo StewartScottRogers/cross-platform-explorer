@@ -328,6 +328,10 @@ pub mod thumb_orient;
 /// the pure cache-management model the universal thumbnail pipeline sits on (CPE-939, epic CPE-718).
 pub mod thumb_cache;
 
+/// Thumbnail source decode — PSD (via vendored `psd`) + bomb-guarded raster decode, returning the raw
+/// bytes alongside the image so the caller can apply EXIF orientation (CPE-1086, epic CPE-718).
+pub mod thumb_source;
+
 /// Image preview — TIFF/PSD → PNG data-URL transcode + dimensions/EXIF metadata (CPE-099/101/659).
 pub mod image_preview;
 
