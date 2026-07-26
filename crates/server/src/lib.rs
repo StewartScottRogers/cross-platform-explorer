@@ -104,6 +104,11 @@ pub mod restore_plan;
 /// JSON-lines of Agent Watch filesystem activity, bounded/rotated. Pure helpers over a base dir.
 pub mod audit_journal;
 
+/// Scrubber transport model for activity replay: step to next/previous distinct event ts, slice a
+/// half-open playback window, and advance the playhead by a speed-scaled delta (CPE-1064, epic
+/// CPE-728). Pure `ts`-only math, independent of the projection core.
+pub mod replay_transport;
+
 /// Agent Board backend (CPE-520): read the repo's `Tickets/` folders as Kanban cards + move a card
 /// between columns. Pure card/frontmatter logic (the Tauri commands do the file I/O).
 pub mod ticket_board;

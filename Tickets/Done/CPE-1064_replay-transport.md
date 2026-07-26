@@ -4,7 +4,7 @@ title: "Scrubber transport model — cpe_server::replay_transport (step / window
 type: feature
 component: Backend
 priority: medium
-status: Doing
+status: Done
 tags: ready
 created: 2026-07-25
 epic: CPE-728
@@ -52,3 +52,22 @@ ts (sort defensively if needed).
 2026-07-25 (workshift) — Filed by the Product Manager as a CPE-728 slice. Independent of the projection core
 (ts-only). One-line lib.rs `pub mod` at a distinct anchor. Saturating-arithmetic requirement per this shift's
 reviewer-caught overflow bugs.
+
+2026-07-25 (workshift, Worker) — Built `crates/server/src/replay_transport.rs` end-to-end: `step_next`/
+`step_prev` (next/prev *distinct* ts via `filter().min()/.max()`, so duplicate timestamps are transparently
+skipped without any special-case code), `events_in_window` (half-open `[t0,t1)`, returns empty early if
+`t1 <= t0`), and `advance` (saturating `delta_ms.saturating_mul(speed_num) / speed_den`, then
+`cursor.saturating_add(scaled)`, clamped to `[start,end]`; `speed_num == 0` or `speed_den == 0` short-circuits
+to a clamped no-op before the division so a `den == 0` never divides). Registered `pub mod replay_transport;`
+immediately after `pub mod audit_journal;` in `lib.rs` per the anchor instruction.
+Assumption: `advance`'s clamp treats `[start,end]` defensively (swaps if `start > end`) since the signature
+doesn't statically enforce ordering — not in the acceptance criteria but cheap insurance against a caller bug
+panicking nothing (it's just a compare, no risk either way).
+20 new unit tests added (step/prev distinct-ts + duplicate-skip + out-of-range `None`, half-open window
+inclusion/exclusion + empty-range guard, advance in-range/scaled-by-speed/clamp-high/clamp-low/speed-0/
+den-0 no-op (including a no-op that still clamps an out-of-range cursor)/the `u64::MAX` saturation case from
+the acceptance criteria plus a variant with a non-zero `start`). No new deps — confirmed via `git diff`
+showing only `lib.rs` + the new file touched, no `Cargo.toml`/`Cargo.lock` changes.
+Verify: `cargo test -p cpe-server` → 897 passed, 0 failed (20 new + all pre-existing green).
+`cargo clippy --all-targets -- -D warnings` clean; `cargo clippy --all-targets --features index -- -D
+warnings` clean. Opened PR, moving to Done.
