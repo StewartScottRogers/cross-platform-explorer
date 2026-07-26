@@ -102,6 +102,13 @@ reviewer-prescribed fix), then **re-review + re-run UAT** — loop until both ar
 ticket / PR. **CI green is a further automated check** but does **not** replace the
 human-style Reviewer — a green build can still ship wrong logic or hollow tests.
 
+**Reviewer and UAT return machine-checkable verdicts** — a one-line `APPROVE` / `CHANGES REQUESTED` (with the
+exact findings) and `UAT PASS` / `UAT FAIL` (with the commands run + observed output) — so the Foreman's merge
+step is a **rubber-stamp on evidence, not a re-read of the diff**. That keeps per-PR Foreman cost low, which is
+what lets the single merge lock keep pace with a wide worker pool. When several approved PRs are green and touch
+**disjoint** files, the Foreman **batch-merges them back-to-back** in one drain pass (re-checking that each
+still rebases clean) instead of paying a full context-switch per PR.
+
 Every code change goes through a `CPE-NNN` ticket; **not pushed = not done**. Land each: branch (never
 `main`) → checks → review → merge → push.
 
@@ -141,9 +148,20 @@ time** — size everything else around that.
 
 **At each dispatch:**
 
-- **Right-size parallelism.** Run enough workers to keep the machine busy, but not so many that finished PRs
-  queue up behind the serial merge. Rule of thumb: dispatch as many **independent, low-conflict** tickets as
-  are ready; hold back ones that touch the same files/crate (they'd collide on merge anyway).
+- **Keep a deep ready bench.** Parallel width is capped by *ready, independent* tickets, not worker count — a
+  queue of 3 non-colliding tickets can't feed 10 workers. Keep at least (target parallelism) tickets pre-sliced
+  and ready at all times, each tagged with its **conflict surface** (the crate/files it touches) so the Foreman
+  can grab N provably-non-overlapping ones at a glance. When the bench runs low, the Foreman tasks the
+  PM/Researchers to decompose the next epic *ahead* of need — never let workers idle for lack of sliced work.
+  Favour slicing along the crate seam (`cpe-server` / format crates) so more tickets are independent by
+  construction — architecture is itself a throughput lever.
+- **Right-size parallelism to *measured* capacity.** Set the worker count from this machine's real cores/RAM,
+  not a habit number — read the core count once at kickoff (`nproc` / `sysctl -n hw.ncpu` /
+  `$env:NUMBER_OF_PROCESSORS`) and cap total agents near `min(cores − 2, ready-independent-tickets)`. **Cap
+  concurrent Rust builds separately and lower** than total agents: a full `cargo build` + `clippy` ×2 + tests is
+  CPU/RAM-hungry, and over-subscribing builds *thrashes* — total useful work drops. Stagger worker dispatch so
+  their heavy build phases interleave rather than all hitting disk/CPU at once. Still hold back tickets that
+  touch the same files/crate (they'd collide on merge anyway).
 - **Batch the trivial.** Several tiny same-crate/same-file tickets → **one** worker doing them in sequence,
   not N worktrees each paying spin-up cost.
 - **Cheapest capable model** per the right-sizing tiers above — audit that the tier actually matches the
@@ -157,8 +175,9 @@ time** — size everything else around that.
 - **Idle capacity?** Machine free but few workers running → pull the next ready ticket forward now.
 - **Stuck / looping agent?** Escalate its model or re-scope the task rather than letting it burn loops
   (per the right-sizing rule) — don't wait for it to fail on its own.
-- **Merge queue backing up?** PRs approved but unmerged → stop dispatching new workers and drain the merge
-  queue first, so reviewed work actually ships (*not pushed = not done*).
+- **Merge queue backing up?** PRs approved but unmerged → stop dispatching new workers and **drain with a
+  batch-merge pass** (approved + green + disjoint files → merge in sequence, re-checking each rebases clean),
+  so reviewed work actually ships (*not pushed = not done*).
 - **Review queue backing up?** PRs waiting on Reviewer/UAT → spin up more reviewers in parallel before
   adding more builders.
 

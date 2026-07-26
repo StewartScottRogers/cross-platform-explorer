@@ -43,3 +43,4 @@ These are **not** MVD; listed so the QA Architect pins them and audits for regre
 - When a row flips to ✅, decrement the MVD count in the header and name the pinning CI job in the row.
 
 | CPE-1090 | Code-preview outline strip / pills reflow / breadcrumb-on-scroll / jump feel | headless UAT only — interactive visual render on installed build still needs human eyes | open | 2026-07-26 |
+| CPE-1091 | Per-line gutter/fold/minimap/indent-guides visual render | headless UAT+review only — fold animation, minimap drag, gutter alignment on WebView2 need human eyes | open | 2026-07-26 |
