@@ -4,7 +4,7 @@ title: "Batch-Media dialog — ordered ops, live plan preview, streamed progress
 type: feature
 component: Frontend
 priority: high
-status: Backlog
+status: Doing
 tags: ready
 created: 2026-07-26
 epic: CPE-723

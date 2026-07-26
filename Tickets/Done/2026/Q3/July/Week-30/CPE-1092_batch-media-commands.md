@@ -4,7 +4,7 @@ title: "Batch-media commands — plan/validate + streamed execute (GUI #2 enable
 type: feature
 component: Backend
 priority: high
-status: Doing
+status: Done
 tags: ready
 created: 2026-07-26
 epic: CPE-723
