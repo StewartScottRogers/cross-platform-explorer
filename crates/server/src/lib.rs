@@ -237,6 +237,10 @@ pub mod shell_menu;
 /// Archive listing — browse into zip/tar/gzip/7z/iso without extracting (CPE-064/109/110/113).
 pub mod archive;
 
+/// Archive container format detector — pure magic-byte + extension sniff, no archive crate (CPE-1054,
+/// epic CPE-705).
+pub mod archive_format;
+
 /// Per-line indent-guide depth for a code preview (CPE-1051, epic CPE-724).
 pub mod indent_guides;
 
