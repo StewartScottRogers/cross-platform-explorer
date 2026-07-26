@@ -92,3 +92,22 @@ _(no shifts recorded yet — first real workshift will seed this)_
 - Frontier: CPE-728 remainder is the scrubber/timeline GUI (play/pause/step/speed bar, jump-to-moment) —
   attended. These 4 modules are exactly the pure data those renderers consume. Standing order "do the next
   epic always" is in effect — rolling to the 5th epic.
+
+## 2026-07-25 (late night) — CPE-730 Multi-agent conflict radar detectors (4 shipped)
+- Shipped the full CPE-730 headless detector layer in the **sidecar ai-console crate** (not crates/server):
+  CPE-1067 conflict_rename (divergence/collision), CPE-1068 conflict_window (temporal contention, symmetric
+  saturating abs-diff), CPE-1069 conflict_owner (per-file attribution + deterministic owner), CPE-1070
+  conflict_region (folder heat-map rollup). Pure folds over conflict::AgentActivity; no deps.
+- **Zero rework again** — all 4 one-pass APPROVE. The standing briefs held: saturating arithmetic
+  (window abs-diff at u64::MAX, saturating_add counts), cross-OS string-segment paths + the prefix-collision
+  guard (region rollup: `a/` vs `ab/` stay separate via segment equality — reviewer + UAT both probed it).
+- **Sidecar-crate note for future waves:** these modules live in `sidecar/ai-console/src/` (standalone crate,
+  CI = the "Sidecar platform" 3-OS job); workers verify from `sidecar/ai-console` with plain `cargo test` +
+  `cargo clippy --all-targets -- -D warnings` (cargo at ~/.cargo/bin). conflict.rs uses PLAIN derives
+  (Debug/Clone/PartialEq/Eq — NO serde/specta); mirror that, don't add serialization.
+- Semantic call logged: conflict_window uses adjacency-in-time (windows(2)) not all-pairs, so 3+ agents chain
+  transitively — reviewer judged acceptable (documented + tested + never a false flag). Fine for a live signal.
+- Frontier: CPE-730 remainder = the radar GUI (banner / per-file "who else is here" / owner-coloured heat-map)
+  + the live per-session attribution FEED that shapes real events into these detectors' caller-shaped inputs
+  (epic notes activity isn't session-tagged yet) — both attended. Standing order "do the next epic always"
+  in effect — rolling to the 6th epic.

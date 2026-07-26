@@ -4,7 +4,7 @@ title: "Region heat-map rollup — ai_console::conflict_region (folder-level own
 type: feature
 component: Backend
 priority: medium
-status: Doing
+status: Done
 tags: ready
 created: 2026-07-25
 epic: CPE-730
