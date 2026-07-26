@@ -14,19 +14,23 @@ use crate::code_outline::{outline, Symbol};
 /// The outermost→innermost chain of symbols whose block contains 1-based `line`.
 ///
 /// # Block-extent rule
-/// Each symbol's block extent is computed independently, in this priority order:
-/// 1. **Direct match** — the fold range whose `start_line == symbol.line` (the common case: a symbol is
-///    declared on the same line its block opens, e.g. `fn foo() {`, `class Foo:`, `## Heading`). If more
-///    than one fold range opens on that exact line (e.g. two `{` on one physical line), the one with the
-///    *largest* `end_line` wins, since that is the block that actually belongs to the declaration rather
-///    than an inner block that happens to open on the same line.
-/// 2. **Smallest containing fold** — if no fold starts exactly on the symbol's line (e.g. a multi-line
-///    signature whose `{` lands on a later line), fall back to the smallest fold range that contains the
-///    symbol's line at all.
-/// 3. **Next-symbol fallback** — if the symbol has no fold range at all (a one-line `const`, a Markdown
-///    heading with no `code_folds` support for its language, an unsupported/`Other` language for
-///    `code_folds`, …), its extent runs from its own line up to (but not including) the next symbol's
-///    line, or to end-of-file if it is the last symbol.
+/// Each symbol's block extent is computed independently, and — critically — is never allowed to start
+/// *before* the symbol's own declaration line (an extent borrowed from an ancestor would otherwise match
+/// lines that belong to an unrelated sibling on either side of the symbol). Two cases:
+/// 1. **The symbol owns a fold** — a fold range whose `start_line == symbol.line` (the common case: a
+///    symbol is declared on the same line its block opens, e.g. `fn foo() {`, `class Foo:`, `##
+///    Heading`). If more than one fold range opens on that exact line (e.g. two `{` on one physical
+///    line), the one with the *largest* `end_line` wins, since that is the block that actually belongs
+///    to the declaration rather than an inner block that happens to open on the same line. Extent =
+///    that fold's `(start_line, end_line)`.
+/// 2. **The symbol owns no fold** (a one-line `const`, a multi-line signature whose `{`/`:` and matching
+///    close both land on one physical line so `code_folds`' scanner never opens a range for it, a
+///    Markdown heading with no `code_folds` support for its language, an unsupported/`Other` language
+///    for `code_folds`, …) — its extent starts at its **own** line and runs to just before the next
+///    symbol's line (or EOF if it's last), capped tighter still by the end of the smallest fold that
+///    happens to enclose its line (so it doesn't overrun its parent's block either). Because this span
+///    always starts at the symbol's own line, it can never be mistaken for an ancestor's whole range and
+///    so can never swallow a sibling declared earlier *or* later in the same enclosing block.
 ///
 /// # Selection + ordering
 /// Symbols whose extent contains `line` are kept and sorted **outermost→innermost** (ascending extent
@@ -42,11 +46,8 @@ pub fn enclosing_symbols(source: &str, lang: &str, line: usize) -> Vec<Symbol> {
     let folds = fold_ranges(source, lang);
     let total_lines = source.lines().count().max(1);
 
-    let extents: Vec<(usize, usize)> = syms
-        .iter()
-        .enumerate()
-        .map(|(i, sym)| block_extent(sym.line, &folds, &syms, i, total_lines))
-        .collect();
+    let extents: Vec<(usize, usize)> =
+        syms.iter().map(|sym| block_extent(sym.line, &folds, &syms, total_lines)).collect();
 
     let mut chain: Vec<usize> =
         (0..syms.len()).filter(|&i| extents[i].0 <= line && line <= extents[i].1).collect();
@@ -55,37 +56,27 @@ pub fn enclosing_symbols(source: &str, lang: &str, line: usize) -> Vec<Symbol> {
 }
 
 /// Compute one symbol's `(start_line, end_line)` block extent per the rule documented on
-/// [`enclosing_symbols`]. `idx` is the symbol's index into `syms` (used for the next-symbol fallback).
-fn block_extent(
-    sym_line: usize,
-    folds: &[FoldRange],
-    syms: &[Symbol],
-    idx: usize,
-    total_lines: usize,
-) -> (usize, usize) {
-    // Rule 1: a fold opening exactly on the symbol's declaration line — widest such fold wins.
+/// [`enclosing_symbols`]. `syms` is the full outline (used to find the next symbol's line for the
+/// fold-less fallback's sibling cap).
+fn block_extent(sym_line: usize, folds: &[FoldRange], syms: &[Symbol], total_lines: usize) -> (usize, usize) {
+    // Case 1: a fold this symbol itself opens (starts exactly on its declaration line) — widest wins.
     if let Some(f) = folds.iter().filter(|f| f.start_line == sym_line).max_by_key(|f| f.end_line) {
         return (f.start_line, f.end_line);
     }
-    // Rule 2: the smallest fold range that contains the symbol's line at all — but only if it doesn't
-    // also swallow a sibling. A fold-less symbol (e.g. a multi-line signature with a one-line body, so
-    // `code_folds`' brace scanner never opens a range for it) sitting inside a larger block will always
-    // find that block's own fold "containing" its line; accepting it unconditionally would hand the
-    // symbol its ancestor's whole span, wrongly pulling in any sibling declared later in that same span.
-    // So a candidate fold is only accepted if no OTHER symbol is declared strictly after this one and at
-    // or before the fold's end — otherwise it isn't really *this* symbol's own extent, and we fall
-    // through to rule 3's sibling-capped fallback instead.
-    if let Some(f) = folds
+    // Case 2: fold-less symbol — a sibling-capped span that always starts at the symbol's OWN line, so
+    // it can never be an ancestor's borrowed range and can never swallow a sibling on either side.
+    let next_symbol_cap =
+        syms.iter().filter(|s| s.line > sym_line).map(|s| s.line - 1).min().unwrap_or(total_lines);
+    let enclosing_fold_cap = folds
         .iter()
         .filter(|f| f.start_line <= sym_line && sym_line <= f.end_line)
-        .filter(|f| !syms.iter().any(|s| s.line > sym_line && s.line <= f.end_line))
-        .min_by_key(|f| f.end_line - f.start_line)
-    {
-        return (f.start_line, f.end_line);
-    }
-    // Rule 3: no fold covers this symbol at all — span to just before the next symbol, or to EOF.
-    let end = syms.get(idx + 1).map(|next| next.line.saturating_sub(1)).unwrap_or(total_lines).max(sym_line);
-    (sym_line, end)
+        .map(|f| f.end_line)
+        .min();
+    let end = match enclosing_fold_cap {
+        Some(cap) => next_symbol_cap.min(cap),
+        None => next_symbol_cap,
+    };
+    (sym_line, end.max(sym_line))
 }
 
 #[cfg(test)]
@@ -138,6 +129,44 @@ impl Foo {
     }
 
     #[test]
+    fn foldless_sibling_with_multiline_signature_does_not_swallow_the_prior_sibling() {
+        // Mirror of the regression above: the fold-less symbol (`fn a`) is now declared AFTER a folded
+        // sibling (`fn z`) instead of before it. A prior buggy fix rejected the ancestor fold only when
+        // a LATER sibling fell inside it, so this direction still leaked: `a`'s extent inherited the
+        // whole `impl` span (starting at line 1, before `a`'s own declaration at line 5), wrongly
+        // matching line 3 which is inside `fn z` only.
+        let src = "\
+impl Foo {
+    fn z(&self) {
+        w()
+    }
+    fn a(
+        x: i32,
+    ) -> i32 { x }
+}
+";
+        let got = enclosing_symbols(src, "rust", 3); // inside `w()`, within `fn z` only
+        assert_eq!(names(&got), vec![("Foo", SymbolKind::Struct), ("z", SymbolKind::Function)]);
+        assert!(!got.iter().any(|s| s.name == "a"), "fn a must not appear: {:?}", got);
+    }
+
+    #[test]
+    fn lone_foldless_child_with_no_interfering_sibling_is_still_included() {
+        // A fold-less symbol with no sibling on either side must still be reported for a line inside
+        // its own (fold-less) body — its sibling-capped span, with no next symbol, is capped by the
+        // enclosing `impl`'s fold end instead, which still covers its own body correctly.
+        let src = "\
+impl Foo {
+    fn a(
+        x: i32,
+    ) -> i32 { x }
+}
+";
+        let got = enclosing_symbols(src, "rust", 4); // inside `) -> i32 { x }`, `fn a`'s own body
+        assert_eq!(names(&got), vec![("Foo", SymbolKind::Struct), ("a", SymbolKind::Function)]);
+    }
+
+    #[test]
     fn python_class_and_method_outer_then_inner() {
         let src = "\
 class Server:
@@ -180,8 +209,7 @@ class Outer:
             .map(|s| {
                 let syms = outline(src, "python");
                 let folds = fold_ranges(src, "python");
-                let idx = syms.iter().position(|x| x.line == s.line).unwrap();
-                block_extent(s.line, &folds, &syms, idx, src.lines().count())
+                block_extent(s.line, &folds, &syms, src.lines().count())
             })
             .collect();
         for w in extents.windows(2) {

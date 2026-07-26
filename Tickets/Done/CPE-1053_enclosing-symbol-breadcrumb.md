@@ -109,3 +109,31 @@ exact repro (asserts line 7 → `["Foo", "b"]`, and that `"a"` is absent).
 - No new dependencies added; `code_outline.rs`/`code_folds.rs` untouched.
 
 Pushed fix to `cpe-1053-code-breadcrumb` — PR #371 updated.
+
+2026-07-25 (workshift, Worker) — PR #371 got CHANGES REQUESTED a second time: the previous fix's guard
+was only one-directional. It rejected the ancestor fold when a LATER sibling fell inside it, but a
+fold-less symbol declared AFTER a folded sibling (with no sibling after IT) still inherited the whole
+ancestor fold — an extent starting BEFORE its own declaration line — and swallowed the EARLIER sibling.
+
+**Root-cause fix (bidirectional by construction, per reviewer's recommended direction):** dropped the
+"smallest containing fold" rule entirely — that ancestor-inheritance was the source of both directions
+of the bug. A symbol's block extent is now exactly one of two cases: (1) it owns a fold (a fold whose
+`start_line == symbol.line`) → use that fold; (2) it owns no fold → its extent is a sibling-capped span
+that always **starts at its own declaration line** — `[symbol.line, min(next_symbol.line - 1,
+enclosing_fold_end)]` — so it can never be mistaken for an ancestor's borrowed range and can never
+swallow a sibling on either side. `block_extent` no longer takes a `syms` index; it scans all symbols by
+line directly.
+
+Added regression test `foldless_sibling_with_multiline_signature_does_not_swallow_the_prior_sibling`
+(mirror of the original repro: folded `fn z` declared before a fold-less `fn a`; asserts line 3 →
+`["Foo","z"]`, `"a"` absent) and kept both prior cases: the original forward-swallow regression test,
+and a new `lone_foldless_child_with_no_interfering_sibling_is_still_included` test confirming a lone
+fold-less child with no interfering sibling is still correctly reported.
+
+**Re-verification:**
+- `cargo test` (from `crates/server`): 777 passed, 0 failed (12 `code_breadcrumb` tests now).
+- `cargo clippy --all-targets -- -D warnings` — clean.
+- `cargo clippy --all-targets --features index -- -D warnings` — clean.
+- No new dependencies added; `code_outline.rs`/`code_folds.rs` untouched.
+
+Pushed to `cpe-1053-code-breadcrumb` — PR #371 updated.
