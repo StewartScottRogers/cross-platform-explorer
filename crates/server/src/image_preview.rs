@@ -19,6 +19,13 @@ pub fn read_image_data_url(path: &str) -> Result<String, String> {
     let png: Vec<u8> = if ext == "psd" {
         let bytes = fs::read(path).map_err(|e| e.to_string())?;
         let psd = psd::Psd::from_bytes(&bytes).map_err(|e| e.to_string())?;
+        if !crate::thumb_source::psd_within_limits(&psd) {
+            return Err(format!(
+                "PSD dimensions exceed limit ({}x{})",
+                psd.width(),
+                psd.height()
+            ));
+        }
         let rgba = psd.rgba();
         let buf = image::RgbaImage::from_raw(psd.width(), psd.height(), rgba)
             .ok_or("PSD pixel buffer size mismatch")?;
@@ -141,6 +148,58 @@ mod tests {
         fs::write(d.join("t.txt"), b"not an image").unwrap();
         let none = image_meta(&d.join("t.txt").to_string_lossy()).unwrap();
         assert!(none.width.is_none() && none.camera.is_none());
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    /// Build a minimal, valid, **uncompressed** 8BPS PSD by hand — same recipe as
+    /// `thumb_source::tests::minimal_psd` (CPE-1086/CPE-1087): a 26-byte file header (RGB, 8-bit, `width`
+    /// x `height`), three empty length-prefixed sections, then a raw planar R/G/B image-data section (no
+    /// alpha, fully opaque composite). Kept as a local copy per this file's "documented local copy"
+    /// precedent rather than reaching into another module's private test helper.
+    fn minimal_psd(width: u32, height: u32) -> Vec<u8> {
+        let mut b = Vec::new();
+        b.extend_from_slice(b"8BPS");
+        b.extend_from_slice(&1u16.to_be_bytes());
+        b.extend_from_slice(&[0u8; 6]);
+        b.extend_from_slice(&3u16.to_be_bytes());
+        b.extend_from_slice(&height.to_be_bytes());
+        b.extend_from_slice(&width.to_be_bytes());
+        b.extend_from_slice(&8u16.to_be_bytes());
+        b.extend_from_slice(&3u16.to_be_bytes());
+        b.extend_from_slice(&0u32.to_be_bytes());
+        b.extend_from_slice(&0u32.to_be_bytes());
+        b.extend_from_slice(&0u32.to_be_bytes());
+        b.extend_from_slice(&0u16.to_be_bytes());
+        let plane = (width as usize) * (height as usize);
+        b.extend(std::iter::repeat(200u8).take(plane));
+        b.extend(std::iter::repeat(100u8).take(plane));
+        b.extend(std::iter::repeat(50u8).take(plane));
+        b
+    }
+
+    #[test]
+    fn read_image_data_url_transcodes_a_normal_psd_to_png() {
+        let d = scratch("psd");
+        let f = d.join("a.psd");
+        fs::write(&f, minimal_psd(6, 4)).unwrap();
+        let url = read_image_data_url(&f.to_string_lossy()).unwrap();
+        assert!(url.starts_with("data:image/png;base64,"));
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    /// CPE-1087: a PSD declaring a width (25,000) past the shared `thumb_source::psd_within_limits`
+    /// guard's `MAX_IMAGE_DIMENSION` (20,000) — but still inside the `psd` crate's own hard-coded 30,000
+    /// header cap, so this is a genuinely valid, parseable PSD, not one the crate already rejects on its
+    /// own — must be rejected with an `Err` *before* `.rgba()`'s `width * height * 4` composite
+    /// allocation. Height is kept at 2 so the fixture's real (uncompressed) pixel data is a trivial
+    /// ~150KB rather than gigabytes.
+    #[test]
+    fn read_image_data_url_rejects_an_overwide_psd() {
+        let d = scratch("psdbomb");
+        let f = d.join("bomb.psd");
+        fs::write(&f, minimal_psd(25_000, 2)).unwrap();
+        let err = read_image_data_url(&f.to_string_lossy());
+        assert!(err.is_err(), "a PSD wider than MAX_IMAGE_DIMENSION must be rejected, not OOM/panic");
         let _ = fs::remove_dir_all(&d);
     }
 }

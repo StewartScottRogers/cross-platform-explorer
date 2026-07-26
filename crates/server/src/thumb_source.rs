@@ -33,6 +33,22 @@ fn bounded_limits() -> Limits {
     limits
 }
 
+/// Same bomb-guard budget as [`bounded_limits`], applied to a **parsed** `psd::Psd` header — the
+/// vendored `psd` crate has no size limit of its own, so a maliciously huge-declared PSD (header
+/// claiming e.g. 100,000×100,000) would otherwise sail through to `.rgba()`, which allocates
+/// `width * height * 4` bytes and OOMs. Call this BEFORE `.rgba()` at every PSD call site
+/// (`decode_thumb_image` here, and `image_preview::read_image_data_url`) so a crafted file fails fast
+/// with an `Err` instead of an unbounded allocation. Checked in `u64` so the byte-budget multiply can't
+/// overflow even for pathological declared dimensions.
+pub(crate) fn psd_within_limits(psd: &psd::Psd) -> bool {
+    let (w, h) = (psd.width(), psd.height());
+    if w > MAX_IMAGE_DIMENSION || h > MAX_IMAGE_DIMENSION {
+        return false;
+    }
+    let byte_budget = (w as u64) * (h as u64) * 4;
+    byte_budget <= MAX_ALLOC_BYTES
+}
+
 /// Decode a thumbnail source to an image + its raw bytes (the bytes let the caller read EXIF
 /// orientation — a PSD carries none, so orientation is a no-op there). Dispatches on the (lowercased)
 /// file extension: `.psd` goes through the `psd` crate's composite, everything else through `image`
@@ -43,6 +59,13 @@ pub fn decode_thumb_image(path: &Path) -> Result<(DynamicImage, Vec<u8>), String
 
     let img = if ext == "psd" {
         let psd = psd::Psd::from_bytes(&bytes).map_err(|e| e.to_string())?;
+        if !psd_within_limits(&psd) {
+            return Err(format!(
+                "PSD dimensions exceed limit ({}x{})",
+                psd.width(),
+                psd.height()
+            ));
+        }
         let rgba = psd.rgba();
         let buf = image::RgbaImage::from_raw(psd.width(), psd.height(), rgba)
             .ok_or("PSD pixel buffer size mismatch")?;
@@ -114,6 +137,34 @@ mod tests {
         let px = img.to_rgba8().get_pixel(0, 0).0;
         assert_eq!(px, [200, 100, 50, 255], "planar R/G/B composited, fully opaque");
         let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// CPE-1087: a PSD declaring a width (25,000) past our `MAX_IMAGE_DIMENSION` (20,000) — but still
+    /// inside the `psd` crate's own hard-coded 30,000 header cap, so this is a genuinely *valid,
+    /// parseable* PSD, not one the crate would already reject on its own — must be rejected by OUR guard
+    /// with an `Err` *before* `.rgba()`'s `width * height * 4` composite allocation. Height is kept at 2
+    /// so the fixture's real (uncompressed) pixel data is a trivial ~150KB rather than gigabytes; the
+    /// guard trips on the declared width alone, exactly as it would for a real huge-canvas file.
+    #[test]
+    fn decode_thumb_image_rejects_an_overwide_psd_before_allocating() {
+        let d = scratch("psdbomb");
+        let f = d.join("bomb.psd");
+        std::fs::write(&f, minimal_psd(25_000, 2)).unwrap();
+        let err = decode_thumb_image(&f);
+        assert!(err.is_err(), "a PSD wider than MAX_IMAGE_DIMENSION must be rejected, not OOM/panic");
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn psd_within_limits_direct_true_for_small_false_for_overwide() {
+        let small = psd::Psd::from_bytes(&minimal_psd(6, 4)).unwrap();
+        assert!(psd_within_limits(&small), "a normal small PSD must stay within the guard's budget");
+
+        // 25,000 x 2: past our 20,000-px guard, but still inside the psd crate's own 30,000 header cap
+        // and cheap to build with real (uncompressed) pixel data — a genuine, parseable PSD our guard
+        // must catch, not one the crate's own header validation already rejects.
+        let overwide = psd::Psd::from_bytes(&minimal_psd(25_000, 2)).unwrap();
+        assert!(!psd_within_limits(&overwide), "a PSD wider than the guard's budget must be rejected");
     }
 
     #[test]
