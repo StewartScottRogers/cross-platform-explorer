@@ -4,7 +4,7 @@ title: "Revert safety — cpe_server::revert_safety (3-way conflict classifier)"
 type: feature
 component: Backend
 priority: high
-status: Doing
+status: Done
 tags: ready
 created: 2026-07-25
 epic: CPE-732

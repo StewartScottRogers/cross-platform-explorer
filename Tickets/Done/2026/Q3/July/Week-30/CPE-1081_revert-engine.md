@@ -4,7 +4,7 @@ title: "Revert engine — cpe_server::revert_engine (surgical real-fs restore ex
 type: feature
 component: Backend
 priority: high
-status: Doing
+status: Done
 tags: ready
 created: 2026-07-25
 epic: CPE-732

@@ -4,7 +4,7 @@ title: "Revert attribution — cpe_server::revert_attribution (agent-touched pat
 type: feature
 component: Backend
 priority: high
-status: Doing
+status: Done
 tags: ready
 created: 2026-07-25
 epic: CPE-732
