@@ -131,6 +131,14 @@ jobs:
         with:
           components: clippy
 
+      # `getfattr` (package `attr`) is required by the server crate's native-metadata OS-interop test
+      # (CPE-1049, tests/native_meta_os_interop.rs) to read an xattr back through the OS's own tool,
+      # independent of native_meta::read. Without it the Linux leg would silently skip (ErrorKind::NotFound)
+      # instead of genuinely asserting OS interop — install it so the assertion always runs on Linux.
+      - name: Install attr (getfattr) for xattr interop test
+        if: matrix.os == 'ubuntu-latest'
+        run: sudo apt-get update && sudo apt-get install -y attr
+
       - name: Rust cache
         uses: swatinem/rust-cache@v2
         with:
