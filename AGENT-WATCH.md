@@ -41,6 +41,15 @@ feature-gated behind `sidecar-platform`; with no agent running the plain explore
   rollup, budget) stays unwired dead code (see
   `.claude/research-library/entries/sidecar-live-cost-usage-scanner.md`) until a future ticket wires
   live `RunRecord` capture.
+- **Activity-overlap radar (CPE-1099–1101/1100):** the drawer's "Radar" tab folds the (now
+  multi-session, actor-tagged) timeline into paths touched by ≥2 distinct actors within a short
+  window — the "two agents (or agent vs. user) editing the same file" signal — as a pill list per
+  path with a relative timestamp; clicking navigates there. Deliberately worded "activity overlap",
+  never "conflict": a raw filesystem watcher can't prove two touches came from unrelated processes vs.
+  the same agent revisiting its own file, so an overlap that includes an unresolved `"unknown"` actor
+  carries a small hedge note. Pure frontend fold over the existing timeline — no new backend surface,
+  no new listener/timer. The honest unknown-vs-agent upgrade (positively confirming a watcher write
+  came from an unrelated process) is deferred to a future ticket.
 
 ## What it is for
 

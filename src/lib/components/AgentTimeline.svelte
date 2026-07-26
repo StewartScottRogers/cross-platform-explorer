@@ -11,6 +11,7 @@
   import DiffSideBySide from "./DiffSideBySide.svelte";
   import ConsultedFiles from "./ConsultedFiles.svelte";
   import type { TimelineEntry } from "../agentActivity";
+  import type { AgentSession } from "../sidecar";
   import { agentDiffs, diffFor, diffLineStats } from "../agentDiffs";
   import { agentCost, totalTokens, formatTokens, formatUsd } from "../agentCost";
   import {
@@ -23,12 +24,17 @@
     isMultiplyEdited,
     isWriteKind,
   } from "../agentReplay";
+  import { foldOverlaps, overlapHasUnknown, friendlyActor, relativeLabel } from "../agentConflicts";
 
   export let entries: TimelineEntry[] = [];
   export let agentName = "agent";
   /** sessionId of the agent currently being watched, if any (CPE-1098) — lets the cost tab flag
    *  which reporting session is the one on screen when several sessions report usage. */
   export let sessionId = "";
+  /** Currently-running agent sessions (CPE-1100) — joined against an overlap's actor ids so the
+   *  Radar tab can show an agent's name instead of a bare sessionId. Empty is fine (falls back to a
+   *  shortened id); this component never fetches sessions itself. */
+  export let sessions: AgentSession[] = [];
 
   const dispatch = createEventDispatcher<{ navigate: string; close: void }>();
 
@@ -55,10 +61,15 @@
   };
   const clock = (at: number) => new Date(at).toLocaleTimeString();
 
-  // ---------- Replay tab (CPE-1094) / Cost tab (CPE-1098) ----------
-  /** "Live" (default, today's list), "Replay" (scrub through the session's history), or "Cost" (live
-   *  per-session token/USD usage). */
-  let tab: "live" | "replay" | "cost" = "live";
+  // ---------- Replay tab (CPE-1094) / Cost tab (CPE-1098) / Radar tab (CPE-1100) ----------
+  /** "Live" (default, today's list), "Replay" (scrub through the session's history), "Cost" (live
+   *  per-session token/USD usage), or "Radar" (activity-overlap signal across distinct actors). */
+  let tab: "live" | "replay" | "cost" | "radar" = "live";
+
+  // ---------- Radar tab (CPE-1100) ----------
+  /** Paths touched by ≥2 distinct actors within the overlap window, most-recent first (pure fold
+   *  over `entries` — no new listener/timer; see agentConflicts.ts for the hedged wording rationale). */
+  $: overlaps = foldOverlaps(entries);
 
   // ---------- Cost ledger tab (CPE-1098) ----------
   /** Reporting sessions, current-watched one first (if it has reported), then the rest sorted by id
@@ -189,6 +200,13 @@
       aria-selected={tab === "cost"}
       on:click={() => (tab = "cost")}
     ><span class="tab-label">Cost</span></button>
+    <button
+      class="tab"
+      class:active={tab === "radar"}
+      role="tab"
+      aria-selected={tab === "radar"}
+      on:click={() => (tab = "radar")}
+    ><span class="tab-label">Radar</span></button>
   </div>
 
   {#if tab === "live"}
@@ -318,7 +336,7 @@
         {/each}
       </ul>
     {/if}
-  {:else}
+  {:else if tab === "cost"}
     <!-- Cost tab (CPE-1098): live per-session usage bridged from the sidecar's best-effort PTY usage
          scrape (CPE-1097) — advisory figures, never billing (see the note below the list). -->
     {#if costList.length === 0}
@@ -336,6 +354,36 @@
             <div class="cl-row"><span class="cl-label">Output tokens</span><span class="cl-value">{formatTokens(c.outputTokens)}</span></div>
             <div class="cl-row"><span class="cl-label">Total tokens</span><span class="cl-value">{formatTokens(totalTokens(c))}</span></div>
             <div class="cl-row"><span class="cl-label">Cost (USD)</span><span class="cl-value">{formatUsd(c.costUsd)}</span></div>
+          </li>
+        {/each}
+      </ul>
+    {/if}
+  {:else}
+    <!-- Radar tab (CPE-1100): activity OVERLAP, not "conflict" — a raw watcher can't prove two
+         touches came from unrelated actors vs. the same agent revisiting its own file, so the
+         wording is deliberately hedged (agentConflicts.ts). -->
+    {#if overlaps.length === 0}
+      <div class="tl-empty">No overlapping activity — nothing has been touched by more than one actor recently.</div>
+    {:else}
+      <ul class="tl-list rd-list">
+        {#each overlaps as o (o.path)}
+          <li class="rd-item">
+            <button
+              class="tl-row rd-row"
+              title={o.path}
+              on:click={() => dispatch("navigate", dirOf(o.path))}
+            >
+              <span class="tl-name">{baseOf(o.path)}</span>
+              <span class="tl-time">{relativeLabel(o.lastAt, Date.now())}</span>
+            </button>
+            <div class="rd-actors">
+              {#each o.actors as a (a)}
+                <span class="rd-pill">{friendlyActor(a, sessions)}</span>
+              {/each}
+            </div>
+            {#if overlapHasUnknown(o)}
+              <div class="rd-note">Includes an unresolved actor — attribution here is best-effort.</div>
+            {/if}
           </li>
         {/each}
       </ul>
@@ -669,6 +717,51 @@
     color: var(--text, inherit);
     font-variant-numeric: tabular-nums;
     font-weight: 600;
+  }
+
+  /* ---------- Radar tab (CPE-1100): activity-overlap panel ---------- */
+  .rd-list {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+  }
+  .rd-item {
+    padding: 4px 4px 8px;
+    border-bottom: 1px solid var(--border, #3a3a3a);
+  }
+  .rd-item:last-child {
+    border-bottom: 0;
+  }
+  /* .rd-row reuses .tl-row's layout/hover as-is — it's the click target that navigates to the path. */
+  .rd-actors {
+    /* Tick-tacks: the pill row reflows onto more lines rather than overflowing the drawer. */
+    display: flex;
+    flex-wrap: wrap;
+    gap: 5px;
+    padding: 2px 8px 0;
+  }
+  .rd-pill {
+    flex: 0 0 auto;
+    max-width: 100%;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    padding: 1px 8px;
+    border-radius: 999px;
+    border: 1px solid var(--border, #3a3a3a);
+    background: var(--surface-alt, transparent);
+    color: var(--text, inherit);
+    font-size: 10.5px;
+    font-weight: 600;
+  }
+  .rd-note {
+    margin: 4px 8px 0;
+    padding: 3px 7px;
+    border-radius: 5px;
+    background: color-mix(in srgb, var(--warn, #b5872b) 18%, transparent);
+    color: var(--text, inherit);
+    font-size: 10px;
+    line-height: 1.4;
   }
 </style>
 
