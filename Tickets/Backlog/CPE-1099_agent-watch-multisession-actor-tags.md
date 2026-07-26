@@ -50,3 +50,16 @@ originating actor, so a conflict radar (CPE-1100) can render real (not misleadin
 2026-07-26 (workshift, GUI) — Filed as GUI #3 conflict-radar ENABLEMENT (the architecture change) from the
 Library substrate brief. `big-design` — largest of the GUI #3 slices; do LAST. Blocks CPE-1100. May warrant a
 Researcher/Plan pass at activation given the off-mode-leanness + actor-attribution subtleties.
+
+## Build spec (de-risked, 2026-07-26)
+A Plan/architect pass produced a full build spec — filed at
+`.claude/research-library/entries/agent-watch-multisession-actor-plan.md` (READ IT before building). Key
+outcomes: **product decision = WATCH ALL running sessions** (overlap detection is the radar's frontend fold,
+not a watch-selection concern; cost = 2N threads for N sessions, collapses to 0 when idle). **Split this ticket
+into sub-slices at build time:** (a) multi-session watch structural refactor — keyed
+`HashMap<sessionId,AgentWatch>`, ADD-not-replace `agent_watch_start(session_id,path)`, `agent_watch_stop(id)`
++ `agent_watch_stop_all`, frontend desired-set−armed-set reconcile with ONE shared listener pair; (b) actor
+tags — `actor` field (sessionId/"user"/"unknown") via a no-thread app-op ledger + `note_app_op` at 8 file-op
+sites + `sessionId` on `read_announcement`; (c) optional honest unknown-vs-agent via sidecar `fs-write:`
+reporting. Slice (a) is highest-risk (edits the #413 lib.rs region + off-means-off across session churn) — do
+it first behind an unchanged event shape. Build AFTER #413 merges.
