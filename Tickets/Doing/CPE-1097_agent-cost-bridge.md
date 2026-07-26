@@ -4,7 +4,7 @@ title: "Agent Watch: bridge live per-session usage (tokens + cost) to the fronte
 type: feature
 component: Backend
 priority: medium
-status: Backlog
+status: Doing
 tags: ready
 created: 2026-07-26
 epic: CPE-396
