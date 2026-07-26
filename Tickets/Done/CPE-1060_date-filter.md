@@ -89,4 +89,32 @@ malformed-calendar-date rejection, garbage/edge-case rejection). `cargo clippy -
 warnings` clean; `cargo clippy --all-targets --features index -- -D warnings` clean. No new dependencies
 added to `Cargo.toml`.
 
-Branch `cpe-1060-date-filter`, PR opened against `main`.
+Branch `cpe-1060-date-filter`, PR opened against `main` (#379).
+
+2026-07-25 (workshift, overnight Worker) — PR #379 got CHANGES REQUESTED: reviewer (UAT) found a real
+overflow bug — the absolute-date path (`parse_absolute`/`days_from_civil`) used raw, unchecked
+arithmetic, unlike `parse_relative` which already used `checked_mul`/`checked_sub`. A syntactically-valid
+but huge digit string as a year (`9223372036854775807`, `99999999999999999`) parsed fine as an `i64` but
+then overflowed `era * 146097` in `days_from_civil` or the caller's `* SECS_PER_DAY` — panicking in debug,
+silently wrapping in release — reachable from a plain user-typed search token, contradicting the module's
+own "never panics" doc claim.
+
+**Fix chosen: bound the year (not threaded checked-arithmetic).** Added `parse_year` — a dedicated
+year-component parser used in all three `parse_absolute` match arms — that rejects any digit string longer
+than 5 characters (`MAX_ABS_YEAR = 99_999`) *before* calling `str::parse`, and rejects a parsed value above
+that bound. Simpler than threading `checked_mul`/`checked_add` through every `days_from_civil` call site
+and every `* SECS_PER_DAY`, and it also cheaply caps `days_in_month`/month-rollover math for free — no
+plausible filesystem mtime falls outside a 5-digit year. Updated the `days_from_civil` doc comment, which
+previously overclaimed "valid for any i64 year" — it's mathematically true for the algorithm in isolation,
+but now documented that every caller in this module relies on `parse_year`'s bound to keep the downstream
+arithmetic overflow-free.
+
+Added regression test `oversized_absolute_year_is_rejected_not_overflowed`: both reviewer-supplied probes
+(`9223372036854775807`, `99999999999999999`) plus `100000000000000000`, `18446744073709551615` (u64::MAX),
+a 6-digit `100000` (one past the bound, alone and with month/day segments attached) all → `None`; confirmed
+the boundary-legal 5-digit `99999` and an ordinary `2024` still parse fine (no over-tightening).
+
+Re-verified: `cargo test -p cpe-server` → 826 passed, 0 failed (12 `date_filter` tests, up from 11).
+`cargo clippy --all-targets -- -D warnings` clean; `cargo clippy --all-targets --features index -- -D
+warnings` clean. No new deps. Only `date_filter.rs` changed for this fix. Pushed to `cpe-1060-date-filter`;
+PR #379 updated.

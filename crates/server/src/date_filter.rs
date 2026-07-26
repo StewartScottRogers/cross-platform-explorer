@@ -115,13 +115,13 @@ fn parse_absolute(t: &str) -> Option<DateFilter> {
     let parts: Vec<&str> = t.split('-').collect();
     match parts.as_slice() {
         [y] => {
-            let year = parse_digits(y)?;
+            let year = parse_year(y)?;
             let lo = days_from_civil(year, 1, 1) * SECS_PER_DAY;
             let hi = days_from_civil(year + 1, 1, 1) * SECS_PER_DAY - 1;
             Some(DateFilter::Between { lo, hi })
         }
         [y, m] => {
-            let year = parse_digits(y)?;
+            let year = parse_year(y)?;
             let month = parse_bounded(m, 1, 12)?;
             let lo = days_from_civil(year, month, 1) * SECS_PER_DAY;
             let (ny, nm) = if month == 12 { (year + 1, 1) } else { (year, month + 1) };
@@ -129,7 +129,7 @@ fn parse_absolute(t: &str) -> Option<DateFilter> {
             Some(DateFilter::Between { lo, hi })
         }
         [y, m, d] => {
-            let year = parse_digits(y)?;
+            let year = parse_year(y)?;
             let month = parse_bounded(m, 1, 12)?;
             let day = parse_bounded(d, 1, 31)?;
             if day > days_in_month(year, month) {
@@ -150,10 +150,37 @@ fn parse_digits(s: &str) -> Option<i64> {
     s.parse().ok()
 }
 
-/// [`parse_digits`] with an inclusive `[min, max]` range check (used for month/day components).
+/// [`parse_digits`] with an inclusive `[min, max]` range check (used for month/day components,
+/// whose small bounds — `1..=12`, `1..=31` — can never overflow the arithmetic downstream).
 fn parse_bounded(s: &str, min: i64, max: i64) -> Option<i64> {
     let v = parse_digits(s)?;
     if v < min || v > max {
+        None
+    } else {
+        Some(v)
+    }
+}
+
+/// Inclusive bound on a parsed absolute-date year: no plausible filesystem timestamp falls outside
+/// it, and it keeps every downstream calculation (`days_from_civil`, `* SECS_PER_DAY`, the `year + 1`
+/// rollover) safely within `i64` with headroom to spare.
+const MAX_ABS_YEAR: i64 = 99_999;
+
+/// Parse the year component of an absolute-date token, bounded to `0..=MAX_ABS_YEAR`.
+///
+/// Rejects a syntactically-valid-but-huge digit string (e.g. `9223372036854775807`,
+/// `99999999999999999`) up front via a length check *before* calling `str::parse`, so it can never
+/// hand [`days_from_civil`] a value whose `era * 146097` (or the caller's subsequent
+/// `* SECS_PER_DAY`) would overflow `i64` — a reviewer-caught bug in the first cut of this parser
+/// (CPE-1060 PR #379): unbounded absolute-date years panicked in debug / silently wrapped in
+/// release on a fat-fingered or adversarial search token.
+fn parse_year(s: &str) -> Option<i64> {
+    // MAX_ABS_YEAR has 5 digits, so anything longer is rejected outright without ever parsing it.
+    if s.is_empty() || s.len() > 5 || !s.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    let v: i64 = s.parse().ok()?;
+    if v > MAX_ABS_YEAR {
         None
     } else {
         Some(v)
@@ -176,9 +203,12 @@ fn days_in_month(y: i64, m: i64) -> i64 {
 }
 
 /// Civil date (year, month 1-12, day 1-31) → days since the Unix epoch (1970-01-01 = day 0).
-/// Howard Hinnant's `days_from_civil` algorithm: integer-only, proleptic Gregorian, valid for any
-/// `i64` year (positive or negative), no timezone involved. Does not validate the date — callers
-/// validate month/day range and days-in-month first ([`parse_bounded`], [`days_in_month`]).
+/// Howard Hinnant's `days_from_civil` algorithm: integer-only, proleptic Gregorian, no timezone
+/// involved. The algorithm itself is mathematically valid for any `i64` year, but callers in this
+/// module only ever pass a year bounded by [`parse_year`] (`MAX_ABS_YEAR`) — an unbounded year would
+/// overflow `i64` in `era * 146097` here, or in the caller's subsequent `* SECS_PER_DAY`. Does not
+/// validate month/day range or days-in-month — callers do that first ([`parse_bounded`],
+/// [`days_in_month`]).
 fn days_from_civil(y: i64, m: i64, d: i64) -> i64 {
     let y = if m <= 2 { y - 1 } else { y };
     let era = if y >= 0 { y } else { y - 399 } / 400;
@@ -355,5 +385,22 @@ mod tests {
         assert_eq!(parse("abcd", 0), None);
         assert_eq!(parse("2024-ab", 0), None); // non-numeric month
         assert_eq!(parse("-", 0), None);
+    }
+
+    /// Regression for a reviewer-caught overflow (CPE-1060 PR #379): a syntactically-valid but huge
+    /// digit string as an absolute-date year must be rejected, not panic (`* SECS_PER_DAY` /
+    /// `days_from_civil`'s `era * 146097` would overflow `i64`) and not silently wrap in release.
+    #[test]
+    fn oversized_absolute_year_is_rejected_not_overflowed() {
+        assert_eq!(parse("9223372036854775807", 0), None); // i64::MAX as a "year"
+        assert_eq!(parse("99999999999999999", 0), None); // 17 nines
+        assert_eq!(parse("100000000000000000", 0), None); // 18 digits
+        assert_eq!(parse("18446744073709551615", 0), None); // u64::MAX, doesn't even fit i64
+        assert_eq!(parse("100000", 0), None); // 6 digits, one past MAX_ABS_YEAR's 5
+        assert_eq!(parse("100000-07", 0), None); // same, with a month segment attached
+        assert_eq!(parse("100000-07-01", 0), None); // and with a day segment attached
+        // A boundary-legal 5-digit year still parses fine — the fix must not over-tighten.
+        assert!(parse("99999", 0).is_some());
+        assert!(parse("2024", 0).is_some()); // ordinary year still works
     }
 }
