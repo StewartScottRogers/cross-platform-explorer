@@ -4,7 +4,7 @@ title: "Code preview: symbol outline strip + breadcrumb + jump-to-symbol"
 type: feature
 component: Frontend
 priority: high
-status: Doing
+status: Done
 tags: ready
 created: 2026-07-26
 epic: CPE-724
