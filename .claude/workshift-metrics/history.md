@@ -259,3 +259,32 @@ scrubber (pure frontend, build first) · CPE-1097/1098 cost ledger (sidecar `cos
 bridge, then panel) · CPE-1099/1100 conflict radar (multi-session watch + actor tags [big-design], then panel)
 · CPE-1095 code-preview polish (fold-aware jump + doc wording) · CPE-1096 QA gui-smoke asserts code-preview
 render (burns down CPE-1090/1091/1093 visual debt).
+
+## 2026-07-26 (cont.) — GUI #3 Agent-Watch dashboards (all 3 shipped)
+
+**Shipped (6 PRs, main green):** CPE-1094 replay scrubber (#412) · CPE-1097 cost bridge + CPE-405 read-fix
+(#413) · CPE-1098 cost ledger panel (#414) · CPE-1099 multi-session watch (#415) · CPE-1101 actor tags (#416)
+· CPE-1100 activity-overlap radar (#417). **All three Agent-Watch dashboards done.** Also: cut+installed a
+fresh sidecar release 0.57.35 from main (user ran it, batch-media dialog human-verified "looks good").
+
+**Notable:** the CPE-1097 worker found a **silently-broken-in-production bug** — `main.rs` blanket-wrapped
+every announcement in `session:`, so `fs-read:`/`cost:` came out as `session:fs-read:{…}` and never matched
+the host arm → Agent-Watch "read" activity (CPE-405) had been dead. Fixed + regression-tested in #413.
+
+**Tuned defaults (this GUI initiative, CPE-1088..1101):** 46 agent-runs (12 workers, 14 reviewer-passes, 12
+UAT, 4 researchers, 3 foreman-fixes, 1 planner), 6 rework cycles (ALL reviewer/UAT-caught, all fixed+merged),
+cost_proxy ≈ 153k. Every merge CI-green.
+- **sonnet worker + opus reviewer** stays the right GUI pairing — reviewers caught every one of the 6 rework
+  items (scroll offset, avif eligibility, debounce leak, typed-payload AC, +2). Keep opus on review.
+- **opus worker** for the genuinely-hard slices (per-line hljs splitter CPE-1091; multi-session watch
+  refactor CPE-1099; cfg-gated actor ledger CPE-1101) — 0 rework on those, worth the spend.
+- **Research/Plan spikes before hard tickets keep paying** — the hljs-per-line spike, the batch-media surface
+  map, the agent-watch substrate map, the sidecar-cost rescope (caught a whole ticket aimed at DEAD CODE), and
+  the CPE-1099 multi-session Plan all turned unknowns into zero-flail builds. 6 Library entries filed.
+- **Off-means-off** is the recurring Agent-Watch gate — every panel proven to add 0 listeners/threads when not
+  watching; reviewers traced it each time. Pure-derivation panels (radar) are the cleanest way to honour it.
+- **Foreman-applied reviewer-prescribed fixes** (3×) beat round-tripping the worker for tiny exact changes.
+
+**Left queued:** CPE-1095 (code-preview fold-jump polish), CPE-1096 (gui-smoke asserts code-preview),
+CPE-1102 (extend "user" actor-tag to delete_permanent/transfers/extract), CPE-1099c note (honest unknown via
+sidecar fs-write:). All low-priority fast-follows with Library-backed designs.
