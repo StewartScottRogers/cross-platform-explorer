@@ -99,6 +99,7 @@ pub use scope::{build_launch, dangerous_flags, AgentLaunchRequest};
 pub mod ui;
 pub use ui::{serve as serve_ui, UiServer};
 pub mod usage;
+pub mod conflict_owner;
 pub use usage::{Usage, UsageScanner};
 pub mod vault;
 
