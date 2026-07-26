@@ -4,7 +4,7 @@ title: "Journal-backed replay assembly — cpe_server::replay_session (load_repl
 type: feature
 component: Backend
 priority: medium
-status: Backlog
+status: Doing
 tags: ready
 created: 2026-07-25
 epic: CPE-728

@@ -4,7 +4,7 @@ title: "Replay folder view + transition diff — cpe_server::replay_view (childr
 type: feature
 component: Backend
 priority: medium
-status: Backlog
+status: Doing
 tags: ready
 created: 2026-07-25
 epic: CPE-728
