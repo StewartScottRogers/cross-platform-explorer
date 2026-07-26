@@ -4,7 +4,7 @@ title: "code_intel tauri command — expose outline/folds/indent/minimap to the 
 type: feature
 component: Backend
 priority: high
-status: Doing
+status: Done
 tags: ready
 created: 2026-07-26
 epic: CPE-724
