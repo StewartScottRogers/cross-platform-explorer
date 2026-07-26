@@ -227,6 +227,30 @@
     <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V15z" />
   {:else if name === "activity"}
     <path d="M3 12h4l3 8 4-16 3 8h4" />
+  <!-- code-preview outline glyphs (CPE-1090): a short letter/mark per SymbolKind, drawn with `currentColor`
+       text so a pill's own colour (theme-only, per MENUS.md) is inherited automatically. -->
+  {:else if name === "function"}
+    <text x="12" y="16.5" font-size="13" font-weight="700" text-anchor="middle" fill="currentColor" stroke="none">ƒ</text>
+  {:else if name === "method"}
+    <text x="12" y="16.5" font-size="12" font-weight="700" text-anchor="middle" fill="currentColor" stroke="none">m</text>
+  {:else if name === "struct"}
+    <text x="12" y="16.5" font-size="12" font-weight="700" text-anchor="middle" fill="currentColor" stroke="none">S</text>
+  {:else if name === "enum"}
+    <text x="12" y="16.5" font-size="12" font-weight="700" text-anchor="middle" fill="currentColor" stroke="none">E</text>
+  {:else if name === "trait"}
+    <text x="12" y="16.5" font-size="12" font-weight="700" text-anchor="middle" fill="currentColor" stroke="none">T</text>
+  {:else if name === "interface"}
+    <text x="12" y="16.5" font-size="12" font-weight="700" text-anchor="middle" fill="currentColor" stroke="none">I</text>
+  {:else if name === "class"}
+    <text x="12" y="16.5" font-size="12" font-weight="700" text-anchor="middle" fill="currentColor" stroke="none">C</text>
+  {:else if name === "module"}
+    <path d="M12 3.5l7 4v9l-7 4-7-4v-9z" fill="none" stroke="currentColor" />
+  {:else if name === "constant"}
+    <text x="12" y="16.5" font-size="13" font-weight="700" text-anchor="middle" fill="currentColor" stroke="none">#</text>
+  {:else if name === "type_alias"}
+    <text x="12" y="16.5" font-size="12" font-weight="700" text-anchor="middle" fill="currentColor" stroke="none">τ</text>
+  {:else if name === "heading"}
+    <text x="12" y="16.5" font-size="12" font-weight="700" text-anchor="middle" fill="currentColor" stroke="none">¶</text>
   {/if}
 </svg>
 
