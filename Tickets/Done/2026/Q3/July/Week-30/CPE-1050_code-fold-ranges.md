@@ -4,7 +4,7 @@ title: "Code fold ranges — cpe_server::code_folds (foldable block spans)"
 type: feature
 component: Backend
 priority: medium
-status: Doing
+status: Done
 tags: ready
 created: 2026-07-25
 epic: CPE-724
