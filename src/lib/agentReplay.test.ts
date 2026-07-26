@@ -8,6 +8,7 @@ import {
   nextTimestamp,
   prevTimestamp,
   isMultiplyEdited,
+  cadenceForSpeed,
 } from "./agentReplay";
 import type { TimelineEntry } from "./agentActivity";
 
@@ -153,6 +154,27 @@ describe("agentReplay pure helpers (CPE-1094)", () => {
 
     it("is false for a path with no entries at all", () => {
       expect(isMultiplyEdited([], "/missing")).toBe(false);
+    });
+  });
+
+  describe("cadenceForSpeed (CPE-1104)", () => {
+    it("returns the base cadence unchanged at 1x (default)", () => {
+      expect(cadenceForSpeed(400, 1)).toBe(400);
+    });
+
+    it("halves the period at 2x and quarters it at 4x (faster playback)", () => {
+      expect(cadenceForSpeed(400, 2)).toBe(200);
+      expect(cadenceForSpeed(400, 4)).toBe(100);
+    });
+
+    it("doubles the period at 0.5x (slower playback)", () => {
+      expect(cadenceForSpeed(400, 0.5)).toBe(800);
+    });
+
+    it("is division-safe: a non-positive speed falls back to the base cadence rather than NaN/Infinity", () => {
+      expect(cadenceForSpeed(400, 0)).toBe(400);
+      expect(cadenceForSpeed(400, -1)).toBe(400);
+      expect(Number.isFinite(cadenceForSpeed(400, 0))).toBe(true);
     });
   });
 });

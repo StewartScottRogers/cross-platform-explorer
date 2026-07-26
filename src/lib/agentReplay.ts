@@ -94,6 +94,18 @@ export function prevTimestamp(timeline: TimelineEntry[], t: number): number | nu
   return prev;
 }
 
+/**
+ * The play-interval period (ms) for a given playback `speed` multiplier (CPE-1104): `baseMs / speed`
+ * — e.g. 2× plays twice as fast (half the period), 0.5× plays half as fast (double the period).
+ * Division-safe: the Replay tab only ever passes a positive speed from its fixed selector set (0.5,
+ * 1, 2, 4 — never a user-typed value), but a non-positive `speed` here falls back to `baseMs`
+ * unchanged (1×) rather than dividing by zero or going negative/infinite.
+ */
+export function cadenceForSpeed(baseMs: number, speed: number): number {
+  if (!(speed > 0)) return baseMs;
+  return baseMs / speed;
+}
+
 /** A kind that carries a captured before/after diff (mirrors `AgentTimeline.svelte`'s `isWrite`). */
 export const isWriteKind = (k: TimelineEntry["kind"]): boolean => k === "created" || k === "modified";
 
