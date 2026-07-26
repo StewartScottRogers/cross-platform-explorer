@@ -91,6 +91,50 @@ pub fn partition(classified: &[ClassifiedAction]) -> (Vec<RestoreAction>, Vec<Cl
     (safe, conflicts)
 }
 
+/// A confirm-dialog-ready summary of a classified plan: how many actions are safe to revert
+/// automatically, how many conflict with an outside change, and which paths those conflicts are at
+/// (deterministic order — the order `classified` is given in, i.e. the plan's own order).
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct ConflictReport {
+    pub safe: usize,
+    pub conflicts: usize,
+    pub conflict_paths: Vec<String>,
+    /// `conflicts / (safe + conflicts)`, or `None` if there are no actions at all (division-safe:
+    /// never NaN/inf).
+    pub conflict_ratio: Option<f64>,
+}
+
+/// Summarize a classified plan for display: counts of safe vs. conflicting actions, the list of
+/// conflicting paths (in `classified`'s order), and a division-safe conflict ratio.
+pub fn summarize_conflicts(classified: &[ClassifiedAction]) -> ConflictReport {
+    let mut safe = 0usize;
+    let mut conflicts = 0usize;
+    let mut conflict_paths = Vec::new();
+    for c in classified {
+        match &c.safety {
+            RevertSafety::Safe => safe += 1,
+            RevertSafety::Conflict(_) => {
+                conflicts += 1;
+                conflict_paths.push(c.action.path.clone());
+            }
+        }
+    }
+    let total = safe + conflicts;
+    let conflict_ratio = if total == 0 { None } else { Some(conflicts as f64 / total as f64) };
+    ConflictReport { safe, conflicts, conflict_paths, conflict_ratio }
+}
+
+/// The plan to actually execute, given a user's choice of whether to include conflicting actions:
+/// `include_conflicts = false` (the default, "revert safe only") keeps just the `Safe` actions;
+/// `true` ("revert anyway") keeps every action. Preserves `classified`'s order either way.
+pub fn plan_for(classified: &[ClassifiedAction], include_conflicts: bool) -> Vec<RestoreAction> {
+    classified
+        .iter()
+        .filter(|c| include_conflicts || c.safety == RevertSafety::Safe)
+        .map(|c| c.action.clone())
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -228,5 +272,96 @@ mod tests {
         let paths: Vec<&str> = classified.iter().map(|c| c.action.path.as_str()).collect();
         assert_eq!(paths, vec!["a.rs", "b.rs", "c.rs"]);
         assert_eq!(classified[1].safety, RevertSafety::Safe);
+    }
+
+    #[test]
+    fn summarize_conflicts_counts_and_collects_paths_in_order() {
+        // a.rs safe (agent-touched), gone.rs + new.rs conflicts, in plan order.
+        let checkpoint = snap(&[("a.rs", "old", 10), ("gone.rs", "g", 5)]);
+        let current = snap(&[("a.rs", "new", 12), ("new.rs", "n", 7)]);
+        let plan = plan_restore(&checkpoint, &current);
+        let agent_touched = touched(&["a.rs"]);
+
+        let classified = classify_plan(&plan, &checkpoint, &current, &agent_touched);
+        let report = summarize_conflicts(&classified);
+
+        assert_eq!(report.safe, 1);
+        assert_eq!(report.conflicts, 2);
+        assert_eq!(report.conflict_paths, vec!["gone.rs".to_string(), "new.rs".to_string()]);
+        assert_eq!(report.conflict_ratio, Some(2.0 / 3.0));
+    }
+
+    #[test]
+    fn summarize_conflicts_empty_plan_has_no_ratio() {
+        let report = summarize_conflicts(&[]);
+        assert_eq!(report, ConflictReport::default());
+        assert_eq!(report.conflict_ratio, None);
+    }
+
+    #[test]
+    fn summarize_conflicts_all_safe_has_zero_ratio_not_nan() {
+        let checkpoint = snap(&[("a.rs", "old", 10)]);
+        let current = snap(&[("a.rs", "new", 12)]);
+        let plan = plan_restore(&checkpoint, &current);
+        let agent_touched = touched(&["a.rs"]);
+
+        let classified = classify_plan(&plan, &checkpoint, &current, &agent_touched);
+        let report = summarize_conflicts(&classified);
+
+        assert_eq!(report.safe, 1);
+        assert_eq!(report.conflicts, 0);
+        assert!(report.conflict_paths.is_empty());
+        assert_eq!(report.conflict_ratio, Some(0.0));
+        assert!(report.conflict_ratio.unwrap().is_finite());
+    }
+
+    #[test]
+    fn summarize_conflicts_all_conflict_has_ratio_one() {
+        let checkpoint = snap(&[("a.rs", "old", 10)]);
+        let current = snap(&[("a.rs", "new", 12)]);
+        let plan = plan_restore(&checkpoint, &current);
+        let agent_touched = touched(&[]);
+
+        let classified = classify_plan(&plan, &checkpoint, &current, &agent_touched);
+        let report = summarize_conflicts(&classified);
+
+        assert_eq!(report.safe, 0);
+        assert_eq!(report.conflicts, 1);
+        assert_eq!(report.conflict_ratio, Some(1.0));
+        assert!(report.conflict_ratio.unwrap().is_finite());
+    }
+
+    #[test]
+    fn plan_for_false_keeps_only_safe_subset() {
+        let checkpoint = snap(&[("a.rs", "old", 10), ("gone.rs", "g", 5)]);
+        let current = snap(&[("a.rs", "new", 12), ("new.rs", "n", 7)]);
+        let plan = plan_restore(&checkpoint, &current);
+        let agent_touched = touched(&["a.rs"]);
+
+        let classified = classify_plan(&plan, &checkpoint, &current, &agent_touched);
+        let safe_only = plan_for(&classified, false);
+
+        assert_eq!(safe_only, vec![RestoreAction { path: "a.rs".into(), op: RestoreOp::Overwrite }]);
+    }
+
+    #[test]
+    fn plan_for_true_keeps_all_actions() {
+        let checkpoint = snap(&[("a.rs", "old", 10), ("gone.rs", "g", 5)]);
+        let current = snap(&[("a.rs", "new", 12), ("new.rs", "n", 7)]);
+        let plan = plan_restore(&checkpoint, &current);
+        let agent_touched = touched(&["a.rs"]);
+
+        let classified = classify_plan(&plan, &checkpoint, &current, &agent_touched);
+        let all = plan_for(&classified, true);
+
+        assert_eq!(all.len(), classified.len());
+        let expected: Vec<RestoreAction> = classified.iter().map(|c| c.action.clone()).collect();
+        assert_eq!(all, expected);
+    }
+
+    #[test]
+    fn plan_for_empty_plan_yields_empty_output() {
+        assert!(plan_for(&[], false).is_empty());
+        assert!(plan_for(&[], true).is_empty());
     }
 }
