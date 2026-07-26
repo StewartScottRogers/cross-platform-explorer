@@ -84,3 +84,35 @@ Row #6 had zero coverage and its dominant failure modes are pure artifact correc
 GUI. One new dep (`minisign`, the lib Tauri's updater uses), confined to the non-shipped verify crate.
 2026-07-25 (workshift, Foreman) — Held for a user green-light rather than built overnight: adds a dep +
 touches `release.yml`. Burndown #6 flipped to 🔧 in progress.
+2026-07-25 (workshift, Worker) — Built both slices on branch `cpe-1058-updater-verify`.
+- **Crate:** new standalone `crates/updater-verify` (`cpe-updater-verify`), out of any workspace (no root
+  `Cargo.toml`; `crates/.gitignore` keeps `target/` out), **NOT** a dependency of `src-tauri` (grep-confirmed
+  clean). One crypto dep: `minisign = "0.9"` (v0.9.1 resolved) — the same lib Tauri uses; confined here.
+- **API note (differs slightly from the ticket's sketch, resolved from docs.rs):** in `minisign` 0.9,
+  `verify` and `sign` are **free functions**, not `PublicKey` methods. Used
+  `minisign::sign(Some(&pk), &sk, Cursor, trusted, untrusted) -> SignatureBox` and
+  `minisign::verify(&pk, &sig_box, Cursor::new(bytes), quiet=true, output=false, allow_legacy=true)`. The
+  double-base64 decode is exactly as the ticket described: config `pubkey` → base64-decode → 2-line minisign
+  public-key file → `PublicKeyBox::from_string(..).into_public_key()`; each `signature` → base64-decode →
+  `.sig` file text → `SignatureBox::from_string(..)`. Verified the config pubkey in `tauri.conf.json` really
+  does decode to `untrusted comment: minisign public key: 521E574F68E2561A\nRW…`. `allow_legacy=true` so both
+  prehashed (Tauri's form) and legacy ed25519 sigs verify.
+- **Assumption (logged):** the loader closure returning `None` for a URL means "artifact not present here" →
+  that platform's *crypto* check is **skipped** (its shape is still validated), so the per-OS release matrix
+  can each verify only the platforms they built while a merged `latest.json` names others. The bin guards
+  against a vacuous pass: if the manifest has platforms but **zero** matched a local artifact, it fails.
+- **Slice A:** 13 hermetic unit tests (valid / tampered-artifact / wrong-key / version-mismatch /
+  unparseable / missing-version / missing-signature / missing-url / no-platforms / array-form / bad-pubkey /
+  bad-signature-encoding / missing-artifact-skips-crypto). In-test ephemeral keypair encoded into the real
+  double-base64 shape so the real decode path is exercised.
+- **Slice B:** `verify-release-artifacts` bin reads `pubkey`+`version` from `tauri.conf.json`, walks a search
+  dir for `latest.json` + artifacts (match by URL basename), runs `verify_update_manifest`, exits non-zero on
+  a bad manifest. Plus 3 integration tests (`tests/release_guard.rs`) that scaffold a real config+manifest+
+  artifact in a tempdir and run the compiled bin: valid → exit 0, tampered → non-zero, version-mismatch →
+  non-zero. `release.yml` step added AFTER the tauri-action build, guarded by a `has=true/false` check on
+  `TAURI_SIGNING_PRIVATE_KEY` (mirrors the `catalog` job) so it **skips cleanly** on forks/PRs/unsigned repos.
+- **CI:** added an `updater-verify` `working-directory` block (clippy `--all-targets -D warnings` + `cargo
+  test`) to the 3-OS `Server crates` job + `./crates/updater-verify -> target` to the rust-cache list.
+- **Verified locally (Windows):** `cargo clippy --all-targets -- -D warnings` clean; `cargo test` = 16
+  passed / 0 failed (13 unit + 3 integration). No Defender os-error-225. Burndown #6 note narrowed to the
+  in-place binary swap only; **MVD count left at 7 for the Foreman to call.**
