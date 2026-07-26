@@ -4,7 +4,7 @@ title: "Archive format detector — cpe_server::archive_format (magic-byte sniff
 type: feature
 component: Backend
 priority: medium
-status: Doing
+status: Done
 tags: ready
 created: 2026-07-25
 epic: CPE-705

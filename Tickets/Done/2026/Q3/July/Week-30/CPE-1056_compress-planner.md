@@ -4,7 +4,7 @@ title: "Compress-selection planner — cpe_server::compress_plan (inner names + 
 type: feature
 component: Backend
 priority: medium
-status: Doing
+status: Done
 tags: ready
 created: 2026-07-25
 epic: CPE-705
