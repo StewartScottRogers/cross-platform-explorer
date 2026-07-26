@@ -18,7 +18,7 @@
   import { fsActivity, agentTimeline } from "../agentActivity";
   import { click as selClick, selectedIndices, type Selection } from "../selection";
   import { sortEntries } from "../sort";
-  import { makeMatcher } from "../search";
+  import { makeEntryMatcher } from "../entrySearch";
   import { matchesFileFilter } from "../filetypes";
   import { filterEntriesByTag } from "../tagFilter";
   import { tags } from "../tags";
@@ -88,8 +88,10 @@
   // In `rawList` mode (archive browsing) none of the filters apply: the base list is only sorted.
   $: searching = search.trim().length > 0;
   $: shown = rawList ? baseEntries : baseEntries.filter((e) => showHidden || !e.hidden);
-  $: searchMatcher = makeMatcher(search);
-  $: filtered = !rawList && searching ? shown.filter((e) => searchMatcher(e.name)) : shown;
+  // Power-filters (CPE-1088): size:/date:|modified:/type:/ext:/path: + boolean OR/NOT/-/parens over the
+  // bare-name glob matcher. Compiled once per keystroke here, not per entry (see entrySearch.ts).
+  $: searchMatcher = makeEntryMatcher(search);
+  $: filtered = !rawList && searching ? shown.filter((e) => searchMatcher(e)) : shown;
   $: typeFiltered =
     !rawList && fileFilter !== "all" ? filtered.filter((e) => matchesFileFilter(e, fileFilter)) : filtered;
   $: tagFiltered =
