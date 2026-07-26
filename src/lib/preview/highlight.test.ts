@@ -4,7 +4,14 @@ import {
   languageForExt,
   languageForName,
   ensureLanguage,
+  splitHighlightedIntoLines,
 } from "./highlight";
+
+/** Remove only the span tags a highlight fragment can contain, leaving text + entities. */
+const stripSpans = (s: string): string => s.replace(/<\/?span[^>]*>/g, "");
+/** How many `<span…>` opens vs `</span>` closes — a valid fragment has them balanced. */
+const spanBalance = (s: string): number =>
+  (s.match(/<span\b/g) ?? []).length - (s.match(/<\/span>/g) ?? []).length;
 
 describe("languageForExt", () => {
   it("maps known code extensions (loader exists)", () => {
@@ -113,5 +120,68 @@ describe("highlightForFile (lazy grammars)", () => {
     expect(highlightForFile("\\section{Intro} \\textbf{hi}", "a.tex")).toContain("hljs-");
     await ensureLanguage("asciidoc");
     expect(highlightForFile("= Title\n\n== Section", "a.adoc")).toContain("hljs-");
+  });
+});
+
+describe("splitHighlightedIntoLines (CPE-1091)", () => {
+  it("returns a single empty line for empty input", () => {
+    expect(splitHighlightedIntoLines("")).toEqual([""]);
+  });
+
+  it("splits plain (span-free) text on newlines like String.split", () => {
+    expect(splitHighlightedIntoLines("a\nb\nc")).toEqual(["a", "b", "c"]);
+  });
+
+  it("yields a trailing empty fragment for a trailing newline", () => {
+    expect(splitHighlightedIntoLines("a\n")).toEqual(["a", ""]);
+  });
+
+  it("keeps a single-line span intact on its line", () => {
+    const html = 'const <span class="hljs-number">1</span>;';
+    expect(splitHighlightedIntoLines(html)).toEqual([html]);
+  });
+
+  it("closes and reopens a span that straddles a newline (multi-line comment)", () => {
+    const html = '<span class="hljs-comment">/* a\nb\nc */</span>';
+    const rows = splitHighlightedIntoLines(html);
+    expect(rows).toEqual([
+      '<span class="hljs-comment">/* a</span>',
+      '<span class="hljs-comment">b</span>',
+      '<span class="hljs-comment">c */</span>',
+    ]);
+    // Every row is independently valid HTML: balanced spans.
+    for (const r of rows) expect(spanBalance(r)).toBe(0);
+  });
+
+  it("handles nested spans straddling a newline", () => {
+    const html = '<span class="a">x<span class="b">y\nz</span>w</span>';
+    const rows = splitHighlightedIntoLines(html);
+    expect(rows).toEqual([
+      '<span class="a">x<span class="b">y</span></span>',
+      '<span class="a"><span class="b">z</span>w</span>',
+    ]);
+    for (const r of rows) expect(spanBalance(r)).toBe(0);
+  });
+
+  it("handles a span that opens and closes mid-line", () => {
+    const html = 'a <span class="k">b</span> c\nd <span class="k">e</span> f';
+    const rows = splitHighlightedIntoLines(html);
+    expect(rows).toEqual(['a <span class="k">b</span> c', 'd <span class="k">e</span> f']);
+    for (const r of rows) expect(spanBalance(r)).toBe(0);
+  });
+
+  it("passes escaped entities through without treating them as tags", () => {
+    const html = '<span class="hljs-string">"a &lt; b &amp;&amp; c &gt; d"</span>';
+    expect(splitHighlightedIntoLines(html)).toEqual([html]);
+  });
+
+  it("re-concatenates (stripped) back to the original stripped text for a realistic blob", () => {
+    const html =
+      '<span class="hljs-keyword">const</span> s = <span class="hljs-string">"x\ny"</span>;\n' +
+      '<span class="hljs-comment">// tail</span>';
+    const rows = splitHighlightedIntoLines(html);
+    // Rows recombine (minus the injected per-row span wrappers) to the original stripped text.
+    expect(rows.map(stripSpans).join("\n")).toBe(stripSpans(html));
+    for (const r of rows) expect(spanBalance(r)).toBe(0);
   });
 });

@@ -3,11 +3,11 @@
   import type { DirEntry } from "../types";
   import { pickProvider, type ArchiveEntry } from "../preview/provider";
   import { parseCsv } from "../preview/csv";
-  import { highlightForFile, ensureLanguageForName, languageForName } from "../preview/highlight";
+  import { highlightForFile, ensureLanguageForName, languageForName, splitHighlightedIntoLines } from "../preview/highlight";
   import { renderMarkdown } from "../preview/markdown";
   import { lineToScrollTop, scrollTopToLine, enclosingSymbol, resolveLineHeight } from "../preview/outline";
   import { commands } from "../bindings.gen";
-  import type { Symbol as CodeSymbol } from "../bindings.gen";
+  import type { Symbol as CodeSymbol, FoldRange, MinimapRow } from "../bindings.gen";
   import HexView from "./HexView.svelte";
   import DataBrowser from "./DataBrowser.svelte";
   import Icon from "./Icon.svelte";
@@ -192,36 +192,94 @@
     if (mine === mdReq) mdHtml = html;
   }
 
-  // ---- code-intel outline strip + breadcrumb + jump-to-symbol (CPE-1090, epic CPE-724) ----
+  // ---- code intelligence: outline strip + breadcrumb (CPE-1090) + per-line rows / fold / indent /
+  //      minimap (CPE-1091), epic CPE-724. One codeIntel fetch feeds all of it. ----
+  /** Tab width sent to codeIntel; also the column span of one indent guide. Matches the backend
+   *  default (`code_intel` uses 4) so `indent[i]` levels line up with `TAB_WIDTH`-ch guides. */
+  const TAB_WIDTH = 4;
   let outline: CodeSymbol[] = [];
+  let folds: FoldRange[] = [];
+  let indent: number[] = [];
+  let minimap: MinimapRow[] = [];
   let outlineReq = 0;
   let breadcrumbSym: CodeSymbol | null = null;
 
   $: if (entry && textState === "idle" && provider.kind === "text") {
-    loadOutlineFor(entry.name, text);
+    loadCodeIntelFor(entry.name, text);
   } else if (!entry || provider.kind !== "text") {
     outline = [];
+    folds = [];
+    indent = [];
+    minimap = [];
     breadcrumbSym = null;
     outlineReq++; // supersede any in-flight fetch for a file we've navigated away from
   }
 
-  async function loadOutlineFor(name: string, src: string) {
+  async function loadCodeIntelFor(name: string, src: string) {
     const mine = ++outlineReq;
-    // Clear synchronously so a superseded fetch can never leave a stale (wrong-file) outline visible
+    // Clear synchronously so a superseded fetch can never leave a stale (wrong-file) view visible
     // while the new one is in flight.
     outline = [];
+    folds = [];
+    indent = [];
+    minimap = [];
     breadcrumbSym = null;
     if (!src) return;
     const lang = languageForName(name) ?? "";
     try {
-      const result = await commands.codeIntel(src, lang, null, null);
+      const result = await commands.codeIntel(src, lang, TAB_WIDTH, null);
       if (mine !== outlineReq) return;
       outline = result.outline;
+      folds = result.folds;
+      indent = result.indent;
+      minimap = result.minimap;
       updateBreadcrumb();
+      updateMinimapViewport();
     } catch {
       if (mine !== outlineReq) return;
       outline = [];
+      folds = [];
+      indent = [];
+      minimap = [];
     }
+  }
+
+  // ---- per-line rows (CPE-1091) ----
+  // The highlighted blob split into one span-safe HTML fragment per source line. Recomputed whenever the
+  // highlight output changes (two-phase: escaped → highlighted). Only the code branch consumes it.
+  $: codeLines = provider.kind === "text" ? splitHighlightedIntoLines(codeHtml) : [];
+  // Gutter width in ch: enough for the largest line number, plus room for a fold triangle.
+  $: gutterDigits = Math.max(2, String(codeLines.length).length);
+
+  // ---- fold gutter (CPE-1091) ----
+  // Foldable ranges keyed by their 1-based start line. Only ranges that actually cover ≥1 interior line
+  // are foldable (start==end → nothing to collapse; division/empty-safe).
+  $: foldByStart = new Map<number, FoldRange>(
+    folds.filter((f) => f.end_line > f.start_line).map((f) => [f.start_line, f]),
+  );
+  /** Start lines the user has collapsed. Per-file; reset on entry change (see the lastPath effect). */
+  let foldCollapsed = new Set<number>();
+  // 1-based lines currently hidden by an active fold (start_line+1 .. end_line for each collapsed range).
+  $: hiddenLines = (() => {
+    const hidden = new Set<number>();
+    for (const start of foldCollapsed) {
+      const f = foldByStart.get(start);
+      if (!f) continue;
+      for (let ln = f.start_line + 1; ln <= f.end_line; ln++) hidden.add(ln);
+    }
+    return hidden;
+  })();
+
+  function toggleFold(startLine: number) {
+    const next = new Set(foldCollapsed);
+    if (next.has(startLine)) next.delete(startLine);
+    else next.add(startLine);
+    foldCollapsed = next;
+  }
+  /** Number of lines a collapsed range hides, for its "⋯ N lines" badge. */
+  function foldLen(startLine: number): number {
+    const f = foldByStart.get(startLine);
+    return f ? f.end_line - f.start_line : 0;
   }
 
   /** Walk up from `el` to the nearest ancestor whose content actually overflows its box. The code
@@ -281,8 +339,58 @@
    *  its whole lifetime; no manual addEventListener/removeEventListener bookkeeping needed. Guarded so it
    *  no-ops outside the code view (other preview kinds, or while editing). */
   function handlePreviewScroll() {
-    if (provider.kind !== "text" || editing || outline.length === 0) return;
+    if (provider.kind !== "text" || editing) return;
+    if (outline.length > 0) updateBreadcrumb();
+    updateMinimapViewport();
+  }
+
+  // ---- minimap (CPE-1091) ----
+  // The viewport indicator box + click-to-scroll work purely off the scroll container's
+  // scrollTop/scrollHeight/clientHeight ratios, so they stay correct under the wrap toggle too (no
+  // uniform-line-height assumption). Division-safe: a zero/unmeasurable scrollHeight fills the box.
+  let mmViewport = { top: 0, height: 100 }; // percentages of the minimap height
+  let mmHeightPx = 0; // minimap pixel height = the visible pane height (the minimap overlays the viewport)
+  function updateMinimapViewport() {
+    if (!textContentEl || minimap.length === 0) return;
+    const container = findScrollContainer(textContentEl);
+    if (!container) return;
+    mmHeightPx = container.clientHeight;
+    const sh = container.scrollHeight;
+    if (!Number.isFinite(sh) || sh <= 0) {
+      mmViewport = { top: 0, height: 100 };
+      return;
+    }
+    const top = Math.max(0, Math.min(100, (container.scrollTop / sh) * 100));
+    const height = Math.max(2, Math.min(100, (container.clientHeight / sh) * 100));
+    mmViewport = { top, height };
+  }
+  // Re-measure the minimap after new rows paint or the window resizes (guarded — no-ops before mount /
+  // outside the code view). `tick()` waits for the DOM so scrollHeight/clientHeight are real.
+  $: if (minimap.length && codeLines.length) tick().then(updateMinimapViewport);
+
+  /** Click (or drag) on the minimap: scroll the pane so the clicked fraction of the file is centred. */
+  function onMinimapPoint(e: MouseEvent) {
+    if (!textContentEl) return;
+    const container = findScrollContainer(textContentEl);
+    if (!container) return;
+    const rail = e.currentTarget as HTMLElement;
+    const rect = rail.getBoundingClientRect();
+    if (rect.height <= 0) return;
+    const frac = Math.max(0, Math.min(1, (e.clientY - rect.top) / rect.height));
+    const target = frac * container.scrollHeight - container.clientHeight / 2;
+    container.scrollTop = Math.max(0, Math.min(target, container.scrollHeight));
+    updateMinimapViewport();
     updateBreadcrumb();
+  }
+  function onMinimapDown(e: MouseEvent) {
+    onMinimapPoint(e);
+    const move = (ev: MouseEvent) => onMinimapPoint(ev);
+    const up = () => {
+      window.removeEventListener("mousemove", move);
+      window.removeEventListener("mouseup", up);
+    };
+    window.addEventListener("mousemove", move);
+    window.addEventListener("mouseup", up);
   }
 
   // ---- word wrap (CPE-565): wrap long lines in the text/code/json preview; remembered across files. ----
@@ -310,6 +418,7 @@
     lastPath = entry.path;
     editing = false;
     saveError = "";
+    foldCollapsed = new Set(); // fold state is per-file — never carry a collapse across files (CPE-1091)
   }
 
   function startEdit() {
@@ -441,7 +550,7 @@
   }
 </script>
 
-<svelte:window on:click={closeTextMenu} on:keydown={(e) => e.key === "Escape" && closeTextMenu()} />
+<svelte:window on:click={closeTextMenu} on:keydown={(e) => e.key === "Escape" && closeTextMenu()} on:resize={updateMinimapViewport} />
 
 <!-- svelte-ignore a11y-no-noninteractive-element-interactions -->
 <aside class="preview" on:contextmenu={openTextMenu} on:scroll={handlePreviewScroll}>
@@ -553,8 +662,8 @@
         <div class="preview-markdown" bind:this={textContentEl}>{@html mdHtml}</div>
       {:else}
         {#if outline.length > 0}
-          <!-- Symbol outline strip + breadcrumb (CPE-1090): additive UI over the outline; the <pre>
-               below is UNCHANGED single-blob render (CPE-1091 does the per-line refactor). -->
+          <!-- Symbol outline strip + breadcrumb (CPE-1090): additive UI over the outline; jumps index
+               into the per-line rows below via the same scroll math. -->
           <div class="outline-bar">
             {#if breadcrumbSym}
               <div class="outline-crumb">
@@ -579,8 +688,27 @@
             </div>
           </div>
         {/if}
-        <!-- codeHtml is escaped or hljs output (lazy grammar), safe to inject. -->
-        <pre class="preview-text" class:nowrap={!wrapLines} bind:this={textContentEl}><code>{@html codeHtml}</code></pre>
+        <!-- Per-line code rows (CPE-1091): one span-safe row per source line inside ONE <pre>/<code>, so
+             select-all/copy still grabs the whole file as one blob. Line numbers come from CSS ::before
+             (never part of the selection); the fold triangle is a text-free button (CSS glyph). codeHtml
+             is escaped-or-hljs output (lazy grammar); each split fragment is balanced HTML, safe to inject.
+             Whitespace inside <code> is significant (white-space:pre) — keep the rows compact. -->
+        <div class="code-view">
+          <pre
+            class="preview-text code-rows"
+            class:nowrap={!wrapLines}
+            style="--gutter: calc({gutterDigits}ch + 22px); --tab-ch: {TAB_WIDTH}ch"
+          ><code class="cl-code" bind:this={textContentEl}>{#each codeLines as line, i}{#if !hiddenLines.has(i + 1)}<span class="cl-row" class:foldable={foldByStart.has(i + 1)} data-line={i + 1} style="--indent: {indent[i] ?? 0}">{#if foldByStart.has(i + 1)}<button type="button" class="fold-toggle" class:collapsed={foldCollapsed.has(i + 1)} aria-label={foldCollapsed.has(i + 1) ? `Expand lines ${i + 1}–${foldByStart.get(i + 1)?.end_line}` : `Collapse lines ${i + 1}–${foldByStart.get(i + 1)?.end_line}`} aria-expanded={!foldCollapsed.has(i + 1)} tabindex="-1" on:click|stopPropagation={() => toggleFold(i + 1)}></button>{/if}{@html line}{#if foldCollapsed.has(i + 1)}<span class="fold-badge"> ⋯ {foldLen(i + 1)} lines</span>{/if}</span>{/if}{/each}</code></pre>
+          {#if minimap.length > 0}
+            <!-- svelte-ignore a11y-no-static-element-interactions -->
+            <div class="minimap" role="presentation" style="height: {mmHeightPx}px" on:mousedown|preventDefault={onMinimapDown}>
+              {#each minimap as row}
+                <div class="mm-row"><div class="mm-fill" style="width: {6 + (row.fill / 255) * 90}%; margin-left: {Math.min(row.indent * 6, 60)}%; opacity: {0.18 + (row.fill / 255) * 0.82}"></div></div>
+              {/each}
+              <div class="mm-viewport" style="top: {mmViewport.top}%; height: {mmViewport.height}%"></div>
+            </div>
+          {/if}
+        </div>
       {/if}
     {/if}
   {:else}
@@ -638,6 +766,101 @@
   }
   /* Wrap toggle (CPE-565): off = preserve code indentation with horizontal scroll. */
   .preview-text.nowrap { white-space: pre; word-break: normal; overflow-x: auto; }
+
+  /* ---- Per-line code rows + gutter/fold/indent/minimap (CPE-1091, epic CPE-724) ---- */
+  .code-view { position: relative; display: flex; align-items: flex-start; }
+  .code-rows { flex: 1 1 auto; min-width: 0; padding: 12px 0; }
+  .cl-code { display: block; line-height: 1.5; }
+  /* One block per source line so line numbers, fold toggle and indent guides align to the row and the
+     minimap/outline scroll math sees a uniform line height. The whole <code> stays one selection blob,
+     so select-all/copy yields the file (block rows copy newline-joined). */
+  .cl-row {
+    display: block;
+    position: relative;
+    padding-left: var(--gutter);
+    min-height: 1.5em; /* keep empty lines a full row tall (division-safe: no 0-height rows) */
+    /* Indent guides: `--indent` faint vertical rules, one every --tab-ch columns, starting after the
+       gutter. `--indent: 0` → zero background width → nothing drawn. */
+    background-image: repeating-linear-gradient(
+      to right,
+      var(--border) 0, var(--border) 1px,
+      transparent 1px, transparent var(--tab-ch)
+    );
+    background-repeat: no-repeat;
+    background-position: var(--gutter) 0;
+    background-size: calc(var(--indent, 0) * var(--tab-ch)) 100%;
+  }
+  /* Line number in the gutter via generated content — NOT a DOM text node, so it is never part of a
+     selection/copy. Right-aligned in the gutter, dimmed, not selectable. */
+  .cl-row::before {
+    content: attr(data-line);
+    position: absolute;
+    left: 0;
+    width: calc(var(--gutter) - 22px);
+    text-align: right;
+    color: var(--text-faint);
+    user-select: none;
+    -webkit-user-select: none;
+    pointer-events: none;
+  }
+  /* Fold triangle: a text-free button (glyph drawn in CSS) so it never lands in copied text. */
+  .fold-toggle {
+    position: absolute;
+    left: calc(var(--gutter) - 18px);
+    top: 0;
+    width: 14px;
+    height: 1.5em;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    color: var(--text-dim);
+    user-select: none;
+    -webkit-user-select: none;
+  }
+  .fold-toggle::before {
+    content: "▾";
+    font-size: 10px;
+    line-height: 1;
+    transition: transform 0.1s ease;
+  }
+  .fold-toggle.collapsed::before { transform: rotate(-90deg); }
+  .fold-toggle:hover { color: var(--text); }
+  .fold-badge {
+    margin-left: 8px;
+    padding: 0 6px;
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    color: var(--text-dim);
+    font-size: 11px;
+    user-select: none;
+    -webkit-user-select: none;
+  }
+  /* Minimap: a downsampled overview pinned to the right of the viewport (sticky), whose bars come from
+     MinimapRow[] and whose viewport box + click-scroll use pure scroll fractions (wrap-safe). */
+  .minimap {
+    position: sticky;
+    top: 0;
+    flex: 0 0 auto;
+    width: 64px;
+    display: flex;
+    flex-direction: column;
+    white-space: normal; /* escape the inherited pre whitespace */
+    background: var(--surface);
+    border-left: 1px solid var(--border);
+    cursor: pointer;
+    overflow: hidden;
+  }
+  .mm-row { flex: 1 1 0; display: flex; align-items: center; min-height: 0; }
+  .mm-fill { height: 60%; min-height: 1px; background: var(--text-dim); border-radius: 1px; }
+  .mm-viewport {
+    position: absolute;
+    left: 0;
+    right: 0;
+    background: var(--accent);
+    opacity: 0.16;
+    border: 1px solid var(--accent);
+    pointer-events: none;
+  }
   /* Symbol outline strip + breadcrumb (CPE-1090): additive header above the code <pre>. */
   .outline-bar {
     display: flex;
