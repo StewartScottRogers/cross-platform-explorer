@@ -51,3 +51,32 @@ Logic:
 ## Work Log
 2026-07-25 (workshift) — Filed by the Product Manager as a clean headless CPE-705 slice (the inner-naming
 logic every compress command needs). Independent module; one-line lib.rs `pub mod` only.
+
+2026-07-25 (workshift, overnight Worker) — Built `crates/server/src/compress_plan.rs` +
+`pub mod compress_plan;` after `pub mod checksum;` in `lib.rs`. Opened PR — see repo PR list for the
+number. `cargo test -p cpe-server`: 775 passed, 0 failed (10 new). `cargo clippy --all-targets -- -D
+warnings` and `--features index`: both clean. No new deps.
+
+Assumptions logged (none of these are contradicted by the ticket, but they weren't spelled out, so
+flagging for reviewer sign-off):
+- **Single-item → basename falls out of one formula**, not a special case: the common-ancestor length is
+  capped at `min(source segment count) - 1` so every item always keeps at least its own last segment.
+  With one item that cap forces basename-only; with N items it also stops a directory item's full path
+  from swallowing a shorter nested item's own name. Verified by test
+  `deeper_nesting_still_strips_to_shared_ancestor` and `single_directory_also_maps_to_its_basename`.
+- **Single lone directory → basename, no trailing slash** (the design note's parenthetical `name/...`
+  wasn't required by acceptance criteria, so kept output uniform with the file case — a directory entry
+  is just a name like any other; nothing downstream needs a `/` marker at the planner layer).
+- **Mixed-root / no-shared-segment rule**: falls back to each source's full normalised path (leading
+  separator stripped), e.g. `/a/x.txt`+`/b/y.txt` → `a/x.txt`, `b/y.txt`; documented in the module doc
+  comment and covered by `mixed_root_selection_falls_back_to_full_relative_paths` (incl. a
+  Windows-drive-letter variant, since drive letters differing is the most likely real-world mixed-root
+  case).
+- **Collision detection also fires outside `flatten`** when two sources resolve to the same relative
+  name (e.g. the same path selected twice) — not just the flatten same-basename case the acceptance
+  criteria called out by name. Covered by `non_flatten_collision_from_duplicate_selection`.
+- Collision list order is first-repeat order over a `Vec` (not a `HashMap`) specifically to keep
+  `plan_compress` deterministic per the acceptance criteria.
+
+No blockers. Defender may flag the test binary as os error 225 on some machines — a scan artifact, not a
+compile/test failure; `cargo test` above ran clean in this worktree.

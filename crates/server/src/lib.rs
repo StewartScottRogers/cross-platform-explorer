@@ -117,6 +117,10 @@ pub mod text_stats;
 /// File + folder-tree SHA-256 checksums (CPE-412) and the integrity-baseline manifest (CPE-791).
 pub mod checksum;
 
+/// Compress-selection planner (CPE-1056, epic CPE-705): selection → inner archive-entry names,
+/// with collision detection.
+pub mod compress_plan;
+
 /// Folder statistics — recursive file/dir/byte totals (CPE-649).
 pub mod folder_stats;
 
