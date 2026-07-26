@@ -3,10 +3,14 @@
   import type { DirEntry } from "../types";
   import { pickProvider, type ArchiveEntry } from "../preview/provider";
   import { parseCsv } from "../preview/csv";
-  import { highlightForFile, ensureLanguageForName } from "../preview/highlight";
+  import { highlightForFile, ensureLanguageForName, languageForName } from "../preview/highlight";
   import { renderMarkdown } from "../preview/markdown";
+  import { lineToScrollTop, scrollTopToLine, enclosingSymbol, resolveLineHeight } from "../preview/outline";
+  import { commands } from "../bindings.gen";
+  import type { Symbol as CodeSymbol } from "../bindings.gen";
   import HexView from "./HexView.svelte";
   import DataBrowser from "./DataBrowser.svelte";
+  import Icon from "./Icon.svelte";
   import { t } from "../i18n";
   import { formatSize } from "../format";
   import { lsBool, lsSet } from "../persist";
@@ -188,6 +192,99 @@
     if (mine === mdReq) mdHtml = html;
   }
 
+  // ---- code-intel outline strip + breadcrumb + jump-to-symbol (CPE-1090, epic CPE-724) ----
+  let outline: CodeSymbol[] = [];
+  let outlineReq = 0;
+  let breadcrumbSym: CodeSymbol | null = null;
+
+  $: if (entry && textState === "idle" && provider.kind === "text") {
+    loadOutlineFor(entry.name, text);
+  } else if (!entry || provider.kind !== "text") {
+    outline = [];
+    breadcrumbSym = null;
+    outlineReq++; // supersede any in-flight fetch for a file we've navigated away from
+  }
+
+  async function loadOutlineFor(name: string, src: string) {
+    const mine = ++outlineReq;
+    // Clear synchronously so a superseded fetch can never leave a stale (wrong-file) outline visible
+    // while the new one is in flight.
+    outline = [];
+    breadcrumbSym = null;
+    if (!src) return;
+    const lang = languageForName(name) ?? "";
+    try {
+      const result = await commands.codeIntel(src, lang, null, null);
+      if (mine !== outlineReq) return;
+      outline = result.outline;
+      updateBreadcrumb();
+    } catch {
+      if (mine !== outlineReq) return;
+      outline = [];
+    }
+  }
+
+  /** Walk up from `el` to the nearest ancestor whose content actually overflows its box. The code
+   *  `<pre>` has no `overflow` set (it grows to fit its content — see `.preview-text`), so the real
+   *  scroll container is `aside.preview` (`overflow:auto`); walking generically avoids hard-coding that
+   *  and keeps working if the CSS changes. */
+  function findScrollContainer(el: HTMLElement | undefined): HTMLElement | undefined {
+    let node: HTMLElement | null = el ?? null;
+    while (node) {
+      if (node.scrollHeight > node.clientHeight + 1) return node;
+      node = node.parentElement;
+    }
+    return el;
+  }
+
+  function measureLineHeight(el: HTMLElement): number {
+    const style = getComputedStyle(el);
+    return resolveLineHeight(style.lineHeight, parseFloat(style.fontSize));
+  }
+
+  /** The `<pre>`'s top offset within the scroll container's scroll coordinate space. The container
+   *  (`aside.preview`) scrolls the edit-bar + outline strip *above* the `<pre>`, so the first code line
+   *  sits this many px down — jump/breadcrumb must add/subtract it or they drift by the header's height
+   *  (which itself grows when the pills reflow). `getBoundingClientRect` is used rather than `offsetTop`
+   *  because `aside.preview` is not a positioned `offsetParent`. */
+  function preOffset(container: HTMLElement, pre: HTMLElement): number {
+    return pre.getBoundingClientRect().top - container.getBoundingClientRect().top + container.scrollTop;
+  }
+
+  /** Click a symbol pill: scroll the preview so that symbol's line is at (or near) the top. */
+  function jumpToSymbol(sym: CodeSymbol) {
+    if (!textContentEl) return;
+    const container = findScrollContainer(textContentEl);
+    if (!container) return;
+    const lineHeight = measureLineHeight(textContentEl);
+    const target = preOffset(container, textContentEl) + lineToScrollTop(sym.line, lineHeight);
+    container.scrollTop = Math.max(0, Math.min(target, container.scrollHeight));
+    updateBreadcrumb();
+  }
+
+  /** Recompute the breadcrumb (the enclosing symbol of the top-visible line) from the live scroll
+   *  position. Cheap: `outline` is small, and this is only a linear scan. */
+  function updateBreadcrumb() {
+    if (!textContentEl || outline.length === 0) {
+      breadcrumbSym = null;
+      return;
+    }
+    const container = findScrollContainer(textContentEl);
+    if (!container) return;
+    const lineHeight = measureLineHeight(textContentEl);
+    const topLine = scrollTopToLine(container.scrollTop - preOffset(container, textContentEl), lineHeight);
+    breadcrumbSym = enclosingSymbol(outline, topLine);
+  }
+
+  /** Bound declaratively on `aside.preview` (the scroll container — see `findScrollContainer`), which
+   *  is a fixed part of the markup rather than re-created per entry, so Svelte manages attach/detach for
+   *  its whole lifetime; no manual addEventListener/removeEventListener bookkeeping needed. Guarded so it
+   *  no-ops outside the code view (other preview kinds, or while editing). */
+  function handlePreviewScroll() {
+    if (provider.kind !== "text" || editing || outline.length === 0) return;
+    updateBreadcrumb();
+  }
+
   // ---- word wrap (CPE-565): wrap long lines in the text/code/json preview; remembered across files. ----
   // Default ON (the pane has always wrapped); only an explicit "0" turns wrapping off.
   const WRAP_KEY = "cpe.previewWrap";
@@ -347,7 +444,7 @@
 <svelte:window on:click={closeTextMenu} on:keydown={(e) => e.key === "Escape" && closeTextMenu()} />
 
 <!-- svelte-ignore a11y-no-noninteractive-element-interactions -->
-<aside class="preview" on:contextmenu={openTextMenu}>
+<aside class="preview" on:contextmenu={openTextMenu} on:scroll={handlePreviewScroll}>
   {#if provider.kind === "image" && entry}
     <img class="preview-img" src={assetUrl(entry.path)} alt={entry.name} />
   {:else if provider.kind === "decoded-image" && entry}
@@ -455,6 +552,33 @@
         <!-- mdHtml is DOMPurify-sanitized (lazy renderer), safe to inject. -->
         <div class="preview-markdown" bind:this={textContentEl}>{@html mdHtml}</div>
       {:else}
+        {#if outline.length > 0}
+          <!-- Symbol outline strip + breadcrumb (CPE-1090): additive UI over the outline; the <pre>
+               below is UNCHANGED single-blob render (CPE-1091 does the per-line refactor). -->
+          <div class="outline-bar">
+            {#if breadcrumbSym}
+              <div class="outline-crumb">
+                <Icon name={breadcrumbSym.kind} size={12} />
+                <span class="outline-crumb-name">{breadcrumbSym.name}</span>
+              </div>
+            {/if}
+            <div class="outline-pills">
+              {#each outline as sym (sym.line + ":" + sym.name)}
+                <button
+                  type="button"
+                  class="outline-pill"
+                  class:active={breadcrumbSym === sym}
+                  aria-label={`Jump to ${sym.kind} ${sym.name}, line ${sym.line}`}
+                  title={`${sym.name} — line ${sym.line}`}
+                  on:click={() => jumpToSymbol(sym)}
+                >
+                  <Icon name={sym.kind} size={12} />
+                  <span class="outline-pill-name">{sym.name}</span>
+                </button>
+              {/each}
+            </div>
+          </div>
+        {/if}
         <!-- codeHtml is escaped or hljs output (lazy grammar), safe to inject. -->
         <pre class="preview-text" class:nowrap={!wrapLines} bind:this={textContentEl}><code>{@html codeHtml}</code></pre>
       {/if}
@@ -514,6 +638,61 @@
   }
   /* Wrap toggle (CPE-565): off = preserve code indentation with horizontal scroll. */
   .preview-text.nowrap { white-space: pre; word-break: normal; overflow-x: auto; }
+  /* Symbol outline strip + breadcrumb (CPE-1090): additive header above the code <pre>. */
+  .outline-bar {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    padding: 6px 8px;
+    border-bottom: 1px solid var(--border);
+    background: var(--surface);
+    flex: none;
+  }
+  .outline-crumb {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    min-width: 0;
+    font-size: 11px;
+    color: var(--text-dim);
+  }
+  .outline-crumb-name {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  /* Tick-tacks rule: the row reflows (wraps onto more rows + grows height); each pill keeps its own
+     text on one line and never shrinks. */
+  .outline-pills {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 4px;
+  }
+  .outline-pill {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    flex: 0 0 auto;
+    max-width: 220px;
+    padding: 2px 8px;
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    background: var(--surface);
+    color: var(--text);
+    font-size: 11px;
+    line-height: 1.6;
+  }
+  .outline-pill-name {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .outline-pill.active {
+    border-color: var(--accent);
+  }
+  .outline-pill:hover {
+    border-color: var(--border-strong);
+  }
   .wrapbtn { font-size: 13px; line-height: 1; min-width: 26px; }
   .editbtn.on { background: var(--accent); color: #fff; border-color: var(--accent); }
   .preview-table-wrap {
