@@ -4565,6 +4565,114 @@ fn classify_fs_event(kind: &notify::EventKind) -> Option<&'static str> {
     }
 }
 
+/// CPE-1117: insert a single path into the coalesce window as `"renamed"`, honouring the same
+/// "removed wins" rule as the main pump loop (a rename that's then deleted in-window reads as gone).
+#[cfg(feature = "sidecar-platform")]
+fn mark_renamed(pending: &mut std::collections::HashMap<String, &'static str>, path: String) {
+    let slot = pending.entry(path).or_insert("renamed");
+    if *slot != "removed" {
+        *slot = "renamed";
+    }
+}
+
+/// CPE-1117: record a fully-resolved rename `from`→`to`. The *target* becomes the coalesced
+/// `"renamed"` activity item, and its source is stashed in `rename_from[to]` for `flush_fs_batch`
+/// to attach as `from`/`to`. `flush` only reads `rename_from` for items still `"renamed"` at flush
+/// time, so a target that's removed-in-window silently drops its now-stale source (no false pair).
+#[cfg(feature = "sidecar-platform")]
+fn record_rename_pair(
+    pending: &mut std::collections::HashMap<String, &'static str>,
+    rename_from: &mut std::collections::HashMap<String, String>,
+    from: String,
+    to: String,
+) {
+    mark_renamed(pending, to.clone());
+    rename_from.insert(to, from);
+}
+
+/// CPE-1117: fold one raw rename event into the coalesce window, capturing its source→target pair.
+///
+/// `notify` reports renames in one of two shapes and this handles both:
+///   * a single `RenameMode::Both` event whose `paths` are `[from, to]` (macOS FSEvents and some
+///     backends) — paired immediately;
+///   * a `RenameMode::From` then `RenameMode::To` split sharing a tracker *cookie*
+///     (Windows `ReadDirectoryChangesW`, Linux inotify) — the source is held in `pending_by_cookie`
+///     until its partner arrives inside the same ~200ms flush window.
+///
+/// ## Fidelity ceiling (decide-and-log, CPE-1117)
+/// Where the platform cannot give us a pair we degrade to today's single-path `"renamed"` — no
+/// crash, no fabricated pair. That covers: `RenameMode::Any`/`Other` events (some Linux inotify
+/// backends never emit `Both` *or* a cookie); a `From`/`To` with no tracker cookie to correlate on;
+/// and a `From` whose matching `To` never arrives (moved *out of* the watched tree, or split across
+/// a flush boundary — see [`fold_orphan_renames`]). Competing-rename detection (CPE-1118) simply
+/// sees fewer pairs on those platforms; it never sees a wrong one.
+#[cfg(feature = "sidecar-platform")]
+fn handle_rename_event(
+    event: &notify::Event,
+    pending: &mut std::collections::HashMap<String, &'static str>,
+    rename_from: &mut std::collections::HashMap<String, String>,
+    pending_by_cookie: &mut std::collections::HashMap<usize, String>,
+) {
+    use notify::event::{ModifyKind, RenameMode};
+    use notify::EventKind::Modify;
+
+    // classify_fs_event only routes `Modify(Name(_))` here; default defensively to `Any`.
+    let mode = match event.kind {
+        Modify(ModifyKind::Name(m)) => m,
+        _ => RenameMode::Any,
+    };
+    let mut paths = event.paths.iter().map(|p| p.to_string_lossy().into_owned());
+
+    match mode {
+        RenameMode::Both => {
+            // Paths are `[from, to]` in that exact order (notify contract). Pair only when both are
+            // present; a malformed single-path `Both` degrades to single-path.
+            match (paths.next(), paths.next()) {
+                (Some(from), Some(to)) => record_rename_pair(pending, rename_from, from, to),
+                (Some(only), None) => mark_renamed(pending, only),
+                _ => {}
+            }
+        }
+        RenameMode::From => match (event.attrs.tracker(), paths.next()) {
+            // Hold the source until its `To` partner arrives (correlated by cookie).
+            (Some(cookie), Some(from)) => {
+                pending_by_cookie.insert(cookie, from);
+            }
+            // No cookie to pair on — emit the source as a single-path rename now.
+            (None, Some(from)) => mark_renamed(pending, from),
+            _ => {}
+        },
+        RenameMode::To => match (event.attrs.tracker(), paths.next()) {
+            (Some(cookie), Some(to)) => match pending_by_cookie.remove(&cookie) {
+                Some(from) => record_rename_pair(pending, rename_from, from, to),
+                // A `To` whose `From` we never saw — single-path fallback.
+                None => mark_renamed(pending, to),
+            },
+            (None, Some(to)) => mark_renamed(pending, to),
+            _ => {}
+        },
+        // `Any`/`Other`: the backend didn't tell us direction — emit each path single-path.
+        _ => {
+            for p in paths {
+                mark_renamed(pending, p);
+            }
+        }
+    }
+}
+
+/// CPE-1117: any rename source still waiting for its `To` when the window flushes degrades to a
+/// single-path `"renamed"` (fidelity fallback — see [`handle_rename_event`]). Called at the top of
+/// every `flush_fs_batch` so an unmatched `From` is never lost and never lingers past its window.
+#[cfg(feature = "sidecar-platform")]
+fn fold_orphan_renames(
+    pending: &mut std::collections::HashMap<String, &'static str>,
+    pending_by_cookie: &mut std::collections::HashMap<usize, String>,
+) {
+    for (_cookie, from) in pending_by_cookie.drain() {
+        mark_renamed(pending, from);
+    }
+}
+
 /// Read a file as UTF-8 text for shadowing (CPE-743), or `None` if it isn't a suitable text file:
 /// not a regular file, larger than `cap` bytes, unreadable, or not valid UTF-8 (binary). Cheap
 /// bail-outs first (metadata is one stat) so the pump never slurps a huge or binary file.
@@ -4599,6 +4707,13 @@ fn fs_activity_pump(
     const FLUSH: Duration = Duration::from_millis(200);
     const CAP: usize = 500;
     let mut pending: HashMap<String, &'static str> = HashMap::new();
+    // CPE-1117: a renamed *target* path -> its *source* path, drained by `flush_fs_batch` to attach
+    // `from`/`to` to the renamed activity item (absent target => single-path fallback).
+    let mut rename_from: HashMap<String, String> = HashMap::new();
+    // CPE-1117: half-seen renames awaiting their partner, keyed by notify's tracker cookie (the
+    // Windows/Linux `From`-then-`To` split). Paired within the flush window by `handle_rename_event`;
+    // orphans fall back to single-path in `fold_orphan_renames`.
+    let mut pending_by_cookie: HashMap<usize, String> = HashMap::new();
     let mut shadow = agent_shadow::ShadowStore::new();
     let mut last_flush = Instant::now();
 
@@ -4606,30 +4721,64 @@ fn fs_activity_pump(
         match rx.recv_timeout(FLUSH) {
             Ok(Ok(event)) => {
                 if let Some(kind) = classify_fs_event(&event.kind) {
-                    for p in event.paths {
-                        // A `removed` wins over a same-window `created`/`modified` so a file the
-                        // agent creates then deletes reads as gone, not as churn.
-                        let path = p.to_string_lossy().into_owned();
-                        let slot = pending.entry(path).or_insert(kind);
-                        if kind == "removed" || *slot != "removed" {
-                            *slot = kind;
+                    if kind == "renamed" {
+                        // CPE-1117: capture the source->target pair (or degrade gracefully to a
+                        // single-path `renamed`); see `handle_rename_event` for the fidelity ceiling.
+                        handle_rename_event(
+                            &event,
+                            &mut pending,
+                            &mut rename_from,
+                            &mut pending_by_cookie,
+                        );
+                    } else {
+                        for p in event.paths {
+                            // A `removed` wins over a same-window `created`/`modified` so a file the
+                            // agent creates then deletes reads as gone, not as churn.
+                            let path = p.to_string_lossy().into_owned();
+                            let slot = pending.entry(path).or_insert(kind);
+                            if kind == "removed" || *slot != "removed" {
+                                *slot = kind;
+                            }
                         }
                     }
                 }
-                if pending.len() >= CAP {
-                    flush_fs_batch(&app, &mut pending, &mut shadow, &session_id);
+                // Cap on either the emit queue or the (normally tiny) in-flight rename map, so a
+                // flood of unpaired `From` events can't grow memory unbounded between timer flushes.
+                if pending.len() >= CAP || pending_by_cookie.len() >= CAP {
+                    flush_fs_batch(
+                        &app,
+                        &mut pending,
+                        &mut rename_from,
+                        &mut pending_by_cookie,
+                        &mut shadow,
+                        &session_id,
+                    );
                     last_flush = Instant::now();
                 }
             }
             Ok(Err(_)) => {} // a watch error — ignore, keep pumping
             Err(RecvTimeoutError::Timeout) => {}
             Err(RecvTimeoutError::Disconnected) => {
-                flush_fs_batch(&app, &mut pending, &mut shadow, &session_id);
+                flush_fs_batch(
+                    &app,
+                    &mut pending,
+                    &mut rename_from,
+                    &mut pending_by_cookie,
+                    &mut shadow,
+                    &session_id,
+                );
                 break;
             }
         }
         if last_flush.elapsed() >= FLUSH {
-            flush_fs_batch(&app, &mut pending, &mut shadow, &session_id);
+            flush_fs_batch(
+                &app,
+                &mut pending,
+                &mut rename_from,
+                &mut pending_by_cookie,
+                &mut shadow,
+                &session_id,
+            );
             last_flush = Instant::now();
         }
     }
@@ -4643,13 +4792,22 @@ fn fs_activity_pump(
 fn flush_fs_batch(
     app: &tauri::AppHandle,
     pending: &mut std::collections::HashMap<String, &'static str>,
+    rename_from: &mut std::collections::HashMap<String, String>,
+    pending_by_cookie: &mut std::collections::HashMap<usize, String>,
     shadow: &mut agent_shadow::ShadowStore,
     session_id: &str,
 ) {
     use serde_json::json;
     use tauri::{Emitter, Manager};
 
+    // CPE-1117: fold any rename source whose matching `To` never arrived within this window into the
+    // batch as a single-path `renamed` (fidelity fallback) *before* deciding there's nothing to flush.
+    fold_orphan_renames(pending, pending_by_cookie);
+
     if pending.is_empty() {
+        // No `renamed` items => any stray captured sources are moot; drop them so nothing leaks
+        // into a later window and gets mis-attached.
+        rename_from.clear();
         return;
     }
     // Per-event actor tag (CPE-1101). The owning session id is the default; a fresh app-op ledger
@@ -4707,8 +4865,21 @@ fn flush_fs_batch(
             actor: Some(actor.clone()),
             detail: None,
         });
-        activity.push(json!({ "kind": kind, "path": path, "actor": actor }));
+        // CPE-1117: attach the captured source for a paired rename; a `renamed` item with no
+        // recorded source (unpaired on this platform/event) stays single-path — no `from`/`to`.
+        let renamed_from = if kind == "renamed" { rename_from.remove(&path) } else { None };
+        let mut item = json!({ "kind": kind, "path": path, "actor": actor });
+        if let Some(from) = renamed_from {
+            // `path` (now the item's `path`) is the rename target; surface it as `to` too so the
+            // competing-rename fold (CPE-1118) reads `from`/`to` directly.
+            item["to"] = item["path"].clone();
+            item["from"] = json!(from);
+        }
+        activity.push(item);
     }
+    // Drop any leftover captured sources whose target was removed/superseded in-window (so it was
+    // never emitted as `renamed`) — never carry a source into a later window.
+    rename_from.clear();
     // Append the batch to the durable audit journal (CPE-1108) so the session's full ordered event
     // log survives beyond the 300-cap in-memory timeline for replay. This lives only on the pump
     // thread, so nothing is written when no session is armed (off means off). A journal-write error
@@ -6553,8 +6724,18 @@ mod agent_watch_tests {
         // Mutations become the coarse Agent Watch kinds (CPE-398)…
         assert_eq!(classify_fs_event(&EventKind::Create(CreateKind::File)), Some("created"));
         assert_eq!(classify_fs_event(&EventKind::Remove(RemoveKind::File)), Some("removed"));
+        // …every rename shape maps to the coarse `renamed` kind; the from→to *pairing* (CPE-1117)
+        // is the pump's job (see the rename-pairing tests below), not this coarse classifier's.
         assert_eq!(
             classify_fs_event(&EventKind::Modify(ModifyKind::Name(RenameMode::Both))),
+            Some("renamed"),
+        );
+        assert_eq!(
+            classify_fs_event(&EventKind::Modify(ModifyKind::Name(RenameMode::From))),
+            Some("renamed"),
+        );
+        assert_eq!(
+            classify_fs_event(&EventKind::Modify(ModifyKind::Name(RenameMode::To))),
             Some("renamed"),
         );
         assert_eq!(
@@ -6564,6 +6745,125 @@ mod agent_watch_tests {
         // …and reads / unknowns are dropped (a Windows watcher can't see reads anyway).
         assert_eq!(classify_fs_event(&EventKind::Access(notify::event::AccessKind::Read)), None);
         assert_eq!(classify_fs_event(&EventKind::Other), None);
+    }
+
+    // --- Rename source→target pairing (CPE-1117) ----------------------------------------
+    use super::{fold_orphan_renames, handle_rename_event};
+    use std::collections::HashMap;
+    use std::path::PathBuf;
+
+    /// Build a `Modify(Name(mode))` event with the given paths and (optional) tracker cookie, the way
+    /// notify's backends do: a `Both` carries `[from, to]`; a `From`/`To` split carries one path each
+    /// plus a shared cookie.
+    fn name_event(mode: RenameMode, paths: &[&str], cookie: Option<usize>) -> notify::Event {
+        let mut ev = notify::Event::new(EventKind::Modify(ModifyKind::Name(mode)));
+        for p in paths {
+            ev = ev.add_path(PathBuf::from(p));
+        }
+        if let Some(c) = cookie {
+            ev = ev.set_tracker(c);
+        }
+        ev
+    }
+
+    // The three per-window maps the pump threads through `handle_rename_event`.
+    type PendingMap = HashMap<String, &'static str>;
+    type RenameFromMap = HashMap<String, String>;
+    type CookieMap = HashMap<usize, String>;
+    fn maps() -> (PendingMap, RenameFromMap, CookieMap) {
+        (HashMap::new(), HashMap::new(), HashMap::new())
+    }
+
+    #[test]
+    fn rename_both_pairs_source_and_target_in_one_record() {
+        // macOS / backends that emit a single `Both` with paths == [from, to].
+        let (mut pending, mut rename_from, mut cookies) = maps();
+        let ev = name_event(RenameMode::Both, &["/w/old.txt", "/w/new.txt"], None);
+        handle_rename_event(&ev, &mut pending, &mut rename_from, &mut cookies);
+        // One item, keyed by the *target*; the source rides in the side channel — never a second item.
+        assert_eq!(pending.get("/w/new.txt"), Some(&"renamed"));
+        assert_eq!(pending.get("/w/old.txt"), None);
+        assert_eq!(rename_from.get("/w/new.txt").map(String::as_str), Some("/w/old.txt"));
+        assert!(cookies.is_empty());
+    }
+
+    #[test]
+    fn rename_from_then_to_pairs_by_cookie() {
+        // Windows / Linux: a `From` then a `To` sharing one tracker cookie, within the flush window.
+        let (mut pending, mut rename_from, mut cookies) = maps();
+        handle_rename_event(
+            &name_event(RenameMode::From, &["/w/old.txt"], Some(42)),
+            &mut pending,
+            &mut rename_from,
+            &mut cookies,
+        );
+        // `From` alone emits nothing yet — the source is held by cookie awaiting its `To`.
+        assert!(pending.is_empty());
+        assert_eq!(cookies.get(&42).map(String::as_str), Some("/w/old.txt"));
+
+        handle_rename_event(
+            &name_event(RenameMode::To, &["/w/new.txt"], Some(42)),
+            &mut pending,
+            &mut rename_from,
+            &mut cookies,
+        );
+        assert_eq!(pending.get("/w/new.txt"), Some(&"renamed"));
+        assert_eq!(rename_from.get("/w/new.txt").map(String::as_str), Some("/w/old.txt"));
+        assert!(cookies.is_empty(), "cookie consumed once paired");
+    }
+
+    #[test]
+    fn orphan_from_degrades_to_single_path_on_flush() {
+        // A `From` whose matching `To` never arrives (moved out of the tree). At window flush it must
+        // fall back to a single-path `renamed` — no crash, no fabricated pair.
+        let (mut pending, mut rename_from, mut cookies) = maps();
+        handle_rename_event(
+            &name_event(RenameMode::From, &["/w/gone.txt"], Some(7)),
+            &mut pending,
+            &mut rename_from,
+            &mut cookies,
+        );
+        fold_orphan_renames(&mut pending, &mut cookies);
+        assert_eq!(pending.get("/w/gone.txt"), Some(&"renamed"));
+        assert!(rename_from.is_empty(), "no false from→to pair for an orphan");
+        assert!(cookies.is_empty());
+    }
+
+    #[test]
+    fn rename_to_without_a_seen_from_is_single_path() {
+        // A `To` (with or without a cookie) whose `From` we never captured degrades to single-path.
+        let (mut pending, mut rename_from, mut cookies) = maps();
+        handle_rename_event(
+            &name_event(RenameMode::To, &["/w/x.txt"], Some(99)),
+            &mut pending,
+            &mut rename_from,
+            &mut cookies,
+        );
+        assert_eq!(pending.get("/w/x.txt"), Some(&"renamed"));
+        assert!(rename_from.is_empty());
+    }
+
+    #[test]
+    fn rename_any_and_cookieless_split_degrade_gracefully() {
+        // `Any`/`Other` (some Linux inotify backends) and a cookieless `From` both fall back to
+        // single-path `renamed` with no pairing — the documented fidelity ceiling.
+        let (mut pending, mut rename_from, mut cookies) = maps();
+        handle_rename_event(
+            &name_event(RenameMode::Any, &["/w/a.txt"], None),
+            &mut pending,
+            &mut rename_from,
+            &mut cookies,
+        );
+        handle_rename_event(
+            &name_event(RenameMode::From, &["/w/b.txt"], None),
+            &mut pending,
+            &mut rename_from,
+            &mut cookies,
+        );
+        assert_eq!(pending.get("/w/a.txt"), Some(&"renamed"));
+        assert_eq!(pending.get("/w/b.txt"), Some(&"renamed"));
+        assert!(rename_from.is_empty());
+        assert!(cookies.is_empty());
     }
 
     // --- Multi-session watch: keyed map + zero-watcher invariant (CPE-1099) -------------
