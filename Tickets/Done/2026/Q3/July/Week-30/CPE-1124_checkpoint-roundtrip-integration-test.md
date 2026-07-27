@@ -4,7 +4,7 @@ title: "Checkpoint & rollback: engine round-trip integration test"
 type: test
 component: Backend
 priority: high
-status: Backlog
+status: Done
 tags: ready
 created: 2026-07-26
 epic: CPE-732
@@ -38,3 +38,5 @@ part NOW. New test file, zero collision with any other ticket.
 ## Work Log
 2026-07-26 (workshift) — CPE-732 first wave (PM slice D). Parallel-safe (new test file); validates the pre-built
 engines compose correctly before/alongside the command layer (CPE-1123). Dispatched to a sonnet worker.
+
+2026-07-26 (workshift) — Built (PR #438, merged 5636e939). Reviewer APPROVE + UAT PASS. UAT ran a MUTATION test (broke apply_delete -> test failed as expected -> reverted), proving the assertions catch real regressions. Covers capture->mutate(incl rename=Create+Delete)->plan->drift(5 Conflict unattributed -> 5 Safe when attributed)->revert->byte-match Snapshot equality, + portable skip-unreadable (missing-blob). No prod changes, no new deps.
