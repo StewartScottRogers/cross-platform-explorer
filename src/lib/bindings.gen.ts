@@ -1840,6 +1840,11 @@ export type ContentMatch = { path: string; line_number: number; line: string }
  */
 export type ContentSearchResult = { matches: ContentMatch[]; files_scanned: number; truncated: boolean }
 /**
+ * Where a [`MediaOp::Watermark`] overlay is anchored on the base image. Default `BottomRight`
+ * matches the common "small logo in the corner" placement.
+ */
+export type Corner = "top_left" | "top_right" | "bottom_left" | "bottom_right" | "center"
+/**
  * One redacted log line in a diagnostics response (CPE-323).
  */
 export type DiagLogLine = { 
@@ -2014,7 +2019,13 @@ export type MediaOp =
  * formats without a lossy quality knob (png/gif/bmp/tif, and this crate's lossless-only WebP
  * encoder) accept it as a graceful no-op.
  */
-{ op: "compress"; quality: number }
+{ op: "compress"; quality: number } | 
+/**
+ * Alpha-composite an overlay image (logo/stamp) onto each image at a corner + opacity.
+ * **Optional by construction**: an empty `image` path means "no watermark" — the op then
+ * contributes nothing (no summary line, no bytes touched). `opacity` is 0-100.
+ */
+{ op: "watermark"; image: string; position?: Corner; opacity: number }
 /**
  * An edit the user asked for.
  */

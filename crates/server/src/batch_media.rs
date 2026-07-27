@@ -27,6 +27,43 @@ pub enum MediaOp {
     /// formats without a lossy quality knob (png/gif/bmp/tif, and this crate's lossless-only WebP
     /// encoder) accept it as a graceful no-op.
     Compress { quality: u8 },
+    /// Alpha-composite an overlay image (logo/stamp) onto each image at a corner + opacity.
+    /// **Optional by construction**: an empty `image` path means "no watermark" — the op then
+    /// contributes nothing (no summary line, no bytes touched). `opacity` is 0-100.
+    Watermark {
+        image: String,
+        #[serde(default)]
+        position: Corner,
+        opacity: u8,
+    },
+}
+
+/// Where a [`MediaOp::Watermark`] overlay is anchored on the base image. Default `BottomRight`
+/// matches the common "small logo in the corner" placement.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[cfg_attr(feature = "specta", derive(specta::Type))]
+#[serde(rename_all = "snake_case")]
+pub enum Corner {
+    TopLeft,
+    TopRight,
+    BottomLeft,
+    #[default]
+    BottomRight,
+    Center,
+}
+
+impl Corner {
+    /// A short lowercase-snake token for plan summaries — mirrors the serde wire form so the
+    /// preview text and the JSON payload agree on how a corner reads.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Corner::TopLeft => "top_left",
+            Corner::TopRight => "top_right",
+            Corner::BottomLeft => "bottom_left",
+            Corner::BottomRight => "bottom_right",
+            Corner::Center => "center",
+        }
+    }
 }
 
 /// A batch job: the ordered ops + whether to write to new files (default) or overwrite in place.
@@ -77,6 +114,9 @@ pub fn validate(job: &BatchJob) -> Result<(), String> {
             MediaOp::Compress { quality } if *quality == 0 || *quality > 100 => {
                 return Err(format!("compress quality must be 1-100 (got {quality})"));
             }
+            MediaOp::Watermark { opacity, .. } if *opacity > 100 => {
+                return Err(format!("watermark opacity must be 0-100 (got {opacity})"));
+            }
             _ => {}
         }
     }
@@ -100,6 +140,13 @@ fn join(dir: &str, stem: &str, ext: &str) -> String {
     } else {
         format!("{dir}{stem}.{ext}")
     }
+}
+
+/// The filename (no directory) of a path, for use in a short human summary — e.g. a watermark
+/// overlay's own path is usually long, but the summary only needs `logo.png`.
+fn basename(path: &str) -> String {
+    let (_, stem, ext) = split(path);
+    join("", &stem, &ext)
 }
 
 /// Plan the batch: for each input compute its output path (applying the ops' effect on name/extension),
@@ -150,6 +197,16 @@ pub fn plan(job: &BatchJob, inputs: &[String]) -> Vec<PlannedItem> {
                     // No suffix (mirrors StripMetadata): compress changes bytes, not dimensions/name, so
                     // it relies on the non-destructive collision guard's generic "-out" fallback below.
                     MediaOp::Compress { quality } => parts.push(format!("compress q{quality}")),
+                    // Optional by construction: an empty `image` means "no watermark configured", so the
+                    // op contributes NOTHING to the plan — no summary text, no suffix — same as if the op
+                    // weren't in the list at all. A non-empty image gets a summary line but, like
+                    // Compress/StripMetadata, no dedicated suffix; the generic non-destructive fallback
+                    // below still keeps the output distinct from the input.
+                    MediaOp::Watermark { image, position, opacity } => {
+                        if !image.trim().is_empty() {
+                            parts.push(format!("watermark {} {} {opacity}%", basename(image), position.as_str()));
+                        }
+                    }
                 }
             }
 
@@ -210,6 +267,56 @@ mod tests {
         assert_eq!(out[0].summary, "compress q80");
         // No dedicated suffix (mirrors StripMetadata) — the generic non-destructive fallback renames
         // the sole-op case to "-out" so the output still differs from the input.
+        assert_eq!(out[0].output, "/pics/cat-out.jpg");
+    }
+
+    #[test]
+    fn validate_rejects_out_of_range_watermark_opacity() {
+        let op = |opacity| MediaOp::Watermark { image: "logo.png".into(), position: Corner::default(), opacity };
+        assert!(validate(&BatchJob::new(vec![op(101)])).is_err());
+        assert!(validate(&BatchJob::new(vec![op(0)])).is_ok()); // 0 is valid (a fully-invisible watermark)
+        assert!(validate(&BatchJob::new(vec![op(100)])).is_ok());
+    }
+
+    #[test]
+    fn validate_does_not_require_the_watermark_image_to_exist() {
+        // Empty (unset) is explicitly fine at validate time — checked only at apply, per the
+        // "optional, none if unset" requirement.
+        let op = MediaOp::Watermark { image: String::new(), position: Corner::default(), opacity: 50 };
+        assert!(validate(&BatchJob::new(vec![op])).is_ok());
+    }
+
+    #[test]
+    fn watermark_with_empty_image_contributes_nothing_to_the_plan() {
+        // Empty image ⇒ the op adds no summary text and no suffix — it's as if it weren't in the ops
+        // list at all. The non-destructive collision guard still renames to "-out" (the same generic
+        // fallback Compress/StripMetadata rely on), since *some* job with >=1 op was still submitted.
+        let job = BatchJob::new(vec![MediaOp::Watermark {
+            image: String::new(),
+            position: Corner::BottomRight,
+            opacity: 80,
+        }]);
+        let out = plan(&job, &v(&["/pics/cat.jpg"]));
+        assert_eq!(out[0].summary, "no-op");
+        assert_eq!(out[0].output, "/pics/cat-out.jpg");
+
+        // In overwrite mode (no collision guard), an empty-image watermark truly changes nothing.
+        let mut job2 = job.clone();
+        job2.non_destructive = false;
+        let out2 = plan(&job2, &v(&["/pics/cat.jpg"]));
+        assert_eq!(out2[0].output, "/pics/cat.jpg");
+    }
+
+    #[test]
+    fn watermark_summary_names_the_overlay_corner_and_opacity() {
+        let job = BatchJob::new(vec![MediaOp::Watermark {
+            image: "/assets/logo.png".into(),
+            position: Corner::TopLeft,
+            opacity: 40,
+        }]);
+        let out = plan(&job, &v(&["/pics/cat.jpg"]));
+        assert_eq!(out[0].summary, "watermark logo.png top_left 40%");
+        // No dedicated suffix (mirrors Compress/StripMetadata) — falls back to the generic "-out".
         assert_eq!(out[0].output, "/pics/cat-out.jpg");
     }
 

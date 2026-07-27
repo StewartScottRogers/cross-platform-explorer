@@ -12,6 +12,12 @@ describe("mediaOpLabel", () => {
     expect(mediaOpLabel({ op: "rename", template: "{stem}-x" })).toBe('Rename "{stem}-x"');
     expect(mediaOpLabel({ op: "strip_metadata" })).toBe("Strip metadata");
     expect(mediaOpLabel({ op: "compress", quality: 80 })).toBe("Compress q80");
+    expect(mediaOpLabel({ op: "watermark", image: "", position: "bottom_right", opacity: 80 })).toBe(
+      "Watermark (none)",
+    );
+    expect(
+      mediaOpLabel({ op: "watermark", image: "C:\\assets\\logo.png", position: "top_left", opacity: 40 }),
+    ).toBe("Watermark logo.png top_left 40%");
   });
 });
 
