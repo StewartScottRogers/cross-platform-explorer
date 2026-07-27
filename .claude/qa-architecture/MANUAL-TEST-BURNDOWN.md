@@ -59,3 +59,6 @@ These are **not** MVD; listed so the QA Architect pins them and audits for regre
   `cargo test` jobs. Complements CPE-1115 (which makes the skip *visible* in the dialog) + CPE-1105 (dialog
   logic) — the CPE-1093 "real image-transform output" residual is now largely covered at the integration level;
   only pure pixel/theme *feel* on the installed build remains human debt.
+
+### Workshift 2026-07-26 (resume) — new manual debt from merged PRs
+| CPE-1114 | Cost History tab: SVG over-time bar-chart geometry + hover tooltips; light/dark theme of `.hd-stat`/`.hd-bar`; drawer at 340px/90vw reflow; long agent/model name ellipsis+title; a real multi-week `history.jsonl` round-tripping into believable numbers | **logic fully automated** (`agentMetricsRollup.test.ts` 14 cases assert real values; AgentTimeline History-tab component behaviour, pull-only, empty/error states covered) — residual is **pixel/theme/geometry-only** on the installed build with a real persisted journal; candidate to fold into the `gui-smoke` fixture (seed a synthetic history.jsonl + assert `.hd-*`/`.hd-bar` render) | logic automated — visual residual | 2026-07-26 |
