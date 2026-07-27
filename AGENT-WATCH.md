@@ -50,6 +50,16 @@ feature-gated behind `sidecar-platform`; with no agent running the plain explore
   carries a small hedge note. Pure frontend fold over the existing timeline — no new backend surface,
   no new listener/timer. The honest unknown-vs-agent upgrade (positively confirming a watcher write
   came from an unrelated process) is deferred to a future ticket.
+- **Cross-session history dashboard (CPE-1107/1113/1114, epic CPE-731 — closed):** the fuller
+  per-session Cost tab (files/edits/churn/wall-clock/throughput, CPE-1107) flushes one
+  `SessionMetricsRecord` per session to a persisted `agent-metrics/history.jsonl` on session end
+  (CPE-1113, `commands.metricsRecord`/`metrics_history`). The drawer's "History" tab (CPE-1114) reads
+  `commands.metricsHistory()` **once, pull-only, on first open this mount** — no listener/timer,
+  nothing runs while the tab/drawer is closed — and renders a cross-session rollup (totals, per-model
+  and per-agent tables with share, division-safe throughput ratios, and a hand-rolled SVG bars-per-day
+  view of cost or tokens). `src/lib/agentMetricsRollup.ts` is the pure rollup, mirroring the tested
+  Rust `fleet_metrics::aggregate`/`efficiency` formulas so the numbers match. Same advisory framing as
+  the Cost tab — best-effort, never billing.
 
 ## What it is for
 
