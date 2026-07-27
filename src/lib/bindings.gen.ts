@@ -1095,6 +1095,62 @@ async replayLoad(session: string) : Promise<Result<ReplayLoad, string>> {
 }
 },
 /**
+ * Capture the tree under `root` into its per-root checkpoint store + record a labelled index entry.
+ */
+async checkpointCreate(root: string, label: string) : Promise<Result<CheckpointCreated, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("checkpoint_create", { root, label }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * The checkpoints recorded for `root`, newest-first.
+ */
+async checkpointList(root: string) : Promise<Result<Checkpoint[], string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("checkpoint_list", { root }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * Preview reverting `root` to checkpoint `manifest_id`: restore-plan summary + a drift report so the UI
+ * can warn before touching disk. Reads only; nothing destructive.
+ */
+async checkpointPreviewRevert(root: string, manifestId: string) : Promise<Result<RevertPreview, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("checkpoint_preview_revert", { root, manifestId }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * Revert the whole tree under `root` to checkpoint `manifest_id` (skip-on-error honoured).
+ */
+async checkpointRevert(root: string, manifestId: string) : Promise<Result<RevertOutcome, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("checkpoint_revert", { root, manifestId }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * Cherry-revert a single `path` under `root` to its state in checkpoint `manifest_id`.
+ */
+async checkpointRevertOne(root: string, manifestId: string, path: string) : Promise<Result<RevertOutcome, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("checkpoint_revert_one", { root, manifestId, path }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
  * Line / word / character / byte counts for a text file (CPE-414). Lines follow `str::lines`
  * (a final unterminated line still counts); words are whitespace-separated; characters are Unicode
  * scalar values. Capped so analysing a file stays predictable; a non-UTF-8 (binary) file, a
@@ -1813,6 +1869,47 @@ fields: ([string, string])[];
  */
 body: string }
 /**
+ * One recorded checkpoint's index entry: which manifest holds its captured tree, the user's label, and
+ * when it was taken (epoch ms). This is the row appended to / read from `checkpoints.json`.
+ */
+export type Checkpoint = { 
+/**
+ * The [`snapshot_capture`] manifest id this checkpoint captured into — pass to preview/revert.
+ */
+manifest_id: string; 
+/**
+ * The user-supplied label ("before refactor", …). May be empty.
+ */
+label: string; 
+/**
+ * When the checkpoint was taken, epoch milliseconds.
+ */
+ts: number }
+/**
+ * Outcome of [`checkpoint_create`]: the index entry plus the dedup accounting from the capture.
+ */
+export type CheckpointCreated = { 
+/**
+ * The checkpoint just recorded (also now the newest entry [`checkpoint_list`] returns).
+ */
+checkpoint: Checkpoint; 
+/**
+ * Blobs newly written to the store by this capture.
+ */
+new_blobs: number; 
+/**
+ * Blobs already present and reused (the dedup win — nothing written).
+ */
+reused_blobs: number; 
+/**
+ * Bytes this capture added to the store's footprint.
+ */
+added_bytes: number; 
+/**
+ * Files whose content was skipped (never silently dropped).
+ */
+skipped: SkippedInfo[] }
+/**
  * A file's checksum baseline entry (CPE-791) — matches the frontend `ChecksumEntry` (CPE-790).
  * `modified` is epoch-ms.
  */
@@ -2252,6 +2349,59 @@ actions: string[]; up_to_date: boolean; conflicts_possible: boolean; blocked: st
  */
 conflicted: boolean }
 /**
+ * Outcome of a revert — an `OpResult`-style summary: how many actions applied, plus the ones that were
+ * skipped (each carried as a failed [`OpResult`] with the skip reason), preserving the engine's
+ * skip-on-error guarantee.
+ */
+export type RevertOutcome = { 
+/**
+ * Actions applied successfully.
+ */
+applied: number; 
+/**
+ * Actions skipped (missing blob, locked/permission-denied, path-safety refusal): `ok:false` +
+ * `error` = the reason. Never fatal to the rest of the revert.
+ */
+skipped: OpResult[] }
+/**
+ * A preview of what reverting to a checkpoint would do: the restore-plan summary plus a **drift** report.
+ * 
+ * Drift = files that differ from the checkpoint but that this layer cannot attribute to the watched
+ * agent. Attribution ([`crate::revert_attribution`]) is not wired into this command signature, so the
+ * classifier runs against an empty "agent-touched" set — every diverging path is surfaced as drift
+ * ("changed outside since checkpoint"), the conservative default that makes the UI warn first. When
+ * attribution is later threaded through, only genuinely-outside changes will remain drift.
+ */
+export type RevertPreview = { 
+/**
+ * Files present in the checkpoint but gone now → would be recreated.
+ */
+creates: number; 
+/**
+ * Files present in both but changed → would be overwritten with the checkpoint content.
+ */
+overwrites: number; 
+/**
+ * Files created since the checkpoint → would be deleted.
+ */
+deletes: number; 
+/**
+ * Bytes the revert would write back (Create + Overwrite checkpoint sizes; deletes free space).
+ */
+bytes_written: number; 
+/**
+ * Total paths the revert would touch (`creates + overwrites + deletes`).
+ */
+total: number; 
+/**
+ * How many of those touched paths are drift (see the struct doc).
+ */
+drift_count: number; 
+/**
+ * The drifted paths, in plan order, so the UI can list them.
+ */
+drift_paths: string[] }
+/**
  * One session's final cost + activity tallies. Mirrors the frontend `SessionMetrics`
  * (`src/lib/agentSessionMetrics.ts`) — camelCase on the wire to match it. **Advisory / best-effort:**
  * tokens + cost are text-scraped from the agent's own output; churn / files / wall-clock are
@@ -2349,6 +2499,15 @@ binary_ok: boolean; requested: Capability[]; granted: Capability[] }
  * presence after the repair; `actions` are the plain-language steps taken.
  */
 export type SidecarRepair = { id: string; binary_ok: boolean; actions: string[] }
+/**
+ * A file the capture left out (oversize / over budget), surfaced so the caller can warn a checkpoint is
+ * incomplete rather than silently dropping content. The string form of [`crate::snapshot::SkipReason`].
+ */
+export type SkippedInfo = { path: string; size: number; 
+/**
+ * `"oversize"` (larger than the per-file cap) or `"budget"` (would breach the store cap).
+ */
+reason: string }
 /**
  * One symbol in the outline.
  */

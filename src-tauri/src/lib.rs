@@ -2490,6 +2490,91 @@ async fn replay_load(app: tauri::AppHandle, session: String) -> Result<ReplayLoa
     .map_err(|e| e.to_string())
 }
 
+// ---- Checkpoint & rollback (CPE-1123, epic CPE-732) -----------------------------------------------
+// Thin `spawn_blocking` dispatchers over `cpe_server::checkpoint_store` — the whole checkpoint/rollback
+// engine lives in the Server; these commands just resolve `TauriCtx` (which owns the per-root store dir
+// under the app-data dir) and delegate. Async per the async-commands guardrail; the store is only touched
+// when the user takes/reverts a checkpoint, so it costs nothing when unused (off-means-off).
+
+/// Capture the tree under `root` into its per-root checkpoint store + record a labelled index entry.
+#[tauri::command]
+#[cfg_attr(feature = "specta-bindings", specta::specta)]
+async fn checkpoint_create(
+    app: tauri::AppHandle,
+    root: String,
+    label: String,
+) -> Result<cpe_server::checkpoint_store::CheckpointCreated, String> {
+    let ctx = server_ctx::TauriCtx::new(&app);
+    tauri::async_runtime::spawn_blocking(move || {
+        cpe_server::checkpoint_store::checkpoint_create(&ctx, &root, &label)
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+/// The checkpoints recorded for `root`, newest-first.
+#[tauri::command]
+#[cfg_attr(feature = "specta-bindings", specta::specta)]
+async fn checkpoint_list(
+    app: tauri::AppHandle,
+    root: String,
+) -> Result<Vec<cpe_server::checkpoint_store::Checkpoint>, String> {
+    let ctx = server_ctx::TauriCtx::new(&app);
+    tauri::async_runtime::spawn_blocking(move || cpe_server::checkpoint_store::checkpoint_list(&ctx, &root))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+/// Preview reverting `root` to checkpoint `manifest_id`: restore-plan summary + a drift report so the UI
+/// can warn before touching disk. Reads only; nothing destructive.
+#[tauri::command]
+#[cfg_attr(feature = "specta-bindings", specta::specta)]
+async fn checkpoint_preview_revert(
+    app: tauri::AppHandle,
+    root: String,
+    manifest_id: String,
+) -> Result<cpe_server::checkpoint_store::RevertPreview, String> {
+    let ctx = server_ctx::TauriCtx::new(&app);
+    tauri::async_runtime::spawn_blocking(move || {
+        cpe_server::checkpoint_store::checkpoint_preview_revert(&ctx, &root, &manifest_id)
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+/// Revert the whole tree under `root` to checkpoint `manifest_id` (skip-on-error honoured).
+#[tauri::command]
+#[cfg_attr(feature = "specta-bindings", specta::specta)]
+async fn checkpoint_revert(
+    app: tauri::AppHandle,
+    root: String,
+    manifest_id: String,
+) -> Result<cpe_server::checkpoint_store::RevertOutcome, String> {
+    let ctx = server_ctx::TauriCtx::new(&app);
+    tauri::async_runtime::spawn_blocking(move || {
+        cpe_server::checkpoint_store::checkpoint_revert(&ctx, &root, &manifest_id)
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+/// Cherry-revert a single `path` under `root` to its state in checkpoint `manifest_id`.
+#[tauri::command]
+#[cfg_attr(feature = "specta-bindings", specta::specta)]
+async fn checkpoint_revert_one(
+    app: tauri::AppHandle,
+    root: String,
+    manifest_id: String,
+    path: String,
+) -> Result<cpe_server::checkpoint_store::RevertOutcome, String> {
+    let ctx = server_ctx::TauriCtx::new(&app);
+    tauri::async_runtime::spawn_blocking(move || {
+        cpe_server::checkpoint_store::checkpoint_revert_one(&ctx, &root, &manifest_id, &path)
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
 /// Line / word / character / byte counts for a text file (CPE-414). Lines follow `str::lines`
 /// (a final unterminated line still counts); words are whitespace-separated; characters are Unicode
 /// scalar values. Capped so analysing a file stays predictable; a non-UTF-8 (binary) file, a
@@ -6614,6 +6699,11 @@ pub fn run() {
             metrics_record,
             metrics_history,
             replay_load,
+            checkpoint_create,
+            checkpoint_list,
+            checkpoint_preview_revert,
+            checkpoint_revert,
+            checkpoint_revert_one,
             text_stats,
             inspect_file,
             search_file_contents,
@@ -7263,6 +7353,11 @@ pub fn export_bindings(out: &std::path::Path) -> Result<(), String> {
         metrics_record,
         metrics_history,
         replay_load,
+        checkpoint_create,
+        checkpoint_list,
+        checkpoint_preview_revert,
+        checkpoint_revert,
+        checkpoint_revert_one,
         text_stats,
         inspect_file,
         search_file_contents,
