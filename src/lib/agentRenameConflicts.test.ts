@@ -1,10 +1,12 @@
 /**
  * Unit tests for the competing-rename fold (CPE-1118, epic CPE-730). Ports the sidecar's
  * `conflict_rename.rs` test suite (CPE-1067) one-for-one, adapted to fold over
- * {@link TimelineEntry} instead of a `RenameActivity` list.
+ * {@link TimelineEntry} instead of a `RenameActivity` list. Also covers the CPE-1121 time gate
+ * (folds are now windowed by `OVERLAP_WINDOW_MS`, mirroring `agentConflicts.ts`'s overlap fold).
  */
 import { describe, it, expect } from "vitest";
 import { foldRenameConflicts, renameConflictNote } from "./agentRenameConflicts";
+import { OVERLAP_WINDOW_MS } from "./agentConflicts";
 import type { TimelineEntry } from "./agentActivity";
 
 let nextId = 1;
@@ -156,6 +158,34 @@ describe("foldRenameConflicts (CPE-1118)", () => {
     ];
     const c = foldRenameConflicts(entries);
     expect(c[0].lastAt).toBe(2_500);
+  });
+
+  it("(CPE-1121) two renames within OVERLAP_WINDOW_MS of each other still fold into a conflict", () => {
+    const entries = [
+      rename("shared.rs", "alice.rs", "alice", 0),
+      rename("shared.rs", "bob.rs", "bob", OVERLAP_WINDOW_MS - 1),
+    ];
+    const c = foldRenameConflicts(entries);
+    expect(c).toHaveLength(1);
+    expect(c[0].path).toBe("shared.rs");
+    expect(c[0].kind).toBe("divergence");
+    expect(c[0].actors).toEqual(["alice", "bob"]);
+    expect(c[0].lastAt).toBe(OVERLAP_WINDOW_MS - 1);
+  });
+
+  it("(CPE-1121) two same-from renames further apart than OVERLAP_WINDOW_MS do NOT fold — stale rename no longer reads as a live race", () => {
+    const entries = [
+      rename("shared.rs", "alice.rs", "alice", 0),
+      rename("shared.rs", "bob.rs", "bob", OVERLAP_WINDOW_MS + 1),
+    ];
+    expect(foldRenameConflicts(entries)).toEqual([]);
+  });
+
+  it("(CPE-1121) a caller-supplied windowMs overrides the OVERLAP_WINDOW_MS default", () => {
+    const entries = [rename("shared.rs", "alice.rs", "alice", 0), rename("shared.rs", "bob.rs", "bob", 100)];
+    // Within the default window, but outside a tighter caller-supplied one.
+    expect(foldRenameConflicts(entries)).toHaveLength(1);
+    expect(foldRenameConflicts(entries, 50)).toEqual([]);
   });
 });
 
