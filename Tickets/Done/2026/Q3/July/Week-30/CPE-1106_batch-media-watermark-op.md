@@ -4,7 +4,7 @@ title: "Batch media: optional image-overlay Watermark op"
 type: feature
 component: Backend
 priority: medium
-status: Doing
+status: Done
 tags: ready
 created: 2026-07-26
 epic: CPE-723

@@ -2,7 +2,7 @@
 id: CPE-723
 title: "EPIC: Batch media operations"
 type: Task
-status: In Progress
+status: Done
 priority: Medium
 component: Multiple
 tags: [epic]
@@ -40,3 +40,10 @@ to WebP" is a common chore that currently forces users out to another app.
 2026-07-23 (dayshift) — **Activated.** First slice: **CPE-940** — `batch_media::plan` / `validate`: the pure
 planner turning media ops + a selection into collision-safe, non-destructive output paths + summaries.
 Remaining: the actual transforms (resize/convert/rotate/…), the before/after preview, and the progress panel.
+
+## Closure (2026-07-26)
+**Closed — Definition of Done met.** The op set now covers resize/convert/rotate/flip/rename/strip-metadata
+(shipped) + **compress** (CPE-1103) + **watermark** (CPE-1106, optional dep-free image overlay per the user's
+"none if unset" call), run over a multi-selection with a live plan preview + streamed progress (CPE-1092/1093).
+Dialog interaction logic pinned by CPE-1105. Delivering tickets: CPE-940/1083/1084 (engine), CPE-1092 (commands),
+CPE-1093 (dialog), CPE-1103 (compress), CPE-1106 (watermark), CPE-1105 (dialog test). PM/gauntlet-verified.
