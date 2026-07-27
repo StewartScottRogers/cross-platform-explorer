@@ -217,6 +217,37 @@ ledger**. Substrate + full schema live in `.claude/workshift-metrics/` (`README.
 This is still lightweight — a one-line append per agent and one distilled block per shift — but it means every
 concurrency and model call is backed by measured throughput, not guesswork.
 
+### The sub-agent budget — bounded batches + checkpoint-and-reset (never hit the wall)
+
+Sub-agent spawns are capped **per session** (`CLAUDE_CODE_MAX_SUBAGENTS_PER_SESSION`, default **200**). Each
+ticket burns ~3–4 agents (Worker + independent Reviewer + independent UAT, ± a Researcher/Planner), so a single
+session tops out around **~40–50 tickets**. If the shift spawns blindly to 200 it **stalls mid-task** — the crew
+goes dark with in-flight work and no way to finish it (this happened: 200 agents → dead crew mid-epic). **Do not
+run into the wall. Reset the budget *before* it, often.**
+
+- **The ledger IS the live counter.** `ledger.jsonl` already records one row per agent-run, so the Foreman
+  always knows the running count — no separate bookkeeping. Track it against the cap.
+- **Reserve a drain margin; reset at a threshold, not at the cap.** Treat **~75% of the cap (~150/200)** as the
+  **reset line**, leaving ~50 agents of headroom to *finish what's in flight*. As the count approaches the line,
+  **stop dispatching new tickets**, let the open gauntlets (Reviewer+UAT) complete, merge the drained PRs, prune
+  worktrees — quiesce to a clean, all-green, nothing-in-flight state.
+- **Checkpoint, then hand off for a session reset.** The per-session cap only refreshes in a **new session** (the
+  Foreman cannot self-restart one). So at the reset line, after quiescing: append a **resumable checkpoint** to
+  `.claude/workshift-metrics/CHECKPOINT.md` (committed) — *what merged this batch, what's next in priority order,
+  active epic/slice + its plan/Library entry, any decide-and-log assumptions, tuned defaults* — then tell the
+  user plainly: batch done, budget nearly spent, **start a fresh session and say "resume the workshift"** (or
+  raise `CLAUDE_CODE_MAX_SUBAGENTS_PER_SESSION` to continue now). A fresh session reads `CHECKPOINT.md` +
+  `history.md` and continues seamlessly with a full budget. This is the "reset often" loop: **work a bounded
+  batch → quiesce → checkpoint → reset → resume**, indefinitely, without ever stalling with lost in-flight work.
+- **Stretch the budget between resets (spend agents where they earn their keep).** Fewer agents per ticket = more
+  tickets per session: **batch several trivial same-file tickets into one Worker**; **Foreman-apply a tiny,
+  exactly-prescribed reviewer fix directly** (re-verify + a focused re-review) instead of a full worker
+  round-trip; **reuse a Library hit** to skip a Researcher; **de-risk the hard slice once** with a single Plan
+  agent rather than several flailing Workers. Keep the **≥2-independent-checks gate** (Reviewer AND UAT) — that's
+  non-negotiable — but don't pile on extra refuters/researchers unless the ticket is genuinely high-risk.
+- **Surface it.** Add a `• Budget —` line to the `FOREMAN` block: `agents ~N/200 · ~M tickets to reset line`. So
+  a reset is a *planned, clean* checkpoint, never a surprise mid-merge.
+
 ## The research Library — file it once, reuse it forever
 
 The **Librarian** keeps `.claude/research-library/` (committed, shared CLI↔desktop). It makes research a
