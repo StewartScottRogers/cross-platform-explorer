@@ -5,12 +5,25 @@
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { render, screen, fireEvent } from "@testing-library/svelte";
+import { tick } from "svelte";
+import { invoke } from "@tauri-apps/api/core";
 import AgentTimeline from "./AgentTimeline.svelte";
 import type { TimelineEntry } from "../agentActivity";
 import type { AgentSession } from "../sidecar";
 import { ingestDiff, clearDiffs } from "../agentDiffs";
 
 vi.mock("@tauri-apps/api/core", () => ({ invoke: vi.fn() }));
+// Command-router `invoke` mock (RepoBrowser.test.ts's pattern) — `commands.replayLoad` (bindings.gen)
+// routes through this same `invoke` (via `src/lib/invoke.ts`), so mocking it here drives the typed call.
+const invokeMock = invoke as unknown as ReturnType<typeof vi.fn>;
+
+/** Drain the `replay_load` await chain (mock → `withBusy` → the component's own `await`) plus a Svelte
+ *  `tick()`, purely via microtasks — no `setTimeout`-based polling (`findBy*`/`waitFor`), which this file
+ *  has seen flake against real-timer restoration after its earlier `vi.useFakeTimers()` tests. */
+async function flushReplayLoad(): Promise<void> {
+  for (let i = 0; i < 8; i++) await Promise.resolve();
+  await tick();
+}
 
 const entry = (over: Partial<TimelineEntry> = {}): TimelineEntry => ({
   id: 1,
@@ -236,6 +249,159 @@ describe("AgentTimeline Replay tab (CPE-1094)", () => {
     await rerender({ entries, agentName: "Claude Code" });
     const slider = screen.getByLabelText("Replay position") as HTMLInputElement;
     expect(slider.value).toBe("2000"); // back to jump-to-end default, not a stale mid-point
+  });
+});
+
+describe("AgentTimeline reconstructed folder listing (CPE-1111, epic CPE-728 slice d)", () => {
+  // Transport ticks (`t`) are driven off the `entries` prop's timestamp range, independent of the
+  // durable `replay_load` events below — mirrors production, where the in-memory capped timeline and
+  // the durable journal can differ.
+  const transportEntries = [
+    entry({ id: 1, kind: "created", path: "Z:/repos/app/root/file.txt", at: 100 }),
+    entry({ id: 2, kind: "created", path: "Z:/repos/app/root/sub", at: 300 }),
+  ];
+
+  const ev = (ts: number, kind: string, path: string) => ({ ts, session: "sess-1", kind, path, actor: null, detail: null });
+  const emptySummary = { total: 0, byKind: {}, sessions: [], firstAt: null, lastAt: null };
+
+  beforeEach(() => invokeMock.mockReset());
+  afterEach(() => vi.useRealTimers());
+
+  it("loads replay data once on Replay-tab enter and renders the reconstructed listing at the scrub time", async () => {
+    invokeMock.mockImplementation(async (cmd: string) => {
+      if (cmd !== "replay_load") return undefined;
+      return {
+        replay: {
+          events: [
+            ev(100, "created", "Z:/repos/app/root/file.txt"),
+            ev(200, "created", "Z:/repos/app/root/sub"),
+            ev(300, "created", "Z:/repos/app/root/sub/leaf.txt"),
+          ],
+          bounds: [100, 300],
+          summary: emptySummary,
+        },
+        baseline: null,
+      };
+    });
+
+    render(AgentTimeline, {
+      entries: transportEntries,
+      agentName: "Claude Code",
+      sessionId: "sess-1",
+      currentPath: "Z:/repos/app/root",
+    });
+    await fireEvent.click(screen.getByRole("tab", { name: "Replay" }));
+    await flushReplayLoad();
+
+    // Defaults to the end of the range (t=300): file.txt + sub (a direct child of root) show, but the
+    // grandchild leaf.txt does not (children_at excludes anything not a DIRECT child of currentPath).
+    // Both names also appear in the frozen event list / current-entry box below, so assert presence via
+    // getAllByText rather than a single-match query.
+    expect(screen.getAllByText("file.txt").length).toBeGreaterThan(0);
+    expect(screen.getAllByText("sub").length).toBeGreaterThan(0);
+    expect(screen.queryByText("leaf.txt")).toBeNull();
+    expect(screen.getByText(/Reconstruction at scrub time \(read-only\)/i)).toBeTruthy();
+
+    expect(invokeMock).toHaveBeenCalledTimes(1);
+    expect(invokeMock).toHaveBeenCalledWith("replay_load", { session: "sess-1" });
+  });
+
+  it("re-derives the listing per scrub tick with no additional replay_load call", async () => {
+    invokeMock.mockImplementation(async (cmd: string) => {
+      if (cmd !== "replay_load") return undefined;
+      return {
+        replay: {
+          events: [
+            ev(100, "created", "Z:/repos/app/root/file.txt"),
+            ev(300, "created", "Z:/repos/app/root/sub"),
+          ],
+          bounds: [100, 300],
+          summary: emptySummary,
+        },
+        baseline: null,
+      };
+    });
+
+    render(AgentTimeline, {
+      entries: transportEntries,
+      agentName: "Claude Code",
+      sessionId: "sess-1",
+      currentPath: "Z:/repos/app/root",
+    });
+    await fireEvent.click(screen.getByRole("tab", { name: "Replay" }));
+    await flushReplayLoad();
+    expect(screen.getAllByText("file.txt").length).toBeGreaterThan(0);
+    expect(screen.getAllByText("sub").length).toBeGreaterThan(0); // present at t=300
+
+    invokeMock.mockClear();
+    await fireEvent.click(screen.getByTitle("Step back")); // t: 300 -> 100 (only two ticks in transportEntries)
+    await flushReplayLoad();
+
+    expect(screen.queryByText("sub")).toBeNull(); // not created until ts=300
+    expect(screen.getAllByText("file.txt").length).toBeGreaterThan(0); // created at ts=100, still present
+    expect(invokeMock).not.toHaveBeenCalled(); // scrubbing never re-calls replay_load
+  });
+
+  it("falls back to the classic event list (never breaks the tab) when replay_load errors", async () => {
+    invokeMock.mockImplementation(async (cmd: string) => {
+      if (cmd === "replay_load") throw new Error("boom");
+      return undefined;
+    });
+
+    render(AgentTimeline, {
+      entries: transportEntries,
+      agentName: "Claude Code",
+      sessionId: "sess-1",
+      currentPath: "Z:/repos/app/root",
+    });
+    await fireEvent.click(screen.getByRole("tab", { name: "Replay" }));
+    await flushReplayLoad();
+
+    expect(invokeMock).toHaveBeenCalledWith("replay_load", { session: "sess-1" });
+    // No reconstruction section, but the tab itself still renders fine (frozen event list + transport).
+    expect(screen.queryByText(/Reconstruction at scrub time/i)).toBeNull();
+    expect(screen.getByLabelText("Replay position")).toBeTruthy();
+    expect(screen.getAllByText("sub").length).toBeGreaterThan(0); // frozen list entry, from `entries` prop
+  });
+
+  it("a session change (generation token) supersedes a slow in-flight load", async () => {
+    let resolveSess1: (v: unknown) => void = () => {};
+    let resolveSess2: (v: unknown) => void = () => {};
+    const sess1Promise = new Promise((r) => { resolveSess1 = r; });
+    const sess2Promise = new Promise((r) => { resolveSess2 = r; });
+    invokeMock.mockImplementation(async (cmd: string, args: { session: string }) => {
+      if (cmd !== "replay_load") return undefined;
+      return args.session === "sess-1" ? sess1Promise : sess2Promise;
+    });
+
+    const { rerender } = render(AgentTimeline, {
+      entries: transportEntries,
+      agentName: "Claude Code",
+      sessionId: "sess-1",
+      currentPath: "Z:/repos/app/root",
+    });
+    await fireEvent.click(screen.getByRole("tab", { name: "Replay" }));
+    await flushReplayLoad();
+    expect(invokeMock).toHaveBeenCalledWith("replay_load", { session: "sess-1" });
+
+    // A different session is now watched before sess-1's slow load resolves.
+    await rerender({ sessionId: "sess-2" });
+    await flushReplayLoad();
+    expect(invokeMock).toHaveBeenCalledWith("replay_load", { session: "sess-2" });
+
+    resolveSess1({
+      replay: { events: [ev(300, "created", "Z:/repos/app/root/from-sess1.txt")], bounds: [300, 300], summary: emptySummary },
+      baseline: null,
+    });
+    await flushReplayLoad();
+    expect(screen.queryByText("from-sess1.txt")).toBeNull(); // superseded — must never leak in
+
+    resolveSess2({
+      replay: { events: [ev(300, "created", "Z:/repos/app/root/from-sess2.txt")], bounds: [300, 300], summary: emptySummary },
+      baseline: null,
+    });
+    await flushReplayLoad();
+    expect(screen.getByText("from-sess2.txt")).toBeTruthy();
   });
 });
 

@@ -34,6 +34,9 @@
     cadenceForSpeed,
   } from "../agentReplay";
   import { foldOverlaps, overlapHasUnknown, friendlyActor, relativeLabel } from "../agentConflicts";
+  import { commands } from "../bindings.gen";
+  import type { ReplayData, Baseline, ReplayEntry as ReplayRow } from "../bindings.gen";
+  import { stateAtFrom, childrenAt, type FsState } from "../replayFold";
 
   export let entries: TimelineEntry[] = [];
   export let agentName = "agent";
@@ -44,6 +47,10 @@
    *  Radar tab can show an agent's name instead of a bare sessionId. Empty is fine (falls back to a
    *  shortened id); this component never fetches sessions itself. */
   export let sessions: AgentSession[] = [];
+  /** The folder currently navigated in the explorer (CPE-1111, epic CPE-728 slice d) — the root the
+   *  Replay tab reconstructs a listing for via `childrenAt`. Empty means the reconstructed root. This
+   *  component never navigates on its own; it only reads this prop. */
+  export let currentPath = "";
 
   const dispatch = createEventDispatcher<{ navigate: string; close: void }>();
 
@@ -118,6 +125,13 @@
   const resetReplay = () => {
     stopPlaying();
     t = 0;
+    // Belt-and-braces alongside the sessionId-keyed invalidation below: entries emptying (watch
+    // stopped/cleared) must never leave a stale reconstruction on screen.
+    replayGen += 1;
+    replayData = null;
+    replayBaseline = null;
+    replayLoadError = "";
+    replayLoading = false;
   };
 
   // Reset local scrub/play state whenever the timeline empties (stop-watching, CPE-400's
@@ -145,6 +159,94 @@
   $: replayMultiplyEdited = replayCurrent ? isMultiplyEdited(entries, replayCurrent.path) : false;
   $: atEnd = !!range && t >= range.lastAt;
   $: atStart = !!range && t <= range.firstAt;
+
+  // ---------- Reconstructed folder listing (CPE-1111, epic CPE-728 slice d) ----------
+  // `replay_load` (CPE-1110) ships the session's durable audit journal + baseline once; scrubbing then
+  // re-derives "what did this folder look like at time t" entirely client-side via the pure
+  // `replayFold.ts` fold (no per-tick IPC). PULL-ONLY: the load below only ever runs while the Replay
+  // tab is open and a session is being watched — nothing runs while the tab/drawer is closed.
+  let replayData: ReplayData | null = null;
+  let replayBaseline: Baseline | null = null;
+  let replayLoading = false;
+  let replayLoadError = "";
+  /** Generation token: bumped whenever `sessionId` changes so a slow load for a since-superseded
+   *  session can never clobber a newer one's result. */
+  let replayGen = 0;
+  let lastReplaySessionId = "";
+
+  // A session change (new watch, or watch stopped → sessionId cleared) invalidates any in-flight load
+  // and drops the stale reconstruction — never show session A's folder under session B's scrubber.
+  $: if (sessionId !== lastReplaySessionId) {
+    lastReplaySessionId = sessionId;
+    replayGen += 1;
+    replayData = null;
+    replayBaseline = null;
+    replayLoadError = "";
+    replayLoading = false;
+  }
+
+  async function loadReplayData(session: string) {
+    const g = ++replayGen;
+    replayLoading = true;
+    replayLoadError = "";
+    try {
+      const res = await commands.replayLoad(session);
+      if (g !== replayGen) return; // superseded by a newer session/tab-enter
+      if (res.status === "ok") {
+        replayData = res.data.replay;
+        replayBaseline = res.data.baseline;
+      } else {
+        replayLoadError = String(res.error);
+      }
+    } catch (e) {
+      if (g !== replayGen) return;
+      replayLoadError = e instanceof Error ? e.message : String(e);
+    } finally {
+      if (g === replayGen) replayLoading = false;
+    }
+  }
+
+  // Load on Replay-tab enter (pull-only, once per session) — never while the tab is closed, never on a
+  // timer. A prior load error is left alone (no retry storm); a new session clears it above and tries
+  // again on next tab-enter.
+  $: if (tab === "replay" && sessionId && !replayData && !replayLoading && !replayLoadError) {
+    loadReplayData(sessionId);
+  }
+
+  /** Split `path` into normalized `/`-segments — mirrors `replayFold.ts`'s internal `segments()` so a
+   *  path compares identically here regardless of which separator produced it. Kept local (a tiny
+   *  presentation-only helper) rather than exported from `replayFold.ts`, which stays untouched. */
+  const replaySegs = (p: string) => p.replace(/\\/g, "/").split("/").filter((s) => s.length > 0);
+
+  /** Every normalized path (as a joined segment string) that has at least one deeper entry in `state` —
+   *  i.e. a reconstructed directory. Best-effort: `ReplayEntry` carries no `is_dir` field, so a
+   *  currently-empty directory (nothing visible inside it at this scrub moment) can't be distinguished
+   *  from a file this way; this mirrors "does this folder show anything inside it right now". */
+  function replayDirSet(state: FsState): Set<string> {
+    const dirs = new Set<string>();
+    for (const path of state.keys()) {
+      const segs = replaySegs(path);
+      for (let i = 1; i < segs.length; i++) dirs.add(segs.slice(0, i).join("/"));
+    }
+    return dirs;
+  }
+
+  /** The reconstructed live file-set at the current scrub time `t`, seeded from the baseline — pure,
+   *  local, no IPC; re-derives on every tick. */
+  $: replayState = replayData ? stateAtFrom(replayBaseline, replayData.events, t) : null;
+  $: replayDirs = replayState ? replayDirSet(replayState) : new Set<string>();
+  /** The reconstructed folder listing for `currentPath` at time `t`, each entry flagged dir/file. */
+  $: replayListing = replayState
+    ? childrenAt(replayState, currentPath).map((e: ReplayRow) => ({
+        ...e,
+        isDir: replayDirs.has(replaySegs(e.path).join("/")),
+      }))
+    : [];
+
+  /** Human label for a reconstructed entry's last-touch kind — extends `KIND_LABEL` with `"baseline"`
+   *  (a pre-existing entry the fold seeded from the baseline snapshot, never itself an agent action). */
+  const replayKindLabel = (k: string): string =>
+    k === "baseline" ? "existing" : (KIND_LABEL as Record<string, string>)[k] ?? k;
 
   const jumpStart = () => {
     stopPlaying();
@@ -368,6 +470,38 @@
         {/if}
       {/if}
 
+      <!-- Reconstructed folder listing (CPE-1111, epic CPE-728 slice d): "what did this folder look
+           like at this scrub moment", pre-existing + event-derived entries together. Loaded once per
+           session on tab-enter (pull-only); re-derives per tick with no IPC. A load error falls back
+           silently to the classic frozen event list below — the tab never breaks. -->
+      {#if replayLoading}
+        <div class="tl-empty rp-recon-empty">Loading reconstruction…</div>
+      {:else if replayData}
+        <div class="rp-recon">
+          <div class="rp-recon-head">
+            <span class="rp-recon-title">Reconstruction at scrub time (read-only)</span>
+            {#if currentPath}<span class="rp-recon-path" title={currentPath}>{currentPath}</span>{/if}
+          </div>
+          {#if replayListing.length === 0}
+            <div class="tl-empty rp-recon-empty">Nothing reconstructed for this folder at this point.</div>
+          {:else}
+            <ul class="tl-list rp-recon-list">
+              {#each replayListing as re (re.path)}
+                <li>
+                  <span class="tl-row rp-row rp-recon-row">
+                    <Icon name={re.isDir ? "folder" : "document"} size={14} />
+                    <span class="tl-name" title={re.path}>{re.name}</span>
+                    <span class="tl-badge {re.kind}">{replayKindLabel(re.kind)}</span>
+                    {#if re.kind !== "baseline"}<span class="tl-time">{clock(re.ts)}</span>{/if}
+                  </span>
+                </li>
+              {/each}
+            </ul>
+          {/if}
+        </div>
+      {/if}
+
+      <div class="rp-hist-head">Activity up to this point</div>
       <ul class="tl-list rp-list">
         {#each replayFrozen as e (e.id)}
           <li class:rp-current-row={replayCurrent?.id === e.id}>
@@ -566,6 +700,13 @@
     color: var(--text-muted, #9a9a9a);
     border: 1px solid var(--border, #4a4a4a);
   }
+  /* CPE-1111: a reconstructed entry the fold seeded from the baseline snapshot (pre-existing, never
+     itself an agent action this session) — same hollow/muted treatment as a read. */
+  .tl-badge.baseline {
+    background: transparent;
+    color: var(--text-muted, #9a9a9a);
+    border: 1px solid var(--border, #4a4a4a);
+  }
   .tl-name {
     flex: 1;
     overflow: hidden;
@@ -732,15 +873,70 @@
     margin: 0 8px 6px;
     padding: 0;
   }
-  .rp-list {
-    border-top: 1px solid var(--border, #3a3a3a);
-  }
   .rp-row {
     cursor: default;
   }
   .rp-current-row {
     background: color-mix(in srgb, var(--accent, #2f6fed) 14%, transparent);
     border-radius: 5px;
+  }
+
+  /* ---------- Reconstructed folder listing (CPE-1111, epic CPE-728 slice d) ---------- */
+  .rp-recon {
+    border-top: 1px solid var(--border, #3a3a3a);
+    flex: 0 1 auto;
+    /* This section can grow with the listing but must still yield scroll room to the rest of the
+       drawer, so it scrolls internally rather than pushing the transport off-screen. */
+    max-height: 45%;
+    display: flex;
+    flex-direction: column;
+    min-height: 0;
+  }
+  .rp-recon-head {
+    display: flex;
+    flex-wrap: wrap; /* tick-tacks: reflow rather than overflow if the path is long */
+    align-items: baseline;
+    gap: 6px;
+    padding: 6px 10px 2px;
+    flex: 0 0 auto;
+  }
+  .rp-recon-title {
+    font-size: 10.5px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.03em;
+    color: var(--text-muted, #9a9a9a);
+  }
+  .rp-recon-path {
+    flex: 1 1 auto;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    font-size: 10.5px;
+    opacity: 0.75;
+  }
+  .rp-recon-empty {
+    padding: 6px 10px 10px;
+  }
+  .rp-recon-list {
+    overflow-y: auto;
+    flex: 1 1 auto;
+    min-height: 0;
+    padding: 0 4px 6px;
+  }
+  .rp-recon-row {
+    gap: 6px;
+  }
+  .rp-hist-head {
+    padding: 6px 10px 2px;
+    font-size: 10.5px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.03em;
+    color: var(--text-muted, #9a9a9a);
+    border-top: 1px solid var(--border, #3a3a3a);
+    flex: 0 0 auto;
   }
 
   /* ---------- Cost ledger tab (CPE-1098) ---------- */
