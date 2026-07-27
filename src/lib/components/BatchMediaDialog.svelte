@@ -14,7 +14,7 @@
   import { commands } from "../bindings.gen";
   import type { BatchReport, Corner, MediaOp, OpResult, PlannedItem } from "../bindings.gen";
   import { rawInvoke, createChannel, type StreamChannel } from "../invoke";
-  import { mediaOpLabel, opsToJob, progressPercent } from "../batchMedia";
+  import { mediaOpLabel, opsToJob, progressPercent, skipRows } from "../batchMedia";
   import { baseName } from "../contentSearch";
 
   /** Extensions the native "choose a watermark image" picker offers — mirrors the batch-media encoder's
@@ -196,6 +196,10 @@
   let failed = 0;
   let total = 0;
   let activeChannel: StreamChannel<OpResult[]> | null = null;
+  /** Set once the run finishes WITH skipped files: hold the dialog open on a results panel that lists every
+   *  skipped file + reason (CPE-1115), so a skip is never silently dropped. Cleared → the dialog closes via
+   *  the parent on "Done". A clean run (no skips) never sets this and closes immediately. */
+  let completed: BatchReport | null = null;
 
   function detachChannel() {
     if (activeChannel) activeChannel.onmessage = null;
@@ -232,12 +236,26 @@
         onResult: ch,
       });
       detachChannel();
-      dispatch("apply", { report });
+      applying = false;
+      if (report.skipped.length > 0) {
+        // Hold the dialog open on a results panel so the user sees exactly which files were skipped and
+        // why, instead of a transient toast showing only the first (CPE-1115). "Done" finishes the flow.
+        completed = report;
+      } else {
+        dispatch("apply", { report });
+      }
     } catch (e) {
       detachChannel();
       applying = false;
       applyError = String(e);
     }
+  }
+
+  /** Acknowledge the skip results panel: hand the report to the parent (refresh + close). */
+  function finish() {
+    const report = completed;
+    completed = null;
+    if (report) dispatch("apply", { report });
   }
 
   function cancel() {
@@ -362,9 +380,30 @@
       </div>
     {/if}
 
+    {#if completed}
+      <div class="skips" data-testid="batch-media-skips">
+        <div class="skips-head">✓ {completed.written} written · ⚠ {completed.skipped.length} skipped</div>
+        <ul class="skips-list">
+          {#each skipRows(completed) as s}
+            <li>
+              <span class="skip-name" title={s.name}>{s.name}</span>
+              <span class="skip-reason">— {s.reason}</span>
+            </li>
+          {/each}
+        </ul>
+        <div class="skips-note">
+          Skipped files couldn't be processed (e.g. not a valid image) and were left untouched.
+        </div>
+      </div>
+    {/if}
+
     <div class="actions">
-      <button class="btn" disabled={applying} on:click={cancel}>Cancel</button>
-      <button class="btn primary" disabled={!canApply} on:click={apply}>{applying ? "Applying…" : "Apply"}</button>
+      {#if completed}
+        <button class="btn primary" on:click={finish} data-testid="batch-media-done">Done</button>
+      {:else}
+        <button class="btn" disabled={applying} on:click={cancel}>Cancel</button>
+        <button class="btn primary" disabled={!canApply} on:click={apply}>{applying ? "Applying…" : "Apply"}</button>
+      {/if}
     </div>
   </div>
 </div>
@@ -518,4 +557,26 @@
   .btn.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
   .btn.primary:hover:not(:disabled) { background: var(--accent-hover); }
   .btn:disabled { opacity: 0.5; }
+
+  /* CPE-1115: prominent skipped-files results panel — a skip is never silently dropped. */
+  .skips {
+    margin-bottom: 14px;
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    background: var(--surface-alt);
+    padding: 8px 10px;
+  }
+  .skips-head { font-size: 12.5px; font-weight: 600; color: var(--text); margin-bottom: 6px; }
+  .skips-list {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+    max-height: 140px;
+    overflow-y: auto;
+    font-size: 12px;
+  }
+  .skips-list li { padding: 2px 0; display: flex; flex-wrap: wrap; gap: 4px; }
+  .skip-name { color: var(--text); font-weight: 500; }
+  .skip-reason { color: var(--warn, #c42b1c); }
+  .skips-note { margin-top: 6px; font-size: 11px; color: var(--text-dim); }
 </style>

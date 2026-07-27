@@ -96,3 +96,17 @@ export function progressPercent(done: number, total: number): number {
   if (!Number.isFinite(done) || done <= 0) return 0;
   return Math.max(0, Math.min(100, Math.round((done / total) * 100)));
 }
+
+/**
+ * Map a batch report's `skipped` entries — `[inputPath, reason]` pairs from `BatchReport.skipped` — to
+ * display rows (basename + reason) for the dialog's skip panel (CPE-1115). Batch-media is skip-on-error: a
+ * file the engine can't process (e.g. a placeholder/corrupt image that won't decode) is left untouched and
+ * recorded here rather than aborting the batch — so the UI must surface these clearly instead of silently
+ * dropping them. Pure; basename via the same `/\`-split used elsewhere in the app.
+ */
+export function skipRows(report: { skipped: [string, string][] }): { name: string; reason: string }[] {
+  return report.skipped.map(([path, reason]) => ({
+    name: path.split(/[\\/]/).pop() || path,
+    reason,
+  }));
+}

@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { mediaOpLabel, opsToJob, partitionEligible, progressPercent, canBatchTransform } from "./batchMedia";
+import { mediaOpLabel, opsToJob, partitionEligible, progressPercent, canBatchTransform, skipRows } from "./batchMedia";
 import type { MediaOp } from "./bindings.gen";
 
 describe("mediaOpLabel", () => {
@@ -97,5 +97,25 @@ describe("progressPercent", () => {
     expect(progressPercent(3, 3)).toBe(100);
     expect(progressPercent(4, 3)).toBe(100); // never overshoot past done
     expect(progressPercent(-1, 3)).toBe(0); // never go negative
+  });
+});
+
+describe("skipRows (CPE-1115)", () => {
+  it("maps skipped [path, reason] pairs to basename + reason rows", () => {
+    const rows = skipRows({
+      skipped: [
+        ["Z:\\pics\\photo.jpg", "not a valid image"],
+        ["/home/me/pics/broken.png", "unexpected EOF"],
+      ],
+    });
+    expect(rows).toEqual([
+      { name: "photo.jpg", reason: "not a valid image" },
+      { name: "broken.png", reason: "unexpected EOF" },
+    ]);
+  });
+
+  it("is empty for a clean report and keeps a path with no separators", () => {
+    expect(skipRows({ skipped: [] })).toEqual([]);
+    expect(skipRows({ skipped: [["bare.gif", "why"]] })).toEqual([{ name: "bare.gif", reason: "why" }]);
   });
 });

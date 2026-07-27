@@ -282,6 +282,41 @@ describe("BatchMediaDialog apply + streamed progress", () => {
     expect(onApply).toHaveBeenCalledWith({ report: { written: 1, skipped: [] } });
   });
 
+  it("holds the dialog open on skips, lists each skipped file + reason, and dispatches only on Done (CPE-1115)", async () => {
+    const { component } = render(BatchMediaDialog, { paths: ["/repo/photo.jpg", "/repo/pixel.png"] });
+    await fireEvent.click(addButton());
+    await vi.advanceTimersByTimeAsync(200);
+    planCalls[0].resolve([
+      { input: "/repo/photo.jpg", output: "/repo/photo-out.jpg", summary: "s1" },
+      { input: "/repo/pixel.png", output: "/repo/pixel-out.png", summary: "s2" },
+    ]);
+    await settle();
+
+    const onApply = vi.fn();
+    component.$on("apply", (e: CustomEvent) => onApply(e.detail));
+
+    await fireEvent.click(applyButton());
+    expect(execCalls).toHaveLength(1);
+    // One file written, one skipped (an undecodable input) — the CPE-1115 scenario.
+    execCalls[0].resolve({ written: 1, skipped: [["/repo/photo.jpg", "not a valid image"]] });
+    await settle();
+
+    // The dialog stays open on a results panel that names the skipped file + reason and the counts —
+    // NOT a silent close/dispatch.
+    const skips = screen.getByTestId("batch-media-skips");
+    expect(skips.textContent).toContain("photo.jpg");
+    expect(skips.textContent).toContain("not a valid image");
+    expect(skips.textContent).toContain("1 written");
+    expect(skips.textContent).toContain("1 skipped");
+    expect(onApply).not.toHaveBeenCalled();
+
+    // "Done" acknowledges → hands the report to the parent (which refreshes the listing + closes).
+    await fireEvent.click(screen.getByTestId("batch-media-done"));
+    expect(onApply).toHaveBeenCalledWith({
+      report: { written: 1, skipped: [["/repo/photo.jpg", "not a valid image"]] },
+    });
+  });
+
   it("tears down the channel subscription on unmount even mid-apply (no leak)", async () => {
     const { unmount } = render(BatchMediaDialog, { paths: ["/repo/a.png"] });
     await fireEvent.click(addButton());
