@@ -13,7 +13,10 @@
   import type { Selection } from "../selection";
   import type { DirEntry, SortKey, SortDir, ViewMode } from "../types";
   import type { AgentActivity } from "../agentActivity";
-  import { folderActivityKindNorm, normalizeActivityByKind } from "../agentActivity";
+  import { folderActivityKindNorm, folderOwnerNorm, normalizeActivityByKind } from "../agentActivity";
+  import { colorForActor } from "../agentColors";
+  import { friendlyActor } from "../agentConflicts";
+  import type { AgentSession } from "../sidecar";
   import { tags, entryFor, labelColor } from "../tags";
   import { evaluateRules, type ColorRule } from "../colorRules";
 
@@ -21,6 +24,11 @@
   /** Agent Watch (CPE-399): per-path live activity, keyed by absolute path. Empty ⇒ no
       annotations, so the list is visually unchanged when not watching an agent. */
   export let activity: Record<string, AgentActivity> = {};
+  /** Currently-running agent sessions (CPE-1116), joined against an activity entry's `actor` so the
+      owner heat-map + legend can show an agent's name/colour slot instead of a bare sessionId.
+      Optional — an empty list is fine (falls back to a deterministic per-id colour + shortened id
+      label), matching {@link colorForActor} / {@link friendlyActor}'s graceful degradation. */
+  export let sessions: AgentSession[] = [];
   /** Human labels for the row badge, by activity kind. */
   const ACTIVITY_LABEL_KEY: Record<AgentActivity["kind"], string> = {
     created: "fl.badgeNew",
@@ -34,6 +42,19 @@
   // subtrees it has only *read* (CPE-742). Normalized once here (not per folder row) so the per-row
   // descendant check is a cheap prefix test (CPE-698).
   $: activitySets = normalizeActivityByKind(activity);
+  // Owner-coloured heat-map legend (CPE-1116): the distinct actors currently present in the
+  // activity map, "You" first, then known agent sessions sorted for a stable order, "Unknown"
+  // last. Empty ⇒ no legend, matching "off means off" — the row containing it renders nothing.
+  $: legendActors = Array.from(new Set(Object.values(activity).map((a) => a.actor || "unknown"))).sort(
+    (a, b) => {
+      if (a === b) return 0;
+      if (a === "user") return -1;
+      if (b === "user") return 1;
+      if (a === "unknown") return 1;
+      if (b === "unknown") return -1;
+      return a.localeCompare(b);
+    },
+  );
   export let selection: Selection;
   export let sortKey: SortKey = "name";
   export let sortDir: SortDir = "asc";
@@ -464,6 +485,9 @@
       {@const insideKind = entry.is_dir ? folderActivityKindNorm(activitySets, entry.path) : null}
       {@const tagEntry = entryFor($tags, entry.path)}
       {@const act = activity[entry.path]}
+      {@const insideOwner = entry.is_dir ? folderOwnerNorm(activitySets, entry.path) : null}
+      {@const ownerActor = act ? act.actor ?? "unknown" : insideOwner}
+      {@const ownerColor = ownerActor ? colorForActor(ownerActor, sessions) : null}
       {@const ruleStyle = colorRules.length ? evaluateRules(entry, colorRules, rulesNow) : {}}
       <div
         class="row view-{view}"
@@ -477,7 +501,7 @@
         class:agent-inside-read={insideKind === "read"}
         class:tagged={!!tagEntry.label}
         class:rule-tinted={!!ruleStyle.color}
-        style={`${tagEntry.label ? `--label-color: ${labelColor(tagEntry.label)};` : ""}${ruleStyle.color ? `--rule-color: ${ruleStyle.color};` : ""}`}
+        style={`${ownerColor ? `--agent-accent: ${ownerColor};` : ""}${tagEntry.label ? `--label-color: ${labelColor(tagEntry.label)};` : ""}${ruleStyle.color ? `--rule-color: ${ruleStyle.color};` : ""}`}
         data-agent-kind={act?.kind ?? ""}
         data-drop-path={entry.is_dir ? entry.path : null}
         bind:this={rowEls[i]}
@@ -558,6 +582,20 @@
   </div>
 {/if}
 
+{#if legendActors.length > 0}
+  <!-- Owner-coloured heat-map legend (CPE-1116): maps each colour currently in use on the accent
+       bars above to its actor. Purely additive — rendered only while the activity map is
+       non-empty, so a plain (not-watching) list looks byte-identical to before this ticket. -->
+  <div class="agent-legend" role="list" aria-label={$t("fl.agentLegend")}>
+    {#each legendActors as a (a)}
+      <span class="agent-legend-pill" role="listitem" style="--agent-accent: {colorForActor(a, sessions)}">
+        <span class="agent-legend-swatch" aria-hidden="true" />
+        <span class="agent-legend-name">{friendlyActor(a, sessions)}</span>
+      </span>
+    {/each}
+  </div>
+{/if}
+
 <style>
   .ellip {
     overflow: hidden;
@@ -585,13 +623,16 @@
 
   /* Agent Watch (CPE-399): a file the agent just touched gets a left accent bar + a kind
      badge, pulsing briefly on appearance so a live change draws the eye. Purely additive —
-     rows with no activity are untouched (off means off). */
+     rows with no activity are untouched (off means off). CPE-1116: the accent bar's colour is
+     the row's OWNER (`--agent-accent`, set inline per-row from `colorForActor`), not the
+     activity kind — the kind still shows via the badge below. `--agent-unknown` is the
+     fallback for the rare case a row is active without a resolved owner colour. */
   .row.agent-active {
-    box-shadow: inset 3px 0 0 var(--agent-accent, #3a9d4a);
+    box-shadow: inset 3px 0 0 var(--agent-accent, var(--agent-unknown));
     animation: agent-pulse 900ms ease-out;
   }
   @keyframes agent-pulse {
-    from { background: color-mix(in srgb, var(--agent-accent, #3a9d4a) 26%, transparent); }
+    from { background: color-mix(in srgb, var(--agent-accent, var(--agent-unknown)) 26%, transparent); }
     to { background: transparent; }
   }
   .agent-badge {
@@ -617,33 +658,28 @@
     color: var(--text-muted, #9a9a9a);
     border: 1px solid var(--border, #5a5a5a);
   }
-  /* Per-kind left accent, driven by the row's data attribute. */
-  .row.agent-active[data-agent-kind="created"] { --agent-accent: #3a9d4a; }
-  .row.agent-active[data-agent-kind="modified"] { --agent-accent: #b5872b; }
-  .row.agent-active[data-agent-kind="renamed"] { --agent-accent: #3a72b5; }
-  .row.agent-active[data-agent-kind="removed"] { --agent-accent: #b5433a; }
-  /* CPE-405: dimmer accent for a read, so consulted files read as subordinate to changed ones. */
-  .row.agent-active[data-agent-kind="read"] { --agent-accent: #6b6b6b; }
-  /* A folder whose subtree the agent is changing — a soft accent so you can follow it down (CPE-402). */
+  /* A folder whose subtree the agent is changing — a soft accent so you can follow it down
+     (CPE-402), now coloured by the subtree's owning actor (CPE-1116) via the same inline
+     `--agent-accent`. */
   .row.agent-inside:not(.agent-active) {
-    box-shadow: inset 3px 0 0 color-mix(in srgb, var(--accent, #2f6fed) 55%, transparent);
+    box-shadow: inset 3px 0 0 color-mix(in srgb, var(--agent-accent, var(--agent-unknown)) 55%, transparent);
   }
-  /* CPE-742: a subtree the agent has ONLY read (not changed) gets a cooler, dimmer tint than the write
+  /* CPE-742: a subtree the agent has ONLY read (not changed) gets a dimmer tint than the write
      heat above — consistent with CPE-405's "a read is the weakest signal". Write outranks read, so a
-     folder being edited keeps the accent bar. */
+     folder being edited keeps the stronger accent (and `folderOwnerNorm` only lets read-paths vote
+     when the subtree has no writes at all — CPE-1116). */
   .row.agent-inside-read:not(.agent-active) {
-    box-shadow: inset 3px 0 0 color-mix(in srgb, var(--text-muted, #6b6b6b) 45%, transparent);
+    box-shadow: inset 3px 0 0 color-mix(in srgb, var(--agent-accent, var(--agent-unknown)) 45%, transparent);
   }
   .agent-inside-dot {
     flex: 0 0 auto;
     margin-left: 8px;
     font-size: 9px;
     line-height: 1;
-    color: var(--accent, #2f6fed);
+    color: var(--agent-accent, var(--agent-unknown));
     opacity: 0.8;
   }
   .row.agent-inside-read .agent-inside-dot {
-    color: var(--text-muted, #6b6b6b);
     opacity: 0.6;
   }
 
@@ -820,5 +856,42 @@
     -webkit-box-orient: vertical;
     line-height: 1.25;
     height: 2.5em; /* 2 lines × 1.25 line-height */
+  }
+
+  /* Owner-coloured heat-map legend (CPE-1116): a row of pills that REFLOWS — the container wraps
+     onto more rows and grows its height, while each pill keeps its text on one line and never
+     shrinks (tick-tacks convention, see CLAUDE.md "Pills / chips / badges"). Rendered only while
+     the activity map is non-empty (see the {#if} above), so an idle list has zero footprint. */
+  .agent-legend {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+    padding: 6px 10px;
+    border-top: 1px solid var(--border);
+  }
+  .agent-legend-pill {
+    display: flex;
+    align-items: center;
+    gap: 5px;
+    flex: 0 0 auto;
+    padding: 2px 8px 2px 6px;
+    border-radius: 999px;
+    background: var(--hover);
+    font-size: 11px;
+    color: var(--text-dim);
+    white-space: nowrap;
+  }
+  .agent-legend-swatch {
+    flex: 0 0 auto;
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    background: var(--agent-accent, var(--agent-unknown));
+  }
+  .agent-legend-name {
+    max-width: 160px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
   }
 </style>
