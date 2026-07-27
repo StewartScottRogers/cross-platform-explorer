@@ -202,6 +202,33 @@ describe("Replay-mode overlay: integrated read-only guards (CPE-1112 rework)", (
     expect(invoke).not.toHaveBeenCalledWith("move_entries", expect.anything());
   });
 
+  it("Ctrl+Z (undo) is blocked with the read-only notice, even with a pending undo entry (CPE-1122)", async () => {
+    render(App);
+    const driveButtons = await screen.findAllByText("Local Disk (C:)");
+    await fireEvent.click(driveButtons[0]);
+    await waitFor(() => expect(screen.getByText("alpha.md")).toBeTruthy());
+
+    // Delete a REAL live file BEFORE entering Replay mode, so the undo stack is non-empty — proves the
+    // block below is Replay mode's own guard firing, not the pre-existing "nothing to undo" no-op.
+    await fireEvent.click(screen.getByText("alpha.md"));
+    await fireEvent.keyDown(window, { key: "Delete" });
+    await waitFor(() => expect(invoke).toHaveBeenCalledWith("delete_to_trash", expect.anything()));
+
+    announceSession();
+    await waitFor(() => expect(screen.getByTitle("Show the full activity log")).toBeTruthy());
+    await fireEvent.click(screen.getByTitle("Show the full activity log"));
+    await fireEvent.click(await screen.findByRole("tab", { name: "Replay" }));
+    await waitFor(() => expect(screen.getByText(/Reconstruction at scrub time \(read-only\)/i)).toBeTruthy());
+    await fireEvent.click(screen.getByLabelText("Show in file pane"));
+    await waitFor(() => expect(screen.getByText(/Replay mode — read-only reconstruction/i)).toBeTruthy());
+
+    invoke.mockClear();
+    await fireEvent.keyDown(window, { key: "z", ctrlKey: true });
+    await waitFor(() => expect(screen.getByText(/read-only Replay-mode reconstruction/i)).toBeTruthy());
+    expect(invoke).not.toHaveBeenCalledWith("restore_from_trash", expect.anything());
+    expect(invoke).not.toHaveBeenCalledWith("move_exact", expect.anything());
+  });
+
   it("Ctrl+Shift+N (new folder) is blocked with the read-only notice", async () => {
     await enterReplayOverlay();
     invoke.mockClear();

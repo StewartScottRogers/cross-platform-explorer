@@ -1745,6 +1745,7 @@
   /** Undo the last rename or move. Copies and deletes are deliberately not
       undoable — see the comment at the top of lib/undo.ts. */
   async function undo() {
+    if (blockedInArchive()) return;
     const { entry, rest } = popUndo(undoStack);
     if (!entry) {
       showNotice("Nothing to undo.");
