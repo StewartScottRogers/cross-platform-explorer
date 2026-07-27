@@ -404,6 +404,28 @@ mod tests {
         let _ = fs::remove_dir_all(&app);
     }
 
+    /// CPE-1127: every store entry point that takes a caller-supplied `manifest_id` refuses a
+    /// traversal/separator id (they funnel through `snapshot_capture::load_manifest`, which validates).
+    #[test]
+    fn revert_entry_points_refuse_a_traversal_manifest_id() {
+        let app = scratch("app-data-traversal");
+        let ctx = HeadlessCtx::new(&app);
+        let root = scratch("root-traversal");
+        fs::write(root.join("a.txt"), b"a").unwrap();
+        let root_s = root.to_string_lossy().to_string();
+        // A real checkpoint exists, but every call below is attacked with a bad id, not the real one.
+        checkpoint_create(&ctx, &root_s, "cp").unwrap();
+
+        for bad in ["../../etc/foo", "..\\secrets", "nested/id"] {
+            assert!(checkpoint_preview_revert(&ctx, &root_s, bad).is_err(), "preview_revert({bad:?})");
+            assert!(checkpoint_revert(&ctx, &root_s, bad).is_err(), "revert({bad:?})");
+            assert!(checkpoint_revert_one(&ctx, &root_s, bad, "a.txt").is_err(), "revert_one({bad:?})");
+        }
+
+        let _ = fs::remove_dir_all(&root);
+        let _ = fs::remove_dir_all(&app);
+    }
+
     #[test]
     fn cherry_revert_one_restores_a_single_path_only() {
         let app = scratch("app-data-one");
