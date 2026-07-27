@@ -1058,6 +1058,19 @@ async auditRead(session: string) : Promise<Result<AuditEvent[], string>> {
 }
 },
 /**
+ * Load a past session's replay data + baseline for the Replay tab. Thin `spawn_blocking` shell over the
+ * two already-tested `cpe_server` readers (mirrors `audit_read`). PULL-ONLY — called when the Replay
+ * tab opens; nothing runs while it's closed, so replay is zero-cost with Agent Watch off (off-means-off).
+ */
+async replayLoad(session: string) : Promise<Result<ReplayLoad, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("replay_load", { session }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
  * Line / word / character / byte counts for a text file (CPE-414). Lines follow `str::lines`
  * (a final unterminated line still counts); words are whitespace-separated; characters are Unicode
  * scalar values. Capped so analysing a file stays predictable; a non-UTF-8 (binary) file, a
@@ -1657,6 +1670,14 @@ async forgeConflictAbort(path: string) : Promise<Result<string, string>> {
 /** user-defined types **/
 
 /**
+ * A whole-run summary of an activity stream.
+ */
+export type ActivitySummary = { total: number; by_kind: Partial<{ [key in string]: number }>; sessions: string[]; 
+/**
+ * First → last event span in ms (`0` for 0/1 events).
+ */
+span_ms: number }
+/**
  * One entry inside an archive, for the archive preview.
  */
 export type ArchiveEntry = { name: string; size: number; is_dir: boolean }
@@ -1690,6 +1711,20 @@ actor?: string | null;
  * Optional extra detail (rename target, diff summary, ...).
  */
 detail?: string | null }
+/**
+ * A captured snapshot of the pre-existing entries under a watched root at watch-start.
+ */
+export type Baseline = { 
+/**
+ * Absolute paths of the pre-existing entries (both directories and files) found under the watched
+ * root. Order is unspecified; consumers seed a `BTreeMap`-backed [`FsState`] from it.
+ */
+paths: string[]; 
+/**
+ * `true` if the walk hit [`MAX_BASELINE_ENTRIES`] or [`MAX_BASELINE_DEPTH`] and stopped early, so
+ * the snapshot is a bounded (incomplete) view of a very large tree.
+ */
+truncated?: boolean }
 /**
  * A batch job: the ordered ops + whether to write to new files (default) or overwrite in place.
  */
@@ -1956,6 +1991,18 @@ export type FoldRange = { start_line: number; end_line: number; kind: FoldKind }
  */
 export type FolderStats = { files: number; dirs: number; bytes: number; truncated: boolean }
 /**
+ * One path's last-known state in a projection.
+ */
+export type FsNode = { 
+/**
+ * Timestamp (epoch ms) of the last event that touched this path.
+ */
+ts: number; 
+/**
+ * The kind of the last event that touched this path (`created`/`modified`/`renamed`, ...).
+ */
+kind: string }
+/**
  * What the Generic-Git consent prompt needs: the parsed host, transport, credential-stripped URL,
  * and whether the host is already admitted.
  */
@@ -2106,6 +2153,60 @@ kind: string }
  * One planned output: where `input` will be written and a one-line summary of what happens to it.
  */
 export type PlannedItem = { input: string; output: string; summary: string }
+/**
+ * Everything a replay view needs for one session, assembled from its durable audit journal.
+ */
+export type ReplayData = { 
+/**
+ * The session's recorded events, in journal (append) order.
+ */
+events: AuditEvent[]; 
+/**
+ * The `(min_ts, max_ts)` span covered by `events`. `None` if `events` is empty.
+ */
+bounds: [number, number] | null; 
+/**
+ * Whole-run summary (totals / by-kind / sessions / span) over `events`.
+ */
+summary: ActivitySummary }
+/**
+ * One direct child of a folder in a replay projection, ready to render as a folder-view row.
+ */
+export type ReplayEntry = { 
+/**
+ * The child's own name (its final path segment).
+ */
+name: string; 
+/**
+ * The child's full path, as stored in `FsState`.
+ */
+path: string; 
+/**
+ * Timestamp (epoch ms) of the last event that touched this path.
+ */
+ts: number; 
+/**
+ * The kind of the last event that touched this path (`created`/`modified`/`renamed`, ...).
+ */
+kind: string }
+/**
+ * Everything the Replay tab needs for one session, pulled once on tab-open (CPE-1110, epic CPE-728
+ * slice **c**): the session's durable audit journal packaged for replay
+ * (`replay_session::load_replay` — events in journal order + `(min,max)` ts bounds + whole-run
+ * summary) plus its baseline snapshot (`replay_baseline::read_baseline`). The frontend seeds the fold
+ * from `baseline` and re-derives the folder listing per scrub tick entirely client-side
+ * (`src/lib/replayFold.ts`), so scrubbing costs no IPC round-trip per tick.
+ */
+export type ReplayLoad = { 
+/**
+ * The session's events (journal order) + `(min,max)` ts bounds + whole-run summary.
+ */
+replay: ReplayData; 
+/**
+ * The pre-existing-entries snapshot captured at watch-start, or `None` if the session never wrote
+ * one — the fold then degrades to events-only reconstruction (an empty seed).
+ */
+baseline: Baseline | null }
 /**
  * One entry in a browsed remote repo tree (CPE-434/435) — a file or folder, for the Repositories
  * left-pane view. Serialised to the frontend.
