@@ -23,6 +23,10 @@ pub enum MediaOp {
     Rename { template: String },
     /// Drop all embedded metadata (EXIF/IPTC/XMP).
     StripMetadata,
+    /// Re-encode at a target quality (1-100) to shrink file size. Affects JPEG targets only;
+    /// formats without a lossy quality knob (png/gif/bmp/tif, and this crate's lossless-only WebP
+    /// encoder) accept it as a graceful no-op.
+    Compress { quality: u8 },
 }
 
 /// A batch job: the ordered ops + whether to write to new files (default) or overwrite in place.
@@ -69,6 +73,9 @@ pub fn validate(job: &BatchJob) -> Result<(), String> {
             }
             MediaOp::Rename { template } if template.trim().is_empty() => {
                 return Err("rename needs a non-empty template".into());
+            }
+            MediaOp::Compress { quality } if *quality == 0 || *quality > 100 => {
+                return Err(format!("compress quality must be 1-100 (got {quality})"));
             }
             _ => {}
         }
@@ -140,6 +147,9 @@ pub fn plan(job: &BatchJob, inputs: &[String]) -> Vec<PlannedItem> {
                         parts.push("rename".into());
                     }
                     MediaOp::StripMetadata => parts.push("strip-metadata".into()),
+                    // No suffix (mirrors StripMetadata): compress changes bytes, not dimensions/name, so
+                    // it relies on the non-destructive collision guard's generic "-out" fallback below.
+                    MediaOp::Compress { quality } => parts.push(format!("compress q{quality}")),
                 }
             }
 
@@ -183,6 +193,24 @@ mod tests {
         assert!(validate(&BatchJob::new(vec![MediaOp::Convert { to_ext: "  ".into() }])).is_err());
         assert!(validate(&BatchJob::new(vec![MediaOp::Resize { max_px: 0 }])).is_err());
         assert!(validate(&BatchJob::new(vec![MediaOp::Resize { max_px: 800 }])).is_ok());
+    }
+
+    #[test]
+    fn validate_rejects_out_of_range_compress_quality() {
+        assert!(validate(&BatchJob::new(vec![MediaOp::Compress { quality: 0 }])).is_err());
+        assert!(validate(&BatchJob::new(vec![MediaOp::Compress { quality: 101 }])).is_err());
+        assert!(validate(&BatchJob::new(vec![MediaOp::Compress { quality: 1 }])).is_ok());
+        assert!(validate(&BatchJob::new(vec![MediaOp::Compress { quality: 100 }])).is_ok());
+    }
+
+    #[test]
+    fn compress_summary_and_no_forced_suffix() {
+        let job = BatchJob::new(vec![MediaOp::Compress { quality: 80 }]);
+        let out = plan(&job, &v(&["/pics/cat.jpg"]));
+        assert_eq!(out[0].summary, "compress q80");
+        // No dedicated suffix (mirrors StripMetadata) — the generic non-destructive fallback renames
+        // the sole-op case to "-out" so the output still differs from the input.
+        assert_eq!(out[0].output, "/pics/cat-out.jpg");
     }
 
     #[test]

@@ -11,6 +11,7 @@ describe("mediaOpLabel", () => {
     expect(mediaOpLabel({ op: "flip", horizontal: false })).toBe("Flip vertical");
     expect(mediaOpLabel({ op: "rename", template: "{stem}-x" })).toBe('Rename "{stem}-x"');
     expect(mediaOpLabel({ op: "strip_metadata" })).toBe("Strip metadata");
+    expect(mediaOpLabel({ op: "compress", quality: 80 })).toBe("Compress q80");
   });
 });
 
