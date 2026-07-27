@@ -45,6 +45,11 @@ export function mediaOpLabel(op: MediaOp): string {
       return "Strip metadata";
     case "compress":
       return `Compress q${op.quality}`;
+    case "watermark": {
+      if (!op.image) return "Watermark (none)";
+      const name = op.image.split(/[\\/]/).pop() ?? op.image;
+      return `Watermark ${name} ${op.position} ${op.opacity}%`;
+    }
     default: {
       // Exhaustiveness guard: a new MediaOp variant must be given a label above before it compiles.
       const exhaustive: never = op;

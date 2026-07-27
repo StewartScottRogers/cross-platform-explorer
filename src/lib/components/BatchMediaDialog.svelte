@@ -10,11 +10,17 @@
    * before telling the parent to report + refresh + close (CPE-1092 supplies both commands).
    */
   import { createEventDispatcher, onDestroy } from "svelte";
+  import { open as openFileDialog } from "@tauri-apps/plugin-dialog";
   import { commands } from "../bindings.gen";
-  import type { BatchReport, MediaOp, OpResult, PlannedItem } from "../bindings.gen";
+  import type { BatchReport, Corner, MediaOp, OpResult, PlannedItem } from "../bindings.gen";
   import { rawInvoke, createChannel, type StreamChannel } from "../invoke";
   import { mediaOpLabel, opsToJob, progressPercent } from "../batchMedia";
   import { baseName } from "../contentSearch";
+
+  /** Extensions the native "choose a watermark image" picker offers — mirrors the batch-media encoder's
+   *  decode-capable set closely enough for a logo/stamp overlay (a superset of {@link canBatchTransform}
+   *  is fine here since the overlay is only ever decoded, never re-encoded). */
+  const WATERMARK_IMAGE_EXTS = ["png", "jpg", "jpeg", "gif", "webp", "bmp", "tif", "tiff"];
 
   /** Full paths of the (already image-filtered) selection to operate on. */
   export let paths: string[] = [];
@@ -33,6 +39,9 @@
   let flipDir: "horizontal" | "vertical" = "horizontal";
   let renameTemplate = "{stem}";
   let compressQuality = 80;
+  let watermarkImage = "";
+  let watermarkPosition: Corner = "bottom_right";
+  let watermarkOpacity = 80;
   /** Placeholder text for the rename-template field — a plain JS string, so the literal `{tokens}` in it
    *  aren't parsed as Svelte template expressions the way they would be if written directly in markup. */
   const renameTemplatePlaceholder = "{stem}-{n}";
@@ -49,6 +58,9 @@
     flip: "horizontal" | "vertical",
     template: string,
     quality: number,
+    watermarkImg: string,
+    watermarkPos: Corner,
+    watermarkOp: number,
   ): MediaOp | null {
     switch (kind) {
       case "resize":
@@ -71,6 +83,12 @@
         return Number.isFinite(quality) && quality >= 1 && quality <= 100
           ? { op: "compress", quality: Math.round(quality) }
           : null;
+      case "watermark":
+        // Empty image is a valid, deliberate "no watermark configured" op (the backend treats it as a
+        // no-op) — only the opacity range needs to validate for the op itself to build.
+        return Number.isFinite(watermarkOp) && watermarkOp >= 0 && watermarkOp <= 100
+          ? { op: "watermark", image: watermarkImg, position: watermarkPos, opacity: Math.round(watermarkOp) }
+          : null;
       default:
         return null;
     }
@@ -84,7 +102,26 @@
     flipDir,
     renameTemplate,
     compressQuality,
+    watermarkImage,
+    watermarkPosition,
+    watermarkOpacity,
   );
+
+  /** Browse for a watermark overlay image via the native picker (CPE-1106) — same
+   *  `@tauri-apps/plugin-dialog` `open` the app already uses elsewhere (see `App.svelte`). */
+  async function browseForWatermarkImage() {
+    try {
+      const picked = await openFileDialog({
+        directory: false,
+        multiple: false,
+        filters: [{ name: "Images", extensions: WATERMARK_IMAGE_EXTS }],
+        title: "Choose a watermark image…",
+      });
+      if (typeof picked === "string") watermarkImage = picked;
+    } catch {
+      // Cancelled or unavailable — leave the current selection untouched.
+    }
+  }
 
   function addOp() {
     if (pendingOp) ops = [...ops, pendingOp];
@@ -228,6 +265,7 @@
           <option value="rename">Rename</option>
           <option value="strip_metadata">Strip metadata</option>
           <option value="compress">Compress</option>
+          <option value="watermark">Watermark</option>
         </select>
         {#if opKind === "resize"}
           <input class="num" type="number" min="1" bind:value={resizeMaxPx} aria-label="Max size in pixels" />
@@ -250,6 +288,20 @@
         {:else if opKind === "compress"}
           <input class="num" type="number" min="1" max="100" bind:value={compressQuality} aria-label="Compress quality" />
           <span class="lbl">quality (1-100)</span>
+        {:else if opKind === "watermark"}
+          <button class="btn" type="button" on:click={browseForWatermarkImage}>Browse…</button>
+          <span class="grow wm-path" title={watermarkImage || "No image chosen — no watermark"}>
+            {watermarkImage ? baseName(watermarkImage) : "No image chosen (no watermark)"}
+          </span>
+          <select bind:value={watermarkPosition} aria-label="Watermark corner">
+            <option value="top_left">Top-left</option>
+            <option value="top_right">Top-right</option>
+            <option value="bottom_left">Bottom-left</option>
+            <option value="bottom_right">Bottom-right</option>
+            <option value="center">Center</option>
+          </select>
+          <input class="num" type="number" min="0" max="100" bind:value={watermarkOpacity} aria-label="Watermark opacity" />
+          <span class="lbl">opacity (0-100)</span>
         {/if}
         <button class="btn" disabled={!pendingOp} on:click={addOp}>+ Add</button>
       </div>
@@ -362,6 +414,14 @@
   }
   .num { width: 90px; }
   .lbl { font-size: 12px; color: var(--text-dim); }
+  .wm-path {
+    font-size: 12px;
+    color: var(--text-dim);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    min-width: 0;
+  }
 
   /* Reflowing pill list (tick-tacks convention): the container wraps onto more rows and grows its
      height; each pill keeps its own text on one line and never shrinks. */

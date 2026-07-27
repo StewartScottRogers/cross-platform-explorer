@@ -13,9 +13,9 @@
 use std::io::Cursor;
 
 use image::codecs::jpeg::JpegEncoder;
-use image::{DynamicImage, ImageFormat, ImageReader, Limits};
+use image::{imageops, DynamicImage, ImageFormat, ImageReader, Limits};
 
-use crate::batch_media::MediaOp;
+use crate::batch_media::{Corner, MediaOp};
 
 /// Strict decode limits (CPE-1083 "bounded allocation" requirement): a crafted file that declares a
 /// huge canvas (a "decompression bomb") must fail fast with an `Err`, never attempt to allocate an
@@ -74,6 +74,62 @@ fn normalize_orientation(img: DynamicImage, orientation: u32) -> DynamicImage {
     }
 }
 
+/// Where an overlay's top-left corner lands on the base image, given the requested [`Corner`] anchor and
+/// both images' dimensions. Signed (`i64`) on purpose: an overlay bigger than the base — or anchored at
+/// `BottomRight`/`Center` — legitimately needs a *negative* origin so the anchor corner (not necessarily
+/// the overlay's top-left pixel) lines up with the base's corner; `image::imageops::overlay` clips
+/// out-of-bounds coordinates safely on every side, so a negative/oversized result here never panics.
+fn corner_origin(position: Corner, base_w: u32, base_h: u32, overlay_w: u32, overlay_h: u32) -> (i64, i64) {
+    let (bw, bh) = (i64::from(base_w), i64::from(base_h));
+    let (ow, oh) = (i64::from(overlay_w), i64::from(overlay_h));
+    match position {
+        Corner::TopLeft => (0, 0),
+        Corner::TopRight => (bw - ow, 0),
+        Corner::BottomLeft => (0, bh - oh),
+        Corner::BottomRight => (bw - ow, bh - oh),
+        Corner::Center => ((bw - ow) / 2, (bh - oh) / 2),
+    }
+}
+
+/// Alpha-composite the overlay image at `overlay_path` onto `img` at the given corner/opacity. `Err`
+/// (never a panic) if the overlay can't be read or decoded — the caller (`apply_ops`) propagates this as
+/// a per-file failure, same as any other op's error.
+fn apply_watermark(img: DynamicImage, overlay_path: &str, position: Corner, opacity: u8) -> Result<DynamicImage, String> {
+    // Validated at the planner level (`batch_media::validate`), but clamp defensively so this never
+    // misbehaves even if called past that guard.
+    let opacity = opacity.min(100);
+    if opacity == 0 {
+        // A fully-invisible watermark changes nothing — skip the overlay read/decode entirely.
+        return Ok(img);
+    }
+
+    let overlay_bytes = std::fs::read(overlay_path)
+        .map_err(|e| format!("could not read watermark image '{overlay_path}': {e}"))?;
+    let mut reader = ImageReader::new(Cursor::new(&overlay_bytes))
+        .with_guessed_format()
+        .map_err(|e| format!("could not read watermark image bytes: {e}"))?;
+    // Same decode-bomb guard as the main decode — an overlay is still an arbitrary user file.
+    reader.limits(bounded_limits());
+    let overlay = reader
+        .decode()
+        .map_err(|e| format!("could not decode watermark image '{overlay_path}': {e}"))?;
+
+    let mut base = img.to_rgba8();
+    let mut ov = overlay.to_rgba8();
+
+    // Scale the overlay's own alpha by opacity/100 (saturating: bounded to u8 by construction since
+    // `a` and `opacity` are both <= 255/100 respectively, so `a * opacity` never exceeds 255 * 100).
+    let scale = u32::from(opacity);
+    for px in ov.pixels_mut() {
+        let a = u32::from(px.0[3]);
+        px.0[3] = ((a * scale) / 100) as u8;
+    }
+
+    let (x, y) = corner_origin(position, base.width(), base.height(), ov.width(), ov.height());
+    imageops::overlay(&mut base, &ov, x, y);
+    Ok(DynamicImage::ImageRgba8(base))
+}
+
 /// Decode `input` once, fold the ordered `ops` over the resulting [`DynamicImage`], then encode to the
 /// resulting target format. `Err` (never a panic) on any decode/encode/unsupported-op failure.
 ///
@@ -100,6 +156,19 @@ fn normalize_orientation(img: DynamicImage, orientation: u32) -> DynamicImage {
 ///   — the vendored WebP encoder here is lossless-only, and png/gif/bmp/tif have no quality parameter at
 ///   all — so on every other target format this is a graceful no-op: it still succeeds, it just re-encodes
 ///   at that format's normal (lossless-for-that-format) settings.
+/// - **Watermark { image, position, opacity }** — **optional**: an empty `image` is a no-op (nothing is
+///   loaded, nothing changes), matching the "none if unset" requirement. Otherwise the overlay file is
+///   read + decoded with the same bounded/decode-bomb-guarded limits as the main image, its alpha channel
+///   is scaled by `opacity/100`, and it is alpha-composited onto the working image at the corner named by
+///   `position` via `image::imageops::overlay` (a plain per-pixel `Blend`, no new dependency). A missing or
+///   undecodable overlay file is a graceful `Err`, which the batch executor (`batch_execute::execute_one`)
+///   already turns into a per-file skip-with-reason rather than aborting the run — the same path every
+///   other op's failure already takes. An overlay **larger** than the base image is anchored at the
+///   requested corner and clipped to the base's bounds (`imageops::overlay` clips safely on its own, so no
+///   separate crop/scale-to-fit step is needed) rather than being scaled down. This composites onto
+///   whatever pixels are already in `img` at this point in the fold, so — like `Compress` — ordering with
+///   `Resize`/`Rotate`/`Convert` matters: a `Resize` before `Watermark` waterfalls into a smaller stamp
+///   position/scale on the shrunk canvas; after, the stamp is placed on the full-size canvas instead.
 pub fn apply_ops(input: &[u8], ops: &[MediaOp]) -> Result<Vec<u8>, String> {
     let mut reader = ImageReader::new(Cursor::new(input))
         .with_guessed_format()
@@ -149,6 +218,13 @@ pub fn apply_ops(input: &[u8], ops: &[MediaOp]) -> Result<Vec<u8>, String> {
                 // Saturating/validated: the planner's `validate()` already rejects 0/>100, but clamp
                 // defensively so this never panics even if called past that guard.
                 encode_quality = Some((*quality).clamp(1, 100));
+            }
+            MediaOp::Watermark { image, position, opacity } => {
+                // Optional by construction: an empty path means "no watermark configured" — skip
+                // entirely, touching neither the filesystem nor the pixels.
+                if !image.trim().is_empty() {
+                    img = apply_watermark(img, image, *position, *opacity)?;
+                }
             }
         }
     }
@@ -373,6 +449,146 @@ mod tests {
         for quality in [1u8, 25, 50, 75, 100] {
             apply_ops(&input, &[MediaOp::Compress { quality }]).unwrap();
         }
+    }
+
+    /// A solid-color RGB PNG with no alpha channel — used as a fully-opaque watermark overlay so an
+    /// opacity=100 composite fully replaces the covered pixels with a known, checkable color.
+    fn solid_png_bytes(w: u32, h: u32, rgb: [u8; 3]) -> Vec<u8> {
+        let mut out = Cursor::new(Vec::new());
+        image::RgbImage::from_pixel(w, h, image::Rgb(rgb))
+            .write_to(&mut out, ImageFormat::Png)
+            .unwrap();
+        out.into_inner()
+    }
+
+    /// Process-unique scratch file for watermark-overlay fixtures (mirrors `batch_execute`'s scratch-dir
+    /// pattern) since `apply_watermark` reads the overlay from a real path, not bytes.
+    fn scratch_file(tag: &str, bytes: &[u8]) -> std::path::PathBuf {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static SEQ: AtomicU64 = AtomicU64::new(0);
+        let n = SEQ.fetch_add(1, Ordering::Relaxed);
+        let p = std::env::temp_dir().join(format!(
+            "cpe-watermark-{}-{}-{}.png",
+            tag,
+            std::process::id(),
+            n
+        ));
+        std::fs::write(&p, bytes).unwrap();
+        p
+    }
+
+    #[test]
+    fn watermark_with_empty_image_is_a_no_op() {
+        let input = png_bytes(20, 20);
+        let out = apply_ops(
+            &input,
+            &[MediaOp::Watermark { image: String::new(), position: Corner::BottomRight, opacity: 100 }],
+        )
+        .unwrap();
+        let decoded = image::load_from_memory(&out).unwrap().to_rgb8();
+        let original = image::load_from_memory(&input).unwrap().to_rgb8();
+        assert_eq!(decoded, original, "empty image ⇒ pixels must be untouched");
+    }
+
+    #[test]
+    fn watermark_composites_the_overlay_at_the_target_corner() {
+        let input = png_bytes(20, 20); // solid [10,20,30] base, no alpha
+        let overlay_path = scratch_file("topleft", &solid_png_bytes(4, 4, [200, 0, 0]));
+
+        let out = apply_ops(
+            &input,
+            &[MediaOp::Watermark {
+                image: overlay_path.to_string_lossy().to_string(),
+                position: Corner::TopLeft,
+                opacity: 100,
+            }],
+        )
+        .unwrap();
+        let decoded = image::load_from_memory(&out).unwrap().to_rgb8();
+
+        // Fully opaque overlay at opacity 100 ⇒ the covered top-left region is fully replaced.
+        assert_eq!(decoded.get_pixel(0, 0).0, [200, 0, 0]);
+        assert_eq!(decoded.get_pixel(3, 3).0, [200, 0, 0]);
+        // Outside the overlay's footprint, the base color is untouched.
+        assert_eq!(decoded.get_pixel(10, 10).0, [10, 20, 30]);
+
+        let _ = std::fs::remove_file(&overlay_path);
+    }
+
+    #[test]
+    fn watermark_opacity_zero_leaves_the_base_unchanged() {
+        let input = png_bytes(16, 16);
+        let overlay_path = scratch_file("opacity0", &solid_png_bytes(8, 8, [255, 255, 255]));
+
+        let out = apply_ops(
+            &input,
+            &[MediaOp::Watermark {
+                image: overlay_path.to_string_lossy().to_string(),
+                position: Corner::Center,
+                opacity: 0,
+            }],
+        )
+        .unwrap();
+        let decoded = image::load_from_memory(&out).unwrap().to_rgb8();
+        let original = image::load_from_memory(&input).unwrap().to_rgb8();
+        assert_eq!(decoded, original, "opacity 0 ⇒ base pixels must be unchanged");
+
+        let _ = std::fs::remove_file(&overlay_path);
+    }
+
+    #[test]
+    fn watermark_oversized_overlay_is_clamped_not_panicking() {
+        let input = png_bytes(10, 10);
+        // Overlay is deliberately larger than the base in both dimensions.
+        let overlay_path = scratch_file("oversized", &solid_png_bytes(50, 50, [0, 255, 0]));
+
+        let out = apply_ops(
+            &input,
+            &[MediaOp::Watermark {
+                image: overlay_path.to_string_lossy().to_string(),
+                position: Corner::BottomRight,
+                opacity: 100,
+            }],
+        )
+        .unwrap();
+        let decoded = image::load_from_memory(&out).unwrap();
+        // The base's own dimensions are unaffected by an oversized overlay — it's clipped, not scaled.
+        assert_eq!((decoded.width(), decoded.height()), (10, 10));
+        // Anchored at BottomRight and clipped: the visible corner is covered by the overlay color.
+        assert_eq!(decoded.to_rgb8().get_pixel(9, 9).0, [0, 255, 0]);
+
+        let _ = std::fs::remove_file(&overlay_path);
+    }
+
+    #[test]
+    fn watermark_missing_overlay_file_errors_instead_of_panicking() {
+        let input = png_bytes(8, 8);
+        let missing = std::env::temp_dir().join("cpe-watermark-does-not-exist-xyz.png");
+        let err = apply_ops(
+            &input,
+            &[MediaOp::Watermark {
+                image: missing.to_string_lossy().to_string(),
+                position: Corner::BottomRight,
+                opacity: 50,
+            }],
+        );
+        assert!(err.is_err(), "a missing overlay file must be a graceful Err, never a panic");
+    }
+
+    #[test]
+    fn watermark_undecodable_overlay_errors_instead_of_panicking() {
+        let input = png_bytes(8, 8);
+        let overlay_path = scratch_file("not-an-image", b"this is definitely not image bytes");
+        let err = apply_ops(
+            &input,
+            &[MediaOp::Watermark {
+                image: overlay_path.to_string_lossy().to_string(),
+                position: Corner::BottomRight,
+                opacity: 50,
+            }],
+        );
+        assert!(err.is_err(), "an undecodable overlay file must be a graceful Err, never a panic");
+        let _ = std::fs::remove_file(&overlay_path);
     }
 
     #[test]

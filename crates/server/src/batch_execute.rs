@@ -167,6 +167,33 @@ mod tests {
     }
 
     #[test]
+    fn missing_watermark_overlay_is_skipped_with_a_reason_not_fatal() {
+        // The INPUT file is real and valid; only the watermark's overlay path is missing. This must
+        // still be a per-file skip (with a reason), not a fatal error for the whole batch.
+        let d = scratch("watermark-missing-overlay");
+        let a = d.join("a.png");
+        fs::write(&a, png_bytes(20, 20)).unwrap();
+
+        let job = BatchJob::new(vec![MediaOp::Watermark {
+            image: d.join("nope-logo.png").to_string_lossy().to_string(),
+            position: crate::batch_media::Corner::BottomRight,
+            opacity: 50,
+        }]);
+        let inputs = vec![a.to_string_lossy().to_string()];
+        let items = plan(&job, &inputs);
+
+        let report = execute_plan(&items, &job);
+        assert_eq!(report.written, 0);
+        assert_eq!(report.skipped.len(), 1);
+        assert_eq!(report.skipped[0].0, a.to_string_lossy().to_string());
+        assert!(!report.skipped[0].1.is_empty(), "the skip must carry a reason");
+        // The valid input itself must be untouched.
+        assert_eq!(fs::read(&a).unwrap(), png_bytes(20, 20));
+
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    #[test]
     fn empty_plan_yields_an_empty_report_with_no_panic() {
         let job = BatchJob::new(vec![MediaOp::Resize { max_px: 16 }]);
         let report = execute_plan(&[], &job);
