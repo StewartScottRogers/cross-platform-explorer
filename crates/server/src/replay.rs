@@ -62,6 +62,29 @@ pub fn state_at(events: &[AuditEvent], t_ms: u64) -> FsState {
     state
 }
 
+/// Reconstruct the state at time `t_ms` **seeded from a pre-captured baseline** `base` (see
+/// [`crate::replay_baseline`]), instead of from an empty set: clone `base`, then fold every event with
+/// `ts <= t_ms` in `ts` order via the exact same rules as [`state_at`] (events are ts-sorted first, so
+/// unsorted input still projects correctly). So pre-existing untouched files — which never emit an
+/// event, and so are invisible to [`state_at`] — still appear, while a `removed`/`renamed`/`modified`
+/// event over a baseline path is reflected on top of it.
+///
+/// Pure: `base` is borrowed and left unchanged (a clone is folded); [`state_at`]/[`fold`] are untouched.
+/// An empty `base` makes this identical to [`state_at`].
+pub fn state_at_from(base: &FsState, events: &[AuditEvent], t_ms: u64) -> FsState {
+    let mut sorted: Vec<&AuditEvent> = events.iter().collect();
+    sorted.sort_by_key(|e| e.ts);
+
+    let mut state = base.clone();
+    for e in sorted {
+        if e.ts > t_ms {
+            break;
+        }
+        fold(&mut state, e);
+    }
+    state
+}
+
 /// Apply one event to `state` in place, per the fold rules documented on [`state_at`].
 fn fold(state: &mut FsState, e: &AuditEvent) {
     match e.kind.as_str() {
@@ -289,5 +312,99 @@ mod tests {
     fn seek_index_handles_unsorted_input() {
         let events = [ev(30, "created", "/c"), ev(10, "created", "/a"), ev(20, "created", "/b")];
         assert_eq!(seek_index(&events, 20), 2);
+    }
+
+    // --- state_at_from (baseline-seeded reconstruction, CPE-1109) ---
+
+    /// Build a baseline `FsState` from a list of pre-existing paths (ts 0, kind "baseline"), mirroring
+    /// what `replay_baseline::Baseline::to_state` produces, without depending on that module here.
+    fn baseline(paths: &[&str]) -> FsState {
+        paths.iter().map(|p| (p.to_string(), FsNode { ts: 0, kind: "baseline".into() })).collect()
+    }
+
+    #[test]
+    fn state_at_from_with_no_events_is_exactly_the_baseline() {
+        let base = baseline(&["/root/pre1.txt", "/root/pre2.txt", "/root/sub"]);
+        let got = state_at_from(&base, &[], u64::MAX);
+        assert_eq!(got, base);
+        // And it is identical at any earlier moment too (no events to gate).
+        assert_eq!(state_at_from(&base, &[], 0), base);
+    }
+
+    #[test]
+    fn state_at_from_empty_baseline_equals_state_at() {
+        // A baseline-seeded fold from an empty seed must match the plain fold.
+        let events = [ev(10, "created", "/a"), ev(20, "modified", "/a"), ev(30, "created", "/b")];
+        for t in [0, 10, 15, 20, 25, 30, 100] {
+            assert_eq!(state_at_from(&FsState::new(), &events, t), state_at(&events, t), "t={t}");
+        }
+    }
+
+    #[test]
+    fn state_at_from_delete_over_baseline_removes_the_preexisting_path() {
+        let base = baseline(&["/root/pre.txt", "/root/keep.txt"]);
+        let events = [ev(10, "removed", "/root/pre.txt")];
+        // Before the delete, both pre-existing files are present.
+        let before = state_at_from(&base, &events, 5);
+        assert!(before.contains_key("/root/pre.txt") && before.contains_key("/root/keep.txt"));
+        // After the delete, the pre-existing file is gone; the untouched one remains.
+        let after = state_at_from(&base, &events, 10);
+        assert!(!after.contains_key("/root/pre.txt"));
+        assert!(after.contains_key("/root/keep.txt"));
+    }
+
+    #[test]
+    fn state_at_from_create_over_baseline_adds_the_new_path() {
+        let base = baseline(&["/root/pre.txt"]);
+        let events = [ev(10, "created", "/root/new.txt")];
+        let after = state_at_from(&base, &events, 10);
+        assert!(after.contains_key("/root/pre.txt"), "pre-existing file still shown");
+        assert!(after.contains_key("/root/new.txt"), "created file added");
+        assert_eq!(after["/root/new.txt"].kind, "created");
+        assert_eq!(after["/root/new.txt"].ts, 10);
+    }
+
+    #[test]
+    fn state_at_from_modify_over_baseline_updates_ts_and_kind_by_ts_order() {
+        let base = baseline(&["/root/pre.txt"]);
+        let events = [ev(30, "modified", "/root/pre.txt")];
+        // Before the modify ts, the node still carries its baseline stamp.
+        let before = state_at_from(&base, &events, 15);
+        assert_eq!(before["/root/pre.txt"].kind, "baseline");
+        assert_eq!(before["/root/pre.txt"].ts, 0);
+        // At/after the modify ts, the event's ts/kind win.
+        let after = state_at_from(&base, &events, 30);
+        assert_eq!(after["/root/pre.txt"].kind, "modified");
+        assert_eq!(after["/root/pre.txt"].ts, 30);
+    }
+
+    #[test]
+    fn state_at_from_rename_over_baseline_moves_the_preexisting_path() {
+        let base = baseline(&["/root/old.txt"]);
+        let events = [renamed(20, "/root/old.txt", "/root/new.txt")];
+        let after = state_at_from(&base, &events, 20);
+        assert!(!after.contains_key("/root/old.txt"));
+        assert!(after.contains_key("/root/new.txt"));
+    }
+
+    #[test]
+    fn state_at_from_does_not_mutate_the_baseline() {
+        // Purity: the borrowed baseline is unchanged after folding a destructive event over a clone.
+        let base = baseline(&["/root/pre.txt"]);
+        let events = [ev(10, "removed", "/root/pre.txt")];
+        let _ = state_at_from(&base, &events, 100);
+        assert!(base.contains_key("/root/pre.txt"), "state_at_from must not mutate its base argument");
+    }
+
+    #[test]
+    fn state_at_from_children_at_shows_preexisting_plus_events() {
+        use crate::replay_view::children_at;
+        let base = baseline(&["/root/pre1.txt", "/root/pre2.txt"]);
+        let events = [ev(10, "created", "/root/added.txt"), ev(20, "removed", "/root/pre1.txt")];
+        let listing = state_at_from(&base, &events, 20);
+        let mut names: Vec<String> = children_at(&listing, "/root").into_iter().map(|e| e.name).collect();
+        names.sort();
+        // pre1 deleted, pre2 (untouched pre-existing) still shown, added.txt created.
+        assert_eq!(names, vec!["added.txt".to_string(), "pre2.txt".to_string()]);
     }
 }
