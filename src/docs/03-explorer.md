@@ -67,10 +67,14 @@ The explorer is the core of the app and is tuned to stay **fast, small, and pred
 - **Operations** — copy, cut, paste, rename, delete (to the trash, restorable), new folder, and batch
   rename. Filesystem operations skip entries they can't read rather than failing the whole listing.
 - **Batch media** — right-click 2+ selected image files and choose **Batch media…** to queue an ordered
-  list of edits (resize, convert, rotate, flip, rename, strip metadata) and run them across every file at
-  once. Add ops one at a time — they apply in the order shown — and a live preview lists each file's
-  planned output and a one-line summary as you build the list; non-image files in the selection are
-  skipped with a notice. Runs **non-destructively** by default (writes new files alongside the originals)
+  list of edits (resize, **compress**, convert, rotate, flip, **watermark**, rename, strip metadata) and run
+  them across every file at once. Pick an operation and its settings, then click **+ Add** to put it on the
+  list — nothing runs until you add at least one op. They apply in the order shown, and a live preview lists
+  each file's planned output and a one-line summary as you build the list. (Compress re-encodes JPEGs at the
+  chosen quality; watermark overlays a chosen image at a corner/opacity, and is optional — no image, no
+  watermark.) Non-image or un-decodable files (e.g. a corrupt or placeholder image) are **skipped**: after the
+  run the dialog stays open and lists each skipped file with the reason, so nothing is silently dropped. Runs
+  **non-destructively** by default (writes new files alongside the originals)
   and shows a live progress bar while it applies.
 - **Drag and drop** — drag any selection onto a folder row or a sidebar place/drive to move or copy it.
   The action follows the OS convention: dropping **within the same drive moves**, **across drives copies**,
