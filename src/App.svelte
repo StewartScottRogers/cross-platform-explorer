@@ -125,6 +125,7 @@
   import CompareDialog from "./lib/components/CompareDialog.svelte";
   import IntegrityDialog from "./lib/components/IntegrityDialog.svelte";
   import TemplatesDialog from "./lib/components/TemplatesDialog.svelte";
+  import CheckpointDialog from "./lib/components/CheckpointDialog.svelte";
   import type { ChecksumEntry, IntegrityReport } from "./lib/integrity";
   import SelectByDialog from "./lib/components/SelectByDialog.svelte";
   import { selectMatching } from "./lib/selectMatch";
@@ -305,6 +306,7 @@
   let compareRight = "";
   let integrityOpen = false;
   let templatesOpen = false;
+  let checkpointOpen = false;
   let integrityBaselines: Record<string, ChecksumEntry[]> = settings.loadIntegrityBaselines();
   /** Opt-in: verify all baselined folders once at startup (CPE-872). Off by default. */
   let verifyOnStartup = settings.loadVerifyOnStartup();
@@ -567,6 +569,7 @@
     { id: "tool.compareFolders", group: $t("palette.groupTools"), label: $t("palette.compareFolders"), keywords: "diff compare folders directories tree", run: openCompare },
     { id: "tool.integrity", group: $t("palette.groupTools"), label: $t("palette.integrity"), keywords: "integrity checksum bitrot corruption verify baseline", run: () => (integrityOpen = true) },
     { id: "tool.templates", group: $t("palette.groupTools"), label: $t("palette.templates"), keywords: "folder templates scaffold capture stamp new from template boilerplate", run: () => (templatesOpen = true) },
+    { id: "tool.checkpoint", group: $t("palette.groupTools"), label: $t("palette.checkpoint"), keywords: "checkpoint rollback revert restore snapshot undo agent watch", run: () => (checkpointOpen = true), enabled: inFolder },
     { id: "tool.verifyAll", group: $t("palette.groupTools"), label: $t("palette.verifyAll"), keywords: "integrity verify all baselined folders bitrot corruption monitor check", run: verifyAllBaselines, enabled: () => Object.keys(integrityBaselines).length > 0 },
     { id: "tool.selectBy", group: $t("palette.groupTools"), label: $t("palette.selectBy"), keywords: "select by criteria extension size date filter", run: () => (selectByOpen = true), enabled: inFolder },
     { id: "tool.watchRules", group: $t("palette.groupTools"), label: $t("palette.watchRules"), keywords: "watch rules folder automation move copy tag rename", run: () => (watchRulesOpen = true) },
@@ -3912,6 +3915,15 @@
     path={isHome || archive ? "" : currentPath}
     on:stamped={() => refresh()}
     on:close={() => (templatesOpen = false)}
+  />
+{/if}
+
+{#if checkpointOpen}
+  <CheckpointDialog
+    initialPath={isHome || archive ? "" : currentPath}
+    on:reverted={() => refresh()}
+    on:help={() => openDocsSlug("16-checkpoints")}
+    on:cancel={() => (checkpointOpen = false)}
   />
 {/if}
 

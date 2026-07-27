@@ -1,0 +1,272 @@
+<script lang="ts">
+  /**
+   * Checkpoint & rollback (CPE-1125, epic CPE-732). The headless-driveable command surface over the
+   * CPE-1123 command layer (`checkpoint_create/list/preview_revert/revert/revert_one`): capture the
+   * current root into a labelled checkpoint, list what's been captured, preview a revert (the
+   * restore-plan summary + a drift report), then revert — either the whole tree or a single path. A
+   * revert overwrites/deletes files on disk directly (no Recycle Bin), so both revert actions arm an
+   * inline confirmation panel first; nothing destructive fires on a single click. This is the minimal
+   * palette-driven flow — the richer visual restore panel + timeline markers are the deferred GUI cap
+   * (CPE-1126).
+   */
+  import { createEventDispatcher, onMount } from "svelte";
+  import { unwrap } from "../invoke";
+  import { commands } from "../bindings.gen"; // typed client (CPE-964)
+  import type { Checkpoint, RevertPreview, RevertOutcome } from "../bindings.gen";
+  import Icon from "./Icon.svelte";
+
+  /** Root folder to checkpoint/revert (pre-filled with the current folder by App). */
+  export let initialPath = "";
+
+  const dispatch = createEventDispatcher<{ reverted: void; cancel: void; help: void }>();
+
+  let path = initialPath;
+  let label = "";
+  let revertOnePath = "";
+
+  let checkpoints: Checkpoint[] = [];
+  let selected: Checkpoint | null = null;
+  let preview: RevertPreview | null = null;
+  let outcome: RevertOutcome | null = null;
+  /** Which destructive action is armed and awaiting a second click: null when nothing is pending. */
+  let confirming: "all" | "one" | null = null;
+
+  let loading = false;
+  let error = "";
+  let note = "";
+
+  async function loadList() {
+    if (!path.trim()) { checkpoints = []; return; }
+    loading = true; error = "";
+    try {
+      checkpoints = unwrap(await commands.checkpointList(path.trim()));
+    } catch (e) { error = String(e); } finally { loading = false; }
+  }
+
+  onMount(loadList);
+
+  function resetOutcome() {
+    preview = null;
+    outcome = null;
+    confirming = null;
+  }
+
+  async function doCreate() {
+    if (!path.trim()) return;
+    loading = true; error = ""; note = "";
+    try {
+      const created = unwrap(await commands.checkpointCreate(path.trim(), label.trim()));
+      label = "";
+      note = `Checkpoint "${created.checkpoint.label || created.checkpoint.manifest_id}" captured — ` +
+        `${created.new_blobs} new, ${created.reused_blobs} reused` +
+        (created.skipped.length ? `, ${created.skipped.length} skipped` : "") + ".";
+      await loadList();
+    } catch (e) { error = String(e); } finally { loading = false; }
+  }
+
+  async function doPreview(cp: Checkpoint) {
+    selected = cp;
+    resetOutcome();
+    loading = true; error = "";
+    try {
+      preview = unwrap(await commands.checkpointPreviewRevert(path.trim(), cp.manifest_id));
+    } catch (e) { error = String(e); } finally { loading = false; }
+  }
+
+  /** Arm the whole-tree revert — the caller must click the confirm panel's "Revert" to actually run it. */
+  function armRevert(cp: Checkpoint) {
+    selected = cp;
+    outcome = null;
+    confirming = "all";
+  }
+
+  /** Arm a single-path revert — same two-step confirm, scoped to `revertOnePath`. */
+  function armRevertOne(cp: Checkpoint) {
+    if (!revertOnePath.trim()) { error = "Enter a path to revert first."; return; }
+    selected = cp;
+    outcome = null;
+    confirming = "one";
+  }
+
+  function cancelConfirm() {
+    confirming = null;
+  }
+
+  async function doRevertConfirmed() {
+    if (!selected) return;
+    const cp = selected;
+    const kind = confirming;
+    confirming = null;
+    loading = true; error = ""; note = "";
+    try {
+      outcome = kind === "one"
+        ? unwrap(await commands.checkpointRevertOne(path.trim(), cp.manifest_id, revertOnePath.trim()))
+        : unwrap(await commands.checkpointRevert(path.trim(), cp.manifest_id));
+      note = `Revert applied ${outcome.applied} change${outcome.applied === 1 ? "" : "s"}` +
+        (outcome.skipped.length ? `, skipped ${outcome.skipped.length}.` : ".");
+      dispatch("reverted");
+    } catch (e) { error = String(e); } finally { loading = false; }
+  }
+
+  const fmtTime = (ms: number) => new Date(ms).toLocaleString();
+  const fmtBytes = (n: number) => {
+    if (n < 1024) return `${n} B`;
+    const units = ["KB", "MB", "GB", "TB"];
+    let v = n / 1024, i = 0;
+    while (v >= 1024 && i < units.length - 1) { v /= 1024; i++; }
+    return `${v.toFixed(1)} ${units[i]}`;
+  };
+  const shortId = (id: string) => (id.length > 12 ? `${id.slice(0, 12)}…` : id);
+</script>
+
+<svelte:window on:keydown={(e) => e.key === "Escape" && !confirming && dispatch("cancel")} />
+
+<!-- svelte-ignore a11y-click-events-have-key-events a11y-no-static-element-interactions -->
+<div class="backdrop" on:click={() => !confirming && dispatch("cancel")}>
+  <!-- svelte-ignore a11y-click-events-have-key-events a11y-no-static-element-interactions a11y-no-noninteractive-element-interactions -->
+  <div class="dialog" role="dialog" aria-modal="true" aria-label="Checkpoint & rollback" on:click|stopPropagation>
+    <div class="head-row">
+      <h2>Checkpoint & rollback</h2>
+      <button class="docs" title="Open documentation" aria-label="Open documentation" data-testid="help-btn"
+        on:click={() => dispatch("help")}><Icon name="book" size={15} /></button>
+    </div>
+    <p>Capture the current tree into a labelled checkpoint, then revert to it later — the whole tree or a
+       single path. Preview first: it shows what would change and flags <strong>drift</strong> (anything
+       changed since the checkpoint) so a revert never surprises you.</p>
+
+    <div class="paths">
+      <input class="path" placeholder="Folder to checkpoint…" bind:value={path} aria-label="Root folder"
+        data-testid="checkpoint-path" on:change={loadList} />
+      <button class="btn" data-testid="refresh-btn" disabled={loading || !path.trim()} on:click={loadList}>Refresh</button>
+    </div>
+
+    <div class="create-row">
+      <input class="label-input" placeholder="Checkpoint label (optional)…" bind:value={label}
+        aria-label="Checkpoint label" data-testid="checkpoint-label" />
+      <button class="btn primary" data-testid="create-btn" disabled={loading || !path.trim()} on:click={doCreate}>
+        Create checkpoint
+      </button>
+    </div>
+
+    {#if error}<div class="err" data-testid="error">{error}</div>{/if}
+    {#if note}<div class="note" data-testid="note">{note}</div>{/if}
+
+    <div class="list" data-testid="checkpoint-list">
+      {#if !path.trim()}
+        <div class="empty">Enter a folder to see its checkpoints.</div>
+      {:else if loading && checkpoints.length === 0}
+        <div class="empty">Loading…</div>
+      {:else if checkpoints.length === 0}
+        <div class="empty">No checkpoints yet — create one above.</div>
+      {:else}
+        {#each checkpoints as cp (cp.manifest_id)}
+          <div class="cp-row" class:selected={selected?.manifest_id === cp.manifest_id} data-testid="cp-{cp.manifest_id}">
+            <div class="cp-info">
+              <span class="cp-label">{cp.label || shortId(cp.manifest_id)}</span>
+              <span class="cp-meta">{fmtTime(cp.ts)} · {shortId(cp.manifest_id)}</span>
+            </div>
+            <div class="cp-actions">
+              <button class="mini" data-testid="preview-btn-{cp.manifest_id}" disabled={loading} on:click={() => doPreview(cp)}>Preview</button>
+              <button class="mini danger" data-testid="revert-btn-{cp.manifest_id}" disabled={loading} on:click={() => armRevert(cp)}>Revert…</button>
+            </div>
+          </div>
+        {/each}
+      {/if}
+    </div>
+
+    {#if selected}
+      <div class="revert-one">
+        <input class="path-input" placeholder="Path under the root to revert alone…" bind:value={revertOnePath}
+          aria-label="Path to revert" data-testid="revert-one-path" />
+        <button class="mini danger" data-testid="revert-one-btn" disabled={loading || !revertOnePath.trim()}
+          on:click={() => selected && armRevertOne(selected)}>Revert this path…</button>
+      </div>
+    {/if}
+
+    {#if preview}
+      <div class="preview" data-testid="preview-panel">
+        <div class="preview-counts">
+          <span>creates {preview.creates}</span>
+          <span>overwrites {preview.overwrites}</span>
+          <span>deletes {preview.deletes}</span>
+          <span>{fmtBytes(preview.bytes_written)} to write</span>
+          <span class:drift={preview.drift_count > 0}>drift {preview.drift_count}</span>
+        </div>
+        {#if preview.drift_count > 0}
+          <div class="drift-list" data-testid="drift-list">
+            {#each preview.drift_paths as p (p)}<div class="drift-item" title={p}>{p}</div>{/each}
+          </div>
+        {/if}
+      </div>
+    {/if}
+
+    {#if outcome}
+      <div class="outcome" data-testid="outcome-panel">
+        Applied {outcome.applied} change{outcome.applied === 1 ? "" : "s"}
+        {#if outcome.skipped.length}, skipped {outcome.skipped.length}{/if}.
+      </div>
+    {/if}
+
+    {#if confirming && selected}
+      <div class="confirm" data-testid="confirm-revert">
+        <p class="confirm-msg">
+          {#if confirming === "all"}
+            This overwrites/recreates/deletes files under <strong>{path}</strong> to match
+            checkpoint <strong>{selected.label || shortId(selected.manifest_id)}</strong>. This cannot be undone.
+          {:else}
+            This reverts <strong>{revertOnePath}</strong> alone to checkpoint
+            <strong>{selected.label || shortId(selected.manifest_id)}</strong>. This cannot be undone.
+          {/if}
+        </p>
+        <div class="confirm-actions">
+          <button class="btn" data-testid="confirm-cancel-btn" on:click={cancelConfirm}>Cancel</button>
+          <button class="btn primary danger" data-testid="confirm-yes-btn" on:click={doRevertConfirmed}>
+            Yes, revert
+          </button>
+        </div>
+      </div>
+    {/if}
+
+    <div class="actions">
+      <button class="btn primary" on:click={() => dispatch("cancel")}>Close</button>
+    </div>
+  </div>
+</div>
+
+<style>
+  .backdrop { position: fixed; inset: 0; background: rgba(0, 0, 0, 0.25); display: grid; place-items: center; z-index: 200; }
+  .dialog { width: 680px; max-width: 95vw; max-height: 90vh; overflow: auto; background: var(--surface); border: 1px solid var(--border-strong); border-radius: 10px; box-shadow: 0 20px 50px rgba(0, 0, 0, 0.25); padding: 20px; }
+  .head-row { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+  h2 { font-size: 16px; margin-bottom: 8px; }
+  .docs { display: grid; place-items: center; height: 26px; width: 26px; padding: 0; border: 1px solid var(--border-strong); border-radius: var(--radius); background: var(--surface-alt); color: var(--text); }
+  p { color: var(--text-dim); font-size: 12.5px; margin-bottom: 12px; line-height: 1.5; }
+  .paths, .create-row, .revert-one { display: flex; gap: 8px; margin-bottom: 8px; }
+  .path, .label-input, .path-input { flex: 1 1 auto; height: 30px; padding: 0 8px; font: inherit; color: var(--text); background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); min-width: 0; }
+  .err { color: #c0392b; font-size: 12.5px; margin-bottom: 8px; }
+  .note { color: var(--accent); font-size: 12.5px; margin-bottom: 8px; }
+  .list { max-height: 30vh; overflow: auto; border: 1px solid var(--border); border-radius: var(--radius); margin-bottom: 8px; }
+  .empty { padding: 12px; color: var(--text-dim); font-size: 12.5px; }
+  .cp-row { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 8px 10px; border-bottom: 1px solid var(--border); }
+  .cp-row:last-child { border-bottom: none; }
+  .cp-row.selected { background: var(--surface-alt); }
+  .cp-info { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+  .cp-label { font-size: 13px; color: var(--text); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .cp-meta { font-size: 11px; color: var(--text-dim); }
+  .cp-actions { display: flex; gap: 6px; flex: 0 0 auto; }
+  .mini { height: 26px; padding: 0 10px; font-size: 12px; border: 1px solid var(--border-strong); border-radius: var(--radius); background: var(--surface-alt); color: var(--text); }
+  .mini.danger:not(:disabled) { border-color: #c42b1c; color: #c42b1c; }
+  .mini:disabled { opacity: 0.4; }
+  .preview { border: 1px solid var(--border); border-radius: var(--radius); padding: 10px; margin-bottom: 8px; }
+  .preview-counts { display: flex; flex-wrap: wrap; gap: 12px; font-size: 12px; color: var(--text-dim); }
+  .preview-counts .drift { color: #b8860b; font-weight: 600; }
+  .drift-list { margin-top: 8px; max-height: 14vh; overflow: auto; }
+  .drift-item { padding: 2px 0; font-size: 12px; color: var(--text-dim); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .outcome { font-size: 12.5px; color: var(--text); margin-bottom: 8px; }
+  .confirm { border: 1px solid #c42b1c; border-radius: var(--radius); padding: 12px; margin-bottom: 8px; background: color-mix(in srgb, #c42b1c 8%, var(--surface)); }
+  .confirm-msg { color: var(--text); font-size: 12.5px; margin-bottom: 10px; }
+  .confirm-actions { display: flex; justify-content: flex-end; gap: 8px; }
+  .actions { display: flex; justify-content: flex-end; margin-top: 6px; }
+  .btn { height: 30px; padding: 0 14px; border: 1px solid var(--border-strong); border-radius: var(--radius); background: var(--surface-alt); color: var(--text); }
+  .btn.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+  .btn.primary.danger { background: #c42b1c; border-color: #c42b1c; }
+</style>
