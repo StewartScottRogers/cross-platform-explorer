@@ -2,13 +2,13 @@
 id: CPE-731
 title: "EPIC: Agent cost & resource dashboard"
 type: Task
-status: In Progress
+status: Done
 priority: Medium
 component: Multiple
 tags: [epic]
 estimate: 4h+
 created: 2026-07-18
-closed:
+closed: 2026-07-26
 ---
 
 ## Goal
@@ -42,3 +42,14 @@ progress. Making cost and throughput visible closes the loop between "what the a
 `cost_usd` comes only from the agent's own observability, which not every agent emits. First slice
 shipped: **CPE-912** — `Pricing::estimate_cost(input_tokens, output_tokens)` (tokens × price). Remaining
 is the dashboard GUI (per-session / rolling cost, budgets + alerts).
+
+2026-07-26 (workshift) — **Closed.** All children Done: CPE-912/913 (cost estimator + rollup/budget),
+CPE-1071–1074 (unwired Rust `session_metrics`/`fleet_metrics`/throughput-bucketing/`efficiency` — kept
+as tested, formula-source modules rather than wired to live capture, per the filed plan), CPE-1107 (live
+per-session Cost tab: tokens/cost/files/churn/wall-clock/throughput), CPE-1113 (persisted per-session
+`metrics_journal` + flush-on-end), and CPE-1114 (cross-session "History" tab — totals, per-model/
+per-agent rollups, throughput ratios, over-time bars — reading the CPE-1113 journal, `agentMetricsRollup.ts`
+mirroring the Rust `fleet_metrics`/`efficiency` formulas). DoD met: per-session AND cross-session token/
+spend/time/files/churn/throughput are shown (Cost tab + History tab); metrics roll up historically via the
+persisted journal; with no agent running the dashboard is idle (pull-only reads, no listener/timer, no
+explorer-mode cost).
