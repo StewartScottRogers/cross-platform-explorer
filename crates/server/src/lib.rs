@@ -134,6 +134,12 @@ pub mod revert_safety;
 /// On-disk append-only session audit journal (CPE-800, epic CPE-733): durable per-session
 /// JSON-lines of Agent Watch filesystem activity, bounded/rotated. Pure helpers over a base dir.
 pub mod audit_journal;
+
+/// On-disk append-only per-session **cost/activity metrics** journal (CPE-1113, epic CPE-731 slice b):
+/// a sibling of [`audit_journal`] at a coarser grain — one [`metrics_journal::SessionMetricsRecord`] row
+/// per ended Agent Watch session, in a single bounded/rotated `agent-metrics/history.jsonl`, so the cost
+/// dashboard can show cross-session history. Pure helpers over a base dir; advisory/best-effort figures.
+pub mod metrics_journal;
 pub mod revert_attribution;
 
 /// Scrubber transport model for activity replay: step to next/previous distinct event ts, slice a

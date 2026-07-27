@@ -1,7 +1,8 @@
 import { writable, type Readable } from "svelte/store";
 import type { AgentSession, SessionAnnouncement } from "./sidecar";
 import type { FsDiff } from "./agentDiffs";
-import type { AgentCost } from "./agentCost";
+import { currentCost, type AgentCost } from "./agentCost";
+import { commands, type SessionMetricsRecord } from "./bindings.gen";
 
 /**
  * Live per-session cost+activity metrics for the Agent Watch Cost tab (CPE-1107, epic CPE-731 slice a).
@@ -80,6 +81,11 @@ const store = writable<Record<string, SessionAccumulator>>({});
 
 /** Reactive per-session accumulator map (keyed by sessionId). Empty when not watching. */
 export const agentSessionMetrics: Readable<Record<string, SessionAccumulator>> = store;
+
+/** Session ids already flushed to the metrics journal this watch (CPE-1113), so a re-reconcile can't
+ *  double-write a row. Cleared on full teardown ({@link clearAgentSessionMetrics}); an id is un-marked
+ *  when its session (re)starts so a genuine restart of the same id can flush again. */
+const flushedSessionIds = new Set<string>();
 
 /** Fold a `started` announcement into the map (pure): (re)creates a fresh accumulator stamped with
  *  `startedAt=now` and the announced identity — a genuine restart of that session id starts clean. */
@@ -164,6 +170,9 @@ export function foldDiffsForMetrics(
 /** Fold a `session:<json>` announcement into the store (called from `agentSessions.ts`'s
  *  `ingestSessionState` — no listener of its own). Exposed for headless tests. */
 export function ingestSessionAnnouncement(ann: SessionAnnouncement, now = Date.now()): void {
+  // A genuine restart of a session id resets its accumulator (foldSessionStarted) — un-mark it so its
+  // next end flushes a fresh row (CPE-1113).
+  if (ann.event === "started") flushedSessionIds.delete(ann.session.sessionId);
   store.update((prev) => foldSessionAnnouncement(prev, ann, now));
 }
 
@@ -181,9 +190,11 @@ export function currentSessionMetrics(): Record<string, SessionAccumulator> {
 }
 
 /** Clear the accumulator map (on full stop-watching), so a stale session never bleeds into a new one.
- *  Mirrors `clearAgentCost()`/`clearDiffs()` — call from the same place those are cleared. */
+ *  Mirrors `clearAgentCost()`/`clearDiffs()` — call from the same place those are cleared. Also resets
+ *  the flushed-ids guard (CPE-1113) so the next watch starts clean. */
 export function clearAgentSessionMetrics(): void {
   store.set({});
+  flushedSessionIds.clear();
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -323,4 +334,78 @@ export function formatDuration(ms: number | null): string {
 export function formatPerMinute(n: number | undefined): string | null {
   if (n === undefined || !Number.isFinite(n) || n < 0) return null;
   return `${n.toFixed(1)}/min`;
+}
+
+// ---------------------------------------------------------------------------------------------
+// Flush-on-session-end persistence (CPE-1113, epic CPE-731 slice b).
+//
+// When a watched session ends, one `SessionMetricsRecord` is flushed to the sibling metrics journal
+// (`agent-metrics/history.jsonl`, via `commands.metricsRecord`) so the cost dashboard can show
+// cross-session history (731c). The record is built from the LIVE accumulator (which holds its own
+// cap-immune copy) at the `stopAgentWatch(id)` seam + the full-stop loop, BEFORE the stores clear.
+// Advisory / best-effort — a flush failure is swallowed so it can never break teardown or the live view.
+// ---------------------------------------------------------------------------------------------
+
+/** Only sessions that actually STARTED and produced *some* signal are worth a row — skip never-started
+ *  (lazy fs-diff) entries and empty started-but-did-nothing sessions, so the journal has no junk rows. */
+export function sessionMetricsWorthPersisting(m: SessionMetrics): boolean {
+  if (m.startedAt === null) return false; // lazy fs-diff entry, never a real `started`
+  return (
+    m.filesTouched > 0 ||
+    m.editCount > 0 ||
+    m.churnBytes > 0 ||
+    m.totalTokens > 0 ||
+    m.costUsd > 0
+  );
+}
+
+/** Build the persisted, wire-shaped {@link SessionMetricsRecord} from a derived {@link SessionMetrics}
+ *  (pure; injectable `now` for tests). `endedAt`/`wallClockMs` are coerced to concrete numbers — a flush
+ *  only happens at/after session end, but if `endedAt` is somehow still null it's stamped `now`. */
+export function buildMetricsRecord(m: SessionMetrics, now = Date.now()): SessionMetricsRecord {
+  const startedAt = m.startedAt ?? 0;
+  const endedAt = m.endedAt ?? now;
+  const wallClockMs = Math.max(0, endedAt - startedAt);
+  return {
+    sessionId: m.sessionId,
+    agentId: m.agentId,
+    agentName: m.agentName,
+    provider: m.provider,
+    model: m.model,
+    cwd: m.cwd,
+    startedAt,
+    endedAt,
+    wallClockMs,
+    inputTokens: m.inputTokens,
+    outputTokens: m.outputTokens,
+    totalTokens: m.totalTokens,
+    costUsd: m.costUsd,
+    filesTouched: m.filesTouched,
+    churnBytes: m.churnBytes,
+    editCount: m.editCount,
+  };
+}
+
+/** Flush one ended session's metrics row to the journal (idempotent — at most once per session end).
+ *  Reads the live accumulator + its `agentCost` snapshot, builds the record, and appends it. A no-op for
+ *  an unknown, already-flushed, or not-worth-persisting session. Errors are swallowed (advisory). */
+export async function flushSession(sessionId: string, now = Date.now()): Promise<void> {
+  if (flushedSessionIds.has(sessionId)) return; // already flushed this watch
+  const acc = currentSessionMetrics()[sessionId];
+  if (!acc) return; // unknown session
+  const m = deriveSessionMetrics(acc, currentCost()[sessionId], now);
+  if (!sessionMetricsWorthPersisting(m)) return; // empty / never-started
+  flushedSessionIds.add(sessionId); // mark BEFORE the await so a re-reconcile can't double-write
+  try {
+    await commands.metricsRecord(buildMetricsRecord(m, now));
+  } catch (e) {
+    // Advisory/best-effort persistence — never break teardown or the live view on a flush failure.
+    console.debug("session metrics flush failed:", e);
+  }
+}
+
+/** Flush every currently-known session's metrics row (the full-stop path), each idempotently. Call
+ *  BEFORE {@link clearAgentSessionMetrics} so nothing is lost when the whole Agent Deck stops. */
+export async function flushAllSessions(now = Date.now()): Promise<void> {
+  for (const id of Object.keys(currentSessionMetrics())) await flushSession(id, now);
 }

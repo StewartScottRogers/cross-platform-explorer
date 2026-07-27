@@ -1058,6 +1058,30 @@ async auditRead(session: string) : Promise<Result<AuditEvent[], string>> {
 }
 },
 /**
+ * Append one ended session's metrics row to the bounded/rotated history journal. The record is built
+ * frontend-side from the live accumulator at session end (advisory/best-effort figures).
+ */
+async metricsRecord(rec: SessionMetricsRecord) : Promise<Result<null, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("metrics_record", { rec }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * Read every persisted session metrics row back (append order; malformed lines skipped). Pull-only —
+ * called when the cross-session cost dashboard opens (CPE-731c). Missing journal → empty.
+ */
+async metricsHistory() : Promise<Result<SessionMetricsRecord[], string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("metrics_history") };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
  * Load a past session's replay data + baseline for the Replay tab. Thin `spawn_blocking` shell over the
  * two already-tested `cpe_server` readers (mirrors `audit_read`). PULL-ONLY — called when the Replay
  * tab opens; nothing runs while it's closed, so replay is zero-cost with Agent Watch off (off-means-off).
@@ -2227,6 +2251,77 @@ actions: string[]; up_to_date: boolean; conflicts_possible: boolean; blocked: st
  * status bar surfaces a "Resolve…" entry into the CPE-496 resolver.
  */
 conflicted: boolean }
+/**
+ * One session's final cost + activity tallies. Mirrors the frontend `SessionMetrics`
+ * (`src/lib/agentSessionMetrics.ts`) — camelCase on the wire to match it. **Advisory / best-effort:**
+ * tokens + cost are text-scraped from the agent's own output; churn / files / wall-clock are
+ * approximations. Not billing.
+ */
+export type SessionMetricsRecord = { 
+/**
+ * The agent session id this row belongs to.
+ */
+sessionId: string; 
+/**
+ * Agent catalog id (e.g. `"claude"`).
+ */
+agentId: string; 
+/**
+ * Human-readable agent name (e.g. `"Claude Code"`).
+ */
+agentName: string; 
+/**
+ * Provider the session ran through (e.g. `"openrouter"`).
+ */
+provider: string; 
+/**
+ * Model the session used (e.g. `"sonnet"`).
+ */
+model: string; 
+/**
+ * The session's working directory.
+ */
+cwd: string; 
+/**
+ * Epoch ms the session started (folded from its `started` announcement).
+ */
+startedAt: number; 
+/**
+ * Epoch ms the session ended (folded from its `ended` announcement / teardown).
+ */
+endedAt: number; 
+/**
+ * `ended_at - started_at` wall-clock, in milliseconds (best-effort — misses think time).
+ */
+wallClockMs: number; 
+/**
+ * Best-effort input tokens (text-scraped, advisory).
+ */
+inputTokens: number; 
+/**
+ * Best-effort output tokens (text-scraped, advisory).
+ */
+outputTokens: number; 
+/**
+ * `input_tokens + output_tokens`.
+ */
+totalTokens: number; 
+/**
+ * Best-effort USD cost (text-scraped, advisory — never billing).
+ */
+costUsd: number; 
+/**
+ * Distinct paths the session wrote to.
+ */
+filesTouched: number; 
+/**
+ * Σ |after.len − before.len| across every write (approximate churn).
+ */
+churnBytes: number; 
+/**
+ * Total fs-diff writes attributed to the session (not deduped by path).
+ */
+editCount: number }
 /**
  * A sidecar's health for the management panel (CPE-323): running state, the last error
  * that stopped it (if any), and recent log lines. Every string here is redacted.

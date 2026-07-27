@@ -1,6 +1,12 @@
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, vi, beforeEach } from "vitest";
 import type { AgentSession, SessionAnnouncement } from "./sidecar";
 import type { FsDiff } from "./agentDiffs";
+
+// vi.mock is hoisted; create the mock fn via vi.hoisted so the factory closes over an initialised
+// binding (matches sidecar.test.ts). The typed client's `metricsRecord` is the only member the flush uses.
+const { metricsRecord } = vi.hoisted(() => ({ metricsRecord: vi.fn() }));
+vi.mock("./bindings.gen", () => ({ commands: { metricsRecord } }));
+
 import {
   emptySessionAccumulator,
   foldSessionStarted,
@@ -18,8 +24,14 @@ import {
   ingestDiffsForMetrics,
   currentSessionMetrics,
   clearAgentSessionMetrics,
+  sessionMetricsWorthPersisting,
+  buildMetricsRecord,
+  flushSession,
+  flushAllSessions,
   type SessionAccumulator,
+  type SessionMetrics,
 } from "./agentSessionMetrics";
+import { ingestCost, clearAgentCost } from "./agentCost";
 
 const session = (id: string, cwd = "/work"): AgentSession => ({
   sessionId: id,
@@ -323,5 +335,179 @@ describe("store lifecycle (ingestSessionAnnouncement / ingestDiffsForMetrics / c
     clearAgentSessionMetrics();
     ingestDiffsForMetrics([]);
     expect(currentSessionMetrics()).toEqual({});
+  });
+});
+
+describe("sessionMetricsWorthPersisting (skip empty / never-started)", () => {
+  const m = (over: Partial<SessionMetrics>): SessionMetrics =>
+    deriveSessionMetrics(
+      { ...emptySessionAccumulator("s1"), ...over } as SessionAccumulator,
+      undefined,
+      2000,
+    );
+
+  it("is false for a never-started (lazy fs-diff) entry, even with activity", () => {
+    expect(sessionMetricsWorthPersisting(m({ startedAt: null, editCount: 5, churnBytes: 99 }))).toBe(false);
+  });
+
+  it("is false for a started-but-did-nothing session (no files/edits/churn/tokens/cost)", () => {
+    expect(sessionMetricsWorthPersisting(m({ startedAt: 1000, endedAt: 2000 }))).toBe(false);
+  });
+
+  it("is true once any signal is present (edit / churn / files)", () => {
+    expect(sessionMetricsWorthPersisting(m({ startedAt: 1000, endedAt: 2000, editCount: 1 }))).toBe(true);
+    expect(
+      sessionMetricsWorthPersisting(m({ startedAt: 1000, endedAt: 2000, churnBytes: 10 })),
+    ).toBe(true);
+  });
+
+  it("is true for a token-only session (cost present, no filesystem activity)", () => {
+    const acc: SessionAccumulator = { ...emptySessionAccumulator("s1"), startedAt: 1000, endedAt: 2000 };
+    const withTokens = deriveSessionMetrics(acc, { inputTokens: 10, outputTokens: 5, costUsd: 0.1 }, 2000);
+    expect(sessionMetricsWorthPersisting(withTokens)).toBe(true);
+  });
+});
+
+describe("buildMetricsRecord (pure, wire-shaped)", () => {
+  it("builds the camelCase record from a derived SessionMetrics, joining tokens/cost", () => {
+    const acc: SessionAccumulator = {
+      ...emptySessionAccumulator("s1"),
+      agentId: "claude",
+      agentName: "Claude Code",
+      provider: "openrouter",
+      model: "sonnet",
+      cwd: "/work",
+      startedAt: 1000,
+      endedAt: 61000, // 1 minute
+      filesTouched: { "/a": true, "/b": true },
+      editCount: 3,
+      churnBytes: 2048,
+    };
+    const m = deriveSessionMetrics(acc, { inputTokens: 100, outputTokens: 50, costUsd: 1.25 }, 99999);
+    const rec = buildMetricsRecord(m);
+    expect(rec).toEqual({
+      sessionId: "s1",
+      agentId: "claude",
+      agentName: "Claude Code",
+      provider: "openrouter",
+      model: "sonnet",
+      cwd: "/work",
+      startedAt: 1000,
+      endedAt: 61000,
+      wallClockMs: 60000,
+      inputTokens: 100,
+      outputTokens: 50,
+      totalTokens: 150,
+      costUsd: 1.25,
+      filesTouched: 2,
+      churnBytes: 2048,
+      editCount: 3,
+    });
+  });
+
+  it("stamps endedAt=now + recomputes wallClock when endedAt is somehow still null", () => {
+    const acc: SessionAccumulator = { ...emptySessionAccumulator("s1"), startedAt: 1000, editCount: 1 };
+    const m = deriveSessionMetrics(acc, undefined, 4000); // still live -> endedAt null
+    const rec = buildMetricsRecord(m, 4000);
+    expect(rec.endedAt).toBe(4000);
+    expect(rec.wallClockMs).toBe(3000);
+  });
+});
+
+describe("flushSession / flushAllSessions (CPE-1113 flush-on-end)", () => {
+  beforeEach(() => {
+    metricsRecord.mockReset();
+    metricsRecord.mockResolvedValue({ status: "ok", data: null });
+    clearAgentSessionMetrics(); // also resets the flushed-ids guard
+    clearAgentCost();
+  });
+
+  it("flushes exactly one record built from the accumulator + agentCost on a session end", async () => {
+    ingestSessionAnnouncement({ event: "started", session: session("s1") }, 1000);
+    ingestDiffsForMetrics([diff("/a.txt", "", "hello", "s1")]); // 1 edit, +5 churn, 1 file
+    ingestCost({ sessionId: "s1", inputTokens: 100, outputTokens: 50, costUsd: 2 });
+    ingestSessionAnnouncement({ event: "ended", session: session("s1") }, 61000); // 1 min wall-clock
+
+    await flushSession("s1");
+
+    expect(metricsRecord).toHaveBeenCalledTimes(1);
+    expect(metricsRecord).toHaveBeenCalledWith({
+      sessionId: "s1",
+      agentId: "claude",
+      agentName: "Claude Code",
+      provider: "openrouter",
+      model: "sonnet",
+      cwd: "/work",
+      startedAt: 1000,
+      endedAt: 61000,
+      wallClockMs: 60000,
+      inputTokens: 100,
+      outputTokens: 50,
+      totalTokens: 150,
+      costUsd: 2,
+      filesTouched: 1,
+      churnBytes: 5,
+      editCount: 1,
+    });
+  });
+
+  it("flushes at most once per session end (a re-reconcile can't double-write)", async () => {
+    ingestSessionAnnouncement({ event: "started", session: session("s1") }, 1000);
+    ingestDiffsForMetrics([diff("/a.txt", "", "x", "s1")]);
+    ingestSessionAnnouncement({ event: "ended", session: session("s1") }, 2000);
+
+    await flushSession("s1");
+    await flushSession("s1"); // idempotent
+    await flushAllSessions(); // full-stop path — still no double-write
+
+    expect(metricsRecord).toHaveBeenCalledTimes(1);
+  });
+
+  it("does NOT flush an empty / never-started session (no junk rows)", async () => {
+    // Never-started: a lone fs-diff races in with no `started`.
+    ingestDiffsForMetrics([diff("/a.txt", "", "x", "s-race")]);
+    // Started but did nothing.
+    ingestSessionAnnouncement({ event: "started", session: session("s-idle") }, 1000);
+    ingestSessionAnnouncement({ event: "ended", session: session("s-idle") }, 2000);
+
+    await flushSession("s-race");
+    await flushSession("s-idle");
+    await flushAllSessions();
+
+    expect(metricsRecord).not.toHaveBeenCalled();
+  });
+
+  it("swallows a flush failure so teardown/live view is unaffected", async () => {
+    metricsRecord.mockRejectedValueOnce(new Error("boom"));
+    ingestSessionAnnouncement({ event: "started", session: session("s1") }, 1000);
+    ingestDiffsForMetrics([diff("/a.txt", "", "x", "s1")]);
+    ingestSessionAnnouncement({ event: "ended", session: session("s1") }, 2000);
+
+    await expect(flushSession("s1")).resolves.toBeUndefined(); // does not throw
+  });
+
+  it("a restart of the same session id un-marks it so its next end flushes again", async () => {
+    ingestSessionAnnouncement({ event: "started", session: session("s1") }, 1000);
+    ingestDiffsForMetrics([diff("/a.txt", "", "x", "s1")]);
+    ingestSessionAnnouncement({ event: "ended", session: session("s1") }, 2000);
+    await flushSession("s1");
+    expect(metricsRecord).toHaveBeenCalledTimes(1);
+
+    // Same id restarts (accumulator resets clean, flushed-guard un-marked) and ends again.
+    ingestSessionAnnouncement({ event: "started", session: session("s1") }, 3000);
+    ingestDiffsForMetrics([diff("/b.txt", "", "y", "s1")]);
+    ingestSessionAnnouncement({ event: "ended", session: session("s1") }, 4000);
+    await flushSession("s1");
+    expect(metricsRecord).toHaveBeenCalledTimes(2);
+  });
+
+  it("flushAllSessions flushes every worth-persisting session once", async () => {
+    for (const id of ["s1", "s2"]) {
+      ingestSessionAnnouncement({ event: "started", session: session(id) }, 1000);
+      ingestDiffsForMetrics([diff(`/${id}.txt`, "", "x", id)]);
+      ingestSessionAnnouncement({ event: "ended", session: session(id) }, 2000);
+    }
+    await flushAllSessions();
+    expect(metricsRecord).toHaveBeenCalledTimes(2);
   });
 });
