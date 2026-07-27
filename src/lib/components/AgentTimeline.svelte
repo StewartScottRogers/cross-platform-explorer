@@ -34,6 +34,7 @@
     cadenceForSpeed,
   } from "../agentReplay";
   import { foldOverlaps, overlapHasUnknown, friendlyActor, relativeLabel } from "../agentConflicts";
+  import { foldRenameConflicts, renameConflictNote } from "../agentRenameConflicts";
   import { commands } from "../bindings.gen";
   import type { ReplayData, Baseline, ReplayEntry as ReplayRow, SessionMetricsRecord } from "../bindings.gen";
   import type { DirEntry } from "../types";
@@ -99,6 +100,10 @@
   /** Paths touched by ≥2 distinct actors within the overlap window, most-recent first (pure fold
    *  over `entries` — no new listener/timer; see agentConflicts.ts for the hedged wording rationale). */
   $: overlaps = foldOverlaps(entries);
+  /** Competing renames (CPE-1118) — same-`from`/diff-`to` divergences and diff-`from`/same-`to`
+   *  collisions across distinct actors, folded from the same `entries` (no new listener/timer; see
+   *  agentRenameConflicts.ts, which mirrors the sidecar's conflict_rename.rs). */
+  $: renameConflicts = foldRenameConflicts(entries);
 
   // ---------- Cost ledger tab (CPE-1098 tokens+cost; CPE-1107 fuller per-session metrics) ----------
   /** Reporting/active sessions, current-watched one first (if present), then the rest sorted by id for
@@ -680,31 +685,60 @@
     <!-- Radar tab (CPE-1100): activity OVERLAP, not "conflict" — a raw watcher can't prove two
          touches came from unrelated actors vs. the same agent revisiting its own file, so the
          wording is deliberately hedged (agentConflicts.ts). -->
-    {#if overlaps.length === 0}
+    {#if overlaps.length === 0 && renameConflicts.length === 0}
       <div class="tl-empty">No overlapping activity — nothing has been touched by more than one actor recently.</div>
     {:else}
-      <ul class="tl-list rd-list">
-        {#each overlaps as o (o.path)}
-          <li class="rd-item">
-            <button
-              class="tl-row rd-row"
-              title={o.path}
-              on:click={() => dispatch("navigate", dirOf(o.path))}
-            >
-              <span class="tl-name">{baseOf(o.path)}</span>
-              <span class="tl-time">{relativeLabel(o.lastAt, Date.now())}</span>
-            </button>
-            <div class="rd-actors">
-              {#each o.actors as a (a)}
-                <span class="rd-pill">{friendlyActor(a, sessions)}</span>
-              {/each}
-            </div>
-            {#if overlapHasUnknown(o)}
-              <div class="rd-note">Includes an unresolved actor — attribution here is best-effort.</div>
-            {/if}
-          </li>
-        {/each}
-      </ul>
+      {#if overlaps.length > 0}
+        <ul class="tl-list rd-list">
+          {#each overlaps as o (o.path)}
+            <li class="rd-item">
+              <button
+                class="tl-row rd-row"
+                title={o.path}
+                on:click={() => dispatch("navigate", dirOf(o.path))}
+              >
+                <span class="tl-name">{baseOf(o.path)}</span>
+                <span class="tl-time">{relativeLabel(o.lastAt, Date.now())}</span>
+              </button>
+              <div class="rd-actors">
+                {#each o.actors as a (a)}
+                  <span class="rd-pill">{friendlyActor(a, sessions)}</span>
+                {/each}
+              </div>
+              {#if overlapHasUnknown(o)}
+                <div class="rd-note">Includes an unresolved actor — attribution here is best-effort.</div>
+              {/if}
+            </li>
+          {/each}
+        </ul>
+      {/if}
+      {#if renameConflicts.length > 0}
+        <!-- Competing renames (CPE-1118): same-from divergence / same-to collision across distinct
+             actors, mirroring conflict_rename.rs. Extends this tab rather than adding a second
+             empty state — the "No overlapping activity" state above already covers "nothing here". -->
+        <div class="rd-section-title">Competing renames</div>
+        <ul class="tl-list rd-list">
+          {#each renameConflicts as rc (rc.kind + ':' + rc.path)}
+            <li class="rd-item">
+              <button
+                class="tl-row rd-row"
+                title={rc.path}
+                on:click={() => dispatch("navigate", dirOf(rc.path))}
+              >
+                <span class="rd-kind-badge rd-kind-{rc.kind}">{rc.kind === "divergence" ? "diverged" : "collided"}</span>
+                <span class="tl-name">{baseOf(rc.path)}</span>
+                <span class="tl-time">{relativeLabel(rc.lastAt, Date.now())}</span>
+              </button>
+              <div class="rd-actors">
+                {#each rc.actors as a (a)}
+                  <span class="rd-pill">{friendlyActor(a, sessions)}</span>
+                {/each}
+              </div>
+              <div class="rd-note">{renameConflictNote(rc.kind)}</div>
+            </li>
+          {/each}
+        </ul>
+      {/if}
     {/if}
   {:else}
     <!-- History tab (CPE-1114, epic CPE-731 slice c — final slice): cross-session rollup read from the
@@ -1337,6 +1371,36 @@
     color: var(--text, inherit);
     font-size: 10px;
     line-height: 1.4;
+  }
+  /* CPE-1118: "Competing renames" sub-section within the Radar tab — a small heading separating it
+     from the activity-overlap list above, theme vars only (no dark overrides; app is light-only). */
+  .rd-section-title {
+    margin: 10px 4px 4px;
+    padding-top: 8px;
+    border-top: 1px solid var(--border, #3a3a3a);
+    font-size: 11px;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    color: var(--text-muted, #9a9a9a);
+  }
+  .rd-kind-badge {
+    flex: 0 0 auto;
+    padding: 0 6px;
+    border-radius: 999px;
+    font-size: 10px;
+    font-weight: 600;
+    line-height: 16px;
+    text-transform: uppercase;
+    letter-spacing: 0.03em;
+    color: var(--text, inherit);
+    border: 1px solid var(--border, #3a3a3a);
+  }
+  .rd-kind-divergence {
+    background: color-mix(in srgb, var(--warn, #b5872b) 22%, transparent);
+  }
+  .rd-kind-collision {
+    background: color-mix(in srgb, var(--accent, #2f6fed) 22%, transparent);
   }
 
   /* ---------- History tab (CPE-1114, epic CPE-731 slice c): cross-session rollup dashboard ---------- */

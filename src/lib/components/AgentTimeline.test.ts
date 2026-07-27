@@ -618,3 +618,109 @@ describe("AgentTimeline Radar tab (CPE-1100)", () => {
     expect(screen.getByText(/No overlapping activity/i)).toBeTruthy();
   });
 });
+
+describe("AgentTimeline Radar tab — competing renames (CPE-1118)", () => {
+  const sessions: AgentSession[] = [
+    {
+      sessionId: "sess-1",
+      agentId: "claude-code",
+      agentName: "Claude Code",
+      provider: "anthropic",
+      model: "claude",
+      cwd: "/repo",
+    },
+  ];
+
+  it("renders a divergence with a badge, filename, and actor pills, and navigates on click", async () => {
+    const entries = [
+      entry({
+        id: 1,
+        kind: "renamed",
+        path: "Z:/repos/app/alice.ts",
+        at: 1_000,
+        actor: "sess-1",
+        from: "Z:/repos/app/shared.ts",
+        to: "Z:/repos/app/alice.ts",
+      }),
+      entry({
+        id: 2,
+        kind: "renamed",
+        path: "Z:/repos/app/bob.ts",
+        at: 1_500,
+        actor: "user",
+        from: "Z:/repos/app/shared.ts",
+        to: "Z:/repos/app/bob.ts",
+      }),
+    ];
+    const { component } = render(AgentTimeline, { entries, agentName: "Claude Code", sessions });
+    const navigate = vi.fn();
+    component.$on("navigate", (e) => navigate(e.detail));
+    await fireEvent.click(screen.getByRole("tab", { name: "Radar" }));
+
+    expect(screen.getByText("Competing renames")).toBeTruthy();
+    expect(screen.getByText("diverged")).toBeTruthy();
+    expect(screen.getByText("shared.ts")).toBeTruthy(); // badge shows the shared `from` path
+    expect(screen.getByText("Claude Code")).toBeTruthy(); // sess-1 resolved via `sessions`
+    expect(screen.getByText("You")).toBeTruthy(); // "user" -> "You"
+    expect(screen.getByText(/different names/i)).toBeTruthy();
+
+    await fireEvent.click(screen.getByText("shared.ts"));
+    expect(navigate).toHaveBeenCalledWith("Z:/repos/app"); // containing folder of the shared `from`
+  });
+
+  it("renders a collision with a badge and actor pills", async () => {
+    const entries = [
+      entry({
+        id: 1,
+        kind: "renamed",
+        path: "Z:/repos/app/final.ts",
+        at: 1_000,
+        actor: "sess-1",
+        from: "Z:/repos/app/a.ts",
+        to: "Z:/repos/app/final.ts",
+      }),
+      entry({
+        id: 2,
+        kind: "renamed",
+        path: "Z:/repos/app/final.ts",
+        at: 1_500,
+        actor: "user",
+        from: "Z:/repos/app/b.ts",
+        to: "Z:/repos/app/final.ts",
+      }),
+    ];
+    render(AgentTimeline, { entries, agentName: "Claude Code", sessions });
+    await fireEvent.click(screen.getByRole("tab", { name: "Radar" }));
+
+    // Two actors touching the same `to` path within the overlap window also qualifies as an
+    // activity overlap (agentConflicts.ts) — both sections legitimately render "final.ts" here,
+    // so assert the count rather than a single match.
+    expect(screen.getByText("collided")).toBeTruthy();
+    expect(screen.getAllByText("final.ts").length).toBeGreaterThanOrEqual(1);
+    expect(screen.getByText(/same name/i)).toBeTruthy();
+  });
+
+  it("shows no 'Competing renames' section and no rows when there are no rename conflicts", async () => {
+    const entries = [
+      entry({ id: 1, kind: "renamed", path: "Z:/repos/app/solo.ts", at: 1_000, actor: "sess-1", from: "Z:/repos/app/old.ts", to: "Z:/repos/app/solo.ts" }),
+    ];
+    render(AgentTimeline, { entries, agentName: "Claude Code", sessions });
+    await fireEvent.click(screen.getByRole("tab", { name: "Radar" }));
+
+    expect(screen.queryByText("Competing renames")).toBeNull();
+    expect(screen.getByText(/No overlapping activity/i)).toBeTruthy();
+  });
+
+  it("does not flag a same-actor rename or a from===to no-op as a competing rename", async () => {
+    const entries = [
+      entry({ id: 1, kind: "renamed", path: "Z:/repos/app/v1.ts", at: 1_000, actor: "sess-1", from: "Z:/repos/app/shared.ts", to: "Z:/repos/app/v1.ts" }),
+      entry({ id: 2, kind: "renamed", path: "Z:/repos/app/v2.ts", at: 1_500, actor: "sess-1", from: "Z:/repos/app/shared.ts", to: "Z:/repos/app/v2.ts" }),
+      entry({ id: 3, kind: "renamed", path: "Z:/repos/app/same.ts", at: 2_000, actor: "user", from: "Z:/repos/app/same.ts", to: "Z:/repos/app/same.ts" }),
+    ];
+    render(AgentTimeline, { entries, agentName: "Claude Code", sessions });
+    await fireEvent.click(screen.getByRole("tab", { name: "Radar" }));
+
+    expect(screen.queryByText("Competing renames")).toBeNull();
+    expect(screen.getByText(/No overlapping activity/i)).toBeTruthy();
+  });
+});

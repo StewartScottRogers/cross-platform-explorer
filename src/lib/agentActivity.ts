@@ -40,6 +40,12 @@ export interface TimelineEntry {
    *  timeline entries across distinct actors; existing timeline rows ignore it. Optional for the same
    *  reason as {@link AgentActivity.actor}. */
   actor?: string;
+  /** For a `renamed` entry where the platform reported the source→target pair (CPE-1117): the path
+   *  it was renamed FROM. `to` mirrors `path` (the target). Both are absent when the platform only
+   *  reported a single path (degraded rename) — competing-rename detection (CPE-1118) then simply
+   *  skips the entry rather than guessing. */
+  from?: string;
+  to?: string;
 }
 
 /** One file the agent has READ this session (CPE-741) — the durable "consulted" set. Unlike the
@@ -110,6 +116,8 @@ export function mergeTimeline(
     path: it.path,
     at: now,
     actor: it.actor,
+    from: it.from,
+    to: it.to,
   }));
   return [...created.reverse(), ...prev].slice(0, cap);
 }
