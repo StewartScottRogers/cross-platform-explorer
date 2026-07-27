@@ -4,7 +4,7 @@ title: "Cost dashboard: cross-session history rollup view"
 type: feature
 component: Frontend
 priority: medium
-status: Backlog
+status: Done
 tags: ready
 created: 2026-07-26
 epic: CPE-731
@@ -64,3 +64,15 @@ persistence 731b + this history view).
 2026-07-26 (workshift) — Filed + designed (Library-backed) but NOT built: the session hit the 200-agent crew cap
 before a worker could be dispatched. Ready to build (pure frontend, commands + persistence already merged in
 731a/731b). Pick up in a fresh session (resets the agent budget) or with a raised cap.
+
+2026-07-26 (workshift, worker) — Built end-to-end on branch `cpe-1114-cost-history-dashboard`:
+`src/lib/agentMetricsRollup.ts` (pure `rollup`/`overTime`, mirroring `fleet_metrics::aggregate` +
+`efficiency.rs`, division/NaN-safe throughout) + `src/lib/agentMetricsRollup.test.ts` (14 vitest cases:
+empty, single, multi-model, multi-agent, 0-safe ratios, day/hour bucketing). Added a "History" tab to
+`src/lib/components/AgentTimeline.svelte`: reads `commands.metricsHistory()` once, pull-only, on first
+open this mount (generation-token guarded, clean empty/error states); renders totals, per-model +
+per-agent tables with share, throughput ratios, and a hand-rolled SVG bars-per-day view (cost/tokens
+toggle, no chart dep). Theme vars only; tables scroll horizontally; totals reflow. Closes epic CPE-731
+(731a live metrics + 731b persistence + this history view). `npm run check` clean; `npm test` green
+(1230/1230, including the existing 22-test `AgentTimeline.test.ts` suite unaffected). No backend
+changes, no bindings regen, no new deps. PR opened against `main`.

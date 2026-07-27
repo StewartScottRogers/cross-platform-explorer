@@ -35,8 +35,9 @@
   } from "../agentReplay";
   import { foldOverlaps, overlapHasUnknown, friendlyActor, relativeLabel } from "../agentConflicts";
   import { commands } from "../bindings.gen";
-  import type { ReplayData, Baseline, ReplayEntry as ReplayRow } from "../bindings.gen";
+  import type { ReplayData, Baseline, ReplayEntry as ReplayRow, SessionMetricsRecord } from "../bindings.gen";
   import { stateAtFrom, childrenAt, type FsState } from "../replayFold";
+  import { rollup, overTime } from "../agentMetricsRollup";
 
   export let entries: TimelineEntry[] = [];
   export let agentName = "agent";
@@ -77,10 +78,11 @@
   };
   const clock = (at: number) => new Date(at).toLocaleTimeString();
 
-  // ---------- Replay tab (CPE-1094) / Cost tab (CPE-1098) / Radar tab (CPE-1100) ----------
+  // ---------- Replay tab (CPE-1094) / Cost tab (CPE-1098) / Radar tab (CPE-1100) / History tab (CPE-1114) ----------
   /** "Live" (default, today's list), "Replay" (scrub through the session's history), "Cost" (live
-   *  per-session token/USD usage), or "Radar" (activity-overlap signal across distinct actors). */
-  let tab: "live" | "replay" | "cost" | "radar" = "live";
+   *  per-session token/USD usage), "Radar" (activity-overlap signal across distinct actors), or
+   *  "History" (cross-session rollup from the persisted metrics journal). */
+  let tab: "live" | "replay" | "cost" | "radar" | "history" = "live";
 
   // ---------- Radar tab (CPE-1100) ----------
   /** Paths touched by ≥2 distinct actors within the overlap window, most-recent first (pure fold
@@ -101,6 +103,64 @@
       deriveSessionMetrics($agentSessionMetrics[id] ?? emptySessionAccumulator(id), $agentCost[id]),
     );
   })();
+
+  // ---------- History tab (CPE-1114, epic CPE-731 slice c — final slice) ----------
+  // Cross-session rollup of the persisted metrics journal (CPE-1113's `commands.metricsHistory()`),
+  // separate from the live per-session Cost tab above. Session-independent, so it's read PULL-ONLY:
+  // once, the first time this tab is opened this mount — no listener, no timer, no polling. The whole
+  // drawer is destroyed/recreated each time it's closed/reopened (App.svelte's `{#if showTimeline}`),
+  // so "on open" here is simply "on first History-tab visit this mount".
+  /** Raw rows from the journal, or `null` before the first load this mount. */
+  let historyRecords: SessionMetricsRecord[] | null = null;
+  let historyLoading = false;
+  let historyError = "";
+  /** Generation token: guards a slow load from clobbering a result if the drawer/component is torn
+   *  down mid-flight (mirrors `replayGen`). */
+  let historyGen = 0;
+  /** Which series the over-time bars show. */
+  let historyMetric: "cost" | "tokens" = "cost";
+
+  async function loadHistory() {
+    const g = ++historyGen;
+    historyLoading = true;
+    historyError = "";
+    try {
+      const res = await commands.metricsHistory();
+      if (g !== historyGen) return; // superseded
+      if (res.status === "ok") {
+        historyRecords = res.data;
+      } else {
+        historyError = String(res.error);
+      }
+    } catch (e) {
+      if (g !== historyGen) return;
+      historyError = e instanceof Error ? e.message : String(e);
+    } finally {
+      if (g === historyGen) historyLoading = false;
+    }
+  }
+
+  // Load once on History-tab enter — never while the tab is closed, never on a timer. A load error is
+  // left alone (no retry storm); reopening the drawer (a fresh mount) tries again.
+  $: if (tab === "history" && historyRecords === null && !historyLoading && !historyError) {
+    loadHistory();
+  }
+
+  $: historyRollup = historyRecords ? rollup(historyRecords) : null;
+  $: historyOverTime = historyRecords ? overTime(historyRecords, "day") : [];
+  $: historyMax = historyOverTime.reduce(
+    (m, p) => Math.max(m, historyMetric === "cost" ? p.costUsd : p.totalTokens),
+    0,
+  );
+
+  /** `part` as a percentage of `total`, division-safe — "—" rather than a bogus/NaN percentage when
+   *  `total` is 0 (e.g. every recorded session cost exactly $0). */
+  function historyShare(part: number, total: number): string {
+    if (!Number.isFinite(part) || !Number.isFinite(total) || total <= 0) return "—";
+    return `${((part / total) * 100).toFixed(1)}%`;
+  }
+
+  const historyBarDate = (bucketStart: number): string => new Date(bucketStart).toLocaleDateString();
 
   /** Selected scrub position — an epoch ms timestamp somewhere in `[range.firstAt, range.lastAt]`. */
   let t = 0;
@@ -343,6 +403,13 @@
       aria-selected={tab === "radar"}
       on:click={() => (tab = "radar")}
     ><span class="tab-label">Radar</span></button>
+    <button
+      class="tab"
+      class:active={tab === "history"}
+      role="tab"
+      aria-selected={tab === "history"}
+      on:click={() => (tab = "history")}
+    ><span class="tab-label">History</span></button>
   </div>
 
   {#if tab === "live"}
@@ -557,7 +624,7 @@
         {/each}
       </ul>
     {/if}
-  {:else}
+  {:else if tab === "radar"}
     <!-- Radar tab (CPE-1100): activity OVERLAP, not "conflict" — a raw watcher can't prove two
          touches came from unrelated actors vs. the same agent revisiting its own file, so the
          wording is deliberately hedged (agentConflicts.ts). -->
@@ -586,6 +653,132 @@
           </li>
         {/each}
       </ul>
+    {/if}
+  {:else}
+    <!-- History tab (CPE-1114, epic CPE-731 slice c — final slice): cross-session rollup read from the
+         persisted metrics journal (`commands.metricsHistory()`, CPE-1113). Pull-only — see the load
+         guard above; nothing runs here while this tab/the drawer is closed. -->
+    {#if historyLoading}
+      <div class="tl-empty">Loading session history…</div>
+    {:else if historyError}
+      <div class="tl-empty">Couldn't load session history: {historyError}</div>
+    {:else if !historyRollup || historyRollup.totals.sessions === 0}
+      <div class="tl-empty">No session history yet — rows appear here once a watched session ends.</div>
+    {:else}
+      <div class="cl-note">
+        Cross-session totals recorded on this machine — best-effort figures scraped from each agent's
+        own output, not billing. Churn/files/wall-clock are approximations.
+      </div>
+      <div class="hd-body">
+        <div class="hd-totals">
+          <div class="hd-stat"><span class="hd-stat-label">Sessions</span><span class="hd-stat-value">{formatTokens(historyRollup.totals.sessions)}</span></div>
+          <div class="hd-stat"><span class="hd-stat-label">Total cost</span><span class="hd-stat-value">{formatUsd(historyRollup.totals.costUsd)}</span></div>
+          <div class="hd-stat"><span class="hd-stat-label">Total tokens</span><span class="hd-stat-value">{formatTokens(historyRollup.totals.totalTokens)}</span></div>
+          <div class="hd-stat"><span class="hd-stat-label">Total time</span><span class="hd-stat-value">{formatDuration(historyRollup.totals.wallClockMs)}</span></div>
+          <div class="hd-stat"><span class="hd-stat-label">Files touched</span><span class="hd-stat-value">{formatTokens(historyRollup.totals.filesTouched)}</span></div>
+          <div class="hd-stat"><span class="hd-stat-label">Churn</span><span class="hd-stat-value">{formatBytes(historyRollup.totals.churnBytes)}</span></div>
+        </div>
+
+        {#if historyRollup.ratios.tokensPerMinute !== undefined || historyRollup.ratios.usdPerSession !== undefined || historyRollup.ratios.usdPerFile !== undefined || historyRollup.ratios.churnPer1kTokens !== undefined}
+          <div class="hd-section-title">Throughput</div>
+          <div class="hd-ratios">
+            {#if historyRollup.ratios.tokensPerMinute !== undefined}
+              <div class="cl-row"><span class="cl-label">Tokens/min</span><span class="cl-value">{formatPerMinute(historyRollup.ratios.tokensPerMinute)}</span></div>
+            {/if}
+            {#if historyRollup.ratios.usdPerSession !== undefined}
+              <div class="cl-row"><span class="cl-label">USD/session</span><span class="cl-value">{formatUsd(historyRollup.ratios.usdPerSession)}</span></div>
+            {/if}
+            {#if historyRollup.ratios.usdPerFile !== undefined}
+              <div class="cl-row"><span class="cl-label">USD/file</span><span class="cl-value">{formatUsd(historyRollup.ratios.usdPerFile)}</span></div>
+            {/if}
+            {#if historyRollup.ratios.churnPer1kTokens !== undefined}
+              <div class="cl-row"><span class="cl-label">Churn/1k tok</span><span class="cl-value">{formatBytes(historyRollup.ratios.churnPer1kTokens)}</span></div>
+            {/if}
+          </div>
+        {/if}
+
+        <div class="hd-section-title">By model</div>
+        <div class="hd-table-wrap">
+          <table class="hd-table">
+            <thead>
+              <tr><th>Model</th><th>Sessions</th><th>Tokens</th><th>Cost</th><th>Share</th></tr>
+            </thead>
+            <tbody>
+              {#each [...historyRollup.byModel.values()] as row (row.model)}
+                <tr>
+                  <td class="hd-key" title={row.model}>{row.model}</td>
+                  <td>{formatTokens(row.sessions)}</td>
+                  <td>{formatTokens(row.totalTokens)}</td>
+                  <td>{formatUsd(row.costUsd)}</td>
+                  <td>{historyShare(row.costUsd, historyRollup.totals.costUsd)}</td>
+                </tr>
+              {/each}
+            </tbody>
+          </table>
+        </div>
+
+        <div class="hd-section-title">By agent</div>
+        <div class="hd-table-wrap">
+          <table class="hd-table">
+            <thead>
+              <tr><th>Agent</th><th>Sessions</th><th>Tokens</th><th>Cost</th><th>Share</th></tr>
+            </thead>
+            <tbody>
+              {#each [...historyRollup.byAgent.values()] as row (row.agentId)}
+                <tr>
+                  <td class="hd-key" title={row.agentName}>{row.agentName}</td>
+                  <td>{formatTokens(row.sessions)}</td>
+                  <td>{formatTokens(row.totalTokens)}</td>
+                  <td>{formatUsd(row.costUsd)}</td>
+                  <td>{historyShare(row.costUsd, historyRollup.totals.costUsd)}</td>
+                </tr>
+              {/each}
+            </tbody>
+          </table>
+        </div>
+
+        <div class="hd-section-title-row">
+          <span class="hd-section-title">Over time</span>
+          <div class="rp-speed hd-metric-toggle" role="group" aria-label="Over-time series">
+            <button
+              class="rp-speed-btn"
+              class:active={historyMetric === "cost"}
+              aria-pressed={historyMetric === "cost"}
+              on:click={() => (historyMetric = "cost")}
+            >Cost</button>
+            <button
+              class="rp-speed-btn"
+              class:active={historyMetric === "tokens"}
+              aria-pressed={historyMetric === "tokens"}
+              on:click={() => (historyMetric = "tokens")}
+            >Tokens</button>
+          </div>
+        </div>
+        {#if historyOverTime.length === 0}
+          <div class="tl-empty hd-chart-empty">Not enough history yet to chart.</div>
+        {:else}
+          <svg
+            class="hd-chart"
+            viewBox="0 0 {historyOverTime.length * 16} 60"
+            preserveAspectRatio="none"
+            role="img"
+            aria-label="{historyMetric === 'cost' ? 'Cost' : 'Tokens'} per day"
+          >
+            {#each historyOverTime as p, i (p.bucketStart)}
+              {@const v = historyMetric === "cost" ? p.costUsd : p.totalTokens}
+              {@const h = historyMax > 0 ? Math.max(1, (v / historyMax) * 56) : 1}
+              <rect
+                x={i * 16 + 3}
+                y={60 - h}
+                width="10"
+                height={h}
+                rx="2"
+                class="hd-bar"
+              ><title>{historyBarDate(p.bucketStart)}: {historyMetric === "cost" ? formatUsd(v) : formatTokens(v)}</title></rect>
+            {/each}
+          </svg>
+        {/if}
+      </div>
     {/if}
   {/if}
 </aside>
@@ -1064,6 +1257,130 @@
     color: var(--text, inherit);
     font-size: 10px;
     line-height: 1.4;
+  }
+
+  /* ---------- History tab (CPE-1114, epic CPE-731 slice c): cross-session rollup dashboard ---------- */
+  .hd-body {
+    overflow-y: auto;
+    flex: 1;
+    padding: 4px 10px 12px;
+  }
+  /* Totals strip: stat tiles reflow onto more rows rather than overflowing the narrow drawer (same
+     wrap-container principle as the tick-tack pill rows elsewhere in this file). */
+  .hd-totals {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+    margin-bottom: 6px;
+  }
+  .hd-stat {
+    flex: 1 1 90px;
+    min-width: 90px;
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    padding: 6px 8px;
+    border: 1px solid var(--border, #3a3a3a);
+    border-radius: 6px;
+    background: var(--surface-alt, transparent);
+  }
+  .hd-stat-label {
+    font-size: 10px;
+    color: var(--text-muted, #9a9a9a);
+    white-space: nowrap;
+  }
+  .hd-stat-value {
+    font-size: 13px;
+    font-weight: 600;
+    color: var(--text, inherit);
+    font-variant-numeric: tabular-nums;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .hd-section-title {
+    margin: 10px 0 4px;
+    font-size: 10.5px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.03em;
+    color: var(--text-muted, #9a9a9a);
+  }
+  .hd-section-title-row {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    justify-content: space-between;
+    gap: 6px;
+    margin-top: 10px;
+  }
+  .hd-section-title-row .hd-section-title {
+    margin: 0;
+  }
+  .hd-metric-toggle {
+    padding: 0;
+    justify-content: flex-end;
+  }
+  .hd-ratios {
+    display: flex;
+    flex-direction: column;
+  }
+  /* Tables reflow via horizontal scroll rather than squeezing columns unreadably in the 340px drawer. */
+  .hd-table-wrap {
+    overflow-x: auto;
+    border: 1px solid var(--border, #3a3a3a);
+    border-radius: 6px;
+  }
+  .hd-table {
+    width: 100%;
+    min-width: 280px;
+    border-collapse: collapse;
+    font-size: 11px;
+  }
+  .hd-table th,
+  .hd-table td {
+    padding: 4px 7px;
+    text-align: right;
+    white-space: nowrap;
+    font-variant-numeric: tabular-nums;
+  }
+  .hd-table th:first-child,
+  .hd-table td:first-child {
+    text-align: left;
+  }
+  .hd-table th {
+    color: var(--text-muted, #9a9a9a);
+    font-weight: 600;
+    font-size: 10px;
+    text-transform: uppercase;
+    letter-spacing: 0.02em;
+    border-bottom: 1px solid var(--border, #3a3a3a);
+  }
+  .hd-table td {
+    color: var(--text, inherit);
+    border-bottom: 1px solid var(--border, #3a3a3a);
+  }
+  .hd-table tr:last-child td {
+    border-bottom: 0;
+  }
+  .hd-key {
+    max-width: 120px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .hd-chart-empty {
+    padding: 8px 0 0;
+  }
+  /* Hand-rolled SVG bar chart (no chart dependency) — cost or tokens per UTC day, scaled to the
+     tallest bar in view. A native <title> per bar supplies a hover tooltip (date + value). */
+  .hd-chart {
+    display: block;
+    width: 100%;
+    height: 70px;
+    margin-top: 4px;
+  }
+  .hd-bar {
+    fill: var(--accent, #2f6fed);
   }
 </style>
 
