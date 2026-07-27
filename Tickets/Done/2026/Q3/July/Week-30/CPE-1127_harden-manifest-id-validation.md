@@ -4,7 +4,7 @@ title: "Checkpoint store: validate manifest_id is a single safe segment (read-pa
 type: chore
 component: Backend
 priority: medium
-status: Backlog
+status: Done
 tags: ready
 created: 2026-07-27
 epic: CPE-732
@@ -34,3 +34,5 @@ bounded (read-only; must end `.json` and parse as `PersistedManifest`; `manifest
 ## Work Log
 2026-07-27 (workshift) — Filed from the CPE-1123 #439 review (low-severity, write-safe read-path traversal;
 pre-existing pattern in restore/prune too). Merged #439 as-is (bounded + write-safe) and captured hardening here.
+
+2026-07-27 (workshift) — Built (PR #440, merged 324ce05a). Reviewer APPROVE + UAT PASS: validate_manifest_id at the single load_manifest chokepoint (grep-verified to cover restore/prune/manifest_snapshot -> all 5 entry points); rejects ../ separators/:/NUL unconditionally (both OS separators). UAT regression-probe removed the guard -> planted-outside-file test FAILED, proving it load-bearing; valid ids unaffected; clippy clean all modes.

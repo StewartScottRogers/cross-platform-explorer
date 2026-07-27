@@ -47,3 +47,17 @@ under a per-file + whole-store byte `CaptureBudget` (the "bounded, dedup" DoD). 
 `Snapshot`/`FileState`, so a checkpoint = a `Snapshot` + the blobs its hashes resolve to. 11 tests, pure std.
 **Remaining (GUI/attended):** the revert **engine** (execute a `restore_plan`, skip-unreadable) and the
 timeline checkpoint-marker + restore UI.
+
+2026-07-27 (workshift) — **Headless scope COMPLETE.** The pre-built engines (snapshot/snapshot_capture/
+restore_plan/revert_engine/revert_safety/BlobStore) are now wired into a live feature:
+- CPE-1123 command layer — per-root checkpoint store (SHA-256 key, tolerant JSONL index mirroring audit_journal)
+  + 5 commands (create/list/preview_revert/revert/revert_one), revert write-safe (safe_segments). PR #439.
+- CPE-1124 engine round-trip integration test (capture→mutate→plan/drift→revert→byte-match + skip-unreadable),
+  mutation-proven. PR #438.
+- CPE-1125 palette action tool.checkpoint + CheckpointDialog (confirm-before-revert) + docs 16-checkpoints. PR #441.
+- CPE-1127 manifest_id path-traversal hardening (read path). PR #440.
+Each passed an independent Reviewer + UAT gauntlet; every merge CI-green.
+**Still open (epic stays In Progress):** CPE-1126 — the rich visual **restore panel + timeline checkpoint
+markers** (the attended GUI cap, ~15%), DEFERRED to a user-present GUI-verification session (on the QA MVD
+ledger). Optional headless follow-up: thread revert_attribution into checkpoint_preview_revert so drift flags
+only truly-outside changes (currently conservative "warn about everything", documented).

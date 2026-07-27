@@ -4,7 +4,7 @@ title: "Checkpoint & rollback: palette action + in-app docs"
 type: feature
 component: Frontend
 priority: medium
-status: Backlog
+status: Done
 tags: ready
 created: 2026-07-26
 epic: CPE-732
@@ -34,3 +34,5 @@ regenerated bindings to invoke).
 ## Work Log
 2026-07-26 (workshift) — CPE-732 first wave (PM slice E). Blocked on CPE-1123 (command layer + bindings). The
 richer VISUAL surface (restore panel + timeline markers) is the deferred GUI cap CPE-1126.
+
+2026-07-27 (workshift) — Built (PR #441, merged 10caa129). Reviewer APPROVE + UAT PASS: CheckpointDialog (create/list/preview/revert) via commands.checkpoint*, palette tool.checkpoint (enabled:inFolder), docs 16-checkpoints.md (glob-discovered + openDocsSlug help link — Integrity/Templates precedent, NOT a Section; guard test green), i18n all 12 locales. Two-step confirm-before-revert enforced on BOTH whole-tree and single-path (proven no one-click destructive). Colours match the existing dialog palette. Headless-driveable surface; rich visual restore panel is the deferred CPE-1126.
