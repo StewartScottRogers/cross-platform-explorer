@@ -32,6 +32,11 @@ pub const MAX_BASELINE_ENTRIES: usize = 50_000;
 
 /// Maximum directory-nesting depth the baseline walk will descend. Bounds recursion regardless of the
 /// entry cap and guarantees termination even through a directory-symlink cycle.
+///
+/// The symlink-cycle guard is **defense-in-depth** (CPE-1109 UAT note): the walk reads entries via
+/// `listing::list_dir`, whose `metadata()` does not follow symlinks, so a self-referential symlink is
+/// recorded as a single entry rather than descended into — a cycle can't actually loop here. The depth
+/// cap is retained anyway as a hard upper bound on a genuinely deep (non-symlink) tree.
 pub const MAX_BASELINE_DEPTH: usize = 64;
 
 /// The `kind` stamped on every node seeded from the baseline (as opposed to an event-derived node). A

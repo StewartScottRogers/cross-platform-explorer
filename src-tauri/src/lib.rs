@@ -2416,6 +2416,38 @@ async fn audit_read(
         .map_err(|e| e.to_string())
 }
 
+/// Everything the Replay tab needs for one session, pulled once on tab-open (CPE-1110, epic CPE-728
+/// slice **c**): the session's durable audit journal packaged for replay
+/// (`replay_session::load_replay` — events in journal order + `(min,max)` ts bounds + whole-run
+/// summary) plus its baseline snapshot (`replay_baseline::read_baseline`). The frontend seeds the fold
+/// from `baseline` and re-derives the folder listing per scrub tick entirely client-side
+/// (`src/lib/replayFold.ts`), so scrubbing costs no IPC round-trip per tick.
+#[derive(Debug, Clone, serde::Serialize)]
+#[cfg_attr(feature = "specta-bindings", derive(specta::Type))]
+struct ReplayLoad {
+    /// The session's events (journal order) + `(min,max)` ts bounds + whole-run summary.
+    replay: cpe_server::replay_session::ReplayData,
+    /// The pre-existing-entries snapshot captured at watch-start, or `None` if the session never wrote
+    /// one — the fold then degrades to events-only reconstruction (an empty seed).
+    baseline: Option<cpe_server::replay_baseline::Baseline>,
+}
+
+/// Load a past session's replay data + baseline for the Replay tab. Thin `spawn_blocking` shell over the
+/// two already-tested `cpe_server` readers (mirrors `audit_read`). PULL-ONLY — called when the Replay
+/// tab opens; nothing runs while it's closed, so replay is zero-cost with Agent Watch off (off-means-off).
+#[tauri::command]
+#[cfg_attr(feature = "specta-bindings", specta::specta)]
+async fn replay_load(app: tauri::AppHandle, session: String) -> Result<ReplayLoad, String> {
+    let dir = audit_dir(&app)?;
+    tauri::async_runtime::spawn_blocking(move || {
+        let replay = cpe_server::replay_session::load_replay(&dir, &session);
+        let baseline = cpe_server::replay_baseline::read_baseline(&dir, &session);
+        ReplayLoad { replay, baseline }
+    })
+    .await
+    .map_err(|e| e.to_string())
+}
+
 /// Line / word / character / byte counts for a text file (CPE-414). Lines follow `str::lines`
 /// (a final unterminated line still counts); words are whitespace-separated; characters are Unicode
 /// scalar values. Capped so analysing a file stays predictable; a non-UTF-8 (binary) file, a
@@ -6366,6 +6398,7 @@ pub fn run() {
             audit_record,
             audit_sessions,
             audit_read,
+            replay_load,
             text_stats,
             inspect_file,
             search_file_contents,
@@ -6883,6 +6916,7 @@ pub fn export_bindings(out: &std::path::Path) -> Result<(), String> {
         audit_record,
         audit_sessions,
         audit_read,
+        replay_load,
         text_stats,
         inspect_file,
         search_file_contents,
@@ -6933,7 +6967,12 @@ pub fn export_bindings(out: &std::path::Path) -> Result<(), String> {
         forge_resolve_file,
         forge_conflict_continue,
         forge_conflict_abort,
-    ]);
+    ])
+    // CPE-1110: export the replay projection types that no command *returns* but the frontend fold
+    // (`src/lib/replayFold.ts`) reconstructs client-side — `ReplayEntry` (a `children_at` row) and
+    // `FsNode` (a folded path's last-touch state) — so the TS fold shares one contract with Rust.
+    .typ::<cpe_server::replay_view::ReplayEntry>()
+    .typ::<cpe_server::replay::FsNode>();
     let tmp = std::env::temp_dir().join("cpe_bindings_export.ts");
     // u64 byte-counts (e.g. write_file_text) map to `number` — matches how the frontend already treats
     // these returns and how serde_json emits them; specta forbids BigInt types without an explicit policy.
