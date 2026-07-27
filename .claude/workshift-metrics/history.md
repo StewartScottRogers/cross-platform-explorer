@@ -307,3 +307,23 @@ activity, double-`session:` prefix).
 here. For multi-epic marathons, either raise CLAUDE_CODE_MAX_SUBAGENTS_PER_SESSION or split across sessions so the
 crew budget resets. Reviewers again caught every rework item (6 cycles, all fixed pre-merge). sonnet-worker +
 opus-reviewer stayed the right pairing; opus-worker for the genuinely-hard slices (fold port, persistence, cfg-gated).
+
+## 2026-07-27 (workshift — short, furlough wind-down)
+
+Resumed on a stale checkpoint; found the prior session had already closed epics CPE-730/731 + the CPE-732
+headless scope and cut v0.57.37. Drained the last 3 genuinely-headless tickets, then the user called a
+**furlough** (out of tokens until next month's plan). Clean stop: tree clean, worktrees pruned, Backlog empty.
+
+**Shipped (3 workers, all sonnet, 0 rework, all merged):**
+- CPE-1119 (#442) — deleted 5 orphaned sidecar `conflict*.rs` modules (946 LOC dead code; grep-proven).
+- CPE-1122 (#443) — gated Ctrl+Z `undo()` in read-only views via the shared `blockedInArchive()` predicate.
+- CPE-691 (#444) — full-list-render regression guard for the virtualized FileList (test-only, proven falsifiable).
+
+**Metrics:** 3 merged · median gauntlet n/a (Foreman-reviewed, not full gauntlet — furlough) · 0 retries ·
+~cost-proxy 3.8k (all sonnet). Admin-merged to save tokens; each passed full local suite; CI runs post-push.
+
+**Re-confirmed frontier lesson (again):** every "open" pure/headless slice probed was already Done
+(CPE-999/1001, CPE-1002 detectors, CPE-737). The clean headless well is tapped — remaining epic work is
+attended GUI / big-design / user-resource. The *honest* headless work left (queued for next shift, unbuilt):
+OGG read-side multi-page packet reassembly (a real correctness bug), CPE-732 revert_attribution threading,
+and a gui-smoke extension for the CPE-1114 cost-History visual residual. Full detail in `CHECKPOINT.md`.
