@@ -4,7 +4,7 @@ title: "Cost dashboard: cross-session history rollup view"
 type: feature
 component: Frontend
 priority: medium
-status: Doing
+status: Backlog
 tags: ready
 created: 2026-07-26
 epic: CPE-731
@@ -60,3 +60,7 @@ commands already exist). Design: `.claude/research-library/entries/cost-dashboar
 2026-07-26 (workshift) — CPE-731 slice c (final), from the filed plan. Rollup (mirror fleet_metrics/efficiency)
 + cross-session dashboard reading the CPE-1113 journal. Closes epic CPE-731 (fuller per-session metrics 731a +
 persistence 731b + this history view).
+
+2026-07-26 (workshift) — Filed + designed (Library-backed) but NOT built: the session hit the 200-agent crew cap
+before a worker could be dispatched. Ready to build (pure frontend, commands + persistence already merged in
+731a/731b). Pick up in a fresh session (resets the agent budget) or with a raised cap.
