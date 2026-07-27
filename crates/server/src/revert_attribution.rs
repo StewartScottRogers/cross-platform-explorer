@@ -103,7 +103,7 @@ mod tests {
     use super::*;
 
     fn ev(ts: u64, session: &str, kind: &str, path: &str) -> AuditEvent {
-        AuditEvent { ts, session: session.into(), kind: kind.into(), path: path.into(), detail: None }
+        AuditEvent { ts, session: session.into(), kind: kind.into(), path: path.into(), actor: None, detail: None }
     }
 
     fn renamed(ts: u64, session: &str, from: &str, to: &str) -> AuditEvent {
@@ -112,6 +112,7 @@ mod tests {
             session: session.into(),
             kind: "renamed".into(),
             path: from.into(),
+            actor: None,
             detail: Some(format!("-> {to}")),
         }
     }
@@ -188,6 +189,7 @@ mod tests {
             session: "s1".into(),
             kind: "renamed".into(),
             path: "/repo/old.txt".into(),
+            actor: None,
             detail: Some("nonsense".into()),
         };
         let no_detail = AuditEvent {
@@ -195,6 +197,7 @@ mod tests {
             session: "s1".into(),
             kind: "renamed".into(),
             path: "/repo/old2.txt".into(),
+            actor: None,
             detail: None,
         };
         let got = agent_touched(&[no_marker, no_detail], "s1", 0, "/repo");

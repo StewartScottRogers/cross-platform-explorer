@@ -12,6 +12,9 @@ export interface AuditEvent {
   kind: string;
   /** Absolute path. */
   path: string;
+  /** Who caused the event (CPE-1101 actor: owning session id, "user", or "unknown"). Additive +
+   * backward-compatible: events predating the field have no `actor`. */
+  actor?: string;
   /** Optional extra detail (e.g. rename target, diff summary). */
   detail?: string;
 }

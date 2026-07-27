@@ -2385,7 +2385,7 @@ async fn audit_record(
 ) -> Result<(), String> {
     let dir = audit_dir(&app)?;
     let ts = to_epoch_ms(SystemTime::now()).unwrap_or(0);
-    let event = audit_journal::AuditEvent { ts, session, kind, path, detail };
+    let event = audit_journal::AuditEvent { ts, session, kind, path, actor: None, detail };
     tauri::async_runtime::spawn_blocking(move || {
         audit_journal::record(&dir, &event, audit_journal::MAX_EVENTS_PER_SESSION)
     })
@@ -4583,6 +4583,8 @@ fn flush_fs_batch(
     // drain race) we emit "unknown" rather than a dead id. State is always managed under this feature,
     // but we degrade gracefully to the session id if it somehow isn't.
     let now = std::time::Instant::now();
+    // One epoch-ms stamp for this drained batch (server-side, so the persisted log can't be skewed).
+    let ts = to_epoch_ms(SystemTime::now()).unwrap_or(0);
     let watch_state = app.try_state::<AgentWatchState>();
     let session_present = watch_state
         .as_ref()
@@ -4591,6 +4593,8 @@ fn flush_fs_batch(
 
     let mut activity = Vec::with_capacity(pending.len());
     let mut diffs = Vec::new();
+    // CPE-1108: durable per-event journal for replay — built alongside the live emit below.
+    let mut events: Vec<audit_journal::AuditEvent> = Vec::with_capacity(pending.len());
     for (path, kind) in pending.drain() {
         let actor = match watch_state.as_ref() {
             Some(s) => {
@@ -4620,7 +4624,30 @@ fn flush_fs_batch(
         if let Some(r) = record {
             diffs.push(json!({ "path": r.path, "before": r.before, "after": r.after, "actor": actor.clone() }));
         }
+        // Persist this event (CPE-1108) before `path`/`actor` move into the live activity item.
+        events.push(audit_journal::AuditEvent {
+            ts,
+            session: session_id.to_string(),
+            kind: kind.to_string(),
+            path: path.clone(),
+            actor: Some(actor.clone()),
+            detail: None,
+        });
         activity.push(json!({ "kind": kind, "path": path, "actor": actor }));
+    }
+    // Append the batch to the durable audit journal (CPE-1108) so the session's full ordered event
+    // log survives beyond the 300-cap in-memory timeline for replay. This lives only on the pump
+    // thread, so nothing is written when no session is armed (off means off). A journal-write error
+    // must never break the live pump/activity view: log it and carry on.
+    match audit_dir(app) {
+        Ok(dir) => {
+            if let Err(e) =
+                audit_journal::record_many(&dir, &events, audit_journal::MAX_EVENTS_PER_SESSION)
+            {
+                eprintln!("[agent-watch] audit journal append failed (swallowed): {e}");
+            }
+        }
+        Err(e) => eprintln!("[agent-watch] audit dir unavailable, skipping journal append: {e}"),
     }
     let _ = app.emit("ai-console://fs-activity", activity);
     if !diffs.is_empty() {

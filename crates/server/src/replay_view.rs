@@ -289,7 +289,7 @@ mod tests {
         use crate::replay::state_at;
 
         fn ev(ts: u64, kind: &str, path: &str) -> AuditEvent {
-            AuditEvent { ts, session: "s1".into(), kind: kind.into(), path: path.into(), detail: None }
+            AuditEvent { ts, session: "s1".into(), kind: kind.into(), path: path.into(), actor: None, detail: None }
         }
 
         let events = [
