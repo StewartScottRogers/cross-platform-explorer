@@ -1123,7 +1123,16 @@
     selection = emptySelection();
   }
 
-  /** Guard file-mutating actions: the in-archive view is read-only. */
+  /** Guard file-mutating actions: the in-archive view, a smart folder, and Replay mode's reconstructed
+   *  overlay are all read-only. CPE-1112 rework (independent review + UAT both flagged this): the file
+   *  pane's rows while `replayOverlayEntries` is set come from the PAST, reconstructed from the audit
+   *  journal — they don't correspond 1:1 with what's actually on disk right now, and a stale/mismatched
+   *  index into the live listing could otherwise make a mutating action hit a completely different real
+   *  file than the one on screen. Every mutator below already funnels through this one chokepoint, so
+   *  adding the check here — rather than re-deriving it at each call site — closes the hole everywhere
+   *  at once (selection-dependent ops are additionally covered by `selectedEntries` being forced empty
+   *  in `ExplorerPane.svelte` while `inReplay`; this also covers the selection-INDEPENDENT ones:
+   *  new-folder, new-file, paste, ...). */
   function blockedInArchive(): boolean {
     if (smartFolder) {
       showNotice("This is a smart folder — a saved search view. Open a file's real location to change it.", true);
@@ -1131,6 +1140,10 @@
     }
     if (archive) {
       showNotice("This is a read-only view inside an archive.", true);
+      return true;
+    }
+    if (replayOverlayEntries !== null) {
+      showNotice("This is a read-only Replay-mode reconstruction — exit Replay mode to make changes.", true);
       return true;
     }
     return false;
@@ -1409,6 +1422,14 @@
   let homePath = "";
 
   async function open(entry: DirEntry) {
+    // CPE-1112 rework: `selectedEntries`/the FileList dispatch that normally feeds `entry` are already
+    // neutralized while Replay mode's overlay is showing (`ExplorerPane.svelte` forces `selectedEntries`
+    // empty and no-ops its `open` dispatch), but `open()` is also reachable via the command-palette/
+    // Enter-key paths above — guard here too so opening a file/navigating a folder can never act on a
+    // stale reference into whatever the LIVE listing happens to hold at that moment, not what's on
+    // screen. Deliberately NOT routed through `blockedInArchive()` — browsing INSIDE an archive is
+    // allowed (that's the very next branch below); only Replay mode's read-only reconstruction blocks.
+    if (replayOverlayEntries !== null) return;
     if (archive) { await openInArchive(entry); return; }
     if (entry.is_dir) {
       await navigate(entry.path);
@@ -2151,6 +2172,14 @@
       folder. Always a COPY — the external originals must stay put. */
   async function importDroppedFiles(paths: string[], pos: { x: number; y: number }) {
     if (!paths || paths.length === 0) return;
+    // CPE-1112 rework: an overlay row still carries its REAL reconstructed path in `[data-drop-path]`
+    // (`folderUnderCursor` below reads it straight off the DOM), so without this an OS file-drop during
+    // Replay mode could silently import into a folder the user only meant to look at in the past — the
+    // exact same "read-only means read-only" contract the other guards in this file enforce.
+    if (replayOverlayEntries !== null) {
+      showNotice("This is a read-only Replay-mode reconstruction — exit Replay mode to make changes.", true);
+      return;
+    }
     const dest = folderUnderCursor(pos) || (isHome || archive || smartFolder ? "" : currentPath);
     if (!dest) {
       showNotice($t("dnd.openFolderToImport"), true);

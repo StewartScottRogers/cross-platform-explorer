@@ -67,3 +67,38 @@ on package.json/package-lock.json/src-tauri/Cargo.{toml,lock} is empty (no new d
 touched. Files: `src/lib/replayOverlay.ts` (new), `src/lib/replayOverlay.test.ts` (new),
 `src/lib/components/ExplorerPane.svelte`, `src/lib/components/AgentTimeline.svelte`,
 `src/lib/components/AgentTimeline.test.ts`, `src/App.svelte`.
+
+2026-07-26 — REWORK (independent Reviewer + UAT both flagged the SAME blocking defect on PR #432). Rebased
+onto `main` after PR #431 (CPE-1114 cost-history dashboard) merged — one textual conflict in
+`AgentTimeline.svelte`'s import block (kept both `SessionMetricsRecord`/`rollup`/`overTime` from #431 and
+`DirEntry`/`resolveOverlay`/`ReplaySource` from this ticket); `AgentTimeline.test.ts` auto-merged clean.
+**The defect**: `ExplorerPane`'s FileList-level no-ops (open/context/drop/commitRename) only covered actions
+routed THROUGH FileList's dispatched events — but `selectedEntries` was still derived by indexing into the LIVE
+`visible` array (`selectedIndices(selection).map(i => visible[i])`) using indices from whatever FileList was
+CURRENTLY showing. While Replay mode's overlay was active, FileList showed the overlay's rows (a different
+set/order than `visible` for the same folder), so clicking a "read-only" reconstructed row then pressing
+Delete/F2/Ctrl-X could act on a completely different REAL live file — the banner said read-only, but a live
+file could be deleted/renamed. Selection-independent mutators (Ctrl+V paste, new-folder, new-file, OS
+file-drop-in) had no gate at all.
+**The fix**: `ExplorerPane.svelte` — `selectedEntries` is now forced to `[]` unconditionally for the entire
+time `inReplay` is true (never indexes into `visible` in that state, regardless of what `selection` holds);
+`selection` itself is actively cleared on the off→on edge; the row `on:click` is gated `!inReplay` alongside
+its sibling FileList-event gates. `App.svelte` — extended the existing `blockedInArchive()` chokepoint (the
+same one that already gates doCut/doCopy/doDuplicate/askDelete/beginRename/newFolder/newFile/doPaste) with a
+`replayOverlayEntries !== null` branch, so every mutator already routed through it is covered by ONE change;
+added a standalone guard directly in `open()` (deliberately NOT via `blockedInArchive()`, since browsing
+inside an archive must stay allowed) so Enter-to-open/command-palette "open" can't act on a stale reference;
+added the same standalone guard to `importDroppedFiles()` (found while auditing: an OS file dropped onto an
+overlay row would otherwise import into that row's REAL reconstructed path, read off `[data-drop-path]` in the
+DOM — a second real read-only violation beyond what was asked, fixed as the same class of bug).
+**New tests**: `src/App.replayGuards.test.ts` (6 new, full-App integration — the layer the original gap lived
+at, not just the pure-derivation/component layers `replayOverlay.test.ts`/`AgentTimeline.test.ts` already
+covered): drives a REAL watched agent session + Replay-tab load + "Show in file pane" toggle end-to-end, then
+asserts (1) clicking an overlay row never populates the live selection, (2) Delete never calls
+`delete_to_trash`/`delete_permanent`, (3) Ctrl+V is blocked by the read-only notice even with a non-empty
+clipboard (proving it's THIS guard, not the pre-existing empty-clipboard no-op), (4) Ctrl+Shift+N is blocked +
+never calls `create_dir`, (5) Enter never calls `open_external` and never navigates, (6) leaving Replay mode
+restores full functionality (new-folder works again). Re-verified: `npm run check` 0/0; full suite 1258/1258
+green (up from 1252 post-rebase, +6 new); `git diff --stat` on package.json/package-lock.json/
+src-tauri/Cargo.{toml,lock}/`crates/` empty (no new deps, no backend/bindings changes). Pushed
+`cpe-1112-replay-file-pane-overlay` with `--force-with-lease` after the rebase.
