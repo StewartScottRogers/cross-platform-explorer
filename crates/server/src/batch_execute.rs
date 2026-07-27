@@ -268,4 +268,50 @@ mod tests {
         let _ = fs::remove_dir_all(&d);
         let _ = fs::remove_dir_all(&d2);
     }
+
+    /// QA-Architect burndown (CPE-1115 follow-up): pin the exact scenario the user hit by hand on 0.57.36 —
+    /// a file with a valid image *extension* (and even a valid JPEG SOI marker) but **no decodable image
+    /// data** must be SKIPPED-with-a-reason (never fatal), while the valid images in the same batch still
+    /// produce outputs. The pre-existing skip test uses a `.txt` (obviously not an image); this covers the
+    /// subtler "looks like an image, isn't" case that made "2 selected → 1 output" look like a lost-file bug.
+    #[test]
+    fn a_real_looking_but_undecodable_image_is_skipped_while_valid_files_still_succeed() {
+        let d = scratch("undecodable");
+        let good_png = d.join("pixel.png");
+        let good_jpg = d.join("real.jpg");
+        let bad_jpg = d.join("photo.jpg"); // valid .jpg ext + JPEG SOI/EOI, but no frame/scan → undecodable
+        fs::write(&good_png, png_bytes(4, 4)).unwrap();
+        {
+            let mut buf = Cursor::new(Vec::new());
+            image::RgbImage::from_pixel(8, 8, image::Rgb([120u8, 130, 140]))
+                .write_to(&mut buf, ImageFormat::Jpeg)
+                .unwrap();
+            fs::write(&good_jpg, buf.into_inner()).unwrap();
+        }
+        fs::write(&bad_jpg, [0xFFu8, 0xD8, 0xFF, 0xD9]).unwrap(); // SOI + EOI, zero image content
+
+        let job = BatchJob::new(vec![MediaOp::Compress { quality: 80 }]);
+        let inputs = vec![
+            good_png.to_string_lossy().to_string(),
+            good_jpg.to_string_lossy().to_string(),
+            bad_jpg.to_string_lossy().to_string(),
+        ];
+        let items = plan(&job, &inputs);
+        assert_eq!(items.len(), 3, "one planned item per input");
+
+        let report = execute_plan(&items, &job);
+        assert_eq!(report.written, 2, "the two valid images are written");
+        assert_eq!(report.skipped.len(), 1, "the undecodable jpg is skipped, not fatal to the batch");
+        assert_eq!(report.skipped[0].0, bad_jpg.to_string_lossy().to_string());
+        assert!(!report.skipped[0].1.is_empty(), "the skip must carry a human reason");
+
+        // Both valid outputs exist and decode; the skipped input produced NO output file.
+        for item in items.iter().take(2) {
+            let bytes = fs::read(&item.output).unwrap_or_else(|e| panic!("expected output {}: {e}", item.output));
+            assert!(image::load_from_memory(&bytes).is_ok(), "valid output should decode");
+        }
+        assert!(!Path::new(&items[2].output).exists(), "no output for the skipped file");
+
+        let _ = fs::remove_dir_all(&d);
+    }
 }

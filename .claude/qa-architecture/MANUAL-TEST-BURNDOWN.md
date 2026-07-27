@@ -48,3 +48,14 @@ These are **not** MVD; listed so the QA Architect pins them and audits for regre
 | CPE-1094 | Agent-Watch replay scrubber: tab strip / slider drag / play cadence / diff-on-scrub | headless UAT+review only — needs eyes on a real watched session in the installed build | open | 2026-07-26 |
 | CPE-1098 | Agent-Watch cost ledger tab: card layout / theme colours / live token+USD numbers | headless UAT+review only — needs eyes + a real agent session printing usage on the installed build; stays open (needs a live agent session, not just a static fixture) | open | 2026-07-26 |
 | CPE-1100 | Agent-Watch radar tab: overlap rows / actor pills / navigate / live 2-actor race | headless UAT+review only — needs eyes + two concurrent actors racing a file on the installed build; stays open (needs a live 2-actor session, not just a static fixture) | open | 2026-07-26 |
+
+### QA-Architect pass 2026-07-26 (Foreman-played; crew at agent cap)
+- **Batch-media skip-on-error now pinned** (`crates/server` `batch_execute` integration test
+  `a_real_looking_but_undecodable_image_is_skipped_while_valid_files_still_succeed`): a mixed batch of a valid
+  PNG + valid JPEG + a real-looking-but-undecodable `.jpg` (valid SOI, no image data) → asserts written=2,
+  skipped=1 with a reason, both valid outputs decode, the skipped input writes no output. This automates the
+  exact scenario a user hit by hand on 0.57.36 ("2 selected → 1 output" that looked like a lost-file bug but
+  was a correct skip), so it can never silently regress. Pinned on the `Backend` + `Server crates` 3-OS
+  `cargo test` jobs. Complements CPE-1115 (which makes the skip *visible* in the dialog) + CPE-1105 (dialog
+  logic) — the CPE-1093 "real image-transform output" residual is now largely covered at the integration level;
+  only pure pixel/theme *feel* on the installed build remains human debt.
