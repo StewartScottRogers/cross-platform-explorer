@@ -1,6 +1,7 @@
 import { writable, type Readable } from "svelte/store";
 import { listen } from "@tauri-apps/api/event";
 import { inlineDiff, type InlineSeg } from "./diff";
+import { ingestDiffsForMetrics } from "./agentSessionMetrics";
 
 /**
  * Per-path before/after store for Agent Watch "Edit Diff Peek" (CPE-744, epic CPE-727).
@@ -205,10 +206,15 @@ const store = writable<DiffState>(emptyDiffState());
 /** Reactive per-path diff state (empty when not watching). */
 export const agentDiffs: Readable<DiffState> = store;
 
-/** Fold a raw `ai-console://fs-diff` payload into the store (exposed for headless tests). */
+/** Fold a raw `ai-console://fs-diff` payload into the store (exposed for headless tests). Also folds
+ *  the same batch into `agentSessionMetrics` (CPE-1107) — per-session files/edits/churn tallies are a
+ *  second fold hung off this one ingest path, not a new listener. */
 export function ingestDiff(payload: unknown): void {
   const items = normalizeFsDiff(payload);
-  if (items.length) store.update((prev) => foldDiffs(prev, items));
+  if (items.length) {
+    store.update((prev) => foldDiffs(prev, items));
+    ingestDiffsForMetrics(items);
+  }
 }
 
 /** Test/introspection helper: the current diff state synchronously. */

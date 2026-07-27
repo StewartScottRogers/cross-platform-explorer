@@ -13,7 +13,15 @@
   import type { TimelineEntry } from "../agentActivity";
   import type { AgentSession } from "../sidecar";
   import { agentDiffs, diffFor, diffLineStats } from "../agentDiffs";
-  import { agentCost, totalTokens, formatTokens, formatUsd } from "../agentCost";
+  import { agentCost, formatTokens, formatUsd } from "../agentCost";
+  import {
+    agentSessionMetrics,
+    emptySessionAccumulator,
+    deriveSessionMetrics,
+    formatBytes,
+    formatDuration,
+    formatPerMinute,
+  } from "../agentSessionMetrics";
   import {
     sliderRange,
     sliderFraction,
@@ -72,16 +80,19 @@
    *  over `entries` — no new listener/timer; see agentConflicts.ts for the hedged wording rationale). */
   $: overlaps = foldOverlaps(entries);
 
-  // ---------- Cost ledger tab (CPE-1098) ----------
-  /** Reporting sessions, current-watched one first (if it has reported), then the rest sorted by id
-   *  for a stable order. Advisory — best-effort figures scraped from the agent's own output. */
+  // ---------- Cost ledger tab (CPE-1098 tokens+cost; CPE-1107 fuller per-session metrics) ----------
+  /** Reporting/active sessions, current-watched one first (if present), then the rest sorted by id for
+   *  a stable order. The union of `agentCost` (has reported usage) and `agentSessionMetrics` (has
+   *  file/edit/churn/wall-clock activity) so a session that's touched files before its first cost
+   *  report still shows up. Advisory — best-effort figures, never billing. */
   $: costList = (() => {
-    const all = Object.values($agentCost);
-    const mine = all.filter((c) => c.sessionId === sessionId);
-    const others = all
-      .filter((c) => c.sessionId !== sessionId)
-      .sort((a, b) => a.sessionId.localeCompare(b.sessionId));
-    return [...mine, ...others];
+    const ids = new Set<string>([...Object.keys($agentCost), ...Object.keys($agentSessionMetrics)]);
+    const all = [...ids];
+    const mine = all.filter((id) => id === sessionId);
+    const others = all.filter((id) => id !== sessionId).sort((a, b) => a.localeCompare(b));
+    return [...mine, ...others].map((id) =>
+      deriveSessionMetrics($agentSessionMetrics[id] ?? emptySessionAccumulator(id), $agentCost[id]),
+    );
   })();
 
   /** Selected scrub position — an epoch ms timestamp somewhere in `[range.firstAt, range.lastAt]`. */
@@ -375,7 +386,11 @@
     {#if costList.length === 0}
       <div class="tl-empty">No usage reported yet — figures appear here once the agent reports usage.</div>
     {:else}
-      <div class="cl-note">Best-effort figures scraped from the agent's own output — not billing.</div>
+      <div class="cl-note">
+        Best-effort figures scraped from the agent's own output — not billing. Files/edits/churn/
+        wall-clock are approximations derived from the activity this app observed, not an authoritative
+        agent-side count.
+      </div>
       <ul class="cl-list">
         {#each costList as c (c.sessionId)}
           <li class="cl-card" class:cl-current={c.sessionId === sessionId && sessionId !== ""}>
@@ -385,8 +400,25 @@
             </div>
             <div class="cl-row"><span class="cl-label">Input tokens</span><span class="cl-value">{formatTokens(c.inputTokens)}</span></div>
             <div class="cl-row"><span class="cl-label">Output tokens</span><span class="cl-value">{formatTokens(c.outputTokens)}</span></div>
-            <div class="cl-row"><span class="cl-label">Total tokens</span><span class="cl-value">{formatTokens(totalTokens(c))}</span></div>
+            <div class="cl-row"><span class="cl-label">Total tokens</span><span class="cl-value">{formatTokens(c.totalTokens)}</span></div>
             <div class="cl-row"><span class="cl-label">Cost (USD)</span><span class="cl-value">{formatUsd(c.costUsd)}</span></div>
+            <div class="cl-sep"></div>
+            <div class="cl-row"><span class="cl-label">Files touched</span><span class="cl-value">{formatTokens(c.filesTouched)}</span></div>
+            <div class="cl-row"><span class="cl-label">Edits</span><span class="cl-value">{formatTokens(c.editCount)}</span></div>
+            <div class="cl-row"><span class="cl-label">Churn</span><span class="cl-value">{formatBytes(c.churnBytes)}</span></div>
+            <div class="cl-row"><span class="cl-label">Wall-clock</span><span class="cl-value">{formatDuration(c.wallClockMs)}</span></div>
+            {#if c.tokensPerMinute !== undefined || c.usdPerFile !== undefined || c.churnPer1kTokens !== undefined}
+              <div class="cl-sep"></div>
+              {#if c.tokensPerMinute !== undefined}
+                <div class="cl-row"><span class="cl-label">Tokens/min</span><span class="cl-value">{formatPerMinute(c.tokensPerMinute)}</span></div>
+              {/if}
+              {#if c.usdPerFile !== undefined}
+                <div class="cl-row"><span class="cl-label">USD/file</span><span class="cl-value">{formatUsd(c.usdPerFile)}</span></div>
+              {/if}
+              {#if c.churnPer1kTokens !== undefined}
+                <div class="cl-row"><span class="cl-label">Churn/1k tok</span><span class="cl-value">{formatBytes(c.churnPer1kTokens)}</span></div>
+              {/if}
+            {/if}
           </li>
         {/each}
       </ul>
@@ -785,6 +817,12 @@
     color: var(--text, inherit);
     font-variant-numeric: tabular-nums;
     font-weight: 600;
+  }
+  /* CPE-1107: a thin divider between the tokens+cost rows and the fuller files/churn/wall-clock and
+     throughput sections, so the card reads as grouped facts rather than one flat list. */
+  .cl-sep {
+    margin: 4px 0;
+    border-top: 1px solid var(--border, #3a3a3a);
   }
 
   /* ---------- Radar tab (CPE-1100): activity-overlap panel ---------- */

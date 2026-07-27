@@ -5,6 +5,7 @@ import {
   parseSessionAnnouncement,
   type AgentSession,
 } from "./sidecar";
+import { ingestSessionAnnouncement } from "./agentSessionMetrics";
 
 /**
  * Live registry of coding-agent sessions launched from the Agent Deck (Agent Watch, CPE-396).
@@ -61,10 +62,15 @@ export function currentSessions(): AgentSession[] {
   return snapshot;
 }
 
-/** Apply one raw `session:<json>` payload to the store (exposed for headless tests). */
+/** Apply one raw `session:<json>` payload to the store (exposed for headless tests). Also folds the
+ *  same announcement into `agentSessionMetrics` (CPE-1107) — the started/ended stamp is a second fold
+ *  hung off this one ingest path, not a new listener. */
 export function ingestSessionState(state: string): void {
   const ann = parseSessionAnnouncement(state);
-  if (ann) store.update((list) => applySessionAnnouncement(list, ann));
+  if (ann) {
+    store.update((list) => applySessionAnnouncement(list, ann));
+    ingestSessionAnnouncement(ann);
+  }
 }
 
 /** Clear every active-session leaf at once — used when the whole Agent Deck is stopped from the
