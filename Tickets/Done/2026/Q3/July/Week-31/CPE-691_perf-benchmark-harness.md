@@ -52,3 +52,5 @@ Landed the safe **measure-first** part: dev-gated `[perf] first paint / settled`
 (100/1k/10k/50k) benchmark and a **regression budget test** — until **CPE-690 (virtualization)** lands, so
 the budget guards the windowed renderer rather than the current full-list one, and the before/after 10×
 is measured against the real change. deferred-on: CPE-690. revisit-when: virtualization is in.
+
+2026-07-27 (workshift) — **Done.** Prereq (CPE-690/766 virtualization) now landed. Added test-only `FileList.virtualize-guard.test.ts`: 5000-entry mount asserts bounded DOM window (<100 rows) via getBoundingClientRect stub so windowing path runs under jsdom; proven falsifiable (forced full-list branch → failed → reverted). check + 1312 vitest green. PR #444 merged (Foreman-reviewed, furlough wind-down).
