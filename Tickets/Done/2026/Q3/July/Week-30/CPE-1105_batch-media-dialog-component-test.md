@@ -4,7 +4,7 @@ title: "QA: BatchMediaDialog component test (burn down the dialog visual-verific
 type: chore
 component: Frontend
 priority: medium
-status: Doing
+status: Done
 tags: ready
 created: 2026-07-26
 epic: CPE-396
