@@ -3343,6 +3343,7 @@
       {activeWatchCwd}
       {watchedAgentName}
       {recentChanges}
+      sessions={$agentSessions}
       bind:showTimeline
       replayOverlay={replayOverlayEntries}
       bind:entries
