@@ -117,4 +117,46 @@ mod tests {
         assert_eq!(data.summary.total, 1);
         fs::remove_dir_all(&base).ok();
     }
+
+    /// QA-Architect end-to-end pin for the whole CPE-728 replay chain (journal write → baseline → load →
+    /// fold → folder listing). Every stage is unit-tested in isolation; this ties them together so a wiring
+    /// bug BETWEEN the journal, the baseline seed, and the reconstruction fold can't slip through unnoticed.
+    #[test]
+    fn end_to_end_journal_baseline_load_reconstruct_folder_at_each_moment() {
+        let base = tmp();
+        let session = "e2e";
+
+        // Baseline: two pre-existing files under the watched root /w, exactly as `capture` would record them.
+        let baseline = crate::replay_baseline::Baseline {
+            paths: vec!["/w/a.txt".into(), "/w/b.txt".into()],
+            truncated: false,
+        };
+        crate::replay_baseline::write_baseline(&base, session, &baseline).unwrap();
+
+        // Events via the journal's real append path (record_many): create c@10, remove b@20, rename c→d@30.
+        let events = vec![
+            AuditEvent { ts: 10, session: session.into(), kind: "created".into(), path: "/w/c.txt".into(), actor: None, detail: None },
+            AuditEvent { ts: 20, session: session.into(), kind: "removed".into(), path: "/w/b.txt".into(), actor: None, detail: None },
+            AuditEvent { ts: 30, session: session.into(), kind: "renamed".into(), path: "/w/c.txt".into(), actor: None, detail: Some("-> /w/d.txt".into()) },
+        ];
+        audit_journal::record_many(&base, &events, audit_journal::MAX_EVENTS_PER_SESSION).unwrap();
+
+        // Load back exactly as the Replay tab would (read_baseline + load_replay).
+        let loaded_baseline = crate::replay_baseline::read_baseline(&base, session).expect("baseline round-trips");
+        assert_eq!(loaded_baseline.paths.len(), 2);
+        let data = load_replay(&base, session);
+        assert_eq!(data.events.len(), 3);
+
+        // Reconstruct the /w listing at each scrub moment (basenames; children_at sorts ascending by path).
+        let names_at = |t: u64| -> Vec<String> {
+            let state = replay::state_at_from(&loaded_baseline.to_state(), &data.events, t);
+            crate::replay_view::children_at(&state, "/w").into_iter().map(|e| e.name).collect()
+        };
+        assert_eq!(names_at(5), vec!["a.txt", "b.txt"], "before any event → baseline only");
+        assert_eq!(names_at(15), vec!["a.txt", "b.txt", "c.txt"], "after create c");
+        assert_eq!(names_at(25), vec!["a.txt", "c.txt"], "after remove b");
+        assert_eq!(names_at(35), vec!["a.txt", "d.txt"], "after rename c→d");
+
+        fs::remove_dir_all(&base).ok();
+    }
 }
