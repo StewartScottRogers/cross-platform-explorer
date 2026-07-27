@@ -27,6 +27,11 @@ pub struct AuditEvent {
     pub kind: String,
     /// Absolute path the activity touched.
     pub path: String,
+    /// Who caused the event (CPE-1101 actor attribution: the owning session id, `"user"`, or
+    /// `"unknown"`). Additive + backward-compatible: old journal lines with no `actor` deserialize
+    /// as `None`, and the replay fold ignores it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub actor: Option<String>,
     /// Optional extra detail (rename target, diff summary, ...).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub detail: Option<String>,
@@ -61,6 +66,37 @@ pub fn record(base: &Path, event: &AuditEvent, max_events: usize) -> Result<(), 
         f.flush().map_err(|e| e.to_string())?;
     }
     trim(&file, max_events)?;
+    Ok(())
+}
+
+/// Append a whole batch of events to their session journals in one call (creating `base` if needed),
+/// then trim each touched file to its last `max_events` lines once. A 50-file watch batch becomes one
+/// call instead of 50, keeping the same per-session cap/rotation as [`record`]. Events are grouped by
+/// session so mixed-session batches stay correct; empty batches are a no-op (they never create `base`).
+pub fn record_many(base: &Path, events: &[AuditEvent], max_events: usize) -> Result<(), String> {
+    if events.is_empty() {
+        return Ok(());
+    }
+    fs::create_dir_all(base).map_err(|e| e.to_string())?;
+    // Append every event first, remembering which session files were touched, then trim each once.
+    let mut touched: Vec<String> = Vec::new();
+    for event in events {
+        let file = session_file(base, &event.session);
+        let line = serde_json::to_string(event).map_err(|e| e.to_string())?;
+        let mut f = OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&file)
+            .map_err(|e| e.to_string())?;
+        writeln!(f, "{line}").map_err(|e| e.to_string())?;
+        f.flush().map_err(|e| e.to_string())?;
+        if !touched.iter().any(|s| s == &event.session) {
+            touched.push(event.session.clone());
+        }
+    }
+    for session in &touched {
+        trim(&session_file(base, session), max_events)?;
+    }
     Ok(())
 }
 
@@ -138,6 +174,7 @@ mod tests {
             session: session.into(),
             kind: kind.into(),
             path: format!("/x/{ts}.txt"),
+            actor: None,
             detail: None,
         }
     }
@@ -207,6 +244,86 @@ mod tests {
         record(&base, &e, 100).unwrap();
         assert_eq!(read_session(&base, "s1")[0].detail.as_deref(), Some("-> /x/new.txt"));
         assert!(read_session(&base, "nope").is_empty());
+        fs::remove_dir_all(&base).ok();
+    }
+
+    #[test]
+    fn record_many_appends_the_whole_batch_in_order() {
+        let base = tmp();
+        let batch: Vec<AuditEvent> = (1..=5).map(|ts| ev(ts, "s1", "modified")).collect();
+        record_many(&base, &batch, MAX_EVENTS_PER_SESSION).unwrap();
+        let got = read_session(&base, "s1");
+        assert_eq!(got.iter().map(|e| e.ts).collect::<Vec<_>>(), vec![1, 2, 3, 4, 5]);
+        fs::remove_dir_all(&base).ok();
+    }
+
+    #[test]
+    fn record_many_respects_the_cap_keeping_the_newest() {
+        let base = tmp();
+        // Two batches totalling 6 events into a cap-4 journal: only the last 4 survive.
+        record_many(&base, &(1..=3).map(|ts| ev(ts, "s1", "read")).collect::<Vec<_>>(), 4).unwrap();
+        record_many(&base, &(4..=6).map(|ts| ev(ts, "s1", "read")).collect::<Vec<_>>(), 4).unwrap();
+        let got = read_session(&base, "s1");
+        assert_eq!(got.iter().map(|e| e.ts).collect::<Vec<_>>(), vec![3, 4, 5, 6]);
+        fs::remove_dir_all(&base).ok();
+    }
+
+    #[test]
+    fn record_many_groups_mixed_sessions_and_caps_each() {
+        let base = tmp();
+        // Interleaved sessions in one batch, cap 2: each session file keeps only its own last 2.
+        let batch = vec![
+            ev(1, "a", "created"),
+            ev(2, "b", "created"),
+            ev(3, "a", "created"),
+            ev(4, "b", "created"),
+            ev(5, "a", "created"),
+        ];
+        record_many(&base, &batch, 2).unwrap();
+        assert_eq!(
+            read_session(&base, "a").iter().map(|e| e.ts).collect::<Vec<_>>(),
+            vec![3, 5]
+        );
+        assert_eq!(
+            read_session(&base, "b").iter().map(|e| e.ts).collect::<Vec<_>>(),
+            vec![2, 4]
+        );
+        fs::remove_dir_all(&base).ok();
+    }
+
+    #[test]
+    fn record_many_empty_batch_is_a_noop_and_creates_nothing() {
+        let base = std::env::temp_dir().join(format!("cpe-audit-empty-{}", std::process::id()));
+        // Deliberately do NOT create `base`: an empty batch must not touch the filesystem.
+        fs::remove_dir_all(&base).ok();
+        record_many(&base, &[], MAX_EVENTS_PER_SESSION).unwrap();
+        assert!(!base.exists(), "empty record_many must not create the journal dir");
+    }
+
+    #[test]
+    fn actor_round_trips_and_old_lines_without_actor_read_as_none() {
+        let base = tmp();
+        // New event carrying an actor round-trips.
+        let mut e = ev(1, "s1", "modified");
+        e.actor = Some("user".into());
+        record(&base, &e, 100).unwrap();
+        assert_eq!(read_session(&base, "s1")[0].actor.as_deref(), Some("user"));
+
+        // An "old" journal line predating the field (no `actor` key) still deserializes → None.
+        let file = session_file(&base, "s2");
+        fs::create_dir_all(&base).unwrap();
+        let mut f = OpenOptions::new().create(true).append(true).open(&file).unwrap();
+        writeln!(f, r#"{{"ts":2,"session":"s2","kind":"created","path":"/x/2.txt"}}"#).unwrap();
+        drop(f);
+        let got = read_session(&base, "s2");
+        assert_eq!(got.len(), 1);
+        assert_eq!(got[0].actor, None);
+        assert_eq!(got[0].detail, None);
+        assert_eq!(got[0].path, "/x/2.txt");
+
+        // And an event with actor None serializes WITHOUT the key (skip_serializing_if).
+        let line = serde_json::to_string(&ev(3, "s3", "removed")).unwrap();
+        assert!(!line.contains("actor"), "actor:None must be omitted from JSON: {line}");
         fs::remove_dir_all(&base).ok();
     }
 }

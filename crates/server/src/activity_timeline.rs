@@ -64,7 +64,7 @@ mod tests {
     use super::*;
 
     fn ev(ts: u64, session: &str, kind: &str) -> AuditEvent {
-        AuditEvent { ts, session: session.into(), kind: kind.into(), path: "/x".into(), detail: None }
+        AuditEvent { ts, session: session.into(), kind: kind.into(), path: "/x".into(), actor: None, detail: None }
     }
 
     #[test]

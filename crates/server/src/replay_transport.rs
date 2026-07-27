@@ -75,6 +75,7 @@ mod tests {
             session: "s".into(),
             kind: "modified".into(),
             path: "/x".into(),
+            actor: None,
             detail: None,
         }
     }

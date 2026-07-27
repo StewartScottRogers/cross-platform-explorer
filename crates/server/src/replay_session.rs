@@ -58,7 +58,7 @@ mod tests {
     }
 
     fn ev(ts: u64, session: &str, kind: &str) -> AuditEvent {
-        AuditEvent { ts, session: session.into(), kind: kind.into(), path: format!("/x/{ts}.txt"), detail: None }
+        AuditEvent { ts, session: session.into(), kind: kind.into(), path: format!("/x/{ts}.txt"), actor: None, detail: None }
     }
 
     #[test]

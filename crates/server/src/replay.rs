@@ -126,7 +126,7 @@ mod tests {
     use super::*;
 
     fn ev(ts: u64, kind: &str, path: &str) -> AuditEvent {
-        AuditEvent { ts, session: "s1".into(), kind: kind.into(), path: path.into(), detail: None }
+        AuditEvent { ts, session: "s1".into(), kind: kind.into(), path: path.into(), actor: None, detail: None }
     }
 
     fn renamed(ts: u64, from: &str, to: &str) -> AuditEvent {
@@ -135,6 +135,7 @@ mod tests {
             session: "s1".into(),
             kind: "renamed".into(),
             path: from.into(),
+            actor: None,
             detail: Some(format!("-> {to}")),
         }
     }
@@ -177,7 +178,7 @@ mod tests {
     fn renamed_with_unparseable_detail_is_a_no_op() {
         // Missing "-> " marker entirely.
         let bad1 =
-            AuditEvent { ts: 20, session: "s1".into(), kind: "renamed".into(), path: "/a".into(), detail: Some("nonsense".into()) };
+            AuditEvent { ts: 20, session: "s1".into(), kind: "renamed".into(), path: "/a".into(), actor: None, detail: Some("nonsense".into()) };
         // No detail at all.
         let bad2 = ev(20, "renamed", "/a");
         for bad in [bad1, bad2] {

@@ -1681,6 +1681,12 @@ kind: string;
  */
 path: string; 
 /**
+ * Who caused the event (CPE-1101 actor attribution: the owning session id, `"user"`, or
+ * `"unknown"`). Additive + backward-compatible: old journal lines with no `actor` deserialize
+ * as `None`, and the replay fold ignores it.
+ */
+actor?: string | null; 
+/**
  * Optional extra detail (rename target, diff summary, ...).
  */
 detail?: string | null }
