@@ -356,9 +356,37 @@ fn save_manifest(store_dir: &Path, manifest: &PersistedManifest) -> Result<(), S
 }
 
 fn load_manifest(store_dir: &Path, manifest_id: &str) -> Result<PersistedManifest, String> {
+    validate_manifest_id(manifest_id)?;
     let path = manifest_path(store_dir, manifest_id);
     let data = fs::read_to_string(&path).map_err(|e| format!("{}: {e}", path.display()))?;
     serde_json::from_str(&data).map_err(|e| format!("{}: {e}", path.display()))
+}
+
+/// Reject a caller-supplied `manifest_id` that isn't a single safe path segment, so
+/// [`manifest_path`] can never resolve outside `store_dir/manifests/`.
+///
+/// `load_manifest` is the single chokepoint every caller-supplied manifest id funnels through —
+/// [`restore`], [`prune`], and [`manifest_snapshot`] (in turn used by `checkpoint_store`'s
+/// preview/revert/revert_one) — so validating here covers every read-path entry point in one
+/// place. Read-only defense-in-depth: the write/delete side of a revert is already independently
+/// guarded by [`crate::revert_engine`]'s `safe_segments`, so a crafted id here cannot corrupt or
+/// delete anything — at worst it would have let the read resolve to an arbitrary `.json` file
+/// outside the store, which this closes off. Mirrors `safe_segments`'s checks (empty, `.`/`..`,
+/// separators, drive-letter colon) plus a NUL guard, since a manifest id is a single segment, not
+/// a `/`-joined relative path.
+fn validate_manifest_id(id: &str) -> Result<(), String> {
+    if id.is_empty()
+        || id == "."
+        || id == ".."
+        || id.contains('/')
+        || id.contains('\\')
+        || id.contains("..")
+        || id.contains(':')
+        || id.contains('\0')
+    {
+        return Err(format!("{id}: not a valid manifest id"));
+    }
+    Ok(())
 }
 
 /// A fresh, unique manifest id for a capture happening now: the wall-clock epoch-ms, with a `-N` suffix
@@ -526,6 +554,39 @@ mod tests {
         assert!(restore(&store.to_string_lossy(), "does-not-exist", &dest.to_string_lossy()).is_err());
         let _ = fs::remove_dir_all(&store);
         let _ = fs::remove_dir_all(&dest);
+    }
+
+    // ---- manifest_id validation (CPE-1127) ------------------------------------------------------
+
+    #[test]
+    fn load_manifest_rejects_traversal_and_separator_ids_before_reading_outside_manifests_dir() {
+        let store = scratch("validate-traversal");
+        // A valid-looking manifest planted OUTSIDE manifests/ that a `..`-id would otherwise reach if
+        // validation were missing: manifest_path(store, "../outside") == store/manifests/../outside.json
+        // == store/outside.json.
+        let outside = store.join("outside.json");
+        fs::write(&outside, br#"{"id":"outside","created_ms":0,"files":{},"skipped":[]}"#).unwrap();
+
+        for bad in ["../outside", "..\\outside", "sub/id", "sub\\id", "..", ".", "", "a:b", "a\0b"] {
+            assert!(
+                load_manifest(&store, bad).is_err(),
+                "expected manifest id {bad:?} to be refused, not read"
+            );
+        }
+        // The unsafe entry-point call sites reject it too (they all funnel through load_manifest).
+        assert!(restore(&store.to_string_lossy(), "../outside", &scratch("validate-dest").to_string_lossy())
+            .is_err());
+        assert!(prune(&store.to_string_lossy(), "../outside").is_err());
+
+        // A normal id — the shape `fresh_manifest_id` actually produces — still loads exactly as before.
+        let src = scratch("validate-src");
+        fs::write(src.join("f.txt"), b"hi").unwrap();
+        let outcome =
+            capture(&src.to_string_lossy(), &store.to_string_lossy(), &CaptureBudget::UNLIMITED).unwrap();
+        assert!(load_manifest(&store, &outcome.manifest_id).is_ok());
+
+        let _ = fs::remove_dir_all(&store);
+        let _ = fs::remove_dir_all(&src);
     }
 
     // ---- dedup -----------------------------------------------------------------------------------
