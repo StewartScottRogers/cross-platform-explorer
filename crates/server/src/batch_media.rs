@@ -23,8 +23,9 @@ pub enum MediaOp {
     Rename { template: String },
     /// Drop all embedded metadata (EXIF/IPTC/XMP).
     StripMetadata,
-    /// Re-encode at a target quality (1-100) to shrink file size. Affects lossy-capable targets
-    /// (jpeg/webp); formats without a quality knob (png/gif/bmp/tif) accept it as a no-op.
+    /// Re-encode at a target quality (1-100) to shrink file size. Affects JPEG targets only;
+    /// formats without a lossy quality knob (png/gif/bmp/tif, and this crate's lossless-only WebP
+    /// encoder) accept it as a graceful no-op.
     Compress { quality: u8 },
 }
 
