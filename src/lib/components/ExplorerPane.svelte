@@ -16,7 +16,7 @@
   import * as settings from "../settings";
   import { baseName } from "../contentSearch";
   import { fsActivity, agentTimeline } from "../agentActivity";
-  import { click as selClick, selectedIndices, type Selection } from "../selection";
+  import { click as selClick, selectedIndices, emptySelection, type Selection } from "../selection";
   import { sortEntries } from "../sort";
   import { makeEntryMatcher } from "../entrySearch";
   import { matchesFileFilter } from "../filetypes";
@@ -40,6 +40,14 @@
   export let watchedAgentName = "";
   export let recentChanges: { path: string; kind: string }[] = [];
   export let showTimeline = false;
+  /** Read-only reconstructed listing to show INSTEAD OF the live `visible` list while Replay mode is
+   *  active (CPE-1112, epic CPE-728 slice e — the file-pane graduate of CPE-1111's in-drawer view).
+   *  `null` (default, "off") ⇒ the pane renders the live listing exactly as before; this prop is purely
+   *  additive, this component never assigns to it, and it never feeds back into `entries`/`visible`/
+   *  `shown` or the fetch pipeline below — the caller (App, via AgentTimeline's pure
+   *  `replayOverlay.ts` derivation) owns it and setting it back to `null` restores the live listing on
+   *  the very next reactive tick, with no separate cleanup step. */
+  export let replayOverlay: DirEntry[] | null = null;
 
   // The listing + its display state.
   export let showHidden = false;
@@ -101,10 +109,40 @@
     ? (e: DirEntry) => (e.is_dir ? (folderSizes.get(e.path) ?? -1) : e.size)
     : undefined;
   $: visible = sortEntries(tagFiltered, sortKey, sortDir, foldersFirst, sizeOf);
-  // `selectedEntries` depends on `visible`; Svelte orders these reactive blocks by dependency.
-  $: selectedEntries = selectedIndices(selection)
-    .map((i) => visible[i])
-    .filter(Boolean);
+
+  // ---- Replay-mode overlay (CPE-1112) — a read-only swap of what FileList renders, never of `visible`
+  // itself. `visible` (and the `entries` it's derived from) keep deriving from the real listing pipeline
+  // above, untouched, the whole time Replay mode is on — so the live store is provably never mutated by
+  // this feature and reappears exactly as it was the instant `replayOverlay` goes back to `null`.
+  // `paneEntries` is the ONLY thing that changes: the array actually handed to FileList.
+  $: paneEntries = replayOverlay ?? visible;
+  $: inReplay = replayOverlay !== null;
+
+  // SECURITY/DATA-INTEGRITY (CPE-1112 rework, found by independent review + UAT): `selection` is a set
+  // of ROW INDICES, meaningful only against the array FileList is currently showing. While `inReplay`,
+  // that array is the overlay (`paneEntries`), whose rows are a DIFFERENT set/order than `visible` for
+  // the same `currentPath` — so `selectedIndices(selection).map(i => visible[i])` can silently resolve
+  // an overlay row the user clicked to an unrelated LIVE file. Every op that reads `selectedEntries`
+  // (Delete, F2 rename, Ctrl-X/Ctrl-C, Ctrl-D duplicate, copy-path, properties, extract, terminal-here,
+  // tags, batch-rename, batch-media, the command-palette file commands, ...) would then act on that
+  // wrong file — a real "read-only reconstruction" data-loss hole. So: `selectedEntries` is forced empty
+  // for the ENTIRE time `inReplay` is true, unconditionally — it never indexes into `visible` in that
+  // state, regardless of what `selection` itself holds.
+  $: selectedEntries = inReplay
+    ? []
+    : selectedIndices(selection).map((i) => visible[i]).filter(Boolean);
+
+  // Belt-and-braces: actively clear `selection` itself the INSTANT Replay mode turns on (not merely its
+  // derived `selectedEntries`) — so no stale highlighted row lingers under the overlay banner, and no
+  // later Shift-click can extend a range from an anchor that meant something different in the overlay's
+  // row order. One-shot on the off->on edge (a plain `$: if (inReplay) selection = emptySelection()`
+  // would fight any click made WHILE overlay rows are shown — those are already neutralized by the
+  // `!inReplay` guards below/on FileList's dispatched events, and by `selectedEntries` above regardless).
+  let wasInReplay = false;
+  $: {
+    if (inReplay && !wasInReplay) selection = emptySelection();
+    wasInReplay = inReplay;
+  }
 
   // ---- listing fetch + directory cache (CPE-676 domino 3b) — the pane owns fetching its own listing.
   // A generation token supersedes an in-flight stream when the caller navigates away; the LRU cache
@@ -252,7 +290,14 @@
     on:clearRecents={() => dispatch("clearRecents")}
   />
 {:else}
-  {#if activeWatchCwd}
+  {#if inReplay}
+    <!-- Replay-mode overlay banner (CPE-1112): makes it unmistakable the pane is showing a read-only
+         reconstruction, not the live folder — the live listing/agent strip never renders alongside it. -->
+    <div class="replay-strip" role="status">
+      <Icon name="recent" size={13} />
+      <span class="replay-strip-label">Replay mode — read-only reconstruction, live listing paused</span>
+    </div>
+  {:else if activeWatchCwd}
     <div class="agent-strip" role="status">
       <span class="agent-dot" />
       <span class="agent-strip-label">{$t("agent.watch", { name: watchedAgentName })}</span>
@@ -278,8 +323,8 @@
     </div>
   {/if}
   <FileList
-    entries={visible}
-    activity={activeWatchCwd ? $fsActivity : {}}
+    entries={paneEntries}
+    activity={!inReplay && activeWatchCwd ? $fsActivity : {}}
     {selection}
     {sortKey}
     {sortDir}
@@ -289,32 +334,53 @@
     {searching}
     {cutPaths}
     {renamingPath}
-    {canDrag}
+    canDrag={canDrag && !inReplay}
     {renameValue}
     {columnWidths}
     {colorRules}
-    {showFolderSizes}
+    showFolderSizes={showFolderSizes && !inReplay}
     {folderSizes}
     on:needSizes
     on:resizeColumns={(e) => { columnWidths = e.detail; settings.saveColumnWidths(columnWidths); }}
     bind:rowEls
     bind:draggedPaths
-    on:click={(e) => (selection = selClick(selection, e.detail.index, e.detail))}
-    on:open={(e) => dispatch("open", e.detail)}
+    on:click={(e) => { if (!inReplay) selection = selClick(selection, e.detail.index, e.detail); }}
+    on:open={(e) => { if (!inReplay) dispatch("open", e.detail); }}
     on:sort={(e) => {
       sortKey = e.detail.key; sortDir = e.detail.dir;
       settings.saveSortKey(sortKey); settings.saveSortDir(sortDir);
     }}
-    on:context={(e) => dispatch("rowContext", e.detail)}
-    on:contextEmpty={(e) => dispatch("contextEmpty", e.detail)}
-    on:commitRename={(e) => dispatch("commitRename", e.detail)}
+    on:context={(e) => { if (!inReplay) dispatch("rowContext", e.detail); }}
+    on:contextEmpty={(e) => { if (!inReplay) dispatch("contextEmpty", e.detail); }}
+    on:commitRename={(e) => { if (!inReplay) dispatch("commitRename", e.detail); }}
     on:cancelRename={() => (renamingPath = "")}
-    on:drop={(e) => dispatch("drop", e.detail)}
+    on:drop={(e) => { if (!inReplay) dispatch("drop", e.detail); }}
   />
 {/if}
 </div>
 
 <style>
+  /* Replay-mode overlay banner (CPE-1112) — mutually exclusive with the Agent-Watch strip below (never
+     rendered simultaneously: `inReplay` short-circuits it in the template above), theme-vars only so it
+     reads identically light/dark. */
+  .replay-strip {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 4px 12px;
+    font-size: 12px;
+    font-weight: 600;
+    color: var(--text);
+    background: color-mix(in srgb, var(--warn, #b5872b) 14%, var(--surface));
+    border-bottom: 1px solid var(--border);
+    overflow: hidden;
+    white-space: nowrap;
+  }
+  .replay-strip-label {
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+
   /* Agent Watch activity strip (CPE-399) — a thin live banner above the file list, shown only
      while the explorer is inside a running agent's Project folder. */
   .agent-strip {

@@ -405,6 +405,161 @@ describe("AgentTimeline reconstructed folder listing (CPE-1111, epic CPE-728 sli
   });
 });
 
+describe("AgentTimeline Replay-mode file-pane overlay (CPE-1112, epic CPE-728 slice e)", () => {
+  // Same fixtures as the in-drawer reconstruction suite above — this feature reuses that exact data,
+  // just also mirrors it out via the `replayOverlay` event instead of only rendering it in the drawer.
+  const transportEntries = [
+    entry({ id: 1, kind: "created", path: "Z:/repos/app/root/file.txt", at: 100 }),
+    entry({ id: 2, kind: "created", path: "Z:/repos/app/root/sub", at: 300 }),
+  ];
+  const ev = (ts: number, kind: string, path: string) => ({ ts, session: "sess-1", kind, path, actor: null, detail: null });
+  const emptySummary = { total: 0, byKind: {}, sessions: [], firstAt: null, lastAt: null };
+
+  const mockReplayLoad = () => {
+    invokeMock.mockImplementation(async (cmd: string) => {
+      if (cmd !== "replay_load") return undefined;
+      return {
+        replay: {
+          events: [ev(100, "created", "Z:/repos/app/root/file.txt"), ev(300, "created", "Z:/repos/app/root/sub")],
+          bounds: [100, 300],
+          summary: emptySummary,
+        },
+        baseline: null,
+      };
+    });
+  };
+
+  beforeEach(() => invokeMock.mockReset());
+  afterEach(() => vi.useRealTimers());
+
+  it("off by default: opening Replay with a loaded reconstruction never fires a non-null overlay", async () => {
+    mockReplayLoad();
+    const { component } = render(AgentTimeline, {
+      entries: transportEntries,
+      agentName: "Claude Code",
+      sessionId: "sess-1",
+      currentPath: "Z:/repos/app/root",
+    });
+    const overlay = vi.fn();
+    component.$on("replayOverlay", (e) => overlay(e.detail));
+
+    await fireEvent.click(screen.getByRole("tab", { name: "Replay" }));
+    await flushReplayLoad();
+
+    expect(screen.getByLabelText("Show in file pane")).toBeTruthy();
+    // Every dispatch so far (mount + every reactive recompute) has been null — the toggle is off.
+    expect(overlay.mock.calls.every((call) => call[0] === null)).toBe(true);
+    expect(overlay).toHaveBeenCalled(); // sanity: the handler IS wired and firing
+  });
+
+  it("checking the toggle dispatches the same reconstruction the drawer shows, DirEntry-shaped", async () => {
+    mockReplayLoad();
+    const { component } = render(AgentTimeline, {
+      entries: transportEntries,
+      agentName: "Claude Code",
+      sessionId: "sess-1",
+      currentPath: "Z:/repos/app/root",
+    });
+    const overlay = vi.fn();
+    component.$on("replayOverlay", (e) => overlay(e.detail));
+
+    await fireEvent.click(screen.getByRole("tab", { name: "Replay" }));
+    await flushReplayLoad();
+    overlay.mockClear();
+
+    await fireEvent.click(screen.getByLabelText("Show in file pane"));
+
+    const last = overlay.mock.calls.at(-1)?.[0];
+    expect(last).not.toBeNull();
+    const names = (last as { name: string }[]).map((e) => e.name).sort();
+    expect(names).toEqual(["file.txt", "sub"]); // t defaults to the end (300): both direct children present
+    const sub = (last as { name: string; is_dir: boolean; path: string }[]).find((e) => e.name === "sub");
+    expect(sub?.is_dir).toBe(false); // no grandchild under it in this fixture — not distinguishable as a dir
+    expect(sub?.path).toBe("Z:/repos/app/root/sub");
+  });
+
+  it("unchecking the toggle restores the live pane (dispatches null again)", async () => {
+    mockReplayLoad();
+    const { component } = render(AgentTimeline, {
+      entries: transportEntries,
+      agentName: "Claude Code",
+      sessionId: "sess-1",
+      currentPath: "Z:/repos/app/root",
+    });
+    const overlay = vi.fn();
+    component.$on("replayOverlay", (e) => overlay(e.detail));
+
+    await fireEvent.click(screen.getByRole("tab", { name: "Replay" }));
+    await flushReplayLoad();
+    const toggle = screen.getByLabelText("Show in file pane") as HTMLInputElement;
+    await fireEvent.click(toggle);
+    expect(overlay.mock.calls.at(-1)?.[0]).not.toBeNull();
+
+    await fireEvent.click(toggle); // uncheck
+    expect(overlay.mock.calls.at(-1)?.[0]).toBeNull();
+  });
+
+  it("leaving the Replay tab restores the live pane even without touching the toggle", async () => {
+    mockReplayLoad();
+    const { component } = render(AgentTimeline, {
+      entries: transportEntries,
+      agentName: "Claude Code",
+      sessionId: "sess-1",
+      currentPath: "Z:/repos/app/root",
+    });
+    const overlay = vi.fn();
+    component.$on("replayOverlay", (e) => overlay(e.detail));
+
+    await fireEvent.click(screen.getByRole("tab", { name: "Replay" }));
+    await flushReplayLoad();
+    await fireEvent.click(screen.getByLabelText("Show in file pane"));
+    expect(overlay.mock.calls.at(-1)?.[0]).not.toBeNull();
+
+    await fireEvent.click(screen.getByRole("tab", { name: "Live" }));
+    expect(overlay.mock.calls.at(-1)?.[0]).toBeNull();
+  });
+
+  it("unmounting the drawer mid-overlay restores the live pane (no dangling reconstruction)", async () => {
+    mockReplayLoad();
+    const { component, unmount } = render(AgentTimeline, {
+      entries: transportEntries,
+      agentName: "Claude Code",
+      sessionId: "sess-1",
+      currentPath: "Z:/repos/app/root",
+    });
+    const overlay = vi.fn();
+    component.$on("replayOverlay", (e) => overlay(e.detail));
+
+    await fireEvent.click(screen.getByRole("tab", { name: "Replay" }));
+    await flushReplayLoad();
+    await fireEvent.click(screen.getByLabelText("Show in file pane"));
+    expect(overlay.mock.calls.at(-1)?.[0]).not.toBeNull();
+
+    unmount();
+    expect(overlay.mock.calls.at(-1)?.[0]).toBeNull(); // the drawer's own teardown sends the restore
+  });
+
+  it("never mutates the `entries` prop it was given while the overlay is toggled on and off", async () => {
+    mockReplayLoad();
+    const snapshot = transportEntries.map((e) => ({ ...e }));
+    const { component } = render(AgentTimeline, {
+      entries: transportEntries,
+      agentName: "Claude Code",
+      sessionId: "sess-1",
+      currentPath: "Z:/repos/app/root",
+    });
+    await fireEvent.click(screen.getByRole("tab", { name: "Replay" }));
+    await flushReplayLoad();
+    const toggle = screen.getByLabelText("Show in file pane");
+    await fireEvent.click(toggle);
+    await fireEvent.click(screen.getByTitle("Step back"));
+    await fireEvent.click(toggle);
+
+    expect(transportEntries).toEqual(snapshot); // the source timeline is exactly as it was handed in
+    void component;
+  });
+});
+
 describe("AgentTimeline Radar tab (CPE-1100)", () => {
   const sessions: AgentSession[] = [
     {
