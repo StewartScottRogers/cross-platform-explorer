@@ -36,8 +36,10 @@
   import { foldOverlaps, overlapHasUnknown, friendlyActor, relativeLabel } from "../agentConflicts";
   import { commands } from "../bindings.gen";
   import type { ReplayData, Baseline, ReplayEntry as ReplayRow, SessionMetricsRecord } from "../bindings.gen";
+  import type { DirEntry } from "../types";
   import { stateAtFrom, childrenAt, type FsState } from "../replayFold";
   import { rollup, overTime } from "../agentMetricsRollup";
+  import { resolveOverlay, type ReplaySource } from "../replayOverlay";
 
   export let entries: TimelineEntry[] = [];
   export let agentName = "agent";
@@ -53,7 +55,16 @@
    *  component never navigates on its own; it only reads this prop. */
   export let currentPath = "";
 
-  const dispatch = createEventDispatcher<{ navigate: string; close: void }>();
+  const dispatch = createEventDispatcher<{
+    navigate: string;
+    close: void;
+    /** CPE-1112 (epic CPE-728 slice e): the read-only reconstructed listing to show in the MAIN file
+     *  pane instead of its live listing, or `null` to show the live listing. Fired on every change to
+     *  Replay mode's own toggle, the scrub position, the reconstructed folder, or the loaded session —
+     *  purely derived via `replayOverlay.ts`'s `resolveOverlay`, never imperative. The listener (App)
+     *  owns forwarding this straight into `ExplorerPane`'s `replayOverlay` prop. */
+    replayOverlay: DirEntry[] | null;
+  }>();
 
   /** Which entry's before/after peek is currently revealed (hover/focus), or null (CPE-745). */
   let openId: number | null = null;
@@ -192,6 +203,10 @@
     replayBaseline = null;
     replayLoadError = "";
     replayLoading = false;
+    // CPE-1112: a fresh/cleared session must never inherit Replay mode being on from a prior one —
+    // setting this triggers `replayOverlayActive`'s reactive recompute, which dispatches `null` and
+    // restores the main pane's live listing on its own (no separate cleanup call needed).
+    replayMode = false;
   };
 
   // Reset local scrub/play state whenever the timeline empties (stop-watching, CPE-400's
@@ -203,9 +218,14 @@
     resetReplay();
   }
 
-  // Also clear the interval outright when the component itself is torn down (drawer closed) —
-  // belt-and-braces alongside the reset above so play never outlives its mount.
-  onDestroy(stopPlaying);
+  // Also clear the interval outright when the component itself is torn down (drawer closed) — and
+  // explicitly restore the main pane (CPE-1112): the drawer can be closed mid-scrub with the overlay
+  // showing, and once this component is gone no further reactive statement will fire to send the
+  // restoring `null` on its own, so it must be sent here as the final, explicit step.
+  onDestroy(() => {
+    stopPlaying();
+    dispatch("replayOverlay", null);
+  });
 
   $: range = sliderRange(entries);
   // Snap `t` into range whenever it falls outside the current span — covers both the initial
@@ -307,6 +327,26 @@
    *  (a pre-existing entry the fold seeded from the baseline snapshot, never itself an agent action). */
   const replayKindLabel = (k: string): string =>
     k === "baseline" ? "existing" : (KIND_LABEL as Record<string, string>)[k] ?? k;
+
+  // ---------- Replay-mode file-pane overlay (CPE-1112, epic CPE-728 slice e) ----------
+  // "Replay mode": an explicit toggle (off by default) that additionally mirrors the SAME
+  // reconstruction already computed above (`replayState`, keyed by `currentPath`) into the MAIN
+  // explorer file pane, via a `replayOverlay` event the parent (App) forwards straight into
+  // `ExplorerPane`'s `replayOverlay` prop. The in-drawer listing above (`replayListing`) is completely
+  // untouched by any of this and stays the always-available fallback (CPE-1111) — this is purely
+  // additive. Gating goes through `replayOverlay.ts#resolveOverlay`, a pure function, so "off-means-off"
+  // and "restore-on-exit" are true by construction: whenever `replayOverlayActive` goes false (the
+  // toggle flips off, OR the user leaves the Replay tab) the very next reactive recompute dispatches
+  // `null` and the main pane's live listing reappears — there is no imperative teardown to forget.
+  let replayMode = false;
+
+  /** Active only while BOTH the toggle is on AND the Replay tab is the one on screen — tabbing away
+   *  (without touching the toggle) restores the live pane exactly like switching the toggle off. */
+  $: replayOverlayActive = replayMode && tab === "replay";
+  $: replaySource = replayData
+    ? ({ baseline: replayBaseline, events: replayData.events } as ReplaySource)
+    : null;
+  $: dispatch("replayOverlay", resolveOverlay(replayOverlayActive, replaySource, t, currentPath));
 
   const jumpStart = () => {
     stopPlaying();
@@ -548,7 +588,19 @@
           <div class="rp-recon-head">
             <span class="rp-recon-title">Reconstruction at scrub time (read-only)</span>
             {#if currentPath}<span class="rp-recon-path" title={currentPath}>{currentPath}</span>{/if}
+            <!-- CPE-1112 (epic CPE-728 slice e): graduate this same reconstruction from the drawer to
+                 the main file pane while scrubbing. Off by default; flipping it off (or leaving this
+                 tab) restores the live pane on the next tick — see `replayOverlayActive` above. -->
+            <label class="rp-overlay-toggle">
+              <input type="checkbox" bind:checked={replayMode} />
+              Show in file pane
+            </label>
           </div>
+          {#if replayMode}
+            <div class="rp-overlay-note">
+              Live listing paused in the main pane — showing this reconstruction there instead.
+            </div>
+          {/if}
           {#if replayListing.length === 0}
             <div class="tl-empty rp-recon-empty">Nothing reconstructed for this folder at this point.</div>
           {:else}
@@ -1111,6 +1163,34 @@
   }
   .rp-recon-empty {
     padding: 6px 10px 10px;
+  }
+  /* CPE-1112: the Replay-mode toggle (tick-tack row — reflows onto its own line via flex-wrap on
+     .rp-recon-head above rather than overflowing it) + the confirming note shown while it's on. */
+  .rp-overlay-toggle {
+    flex: 0 0 auto;
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    margin-left: auto;
+    font-size: 10.5px;
+    font-weight: 600;
+    color: var(--text-muted, #9a9a9a);
+    cursor: pointer;
+    white-space: nowrap;
+  }
+  .rp-overlay-toggle input {
+    margin: 0;
+    accent-color: var(--accent, #2f6fed);
+  }
+  .rp-overlay-note {
+    margin: 0 10px 4px;
+    padding: 3px 7px;
+    border-radius: 5px;
+    background: color-mix(in srgb, var(--warn, #b5872b) 18%, transparent);
+    color: var(--text, inherit);
+    font-size: 10px;
+    line-height: 1.4;
+    flex: 0 0 auto;
   }
   .rp-recon-list {
     overflow-y: auto;

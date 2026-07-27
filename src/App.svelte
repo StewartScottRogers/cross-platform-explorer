@@ -746,6 +746,12 @@
   let unlistenCost: (() => void) | null = null;
   /** Whether the Agent Watch activity timeline drawer is open (CPE-400). */
   let showTimeline = false;
+  /** The read-only reconstructed listing to show in the main file pane instead of the live listing
+   *  while Replay mode is on (CPE-1112, epic CPE-728 slice e) — `null` (default, "off") means the pane
+   *  shows the live listing exactly as before. Set entirely by `AgentTimeline`'s `replayOverlay` event
+   *  (a pure derivation, see `lib/replayOverlay.ts`); App never computes or mutates it itself, just
+   *  forwards it straight into `ExplorerPane`. */
+  let replayOverlayEntries: DirEntry[] | null = null;
 
   /** Folder whose disk-usage treemap is open (CPE-751), or null when the Space view is closed. */
   let spacePath: string | null = null;
@@ -3309,6 +3315,7 @@
       {watchedAgentName}
       {recentChanges}
       bind:showTimeline
+      replayOverlay={replayOverlayEntries}
       bind:entries
       smartOverride={smartFolder ? smartEntries : null}
       archiveOverride={archive ? archiveChildren(archive) : null}
@@ -3556,6 +3563,7 @@
     {currentPath}
     on:navigate={(e) => navigate(e.detail)}
     on:close={() => (showTimeline = false)}
+    on:replayOverlay={(e) => (replayOverlayEntries = e.detail)}
   />
 {/if}
 
