@@ -19,11 +19,32 @@ full-list rendering.
 
 ## Acceptance Criteria
 - [x] Time-to-first-paint + time-to-settled marks (dev-gated) in loadPath — the core measurement.
-- [ ] A regression guard (test/budget) against full-list rendering.
-- [ ] `npm run check` + suite green.
+- [x] A regression guard (test/budget) against full-list rendering.
+- [x] `npm run check` + suite green.
 
 ## Work Log
 2026-07-18 (dayshift) — Picked up. Doing the safe 'measure-first' part now (dev-gated time-to-first-paint/settle marks in loadPath); the full-list-rendering regression guard waits for virtualization (CPE-690).
+
+2026-07-27 — Picked the deferred slice back up now that CPE-690 (details-view virtualization) and
+CPE-766 (icon/gallery grid virtualization) are both Done. Added `src/lib/components/FileList.virtualize-guard.test.ts`
+(test-only; no production code touched). **Invariant asserted:** for a folder with N=5,000 entries
+(well above `FileList.svelte`'s `VIRTUALIZE_THRESHOLD` of 100), the number of `.row` elements actually
+mounted in the DOM stays bounded (< 100, matching a ~600px viewport at 30px rows + overscan) —
+independent of N — instead of one row per entry. jsdom does no real layout, so
+`Element.prototype.getBoundingClientRect` is stubbed to hand FileList's `measureGeometry()` a realistic
+`.filelist-pane` viewport height and row height, which lets the component's real windowing path
+(`windowRange` from `../virtualize`) engage instead of silently falling back to full-list rendering
+(the fallback CPE-690's Work Log flagged as unverified headlessly). A companion test asserts a
+12-entry folder (below the threshold) still renders all 12 rows — guards the "small folder pays
+nothing" side too.
+
+**Proved falsifiable**: temporarily forced `win` in FileList.svelte to always take the full-list
+branch (simulating a revert of the windowing logic) — the new test failed as expected
+(`expected 5000 to be less than 100`, i.e. `renderedRows` was 5000). Reverted the simulated regression
+(confirmed `git diff` on FileList.svelte is empty again) and the test passes on the real code.
+
+Verified: `npm run check` → 0 errors/0 warnings. `npx vitest run` → 121 files / 1312 tests, all green
+(no new deps). Closing out this ticket's remaining ACs.
 
 ## Deferred
 Landed the safe **measure-first** part: dev-gated `[perf] first paint / settled` console marks in
