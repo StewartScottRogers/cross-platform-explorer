@@ -25,6 +25,7 @@
   import type { FolderAction, FolderContext } from "../folderContext";
   import type { DirEntry, Place, SortKey, SortDir, ViewMode, RecentFile, Favorite } from "../types";
   import type { ColorRule } from "../colorRules";
+  import type { AgentSession } from "../sidecar";
 
   /** True when the Home screen should show (App: `isHome && !smartFolder`). */
   export let inHome = false;
@@ -40,6 +41,11 @@
   export let watchedAgentName = "";
   export let recentChanges: { path: string; kind: string }[] = [];
   export let showTimeline = false;
+  /** Currently-running agent sessions (CPE-1116/CPE-1120), forwarded straight into `<FileList>` so its
+   *  owner heat-map + legend resolve colours via the stable sorted-session index and show agent names
+   *  instead of falling back to the per-id hash + shortened sessionId. Optional — an empty list (default)
+   *  preserves today's behaviour exactly ("off means off"). */
+  export let sessions: AgentSession[] = [];
   /** Read-only reconstructed listing to show INSTEAD OF the live `visible` list while Replay mode is
    *  active (CPE-1112, epic CPE-728 slice e — the file-pane graduate of CPE-1111's in-drawer view).
    *  `null` (default, "off") ⇒ the pane renders the live listing exactly as before; this prop is purely
@@ -325,6 +331,7 @@
   <FileList
     entries={paneEntries}
     activity={!inReplay && activeWatchCwd ? $fsActivity : {}}
+    {sessions}
     {selection}
     {sortKey}
     {sortDir}
