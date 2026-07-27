@@ -50,7 +50,7 @@ mod agent_shadow;
 /// The session audit journal (CPE-800), pure window-geometry resolver (CPE-598), and Agent Board
 /// backend (CPE-520) now live in the `cpe-server` crate (CPE-815); re-export their module paths so
 /// existing `audit_journal::` / `geometry::` / `ticket_board::` references resolve unchanged.
-use cpe_server::{audit_journal, geometry, ticket_board};
+use cpe_server::{audit_journal, geometry, metrics_journal, ticket_board};
 /// Shared FS utils (epoch-ms + streaming SHA-256) also live in `cpe-server` (CPE-815); re-export them
 /// so the many `to_epoch_ms(…)` / `sha256_file(…)` call sites resolve unchanged.
 use cpe_server::fsutil::to_epoch_ms;
@@ -2412,6 +2412,48 @@ async fn audit_read(
 ) -> Result<Vec<audit_journal::AuditEvent>, String> {
     let dir = audit_dir(&app)?;
     tauri::async_runtime::spawn_blocking(move || audit_journal::read_session(&dir, &session))
+        .await
+        .map_err(|e| e.to_string())
+}
+
+// ---- Per-session cost/activity metrics journal (CPE-1113, epic CPE-731 slice b) -------------------
+// A SIBLING of the audit journal above — same durable-JSONL pattern, coarser grain (one row per session,
+// not per event) and a SEPARATE file (`agent-metrics/history.jsonl`, never the audit file). Written only
+// when a watched session ENDS (the frontend flushes one record from its live accumulator before the
+// stores clear); `metrics_history` is pull-only (read when the cost dashboard opens). Advisory /
+// best-effort figures — never billing. Costs nothing when Agent Watch is off ("off means off").
+
+/// Resolve (and create) the metrics-journal directory under the app-data dir (sibling of `audit_dir`).
+fn metrics_dir(app: &tauri::AppHandle) -> Result<std::path::PathBuf, String> {
+    let dir = server_ctx::TauriCtx::new(app).app_data_dir()?.join("agent-metrics");
+    Ok(dir)
+}
+
+/// Append one ended session's metrics row to the bounded/rotated history journal. The record is built
+/// frontend-side from the live accumulator at session end (advisory/best-effort figures).
+#[tauri::command]
+#[cfg_attr(feature = "specta-bindings", specta::specta)]
+async fn metrics_record(
+    app: tauri::AppHandle,
+    rec: metrics_journal::SessionMetricsRecord,
+) -> Result<(), String> {
+    let dir = metrics_dir(&app)?;
+    tauri::async_runtime::spawn_blocking(move || {
+        metrics_journal::append(&dir, &rec, metrics_journal::MAX_SESSIONS)
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+/// Read every persisted session metrics row back (append order; malformed lines skipped). Pull-only —
+/// called when the cross-session cost dashboard opens (CPE-731c). Missing journal → empty.
+#[tauri::command]
+#[cfg_attr(feature = "specta-bindings", specta::specta)]
+async fn metrics_history(
+    app: tauri::AppHandle,
+) -> Result<Vec<metrics_journal::SessionMetricsRecord>, String> {
+    let dir = metrics_dir(&app)?;
+    tauri::async_runtime::spawn_blocking(move || metrics_journal::read_all(&dir))
         .await
         .map_err(|e| e.to_string())
 }
@@ -6398,6 +6440,8 @@ pub fn run() {
             audit_record,
             audit_sessions,
             audit_read,
+            metrics_record,
+            metrics_history,
             replay_load,
             text_stats,
             inspect_file,
@@ -6916,6 +6960,8 @@ pub fn export_bindings(out: &std::path::Path) -> Result<(), String> {
         audit_record,
         audit_sessions,
         audit_read,
+        metrics_record,
+        metrics_history,
         replay_load,
         text_stats,
         inspect_file,

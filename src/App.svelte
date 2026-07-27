@@ -25,7 +25,7 @@
   import { initAgentActivity, fsActivity, recentActivities, agentTimeline, affectsListing } from "./lib/agentActivity";
   import { initAgentDiffs } from "./lib/agentDiffs";
   import { initAgentCost } from "./lib/agentCost";
-  import { clearAgentSessionMetrics } from "./lib/agentSessionMetrics";
+  import { clearAgentSessionMetrics, flushSession, flushAllSessions } from "./lib/agentSessionMetrics";
   import AgentTimeline from "./lib/components/AgentTimeline.svelte";
   import DiskSpaceView from "./lib/components/DiskSpaceView.svelte";
   import DiagnosticsOverlay from "./lib/components/DiagnosticsOverlay.svelte";
@@ -822,9 +822,12 @@
           armedWatches.set(id, cwd);
         }
       }
-      // Stop the removed: sessions that are no longer running.
+      // Stop the removed: sessions that are no longer running. Flush each ended session's metrics row to
+      // the journal FIRST (CPE-1113) — the live accumulator + agentCost are still present at this seam
+      // (per-session stop doesn't clear them); the flush is idempotent + errors are swallowed.
       for (const id of [...armedWatches.keys()]) {
         if (!desired.has(id)) {
+          await flushSession(id);
           await stopAgentWatch(id);
           armedWatches.delete(id);
         }
@@ -835,6 +838,10 @@
         if (!unlistenDiffs) unlistenDiffs = await initAgentDiffs();
         if (!unlistenCost) unlistenCost = await initAgentCost();
       } else {
+        // Full stop: flush any not-yet-flushed session rows BEFORE the stores clear (CPE-1113,
+        // belt-and-suspenders — the removed-loop above already flushed each ended session), then tear
+        // down. `agentCost` is still present until `unlistenCost()` runs below, so flush first.
+        await flushAllSessions();
         unlistenActivity?.(); unlistenActivity = null;
         unlistenDiffs?.(); unlistenDiffs = null;
         unlistenCost?.(); unlistenCost = null;
