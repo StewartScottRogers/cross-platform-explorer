@@ -157,6 +157,13 @@ export interface FsActivity {
    *  *distinct* actors. Optional so a hand-built activity stays valid; `normalizeFsActivity` fills
    *  `"unknown"` for any wire payload that predates the tag, so real events always carry it. */
   actor?: string;
+  /** For a `renamed` item where the platform reported the source→target pair (CPE-1117): the path
+   *  the file was renamed **from**. `to` mirrors `path` (the target). Both are ABSENT on platforms
+   *  or events that can't form a pair (e.g. some Linux inotify backends never emit the pairing) —
+   *  the item then degrades to a single-path `renamed`. Competing-rename detection (CPE-1118) reads
+   *  `from`/`to` and simply sees no pair rather than a wrong one. */
+  from?: string;
+  to?: string;
 }
 
 /** Start watching one agent session's Project folder for filesystem activity (CPE-398/1099). Keyed
@@ -203,12 +210,21 @@ export function normalizeFsActivity(payload: unknown): FsActivity[] {
     const path = (item as { path?: unknown })?.path;
     const actor = (item as { actor?: unknown })?.actor;
     if (typeof kind === "string" && kinds.has(kind) && typeof path === "string" && path) {
-      out.push({
+      const activity: FsActivity = {
         kind: kind as FsActivity["kind"],
         path,
         // Back-compat: a payload without `actor` (pre-CPE-1101) stays valid and reads "unknown".
         actor: typeof actor === "string" && actor ? actor : "unknown",
-      });
+      };
+      // CPE-1117: carry the rename source→target pair when the platform provided it. Absent keys
+      // (single-path fallback / non-pairing platforms) leave the item unchanged — no false pair.
+      if (kind === "renamed") {
+        const from = (item as { from?: unknown })?.from;
+        const to = (item as { to?: unknown })?.to;
+        if (typeof from === "string" && from) activity.from = from;
+        if (typeof to === "string" && to) activity.to = to;
+      }
+      out.push(activity);
     }
   }
   return out;

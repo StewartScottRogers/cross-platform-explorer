@@ -151,6 +151,25 @@ describe("Agent Watch filesystem activity (CPE-398)", () => {
     expect(items.map((i) => i.actor)).toEqual(["sess-1", "user", "unknown", "unknown", "unknown"]);
   });
 
+  it("normalizeFsActivity threads a rename's from/to pair and leaves single-path renames unpaired (CPE-1117)", () => {
+    const items = normalizeFsActivity([
+      // Platform reported the pair → both carried through.
+      { kind: "renamed", path: "/new.txt", actor: "sess-1", from: "/old.txt", to: "/new.txt" },
+      // Single-path fallback (non-pairing platform) → no from/to keys added.
+      { kind: "renamed", path: "/solo.txt", actor: "sess-1" },
+      // Bogus from/to types are ignored, item stays valid + unpaired.
+      { kind: "renamed", path: "/bad.txt", actor: "sess-1", from: 42, to: "" },
+      // from/to are only meaningful for renames — ignored on other kinds.
+      { kind: "modified", path: "/m.rs", actor: "sess-1", from: "/x", to: "/y" },
+    ]);
+    expect(items).toEqual([
+      { kind: "renamed", path: "/new.txt", actor: "sess-1", from: "/old.txt", to: "/new.txt" },
+      { kind: "renamed", path: "/solo.txt", actor: "sess-1" },
+      { kind: "renamed", path: "/bad.txt", actor: "sess-1" },
+      { kind: "modified", path: "/m.rs", actor: "sess-1" },
+    ]);
+  });
+
   it("startAgentWatch invokes the command (keyed by sessionId) and reports success/failure without throwing", async () => {
     invoke.mockResolvedValueOnce(undefined);
     expect(await startAgentWatch("s1", "Z:/repo")).toBe(true);
