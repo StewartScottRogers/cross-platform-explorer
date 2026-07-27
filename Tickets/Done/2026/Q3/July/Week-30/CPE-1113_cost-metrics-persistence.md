@@ -4,7 +4,7 @@ title: "Cost dashboard: per-session metrics journal + flush-on-session-end"
 type: feature
 component: Backend
 priority: medium
-status: Doing
+status: Done
 tags: ready
 created: 2026-07-26
 epic: CPE-731
