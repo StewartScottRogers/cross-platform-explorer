@@ -1,4 +1,5 @@
 import type { TimelineEntry } from "./agentActivity";
+import { OVERLAP_WINDOW_MS } from "./agentConflicts";
 
 /**
  * Competing-rename detection (CPE-1118, epic CPE-730) — a pure frontend fold over the
@@ -13,6 +14,13 @@ import type { TimelineEntry } from "./agentActivity";
  * Deliberately hedged like `agentConflicts.ts`: a raw filesystem watcher can't *prove* two
  * renames came from unrelated actors vs. the same agent correcting itself, so the radar surfaces
  * this as "competing renames" with best-effort wording, never a hard "conflict".
+ *
+ * **Time-gated (CPE-1121):** the sidecar's `conflict_rename.rs` has no notion of time, but a
+ * long-lived live Radar view does — without a window, a rename from a session that ended hours or
+ * days ago can fold into a "competing rename" with a fresh one, reading as a live race when it
+ * isn't. Reuses `agentConflicts.ts`'s {@link OVERLAP_WINDOW_MS} (the overlap detector's window) so
+ * the two Radar folds stay consistent: only renames whose contributing entries land within that
+ * window of each other co-fold into a divergence/collision.
  */
 
 /** What kind of rename contention a path is under. */
@@ -40,22 +48,56 @@ interface Bucket {
   lastAt: number;
 }
 
+/**
+ * Group `renames` by `keyOf` (the shared `from` or `to`), then within each group slide a
+ * `windowMs`-wide trailing window across its entries (sorted oldest-first) — same technique as
+ * `foldOverlaps` in `agentConflicts.ts` — keeping only the most-recent window whose entries carry
+ * both ≥2 distinct actors and ≥2 distinct `otherOf` values (the divergence/collision threshold). A
+ * key with no qualifying window is omitted entirely, which is how the temporal gate suppresses
+ * stale folds: renames far enough apart in time never share a window.
+ */
 function fold(
   renames: Array<{ from: string; to: string; actor: string; at: number }>,
   keyOf: (from: string, to: string) => string,
   otherOf: (from: string, to: string) => string,
+  windowMs: number,
 ): Map<string, Bucket> {
-  const buckets = new Map<string, Bucket>();
+  const byKey = new Map<string, Array<{ other: string; actor: string; at: number }>>();
   for (const r of renames) {
     const key = keyOf(r.from, r.to);
-    let b = buckets.get(key);
-    if (!b) {
-      b = { actors: new Set(), others: new Set(), lastAt: -Infinity };
-      buckets.set(key, b);
+    const item = { other: otherOf(r.from, r.to), actor: r.actor, at: r.at };
+    const list = byKey.get(key);
+    if (list) list.push(item);
+    else byKey.set(key, [item]);
+  }
+
+  const buckets = new Map<string, Bucket>();
+  for (const [key, list] of byKey) {
+    const sorted = [...list].sort((a, b) => a.at - b.at);
+
+    let bestActors: Set<string> | null = null;
+    let bestOthers: Set<string> | null = null;
+    let bestAt = -Infinity;
+    let left = 0;
+    for (let right = 0; right < sorted.length; right++) {
+      while (sorted[right].at - sorted[left].at > windowMs) left++;
+
+      const actors = new Set<string>();
+      const others = new Set<string>();
+      for (let k = left; k <= right; k++) {
+        actors.add(sorted[k].actor);
+        others.add(sorted[k].other);
+      }
+      if (actors.size >= 2 && others.size >= 2 && sorted[right].at >= bestAt) {
+        bestAt = sorted[right].at;
+        bestActors = actors;
+        bestOthers = others;
+      }
     }
-    b.actors.add(r.actor);
-    b.others.add(otherOf(r.from, r.to));
-    if (r.at > b.lastAt) b.lastAt = r.at;
+
+    if (bestActors && bestOthers) {
+      buckets.set(key, { actors: bestActors, others: bestOthers, lastAt: bestAt });
+    }
   }
   return buckets;
 }
@@ -76,8 +118,16 @@ const ordinalCmp = (a: string, b: string): number => (a < b ? -1 : a > b ? 1 : 0
  * `from === to` no-op rename is ignored entirely, and same-actor repeated renames of a path never
  * count as a conflict — only distinct actors do. Results are sorted by path, with each conflict's
  * actors sorted, for a stable radar order. Empty/degenerate input -> `[]`.
+ *
+ * **Time-gated (CPE-1121):** only renames whose contributing entries fall within `windowMs` of
+ * each other co-fold into a conflict — defaults to `agentConflicts.ts`'s {@link OVERLAP_WINDOW_MS}
+ * so the divergence/collision fold and the activity-overlap fold agree on "close in time". Two
+ * same-`from`/same-`to` renames further apart than `windowMs` no longer produce a conflict.
  */
-export function foldRenameConflicts(entries: TimelineEntry[]): RenameConflict[] {
+export function foldRenameConflicts(
+  entries: TimelineEntry[],
+  windowMs: number = OVERLAP_WINDOW_MS,
+): RenameConflict[] {
   const renames: Array<{ from: string; to: string; actor: string; at: number }> = [];
   for (const e of entries) {
     if (e.kind !== "renamed" || !e.from || !e.to || e.from === e.to) continue;
@@ -89,23 +139,21 @@ export function foldRenameConflicts(entries: TimelineEntry[]): RenameConflict[] 
     renames,
     (from) => from,
     (_from, to) => to,
+    windowMs,
   );
   const byTo = fold(
     renames,
     (_from, to) => to,
     (from) => from,
+    windowMs,
   );
 
   const out: RenameConflict[] = [];
   for (const [from, b] of byFrom) {
-    if (b.actors.size >= 2 && b.others.size >= 2) {
-      out.push({ path: from, kind: "divergence", actors: [...b.actors].sort(ordinalCmp), lastAt: b.lastAt });
-    }
+    out.push({ path: from, kind: "divergence", actors: [...b.actors].sort(ordinalCmp), lastAt: b.lastAt });
   }
   for (const [to, b] of byTo) {
-    if (b.actors.size >= 2 && b.others.size >= 2) {
-      out.push({ path: to, kind: "collision", actors: [...b.actors].sort(ordinalCmp), lastAt: b.lastAt });
-    }
+    out.push({ path: to, kind: "collision", actors: [...b.actors].sort(ordinalCmp), lastAt: b.lastAt });
   }
 
   return out.sort((a, b) => ordinalCmp(a.path, b.path));
