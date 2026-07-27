@@ -4,7 +4,7 @@ title: "Activity replay: reconstructed folder listing in the Replay tab"
 type: feature
 component: Frontend
 priority: medium
-status: Doing
+status: Done
 tags: ready
 created: 2026-07-26
 epic: CPE-728

@@ -2,7 +2,7 @@
 id: CPE-728
 title: "EPIC: Activity replay & scrub — a time machine for agent activity"
 type: Task
-status: In Progress
+status: Done
 priority: Medium
 component: Multiple
 tags: [epic]
@@ -40,3 +40,15 @@ powerful way to understand and review an agent's work, not just watch it live.
 2026-07-22 (nightshift) — **Activated.** First slice: **CPE-916** — `activity_timeline::bucketize` +
 `summarize` over the existing `audit_journal::AuditEvent` stream (the scrub view's compute core). Remaining:
 the timeline/minimap UI, playback scrubber, and state-at-cursor reconstruction.
+
+## Closure (2026-07-26)
+**Closed — Definition of Done met.** Delivered via event-replay: CPE-1108 (persist fs-activity to the audit
+journal — full ordered log beyond the 300-cap), CPE-1109 (baseline snapshot + `state_at_from` so reconstruction
+includes pre-existing files), CPE-1110 (`replay_load` command + pure TS fold `replayFold.ts` matched 1:1 to the
+Rust oracle), CPE-1111 (reconstructed folder listing rendered in the Replay tab, re-derived per scrub tick with
+no IPC). Plus the shipped scrubber CPE-1094 + variable speed CPE-1104. DoD lines met: transport scrubs + the
+folder view reflects state at any point (in-drawer reconstruction); create/modify/move/delete/read replay in
+order with variable speed; the full ordered event log persists beyond the transient cap. The **read-only
+file-pane overlay** (drive the MAIN explorer pane to the reconstructed listing) is an optional enhancement,
+filed as CPE-1112 (not required by the DoD — the in-drawer reconstruction satisfies "the folder view reflects
+state at any point").
