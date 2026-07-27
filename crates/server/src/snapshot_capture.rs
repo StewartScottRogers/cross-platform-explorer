@@ -247,6 +247,21 @@ pub fn prune(store_dir: &str, manifest_id: &str) -> Result<u64, String> {
     Ok(freed)
 }
 
+/// Load the checkpoint [`Snapshot`] (`path → FileState`) recorded in manifest `manifest_id` from the
+/// store at `store_dir`. The read-back view of [`capture`]: it reconstructs the "checkpoint" side of the
+/// two-map input [`crate::restore_plan::plan_restore`] needs, so a command layer can diff a captured
+/// checkpoint against a fresh [`scan_dir`] of the live tree without re-reading any blob bytes. Files the
+/// original capture skipped (oversize/budget) are absent — they were never in the manifest.
+pub fn manifest_snapshot(store_dir: &str, manifest_id: &str) -> Result<Snapshot, String> {
+    let store_path = Path::new(store_dir);
+    let manifest = load_manifest(store_path, manifest_id)?;
+    Ok(manifest
+        .files
+        .into_iter()
+        .map(|(path, file)| (path, FileState::new(file.hash, file.size)))
+        .collect())
+}
+
 // ---- on-disk layout + persistence -----------------------------------------------------------------
 
 fn blobs_dir(store_dir: &Path) -> PathBuf {

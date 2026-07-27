@@ -205,6 +205,13 @@ pub mod snapshot_capture;
 /// without modifying them.
 pub mod revert_engine;
 
+/// Per-watched-root checkpoint store (CPE-1123, epic CPE-732) — the command-layer glue that wires the
+/// checkpoint/rollback engine (`snapshot_capture` + `restore_plan` + `revert_safety` + `revert_engine`)
+/// into a live store: capture a checkpoint, keep a tolerant JSON-lines index per root (mirroring
+/// `audit_journal`'s on-disk pattern), preview a revert (plan + drift), and revert whole-tree or a single
+/// path. Reaches the app-data dir through the `ServerCtx` seam; the Tauri commands are one-liners into it.
+pub mod checkpoint_store;
+
 /// Disk-usage scanning — recursive directory size + per-child breakdown (CPE-749/754).
 pub mod disk_usage;
 
