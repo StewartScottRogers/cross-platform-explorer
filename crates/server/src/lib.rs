@@ -108,6 +108,12 @@ pub mod replay;
 /// folder at moment `T` (`children_at`) and the added/removed/modified diff between two scrub
 /// cursors (`diff_states`), to animate a scrub. Pure projection over [`replay::FsState`].
 pub mod replay_view;
+
+/// Baseline snapshot for activity replay (CPE-1109, epic CPE-728): capture the pre-existing entries
+/// under a watched root once at watch-start (a bounded recursive walk reusing [`listing`]), persist it
+/// as a separate `<session>.baseline.json` (representation B — never synthetic events in the journal),
+/// and seed [`replay::state_at_from`] from it so pre-existing untouched files appear in a reconstruction.
+pub mod replay_baseline;
 pub mod batch_media;
 
 /// Batch media **transform engine** (CPE-1083, epic CPE-723): applies an ordered list of

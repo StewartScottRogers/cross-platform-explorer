@@ -4684,6 +4684,31 @@ fn agent_watch_start(
     // closes `rx` and ends this thread — no separate stop signal needed.
     // The pump owns its session id so every event it flushes can default `actor` to it (CPE-1101).
     let pump_session = session_id.clone();
+    // CPE-1109 (epic CPE-728, slice b): capture a bounded baseline snapshot of the watched tree once,
+    // here at watch-start, so replay can reconstruct pre-existing untouched files (which never emit an
+    // event). Off-means-off — this runs ONLY inside agent_watch_start; no armed watch => no capture.
+    // Representation B: a separate <session>.baseline.json beside the journal, never synthetic events in
+    // the activity log. Runs on its own thread (a large walk must not delay the watch going live) and a
+    // capture/write failure is logged + swallowed, degrading replay to events-only rather than breaking
+    // watching.
+    {
+        let baseline_app = app.clone();
+        let baseline_session = session_id.clone();
+        let baseline_path = path.clone();
+        std::thread::spawn(move || {
+            let baseline = cpe_server::replay_baseline::capture(&baseline_path);
+            match audit_dir(&baseline_app) {
+                Ok(dir) => {
+                    if let Err(e) =
+                        cpe_server::replay_baseline::write_baseline(&dir, &baseline_session, &baseline)
+                    {
+                        eprintln!("[agent-watch] baseline write failed (swallowed): {e}");
+                    }
+                }
+                Err(e) => eprintln!("[agent-watch] audit dir unavailable, skipping baseline: {e}"),
+            }
+        });
+    }
     std::thread::spawn(move || fs_activity_pump(app, rx, pump_session));
     state.arm(session_id, AgentWatch { _watcher: watcher, path });
     Ok(())
