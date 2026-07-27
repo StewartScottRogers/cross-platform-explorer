@@ -4,7 +4,7 @@ title: "Activity replay: persist fs-activity to the audit journal (writer)"
 type: feature
 component: Backend
 priority: medium
-status: Doing
+status: Done
 tags: ready
 created: 2026-07-26
 epic: CPE-728
