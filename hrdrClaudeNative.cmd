@@ -23,7 +23,8 @@ REM      [7/7] Launch Claude         (as a tracked pane anchored to the repo)
 REM
 REM  Claude shows up as a tracked "Claude" pane in herdr's sidebar; its live state
 REM  (idle / working / blocked) is reported by herdr's native Claude integration
-REM  hook, which this script installs on first run if it is missing.
+REM  hook. Step [4/7] guarantees both the "claude" and "copilot" integration hooks
+REM  are installed, running each install unless status confirms it already is.
 REM
 REM  WHERE IT RUNS THE REPO FROM
 REM  ---------------------------
@@ -186,14 +187,14 @@ REM  Keep herdr current (best-effort; ignore failures on an offline/pinned box).
 echo       updating herdr ...
 "%HERDR%" update 2>nul
 
-REM  Install the native Claude integration hook so the pane reports Claude's state
-REM  in the sidebar. Reinstall ONLY when status says it is not installed, so an
-REM  already-installed hook is left untouched (no needless churn).
-"%HERDR%" integration status 2>nul | findstr /I /C:"claude: not installed" >nul
-if not errorlevel 1 (
-    echo       installing herdr Claude integration hook ...
-    "%HERDR%" integration install claude
-)
+REM  Guarantee both native integration hooks are installed -- "claude" so the pane
+REM  reports Claude's state in the sidebar, and "copilot" alongside it. Each is
+REM  ensured idempotently: we install unless `integration status` EXPLICITLY reports
+REM  that hook as already installed, so any uncertainty (unreadable status, changed
+REM  wording) errs on the side of running the install rather than skipping it. An
+REM  already-installed hook that status confirms is left untouched (no needless churn).
+call :ensure_integration claude
+call :ensure_integration copilot
 
 
 REM -----------------------------------------------------------------------------
@@ -338,3 +339,22 @@ echo.
 pause
 endlocal
 exit /b 1
+
+
+REM -----------------------------------------------------------------------------
+REM  :ensure_integration <name>  --  guarantee `herdr integration install <name>`
+REM  has run. Skips the install ONLY when `integration status` explicitly reports
+REM  "<name>: installed"; every other outcome (not installed, unknown, unreadable
+REM  status) falls through to the install, which herdr treats as idempotent. The
+REM  findstr regex matches "<name>:" + optional spaces + "installed", so the
+REM  "<name>: not installed" line does NOT satisfy it (the "not" breaks the match).
+REM -----------------------------------------------------------------------------
+:ensure_integration
+"%HERDR%" integration status 2>nul | findstr /I /R /C:"%~1: *installed" >nul
+if not errorlevel 1 (
+    echo       herdr %~1 integration already installed
+    goto :eof
+)
+echo       installing herdr %~1 integration hook ...
+"%HERDR%" integration install %~1
+goto :eof
