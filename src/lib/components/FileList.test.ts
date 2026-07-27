@@ -82,6 +82,70 @@ describe("FileList Agent Watch annotations (CPE-399)", () => {
   });
 });
 
+describe("Owner-coloured heat-map + legend (CPE-1116)", () => {
+  it("tints an active row's accent bar with its actor's colour, not a per-kind literal", () => {
+    const entries = [entry({ name: "changed.rs", path: "/x/changed.rs", extension: "rs" })];
+    const { container } = render(FileList, {
+      ...base,
+      entries,
+      activity: { "/x/changed.rs": { kind: "modified" as const, at: Date.now(), actor: "sess-a" } },
+    });
+    const row = container.querySelector(".row.agent-active") as HTMLElement;
+    expect(row).toBeTruthy();
+    // No session list resolves "sess-a" here, so it falls back to a deterministic hashed slot —
+    // the point under test is that SOME --agent-N var drives the accent, not a hard-coded hex.
+    expect(row.style.getPropertyValue("--agent-accent")).toMatch(/^var\(--agent-[1-6]\)$/);
+  });
+
+  it("tints an inside folder row with its subtree's owning actor (most-touches wins)", () => {
+    const entries = [entry({ name: "src", path: "/x/src", is_dir: true, extension: "" })];
+    const now = Date.now();
+    const { container } = render(FileList, {
+      ...base,
+      entries,
+      activity: {
+        "/x/src/a.rs": { kind: "modified" as const, at: now, actor: "sess-a" },
+        "/x/src/b.rs": { kind: "modified" as const, at: now, actor: "sess-a" },
+        "/x/src/c.rs": { kind: "modified" as const, at: now, actor: "sess-b" },
+      },
+    });
+    const row = container.querySelector(".row.agent-inside") as HTMLElement;
+    expect(row).toBeTruthy();
+    expect(row.style.getPropertyValue("--agent-accent")).toMatch(/^var\(--agent-[1-6]\)$/);
+  });
+
+  it("colours the user's own edits with the dedicated --agent-user var", () => {
+    const entries = [entry({ name: "mine.txt", path: "/x/mine.txt" })];
+    const { container } = render(FileList, {
+      ...base,
+      entries,
+      activity: { "/x/mine.txt": { kind: "created" as const, at: Date.now(), actor: "user" } },
+    });
+    const row = container.querySelector(".row.agent-active") as HTMLElement;
+    expect(row.style.getPropertyValue("--agent-accent")).toBe("var(--agent-user)");
+  });
+
+  it("shows a legend pill per distinct actor only while the activity map is non-empty", async () => {
+    const entries = [entry({ name: "a.rs", path: "/x/a.rs" }), entry({ name: "b.rs", path: "/x/b.rs" })];
+    const { container, rerender } = render(FileList, {
+      ...base,
+      entries,
+      activity: {
+        "/x/a.rs": { kind: "created" as const, at: Date.now(), actor: "user" },
+        "/x/b.rs": { kind: "modified" as const, at: Date.now(), actor: "sess-a" },
+      },
+    });
+    const legend = container.querySelector(".agent-legend");
+    expect(legend).toBeTruthy();
+    expect(legend?.querySelectorAll(".agent-legend-pill").length).toBe(2);
+    expect(screen.getByText("You")).toBeTruthy(); // friendlyActor("user", ...)
+
+    // Off means off: an empty activity map hides the legend entirely.
+    await rerender({ ...base, entries, activity: {} });
+    expect(container.querySelector(".agent-legend")).toBeNull();
+  });
+});
+
 describe("FileList rendering", () => {
   it("renders a row for every entry", () => {
     const entries = [

@@ -13,6 +13,7 @@ import {
   foldConsulted,
   normalizeActivityByKind,
   folderActivityKindNorm,
+  folderOwnerNorm,
   fsActivity,
   agentTimeline,
   ACTIVITY_TTL_MS,
@@ -258,5 +259,90 @@ describe("folderActivityKindNorm (read-vs-write heat, CPE-742)", () => {
     const sets = mk({ "Z:/r/w/a": "removed", "Z:/r/rd/b": "read" });
     expect(folderActivityKindNorm(sets, "Z:/r/w")).toBe("write");
     expect(folderActivityKindNorm(sets, "Z:/r/rd")).toBe("read");
+  });
+});
+
+describe("folderOwnerNorm (owner-coloured heat-map rollup, CPE-1116)", () => {
+  // Ports the sidecar's conflict_owner.rs (per-file owner) + conflict_region.rs (region rollup)
+  // cases to this module's snapshot data model: the activity map holds one *current* actor per
+  // path (not a running per-agent touch count), so each path already IS a single-file
+  // attribution, and folderOwnerNorm is the region rollup — every path under `dir` casts one vote
+  // for its own actor; most votes ("most-touches") wins; ties break to the lexically-least actor.
+  const mkOwner = (m: Record<string, { kind: AgentActivity["kind"]; actor?: string }>) =>
+    normalizeActivityByKind(m);
+
+  it("single owner: a folder with one actor's write is owned by that actor", () => {
+    // Mirrors conflict_owner::single_agent_path_is_owned_by_that_agent.
+    const sets = mkOwner({ "Z:/r/a/x.rs": { kind: "modified", actor: "alice" } });
+    expect(folderOwnerNorm(sets, "Z:/r/a")).toBe("alice");
+  });
+
+  it("contested folder: owner is whichever actor touched the most files (most-touches wins)", () => {
+    // Mirrors conflict_owner::contested_path_owner_is_top_editor, at folder granularity: alice
+    // touched 2 files under Z:/r/a, bob touched 1 -> alice owns the folder.
+    const sets = mkOwner({
+      "Z:/r/a/x.rs": { kind: "modified", actor: "alice" },
+      "Z:/r/a/y.rs": { kind: "created", actor: "alice" },
+      "Z:/r/a/z.rs": { kind: "modified", actor: "bob" },
+    });
+    expect(folderOwnerNorm(sets, "Z:/r/a")).toBe("alice");
+  });
+
+  it("full tie on touches breaks to the lexically-least actor", () => {
+    // Mirrors conflict_owner::full_tie_breaks_lexically_least_agent /
+    // conflict_region::tie_on_votes_broken_by_lexically_least_owner.
+    const sets = mkOwner({
+      "Z:/r/a/x.rs": { kind: "modified", actor: "zoe" },
+      "Z:/r/a/y.rs": { kind: "modified", actor: "amy" },
+    });
+    expect(folderOwnerNorm(sets, "Z:/r/a")).toBe("amy");
+  });
+
+  it("write outranks read: a folder with both a write and a read is owned by the writer", () => {
+    const sets = mkOwner({
+      "Z:/r/a/read.md": { kind: "read", actor: "bob" },
+      "Z:/r/a/write.rs": { kind: "modified", actor: "alice" },
+    });
+    expect(folderOwnerNorm(sets, "Z:/r/a")).toBe("alice");
+  });
+
+  it("a read-only folder (no writes at all) is owned by its top reader", () => {
+    // Write only outranks read when a write actually exists in the subtree — an all-read folder
+    // still gets an owner rather than falling back to null (that's reserved for "nothing here").
+    const sets = mkOwner({
+      "Z:/r/a/x.md": { kind: "read", actor: "bob" },
+      "Z:/r/a/y.md": { kind: "read", actor: "bob" },
+      "Z:/r/a/z.md": { kind: "read", actor: "alice" },
+    });
+    expect(folderOwnerNorm(sets, "Z:/r/a")).toBe("bob");
+  });
+
+  it("empty subtree — nothing inside, or only the folder itself — returns null", () => {
+    // Mirrors folderActivityKindNorm's "excludes the folder itself" behavior.
+    const sets = mkOwner({
+      "Z:/r/a": { kind: "modified", actor: "alice" },
+      "Z:/r/other/x": { kind: "modified", actor: "bob" },
+    });
+    expect(folderOwnerNorm(sets, "Z:/r/a")).toBeNull();
+    expect(folderOwnerNorm(sets, "")).toBeNull();
+  });
+
+  it("is deterministic regardless of input order", () => {
+    const build = (order: string[]) =>
+      mkOwner(
+        Object.fromEntries(
+          order.map((actor, i) => [`Z:/r/a/${i}.rs`, { kind: "modified" as const, actor }]),
+        ),
+      );
+    const a = folderOwnerNorm(build(["zoe", "amy", "bob"]), "Z:/r/a");
+    const b = folderOwnerNorm(build(["bob", "zoe", "amy"]), "Z:/r/a");
+    const c = folderOwnerNorm(build(["amy", "bob", "zoe"]), "Z:/r/a");
+    expect(a).toBe(b);
+    expect(b).toBe(c);
+  });
+
+  it("carries actor through normalizeActivityByKind, defaulting a missing actor to 'unknown'", () => {
+    const sets = normalizeActivityByKind({ "Z:/r/a/x.rs": { kind: "modified" } });
+    expect(folderOwnerNorm(sets, "Z:/r/a")).toBe("unknown");
   });
 });

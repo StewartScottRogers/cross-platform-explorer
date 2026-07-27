@@ -27,6 +27,24 @@
 
   --row-h: 30px;
 
+  /* Conflict radar owner palette (CPE-1116, epic CPE-730): fixed, cycling colours for the
+     activity heat-map's per-owner accent + legend (`agentColors.ts:colorForActor`), chosen from
+     the colour-blind-safe Okabe-Ito set so distinct agents stay distinguishable. Never read
+     directly by a colour literal in component code — always through `colorForActor` so a future
+     dark theme (this app is currently light-only; see `color-scheme: light` above) can override
+     these same six vars without touching any component. */
+  --agent-1: #0072b2; /* blue */
+  --agent-2: #d55e00; /* vermillion */
+  --agent-3: #009e73; /* bluish green */
+  --agent-4: #cc79a7; /* reddish purple */
+  --agent-5: #e69f00; /* orange */
+  --agent-6: #56b4e9; /* sky blue */
+  /* Dedicated, out-of-cycle colour for the local user's own edits, so "you" is always the same
+     colour regardless of how many agent sessions are running. */
+  --agent-user: #6b4fbb;
+  /* Neutral/muted — an untagged ("unknown") actor never competes visually with a real owner. */
+  --agent-unknown: var(--text-faint);
+
   font-family: "Segoe UI Variable Text", "Segoe UI", system-ui, -apple-system,
     Roboto, sans-serif;
   font-size: 13px;

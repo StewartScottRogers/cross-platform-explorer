@@ -200,24 +200,36 @@ export function folderHasActivityNorm(normPaths: string[], dir: string): boolean
 /** A kind counts as a change unless it's a `read` — reads are the weakest signal (CPE-405). */
 const isWriteKind = (k: FsActivity["kind"]): boolean => k !== "read";
 
-/** Normalized activity paths split into writes vs reads (CPE-742). Built once from the activity map so
- *  the per-folder-row heat check ({@link folderActivityKindNorm}) is a cheap prefix test per side and
- *  never re-normalizes the set per row (preserves the CPE-698 optimization). */
-export interface ActivitySets {
-  writes: string[];
-  reads: string[];
+/** A normalized activity path plus who touched it (CPE-1116). `actor` mirrors {@link AgentActivity.actor}
+ *  — a `sessionId` / `"user"` / `"unknown"` — carried through so folder-level owner attribution
+ *  ({@link folderOwnerNorm}) doesn't need to re-look-up the raw activity map. */
+export interface ActivityEntry {
+  path: string;
+  actor: string;
 }
 
-/** Split the activity map into normalized write-paths and read-paths (CPE-742). */
+/** Normalized activity paths split into writes vs reads (CPE-742), each paired with its actor
+ *  (CPE-1116). Built once from the activity map so the per-folder-row heat check
+ *  ({@link folderActivityKindNorm}) and owner rollup ({@link folderOwnerNorm}) are cheap prefix
+ *  scans per row and never re-normalize the set per row (preserves the CPE-698 optimization). */
+export interface ActivitySets {
+  writes: ActivityEntry[];
+  reads: ActivityEntry[];
+}
+
+/** Split the activity map into normalized write-paths and read-paths, carrying each path's actor
+ *  (CPE-742 / CPE-1116). An entry without `actor` (e.g. a hand-built test activity) reads as
+ *  `"unknown"`, matching {@link normalizeFsActivity}'s wire back-compat default. */
 export function normalizeActivityByKind(
-  activity: Record<string, { kind: FsActivity["kind"] }>,
+  activity: Record<string, { kind: FsActivity["kind"]; actor?: string }>,
 ): ActivitySets {
-  const writes: string[] = [];
-  const reads: string[] = [];
+  const writes: ActivityEntry[] = [];
+  const reads: ActivityEntry[] = [];
   for (const [path, a] of Object.entries(activity)) {
     const n = normalizePath(path);
     if (!n) continue;
-    (isWriteKind(a.kind) ? writes : reads).push(n);
+    const entry: ActivityEntry = { path: n, actor: a.actor || "unknown" };
+    (isWriteKind(a.kind) ? writes : reads).push(entry);
   }
   return { writes, reads };
 }
@@ -232,9 +244,45 @@ export function folderActivityKindNorm(sets: ActivitySets, dir: string): "write"
   const d = normalizePath(dir);
   if (!d) return null;
   const prefix = d + "/";
-  if (sets.writes.some((p) => p.startsWith(prefix))) return "write";
-  if (sets.reads.some((p) => p.startsWith(prefix))) return "read";
+  if (sets.writes.some((e) => e.path.startsWith(prefix))) return "write";
+  if (sets.reads.some((e) => e.path.startsWith(prefix))) return "read";
   return null;
+}
+
+/**
+ * The deterministic owning actor for a folder's subtree (CPE-1116), for heat-map colouring.
+ * Mirrors the sidecar's `conflict_owner::attribute` + `conflict_region::roll_up` logic, adapted to
+ * this module's snapshot data model (the activity map holds one *current* actor per path, not a
+ * running per-agent touch count — so each path already IS a single-file "attribution", and this
+ * function is the region rollup: every path under `dir` casts one vote for its own actor).
+ *
+ * Rule: write outranks read — if the subtree has any write, only write-paths vote (a folder being
+ * edited is never coloured by a stale read); otherwise read-paths vote. Whichever actor has the
+ * most votes ("most-touches wins") owns the folder; a tie is broken by the lexically-least actor id,
+ * so the result is deterministic regardless of map/object iteration order. Excludes `dir` itself.
+ * Empty subtree (no matching paths) -> `null`.
+ */
+export function folderOwnerNorm(sets: ActivitySets, dir: string): string | null {
+  const d = normalizePath(dir);
+  if (!d) return null;
+  const prefix = d + "/";
+
+  const writeVotes = sets.writes.filter((e) => e.path.startsWith(prefix));
+  const votes = writeVotes.length > 0 ? writeVotes : sets.reads.filter((e) => e.path.startsWith(prefix));
+  if (votes.length === 0) return null;
+
+  const tally = new Map<string, number>();
+  for (const e of votes) tally.set(e.actor, (tally.get(e.actor) ?? 0) + 1);
+
+  let owner: string | null = null;
+  let bestCount = -1;
+  for (const [actor, count] of tally) {
+    if (count > bestCount || (count === bestCount && owner !== null && actor < owner)) {
+      owner = actor;
+      bestCount = count;
+    }
+  }
+  return owner;
 }
 
 /**
