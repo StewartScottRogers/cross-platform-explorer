@@ -4,7 +4,7 @@ title: "Checkpoint & rollback: command layer (store + create/list/preview/revert
 type: feature
 component: Backend
 priority: high
-status: Backlog
+status: Done
 tags: ready
 created: 2026-07-26
 epic: CPE-732
@@ -57,3 +57,5 @@ dispatchers + bindings regen).
 ## Work Log
 2026-07-26 (workshift) — CPE-732 first wave (PM slices A+B+C). Engine pre-built+tested but unwired; this is pure
 integration. Dispatched to an opus worker (integration + orchestration on the ServerCtx/lib.rs seam).
+
+2026-07-27 (workshift) — Built (PR #439, merged da598e7d). Opus Reviewer APPROVE + UAT PASS: 5 commands (create/list/preview_revert/revert/revert_one) wired to the pre-built engines; per-root store keyed SHA-256(abs root); tolerant JSONL index (skip-malformed, newest-first) mirroring audit_journal; revert write-safe (safe_segments rejects ../abs/drive — even a poisoned manifest can't escape root); skip-on-error preserved; revert_one proven no over-reach; bindings regen'd (5 methods+5 types); clippy clean all 4 feature-mode combos. Non-blocking nit -> CPE-1127 (harden manifest_id read path). Drift is conservative (empty agent-touched set) until attribution threaded — documented.
