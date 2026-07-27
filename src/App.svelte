@@ -25,6 +25,7 @@
   import { initAgentActivity, fsActivity, recentActivities, agentTimeline, affectsListing } from "./lib/agentActivity";
   import { initAgentDiffs } from "./lib/agentDiffs";
   import { initAgentCost } from "./lib/agentCost";
+  import { clearAgentSessionMetrics } from "./lib/agentSessionMetrics";
   import AgentTimeline from "./lib/components/AgentTimeline.svelte";
   import DiskSpaceView from "./lib/components/DiskSpaceView.svelte";
   import DiagnosticsOverlay from "./lib/components/DiagnosticsOverlay.svelte";
@@ -837,6 +838,7 @@
         unlistenActivity?.(); unlistenActivity = null;
         unlistenDiffs?.(); unlistenDiffs = null;
         unlistenCost?.(); unlistenCost = null;
+        clearAgentSessionMetrics(); // CPE-1107: no listener of its own — clear alongside the others
         if (watchRefreshTimer) { clearTimeout(watchRefreshTimer); watchRefreshTimer = null; }
       }
     } finally {
