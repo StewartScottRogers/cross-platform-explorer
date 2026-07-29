@@ -33,6 +33,8 @@ updater.pw
 
 # Workshift raw per-agent metrics (transient/noisy; the distilled history.md IS committed)
 .claude/workshift-metrics/ledger.jsonl
+# Workshift concurrency lock (per-machine, transient; never committed)
+.claude/workshift-metrics/WORKSHIFT-LOCK
 
 # Generated catalog bundle (produced by CI / catalog-sign)
 catalog-out/
