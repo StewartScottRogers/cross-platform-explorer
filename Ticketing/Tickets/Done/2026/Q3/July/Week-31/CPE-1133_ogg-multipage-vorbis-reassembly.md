@@ -4,7 +4,7 @@ title: "OGG metadata reader: reassemble the Vorbis-comment packet across pages (
 type: bug
 component: Backend
 priority: medium
-status: Backlog
+status: Done
 tags: ready
 created: 2026-07-29
 epic: CPE-1002
