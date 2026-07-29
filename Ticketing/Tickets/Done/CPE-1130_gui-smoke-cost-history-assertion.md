@@ -2,12 +2,12 @@
 id: CPE-1130
 title: QA — fold the cost-History visual residual into gui-smoke CI (burn down an MVD row)
 type: Test
-status: Open
+status: Done
 priority: Medium
 component: CI
 estimate: 1h
 created: 2026-07-29
-closed:
+closed: 2026-07-29
 tags: [ready]
 ---
 
@@ -39,7 +39,24 @@ build, so this surface is pinned by CI and never regresses to manual eyeballing.
 
 ## Resolution
 
-*(Agent writes this when closing — do not fill in)*
+Landed via **PR #446** (squash-merged to `main` as `a9ff7e83`). The `gui-smoke` job now seeds a synthetic
+3-record `agent-metrics/history.jsonl` fixture (schema exactly matching `SessionMetricsRecord`, verified by
+Rust's own `camelcase_wire_shape_matches_the_frontend` test) and asserts `.hd-bar`/`.hd-totals`/`.hd-stat`/
+`.hd-table` render on the real build — falsifiable (empty fixture → `tl-empty`, zero `.hd-bar` nodes → the
+`waitUntil` fails loudly). **Bonus real fix:** the build-and-run uncovered a pre-existing UX bug — the Agent
+Watch drawer's 5-tab strip overflowed the 340px drawer at the default 1000×700, leaving the History tab
+unclickable off-screen; fixed with a scoped `.tl-tabbar` flex-wrap + reduced min-width (no main-tabbar
+regression). Reaching the drawer headlessly uses a `--test-mode`-gated `window.__CPE_TEST_INGEST_SESSION__`
+hook (absent from production builds).
+
+**Gauntlet:** Reviewer (opus) **APPROVE** — confirmed the test hook is gated to `--test-mode` only (zero
+production surface), the CSS is confined to `.tl-tabbar`, the assertion is genuinely falsifiable, the fixture
+matches the real struct, and a 3-way test-merge yields the correct burndown (MVD=8). UAT (sonnet) **UAT PASS**
+— independently matched the fixture to the struct, confirmed the hook gating in the Rust source, and ran
+npm check (0) + vitest (47/47) + the Rust journal tests (6/6). CI: all blocking jobs green; the `gui-smoke`
+job itself is non-blocking (`continue-on-error`, CPE-1048) and the author verified it green in a real local
+tauri-driver run. Nits (non-blocking, left as-is): a stale MVD number in this ticket's own note and a dangling
+doc reference in `wdio.conf.ts`.
 
 ## Work Log
 
