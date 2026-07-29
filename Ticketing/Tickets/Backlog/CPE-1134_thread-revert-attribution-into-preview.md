@@ -84,6 +84,20 @@ deferred GUI cap CPE-1126).
 - Verified: `cargo build`, `cargo test` (1072 tests total across `crates/server`, 0 failed), and
   `cargo clippy --all-targets -- -D warnings` all clean.
 
+## Review fix (2026-07-29, Foreman-applied per opus reviewer CHANGES REQUESTED)
+- **Safety defect fixed:** the `since_ts` lookup fell back to `.unwrap_or(0)` when a `manifest_id` was absent
+  from the on-disk index (a torn/corrupt index row can leave the manifest present but its index entry gone).
+  `ts: 0` makes `agent_touched` keep the session's ENTIRE history → a *superset* touched-set → *fewer* drift
+  warnings → **strictly less safe than `None`** (a false-negative in a destructive-rollback warning). Replaced
+  with a `match` that degrades to the conservative empty touched-set (`BTreeSet::new()`, warn about every
+  diverging path) when the index entry is missing — every branch is now ≥ as safe as `None`. Corrected the
+  now-false doc lines on `checkpoint_preview_revert` accordingly.
+- **Test gap closed:** added `preview_with_session_ignores_pre_checkpoint_events` — seeds a session event dated
+  *before* the checkpoint and asserts the post-checkpoint divergence is still flagged as drift, proving the
+  real `Checkpoint.ts` bounds attribution (this test would fail under the old `unwrap_or(0)`).
+- Re-verified `crates/server`: 1063 lib tests pass (0 failed), `cargo clippy --all-targets -- -D warnings`
+  clean. `src-tauri` signature unchanged (reviewer already confirmed it compiles).
+
 ## Notes
 - Queued in `.claude/workshift-metrics/CHECKPOINT.md` as "CPE-732 optional headless follow-up — thread
   `revert_attribution` into `checkpoint_preview_revert` so drift flags only *truly-outside* changes."

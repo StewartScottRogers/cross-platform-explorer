@@ -262,9 +262,11 @@ pub fn checkpoint_list(ctx: &dyn ServerCtx, root: &str) -> Result<Vec<Checkpoint
 ///   at/after this checkpoint's index `ts` (the `Checkpoint.ts` this `manifest_id` was recorded under
 ///   — looked up via [`read_checkpoints`], since the captured [`restore_plan::Snapshot`] itself is
 ///   just a path→state map with no timestamp of its own); only paths outside that set are drift. A
-///   missing/empty journal, or a `manifest_id` absent from the index (defensive; falls back to `ts:
-///   0`, i.e. "every event counts"), folds to a touched-set that is empty or a superset — never a
-///   panic, never less safe than `None`.
+///   missing/empty journal folds to an empty touched-set (every diverging path is drift). If the
+///   `manifest_id` is absent from the on-disk index (defensive: a torn/corrupt index row can leave
+///   the manifest present but its entry missing) we cannot bound `sess`'s history to this checkpoint,
+///   so we **degrade to the conservative empty touched-set** — warn about every diverging path, exactly
+///   like `None`. Every branch is at least as safe as `None` and never panics.
 pub fn checkpoint_preview_revert(
     ctx: &dyn ServerCtx,
     root: &str,
@@ -282,13 +284,24 @@ pub fn checkpoint_preview_revert(
         // reported as drift (conservative warn). See `RevertPreview`'s doc.
         None => std::collections::BTreeSet::new(),
         Some(sess) => {
-            let since_ts = read_checkpoints(&store_dir)
+            // Attribution needs this checkpoint's recorded timestamp so only mutations at/after it
+            // count as the agent's own. If the `manifest_id` is absent from the on-disk index
+            // (defensive: a torn/corrupt index row can leave the manifest present but its entry
+            // missing), we cannot bound `sess`'s history to this checkpoint — so degrade to the
+            // conservative empty touched-set (warn about every diverging path), exactly like `None`.
+            // Falling back to `ts: 0` would instead keep the session's ENTIRE history, attributing
+            // more paths away and suppressing real outside-drift warnings — strictly less safe.
+            match read_checkpoints(&store_dir)
                 .into_iter()
                 .find(|c| c.manifest_id == manifest_id)
                 .map(|c| c.ts)
-                .unwrap_or(0);
-            let events = audit_journal::read_session(&audit_base(ctx)?, sess);
-            revert_attribution::agent_touched(&events, sess, since_ts, root)
+            {
+                Some(since_ts) => {
+                    let events = audit_journal::read_session(&audit_base(ctx)?, sess);
+                    revert_attribution::agent_touched(&events, sess, since_ts, root)
+                }
+                None => std::collections::BTreeSet::new(),
+            }
         }
     };
     let classified = classify_plan(&plan, &checkpoint, &current, &touched);
@@ -556,6 +569,55 @@ mod tests {
         assert_eq!(attributed.drift_count, 1, "only b.txt (a different session) is drift");
         assert_eq!(attributed.drift_paths, vec!["b.txt".to_string()]);
         assert!(!attributed.drift_paths.contains(&"a.txt".to_string()), "agent-1's own edit isn't drift");
+
+        let _ = fs::remove_dir_all(&root);
+        let _ = fs::remove_dir_all(&app);
+    }
+
+    /// CPE-1134 (review follow-up): attribution is bounded by the checkpoint's *real* recorded `ts`, not
+    /// `0`. A session event that predates the checkpoint must NOT be attributed away — the agent
+    /// touching a path *before* the checkpoint says nothing about who diverged it *after*. This guards
+    /// the earlier `unwrap_or(0)` hazard (a `0` floor would keep pre-checkpoint events and wrongly
+    /// suppress the drift warning).
+    #[test]
+    fn preview_with_session_ignores_pre_checkpoint_events() {
+        let app = scratch("app-data-pre-cp");
+        let ctx = HeadlessCtx::new(&app);
+        let root = scratch("root-pre-cp");
+        fs::write(root.join("a.txt"), b"a original").unwrap();
+        let root_s = root.to_string_lossy().to_string();
+
+        let created = checkpoint_create(&ctx, &root_s, "cp").unwrap();
+        let manifest_id = created.checkpoint.manifest_id.clone();
+        let checkpoint_ts = created.checkpoint.ts;
+        assert!(checkpoint_ts >= 1, "epoch-ms checkpoint ts should be well above 0");
+
+        // a.txt diverges after the checkpoint, but the ONLY journal event for the reverting session is
+        // dated BEFORE the checkpoint — so it must not attribute a.txt away.
+        fs::write(root.join("a.txt"), b"a edited after checkpoint").unwrap();
+        let base = audit_base(&ctx).unwrap();
+        audit_journal::record(
+            &base,
+            &audit_journal::AuditEvent {
+                ts: checkpoint_ts - 1,
+                session: "agent-1".into(),
+                kind: "modified".into(),
+                path: format!("{root_s}/a.txt"),
+                actor: None,
+                detail: None,
+            },
+            audit_journal::MAX_EVENTS_PER_SESSION,
+        )
+        .unwrap();
+
+        let preview =
+            checkpoint_preview_revert(&ctx, &root_s, &manifest_id, Some("agent-1")).unwrap();
+        assert_eq!(preview.total, 1);
+        assert_eq!(
+            preview.drift_count, 1,
+            "a pre-checkpoint event must not attribute the post-checkpoint divergence away"
+        );
+        assert_eq!(preview.drift_paths, vec!["a.txt".to_string()]);
 
         let _ = fs::remove_dir_all(&root);
         let _ = fs::remove_dir_all(&app);
