@@ -327,3 +327,35 @@ headless scope and cut v0.57.37. Drained the last 3 genuinely-headless tickets, 
 attended GUI / big-design / user-resource. The *honest* headless work left (queued for next shift, unbuilt):
 OGG read-side multi-page packet reassembly (a real correctness bug), CPE-732 revert_attribution threading,
 and a gui-smoke extension for the CPE-1114 cost-History visual residual. Full detail in `CHECKPOINT.md`.
+
+## 2026-07-29 (workshift — Ticketing/ container realignment + QA burndown)
+
+Triggered right after the CPE-1128 `Tickets/ → Ticketing/` restructure. Assignment: CPE-1129 (realign the
+sidecars to the new container). Shipped it + one QA follow-up, then the headless well was tapped (same
+finding as prior shifts — remainder is user-gated GUI/big-design).
+
+**Shipped (2 workers, both sonnet, 0 rework, both merged, full 2-check gauntlet each):**
+- CPE-1129 (#445) — standalone `agent-board` sidecar now reads Epics (`Ticketing/Epics/`) + Sprints
+  (`Ticketing/Sprints/`) at parity with the in-process board; added `/api/epics` + `/api/sprints` + a
+  Board/Epics/Sprints view switcher. `ticket_mcp` + `ai-console` audited already-correct. Reviewer opus
+  APPROVE + UAT real-HTTP PASS (negative check: old `Tickets/Epics/` correctly excluded).
+- CPE-1130 (#446) — `gui-smoke` now pins the CPE-1114 cost-History render; the real build uncovered + fixed
+  a genuine bug (AgentTimeline 5-tab strip overflowed the 340px drawer at default 1000×700 → History tab
+  unclickable off-screen; scoped `.tl-tabbar` flex-wrap fix). Reviewer opus APPROVE + UAT PASS.
+
+**Metrics:** 2 merged · gauntlet CPE-1129 ~16m / CPE-1130 ~39m (worker ran real gui-smoke 3×) · 0 retries ·
+0 escaped-defects · opus-reviewer + sonnet-UAT gate on both.
+
+**QA:** MVD 7→8 (row #9: standalone-board switcher live-browser click-through, deferred by CPE-1129 UAT);
+CPE-1114 cost-History flipped to automated (pinned by gui-smoke via CPE-1130).
+
+**Tuned defaults (seed next shift):** sonnet worker + opus reviewer + sonnet UAT held clean (0 rework). This
+machine HAS cargo + tauri-driver + msedgedriver → a worker CAN run the real gui-smoke locally (~30-40m) and
+it's worth it (found a real bug that way). No cargo workspace — check each crate dir. Greedy-sed hazard:
+`Ticketing/Tickets` → `Ticketing/Ticketing` (cost CPE-1128 a CI red) — make targeted edits.
+
+**Frontier (unchanged):** headless well tapped. Honest-headless-but-unbuilt: OGG multi-page reassembly
+(couldn't cleanly locate this shift), CPE-732 revert_attribution threading. Rest user-gated (CPE-002 signing,
+format decoders, CPE-672/674 drag-out, CPE-1126 restore panel).
+
+**Budget:** ~9 sub-agents (2 workers + 2 reviewers + 2 UAT + Foreman recon). Nowhere near the 200 cap.
