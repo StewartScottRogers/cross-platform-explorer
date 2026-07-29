@@ -4,7 +4,7 @@ The authoritative list of every app aspect that still needs a **human** to verif
 that will retire each one. The QA Architect drives the **still-manual count (MVD) toward zero** and never
 lets an automated row silently regress. Charter + rules: [README.md](README.md).
 
-**MVD (still-manual surfaces): 7** · _baseline seeded 2026-07-25; row #8 flipped ✅ (CPE-1049); row #6's download/verify sub-surface automated (CPE-1058) — row stays in MVD for the still-attended in-place binary swap._
+**MVD (still-manual surfaces): 8** · _baseline seeded 2026-07-25; row #8 flipped ✅ (CPE-1049); row #6's download/verify sub-surface automated (CPE-1058) — row stays in MVD for the still-attended in-place binary swap; row #9 added 2026-07-29 (CPE-1129 UAT deferred the standalone-board switcher's live-browser click-through)._
 
 ## Legend
 `⛰ manual` = still needs human eyes · `🔧 in progress` = automation ticket open · `✅ automated` = retired,
@@ -22,6 +22,7 @@ pinned by a CI/guard job (must never regress).
 | 6 | **Auto-update flow** (updater downloads, verifies signature, swaps in place) | manifest shape + minisign signature + version match automated by `crates/updater-verify` (CPE-1058, **merged** PR #376) | 🟡 partial — download/verify automated & pinned; binary-swap still attended | **Done for the download/verify/version sub-surface** — hermetic `crates/updater-verify` unit tests (manifest shape + minisign signature verify against the configured pubkey + version match) pinned on the 3-OS `Server crates` CI job, plus a `release.yml` guard (`verify-release-artifacts`, skips cleanly without signing secrets) re-checking the real built artifacts. **Residual still-manual: the in-place binary swap on each OS only** (needs a running app/GUI runner — kept in MVD) | CPE-1058 |
 | 7 | **Real remote network run** (non-loopback client↔server over the wire) | loopback via `cpe-net` example + unit tests | ⛰ manual | Containerised two-host network E2E in CI (server container + client), asserting listing over a real socket | CPE-819/820 |
 | 8 | **Native OS metadata interop** (ADS on Win, xattr on Linux) verified with OS tools | **self-asserting `cargo test`** (`native_meta_os_interop.rs`) reads back via the OS's own path (`file:stream` on Win / `getfattr` on Linux / `xattr` on macOS) and compares bytes | ✅ automated | Done — pinned by the `Backend` + `Server crates` 3-OS `cargo test` jobs (ubuntu leg now installs `attr` so `getfattr` always runs) | CPE-1049 |
+| 9 | **Standalone agent-board sidecar UI** (Board/Epics/Sprints view-switcher click-to-swap in a live browser) | HTTP/HTML surface asserted: agent-board `ui.rs` tests + CPE-1129 UAT curled `/api/cards`+`/api/epics`+`/api/sprints` and asserted the switcher DOM/endpoints; live-browser click behavior unverified | ⛰ manual | Fold the served sidecar UI into a `gui-smoke`-style headless drive (launch the sidecar, drive the loopback URL with WebDriver, click each view button, assert the list swaps) | _unfiled_ |
 
 ## Already automated (the ratchet — must never regress to manual)
 
