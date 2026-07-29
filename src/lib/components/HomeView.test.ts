@@ -108,3 +108,28 @@ describe("HomeView Recent remove (CPE-341)", () => {
     expect(removeRecent).toHaveBeenCalledWith("/home/a.md");
   });
 });
+
+describe("HomeView Recent single-click selects for preview, double-click opens (CPE-1132)", () => {
+  it("a single click dispatches select with the row's path and does NOT open it", async () => {
+    const { component } = render(HomeView, { places: [], drives: [], pins: [], recents, favorites: [] });
+    const select = vi.fn();
+    const openFile = vi.fn();
+    component.$on("select", (e) => select(e.detail));
+    component.$on("openFile", (e) => openFile(e.detail));
+
+    await fireEvent.click(screen.getByText("a.md"));
+
+    expect(select).toHaveBeenCalledWith("/home/a.md");
+    expect(openFile).not.toHaveBeenCalled();
+  });
+
+  it("a double click still dispatches openFile with the row's path", async () => {
+    const { component } = render(HomeView, { places: [], drives: [], pins: [], recents, favorites: [] });
+    const openFile = vi.fn();
+    component.$on("openFile", (e) => openFile(e.detail));
+
+    await fireEvent.dblClick(screen.getByText("b.md"));
+
+    expect(openFile).toHaveBeenCalledWith("/home/b.md");
+  });
+});

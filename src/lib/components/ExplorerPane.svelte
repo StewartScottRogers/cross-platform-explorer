@@ -231,6 +231,10 @@
   const dispatch = createEventDispatcher<{
     navigate: string;
     openRecent: string;
+    /** Display-only Home selection (CPE-1132): a single-clicked Recent/Favorite file should drive
+     *  the right preview/detail pane without becoming a FileList op target — forwarded from
+     *  `<HomeView>`'s `select` event since Home has no `<FileList>`/`selectedEntries` of its own. */
+    homeSelect: string;
     unpin: string;
     unfavorite: string;
     removeRecent: string;
@@ -289,6 +293,7 @@
     {recentFolders}
     on:navigate={(e) => dispatch("navigate", e.detail)}
     on:openFile={(e) => dispatch("openRecent", e.detail)}
+    on:select={(e) => dispatch("homeSelect", e.detail)}
     on:unpin={(e) => dispatch("unpin", e.detail)}
     on:unfavorite={(e) => dispatch("unfavorite", e.detail)}
     on:removeRecent={(e) => dispatch("removeRecent", e.detail)}
