@@ -2,12 +2,12 @@
 id: CPE-1129
 title: Realign the sidecars to the Ticketing/ container (verify ticket/epic/sprint directory reads)
 type: Task
-status: In Progress
+status: Done
 priority: High
 component: Backend
 estimate: 2h
 created: 2026-07-29
-closed:
+closed: 2026-07-29
 tags: [ready]
 ---
 
@@ -44,7 +44,22 @@ resolves ticket, epic, or sprint directories must also be verified against the n
 
 ## Resolution
 
-*(Agent writes this when closing — do not fill in)*
+Realigned via **PR #445** (squash-merged to `main` as `d08afd17`). Audit found `ticket_mcp` and
+`ai-console` already correct post-CPE-1128; the real gap was the standalone `sidecar/agent-board`, which
+read only status columns. Took the **parity** path: added `read_epics()` (unions `Ticketing/Epics/` +
+top-level `Ticketing/Tickets/Done/` epic-tagged tickets, mirroring the in-process `board_epics_impl`) and
+`read_sprints()` (`Ticketing/Sprints/`), wired `GET /api/epics` + `GET /api/sprints`, and added a
+Board/Epics/Sprints view switcher to the served HTML — all dependency-free. Fixed several stale
+pre-CPE-1128 doc strings as AC-5. All paths use `Path::join` (no `Ticketing/Ticketing/` sed hazard).
+
+**Gauntlet:** Reviewer (opus) **APPROVE** — correctness verified against the in-process reference, tests
+exercise the sibling locations + closed-in-Done + negative cases, no new deps, sprints view in-scope.
+UAT (sonnet) **UAT PASS** — drove the real `serve()` router over HTTP against a temp `Ticketing/` tree;
+`/api/epics` + `/api/sprints` resolve from the new sibling dirs, and old `Tickets/Epics/`/`Tickets/Sprints/`
+fixtures are correctly **excluded** (real negative check). CI: all blocking jobs green across the 3-OS
+matrix (backend / server crates / sidecar platform / frontend); the non-blocking GUI-smoke doesn't touch
+this surface. One deferral logged as manual-test-debt (burndown row #9): live-browser click-through of the
+new switcher (needs build→deploy→run) — the HTTP/HTML surface itself is verified.
 
 ## Work Log
 
