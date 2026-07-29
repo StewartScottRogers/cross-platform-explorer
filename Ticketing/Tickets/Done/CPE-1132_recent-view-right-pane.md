@@ -2,12 +2,12 @@
 id: CPE-1132
 title: "Recent" middle-pane view doesn't drive the right (preview/detail) pane like normal views
 type: Defect
-status: In Progress
+status: Done
 priority: Medium
 component: Frontend
 estimate:
 created: 2026-07-29
-closed:
+closed: 2026-07-29
 tags: [ready]
 ---
 
@@ -102,3 +102,13 @@ Favorites/Folders tabs and folder-row navigation were left untouched (ticket's f
   selection→preview/op wiring). Opened PR against `main`; not merged. Live-GUI verification
   (actually clicking Recent in the running app and eyeballing the preview pane) is pending the
   Foreman.
+
+## Resolution
+
+Fixed via **PR #447** (merged to `main` as `5b862dfd`). Home's Recent tab is a `HomeView` dashboard, not a
+`FileList`, so it never produced the `selectedEntries` that drive the right pane. Added a display-only
+Home-preview path: a Recent single-click dispatches `select` → `ExplorerPane` forwards `homeSelect` →
+`App.selectHomeEntry()` resolves the path to a real `DirEntry` via `commands.entriesForPaths([path])` and
+sets `homePreview`; `PreviewPane`/`DetailsPane` fall back to it only when `selectedEntries` is empty, and it
+clears reactively so it never leaks into the op-selection. Double-click still opens. npm check clean, vitest
+1316 pass (+ new HomeView/ExplorerPane tests), Foreman-reviewed, blocking CI green.
