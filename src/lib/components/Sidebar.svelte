@@ -320,7 +320,7 @@
       <Icon name="code" />
       <span class="label">{$t("sidebar.repositories")}</span>
     </button>
-    <button class="nav-item" title="Agent Board — Kanban over this folder's Tickets/" on:click={() => dispatch("board")}>
+    <button class="nav-item" title="Agent Board — Kanban over this folder's Ticketing/" on:click={() => dispatch("board")}>
       <span class="twisty hidden" />
       <Icon name="documents" />
       <span class="label">Agent Board</span>

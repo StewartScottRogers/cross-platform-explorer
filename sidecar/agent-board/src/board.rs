@@ -1,4 +1,4 @@
-//! The Agent Board's Kanban model over `Tickets/` (CPE-852, epic CPE-850).
+//! The Agent Board's Kanban model over `Ticketing/Tickets/` (CPE-852, epic CPE-850).
 //!
 //! Reimplemented **inside the sidecar** — it must not depend on `cpe-server` or the app (ADR 0001) — so
 //! the board reads and moves the same real markdown files the CLI `/ticketing-*` flow uses, staying one
@@ -11,8 +11,14 @@ use std::path::{Path, PathBuf};
 
 use serde::Serialize;
 
-/// The Kanban columns — exactly the workflow status folders under `Tickets/`.
+/// The Kanban columns — exactly the workflow status folders under `Ticketing/Tickets/`.
 pub const COLUMNS: [&str; 5] = ["Backlog", "Doing", "Blocked", "Deferred", "Done"];
+
+/// The status-flow queue root under a project root: `<root>/Ticketing/Tickets/` (CPE-1128 — the
+/// `Ticketing/` container holds the status folders alongside the sibling `Epics/`/`Sprints/` queues).
+fn tickets_dir(root: &Path) -> PathBuf {
+    root.join("Ticketing").join("Tickets")
+}
 
 /// The folder for a column (the folder IS the status); case-insensitive match to the canonical name.
 pub fn folder_for_column(column: &str) -> Option<&'static str> {
@@ -131,12 +137,12 @@ pub fn set_status(md: &str, new_status: &str) -> String {
     out
 }
 
-/// Walk up from `start` to the nearest ancestor containing a `Tickets/` folder (so the board auto-finds
-/// the project it's pointed at). `None` when none does.
+/// Walk up from `start` to the nearest ancestor containing a `Ticketing/` folder (so the board auto-finds
+/// the project it's pointed at). `None` when none does. Keys on the `Ticketing/` container since CPE-1128.
 pub fn nearest_project_root(start: &Path) -> Option<PathBuf> {
     let mut dir = Some(start);
     while let Some(d) = dir {
-        if d.join("Tickets").is_dir() {
+        if d.join("Ticketing").is_dir() {
             return Some(d.to_path_buf());
         }
         dir = d.parent();
@@ -144,12 +150,12 @@ pub fn nearest_project_root(start: &Path) -> Option<PathBuf> {
     None
 }
 
-/// Read every ticket under `root/Tickets/<column>/*.md` into cards. Unreadable dirs/files and
+/// Read every ticket under `root/Ticketing/Tickets/<column>/*.md` into cards. Unreadable dirs/files and
 /// id-less files are skipped (never fails the listing). Sorted by column order then id.
 pub fn read_board(root: &Path) -> Vec<Card> {
     let mut cards = Vec::new();
     for column in COLUMNS {
-        let dir = root.join("Tickets").join(column);
+        let dir = tickets_dir(root).join(column);
         let Ok(entries) = fs::read_dir(&dir) else { continue };
         for entry in entries.flatten() {
             let path = entry.path();
@@ -171,12 +177,12 @@ pub fn read_board(root: &Path) -> Vec<Card> {
     cards
 }
 
-/// Find the file backing ticket `id` under `root/Tickets/<column>/`, returning `(path, column)`. Searches
-/// **recursively** so an archived Done ticket (in a dated `Done/YYYY/…` subfolder) is still found and can
-/// be moved/reopened (CPE-864).
+/// Find the file backing ticket `id` under `root/Ticketing/Tickets/<column>/`, returning `(path, column)`.
+/// Searches **recursively** so an archived Done ticket (in a dated `Done/YYYY/…` subfolder) is still found
+/// and can be moved/reopened (CPE-864).
 fn find_card_file(root: &Path, id: &str) -> Option<(PathBuf, &'static str)> {
     for column in COLUMNS {
-        let dir = root.join("Tickets").join(column);
+        let dir = tickets_dir(root).join(column);
         if let Some(hit) = find_in_dir(&dir, id, column) {
             return Some(hit);
         }
@@ -203,7 +209,7 @@ fn find_in_dir(dir: &Path, id: &str, column: &'static str) -> Option<(PathBuf, &
     None
 }
 
-/// Collect archived Done tickets — those in **subdirectories** of `Tickets/Done/` (the dated `YYYY/QN/…`
+/// Collect archived Done tickets — those in **subdirectories** of `Ticketing/Tickets/Done/` (the dated `YYYY/QN/…`
 /// folders `/ticketing-organize` produces). Top-level files are "recent" and come from [`read_board`];
 /// anything nested is archived (CPE-864, mirroring the in-process board's CPE-531).
 fn collect_archived(dir: &Path, top_level: bool, column: &str, out: &mut Vec<Card>) {
@@ -226,7 +232,7 @@ fn collect_archived(dir: &Path, top_level: bool, column: &str, out: &mut Vec<Car
 /// (CPE-864). Kept separate from [`read_board`] so the default board stays fast as Done grows. Id-sorted.
 pub fn read_archived(root: &Path) -> Vec<Card> {
     let mut out = Vec::new();
-    collect_archived(&root.join("Tickets").join("Done"), true, "Done", &mut out);
+    collect_archived(&tickets_dir(root).join("Done"), true, "Done", &mut out);
     out.sort_by(|a, b| a.id.cmp(&b.id));
     out
 }
@@ -243,7 +249,7 @@ pub fn move_card(root: &Path, id: &str, to_column: &str) -> Result<String, Strin
     let updated = set_status(&md, status);
 
     let file_name = src.file_name().ok_or("bad file name")?;
-    let dest_dir = root.join("Tickets").join(to);
+    let dest_dir = tickets_dir(root).join(to);
     fs::create_dir_all(&dest_dir).map_err(|e| e.to_string())?;
     let dest = dest_dir.join(file_name);
 
@@ -263,7 +269,7 @@ mod tests {
     use super::*;
 
     fn write_ticket(root: &Path, column: &str, id: &str, status: &str) {
-        let dir = root.join("Tickets").join(column);
+        let dir = tickets_dir(root).join(column);
         fs::create_dir_all(&dir).unwrap();
         let md = format!(
             "---\nid: {id}\ntitle: \"{id} title\"\ntype: feature\nstatus: {status}\npriority: low\ntags: [ready]\n---\n\n## Summary\nbody\n"
@@ -314,8 +320,8 @@ mod tests {
         let new_col = move_card(root, "CPE-9", "Doing").unwrap();
         assert_eq!(new_col, "Doing");
         // File moved out of Backlog into Doing…
-        assert!(!root.join("Tickets/Backlog/CPE-9_x.md").exists());
-        let moved = root.join("Tickets/Doing/CPE-9_x.md");
+        assert!(!root.join("Ticketing/Tickets/Backlog/CPE-9_x.md").exists());
+        let moved = root.join("Ticketing/Tickets/Doing/CPE-9_x.md");
         assert!(moved.exists());
         // …with its status rewritten.
         let md = fs::read_to_string(&moved).unwrap();
@@ -338,7 +344,7 @@ mod tests {
     fn nearest_project_root_finds_tickets() {
         let tmp = tempfile::tempdir().unwrap();
         let root = tmp.path();
-        fs::create_dir_all(root.join("Tickets/Backlog")).unwrap();
+        fs::create_dir_all(root.join("Ticketing/Tickets/Backlog")).unwrap();
         let deep = root.join("a/b");
         fs::create_dir_all(&deep).unwrap();
         assert_eq!(nearest_project_root(&deep).as_deref(), Some(root));
@@ -346,7 +352,7 @@ mod tests {
 
     // Write a ticket into a nested archive subfolder of Done/ (CPE-864).
     fn write_archived(root: &Path, sub: &str, id: &str) {
-        let dir = root.join("Tickets/Done").join(sub);
+        let dir = tickets_dir(root).join("Done").join(sub);
         fs::create_dir_all(&dir).unwrap();
         let md = format!(
             "---\nid: {id}\ntitle: \"{id} title\"\ntype: feature\nstatus: Done\npriority: low\ntags: [ready]\nclosed: 2026-07-21\n---\n\nbody\n"
@@ -380,8 +386,8 @@ mod tests {
         // Reopen the archived ticket: move recursively finds it and relocates it to the target column root.
         let col = move_card(root, "CPE-300", "Doing").unwrap();
         assert_eq!(col, "Doing");
-        assert!(root.join("Tickets/Doing/CPE-300_x.md").exists());
-        assert!(!root.join("Tickets/Done/2026/Q3/July/Week-30/CPE-300_x.md").exists());
+        assert!(root.join("Ticketing/Tickets/Doing/CPE-300_x.md").exists());
+        assert!(!root.join("Ticketing/Tickets/Done/2026/Q3/July/Week-30/CPE-300_x.md").exists());
         assert_eq!(read_board(root).iter().find(|c| c.id == "CPE-300").unwrap().column, "Doing");
     }
 
@@ -397,7 +403,7 @@ mod tests {
         let col = move_card(root, "CPE-400", "Done").unwrap();
         assert_eq!(col, "Done");
         // The nested archived original is gone…
-        assert!(!root.join("Tickets/Done/2026/Q3/July/Week-30/CPE-400_x.md").exists(), "nested original removed");
+        assert!(!root.join("Ticketing/Tickets/Done/2026/Q3/July/Week-30/CPE-400_x.md").exists(), "nested original removed");
         // …and the ticket now backs exactly one file across the active board + the archive.
         let active = read_board(root).into_iter().filter(|c| c.id == "CPE-400").count();
         let archived = read_archived(root).into_iter().filter(|c| c.id == "CPE-400").count();

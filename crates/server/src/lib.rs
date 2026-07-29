@@ -152,7 +152,7 @@ pub mod replay_transport;
 /// `audit_journal::read_session`, `replay::bounds`, and `activity_timeline::summarize`.
 pub mod replay_session;
 
-/// Agent Board backend (CPE-520): read the repo's `Tickets/` folders as Kanban cards + move a card
+/// Agent Board backend (CPE-520): read the repo's `Ticketing/` folders as Kanban cards + move a card
 /// between columns. Pure card/frontmatter logic (the Tauri commands do the file I/O).
 pub mod ticket_board;
 

@@ -469,7 +469,7 @@
   let patternSelectOpen = false;
   /** Repositories browser overlay (CPE-434/435) — browse GitHub & other forges in-app. */
   let showRepos = false;
-  /** Agent Board (CPE-521) — Kanban over the current folder's Tickets/. */
+  /** Agent Board (CPE-521) — Kanban over the current folder's Ticketing/. */
   let showBoard = false;
   /** Integrated workbench (CPE-526) — git diff of the current folder. */
   let showWorkbench = false;

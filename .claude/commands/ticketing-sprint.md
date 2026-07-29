@@ -12,7 +12,7 @@ are we doing *now/next*" grouping. It is **orthogonal to epics**: an epic is a *
 decomposed just-in-time; a sprint is a *time-boxed* selection that can pull tickets from **any** epic
 (or none). A single ticket may belong to both an epic (`epic:`) and a sprint (`sprint:`) at once.
 
-Sprints live in **`Tickets/Sprints/`**, one markdown file per sprint, id **`SPR-NN`** (two digits,
+Sprints live in **`Ticketing/Sprints/`**, one markdown file per sprint, id **`SPR-NN`** (two digits,
 sequential — `SPR-01`, `SPR-02`, …; a **separate** sequence from `CPE-NNN`). Membership is authoritative
 via the **`sprint: SPR-NN`** frontmatter field on member tickets (so progress is countable by globbing);
 the sprint file's `## Tickets` section is a human-readable mirror kept in step on assign/remove.
@@ -53,7 +53,7 @@ One or two lines: what this sprint aims to land.
 
 ## `list` (default)
 
-1. Glob `Tickets/Sprints/SPR-*.md`. Read frontmatter (id, title, status, start, end) + the Goal line.
+1. Glob `Ticketing/Sprints/SPR-*.md`. Read frontmatter (id, title, status, start, end) + the Goal line.
 2. For each sprint, count member progress: glob every ticket whose `sprint:` frontmatter equals this
    sprint's id, across `Backlog/ Doing/ Blocked/ Deferred/ Done/`, and report `X of Y tickets Done`.
 3. Render (Active first, then Planned):
@@ -80,8 +80,8 @@ One or two lines: what this sprint aims to land.
 
 ## `new "<name>"`
 
-1. Next id: scan `Tickets/**/SPR-*.md` for the highest `SPR-NN`, add 1 (zero-pad to 2).
-2. Create `Tickets/Sprints/SPR-NN_<slug>.md` with the shape above: `status: Planned`, `start`/`end`
+1. Next id: scan `Ticketing/**/SPR-*.md` for the highest `SPR-NN`, add 1 (zero-pad to 2).
+2. Create `Ticketing/Sprints/SPR-NN_<slug>.md` with the shape above: `status: Planned`, `start`/`end`
    (default `end` = start + 2 weeks unless the user gives one), a Goal, and an empty `## Tickets` list.
 3. Report the created sprint and offer to `activate` it or `assign` tickets.
 

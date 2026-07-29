@@ -5,10 +5,10 @@
 //! into a tiny router over the [`crate::board`] model:
 //!
 //! - `GET /`            → the Kanban page (HTML + JS).
-//! - `GET /api/cards`   → the cards under `Tickets/` as JSON.
+//! - `GET /api/cards`   → the cards under `Ticketing/` as JSON.
 //! - `POST /api/move`   → `{ id, to }` moves a card; replies with the refreshed cards.
 //!
-//! Loopback-only, so it isn't reachable off the machine. Reads/writes the real `Tickets/` files at the
+//! Loopback-only, so it isn't reachable off the machine. Reads/writes the real `Ticketing/` files at the
 //! `root` the sidecar was pointed at (`main` resolves it; host-brokered context is CPE-853).
 
 use std::io::{BufRead, BufReader, Read, Write};
@@ -32,7 +32,7 @@ impl UiServer {
 }
 
 /// Serve the board UI over an ephemeral loopback port for the process's lifetime, reading/writing the
-/// `Tickets/` under `root`.
+/// `Ticketing/` under `root`.
 pub fn serve(root: PathBuf) -> Result<UiServer, String> {
     let listener = TcpListener::bind("127.0.0.1:0").map_err(|e| e.to_string())?;
     let port = listener.local_addr().map_err(|e| e.to_string())?.port();
@@ -225,7 +225,7 @@ mod tests {
     use std::fs;
 
     fn seed(root: &Path, column: &str, id: &str) {
-        let dir = root.join("Tickets").join(column);
+        let dir = root.join("Ticketing").join("Tickets").join(column);
         fs::create_dir_all(&dir).unwrap();
         fs::write(
             dir.join(format!("{id}_x.md")),
@@ -275,8 +275,8 @@ mod tests {
         let moved = post(server.port, "/api/move", "{\"id\":\"CPE-1\",\"to\":\"Doing\"}");
         assert!(moved.contains("200 OK"), "resp: {moved}");
         assert!(moved.contains("Doing"));
-        assert!(root.join("Tickets/Doing/CPE-1_x.md").exists());
-        assert!(!root.join("Tickets/Backlog/CPE-1_x.md").exists());
+        assert!(root.join("Ticketing/Ticketing/Doing/CPE-1_x.md").exists());
+        assert!(!root.join("Ticketing/Ticketing/Backlog/CPE-1_x.md").exists());
 
         // A bad move is a 400.
         let bad = post(server.port, "/api/move", "{\"id\":\"CPE-1\",\"to\":\"Nope\"}");

@@ -163,31 +163,32 @@ The desktop app manages releases and monitoring:
 
 ### Using both together
 
-The ticket system (`Tickets/`, `.claude/commands/`) is committed to git, so tickets filed from the
+The ticket system (`Ticketing/`, `.claude/commands/`) is committed to git, so tickets filed from the
 CLI are visible on the desktop and vice-versa. Release/monitoring lives on the desktop; day-to-day
 coding and ticket work happens in the CLI. Nothing is surface-specific except the desktop-only
 scheduled tasks and the `gh`-driven release helpers (which also work from a CLI PowerShell session).
 
 ## Ticket System
 
-Tickets live in `Tickets/`. Folder location is the authoritative status:
+The ticket system lives under the `Ticketing/` container: the status-flow queue in `Ticketing/Tickets/`,
+plus the sibling `Epics/` and `Sprints/` queues. Folder location is the authoritative status:
 
 | Folder | Status |
 |--------|--------|
-| `Tickets/Epics/`   | Umbrella trackers — a **separate queue**, decomposed just-in-time (`Proposed` = dormant brief, `In Progress` = activated) |
-| `Tickets/Sprints/` | Time-boxed ticket batches — a **separate queue** (`SPR-NN`; `Planned` / `Active` / `Closed`); orthogonal to epics, managed via `/ticketing-sprint` |
-| `Tickets/Backlog/` | Open â€” ready to work |
-| `Tickets/Doing/`   | In Progress â€” one at a time |
-| `Tickets/Blocked/` | Deferred on an **external** gate — not workable until it clears |
-| `Tickets/Deferred/`| Postponed by **our** choice / an internal prereq — pickable anytime |
-| `Tickets/Done/`    | Closed |
+| `Ticketing/Epics/`   | Umbrella trackers — a **separate queue**, decomposed just-in-time (`Proposed` = dormant brief, `In Progress` = activated) |
+| `Ticketing/Sprints/` | Time-boxed ticket batches — a **separate queue** (`SPR-NN`; `Planned` / `Active` / `Closed`); orthogonal to epics, managed via `/ticketing-sprint` |
+| `Ticketing/Tickets/Backlog/` | Open â€” ready to work |
+| `Ticketing/Tickets/Doing/`   | In Progress â€” one at a time |
+| `Ticketing/Tickets/Blocked/` | Deferred on an **external** gate — not workable until it clears |
+| `Ticketing/Tickets/Deferred/`| Postponed by **our** choice / an internal prereq — pickable anytime |
+| `Ticketing/Tickets/Done/`    | Closed |
 
 IDs are sequential: `CPE-NNN`. To work a ticket: `/ticketing-work CPE-NNN`. To file one
-interactively: `/ticketing-new`. See `Tickets/wiki.md` for full workflow rules.
+interactively: `/ticketing-new`. See `Ticketing/wiki.md` for full workflow rules.
 
-**Epics** are handled specially: they live in `Tickets/Epics/` and are **not** researched, planned, or
+**Epics** are handled specially: they live in `Ticketing/Epics/` and are **not** researched, planned, or
 sub-ticketed until *activated* with `/ticketing-epic activate CPE-NNN`. A dormant epic is just a brief;
-`/ticketing-work` never builds one directly. See `Tickets/wiki.md` → "Epics" and the `ticketing-epic` skill.
+`/ticketing-work` never builds one directly. See `Ticketing/wiki.md` → "Epics" and the `ticketing-epic` skill.
 
 ### Showing open tickets â€” ALWAYS include Blocked, Deferred, Epics, and Sprints
 
@@ -196,18 +197,18 @@ Backlog table **plus** the Blocked, Deferred, **Epics**, and **Sprints** tables 
 Backlog. (User preference, stated 2026-07-16: ticket listings must always surface **epics and
 sprints**.):
 
-1. **Open** â€” all `Tickets/Backlog/CPE-*.md`, as a table of ID, title, type, priority, tags, estimate.
+1. **Open** â€” all `Ticketing/Tickets/Backlog/CPE-*.md`, as a table of ID, title, type, priority, tags, estimate.
    `tags` is the ticket's disposition (`ready`, `big-design`, `resource-blocked` + qualifier, etc.);
-   the controlled vocabulary lives in `Tickets/wiki.md` ("Disposition Tags").
-2. **Blocked** — all `Tickets/Blocked/CPE-*.md`, as a table of ID, title, tags, and a one-line
+   the controlled vocabulary lives in `Ticketing/wiki.md` ("Disposition Tags").
+2. **Blocked** — all `Ticketing/Tickets/Blocked/CPE-*.md`, as a table of ID, title, tags, and a one-line
    *blocked-on / unblocks-when* note read from the ticket's Notes or Work Log.
-3. **Deferred** — all `Tickets/Deferred/CPE-*.md`, as a table of ID, title, tags, and a one-line
+3. **Deferred** — all `Ticketing/Tickets/Deferred/CPE-*.md`, as a table of ID, title, tags, and a one-line
    *deferred-on / revisit-when* note. These are postponed by our choice (often an internal prereq),
    not externally gated, so they remain pickable.
-4. **Epics** — all `Tickets/Epics/CPE-*.md`, as a table of ID, title, status (`Proposed`/`In Progress`),
+4. **Epics** — all `Ticketing/Epics/CPE-*.md`, as a table of ID, title, status (`Proposed`/`In Progress`),
    tags, and a one-line goal (plus `X of Y children Done` for an activated epic). This is the separate
    epic queue; epics are decomposed via `/ticketing-epic`, not worked by `/ticketing-work`.
-5. **Sprints** — all `Tickets/Sprints/SPR-*.md`, **Active first then Planned**, as a table of ID, title,
+5. **Sprints** — all `Ticketing/Sprints/SPR-*.md`, **Active first then Planned**, as a table of ID, title,
    status (`Active`/`Planned`), window (`start â†’ end`), a one-line goal, and progress (`X of Y tickets
    Done`, counting tickets whose `sprint:` frontmatter names it). This is the separate, time-boxed sprint
    queue; sprints are managed via `/ticketing-sprint`, not worked directly. Orthogonal to epics — a
@@ -215,5 +216,5 @@ sprints**.):
 
 Blocked, Deferred, Epic, and Sprint tickets are all outstanding work, so omitting them misrepresents the
 queue. If a section is empty, say "none blocked" / "none deferred" / "no epics" / "no sprints" rather
-than dropping it. Also surface anything sitting in `Tickets/Doing/` so stalled work-in-progress is never
+than dropping it. Also surface anything sitting in `Ticketing/Tickets/Doing/` so stalled work-in-progress is never
 silently lost.

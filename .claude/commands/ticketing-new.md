@@ -10,7 +10,7 @@ filing CPE-NNN and working it"), create the ticket here, then `/ticketing-work` 
 Do NOT intercept (just do the thing): answering questions, analysis, running build / commit / push /
 git ops, cutting or publishing a release, managing tickets or the skill system, trivial one-liners
 being iterated live, or anything the user says to "just do." If it is genuinely borderline, ask first.
-See "When to Auto-File a Ticket" in `Tickets/wiki.md` for the authoritative boundaries.
+See "When to Auto-File a Ticket" in `Ticketing/wiki.md` for the authoritative boundaries.
 
 **Epic exception:** if the request is epic-sized (a Mega-Feature / many-child effort), do NOT work it
 to Done. File it as a brief in the **Epics queue** and stop — see Step 3c. Epics are decomposed later,
@@ -18,7 +18,7 @@ just-in-time, via `/ticketing-epic activate`.
 
 ## Step 1 — Find the Next ID
 
-Scan **all** ticket folders recursively — `Tickets/Epics/`, `Backlog/`, `Doing/`, `Blocked/`,
+Scan **all** ticket folders recursively — `Ticketing/Epics/`, `Backlog/`, `Doing/`, `Blocked/`,
 `Deferred/`, `Done/` — for every CPE-NNN_*.md file. Find the highest NNN. New ID = that number + 1,
 zero-padded to three digits (e.g. CPE-022). (IDs are shared across all queues, epics included.)
 
@@ -56,7 +56,7 @@ State the estimate and your reasoning in one sentence before proceeding.
 
 ## Step 3b — Assign a Disposition Tag
 
-Pick the ticket's `tags:` from the controlled vocabulary in `Tickets/wiki.md` ("Disposition Tags").
+Pick the ticket's `tags:` from the controlled vocabulary in `Ticketing/wiki.md` ("Disposition Tags").
 Exactly one primary tag (`ready` · `big-design` · `needs-decision` · `needs-prereq` · `epic` ·
 `resource-blocked`), plus any qualifiers. Most freshly-filed, actionable work is `ready`. If it's
 `resource-blocked`, add a qualifier (e.g. `needs-macos-linux`) so the listing shows what's needed.
@@ -68,7 +68,7 @@ If the item is too big for one unit of work — a Mega-Feature, or something tha
 many child tickets — it is an **epic**, and epics take a different path. Do **not** file it into
 `Backlog/`, and do **not** decompose it now. Instead:
 
-1. Create it in **`Tickets/Epics/`** with `status: Proposed` and `tags: [epic]`, as a one-page
+1. Create it in **`Ticketing/Epics/`** with `status: Proposed` and `tags: [epic]`, as a one-page
    **brief only**: the goal (Summary), a rough scope, and any open `## Open questions` — **no child
    tickets, no research, no acceptance-criteria breakdown of sub-work**. (An epic-level Definition of
    Done is fine; per-slice detail is not.)
@@ -83,7 +83,7 @@ Everything below (Steps 4–5) is for a normal, single-unit ticket.
 
 Derive a kebab-case filename slug from the title (3-8 words, lowercase, hyphens).
 
-Write Tickets/Backlog/CPE-NNN_slug.md using the structure below.
+Write Ticketing/Tickets/Backlog/CPE-NNN_slug.md using the structure below.
 Delete the Environment / Steps / Expected / Actual sections if type is not Bug or Defect.
 
 ```markdown

@@ -1,6 +1,6 @@
 //! `ticket-mcp` — a stdio **MCP server** exposing a repo's Agent Board directives (CPE-962). Point an
 //! MCP-speaking agent at `ticket-mcp <repo-root>` and it serves `directives.list` / `directives.reply`
-//! over newline-delimited JSON-RPC; the repo's `Tickets/**.md` files (their `## Agent Directives`
+//! over newline-delimited JSON-RPC; the repo's `Ticketing/**.md` files (their `## Agent Directives`
 //! sections) are the source of truth. Runs anywhere the repo is checked out — the board→agent bridge for
 //! deployments outside your control.
 
@@ -14,8 +14,10 @@ struct FsStore {
 }
 
 impl FsStore {
-    fn tickets(&self) -> PathBuf {
-        self.root.join("Tickets")
+    /// The `Ticketing/` container root — walked recursively so directives across the status-flow
+    /// `Tickets/` queue plus the sibling `Epics/`/`Sprints/` queues are all covered (CPE-1128).
+    fn ticketing(&self) -> PathBuf {
+        self.root.join("Ticketing")
     }
     fn walk_md(dir: &Path, out: &mut Vec<PathBuf>) {
         let Ok(rd) = std::fs::read_dir(dir) else { return };
@@ -30,7 +32,7 @@ impl FsStore {
     }
     fn all_md(&self) -> Vec<PathBuf> {
         let mut v = Vec::new();
-        Self::walk_md(&self.tickets(), &mut v);
+        Self::walk_md(&self.ticketing(), &mut v);
         v
     }
 }

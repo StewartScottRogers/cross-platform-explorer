@@ -1,6 +1,6 @@
 //! Swarm coordination tools over MCP — the **router seam** (CPE-541, epic CPE-528).
 //!
-//! [`CPE-528`](../../../Tickets/Epics/CPE-528_epic-wire-agent-workspace-live-sessions.md) needs the
+//! [`CPE-528`](../../../Ticketing/Epics/CPE-528_epic-wire-agent-workspace-live-sessions.md) needs the
 //! in-process [`Mailbox`](crate::swarm_mailbox::Mailbox) ([[CPE-516]]) and shared
 //! [`MemoryGraph`](crate::agent_memory::MemoryGraph) ([[CPE-525]]) exposed to **external agent
 //! processes** so a launched swarm coordinates and shares context. That exposure is one MCP host over

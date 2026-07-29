@@ -1,6 +1,6 @@
 //! Ticket-directives **MCP** surface (CPE-962, epic CPE-503): exposes the Agent Board's `## Agent
 //! Directives` (CPE-961) over the Model Context Protocol so ANY MCP-speaking agent — Claude or another,
-//! deployed outside your control — can `directives.list` the open directives across a repo's `Tickets/`
+//! deployed outside your control — can `directives.list` the open directives across a repo's `Ticketing/`
 //! and `directives.reply` (append a reply + optionally flip `open`→`done`). The ticket files stay the
 //! source of truth.
 //!
@@ -22,7 +22,7 @@ pub struct OpenDirective {
     pub text: String,
 }
 
-/// The store the MCP tools act on. A real impl walks a repo's `Tickets/`; tests use an in-memory fake.
+/// The store the MCP tools act on. A real impl walks a repo's `Ticketing/`; tests use an in-memory fake.
 pub trait DirectiveStore {
     /// Every `open` directive across the repo, each tagged with its ticket id.
     fn list_open(&self) -> Vec<OpenDirective>;

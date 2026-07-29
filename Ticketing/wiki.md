@@ -34,7 +34,7 @@ Format: `CPE-NNN` (zero-padded three digits — `CPE-001`, `CPE-042`, `CPE-100`)
 Sequential. To find the next ID: scan all folders for `CPE-*.md`, read the highest NNN, add 1.
 
 **Sprints use a separate sequence:** `SPR-NN` (zero-padded two digits — `SPR-01`, `SPR-02`). Scan
-`Tickets/**/SPR-*.md` for the highest NN, add 1. Sprints never take a `CPE` id.
+`Ticketing/**/SPR-*.md` for the highest NN, add 1. Sprints never take a `CPE` id.
 
 ## File Naming
 
@@ -102,7 +102,7 @@ Keep tags current: when the situation changes (a prereq lands, a decision is mad
 | `big-design` | Substantial; needs a design pass (decisions baked into the design) before coding. |
 | `needs-decision` | Blocked on a product/UX decision from the user — record the open question in Notes. |
 | `needs-prereq` | Depends on another unbuilt ticket/feature — name it in Notes. |
-| `epic` | Umbrella tracker, not a single unit of work; lives in `Tickets/Epics/` (a separate queue), decomposed just-in-time, closes when its children do. See "Epics" below. |
+| `epic` | Umbrella tracker, not a single unit of work; lives in `Ticketing/Epics/` (a separate queue), decomposed just-in-time, closes when its children do. See "Epics" below. |
 | `resource-blocked` | Needs something the agent can't access in this environment. **Always pair with a qualifier below.** |
 
 Qualifiers for `resource-blocked` (add alongside it):
@@ -149,7 +149,7 @@ either as Won't Fix; they are postponed, not declined. See each folder's `wiki.m
 
 An **epic** is a headline goal too big for one unit of work (a Mega-Feature, or anything that will
 clearly spawn many child tickets). Epics are managed by the **`ticketing-epic`** skill and live in
-their own queue, **`Tickets/Epics/`** — never in `Backlog/`.
+their own queue, **`Ticketing/Epics/`** — never in `Backlog/`.
 
 **The core rule: no research, planning, or sub-ticketing until an epic is *activated*.** A dormant
 epic is a one-page brief — goal, rough scope, open questions, maybe an epic-level Definition of Done —
@@ -179,7 +179,7 @@ Lifecycle:
 
 A **sprint** is a **named, time-boxed batch of tickets** worked together toward a near-term goal — the
 "what are we doing now/next" grouping. Sprints are managed by the **`ticketing-sprint`** skill and live
-in **`Tickets/Sprints/`**, ids **`SPR-NN`** (a separate sequence from `CPE-NNN`).
+in **`Ticketing/Sprints/`**, ids **`SPR-NN`** (a separate sequence from `CPE-NNN`).
 
 Sprints are **orthogonal to epics**: an epic is a *thematic* umbrella; a sprint is a *time-boxed*
 selection that can pull tickets from **any** epic or none. A ticket may belong to both at once — it can

@@ -1,15 +1,15 @@
-List all open cross-platform-explorer tickets in Tickets/Backlog/ as a markdown table,
+List all open cross-platform-explorer tickets in Ticketing/Tickets/Backlog/ as a markdown table,
 then present an action menu following the rules in menu-render.md.
 
 ---
 
 ## Step 1 — Display the Table
 
-1. Glob Tickets/Backlog/CPE-*.md
+1. Glob Ticketing/Tickets/Backlog/CPE-*.md
 2. For each file read frontmatter: id, title, type, priority, tags, estimate
 3. Sort by ID ascending
 4. Output the table (Tags = the `tags:` disposition list, comma-separated — see the
-   Disposition Tags vocabulary in `Tickets/wiki.md`):
+   Disposition Tags vocabulary in `Ticketing/wiki.md`):
 
 | ID | Title | Type | Priority | Tags | Estimate |
 |----|-------|------|----------|------|----------|
@@ -17,33 +17,33 @@ then present an action menu following the rules in menu-render.md.
 ### ALWAYS also show Blocked and Deferred (mandatory)
 
 After the Backlog table, ALWAYS show a **Blocked** table — never omit it. Glob
-`Tickets/Blocked/CPE-*.md` and render: ID, title, **Tags** (from `tags:`), and a one-line
+`Ticketing/Tickets/Blocked/CPE-*.md` and render: ID, title, **Tags** (from `tags:`), and a one-line
 *blocked-on / unblocks-when* note read from the ticket's Notes or Work Log. Blocked tickets are outstanding work; leaving them out
 misrepresents the queue. If `Blocked/` is empty, print "Blocked: none" rather than dropping the
 section entirely.
 
-Then ALWAYS show a **Deferred** table too. Glob `Tickets/Deferred/CPE-*.md` and render: ID, title,
+Then ALWAYS show a **Deferred** table too. Glob `Ticketing/Tickets/Deferred/CPE-*.md` and render: ID, title,
 **Tags**, and a one-line *deferred-on / revisit-when* note from the ticket's Notes or Work Log.
 Deferred tickets are work we postponed by choice (often an internal prereq), not externally gated —
 still outstanding. If `Deferred/` is empty, print "Deferred: none" rather than dropping the section.
 
-Also glob `Tickets/Doing/CPE-*.md`. If anything is in-flight or stalled there, show it under its own
+Also glob `Ticketing/Tickets/Doing/CPE-*.md`. If anything is in-flight or stalled there, show it under its own
 heading so abandoned work-in-progress can be restarted.
 
-ALWAYS show an **Epics** table (the separate epic queue). Glob `Tickets/Epics/CPE-*.md` and
+ALWAYS show an **Epics** table (the separate epic queue). Glob `Ticketing/Epics/CPE-*.md` and
 render: ID, title, **status** (`Proposed` = dormant brief / `In Progress` = activated), **Tags**, and
 a one-line goal. For an `In Progress` epic, add a child-progress note (`X of Y children Done`, counting
 tickets whose `epic:` frontmatter names it). Epics are **not** in the Backlog Work options — they are
 decomposed via `/ticketing-epic activate CPE-NNN`, not built by `/ticketing-work`. If `Epics/` is
-empty, print "Epics: none". (See the `ticketing-epic` skill and `Tickets/wiki.md` → "Epics".)
+empty, print "Epics: none". (See the `ticketing-epic` skill and `Ticketing/wiki.md` → "Epics".)
 
 Finally, ALWAYS show a **Sprints** table too (mandatory — the user asked for epics **and** sprints on
-every listing). Glob `Tickets/Sprints/SPR-*.md` and render, **Active first then Planned**: ID, title,
+every listing). Glob `Ticketing/Sprints/SPR-*.md` and render, **Active first then Planned**: ID, title,
 **status** (`Active`/`Planned`), **window** (`start → end`), a one-line goal, and **progress**
 (`X of Y tickets Done`, counting tickets whose `sprint:` frontmatter names it, across all folders).
 Sprints are time-boxed batches, orthogonal to epics — a ticket may appear in both. They are managed via
 `/ticketing-sprint`, not built directly. If `Sprints/` is empty, print "Sprints: none". (See the
-`ticketing-sprint` skill and `Tickets/wiki.md` → "Sprints".)
+`ticketing-sprint` skill and `Ticketing/wiki.md` → "Sprints".)
 
 Blocked tickets are **not** offered in the action menu's Work options (working them won't clear the
 gate). Deferred tickets are also **not** in the default Work-all/subset options — but unlike Blocked

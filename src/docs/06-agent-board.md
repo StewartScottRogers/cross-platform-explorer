@@ -7,9 +7,10 @@ categoryOrder: 3
 
 # Agent Board
 
-The Agent Board is a **Kanban view over your tickets** — the `Tickets/` markdown files in a project
-folder. It is not a separate task list; it reads and writes the same files the ticket workflow uses, so
-the board and the command-line flow never drift.
+The Agent Board is a **Kanban view over your tickets** — the markdown files under a project's
+`Ticketing/` folder (the status-flow tickets live in `Ticketing/Tickets/`). It is not a separate task
+list; it reads and writes the same files the ticket workflow uses, so the board and the command-line
+flow never drift.
 
 Open it from **Agent Board** in the left sidebar.
 
@@ -27,10 +28,10 @@ remembers its size and position between runs.
 
 ## Choosing a project
 
-The board reads a project's `Tickets/` folder. When you open it inside a repo, it **finds the project
-automatically** — it walks up from the current folder to the nearest one that has a `Tickets/` folder.
+The board reads a project's `Ticketing/` folder. When you open it inside a repo, it **finds the project
+automatically** — it walks up from the current folder to the nearest one that has a `Ticketing/` folder.
 You can also click **📁 Project** to point it at any project folder; your choice is **remembered** for
-next time. If no `Tickets/` folder is found, the board tells you so (and offers the picker) instead of
+next time. If no `Ticketing/` folder is found, the board tells you so (and offers the picker) instead of
 showing a blank panel.
 
 ## Columns and cards

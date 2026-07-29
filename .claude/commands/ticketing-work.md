@@ -3,11 +3,11 @@ pick up -> implement -> close.
 
 ## Picking Up
 
-0. **Epic guard.** If the target is an epic (found in `Tickets/Epics/`, or its `tags:` include `epic`),
+0. **Epic guard.** If the target is an epic (found in `Ticketing/Epics/`, or its `tags:` include `epic`),
    do NOT build it here — an epic is decomposed just-in-time, not worked directly. Redirect: run
    `/ticketing-epic activate CPE-$ARGUMENTS` (if it is still `Proposed`) or point the user at its
    child tickets in `Backlog/` (if already `In Progress`). Then stop this skill.
-1. Find the file. Check Tickets/Backlog/CPE-$ARGUMENTS_*.md first, then Blocked/, then Deferred/, then Doing/, then Done/ recursively.
+1. Find the file. Check Ticketing/Tickets/Backlog/CPE-$ARGUMENTS_*.md first, then Blocked/, then Deferred/, then Doing/, then Done/ recursively.
 2. If found in Done/: ask the user whether to reopen before proceeding.
    If found in Blocked/: read the Work Log's blocked-on / unblock note first. Confirm the blocker has
    actually cleared before picking up; if it has not, tell the user what is still gating it and stop.
@@ -21,14 +21,14 @@ pick up -> implement -> close.
      based on the full ticket content. Add it to the frontmatter.
    - If present but the full ticket reveals it is significantly off: update it and note the revision.
    Log the estimate (and any revision) as the first Work Log entry.
-5. Move the file from Backlog/ to Tickets/Doing/.
+5. Move the file from Backlog/ to Ticketing/Tickets/Doing/.
 6. Update frontmatter: status -> "In Progress".
 7. Append Work Log entry: "YYYY-MM-DD — Picked up. Estimate: {estimate}. [one-line plan]."
 
 ## Doing the Work
 
 8. Implement the fix or feature. Follow:
-   - Tickets/wiki.md — ticket workflow rules
+   - Ticketing/wiki.md — ticket workflow rules
    - CLAUDE.md — project architecture and conventions (how frontend <-> Rust connect, versioning, guardrails)
    - RELEASING.md — if the work affects release/versioning/updater behaviour
 9. After every significant discovery, decision, or completed action — append a Work Log entry:
@@ -54,7 +54,7 @@ pick up -> implement -> close.
 ## Post-Close Menu
 
 After closing, render an action menu following the rules in menu-render.md.
-Check whether any tickets remain in Tickets/Backlog/ — omit [1] if the queue is empty.
+Check whether any tickets remain in Ticketing/Tickets/Backlog/ — omit [1] if the queue is empty.
 
 **Queue has tickets remaining** — HORIZONTAL:
 ```

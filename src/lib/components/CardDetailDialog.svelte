@@ -63,7 +63,7 @@
     if (!standalone) clampSize();
     try {
       const d = (await commands.boardCardDetail(root, id)) as Detail | null;
-      if (!d) error = `Couldn't find ${id} under Tickets/.`;
+      if (!d) error = `Couldn't find ${id} under Ticketing/.`;
       else {
         detail = d;
         bodyHtml = d.body ? await renderMarkdown(d.body) : "";

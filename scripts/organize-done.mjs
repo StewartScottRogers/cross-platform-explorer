@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// Auto-archive Tickets/Done/ (CPE-865, epic — /ticketing-organize logic as a committed script).
+// Auto-archive Ticketing/Tickets/Done/ (CPE-865, epic — /ticketing-organize logic as a committed script).
 //
 // Subdivides any folder under Done/ that holds >= THRESHOLD .md files into YYYY / QN / MonthName / Week-NN,
 // filed by each ticket's `closed:` date. Idempotent + resumable (only moves when over threshold; re-running
@@ -19,7 +19,7 @@ import { execSync } from "node:child_process";
 
 const THRESHOLD = 50;
 const REPO = join(dirname(fileURLToPath(import.meta.url)), "..");
-const DONE = join(REPO, "Tickets", "Done");
+const DONE = join(REPO, "Ticketing", "Tickets", "Done");
 const MONTHS = ["January","February","March","April","May","June","July","August","September","October","November","December"];
 
 let moved = 0, created = 0, skipped = 0, warned = 0;
@@ -79,7 +79,7 @@ function processDir(dir, depth) {
   }
 }
 
-if (!existsSync(DONE)) { console.log("no Tickets/Done — nothing to do"); process.exit(0); }
+if (!existsSync(DONE)) { console.log("no Ticketing/Tickets/Done — nothing to do"); process.exit(0); }
 processDir(DONE, 0);
 console.log(`RESULT moved=${moved} created=${created} skipped=${skipped} warned=${warned}`);
 
@@ -87,7 +87,7 @@ if (process.argv.includes("--commit") && moved > 0) {
   try {
     const branch = execSync("git rev-parse --abbrev-ref HEAD", { cwd: REPO }).toString().trim();
     if (branch === "main") {
-      execSync("git add Tickets/Done", { cwd: REPO });
+      execSync("git add Ticketing/Tickets/Done", { cwd: REPO });
       // Only commit if staging actually produced a change.
       try { execSync("git diff --cached --quiet", { cwd: REPO }); }
       catch {

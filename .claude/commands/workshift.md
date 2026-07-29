@@ -7,7 +7,7 @@ An autonomous "work while you're away" mode. Triggered when the user says **"sta
 The user is away and **cannot answer questions** — make the best reasonable guess, log the assumption in the
 ticket work log, and keep moving until the work is **done** or the user **comes home**. **Never idle.** The
 assignment is whatever "this" refers to when the shift starts; if nothing specific, work the critical path
-(finish `Tickets/Doing/` → clear `Tickets/Backlog/` + pickable `Deferred/` → activate an epic → have the
+(finish `Ticketing/Tickets/Doing/` → clear `Ticketing/Tickets/Backlog/` + pickable `Deferred/` → activate an epic → have the
 **Product Manager** task Researchers to find + pitch new epics, pick the highest-impact ones, then build them).
 
 **DO NOT STOP FOR APPROVAL OR STATUS UPDATES.** Never end a turn asking permission to continue; never pause
@@ -100,7 +100,7 @@ Library hit or a decide-and-log over a fresh spawn.
 | **Reviewer** | per-ticket | An **independent** sub-agent (NOT the author) that re-checks a worker's PR before merge — the code QA gate. |
 | **QA Architect** | per-shift | Owns the mission to **eliminate manual testing over time** — the user's stated goal is to *never test anything by hand*. It doesn't test one ticket; it makes the **whole app more automatically testable every shift**, driving **Manual Verification Debt (MVD)** — the count of surfaces still needing human eyes — monotonically to zero. Each shift it audits for new manual debt (every UAT skip-and-note becomes a burndown row), picks the highest-leverage manual surface, and **files a `CPE-NNN` ticket** for a Worker to build the automation (headless GUI driving, smoke-install CI, visual-regression, self-asserting examples, cross-OS runners…). Once a surface is automated a CI/guard job **pins** it so it never regresses. Charter + burndown ledger: `.claude/qa-architecture/`. Distinct from the Reviewer (checks code) and UAT Tester (exercises this feature) — the QA Architect improves the **testing system itself**. |
 | **UAT Tester** | per-ticket | An **independent** sub-agent responsible for **user acceptance testing** — it stands in for the end user and checks the change *from the outside*: does it actually do what the user asked, is the behaviour/UX acceptable, does it meet the ticket's acceptance criteria as a person would experience them (not just as unit tests assert)? Distinct from the Reviewer (who scrutinises the code); the UAT Tester exercises the **feature**. For user-facing/GUI changes it drives the real build (see GUI verification below); for headless/backend changes it exercises the command or API surface end-to-end. Signs off `UAT PASS` / `UAT FAIL` with concrete reproduction of what it did. |
-| **Janitor** | per-shift (light between-merges) | Keeps the workspace clean so the crew stays fast. Between merges it reclaims **abandoned resources** and tidies up (see the Janitor duties section below) — leftover git worktrees from finished workers, merged/stale branches, orphaned `.claude/uat-*` and scratchpad temp dirs, and an overstuffed `Tickets/Done/` (runs `/ticketing-organize`). It works **non-destructively by default** and never touches another live process's resources (worktrees/branches/untracked dirs in use — see [[concurrent-nightshift-coordination]]). For a **deep clean** that would collide with active workers (pruning worktrees, `git gc`, reorganising `Done/`), the Janitor asks the **Foreman to call a break** — quiesce dispatch, let in-flight PRs settle — then cleans on the quiet tree and signals all-clear. |
+| **Janitor** | per-shift (light between-merges) | Keeps the workspace clean so the crew stays fast. Between merges it reclaims **abandoned resources** and tidies up (see the Janitor duties section below) — leftover git worktrees from finished workers, merged/stale branches, orphaned `.claude/uat-*` and scratchpad temp dirs, and an overstuffed `Ticketing/Tickets/Done/` (runs `/ticketing-organize`). It works **non-destructively by default** and never touches another live process's resources (worktrees/branches/untracked dirs in use — see [[concurrent-nightshift-coordination]]). For a **deep clean** that would collide with active workers (pruning worktrees, `git gc`, reorganising `Done/`), the Janitor asks the **Foreman to call a break** — quiesce dispatch, let in-flight PRs settle — then cleans on the quiet tree and signals all-clear. |
 
 Spawning sub-agents is **pre-authorised** during a workshift (this overrides the default "don't spawn agents
 unless asked"). Give each agent enough context (the ticket + acceptance criteria + relevant crates/APIs +
@@ -179,7 +179,7 @@ The re-review/re-UAT loop has a **hard cap of 3 build→check attempts per ticke
 gauntlet after the 3rd attempt is **not retried again this shift** — retrying past that just burns the finite
 agent budget and worktrees on a ticket that clearly needs a rethink. Instead the Foreman:
 
-1. **Parks it.** Move the ticket to `Tickets/Blocked/` (external gate surfaced) or `Tickets/Deferred/` (needs a
+1. **Parks it.** Move the ticket to `Ticketing/Tickets/Blocked/` (external gate surfaced) or `Ticketing/Tickets/Deferred/` (needs a
    redesign / our-choice postpone), per the disposition it earned.
 2. **Records why.** In the ticket work log, note the 3 attempts, the failing verdict each time (the Reviewer /
    UAT findings), and the leading hypothesis for *why* it won't converge — enough that the next pickup starts
@@ -483,7 +483,7 @@ lock heartbeat instead.
 ## Janitor — keep the workspace clean (and call a deep-clean break)
 
 A long shift leaves debris: worktrees from finished workers, merged branches, UAT scratch dirs, temp
-files, and a `Tickets/Done/` that keeps growing. Left alone it slows every worker (stale worktrees confuse
+files, and a `Ticketing/Tickets/Done/` that keeps growing. Left alone it slows every worker (stale worktrees confuse
 git ops — see [[verify-subagent-merges]]) and buries the queue. The **Janitor** runs a light pass **between
 merges** and a **deep pass on a called break**.
 
@@ -498,7 +498,7 @@ merges** and a **deep pass on a called break**.
 
 **Deep pass (needs a Foreman-called break — anything that could collide with a live worker):**
 
-- `git worktree prune` across the board + `git gc`, branch sweep, `Tickets/Done/` reorganisation via
+- `git worktree prune` across the board + `git gc`, branch sweep, `Ticketing/Tickets/Done/` reorganisation via
   `/ticketing-organize` (the SessionStart hook warns when `Done/…/Week-NN` overflows — that warning is the
   Janitor's cue).
 

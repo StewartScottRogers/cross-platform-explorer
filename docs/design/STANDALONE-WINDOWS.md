@@ -56,7 +56,7 @@ The Agent Board exists in **two** forms, and `openAgentBoard()` prefers the heav
 |--|--|--|
 | What runs | the app's own `BoardView` in a `?board` webview | a separate `agent-board` process serving its own Kanban UI |
 | Window label | `agent-board` (**in** a capability — trusted, uses Tauri `invoke`) | `agent-board-sidecar` (**in no** capability — isolated, like the Agent Deck window) |
-| Data path | `ticket_board` Tauri commands | the sidecar reads/writes `Tickets/` itself and serves a loopback HTTP API |
+| Data path | `ticket_board` Tauri commands | the sidecar reads/writes `Ticketing/` itself and serves a loopback HTTP API |
 | Availability | every build | only the `sidecar-platform` build |
 
 `openAgentBoard()` starts the sidecar (`sidecar_start_agent_board` → spawn, handshake, read `ui:<url>`) and

@@ -55,7 +55,7 @@ use cpe_server::{audit_journal, geometry, metrics_journal, ticket_board};
 /// so the many `to_epoch_ms(…)` / `sha256_file(…)` call sites resolve unchanged.
 use cpe_server::fsutil::to_epoch_ms;
 
-/// Read every ticket under `<root>/Tickets/{Backlog,Doing,Blocked,Deferred,Done}/CPE-*.md` into board
+/// Read every ticket under `<root>/Ticketing/Tickets/{Backlog,Doing,Blocked,Deferred,Done}/CPE-*.md` into board
 /// cards (CPE-520). Read-only; a malformed file is skipped, never fails the listing.
 #[tauri::command]
 #[cfg_attr(feature = "specta-bindings", specta::specta)]
@@ -65,7 +65,7 @@ async fn board_cards(root: String) -> Vec<ticket_board::Card> {
 }
 
 fn board_cards_impl(root: String) -> Vec<ticket_board::Card> {
-    let tickets = std::path::Path::new(&root).join("Tickets");
+    let tickets = std::path::Path::new(&root).join("Ticketing").join("Tickets");
     let mut cards = Vec::new();
     for col in ticket_board::COLUMNS {
         let Ok(entries) = std::fs::read_dir(tickets.join(col)) else { continue };
@@ -85,7 +85,7 @@ fn board_cards_impl(root: String) -> Vec<ticket_board::Card> {
     cards
 }
 
-/// Find the nearest project root at/above `start` — the closest ancestor dir with a `Tickets/` folder —
+/// Find the nearest project root at/above `start` — the closest ancestor dir with a `Ticketing/` folder —
 /// so the Agent Board can auto-open the project you're inside (CPE-554). `None` if none is found.
 #[tauri::command]
 #[cfg_attr(feature = "specta-bindings", specta::specta)]
@@ -113,7 +113,7 @@ fn board_move_impl(root: String, id: String, to_column: String) -> Result<(), St
     let folder =
         ticket_board::folder_for_column(&to_column).ok_or_else(|| format!("unknown column '{to_column}'"))?;
     let status = ticket_board::status_for_column(&to_column).unwrap_or(folder);
-    let tickets = std::path::Path::new(&root).join("Tickets");
+    let tickets = std::path::Path::new(&root).join("Ticketing").join("Tickets");
 
     // Locate the ticket file: `<id>_*.md` in one of the columns. Recursive, so an archived Done ticket
     // (in a dated `Done/YYYY/…` subfolder) can still be reopened/moved (CPE-864).
@@ -163,7 +163,7 @@ fn find_ticket_file_recursive(dir: &std::path::Path, prefix: &str) -> Option<std
     None
 }
 
-/// Collect archived Done tickets — those in **subdirectories** of `Tickets/Done/` (the dated
+/// Collect archived Done tickets — those in **subdirectories** of `Ticketing/Tickets/Done/` (the dated
 /// `YYYY/QN/…` folders `/ticketing-organize` produces). Top-level Done files are "recent" and are
 /// returned by `board_cards`; anything nested is archived (CPE-531). Recursive.
 fn collect_archived(dir: &std::path::Path, top_level: bool, out: &mut Vec<ticket_board::Card>) {
@@ -195,14 +195,15 @@ async fn board_archived(root: String) -> Vec<ticket_board::Card> {
 }
 
 fn board_archived_impl(root: String) -> Vec<ticket_board::Card> {
-    let done = std::path::Path::new(&root).join("Tickets").join("Done");
+    let done = std::path::Path::new(&root).join("Ticketing").join("Tickets").join("Done");
     let mut out = Vec::new();
     collect_archived(&done, true, &mut out);
     out
 }
 
 /// List the repo's epics for the board's epic-organized view (CPE-530): active/proposed epics from
-/// `Tickets/Epics/` + closed epics from `Tickets/Done/` (top level), each `epic`-tagged. Read-only.
+/// `Ticketing/Epics/` + closed epics from `Ticketing/Tickets/Done/` (top level), each `epic`-tagged.
+/// Read-only. Note the two live at different depths since CPE-1128 (Epics is a sibling of Tickets).
 #[tauri::command]
 #[cfg_attr(feature = "specta-bindings", specta::specta)]
 async fn board_epics(root: String) -> Vec<ticket_board::Epic> {
@@ -211,10 +212,11 @@ async fn board_epics(root: String) -> Vec<ticket_board::Epic> {
 }
 
 fn board_epics_impl(root: String) -> Vec<ticket_board::Epic> {
-    let tickets = std::path::Path::new(&root).join("Tickets");
+    let base = std::path::Path::new(&root).join("Ticketing");
     let mut epics = Vec::new();
-    for sub in ["Epics", "Done"] {
-        let Ok(entries) = std::fs::read_dir(tickets.join(sub)) else { continue };
+    // Epics is a top-level sibling queue; closed epics live in the status-flow's Done (CPE-1128).
+    for dir in [base.join("Epics"), base.join("Tickets").join("Done")] {
+        let Ok(entries) = std::fs::read_dir(&dir) else { continue };
         for e in entries.flatten() {
             let p = e.path();
             let name = p.file_name().and_then(|s| s.to_str()).unwrap_or("");
@@ -233,11 +235,11 @@ fn board_epics_impl(root: String) -> Vec<ticket_board::Epic> {
 
 /// Find a ticket's file `<id>_*.md` across the board columns.
 fn find_ticket_file(root: &str, id: &str) -> Option<std::path::PathBuf> {
-    // Search ALL of Tickets/ recursively, so a card in Epics/ or Sprints/ or an archived Done/** subfolder
-    // resolves too — not just the five workflow columns (CPE-966). The `{id}_` prefix (with the underscore)
-    // keeps `CPE-6` from matching `CPE-616`.
-    let tickets = std::path::Path::new(root).join("Tickets");
-    find_ticket_file_recursive(&tickets, &format!("{id}_"))
+    // Search ALL of Ticketing/ recursively, so a card in the sibling Epics/ or Sprints/ queues or an
+    // archived Tickets/Done/** subfolder resolves too — not just the five workflow columns (CPE-966,
+    // CPE-1128). The `{id}_` prefix (with the underscore) keeps `CPE-6` from matching `CPE-616`.
+    let base = std::path::Path::new(root).join("Ticketing");
+    find_ticket_file_recursive(&base, &format!("{id}_"))
 }
 
 /// Toggle the `review` tag on ticket `id` (CPE-523) — drives the board's virtual Review lane.
@@ -288,12 +290,12 @@ fn board_directive_impl(root: String, id: String, target: String, text: String, 
 }
 
 /// Full detail for one Agent Board card (CPE-959): its ordered frontmatter fields + markdown body + the
-/// folder under `Tickets/` it lives in — for the card-detail popup. Works for tickets and epics alike.
+/// folder under `Ticketing/` it lives in — for the card-detail popup. Works for tickets and epics alike.
 #[derive(serde::Serialize)]
 #[cfg_attr(feature = "specta-bindings", derive(specta::Type))]
 struct CardDetail {
     id: String,
-    /// Folder under `Tickets/` (e.g. "Backlog", "Epics", "Done/2026/Q3/July/Week-30").
+    /// Folder under `Ticketing/` (e.g. "Tickets/Backlog", "Epics", "Tickets/Done/2026/Q3/July/Week-30").
     location: String,
     /// Ordered frontmatter `(key, value)` pairs.
     fields: Vec<(String, String)>,
@@ -301,7 +303,7 @@ struct CardDetail {
     body: String,
 }
 
-/// Read one card's full detail by id, from anywhere under `Tickets/` (CPE-959). `None` if not found.
+/// Read one card's full detail by id, from anywhere under `Ticketing/` (CPE-959). `None` if not found.
 #[tauri::command]
 #[cfg_attr(feature = "specta-bindings", specta::specta)]
 async fn board_card_detail(root: String, id: String) -> Option<CardDetail> {
@@ -314,10 +316,10 @@ fn board_card_detail_impl(root: String, id: String) -> Option<CardDetail> {
     let path = find_ticket_file(&root, &id)?;
     let md = std::fs::read_to_string(&path).ok()?;
     let (fields, body) = ticket_board::detail_from(&md);
-    let tickets = std::path::Path::new(&root).join("Tickets");
+    let base = std::path::Path::new(&root).join("Ticketing");
     let location = path
         .parent()
-        .and_then(|par| par.strip_prefix(&tickets).ok())
+        .and_then(|par| par.strip_prefix(&base).ok())
         .map(|rel| rel.to_string_lossy().replace('\\', "/"))
         .unwrap_or_default();
     Some(CardDetail { id, location, fields, body })
@@ -5431,7 +5433,7 @@ fn resolve_agent_board_bin(app: &tauri::AppHandle) -> Result<String, String> {
 }
 
 /// Spawn the Agent Board sidecar, complete the handshake, and return the URL of the Kanban UI it serves
-/// so the frontend can frame it in a window (CPE-853, epic CPE-850). The board reads `Tickets/` under
+/// so the frontend can frame it in a window (CPE-853, epic CPE-850). The board reads `Ticketing/` under
 /// `root` (passed as `CPE_BOARD_ROOT`; falls back to the sidecar's own cwd when absent). The window
 /// singleton (by label) prevents duplicate launches, so this deliberately keeps the connection alive on a
 /// detached servicing thread rather than a managed reuse state. Non-fatal: returns an error string the UI
@@ -7469,12 +7471,13 @@ mod tests {
     fn find_ticket_file_locates_epics_sprints_and_archived() {
         let tmp = tempfile::tempdir().unwrap();
         let root = tmp.path();
-        let t = root.join("Tickets");
+        // The Ticketing/ container (CPE-1128): status folders under Tickets/, Epics/ & Sprints/ as siblings.
+        let t = root.join("Ticketing");
         for (dir, name) in [
-            ("Backlog", "CPE-10_a.md"),
+            ("Tickets/Backlog", "CPE-10_a.md"),
             ("Epics", "CPE-616_epic-remote.md"),
             ("Sprints", "SPR-01_x.md"),
-            ("Done/2026/Q3/July/Week-30", "CPE-1_done.md"),
+            ("Tickets/Done/2026/Q3/July/Week-30", "CPE-1_done.md"),
         ] {
             let d = t.join(dir);
             std::fs::create_dir_all(&d).unwrap();

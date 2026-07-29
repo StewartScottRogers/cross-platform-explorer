@@ -2,11 +2,11 @@
 //!
 //! An out-of-process sidecar on the ADR-0001 platform, mirroring `sidecar/repos` and
 //! `sidecar/ai-console`: it depends **only** on [`sidecar_contract`] (never the host or the explorer),
-//! handshakes over stdio, and serves its **own** loopback UI (the Kanban board over `Tickets/`, real data
+//! handshakes over stdio, and serves its **own** loopback UI (the Kanban board over `Ticketing/`, real data
 //! in CPE-852) which the host frames. The stdio side effects live in `main`; the decisions here are pure
 //! and unit-tested.
 
-/// The Kanban model over Tickets/ (read + move cards).
+/// The Kanban model over Ticketing/ (read + move cards).
 pub mod board;
 /// The sidecar's own served UI (a dependency-free loopback HTTP server).
 pub mod ui;
@@ -16,12 +16,12 @@ use sidecar_contract::{Capability, Envelope, Hello, Message, Response, CONTRACT_
 /// This sidecar's stable id, matching `sidecar.json` and the `Hello`.
 pub const SIDECAR_ID: &str = "agent-board";
 
-/// Env var overriding the project root whose `Tickets/` the board reads.
+/// Env var overriding the project root whose `Ticketing/` the board reads.
 pub const BOARD_ROOT_ENV: &str = "CPE_BOARD_ROOT";
 
-/// Resolve the project root the board reads `Tickets/` under, from an explicit host-supplied root (the
+/// Resolve the project root the board reads `Ticketing/` under, from an explicit host-supplied root (the
 /// explorer's current folder, via `CPE_BOARD_ROOT`) plus a fallback cwd. Walks **up** from the start path
-/// to the nearest ancestor that actually has a `Tickets/` folder, so the board finds the project whether
+/// to the nearest ancestor that actually has a `Ticketing/` folder, so the board finds the project whether
 /// it's pointed at the project root OR a subfolder within it (CPE-861). This mirrors the in-process board,
 /// which resolves its root via `find_project_root` (walk-up) before reading cards. Pure, so it's
 /// unit-testable without mutating env/cwd.
@@ -33,8 +33,8 @@ pub fn resolve_board_root(explicit: Option<&str>, cwd: std::path::PathBuf) -> st
     board::nearest_project_root(&start).unwrap_or(start)
 }
 
-/// The project root the board reads `Tickets/` under: the `CPE_BOARD_ROOT` env var if set, else the
-/// sidecar's cwd — in both cases walking up to the nearest ancestor with a `Tickets/` folder (CPE-861).
+/// The project root the board reads `Ticketing/` under: the `CPE_BOARD_ROOT` env var if set, else the
+/// sidecar's cwd — in both cases walking up to the nearest ancestor with a `Ticketing/` folder (CPE-861).
 /// Host-brokered `context` will supply the root properly in CPE-853; this keeps the sidecar functional
 /// when launched from anywhere inside a project.
 pub fn board_root() -> std::path::PathBuf {
@@ -44,7 +44,7 @@ pub fn board_root() -> std::path::PathBuf {
 }
 
 /// The opening `Hello` this sidecar announces: its id/version, the contract version it speaks, and the
-/// capabilities it requests — `context`, to learn the project root whose `Tickets/` it reads (CPE-852).
+/// capabilities it requests — `context`, to learn the project root whose `Ticketing/` it reads (CPE-852).
 pub fn hello() -> Envelope {
     Envelope::new(
         0,
@@ -96,9 +96,9 @@ mod tests {
     fn resolve_board_root_walks_up_from_explicit_subfolder_root() {
         let tmp = tempfile::tempdir().unwrap();
         let root = tmp.path();
-        std::fs::create_dir_all(root.join("Tickets/Backlog")).unwrap();
+        std::fs::create_dir_all(root.join("Ticketing/Ticketing/Backlog")).unwrap();
         // Host points the board at a SUBFOLDER of the project (CPE-861) → still resolves to the project root.
-        let sub = root.join("Tickets/Doing");
+        let sub = root.join("Ticketing/Ticketing/Doing");
         assert_eq!(
             resolve_board_root(Some(sub.to_str().unwrap()), std::path::PathBuf::from(".")).as_path(),
             root,

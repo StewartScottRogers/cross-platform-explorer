@@ -7,7 +7,7 @@ No argument ⇒ `list`.
 
 ## What an epic is (and what it is NOT)
 
-An epic is a headline goal too large for one unit of work. It lives in **`Tickets/Epics/`** — a queue
+An epic is a headline goal too large for one unit of work. It lives in **`Ticketing/Epics/`** — a queue
 **separate from the Backlog** — and stays there as a one-page brief (goal, rough scope, open
 questions) with **no child tickets and no research or building** until it is **activated**.
 
@@ -36,7 +36,7 @@ dormant; an `In Progress` epic has been activated and has children in flight.
 
 ## `list` (default)
 
-1. Glob `Tickets/Epics/CPE-*.md`. Read frontmatter (id, title, status, tags) + the Summary's first line.
+1. Glob `Ticketing/Epics/CPE-*.md`. Read frontmatter (id, title, status, tags) + the Summary's first line.
 2. For each **Active** epic (`status: In Progress`), count child progress: glob every ticket whose
    `epic:` frontmatter equals this epic's id, across `Backlog/ Doing/ Blocked/ Deferred/ Done/`, and
    report `X of Y children Done`.

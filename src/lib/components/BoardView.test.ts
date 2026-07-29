@@ -1,5 +1,5 @@
 /**
- * BoardView empty-state + project-picker (CPE-551). The board scans `<root>/Tickets/`; off-repo that's
+ * BoardView empty-state + project-picker (CPE-551). The board scans `<root>/Ticketing/`; off-repo that's
  * empty and used to read as "broken". These assert the helpful empty-state renders and that choosing a
  * project repoints + persists the board root.
  */
@@ -36,7 +36,7 @@ beforeEach(() => {
 });
 
 describe("BoardView empty-state (CPE-551)", () => {
-  it("shows a choose-project prompt (not a blank panel) when the folder has no Tickets/", async () => {
+  it("shows a choose-project prompt (not a blank panel) when the folder has no Ticketing/", async () => {
     render(BoardView, { root: "/some/browsed/folder" });
     expect(await screen.findByText("No tickets found here.")).toBeTruthy();
     expect(screen.getAllByText("/some/browsed/folder").length).toBeGreaterThan(0); // the searched root is shown

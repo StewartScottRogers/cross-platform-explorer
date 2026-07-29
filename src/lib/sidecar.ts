@@ -57,7 +57,7 @@ export async function startAiConsole(): Promise<string | null> {
 /**
  * Start the Agent Board sidecar and return the loopback URL of the Kanban UI it serves (CPE-853), or
  * `null` when unavailable (plain build / start failed) so the caller can fall back. `root` scopes which
- * project's `Tickets/` the board reads.
+ * project's `Ticketing/` the board reads.
  */
 export async function startAgentBoard(root?: string): Promise<string | null> {
   try {

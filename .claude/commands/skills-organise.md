@@ -117,7 +117,7 @@ Move existing skills into a named feature set, renaming files and updating all r
    d. Find and update all references to the old skill name in:
       - All `.claude/commands/*.md` files (other skills that reference it)
       - `CLAUDE.md`
-      - `Tickets/wiki.md` and all `Tickets/**/*.md`
+      - `Ticketing/wiki.md` and all `Ticketing/**/*.md`
       - Any `.md` files in the project root
       Replace `/old-name` -> `/new-name` and `old-name.md` -> `new-name.md`.
 

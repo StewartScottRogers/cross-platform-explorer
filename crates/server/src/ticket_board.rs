@@ -1,10 +1,10 @@
-//! Agent Board backend (CPE-520) — read the repo's `Tickets/` folders as Kanban **cards** and move a
+//! Agent Board backend (CPE-520) — read the repo's `Ticketing/` folders as Kanban **cards** and move a
 //! card between columns. The board is backed by the **real markdown files** (the activation decision
 //! for [CPE-503]), so the board and the CLI `/ticketing-*` flow share one source of truth. This module
 //! is the pure core: parse a ticket's frontmatter into a [`Card`], and map folders ↔ columns ↔ the
 //! `status:` frontmatter. The Tauri commands in `lib.rs` do the file I/O on top of it.
 
-/// The Kanban columns, which are exactly the workflow status folders under `Tickets/`.
+/// The Kanban columns, which are exactly the workflow status folders under `Ticketing/Tickets/`.
 pub const COLUMNS: [&str; 5] = ["Backlog", "Doing", "Blocked", "Deferred", "Done"];
 
 /// The folder a column's tickets live in (identical to the column name — the folder IS the status).
@@ -135,7 +135,7 @@ pub struct Epic {
 }
 
 /// Parse an epic from a ticket's markdown. Returns `None` if it has no id **or** isn't an epic (its
-/// `tags` must include `epic`). Used to list epics from `Tickets/Epics/` + closed epics in `Done/`.
+/// `tags` must include `epic`). Used to list epics from `Ticketing/Epics/` + closed epics in `Tickets/Done/`.
 pub fn epic_from(md: &str) -> Option<Epic> {
     let fm = frontmatter(md);
     let id = fm.get("id").map(|s| unquote(s)).filter(|s| !s.is_empty())?;
@@ -412,12 +412,13 @@ pub fn append_finding(md: &str, note: &str) -> String {
 }
 
 /// Walk up from `start` (inclusive) and return the nearest ancestor directory that contains a readable
-/// `Tickets/` folder — so the Agent Board auto-finds the project you're inside (CPE-554). `None` when no
-/// ancestor has one. Read-only; a missing/denied dir simply isn't a match.
+/// `Ticketing/` folder — so the Agent Board auto-finds the project you're inside (CPE-554, CPE-1128).
+/// The `Ticketing/` container holds the status-flow `Tickets/` queue plus the sibling `Epics/`/`Sprints/`
+/// queues. `None` when no ancestor has one. Read-only; a missing/denied dir simply isn't a match.
 pub fn nearest_project_root(start: &std::path::Path) -> Option<std::path::PathBuf> {
     let mut dir = Some(start);
     while let Some(d) = dir {
-        if d.join("Tickets").is_dir() {
+        if d.join("Ticketing").is_dir() {
             return Some(d.to_path_buf());
         }
         dir = d.parent();
@@ -529,10 +530,11 @@ mod tests {
     }
 
     #[test]
-    fn nearest_project_root_walks_up_to_the_tickets_folder() {
+    fn nearest_project_root_walks_up_to_the_ticketing_folder() {
         let tmp = tempfile::tempdir().unwrap();
         let root = tmp.path();
-        std::fs::create_dir_all(root.join("Tickets").join("Backlog")).unwrap();
+        // The project root is the dir holding the `Ticketing/` container (CPE-1128).
+        std::fs::create_dir_all(root.join("Ticketing").join("Tickets").join("Backlog")).unwrap();
         let deep = root.join("src").join("lib").join("components");
         std::fs::create_dir_all(&deep).unwrap();
 
@@ -541,7 +543,7 @@ mod tests {
         // …and at the project root itself.
         assert_eq!(nearest_project_root(root).as_deref(), Some(root));
 
-        // A tree with no Tickets/ ancestor yields None.
+        // A tree with no Ticketing/ ancestor yields None.
         let other = tempfile::tempdir().unwrap();
         assert_eq!(nearest_project_root(other.path()), None);
     }

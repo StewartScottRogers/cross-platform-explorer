@@ -15,7 +15,7 @@ Before presenting anything to the user, read the project silently:
 - **PROJECT** — `name` in `package.json`, else `productName` in `src-tauri/tauri.conf.json`,
   else the README H1, else the working directory name.
 - **APP** — the human product name (`productName` in `src-tauri/tauri.conf.json`).
-- **PREFIX** — if `Tickets/` already exists with `{XX}-NNN` files, reuse that prefix.
+- **PREFIX** — if `Ticketing/` (or a legacy `Tickets/`) already exists with `{XX}-NNN` files, reuse that prefix.
   Otherwise derive initials from PROJECT (`cross-platform-explorer` -> `CPE`). Two-to-four capitals.
 - **COMPONENTS** — the architectural areas of the app. Default for this project:
   `Frontend | Backend | Updater | CI | Packaging | Docs | Multiple`
@@ -49,17 +49,20 @@ Skip any folder or file that already exists. Create a `wiki.md` in each subfolde
 its purpose, rules, and conventions.
 
 ```
-Tickets/
-  Backlog/wiki.md  <- purpose, how to file, priority guide, how to invoke ticketing-work
-  Doing/wiki.md    <- one-at-a-time rule, what the agent updates, how to pause/resume
-  Blocked/wiki.md  <- EXTERNAL-gate tickets, what a blocked note must contain
-  Deferred/wiki.md <- OUR-choice/internal-prereq postponements (pickable); Blocked-vs-Deferred rule
-  Done/wiki.md     <- terminal statuses, what a closed ticket contains, how to reopen
+Ticketing/              <- container: system-level wiki.md + _template.md live here
+  Tickets/              <- the status-flow queue
+    Backlog/wiki.md  <- purpose, how to file, priority guide, how to invoke ticketing-work
+    Doing/wiki.md    <- one-at-a-time rule, what the agent updates, how to pause/resume
+    Blocked/wiki.md  <- EXTERNAL-gate tickets, what a blocked note must contain
+    Deferred/wiki.md <- OUR-choice/internal-prereq postponements (pickable); Blocked-vs-Deferred rule
+    Done/wiki.md     <- terminal statuses, what a closed ticket contains, how to reopen
+  Epics/               <- sibling queue: umbrella trackers, decomposed just-in-time
+  Sprints/             <- sibling queue: time-boxed SPR-NN ticket batches
 ```
 
 ---
 
-## Step 3 — Write Tickets/wiki.md
+## Step 3 — Write Ticketing/wiki.md
 
 Write the workflow rules (substitute PROJECT / APP / PREFIX / COMPONENTS). Cover: purpose,
 folder structure (folder = status), ID scheme (`{PREFIX}-NNN`, sequential, zero-padded),
@@ -73,7 +76,7 @@ Do NOT include any MSBuild / `.projitems` / Visual Studio instructions — this 
 
 ---
 
-## Step 4 — Write Tickets/_template.md
+## Step 4 — Write Ticketing/_template.md
 
 Write a ticket template with the frontmatter schema and the standard body sections
 (Summary, Environment, Steps to Reproduce, Expected, Actual, Acceptance Criteria, Resolution,
@@ -89,19 +92,20 @@ replace it; otherwise append:
 ```markdown
 ## Ticket System
 
-Tickets live in `Tickets/`. Folder location is the authoritative status:
+The ticket system lives under the `Ticketing/` container: the status-flow queue in `Ticketing/Tickets/`,
+plus the sibling `Epics/` and `Sprints/` queues. Folder location is the authoritative status:
 
 | Folder | Status |
 |--------|--------|
-| `Tickets/Backlog/` | Open — ready to work |
-| `Tickets/Doing/`   | In Progress — one at a time |
-| `Tickets/Blocked/` | Deferred on an **external** gate — not workable until it clears |
-| `Tickets/Deferred/`| Postponed by **our** choice / an internal prereq — pickable anytime |
-| `Tickets/Done/`    | Closed |
+| `Ticketing/Tickets/Backlog/` | Open — ready to work |
+| `Ticketing/Tickets/Doing/`   | In Progress — one at a time |
+| `Ticketing/Tickets/Blocked/` | Deferred on an **external** gate — not workable until it clears |
+| `Ticketing/Tickets/Deferred/`| Postponed by **our** choice / an internal prereq — pickable anytime |
+| `Ticketing/Tickets/Done/`    | Closed |
 
 IDs are sequential: `CPE-NNN`. To work a ticket: `/ticketing-work CPE-NNN`.
 To file one interactively: `/ticketing-new`. When the user says "tasks", list all
-`Tickets/Backlog/CPE-*.md` as a table of ID, title, type, and priority.
+`Ticketing/Tickets/Backlog/CPE-*.md` as a table of ID, title, type, and priority.
 ```
 
 ---

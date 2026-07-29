@@ -1,5 +1,5 @@
 <script lang="ts">
-  // Agent Board — Kanban view over the real Tickets/ folders (CPE-521, epic CPE-503). Columns are the
+  // Agent Board — Kanban view over the real Ticketing/ folders (CPE-521, epic CPE-503). Columns are the
   // workflow folders; dragging a card to another column calls `board_move` (the file moves + its
   // status frontmatter updates), keeping the board and the CLI /ticketing-* flow in one source of
   // truth. Read + drag only — agent dispatch is wave 2 (CPE-522). Backed by the CPE-520 commands.
@@ -19,7 +19,7 @@
     type Card, type Lane, type Epic,
   } from "../board";
 
-  /** The folder the board scans (`<root>/Tickets/…`) — defaults to the folder being browsed. */
+  /** The folder the board scans (`<root>/Ticketing/Tickets/…`) — defaults to the folder being browsed. */
   export let root: string;
 
   /** Render as a dedicated window filling its viewport (CPE-843): drops the modal dim-backdrop and the
@@ -39,7 +39,7 @@
   let loading = true;
   let error = "";
   // Distinguish "nothing loaded" from "loading": an empty result across every source means this folder
-  // has no readable Tickets/ — show a helpful prompt instead of a blank panel (CPE-551).
+  // has no readable Ticketing/ — show a helpful prompt instead of a blank panel (CPE-551).
   $: isEmpty = !loading && !error && cards.length === 0 && archived.length === 0 && epics.length === 0;
   let note = ""; // last action, shown in the status bar (CPE-529)
   let dragId: string | null = null;
@@ -156,7 +156,7 @@
   function refresh() { load(); loadEpics(); loadArchived(); }
   onMount(async () => {
     // No explicit project chosen yet? auto-detect the project you're inside — the nearest ancestor of the
-    // browsed folder that has a Tickets/ folder (CPE-554) — before scanning. A saved/chosen root wins.
+    // browsed folder that has a Ticketing/ folder (CPE-554) — before scanning. A saved/chosen root wins.
     if (!savedRoot()) {
       try {
         const detected = await commands.findProjectRoot(root);
@@ -166,7 +166,7 @@
     refresh();
   });
 
-  /** Point the board at a different project folder (one that has a Tickets/ folder), and remember it. */
+  /** Point the board at a different project folder (one that has a Ticketing/ folder), and remember it. */
   async function chooseProject() {
     let dest: string | string[] | null;
     try {
@@ -174,7 +174,7 @@
         directory: true,
         multiple: false,
         defaultPath: boardRoot || undefined,
-        title: "Choose a project folder (one that has a Tickets/ folder)",
+        title: "Choose a project folder (one that has a Ticketing/ folder)",
       });
     } catch {
       return; // dialog unavailable / errored — no-op
@@ -245,7 +245,7 @@
         <button class="board-btn" class:active={viewMode === "board"} on:click={() => (viewMode = "board")} title="Kanban columns">▦ Board</button>
         <button class="board-btn" class:active={viewMode === "epics"} on:click={() => (viewMode = "epics")} title="Organize by epic">◧ Epics</button>
         <button class="board-btn" on:click={chooseProject} title={"Project: " + boardRoot + "\nChoose a different project folder"}>📁 Project</button>
-        <button class="board-btn" on:click={refresh} title="Refresh from the Tickets/ folders">Refresh</button>
+        <button class="board-btn" on:click={refresh} title="Refresh from the Ticketing/Ticketing/ folders">Refresh</button>
         <HelpButton section="agent-board" on:help />
         {#if !windowed}
           <button class="board-x board-popout" title="Open in its own window" aria-label="Open Agent Board in its own window" on:click={() => dispatch("popout")}>⧉</button>
@@ -261,7 +261,7 @@
     {:else if isEmpty}
       <div class="board-empty board-noproject">
         <p class="np-title">No tickets found here.</p>
-        <p class="np-body">The board reads a project's <code>Tickets/</code> folder, but none was found in:</p>
+        <p class="np-body">The board reads a project's <code>Ticketing/</code> folder, but none was found in:</p>
         <p class="np-path">{boardRoot}</p>
         <button class="board-btn np-choose" on:click={chooseProject}>📁 Choose a project folder…</button>
       </div>
