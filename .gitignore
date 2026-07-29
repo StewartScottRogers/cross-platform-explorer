@@ -48,3 +48,5 @@ src-tauri/sidecars/
 
 # CPE-1042: git-ignored sandbox for editable copies of samples/ (scripts/new-sample-sandbox.*)
 .sandbox/
+*.pfx
+*.p12

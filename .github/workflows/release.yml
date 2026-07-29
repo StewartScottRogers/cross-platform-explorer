@@ -62,6 +62,48 @@ jobs:
       - name: Install frontend dependencies
         run: npm ci
 
+      # --- Windows code signing (CPE-1131 — self-signed) ---
+      # Conditional on the WINDOWS_CERT_PFX_BASE64 secret so fork/PR/unconfigured builds still succeed
+      # UNSIGNED (mirrors the updater/catalog "skip when the secret is absent" pattern below). When the
+      # secret is present on a windows-latest runner, import the .pfx and patch bundle.windows in
+      # tauri.conf.json so tauri-action signs the installer. NOTE: a self-signed cert makes the installer
+      # Authenticode-signed but does NOT clear SmartScreen for the public — see docs/signing/ + CPE-002.
+      - name: Detect Windows signing cert (CPE-1131)
+        id: wincert
+        shell: bash
+        env:
+          PFX: ${{ secrets.WINDOWS_CERT_PFX_BASE64 }}
+        run: |
+          if [ "${{ matrix.platform }}" = "windows-latest" ] && [ -n "$PFX" ]; then
+            echo "has=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "has=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Set up Windows code signing (CPE-1131 — self-signed)
+        if: steps.wincert.outputs.has == 'true'
+        shell: pwsh
+        env:
+          WINDOWS_CERT_PFX_BASE64: ${{ secrets.WINDOWS_CERT_PFX_BASE64 }}
+          WINDOWS_CERT_PASSWORD: ${{ secrets.WINDOWS_CERT_PASSWORD }}
+        run: |
+          $pfx = Join-Path $env:RUNNER_TEMP 'cpe-sign.pfx'
+          [IO.File]::WriteAllBytes($pfx, [Convert]::FromBase64String($env:WINDOWS_CERT_PFX_BASE64))
+          $sec = ConvertTo-SecureString $env:WINDOWS_CERT_PASSWORD -Force -AsPlainText
+          $cert = Import-PfxCertificate -FilePath $pfx -CertStoreLocation Cert:\CurrentUser\My -Password $sec
+          Remove-Item $pfx -Force
+          # Patch bundle.windows in tauri.conf.json (runner-only; never committed) so tauri-action signs.
+          $conf = 'src-tauri/tauri.conf.json'
+          $j = Get-Content $conf -Raw | ConvertFrom-Json
+          if ($null -eq $j.bundle.windows) {
+            $j.bundle | Add-Member -NotePropertyName windows -NotePropertyValue ([pscustomobject]@{}) -Force
+          }
+          $j.bundle.windows | Add-Member -NotePropertyName certificateThumbprint -NotePropertyValue $cert.Thumbprint -Force
+          $j.bundle.windows | Add-Member -NotePropertyName digestAlgorithm      -NotePropertyValue 'sha256' -Force
+          $j.bundle.windows | Add-Member -NotePropertyName timestampUrl         -NotePropertyValue 'http://timestamp.digicert.com' -Force
+          ($j | ConvertTo-Json -Depth 40) | Set-Content $conf -Encoding utf8
+          Write-Host "Windows self-signed signing enabled (thumbprint $($cert.Thumbprint))."
+
       - name: Build and publish release
         uses: tauri-apps/tauri-action@v0
         env:

@@ -126,6 +126,16 @@ kill-all before touching the installer.
 - Losing the private key OR password means you can no longer sign updates and
   auto-update breaks for existing installs.
 
+### OS installer code signing
+
+- **Windows — self-signed (CPE-1131):** release `.exe`/`.msi` installers are Authenticode-signed in CI
+  with a self-signed cert, stored as repo secrets `WINDOWS_CERT_PFX_BASE64` + `WINDOWS_CERT_PASSWORD`.
+  The signing step in `release.yml` is **conditional** — it skips (unsigned, still green) when the secret
+  is absent, so forks/PRs aren't broken. Caveat: self-signing does **not** clear SmartScreen for the
+  public — only a CA OV/EV cert does (that's still **CPE-002**). Public cert + trust/rotate instructions:
+  [docs/signing/README.md](docs/signing/README.md).
+- **macOS (CPE-002, still Blocked):** needs an Apple Developer ID cert + notarization — not self-signable.
+
 ## Status dashboard
 
 `STATUS.html` (gitignored) is a local dashboard refreshed by the scheduled task
