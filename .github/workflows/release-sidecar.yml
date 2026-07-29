@@ -137,6 +137,45 @@ jobs:
             cp "$bin" "sidecar/$s/target/release/$s.pristine"
           done
 
+      # --- Windows code signing (CPE-1131 — self-signed) ---
+      # Same conditional pattern as release.yml: sign only when the cert secret is present, else skip
+      # (unsigned, still green). The bundle.windows patch lands on the BASE tauri.conf.json; the sidecar
+      # --config overlays don't set bundle.windows, so the thumbprint survives the merge.
+      - name: Detect Windows signing cert (CPE-1131)
+        id: wincert
+        shell: bash
+        env:
+          PFX: ${{ secrets.WINDOWS_CERT_PFX_BASE64 }}
+        run: |
+          if [ "${{ matrix.platform }}" = "windows-latest" ] && [ -n "$PFX" ]; then
+            echo "has=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "has=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Set up Windows code signing (CPE-1131 — self-signed)
+        if: steps.wincert.outputs.has == 'true'
+        shell: pwsh
+        env:
+          WINDOWS_CERT_PFX_BASE64: ${{ secrets.WINDOWS_CERT_PFX_BASE64 }}
+          WINDOWS_CERT_PASSWORD: ${{ secrets.WINDOWS_CERT_PASSWORD }}
+        run: |
+          $pfx = Join-Path $env:RUNNER_TEMP 'cpe-sign.pfx'
+          [IO.File]::WriteAllBytes($pfx, [Convert]::FromBase64String($env:WINDOWS_CERT_PFX_BASE64))
+          $sec = ConvertTo-SecureString $env:WINDOWS_CERT_PASSWORD -Force -AsPlainText
+          $cert = Import-PfxCertificate -FilePath $pfx -CertStoreLocation Cert:\CurrentUser\My -Password $sec
+          Remove-Item $pfx -Force
+          $conf = 'src-tauri/tauri.conf.json'
+          $j = Get-Content $conf -Raw | ConvertFrom-Json
+          if ($null -eq $j.bundle.windows) {
+            $j.bundle | Add-Member -NotePropertyName windows -NotePropertyValue ([pscustomobject]@{}) -Force
+          }
+          $j.bundle.windows | Add-Member -NotePropertyName certificateThumbprint -NotePropertyValue $cert.Thumbprint -Force
+          $j.bundle.windows | Add-Member -NotePropertyName digestAlgorithm      -NotePropertyValue 'sha256' -Force
+          $j.bundle.windows | Add-Member -NotePropertyName timestampUrl         -NotePropertyValue 'http://timestamp.digicert.com' -Force
+          ($j | ConvertTo-Json -Depth 40) | Set-Content $conf -Encoding utf8
+          Write-Host "Windows self-signed signing enabled (thumbprint $($cert.Thumbprint))."
+
       - name: Build and publish sidecar-enabled release
         uses: tauri-apps/tauri-action@v0
         env:
