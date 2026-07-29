@@ -1,4 +1,5 @@
-//! The Agent Board's Kanban model over `Ticketing/Tickets/` (CPE-852, epic CPE-850).
+//! The Agent Board's Kanban model over `Ticketing/Tickets/` (CPE-852, epic CPE-850), plus read-only
+//! views over the sibling `Ticketing/Epics/` and `Ticketing/Sprints/` queues (CPE-1129).
 //!
 //! Reimplemented **inside the sidecar** — it must not depend on `cpe-server` or the app (ADR 0001) — so
 //! the board reads and moves the same real markdown files the CLI `/ticketing-*` flow uses, staying one
@@ -18,6 +19,16 @@ pub const COLUMNS: [&str; 5] = ["Backlog", "Doing", "Blocked", "Deferred", "Done
 /// `Ticketing/` container holds the status folders alongside the sibling `Epics/`/`Sprints/` queues).
 fn tickets_dir(root: &Path) -> PathBuf {
     root.join("Ticketing").join("Tickets")
+}
+
+/// The sibling Epics queue: `<root>/Ticketing/Epics/` (CPE-1129).
+fn epics_dir(root: &Path) -> PathBuf {
+    root.join("Ticketing").join("Epics")
+}
+
+/// The sibling Sprints queue: `<root>/Ticketing/Sprints/` (CPE-1129).
+fn sprints_dir(root: &Path) -> PathBuf {
+    root.join("Ticketing").join("Sprints")
 }
 
 /// The folder for a column (the folder IS the status); case-insensitive match to the canonical name.
@@ -237,6 +248,105 @@ pub fn read_archived(root: &Path) -> Vec<Card> {
     out
 }
 
+/// An epic for the board's Epics view (CPE-1129, mirroring the in-process board's `ticket_board::Epic`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct Epic {
+    pub id: String,
+    pub title: String,
+    pub status: String,
+    pub tags: Vec<String>,
+}
+
+/// Parse an epic from a ticket's markdown. `None` if it has no id **or** isn't `epic`-tagged.
+fn epic_from(md: &str) -> Option<Epic> {
+    let fm = frontmatter(md);
+    let id = fm.get("id").map(|s| unquote(s)).filter(|s| !s.is_empty())?;
+    let tags: Vec<String> = fm.get("tags").map(|s| parse_tags(s)).unwrap_or_default();
+    if !tags.iter().any(|t| t == "epic") {
+        return None;
+    }
+    Some(Epic {
+        id,
+        title: fm.get("title").map(|s| unquote(s)).unwrap_or_default(),
+        status: fm.get("status").map(|s| unquote(s)).unwrap_or_default(),
+        tags,
+    })
+}
+
+/// Read the repo's epics: active/proposed epics from `Ticketing/Epics/` + closed epics from the
+/// top level of `Ticketing/Tickets/Done/` (each `epic`-tagged) — mirrors the in-process board's
+/// `board_epics_impl` (CPE-1129). Unreadable dirs/files and non-epic tickets are skipped. Id-sorted.
+pub fn read_epics(root: &Path) -> Vec<Epic> {
+    let mut epics = Vec::new();
+    for dir in [epics_dir(root), tickets_dir(root).join("Done")] {
+        let Ok(entries) = fs::read_dir(&dir) else { continue };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.extension().and_then(|e| e.to_str()) != Some("md") {
+                continue;
+            }
+            if let Ok(md) = fs::read_to_string(&path) {
+                if let Some(epic) = epic_from(&md) {
+                    epics.push(epic);
+                }
+            }
+        }
+    }
+    epics.sort_by(|a, b| a.id.cmp(&b.id));
+    epics
+}
+
+/// A sprint for the board's Sprints view (CPE-1129) — a named, time-boxed batch of tickets.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct Sprint {
+    pub id: String,
+    pub title: String,
+    pub status: String,
+    pub start: Option<String>,
+    pub end: Option<String>,
+}
+
+/// Parse a sprint from a ticket's markdown. `None` if it has no id **or** the id isn't a `SPR-`
+/// sprint id (sprints use a separate id sequence from `CPE-NNN` — see `Ticketing/wiki.md` → "Sprints").
+fn sprint_from(md: &str) -> Option<Sprint> {
+    let fm = frontmatter(md);
+    let id = fm.get("id").map(|s| unquote(s)).filter(|s| !s.is_empty())?;
+    if !id.starts_with("SPR-") {
+        return None;
+    }
+    Some(Sprint {
+        id,
+        title: fm.get("title").map(|s| unquote(s)).unwrap_or_default(),
+        status: fm.get("status").map(|s| unquote(s)).unwrap_or_default(),
+        start: fm.get("start").map(|s| unquote(s)).filter(|s| !s.is_empty()),
+        end: fm.get("end").map(|s| unquote(s)).filter(|s| !s.is_empty()),
+    })
+}
+
+/// Read the repo's sprints: planned/active sprints from `Ticketing/Sprints/` + closed sprints from the
+/// top level of `Ticketing/Tickets/Done/` (matched by their `SPR-` id, since a closed sprint carries no
+/// distinguishing tag the way a closed epic does) — CPE-1129. Unreadable dirs/files and non-sprint
+/// tickets are skipped. Id-sorted.
+pub fn read_sprints(root: &Path) -> Vec<Sprint> {
+    let mut sprints = Vec::new();
+    for dir in [sprints_dir(root), tickets_dir(root).join("Done")] {
+        let Ok(entries) = fs::read_dir(&dir) else { continue };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.extension().and_then(|e| e.to_str()) != Some("md") {
+                continue;
+            }
+            if let Ok(md) = fs::read_to_string(&path) {
+                if let Some(sprint) = sprint_from(&md) {
+                    sprints.push(sprint);
+                }
+            }
+        }
+    }
+    sprints.sort_by(|a, b| a.id.cmp(&b.id));
+    sprints
+}
+
 /// Move card `id` to `to_column`: rewrite its `status:` to match, and move the file into that column's
 /// folder (a no-op move when it's already there — the status is still rewritten). Returns the card's new
 /// column name on success.
@@ -408,5 +518,67 @@ mod tests {
         let active = read_board(root).into_iter().filter(|c| c.id == "CPE-400").count();
         let archived = read_archived(root).into_iter().filter(|c| c.id == "CPE-400").count();
         assert_eq!(active + archived, 1, "ticket must exist exactly once, not duplicated");
+    }
+
+    fn write_epic(root: &Path, dir: &str, id: &str, status: &str) {
+        let d = root.join("Ticketing").join(dir);
+        fs::create_dir_all(&d).unwrap();
+        let md = format!(
+            "---\nid: {id}\ntitle: \"{id} title\"\ntype: Epic\nstatus: {status}\npriority: high\ntags: [epic]\n---\n\nbody\n"
+        );
+        fs::write(d.join(format!("{id}_x.md")), md).unwrap();
+    }
+
+    fn write_sprint(root: &Path, dir: &str, id: &str, status: &str, start: &str, end: &str) {
+        let d = root.join("Ticketing").join(dir);
+        fs::create_dir_all(&d).unwrap();
+        let md = format!(
+            "---\nid: {id}\ntitle: \"{id} title\"\nstatus: {status}\nstart: {start}\nend: {end}\n---\n\nbody\n"
+        );
+        fs::write(d.join(format!("{id}_x.md")), md).unwrap();
+    }
+
+    #[test]
+    fn read_epics_resolves_from_the_sibling_epics_dir_and_closed_done() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        write_epic(root, "Epics", "CPE-500", "In Progress");
+        write_epic(root, "Tickets/Done", "CPE-501", "Done");
+        // A non-epic ticket in Done must NOT be picked up as an epic.
+        write_ticket(root, "Done", "CPE-9", "Done");
+
+        let epics = read_epics(root);
+        let ids: Vec<&str> = epics.iter().map(|e| e.id.as_str()).collect();
+        assert_eq!(ids, vec!["CPE-500", "CPE-501"], "epics from the sibling Epics/ and closed Tickets/Done/");
+        assert_eq!(epics[0].status, "In Progress");
+        assert_eq!(epics[1].status, "Done");
+        assert!(epics.iter().all(|e| e.tags.contains(&"epic".to_string())));
+    }
+
+    #[test]
+    fn read_sprints_resolves_from_the_sibling_sprints_dir_and_closed_done() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        write_sprint(root, "Sprints", "SPR-02", "Active", "2026-07-20", "2026-08-03");
+        write_sprint(root, "Tickets/Done", "SPR-01", "Closed", "2026-07-06", "2026-07-20");
+        // A regular ticket in Done must NOT be picked up as a sprint.
+        write_ticket(root, "Done", "CPE-9", "Done");
+
+        let sprints = read_sprints(root);
+        let ids: Vec<&str> = sprints.iter().map(|s| s.id.as_str()).collect();
+        assert_eq!(ids, vec!["SPR-01", "SPR-02"], "id-sorted, from the sibling Sprints/ and closed Tickets/Done/");
+        assert_eq!(sprints[0].status, "Closed");
+        assert_eq!(sprints[0].start.as_deref(), Some("2026-07-06"));
+        assert_eq!(sprints[0].end.as_deref(), Some("2026-07-20"));
+        assert_eq!(sprints[1].status, "Active");
+    }
+
+    #[test]
+    fn read_epics_and_sprints_are_empty_when_the_dirs_are_absent() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        std::fs::create_dir_all(root.join("Ticketing").join("Tickets").join("Backlog")).unwrap();
+        assert!(read_epics(root).is_empty());
+        assert!(read_sprints(root).is_empty());
     }
 }

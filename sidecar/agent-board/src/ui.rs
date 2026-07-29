@@ -5,7 +5,11 @@
 //! into a tiny router over the [`crate::board`] model:
 //!
 //! - `GET /`            → the Kanban page (HTML + JS).
-//! - `GET /api/cards`   → the cards under `Ticketing/` as JSON.
+//! - `GET /api/cards`   → the cards under `Ticketing/Tickets/` as JSON.
+//! - `GET /api/epics`   → the epics under `Ticketing/Epics/` (+ closed ones in `Tickets/Done/`) as JSON
+//!   (CPE-1129, parity with the in-process board's Epics view).
+//! - `GET /api/sprints` → the sprints under `Ticketing/Sprints/` (+ closed ones in `Tickets/Done/`) as
+//!   JSON (CPE-1129).
 //! - `POST /api/move`   → `{ id, to }` moves a card; replies with the refreshed cards.
 //!
 //! Loopback-only, so it isn't reachable off the machine. Reads/writes the real `Ticketing/` files at the
@@ -104,6 +108,17 @@ fn route(method: &str, path: &str, body: &[u8], root: &Path) -> (&'static str, &
             "application/json",
             serde_json::to_vec(&board::read_archived(root)).unwrap_or_default(),
         ),
+        // Epics + Sprints from their sibling Ticketing/ queues (CPE-1129, parity with the in-app board).
+        ("GET", "/api/epics") => (
+            "200 OK",
+            "application/json",
+            serde_json::to_vec(&board::read_epics(root)).unwrap_or_default(),
+        ),
+        ("GET", "/api/sprints") => (
+            "200 OK",
+            "application/json",
+            serde_json::to_vec(&board::read_sprints(root)).unwrap_or_default(),
+        ),
         ("POST", "/api/move") => {
             #[derive(serde::Deserialize)]
             struct MoveReq {
@@ -139,7 +154,18 @@ pub fn board_html() -> String {
          background: Canvas; color: CanvasText; }
   header { padding: 8px 12px; font-weight: 600; border-bottom: 1px solid GrayText; display: flex; gap: 10px; align-items: baseline; }
   header .note { font-weight: 400; color: GrayText; font-size: 12px; }
+  .views { margin-left: auto; display: flex; gap: 4px; }
+  .viewbtn { font: inherit; font-weight: 600; background: transparent; border: 1px solid GrayText; color: GrayText;
+             border-radius: 6px; padding: 3px 10px; cursor: pointer; }
+  .viewbtn.active { color: CanvasText; border-color: Highlight; background: color-mix(in srgb, Highlight 15%, Canvas); }
   .cols { flex: 1; display: flex; gap: 8px; padding: 10px; overflow: auto; min-height: 0; }
+  .list { flex: 1; padding: 10px; overflow: auto; min-height: 0; display: flex; flex-direction: column; gap: 8px; }
+  .row { background: Canvas; border: 1px solid GrayText; border-radius: 6px; padding: 8px 10px; }
+  .row .id { font-weight: 600; }
+  .row .title { color: GrayText; margin-left: 6px; }
+  .row .meta { margin-top: 4px; display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+  .pill { font-size: 11px; border: 1px solid GrayText; border-radius: 999px; padding: 1px 8px; color: GrayText;
+          white-space: nowrap; flex: 0 0 auto; }
   .col { flex: 1 1 0; min-width: 150px; display: flex; flex-direction: column; background: color-mix(in srgb, CanvasText 6%, Canvas);
          border-radius: 8px; padding: 6px; }
   .col h2 { font-size: 12px; margin: 2px 4px 6px; display: flex; justify-content: space-between; color: GrayText; }
@@ -158,14 +184,62 @@ pub fn board_html() -> String {
   .archlist .card { opacity: 0.8; }
 </style></head>
 <body>
-  <header>Agent Board <span class="note">running out of process · drag a card to move it</span></header>
+  <header>Agent Board <span class="note">running out of process · drag a card to move it</span>
+    <span class="views">
+      <button class="viewbtn active" id="viewboard" data-view="board">Board</button>
+      <button class="viewbtn" id="viewepics" data-view="epics">Epics</button>
+      <button class="viewbtn" id="viewsprints" data-view="sprints">Sprints</button>
+    </span>
+  </header>
   <div class="cols" id="cols"></div>
+  <div class="list" id="epicsList" hidden></div>
+  <div class="list" id="sprintsList" hidden></div>
 <script>
 const COLUMNS = ["Backlog","Doing","Blocked","Deferred","Done"];
 let dragId = null;
 let archivedCards = [];   // archived Done tickets (CPE-864), fetched once, shown behind a toggle
 let showArchived = false;
 let activeCards = [];
+
+// Epics/Sprints view (CPE-1129) — a lightweight parallel to the Board's Kanban, mirroring the
+// in-process board's Epics view. Not draggable; a read surface over the sibling Ticketing/ queues.
+function esc(s) { return (s || "").replace(/</g, "&lt;"); }
+function pillsHtml(tags) { return (tags || []).map(t => `<span class="pill">${esc(t)}</span>`).join(""); }
+
+async function loadEpics() {
+  const res = await fetch("/api/epics");
+  const epics = res.ok ? await res.json() : [];
+  const root = document.getElementById("epicsList");
+  root.innerHTML = epics.length
+    ? epics.map(e => `<div class="row"><span class="id">${esc(e.id)}</span><span class="title">${esc(e.title)}</span>` +
+        `<div class="meta"><span class="pill">${esc(e.status)}</span>${pillsHtml(e.tags)}</div></div>`).join("")
+    : `<div class="empty">No epics.</div>`;
+}
+
+async function loadSprints() {
+  const res = await fetch("/api/sprints");
+  const sprints = res.ok ? await res.json() : [];
+  const root = document.getElementById("sprintsList");
+  root.innerHTML = sprints.length
+    ? sprints.map(s => {
+        const window = (s.start || s.end) ? `${esc(s.start || "?")} → ${esc(s.end || "?")}` : "";
+        return `<div class="row"><span class="id">${esc(s.id)}</span><span class="title">${esc(s.title)}</span>` +
+          `<div class="meta"><span class="pill">${esc(s.status)}</span>${window ? `<span class="pill">${window}</span>` : ""}</div></div>`;
+      }).join("")
+    : `<div class="empty">No sprints.</div>`;
+}
+
+function switchView(view) {
+  document.getElementById("cols").hidden = view !== "board";
+  document.getElementById("epicsList").hidden = view !== "epics";
+  document.getElementById("sprintsList").hidden = view !== "sprints";
+  ["board", "epics", "sprints"].forEach(v =>
+    document.getElementById("view" + v).classList.toggle("active", v === view));
+  if (view === "epics") loadEpics();
+  if (view === "sprints") loadSprints();
+}
+document.querySelectorAll(".viewbtn").forEach(btn =>
+  btn.addEventListener("click", () => switchView(btn.dataset.view)));
 
 async function load() {
   const [cardsRes, archRes] = await Promise.all([fetch("/api/cards"), fetch("/api/archived")]);
@@ -291,5 +365,45 @@ mod tests {
         assert!(html.contains("<!doctype html>"));
         assert!(html.contains("Agent Board"));
         assert!(html.contains("/api/move"));
+        // The Epics/Sprints view switcher (CPE-1129) is wired into the served page.
+        assert!(html.contains("/api/epics"));
+        assert!(html.contains("/api/sprints"));
+    }
+
+    fn seed_epic(root: &Path, dir: &str, id: &str, status: &str) {
+        let d = root.join("Ticketing").join(dir);
+        fs::create_dir_all(&d).unwrap();
+        fs::write(
+            d.join(format!("{id}_x.md")),
+            format!("---\nid: {id}\ntitle: \"{id}\"\ntype: Epic\nstatus: {status}\npriority: high\ntags: [epic]\n---\nbody\n"),
+        )
+        .unwrap();
+    }
+
+    fn seed_sprint(root: &Path, dir: &str, id: &str, status: &str) {
+        let d = root.join("Ticketing").join(dir);
+        fs::create_dir_all(&d).unwrap();
+        fs::write(
+            d.join(format!("{id}_x.md")),
+            format!("---\nid: {id}\ntitle: \"{id}\"\nstatus: {status}\nstart: 2026-07-20\nend: 2026-08-03\n---\nbody\n"),
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn serves_epics_and_sprints_json_from_the_sibling_ticketing_queues() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().to_path_buf();
+        seed_epic(&root, "Epics", "CPE-500", "In Progress");
+        seed_sprint(&root, "Sprints", "SPR-02", "Active");
+        let server = serve(root.clone()).unwrap();
+
+        let epics = get(server.port, "/api/epics");
+        assert!(epics.contains("application/json"));
+        assert!(epics.contains("CPE-500") && epics.contains("In Progress"));
+
+        let sprints = get(server.port, "/api/sprints");
+        assert!(sprints.contains("application/json"));
+        assert!(sprints.contains("SPR-02") && sprints.contains("Active") && sprints.contains("2026-07-20"));
     }
 }

@@ -3468,7 +3468,7 @@ fn sidecar_dirs(app: &tauri::AppHandle) -> Vec<PathBuf> {
         // natively, so no bespoke launch UI is wired — but it is bundled + registered behind the feature.
         manifest.join("../sidecar/repos"),
         PathBuf::from("sidecar/repos"),
-        // The Agent Board sidecar (CPE-850): the out-of-process Kanban over Tickets/. Bundled +
+        // The Agent Board sidecar (CPE-850): the out-of-process Kanban over Ticketing/. Bundled +
         // registered behind the feature so it appears in the sidecar manager alongside the others.
         manifest.join("../sidecar/agent-board"),
         PathBuf::from("sidecar/agent-board"),

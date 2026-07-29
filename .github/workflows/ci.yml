@@ -318,7 +318,7 @@ jobs:
           cargo test
 
       - name: agent-board — clippy + test
-        # The Agent Board sidecar (CPE-851, epic CPE-850): out-of-process Kanban over Tickets/.
+        # The Agent Board sidecar (CPE-851, epic CPE-850): out-of-process Kanban over Ticketing/.
         working-directory: sidecar/agent-board
         run: |
           cargo clippy --all-targets -- -D warnings
