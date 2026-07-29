@@ -12,16 +12,17 @@ tracker or IDE project integration to keep in sync.
 ## Folder Structure
 
 ```
-Tickets/
+Ticketing/
   wiki.md        <- workflow rules (you are here)
-  _template.md   <- copy to Backlog/ to start a new ticket
-  Epics/         <- umbrella trackers, decomposed just-in-time (SEPARATE queue — see "Epics" below)
-  Sprints/       <- time-boxed batches of tickets (SEPARATE queue — see "Sprints" below)
-  Backlog/       <- open tickets waiting to be worked
-  Doing/         <- ticket the agent is currently working (one at a time)
-  Blocked/       <- tickets deferred on an EXTERNAL gate (can't be worked until it clears)
-  Deferred/      <- tickets WE postponed by choice / on an internal prereq (pickable anytime)
-  Done/          <- closed tickets — never deleted
+  _template.md   <- copy to Tickets/Backlog/ to start a new ticket
+  Epics/         <- umbrella trackers, decomposed just-in-time (SIBLING queue — see "Epics" below)
+  Sprints/       <- time-boxed batches of tickets (SIBLING queue — see "Sprints" below)
+  Tickets/       <- the status-flow queue (folder = status)
+    Backlog/       <- open tickets waiting to be worked
+    Doing/         <- ticket the agent is currently working (one at a time)
+    Blocked/       <- tickets deferred on an EXTERNAL gate (can't be worked until it clears)
+    Deferred/      <- tickets WE postponed by choice / on an internal prereq (pickable anytime)
+    Done/          <- closed tickets — never deleted
 ```
 
 The folder a ticket lives in IS its status. The `status:` frontmatter field mirrors it.

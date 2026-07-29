@@ -26,6 +26,11 @@ It's a **singleton**: there is only ever one board window — opening it again j
 already have. The embedded in-board view still works too, so you can use whichever fits. The window
 remembers its size and position between runs.
 
+On a `sidecar-platform` build, opening the board's own window prefers a separate out-of-process **Agent
+Board sidecar**. It reads the same `Ticketing/` files and offers its own lightweight **Board / Epics /
+Sprints** view switcher, so the Epics and Sprints queues are visible there too, not just in the embedded
+view.
+
 ## Choosing a project
 
 The board reads a project's `Ticketing/` folder. When you open it inside a repo, it **finds the project

@@ -66,6 +66,10 @@ window. The sidecar is a first-class platform tenant — a `sidecar/agent-board`
 (`tauri.sidecar.*.conf.json` → `sidecars/agent-board*`), and managed in **Settings → SidecarManager** like
 Agent Deck / Repositories. See the `sidecar/agent-board` crate and epic CPE-850.
 
+The sidecar reads the full `Ticketing/` container, not just the status-flow queue: its served page has a
+**Board / Epics / Sprints** view switcher, reading `Ticketing/Epics/` and `Ticketing/Sprints/` (the
+sibling queues lifted out in CPE-1128) at parity with the in-process board's Epics view (CPE-1129).
+
 ## Related
 
 - Boot-mode selection: `src/lib/bootMode.ts` (+ `bootMode.test.ts`).

@@ -8,4 +8,4 @@ sub-ticketed until it is **activated** (`/ticketing-epic activate CPE-NNN`).
 - `status: In Progress` — activated; children live in `Backlog/` (each with `epic: CPE-NNN`).
 - Closes to `Done/` when all children are Done and the epic's Definition of Done holds.
 
-Managed by the `ticketing-epic` skill; see `Tickets/wiki.md` → "Epics".
+Managed by the `ticketing-epic` skill; see `Ticketing/wiki.md` → "Epics".
