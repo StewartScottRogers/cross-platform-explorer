@@ -31,9 +31,10 @@ fleet and to make the signing pipeline real.
 - [x] Commit the **public** `.cer` + trust instructions (`docs/signing/`) so the user can make the app show
       as a trusted publisher on their machines.
 - [x] Update RELEASING.md to describe the self-signed Windows signing (and the SmartScreen caveat).
-- [ ] Verify a real release actually produces a signed installer (cut a release; `Get-AuthenticodeSignature`
-      on the `.exe`/`.msi` shows our cert). *Requires the user to cut a release (`Run`) — the CI change is
-      turnkey; the secrets are set.*
+- [x] Verify a real release actually produces a signed installer. **Verified 2026-07-29:** cut
+      `v0.57.38-sidecar` via `release-sidecar.yml`; the CI-built `…Sidecar._0.57.38_x64-setup.exe`
+      reports `Get-AuthenticodeSignature` → **Valid**, signer `CN=Cross-Platform Explorer` (thumbprint
+      `06097080…795B`), DigiCert-timestamped.
 
 ## Resolution
 
