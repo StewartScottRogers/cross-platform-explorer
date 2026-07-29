@@ -45,14 +45,50 @@ correctness bug**, not cosmetic.
   comment header packet is found (don't walk the whole audio stream).
 
 ## Acceptance Criteria
-- [ ] A synthetic OGG whose Vorbis-comment packet is **split across two pages** parses all tags correctly
+- [x] A synthetic OGG whose Vorbis-comment packet is **split across two pages** parses all tags correctly
       (title/artist/etc.), matching what the same comment block yields when contained in a single page.
-- [ ] The existing single-page OGG path still parses identically (no regression).
-- [ ] Truncated / malformed OGG input (short page header, bad segment table, body running past EOF, missing
+- [x] The existing single-page OGG path still parses identically (no regression).
+- [x] Truncated / malformed OGG input (short page header, bad segment table, body running past EOF, missing
       comment header) returns an empty `Vec` and never panics — covered by tests.
-- [ ] New unit tests build a multi-page OGG fixture in-code (extend the existing `build_vorbis` test helper into
+- [x] New unit tests build a multi-page OGG fixture in-code (extend the existing `build_vorbis` test helper into
       a page-framing helper) and assert reassembly; all `crates/server` tests pass.
-- [ ] `cargo clippy --all-targets -D warnings` clean (both feature modes as CI runs them).
+- [x] `cargo clippy --all-targets -D warnings` clean (both feature modes as CI runs them).
+
+## Work Log
+
+Added a local, std-only OGG page walker (`find_ogg_vorbis_packet`) in `crates/server/src/media_meta_read.rs`
+that parses each 27-byte page header, reads `page_segments` and the lace/segment table, and reassembles
+packets by concatenating segment bodies (lace `255` continues into the next segment/page, `< 255` including
+`0` terminates). It returns the body of the first complete packet starting with `\x03vorbis`, with the
+signature stripped, or `None` on any malformed/truncated input (every slice access goes through
+`bytes.get(..)` — no panics). `read_ogg` now calls this walker instead of a naive `find_subslice` byte scan,
+then hands the result unchanged to the existing `parse_vorbis_comment`.
+
+Test helpers: extended the OGG test fixtures with `build_vorbis_packet` (prepends the `\x03vorbis` signature
+to a `build_vorbis` block), `lace_segments` (spec-correct lace encoding of an arbitrary packet), `ogg_page`
+(serializes one real page from lace segments), `build_ogg` (single page) and `build_ogg_split` (packet torn
+across two pages at a chosen segment boundary). New tests: `read_ogg_reassembles_comment_header_split_across_two_pages`
+(asserts a >255-byte comment packet split across two pages parses identically to the same packet on one
+page), `read_ogg_tolerates_truncation_of_a_split_page_stream`, and `read_ogg_rejects_malformed_page_framing`
+(short header, bad segment table, body past EOF, and a well-formed non-comment packet all yield empty `Vec`
+without panicking). The pre-existing `read_ogg_extracts_comment_header` / `read_ogg_rejects_non_ogg_and_tolerates_truncation`
+tests were updated to build a real page (previously a fake `OggS` + stub bytes the old naive scanner didn't
+actually validate) and continue to pass, confirming no regression on the single-page happy path.
+
+Collateral fix (outside the ticket's stated file scope, needed to keep `cargo test` clean): the routing test
+`column_extract::tests::routes_audio_by_extension_to_the_right_codec` had its own local `ogg()` fixture
+builder using fake page framing (`page_segments=1`, lace value `0xFF` = "continue forever") that the old
+naive byte-scanner never actually validated. Under the new real page walker that fixture is malformed
+(claims a 255-byte segment body that isn't present), so it was updated to emit a well-formed single-segment
+page (lace value = exact packet length) in `crates/server/src/column_extract.rs`. No production logic in
+that file changed.
+
+Verified locally (Windows, cargo in PATH via `C:\Users\Stewart Rogers\.cargo\bin`), from `crates/server`:
+- `cargo build` — clean.
+- `cargo test` — 1063 lib tests + 10 integration/doc tests, 0 failed.
+- `cargo test --all-features` — 1083 lib tests + 10 integration/doc tests, 0 failed.
+- `cargo clippy --all-targets -- -D warnings` — clean.
+- `cargo clippy --all-targets --all-features -- -D warnings` — clean.
 
 ## Notes
 - Queued in `.claude/workshift-metrics/CHECKPOINT.md` as genuine honest-headless work ("a legit read-side
