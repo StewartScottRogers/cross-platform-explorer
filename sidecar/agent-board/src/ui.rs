@@ -275,8 +275,8 @@ mod tests {
         let moved = post(server.port, "/api/move", "{\"id\":\"CPE-1\",\"to\":\"Doing\"}");
         assert!(moved.contains("200 OK"), "resp: {moved}");
         assert!(moved.contains("Doing"));
-        assert!(root.join("Ticketing/Ticketing/Doing/CPE-1_x.md").exists());
-        assert!(!root.join("Ticketing/Ticketing/Backlog/CPE-1_x.md").exists());
+        assert!(root.join("Ticketing/Tickets/Doing/CPE-1_x.md").exists());
+        assert!(!root.join("Ticketing/Tickets/Backlog/CPE-1_x.md").exists());
 
         // A bad move is a 400.
         let bad = post(server.port, "/api/move", "{\"id\":\"CPE-1\",\"to\":\"Nope\"}");

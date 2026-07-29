@@ -96,9 +96,9 @@ mod tests {
     fn resolve_board_root_walks_up_from_explicit_subfolder_root() {
         let tmp = tempfile::tempdir().unwrap();
         let root = tmp.path();
-        std::fs::create_dir_all(root.join("Ticketing/Ticketing/Backlog")).unwrap();
+        std::fs::create_dir_all(root.join("Ticketing/Tickets/Backlog")).unwrap();
         // Host points the board at a SUBFOLDER of the project (CPE-861) → still resolves to the project root.
-        let sub = root.join("Ticketing/Ticketing/Doing");
+        let sub = root.join("Ticketing/Tickets/Doing");
         assert_eq!(
             resolve_board_root(Some(sub.to_str().unwrap()), std::path::PathBuf::from(".")).as_path(),
             root,

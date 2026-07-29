@@ -245,7 +245,7 @@
         <button class="board-btn" class:active={viewMode === "board"} on:click={() => (viewMode = "board")} title="Kanban columns">▦ Board</button>
         <button class="board-btn" class:active={viewMode === "epics"} on:click={() => (viewMode = "epics")} title="Organize by epic">◧ Epics</button>
         <button class="board-btn" on:click={chooseProject} title={"Project: " + boardRoot + "\nChoose a different project folder"}>📁 Project</button>
-        <button class="board-btn" on:click={refresh} title="Refresh from the Ticketing/Ticketing/ folders">Refresh</button>
+        <button class="board-btn" on:click={refresh} title="Refresh from the Ticketing/Tickets/ folders">Refresh</button>
         <HelpButton section="agent-board" on:help />
         {#if !windowed}
           <button class="board-x board-popout" title="Open in its own window" aria-label="Open Agent Board in its own window" on:click={() => dispatch("popout")}>⧉</button>

@@ -21,14 +21,14 @@ async listDir(path: string) : Promise<Result<DirEntry[], string>> {
 }
 },
 /**
- * Find the nearest project root at/above `start` — the closest ancestor dir with a `Tickets/` folder —
+ * Find the nearest project root at/above `start` — the closest ancestor dir with a `Ticketing/` folder —
  * so the Agent Board can auto-open the project you're inside (CPE-554). `None` if none is found.
  */
 async findProjectRoot(start: string) : Promise<string | null> {
     return await TAURI_INVOKE("find_project_root", { start });
 },
 /**
- * Read every ticket under `<root>/Tickets/{Backlog,Doing,Blocked,Deferred,Done}/CPE-*.md` into board
+ * Read every ticket under `<root>/Ticketing/Tickets/{Backlog,Doing,Blocked,Deferred,Done}/CPE-*.md` into board
  * cards (CPE-520). Read-only; a malformed file is skipped, never fails the listing.
  */
 async boardCards(root: string) : Promise<Card[]> {
@@ -36,7 +36,8 @@ async boardCards(root: string) : Promise<Card[]> {
 },
 /**
  * List the repo's epics for the board's epic-organized view (CPE-530): active/proposed epics from
- * `Tickets/Epics/` + closed epics from `Tickets/Done/` (top level), each `epic`-tagged. Read-only.
+ * `Ticketing/Epics/` + closed epics from `Ticketing/Tickets/Done/` (top level), each `epic`-tagged.
+ * Read-only. Note the two live at different depths since CPE-1128 (Epics is a sibling of Tickets).
  */
 async boardEpics(root: string) : Promise<Epic[]> {
     return await TAURI_INVOKE("board_epics", { root });
@@ -85,7 +86,7 @@ async boardNote(root: string, id: string, note: string) : Promise<Result<null, s
 }
 },
 /**
- * Read one card's full detail by id, from anywhere under `Tickets/` (CPE-959). `None` if not found.
+ * Read one card's full detail by id, from anywhere under `Ticketing/` (CPE-959). `None` if not found.
  */
 async boardCardDetail(root: string, id: string) : Promise<CardDetail | null> {
     return await TAURI_INVOKE("board_card_detail", { root, id });
@@ -1471,7 +1472,7 @@ async sidecarStartAiConsole() : Promise<Result<string, string>> {
 },
 /**
  * Spawn the Agent Board sidecar, complete the handshake, and return the URL of the Kanban UI it serves
- * so the frontend can frame it in a window (CPE-853, epic CPE-850). The board reads `Tickets/` under
+ * so the frontend can frame it in a window (CPE-853, epic CPE-850). The board reads `Ticketing/` under
  * `root` (passed as `CPE_BOARD_ROOT`; falls back to the sidecar's own cwd when absent). The window
  * singleton (by label) prevents duplicate launches, so this deliberately keeps the connection alive on a
  * detached servicing thread rather than a managed reuse state. Non-fatal: returns an error string the UI
@@ -1853,11 +1854,11 @@ export type Card = { id: string; title: string; ticket_type: string; priority: s
 column: string }
 /**
  * Full detail for one Agent Board card (CPE-959): its ordered frontmatter fields + markdown body + the
- * folder under `Tickets/` it lives in — for the card-detail popup. Works for tickets and epics alike.
+ * folder under `Ticketing/` it lives in — for the card-detail popup. Works for tickets and epics alike.
  */
 export type CardDetail = { id: string; 
 /**
- * Folder under `Tickets/` (e.g. "Backlog", "Epics", "Done/2026/Q3/July/Week-30").
+ * Folder under `Ticketing/` (e.g. "Tickets/Backlog", "Epics", "Tickets/Done/2026/Q3/July/Week-30").
  */
 location: string; 
 /**
