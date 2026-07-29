@@ -168,12 +168,19 @@ mod tests {
         f
     }
 
+    /// A minimal single-page OGG stream (CPE-1133: `read_ogg` now walks real page framing, so this must
+    /// be a well-formed page — one segment whose lace value is the packet's exact length — rather than a
+    /// raw byte scan target).
     fn ogg(comments: &[&str]) -> Vec<u8> {
+        let mut packet = b"\x03vorbis".to_vec();
+        packet.extend_from_slice(&vorbis_block(comments));
+        assert!(packet.len() < 255, "fixture must fit in a single lace segment");
         let mut o = Vec::new();
         o.extend_from_slice(b"OggS");
-        o.extend_from_slice(&[0u8; 22]);
-        o.extend_from_slice(b"\x01\xff\x03vorbis");
-        o.extend_from_slice(&vorbis_block(comments));
+        o.extend_from_slice(&[0u8; 22]); // version + header_type + granule + serial + seqno + checksum (stubbed)
+        o.push(1); // page_segments: one segment
+        o.push(packet.len() as u8); // lace value < 255 terminates the packet at exactly its length
+        o.extend_from_slice(&packet);
         o
     }
 

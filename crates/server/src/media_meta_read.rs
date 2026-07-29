@@ -232,19 +232,61 @@ pub fn read_flac(bytes: &[u8]) -> Vec<MetaField> {
 
 /// Parse an OGG stream's Vorbis-comment tags into [`MetaField`]s (group `"vorbis"`). Returns empty when the
 /// `OggS` magic is absent or no comment header is found. The Vorbis *comment header* packet always begins
-/// with the 7-byte signature `\x03vorbis`; we locate it and hand the bytes that follow to
-/// [`parse_vorbis_comment`], which reads exactly its declared entries and ignores the trailing framing.
-///
-/// This is a pragmatic reader: it assumes the comment header isn't split across Ogg pages (true for typical
-/// tag sizes). Full multi-page packet reassembly is a later refinement; the shared [`parse_vorbis_comment`]
-/// stays the codec.
+/// with the 7-byte signature `\x03vorbis`; [`find_ogg_vorbis_packet`] walks the OGG page structure to
+/// reassemble that packet (which may span multiple pages) and returns its body with the signature already
+/// stripped, which we hand to [`parse_vorbis_comment`] — the shared codec, unchanged.
 pub fn read_ogg(bytes: &[u8]) -> Vec<MetaField> {
     if bytes.len() < 4 || &bytes[0..4] != b"OggS" {
         return Vec::new();
     }
-    const SIG: &[u8] = b"\x03vorbis";
-    let Some(idx) = find_subslice(bytes, SIG) else { return Vec::new() };
-    parse_vorbis_comment(&bytes[idx + SIG.len()..])
+    let Some(body) = find_ogg_vorbis_packet(bytes) else { return Vec::new() };
+    parse_vorbis_comment(&body)
+}
+
+/// The 7-byte packet signature that opens the Vorbis comment-header packet.
+const OGG_VORBIS_COMMENT_SIG: &[u8] = b"\x03vorbis";
+
+/// Walk an OGG logical bitstream's pages from the start of `bytes` (which must already begin with the
+/// `OggS` magic — checked by the caller), reassembling packets from segment bodies, and return the body of
+/// the first complete packet that starts with `\x03vorbis` (the Vorbis comment header), with that 7-byte
+/// signature already stripped. Returns `None` if the input is truncated/malformed before such a packet
+/// completes, or if none appears — never panics, since every offset is bounds-checked before use.
+///
+/// OGG page layout (Ogg encapsulation, RFC 3533 / Vorbis I §4): a 27-byte header — `OggS` magic(4),
+/// version(1), header_type(1), granule_position(8), serial(4), sequence(4), checksum(4),
+/// `page_segments`(1) — followed by `page_segments` 1-byte "lace" values (the segment table), then that
+/// many segment bodies back-to-back. Packets are reassembled by concatenating segment bodies in order: a
+/// lace value of `255` means the segment is full and the packet **continues** into the next segment
+/// (possibly on the next page); a lace value `< 255` (including `0`) **terminates** the packet at that
+/// many bytes into the segment. Walking stops as soon as the target packet is found, and `pos` only ever
+/// advances, so the total bytes walked is capped at `bytes.len()`.
+fn find_ogg_vorbis_packet(bytes: &[u8]) -> Option<Vec<u8>> {
+    let mut pos = 0usize;
+    let mut packet: Vec<u8> = Vec::new();
+    while pos < bytes.len() {
+        let header = bytes.get(pos..pos + 27)?; // truncated page header
+        if &header[0..4] != b"OggS" {
+            return None; // not a page boundary — malformed/desynced stream
+        }
+        let page_segments = header[26] as usize;
+        let seg_table_start = pos + 27;
+        let seg_table = bytes.get(seg_table_start..seg_table_start + page_segments)?; // truncated segment table
+        let mut body_pos = seg_table_start + page_segments;
+        for &lace in seg_table {
+            let seg = bytes.get(body_pos..body_pos + lace as usize)?; // body runs past EOF
+            packet.extend_from_slice(seg);
+            body_pos += lace as usize;
+            if lace < 255 {
+                // Terminating lace value: the packet is complete.
+                if let Some(comment_body) = packet.strip_prefix(OGG_VORBIS_COMMENT_SIG) {
+                    return Some(comment_body.to_vec());
+                }
+                packet.clear();
+            }
+        }
+        pos = body_pos; // next page (if any) starts right after this page's segment bodies
+    }
+    None // ran out of pages without finding the comment header
 }
 
 /// The index of the first occurrence of `needle` in `haystack`, or `None`.
@@ -865,23 +907,74 @@ mod tests {
         }
     }
 
-    /// Wrap a Vorbis-comment block in a minimal OGG stream: the `OggS` magic + a stub page header + the
-    /// `\x03vorbis` comment-header signature + the block + a trailing framing byte.
-    fn build_ogg(comment_block: &[u8]) -> Vec<u8> {
-        let mut o = Vec::new();
-        o.extend_from_slice(b"OggS");
-        o.extend_from_slice(&[0u8; 22]); // version + flags + granule + serial + seqno + crc (stubbed)
-        o.push(1); // one segment (contents irrelevant to the scan-based reader)
-        o.push(0xFF);
-        o.extend_from_slice(b"\x03vorbis");
-        o.extend_from_slice(comment_block);
-        o.push(0x01); // framing bit — parse_vorbis_comment stops before this
-        o
+    /// The Vorbis comment-header *packet* (as opposed to just the comment block): the 7-byte
+    /// `\x03vorbis` signature followed by a comment block built via [`build_vorbis`]. This is what
+    /// actually rides inside OGG pages — [`read_ogg`] strips the signature back off before handing the
+    /// rest to [`parse_vorbis_comment`].
+    fn build_vorbis_packet(comments: &[&str]) -> Vec<u8> {
+        let mut p = b"\x03vorbis".to_vec();
+        p.extend_from_slice(&build_vorbis(comments));
+        p
+    }
+
+    /// Lace-encode `packet` into OGG segments per the spec: every full 255-byte chunk gets lace value
+    /// `255` (meaning "continue"), and the packet is closed by one final segment whose lace is `< 255`
+    /// (that terminator is `0` bytes long when the packet's length is an exact multiple of 255 — real
+    /// encoders emit that too, so a reader can't skip handling it).
+    fn lace_segments(packet: &[u8]) -> Vec<(u8, &[u8])> {
+        let mut segs = Vec::new();
+        let mut rest = packet;
+        while rest.len() >= 255 {
+            let (chunk, tail) = rest.split_at(255);
+            segs.push((255u8, chunk));
+            rest = tail;
+        }
+        segs.push((rest.len() as u8, rest)); // terminator, length 0..=254
+        segs
+    }
+
+    /// Serialize one OGG page (27-byte header + segment table + segment bodies) carrying exactly the
+    /// given lace segments. Header fields other than `page_segments` are stubbed at zero — the reader
+    /// under test never inspects them.
+    fn ogg_page(segments: &[(u8, &[u8])], sequence: u32) -> Vec<u8> {
+        let mut p = Vec::new();
+        p.extend_from_slice(b"OggS");
+        p.push(0); // version
+        p.push(0); // header_type flags (bos/eos/continuation) — irrelevant to lace-based reassembly
+        p.extend_from_slice(&[0u8; 8]); // granule position
+        p.extend_from_slice(&[0u8; 4]); // stream serial number
+        p.extend_from_slice(&sequence.to_le_bytes()); // page sequence number
+        p.extend_from_slice(&[0u8; 4]); // checksum (unchecked by our reader)
+        p.push(segments.len() as u8); // page_segments
+        for &(lace, _) in segments {
+            p.push(lace);
+        }
+        for &(_, body) in segments {
+            p.extend_from_slice(body);
+        }
+        p
+    }
+
+    /// Wrap `packet` in a single OGG page — the common single-page case.
+    fn build_ogg(packet: &[u8]) -> Vec<u8> {
+        ogg_page(&lace_segments(packet), 0)
+    }
+
+    /// Wrap `packet` across **two** OGG pages, splitting after `first_page_segments` lace segments (so the
+    /// packet's data is torn across a page boundary, exercising reassembly). `first_page_segments` must
+    /// leave at least one segment for the second page for the split to actually happen.
+    fn build_ogg_split(packet: &[u8], first_page_segments: usize) -> Vec<u8> {
+        let segs = lace_segments(packet);
+        let split = first_page_segments.min(segs.len());
+        let mut out = ogg_page(&segs[..split], 0);
+        out.extend_from_slice(&ogg_page(&segs[split..], 1));
+        out
     }
 
     #[test]
     fn read_ogg_extracts_comment_header() {
-        let ogg = build_ogg(&build_vorbis(&["TITLE=Weightless", "ARTIST=Marconi Union", "TRACKNUMBER=1"]));
+        let packet = build_vorbis_packet(&["TITLE=Weightless", "ARTIST=Marconi Union", "TRACKNUMBER=1"]);
+        let ogg = build_ogg(&packet);
         let f = read_ogg(&ogg);
         assert_eq!(get(&f, "Title"), Some("Weightless"));
         assert_eq!(get(&f, "Artist"), Some("Marconi Union"));
@@ -892,10 +985,68 @@ mod tests {
     fn read_ogg_rejects_non_ogg_and_tolerates_truncation() {
         assert!(read_ogg(b"fLaC....").is_empty());
         assert!(read_ogg(b"OggS-no-vorbis-marker-here").is_empty()); // magic but no comment header
-        let ogg = build_ogg(&build_vorbis(&["TITLE=T"]));
+        let ogg = build_ogg(&build_vorbis_packet(&["TITLE=T"]));
         for cut in 4..ogg.len() {
             let _ = read_ogg(&ogg[..cut]); // no panic on any truncation
         }
+    }
+
+    #[test]
+    fn read_ogg_reassembles_comment_header_split_across_two_pages() {
+        // A comment block long enough that its packet spans more than one 255-byte lace segment, so a
+        // realistic encoder would (and our synthetic builder does) split it across pages.
+        let long_comment = "x".repeat(400);
+        let packet = build_vorbis_packet(&["TITLE=Weightless", "ARTIST=Marconi Union", &format!("COMMENT={long_comment}")]);
+        assert!(packet.len() > 255, "fixture must exceed one lace segment to exercise the split");
+
+        // Same packet, single page vs. split after the first lace segment (forces the tear mid-packet).
+        let single_page = read_ogg(&build_ogg(&packet));
+        let split_pages = read_ogg(&build_ogg_split(&packet, 1));
+
+        assert_eq!(get(&split_pages, "Title"), Some("Weightless"));
+        assert_eq!(get(&split_pages, "Artist"), Some("Marconi Union"));
+        assert_eq!(get(&split_pages, "Comment"), Some(long_comment.as_str()));
+        assert_eq!(single_page, split_pages, "split-page reassembly must match the single-page parse");
+    }
+
+    #[test]
+    fn read_ogg_tolerates_truncation_of_a_split_page_stream() {
+        let long_comment = "y".repeat(600); // spans several lace segments across both pages
+        let packet = build_vorbis_packet(&["TITLE=Split", &format!("COMMENT={long_comment}")]);
+        let ogg = build_ogg_split(&packet, 1);
+        for cut in 4..ogg.len() {
+            let _ = read_ogg(&ogg[..cut]); // truncated page header/segment-table/body must never panic
+        }
+    }
+
+    #[test]
+    fn read_ogg_rejects_malformed_page_framing() {
+        // Header claims OggS magic but is shorter than the fixed 27-byte header.
+        let mut short_header = b"OggS".to_vec();
+        short_header.extend_from_slice(&[0u8; 10]);
+        assert!(read_ogg(&short_header).is_empty());
+
+        // A complete 27-byte header whose page_segments byte claims more lace bytes than are actually
+        // present (truncated segment table).
+        let mut bad_seg_table = b"OggS".to_vec();
+        bad_seg_table.extend_from_slice(&[0u8; 22]);
+        bad_seg_table.push(10); // claims 10 segments
+        bad_seg_table.push(5); // only 1 lace byte actually follows
+        assert!(read_ogg(&bad_seg_table).is_empty());
+
+        // A well-formed header + segment table whose declared segment body runs past the end of the
+        // buffer (truncated body).
+        let mut body_past_eof = b"OggS".to_vec();
+        body_past_eof.extend_from_slice(&[0u8; 22]);
+        body_past_eof.push(1); // one segment
+        body_past_eof.push(200); // claims 200 bytes of body
+        body_past_eof.extend_from_slice(&[0u8; 5]); // far short of 200 bytes
+        assert!(read_ogg(&body_past_eof).is_empty());
+
+        // A structurally valid page whose only (terminated) packet is not the comment header.
+        let other_packet = b"\x01not-vorbis-comment-header".to_vec();
+        let ogg = build_ogg(&other_packet);
+        assert!(read_ogg(&ogg).is_empty());
     }
 
     #[test]
