@@ -25,6 +25,19 @@ Self-contained: its own `package.json`/lockfile/`tsconfig.json`. Nothing here to
    regression on the plain highlighted output). This pins the CPE-1090/1091 render as CI coverage,
    closing their `MANUAL-TEST-BURNDOWN.md` rows (still non-blocking, like the rest of this job — see
    CPE-1048 below).
+5. **Cost-History rollup renders (CPE-1130)** — `wdio.conf.ts#seedHistoryFixture` writes a 3-row
+   synthetic `SessionMetricsRecord[]` journal (`history.jsonl`, CPE-1113's on-disk schema) straight
+   into the REAL app-data directory this build reads from (`<OS app-data root>/<bundle
+   identifier>/agent-metrics/history.jsonl`, mirroring `crates/server/src/metrics_journal.rs` +
+   `server_ctx.rs`'s `app_data_dir()`), before the app process starts. `specs/cost-history.smoke.ts`
+   then: seeds a SYNTHETIC "started" Agent Watch session via a test-mode-only hook
+   (`window.__CPE_TEST_INGEST_SESSION__`, App.svelte) so the drawer's `.agent-log-btn` becomes
+   reachable without a real running agent; opens the drawer; switches to the History tab; and asserts
+   `.hd-bar` (the over-time chart), `.hd-totals`/`.hd-stat` (the totals strip), and a `.hd-table`
+   row (by-model/by-agent) all render non-empty. Restores whatever was at the fixture path
+   beforehand in `onComplete` (a no-op on CI's ephemeral runner; on a local run it means this suite
+   never permanently clobbers a real developer's own Agent Watch history). Closes the
+   `MANUAL-TEST-BURNDOWN.md` row for CPE-1114's cost-History visual residual.
 
 ## Prerequisites
 

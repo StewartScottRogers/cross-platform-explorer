@@ -20,7 +20,7 @@
   import AboutDialog from "./lib/components/AboutDialog.svelte";
   import SettingsDialog from "./lib/components/SettingsDialog.svelte";
   import { startAiConsole, startAgentBoard, consoleUrlWith, platformActive, consentState, setConsent, CAPABILITY_INFO } from "./lib/sidecar";
-  import { initAgentSessions, agentSessions, watchTargetFor, watchTargets, currentSessions, normalizePath, clearAgentSessions } from "./lib/agentSessions";
+  import { initAgentSessions, agentSessions, watchTargetFor, watchTargets, currentSessions, normalizePath, clearAgentSessions, ingestSessionState } from "./lib/agentSessions";
   import { startAgentWatch, stopAgentWatch, type FsActivity, type AgentSession } from "./lib/sidecar";
   import { initAgentActivity, fsActivity, recentActivities, agentTimeline, affectsListing } from "./lib/agentActivity";
   import { initAgentDiffs } from "./lib/agentDiffs";
@@ -186,6 +186,19 @@
   const testMode =
     typeof window !== "undefined" &&
     (window as unknown as { __CPE_TEST_MODE__?: boolean }).__CPE_TEST_MODE__ === true;
+
+  // CPE-1130: a test-mode-only hook that lets the headless gui-smoke suite seed a SYNTHETIC Agent
+  // Watch session announcement (the same `session:<json>` wire shape a real sidecar emits over the
+  // `ai-console://session` event, decoded by `agentSessions.ts#ingestSessionState`) without a real
+  // agent/sidecar running. Opening the Agent Watch drawer (and its cost-History tab, CPE-1114) is
+  // gated behind `activeWatchCwd` being non-empty — there's no other way to reach it in a smoke
+  // harness that never launches a real agent. Mirrors the existing `__CPE_OPEN_DIR__`/
+  // `__CPE_TEST_MODE__` convention: only attached when `testMode` is true, so it's absent (zero
+  // cost, zero attack surface) from every normal launch.
+  if (testMode) {
+    (window as unknown as { __CPE_TEST_INGEST_SESSION__?: (state: string) => void }).__CPE_TEST_INGEST_SESSION__ =
+      ingestSessionState;
+  }
 
   let notice = "";
   let noticeIsError = false;

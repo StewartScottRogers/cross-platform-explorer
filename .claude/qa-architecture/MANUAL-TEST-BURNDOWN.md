@@ -50,6 +50,16 @@ These are **not** MVD; listed so the QA Architect pins them and audits for regre
 | CPE-1098 | Agent-Watch cost ledger tab: card layout / theme colours / live token+USD numbers | headless UAT+review only — needs eyes + a real agent session printing usage on the installed build; stays open (needs a live agent session, not just a static fixture) | open | 2026-07-26 |
 | CPE-1100 | Agent-Watch radar tab: overlap rows / actor pills / navigate / live 2-actor race | headless UAT+review only — needs eyes + two concurrent actors racing a file on the installed build; stays open (needs a live 2-actor session, not just a static fixture) | open | 2026-07-26 |
 
+### CPE-1130 (2026-07-29) — cost-History row flipped ✅
+CPE-1114's row above flipped from "logic automated — visual residual" to "automated — pinned by
+`gui-smoke`", closing the last open item this supplementary table tracked for it. Note on the header
+**MVD (still-manual surfaces): 7** count: that number tracks only the 8 numbered rows in the primary
+Ledger table above (which CPE-1114 is not one of — it lives in this secondary "new manual debt from
+merged PRs" table, same as CPE-1090/1091/1093/1094/1098/1100). Consistent with how the CPE-1090/1091
+flips earlier in this same table did **not** move that header number, this flip doesn't either — the
+header stays at 7. If the QA Architect later wants this supplementary table folded into the primary
+numbered Ledger, that's a separate reorganisation, not part of this ticket's scope.
+
 ### QA-Architect pass 2026-07-26 (Foreman-played; crew at agent cap)
 - **Batch-media skip-on-error now pinned** (`crates/server` `batch_execute` integration test
   `a_real_looking_but_undecodable_image_is_skipped_while_valid_files_still_succeed`): a mixed batch of a valid
@@ -62,4 +72,4 @@ These are **not** MVD; listed so the QA Architect pins them and audits for regre
   only pure pixel/theme *feel* on the installed build remains human debt.
 
 ### Workshift 2026-07-26 (resume) — new manual debt from merged PRs
-| CPE-1114 | Cost History tab: SVG over-time bar-chart geometry + hover tooltips; light/dark theme of `.hd-stat`/`.hd-bar`; drawer at 340px/90vw reflow; long agent/model name ellipsis+title; a real multi-week `history.jsonl` round-tripping into believable numbers | **logic fully automated** (`agentMetricsRollup.test.ts` 14 cases assert real values; AgentTimeline History-tab component behaviour, pull-only, empty/error states covered) — residual is **pixel/theme/geometry-only** on the installed build with a real persisted journal; candidate to fold into the `gui-smoke` fixture (seed a synthetic history.jsonl + assert `.hd-*`/`.hd-bar` render) | logic automated — visual residual | 2026-07-26 |
+| CPE-1114 | Cost History tab: SVG over-time bar-chart geometry + hover tooltips; light/dark theme of `.hd-stat`/`.hd-bar`; drawer at 340px/90vw reflow; long agent/model name ellipsis+title; a real multi-week `history.jsonl` round-tripping into believable numbers | **logic fully automated** (`agentMetricsRollup.test.ts` 14 cases assert real values; AgentTimeline History-tab component behaviour, pull-only, empty/error states covered) **+ render pinned by `gui-smoke` (CPE-1130):** `wdio.conf.ts#seedHistoryFixture` seeds a synthetic 3-row `history.jsonl` straight into the real app-data dir the built binary reads from; `specs/cost-history.smoke.ts` seeds a synthetic watched-session announcement (test-mode-only hook) to reach the drawer, opens the History tab, and asserts `.hd-bar` (over-time chart), `.hd-totals`/`.hd-stat` (totals strip), and a `.hd-table` row (by-model/by-agent) all render non-empty on a real `tauri build` binary — non-blocking CI smoke signal (`continue-on-error`, CPE-1048), not a hard gate; exact pixel/theme colour fidelity still worth an occasional human glance (same framing as the CPE-1090/1091 rows above) | **automated — pinned by `gui-smoke` (CPE-1130; non-blocking per CPE-1048)** | 2026-07-29 |
