@@ -1213,6 +1213,16 @@
   $: currentPath = current(activeTab.history) ?? HOME;
   $: isHome = currentPath === HOME;
 
+  // Display-only Home preview (CPE-1132): single-clicking a Recent/Favorite file on the Home screen
+  // drives the right preview/detail pane, matching every other middle-pane view. Home has no
+  // `<FileList>` (see `ExplorerPane`'s `inHome` branch), so `selectedEntries` — which is derived from
+  // `visible`/`selection` there and also feeds file OPERATIONS (delete/rename/copy/run/…) — is always
+  // empty in Home and stays that way on purpose: this is a SEPARATE, read-only path that never touches
+  // `selectedEntries`, so a Home-previewed file can never become an accidental op target. Cleared below
+  // the instant it would go stale (leaving Home, or a real FileList selection landing).
+  let homePreview: DirEntry | null = null;
+  $: if (!isHome || selectedEntries.length > 0) homePreview = null;
+
   function showNotice(message: string, isError = false) {
     notice = message;
     noticeIsError = isError;
@@ -1472,6 +1482,21 @@
       recents = recents.filter((r) => r.path !== path);
       settings.saveRecents(recents);
       showNotice("That file is no longer available — removed from Recent.", true);
+    }
+  }
+
+  /** Display-only Home selection (CPE-1132): single-clicking a Recent file drives the right
+   *  preview/detail pane. Reuses `entries_for_paths` (the same stat-a-path-into-a-`DirEntry` command
+   *  smart folders use, CPE-667) rather than `entry_info` — its return type already IS the real
+   *  `DirEntry` the preview/details panes read elsewhere, so there's no separate field-mapping to get
+   *  wrong. Silently clears `homePreview` if the file has since moved/vanished (self-healing, same as
+   *  smart folders) instead of surfacing an error for what is, after all, just a passive preview. */
+  async function selectHomeEntry(path: string): Promise<void> {
+    try {
+      const [found] = await commands.entriesForPaths([path]);
+      homePreview = found ?? null;
+    } catch {
+      homePreview = null;
     }
   }
 
@@ -3395,6 +3420,7 @@
       on:contextAction={(e) => handleContextAction(e.detail)}
       on:navigate={(e) => navigate(e.detail)}
       on:openRecent={(e) => openRecent(e.detail)}
+      on:homeSelect={(e) => selectHomeEntry(e.detail)}
       on:unpin={(e) => { pins = settings.togglePin(pins, e.detail); settings.savePins(pins); }}
       on:unfavorite={(e) => { favorites = favorites.filter((f) => f.path !== e.detail); settings.saveFavorites(favorites); }}
       on:removeRecent={(e) => { recents = settings.removeRecent(recents, e.detail); settings.saveRecents(recents); }}
@@ -3516,7 +3542,7 @@
 
       {#if showPreview}
         <PreviewPane
-          entry={selectedEntries.length === 1 ? selectedEntries[0] : null}
+          entry={selectedEntries.length === 1 ? selectedEntries[0] : homePreview}
           assetUrl={convertFileSrc}
           loadText={loadPreviewText}
           loadEntries={loadArchiveEntries}
@@ -3524,10 +3550,10 @@
           loadImageData={loadImageData}
           saveText={savePreviewText}
         >
-          <DetailsPane selected={selectedEntries} {folderName} {itemCount} />
+          <DetailsPane selected={selectedEntries.length ? selectedEntries : (homePreview ? [homePreview] : [])} {folderName} {itemCount} />
         </PreviewPane>
       {:else}
-        <DetailsPane selected={selectedEntries} {folderName} {itemCount} />
+        <DetailsPane selected={selectedEntries.length ? selectedEntries : (homePreview ? [homePreview] : [])} {folderName} {itemCount} />
       {/if}
     </div>
   {/if}

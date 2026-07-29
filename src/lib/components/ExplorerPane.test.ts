@@ -5,12 +5,12 @@
  * shortened sessionId (the bug this ticket fixes — flagged by the CPE-1116 Reviewer + UAT).
  */
 import { describe, it, expect, afterEach, vi } from "vitest";
-import { render, screen } from "@testing-library/svelte";
+import { render, screen, fireEvent } from "@testing-library/svelte";
 import ExplorerPane from "./ExplorerPane.svelte";
 import { emptySelection } from "../selection";
 import { ingestActivity, clearActivity } from "../agentActivity";
 import type { AgentSession } from "../sidecar";
-import type { DirEntry } from "../types";
+import type { DirEntry, RecentFile } from "../types";
 
 // The component tree imports Tauri APIs transitively; stub them so jsdom can render without a
 // Tauri runtime (same stub FileList.test.ts uses).
@@ -81,5 +81,22 @@ describe("ExplorerPane -> FileList sessions wiring (CPE-1120)", () => {
     expect(row.style.getPropertyValue("--agent-accent")).toMatch(/^var\(--agent-[1-6]\)$/);
     // friendlyActor's fallback for an unresolved id: first 10 chars + an ellipsis.
     expect(screen.getByText("sess-a-lon…")).toBeTruthy();
+  });
+});
+
+describe("ExplorerPane Home -> right-pane preview wiring (CPE-1132)", () => {
+  it("forwards HomeView's `select` event as `homeSelect` (Home has no FileList/selectedEntries of its own)", async () => {
+    const recents: RecentFile[] = [{ path: "/home/a.md", name: "a.md", opened: 1 }];
+    const { component } = render(ExplorerPane, {
+      selection: emptySelection(),
+      inHome: true,
+      recents,
+    });
+    const homeSelect = vi.fn();
+    component.$on("homeSelect", (e) => homeSelect(e.detail));
+
+    await fireEvent.click(screen.getByText("a.md"));
+
+    expect(homeSelect).toHaveBeenCalledWith("/home/a.md");
   });
 });

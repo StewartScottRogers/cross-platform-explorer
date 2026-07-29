@@ -20,6 +20,9 @@
   const dispatch = createEventDispatcher<{
     navigate: string;
     openFile: string;
+    /** Display-only: single-clicking a Recent file drives the right preview/detail pane without
+     *  opening it or becoming an operation target (CPE-1132). */
+    select: string;
     unpin: string;
     unfavorite: string;
     removeRecent: string;
@@ -136,7 +139,7 @@
             <span>{$t("home.name")}</span><span>{$t("home.dateOpened")}</span>
           </div>
           {#each recents as r (r.path)}
-            <button class="recent-row" on:dblclick={() => dispatch("openFile", r.path)} on:click={() => dispatch("openFile", r.path)}>
+            <button class="recent-row" on:dblclick={() => dispatch("openFile", r.path)} on:click={() => dispatch("select", r.path)}>
               <span class="rname">
                 <Icon name={iconFor({ is_dir: false, extension: extOf(r.name) })} />
                 <span class="ellip">{r.name}</span>
