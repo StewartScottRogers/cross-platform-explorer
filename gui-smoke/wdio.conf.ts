@@ -227,6 +227,79 @@ function restoreHistoryFixture(): void {
   historyFixtureBackup = null;
 }
 
+// --- CPE-1135: Replay-scrubber fixture ----------------------------------------------------------
+// Seed the on-disk audit journal + baseline for a FIXED synthetic session id into the REAL app-data
+// dir this build reads from, so the Agent Watch drawer's Replay tab (AgentTimeline.svelte, CPE-1094 —
+// `replay_load`, CPE-1110) has something to load when the smoke suite opens it. Mirrors the CPE-1130
+// history-fixture discipline above: seed in `onPrepare`, restore/delete in `onComplete`.
+//
+// On-disk shapes (discovered from the backend, not invented — see crates/server/src/audit_journal.rs
+// and replay_baseline.rs, and their round-trip tests):
+//   - Journal: `<app-data-dir>/audit/<session>.jsonl` (`audit_journal::session_file`, called from
+//     `audit_dir()` in src-tauri/src/lib.rs), one `AuditEvent` JSON object per line. `AuditEvent` has
+//     NO serde rename — the wire field names ARE the Rust field names: `ts`, `session`, `kind`,
+//     `path`, and optional `actor`/`detail` (both `#[serde(default, skip_serializing_if =
+//     "Option::is_none")]`, so an old/minimal line without them still deserializes — the
+//     `actor_round_trips_and_old_lines_without_actor_read_as_none` test constructs exactly this).
+//   - Baseline: `<app-data-dir>/audit/<session>.baseline.json` (`replay_baseline::baseline_file`,
+//     same `audit_dir()` base — a DISTINCT extension so `audit_journal::list_sessions`'s `.jsonl`
+//     filter never picks it up). Shape: `{ paths: string[], truncated: bool }` (`Baseline`, no rename).
+//
+// Paths are rooted at the SAME tmpDir `--open=<dir>` already navigated into (onPrepare below), so the
+// reconstructed listing (`AgentTimeline.svelte`'s `.rp-recon-list`, fed by
+// `replayFold.ts#childrenAt(state, currentPath)`) has real content to show, not just the empty state —
+// `currentPath` is that exact tmpDir string once navigation lands (open-dir.smoke.ts already proves
+// the breadcrumb/listing reflect it verbatim).
+export const REPLAY_SESSION_ID = "gui-smoke-replay";
+export const REPLAY_BASELINE_NAME = "CPE-1135-existing.txt";
+export const REPLAY_CREATED_NAME = "CPE-1135-created.txt";
+
+let replayFixtureBackup: {
+  journalFile: string;
+  journalOriginal: string | null;
+  baselineFile: string;
+  baselineOriginal: string | null;
+} | null = null;
+
+function seedReplayFixture(tmpDir: string): void {
+  const dir = path.join(resolveAppDataDir(), "audit");
+  fs.mkdirSync(dir, { recursive: true });
+  const journalFile = path.join(dir, `${REPLAY_SESSION_ID}.jsonl`);
+  const baselineFile = path.join(dir, `${REPLAY_SESSION_ID}.baseline.json`);
+  replayFixtureBackup = {
+    journalFile,
+    journalOriginal: fs.existsSync(journalFile) ? fs.readFileSync(journalFile, "utf-8") : null,
+    baselineFile,
+    baselineOriginal: fs.existsSync(baselineFile) ? fs.readFileSync(baselineFile, "utf-8") : null,
+  };
+
+  // Baseline: one pre-existing file under tmpDir, exactly as `replay_baseline::capture` would record
+  // it at watch-start (a flat list of absolute paths; this fixture needs no nested directories).
+  const baseline = { paths: [path.join(tmpDir, REPLAY_BASELINE_NAME)], truncated: false };
+  fs.writeFileSync(baselineFile, JSON.stringify(baseline), "utf-8");
+
+  // Journal: two events for the same path, 30s apart, so the fold has something to apply on top of
+  // the baseline (a create then a modify) — mirrors `replay_session.rs`'s own
+  // `loads_events_in_order_with_bounds_and_summary` fixture shape.
+  const started = Date.now() - 60_000;
+  const createdPath = path.join(tmpDir, REPLAY_CREATED_NAME);
+  const events = [
+    { ts: started, session: REPLAY_SESSION_ID, kind: "created", path: createdPath },
+    { ts: started + 30_000, session: REPLAY_SESSION_ID, kind: "modified", path: createdPath },
+  ];
+  fs.writeFileSync(journalFile, events.map((e) => JSON.stringify(e)).join("\n") + "\n", "utf-8");
+}
+
+function restoreReplayFixture(): void {
+  if (!replayFixtureBackup) return;
+  const { journalFile, journalOriginal, baselineFile, baselineOriginal } = replayFixtureBackup;
+  if (journalOriginal === null) fs.rmSync(journalFile, { force: true });
+  else fs.writeFileSync(journalFile, journalOriginal, "utf-8");
+  if (baselineOriginal === null) fs.rmSync(baselineFile, { force: true });
+  else fs.writeFileSync(baselineFile, baselineOriginal, "utf-8");
+  replayFixtureBackup = null;
+}
+
 let tauriDriver: ChildProcess | undefined;
 let shuttingDown = false;
 
@@ -314,6 +387,10 @@ export const config: WebdriverIO.Config = {
     // the History tab is opened.
     seedHistoryFixture();
 
+    // CPE-1135: seed the Replay-tab's audit journal + baseline fixture, rooted at this same tmpDir,
+    // before the app process ever starts (see the block above).
+    seedReplayFixture(tmpDir);
+
     const caps = capabilities as unknown as Array<{ "tauri:options": { args: string[] } }>;
     caps[0]["tauri:options"].args = ["--test-mode", "--x=-4000", `--open=${tmpDir}`];
 
@@ -357,6 +434,8 @@ export const config: WebdriverIO.Config = {
     // CPE-1130: restore whatever was at the history.jsonl fixture path before this run (or delete it
     // if we created it fresh) — see the comment on `historyFixtureBackup` above.
     restoreHistoryFixture();
+    // CPE-1135: same restore discipline for the Replay-tab journal + baseline fixture.
+    restoreReplayFixture();
   },
 };
 

@@ -22,7 +22,7 @@
   import { startAiConsole, startAgentBoard, consoleUrlWith, platformActive, consentState, setConsent, CAPABILITY_INFO } from "./lib/sidecar";
   import { initAgentSessions, agentSessions, watchTargetFor, watchTargets, currentSessions, normalizePath, clearAgentSessions, ingestSessionState } from "./lib/agentSessions";
   import { startAgentWatch, stopAgentWatch, type FsActivity, type AgentSession } from "./lib/sidecar";
-  import { initAgentActivity, fsActivity, recentActivities, agentTimeline, affectsListing } from "./lib/agentActivity";
+  import { initAgentActivity, fsActivity, recentActivities, agentTimeline, affectsListing, ingestActivity } from "./lib/agentActivity";
   import { initAgentDiffs } from "./lib/agentDiffs";
   import { initAgentCost } from "./lib/agentCost";
   import { clearAgentSessionMetrics, flushSession, flushAllSessions } from "./lib/agentSessionMetrics";
@@ -198,6 +198,23 @@
   if (testMode) {
     (window as unknown as { __CPE_TEST_INGEST_SESSION__?: (state: string) => void }).__CPE_TEST_INGEST_SESSION__ =
       ingestSessionState;
+  }
+
+  // CPE-1135: a test-mode-only hook mirroring the one above — lets the headless gui-smoke suite seed
+  // SYNTHETIC filesystem-activity items directly into the live `agentTimeline` store (the same shape
+  // an `ai-console://fs-activity` batch decodes to via `agentActivity.ts#ingestActivity` /
+  // `sidecar.ts#normalizeFsActivity`) without a real watched folder or agent ever producing them. The
+  // Agent Watch drawer's Replay tab (`AgentTimeline.svelte`, CPE-1094) only renders its scrubber
+  // transport/slider (`.rp-transport`/`.rp-slider`) once `sliderRange(entries)` is non-null, which
+  // needs >=2 timeline entries — there is no other way to reach that render in a harness that never
+  // watches real filesystem activity. `at` lets the caller control each batch's timestamp explicitly
+  // (default `Date.now()`), so two calls can land distinct, ordered entries instead of racing the
+  // same millisecond. Mirrors the `__CPE_TEST_INGEST_SESSION__`/`__CPE_OPEN_DIR__` convention: only
+  // attached when `testMode` is true, so it's absent (zero cost, zero attack surface) outside
+  // `--test-mode`.
+  if (testMode) {
+    (window as unknown as { __CPE_TEST_INGEST_ACTIVITY__?: (payload: string, at?: number) => void }).__CPE_TEST_INGEST_ACTIVITY__ =
+      (payload: string, at?: number) => ingestActivity(JSON.parse(payload), at);
   }
 
   let notice = "";
