@@ -1034,6 +1034,21 @@
     padding: 6px 8px 0;
     background: var(--surface, #1e1e1e);
     flex: 0 0 auto;
+    /* CPE-1130 (found via gui-smoke's new cost-History smoke test): the base `.tab` class's
+       120px min-width (TABS.md, sized for the wide main-window tabbar) means 5 tabs
+       (Live/Replay/Cost/Radar/History) can never fit this drawer's 340px/90vw width on one row —
+       the last tab silently overflowed past the document's edge and was unclickable. Reflow onto a
+       second row rather than overflow (same tick-tack wrap-container convention used for pill rows
+       elsewhere in this file), belt-and-braces alongside the narrower min-width below.
+       Still reuses `.tab`/`.tab.active` as-is (TABS.md) — only the container wraps. */
+    flex-wrap: wrap;
+    row-gap: 2px;
+  }
+  .tl-tabbar .tab {
+    /* Shrink the floor for this narrow context — see the `.tl-tabbar` comment above. `.tab-label`
+       already ellipsis-truncates (app.css), so a tighter tab still reads fine. */
+    min-width: 60px;
+    padding: 0 6px;
   }
   .rp-transport {
     display: flex;

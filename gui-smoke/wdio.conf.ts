@@ -98,6 +98,135 @@ pub fn describe(widget: &Widget) -> String {
 }
 `;
 
+// --- CPE-1130: cost-History fixture -----------------------------------------------------------
+// Seed a synthetic session-metrics journal (`history.jsonl`) into the REAL app-data directory this
+// exact build reads from, so the Agent Watch drawer's cost-History tab (AgentTimeline.svelte,
+// CPE-1114 — `.hd-bar`/`.hd-*` elements) has rows to roll up and render when the smoke suite opens
+// it. This burns down the manual-verification-debt row for that view (MANUAL-TEST-BURNDOWN.md).
+//
+// The on-disk shape is CPE-1113's journal (crates/server/src/metrics_journal.rs): one
+// `SessionMetricsRecord` JSON object per line, camelCase, at
+// `<app-data-dir>/agent-metrics/history.jsonl`, where `app-data-dir` is Tauri's own
+// `app_data_dir()` resolution — `<OS app-data root>/<bundle identifier>`
+// (src-tauri/src/server_ctx.rs -> `app.path().app_data_dir()`). The identifier is read straight out
+// of tauri.conf.json rather than hardcoded so a future rename can't silently break this fixture.
+const TAURI_CONF = JSON.parse(
+  fs.readFileSync(path.resolve(__dirname, "..", "src-tauri", "tauri.conf.json"), "utf-8"),
+) as { identifier: string };
+
+/** `<OS app-data root>/<bundle identifier>`, matching Tauri's `app_data_dir()`. This job runs
+ *  `windows-latest` only today (see gui-smoke.yml's header comment), so the win32 branch (`APPDATA`)
+ *  is what CI actually exercises; the darwin/linux branches are best-effort for local runs on those
+ *  platforms later and are not covered by CI. */
+function resolveAppDataDir(): string {
+  if (process.platform === "win32") {
+    const appData = process.env.APPDATA ?? path.join(os.homedir(), "AppData", "Roaming");
+    return path.join(appData, TAURI_CONF.identifier);
+  }
+  if (process.platform === "darwin") {
+    return path.join(os.homedir(), "Library", "Application Support", TAURI_CONF.identifier);
+  }
+  const xdgData = process.env.XDG_DATA_HOME ?? path.join(os.homedir(), ".local", "share");
+  return path.join(xdgData, TAURI_CONF.identifier);
+}
+
+/** One JSONL line matching `SessionMetricsRecord`'s camelCase wire shape — the exact fields
+ *  `metrics_history` deserializes (see the `camelcase_wire_shape_matches_the_frontend` Rust test in
+ *  metrics_journal.rs, which this fixture is deliberately shaped to match). */
+function fixtureRecord(opts: {
+  sessionId: string;
+  agentId: string;
+  agentName: string;
+  model: string;
+  daysAgo: number;
+  costUsd: number;
+  totalTokens: number;
+}): string {
+  const started = Date.now() - opts.daysAgo * 24 * 60 * 60 * 1000;
+  const ended = started + 5 * 60 * 1000; // a nominal 5-minute session
+  const inputTokens = Math.round(opts.totalTokens * 0.6);
+  const outputTokens = opts.totalTokens - inputTokens;
+  return JSON.stringify({
+    sessionId: opts.sessionId,
+    agentId: opts.agentId,
+    agentName: opts.agentName,
+    provider: "openrouter",
+    model: opts.model,
+    cwd: "/gui-smoke/cpe-1130-fixture",
+    startedAt: started,
+    endedAt: ended,
+    wallClockMs: ended - started,
+    inputTokens,
+    outputTokens,
+    totalTokens: opts.totalTokens,
+    costUsd: opts.costUsd,
+    filesTouched: 3,
+    churnBytes: 2048,
+    editCount: 5,
+  });
+}
+
+/** Three rows across three days and two agents/models — enough for the over-time bars (>=1
+ *  `.hd-bar`), the by-model table, and the by-agent table to all have real, non-empty content.
+ *  Exported so the falsifiability check (README "Falsification evidence") can point at the same
+ *  generator when constructing the deliberately-EMPTY variant. */
+export function historyFixtureLines(): string[] {
+  return [
+    fixtureRecord({
+      sessionId: "gui-smoke-hist-1",
+      agentId: "claude",
+      agentName: "Claude Code",
+      model: "sonnet",
+      daysAgo: 2,
+      costUsd: 1.23,
+      totalTokens: 4200,
+    }),
+    fixtureRecord({
+      sessionId: "gui-smoke-hist-2",
+      agentId: "claude",
+      agentName: "Claude Code",
+      model: "opus",
+      daysAgo: 1,
+      costUsd: 0.45,
+      totalTokens: 1500,
+    }),
+    fixtureRecord({
+      sessionId: "gui-smoke-hist-3",
+      agentId: "copilot",
+      agentName: "Copilot",
+      model: "gpt-5",
+      daysAgo: 0,
+      costUsd: 0.08,
+      totalTokens: 600,
+    }),
+  ];
+}
+
+/** Backup of whatever was at the fixture path before we overwrote it (or `null` if nothing was
+ *  there), so a LOCAL run never permanently clobbers a real developer's own Agent Watch history —
+ *  restored in `onComplete` below, mirroring the tmpDir cleanup pattern. On CI's ephemeral runner
+ *  this is always `null` (ephemeral) — the restore there just deletes the fixture file we made. */
+let historyFixtureBackup: { file: string; original: string | null } | null = null;
+
+function seedHistoryFixture(): void {
+  const dir = path.join(resolveAppDataDir(), "agent-metrics");
+  fs.mkdirSync(dir, { recursive: true });
+  const file = path.join(dir, "history.jsonl");
+  historyFixtureBackup = { file, original: fs.existsSync(file) ? fs.readFileSync(file, "utf-8") : null };
+  fs.writeFileSync(file, historyFixtureLines().join("\n") + "\n", "utf-8");
+}
+
+function restoreHistoryFixture(): void {
+  if (!historyFixtureBackup) return;
+  const { file, original } = historyFixtureBackup;
+  if (original === null) {
+    fs.rmSync(file, { force: true });
+  } else {
+    fs.writeFileSync(file, original, "utf-8");
+  }
+  historyFixtureBackup = null;
+}
+
 let tauriDriver: ChildProcess | undefined;
 let shuttingDown = false;
 
@@ -180,6 +309,11 @@ export const config: WebdriverIO.Config = {
     // suite can open it in the same session without a second app launch.
     fs.writeFileSync(path.join(tmpDir, FIXTURE_NAME), FIXTURE_SOURCE, "utf-8");
 
+    // CPE-1130: seed the cost-History journal fixture into the real app-data dir (see the block
+    // above) before the app process ever starts, so `metrics_history` has rows to read the moment
+    // the History tab is opened.
+    seedHistoryFixture();
+
     const caps = capabilities as unknown as Array<{ "tauri:options": { args: string[] } }>;
     caps[0]["tauri:options"].args = ["--test-mode", "--x=-4000", `--open=${tmpDir}`];
 
@@ -220,6 +354,9 @@ export const config: WebdriverIO.Config = {
       // itself threw before reaching that point).
     }
     fs.rmSync(STATE_FILE, { force: true });
+    // CPE-1130: restore whatever was at the history.jsonl fixture path before this run (or delete it
+    // if we created it fresh) — see the comment on `historyFixtureBackup` above.
+    restoreHistoryFixture();
   },
 };
 
