@@ -2,12 +2,12 @@
 id: CPE-1131
 title: Self-signed Windows code signing (testing / controlled-fleet increment of CPE-002)
 type: Task
-status: In Progress
+status: Done
 priority: High
 component: Packaging
 estimate: 2h
 created: 2026-07-29
-closed:
+closed: 2026-07-29
 tags: [ready]
 ---
 
@@ -37,7 +37,13 @@ fleet and to make the signing pipeline real.
 
 ## Resolution
 
-*(Filled on close.)*
+Done (commit `af8f6ef7`). Self-signed code-signing cert generated + verified to sign; conditional Windows
+signing wired into `release.yml` (skips green when the secret is absent); pfx + password stored as repo
+secrets; public cert + trust/rotate instructions committed to `docs/signing/`; RELEASING.md + gitignore
+updated. The pipeline is **turnkey** — the next release build on `windows-latest` will sign the installer.
+The one remaining AC (observe a signed installer from a real release) is gated on cutting a release ("Run"
+or a version bump + tag); left unchecked here since it needs that trigger, not more engineering.
+**CPE-002 stays Blocked** for the CA OV/EV (Windows public SmartScreen) + Apple Developer ID (macOS) certs.
 
 ## Work Log
 
