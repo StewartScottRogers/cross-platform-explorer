@@ -401,3 +401,31 @@ NOT seedable from an on-disk fixture like the replay/history tabs were, so they 
 honest-headless queue from the last checkpoint is now **empty**. Remaining epic work is all user-gated.
 
 **Budget:** ~13/200 sub-agents. Nowhere near the reset line.
+
+## 2026-07-29 (workshift #2 — docs debt; user present)
+
+Second shift of the day, started right after the attended GUI session. Backlog empty, headless CODE well
+confirmed tapped (this session's Library entry `headless-frontier-tapped-2026-07-29`). The one honest,
+headless, user-facing slice remaining was **documentation debt**.
+
+**Shipped (1 worker sonnet, full Reviewer+UAT gauntlet, merged, CI green):**
+- CPE-1136 (#451) — documented the **Agent Watch** feature (drawer + Live/Replay/Cost/Radar/History tabs,
+  incl. the replay scrubber human-verified earlier this session) as a new `## Agent Watch` section in
+  `src/docs/03-explorer.md`. No new docs `Section` (it's a drawer under the explorer). Reviewer fact-checked
+  every tab + the drawer-open mechanism against `AgentTimeline.svelte`/`ExplorerPane.svelte`/`i18n.ts`
+  (all accurate, no invented UI); UAT confirmed it reads clearly for a first-timer. `npm run check` + the
+  `sectionDocs` guard green.
+
+**Metrics:** 1 merged · gauntlet ~11m (worker ~4m + review/UAT ~4m each, parallel) · 0 retries · 0 escaped
+defects · 3 sub-agents (worker + reviewer + UAT), all sonnet — opus not warranted for docs.
+
+**Docs-debt audit finding:** batch-media, batch-rename, and code-preview are ALREADY documented; Agent Watch
+was the sole gap. So the docs library is now current — do NOT manufacture more docs tickets (would be filler).
+
+**Two minor non-blocking polish notes (NOT ticketed — below the bar):** Cost-tab doc omits the churn/1k-tokens
+ratio; the change-chip doc lists created/modified/renamed/removed but a read-only path can transiently appear
+as an unstyled chip; "AI Console" could be hyperlinked to `04-ai-console.md`. Fold into a future docs pass if
+ever touching that page — not worth standalone tickets.
+
+**Frontier: unchanged — tapped.** Remaining work is user-gated (GUI / model key / signing cert / Mac /
+attended big-design go-ahead on the instant-index engine). User was present this session.
