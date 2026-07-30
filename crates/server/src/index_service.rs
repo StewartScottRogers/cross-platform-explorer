@@ -443,19 +443,23 @@ mod tests {
         let svc = IndexService::new();
         let root = tree.to_string_lossy().to_string();
 
-        let handles: Vec<_> = (0..2)
-            .map(|_| {
-                let svc = svc.clone();
-                let root = root.clone();
-                let idxdir = idxdir.clone();
-                std::thread::spawn(move || {
-                    svc.build_root(&root, 9, &idxdir, &AtomicBool::new(false), |_| {})
+        // Many rounds × several threads to widen the overlap window so a regression (the old
+        // unconditional save+insert racing the shared temp file) is a hard failure, not a flake.
+        for _ in 0..40 {
+            let handles: Vec<_> = (0..4)
+                .map(|_| {
+                    let svc = svc.clone();
+                    let root = root.clone();
+                    let idxdir = idxdir.clone();
+                    std::thread::spawn(move || {
+                        svc.build_root(&root, 9, &idxdir, &AtomicBool::new(false), |_| {})
+                    })
                 })
-            })
-            .collect();
-        for h in handles {
-            // The key assertion: no build errors out (no temp-file rename race).
-            h.join().unwrap().expect("concurrent build_root must not error");
+                .collect();
+            for h in handles {
+                // The key assertion: no build errors out (no temp-file rename race).
+                h.join().unwrap().expect("concurrent build_root must not error");
+            }
         }
 
         assert_eq!(svc.resident_count(), 1, "exactly one volume resident after concurrent builds");
