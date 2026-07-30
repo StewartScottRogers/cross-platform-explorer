@@ -4,7 +4,7 @@ title: "Metadata columns: streamed command to extract a chosen column's typed ce
 type: feature
 component: Backend
 priority: high
-status: Backlog
+status: Done
 tags: ready
 created: 2026-07-30
 epic: CPE-707
