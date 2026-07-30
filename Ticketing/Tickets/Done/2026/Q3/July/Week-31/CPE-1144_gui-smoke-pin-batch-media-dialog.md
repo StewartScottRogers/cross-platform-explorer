@@ -4,7 +4,7 @@ title: "QA: pin the Batch-Media dialog render in gui-smoke (burn down CPE-1093 r
 type: chore
 component: Testing
 priority: low
-status: Backlog
+status: Done
 tags: ready
 created: 2026-07-30
 epic: CPE-723
