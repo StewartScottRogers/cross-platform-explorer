@@ -10,6 +10,20 @@ export const COLUMN_DEFAULTS = [320, 150, 120, 90];
 export const COLUMN_MINS = [120, 90, 80, 60];
 /** A generous per-column maximum so a drag can't produce an absurd width. */
 export const COLUMN_MAX = 1200;
+/** The leftmost (Name) column's own minimum — the absolute floor the middle file-list pane must
+ *  never drop below, even on its own (CPE-1140, requirement #3). */
+export const NAME_COL_MIN = COLUMN_MINS[0];
+/** Horizontal chrome the details-view grid adds around the columns: `.columns` in app.css pads
+ *  `12px 10px` (22px) and `.rows` pads `6px 0` — the wider of the two, so the derived middle-pane
+ *  minimum leaves every column fully visible instead of flush against the pane edge. */
+const FILELIST_CHROME = 22;
+/** The middle (file-list) pane's minimum width (CPE-1140): the sum of every visible details-view
+ *  column's minimum width plus the pane's own chrome, floored by the Name column's own minimum so
+ *  the middle is never narrower than its leftmost column. */
+export const MID_MIN = Math.max(
+  COLUMN_MINS.reduce((sum, w) => sum + w, 0) + FILELIST_CHROME,
+  NAME_COL_MIN,
+);
 
 /**
  * The CSS grid template for the four columns plus a trailing `1fr` spacer that soaks up

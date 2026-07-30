@@ -10,6 +10,7 @@ import { describe, it, expect, vi, beforeEach } from "vitest";
 import { render, screen, fireEvent, waitFor } from "@testing-library/svelte";
 import App from "./App.svelte";
 import { resetSettings } from "./lib/settings";
+import { MID_MIN } from "./lib/columns";
 import type { DirEntry, Place } from "./lib/types";
 
 const dir = (name: string): DirEntry => ({
@@ -356,8 +357,10 @@ describe("resizable panels (CPE-069)", () => {
     await fireEvent.mouseMove(window, { clientX: 300 }); // +80px
     await fireEvent.mouseUp(window);
 
+    // CPE-1140: the middle track carries a real minimum (MID_MIN) alongside 1fr — it never
+    // collapses below the file-list columns.
     const main = container.querySelector(".main") as HTMLElement;
-    expect(main.getAttribute("style")).toContain("grid-template-columns: 300px 6px 1fr");
+    expect(main.getAttribute("style")).toContain(`grid-template-columns: 300px 6px minmax(${MID_MIN}px, 1fr)`);
     // Width is persisted to the single settings file via the backend (CPE-226),
     // debounced — so wait for the write_settings call carrying the new value.
     await waitFor(() =>
@@ -379,7 +382,7 @@ describe("resizable panels (CPE-069)", () => {
     await fireEvent.mouseUp(window);
 
     const main = container.querySelector(".main") as HTMLElement;
-    expect(main.getAttribute("style")).toContain("grid-template-columns: 160px 6px 1fr");
+    expect(main.getAttribute("style")).toContain(`grid-template-columns: 160px 6px minmax(${MID_MIN}px, 1fr)`);
   });
 });
 

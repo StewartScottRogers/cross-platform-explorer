@@ -99,7 +99,8 @@
   import { matchesGlob } from "./lib/glob";
   import PatternSelectDialog from "./lib/components/PatternSelectDialog.svelte";
   import { firstMatchIndex } from "./lib/typeahead";
-  import { clampWidth } from "./lib/resize";
+  import { clampWidth, maxSidePaneWidth, fitSidePanes, PANE_DIVIDER_W } from "./lib/resize";
+  import { MID_MIN, NAME_COL_MIN } from "./lib/columns";
   import {
     createHistory, visit, back, forward, canGoBack, canGoForward, current, recentPaths,
     type History,
@@ -267,8 +268,12 @@
   const PREVIEW_MAX_BYTES = 256 * 1024;
 
   // ---- resizable panels ----
-  const SIDEBAR_MIN = 160, SIDEBAR_MAX = 480;
-  const RIGHT_MIN = 220, RIGHT_MAX = 560;
+  // CPE-1140: no fixed maximums — the side panes may grow arbitrarily wide. Their effective max is
+  // dynamic (sidebarMaxWidth()/rightMaxWidth() below): whatever is left of the window once the OTHER
+  // side pane, the grid dividers, and the middle pane's own minimum (MID_MIN, derived from the
+  // file-list column mins in lib/columns.ts) are accounted for — the middle's floor always wins.
+  const SIDEBAR_MIN = 160;
+  const RIGHT_MIN = 220;
   let sidebarWidth = 220;
   let rightWidth = 300;
   let resizing: null | "left" | "right" = null;
@@ -276,11 +281,28 @@
   let resizeStartW = 0;
 
   $: gridCols = showDetails
-    ? `${sidebarWidth}px 6px 1fr 6px ${rightWidth}px`
-    : `${sidebarWidth}px 6px 1fr`;
+    ? `${sidebarWidth}px ${PANE_DIVIDER_W}px minmax(${MID_MIN}px, 1fr) ${PANE_DIVIDER_W}px ${rightWidth}px`
+    : `${sidebarWidth}px ${PANE_DIVIDER_W}px minmax(${MID_MIN}px, 1fr)`;
 
   // Dual-pane (CPE-677): two equal file columns, preview suppressed; reuses the preview grid slot.
-  $: effectiveGridCols = dualPane ? `${sidebarWidth}px 6px 1fr 6px 1fr` : gridCols;
+  // Each column keeps its own floor at the Name column's minimum (never collapses below it, CPE-1140).
+  $: effectiveGridCols = dualPane
+    ? `${sidebarWidth}px ${PANE_DIVIDER_W}px minmax(${NAME_COL_MIN}px, 1fr) ${PANE_DIVIDER_W}px minmax(${NAME_COL_MIN}px, 1fr)`
+    : gridCols;
+
+  /** The sidebar's current dynamic maximum (CPE-1140): as wide as the window allows without pushing
+   *  the middle pane (or, in dual-pane, its two file columns) below its minimum. */
+  function sidebarMaxWidth(): number {
+    const midMin = dualPane ? 2 * NAME_COL_MIN : MID_MIN;
+    const dividerCount = dualPane ? 2 : showDetails ? 2 : 1;
+    const otherPanesWidth = dualPane ? 0 : showDetails ? rightWidth : 0;
+    return maxSidePaneWidth(window.innerWidth, otherPanesWidth, PANE_DIVIDER_W, dividerCount, midMin, SIDEBAR_MIN);
+  }
+  /** The right pane's current dynamic maximum (CPE-1140): as wide as the window allows without
+   *  pushing the middle file-list pane below MID_MIN. Only meaningful outside dual-pane. */
+  function rightMaxWidth(): number {
+    return maxSidePaneWidth(window.innerWidth, sidebarWidth, PANE_DIVIDER_W, 2, MID_MIN, RIGHT_MIN);
+  }
 
   /** Live column count of the file grid, for 2-D arrow-key nav (CPE-769). 1 for list/details; for the
       icons/gallery grid, read the resolved `grid-template-columns` off the live `.rows.grid` (the same
@@ -304,10 +326,10 @@
   function onResize(e: MouseEvent) {
     const dx = e.clientX - resizeStartX;
     if (resizing === "left") {
-      sidebarWidth = clampWidth(resizeStartW + dx, SIDEBAR_MIN, SIDEBAR_MAX);
+      sidebarWidth = clampWidth(resizeStartW + dx, SIDEBAR_MIN, sidebarMaxWidth());
     } else if (resizing === "right") {
       // The right pane grows as the divider moves left, so subtract dx.
-      rightWidth = clampWidth(resizeStartW - dx, RIGHT_MIN, RIGHT_MAX);
+      rightWidth = clampWidth(resizeStartW - dx, RIGHT_MIN, rightMaxWidth());
     }
   }
   function endResize() {
@@ -2605,8 +2627,25 @@
     sortDir = settings.loadSortDir();
     showDetails = settings.loadShowDetails();
     showPreview = settings.loadShowPreview();
-    sidebarWidth = clampWidth(settings.loadSidebarWidth(), SIDEBAR_MIN, SIDEBAR_MAX);
-    rightWidth = clampWidth(settings.loadRightWidth(), RIGHT_MIN, RIGHT_MAX);
+    // CPE-1140: re-clamp persisted widths to the current dynamic rules on load, so a value saved
+    // under the old fixed SIDEBAR_MAX/RIGHT_MAX (or simply too wide for today's window) can't paint
+    // a broken first layout. Load both raw values first, then clamp each against the other's
+    // now-current width — sidebarMaxWidth()/rightMaxWidth() read live state, the same functions the
+    // drag-resize handlers use, so load and drag can never disagree.
+    sidebarWidth = settings.loadSidebarWidth();
+    rightWidth = settings.loadRightWidth();
+    if (showDetails && !dualPane) {
+      // Both side panes are live: fit them TOGETHER (order-independent) so two large persisted widths on a
+      // now-narrower window shrink proportionally instead of the first-clamped pane absorbing the whole
+      // squeeze (CPE-1140 review). Budget = window minus the two dividers and the middle's minimum.
+      const budget = window.innerWidth - 2 * PANE_DIVIDER_W - MID_MIN;
+      [sidebarWidth, rightWidth] = fitSidePanes(sidebarWidth, rightWidth, SIDEBAR_MIN, RIGHT_MIN, budget);
+    } else {
+      // Only the sidebar competes with the middle here (right pane absent / is a dual-pane file column), so
+      // its single dynamic clamp is already order-independent.
+      sidebarWidth = clampWidth(sidebarWidth, SIDEBAR_MIN, sidebarMaxWidth());
+      rightWidth = clampWidth(rightWidth, RIGHT_MIN, rightMaxWidth());
+    }
     pins = settings.loadPins();
     recents = settings.loadRecents();
     favorites = settings.loadFavorites();
@@ -3344,10 +3383,9 @@
         <input
           type="number"
           min={SIDEBAR_MIN}
-          max={SIDEBAR_MAX}
           bind:value={sidebarWidth}
           on:change={() => {
-            sidebarWidth = clampWidth(sidebarWidth, SIDEBAR_MIN, SIDEBAR_MAX);
+            sidebarWidth = clampWidth(sidebarWidth, SIDEBAR_MIN, sidebarMaxWidth());
             settings.saveSidebarWidth(sidebarWidth);
           }}
         />
@@ -3529,10 +3567,9 @@
           <input
             type="number"
             min={RIGHT_MIN}
-            max={RIGHT_MAX}
             bind:value={rightWidth}
             on:change={() => {
-              rightWidth = clampWidth(rightWidth, RIGHT_MIN, RIGHT_MAX);
+              rightWidth = clampWidth(rightWidth, RIGHT_MIN, rightMaxWidth());
               settings.saveRightWidth(rightWidth);
             }}
           />
