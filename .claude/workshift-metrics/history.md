@@ -429,3 +429,38 @@ ever touching that page — not worth standalone tickets.
 
 **Frontier: unchanged — tapped.** Remaining work is user-gated (GUI / model key / signing cert / Mac /
 attended big-design go-ahead on the instant-index engine). User was present this session.
+
+## 2026-07-29 (workshift #3 — instant-index epic CPE-703 shipped, attended)
+
+User gave the go-ahead on the "big-design" instant-index engine. Research revealed the engine (CPE-831/832/833)
+was ALREADY built + tested but wired to nothing — so the work was enablement + UI, not a from-scratch build.
+Sliced into 3, each through the full Reviewer+UAT gauntlet, all merged with 3-OS CI green, then user-GUI-verified.
+
+**Shipped + merged:**
+- CPE-1137 (#452, opus worker) — IndexService state + streamed build/search/status/drop commands + per-volume
+  persistence + off-means-off. **Opus reviewer caught a same-volume build race** (shared temp file / map);
+  Foreman-fixed with a per-volume build lock + superseded-skip + 2 concurrency tests; focused re-review APPROVE.
+- CPE-1138 (#453, sonnet worker) — live `notify` watcher → `apply_create/remove/rename`; pure `resolve_touched`
+  mapping. **Opus reviewer caught a nested-create ordering bug** (HashSet drain order → child applied before
+  parent dir → apply_create silently drops it, losing files from archive-extract/git-checkout/cp-r on Windows);
+  Foreman-fixed by sorting ancestors-first in a pure testable helper + ordering unit test + end-to-end
+  nested-create regression test.
+- CPE-1139 (#454, sonnet worker) — keyboard-first Ctrl+K global search overlay: debounced streamed
+  index_search with generation-token supersede, ↑/↓+Enter reveal (reuses the navigate contract),
+  "Build index" opt-in affordance (off-means-off), i18n ×12, docs subsection. Reviewer APPROVE + UAT PASS.
+
+**Metrics:** 3 merged · gauntlet ~30-50m each incl. re-review · 2 retries (both real defect fixes) · **0 escaped
+defects** (all 3 merge commits green on main) · ~18 sub-agents this epic. opus for the foundation worker + all
+backend reviewers earned its keep (caught both concurrency/ordering bugs that unit tests + 3-OS builds passed
+clean); sonnet fine for the watcher/overlay workers + the overlay reviewer.
+
+**GUI-verify:** built the sidecar app from main (no devtools needed — instant search is real UI, not console-
+seeded like the replay scrubber was), installed, launched; user confirmed Ctrl+K → Build index → cross-folder
+type-ahead → reveal → live-edit-reflects all work. Epic CPE-703 CLOSED.
+
+**Held again:** the specta-bindings regen discipline (CPE-1137 regenerated bindings for its new commands);
+one-worker-per-file zero conflicts; opus-reviewer-on-backend-concurrency is worth it. **Frontier now:** the
+instant-index epic was the last attended big-design item with a built-but-unwired core; remaining epics are
+GUI/model-key/cert/Mac gated. QA follow-up noted (not filed): a gui-smoke render pin for the Ctrl+K overlay.
+
+**Budget:** ~18 sub-agents this epic; well under the 200 cap across the whole session's shifts.

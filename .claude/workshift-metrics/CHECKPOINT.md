@@ -1,9 +1,17 @@
 # Workshift Checkpoint
 
-**Written 2026-07-29 ~17:28 local (USMST).** Clean end-of-shift stop — **nothing in flight, tree clean,
+**Written 2026-07-29 ~22:12 local (USMST).** Clean end-of-shift stop — **nothing in flight, tree clean,
 worktrees pruned, Backlog empty, all merged + pushed + post-merge CI green.** The three honest-headless slices
 this file previously queued are now **DONE**. Resume with a fresh session + "resume the workshift"; this file
 + `history.md` carry full context.
+
+## Latest (2026-07-29 eve): instant-index epic CPE-703 CLOSED
+Attended session after the docs shift. User approved the instant-index big-design item; research found the
+engine (CPE-831/832/833) already built-but-unwired, so it was enablement + UI: CPE-1137 (commands+state),
+CPE-1138 (notify watcher), CPE-1139 (Ctrl+K overlay) — all merged, 3-OS CI green, user-GUI-verified, 0 escaped
+defects (2 real defects caught+fixed pre-merge). Epic CPE-703 = Done. **Frontier: the last built-but-unwired
+attended big-design item is now shipped — remaining epics are GUI/model-key/cert/Mac gated.** QA follow-up
+noted (not filed): a gui-smoke render pin for the Ctrl+K overlay. Full detail in history.md.
 
 ## What shipped this shift (2026-07-29) — all merged to `main`, full 2-check + UAT gauntlet, 3-OS CI green
 - **CPE-1133** (PR #449) — `read_ogg` reassembles the Vorbis-comment packet across OGG pages (real read-side
