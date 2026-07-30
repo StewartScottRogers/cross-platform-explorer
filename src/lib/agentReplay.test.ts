@@ -9,8 +9,12 @@ import {
   prevTimestamp,
   isMultiplyEdited,
   cadenceForSpeed,
+  checkpointMarkers,
 } from "./agentReplay";
 import type { TimelineEntry } from "./agentActivity";
+import type { Checkpoint } from "./bindings.gen";
+
+const cp = (manifest_id: string, ts: number, label = ""): Checkpoint => ({ manifest_id, ts, label });
 
 const e = (id: number, path: string, at: number, kind: TimelineEntry["kind"] = "modified"): TimelineEntry => ({
   id,
@@ -175,6 +179,60 @@ describe("agentReplay pure helpers (CPE-1094)", () => {
       expect(cadenceForSpeed(400, 0)).toBe(400);
       expect(cadenceForSpeed(400, -1)).toBe(400);
       expect(Number.isFinite(cadenceForSpeed(400, 0))).toBe(true);
+    });
+  });
+
+  describe("checkpointMarkers (CPE-1126)", () => {
+    it("is empty for a null range", () => {
+      expect(checkpointMarkers(null, [cp("m1", 150)])).toEqual([]);
+    });
+
+    it("is empty when there are no checkpoints", () => {
+      expect(checkpointMarkers({ firstAt: 100, lastAt: 300 }, [])).toEqual([]);
+    });
+
+    it("positions an in-range checkpoint by the same math as sliderFraction", () => {
+      const range = { firstAt: 100, lastAt: 300 };
+      const [m] = checkpointMarkers(range, [cp("m1", 200)]);
+      expect(m.fraction).toBe(0.5);
+      expect(m.inRange).toBe(true);
+      expect(m.cp.manifest_id).toBe("m1");
+    });
+
+    it("marks the exact endpoints as in-range at fractions 0 and 1", () => {
+      const range = { firstAt: 100, lastAt: 300 };
+      const markers = checkpointMarkers(range, [cp("start", 100), cp("end", 300)]);
+      expect(markers[0]).toMatchObject({ fraction: 0, inRange: true });
+      expect(markers[1]).toMatchObject({ fraction: 1, inRange: true });
+    });
+
+    it("clamps a checkpoint BEFORE the window to fraction 0 and flags it out-of-range", () => {
+      const range = { firstAt: 100, lastAt: 300 };
+      const [m] = checkpointMarkers(range, [cp("early", 50)]);
+      expect(m.fraction).toBe(0);
+      expect(m.inRange).toBe(false);
+    });
+
+    it("clamps a checkpoint AFTER the window to fraction 1 and flags it out-of-range", () => {
+      const range = { firstAt: 100, lastAt: 300 };
+      const [m] = checkpointMarkers(range, [cp("late", 999)]);
+      expect(m.fraction).toBe(1);
+      expect(m.inRange).toBe(false);
+    });
+
+    it("never divides by zero on a degenerate (firstAt === lastAt) range", () => {
+      const range = { firstAt: 500, lastAt: 500 };
+      const markers = checkpointMarkers(range, [cp("on", 500), cp("off", 400)]);
+      expect(markers[0]).toMatchObject({ fraction: 0, inRange: true });
+      expect(markers[1]).toMatchObject({ fraction: 0, inRange: false });
+      expect(markers.every((m) => Number.isFinite(m.fraction))).toBe(true);
+    });
+
+    it("preserves input order and maps every checkpoint", () => {
+      const range = { firstAt: 0, lastAt: 400 };
+      const markers = checkpointMarkers(range, [cp("a", 400), cp("b", 0), cp("c", 200)]);
+      expect(markers.map((m) => m.cp.manifest_id)).toEqual(["a", "b", "c"]);
+      expect(markers.map((m) => m.fraction)).toEqual([1, 0, 0.5]);
     });
   });
 });
