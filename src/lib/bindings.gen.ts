@@ -1247,6 +1247,44 @@ async findDuplicatesStream(root: string, onGroup: TAURI_CHANNEL<DupGroup[]>) : P
 }
 },
 /**
+ * Propose an auto-organize plan for `dir` under `rule` — one [`cpe_server::organize::MoveProposal`] per
+ * file. Read-only: moves nothing.
+ */
+async organizePlan(dir: string, rule: OrganizeRule) : Promise<Result<MoveProposal[], string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("organize_plan", { dir, rule }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * Flag likely-clutter files in `dir` (zero-byte / installer / partial-download / backup leftovers).
+ * Read-only suggestion surface — never an auto-action.
+ */
+async organizeClutter(dir: string) : Promise<Result<ClutterFinding[], string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("organize_clutter", { dir }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * Apply an auto-organize plan for `dir` under `rule`: checkpoint `dir` first (one-undo for the whole
+ * reorg), then create each proposal's target subfolder and move the file into it (skip-on-error per
+ * file). Nothing runs until this is called explicitly — the dialog only calls it after the user reviews
+ * `organize_plan`'s preview and clicks Apply.
+ */
+async organizeApply(dir: string, rule: OrganizeRule) : Promise<Result<OrganizeApplyOutcome, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("organize_apply", { dir, rule }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
  * Crawl `root` into a resident index for `volume_id`, persist it to `<app_data>/index/<volume_id>.idx`,
  * and stream `BuildStats` progress over `on_progress` as the crawl advances. Re-issuing a build for the
  * same volume cancels the prior crawl. Returns the final `BuildStats`.
@@ -2034,6 +2072,30 @@ export type ChecksumEntry = { path: string; sha256: string; size: number; modifi
  */
 export type ChildSize = { name: string; path: string; is_dir: boolean; size: number }
 /**
+ * One flagged file: its `name` and the [`ClutterReason`] it matched.
+ */
+export type ClutterFinding = { name: string; reason: ClutterReason }
+/**
+ * Why a file is flagged as likely clutter — a *suggestion* for the declutter view, never an auto-action.
+ */
+export type ClutterReason = 
+/**
+ * A zero-byte file — usually a failed download or a leftover stub.
+ */
+"zero_byte" | 
+/**
+ * An installer package (`.exe`/`.msi`/`.dmg`/…) — commonly safe to remove once installed.
+ */
+"installer" | 
+/**
+ * A partial/temporary download (`.part`, `.crdownload`, `.tmp`) — an interrupted or transient file.
+ */
+"temp_or_partial" | 
+/**
+ * A backup or editor lock/leftover (`.bak`, a trailing `~`, an office `~$` lock).
+ */
+"backup"
+/**
  * The aggregate code-intelligence bundle for one file's text.
  */
 export type CodeIntel = { outline: Symbol[]; folds: FoldRange[]; indent: number[]; minimap: MinimapRow[] }
@@ -2354,6 +2416,10 @@ fill: number;
  */
 indent: number }
 /**
+ * A proposed move: put file `name` into subfolder `target_subdir` (relative to its current folder).
+ */
+export type MoveProposal = { name: string; target_subdir: string }
+/**
  * One filename-search hit: the full path, the bare name, and whether it's a folder.
  */
 export type NameMatch = { path: string; name: string; is_dir: boolean }
@@ -2372,6 +2438,36 @@ export type Node = { kind: "dir"; name: string; children?: Node[] } | { kind: "f
  * which one failed.
  */
 export type OpResult = { path: string; ok: boolean; error: string }
+/**
+ * The outcome of an apply: the checkpoint captured **before** any file moved, plus the per-file move
+ * results (never all-or-nothing — see [`apply_proposals`]).
+ */
+export type OrganizeApplyOutcome = { 
+/**
+ * The checkpoint taken over `dir` immediately before any move — revert to it (`checkpoint_revert`)
+ * to undo the whole reorg in one action.
+ */
+checkpoint: CheckpointCreated; results: OpResult[] }
+/**
+ * The declarative rule that decides each file's destination subfolder.
+ */
+export type OrganizeRule = 
+/**
+ * Group by content category (Images / Documents / Audio / Video / Archives / Code / Other).
+ */
+"by_kind" | 
+/**
+ * Group by uppercased extension (e.g. `PNG`), or `NoExtension` when there is none.
+ */
+"by_extension" | 
+/**
+ * Group by the 4-digit year of the last-modified time.
+ */
+"by_modified_year" | 
+/**
+ * Group into coarse size buckets (`Tiny` / `Small` / `Large`).
+ */
+"by_size_bucket"
 /**
  * A window of rows from a data source: the columns, the row window (each cell stringified), and the
  * total row count when known (so the UI can size a scrollbar without loading everything).

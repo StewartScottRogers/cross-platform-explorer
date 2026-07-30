@@ -46,15 +46,15 @@ approves in a preview; the apply is wrapped in a checkpoint so it's one-click un
 - Docs: add an "Organize a folder" subsection to the relevant `src/docs/*.md` (no new `Section`).
 
 ## Acceptance Criteria
-- [ ] `organize_plan`/`organize_apply` (+ `organize_clutter` if included) are registered commands (both
+- [x] `organize_plan`/`organize_apply` (+ `organize_clutter` if included) are registered commands (both
       `generate_handler!` + `collect_commands!`); `organize_plan` only proposes (moves nothing);
       `organize_apply` checkpoints first, then moves, returning a moved/skipped summary.
-- [ ] The dialog previews proposals per rule, and Apply performs the moves and leaves a one-click Undo
+- [x] The dialog previews proposals per rule, and Apply performs the moves and leaves a one-click Undo
       (checkpoint). Nothing moves without explicit Apply.
-- [ ] Headless tests: command layer maps a temp tree → proposals for each rule; apply moves files into the
+- [x] Headless tests: command layer maps a temp tree → proposals for each rule; apply moves files into the
       right subdirs + a checkpoint exists for undo; a component/jsdom test covers the dialog logic (rule
       switch → preview, apply, empty/error states), backend mocked.
-- [ ] `bindings.gen.ts` regenerated + committed; `npm run check` green; `crates/server` tests + clippy (both
+- [x] `bindings.gen.ts` regenerated + committed; `npm run check` green; `crates/server` tests + clippy (both
       modes) green; `src-tauri` `cargo check` green.
 - [ ] GUI-verified on the real build (build → deploy → run): pick a rule, preview looks right, Apply reorganizes
       the folder, Undo restores it. **Deferred to the Foreman + user pass.**
@@ -64,3 +64,54 @@ approves in a preview; the apply is wrapped in a checkpoint so it's one-click un
   resource needed for the rules mode. The **AI-assisted** organize mode (model-gated) stays out of scope.
 - Because this MOVES user files, the checkpoint-protected apply + explicit preview/approve are mandatory — no
   silent or unconfirmed moves. Working this child re-activates epic CPE-979's rules slice.
+
+## Work Log
+- 2026-07-29/30: Implemented end-to-end on branch `cpe-1142-auto-organize`.
+  - **Backend**: `crates/server/src/organize_apply.rs` (new) is the I/O + `ServerCtx` glue around the
+    existing pure `organize.rs` planner: `organize_plan(dir, rule)` (list → map to `OrganizeEntry` →
+    `plan_organize`, read-only), `organize_clutter(dir)` (same mapping → `find_clutter`, read-only,
+    included since it was cheap to add), and `organize_apply(ctx, dir, rule)` — **checkpoints `dir` first**
+    (`checkpoint_store::checkpoint_create`, label "Before auto-organize"), then re-plans and moves each
+    file into `dir/<target_subdir>/` (creating it if needed) via `std::fs::rename`, skip-on-error per file
+    (locked file / name collision → a failed `OpResult`, rest of the plan still runs). Added
+    `serde`/`specta::Type` derives to `OrganizeRule` (`#[serde(rename_all = "snake_case")]` →
+    `by_kind`/`by_extension`/`by_modified_year`/`by_size_bucket`), `MoveProposal`, `ClutterFinding`,
+    `ClutterReason` so they cross the IPC boundary. `src-tauri/src/lib.rs` gained three thin
+    `async fn` + `spawn_blocking` dispatchers (`organize_plan`, `organize_clutter`, `organize_apply`),
+    registered in both `generate_handler!` and `collect_commands!`; `organize_apply` also calls
+    `note_app_op` on the successful move targets (Agent Watch attribution, mirroring `move_exact`).
+    Regenerated `src/lib/bindings.gen.ts` via `export_bindings --features "specta-bindings sidecar-platform"`.
+  - **Frontend**: `src/lib/components/OrganizeDialog.svelte` (new) — rule picker (4 buttons), debounced
+    (120ms) live preview grouped by destination subfolder with reflowing pills, empty/loading/error states,
+    Apply → outcome panel (moved/skipped counts + checkpoint note) with an Undo button that opens
+    `CheckpointDialog` on the same folder (reuses the existing checkpoint/rollback UI rather than
+    duplicating revert logic). Opened from the command palette (`tool.organize`, new entry next to
+    `tool.checkpoint`) and from the Tools menu (`organize-folder` in `MenuBar.svelte`, "sort" icon — no
+    dedicated glyph existed). Wired into `App.svelte` (`organizeOpen` state, dialog markup block,
+    `onMenuSelect` case). Docs: new "## Organizing a folder" subsection in `src/docs/03-explorer.md`
+    (existing "explorer" Section — no new Section/mapping needed).
+  - **i18n**: added `palette.organize`, `mi.organizeFolder`, and 13 `org.*` dialog keys to all 12 locales
+    (en/es/de/fr/it/pt/nl/pl/ru/zh/ja/ko) via a small Node script that inserts after the existing
+    `palette.checkpoint`/`mi.findDuplicates` lines in each locale block — `npx vitest run src/lib/i18n.test.ts`
+    (the CPE-481 coverage gate) passes.
+  - **Tests**: 7 new Rust tests in `organize_apply.rs` (plan-per-rule, missing dir is an error, empty dir,
+    clutter detection, apply-checkpoints-then-moves-then-checkpoint-can-restore, skip-on-collision-without-
+    failing-the-rest) — `crates/server` now 1072 lib tests, all green. 6 new jsdom tests in
+    `OrganizeDialog.test.ts` (default-rule preview grouped by subdir, debounced rule switch, empty state,
+    preview error, apply never fires before the click, Apply → outcome + Undo dispatch) — full `npx vitest
+    run` is 124 files / 1360 tests, all green, including `App.test.ts` (Tools menu still renders correctly)
+    and the pre-existing `typed_bindings_are_committed_and_routed_through_busy_cursor` guard.
+  - **Verification**: `crates/server`: `cargo test` (1072 passed) + `cargo clippy --all-targets -- -D
+    warnings` (clean, default and `--features specta`). `src-tauri`: `cargo check --features
+    sidecar-platform` (clean) + `cargo clippy --features sidecar-platform -- -D warnings` (clean) +
+    `cargo test --features sidecar-platform --lib` (125 passed, unrelated to this ticket but run as an
+    extra check). `npm run check` (0 errors/warnings). GUI-verify (build → deploy → run → click through the
+    dialog) is deferred to the Foreman + user pass per the AC.
+  - **Assumptions**: reused `std::fs::rename` directly in the new `organize_apply` module rather than
+    calling into `src-tauri`'s private `move_exact_impl`/`do_move_into` helpers (they're not `pub` and
+    `move_exact_impl` refuses when the destination *parent* is missing, which is exactly the case here —
+    the whole point is to create `target_subdir` first), following the same-shape precedent already set by
+    `cpe_server::backup::apply_backup_plan_walk` (I/O + `OpResult` living in `cpe-server`, not `lib.rs`).
+    `organize_clutter` is wired end-to-end on the backend (command + tests) but has no dialog UI yet — the
+    ticket marked it optional/"include if cheap" and scoped the frontend to the rule-picker dialog only;
+    a future ticket can surface it as a declutter panel.
