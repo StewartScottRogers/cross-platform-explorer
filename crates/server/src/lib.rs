@@ -264,6 +264,13 @@ pub mod size_filter;
 #[cfg(feature = "index")]
 pub mod index;
 
+/// Instant-search index **service** — holds the resident per-volume [`index::Index`]es in memory, persists
+/// them, and merges a query across every resident volume; the thin state layer behind the `index_*` Tauri
+/// commands (CPE-1137, epic CPE-703). Same `index` feature gate as the engine, so the plain build compiles
+/// zero index code.
+#[cfg(feature = "index")]
+pub mod index_service;
+
 /// Spotlight result aggregation — merge fuzzy-ranked hits from several sources (actions/folders/files/
 /// recents) into grouped, per-kind-capped, best-first results for the overlay (CPE-948, epic CPE-704).
 pub mod spotlight_results;

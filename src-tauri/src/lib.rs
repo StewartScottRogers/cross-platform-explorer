@@ -2718,6 +2718,155 @@ async fn search_file_contents_stream(
     .map_err(|e| e.to_string())?
 }
 
+// ---- Instant-search index (CPE-1137, epic CPE-703) ------------------------------------------------
+// Thin dispatchers over `cpe_server::index_service::IndexService` (held in managed state). The engine
+// (crawl / on-disk store / trigram-pruned search) is all in `cpe-server`; these commands only resolve the
+// per-volume index directory under app-data, keep the `ipc::Channel` transport in this adapter (per
+// `docs/design/STREAMING.md`), and run every crawl/search on a blocking thread (async + `spawn_blocking`,
+// the async-all-commands rule). Off means off: the service is empty until `index_build` is invoked —
+// nothing crawls or loads at startup.
+
+/// Resolve the per-volume index directory under app-data (`<app_data>/index`), sibling of `audit`.
+fn index_dir(app: &tauri::AppHandle) -> Result<std::path::PathBuf, String> {
+    let dir = server_ctx::TauriCtx::new(app).app_data_dir()?.join("index");
+    Ok(dir)
+}
+
+/// Registry of in-flight `index_build` crawls' cancel flags, keyed by volume id, so a re-issued build for
+/// the same volume cancels the prior crawl (mirrors `DIR_STREAM_CANCELS`).
+static INDEX_BUILD_CANCELS: std::sync::OnceLock<
+    std::sync::Mutex<std::collections::HashMap<u64, std::sync::Arc<std::sync::atomic::AtomicBool>>>,
+> = std::sync::OnceLock::new();
+
+fn index_build_registry(
+) -> &'static std::sync::Mutex<std::collections::HashMap<u64, std::sync::Arc<std::sync::atomic::AtomicBool>>>
+{
+    INDEX_BUILD_CANCELS.get_or_init(Default::default)
+}
+
+/// Crawl `root` into a resident index for `volume_id`, persist it to `<app_data>/index/<volume_id>.idx`,
+/// and stream `BuildStats` progress over `on_progress` as the crawl advances. Re-issuing a build for the
+/// same volume cancels the prior crawl. Returns the final `BuildStats`.
+#[tauri::command]
+#[cfg_attr(feature = "specta-bindings", specta::specta)]
+async fn index_build(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, cpe_server::index_service::IndexService>,
+    root: String,
+    volume_id: u64,
+    on_progress: tauri::ipc::Channel<cpe_server::index::BuildStats>,
+) -> Result<cpe_server::index::BuildStats, String> {
+    use std::sync::atomic::Ordering;
+    let dir = index_dir(&app)?;
+    let svc = state.inner().clone();
+
+    // Cancel any crawl already running for this volume, then register our own flag.
+    let cancel = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    {
+        let mut reg = index_build_registry().lock().unwrap();
+        if let Some(prev) = reg.get(&volume_id) {
+            prev.store(true, Ordering::Relaxed);
+        }
+        reg.insert(volume_id, cancel.clone());
+    }
+    let cancel_id = cancel.clone(); // for the still-ours check after the crawl
+
+    let result = tauri::async_runtime::spawn_blocking(move || {
+        svc.build_root(&root, volume_id, &dir, &cancel, |stats| {
+            let _ = on_progress.send(stats);
+        })
+    })
+    .await
+    .map_err(|e| e.to_string())?;
+
+    // Deregister — but only if a newer build hasn't already replaced our flag.
+    {
+        let mut reg = index_build_registry().lock().unwrap();
+        if reg.get(&volume_id).is_some_and(|f| std::sync::Arc::ptr_eq(f, &cancel_id)) {
+            reg.remove(&volume_id);
+        }
+    }
+    result
+}
+
+/// Streamed instant search across all resident volumes (lazily loading any persisted-but-not-resident
+/// volume from disk first). Parses `query` via `index_query`, merges + ranks the hits, and streams them in
+/// batches over `on_hit`; the frontend supersedes an in-flight search by generation token (STREAMING.md).
+/// Returns the total number of hits emitted. Shares `search_all` with `index_search_collect` so the two
+/// can never diverge.
+#[tauri::command]
+#[cfg_attr(feature = "specta-bindings", specta::specta)]
+async fn index_search(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, cpe_server::index_service::IndexService>,
+    query: String,
+    limit: usize,
+    on_hit: tauri::ipc::Channel<Vec<cpe_server::index::IndexHit>>,
+) -> Result<usize, String> {
+    let dir = index_dir(&app)?;
+    let svc = state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let mut emitted = 0usize;
+        svc.stream_search(&dir, &query, limit, cpe_server::index_service::SEARCH_BATCH, |batch| {
+            emitted += batch.len();
+            let _ = on_hit.send(batch);
+            std::ops::ControlFlow::Continue(())
+        });
+        Ok(emitted)
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+/// Collect-to-vec variant of `index_search` (tests + non-streaming callers): returns the ranked hits
+/// directly instead of streaming them. Same `search_all` ranking, so results match `index_search`.
+#[tauri::command]
+#[cfg_attr(feature = "specta-bindings", specta::specta)]
+async fn index_search_collect(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, cpe_server::index_service::IndexService>,
+    query: String,
+    limit: usize,
+) -> Result<Vec<cpe_server::index::IndexHit>, String> {
+    let dir = index_dir(&app)?;
+    let svc = state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || svc.search_all(&dir, &query, limit))
+        .await
+        .map_err(|e| e.to_string())
+}
+
+/// Resident volumes + their entry counts / truncated flags, for the UI to show index state. In-memory
+/// only (no disk scan), so a fresh service reports an empty list.
+#[tauri::command]
+#[cfg_attr(feature = "specta-bindings", specta::specta)]
+fn index_status(
+    state: tauri::State<'_, cpe_server::index_service::IndexService>,
+) -> Vec<cpe_server::index_service::VolumeStatus> {
+    state.status()
+}
+
+/// Drop `volume_id` from memory and delete its on-disk index file. Returns whether the volume was resident.
+#[tauri::command]
+#[cfg_attr(feature = "specta-bindings", specta::specta)]
+async fn index_drop(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, cpe_server::index_service::IndexService>,
+    volume_id: u64,
+) -> Result<bool, String> {
+    let dir = index_dir(&app)?;
+    let svc = state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || svc.drop_volume(&dir, volume_id))
+        .await
+        .map_err(|e| e.to_string())
+}
+
+/// Free every resident volume from memory (on-disk files are kept; a later `index_search` reloads them).
+#[tauri::command]
+#[cfg_attr(feature = "specta-bindings", specta::specta)]
+fn index_clear(state: tauri::State<'_, cpe_server::index_service::IndexService>) {
+    state.clear();
+}
+
 /// Find duplicate files under `root` (CPE-420) — size-then-hash two-pass scan. Model lives in
 /// `cpe_server::duplicates` (CPE-815); this is a thin `spawn_blocking` dispatcher.
 #[tauri::command]
@@ -6535,6 +6684,11 @@ pub fn run() {
         .map_err(|e| eprintln!("keep-awake: could not inhibit screen lock: {e}"))
         .ok();
 
+    // Instant-search index service (CPE-1137, epic CPE-703): the resident per-volume indices live here.
+    // Always registered — the index is a core-explorer feature, not sidecar — but off means off: the map
+    // is empty until `index_build` is invoked, so with the feature unused it costs nothing at startup.
+    builder = builder.manage(cpe_server::index_service::IndexService::default());
+
     // Hold the AI Console sidecar connection in managed state (feature-gated).
     #[cfg(feature = "sidecar-platform")]
     {
@@ -6715,6 +6869,12 @@ pub fn run() {
             files_identical,
             find_duplicates,
             find_duplicates_stream,
+            index_build,
+            index_search,
+            index_search_collect,
+            index_status,
+            index_drop,
+            index_clear,
             git_remote_url,
             open_external,
             run_as_admin,
@@ -7369,6 +7529,12 @@ pub fn export_bindings(out: &std::path::Path) -> Result<(), String> {
         files_identical,
         find_duplicates,
         find_duplicates_stream,
+        index_build,
+        index_search,
+        index_search_collect,
+        index_status,
+        index_drop,
+        index_clear,
         git_remote_url,
         open_external,
         run_as_admin,

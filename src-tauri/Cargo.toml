@@ -38,7 +38,11 @@ tauri-specta = { version = "=2.0.0-rc.21", features = ["derive", "typescript"], 
 # the wire contract (CPE-810/815). A normal (non-optional) dependency — it pulls only
 # serde/serde_json/cpe-contract, all already in the tree, so it adds no weight to the plain
 # explorer. The app is the thin adapter that provides `TauriCtx` and dispatches to it.
-cpe-server = { path = "../crates/server" }
+# The `index` feature turns on the instant-search index engine + service (CPE-832/1137, epic CPE-703).
+# The app is the adapter that exposes the index commands, so it enables the gate here (the crate default
+# stays OFF, keeping `cpe-server`'s own plain build/test the delete-test). Adds no new crates — the index
+# is std-only.
+cpe-server = { path = "../crates/server", features = ["index"] }
 # (sha2 moved to `cpe-server` with the checksum/backup/thumbnail domains, CPE-815/821 — no longer a
 # direct app dep.)
 # (The recursive directory-size walk that used rayon moved to `cpe-server` (CPE-815, disk_usage);

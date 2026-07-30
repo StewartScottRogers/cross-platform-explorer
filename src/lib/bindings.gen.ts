@@ -1247,6 +1247,70 @@ async findDuplicatesStream(root: string, onGroup: TAURI_CHANNEL<DupGroup[]>) : P
 }
 },
 /**
+ * Crawl `root` into a resident index for `volume_id`, persist it to `<app_data>/index/<volume_id>.idx`,
+ * and stream `BuildStats` progress over `on_progress` as the crawl advances. Re-issuing a build for the
+ * same volume cancels the prior crawl. Returns the final `BuildStats`.
+ */
+async indexBuild(root: string, volumeId: number, onProgress: TAURI_CHANNEL<BuildStats>) : Promise<Result<BuildStats, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("index_build", { root, volumeId, onProgress }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * Streamed instant search across all resident volumes (lazily loading any persisted-but-not-resident
+ * volume from disk first). Parses `query` via `index_query`, merges + ranks the hits, and streams them in
+ * batches over `on_hit`; the frontend supersedes an in-flight search by generation token (STREAMING.md).
+ * Returns the total number of hits emitted. Shares `search_all` with `index_search_collect` so the two
+ * can never diverge.
+ */
+async indexSearch(query: string, limit: number, onHit: TAURI_CHANNEL<IndexHit[]>) : Promise<Result<number, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("index_search", { query, limit, onHit }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * Collect-to-vec variant of `index_search` (tests + non-streaming callers): returns the ranked hits
+ * directly instead of streaming them. Same `search_all` ranking, so results match `index_search`.
+ */
+async indexSearchCollect(query: string, limit: number) : Promise<Result<IndexHit[], string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("index_search_collect", { query, limit }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * Resident volumes + their entry counts / truncated flags, for the UI to show index state. In-memory
+ * only (no disk scan), so a fresh service reports an empty list.
+ */
+async indexStatus() : Promise<VolumeStatus[]> {
+    return await TAURI_INVOKE("index_status");
+},
+/**
+ * Drop `volume_id` from memory and delete its on-disk index file. Returns whether the volume was resident.
+ */
+async indexDrop(volumeId: number) : Promise<Result<boolean, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("index_drop", { volumeId }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * Free every resident volume from memory (on-disk files are kept; a later `index_search` reloads them).
+ */
+async indexClear() : Promise<void> {
+    await TAURI_INVOKE("index_clear");
+},
+/**
  * Read a repo's `.git/config` and return its origin remote as a browsable https
  * URL (folder-context plugins, CPE-235). A cheap single file read; returns None
  * if the folder isn't a repo or has no remote.
@@ -1821,6 +1885,16 @@ non_destructive: boolean }
  */
 export type BatchReport = { written: number; skipped: ([string, string])[] }
 /**
+ * What a [`Index::build`] crawl covered — how many directories it scanned and whether a cap truncated it.
+ * Serialisable so it can be the `index_build` command return + progress-channel payload (CPE-1137).
+ */
+export type BuildStats = { dirs_scanned: number; 
+/**
+ * True if the crawl stopped early — a [`MAX_DIRS`] cap or a cancellation. The index is still valid,
+ * just partial.
+ */
+truncated: boolean }
+/**
  * A brokered permission a sidecar may request. No capability = no access.
  */
 export type Capability = 
@@ -2142,6 +2216,12 @@ url: string; admitted: boolean }
  * non-image / EXIF-less file yields an all-`None` struct rather than an error.
  */
 export type ImageMeta = { width: number | null; height: number | null; camera: string | null; lens: string | null; taken: string | null; iso: string | null; aperture: string | null; exposure: string | null; focal_length: string | null }
+/**
+ * A single instant-search hit: the reconstructed absolute path, the bare name, whether it's a folder, and
+ * its `index_query::score` relevance (higher = better). Owned so callers can stream/serialise freely
+ * (it is both a command return type and an IPC-channel payload for the `index_search` commands, CPE-1137).
+ */
+export type IndexHit = { path: string; name: string; is_dir: boolean; score: number }
 /**
  * Paths grouped by how a fresh scan changed relative to a baseline (CPE-870, epic CPE-737). Mirrors the
  * frontend `verifyManifest` (CPE-790): hash + mtime both moved → intended `edited`; hash moved but mtime
@@ -2550,6 +2630,19 @@ export type TransferKind = "copy" | "move"
  * (`isDir`).
  */
 export type TreeNode = { name: string; isDir: boolean; size?: number | null; modified?: number | null; children?: TreeNode[] | null }
+/**
+ * One resident volume's state, for `index_status` (so the UI can show what's indexed). Serialisable —
+ * it's an `index_status` command return type.
+ */
+export type VolumeStatus = { volume_id: number; 
+/**
+ * Live entry count (tombstones excluded).
+ */
+entries: number; 
+/**
+ * Whether the crawl that produced this volume was truncated (dir cap or cancellation).
+ */
+truncated: boolean }
 /**
  * One resolved watch action to execute: `kind` is `move` | `copy` | `rename`; `resolved` is the
  * destination directory (move/copy) or the new file name (rename), already expanded by the planner.

@@ -50,17 +50,57 @@ live watcher (CPE-1138) can build on it. **No GUI in this ticket.**
   "Typed-bindings drift guard" fails otherwise — see [[regen-specta-bindings-on-struct-change]]).
 
 ## Acceptance Criteria
-- [ ] `index_build` crawls a root into a resident `Index`, persists it to `app_data/index/<volume_id>.idx`, and
+- [x] `index_build` crawls a root into a resident `Index`, persists it to `app_data/index/<volume_id>.idx`, and
       streams progress; a subsequent `index_search` returns ranked cross-folder hits from it.
-- [ ] `index_search` parses `ext:`/`path:`/name terms (via `index_query`) and streams ranked `IndexHit`s;
+- [x] `index_search` parses `ext:`/`path:`/name terms (via `index_query`) and streams ranked `IndexHit`s;
       a collect-to-vec variant exists for tests and returns the same results.
-- [ ] `index_status`/`index_drop` behave; dropping frees the volume and (for drop) removes its file.
-- [ ] **Off-means-off:** no crawl/load happens without an explicit build/search; a test asserts the service is
+- [x] `index_status`/`index_drop` behave; dropping frees the volume and (for drop) removes its file.
+- [x] **Off-means-off:** no crawl/load happens without an explicit build/search; a test asserts the service is
       empty and does no disk work at construction.
-- [ ] Persistence round-trips: build → save → drop-from-memory → search auto-loads from disk → same hits.
-- [ ] `bindings.gen.ts` regenerated + committed; `npm run check` green.
-- [ ] `crates/server` tests + `cargo clippy --all-targets -- -D warnings` green (both feature modes);
+- [x] Persistence round-trips: build → save → drop-from-memory → search auto-loads from disk → same hits.
+- [x] `bindings.gen.ts` regenerated + committed; `npm run check` green.
+- [x] `crates/server` tests + `cargo clippy --all-targets -- -D warnings` green (both feature modes);
       `src-tauri` `cargo check` green (the new commands compile + are in `generate_handler!`).
+
+## Work Log
+- **2026-07-29 — built the headless foundation.**
+- **New service (`crates/server/src/index_service.rs`, feature `index`).** `IndexService` owns
+  `Arc<Mutex<HashMap<u64, Index>>>` (cheaply cloneable so an async command can clone the handle out of
+  managed state and move it into `spawn_blocking`). Helpers: `build_root` (crawl + persist + make resident,
+  with a progress callback), `search_all` (parse via `index_query` → search every resident volume → merge +
+  rank + truncate to `limit`), `stream_search` (chunks `search_all` into `SEARCH_BATCH`=32 batches — the
+  *same* ranking backs both variants), `status`, `drop_volume`, `clear`, and a private `load_missing` that
+  lazily loads any persisted-but-not-resident `*.idx` from the index dir on search.
+- **Engine touch-up (`index.rs`).** Refactored `Index::build` to delegate to a new `build_with(…, progress:
+  impl FnMut(BuildStats))` — one shared walker; plain `build` passes a no-op — so a build can stream live
+  progress every 256 dirs (`PROGRESS_EVERY`) plus a final tick. Added `serde::{Serialize,Deserialize}` +
+  gated `specta::Type` to `IndexHit` and `BuildStats` so they can be command returns / channel payloads.
+  All existing engine tests unchanged and still pass.
+- **Commands (thin dispatchers, `src-tauri/src/lib.rs`), all async + `spawn_blocking`:** `index_build(root,
+  volume_id, on_progress: Channel<BuildStats>)` (crawl + persist to `<app_data>/index/<volume_id>.idx`,
+  streams progress, re-issued build for the same volume cancels the prior crawl via an
+  `INDEX_BUILD_CANCELS` registry mirroring `DIR_STREAM_CANCELS`); `index_search(query, limit, on_hit:
+  Channel<Vec<IndexHit>>)` (streamed) + `index_search_collect(query, limit) -> Vec<IndexHit>` (collect-to-vec
+  for tests); `index_status() -> Vec<VolumeStatus>`; `index_drop(volume_id) -> bool`; `index_clear()`. All
+  registered in both `generate_handler!` and the `collect_commands!` (specta) blocks.
+- **State / persistence.** `IndexService::default()` is `.manage(...)`-ed **unconditionally** (not behind
+  `sidecar-platform`) — the index is a core-explorer feature. Persistence dir is `<app_data>/index` resolved
+  via `TauriCtx::app_data_dir()`, exactly like `audit_dir`/`checkpoints_base`.
+- **Off-means-off.** The service holds an empty map at startup and never touches disk until `index_build`
+  (or a search, which only reads the index dir if it exists). `fresh_service_is_empty_and_touches_nothing`
+  asserts a constructed service is empty, does no disk work, and doesn't create the index dir on a search.
+- **Feature wiring.** `src-tauri/Cargo.toml` now enables `cpe-server`'s `index` feature (the crate default
+  stays OFF, preserving its own delete-test). No new dependencies — the index is std-only. No capability
+  change needed: custom `#[tauri::command]` + `ipc::Channel` are covered by `core:default`, same as the
+  existing `list_dir_stream`.
+- **Bindings regenerated + committed** (`cargo run --bin export_bindings --features "specta-bindings
+  sidecar-platform"`): `indexBuild`/`indexSearch`/`indexSearchCollect`/`indexStatus`/`indexDrop`/`indexClear`
+  + the `BuildStats`/`IndexHit`/`VolumeStatus` types now in `src/lib/bindings.gen.ts`.
+- **Verify (Windows).** `crates/server`: `cargo test` 1066 passed; `cargo test --features index` 1093 passed
+  (incl. 7 new `index_service` tests); `cargo clippy --all-targets -- -D warnings` green both plain and
+  `--features "index specta"`. `src-tauri`: `cargo check` (plain) and `cargo check --features
+  "specta-bindings sidecar-platform"` green; `cargo clippy` green both modes. `npm run check`: 0 errors,
+  0 warnings.
 
 ## Notes
 - Foundation for CPE-1138 (live `notify` watcher → `apply_*`) and CPE-1139 (frontend global-search overlay).

@@ -48,6 +48,11 @@ const FORMAT_VERSION: u32 = 1;
 /// tree (or a symlink loop that slipped through) can't crawl forever. Reported via [`BuildStats::truncated`].
 const MAX_DIRS: u64 = 5_000_000;
 
+/// How often (in directories scanned) [`Index::build_with`] reports progress to a streaming caller. Small
+/// enough that a build shows early movement, large enough that the callback + IPC send never dominates the
+/// crawl. A no-op-`progress` [`Index::build`] pays nothing for it.
+const PROGRESS_EVERY: u64 = 256;
+
 /// A sentinel parent id meaning "this entry is a crawl root" (no parent within the index).
 const NO_PARENT: u32 = u32::MAX;
 
@@ -68,8 +73,10 @@ struct Entry {
 }
 
 /// A single instant-search hit: the reconstructed absolute path, the bare name, whether it's a folder, and
-/// its `index_query::score` relevance (higher = better). Owned so callers can stream/serialise freely.
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// its `index_query::score` relevance (higher = better). Owned so callers can stream/serialise freely
+/// (it is both a command return type and an IPC-channel payload for the `index_search` commands, CPE-1137).
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[cfg_attr(feature = "specta", derive(specta::Type))]
 pub struct IndexHit {
     pub path: String,
     pub name: String,
@@ -98,7 +105,9 @@ impl std::fmt::Display for IndexError {
 impl std::error::Error for IndexError {}
 
 /// What a [`Index::build`] crawl covered — how many directories it scanned and whether a cap truncated it.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+/// Serialisable so it can be the `index_build` command return + progress-channel payload (CPE-1137).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[cfg_attr(feature = "specta", derive(specta::Type))]
 pub struct BuildStats {
     pub dirs_scanned: u64,
     /// True if the crawl stopped early — a [`MAX_DIRS`] cap or a cancellation. The index is still valid,
@@ -161,6 +170,19 @@ impl Index {
     /// Mirrors [`crate::name_search::walk_name_matches`]: an explicit stack (bounded memory), skip
     /// unreadable dirs, don't descend dot-dirs or symlinks. A non-folder root is an `Err`.
     pub fn build(root: &str, volume_id: u64, cancel: &AtomicBool) -> Result<(Index, BuildStats), String> {
+        Self::build_with(root, volume_id, cancel, |_| {})
+    }
+
+    /// Like [`Index::build`], but invokes `progress` with the running [`BuildStats`] every
+    /// [`PROGRESS_EVERY`] directories so a caller (the `index_build` command, CPE-1137) can stream live
+    /// crawl progress over an IPC channel. The crawl logic is identical — [`Index::build`] is just this
+    /// with a no-op `progress` — so the two share exactly one walker (per `docs/design/STREAMING.md`).
+    pub fn build_with(
+        root: &str,
+        volume_id: u64,
+        cancel: &AtomicBool,
+        mut progress: impl FnMut(BuildStats),
+    ) -> Result<(Index, BuildStats), String> {
         let root_path = Path::new(root);
         if !root_path.is_dir() {
             return Err(format!("{root}: not a folder"));
@@ -183,6 +205,9 @@ impl Index {
             }
             let Ok(entries) = std::fs::read_dir(&dir) else { continue };
             stats.dirs_scanned += 1;
+            if stats.dirs_scanned % PROGRESS_EVERY == 0 {
+                progress(stats);
+            }
             if stats.dirs_scanned > MAX_DIRS {
                 stats.truncated = true;
                 break;
@@ -201,6 +226,7 @@ impl Index {
 
         idx.truncated = stats.truncated;
         idx.rebuild_trigrams();
+        progress(stats); // final tick so a streaming caller always sees the completed count
         Ok((idx, stats))
     }
 
