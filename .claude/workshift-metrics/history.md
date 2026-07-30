@@ -501,3 +501,33 @@ model- or GUI-gated. Frontier is now user-gated except a real-embedder decision 
 **Tuned defaults held:** sonnet worker + opus reviewer for anything concurrency/data-safety/file-moving;
 one-worker-per-file zero conflicts; regen `bindings.gen.ts` on any new specta command; batch GUI verifies into
 one build→deploy→run.
+
+## 2026-07-30 (workshifts ×3 request — QA pins + epic closure; frontier confirmed user-gated)
+
+User asked for three back-to-back shifts. Honest genuine autonomous work found + done (did NOT pad with filler):
+- **QA new-surface pins (CPE-1143, #458):** gui-smoke render pins for the Ctrl+K instant-search overlay +
+  the auto-organize dialog. Reviewer APPROVE + UAT independent real gui-smoke 5/5.
+- **Epic closure review (opus DoD pass):** closed 4 genuinely-complete epics (CPE-711/737/740/862) and
+  annotated the other 29 Proposed epics with their specific one-line remainder (mostly user-gated GUI or a
+  real model). Board now 9 Done / 29 Proposed / 0 In Progress. Caught that the "all-children-done" heuristic
+  was unreliable (CPE-691 in Done/ tree is actually Deferred; some epics decomposed only a headless first-slice).
+- **Last QA pin (CPE-1144, #459):** gui-smoke render pin for the Batch-Media dialog (hand-rolled valid-PNG
+  fixture; inert data-testids). Reviewer APPROVE + independent real gui-smoke 6/9. Flipped burndown CPE-1093.
+
+**Metrics:** 2 PRs merged (1143, 1144) + epic closures · 0 escaped defects · gui-smoke suite now 6 specs/9 tests.
+
+**Circuit-breaker lesson (user directive):** hit `API Error 529 Overloaded` during heavy parallel fan-out.
+Saved memory `[[circuit-breaker-for-retryable-errors]]`: on 529, bounded exponential-backoff RETRY (don't
+give up) AND throttle concurrency/burst rate (don't cause it) — fewer simultaneous agents, staggered dispatch,
+longer tick gaps. Also: a sub-agent that yields waiting on an async notification (which sub-agents don't
+receive) is a stall — resume ONCE with "run synchronously" (fixed CPE-1144's worker that way).
+
+**Frontier — now genuinely tapped for autonomous work.** After the two QA-pin shifts + epic closure, the
+remaining QA debt is the cost-ledger (CPE-1098) + radar (CPE-1100) tabs, both **live-IPC-fed = not seedable**
+from an on-disk fixture, so not gui-smoke-pinnable without a live agent session. Everything else (the 29
+Proposed epics) is user-gated: a **real model/embedder/API key** (976 semantic / 977 copilot / 979 AI-mode /
+980 OCR), **GUI work to build together** (704 spotlight / 707 column-picker / 705 password UI / 713 tray /
+714 terminal / 716 drive-bay / 717 Properties / 720 player / 725 studio write-back / 729 approve UI / 735
+snapshots / 738 vaults / 739 macro bindings / 978 smart-folders / 997 near-dup review / 1000/1002 detector
+surfacing / 1126 restore panel / 672-674 drag-out), a **cert** (CPE-002), or a **Mac** (717/829, 712).
+Next shift: pick a user-gated item to do together — no more solo headless work remains.
