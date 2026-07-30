@@ -5488,14 +5488,15 @@ fn index_watch_pump(
             .drain(..)
             .map(|(from, to)| WatchEvent::Renamed { from, to })
             .collect();
-        for path in touched.drain() {
-            if std::path::Path::new(&path).exists() {
-                let is_dir = std::path::Path::new(&path).is_dir();
-                events.push(WatchEvent::Created { path, is_dir });
-            } else {
-                events.push(WatchEvent::Removed { path });
-            }
-        }
+        // Resolve the re-stat set into Created/Removed events with ancestors ordered before descendants
+        // (CPE-1138 review): `HashSet` drain order is arbitrary, and `apply_create` silently drops a child
+        // whose parent dir isn't indexed yet — so a same-window `mkdir a && touch a/f` must apply `a`
+        // before `a/f`. `resolve_touched` sorts to guarantee that.
+        let touched_paths: Vec<String> = touched.drain().collect();
+        events.extend(cpe_server::index_watch::resolve_touched(&touched_paths, |p| {
+            let path = std::path::Path::new(p);
+            path.exists().then(|| path.is_dir())
+        }));
         let mutations = plan_from_events(&events);
         if mutations.is_empty() {
             return;

@@ -123,3 +123,19 @@ rename into an opaque `"renamed"` tag that doesn't preserve from/to direction �
 label, not enough to decide `apply_create` vs `apply_remove` correctly for the index. The full live-FS
 behaviour (watch a real folder, edit it in the running app, see search update) is left to the GUI/attended
 pass noted in this ticket, alongside CPE-1139.
+
+## Review fix (2026-07-29, Foreman-applied per opus reviewer CHANGES REQUESTED)
+- **Nested-create ordering bug fixed:** the pump's flush drained `touched` (a `HashSet`) in arbitrary order,
+  so a child file's `Create` could be applied before its parent dir's `Create`; `Index::apply_create`
+  silently drops an entry whose parent isn't indexed yet → the child stayed missing until a rebuild (breaks
+  AC#3 for same-window `mkdir a && touch a/f`, archive-extract, `git checkout`, `cp -r` — common on Windows).
+- **Fix:** extracted the re-stat resolution into a pure, testable `index_watch::resolve_touched(touched, stat)`
+  in `cpe-server` that **sorts paths ascending** so an ancestor (a path prefix) always precedes its
+  descendants, then classifies each as `Created`(exists)/`Removed`(gone). The pump now calls it instead of
+  draining the `HashSet` directly.
+- **Tests added:** `resolve_touched_orders_ancestors_before_descendants` (pure: child-before-parent input →
+  parent Create emitted first; gone path → Removed) and `nested_create_in_one_window_is_indexed_regardless_of_event_order`
+  (end-to-end: build index, create `freshdir/` + `freshdir/nested_hit.rs`, feed the child event FIRST →
+  resolve_touched → apply_mutations → assert `nested_hit.rs` is searchable). index_watch now 14 tests.
+- No exported type/signature changed → no `bindings.gen.ts` regen. `crates/server` green; clippy clean
+  (`index specta`); `src-tauri` clippy `--features sidecar-platform` clean.

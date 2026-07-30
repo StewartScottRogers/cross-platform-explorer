@@ -76,6 +76,32 @@ pub fn plan_from_events(events: &[WatchEvent]) -> Vec<IndexMutation> {
     events.iter().flat_map(plan_from_event).collect()
 }
 
+/// Resolve a debounce window's re-stat set (paths whose create/remove identity is decided by their
+/// *current* existence, not the individual event kind) into ordered [`WatchEvent`]s.
+///
+/// **Ordering matters (CPE-1138 review):** the returned `Created` events are sorted so that an **ancestor
+/// path always precedes its descendants** — a parent directory before any file inside it. This is required
+/// because [`crate::index::Index::apply_create`] resolves a path's parent and *silently drops* the entry if
+/// the parent isn't indexed yet; when a directory and files within it are created inside the same window
+/// (archive extraction, `git checkout`, `cp -r`), applying a child before its parent would lose the child
+/// until a manual rebuild. A lexicographic sort gives this ordering for free: an ancestor path is a prefix
+/// of its descendants and so always sorts first (on both `/` and `\` separators).
+///
+/// `stat(path)` reports the path's current state: `Some(is_dir)` if it exists (→ `Created`), `None` if it's
+/// gone (→ `Removed`). Removes are order-independent (`apply_remove` tombstones the whole subtree), so they
+/// ride along in the same sorted pass.
+pub fn resolve_touched(touched: &[String], stat: impl Fn(&str) -> Option<bool>) -> Vec<WatchEvent> {
+    let mut paths: Vec<&str> = touched.iter().map(String::as_str).collect();
+    paths.sort_unstable();
+    paths
+        .into_iter()
+        .map(|p| match stat(p) {
+            Some(is_dir) => WatchEvent::Created { path: p.to_string(), is_dir },
+            None => WatchEvent::Removed { path: p.to_string() },
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -303,6 +329,81 @@ mod tests {
 
         let mutations = plan_from_events(&[WatchEvent::Created { path: abs(&tree, &["x.txt"]), is_dir: false }]);
         assert!(!svc.apply_mutations(&idxdir, 5, &mutations).unwrap());
+        let _ = fs::remove_dir_all(&tree);
+        let _ = fs::remove_dir_all(&idxdir);
+    }
+
+    // ---- resolve_touched: ancestor-before-descendant ordering (CPE-1138 review) ----
+
+    /// `resolve_touched` sorts so a parent dir's `Created` precedes any child's, regardless of the input
+    /// order (the pump feeds it a `HashSet` drain, i.e. arbitrary order), and classifies gone paths as
+    /// `Removed`.
+    #[test]
+    fn resolve_touched_orders_ancestors_before_descendants() {
+        // Child listed BEFORE its parent dir; plus a gone path. `/`-separated so the assertion is
+        // separator-agnostic (a real Windows pump would feed `\`, which sorts the same way).
+        let touched = vec![
+            "root/dir/child.rs".to_string(),
+            "root/dir".to_string(),
+            "root/gone.txt".to_string(),
+        ];
+        let events = resolve_touched(&touched, |p| match p {
+            "root/gone.txt" => None,      // removed
+            "root/dir" => Some(true),     // a directory
+            _ => Some(false),             // a file
+        });
+        let created: Vec<&str> = events
+            .iter()
+            .filter_map(|e| match e {
+                WatchEvent::Created { path, .. } => Some(path.as_str()),
+                _ => None,
+            })
+            .collect();
+        let dir_pos = created.iter().position(|p| *p == "root/dir").expect("dir created");
+        let child_pos = created
+            .iter()
+            .position(|p| *p == "root/dir/child.rs")
+            .expect("child created");
+        assert!(dir_pos < child_pos, "parent dir's Create must precede the child's: {created:?}");
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, WatchEvent::Removed { path } if path == "root/gone.txt")),
+            "a gone path must resolve to Removed"
+        );
+    }
+
+    /// End-to-end regression for the review defect: a directory AND a file inside it created in the SAME
+    /// window, with the child's event seen FIRST, must still index the child (not silently drop it because
+    /// its parent wasn't indexed yet). With the old arbitrary `HashSet` order this could lose the child.
+    #[test]
+    fn nested_create_in_one_window_is_indexed_regardless_of_event_order() {
+        let tree = scratch("nested-tree");
+        sample_tree(&tree);
+        let idxdir = scratch("nested-idx");
+        let svc = IndexService::new();
+        svc.build_root(&tree.to_string_lossy(), 8, &idxdir, &AtomicBool::new(false), |_| {})
+            .unwrap();
+
+        // Create a brand-new subdir + a file inside it on disk (as an extraction/checkout would).
+        let newdir = abs(&tree, &["freshdir"]);
+        let child = abs(&tree, &["freshdir", "nested_hit.rs"]);
+        fs::create_dir(&newdir).unwrap();
+        fs::write(&child, b"x").unwrap();
+
+        // Feed the re-stat set with the CHILD before the PARENT (the order the old HashSet could hand us).
+        let touched = vec![child.clone(), newdir.clone()];
+        let events = resolve_touched(&touched, |p| {
+            let path = Path::new(p);
+            path.exists().then(|| path.is_dir())
+        });
+        let mutations = plan_from_events(&events);
+        assert!(svc.apply_mutations(&idxdir, 8, &mutations).unwrap());
+
+        assert!(
+            names(&svc.search_all(&idxdir, "nested_hit", 10)).contains(&"nested_hit.rs".to_string()),
+            "a child created alongside its parent dir in one window must be searchable"
+        );
         let _ = fs::remove_dir_all(&tree);
         let _ = fs::remove_dir_all(&idxdir);
     }
