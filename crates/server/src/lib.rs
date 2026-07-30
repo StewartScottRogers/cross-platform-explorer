@@ -271,6 +271,12 @@ pub mod index;
 #[cfg(feature = "index")]
 pub mod index_service;
 
+/// Live index watch — pure event→mutation mapping between a normalized filesystem-watch event and the
+/// [`index::Index`] incremental primitives (CPE-1138, epic CPE-703). No `notify` dependency here; the OS
+/// watcher subscription is the thin `src-tauri` adapter. Same `index` feature gate as the engine/service.
+#[cfg(feature = "index")]
+pub mod index_watch;
+
 /// Spotlight result aggregation — merge fuzzy-ranked hits from several sources (actions/folders/files/
 /// recents) into grouped, per-kind-capped, best-first results for the overlay (CPE-948, epic CPE-704).
 pub mod spotlight_results;

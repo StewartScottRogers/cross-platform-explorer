@@ -2759,6 +2759,7 @@ async fn index_build(
     use std::sync::atomic::Ordering;
     let dir = index_dir(&app)?;
     let svc = state.inner().clone();
+    let root_for_watch = root.clone(); // build_root consumes `root`; the watcher needs it after
 
     // Cancel any crawl already running for this volume, then register our own flag.
     let cancel = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
@@ -2785,6 +2786,14 @@ async fn index_build(
         if reg.get(&volume_id).is_some_and(|f| std::sync::Arc::ptr_eq(f, &cancel_id)) {
             reg.remove(&volume_id);
         }
+    }
+
+    // Arm (or re-arm) the live watcher — but ONLY if this build actually became resident. A build
+    // whose `cancel` flag reads true here was superseded by a newer same-volume build (see
+    // `IndexService::build_root`'s docs) and never touched the resident map; starting a watcher for
+    // it would race the newer build's own `index_watch_start` with a stale root. CPE-1138.
+    if result.is_ok() && !cancel_id.load(Ordering::Relaxed) {
+        index_watch_start(&app, volume_id, &root_for_watch);
     }
     result
 }
@@ -2845,7 +2854,9 @@ fn index_status(
     state.status()
 }
 
-/// Drop `volume_id` from memory and delete its on-disk index file. Returns whether the volume was resident.
+/// Drop `volume_id` from memory and delete its on-disk index file. Returns whether the volume was
+/// resident. Also stops (CPE-1138) any live watcher for the volume — off means off: a dropped volume
+/// leaves no watcher thread/handle behind, resident or not (a `stop` on an unarmed volume is a no-op).
 #[tauri::command]
 #[cfg_attr(feature = "specta-bindings", specta::specta)]
 async fn index_drop(
@@ -2855,16 +2866,20 @@ async fn index_drop(
 ) -> Result<bool, String> {
     let dir = index_dir(&app)?;
     let svc = state.inner().clone();
-    tauri::async_runtime::spawn_blocking(move || svc.drop_volume(&dir, volume_id))
+    let removed = tauri::async_runtime::spawn_blocking(move || svc.drop_volume(&dir, volume_id))
         .await
-        .map_err(|e| e.to_string())
+        .map_err(|e| e.to_string())?;
+    index_watch_stop(&app, volume_id);
+    Ok(removed)
 }
 
 /// Free every resident volume from memory (on-disk files are kept; a later `index_search` reloads them).
+/// Also stops (CPE-1138) every live watcher — off means off.
 #[tauri::command]
 #[cfg_attr(feature = "specta-bindings", specta::specta)]
-fn index_clear(state: tauri::State<'_, cpe_server::index_service::IndexService>) {
+fn index_clear(app: tauri::AppHandle, state: tauri::State<'_, cpe_server::index_service::IndexService>) {
     state.clear();
+    index_watch_stop_all(&app);
 }
 
 /// Find duplicate files under `root` (CPE-420) — size-then-hash two-pass scan. Model lives in
@@ -5319,6 +5334,241 @@ fn folder_watch_stop(state: tauri::State<FolderWatchState>) {
     *state.current.lock().unwrap() = None;
 }
 
+// --- Instant index: live watcher adapter (CPE-1138, epic CPE-703) ----------------------------
+// The pure event→mutation mapping (`cpe_server::index_watch::{WatchEvent, plan_from_events}`) and the
+// batch-applying `IndexService::apply_mutations` live in `cpe-server` (notify-free, unit-tested
+// headlessly). This is the thin OS-watch half: a `notify` watcher per resident volume that feeds a
+// debounced pump, which resolves rename-cookie pairs, plans mutations, and applies them. Mirrors
+// `FolderWatchState`/`AgentWatchState` — gated behind `sidecar-platform` (the plain explorer pulls no
+// watcher machinery), and it's `index_build`/`index_drop`/`index_clear` that arm/disarm it, so a watcher
+// only exists while its volume is actually resident (off means off).
+
+/// The live index watchers, one per resident volume, keyed by `volume_id`. Each stored `notify` watcher
+/// (plus its pump thread) stays alive only while its key is present — removing a key (or clearing the
+/// map) drops the watcher AND ends its pump thread (the event channel closes). An empty map is zero
+/// watchers and zero threads.
+#[cfg(feature = "sidecar-platform")]
+#[derive(Default)]
+struct IndexWatchState {
+    watches: std::sync::Mutex<std::collections::HashMap<u64, IndexWatch>>,
+}
+
+#[cfg(feature = "sidecar-platform")]
+struct IndexWatch {
+    _watcher: notify::RecommendedWatcher,
+    #[allow(dead_code)]
+    root: String,
+}
+
+#[cfg(feature = "sidecar-platform")]
+impl IndexWatchState {
+    /// Insert (or replace) `volume_id`'s watch. Re-arming an already-watched volume drops the old
+    /// `IndexWatch` first (its pump thread exits on the closed channel) before storing the new one —
+    /// the map-lifecycle half of arming, kept free of any `notify`/`AppHandle` setup so it's directly
+    /// testable (mirrors `AgentWatchState::arm`).
+    fn arm(&self, volume_id: u64, watch: IndexWatch) {
+        self.watches.lock().unwrap().insert(volume_id, watch);
+    }
+
+    /// Disarm just one volume's watcher (its pump exits on the closed channel). Idempotent.
+    fn stop(&self, volume_id: u64) {
+        self.watches.lock().unwrap().remove(&volume_id);
+    }
+
+    /// Disarm every watcher at once (e.g. `index_clear`). The map is emptied → 0 threads.
+    fn stop_all(&self) {
+        self.watches.lock().unwrap().clear();
+    }
+
+    #[cfg(test)]
+    fn armed_count(&self) -> usize {
+        self.watches.lock().unwrap().len()
+    }
+}
+
+/// Start (or re-arm) `volume_id`'s live watcher over `root` if the sidecar platform is enabled;
+/// a compile-time no-op otherwise (the plain explorer build has no `IndexWatchState`/`notify` at all).
+/// A `notify` setup failure is swallowed — the index just stays live-search-stale for that volume
+/// rather than failing the build that triggered this.
+#[cfg(feature = "sidecar-platform")]
+fn index_watch_start(app: &tauri::AppHandle, volume_id: u64, root: &str) {
+    use notify::{RecursiveMode, Watcher};
+    use tauri::Manager;
+    let Some(state) = app.try_state::<IndexWatchState>() else { return };
+    let (tx, rx) = std::sync::mpsc::channel();
+    let Ok(mut watcher) = notify::recommended_watcher(move |res| {
+        let _ = tx.send(res);
+    }) else {
+        return;
+    };
+    if watcher.watch(std::path::Path::new(root), RecursiveMode::Recursive).is_err() {
+        return;
+    }
+    let app_for_pump = app.clone();
+    let root_owned = root.to_string();
+    std::thread::spawn(move || index_watch_pump(app_for_pump, rx, volume_id, root_owned));
+    state.arm(volume_id, IndexWatch { _watcher: watcher, root: root.to_string() });
+}
+#[cfg(not(feature = "sidecar-platform"))]
+#[inline]
+fn index_watch_start(_app: &tauri::AppHandle, _volume_id: u64, _root: &str) {}
+
+/// Stop `volume_id`'s live watcher (`index_drop`/a superseded build); a no-op if none is armed.
+#[cfg(feature = "sidecar-platform")]
+fn index_watch_stop(app: &tauri::AppHandle, volume_id: u64) {
+    use tauri::Manager;
+    if let Some(state) = app.try_state::<IndexWatchState>() {
+        state.stop(volume_id);
+    }
+}
+#[cfg(not(feature = "sidecar-platform"))]
+#[inline]
+fn index_watch_stop(_app: &tauri::AppHandle, _volume_id: u64) {}
+
+/// Stop every live index watcher (`index_clear`); a no-op if none are armed.
+#[cfg(feature = "sidecar-platform")]
+fn index_watch_stop_all(app: &tauri::AppHandle) {
+    use tauri::Manager;
+    if let Some(state) = app.try_state::<IndexWatchState>() {
+        state.stop_all();
+    }
+}
+#[cfg(not(feature = "sidecar-platform"))]
+#[inline]
+fn index_watch_stop_all(_app: &tauri::AppHandle) {}
+
+/// Coalescing pump for one volume's index watcher: fold raw `notify` events over a short debounce
+/// window, resolve rename-cookie pairs (mirrors `handle_rename_event`'s fidelity ceiling, CPE-1117 —
+/// a pairable rename becomes one [`cpe_server::index_watch::WatchEvent::Renamed`]; anything unpairable
+/// degrades to a plain create/remove at the one path known), then plan + apply the whole window as ONE
+/// batch via [`cpe_server::index_service::IndexService::apply_mutations`] — one lock acquisition, at
+/// most one save, no matter how many events landed in the window. Ends when the channel closes (the
+/// watcher was dropped by `stop`/`stop_all`).
+#[cfg(feature = "sidecar-platform")]
+fn index_watch_pump(
+    app: tauri::AppHandle,
+    rx: std::sync::mpsc::Receiver<notify::Result<notify::Event>>,
+    volume_id: u64,
+    _root: String,
+) {
+    use cpe_server::index_watch::{plan_from_events, WatchEvent};
+    use notify::event::{ModifyKind, RenameMode};
+    use notify::EventKind;
+    use std::collections::{HashMap, HashSet};
+    use std::sync::mpsc::RecvTimeoutError;
+    use std::time::{Duration, Instant};
+    use tauri::Manager;
+
+    const FLUSH: Duration = Duration::from_millis(300);
+    // Paths whose exact create/remove identity we resolve at FLUSH time by re-stat'ing (below) —
+    // covers plain Create/Remove events, "Any"/"Other" renames, and any rename half `notify` never
+    // paired within the window. Re-checking existence at flush (rather than trusting the individual
+    // event kind) also self-corrects a same-window create-then-delete or delete-then-recreate.
+    let mut touched: HashSet<String> = HashSet::new();
+    // Cookie-paired renames, resolved as soon as both halves arrive.
+    let mut renamed_pairs: Vec<(String, String)> = Vec::new();
+    // Half-seen renames awaiting their partner, keyed by notify's tracker cookie.
+    let mut pending_by_cookie: HashMap<usize, String> = HashMap::new();
+    let mut last_flush = Instant::now();
+
+    let flush = |app: &tauri::AppHandle,
+                 touched: &mut HashSet<String>,
+                 renamed_pairs: &mut Vec<(String, String)>,
+                 pending_by_cookie: &mut HashMap<usize, String>| {
+        // A `From` still waiting for its `To` when the window closes: the OS never gave us the pair
+        // (moved out of the watched tree, or split across a flush boundary) — fold it into the
+        // existence re-check below (the ticket's "rename-as-remove+create" fallback).
+        for (_cookie, from) in pending_by_cookie.drain() {
+            touched.insert(from);
+        }
+        if touched.is_empty() && renamed_pairs.is_empty() {
+            return;
+        }
+        let mut events: Vec<WatchEvent> = renamed_pairs
+            .drain(..)
+            .map(|(from, to)| WatchEvent::Renamed { from, to })
+            .collect();
+        for path in touched.drain() {
+            if std::path::Path::new(&path).exists() {
+                let is_dir = std::path::Path::new(&path).is_dir();
+                events.push(WatchEvent::Created { path, is_dir });
+            } else {
+                events.push(WatchEvent::Removed { path });
+            }
+        }
+        let mutations = plan_from_events(&events);
+        if mutations.is_empty() {
+            return;
+        }
+        let Some(svc) = app.try_state::<cpe_server::index_service::IndexService>() else { return };
+        let Ok(dir) = index_dir(app) else { return };
+        let _ = svc.apply_mutations(&dir, volume_id, &mutations);
+    };
+
+    loop {
+        match rx.recv_timeout(FLUSH) {
+            Ok(Ok(event)) => match event.kind {
+                EventKind::Create(_) | EventKind::Remove(_) => {
+                    for p in event.paths {
+                        touched.insert(p.to_string_lossy().into_owned());
+                    }
+                }
+                EventKind::Modify(ModifyKind::Name(mode)) => {
+                    let mut paths = event.paths.iter().map(|p| p.to_string_lossy().into_owned());
+                    match mode {
+                        RenameMode::Both => match (paths.next(), paths.next()) {
+                            (Some(from), Some(to)) => renamed_pairs.push((from, to)),
+                            (Some(only), None) => {
+                                touched.insert(only);
+                            }
+                            _ => {}
+                        },
+                        RenameMode::From => match (event.attrs.tracker(), paths.next()) {
+                            (Some(cookie), Some(from)) => {
+                                pending_by_cookie.insert(cookie, from);
+                            }
+                            (None, Some(from)) => {
+                                touched.insert(from);
+                            }
+                            _ => {}
+                        },
+                        RenameMode::To => match (event.attrs.tracker(), paths.next()) {
+                            (Some(cookie), Some(to)) => match pending_by_cookie.remove(&cookie) {
+                                Some(from) => renamed_pairs.push((from, to)),
+                                None => {
+                                    touched.insert(to);
+                                }
+                            },
+                            (None, Some(to)) => {
+                                touched.insert(to);
+                            }
+                            _ => {}
+                        },
+                        // `Any`/`Other`: the backend didn't tell us direction — the existence re-check
+                        // at flush time decides create vs. remove for each path.
+                        _ => {
+                            for p in paths {
+                                touched.insert(p);
+                            }
+                        }
+                    }
+                }
+                _ => {} // Modify(Data)/Access/Other — the filename index doesn't track content
+            },
+            Ok(Err(_)) => {} // a watch error — ignore, keep pumping
+            Err(RecvTimeoutError::Timeout) => {}
+            Err(RecvTimeoutError::Disconnected) => {
+                flush(&app, &mut touched, &mut renamed_pairs, &mut pending_by_cookie);
+                break;
+            }
+        }
+        if last_flush.elapsed() >= FLUSH {
+            flush(&app, &mut touched, &mut renamed_pairs, &mut pending_by_cookie);
+            last_flush = Instant::now();
+        }
+    }
+}
+
 #[cfg(feature = "sidecar-platform")]
 impl Default for AiConsoleState {
     fn default() -> Self {
@@ -6697,6 +6947,8 @@ pub fn run() {
         builder = builder.manage(AgentWatchState::default());
         // The watched-folder rules watcher (CPE-794); empty until the user configures watched folders.
         builder = builder.manage(FolderWatchState::default());
+        // The instant-index live watcher (CPE-1138); empty until `index_build` makes a volume resident.
+        builder = builder.manage(IndexWatchState::default());
     }
 
     // Startup setup: create the main window in Rust (CPE-608) so its webview can inject a
@@ -7161,6 +7413,54 @@ mod agent_watch_tests {
         // stop_all clears the map → back to the zero-watcher invariant.
         state.disarm_all();
         assert!(state.is_empty());
+    }
+
+    // --- Instant index: live watcher map lifecycle (CPE-1138) -----------------------------
+    use super::{IndexWatch, IndexWatchState};
+
+    /// Build a real `notify` watcher over a fresh temp subdir so an `IndexWatch` can be inserted in a
+    /// test without any Tauri machinery (mirrors `make_watch` for `AgentWatch` above). The receiver is
+    /// dropped immediately: this only asserts on the map's lifecycle (arm/stop/stop_all), not on
+    /// emitted events — event→mutation behaviour is covered by `cpe_server::index_watch`'s own tests.
+    fn make_index_watch(tag: &str) -> IndexWatch {
+        use notify::{RecursiveMode, Watcher};
+        let dir = std::env::temp_dir().join(format!("cpe1138-{}-{}", std::process::id(), tag));
+        std::fs::create_dir_all(&dir).unwrap();
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut watcher = notify::recommended_watcher(move |res| {
+            let _ = tx.send(res);
+        })
+        .unwrap();
+        watcher.watch(&dir, RecursiveMode::Recursive).unwrap();
+        IndexWatch { _watcher: watcher, root: dir.to_string_lossy().into_owned() }
+    }
+
+    #[test]
+    fn arming_two_volumes_then_stop_all_leaves_zero_watchers() {
+        let state = IndexWatchState::default();
+        // Off means off: nothing armed ⇒ empty map ⇒ zero watcher/pump threads.
+        assert_eq!(state.armed_count(), 0);
+
+        // Arm two distinct volumes — both watched concurrently (keyed by volume_id).
+        state.arm(1, make_index_watch("v1"));
+        state.arm(2, make_index_watch("v2"));
+        assert_eq!(state.armed_count(), 2);
+
+        // Re-arming an already-watched volume (a rebuild) replaces its watch, not adds a second.
+        state.arm(1, make_index_watch("v1b"));
+        assert_eq!(state.armed_count(), 2);
+
+        // Stopping one volume (`index_drop`) removes only that key; the other keeps watching.
+        state.stop(1);
+        assert_eq!(state.armed_count(), 1);
+
+        // A repeat stop is a no-op (idempotent).
+        state.stop(1);
+        assert_eq!(state.armed_count(), 1);
+
+        // stop_all (`index_clear`) empties the map → back to the zero-watcher invariant.
+        state.stop_all();
+        assert_eq!(state.armed_count(), 0);
     }
 
     // --- Per-event actor tags: app-op ledger + actor resolution (CPE-1101) ----------------
