@@ -563,6 +563,154 @@ describe("AgentTimeline Replay-mode file-pane overlay (CPE-1112, epic CPE-728 sl
   });
 });
 
+describe("AgentTimeline checkpoint restore panel — two-step revert confirm gate (CPE-1150, epic CPE-732)", () => {
+  // SAFETY-CRITICAL regression cover for CPE-1126's restore panel: a revert overwrites/deletes files
+  // with no Recycle Bin, so it must never fire on a single click. "Revert to this checkpoint…" only
+  // ARMS a confirm (sets cpConfirming); `commands.checkpointRevert` fires ONLY from the separate
+  // "Yes, revert" click. Mirrors CheckpointDialog.test.ts's gate coverage. Routes through the same
+  // core-`invoke` mock the reconstruction suites use — the typed `commands.*` client dispatches to it.
+  const CP = { manifest_id: "cp-1", label: "before refactor", ts: 1500 };
+  const PREVIEW = {
+    creates: 1,
+    overwrites: 2,
+    deletes: 0,
+    bytes_written: 4096,
+    total: 3,
+    drift_count: 0,
+    drift_paths: [] as string[],
+  };
+  const OUTCOME = { applied: 3, skipped: [] as unknown[] };
+  const emptySummary = { total: 0, byKind: {}, sessions: [], firstAt: null, lastAt: null };
+  const CURRENT_PATH = "Z:/work/proj";
+
+  /** Two entries so `sliderRange` yields a scrubbable range (markers only render when a range exists). */
+  const scrubEntries = () => [
+    entry({ id: 2, kind: "modified", path: "Z:/work/proj/b.ts", at: 2000 }),
+    entry({ id: 1, kind: "created", path: "Z:/work/proj/a.ts", at: 1000 }),
+  ];
+
+  /** Default happy-path mock: Replay-tab enter loads reconstruction + one in-range checkpoint; the
+   *  marker click previews the revert; the confirm's "Yes" reverts. Individual tests can re-mock. */
+  const mockCheckpointCommands = () => {
+    invokeMock.mockImplementation(async (cmd: string) => {
+      switch (cmd) {
+        case "replay_load":
+          return { replay: { events: [], bounds: [1000, 2000], summary: emptySummary }, baseline: null };
+        case "checkpoint_list":
+          return [CP];
+        case "checkpoint_preview_revert":
+          return PREVIEW;
+        case "checkpoint_revert":
+          return OUTCOME;
+        default:
+          return undefined;
+      }
+    });
+  };
+
+  /** Mount, open the Replay tab, click the checkpoint marker, and settle the revert preview so the
+   *  restore panel's "Revert to this checkpoint…" button is enabled (not `revertPreviewLoading`). */
+  async function mountAndOpenRestorePanel(props: Record<string, unknown> = {}) {
+    const r = render(AgentTimeline, {
+      entries: scrubEntries(),
+      agentName: "Claude Code",
+      sessionId: "sess-1",
+      currentPath: CURRENT_PATH,
+      ...props,
+    });
+    await fireEvent.click(screen.getByRole("tab", { name: "Replay" }));
+    await flushReplayLoad(); // drains replay_load + checkpoint_list (both fire on tab enter)
+    await fireEvent.click(screen.getByTestId(`checkpoint-marker-${CP.manifest_id}`));
+    await flushReplayLoad(); // drains checkpoint_preview_revert so the arm button is enabled
+    return r;
+  }
+
+  beforeEach(() => invokeMock.mockReset());
+  afterEach(() => vi.useRealTimers());
+
+  it("arming: clicking 'Revert to this checkpoint…' does NOT revert — it only shows the confirm", async () => {
+    mockCheckpointCommands();
+    await mountAndOpenRestorePanel();
+
+    // Precondition: the restore panel is open with its (armed-first) revert button, no confirm yet.
+    expect(screen.getByTestId("checkpoint-restore-panel")).toBeTruthy();
+    expect(screen.queryByTestId("checkpoint-confirm-revert")).toBeNull();
+
+    await fireEvent.click(screen.getByTestId("checkpoint-revert-btn"));
+
+    // The gate: arming must NOT invoke the destructive command — it only reveals the confirm.
+    expect(invokeMock).not.toHaveBeenCalledWith("checkpoint_revert", expect.anything());
+    expect(screen.getByTestId("checkpoint-confirm-revert")).toBeTruthy();
+    expect(screen.getByTestId("checkpoint-confirm-yes")).toBeTruthy();
+  });
+
+  it("confirming: checkpoint_revert fires only after 'Yes, revert', with (currentPath, manifest_id)", async () => {
+    mockCheckpointCommands();
+    await mountAndOpenRestorePanel();
+
+    await fireEvent.click(screen.getByTestId("checkpoint-revert-btn")); // arm
+    expect(invokeMock).not.toHaveBeenCalledWith("checkpoint_revert", expect.anything());
+
+    await fireEvent.click(screen.getByTestId("checkpoint-confirm-yes")); // confirm
+    await flushReplayLoad();
+    await flushReplayLoad(); // settle doCheckpointRevert's post-revert list/preview refresh too
+
+    // The ONLY place checkpointRevert is invoked — with the panel's folder + selected manifest id.
+    expect(invokeMock).toHaveBeenCalledWith("checkpoint_revert", {
+      root: CURRENT_PATH,
+      manifestId: CP.manifest_id,
+    });
+    // The outcome renders, confirming the revert completed through the component (synchronous read —
+    // `findBy*`/`waitFor` are known to flake in this file against real-timer restoration, see the
+    // `flushReplayLoad` note above).
+    expect(screen.getByTestId("checkpoint-outcome")).toBeTruthy();
+  });
+
+  it("cancelling: 'Cancel' dismisses the confirm and leaves checkpoint_revert uncalled", async () => {
+    mockCheckpointCommands();
+    await mountAndOpenRestorePanel();
+
+    await fireEvent.click(screen.getByTestId("checkpoint-revert-btn")); // arm
+    expect(screen.getByTestId("checkpoint-confirm-revert")).toBeTruthy();
+
+    await fireEvent.click(screen.getByTestId("checkpoint-confirm-cancel"));
+
+    expect(screen.queryByTestId("checkpoint-confirm-revert")).toBeNull(); // dismissed
+    expect(screen.getByTestId("checkpoint-revert-btn")).toBeTruthy(); // back to the armed-first button
+    expect(invokeMock).not.toHaveBeenCalledWith("checkpoint_revert", expect.anything());
+  });
+
+  it("empty currentPath: no marker/restore panel surfaces, so the destructive path is unreachable", async () => {
+    mockCheckpointCommands();
+    render(AgentTimeline, {
+      entries: scrubEntries(),
+      agentName: "Claude Code",
+      sessionId: "sess-1",
+      currentPath: "", // no folder → checkpoints never load (the load guard requires a path)
+    });
+    await fireEvent.click(screen.getByRole("tab", { name: "Replay" }));
+    await flushReplayLoad();
+
+    // With no folder there is nothing to revert TO: no checkpoint list, no markers, no restore panel.
+    expect(invokeMock).not.toHaveBeenCalledWith("checkpoint_list", expect.anything());
+    expect(screen.queryByTestId("checkpoint-markers")).toBeNull();
+    expect(screen.queryByTestId("checkpoint-restore-panel")).toBeNull();
+    expect(invokeMock).not.toHaveBeenCalledWith("checkpoint_revert", expect.anything());
+  });
+
+  it("confirm message names the selected checkpoint and warns the revert cannot be undone", async () => {
+    mockCheckpointCommands();
+    await mountAndOpenRestorePanel();
+
+    await fireEvent.click(screen.getByTestId("checkpoint-revert-btn")); // arm
+
+    const confirm = screen.getByTestId("checkpoint-confirm-revert");
+    expect(confirm.textContent).toContain(CP.label); // "before refactor"
+    expect(confirm.textContent).toContain(CURRENT_PATH); // the folder being overwritten
+    expect(confirm.textContent).toMatch(/cannot be undone/i);
+  });
+});
+
 describe("AgentTimeline Radar tab (CPE-1100)", () => {
   const sessions: AgentSession[] = [
     {
