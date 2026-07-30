@@ -9,12 +9,15 @@
 //!
 //! Pure + std-only: a lookup + parse over already-read fields, no I/O.
 
+use serde::{Deserialize, Serialize};
+
 use crate::media_meta_edit::MetaField;
 use crate::metadata_column::CellValue;
 
 /// The audio metadata columns a user can add to the details view — each maps to a friendly key
 /// [`crate::media_meta_read::read_id3v2`] emits.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "specta", derive(specta::Type))]
 pub enum AudioColumn {
     Title,
     Artist,
@@ -31,6 +34,23 @@ pub enum AudioColumn {
 }
 
 impl AudioColumn {
+    /// Every audio column, in a stable display order — what the column picker enumerates
+    /// (CPE-1145).
+    pub(crate) const ALL: [AudioColumn; 12] = [
+        AudioColumn::Title,
+        AudioColumn::Artist,
+        AudioColumn::Album,
+        AudioColumn::AlbumArtist,
+        AudioColumn::Track,
+        AudioColumn::Disc,
+        AudioColumn::Genre,
+        AudioColumn::Year,
+        AudioColumn::Composer,
+        AudioColumn::Publisher,
+        AudioColumn::Bpm,
+        AudioColumn::Comment,
+    ];
+
     /// The friendly [`MetaField::key`] this column reads (as produced by the ID3 read codec).
     fn key(self) -> &'static str {
         match self {
@@ -52,6 +72,31 @@ impl AudioColumn {
     /// Whether this column is a numeric quantity (sorts as an integer, not text).
     fn is_numeric(self) -> bool {
         matches!(self, AudioColumn::Track | AudioColumn::Disc | AudioColumn::Year | AudioColumn::Bpm)
+    }
+
+    /// Stable snake_case token for this column, used to build [`crate::column_extract::MetaColumn::id`]
+    /// (persistence in `column_config`, CPE-1145).
+    pub(crate) fn id_token(self) -> &'static str {
+        match self {
+            AudioColumn::Title => "title",
+            AudioColumn::Artist => "artist",
+            AudioColumn::Album => "album",
+            AudioColumn::AlbumArtist => "album_artist",
+            AudioColumn::Track => "track",
+            AudioColumn::Disc => "disc",
+            AudioColumn::Genre => "genre",
+            AudioColumn::Year => "year",
+            AudioColumn::Composer => "composer",
+            AudioColumn::Publisher => "publisher",
+            AudioColumn::Bpm => "bpm",
+            AudioColumn::Comment => "comment",
+        }
+    }
+
+    /// The friendly display label for the column picker — reuses [`Self::key`], which is already a
+    /// human-readable name.
+    pub(crate) fn label(self) -> &'static str {
+        self.key()
     }
 }
 

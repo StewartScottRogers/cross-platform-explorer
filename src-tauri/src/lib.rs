@@ -2067,6 +2067,61 @@ async fn metadata_write(
     .await.map_err(|e| e.to_string())?
 }
 
+/// Every metadata column the details-view picker can offer (CPE-1145, epic CPE-707): a stable id (for
+/// `column_config` persistence), a friendly label, the typed `MetaColumn` to hand back to
+/// `metadata_column_cells`, and the extensions it applies to. In-memory enumeration only, no I/O — thin
+/// dispatcher into `cpe_server::column_cells::available_columns`.
+#[tauri::command]
+#[cfg_attr(feature = "specta-bindings", specta::specta)]
+fn metadata_columns_available() -> Vec<cpe_server::column_cells::AvailableColumn> {
+    cpe_server::column_cells::available_columns()
+}
+
+/// Streamed metadata-column fill for a listing (CPE-1145, epic CPE-707): for each of `paths`, reads a
+/// capped header and extracts `column` (via `cpe_server::column_extract::extract_column`), pushing
+/// batches of `{ path, cell, display }` over `on_cell` as they resolve — so a column added to a big
+/// listing paints visible rows fast (STREAMING.md). Skip-on-error per file: an unreadable/undecodable
+/// file yields an empty cell, never a failed batch. Async + `spawn_blocking` (the walk does real file
+/// I/O). Shares `stream_column_cells` with the collect-to-vec variant below, so the two can never
+/// diverge. Returns the total number of cells emitted.
+#[tauri::command]
+#[cfg_attr(feature = "specta-bindings", specta::specta)]
+async fn metadata_column_cells(
+    paths: Vec<String>,
+    column: cpe_server::column_extract::MetaColumn,
+    on_cell: tauri::ipc::Channel<Vec<cpe_server::column_cells::MetadataCell>>,
+) -> Result<usize, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let mut emitted = 0usize;
+        cpe_server::column_cells::stream_column_cells(
+            &paths,
+            column,
+            cpe_server::column_cells::COLUMN_CELLS_BATCH,
+            |batch| {
+                emitted += batch.len();
+                let _ = on_cell.send(batch);
+                std::ops::ControlFlow::Continue(())
+            },
+        );
+        Ok(emitted)
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+/// Collect-to-vec variant of `metadata_column_cells` (tests + non-streaming callers): returns every cell
+/// directly instead of streaming batches. Same walk, so results always match `metadata_column_cells`.
+#[tauri::command]
+#[cfg_attr(feature = "specta-bindings", specta::specta)]
+async fn metadata_column_cells_collect(
+    paths: Vec<String>,
+    column: cpe_server::column_extract::MetaColumn,
+) -> Vec<cpe_server::column_cells::MetadataCell> {
+    tauri::async_runtime::spawn_blocking(move || cpe_server::column_cells::column_cells(&paths, column))
+        .await
+        .unwrap_or_default()
+}
+
 /// Recursive counts + size of a directory tree, for the Properties dialog (CPE-649): number of files,
 /// number of sub-folders, and total bytes. Cycle-safe (doesn't follow symlinked dirs) and bounded —
 /// stops at a large entry cap (reporting `truncated`) so it can't spin on a pathological tree.
@@ -7163,6 +7218,9 @@ pub fn run() {
             metadata_read,
             metadata_writable,
             metadata_write,
+            metadata_columns_available,
+            metadata_column_cells,
+            metadata_column_cells_collect,
             list_dir_stream,
             cancel_dir_stream,
             entries_for_paths,
@@ -7877,6 +7935,9 @@ pub fn export_bindings(out: &std::path::Path) -> Result<(), String> {
         metadata_read,
         metadata_writable,
         metadata_write,
+        metadata_columns_available,
+        metadata_column_cells,
+        metadata_column_cells_collect,
         list_dir_stream,
         cancel_dir_stream,
         entries_for_paths,

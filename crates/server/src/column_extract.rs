@@ -8,6 +8,8 @@
 //! the codec by extension and returns the cell — or [`CellValue::Empty`] when the file kind doesn't match
 //! the column (so it sorts last). Pure: no filesystem, the adapter reads the bytes.
 
+use serde::{Deserialize, Serialize};
+
 use crate::doc_column::doc_pages_cell;
 use crate::doc_info_column::{doc_info_cell, DocInfoColumn};
 use crate::image_column::image_dimensions_cell;
@@ -19,8 +21,18 @@ use crate::video_column::video_cell;
 use crate::video_meta_read::read_mp4;
 use crate::video_tag_column::{video_tag_cell, VideoTagColumn};
 
+/// Audio file extensions the audio-tag extractors read (ID3v2/FLAC/OGG-Vorbis).
+const AUDIO_EXTS: &[&str] = &["mp3", "flac", "ogg", "oga"];
+/// Image extensions the pixel-dimensions header reader attempts.
+const IMAGE_EXTS: &[&str] = &["png", "jpg", "jpeg", "gif", "bmp", "webp", "tiff", "tif"];
+/// Document extensions the page-count / doc-info readers attempt (PDF only, v1).
+const DOC_EXTS: &[&str] = &["pdf"];
+/// ISO-BMFF video extensions the duration / tag readers attempt.
+const VIDEO_EXTS: &[&str] = &["mp4", "mov", "m4v"];
+
 /// A metadata column the details view can add, spanning media families.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "specta", derive(specta::Type))]
 pub enum MetaColumn {
     /// A typed audio-tag column (Title/Artist/Track/Year/…), read from ID3/FLAC/OGG by extension.
     Audio(AudioColumn),
@@ -38,6 +50,61 @@ pub enum MetaColumn {
     VideoTag(VideoTagColumn),
 }
 
+impl MetaColumn {
+    /// Every pickable column, in a stable display order (family by family) — what
+    /// [`crate::column_cells::available_columns`] enumerates for the picker UI (CPE-1145, epic CPE-707).
+    pub fn all() -> Vec<MetaColumn> {
+        let mut out: Vec<MetaColumn> = Vec::with_capacity(
+            AudioColumn::ALL.len() + 2 + DocInfoColumn::ALL.len() + VideoTagColumn::ALL.len(),
+        );
+        out.extend(AudioColumn::ALL.into_iter().map(MetaColumn::Audio));
+        out.push(MetaColumn::ImageDimensions);
+        out.push(MetaColumn::DocPages);
+        out.extend(DocInfoColumn::ALL.into_iter().map(MetaColumn::DocInfo));
+        out.push(MetaColumn::VideoDuration);
+        out.extend(VideoTagColumn::ALL.into_iter().map(MetaColumn::VideoTag));
+        out
+    }
+
+    /// A stable string id for this column (family-prefixed snake_case, e.g. `"audio.track"`,
+    /// `"image.dimensions"`, `"doc.info.title"`), for persisting the picker's chosen columns in
+    /// [`crate::column_config`] — that store keeps string ids so it stays decoupled from this enum.
+    pub fn id(&self) -> String {
+        match self {
+            MetaColumn::Audio(c) => format!("audio.{}", c.id_token()),
+            MetaColumn::ImageDimensions => "image.dimensions".to_string(),
+            MetaColumn::DocPages => "doc.pages".to_string(),
+            MetaColumn::DocInfo(c) => format!("doc.info.{}", c.id_token()),
+            MetaColumn::VideoDuration => "video.duration".to_string(),
+            MetaColumn::VideoTag(c) => format!("video.tag.{}", c.id_token()),
+        }
+    }
+
+    /// The friendly display label for the column picker — family-prefixed so a name that recurs across
+    /// families (e.g. "Year" in both Audio and VideoTag) is unambiguous in a flat list.
+    pub fn label(&self) -> String {
+        match self {
+            MetaColumn::Audio(c) => format!("Audio: {}", c.label()),
+            MetaColumn::ImageDimensions => "Image Dimensions".to_string(),
+            MetaColumn::DocPages => "Page Count".to_string(),
+            MetaColumn::DocInfo(c) => format!("Document: {}", c.label()),
+            MetaColumn::VideoDuration => "Video Duration".to_string(),
+            MetaColumn::VideoTag(c) => format!("Video: {}", c.label()),
+        }
+    }
+
+    /// The lowercase extensions this column applies to, so the picker can grey out a non-applicable row
+    /// (mirrors the gating `extract_column` already does internally).
+    pub fn extensions(&self) -> &'static [&'static str] {
+        match self {
+            MetaColumn::Audio(_) => AUDIO_EXTS,
+            MetaColumn::ImageDimensions => IMAGE_EXTS,
+            MetaColumn::DocPages | MetaColumn::DocInfo(_) => DOC_EXTS,
+            MetaColumn::VideoDuration | MetaColumn::VideoTag(_) => VIDEO_EXTS,
+        }
+    }
+}
+
 /// Read a file's audio tags, choosing the codec by extension: `mp3` → ID3v2, `flac` → FLAC/Vorbis,
 /// `ogg`/`oga` → OGG/Vorbis. A non-audio (or unrecognised) extension yields no fields.
 pub fn read_audio_tags(ext: &str, bytes: &[u8]) -> Vec<MetaField> {
@@ -51,21 +118,18 @@ pub fn read_audio_tags(ext: &str, bytes: &[u8]) -> Vec<MetaField> {
 
 /// Whether `ext` is an image kind the dimensions reader should attempt (avoids decoding non-images).
 fn is_image_ext(ext: &str) -> bool {
-    matches!(
-        ext.to_ascii_lowercase().as_str(),
-        "png" | "jpg" | "jpeg" | "gif" | "bmp" | "webp" | "tiff" | "tif"
-    )
+    IMAGE_EXTS.contains(&ext.to_ascii_lowercase().as_str())
 }
 
 /// Whether `ext` is a document kind the page-count reader should attempt (PDF only, v1).
 fn is_doc_ext(ext: &str) -> bool {
-    matches!(ext.to_ascii_lowercase().as_str(), "pdf")
+    DOC_EXTS.contains(&ext.to_ascii_lowercase().as_str())
 }
 
 /// Whether `ext` is an ISO-BMFF video kind the duration reader should attempt (avoids walking the box
 /// tree of unrelated files).
 fn is_video_ext(ext: &str) -> bool {
-    matches!(ext.to_ascii_lowercase().as_str(), "mp4" | "mov" | "m4v")
+    VIDEO_EXTS.contains(&ext.to_ascii_lowercase().as_str())
 }
 
 /// The typed [`CellValue`] for `col` from a file's `ext` + leading `bytes`, dispatched to the family
@@ -384,5 +448,52 @@ mod tests {
         assert!(!read_audio_tags("mp3", &id3(&[("TIT2", "X")])).is_empty());
         assert!(read_audio_tags("png", &png(2, 2)).is_empty());
         assert!(read_audio_tags("", b"").is_empty());
+    }
+
+    #[test]
+    fn all_columns_have_unique_ids_and_nonempty_labels_and_extensions() {
+        let all = MetaColumn::all();
+        // 12 audio + 1 dimensions + 1 pages + 8 doc-info + 1 duration + 9 video-tag.
+        assert_eq!(all.len(), 32);
+
+        let mut ids: Vec<String> = all.iter().map(MetaColumn::id).collect();
+        ids.sort();
+        ids.dedup();
+        assert_eq!(ids.len(), all.len(), "every column must have a unique id");
+
+        for col in &all {
+            assert!(!col.label().is_empty());
+            assert!(!col.extensions().is_empty());
+        }
+    }
+
+    #[test]
+    fn column_ids_are_stable_family_prefixed_tokens() {
+        assert_eq!(MetaColumn::Audio(AudioColumn::Track).id(), "audio.track");
+        assert_eq!(MetaColumn::ImageDimensions.id(), "image.dimensions");
+        assert_eq!(MetaColumn::DocPages.id(), "doc.pages");
+        assert_eq!(MetaColumn::DocInfo(DocInfoColumn::Author).id(), "doc.info.author");
+        assert_eq!(MetaColumn::VideoDuration.id(), "video.duration");
+        assert_eq!(MetaColumn::VideoTag(VideoTagColumn::Year).id(), "video.tag.year");
+    }
+
+    #[test]
+    fn extensions_match_the_gating_used_by_extract_column() {
+        assert_eq!(MetaColumn::Audio(AudioColumn::Title).extensions(), AUDIO_EXTS);
+        assert_eq!(MetaColumn::ImageDimensions.extensions(), IMAGE_EXTS);
+        assert_eq!(MetaColumn::DocPages.extensions(), DOC_EXTS);
+        assert_eq!(MetaColumn::DocInfo(DocInfoColumn::Title).extensions(), DOC_EXTS);
+        assert_eq!(MetaColumn::VideoDuration.extensions(), VIDEO_EXTS);
+        assert_eq!(MetaColumn::VideoTag(VideoTagColumn::Title).extensions(), VIDEO_EXTS);
+    }
+
+    #[test]
+    fn labels_are_family_prefixed_and_disambiguate_recurring_names() {
+        // "Year" recurs in both Audio and VideoTag — the family prefix keeps them distinct in a flat list.
+        let audio_year = MetaColumn::Audio(AudioColumn::Year).label();
+        let video_year = MetaColumn::VideoTag(VideoTagColumn::Year).label();
+        assert_ne!(audio_year, video_year);
+        assert!(audio_year.starts_with("Audio:"));
+        assert!(video_year.starts_with("Video:"));
     }
 }
