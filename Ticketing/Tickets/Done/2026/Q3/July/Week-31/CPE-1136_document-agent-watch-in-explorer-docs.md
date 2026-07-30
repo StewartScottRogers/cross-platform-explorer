@@ -4,7 +4,7 @@ title: "Docs: document the Agent Watch drawer (live activity + replay scrubber +
 type: chore
 component: Docs
 priority: medium
-status: Backlog
+status: Done
 tags: ready
 created: 2026-07-29
 epic: CPE-728
