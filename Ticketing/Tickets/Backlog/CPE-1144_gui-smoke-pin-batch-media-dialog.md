@@ -35,13 +35,50 @@ CPE-1100 tabs are live-IPC-fed and genuinely NOT seedable from disk, so they sta
   edit needed.
 
 ## Acceptance Criteria
-- [ ] `gui-smoke/specs/batch-media.smoke.ts` drives the real build to the Batch-Media dialog, adds an op, and
+- [x] `gui-smoke/specs/batch-media.smoke.ts` drives the real build to the Batch-Media dialog, adds an op, and
       asserts the op-pill list + plan preview render non-empty; non-destructive (no Apply / no image writes
       outside the throwaway tmpDir).
-- [ ] Fixture seeds valid image(s) into the disposable tmpDir; cleaned up by `onComplete` (no residue).
-- [ ] Any new `data-testid`/test-mode seam is inert in production; existing smoke specs still pass; `npm run
+- [x] Fixture seeds valid image(s) into the disposable tmpDir; cleaned up by `onComplete` (no residue).
+- [x] Any new `data-testid`/test-mode seam is inert in production; existing smoke specs still pass; `npm run
       check` passes.
-- [ ] Wired non-blocking (`continue-on-error`); the real gui-smoke suite passes locally incl. the new spec.
+- [x] Wired non-blocking (`continue-on-error`); the real gui-smoke suite passes locally incl. the new spec.
+
+## Work Log
+- Studied the proven pattern (`organize.smoke.ts` / `instant-search.smoke.ts`) and the surface:
+  `BatchMediaDialog.svelte` (op builder + debounced `batchMediaPlan` preview), `batchMedia.ts`
+  (`canBatchTransform`/`partitionEligible` — encoder-writable extensions only), and `App.svelte`'s
+  opener. **No command-palette entry exists for Batch Media** (grep of `paletteCommands` — no
+  `batch-media` id, unlike `tool.organize`); the only real opener is the right-click context menu's
+  "Batch media…" item (`ContextMenu.svelte`, gated on `selectionCount > 1 && mediaEligible`).
+- **Fixture (`wdio.conf.ts#seedBatchMediaFixture`)**: `batch_media::plan` (crates/server/src/batch_media.rs)
+  turned out to be pure path-string manipulation — it never opens/decodes the file for the preview — but
+  the ticket explicitly asked for real decodable images so the fixture stays honest with what a real
+  batch-media flow encounters (and keeps working if `plan` ever starts inspecting bytes). Hand-rolled a
+  minimal valid truecolour PNG encoder (IHDR/IDAT via `node:zlib` deflate/IEND, CRC32 per the PNG spec) —
+  no external deps — and self-validated it (CRC recompute + zlib inflate round-trip on every chunk) before
+  wiring it in. Two 4x4 PNGs (`CPE-1144-photo-a.png` / `-b.png`) are seeded into the same disposable tmpDir
+  as every other fixture; cleaned up by the existing `onComplete` `rm -rf`.
+- **Spec (`batch-media.smoke.ts`)**: selects both seeded rows (plain click + ctrl+click), right-clicks to
+  open the context menu (preserving the multi-selection, mirroring `App.svelte`'s `onRowContext`), clicks
+  "Batch media…" (found by scanning `.ctx .row` HTML for its label, same technique organize.smoke.ts uses
+  for palette rows), adds the default Resize(1024px) op via `[data-testid="add-op-btn"]`, then asserts
+  `[data-testid="op-pill"]` renders "Resize 1024px" and `[data-testid="preview-row"]` renders exactly 2 rows
+  named `CPE-1144-photo-{a,b}-1024.png` (the backend's actual computed output names — falsifiable, tied to
+  this spec's own fixture). Dismissed via `[data-testid="cancel-btn"]` — Apply is never clicked.
+  - Two DOM gestures with no prior precedent in this harness — ctrl+click and right-click — are driven via
+    `browser.execute` dispatching a real `MouseEvent` at the row's own DOM node (Svelte's handlers just read
+    `e.ctrlKey`/event type off whatever `MouseEvent` they receive), rather than relying on WebDriver's
+    native pointer/actions API against wry's embedded WebView2 control under the classic-protocol
+    workaround this harness already forces.
+- **Seam added**: four inert `data-testid`s in `BatchMediaDialog.svelte` (`add-op-btn`, `op-pill`,
+  `plan-preview`/`preview-row`, `cancel-btn`/`apply-btn`) — same minimal-hook pattern CPE-1142 used for
+  `OrganizeDialog.svelte`. No `--test-mode`-gated hook was needed; the existing right-click opener was
+  reachable headlessly.
+- **Verification — ran the real gui-smoke suite locally** (`npm run build` → `npm run tauri build --
+  --no-bundle` → `cd gui-smoke && npm ci && npm test` with
+  `WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS="--disable-gpu --no-sandbox --disable-dev-shm-usage"`): **6 spec
+  files / 9 tests, all passing**, exit code 0 — batch-media.smoke.ts's 1 test included. `npm run check`:
+  0 errors, 0 warnings.
 
 ## Notes
 - Flips the burndown CPE-1093 row from "logic automated — pixel/theme residual" to "render pinned by

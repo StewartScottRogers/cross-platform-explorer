@@ -321,13 +321,13 @@
           <input class="num" type="number" min="0" max="100" bind:value={watermarkOpacity} aria-label="Watermark opacity" />
           <span class="lbl">opacity (0-100)</span>
         {/if}
-        <button class="btn" disabled={!pendingOp} on:click={addOp}>+ Add</button>
+        <button class="btn" data-testid="add-op-btn" disabled={!pendingOp} on:click={addOp}>+ Add</button>
       </div>
 
       {#if ops.length > 0}
-        <div class="pills">
+        <div class="pills" data-testid="op-pills">
           {#each ops as op, i (i)}
-            <span class="pill">
+            <span class="pill" data-testid="op-pill">
               <span class="pill-text">{mediaOpLabel(op)}</span>
               <button class="pill-x" aria-label="Remove operation" on:click={() => removeOp(i)}>✕</button>
             </span>
@@ -341,12 +341,12 @@
       </label>
     </div>
 
-    <div class="preview">
+    <div class="preview" data-testid="plan-preview">
       {#if ops.length === 0}
-        <div class="empty">Add an operation above to see a preview.</div>
+        <div class="empty" data-testid="plan-preview-empty">Add an operation above to see a preview.</div>
       {:else}
         {#each previewRows as it (it.input)}
-          <div class="rowp">
+          <div class="rowp" data-testid="preview-row">
             <span class="from" title={it.input}>{baseName(it.input)}</span>
             <span class="arrow">→</span>
             <span class="to" title={it.output}>{baseName(it.output)}</span>
@@ -401,8 +401,8 @@
       {#if completed}
         <button class="btn primary" on:click={finish} data-testid="batch-media-done">Done</button>
       {:else}
-        <button class="btn" disabled={applying} on:click={cancel}>Cancel</button>
-        <button class="btn primary" disabled={!canApply} on:click={apply}>{applying ? "Applying…" : "Apply"}</button>
+        <button class="btn" data-testid="cancel-btn" disabled={applying} on:click={cancel}>Cancel</button>
+        <button class="btn primary" data-testid="apply-btn" disabled={!canApply} on:click={apply}>{applying ? "Applying…" : "Apply"}</button>
       {/if}
     </div>
   </div>
