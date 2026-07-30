@@ -2,7 +2,7 @@
 id: CPE-976
 title: "EPIC: AI semantic search — find files by meaning"
 type: Task
-status: In Progress
+status: Proposed
 priority: High
 component: Multiple
 tags: [epic, big-design]
@@ -90,3 +90,6 @@ hard rule as CPE-703).
 2026-07-24 (dayshift) — **CPE-983** landed the document pipeline: `semantic_index::{chunk_text, SemanticIndex}` — chunk (overlapping word windows) → `embed_batch` → `vector_index`, with `upsert_document`/`remove_document` (exact chunk bookkeeping) and per-document `search` (best chunk per doc, only positive-similarity docs). 7 tests via FakeEmbedder. Next: CPE-984 blend with lexical hits; then CPE-985 UI (attended) + the deferred real embedder.
 
 2026-07-24 (dayshift) — **CPE-984** landed the query blend: `search_fusion::{rrf, blend_semantic_lexical}` — Reciprocal Rank Fusion (scale-free) merging semantic `DocHit`s + lexical hits into one ranked list with per-source provenance (`in_semantic`/`in_lexical`). **CPE-976 is now headless-complete** (vector core + embedder seam + pipeline + fusion); only **CPE-985 (NL search UI, attended)** and the **real embedder backend (deferred big-design)** remain.
+
+## Board hygiene 2026-07-29 — reverted In Progress → Proposed
+Not actively being worked: all decomposed child tickets are Done. Remaining DoD is user-gated (GUI / model-key / cert / Mac) or a deferred cap. Reverted to **Proposed** so the epic queue honestly shows what's dormant vs active; re-activate with `/ticketing-epic activate` to resume (like CPE-703 was this session). **Done-candidate:** all children complete — review DoD; may qualify for Done rather than a re-build.

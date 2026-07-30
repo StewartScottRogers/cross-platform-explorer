@@ -2,7 +2,7 @@
 id: CPE-737
 title: "EPIC: Integrity guard (bitrot detection)"
 type: Task
-status: In Progress
+status: Proposed
 priority: Low
 component: Multiple
 tags: [epic]
@@ -53,3 +53,6 @@ checksum backend. Pure classifier lands first.
 2026-07-21 (autonomous) — **v1 COMPLETE.** All three children done: CPE-790 (integrity model), CPE-791 (baseline store + on-demand verify — reconciled Deferred → Done, its frontend glue shipped with 792), CPE-792 (report view). Users baseline a folder, verify on demand, see changes classified (intact/edited/corrupted/missing/new) via the mtime heuristic, and rebaseline — reachable from the palette (`tool.integrity`). Remaining epic scope is the OPTIONAL scheduled/background verifier (a later child; opt-in, fast-when-off) — file it if/when wanted.
 
 2026-07-21 (autonomous) — **EPIC COMPLETE (incl. monitoring).** Added backend verify (CPE-870 #148), verify-all-at-once (CPE-871 #149), and opt-in verify-on-startup (CPE-872 #150). DoD met: baseline + flag unexpected/missing + classify + rebaseline + opt-in monitoring. Only a richer while-running scheduler remains as an optional future child.
+
+## Board hygiene 2026-07-29 — reverted In Progress → Proposed
+Not actively being worked: all decomposed child tickets are Done. Remaining DoD is user-gated (GUI / model-key / cert / Mac) or a deferred cap. Reverted to **Proposed** so the epic queue honestly shows what's dormant vs active; re-activate with `/ticketing-epic activate` to resume (like CPE-703 was this session). **Done-candidate:** all children complete — review DoD; may qualify for Done rather than a re-build.

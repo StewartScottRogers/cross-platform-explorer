@@ -2,7 +2,7 @@
 id: CPE-713
 title: "EPIC: Tray resident — system tray & background quick-access"
 type: Task
-status: In Progress
+status: Proposed
 priority: Low
 component: Multiple
 tags: [epic]
@@ -39,3 +39,6 @@ launch-on-login turns CPE into an always-available utility — additive and full
 2026-07-23 (dayshift) — **Activated.** First slice: **CPE-946** — `tray_quick::QuickAccess`: the pinned +
 recent quick-access list model for the tray menu. Remaining: the tray icon/menu, minimize-to-tray, and
 background quick-launch.
+
+## Board hygiene 2026-07-29 — reverted In Progress → Proposed
+Not actively being worked: all decomposed child tickets are Done. Remaining DoD is user-gated (GUI / model-key / cert / Mac) or a deferred cap. Reverted to **Proposed** so the epic queue honestly shows what's dormant vs active; re-activate with `/ticketing-epic activate` to resume (like CPE-703 was this session). **Done-candidate:** all children complete — review DoD; may qualify for Done rather than a re-build.

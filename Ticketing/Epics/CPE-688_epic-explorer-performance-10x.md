@@ -2,7 +2,7 @@
 id: CPE-688
 title: "EPIC: Explorer performance — 10× faster directory open & all file-list operations"
 type: Task
-status: In Progress
+status: Proposed
 priority: High
 component: Frontend
 tags: [epic, big-design]
@@ -118,3 +118,6 @@ stream batch. Not decomposed; activate to plan.
    regression budget guarding against full-list rendering.
 4. **CPE-692** — Slim the row template (fewer per-row handlers/bindings; hoist shared work). *(prereq: 690)*
 5. **CPE-693** — Backend profiling pass; optimize Rust only if the profile warrants.
+
+## Board hygiene 2026-07-29 — reverted In Progress → Proposed
+Not actively being worked: all decomposed child tickets are Done. Remaining DoD is user-gated (GUI / model-key / cert / Mac) or a deferred cap. Reverted to **Proposed** so the epic queue honestly shows what's dormant vs active; re-activate with `/ticketing-epic activate` to resume (like CPE-703 was this session). **Done-candidate:** all children complete — review DoD; may qualify for Done rather than a re-build.

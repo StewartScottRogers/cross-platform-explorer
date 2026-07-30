@@ -2,7 +2,7 @@
 id: CPE-725
 title: "EPIC: Media metadata studio (editable EXIF / IPTC / ID3)"
 type: Task
-status: In Progress
+status: Proposed
 priority: Medium
 component: Multiple
 tags: [epic]
@@ -87,3 +87,6 @@ inspector is live end-to-end — backend commands (read/writable/atomic-write) +
 build. This is the studio UI the epic was building toward; audio (ID3/FLAC) is now fully round-trip
 editable in the GUI. Remaining: OGG/EXIF write-back codecs (deferred, format-risky), plus batch-media
 ops + photo-map extras.
+
+## Board hygiene 2026-07-29 — reverted In Progress → Proposed
+Not actively being worked: all decomposed child tickets are Done. Remaining DoD is user-gated (GUI / model-key / cert / Mac) or a deferred cap. Reverted to **Proposed** so the epic queue honestly shows what's dormant vs active; re-activate with `/ticketing-epic activate` to resume (like CPE-703 was this session). **Done-candidate:** all children complete — review DoD; may qualify for Done rather than a re-build.

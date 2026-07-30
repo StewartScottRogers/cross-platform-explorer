@@ -2,7 +2,7 @@
 id: CPE-977
 title: "EPIC: AI file copilot — natural-language file operations"
 type: Task
-status: In Progress
+status: Proposed
 priority: High
 component: Multiple
 tags: [epic, big-design]
@@ -69,3 +69,6 @@ confirm/execute UI is attended.
    *Headless — buildable now.*
 2. **CPE-992+** — the `LlmPlanner` seam (**needs a model backend — user resource**), risk-gate via CPE-729,
    preview/execute/undo via CPE-732. **Attended.**
+
+## Board hygiene 2026-07-29 — reverted In Progress → Proposed
+Not actively being worked: all decomposed child tickets are Done. Remaining DoD is user-gated (GUI / model-key / cert / Mac) or a deferred cap. Reverted to **Proposed** so the epic queue honestly shows what's dormant vs active; re-activate with `/ticketing-epic activate` to resume (like CPE-703 was this session). **Done-candidate:** all children complete — review DoD; may qualify for Done rather than a re-build.

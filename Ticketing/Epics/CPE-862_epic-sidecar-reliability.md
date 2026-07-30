@@ -2,7 +2,7 @@
 id: CPE-862
 title: Sidecar reliability & self-healing
 type: epic
-status: In Progress
+status: Proposed
 priority: high
 tags: reliability
 created: 2026-07-21
@@ -40,3 +40,6 @@ needed.
 - CPE-863 — Sidecar health diagnosis + Repair button (L1) + bundle repos — **Done** (#138)
 - CPE-867 — Auto-restore from a bundled pristine copy (L2) — **Done** (#145)
 - CPE-868 — Resilient launch: retry with backoff (L3) — **Done** (#146)
+
+## Board hygiene 2026-07-29 — reverted In Progress → Proposed
+Not actively being worked: all decomposed child tickets are Done. Remaining DoD is user-gated (GUI / model-key / cert / Mac) or a deferred cap. Reverted to **Proposed** so the epic queue honestly shows what's dormant vs active; re-activate with `/ticketing-epic activate` to resume (like CPE-703 was this session). **Done-candidate:** all children complete — review DoD; may qualify for Done rather than a re-build.

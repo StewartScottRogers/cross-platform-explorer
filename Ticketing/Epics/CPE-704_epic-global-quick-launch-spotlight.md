@@ -2,7 +2,7 @@
 id: CPE-704
 title: "EPIC: Global quick-launch spotlight overlay"
 type: Task
-status: In Progress
+status: Proposed
 priority: Medium
 component: Multiple
 tags: [epic]
@@ -39,3 +39,6 @@ system-level tool, and it is the natural front-end for the instant index ([[CPE-
 2026-07-23 (dayshift) — **Activated.** First slice: **CPE-937** — `spotlight::fuzzy_score` + `rank`: the
 pure fuzzy-match/ranking core the overlay lists results with. Remaining: the system-wide hotkey, the
 lightweight overlay window, and feeding real files/folders/actions in.
+
+## Board hygiene 2026-07-29 — reverted In Progress → Proposed
+Not actively being worked: all decomposed child tickets are Done. Remaining DoD is user-gated (GUI / model-key / cert / Mac) or a deferred cap. Reverted to **Proposed** so the epic queue honestly shows what's dormant vs active; re-activate with `/ticketing-epic activate` to resume (like CPE-703 was this session). **Done-candidate:** all children complete — review DoD; may qualify for Done rather than a re-build.

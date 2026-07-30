@@ -2,7 +2,7 @@
 id: CPE-1002
 title: "EPIC: File inspection & safety utilities"
 type: Task
-status: In Progress
+status: Proposed
 priority: Medium
 component: Backend
 tags: [epic]
@@ -52,3 +52,6 @@ remains is the **attended UI** (columns/badges/cleanup views) that surfaces thes
 ## Definition of Done
 - Each detector is a pure, cargo/vitest-tested `cpe-server`/`src/lib` function with no new deps and no cost
   when unused; the UI surfaces them (attended).
+
+## Board hygiene 2026-07-29 — reverted In Progress → Proposed
+Not actively being worked: all decomposed child tickets are Done. Remaining DoD is user-gated (GUI / model-key / cert / Mac) or a deferred cap. Reverted to **Proposed** so the epic queue honestly shows what's dormant vs active; re-activate with `/ticketing-epic activate` to resume (like CPE-703 was this session). **Done-candidate:** all children complete — review DoD; may qualify for Done rather than a re-build.

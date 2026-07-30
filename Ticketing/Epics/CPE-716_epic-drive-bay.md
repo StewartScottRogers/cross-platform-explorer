@@ -2,7 +2,7 @@
 id: CPE-716
 title: "EPIC: Drive bay — removable & network volume manager"
 type: Task
-status: In Progress
+status: Proposed
 priority: Low
 component: Multiple
 tags: [epic]
@@ -45,3 +45,6 @@ Mount/eject + network-share management are heavier follow-ups.
    (Windows `GetDriveTypeW`; unix returns "fixed"/"unknown" for now). cargo-tested. **Foundation, backend.**
 2. **CPE-806** — Drive badges in the sidebar + a removable/network section, using `drive_type`. **GUI.** *(prereq: 805)*
 3. **CPE-807** — Eject/unmount + network-share connect. **Backend + GUI.** *(prereq: 805)*
+
+## Board hygiene 2026-07-29 — reverted In Progress → Proposed
+Not actively being worked: all decomposed child tickets are Done. Remaining DoD is user-gated (GUI / model-key / cert / Mac) or a deferred cap. Reverted to **Proposed** so the epic queue honestly shows what's dormant vs active; re-activate with `/ticketing-epic activate` to resume (like CPE-703 was this session). **Done-candidate:** all children complete — review DoD; may qualify for Done rather than a re-build.

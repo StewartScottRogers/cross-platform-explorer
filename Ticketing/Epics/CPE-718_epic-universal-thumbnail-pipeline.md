@@ -2,7 +2,7 @@
 id: CPE-718
 title: "EPIC: Universal thumbnail pipeline"
 type: Task
-status: In Progress
+status: Proposed
 priority: Medium
 component: Multiple
 tags: [epic]
@@ -42,3 +42,6 @@ and gallery views genuinely useful for mixed folders and is the visual backbone 
   (`thumb_cache.rs`): stable collision-resistant cache key (path+mtime+size+target_px), dual-budget
   (count + bytes) LRU cache, and request coalescing. Headless-testable; the per-format extractors +
   frontend streaming client build on top of it.
+
+## Board hygiene 2026-07-29 — reverted In Progress → Proposed
+Not actively being worked: all decomposed child tickets are Done. Remaining DoD is user-gated (GUI / model-key / cert / Mac) or a deferred cap. Reverted to **Proposed** so the epic queue honestly shows what's dormant vs active; re-activate with `/ticketing-epic activate` to resume (like CPE-703 was this session). **Done-candidate:** all children complete — review DoD; may qualify for Done rather than a re-build.

@@ -2,7 +2,7 @@
 id: CPE-1000
 title: "EPIC: True file-type detection & extension-mismatch flagging"
 type: Task
-status: In Progress
+status: Proposed
 priority: Medium
 component: Multiple
 tags: [epic]
@@ -49,3 +49,6 @@ mismatches. Pure byte-prefix matching: no AI, no new deps, delete-testable.
    *Headless — buildable now.*
 2. **CPE-1002+** — File-sniffing wiring (leading-bytes read) + the true-type column + mismatch badge/review
    UI + safe rename-to-correct-extension. **GUI/attended.**
+
+## Board hygiene 2026-07-29 — reverted In Progress → Proposed
+Not actively being worked: all decomposed child tickets are Done. Remaining DoD is user-gated (GUI / model-key / cert / Mac) or a deferred cap. Reverted to **Proposed** so the epic queue honestly shows what's dormant vs active; re-activate with `/ticketing-epic activate` to resume (like CPE-703 was this session). **Done-candidate:** all children complete — review DoD; may qualify for Done rather than a re-build.

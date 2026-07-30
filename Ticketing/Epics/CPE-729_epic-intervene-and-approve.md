@@ -2,7 +2,7 @@
 id: CPE-729
 title: "EPIC: Intervene & approve — gate high-impact agent actions"
 type: Task
-status: In Progress
+status: Proposed
 priority: Medium
 component: Multiple
 tags: [epic, big-design]
@@ -41,3 +41,6 @@ drive" boundary — a scoped, opt-in exception — so it's its own epic and its 
 action risk classifier (Low/Medium/High + reasons) + `needs_approval` policy threshold, complementing the
 existing launch-flag detection. Remaining: the approve/reject/edit-scope prompt UI + wiring into the
 agent's pre-exec/filesystem-op hook + user-defined rules.
+
+## Board hygiene 2026-07-29 — reverted In Progress → Proposed
+Not actively being worked: all decomposed child tickets are Done. Remaining DoD is user-gated (GUI / model-key / cert / Mac) or a deferred cap. Reverted to **Proposed** so the epic queue honestly shows what's dormant vs active; re-activate with `/ticketing-epic activate` to resume (like CPE-703 was this session). **Done-candidate:** all children complete — review DoD; may qualify for Done rather than a re-build.

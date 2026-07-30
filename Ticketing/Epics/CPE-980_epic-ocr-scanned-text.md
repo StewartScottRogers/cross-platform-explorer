@@ -2,7 +2,7 @@
 id: CPE-980
 title: "EPIC: OCR & scanned-document text"
 type: Task
-status: In Progress
+status: Proposed
 priority: Medium
 component: Multiple
 tags: [epic, big-design]
@@ -61,3 +61,6 @@ noted. Preview/highlight UI is attended.
    `OcrCache` (content-hash → text, so a page is OCR'd once). Cargo-tested. *Headless — buildable now.*
 2. **CPE-993+** — a real engine behind a feature gate (**needs a bundled model / external service — user
    resource**) + preview/hit-highlight UI + feeding the semantic index. **Attended.**
+
+## Board hygiene 2026-07-29 — reverted In Progress → Proposed
+Not actively being worked: all decomposed child tickets are Done. Remaining DoD is user-gated (GUI / model-key / cert / Mac) or a deferred cap. Reverted to **Proposed** so the epic queue honestly shows what's dormant vs active; re-activate with `/ticketing-epic activate` to resume (like CPE-703 was this session). **Done-candidate:** all children complete — review DoD; may qualify for Done rather than a re-build.

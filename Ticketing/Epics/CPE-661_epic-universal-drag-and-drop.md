@@ -2,7 +2,7 @@
 id: CPE-661
 title: "EPIC: Universal drag-and-drop for files"
 type: Task
-status: In Progress
+status: Proposed
 priority: Medium
 component: Frontend
 tags: [epic]
@@ -110,3 +110,6 @@ through the shared transfer queue, closes those gaps and removes duplicated, dri
    native drag carrying real file paths so files drop into other apps. *(prereq: 669; spike-gated)*
 6. **CPE-673** — Specialized views: archive drag-out = extract-on-drop (no drop-in); verify gallery DnD;
    ensure Agent Board card DnD isn't regressed; consistent themed affordances everywhere. *(prereq: 669)*
+
+## Board hygiene 2026-07-29 — reverted In Progress → Proposed
+Not actively being worked: open children remain but are Deferred — CPE-672/674 (drag-out, Deferred). Remaining DoD is user-gated (GUI / model-key / cert / Mac) or a deferred cap. Reverted to **Proposed** so the epic queue honestly shows what's dormant vs active; re-activate with `/ticketing-epic activate` to resume (like CPE-703 was this session). 

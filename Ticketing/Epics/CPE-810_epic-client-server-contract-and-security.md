@@ -2,7 +2,7 @@
 id: CPE-810
 title: "EPIC: Decoupled Rust Server + transport-neutral typed contract + pluggable security"
 type: Task
-status: In Progress
+status: Proposed
 priority: High
 component: Multiple
 tags: [epic]
@@ -197,3 +197,6 @@ the later pillars need a rewrite.
   emit; 113 commands, ~41 serde types, 3 `ipc::Channel`, 140 items behind `sidecar-platform`) and the
   reusable `sidecar/contract` versioning. Resolved 4 decisions (above) with the user; decomposed into
   CPE-811–820. Suggested start: CPE-811 (foundation) or CPE-812 (first user-visible slice).
+
+## Board hygiene 2026-07-29 — reverted In Progress → Proposed
+Not actively being worked: all decomposed child tickets are Done. Remaining DoD is user-gated (GUI / model-key / cert / Mac) or a deferred cap. Reverted to **Proposed** so the epic queue honestly shows what's dormant vs active; re-activate with `/ticketing-epic activate` to resume (like CPE-703 was this session). **Done-candidate:** all children complete — review DoD; may qualify for Done rather than a re-build.

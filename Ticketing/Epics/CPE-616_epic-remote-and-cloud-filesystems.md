@@ -2,7 +2,7 @@
 id: CPE-616
 title: "EPIC: Remote & cloud filesystems"
 type: Task
-status: In Progress
+status: Proposed
 priority: Medium
 component: Multiple
 tags: [epic]
@@ -85,3 +85,6 @@ and `cpe-webdav` (ureq, CPE-904). Architecture written up in
 [docs/design/REMOTE-FILESYSTEMS.md](../../docs/design/REMOTE-FILESYSTEMS.md). Remaining is app/attended:
 the Connections sidebar UI + OS keychain, the transfer-manager UI, and wiring `vfs::open` into the app's
 commands (SMB/S3 providers are a further, impedance-heavy follow-up).
+
+## Board hygiene 2026-07-29 — reverted In Progress → Proposed
+Not actively being worked: all decomposed child tickets are Done. Remaining DoD is user-gated (GUI / model-key / cert / Mac) or a deferred cap. Reverted to **Proposed** so the epic queue honestly shows what's dormant vs active; re-activate with `/ticketing-epic activate` to resume (like CPE-703 was this session). **Done-candidate:** all children complete — review DoD; may qualify for Done rather than a re-build.

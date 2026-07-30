@@ -2,7 +2,7 @@
 id: CPE-978
 title: "EPIC: Smart folders & saved searches"
 type: Task
-status: In Progress
+status: Proposed
 priority: Medium
 component: Multiple
 tags: [epic]
@@ -64,3 +64,6 @@ natural home for a saved **semantic** query ([[CPE-976]]).
 - Reuses [[CPE-711]]'s `Condition` matcher and [[CPE-703]]'s index; composes with [[CPE-976]] (semantic) and
   [[CPE-737]]/tags. Build the **pure saved-query model + evaluator** first (headless, cargo-tested), then the
   sidebar UI + persistence. See [[prefer-streaming-liveness]], [[maintain-in-app-docs-library]].
+
+## Board hygiene 2026-07-29 — reverted In Progress → Proposed
+Not actively being worked: all decomposed child tickets are Done. Remaining DoD is user-gated (GUI / model-key / cert / Mac) or a deferred cap. Reverted to **Proposed** so the epic queue honestly shows what's dormant vs active; re-activate with `/ticketing-epic activate` to resume (like CPE-703 was this session). **Done-candidate:** all children complete — review DoD; may qualify for Done rather than a re-build.

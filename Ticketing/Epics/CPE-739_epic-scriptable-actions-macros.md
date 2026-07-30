@@ -2,7 +2,7 @@
 id: CPE-739
 title: "EPIC: Scriptable actions / user macros"
 type: Task
-status: In Progress
+status: Proposed
 priority: Medium
 component: Multiple
 tags: [epic]
@@ -50,3 +50,6 @@ store. A user's macro library now survives restarts. Confirmed distinct from the
 `macro_library` (CPE-951) — that's CRUD+ordering+validation, this is disk persistence. Independently
 reviewed (redundancy explicitly checked) + UAT-passed (PR #350). Remaining: parameter-prompt UI, action
 library surfacing, and menu/hotkey/watched-folder bindings (GUI/attended).
+
+## Board hygiene 2026-07-29 — reverted In Progress → Proposed
+Not actively being worked: all decomposed child tickets are Done. Remaining DoD is user-gated (GUI / model-key / cert / Mac) or a deferred cap. Reverted to **Proposed** so the epic queue honestly shows what's dormant vs active; re-activate with `/ticketing-epic activate` to resume (like CPE-703 was this session). **Done-candidate:** all children complete — review DoD; may qualify for Done rather than a re-build.

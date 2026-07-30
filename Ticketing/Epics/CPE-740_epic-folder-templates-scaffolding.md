@@ -2,7 +2,7 @@
 id: CPE-740
 title: "EPIC: Folder templates & scaffolding"
 type: Task
-status: In Progress
+status: Proposed
 priority: Low
 component: Multiple
 tags: [epic]
@@ -63,3 +63,6 @@ structure — developers, photographers, accountants. Small, self-contained, hig
 3. **CPE-837** — Tauri commands + template gallery + "New from template…" flow (frontend): capture-from-
    folder, manage, stamp with a token-fill dialog; the thin `#[tauri::command]` dispatchers over the store
    and core. **GUI-verified — attended.** *(prereq: 835, 836)*
+
+## Board hygiene 2026-07-29 — reverted In Progress → Proposed
+Not actively being worked: all decomposed child tickets are Done. Remaining DoD is user-gated (GUI / model-key / cert / Mac) or a deferred cap. Reverted to **Proposed** so the epic queue honestly shows what's dormant vs active; re-activate with `/ticketing-epic activate` to resume (like CPE-703 was this session). **Done-candidate:** all children complete — review DoD; may qualify for Done rather than a re-build.

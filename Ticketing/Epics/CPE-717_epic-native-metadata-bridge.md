@@ -2,7 +2,7 @@
 id: CPE-717
 title: "EPIC: Native metadata bridge — Finder tags, NTFS streams, xattrs"
 type: Task
-status: In Progress
+status: Proposed
 priority: Low
 component: Multiple
 tags: [epic]
@@ -79,3 +79,6 @@ versa. Bridging to native metadata makes labels portable and interoperable with 
 - **2026-07-21** — Activated (dayshift, autonomous). Resolved the three open questions (above) with logged
   best-guesses. Decomposed into CPE-826 (I/O core, headless), CPE-827 (reconcile + Finder plist, headless),
   CPE-828 (UI/commands, attended). Starting CPE-826.
+
+## Board hygiene 2026-07-29 — reverted In Progress → Proposed
+Not actively being worked: all decomposed child tickets are Done. Remaining DoD is user-gated (GUI / model-key / cert / Mac) or a deferred cap. Reverted to **Proposed** so the epic queue honestly shows what's dormant vs active; re-activate with `/ticketing-epic activate` to resume (like CPE-703 was this session). **Done-candidate:** all children complete — review DoD; may qualify for Done rather than a re-build.

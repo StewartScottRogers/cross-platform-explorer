@@ -2,7 +2,7 @@
 id: CPE-715
 title: "EPIC: Link forge — symlink, junction & hardlink management"
 type: Task
-status: In Progress
+status: Proposed
 priority: Low
 component: Multiple
 tags: [epic]
@@ -48,3 +48,6 @@ creation lands first.
    cargo-tested. **Foundation, backend.**
 2. **CPE-803** — "New Link…" UI + linked-entry badges + "resolves to" target indicator. **GUI.** *(prereq: 802)*
 3. **CPE-804** — Broken-link detection + target repair + Windows junctions. **Backend + GUI.** *(prereq: 802)*
+
+## Board hygiene 2026-07-29 — reverted In Progress → Proposed
+Not actively being worked: all decomposed child tickets are Done. Remaining DoD is user-gated (GUI / model-key / cert / Mac) or a deferred cap. Reverted to **Proposed** so the epic queue honestly shows what's dormant vs active; re-activate with `/ticketing-epic activate` to resume (like CPE-703 was this session). **Done-candidate:** all children complete — review DoD; may qualify for Done rather than a re-build.

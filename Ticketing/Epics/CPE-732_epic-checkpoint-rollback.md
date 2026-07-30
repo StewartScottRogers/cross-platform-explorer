@@ -2,7 +2,7 @@
 id: CPE-732
 title: "EPIC: Checkpoint & rollback of agent work"
 type: Task
-status: In Progress
+status: Proposed
 priority: High
 component: Multiple
 tags: [epic]
@@ -61,3 +61,6 @@ Each passed an independent Reviewer + UAT gauntlet; every merge CI-green.
 markers** (the attended GUI cap, ~15%), DEFERRED to a user-present GUI-verification session (on the QA MVD
 ledger). Optional headless follow-up: thread revert_attribution into checkpoint_preview_revert so drift flags
 only truly-outside changes (currently conservative "warn about everything", documented).
+
+## Board hygiene 2026-07-29 — reverted In Progress → Proposed
+Not actively being worked: open children remain but are Deferred — CPE-1126 (restore panel, Deferred). Remaining DoD is user-gated (GUI / model-key / cert / Mac) or a deferred cap. Reverted to **Proposed** so the epic queue honestly shows what's dormant vs active; re-activate with `/ticketing-epic activate` to resume (like CPE-703 was this session). 

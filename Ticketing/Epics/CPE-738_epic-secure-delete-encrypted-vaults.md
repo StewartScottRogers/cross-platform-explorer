@@ -2,7 +2,7 @@
 id: CPE-738
 title: "EPIC: Secure delete & encrypted vaults"
 type: Task
-status: In Progress
+status: Proposed
 priority: Low
 component: Multiple
 tags: [epic]
@@ -40,3 +40,6 @@ guarantees) it's a differentiating trust feature.
 2026-07-23 (dayshift) — **Activated.** First slice: **CPE-941** — `secure_delete::plan_shred` / `passes`:
 overwrite-pass schedules (Zero/Random/DoD3/Gutmann) + honest SSD / copy-on-write erasure caveats. Remaining:
 the overwrite engine, and the encrypted-vault half (passphrase/key derivation + transparent mount).
+
+## Board hygiene 2026-07-29 — reverted In Progress → Proposed
+Not actively being worked: all decomposed child tickets are Done. Remaining DoD is user-gated (GUI / model-key / cert / Mac) or a deferred cap. Reverted to **Proposed** so the epic queue honestly shows what's dormant vs active; re-activate with `/ticketing-epic activate` to resume (like CPE-703 was this session). **Done-candidate:** all children complete — review DoD; may qualify for Done rather than a re-build.
