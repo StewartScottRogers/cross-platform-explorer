@@ -48,6 +48,14 @@ pub struct VolumeStatus {
 #[derive(Clone, Default)]
 pub struct IndexService {
     volumes: Arc<Mutex<HashMap<u64, Index>>>,
+    /// Per-volume build lock. [`build_root`](Self::build_root) holds the `volume_id`'s lock across the
+    /// whole crawl → save → insert, so a **re-issued build for the same volume serialises behind (and
+    /// after cancelling) the prior one** instead of racing it — two overlapping same-volume builds would
+    /// otherwise collide on the shared `<volume_id>.cpeidx.tmp` temp file (a spurious `rename` `ENOENT` /
+    /// stale on-disk index) and last-writer-wins the resident map (CPE-1137 review). Distinct volumes hold
+    /// distinct locks, so different volumes still build fully in parallel. The map only ever grows by one
+    /// tiny `Arc<Mutex<()>>` per volume-id ever built (a handful — one per drive).
+    build_locks: Arc<Mutex<HashMap<u64, Arc<Mutex<()>>>>>,
 }
 
 impl IndexService {
@@ -67,9 +75,17 @@ impl IndexService {
     }
 
     /// Crawl `root` into a fresh [`Index`] for `volume_id`, make it resident (replacing any prior index
-    /// for that volume), and persist it to `dir/<volume_id>.idx`. `cancel` aborts a long crawl (the
-    /// partial index is still stored). `progress` is called with the running [`BuildStats`] as the crawl
-    /// advances, so a streaming caller can report live progress. Returns the final stats.
+    /// for that volume), and persist it to `dir/<volume_id>.idx`. `cancel` aborts a long crawl. `progress`
+    /// is called with the running [`BuildStats`] as the crawl advances, so a streaming caller can report
+    /// live progress. Returns the final stats.
+    ///
+    /// **Concurrency (CPE-1137 review):** builds for the *same* `volume_id` are serialised behind a
+    /// per-volume lock held across the whole crawl → save → insert, so a re-issued build can't race the
+    /// prior one's shared temp file or resident-map insert. If this build is **superseded** — its `cancel`
+    /// flag was signalled by a newer same-volume build (the caller cancels the prior before starting the
+    /// next) — it does **not** persist or become resident: the newer build (which takes the lock next)
+    /// owns the volume. Persisting a cancelled partial would leave a stale/inconsistent on-disk index.
+    /// Distinct volumes use distinct locks and still build in parallel.
     pub fn build_root(
         &self,
         root: &str,
@@ -78,7 +94,22 @@ impl IndexService {
         cancel: &AtomicBool,
         progress: impl FnMut(BuildStats),
     ) -> Result<BuildStats, String> {
+        // Acquire this volume's build lock (created on first use), held across crawl+save+insert.
+        let build_lock = {
+            let mut locks = self.build_locks.lock().unwrap();
+            locks.entry(volume_id).or_default().clone()
+        };
+        let _build_guard = build_lock.lock().unwrap();
+
         let (idx, stats) = Index::build_with(root, volume_id, cancel, progress)?;
+
+        // Superseded (a newer same-volume build signalled our cancel): drop the partial without touching
+        // disk or the resident map — the newer build owns the volume. Checked AFTER the crawl since that's
+        // where cancellation is observed; the per-volume lock guarantees no newer build has run yet.
+        if cancel.load(std::sync::atomic::Ordering::Relaxed) {
+            return Ok(stats);
+        }
+
         std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
         idx.save(&Self::volume_path(dir, volume_id))
             .map_err(|e| e.to_string())?;
@@ -364,6 +395,77 @@ mod tests {
         assert!(!file.exists(), "drop should delete the on-disk file");
         // Dropping again is a no-op (not resident).
         assert!(!svc.drop_volume(&idxdir, 5));
+
+        let _ = fs::remove_dir_all(&tree);
+        let _ = fs::remove_dir_all(&idxdir);
+    }
+
+    /// CPE-1137 review: a build whose `cancel` flag is already set (superseded) must NOT persist or
+    /// become resident — it drops its partial index so the newer same-volume build owns the volume.
+    #[test]
+    fn superseded_build_does_not_persist_or_become_resident() {
+        let tree = scratch("superseded");
+        sample_tree(&tree);
+        let idxdir = scratch("superseded-idx");
+        let svc = IndexService::new();
+
+        // A pre-cancelled build returns Ok (the caller signalled it) but leaves nothing behind.
+        let cancelled = AtomicBool::new(true);
+        svc.build_root(&tree.to_string_lossy(), 7, &idxdir, &cancelled, |_| {})
+            .unwrap();
+        assert_eq!(svc.resident_count(), 0, "superseded build must not become resident");
+        assert!(
+            !IndexService::volume_path(&idxdir, 7).exists(),
+            "superseded build must not persist an on-disk index"
+        );
+
+        // A normal (non-cancelled) build for the same volume then wins: persisted + resident + searchable.
+        svc.build_root(&tree.to_string_lossy(), 7, &idxdir, &AtomicBool::new(false), |_| {})
+            .unwrap();
+        assert_eq!(svc.resident_count(), 1);
+        assert!(IndexService::volume_path(&idxdir, 7).is_file());
+        assert_eq!(names(&svc.search_all(&idxdir, "report", 10)), vec!["report.md", "report.rs"]);
+
+        let _ = fs::remove_dir_all(&tree);
+        let _ = fs::remove_dir_all(&idxdir);
+    }
+
+    /// CPE-1137 review: overlapping builds for the SAME volume serialise behind the per-volume build lock
+    /// instead of racing the shared temp file / resident map. Two threads build volume 9 concurrently on
+    /// the same index dir; neither errors, exactly one volume ends resident, the on-disk file loads
+    /// cleanly, and search works — with the old unconditional save+insert this could `rename`-`ENOENT` or
+    /// leave an inconsistent `.idx`.
+    #[test]
+    fn concurrent_same_volume_builds_dont_race() {
+        let tree = scratch("concurrent");
+        sample_tree(&tree);
+        let idxdir = scratch("concurrent-idx");
+        let svc = IndexService::new();
+        let root = tree.to_string_lossy().to_string();
+
+        let handles: Vec<_> = (0..2)
+            .map(|_| {
+                let svc = svc.clone();
+                let root = root.clone();
+                let idxdir = idxdir.clone();
+                std::thread::spawn(move || {
+                    svc.build_root(&root, 9, &idxdir, &AtomicBool::new(false), |_| {})
+                })
+            })
+            .collect();
+        for h in handles {
+            // The key assertion: no build errors out (no temp-file rename race).
+            h.join().unwrap().expect("concurrent build_root must not error");
+        }
+
+        assert_eq!(svc.resident_count(), 1, "exactly one volume resident after concurrent builds");
+        // On-disk index is consistent: a fresh service reloads it and finds the same files.
+        let fresh = IndexService::new();
+        assert_eq!(
+            names(&fresh.search_all(&idxdir, "report", 10)),
+            vec!["report.md", "report.rs"],
+            "on-disk index left by concurrent builds must load cleanly and be searchable"
+        );
 
         let _ = fs::remove_dir_all(&tree);
         let _ = fs::remove_dir_all(&idxdir);

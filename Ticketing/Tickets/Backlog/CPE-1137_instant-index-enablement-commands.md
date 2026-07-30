@@ -107,3 +107,18 @@ live watcher (CPE-1138) can build on it. **No GUI in this ticket.**
 - Honour the epic tiebreaker: fast/small/**zero cost when off**. Reuse `name_search` semantics already in
   `index_query`. Full "auto-crawl every mounted volume" can be a thin follow-up if not trivial here — building
   a given root + searching all resident volumes satisfies this ticket.
+
+## Review fix (2026-07-29, Foreman-applied per opus reviewer CHANGES REQUESTED)
+- **Concurrency race fixed (reviewer Option A):** added a per-volume build lock to `IndexService`
+  (`build_locks: HashMap<u64, Arc<Mutex<()>>>`). `build_root` now holds the volume's lock across
+  crawl→save→insert, so a re-issued same-volume build serialises behind (and after cancelling) the prior
+  one instead of racing the shared `<volume_id>.cpeidx.tmp` temp file / resident-map insert. Distinct
+  volumes keep distinct locks → still parallel.
+- **Superseded builds drop their partial:** `build_root` now returns early (no save, no insert) when its
+  `cancel` flag is set — the newer same-volume build (next to hold the lock) owns the volume. Fixes the
+  prior unconditional save+insert that could persist a cancelled partial.
+- **Tests added (closing the reviewer's gap):** `superseded_build_does_not_persist_or_become_resident`
+  and `concurrent_same_volume_builds_dont_race` (2 threads build the same volume; no error, exactly one
+  resident, on-disk index loads cleanly + searchable).
+- No exported type / command signature changed → no `bindings.gen.ts` regen needed. `crates/server`
+  1095 tests pass; `cargo clippy --all-targets --features "index specta" -- -D warnings` clean.
