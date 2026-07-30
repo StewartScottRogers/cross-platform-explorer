@@ -26,6 +26,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { $, $$, browser } from "@wdio/globals";
+import { snap } from "../lib/snap.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const STATE_FILE = path.resolve(__dirname, "..", ".smoke-state.json");
@@ -173,6 +174,10 @@ describe("CPE-1144 — headless GUI smoke: Batch-Media dialog renders an op + pl
     const previewHtml = await previewEl.getHTML({ includeSelectorTag: false });
     expect(previewHtml).to.include("CPE-1144-photo-a-1024.png");
     expect(previewHtml).to.include("CPE-1144-photo-b-1024.png");
+
+    // CPE-1148 Part A: capture the op-pill list + plan preview (after the assertions above, before
+    // it's dismissed).
+    await snap("batch-media-dialog");
 
     // Non-destructive: never click Apply — dismiss via Cancel instead (each spec file gets its own
     // fresh app launch/session in this harness, so this isn't required for isolation from other

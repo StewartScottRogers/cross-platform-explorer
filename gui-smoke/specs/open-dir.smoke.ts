@@ -5,6 +5,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { $, $$, browser } from "@wdio/globals";
+import { snap } from "../lib/snap.js"; // ESM relative import — resolves to lib/snap.ts under tsx
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const STATE_FILE = path.resolve(__dirname, "..", ".smoke-state.json");
@@ -65,6 +66,10 @@ describe("CPE-1045 — headless GUI smoke: --open <dir> navigates", () => {
         timeoutMsg: `expected <body> to contain the marker filename "${MARKER_NAME}"`,
       },
     );
+
+    // CPE-1148 Part A: capture the plain directory-listing surface (after the assertions above, so
+    // a failed assertion still leaves a shot of whatever state it failed in).
+    await snap("open-dir");
   });
 
   // CPE-1096 — QA-debt burndown: CPE-1090 (outline strip/breadcrumb) and CPE-1091 (per-line

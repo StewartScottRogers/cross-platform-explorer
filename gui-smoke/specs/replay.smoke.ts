@@ -26,6 +26,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { $, $$, browser } from "@wdio/globals";
+import { snap } from "../lib/snap.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const STATE_FILE = path.resolve(__dirname, "..", ".smoke-state.json");
@@ -178,5 +179,9 @@ describe("CPE-1135 — headless GUI smoke: Replay scrubber renders from a seeded
     });
     const reconHtml = await reconList.getHTML({ includeSelectorTag: false });
     expect(reconHtml).to.include(REPLAY_CREATED_NAME);
+
+    // CPE-1148 Part A: capture the Replay tab (transport/slider + reconstruction), after the
+    // assertions above.
+    await snap("replay-tab");
   });
 });

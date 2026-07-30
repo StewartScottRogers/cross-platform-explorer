@@ -20,6 +20,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { $, $$, browser } from "@wdio/globals";
+import { snap } from "../lib/snap.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const STATE_FILE = path.resolve(__dirname, "..", ".smoke-state.json");
@@ -127,5 +128,8 @@ describe("CPE-1130 — headless GUI smoke: cost-History renders from a seeded jo
     // `.hd-*` surface fed by the same rollup.
     const modelRows = await $$(".hd-table tbody tr");
     expect(modelRows.length, "expected >=1 row in a .hd-table (by-model or by-agent)").to.be.greaterThan(0);
+
+    // CPE-1148 Part A: capture the cost-History rollup, after the assertions above.
+    await snap("cost-history");
   });
 });

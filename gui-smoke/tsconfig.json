@@ -8,5 +8,5 @@
     "skipLibCheck": true,
     "strict": true
   },
-  "include": ["wdio.conf.ts", "specs/**/*.ts"]
+  "include": ["wdio.conf.ts", "specs/**/*.ts", "lib/**/*.ts"]
 }

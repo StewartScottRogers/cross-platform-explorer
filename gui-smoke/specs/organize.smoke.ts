@@ -12,6 +12,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { $, $$, browser } from "@wdio/globals";
+import { snap } from "../lib/snap.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const STATE_FILE = path.resolve(__dirname, "..", ".smoke-state.json");
@@ -126,6 +127,10 @@ describe("CPE-1143 — headless GUI smoke: auto-organize dialog renders a groupe
     // The summary line rendered too (a second, independent surface fed by the same plan).
     const summary = await $('[data-testid="summary"]');
     expect(await summary.isExisting(), "expected the plan summary line to render").to.equal(true);
+
+    // CPE-1148 Part A: capture the grouped-preview dialog (after the assertions above, before it's
+    // dismissed).
+    await snap("organize-dialog");
 
     // Non-destructive: never click Apply — dismiss via Cancel instead, for a clean end state (each
     // spec file gets its own fresh app launch/session in this harness, so this isn't required for
