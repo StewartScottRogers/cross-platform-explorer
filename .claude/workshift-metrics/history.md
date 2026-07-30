@@ -464,3 +464,40 @@ instant-index epic was the last attended big-design item with a built-but-unwire
 GUI/model-key/cert/Mac gated. QA follow-up noted (not filed): a gui-smoke render pin for the Ctrl+K overlay.
 
 **Budget:** ~18 sub-agents this epic; well under the 200 cap across the whole session's shifts.
+
+## 2026-07-29→30 (workshifts ×2, attended — board hygiene + UX/feature polish)
+
+User asked for "two workshifts back to back", then gave two mid-run directives (epic-board cleanup + a pane
+min-width bug). Delivered both plus two "instant-index twin" features the shift-2 researcher surfaced.
+
+**Shift 1:**
+- **Epic board hygiene** — reverted all 33 dormant "In Progress" epics → Proposed (none were actually being
+  worked; 30 had every child Done). Board now honestly shows 5 Done / 33 Proposed / 0 active. ~30 flagged as
+  Done-candidates for a future DoD review.
+- **CPE-1140 (#455) pane min-widths** — middle pane got a real min (MID_MIN=372, floored at the Name column),
+  removed both side maxes, dynamic side-pane clamp so the middle never collapses. Reviewer caught an
+  order-dependent load re-clamp; Foreman-fixed with a proportional `fitSidePanes` + tests. UAT PASS,
+  user-GUI-verified (drag panes wide, middle holds its columns).
+- **CPE-1141 (#456) archive commands** — wired the built-but-unwired `compress_archive`/`compress_to_zip_encrypted`/
+  `extract_zip_encrypted` engine fns as commands (tar.gz + password zip). Reviewer APPROVE + UAT PASS (backend-only).
+
+**Shift 2:**
+- **CPE-1142 (#457) rules-based auto-organize** — the researcher's #1 pick (built+tested `organize.rs`, unwired).
+  Shipped a safe propose → checkpoint → apply → undo feature: `organize_plan` (read-only) / `organize_apply`
+  (checkpoint FIRST, then move into `dir/<subdir>/`, collision pre-checked = never overwrites) + an
+  OrganizeDialog (rule picker, grouped preview, Apply, one-click Undo via the checkpoint). **opus data-safety
+  review** confirmed no overwrite / full-restore / no path-traversal; UAT proved the round-trip + collision-skip;
+  user-GUI-verified (organize the demo folder, Undo restores). AI-assisted organize mode stays model-gated (skipped).
+
+**Metrics:** 4 PRs merged · **0 escaped defects** (all merge commits green on main) · gauntlet caught 4 real
+pre-merge defects (build race, nested-create ordering, since_ts safety false-negative, load-clamp order) · ~26
+sub-agents across both shifts. opus reviewers on the concurrency/data-safety slices earned their keep every time.
+
+**Shift-2 research verdict (filed as knowledge):** two real "instant-index twins" existed (CPE-979 rules-organize
+[shipped], CPE-705 archive residual [shipped]); **skipped CPE-976 semantic** (FakeEmbedder = lexical overlap, not
+real meaning — would mislead without a real embedder); OCR/copilot/smart-folders/near-dup are genuinely
+model- or GUI-gated. Frontier is now user-gated except a real-embedder decision for the AI cluster.
+
+**Tuned defaults held:** sonnet worker + opus reviewer for anything concurrency/data-safety/file-moving;
+one-worker-per-file zero conflicts; regen `bindings.gen.ts` on any new specta command; batch GUI verifies into
+one build→deploy→run.

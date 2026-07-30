@@ -1,9 +1,17 @@
 # Workshift Checkpoint
 
-**Written 2026-07-29 ~22:12 local (USMST).** Clean end-of-shift stop — **nothing in flight, tree clean,
+**Written 2026-07-30 ~00:50 local (USMST).** Clean end-of-shift stop — **nothing in flight, tree clean,
 worktrees pruned, Backlog empty, all merged + pushed + post-merge CI green.** The three honest-headless slices
 this file previously queued are now **DONE**. Resume with a fresh session + "resume the workshift"; this file
 + `history.md` carry full context.
+
+## Latest (2026-07-30): 2 attended shifts — board hygiene + pane fix + 2 shipped twins
+User ran two back-to-back shifts + gave two directives. Shipped: epic-board hygiene (33 In Progress → Proposed;
+board now 5 Done/33 Proposed/0 active), CPE-1140 pane min-widths (GUI-verified), CPE-1141 archive commands,
+CPE-1142 rules-based auto-organize (checkpoint-protected move+undo, opus data-safety review, GUI-verified).
+4 PRs, 0 escaped defects. Shift-2 research: shipped the CPE-979 rules slice + CPE-705 archive residual;
+SKIPPED CPE-976 semantic (FakeEmbedder is lexical-only — misleading without a real embedder). Frontier now
+user-gated except a real-embedder decision for the AI cluster (976-980). Full detail in history.md.
 
 ## Latest (2026-07-29 eve): instant-index epic CPE-703 CLOSED
 Attended session after the docs shift. User approved the instant-index big-design item; research found the
