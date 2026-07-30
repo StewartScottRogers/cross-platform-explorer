@@ -63,6 +63,7 @@
   import ShortcutsDialog from "./lib/components/ShortcutsDialog.svelte";
   import ContentSearchDialog from "./lib/components/ContentSearchDialog.svelte";
   import FileNameSearchDialog from "./lib/components/FileNameSearchDialog.svelte";
+  import InstantSearch from "./lib/components/InstantSearch.svelte";
   import TransferPanel from "./lib/components/TransferPanel.svelte";
   import TransferConflictDialog from "./lib/components/TransferConflictDialog.svelte";
   import { initTransfers, startTransfer, collidingNames, type TransferReport, type ConflictPolicy } from "./lib/transfers";
@@ -492,6 +493,9 @@
   let contentSearchOpen = false;
   /** "Find files by name" recursive name-search overlay (Ctrl+P), scoped to the current folder (CPE-603). */
   let fileSearchOpen = false;
+  /** Instant Search overlay (Ctrl+K) — keyboard-first cross-volume search over the resident index
+   *  (CPE-1139, epic CPE-703). Global: works from any folder, or the Home screen. */
+  let instantSearchOpen = false;
   /** Query the toolbar Search hands to the recursive find dialog on Enter (CPE-866). */
   let deepSearchQuery = "";
   /** "Find duplicate files" overlay, scoped to the current folder (CPE-421). */
@@ -593,6 +597,7 @@
     { id: "view.paneMirror", group: $t("palette.groupView"), label: $t("palette.paneMirror"), keywords: "commander mirror equal pane path", run: mirrorPane, enabled: () => dualPane },
     { id: "tool.findByName", group: $t("palette.groupTools"), label: $t("palette.findByName"), shortcut: "Ctrl+P", run: () => (fileSearchOpen = true), enabled: inFolder },
     { id: "tool.searchInFiles", group: $t("palette.groupTools"), label: $t("palette.searchInFiles"), shortcut: "Ctrl+Shift+F", run: () => (contentSearchOpen = true), enabled: inFolder },
+    { id: "tool.instantSearch", group: $t("palette.groupTools"), label: $t("palette.instantSearch"), shortcut: "Ctrl+K", run: () => (instantSearchOpen = true) },
     { id: "tool.findDuplicates", group: $t("palette.groupTools"), label: $t("palette.findDuplicates"), run: () => (duplicatesOpen = true), enabled: inFolder },
     { id: "tool.colorRules", group: $t("palette.groupTools"), label: $t("palette.colorRules"), keywords: "color rules highlight label", run: () => (colorRulesOpen = true) },
     { id: "tool.sessionHistory", group: $t("palette.groupTools"), label: $t("palette.sessionHistory"), keywords: "audit log history export sessions activity", run: () => (sessionHistoryOpen = true) },
@@ -2493,6 +2498,7 @@
     if (ctrl && event.shiftKey && event.key.toLowerCase() === "f") { event.preventDefault(); if (!isHome && !archive) contentSearchOpen = true; return; }
     if (ctrl && event.shiftKey && event.key.toLowerCase() === "p") { event.preventDefault(); paletteOpen = true; return; } // command palette (CPE-602)
     if (ctrl && !event.shiftKey && event.key.toLowerCase() === "p") { event.preventDefault(); if (!isHome && !archive) fileSearchOpen = true; return; } // find files by name (CPE-603)
+    if (ctrl && !event.shiftKey && event.key.toLowerCase() === "k") { event.preventDefault(); instantSearchOpen = true; return; } // Instant Search — cross-volume index (CPE-1139); free binding, works anywhere (incl. Home)
     if (ctrl && event.key.toLowerCase() === "t") { event.preventDefault(); newTab(); return; }
     if (ctrl && event.key.toLowerCase() === "w") { event.preventDefault(); closeTab(activeId); return; }
     if (ctrl && event.key === "Tab") { event.preventDefault(); cycleTab(event.shiftKey ? -1 : 1); return; }
@@ -3753,6 +3759,15 @@
     on:help={() => openDocsSlug("12-search")}
     on:navigate={(e) => { fileSearchOpen = false; revealFileInApp(e.detail); }}
     on:close={() => { fileSearchOpen = false; deepSearchQuery = ""; }}
+  />
+{/if}
+
+{#if instantSearchOpen}
+  <InstantSearch
+    root={isHome ? "" : currentPath}
+    on:help={() => openDocsSlug("12-search")}
+    on:navigate={(e) => { instantSearchOpen = false; revealFileInApp(e.detail); }}
+    on:close={() => (instantSearchOpen = false)}
   />
 {/if}
 

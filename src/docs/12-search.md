@@ -82,6 +82,24 @@ Besides finding files by **name**, you can search their **contents**. Both searc
 Both boxes remember your **recent queries** — start typing to pick one from the drop-down. Results
 **stream in** as the folder tree is walked, so matches appear immediately even on large trees.
 
+## Instant search (Ctrl+K) — every indexed folder, any drive
+
+The two search boxes above both work **inside** a folder you've opened. **Instant Search** (**Ctrl+K**,
+from anywhere — including the Home screen) is different: it searches an in-memory **index** of file
+names built ahead of time, so matches across an entire drive appear **as you type**, instead of walking
+the tree live.
+
+- Press **Ctrl+K** to open the overlay: a single box, keyboard-first — **↑/↓** to move, **Enter** to
+  reveal the selected file in its folder (and select it), **Esc** to close.
+- Results stream in and **re-rank live**; typing further narrows them without waiting for a full search
+  to finish, and an older still-running search is dropped the moment a newer keystroke supersedes it.
+- **Off means off.** Nothing is indexed until you ask. The first time you open Instant Search on a drive
+  with no index yet, you'll see a **"Build index"** action instead of a blank list — click it to crawl
+  that drive once (with live progress); after that, searches against it are instant. No index is ever
+  built silently in the background.
+- The index only covers **file and folder names** (not contents) — for "find text inside my files" use
+  **Search in files** above.
+
 ## Tips
 
 - Very large trees are **capped** for responsiveness; if a search is truncated the results panel says so —
