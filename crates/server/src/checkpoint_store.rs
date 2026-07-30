@@ -36,10 +36,12 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
+use crate::audit_journal;
 use crate::ctx::ServerCtx;
 use crate::fsutil::to_epoch_ms;
 use crate::model::OpResult;
 use crate::restore_plan::{self, plan_restore, summarize_plan, RestoreAction};
+use crate::revert_attribution;
 use crate::revert_engine::{execute_restore, RestoreReport};
 use crate::revert_safety::{classify_plan, summarize_conflicts};
 use crate::snapshot::{CaptureBudget, SkipReason};
@@ -88,10 +90,13 @@ pub struct CheckpointCreated {
 /// A preview of what reverting to a checkpoint would do: the restore-plan summary plus a **drift** report.
 ///
 /// Drift = files that differ from the checkpoint but that this layer cannot attribute to the watched
-/// agent. Attribution ([`crate::revert_attribution`]) is not wired into this command signature, so the
-/// classifier runs against an empty "agent-touched" set — every diverging path is surfaced as drift
-/// ("changed outside since checkpoint"), the conservative default that makes the UI warn first. When
-/// attribution is later threaded through, only genuinely-outside changes will remain drift.
+/// agent. [`checkpoint_preview_revert`] takes an optional session id to resolve this:
+/// - `session: None` (conservative default) — the classifier runs against an **empty** "agent-touched"
+///   set, so every diverging path is surfaced as drift ("changed outside since checkpoint").
+/// - `session: Some(sess)` (attribution-aware) — [`crate::revert_attribution::agent_touched`] computes
+///   the set of paths `sess` itself mutated at/after the checkpoint, from the durable audit journal;
+///   only paths **outside** that set are surfaced as drift, since the agent's own changes are expected,
+///   not a warning-worthy conflict.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 #[cfg_attr(feature = "specta", derive(specta::Type))]
 pub struct RevertPreview {
@@ -155,6 +160,17 @@ fn root_key(root: &str) -> String {
 /// The base checkpoints directory under the app-data dir (sibling of the audit journal's `audit/`).
 fn checkpoints_base(ctx: &dyn ServerCtx) -> Result<PathBuf, String> {
     Ok(ctx.app_data_dir()?.join("checkpoints"))
+}
+
+/// The base audit-journal directory under the app-data dir — mirrors `checkpoints_base` above, and
+/// must resolve to the exact same path the app adapter writes to. That writer is `audit_dir` in
+/// `src-tauri/src/lib.rs` (`TauriCtx::new(app).app_data_dir()?.join("audit")`, the base every
+/// `audit_journal::record`/`record_many` call in this codebase is given); `ServerCtx::app_data_dir`
+/// is the same seam `TauriCtx` implements, so `<app_data>/audit` here lines up with what a real
+/// session actually wrote — reading anywhere else would make [`revert_attribution::agent_touched`]'s
+/// touched-set silently empty for a real session.
+fn audit_base(ctx: &dyn ServerCtx) -> Result<PathBuf, String> {
+    Ok(ctx.app_data_dir()?.join("audit"))
 }
 
 /// The per-root store directory: `<app_data>/checkpoints/<root_key>`.
@@ -237,19 +253,58 @@ pub fn checkpoint_list(ctx: &dyn ServerCtx, root: &str) -> Result<Vec<Checkpoint
 /// Preview reverting `root` to checkpoint `manifest_id`: diff the captured checkpoint against a fresh scan
 /// of the live tree ([`plan_restore`] + [`summarize_plan`]) and classify the drift ([`classify_plan`] +
 /// [`summarize_conflicts`]) so the UI can warn before touching disk. Reads nothing destructive.
+///
+/// `session` selects how drift is attributed (see [`RevertPreview`]'s doc):
+/// - `None` — conservative default, byte-identical to the pre-attribution behaviour: every diverging
+///   path is drift.
+/// - `Some(sess)` — attribution-aware: `sess`'s durable audit journal (under [`audit_base`]) is read
+///   and folded by [`revert_attribution::agent_touched`] into the set of paths `sess` itself mutated
+///   at/after this checkpoint's index `ts` (the `Checkpoint.ts` this `manifest_id` was recorded under
+///   — looked up via [`read_checkpoints`], since the captured [`restore_plan::Snapshot`] itself is
+///   just a path→state map with no timestamp of its own); only paths outside that set are drift. A
+///   missing/empty journal folds to an empty touched-set (every diverging path is drift). If the
+///   `manifest_id` is absent from the on-disk index (defensive: a torn/corrupt index row can leave
+///   the manifest present but its entry missing) we cannot bound `sess`'s history to this checkpoint,
+///   so we **degrade to the conservative empty touched-set** — warn about every diverging path, exactly
+///   like `None`. Every branch is at least as safe as `None` and never panics.
 pub fn checkpoint_preview_revert(
     ctx: &dyn ServerCtx,
     root: &str,
     manifest_id: &str,
+    session: Option<&str>,
 ) -> Result<RevertPreview, String> {
-    let store = store_dir_for(ctx, root)?.to_string_lossy().to_string();
+    let store_dir = store_dir_for(ctx, root)?;
+    let store = store_dir.to_string_lossy().to_string();
     let checkpoint = snapshot_capture::manifest_snapshot(&store, manifest_id)?;
     let current = snapshot_capture::scan_dir(root)?;
     let plan = plan_restore(&checkpoint, &current);
     let summary = summarize_plan(&plan, &checkpoint);
-    // No agent attribution at this layer → classify against an empty touched-set so every diverging path
-    // is reported as drift (conservative warn). See `RevertPreview`'s doc.
-    let classified = classify_plan(&plan, &checkpoint, &current, &std::collections::BTreeSet::new());
+    let touched = match session {
+        // No session supplied → classify against an empty touched-set so every diverging path is
+        // reported as drift (conservative warn). See `RevertPreview`'s doc.
+        None => std::collections::BTreeSet::new(),
+        Some(sess) => {
+            // Attribution needs this checkpoint's recorded timestamp so only mutations at/after it
+            // count as the agent's own. If the `manifest_id` is absent from the on-disk index
+            // (defensive: a torn/corrupt index row can leave the manifest present but its entry
+            // missing), we cannot bound `sess`'s history to this checkpoint — so degrade to the
+            // conservative empty touched-set (warn about every diverging path), exactly like `None`.
+            // Falling back to `ts: 0` would instead keep the session's ENTIRE history, attributing
+            // more paths away and suppressing real outside-drift warnings — strictly less safe.
+            match read_checkpoints(&store_dir)
+                .into_iter()
+                .find(|c| c.manifest_id == manifest_id)
+                .map(|c| c.ts)
+            {
+                Some(since_ts) => {
+                    let events = audit_journal::read_session(&audit_base(ctx)?, sess);
+                    revert_attribution::agent_touched(&events, sess, since_ts, root)
+                }
+                None => std::collections::BTreeSet::new(),
+            }
+        }
+    };
+    let classified = classify_plan(&plan, &checkpoint, &current, &touched);
     let drift = summarize_conflicts(&classified);
     Ok(RevertPreview {
         creates: summary.creates as u32,
@@ -375,7 +430,7 @@ mod tests {
 
         // 3) Preview: overwrite edit.txt, create nested/gone.txt, delete added.txt = 3 paths, all drift
         //    (no attribution wired → every change is surfaced).
-        let preview = checkpoint_preview_revert(&ctx, &root_s, &manifest_id).unwrap();
+        let preview = checkpoint_preview_revert(&ctx, &root_s, &manifest_id, None).unwrap();
         assert_eq!(preview.overwrites, 1);
         assert_eq!(preview.creates, 1);
         assert_eq!(preview.deletes, 1);
@@ -396,7 +451,7 @@ mod tests {
         assert_eq!(fs::read(root.join("keep.txt")).unwrap(), b"keep me");
 
         // A re-preview now finds nothing to do (tree matches the checkpoint).
-        let after = checkpoint_preview_revert(&ctx, &root_s, &manifest_id).unwrap();
+        let after = checkpoint_preview_revert(&ctx, &root_s, &manifest_id, None).unwrap();
         assert_eq!(after.total, 0);
         assert_eq!(after.drift_count, 0);
 
@@ -417,7 +472,7 @@ mod tests {
         checkpoint_create(&ctx, &root_s, "cp").unwrap();
 
         for bad in ["../../etc/foo", "..\\secrets", "nested/id"] {
-            assert!(checkpoint_preview_revert(&ctx, &root_s, bad).is_err(), "preview_revert({bad:?})");
+            assert!(checkpoint_preview_revert(&ctx, &root_s, bad, None).is_err(), "preview_revert({bad:?})");
             assert!(checkpoint_revert(&ctx, &root_s, bad).is_err(), "revert({bad:?})");
             assert!(checkpoint_revert_one(&ctx, &root_s, bad, "a.txt").is_err(), "revert_one({bad:?})");
         }
@@ -446,6 +501,149 @@ mod tests {
         assert!(outcome.skipped.is_empty());
         assert_eq!(fs::read(root.join("a.txt")).unwrap(), b"a original", "a.txt reverted");
         assert_eq!(fs::read(root.join("b.txt")).unwrap(), b"b edited", "b.txt left untouched");
+
+        let _ = fs::remove_dir_all(&root);
+        let _ = fs::remove_dir_all(&app);
+    }
+
+    /// CPE-1134: with `session: Some(sess)` and a seeded audit journal, a path `sess` itself mutated
+    /// at/after the checkpoint is attributed away (not drift), while a path a *different* session
+    /// touched is still surfaced — proving `revert_attribution::agent_touched` is actually wired in,
+    /// not just accepted and ignored.
+    #[test]
+    fn preview_with_session_excludes_only_that_sessions_own_changes_from_drift() {
+        let app = scratch("app-data-attrib");
+        let ctx = HeadlessCtx::new(&app);
+        let root = scratch("root-attrib");
+        fs::write(root.join("a.txt"), b"a original").unwrap();
+        fs::write(root.join("b.txt"), b"b original").unwrap();
+        let root_s = root.to_string_lossy().to_string();
+
+        let created = checkpoint_create(&ctx, &root_s, "cp").unwrap();
+        let manifest_id = created.checkpoint.manifest_id.clone();
+        let checkpoint_ts = created.checkpoint.ts;
+
+        // Both files diverge after the checkpoint: a.txt by "agent-1" (the reverting session), b.txt
+        // by a different session entirely.
+        fs::write(root.join("a.txt"), b"a edited by agent-1").unwrap();
+        fs::write(root.join("b.txt"), b"b edited by someone else").unwrap();
+
+        let base = audit_base(&ctx).unwrap();
+        audit_journal::record(
+            &base,
+            &audit_journal::AuditEvent {
+                ts: checkpoint_ts + 1,
+                session: "agent-1".into(),
+                kind: "modified".into(),
+                path: format!("{root_s}/a.txt"),
+                actor: None,
+                detail: None,
+            },
+            audit_journal::MAX_EVENTS_PER_SESSION,
+        )
+        .unwrap();
+        audit_journal::record(
+            &base,
+            &audit_journal::AuditEvent {
+                ts: checkpoint_ts + 1,
+                session: "other-session".into(),
+                kind: "modified".into(),
+                path: format!("{root_s}/b.txt"),
+                actor: None,
+                detail: None,
+            },
+            audit_journal::MAX_EVENTS_PER_SESSION,
+        )
+        .unwrap();
+
+        // Without a session, both diverging paths are drift (unchanged conservative default).
+        let conservative = checkpoint_preview_revert(&ctx, &root_s, &manifest_id, None).unwrap();
+        assert_eq!(conservative.total, 2);
+        assert_eq!(conservative.drift_count, 2, "no attribution → both diverging paths are drift");
+
+        // With the reverting agent's session, its own change (a.txt) is attributed away; the other
+        // session's change (b.txt) is still drift.
+        let attributed =
+            checkpoint_preview_revert(&ctx, &root_s, &manifest_id, Some("agent-1")).unwrap();
+        assert_eq!(attributed.total, 2, "still two paths to restore");
+        assert_eq!(attributed.drift_count, 1, "only b.txt (a different session) is drift");
+        assert_eq!(attributed.drift_paths, vec!["b.txt".to_string()]);
+        assert!(!attributed.drift_paths.contains(&"a.txt".to_string()), "agent-1's own edit isn't drift");
+
+        let _ = fs::remove_dir_all(&root);
+        let _ = fs::remove_dir_all(&app);
+    }
+
+    /// CPE-1134 (review follow-up): attribution is bounded by the checkpoint's *real* recorded `ts`, not
+    /// `0`. A session event that predates the checkpoint must NOT be attributed away — the agent
+    /// touching a path *before* the checkpoint says nothing about who diverged it *after*. This guards
+    /// the earlier `unwrap_or(0)` hazard (a `0` floor would keep pre-checkpoint events and wrongly
+    /// suppress the drift warning).
+    #[test]
+    fn preview_with_session_ignores_pre_checkpoint_events() {
+        let app = scratch("app-data-pre-cp");
+        let ctx = HeadlessCtx::new(&app);
+        let root = scratch("root-pre-cp");
+        fs::write(root.join("a.txt"), b"a original").unwrap();
+        let root_s = root.to_string_lossy().to_string();
+
+        let created = checkpoint_create(&ctx, &root_s, "cp").unwrap();
+        let manifest_id = created.checkpoint.manifest_id.clone();
+        let checkpoint_ts = created.checkpoint.ts;
+        assert!(checkpoint_ts >= 1, "epoch-ms checkpoint ts should be well above 0");
+
+        // a.txt diverges after the checkpoint, but the ONLY journal event for the reverting session is
+        // dated BEFORE the checkpoint — so it must not attribute a.txt away.
+        fs::write(root.join("a.txt"), b"a edited after checkpoint").unwrap();
+        let base = audit_base(&ctx).unwrap();
+        audit_journal::record(
+            &base,
+            &audit_journal::AuditEvent {
+                ts: checkpoint_ts - 1,
+                session: "agent-1".into(),
+                kind: "modified".into(),
+                path: format!("{root_s}/a.txt"),
+                actor: None,
+                detail: None,
+            },
+            audit_journal::MAX_EVENTS_PER_SESSION,
+        )
+        .unwrap();
+
+        let preview =
+            checkpoint_preview_revert(&ctx, &root_s, &manifest_id, Some("agent-1")).unwrap();
+        assert_eq!(preview.total, 1);
+        assert_eq!(
+            preview.drift_count, 1,
+            "a pre-checkpoint event must not attribute the post-checkpoint divergence away"
+        );
+        assert_eq!(preview.drift_paths, vec!["a.txt".to_string()]);
+
+        let _ = fs::remove_dir_all(&root);
+        let _ = fs::remove_dir_all(&app);
+    }
+
+    /// CPE-1134: a missing (never-written) or empty audit journal for the requested session degrades to
+    /// the conservative behaviour — no panic, and every diverging path still counted as drift, exactly
+    /// as if `session` had been `None`.
+    #[test]
+    fn preview_with_session_and_no_journal_degrades_to_conservative_behaviour() {
+        let app = scratch("app-data-no-journal");
+        let ctx = HeadlessCtx::new(&app);
+        let root = scratch("root-no-journal");
+        fs::write(root.join("a.txt"), b"a original").unwrap();
+        let root_s = root.to_string_lossy().to_string();
+
+        let created = checkpoint_create(&ctx, &root_s, "cp").unwrap();
+        let manifest_id = created.checkpoint.manifest_id.clone();
+        fs::write(root.join("a.txt"), b"a edited").unwrap();
+
+        // No audit dir has ever been created under this app-data dir — `read_session` must return an
+        // empty Vec rather than erroring, and the preview must not panic.
+        let preview =
+            checkpoint_preview_revert(&ctx, &root_s, &manifest_id, Some("nobody")).unwrap();
+        assert_eq!(preview.total, 1);
+        assert_eq!(preview.drift_count, 1, "unattributed session → still conservative drift");
 
         let _ = fs::remove_dir_all(&root);
         let _ = fs::remove_dir_all(&app);

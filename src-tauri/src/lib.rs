@@ -2537,8 +2537,10 @@ async fn checkpoint_preview_revert(
     manifest_id: String,
 ) -> Result<cpe_server::checkpoint_store::RevertPreview, String> {
     let ctx = server_ctx::TauriCtx::new(&app);
+    // No live caller passes a session yet (the restore panel that would is the deferred GUI cap
+    // CPE-1126) — `None` keeps today's conservative "every diverging path is drift" behaviour.
     tauri::async_runtime::spawn_blocking(move || {
-        cpe_server::checkpoint_store::checkpoint_preview_revert(&ctx, &root, &manifest_id)
+        cpe_server::checkpoint_store::checkpoint_preview_revert(&ctx, &root, &manifest_id, None)
     })
     .await
     .map_err(|e| e.to_string())?

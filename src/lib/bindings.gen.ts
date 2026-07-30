@@ -2368,10 +2368,13 @@ skipped: OpResult[] }
  * A preview of what reverting to a checkpoint would do: the restore-plan summary plus a **drift** report.
  * 
  * Drift = files that differ from the checkpoint but that this layer cannot attribute to the watched
- * agent. Attribution ([`crate::revert_attribution`]) is not wired into this command signature, so the
- * classifier runs against an empty "agent-touched" set — every diverging path is surfaced as drift
- * ("changed outside since checkpoint"), the conservative default that makes the UI warn first. When
- * attribution is later threaded through, only genuinely-outside changes will remain drift.
+ * agent. [`checkpoint_preview_revert`] takes an optional session id to resolve this:
+ * - `session: None` (conservative default) — the classifier runs against an **empty** "agent-touched"
+ * set, so every diverging path is surfaced as drift ("changed outside since checkpoint").
+ * - `session: Some(sess)` (attribution-aware) — [`crate::revert_attribution::agent_touched`] computes
+ * the set of paths `sess` itself mutated at/after the checkpoint, from the durable audit journal;
+ * only paths **outside** that set are surfaced as drift, since the agent's own changes are expected,
+ * not a warning-worthy conflict.
  */
 export type RevertPreview = { 
 /**
