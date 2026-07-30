@@ -359,3 +359,45 @@ it's worth it (found a real bug that way). No cargo workspace — check each cra
 format decoders, CPE-672/674 drag-out, CPE-1126 restore panel).
 
 **Budget:** ~9 sub-agents (2 workers + 2 reviewers + 2 UAT + Foreman recon). Nowhere near the 200 cap.
+
+## 2026-07-29 (workshift — the 3 checkpoint-queued honest-headless slices)
+
+Backlog empty, all Deferred/Blocked user-gated. Assignment = the critical path: build the three genuine
+headless slices the prior CHECKPOINT queued but never built, then confirm the frontier.
+
+**Shipped (3 workers, all sonnet, full 2-check + UAT gauntlet each, all merged, all 3-OS CI green):**
+- CPE-1133 (#449) — `read_ogg` now reassembles the Vorbis-comment packet across OGG pages (real read-side
+  correctness bug; the old naive `\x03vorbis` scan corrupted multi-page comment headers). Std-only page
+  walker + multi-page/truncation tests. Opus Reviewer APPROVE (verified it doesn't over-reject valid OGG +
+  the collateral column_extract fixture fix was legit); UAT PASS (independent OGG builder, 686 truncation
+  offsets, 0 panics). Collateral: corrected one fake-OGG test fixture the old scanner accepted.
+- CPE-1134 (#448) — threaded `revert_attribution::agent_touched` into `checkpoint_preview_revert` (optional
+  `session` param; `None` = old conservative behaviour). **Opus Reviewer caught a real safety false-negative:**
+  the `since_ts` `unwrap_or(0)` fallback on a torn index entry attributed the session's ENTIRE history away →
+  fewer drift warnings → less safe than `None`. Foreman-applied the exact fix (conservative empty-set on
+  index-miss + regression test `..ignores_pre_checkpoint_events`). UAT PASS.
+- CPE-1135 (#450) — QA-Architect slice: `gui-smoke` now pins the Agent-Watch Replay-scrubber render (seeds a
+  real audit-journal + baseline fixture, asserts `.rp-transport`/enabled `.rp-slider`/`.rp-recon` with the
+  seeded filename). Sonnet Reviewer APPROVE (hook gating + fixture shapes verified); UAT PASS (independent
+  real gui-smoke 3/3, ~2.5m build + 27s). Burns down MVD row CPE-1094 (render automated; feel residual).
+
+**Metrics:** 3 merged · gauntlet CPE-1133/1134 ~7m worker + ~5m/side gauntlet, CPE-1135 ~19m (real gui-smoke) ·
+1 retry (CPE-1134 review fix) + 1 CI fix (bindings drift) · **0 escaped-defects** (all 3 merge commits green
+on main) · ~13 sub-agents. Opus reviewer on the two backend correctness slices earned its keep (caught the
+attribution false-negative); sonnet reviewer fine for the test-infra slice.
+
+**NEW tuned default (important):** a worker that changes a **specta-exported struct's doc OR shape**
+(`RevertPreview` here) MUST regenerate `src/lib/bindings.gen.ts` via
+`cargo run --bin export_bindings --features "specta-bindings sidecar-platform"` — local `crates/server`-only
+verification NEVER catches it; only the `src-tauri` Backend job's "Typed-bindings drift guard" does. Add this
+to every backend-worker brief that touches a `#[cfg_attr(feature="specta"...)]` type. Held again: sonnet
+worker + opus reviewer, one-worker-per-file zero conflicts, cargo at `C:\Users\Stewart Rogers\.cargo\bin`
+(prepend to PATH), no cargo workspace (run per-crate).
+
+**Frontier — re-confirmed TAPPED (fresh 3-sweep researcher pass, cross-checked vs git):** every marker hit is
+correct-but-cautious, not a deferred bug; every unwired engine is a documented GUI/model/attended gate; the
+two remaining burndown tabs (CPE-1098 cost-ledger, CPE-1100 radar) are fed by **live IPC only** — genuinely
+NOT seedable from an on-disk fixture like the replay/history tabs were, so they can't be gui-smoke-pinned. The
+honest-headless queue from the last checkpoint is now **empty**. Remaining epic work is all user-gated.
+
+**Budget:** ~13/200 sub-agents. Nowhere near the reset line.

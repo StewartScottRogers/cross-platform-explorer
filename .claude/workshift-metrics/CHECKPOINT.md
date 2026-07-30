@@ -1,25 +1,26 @@
 # Workshift Checkpoint
 
-**Written 2026-07-27 ~04:16 local (USMST).** Shift **wound down for FURLOUGH** at the user's request
-("running out of tokens … put everyone on furlough until Claude puts me on next month's plan"). This was a
-clean, planned stop — **nothing in flight, tree clean, all worktrees pruned, Backlog empty**. Resume next
-month with a fresh session and "resume the workshift"; this file + `history.md` carry full context.
+**Written 2026-07-29 ~17:28 local (USMST).** Clean end-of-shift stop — **nothing in flight, tree clean,
+worktrees pruned, Backlog empty, all merged + pushed + post-merge CI green.** The three honest-headless slices
+this file previously queued are now **DONE**. Resume with a fresh session + "resume the workshift"; this file
++ `history.md` carry full context.
 
-## What shipped this (short) shift — all merged to `main`, pushed
-- **CPE-1119** (PR #442) — retired 5 orphaned sidecar conflict modules (`sidecar/ai-console/src/conflict*.rs`,
-  946 lines dead code, option (a) DELETE). Grep-proven dead (referenced only by each other + own tests);
-  sidecar build + `clippy -D` + 378 tests green.
-- **CPE-1122** (PR #443) — gated `undo()` (Ctrl+Z) behind `blockedInArchive()` in read-only views
-  (archive / smart-folder / replay); one-line guard reusing the shared predicate + seeded-undo-stack test.
-- **CPE-691** (PR #444) — full-list-render **regression guard** for the virtualized `FileList` (test-only;
-  proven falsifiable). Closes the last open AC of the perf epic child (prereq CPE-690/766 had landed).
+## What shipped this shift (2026-07-29) — all merged to `main`, full 2-check + UAT gauntlet, 3-OS CI green
+- **CPE-1133** (PR #449) — `read_ogg` reassembles the Vorbis-comment packet across OGG pages (real read-side
+  correctness bug the old naive `\x03vorbis` scan corrupted). Opus review + independent UAT.
+- **CPE-1134** (PR #448) — threaded `revert_attribution` into `checkpoint_preview_revert` (optional `session`;
+  `None` = old conservative behaviour). Opus reviewer caught a real safety false-negative (`unwrap_or(0)`
+  fallback on a torn index entry); fixed to conservative empty-set + regression test. Needed a
+  `bindings.gen.ts` regen (specta doc drift — see the tuned-default note in `history.md`).
+- **CPE-1135** (PR #450) — QA slice: `gui-smoke` pins the Agent-Watch Replay-scrubber render (seeded
+  audit-journal + baseline fixture). Burns down MVD row CPE-1094 (render automated; feel residual).
 
-**Review note (honest):** given the token wind-down, these three were **Foreman-reviewed**, not run through
-the full independent Reviewer+UAT gauntlet. All are low-risk (dead-code delete with grep proof; a one-line
-guard reusing a tested predicate; a test-only addition) and each passed its **full local suite** before merge.
-They were **admin-merged**, bypassing *pre-merge* PR CI to save tokens — **CI still runs on `main` post-push;
-a resuming session should confirm the three commits (49ed8d50, 85659702, 6ac58a53 + ticket commits) went
-green** and, if any red, fix-forward.
+**No queued honest-headless work remains.** A fresh 3-sweep researcher pass (2026-07-29, cross-checked vs git)
+re-confirmed the well is tapped: every marker hit is correct-but-cautious, every unwired engine is a
+documented GUI/model/attended gate, and the two remaining burndown tabs (CPE-1098 cost-ledger, CPE-1100 radar)
+are fed by **live IPC only** — NOT seedable from an on-disk fixture, so they can't be gui-smoke-pinned the way
+the replay/history tabs were. Next shift: expect to need the user (GUI / model key / signing cert / Mac /
+heavy native deps) or an attended big-design go-ahead. **Do NOT manufacture filler `cpe-server` modules.**
 
 ## The honest state of the headless frontier (READ THIS before probing epics)
 Per `[[headless-frontier-and-cpe-net]]` and re-confirmed today: **the clean pure/headless well is genuinely
