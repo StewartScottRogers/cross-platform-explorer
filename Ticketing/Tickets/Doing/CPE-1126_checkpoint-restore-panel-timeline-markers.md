@@ -82,3 +82,25 @@ Verification (all from the worktree):
   total-invoke-count assertion to count `replay_load` calls specifically.)
 - Confirmed no `#[derive(specta::Type)]` / Rust struct touched — frontend-only diff, no `bindings.gen.ts`
   regen required.
+
+2026-07-30 (Foreman) — **Code reviewed + merged; final verify is the user's.** Per the user's choice to
+"build the visual layer and save only the safety check for me," the code layer is landed and the
+revert-safety/clarity judgment is reserved for a user-present GUI pass.
+- Independent reviewer **APPROVE**. Safety-critical checks confirmed sound: the ONLY caller of
+  `checkpointRevert` is behind the separate "Yes, revert" click (no single-click revert path); the confirm
+  names the target checkpoint + folder and says "cannot be undone"; off-means-off teardown is complete and
+  gen-token guarded; the `checkpointMarkers` clamp/zero-width/null math has genuine (non-hollow) tests; full
+  suite 1410 green with no weakened assertions. Merged as **PR #466** (squash, commit `6e79f159`); worker
+  worktree + branch pruned.
+- Reviewer's non-blocking flags:
+  1. **(follow-up work — filed as [[CPE-1150]])** the two-step confirm gate has NO component-level test
+     (all new tests cover the pure helper); worth a dedicated test given the destructiveness.
+  2. **(for the user's verify)** drift is computed session-agnostic (`checkpointPreviewRevert` called without
+     the optional session arg), so it over-warns — it surfaces the watched agent's OWN expected changes as
+     drift. Safe direction (never under-warns) but reads noisier than necessary.
+  3. **(for the user's verify)** the drift count/list sits in the preview area ABOVE the red confirm box
+     rather than being restated inside it; consider echoing the drift number in the final confirm for a
+     revert that would clobber drifted work.
+- **Remaining to close:** a user-present build → deploy → run to confirm the revert-confirm reads clearly and
+  safely and the markers land right (the "confirm-to-revert is safe/clear" clause of the AC). Kept in Doing/
+  as the final pending step; on the QA Manual-Verification-Debt ledger. Not faked, not force-closed.

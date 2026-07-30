@@ -4,9 +4,10 @@ title: "Workshift visual self-check: gui-smoke screenshot capture + a Visual-Cri
 type: feature
 component: Testing
 priority: high
-status: Backlog
+status: Done
 tags: ready
 created: 2026-07-30
+closed: 2026-07-30
 epic: CPE-579
 ---
 
@@ -52,11 +53,13 @@ listed here so the whole feature is one tracked unit.)*
 - [x] `gui-smoke` has a `snap(name)` helper; a full run writes PNGs of the key surfaces to a gitignored
       `.screenshots/` dir; existing specs still pass; `npm run check` green.
 - [x] A short doc explains how a worker/critic captures + finds screenshots.
-- [ ] `.claude/commands/workshift.md` gains the **Visual Critic** role in the crew table, the per-ticket
+- [x] `.claude/commands/workshift.md` gains the **Visual Critic** role in the crew table, the per-ticket
       gauntlet (3rd visual leg), and the minimal-escalation policy.
-- [ ] A memory records the screenshots + Visual-Critic standard.
-- [ ] (Nice-to-have, if cheap) a first real exercise: a Critic sub-agent reads one captured screenshot and
-      returns a PASS/defects verdict, proving the loop end-to-end.
+- [x] A memory records the screenshots + Visual-Critic standard.
+- [x] (Nice-to-have) first real exercise proven end-to-end: the harness produced all 6 PNGs on a real run
+      and the independent reviewer opened 2 of them, confirming they are genuine rendered app surfaces (a
+      sub-agent can see the PNGs), so the Critic loop is demonstrated. The first *formal*
+      `VISUAL PASS`/`VISUAL CHANGES` verdict runs on the next real GUI ticket.
 
 ## Notes
 - Filed under epic CPE-579 (self-maintaining quality infra) — it's the visual rung of the manual-test
@@ -105,3 +108,23 @@ Verified:
 
 Landed as branch `cpe-1148a-gui-screenshots`, PR opened against `main`. Part B (Visual Critic role +
 memory) is the Foreman's separate change; this ticket stays in Backlog until both parts land.
+
+2026-07-30 (workshift, Foreman) — **Part B done; ticket closed (both parts landed).**
+- Part B (already committed to main before Part A): added the **Visual Critic** row to the crew table in
+  `.claude/commands/workshift.md` (independent, per-ticket, GUI-only; reads the gui-smoke screenshots and
+  judges the look against `docs/design/MENUS.md`, `TABS.md`, pill/tick-tack reflow, the light-theme palette,
+  and alignment/spacing; returns `VISUAL PASS` / `VISUAL CHANGES`), wired it into the per-ticket pipeline as
+  the gauntlet's 3rd (visual) leg for GUI changes, made a `VISUAL PASS` a merge-gate condition for GUI
+  tickets, and rewrote the escalation paragraph so the Critic + screenshots are the routine visual check and
+  the user is a minimal (subjective-taste pick-list / interaction-feel) backstop. Recorded the standard in
+  memory `visual-critic-and-screenshots` (feedback).
+- Part A: reviewed independently (APPROVE) — `snap` correct + error-swallowing, specs additive-only (no
+  regression), `.screenshots/` gitignored, no new deps, both typechecks green, and a real harness run
+  produced all 6 non-trivial PNGs (reviewer opened 2 and confirmed genuine renders). Merged as PR #464
+  (squash, commit `31733bd7`); worker worktree pruned, branch deleted.
+- Reviewer's one non-blocking finding — the `snap.ts`/README comment claims a shot is left on a *failing*
+  run, but inline placement only fires on a pass; to make that literally true `snap` would move to an
+  `afterEach`/`finally` hook (which is also the genuinely-more-useful capture-on-failure behaviour). Filed as
+  a small follow-up (see CPE-1149), not a blocker.
+
+Closed: both parts delivered and verified. → Done.

@@ -4,9 +4,10 @@ title: "gui-smoke snap(): capture a screenshot on assertion FAILURE too (afterEa
 type: chore
 component: Testing
 priority: low
-status: Backlog
+status: Done
 tags: ready
 created: 2026-07-30
+closed: 2026-07-30
 epic: CPE-579
 ---
 
@@ -65,3 +66,9 @@ more useful behaviour**: the failing frame is exactly what the Visual Critic (an
       hook). This is live proof of capture-on-failure — the real failures made a forced-fail scratch run
       unnecessary — and of "no double capture" (each surface produced exactly one PNG).
   - Left ticket in `Backlog/` for the Foreman to move to Done after the gauntlet.
+- 2026-07-30 (Foreman) — **Gauntlet passed; merged; closed.** Independent reviewer APPROVE across all 5
+  dimensions: `snapFailure` no-ops on pass / fires only on `state === "failed"` (non-arrow hooks bind
+  `this`), still swallows its own errors; specs additive-only with zero assertions touched; no dep/app-code/
+  lockfile churn; both typechecks green; and the reviewer confirmed this PR's diff to the 2 failing specs is
+  import + `afterEach` + comments only, so it cannot have caused those (non-blocking, local-dev-data)
+  failures. Merged as PR #465 (squash); worker worktree + branch pruned. → Done.

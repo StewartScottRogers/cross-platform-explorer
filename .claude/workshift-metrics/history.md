@@ -564,3 +564,10 @@ the crew + gauntlet. The manual-test burndown's row #1 (headless GUI) + row #3 (
 natural homes.
 
 **Frontier:** still user-gated (the 28 Proposed epics' remainders — model/GUI-together/cert/Mac).
+
+### 2026-07-30 16:31 USMST — resume: CPE-1126 visual layer landed
+- User chose (a): build CPE-1126's visual layer, reserve the revert-safety judgment for them.
+- CPE-1126 checkpoint markers + restore panel: worker built (PR #466), reviewer APPROVE (safety pattern sound, 1410 tests green), merged as 6e79f159.
+- Ticket-tree hygiene fixed: CPE-1126 was duplicated (Deferred+Doing) — removed the Deferred dup; CPE-1148/1149 Done files had uncommitted status flips — finalized. (Root cause: an earlier  sans --delete-branch aborted at the branch-delete prompt AFTER merging, and a --ff-only pull couldn't advance over local staged changes; reconciled by hard-syncing to origin/main + restoring the finalized files.)
+- Filed CPE-1150 (reviewer flag: no component test for the two-step revert confirm gate).
+- Remaining on CPE-1126: user-present GUI safety/clarity verify (kept in Doing/, on the MVD burndown).
