@@ -4,7 +4,7 @@ title: "Instant index: live notify watcher keeps the index current without resca
 type: feature
 component: Backend
 priority: high
-status: Backlog
+status: Done
 tags: ready
 created: 2026-07-29
 epic: CPE-703

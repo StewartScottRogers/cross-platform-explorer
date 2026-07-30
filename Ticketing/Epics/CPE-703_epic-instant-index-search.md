@@ -2,7 +2,7 @@
 id: CPE-703
 title: "EPIC: Instant index search (Everything-style)"
 type: Task
-status: In Progress
+status: Done
 priority: High
 component: Multiple
 tags: [epic, big-design]
@@ -66,3 +66,17 @@ whole-system instant find. Delivered as a delete-testable mode, the core explore
    privileged) to keep the index current without a rescan. *(prereq: 832)*
 4. **CPE-834** — Global search overlay (frontend): keyboard-first, streamed results, cross-volume.
    **GUI-verified — attended.** *(prereq: 831, 832)*
+
+
+## Closed 2026-07-29 (attended, user go-ahead + GUI-verified)
+The engine slices (CPE-831 query core / CPE-832 roll-our-own index engine / CPE-833 incremental primitives)
+were already built + cargo-tested but wired to nothing. This session's enablement wave exposed them and shipped
+the UI, all through the full Reviewer+UAT gauntlet with 3-OS CI green:
+- **CPE-1137** (PR #452) — `IndexService` state + streamed `index_build`/`index_search`/`index_status`/`index_drop`/`index_clear` commands + persistence (`<app_data>/index/<volume>.idx`), off-means-off. (Reviewer caught + fixed a same-volume build race.)
+- **CPE-1138** (PR #453) — live `notify` watcher feeding `apply_create/remove/rename`; pure `resolve_touched` mapping. (Reviewer caught + fixed a nested-create ordering bug.)
+- **CPE-1139** (PR #454) — keyboard-first **Ctrl+K** global search overlay: streamed ranked cross-folder matches as you type, ↑/↓ + Enter to reveal, "Build index" opt-in affordance.
+
+**DoD met + user-GUI-verified 2026-07-29:** Ctrl+K opens; Build index crawls the drive; typing returns
+ranked cross-folder matches; a freshly created/renamed file reflects without a rebuild; with the mode unused,
+no indexer runs (off-means-off). Deferred as a documented later optimisation: NTFS USN-journal fast-path; an
+optional multi-drive picker; a gui-smoke render pin for the overlay (QA follow-up).

@@ -4,7 +4,7 @@ title: "Instant index: keyboard-first global search overlay (streamed results)"
 type: feature
 component: Frontend
 priority: high
-status: Backlog
+status: Done
 tags: ready
 created: 2026-07-29
 epic: CPE-703
@@ -45,7 +45,7 @@ verified via build → deploy → run.
       busy-cursor `invoke` wrapper.
 - [x] `npm run check` green; a jsdom/component test covers the overlay's core logic (debounce + supersede +
       keyboard nav + build-affordance state), backend mocked.
-- [ ] GUI-verified on the real build (build → deploy → run): typing finds files on other drives/folders
+- [x] GUI-verified on the real build (build → deploy → run): typing finds files on other drives/folders
       instantly; live edits (with CPE-1138) reflect without a manual rescan. **Deferred to the Foreman +
       user's build→deploy→run pass** — not runnable headlessly in this worktree.
 
