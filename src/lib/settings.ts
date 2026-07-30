@@ -15,7 +15,7 @@
 import { commands } from "./bindings.gen"; // typed client (CPE-964)
 import { unwrap } from "./invoke";
 import type { ViewMode, SortKey, SortDir, RecentFile, Favorite } from "./types";
-import { COLUMN_DEFAULTS } from "./columns";
+import { COLUMN_DEFAULTS, META_COL_MIN, COLUMN_MAX, type ActiveMetaColumn } from "./columns";
 import { parseRules, serializeRules } from "./colorRulesStore";
 import type { ColorRule } from "./colorRules";
 import { parseManifest } from "./integrity";
@@ -45,6 +45,7 @@ export const KEYS = {
   favorites: "cpe.favorites",
   recentFolders: "cpe.recentFolders",
   columnWidths: "cpe.columnWidths",
+  metaColumnsByFolder: "cpe.metaColumnsByFolder",
   diagnostics: "cpe.diagnostics",
   verifyOnStartup: "cpe.verifyOnStartup",
   colorRules: "cpe.colorRules",
@@ -145,8 +146,13 @@ function write(key: string, value: unknown): void {
 
 const isView = (v: unknown): v is ViewMode =>
   v === "details" || v === "list" || v === "icons";
+// A metadata-column sort key is the `meta:<columnId>` prefix convention (CPE-1146); loosely
+// validated (any non-empty suffix) since the column-set membership check happens at use time — a
+// persisted `meta:` key for a column that's since been removed just degrades to an Empty-tiebreak
+// stable sort, never a crash.
 const isSortKey = (v: unknown): v is SortKey =>
-  v === "name" || v === "modified" || v === "type" || v === "size";
+  v === "name" || v === "modified" || v === "type" || v === "size" ||
+  (typeof v === "string" && v.startsWith("meta:") && v.length > 5);
 const isSortDir = (v: unknown): v is SortDir => v === "asc" || v === "desc";
 const isBool = (v: unknown): v is boolean => typeof v === "boolean";
 const isString = (v: unknown): v is string => typeof v === "string";
@@ -242,6 +248,46 @@ const isColumnWidths = (v: unknown): v is number[] =>
 export const loadColumnWidths = (): number[] =>
   read(KEYS.columnWidths, COLUMN_DEFAULTS.slice(), isColumnWidths);
 export const saveColumnWidths = (v: number[]) => write(KEYS.columnWidths, v);
+
+// Active metadata columns, per folder (CPE-1146, epic CPE-707): which of CPE-1145's pickable columns
+// (Dimensions, Duration, Pages, …) are showing in a given folder, in display order, with their own
+// widths — keyed by the folder's absolute path so different folders can carry different column sets.
+// Stored as ONE `Record<path, ActiveMetaColumn[]>` document (not a key per folder) so it round-trips
+// through the same single settings.json as everything else. The default is "none active" (the ticket's
+// design: a fresh folder shows only the 4 built-ins) — a folder absent from the map, or the map itself
+// absent/corrupt, degrades to `[]` rather than crashing. A folder saved with an EMPTY active set is
+// pruned from the map rather than stored as `path: []`, so the document stays small for the common case.
+const isActiveMetaColumnArray = (v: unknown): v is ActiveMetaColumn[] =>
+  Array.isArray(v) &&
+  v.every(
+    (x) =>
+      x && typeof x === "object" &&
+      typeof (x as ActiveMetaColumn).id === "string" && (x as ActiveMetaColumn).id.length > 0 &&
+      typeof (x as ActiveMetaColumn).width === "number" && Number.isFinite((x as ActiveMetaColumn).width) &&
+      (x as ActiveMetaColumn).width > 0,
+  );
+
+export const loadMetaColumnsForFolder = (path: string): ActiveMetaColumn[] => {
+  const v = state[KEYS.metaColumnsByFolder];
+  if (!v || typeof v !== "object") return [];
+  const forFolder = (v as Record<string, unknown>)[path];
+  if (!isActiveMetaColumnArray(forFolder)) return [];
+  // Re-clamp on load (CPE-1140-style guard): a width saved under an older/different clamp rule (or
+  // hand-edited) can never paint a too-narrow/absurdly-wide column on restore.
+  return forFolder.map((c) => ({
+    ...c,
+    width: Math.max(META_COL_MIN, Math.min(COLUMN_MAX, Math.round(c.width))),
+  }));
+};
+
+export const saveMetaColumnsForFolder = (path: string, cols: ActiveMetaColumn[]): void => {
+  const v = state[KEYS.metaColumnsByFolder];
+  const map: Record<string, ActiveMetaColumn[]> =
+    v && typeof v === "object" ? { ...(v as Record<string, ActiveMetaColumn[]>) } : {};
+  if (cols.length === 0) delete map[path];
+  else map[path] = cols;
+  write(KEYS.metaColumnsByFolder, map);
+};
 
 // Rule-based file coloring & labels (CPE-776, epic CPE-709). Stored as the raw `ColorRule[]`; loaded
 // through the tolerant `parseRules` so a corrupt/hand-edited value degrades to `[]` rather than crashing.

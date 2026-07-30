@@ -2,9 +2,11 @@ import { describe, it, expect } from "vitest";
 import {
   addRecent, removeRecent, togglePin, toggleFavorite, mergeLegacy,
   loadAutoRestore, saveAutoRestore, loadLastSession, saveLastSession,
+  loadMetaColumnsForFolder, saveMetaColumnsForFolder,
 } from "./settings";
 import type { RecentFile, Favorite } from "./types";
 import type { WorkspaceTab } from "./workspaces";
+import type { ActiveMetaColumn } from "./columns";
 
 describe("auto-restore session settings (CPE-789)", () => {
   it("defaults to off with no saved session", () => {
@@ -25,6 +27,40 @@ describe("auto-restore session settings (CPE-789)", () => {
     saveLastSession([{ path: "/ok" }, { path: "" }, { bogus: 1 } as unknown as WorkspaceTab]);
     expect(loadLastSession()).toEqual([{ path: "/ok" }]);
     saveLastSession([]); // reset
+  });
+});
+
+// CPE-1146 (epic CPE-707): the active metadata-column set persists PER FOLDER, keyed by absolute path,
+// with "none saved" degrading to an empty array (the default: a fresh folder shows only the built-ins).
+describe("metaColumnsByFolder (CPE-1146)", () => {
+  it("defaults to empty for a folder with nothing saved", () => {
+    expect(loadMetaColumnsForFolder("/never/saved")).toEqual([]);
+  });
+
+  it("round-trips a saved column set for its own folder, leaving other folders untouched", () => {
+    const cols: ActiveMetaColumn[] = [{ id: "dimensions", width: 120 }, { id: "duration", width: 90 }];
+    saveMetaColumnsForFolder("/photos", cols);
+    expect(loadMetaColumnsForFolder("/photos")).toEqual(cols);
+    expect(loadMetaColumnsForFolder("/music")).toEqual([]); // a different folder is unaffected
+    saveMetaColumnsForFolder("/photos", []); // reset for other tests
+  });
+
+  it("saving an empty set for a folder that HAD one restores the default-empty (folder pruned, not stored as [])", () => {
+    saveMetaColumnsForFolder("/temp", [{ id: "dimensions", width: 100 }]);
+    expect(loadMetaColumnsForFolder("/temp")).toEqual([{ id: "dimensions", width: 100 }]);
+    saveMetaColumnsForFolder("/temp", []);
+    expect(loadMetaColumnsForFolder("/temp")).toEqual([]);
+  });
+
+  it("re-clamps a corrupt/too-narrow persisted width on load (CPE-1140-style guard)", () => {
+    saveMetaColumnsForFolder("/clamp-me", [{ id: "dimensions", width: 3 }]);
+    expect(loadMetaColumnsForFolder("/clamp-me")[0].width).toBeGreaterThanOrEqual(70); // META_COL_MIN
+    saveMetaColumnsForFolder("/clamp-me", []); // reset
+  });
+
+  it("degrades a corrupt entry (wrong shape) to empty rather than crashing", () => {
+    saveMetaColumnsForFolder("/bad", [{ bogus: 1 } as unknown as ActiveMetaColumn]);
+    expect(loadMetaColumnsForFolder("/bad")).toEqual([]);
   });
 });
 

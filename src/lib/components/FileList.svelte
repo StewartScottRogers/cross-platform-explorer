@@ -7,11 +7,14 @@
   import { formatSize } from "../format";
   import { formatDate } from "../datetime";
   import { iconFor, typeName, isImage } from "../filetypes";
-  import { columnsTemplate, resizeColumnTo, boundaryOffsets, COLUMN_DEFAULTS } from "../columns";
+  import {
+    columnsTemplate, resizeColumnTo, boundaryOffsets, COLUMN_DEFAULTS, fullMins,
+  } from "../columns";
   import { isSelected } from "../selection";
   import { setDragData, isValidDrop, hoverEffect } from "../dnd";
   import type { Selection } from "../selection";
   import type { DirEntry, SortKey, SortDir, ViewMode } from "../types";
+  import type { AvailableColumn, MetadataCell } from "../bindings.gen";
   import type { AgentActivity } from "../agentActivity";
   import { folderActivityKindNorm, folderOwnerNorm, normalizeActivityByKind } from "../agentActivity";
   import { colorForActor } from "../agentColors";
@@ -96,6 +99,14 @@
     drop: { paths: string[]; dest: string; ctrlKey: boolean; shiftKey: boolean };
     resizeColumns: number[];
     needSizes: string[];
+    /** Active metadata columns' widths changed (CPE-1146), parallel to `activeMetaColumns` by id. */
+    resizeMetaColumns: { id: string; width: number }[];
+    /** The visible-row paths an active metadata column still needs cells for, one entry per column
+     *  that has any (CPE-1146) — the caller (ExplorerPane) streams `metadata_column_cells` for them
+     *  and merges results back into `metaCells`. */
+    needMetaCells: { columnId: string; paths: string[] }[];
+    /** The header "Columns…" affordance was clicked (CPE-1146) — the caller opens the picker. */
+    openColumnPicker: void;
   }>();
 
   /** Recursive folder-size column (CPE-750): when on, folder rows show their computed subtree size from
@@ -107,9 +118,38 @@
   /** Details-view column widths (Name/Date/Type/Size), bound from the parent so they
       persist; the trailing spacer is implicit (CPE-350). */
   export let columnWidths: number[] = COLUMN_DEFAULTS.slice();
-  $: colTemplate = columnsTemplate(columnWidths);
+  /** Active metadata columns (CPE-1146, epic CPE-707), already resolved against the CPE-1145 catalog
+      + given their own width, in display order — appended after the 4 built-ins. Empty (the default)
+      renders byte-for-byte the pre-CPE-1146 fixed 4-column list. */
+  export let activeMetaColumns: { col: AvailableColumn; width: number }[] = [];
+  /** Cell cache for the active metadata columns: columnId -> path -> cell (CPE-1146). Owned by the
+      caller (ExplorerPane), which streams fills for the visible-row `needMetaCells` requests below and
+      supersedes by folder-navigation generation token (STREAMING.md). A path with no entry yet simply
+      renders blank until its batch lands — never a crash, never blocks the row. */
+  export let metaCells: Map<string, Map<string, MetadataCell>> = new Map();
+
+  // The combined widths/mins the grid template + resize handles operate over: the 4 built-ins, then
+  // one track per active metadata column.
+  $: allWidths = columnWidths.concat(activeMetaColumns.map((ac) => ac.width));
+  $: allMins = fullMins(activeMetaColumns.length);
+  $: colTemplate = columnsTemplate(allWidths);
   // Right-edge offset of each column, for placing the drag handles. 10px = .columns pad-left.
-  $: handleOffsets = boundaryOffsets(columnWidths, 10);
+  $: handleOffsets = boundaryOffsets(allWidths, 10);
+
+  /** Split a resized combined-widths array back into the built-in `columnWidths` prop + the parallel
+      `activeMetaColumns` widths, and tell the parent both changed (only the meta event fires when
+      there are no active metadata columns, matching the pre-CPE-1146 wire shape exactly). */
+  function applyResizedWidths(next: number[]) {
+    const n = columnWidths.length;
+    columnWidths = next.slice(0, n);
+    activeMetaColumns = activeMetaColumns.map((ac, idx) => ({ ...ac, width: next[n + idx] }));
+  }
+  function emitResize() {
+    dispatch("resizeColumns", columnWidths);
+    if (activeMetaColumns.length) {
+      dispatch("resizeMetaColumns", activeMetaColumns.map((ac) => ({ id: ac.col.id, width: ac.width })));
+    }
+  }
 
   /** Drag a column's right edge to resize it; the layout updates live and persists on
       release. `stopPropagation` keeps the click off the sort-header button. */
@@ -117,14 +157,16 @@
     e.preventDefault();
     e.stopPropagation();
     const startX = e.clientX;
-    const startW = columnWidths[i];
+    const widths = allWidths;
+    const mins = allMins;
+    const startW = widths[i];
     const move = (ev: PointerEvent) => {
-      columnWidths = resizeColumnTo(columnWidths, i, startW + (ev.clientX - startX));
+      applyResizedWidths(resizeColumnTo(widths, i, startW + (ev.clientX - startX), mins));
     };
     const up = () => {
       window.removeEventListener("pointermove", move);
       window.removeEventListener("pointerup", up);
-      dispatch("resizeColumns", columnWidths);
+      emitResize();
     };
     window.addEventListener("pointermove", move);
     window.addEventListener("pointerup", up);
@@ -136,8 +178,14 @@
     if (e.key !== "ArrowLeft" && e.key !== "ArrowRight") return;
     e.preventDefault();
     const step = (e.shiftKey ? 32 : 8) * (e.key === "ArrowLeft" ? -1 : 1);
-    columnWidths = resizeColumnTo(columnWidths, i, columnWidths[i] + step);
-    dispatch("resizeColumns", columnWidths);
+    applyResizedWidths(resizeColumnTo(allWidths, i, allWidths[i] + step, allMins));
+    emitResize();
+  }
+
+  /** Label for resize-handle `i`'s aria-label, over the combined built-in + metadata column set. */
+  function handleLabel(i: number): string {
+    if (i < COLUMNS.length) return $t(COLUMNS[i].labelKey);
+    return activeMetaColumns[i - COLUMNS.length]?.col.label ?? "";
   }
 
   /** Paths being dragged, and the folder row currently hovered as a target. */
@@ -324,6 +372,21 @@
     if (need.length) dispatch("needSizes", need);
   }
 
+  // Lazy metadata-cell fetch (CPE-1146): ask the caller to fill cells for whichever VISIBLE rows each
+  // active column doesn't have cached yet — mirrors the folder-sizes pattern above exactly. Re-runs as
+  // `windowed` changes (scroll) and as `metaCells` fills in (shrinking the request to nothing once the
+  // visible window is covered), so scrolling pulls new columns' worth of cells in on demand.
+  $: if (activeMetaColumns.length) {
+    const reqs = activeMetaColumns
+      .map((ac) => {
+        const cached = metaCells.get(ac.col.id);
+        const paths = windowed.filter((w) => !cached?.has(w.entry.path)).map((w) => w.entry.path);
+        return { columnId: ac.col.id, paths };
+      })
+      .filter((r) => r.paths.length > 0);
+    if (reqs.length) dispatch("needMetaCells", reqs);
+  }
+
   // Spacer heights. In the grids each spacer is itself a full-width grid row, so it introduces one
   // row-gap of its own above/below the rendered slice — subtract it back out so the tiles land exactly
   // at their absolute row position. In the (block) list/details views there is no gap to compensate.
@@ -434,6 +497,29 @@
         {/if}
       </button>
     {/each}
+    {#each activeMetaColumns as ac (ac.col.id)}
+      <!-- Metadata column headers (CPE-1146): same sort-header behaviour as the built-ins, keyed by the
+           `meta:<id>` sort-key convention so headerClick/the parent's compare need no special-casing. -->
+      <button
+        class="col meta"
+        on:click={() => headerClick(`meta:${ac.col.id}`)}
+        title={$t("fl.sortBy", { col: ac.col.label })}
+      >
+        {ac.col.label}
+        {#if sortKey === `meta:${ac.col.id}`}
+          <span class="sortchev">
+            <Icon name={sortDir === "asc" ? "chev-up" : "chev-down"} size={12} />
+          </span>
+        {/if}
+      </button>
+    {/each}
+    <button
+      class="col columns-btn"
+      data-testid="open-column-picker"
+      title={$t("fl.columnsButton")}
+      aria-label={$t("fl.columnsButton")}
+      on:click={() => dispatch("openColumnPicker")}
+    ><Icon name="details" size={13} /></button>
     {#each handleOffsets as x, i (i)}
       <!-- A focusable separator is the valid ARIA "window splitter" pattern; the lint
            flags the tabindex/handlers as if it were plain text, so suppress those. -->
@@ -443,8 +529,8 @@
         style="left: {x}px"
         role="separator"
         aria-orientation="vertical"
-        aria-label={$t("fl.resizeColumn", { col: COLUMNS[i] ? $t(COLUMNS[i].labelKey) : "" })}
-        aria-valuenow={Math.round(columnWidths[i])}
+        aria-label={$t("fl.resizeColumn", { col: handleLabel(i) })}
+        aria-valuenow={Math.round(allWidths[i])}
         tabindex="0"
         title={$t("fl.resizeTip")}
         on:pointerdown={(e) => startColResize(e, i)}
@@ -573,6 +659,23 @@
               {formatSize(entry.size)}
             {/if}
           </span>
+          {#each activeMetaColumns as ac (ac.col.id)}
+            <!-- Metadata cells (CPE-1146): the pre-formatted `display` string, per CPE-1145's guidance
+                 (never reimplement byte/float/dimension formatting here). Not yet cached (still
+                 in flight, or scrolled past the visible window that triggered a fetch) → blank, never
+                 a placeholder that could be mistaken for a confirmed empty value. A cached but genuinely
+                 empty/unsupported cell renders a dim "—" (AC: never blocks the row). -->
+            {@const cell = metaCells.get(ac.col.id)?.get(entry.path)}
+            <span class="cell meta">
+              {#if cell}
+                {#if cell.cell === "Empty" || cell.display === ""}
+                  <span class="meta-empty">—</span>
+                {:else}
+                  {cell.display}
+                {/if}
+              {/if}
+            </span>
+          {/each}
         {/if}
       </div>
     {/each}

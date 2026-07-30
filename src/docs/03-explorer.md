@@ -89,6 +89,26 @@ The explorer is the core of the app and is tuned to stay **fast, small, and pred
   renames, so they don't need the panel.) If a copy would overwrite files that already exist, a prompt
   asks once how to handle the whole batch — **Replace**, **Keep both** (auto-numbered), or **Skip**.
 
+## Add metadata columns
+
+The details view can show extra columns beyond Name/Date/Type/Size — pixel **dimensions** for images,
+**duration** for audio/video, **page count** for PDFs, and typed tag columns (Title/Artist/Track/Year for
+audio and video, Title/Author/Subject for PDFs).
+
+Open **Manage columns…** from the command palette, or click the small columns icon at the right end of
+the details-view header. Pick columns from **Available** with **+**; reorder or remove an active column
+with the ↑ / ↓ / × buttons next to it in **Active**. Values fill in as you scroll (only the rows on
+screen are fetched), and a column with no value for a given row shows a dim **—** rather than a blank
+that could be mistaken for a fetch still in progress.
+
+Click a metadata column's header to sort by it — dimensions, duration, and page counts sort **numerically**
+(smallest/shortest first ascending), not alphabetically on the formatted text. Clicking again reverses the
+direction, same as the built-in columns.
+
+The active column set, its order, and each column's width are remembered **per folder** — reopening a
+folder brings its columns back exactly as you left them, and a folder you've never customized shows just
+the four built-ins.
+
 ## Command palette
 
 Press **Ctrl+Shift+P** to open the command palette — a searchable list of every action in the app

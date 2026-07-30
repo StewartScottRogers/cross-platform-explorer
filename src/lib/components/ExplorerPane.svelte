@@ -4,7 +4,7 @@
   // first step toward a reusable pane that can be instantiated twice for dual-pane commander mode. For now
   // it is presentational: App still owns the explorer state and passes it in via props/binds and receives
   // actions via events. Subsequent slices push state ownership down into this component.
-  import { createEventDispatcher, tick } from "svelte";
+  import { createEventDispatcher, tick, onMount } from "svelte";
   import { rawInvoke, createChannel } from "../invoke";
   import { friendlyError } from "../format";
   import Icon from "./Icon.svelte";
@@ -17,7 +17,7 @@
   import { baseName } from "../contentSearch";
   import { fsActivity, agentTimeline } from "../agentActivity";
   import { click as selClick, selectedIndices, emptySelection, type Selection } from "../selection";
-  import { sortEntries } from "../sort";
+  import { sortEntries, sortByMetaColumn } from "../sort";
   import { makeEntryMatcher } from "../entrySearch";
   import { matchesFileFilter } from "../filetypes";
   import { filterEntriesByTag } from "../tagFilter";
@@ -26,6 +26,10 @@
   import type { DirEntry, Place, SortKey, SortDir, ViewMode, RecentFile, Favorite } from "../types";
   import type { ColorRule } from "../colorRules";
   import type { AgentSession } from "../sidecar";
+  import type { ActiveMetaColumn } from "../columns";
+  import type { AvailableColumn, MetadataCell } from "../bindings.gen";
+  import { commands } from "../bindings.gen"; // typed client (CPE-964) — the non-streamed collect variant
+  import { metaColumnCatalog, ensureMetaColumnCatalog } from "../metaColumnCatalog";
 
   /** True when the Home screen should show (App: `isHome && !smartFolder`). */
   export let inHome = false;
@@ -91,6 +95,11 @@
   export let sortKey: SortKey = "name";
   export let sortDir: SortDir = "asc";
   export let columnWidths: number[] = [];
+  /** Active metadata columns for THIS pane's current folder (CPE-1146, epic CPE-707): id + width, in
+      display order. Bound from App, which loads/saves it per-folder (`settings.ts`
+      `metaColumnsByFolder`) on navigation. Empty (the default) ⇒ no metadata columns — the pane behaves
+      exactly as before CPE-1146. */
+  export let activeMetaColumns: ActiveMetaColumn[] = [];
   export let selection: Selection;
   export let draggedPaths: string[] = [];
   export let rowEls: HTMLElement[] = [];
@@ -114,7 +123,93 @@
   $: sizeOf = showFolderSizes
     ? (e: DirEntry) => (e.is_dir ? (folderSizes.get(e.path) ?? -1) : e.size)
     : undefined;
-  $: visible = sortEntries(tagFiltered, sortKey, sortDir, foldersFirst, sizeOf);
+  // A `meta:<id>` sortKey (CPE-1146) sorts by that metadata column's typed value instead of the 4
+  // built-in keys — but ONLY if the id is one of THIS pane's own active columns. `sortKey` is a global
+  // (App-level) value shared by both dual-pane panes (CPE-677): Pane B never gets a metadata-column set
+  // wired (out of scope, see the ticket's Notes), so without this check it would otherwise try to
+  // fetch-on-sort a column it has no header/cells for. Any other case (a stale `meta:` key for a column
+  // this pane no longer has active) falls through to the normal built-in sort, degrading gracefully.
+  $: activeSortColumn =
+    sortKey.startsWith("meta:") && activeMetaColumns.some((c) => c.id === sortKey.slice(5))
+      ? sortKey.slice(5)
+      : null;
+  $: visible = activeSortColumn
+    ? sortByMetaColumn(tagFiltered, (p) => metaCells.get(activeSortColumn as string)?.get(p)?.cell ?? "Empty", sortDir, foldersFirst)
+    : sortEntries(tagFiltered, sortKey as SortKey, sortDir, foldersFirst, sizeOf);
+
+  // ---- Metadata columns (CPE-1146, epic CPE-707) --------------------------------------------------
+  // The catalog is a shared, app-wide singleton (metaColumnCatalog.ts) — fetched once regardless of how
+  // many `<ExplorerPane>`s exist. Resolve THIS pane's active ids against it for FileList's header/cell
+  // rendering; an id the catalog doesn't (yet, or no longer) offer is simply dropped from the resolved
+  // list — it still round-trips in `activeMetaColumns`/persisted settings untouched.
+  onMount(() => { void ensureMetaColumnCatalog(); });
+  $: resolvedMetaColumns = activeMetaColumns
+    .map((ac) => {
+      const col = $metaColumnCatalog.find((a) => a.id === ac.id);
+      return col ? { col, width: ac.width } : null;
+    })
+    .filter((x): x is { col: AvailableColumn; width: number } => x !== null);
+
+  // Cell cache: columnId -> path -> cell. Merges in place as streamed/collected batches land; a fetch
+  // guards against writing after the folder has been navigated away from (the same `loadGen` token
+  // `loadListing` below bumps) or after the column was removed mid-fetch, so a superseded result never
+  // paints (STREAMING.md generation-token convention, extended to metadata cells).
+  let metaCells = new Map<string, Map<string, MetadataCell>>();
+  function mergeMetaCells(columnId: string, cells: MetadataCell[]): void {
+    const next = new Map(metaCells);
+    const forCol = new Map(next.get(columnId) ?? []);
+    for (const c of cells) forCol.set(c.path, c);
+    next.set(columnId, forCol);
+    metaCells = next;
+  }
+
+  /** Lazy visible-window fetch (CPE-1145's streamed `metadata_column_cells`), fired by FileList's
+   *  `needMetaCells` for whichever rows an active column doesn't have cached yet. Uses `rawInvoke`, not
+   *  the busy-tracked `invoke` — a stream shows its own (implicit, in-place) progress and must not also
+   *  raise the app-wide busy cursor (BUSY-CURSOR.md). */
+  async function fetchMetaCells(columnId: string, paths: string[]): Promise<void> {
+    const col = $metaColumnCatalog.find((a) => a.id === columnId);
+    if (!col || paths.length === 0) return;
+    const gen = loadGen;
+    const channel = createChannel<MetadataCell[]>();
+    channel.onmessage = (batch) => {
+      if (gen !== loadGen || !activeMetaColumns.some((ac) => ac.id === columnId)) return; // superseded
+      mergeMetaCells(columnId, batch);
+    };
+    try {
+      await rawInvoke("metadata_column_cells", { paths, column: col.column, onCell: channel });
+    } catch {
+      // A failed column fetch just leaves those cells blank — never blocks the row (CPE-1146 AC).
+    }
+  }
+  function onNeedMetaCells(reqs: { columnId: string; paths: string[] }[]): void {
+    for (const r of reqs) void fetchMetaCells(r.columnId, r.paths);
+  }
+
+  /** Fetch-on-sort (CPE-1146): clicking a metadata column header needs EVERY row's cell to sort
+   *  correctly, not just the visible window — the streamed collect-to-vec variant fetches the whole
+   *  folder in one deliberate, user-initiated call, so it goes through the busy-tracked `commands.*`
+   *  client (not `rawInvoke`) like any other explicit one-shot operation. Fires once per distinct
+   *  `sortKey`, not on every entries-batch re-sort while a folder is still streaming in. */
+  let lastSortFetchKey = "";
+  $: if (activeSortColumn && sortKey !== lastSortFetchKey) {
+    lastSortFetchKey = sortKey;
+    void fetchAllMetaCellsForSort(activeSortColumn);
+  }
+  $: if (!activeSortColumn) lastSortFetchKey = "";
+  async function fetchAllMetaCellsForSort(columnId: string): Promise<void> {
+    const col = $metaColumnCatalog.find((a) => a.id === columnId);
+    const paths = entries.map((e) => e.path);
+    if (!col || paths.length === 0) return;
+    const gen = loadGen;
+    try {
+      const cells = await commands.metadataColumnCellsCollect(paths, col.column);
+      if (gen !== loadGen) return; // a newer navigation superseded this folder
+      mergeMetaCells(columnId, cells);
+    } catch {
+      // Sort just falls back to a stable Empty-tiebreak (name) order — never blocks the row.
+    }
+  }
 
   // ---- Replay-mode overlay (CPE-1112) — a read-only swap of what FileList renders, never of `visible`
   // itself. `visible` (and the `entries` it's derived from) keep deriving from the real listing pipeline
@@ -246,6 +341,10 @@
     commitRename: string;
     drop: { paths: string[]; dest: string; ctrlKey: boolean; shiftKey: boolean };
     contextAction: FolderAction;
+    /** A metadata column's width changed (CPE-1146) — the caller persists it per-folder. */
+    resizeMetaColumns: { id: string; width: number }[];
+    /** The header "Columns…" affordance was clicked (CPE-1146) — the caller opens the picker. */
+    openColumnPicker: void;
   }>();
 </script>
 
@@ -349,11 +448,16 @@
     canDrag={canDrag && !inReplay}
     {renameValue}
     {columnWidths}
+    activeMetaColumns={resolvedMetaColumns}
+    {metaCells}
     {colorRules}
     showFolderSizes={showFolderSizes && !inReplay}
     {folderSizes}
     on:needSizes
     on:resizeColumns={(e) => { columnWidths = e.detail; settings.saveColumnWidths(columnWidths); }}
+    on:needMetaCells={(e) => onNeedMetaCells(e.detail)}
+    on:resizeMetaColumns={(e) => dispatch("resizeMetaColumns", e.detail)}
+    on:openColumnPicker={() => dispatch("openColumnPicker")}
     bind:rowEls
     bind:draggedPaths
     on:click={(e) => { if (!inReplay) selection = selClick(selection, e.detail.index, e.detail); }}

@@ -11,6 +11,7 @@ import { render, screen, fireEvent } from "@testing-library/svelte";
 import FileList from "./FileList.svelte";
 import { emptySelection, selectOnly } from "../selection";
 import type { DirEntry } from "../types";
+import type { AvailableColumn, MetadataCell } from "../bindings.gen";
 
 // The component tree imports Tauri APIs transitively; stub them so jsdom can
 // render without a Tauri runtime.
@@ -326,5 +327,94 @@ describe("FileList rendering", () => {
       expect(row!.classList.contains(`view-${view}`)).toBe(true);
       unmount();
     }
+  });
+});
+
+// CPE-1146 (epic CPE-707): dynamic metadata columns — a header + real value per active column,
+// requesting cells for visible rows lazily, and rendering the dim empty-cell placeholder.
+describe("FileList dynamic metadata columns (CPE-1146)", () => {
+  const dims: AvailableColumn = { id: "dimensions", label: "Dimensions", column: "ImageDimensions", extensions: ["png"] };
+
+  it("renders a header for each active metadata column, after the 4 built-ins", () => {
+    render(FileList, {
+      ...base,
+      entries: [entry({ path: "/x/a.png", name: "a.png" })],
+      activeMetaColumns: [{ col: dims, width: 110 }],
+    });
+    expect(screen.getByText("Dimensions")).toBeTruthy();
+  });
+
+  it("renders a cached cell's pre-formatted display string", () => {
+    const cell: MetadataCell = { path: "/x/a.png", cell: { Dimensions: { w: 1920, h: 1080 } }, display: "1920×1080" };
+    const metaCells = new Map([["dimensions", new Map([["/x/a.png", cell]])]]);
+    render(FileList, {
+      ...base,
+      entries: [entry({ path: "/x/a.png", name: "a.png" })],
+      activeMetaColumns: [{ col: dims, width: 110 }],
+      metaCells,
+    });
+    expect(screen.getByText("1920×1080")).toBeTruthy();
+  });
+
+  it("renders a dim '—' for a cached-but-Empty cell, and nothing for a not-yet-fetched one", () => {
+    const emptyCell: MetadataCell = { path: "/x/nope.png", cell: "Empty", display: "" };
+    const metaCells = new Map([["dimensions", new Map([["/x/nope.png", emptyCell]])]]);
+    const { container } = render(FileList, {
+      ...base,
+      entries: [
+        entry({ path: "/x/nope.png", name: "nope.png" }),
+        entry({ path: "/x/pending.png", name: "pending.png" }),
+      ],
+      activeMetaColumns: [{ col: dims, width: 110 }],
+      metaCells,
+    });
+    expect(container.querySelector(".meta-empty")?.textContent).toBe("—");
+    // The not-yet-fetched row's meta cell exists but is blank (never a crash, never a stray placeholder).
+    const metaCellsEls = container.querySelectorAll(".cell.meta");
+    expect(metaCellsEls.length).toBe(2);
+    expect(metaCellsEls[1].textContent?.trim()).toBe("");
+  });
+
+  it("asks the caller for visible-row cells an active column doesn't have cached yet", async () => {
+    // Mount with no active columns so nothing fires at mount time (a dispatch during the initial render
+    // would land before a listener attached after `render()` returns); activate the column AFTERWARD so
+    // the resulting reactive request is observed by a listener already wired up.
+    const { component } = render(FileList, {
+      ...base,
+      entries: [entry({ path: "/x/a.png", name: "a.png" })],
+    });
+    const needMetaCells = vi.fn();
+    component.$on("needMetaCells", (e: CustomEvent<{ columnId: string; paths: string[] }[]>) => needMetaCells(e.detail));
+
+    await component.$set({ activeMetaColumns: [{ col: dims, width: 110 }] });
+
+    expect(needMetaCells).toHaveBeenCalledWith([{ columnId: "dimensions", paths: ["/x/a.png"] }]);
+  });
+
+  it("clicking a metadata column header dispatches a meta:<id> sort key, toggling direction", async () => {
+    const { component } = render(FileList, {
+      ...base,
+      entries: [entry({ path: "/x/a.png", name: "a.png" })],
+      activeMetaColumns: [{ col: dims, width: 110 }],
+    });
+    const sorted = vi.fn();
+    component.$on("sort", (e: CustomEvent<{ key: string; dir: string }>) => sorted(e.detail));
+
+    await fireEvent.click(screen.getByText("Dimensions"));
+    expect(sorted).toHaveBeenCalledWith({ key: "meta:dimensions", dir: "asc" });
+  });
+
+  it("clicking the header 'Columns…' affordance dispatches openColumnPicker", async () => {
+    const { component } = render(FileList, { ...base, entries: [entry()] });
+    const opened = vi.fn();
+    component.$on("openColumnPicker", opened);
+
+    await fireEvent.click(screen.getByTestId("open-column-picker"));
+    expect(opened).toHaveBeenCalledOnce();
+  });
+
+  it("no active metadata columns renders exactly the pre-CPE-1146 4-column list (off means off)", () => {
+    const { container } = render(FileList, { ...base, entries: [entry()] });
+    expect(container.querySelectorAll(".cell.meta").length).toBe(0);
   });
 });
