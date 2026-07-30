@@ -26,7 +26,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { $, $$, browser } from "@wdio/globals";
-import { snap } from "../lib/snap.js";
+import { snap, snapFailure } from "../lib/snap.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const STATE_FILE = path.resolve(__dirname, "..", ".smoke-state.json");
@@ -86,6 +86,13 @@ async function findRow(name: string): Promise<WebdriverIO.Element> {
 describe("CPE-1144 — headless GUI smoke: Batch-Media dialog renders an op + plan preview", () => {
   before(() => {
     JSON.parse(fs.readFileSync(STATE_FILE, "utf-8")) as { tmpDir: string };
+  });
+
+  // CPE-1149: on a failing run, leave a shot of the state it failed in (`batch-media-dialog-fail.png`)
+  // — the inline `snap("batch-media-dialog")` below is only reached on a pass. Non-arrow fn so Mocha
+  // binds `this`; `snapFailure` is a no-op on a pass and swallows its own errors.
+  afterEach(async function () {
+    await snapFailure(this.currentTest, "batch-media-dialog");
   });
 
   it("selects two seeded images, opens via the context menu, adds an op, and renders the preview", async () => {
@@ -176,7 +183,10 @@ describe("CPE-1144 — headless GUI smoke: Batch-Media dialog renders an op + pl
     expect(previewHtml).to.include("CPE-1144-photo-b-1024.png");
 
     // CPE-1148 Part A: capture the op-pill list + plan preview (after the assertions above, before
-    // it's dismissed).
+    // it's dismissed below). On a FAILING run this line is never reached and the dialog is still open
+    // when the `afterEach` hook fires, so it captures `batch-media-dialog-fail.png` of the failure
+    // state instead (CPE-1149) — the pass shot stays inline because the afterEach runs only after the
+    // Cancel click below dismisses the dialog.
     await snap("batch-media-dialog");
 
     // Non-destructive: never click Apply — dismiss via Cancel instead (each spec file gets its own

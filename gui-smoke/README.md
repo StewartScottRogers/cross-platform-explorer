@@ -133,33 +133,50 @@ var. Relatedly, never add `--user-data-dir` to that env var either — msedgedri
 user-data-dir it watches for `DevToolsActivePort`, and overriding it makes WebView2 write the file
 somewhere the driver isn't looking, reproducing the same failure.
 
-## Screenshots for the Visual Critic (CPE-1148 Part A)
+## Screenshots for the Visual Critic (CPE-1148 Part A / CPE-1149)
 
-Every smoke spec calls a shared `snap(name)` helper (`gui-smoke/lib/snap.ts`) right after its own
-assertions pass, so one `npm test` run leaves a **gallery of the app's main screens** on disk at
-`gui-smoke/.screenshots/<name>.png`:
+Every smoke spec captures its key surface to disk, so one `npm test` run leaves a **gallery of the
+app's main screens** at `gui-smoke/.screenshots/<name>.png`. Two shared helpers in
+`gui-smoke/lib/snap.ts` split the pass and fail cases:
 
-| File | Spec | Surface |
-|------|------|---------|
-| `open-dir.png` | `open-dir.smoke.ts` | The plain directory listing after `--open <dir>` navigation |
-| `organize-dialog.png` | `organize.smoke.ts` | Auto-organize dialog's grouped proposal preview |
-| `instant-search.png` | `instant-search.smoke.ts` | Ctrl+K Instant Search overlay (off-means-off state) |
-| `batch-media-dialog.png` | `batch-media.smoke.ts` | Batch-Media dialog's op-pill list + plan preview |
-| `replay-tab.png` | `replay.smoke.ts` | Agent Watch drawer's Replay tab (transport/slider + reconstruction) |
-| `cost-history.png` | `cost-history.smoke.ts` | Agent Watch drawer's cost-History rollup |
+- **Pass** — each spec calls `snap(name)` **inline**, right after its assertions pass, capturing the
+  good frame at exactly the right instant (e.g. a dialog just before the spec dismisses it). Writes
+  `<name>.png`.
+- **Fail (CPE-1149)** — each spec's `afterEach(function () { … })` hook calls
+  `snapFailure(this.currentTest, name)`, which writes `<name>-fail.png` **only when the test that
+  just ran failed** — a shot of whatever state the assertion failed in. On a pass it is a no-op, so
+  no surface is captured twice.
 
-`.screenshots/` is gitignored — these are run artifacts, never committed. `snap()` swallows its own
-errors (a screenshot is observability, not an assertion) and is called **after** each spec's real
-`expect`/`waitUntil` checks, so a failed assertion still leaves a shot of whatever state it failed
-in, and none of the specs' existing non-blocking (`continue-on-error`) behaviour changes.
+| Pass file | Fail file | Spec | Surface |
+|------|------|------|---------|
+| `open-dir.png` | `open-dir-fail.png` | `open-dir.smoke.ts` | The plain directory listing after `--open <dir>` navigation |
+| `organize-dialog.png` | `organize-dialog-fail.png` | `organize.smoke.ts` | Auto-organize dialog's grouped proposal preview |
+| `instant-search.png` | `instant-search-fail.png` | `instant-search.smoke.ts` | Ctrl+K Instant Search overlay (off-means-off state) |
+| `batch-media-dialog.png` | `batch-media-dialog-fail.png` | `batch-media.smoke.ts` | Batch-Media dialog's op-pill list + plan preview |
+| `replay-tab.png` | `replay-tab-fail.png` | `replay.smoke.ts` | Agent Watch drawer's Replay tab (transport/slider + reconstruction) |
+| `cost-history.png` | `cost-history-fail.png` | `cost-history.smoke.ts` | Agent Watch drawer's cost-History rollup |
+
+`.screenshots/` is gitignored — these are run artifacts, never committed. Both helpers swallow their
+own errors (a screenshot is observability, not an assertion — it must never fail or mask a real
+assertion), and none of the specs' existing non-blocking (`continue-on-error`) behaviour changes.
+
+**Why the split (and not one always-on `afterEach`)?** The inline `snap()` alone is never reached
+once an earlier `expect` throws — so before CPE-1149 a failing run left no shot at all, even though
+this section (and `snap.ts`) claimed otherwise. Moving *all* capture into an `afterEach` would fix
+that but break the pass shots: several specs dismiss their dialog (Cancel) at the end of the test
+body, and an `afterEach` runs only *after* that, capturing the dismissed surface. So the pass shot
+stays inline (right frame, right moment) and the hook captures only the failing frame — the `-fail`
+suffix keeps a failing shot from clobbering the last good `<name>.png` baseline.
 
 **Capturing the surface you changed:** if your ticket touches a GUI surface that already has a
-smoke spec, add (or move) a `snap('your-surface')` call after that spec's assertions — reuse the
-existing spec rather than adding a new app launch. If the surface has no spec yet, the cheapest way
-to get a screenshot is still to add one (see any file in `specs/` for the pattern: reach the surface
-the same way a user does, assert something real about it, then `snap()`). Run the harness locally
-(`cd gui-smoke && npm test`, prerequisites above) and the PNG lands in `.screenshots/` for a
-reviewer — human or, per CPE-1148 Part B, a future Visual-Critic sub-agent — to open directly.
+smoke spec, add (or move) a `snap('your-surface')` call after that spec's assertions and add a
+matching `afterEach(function () { await snapFailure(this.currentTest, 'your-surface'); })` — reuse
+the existing spec rather than adding a new app launch. If the surface has no spec yet, the cheapest
+way to get a screenshot is still to add one (see any file in `specs/` for the pattern: reach the
+surface the same way a user does, assert something real about it, `snap()` inline, and wire the
+`afterEach` fail-shot). Run the harness locally (`cd gui-smoke && npm test`, prerequisites above) and
+the PNG lands in `.screenshots/` for a reviewer — human or, per CPE-1148 Part B, a future
+Visual-Critic sub-agent — to open directly.
 
 ## Follow-ups (not this ticket — see CPE-1045's "Follow-ups" section)
 

@@ -26,7 +26,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { $, $$, browser } from "@wdio/globals";
-import { snap } from "../lib/snap.js";
+import { snap, snapFailure } from "../lib/snap.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const STATE_FILE = path.resolve(__dirname, "..", ".smoke-state.json");
@@ -43,6 +43,13 @@ describe("CPE-1135 — headless GUI smoke: Replay scrubber renders from a seeded
   before(() => {
     // Written by wdio.conf.ts#onPrepare in the main process before this session started.
     ({ tmpDir } = JSON.parse(fs.readFileSync(STATE_FILE, "utf-8")) as { tmpDir: string });
+  });
+
+  // CPE-1149: on a failing run, leave a shot of the state it failed in (`replay-tab-fail.png`) — the
+  // inline `snap("replay-tab")` below is only reached on a pass. Non-arrow fn so Mocha binds `this`;
+  // `snapFailure` is a no-op on a pass and swallows its own errors.
+  afterEach(async function () {
+    await snapFailure(this.currentTest, "replay-tab");
   });
 
   it("opens the Agent Watch drawer's Replay tab and renders the scrubber + reconstruction", async () => {
@@ -181,7 +188,8 @@ describe("CPE-1135 — headless GUI smoke: Replay scrubber renders from a seeded
     expect(reconHtml).to.include(REPLAY_CREATED_NAME);
 
     // CPE-1148 Part A: capture the Replay tab (transport/slider + reconstruction), after the
-    // assertions above.
+    // assertions above. On a FAILING run this line is never reached — the `afterEach` hook above
+    // captures `replay-tab-fail.png` of the failure state instead (CPE-1149).
     await snap("replay-tab");
   });
 });

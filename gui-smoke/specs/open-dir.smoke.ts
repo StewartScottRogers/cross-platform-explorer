@@ -5,7 +5,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { $, $$, browser } from "@wdio/globals";
-import { snap } from "../lib/snap.js"; // ESM relative import — resolves to lib/snap.ts under tsx
+import { snap, snapFailure } from "../lib/snap.js"; // ESM relative import — resolves to lib/snap.ts under tsx
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const STATE_FILE = path.resolve(__dirname, "..", ".smoke-state.json");
@@ -22,6 +22,13 @@ describe("CPE-1045 — headless GUI smoke: --open <dir> navigates", () => {
     // Written by wdio.conf.ts#onPrepare in the main process before this session started.
     const { tmpDir } = JSON.parse(fs.readFileSync(STATE_FILE, "utf-8")) as { tmpDir: string };
     tmpBasename = path.basename(tmpDir);
+  });
+
+  // CPE-1149: on ANY failing test in this spec, leave a shot of the state it failed in
+  // (`open-dir-fail.png`) — the inline `snap("open-dir")` below is only reached on a pass. Non-arrow
+  // fn so Mocha binds `this`; `snapFailure` is a no-op on a pass and swallows its own errors.
+  afterEach(async function () {
+    await snapFailure(this.currentTest, "open-dir");
   });
 
   // Health check (burndown #2 — build -> deploy -> run smoke): the window launched and is
@@ -67,8 +74,9 @@ describe("CPE-1045 — headless GUI smoke: --open <dir> navigates", () => {
       },
     );
 
-    // CPE-1148 Part A: capture the plain directory-listing surface (after the assertions above, so
-    // a failed assertion still leaves a shot of whatever state it failed in).
+    // CPE-1148 Part A: capture the plain directory-listing surface (after the assertions above).
+    // On a FAILING run this line is never reached — the `afterEach` hook above captures
+    // `open-dir-fail.png` of the failure state instead (CPE-1149).
     await snap("open-dir");
   });
 

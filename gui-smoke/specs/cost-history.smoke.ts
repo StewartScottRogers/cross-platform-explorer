@@ -20,7 +20,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { $, $$, browser } from "@wdio/globals";
-import { snap } from "../lib/snap.js";
+import { snap, snapFailure } from "../lib/snap.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const STATE_FILE = path.resolve(__dirname, "..", ".smoke-state.json");
@@ -31,6 +31,13 @@ describe("CPE-1130 — headless GUI smoke: cost-History renders from a seeded jo
   before(() => {
     // Written by wdio.conf.ts#onPrepare in the main process before this session started.
     ({ tmpDir } = JSON.parse(fs.readFileSync(STATE_FILE, "utf-8")) as { tmpDir: string });
+  });
+
+  // CPE-1149: on a failing run, leave a shot of the state it failed in (`cost-history-fail.png`) —
+  // the inline `snap("cost-history")` below is only reached on a pass. Non-arrow fn so Mocha binds
+  // `this`; `snapFailure` is a no-op on a pass and swallows its own errors.
+  afterEach(async function () {
+    await snapFailure(this.currentTest, "cost-history");
   });
 
   it("opens the Agent Watch drawer's History tab and renders .hd-bar / .hd-* elements", async () => {
@@ -129,7 +136,9 @@ describe("CPE-1130 — headless GUI smoke: cost-History renders from a seeded jo
     const modelRows = await $$(".hd-table tbody tr");
     expect(modelRows.length, "expected >=1 row in a .hd-table (by-model or by-agent)").to.be.greaterThan(0);
 
-    // CPE-1148 Part A: capture the cost-History rollup, after the assertions above.
+    // CPE-1148 Part A: capture the cost-History rollup, after the assertions above. On a FAILING run
+    // this line is never reached — the `afterEach` hook above captures `cost-history-fail.png` of the
+    // failure state instead (CPE-1149).
     await snap("cost-history");
   });
 });
