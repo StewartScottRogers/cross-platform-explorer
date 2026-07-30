@@ -134,3 +134,63 @@ turning it off removes every entry it added, with nothing left behind.
 The toggle registers under your **user** account only, so enabling it never needs administrator rights.
 It's available on **Windows** today; the macOS and Linux equivalents are on the way, and the toggle shows a
 "coming soon" note on those platforms until then.
+
+## Agent Watch
+
+Agent Watch is a mode layered over the explorer, not a separate app or a toggle you hunt for. It appears
+only when there's something to show: launch a coding agent from the AI Console, then navigate the
+explorer into (or already be sitting in) that agent's project folder. An **"Agent Watch — \<name\>"**
+strip appears above the file list, with a live dot, a running feed of recent change chips (created /
+modified / renamed / removed, fading over time), and a **Log** button.
+
+**Off means off.** Leave the folder, or let the agent's session end, and the strip disappears along with
+everything it drives — no watched session means no Agent Watch, no background watcher, and no cost, on
+top of the plain explorer.
+
+Click **Log** to open the Agent Watch drawer on the right — a tabbed activity panel: **Live**, **Replay**,
+**Cost**, **Radar**, **History**.
+
+### Live
+
+The default tab: a durable, newest-first log of every filesystem action the agent has taken this session
+— created, edited, deleted, moved. Click any row to jump the explorer to its containing folder. A
+**consulted files** list above the log surfaces files the agent has *read* (not just changed) this
+session — reads aren't visible to a filesystem watcher, so they're parsed from the agent's own output and
+shown as a dimmer, distinct signal from actual writes. A row whose edit captured a before/after diff shows
+a small `+added −removed` line count; hover or focus it to peek the diff inline, or click **Open full
+diff** for a side-by-side view.
+
+### Replay
+
+Scrub back and forth through the session's recorded activity with a slider — plus jump-to-start,
+jump-to-end, step back/forward, and play/pause at 0.5×/1×/2×/4× speed. Moving the scrubber reconstructs
+the folder listing exactly as it stood at that instant: files that had been created, modified, or removed
+by that point in time are shown, read-only, right in the drawer. A **"Show in file pane"** checkbox
+graduates that same reconstruction into the main explorer pane itself — pausing its live listing until you
+switch the toggle off or leave the Replay tab. If a path was edited more than once during the session, its
+diff at an earlier scrub point isn't retained; the drawer says so rather than showing a diff from the
+wrong moment.
+
+### Cost
+
+Live, per-session token and cost usage: input/output/total tokens and a USD estimate for every reporting
+session, plus files touched, edit count, churn (bytes changed), and wall-clock time, with per-minute and
+per-file throughput ratios once there's enough data to derive them. These figures are scraped from the
+agent's own printed output — **advisory, not a billing record**.
+
+### Radar
+
+Flags paths that two or more distinct actors have touched within a short window — the "two agents, or an
+agent and you, editing the same file" signal — as a list of paths with the actors involved and a relative
+timestamp; click a row to jump there. It's deliberately worded as an **activity overlap**, not a
+"conflict": a filesystem watcher can't prove two touches came from genuinely unrelated processes rather
+than the same agent revisiting its own file, so an overlap involving an unresolved actor carries a hedge
+note. A **Competing renames** section below it separately flags same-source or same-destination rename
+divergences across distinct actors.
+
+### History
+
+A cross-session rollup read from a small local history log, loaded once the first time you open the tab:
+totals (sessions, cost, tokens, time, files touched, churn), throughput ratios, per-model and per-agent
+breakdowns with each one's share of total cost, and a bar chart of cost or tokens per day. Same advisory
+framing as the Cost tab — best-effort figures, never billing.
