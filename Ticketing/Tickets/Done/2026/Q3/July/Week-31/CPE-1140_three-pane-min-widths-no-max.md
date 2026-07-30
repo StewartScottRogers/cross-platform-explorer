@@ -4,7 +4,7 @@ title: "Three-pane layout: enforce sensible per-pane minimum widths, remove all 
 type: bug
 component: Frontend
 priority: high
-status: Backlog
+status: Done
 tags: ready
 created: 2026-07-29
 epic: CPE-688

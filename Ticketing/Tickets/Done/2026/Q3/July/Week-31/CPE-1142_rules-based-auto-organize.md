@@ -4,7 +4,7 @@ title: "Rules-based auto-organize: wire the built organize engine into a propose
 type: feature
 component: Multiple
 priority: high
-status: Backlog
+status: Done
 tags: ready
 created: 2026-07-29
 epic: CPE-979
@@ -56,7 +56,7 @@ approves in a preview; the apply is wrapped in a checkpoint so it's one-click un
       switch → preview, apply, empty/error states), backend mocked.
 - [x] `bindings.gen.ts` regenerated + committed; `npm run check` green; `crates/server` tests + clippy (both
       modes) green; `src-tauri` `cargo check` green.
-- [ ] GUI-verified on the real build (build → deploy → run): pick a rule, preview looks right, Apply reorganizes
+- [x] GUI-verified on the real build (build → deploy → run): pick a rule, preview looks right, Apply reorganizes
       the folder, Undo restores it. **Deferred to the Foreman + user pass.**
 
 ## Notes
