@@ -4,7 +4,7 @@ title: "Checkpoint preview: thread revert_attribution so drift flags only truly-
 type: enhancement
 component: Backend
 priority: medium
-status: Backlog
+status: Done
 tags: ready
 created: 2026-07-29
 epic: CPE-732
