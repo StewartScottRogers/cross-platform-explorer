@@ -49,9 +49,9 @@ listed here so the whole feature is one tracked unit.)*
 - Write a memory (feedback) capturing this as the standing way.
 
 ## Acceptance Criteria
-- [ ] `gui-smoke` has a `snap(name)` helper; a full run writes PNGs of the key surfaces to a gitignored
+- [x] `gui-smoke` has a `snap(name)` helper; a full run writes PNGs of the key surfaces to a gitignored
       `.screenshots/` dir; existing specs still pass; `npm run check` green.
-- [ ] A short doc explains how a worker/critic captures + finds screenshots.
+- [x] A short doc explains how a worker/critic captures + finds screenshots.
 - [ ] `.claude/commands/workshift.md` gains the **Visual Critic** role in the crew table, the per-ticket
       gauntlet (3rd visual leg), and the minimal-escalation policy.
 - [ ] A memory records the screenshots + Visual-Critic standard.
@@ -64,3 +64,44 @@ listed here so the whole feature is one tracked unit.)*
 - Directly targets the pain from the CPE-1147 button saga: the clip + right-vs-left placement are
   screenshot-visible (Critic catches them with zero user involvement); only the pure icon *preference*
   legitimately reached the user.
+
+## Work Log
+2026-07-30 (workshift, Worker) — Implemented Part A only (screenshot-capture infra); Part B (the Visual
+Critic role in `.claude/commands/workshift.md`) is the Foreman's, still pending — ticket left in Backlog.
+
+- Added `gui-smoke/lib/snap.ts`: `snap(name)` creates `gui-smoke/.screenshots/` (if missing) and calls
+  `browser.saveScreenshot(...)` to write `<name>.png` there. Deliberately swallows its own errors — a
+  screenshot is an observability artifact, not an assertion, so a capture failure never fails or masks a
+  spec's real checks.
+- Wired `snap(...)` into all 6 existing smoke specs, each called AFTER that spec's own assertions (so a
+  failed assertion still leaves a shot of the failing state) and before any cleanup click: `open-dir.png`
+  (`open-dir.smoke.ts`), `organize-dialog.png` (`organize.smoke.ts`), `instant-search.png`
+  (`instant-search.smoke.ts`), `batch-media-dialog.png` (`batch-media.smoke.ts`), `replay-tab.png`
+  (`replay.smoke.ts`), `cost-history.png` (`cost-history.smoke.ts`). No existing assertion or the
+  non-blocking (`continue-on-error`) CI behaviour was touched. No standalone "column view" spec exists yet
+  in `gui-smoke/specs/` (grepped — not present), so no 7th snap was added; the doc below explains how to
+  add one when/if that spec lands.
+- `gui-smoke/tsconfig.json`: added `lib/**/*.ts` to `include` so the new helper type-checks.
+- `gui-smoke/.gitignore`: added `.screenshots/` (run artifacts, never committed).
+- `gui-smoke/README.md`: new "Screenshots for the Visual Critic (CPE-1148 Part A)" section — a table of
+  every PNG name → spec → surface, the gitignore/non-fatal-capture rationale, and how a worker captures
+  the surface it changed (reuse an existing spec's `snap()` call, or add a new spec following the existing
+  pattern if none exists yet).
+
+Verified:
+- `npm run check` (root, svelte-check): 0 errors, 0 warnings.
+- `cd gui-smoke && npm ci && npm run typecheck` (`tsc --noEmit`): clean.
+- **Ran the real gui-smoke harness locally** (tauri-driver + msedgedriver already installed in
+  `~/.cargo/bin` on this machine): `npm run build` (frontend) → `npm run tauri build -- --no-bundle`
+  (release binary, ~2m25s compile) → `cd gui-smoke && npm test`. All 6 spec files passed (9 `it`s total,
+  0 failures, ~46s). Confirmed `gui-smoke/.screenshots/` was populated with all 6 expected, non-empty
+  PNGs: `open-dir.png` (78,252 B), `organize-dialog.png` (76,382 B), `instant-search.png` (82,773 B),
+  `batch-media-dialog.png` (81,225 B), `replay-tab.png` (109,929 B), `cost-history.png` (119,521 B).
+  Visually opened two of them (`open-dir.png`, `organize-dialog.png`) — both show the real rendered app
+  state (directory listing with the seeded fixtures; the auto-organize dialog's by-extension grouped
+  preview), not blank/garbage frames.
+- Reverted incidental `package-lock.json`/`src-tauri/Cargo.toml` diffs picked up by `npm install`/the
+  release build (a stale lockfile version field) before committing — out of scope for this ticket.
+
+Landed as branch `cpe-1148a-gui-screenshots`, PR opened against `main`. Part B (Visual Critic role +
+memory) is the Foreman's separate change; this ticket stays in Backlog until both parts land.

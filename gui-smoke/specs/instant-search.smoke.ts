@@ -17,6 +17,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { $, browser } from "@wdio/globals";
+import { snap } from "../lib/snap.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const STATE_FILE = path.resolve(__dirname, "..", ".smoke-state.json");
@@ -74,5 +75,8 @@ describe("CPE-1143 — headless GUI smoke: Ctrl+K Instant Search overlay renders
     expect(await buildBtn.isEnabled(), "expected 'Build index' to be enabled once a folder is open").to.equal(
       true,
     );
+
+    // CPE-1148 Part A: capture the overlay's off-means-off state (after the assertions above).
+    await snap("instant-search");
   });
 });

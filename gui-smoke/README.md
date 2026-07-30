@@ -133,6 +133,34 @@ var. Relatedly, never add `--user-data-dir` to that env var either — msedgedri
 user-data-dir it watches for `DevToolsActivePort`, and overriding it makes WebView2 write the file
 somewhere the driver isn't looking, reproducing the same failure.
 
+## Screenshots for the Visual Critic (CPE-1148 Part A)
+
+Every smoke spec calls a shared `snap(name)` helper (`gui-smoke/lib/snap.ts`) right after its own
+assertions pass, so one `npm test` run leaves a **gallery of the app's main screens** on disk at
+`gui-smoke/.screenshots/<name>.png`:
+
+| File | Spec | Surface |
+|------|------|---------|
+| `open-dir.png` | `open-dir.smoke.ts` | The plain directory listing after `--open <dir>` navigation |
+| `organize-dialog.png` | `organize.smoke.ts` | Auto-organize dialog's grouped proposal preview |
+| `instant-search.png` | `instant-search.smoke.ts` | Ctrl+K Instant Search overlay (off-means-off state) |
+| `batch-media-dialog.png` | `batch-media.smoke.ts` | Batch-Media dialog's op-pill list + plan preview |
+| `replay-tab.png` | `replay.smoke.ts` | Agent Watch drawer's Replay tab (transport/slider + reconstruction) |
+| `cost-history.png` | `cost-history.smoke.ts` | Agent Watch drawer's cost-History rollup |
+
+`.screenshots/` is gitignored — these are run artifacts, never committed. `snap()` swallows its own
+errors (a screenshot is observability, not an assertion) and is called **after** each spec's real
+`expect`/`waitUntil` checks, so a failed assertion still leaves a shot of whatever state it failed
+in, and none of the specs' existing non-blocking (`continue-on-error`) behaviour changes.
+
+**Capturing the surface you changed:** if your ticket touches a GUI surface that already has a
+smoke spec, add (or move) a `snap('your-surface')` call after that spec's assertions — reuse the
+existing spec rather than adding a new app launch. If the surface has no spec yet, the cheapest way
+to get a screenshot is still to add one (see any file in `specs/` for the pattern: reach the surface
+the same way a user does, assert something real about it, then `snap()`). Run the harness locally
+(`cd gui-smoke && npm test`, prerequisites above) and the PNG lands in `.screenshots/` for a
+reviewer — human or, per CPE-1148 Part B, a future Visual-Critic sub-agent — to open directly.
+
 ## Follow-ups (not this ticket — see CPE-1045's "Follow-ups" section)
 
 - **Linux CI leg**: add an `ubuntu-latest` matrix arm using `webkit2gtk-driver` + `xvfb-run` (no
