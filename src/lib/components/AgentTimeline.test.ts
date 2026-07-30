@@ -302,7 +302,10 @@ describe("AgentTimeline reconstructed folder listing (CPE-1111, epic CPE-728 sli
     expect(screen.queryByText("leaf.txt")).toBeNull();
     expect(screen.getByText(/Reconstruction at scrub time \(read-only\)/i)).toBeTruthy();
 
-    expect(invokeMock).toHaveBeenCalledTimes(1);
+    // CPE-1126: the Replay tab now ALSO lists checkpoints for `currentPath` on enter (checkpoint_list),
+    // so assert replay_load fired exactly once specifically rather than a bare total-invoke count.
+    const replayLoadCalls = invokeMock.mock.calls.filter(([cmd]: unknown[]) => cmd === "replay_load");
+    expect(replayLoadCalls.length).toBe(1);
     expect(invokeMock).toHaveBeenCalledWith("replay_load", { session: "sess-1" });
   });
 

@@ -32,11 +32,20 @@
     isMultiplyEdited,
     isWriteKind,
     cadenceForSpeed,
+    checkpointMarkers,
   } from "../agentReplay";
   import { foldOverlaps, overlapHasUnknown, friendlyActor, relativeLabel } from "../agentConflicts";
   import { foldRenameConflicts, renameConflictNote } from "../agentRenameConflicts";
   import { commands } from "../bindings.gen";
-  import type { ReplayData, Baseline, ReplayEntry as ReplayRow, SessionMetricsRecord } from "../bindings.gen";
+  import type {
+    ReplayData,
+    Baseline,
+    ReplayEntry as ReplayRow,
+    SessionMetricsRecord,
+    Checkpoint,
+    RevertPreview,
+    RevertOutcome,
+  } from "../bindings.gen";
   import type { DirEntry } from "../types";
   import { stateAtFrom, childrenAt, type FsState } from "../replayFold";
   import { rollup, overTime } from "../agentMetricsRollup";
@@ -212,6 +221,8 @@
     // setting this triggers `replayOverlayActive`'s reactive recompute, which dispatches `null` and
     // restores the main pane's live listing on its own (no separate cleanup call needed).
     replayMode = false;
+    // CPE-1126: never carry another agent/session's checkpoint markers or restore panel over.
+    clearCheckpoints();
   };
 
   // Reset local scrub/play state whenever the timeline empties (stop-watching, CPE-400's
@@ -230,6 +241,9 @@
   onDestroy(() => {
     stopPlaying();
     dispatch("replayOverlay", null);
+    // CPE-1126: the drawer can be closed with a checkpoint restore panel open — invalidate any
+    // in-flight checkpoint/preview load so it can't resolve into a torn-down component.
+    clearCheckpoints();
   });
 
   $: range = sliderRange(entries);
@@ -352,6 +366,162 @@
     ? ({ baseline: replayBaseline, events: replayData.events } as ReplaySource)
     : null;
   $: dispatch("replayOverlay", resolveOverlay(replayOverlayActive, replaySource, t, currentPath));
+
+  // ---------- Checkpoint markers + restore panel (CPE-1126, epic CPE-732 GUI cap) ----------
+  // The visual restore layer over the CPE-1123/1125 command surface: checkpoints captured for the
+  // watched folder appear as pins on the Replay scrubber, and selecting one opens a compact restore
+  // panel (revert plan + drift warning + a two-step confirm, mirroring CheckpointDialog's safety). The
+  // checkpoints belong to a FOLDER (the drawer's `currentPath`), not to the session, so they're keyed
+  // by path. PULL-ONLY: loaded once on Replay-tab enter (and again if the folder changes while the tab
+  // is open), never on a timer, never while the tab/drawer is closed. off-means-off (AGENT-WATCH.md):
+  // markers, panel, and loaded list all clear when the tab is left, the session/agent changes, or the
+  // drawer is destroyed.
+  let checkpoints: Checkpoint[] = [];
+  let checkpointLoading = false;
+  let checkpointError = "";
+  /** Generation token — a slow list for a since-superseded folder/tab can't clobber a newer result. */
+  let checkpointGen = 0;
+  let lastCheckpointPath = "";
+
+  /** The checkpoint whose restore plan is open in the panel below the scrubber, or null. */
+  let selectedCheckpoint: Checkpoint | null = null;
+  let revertPreview: RevertPreview | null = null;
+  let revertPreviewLoading = false;
+  let revertPreviewError = "";
+  let revertPreviewGen = 0;
+  /** True once "Revert to this checkpoint…" is armed and awaiting the confirm panel's second click. */
+  let cpConfirming = false;
+  let reverting = false;
+  let revertOutcome: RevertOutcome | null = null;
+  let revertError = "";
+
+  $: cpMarkers = checkpointMarkers(range, checkpoints);
+
+  /** Clear just the restore panel (selection + preview + confirm + outcome) — the loaded list stays. */
+  function clearCheckpointRestore() {
+    revertPreviewGen += 1; // invalidate any in-flight preview
+    selectedCheckpoint = null;
+    revertPreview = null;
+    revertPreviewLoading = false;
+    revertPreviewError = "";
+    cpConfirming = false;
+    reverting = false;
+    revertOutcome = null;
+    revertError = "";
+  }
+
+  /** Full teardown of the checkpoint layer — off-means-off. Invalidates in-flight loads too. */
+  function clearCheckpoints() {
+    checkpointGen += 1;
+    checkpoints = [];
+    checkpointError = "";
+    checkpointLoading = false;
+    lastCheckpointPath = "";
+    clearCheckpointRestore();
+  }
+
+  async function loadCheckpoints(root: string) {
+    const g = ++checkpointGen;
+    checkpointLoading = true;
+    checkpointError = "";
+    try {
+      const res = await commands.checkpointList(root);
+      if (g !== checkpointGen) return; // superseded by a newer folder/tab-enter/teardown
+      if (res.status === "ok") {
+        checkpoints = Array.isArray(res.data) ? res.data : []; // never let a null/odd payload crash markers
+      } else {
+        checkpointError = String(res.error);
+      }
+    } catch (e) {
+      if (g !== checkpointGen) return;
+      checkpointError = e instanceof Error ? e.message : String(e);
+    } finally {
+      if (g === checkpointGen) checkpointLoading = false;
+    }
+  }
+
+  // Pull-only load: on Replay-tab enter with a folder set, or when the folder changes while the tab is
+  // open. A prior load error is left as-is (no retry storm); re-entering the tab / changing folder
+  // re-tries. Mirrors the `lastReplaySessionId` guard pattern — the `!==` guard prevents a re-run loop.
+  $: if (tab === "replay" && currentPath && currentPath !== lastCheckpointPath) {
+    lastCheckpointPath = currentPath;
+    clearCheckpointRestore();
+    loadCheckpoints(currentPath);
+  }
+
+  // off-means-off: leaving the Replay tab tears the whole checkpoint layer down (markers + panel +
+  // loaded list), exactly like the drawer closing. Guarded so it only fires once per exit.
+  $: if (tab !== "replay" && (checkpoints.length || lastCheckpointPath || selectedCheckpoint)) {
+    clearCheckpoints();
+  }
+
+  async function loadRevertPreview(cp: Checkpoint) {
+    if (!currentPath) return;
+    const g = ++revertPreviewGen;
+    revertPreviewLoading = true;
+    revertPreviewError = "";
+    revertPreview = null;
+    try {
+      const res = await commands.checkpointPreviewRevert(currentPath, cp.manifest_id);
+      if (g !== revertPreviewGen) return;
+      if (res.status === "ok") {
+        revertPreview = res.data;
+      } else {
+        revertPreviewError = String(res.error);
+      }
+    } catch (e) {
+      if (g !== revertPreviewGen) return;
+      revertPreviewError = e instanceof Error ? e.message : String(e);
+    } finally {
+      if (g === revertPreviewGen) revertPreviewLoading = false;
+    }
+  }
+
+  /** Click a marker: stop playback, jump the scrubber to the checkpoint's moment, and open its
+   *  restore panel (loading the revert preview). Out-of-range `ts` is snapped back into the track by
+   *  the existing range-clamp reactive above — the panel still shows the true checkpoint either way. */
+  function selectCheckpoint(cp: Checkpoint) {
+    stopPlaying();
+    t = cp.ts;
+    selectedCheckpoint = cp;
+    cpConfirming = false;
+    revertOutcome = null;
+    revertError = "";
+    loadRevertPreview(cp);
+  }
+
+  const armCheckpointRevert = () => { cpConfirming = true; };
+  const cancelCheckpointRevert = () => { cpConfirming = false; };
+
+  async function doCheckpointRevert() {
+    if (!selectedCheckpoint || !currentPath) return;
+    const cp = selectedCheckpoint;
+    cpConfirming = false;
+    reverting = true;
+    revertError = "";
+    revertOutcome = null;
+    try {
+      const res = await commands.checkpointRevert(currentPath, cp.manifest_id);
+      if (res.status === "ok") {
+        revertOutcome = res.data;
+        // A revert changes the tree, so the plan is now stale — refresh both the list and the preview.
+        loadCheckpoints(currentPath);
+        loadRevertPreview(cp);
+      } else {
+        revertError = String(res.error);
+      }
+    } catch (e) {
+      revertError = e instanceof Error ? e.message : String(e);
+    } finally {
+      reverting = false;
+    }
+  }
+
+  const cpTime = (ms: number) => new Date(ms).toLocaleString();
+  const cpShortId = (id: string) => (id.length > 12 ? `${id.slice(0, 12)}…` : id);
+  const cpMarkerTitle = (m: { cp: Checkpoint; inRange: boolean }) =>
+    `${m.cp.label || cpShortId(m.cp.manifest_id)} — ${cpTime(m.cp.ts)}` +
+    (m.inRange ? "" : " (outside the recorded window — pinned to the track edge)");
 
   const jumpStart = () => {
     stopPlaying();
@@ -546,19 +716,110 @@
           >{s}×</button>
         {/each}
       </div>
-      <input
-        class="rp-slider"
-        type="range"
-        min={range.firstAt}
-        max={range.lastAt}
-        step="1"
-        value={t}
-        disabled={range.firstAt === range.lastAt}
-        on:input={onSliderInput}
-        aria-label="Replay position"
-        aria-valuetext={new Date(t).toLocaleTimeString()}
-      />
+      <!-- Scrubber track wrapped so checkpoint marker pins (CPE-1126) can be absolutely positioned
+           over the same span as the slider thumb (`left: fraction*100%`). -->
+      <div class="rp-track">
+        <input
+          class="rp-slider"
+          type="range"
+          min={range.firstAt}
+          max={range.lastAt}
+          step="1"
+          value={t}
+          disabled={range.firstAt === range.lastAt}
+          on:input={onSliderInput}
+          aria-label="Replay position"
+          aria-valuetext={new Date(t).toLocaleTimeString()}
+        />
+        {#if cpMarkers.length > 0}
+          <div class="rp-markers" data-testid="checkpoint-markers" aria-hidden="false">
+            {#each cpMarkers as m (m.cp.manifest_id)}
+              <button
+                class="rp-marker"
+                class:out={!m.inRange}
+                class:sel={selectedCheckpoint?.manifest_id === m.cp.manifest_id}
+                style="left: {m.fraction * 100}%"
+                title={cpMarkerTitle(m)}
+                aria-label={`Checkpoint ${m.cp.label || cpShortId(m.cp.manifest_id)}`}
+                data-testid="checkpoint-marker-{m.cp.manifest_id}"
+                on:click={() => selectCheckpoint(m.cp)}
+              ></button>
+            {/each}
+          </div>
+        {/if}
+      </div>
       <div class="rp-clock">{new Date(t).toLocaleTimeString()} <span class="rp-frac">({Math.round(sliderFraction(range, t) * 100)}%)</span></div>
+
+      <!-- Checkpoint restore panel (CPE-1126): revert plan + drift warning + two-step confirm,
+           mirroring CheckpointDialog's safety pattern. Opens when a marker is selected. -->
+      {#if selectedCheckpoint}
+        <div class="cp-restore" data-testid="checkpoint-restore-panel">
+          <div class="cp-restore-head">
+            <span class="cp-restore-title">Restore to checkpoint</span>
+            <button class="cp-restore-close" title="Dismiss" aria-label="Dismiss restore panel" on:click={clearCheckpointRestore}>
+              <Icon name="close" size={12} />
+            </button>
+          </div>
+          <div class="cp-restore-id" title={selectedCheckpoint.manifest_id}>
+            {selectedCheckpoint.label || cpShortId(selectedCheckpoint.manifest_id)}
+            <span class="cp-restore-meta">{cpTime(selectedCheckpoint.ts)}</span>
+          </div>
+
+          {#if revertPreviewLoading}
+            <div class="tl-empty cp-restore-empty">Previewing revert…</div>
+          {:else if revertPreviewError}
+            <div class="cp-restore-err" data-testid="checkpoint-preview-error">Couldn't preview revert: {revertPreviewError}</div>
+          {:else if revertPreview}
+            <div class="cp-counts" data-testid="checkpoint-counts">
+              <span class="cp-count">creates {revertPreview.creates}</span>
+              <span class="cp-count">overwrites {revertPreview.overwrites}</span>
+              <span class="cp-count">deletes {revertPreview.deletes}</span>
+              <span class="cp-count">{formatBytes(revertPreview.bytes_written)} to write</span>
+              <span class="cp-count" class:drift={revertPreview.drift_count > 0}>drift {revertPreview.drift_count}</span>
+            </div>
+            {#if revertPreview.drift_count > 0}
+              <div class="cp-drift-warn" data-testid="checkpoint-drift-warning">
+                <strong>{revertPreview.drift_count} file{revertPreview.drift_count === 1 ? "" : "s"} changed since this checkpoint</strong>
+                — reverting overwrites that newer work. Review before you revert.
+              </div>
+              <div class="cp-drift-list">
+                {#each revertPreview.drift_paths as p (p)}<div class="cp-drift-item" title={p}>{p}</div>{/each}
+              </div>
+            {/if}
+          {/if}
+
+          {#if revertOutcome}
+            <div class="cp-outcome" data-testid="checkpoint-outcome">
+              Reverted — applied {revertOutcome.applied} change{revertOutcome.applied === 1 ? "" : "s"}{#if revertOutcome.skipped.length}, skipped {revertOutcome.skipped.length}{/if}.
+            </div>
+          {/if}
+          {#if revertError}<div class="cp-restore-err">{revertError}</div>{/if}
+
+          {#if cpConfirming}
+            <div class="cp-confirm" data-testid="checkpoint-confirm-revert">
+              <p class="cp-confirm-msg">
+                This overwrites, recreates, and deletes files under <strong>{currentPath}</strong> to match
+                <strong>{selectedCheckpoint.label || cpShortId(selectedCheckpoint.manifest_id)}</strong>. This cannot be undone.
+              </p>
+              <div class="cp-confirm-actions">
+                <button class="cp-btn" data-testid="checkpoint-confirm-cancel" on:click={cancelCheckpointRevert}>Cancel</button>
+                <button class="cp-btn danger" data-testid="checkpoint-confirm-yes" disabled={reverting} on:click={doCheckpointRevert}>
+                  Yes, revert
+                </button>
+              </div>
+            </div>
+          {:else}
+            <div class="cp-restore-actions">
+              <button
+                class="cp-btn danger"
+                data-testid="checkpoint-revert-btn"
+                disabled={reverting || revertPreviewLoading || !currentPath}
+                on:click={armCheckpointRevert}
+              >Revert to this checkpoint…</button>
+            </div>
+          {/if}
+        </div>
+      {/if}
 
       {#if replayCurrent}
         <div class="rp-current">
@@ -1118,12 +1379,62 @@
     border-color: var(--accent, #2f6fed);
     font-weight: 600;
   }
+  /* CPE-1126: the slider now lives inside `.rp-track` so marker pins can overlay the same span.
+     The track carries the horizontal inset the slider used to own; the slider fills it. */
+  .rp-track {
+    position: relative;
+    margin: 2px 10px 0;
+    flex: 0 0 auto;
+  }
   .rp-slider {
     display: block;
-    width: calc(100% - 20px);
-    margin: 2px 10px 0;
+    width: 100%;
+    margin: 0;
     accent-color: var(--accent, #2f6fed);
-    flex: 0 0 auto;
+  }
+  /* Marker overlay: pins sit above the track, click-through everywhere except on a pin itself. The
+     small horizontal insets keep an edge-pinned marker fully visible rather than half-clipped. */
+  .rp-markers {
+    position: absolute;
+    left: 0;
+    right: 0;
+    top: 0;
+    bottom: 0;
+    pointer-events: none;
+  }
+  .rp-marker {
+    position: absolute;
+    top: 50%;
+    width: 10px;
+    height: 14px;
+    margin-left: -5px;
+    padding: 0;
+    transform: translateY(-50%);
+    border: 1px solid var(--surface, #1e1e1e);
+    border-radius: 3px;
+    background: var(--accent, #2f6fed);
+    box-shadow: 0 0 0 1px color-mix(in srgb, var(--accent, #2f6fed) 60%, transparent);
+    cursor: pointer;
+    pointer-events: auto;
+  }
+  .rp-marker:hover {
+    background: color-mix(in srgb, var(--accent, #2f6fed) 82%, #fff);
+  }
+  .rp-marker.sel {
+    background: var(--accent, #2f6fed);
+    box-shadow: 0 0 0 2px var(--accent, #2f6fed);
+    height: 18px;
+  }
+  /* Out-of-range (clamped to a track edge): a subtly distinct hollow/muted pin so it reads as
+     "outside the recorded window" rather than a normal in-window checkpoint. */
+  .rp-marker.out {
+    background: var(--surface-alt, #2a2a2a);
+    border-color: var(--text-muted, #9a9a9a);
+    box-shadow: none;
+    opacity: 0.75;
+  }
+  .rp-marker.out:hover {
+    background: color-mix(in srgb, var(--text-muted, #9a9a9a) 30%, var(--surface-alt, #2a2a2a));
   }
   .rp-clock {
     padding: 2px 10px 8px;
@@ -1173,6 +1484,174 @@
   .rp-current-row {
     background: color-mix(in srgb, var(--accent, #2f6fed) 14%, transparent);
     border-radius: 5px;
+  }
+
+  /* ---------- Checkpoint restore panel (CPE-1126, epic CPE-732 GUI cap) ---------- */
+  /* A real visible border (not just a shadow), theme vars only — mirrors CheckpointDialog's language. */
+  .cp-restore {
+    margin: 4px 8px 8px;
+    padding: 8px 10px 10px;
+    border: 1px solid var(--border-strong, var(--border, #3a3a3a));
+    border-radius: 6px;
+    background: var(--surface-alt, transparent);
+    flex: 0 0 auto;
+  }
+  .cp-restore-head {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    margin-bottom: 2px;
+  }
+  .cp-restore-title {
+    flex: 1 1 auto;
+    font-size: 10.5px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.03em;
+    color: var(--text-muted, #9a9a9a);
+  }
+  .cp-restore-close {
+    flex: 0 0 auto;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 20px;
+    height: 20px;
+    padding: 0;
+    border: 0;
+    background: none;
+    color: var(--text, inherit);
+    cursor: pointer;
+    border-radius: 4px;
+  }
+  .cp-restore-close:hover {
+    background: rgba(128, 128, 128, 0.18);
+  }
+  .cp-restore-id {
+    font-size: 12.5px;
+    font-weight: 600;
+    color: var(--text, inherit);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    margin-bottom: 6px;
+  }
+  .cp-restore-meta {
+    margin-left: 6px;
+    font-size: 10.5px;
+    font-weight: 400;
+    color: var(--text-muted, #9a9a9a);
+  }
+  .cp-restore-empty {
+    padding: 6px 0;
+  }
+  .cp-restore-err {
+    padding: 4px 0;
+    font-size: 11.5px;
+    color: var(--danger, #c0392b);
+  }
+  /* Counts row — tick-tacks: reflow onto more rows, each pill one-line and non-shrinking. */
+  .cp-counts {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+    margin-bottom: 4px;
+  }
+  .cp-count {
+    flex: 0 0 auto;
+    white-space: nowrap;
+    padding: 1px 8px;
+    border-radius: 999px;
+    border: 1px solid var(--border, #3a3a3a);
+    background: var(--surface, transparent);
+    color: var(--text-muted, #9a9a9a);
+    font-size: 10.5px;
+    font-weight: 600;
+    font-variant-numeric: tabular-nums;
+  }
+  .cp-count.drift {
+    color: var(--warn, #b8860b);
+    border-color: var(--warn, #b8860b);
+  }
+  /* Prominent drift warning when reverting would clobber work changed since the checkpoint. */
+  .cp-drift-warn {
+    margin: 4px 0;
+    padding: 6px 8px;
+    border: 1px solid var(--warn, #b8860b);
+    border-radius: 5px;
+    background: color-mix(in srgb, var(--warn, #b8860b) 16%, transparent);
+    color: var(--text, inherit);
+    font-size: 11px;
+    line-height: 1.4;
+  }
+  .cp-drift-list {
+    max-height: 12vh;
+    overflow: auto;
+    margin-bottom: 4px;
+  }
+  .cp-drift-item {
+    padding: 1px 0;
+    font-size: 11px;
+    color: var(--text-muted, #9a9a9a);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .cp-outcome {
+    margin: 4px 0;
+    font-size: 11.5px;
+    color: var(--text, inherit);
+  }
+  .cp-restore-actions {
+    display: flex;
+    justify-content: flex-end;
+    margin-top: 4px;
+  }
+  .cp-btn {
+    height: 28px;
+    padding: 0 12px;
+    border: 1px solid var(--border-strong, var(--border, #3a3a3a));
+    border-radius: 5px;
+    background: var(--surface, transparent);
+    color: var(--text, inherit);
+    font-size: 12px;
+    cursor: pointer;
+  }
+  .cp-btn:hover:not(:disabled) {
+    background: rgba(128, 128, 128, 0.14);
+  }
+  .cp-btn:disabled {
+    opacity: 0.4;
+    cursor: default;
+  }
+  /* Destructive treatment reuses CheckpointDialog's red — a literal here, matching that dialog, since
+     the palette has no dedicated destructive token; this is the one sanctioned red (a revert). */
+  .cp-btn.danger {
+    border-color: #c42b1c;
+    color: #fff;
+    background: #c42b1c;
+  }
+  .cp-btn.danger:hover:not(:disabled) {
+    background: #b0271a;
+  }
+  /* Two-step confirm panel — same red-tinted surface CheckpointDialog uses. */
+  .cp-confirm {
+    margin-top: 6px;
+    padding: 8px 10px;
+    border: 1px solid #c42b1c;
+    border-radius: 5px;
+    background: color-mix(in srgb, #c42b1c 8%, var(--surface, #1e1e1e));
+  }
+  .cp-confirm-msg {
+    margin: 0 0 8px;
+    font-size: 11.5px;
+    line-height: 1.45;
+    color: var(--text, inherit);
+  }
+  .cp-confirm-actions {
+    display: flex;
+    justify-content: flex-end;
+    gap: 8px;
   }
 
   /* ---------- Reconstructed folder listing (CPE-1111, epic CPE-728 slice d) ---------- */

@@ -1,4 +1,5 @@
 import type { TimelineEntry } from "./agentActivity";
+import type { Checkpoint } from "./bindings.gen";
 
 /**
  * Pure helpers behind the Agent Watch **replay scrubber** (CPE-1094). `agentTimeline` (durable,
@@ -124,4 +125,48 @@ export function isMultiplyEdited(timeline: TimelineEntry[], path: string): boole
     }
   }
   return false;
+}
+
+/**
+ * A checkpoint (CPE-1123/1125) positioned on the Replay scrubber track (CPE-1126, epic CPE-732).
+ * `fraction` is a 0..1 track position for `left: fraction*100%`, computed with the SAME math as
+ * `sliderFraction`. `inRange` is whether the checkpoint's `ts` actually falls within the recorded
+ * `[firstAt, lastAt]` window — a checkpoint taken before the session began recording, or after the
+ * last recorded action, is `inRange:false` and its `fraction` is CLAMPED to the nearest track edge
+ * (0 or 1) so its pin still shows, pinned to the edge, rather than overflowing off the track.
+ */
+export interface CheckpointMarker {
+  cp: Checkpoint;
+  fraction: number;
+  inRange: boolean;
+}
+
+/**
+ * Map each checkpoint's `ts` onto the scrubber track for `range`. Pure — no store/DOM. Mirrors
+ * `sliderFraction`'s division-safety and clamping so markers line up exactly with the thumb:
+ * - `range === null` (nothing to scrub, <2 entries) → `[]`.
+ * - degenerate `firstAt === lastAt` → every marker at `fraction:0` (never divides by zero); a
+ *   marker is `inRange` only if its `ts` equals that single point.
+ * - otherwise `fraction = (ts - firstAt) / (lastAt - firstAt)`, clamped to `[0, 1]`, with
+ *   `inRange = firstAt <= ts <= lastAt`.
+ * Input order is preserved (the caller decides ordering).
+ */
+export function checkpointMarkers(
+  range: SliderRange | null,
+  checkpoints: Checkpoint[],
+): CheckpointMarker[] {
+  if (!range) return [];
+  const { firstAt, lastAt } = range;
+  const degenerate = lastAt === firstAt;
+  return checkpoints.map((cp) => {
+    const inRange = cp.ts >= firstAt && cp.ts <= lastAt;
+    let fraction: number;
+    if (degenerate) {
+      fraction = 0;
+    } else {
+      const raw = (cp.ts - firstAt) / (lastAt - firstAt);
+      fraction = raw < 0 ? 0 : raw > 1 ? 1 : raw;
+    }
+    return { cp, fraction, inRange };
+  });
 }
