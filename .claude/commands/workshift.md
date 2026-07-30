@@ -100,6 +100,7 @@ Library hit or a decide-and-log over a fresh spawn.
 | **Reviewer** | per-ticket | An **independent** sub-agent (NOT the author) that re-checks a worker's PR before merge — the code QA gate. |
 | **QA Architect** | per-shift | Owns the mission to **eliminate manual testing over time** — the user's stated goal is to *never test anything by hand*. It doesn't test one ticket; it makes the **whole app more automatically testable every shift**, driving **Manual Verification Debt (MVD)** — the count of surfaces still needing human eyes — monotonically to zero. Each shift it audits for new manual debt (every UAT skip-and-note becomes a burndown row), picks the highest-leverage manual surface, and **files a `CPE-NNN` ticket** for a Worker to build the automation (headless GUI driving, smoke-install CI, visual-regression, self-asserting examples, cross-OS runners…). Once a surface is automated a CI/guard job **pins** it so it never regresses. Charter + burndown ledger: `.claude/qa-architecture/`. Distinct from the Reviewer (checks code) and UAT Tester (exercises this feature) — the QA Architect improves the **testing system itself**. |
 | **UAT Tester** | per-ticket | An **independent** sub-agent responsible for **user acceptance testing** — it stands in for the end user and checks the change *from the outside*: does it actually do what the user asked, is the behaviour/UX acceptable, does it meet the ticket's acceptance criteria as a person would experience them (not just as unit tests assert)? Distinct from the Reviewer (who scrutinises the code); the UAT Tester exercises the **feature**. For user-facing/GUI changes it drives the real build (see GUI verification below); for headless/backend changes it exercises the command or API surface end-to-end. Signs off `UAT PASS` / `UAT FAIL` with concrete reproduction of what it did. |
+| **Visual Critic** | per-ticket (GUI changes only) | An **independent** sub-agent with **good design taste** that *looks at* the work — it reads the **screenshots** captured by the `gui-smoke` harness (CPE-1148) of the real built app and judges the **visual result** against the design standards ([docs/design/MENUS.md](../../docs/design/MENUS.md), [TABS.md](../../docs/design/TABS.md), the pill/tick-tack reflow rules, the light-theme palette, alignment/spacing) **and** plain "does this look and feel right". It is the gauntlet's **visual leg** — Reviewer checks the *code*, UAT checks the *behaviour*, the Critic checks the *look/feel*. Returns **`VISUAL PASS`** or **`VISUAL CHANGES`** with concrete, screenshot-grounded defects (clipped / misaligned / misplaced / wrong-or-ambiguous glyph / off-theme / cramped). Its whole purpose is to **catch the visual defects that used to bounce to the user** (placement, clipping, icon legibility) so the user is asked **minimally** — only for a genuinely subjective taste/preference call (and then via a concrete pick-list), or for something a screenshot can't show (interaction feel / animation cadence). See [[visual-critic-and-screenshots]]. |
 | **Janitor** | per-shift (light between-merges) | Keeps the workspace clean so the crew stays fast. Between merges it reclaims **abandoned resources** and tidies up (see the Janitor duties section below) — leftover git worktrees from finished workers, merged/stale branches, orphaned `.claude/uat-*` and scratchpad temp dirs, and an overstuffed `Ticketing/Tickets/Done/` (runs `/ticketing-organize`). It works **non-destructively by default** and never touches another live process's resources (worktrees/branches/untracked dirs in use — see [[concurrent-nightshift-coordination]]). For a **deep clean** that would collide with active workers (pruning worktrees, `git gc`, reorganising `Done/`), the Janitor asks the **Foreman to call a break** — quiesce dispatch, let in-flight PRs settle — then cleans on the quiet tree and signals all-clear. |
 
 Spawning sub-agents is **pre-authorised** during a workshift (this overrides the default "don't spawn agents
@@ -144,7 +145,8 @@ Timestamp it in local time like every on-screen message. Then begin.
 ## The per-ticket pipeline — ≥2 independent checks + UAT before "Done"
 
 ```
-Worker builds + self-tests  →  INDEPENDENT Reviewer re-checks (code)  →  INDEPENDENT UAT Tester exercises the feature  →  (CI)  →  Foreman merges → push
+Worker builds + self-tests → INDEPENDENT Reviewer re-checks (code) → INDEPENDENT UAT exercises the feature
+  → [GUI change: gui-smoke SCREENSHOTS → INDEPENDENT Visual Critic judges the look] → (CI) → Foreman merges → push
 ```
 
 A ticket is **never** marked Done / merged on the worker's own say-so. Distinct checks are required:
@@ -166,8 +168,19 @@ A ticket is **never** marked Done / merged on the worker's own say-so. Distinct 
    end-to-end. It returns **`UAT PASS`** / **`UAT FAIL`** with a concrete record of what it did and observed.
    If UAT can't run without a user resource (interactive cross-OS GUI verification, credentials, etc.), the
    Foreman applies the skip-and-note escalation rather than faking a pass.
+4. **Independent Visual Critic (GUI changes only)** — for a change that alters what the app *looks like*, the
+   worker's (or a dedicated) `gui-smoke` run **captures screenshots** of the affected surface(s) (CPE-1148),
+   and the Foreman dispatches a **separate** taste-aware sub-agent to *look at* them and judge the visual
+   result against the design standards (MENUS/TABS/pill-reflow/light-theme/alignment) + good taste. It returns
+   **`VISUAL PASS`** / **`VISUAL CHANGES`** (concrete, screenshot-grounded defects). This is the leg that
+   **replaces the user's routine eyes-on**: placement, clipping, misalignment, wrong/ambiguous glyphs, and
+   off-theme are all screenshot-visible and get caught + routed back to the worker **without the user**. The
+   Critic escalates to the user **only** for (a) a genuinely subjective taste/preference call — and then as a
+   concrete pick-list, never an open question — or (b) something a screenshot can't reveal (interaction feel,
+   animation cadence, real-hardware behaviour). Headless/backend tickets skip this leg.
 
-The **Foreman merges only after both the Reviewer signs off AND the UAT Tester returns `UAT PASS`.** On
+The **Foreman merges only after the Reviewer signs off, the UAT Tester returns `UAT PASS`, AND (for a GUI
+change) the Visual Critic returns `VISUAL PASS`.** On
 `CHANGES REQUESTED` or `UAT FAIL`, route the findings back to the worker (or apply a precise
 reviewer-prescribed fix), then **re-review + re-run UAT** — but this loop is **bounded, not infinite** (see the
 circuit breaker below); log the outcome in the ticket / PR. **CI green is a further automated check** but does
@@ -457,6 +470,18 @@ one), kill every `cpe`/`ai-console` process (incl. `--session-daemon`) **before*
 the file-locked sidecar, verify the installed version + sidecar timestamp, then launch + confirm it's
 responding. Bracket it with the ASCII **WAIT → ① BUILD → ② DEPLOY → ③ RUN → RUNNING → checklist** narration.
 See [[gui-verify-needs-build-deploy-run]], [[always-install-sidecar-build]], [[install-kill-all-processes-first]].
+
+**The Visual Critic comes first — minimise the user's eyes-on (CPE-1148).** Before pulling the user in to
+*look*, the routine visual check is the **Visual Critic reading `gui-smoke` screenshots** (per-ticket gauntlet
+step 4 above). It catches the defects that used to cost a user round-trip — placement, clipping, misalignment,
+wrong/ambiguous icons, off-theme, cramped spacing — and routes them back to the worker with **zero user
+involvement**. Only bring the user into a build → deploy → run when: (a) a genuinely **subjective taste** call
+remains (and present it as a concrete pick-list, not an open question), or (b) something a screenshot can't
+show — **interaction feel**, animation cadence, drag latency, real-hardware behaviour — needs live hands. So
+build→deploy→run-with-the-user becomes a **final confirmation / interaction-feel** check, not the
+every-iteration catch-obvious-defects loop it used to be. The user stays the ultimate backstop; they're just
+touched far less. (The button-placement/icon/clipping saga that motivated this was almost entirely
+screenshot-visible — only the pure icon *preference* legitimately needed the user.)
 
 ## Machine-sharing (do NOT auto-yield)
 
