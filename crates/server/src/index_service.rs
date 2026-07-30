@@ -219,6 +219,49 @@ impl IndexService {
     pub fn clear(&self) {
         self.volumes.lock().unwrap().clear();
     }
+
+    /// Apply a batch of watch-derived [`crate::index_watch::IndexMutation`]s to `volume_id`'s resident
+    /// index under a **single** lock acquisition (CPE-1138, epic CPE-703). The `notify` adapter in
+    /// `src-tauri` debounces a burst of OS filesystem events into one batch per flush window (mirroring
+    /// `FolderWatchState`'s coalescing pump) and calls this once per batch — via
+    /// [`crate::index_watch::plan_from_events`] — so a `git checkout` storm takes one lock + at most one
+    /// save, not one of each per event.
+    ///
+    /// A no-op (`Ok(false)`) when `volume_id` isn't resident (a benign race with
+    /// [`IndexService::drop_volume`]/[`IndexService::clear`], or a watcher outliving the build it was
+    /// started for — the watcher's teardown just hasn't caught up yet) or `mutations` is empty. Persists
+    /// (`save`) once at the end **only if** at least one mutation actually changed the index — the
+    /// "debounced save" the design calls for; a batch that mutates nothing (e.g. every remove targeted an
+    /// already-tombstoned path) skips the disk write entirely.
+    pub fn apply_mutations(
+        &self,
+        dir: &Path,
+        volume_id: u64,
+        mutations: &[crate::index_watch::IndexMutation],
+    ) -> Result<bool, String> {
+        use crate::index_watch::IndexMutation;
+        if mutations.is_empty() {
+            return Ok(false);
+        }
+        let mut vols = self.volumes.lock().unwrap();
+        let Some(idx) = vols.get_mut(&volume_id) else {
+            return Ok(false);
+        };
+        let mut changed = false;
+        for m in mutations {
+            let did = match m {
+                IndexMutation::Create { path, is_dir } => idx.apply_create(path, *is_dir).is_some(),
+                IndexMutation::Remove { path } => idx.apply_remove(path),
+                IndexMutation::Rename { from, to } => idx.apply_rename(from, to),
+            };
+            changed |= did;
+        }
+        if changed {
+            std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
+            idx.save(&Self::volume_path(dir, volume_id)).map_err(|e| e.to_string())?;
+        }
+        Ok(changed)
+    }
 }
 
 #[cfg(test)]

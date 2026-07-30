@@ -1294,7 +1294,9 @@ async indexStatus() : Promise<VolumeStatus[]> {
     return await TAURI_INVOKE("index_status");
 },
 /**
- * Drop `volume_id` from memory and delete its on-disk index file. Returns whether the volume was resident.
+ * Drop `volume_id` from memory and delete its on-disk index file. Returns whether the volume was
+ * resident. Also stops (CPE-1138) any live watcher for the volume — off means off: a dropped volume
+ * leaves no watcher thread/handle behind, resident or not (a `stop` on an unarmed volume is a no-op).
  */
 async indexDrop(volumeId: number) : Promise<Result<boolean, string>> {
     try {
@@ -1306,6 +1308,7 @@ async indexDrop(volumeId: number) : Promise<Result<boolean, string>> {
 },
 /**
  * Free every resident volume from memory (on-disk files are kept; a later `index_search` reloads them).
+ * Also stops (CPE-1138) every live watcher — off means off.
  */
 async indexClear() : Promise<void> {
     await TAURI_INVOKE("index_clear");
