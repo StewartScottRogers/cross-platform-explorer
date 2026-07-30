@@ -4,6 +4,8 @@ import {
   resizeColumnTo,
   boundaryOffsets,
   COLUMN_MINS,
+  NAME_COL_MIN,
+  MID_MIN,
 } from "./columns";
 
 describe("columnsTemplate (CPE-350)", () => {
@@ -42,5 +44,20 @@ describe("resizeColumnTo (CPE-350)", () => {
 describe("boundaryOffsets (CPE-350)", () => {
   it("accumulates from the left padding to each column's right edge", () => {
     expect(boundaryOffsets([320, 150, 120, 90], 10)).toEqual([330, 480, 600, 690]);
+  });
+});
+
+// CPE-1140: the middle (file-list) pane's derived minimum must never be smaller than the
+// leftmost Name column's own minimum — the middle pane can never be narrower than that column.
+describe("MID_MIN (CPE-1140)", () => {
+  it("equals NAME_COL_MIN", () => {
+    expect(NAME_COL_MIN).toBe(COLUMN_MINS[0]);
+  });
+  it("is at least the Name column's own minimum", () => {
+    expect(MID_MIN).toBeGreaterThanOrEqual(NAME_COL_MIN);
+  });
+  it("is at least the sum of every visible column's minimum width", () => {
+    const sum = COLUMN_MINS.reduce((a, b) => a + b, 0);
+    expect(MID_MIN).toBeGreaterThanOrEqual(sum);
   });
 });
