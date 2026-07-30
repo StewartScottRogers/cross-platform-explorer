@@ -99,7 +99,7 @@
   import { matchesGlob } from "./lib/glob";
   import PatternSelectDialog from "./lib/components/PatternSelectDialog.svelte";
   import { firstMatchIndex } from "./lib/typeahead";
-  import { clampWidth, maxSidePaneWidth, PANE_DIVIDER_W } from "./lib/resize";
+  import { clampWidth, maxSidePaneWidth, fitSidePanes, PANE_DIVIDER_W } from "./lib/resize";
   import { MID_MIN, NAME_COL_MIN } from "./lib/columns";
   import {
     createHistory, visit, back, forward, canGoBack, canGoForward, current, recentPaths,
@@ -2634,8 +2634,18 @@
     // drag-resize handlers use, so load and drag can never disagree.
     sidebarWidth = settings.loadSidebarWidth();
     rightWidth = settings.loadRightWidth();
-    sidebarWidth = clampWidth(sidebarWidth, SIDEBAR_MIN, sidebarMaxWidth());
-    rightWidth = clampWidth(rightWidth, RIGHT_MIN, rightMaxWidth());
+    if (showDetails && !dualPane) {
+      // Both side panes are live: fit them TOGETHER (order-independent) so two large persisted widths on a
+      // now-narrower window shrink proportionally instead of the first-clamped pane absorbing the whole
+      // squeeze (CPE-1140 review). Budget = window minus the two dividers and the middle's minimum.
+      const budget = window.innerWidth - 2 * PANE_DIVIDER_W - MID_MIN;
+      [sidebarWidth, rightWidth] = fitSidePanes(sidebarWidth, rightWidth, SIDEBAR_MIN, RIGHT_MIN, budget);
+    } else {
+      // Only the sidebar competes with the middle here (right pane absent / is a dual-pane file column), so
+      // its single dynamic clamp is already order-independent.
+      sidebarWidth = clampWidth(sidebarWidth, SIDEBAR_MIN, sidebarMaxWidth());
+      rightWidth = clampWidth(rightWidth, RIGHT_MIN, rightMaxWidth());
+    }
     pins = settings.loadPins();
     recents = settings.loadRecents();
     favorites = settings.loadFavorites();

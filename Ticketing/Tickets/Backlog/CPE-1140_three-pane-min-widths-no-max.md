@@ -127,3 +127,19 @@ Desired behaviour (from the user):
 - **Left unchecked:** the GUI-verify half of the last AC line (drag both side panes very wide on the real
   build; shrink the window) — that's the Foreman + user's build → deploy → run pass, per the ticket
   instructions.
+
+## Review fix (2026-07-29, Foreman-applied per reviewer CHANGES REQUESTED)
+- **Load-time re-clamp was order-dependent:** it computed `sidebarMaxWidth()` from the *raw* persisted right
+  width, then clamped the right from the already-shrunk sidebar — so whichever pane was clamped first absorbed
+  the entire squeeze, and a valid persisted sidebar could be needlessly forced to its min when the right pane's
+  persisted width was large (now reachable since the fixed maxes are gone). Invariants held (nothing collapsed
+  below min; middle stayed ≥ MID_MIN) but the allocation was unbalanced + contradicted the "drag and load agree"
+  claim.
+- **Fix:** new pure `fitSidePanes(sidebar, right, sidebarMin, rightMin, budget)` in `resize.ts` — floors each at
+  its own min, and when the two overflow the shared budget (`window − 2·divider − MID_MIN`) trims each
+  **proportionally to its slack above its min**, so neither is gratuitously collapsed (order-independent). Used
+  in `applySettings` for the both-panes mode (`showDetails && !dualPane`); the single-sidebar modes keep the
+  existing clamp (already order-independent there).
+- **Tests:** 4 new `fitSidePanes` cases in `resize.test.ts` — already-fit no-op, proportional shrink of two
+  oversized panes (neither collapses to min; order-independent), too-narrow floors both at min, below-min raises
+  to min. resize.test.ts now 14 tests; `npm run check` clean.

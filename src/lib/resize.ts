@@ -33,3 +33,39 @@ export function maxSidePaneWidth(
   const available = windowWidth - otherPanesWidth - dividerWidth * dividerCount - midMin;
   return Math.max(min, available);
 }
+
+/**
+ * CPE-1140 (review follow-up): fit BOTH persisted side-pane widths together on load, order-independently.
+ *
+ * The per-pane {@link maxSidePaneWidth} clamp is correct for a single drag (the other pane's width is
+ * already settled), but applying it sequentially at load — clamp the sidebar using the *raw* persisted
+ * right width, then clamp the right using the already-shrunk sidebar — makes whichever pane is clamped
+ * first absorb the entire squeeze, so a perfectly valid persisted sidebar could be forced to its min just
+ * because the right pane's persisted width is large (reachable now that the fixed maxes are gone).
+ *
+ * This shares the available room (`budget = windowWidth − dividers − midMin`) between the two panes and,
+ * when the two persisted widths overflow it, trims each **proportionally to its slack above its own min**,
+ * so neither is gratuitously collapsed. Each pane stays ≥ its own min; if the window is so narrow that
+ * both mins + `midMin` don't fit, both land at their min and the middle pane's `minmax(midMin, 1fr)` grid
+ * track is the one that overflows/scrolls (the ticket's narrow-window behaviour). Returns `[sidebar, right]`.
+ */
+export function fitSidePanes(
+  sidebar: number,
+  right: number,
+  sidebarMin: number,
+  rightMin: number,
+  budget: number,
+): [number, number] {
+  const s = Math.max(sidebarMin, sidebar);
+  const r = Math.max(rightMin, right);
+  const overflow = s + r - budget;
+  if (overflow <= 0) return [s, r];
+  const sSlack = s - sidebarMin;
+  const rSlack = r - rightMin;
+  const totalSlack = sSlack + rSlack;
+  if (totalSlack <= 0) return [s, r]; // both already at min — window too narrow; middle scrolls
+  return [
+    Math.max(sidebarMin, Math.round(s - overflow * (sSlack / totalSlack))),
+    Math.max(rightMin, Math.round(r - overflow * (rSlack / totalSlack))),
+  ];
+}
