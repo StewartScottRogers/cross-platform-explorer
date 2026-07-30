@@ -2,7 +2,7 @@
 id: CPE-707
 title: "EPIC: Custom & metadata columns"
 type: Task
-status: Proposed
+status: Done
 priority: Medium
 component: Multiple
 tags: [epic]
@@ -80,3 +80,6 @@ shift: doc-info (PDF) + video-tag. Remaining 707: the column-picker/persistence 
 
 ## Board hygiene 2026-07-29 — reverted In Progress → Proposed
 Not actively being worked: all decomposed child tickets are Done. Remaining DoD is user-gated (GUI / model-key / cert / Mac) or a deferred cap. Reverted to **Proposed** so the epic queue honestly shows what's dormant vs active; re-activate with `/ticketing-epic activate` to resume (like CPE-703 was this session). **Remaining (DoD review 2026-07-30):** Column-picker UI (add/remove/reorder) unbuilt (extractors + per-folder persistence shipped).
+
+## Closed 2026-07-30 — DoD met + GUI-verified
+The column-picker UI shipped (CPE-1145 streamed metadata_column_cells command + CPE-1146 dynamic FileList columns/picker/per-folder persistence/type-aware sort + CPE-1147 left-placement & grid icon), all through the full Reviewer+UAT gauntlet and user-GUI-verified: adding a metadata column shows real values, sorts type-aware (numeric, not lexical), and persists per folder. DoD ("users add metadata columns from a picker; they sort + format correctly; choices persist per folder") met. The per-family extractors + typed CellValue sort were already built (CPE-918/971/974/975/1028/1029); this wave wired + surfaced them. Editing metadata stays in the media studio (CPE-725), out of scope.

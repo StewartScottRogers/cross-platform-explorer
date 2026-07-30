@@ -4,7 +4,7 @@ title: "Column-picker button: move it to the LEFT of the header + use a more ind
 type: chore
 component: Frontend
 priority: medium
-status: Backlog
+status: Done
 tags: ready
 created: 2026-07-30
 epic: CPE-707
@@ -48,7 +48,7 @@ two small UI tweaks:
 - [x] `npm run check` green; existing `FileList.test.ts` (incl. the `open-column-picker` assertions) still
       passes; the `gui-smoke` `organize`/`instant-search`/`batch-media`/column pins unaffected (the testid is
       unchanged).
-- [ ] GUI-verified on the real build (button is left-of-header + the icon reads clearly). **Deferred to the
+- [x] GUI-verified on the real build (button is left-of-header + the icon reads clearly). **Deferred to the
       Foreman + user pass.**
 
 ## Work Log

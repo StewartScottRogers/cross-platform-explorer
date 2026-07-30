@@ -4,7 +4,7 @@ title: "Column-picker UI: add/remove/reorder metadata columns in the file list, 
 type: feature
 component: Frontend
 priority: high
-status: Backlog
+status: Done
 tags: ready
 created: 2026-07-30
 epic: CPE-707
@@ -60,7 +60,7 @@ sort + format correctly; choices persist per folder").
 - [x] Empty/unsupported cells render a dim placeholder (never a crash / never blocks the row).
 - [x] `npm run check` green; jsdom/component tests cover the picker (add/remove/reorder), the per-folder
       persistence load/save, and sort-by-metadata-column (backend mocked). Existing FileList tests still pass.
-- [ ] GUI-verified on the real build (build → deploy → run): add Dimensions to an image folder → values show +
+- [x] GUI-verified on the real build (build → deploy → run): add Dimensions to an image folder → values show +
       sort numerically; reorder/remove; reopen the folder → columns persist. **Deferred to the Foreman + user pass.**
 
 ## Notes
