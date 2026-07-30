@@ -4,7 +4,7 @@ title: "QA: pin the auto-organize dialog + Ctrl+K instant-search overlay renders
 type: chore
 component: Testing
 priority: medium
-status: Backlog
+status: Done
 tags: ready
 created: 2026-07-30
 epic: CPE-688
