@@ -531,3 +531,36 @@ Proposed epics) is user-gated: a **real model/embedder/API key** (976 semantic /
 snapshots / 738 vaults / 739 macro bindings / 978 smart-folders / 997 near-dup review / 1000/1002 detector
 surfacing / 1126 restore panel / 672-674 drag-out), a **cert** (CPE-002), or a **Mac** (717/829, 712).
 Next shift: pick a user-gated item to do together — no more solo headless work remains.
+
+## 2026-07-30 (attended feature — column-picker, epic CPE-707 CLOSED)
+
+User picked the column-picker (CPE-707) to build together after the frontier went user-gated. The metadata
+engine (per-family extractors + typed CellValue sort, CPE-918/971/974/975/1028/1029) was built-but-unwired, so
+this was enablement + UI, shipped in slices through the full Reviewer+UAT gauntlet + user GUI-verify:
+- **CPE-1145 (#460)** — streamed `metadata_column_cells` command + `metadata_columns_available` + MetaColumn/
+  CellValue wire + bindings. Opus reviewer caught a real data-correctness bug: the 1 MiB header cap made
+  `DocPages` (a linear /Type/Page scan) silently UNDERCOUNT a big PDF (wrong, not empty) — fixed to degrade to
+  Empty on a truncated read + a >1 MiB regression test.
+- **CPE-1146 (#461)** — dynamic FileList columns (reuses length-agnostic helpers), streamed visible-row fetch
+  guarded by loadGen, fetch-on-sort with type-aware `compareCellValues` (numeric/area, Empty-last), per-folder
+  `metaColumnsByFolder` persistence, ColumnPickerDialog + palette + header button. Reviewer + UAT both traced
+  the full journey; no CPE-1140 regression (MID_MIN built-ins-only).
+- **CPE-1147 (#462, #463)** — GUI-verify polish iterations: moved the picker button to the header LEFT
+  (absolute-positioned → zero grid tracks, can't misalign columns), switched the icon gear→**spreadsheet grid**
+  (user-chosen from a pick-list), and fixed the icon right-clip (shared `.col` overflow:hidden → overflow:visible
+  + width 24→28). Foreman-applied the tiny CSS/icon iterations directly.
+
+**Metrics:** 4 PRs merged · 0 escaped defects · gauntlet caught the PDF-undercount + the button clip/placement.
+
+**529 throttle applied:** after hitting `API Error 529 Overloaded`, dropped to single-agent/sequential dispatch
++ longer tick gaps (memory `[[circuit-breaker-for-retryable-errors]]`). No further overloads.
+
+**Process idea raised by the user (NOT yet built — awaiting go-ahead):** a **Visual Critic** role +
+gui-smoke **screenshot capture** so the workshift can judge GUI work from screenshots (as the gauntlet's visual
+leg, next to Reviewer=code / UAT=behavior) and escalate to the user minimally. This directly targets the
+button-polish round-trips (clip/placement are screenshot-visible; only pure icon *preference* needed the user).
+When approved: a QA-Architect ticket for the screenshot harness + a workshift-skill change adding the Critic to
+the crew + gauntlet. The manual-test burndown's row #1 (headless GUI) + row #3 (visual/theme regression) are the
+natural homes.
+
+**Frontier:** still user-gated (the 28 Proposed epics' remainders — model/GUI-together/cert/Mac).
