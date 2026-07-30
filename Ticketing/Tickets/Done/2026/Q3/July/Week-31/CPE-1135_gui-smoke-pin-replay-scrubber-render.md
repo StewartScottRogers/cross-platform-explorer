@@ -4,7 +4,7 @@ title: "QA: pin the Agent-Watch replay-scrubber render in gui-smoke (burn down C
 type: chore
 component: Testing
 priority: medium
-status: Backlog
+status: Done
 tags: ready
 created: 2026-07-29
 epic: CPE-728
