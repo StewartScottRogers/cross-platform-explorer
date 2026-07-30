@@ -43,6 +43,7 @@
       items: [
         { id: "content-search", labelKey: "mi.searchInFiles", hint: "Ctrl+Shift+F", icon: "search" },
         { id: "find-duplicates", labelKey: "mi.findDuplicates", icon: "copy" },
+        { id: "organize-folder", labelKey: "mi.organizeFolder", icon: "sort" },
         { sep: true },
         { id: "copy-file-names", labelKey: "mi.copyFileNames", icon: "rename" },
         { id: "copy-file-list", labelKey: "mi.copyFileList", icon: "copy" },

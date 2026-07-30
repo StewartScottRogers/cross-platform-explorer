@@ -2918,6 +2918,60 @@ async fn find_duplicates_stream(
     .map_err(|e| e.to_string())?
 }
 
+// ---- Rules-based auto-organize (CPE-1142, epic CPE-979) -------------------------------------------
+// Propose -> checkpoint -> apply, wired over the built+tested `cpe_server::organize` planner. The listing
+// + checkpoint + move glue lives in `cpe_server::organize_apply` (CPE-815 pattern); these commands are
+// thin `spawn_blocking` dispatchers. `organize_plan`/`organize_clutter` are read-only previews; only
+// `organize_apply` touches disk, and it always checkpoints `dir` first so the whole reorg is one undo.
+
+/// Propose an auto-organize plan for `dir` under `rule` — one [`cpe_server::organize::MoveProposal`] per
+/// file. Read-only: moves nothing.
+#[tauri::command]
+#[cfg_attr(feature = "specta-bindings", specta::specta)]
+async fn organize_plan(
+    dir: String,
+    rule: cpe_server::organize::OrganizeRule,
+) -> Result<Vec<cpe_server::organize::MoveProposal>, String> {
+    cpe_server::fs_route::require_local(&dir)?;
+    tauri::async_runtime::spawn_blocking(move || cpe_server::organize_apply::organize_plan(&dir, rule))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+/// Flag likely-clutter files in `dir` (zero-byte / installer / partial-download / backup leftovers).
+/// Read-only suggestion surface — never an auto-action.
+#[tauri::command]
+#[cfg_attr(feature = "specta-bindings", specta::specta)]
+async fn organize_clutter(dir: String) -> Result<Vec<cpe_server::organize::ClutterFinding>, String> {
+    cpe_server::fs_route::require_local(&dir)?;
+    tauri::async_runtime::spawn_blocking(move || cpe_server::organize_apply::organize_clutter(&dir))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+/// Apply an auto-organize plan for `dir` under `rule`: checkpoint `dir` first (one-undo for the whole
+/// reorg), then create each proposal's target subfolder and move the file into it (skip-on-error per
+/// file). Nothing runs until this is called explicitly — the dialog only calls it after the user reviews
+/// `organize_plan`'s preview and clicks Apply.
+#[tauri::command]
+#[cfg_attr(feature = "specta-bindings", specta::specta)]
+async fn organize_apply(
+    app: tauri::AppHandle,
+    dir: String,
+    rule: cpe_server::organize::OrganizeRule,
+) -> Result<cpe_server::organize_apply::OrganizeApplyOutcome, String> {
+    cpe_server::fs_route::require_local(&dir)?;
+    let ctx = server_ctx::TauriCtx::new(&app);
+    let outcome = tauri::async_runtime::spawn_blocking(move || cpe_server::organize_apply::organize_apply(&ctx, &dir, rule))
+        .await
+        .map_err(|e| e.to_string())??;
+    // Both the vacated original path and the new target path are ours (CPE-1101), mirroring move_exact.
+    note_app_op(&app, || {
+        outcome.results.iter().filter(|r| r.ok).map(|r| r.path.clone()).collect()
+    });
+    Ok(outcome)
+}
+
 /// Read `settings.json` from `dir`, returning `{}` when it's absent or
 /// unreadable so the frontend always starts from a valid document.
 /// Read the single on-disk settings file (`settings.json` in the app config dir). Returns `{}` when it
@@ -7151,6 +7205,9 @@ pub fn run() {
             files_identical,
             find_duplicates,
             find_duplicates_stream,
+            organize_plan,
+            organize_clutter,
+            organize_apply,
             index_build,
             index_search,
             index_search_collect,
@@ -7862,6 +7919,9 @@ pub fn export_bindings(out: &std::path::Path) -> Result<(), String> {
         files_identical,
         find_duplicates,
         find_duplicates_stream,
+        organize_plan,
+        organize_clutter,
+        organize_apply,
         index_build,
         index_search,
         index_search_collect,

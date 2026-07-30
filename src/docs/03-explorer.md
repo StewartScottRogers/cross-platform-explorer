@@ -104,6 +104,25 @@ duplicate detection. For image files the Properties dialog also shows **dimensio
 **EXIF** — camera, lens, date taken, ISO, aperture, exposure, and focal length — omitting whatever the
 photo doesn't carry.
 
+## Organizing a folder
+
+**Organize this folder…** (command palette, or Tools menu) sorts a folder's files into subfolders by a
+rule you pick — a safe **propose → review → apply** flow: nothing moves until you click Apply.
+
+1. Pick a rule: **By kind** (Images / Documents / Audio / Video / Archives / Code / Other), **By
+   extension** (a subfolder per uppercased extension, e.g. `PNG`), **By year modified** (a subfolder per
+   4-digit year), or **By size** (Tiny / Small / Large buckets).
+2. The dialog previews every proposed move, grouped by destination subfolder, with a running count —
+   switching rules updates the preview live. An empty folder (or a folder with no eligible files) says so
+   plainly instead of showing an empty list.
+3. Click **Organize** to apply. It always **takes a checkpoint of the folder first**, then creates each
+   destination subfolder and moves the files in — so the whole reorganization is a **single undo**: the
+   result panel names the checkpoint and offers a one-click way to open **Checkpoint & rollback** and
+   revert it. A file that can't be moved (locked, or a name collision at the destination) is reported by
+   name rather than failing the whole run.
+
+Only files move — subfolders already in the listing are left alone, and nothing is ever deleted.
+
 ## Dual-pane (commander) mode
 
 Turn on **Dual pane** from the command palette (Ctrl/Cmd+K → *Dual pane*) to split the file list into two

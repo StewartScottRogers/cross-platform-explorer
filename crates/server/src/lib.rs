@@ -227,6 +227,11 @@ pub mod duplicates;
 /// size). No AI, no I/O (CPE-987, epic CPE-979); a later move engine executes the proposals.
 pub mod organize;
 
+/// Rules-based auto-organize command layer (CPE-1142, epic CPE-979): lists a directory, maps it to
+/// `organize::OrganizeEntry`s, and — on apply — checkpoints the tree first, then executes the plan on
+/// disk. The I/O + `ServerCtx` glue `organize` itself deliberately stays free of.
+pub mod organize_apply;
+
 /// Spotlight frecency — rank recently+frequently used items (count × recency-decay) for the overlay's
 /// default empty-query view (CPE-952, epic CPE-704). Pure + deterministic.
 pub mod spotlight_frecency;

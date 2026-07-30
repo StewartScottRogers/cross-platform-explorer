@@ -28,7 +28,9 @@ impl OrganizeEntry {
 }
 
 /// The declarative rule that decides each file's destination subfolder.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[cfg_attr(feature = "specta", derive(specta::Type))]
+#[serde(rename_all = "snake_case")]
 pub enum OrganizeRule {
     /// Group by content category (Images / Documents / Audio / Video / Archives / Code / Other).
     ByKind,
@@ -41,7 +43,8 @@ pub enum OrganizeRule {
 }
 
 /// A proposed move: put file `name` into subfolder `target_subdir` (relative to its current folder).
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[cfg_attr(feature = "specta", derive(specta::Type))]
 pub struct MoveProposal {
     pub name: String,
     pub target_subdir: String,
@@ -126,7 +129,9 @@ fn year_from_epoch_secs(secs: u64) -> i64 {
 // ---- Junk / clutter detection (CPE-994, epic CPE-979) ----
 
 /// Why a file is flagged as likely clutter — a *suggestion* for the declutter view, never an auto-action.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[cfg_attr(feature = "specta", derive(specta::Type))]
+#[serde(rename_all = "snake_case")]
 pub enum ClutterReason {
     /// A zero-byte file — usually a failed download or a leftover stub.
     ZeroByte,
@@ -151,7 +156,8 @@ impl ClutterReason {
 }
 
 /// One flagged file: its `name` and the [`ClutterReason`] it matched.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[cfg_attr(feature = "specta", derive(specta::Type))]
 pub struct ClutterFinding {
     pub name: String,
     pub reason: ClutterReason,
