@@ -23,6 +23,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import zlib from "node:zlib";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -116,6 +117,83 @@ function seedOrganizeFixture(tmpDir: string): void {
   fs.writeFileSync(path.join(tmpDir, ORGANIZE_PNG_NAME), "not a real png, just bytes\n", "utf-8");
   fs.writeFileSync(path.join(tmpDir, ORGANIZE_ZIP_NAME), "not a real zip, just bytes\n", "utf-8");
   fs.writeFileSync(path.join(tmpDir, ORGANIZE_MP3_NAME), "not a real mp3, just bytes\n", "utf-8");
+}
+
+// --- CPE-1144: Batch-Media dialog fixture -------------------------------------------------------
+// Batch-media plans IMAGE transforms (BatchMediaDialog.svelte, crates/server/src/batch_media.rs),
+// so — unlike CPE-1143's organize fixture just above, which only needs the right *extension*
+// (`organize_plan` reads name/extension/size/mtime metadata and never opens the file) — this fixture
+// writes genuinely decodable PNGs. `batch_media::plan` (the command backing the live preview) is
+// itself pure path-string manipulation and never opens the file either, so a fake-bytes `.png` would
+// already render a preview today; these are still real, valid PNGs so the fixture stays honest with
+// what a real batch-media flow encounters and keeps working if `plan` ever starts inspecting bytes.
+//
+// Hand-rolled rather than pulled in as a dependency: a minimal single-IDAT truecolour (colour type 2)
+// PNG, built + CRC32'd here with the exact algorithm the PNG spec mandates (ISO 3309 / the same table
+// zlib/gzip use), and structurally self-checked (crc recompute + zlib inflate round-trip on every
+// chunk, IHDR field readback) before ever being wired in here.
+const PNG_CRC_TABLE = (() => {
+  const table = new Uint32Array(256);
+  for (let n = 0; n < 256; n++) {
+    let c = n;
+    for (let k = 0; k < 8; k++) c = c & 1 ? 0xedb88320 ^ (c >>> 1) : c >>> 1;
+    table[n] = c >>> 0;
+  }
+  return table;
+})();
+
+function pngCrc32(buf: Buffer): number {
+  let c = 0xffffffff;
+  for (let i = 0; i < buf.length; i++) c = PNG_CRC_TABLE[(c ^ buf[i]) & 0xff] ^ (c >>> 8);
+  return (c ^ 0xffffffff) >>> 0;
+}
+
+function pngChunk(type: string, data: Buffer): Buffer {
+  const typeBuf = Buffer.from(type, "ascii");
+  const len = Buffer.alloc(4);
+  len.writeUInt32BE(data.length, 0);
+  const crc = Buffer.alloc(4);
+  crc.writeUInt32BE(pngCrc32(Buffer.concat([typeBuf, data])), 0);
+  return Buffer.concat([len, typeBuf, data, crc]);
+}
+
+/** A tiny, valid, decodable truecolour PNG — no external deps, just `node:zlib`'s deflate. */
+function tinyPng(width: number, height: number, rgb: [number, number, number]): Buffer {
+  const sig = Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]);
+  const ihdrData = Buffer.alloc(13);
+  ihdrData.writeUInt32BE(width, 0);
+  ihdrData.writeUInt32BE(height, 4);
+  ihdrData[8] = 8; // bit depth
+  ihdrData[9] = 2; // colour type: truecolour (RGB)
+  ihdrData[10] = 0; // compression method
+  ihdrData[11] = 0; // filter method
+  ihdrData[12] = 0; // interlace method
+  const rowBytes = 1 + width * 3;
+  const raw = Buffer.alloc(rowBytes * height);
+  for (let y = 0; y < height; y++) {
+    const rowStart = y * rowBytes;
+    raw[rowStart] = 0; // per-scanline filter type: None
+    for (let x = 0; x < width; x++) {
+      const px = rowStart + 1 + x * 3;
+      raw[px] = rgb[0];
+      raw[px + 1] = rgb[1];
+      raw[px + 2] = rgb[2];
+    }
+  }
+  return Buffer.concat([
+    sig,
+    pngChunk("IHDR", ihdrData),
+    pngChunk("IDAT", zlib.deflateSync(raw)),
+    pngChunk("IEND", Buffer.alloc(0)),
+  ]);
+}
+
+export const BATCH_MEDIA_PNG_A_NAME = "CPE-1144-photo-a.png";
+export const BATCH_MEDIA_PNG_B_NAME = "CPE-1144-photo-b.png";
+
+function seedBatchMediaFixture(tmpDir: string): void {
+  fs.writeFileSync(path.join(tmpDir, BATCH_MEDIA_PNG_A_NAME), tinyPng(4, 4, [200, 60, 60]));
+  fs.writeFileSync(path.join(tmpDir, BATCH_MEDIA_PNG_B_NAME), tinyPng(4, 4, [60, 120, 200]));
 }
 
 // --- CPE-1130: cost-History fixture -----------------------------------------------------------
@@ -404,6 +482,10 @@ export const config: WebdriverIO.Config = {
 
     // CPE-1143: seed a few mixed-kind files for the auto-organize preview (see the block above).
     seedOrganizeFixture(tmpDir);
+
+    // CPE-1144: seed two real, decodable PNGs for the Batch-Media dialog's plan preview (see the
+    // block above) — same tmpDir, same single app launch.
+    seedBatchMediaFixture(tmpDir);
 
     // CPE-1130: seed the cost-History journal fixture into the real app-data dir (see the block
     // above) before the app process ever starts, so `metrics_history` has rows to read the moment
