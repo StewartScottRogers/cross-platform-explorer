@@ -98,6 +98,26 @@ pub fn describe(widget: &Widget) -> String {
 }
 `;
 
+// --- CPE-1143: auto-organize preview fixture --------------------------------------------------
+// A few extra mixed-kind files dropped straight into the seeded tmpDir (alongside MARKER_NAME/
+// FIXTURE_NAME above) so `organize.smoke.ts`'s grouped preview (OrganizeDialog.svelte, driven by
+// the real `organize_plan` command) has real variety to group — MARKER_NAME (.txt) and
+// FIXTURE_NAME (.rs) alone only cover two of `organize.rs`'s `kind_category` buckets
+// (Documents/Code); these add Images/Archives/Audio so a by-kind OR by-extension preview always
+// renders more than one group. Content is throwaway (never opened/parsed — `organize_plan` only
+// reads name/extension/size/mtime metadata), and — unlike the history/replay fixtures above, which
+// live in the REAL shared app-data directory — these files live entirely inside the disposable
+// tmpDir `onComplete` already `rm -rf`s, so no separate backup/restore pair is needed here.
+export const ORGANIZE_PNG_NAME = "CPE-1143-photo.png";
+export const ORGANIZE_ZIP_NAME = "CPE-1143-archive.zip";
+export const ORGANIZE_MP3_NAME = "CPE-1143-song.mp3";
+
+function seedOrganizeFixture(tmpDir: string): void {
+  fs.writeFileSync(path.join(tmpDir, ORGANIZE_PNG_NAME), "not a real png, just bytes\n", "utf-8");
+  fs.writeFileSync(path.join(tmpDir, ORGANIZE_ZIP_NAME), "not a real zip, just bytes\n", "utf-8");
+  fs.writeFileSync(path.join(tmpDir, ORGANIZE_MP3_NAME), "not a real mp3, just bytes\n", "utf-8");
+}
+
 // --- CPE-1130: cost-History fixture -----------------------------------------------------------
 // Seed a synthetic session-metrics journal (`history.jsonl`) into the REAL app-data directory this
 // exact build reads from, so the Agent Watch drawer's cost-History tab (AgentTimeline.svelte,
@@ -381,6 +401,9 @@ export const config: WebdriverIO.Config = {
     // CPE-1096: seed the code-preview fixture alongside the marker, in the same temp dir, so the
     // suite can open it in the same session without a second app launch.
     fs.writeFileSync(path.join(tmpDir, FIXTURE_NAME), FIXTURE_SOURCE, "utf-8");
+
+    // CPE-1143: seed a few mixed-kind files for the auto-organize preview (see the block above).
+    seedOrganizeFixture(tmpDir);
 
     // CPE-1130: seed the cost-History journal fixture into the real app-data dir (see the block
     // above) before the app process ever starts, so `metrics_history` has rows to read the moment
