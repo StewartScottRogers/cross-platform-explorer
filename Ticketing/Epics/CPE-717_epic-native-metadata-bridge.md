@@ -81,4 +81,4 @@ versa. Bridging to native metadata makes labels portable and interoperable with 
   CPE-828 (UI/commands, attended). Starting CPE-826.
 
 ## Board hygiene 2026-07-29 — reverted In Progress → Proposed
-Not actively being worked: all decomposed child tickets are Done. Remaining DoD is user-gated (GUI / model-key / cert / Mac) or a deferred cap. Reverted to **Proposed** so the epic queue honestly shows what's dormant vs active; re-activate with `/ticketing-epic activate` to resume (like CPE-703 was this session). **Done-candidate:** all children complete — review DoD; may qualify for Done rather than a re-build.
+Not actively being worked: all decomposed child tickets are Done. Remaining DoD is user-gated (GUI / model-key / cert / Mac) or a deferred cap. Reverted to **Proposed** so the epic queue honestly shows what's dormant vs active; re-activate with `/ticketing-epic activate` to resume (like CPE-703 was this session). **Remaining (DoD review 2026-07-30):** Properties UI + column surfacing + opt-in toggle (CPE-828) attended; Mac Finder byte-compat needs a Mac (CPE-829).

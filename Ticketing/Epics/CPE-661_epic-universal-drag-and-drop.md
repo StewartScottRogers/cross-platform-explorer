@@ -112,4 +112,6 @@ through the shared transfer queue, closes those gaps and removes duplicated, dri
    ensure Agent Board card DnD isn't regressed; consistent themed affordances everywhere. *(prereq: 669)*
 
 ## Board hygiene 2026-07-29 — reverted In Progress → Proposed
-Not actively being worked: open children remain but are Deferred — CPE-672/674 (drag-out, Deferred). Remaining DoD is user-gated (GUI / model-key / cert / Mac) or a deferred cap. Reverted to **Proposed** so the epic queue honestly shows what's dormant vs active; re-activate with `/ticketing-epic activate` to resume (like CPE-703 was this session). 
+Not actively being worked: open children remain but are Deferred — CPE-672/674 (drag-out, Deferred). Remaining DoD is user-gated (GUI / model-key / cert / Mac) or a deferred cap. Reverted to **Proposed** so the epic queue honestly shows what's dormant vs active; re-activate with `/ticketing-epic activate` to resume (like CPE-703 was this session).
+
+**Remaining (DoD review 2026-07-30):** Drag-OUT to OS apps (CPE-672/674) Deferred — a named DoD bullet.

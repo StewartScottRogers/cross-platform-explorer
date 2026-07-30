@@ -199,4 +199,4 @@ the later pillars need a rewrite.
   CPE-811–820. Suggested start: CPE-811 (foundation) or CPE-812 (first user-visible slice).
 
 ## Board hygiene 2026-07-29 — reverted In Progress → Proposed
-Not actively being worked: all decomposed child tickets are Done. Remaining DoD is user-gated (GUI / model-key / cert / Mac) or a deferred cap. Reverted to **Proposed** so the epic queue honestly shows what's dormant vs active; re-activate with `/ticketing-epic activate` to resume (like CPE-703 was this session). **Done-candidate:** all children complete — review DoD; may qualify for Done rather than a re-build.
+Not actively being worked: all decomposed child tickets are Done. Remaining DoD is user-gated (GUI / model-key / cert / Mac) or a deferred cap. Reverted to **Proposed** so the epic queue honestly shows what's dormant vs active; re-activate with `/ticketing-epic activate` to resume (like CPE-703 was this session). **Remaining (DoD review 2026-07-30):** Typed-bindings first slice (CPE-812/813) deferred; frontend transport seam + end-to-end remote GUI (CPE-819/820) unbuilt (headless contract/dispatcher/cpe-net only).

@@ -70,4 +70,4 @@ asymmetric `diagonal_staircase` fixture (8 distinct packed bytes, golden `0xe0f0
 `hash != hash.swap_bytes()` assertions — so a row-order/packing swap now fails the test. Follow-up closed.
 
 ## Board hygiene 2026-07-29 — reverted In Progress → Proposed
-Not actively being worked: all decomposed child tickets are Done. Remaining DoD is user-gated (GUI / model-key / cert / Mac) or a deferred cap. Reverted to **Proposed** so the epic queue honestly shows what's dormant vs active; re-activate with `/ticketing-epic activate` to resume (like CPE-703 was this session). **Done-candidate:** all children complete — review DoD; may qualify for Done rather than a re-build.
+Not actively being worked: all decomposed child tickets are Done. Remaining DoD is user-gated (GUI / model-key / cert / Mac) or a deferred cap. Reverted to **Proposed** so the epic queue honestly shows what's dormant vs active; re-activate with `/ticketing-epic activate` to resume (like CPE-703 was this session). **Remaining (DoD review 2026-07-30):** Folder/selection hashing pipeline + side-by-side review/cleanup UI unbuilt (only perceptual/SimHash cores).

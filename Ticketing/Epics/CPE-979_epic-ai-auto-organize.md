@@ -66,7 +66,7 @@ first keeps it honest and testable; the AI layer only *suggests*, never auto-mov
   [[CPE-977]] and [[CPE-732]]. See [[go-with-recommendation]].
 
 ## Board hygiene 2026-07-29 — reverted In Progress → Proposed
-Not actively being worked: all decomposed child tickets are Done. Remaining DoD is user-gated (GUI / model-key / cert / Mac) or a deferred cap. Reverted to **Proposed** so the epic queue honestly shows what's dormant vs active; re-activate with `/ticketing-epic activate` to resume (like CPE-703 was this session). **Done-candidate:** all children complete — review DoD; may qualify for Done rather than a re-build.
+Not actively being worked: all decomposed child tickets are Done. Remaining DoD is user-gated (GUI / model-key / cert / Mac) or a deferred cap. Reverted to **Proposed** so the epic queue honestly shows what's dormant vs active; re-activate with `/ticketing-epic activate` to resume (like CPE-703 was this session). **Remaining (DoD review 2026-07-30):** AI-assisted mode needs a real classifier/MODEL (rules slice CPE-1142 shipped + GUI-verified).
 
 ## Update 2026-07-30 — rules-based slice SHIPPED (CPE-1142)
 The rules-driven organizer (propose/checkpoint/apply/undo, By kind/extension/year/size) shipped + GUI-verified. The **AI-assisted** organize mode remains model-gated (a real classifier/LLM = user resource). Epic stays Proposed for that remainder.

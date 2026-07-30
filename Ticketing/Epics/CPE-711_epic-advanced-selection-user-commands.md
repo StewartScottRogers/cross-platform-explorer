@@ -2,7 +2,7 @@
 id: CPE-711
 title: "EPIC: Advanced selection & user-defined commands"
 type: Task
-status: Proposed
+status: Done
 priority: Medium
 component: Frontend
 tags: [epic]
@@ -58,4 +58,7 @@ cores land first.
    *(prereq: 781)*
 
 ## Board hygiene 2026-07-29 — reverted In Progress → Proposed
-Not actively being worked: all decomposed child tickets are Done. Remaining DoD is user-gated (GUI / model-key / cert / Mac) or a deferred cap. Reverted to **Proposed** so the epic queue honestly shows what's dormant vs active; re-activate with `/ticketing-epic activate` to resume (like CPE-703 was this session). **Done-candidate:** all children complete — review DoD; may qualify for Done rather than a re-build.
+Not actively being worked: all decomposed child tickets are Done. Remaining DoD is user-gated (GUI / model-key / cert / Mac) or a deferred cap. Reverted to **Proposed** so the epic queue honestly shows what's dormant vs active; re-activate with `/ticketing-epic activate` to resume (like CPE-703 was this session).
+
+## Closed 2026-07-30 — DoD verified complete (opus review)
+advanced selection + user-defined commands — Select-by dialog (CPE-782) + user commands w/ confirm-gate (CPE-783) + cores all Done & GUI-verified.

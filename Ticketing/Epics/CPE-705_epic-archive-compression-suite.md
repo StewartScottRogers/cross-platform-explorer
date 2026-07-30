@@ -51,7 +51,7 @@ create deferred — read only for now); **edit model** = extract-modify-repack o
 - CPE-909 — Password-protected (AES-256) zip create + extract (backend) — **Done**; the password prompt UI remains.
 
 ## Board hygiene 2026-07-29 — reverted In Progress → Proposed
-Not actively being worked: all decomposed child tickets are Done. Remaining DoD is user-gated (GUI / model-key / cert / Mac) or a deferred cap. Reverted to **Proposed** so the epic queue honestly shows what's dormant vs active; re-activate with `/ticketing-epic activate` to resume (like CPE-703 was this session). **Done-candidate:** all children complete — review DoD; may qualify for Done rather than a re-build.
+Not actively being worked: all decomposed child tickets are Done. Remaining DoD is user-gated (GUI / model-key / cert / Mac) or a deferred cap. Reverted to **Proposed** so the epic queue honestly shows what's dormant vs active; re-activate with `/ticketing-epic activate` to resume (like CPE-703 was this session). **Remaining (DoD review 2026-07-30):** Password-prompt UI + compress/extract context-menu entries + navigate-into-archive routing unbuilt (engine commands shipped via CPE-1141).
 
 ## Update 2026-07-30 — remaining engine commands SHIPPED (CPE-1141)
 Wired compress_archive (tar.gz) + encrypted-zip create/extract as commands. Only the password-prompt UI / context-menu entries remain (attended GUI). Epic stays Proposed for that UI remainder.

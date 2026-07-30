@@ -63,4 +63,6 @@ ledger). Optional headless follow-up: thread revert_attribution into checkpoint_
 only truly-outside changes (currently conservative "warn about everything", documented).
 
 ## Board hygiene 2026-07-29 — reverted In Progress → Proposed
-Not actively being worked: open children remain but are Deferred — CPE-1126 (restore panel, Deferred). Remaining DoD is user-gated (GUI / model-key / cert / Mac) or a deferred cap. Reverted to **Proposed** so the epic queue honestly shows what's dormant vs active; re-activate with `/ticketing-epic activate` to resume (like CPE-703 was this session). 
+Not actively being worked: open children remain but are Deferred — CPE-1126 (restore panel, Deferred). Remaining DoD is user-gated (GUI / model-key / cert / Mac) or a deferred cap. Reverted to **Proposed** so the epic queue honestly shows what's dormant vs active; re-activate with `/ticketing-epic activate` to resume (like CPE-703 was this session).
+
+**Remaining (DoD review 2026-07-30):** Rich restore panel + timeline checkpoint markers (CPE-1126) Deferred (commands + CheckpointDialog shipped).
