@@ -1386,6 +1386,42 @@ async extractArchive(path: string, dest: string) : Promise<Result<string, string
 }
 },
 /**
+ * Pack files/folders into `dest`, choosing the archive format by `dest`'s extension (`.zip` or
+ * `.tar.gz`/`.tgz`) (CPE-908/1141). Model lives in `cpe_server::archive` (CPE-822); thin dispatcher.
+ */
+async compressArchive(paths: string[], dest: string) : Promise<Result<string, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("compress_archive", { paths, dest }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * Pack files/folders into a password-protected (AES-256) `.zip` at `dest` (CPE-909/1141). Model lives
+ * in `cpe_server::archive` (CPE-822); thin dispatcher.
+ */
+async compressToZipEncrypted(paths: string[], dest: string, password: string) : Promise<Result<string, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("compress_to_zip_encrypted", { paths, dest, password }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * Extract a password-protected `.zip` at `path` into `dest` with `password` (CPE-909/1141). Model
+ * lives in `cpe_server::archive` (CPE-822); thin dispatcher.
+ */
+async extractZipEncrypted(path: string, dest: string, password: string) : Promise<Result<string, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("extract_zip_encrypted", { path, dest, password }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
  * Open the platform's terminal with its working directory set to `path`
  * (CPE-253). Windows prefers Windows Terminal and falls back to a fresh cmd
  * window; macOS uses Terminal.app; Linux tries the common emulators in turn.

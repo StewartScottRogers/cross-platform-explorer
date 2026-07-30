@@ -3529,6 +3529,35 @@ async fn extract_archive(app: tauri::AppHandle, path: String, dest: String) -> R
         .await.map_err(|e| e.to_string())?
 }
 
+/// Pack files/folders into `dest`, choosing the archive format by `dest`'s extension (`.zip` or
+/// `.tar.gz`/`.tgz`) (CPE-908/1141). Model lives in `cpe_server::archive` (CPE-822); thin dispatcher.
+#[tauri::command]
+#[cfg_attr(feature = "specta-bindings", specta::specta)]
+async fn compress_archive(paths: Vec<String>, dest: String) -> Result<String, String> {
+    tauri::async_runtime::spawn_blocking(move || cpe_server::archive::compress_archive(&paths, &dest))
+        .await.map_err(|e| e.to_string())?
+}
+
+/// Pack files/folders into a password-protected (AES-256) `.zip` at `dest` (CPE-909/1141). Model lives
+/// in `cpe_server::archive` (CPE-822); thin dispatcher.
+#[tauri::command]
+#[cfg_attr(feature = "specta-bindings", specta::specta)]
+async fn compress_to_zip_encrypted(paths: Vec<String>, dest: String, password: String) -> Result<String, String> {
+    tauri::async_runtime::spawn_blocking(move || cpe_server::archive::compress_to_zip_encrypted(&paths, &dest, &password))
+        .await.map_err(|e| e.to_string())?
+}
+
+/// Extract a password-protected `.zip` at `path` into `dest` with `password` (CPE-909/1141). Model
+/// lives in `cpe_server::archive` (CPE-822); thin dispatcher.
+#[tauri::command]
+#[cfg_attr(feature = "specta-bindings", specta::specta)]
+async fn extract_zip_encrypted(app: tauri::AppHandle, path: String, dest: String, password: String) -> Result<String, String> {
+    // Coarse best-effort record (CPE-1102), mirroring `extract_archive`: record just the `dest` root.
+    note_app_op(&app, || vec![dest.clone()]);
+    tauri::async_runtime::spawn_blocking(move || cpe_server::archive::extract_zip_encrypted(&path, &dest, &password))
+        .await.map_err(|e| e.to_string())?
+}
+
 /// Run an executable with elevation (CPE-241). On Windows this uses
 /// `Start-Process -Verb RunAs`, which shows the UAC prompt. On other platforms
 /// there is no standard per-launch elevation prompt, so it runs normally.
@@ -7134,6 +7163,9 @@ pub fn run() {
             extract_archive_entry,
             compress_to_zip,
             extract_archive,
+            compress_archive,
+            compress_to_zip_encrypted,
+            extract_zip_encrypted,
             open_terminal,
             run_command,
             create_file,
@@ -7842,6 +7874,9 @@ pub fn export_bindings(out: &std::path::Path) -> Result<(), String> {
         extract_archive_entry,
         compress_to_zip,
         extract_archive,
+        compress_archive,
+        compress_to_zip_encrypted,
+        extract_zip_encrypted,
         open_terminal,
         run_command,
         create_file,
