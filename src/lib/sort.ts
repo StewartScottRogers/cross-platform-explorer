@@ -1,5 +1,6 @@
 import type { DirEntry, SortKey, SortDir } from "./types";
 import { typeName } from "./filetypes";
+import type { CellValue } from "./bindings.gen";
 
 /**
  * Numeric-aware, case-insensitive collator so that embedded numbers compare by
@@ -85,4 +86,55 @@ export function sortEntries(
     return [...entries].sort((a, b) => compareEntries(a, b, key, dir, foldersFirst, typeName, sizeOf));
   }
   return [...entries].sort((a, b) => compareEntries(a, b, key, dir, foldersFirst));
+}
+
+// ── Metadata-column sort (CPE-1146, epic CPE-707) ────────────────────────────────────────────────
+// Type-aware ordering over CPE-1145's typed `CellValue`, NOT the pre-formatted display string (a
+// lexical sort on "1920×1080" vs "640×480" would put the bigger image first — wrong). `Empty` (no
+// value for that row — unreadable, or the wrong file kind for the column) always sorts last,
+// regardless of asc/desc, so rows the column doesn't apply to don't jump to the top on a descending
+// sort; direction only reorders the rows that actually have a value.
+
+/** Compare two typed cell values for sort. Mismatched variants (shouldn't happen — a column always
+ *  extracts one `CellValue` shape) compare equal rather than throwing. */
+export function compareCellValues(a: CellValue, b: CellValue): number {
+  const aEmpty = a === "Empty";
+  const bEmpty = b === "Empty";
+  if (aEmpty && bEmpty) return 0;
+  if (aEmpty) return 1;
+  if (bEmpty) return -1;
+  if ("Text" in a && "Text" in b) return a.Text.localeCompare(b.Text, undefined, { sensitivity: "base" });
+  if ("Int" in a && "Int" in b) return a.Int - b.Int;
+  if ("Float" in a && "Float" in b) return a.Float - b.Float;
+  if ("Bytes" in a && "Bytes" in b) return a.Bytes - b.Bytes;
+  if ("Dimensions" in a && "Dimensions" in b) {
+    const areaA = a.Dimensions.w * a.Dimensions.h;
+    const areaB = b.Dimensions.w * b.Dimensions.h;
+    return areaA - areaB || a.Dimensions.w - b.Dimensions.w;
+  }
+  return 0;
+}
+
+/** Sort entries by an active metadata column's typed value, `cellOf` resolving each path to its
+ *  (possibly not-yet-fetched → `"Empty"`) cell. Mirrors `sortEntries`'s folders-first grouping + a
+ *  natural-name tiebreaker so equal/empty values fall back to a stable, familiar order. */
+export function sortByMetaColumn(
+  entries: DirEntry[],
+  cellOf: (path: string) => CellValue,
+  dir: SortDir,
+  foldersFirst = true,
+): DirEntry[] {
+  return [...entries].sort((a, b) => {
+    if (foldersFirst && a.is_dir !== b.is_dir) return a.is_dir ? -1 : 1;
+    const av = cellOf(a.path);
+    const bv = cellOf(b.path);
+    const aEmpty = av === "Empty";
+    const bEmpty = bv === "Empty";
+    // Empty-last is a GROUPING decision, like folders-first above — it must not flip with `dir`, or a
+    // descending sort would put every not-yet-fetched/unsupported row at the TOP (compareCellValues'
+    // own Empty ordering would otherwise get inverted along with everything else below).
+    if (aEmpty !== bEmpty) return aEmpty ? 1 : -1;
+    const cmp = compareCellValues(av, bv) || compareNames(a.name, b.name);
+    return dir === "asc" ? cmp : -cmp;
+  });
 }

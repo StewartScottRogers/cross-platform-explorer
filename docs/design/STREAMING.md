@@ -101,6 +101,7 @@ by match/size limits (name search) can skip it.
 |----------|---------|--------|--------|
 | Directory listing | `list_dir_stream` (`list_dir` collects) | `stream_dir_entries` | `cancel_dir_stream` (CPE-665) |
 | Filename search | `find_files_by_name_stream` (`find_files_by_name` collects) | `walk_name_matches` | capped, no cancel |
+| Metadata-column cells | `metadata_column_cells` (`metadata_column_cells_collect` collects) | `stream_column_cells` | no cancel — batches are visible-window sized (CPE-1146), or capped by `metadata_column_cells_collect`'s one-shot fetch-on-sort caller |
 
 New bulk producers follow this shape: one shared walker, a streaming command over an `ipc::Channel`, a
 frontend `Channel` subscription that flips `loading` on the first batch and supersedes by generation.

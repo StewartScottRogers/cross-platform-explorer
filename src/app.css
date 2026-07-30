@@ -399,6 +399,17 @@ button:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
 .cell.num { text-align: right; color: var(--text-dim); }
 .cell.dim { color: var(--text-dim); }
 
+/* Metadata columns (CPE-1146, epic CPE-707): the active-column set is dynamic, but the shared
+   `--filelist-cols` template (set inline per-render from `columns.ts`) already grows to fit it — these
+   are just per-item styling, not new grid tracks. `.meta-empty` is the "no value for this row" dim
+   placeholder ("—"), distinct from a cell that hasn't been fetched yet (renders nothing, never a
+   placeholder that could be mistaken for a confirmed-empty value). The header "Columns…" affordance
+   sits in the trailing 1fr spacer; `justify-self: start` keeps it a small icon button there rather than
+   stretching the whole remaining header width into one giant hit target. */
+.col.columns-btn { flex: 0 0 auto; justify-self: start; width: 26px; padding: 0; justify-content: center; border-radius: 4px; }
+.col.columns-btn:hover { background: var(--surface-alt); color: var(--text); }
+.meta-empty { color: var(--text-faint); }
+
 /* ---------- Home view ---------- */
 .home { padding: 8px 20px 20px; }
 .section-head {

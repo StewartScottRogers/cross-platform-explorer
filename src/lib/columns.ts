@@ -66,3 +66,60 @@ export function boundaryOffsets(widths: number[], padLeft: number): number[] {
   }
   return out;
 }
+
+// ── Dynamic metadata columns (CPE-1146, epic CPE-707) ────────────────────────────────────────────
+// Generalises the fixed 4 (Name/Date/Type/Size) with N user-picked metadata columns (Dimensions,
+// Duration, Pages, …) appended after them. The built-in constants above are UNCHANGED — a folder with
+// no active metadata columns renders byte-for-byte as before ("none active" is the default, per the
+// ticket's persistence design) — these are purely additive helpers for the active set.
+
+/** One active metadata column: its stable id (matches `AvailableColumn.id`, CPE-1145) + its own
+ *  resizable width. Order in the array IS display order. */
+export interface ActiveMetaColumn {
+  id: string;
+  width: number;
+}
+
+/** Default width (px) a newly-added metadata column starts at. */
+export const META_COL_DEFAULT_WIDTH = 110;
+/** Minimum width (px) for any metadata column — narrower than the built-ins since values like
+ *  "1920×1080" or "3:45" are short. */
+export const META_COL_MIN = 70;
+
+/** The full per-column minimum-widths array for the 4 built-ins plus `metaCount` active metadata
+ *  columns, for `resizeColumnTo`'s `mins` parameter over the combined widths array. */
+export function fullMins(metaCount: number): number[] {
+  return COLUMN_MINS.concat(new Array(Math.max(0, metaCount)).fill(META_COL_MIN) as number[]);
+}
+
+/** Append `id` to the active set at `META_COL_DEFAULT_WIDTH`, unless it's already active (no-op —
+ *  a column can't be added twice). Does not mutate the input. */
+export function addMetaColumn(active: ActiveMetaColumn[], id: string): ActiveMetaColumn[] {
+  if (active.some((c) => c.id === id)) return active;
+  return [...active, { id, width: META_COL_DEFAULT_WIDTH }];
+}
+
+/** Drop `id` from the active set (no-op if absent). Does not mutate the input. */
+export function removeMetaColumn(active: ActiveMetaColumn[], id: string): ActiveMetaColumn[] {
+  return active.filter((c) => c.id !== id);
+}
+
+/** Move `id` one slot earlier (`dir: -1`) or later (`dir: 1`) in display order; a no-op at either
+ *  end or if `id` isn't active. Does not mutate the input. */
+export function moveMetaColumn(active: ActiveMetaColumn[], id: string, dir: -1 | 1): ActiveMetaColumn[] {
+  const i = active.findIndex((c) => c.id === id);
+  const j = i + dir;
+  if (i < 0 || j < 0 || j >= active.length) return active;
+  const next = active.slice();
+  [next[i], next[j]] = [next[j], next[i]];
+  return next;
+}
+
+/** Re-clamp every active column's width into `[META_COL_MIN, COLUMN_MAX]` — called when restoring a
+ *  persisted set (CPE-1140-style load guard) so a stale/corrupt width can't paint a broken layout. */
+export function clampMetaWidths(active: ActiveMetaColumn[]): ActiveMetaColumn[] {
+  return active.map((c) => ({
+    ...c,
+    width: Math.max(META_COL_MIN, Math.min(COLUMN_MAX, Math.round(c.width))),
+  }));
+}

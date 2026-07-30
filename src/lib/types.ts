@@ -5,7 +5,11 @@
 // any mismatch, so these can never silently diverge from Rust again.
 export type { DirEntry, Place } from "./bindings.gen";
 
-export type SortKey = "name" | "modified" | "type" | "size";
+// The 4 built-ins, plus `meta:<columnId>` for an active metadata column (CPE-1146, epic CPE-707) —
+// `string & {}` keeps the 4 literals autocompleting in editors while still accepting any string
+// (TS can't express "these literals OR a template-prefixed string" more precisely without losing the
+// plain `sortKey === "name"` narrowing call sites already rely on).
+export type SortKey = "name" | "modified" | "type" | "size" | (string & {});
 export type SortDir = "asc" | "desc";
 export type ViewMode = "details" | "list" | "icons" | "gallery";
 

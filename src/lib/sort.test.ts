@@ -1,6 +1,7 @@
 import { describe, it, expect } from "vitest";
-import { compareNames, compareEntries, sortEntries } from "./sort";
+import { compareNames, compareEntries, sortEntries, compareCellValues, sortByMetaColumn } from "./sort";
 import type { DirEntry } from "./types";
+import type { CellValue } from "./bindings.gen";
 
 const entry = (over: Partial<DirEntry>): DirEntry => ({
   name: "x",
@@ -163,5 +164,80 @@ describe("foldersFirst toggle (CPE-359)", () => {
     expect(names(sortEntries(mixed, "name", "asc", false))).toEqual(["alpha.txt", "zeta"]);
     // …but with foldersFirst on, the folder leads regardless of name:
     expect(names(sortEntries(mixed, "name", "asc", true))).toEqual(["zeta", "alpha.txt"]);
+  });
+});
+
+// CPE-1146 (epic CPE-707): metadata-column sort must be TYPE-AWARE — numeric for
+// Dimensions/Duration/Pages/Year, not a lexical compare on the pre-formatted display string (which
+// would put "1920×1080" before "640×480" — wrong).
+describe("compareCellValues (CPE-1146)", () => {
+  it("compares Int/Float numerically, not lexically", () => {
+    expect(compareCellValues({ Int: 2 }, { Int: 10 })).toBeLessThan(0); // NOT "10" < "2" lexically
+    expect(compareCellValues({ Float: 3.5 }, { Float: 3.2 })).toBeGreaterThan(0);
+  });
+
+  it("compares Bytes numerically", () => {
+    expect(compareCellValues({ Bytes: 100 }, { Bytes: 20000 })).toBeLessThan(0);
+  });
+
+  it("compares Dimensions by area then width, not the formatted 'w×h' string", () => {
+    const small: CellValue = { Dimensions: { w: 640, h: 480 } }; // area 307200
+    const big: CellValue = { Dimensions: { w: 1920, h: 1080 } }; // area 2073600
+    expect(compareCellValues(small, big)).toBeLessThan(0);
+    // Same area, tiebreak on width.
+    expect(compareCellValues({ Dimensions: { w: 100, h: 200 } }, { Dimensions: { w: 200, h: 100 } })).toBeLessThan(0);
+  });
+
+  it("compares Text case-insensitively", () => {
+    expect(compareCellValues({ Text: "banana" }, { Text: "Apple" })).toBeGreaterThan(0);
+    expect(compareCellValues({ Text: "apple" }, { Text: "Apple" })).toBe(0);
+  });
+
+  it("Empty always sorts last, regardless of the other value", () => {
+    expect(compareCellValues("Empty", { Int: 1 })).toBeGreaterThan(0);
+    expect(compareCellValues({ Int: 1 }, "Empty")).toBeLessThan(0);
+    expect(compareCellValues("Empty", "Empty")).toBe(0);
+  });
+});
+
+describe("sortByMetaColumn (CPE-1146)", () => {
+  const withCells = (vals: Record<string, CellValue>) => (p: string): CellValue => vals[p] ?? "Empty";
+
+  it("orders files by the typed value, ascending", () => {
+    const es = [
+      entry({ name: "big.png", path: "/big.png" }),
+      entry({ name: "small.png", path: "/small.png" }),
+      entry({ name: "mid.png", path: "/mid.png" }),
+    ];
+    const cellOf = withCells({
+      "/big.png": { Dimensions: { w: 1920, h: 1080 } },
+      "/small.png": { Dimensions: { w: 100, h: 100 } },
+      "/mid.png": { Dimensions: { w: 640, h: 480 } },
+    });
+    expect(names(sortByMetaColumn(es, cellOf, "asc"))).toEqual(["small.png", "mid.png", "big.png"]);
+    expect(names(sortByMetaColumn(es, cellOf, "desc"))).toEqual(["big.png", "mid.png", "small.png"]);
+  });
+
+  it("keeps a row with no value (Empty, e.g. not yet fetched) last in BOTH directions", () => {
+    const es = [
+      entry({ name: "unfetched.png", path: "/unfetched.png" }),
+      entry({ name: "big.png", path: "/big.png" }),
+      entry({ name: "small.png", path: "/small.png" }),
+    ];
+    const cellOf = withCells({
+      "/big.png": { Dimensions: { w: 1920, h: 1080 } },
+      "/small.png": { Dimensions: { w: 100, h: 100 } },
+    });
+    expect(names(sortByMetaColumn(es, cellOf, "asc"))).toEqual(["small.png", "big.png", "unfetched.png"]);
+    expect(names(sortByMetaColumn(es, cellOf, "desc"))).toEqual(["big.png", "small.png", "unfetched.png"]);
+  });
+
+  it("still floats folders above files by default (folders have no metadata cell)", () => {
+    const es = [
+      entry({ name: "photo.png", path: "/photo.png", is_dir: false }),
+      entry({ name: "folder", path: "/folder", is_dir: true }),
+    ];
+    const cellOf = withCells({ "/photo.png": { Dimensions: { w: 10, h: 10 } } });
+    expect(names(sortByMetaColumn(es, cellOf, "asc"))).toEqual(["folder", "photo.png"]);
   });
 });

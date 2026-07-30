@@ -100,7 +100,9 @@
   import PatternSelectDialog from "./lib/components/PatternSelectDialog.svelte";
   import { firstMatchIndex } from "./lib/typeahead";
   import { clampWidth, maxSidePaneWidth, fitSidePanes, PANE_DIVIDER_W } from "./lib/resize";
-  import { MID_MIN, NAME_COL_MIN } from "./lib/columns";
+  import { MID_MIN, NAME_COL_MIN, clampMetaWidths, type ActiveMetaColumn } from "./lib/columns";
+  import ColumnPickerDialog from "./lib/components/ColumnPickerDialog.svelte";
+  import { metaColumnCatalog } from "./lib/metaColumnCatalog";
   import {
     createHistory, visit, back, forward, canGoBack, canGoForward, current, recentPaths,
     type History,
@@ -351,6 +353,12 @@
   let favorites: Favorite[] = [];
   let recentFolders: RecentFile[] = [];
   let columnWidths: number[] = settings.loadColumnWidths();
+  /** Active metadata columns for the CURRENT folder (CPE-1146, epic CPE-707): id + width, in display
+      order. Loaded/saved per-folder in `loadPath` below; empty (Home, or a folder with none saved) is
+      the default — the pane behaves exactly as before CPE-1146. Pane B (dual-pane) doesn't get its own
+      set today — out of scope, see the ticket's Notes. */
+  let activeMetaColumns: ActiveMetaColumn[] = [];
+  let columnPickerOpen = false;
   /** Active rule-based coloring rule set (CPE-776, epic CPE-709); empty ⇒ rows unstyled. */
   let colorRules: ColorRule[] = settings.loadColorRules();
   let colorRulesOpen = false;
@@ -630,6 +638,7 @@
     { id: "tool.templates", group: $t("palette.groupTools"), label: $t("palette.templates"), keywords: "folder templates scaffold capture stamp new from template boilerplate", run: () => (templatesOpen = true) },
     { id: "tool.checkpoint", group: $t("palette.groupTools"), label: $t("palette.checkpoint"), keywords: "checkpoint rollback revert restore snapshot undo agent watch", run: () => (checkpointOpen = true), enabled: inFolder },
     { id: "tool.organize", group: $t("palette.groupTools"), label: $t("palette.organize"), keywords: "organize auto organize sort files by kind extension year size declutter clean up", run: () => (organizeOpen = true), enabled: inFolder },
+    { id: "tool.columns", group: $t("palette.groupTools"), label: $t("palette.manageColumns"), keywords: "columns metadata dimensions duration pages track year picker details view add remove reorder", run: () => (columnPickerOpen = true), enabled: inFolder },
     { id: "tool.verifyAll", group: $t("palette.groupTools"), label: $t("palette.verifyAll"), keywords: "integrity verify all baselined folders bitrot corruption monitor check", run: verifyAllBaselines, enabled: () => Object.keys(integrityBaselines).length > 0 },
     { id: "tool.selectBy", group: $t("palette.groupTools"), label: $t("palette.selectBy"), keywords: "select by criteria extension size date filter", run: () => (selectByOpen = true), enabled: inFolder },
     { id: "tool.watchRules", group: $t("palette.groupTools"), label: $t("palette.watchRules"), keywords: "watch rules folder automation move copy tag rename", run: () => (watchRulesOpen = true) },
@@ -1281,6 +1290,14 @@
     tabs = tabs.map((t) => (t.id === activeId ? { ...t, history: h } : t));
   }
 
+  /** Merge a resize event's widths (only the columns FileList actually rendered — i.e. resolved
+   *  against the catalog) back into the full active set by id, so a column not yet resolved (catalog
+   *  still loading) keeps its previous width instead of being dropped from the persisted set (CPE-1146). */
+  function applyMetaColumnWidths(active: ActiveMetaColumn[], resized: { id: string; width: number }[]): ActiveMetaColumn[] {
+    const widths = new Map(resized.map((r) => [r.id, r.width]));
+    return active.map((c) => ({ id: c.id, width: widths.get(c.id) ?? c.width }));
+  }
+
   async function loadPath(path: string, keepSelection = false, useCache = false) {
     const previouslySelected = keepSelection
       ? selectedIndices(selection).map((i) => visible[i]?.path).filter(Boolean)
@@ -1294,6 +1311,11 @@
       selectedTag = ""; // a tag filter is folder-scoped; leaving the folder clears it (CPE-639)
     }
     error = "";
+
+    // Metadata columns (CPE-1146, epic CPE-707): restore THIS folder's saved column set + widths,
+    // re-clamping widths on load (CPE-1140-style guard) so a stale/corrupt width can't paint a
+    // too-narrow column. Home has no listing, so it never carries a column set.
+    activeMetaColumns = path === HOME ? [] : clampMetaWidths(settings.loadMetaColumnsForFolder(path));
 
     // A new listing (or a refresh) invalidates the recursive-size cache so sizes recompute (CPE-750).
     if (folderSizes.size > 0) folderSizes = new Map();
@@ -3478,6 +3500,9 @@
       bind:sortKey
       bind:sortDir
       bind:columnWidths
+      {activeMetaColumns}
+      on:resizeMetaColumns={(e) => { activeMetaColumns = applyMetaColumnWidths(activeMetaColumns, e.detail); settings.saveMetaColumnsForFolder(currentPath, activeMetaColumns); }}
+      on:openColumnPicker={() => (columnPickerOpen = true)}
       bind:selection
       bind:selectedEntries
       bind:draggedPaths
@@ -4047,6 +4072,17 @@
     on:undo={() => { organizeOpen = false; checkpointOpen = true; }}
     on:help={() => openDocsSlug("03-explorer")}
     on:cancel={() => (organizeOpen = false)}
+  />
+{/if}
+
+{#if columnPickerOpen}
+  <!-- Column picker (CPE-1146, epic CPE-707): every change (add/remove/reorder) is persisted per-folder
+       immediately, so there's nothing to "cancel" — the dialog just closes. -->
+  <ColumnPickerDialog
+    available={$metaColumnCatalog}
+    active={activeMetaColumns}
+    on:change={(e) => { activeMetaColumns = e.detail; settings.saveMetaColumnsForFolder(currentPath, activeMetaColumns); }}
+    on:close={() => (columnPickerOpen = false)}
   />
 {/if}
 
