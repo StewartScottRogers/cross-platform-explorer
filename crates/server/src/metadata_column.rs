@@ -11,9 +11,12 @@
 
 use std::cmp::Ordering;
 
+use serde::{Deserialize, Serialize};
+
 /// A typed cell value for a metadata column. `Empty` means the extractor produced no value for this row
 /// (unreadable, or the wrong file kind — e.g. an audio column on an image).
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "specta", derive(specta::Type))]
 pub enum CellValue {
     /// Free text (artist, album, camera model). Sorted case-insensitively.
     Text(String),

@@ -436,6 +436,12 @@ pub mod column_extract;
 /// a Pages column (CPE-1029, epic CPE-707). Pure byte scan; no PDF library, no new dependency.
 pub mod doc_column;
 
+/// Metadata-column cell extraction over real files — the file-I/O layer on top of
+/// [`column_extract::extract_column`]: a capped-header read per path, the available-columns list (id +
+/// label + applicable extensions) for the picker, and the shared streamed/collect-to-vec walker the
+/// `metadata_column_cells`/`metadata_columns_available` commands dispatch into (CPE-1145, epic CPE-707).
+pub mod column_cells;
+
 /// Pure vector index — cosine-similarity top-k over stored embeddings + a persistent store, the
 /// backend/model-agnostic core of AI semantic search (CPE-981, epic CPE-976). Pure std; the embedder is
 /// separate + feature-gated (CPE-982).

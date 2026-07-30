@@ -743,6 +743,39 @@ async metadataWrite(path: string, edits: MetaEdit[]) : Promise<Result<MetaField[
 }
 },
 /**
+ * Every metadata column the details-view picker can offer (CPE-1145, epic CPE-707): a stable id (for
+ * `column_config` persistence), a friendly label, the typed `MetaColumn` to hand back to
+ * `metadata_column_cells`, and the extensions it applies to. In-memory enumeration only, no I/O — thin
+ * dispatcher into `cpe_server::column_cells::available_columns`.
+ */
+async metadataColumnsAvailable() : Promise<AvailableColumn[]> {
+    return await TAURI_INVOKE("metadata_columns_available");
+},
+/**
+ * Streamed metadata-column fill for a listing (CPE-1145, epic CPE-707): for each of `paths`, reads a
+ * capped header and extracts `column` (via `cpe_server::column_extract::extract_column`), pushing
+ * batches of `{ path, cell, display }` over `on_cell` as they resolve — so a column added to a big
+ * listing paints visible rows fast (STREAMING.md). Skip-on-error per file: an unreadable/undecodable
+ * file yields an empty cell, never a failed batch. Async + `spawn_blocking` (the walk does real file
+ * I/O). Shares `stream_column_cells` with the collect-to-vec variant below, so the two can never
+ * diverge. Returns the total number of cells emitted.
+ */
+async metadataColumnCells(paths: string[], column: MetaColumn, onCell: TAURI_CHANNEL<MetadataCell[]>) : Promise<Result<number, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("metadata_column_cells", { paths, column, onCell }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * Collect-to-vec variant of `metadata_column_cells` (tests + non-streaming callers): returns every cell
+ * directly instead of streaming batches. Same walk, so results always match `metadata_column_cells`.
+ */
+async metadataColumnCellsCollect(paths: string[], column: MetaColumn) : Promise<MetadataCell[]> {
+    return await TAURI_INVOKE("metadata_column_cells_collect", { paths, column });
+},
+/**
  * Streaming variant of `list_dir` (CPE-663, epic CPE-662): pushes `DirEntry` batches over an IPC channel
  * as the directory is read, so the frontend paints the first rows immediately instead of waiting for the
  * whole listing. `stream_id` (frontend-supplied, monotonic) registers a cancel flag polled each batch, so
@@ -1904,6 +1937,11 @@ span_ms: number }
  */
 export type ArchiveEntry = { name: string; size: number; is_dir: boolean }
 /**
+ * The audio metadata columns a user can add to the details view — each maps to a friendly key
+ * [`crate::media_meta_read::read_id3v2`] emits.
+ */
+export type AudioColumn = "Title" | "Artist" | "Album" | "AlbumArtist" | "Track" | "Disc" | "Genre" | "Year" | "Composer" | "Publisher" | "Bpm" | "Comment"
+/**
  * One filesystem-activity event. Mirrors the frontend `AuditEvent` (`src/lib/auditExport.ts`).
  */
 export type AuditEvent = { 
@@ -1933,6 +1971,13 @@ actor?: string | null;
  * Optional extra detail (rename target, diff summary, ...).
  */
 detail?: string | null }
+/**
+ * One pickable metadata column for the picker UI: a stable string id (for persistence in
+ * [`crate::column_config`]), a friendly label, the typed [`MetaColumn`] to pass back into
+ * [`column_cells`]/the streaming command, and the lowercase extensions it applies to (so the picker can
+ * grey out a non-applicable row).
+ */
+export type AvailableColumn = { id: string; label: string; column: MetaColumn; extensions: string[] }
 /**
  * A captured snapshot of the pre-existing entries under a watched root at watch-start.
  */
@@ -2020,6 +2065,35 @@ fields: ([string, string])[];
  * The markdown body after the frontmatter.
  */
 body: string }
+/**
+ * A typed cell value for a metadata column. `Empty` means the extractor produced no value for this row
+ * (unreadable, or the wrong file kind — e.g. an audio column on an image).
+ */
+export type CellValue = 
+/**
+ * Free text (artist, album, camera model). Sorted case-insensitively.
+ */
+{ Text: string } | 
+/**
+ * An integer quantity (page count, bitrate kbps, track number).
+ */
+{ Int: number } | 
+/**
+ * A real quantity (duration seconds, aperture f-number).
+ */
+{ Float: number } | 
+/**
+ * A byte size — formatted human-readably, sorted numerically.
+ */
+{ Bytes: number } | 
+/**
+ * Pixel dimensions — formatted `w × h`, sorted by area then width.
+ */
+{ Dimensions: { w: number; h: number } } | 
+/**
+ * No value for this row.
+ */
+"Empty"
 /**
  * One recorded checkpoint's index entry: which manifest holds its captured tree, the user's label, and
  * when it was taken (epoch ms). This is the row appended to / read from `checkpoints.json`.
@@ -2216,6 +2290,11 @@ hidden: boolean }
  */
 export type DiskSpace = { free: number; total: number }
 /**
+ * The document-info columns a user can add to the details view — each maps to a friendly key
+ * [`crate::media_meta_read::read_pdf`] emits.
+ */
+export type DocInfoColumn = "Title" | "Author" | "Subject" | "Keywords" | "Creator" | "Producer" | "DateCreated" | "DateModified"
+/**
  * A set of byte-identical files: their shared size + hash and every path.
  */
 export type DupGroup = { size: number; hash: string; paths: string[] }
@@ -2383,6 +2462,36 @@ export type MediaOp =
  */
 { op: "watermark"; image: string; position?: Corner; opacity: number }
 /**
+ * A metadata column the details view can add, spanning media families.
+ */
+export type MetaColumn = 
+/**
+ * A typed audio-tag column (Title/Artist/Track/Year/…), read from ID3/FLAC/OGG by extension.
+ */
+{ Audio: AudioColumn } | 
+/**
+ * The image's pixel dimensions (`w × h`, sorted by area).
+ */
+"ImageDimensions" | 
+/**
+ * A document's page count (PDF, v1), sorted numerically.
+ */
+"DocPages" | 
+/**
+ * A typed document-info column (Title/Author/Subject/…), read from a PDF's `/Info` dictionary
+ * (CPE-1039).
+ */
+{ DocInfo: DocInfoColumn } | 
+/**
+ * The video's duration in seconds, read from the ISO-BMFF `moov/mvhd` box (CPE-1028).
+ */
+"VideoDuration" | 
+/**
+ * A typed video-tag column (Title/Artist/Album/Year/…), read from an MP4/MOV's
+ * `moov/udta/meta/ilst` iTunes-style tags (CPE-1040).
+ */
+{ VideoTag: VideoTagColumn }
+/**
  * An edit the user asked for.
  */
 export type MetaEdit = 
@@ -2403,6 +2512,13 @@ export type MetaField = {
  * The metadata group/namespace, e.g. `"exif"`, `"iptc"`, `"id3"`.
  */
 group: string; key: string; value: string; editable: boolean }
+/**
+ * One streamed/collected cell result: the source path, the typed value (so the frontend can do
+ * type-aware behaviour later, e.g. right-aligning numbers), and a pre-formatted display string —
+ * reusing [`CellValue::display`] rather than making the frontend reimplement byte/float/dimension
+ * formatting in TypeScript.
+ */
+export type MetadataCell = { path: string; cell: CellValue; display: string }
 /**
  * One row of the downsampled minimap.
  */
@@ -2765,6 +2881,11 @@ export type TransferKind = "copy" | "move"
  * (`isDir`).
  */
 export type TreeNode = { name: string; isDir: boolean; size?: number | null; modified?: number | null; children?: TreeNode[] | null }
+/**
+ * The video-tag columns a user can add to the details view — each maps to a friendly key
+ * [`crate::video_meta_read::read_mp4`] emits.
+ */
+export type VideoTagColumn = "Title" | "Artist" | "Album" | "Year" | "Comment" | "Genre" | "Composer" | "Encoder" | "Copyright"
 /**
  * One resident volume's state, for `index_status` (so the UI can show what's indexed). Serialisable —
  * it's an `index_status` command return type.

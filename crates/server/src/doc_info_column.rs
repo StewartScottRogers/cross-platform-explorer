@@ -9,12 +9,15 @@
 //!
 //! Pure + std-only: a lookup over already-read fields, no I/O.
 
+use serde::{Deserialize, Serialize};
+
 use crate::media_meta_edit::MetaField;
 use crate::metadata_column::CellValue;
 
 /// The document-info columns a user can add to the details view — each maps to a friendly key
 /// [`crate::media_meta_read::read_pdf`] emits.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "specta", derive(specta::Type))]
 pub enum DocInfoColumn {
     Title,
     Author,
@@ -27,6 +30,19 @@ pub enum DocInfoColumn {
 }
 
 impl DocInfoColumn {
+    /// Every document-info column, in a stable display order — what the column picker enumerates
+    /// (CPE-1145).
+    pub(crate) const ALL: [DocInfoColumn; 8] = [
+        DocInfoColumn::Title,
+        DocInfoColumn::Author,
+        DocInfoColumn::Subject,
+        DocInfoColumn::Keywords,
+        DocInfoColumn::Creator,
+        DocInfoColumn::Producer,
+        DocInfoColumn::DateCreated,
+        DocInfoColumn::DateModified,
+    ];
+
     /// The friendly [`MetaField::key`] this column reads (as produced by the PDF `/Info` read codec).
     fn key(self) -> &'static str {
         match self {
@@ -39,6 +55,27 @@ impl DocInfoColumn {
             DocInfoColumn::DateCreated => "Date Created",
             DocInfoColumn::DateModified => "Date Modified",
         }
+    }
+
+    /// Stable snake_case token for this column, used to build [`crate::column_extract::MetaColumn::id`]
+    /// (persistence in `column_config`, CPE-1145).
+    pub(crate) fn id_token(self) -> &'static str {
+        match self {
+            DocInfoColumn::Title => "title",
+            DocInfoColumn::Author => "author",
+            DocInfoColumn::Subject => "subject",
+            DocInfoColumn::Keywords => "keywords",
+            DocInfoColumn::Creator => "creator",
+            DocInfoColumn::Producer => "producer",
+            DocInfoColumn::DateCreated => "date_created",
+            DocInfoColumn::DateModified => "date_modified",
+        }
+    }
+
+    /// The friendly display label for the column picker — reuses [`Self::key`], which is already a
+    /// human-readable name.
+    pub(crate) fn label(self) -> &'static str {
+        self.key()
     }
 }
 

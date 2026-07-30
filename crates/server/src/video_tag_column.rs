@@ -9,12 +9,15 @@
 //!
 //! Pure + std-only: a lookup + parse over already-read fields, no I/O.
 
+use serde::{Deserialize, Serialize};
+
 use crate::media_meta_edit::MetaField;
 use crate::metadata_column::CellValue;
 
 /// The video-tag columns a user can add to the details view — each maps to a friendly key
 /// [`crate::video_meta_read::read_mp4`] emits.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "specta", derive(specta::Type))]
 pub enum VideoTagColumn {
     Title,
     Artist,
@@ -28,6 +31,20 @@ pub enum VideoTagColumn {
 }
 
 impl VideoTagColumn {
+    /// Every video-tag column, in a stable display order — what the column picker enumerates
+    /// (CPE-1145).
+    pub(crate) const ALL: [VideoTagColumn; 9] = [
+        VideoTagColumn::Title,
+        VideoTagColumn::Artist,
+        VideoTagColumn::Album,
+        VideoTagColumn::Year,
+        VideoTagColumn::Comment,
+        VideoTagColumn::Genre,
+        VideoTagColumn::Composer,
+        VideoTagColumn::Encoder,
+        VideoTagColumn::Copyright,
+    ];
+
     /// The friendly [`MetaField::key`] this column reads (as produced by the MP4/MOV tag read codec).
     fn key(self) -> &'static str {
         match self {
@@ -46,6 +63,28 @@ impl VideoTagColumn {
     /// Whether this column is a numeric quantity (sorts as an integer, not text).
     fn is_numeric(self) -> bool {
         matches!(self, VideoTagColumn::Year)
+    }
+
+    /// Stable snake_case token for this column, used to build [`crate::column_extract::MetaColumn::id`]
+    /// (persistence in `column_config`, CPE-1145).
+    pub(crate) fn id_token(self) -> &'static str {
+        match self {
+            VideoTagColumn::Title => "title",
+            VideoTagColumn::Artist => "artist",
+            VideoTagColumn::Album => "album",
+            VideoTagColumn::Year => "year",
+            VideoTagColumn::Comment => "comment",
+            VideoTagColumn::Genre => "genre",
+            VideoTagColumn::Composer => "composer",
+            VideoTagColumn::Encoder => "encoder",
+            VideoTagColumn::Copyright => "copyright",
+        }
+    }
+
+    /// The friendly display label for the column picker — reuses [`Self::key`], which is already a
+    /// human-readable name.
+    pub(crate) fn label(self) -> &'static str {
+        self.key()
     }
 }
 
