@@ -377,6 +377,10 @@ button:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
 }
 .col.num { justify-content: flex-end; }
 .col .sortchev { opacity: 0.8; }
+/* Column-picker button (CPE-1147): the Name header gets extra left padding so its label/chevron
+   clears the absolutely-positioned `.columns-btn` pinned at the header's left edge (see below) —
+   the button occupies no grid track, so this is pure visual clearance, not a layout column. */
+.col.name { padding-left: 34px; }
 
 /* rows */
 .rows { padding: 2px 6px 0; }
@@ -403,10 +407,22 @@ button:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
    `--filelist-cols` template (set inline per-render from `columns.ts`) already grows to fit it — these
    are just per-item styling, not new grid tracks. `.meta-empty` is the "no value for this row" dim
    placeholder ("—"), distinct from a cell that hasn't been fetched yet (renders nothing, never a
-   placeholder that could be mistaken for a confirmed-empty value). The header "Columns…" affordance
-   sits in the trailing 1fr spacer; `justify-self: start` keeps it a small icon button there rather than
-   stretching the whole remaining header width into one giant hit target. */
-.col.columns-btn { flex: 0 0 auto; justify-self: start; width: 26px; padding: 0; justify-content: center; border-radius: 4px; }
+   placeholder that could be mistaken for a confirmed-empty value). The "Columns…" affordance (CPE-1147)
+   is absolutely positioned within `.columns` (which is `position: sticky`, a positioning context) so it
+   sits pinned at the header's LEFT edge without occupying a grid track — the file ROWS below have no
+   matching leading track, so giving it one here would desync every header boundary/resizer from its row
+   cells. `.col.name`'s extra left padding above gives its label clearance from the button. */
+.col.columns-btn {
+  position: absolute;
+  left: 4px;
+  top: 3px;
+  z-index: 1;
+  width: 24px;
+  height: 24px;
+  padding: 0;
+  justify-content: center;
+  border-radius: 4px;
+}
 .col.columns-btn:hover { background: var(--surface-alt); color: var(--text); }
 .meta-empty { color: var(--text-faint); }
 

@@ -40,16 +40,40 @@ two small UI tweaks:
   dispatch unchanged.
 
 ## Acceptance Criteria
-- [ ] The column-picker button renders at the LEFT of the file-list header (middle pane), not the right.
-- [ ] Header column labels + resizers stay aligned with the file rows below; no regression to column resize,
+- [x] The column-picker button renders at the LEFT of the file-list header (middle pane), not the right.
+- [x] Header column labels + resizers stay aligned with the file rows below; no regression to column resize,
       `boundaryOffsets`, or the CPE-1140 middle-pane minimum.
-- [ ] The button uses a more indicative icon (`settings` gear, or `plus` if a gear is already adjacent);
+- [x] The button uses a more indicative icon (`settings` gear, or `plus` if a gear is already adjacent);
       `title`/`aria-label`/`data-testid` unchanged.
-- [ ] `npm run check` green; existing `FileList.test.ts` (incl. the `open-column-picker` assertions) still
+- [x] `npm run check` green; existing `FileList.test.ts` (incl. the `open-column-picker` assertions) still
       passes; the `gui-smoke` `organize`/`instant-search`/`batch-media`/column pins unaffected (the testid is
       unchanged).
 - [ ] GUI-verified on the real build (button is left-of-header + the icon reads clearly). **Deferred to the
       Foreman + user pass.**
+
+## Work Log
+
+- **Placement approach:** absolutely-positioned `.columns-btn` pinned to the header's left edge (`.columns`
+  is already `position: sticky`, which establishes a containing block for `position: absolute` descendants —
+  no new `position: relative` needed). The button was moved to be the FIRST DOM child of `.columns`, ahead of
+  the `{#each COLUMNS}` block, but because it's `position: absolute` it is taken OUT of grid flow entirely —
+  it consumes zero grid tracks. This means `colTemplate` (`columnsTemplate(allWidths)` from `columns.ts`),
+  `boundaryOffsets`, and the `.row` grid (which shares the same `--filelist-cols` template) are completely
+  untouched — verified by reading `columns.ts` (`columnsTemplate`/`boundaryOffsets` take only the real column
+  widths array, never see the button) and confirming the resize `<span class="col-resize">` handles are
+  already excluded from grid flow the same way (comment at their definition: "`.columns` is position:sticky,
+  so these absolute handles are contained by it"). The Name header button gets `class:name={col.key ===
+  "name"}` → new CSS rule `.col.name { padding-left: 34px; }` so its label/chevron clears the 24px button
+  (positioned at `left: 4px`), leaving a ~6px gap. `MID_MIN` (`columns.ts`) is derived purely from
+  `COLUMN_MINS` + `FILELIST_CHROME`, neither of which changed, so CPE-1140's middle-pane minimum is
+  unaffected.
+- **Icon:** `settings` (gear) — grepped the whole `src/` tree for `name="settings"` and found zero existing
+  usages, so no adjacent-gear ambiguity in this header (or anywhere in the app); used the ticket's default
+  choice instead of the `plus` fallback.
+- **Verify:** `npm run check` → 0 errors, 0 warnings. `npx vitest run src/lib/components/FileList.test.ts` →
+  28/28 passed (the `open-column-picker` click-dispatch test asserts only the testid + event, not position/
+  icon, so it needed no changes). `npx vitest run` full suite → 126 files / 1402 tests passed, nothing else
+  broke.
 
 ## Notes
 - Pure cosmetic follow-up to CPE-1146; the feature (dynamic columns, type-aware sort, per-folder persistence)
