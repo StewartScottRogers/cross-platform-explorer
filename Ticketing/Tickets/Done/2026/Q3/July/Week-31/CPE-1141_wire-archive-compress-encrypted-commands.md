@@ -4,7 +4,7 @@ title: "Archive suite: wire the built-but-unwired compress_archive + encrypted-z
 type: feature
 component: Backend
 priority: medium
-status: Backlog
+status: Done
 tags: ready
 created: 2026-07-29
 epic: CPE-705
