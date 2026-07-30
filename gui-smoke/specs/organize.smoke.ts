@@ -12,7 +12,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { $, $$, browser } from "@wdio/globals";
-import { snap } from "../lib/snap.js";
+import { snap, snapFailure } from "../lib/snap.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const STATE_FILE = path.resolve(__dirname, "..", ".smoke-state.json");
@@ -27,6 +27,13 @@ const ORGANIZE_ZIP_NAME = "CPE-1143-archive.zip";
 describe("CPE-1143 — headless GUI smoke: auto-organize dialog renders a grouped preview", () => {
   before(() => {
     JSON.parse(fs.readFileSync(STATE_FILE, "utf-8")) as { tmpDir: string };
+  });
+
+  // CPE-1149: on a failing run, leave a shot of the state it failed in (`organize-dialog-fail.png`)
+  // — the inline `snap("organize-dialog")` below is only reached on a pass. Non-arrow fn so Mocha
+  // binds `this`; `snapFailure` is a no-op on a pass and swallows its own errors.
+  afterEach(async function () {
+    await snapFailure(this.currentTest, "organize-dialog");
   });
 
   it("opens via the command palette, picks a rule, and renders grouped proposal rows", async () => {
@@ -129,7 +136,10 @@ describe("CPE-1143 — headless GUI smoke: auto-organize dialog renders a groupe
     expect(await summary.isExisting(), "expected the plan summary line to render").to.equal(true);
 
     // CPE-1148 Part A: capture the grouped-preview dialog (after the assertions above, before it's
-    // dismissed).
+    // dismissed below). On a FAILING run this line is never reached and the dialog is still open when
+    // the `afterEach` hook fires, so it captures `organize-dialog-fail.png` of the failure state
+    // instead (CPE-1149) — capturing in the hook rather than here is why the pass shot must stay
+    // inline: the afterEach runs only after the Cancel click below dismisses the dialog.
     await snap("organize-dialog");
 
     // Non-destructive: never click Apply — dismiss via Cancel instead, for a clean end state (each

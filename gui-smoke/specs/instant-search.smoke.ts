@@ -17,7 +17,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { $, browser } from "@wdio/globals";
-import { snap } from "../lib/snap.js";
+import { snap, snapFailure } from "../lib/snap.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const STATE_FILE = path.resolve(__dirname, "..", ".smoke-state.json");
@@ -28,6 +28,13 @@ describe("CPE-1143 — headless GUI smoke: Ctrl+K Instant Search overlay renders
     // directly by this spec (no fixture keyed off it), but read for parity with every other spec in
     // this suite and to fail fast with a clear error if the state file is somehow missing.
     JSON.parse(fs.readFileSync(STATE_FILE, "utf-8")) as { tmpDir: string };
+  });
+
+  // CPE-1149: on a failing run, leave a shot of the state it failed in (`instant-search-fail.png`) —
+  // the inline `snap("instant-search")` below is only reached on a pass. Non-arrow fn so Mocha binds
+  // `this`; `snapFailure` is a no-op on a pass and swallows its own errors.
+  afterEach(async function () {
+    await snapFailure(this.currentTest, "instant-search");
   });
 
   it("Ctrl+K opens the overlay and its off-means-off 'Build index' affordance renders", async () => {
@@ -76,7 +83,9 @@ describe("CPE-1143 — headless GUI smoke: Ctrl+K Instant Search overlay renders
       true,
     );
 
-    // CPE-1148 Part A: capture the overlay's off-means-off state (after the assertions above).
+    // CPE-1148 Part A: capture the overlay's off-means-off state (after the assertions above). On a
+    // FAILING run this line is never reached — the `afterEach` hook above captures
+    // `instant-search-fail.png` of the failure state instead (CPE-1149).
     await snap("instant-search");
   });
 });
