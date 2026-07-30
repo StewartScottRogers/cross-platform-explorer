@@ -51,7 +51,7 @@ complete. Nearly every epic is "In Progress" but their **headless cores are buil
 ### Everything else = surface to the user, don't force it
 Big remaining menus, all **user-gated**: the AI-explorer UIs + real embedder/LLM/OCR backend (976–980, need a
 model choice / API key); remote-filesystem connections sidebar + keychain + transfer UI + SMB/S3 (616);
-index-search overlay UI (703); native-metadata Properties UI + Mac Finder round-trip (717/828); archive
+native-metadata Properties UI + Mac Finder round-trip (717/828); archive
 compress/extract context actions + password prompt UI (705); checkpoint **restore panel + timeline markers**
 (CPE-1126, the CPE-732 GUI cap); media-studio editor UI; drag-OUT-to-OS (CPE-672/674, needs a plugin spike +
 GUI). Also **CPE-002** code-signing (blocked on the user's cert).
