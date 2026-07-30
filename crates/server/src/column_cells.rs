@@ -70,14 +70,21 @@ pub struct MetadataCell {
     pub display: String,
 }
 
-/// Read a capped header of `path` (at most [`HEADER_CAP`] bytes). Any I/O failure (missing file, no
+/// Read a capped header of `path` (at most [`HEADER_CAP`] bytes), plus a `truncated` flag = whether the
+/// file was LARGER than the cap (so bytes past the header were not read). Any I/O failure (missing file, no
 /// permission, a directory, …) surfaces as `Err`; [`stream_column_cells`] below turns that into an empty
-/// cell rather than aborting the batch.
-fn read_header(path: &Path) -> std::io::Result<Vec<u8>> {
+/// cell rather than aborting the batch. `truncated` lets the caller suppress a metadata value that a
+/// truncated read could compute *wrongly* rather than merely miss (see the `DocPages` note there).
+fn read_header(path: &Path) -> std::io::Result<(Vec<u8>, bool)> {
     let file = std::fs::File::open(path)?;
     let mut bytes = Vec::new();
-    file.take(HEADER_CAP).read_to_end(&mut bytes)?;
-    Ok(bytes)
+    // Read one byte past the cap so we can tell "file exceeds the cap" from "file is exactly the cap".
+    file.take(HEADER_CAP + 1).read_to_end(&mut bytes)?;
+    let truncated = bytes.len() as u64 > HEADER_CAP;
+    if truncated {
+        bytes.truncate(HEADER_CAP as usize);
+    }
+    Ok((bytes, truncated))
 }
 
 /// The shared column-cell walk (CPE-1145): for each of `paths`, read a capped header and extract `col`
@@ -98,10 +105,18 @@ pub fn stream_column_cells(
             .and_then(|e| e.to_str())
             .unwrap_or("")
             .to_string();
-        // Skip-on-error: an unreadable file's bytes default to empty, which every extractor already
-        // turns into `CellValue::Empty` (never a panic — see `column_extract`'s own fixture tests).
-        let bytes = read_header(Path::new(path)).unwrap_or_default();
-        let cell = extract_column(&ext, &bytes, col);
+        // Skip-on-error: an unreadable file's bytes default to empty (+ not truncated), which every
+        // extractor already turns into `CellValue::Empty` (never a panic — see `column_extract`'s fixtures).
+        let (bytes, truncated) = read_header(Path::new(path)).unwrap_or_default();
+        let mut cell = extract_column(&ext, &bytes, col);
+        // CPE-1145 review fix: unlike the video/image extractors (which bounds-check structurally and bail to
+        // Empty on truncation), `DocPages` is a linear `/Type /Page` substring scan with no end-of-structure
+        // check — a page object living past the header cap would be silently UNDERCOUNTED (e.g. a 50-page
+        // scanned PDF reported as "5"). A count from a truncated read can be *wrong*, not just missing, so
+        // degrade it to Empty: honour the "never wrong, only empty" contract every other column keeps.
+        if truncated && matches!(col, MetaColumn::DocPages) && matches!(cell, CellValue::Int(_)) {
+            cell = CellValue::Empty;
+        }
         let display = cell.display(EMPTY_PLACEHOLDER);
         buf.push(MetadataCell { path: path.clone(), cell, display });
         if buf.len() >= batch && flush(std::mem::take(&mut buf)).is_break() {
@@ -244,6 +259,48 @@ mod tests {
         let page_cells = column_cells(std::slice::from_ref(&pdf_path), MetaColumn::DocPages);
         assert_eq!(page_cells[0].cell, CellValue::Int(3));
         assert_eq!(page_cells[0].display, "3");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// CPE-1145 review fix: `DocPages` counts `/Type /Page` markers by linear scan, so a PDF whose page
+    /// objects extend PAST the 1 MiB header cap would be silently UNDERCOUNTED (a wrong, non-empty value).
+    /// A count from a truncated read must degrade to `Empty` — never report a wrong page number.
+    #[test]
+    fn doc_pages_on_a_truncated_read_yields_empty_not_an_undercount() {
+        let dir = scratch("pdf-truncated");
+
+        // Two page objects near the start, then >1 MiB of filler, then three more page objects — so the
+        // real page count is 5 but only the first 2 markers live within the capped header.
+        let mut big = Vec::new();
+        big.extend_from_slice(b"%PDF-1.4\n");
+        for n in 0..2 {
+            big.extend_from_slice(
+                format!("{} 0 obj\n<< /Type /Page >>\nendobj\n", n + 1).as_bytes(),
+            );
+        }
+        big.extend(std::iter::repeat(b'%').take((HEADER_CAP as usize) + 4096)); // push past the cap
+        for n in 2..5 {
+            big.extend_from_slice(
+                format!("{} 0 obj\n<< /Type /Page >>\nendobj\n", n + 1).as_bytes(),
+            );
+        }
+        assert!(big.len() as u64 > HEADER_CAP, "fixture must exceed the header cap");
+        let big_pdf = write_file(&dir, "scanned.pdf", &big);
+
+        // Undercount (2, from the visible markers) would be WRONG → the fix returns Empty instead.
+        let cells = column_cells(std::slice::from_ref(&big_pdf), MetaColumn::DocPages);
+        assert_eq!(
+            cells[0].cell,
+            CellValue::Empty,
+            "a truncated-read DocPages must be Empty, never a wrong undercount"
+        );
+        assert_eq!(cells[0].display, "—");
+
+        // Control: a small in-cap PDF still reports its real page count (the fix only suppresses truncated reads).
+        let small_pdf = write_file(&dir, "small.pdf", &pdf(4));
+        let small = column_cells(std::slice::from_ref(&small_pdf), MetaColumn::DocPages);
+        assert_eq!(small[0].cell, CellValue::Int(4));
 
         let _ = std::fs::remove_dir_all(&dir);
     }

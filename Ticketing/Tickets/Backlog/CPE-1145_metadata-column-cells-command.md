@@ -121,3 +121,18 @@ clean. `npm run check`: 0 errors, 0 warnings.
 is speculative plumbing for `column_config` (CPE-1032) persistence, not yet wired to it (that store still
 takes arbitrary strings, so no change was needed there); `require_local` intentionally omitted (see
 above).
+
+## Review fix (2026-07-30, Foreman-applied per reviewer CHANGES REQUESTED)
+- **DocPages truncated-read undercount fixed (real data-correctness bug):** the 1 MiB header cap degrades
+  safely to Empty for video/image/audio (structural bounds-checks), but `DocPages` is a linear `/Type /Page`
+  substring scan — a PDF with page objects past 1 MiB would report a WRONG, undercounted page number (e.g. a
+  50-page scanned PDF → "5"), not Empty, contradicting the "never wrong, only empty" property.
+- **Fix:** `read_header` now returns `(bytes, truncated)` (truncated = file exceeded the cap); in
+  `stream_column_cells`, a `DocPages` `Int` from a truncated read is degraded to `CellValue::Empty` (the one
+  family whose scan can *lie*; every other column already bails to Empty structurally). Internal only — no
+  exported type/signature change, so no bindings regen.
+- **Test added:** `doc_pages_on_a_truncated_read_yields_empty_not_an_undercount` — a >1 MiB PDF with 2 page
+  markers before the cap + 3 past it → asserts Empty (not "2"); control small PDF still reports Int(4).
+- **Test-count correction:** the earlier "17 new tests" claim was wrong — actual is 9 + this new one = **10**.
+- Re-verified: `crates/server` `cargo test` green (incl. the new test), `cargo clippy --all-targets -- -D
+  warnings` clean.
