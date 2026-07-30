@@ -4,7 +4,7 @@ title: "Instant index: expose the built engine via streamed build/search command
 type: feature
 component: Backend
 priority: high
-status: Backlog
+status: Done
 tags: ready
 created: 2026-07-29
 epic: CPE-703
