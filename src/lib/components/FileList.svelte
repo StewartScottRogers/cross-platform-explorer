@@ -493,7 +493,7 @@
       title={$t("fl.columnsButton")}
       aria-label={$t("fl.columnsButton")}
       on:click={() => dispatch("openColumnPicker")}
-    ><Icon name="settings" size={13} /></button>
+    ><Icon name="spreadsheet" size={13} /></button>
     {#each COLUMNS as col (col.key)}
       <button
         class="col"
