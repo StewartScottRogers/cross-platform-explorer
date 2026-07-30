@@ -482,10 +482,23 @@
 
 {#if view === "details" && !error && !loading && entries.length > 0}
   <div class="columns" style="--filelist-cols: {colTemplate}">
+    <!-- Column-picker button (CPE-1147): pinned to the header's LEFT edge via absolute positioning
+         so it never occupies a grid track — the file ROWS below have no matching leading track, and
+         adding one here would desync every header boundary/resizer from its row cells. The Name
+         header (first `.col` below) gets left padding (`.col.name`) so its label/chevron clears the
+         button instead of sitting under it. -->
+    <button
+      class="col columns-btn"
+      data-testid="open-column-picker"
+      title={$t("fl.columnsButton")}
+      aria-label={$t("fl.columnsButton")}
+      on:click={() => dispatch("openColumnPicker")}
+    ><Icon name="settings" size={13} /></button>
     {#each COLUMNS as col (col.key)}
       <button
         class="col"
         class:num={col.num}
+        class:name={col.key === "name"}
         on:click={() => headerClick(col.key)}
         title={$t("fl.sortBy", { col: $t(col.labelKey) })}
       >
@@ -513,13 +526,6 @@
         {/if}
       </button>
     {/each}
-    <button
-      class="col columns-btn"
-      data-testid="open-column-picker"
-      title={$t("fl.columnsButton")}
-      aria-label={$t("fl.columnsButton")}
-      on:click={() => dispatch("openColumnPicker")}
-    ><Icon name="details" size={13} /></button>
     {#each handleOffsets as x, i (i)}
       <!-- A focusable separator is the valid ARIA "window splitter" pattern; the lint
            flags the tabindex/handlers as if it were plain text, so suppress those. -->
