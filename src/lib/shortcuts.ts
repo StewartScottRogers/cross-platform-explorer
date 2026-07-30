@@ -33,6 +33,7 @@ export const SHORTCUT_GROUPS: ShortcutGroup[] = [
       { keys: "Ctrl+F", description: "Search the current folder" },
       { keys: "Ctrl+P", description: "Find files by name (recursive)" },
       { keys: "Ctrl+Shift+F", description: "Search inside files (content search)" },
+      { keys: "Ctrl+K", description: "Instant Search — every indexed folder, any drive" },
       { keys: "Enter", description: "Open the selected item" },
       { keys: "Type a name", description: "Jump to the matching item" },
     ],
