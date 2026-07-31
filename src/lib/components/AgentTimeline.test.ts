@@ -644,6 +644,21 @@ describe("AgentTimeline checkpoint restore panel — two-step revert confirm gat
     expect(screen.getByTestId("checkpoint-confirm-yes")).toBeTruthy();
   });
 
+  it("counts read as the revert PLAN in plain language (CPE-1165), not a summary of the user's edits", async () => {
+    mockCheckpointCommands(); // PREVIEW: creates 1, overwrites 2, deletes 0, drift_count 0
+    await mountAndOpenRestorePanel();
+
+    expect(screen.getByTestId("checkpoint-counts-lead").textContent).toContain("Reverting will:");
+    const counts = screen.getByTestId("checkpoint-counts");
+    expect(counts.textContent).toContain("restore 1"); // creates → files you deleted come back
+    expect(counts.textContent).toContain("overwrite 2"); // overwrites → changed files reset
+    expect(counts.textContent).toContain("delete 0"); // deletes → files added since are removed
+    expect(counts.textContent).toContain("0 changed since this checkpoint"); // drift_count reworded
+    // The old inverse-reading bare labels are gone.
+    expect(counts.textContent).not.toContain("creates 1");
+    expect(counts.textContent).not.toContain("drift 0");
+  });
+
   it("confirming: checkpoint_revert fires only after 'Yes, revert', with (currentPath, manifest_id)", async () => {
     mockCheckpointCommands();
     await mountAndOpenRestorePanel();

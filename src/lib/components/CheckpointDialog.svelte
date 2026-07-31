@@ -186,12 +186,14 @@
 
     {#if preview}
       <div class="preview" data-testid="preview-panel">
+        <div class="preview-lead" data-testid="preview-lead">Reverting will:</div>
         <div class="preview-counts">
-          <span>creates {preview.creates}</span>
-          <span>overwrites {preview.overwrites}</span>
-          <span>deletes {preview.deletes}</span>
-          <span>{fmtBytes(preview.bytes_written)} to write</span>
-          <span class:drift={preview.drift_count > 0}>drift {preview.drift_count}</span>
+          <span title="Files you deleted come back">restore {preview.creates}</span>
+          <span title="Changed files are reset to the checkpoint">overwrite {preview.overwrites}</span>
+          <span title="Files added since the checkpoint are removed">delete {preview.deletes}</span>
+          <span title="Total bytes written back to disk">{fmtBytes(preview.bytes_written)} to write</span>
+          <span class:drift={preview.drift_count > 0}
+            title="Changed since this checkpoint — reverting overwrites that newer work">{preview.drift_count} changed since this checkpoint</span>
         </div>
         {#if preview.drift_count > 0}
           <div class="drift-list" data-testid="drift-list">
@@ -258,7 +260,9 @@
   .mini.danger:not(:disabled) { border-color: #c42b1c; color: #c42b1c; }
   .mini:disabled { opacity: 0.4; }
   .preview { border: 1px solid var(--border); border-radius: var(--radius); padding: 10px; margin-bottom: 8px; }
+  .preview-lead { font-size: 12px; font-weight: 600; color: var(--text); margin-bottom: 6px; }
   .preview-counts { display: flex; flex-wrap: wrap; gap: 12px; font-size: 12px; color: var(--text-dim); }
+  .preview-counts span { white-space: nowrap; flex: 0 0 auto; }
   .preview-counts .drift { color: #b8860b; font-weight: 600; }
   .drift-list { margin-top: 8px; max-height: 14vh; overflow: auto; }
   .drift-item { padding: 2px 0; font-size: 12px; color: var(--text-dim); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
