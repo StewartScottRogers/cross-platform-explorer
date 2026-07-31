@@ -117,3 +117,13 @@ walkthrough. Outcome: **not a plain pass — two concrete refinements requested*
   2. **Echo drift in the confirm** — restate the drift count inside the red "Yes, revert" box so a
      clobbering revert is unmissable at the destructive click.
   This ticket stays in Doing/ until CPE-1151 lands; then a short re-confirm closes the "safe/clear" clause.
+
+2026-07-30 (Foreman) — **CPE-1151 landed** (PR #468, `dd25e52b`): precise session-aware drift + the drift
+count echoed inside the red confirm, both reviewer-APPROVED (gate intact, both-mode clippy clean, no bindings
+drift, 46 FE tests + 3 new domain tests green). So both of the user's requested refinements are shipped.
+- **The one thing still unseen:** a *screenshot* of the improved restore panel — gui-smoke still can't render a
+  checkpoint marker (needs a real snapshot-store seed, not the replay fixture). Filed **[[CPE-1152]]** to add
+  that seed seam so the Visual Critic can screenshot-verify this surface (and retire its MVD row). Once
+  CPE-1152 lands and the Critic returns `VISUAL PASS` (or the user accepts on the strength of
+  build+review+tests+their directed fixes), CPE-1126's "confirm-to-revert is safe/clear" clause closes.
+  Pending the user's call on which of those two closes it.

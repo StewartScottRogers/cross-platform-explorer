@@ -4,9 +4,10 @@ title: "Restore panel: session-precise drift + echo drift count inside the rever
 type: feature
 component: Frontend
 priority: high
-status: Backlog
+status: Done
 tags: ready
 created: 2026-07-30
+closed: 2026-07-30
 epic: CPE-732
 ---
 
