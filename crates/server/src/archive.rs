@@ -243,7 +243,7 @@ pub fn create_empty_zip(dest: &str) -> Result<String, String> {
         .create_new(true)
         .open(dest)
         .map_err(|e| e.to_string())?;
-    let mut writer = zip::ZipWriter::new(file);
+    let writer = zip::ZipWriter::new(file);
     writer.finish().map_err(|e| e.to_string())?;
     Ok(dest.to_string())
 }
