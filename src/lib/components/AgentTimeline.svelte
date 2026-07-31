@@ -773,12 +773,14 @@
           {:else if revertPreviewError}
             <div class="cp-restore-err" data-testid="checkpoint-preview-error">Couldn't preview revert: {revertPreviewError}</div>
           {:else if revertPreview}
+            <div class="cp-counts-lead" data-testid="checkpoint-counts-lead">Reverting will:</div>
             <div class="cp-counts" data-testid="checkpoint-counts">
-              <span class="cp-count">creates {revertPreview.creates}</span>
-              <span class="cp-count">overwrites {revertPreview.overwrites}</span>
-              <span class="cp-count">deletes {revertPreview.deletes}</span>
-              <span class="cp-count">{formatBytes(revertPreview.bytes_written)} to write</span>
-              <span class="cp-count" class:drift={revertPreview.drift_count > 0}>drift {revertPreview.drift_count}</span>
+              <span class="cp-count" title="Files you deleted come back">restore {revertPreview.creates}</span>
+              <span class="cp-count" title="Changed files are reset to the checkpoint">overwrite {revertPreview.overwrites}</span>
+              <span class="cp-count" title="Files added since the checkpoint are removed">delete {revertPreview.deletes}</span>
+              <span class="cp-count" title="Total bytes written back to disk">{formatBytes(revertPreview.bytes_written)} to write</span>
+              <span class="cp-count" class:drift={revertPreview.drift_count > 0}
+                title="Changed since this checkpoint — reverting overwrites that newer work">{revertPreview.drift_count} changed since this checkpoint</span>
             </div>
             {#if revertPreview.drift_count > 0}
               <div class="cp-drift-warn" data-testid="checkpoint-drift-warning">
@@ -1558,6 +1560,13 @@
     padding: 4px 0;
     font-size: 11.5px;
     color: var(--danger, #c0392b);
+  }
+  /* Lead-in framing the counts as the revert plan (CPE-1165), not a summary of the user's edits. */
+  .cp-counts-lead {
+    margin: 2px 0 4px;
+    font-size: 11px;
+    font-weight: 600;
+    color: var(--text, inherit);
   }
   /* Counts row — tick-tacks: reflow onto more rows, each pill one-line and non-shrinking. */
   .cp-counts {

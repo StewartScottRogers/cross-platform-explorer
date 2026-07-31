@@ -82,7 +82,13 @@ describe("CheckpointDialog (CPE-1125)", () => {
 
     expect(invokeMock).toHaveBeenCalledWith("checkpoint_preview_revert", { root: "/work/proj", manifestId: "m-2", session: null });
     const panel = await screen.findByTestId("preview-panel");
-    expect(panel.textContent).toContain("drift 1");
+    // CPE-1165: the preview is framed as the revert PLAN ("what reverting will do"), in plain
+    // user-outcome language — not a summary of the user's edits. The bare "drift N" is gone.
+    expect(panel.textContent).toContain("Reverting will:");
+    expect(panel.textContent).toContain("restore 1"); // creates → files you deleted come back
+    expect(panel.textContent).toContain("overwrite 2"); // overwrites → changed files reset
+    expect(panel.textContent).toContain("1 changed since this checkpoint"); // drift_count reworded
+    expect(panel.textContent).not.toContain("drift 1");
     expect(await screen.findByTestId("drift-list")).toBeTruthy();
   });
 

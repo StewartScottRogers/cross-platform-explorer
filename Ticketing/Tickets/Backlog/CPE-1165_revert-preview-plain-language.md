@@ -31,12 +31,33 @@ Keep it accurate to the RevertPreview fields (creates/overwrites/deletes/bytes_w
 labeling/copy change only.
 
 ## Acceptance Criteria
-- [ ] The preview reads unambiguously as "what reverting will do", not a summary of the user's edits — a user
+- [x] The preview reads unambiguously as "what reverting will do", not a summary of the user's edits — a user
       who deleted+modified sees wording that matches (restore the deleted, undo the changed).
-- [ ] Applied consistently in CheckpointDialog AND the AgentTimeline restore panel.
-- [ ] No logic change (same RevertPreview data); `npm run check` green; existing checkpoint/restore-panel tests
+- [x] Applied consistently in CheckpointDialog AND the AgentTimeline restore panel.
+- [x] No logic change (same RevertPreview data); `npm run check` green; existing checkpoint/restore-panel tests
       still pass (update any snapshot/label assertions to the new copy); i18n keys added to all locales if new
       strings are introduced.
 
 ## Notes
 - Copy/clarity only; safe. Origin: the user's revert test — the plan was correct but the labels read inverse.
+
+## Work Log
+- 2026-07-31 — Reframed the revert-preview counts as an explicit plan in BOTH renderers.
+  - **Lead-in added:** `Reverting will:` (CheckpointDialog `.preview-lead`; AgentTimeline `.cp-counts-lead`).
+  - **Before → after** (bare counts that read like a summary of the user's edits → plain user-outcome plan):
+    - `creates N`  → `restore N`   (tooltip: "Files you deleted come back")
+    - `overwrites N` → `overwrite N` (tooltip: "Changed files are reset to the checkpoint")
+    - `deletes N`  → `delete N`    (tooltip: "Files added since the checkpoint are removed")
+    - `{bytes} to write` → unchanged (tooltip added: "Total bytes written back to disk")
+    - `drift N`    → `N changed since this checkpoint` (drift emphasis class kept; tooltip:
+      "Changed since this checkpoint — reverting overwrites that newer work")
+  - **Field mapping (exact):** creates→restore, overwrites→overwrite, deletes→delete, bytes_written→bytes to
+    write, drift_count→changed since this checkpoint. LOGIC UNCHANGED — same RevertPreview data, same
+    actions, same two-step confirm, drift echo (CPE-1151) and drift-warning list untouched.
+  - **i18n:** neither component is i18n-keyed (all copy is hardcoded English); kept the new copy hardcoded to
+    match — no new locale keys introduced, so the CPE-481 gate is not triggered.
+  - **Tick-tack:** counts stay a reflowing pill row (flex-wrap container, nowrap non-shrinking pills).
+  - **Tests:** updated CheckpointDialog.test.ts (asserts "Reverting will:", "restore 1", "overwrite 2",
+    "1 changed since this checkpoint"; asserts old "drift 1" gone). Added an AgentTimeline.test.ts case
+    asserting the plain-language framing in the restore panel counts. `npm run check` → 0 errors / 0 warnings;
+    `npx vitest run` → 129 files, 1470 tests passed.
