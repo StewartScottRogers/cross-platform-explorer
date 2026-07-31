@@ -12,11 +12,13 @@ use serde::{Deserialize, Serialize};
 
 use crate::doc_column::doc_pages_cell;
 use crate::doc_info_column::{doc_info_cell, DocInfoColumn};
+use crate::file_type::{detect_type, mismatch};
 use crate::image_column::image_dimensions_cell;
 use crate::media_column::{audio_cell, AudioColumn};
 use crate::media_meta_edit::MetaField;
 use crate::media_meta_read::{read_flac, read_id3v2, read_ogg, read_pdf};
 use crate::metadata_column::CellValue;
+use crate::text_encoding::{detect_encoding, detect_line_endings, EncodingGuess, LineEnding};
 use crate::video_column::video_cell;
 use crate::video_meta_read::read_mp4;
 use crate::video_tag_column::{video_tag_cell, VideoTagColumn};
@@ -48,6 +50,21 @@ pub enum MetaColumn {
     /// A typed video-tag column (Title/Artist/Album/Year/…), read from an MP4/MOV's
     /// `moov/udta/meta/ilst` iTunes-style tags (CPE-1040).
     VideoTag(VideoTagColumn),
+    /// The file's true type detected from its leading magic bytes (CPE-1001), e.g. `"PNG image"`; empty
+    /// when no signature is recognised. Unlike the media-family columns above this **applies to every
+    /// file** (the empty-[`extensions`](MetaColumn::extensions) sentinel — see [`MetaColumn::applies_to_all`]).
+    TrueType,
+    /// A flag when the detected true type disagrees with the file's extension (CPE-1001) — a disguised
+    /// file, e.g. a `.jpg` that is really a Windows executable (`"mismatch: exe"`). Empty when they agree,
+    /// the type is unknown, or there is no extension. Applies to every file.
+    TypeMismatch,
+    /// The file's guessed text encoding (CPE-1003), e.g. `"UTF-8"`, `"Latin-1 / 8-bit (guessed)"`,
+    /// `"Binary"`; empty for a zero-byte file. Applies to every file.
+    TextEncoding,
+    /// The file's dominant line-ending convention (CPE-1003): `"LF (Unix)"`, `"CRLF (Windows)"`,
+    /// `"CR (classic Mac)"`, or `"Mixed"`. Empty for binary/empty files and text with no line breaks.
+    /// Applies to every file.
+    LineEndings,
 }
 
 impl MetaColumn {
@@ -63,6 +80,11 @@ impl MetaColumn {
         out.extend(DocInfoColumn::ALL.into_iter().map(MetaColumn::DocInfo));
         out.push(MetaColumn::VideoDuration);
         out.extend(VideoTagColumn::ALL.into_iter().map(MetaColumn::VideoTag));
+        // Magic-byte detectors (CPE-1166) — apply to every file, so they follow the family columns.
+        out.push(MetaColumn::TrueType);
+        out.push(MetaColumn::TypeMismatch);
+        out.push(MetaColumn::TextEncoding);
+        out.push(MetaColumn::LineEndings);
         out
     }
 
@@ -77,6 +99,10 @@ impl MetaColumn {
             MetaColumn::DocInfo(c) => format!("doc.info.{}", c.id_token()),
             MetaColumn::VideoDuration => "video.duration".to_string(),
             MetaColumn::VideoTag(c) => format!("video.tag.{}", c.id_token()),
+            MetaColumn::TrueType => "detect.true_type".to_string(),
+            MetaColumn::TypeMismatch => "detect.type_mismatch".to_string(),
+            MetaColumn::TextEncoding => "detect.text_encoding".to_string(),
+            MetaColumn::LineEndings => "detect.line_endings".to_string(),
         }
     }
 
@@ -90,18 +116,40 @@ impl MetaColumn {
             MetaColumn::DocInfo(c) => format!("Document: {}", c.label()),
             MetaColumn::VideoDuration => "Video Duration".to_string(),
             MetaColumn::VideoTag(c) => format!("Video: {}", c.label()),
+            MetaColumn::TrueType => "True Type".to_string(),
+            MetaColumn::TypeMismatch => "Type Mismatch".to_string(),
+            MetaColumn::TextEncoding => "Text Encoding".to_string(),
+            MetaColumn::LineEndings => "Line Endings".to_string(),
         }
     }
 
     /// The lowercase extensions this column applies to, so the picker can grey out a non-applicable row
     /// (mirrors the gating `extract_column` already does internally).
+    ///
+    /// **"Applies to all files" sentinel (CPE-1166):** an **empty** slice means the column applies to
+    /// *every* file, not a specific media family — the magic-byte detectors (true type / mismatch /
+    /// encoding / line endings) are file-agnostic. The picker must treat empty-extensions as
+    /// applies-to-all and never grey such a column out. See [`MetaColumn::applies_to_all`].
     pub fn extensions(&self) -> &'static [&'static str] {
         match self {
             MetaColumn::Audio(_) => AUDIO_EXTS,
             MetaColumn::ImageDimensions => IMAGE_EXTS,
             MetaColumn::DocPages | MetaColumn::DocInfo(_) => DOC_EXTS,
             MetaColumn::VideoDuration | MetaColumn::VideoTag(_) => VIDEO_EXTS,
+            // Applies-to-all sentinel: the file-agnostic magic-byte detectors have no extension gate.
+            MetaColumn::TrueType
+            | MetaColumn::TypeMismatch
+            | MetaColumn::TextEncoding
+            | MetaColumn::LineEndings => &[],
         }
+    }
+
+    /// Whether this column applies to **every** file rather than one media family — the "applies to all
+    /// files" sentinel (CPE-1166): an empty [`extensions`](MetaColumn::extensions) list. The magic-byte
+    /// detectors are the only such columns; the picker must never grey them out on an unrecognised
+    /// extension.
+    pub fn applies_to_all(&self) -> bool {
+        self.extensions().is_empty()
     }
 }
 
@@ -171,6 +219,53 @@ pub fn extract_column(ext: &str, bytes: &[u8], col: MetaColumn) -> CellValue {
                 video_tag_cell(&read_mp4(bytes), col)
             } else {
                 CellValue::Empty
+            }
+        }
+        // Magic-byte detectors (CPE-1166) — file-agnostic, so no extension gate; they read only the
+        // leading bytes the caller supplies (the detectors cap their own scans internally).
+        MetaColumn::TrueType => match detect_type(bytes) {
+            Some(ft) => CellValue::Text(ft.label().to_string()),
+            None => CellValue::Empty,
+        },
+        MetaColumn::TypeMismatch => match mismatch(bytes, ext) {
+            // Compact flag naming what the bytes really are, via the detected type's canonical extension
+            // (e.g. a PE disguised as `.jpg` → "mismatch: exe").
+            Some(m) => CellValue::Text(format!(
+                "mismatch: {}",
+                m.detected.extensions().first().copied().unwrap_or("")
+            )),
+            None => CellValue::Empty,
+        },
+        MetaColumn::TextEncoding => match detect_encoding(bytes) {
+            // A zero-byte file has no meaningful encoding → no value (sorts last), not the "Empty file"
+            // label — keeps the column's blanks consistent with every other column's `Empty`.
+            EncodingGuess::Empty => CellValue::Empty,
+            enc => CellValue::Text(enc.label().to_string()),
+        },
+        MetaColumn::LineEndings => line_endings_cell(bytes),
+    }
+}
+
+/// The line-ending cell for a file's leading `bytes` (CPE-1166): decode as text and report the dominant
+/// convention, mirroring [`crate::inspect`]'s Properties-panel logic. Binary/empty files — and text with
+/// no line breaks — yield [`CellValue::Empty`]. Computed over the (capped) header bytes only, so it is a
+/// sample of the file's convention, not an exhaustive scan (an accepted per-row trade-off).
+fn line_endings_cell(bytes: &[u8]) -> CellValue {
+    match detect_encoding(bytes) {
+        EncodingGuess::Binary | EncodingGuess::Empty => CellValue::Empty,
+        _ => {
+            let report = detect_line_endings(&String::from_utf8_lossy(bytes));
+            if report.crlf == 0 && report.lf == 0 && report.cr == 0 {
+                return CellValue::Empty;
+            }
+            if report.mixed {
+                return CellValue::Text("Mixed".to_string());
+            }
+            match report.dominant {
+                LineEnding::Crlf => CellValue::Text("CRLF (Windows)".to_string()),
+                LineEnding::Lf => CellValue::Text("LF (Unix)".to_string()),
+                LineEnding::Cr => CellValue::Text("CR (classic Mac)".to_string()),
+                LineEnding::None | LineEnding::Mixed => CellValue::Empty,
             }
         }
     }
@@ -443,6 +538,93 @@ mod tests {
         assert_eq!(extract_column("xyz", b"whatever", MetaColumn::Audio(AudioColumn::Title)), CellValue::Empty);
     }
 
+    // --- CPE-1166: the applies-to-all magic-byte detectors ---
+
+    fn pe_bytes() -> Vec<u8> {
+        vec![0x4D, 0x5A, 0x90, 0x00] // "MZ" DOS stub → Windows PE (exe/dll)
+    }
+
+    #[test]
+    fn true_type_detects_across_extensions_and_is_empty_for_unrecognised_bytes() {
+        // Real PNG bytes under a `.txt` name still detect the true type — the column applies to all files,
+        // not just image extensions.
+        assert_eq!(
+            extract_column("txt", &png(4, 4), MetaColumn::TrueType),
+            CellValue::Text("PNG image".into())
+        );
+        // A PE, whatever the extension.
+        assert_eq!(
+            extract_column("jpg", &pe_bytes(), MetaColumn::TrueType),
+            CellValue::Text("Windows executable/library".into())
+        );
+        // Plain text has no magic signature → no value.
+        assert_eq!(extract_column("txt", b"just some plain text", MetaColumn::TrueType), CellValue::Empty);
+    }
+
+    #[test]
+    fn type_mismatch_flags_a_disguised_file_and_is_empty_when_consistent() {
+        // A PE renamed to `.jpg` → flagged with the detected type's canonical extension (CPE-1166 example).
+        assert_eq!(
+            extract_column("jpg", &pe_bytes(), MetaColumn::TypeMismatch),
+            CellValue::Text("mismatch: exe".into())
+        );
+        // PNG bytes under a `.txt` name → mismatch, flagged as the real ".png".
+        assert_eq!(
+            extract_column("txt", &png(4, 4), MetaColumn::TypeMismatch),
+            CellValue::Text("mismatch: png".into())
+        );
+        // PNG bytes correctly named `.png` → no mismatch.
+        assert_eq!(extract_column("png", &png(4, 4), MetaColumn::TypeMismatch), CellValue::Empty);
+        // Unknown bytes → nothing to contradict → Empty.
+        assert_eq!(extract_column("txt", b"plain text", MetaColumn::TypeMismatch), CellValue::Empty);
+        // A detected type with no extension → nothing to disagree with → Empty.
+        assert_eq!(extract_column("", &pe_bytes(), MetaColumn::TypeMismatch), CellValue::Empty);
+    }
+
+    #[test]
+    fn text_encoding_reports_utf8_latin1_binary_and_empty() {
+        // UTF-8 ASCII.
+        assert_eq!(
+            extract_column("txt", b"plain ascii text", MetaColumn::TextEncoding),
+            CellValue::Text("UTF-8".into())
+        );
+        // 0xE9 alone ('é' in Latin-1) is invalid UTF-8 but not binary-looking → Latin-1 guess.
+        assert_eq!(
+            extract_column("txt", &[0xE9], MetaColumn::TextEncoding),
+            CellValue::Text("Latin-1 / 8-bit (guessed)".into())
+        );
+        // A PNG's bytes read as Binary (NUL bytes in the header).
+        assert_eq!(
+            extract_column("png", &png(4, 4), MetaColumn::TextEncoding),
+            CellValue::Text("Binary".into())
+        );
+        // A zero-byte file → no value (not the "Empty file" label), so it sorts last like any blank cell.
+        assert_eq!(extract_column("txt", b"", MetaColumn::TextEncoding), CellValue::Empty);
+    }
+
+    #[test]
+    fn line_endings_report_lf_crlf_mixed_and_empty() {
+        assert_eq!(
+            extract_column("txt", b"a\nb\nc\n", MetaColumn::LineEndings),
+            CellValue::Text("LF (Unix)".into())
+        );
+        assert_eq!(
+            extract_column("txt", b"a\r\nb\r\n", MetaColumn::LineEndings),
+            CellValue::Text("CRLF (Windows)".into())
+        );
+        // Both conventions present → Mixed.
+        assert_eq!(
+            extract_column("txt", b"a\r\nb\n", MetaColumn::LineEndings),
+            CellValue::Text("Mixed".into())
+        );
+        // Text with no line breaks → no value.
+        assert_eq!(extract_column("txt", b"one line, no break", MetaColumn::LineEndings), CellValue::Empty);
+        // Binary → no value.
+        assert_eq!(extract_column("png", &png(4, 4), MetaColumn::LineEndings), CellValue::Empty);
+        // Empty file → no value.
+        assert_eq!(extract_column("txt", b"", MetaColumn::LineEndings), CellValue::Empty);
+    }
+
     #[test]
     fn read_audio_tags_dispatches_and_is_empty_for_non_audio() {
         assert!(!read_audio_tags("mp3", &id3(&[("TIT2", "X")])).is_empty());
@@ -451,20 +633,41 @@ mod tests {
     }
 
     #[test]
-    fn all_columns_have_unique_ids_and_nonempty_labels_and_extensions() {
+    fn all_columns_have_unique_ids_and_nonempty_labels() {
         let all = MetaColumn::all();
-        // 12 audio + 1 dimensions + 1 pages + 8 doc-info + 1 duration + 9 video-tag.
-        assert_eq!(all.len(), 32);
+        // 12 audio + 1 dimensions + 1 pages + 8 doc-info + 1 duration + 9 video-tag + 4 detectors.
+        assert_eq!(all.len(), 36);
 
         let mut ids: Vec<String> = all.iter().map(MetaColumn::id).collect();
         ids.sort();
         ids.dedup();
         assert_eq!(ids.len(), all.len(), "every column must have a unique id");
 
+        // Every column has a label. Extensions are NOT asserted non-empty any more: the applies-to-all
+        // sentinel (CPE-1166) deliberately uses an empty list — see the dedicated sentinel test below.
         for col in &all {
             assert!(!col.label().is_empty());
-            assert!(!col.extensions().is_empty());
         }
+    }
+
+    #[test]
+    fn applies_to_all_sentinel_is_empty_extensions_for_detectors_only() {
+        // The "applies to all files" sentinel (CPE-1166): a column with EMPTY extensions applies to every
+        // file and must never be greyed out by the extension gate. The magic-byte detectors are the only
+        // such columns; every media-family column keeps a non-empty extension list.
+        for col in [
+            MetaColumn::TrueType,
+            MetaColumn::TypeMismatch,
+            MetaColumn::TextEncoding,
+            MetaColumn::LineEndings,
+        ] {
+            assert!(col.extensions().is_empty(), "{} must apply to all files", col.id());
+            assert!(col.applies_to_all(), "{} must report applies_to_all", col.id());
+        }
+        // A media-family column is still extension-scoped, never applies-to-all.
+        assert!(!MetaColumn::ImageDimensions.extensions().is_empty());
+        assert!(!MetaColumn::ImageDimensions.applies_to_all());
+        assert!(!MetaColumn::Audio(AudioColumn::Title).applies_to_all());
     }
 
     #[test]
@@ -475,6 +678,10 @@ mod tests {
         assert_eq!(MetaColumn::DocInfo(DocInfoColumn::Author).id(), "doc.info.author");
         assert_eq!(MetaColumn::VideoDuration.id(), "video.duration");
         assert_eq!(MetaColumn::VideoTag(VideoTagColumn::Year).id(), "video.tag.year");
+        assert_eq!(MetaColumn::TrueType.id(), "detect.true_type");
+        assert_eq!(MetaColumn::TypeMismatch.id(), "detect.type_mismatch");
+        assert_eq!(MetaColumn::TextEncoding.id(), "detect.text_encoding");
+        assert_eq!(MetaColumn::LineEndings.id(), "detect.line_endings");
     }
 
     #[test]
@@ -485,6 +692,11 @@ mod tests {
         assert_eq!(MetaColumn::DocInfo(DocInfoColumn::Title).extensions(), DOC_EXTS);
         assert_eq!(MetaColumn::VideoDuration.extensions(), VIDEO_EXTS);
         assert_eq!(MetaColumn::VideoTag(VideoTagColumn::Title).extensions(), VIDEO_EXTS);
+        // The detectors gate on nothing — they run for every extension (applies-to-all sentinel).
+        assert!(MetaColumn::TrueType.extensions().is_empty());
+        assert!(MetaColumn::TypeMismatch.extensions().is_empty());
+        assert!(MetaColumn::TextEncoding.extensions().is_empty());
+        assert!(MetaColumn::LineEndings.extensions().is_empty());
     }
 
     #[test]

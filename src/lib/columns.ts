@@ -123,3 +123,24 @@ export function clampMetaWidths(active: ActiveMetaColumn[]): ActiveMetaColumn[] 
     width: Math.max(META_COL_MIN, Math.min(COLUMN_MAX, Math.round(c.width))),
   }));
 }
+
+/**
+ * The "applies to all files" sentinel (CPE-1166): an `AvailableColumn` whose `extensions` list is
+ * **empty** applies to every file, not one media family — the magic-byte detectors (true type, type
+ * mismatch, text encoding, line endings) are file-agnostic. The column picker uses this to decide
+ * whether an extension gate is relevant: an applies-to-all column must never be greyed out.
+ * Mirrors `MetaColumn::applies_to_all` in the Rust `column_extract` module.
+ */
+export function appliesToAllFiles(extensions: string[]): boolean {
+  return extensions.length === 0;
+}
+
+/**
+ * Whether a column with the given `extensions` is applicable to a file of the given lowercase `ext`.
+ * An applies-to-all column (empty `extensions`, see {@link appliesToAllFiles}) matches every file; an
+ * extension-scoped column matches only when its list contains `ext`. Callers pass `ext` already
+ * lowercased and without a leading dot.
+ */
+export function columnAppliesTo(extensions: string[], ext: string): boolean {
+  return appliesToAllFiles(extensions) || extensions.includes(ext);
+}

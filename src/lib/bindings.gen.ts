@@ -2028,7 +2028,8 @@ detail?: string | null }
  * One pickable metadata column for the picker UI: a stable string id (for persistence in
  * [`crate::column_config`]), a friendly label, the typed [`MetaColumn`] to pass back into
  * [`column_cells`]/the streaming command, and the lowercase extensions it applies to (so the picker can
- * grey out a non-applicable row).
+ * grey out a non-applicable row). An **empty** `extensions` list is the "applies to all files" sentinel
+ * (CPE-1166): the column runs for every file and the picker must never grey it out.
  */
 export type AvailableColumn = { id: string; label: string; column: MetaColumn; extensions: string[] }
 /**
@@ -2543,7 +2544,30 @@ export type MetaColumn =
  * A typed video-tag column (Title/Artist/Album/Year/…), read from an MP4/MOV's
  * `moov/udta/meta/ilst` iTunes-style tags (CPE-1040).
  */
-{ VideoTag: VideoTagColumn }
+{ VideoTag: VideoTagColumn } | 
+/**
+ * The file's true type detected from its leading magic bytes (CPE-1001), e.g. `"PNG image"`; empty
+ * when no signature is recognised. Unlike the media-family columns above this **applies to every
+ * file** (the empty-[`extensions`](MetaColumn::extensions) sentinel — see [`MetaColumn::applies_to_all`]).
+ */
+"TrueType" | 
+/**
+ * A flag when the detected true type disagrees with the file's extension (CPE-1001) — a disguised
+ * file, e.g. a `.jpg` that is really a Windows executable (`"mismatch: exe"`). Empty when they agree,
+ * the type is unknown, or there is no extension. Applies to every file.
+ */
+"TypeMismatch" | 
+/**
+ * The file's guessed text encoding (CPE-1003), e.g. `"UTF-8"`, `"Latin-1 / 8-bit (guessed)"`,
+ * `"Binary"`; empty for a zero-byte file. Applies to every file.
+ */
+"TextEncoding" | 
+/**
+ * The file's dominant line-ending convention (CPE-1003): `"LF (Unix)"`, `"CRLF (Windows)"`,
+ * `"CR (classic Mac)"`, or `"Mixed"`. Empty for binary/empty files and text with no line breaks.
+ * Applies to every file.
+ */
+"LineEndings"
 /**
  * An edit the user asked for.
  */
