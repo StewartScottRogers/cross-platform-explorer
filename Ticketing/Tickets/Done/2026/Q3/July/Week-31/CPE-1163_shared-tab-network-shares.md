@@ -4,9 +4,10 @@ title: "Populate the Home \"Shared\" tab with network / mapped / SMB shares + it
 type: feature
 component: Backend
 priority: medium
-status: Backlog
+status: Done
 tags: ready
 created: 2026-07-31
+closed: 2026-07-31
 ---
 
 ## Summary
@@ -106,3 +107,6 @@ macOS mount, user-share validation, combine/dedupe, empty-not-hang) + the `list_
 test (user location surfaces even with no OS mounts; no hang); `npx vitest run` 1469 passed incl. new
 HomeView Shared-tab, settings network-location, and ContextMenu shared-menu tests. In-app docs updated
 (`src/docs/03-explorer.md` → Home screen → Shared).
+
+## Close (Foreman, 2026-07-31)
+Merged PR #478, reviewer APPROVE. Non-hang + disconnect-safety + 3-OS compile + bindings-drift + all-3-mode clippy all verified. Minor non-blocking note: the 8s `run_bounded_output` (disconnect path) detaches rather than kills its child on timeout (parent has no handle after wait_with_output) — cosmetic, does not freeze the UI (net use /delete is short+local); tighten to match run_bounded_capture kill-on-timeout if it ever matters.
