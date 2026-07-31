@@ -4,9 +4,10 @@ title: "New ▸ must be reachable on item/folder right-click (create inside the 
 type: bug
 component: Frontend
 priority: high
-status: Backlog
+status: Done
 tags: ready
 created: 2026-07-30
+closed: 2026-07-30
 ---
 
 ## Summary
