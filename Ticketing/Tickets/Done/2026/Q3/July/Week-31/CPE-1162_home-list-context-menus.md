@@ -4,9 +4,10 @@ title: "Right-click context menus for the Home lists (Recent / Favorites / Folde
 type: feature
 component: Frontend
 priority: high
-status: Backlog
+status: Done
 tags: ready
 created: 2026-07-31
+closed: 2026-07-31
 ---
 
 ## Summary
