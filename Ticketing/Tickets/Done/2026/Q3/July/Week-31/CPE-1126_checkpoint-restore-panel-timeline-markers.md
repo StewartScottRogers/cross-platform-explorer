@@ -4,9 +4,10 @@ title: "Checkpoint & rollback: restore panel + timeline checkpoint markers (GUI 
 type: feature
 component: Frontend
 priority: medium
-status: Doing
+status: Done
 tags: needs-gui-verify
 created: 2026-07-26
+closed: 2026-07-30
 epic: CPE-732
 ---
 
@@ -127,3 +128,16 @@ drift, 46 FE tests + 3 new domain tests green). So both of the user's requested 
   CPE-1152 lands and the Critic returns `VISUAL PASS` (or the user accepts on the strength of
   build+review+tests+their directed fixes), CPE-1126's "confirm-to-revert is safe/clear" clause closes.
   Pending the user's call on which of those two closes it.
+
+2026-07-30 (Foreman) — **CLOSED (Done).** CPE-1152 landed (PR #469, `dc2ea001`): the gui-smoke harness now
+seeds a real checkpoint and captures the restore panel + armed confirm as screenshots. The **Visual Critic**
+judged those real screenshots and returned **`VISUAL PASS`** — first formal Critic verdict on a GUI ticket:
+tab treatment per TABS.md, pill/counts reflow clean, coherent light-theme palette (amber=drift caution,
+red=irreversible action), no clipping/overflow in the 340px drawer, and — the reserved clause — the
+revert-confirm reads **clearly and safely** (unmistakable two-step arm→"Yes, revert", names the concrete
+ops + "cannot be undone", drift loss echoed at the click, serious-not-alarmist). One non-blocking taste note
+(drift shown 3×; keep the confirm echo if ever trimmed). The user was shown both screenshots + the verdict
+and **signed off to close** (their reserved final safety call). So the AC — "restore panel renders the plan +
+drift warning; confirm-to-revert is safe/clear; timeline shows markers; theme vars only; reflow;
+off-means-off" — is fully met and independently verified. Manual-Verification-Debt row retired (the surface
+is now automatically screenshot-verifiable). → Done.

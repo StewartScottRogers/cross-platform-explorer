@@ -4,9 +4,10 @@ title: "gui-smoke: seed a checkpoint so the restore panel + markers can be scree
 type: chore
 component: Testing
 priority: medium
-status: Backlog
+status: Done
 tags: ready
 created: 2026-07-30
+closed: 2026-07-30
 epic: CPE-579
 ---
 
