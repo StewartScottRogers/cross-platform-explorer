@@ -2418,6 +2418,15 @@
     propsFor = selectedEntries;
   }
 
+  /** Properties for the CURRENT folder (CPE-1153) — the empty-area menu's Properties row, when nothing
+   *  is selected. Home is an abstract view with no single path, so it's skipped there. The dialog
+   *  re-fetches real info from the backend via the path, so a synthesized folder entry is enough. */
+  function openFolderProperties() {
+    if (isHome) return;
+    const name = splitPath(currentPath).at(-1)?.name ?? currentPath;
+    propsFor = [{ name, path: currentPath, is_dir: true, size: 0, modified: null, extension: "", hidden: false }];
+  }
+
   function openMetadataStudio() {
     if (selectedEntries.length === 0) return;
     studioFor = selectedEntries;
@@ -2496,6 +2505,20 @@
         break;
       }
       case "refresh": refresh(); break;
+      case "undo": undo(); break;
+      case "properties-folder": openFolderProperties(); break;
+      // View / Sort submenus (CPE-1153) — drive the SAME view/sortKey/sortDir state the toolbar and
+      // column headers use (single source of truth), and persist exactly as those paths do.
+      case "view:details": view = "details"; settings.saveView(view); break;
+      case "view:list": view = "list"; settings.saveView(view); break;
+      case "view:icons": view = "icons"; settings.saveView(view); break;
+      case "view:gallery": view = "gallery"; settings.saveView(view); break;
+      case "sort:name": sortKey = "name"; settings.saveSortKey(sortKey); break;
+      case "sort:modified": sortKey = "modified"; settings.saveSortKey(sortKey); break;
+      case "sort:type": sortKey = "type"; settings.saveSortKey(sortKey); break;
+      case "sort:size": sortKey = "size"; settings.saveSortKey(sortKey); break;
+      case "sortdir:asc": sortDir = "asc"; settings.saveSortDir(sortDir); break;
+      case "sortdir:desc": sortDir = "desc"; settings.saveSortDir(sortDir); break;
       case "help-docs": openDocs(currentSection()); break;
     }
   }
@@ -3700,6 +3723,11 @@
     mediaEligible={selectedEntries.length > 1 && selectedEntries.some((e) => !e.is_dir && canBatchTransform(e.name))}
     canTerminal={!isHome && !archive}
     sameTypeExt={selectedEntries.length === 1 && !selectedEntries[0].is_dir ? selectedEntries[0].extension : ""}
+    {view}
+    {sortKey}
+    {sortDir}
+    canUndo={canUndo(undoStack)}
+    undoLabel={peekLabel(undoStack)}
     on:action={(e) => runAction(e.detail)}
     on:close={() => (ctx = null)}
   />
