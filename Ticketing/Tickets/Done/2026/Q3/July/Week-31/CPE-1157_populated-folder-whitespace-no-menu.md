@@ -4,9 +4,10 @@ title: "Populated folder: right-clicking white space doesn't open the empty-area
 type: bug
 component: Frontend
 priority: high
-status: Backlog
+status: Done
 tags: ready
 created: 2026-07-30
+closed: 2026-07-31
 ---
 
 ## Summary

@@ -4,9 +4,10 @@ title: "Right-clicking a disk/drive gives no context menu — it should offer a 
 type: bug
 component: Frontend
 priority: high
-status: Backlog
+status: Done
 tags: ready
 created: 2026-07-30
+closed: 2026-07-31
 ---
 
 ## Summary

@@ -4,9 +4,10 @@ title: "Component test: restore-panel two-step revert confirm gate (AgentTimelin
 type: chore
 component: Frontend
 priority: medium
-status: Backlog
+status: Done
 tags: ready
 created: 2026-07-30
+closed: 2026-07-30
 epic: CPE-732
 ---
 

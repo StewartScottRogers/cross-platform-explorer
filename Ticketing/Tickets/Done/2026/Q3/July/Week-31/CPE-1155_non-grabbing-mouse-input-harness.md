@@ -4,9 +4,10 @@ title: "QA Architect: faithful mouse input (click/scroll/hover/right-click) in t
 type: chore
 component: Testing
 priority: high
-status: Backlog
+status: Done
 tags: ready
 created: 2026-07-30
+closed: 2026-07-31
 epic: CPE-579
 ---
 
