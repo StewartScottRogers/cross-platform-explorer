@@ -3,7 +3,7 @@
  * packaged app; this proves the Svelte-level path is correct (store + the real picker-click flow), so a
  * future regression here fails CI. (The packaged-app failure is tracked separately as environment-specific.)
  */
-import { describe, it, expect, beforeEach } from "vitest";
+import { describe, it, expect, beforeEach, vi } from "vitest";
 import { render, fireEvent } from "@testing-library/svelte";
 import MenuBar from "./MenuBar.svelte";
 import { locale } from "../i18n";
@@ -36,5 +36,19 @@ describe("MenuBar language switching (CPE-553)", () => {
     expect(await findByText("Datei")).toBeTruthy(); // menu.file → German
     locale.set("fr");
     expect(await findByText("Fichier")).toBeTruthy(); // menu.file → French
+  });
+});
+
+describe("MenuBar Command Palette entry (CPE-1164)", () => {
+  it("Tools ▸ Command palette dispatches select 'command-palette' with the shortcut shown", async () => {
+    const { component, getByText, findByText } = render(MenuBar);
+    const select = vi.fn();
+    component.$on("select", (e) => select((e as CustomEvent).detail));
+
+    await fireEvent.click(getByText("Tools")); // open the Tools menu
+    const item = (await findByText("Command palette")).closest("button")!;
+    expect(item.textContent).toContain("Ctrl+Shift+P");
+    await fireEvent.click(item);
+    expect(select).toHaveBeenCalledWith("command-palette");
   });
 });

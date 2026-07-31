@@ -267,6 +267,17 @@ describe("ContextMenu empty-area Windows 11 parity (CPE-1153)", () => {
     expect(parent.getAttribute("aria-expanded")).toBe("false");
   });
 
+  it("offers a Command Palette row that dispatches command-palette (CPE-1164)", async () => {
+    const { component } = render(ContextMenu, { props: { ...empty } });
+    const action = vi.fn();
+    component.$on("action", (e) => action(e.detail));
+    const row = screen.getByText("Command palette").closest("button")!;
+    expect(row).toBeTruthy();
+    expect(row.textContent).toContain("Ctrl+Shift+P");
+    await fireEvent.click(row);
+    expect(action).toHaveBeenCalledWith("command-palette");
+  });
+
   it("keeps the existing background rows working (Paste gated, Refresh, Select all)", async () => {
     const { component } = render(ContextMenu, { props: { ...empty, canPaste: true } });
     const action = vi.fn();

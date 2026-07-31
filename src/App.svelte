@@ -2546,6 +2546,9 @@
       }
     }
     switch (action) {
+      // Command Palette discoverable entry points (CPE-1164) — the toolbar button and the empty-area
+      // context-menu row both dispatch this; reuse the same open path as Ctrl+Shift+P.
+      case "command-palette": paletteOpen = true; break;
       case "open": if (selectedEntries[0]) open(selectedEntries[0]); break;
       case "execute": executeSelected(); break;
       case "execute-admin": executeAsAdmin(); break;
@@ -3314,6 +3317,7 @@
   /** Route a menu selection to its action. See MenuBar's `menus` table. */
   function onMenuSelect(action: string) {
     switch (action) {
+      case "command-palette": paletteOpen = true; break; // Tools ▸ Command Palette (CPE-1164)
       case "exit": exitApp(); break;
       case "check-updates": checkForUpdates(true); break;
       case "settings": showSettings = true; break;

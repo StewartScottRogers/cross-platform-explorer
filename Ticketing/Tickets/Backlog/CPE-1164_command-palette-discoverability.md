@@ -30,13 +30,34 @@ item context menus.
 All simply set `paletteOpen = true` (reuse the existing open path). Keep the shortcut working.
 
 ## Acceptance Criteria
-- [ ] A visible toolbar button opens the Command Palette; its tooltip shows the `Ctrl+Shift+P` shortcut.
-- [ ] A top-menu item (Tools/File) opens it, labelled with the shortcut.
-- [ ] The empty-area context menu has a "Command Palette" entry that opens it.
-- [ ] `Ctrl+Shift+P` still works; the palette is unchanged otherwise. MENUS.md-compliant (theme vars, leading
+- [x] A visible toolbar button opens the Command Palette; its tooltip shows the `Ctrl+Shift+P` shortcut.
+- [x] A top-menu item (Tools/File) opens it, labelled with the shortcut.
+- [x] The empty-area context menu has a "Command Palette" entry that opens it.
+- [x] `Ctrl+Shift+P` still works; the palette is unchanged otherwise. MENUS.md-compliant (theme vars, leading
       icon); i18n keys added to all COMPLETE_LOCALES (CPE-481 gate); `npm run check` green; a test covers at
       least the toolbar/menu dispatch → `paletteOpen`.
 
 ## Notes
 - Pure frontend (reuses the existing palette). Cross-platform-agnostic. Follows the MENUS.md + menu-items-need-
   icons + tabs conventions already established this session.
+
+## Work Log
+- 2026-07-31: Added three discoverable entry points, all reusing the existing `paletteOpen = true` open path
+  (Ctrl+Shift+P keydown untouched):
+  1. **Toolbar button** — `src/lib/components/CommandBar.svelte`: a `search`-glyph button at the far-right of
+     the toolbar (after the spacer, before Details) dispatching `action: "command-palette"`. Tooltip
+     `"Command palette (Ctrl+Shift+P)"` (name + shortcut, translated via `palette.ariaPalette`).
+  2. **Top-menu item** — `src/lib/components/MenuBar.svelte`: first item of the **Tools** menu, `search` icon,
+     hint `Ctrl+Shift+P`, followed by a separator. Dispatches `select: "command-palette"`.
+  3. **Context-menu row** — `src/lib/components/ContextMenu.svelte` (`target === "empty"` branch): a
+     "Command palette" row (leading `search` icon, `Ctrl+Shift+P` hint) in its own separator group above
+     "Documents for this view". Dispatches `action: "command-palette"` → `runAction`.
+- Wiring in `src/App.svelte`: `runAction` gets `case "command-palette": paletteOpen = true` (serves both the
+  toolbar button and the context-menu row); `onMenuSelect` gets the matching case for the Tools item.
+- **i18n**: no new keys — reused the already-fully-translated `palette.ariaPalette` ("Command palette") for the
+  label/tooltip across all COMPLETE_LOCALES, so the CPE-481 gate is satisfied with zero new translations.
+  Assumption: `search` was chosen as the closest sensible EXISTING Icon glyph (a "search-commands" palette
+  metaphor, per the ticket) rather than adding a new one; the tooltip/label disambiguates it from the search
+  tools.
+- **Verify**: `npm run check` → 0 errors / 0 warnings. `npx vitest run` → 130 files, 1473 tests passed
+  (new CommandBar.test.ts + ContextMenu + MenuBar CPE-1164 cases green). Pure frontend — no Rust/bindings.

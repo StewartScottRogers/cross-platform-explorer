@@ -512,6 +512,13 @@
         <Icon name="info" size={15} /> {$t('ctx.properties')}
       </button>
     {/if}
+    <!-- Command Palette (CPE-1164) — a right-click affordance for the Ctrl+Shift+P palette; App maps
+         the `command-palette` action to paletteOpen via runAction. Leading icon per MENUS.md. -->
+    <div class="sep" role="separator" />
+    <button class="row" role="menuitem" on:click={() => run("command-palette")}>
+      <Icon name="search" size={15} /> {$t('palette.ariaPalette')}
+      <span class="hint">Ctrl+Shift+P</span>
+    </button>
     <div class="sep" role="separator" />
     <button class="row" role="menuitem" on:click={() => run("help-docs")}>
       <Icon name="book" size={15} /> Documents for this view
