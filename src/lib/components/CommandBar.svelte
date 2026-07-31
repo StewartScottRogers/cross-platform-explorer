@@ -154,6 +154,17 @@
 
   <span class="spacer" />
 
+  <!-- Command Palette launcher (CPE-1164) — a visible affordance for the Ctrl+Shift+P palette, which
+       otherwise had no discoverable entry point. Reuses the existing open path via the `command-palette`
+       action; tooltip names it AND shows the shortcut. -->
+  <button
+    class="cmd"
+    title={`${$t('palette.ariaPalette')} (Ctrl+Shift+P)`}
+    on:click={() => dispatch("action", "command-palette")}
+  >
+    <Icon name="search" />
+  </button>
+
   <button
     class="cmd"
     title={showDetails ? "Hide details pane (Alt+P)" : "Show details pane (Alt+P)"}

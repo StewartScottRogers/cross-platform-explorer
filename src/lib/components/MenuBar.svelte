@@ -41,6 +41,10 @@
       id: "tools",
       labelKey: "menu.tools",
       items: [
+        // Command Palette entry (CPE-1164) — a discoverable launcher for the Ctrl+Shift+P palette.
+        // Reuses the fully-translated `palette.ariaPalette` label; App maps `command-palette` → paletteOpen.
+        { id: "command-palette", labelKey: "palette.ariaPalette", hint: "Ctrl+Shift+P", icon: "search" },
+        { sep: true },
         { id: "content-search", labelKey: "mi.searchInFiles", hint: "Ctrl+Shift+F", icon: "search" },
         { id: "find-duplicates", labelKey: "mi.findDuplicates", icon: "copy" },
         { id: "organize-folder", labelKey: "mi.organizeFolder", icon: "sort" },
