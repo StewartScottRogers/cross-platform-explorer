@@ -126,6 +126,21 @@
         <Icon name="code" size={15} /> {$t('ctx.workOnThis')}
       </button>
     {/if}
+    <div class="sep" />
+    <!-- New ▸ on the on-item menu (CPE-1156) — the same CPE-1153 submenu as the empty-area menu, so
+         right-clicking ANY item still exposes New. When a single FOLDER is selected the create targets
+         INSIDE it (`new-*-in`, handled with `selectedEntries[0].path`); on a file / multi-selection it
+         creates in the current folder (`new-*`), same as the empty-area menu. -->
+    <Submenu label={$t('cmd.new')} icon="plus">
+      <button class="row" role="menuitem" on:click={() => run(folderSelected ? "new-folder-in" : "new-folder")}>
+        <Icon name="folder" size={15} /> {$t('ctx.folder')}
+        {#if !folderSelected}<span class="hint">Ctrl+Shift+N</span>{/if}
+      </button>
+      <button class="row" role="menuitem" on:click={() => run(folderSelected ? "new-file-in" : "new-file")}>
+        <Icon name="document" size={15} /> {$t('ctx.textFile')}
+      </button>
+    </Submenu>
+    <div class="sep" />
     <button class="row" role="menuitem" on:click={() => run("duplicate")}>
       <Icon name="copy" size={15} /> {$t('ctx.duplicate')}
       <span class="hint">Ctrl+D</span>

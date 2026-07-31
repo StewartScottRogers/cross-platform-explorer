@@ -48,6 +48,34 @@ describe("ContextMenu Copy to / Move to folder (CPE-355)", () => {
     expect(screen.queryByText("Move to folder…")).toBeNull();
   });
 
+  it("New ▸ on a FILE item dispatches new-folder / new-file (create in the current folder) — CPE-1156", async () => {
+    const { component } = render(ContextMenu, { props: { ...base, folderSelected: false } });
+    const action = vi.fn();
+    component.$on("action", (e) => action(e.detail));
+
+    await openSubmenu("New");
+    await fireEvent.click(screen.getByText("Folder"));
+    expect(action).toHaveBeenCalledWith("new-folder");
+
+    await openSubmenu("New");
+    await fireEvent.click(screen.getByText("Text file"));
+    expect(action).toHaveBeenCalledWith("new-file");
+  });
+
+  it("New ▸ on a FOLDER item dispatches new-folder-in / new-file-in (create inside that folder) — CPE-1156", async () => {
+    const { component } = render(ContextMenu, { props: { ...base, folderSelected: true } });
+    const action = vi.fn();
+    component.$on("action", (e) => action(e.detail));
+
+    await openSubmenu("New");
+    await fireEvent.click(screen.getByText("Folder"));
+    expect(action).toHaveBeenCalledWith("new-folder-in");
+
+    await openSubmenu("New");
+    await fireEvent.click(screen.getByText("Text file"));
+    expect(action).toHaveBeenCalledWith("new-file-in");
+  });
+
   it("shows Compare files only when comparable, and dispatches compare (CPE-418)", async () => {
     const { component } = render(ContextMenu, { props: { ...base, selectionCount: 2, comparable: true } });
     const action = vi.fn();

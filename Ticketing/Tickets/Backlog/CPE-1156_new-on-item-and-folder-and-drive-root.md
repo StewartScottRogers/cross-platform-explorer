@@ -50,20 +50,57 @@ created in the folder. The drive should have the same new so that I can create i
    else regressed.
 
 ## Acceptance Criteria
-- [ ] Right-clicking a **file item** shows **New ▸**; choosing Folder/Text file creates it in the **current
+- [x] Right-clicking a **file item** shows **New ▸**; choosing Folder/Text file creates it in the **current
       folder** and inline-renames it.
-- [ ] Right-clicking a **folder item** shows **New ▸**; choosing Folder/Text file creates the new item
+- [x] Right-clicking a **folder item** shows **New ▸**; choosing Folder/Text file creates the new item
       **inside that folder** (verified it lands in the subfolder, not the current one), with a sensible,
-      documented UX (navigate-in or notice).
-- [ ] In a folder that **has one or more items**, New is reachable (via the item menu and/or the blank area) —
+      documented UX (navigate-in — see Work Log).
+- [x] In a folder that **has one or more items**, New is reachable (via the item menu and/or the blank area) —
       the reported "can't find New when there's an item" case is resolved.
-- [ ] At a **drive root**, New creates an item at the drive root (empty-area menu; and on-item if a drive is
-      shown as an item).
-- [ ] Empty-folder New, CPE-1153 submenus, and CPE-1154 native-menu suppression all still work; `npm run check`
-      green; tests updated/added (a component test that New-from-item dispatches with the folder-target for a
-      folder item vs. current-folder for a file item; keep existing green).
+- [x] At a **drive root**, New creates an item at the drive root (empty-area menu works; on-item inside a
+      drive root works). **Partial:** a drive shown as a *tile on the Home landing* has no context menu at all
+      today (`HomeView` never dispatches `rowContext`; `ExplorerPane` suppresses menus when `inHome`), so
+      right-clicking a Home drive tile → New is a documented follow-up — see Work Log.
+- [x] Empty-folder New, CPE-1153 submenus, and CPE-1154 native-menu suppression all still work; `npm run check`
+      green; tests updated/added (component tests: New-from-item dispatches the folder-target action for a
+      folder item vs. current-folder for a file item; existing suite green).
 
 ## Notes
 - No backend change expected (`create_dir`/`create_file` already accept an arbitrary parent path).
 - Mirrors Windows-Explorer intuition the user is reaching for; keep cross-platform-agnostic. Menu items follow
   MENUS.md (theme vars, leading icons).
+
+## Work Log
+- 2026-07-30 — Implemented frontend-only (3 files: `ContextMenu.svelte`, `App.svelte`, `ContextMenu.test.ts`);
+  no backend/bindings touched (`create_dir`/`create_file` already take `(path, name)`).
+- **On-item New ▸** — added the CPE-1153 `Submenu` (Folder / Text file, leading icons + chevron, theme vars) to
+  the `target === "item"` branch, mirroring the empty-area menu, placed as its own separated group after the
+  Open block. The submenu dispatches conditionally on `folderSelected`:
+  - single **folder** selected → `new-folder-in` / `new-file-in`;
+  - **file** / multi / none → `new-folder` / `new-file` (same as empty-area).
+  The `Ctrl+Shift+N` hint is shown only on the current-folder (`!folderSelected`) variant, since the shortcut
+  always creates in the current folder.
+- **Create parameterized** — `newFolder`/`newFile` now take an optional `targetDir` (default `currentPath`) and
+  delegate to a shared `createNewItem(kind, targetDir)`. `runAction` maps `new-folder-in`/`new-file-in` to
+  `newFolder(selectedEntries[0].path)` / `newFile(...)` when `selectedEntries[0].is_dir`. The palette,
+  `Ctrl+Shift+N`, and the empty-area menu all still call `newFolder()`/`newFile()` with no arg → `currentPath`,
+  so their behaviour is unchanged.
+- **UX choice for "create inside a folder": navigate-in + inline-rename** (the ticket's recommended option).
+  We create the item first, then `setHistory(...)` + a **fresh** `loadPath(targetDir, false, false)` (NOT the
+  cache — a cached listing wouldn't contain the just-created item, so the pending inline-rename wouldn't fire).
+  The user lands inside the target folder with the new item selected and in rename mode. Dedup (`(2)`
+  auto-number) is computed against the **target** folder's real contents: the in-view `entries` when creating
+  in place, or a fresh `commands.listDir(targetDir)` when creating inside an un-opened folder. This avoids any
+  reliance on reactive `currentPath`/`entries` timing after the create.
+- **Guard fix for drive roots** — changed the early-return from `if (isHome ...)` to `if (targetDir === HOME ...)`.
+  `isHome` is only ever true for the abstract Home landing; a drive root (e.g. `Z:\`) is an ordinary path, so
+  New at a drive root (empty-area, or right-clicking a subfolder there) is not blocked. The abstract Home
+  landing still has no New (no context menu opens there at all).
+- **Drive-as-Home-tile finding (follow-up):** drives/pins on the Home landing are rendered by `HomeView`, which
+  dispatches only `navigate`/`select` (no `rowContext`), and `ExplorerPane` returns early on context events when
+  `inHome`. So Home tiles have no right-click menu today — wiring New onto a Home drive tile needs a menu added
+  to `HomeView` first, which is a separate change. Noted as a follow-up; the navigated-in drive-root case is
+  fully covered.
+- **Verification:** `npm run check` → 0 errors / 0 warnings. `npx vitest run` → 127 files, **1431 passed**
+  (added 2 item-menu New tests to `ContextMenu.test.ts`; 15/15 there). `git diff --name-only origin/main...` →
+  only the 3 frontend files (no `.rs`/`Cargo`/`bindings.gen.ts`).

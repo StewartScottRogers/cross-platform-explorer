@@ -1885,29 +1885,58 @@
     }
   }
 
-  async function newFolder() {
-    if (isHome || blockedInArchive()) return;
-    try {
-      const name = uniqueName("New folder", entries.map((e) => e.name));
-      const created = unwrap(await commands.createDir(currentPath, name));
-      pendingRenamePath = created; // select + inline-rename it once the list reloads
-      await loadPath(currentPath);
-    } catch (e) {
-      showNotice(String(e), true);
-    }
+  async function newFolder(targetDir: string = currentPath) {
+    await createNewItem("folder", targetDir);
   }
 
-  async function newFile() {
-    if (isHome || blockedInArchive()) return;
+  async function newFile(targetDir: string = currentPath) {
+    await createNewItem("file", targetDir);
+  }
+
+  /** Create a new folder / text file in `targetDir` and inline-rename it (CPE-1156).
+   *
+   *  `targetDir` defaults to the folder in view (empty-area menu, palette, Ctrl+Shift+N, and a file
+   *  right-click all create in the current folder). Right-clicking a FOLDER passes that folder's path so
+   *  the new item lands INSIDE it — including a drive root reached that way. UX choice: we create the
+   *  item, then navigate INTO the target folder so the user sees it and names it inline (via
+   *  `pendingRenamePath`), matching Windows-Explorer intuition. The `(2)` auto-number dedups against the
+   *  TARGET folder's real contents — the in-view `entries` when creating in place, or a fresh `listDir`
+   *  when creating inside another folder (its listing isn't loaded yet). */
+  async function createNewItem(kind: "folder" | "file", targetDir: string) {
+    // Guard the abstract Home landing (no real path) and read-only archives — but NOT real drive roots,
+    // which are ordinary paths (`isHome` is only ever true for the Home landing itself).
+    if (targetDir === HOME || blockedInArchive()) return;
+
+    const inSubfolder = targetDir !== currentPath;
+
+    // Names to dedupe against: the in-view listing when creating in place; a fresh listing of the target
+    // folder when creating inside a folder we haven't opened (so "New folder (2)" is correct there).
+    let existing: string[];
+    if (inSubfolder) {
+      const res = await commands.listDir(targetDir);
+      existing = res.status === "ok" ? res.data.map((e) => e.name) : [];
+    } else {
+      existing = entries.map((e) => e.name);
+    }
+
     try {
-      const name = uniqueNameWithExt(
-        "New Text Document",
-        ".txt",
-        entries.map((e) => e.name),
-      );
-      const created = unwrap(await commands.createFile(currentPath, name));
-      pendingRenamePath = created; // select + inline-rename it once the list reloads
-      await loadPath(currentPath);
+      let created: string;
+      if (kind === "folder") {
+        const name = uniqueName("New folder", existing);
+        created = unwrap(await commands.createDir(targetDir, name));
+      } else {
+        const name = uniqueNameWithExt("New Text Document", ".txt", existing);
+        created = unwrap(await commands.createFile(targetDir, name));
+      }
+      pendingRenamePath = created; // select + inline-rename it once the target listing loads
+      if (inSubfolder) {
+        // Navigate INTO the target folder (adds to history like any navigation) with a FRESH load — a
+        // cached listing wouldn't contain the just-created item, so the rename wouldn't fire.
+        setHistory(visit(activeTab.history, targetDir));
+        await loadPath(targetDir, false, false);
+      } else {
+        await loadPath(currentPath);
+      }
     } catch (e) {
       showNotice(String(e), true);
     }
@@ -2495,6 +2524,9 @@
       case "tags": if (selectedEntries.length >= 1) tagEditorFor = [...selectedEntries]; break;
       case "new-folder": newFolder(); break;
       case "new-file": newFile(); break;
+      // New ▸ from a folder right-click (CPE-1156) — create INSIDE the clicked folder (its own path).
+      case "new-folder-in": if (selectedEntries[0]?.is_dir) newFolder(selectedEntries[0].path); break;
+      case "new-file-in": if (selectedEntries[0]?.is_dir) newFile(selectedEntries[0].path); break;
       case "select-all": selection = selectAll(visible.length); break;
       case "invert-selection": selection = invertSelection(selection, visible.length); break;
       case "select-pattern": patternSelectOpen = true; break;
