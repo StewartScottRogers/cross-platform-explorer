@@ -233,6 +233,21 @@ pub fn compress_to_zip(paths: &[String], dest: &str) -> Result<String, String> {
     Ok(dest.to_string())
 }
 
+/// Create a valid *empty* zip archive at `dest` (CPE-1161). An empty file is NOT a valid `.zip` — a
+/// real archive needs at least the End-Of-Central-Directory record, which `ZipWriter::finish` writes.
+/// Uses `create_new` so it fails atomically rather than clobbering an existing file (mirrors the
+/// explorer's `create_file`). Returns the created path.
+pub fn create_empty_zip(dest: &str) -> Result<String, String> {
+    let file = fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(dest)
+        .map_err(|e| e.to_string())?;
+    let writer = zip::ZipWriter::new(file);
+    writer.finish().map_err(|e| e.to_string())?;
+    Ok(dest.to_string())
+}
+
 /// Recursively add `src` to a tar builder as `name_in_tar`, adding directory entries so empty folders
 /// survive. Never packs the output archive into itself (CPE-632) — mirrors [`zip_add_path`].
 fn tar_add_path<W: std::io::Write>(
@@ -449,6 +464,23 @@ mod tests {
         assert!(entries.iter().any(|e| e.name == "sub/" && e.is_dir));
         // Also reachable via the zip-specific lister (used by the compress verifier).
         assert!(zip_entries(&zip_path.to_string_lossy()).unwrap().iter().any(|e| e.name == "hello.txt"));
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn create_empty_zip_makes_a_valid_openable_archive() {
+        let d = scratch("emptyzip");
+        let zip_path = d.join("New Compressed (zipped) Folder.zip");
+        let out = create_empty_zip(&zip_path.to_string_lossy()).unwrap();
+        assert_eq!(out, zip_path.to_string_lossy());
+        assert!(zip_path.exists());
+        // It must be a genuinely valid archive: the zip reader opens it and reports zero entries,
+        // and our own lister agrees (an empty file would fail both).
+        let archive = zip::ZipArchive::new(fs::File::open(&zip_path).unwrap()).unwrap();
+        assert_eq!(archive.len(), 0);
+        assert!(read_archive_entries(&zip_path.to_string_lossy()).unwrap().is_empty());
+        // Refuses to clobber an existing file (atomic create_new).
+        assert!(create_empty_zip(&zip_path.to_string_lossy()).is_err());
         let _ = fs::remove_dir_all(&d);
     }
 

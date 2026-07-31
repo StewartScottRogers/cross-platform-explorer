@@ -95,6 +95,7 @@
   import { t } from "./lib/i18n";
   import { friendlyError, splitPath, formatPathsForClipboard } from "./lib/format";
   import { uniqueName, uniqueNameWithExt } from "./lib/naming";
+  import { NEW_FILE_TYPE_BY_EXT, type NewFileType } from "./lib/newFileTypes";
   import { validateFileName } from "./lib/filename";
   import { matchesGlob } from "./lib/glob";
   import PatternSelectDialog from "./lib/components/PatternSelectDialog.svelte";
@@ -1894,8 +1895,8 @@
     await createNewItem("folder", targetDir);
   }
 
-  async function newFile(targetDir: string = currentPath) {
-    await createNewItem("file", targetDir);
+  async function newFile(targetDir: string = currentPath, spec?: NewFileType) {
+    await createNewItem("file", targetDir, spec);
   }
 
   /** Create a new folder / text file in `targetDir` and inline-rename it (CPE-1156).
@@ -1907,7 +1908,7 @@
    *  `pendingRenamePath`), matching Windows-Explorer intuition. The `(2)` auto-number dedups against the
    *  TARGET folder's real contents — the in-view `entries` when creating in place, or a fresh `listDir`
    *  when creating inside another folder (its listing isn't loaded yet). */
-  async function createNewItem(kind: "folder" | "file", targetDir: string) {
+  async function createNewItem(kind: "folder" | "file", targetDir: string, spec?: NewFileType) {
     // Guard the abstract Home landing (no real path) and read-only archives — but NOT real drive roots,
     // which are ordinary paths (`isHome` is only ever true for the Home landing itself).
     if (targetDir === HOME || blockedInArchive()) return;
@@ -1930,8 +1931,18 @@
         const name = uniqueName("New folder", existing);
         created = unwrap(await commands.createDir(targetDir, name));
       } else {
-        const name = uniqueNameWithExt("New Text Document", ".txt", existing);
-        created = unwrap(await commands.createFile(targetDir, name));
+        // Default (no spec) is the plain Text file (.txt). A spec (CPE-1161) carries its own extension
+        // and creation strategy: empty file, a minimal valid stub (RTF), or a valid empty .zip archive.
+        const base = spec?.base ?? "New Text Document";
+        const ext = spec ? `.${spec.ext}` : ".txt";
+        const name = uniqueNameWithExt(base, ext, existing);
+        if (spec?.zip) {
+          created = unwrap(await commands.createEmptyZip(targetDir, name));
+        } else if (spec?.content != null) {
+          created = unwrap(await commands.createFileWithContent(targetDir, name, spec.content));
+        } else {
+          created = unwrap(await commands.createFile(targetDir, name));
+        }
       }
       pendingRenamePath = created; // select + inline-rename it once the target listing loads
       if (inSubfolder) {
@@ -2497,6 +2508,23 @@
 
   // ---- context menu / command dispatch ----
   function runAction(action: string) {
+    // Typed New ▸ file types (CPE-1161) carry the extension as `new-file:<ext>` / `new-file-in:<ext>`
+    // / `drive-new-file:<ext>`, resolved back to a spec here so one list drives all three menus. The
+    // target folder mirrors the plain new-file rules: current folder / the clicked folder / drive root.
+    if (action.includes(":")) {
+      const [verb, ext] = action.split(":");
+      const spec = ext ? NEW_FILE_TYPE_BY_EXT[ext] : undefined;
+      if (spec && (verb === "new-file" || verb === "new-file-in" || verb === "drive-new-file")) {
+        if (verb === "new-file-in") {
+          if (selectedEntries[0]?.is_dir) newFile(selectedEntries[0].path, spec);
+        } else if (verb === "drive-new-file") {
+          if (driveCtxPath) newFile(driveCtxPath, spec);
+        } else {
+          newFile(currentPath, spec);
+        }
+        return;
+      }
+    }
     switch (action) {
       case "open": if (selectedEntries[0]) open(selectedEntries[0]); break;
       case "execute": executeSelected(); break;

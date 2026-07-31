@@ -66,6 +66,12 @@ The explorer is the core of the app and is tuned to stay **fast, small, and pred
 - **Selection** — multi-select with Shift/Ctrl; the status bar shows the count and total size.
 - **Operations** — copy, cut, paste, rename, delete (to the trash, restorable), new folder, and batch
   rename. Filesystem operations skip entries they can't read rather than failing the whole listing.
+- **New ▸** — right-click empty space, a folder, or a drive and open the **New** submenu to create a new
+  item in the right place (the current folder, the clicked folder, or the drive root). Beyond **Folder**
+  and **Text file** you can create **Markdown, Rich Text, JSON, YAML, XML, HTML, CSS, JavaScript, Python,
+  CSV**, and a **Compressed (zipped) Folder**. The file is created empty (ready for you to fill in),
+  except Rich Text (a minimal valid `.rtf` stub) and the zipped folder (a valid empty `.zip` archive),
+  and it drops straight into inline rename like a new text file.
 - **Batch media** — right-click 2+ selected image files and choose **Batch media…** to queue an ordered
   list of edits (resize, **compress**, convert, rotate, flip, **watermark**, rename, strip metadata) and run
   them across every file at once. Pick an operation and its settings, then click **+ Add** to put it on the

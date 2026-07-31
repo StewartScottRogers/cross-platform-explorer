@@ -4,6 +4,7 @@
   import Submenu from "./Submenu.svelte";
   import { t } from "../i18n";
   import type { ViewMode, SortKey, SortDir } from "../types";
+  import { NEW_FILE_TYPE_GROUPS } from "../newFileTypes";
 
   export let x = 0;
   export let y = 0;
@@ -142,6 +143,14 @@
       <button class="row" role="menuitem" on:click={() => run(folderSelected ? "new-file-in" : "new-file")}>
         <Icon name="document" size={15} /> {$t('ctx.textFile')}
       </button>
+      {#each NEW_FILE_TYPE_GROUPS as group, gi}
+        {#if gi > 0}<div class="sep" role="separator" />{/if}
+        {#each group as ft}
+          <button class="row" role="menuitem" on:click={() => run(`${folderSelected ? 'new-file-in' : 'new-file'}:${ft.ext}`)}>
+            <Icon name={ft.icon} size={15} /> {$t(ft.labelKey)}
+          </button>
+        {/each}
+      {/each}
     </Submenu>
     <div class="sep" />
     <button class="row" role="menuitem" on:click={() => run("duplicate")}>
@@ -237,6 +246,14 @@
       <button class="row" role="menuitem" on:click={() => run("drive-new-file")}>
         <Icon name="document" size={15} /> {$t('ctx.textFile')}
       </button>
+      {#each NEW_FILE_TYPE_GROUPS as group, gi}
+        {#if gi > 0}<div class="sep" role="separator" />{/if}
+        {#each group as ft}
+          <button class="row" role="menuitem" on:click={() => run(`drive-new-file:${ft.ext}`)}>
+            <Icon name={ft.icon} size={15} /> {$t(ft.labelKey)}
+          </button>
+        {/each}
+      {/each}
     </Submenu>
     <div class="sep" role="separator" />
     <button class="row" role="menuitem" on:click={() => run("drive-copy-path")}>
@@ -263,6 +280,14 @@
       <button class="row" role="menuitem" on:click={() => run("new-file")}>
         <Icon name="document" size={15} /> {$t('ctx.textFile')}
       </button>
+      {#each NEW_FILE_TYPE_GROUPS as group, gi}
+        {#if gi > 0}<div class="sep" role="separator" />{/if}
+        {#each group as ft}
+          <button class="row" role="menuitem" on:click={() => run(`new-file:${ft.ext}`)}>
+            <Icon name={ft.icon} size={15} /> {$t(ft.labelKey)}
+          </button>
+        {/each}
+      {/each}
     </Submenu>
     <div class="sep" role="separator" />
     <button class="row" role="menuitem" disabled={!canPaste} on:click={() => run("paste")}>
