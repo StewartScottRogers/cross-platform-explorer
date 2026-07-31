@@ -53,6 +53,9 @@
     tagMenu: { x: number; y: number; tag: string };
     openSmartFolder: SmartFolder;
     smartFolderMenu: { x: number; y: number; id: string; name: string };
+    /** Right-clicking a DRIVE row (CPE-1158): opens the same folder-like drive menu as a Home drive
+     *  tile, targeting the drive's root path. Only drive rows dispatch this. */
+    driveContext: { x: number; y: number; path: string; name: string };
   }>();
 
   // Every sidebar section's collapse state now comes from one persisted store (CPE-675), so a layout the
@@ -369,6 +372,12 @@
         on:dragover={(e) => onDragOver(e, place.path)}
         on:dragleave={() => (dropPath = dropPath === place.path ? "" : dropPath)}
         on:drop={(e) => onDrop(e, place.path)}
+        on:contextmenu={(e) => {
+          // Drive rows get a folder-like right-click menu (CPE-1158); place rows don't (unchanged).
+          if (!isDrive) return;
+          e.preventDefault();
+          dispatch("driveContext", { x: e.clientX, y: e.clientY, path: place.path, name: place.name });
+        }}
       >
         <button
           class="twisty"

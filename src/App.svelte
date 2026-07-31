@@ -493,7 +493,12 @@
   let canRestoreTrash = false;
   /** Paths currently being dragged, shared with the sidebar as a drop target. */
   let draggedPaths: string[] = [];
-  let ctx: { x: number; y: number; target: "item" | "empty" } | null = null;
+  let ctx: { x: number; y: number; target: "item" | "empty" | "drive" } | null = null;
+  // The drive root + display name for an open "drive" context menu (CPE-1158). All drive-menu actions
+  // target this path, so the menu works identically from a Home tile and a sidebar row — and from Home,
+  // where there is no FileList selection to piggy-back on.
+  let driveCtxPath = "";
+  let driveCtxName = "";
   let confirm: { title: string; message: string; label: string; onYes: () => void } | null = null;
   let propsFor: DirEntry[] | null = null;
   let studioFor: DirEntry[] | null = null;
@@ -2527,6 +2532,14 @@
       // New ▸ from a folder right-click (CPE-1156) — create INSIDE the clicked folder (its own path).
       case "new-folder-in": if (selectedEntries[0]?.is_dir) newFolder(selectedEntries[0].path); break;
       case "new-file-in": if (selectedEntries[0]?.is_dir) newFile(selectedEntries[0].path); break;
+      // Drive/disk menu (CPE-1158) — every action targets the drive ROOT (`driveCtxPath`), so it works
+      // the same from a Home tile and a sidebar row. New reuses CPE-1156's create-in-target path.
+      case "drive-open": if (driveCtxPath) navigate(driveCtxPath); break;
+      case "drive-new-folder": if (driveCtxPath) newFolder(driveCtxPath); break;
+      case "drive-new-file": if (driveCtxPath) newFile(driveCtxPath); break;
+      case "drive-copy-path": copyDrivePath(); break;
+      case "drive-terminal": openDriveTerminal(); break;
+      case "drive-properties": openDriveProperties(); break;
       case "select-all": selection = selectAll(visible.length); break;
       case "invert-selection": selection = invertSelection(selection, visible.length); break;
       case "select-pattern": patternSelectOpen = true; break;
@@ -2559,6 +2572,44 @@
     // Right-clicking an unselected row selects it first, as Explorer does.
     if (!selection.indices.has(e.index)) selection = selectOnly(e.index);
     ctx = { x: e.x, y: e.y, target: "item" };
+  }
+
+  /** Open the drive/disk context menu (CPE-1158) for a Home drive tile or a sidebar drive row. The
+   *  menu's actions all target `driveCtxPath` (the drive ROOT), so New creates at the root and
+   *  Properties describes the root — independent of the FileList selection (Home has none). */
+  function onDriveContext(e: { x: number; y: number; path: string; name: string }) {
+    driveCtxPath = e.path;
+    driveCtxName = e.name;
+    ctx = { x: e.x, y: e.y, target: "drive" };
+  }
+
+  /** Copy the drive root path to the OS clipboard (CPE-1158 drive menu). */
+  async function copyDrivePath() {
+    if (!driveCtxPath) return;
+    try {
+      await navigator.clipboard.writeText(driveCtxPath);
+      showNotice("Copied path to the clipboard.");
+    } catch {
+      showNotice("Couldn't copy the path to the clipboard.", true);
+    }
+  }
+
+  /** Open a terminal at the drive root (CPE-1158). Unlike `openTerminal`, this has no `isHome` guard —
+   *  the drive menu is reachable FROM Home, and a drive root is a real, terminal-worthy path. */
+  async function openDriveTerminal() {
+    if (!driveCtxPath) return;
+    try {
+      unwrap(await commands.openTerminal(driveCtxPath));
+    } catch {
+      showNotice("Couldn't open a terminal here.", true);
+    }
+  }
+
+  /** Properties for the drive root (CPE-1158) — a synthesized folder entry; the dialog re-fetches the
+   *  real volume info from the path, mirroring `openFolderProperties`. */
+  function openDriveProperties() {
+    if (!driveCtxPath) return;
+    propsFor = [{ name: driveCtxName || driveCtxPath, path: driveCtxPath, is_dir: true, size: 0, modified: null, extension: "", hidden: false }];
   }
 
   // CPE-1154: kill the native WebView2/Edge browser context menu ("Back / Refresh / Save as /
@@ -3505,6 +3556,7 @@
       on:tagMenu={(e) => (tagMenu = e.detail)}
       on:openSmartFolder={(e) => openSmartFolder(e.detail)}
       on:smartFolderMenu={(e) => (smartFolderMenu = e.detail)}
+      on:driveContext={(e) => onDriveContext(e.detail)}
       on:navigate={(e) => { if (archive) exitArchive(); navigate(e.detail); }}
       on:openFile={(e) => openRecent(e.detail)}
       on:home={() => { if (archive) exitArchive(); navigate(HOME); }}
@@ -3588,6 +3640,7 @@
       on:clearRecents={() => { recents = []; settings.saveRecents(recents); }}
       on:open={(e) => open(e.detail)}
       on:rowContext={(e) => onRowContext(e.detail)}
+      on:driveContext={(e) => onDriveContext(e.detail)}
       on:contextEmpty={(e) => (ctx = { x: e.detail.x, y: e.detail.y, target: "empty" })}
       on:commitRename={(e) => commitRename(e.detail)}
       on:drop={(e) => dropInto(e.detail.paths, e.detail.dest, e.detail)}

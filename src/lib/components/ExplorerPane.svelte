@@ -330,6 +330,10 @@
      *  the right preview/detail pane without becoming a FileList op target — forwarded from
      *  `<HomeView>`'s `select` event since Home has no `<FileList>`/`selectedEntries` of its own. */
     homeSelect: string;
+    /** A Home DRIVE tile was right-clicked (CPE-1158). Forwarded straight up even while `inHome` — this
+     *  is deliberately distinct from `contextEmpty`/`paneContext`, which stay suppressed on Home, so the
+     *  drive tiles get a menu WITHOUT re-introducing an empty-area menu on the blank Home background. */
+    driveContext: { x: number; y: number; path: string; name: string };
     unpin: string;
     unfavorite: string;
     removeRecent: string;
@@ -409,6 +413,7 @@
     on:navigate={(e) => dispatch("navigate", e.detail)}
     on:openFile={(e) => dispatch("openRecent", e.detail)}
     on:select={(e) => dispatch("homeSelect", e.detail)}
+    on:driveContext={(e) => dispatch("driveContext", e.detail)}
     on:unpin={(e) => dispatch("unpin", e.detail)}
     on:unfavorite={(e) => dispatch("unfavorite", e.detail)}
     on:removeRecent={(e) => dispatch("removeRecent", e.detail)}

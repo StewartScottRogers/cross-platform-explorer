@@ -7,8 +7,11 @@
 
   export let x = 0;
   export let y = 0;
-  /** "item" when opened on a row, "empty" when opened on blank space. */
-  export let target: "item" | "empty" = "item";
+  /** "item" when opened on a row, "empty" when opened on blank space, "drive" when opened on a
+   *  disk/drive tile or sidebar drive row (CPE-1158) — a focused folder-like menu whose actions all
+   *  target the drive's ROOT path, deliberately omitting rename/delete/cut/etc. that make no sense for
+   *  a whole volume. */
+  export let target: "item" | "empty" | "drive" = "item";
   export let canPaste = false;
   export let selectionCount = 0;
   /** True when exactly one folder is selected — enables "Open in new tab". */
@@ -216,6 +219,37 @@
       <Icon name="info" size={15} /> {$t('studio.menu')}
     </button>
     <div class="sep" />
+    <button class="row" role="menuitem" on:click={() => run("help-docs")}>
+      <Icon name="book" size={15} /> Documents for this view
+    </button>
+  {:else if target === "drive"}
+    <!-- Drive/disk menu (CPE-1158): a folder-like menu targeting the drive's ROOT path. Open navigates
+         into the root; New ▸ creates AT the root (reusing CPE-1156's create-in-target path); Properties
+         is for the root. Rename/Delete/Cut/etc. are intentionally absent — you don't rename a volume. -->
+    <button class="row" role="menuitem" on:click={() => run("drive-open")}>
+      <Icon name="drive" size={15} /> {$t('ctx.open')}
+    </button>
+    <div class="sep" role="separator" />
+    <Submenu label={$t('cmd.new')} icon="plus">
+      <button class="row" role="menuitem" on:click={() => run("drive-new-folder")}>
+        <Icon name="folder" size={15} /> {$t('ctx.folder')}
+      </button>
+      <button class="row" role="menuitem" on:click={() => run("drive-new-file")}>
+        <Icon name="document" size={15} /> {$t('ctx.textFile')}
+      </button>
+    </Submenu>
+    <div class="sep" role="separator" />
+    <button class="row" role="menuitem" on:click={() => run("drive-copy-path")}>
+      <Icon name="paste" size={15} /> {$t('ctx.copyAsPath')}
+    </button>
+    <button class="row" role="menuitem" on:click={() => run("drive-terminal")}>
+      <Icon name="code" size={15} /> {$t('ctx.openInTerminal')}
+    </button>
+    <div class="sep" role="separator" />
+    <button class="row" role="menuitem" on:click={() => run("drive-properties")}>
+      <Icon name="info" size={15} /> {$t('ctx.properties')}
+    </button>
+    <div class="sep" role="separator" />
     <button class="row" role="menuitem" on:click={() => run("help-docs")}>
       <Icon name="book" size={15} /> Documents for this view
     </button>
