@@ -84,6 +84,57 @@ describe("ExplorerPane -> FileList sessions wiring (CPE-1120)", () => {
   });
 });
 
+describe("ExplorerPane pane-wide right-click → empty-area menu (CPE-1154)", () => {
+  // Fire a real, cancelable contextmenu event on the `.filelist-pane` scroll container itself —
+  // the blank pane pixels the old `.rows`/`.empty-state` handlers never covered (the confirmed leak).
+  const rightClick = (el: Element, x = 7, y = 9): MouseEvent => {
+    const ev = new MouseEvent("contextmenu", { bubbles: true, cancelable: true, clientX: x, clientY: y });
+    el.dispatchEvent(ev);
+    return ev;
+  };
+
+  it("an EMPTY folder: right-clicking the blank pane opens the app menu (dispatches contextEmpty) and suppresses the native one", () => {
+    const { container, component } = render(ExplorerPane, {
+      selection: emptySelection(),
+      entries: [], // empty folder — `.empty-state` is a centred box that does NOT fill the pane
+    });
+    const contextEmpty = vi.fn();
+    component.$on("contextEmpty", (e) => contextEmpty(e.detail));
+
+    const pane = container.querySelector(".filelist-pane")!;
+    expect(pane).toBeTruthy();
+    const ev = rightClick(pane, 7, 9);
+
+    expect(contextEmpty).toHaveBeenCalledWith({ x: 7, y: 9 });
+    expect(ev.defaultPrevented).toBe(true); // native WebView2/Edge menu suppressed
+  });
+
+  it("a populated folder: right-clicking the blank pane (not a row) still opens the empty-area menu", () => {
+    const { container, component } = render(ExplorerPane, {
+      selection: emptySelection(),
+      entries: [entry()],
+    });
+    const contextEmpty = vi.fn();
+    component.$on("contextEmpty", (e) => contextEmpty(e.detail));
+
+    rightClick(container.querySelector(".filelist-pane")!, 3, 4);
+    expect(contextEmpty).toHaveBeenCalledWith({ x: 3, y: 4 });
+  });
+
+  it("Home is NOT a folder: the pane catch-all never opens the empty-area menu there", () => {
+    const { container, component } = render(ExplorerPane, {
+      selection: emptySelection(),
+      inHome: true,
+    });
+    const contextEmpty = vi.fn();
+    component.$on("contextEmpty", (e) => contextEmpty(e.detail));
+
+    const ev = rightClick(container.querySelector(".filelist-pane")!);
+    expect(contextEmpty).not.toHaveBeenCalled();
+    expect(ev.defaultPrevented).toBe(false); // ExplorerPane doesn't act; App's window suppressor handles Home
+  });
+});
+
 describe("ExplorerPane Home -> right-pane preview wiring (CPE-1132)", () => {
   it("forwards HomeView's `select` event as `homeSelect` (Home has no FileList/selectedEntries of its own)", async () => {
     const recents: RecentFile[] = [{ path: "/home/a.md", name: "a.md", opened: 1 }];

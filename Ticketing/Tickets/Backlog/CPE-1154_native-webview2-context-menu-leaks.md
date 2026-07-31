@@ -42,18 +42,45 @@ populated list; this is a longstanding coverage gap made visible during testing.
    native menu must be suppressed there; a custom menu is optional.
 
 ## Acceptance Criteria
-- [ ] The native WebView2/Edge context menu ("Back/Refresh/Save as/Print/…") **never** appears anywhere in the
+- [x] The native WebView2/Edge context menu ("Back/Refresh/Save as/Print/…") **never** appears anywhere in the
       app (verified by right-clicking: an empty folder's blank space, a populated list's padding, the toolbar,
-      the sidebar).
-- [ ] Right-clicking the file pane — **including an empty folder** — opens the app's empty-area context menu.
-- [ ] Right-clicking a file row still opens the item menu; existing menu behaviour (CPE-1153 submenus etc.)
-      unchanged.
-- [ ] A test covers it: at minimum a gui-smoke spec that opens an **empty** folder, does a **real pointer**
-      right-click (`button:2`) on the blank pane area, and asserts the app's `.ctx` appears (the prior driver
-      check only used a synthetic event on the handled element, which hid this gap). `npm run check` green.
+      the sidebar). — one window-level `contextmenu` suppressor in `App.svelte` `onMount` (removed on destroy).
+- [x] Right-clicking the file pane — **including an empty folder** — opens the app's empty-area context menu.
+      — `ExplorerPane` now carries a pane-wide `on:contextmenu` catch-all over the whole `.filelist-pane`.
+- [x] Right-clicking a file row still opens the item menu; existing menu behaviour (CPE-1153 submenus etc.)
+      unchanged. — `rowContext`/`emptyContext` `stopPropagation` so the catch-all only fires for blank pixels;
+      full frontend suite (1429 tests) green.
+- [x] A test covers it: gui-smoke spec `context-menu.smoke.ts` opens an **empty** folder (seeded subdir) and
+      does a **real pointer** right-click (`button:2`) on the blank pane area, asserting `.ctx` appears (runs in
+      CI). Plus `App.contextmenu.test.ts` (window suppressor wiring + teardown) and 3 `ExplorerPane.test.ts`
+      cases (empty/populated pane opens menu; Home does not). `npm run check` green (0/0).
 
 ## Notes
 - The global suppressor is the standard desktop-app pattern; without it any unhandled pixel leaks the browser
   menu. Keep it light-theme / cross-platform-agnostic.
 - Related discovery path: reported right after CPE-1153 while testing on an empty freshly-created folder; also
   connects to the Home-screen right-click gap noted in CPE-1153.
+
+## Work Log
+- 2026-07-30 (Worker, branch `cpe-1154-suppress-native-contextmenu`): frontend-only fix in two parts.
+  1. **Native suppression, app-wide.** `App.svelte`: added `suppressNativeMenu(e) => e.preventDefault()`,
+     registered as a window-level `contextmenu` listener in `onMount` (beside the existing `focus` listener)
+     and removed in `onDestroy`. It ONLY `preventDefault`s — never `stopPropagation`, never touches `ctx` — so
+     a right-click on a handled element still opens the custom `ContextMenu`, while every otherwise-unhandled
+     pixel (pane padding, the blank area around an empty-folder box, toolbar, sidebar, Home) no longer leaks the
+     WebView2/Edge browser menu.
+  2. **Whole-pane app-menu coverage.** `ExplorerPane.svelte`: added a `paneContext` catch-all wired onto the
+     entire `.filelist-pane` scroll container via `on:contextmenu`; it dispatches `contextEmpty` (guarded by
+     `!inHome && !inReplay`) so ANY blank pane pixel — including an empty folder's centred-box surroundings and
+     the gap below a short list — opens the empty-area menu. `FileList.svelte`: `emptyContext` now also
+     `stopPropagation`s (like `rowContext` already did) so `.rows`/`.empty-state` handled regions don't
+     double-dispatch through the catch-all; row right-clicks still win the item menu.
+  - Tests: new `App.contextmenu.test.ts` (window suppressor preventDefaults while mounted, torn down on
+     unmount); +3 cases in `ExplorerPane.test.ts` (empty folder + populated folder blank-pane right-click both
+     dispatch `contextEmpty` with `defaultPrevented`; Home does not); new gui-smoke `context-menu.smoke.ts` +
+     an empty-folder fixture in `wdio.conf.ts` doing a REAL `button:2` pointer right-click on the blank pane and
+     asserting `.ctx` (empty-area variant) appears — runs in CI.
+  - Verification: `npm run check` → 0 errors / 0 warnings. `npx vitest run` → 127 files / 1429 tests all pass
+     (incl. the 5 new cases). gui-smoke not run locally (it launches a focus-stealing release window — the
+     harness's own off-screen placement is clamped back on-screen by CPE-600 geometry — and needs a full release
+     build; CI/`windows-latest` is the intended runner per gui-smoke README).

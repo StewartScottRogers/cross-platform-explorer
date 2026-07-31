@@ -346,6 +346,21 @@
     /** The header "Columns…" affordance was clicked (CPE-1146) — the caller opens the picker. */
     openColumnPicker: void;
   }>();
+
+  /** CPE-1154: catch-all right-click over the ENTIRE file pane, so ANY blank pixel — the pane's own
+   *  padding, the space around a centred empty-folder box, the gap below a short list, even the sticky
+   *  column header — opens the app's empty-area menu, not just the `.rows`/`.empty-state` boxes (which
+   *  don't fill the pane and were the source of the CPE-1154 leak). FileList's `rowContext`
+   *  `stopPropagation`s so a right-click on a real row never reaches here (its item menu wins), and its
+   *  `emptyContext` also `stopPropagation`s so those handled regions don't double-dispatch — this fires
+   *  only for the otherwise-unhandled pane pixels. Never on Home (not a folder) or in replay (read-only,
+   *  mirroring the `on:contextEmpty` guard below). `preventDefault` also belt-and-braces the native menu
+   *  even though App's window-level suppressor already does. */
+  function paneContext(e: MouseEvent) {
+    if (inHome || inReplay) return;
+    e.preventDefault();
+    dispatch("contextEmpty", { x: e.clientX, y: e.clientY });
+  }
 </script>
 
 <Toolbar label={$t("tb.fileList")}>
@@ -381,7 +396,8 @@
   </div>
 </Toolbar>
 <ContextBar contexts={folderContexts} on:action={(e) => dispatch("contextAction", e.detail)} />
-<div class="filelist-pane" role="region" aria-label={$t("tb.fileList")}>
+<!-- svelte-ignore a11y-no-static-element-interactions -->
+<div class="filelist-pane" role="region" aria-label={$t("tb.fileList")} on:contextmenu={paneContext}>
 {#if inHome}
   <HomeView
     {places}

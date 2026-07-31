@@ -319,6 +319,10 @@
 
   function emptyContext(e: MouseEvent) {
     e.preventDefault();
+    // Stop here so the pane-level catch-all in ExplorerPane (CPE-1154) doesn't ALSO dispatch a
+    // second contextEmpty for the same click — this handler already covers the `.rows`/`.empty-state`
+    // boxes; the pane catch-all is only for the blank pixels those boxes don't cover.
+    e.stopPropagation();
     dispatch("contextEmpty", { x: e.clientX, y: e.clientY });
   }
 

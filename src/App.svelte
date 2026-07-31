@@ -2529,6 +2529,16 @@
     ctx = { x: e.x, y: e.y, target: "item" };
   }
 
+  // CPE-1154: kill the native WebView2/Edge browser context menu ("Back / Refresh / Save as /
+  // Print / …") EVERYWHERE. The app's own menus open via per-element `on:contextmenu` handlers that
+  // already `preventDefault` + dispatch the custom `ContextMenu`; this window-level catch-all ONLY
+  // `preventDefault`s — it never `stopPropagation`s and never touches `ctx` — so on a handled element
+  // the custom menu still opens, while every otherwise-unhandled pixel (pane padding, the blank area
+  // around an empty-folder box, the toolbar, the sidebar, Home) no longer leaks the browser menu.
+  function suppressNativeMenu(e: MouseEvent) {
+    e.preventDefault();
+  }
+
   // ---- keyboard ----
   function handleKeydown(event: KeyboardEvent) {
     const target = event.target as HTMLElement | null;
@@ -3260,6 +3270,10 @@
     autoMirrorTimer = setInterval(maybeAutoSync, 60_000);
     window.addEventListener("focus", maybeAutoSync);
 
+    // CPE-1154: app-wide native-context-menu suppressor (see suppressNativeMenu above). Registered
+    // here alongside the other window listeners and torn down in onDestroy below.
+    window.addEventListener("contextmenu", suppressNativeMenu);
+
     // Drive-connect scheduler (CPE-797): starts polling only if a backup job opted into auto-run.
     reconcileDriveScheduler();
   });
@@ -3274,6 +3288,7 @@
     if (watchRefreshTimer) clearTimeout(watchRefreshTimer);
     if (autoMirrorTimer) clearInterval(autoMirrorTimer);
     window.removeEventListener("focus", maybeAutoSync);
+    window.removeEventListener("contextmenu", suppressNativeMenu); // CPE-1154
     stopDriveScheduler();
   });
 </script>
