@@ -1154,9 +1154,9 @@ async checkpointList(root: string) : Promise<Result<Checkpoint[], string>> {
  * Preview reverting `root` to checkpoint `manifest_id`: restore-plan summary + a drift report so the UI
  * can warn before touching disk. Reads only; nothing destructive.
  */
-async checkpointPreviewRevert(root: string, manifestId: string) : Promise<Result<RevertPreview, string>> {
+async checkpointPreviewRevert(root: string, manifestId: string, session: string | null) : Promise<Result<RevertPreview, string>> {
     try {
-    return { status: "ok", data: await TAURI_INVOKE("checkpoint_preview_revert", { root, manifestId }) };
+    return { status: "ok", data: await TAURI_INVOKE("checkpoint_preview_revert", { root, manifestId, session }) };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
