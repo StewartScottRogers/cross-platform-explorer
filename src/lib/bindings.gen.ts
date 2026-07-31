@@ -142,6 +142,33 @@ async listDrives() : Promise<Place[]> {
     return await TAURI_INVOKE("list_drives");
 },
 /**
+ * Network / mapped / SMB shares for the Home "Shared" tab (CPE-1163).
+ * 
+ * Returns the OS-enumerated network drives (Windows mapped drives, Unix SMB/NFS mounts) merged with
+ * the user's own added locations (`user_added`, persisted by the frontend like favorites). The pure
+ * parsing + merging lives in `cpe_server::net_share`; this command only runs the platform command
+ * and feeds its stdout in. **Time-bounded:** the enumeration subprocess is capped (below), so a
+ * dead/offline mapped server can never hang the Home view — a timeout yields an empty enumeration
+ * and the user-added rows still list.
+ */
+async listNetworkShares(userAdded: string[]) : Promise<NetShare[]> {
+    return await TAURI_INVOKE("list_network_shares", { userAdded });
+},
+/**
+ * Disconnect a mapped network drive — the Shared tab's "Disconnect" action for a mapped drive
+ * (CPE-1163). Windows-only (`net use <drive> /delete /y`), best-effort + time-bounded; on any other
+ * platform, or for a `path` that isn't a drive-letter root, it returns a clear error the UI surfaces.
+ * User-added locations use the frontend "Remove" path instead (pure list pruning, no command).
+ */
+async disconnectNetworkShare(path: string) : Promise<Result<null, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("disconnect_network_share", { path }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
  * Report free/total space on the volume that holds `path` (CPE-403). `free` is what's available to
  * the user (respects quotas). Non-fatal: returns an error string the frontend degrades on rather
  * than surfacing — a status-bar nicety must never break navigation.
@@ -2570,6 +2597,27 @@ export type NameMatch = { path: string; name: string; is_dir: boolean }
  * hit (so the UI can say "showing the first results").
  */
 export type NameSearchResult = { matches: NameMatch[]; dirs_scanned: number; truncated: boolean }
+/**
+ * One row on the Home "Shared" tab (CPE-1163): a mapped/mounted network drive the OS already knows
+ * about, or a user-added network location. `path` is the navigable handle (a drive root like `Z:\`
+ * for a mapped drive, a mountpoint for a Unix mount, or the raw `\\server\share` / `smb://…` address
+ * for a user-added location); `kind` tells the UI which right-click actions apply.
+ */
+export type NetShare = { 
+/**
+ * Display label — the UNC/source for an enumerated share, or the share/host for a user location.
+ */
+name: string; 
+/**
+ * Navigable path: a drive root (`Z:\`), a mountpoint (`/mnt/share`), or the user's raw address.
+ */
+path: string; 
+/**
+ * `"mapped"` (OS-enumerated Windows mapped drive), `"mount"` (Unix SMB/NFS mount), or `"user"`
+ * (a location the user typed + we persist). The UI adapts the menu: mapped → "Disconnect",
+ * user → "Remove".
+ */
+kind: string }
 /**
  * A node in a template tree: a directory (with children) or a file (with placeholder contents).
  */

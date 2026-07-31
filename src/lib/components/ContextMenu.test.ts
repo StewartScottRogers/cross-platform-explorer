@@ -278,3 +278,44 @@ describe("ContextMenu empty-area Windows 11 parity (CPE-1153)", () => {
     expect(action).toHaveBeenCalledWith("select-all");
   });
 });
+
+// Shared-tab row menu (CPE-1163) — the `target:"home-item"` + `homeView:"shared"` branch offers
+// Open / Copy path / Properties plus a kind-specific Disconnect (mapped) or Remove (user).
+const homeShared = {
+  ...base,
+  target: "home-item" as const,
+  homeView: "shared" as const,
+  homeIsDir: true,
+};
+
+describe("ContextMenu Shared row menu (CPE-1163)", () => {
+  it("a mapped drive offers Disconnect (not Remove) and dispatches share-disconnect", async () => {
+    const { component } = render(ContextMenu, { props: { ...homeShared, homeKind: "mapped" } });
+    const action = vi.fn();
+    component.$on("action", (e) => action(e.detail));
+
+    expect(screen.getByText("Open")).toBeTruthy();
+    expect(screen.getByText(/Copy as path|Copy path/i)).toBeTruthy();
+    expect(screen.queryByText(/Remove network location/i)).toBeNull();
+
+    await fireEvent.click(screen.getByText("Disconnect"));
+    expect(action).toHaveBeenCalledWith("share-disconnect");
+  });
+
+  it("a user-added location offers Remove (not Disconnect) and dispatches share-remove", async () => {
+    const { component } = render(ContextMenu, { props: { ...homeShared, homeKind: "user" } });
+    const action = vi.fn();
+    component.$on("action", (e) => action(e.detail));
+
+    expect(screen.queryByText("Disconnect")).toBeNull();
+    await fireEvent.click(screen.getByText(/Remove network location/i));
+    expect(action).toHaveBeenCalledWith("share-remove");
+  });
+
+  it("an OS mount offers neither Disconnect nor Remove, but still Open + Copy path", async () => {
+    render(ContextMenu, { props: { ...homeShared, homeKind: "mount" } });
+    expect(screen.getByText("Open")).toBeTruthy();
+    expect(screen.queryByText("Disconnect")).toBeNull();
+    expect(screen.queryByText(/Remove network location/i)).toBeNull();
+  });
+});

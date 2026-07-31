@@ -60,6 +60,7 @@ export const KEYS = {
   lastSession: "cpe.lastSession",
   dualPane: "cpe.dualPane",
   paneBPath: "cpe.paneBPath",
+  networkLocations: "cpe.networkLocations",
 } as const;
 
 const MAX_RECENTS = 20;
@@ -231,6 +232,27 @@ export const saveRightWidth = (v: number) => write(KEYS.rightWidth, v);
 
 export const loadPins = (): string[] => read(KEYS.pins, [], isStringArray);
 export const savePins = (v: string[]) => write(KEYS.pins, v);
+
+// User-added network locations for the Home "Shared" tab (CPE-1163): raw `\\server\share` / `smb://…`
+// addresses the user typed. Persisted here (like pins/favorites) — the backend merges these with the
+// OS-enumerated mapped drives; a corrupt value degrades to [].
+export const loadNetworkLocations = (): string[] => read(KEYS.networkLocations, [], isStringArray);
+export const saveNetworkLocations = (v: string[]) => write(KEYS.networkLocations, v);
+
+/** Append a network location, trimmed + de-duplicated (case/trailing-slash-insensitive). */
+export function addNetworkLocation(list: string[], path: string): string[] {
+  const trimmed = path.trim();
+  if (!trimmed) return list;
+  const key = trimmed.replace(/[\\/]+$/, "").toLowerCase();
+  const without = list.filter((p) => p.trim().replace(/[\\/]+$/, "").toLowerCase() !== key);
+  return [...without, trimmed];
+}
+
+/** Drop a network location by path (trailing-slash / case-insensitive match). */
+export function removeNetworkLocation(list: string[], path: string): string[] {
+  const key = path.trim().replace(/[\\/]+$/, "").toLowerCase();
+  return list.filter((p) => p.trim().replace(/[\\/]+$/, "").toLowerCase() !== key);
+}
 
 export const loadRecents = (): RecentFile[] => read(KEYS.recents, [], isRecentArray);
 export const saveRecents = (v: RecentFile[]) => write(KEYS.recents, v);

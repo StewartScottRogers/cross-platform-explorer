@@ -149,7 +149,7 @@
   import {
     pushUndo, popUndo, canUndo, peekLabel, invert, deletedPaths, type UndoEntry,
   } from "./lib/undo";
-  import type { DirEntry, Place, SortKey, SortDir, ViewMode, RecentFile, Favorite } from "./lib/types";
+  import type { DirEntry, Place, SortKey, SortDir, ViewMode, RecentFile, Favorite, NetShare } from "./lib/types";
 
   interface OpResult { path: string; ok: boolean; error: string }
 
@@ -353,6 +353,11 @@
   let recents: RecentFile[] = [];
   let favorites: Favorite[] = [];
   let recentFolders: RecentFile[] = [];
+  // Home "Shared" tab (CPE-1163): user-added network locations (persisted) + the combined share list
+  // the backend returns (enumerated mapped drives/mounts merged with the user's), loaded on demand.
+  let networkLocations: string[] = [];
+  let shared: NetShare[] = [];
+  let sharedLoading = false;
   let columnWidths: number[] = settings.loadColumnWidths();
   /** Active metadata columns for the CURRENT folder (CPE-1146, epic CPE-707): id + width, in display
       order. Loaded/saved per-folder in `loadPath` below; empty (Home, or a folder with none saved) is
@@ -508,7 +513,10 @@
   let homeCtxPath = "";
   let homeCtxName = "";
   let homeCtxIsDir = false;
-  let homeCtxView: "recent" | "favorites" | "folders" = "recent";
+  let homeCtxView: "recent" | "favorites" | "folders" | "shared" = "recent";
+  // For a Shared row (CPE-1163): its kind ("mapped" | "mount" | "user"), so the menu offers the right
+  // action — Disconnect for a mapped drive, Remove for a user-added location.
+  let homeCtxKind = "";
   let homeCtxStale = false;
   let confirm: { title: string; message: string; label: string; onYes: () => void } | null = null;
   let propsFor: DirEntry[] | null = null;
@@ -2597,6 +2605,9 @@
       case "home-pin": pinHomeItem(); break;
       case "home-remove": removeHomePointer(homeCtxPath, homeCtxView); break;
       case "home-clear": recents = []; settings.saveRecents(recents); break;
+      // Shared row menu (CPE-1163): Disconnect a mapped drive, or Remove a user-added location.
+      case "share-disconnect": disconnectShare(); break;
+      case "share-remove": removeNetworkLocation(homeCtxPath); break;
       case "select-all": selection = selectAll(visible.length); break;
       case "invert-selection": selection = invertSelection(selection, visible.length); break;
       case "select-pattern": patternSelectOpen = true; break;
@@ -2701,14 +2712,67 @@
   /** Open the "home-item" menu for a Home row (CPE-1162). Stores the target, opens the menu, then fires
    *  a best-effort existence check (reusing `entries_for_paths`, the same stat-a-path command Home's
    *  preview uses) to mark it stale — a missing target disables the on-disk rows but keeps Remove live. */
-  function onHomeItemContext(e: { x: number; y: number; path: string; is_dir: boolean; view: "recent" | "favorites" | "folders" }) {
+  function onHomeItemContext(e: { x: number; y: number; path: string; is_dir: boolean; view: "recent" | "favorites" | "folders" | "shared"; kind?: string }) {
     homeCtxPath = e.path;
     homeCtxName = leafName(e.path);
     homeCtxIsDir = e.is_dir;
     homeCtxView = e.view;
+    homeCtxKind = e.kind ?? "";
     homeCtxStale = false; // optimistic; the async check below flips it if the target is gone
     ctx = { x: e.x, y: e.y, target: "home-item" };
-    void checkHomeCtxStale(e.path);
+    // Shared rows deliberately skip the stat-based stale check (CPE-1163): statting a dead/offline
+    // network path could stall, and an unreachable share must degrade gracefully — Open surfaces its
+    // own error, while Remove/Disconnect stay live regardless. Local rows keep the freshness check.
+    if (e.view !== "shared") void checkHomeCtxStale(e.path);
+  }
+
+  /** (Re)load the Home "Shared" tab (CPE-1163): the OS-enumerated network drives merged with the
+   *  user's added locations. Pull-only — called when the Shared tab is opened or after add/remove,
+   *  never on a timer. Time-bounded in the backend, so an offline server can't hang this. */
+  async function loadShared(): Promise<void> {
+    sharedLoading = true;
+    try {
+      shared = await commands.listNetworkShares(networkLocations);
+    } catch {
+      // A failed enumeration degrades to just the user-added locations, never a crash.
+      shared = networkLocations
+        .map((p) => ({ name: leafName(p) || p, path: p, kind: "user" }))
+        .filter((s) => s.path.trim().length > 0);
+    } finally {
+      sharedLoading = false;
+    }
+  }
+
+  /** Add a user-typed network location (CPE-1163): persist it, then reload so it appears (the backend
+   *  validates + dedupes against enumerated drives). An unparseable address simply won't list. */
+  function addNetworkLocation(path: string): void {
+    const next = settings.addNetworkLocation(networkLocations, path);
+    if (next === networkLocations) return;
+    networkLocations = next;
+    settings.saveNetworkLocations(networkLocations);
+    showNotice(`Added network location "${path.trim()}".`);
+    void loadShared();
+  }
+
+  /** Remove a user-added network location (CPE-1163) — prunes the persisted list + reloads. Never
+   *  touches an OS-enumerated mapped drive (that's Disconnect). */
+  function removeNetworkLocation(path: string): void {
+    networkLocations = settings.removeNetworkLocation(networkLocations, path);
+    settings.saveNetworkLocations(networkLocations);
+    void loadShared();
+  }
+
+  /** Disconnect a mapped network drive from the Shared row menu (CPE-1163) — Windows `net use /delete`
+   *  via the backend, then reload. Best-effort: a failure surfaces a notice, never throws. */
+  async function disconnectShare(): Promise<void> {
+    if (!homeCtxPath) return;
+    try {
+      await commands.disconnectNetworkShare(homeCtxPath);
+      showNotice(`Disconnected "${homeCtxName}".`);
+    } catch (e) {
+      showNotice(String(e), true);
+    }
+    void loadShared();
   }
 
   async function checkHomeCtxStale(path: string): Promise<void> {
@@ -2795,13 +2859,16 @@
 
   /** Prune a home list ENTRY (pointer) — never touches the file on disk. Shared by `home-remove` and
    *  the post-delete cleanup. */
-  function removeHomePointer(path: string, view: "recent" | "favorites" | "folders") {
+  function removeHomePointer(path: string, view: "recent" | "favorites" | "folders" | "shared") {
     if (view === "favorites") {
       favorites = favorites.filter((f) => f.path !== path);
       settings.saveFavorites(favorites);
     } else if (view === "folders") {
       recentFolders = settings.removeRecent(recentFolders, path);
       settings.saveRecentFolders(recentFolders);
+    } else if (view === "shared") {
+      // A Shared row's pointer is a user-added network location (CPE-1163).
+      removeNetworkLocation(path);
     } else {
       recents = settings.removeRecent(recents, path);
       settings.saveRecents(recents);
@@ -3013,6 +3080,7 @@
     recents = settings.loadRecents();
     favorites = settings.loadFavorites();
     recentFolders = settings.loadRecentFolders();
+    networkLocations = settings.loadNetworkLocations();
     columnWidths = settings.loadColumnWidths();
     colorRules = settings.loadColorRules();
   }
@@ -3813,6 +3881,8 @@
       {recents}
       {favorites}
       {recentFolders}
+      {shared}
+      {sharedLoading}
       {activeWatchCwd}
       {watchedAgentName}
       {recentChanges}
@@ -3864,6 +3934,9 @@
       on:rowContext={(e) => onRowContext(e.detail)}
       on:driveContext={(e) => onDriveContext(e.detail)}
       on:homeItemContext={(e) => onHomeItemContext(e.detail)}
+      on:loadShared={() => loadShared()}
+      on:addNetworkLocation={(e) => addNetworkLocation(e.detail)}
+      on:removeNetworkLocation={(e) => removeNetworkLocation(e.detail)}
       on:contextEmpty={(e) => (ctx = { x: e.detail.x, y: e.detail.y, target: "empty" })}
       on:commitRename={(e) => commitRename(e.detail)}
       on:drop={(e) => dropInto(e.detail.paths, e.detail.dest, e.detail)}
@@ -4052,6 +4125,7 @@
     canUndo={canUndo(undoStack)}
     undoLabel={peekLabel(undoStack)}
     homeView={ctx.target === "home-item" ? homeCtxView : ""}
+    homeKind={ctx.target === "home-item" ? homeCtxKind : ""}
     homeIsDir={homeCtxIsDir}
     homeStale={homeCtxStale}
     on:action={(e) => runAction(e.detail)}

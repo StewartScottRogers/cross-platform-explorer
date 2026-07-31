@@ -8,7 +8,7 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { render, screen, fireEvent } from "@testing-library/svelte";
 import HomeView from "./HomeView.svelte";
-import type { Favorite, RecentFile } from "../types";
+import type { Favorite, RecentFile, NetShare } from "../types";
 
 // The component tree imports Tauri APIs transitively; stub them for jsdom.
 vi.mock("@tauri-apps/api/core", () => ({ invoke: vi.fn() }));
@@ -156,6 +156,68 @@ describe("HomeView row right-click dispatches homeItemContext (CPE-1162)", () =>
 
     await fireEvent.contextMenu(container.querySelector(".home")!);
     expect(ctx).not.toHaveBeenCalled();
+  });
+});
+
+describe("HomeView Shared tab — network shares (CPE-1163)", () => {
+  const shared: NetShare[] = [
+    { name: "\\\\server\\share (Z:)", path: "Z:\\", kind: "mapped" },
+    { name: "projects", path: "\\\\nas\\projects", kind: "user" },
+  ];
+
+  it("requests a load when the Shared tab is opened, and renders the rows", async () => {
+    const { component } = render(HomeView, { places: [], drives: [], pins: [], recents: [], favorites: [], shared });
+    const loadShared = vi.fn();
+    component.$on("loadShared", () => loadShared());
+
+    await fireEvent.click(screen.getByRole("button", { name: /Shared/i }));
+    expect(loadShared).toHaveBeenCalled();
+    expect(screen.getByText(/\\\\server\\share \(Z:\)/)).toBeTruthy();
+    expect(screen.getByText("projects")).toBeTruthy();
+  });
+
+  it("restores the Shared tab on open and shows an empty state when there are none", async () => {
+    // (The mount-time `loadShared` dispatch fires before a post-render `$on` can attach, so it's not
+    // asserted here; the tab-open dispatch is covered above. This verifies the restored-tab render.)
+    localStorage.setItem("cpe.homeTab", "shared");
+    render(HomeView, { places: [], drives: [], pins: [], recents: [], favorites: [], shared: [] });
+    expect(screen.getByText(/No network locations/i)).toBeTruthy();
+  });
+
+  it("a Shared row right-click dispatches {view:'shared', kind}", async () => {
+    localStorage.setItem("cpe.homeTab", "shared");
+    const { component } = render(HomeView, { places: [], drives: [], pins: [], recents: [], favorites: [], shared });
+    const ctx = vi.fn();
+    component.$on("homeItemContext", (e) => ctx(e.detail));
+
+    await fireEvent.contextMenu(screen.getByText("projects").closest("button")!);
+    expect(ctx.mock.calls[0][0]).toMatchObject({ path: "\\\\nas\\projects", is_dir: true, view: "shared", kind: "user" });
+  });
+
+  it("the ✕ on a user-added row dispatches removeNetworkLocation with that path", async () => {
+    localStorage.setItem("cpe.homeTab", "shared");
+    const { component } = render(HomeView, { places: [], drives: [], pins: [], recents: [], favorites: [], shared });
+    const remove = vi.fn();
+    component.$on("removeNetworkLocation", (e) => remove(e.detail));
+
+    // Only the user-added row carries a remove ✕ (mapped drives use Disconnect from the menu).
+    const buttons = screen.getAllByRole("button", { name: /Remove network location/i });
+    expect(buttons).toHaveLength(1);
+    await fireEvent.click(buttons[0]);
+    expect(remove).toHaveBeenCalledWith("\\\\nas\\projects");
+  });
+
+  it("＋ Add network location reveals an input that dispatches addNetworkLocation on submit", async () => {
+    localStorage.setItem("cpe.homeTab", "shared");
+    const { component } = render(HomeView, { places: [], drives: [], pins: [], recents: [], favorites: [], shared: [] });
+    const add = vi.fn();
+    component.$on("addNetworkLocation", (e) => add(e.detail));
+
+    await fireEvent.click(screen.getByRole("button", { name: /Add network location/i }));
+    const input = screen.getByPlaceholderText(/server|smb:/i) as HTMLInputElement;
+    await fireEvent.input(input, { target: { value: "\\\\host\\pub" } });
+    await fireEvent.submit(input.closest("form")!);
+    expect(add).toHaveBeenCalledWith("\\\\host\\pub");
   });
 });
 

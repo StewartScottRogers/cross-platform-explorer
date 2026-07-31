@@ -23,7 +23,7 @@
   import { filterEntriesByTag } from "../tagFilter";
   import { tags } from "../tags";
   import type { FolderAction, FolderContext } from "../folderContext";
-  import type { DirEntry, Place, SortKey, SortDir, ViewMode, RecentFile, Favorite } from "../types";
+  import type { DirEntry, Place, SortKey, SortDir, ViewMode, RecentFile, Favorite, NetShare } from "../types";
   import type { ColorRule } from "../colorRules";
   import type { AgentSession } from "../sidecar";
   import type { ActiveMetaColumn } from "../columns";
@@ -39,6 +39,9 @@
   export let recents: RecentFile[] = [];
   export let favorites: Favorite[] = [];
   export let recentFolders: RecentFile[] = [];
+  // Home "Shared" tab (CPE-1163): network/mapped shares + their loading flag; App owns the fetch.
+  export let shared: NetShare[] = [];
+  export let sharedLoading = false;
 
   // Agent-Watch strip (CPE-399).
   export let activeWatchCwd = "";
@@ -338,12 +341,18 @@
      *  while `inHome` — deliberately distinct from `contextEmpty`/`paneContext` (which stay suppressed
      *  on Home), exactly like `driveContext`, so the rows get a menu WITHOUT re-introducing an
      *  empty-area menu on the blank Home background. */
-    homeItemContext: { x: number; y: number; path: string; is_dir: boolean; view: "recent" | "favorites" | "folders" };
+    homeItemContext: { x: number; y: number; path: string; is_dir: boolean; view: "recent" | "favorites" | "folders" | "shared"; kind?: string };
     unpin: string;
     unfavorite: string;
     removeRecent: string;
     removeRecentFolder: string;
     clearRecents: void;
+    /** Home "Shared" tab was opened (CPE-1163) — App (re)loads the network shares. */
+    loadShared: void;
+    /** A "＋ Add network location" address was submitted (CPE-1163). */
+    addNetworkLocation: string;
+    /** Remove a user-added network location by path (CPE-1163). */
+    removeNetworkLocation: string;
     open: DirEntry;
     rowContext: { x: number; y: number; index: number };
     contextEmpty: { x: number; y: number };
@@ -425,6 +434,8 @@
     {recents}
     {favorites}
     {recentFolders}
+    {shared}
+    {sharedLoading}
     on:navigate={(e) => dispatch("navigate", e.detail)}
     on:openFile={(e) => dispatch("openRecent", e.detail)}
     on:select={(e) => dispatch("homeSelect", e.detail)}
@@ -435,6 +446,9 @@
     on:removeRecent={(e) => dispatch("removeRecent", e.detail)}
     on:removeRecentFolder={(e) => dispatch("removeRecentFolder", e.detail)}
     on:clearRecents={() => dispatch("clearRecents")}
+    on:loadShared={() => dispatch("loadShared")}
+    on:addNetworkLocation={(e) => dispatch("addNetworkLocation", e.detail)}
+    on:removeNetworkLocation={(e) => dispatch("removeNetworkLocation", e.detail)}
   />
 {:else}
   {#if inReplay}
