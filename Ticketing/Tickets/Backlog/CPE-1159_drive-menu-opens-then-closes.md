@@ -29,12 +29,32 @@ menu"). Both sites:
   agentMenu handler.
 
 ## Acceptance Criteria
-- [ ] Right-clicking a drive (Home tile AND sidebar row) opens the drive menu and it **STAYS open** (no flash).
-- [ ] A **CDP-harness (CPE-1155 `mouse.ts`) regression test** right-clicks a drive tile and asserts the drive
+- [x] Right-clicking a drive (Home tile AND sidebar row) opens the drive menu and it **STAYS open** (no flash).
+- [x] A **CDP-harness (CPE-1155 `mouse.ts`) regression test** right-clicks a drive tile and asserts the drive
       menu is present AND still present a tick later (the open-then-close signature that the jsdom mount-only
       test missed). This is the faithful test that would have caught it.
-- [ ] Blank Home background still opens no menu; empty-area / on-item / white-space menus all still work;
+- [x] Blank Home background still opens no menu; empty-area / on-item / white-space menus all still work;
       native menu still suppressed. `npm run check` green.
+
+## Work Log
+- 2026-07-31 — Fixed both drive `contextmenu` handlers to `stopPropagation()` right after
+  `preventDefault()`, mirroring the CPE-1157 pane fix and the neighbouring `agentMenu` handler:
+  - `src/lib/components/HomeView.svelte` — drive-tile handler.
+  - `src/lib/components/Sidebar.svelte` — drive-row handler.
+  No other drive-menu code touched (App.onDriveContext, the ContextMenu drive branch, and the actions
+  were already correct — the menu only self-closed).
+- Added CDP-harness regression spec `gui-smoke/specs/drive-menu.smoke.ts` (uses `lib/mouse.ts`,
+  CPE-1155): navigates to Home, does a faithful non-grabbing right-click on a drive TILE and a sidebar
+  drive ROW, and asserts the drive menu is present AND still present after a 500 ms beat (stay-open
+  contract), with a MutationObserver probe recording `.ctx` presence transitions. Also verifies it is
+  the drive variant (Open in Terminal + Copy as path, no on-item quickrow, no Paste/Ctrl+V).
+- **Falsifiability proven by rebuild-and-run both ways:**
+  - WITHOUT the fix: both tests FAIL; probe shows the exact open-then-close signature
+    `present:false → present:true → present:false` (menu flashed ~11-19 ms then self-closed).
+  - WITH the fix: all 3 tests PASS; probe shows `present:false → present:true` and stays.
+- Kept `DriveContextMenu.test.ts` (6 jsdom tests) intact and green.
+- Verification: `npm run check` → 0 errors / 0 warnings; `vitest run DriveContextMenu.test.ts` → 6
+  passing; `gui-smoke drive-menu.smoke.ts` → 3 passing against a real Tauri release build.
 
 ## Notes — systemic (see [[CPE-1160]])
 This window-close race has now bitten THREE times (CPE-1154 native leak → CPE-1157 pane → CPE-1159 drive)

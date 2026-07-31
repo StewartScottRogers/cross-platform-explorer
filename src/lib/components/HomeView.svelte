@@ -87,6 +87,10 @@
             // native-menu suppressor, leaving no menu (matching prior behaviour).
             if (!place.isDrive) return;
             e.preventDefault();
+            // stopPropagation so the same contextmenu event doesn't bubble to window, where
+            // ContextMenu.svelte's window-level dismisser would instantly close the just-opened
+            // menu (CPE-1159 — same open-then-close race CPE-1157 fixed for the pane).
+            e.stopPropagation();
             dispatch("driveContext", { x: e.clientX, y: e.clientY, path: place.path, name: place.name });
           }}
         >
