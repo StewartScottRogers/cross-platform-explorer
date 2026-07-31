@@ -4,9 +4,10 @@ title: "Right-click context menu: bring it to Windows 11 Explorer parity (New �
 type: feature
 component: Frontend
 priority: medium
-status: Backlog
+status: Done
 tags: ready
 created: 2026-07-30
+closed: 2026-07-30
 ---
 
 ## Summary
@@ -103,3 +104,18 @@ Backlog per instructions.
 - Keep it **cross-platform** (this is a general explorer, not Windows-only) — mirror Windows 11's *shape*,
   but the labels/behaviour must read sensibly on macOS/Linux too; don't hard-code Windows-only concepts.
 - Respect the [[prefer-inline-instant-controls]] and menu conventions; no modal popups for these.
+
+## Close (Foreman, 2026-07-30)
+Merged as PR #470 (`a9c919ba`), reviewer APPROVE across all 7 areas (submenu open/close + keyboard + leftward
+overflow-flip; View/Sort single-source-of-truth confirmed; MENUS.md-conformant; i18n keys in all 12
+COMPLETE_LOCALES; Undo/Properties wired to existing paths; on-item branch byte-identical; 13 ContextMenu tests
++ full suite 1424 green; frontend-only). Being GUI-verified hands-on by the user this round.
+
+Reviewer's non-blocking visual heads-ups (for the hands-on test / possible follow-ups):
+1. **Flyout clamps only horizontally, not vertically** — `Sort by ▸` is the tallest flyout; opened near the
+   screen bottom its lower items could clip (no bottom-edge reposition). If confirmed in use → file a small
+   follow-up to add vertical clamp.
+2. **Trailing checkmark alignment** — the active-value ✓ is trailing (leading slot holds the category icon);
+   sanity-check the ✓/hint/chevron columns don't collide, and that a leftward-flipped flyout doesn't overlap
+   the parent menu.
+Also: `ctx.newFolder`/`ctx.newFile` i18n keys are now orphaned (harmless; optional cleanup).
