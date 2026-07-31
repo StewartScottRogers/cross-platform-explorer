@@ -4,9 +4,10 @@ title: "Right-click leaks the native WebView2 (Edge) menu instead of the app's o
 type: bug
 component: Frontend
 priority: high
-status: Backlog
+status: Done
 tags: ready
 created: 2026-07-30
+closed: 2026-07-30
 ---
 
 ## Summary
