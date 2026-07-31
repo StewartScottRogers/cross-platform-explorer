@@ -23,6 +23,9 @@
     /** Display-only: single-clicking a Recent file drives the right preview/detail pane without
      *  opening it or becoming an operation target (CPE-1132). */
     select: string;
+    /** Right-clicking a DRIVE tile (CPE-1158): opens a folder-like menu targeting the drive's root
+     *  path. Only drive tiles dispatch this — the blank Home background stays menu-less. */
+    driveContext: { x: number; y: number; path: string; name: string };
     unpin: string;
     unfavorite: string;
     removeRecent: string;
@@ -46,7 +49,13 @@
     path: p,
     kind: "folder",
   }));
-  $: cards = [...places, ...drives, ...pinned];
+  // Tag each Quick-access card with whether it's a drive, so only drive tiles get the right-click
+  // menu (CPE-1158) — places/pins and the blank Home background stay menu-less.
+  $: cards = [
+    ...places.map((p) => ({ ...p, isDrive: false })),
+    ...drives.map((d) => ({ ...d, isDrive: true })),
+    ...pinned.map((p) => ({ ...p, isDrive: false })),
+  ];
 
   const extOf = (name: string) => {
     const i = name.lastIndexOf(".");
@@ -70,7 +79,17 @@
   {#if quickOpen}
     <div class="qa-grid">
       {#each cards as place (place.path)}
-        <button class="qa-card" on:click={() => dispatch("navigate", place.path)}>
+        <button
+          class="qa-card"
+          on:click={() => dispatch("navigate", place.path)}
+          on:contextmenu={(e) => {
+            // Only drive tiles get a menu (CPE-1158); other tiles fall through to the window-level
+            // native-menu suppressor, leaving no menu (matching prior behaviour).
+            if (!place.isDrive) return;
+            e.preventDefault();
+            dispatch("driveContext", { x: e.clientX, y: e.clientY, path: place.path, name: place.name });
+          }}
+        >
           <Icon name={place.kind} size={28} />
           <span class="qa-text">
             <span class="qa-name">{place.name}</span>
