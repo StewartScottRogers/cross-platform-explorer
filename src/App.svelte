@@ -494,12 +494,22 @@
   let canRestoreTrash = false;
   /** Paths currently being dragged, shared with the sidebar as a drop target. */
   let draggedPaths: string[] = [];
-  let ctx: { x: number; y: number; target: "item" | "empty" | "drive" } | null = null;
+  let ctx: { x: number; y: number; target: "item" | "empty" | "drive" | "home-item" } | null = null;
   // The drive root + display name for an open "drive" context menu (CPE-1158). All drive-menu actions
   // target this path, so the menu works identically from a Home tile and a sidebar row — and from Home,
   // where there is no FileList selection to piggy-back on.
   let driveCtxPath = "";
   let driveCtxName = "";
+  // The clicked Home row's path + type + source-view for an open "home-item" menu (CPE-1162). Stored
+  // independently of the FileList selection (Home has none), exactly like `driveCtxPath` — every
+  // home-* action in runAction targets THIS path. `homeCtxStale` is set by a best-effort async
+  // existence check when the menu opens: true ⇒ the on-disk rows are disabled but "Remove from <view>"
+  // stays live so a dead pointer can still be pruned.
+  let homeCtxPath = "";
+  let homeCtxName = "";
+  let homeCtxIsDir = false;
+  let homeCtxView: "recent" | "favorites" | "folders" = "recent";
+  let homeCtxStale = false;
   let confirm: { title: string; message: string; label: string; onYes: () => void } | null = null;
   let propsFor: DirEntry[] | null = null;
   let studioFor: DirEntry[] | null = null;
@@ -2514,11 +2524,13 @@
     if (action.includes(":")) {
       const [verb, ext] = action.split(":");
       const spec = ext ? NEW_FILE_TYPE_BY_EXT[ext] : undefined;
-      if (spec && (verb === "new-file" || verb === "new-file-in" || verb === "drive-new-file")) {
+      if (spec && (verb === "new-file" || verb === "new-file-in" || verb === "drive-new-file" || verb === "home-new-file")) {
         if (verb === "new-file-in") {
           if (selectedEntries[0]?.is_dir) newFile(selectedEntries[0].path, spec);
         } else if (verb === "drive-new-file") {
           if (driveCtxPath) newFile(driveCtxPath, spec);
+        } else if (verb === "home-new-file") {
+          if (homeCtxIsDir && homeCtxPath) newFile(homeCtxPath, spec);
         } else {
           newFile(currentPath, spec);
         }
@@ -2568,6 +2580,23 @@
       case "drive-copy-path": copyDrivePath(); break;
       case "drive-terminal": openDriveTerminal(); break;
       case "drive-properties": openDriveProperties(); break;
+      // Home row menu (CPE-1162) — every action targets `homeCtxPath` (the clicked row), independent of
+      // any FileList selection. `home-delete` trashes the real file; `home-remove` prunes only the list
+      // pointer — deliberately two different verbs so the menu can keep them unmistakably distinct.
+      case "home-open": openHomeItem(); break;
+      case "home-open-new-tab": if (homeCtxIsDir && homeCtxPath) openInNewTab(homeCtxEntry()); break;
+      case "home-reveal": revealHomeItem(); break;
+      case "home-copy": copyHomeItem(); break;
+      case "home-copy-path": copyHomeItemPath(); break;
+      case "home-rename": renameHomeItem(); break;
+      case "home-new-folder": if (homeCtxIsDir && homeCtxPath) newFolder(homeCtxPath); break;
+      case "home-new-file": if (homeCtxIsDir && homeCtxPath) newFile(homeCtxPath); break;
+      case "home-properties": openHomeItemProperties(); break;
+      case "home-delete": deleteHomeItem(); break;
+      case "home-favorite": favoriteHomeItem(); break;
+      case "home-pin": pinHomeItem(); break;
+      case "home-remove": removeHomePointer(homeCtxPath, homeCtxView); break;
+      case "home-clear": recents = []; settings.saveRecents(recents); break;
       case "select-all": selection = selectAll(visible.length); break;
       case "invert-selection": selection = invertSelection(selection, visible.length); break;
       case "select-pattern": patternSelectOpen = true; break;
@@ -2638,6 +2667,171 @@
   function openDriveProperties() {
     if (!driveCtxPath) return;
     propsFor = [{ name: driveCtxName || driveCtxPath, path: driveCtxPath, is_dir: true, size: 0, modified: null, extension: "", hidden: false }];
+  }
+
+  // ---- Home row context menu (CPE-1162) ---------------------------------------------------------
+  // The Home Recent/Favorites/Folders lists have no `<FileList>`/selection, so — exactly like the drive
+  // tile (CPE-1158) — a right-clicked row carries its own {path,is_dir,view} up here; every `home-*`
+  // action targets `homeCtxPath`. This is what keeps the two ideas of "remove" distinct: `home-delete`
+  // trashes the real file on disk, while `home-remove` only prunes the list ENTRY (favorite/recent
+  // pointer). Shared is deliberately not a `view` value yet — the menu machinery is view-agnostic so it
+  // plugs in once Shared's data source is decided (CPE-1163).
+
+  /** Derive a leaf name from a path (last non-empty \ or / segment). */
+  function leafName(path: string): string {
+    return path.split(/[\\/]/).filter(Boolean).pop() ?? path;
+  }
+
+  /** The clicked home item as a synthesized `DirEntry` for the dialogs/ops that want one (Properties,
+   *  Open-in-new-tab, delete). The size/modified/extension are placeholders the backend re-derives. */
+  function homeCtxEntry(): DirEntry {
+    const name = leafName(homeCtxPath);
+    const dot = name.lastIndexOf(".");
+    return {
+      name,
+      path: homeCtxPath,
+      is_dir: homeCtxIsDir,
+      size: 0,
+      modified: null,
+      extension: !homeCtxIsDir && dot > 0 ? name.slice(dot + 1).toLowerCase() : "",
+      hidden: false,
+    };
+  }
+
+  /** Open the "home-item" menu for a Home row (CPE-1162). Stores the target, opens the menu, then fires
+   *  a best-effort existence check (reusing `entries_for_paths`, the same stat-a-path command Home's
+   *  preview uses) to mark it stale — a missing target disables the on-disk rows but keeps Remove live. */
+  function onHomeItemContext(e: { x: number; y: number; path: string; is_dir: boolean; view: "recent" | "favorites" | "folders" }) {
+    homeCtxPath = e.path;
+    homeCtxName = leafName(e.path);
+    homeCtxIsDir = e.is_dir;
+    homeCtxView = e.view;
+    homeCtxStale = false; // optimistic; the async check below flips it if the target is gone
+    ctx = { x: e.x, y: e.y, target: "home-item" };
+    void checkHomeCtxStale(e.path);
+  }
+
+  async function checkHomeCtxStale(path: string): Promise<void> {
+    try {
+      const [found] = await commands.entriesForPaths([path]);
+      // Guard against a newer menu having opened for a different row while this awaited.
+      if (homeCtxPath === path) homeCtxStale = !found;
+    } catch {
+      // A failed check is treated as "not stale" — never wrongly disable a live entry over a hiccup;
+      // an on-disk action that then fails surfaces its own graceful error.
+      if (homeCtxPath === path) homeCtxStale = false;
+    }
+  }
+
+  /** Open the clicked home item: a folder navigates, a file opens via the OS (reusing `openRecent`,
+   *  which self-heals a vanished Recent entry). */
+  function openHomeItem() {
+    if (!homeCtxPath) return;
+    if (homeCtxIsDir) navigate(homeCtxPath);
+    else openRecent(homeCtxPath);
+  }
+
+  /** Copy the home item to the clipboard (stage a copy, like `doCopy` for a FileList selection). */
+  function copyHomeItem() {
+    if (!homeCtxPath) return;
+    clipboard = stage([homeCtxPath], "copy");
+    showNotice("Copied 1 item.");
+  }
+
+  /** Copy the home item's path to the OS clipboard. */
+  async function copyHomeItemPath() {
+    if (!homeCtxPath) return;
+    try {
+      await navigator.clipboard.writeText(formatPathsForClipboard([homeCtxPath]));
+      showNotice("Copied path to the clipboard.");
+    } catch {
+      showNotice("Couldn't copy the path to the clipboard.", true);
+    }
+  }
+
+  /** Reveal the home item in the OS file manager. */
+  async function revealHomeItem() {
+    if (!homeCtxPath) return;
+    try {
+      await revealItemInDir(homeCtxPath);
+    } catch {
+      showNotice("Couldn't reveal that in the file manager.", true);
+    }
+  }
+
+  /** Rename the real file/folder behind a home row (CPE-1162). Home has no `<FileList>` to inline-edit,
+   *  so we navigate to the item's PARENT folder and hand off to the existing post-load inline-rename
+   *  hook (`pendingRenamePath`) — the same path a freshly-created item uses. */
+  async function renameHomeItem() {
+    if (!homeCtxPath) return;
+    const parent = splitPath(homeCtxPath).at(-2)?.path;
+    if (!parent) { showNotice("Can't rename this item from here.", true); return; }
+    pendingRenamePath = homeCtxPath;
+    await navigate(parent);
+  }
+
+  /** Delete the real file/folder behind a home row to the Recycle Bin (CPE-1162) — the DESTRUCTIVE
+   *  action, distinct from `home-remove`'s list-pointer pruning. Reuses the trash command + undo, then
+   *  prunes the now-dead pointer from whichever list it came from so the entry doesn't linger. */
+  async function deleteHomeItem() {
+    if (!homeCtxPath) return;
+    const path = homeCtxPath;
+    const view = homeCtxView;
+    try {
+      const results = await commands.deleteToTrash([path]);
+      reportResults(results, "Moved to Recycle Bin:");
+      if (canRestoreTrash) {
+        const restored = results.filter((r) => r.ok).map((r) => ({ from: r.path, to: "" }));
+        if (restored.length > 0) {
+          undoStack = pushUndo(undoStack, { kind: "delete", moves: restored, label: "Delete 1 item" });
+        }
+      }
+      // Trashing the file makes any list pointer to it dead — prune it from its source list.
+      if (results.some((r) => r.ok)) removeHomePointer(path, view);
+    } catch (e) {
+      showNotice(String(e), true);
+    }
+  }
+
+  /** Prune a home list ENTRY (pointer) — never touches the file on disk. Shared by `home-remove` and
+   *  the post-delete cleanup. */
+  function removeHomePointer(path: string, view: "recent" | "favorites" | "folders") {
+    if (view === "favorites") {
+      favorites = favorites.filter((f) => f.path !== path);
+      settings.saveFavorites(favorites);
+    } else if (view === "folders") {
+      recentFolders = settings.removeRecent(recentFolders, path);
+      settings.saveRecentFolders(recentFolders);
+    } else {
+      recents = settings.removeRecent(recents, path);
+      settings.saveRecents(recents);
+    }
+  }
+
+  /** Add the clicked home item to Favorites (cross-view action for Recent/Folders rows). */
+  function favoriteHomeItem() {
+    if (!homeCtxPath) return;
+    if (favorites.some((f) => f.path === homeCtxPath)) {
+      showNotice(`"${homeCtxName}" is already in Favorites.`);
+      return;
+    }
+    favorites = settings.toggleFavorite(favorites, { path: homeCtxPath, name: homeCtxName, is_dir: homeCtxIsDir });
+    settings.saveFavorites(favorites);
+    showNotice(`Added "${homeCtxName}" to Favorites.`);
+  }
+
+  /** Pin the clicked home folder to Quick access (cross-view action; folders only). */
+  function pinHomeItem() {
+    if (!homeCtxPath || !homeCtxIsDir) return;
+    const wasPinned = pins.includes(homeCtxPath);
+    pins = settings.togglePin(pins, homeCtxPath);
+    settings.savePins(pins);
+    showNotice(wasPinned ? `Unpinned "${homeCtxName}".` : `Pinned "${homeCtxName}" to Quick access.`);
+  }
+
+  function openHomeItemProperties() {
+    if (!homeCtxPath) return;
+    propsFor = [homeCtxEntry()];
   }
 
   // CPE-1154: kill the native WebView2/Edge browser context menu ("Back / Refresh / Save as /
@@ -3669,6 +3863,7 @@
       on:open={(e) => open(e.detail)}
       on:rowContext={(e) => onRowContext(e.detail)}
       on:driveContext={(e) => onDriveContext(e.detail)}
+      on:homeItemContext={(e) => onHomeItemContext(e.detail)}
       on:contextEmpty={(e) => (ctx = { x: e.detail.x, y: e.detail.y, target: "empty" })}
       on:commitRename={(e) => commitRename(e.detail)}
       on:drop={(e) => dropInto(e.detail.paths, e.detail.dest, e.detail)}
@@ -3856,6 +4051,9 @@
     {sortDir}
     canUndo={canUndo(undoStack)}
     undoLabel={peekLabel(undoStack)}
+    homeView={ctx.target === "home-item" ? homeCtxView : ""}
+    homeIsDir={homeCtxIsDir}
+    homeStale={homeCtxStale}
     on:action={(e) => runAction(e.detail)}
     on:close={() => (ctx = null)}
   />

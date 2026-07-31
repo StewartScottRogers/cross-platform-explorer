@@ -334,6 +334,11 @@
      *  is deliberately distinct from `contextEmpty`/`paneContext`, which stay suppressed on Home, so the
      *  drive tiles get a menu WITHOUT re-introducing an empty-area menu on the blank Home background. */
     driveContext: { x: number; y: number; path: string; name: string };
+    /** A Home Recent/Favorites/Folders ROW was right-clicked (CPE-1162). Forwarded straight up even
+     *  while `inHome` — deliberately distinct from `contextEmpty`/`paneContext` (which stay suppressed
+     *  on Home), exactly like `driveContext`, so the rows get a menu WITHOUT re-introducing an
+     *  empty-area menu on the blank Home background. */
+    homeItemContext: { x: number; y: number; path: string; is_dir: boolean; view: "recent" | "favorites" | "folders" };
     unpin: string;
     unfavorite: string;
     removeRecent: string;
@@ -424,6 +429,7 @@
     on:openFile={(e) => dispatch("openRecent", e.detail)}
     on:select={(e) => dispatch("homeSelect", e.detail)}
     on:driveContext={(e) => dispatch("driveContext", e.detail)}
+    on:homeItemContext={(e) => dispatch("homeItemContext", e.detail)}
     on:unpin={(e) => dispatch("unpin", e.detail)}
     on:unfavorite={(e) => dispatch("unfavorite", e.detail)}
     on:removeRecent={(e) => dispatch("removeRecent", e.detail)}

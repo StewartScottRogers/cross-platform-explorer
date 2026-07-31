@@ -109,6 +109,56 @@ describe("HomeView Recent remove (CPE-341)", () => {
   });
 });
 
+describe("HomeView row right-click dispatches homeItemContext (CPE-1162)", () => {
+  const recentFolders: RecentFile[] = [{ path: "/home/projects", name: "projects", opened: 2 }];
+
+  it("a Recent row dispatches {path,is_dir:false,view:'recent'}", async () => {
+    const { component } = render(HomeView, { places: [], drives: [], pins: [], recents, favorites: [] });
+    const ctx = vi.fn();
+    component.$on("homeItemContext", (e) => ctx(e.detail));
+
+    const row = screen.getByText("a.md").closest("button")!;
+    await fireEvent.contextMenu(row);
+
+    expect(ctx).toHaveBeenCalledTimes(1);
+    expect(ctx.mock.calls[0][0]).toMatchObject({ path: "/home/a.md", is_dir: false, view: "recent" });
+  });
+
+  it("a Favorites row carries the entry's own is_dir + view:'favorites'", async () => {
+    localStorage.setItem("cpe.homeTab", "favorites");
+    const { component } = render(HomeView, { places: [], drives: [], pins: [], recents: [], favorites });
+    const ctx = vi.fn();
+    component.$on("homeItemContext", (e) => ctx(e.detail));
+
+    await fireEvent.contextMenu(screen.getByText("docs").closest("button")!);
+    expect(ctx.mock.calls[0][0]).toMatchObject({ path: "/home/docs", is_dir: true, view: "favorites" });
+
+    await fireEvent.contextMenu(screen.getByText("notes.txt").closest("button")!);
+    expect(ctx.mock.calls[1][0]).toMatchObject({ path: "/home/notes.txt", is_dir: false, view: "favorites" });
+  });
+
+  it("a Folders row dispatches {is_dir:true,view:'folders'}", async () => {
+    const { component } = render(HomeView, {
+      places: [], drives: [], pins: [], recents: [], favorites: [], recentFolders,
+    });
+    const ctx = vi.fn();
+    component.$on("homeItemContext", (e) => ctx(e.detail));
+
+    await fireEvent.click(screen.getByRole("button", { name: /Folders/i }));
+    await fireEvent.contextMenu(screen.getByText("projects").closest("button")!);
+    expect(ctx.mock.calls[0][0]).toMatchObject({ path: "/home/projects", is_dir: true, view: "folders" });
+  });
+
+  it("the blank Home background dispatches NO homeItemContext", async () => {
+    const { container, component } = render(HomeView, { places: [], drives: [], pins: [], recents, favorites: [] });
+    const ctx = vi.fn();
+    component.$on("homeItemContext", (e) => ctx(e.detail));
+
+    await fireEvent.contextMenu(container.querySelector(".home")!);
+    expect(ctx).not.toHaveBeenCalled();
+  });
+});
+
 describe("HomeView Recent single-click selects for preview, double-click opens (CPE-1132)", () => {
   it("a single click dispatches select with the row's path and does NOT open it", async () => {
     const { component } = render(HomeView, { places: [], drives: [], pins: [], recents, favorites: [] });

@@ -12,7 +12,7 @@
    *  disk/drive tile or sidebar drive row (CPE-1158) — a focused folder-like menu whose actions all
    *  target the drive's ROOT path, deliberately omitting rename/delete/cut/etc. that make no sense for
    *  a whole volume. */
-  export let target: "item" | "empty" | "drive" = "item";
+  export let target: "item" | "empty" | "drive" | "home-item" = "item";
   export let canPaste = false;
   export let selectionCount = 0;
   /** True when exactly one folder is selected — enables "Open in new tab". */
@@ -45,6 +45,16 @@
    *  `sortdir:<dir>` into the same state the column headers use (CPE-1153). */
   export let sortKey: SortKey = "name";
   export let sortDir: SortDir = "asc";
+  /** Home-item menu (CPE-1162, `target: "home-item"`): which segmented list the right-clicked row came
+   *  from, so the correct view-native "Remove from <view>" (+ "Clear all" on Recent) shows and the
+   *  cross-view Add-to-Favorites/Pin rows appear only where they make sense. */
+  export let homeView: "recent" | "favorites" | "folders" | "" = "";
+  /** Whether the right-clicked Home row is a folder — toggles Open-in-new-tab / New ▸ / the Open icon. */
+  export let homeIsDir = false;
+  /** True when a best-effort existence check found the row's real target missing (CPE-1162). Disables
+   *  the on-disk actions (Open/Reveal/Copy/Rename/Delete/New/Properties + Add-to-Fav/Pin) but KEEPS the
+   *  pointer-level "Remove from <view>" / "Clear all" enabled so a dead entry can still be pruned. */
+  export let homeStale = false;
   /** Whether the undo stack has anything to undo — gates the empty-area Undo row (CPE-1153). */
   export let canUndo = false;
   /** Human label of the top undo entry (e.g. "Rename to report.txt"); appended after "Undo" when set. */
@@ -266,6 +276,92 @@
     <button class="row" role="menuitem" on:click={() => run("drive-properties")}>
       <Icon name="info" size={15} /> {$t('ctx.properties')}
     </button>
+    <div class="sep" role="separator" />
+    <button class="row" role="menuitem" on:click={() => run("help-docs")}>
+      <Icon name="book" size={15} /> Documents for this view
+    </button>
+  {:else if target === "home-item"}
+    <!-- Home Recent/Favorites/Folders ROW menu (CPE-1162). Every on-disk action targets the row's real
+         path (stored in App, independent of any FileList selection — Home has none). The CRITICAL
+         peculiarity: the DESTRUCTIVE "Delete" (trashes the real file, top group) is kept unmistakably
+         separate — distinct wording, distinct group, a separator between — from the pointer-level
+         "Remove from <view>" (prunes only the list ENTRY, list-management group at the bottom). Stale
+         targets disable the on-disk rows but keep Remove/Clear enabled. MENUS.md: theme vars, leading
+         icons, never red text. -->
+    <button class="row" role="menuitem" disabled={homeStale} on:click={() => run("home-open")}>
+      <Icon name={homeIsDir ? "folder" : "document"} size={15} /> {$t('ctx.open')}
+    </button>
+    {#if homeIsDir}
+      <button class="row" role="menuitem" disabled={homeStale} on:click={() => run("home-open-new-tab")}>
+        <Icon name="plus" size={15} /> {$t('ctx.openNewTab')}
+      </button>
+    {/if}
+    <div class="sep" role="separator" />
+    <button class="row" role="menuitem" disabled={homeStale} on:click={() => run("home-reveal")}>
+      <Icon name="folder" size={15} /> {$t('ctx.reveal')}
+    </button>
+    <button class="row" role="menuitem" disabled={homeStale} on:click={() => run("home-copy")}>
+      <Icon name="copy" size={15} /> {$t('ctx.copy')}
+    </button>
+    <button class="row" role="menuitem" disabled={homeStale} on:click={() => run("home-copy-path")}>
+      <Icon name="paste" size={15} /> {$t('ctx.copyAsPath')}
+    </button>
+    <button class="row" role="menuitem" disabled={homeStale} on:click={() => run("home-rename")}>
+      <Icon name="rename" size={15} /> {$t('ctx.rename')}
+    </button>
+    {#if homeIsDir && !homeStale}
+      <!-- New ▸ inside the folder (CPE-1156/1161's typed list) — home-new-* target the row's own path.
+           Hidden entirely when the target is stale (you can't create inside a folder that's gone). -->
+      <Submenu label={$t('cmd.new')} icon="plus">
+        <button class="row" role="menuitem" on:click={() => run("home-new-folder")}>
+          <Icon name="folder" size={15} /> {$t('ctx.folder')}
+        </button>
+        <button class="row" role="menuitem" on:click={() => run("home-new-file")}>
+          <Icon name="document" size={15} /> {$t('ctx.textFile')}
+        </button>
+        {#each NEW_FILE_TYPE_GROUPS as group, gi}
+          {#if gi > 0}<div class="sep" role="separator" />{/if}
+          {#each group as ft}
+            <button class="row" role="menuitem" on:click={() => run(`home-new-file:${ft.ext}`)}>
+              <Icon name={ft.icon} size={15} /> {$t(ft.labelKey)}
+            </button>
+          {/each}
+        {/each}
+      </Submenu>
+    {/if}
+    <button class="row" role="menuitem" disabled={homeStale} on:click={() => run("home-properties")}>
+      <Icon name="info" size={15} /> {$t('ctx.properties')}
+    </button>
+    <!-- Destructive group — the real-file trash, kept apart from the list-management "Remove" below. -->
+    <div class="sep" role="separator" />
+    <button class="row" role="menuitem" disabled={homeStale} on:click={() => run("home-delete")}>
+      <Icon name="delete" size={15} /> {$t('ctx.delete')}
+    </button>
+    <!-- Cross-view group. -->
+    {#if homeView === "recent" || homeView === "folders"}
+      <div class="sep" role="separator" />
+      <button class="row" role="menuitem" disabled={homeStale} on:click={() => run("home-favorite")}>
+        <Icon name="star" size={15} /> {$t('ctx.addFavorite')}
+      </button>
+      {#if homeIsDir}
+        <button class="row" role="menuitem" disabled={homeStale} on:click={() => run("home-pin")}>
+          <Icon name="pin" size={15} /> {$t('home.pinToQuickAccess')}
+        </button>
+      {/if}
+    {/if}
+    <!-- List-management group — prunes only the ENTRY (never the file); stays enabled even when stale. -->
+    <div class="sep" role="separator" />
+    <button class="row" role="menuitem" on:click={() => run("home-remove")}>
+      <Icon name="close" size={15} />
+      {#if homeView === "favorites"}{$t('home.removeFromFavorites')}
+      {:else if homeView === "folders"}{$t('home.removeFromRecentFolders')}
+      {:else}{$t('home.removeFromRecent')}{/if}
+    </button>
+    {#if homeView === "recent"}
+      <button class="row" role="menuitem" on:click={() => run("home-clear")}>
+        <Icon name="delete" size={15} /> {$t('home.clearAll')}
+      </button>
+    {/if}
     <div class="sep" role="separator" />
     <button class="row" role="menuitem" on:click={() => run("help-docs")}>
       <Icon name="book" size={15} /> Documents for this view

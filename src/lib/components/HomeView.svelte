@@ -26,6 +26,13 @@
     /** Right-clicking a DRIVE tile (CPE-1158): opens a folder-like menu targeting the drive's root
      *  path. Only drive tiles dispatch this — the blank Home background stays menu-less. */
     driveContext: { x: number; y: number; path: string; name: string };
+    /** Right-clicking a Recent / Favorites / Folders ROW (CPE-1162): opens a file/folder-like menu
+     *  targeting that row's real path, carrying which segmented list it came from so App can offer the
+     *  correct view-native "Remove from <view>" alongside the normal file ops. Mirrors `driveContext` —
+     *  only real rows dispatch it; the blank Home background stays menu-less. Shared is out of scope for
+     *  now (empty/unimplemented) but the {path,is_dir,view} shape is deliberately view-agnostic so a
+     *  future "shared" view plugs in with one more `view` value. */
+    homeItemContext: { x: number; y: number; path: string; is_dir: boolean; view: HomeItemView };
     unpin: string;
     unfavorite: string;
     removeRecent: string;
@@ -61,6 +68,19 @@
     const i = name.lastIndexOf(".");
     return i > 0 ? name.slice(i + 1).toLowerCase() : "";
   };
+
+  /** Which segmented list a right-clicked row belongs to (CPE-1162). View-agnostic by design so a
+   *  future "shared" list is a one-word addition here + a `view` branch in App/ContextMenu. */
+  type HomeItemView = "recent" | "favorites" | "folders";
+  /** Open the row context menu (CPE-1162), mirroring the drive-tile handler above EXACTLY:
+   *  preventDefault + stopPropagation are BOTH required — without stopPropagation the same
+   *  `contextmenu` event bubbles to window, where ContextMenu.svelte's dismisser instantly closes the
+   *  just-opened menu (CPE-1157/1159 self-close race). */
+  function rowContext(e: MouseEvent, path: string, is_dir: boolean, view: HomeItemView) {
+    e.preventDefault();
+    e.stopPropagation();
+    dispatch("homeItemContext", { x: e.clientX, y: e.clientY, path, is_dir, view });
+  }
 </script>
 
 <div class="home">
@@ -162,7 +182,12 @@
             <span>{$t("home.name")}</span><span>{$t("home.dateOpened")}</span>
           </div>
           {#each recents as r (r.path)}
-            <button class="recent-row" on:dblclick={() => dispatch("openFile", r.path)} on:click={() => dispatch("select", r.path)}>
+            <button
+              class="recent-row"
+              on:dblclick={() => dispatch("openFile", r.path)}
+              on:click={() => dispatch("select", r.path)}
+              on:contextmenu={(e) => rowContext(e, r.path, false, "recent")}
+            >
               <span class="rname">
                 <Icon name={iconFor({ is_dir: false, extension: extOf(r.name) })} />
                 <span class="ellip">{r.name}</span>
@@ -197,6 +222,7 @@
               class="recent-row fav-row"
               on:dblclick={() => dispatch(f.is_dir ? "navigate" : "openFile", f.path)}
               on:click={() => dispatch(f.is_dir ? "navigate" : "openFile", f.path)}
+              on:contextmenu={(e) => rowContext(e, f.path, f.is_dir, "favorites")}
             >
               <span class="rname">
                 <Icon name={f.is_dir ? "folder" : iconFor({ is_dir: false, extension: extOf(f.name) })} />
@@ -231,6 +257,7 @@
               class="recent-row fav-row"
               on:dblclick={() => dispatch("navigate", d.path)}
               on:click={() => dispatch("navigate", d.path)}
+              on:contextmenu={(e) => rowContext(e, d.path, true, "folders")}
             >
               <span class="rname">
                 <Icon name="folder" />
