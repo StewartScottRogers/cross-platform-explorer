@@ -20,7 +20,8 @@ use crate::metadata_column::CellValue;
 /// One pickable metadata column for the picker UI: a stable string id (for persistence in
 /// [`crate::column_config`]), a friendly label, the typed [`MetaColumn`] to pass back into
 /// [`column_cells`]/the streaming command, and the lowercase extensions it applies to (so the picker can
-/// grey out a non-applicable row).
+/// grey out a non-applicable row). An **empty** `extensions` list is the "applies to all files" sentinel
+/// (CPE-1166): the column runs for every file and the picker must never grey it out.
 #[derive(Debug, Clone, Serialize)]
 #[cfg_attr(feature = "specta", derive(specta::Type))]
 pub struct AvailableColumn {
@@ -355,11 +356,18 @@ mod tests {
     #[test]
     fn available_columns_expose_id_label_and_extensions() {
         let cols = available_columns();
-        assert_eq!(cols.len(), 32);
+        assert_eq!(cols.len(), 36);
         let track = cols.iter().find(|c| c.id == "audio.track").expect("audio.track present");
         assert_eq!(track.column, MetaColumn::Audio(AudioColumn::Track));
         assert!(track.extensions.contains(&"mp3".to_string()));
         assert!(track.label.starts_with("Audio:"));
+
+        // An applies-to-all detector column (CPE-1166) is exposed with an EMPTY extension list — the
+        // sentinel the picker reads as "applies to every file" (never greyed out).
+        let true_type = cols.iter().find(|c| c.id == "detect.true_type").expect("detect.true_type present");
+        assert_eq!(true_type.column, MetaColumn::TrueType);
+        assert!(true_type.extensions.is_empty(), "an applies-to-all column carries no extensions");
+        assert_eq!(true_type.label, "True Type");
     }
 
     #[test]

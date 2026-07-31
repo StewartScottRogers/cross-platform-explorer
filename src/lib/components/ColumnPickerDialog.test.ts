@@ -100,4 +100,17 @@ describe("ColumnPickerDialog add/remove/reorder (CPE-1146)", () => {
     });
     expect(screen.getByTestId("active-empty")).toBeTruthy();
   });
+
+  // CPE-1166: an "applies to all files" column carries an EMPTY extensions list (the magic-byte
+  // detectors — true type / encoding / …). It must be offered exactly like any other column and never
+  // greyed out by an extension gate — its Add button is enabled while it isn't already active.
+  it("offers an applies-to-all column (empty extensions) with an enabled Add button", () => {
+    const withDetector: AvailableColumn[] = [
+      ...AVAILABLE,
+      { id: "detect.true_type", label: "True Type", column: "TrueType", extensions: [] },
+    ];
+    render(ColumnPickerDialog, { available: withDetector, active: [] });
+    expect(screen.getByTestId("available-list").textContent).toContain("True Type");
+    expect((screen.getByTestId("add-detect.true_type") as HTMLButtonElement).disabled).toBe(false);
+  });
 });

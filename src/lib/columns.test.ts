@@ -11,6 +11,8 @@ import {
   removeMetaColumn,
   moveMetaColumn,
   clampMetaWidths,
+  appliesToAllFiles,
+  columnAppliesTo,
   META_COL_MIN,
   META_COL_DEFAULT_WIDTH,
   type ActiveMetaColumn,
@@ -141,5 +143,25 @@ describe("clampMetaWidths (CPE-1146, CPE-1140-style load guard)", () => {
 
   it("leaves an already-valid width untouched (rounded)", () => {
     expect(clampMetaWidths([{ id: "dimensions", width: 110.4 }])[0].width).toBe(110);
+  });
+});
+
+// CPE-1166: the "applies to all files" sentinel — an empty `extensions` list means the column applies
+// to every file (the magic-byte detectors), so it must never be greyed out by the extension gate.
+describe("appliesToAllFiles / columnAppliesTo (CPE-1166)", () => {
+  it("treats an empty extensions list as applies-to-all", () => {
+    expect(appliesToAllFiles([])).toBe(true);
+    expect(appliesToAllFiles(["png", "jpg"])).toBe(false);
+  });
+
+  it("an applies-to-all column matches every extension (never greyed out)", () => {
+    expect(columnAppliesTo([], "png")).toBe(true);
+    expect(columnAppliesTo([], "exe")).toBe(true);
+    expect(columnAppliesTo([], "")).toBe(true);
+  });
+
+  it("an extension-scoped column matches only its listed extensions", () => {
+    expect(columnAppliesTo(["png", "jpg"], "png")).toBe(true);
+    expect(columnAppliesTo(["png", "jpg"], "pdf")).toBe(false);
   });
 });
