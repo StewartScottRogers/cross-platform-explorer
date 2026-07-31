@@ -2590,12 +2590,19 @@ async fn checkpoint_preview_revert(
     app: tauri::AppHandle,
     root: String,
     manifest_id: String,
+    session: Option<String>,
 ) -> Result<cpe_server::checkpoint_store::RevertPreview, String> {
     let ctx = server_ctx::TauriCtx::new(&app);
-    // No live caller passes a session yet (the restore panel that would is the deferred GUI cap
-    // CPE-1126) — `None` keeps today's conservative "every diverging path is drift" behaviour.
+    // `Some(session)` folds the watched agent's own touched-set so only paths changed OUTSIDE that
+    // agent count as drift (CPE-1151); `None` keeps the conservative "every diverging path is drift"
+    // behaviour for callers with no watched session.
     tauri::async_runtime::spawn_blocking(move || {
-        cpe_server::checkpoint_store::checkpoint_preview_revert(&ctx, &root, &manifest_id, None)
+        cpe_server::checkpoint_store::checkpoint_preview_revert(
+            &ctx,
+            &root,
+            &manifest_id,
+            session.as_deref(),
+        )
     })
     .await
     .map_err(|e| e.to_string())?

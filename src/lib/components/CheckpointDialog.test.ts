@@ -80,7 +80,7 @@ describe("CheckpointDialog (CPE-1125)", () => {
 
     await fireEvent.click(screen.getByTestId("preview-btn-m-2"));
 
-    expect(invokeMock).toHaveBeenCalledWith("checkpoint_preview_revert", { root: "/work/proj", manifestId: "m-2" });
+    expect(invokeMock).toHaveBeenCalledWith("checkpoint_preview_revert", { root: "/work/proj", manifestId: "m-2", session: null });
     const panel = await screen.findByTestId("preview-panel");
     expect(panel.textContent).toContain("drift 1");
     expect(await screen.findByTestId("drift-list")).toBeTruthy();

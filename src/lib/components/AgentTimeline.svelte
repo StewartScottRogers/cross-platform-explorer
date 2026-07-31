@@ -462,7 +462,10 @@
     revertPreviewError = "";
     revertPreview = null;
     try {
-      const res = await commands.checkpointPreviewRevert(currentPath, cp.manifest_id);
+      // Pass the watched session (CPE-1151) so the agent's OWN expected edits are folded out of the
+      // drift report — only changes made OUTSIDE that agent count as drift. No watched session →
+      // `null` → the backend's conservative "every diverging path is drift" behaviour is unchanged.
+      const res = await commands.checkpointPreviewRevert(currentPath, cp.manifest_id, sessionId || null);
       if (g !== revertPreviewGen) return;
       if (res.status === "ok") {
         revertPreview = res.data;
@@ -801,6 +804,12 @@
                 This overwrites, recreates, and deletes files under <strong>{currentPath}</strong> to match
                 <strong>{selectedCheckpoint.label || cpShortId(selectedCheckpoint.manifest_id)}</strong>. This cannot be undone.
               </p>
+              {#if revertPreview && revertPreview.drift_count > 0}
+                <p class="cp-confirm-drift" data-testid="checkpoint-confirm-drift">
+                  <strong>{revertPreview.drift_count} file{revertPreview.drift_count === 1 ? "" : "s"} changed since this checkpoint</strong>
+                  will be lost.
+                </p>
+              {/if}
               <div class="cp-confirm-actions">
                 <button class="cp-btn" data-testid="checkpoint-confirm-cancel" on:click={cancelCheckpointRevert}>Cancel</button>
                 <button class="cp-btn danger" data-testid="checkpoint-confirm-yes" disabled={reverting} on:click={doCheckpointRevert}>
@@ -1647,6 +1656,16 @@
     font-size: 11.5px;
     line-height: 1.45;
     color: var(--text, inherit);
+  }
+  .cp-confirm-drift {
+    margin: 0 0 8px;
+    padding: 6px 8px;
+    border: 1px solid var(--warn, #b8860b);
+    border-radius: 5px;
+    background: color-mix(in srgb, var(--warn, #b8860b) 16%, transparent);
+    color: var(--text, inherit);
+    font-size: 11.5px;
+    line-height: 1.4;
   }
   .cp-confirm-actions {
     display: flex;

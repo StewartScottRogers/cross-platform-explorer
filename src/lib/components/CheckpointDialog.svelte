@@ -69,7 +69,8 @@
     resetOutcome();
     loading = true; error = "";
     try {
-      preview = unwrap(await commands.checkpointPreviewRevert(path.trim(), cp.manifest_id));
+      // No watched session in this dialog → `null` keeps the conservative drift behaviour (CPE-1151).
+      preview = unwrap(await commands.checkpointPreviewRevert(path.trim(), cp.manifest_id, null));
     } catch (e) { error = String(e); } finally { loading = false; }
   }
 

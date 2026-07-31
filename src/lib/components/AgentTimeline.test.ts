@@ -709,6 +709,55 @@ describe("AgentTimeline checkpoint restore panel — two-step revert confirm gat
     expect(confirm.textContent).toContain(CURRENT_PATH); // the folder being overwritten
     expect(confirm.textContent).toMatch(/cannot be undone/i);
   });
+
+  // CPE-1151: echo the drift INSIDE the destructive confirm so a revert that would clobber drifted
+  // work is unmissable at the moment of the click — not only in the preview area above it.
+  const mockCheckpointCommandsWithPreview = (preview: Record<string, unknown>) => {
+    invokeMock.mockImplementation(async (cmd: string) => {
+      switch (cmd) {
+        case "replay_load":
+          return { replay: { events: [], bounds: [1000, 2000], summary: emptySummary }, baseline: null };
+        case "checkpoint_list":
+          return [CP];
+        case "checkpoint_preview_revert":
+          return preview;
+        case "checkpoint_revert":
+          return OUTCOME;
+        default:
+          return undefined;
+      }
+    });
+  };
+
+  it("drift echo: when drift_count > 0 the confirm restates the drift that will be lost", async () => {
+    mockCheckpointCommandsWithPreview({
+      ...PREVIEW,
+      drift_count: 3,
+      drift_paths: ["Z:/work/proj/x.ts", "Z:/work/proj/y.ts", "Z:/work/proj/z.ts"],
+    });
+    await mountAndOpenRestorePanel();
+
+    await fireEvent.click(screen.getByTestId("checkpoint-revert-btn")); // arm
+
+    const echo = screen.getByTestId("checkpoint-confirm-drift");
+    expect(echo).toBeTruthy();
+    expect(echo.textContent).toContain("3 files changed");
+    // The echo lives INSIDE the confirm box (the destructive moment), not just the preview above it.
+    expect(screen.getByTestId("checkpoint-confirm-revert").contains(echo)).toBe(true);
+    // The safety gate is untouched: still armed via confirm, "cannot be undone" wording intact.
+    expect(screen.getByTestId("checkpoint-confirm-yes")).toBeTruthy();
+    expect(screen.getByTestId("checkpoint-confirm-revert").textContent).toMatch(/cannot be undone/i);
+  });
+
+  it("drift echo: when drift_count === 0 the confirm shows NO drift line", async () => {
+    mockCheckpointCommandsWithPreview({ ...PREVIEW, drift_count: 0, drift_paths: [] });
+    await mountAndOpenRestorePanel();
+
+    await fireEvent.click(screen.getByTestId("checkpoint-revert-btn")); // arm
+
+    expect(screen.getByTestId("checkpoint-confirm-revert")).toBeTruthy(); // gate still present
+    expect(screen.queryByTestId("checkpoint-confirm-drift")).toBeNull(); // but no drift echo
+  });
 });
 
 describe("AgentTimeline Radar tab (CPE-1100)", () => {
