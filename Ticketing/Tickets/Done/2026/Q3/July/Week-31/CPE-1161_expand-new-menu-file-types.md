@@ -4,9 +4,10 @@ title: "Expand the New ▸ menu with a full set of file types (Markdown/JSON/YAM
 type: feature
 component: Frontend
 priority: medium
-status: Backlog
+status: Done
 tags: ready
 created: 2026-07-31
+closed: 2026-07-31
 ---
 
 ## Summary
