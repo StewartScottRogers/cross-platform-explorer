@@ -89,6 +89,20 @@ describe("ContextMenu drive branch (CPE-1158)", () => {
     expect(action).toHaveBeenCalledWith("drive-new-file");
   });
 
+  it("New ▸ offers the expanded typed file types and dispatches drive-new-file:<ext> (create AT the drive root) — CPE-1161", async () => {
+    const { component } = render(ContextMenu, { props: { ...driveMenu } });
+    const action = vi.fn();
+    component.$on("action", (e) => action(e.detail));
+
+    await openSubmenu("New");
+    await fireEvent.click(screen.getByText("CSS"));
+    expect(action).toHaveBeenCalledWith("drive-new-file:css");
+
+    await openSubmenu("New");
+    await fireEvent.click(screen.getByText("Compressed (zipped) Folder"));
+    expect(action).toHaveBeenCalledWith("drive-new-file:zip");
+  });
+
   it("Properties dispatches drive-properties (of the drive root)", async () => {
     const { component } = render(ContextMenu, { props: { ...driveMenu } });
     const action = vi.fn();

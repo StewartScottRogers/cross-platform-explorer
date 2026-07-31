@@ -701,6 +701,68 @@ fn create_file_impl(path: String, name: String) -> Result<String, String> {
     Ok(target.to_string_lossy().to_string())
 }
 
+/// Create a new file `name` inside `path` seeded with `content` (CPE-1161) — used by the New ▸ menu
+/// for stub templates that must be valid on creation (e.g. Rich Text `{\rtf1\ansi }`). Mirrors
+/// `create_file`'s validation and atomic `create_new` (fails rather than clobbering).
+#[tauri::command]
+#[cfg_attr(feature = "specta-bindings", specta::specta)]
+async fn create_file_with_content(
+    app: tauri::AppHandle,
+    path: String,
+    name: String,
+    content: String,
+) -> Result<String, String> {
+    note_app_op(&app, || vec![Path::new(&path).join(name.trim()).to_string_lossy().into_owned()]);
+    tauri::async_runtime::spawn_blocking(move || create_file_with_content_impl(path, name, content))
+        .await.map_err(|e| e.to_string())?
+}
+
+fn create_file_with_content_impl(path: String, name: String, content: String) -> Result<String, String> {
+    cpe_server::fs_route::require_local(&path)?;
+    let name = name.trim();
+    if name.is_empty() {
+        return Err("Name cannot be empty".to_string());
+    }
+    valid_entry_name(name)?;
+    let target = Path::new(&path).join(name);
+    if target.exists() {
+        return Err(format!("\"{name}\" already exists"));
+    }
+    use std::io::Write;
+    let mut f = fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&target)
+        .map_err(|e| e.to_string())?;
+    f.write_all(content.as_bytes()).map_err(|e| e.to_string())?;
+    Ok(target.to_string_lossy().to_string())
+}
+
+/// Create a new *valid empty* `.zip` archive `name` inside `path` (CPE-1161) — the New ▸ menu's
+/// Compressed (zipped) Folder. An empty file is not a valid zip, so the actual archive writing is
+/// delegated to `cpe-server` (where the `zip` crate lives); validation mirrors `create_file`.
+#[tauri::command]
+#[cfg_attr(feature = "specta-bindings", specta::specta)]
+async fn create_empty_zip(app: tauri::AppHandle, path: String, name: String) -> Result<String, String> {
+    note_app_op(&app, || vec![Path::new(&path).join(name.trim()).to_string_lossy().into_owned()]);
+    tauri::async_runtime::spawn_blocking(move || create_empty_zip_impl(path, name))
+        .await.map_err(|e| e.to_string())?
+}
+
+fn create_empty_zip_impl(path: String, name: String) -> Result<String, String> {
+    cpe_server::fs_route::require_local(&path)?;
+    let name = name.trim();
+    if name.is_empty() {
+        return Err("Name cannot be empty".to_string());
+    }
+    valid_entry_name(name)?;
+    let target = Path::new(&path).join(name);
+    if target.exists() {
+        return Err(format!("\"{name}\" already exists"));
+    }
+    cpe_server::archive::create_empty_zip(&target.to_string_lossy())
+}
+
 /// Write UTF-8 text back to a file, replacing its contents — for the content
 /// editor. Returns the new byte length.
 #[tauri::command]
@@ -7291,6 +7353,8 @@ pub fn run() {
             open_terminal,
             run_command,
             create_file,
+            create_file_with_content,
+            create_empty_zip,
             #[cfg(feature = "sidecar-platform")]
             sidecar_registry_ids,
             #[cfg(feature = "sidecar-platform")]
@@ -8008,6 +8072,8 @@ pub fn export_bindings(out: &std::path::Path) -> Result<(), String> {
         open_terminal,
         run_command,
         create_file,
+        create_file_with_content,
+        create_empty_zip,
         sidecar_registry_ids,
         sidecar_consent_state,
         sidecar_set_consent,
@@ -8586,6 +8652,45 @@ mod tests {
         fs::write(d.join("note.txt"), b"important").unwrap();
         assert!(create_file_impl(p, "note.txt".into()).is_err());
         assert_eq!(fs::read_to_string(d.join("note.txt")).unwrap(), "important");
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn create_file_with_content_writes_the_stub() {
+        let d = scratch("create_file_content");
+        let created = create_file_with_content_impl(
+            d.to_string_lossy().to_string(),
+            "New Rich Text Document.rtf".into(),
+            "{\\rtf1\\ansi }".into(),
+        )
+        .unwrap();
+        assert!(std::path::Path::new(&created).is_file());
+        assert_eq!(fs::read_to_string(&created).unwrap(), "{\\rtf1\\ansi }");
+        // Won't clobber an existing file.
+        assert!(create_file_with_content_impl(
+            d.to_string_lossy().to_string(),
+            "New Rich Text Document.rtf".into(),
+            "other".into(),
+        )
+        .is_err());
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn create_empty_zip_makes_a_valid_openable_archive() {
+        let d = scratch("create_empty_zip");
+        let created = create_empty_zip_impl(
+            d.to_string_lossy().to_string(),
+            "New Compressed (zipped) Folder.zip".into(),
+        )
+        .unwrap();
+        assert!(std::path::Path::new(&created).is_file());
+        // A valid empty archive is the 22-byte End-Of-Central-Directory record (signature PK\x05\x06),
+        // NOT a zero-byte file. cpe-server's own test opens it with the zip reader; here we assert the
+        // structure the app hands the OS. (The `zip` crate lives in cpe-server, not src-tauri.)
+        let bytes = fs::read(&created).unwrap();
+        assert_eq!(bytes.len(), 22, "empty zip is a single EOCD record");
+        assert_eq!(&bytes[0..4], &[0x50, 0x4b, 0x05, 0x06], "EOCD signature");
         let _ = fs::remove_dir_all(&d);
     }
 

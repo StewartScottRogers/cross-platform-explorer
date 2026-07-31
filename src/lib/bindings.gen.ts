@@ -1530,6 +1530,32 @@ async createFile(path: string, name: string) : Promise<Result<string, string>> {
 }
 },
 /**
+ * Create a new file `name` inside `path` seeded with `content` (CPE-1161) — used by the New ▸ menu
+ * for stub templates that must be valid on creation (e.g. Rich Text `{\rtf1\ansi }`). Mirrors
+ * `create_file`'s validation and atomic `create_new` (fails rather than clobbering).
+ */
+async createFileWithContent(path: string, name: string, content: string) : Promise<Result<string, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("create_file_with_content", { path, name, content }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * Create a new *valid empty* `.zip` archive `name` inside `path` (CPE-1161) — the New ▸ menu's
+ * Compressed (zipped) Folder. An empty file is not a valid zip, so the actual archive writing is
+ * delegated to `cpe-server` (where the `zip` crate lives); validation mirrors `create_file`.
+ */
+async createEmptyZip(path: string, name: string) : Promise<Result<string, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("create_empty_zip", { path, name }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
  * List the ids of sidecars registered in the bundled + user registry directories.
  */
 async sidecarRegistryIds() : Promise<string[]> {

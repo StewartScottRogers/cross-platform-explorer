@@ -76,6 +76,42 @@ describe("ContextMenu Copy to / Move to folder (CPE-355)", () => {
     expect(action).toHaveBeenCalledWith("new-file-in");
   });
 
+  it("New ▸ offers the expanded file types and dispatches new-file:<ext> on a FILE item (CPE-1161)", async () => {
+    const { component } = render(ContextMenu, { props: { ...base, folderSelected: false } });
+    const action = vi.fn();
+    component.$on("action", (e) => action(e.detail));
+
+    await openSubmenu("New");
+    await fireEvent.click(screen.getByText("Markdown"));
+    expect(action).toHaveBeenCalledWith("new-file:md");
+
+    await openSubmenu("New");
+    await fireEvent.click(screen.getByText("JSON"));
+    expect(action).toHaveBeenCalledWith("new-file:json");
+
+    await openSubmenu("New");
+    await fireEvent.click(screen.getByText("Python"));
+    expect(action).toHaveBeenCalledWith("new-file:py");
+
+    await openSubmenu("New");
+    await fireEvent.click(screen.getByText("Compressed (zipped) Folder"));
+    expect(action).toHaveBeenCalledWith("new-file:zip");
+  });
+
+  it("New ▸ on a FOLDER item dispatches new-file-in:<ext> (create the typed file inside it) — CPE-1161", async () => {
+    const { component } = render(ContextMenu, { props: { ...base, folderSelected: true } });
+    const action = vi.fn();
+    component.$on("action", (e) => action(e.detail));
+
+    await openSubmenu("New");
+    await fireEvent.click(screen.getByText("Rich Text"));
+    expect(action).toHaveBeenCalledWith("new-file-in:rtf");
+
+    await openSubmenu("New");
+    await fireEvent.click(screen.getByText("YAML"));
+    expect(action).toHaveBeenCalledWith("new-file-in:yaml");
+  });
+
   it("shows Compare files only when comparable, and dispatches compare (CPE-418)", async () => {
     const { component } = render(ContextMenu, { props: { ...base, selectionCount: 2, comparable: true } });
     const action = vi.fn();
@@ -143,6 +179,20 @@ describe("ContextMenu empty-area Windows 11 parity (CPE-1153)", () => {
     await openSubmenu("New");
     await fireEvent.click(screen.getByText("Text file"));
     expect(action).toHaveBeenCalledWith("new-file");
+  });
+
+  it("New ▸ offers the expanded typed file types and dispatches new-file:<ext> (CPE-1161)", async () => {
+    const { component } = render(ContextMenu, { props: { ...empty } });
+    const action = vi.fn();
+    component.$on("action", (e) => action(e.detail));
+
+    await openSubmenu("New");
+    await fireEvent.click(screen.getByText("HTML"));
+    expect(action).toHaveBeenCalledWith("new-file:html");
+
+    await openSubmenu("New");
+    await fireEvent.click(screen.getByText("Compressed (zipped) Folder"));
+    expect(action).toHaveBeenCalledWith("new-file:zip");
   });
 
   it("View ▸ opens, checkmarks the current mode, and selecting a mode dispatches view:<mode>", async () => {
