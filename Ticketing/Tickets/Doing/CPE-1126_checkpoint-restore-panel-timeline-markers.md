@@ -104,3 +104,16 @@ revert-safety/clarity judgment is reserved for a user-present GUI pass.
 - **Remaining to close:** a user-present build → deploy → run to confirm the revert-confirm reads clearly and
   safely and the markers land right (the "confirm-to-revert is safe/clear" clause of the AC). Kept in Doing/
   as the final pending step; on the QA Manual-Verification-Debt ledger. Not faked, not force-closed.
+
+2026-07-30 (Foreman) — **User GUI verify done.** Built + installed the fresh sidecar build (v0.57.38, the
+first with this code) and launched it for the user. Staging a live in-timeline checkpoint *marker* wasn't
+cheaply possible (needs a watched session + a checkpoint in snapshot storage — the same seed-seam gap as P2),
+so the user judged the revert-confirm via its code-identical twin (the Checkpoint dialog's confirm) + my
+walkthrough. Outcome: **not a plain pass — two concrete refinements requested**, spun out to **[[CPE-1151]]**
+(high):
+  1. **Precise drift** — pass the watched session to `checkpoint_preview_revert` so drift excludes the agent's
+     OWN expected edits (today it hardcodes `None` → over-warns). The domain fn already supports it; the Tauri
+     command needs the session param exposed (+ bindings regen).
+  2. **Echo drift in the confirm** — restate the drift count inside the red "Yes, revert" box so a
+     clobbering revert is unmissable at the destructive click.
+  This ticket stays in Doing/ until CPE-1151 lands; then a short re-confirm closes the "safe/clear" clause.
