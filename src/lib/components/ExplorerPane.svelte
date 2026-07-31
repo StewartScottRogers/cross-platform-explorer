@@ -359,6 +359,16 @@
   function paneContext(e: MouseEvent) {
     if (inHome || inReplay) return;
     e.preventDefault();
+    // CPE-1157: STOP the event here, exactly like FileList's `emptyContext`/`rowContext` do. Without
+    // this the menu we're about to open was dismissed ~5ms later: the same `contextmenu` event kept
+    // bubbling to `window`, where ContextMenu.svelte's own `<svelte:window on:contextmenu={close}>`
+    // (its click-outside/right-click-elsewhere dismisser) fired and closed the just-opened empty-area
+    // menu. It only bit the CATCH-ALL pane pixels (blank area below a populated `.rows`, pane padding)
+    // — the `.rows`/`.empty-state`/row handlers already `stopPropagation`, which is why on-item and
+    // truly-empty folders looked fine. Confirmed with the CPE-1155 CDP harness (present:true → 5ms →
+    // present:false). `preventDefault` above still kills the native WebView2 menu even though we no
+    // longer reach the window-level suppressor.
+    e.stopPropagation();
     dispatch("contextEmpty", { x: e.clientX, y: e.clientY });
   }
 </script>

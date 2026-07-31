@@ -40,22 +40,45 @@ Combine with the existing off-screen, non-focused **test-mode window** ([[automa
 so the whole run is invisible + non-intrusive.
 
 ## Acceptance Criteria
-- [ ] A reusable `gui-smoke` helper (e.g. `mouse.ts`) exposing `click(sel)`, `rightClick(sel|point)`,
+- [x] A reusable `gui-smoke` helper (e.g. `mouse.ts`) exposing `click(sel)`, `rightClick(sel|point)`,
       `scroll(sel, dy)`, `hover(sel)`, and `dragTo(from, to)` implemented via **CDP input injection** (or an
       equivalent WebView2 input-injection API), verified to NOT move the physical cursor while running.
-- [ ] A proof spec uses it to **reproduce the CPE-1154 class of bug**: a real right-click on an empty folder's
+      → `gui-smoke/lib/mouse.ts` (also `doubleClick` + `cdp`/`cdpAvailable`).
+- [x] A proof spec uses it to **reproduce the CPE-1154 class of bug**: a real right-click on an empty folder's
       blank pane asserts the app's `.ctx` opens and the native menu does not — i.e. the helper catches what the
-      synthetic-event check missed.
-- [ ] Documented in `gui-smoke/README.md` + a note in the QA charter (`.claude/qa-architecture/`): "for mouse
+      synthetic-event check missed. → `specs/populated-whitespace.smoke.ts` (empty-folder case), and
+      `specs/context-menu.smoke.ts` converted to the helper.
+- [x] Documented in `gui-smoke/README.md` + a note in the QA charter (`.claude/qa-architecture/`): "for mouse
       behaviour, use `mouse.ts` (CDP, non-grabbing), NOT `browser.action('pointer')` (grabs the cursor) and NOT
       bare `dispatchEvent` (unfaithful)." Update existing specs that use grabbing pointer actions to the helper
-      where practical.
-- [ ] Runs headless/non-blocking in CI (continue-on-error, CPE-1048) the same as the rest of gui-smoke; a
-      short local run demonstrates it works while the user's real cursor stays put.
-- [ ] If CDP mouse injection turns out to be unavailable/unreliable through tauri-driver's msedgedriver on
-      Windows, document the finding and the best available fallback (e.g. a Windows `SendInput` to the specific
-      off-screen window, or WebView2's `CoreWebView2` input APIs via a test seam) rather than silently
-      reverting to cursor-grabbing actions.
+      where practical. → README "Faithful mouse input" section + charter bullet; `context-menu.smoke.ts` converted.
+- [x] Runs headless/non-blocking in CI (continue-on-error, CPE-1048) the same as the rest of gui-smoke; a
+      short local run demonstrates it works while the user's real cursor stays put. → picked up by the
+      `specs/**/*.smoke.ts` glob; local run shows OS cursor byte-identical before/after `rightClick`.
+- [x] If CDP mouse injection turns out to be unavailable/unreliable through tauri-driver's msedgedriver on
+      Windows, document the finding and the best available fallback (...) rather than silently
+      reverting to cursor-grabbing actions. → CDP **is** available here (`cdpAvailable()` → true); documented,
+      and `cdpAvailable()` reports the negative case if a future driver drops the endpoint.
+
+## Work Log
+- 2026-07-31 (Worker, workshift): Built `gui-smoke/lib/mouse.ts` — CDP `Input.dispatchMouseEvent` /
+  `Input.dispatchMouseWheelEvent` via msedgedriver's vendor endpoint
+  `POST /session/:id/chromium/send_command_and_get_result`, surfaced by WebdriverIO as
+  `browser.sendCommandAndGetResult`. (`browser.cdp(...)` — the puppeteer-backed variant the ticket
+  mentioned — is NOT wired for wry here; the vendor endpoint is.) Helpers: `click`, `rightClick`
+  (selector OR explicit `{x,y}` point), `doubleClick`, `hover`, `scroll`, `dragTo`, plus `cdp` +
+  `cdpAvailable`.
+- **Runtime verdict — CDP mouse injection WORKS and is NON-grabbing here.** Verified locally against a
+  fresh CLI release build (Edge/WebView2 150 + msedgedriver 150, classic WebDriver against wry):
+  `cdpAvailable()` → true; a real CDP right-click on a `.row` opens the app's item menu and on blank
+  pane pixels fires the pane `contextmenu`; and the **physical OS cursor position (read via PowerShell
+  `[System.Windows.Forms.Cursor]::Position`) was byte-identical before and after** every `rightClick`
+  (`3521,1817 → 3521,1817`). CDP input never moves the OS pointer by design and the tauri-driver window
+  can stay unfocused/off-screen.
+- Proof/regression spec `specs/populated-whitespace.smoke.ts` uses the helper to reproduce the CPE-1154
+  class faithfully AND drives the CPE-1157 diagnosis/regression. Converted `context-menu.smoke.ts` off
+  `browser.action('pointer')` to `mouse.ts`. `npm run check` 0/0; `gui-smoke` typecheck clean; both
+  specs green (7 passing) against the built app.
 
 ## Notes
 - Epic CPE-579 (self-maintaining quality infra). This is the QA Architect making the whole app more

@@ -71,6 +71,18 @@ Grounded in what the repo already runs (extend these before inventing new stacks
     launches the window itself unfocused (`.focused(false)` in `lib.rs`'s `setup()`) so it never steals
     OS-level mouse/keyboard focus from whatever the user is actively doing. Both flags are launch-only
     and cost nothing when absent.
+  - **Faithful mouse input — use `gui-smoke/lib/mouse.ts` (CDP, NON-grabbing) — CPE-1155.** For any
+    mouse behaviour (click / right-click-context-menu / hover / scroll / drag), drive it with
+    `mouse.ts`, which injects via the Chrome/Edge DevTools Protocol (`Input.dispatchMouseEvent` /
+    `Input.dispatchMouseWheelEvent`). CDP goes through the **real** input pipeline (true hit-testing,
+    native context menu, real event order) yet **never moves the OS cursor** — so mouse tests run in the
+    background while the user keeps working, and the tauri-driver window stays unfocused. **Do NOT** use
+    `browser.action('pointer')` (grabs/hijacks input — violates the off-screen convention above) and
+    **do NOT** use a bare `el.dispatchEvent(new MouseEvent(...))` (unfaithful — bypasses hit-testing;
+    that blind spot is exactly how the CPE-1154 native-menu leak and then CPE-1157 slipped past a
+    "passing" synthetic check). Verified on Windows (Edge/WebView2 150, msedgedriver 150, classic
+    WebDriver against wry): CDP injection reaches the wry webview and the physical cursor provably does
+    not move. See `gui-smoke/README.md` → "Faithful mouse input".
 - **Visual / theme regression** — screenshot-diff the GUI (light/dark, menus per `docs/design/MENUS.md`,
   tabs per `TABS.md`) so appearance rules are checked without human eyes.
 - **Smoke-install job** — a CI job that installs the **sidecar build** artifact, launches it, and asserts

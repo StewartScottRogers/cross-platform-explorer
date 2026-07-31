@@ -12,6 +12,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { $, $$, browser } from "@wdio/globals";
 import { snap, snapFailure } from "../lib/snap.js";
+import { rightClick } from "../lib/mouse.js"; // CPE-1155: non-grabbing CDP right-click
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const STATE_FILE = path.resolve(__dirname, "..", ".smoke-state.json");
@@ -60,20 +61,19 @@ describe("CPE-1154 — headless GUI smoke: real right-click never leaks the nati
 
     // Aim at a genuinely BLANK pane pixel: near the TOP of the scroll pane, where the vertically
     // centred `.empty-state` icon/text is NOT — this is exactly the region that used to leak the
-    // native menu. Absolute viewport coords (getLocation is viewport-relative), so the pointer action
-    // lands on the same spot a user's cursor would.
+    // native menu. Absolute viewport coords (getLocation is viewport-relative), so the click lands on
+    // the same spot a user's cursor would.
+    //
+    // CPE-1155: driven via the non-grabbing CDP `rightClick` helper (was `browser.action('pointer')`,
+    // which grabs input). CDP injects a faithful right-click — real hit-testing + native contextmenu —
+    // without moving the OS cursor, so this runs in the background without hijacking the machine.
     const pane = await $(".filelist-pane");
     const loc = await pane.getLocation();
     const size = await pane.getSize();
     const x = Math.round(loc.x + size.width / 2);
     const y = Math.round(loc.y + 12);
 
-    await browser
-      .action("pointer", { parameters: { pointerType: "mouse" } })
-      .move({ x, y, origin: "viewport" })
-      .down({ button: 2 }) // 2 = secondary / right button
-      .up({ button: 2 })
-      .perform();
+    await rightClick({ x, y });
 
     // The app's custom context menu appears at the click.
     const ctx = await $(".ctx");
