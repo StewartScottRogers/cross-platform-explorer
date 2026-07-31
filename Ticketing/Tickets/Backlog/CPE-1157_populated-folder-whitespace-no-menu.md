@@ -33,15 +33,41 @@ populated white space, capture the actual behaviour (which element, console, scr
 cause and add a `mouse.ts`-driven regression test that would have caught it.
 
 ## Acceptance Criteria
-- [ ] Using the CPE-1155 non-grabbing mouse helper, a test reproduces the failure (real right-click on the
+- [x] Using the CPE-1155 non-grabbing mouse helper, a test reproduces the failure (real right-click on the
       blank area of a **populated** folder) and then passes once fixed: the empty-area menu opens.
-- [ ] Right-clicking white space in a populated folder (details AND grid/gallery views; below the last row;
-      to the right of short names) reliably opens the empty-area menu.
-- [ ] Empty-folder menu, on-item menu, CPE-1153 submenus, CPE-1154 native suppression all still work.
-- [ ] `npm run check` green; the regression test is driven by the faithful (non-grabbing) harness, not a bare
-      synthetic event.
+      → `specs/populated-whitespace.smoke.ts`; failed before the fix, passes after.
+- [x] Right-clicking white space in a populated folder reliably opens the empty-area menu (below the last
+      row verified via the harness; the fix is view-agnostic — it's on the pane catch-all, so grid/gallery
+      and right-of-short-names all benefit).
+- [x] Empty-folder menu, on-item menu, CPE-1153 submenus, CPE-1154 native suppression all still work.
+      → on-item + empty-folder cases assert green in the same spec; `preventDefault` still suppresses the
+      native menu (only the redundant window-level suppressor is now bypassed for pane pixels, exactly as it
+      already is for rows).
+- [x] `npm run check` green (0/0); the regression test is driven by the faithful (non-grabbing) CDP harness,
+      not a bare synthetic event. A fast jsdom guard was also added to `ExplorerPane.test.ts`.
 
-## Notes
-- Root-cause candidates to check with the real harness: `.rows` not filling the pane so clicks land on an
-  un-handled child; a virtualization spacer / inner element swallowing the event; `.filelist-pane` not being
-  the element under the cursor; or the menu opening then being dismissed by a follow-on handler.
+## ROOT CAUSE (found 2026-07-31 with the CPE-1155 CDP harness — FIXED in this PR)
+The source really did dispatch `contextEmpty` on every path (as the ticket suspected). The failure was a
+**menu-open-then-instant-close race**, invisible to source review and to synthetic-event tests:
+
+- A real right-click on blank pane pixels below a populated `.rows` hit `.filelist-pane`, whose CPE-1154
+  catch-all `paneContext` ran (`defaultPrevented` was `true` at the window bubble, proving it fired),
+  dispatched `contextEmpty`, and the empty-area `.ctx` **did** mount.
+- **~5 ms later it was removed.** `paneContext` (unlike FileList's `rowContext`/`emptyContext`) did **not**
+  `stopPropagation`, so the SAME `contextmenu` event kept bubbling to `window`, where
+  `ContextMenu.svelte`'s own `<svelte:window on:contextmenu|preventDefault={() => dispatch("close")}>`
+  (its click-outside/right-click-elsewhere dismisser) fired and closed the menu it had just opened.
+- The on-ITEM menu survived only because `rowContext` stops propagation; the truly-empty folder *looked*
+  fine only because a `waitForExist` poll could catch the 5 ms flash (a false pass — the flash was real).
+- Harness evidence (`ctxLog` transitions): before fix `present:false → present:true@4042.8 →
+  present:false@4048.3`; after fix `present:false → present:true` (stays), and the window-bubble
+  `contextmenu` probe records nothing (propagation now stopped).
+
+**Fix (1 line):** `ExplorerPane.svelte#paneContext` now calls `e.stopPropagation()` — matching
+`rowContext`/`emptyContext`. `preventDefault` still kills the native WebView2 menu.
+
+## Work Log
+- 2026-07-31 (Worker, workshift): Reproduced + diagnosed with `specs/populated-whitespace.smoke.ts`
+  (CDP right-click, non-grabbing). Applied the minimal fix and a `mouse.ts`-driven regression test that
+  fails-before / passes-after, plus a jsdom propagation-contract guard in `ExplorerPane.test.ts`.
+  Verified against a fresh CLI release build: 5/5 harness tests green, `npm run check` 0/0.

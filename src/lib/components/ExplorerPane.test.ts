@@ -121,6 +121,28 @@ describe("ExplorerPane pane-wide right-click → empty-area menu (CPE-1154)", ()
     expect(contextEmpty).toHaveBeenCalledWith({ x: 3, y: 4 });
   });
 
+  // CPE-1157: `paneContext` MUST stopPropagation, or the same contextmenu keeps bubbling to `window`
+  // where ContextMenu.svelte's own `<svelte:window on:contextmenu={close}>` dismisses the menu it just
+  // opened (confirmed with the CPE-1155 CDP harness: the empty-area menu flashed open then closed ~5ms
+  // later on blank pane pixels of a POPULATED folder). The synthetic-event coverage above never caught
+  // this because a component test has no window-level dismisser — so assert the propagation contract
+  // directly: a listener above the pane must NOT receive the event.
+  it("a populated folder: the blank-pane right-click STOPS propagation (so the window dismisser can't close the menu) — CPE-1157", () => {
+    const { container } = render(ExplorerPane, {
+      selection: emptySelection(),
+      entries: [entry()],
+    });
+    const reachedWindow = vi.fn();
+    window.addEventListener("contextmenu", reachedWindow);
+    try {
+      const ev = rightClick(container.querySelector(".filelist-pane")!, 3, 4);
+      expect(ev.defaultPrevented).toBe(true); // native menu still suppressed
+      expect(reachedWindow).not.toHaveBeenCalled(); // propagation stopped at the pane
+    } finally {
+      window.removeEventListener("contextmenu", reachedWindow);
+    }
+  });
+
   it("Home is NOT a folder: the pane catch-all never opens the empty-area menu there", () => {
     const { container, component } = render(ExplorerPane, {
       selection: emptySelection(),

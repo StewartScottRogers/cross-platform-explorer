@@ -178,6 +178,55 @@ surface the same way a user does, assert something real about it, `snap()` inlin
 the PNG lands in `.screenshots/` for a reviewer — human or, per CPE-1148 Part B, a future
 Visual-Critic sub-agent — to open directly.
 
+## Faithful mouse input — `lib/mouse.ts` (CDP, NON-grabbing) — CPE-1155
+
+For any test that needs real **mouse behaviour** — click, right-click (context menu), hover, scroll,
+drag — use `gui-smoke/lib/mouse.ts`, **not** `browser.action('pointer')` and **not** a bare
+`dispatchEvent`.
+
+```ts
+import { rightClick, click, hover, scroll, dragTo, doubleClick, cdpAvailable } from "../lib/mouse.js";
+
+await rightClick(".filelist-pane");        // selector → centre of the first match
+await rightClick({ x: 922, y: 523 });      // or an explicit viewport point (blank pane pixels)
+await click(".some-button");
+await hover(".menu-item");                  // fires mousemove/:hover without moving the OS cursor
+await scroll(".filelist-pane", 400);        // wheel down 400px
+await dragTo(".row-a", ".row-b");
+```
+
+**How it works.** Each helper resolves the target to viewport CSS-pixel coordinates
+(`getBoundingClientRect` via `browser.execute`) and dispatches through the **Chrome/Edge DevTools
+Protocol** — `Input.dispatchMouseEvent` (`mousePressed`/`mouseReleased`/`mouseMoved`, `button:'right'`
+for the context menu) and `Input.dispatchMouseWheelEvent`. These inject through the browser's **real**
+input pipeline: true hit-testing, native context menu, real event order — as faithful as a physical
+click — but **they never move the OS pointer**. msedgedriver exposes CDP over the vendor endpoint
+`POST /session/:id/chromium/send_command_and_get_result`, surfaced by WebdriverIO as
+`browser.sendCommandAndGetResult(cmd, params)` (`mouse.ts`'s `cdp()` uses this; `browser.cdp(...)` —
+the puppeteer-backed variant — is NOT wired for wry here, so we use the vendor endpoint).
+
+**Why not the alternatives (the exact bug this closes):**
+- `browser.action('pointer')…` — WebDriver's native Actions API; it moves/grabs input and hijacks an
+  interactive machine ([[automation-must-not-hijack-screen]]).
+- `el.dispatchEvent(new MouseEvent('contextmenu'))` — non-grabbing but **unfaithful**: it goes
+  straight to a chosen node's handler, bypassing hit-testing and native behaviour. This is exactly how
+  the CPE-1154 native-menu leak (and then CPE-1157) escaped a "passing" synthetic-event check.
+
+**Verified here (CPE-1155), Edge/WebView2 150 + msedgedriver 150, classic WebDriver against wry:**
+- `cdpAvailable()` → **true**. CDP `Input.*` injection works through msedgedriver and reaches the wry
+  WebView2 page (a real right-click on a `.row` opens the app's item menu; on blank pane pixels it
+  fires the pane's `contextmenu`).
+- **Non-grabbing confirmed empirically** — the OS cursor position (read via PowerShell
+  `[System.Windows.Forms.Cursor]::Position`) was byte-identical before and after a `rightClick`. CDP
+  input never touches the physical pointer by design, and the tauri-driver window can stay unfocused.
+- If a future driver drops the vendor endpoint, `cdpAvailable()` returns false so a spec can report
+  the finding instead of failing opaquely (per the CPE-1155 fallback AC).
+
+`specs/populated-whitespace.smoke.ts` is the proof + regression spec: it drives a real CDP right-click
+on the blank area of a **populated** folder (the CPE-1157 repro), asserts the empty-area menu opens,
+and carries a MutationObserver/`contextmenu` probe that pinned CPE-1157's root cause (menu opened then
+closed ~5 ms later because `paneContext` didn't `stopPropagation`).
+
 ## Follow-ups (not this ticket — see CPE-1045's "Follow-ups" section)
 
 - **Linux CI leg**: add an `ubuntu-latest` matrix arm using `webkit2gtk-driver` + `xvfb-run` (no
