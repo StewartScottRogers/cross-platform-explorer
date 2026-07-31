@@ -1,7 +1,9 @@
 <script lang="ts">
   import { createEventDispatcher, onMount } from "svelte";
   import Icon from "./Icon.svelte";
+  import Submenu from "./Submenu.svelte";
   import { t } from "../i18n";
+  import type { ViewMode, SortKey, SortDir } from "../types";
 
   export let x = 0;
   export let y = 0;
@@ -32,6 +34,17 @@
   /** True when the selection contains at least one image file (of 2+ selected) — enables "Batch media…"
    *  (CPE-1093). The dialog itself pre-filters any non-image files out of the eligible set. */
   export let mediaEligible = false;
+  /** Current view mode — the empty-area View ▸ submenu checkmarks it (CPE-1153). Single source of
+   *  truth: the same `view` state the toolbar/CommandBar drive; selecting here dispatches `view:<mode>`. */
+  export let view: ViewMode = "details";
+  /** Current sort key + direction — Sort by ▸ checkmarks them; selecting dispatches `sort:<key>` /
+   *  `sortdir:<dir>` into the same state the column headers use (CPE-1153). */
+  export let sortKey: SortKey = "name";
+  export let sortDir: SortDir = "asc";
+  /** Whether the undo stack has anything to undo — gates the empty-area Undo row (CPE-1153). */
+  export let canUndo = false;
+  /** Human label of the top undo entry (e.g. "Rename to report.txt"); appended after "Undo" when set. */
+  export let undoLabel = "";
 
   const dispatch = createEventDispatcher<{
     action: string;
@@ -192,18 +205,74 @@
       <Icon name="book" size={15} /> Documents for this view
     </button>
   {:else}
-    <button class="row" role="menuitem" on:click={() => run("new-folder")}>
-      <Icon name="folder" size={15} /> {$t('ctx.newFolder')}
-      <span class="hint">Ctrl+Shift+N</span>
-    </button>
-    <button class="row" role="menuitem" on:click={() => run("new-file")}>
-      <Icon name="document" size={15} /> {$t('ctx.newFile')}
-    </button>
+    <!-- New ▸ — Windows 11 shape: create actions live behind a submenu (CPE-1153). -->
+    <Submenu label={$t('cmd.new')} icon="plus">
+      <button class="row" role="menuitem" on:click={() => run("new-folder")}>
+        <Icon name="folder" size={15} /> {$t('ctx.folder')}
+        <span class="hint">Ctrl+Shift+N</span>
+      </button>
+      <button class="row" role="menuitem" on:click={() => run("new-file")}>
+        <Icon name="document" size={15} /> {$t('ctx.textFile')}
+      </button>
+    </Submenu>
+    <div class="sep" role="separator" />
     <button class="row" role="menuitem" disabled={!canPaste} on:click={() => run("paste")}>
       <Icon name="paste" size={15} /> {$t('ctx.paste')}
       <span class="hint">Ctrl+V</span>
     </button>
-    <div class="sep" />
+    <button class="row" role="menuitem" disabled={!canUndo} on:click={() => run("undo")}>
+      <Icon name="back" size={15} /> {$t('ctx.undo')}{undoLabel ? ` ${undoLabel}` : ''}
+      <span class="hint">Ctrl+Z</span>
+    </button>
+    <div class="sep" role="separator" />
+    <!-- View ▸ — drives the SAME `view` state the toolbar/CommandBar use; current mode checkmarked. -->
+    <Submenu label={$t('cmd.view')} icon="view">
+      <button class="row" role="menuitemradio" aria-checked={view === 'details'} on:click={() => run("view:details")}>
+        <Icon name="details" size={15} /> {$t('view.details')}
+        {#if view === 'details'}<span class="check"><Icon name="check" size={14} /></span>{/if}
+      </button>
+      <button class="row" role="menuitemradio" aria-checked={view === 'list'} on:click={() => run("view:list")}>
+        <Icon name="sort" size={15} /> {$t('view.list')}
+        {#if view === 'list'}<span class="check"><Icon name="check" size={14} /></span>{/if}
+      </button>
+      <button class="row" role="menuitemradio" aria-checked={view === 'icons'} on:click={() => run("view:icons")}>
+        <Icon name="view" size={15} /> {$t('view.icons')}
+        {#if view === 'icons'}<span class="check"><Icon name="check" size={14} /></span>{/if}
+      </button>
+      <button class="row" role="menuitemradio" aria-checked={view === 'gallery'} on:click={() => run("view:gallery")}>
+        <Icon name="gallery" size={15} /> {$t('view.gallery')}
+        {#if view === 'gallery'}<span class="check"><Icon name="check" size={14} /></span>{/if}
+      </button>
+    </Submenu>
+    <!-- Sort by ▸ — drives the SAME `sortKey`/`sortDir` the column headers use; both checkmarked. -->
+    <Submenu label={$t('cmd.sort')} icon="sort">
+      <button class="row" role="menuitemradio" aria-checked={sortKey === 'name'} on:click={() => run("sort:name")}>
+        <Icon name="rename" size={15} /> {$t('sort.name')}
+        {#if sortKey === 'name'}<span class="check"><Icon name="check" size={14} /></span>{/if}
+      </button>
+      <button class="row" role="menuitemradio" aria-checked={sortKey === 'modified'} on:click={() => run("sort:modified")}>
+        <Icon name="recent" size={15} /> {$t('sort.modified')}
+        {#if sortKey === 'modified'}<span class="check"><Icon name="check" size={14} /></span>{/if}
+      </button>
+      <button class="row" role="menuitemradio" aria-checked={sortKey === 'type'} on:click={() => run("sort:type")}>
+        <Icon name="filter" size={15} /> {$t('sort.type')}
+        {#if sortKey === 'type'}<span class="check"><Icon name="check" size={14} /></span>{/if}
+      </button>
+      <button class="row" role="menuitemradio" aria-checked={sortKey === 'size'} on:click={() => run("sort:size")}>
+        <Icon name="disk" size={15} /> {$t('sort.size')}
+        {#if sortKey === 'size'}<span class="check"><Icon name="check" size={14} /></span>{/if}
+      </button>
+      <div class="sep" role="separator" />
+      <button class="row" role="menuitemradio" aria-checked={sortDir === 'asc'} on:click={() => run("sortdir:asc")}>
+        <Icon name="chev-up" size={15} /> {$t('cmd.ascending')}
+        {#if sortDir === 'asc'}<span class="check"><Icon name="check" size={14} /></span>{/if}
+      </button>
+      <button class="row" role="menuitemradio" aria-checked={sortDir === 'desc'} on:click={() => run("sortdir:desc")}>
+        <Icon name="chev-down" size={15} /> {$t('cmd.descending')}
+        {#if sortDir === 'desc'}<span class="check"><Icon name="check" size={14} /></span>{/if}
+      </button>
+    </Submenu>
+    <div class="sep" role="separator" />
     <button class="row" role="menuitem" on:click={() => run("select-all")}>
       <Icon name="check" size={15} /> {$t('ctx.selectAll')}
       <span class="hint">Ctrl+A</span>
@@ -218,7 +287,7 @@
       <Icon name="refresh" size={15} /> {$t('ctx.refresh')}
       <span class="hint">F5</span>
     </button>
-    <div class="sep" />
+    <div class="sep" role="separator" />
     {#if canTerminal}
       <button class="row" role="menuitem" on:click={() => run("terminal")}>
         <Icon name="code" size={15} /> {$t('ctx.openInTerminal')}
@@ -230,7 +299,12 @@
     <button class="row" role="menuitem" on:click={() => run("reveal")}>
       <Icon name="folder" size={15} /> {$t('ctx.reveal')}
     </button>
-    <div class="sep" />
+    {#if canTerminal}
+      <button class="row" role="menuitem" on:click={() => run("properties-folder")}>
+        <Icon name="info" size={15} /> {$t('ctx.properties')}
+      </button>
+    {/if}
+    <div class="sep" role="separator" />
     <button class="row" role="menuitem" on:click={() => run("help-docs")}>
       <Icon name="book" size={15} /> Documents for this view
     </button>
@@ -276,6 +350,12 @@
     margin-left: auto;
     color: var(--text-faint);
     font-size: 12px;
+  }
+  /* Trailing ✓ marking the active view / sort key / direction — accent, per MENUS.md. */
+  .check {
+    margin-left: auto;
+    display: inline-flex;
+    color: var(--accent);
   }
   .sep {
     height: 1px;
