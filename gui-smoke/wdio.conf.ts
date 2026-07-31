@@ -398,6 +398,17 @@ function restoreReplayFixture(): void {
   replayFixtureBackup = null;
 }
 
+// --- CPE-1154: empty-folder fixture -----------------------------------------------------------
+// An EMPTY subdirectory of the seeded tmpDir, so context-menu.smoke.ts can navigate into it and
+// exercise the confirmed native-menu-leak repro: right-clicking the BLANK pane area of a folder whose
+// `.empty-state` box is centred and does NOT fill the pane. Just an empty dir — no files inside — so
+// the explorer renders its empty state, and nothing here perturbs the other specs' file fixtures.
+export const EMPTY_DIR_NAME = "CPE-1154-empty-folder";
+
+function seedEmptyFolderFixture(tmpDir: string): void {
+  fs.mkdirSync(path.join(tmpDir, EMPTY_DIR_NAME), { recursive: true });
+}
+
 let tauriDriver: ChildProcess | undefined;
 let shuttingDown = false;
 
@@ -495,6 +506,9 @@ export const config: WebdriverIO.Config = {
     // CPE-1135: seed the Replay-tab's audit journal + baseline fixture, rooted at this same tmpDir,
     // before the app process ever starts (see the block above).
     seedReplayFixture(tmpDir);
+
+    // CPE-1154: seed an empty subdirectory for the native-context-menu-leak repro (see block above).
+    seedEmptyFolderFixture(tmpDir);
 
     const caps = capabilities as unknown as Array<{ "tauri:options": { args: string[] } }>;
     caps[0]["tauri:options"].args = ["--test-mode", "--x=-4000", `--open=${tmpDir}`];
