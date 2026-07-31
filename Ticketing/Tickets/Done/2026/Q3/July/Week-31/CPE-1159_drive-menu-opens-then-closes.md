@@ -4,9 +4,10 @@ title: "Disk right-click menu opens then instantly closes (drive handlers miss s
 type: bug
 component: Frontend
 priority: high
-status: Backlog
+status: Done
 tags: ready
 created: 2026-07-31
+closed: 2026-07-31
 ---
 
 ## Summary
