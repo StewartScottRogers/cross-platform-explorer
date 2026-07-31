@@ -330,3 +330,73 @@ describe("ContextMenu Shared row menu (CPE-1163)", () => {
     expect(screen.queryByText(/Remove network location/i)).toBeNull();
   });
 });
+
+// Open/close-race hardening (CPE-1160). The window dismisser must never be tripped by the very
+// `contextmenu` event that OPENED the menu — the footgun that bit CPE-1154/1157/1159 whenever an
+// opener forgot `e.stopPropagation()`. These tests genuinely exercise the `<svelte:window>`
+// dismisser: they dispatch a *bubbling* event on `document.body` so it propagates up to the window
+// listener the component attaches, exactly as a real opener's event does. Open-time is detected via
+// `performance.now()` (mocked here so we can place events inside / outside the ~50 ms guard window).
+describe("ContextMenu open/close-race hardening (CPE-1160)", () => {
+  function fireBubblingContextmenu(target: EventTarget = document.body) {
+    // A forgetful opener's event: bubbles, no stopPropagation — reaches the window dismisser.
+    target.dispatchEvent(new MouseEvent("contextmenu", { bubbles: true, cancelable: true }));
+  }
+
+  it("does NOT self-close when the OPENING contextmenu bubbles to window without stopPropagation", () => {
+    // Freeze time at open — the opening event arrives in the same tick (elapsed ≈ 0 ms).
+    const now = vi.spyOn(performance, "now").mockReturnValue(1_000);
+    const { component } = render(ContextMenu, { props: { ...base } });
+    const close = vi.fn();
+    component.$on("close", close);
+
+    // Simulate the forgetful opener: the SAME contextmenu event bubbles up to window.
+    fireBubblingContextmenu();
+
+    expect(close).not.toHaveBeenCalled();
+    expect(document.querySelector(".ctx")).toBeTruthy(); // menu is still mounted/visible
+    now.mockRestore();
+  });
+
+  it("a LATER right-click elsewhere STILL closes it (regression — legitimate dismissal survives)", () => {
+    const now = vi.spyOn(performance, "now").mockReturnValue(1_000);
+    const { component } = render(ContextMenu, { props: { ...base } });
+    const close = vi.fn();
+    component.$on("close", close);
+
+    // A deliberate human right-click well past the open-guard window.
+    now.mockReturnValue(1_000 + 500);
+    fireBubblingContextmenu();
+
+    expect(close).toHaveBeenCalledTimes(1);
+    now.mockRestore();
+  });
+
+  it("a left-click outside STILL closes it immediately, even in the same tick (clicks are never gated)", () => {
+    // A click never OPENS the menu, so it must dismiss without any guard delay.
+    const now = vi.spyOn(performance, "now").mockReturnValue(1_000);
+    const { component } = render(ContextMenu, { props: { ...base } });
+    const close = vi.fn();
+    component.$on("close", close);
+
+    document.body.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+
+    expect(close).toHaveBeenCalledTimes(1);
+    now.mockRestore();
+  });
+
+  it("right-clicking INSIDE the menu does not close it (stopPropagation on the menu's own DOM)", () => {
+    // Past the guard window, so only the menu's own stopPropagation can be protecting it.
+    const now = vi.spyOn(performance, "now").mockReturnValue(1_000);
+    const { component } = render(ContextMenu, { props: { ...base } });
+    const close = vi.fn();
+    component.$on("close", close);
+    now.mockReturnValue(1_000 + 500);
+
+    const menu = document.querySelector(".ctx") as HTMLElement;
+    fireBubblingContextmenu(menu); // bubbles up to .ctx, which stops it before window
+
+    expect(close).not.toHaveBeenCalled();
+    now.mockRestore();
+  });
+});

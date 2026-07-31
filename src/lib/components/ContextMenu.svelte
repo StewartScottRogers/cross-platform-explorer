@@ -72,6 +72,26 @@
   let left = x;
   let top = y;
 
+  // CPE-1160 — kill the open/close-race footgun by construction. The `contextmenu` event that
+  // OPENS this menu (dispatched from a row/tile/pane handler) keeps bubbling up the DOM to the
+  // window dismisser below, in the SAME tick as this component mounts. Historically that closed
+  // the just-opened menu ~5 ms later unless the opener remembered `e.stopPropagation()` — a trap
+  // that bit three times (CPE-1154/1157/1159). Instead of relying on every opener to remember,
+  // we record when the menu opened (this component is created fresh per-open via `{#if ctx}` in
+  // App, so this timestamp IS the open time) and have the window dismisser IGNORE any
+  // `contextmenu` that arrives within a tiny threshold of open — i.e. the opening event itself.
+  // A LATER right-click elsewhere (well past the threshold) still closes/repositions; left-clicks
+  // are never gated (a click never opens the menu), so click-outside dismissal stays instant.
+  const openedAt = performance.now();
+  const OPEN_GUARD_MS = 50;
+
+  function onWindowContextmenu(e: MouseEvent) {
+    e.preventDefault();
+    // Ignore the opening event (same tick as mount); a genuine later right-click still closes.
+    if (performance.now() - openedAt < OPEN_GUARD_MS) return;
+    dispatch("close");
+  }
+
   // Keep the menu on screen — a menu that opens half off the edge is useless.
   onMount(() => {
     const rect = el.getBoundingClientRect();
@@ -91,7 +111,7 @@
 
 <svelte:window
   on:click={() => dispatch("close")}
-  on:contextmenu|preventDefault={() => dispatch("close")}
+  on:contextmenu={onWindowContextmenu}
   on:keydown={(e) => e.key === "Escape" && dispatch("close")}
 />
 
