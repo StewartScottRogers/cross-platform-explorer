@@ -3,6 +3,7 @@ import {
   addRecent, removeRecent, togglePin, toggleFavorite, mergeLegacy,
   loadAutoRestore, saveAutoRestore, loadLastSession, saveLastSession,
   loadMetaColumnsForFolder, saveMetaColumnsForFolder,
+  addNetworkLocation, removeNetworkLocation,
 } from "./settings";
 import type { RecentFile, Favorite } from "./types";
 import type { WorkspaceTab } from "./workspaces";
@@ -145,6 +146,28 @@ describe("togglePin", () => {
     const pins = ["/a"];
     togglePin(pins, "/b");
     expect(pins).toEqual(["/a"]);
+  });
+});
+
+describe("network locations (CPE-1163)", () => {
+  it("adds a trimmed location and de-duplicates case/slash-insensitively", () => {
+    let list = addNetworkLocation([], "  \\\\server\\share  ");
+    expect(list).toEqual(["\\\\server\\share"]);
+    // A trailing-slash / different-case variant is treated as the same entry (re-added at the end).
+    list = addNetworkLocation(list, "\\\\SERVER\\share\\");
+    expect(list).toEqual(["\\\\SERVER\\share\\"]);
+    // A genuinely different location is appended.
+    list = addNetworkLocation(list, "smb://nas/media");
+    expect(list).toEqual(["\\\\SERVER\\share\\", "smb://nas/media"]);
+  });
+
+  it("ignores an empty/whitespace address", () => {
+    expect(addNetworkLocation(["\\\\a\\b"], "   ")).toEqual(["\\\\a\\b"]);
+  });
+
+  it("removes a location by path (slash/case-insensitive)", () => {
+    expect(removeNetworkLocation(["\\\\server\\share", "smb://nas/media"], "\\\\SERVER\\SHARE\\"))
+      .toEqual(["smb://nas/media"]);
   });
 });
 

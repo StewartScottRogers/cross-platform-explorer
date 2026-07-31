@@ -48,7 +48,10 @@
   /** Home-item menu (CPE-1162, `target: "home-item"`): which segmented list the right-clicked row came
    *  from, so the correct view-native "Remove from <view>" (+ "Clear all" on Recent) shows and the
    *  cross-view Add-to-Favorites/Pin rows appear only where they make sense. */
-  export let homeView: "recent" | "favorites" | "folders" | "" = "";
+  export let homeView: "recent" | "favorites" | "folders" | "shared" | "" = "";
+  /** For a Shared row (CPE-1163): its kind ("mapped" | "mount" | "user"), so the menu offers Disconnect
+   *  (a mapped drive) vs Remove (a user-added location). Empty for the non-shared views. */
+  export let homeKind = "";
   /** Whether the right-clicked Home row is a folder — toggles Open-in-new-tab / New ▸ / the Open icon. */
   export let homeIsDir = false;
   /** True when a best-effort existence check found the row's real target missing (CPE-1162). Disables
@@ -288,6 +291,40 @@
          "Remove from <view>" (prunes only the list ENTRY, list-management group at the bottom). Stale
          targets disable the on-disk rows but keep Remove/Clear enabled. MENUS.md: theme vars, leading
          icons, never red text. -->
+    {#if homeView === "shared"}
+      <!-- Shared (network / mapped / SMB) row menu (CPE-1163). Reuses the CPE-1162 machinery via the
+           new `view: "shared"`. An unreachable share degrades gracefully: Open surfaces its own error,
+           while Disconnect/Remove stay live regardless (there is no stale-disable here — see App's
+           onHomeItemContext, which skips the stat check for shares). Disconnect vs Remove is chosen by
+           `homeKind`. MENUS.md: theme vars, leading icons, never red text. -->
+      <button class="row" role="menuitem" on:click={() => run("home-open")}>
+        <Icon name="folder" size={15} /> {$t('ctx.open')}
+      </button>
+      <button class="row" role="menuitem" on:click={() => run("home-open-new-tab")}>
+        <Icon name="plus" size={15} /> {$t('ctx.openNewTab')}
+      </button>
+      <div class="sep" role="separator" />
+      <button class="row" role="menuitem" on:click={() => run("home-copy-path")}>
+        <Icon name="paste" size={15} /> {$t('ctx.copyAsPath')}
+      </button>
+      <button class="row" role="menuitem" on:click={() => run("home-properties")}>
+        <Icon name="info" size={15} /> {$t('ctx.properties')}
+      </button>
+      <div class="sep" role="separator" />
+      {#if homeKind === "user"}
+        <button class="row" role="menuitem" on:click={() => run("share-remove")}>
+          <Icon name="close" size={15} /> {$t('home.removeNetworkLocation')}
+        </button>
+      {:else if homeKind === "mapped"}
+        <button class="row" role="menuitem" on:click={() => run("share-disconnect")}>
+          <Icon name="close" size={15} /> {$t('home.disconnectShare')}
+        </button>
+      {/if}
+      <div class="sep" role="separator" />
+      <button class="row" role="menuitem" on:click={() => run("help-docs")}>
+        <Icon name="book" size={15} /> Documents for this view
+      </button>
+    {:else}
     <button class="row" role="menuitem" disabled={homeStale} on:click={() => run("home-open")}>
       <Icon name={homeIsDir ? "folder" : "document"} size={15} /> {$t('ctx.open')}
     </button>
@@ -366,6 +403,7 @@
     <button class="row" role="menuitem" on:click={() => run("help-docs")}>
       <Icon name="book" size={15} /> Documents for this view
     </button>
+    {/if}
   {:else}
     <!-- New ▸ — Windows 11 shape: create actions live behind a submenu (CPE-1153). -->
     <Submenu label={$t('cmd.new')} icon="plus">

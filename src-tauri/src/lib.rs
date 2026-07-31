@@ -3347,6 +3347,176 @@ fn list_drives_impl() -> Vec<Place> {
     drives
 }
 
+/// Network / mapped / SMB shares for the Home "Shared" tab (CPE-1163).
+///
+/// Returns the OS-enumerated network drives (Windows mapped drives, Unix SMB/NFS mounts) merged with
+/// the user's own added locations (`user_added`, persisted by the frontend like favorites). The pure
+/// parsing + merging lives in `cpe_server::net_share`; this command only runs the platform command
+/// and feeds its stdout in. **Time-bounded:** the enumeration subprocess is capped (below), so a
+/// dead/offline mapped server can never hang the Home view — a timeout yields an empty enumeration
+/// and the user-added rows still list.
+#[tauri::command]
+#[cfg_attr(feature = "specta-bindings", specta::specta)]
+async fn list_network_shares(user_added: Vec<String>) -> Vec<cpe_server::net_share::NetShare> {
+    tauri::async_runtime::spawn_blocking(move || list_network_shares_impl(user_added))
+        .await
+        .unwrap_or_default()
+}
+
+fn list_network_shares_impl(user_added: Vec<String>) -> Vec<cpe_server::net_share::NetShare> {
+    cpe_server::net_share::combine_shares(enumerate_os_shares(), &user_added)
+}
+
+/// Best-effort, platform-aware enumeration of the network mounts the OS already knows about. Empty is
+/// always an acceptable result (unsupported platform, no mounts, or a timed-out probe).
+fn enumerate_os_shares() -> Vec<cpe_server::net_share::NetShare> {
+    #[cfg(target_os = "windows")]
+    {
+        // `net use` reads the local redirector table (it does not contact the servers), but bound it
+        // anyway so nothing on the Home path can ever wait on a wedged process.
+        run_bounded_capture("net", &["use"], std::time::Duration::from_secs(3))
+            .map(|o| cpe_server::net_share::parse_net_use(&o))
+            .unwrap_or_default()
+    }
+    #[cfg(target_os = "linux")]
+    {
+        // `/proc/mounts` is a synthetic kernel file — a plain, non-blocking read.
+        std::fs::read_to_string("/proc/mounts")
+            .map(|o| cpe_server::net_share::parse_proc_mounts(&o))
+            .unwrap_or_default()
+    }
+    #[cfg(target_os = "macos")]
+    {
+        run_bounded_capture("/sbin/mount", &[], std::time::Duration::from_secs(3))
+            .map(|o| cpe_server::net_share::parse_macos_mount(&o))
+            .unwrap_or_default()
+    }
+    #[cfg(not(any(target_os = "windows", target_os = "linux", target_os = "macos")))]
+    {
+        Vec::new()
+    }
+}
+
+/// Run `program args…`, returning its captured stdout, but abandon (and kill) it after `timeout` so a
+/// hung network command can never block the caller. The stdout is drained on a helper thread; if the
+/// timeout fires first we kill the child, which closes the pipe and frees the thread. Used only where
+/// the enumeration shells out (Windows `net use`, macOS `mount`).
+#[cfg(any(target_os = "windows", target_os = "macos"))]
+fn run_bounded_capture(program: &str, args: &[&str], timeout: std::time::Duration) -> Option<String> {
+    use std::io::Read;
+    use std::process::{Command, Stdio};
+    use std::sync::mpsc;
+
+    let mut cmd = Command::new(program);
+    cmd.args(args)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null());
+    #[cfg(target_os = "windows")]
+    {
+        use std::os::windows::process::CommandExt;
+        cmd.creation_flags(0x0800_0000); // CREATE_NO_WINDOW — no console flash on the desktop app.
+    }
+
+    let mut child = cmd.spawn().ok()?;
+    let mut stdout = child.stdout.take()?;
+    let (tx, rx) = mpsc::channel();
+    std::thread::spawn(move || {
+        let mut buf = String::new();
+        let _ = stdout.read_to_string(&mut buf);
+        let _ = tx.send(buf);
+    });
+
+    match rx.recv_timeout(timeout) {
+        Ok(buf) => {
+            let _ = child.wait();
+            Some(buf)
+        }
+        Err(_) => {
+            // Timed out: kill the child (closing the pipe frees the reader thread) and give up.
+            let _ = child.kill();
+            let _ = child.wait();
+            None
+        }
+    }
+}
+
+/// Disconnect a mapped network drive — the Shared tab's "Disconnect" action for a mapped drive
+/// (CPE-1163). Windows-only (`net use <drive> /delete /y`), best-effort + time-bounded; on any other
+/// platform, or for a `path` that isn't a drive-letter root, it returns a clear error the UI surfaces.
+/// User-added locations use the frontend "Remove" path instead (pure list pruning, no command).
+#[tauri::command]
+#[cfg_attr(feature = "specta-bindings", specta::specta)]
+async fn disconnect_network_share(path: String) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || disconnect_network_share_impl(path))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+#[cfg(target_os = "windows")]
+fn disconnect_network_share_impl(path: String) -> Result<(), String> {
+    let trimmed = path.trim();
+    let bytes = trimmed.as_bytes();
+    if bytes.len() < 2 || !bytes[0].is_ascii_alphabetic() || bytes[1] != b':' {
+        return Err(format!("Not a mapped drive: {path}"));
+    }
+    let drive = format!("{}:", bytes[0] as char);
+    let output = run_bounded_output(
+        "net",
+        &["use", &drive, "/delete", "/y"],
+        std::time::Duration::from_secs(8),
+    )
+    .ok_or_else(|| "Disconnecting the drive timed out.".to_string())?;
+    if output.status.success() {
+        Ok(())
+    } else {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let msg = stderr.trim();
+        Err(if msg.is_empty() {
+            format!("Couldn't disconnect {drive}.")
+        } else {
+            msg.to_string()
+        })
+    }
+}
+
+#[cfg(not(target_os = "windows"))]
+fn disconnect_network_share_impl(_path: String) -> Result<(), String> {
+    Err("Disconnecting network drives is only supported on Windows.".to_string())
+}
+
+/// Run `program args…` to completion, capturing its full [`Output`](std::process::Output), but give up
+/// after `timeout` so a wedged command can't block. Used for the short, local `net use /delete` so its
+/// exit status (success/failure) can be reported — unlike [`run_bounded_capture`], which only needs
+/// stdout. Windows-only (its sole caller is the disconnect command).
+#[cfg(target_os = "windows")]
+fn run_bounded_output(
+    program: &str,
+    args: &[&str],
+    timeout: std::time::Duration,
+) -> Option<std::process::Output> {
+    use std::os::windows::process::CommandExt;
+    use std::process::{Command, Stdio};
+    use std::sync::mpsc;
+
+    let child = Command::new(program)
+        .args(args)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .creation_flags(0x0800_0000) // CREATE_NO_WINDOW
+        .spawn()
+        .ok()?;
+    let (tx, rx) = mpsc::channel();
+    std::thread::spawn(move || {
+        let _ = tx.send(child.wait_with_output());
+    });
+    match rx.recv_timeout(timeout) {
+        Ok(Ok(output)) => Some(output),
+        _ => None,
+    }
+}
+
 /// Free + total bytes on the volume containing `path`, for the status bar (CPE-403).
 #[derive(serde::Serialize)]
 #[cfg_attr(feature = "specta-bindings", derive(specta::Type))]
@@ -7229,6 +7399,8 @@ pub fn run() {
             home_dir,
             parent_dir,
             list_drives,
+            list_network_shares,
+            disconnect_network_share,
             disk_space,
             special_folders,
             create_dir,
@@ -7950,6 +8122,8 @@ pub fn export_bindings(out: &std::path::Path) -> Result<(), String> {
         home_dir,
         parent_dir,
         list_drives,
+        list_network_shares,
+        disconnect_network_share,
         disk_space,
         special_folders,
         create_dir,
@@ -8229,6 +8403,25 @@ mod tests {
     #[test]
     fn list_drives_returns_at_least_one_root() {
         assert!(!list_drives_impl().is_empty(), "there is always at least one root");
+    }
+
+    #[test]
+    fn list_network_shares_merges_user_locations_without_hanging() {
+        // The command dispatcher must ALWAYS return promptly (the OS probe is time-bounded) and must
+        // include the user-added locations regardless of what the OS enumeration finds (CPE-1163).
+        let shares = list_network_shares_impl(vec![r"\\example-host\share".to_string()]);
+        assert!(
+            shares.iter().any(|s| s.kind == "user" && s.path == r"\\example-host\share"),
+            "the user-added location must appear even when no OS mounts exist: {shares:?}",
+        );
+        // Invalid entries are dropped; an empty request never panics.
+        assert!(
+            list_network_shares_impl(vec!["not a share".to_string()])
+                .iter()
+                .all(|s| s.kind != "user"),
+            "junk user entries are skipped, not surfaced",
+        );
+        let _ = list_network_shares_impl(Vec::new());
     }
 
     #[test]

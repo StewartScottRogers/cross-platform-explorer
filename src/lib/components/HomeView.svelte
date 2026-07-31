@@ -5,7 +5,8 @@
   import { formatDate } from "../datetime";
   import { iconFor } from "../filetypes";
   import { lsGet, lsSet, lsBool } from "../persist";
-  import type { Place, RecentFile, Favorite } from "../types";
+  import { onMount } from "svelte";
+  import type { Place, RecentFile, Favorite, NetShare } from "../types";
 
   export let places: Place[] = [];
   export let drives: Place[] = [];
@@ -16,6 +17,11 @@
   export let favorites: Favorite[] = [];
   /** Recently-visited folders (MRU). */
   export let recentFolders: RecentFile[] = [];
+  /** Network / mapped / SMB shares for the Shared tab (CPE-1163) — loaded on demand when the tab is
+   *  opened (pull-only, never on a timer). App owns the fetch + persistence; we just render. */
+  export let shared: NetShare[] = [];
+  /** True while App is (re)loading the Shared list; drives the tab's loading affordance. */
+  export let sharedLoading = false;
 
   const dispatch = createEventDispatcher<{
     navigate: string;
@@ -32,23 +38,51 @@
      *  only real rows dispatch it; the blank Home background stays menu-less. Shared is out of scope for
      *  now (empty/unimplemented) but the {path,is_dir,view} shape is deliberately view-agnostic so a
      *  future "shared" view plugs in with one more `view` value. */
-    homeItemContext: { x: number; y: number; path: string; is_dir: boolean; view: HomeItemView };
+    homeItemContext: { x: number; y: number; path: string; is_dir: boolean; view: HomeItemView; kind?: string };
     unpin: string;
     unfavorite: string;
     removeRecent: string;
     removeRecentFolder: string;
     clearRecents: void;
+    /** The Shared tab was opened (CPE-1163) — App (re)loads `list_network_shares`. Pull-only. */
+    loadShared: void;
+    /** User submitted a "＋ Add network location" address (CPE-1163) — App validates + persists it. */
+    addNetworkLocation: string;
+    /** Remove a user-added network location by path (CPE-1163) — App prunes it + reloads. */
+    removeNetworkLocation: string;
   }>();
 
   // Remember the Home layout across sessions (CPE-573): which section is open + the active pill tab.
-  type HomeTab = "recent" | "favorites" | "folders";
+  type HomeTab = "recent" | "favorites" | "folders" | "shared";
   let quickOpen = lsBool("cpe.homeQuickOpen", true);
   let recentOpen = lsBool("cpe.homeRecentOpen", true);
   /** Which pill tab is showing in the lower section. */
-  let tab: HomeTab = ((v) => (v === "favorites" || v === "folders" ? v : "recent"))(lsGet("cpe.homeTab"));
+  let tab: HomeTab = ((v) =>
+    v === "favorites" || v === "folders" || v === "shared" ? v : "recent")(lsGet("cpe.homeTab"));
   $: lsSet("cpe.homeQuickOpen", quickOpen ? "1" : "0");
   $: lsSet("cpe.homeRecentOpen", recentOpen ? "1" : "0");
   $: lsSet("cpe.homeTab", tab);
+
+  /** Switch tabs; opening Shared triggers a pull-only (re)load of the network list (CPE-1163). */
+  function selectTab(next: HomeTab) {
+    tab = next;
+    if (next === "shared") dispatch("loadShared");
+  }
+  // If Home reopens with Shared already the remembered tab, load it once on mount.
+  onMount(() => {
+    if (tab === "shared") dispatch("loadShared");
+  });
+
+  // "＋ Add network location" affordance state (CPE-1163).
+  let adding = false;
+  let newLocation = "";
+  function submitLocation() {
+    const v = newLocation.trim();
+    if (!v) return;
+    dispatch("addNetworkLocation", v);
+    newLocation = "";
+    adding = false;
+  }
 
   // Pinned folders appear alongside the built-in places.
   $: pinned = pins.map((p) => ({
@@ -71,15 +105,15 @@
 
   /** Which segmented list a right-clicked row belongs to (CPE-1162). View-agnostic by design so a
    *  future "shared" list is a one-word addition here + a `view` branch in App/ContextMenu. */
-  type HomeItemView = "recent" | "favorites" | "folders";
+  type HomeItemView = "recent" | "favorites" | "folders" | "shared";
   /** Open the row context menu (CPE-1162), mirroring the drive-tile handler above EXACTLY:
    *  preventDefault + stopPropagation are BOTH required — without stopPropagation the same
    *  `contextmenu` event bubbles to window, where ContextMenu.svelte's dismisser instantly closes the
    *  just-opened menu (CPE-1157/1159 self-close race). */
-  function rowContext(e: MouseEvent, path: string, is_dir: boolean, view: HomeItemView) {
+  function rowContext(e: MouseEvent, path: string, is_dir: boolean, view: HomeItemView, kind?: string) {
     e.preventDefault();
     e.stopPropagation();
-    dispatch("homeItemContext", { x: e.clientX, y: e.clientY, path, is_dir, view });
+    dispatch("homeItemContext", { x: e.clientX, y: e.clientY, path, is_dir, view, kind });
   }
 </script>
 
@@ -147,24 +181,27 @@
     >
       <Icon name="chev-right" size={13} />
     </button>
-    <span>{tab === "favorites" ? $t("home.favorites") : tab === "folders" ? $t("home.recentFolders") : $t("home.recent")}</span>
+    <span>{tab === "favorites" ? $t("home.favorites") : tab === "folders" ? $t("home.recentFolders") : tab === "shared" ? $t("home.shared") : $t("home.recent")}</span>
     {#if tab === "recent" && recents.length > 0}
       <button class="clear" on:click={() => dispatch("clearRecents")}>{$t("home.clear")}</button>
+    {/if}
+    {#if tab === "shared"}
+      <button class="clear" on:click={() => (adding = true)}>{$t("home.addNetworkLocation")}</button>
     {/if}
   </div>
 
   {#if recentOpen}
     <div class="pills">
-      <button class="pill" class:active={tab === "recent"} on:click={() => (tab = "recent")}>
+      <button class="pill" class:active={tab === "recent"} on:click={() => selectTab("recent")}>
         <Icon name="recent" size={14} /> {$t("home.recent")}
       </button>
-      <button class="pill" class:active={tab === "favorites"} on:click={() => (tab = "favorites")}>
+      <button class="pill" class:active={tab === "favorites"} on:click={() => selectTab("favorites")}>
         <Icon name="star" size={14} /> {$t("home.favorites")}
       </button>
-      <button class="pill" class:active={tab === "folders"} on:click={() => (tab = "folders")}>
+      <button class="pill" class:active={tab === "folders"} on:click={() => selectTab("folders")}>
         <Icon name="folder" size={14} /> {$t("home.folders")}
       </button>
-      <button class="pill" disabled title={$t("home.sharedTip")}>
+      <button class="pill" class:active={tab === "shared"} on:click={() => selectTab("shared")}>
         <Icon name="people" size={14} /> {$t("home.shared")}
       </button>
     </div>
@@ -243,7 +280,7 @@
           {/each}
         </div>
       {/if}
-    {:else}
+    {:else if tab === "folders"}
       {#if recentFolders.length === 0}
         <div class="empty-state">
           <span class="empty-icon"><Icon name="folder" size={36} /></span>
@@ -275,6 +312,67 @@
               >
                 <Icon name="close" size={13} />
               </span>
+            </button>
+          {/each}
+        </div>
+      {/if}
+    {:else}
+      <!-- Shared tab (CPE-1163): network / mapped / SMB shares. Rows reuse the CPE-1162 row menu via a
+           new `view: "shared"` on homeItemContext. Right-clicking offers Open / Copy path /
+           Disconnect-or-Remove / Properties (adapted to `kind` in App/ContextMenu). -->
+      {#if adding}
+        <!-- svelte-ignore a11y-autofocus -->
+        <form class="add-loc" on:submit|preventDefault={submitLocation}>
+          <Icon name="people" size={15} />
+          <input
+            type="text"
+            autofocus
+            bind:value={newLocation}
+            placeholder={$t("home.addNetworkLocationPlaceholder")}
+            on:keydown={(e) => { if (e.key === "Escape") { adding = false; newLocation = ""; } }}
+          />
+          <button type="submit" class="add-go">{$t("home.add")}</button>
+          <button type="button" class="add-cancel" on:click={() => { adding = false; newLocation = ""; }}>{$t("common.cancel")}</button>
+        </form>
+      {/if}
+      {#if sharedLoading && shared.length === 0}
+        <div class="empty-state">
+          <span class="empty-icon"><Icon name="people" size={36} /></span>
+          <p>{$t("home.sharedLoading")}</p>
+        </div>
+      {:else if shared.length === 0}
+        <div class="empty-state">
+          <span class="empty-icon"><Icon name="people" size={36} /></span>
+          <p>{$t("home.noShared")}</p>
+          <p style="font-size:12px">{$t("home.noSharedSub")}</p>
+        </div>
+      {:else}
+        <div class="recent-list">
+          {#each shared as s (s.path)}
+            <button
+              class="recent-row fav-row"
+              on:dblclick={() => dispatch("navigate", s.path)}
+              on:click={() => dispatch("navigate", s.path)}
+              on:contextmenu={(e) => rowContext(e, s.path, true, "shared", s.kind)}
+            >
+              <span class="rname">
+                <Icon name="people" />
+                <span class="ellip">{s.name}</span>
+                <span class="fav-path ellip">{s.path}</span>
+              </span>
+              {#if s.kind === "user"}
+                <!-- svelte-ignore a11y-no-static-element-interactions a11y-click-events-have-key-events -->
+                <span
+                  class="rmv"
+                  role="button"
+                  tabindex="-1"
+                  aria-label={$t("home.removeNetworkLocation")}
+                  title={$t("home.removeNetworkLocation")}
+                  on:click|stopPropagation={() => dispatch("removeNetworkLocation", s.path)}
+                >
+                  <Icon name="close" size={13} />
+                </span>
+              {/if}
             </button>
           {/each}
         </div>
@@ -322,4 +420,33 @@
   .fav-path { color: var(--text-faint); font-size: 12px; margin-left: 4px; min-width: 0; }
   .fav-row .pin { opacity: 0; }
   .fav-row:hover .pin, .fav-row .pin.pinned { opacity: 1; }
+  /* "＋ Add network location" inline input (CPE-1163). */
+  .add-loc {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    max-width: 860px;
+    padding: 6px 8px;
+    margin-bottom: 6px;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    background: var(--surface);
+  }
+  .add-loc input {
+    flex: 1 1 auto;
+    min-width: 0;
+    padding: 4px 8px;
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    background: var(--bg);
+    color: var(--text);
+  }
+  .add-loc .add-go, .add-loc .add-cancel {
+    flex: 0 0 auto;
+    padding: 4px 10px;
+    border-radius: 4px;
+    font-size: 12px;
+  }
+  .add-loc .add-go { background: var(--accent); color: var(--accent-fg, #fff); }
+  .add-loc .add-cancel { color: var(--text-dim); }
 </style>

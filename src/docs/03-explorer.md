@@ -18,6 +18,22 @@ The explorer is the core of the app and is tuned to stay **fast, small, and pred
   section (Explore, Quick access, Drives, Favorites, Tags, Smart Folders) has a header you can click to
   **collapse** it and reclaim vertical space; your choices persist across sessions.
 
+## Home screen
+
+The Home screen has **Quick access** tiles up top and a tabbed lower section with four pills:
+
+- **Recent** — files you've opened recently. **Favorites** — items you've starred. **Folders** — folders
+  you've visited (an MRU). Right-click any row for the usual actions (Open, Copy, Rename, Properties,
+  and a view-native *Remove from …* that prunes just the list entry without touching the file).
+- **Shared** — network locations. It lists the network drives your OS already has mapped (on Windows,
+  your mapped drive letters and their `\\server\share` targets; on macOS/Linux, mounted SMB/NFS shares)
+  plus any locations you add yourself. Use **＋ Add network location** to type a `\\server\share` or
+  `smb://host/share` address; it's remembered across sessions. Right-click a share for **Open**,
+  **Copy path**, and either **Disconnect** (for a mapped drive) or **Remove** (for a location you added).
+  An unreachable share degrades gracefully — Open reports a clear error while Disconnect/Remove still
+  work. The list loads when you open the tab (never on a background timer), so an offline server never
+  slows the rest of Home.
+
 ## Files
 
 - **Progressive loading** — folders stream in: the first rows appear almost immediately and the rest fill
