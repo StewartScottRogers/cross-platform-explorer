@@ -571,3 +571,19 @@ natural homes.
 - Ticket-tree hygiene fixed: CPE-1126 was duplicated (Deferred+Doing) — removed the Deferred dup; CPE-1148/1149 Done files had uncommitted status flips — finalized. (Root cause: an earlier  sans --delete-branch aborted at the branch-delete prompt AFTER merging, and a --ff-only pull couldn't advance over local staged changes; reconciled by hard-syncing to origin/main + restoring the finalized files.)
 - Filed CPE-1150 (reviewer flag: no component test for the two-step revert confirm gate).
 - Remaining on CPE-1126: user-present GUI safety/clarity verify (kept in Doing/, on the MVD burndown).
+
+### 2026-07-30 20:29 USMST — wrap: CPE-1126 restore-panel arc complete (first Visual-Critic verdict)
+- User chose (a): build CPE-1126's visual layer, reserve the safety call. Delivered the full arc:
+  - CPE-1126 (checkpoint markers + restore panel) — built, reviewed, merged (#466).
+  - CPE-1150 (two-step confirm-gate component test) — #467.
+  - CPE-1151 (session-precise drift + drift echo in confirm) — the user's 2 verify refinements — #468.
+  - CPE-1152 (gui-smoke checkpoint seed) — #469 — made the panel screenshot-able.
+- **First formal Visual Critic verdict on a GUI ticket: VISUAL PASS.** The Critic judged the real captured
+  restore-panel + confirm screenshots (look + revert-safety clarity); user shown the screenshots + verdict
+  and signed off. CPE-1126 closed; its manual-verify-debt row RETIRED. The CPE-1148 loop paid off exactly as
+  intended — crew verifies its own GUI, user looped in only for the final reserved call.
+- Bookkeeping: caught + fixed a bad merge-sequence that had duplicated CPE-1126 + left 1148/1149 closes
+  uncommitted; caught a stalled worker (yielded on a background notification) + resumed it synchronously;
+  caught a stale-binary trap in gui-smoke (rebuilt to prove CPE-1151's echo).
+- Throttle held all session (single agent in flight, staggered) — no 529 recurrence.
+- Queue now: Doing empty, Backlog empty. Remaining work is user-gated (interaction-feel) or resource-gated.
