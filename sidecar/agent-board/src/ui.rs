@@ -150,6 +150,11 @@ pub fn board_html() -> String {
 <style>
   :root { color-scheme: light dark; }
   * { box-sizing: border-box; }
+  /* The view switcher (Board/Epics/Sprints) toggles the `hidden` attribute on the three view
+     containers, but `.cols`/`.list` below set `display:flex` — an AUTHOR rule that otherwise
+     overrides the UA `[hidden]{display:none}` rule, leaving a "hidden" pane still on screen
+     (CPE-1168). Restore the attribute's intent so a view swap actually hides the other panes. */
+  [hidden] { display: none !important; }
   body { font: 13px system-ui, sans-serif; margin: 0; height: 100vh; display: flex; flex-direction: column;
          background: Canvas; color: CanvasText; }
   header { padding: 8px 12px; font-weight: 600; border-bottom: 1px solid GrayText; display: flex; gap: 10px; align-items: baseline; }
@@ -368,6 +373,12 @@ mod tests {
         // The Epics/Sprints view switcher (CPE-1129) is wired into the served page.
         assert!(html.contains("/api/epics"));
         assert!(html.contains("/api/sprints"));
+        // CPE-1168: the view switcher toggles `hidden` on the three panes, but `.cols`/`.list` set
+        // `display:flex`, which (as an author rule) would override the UA `[hidden]{display:none}`
+        // and leave a "hidden" pane on screen. This `!important` rule restores the attribute's
+        // intent so a view swap actually hides the others; a headless click-through (clickthrough.mjs)
+        // caught the missing swap. Keep the rule so the fix can't silently regress.
+        assert!(html.contains("[hidden] { display: none !important; }"));
     }
 
     fn seed_epic(root: &Path, dir: &str, id: &str, status: &str) {
