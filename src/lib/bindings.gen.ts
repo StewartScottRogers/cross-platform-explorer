@@ -2567,7 +2567,16 @@ export type MetaColumn =
  * `"CR (classic Mac)"`, or `"Mixed"`. Empty for binary/empty files and text with no line breaks.
  * Applies to every file.
  */
-"LineEndings"
+"LineEndings" | 
+/**
+ * The path's **native OS tags** (CPE-1175, epic CPE-717) — Finder tags / NTFS ADS / xattr —
+ * comma-joined, read lazily per row via [`crate::native_bridge::read_native_tags`] (never the
+ * internal tag store, never the hot `list_dir` path). Empty when the path has no native metadata,
+ * the filesystem can't store it (FAT, no xattr support), or it isn't readable. Applies to every file
+ * (and directory — native tags aren't extension-scoped), so it uses the same applies-to-all
+ * sentinel as the CPE-1166 detectors.
+ */
+"NativeTags"
 /**
  * An edit the user asked for.
  */

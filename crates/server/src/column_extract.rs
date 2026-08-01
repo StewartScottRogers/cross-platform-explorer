@@ -18,6 +18,7 @@ use crate::media_column::{audio_cell, AudioColumn};
 use crate::media_meta_edit::MetaField;
 use crate::media_meta_read::{read_flac, read_id3v2, read_ogg, read_pdf};
 use crate::metadata_column::CellValue;
+use crate::native_tags::NativeTags;
 use crate::text_encoding::{detect_encoding, detect_line_endings, EncodingGuess, LineEnding};
 use crate::video_column::video_cell;
 use crate::video_meta_read::read_mp4;
@@ -65,6 +66,13 @@ pub enum MetaColumn {
     /// `"CR (classic Mac)"`, or `"Mixed"`. Empty for binary/empty files and text with no line breaks.
     /// Applies to every file.
     LineEndings,
+    /// The path's **native OS tags** (CPE-1175, epic CPE-717) — Finder tags / NTFS ADS / xattr —
+    /// comma-joined, read lazily per row via [`crate::native_bridge::read_native_tags`] (never the
+    /// internal tag store, never the hot `list_dir` path). Empty when the path has no native metadata,
+    /// the filesystem can't store it (FAT, no xattr support), or it isn't readable. Applies to every file
+    /// (and directory — native tags aren't extension-scoped), so it uses the same applies-to-all
+    /// sentinel as the CPE-1166 detectors.
+    NativeTags,
 }
 
 impl MetaColumn {
@@ -72,7 +80,7 @@ impl MetaColumn {
     /// [`crate::column_cells::available_columns`] enumerates for the picker UI (CPE-1145, epic CPE-707).
     pub fn all() -> Vec<MetaColumn> {
         let mut out: Vec<MetaColumn> = Vec::with_capacity(
-            AudioColumn::ALL.len() + 2 + DocInfoColumn::ALL.len() + VideoTagColumn::ALL.len(),
+            AudioColumn::ALL.len() + 3 + DocInfoColumn::ALL.len() + VideoTagColumn::ALL.len(),
         );
         out.extend(AudioColumn::ALL.into_iter().map(MetaColumn::Audio));
         out.push(MetaColumn::ImageDimensions);
@@ -85,6 +93,8 @@ impl MetaColumn {
         out.push(MetaColumn::TypeMismatch);
         out.push(MetaColumn::TextEncoding);
         out.push(MetaColumn::LineEndings);
+        // Native OS tags (CPE-1175) — also applies-to-all, opt-in, lazy per-row read.
+        out.push(MetaColumn::NativeTags);
         out
     }
 
@@ -103,6 +113,7 @@ impl MetaColumn {
             MetaColumn::TypeMismatch => "detect.type_mismatch".to_string(),
             MetaColumn::TextEncoding => "detect.text_encoding".to_string(),
             MetaColumn::LineEndings => "detect.line_endings".to_string(),
+            MetaColumn::NativeTags => "native.tags".to_string(),
         }
     }
 
@@ -120,6 +131,7 @@ impl MetaColumn {
             MetaColumn::TypeMismatch => "Type Mismatch".to_string(),
             MetaColumn::TextEncoding => "Text Encoding".to_string(),
             MetaColumn::LineEndings => "Line Endings".to_string(),
+            MetaColumn::NativeTags => "Native Tags".to_string(),
         }
     }
 
@@ -128,26 +140,29 @@ impl MetaColumn {
     ///
     /// **"Applies to all files" sentinel (CPE-1166):** an **empty** slice means the column applies to
     /// *every* file, not a specific media family — the magic-byte detectors (true type / mismatch /
-    /// encoding / line endings) are file-agnostic. The picker must treat empty-extensions as
-    /// applies-to-all and never grey such a column out. See [`MetaColumn::applies_to_all`].
+    /// encoding / line endings) are file-agnostic, and so is the native-tags column (CPE-1175): OS-level
+    /// tags aren't scoped to a file kind. The picker must treat empty-extensions as applies-to-all and
+    /// never grey such a column out. See [`MetaColumn::applies_to_all`].
     pub fn extensions(&self) -> &'static [&'static str] {
         match self {
             MetaColumn::Audio(_) => AUDIO_EXTS,
             MetaColumn::ImageDimensions => IMAGE_EXTS,
             MetaColumn::DocPages | MetaColumn::DocInfo(_) => DOC_EXTS,
             MetaColumn::VideoDuration | MetaColumn::VideoTag(_) => VIDEO_EXTS,
-            // Applies-to-all sentinel: the file-agnostic magic-byte detectors have no extension gate.
+            // Applies-to-all sentinel: the file-agnostic magic-byte detectors and the native-tags column
+            // (CPE-1175) have no extension gate.
             MetaColumn::TrueType
             | MetaColumn::TypeMismatch
             | MetaColumn::TextEncoding
-            | MetaColumn::LineEndings => &[],
+            | MetaColumn::LineEndings
+            | MetaColumn::NativeTags => &[],
         }
     }
 
     /// Whether this column applies to **every** file rather than one media family — the "applies to all
     /// files" sentinel (CPE-1166): an empty [`extensions`](MetaColumn::extensions) list. The magic-byte
-    /// detectors are the only such columns; the picker must never grey them out on an unrecognised
-    /// extension.
+    /// detectors and the native-tags column (CPE-1175) are the only such columns; the picker must never
+    /// grey them out on an unrecognised extension.
     pub fn applies_to_all(&self) -> bool {
         self.extensions().is_empty()
     }
@@ -243,6 +258,27 @@ pub fn extract_column(ext: &str, bytes: &[u8], col: MetaColumn) -> CellValue {
             enc => CellValue::Text(enc.label().to_string()),
         },
         MetaColumn::LineEndings => line_endings_cell(bytes),
+        // Native tags (CPE-1175) can't be computed from header bytes at all — unlike every other column
+        // here, the value lives in the path's native OS metadata (Finder tags / NTFS ADS / xattr), not
+        // its content. The real per-row read happens in `column_cells::stream_column_cells`, which has
+        // the actual filesystem path and calls `native_tags_cell` (below) against
+        // `native_bridge::read_native_tags(path)` directly — skipping this bytes-only dispatcher (and the
+        // header read) entirely for this column. This arm exists only so `extract_column` stays
+        // exhaustive over `MetaColumn` and never panics if ever called with it directly.
+        MetaColumn::NativeTags => CellValue::Empty,
+    }
+}
+
+/// The [`CellValue`] for a path's native tags (CPE-1175): its tag names comma-joined in their normalized
+/// (sorted, de-duped) order, or [`CellValue::Empty`] when there are none — no native metadata, an
+/// unsupported filesystem, or an unreadable path all collapse to the same empty cell here (the read side,
+/// [`crate::native_bridge::read_native_tags`], already degrades every failure mode to
+/// [`NativeTags::default`]). Pure: takes the already-decoded [`NativeTags`], no filesystem access.
+pub fn native_tags_cell(native: &NativeTags) -> CellValue {
+    if native.tags.is_empty() {
+        CellValue::Empty
+    } else {
+        CellValue::Text(native.tags.join(", "))
     }
 }
 
@@ -625,6 +661,37 @@ mod tests {
         assert_eq!(extract_column("txt", b"", MetaColumn::LineEndings), CellValue::Empty);
     }
 
+    // --- CPE-1175: the native-tags column ---
+
+    #[test]
+    fn extract_column_native_tags_is_always_empty_regardless_of_bytes() {
+        // `extract_column` is pure-over-bytes and has no filesystem access, so it can never compute the
+        // real native-tags value — the actual per-path read happens in `column_cells` via
+        // `native_bridge::read_native_tags` + `native_tags_cell`. This just asserts the dispatcher arm
+        // never panics and always yields Empty, whatever bytes/extension it's handed.
+        assert_eq!(extract_column("txt", b"whatever", MetaColumn::NativeTags), CellValue::Empty);
+        assert_eq!(extract_column("", b"", MetaColumn::NativeTags), CellValue::Empty);
+    }
+
+    #[test]
+    fn native_tags_cell_comma_joins_tags_and_is_empty_when_none() {
+        assert_eq!(
+            native_tags_cell(&NativeTags::new(vec!["q3".into(), "report".into()], String::new())),
+            CellValue::Text("q3, report".into())
+        );
+        // Normalization sorts + de-dupes, so the join order is stable regardless of input order.
+        assert_eq!(
+            native_tags_cell(&NativeTags::new(vec!["zebra".into(), "apple".into()], String::new())),
+            CellValue::Text("apple, zebra".into())
+        );
+        // No tags (a native blob that's absent, unsupported, or carries only a label) → Empty.
+        assert_eq!(native_tags_cell(&NativeTags::default()), CellValue::Empty);
+        assert_eq!(
+            native_tags_cell(&NativeTags::new(vec![], "red".into())),
+            CellValue::Empty
+        );
+    }
+
     #[test]
     fn read_audio_tags_dispatches_and_is_empty_for_non_audio() {
         assert!(!read_audio_tags("mp3", &id3(&[("TIT2", "X")])).is_empty());
@@ -635,8 +702,8 @@ mod tests {
     #[test]
     fn all_columns_have_unique_ids_and_nonempty_labels() {
         let all = MetaColumn::all();
-        // 12 audio + 1 dimensions + 1 pages + 8 doc-info + 1 duration + 9 video-tag + 4 detectors.
-        assert_eq!(all.len(), 36);
+        // 12 audio + 1 dimensions + 1 pages + 8 doc-info + 1 duration + 9 video-tag + 4 detectors + 1 native tags.
+        assert_eq!(all.len(), 37);
 
         let mut ids: Vec<String> = all.iter().map(MetaColumn::id).collect();
         ids.sort();
@@ -651,15 +718,17 @@ mod tests {
     }
 
     #[test]
-    fn applies_to_all_sentinel_is_empty_extensions_for_detectors_only() {
+    fn applies_to_all_sentinel_is_empty_extensions_for_untyped_columns() {
         // The "applies to all files" sentinel (CPE-1166): a column with EMPTY extensions applies to every
-        // file and must never be greyed out by the extension gate. The magic-byte detectors are the only
-        // such columns; every media-family column keeps a non-empty extension list.
+        // file and must never be greyed out by the extension gate. The magic-byte detectors plus the
+        // native-tags column (CPE-1175) are the only such columns; every media-family column keeps a
+        // non-empty extension list.
         for col in [
             MetaColumn::TrueType,
             MetaColumn::TypeMismatch,
             MetaColumn::TextEncoding,
             MetaColumn::LineEndings,
+            MetaColumn::NativeTags,
         ] {
             assert!(col.extensions().is_empty(), "{} must apply to all files", col.id());
             assert!(col.applies_to_all(), "{} must report applies_to_all", col.id());
@@ -682,6 +751,7 @@ mod tests {
         assert_eq!(MetaColumn::TypeMismatch.id(), "detect.type_mismatch");
         assert_eq!(MetaColumn::TextEncoding.id(), "detect.text_encoding");
         assert_eq!(MetaColumn::LineEndings.id(), "detect.line_endings");
+        assert_eq!(MetaColumn::NativeTags.id(), "native.tags");
     }
 
     #[test]
@@ -697,6 +767,8 @@ mod tests {
         assert!(MetaColumn::TypeMismatch.extensions().is_empty());
         assert!(MetaColumn::TextEncoding.extensions().is_empty());
         assert!(MetaColumn::LineEndings.extensions().is_empty());
+        // The native-tags column (CPE-1175) is likewise applies-to-all — OS tags aren't extension-scoped.
+        assert!(MetaColumn::NativeTags.extensions().is_empty());
     }
 
     #[test]
