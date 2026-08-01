@@ -3256,6 +3256,212 @@ fn template_import(app: tauri::AppHandle, json: String) -> Result<TemplateCatalo
     cpe_server::folder_template::import(&server_ctx::TauriCtx::new(&app), &json)
 }
 
+// ---- Action macros (CPE-938/951/1033/1187/1188, epic CPE-739) --------------------------------
+// Thin dispatchers into `cpe_server::macro_store` (CRUD/persistence, CPE-1033) and the CPE-1187
+// `macro_run::resolve` executor (resolution + collision-safe naming + scope guard + inverse
+// model). The RUN command bridges the resolved plan to the existing `rename_entry`/`move_exact`
+// primitives (plus the tag store and a media re-encode for `convert`), applying the whole run
+// atomically — a failure partway rolls back everything already applied via the recorded inverses,
+// so a macro run is never left half-done. `macro_undo` replays a completed run's inverses in
+// reverse to reverse it later. Imported macros never auto-run: `macro_import` only writes to the
+// persisted catalog — running is always a separate, explicit `macro_run` call from the UI.
+use cpe_server::action_macro::{ActionMacro, PlannedOp};
+use cpe_server::macro_run::ResolvedRun;
+use cpe_server::macro_store::{Catalog as MacroCatalog, MacroSummary};
+
+/// Save (insert or replace by name) a macro and persist. Returns the updated catalog.
+#[tauri::command]
+#[cfg_attr(feature = "specta-bindings", specta::specta)]
+fn macro_save(app: tauri::AppHandle, macro_: ActionMacro) -> Result<MacroCatalog, String> {
+    cpe_server::macro_store::save(&server_ctx::TauriCtx::new(&app), macro_)
+}
+
+/// Every stored macro's name + step count, for the gallery.
+#[tauri::command]
+#[cfg_attr(feature = "specta-bindings", specta::specta)]
+fn macro_list(app: tauri::AppHandle) -> Result<Vec<MacroSummary>, String> {
+    cpe_server::macro_store::list(&server_ctx::TauriCtx::new(&app))
+}
+
+/// One stored macro by name (`None` if absent).
+#[tauri::command]
+#[cfg_attr(feature = "specta-bindings", specta::specta)]
+fn macro_load(app: tauri::AppHandle, name: String) -> Result<Option<ActionMacro>, String> {
+    cpe_server::macro_store::load(&server_ctx::TauriCtx::new(&app), &name)
+}
+
+/// Delete a stored macro by name and persist. Returns the updated catalog.
+#[tauri::command]
+#[cfg_attr(feature = "specta-bindings", specta::specta)]
+fn macro_delete(app: tauri::AppHandle, name: String) -> Result<MacroCatalog, String> {
+    cpe_server::macro_store::delete(&server_ctx::TauriCtx::new(&app), &name)
+}
+
+/// A single macro's JSON, for sharing/export.
+#[tauri::command]
+#[cfg_attr(feature = "specta-bindings", specta::specta)]
+fn macro_export(macro_: ActionMacro) -> Result<String, String> {
+    cpe_server::macro_store::export(&macro_)
+}
+
+/// Import a macro (or a whole catalog) from JSON, merged by name into the persisted store. Returns
+/// the updated catalog. **Never runs anything** — running is always the separate, explicit
+/// `macro_run` call the UI makes after the user picks the imported macro.
+#[tauri::command]
+#[cfg_attr(feature = "specta-bindings", specta::specta)]
+fn macro_import(app: tauri::AppHandle, json: String) -> Result<MacroCatalog, String> {
+    cpe_server::macro_store::import(&server_ctx::TauriCtx::new(&app), &json)
+}
+
+/// Expand `macro_` over `inputs` into the flat, unresolved `PlannedOp` preview list (CPE-938) — the
+/// macro-run confirm dialog's dry-run data. Pure; no collision-dedupe or scope check yet (those are
+/// `macro_run`'s job, via CPE-1187's `macro_run::resolve`).
+#[tauri::command]
+#[cfg_attr(feature = "specta-bindings", specta::specta)]
+fn macro_plan(macro_: ActionMacro, inputs: Vec<String>) -> Result<Vec<PlannedOp>, String> {
+    cpe_server::action_macro::validate(&macro_)?;
+    Ok(cpe_server::action_macro::plan(&macro_, &inputs))
+}
+
+/// Run `macro_` over `inputs`, scoped to `root`: resolves + scope-checks via CPE-1187
+/// (`macro_run::resolve`), then physically applies each op. All-or-nothing — if any step fails
+/// partway, everything already applied is rolled back automatically via the recorded inverses
+/// before the error is returned. On success, returns the applied `ResolvedRun`; hang onto it (the
+/// frontend keeps it in memory) and pass it to `macro_undo` to reverse the whole run later.
+#[tauri::command]
+#[cfg_attr(feature = "specta-bindings", specta::specta)]
+async fn macro_run(
+    app: tauri::AppHandle,
+    macro_: ActionMacro,
+    inputs: Vec<String>,
+    root: String,
+) -> Result<ResolvedRun, String> {
+    let resolved = cpe_server::macro_run::resolve(&macro_, &inputs, &root).map_err(|errs| errs.join("; "))?;
+    // Every path a resolved op touches is the user's doing (CPE-1101), same as rename_entry/move_exact.
+    note_app_op(&app, || {
+        resolved
+            .ops
+            .iter()
+            .flat_map(|op| [op.from.clone(), op.to.clone()])
+            .collect()
+    });
+    let ctx = server_ctx::TauriCtx::new(&app);
+    tauri::async_runtime::spawn_blocking(move || macro_apply_run(&ctx, resolved))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+/// Undo a previously-applied `ResolvedRun` (as returned by `macro_run`) by replaying its inverses
+/// in reverse order.
+#[tauri::command]
+#[cfg_attr(feature = "specta-bindings", specta::specta)]
+async fn macro_undo(app: tauri::AppHandle, run: ResolvedRun) -> Result<(), String> {
+    note_app_op(&app, || {
+        run.inverses
+            .iter()
+            .flat_map(|inv| [inv.from.clone(), inv.to.clone()])
+            .collect()
+    });
+    let ctx = server_ctx::TauriCtx::new(&app);
+    tauri::async_runtime::spawn_blocking(move || macro_apply_inverses(&ctx, &run))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+/// Apply every op in `run.ops`, in order; if one fails, immediately replay the inverses of
+/// whatever already succeeded (in reverse), so the run is all-or-nothing, then return the original
+/// failure. On success, returns `run` unchanged — the caller's undo handle for `macro_undo`.
+fn macro_apply_run(ctx: &dyn ServerCtx, run: ResolvedRun) -> Result<ResolvedRun, String> {
+    for (applied, op) in run.ops.iter().enumerate() {
+        if let Err(e) = macro_apply_op(ctx, &op.from, &op.kind, &op.detail, &op.to) {
+            for inv in run.inverses[..applied].iter().rev() {
+                let _ = macro_apply_op(ctx, &inv.from, &inv.kind, &inv.detail, &inv.to);
+            }
+            return Err(format!("macro run failed at step {}: {e} (rolled back)", applied + 1));
+        }
+    }
+    Ok(run)
+}
+
+/// Replay `run.inverses` in reverse order — the undo of a completed `macro_run`.
+fn macro_apply_inverses(ctx: &dyn ServerCtx, run: &ResolvedRun) -> Result<(), String> {
+    for inv in run.inverses.iter().rev() {
+        macro_apply_op(ctx, &inv.from, &inv.kind, &inv.detail, &inv.to)?;
+    }
+    Ok(())
+}
+
+/// Bridge one resolved (or inverse) op to its real primitive. `kind` is `"rename"` / `"move"` /
+/// `"convert"` / `"tag"` / `"untag"` (the inverse-only kind of a tag step, per `macro_run::InverseOp`).
+fn macro_apply_op(ctx: &dyn ServerCtx, from: &str, kind: &str, detail: &str, to: &str) -> Result<(), String> {
+    match kind {
+        "rename" => {
+            let new_name = Path::new(to)
+                .file_name()
+                .and_then(|n| n.to_str())
+                .ok_or_else(|| format!("bad rename target {to:?}"))?
+                .to_string();
+            rename_entry_impl(from.to_string(), new_name).map(|_| ())
+        }
+        "move" => {
+            let results = move_exact_impl(vec![(from.to_string(), to.to_string())]);
+            match results.into_iter().next() {
+                Some(r) if r.ok => Ok(()),
+                Some(r) => Err(r.error),
+                None => Err("move produced no result".to_string()),
+            }
+        }
+        "convert" => macro_convert_in_place(from, to, detail),
+        "tag" => macro_add_tag(ctx, from, detail),
+        "untag" => macro_remove_tag(ctx, from, detail),
+        other => Err(format!("unknown macro op kind {other:?}")),
+    }
+}
+
+/// Re-encode the image at `from` to the `detail` extension and write it at `to`, then remove the
+/// original — a macro `Convert` step is in-place from the user's perspective (one file, new
+/// extension), unlike the Batch-Media dialog's non-destructive-by-default siblings. A no-op when
+/// `to == from`. Non-image bytes or an unsupported target extension fail loudly rather than
+/// silently corrupting the file; `macro_apply_run` rolls the whole run back on any such failure.
+fn macro_convert_in_place(from: &str, to: &str, detail: &str) -> Result<(), String> {
+    if from == to {
+        return Ok(());
+    }
+    let bytes = fs::read(from).map_err(|e| format!("could not read {from}: {e}"))?;
+    let converted = cpe_server::batch_transform::apply_ops(
+        &bytes,
+        &[cpe_server::batch_media::MediaOp::Convert { to_ext: detail.to_string() }],
+    )?;
+    fs::write(to, converted).map_err(|e| format!("could not write {to}: {e}"))?;
+    fs::remove_file(from).map_err(|e| format!("could not remove {from}: {e}"))?;
+    Ok(())
+}
+
+/// Add `label` to the tags already at `path` (union — a macro `Tag` step never clobbers existing
+/// tags), preserving the path's colour label.
+fn macro_add_tag(ctx: &dyn ServerCtx, path: &str, label: &str) -> Result<(), String> {
+    let store = cpe_server::tags::load(ctx)?;
+    let entry = store.get(path);
+    let mut tags: Vec<String> = entry.map(|e| e.tags().to_vec()).unwrap_or_default();
+    let existing_label = entry.map(|e| e.label().to_string()).unwrap_or_default();
+    if !tags.iter().any(|t| t == label) {
+        tags.push(label.to_string());
+    }
+    cpe_server::tags::set(ctx, path, tags, existing_label).map(|_| ())
+}
+
+/// Remove `label` from `path`'s tags (the inverse of `macro_add_tag`), preserving the other tags
+/// and the colour label. A no-op when the path has no tag-store entry at all.
+fn macro_remove_tag(ctx: &dyn ServerCtx, path: &str, label: &str) -> Result<(), String> {
+    let store = cpe_server::tags::load(ctx)?;
+    let Some(entry) = store.get(path) else {
+        return Ok(());
+    };
+    let tags: Vec<String> = entry.tags().iter().filter(|t| *t != label).cloned().collect();
+    let existing_label = entry.label().to_string();
+    cpe_server::tags::set(ctx, path, tags, existing_label).map(|_| ())
+}
+
 // ---- Native tags bridge (CPE-828, epic CPE-717) ----------------------------------------------
 // Sync a path's CPE tags with the OS-native store (macOS Finder tags / Windows NTFS ADS / Linux xattr)
 // via the tested `cpe_server::native_bridge` orchestration (CPE-830). Thin dispatchers over its ctx
@@ -7464,6 +7670,15 @@ pub fn run() {
             template_stamp,
             template_export,
             template_import,
+            macro_save,
+            macro_list,
+            macro_load,
+            macro_delete,
+            macro_export,
+            macro_import,
+            macro_plan,
+            macro_run,
+            macro_undo,
             native_tags_name,
             native_tags_pull,
             native_tags_push,
@@ -8186,6 +8401,15 @@ pub fn export_bindings(out: &std::path::Path) -> Result<(), String> {
         template_stamp,
         template_export,
         template_import,
+        macro_save,
+        macro_list,
+        macro_load,
+        macro_delete,
+        macro_export,
+        macro_import,
+        macro_plan,
+        macro_run,
+        macro_undo,
         native_tags_name,
         native_tags_pull,
         native_tags_push,
@@ -8403,6 +8627,120 @@ mod tests {
     #[test]
     fn parent_dir_at_root_returns_none() {
         assert_eq!(parent_dir_impl("/".to_string()), None);
+    }
+
+    // ---- Action macros: save→list→load round trip + run/undo (CPE-1188, epic CPE-739) ---------
+    // These test the same underlying calls the `macro_*` `#[tauri::command]` dispatchers make
+    // (`cpe_server::macro_store`/`macro_run` + the `macro_apply_*` bridge functions), against a
+    // `HeadlessCtx` — the command fns themselves need a live `tauri::AppHandle`, which (per the
+    // `typed_bindings_are_committed...` test's comment above) can't be constructed in a plain
+    // libtest binary on Windows.
+
+    #[test]
+    fn macro_save_list_load_round_trip() {
+        let base = tempfile::tempdir().unwrap();
+        let ctx = cpe_server::ctx::HeadlessCtx::new(base.path());
+        let mac = cpe_server::action_macro::ActionMacro {
+            name: "tidy".into(),
+            steps: vec![cpe_server::action_macro::MacroStep::Tag { label: "done".into() }],
+        };
+
+        cpe_server::macro_store::save(&ctx, mac.clone()).unwrap();
+        let names: Vec<String> = cpe_server::macro_store::list(&ctx)
+            .unwrap()
+            .into_iter()
+            .map(|s| s.name)
+            .collect();
+        assert_eq!(names, vec!["tidy".to_string()]);
+        assert_eq!(cpe_server::macro_store::load(&ctx, "tidy").unwrap(), Some(mac));
+        assert_eq!(cpe_server::macro_store::load(&ctx, "nope").unwrap(), None);
+    }
+
+    #[test]
+    fn macro_run_tag_step_then_undo_restores_the_tag_store() {
+        let config = tempfile::tempdir().unwrap();
+        let ctx = cpe_server::ctx::HeadlessCtx::new(config.path());
+        let work = tempfile::tempdir().unwrap();
+        let file = work.path().join("a.txt");
+        fs::write(&file, b"hi").unwrap();
+        let input = file.to_string_lossy().to_string();
+        let root = work.path().to_string_lossy().to_string();
+
+        let mac = cpe_server::action_macro::ActionMacro {
+            name: "tag-done".into(),
+            steps: vec![cpe_server::action_macro::MacroStep::Tag { label: "done".into() }],
+        };
+        let resolved = cpe_server::macro_run::resolve(&mac, std::slice::from_ref(&input), &root).unwrap();
+        let applied = macro_apply_run(&ctx, resolved).unwrap();
+
+        let store = cpe_server::tags::load(&ctx).unwrap();
+        assert!(store.get(&input).unwrap().tags().contains(&"done".to_string()));
+
+        macro_apply_inverses(&ctx, &applied).unwrap();
+        let store = cpe_server::tags::load(&ctx).unwrap();
+        assert!(!store.contains_key(&input), "tag entry should be pruned back to nothing after undo");
+    }
+
+    #[test]
+    fn macro_run_rename_and_move_with_undo_restores_the_original_path_and_bytes() {
+        let config = tempfile::tempdir().unwrap();
+        let ctx = cpe_server::ctx::HeadlessCtx::new(config.path());
+        let work = tempfile::tempdir().unwrap();
+        let sub = work.path().join("sub");
+        fs::create_dir_all(&sub).unwrap();
+        let file = sub.join("a.txt");
+        fs::write(&file, b"hello").unwrap();
+        let dest = work.path().join("Archive");
+        fs::create_dir_all(&dest).unwrap();
+
+        let mac = cpe_server::action_macro::ActionMacro {
+            name: "archive".into(),
+            steps: vec![
+                cpe_server::action_macro::MacroStep::Rename { template: "b.txt".into() },
+                cpe_server::action_macro::MacroStep::Move { dest: dest.to_string_lossy().to_string() },
+            ],
+        };
+        let root = work.path().to_string_lossy().to_string();
+        let input = file.to_string_lossy().to_string();
+        let resolved = cpe_server::macro_run::resolve(&mac, &[input], &root).unwrap();
+        let applied = macro_apply_run(&ctx, resolved).unwrap();
+
+        let moved = dest.join("b.txt");
+        assert!(moved.exists(), "file should have been renamed then moved");
+        assert!(!file.exists());
+
+        macro_apply_inverses(&ctx, &applied).unwrap();
+        assert!(file.exists(), "undo should restore the original path");
+        assert!(!moved.exists());
+        assert_eq!(fs::read_to_string(&file).unwrap(), "hello");
+    }
+
+    #[test]
+    fn macro_run_rolls_back_the_first_step_when_a_later_one_fails() {
+        let config = tempfile::tempdir().unwrap();
+        let ctx = cpe_server::ctx::HeadlessCtx::new(config.path());
+        let work = tempfile::tempdir().unwrap();
+        let a = work.path().join("a.txt");
+        fs::write(&a, b"hi").unwrap();
+        // Never created on disk — its rename primitive will fail when actually applied, even
+        // though pure resolution (which never touches disk) planned it a valid collision-free
+        // target right alongside `a.txt`'s.
+        let missing = work.path().join("missing.txt");
+
+        let mac = cpe_server::action_macro::ActionMacro {
+            name: "r".into(),
+            steps: vec![cpe_server::action_macro::MacroStep::Rename { template: "renamed.txt".into() }],
+        };
+        let root = work.path().to_string_lossy().to_string();
+        let inputs = vec![a.to_string_lossy().to_string(), missing.to_string_lossy().to_string()];
+        let resolved = cpe_server::macro_run::resolve(&mac, &inputs, &root).unwrap();
+
+        let err = macro_apply_run(&ctx, resolved).unwrap_err();
+        assert!(err.contains("rolled back"), "got: {err}");
+
+        // The first (successful) step's effect must have been rolled back.
+        assert!(a.exists(), "rollback should restore the first step's original file");
+        assert!(!work.path().join("renamed.txt").exists());
     }
 
     // list_dir + stream_dir_entries walker tests moved with the code to `cpe_server::listing` (CPE-815).

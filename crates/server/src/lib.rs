@@ -305,6 +305,11 @@ pub mod macro_library;
 /// config dir, mirroring the `folder_template` store pattern (CPE-1033, epic CPE-739).
 pub mod macro_store;
 
+/// Macro executor resolution + undo model — resolves `(ActionMacro, inputs)` into a collision-safe,
+/// scope-checked, reversible op list; the actual disk writes happen in the app's `macro_run`
+/// command, driven by this module's plan (CPE-1187, epic CPE-739).
+pub mod macro_run;
+
 /// Shared filesystem model types (DirEntry / EntryInfo / Place / OpResult) + extension/hidden helpers.
 pub mod model;
 

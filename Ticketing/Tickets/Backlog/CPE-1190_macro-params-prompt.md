@@ -30,3 +30,24 @@ Add an **additive** prompt-parameter (model + pure resolution, headless) and a r
 ## Work Log
 - 2026-07-31 — Filed by Foreman (workshift, epic CPE-739). Model half batched into the backend worker (additive);
   prompt-UI half in the frontend phase.
+- 2026-07-31 — **Model half landed** (built alongside CPE-1187/1188 on the same branch,
+  `cpe-1187-1188-macro-backend`): `crates/server/src/action_macro.rs` now supports an `{ask:label}`
+  prompt-parameter token in any step's string field (a rename template, a move dest, a tag label, or a
+  convert extension). Strictly additive — `validate()` only special-cases tokens starting with `ask:` (a
+  bare `{ask}` with no label is still an unknown-token error, same as before); `plan()`'s signature and
+  behaviour are byte-for-byte unchanged (it now delegates to the new `plan_with_params(m, inputs, &empty
+  map)`, and an empty params map with no `{ask:...}` tokens present produces identical output to the old
+  `plan()`, verified by a dedicated equivalence test). New `pub fn plan_with_params(&ActionMacro, &[String],
+  &BTreeMap<String,String>) -> Vec<PlannedOp>` substitutes each `{ask:label}` with `params[label]`; an
+  absent label resolves to nothing (dropped cleanly — never a panic, never a literal `{ask:...}` leaking
+  into a resolved path/tag/extension). 9 new tests: validate accepts `{ask:x}` in a rename template but
+  still rejects a bare `{ask}`; `plan` (old entry point) leaves an unresolved `{ask:...}` dropped, matching
+  "absent param defaults cleanly"; `plan_with_params` == `plan` when no params given; substitution works in
+  a rename template, a move dest, a tag label, and a convert extension; a partially-answered param map still
+  resolves cleanly (the unanswered token drops, the answered one substitutes). The CPE-1187 executor
+  (`macro_run::resolve`) does **not** yet consume `plan_with_params`/params — it still calls the original
+  `plan()`, so today's macro run/undo behaviour is completely unaffected by this change. Wiring the executor
+  through params + the actual `{ask:label}` UI prompt dialog remains this ticket's UI half — **left in
+  Backlog**, not moved to Done, since only the model half is complete. `cargo test -p cpe-server`:
+  1131/1131 passed (action_macro: 27/27, up from 18). `cargo clippy --all-targets -D warnings` clean
+  (default + `--features index`). No new dependencies.

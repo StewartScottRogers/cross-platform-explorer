@@ -53,3 +53,14 @@ library surfacing, and menu/hotkey/watched-folder bindings (GUI/attended).
 
 ## Board hygiene 2026-07-29 — reverted In Progress → Proposed
 Not actively being worked: all decomposed child tickets are Done. Remaining DoD is user-gated (GUI / model-key / cert / Mac) or a deferred cap. Reverted to **Proposed** so the epic queue honestly shows what's dormant vs active; re-activate with `/ticketing-epic activate` to resume (like CPE-703 was this session). **Remaining (DoD review 2026-07-30):** Parameter-prompt UI + menu/hotkey/watched-folder bindings unbuilt (only macro model + store).
+
+2026-07-31 (workshift) — Re-activated; decomposed into CPE-1187..1191. **Macro backend phase landed**
+(CPE-1187 + CPE-1188, one branch/PR): `crates/server/src/macro_run.rs` resolves `(ActionMacro, inputs)` into
+a collision-safe, scope-checked, reversible op list (CPE-1187), and 9 thin Tauri commands
+(`macro_save`/`list`/`load`/`delete`/`export`/`import`/`plan`/`run`/`undo`) now bridge that plan to the real
+`rename_entry`/`move_exact`/tag-store/media-convert primitives, all-or-nothing with automatic rollback on a
+mid-run failure (CPE-1188) — **the macro engine is reachable from the frontend for the first time**.
+Bindings regenerated. CPE-1190's *model* half (an additive `{ask:label}` prompt-parameter token +
+`plan_with_params`) rode along on the same branch; its prompt-UI half is still open in Backlog. Remaining
+before DoD: CPE-1190's UI half, an action-library gallery, and menu/hotkey/watched-folder bindings (all
+GUI/attended, per the 2026-07-30 review above).
