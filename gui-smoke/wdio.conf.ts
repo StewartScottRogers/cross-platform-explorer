@@ -634,6 +634,27 @@ function seedThumbnailGalleryFixture(tmpDir: string): void {
   fs.writeFileSync(path.join(dir, THUMB_GALLERY_BADFONT_NAME), "not a real font, just bytes\n", "utf-8");
 }
 
+// --- CPE-1241: shred-dialog fixture (epic CPE-738) ----------------------------------------------
+// A DEDICATED subfolder + throwaway file for shred-dialog.smoke.ts's render pin of
+// `ShredConfirmDialog` (CPE-1240) — the one destructive surface in the app with NO trash fallback
+// (`shred_paths` overwrites bytes then unlinks). The spec MUST NEVER actually click "Shred
+// permanently" (that would irreversibly destroy the file), but isolating it in its own subfolder,
+// separate from every other spec's fixtures, is belt-and-braces in case a future edit to that spec
+// ever slips and does confirm — the blast radius stays this one throwaway file, and the whole tmpDir
+// is `rm -rf`'d in `onComplete` regardless.
+export const SHRED_DIR_NAME = "CPE-1241-shred-folder";
+export const SHRED_FILE_NAME = "CPE-1241-shred-me.txt";
+
+function seedShredFixture(tmpDir: string): void {
+  const dir = path.join(tmpDir, SHRED_DIR_NAME);
+  fs.mkdirSync(dir, { recursive: true });
+  fs.writeFileSync(
+    path.join(dir, SHRED_FILE_NAME),
+    "CPE-1241 throwaway gui-smoke fixture — the spec must never actually shred this file.\n",
+    "utf-8",
+  );
+}
+
 let tauriDriver: ChildProcess | undefined;
 let shuttingDown = false;
 
@@ -763,6 +784,10 @@ export const config: WebdriverIO.Config = {
     // CPE-1237: seed the mixed-format (PNG/SVG/bad-font) subfolder for the streaming-thumbnail-client
     // gallery render pin (see block above) — same tmpDir, same single app launch.
     seedThumbnailGalleryFixture(tmpDir);
+
+    // CPE-1241: seed a dedicated throwaway file for the ShredConfirmDialog render pin (see block
+    // above) — its own subfolder so nothing else is ever at risk.
+    seedShredFixture(tmpDir);
 
     const caps = capabilities as unknown as Array<{ "tauri:options": { args: string[] } }>;
     caps[0]["tauri:options"].args = ["--test-mode", "--x=-4000", `--open=${tmpDir}`];
