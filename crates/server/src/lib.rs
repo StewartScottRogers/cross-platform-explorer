@@ -515,6 +515,12 @@ pub mod op_plan;
 /// over bytes; no filesystem I/O, no new dependencies.
 pub mod perceptual;
 
+/// Near-duplicate **image** scan pipeline — walks a folder, dHashes each decodable image via
+/// [`perceptual`], and single-link-clusters visually-similar images into groups (CPE-1200, epic
+/// CPE-997). The perceptual complement of [`duplicates`] (byte-identical); streams over the shared
+/// walker like [`duplicates::stream_duplicates`].
+pub mod image_similarity;
+
 /// SimHash text fingerprinting + near-duplicate document clustering (CPE-999, epic CPE-997). Extends
 /// [`perceptual`]'s clustering core to text: Charikar SimHash over tokenised text (stable 64-bit FNV-1a
 /// per token) instead of an image dHash, reusing [`perceptual::cluster`] for the grouping. Pure; no new

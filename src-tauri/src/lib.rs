@@ -3227,6 +3227,48 @@ async fn find_duplicates_stream(
     .map_err(|e| e.to_string())?
 }
 
+/// Find near-duplicate (visually-similar) images under `root` (CPE-1200/1201, epic CPE-997) — walk +
+/// dHash + single-link cluster. Model lives in `cpe_server::image_similarity`; this is a thin
+/// `spawn_blocking` dispatcher, the perceptual complement of `find_duplicates`.
+#[tauri::command]
+#[cfg_attr(feature = "specta-bindings", specta::specta)]
+async fn find_similar_images(root: String) -> Result<cpe_server::image_similarity::SimResult, String> {
+    tauri::async_runtime::spawn_blocking(move || cpe_server::image_similarity::find_similar_images(&root))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+/// Streaming variant of `find_similar_images` (CPE-1200/1201, streaming-liveness convention): pushes the
+/// near-duplicate groups over an IPC channel so the UI thread never blocks on the walk + decode + cluster
+/// (CPE-760). Image clustering is a whole-set operation (single-link needs every hash first), so the
+/// groups arrive as one batch after the walk completes — the frontend still flips `loading` off on it.
+/// The walk is the shared `cpe_server::image_similarity::stream_similar_images`; the returned result
+/// carries the final `files_scanned` + `truncated` with empty `groups` (those streamed).
+#[tauri::command]
+#[cfg_attr(feature = "specta-bindings", specta::specta)]
+async fn find_similar_images_stream(
+    root: String,
+    on_group: tauri::ipc::Channel<Vec<cpe_server::image_similarity::SimGroup>>,
+) -> Result<cpe_server::image_similarity::SimResult, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let stats = cpe_server::image_similarity::stream_similar_images(
+            &root,
+            cpe_server::image_similarity::DEFAULT_MAX_DISTANCE,
+            |batch| {
+                let _ = on_group.send(batch);
+                std::ops::ControlFlow::Continue(())
+            },
+        )?;
+        Ok(cpe_server::image_similarity::SimResult {
+            groups: Vec::new(),
+            files_scanned: stats.files_scanned,
+            truncated: stats.truncated,
+        })
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
 // ---- Rules-based auto-organize (CPE-1142, epic CPE-979) -------------------------------------------
 // Propose -> checkpoint -> apply, wired over the built+tested `cpe_server::organize` planner. The listing
 // + checkpoint + move glue lives in `cpe_server::organize_apply` (CPE-815 pattern); these commands are
@@ -7967,6 +8009,8 @@ pub fn run() {
             files_identical,
             find_duplicates,
             find_duplicates_stream,
+            find_similar_images,
+            find_similar_images_stream,
             organize_plan,
             organize_clutter,
             organize_apply,
@@ -8705,6 +8749,8 @@ pub fn export_bindings(out: &std::path::Path) -> Result<(), String> {
         files_identical,
         find_duplicates,
         find_duplicates_stream,
+        find_similar_images,
+        find_similar_images_stream,
         organize_plan,
         organize_clutter,
         organize_apply,
@@ -10050,6 +10096,40 @@ mod tests {
     // files_identical tests moved with the code to `cpe_server::compare` (CPE-815).
 
     // find_duplicates tests moved with the code to `cpe_server::duplicates` (CPE-815).
+
+    // A minimal valid 4x2 gradient PNG (81 bytes) — lets this crate's test exercise the image-similarity
+    // collect path without pulling the `image` crate in as a dev-dependency here (the pipeline's own
+    // fixtures live in `cpe_server::image_similarity`'s tests). Two byte-identical copies hash equal, so
+    // they must land in one near-duplicate group.
+    const TINY_PNG: &[u8] = &[
+        0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0x00, 0x00, 0x0d, 0x49, 0x48, 0x44, 0x52,
+        0x00, 0x00, 0x00, 0x04, 0x00, 0x00, 0x00, 0x02, 0x08, 0x02, 0x00, 0x00, 0x00, 0xf0, 0xca, 0xea,
+        0x34, 0x00, 0x00, 0x00, 0x18, 0x49, 0x44, 0x41, 0x54, 0x78, 0x9c, 0x63, 0x60, 0x60, 0x60, 0xb0,
+        0xb7, 0xb7, 0xaf, 0xaf, 0xaf, 0xdf, 0xbf, 0x7f, 0x3f, 0x03, 0x32, 0x07, 0x00, 0x5d, 0xcb, 0x08,
+        0xef, 0x4e, 0x95, 0xaf, 0xd0, 0x00, 0x00, 0x00, 0x00, 0x49, 0x45, 0x4e, 0x44, 0xae, 0x42, 0x60,
+        0x82,
+    ];
+
+    #[test]
+    fn find_similar_images_collect_groups_a_fixture() {
+        let d = scratch("simimg");
+        fs::create_dir_all(d.join("sub")).unwrap();
+        // Two byte-identical PNGs (across a subdir) → identical dHash → one near-duplicate group.
+        fs::write(d.join("a.png"), TINY_PNG).unwrap();
+        fs::write(d.join("sub/b.png"), TINY_PNG).unwrap();
+        // A non-image file must be ignored by the extension filter.
+        fs::write(d.join("notes.txt"), b"not an image").unwrap();
+
+        let r = cpe_server::image_similarity::find_similar_images(&d.to_string_lossy()).unwrap();
+        assert!(!r.truncated);
+        assert_eq!(r.files_scanned, 2, "only the two .png candidates are hashed");
+        assert_eq!(r.groups.len(), 1, "the identical pair forms one group");
+        assert_eq!(r.groups[0].paths.len(), 2);
+
+        // A non-folder root is an Err, like find_duplicates.
+        assert!(cpe_server::image_similarity::find_similar_images(&d.join("a.png").to_string_lossy()).is_err());
+        let _ = fs::remove_dir_all(&d);
+    }
 
     // dir_size / dir_children_sizes tests moved with the code to `cpe_server::disk_usage` (CPE-815).
 
