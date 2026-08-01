@@ -27,8 +27,10 @@
   }
 
   function onKeydown(e: KeyboardEvent) {
+    // Only Enter here. Escape is handled once, globally, by the `svelte:window` listener below
+    // (matching ConfirmDialog). Handling it here too would fire `cancel` twice, since a keydown in
+    // the field bubbles up to window.
     if (e.key === "Enter") submit();
-    else if (e.key === "Escape") dispatch("cancel");
   }
 </script>
 

@@ -60,6 +60,19 @@ describe("PasswordPromptDialog (CPE-1179)", () => {
     expect(cancelled).toBe(1);
   });
 
+  it("pressing Escape in the field dispatches cancel exactly once (no double-dispatch)", async () => {
+    // Regression (CPE-1179 review): a keydown in the field bubbles to window, so if both the field's
+    // onKeydown AND the svelte:window listener handled Escape, cancel would fire twice. Only window
+    // should handle it.
+    const { component } = render(PasswordPromptDialog);
+    let cancelled = 0;
+    component.$on("cancel", () => cancelled++);
+
+    await fireEvent.keyDown(screen.getByTestId("password-field"), { key: "Escape" });
+
+    expect(cancelled).toBe(1);
+  });
+
   it("renders the optional error line when the error prop is set", () => {
     render(PasswordPromptDialog, { error: "Wrong password — try again" });
     expect(screen.getByTestId("password-error").textContent).toContain("Wrong password — try again");
