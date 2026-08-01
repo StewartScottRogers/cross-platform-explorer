@@ -2,7 +2,7 @@
 id: CPE-705
 title: "EPIC: Archive & compression suite"
 type: Task
-status: Proposed
+status: In Progress
 priority: Medium
 component: Multiple
 tags: [epic]
