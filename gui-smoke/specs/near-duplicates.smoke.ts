@@ -10,11 +10,13 @@
 // scope), so there is no selection/keeper-guard assertion to mirror here; the spec dismisses via the
 // close button and never mutates the tmpDir.
 //
-// The two seeded fixtures (wdio.conf.ts#seedNearDupDocsFixture) reuse the EXACT paragraphs
-// `simhash.rs`'s own unit test measures at Hamming distance <= 8 (near pair) vs. >= 12 (unrelated) —
-// i.e. this fixture is provably inside `document_similarity::DEFAULT_MAX_DISTANCE` (8), not just
-// plausible-looking prose — so they group as a real near-duplicate pair, structurally far from the
-// unrelated third doc also seeded into this tmpDir.
+// The seeded fixture (wdio.conf.ts#seedNearDupDocsFixture) follows the same shape as `simhash.rs`'s
+// own `near_identical_text_is_closer_than_unrelated_text` unit test (a base paragraph, a lightly-edited
+// near-copy, and an unrelated paragraph). Its actual measured SimHash Hamming distances are near = 3
+// and far = 15 — provably inside `document_similarity::DEFAULT_MAX_DISTANCE` (8) for the near pair and
+// well outside it for the unrelated doc — so the near pair groups as a real near-duplicate while the
+// third doc stays a singleton. (Not byte-identical to the Rust test's strings; the distances above were
+// measured directly against these fixture strings.)
 import { expect } from "chai";
 import fs from "node:fs";
 import path from "node:path";

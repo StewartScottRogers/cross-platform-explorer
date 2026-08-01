@@ -52,12 +52,13 @@ tidy it up when touching the near-dup area for the render-pin.
   so — unlike the similar-images spec — there is no keeper-guard/Move-to-Bin assertion to mirror).
   `afterEach` calls `snapFailure(this.currentTest, "near-duplicates")` per CPE-1149.
 - Added `seedNearDupDocsFixture(tmpDir)` to `gui-smoke/wdio.conf.ts#onPrepare`, seeding
-  `CPE-1221-notes-a.md` / `-b.md` (near-identical) + `CPE-1221-unrelated.md`. Rather than inventing
-  new prose, the fixture reuses the EXACT three paragraphs `crates/server/src/simhash.rs`'s own unit
-  test (`near_duplicate_docs_groups_close_pairs_and_separates_far_ones`) measures: the near pair
-  (one word changed + a sentence appended) at Hamming distance ≤8 and the unrelated paragraph at
-  ≥12 — inside/outside `document_similarity::DEFAULT_MAX_DISTANCE` (8) by construction, not just
-  plausible-looking text.
+  `CPE-1221-notes-a.md` / `-b.md` (near-identical) + `CPE-1221-unrelated.md`. The fixture follows the
+  same shape as `crates/server/src/simhash.rs`'s `near_identical_text_is_closer_than_unrelated_text`
+  test (base paragraph + lightly-edited near-copy + unrelated paragraph). Measured directly against
+  these fixture strings: the near pair (one word changed + a sentence appended) is at Hamming distance
+  3 and the unrelated paragraph at 15 — inside/outside `document_similarity::DEFAULT_MAX_DISTANCE` (8)
+  respectively. (Correction: the fixture is NOT byte-identical to the Rust test's constants and the
+  earlier-cited test name did not exist — distances above are measured against the actual fixture text.)
 - Tidied the garbled `folder_similarity_scan` module doc comment in `crates/server/src/lib.rs`
   (cosmetic only — no code change): now reads "...clusters near-identical folders via
   [`folder_similarity`] — this is the adapter that [`folder_similarity`]'s own docs describe as the

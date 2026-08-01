@@ -263,12 +263,13 @@ function seedSimilarImagesFixture(tmpDir: string): void {
 // Seed two near-identical .md files (plus one unrelated) for the Find-similar-documents dialog
 // (NearDuplicatesDialog.svelte, CPE-1204). The backend (crates/server/src/document_similarity.rs)
 // SimHashes each candidate's text and single-link-clusters at Hamming distance <= 8
-// (`DEFAULT_MAX_DISTANCE`). Rather than inventing new prose and hoping it clusters, this reuses the
-// EXACT three paragraphs `simhash.rs`'s own `near_duplicate_docs_groups_close_pairs_and_separates_far_ones`
-// test measures and asserts on: the near pair (one word changed + a short sentence appended) lands at
-// Hamming distance <= 8 (well inside the threshold), and the unrelated paragraph lands at >= 12 (well
-// outside it) — so this fixture is provably correct against the real backend's own test fixture, not
-// just plausible-looking text.
+// (`DEFAULT_MAX_DISTANCE`). This fixture follows the same shape as `simhash.rs`'s own
+// `near_identical_text_is_closer_than_unrelated_text` test (base paragraph + lightly-edited near-copy +
+// unrelated paragraph). Measured directly against these exact strings: the near pair (one word changed
+// + a short sentence appended) lands at Hamming distance 3 — well inside the threshold — and the
+// unrelated paragraph lands at 15 — well outside it. So the near pair provably clusters and the third
+// doc stays a singleton; the distances above are measured against these fixture strings, which are not
+// byte-identical to the Rust test's constants.
 export const NEAR_DUP_DOC_A_NAME = "CPE-1221-notes-a.md";
 export const NEAR_DUP_DOC_B_NAME = "CPE-1221-notes-b.md";
 export const NEAR_DUP_DOC_UNRELATED_NAME = "CPE-1221-unrelated.md";
