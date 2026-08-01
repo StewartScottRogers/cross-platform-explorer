@@ -2,7 +2,7 @@ import { describe, it, expect } from "vitest";
 import { upsertProgress, markFinished, dismiss, percent, collidingNames, type TransferState, type TransferProgress, type TransferReport } from "./transfers";
 
 const prog = (id: number, done: number, total: number): TransferProgress => ({
-  id, total_bytes: total, done_bytes: done, total_items: 1, done_items: 0, current: "x",
+  id, op: "copy", total_bytes: total, done_bytes: done, total_items: 1, done_items: 0, current: "x",
 });
 
 describe("transfers reducer (CPE-622)", () => {
@@ -19,7 +19,7 @@ describe("transfers reducer (CPE-622)", () => {
 
   it("marks a transfer finished with its report and clears its current file", () => {
     let l = upsertProgress([], prog(1, 50, 100));
-    const r: TransferReport = { id: 1, transferred: 1, skipped: 0, failed: 0, cancelled: false, errors: [] };
+    const r: TransferReport = { id: 1, op: "copy", transferred: 1, skipped: 0, failed: 0, cancelled: false, errors: [] };
     l = markFinished(l, r);
     expect(l[0].finished).toBe(true);
     expect(l[0].current).toBe("");
@@ -27,11 +27,36 @@ describe("transfers reducer (CPE-622)", () => {
   });
 
   it("keeps the report across a late progress event and drops on dismiss", () => {
-    const r: TransferReport = { id: 1, transferred: 1, skipped: 0, failed: 0, cancelled: false, errors: [] };
+    const r: TransferReport = { id: 1, op: "copy", transferred: 1, skipped: 0, failed: 0, cancelled: false, errors: [] };
     let l = markFinished(upsertProgress([], prog(1, 100, 100)), r);
     l = upsertProgress(l, prog(1, 100, 100)); // a stray late event must not wipe the report
     expect(l[0].report).toEqual(r);
     expect(dismiss(l, 1)).toHaveLength(0);
+  });
+
+  it("carries an archive compress/extract op through the reducer alongside copy/move (CPE-1184)", () => {
+    const compressProg: TransferProgress = { id: 5, op: "compress", total_bytes: 100, done_bytes: 40, total_items: 4, done_items: 2, current: "sub/b.txt" };
+    let l = upsertProgress([], compressProg);
+    expect(l[0].op).toBe("compress");
+    expect(percent(l[0])).toBe(40);
+
+    // A later progress tick for the same id keeps its op (the reducer never overwrites it from the
+    // incoming payload's own `op`, but the backend always resends the same op for a given id anyway).
+    l = upsertProgress(l, { ...compressProg, done_bytes: 80, done_items: 3 });
+    expect(l[0].op).toBe("compress");
+    expect(percent(l[0])).toBe(80);
+
+    const extractReport: TransferReport = { id: 6, op: "extract", transferred: 3, skipped: 0, failed: 0, cancelled: false, errors: [] };
+    l = upsertProgress(l, { id: 6, op: "extract", total_bytes: 0, done_bytes: 0, total_items: 3, done_items: 1, current: "c.txt" });
+    l = markFinished(l, extractReport);
+    const extractRow = l.find((t) => t.id === 6)!;
+    expect(extractRow.finished).toBe(true);
+    expect(extractRow.report?.op).toBe("extract");
+
+    // A cancelled compress/extract is a normal report shape too — nothing archive-specific breaks it.
+    const cancelled: TransferReport = { id: 5, op: "compress", transferred: 3, skipped: 0, failed: 0, cancelled: true, errors: [] };
+    l = markFinished(l, cancelled);
+    expect(l.find((t) => t.id === 5)!.report?.cancelled).toBe(true);
   });
 
   it("finds base-name collisions against the destination (CPE-624)", () => {

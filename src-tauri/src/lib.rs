@@ -1647,11 +1647,36 @@ enum ConflictPolicy {
     Keepboth,
 }
 
+/// What operation produced a `TransferProgress`/`TransferReport` row, for the operations panel's label
+/// and icon (CPE-1184). Distinct from `TransferKind` (which only steers the copy/move engine's own
+/// behaviour) — this is a pure UI/reporting discriminant, extended here to cover archive compress/
+/// extract now routed through the same queue (`start_archive_compress`/`start_archive_extract`).
+#[derive(Clone, Copy, PartialEq, Default, serde::Serialize)]
+#[cfg_attr(feature = "specta-bindings", derive(specta::Type))]
+#[serde(rename_all = "lowercase")]
+enum TransferOp {
+    #[default]
+    Copy,
+    Move,
+    Compress,
+    Extract,
+}
+
+impl From<TransferKind> for TransferOp {
+    fn from(k: TransferKind) -> Self {
+        match k {
+            TransferKind::Copy => TransferOp::Copy,
+            TransferKind::Move => TransferOp::Move,
+        }
+    }
+}
+
 /// A progress snapshot emitted while a transfer runs.
 #[derive(Clone, serde::Serialize)]
 #[cfg_attr(feature = "specta-bindings", derive(specta::Type))]
 struct TransferProgress {
     id: u64,
+    op: TransferOp,
     total_bytes: u64,
     done_bytes: u64,
     total_items: u64,
@@ -1659,16 +1684,59 @@ struct TransferProgress {
     current: String,
 }
 
+impl TransferProgress {
+    /// Translate an archive engine's [`cpe_server::archive::ArchiveProgress`] into the shape the
+    /// operations panel already understands, attaching the app-assigned transfer `id` + `op` the
+    /// domain layer doesn't (and shouldn't) know about (CPE-1184).
+    fn from_archive(id: u64, op: TransferOp, p: &cpe_server::archive::ArchiveProgress) -> Self {
+        TransferProgress {
+            id,
+            op,
+            total_bytes: p.total_bytes,
+            done_bytes: p.done_bytes,
+            total_items: p.total_items,
+            done_items: p.done_items,
+            current: p.current.clone(),
+        }
+    }
+}
+
 /// The final outcome of a transfer.
 #[derive(Clone, Default, serde::Serialize)]
 #[cfg_attr(feature = "specta-bindings", derive(specta::Type))]
 struct TransferReport {
     id: u64,
+    op: TransferOp,
     transferred: u64,
     skipped: u64,
     failed: u64,
     cancelled: bool,
     errors: Vec<String>,
+}
+
+impl TransferReport {
+    /// Translate an archive engine's [`cpe_server::archive::ArchiveReport`] into the shape the
+    /// operations panel already understands (CPE-1184). `skipped` stays 0 — archive ops don't have a
+    /// per-item conflict policy like copy/move; an unsafe/zip-slip entry is recorded in `errors`
+    /// instead (mirroring the one-shot extractors' silent-skip).
+    fn from_archive(id: u64, op: TransferOp, r: cpe_server::archive::ArchiveReport) -> Self {
+        TransferReport {
+            id,
+            op,
+            transferred: r.done,
+            skipped: 0,
+            failed: r.failed,
+            cancelled: r.cancelled,
+            errors: r.errors,
+        }
+    }
+
+    /// A report for an archive op that failed before or during the run (couldn't even start, or the
+    /// underlying `?` aborted) — same shape a `Err(e)` from the one-shot commands used to surface,
+    /// just delivered as a `transfer://done` event instead of a rejected promise (CPE-1184).
+    fn archive_failed(id: u64, op: TransferOp, e: String) -> Self {
+        TransferReport { id, op, transferred: 0, skipped: 0, failed: 1, cancelled: false, errors: vec![e] }
+    }
 }
 
 /// Sum the byte size + file count under `p`, skip-on-error and without following symlinked dirs
@@ -1833,13 +1901,14 @@ fn run_transfer(
         .collect();
     let mut prog = TransferProgress {
         id,
+        op: TransferOp::from(kind),
         total_bytes: measured.iter().map(|(b, _)| b).sum(),
         done_bytes: 0,
         total_items: measured.iter().map(|(_, f)| f).sum(),
         done_items: 0,
         current: String::new(),
     };
-    let mut report = TransferReport { id, ..Default::default() };
+    let mut report = TransferReport { id, op: TransferOp::from(kind), ..Default::default() };
     let mut last_emit = 0u64;
     emit(&prog);
 
@@ -1948,7 +2017,9 @@ fn start_transfer(
     id
 }
 
-/// Signal a running transfer to stop at the next chunk boundary (CPE-620).
+/// Signal a running transfer to stop at the next chunk boundary (CPE-620). Also cancels an archive
+/// compress/extract queued via [`start_archive_compress`]/[`start_archive_extract`] — they share this
+/// same registry, so no separate cancel command was needed for them (CPE-1184).
 #[tauri::command]
 #[cfg_attr(feature = "specta-bindings", specta::specta)]
 fn cancel_transfer(id: u64) {
@@ -1956,6 +2027,109 @@ fn cancel_transfer(id: u64) {
     if let Some(flag) = transfer_registry().lock().unwrap().get(&id) {
         flag.store(true, Ordering::Relaxed);
     }
+}
+
+// ---- Archive compress/extract through the transfer queue (CPE-1184, epic CPE-705) ------------
+//
+// `compress_to_zip`/`compress_archive`/`compress_to_zip_encrypted`/`extract_archive`/
+// `extract_zip_encrypted` above are one-shot blocking calls — fine for a small archive, but a large one
+// freezes the UI with no progress and no way to cancel, against the streaming-liveness convention. The
+// two commands below queue the SAME work through `cpe_server::archive`'s streamed functions on a
+// background thread, reusing the copy/move transfer engine's `transfer://progress`/`transfer://done`
+// events + `TRANSFER_CANCELS` registry + id sequence, so archive ops show up in the same operations
+// panel, are cancellable the same way, and queue alongside copies/moves. The one-shot commands above are
+// left untouched for any other caller.
+
+/// Start a compress of `paths` into `dest` through the transfer queue (CPE-1184): streams per-entry
+/// progress and is cancellable exactly like a copy/move. `password` (non-empty) uses the AES-256
+/// encrypted zip path; otherwise the format is picked by `dest`'s extension (`.zip`/`.tar.gz`/`.tgz`),
+/// mirroring [`compress_archive`]. Returns the new transfer's id immediately — progress/completion
+/// arrive as `transfer://progress`/`transfer://done` events, same as `start_transfer`.
+#[tauri::command]
+#[cfg_attr(feature = "specta-bindings", specta::specta)]
+fn start_archive_compress(
+    app: tauri::AppHandle,
+    paths: Vec<String>,
+    dest: String,
+    password: Option<String>,
+) -> Result<u64, String> {
+    if paths.is_empty() {
+        return Err("nothing to compress".into());
+    }
+    use std::sync::atomic::Ordering;
+    let id = TRANSFER_SEQ.fetch_add(1, Ordering::Relaxed);
+    let cancel = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    transfer_registry().lock().unwrap().insert(id, cancel.clone());
+    note_app_op(&app, || vec![dest.clone()]);
+    let ctx = server_ctx::TauriCtx::new(&app);
+    std::thread::spawn(move || {
+        let emit = |p: &cpe_server::archive::ArchiveProgress| {
+            let payload = TransferProgress::from_archive(id, TransferOp::Compress, p);
+            let _ = ctx.emit_json("transfer://progress", serde_json::to_value(payload).unwrap_or_default());
+        };
+        let result = match password.filter(|p| !p.is_empty()) {
+            Some(pw) => cpe_server::archive::compress_to_zip_encrypted_streamed(&paths, &dest, &pw, &cancel, emit),
+            None => cpe_server::archive::compress_archive_streamed(&paths, &dest, &cancel, emit),
+        };
+        let report = match result {
+            Ok(r) => TransferReport::from_archive(id, TransferOp::Compress, r),
+            Err(e) => TransferReport::archive_failed(id, TransferOp::Compress, e),
+        };
+        let _ = ctx.emit_json("transfer://done", serde_json::to_value(&report).unwrap_or_default());
+        transfer_registry().lock().unwrap().remove(&id);
+    });
+    Ok(id)
+}
+
+/// Start an extract of `path` into `dest` through the transfer queue (CPE-1184): streams per-entry
+/// progress and is cancellable exactly like a copy/move. `password` (non-empty) uses the AES-zip path;
+/// otherwise the format is auto-detected by extension, mirroring [`extract_archive`]. Before queuing,
+/// a zip-family archive's password is validated *synchronously* via
+/// [`cpe_server::archive::check_zip_password`] — a cheap header-only check — so the frontend's existing
+/// password-prompt-and-retry flow keeps its original synchronous try/catch shape (an instant rejection)
+/// instead of round-tripping through a transfer id + completion event just to learn a password was
+/// wrong. Returns the new transfer's id immediately once that check passes.
+#[tauri::command]
+#[cfg_attr(feature = "specta-bindings", specta::specta)]
+fn start_archive_extract(
+    app: tauri::AppHandle,
+    path: String,
+    dest: String,
+    password: Option<String>,
+) -> Result<u64, String> {
+    let lower = path.to_lowercase();
+    let is_zip_family = !(lower.ends_with(".tar")
+        || lower.ends_with(".tar.gz")
+        || lower.ends_with(".tgz")
+        || lower.ends_with(".gz")
+        || lower.ends_with(".7z"));
+    if is_zip_family {
+        cpe_server::archive::check_zip_password(&path, password.as_deref())?;
+    }
+    use std::sync::atomic::Ordering;
+    let id = TRANSFER_SEQ.fetch_add(1, Ordering::Relaxed);
+    let cancel = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    transfer_registry().lock().unwrap().insert(id, cancel.clone());
+    // Coarse best-effort record (CPE-1102), mirroring `extract_archive`: record just the `dest` root.
+    note_app_op(&app, || vec![dest.clone()]);
+    let ctx = server_ctx::TauriCtx::new(&app);
+    std::thread::spawn(move || {
+        let emit = |p: &cpe_server::archive::ArchiveProgress| {
+            let payload = TransferProgress::from_archive(id, TransferOp::Extract, p);
+            let _ = ctx.emit_json("transfer://progress", serde_json::to_value(payload).unwrap_or_default());
+        };
+        let result = match password.filter(|p| !p.is_empty()) {
+            Some(pw) => cpe_server::archive::extract_zip_encrypted_streamed(&path, &dest, &pw, &cancel, emit),
+            None => cpe_server::archive::extract_archive_streamed(&path, &dest, &cancel, emit),
+        };
+        let report = match result {
+            Ok(r) => TransferReport::from_archive(id, TransferOp::Extract, r),
+            Err(e) => TransferReport::archive_failed(id, TransferOp::Extract, e),
+        };
+        let _ = ctx.emit_json("transfer://done", serde_json::to_value(&report).unwrap_or_default());
+        transfer_registry().lock().unwrap().remove(&id);
+    });
+    Ok(id)
 }
 
 /// Move each `from` to an EXACT `to` path. Used by undo, which must restore an
@@ -8222,6 +8396,8 @@ pub fn run() {
             compress_archive,
             compress_to_zip_encrypted,
             extract_zip_encrypted,
+            start_archive_compress,
+            start_archive_extract,
             open_terminal,
             run_command,
             create_file,
@@ -8968,6 +9144,8 @@ pub fn export_bindings(out: &std::path::Path) -> Result<(), String> {
         compress_archive,
         compress_to_zip_encrypted,
         extract_zip_encrypted,
+        start_archive_compress,
+        start_archive_extract,
         open_terminal,
         run_command,
         create_file,

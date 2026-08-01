@@ -6,10 +6,16 @@
 import { writable, type Readable } from "svelte/store";
 import { listen } from "@tauri-apps/api/event";
 import { commands } from "./bindings.gen"; // typed client (CPE-964)
+import { unwrap } from "./invoke";
+
+/** What produced a progress/report row (mirror of the Rust `TransferOp`) — a copy/move from the
+ *  transfer engine, or an archive compress/extract now routed through the same queue (CPE-1184). */
+export type TransferOp = "copy" | "move" | "compress" | "extract";
 
 /** A progress snapshot from the backend engine (mirror of the Rust `TransferProgress`). */
 export interface TransferProgress {
   id: number;
+  op: TransferOp;
   total_bytes: number;
   done_bytes: number;
   total_items: number;
@@ -20,6 +26,7 @@ export interface TransferProgress {
 /** The final report of a transfer (mirror of the Rust `TransferReport`). */
 export interface TransferReport {
   id: number;
+  op: TransferOp;
   transferred: number;
   skipped: number;
   failed: number;
@@ -100,7 +107,24 @@ export function startTransfer(sources: string[], dest: string, kind: TransferKin
   return commands.startTransfer(sources, dest, kind, policy);
 }
 
-/** Ask a running transfer to stop at the next chunk boundary. */
+/** Ask a running transfer to stop at the next chunk boundary. Also cancels a queued archive
+ *  compress/extract — they share the same backend registry (CPE-1184). */
 export function cancelTransfer(id: number): Promise<void> {
   return commands.cancelTransfer(id);
+}
+
+/** Start a compress through the transfer queue (CPE-1184): resolves to the new transfer's id, throwing
+ *  on an up-front failure (e.g. an empty selection). Progress/completion arrive via the same
+ *  `transfer://progress`/`transfer://done` events copy/move use, tagged `op: "compress"`. `password`
+ *  (non-empty) packs an AES-256 encrypted zip instead of the plain format picked by `dest`'s extension. */
+export function startArchiveCompress(paths: string[], dest: string, password: string | null): Promise<number> {
+  return commands.startArchiveCompress(paths, dest, password).then(unwrap);
+}
+
+/** Start an extract through the transfer queue (CPE-1184): resolves to the new transfer's id. A missing
+ *  or wrong `password` for an encrypted zip rejects synchronously (before anything is queued), so the
+ *  existing password-prompt-and-retry UX keeps its plain try/catch shape. Progress/completion arrive via
+ *  the same events copy/move use, tagged `op: "extract"`. */
+export function startArchiveExtract(path: string, dest: string, password: string | null): Promise<number> {
+  return commands.startArchiveExtract(path, dest, password).then(unwrap);
 }

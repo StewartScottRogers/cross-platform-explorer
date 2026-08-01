@@ -94,7 +94,9 @@ The Home screen has **Quick access** tiles up top and a tabbed lower section wit
   folder (double-click to look inside, read-only) or unpacked: **Extract** drops its contents into a new
   subfolder right there, and **Extract to…** lets you pick any destination folder instead. Opening or
   extracting a password-protected archive prompts for its password; a wrong password re-prompts rather
-  than failing silently.
+  than failing silently. Compress and extract run through the same transfer queue as copy/move: a large
+  archive shows live progress in the bottom-corner operations panel and stays cancellable instead of
+  freezing the window.
 - **Batch media** — right-click 2+ selected image files and choose **Batch media…** to queue an ordered
   list of edits (resize, **compress**, convert, rotate, flip, **watermark**, rename, strip metadata) and run
   them across every file at once. Pick an operation and its settings, then click **+ Add** to put it on the

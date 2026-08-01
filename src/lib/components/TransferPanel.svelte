@@ -5,6 +5,16 @@
   import { transfers, percent, cancelTransfer, dismissTransfer, type TransferState } from "../transfers";
   import Icon from "./Icon.svelte";
 
+  /** Past-tense verb for the row's op — "copied"/"moved"/"compressed"/"extracted" (CPE-1184). */
+  function verb(t: TransferState): string {
+    switch (t.op) {
+      case "move": return "moved";
+      case "compress": return "compressed";
+      case "extract": return "extracted";
+      default: return "copied";
+    }
+  }
+
   function label(t: TransferState): string {
     if (t.finished) {
       const r = t.report;
@@ -12,7 +22,7 @@
       if (r.cancelled) return `Cancelled — ${r.transferred} done`;
       if (r.failed > 0) return `${r.transferred} done, ${r.failed} failed`;
       if (r.skipped > 0) return `${r.transferred} done, ${r.skipped} skipped`;
-      return `${r.transferred} item${r.transferred === 1 ? "" : "s"} copied`;
+      return `${r.transferred} item${r.transferred === 1 ? "" : "s"} ${verb(t)}`;
     }
     return t.current || "Preparing…";
   }
@@ -23,7 +33,7 @@
     {#each $transfers as t (t.id)}
       <div class="op" class:done={t.finished}>
         <div class="row">
-          <Icon name={t.finished ? "check" : "copy"} size={14} />
+          <Icon name={t.finished ? "check" : (t.op === "compress" || t.op === "extract" ? "archive" : "copy")} size={14} />
           <span class="name" title={label(t)}>{label(t)}</span>
           {#if t.finished}
             <button class="x" title="Dismiss" aria-label="Dismiss" on:click={() => dismissTransfer(t.id)}>

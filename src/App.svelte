@@ -77,7 +77,7 @@
   import type { ResultKind } from "./lib/bindings.gen";
   import TransferPanel from "./lib/components/TransferPanel.svelte";
   import TransferConflictDialog from "./lib/components/TransferConflictDialog.svelte";
-  import { initTransfers, startTransfer, collidingNames, type TransferReport, type ConflictPolicy } from "./lib/transfers";
+  import { initTransfers, startTransfer, startArchiveCompress, startArchiveExtract, collidingNames, type TransferReport, type ConflictPolicy } from "./lib/transfers";
   import DuplicatesDialog from "./lib/components/DuplicatesDialog.svelte";
   import SimilarImagesDialog from "./lib/components/SimilarImagesDialog.svelte";
   import { namesList, detailList, csvList } from "./lib/listing";
@@ -566,6 +566,15 @@
     error: string;
     onSubmit: (password: string) => void | Promise<void>;
   } | null = null;
+  /** Compress/extract ops queued through the transfer engine (CPE-1184), keyed by transfer id, so the
+   *  global `transfer://done` listener knows what to do once the queued run actually finishes — the
+   *  same `onSuccess` shape `extractWithPasswordFallback` used to run inline before archive ops became
+   *  async/queued. `cancelledNotice`/`failedNotice` are the fallback messages when the report itself
+   *  doesn't have a more specific error to show. Entries are consumed (deleted) once handled. */
+  const pendingArchiveOps = new Map<
+    number,
+    { onSuccess: () => void | Promise<void>; cancelledNotice: string; failedNotice: string }
+  >();
   let propsFor: DirEntry[] | null = null;
   let studioFor: DirEntry[] | null = null;
   let batchRenameFor: DirEntry[] | null = null;
@@ -2506,43 +2515,59 @@
       : "Archive";
   }
 
-  /** Compress the selection into a new .zip in the current folder (CPE-251). */
+  /** Compress the selection into a new .zip in the current folder (CPE-251), through the transfer
+   *  queue (CPE-1184) so a large selection streams progress + stays cancellable instead of freezing the
+   *  UI on one blocking call. The actual "Compressed…" notice + folder refresh happen once the queued
+   *  run finishes, via the global `transfer://done` listener below. */
   async function doCompress() {
     if (isHome || blockedInArchive() || selectedEntries.length === 0) return;
     const name = uniqueNameWithExt(compressBaseName(), ".zip", entries.map((e) => e.name));
     const dest = joinPath(currentPath, name);
     const n = selectedEntries.length;
     try {
-      const created = unwrap(await commands.compressToZip(selectedEntries.map((e) => e.path), dest));
-      pendingSelectPath = created;
-      showNotice(`Compressed ${n} item${n === 1 ? "" : "s"} to "${name}".`);
-      await loadPath(currentPath);
+      const id = await startArchiveCompress(selectedEntries.map((e) => e.path), dest, null);
+      pendingArchiveOps.set(id, {
+        onSuccess: async () => {
+          pendingSelectPath = dest;
+          showNotice(`Compressed ${n} item${n === 1 ? "" : "s"} to "${name}".`);
+          await loadPath(currentPath);
+        },
+        cancelledNotice: "Compress cancelled.",
+        failedNotice: `Couldn't compress to "${name}".`,
+      });
     } catch (e) {
       showNotice(String(e), true);
     }
   }
 
-  /** Compress the selection via `compressArchive` (CPE-1183), letting `ext` pick the format: `.zip`
-   *  (deflate, same bytes as `doCompress`) or `.tar.gz` (gzip tarball). Kept separate from `doCompress`
-   *  so its existing hardcoded-zip callers/behaviour are untouched. */
+  /** Compress the selection via the queued archive path (CPE-1183/1184), letting `ext` pick the format:
+   *  `.zip` (deflate, same bytes as `doCompress`) or `.tar.gz` (gzip tarball). Kept as a separate
+   *  function from `doCompress` so its callers/behaviour stay distinguishable, even though both now
+   *  queue through the same `start_archive_compress` command (dest's extension picks the format). */
   async function doCompressAs(ext: ".zip" | ".tar.gz") {
     if (isHome || blockedInArchive() || selectedEntries.length === 0) return;
     const name = uniqueNameWithExt(compressBaseName(), ext, entries.map((e) => e.name));
     const dest = joinPath(currentPath, name);
     const n = selectedEntries.length;
     try {
-      const created = unwrap(await commands.compressArchive(selectedEntries.map((e) => e.path), dest));
-      pendingSelectPath = created;
-      showNotice(`Compressed ${n} item${n === 1 ? "" : "s"} to "${name}".`);
-      await loadPath(currentPath);
+      const id = await startArchiveCompress(selectedEntries.map((e) => e.path), dest, null);
+      pendingArchiveOps.set(id, {
+        onSuccess: async () => {
+          pendingSelectPath = dest;
+          showNotice(`Compressed ${n} item${n === 1 ? "" : "s"} to "${name}".`);
+          await loadPath(currentPath);
+        },
+        cancelledNotice: "Compress cancelled.",
+        failedNotice: `Couldn't compress to "${name}".`,
+      });
     } catch (e) {
       showNotice(String(e), true);
     }
   }
 
-  /** Compress the selection into a password-protected .zip (CPE-1182): collect the password via
-   *  `PasswordPromptDialog`, then `compressToZipEncrypted`. An empty password re-prompts (the backend
-   *  itself rejects one, but asking again beats a raw error notice). */
+  /** Compress the selection into a password-protected .zip (CPE-1182), queued (CPE-1184): collect the
+   *  password via `PasswordPromptDialog`, then `startArchiveCompress` with it. An empty password
+   *  re-prompts (the backend itself rejects one, but asking again beats a raw error notice). */
   async function doCompressWithPassword() {
     if (isHome || blockedInArchive() || selectedEntries.length === 0) return;
     const name = uniqueNameWithExt(compressBaseName(), ".zip", entries.map((e) => e.name));
@@ -2563,11 +2588,17 @@
           return;
         }
         try {
-          const created = unwrap(await commands.compressToZipEncrypted(selectedEntries.map((e) => e.path), dest, password));
+          const id = await startArchiveCompress(selectedEntries.map((e) => e.path), dest, password);
           passwordPrompt = null;
-          pendingSelectPath = created;
-          showNotice(`Compressed ${n} item${n === 1 ? "" : "s"} to "${name}" (password-protected).`);
-          await loadPath(currentPath);
+          pendingArchiveOps.set(id, {
+            onSuccess: async () => {
+              pendingSelectPath = dest;
+              showNotice(`Compressed ${n} item${n === 1 ? "" : "s"} to "${name}" (password-protected).`);
+              await loadPath(currentPath);
+            },
+            cancelledNotice: "Compress cancelled.",
+            failedNotice: `Couldn't compress to "${name}".`,
+          });
         } catch (e) {
           showNotice(String(e), true);
           passwordPrompt = null;
@@ -2592,12 +2623,20 @@
     return { dest: joinPath(currentPath, name), name };
   }
 
-  /** Try a plain extract; if the archive is AES-encrypted, prompt for its password and retry via
-   *  `extractZipEncrypted` (CPE-1182). `onSuccess` runs after either path succeeds. */
+  /** Try a plain extract queued through the transfer engine (CPE-1184: streamed progress + cancel
+   *  instead of one blocking call); if the archive is AES-encrypted, `startArchiveExtract` rejects
+   *  synchronously (it checks the password up front before queuing anything — see its doc comment), so
+   *  this still prompts for the password and retries exactly like the old one-shot version did
+   *  (CPE-1182). `onSuccess` runs once the queued run actually finishes, via the global
+   *  `transfer://done` listener below — not inline here. */
   async function extractWithPasswordFallback(entry: DirEntry, dest: string, onSuccess: () => void | Promise<void>) {
     try {
-      unwrap(await commands.extractArchive(entry.path, dest));
-      await onSuccess();
+      const id = await startArchiveExtract(entry.path, dest, null);
+      pendingArchiveOps.set(id, {
+        onSuccess,
+        cancelledNotice: "Extraction cancelled.",
+        failedNotice: `Couldn't extract "${entry.name}".`,
+      });
     } catch (e) {
       if (!isPasswordError(e)) {
         showNotice(String(e), true);
@@ -2620,9 +2659,13 @@
       error,
       onSubmit: async (password) => {
         try {
-          unwrap(await commands.extractZipEncrypted(entry.path, dest, password));
+          const id = await startArchiveExtract(entry.path, dest, password);
           passwordPrompt = null;
-          await onSuccess();
+          pendingArchiveOps.set(id, {
+            onSuccess,
+            cancelledNotice: "Extraction cancelled.",
+            failedNotice: `Couldn't extract "${entry.name}".`,
+          });
         } catch {
           // Wrong (or empty) password — re-prompt with the error line instead of dismissing.
           promptForExtractPassword(entry, dest, onSuccess, "Wrong password — try again.");
@@ -2633,7 +2676,8 @@
 
   /** Extract the selected archive into a new subfolder of the current folder
       (CPE-252). Named after the archive, auto-numbered to avoid collisions. Transparently prompts for a
-      password when the archive is AES-encrypted (CPE-1182). */
+      password when the archive is AES-encrypted (CPE-1182). Queued through the transfer engine so a
+      large archive streams progress + stays cancellable (CPE-1184). */
   async function doExtract() {
     if (isHome || blockedInArchive()) return;
     const entry = selectedEntries[0];
@@ -2647,7 +2691,7 @@
   }
 
   /** Extract the selected archive into a folder chosen from the native picker (CPE-1183), alongside the
-   *  existing "extract here". Same password fallback as `doExtract`. */
+   *  existing "extract here". Same password fallback as `doExtract`, same queue-routing (CPE-1184). */
   async function doExtractTo() {
     if (isHome || blockedInArchive()) return;
     const entry = selectedEntries[0];
@@ -3940,6 +3984,18 @@
     initTags().catch(() => {});
     listen<TransferReport>("transfer://done", (e) => {
       const r = e.payload;
+      // Archive compress/extract (CPE-1184) queue through the same engine but resolve via the
+      // `onSuccess` closure the call site registered in `pendingArchiveOps` (it already knows the
+      // exact wording + what to refresh — a "Compressed"/"Extracted" notice, not "Copied").
+      if (r.op === "compress" || r.op === "extract") {
+        const pending = pendingArchiveOps.get(r.id);
+        pendingArchiveOps.delete(r.id);
+        if (!pending) return; // stray/unknown id — nothing registered, nothing to do
+        if (r.cancelled) { showNotice(pending.cancelledNotice); return; }
+        if (r.failed > 0) { showNotice(r.errors[0] || pending.failedNotice, true); return; }
+        Promise.resolve(pending.onSuccess()).catch(() => {});
+        return;
+      }
       loadPath(currentPath).catch(() => {});
       if (r.cancelled) showNotice("Copy cancelled.");
       else if (r.failed > 0) showNotice(`Copied ${r.transferred}, ${r.failed} failed.`, true);
