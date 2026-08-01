@@ -62,6 +62,10 @@
   export let canUndo = false;
   /** Human label of the top undo entry (e.g. "Rename to report.txt"); appended after "Undo" when set. */
   export let undoLabel = "";
+  /** Saved macro names bound to the "context" surface (CPE-1191, epic CPE-739) — each dispatches
+   *  `macro:<name>` for App.svelte to run over the current selection via the dry-run confirm flow.
+   *  Empty hides the "Run macro ▸" submenu entirely (no macros bound, or none saved yet). */
+  export let macros: string[] = [];
 
   const dispatch = createEventDispatcher<{
     action: string;
@@ -258,6 +262,17 @@
     <button class="row" role="menuitem" on:click={() => run("tags")}>
       <Icon name="tag" size={15} /> {$t('ctx.tags')}
     </button>
+    {#if macros.length > 0}
+      <!-- Saved macros bound to this surface (CPE-1191). Each runs App's dry-run confirm flow over
+           the current selection — the same "each" selection model as user commands. -->
+      <Submenu label="Run macro" icon="function">
+        {#each macros as name}
+          <button class="row" role="menuitem" on:click={() => run(`macro:${name}`)}>
+            <Icon name="function" size={15} /> {name}
+          </button>
+        {/each}
+      </Submenu>
+    {/if}
     <div class="sep" />
     <button class="row" role="menuitem" on:click={() => run("reveal")}>
       <Icon name="folder" size={15} /> {$t('ctx.reveal')}

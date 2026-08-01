@@ -28,6 +28,8 @@ import { parseJobs, serializeJobs } from "./backup";
 import type { BackupJob } from "./backup";
 import { parseCommands, serializeCommands } from "./userCommands";
 import type { UserCommand } from "./userCommands";
+import { parseBindings, serializeBindings } from "./macroBindings";
+import type { MacroBinding } from "./macroBindings";
 
 export const KEYS = {
   view: "cpe.view",
@@ -54,6 +56,7 @@ export const KEYS = {
   workspaces: "cpe.workspaces",
   backupJobs: "cpe.backupJobs",
   userCommands: "cpe.userCommands",
+  macroBindings: "cpe.macroBindings",
   watchedFolders: "cpe.watchedFolders",
   backupHistory: "cpe.backupHistory",
   autoRestore: "cpe.autoRestore",
@@ -333,6 +336,16 @@ export const loadUserCommands = (): UserCommand[] => {
   return v === undefined ? [] : parseCommands(serializeCommands(v as UserCommand[]));
 };
 export const saveUserCommands = (v: UserCommand[]): void => write(KEYS.userCommands, v);
+
+// Macro surface/hotkey bindings (CPE-1191, epic CPE-739): which saved macros (CPE-1188 catalog,
+// joined by name) show up in the context menu / palette, and their optional hotkey. Loaded through
+// the tolerant `parseBindings` so a corrupt entry degrades rather than crashing. Opt-in — empty until
+// a macro is explicitly bound.
+export const loadMacroBindings = (): MacroBinding[] => {
+  const v = state[KEYS.macroBindings];
+  return v === undefined ? [] : parseBindings(serializeBindings(v as MacroBinding[]));
+};
+export const saveMacroBindings = (v: MacroBinding[]): void => write(KEYS.macroBindings, v);
 
 // Integrity baselines (CPE-792, epic CPE-737): a per-folder checksum manifest, keyed by folder path.
 // Each manifest is loaded through the tolerant `parseManifest` so a corrupt entry degrades to a shorter

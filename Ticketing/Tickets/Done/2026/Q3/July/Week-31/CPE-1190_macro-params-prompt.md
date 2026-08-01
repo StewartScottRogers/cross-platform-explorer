@@ -4,7 +4,7 @@ title: "Parameterized macros: prompt-at-run params (model + param-prompt UI)"
 type: feature
 component: Multiple
 priority: medium
-status: Backlog
+status: Done
 tags: ready
 created: 2026-07-31
 epic: CPE-739
@@ -51,3 +51,22 @@ Add an **additive** prompt-parameter (model + pure resolution, headless) and a r
   Backlog**, not moved to Done, since only the model half is complete. `cargo test -p cpe-server`:
   1131/1131 passed (action_macro: 27/27, up from 18). `cargo clippy --all-targets -D warnings` clean
   (default + `--features index`). No new dependencies.
+- 2026-07-31 — **UI half done; ticket closed.** Built `src/lib/components/MacroParamPrompt.svelte` (+
+  `.test.ts`, 6 tests): a generic labelled-text-input dialog reusing `PasswordPromptDialog`'s pattern
+  (backdrop/border/Escape-cancels/Enter-submits), generalized from one masked field to N plain fields —
+  one per distinct `{ask:label}` the macro references. Submitting dispatches the full `label -> value` map
+  (an untouched field defaults to `""`).
+  **Wiring decision:** the exposed `macro_plan`/`macro_run` Tauri commands (and the CPE-1187 executor,
+  `macro_run::resolve`, backing `macro_run`) still don't accept a params map — only the pure
+  `plan_with_params` does (per the entry above). Rather than touch the backend on this frontend-only
+  branch, the substitution happens **client-side**: new `src/lib/macroParams.ts` (+ `.test.ts`, 8 tests)
+  mirrors the backend's `{ask:label}` substitution rule exactly (dropped/`""` when unanswered, never a
+  literal token leaking through) and returns a fully-resolved `ActionMacro` that
+  `commands.macroPlan`/`commands.macroRun` (CPE-1191's run flow) send as-is — no backend change, no
+  specta-bindings regen, and a macro with no `{ask:...}` tokens round-trips byte-for-byte unchanged. This
+  achieves the ticket's actual goal (parameterized macros work end-to-end from the UI) without the
+  backend executor wiring the entry above flagged as outstanding — that wiring is now moot given the
+  client-side approach. gui-smoke `snap("macro-param-prompt")` added
+  (`gui-smoke/specs/macro-param-prompt.smoke.ts`), exercising a real `{ask:suffix}` macro end-to-end
+  through the context-menu run flow and asserting the prompt (not the dry-run confirm) appears first —
+  typechecks clean; live run is CI. `npm run check`: 0 errors. `npm test`: 139 files / 1556 tests green.
