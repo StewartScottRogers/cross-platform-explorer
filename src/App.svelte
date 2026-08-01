@@ -73,6 +73,8 @@
   import ContentSearchDialog from "./lib/components/ContentSearchDialog.svelte";
   import FileNameSearchDialog from "./lib/components/FileNameSearchDialog.svelte";
   import InstantSearch from "./lib/components/InstantSearch.svelte";
+  import Spotlight from "./lib/components/Spotlight.svelte";
+  import type { ResultKind } from "./lib/bindings.gen";
   import TransferPanel from "./lib/components/TransferPanel.svelte";
   import TransferConflictDialog from "./lib/components/TransferConflictDialog.svelte";
   import { initTransfers, startTransfer, collidingNames, type TransferReport, type ConflictPolicy } from "./lib/transfers";
@@ -716,6 +718,11 @@
   // Command Palette (CPE-602): Ctrl+Shift+P. The command list reuses existing handlers — nothing is
   // duplicated; `enabled` closures read live state so context-invalid commands grey out.
   let paletteOpen = false;
+  // Spotlight overlay (CPE-1216, epic CPE-704): a global quick-launch overlay sectioned across
+  // actions/folders/files/recents. Opened by the backend `spotlight:open` Tauri event (CPE-1215's OS
+  // hotkey, listened for below) AND the in-app "Spotlight (search everywhere)…" palette command, so
+  // it's reachable — and gui-smoke-testable — without the OS-level shortcut.
+  let spotlightOpen = false;
   const inFolder = () => !isHome && !archive && !smartFolder;
   const hasSelection = () => selectedEntries.length > 0;
   const oneSelected = () => selectedEntries.length === 1;
@@ -772,6 +779,7 @@
     { id: "tool.findByName", group: $t("palette.groupTools"), label: $t("palette.findByName"), shortcut: "Ctrl+P", run: () => (fileSearchOpen = true), enabled: inFolder },
     { id: "tool.searchInFiles", group: $t("palette.groupTools"), label: $t("palette.searchInFiles"), shortcut: "Ctrl+Shift+F", run: () => (contentSearchOpen = true), enabled: inFolder },
     { id: "tool.instantSearch", group: $t("palette.groupTools"), label: $t("palette.instantSearch"), shortcut: "Ctrl+K", run: () => (instantSearchOpen = true) },
+    { id: "tool.spotlight", group: $t("palette.groupTools"), label: $t("palette.spotlight"), keywords: "quick launch omnibox everywhere actions folders files recent", run: () => (spotlightOpen = true) },
     { id: "tool.findDuplicates", group: $t("palette.groupTools"), label: $t("palette.findDuplicates"), run: () => (duplicatesOpen = true), enabled: inFolder },
     { id: "tool.findSimilarImages", group: $t("palette.groupTools"), label: $t("palette.findSimilarImages"), keywords: "near duplicate similar images photos perceptual dhash reclaim", run: () => (similarImagesOpen = true), enabled: inFolder },
     { id: "tool.colorRules", group: $t("palette.groupTools"), label: $t("palette.colorRules"), keywords: "color rules highlight label", run: () => (colorRulesOpen = true) },
@@ -952,6 +960,7 @@
   let unlistenSessions: (() => void) | null = null;
   let unlistenTransferDone: (() => void) | null = null;
   let unlistenOpenDocs: (() => void) | null = null;
+  let unlistenSpotlightOpen: (() => void) | null = null;
   // OS file drop-in (CPE-670): overlay shown while OS files are dragged over the window.
   let osDragActive = false;
   let unlistenOsDrop: (() => void) | null = null;
@@ -1632,6 +1641,15 @@
     if (!dir) return;
     pendingSelectPath = filePath; // the post-load hook selects it; the reactive block scrolls to it
     await navigateToTyped(dir);
+  }
+
+  /** Spotlight's `activate` event (CPE-1216): a "file" hit is revealed (folder opened + the file
+   *  selected, like every other search dialog's `navigate` event); a "folder"/"recent" hit navigates
+   *  straight there. Closes the overlay either way. */
+  function onSpotlightActivate(detail: { path: string; kind: ResultKind }) {
+    spotlightOpen = false;
+    if (detail.kind === "file") revealFileInApp(detail.path);
+    else navigateToTyped(detail.path);
   }
 
   async function goBack() {
@@ -3937,6 +3955,13 @@
       getCurrentWindow().setFocus().catch(() => {});
     }).then((un) => (unlistenOpenDocs = un)).catch(() => {});
 
+    // Spotlight overlay (CPE-1216, epic CPE-704): CPE-1215 owns the OS-level global hotkey + emits this
+    // event from the backend when it fires. The overlay is also reachable in-app via the Command
+    // Palette's "Spotlight (search everywhere)…" entry above, so it's testable without the OS hotkey.
+    listen("spotlight:open", () => {
+      spotlightOpen = true;
+    }).then((un) => (unlistenSpotlightOpen = un)).catch(() => {});
+
     // OS file drop-in (CPE-670): files dragged from the desktop/Explorer onto the window are copied into
     // the folder under the cursor (else the current folder). A themed overlay shows while dragging over.
     // Guarded: outside a Tauri webview (e.g. the jsdom test env) this API is absent — drop-in is then
@@ -4023,6 +4048,7 @@
     unlistenSessions?.();
     unlistenTransferDone?.();
     unlistenOpenDocs?.();
+    unlistenSpotlightOpen?.();
     unlistenOsDrop?.();
     unlistenActivity?.();
     if (watchRefreshTimer) clearTimeout(watchRefreshTimer);
@@ -4731,6 +4757,18 @@
 
 {#if paletteOpen}
   <CommandPalette commands={paletteCommands} on:close={() => (paletteOpen = false)} />
+{/if}
+
+{#if spotlightOpen}
+  <Spotlight
+    root={isHome || archive ? "" : currentPath}
+    paletteCommands={paletteCommands}
+    places={[...places, ...drives]}
+    favorites={favorites}
+    history={activeTab.history}
+    on:close={() => (spotlightOpen = false)}
+    on:activate={(e) => onSpotlightActivate(e.detail)}
+  />
 {/if}
 
 {#if showUserCommands}

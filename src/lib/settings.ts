@@ -30,6 +30,8 @@ import { parseCommands, serializeCommands } from "./userCommands";
 import type { UserCommand } from "./userCommands";
 import { parseBindings, serializeBindings } from "./macroBindings";
 import type { MacroBinding } from "./macroBindings";
+import { parseFrecent, serializeFrecent } from "./spotlightFrecency";
+import type { Visit } from "./bindings.gen";
 
 export const KEYS = {
   view: "cpe.view",
@@ -67,6 +69,7 @@ export const KEYS = {
   nativeBridgeEnabled: "cpe.nativeBridgeEnabled",
   spotlightHotkeyEnabled: "cpe.spotlightHotkeyEnabled",
   spotlightHotkeyChord: "cpe.spotlightHotkeyChord",
+  spotlightFrecency: "cpe.spotlightFrecency",
 } as const;
 
 const MAX_RECENTS = 20;
@@ -452,6 +455,15 @@ export const saveBackupHistory = (m: Record<string, BackupRunRecord[]>): void =>
 // means nothing is watched. Stored as a plain string[]; degrades to [] if corrupt.
 export const loadWatchedFolders = (): string[] => read(KEYS.watchedFolders, [], isStringArray);
 export const saveWatchedFolders = (v: string[]): void => write(KEYS.watchedFolders, v);
+
+// Spotlight frecency (CPE-1216, epic CPE-704): the overlay's "opened/revealed here before" usage
+// document, loaded through the tolerant `parseFrecent` so a corrupt entry degrades rather than
+// crashing. Opt-in in effect — empty until the overlay is actually used.
+export const loadSpotlightFrecency = (): Visit[] => {
+  const v = state[KEYS.spotlightFrecency];
+  return typeof v === "string" ? parseFrecent(v) : [];
+};
+export const saveSpotlightFrecency = (v: Visit[]): void => write(KEYS.spotlightFrecency, serializeFrecent(v));
 
 /** Reset every stored preference to its default (used by the app Settings gear). */
 export function resetSettings(): void {
