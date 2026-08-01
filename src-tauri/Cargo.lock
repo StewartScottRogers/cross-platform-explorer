@@ -898,6 +898,7 @@ dependencies = [
  "cpe-server",
  "filetime",
  "fs4",
+ "image",
  "keepawake",
  "notify",
  "repos",
