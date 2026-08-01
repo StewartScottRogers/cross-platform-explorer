@@ -250,7 +250,14 @@
     font-size: 13px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
   }
   .sp-row.active { background: var(--accent); color: #fff; }
-  .sp-row.active :global(.sp-hl) { background: transparent; color: #fff; text-decoration: underline; }
+  /* Matched run pops on the accent fill via a translucent white tint (same accepted on-accent-fill
+     pattern as the row's own #fff text) plus bold weight, rather than a hard-to-scan thin underline. */
+  .sp-row.active :global(.sp-hl) {
+    background: rgba(255, 255, 255, 0.3);
+    color: #fff;
+    font-weight: 700;
+    text-decoration: none;
+  }
   .sp-text { flex: 1 1 auto; overflow: hidden; text-overflow: ellipsis; }
-  :global(mark.sp-hl) { background: var(--accent); color: #fff; border-radius: 2px; padding: 0 1px; }
+  :global(mark.sp-hl) { background: var(--accent); color: #fff; border-radius: 2px; padding: 0 1px; font-weight: 700; }
 </style>
