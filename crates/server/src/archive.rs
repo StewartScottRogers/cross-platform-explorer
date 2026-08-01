@@ -158,12 +158,25 @@ pub fn read_archive_entries(path: &str) -> Result<Vec<ArchiveEntry>, String> {
 /// The flat temp-file target for a single-entry extraction: `%TEMP%/cpe-archive/<basename of inner>`
 /// (CPE-242/1102/1180). Shared by every format's single-entry extractor so they all land in the same
 /// place the frontend expects. Creates the directory; does not create the file itself.
+/// Monotonic counter making each single-entry extraction land in its own temp subdir. Without this,
+/// two concurrent extractions of same-named entries (e.g. two `a.txt`) shared one flat
+/// `cpe-archive/<base>` path and raced — one call would read a file another had already replaced or
+/// removed. That made `extract_archive_entry_any_delegates_zip_to_the_zip_extractor` flaky and it
+/// failed deterministically on the macOS CI leg (CPE-1195); it's also a real app hazard for two
+/// concurrent extract-and-opens of same-named files.
+static EXTRACT_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
 fn temp_extract_target(inner: &str) -> Result<std::path::PathBuf, String> {
     let base = Path::new(inner)
         .file_name()
         .map(|s| s.to_string_lossy().to_string())
         .ok_or_else(|| "invalid entry name".to_string())?;
-    let dir = std::env::temp_dir().join("cpe-archive");
+    // Per-extraction unique subdir (pid + monotonic seq) so the basename is preserved for the opened
+    // file while concurrent extractions can never collide.
+    let seq = EXTRACT_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let dir = std::env::temp_dir()
+        .join("cpe-archive")
+        .join(format!("{}-{}", std::process::id(), seq));
     fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
     Ok(dir.join(base))
 }
