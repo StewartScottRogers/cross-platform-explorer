@@ -109,8 +109,10 @@ describe("CPE-1216 — headless GUI smoke: the Spotlight overlay renders ranked,
     // Sectioned (CPE-1216: "renders sectioned results"): the row lives under a "Files" section header.
     const sectionLabels = $$(".sp-section-label");
     const labelTexts: string[] = [];
-    for await (const el of sectionLabels) labelTexts.push(await el.getText());
-    expect(labelTexts, "expected a 'Files' section header to render").to.include("Files");
+    // `.sp-section-label` is CSS `text-transform: uppercase`, so WebDriver getText() returns the
+    // rendered "FILES" — compare case-insensitively (same lower-casing as the highlight check below).
+    for await (const el of sectionLabels) labelTexts.push((await el.getText()).toLowerCase());
+    expect(labelTexts, "expected a 'Files' section header to render").to.include("files");
 
     // Matched-position highlighting (CPE-1216: from `SpotResult.positions`): the typed "marker"
     // substring is wrapped in a <mark class="sp-hl"> inside the matched row, not just plain text.
@@ -124,10 +126,15 @@ describe("CPE-1216 — headless GUI smoke: the Spotlight overlay renders ranked,
       }
     }
     expect(markerRow, "expected to re-locate the marker row for the highlight assertion").to.not.equal(undefined);
-    const markEl = await markerRow!.$("mark.sp-hl");
-    expect(await markEl.isExisting(), "expected a <mark class=\"sp-hl\"> inside the matched row").to.equal(true);
-    const markText = (await markEl.getText()).toLowerCase();
-    expect(markText, "expected the highlighted run to be part of the typed query").to.include("marker");
+    // Matched positions from the fuzzy scorer can be non-contiguous, so `highlightByPositions` emits
+    // ONE OR MORE <mark class="sp-hl"> runs (UAT-verified: "rdme" → two runs). Collect every run in the
+    // row and concatenate — together they reconstruct the matched characters of the typed "marker"
+    // query — rather than assuming the first run alone spells the whole query.
+    const markEls = markerRow!.$$("mark.sp-hl");
+    const markTexts: string[] = [];
+    for await (const m of markEls) markTexts.push((await m.getText()).toLowerCase());
+    expect(markTexts.length, "expected at least one <mark class=\"sp-hl\"> inside the matched row").to.be.greaterThan(0);
+    expect(markTexts.join(""), "expected the highlighted runs to spell the typed query").to.include("marker");
 
     // CPE-1148 Part A: capture the overlay's ranked, highlighted state (after the assertions above,
     // before Enter dismisses it below). On a FAILING run this line is never reached — the `afterEach`
