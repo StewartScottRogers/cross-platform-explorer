@@ -2084,14 +2084,16 @@ fn start_archive_compress(
 /// Start an extract of `path` into `dest` through the transfer queue (CPE-1184): streams per-entry
 /// progress and is cancellable exactly like a copy/move. `password` (non-empty) uses the AES-zip path;
 /// otherwise the format is auto-detected by extension, mirroring [`extract_archive`]. Before queuing,
-/// a zip-family archive's password is validated *synchronously* via
+/// a zip-family archive's password is validated up-front via
 /// [`cpe_server::archive::check_zip_password`] — a cheap header-only check — so the frontend's existing
-/// password-prompt-and-retry flow keeps its original synchronous try/catch shape (an instant rejection)
-/// instead of round-tripping through a transfer id + completion event just to learn a password was
-/// wrong. Returns the new transfer's id immediately once that check passes.
+/// password-prompt-and-retry flow keeps its original try/catch shape (an instant rejection) instead of
+/// round-tripping through a transfer id + completion event just to learn a password was wrong. That
+/// check opens the zip and reads its central directory (real disk I/O), so it runs off the main thread
+/// via `spawn_blocking` per CPE-760/761 — hence this command is `async`, matching every sibling archive
+/// command. Returns the new transfer's id immediately once the check passes.
 #[tauri::command]
 #[cfg_attr(feature = "specta-bindings", specta::specta)]
-fn start_archive_extract(
+async fn start_archive_extract(
     app: tauri::AppHandle,
     path: String,
     dest: String,
@@ -2104,7 +2106,15 @@ fn start_archive_extract(
         || lower.ends_with(".gz")
         || lower.ends_with(".7z"));
     if is_zip_family {
-        cpe_server::archive::check_zip_password(&path, password.as_deref())?;
+        // Real disk I/O (open zip + read central directory), so run it off the main thread via
+        // spawn_blocking (CPE-760/761), matching extract_archive and every other archive command.
+        let path_check = path.clone();
+        let pw_check = password.clone();
+        tauri::async_runtime::spawn_blocking(move || {
+            cpe_server::archive::check_zip_password(&path_check, pw_check.as_deref())
+        })
+        .await
+        .map_err(|e| e.to_string())??;
     }
     use std::sync::atomic::Ordering;
     let id = TRANSFER_SEQ.fetch_add(1, Ordering::Relaxed);
