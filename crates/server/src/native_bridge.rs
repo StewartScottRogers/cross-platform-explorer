@@ -120,6 +120,23 @@ pub fn push_ctx(ctx: &dyn ServerCtx, path: &Path) -> Result<(), String> {
     push(&read_tags_from(&ctx.app_config_dir()?), path)
 }
 
+/// **Read-only** native-tags lookup for `path` (CPE-1175, epic CPE-717): the same low-level read
+/// [`pull`]/[`pull_ctx`] use (`native_meta::read` + the OS-appropriate [`decode_native`]) but with **no
+/// [`TagStore`] involved at all** — nothing is merged, nothing is persisted. Built for the details-view
+/// "Native Tags" column, which must read a path's native metadata per visible row without mutating the
+/// user's tag store as a side effect of merely displaying a column.
+///
+/// Degrades to the empty [`NativeTags`] (no tags, no label) whenever there is nothing to show: no native
+/// metadata on the path, a filesystem that can't store it (`MetaError::Unsupported`, e.g. FAT/no xattr
+/// support), or a read that fails outright (`MetaError::Io`, e.g. a permission error or a path that
+/// vanished between listing and reading). Never errors — a column cell must never fail the listing.
+pub fn read_native_tags(path: &Path) -> NativeTags {
+    match native_meta::read(path, &native_name()) {
+        Ok(Some(bytes)) => decode_native(&bytes),
+        Ok(None) | Err(_) => NativeTags::default(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -221,6 +238,39 @@ mod tests {
         let dir = scratch("missing");
         let nope = dir.join("nope.txt");
         assert!(pull(&mut TagStore::new(), &nope).is_err());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn read_native_tags_reads_pushed_tags_with_no_store_involved() {
+        let dir = scratch("read-only");
+        let f = dir.join("file.txt");
+        std::fs::write(&f, b"contents").unwrap();
+        if !native_meta::is_supported(&f) {
+            let _ = std::fs::remove_dir_all(&dir);
+            return;
+        }
+
+        // Before anything is pushed, the read-only lookup finds nothing.
+        assert_eq!(read_native_tags(&f), NativeTags::default());
+
+        let mut src = TagStore::new();
+        tag_store_set(&mut src, &f.to_string_lossy(), vec!["report".into(), "q3".into()], "red".into());
+        push(&src, &f).unwrap();
+
+        let native = read_native_tags(&f);
+        assert_eq!(native.tags, vec!["q3".to_string(), "report".to_string()]);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn read_native_tags_degrades_to_empty_on_a_missing_or_unsupported_path() {
+        let dir = scratch("read-only-missing");
+        let nope = dir.join("nope.txt");
+        // A missing path is a read error at the native_meta layer — never surfaced as a panic or an
+        // Err here; the column-cell contract is "never fails the listing", so this degrades to empty.
+        assert_eq!(read_native_tags(&nope), NativeTags::default());
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

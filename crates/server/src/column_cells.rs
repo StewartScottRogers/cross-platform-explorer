@@ -14,8 +14,9 @@ use std::path::Path;
 
 use serde::Serialize;
 
-use crate::column_extract::{extract_column, MetaColumn};
+use crate::column_extract::{extract_column, native_tags_cell, MetaColumn};
 use crate::metadata_column::CellValue;
+use crate::native_bridge::read_native_tags;
 
 /// One pickable metadata column for the picker UI: a stable string id (for persistence in
 /// [`crate::column_config`]), a friendly label, the typed [`MetaColumn`] to pass back into
@@ -101,6 +102,21 @@ pub fn stream_column_cells(
 ) {
     let mut buf: Vec<MetadataCell> = Vec::new();
     for path in paths {
+        // Native tags (CPE-1175) read the path's native OS metadata directly — not its byte content — so
+        // this skips the header read entirely for that column: no wasted 1 MiB read per row just to look
+        // up an xattr/ADS. `read_native_tags` already degrades every failure mode (missing metadata, an
+        // unsupported filesystem, an unreadable path) to an empty `NativeTags`, so this can never panic or
+        // fail the batch — same skip-on-error guarantee as every other column below.
+        if matches!(col, MetaColumn::NativeTags) {
+            let cell = native_tags_cell(&read_native_tags(Path::new(path)));
+            let display = cell.display(EMPTY_PLACEHOLDER);
+            buf.push(MetadataCell { path: path.clone(), cell, display });
+            if buf.len() >= batch && flush(std::mem::take(&mut buf)).is_break() {
+                return;
+            }
+            continue;
+        }
+
         let ext = Path::new(path)
             .extension()
             .and_then(|e| e.to_str())
@@ -356,7 +372,7 @@ mod tests {
     #[test]
     fn available_columns_expose_id_label_and_extensions() {
         let cols = available_columns();
-        assert_eq!(cols.len(), 36);
+        assert_eq!(cols.len(), 37);
         let track = cols.iter().find(|c| c.id == "audio.track").expect("audio.track present");
         assert_eq!(track.column, MetaColumn::Audio(AudioColumn::Track));
         assert!(track.extensions.contains(&"mp3".to_string()));
@@ -368,6 +384,60 @@ mod tests {
         assert_eq!(true_type.column, MetaColumn::TrueType);
         assert!(true_type.extensions.is_empty(), "an applies-to-all column carries no extensions");
         assert_eq!(true_type.label, "True Type");
+
+        // The native-tags column (CPE-1175) appears in the picker's list, applies-to-all like the
+        // detectors above.
+        let native_tags = cols.iter().find(|c| c.id == "native.tags").expect("native.tags present");
+        assert_eq!(native_tags.column, MetaColumn::NativeTags);
+        assert!(native_tags.extensions.is_empty(), "native tags apply to every file, not one extension");
+        assert_eq!(native_tags.label, "Native Tags");
+    }
+
+    // --- CPE-1175: the native-tags column reads real per-path native metadata ---
+
+    #[test]
+    fn native_tags_column_reads_pushed_tags_and_is_blank_on_unsupported_or_absent() {
+        use crate::native_bridge::push;
+        use crate::tags::{tag_store_set, TagStore};
+
+        let dir = scratch("native-tags");
+        let tagged = write_file(&dir, "tagged.txt", b"contents");
+        let untagged = write_file(&dir, "untagged.txt", b"contents");
+        let missing = dir.join("does-not-exist.txt").to_string_lossy().into_owned();
+
+        // Skip gracefully if this filesystem can't store native metadata at all (e.g. old-kernel tmpfs) —
+        // a valid environment, not a code failure; `native_bridge`/`native_meta` cover that path in their
+        // own tests.
+        if !crate::native_meta::is_supported(Path::new(&tagged)) {
+            let _ = std::fs::remove_dir_all(&dir);
+            return;
+        }
+
+        // Push native tags onto one file only, via the store→native path the ticket says to reuse.
+        let mut store = TagStore::new();
+        tag_store_set(&mut store, &tagged, vec!["report".into(), "q3".into()], "red".into());
+        push(&store, Path::new(&tagged)).unwrap();
+
+        let cells = column_cells(
+            &[tagged.clone(), untagged.clone(), missing.clone()],
+            MetaColumn::NativeTags,
+        );
+        assert_eq!(cells.len(), 3);
+        let by_path = |p: &str| cells.iter().find(|c| c.path == p).unwrap();
+
+        // A file with native tags → comma-joined, normalized (sorted) order.
+        assert_eq!(by_path(&tagged).cell, CellValue::Text("q3, report".into()));
+        assert_eq!(by_path(&tagged).display, "q3, report");
+
+        // A file with no native metadata at all → blank, never an error.
+        assert_eq!(by_path(&untagged).cell, CellValue::Empty);
+        assert_eq!(by_path(&untagged).display, "—");
+
+        // A missing path → blank too — the skip-on-error guardrail, never a panic or a failed batch.
+        assert_eq!(by_path(&missing).cell, CellValue::Empty);
+        assert_eq!(by_path(&missing).display, "—");
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
