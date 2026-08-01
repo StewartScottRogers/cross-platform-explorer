@@ -257,6 +257,16 @@
     <text x="12" y="16.5" font-size="12" font-weight="700" text-anchor="middle" fill="currentColor" stroke="none">τ</text>
   {:else if name === "heading"}
     <text x="12" y="16.5" font-size="12" font-weight="700" text-anchor="middle" fill="currentColor" stroke="none">¶</text>
+  <!-- Link glyph (CPE-1208, epic CPE-715): the FileList row badge for a symlink entry, and its
+       "broken" variant (a gap in the chain) for a symlink whose target doesn't resolve. Monochrome via
+       currentColor, like the other toolbar/ui glyphs, so it inherits the badge's own colour. -->
+  {:else if name === "link"}
+    <path d="M9.5 14.5a3.5 3.5 0 0 0 5 0l3-3a3.5 3.5 0 0 0-5-5l-1.2 1.2" />
+    <path d="M14.5 9.5a3.5 3.5 0 0 0-5 0l-3 3a3.5 3.5 0 0 0 5 5l1.2-1.2" />
+  {:else if name === "link-broken"}
+    <path d="M8.7 15.3a3.5 3.5 0 0 0 5 0l1.4-1.4" />
+    <path d="M15.3 8.7a3.5 3.5 0 0 0-5 0L8.9 10.1" />
+    <path d="M4 4l16 16" />
   {/if}
 </svg>
 

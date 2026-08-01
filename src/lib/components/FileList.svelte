@@ -3,6 +3,7 @@
   import { windowRange, ensureVisibleOffset } from "../virtualize";
   import Icon from "./Icon.svelte";
   import ThumbnailImage from "./ThumbnailImage.svelte";
+  import LinkBadge from "./LinkBadge.svelte";
   import { t } from "../i18n";
   import { formatSize } from "../format";
   import { formatDate } from "../datetime";
@@ -651,6 +652,12 @@
                 <span class="tag-chip">{tag}</span>
               {/each}
             </span>
+          {/if}
+          {#if entry.is_symlink}
+            <!-- Link badge (CPE-1208, epic CPE-715): only mounted for symlink rows — a folder with no
+                 links renders zero of these, so the hot listing path is untouched (PURPOSE.md). The
+                 target/broken lookup inside LinkBadge is itself lazy (fetched on visibility/hover). -->
+            <LinkBadge path={entry.path} />
           {/if}
           {#if act}
             <span class="agent-badge {act.kind}">{$t(ACTIVITY_LABEL_KEY[act.kind])}</span>
