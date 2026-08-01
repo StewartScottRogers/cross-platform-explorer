@@ -13,8 +13,10 @@ import RepairLinkDialog from "./RepairLinkDialog.svelte";
 let suggestion: string | null = "/repo/found/marker.txt";
 let deleteOk = true;
 let createOk = true;
+let recheckBroken = true; // link_status.broken re-checked right before the destructive delete (TOCTOU guard)
 const invoke = vi.fn(async (cmd: string, args?: any) => {
   if (cmd === "suggest_repair") return suggestion;
+  if (cmd === "link_status") return { target: "/repo/gone", broken: recheckBroken };
   if (cmd === "delete_permanent") {
     return deleteOk
       ? [{ path: args.paths[0], ok: true, error: "" }]
@@ -97,5 +99,27 @@ describe("RepairLinkDialog (CPE-1209)", () => {
     expect(screen.getByTestId("repair-error")).toBeTruthy();
     // Back on the ready screen (not stuck mid-confirm), so the user can browse for another target.
     expect(screen.getByTestId("repair-browse")).toBeTruthy();
+  });
+
+  it("aborts the destructive delete if the link is no longer broken at confirm time (TOCTOU guard)", async () => {
+    suggestion = "/repo/found/marker.txt";
+    deleteOk = true;
+    createOk = true;
+    recheckBroken = false; // target reappeared between the menu gate and the confirm click
+    invoke.mockClear();
+    const { component } = render(RepairLinkDialog, base);
+    const errorSpy = vi.fn();
+    component.$on("error", (e: CustomEvent<string>) => errorSpy(e.detail));
+
+    await waitFor(() => expect(screen.getByTestId("repair-accept")).toBeTruthy());
+    await fireEvent.click(screen.getByTestId("repair-accept"));
+    await fireEvent.click(screen.getByTestId("repair-confirm-yes"));
+
+    // Re-checks link_status and, seeing it's no longer broken, NEVER deletes — no data loss.
+    await waitFor(() => expect(invoke).toHaveBeenCalledWith("link_status", { path: "/repo/broken-link.txt" }));
+    expect(invoke).not.toHaveBeenCalledWith("delete_permanent", expect.anything());
+    expect(invoke).not.toHaveBeenCalledWith("create_symlink", expect.anything());
+    await waitFor(() => expect(errorSpy).toHaveBeenCalledTimes(1));
+    recheckBroken = true; // restore for any later tests
   });
 });

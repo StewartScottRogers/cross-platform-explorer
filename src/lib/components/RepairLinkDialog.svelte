@@ -60,6 +60,13 @@
     phase = "repairing";
     error = "";
     try {
+      // Re-verify the link is STILL broken right before the destructive delete. Closes a TOCTOU: if a
+      // directory-symlink's target reappeared after the context-menu's broken-check, delete_permanent would
+      // see is_dir()==true and remove_dir_all the now-real target directory. Abort instead of deleting.
+      const recheck = await commands.linkStatus(linkPath);
+      if (!recheck.broken) {
+        throw new Error("This link is no longer broken — refresh the folder and try again.");
+      }
       const delRes = await commands.deletePermanent([linkPath]);
       const delFailed = delRes.find((r) => !r.ok);
       if (delFailed) {
