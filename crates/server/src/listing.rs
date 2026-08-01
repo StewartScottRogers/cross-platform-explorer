@@ -15,6 +15,9 @@ pub const LIST_DIR_BATCH: usize = 256;
 /// Map one directory entry to a [`DirEntry`], or `None` if it can't be read — the caller skips those
 /// rather than failing the whole listing.
 fn dir_entry_from(entry: &fs::DirEntry) -> Option<DirEntry> {
+    // `fs::DirEntry::metadata()` does NOT follow symlinks (unlike `fs::metadata()`), so `meta.is_dir()`
+    // is already false for a symlink pointing at a directory and `meta.file_type().is_symlink()` is free
+    // — no extra syscall beyond the one this listing already makes per entry.
     let meta = entry.metadata().ok()?;
     let entry_path = entry.path();
     let is_dir = meta.is_dir();
@@ -26,6 +29,7 @@ fn dir_entry_from(entry: &fs::DirEntry) -> Option<DirEntry> {
         size: if is_dir { 0 } else { meta.len() },
         modified: meta.modified().ok().and_then(to_epoch_ms),
         extension: if is_dir { String::new() } else { extension_of(&entry_path) },
+        is_symlink: meta.file_type().is_symlink(),
     })
 }
 
@@ -128,6 +132,33 @@ mod tests {
         .unwrap();
         assert_eq!(seen, 100, "break after the first batch stops the walk");
         assert_eq!(n, 100);
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn list_dir_flags_symlinks_and_leaves_plain_files_unflagged() {
+        let d = scratch("symlink");
+        let target = d.join("target.txt");
+        fs::write(&target, b"data").unwrap();
+        let plain = d.join("plain.txt");
+        fs::write(&plain, b"data").unwrap();
+        let link = d.join("link.txt");
+
+        // Symlink creation is unprivileged on Windows only with Developer Mode / admin — skip the
+        // is_symlink assertion there rather than failing; POSIX always permits it (matches links.rs).
+        #[cfg(unix)]
+        let created = std::os::unix::fs::symlink(&target, &link).is_ok();
+        #[cfg(windows)]
+        let created = std::os::windows::fs::symlink_file(&target, &link).is_ok();
+
+        let entries = list_dir(&d.to_string_lossy()).unwrap();
+        let plain_entry = entries.iter().find(|e| e.name == "plain.txt").unwrap();
+        assert!(!plain_entry.is_symlink, "a plain file is never a symlink");
+
+        if created {
+            let link_entry = entries.iter().find(|e| e.name == "link.txt").unwrap();
+            assert!(link_entry.is_symlink, "a listed symlink entry reports is_symlink=true");
+        }
         let _ = fs::remove_dir_all(&d);
     }
 

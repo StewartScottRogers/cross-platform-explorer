@@ -21,6 +21,7 @@ const dir = (name: string): DirEntry => ({
   modified: 0,
   extension: "",
   hidden: false,
+  is_symlink: false,
 });
 
 const file = (name: string, extension: string): DirEntry => ({
@@ -31,6 +32,7 @@ const file = (name: string, extension: string): DirEntry => ({
   modified: new Date(2026, 6, 10, 15, 0).getTime(),
   extension,
   hidden: false,
+  is_symlink: false,
 });
 
 const drives: Place[] = [{ name: "Local Disk (C:)", path: "C:\\d", kind: "drive" }];

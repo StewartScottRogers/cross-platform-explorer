@@ -24,6 +24,7 @@ const entry = (over: Partial<DirEntry> = {}): DirEntry => ({
   modified: Date.now(),
   extension: "rs",
   hidden: false,
+  is_symlink: false,
   ...over,
 });
 

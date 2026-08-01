@@ -1148,6 +1148,15 @@ async linkStatus(path: string) : Promise<LinkStatus> {
     return await TAURI_INVOKE("link_status", { path });
 },
 /**
+ * Suggest a repair target for a broken symlink (CPE-1027, epic CPE-715): reads `broken_link`'s stored
+ * target's basename and searches `search_roots` (in order, each a bounded-depth walk) for the first
+ * matching entry. Returns `None` if `broken_link` isn't a readable symlink or nothing matches. Model in
+ * `cpe_server::links` (CPE-815); this is a thin `spawn_blocking` dispatcher.
+ */
+async suggestRepair(brokenLink: string, searchRoots: string[]) : Promise<string | null> {
+    return await TAURI_INVOKE("suggest_repair", { brokenLink, searchRoots });
+},
+/**
  * Install the "Open in Cross-Platform Explorer" shell integration for the current user (CPE-1020, epic
  * CPE-712) — writes the registry entries for the running exe. Windows-only today; other OSes return an
  * error. Logic in `cpe_server::shell_menu`.
@@ -2575,7 +2584,14 @@ extension: string;
 /**
  * Hidden per the OS convention: the hidden attribute on Windows, a leading dot on POSIX.
  */
-hidden: boolean }
+hidden: boolean; 
+/**
+ * True when the entry itself is a symbolic link (not a link *target* check — the target is resolved
+ * lazily by the frontend on badge render, CPE-1208). Sourced from the entry's own `file_type()`
+ * (which does not follow the link), never from a following `metadata()` call, so listing a folder
+ * costs no extra syscall per entry whether or not it contains links (epic CPE-715).
+ */
+is_symlink: boolean }
 /**
  * Free + total bytes on the volume containing `path`, for the status bar (CPE-403).
  */

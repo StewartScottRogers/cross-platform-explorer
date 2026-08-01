@@ -1308,6 +1308,7 @@
         modified: null,
         extension: isDir ? "" : (childName.includes(".") ? childName.split(".").pop()!.toLowerCase() : ""),
         hidden: false,
+        is_symlink: false,
       });
     }
     return [...seen.values()];
@@ -2762,7 +2763,7 @@
   function openFolderProperties() {
     if (isHome) return;
     const name = splitPath(currentPath).at(-1)?.name ?? currentPath;
-    propsFor = [{ name, path: currentPath, is_dir: true, size: 0, modified: null, extension: "", hidden: false }];
+    propsFor = [{ name, path: currentPath, is_dir: true, size: 0, modified: null, extension: "", hidden: false, is_symlink: false }];
   }
 
   function openMetadataStudio() {
@@ -2964,7 +2965,7 @@
    *  real volume info from the path, mirroring `openFolderProperties`. */
   function openDriveProperties() {
     if (!driveCtxPath) return;
-    propsFor = [{ name: driveCtxName || driveCtxPath, path: driveCtxPath, is_dir: true, size: 0, modified: null, extension: "", hidden: false }];
+    propsFor = [{ name: driveCtxName || driveCtxPath, path: driveCtxPath, is_dir: true, size: 0, modified: null, extension: "", hidden: false, is_symlink: false }];
   }
 
   // ---- Home row context menu (CPE-1162) ---------------------------------------------------------
@@ -2993,6 +2994,7 @@
       modified: null,
       extension: !homeCtxIsDir && dot > 0 ? name.slice(dot + 1).toLowerCase() : "",
       hidden: false,
+      is_symlink: false,
     };
   }
 

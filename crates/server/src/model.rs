@@ -23,6 +23,11 @@ pub struct DirEntry {
     pub extension: String,
     /// Hidden per the OS convention: the hidden attribute on Windows, a leading dot on POSIX.
     pub hidden: bool,
+    /// True when the entry itself is a symbolic link (not a link *target* check — the target is resolved
+    /// lazily by the frontend on badge render, CPE-1208). Sourced from the entry's own `file_type()`
+    /// (which does not follow the link), never from a following `metadata()` call, so listing a folder
+    /// costs no extra syscall per entry whether or not it contains links (epic CPE-715).
+    pub is_symlink: bool,
 }
 
 /// Per-item outcome of a bulk operation. Bulk file operations must NOT be all-or-nothing and must not

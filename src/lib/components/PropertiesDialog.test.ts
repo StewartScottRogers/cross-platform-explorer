@@ -19,7 +19,8 @@ const invoke = vi.fn(async (cmd: string, args?: { path?: string }) => {
 vi.mock("@tauri-apps/api/core", () => ({ invoke: (...a: unknown[]) => invoke(...(a as [string])) }));
 
 const file = (over: Partial<DirEntry> = {}): DirEntry => ({
-  name: "a.txt", path: "/a.txt", is_dir: false, size: 3, modified: 0, extension: "txt", hidden: false, ...over,
+  name: "a.txt", path: "/a.txt", is_dir: false, size: 3, modified: 0, extension: "txt", hidden: false,
+  is_symlink: false, ...over,
 });
 const img = (over: Partial<DirEntry> = {}): DirEntry => file({ name: "p.png", path: "/p.png", extension: "png", ...over });
 

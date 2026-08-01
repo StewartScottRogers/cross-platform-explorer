@@ -62,6 +62,7 @@ export function toDirEntries(rows: ReplayEntry[], dirs: Set<string>): DirEntry[]
       modified: r.kind === "baseline" ? null : r.ts,
       extension,
       hidden: r.name.startsWith("."),
+      is_symlink: false,
     };
   });
 }
