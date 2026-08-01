@@ -4,6 +4,7 @@ import {
   loadAutoRestore, saveAutoRestore, loadLastSession, saveLastSession,
   loadMetaColumnsForFolder, saveMetaColumnsForFolder,
   addNetworkLocation, removeNetworkLocation,
+  loadNativeBridgeEnabled, saveNativeBridgeEnabled,
 } from "./settings";
 import type { RecentFile, Favorite } from "./types";
 import type { WorkspaceTab } from "./workspaces";
@@ -62,6 +63,22 @@ describe("metaColumnsByFolder (CPE-1146)", () => {
   it("degrades a corrupt entry (wrong shape) to empty rather than crashing", () => {
     saveMetaColumnsForFolder("/bad", [{ bogus: 1 } as unknown as ActiveMetaColumn]);
     expect(loadMetaColumnsForFolder("/bad")).toEqual([]);
+  });
+});
+
+// CPE-1177 (epic CPE-717): the native-bridge opt-in that gates TagEditor's native pull/push controls
+// (CPE-1177) and PropertiesDialog's read-only Native metadata section (CPE-1176). OFF by default so
+// the plain explorer never touches OS-native file metadata unless the user turns it on.
+describe("nativeBridgeEnabled (CPE-1177)", () => {
+  it("defaults to off", () => {
+    expect(loadNativeBridgeEnabled()).toBe(false);
+  });
+
+  it("round-trips through persist", () => {
+    saveNativeBridgeEnabled(true);
+    expect(loadNativeBridgeEnabled()).toBe(true);
+    saveNativeBridgeEnabled(false);
+    expect(loadNativeBridgeEnabled()).toBe(false);
   });
 });
 

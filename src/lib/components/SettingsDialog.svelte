@@ -5,6 +5,7 @@
       App to apply + persist, so there is a single source of truth. */
   import { createEventDispatcher, onMount } from "svelte";
   import { platformActive } from "../sidecar";
+  import * as settings from "../settings";
   import SidecarManager from "./SidecarManager.svelte";
   import ShellIntegration from "./ShellIntegration.svelte";
 
@@ -25,6 +26,17 @@
   onMount(async () => {
     platformOn = await platformActive();
   });
+
+  // Native-bridge opt-in (CPE-1177, epic CPE-717): OFF by default. When on, it reveals the OS-native
+  // tag/comment Pull/Push controls in TagEditor and the read-only Native metadata section in
+  // PropertiesDialog (CPE-1176). A Settings control, never a launch-time permission modal
+  // ([[avoid-modal-permission-popups]]). Self-contained (reads/writes settings.ts directly), like the
+  // other settings rows on this page.
+  let nativeBridgeEnabled = settings.loadNativeBridgeEnabled();
+  function setNativeBridgeEnabled(on: boolean) {
+    nativeBridgeEnabled = on;
+    settings.saveNativeBridgeEnabled(on);
+  }
 </script>
 
 <svelte:window on:keydown={(e) => e.key === "Escape" && dispatch("close")} />
@@ -55,6 +67,21 @@
       <button class="settings-btn" on:click={() => dispatch("reset")}>
         Reset all settings to defaults
       </button>
+    </div>
+
+    <div class="section-title">Native metadata bridge</div>
+    <div class="settings-row">
+      <span>Sync tags with OS-native file metadata</span>
+      <input
+        type="checkbox"
+        checked={nativeBridgeEnabled}
+        data-testid="native-bridge-toggle"
+        on:change={(e) => setNativeBridgeEnabled(e.currentTarget.checked)}
+      />
+    </div>
+    <div class="note">
+      Adds Pull/Push controls to the tag editor and a read-only Native metadata section to Properties.
+      Off by default.
     </div>
 
     <ShellIntegration />
@@ -94,6 +121,11 @@
     font-weight: 600;
     color: var(--text-dim);
     margin: 16px 0 6px;
+  }
+  .note {
+    font-size: 12px;
+    color: var(--text-dim);
+    margin-top: 2px;
   }
   .actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 18px; }
   .btn {

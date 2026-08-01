@@ -4,7 +4,7 @@ title: "Native-bridge opt-in toggle (nativeBridgeEnabled) + gate TagEditor nativ
 type: feature
 component: Frontend
 priority: medium
-status: Doing
+status: Done
 tags: ready
 created: 2026-07-31
 epic: CPE-717
@@ -31,3 +31,12 @@ CPE-1176 on one branch (same worker) to avoid a cross-branch key race.
 
 ## Work Log
 - 2026-07-31 — Filed by Foreman (workshift, epic CPE-717). Owns `nativeBridgeEnabled`. Built with CPE-1176 by one worker.
+- 2026-07-31 — Done. Added `nativeBridgeEnabled: boolean` (default `false`) to `src/lib/settings.ts`
+  (persisted via the standard `read`/`write` helpers, round-trips through `settings.json`). Added a
+  labelled toggle + description in `SettingsDialog.svelte` ("Native metadata bridge" section, self-contained
+  like `ShellIntegration.svelte` — reads/writes `settings.ts` directly, no launch-time modal). Gated
+  `TagEditor.svelte`'s native pull/push controls (+ the `pullNative`/`pushNative` handlers, defense-in-depth)
+  behind the flag — hidden when off, shown when on, still per-path-only (hidden in batch mode regardless).
+  Tests: `settings.test.ts` (`nativeBridgeEnabled` defaults off + round-trips) and new `TagEditor.test.ts`
+  (hidden when off, shown when on, hidden in batch even when on). `npm run check` 0 errors; `npm test` all
+  green. Built together with CPE-1176 on branch `cpe-1177-1176-native-metadata-gui`, PR opened against `main`.
