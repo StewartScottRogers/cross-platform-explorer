@@ -2,7 +2,7 @@
 id: CPE-718
 title: "EPIC: Universal thumbnail pipeline"
 type: Task
-status: Proposed
+status: In Progress
 priority: Medium
 component: Multiple
 tags: [epic]
@@ -45,3 +45,22 @@ and gallery views genuinely useful for mixed folders and is the visual backbone 
 
 ## Board hygiene 2026-07-29 — reverted In Progress → Proposed
 Not actively being worked: all decomposed child tickets are Done. Remaining DoD is user-gated (GUI / model-key / cert / Mac) or a deferred cap. Reverted to **Proposed** so the epic queue honestly shows what's dormant vs active; re-activate with `/ticketing-epic activate` to resume (like CPE-703 was this session). **Remaining (DoD review 2026-07-30):** Per-format thumbnail extractors + frontend streaming client unbuilt (only cache core).
+
+## Re-activated 2026-08-01 (workshift) — DoD-gap assessment + decomposition
+PM scouting (grep-first; the 2026-07-30 note was accurate this time). TRUE state:
+- **Image path complete + cached** (thumbnail.rs, thumb_source.rs, thumb_orient.rs) + the CACHE and
+  QUEUE cores are BUILT (thumb_cache.rs CPE-939, thumb_queue.rs CPE-950, cargo-tested) but **ORPHANED**
+  — declared modules wired into NO command; `ThumbnailImage.svelte` bypasses both with a naive per-tile
+  eager decode. (The CPE-978 orphaned-but-built leverage pattern.)
+- **No per-format extractors** beyond raster images: zero SVG / font / video / PDF thumbnailing.
+
+Decomposition (headless-buildable first; heavy-dep formats deferred):
+- **CPE-1236** — SVG + font glyph-sheet thumbnail extractors in cpe-server (extend thumb_source dispatch;
+  lighter deps resvg/usvg + ab_glyph/fontdue; cargo-tested). Cohesive backend slice (shared dispatch +
+  Cargo, so ONE ticket, not two).
+- **CPE-1237** — Frontend streaming thumbnail client: wire the built `thumb_queue` (priority
+  Visible>Prefetch>Background) + `thumb_cache` into visible virtualized tiles, replacing the naive eager
+  decode in `ThumbnailImage.svelte`. vitest + gui-smoke. (Prereq 1236 for shared integration points.)
+- **CPE-1238 (deferred)** — Video representative-frame + PDF first-page extractors. HEAVY native deps
+  (ffmpeg/pdfium/mupdf) that fight PURPOSE's fast/small/predictable, and real-render verification is
+  GUI/hardware-gated. Build-to-last-mile then defer to the user.
