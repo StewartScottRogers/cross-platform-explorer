@@ -417,6 +417,67 @@ function seedEmptyFolderFixture(tmpDir: string): void {
   fs.mkdirSync(path.join(tmpDir, EMPTY_DIR_NAME), { recursive: true });
 }
 
+// --- CPE-1181: archive-browse (.tar.gz) fixture -------------------------------------------------
+// Extends the already-working in-app ZIP browsing (CPE-242/1179) to tar/tar.gz/tgz/7z/iso —
+// `read_archive_entries` (crates/server/src/archive.rs) is already format-agnostic across all of
+// those, so a hand-built, genuinely valid `.tar.gz` is enough to exercise the frontend's new
+// `ARCHIVE_EXTS` entry + `enterArchive`/`archiveChildren` (App.svelte) for a non-zip format.
+//
+// No external `tar` dependency: a minimal single-entry USTAR header (100-byte name, octal
+// mode/uid/gid/size/mtime fields, the standard "sum bytes with the checksum field blanked to
+// spaces" checksum algorithm, "ustar\0"/"00" magic/version) followed by the (zero-padded to a
+// 512-byte boundary) file data and two 512-byte zero end-of-archive blocks — the same shape the
+// backend's own `tar::Builder`-based tests (`extract_archive_unpacks_a_tar_gz`,
+// `read_archive_entries_lists_tar_contents` in archive.rs) construct, just written by hand here
+// since gui-smoke has no Rust access. `zlib.gzipSync` (real gzip, not raw deflate) wraps it, so the
+// backend's gzip-vs-plain-tar dispatch (by trying gzip decode first) sees a genuine gzip stream.
+export const ARCHIVE_TARGZ_NAME = "CPE-1181-archive.tar.gz";
+export const ARCHIVE_TARGZ_INNER_NAME = "CPE-1181-note.txt";
+const ARCHIVE_TARGZ_INNER_CONTENT = "packed inside a tar.gz for CPE-1181\n";
+
+function tarChecksumPlaceholder(): string {
+  return "        "; // 8 ASCII spaces — the checksum field's value while the sum itself is computed
+}
+
+/** One 512-byte USTAR header block for a single regular-file entry. */
+function tarHeader(name: string, size: number, mtimeSec: number): Buffer {
+  const header = Buffer.alloc(512, 0);
+  header.write(name, 0, "utf-8"); // name: 100 bytes
+  header.write("0000644\0", 100, "utf-8"); // mode: 8 bytes
+  header.write("0000000\0", 108, "utf-8"); // uid: 8 bytes
+  header.write("0000000\0", 116, "utf-8"); // gid: 8 bytes
+  header.write(`${size.toString(8).padStart(11, "0")}\0`, 124, "utf-8"); // size: 12 bytes (octal)
+  header.write(`${mtimeSec.toString(8).padStart(11, "0")}\0`, 136, "utf-8"); // mtime: 12 bytes (octal)
+  header.write(tarChecksumPlaceholder(), 148, "utf-8"); // chksum: 8 bytes, blanked for the sum below
+  header[156] = 0x30; // typeflag '0' — regular file
+  header.write("ustar\0", 257, "utf-8"); // magic: 6 bytes
+  header.write("00", 263, "utf-8"); // version: 2 bytes
+
+  let sum = 0;
+  for (let i = 0; i < 512; i++) sum += header[i];
+  header.write(`${sum.toString(8).padStart(6, "0")}\0 `, 148, "utf-8"); // final chksum: 6 octal digits + NUL + space
+  return header;
+}
+
+/** A minimal, genuinely valid single-entry `.tar.gz` (gzip-wrapped USTAR). */
+function buildSingleEntryTarGz(entryName: string, content: string): Buffer {
+  const data = Buffer.from(content, "utf-8");
+  const mtimeSec = Math.floor(Date.now() / 1000);
+  const pad = (512 - (data.length % 512)) % 512;
+  const tarBuf = Buffer.concat([
+    tarHeader(entryName, data.length, mtimeSec),
+    data,
+    Buffer.alloc(pad, 0),
+    Buffer.alloc(1024, 0), // two zero blocks mark end-of-archive
+  ]);
+  return zlib.gzipSync(tarBuf);
+}
+
+function seedArchiveBrowseFixture(tmpDir: string): void {
+  const targz = buildSingleEntryTarGz(ARCHIVE_TARGZ_INNER_NAME, ARCHIVE_TARGZ_INNER_CONTENT);
+  fs.writeFileSync(path.join(tmpDir, ARCHIVE_TARGZ_NAME), targz);
+}
+
 let tauriDriver: ChildProcess | undefined;
 let shuttingDown = false;
 
@@ -522,6 +583,10 @@ export const config: WebdriverIO.Config = {
 
     // CPE-1154: seed an empty subdirectory for the native-context-menu-leak repro (see block above).
     seedEmptyFolderFixture(tmpDir);
+
+    // CPE-1181: seed a genuinely valid single-entry .tar.gz for the non-zip archive-browse pin (see
+    // block above) — same tmpDir, same single app launch.
+    seedArchiveBrowseFixture(tmpDir);
 
     const caps = capabilities as unknown as Array<{ "tauri:options": { args: string[] } }>;
     caps[0]["tauri:options"].args = ["--test-mode", "--x=-4000", `--open=${tmpDir}`];
