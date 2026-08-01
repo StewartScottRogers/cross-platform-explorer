@@ -49,6 +49,24 @@ so both arm a confirmation panel first, restating what will happen. Nothing reve
 After a revert, the dialog reports how many changes were applied and how many were skipped (e.g. a locked
 or missing file); a skip never fails the rest of the revert.
 
+## Scheduled snapshots
+
+Instead of taking every checkpoint by hand, you can have a folder snapshot itself on an interval. Open
+**Settings** (command palette → *Settings*) and find the **Scheduled snapshots** section.
+
+- **Add a folder** — click **Browse…** to pick the folder, choose how often to capture it (e.g. every
+  1 day), and click **Add**. It starts enabled.
+- **Retention** — each folder keeps a rolling window of snapshots: so many *hourly*, *daily*, *weekly*,
+  and *monthly* captures. Older snapshots outside that window are pruned automatically after each
+  scheduled capture, so the store stays bounded instead of growing forever.
+- **Pause / resume** — the **on / paused** toggle on a folder stops or restarts its schedule without
+  losing the rule.
+- **Remove** — the **✕** removes the schedule (existing snapshots in the store are left alone).
+
+This is **opt-in and off by default**: with no folders added, the scheduler does nothing at all — no
+captures, no background work. A folder you add is captured by a background timer while the app is open;
+the first capture happens shortly after you add it (or after launch), then on its interval.
+
 ## What this is (and isn't)
 
 This is the palette-driven, headless-friendly way to create and use checkpoints. A richer visual restore

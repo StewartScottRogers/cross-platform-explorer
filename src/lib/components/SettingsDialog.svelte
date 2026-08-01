@@ -8,6 +8,7 @@
   import * as settings from "../settings";
   import SidecarManager from "./SidecarManager.svelte";
   import ShellIntegration from "./ShellIntegration.svelte";
+  import ScheduledSnapshots from "./ScheduledSnapshots.svelte";
 
   export let showHidden = false;
   export let showDetails = true;
@@ -83,6 +84,13 @@
       Adds Pull/Push controls to the tag editor and a read-only Native metadata section to Properties.
       Off by default.
     </div>
+
+    <div class="section-title">Scheduled snapshots</div>
+    <div class="note">
+      Automatically capture a snapshot of a folder on an interval and keep a retention window. Opt-in per
+      folder and off by default — nothing is captured until you add an enabled folder below.
+    </div>
+    <ScheduledSnapshots />
 
     <ShellIntegration />
 
