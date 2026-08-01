@@ -203,35 +203,41 @@ function seedBatchMediaFixture(tmpDir: string): void {
   fs.writeFileSync(path.join(tmpDir, BATCH_MEDIA_PNG_B_NAME), tinyPng(4, 4, [60, 120, 200]));
 }
 
-// --- CPE-1203: similar-images fixture -----------------------------------------------------------
+// --- CPE-1203 / CPE-1205: similar-images fixture ------------------------------------------------
 // Seed two near-duplicate images for the Find-similar-images dialog (SimilarImagesDialog.svelte,
 // CPE-1202). The backend (crates/server/src/image_similarity.rs) reduces each image to a perceptual
-// dHash and clusters by Hamming distance — so the fixture must be a *structured* image (a solid fill
-// hashes to all-zero, which would wrongly cluster with the batch-media solids also seeded into this
-// tmpDir). A horizontal grayscale GRADIENT is dHash's canonical structured fixture; the same gradient
-// at two different sizes is a genuine near-duplicate pair (mirrors image_similarity.rs's own
-// `gradient_png` test fixture), while being far (in Hamming bits) from the flat batch-media PNGs, so
-// the two seeded gradients form their OWN group of exactly two.
+// dHash and clusters by Hamming distance, then EXCLUDES featureless images (CPE-1205: a hash whose
+// popcount is near 0 or 64 carries no discriminative structure — solid fills AND smooth monotonic
+// gradients both collapse to an all-zero hash and would false-cluster). So the fixture must be a
+// genuinely *structured* image: a **multi-band** pattern (alternating black/white vertical bands) has
+// sharp column transitions that hash near half-set (popcount ~32), well inside the retained band. The
+// same pattern at two different sizes is a genuine near-duplicate pair (the resize preserves the
+// column structure), while being far (in Hamming bits) from the flat batch-media solids and unaffected
+// by the featureless guard, so the two seeded bands form their OWN group of exactly two. NOTE: a
+// gradient is NOT usable here anymore — it hashes all-zero and is dropped by the guard.
 export const SIMILAR_PNG_A_NAME = "CPE-1203-scene-a.png";
 export const SIMILAR_PNG_B_NAME = "CPE-1203-scene-b.png";
 
-/** A horizontal grayscale gradient (brightness rises left→right) at `w×h` — a valid truecolour PNG
- *  built with the same chunk/CRC/deflate machinery as {@link tinyPng}. Two sizes of it are perceptual
- *  near-duplicates under dHash. */
-function gradientPng(width: number, height: number): Buffer {
+/** A structured `width×height` image of `blocks` alternating black/white VERTICAL bands — a valid
+ *  truecolour PNG built with the same chunk/CRC/deflate machinery as {@link tinyPng}. The sharp column
+ *  transitions give a dHash near half-set bits (structured, survives the CPE-1205 featureless guard);
+ *  two sizes of it are perceptual near-duplicates under dHash. `width` should be a multiple of `blocks`
+ *  so each band is a whole number of pixels wide. */
+function bandedPng(width: number, height: number, blocks = 9): Buffer {
   const sig = Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]);
   const ihdrData = Buffer.alloc(13);
   ihdrData.writeUInt32BE(width, 0);
   ihdrData.writeUInt32BE(height, 4);
   ihdrData[8] = 8; // bit depth
   ihdrData[9] = 2; // colour type: truecolour (RGB)
+  const blockPx = Math.max(1, Math.floor(width / blocks));
   const rowBytes = 1 + width * 3;
   const raw = Buffer.alloc(rowBytes * height);
   for (let y = 0; y < height; y++) {
     const rowStart = y * rowBytes;
     raw[rowStart] = 0; // per-scanline filter type: None
     for (let x = 0; x < width; x++) {
-      const v = Math.round((x / Math.max(1, width - 1)) * 255);
+      const v = Math.floor(x / blockPx) % 2 === 0 ? 0 : 255; // alternating black/white bands
       const px = rowStart + 1 + x * 3;
       raw[px] = v;
       raw[px + 1] = v;
@@ -247,8 +253,10 @@ function gradientPng(width: number, height: number): Buffer {
 }
 
 function seedSimilarImagesFixture(tmpDir: string): void {
-  fs.writeFileSync(path.join(tmpDir, SIMILAR_PNG_A_NAME), gradientPng(240, 160));
-  fs.writeFileSync(path.join(tmpDir, SIMILAR_PNG_B_NAME), gradientPng(120, 80));
+  // Same 9-band vertical pattern at two sizes → a structured near-duplicate pair that survives the
+  // CPE-1205 featureless guard (widths are multiples of 9 so bands are whole pixels).
+  fs.writeFileSync(path.join(tmpDir, SIMILAR_PNG_A_NAME), bandedPng(216, 160));
+  fs.writeFileSync(path.join(tmpDir, SIMILAR_PNG_B_NAME), bandedPng(108, 80));
 }
 
 // --- CPE-1130: cost-History fixture -----------------------------------------------------------
@@ -620,8 +628,8 @@ export const config: WebdriverIO.Config = {
     // block above) — same tmpDir, same single app launch.
     seedBatchMediaFixture(tmpDir);
 
-    // CPE-1203: seed two near-duplicate gradient PNGs for the Find-similar-images dialog (see the
-    // block above) — same tmpDir, same single app launch.
+    // CPE-1203 / CPE-1205: seed two structured (multi-band) near-duplicate PNGs for the
+    // Find-similar-images dialog (see the block above) — same tmpDir, same single app launch.
     seedSimilarImagesFixture(tmpDir);
 
     // CPE-1130: seed the cost-History journal fixture into the real app-data dir (see the block

@@ -2,18 +2,19 @@
 // CPE-1202, epic CPE-997): drives the real built app, opens the dialog via its real opener — the
 // Command Palette (Ctrl+Shift+P → "Find similar images…", the same `tool.findSimilarImages` command
 // the Tools ▸ menu item is wired to, see App.svelte's `paletteCommands`) — scans the seeded tmpDir,
-// and asserts the two near-duplicate gradient PNGs render as ONE group with BOTH images (thumbnails
-// present). Also asserts the SAFETY guard: "Move to Bin" is disabled when a selection would delete
-// every copy of the group.
+// and asserts the two near-duplicate structured (multi-band) PNGs render as ONE group with BOTH images
+// (thumbnails present). Also asserts the SAFETY guard: "Move to Bin" is disabled when a selection would
+// delete every copy of the group.
 //
 // This spec DOES NOT delete anything: it never clicks "Move to Bin" (and proves it's disabled once a
 // whole-group selection is armed). The dialog is dismissed via its close button, so nothing outside
 // the throwaway tmpDir is ever touched. It relies on `find_similar_images_stream` being read-only
 // (image_similarity.rs only reads + hashes) rather than re-verifying that here.
 //
-// The two seeded fixtures (wdio.conf.ts#seedSimilarImagesFixture) are the SAME gradient at two sizes —
-// a genuine perceptual near-duplicate pair — and are structurally far from the flat batch-media PNGs
-// also in this tmpDir, so they form their own group of exactly two.
+// The two seeded fixtures (wdio.conf.ts#seedSimilarImagesFixture) are the SAME structured multi-band
+// pattern at two sizes — a genuine perceptual near-duplicate pair — and are structurally far from the
+// flat batch-media PNGs also in this tmpDir. Crucially they survive the CPE-1205 featureless guard
+// (which now excludes solids/gradients that hash all-zero), so they form their own group of exactly two.
 import { expect } from "chai";
 import fs from "node:fs";
 import path from "node:path";
@@ -106,7 +107,7 @@ describe("CPE-1203 — headless GUI smoke: Find-similar-images dialog groups two
     await scanBtn.waitForClickable({ timeout: 10_000 });
     await scanBtn.click();
 
-    // Core assertion (CPE-1203): the two seeded near-duplicate gradients cluster into ONE group with
+    // Core assertion (CPE-1203): the two seeded near-duplicate multi-band images cluster into ONE group with
     // BOTH images — the FALSIFIABLE check tied to this spec's own fixture. If the scan returned no
     // groups (broken invoke, bad path, missing fixture) `[data-testid="sim-none"]` would render and
     // no sim-group would exist, so this fails loudly rather than passing on an empty view.
@@ -118,7 +119,7 @@ describe("CPE-1203 — headless GUI smoke: Find-similar-images dialog groups two
     const cards = await group.$$('[data-testid="sim-image"]');
     expect(cards.length, "expected exactly the two seeded near-duplicates in the group").to.equal(2);
 
-    // Thumbnails present: the real `thumbnail` command decoded both gradients, so each card renders an
+    // Thumbnails present: the real `thumbnail` command decoded both images, so each card renders an
     // <img> (ThumbnailImage only emits <img> once a thumbnail loads; a decode failure falls back to an
     // Icon and no <img>). Wait for both to load.
     await browser.waitUntil(async () => (await group.$$("img").length) >= 2, {
