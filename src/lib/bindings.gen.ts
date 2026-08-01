@@ -1141,6 +1141,20 @@ async createHardLink(target: string, linkPath: string) : Promise<Result<null, st
 }
 },
 /**
+ * Create a Windows directory junction at `link_path` pointing to `target` (CPE-1210, epic CPE-715). A
+ * junction needs no Developer Mode / elevation (unlike a symlink) but only ever targets a directory.
+ * On non-Windows this always returns a clear "Windows-only" error — no reparse-point concept exists
+ * there. Model in `cpe_server::links` (CPE-815); this is a thin `spawn_blocking` dispatcher.
+ */
+async createJunction(target: string, linkPath: string) : Promise<Result<null, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("create_junction", { target, linkPath }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
  * Inspect `path` — is it a symlink, its target, and whether that target is missing (a broken link)
  * (CPE-804, epic CPE-715). Never fails. Model in `cpe_server::links` (CPE-815).
  */

@@ -2399,6 +2399,18 @@ async fn create_hard_link(target: String, link_path: String) -> Result<(), Strin
         .map_err(|e| e.to_string())?
 }
 
+/// Create a Windows directory junction at `link_path` pointing to `target` (CPE-1210, epic CPE-715). A
+/// junction needs no Developer Mode / elevation (unlike a symlink) but only ever targets a directory.
+/// On non-Windows this always returns a clear "Windows-only" error — no reparse-point concept exists
+/// there. Model in `cpe_server::links` (CPE-815); this is a thin `spawn_blocking` dispatcher.
+#[tauri::command]
+#[cfg_attr(feature = "specta-bindings", specta::specta)]
+async fn create_junction(target: String, link_path: String) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || cpe_server::links::create_junction(&target, &link_path))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
 /// Inspect `path` — is it a symlink, its target, and whether that target is missing (a broken link)
 /// (CPE-804, epic CPE-715). Never fails. Model in `cpe_server::links` (CPE-815).
 #[tauri::command]
@@ -7999,6 +8011,7 @@ pub fn run() {
             scan_tree,
             create_symlink,
             create_hard_link,
+            create_junction,
             link_status,
             suggest_repair,
             install_shell_integration,
@@ -8740,6 +8753,7 @@ pub fn export_bindings(out: &std::path::Path) -> Result<(), String> {
         scan_tree,
         create_symlink,
         create_hard_link,
+        create_junction,
         link_status,
         suggest_repair,
         install_shell_integration,
