@@ -929,6 +929,81 @@ fn thumbnail(app: tauri::AppHandle, path: String, max_edge: u32) -> Result<Strin
     Ok(format!("data:image/png;base64,{}", base64::engine::general_purpose::STANDARD.encode(png)))
 }
 
+/// Per-stream cancel flags for `thumbnails_stream`, keyed by the frontend-supplied `stream_id` — mirrors
+/// `index_build`'s registry and the `DIR_STREAM_CANCELS` pattern in STREAMING.md. A scroll-superseded
+/// batch (a new visible window landed while the previous one was still draining) is cancelled by setting
+/// its flag; the drain loop in `cpe_server::thumb_pipeline::run_thumb_batch` checks it between requests
+/// and simply abandons the rest of its per-call queue (no removal API needed — see that module's docs).
+fn thumb_stream_cancels(
+) -> &'static std::sync::Mutex<std::collections::HashMap<u64, std::sync::Arc<std::sync::atomic::AtomicBool>>>
+{
+    static CANCELS: std::sync::OnceLock<
+        std::sync::Mutex<std::collections::HashMap<u64, std::sync::Arc<std::sync::atomic::AtomicBool>>>,
+    > = std::sync::OnceLock::new();
+    CANCELS.get_or_init(Default::default)
+}
+
+/// Stream thumbnails for a batch of visible/prefetch-margin tiles through the priority queue + shared
+/// in-memory cache (CPE-1237, epic CPE-718): wires the previously-orphaned `thumb_queue` (CPE-950,
+/// Visible > Prefetch > Background scheduling) and `thumb_cache` (CPE-939, dual-budget LRU) into a real
+/// dispatch path — `cpe_server::thumb_pipeline::run_thumb_batch` owns the whole enqueue/drain/compute
+/// loop, this command is just the thin Tauri wiring: resolve the on-disk cache dir, hand it the
+/// `thumbnail_cached` decoder as `compute`, and forward each streamed `ThumbResult` over `on_thumb` as it
+/// lands (STREAMING.md). `stream_id` registers a cancel flag `cancel_thumbnails_stream` can trip when the
+/// frontend's visible window moves on before this batch finishes draining. Async + `spawn_blocking` — the
+/// decode work is real file + CPU work and must never run on the UI thread.
+#[tauri::command]
+#[cfg_attr(feature = "specta-bindings", specta::specta)]
+async fn thumbnails_stream(
+    app: tauri::AppHandle,
+    requests: Vec<cpe_server::thumb_pipeline::ThumbRequest>,
+    stream_id: u64,
+    on_thumb: tauri::ipc::Channel<cpe_server::thumb_pipeline::ThumbResult>,
+    state: tauri::State<'_, cpe_server::thumb_pipeline::ThumbCacheService>,
+) -> Result<usize, String> {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::Arc;
+
+    let service = state.inner().clone();
+    let cancel = Arc::new(AtomicBool::new(false));
+    thumb_stream_cancels().lock().unwrap().insert(stream_id, cancel.clone());
+    let cache_dir = server_ctx::TauriCtx::new(&app).app_cache_dir().ok().map(|d| d.join("thumbnails"));
+
+    let emitted = tauri::async_runtime::spawn_blocking(move || {
+        let n = cpe_server::thumb_pipeline::run_thumb_batch(
+            &requests,
+            service.store(),
+            |path, edge| match &cache_dir {
+                Some(dir) => cpe_server::thumbnail::thumbnail_cached(dir, path, edge),
+                None => cpe_server::thumbnail::make_thumbnail_png(path, edge),
+            },
+            || cancel.load(Ordering::Relaxed),
+            |result| {
+                let _ = on_thumb.send(result);
+            },
+        );
+        n
+    })
+    .await
+    .map_err(|e| e.to_string())?;
+
+    thumb_stream_cancels().lock().unwrap().remove(&stream_id);
+    Ok(emitted)
+}
+
+/// Cancel an in-flight `thumbnails_stream` batch (CPE-1237) — the frontend calls this with the previous
+/// generation's `stream_id` when the visible window moves on before that batch finished draining, so
+/// requests for tiles that already scrolled away stop competing with the new visible-priority ones.
+/// Idempotent: a no-op for an unknown or already-finished `stream_id`.
+#[tauri::command]
+#[cfg_attr(feature = "specta-bindings", specta::specta)]
+fn cancel_thumbnails_stream(stream_id: u64) {
+    use std::sync::atomic::Ordering;
+    if let Some(flag) = thumb_stream_cancels().lock().unwrap().get(&stream_id) {
+        flag.store(true, Ordering::Relaxed);
+    }
+}
+
 /// Read a text file's contents for the preview pane, capped at `max_bytes` so a
 /// huge file can never be slurped into memory. Errors (rather than truncating)
 /// when the file is too large, unreadable, or not valid UTF-8 — the frontend
@@ -8229,6 +8304,12 @@ pub fn run() {
     // is empty until `index_build` is invoked, so with the feature unused it costs nothing at startup.
     builder = builder.manage(cpe_server::index_service::IndexService::default());
 
+    // Thumbnail pipeline's shared in-memory hot cache (CPE-1237, epic CPE-718): the `thumb_cache` LRU
+    // fronting `thumbnails_stream`'s decoded bytes, persisting across the many streamed calls one scroll
+    // session issues. Always registered — thumbnails are a core-explorer feature — but empty until the
+    // first request, so it costs nothing when the app never shows a gallery/icon view.
+    builder = builder.manage(cpe_server::thumb_pipeline::ThumbCacheService::default());
+
     // Hold the AI Console sidecar connection in managed state (feature-gated).
     #[cfg(feature = "sidecar-platform")]
     {
@@ -8340,6 +8421,8 @@ pub fn run() {
             data_browser_query,
             read_image_data_url,
             thumbnail,
+            thumbnails_stream,
+            cancel_thumbnails_stream,
             read_settings,
             write_settings,
             load_tags,
@@ -9092,6 +9175,8 @@ pub fn export_bindings(out: &std::path::Path) -> Result<(), String> {
         data_browser_query,
         read_image_data_url,
         thumbnail,
+        thumbnails_stream,
+        cancel_thumbnails_stream,
         read_settings,
         write_settings,
         load_tags,

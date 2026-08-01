@@ -608,6 +608,32 @@ function seedLinkBadgeFixture(tmpDir: string): boolean {
   }
 }
 
+// --- CPE-1237: mixed-format thumbnail-gallery fixture (epic CPE-718) ----------------------------
+// A dedicated subfolder (isolation, same reasoning as CPE-1207's link folder) carrying one file per
+// format the streaming thumbnail client (`thumbnailClient.ts`, wired through `thumb_queue`/
+// `thumb_cache`) is expected to render a REAL tile for, plus one it must gracefully fall back on:
+//   - a genuinely decodable PNG (raster — the pre-CPE-1237 baseline format)
+//   - a genuinely valid minimal SVG (CPE-1236's rasterizer — the new non-photo format)
+//   - a byte-garbage `.ttf` (extension says "thumbnailable", content doesn't decode) — proves the
+//     pipeline's failure path still shows the type icon instead of a broken tile or a crash
+// A real font is deliberately NOT hand-built here (a byte-correct minimal sfnt is a lot of surface
+// for a fixture); the fallback case is exactly as meaningful with garbage bytes, since `hasThumbnail`
+// gates on extension alone — the point is the FRONTEND still asks for it and copes with the miss.
+export const THUMB_GALLERY_DIR_NAME = "CPE-1237-thumbnail-gallery";
+export const THUMB_GALLERY_PNG_NAME = "CPE-1237-photo.png";
+export const THUMB_GALLERY_SVG_NAME = "CPE-1237-icon.svg";
+export const THUMB_GALLERY_BADFONT_NAME = "CPE-1237-bad.ttf";
+const THUMB_GALLERY_SVG_CONTENT =
+  '<svg xmlns="http://www.w3.org/2000/svg" width="100" height="40"><rect width="100" height="40" fill="#2b7"/></svg>';
+
+function seedThumbnailGalleryFixture(tmpDir: string): void {
+  const dir = path.join(tmpDir, THUMB_GALLERY_DIR_NAME);
+  fs.mkdirSync(dir, { recursive: true });
+  fs.writeFileSync(path.join(dir, THUMB_GALLERY_PNG_NAME), tinyPng(24, 24, [80, 140, 220]));
+  fs.writeFileSync(path.join(dir, THUMB_GALLERY_SVG_NAME), THUMB_GALLERY_SVG_CONTENT, "utf-8");
+  fs.writeFileSync(path.join(dir, THUMB_GALLERY_BADFONT_NAME), "not a real font, just bytes\n", "utf-8");
+}
+
 let tauriDriver: ChildProcess | undefined;
 let shuttingDown = false;
 
@@ -733,6 +759,10 @@ export const config: WebdriverIO.Config = {
     // CPE-1208: seed an intact + a broken symlink for the link-badge render pin (see block above) —
     // same tmpDir, same single app launch. Best-effort; the spec checks `linkBadgeFixture.supported`.
     const linkBadgeSupported = seedLinkBadgeFixture(tmpDir);
+
+    // CPE-1237: seed the mixed-format (PNG/SVG/bad-font) subfolder for the streaming-thumbnail-client
+    // gallery render pin (see block above) — same tmpDir, same single app launch.
+    seedThumbnailGalleryFixture(tmpDir);
 
     const caps = capabilities as unknown as Array<{ "tauri:options": { args: string[] } }>;
     caps[0]["tauri:options"].args = ["--test-mode", "--x=-4000", `--open=${tmpDir}`];

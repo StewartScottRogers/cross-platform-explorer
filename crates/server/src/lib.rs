@@ -181,6 +181,10 @@ pub mod folder_stats;
 /// the pure scheduling core of the thumbnail pipeline (CPE-950, epic CPE-718). Pairs with thumb_cache.
 pub mod thumb_queue;
 
+/// Thumbnail pipeline glue — drives `thumb_queue` + `thumb_cache` from a batch of requests, the seam a
+/// Tauri command dispatches into (CPE-1237, epic CPE-718).
+pub mod thumb_pipeline;
+
 /// File comparison — byte-identical check (CPE-418).
 pub mod compare;
 
