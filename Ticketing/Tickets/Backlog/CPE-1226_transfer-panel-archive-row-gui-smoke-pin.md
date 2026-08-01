@@ -22,3 +22,10 @@ is timing-sensitive to capture). Reviewer + UAT covered the code + behaviour; th
   the archive row (icon + wording + progress). Deterministic capture (e.g. a fixture large enough that
   the row is visible, or assert the completed "N items compressed" row if in-progress is too flaky).
 - Visual Critic judges the screenshot (icon legible, wording correct, reflows, on-theme).
+
+## Also spot-check while capturing (CPE-1212 review note)
+CPE-1212 unified drifted danger reds to `--danger` #c42b1c. The largest shade shift was
+`#b5433a`→`#c42b1c` on the "removed"/broken-link badge family (AgentTimeline/FileList/ExplorerPane
+badges, LinkBadge `.broken`, Sidebar drive-full bar) + diff-removed backgrounds. Reviewer judged it
+minor/non-jarring on small elements. When a build is captured, pixel-spot-check the broken-link badge
+(a broken-link fixture already exists) + the drive-full bar look right in the new red.
