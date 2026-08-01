@@ -527,6 +527,12 @@ pub mod image_similarity;
 /// dependencies.
 pub mod simhash;
 
+/// Near-duplicate **document** scan pipeline (CPE-1204, epic CPE-997 stretch). Walks a folder, reads
+/// each candidate plain-text file, and single-link-clusters near-identical documents via [`simhash`].
+/// The textual complement of [`image_similarity`]; streams over a shared walker like
+/// [`duplicates::stream_duplicates`].
+pub mod document_similarity;
+
 /// Boolean query grouping — `OR`/`NOT`/parentheses over opaque leaf tokens (CPE-1062, epic CPE-703).
 /// Complements the AND-only [`index_query`] grammar with real boolean structure; std-only, no deps,
 /// tested with a stub leaf matcher so it needs none of the sibling filter modules.
@@ -578,6 +584,11 @@ pub mod empty_dirs;
 /// with high file overlap). Pure over caller-supplied (path, hash-set) pairs; no I/O, no new
 /// dependencies.
 pub mod folder_similarity;
+
+/// Near-identical-folder **scan** pipeline (CPE-1204, epic CPE-997 stretch). Walks a folder tree,
+/// hashes each candidate subfolder's direct file children, and clusters near-identical folders via
+/// [`folder_similarity`]. The adapter [`folder_similarity`]'s own docs describe as the caller's job.
+pub mod folder_similarity_scan;
 
 /// Pure broken/dangling + cyclic symlink classifier (CPE-1008, epic CPE-1002). Given a
 /// caller-supplied list of symlink records (path, resolved target, target-existence), classifies

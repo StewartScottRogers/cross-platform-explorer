@@ -1601,6 +1601,34 @@ async findSimilarImagesStream(root: string, onGroup: TAURI_CHANNEL<SimGroup[]>) 
 }
 },
 /**
+ * Find near-duplicate (near-identical wording) text documents under `root` (CPE-1204, epic CPE-997
+ * stretch) — walk + SimHash + single-link cluster. Model lives in `cpe_server::document_similarity`;
+ * this is a thin `spawn_blocking` dispatcher, the textual complement of `find_similar_images`. A
+ * modest-sized collect-to-vec command (not streamed): SimHash clustering is a whole-set operation like
+ * image similarity, and this scope (plain-text notes/READMEs) is smaller than a full folder walk.
+ */
+async findSimilarDocuments(root: string) : Promise<Result<DocSimResult, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("find_similar_documents", { root }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * Find near-identical folders under `root` (CPE-1204, epic CPE-997 stretch) — walk + per-folder
+ * content-hash set + Jaccard single-link cluster. Model lives in `cpe_server::folder_similarity_scan`
+ * (adapter) / `cpe_server::folder_similarity` (pure core); this is a thin `spawn_blocking` dispatcher.
+ */
+async findSimilarFolders(root: string) : Promise<Result<FolderSimResult, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("find_similar_folders", { root }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
  * Propose an auto-organize plan for `dir` under `rule` — one [`cpe_server::organize::MoveProposal`] per
  * file. Read-only: moves nothing.
  */
@@ -2663,10 +2691,21 @@ is_symlink: boolean }
  */
 export type DiskSpace = { free: number; total: number }
 /**
+ * A set of near-duplicate documents: every path whose text landed in one SimHash cluster. Only groups
+ * with 2+ members are produced (a singleton has no near-duplicate — dropped, mirroring
+ * [`crate::perceptual::cluster`]/[`near_duplicate_docs`]).
+ */
+export type DocGroup = { paths: string[] }
+/**
  * The document-info columns a user can add to the details view — each maps to a friendly key
  * [`crate::media_meta_read::read_pdf`] emits.
  */
 export type DocInfoColumn = "Title" | "Author" | "Subject" | "Keywords" | "Creator" | "Producer" | "DateCreated" | "DateModified"
+/**
+ * The result of a near-duplicate-document scan: the groups, how many text candidates were hashed, and
+ * whether the file cap truncated the walk. Mirrors [`crate::image_similarity::SimResult`].
+ */
+export type DocSimResult = { groups: DocGroup[]; files_scanned: number; truncated: boolean }
 /**
  * A set of byte-identical files: their shared size + hash and every path.
  */
@@ -2747,6 +2786,15 @@ export type FoldKind =
  * One foldable range. Lines are **1-based and inclusive** on both ends.
  */
 export type FoldRange = { start_line: number; end_line: number; kind: FoldKind }
+/**
+ * One near-identical-folder group: every folder path in it.
+ */
+export type FolderSimGroup = { paths: string[] }
+/**
+ * The result of a near-identical-folder scan: the groups, how many folders were considered candidates,
+ * how many files were hashed, and whether either cap truncated the walk.
+ */
+export type FolderSimResult = { groups: FolderSimGroup[]; folders_scanned: number; files_scanned: number; truncated: boolean }
 /**
  * Recursive folder totals. Serialized to match the frontend `FolderStats`.
  */
