@@ -1210,11 +1210,17 @@ async fn rename_entry(app: tauri::AppHandle, path: String, new_name: String) -> 
         }
         targets
     });
-    tauri::async_runtime::spawn_blocking(move || rename_entry_impl(path, new_name))
+    let ctx = server_ctx::TauriCtx::new(&app);
+    tauri::async_runtime::spawn_blocking(move || rename_entry_impl(&ctx, path, new_name))
         .await.map_err(|e| e.to_string())?
 }
 
-fn rename_entry_impl(path: String, new_name: String) -> Result<String, String> {
+/// Rename `path` to `new_name` in place. `ctx` re-keys any tag-store entries under `path` — the
+/// file/folder's own entry and, for a directory, every tagged descendant's — to the new path so
+/// tags follow the rename instead of orphaning at the old path (CPE-1222). Best-effort: a tag-store
+/// write failure never fails an otherwise-successful filesystem rename (there's nothing sane to roll
+/// back to, and the original frontend-side migration was already best-effort).
+fn rename_entry_impl(ctx: &dyn ServerCtx, path: String, new_name: String) -> Result<String, String> {
     cpe_server::fs_route::require_local(&path)?;
     let new_name = new_name.trim();
     if new_name.is_empty() {
@@ -1235,7 +1241,9 @@ fn rename_entry_impl(path: String, new_name: String) -> Result<String, String> {
         return Err(format!("\"{new_name}\" already exists"));
     }
     fs::rename(src, &target).map_err(|e| e.to_string())?;
-    Ok(target.to_string_lossy().to_string())
+    let target_str = target.to_string_lossy().to_string();
+    let _ = cpe_server::tags::retag(ctx, &path, &target_str);
+    Ok(target_str)
 }
 
 /// Move entries to the OS Recycle Bin / Trash. Recoverable by the user.
@@ -1446,8 +1454,10 @@ fn do_copy_into(src: &Path, dest_dir: &Path) -> Result<PathBuf, String> {
 
 /// Move `src` into `dest_dir` (auto-renaming on collision), returning the path actually written. Falls
 /// back to copy-then-delete across filesystem boundaries (never deletes the source on a failed copy).
-/// Shared by the bulk move command and the watch executor.
-fn do_move_into(src: &Path, dest_dir: &Path) -> Result<PathBuf, String> {
+/// Shared by the bulk move command and the watch executor. `ctx` re-keys any tag-store entries under
+/// `src` to the actually-written path on success (CPE-1222) — best-effort, same rationale as
+/// `rename_entry_impl`.
+fn do_move_into(ctx: &dyn ServerCtx, src: &Path, dest_dir: &Path) -> Result<PathBuf, String> {
     let file_name = src
         .file_name()
         .and_then(|n| n.to_str())
@@ -1457,6 +1467,7 @@ fn do_move_into(src: &Path, dest_dir: &Path) -> Result<PathBuf, String> {
     }
     let target = unique_target(dest_dir, file_name);
     if fs::rename(src, &target).is_ok() {
+        let _ = cpe_server::tags::retag(ctx, &src.to_string_lossy(), &target.to_string_lossy());
         return Ok(target);
     }
     // Cross-volume move: copy, then remove the original only if the copy fully succeeded.
@@ -1472,6 +1483,7 @@ fn do_move_into(src: &Path, dest_dir: &Path) -> Result<PathBuf, String> {
         fs::remove_file(src)
     };
     removed.map_err(|e| format!("Copied, but could not remove original: {e}"))?;
+    let _ = cpe_server::tags::retag(ctx, &src.to_string_lossy(), &target.to_string_lossy());
     Ok(target)
 }
 
@@ -1510,11 +1522,12 @@ async fn move_entries(app: tauri::AppHandle, paths: Vec<String>, dest: String) -
         targets.extend(paths.iter().cloned());
         targets
     });
-    tauri::async_runtime::spawn_blocking(move || move_entries_impl(paths, dest))
+    let ctx = server_ctx::TauriCtx::new(&app);
+    tauri::async_runtime::spawn_blocking(move || move_entries_impl(&ctx, paths, dest))
         .await.unwrap()
 }
 
-fn move_entries_impl(paths: Vec<String>, dest: String) -> Vec<OpResult> {
+fn move_entries_impl(ctx: &dyn ServerCtx, paths: Vec<String>, dest: String) -> Vec<OpResult> {
     let dest_dir = PathBuf::from(&dest);
     paths
         .iter()
@@ -1525,7 +1538,7 @@ fn move_entries_impl(paths: Vec<String>, dest: String) -> Vec<OpResult> {
             {
                 return OpResult::err(src, e);
             }
-            match do_move_into(src, &dest_dir) {
+            match do_move_into(ctx, src, &dest_dir) {
                 Ok(target) => OpResult::ok(&target),
                 Err(e) => OpResult::err(src, e),
             }
@@ -1560,7 +1573,8 @@ async fn run_watch_actions(app: tauri::AppHandle, path: String, actions: Vec<Wat
     // "current" path for the next step (mirroring `run_watch_actions_impl`), while the real executor's
     // collision auto-rename may pick a different name — a miss there just falls back to the session id.
     note_app_op(&app, || plan_watch_action_targets(&path, &actions));
-    tauri::async_runtime::spawn_blocking(move || run_watch_actions_impl(path, actions))
+    let ctx = server_ctx::TauriCtx::new(&app);
+    tauri::async_runtime::spawn_blocking(move || run_watch_actions_impl(&ctx, path, actions))
         .await
         .unwrap_or_default()
 }
@@ -1594,14 +1608,14 @@ fn plan_watch_action_targets(path: &str, actions: &[WatchAction]) -> Vec<String>
     targets
 }
 
-fn run_watch_actions_impl(path: String, actions: Vec<WatchAction>) -> Vec<OpResult> {
+fn run_watch_actions_impl(ctx: &dyn ServerCtx, path: String, actions: Vec<WatchAction>) -> Vec<OpResult> {
     let mut current = PathBuf::from(&path);
     let mut out = Vec::with_capacity(actions.len());
     for action in &actions {
         let result: Result<PathBuf, String> = match action.kind.as_str() {
-            "move" => do_move_into(&current, Path::new(&action.resolved)),
+            "move" => do_move_into(ctx, &current, Path::new(&action.resolved)),
             "copy" => do_copy_into(&current, Path::new(&action.resolved)),
-            "rename" => rename_entry_impl(current.to_string_lossy().to_string(), action.resolved.clone())
+            "rename" => rename_entry_impl(ctx, current.to_string_lossy().to_string(), action.resolved.clone())
                 .map(PathBuf::from),
             other => Err(format!("unknown watch action: {other}")),
         };
@@ -1976,11 +1990,14 @@ async fn move_exact(app: tauri::AppHandle, pairs: Vec<(String, String)>) -> Vec<
         }
         targets
     });
-    tauri::async_runtime::spawn_blocking(move || move_exact_impl(pairs))
+    let ctx = server_ctx::TauriCtx::new(&app);
+    tauri::async_runtime::spawn_blocking(move || move_exact_impl(&ctx, pairs))
         .await.unwrap()
 }
 
-fn move_exact_impl(pairs: Vec<(String, String)>) -> Vec<OpResult> {
+/// `ctx` re-keys any tag-store entries under each successfully-moved `from` to its `to` (CPE-1222) —
+/// including undo's move-back, which previously never migrated tags at all.
+fn move_exact_impl(ctx: &dyn ServerCtx, pairs: Vec<(String, String)>) -> Vec<OpResult> {
     pairs
         .iter()
         .map(|(from, to)| {
@@ -2006,7 +2023,10 @@ fn move_exact_impl(pairs: Vec<(String, String)>) -> Vec<OpResult> {
                 }
             }
             match fs::rename(src, dst) {
-                Ok(()) => OpResult::ok(dst),
+                Ok(()) => {
+                    let _ = cpe_server::tags::retag(ctx, from, to);
+                    OpResult::ok(dst)
+                }
                 Err(e) => OpResult::err(src, e),
             }
         })
@@ -3808,10 +3828,10 @@ fn macro_apply_op(ctx: &dyn ServerCtx, from: &str, kind: &str, detail: &str, to:
                 .and_then(|n| n.to_str())
                 .ok_or_else(|| format!("bad rename target {to:?}"))?
                 .to_string();
-            rename_entry_impl(from.to_string(), new_name).map(|_| ())
+            rename_entry_impl(ctx, from.to_string(), new_name).map(|_| ())
         }
         "move" => {
-            let results = move_exact_impl(vec![(from.to_string(), to.to_string())]);
+            let results = move_exact_impl(ctx, vec![(from.to_string(), to.to_string())]);
             match results.into_iter().next() {
                 Some(r) if r.ok => Ok(()),
                 Some(r) => Err(r.error),
@@ -9988,10 +10008,12 @@ mod tests {
     #[test]
     fn rename_refuses_to_clobber_an_existing_name() {
         let d = scratch("rename_dup");
+        let ctx = HeadlessCtx::new(&d);
         fs::write(d.join("a.txt"), b"a").unwrap();
         fs::write(d.join("b.txt"), b"b").unwrap();
 
         let r = rename_entry_impl(
+            &ctx,
             d.join("a.txt").to_string_lossy().to_string(),
             "b.txt".into(),
         );
@@ -10004,10 +10026,11 @@ mod tests {
     #[test]
     fn rename_refuses_a_path_separator_or_traversal() {
         let d = scratch("rename_sep");
+        let ctx = HeadlessCtx::new(&d);
         fs::write(d.join("a.txt"), b"a").unwrap();
         let p = d.join("a.txt").to_string_lossy().to_string();
         for bad in ["../evil.txt", "sub/b.txt", "a\\b.txt", "..", "."] {
-            assert!(rename_entry_impl(p.clone(), bad.into()).is_err(), "must reject {bad:?}");
+            assert!(rename_entry_impl(&ctx, p.clone(), bad.into()).is_err(), "must reject {bad:?}");
         }
         // The file stays put and nothing escaped the folder.
         assert!(d.join("a.txt").exists());
@@ -10018,14 +10041,63 @@ mod tests {
     #[test]
     fn rename_moves_the_file() {
         let d = scratch("rename_ok");
+        let ctx = HeadlessCtx::new(&d);
         fs::write(d.join("a.txt"), b"a").unwrap();
         let r = rename_entry_impl(
+            &ctx,
             d.join("a.txt").to_string_lossy().to_string(),
             "c.txt".into(),
         );
         assert!(r.is_ok());
         assert!(d.join("c.txt").exists());
         assert!(!d.join("a.txt").exists());
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    // ---- CPE-1222: rename/move must migrate the tag-store entry instead of orphaning it -----------
+
+    #[test]
+    fn rename_entry_impl_migrates_a_tagged_files_entry_to_the_new_path() {
+        let d = scratch("rename_tag_migrate");
+        let ctx = HeadlessCtx::new(&d);
+        fs::write(d.join("a.txt"), b"a").unwrap();
+        let old_path = d.join("a.txt").to_string_lossy().to_string();
+        cpe_server::tags::set(&ctx, &old_path, vec!["important".into()], "red".into()).unwrap();
+
+        let new_path = rename_entry_impl(&ctx, old_path.clone(), "b.txt".into()).unwrap();
+
+        let store = cpe_server::tags::load(&ctx).unwrap();
+        assert!(!store.contains_key(&old_path), "old path must not linger in the tag store");
+        assert_eq!(store[&new_path].tags(), &["important".to_string()]);
+        assert_eq!(store[&new_path].label(), "red");
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn rename_entry_impl_migrates_tags_for_every_file_inside_a_renamed_directory() {
+        // The subtree case: renaming a folder must carry a tagged file living inside it too, not
+        // just the folder's own tag entry (if it even has one — this folder doesn't).
+        let d = scratch("rename_dir_tag_migrate");
+        let ctx = HeadlessCtx::new(&d);
+        let sub = d.join("proj");
+        fs::create_dir_all(sub.join("nested")).unwrap();
+        fs::write(sub.join("a.txt"), b"a").unwrap();
+        fs::write(sub.join("nested").join("b.txt"), b"b").unwrap();
+
+        let a_old = sub.join("a.txt").to_string_lossy().to_string();
+        let b_old = sub.join("nested").join("b.txt").to_string_lossy().to_string();
+        cpe_server::tags::set(&ctx, &a_old, vec!["keep".into()], "".into()).unwrap();
+        cpe_server::tags::set(&ctx, &b_old, vec!["nested-tag".into()], "".into()).unwrap();
+
+        let renamed = rename_entry_impl(&ctx, sub.to_string_lossy().to_string(), "archive".into()).unwrap();
+        let renamed = PathBuf::from(renamed);
+
+        let store = cpe_server::tags::load(&ctx).unwrap();
+        assert!(!store.contains_key(&a_old) && !store.contains_key(&b_old), "old paths orphaned nothing should remain");
+        let a_new = renamed.join("a.txt").to_string_lossy().to_string();
+        let b_new = renamed.join("nested").join("b.txt").to_string_lossy().to_string();
+        assert_eq!(store[&a_new].tags(), &["keep".to_string()]);
+        assert_eq!(store[&b_new].tags(), &["nested-tag".to_string()]);
         let _ = fs::remove_dir_all(&d);
     }
 
@@ -10152,6 +10224,7 @@ mod tests {
     #[test]
     fn watch_actions_move_copy_rename_over_a_landed_file() {
         let d = scratch("watch_exec");
+        let ctx = HeadlessCtx::new(&d);
         let src_dir = d.join("in");
         let sorted = d.join("sorted");
         fs::create_dir_all(&src_dir).unwrap();
@@ -10160,20 +10233,20 @@ mod tests {
         // move: file lands in `in/`, rule moves it into `sorted/`.
         let f = src_dir.join("a.txt");
         fs::write(&f, b"hi").unwrap();
-        let r = run_watch_actions_impl(f.to_string_lossy().to_string(), vec![wa("move", &sorted.to_string_lossy())]);
+        let r = run_watch_actions_impl(&ctx, f.to_string_lossy().to_string(), vec![wa("move", &sorted.to_string_lossy())]);
         assert!(r.iter().all(|x| x.ok), "{r:?}");
         assert!(!f.exists() && sorted.join("a.txt").exists()); // moved, original gone
 
         // copy: original stays put, a copy appears in `sorted/`.
         let g = src_dir.join("b.txt");
         fs::write(&g, b"yo").unwrap();
-        run_watch_actions_impl(g.to_string_lossy().to_string(), vec![wa("copy", &sorted.to_string_lossy())]);
+        run_watch_actions_impl(&ctx, g.to_string_lossy().to_string(), vec![wa("copy", &sorted.to_string_lossy())]);
         assert!(g.exists() && sorted.join("b.txt").exists()); // both exist
 
         // rename: in place, new name in same dir.
         let h = src_dir.join("c.log");
         fs::write(&h, b"x").unwrap();
-        run_watch_actions_impl(h.to_string_lossy().to_string(), vec![wa("rename", "c.txt")]);
+        run_watch_actions_impl(&ctx, h.to_string_lossy().to_string(), vec![wa("rename", "c.txt")]);
         assert!(!h.exists() && src_dir.join("c.txt").exists());
         let _ = fs::remove_dir_all(&d);
     }
@@ -10182,6 +10255,7 @@ mod tests {
     fn watch_actions_pipeline_threads_the_updated_path() {
         // rename → move: the move must act on the *renamed* file, so the pipeline threads the new path.
         let d = scratch("watch_pipe");
+        let ctx = HeadlessCtx::new(&d);
         let src_dir = d.join("in");
         let dest = d.join("out");
         fs::create_dir_all(&src_dir).unwrap();
@@ -10190,6 +10264,7 @@ mod tests {
         fs::write(&f, b"data").unwrap();
 
         let r = run_watch_actions_impl(
+            &ctx,
             f.to_string_lossy().to_string(),
             vec![wa("rename", "final.dat"), wa("move", &dest.to_string_lossy())],
         );
@@ -10238,10 +10313,12 @@ mod tests {
     #[test]
     fn watch_actions_report_unknown_action_per_step_without_aborting() {
         let d = scratch("watch_unknown");
+        let ctx = HeadlessCtx::new(&d);
         fs::create_dir_all(&d).unwrap();
         let f = d.join("a.txt");
         fs::write(&f, b"z").unwrap();
         let r = run_watch_actions_impl(
+            &ctx,
             f.to_string_lossy().to_string(),
             vec![wa("frobnicate", "whatever"), wa("rename", "b.txt")],
         );
@@ -10340,6 +10417,7 @@ mod tests {
     #[test]
     fn move_relocates_and_removes_the_original() {
         let d = scratch("move_ok");
+        let ctx = HeadlessCtx::new(&d);
         let from = d.join("from");
         let to = d.join("to");
         fs::create_dir_all(&from).unwrap();
@@ -10347,12 +10425,52 @@ mod tests {
         fs::write(from.join("m.txt"), b"m").unwrap();
 
         let results = move_entries_impl(
+            &ctx,
             vec![from.join("m.txt").to_string_lossy().to_string()],
             to.to_string_lossy().to_string(),
         );
         assert!(results[0].ok, "{}", results[0].error);
         assert!(to.join("m.txt").exists());
         assert!(!from.join("m.txt").exists());
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    // CPE-1222: `moveEntries` (drag-and-drop / cut-paste) is the everyday move path — it must
+    // migrate a tagged file's entry, and every tagged file inside a moved DIRECTORY, to the new
+    // location. `do_move_into` auto-renames on collision, so the migration must land at whatever
+    // path was actually written, not the naively-expected one.
+    #[test]
+    fn move_entries_impl_migrates_tags_for_a_file_and_a_moved_directorys_subtree() {
+        let d = scratch("move_tag_migrate");
+        let ctx = HeadlessCtx::new(&d);
+        let from = d.join("from");
+        let to = d.join("to");
+        fs::create_dir_all(&from).unwrap();
+        fs::create_dir_all(&to).unwrap();
+        fs::write(from.join("m.txt"), b"m").unwrap();
+        let proj = from.join("proj");
+        fs::create_dir_all(&proj).unwrap();
+        fs::write(proj.join("inner.txt"), b"i").unwrap();
+
+        let m_old = from.join("m.txt").to_string_lossy().to_string();
+        let inner_old = proj.join("inner.txt").to_string_lossy().to_string();
+        cpe_server::tags::set(&ctx, &m_old, vec!["solo".into()], "".into()).unwrap();
+        cpe_server::tags::set(&ctx, &inner_old, vec!["deep".into()], "".into()).unwrap();
+
+        let results = move_entries_impl(
+            &ctx,
+            vec![m_old.clone(), proj.to_string_lossy().to_string()],
+            to.to_string_lossy().to_string(),
+        );
+        assert!(results.iter().all(|r| r.ok), "{results:?}");
+
+        let store = cpe_server::tags::load(&ctx).unwrap();
+        assert!(!store.contains_key(&m_old) && !store.contains_key(&inner_old), "old paths orphaned nothing left");
+        assert_eq!(store[&to.join("m.txt").to_string_lossy().to_string()].tags(), &["solo".to_string()]);
+        assert_eq!(
+            store[&to.join("proj").join("inner.txt").to_string_lossy().to_string()].tags(),
+            &["deep".to_string()]
+        );
         let _ = fs::remove_dir_all(&d);
     }
 
@@ -10507,9 +10625,10 @@ mod tests {
     #[test]
     fn move_exact_restores_to_the_original_name() {
         let d = scratch("move_exact");
+        let ctx = HeadlessCtx::new(&d);
         fs::write(d.join("b.txt"), b"x").unwrap();
 
-        let results = move_exact_impl(vec![(
+        let results = move_exact_impl(&ctx, vec![(
             d.join("b.txt").to_string_lossy().to_string(),
             d.join("a.txt").to_string_lossy().to_string(),
         )]);
@@ -10522,15 +10641,37 @@ mod tests {
     #[test]
     fn move_exact_refuses_to_overwrite() {
         let d = scratch("move_exact_clobber");
+        let ctx = HeadlessCtx::new(&d);
         fs::write(d.join("a.txt"), b"keep").unwrap();
         fs::write(d.join("b.txt"), b"other").unwrap();
 
-        let results = move_exact_impl(vec![(
+        let results = move_exact_impl(&ctx, vec![(
             d.join("b.txt").to_string_lossy().to_string(),
             d.join("a.txt").to_string_lossy().to_string(),
         )]);
         assert!(!results[0].ok, "undo must not clobber an existing file");
         assert_eq!(fs::read(d.join("a.txt")).unwrap(), b"keep");
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    // CPE-1222: undo (`moveExact`) previously never migrated tags at all — a rename/move + undo
+    // round-trip silently dropped the tag on the way back. Also covers the acceptance criterion's
+    // "move" case directly at this layer (a tagged file moved to an exact destination).
+    #[test]
+    fn move_exact_impl_migrates_tags_to_the_restored_path() {
+        let d = scratch("move_exact_tag_migrate");
+        let ctx = HeadlessCtx::new(&d);
+        fs::write(d.join("b.txt"), b"x").unwrap();
+        let old_path = d.join("b.txt").to_string_lossy().to_string();
+        let new_path = d.join("a.txt").to_string_lossy().to_string();
+        cpe_server::tags::set(&ctx, &old_path, vec!["restored".into()], "".into()).unwrap();
+
+        let results = move_exact_impl(&ctx, vec![(old_path.clone(), new_path.clone())]);
+        assert!(results[0].ok, "{}", results[0].error);
+
+        let store = cpe_server::tags::load(&ctx).unwrap();
+        assert!(!store.contains_key(&old_path), "old path must not linger");
+        assert_eq!(store[&new_path].tags(), &["restored".to_string()]);
         let _ = fs::remove_dir_all(&d);
     }
 

@@ -101,6 +101,47 @@ pub fn tag_store_rename(store: &mut TagStore, from: &str, to: &str) {
     }
 }
 
+/// Re-key an entry — AND, when `from` is a directory, every entry keyed somewhere under it — from
+/// `from` → `to` (CPE-1222). `tag_store_rename` above only ever re-keyed the exact path, so a
+/// tagged file living *inside* a renamed/moved folder was silently orphaned: its old-path entry
+/// lingered in the store and the file itself showed no tags at its new path. This is the subtree-
+/// aware superset: an exact match re-keys like `tag_store_rename`; any entry whose path starts with
+/// `from` plus a path separator (`/` or `\`, checked both ways since the store may hold paths from
+/// either convention) is re-keyed by swapping that `from` prefix for `to`, leaving the remainder —
+/// and thus the whole subtree's internal structure — untouched. Returns whether the store changed
+/// (so callers can skip a write when nothing needed to move). A no-op when nothing in the store is
+/// `from` or under it. Pure.
+pub fn tag_store_rename_subtree(store: &mut TagStore, from: &str, to: &str) -> bool {
+    if from == to || from.is_empty() {
+        return false;
+    }
+    let under_slash = format!("{from}/");
+    let under_back = format!("{from}\\");
+    let matches: Vec<String> = store
+        .keys()
+        .filter(|k| k.as_str() == from || k.starts_with(&under_slash) || k.starts_with(&under_back))
+        .cloned()
+        .collect();
+    if matches.is_empty() {
+        return false;
+    }
+    for old_path in matches {
+        let new_path = if old_path == from {
+            to.to_string()
+        } else if let Some(rest) = old_path.strip_prefix(&under_slash) {
+            format!("{to}/{rest}")
+        } else if let Some(rest) = old_path.strip_prefix(&under_back) {
+            format!("{to}\\{rest}")
+        } else {
+            continue; // unreachable given the filter above, but keep the match total honest
+        };
+        if let Some(e) = store.remove(&old_path) {
+            store.insert(new_path, e);
+        }
+    }
+    true
+}
+
 /// Merge `incoming` into `store` (CPE-640, import): union each path's tags; take a non-empty imported
 /// label over an existing one. Non-destructive — existing tags are never dropped. Pure.
 pub fn tag_store_merge(store: &mut TagStore, incoming: TagStore) {
@@ -183,13 +224,14 @@ pub fn delete_tag(ctx: &dyn ServerCtx, tag: &str) -> Result<TagStore, String> {
     Ok(store)
 }
 
-/// Re-key a path's tags/label after an in-app rename or move (CPE-650). A no-op (no write) when the
-/// old path had no tags.
+/// Re-key a path's tags/label after an in-app rename or move (CPE-650) — including, when `from` is
+/// a directory, every tagged entry somewhere inside it (CPE-1222, the subtree case: e.g. renaming a
+/// tagged folder must carry a tagged file inside it too, not just the folder's own entry). A no-op
+/// (no write) when nothing in the store is `from` or under it.
 pub fn retag(ctx: &dyn ServerCtx, from: &str, to: &str) -> Result<TagStore, String> {
     let dir = ctx.app_config_dir()?;
     let mut store = read_tags_from(&dir);
-    if store.contains_key(from) {
-        tag_store_rename(&mut store, from, to);
+    if tag_store_rename_subtree(&mut store, from, to) {
         write_tags_to(&dir, &store)?;
     }
     Ok(store)
@@ -261,6 +303,44 @@ mod tests {
     }
 
     #[test]
+    fn tag_store_rename_subtree_carries_the_top_entry_and_every_descendant() {
+        let mut s = TagStore::new();
+        tag_store_set(&mut s, "/proj", vec!["work".into()], "".into());
+        tag_store_set(&mut s, "/proj/a.txt", vec!["keep".into()], "red".into());
+        tag_store_set(&mut s, "/proj/sub/b.txt", vec!["nested".into()], "".into());
+        // A sibling that merely shares a prefix (NOT a real path separator boundary) must be left alone.
+        tag_store_set(&mut s, "/projector.txt", vec!["unrelated".into()], "".into());
+
+        let changed = tag_store_rename_subtree(&mut s, "/proj", "/archive");
+        assert!(changed);
+
+        assert!(!s.contains_key("/proj") && !s.contains_key("/proj/a.txt") && !s.contains_key("/proj/sub/b.txt"));
+        assert_eq!(s["/archive"].tags, vec!["work".to_string()]);
+        assert_eq!(s["/archive/a.txt"].tags, vec!["keep".to_string()]);
+        assert_eq!(s["/archive/a.txt"].label, "red");
+        assert_eq!(s["/archive/sub/b.txt"].tags, vec!["nested".to_string()]);
+        // The false-prefix sibling is untouched, at its original path.
+        assert_eq!(s["/projector.txt"].tags, vec!["unrelated".to_string()]);
+    }
+
+    #[test]
+    fn tag_store_rename_subtree_handles_windows_backslash_paths_and_no_matches() {
+        let mut s = TagStore::new();
+        tag_store_set(&mut s, r"C:\Users\me\Docs", vec!["work".into()], "".into());
+        tag_store_set(&mut s, r"C:\Users\me\Docs\notes.txt", vec!["keep".into()], "".into());
+
+        assert!(tag_store_rename_subtree(&mut s, r"C:\Users\me\Docs", r"C:\Users\me\Archive"));
+        assert!(s.contains_key(r"C:\Users\me\Archive"));
+        assert!(s.contains_key(r"C:\Users\me\Archive\notes.txt"));
+        assert!(!s.contains_key(r"C:\Users\me\Docs") && !s.contains_key(r"C:\Users\me\Docs\notes.txt"));
+
+        // Nothing under an untagged path: a no-op that reports no change and touches nothing.
+        assert!(!tag_store_rename_subtree(&mut s, "/nothing/here", "/elsewhere"));
+        // Renaming a path onto itself is also a reported no-op.
+        assert!(!tag_store_rename_subtree(&mut s, r"C:\Users\me\Archive", r"C:\Users\me\Archive"));
+    }
+
+    #[test]
     fn tag_store_merge_is_non_destructive() {
         let mut s = TagStore::new();
         tag_store_set(&mut s, "/a", vec!["keep".into()], "red".into());
@@ -320,6 +400,29 @@ mod tests {
         retag(&ctx, "/p", "/q").unwrap();
         let s = load(&ctx).unwrap();
         assert!(s.contains_key("/q") && !s.contains_key("/p"));
+        let _ = fs::remove_dir_all(&base);
+    }
+
+    // CPE-1222: `retag` (the command behind the rename/move backends' migration) must also carry a
+    // tagged file living INSIDE a renamed/moved directory, not just the directory's own entry.
+    #[test]
+    fn retag_through_ctx_migrates_a_directorys_whole_tagged_subtree() {
+        let base = scratch("tags_ctx_subtree");
+        let ctx = HeadlessCtx::new(&base);
+        set(&ctx, "/proj", vec!["work".into()], "".into()).unwrap();
+        set(&ctx, "/proj/notes.txt", vec!["keep".into()], "blue".into()).unwrap();
+
+        retag(&ctx, "/proj", "/archive").unwrap();
+        let s = load(&ctx).unwrap();
+        assert!(!s.contains_key("/proj") && !s.contains_key("/proj/notes.txt"), "old paths fully vacated");
+        assert_eq!(s["/archive"].tags, vec!["work".to_string()]);
+        assert_eq!(s["/archive/notes.txt"].tags, vec!["keep".to_string()]);
+        assert_eq!(s["/archive/notes.txt"].label, "blue");
+
+        // Retagging a path nothing is tagged under is a true no-op: no write, store unchanged.
+        let before = load(&ctx).unwrap();
+        retag(&ctx, "/nothing", "/elsewhere").unwrap();
+        assert_eq!(load(&ctx).unwrap(), before);
         let _ = fs::remove_dir_all(&base);
     }
 
