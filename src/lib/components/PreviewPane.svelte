@@ -1018,7 +1018,7 @@
   }
   .editbtn.primary { background: var(--accent); color: #fff; border-color: var(--accent); }
   .editbtn:disabled { opacity: 0.5; }
-  .edit-err { color: #c42b1c; font-size: 12px; }
+  .edit-err { color: var(--danger); font-size: 12px; }
   .preview-editor {
     flex: 1;
     width: 100%;

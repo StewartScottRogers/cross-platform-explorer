@@ -140,7 +140,7 @@
     100% { margin-left: 100%; }
   }
   .status { color: var(--text-dim); font-size: 12px; margin-bottom: 14px; }
-  .err { color: #c42b1c; font-size: 13px; margin-bottom: 14px; }
+  .err { color: var(--danger); font-size: 13px; margin-bottom: 14px; }
   .actions { display: flex; justify-content: flex-end; gap: 8px; }
   .btn {
     height: 32px;

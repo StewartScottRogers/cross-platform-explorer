@@ -275,7 +275,7 @@
     padding: 10px 2px;
   }
   .error {
-    color: var(--danger, #d33);
+    color: var(--danger);
     padding: 8px 2px;
   }
   /* Tab standard: accent top-bar + surface on the active tab; inactive as recessed chips. */

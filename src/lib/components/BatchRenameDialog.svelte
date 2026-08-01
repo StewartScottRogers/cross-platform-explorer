@@ -220,7 +220,7 @@
     color: inherit;
   }
   .rowp.conflict .to {
-    color: #c42b1c;
+    color: var(--danger);
     font-weight: 600;
   }
   .arrow {
@@ -233,7 +233,7 @@
     min-height: 16px;
   }
   .status .warn {
-    color: #c42b1c;
+    color: var(--danger);
   }
   .actions {
     display: flex;

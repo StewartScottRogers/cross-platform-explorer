@@ -111,8 +111,8 @@
      intact badge so it never jumps the row layout, just recoloured (mirrors `.agent-badge.removed`'s use
      of a warning colour for a destructive/negative state). */
   .link-badge.broken {
-    color: #b5433a;
-    background: color-mix(in srgb, #b5433a 12%, transparent);
-    border-color: color-mix(in srgb, #b5433a 40%, transparent);
+    color: var(--danger);
+    background: color-mix(in srgb, var(--danger) 12%, transparent);
+    border-color: color-mix(in srgb, var(--danger) 40%, transparent);
   }
 </style>

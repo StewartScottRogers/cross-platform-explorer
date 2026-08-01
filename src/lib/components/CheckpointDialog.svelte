@@ -300,7 +300,7 @@
   p { color: var(--text-dim); font-size: 12.5px; margin-bottom: 12px; line-height: 1.5; }
   .paths, .create-row, .revert-one { display: flex; gap: 8px; margin-bottom: 8px; }
   .path, .label-input, .path-input { flex: 1 1 auto; height: 30px; padding: 0 8px; font: inherit; color: var(--text); background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); min-width: 0; }
-  .err { color: #c0392b; font-size: 12.5px; margin-bottom: 8px; }
+  .err { color: var(--danger); font-size: 12.5px; margin-bottom: 8px; }
   .note { color: var(--accent); font-size: 12.5px; margin-bottom: 8px; }
   .list { max-height: 30vh; overflow: auto; border: 1px solid var(--border); border-radius: var(--radius); margin-bottom: 8px; }
   .empty { padding: 12px; color: var(--text-dim); font-size: 12.5px; }
@@ -312,7 +312,7 @@
   .cp-meta { font-size: 11px; color: var(--text-dim); }
   .cp-actions { display: flex; gap: 6px; flex: 0 0 auto; }
   .mini { height: 26px; padding: 0 10px; font-size: 12px; border: 1px solid var(--border-strong); border-radius: var(--radius); background: var(--surface-alt); color: var(--text); }
-  .mini.danger:not(:disabled) { border-color: #c42b1c; color: #c42b1c; }
+  .mini.danger:not(:disabled) { border-color: var(--danger); color: var(--danger); }
   .mini:disabled { opacity: 0.4; }
   .preview { border: 1px solid var(--border); border-radius: var(--radius); padding: 10px; margin-bottom: 8px; }
   .preview-lead { font-size: 12px; font-weight: 600; color: var(--text); margin-bottom: 6px; }
@@ -328,11 +328,11 @@
   .diff-status { padding: 6px 8px; font-size: 12px; color: var(--text-dim); }
   .diff-status.diff-error { color: #b8860b; }
   .outcome { font-size: 12.5px; color: var(--text); margin-bottom: 8px; }
-  .confirm { border: 1px solid #c42b1c; border-radius: var(--radius); padding: 12px; margin-bottom: 8px; background: color-mix(in srgb, #c42b1c 8%, var(--surface)); }
+  .confirm { border: 1px solid var(--danger); border-radius: var(--radius); padding: 12px; margin-bottom: 8px; background: color-mix(in srgb, var(--danger) 8%, var(--surface)); }
   .confirm-msg { color: var(--text); font-size: 12.5px; margin-bottom: 10px; }
   .confirm-actions { display: flex; justify-content: flex-end; gap: 8px; }
   .actions { display: flex; justify-content: flex-end; margin-top: 6px; }
   .btn { height: 30px; padding: 0 14px; border: 1px solid var(--border-strong); border-radius: var(--radius); background: var(--surface-alt); color: var(--text); }
   .btn.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
-  .btn.primary.danger { background: #c42b1c; border-color: #c42b1c; }
+  .btn.primary.danger { background: var(--danger); border-color: var(--danger); }
 </style>

@@ -158,7 +158,7 @@
   .op-arrow { color: var(--text-faint); }
   .results { margin-bottom: 8px; }
   .ok { font-size: 13px; color: var(--text); }
-  .err { color: #d05656; font-size: 12.5px; margin-bottom: 8px; }
+  .err { color: var(--danger); font-size: 12.5px; margin-bottom: 8px; }
   .dim { color: var(--text-dim); font-size: 12.5px; }
   .actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: auto; }
   .btn { height: 32px; padding: 0 16px; border: 1px solid var(--border-strong); border-radius: var(--radius); background: var(--surface-alt); color: var(--text); }

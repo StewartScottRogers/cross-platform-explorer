@@ -275,7 +275,7 @@
   .is-dir { flex: 1 1 auto; min-width: 0; color: var(--text-faint); font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   :global(mark.hl) { background: var(--accent); color: #fff; border-radius: 2px; padding: 0 1px; }
   .dim { color: var(--text-faint); font-size: 13px; }
-  .err { color: #c42b1c; font-size: 13px; }
+  .err { color: var(--danger); font-size: 13px; }
   .is-offer { display: flex; flex-direction: column; gap: 6px; align-items: flex-start; padding: 6px 2px; }
   .is-offer-title { font-weight: 600; font-size: 14px; }
   .is-offer .building { font-variant-numeric: tabular-nums; }

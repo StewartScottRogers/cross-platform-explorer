@@ -198,7 +198,7 @@
   .vs { color: var(--text-dim); font-size: 12px; }
   .summary { display: flex; gap: 12px; margin-bottom: 8px; font-size: 12.5px; font-variant-numeric: tabular-nums; }
   .s-added { color: #2e9e4f; }
-  .s-removed { color: #c0392b; }
+  .s-removed { color: var(--danger); }
   .s-changed { color: #b8860b; }
   .s-identical { color: var(--text-dim); }
   .tree { height: 50vh; overflow: auto; border: 1px solid var(--border); border-radius: var(--radius); }
@@ -208,7 +208,7 @@
   .nname { flex: 1 1 auto; overflow: hidden; text-overflow: ellipsis; }
   .nstatus { flex: 0 0 auto; font-size: 10px; text-transform: uppercase; letter-spacing: 0.03em; color: var(--text-dim); }
   .status-added .nname { color: #2e9e4f; }
-  .status-removed .nname { color: #c0392b; }
+  .status-removed .nname { color: var(--danger); }
   .status-changed .nname { color: #b8860b; }
   .status-identical .nname { color: var(--text-dim); }
   .textcmp { padding: 8px 0; font-family: ui-monospace, monospace; font-size: 12px; }
@@ -217,15 +217,15 @@
   .tl-sign { display: inline-block; width: 1ch; color: var(--text-dim); }
   .tl-add { background: color-mix(in srgb, #2e9e4f 14%, transparent); }
   .tl-add .tl-sign { color: #2e9e4f; }
-  .tl-del { background: color-mix(in srgb, #c0392b 14%, transparent); }
-  .tl-del .tl-sign { color: #c0392b; }
+  .tl-del { background: color-mix(in srgb, var(--danger) 14%, transparent); }
+  .tl-del .tl-sign { color: var(--danger); }
   .filecmp { padding: 12px; font-size: 13px; }
   .fc-equal { color: #2e9e4f; }
   .fc-row { display: flex; gap: 12px; padding: 3px 0; }
   .fc-k { flex: 0 0 130px; color: var(--text-dim); }
   .fc-v { font-family: ui-monospace, monospace; }
   .empty, .err { padding: 12px; color: var(--text-dim); font-size: 12.5px; }
-  .err { color: #c0392b; }
+  .err { color: var(--danger); }
   .actions { display: flex; justify-content: flex-end; margin-top: 14px; }
   .btn { height: 30px; padding: 0 14px; border: 1px solid var(--border-strong); border-radius: var(--radius); background: var(--surface-alt); color: var(--text); }
   .btn:disabled { opacity: 0.4; }

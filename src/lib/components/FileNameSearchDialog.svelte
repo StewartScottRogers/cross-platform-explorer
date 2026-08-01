@@ -164,5 +164,5 @@
   .name { flex: 0 1 auto; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .dir { flex: 1 1 auto; min-width: 0; color: var(--text-faint); font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .dim { color: var(--text-faint); }
-  .err { color: #c42b1c; }
+  .err { color: var(--danger); }
 </style>

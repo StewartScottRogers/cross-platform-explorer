@@ -481,6 +481,6 @@
   .drive-bar { height: 5px; border-radius: 3px; background: rgba(128, 128, 128, 0.28); overflow: hidden; }
   .drive-bar-fill { height: 100%; border-radius: 3px; background: var(--accent, #2f6fed); }
   .drive-bar-fill.warn { background: #b5872b; }
-  .drive-bar-fill.full { background: #b5433a; }
+  .drive-bar-fill.full { background: var(--danger); }
   .drive-free { font-size: 10px; opacity: 0.55; }
 </style>

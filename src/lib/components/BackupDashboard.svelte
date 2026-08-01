@@ -194,15 +194,15 @@
   .mirror { font-size: 10px; text-transform: uppercase; letter-spacing: 0.03em; padding: 0 6px; border-radius: 999px; background: var(--accent); color: #fff; }
   .paths { font-size: 11.5px; color: var(--text-dim); font-family: ui-monospace, monospace; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .status { font-size: 11.5px; color: #2e9e4f; }
-  .status.bad { color: #c0392b; }
+  .status.bad { color: var(--danger); }
   .status.running { color: var(--accent); }
   .hist-toggle { font-size: 11px; padding: 0 6px; border: 1px solid var(--border); border-radius: 999px; background: var(--surface); color: var(--text-dim); }
   .history { flex-basis: 100%; margin-top: 4px; padding-left: 4px; }
   .hist-row { font-size: 11px; color: var(--text-dim); font-variant-numeric: tabular-nums; padding: 1px 0; }
-  .hist-row.bad { color: #c0392b; }
+  .hist-row.bad { color: var(--danger); }
   .jbtns { flex: 0 0 auto; display: flex; gap: 6px; }
   .plan { margin-top: 10px; padding: 8px 10px; border: 1px solid var(--border); border-radius: var(--radius); font-size: 12.5px; background: var(--surface-alt); }
-  .err { margin-top: 10px; padding: 8px 10px; color: #c0392b; font-size: 12.5px; }
+  .err { margin-top: 10px; padding: 8px 10px; color: var(--danger); font-size: 12.5px; }
   .builder { display: flex; align-items: center; gap: 8px; margin-top: 14px; flex-wrap: wrap; }
   .builder .grow { flex: 1 1 130px; }
   input:not([type=checkbox]) { height: 30px; padding: 0 8px; font: inherit; color: var(--text); background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); min-width: 0; }

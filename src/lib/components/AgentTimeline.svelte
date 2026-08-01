@@ -1244,7 +1244,7 @@
   .tl-badge.created { background: #3a9d4a; }
   .tl-badge.modified { background: #b5872b; }
   .tl-badge.renamed { background: #3a72b5; }
-  .tl-badge.removed { background: #b5433a; }
+  .tl-badge.removed { background: var(--danger); }
   /* CPE-405: a read is the weakest signal — a hollow, muted badge, visually subordinate to changes. */
   .tl-badge.read {
     background: transparent;
@@ -1559,7 +1559,7 @@
   .cp-restore-err {
     padding: 4px 0;
     font-size: 11.5px;
-    color: var(--danger, #c0392b);
+    color: var(--danger);
   }
   /* Lead-in framing the counts as the revert plan (CPE-1165), not a summary of the user's edits. */
   .cp-counts-lead {
@@ -1642,23 +1642,22 @@
     opacity: 0.4;
     cursor: default;
   }
-  /* Destructive treatment reuses CheckpointDialog's red — a literal here, matching that dialog, since
-     the palette has no dedicated destructive token; this is the one sanctioned red (a revert). */
+  /* Destructive treatment reuses the app-wide --danger token (CPE-1212), matching CheckpointDialog. */
   .cp-btn.danger {
-    border-color: #c42b1c;
+    border-color: var(--danger);
     color: #fff;
-    background: #c42b1c;
+    background: var(--danger);
   }
   .cp-btn.danger:hover:not(:disabled) {
-    background: #b0271a;
+    background: var(--danger-hover);
   }
   /* Two-step confirm panel — same red-tinted surface CheckpointDialog uses. */
   .cp-confirm {
     margin-top: 6px;
     padding: 8px 10px;
-    border: 1px solid #c42b1c;
+    border: 1px solid var(--danger);
     border-radius: 5px;
-    background: color-mix(in srgb, #c42b1c 8%, var(--surface, #1e1e1e));
+    background: color-mix(in srgb, var(--danger) 8%, var(--surface, #1e1e1e));
   }
   .cp-confirm-msg {
     margin: 0 0 8px;

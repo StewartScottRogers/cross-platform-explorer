@@ -55,7 +55,7 @@
     font-size: 16px;
     margin-bottom: 10px;
   }
-  .warn { color: #c42b1c; display: grid; place-items: center; }
+  .warn { color: var(--danger); display: grid; place-items: center; }
   p { color: var(--text-dim); margin-bottom: 18px; line-height: 1.5; }
   .actions { display: flex; justify-content: flex-end; gap: 8px; }
   .btn {
@@ -71,6 +71,6 @@
     color: #fff;
   }
   .btn.primary:hover { background: var(--accent-hover); }
-  .btn.primary.danger { background: #c42b1c; border-color: #c42b1c; }
-  .btn.primary.danger:hover { background: #a82419; }
+  .btn.primary.danger { background: var(--danger); border-color: var(--danger); }
+  .btn.primary.danger:hover { background: var(--danger-hover); }
 </style>

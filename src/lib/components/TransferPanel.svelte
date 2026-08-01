@@ -73,7 +73,7 @@
   .x:hover { background: var(--surface-alt); }
   .bar { height: 6px; margin: 8px 0 4px; background: var(--surface-alt); border-radius: 3px; overflow: hidden; }
   .fill { height: 100%; background: var(--accent); border-radius: 3px; transition: width 0.15s linear; }
-  .fill.err { background: #c42b1c; }
+  .fill.err { background: var(--danger); }
   .sub { font-size: 11px; color: var(--text-dim); font-variant-numeric: tabular-nums; }
   .dim { color: var(--text-faint); }
 </style>

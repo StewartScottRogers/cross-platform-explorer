@@ -200,11 +200,11 @@
   .pill { flex: 0 0 auto; white-space: nowrap; font-size: 11px; color: var(--text-dim); background: var(--surface-alt); border: 1px solid var(--border); border-radius: 999px; padding: 1px 8px; }
   .rowbtns { display: flex; gap: 6px; flex: 0 0 auto; }
   .mini { height: 24px; padding: 0 8px; font-size: 11px; border: 1px solid var(--border); border-radius: var(--radius); background: var(--surface); color: var(--text); }
-  .mini.danger:hover { border-color: #c0392b; color: #c0392b; }
+  .mini.danger:hover { border-color: var(--danger); color: var(--danger); }
   .import { width: 100%; height: 96px; margin: 4px 0; padding: 8px; font: 12px/1.4 var(--mono, monospace); color: var(--text); background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); resize: vertical; box-sizing: border-box; }
   .status { min-height: 18px; margin: 6px 2px; font-size: 12px; }
   .note { color: var(--accent); }
-  .err { color: #c0392b; }
+  .err { color: var(--danger); }
   .dim { color: var(--text-dim); }
   .empty { padding: 14px; color: var(--text-dim); font-size: 12.5px; }
   .actions { display: flex; justify-content: space-between; align-items: center; margin-top: 12px; }
