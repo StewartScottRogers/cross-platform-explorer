@@ -587,7 +587,8 @@ pub mod folder_similarity;
 
 /// Near-identical-folder **scan** pipeline (CPE-1204, epic CPE-997 stretch). Walks a folder tree,
 /// hashes each candidate subfolder's direct file children, and clusters near-identical folders via
-/// [`folder_similarity`]. The adapter [`folder_similarity`]'s own docs describe as the caller's job.
+/// [`folder_similarity`] — this is the adapter that [`folder_similarity`]'s own docs describe as the
+/// caller's job.
 pub mod folder_similarity_scan;
 
 /// Pure broken/dangling + cyclic symlink classifier (CPE-1008, epic CPE-1002). Given a

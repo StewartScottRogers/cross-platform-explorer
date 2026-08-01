@@ -259,6 +259,45 @@ function seedSimilarImagesFixture(tmpDir: string): void {
   fs.writeFileSync(path.join(tmpDir, SIMILAR_PNG_B_NAME), bandedPng(108, 80));
 }
 
+// --- CPE-1221: near-duplicate DOCUMENTS fixture -------------------------------------------------
+// Seed two near-identical .md files (plus one unrelated) for the Find-similar-documents dialog
+// (NearDuplicatesDialog.svelte, CPE-1204). The backend (crates/server/src/document_similarity.rs)
+// SimHashes each candidate's text and single-link-clusters at Hamming distance <= 8
+// (`DEFAULT_MAX_DISTANCE`). This fixture follows the same shape as `simhash.rs`'s own
+// `near_identical_text_is_closer_than_unrelated_text` test (base paragraph + lightly-edited near-copy +
+// unrelated paragraph). Measured directly against these exact strings: the near pair (one word changed
+// + a short sentence appended) lands at Hamming distance 3 — well inside the threshold — and the
+// unrelated paragraph lands at 15 — well outside it. So the near pair provably clusters and the third
+// doc stays a singleton; the distances above are measured against these fixture strings, which are not
+// byte-identical to the Rust test's constants.
+export const NEAR_DUP_DOC_A_NAME = "CPE-1221-notes-a.md";
+export const NEAR_DUP_DOC_B_NAME = "CPE-1221-notes-b.md";
+export const NEAR_DUP_DOC_UNRELATED_NAME = "CPE-1221-unrelated.md";
+
+const NEAR_DUP_PARAGRAPH_A =
+  "The quick brown fox jumps over the lazy dog near the riverbank. " +
+  "It happens every morning just after sunrise, when the grass is still wet with dew. " +
+  "Local farmers say the fox has been doing this for several years without fail.";
+
+// Same paragraph as A with ONE word changed ("morning" -> "afternoon") and one short sentence
+// appended — a realistic "lightly edited" near-duplicate, matching simhash.rs's own fixture.
+const NEAR_DUP_PARAGRAPH_A_EDITED =
+  "The quick brown fox jumps over the lazy dog near the riverbank. " +
+  "It happens every afternoon just after sunrise, when the grass is still wet with dew. " +
+  "Local farmers say the fox has been doing this for several years without fail. " +
+  "A neighbor recently started photographing it.";
+
+const NEAR_DUP_PARAGRAPH_UNRELATED =
+  "Quarterly revenue increased twelve percent, driven mainly by strong demand in the northern sales " +
+  "region and a new pricing structure for enterprise customers. The finance team expects margins to " +
+  "hold steady into the next fiscal year.";
+
+function seedNearDupDocsFixture(tmpDir: string): void {
+  fs.writeFileSync(path.join(tmpDir, NEAR_DUP_DOC_A_NAME), NEAR_DUP_PARAGRAPH_A, "utf-8");
+  fs.writeFileSync(path.join(tmpDir, NEAR_DUP_DOC_B_NAME), NEAR_DUP_PARAGRAPH_A_EDITED, "utf-8");
+  fs.writeFileSync(path.join(tmpDir, NEAR_DUP_DOC_UNRELATED_NAME), NEAR_DUP_PARAGRAPH_UNRELATED, "utf-8");
+}
+
 // --- CPE-1130: cost-History fixture -----------------------------------------------------------
 // Seed a synthetic session-metrics journal (`history.jsonl`) into the REAL app-data directory this
 // exact build reads from, so the Agent Watch drawer's cost-History tab (AgentTimeline.svelte,
@@ -666,6 +705,10 @@ export const config: WebdriverIO.Config = {
     // CPE-1203 / CPE-1205: seed two structured (multi-band) near-duplicate PNGs for the
     // Find-similar-images dialog (see the block above) — same tmpDir, same single app launch.
     seedSimilarImagesFixture(tmpDir);
+
+    // CPE-1221: seed two near-identical .md docs + one unrelated doc for the Find-similar-documents
+    // dialog (see the block above) — same tmpDir, same single app launch.
+    seedNearDupDocsFixture(tmpDir);
 
     // CPE-1130: seed the cost-History journal fixture into the real app-data dir (see the block
     // above) before the app process ever starts, so `metrics_history` has rows to read the moment
