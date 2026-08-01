@@ -179,7 +179,7 @@
   .outer.standalone { position: fixed; inset: 0; background: var(--surface); }
   .dialog {
     display: flex; flex-direction: column; position: relative;
-    background: var(--surface); color: var(--text); border: 1px solid var(--border-strong);
+    background: var(--surface); color: var(--text); border: 1px solid var(--dialog-border);
     border-radius: 10px; box-shadow: 0 20px 50px rgba(0, 0, 0, 0.3); padding: 14px 18px 0;
     max-width: 96vw; max-height: 94vh;
   }

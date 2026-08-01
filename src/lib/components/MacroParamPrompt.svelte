@@ -90,7 +90,7 @@
     width: 420px;
     max-width: 90vw;
     background: var(--surface);
-    border: 1px solid var(--border-strong);
+    border: 1px solid var(--dialog-border);
     border-radius: 10px;
     box-shadow: 0 20px 50px rgba(0, 0, 0, 0.25);
     padding: 20px;

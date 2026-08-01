@@ -93,7 +93,7 @@
   .backdrop { position: fixed; inset: 0; background: rgba(0, 0, 0, 0.3); display: grid; place-items: center; z-index: 210; }
   .dialog {
     width: 620px; max-width: 94vw; max-height: 84vh; display: flex; flex-direction: column;
-    background: var(--surface); color: var(--text); border: 1px solid var(--border-strong);
+    background: var(--surface); color: var(--text); border: 1px solid var(--dialog-border);
     border-radius: 10px; box-shadow: 0 20px 50px rgba(0, 0, 0, 0.28); padding: 14px 18px 16px;
   }
   header { display: flex; align-items: center; gap: 8px; margin-bottom: 8px; }

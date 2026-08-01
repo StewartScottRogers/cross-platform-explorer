@@ -9,9 +9,19 @@
   --active: #ebebeb;
 
   --border: #e5e5e5;
-  /* Emphasis / dialog-root border. Kept clearly visible so overlays read as distinct
-     surfaces over the content behind them, not just via their shadow (CPE-365). */
+  /* Emphasis border for toolbar/menu/input chrome (address bar, menus, pills, buttons). NOT
+     dark enough for a dialog edge over a dimmed backdrop — see --dialog-border below
+     (CPE-1193). Keep this var scoped to non-modal chrome; don't reach for it on a
+     `.dialog`/overlay-panel border. */
   --border-strong: #b3b3b3;
+  /* Modal-dialog / overlay-panel edge. Every dialog sits on a dimmed backdrop
+     (rgba(0,0,0,.25-.45) over --bg #f3f3f3), which itself renders as roughly #86-#b6 grey —
+     uncomfortably close to --border-strong (#b3b3b3), so that var reads as a soft
+     white->grey gradient instead of a line (CPE-1193, pixel-sampled by the Visual Critic on
+     NearDuplicatesDialog). This value is picked dark enough to stay >=3:1 contrast against
+     the darkest backdrop in use (rgba(0,0,0,.45) -> ~#868686) as well as the white dialog
+     surface, so the edge reads as crisp in every dialog regardless of its backdrop opacity. */
+  --dialog-border: #3c3c3c;
 
   --text: #1b1b1b;
   --text-dim: #616161;

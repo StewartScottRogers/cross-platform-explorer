@@ -89,7 +89,7 @@
     width: min(640px, 92vw);
     background: var(--surface);
     color: var(--text);
-    border: 1px solid var(--border-strong);
+    border: 1px solid var(--dialog-border);
     border-radius: 10px;
     box-shadow: 0 12px 40px rgba(0, 0, 0, 0.35);
     overflow: hidden;

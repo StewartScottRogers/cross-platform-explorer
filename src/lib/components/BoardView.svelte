@@ -401,7 +401,7 @@
   }
   /* Size comes from inline width/height (CPE-529 resizable); max keeps it inside the viewport. */
   .board-panel { max-width: 98vw; max-height: 96vh; display: flex; flex-direction: column; position: relative;
-    background: var(--surface); color: var(--text); border: 1px solid var(--border-strong);
+    background: var(--surface); color: var(--text); border: 1px solid var(--dialog-border);
     border-radius: 8px; box-shadow: 0 16px 48px rgba(0,0,0,0.4); overflow: hidden; }
 
   .board-titlebar { display: flex; align-items: center; justify-content: space-between;

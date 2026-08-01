@@ -173,7 +173,7 @@
 <style>
   .backdrop { position: fixed; inset: 0; background: rgba(0,0,0,0.4); display: grid; place-items: center; z-index: 210; }
   .dialog { width: min(880px, 95vw); height: min(680px, 92vh); display: flex; flex-direction: column;
-    background: var(--surface); color: var(--text); border: 1px solid var(--border-strong);
+    background: var(--surface); color: var(--text); border: 1px solid var(--dialog-border);
     border-radius: 10px; box-shadow: 0 20px 50px rgba(0,0,0,0.3); overflow: hidden; }
 
   .head { display: flex; align-items: center; justify-content: space-between; padding: 12px 16px;

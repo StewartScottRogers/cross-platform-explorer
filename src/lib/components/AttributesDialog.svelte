@@ -226,7 +226,7 @@
 
 <style>
   .backdrop { position: fixed; inset: 0; background: rgba(0, 0, 0, 0.25); display: grid; place-items: center; z-index: 200; }
-  .dialog { width: 400px; max-width: 92vw; background: var(--surface); border: 1px solid var(--border-strong); border-radius: 10px; box-shadow: 0 20px 50px rgba(0, 0, 0, 0.25); padding: 20px; }
+  .dialog { width: 400px; max-width: 92vw; background: var(--surface); border: 1px solid var(--dialog-border); border-radius: 10px; box-shadow: 0 20px 50px rgba(0, 0, 0, 0.25); padding: 20px; }
   h2 { font-size: 15px; margin-bottom: 10px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
   .row { display: flex; align-items: center; gap: 8px; font-size: 13px; color: var(--text); }
