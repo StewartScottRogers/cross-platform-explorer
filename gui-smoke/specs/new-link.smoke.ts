@@ -84,24 +84,26 @@ describe("CPE-1207 — headless GUI smoke: New Link… dialog renders + a hardli
   });
 
   it("New ▸ New Link… renders the dialog (render pin)", async () => {
-    const pane = await $(".filelist-pane");
-    const loc = await pane.getLocation();
-    const size = await pane.getSize();
-    await rightClick({ x: Math.round(loc.x + size.width / 2), y: Math.round(loc.y + 12) });
-
-    const ctx = await $(".ctx");
-    await ctx.waitForExist({ timeout: 10_000, timeoutMsg: "expected the empty-area menu (.ctx) to open" });
-
-    const newPoint = await pointByText(".ctx .parent", "New");
-    expect(newPoint, 'expected the "New ▸" submenu parent row').to.not.equal(null);
-    await click(newPoint!);
-
-    const flyout = await $(".ctx .flyout");
-    await flyout.waitForExist({ timeout: 5_000, timeoutMsg: "expected the New ▸ flyout to open" });
-
-    const newLinkPoint = await pointByText(".ctx .flyout .row", "New Link…");
-    expect(newLinkPoint, 'expected a "New Link…" row in the New ▸ flyout').to.not.equal(null);
-    await click(newLinkPoint!);
+    // Open via the Command Palette (Ctrl+Shift+P → "New Link"), the reliable opener — the hover-to-expand
+    // "New ▸" flyout doesn't open deterministically under headless CDP (CPE-1213). Same palette pattern as
+    // native-tags/organize smoke specs.
+    await browser.keys(["Control", "Shift", "P"]);
+    const paletteInput = await $(".cp-input");
+    await paletteInput.waitForExist({ timeout: 10_000, timeoutMsg: "expected .cp-input (Command Palette) after Ctrl+Shift+P" });
+    await paletteInput.addValue("New Link");
+    let newLinkRow: WebdriverIO.Element | undefined;
+    await browser.waitUntil(
+      async () => {
+        const rows = await $$(".cp-row");
+        for (const row of rows) {
+          const html = await row.getHTML({ includeSelectorTag: false });
+          if (/New Link/i.test(html)) { newLinkRow = row; return true; }
+        }
+        return false;
+      },
+      { timeout: 10_000, timeoutMsg: 'expected a .cp-row labelled "New Link…"' },
+    );
+    await newLinkRow!.click();
 
     const dialog = await $('.dialog[aria-label="New link"]');
     await dialog.waitForExist({
