@@ -2,7 +2,7 @@
 id: CPE-704
 title: "EPIC: Global quick-launch spotlight overlay"
 type: Task
-status: Proposed
+status: In Progress
 priority: Medium
 component: Multiple
 tags: [epic]
