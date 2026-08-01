@@ -48,6 +48,19 @@ describe("ContextMenu Copy to / Move to folder (CPE-355)", () => {
     expect(screen.queryByText("Move to folder…")).toBeNull();
   });
 
+  it("shows Repair link… only when linkBroken, and dispatches repair-link (CPE-1209)", async () => {
+    render(ContextMenu, { props: { ...base, linkBroken: false } });
+    expect(screen.queryByText("Repair link…")).toBeNull();
+
+    const { component } = render(ContextMenu, { props: { ...base, linkBroken: true } });
+    const action = vi.fn();
+    component.$on("action", (e) => action(e.detail));
+    const row = screen.getByText("Repair link…");
+    expect(row).toBeTruthy();
+    await fireEvent.click(row);
+    expect(action).toHaveBeenCalledWith("repair-link");
+  });
+
   it("New ▸ on a FILE item dispatches new-folder / new-file (create in the current folder) — CPE-1156", async () => {
     const { component } = render(ContextMenu, { props: { ...base, folderSelected: false } });
     const action = vi.fn();
@@ -237,6 +250,16 @@ describe("ContextMenu empty-area Windows 11 parity (CPE-1153)", () => {
     await openSubmenu("New");
     await fireEvent.click(screen.getByText("Compressed (zipped) Folder"));
     expect(action).toHaveBeenCalledWith("new-file:zip");
+  });
+
+  it("New ▸ offers New Link… and dispatches new-link (CPE-1207)", async () => {
+    const { component } = render(ContextMenu, { props: { ...empty } });
+    const action = vi.fn();
+    component.$on("action", (e) => action(e.detail));
+
+    await openSubmenu("New");
+    await fireEvent.click(screen.getByText("New Link…"));
+    expect(action).toHaveBeenCalledWith("new-link");
   });
 
   it("View ▸ opens, checkmarks the current mode, and selecting a mode dispatches view:<mode>", async () => {

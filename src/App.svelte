@@ -67,6 +67,8 @@
   import ContextMenu from "./lib/components/ContextMenu.svelte";
   import ConfirmDialog from "./lib/components/ConfirmDialog.svelte";
   import PasswordPromptDialog from "./lib/components/PasswordPromptDialog.svelte";
+  import NewLinkDialog from "./lib/components/NewLinkDialog.svelte";
+  import RepairLinkDialog from "./lib/components/RepairLinkDialog.svelte";
   import ShortcutsDialog from "./lib/components/ShortcutsDialog.svelte";
   import ContentSearchDialog from "./lib/components/ContentSearchDialog.svelte";
   import FileNameSearchDialog from "./lib/components/FileNameSearchDialog.svelte";
@@ -522,6 +524,17 @@
   /** Paths currently being dragged, shared with the sidebar as a drop target. */
   let draggedPaths: string[] = [];
   let ctx: { x: number; y: number; target: "item" | "empty" | "drive" | "home-item" } | null = null;
+  /** True when the single item the currently-open `target: "item"` menu is for is a broken symlink
+   *  (CPE-1209, epic CPE-715) — resolved async in `onRowContext` via `commands.linkStatus` (the menu
+   *  itself can't do async), gating the "Repair link…" row. Reset to false whenever a new item menu
+   *  opens so a stale broken flag never survives onto a different row. */
+  let ctxLinkBroken = false;
+  /** Folder a `NewLinkDialog` creates its link in (CPE-1207, epic CPE-715), or null when closed. Scope
+   *  is deliberately narrow (unlike `createNewItem`'s per-folder targeting): only the empty-area context
+   *  menu and command palette open it, both always acting on `currentPath`. */
+  let newLinkDialogFor: string | null = null;
+  /** The broken symlink a `RepairLinkDialog` is open for (CPE-1209, epic CPE-715), or null when closed. */
+  let repairLinkFor: DirEntry | null = null;
   // The drive root + display name for an open "drive" context menu (CPE-1158). All drive-menu actions
   // target this path, so the menu works identically from a Home tile and a sidebar row — and from Home,
   // where there is no FileList selection to piggy-back on.
@@ -722,6 +735,7 @@
     { id: "tab.reopen", group: $t("palette.groupGo"), label: $t("palette.reopenTab"), shortcut: "Ctrl+Shift+T", run: reopenClosedTab },
     { id: "file.newFolder", group: $t("palette.groupFile"), label: $t("palette.newFolder"), keywords: "create directory mkdir", run: newFolder, enabled: inFolder },
     { id: "file.newFile", group: $t("palette.groupFile"), label: $t("palette.newFile"), keywords: "create", run: newFile, enabled: inFolder },
+    { id: "file.newLink", group: $t("palette.groupFile"), label: $t("palette.newLink"), keywords: "symlink hardlink shortcut", run: () => (newLinkDialogFor = currentPath), enabled: inFolder },
     { id: "file.copy", group: $t("palette.groupFile"), label: $t("palette.copy"), shortcut: "Ctrl+C", run: doCopy, enabled: hasSelection },
     { id: "file.cut", group: $t("palette.groupFile"), label: $t("palette.cut"), shortcut: "Ctrl+X", run: doCut, enabled: hasSelection },
     { id: "file.paste", group: $t("palette.groupFile"), label: $t("palette.paste"), shortcut: "Ctrl+V", run: doPaste, enabled: inFolder },
@@ -2117,6 +2131,37 @@
     }
   }
 
+  /** `NewLinkDialog`'s `created` handler (CPE-1207): reload + inline-rename the new link, mirroring
+   *  `createNewItem`'s create-then-rename flow — `pendingRenamePath` is the same hook both use. */
+  async function onNewLinkCreated(createdPath: string) {
+    newLinkDialogFor = null;
+    pendingRenamePath = createdPath;
+    await loadPath(currentPath);
+  }
+
+  /** `NewLinkDialog`'s `error` handler (CPE-1207): surface the backend failure via the app-wide toast —
+   *  on Windows this is often the Developer-Mode/elevation error `create_symlink` returns when it lacks
+   *  privilege, and it must never be swallowed ([[avoid-modal-permission-popups]]: plain text, no modal).
+   *  The dialog itself stays open (it shows the same message inline) so the user can retry or switch to
+   *  a hardlink instead of losing their typed target/name. */
+  function onNewLinkError(message: string) {
+    showNotice(message, true);
+  }
+
+  /** `RepairLinkDialog`'s `repaired` handler (CPE-1209): the broken link now points at `newTarget` —
+   *  reload so its badge/status catches up, and close the dialog. */
+  async function onLinkRepaired(newTarget: string) {
+    repairLinkFor = null;
+    showNotice(`Repaired link → ${newTarget}`);
+    await loadPath(currentPath);
+  }
+
+  /** `RepairLinkDialog`'s `error` handler (CPE-1209) — same reasoning as `onNewLinkError`: surface via
+   *  the toast, dialog stays open (it shows the same message inline) so the user can try another target. */
+  function onLinkRepairError(message: string) {
+    showNotice(message, true);
+  }
+
   function doCopy() {
     if (blockedInArchive() || selectedEntries.length === 0) return;
     clipboard = stage(selectedEntries.map((e) => e.path), "copy");
@@ -2865,6 +2910,10 @@
       case "tags": if (selectedEntries.length >= 1) tagEditorFor = [...selectedEntries]; break;
       case "new-folder": newFolder(); break;
       case "new-file": newFile(); break;
+      // New Link… (CPE-1207) — empty-area menu + command palette only, always targets currentPath.
+      case "new-link": newLinkDialogFor = currentPath; break;
+      // Repair link… (CPE-1209) — offered only when ContextMenu's `linkBroken` gated it on.
+      case "repair-link": if (selectedEntries.length === 1) repairLinkFor = selectedEntries[0]; break;
       // New ▸ from a folder right-click (CPE-1156) — create INSIDE the clicked folder (its own path).
       case "new-folder-in": if (selectedEntries[0]?.is_dir) newFolder(selectedEntries[0].path); break;
       case "new-file-in": if (selectedEntries[0]?.is_dir) newFile(selectedEntries[0].path); break;
@@ -2924,10 +2973,23 @@
     }
   }
 
-  function onRowContext(e: { x: number; y: number; index: number }) {
+  async function onRowContext(e: { x: number; y: number; index: number }) {
     // Right-clicking an unselected row selects it first, as Explorer does.
     if (!selection.indices.has(e.index)) selection = selectOnly(e.index);
     ctx = { x: e.x, y: e.y, target: "item" };
+    ctxLinkBroken = false; // reset before the async check below settles (CPE-1209)
+    // `visible[e.index]` (not `selectedEntries[0]`) — `selection` was just reassigned above and the
+    // `$:` derived `selectedEntries` hasn't recomputed yet in this same synchronous tick.
+    const entry = visible[e.index];
+    if (entry?.is_symlink) {
+      try {
+        const status = await commands.linkStatus(entry.path);
+        // Guard against a stale write: only apply if this item's menu is still the one open.
+        if (ctx?.target === "item" && visible[e.index]?.path === entry.path) ctxLinkBroken = status.broken;
+      } catch {
+        // Never block the menu on a failed check — leave it false (Repair row simply doesn't show).
+      }
+    }
   }
 
   /** Open the drive/disk context menu (CPE-1158) for a Home drive tile or a sidebar drive row. The
@@ -4434,8 +4496,29 @@
     homeIsDir={homeCtxIsDir}
     homeStale={homeCtxStale}
     macros={ctx.target === "item" ? macroContextNames : []}
+    linkBroken={ctx.target === "item" ? ctxLinkBroken : false}
     on:action={(e) => runAction(e.detail)}
     on:close={() => (ctx = null)}
+  />
+{/if}
+
+{#if newLinkDialogFor}
+  <NewLinkDialog
+    targetDir={newLinkDialogFor}
+    on:created={(e) => onNewLinkCreated(e.detail)}
+    on:error={(e) => onNewLinkError(e.detail)}
+    on:close={() => (newLinkDialogFor = null)}
+  />
+{/if}
+
+{#if repairLinkFor}
+  <RepairLinkDialog
+    linkPath={repairLinkFor.path}
+    linkName={repairLinkFor.name}
+    searchRoots={[currentPath]}
+    on:repaired={(e) => onLinkRepaired(e.detail)}
+    on:error={(e) => onLinkRepairError(e.detail)}
+    on:close={() => (repairLinkFor = null)}
   />
 {/if}
 

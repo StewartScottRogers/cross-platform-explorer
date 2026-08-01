@@ -473,6 +473,17 @@ function seedEmptyFolderFixture(tmpDir: string): void {
   fs.mkdirSync(path.join(tmpDir, EMPTY_DIR_NAME), { recursive: true });
 }
 
+// --- CPE-1207: New-Link dialog fixture ----------------------------------------------------------
+// A DEDICATED empty subdirectory the New-Link click-through creates its hardlink inside, kept
+// separate from CPE-1154's `EMPTY_DIR_NAME` so this spec's write (the created hardlink file) never
+// perturbs context-menu.smoke.ts's "stays empty" assumption for that folder. Blank pane, same
+// right-click reachability as CPE-1154's repro.
+export const NEW_LINK_DIR_NAME = "CPE-1207-new-link-folder";
+
+function seedNewLinkFixture(tmpDir: string): void {
+  fs.mkdirSync(path.join(tmpDir, NEW_LINK_DIR_NAME), { recursive: true });
+}
+
 // --- CPE-1181: archive-browse (.tar.gz) fixture -------------------------------------------------
 // Extends the already-working in-app ZIP browsing (CPE-242/1179) to tar/tar.gz/tgz/7z/iso —
 // `read_archive_entries` (crates/server/src/archive.rs) is already format-agnostic across all of
@@ -667,6 +678,10 @@ export const config: WebdriverIO.Config = {
 
     // CPE-1154: seed an empty subdirectory for the native-context-menu-leak repro (see block above).
     seedEmptyFolderFixture(tmpDir);
+
+    // CPE-1207: seed a dedicated empty subdirectory for the New-Link dialog click-through (see block
+    // above) — separate from CPE-1154's folder so this spec's write doesn't touch that one's fixture.
+    seedNewLinkFixture(tmpDir);
 
     // CPE-1181: seed a genuinely valid single-entry .tar.gz for the non-zip archive-browse pin (see
     // block above) — same tmpDir, same single app launch.
