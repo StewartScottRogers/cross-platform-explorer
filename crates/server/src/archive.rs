@@ -155,6 +155,19 @@ pub fn read_archive_entries(path: &str) -> Result<Vec<ArchiveEntry>, String> {
 // Archive creation & extraction (CPE-251/252/242)
 // ---------------------------------------------------------------------------
 
+/// The flat temp-file target for a single-entry extraction: `%TEMP%/cpe-archive/<basename of inner>`
+/// (CPE-242/1102/1180). Shared by every format's single-entry extractor so they all land in the same
+/// place the frontend expects. Creates the directory; does not create the file itself.
+fn temp_extract_target(inner: &str) -> Result<std::path::PathBuf, String> {
+    let base = Path::new(inner)
+        .file_name()
+        .map(|s| s.to_string_lossy().to_string())
+        .ok_or_else(|| "invalid entry name".to_string())?;
+    let dir = std::env::temp_dir().join("cpe-archive");
+    fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    Ok(dir.join(base))
+}
+
 /// Extract a single entry of a zip to a temp file and return its path (CPE-242). Read-only: the temp
 /// copy is what opens, not the archived bytes.
 pub fn extract_archive_entry(zip: &str, inner: &str) -> Result<String, String> {
@@ -168,16 +181,86 @@ pub fn extract_archive_entry(zip: &str, inner: &str) -> Result<String, String> {
         .ok_or_else(|| format!("entry not found: {inner}"))?;
     let mut entry = archive.by_index(idx).map_err(|e| e.to_string())?;
 
-    let base = Path::new(inner)
-        .file_name()
-        .map(|s| s.to_string_lossy().to_string())
-        .ok_or_else(|| "invalid entry name".to_string())?;
-    let dir = std::env::temp_dir().join("cpe-archive");
-    fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
-    let out = dir.join(&base);
+    let out = temp_extract_target(inner)?;
     let mut w = fs::File::create(&out).map_err(|e| e.to_string())?;
     std::io::copy(&mut entry, &mut w).map_err(|e| e.to_string())?;
     Ok(out.to_string_lossy().to_string())
+}
+
+/// Extract a single entry from a TAR stream (optionally gzip-decompressed by the caller) to `out`.
+/// Returns whether the entry was found. Mirrors [`extract_archive_entry`]'s name matching: the frontend
+/// uses "/"; some tarballs store "\" — try the given name then the backslash variant.
+fn extract_tar_entry<R: std::io::Read>(reader: R, inner: &str, out: &Path) -> Result<bool, String> {
+    let backslashed = inner.replace('/', "\\");
+    let mut archive = tar::Archive::new(reader);
+    for entry in archive.entries().map_err(|e| e.to_string())? {
+        let mut entry = entry.map_err(|e| e.to_string())?;
+        let name = entry
+            .path()
+            .map(|p| p.to_string_lossy().to_string())
+            .unwrap_or_default();
+        if name == inner || name == backslashed {
+            let mut w = fs::File::create(out).map_err(|e| e.to_string())?;
+            std::io::copy(&mut entry, &mut w).map_err(|e| e.to_string())?;
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+/// Extract a single entry from a `.7z` to `out`. Returns whether the entry was found. Applies the same
+/// [`entry_name_is_safe`] guard as [`extract_7z_safe`] to every entry name the archive claims, not just
+/// the caller's `inner` (CPE-628/1180): `sevenz-rust` doesn't validate names itself.
+fn extract_7z_entry(path: &str, inner: &str, out: &Path) -> Result<bool, String> {
+    let backslashed = inner.replace('/', "\\");
+    let mut found = false;
+    // `decompress_file_with_extract_fn` needs an existing directory to build entry dest-paths against
+    // even though our callback ignores that argument and writes straight to `out`.
+    let scratch = out.parent().map(Path::to_path_buf).unwrap_or_else(std::env::temp_dir);
+    sevenz_rust::decompress_file_with_extract_fn(path, &scratch, |entry, reader, _dest| {
+        let name = entry.name();
+        if !found && entry_name_is_safe(name) && (name == inner || name == backslashed) {
+            let mut w = fs::File::create(out).map_err(sevenz_rust::Error::io)?;
+            std::io::copy(reader, &mut w).map_err(sevenz_rust::Error::io)?;
+            found = true;
+            Ok(false) // stop scanning the rest of this block; we have what we need
+        } else {
+            Ok(true) // keep scanning
+        }
+    })
+    .map_err(|e| e.to_string())?;
+    Ok(found)
+}
+
+/// Extract a single entry from any supported non-zip archive format to a temp file and return its path
+/// (CPE-1180): tar, gzip-compressed tar (.tar.gz/.tgz), and 7-Zip. Zip delegates to the existing
+/// [`extract_archive_entry`] (kept separate since the `zip` crate already indexes by name efficiently).
+/// Mirrors `extract_archive_entry`'s contract — a flat temp file at `%TEMP%/cpe-archive/<basename>` — so
+/// the frontend's open-leaf flow doesn't need to know which extractor served it. `inner` is validated
+/// with [`entry_name_is_safe`] up front so a path-traversal entry name is rejected before any extraction
+/// is attempted, regardless of format.
+pub fn extract_archive_entry_any(path: &str, inner: &str) -> Result<String, String> {
+    if !entry_name_is_safe(inner) {
+        return Err(format!("unsafe entry name: {inner}"));
+    }
+    let lower = path.to_lowercase();
+    let out = temp_extract_target(inner)?;
+    let found = if lower.ends_with(".tar.gz") || lower.ends_with(".tgz") {
+        let file = fs::File::open(path).map_err(|e| e.to_string())?;
+        extract_tar_entry(flate2::read::GzDecoder::new(file), inner, &out)?
+    } else if lower.ends_with(".tar") {
+        let file = fs::File::open(path).map_err(|e| e.to_string())?;
+        extract_tar_entry(file, inner, &out)?
+    } else if lower.ends_with(".7z") {
+        extract_7z_entry(path, inner, &out)?
+    } else {
+        return extract_archive_entry(path, inner);
+    };
+    if found {
+        Ok(out.to_string_lossy().to_string())
+    } else {
+        Err(format!("entry not found: {inner}"))
+    }
 }
 
 /// Recursively add `src` to an open zip under the archive path `name_in_zip`. Directories become explicit
@@ -757,6 +840,111 @@ mod tests {
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].name, "note.txt", "name is the archive name minus .gz");
         assert_eq!(entries[0].size, 11, "ISIZE trailer is the uncompressed length");
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    /// Build a minimal `.7z` fixture at `dest` containing `entries` (name, bytes), via `sevenz-rust`'s
+    /// own writer — there is no `compress_to_7z` in this crate (CPE-1180 is extraction-only), so the test
+    /// packs its own fixture the same way the crate would consume a real one.
+    fn write_7z_fixture(dest: &Path, entries: &[(&str, &[u8])]) {
+        let mut w = sevenz_rust::SevenZWriter::create(dest).unwrap();
+        for (name, data) in entries {
+            let mut entry = sevenz_rust::SevenZArchiveEntry::new();
+            entry.name = (*name).to_string();
+            w.push_archive_entry(entry, Some(std::io::Cursor::new(*data))).unwrap();
+        }
+        w.finish().unwrap();
+    }
+
+    #[test]
+    fn extract_archive_entry_any_round_trips_tar_gz_and_7z() {
+        // .tar.gz, built via the existing create fn.
+        let d = scratch("any_targz");
+        fs::create_dir_all(d.join("src/sub")).unwrap();
+        fs::write(d.join("src/a.txt"), b"alpha").unwrap();
+        fs::write(d.join("src/sub/b.txt"), b"beta").unwrap();
+        let tgz = d.join("out.tar.gz");
+        compress_to_targz(&[d.join("src").to_string_lossy().to_string()], &tgz.to_string_lossy()).unwrap();
+
+        let tmp = extract_archive_entry_any(&tgz.to_string_lossy(), "src/sub/b.txt").unwrap();
+        assert_eq!(fs::read(&tmp).unwrap(), b"beta");
+        let _ = fs::remove_file(&tmp);
+
+        // .7z, built via sevenz-rust's own writer (no create fn exists for 7z in this crate).
+        let sevenz = d.join("out.7z");
+        write_7z_fixture(&sevenz, &[("a.txt", b"alpha7z"), ("sub/b.txt", b"beta7z")]);
+        let tmp = extract_archive_entry_any(&sevenz.to_string_lossy(), "sub/b.txt").unwrap();
+        assert_eq!(fs::read(&tmp).unwrap(), b"beta7z");
+        let _ = fs::remove_file(&tmp);
+        let tmp = extract_archive_entry_any(&sevenz.to_string_lossy(), "a.txt").unwrap();
+        assert_eq!(fs::read(&tmp).unwrap(), b"alpha7z");
+        let _ = fs::remove_file(&tmp);
+
+        // A missing entry is a clear error, not a silent empty file.
+        assert!(extract_archive_entry_any(&sevenz.to_string_lossy(), "nope.txt").is_err());
+        assert!(extract_archive_entry_any(&tgz.to_string_lossy(), "nope.txt").is_err());
+
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn extract_archive_entry_any_round_trips_plain_tar_and_tgz_extension() {
+        let d = scratch("any_tar");
+        let tar_path = d.join("bundle.tar");
+        {
+            let f = fs::File::create(&tar_path).unwrap();
+            let mut b = tar::Builder::new(f);
+            let data = b"hi there";
+            let mut header = tar::Header::new_gnu();
+            header.set_size(data.len() as u64);
+            header.set_entry_type(tar::EntryType::Regular);
+            header.set_cksum();
+            b.append_data(&mut header, "hello.txt", &data[..]).unwrap();
+            b.finish().unwrap();
+        }
+        let tmp = extract_archive_entry_any(&tar_path.to_string_lossy(), "hello.txt").unwrap();
+        assert_eq!(fs::read(&tmp).unwrap(), b"hi there");
+        let _ = fs::remove_file(&tmp);
+
+        // .tgz is the same gzip-tar format under a different extension.
+        fs::create_dir_all(d.join("src")).unwrap();
+        fs::write(d.join("src/note.txt"), b"tgz-note").unwrap();
+        let tgz = d.join("bundle.tgz");
+        compress_to_targz(&[d.join("src").to_string_lossy().to_string()], &tgz.to_string_lossy()).unwrap();
+        let tmp = extract_archive_entry_any(&tgz.to_string_lossy(), "src/note.txt").unwrap();
+        assert_eq!(fs::read(&tmp).unwrap(), b"tgz-note");
+        let _ = fs::remove_file(&tmp);
+
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn extract_archive_entry_any_delegates_zip_to_the_zip_extractor() {
+        let d = scratch("any_zip");
+        fs::write(d.join("a.txt"), b"alpha").unwrap();
+        let zip_path = d.join("out.zip");
+        compress_to_zip(&[d.join("a.txt").to_string_lossy().to_string()], &zip_path.to_string_lossy()).unwrap();
+        let tmp = extract_archive_entry_any(&zip_path.to_string_lossy(), "a.txt").unwrap();
+        assert_eq!(fs::read(&tmp).unwrap(), b"alpha");
+        let _ = fs::remove_file(&tmp);
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn extract_archive_entry_any_rejects_a_traversal_inner_regardless_of_format() {
+        let d = scratch("any_traversal");
+        fs::write(d.join("a.txt"), b"alpha").unwrap();
+        let tgz = d.join("out.tar.gz");
+        compress_to_targz(&[d.join("a.txt").to_string_lossy().to_string()], &tgz.to_string_lossy()).unwrap();
+        let sevenz = d.join("out.7z");
+        write_7z_fixture(&sevenz, &[("a.txt", b"alpha")]);
+
+        for bad in ["../evil.txt", "a/../../evil", "..\\evil"] {
+            let err = extract_archive_entry_any(&tgz.to_string_lossy(), bad).unwrap_err();
+            assert!(err.contains("unsafe"), "tgz: expected an unsafe-entry error, got {err:?}");
+            let err = extract_archive_entry_any(&sevenz.to_string_lossy(), bad).unwrap_err();
+            assert!(err.contains("unsafe"), "7z: expected an unsafe-entry error, got {err:?}");
+        }
         let _ = fs::remove_dir_all(&d);
     }
 }
