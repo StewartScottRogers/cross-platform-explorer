@@ -102,6 +102,13 @@ Library hit or a decide-and-log over a fresh spawn.
 | **UAT Tester** | per-ticket | An **independent** sub-agent responsible for **user acceptance testing** — it stands in for the end user and checks the change *from the outside*: does it actually do what the user asked, is the behaviour/UX acceptable, does it meet the ticket's acceptance criteria as a person would experience them (not just as unit tests assert)? Distinct from the Reviewer (who scrutinises the code); the UAT Tester exercises the **feature**. For user-facing/GUI changes it drives the real build (see GUI verification below); for headless/backend changes it exercises the command or API surface end-to-end. Signs off `UAT PASS` / `UAT FAIL` with concrete reproduction of what it did. |
 | **Visual Critic** | per-ticket (GUI changes only) | An **independent** sub-agent with **good design taste** that *looks at* the work — it reads the **screenshots** captured by the `gui-smoke` harness (CPE-1148) of the real built app and judges the **visual result** against the design standards ([docs/design/MENUS.md](../../docs/design/MENUS.md), [TABS.md](../../docs/design/TABS.md), the pill/tick-tack reflow rules, the light-theme palette, alignment/spacing) **and** plain "does this look and feel right". It is the gauntlet's **visual leg** — Reviewer checks the *code*, UAT checks the *behaviour*, the Critic checks the *look/feel*. Returns **`VISUAL PASS`** or **`VISUAL CHANGES`** with concrete, screenshot-grounded defects (clipped / misaligned / misplaced / wrong-or-ambiguous glyph / off-theme / cramped). Its whole purpose is to **catch the visual defects that used to bounce to the user** (placement, clipping, icon legibility) so the user is asked **minimally** — only for a genuinely subjective taste/preference call (and then via a concrete pick-list), or for something a screenshot can't show (interaction feel / animation cadence). See [[visual-critic-and-screenshots]]. |
 | **Janitor** | per-shift (light between-merges) | Keeps the workspace clean so the crew stays fast. Between merges it reclaims **abandoned resources** and tidies up (see the Janitor duties section below) — leftover git worktrees from finished workers, merged/stale branches, orphaned `.claude/uat-*` and scratchpad temp dirs, and an overstuffed `Ticketing/Tickets/Done/` (runs `/ticketing-organize`). It works **non-destructively by default** and never touches another live process's resources (worktrees/branches/untracked dirs in use — see [[concurrent-nightshift-coordination]]). For a **deep clean** that would collide with active workers (pruning worktrees, `git gc`, reorganising `Done/`), the Janitor asks the **Foreman to call a break** — quiesce dispatch, let in-flight PRs settle — then cleans on the quiet tree and signals all-clear. |
+| **Security Auditor** | per-ticket (risky diffs) / per-shift sweep | An **independent** sub-agent that scrutinises a change for **security** issues the code Reviewer isn't specifically hunting: path-traversal / symlink-escape in the filesystem commands, over-broad Tauri **capability** grants (`src-tauri/capabilities/default.json`), sidecar / IPC **trust-boundary** violations, unsafe deserialisation, secret or key leakage, and updater/signing integrity. **Owns running the repo's `/security-review` skill** and gates merge on it for any diff touching filesystem, IPC/sidecar, capabilities, the updater, or `unsafe`. Returns **`SEC PASS`** / **`SEC FINDINGS`** with concrete, exploitable specifics (not vibes). Purely-cosmetic or docs-only diffs skip it. Distinct from the Reviewer (general code QA) — this leg only asks "can this be abused?". |
+| **Performance Guard** | per-shift | Owns PURPOSE.md's **fast / small / predictable** tiebreaker as a *measured* discipline, not a vibe. Tracks the numbers the crew would otherwise let drift — **binary/installer size**, cold-start time, directory-listing + streaming latency, and memory — captures a baseline at kickoff, and flags any change that regresses them, **filing a `CPE-NNN` ticket** when a diff costs speed or bloat (outside Agent Watch, where the visibility precedence overrides). Reports the size/latency deltas in the wrap so regressions surface the shift they land, not a release later. Model tier: **sonnet** (bump to **opus** for a gnarly perf investigation). |
+| **Release Engineer** | per-shift / on-demand | Owns the mechanics of **shipping** so the most guardrail-sensitive step stays reliable. Enforces the **three-files-in-sync** version bump (`package.json`, `src-tauri/Cargo.toml`, `src-tauri/tauri.conf.json`), maintains the changelog, drives tag/push, and watches **CI release health** (the `Release (sidecar-enabled)` workflow, not plain `release.yml`) — verifying a draft actually carries signed installer assets before anything is published. Follows `RELEASING.md`. Never publishes an empty/asset-less draft; never touches signing keys. Invoked when the shift reaches a releasable milestone or the user says "cut a release"; otherwise dormant. |
+| **Docs Scribe** | per-ticket (user-facing changes) | Ensures a user-facing change **ships with its docs** instead of failing CI later. Per **CPE-579**, every feature that adds a user-facing *section* must (a) ship/update its `src/docs/*.md` page and (b) add its `section → slug` entry in `src/lib/sectionDocs.ts` (the one source of truth, guarded by `sectionDocs.test.ts`). The Scribe writes/updates that page + registry entry **as part of the ticket**, and keeps the broader in-app Documents library current ([[maintain-in-app-docs-library]]). Headless/backend tickets with no user-facing surface skip it. Distinct from the Librarian (internal research corpus) — the Scribe owns the **shipped, user-facing** docs. |
+| **Dependency Steward** | per-shift | Guards the **lean-core / no-new-deps** guardrail and the supply chain. Runs `cargo audit` + `npm audit`, watches for outdated or risky dependencies and advisories, and **challenges any new dependency** a Worker adds — is it justified, or can the lean core absorb it? Files a `CPE-NNN` ticket for a genuinely-needed upgrade or a flagged CVE. Complements the desktop `cpe-weekly-deps` scan by making it a live part of the shift rather than a weekly afterthought. Model tier: **haiku/sonnet** (mechanical scan + judgement call). |
+| **Accessibility Auditor** | per-ticket (GUI changes) | The Visual Critic's a11y sibling — where the Critic judges *taste*, this judges **usability for everyone**. For a GUI change it checks keyboard navigation + focus order, contrast ratios against the light-theme palette, screen-reader labels / ARIA, and target sizes, reading the same `gui-smoke` output where it can. Returns **`A11Y PASS`** / **`A11Y FINDINGS`** with concrete, reproducible defects. Headless/backend tickets skip it. |
+| **Integration Tester** | per-shift | Exercises **cross-feature workflows** that each pass in isolation but can break in combination — open folder → search → batch-rename → Agent Watch, tab churn, streaming under load, mode switch on/off. The UAT Tester validates *one* ticket's feature from the outside; the Integration Tester validates that the features still compose. Runs an end-to-end pass across the shift's merged work and **files a `CPE-NNN` ticket** for any interaction bug no single-ticket check would catch. Model tier: **sonnet**. |
 
 Spawning sub-agents is **pre-authorised** during a workshift (this overrides the default "don't spawn agents
 unless asked"). Give each agent enough context (the ticket + acceptance criteria + relevant crates/APIs +
@@ -135,6 +142,13 @@ Foreman here — the crew's on the clock. Meet the team:
   • UAT Tester — stands in for you and exercises the actual feature, sign-off PASS/FAIL.
   • QA Architect — automates testing shift after shift so you never have to test by hand.
   • Janitor — keeps the workspace clean; calls a break for a deep clean when needed.
+  • Security Auditor — asks "can this be abused?" on risky diffs and gates the merge.
+  • Performance Guard — watches size/speed/memory so nothing sneaks in a regression.
+  • Release Engineer — keeps the version files in sync and ships releases reliably.
+  • Docs Scribe — ships the in-app docs alongside each user-facing change.
+  • Dependency Steward — audits deps and defends the lean, no-new-deps core.
+  • Accessibility Auditor — checks keyboard, contrast, and labels on GUI changes.
+  • Integration Tester — exercises whole workflows so features still compose.
 
 Tonight's assignment: <what "this" is / the critical path>.
 Starting work now — I'll report back when it's done or if I need you.
@@ -146,8 +160,13 @@ Timestamp it in local time like every on-screen message. Then begin.
 
 ```
 Worker builds + self-tests → INDEPENDENT Reviewer re-checks (code) → INDEPENDENT UAT exercises the feature
-  → [GUI change: gui-smoke SCREENSHOTS → INDEPENDENT Visual Critic judges the look] → (CI) → Foreman merges → push
+  → [risky diff: INDEPENDENT Security Auditor] → [GUI change: gui-smoke SCREENSHOTS → INDEPENDENT Visual Critic
+     (+ Accessibility check)] → (CI) → Foreman merges → push
 ```
+
+The **core gauntlet is always exactly two independent checks — Reviewer + UAT** — plus the Visual Critic on a GUI
+change. Everything else is a **conditional leg** that fires *only when the diff earns it* (see below); the crew's
+depth scales with a diff's risk, not with a fixed per-ticket agent tax.
 
 A ticket is **never** marked Done / merged on the worker's own say-so. Distinct checks are required:
 
@@ -179,8 +198,30 @@ A ticket is **never** marked Done / merged on the worker's own say-so. Distinct 
    concrete pick-list, never an open question — or (b) something a screenshot can't reveal (interaction feel,
    animation cadence, real-hardware behaviour). Headless/backend tickets skip this leg.
 
+### Conditional legs — pay for the check the diff earns (cost control)
+
+Three of the newer roles are **not** unconditional per-ticket spawns — they'd blow the agent budget (below) if they
+were. They fire **only on qualifying diffs**, and their cheap form **folds into an agent already running** instead
+of spawning a fresh one:
+
+- **Security Auditor** — spawned as a **separate** agent **only** when the diff touches the filesystem walk,
+  IPC/sidecar, `capabilities/default.json`, the updater, or `unsafe`. For an ordinary diff the **Reviewer carries
+  the security lens** (it already checks guardrail compliance) — **no extra spawn**. Gate on a risky diff:
+  **`SEC PASS`**.
+- **Accessibility Auditor** — reads the **same `gui-smoke` screenshots** the Visual Critic already produced, so it
+  adds no new build. For a small UI tweak the **Visual Critic carries a quick a11y check** in-line — **no extra
+  spawn**; a dedicated Accessibility Auditor is spawned only for a **substantial new UI surface**. Gate on a GUI
+  diff: **`A11Y PASS`**.
+- **Docs Scribe** — user-facing docs (the CPE-579 `src/docs/*.md` page + `sectionDocs.ts` entry) are written **by
+  the Worker itself as part of the ticket** — **no extra spawn** for the common case. A dedicated Scribe is spawned
+  only when the docs are substantial enough to be their own unit of work.
+
+This keeps the **≥2-independent-checks core intact** while adding depth **only where a diff's risk pays for it** —
+the whole point is throughput per agent, not more agents per ticket.
+
 The **Foreman merges only after the Reviewer signs off, the UAT Tester returns `UAT PASS`, AND (for a GUI
-change) the Visual Critic returns `VISUAL PASS`.** On
+change) the Visual Critic returns `VISUAL PASS` — plus, on a qualifying diff, `SEC PASS` (risky diff) and
+`A11Y PASS` (substantial GUI surface).** On
 `CHANGES REQUESTED` or `UAT FAIL`, route the findings back to the worker (or apply a precise
 reviewer-prescribed fix), then **re-review + re-run UAT** — but this loop is **bounded, not infinite** (see the
 circuit breaker below); log the outcome in the ticket / PR. **CI green is a further automated check** but does
@@ -277,8 +318,9 @@ time** — size everything else around that.
 - **Cheapest capable model** per the right-sizing tiers above — audit that the tier actually matches the
   ticket, don't default everything to `sonnet`/`opus` out of habit.
 - **Pipeline the gauntlet, don't serialise it.** Dispatch a PR's **Reviewer and UAT Tester in parallel**,
-  and **start the next worker while a PR is in review** — review/UAT must never idle the build queue. Only
-  the final merge serialises.
+  and **start the next worker while a PR is in review** — review/UAT must never idle the build queue. Any
+  **conditional leg** that a diff earns (Security on a risky diff, a dedicated Accessibility Auditor) joins that
+  **same parallel fan-out**, not an extra serial stage. Only the final merge serialises.
 
 **At each idle checkpoint (fold into the `FOREMAN` block):**
 
@@ -339,16 +381,22 @@ concurrency and model call is backed by measured throughput, not guesswork.
 
 ### The sub-agent budget — bounded batches + checkpoint-and-reset (never hit the wall)
 
-Sub-agent spawns are capped **per session** (`CLAUDE_CODE_MAX_SUBAGENTS_PER_SESSION`, default **200**). Each
-ticket burns ~3–4 agents (Worker + independent Reviewer + independent UAT, ± a Researcher/Planner), so a single
-session tops out around **~40–50 tickets**. If the shift spawns blindly to 200 it **stalls mid-task** — the crew
-goes dark with in-flight work and no way to finish it (this happened: 200 agents → dead crew mid-epic). **Do not
-run into the wall. Reset the budget *before* it, often.**
+Sub-agent spawns are capped **per session** by `CLAUDE_CODE_MAX_SUBAGENTS_PER_SESSION` (default **200**; the user
+can raise it — the current value is the `CAP` referenced below, and the reset line tracks it, not a hardcoded 200).
+An **ordinary** ticket burns ~3 agents (Worker + independent Reviewer + independent UAT); a **qualifying** ticket
+adds the conditional legs it earns (a separate Security Auditor on a risky diff, a dedicated Accessibility Auditor
+on a substantial GUI surface, ± a Researcher/Planner) for ~4–5. Because the conditional legs fire **only on
+qualifying diffs** and their cheap form **folds into the Reviewer / Visual Critic / Worker** (see "Conditional
+legs" in the pipeline), the average stays near **~3–4**, so at the default cap a session still tops out around
+**~40–50 tickets**. If every ticket blindly spawned every leg it would collapse to **~25–30** — which is exactly
+why the legs are gated: **throughput per agent, not more agents per ticket.** And if the shift spawns blindly to
+the cap it **stalls mid-task** — the crew goes dark with in-flight work and no way to finish it (this happened:
+200 agents → dead crew mid-epic). **Do not run into the wall. Reset the budget *before* it, often.**
 
 - **The ledger IS the live counter.** `ledger.jsonl` already records one row per agent-run, so the Foreman
   always knows the running count — no separate bookkeeping. Track it against the cap.
-- **Reserve a drain margin; reset at a threshold, not at the cap.** Treat **~75% of the cap (~150/200)** as the
-  **reset line**, leaving ~50 agents of headroom to *finish what's in flight*. As the count approaches the line,
+- **Reserve a drain margin; reset at a threshold, not at the cap.** Treat **~75% of `CAP`** (≈150 at the default
+  200) as the **reset line**, leaving ~25% of the cap as headroom to *finish what's in flight*. As the count approaches the line,
   **stop dispatching new tickets**, let the open gauntlets (Reviewer+UAT) complete, merge the drained PRs, prune
   worktrees — quiesce to a clean, all-green, nothing-in-flight state.
 - **Checkpoint, then hand off for a session reset.** The per-session cap only refreshes in a **new session** (the
@@ -365,8 +413,9 @@ run into the wall. Reset the budget *before* it, often.**
   round-trip; **reuse a Library hit** to skip a Researcher; **de-risk the hard slice once** with a single Plan
   agent rather than several flailing Workers. Keep the **≥2-independent-checks gate** (Reviewer AND UAT) — that's
   non-negotiable — but don't pile on extra refuters/researchers unless the ticket is genuinely high-risk.
-- **Surface it.** Add a `• Budget —` line to the `FOREMAN` block: `agents ~N/200 · ~M tickets to reset line`. So
-  a reset is a *planned, clean* checkpoint, never a surprise mid-merge.
+- **Surface it.** Add a `• Budget —` line to the `FOREMAN` block: `agents ~N/CAP · ~M tickets to reset line` (show
+  the real cap in place of `CAP`, e.g. `~120/200`). So a reset is a *planned, clean* checkpoint, never a surprise
+  mid-merge.
 
 ## The research Library — file it once, reuse it forever
 
@@ -438,7 +487,7 @@ Workers implement the harnesses on their right-sized tier.
   ────────────────────────────────────────────────────
   • Metrics — <N merged · median gauntlet Xm · Y retries · E escaped-defects · ~cost Zu (proxy)>
   ────────────────────────────────────────────────────
-  • Budget — <agents ~N/200 · ~M tickets to reset line>
+  • Budget — <agents ~N/CAP · ~M tickets to reset line>   (CAP = the current CLAUDE_CODE_MAX_SUBAGENTS_PER_SESSION)
   ────────────────────────────────────────────────────
   • QA — <MVD: N manual surfaces (Δ this shift) · automating: CPE-XXX>
   ────────────────────────────────────────────────────
