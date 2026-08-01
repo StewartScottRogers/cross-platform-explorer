@@ -1454,6 +1454,25 @@ async inspectFile(path: string) : Promise<Result<FileInspection, string>> {
 }
 },
 /**
+ * Spotlight fuzzy search + aggregation (CPE-1214, epic CPE-704): rank each `sources` group against
+ * `query` with `spotlight::rank`, group by kind, keep each section's top `per_kind_cap`, and return
+ * non-empty sections ordered by kind priority (Action → Folder → File → Recent). Pure + infallible —
+ * still `spawn_blocking`'d since ranking many candidates is real CPU work. Model lives in
+ * `cpe_server::spotlight_results::aggregate` (CPE-948); this is a thin dispatcher.
+ */
+async spotlightSearch(query: string, sources: ([ResultKind, string[]])[], perKindCap: number) : Promise<SpotSection[]> {
+    return await TAURI_INVOKE("spotlight_search", { query, sources, perKindCap });
+},
+/**
+ * Spotlight frecency ranking (CPE-1214, epic CPE-704): rank `visits` best-first by frecency
+ * (visit count × recency decay) as of `now_s`, returning up to `limit` paths — the overlay's
+ * empty-query default view. Pure + infallible. Model lives in
+ * `cpe_server::spotlight_frecency::rank_frecent` (CPE-952); this is a thin dispatcher.
+ */
+async spotlightFrecent(visits: Visit[], nowS: number, limit: number) : Promise<string[]> {
+    return await TAURI_INVOKE("spotlight_frecent", { visits, nowS, limit });
+},
+/**
  * Search text files under `root` for lines containing `query` (CPE-416). Model lives in
  * `cpe_server::content_search` (CPE-815); this is a thin `spawn_blocking` dispatcher.
  */
@@ -3117,6 +3136,12 @@ export type ResolvedOp = { from: string; kind: string; detail: string; to: strin
  */
 export type ResolvedRun = { ops: ResolvedOp[]; inverses: InverseOp[] }
 /**
+ * The source a result came from. Declaration order is the section priority (actions first).
+ * Deserialize too (not just Serialize): CPE-1214 sends it as a `spotlight_search` command *input*
+ * (each `sources` entry is tagged with its `ResultKind`), so it must round-trip both ways over IPC.
+ */
+export type ResultKind = "action" | "folder" | "file" | "recent"
+/**
  * The outcome of actually pruning a store: which manifests survived, which were removed (by the GFS
  * policy and/or the optional byte cap), and how many bytes were freed.
  */
@@ -3361,6 +3386,14 @@ export type SkippedInfo = { path: string; size: number;
  */
 reason: string }
 /**
+ * One aggregated result: the matched text, its kind, fuzzy score, and matched positions (for highlight).
+ */
+export type SpotResult = { text: string; kind: ResultKind; score: number; positions: number[] }
+/**
+ * A kind-grouped section of results (for a sectioned overlay).
+ */
+export type SpotSection = { kind: ResultKind; results: SpotResult[] }
+/**
  * One symbol in the outline.
  */
 export type Symbol = { name: string; kind: SymbolKind; 
@@ -3403,6 +3436,10 @@ export type TreeNode = { name: string; isDir: boolean; size?: number | null; mod
  * [`crate::video_meta_read::read_mp4`] emits.
  */
 export type VideoTagColumn = "Title" | "Artist" | "Album" | "Year" | "Comment" | "Genre" | "Composer" | "Encoder" | "Copyright"
+/**
+ * A tracked item's usage: how many times it's been opened and when it was last opened (epoch seconds).
+ */
+export type Visit = { path: string; count: number; last_used_s: number }
 /**
  * One resident volume's state, for `index_status` (so the UI can show what's indexed). Serialisable —
  * it's an `index_status` command return type.

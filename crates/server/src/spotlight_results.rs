@@ -5,7 +5,9 @@
 use crate::spotlight::rank;
 
 /// The source a result came from. Declaration order is the section priority (actions first).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, serde::Serialize)]
+/// Deserialize too (not just Serialize): CPE-1214 sends it as a `spotlight_search` command *input*
+/// (each `sources` entry is tagged with its `ResultKind`), so it must round-trip both ways over IPC.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, serde::Serialize, serde::Deserialize)]
 #[cfg_attr(feature = "specta", derive(specta::Type))]
 #[serde(rename_all = "snake_case")]
 pub enum ResultKind {

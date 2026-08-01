@@ -2956,6 +2956,55 @@ async fn inspect_file(path: String) -> Result<cpe_server::inspect::FileInspectio
     .map_err(|e| e.to_string())?
 }
 
+/// Spotlight fuzzy search + aggregation (CPE-1214, epic CPE-704): rank each `sources` group against
+/// `query` with `spotlight::rank`, group by kind, keep each section's top `per_kind_cap`, and return
+/// non-empty sections ordered by kind priority (Action → Folder → File → Recent). Pure + infallible —
+/// still `spawn_blocking`'d since ranking many candidates is real CPU work. Model lives in
+/// `cpe_server::spotlight_results::aggregate` (CPE-948); this is a thin dispatcher.
+#[tauri::command]
+#[cfg_attr(feature = "specta-bindings", specta::specta)]
+async fn spotlight_search(
+    query: String,
+    sources: Vec<(cpe_server::spotlight_results::ResultKind, Vec<String>)>,
+    per_kind_cap: usize,
+) -> Vec<cpe_server::spotlight_results::SpotSection> {
+    tauri::async_runtime::spawn_blocking(move || spotlight_search_impl(query, sources, per_kind_cap))
+        .await
+        .unwrap()
+}
+
+fn spotlight_search_impl(
+    query: String,
+    sources: Vec<(cpe_server::spotlight_results::ResultKind, Vec<String>)>,
+    per_kind_cap: usize,
+) -> Vec<cpe_server::spotlight_results::SpotSection> {
+    cpe_server::spotlight_results::aggregate(&query, &sources, per_kind_cap)
+}
+
+/// Spotlight frecency ranking (CPE-1214, epic CPE-704): rank `visits` best-first by frecency
+/// (visit count × recency decay) as of `now_s`, returning up to `limit` paths — the overlay's
+/// empty-query default view. Pure + infallible. Model lives in
+/// `cpe_server::spotlight_frecency::rank_frecent` (CPE-952); this is a thin dispatcher.
+#[tauri::command]
+#[cfg_attr(feature = "specta-bindings", specta::specta)]
+async fn spotlight_frecent(
+    visits: Vec<cpe_server::spotlight_frecency::Visit>,
+    now_s: u64,
+    limit: usize,
+) -> Vec<String> {
+    tauri::async_runtime::spawn_blocking(move || spotlight_frecent_impl(visits, now_s, limit))
+        .await
+        .unwrap()
+}
+
+fn spotlight_frecent_impl(
+    visits: Vec<cpe_server::spotlight_frecency::Visit>,
+    now_s: u64,
+    limit: usize,
+) -> Vec<String> {
+    cpe_server::spotlight_frecency::rank_frecent(&visits, now_s, limit)
+}
+
 /// Whether two files have identical content (CPE-418). Different sizes short-circuit to `false`;
 /// otherwise the bytes are streamed and compared with an early exit on the first difference — cheaper
 /// and collision-free versus hashing both. A directory or unreadable path is an `Err`, never a panic.
@@ -8038,6 +8087,8 @@ pub fn run() {
             snapshot_run_due,
             text_stats,
             inspect_file,
+            spotlight_search,
+            spotlight_frecent,
             search_file_contents,
             find_files_by_name,
             files_identical,
@@ -8780,6 +8831,8 @@ pub fn export_bindings(out: &std::path::Path) -> Result<(), String> {
         snapshot_run_due,
         text_stats,
         inspect_file,
+        spotlight_search,
+        spotlight_frecent,
         search_file_contents,
         find_files_by_name,
         files_identical,
@@ -8894,6 +8947,7 @@ mod tests {
         for cmd in [
             "runCommand", "createDir", "createFile", "writeFileText", "renameEntry", "canRestoreFromTrash",
             "listDir", "entryInfo", "deleteToTrash", "deletePermanent", "copyEntries", "moveEntries", "moveExact",
+            "spotlightSearch", "spotlightFrecent",
         ] {
             assert!(src.contains(cmd), "typed client should expose `{cmd}`");
         }
@@ -10221,5 +10275,55 @@ mod tests {
         let vmeta = fs::metadata(&visible).unwrap();
         assert!(!is_hidden(&visible, &vmeta));
         let _ = fs::remove_dir_all(&d);
+    }
+
+    // ---- Spotlight commands (CPE-1214, epic CPE-704) -------------------------------------------
+    // The `_impl` fns hold the real logic and are directly testable without an async runtime (same
+    // pattern as `board_cards_impl` etc. above); the `#[tauri::command]` wrapper is just `spawn_blocking`.
+
+    use cpe_server::spotlight_frecency::Visit;
+    use cpe_server::spotlight_results::ResultKind;
+
+    #[test]
+    fn spotlight_search_impl_groups_caps_and_highlights() {
+        let sources = vec![
+            (ResultKind::Action, vec!["Reload window".to_string(), "Rename".to_string(), "Delete".to_string()]),
+            (ResultKind::File, vec!["readme.md".to_string(), "read-later.md".to_string(), "notes.txt".to_string()]),
+        ];
+        let secs = spotlight_search_impl("re".to_string(), sources, 1);
+        // Sections ordered by kind priority (Action before File), each capped at 1.
+        assert_eq!(secs.len(), 2);
+        assert_eq!(secs[0].kind, ResultKind::Action);
+        assert_eq!(secs[0].results.len(), 1);
+        assert_eq!(secs[1].kind, ResultKind::File);
+        assert_eq!(secs[1].results.len(), 1);
+        // The winning file result carries matched-char positions for highlighting.
+        assert!(!secs[1].results[0].positions.is_empty());
+        assert!(secs[1].results[0].score > 0);
+    }
+
+    #[test]
+    fn spotlight_search_impl_empty_on_no_match() {
+        let sources = vec![(ResultKind::File, vec!["cargo.toml".to_string()])];
+        assert!(spotlight_search_impl("zzz".to_string(), sources, 5).is_empty());
+    }
+
+    #[test]
+    fn spotlight_frecent_impl_ranks_recent_and_frequent_first() {
+        let now = 100 * 86_400u64;
+        let visits = vec![
+            Visit { path: "/stale".into(), count: 20, last_used_s: now - 2 * 2_592_000 },
+            Visit { path: "/rare".into(), count: 1, last_used_s: now - 1_800 },
+            Visit { path: "/hot".into(), count: 5, last_used_s: now - 1_800 },
+        ];
+        let out = spotlight_frecent_impl(visits, now, 10);
+        assert_eq!(out, vec!["/hot", "/stale", "/rare"]);
+    }
+
+    #[test]
+    fn spotlight_frecent_impl_caps_at_limit() {
+        let visits: Vec<Visit> =
+            (0..5).map(|i| Visit { path: format!("/v{i}"), count: i + 1, last_used_s: 0 }).collect();
+        assert_eq!(spotlight_frecent_impl(visits, 0, 2).len(), 2);
     }
 }
