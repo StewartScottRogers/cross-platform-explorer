@@ -125,7 +125,7 @@
     border-right: 0;
   }
   .cell.changed.left {
-    background: color-mix(in srgb, #b5433a 20%, transparent);
+    background: color-mix(in srgb, var(--danger) 20%, transparent);
   }
   .cell.changed.right {
     background: color-mix(in srgb, #3a9d4a 22%, transparent);

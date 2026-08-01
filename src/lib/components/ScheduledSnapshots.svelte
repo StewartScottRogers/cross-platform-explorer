@@ -232,5 +232,5 @@
   .btn { height: 28px; padding: 0 12px; border: 1px solid var(--border-strong); border-radius: var(--radius); background: var(--surface-alt); color: var(--text); font-size: 12px; }
   .btn:disabled { opacity: 0.4; }
   .btn.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
-  .err { padding: 6px 8px; color: #c0392b; font-size: 12px; }
+  .err { padding: 6px 8px; color: var(--danger); font-size: 12px; }
 </style>

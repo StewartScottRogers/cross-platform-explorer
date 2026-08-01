@@ -202,7 +202,7 @@
   .cd-body :global(ul), .cd-body :global(ol) { padding-left: 20px; }
   .cd-body :global(a) { color: var(--accent); }
   .cd-msg { color: var(--text-dim); padding: 14px 0; font-size: 13px; }
-  .cd-msg.err { color: #d05656; }
+  .cd-msg.err { color: var(--danger); }
   .cd-msg.dim { color: var(--text-faint); }
   .cd-directive { flex: 0 0 auto; display: flex; gap: 6px; padding: 8px 0; border-top: 1px solid var(--border); }
   .cd-dir-text { flex: 1; min-width: 0; height: 30px; padding: 0 10px; border: 1px solid var(--border-strong); border-radius: 6px; background: var(--surface-alt); color: var(--text); font: inherit; font-size: 12.5px; }

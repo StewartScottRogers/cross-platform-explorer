@@ -403,11 +403,11 @@
   dd { flex: 1; overflow-wrap: anywhere; }
   dd.path { font-family: ui-monospace, monospace; font-size: 12px; }
   /* Content/extension mismatch warning — a disguised file (CPE-1009). */
-  dd.warn { color: var(--danger, #c9372c); font-weight: 600; }
+  dd.warn { color: var(--danger); font-weight: 600; }
   dd.dim { color: var(--text-faint); }
   dd.checksum { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
   .hash { font-family: ui-monospace, monospace; font-size: 11px; overflow-wrap: anywhere; }
-  .err-inline { color: #c42b1c; }
+  .err-inline { color: var(--danger); }
   .dim { color: var(--text-faint); }
   .mini {
     display: inline-flex; align-items: center; gap: 5px;
@@ -422,13 +422,13 @@
     background: var(--surface-alt); font-family: ui-monospace, monospace; font-size: 11px;
   }
   .match { color: #1a7f37; font-weight: 600; white-space: nowrap; }
-  .nomatch { color: #c42b1c; font-weight: 600; white-space: nowrap; }
+  .nomatch { color: var(--danger); font-weight: 600; white-space: nowrap; }
   .actions { display: flex; justify-content: flex-end; padding-top: 8px; }
   .btn { height: 32px; padding: 0 16px; border-radius: var(--radius);
          border: 1px solid var(--border-strong); background: var(--surface-alt); }
   .btn.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
   .btn.primary:hover { background: var(--accent-hover); }
-  .error { color: #c42b1c; padding: 12px 0; }
+  .error { color: var(--danger); padding: 12px 0; }
 
   /* Native metadata (CPE-1176) — a distinct, clearly-bordered read-only section
      ([[dialogs-need-visible-border]]) below the main property list. */

@@ -113,7 +113,7 @@
   .res-cmd { font-family: ui-monospace, monospace; font-size: 12px; font-weight: 600; margin-bottom: 3px; word-break: break-all; }
   .res-meta { font-size: 11px; color: var(--text-dim); margin-bottom: 4px; }
   .res-out { font-family: ui-monospace, monospace; font-size: 12px; white-space: pre-wrap; margin: 0; max-height: 160px; overflow: auto; }
-  .err-text { color: #d05656; }
+  .err-text { color: var(--danger); }
   .actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: auto; }
   .btn { height: 32px; padding: 0 16px; border: 1px solid var(--border-strong); border-radius: var(--radius); background: var(--surface-alt); }
   .btn:disabled { opacity: 0.5; }

@@ -99,7 +99,7 @@
     border: 1px solid var(--border); color: var(--text-dim); white-space: nowrap; flex: 0 0 auto; }
   .sc-status.ok { color: #3a9d4a; border-color: rgba(58,157,74,0.5); }
   .sc-status.warn { color: #c9862a; border-color: rgba(201,134,42,0.5); }
-  .sc-status.bad { color: #d05656; border-color: rgba(208,86,86,0.5); }
+  .sc-status.bad { color: var(--danger); border-color: color-mix(in srgb, var(--danger) 50%, transparent); }
 
   .links { margin-bottom: 18px; }
   .link {

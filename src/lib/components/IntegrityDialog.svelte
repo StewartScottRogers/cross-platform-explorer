@@ -139,19 +139,19 @@
   .note { color: var(--accent); }
   .report { height: 44vh; overflow: auto; border: 1px solid var(--border); border-radius: var(--radius); margin-top: 6px; }
   .counts { display: flex; flex-wrap: wrap; gap: 12px; padding: 8px 10px; font-size: 12px; border-bottom: 1px solid var(--border); position: sticky; top: 0; background: var(--surface); }
-  .counts.alarm { background: color-mix(in srgb, #c0392b 12%, var(--surface)); }
-  .c-corrupted { color: #c0392b; font-weight: 600; }
-  .c-missing { color: #c0392b; }
+  .counts.alarm { background: color-mix(in srgb, var(--danger) 12%, var(--surface)); }
+  .c-corrupted { color: var(--danger); font-weight: 600; }
+  .c-missing { color: var(--danger); }
   .c-edited { color: #b8860b; }
   .c-new { color: #2e9e4f; }
   .c-intact { color: var(--text-dim); }
   .group { padding: 4px 0; }
   .group-head { padding: 4px 10px; font-size: 11px; text-transform: uppercase; letter-spacing: 0.03em; color: var(--text-dim); }
-  .group-corrupted .group-head, .group-missing .group-head { color: #c0392b; }
+  .group-corrupted .group-head, .group-missing .group-head { color: var(--danger); }
   .item { padding: 2px 10px 2px 20px; font-size: 12.5px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   .all-ok { padding: 14px; color: #2e9e4f; font-size: 13px; }
   .empty, .err { padding: 12px; color: var(--text-dim); font-size: 12.5px; }
-  .err { color: #c0392b; }
+  .err { color: var(--danger); }
   .actions { display: flex; justify-content: space-between; align-items: center; margin-top: 14px; }
   .startup-opt { display: flex; align-items: center; gap: 8px; margin-top: 12px; font-size: 12.5px; color: var(--text-dim, #a0a0a0); cursor: pointer; }
   .btn { height: 30px; padding: 0 14px; border: 1px solid var(--border-strong); border-radius: var(--radius); background: var(--surface-alt); color: var(--text); }

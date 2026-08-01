@@ -183,5 +183,5 @@
   .name { font-size: 12px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 160px; }
   .loc { font-size: 11px; color: var(--text-faint); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 100px; }
   .dim { color: var(--text-faint); }
-  .err { color: #c42b1c; }
+  .err { color: var(--danger); }
 </style>

@@ -133,6 +133,6 @@
     margin-top: 2px;
   }
   .note.error {
-    color: var(--danger, #c0392b);
+    color: var(--danger);
   }
 </style>

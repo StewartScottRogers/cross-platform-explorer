@@ -166,7 +166,7 @@
   .rules { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 12px; }
   .rule { height: 28px; padding: 0 12px; border-radius: var(--radius); border: 1px solid var(--border-strong); background: var(--surface-alt); color: var(--text); font-size: 12px; white-space: nowrap; flex: 0 0 auto; }
   .rule.active { background: var(--accent); border-color: var(--accent); color: #fff; }
-  .err { color: #c0392b; font-size: 12.5px; margin-bottom: 8px; }
+  .err { color: var(--danger); font-size: 12.5px; margin-bottom: 8px; }
   .preview { border: 1px solid var(--border); border-radius: var(--radius); padding: 10px; min-height: 120px; max-height: 45vh; overflow: auto; margin-bottom: 12px; }
   .empty { color: var(--text-dim); font-size: 12.5px; padding: 8px 2px; }
   .summary { font-size: 12.5px; color: var(--text-dim); margin-bottom: 10px; }

@@ -164,7 +164,7 @@
   .path { flex: 1 1 auto; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   .count { padding: 6px 2px 0; font-size: 11.5px; color: var(--text-dim); }
   .empty, .err { padding: 10px; color: var(--text-dim); font-size: 12.5px; }
-  .err { color: var(--danger, #c0392b); }
+  .err { color: var(--danger); }
   .actions { display: flex; justify-content: space-between; align-items: center; margin-top: 14px; }
   .exports { display: flex; align-items: center; gap: 6px; }
   .lbl { font-size: 12px; color: var(--text-dim); }

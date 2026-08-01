@@ -212,5 +212,5 @@
   /* Highlighted match within a result line (CPE-557) — theme-driven, not the browser default yellow. */
   .hit code .hl { background: var(--accent); color: #fff; border-radius: 2px; padding: 0 1px; }
   .dim { color: var(--text-faint); }
-  .err { color: #c42b1c; }
+  .err { color: var(--danger); }
 </style>

@@ -239,7 +239,7 @@
   .preview-h { font-size: 12px; color: var(--text-dim); }
   .chip { flex: 0 0 auto; white-space: nowrap; padding: 1px 8px; border-radius: 999px; font-size: 11.5px; background: var(--surface-alt); border: 1px solid var(--border); color: var(--text); }
   .note, .err, .ok { font-size: 12.5px; margin-top: 10px; }
-  .err { color: #c0392b; }
+  .err { color: var(--danger); }
   .ok { color: #2e9e4f; }
   .actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 18px; }
   .btn { height: 32px; padding: 0 16px; border: 1px solid var(--border-strong); border-radius: var(--radius); background: var(--surface-alt); color: var(--text); }

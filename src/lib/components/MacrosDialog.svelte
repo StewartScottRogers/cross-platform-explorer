@@ -399,7 +399,7 @@
   .row-actions { display: flex; gap: 6px; flex: 0 0 auto; }
   .mini { height: 24px; padding: 0 8px; font-size: 11px; border: 1px solid var(--border); border-radius: var(--radius); background: var(--surface); color: var(--text); display: inline-flex; align-items: center; gap: 4px; }
   .mini:disabled { opacity: 0.4; }
-  .mini.danger:hover { border-color: #c0392b; color: #c0392b; }
+  .mini.danger:hover { border-color: var(--danger); color: var(--danger); }
   .empty { padding: 14px; color: var(--text-dim); font-size: 12.5px; }
   .empty.small { padding: 8px; }
   .editor { margin-top: 12px; padding-top: 12px; border-top: 1px solid var(--border); display: flex; flex-direction: column; gap: 10px; }
@@ -417,7 +417,7 @@
   .import { width: 100%; height: 96px; margin: 4px 0; padding: 8px; font: 12px/1.4 var(--mono, monospace); color: var(--text); background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); resize: vertical; box-sizing: border-box; }
   .status { min-height: 18px; margin: 6px 2px; font-size: 12px; }
   .note { color: var(--accent); }
-  .err { color: #c0392b; }
+  .err { color: var(--danger); }
   .dim { color: var(--text-dim); }
   .actions { display: flex; justify-content: space-between; align-items: center; margin-top: 12px; }
   .btn { height: 30px; padding: 0 14px; border: 1px solid var(--border-strong); border-radius: var(--radius); background: var(--surface-alt); color: var(--text); }

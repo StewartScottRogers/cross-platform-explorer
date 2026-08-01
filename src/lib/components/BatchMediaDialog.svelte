@@ -537,12 +537,12 @@
     margin-bottom: 10px;
     min-height: 16px;
   }
-  .status .warn { color: #c42b1c; }
+  .status .warn { color: var(--danger); }
 
   .progress { margin-bottom: 14px; }
   .bar { height: 6px; margin: 4px 0; background: var(--surface-alt); border-radius: 3px; overflow: hidden; }
   .fill { height: 100%; background: var(--accent); border-radius: 3px; transition: width 0.15s linear; }
-  .fill.err { background: #c42b1c; }
+  .fill.err { background: var(--danger); }
   .sub { font-size: 11px; color: var(--text-dim); font-variant-numeric: tabular-nums; }
 
   .actions { display: flex; justify-content: flex-end; gap: 8px; }
@@ -577,6 +577,6 @@
   }
   .skips-list li { padding: 2px 0; display: flex; flex-wrap: wrap; gap: 4px; }
   .skip-name { color: var(--text); font-weight: 500; }
-  .skip-reason { color: var(--warn, #c42b1c); }
+  .skip-reason { color: var(--danger); }
   .skips-note { margin-top: 6px; font-size: 11px; color: var(--text-dim); }
 </style>

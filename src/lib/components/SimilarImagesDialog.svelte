@@ -229,7 +229,7 @@
   .cleanup { margin-left: auto; display: flex; gap: 6px; flex: 0 0 auto; }
   .mini { height: 24px; padding: 0 10px; border-radius: var(--radius); border: 1px solid var(--border-strong); background: var(--surface-alt); font-size: 12px; }
   .mini:hover { background: var(--surface); }
-  .mini.danger:not(:disabled) { border-color: #c42b1c; color: #c42b1c; }
+  .mini.danger:not(:disabled) { border-color: var(--danger); color: var(--danger); }
   .mini:disabled { opacity: 0.5; }
   .results { overflow: auto; }
   .group { margin-bottom: 14px; }
@@ -247,5 +247,5 @@
   .name { font-size: 12px; max-width: 104px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .loc { font-size: 11px; color: var(--text-faint); max-width: 104px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .dim { color: var(--text-faint); }
-  .err { color: #c42b1c; }
+  .err { color: var(--danger); }
 </style>

@@ -247,8 +247,8 @@
   }
   .status.bad {
     color: #fff;
-    background: var(--danger, #c0392b);
-    border-color: var(--danger, #c0392b);
+    background: var(--danger);
+    border-color: var(--danger);
   }
   .logs-toggle.repair {
     color: var(--accent, #3a7d3a);
