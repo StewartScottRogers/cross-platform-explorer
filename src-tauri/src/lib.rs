@@ -10731,6 +10731,41 @@ mod tests {
         let _ = fs::remove_dir_all(&d);
     }
 
+    // CPE-1227: `moveEntries` (drag-and-drop / cut-paste) must migrate a scheduled folder's
+    // snapshot-schedule catalog entry too, not just its tags (CPE-1222 covered tags for this route;
+    // CPE-1225 wired `reschedule` into `do_move_into` but left this route's coverage gap).
+    #[test]
+    fn move_entries_impl_migrates_a_scheduled_folders_catalog_entry_to_the_moved_path() {
+        let d = scratch("move_schedule_migrate");
+        let ctx = HeadlessCtx::new(&d);
+        let from = d.join("from");
+        let to = d.join("to");
+        fs::create_dir_all(&from).unwrap();
+        fs::create_dir_all(&to).unwrap();
+        let watched = from.join("watched");
+        fs::create_dir_all(&watched).unwrap();
+
+        let old_path = watched.to_string_lossy().to_string();
+        cpe_server::snapshot_schedule::set_rule(&ctx, schedule_rule(&old_path)).unwrap();
+
+        let results = move_entries_impl(
+            &ctx,
+            vec![watched.to_string_lossy().to_string()],
+            to.to_string_lossy().to_string(),
+        );
+        assert!(results.iter().all(|r| r.ok), "{results:?}");
+
+        let new_path = to.join("watched").to_string_lossy().to_string();
+        assert!(
+            cpe_server::snapshot_schedule::get_rule(&ctx, &old_path).unwrap().is_none(),
+            "old root must not linger in the schedule catalog"
+        );
+        let migrated = cpe_server::snapshot_schedule::get_rule(&ctx, &new_path).unwrap();
+        assert_eq!(migrated.as_ref().map(|r| r.root.as_str()), Some(new_path.as_str()));
+        assert_eq!(migrated.unwrap().interval_s, 3600);
+        let _ = fs::remove_dir_all(&d);
+    }
+
     #[test]
     fn bulk_ops_report_per_item_instead_of_aborting_on_first_failure() {
         let d = scratch("bulk");
