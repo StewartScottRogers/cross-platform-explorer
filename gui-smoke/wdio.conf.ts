@@ -534,6 +534,30 @@ function seedArchiveBrowseFixture(tmpDir: string): void {
   fs.writeFileSync(path.join(tmpDir, ARCHIVE_TARGZ_NAME), targz);
 }
 
+// --- CPE-1208: link-badge fixture (epic CPE-715) ------------------------------------------------
+// An intact symlink + a broken symlink in the seeded tmpDir, so link-badge.smoke.ts can pin the
+// FileList link badge + broken state (CPE-1208) against the REAL built app's `is_symlink` field
+// (CPE-1206) and `link_status` command (CPE-804). Symlink creation is unprivileged on POSIX but needs
+// either Developer Mode or an elevated process on Windows (`fs.symlinkSync` throws `EPERM` otherwise)
+// — this is best-effort: on failure it leaves `linkBadgeFixture.supported: false` in STATE_FILE and
+// the spec skips its assertions rather than failing the whole suite over a sandbox permission gap.
+export const LINK_TARGET_NAME = "CPE-1208-target.txt";
+export const LINK_GOOD_NAME = "CPE-1208-good-link.txt";
+export const LINK_BROKEN_NAME = "CPE-1208-broken-link.txt";
+
+function seedLinkBadgeFixture(tmpDir: string): boolean {
+  const targetPath = path.join(tmpDir, LINK_TARGET_NAME);
+  fs.writeFileSync(targetPath, "CPE-1208 link target\n", "utf-8");
+  try {
+    fs.symlinkSync(targetPath, path.join(tmpDir, LINK_GOOD_NAME), "file");
+    // Points at a name that is never created — permanently broken, no race with the rest of onPrepare.
+    fs.symlinkSync(path.join(tmpDir, "CPE-1208-does-not-exist.txt"), path.join(tmpDir, LINK_BROKEN_NAME), "file");
+    return true;
+  } catch {
+    return false; // unprivileged symlink creation (e.g. Windows without Developer Mode/elevation)
+  }
+}
+
 let tauriDriver: ChildProcess | undefined;
 let shuttingDown = false;
 
@@ -648,10 +672,18 @@ export const config: WebdriverIO.Config = {
     // block above) — same tmpDir, same single app launch.
     seedArchiveBrowseFixture(tmpDir);
 
+    // CPE-1208: seed an intact + a broken symlink for the link-badge render pin (see block above) —
+    // same tmpDir, same single app launch. Best-effort; the spec checks `linkBadgeFixture.supported`.
+    const linkBadgeSupported = seedLinkBadgeFixture(tmpDir);
+
     const caps = capabilities as unknown as Array<{ "tauri:options": { args: string[] } }>;
     caps[0]["tauri:options"].args = ["--test-mode", "--x=-4000", `--open=${tmpDir}`];
 
-    fs.writeFileSync(STATE_FILE, JSON.stringify({ tmpDir }), "utf-8");
+    fs.writeFileSync(
+      STATE_FILE,
+      JSON.stringify({ tmpDir, linkBadgeFixture: { supported: linkBadgeSupported } }),
+      "utf-8",
+    );
   },
 
   // tauri-driver proxies WebDriver requests to the platform's native driver (msedgedriver on

@@ -6,16 +6,19 @@
  * tested; nothing actually rendered a component. A single test like the one
  * below would have caught it before release.
  */
-import { describe, it, expect, vi } from "vitest";
-import { render, screen, fireEvent } from "@testing-library/svelte";
+import { describe, it, expect, vi, beforeEach } from "vitest";
+import { render, screen, fireEvent, waitFor } from "@testing-library/svelte";
 import FileList from "./FileList.svelte";
 import { emptySelection, selectOnly } from "../selection";
 import type { DirEntry } from "../types";
 import type { AvailableColumn, MetadataCell } from "../bindings.gen";
 
 // The component tree imports Tauri APIs transitively; stub them so jsdom can
-// render without a Tauri runtime.
-vi.mock("@tauri-apps/api/core", () => ({ invoke: vi.fn() }));
+// render without a Tauri runtime. Routed by command name so the link-badge tests (CPE-1208) can control
+// `link_status` responses per-path while every other call site (which never fires in these tests) keeps
+// its old blanket-vi.fn() behaviour.
+const coreInvoke = vi.fn(async (_cmd: string, _args?: unknown): Promise<unknown> => undefined);
+vi.mock("@tauri-apps/api/core", () => ({ invoke: (...a: unknown[]) => coreInvoke(...(a as [string, unknown])) }));
 
 const entry = (over: Partial<DirEntry> = {}): DirEntry => ({
   name: "readme.md",
@@ -27,6 +30,11 @@ const entry = (over: Partial<DirEntry> = {}): DirEntry => ({
   hidden: false,
   is_symlink: false,
   ...over,
+});
+
+beforeEach(() => {
+  coreInvoke.mockClear();
+  coreInvoke.mockImplementation(async (): Promise<unknown> => undefined);
 });
 
 const base = {
@@ -417,5 +425,48 @@ describe("FileList dynamic metadata columns (CPE-1146)", () => {
   it("no active metadata columns renders exactly the pre-CPE-1146 4-column list (off means off)", () => {
     const { container } = render(FileList, { ...base, entries: [entry()] });
     expect(container.querySelectorAll(".cell.meta").length).toBe(0);
+  });
+});
+
+describe("FileList link badge (CPE-1208, epic CPE-715)", () => {
+  it("renders the link badge for a symlink entry", () => {
+    coreInvoke.mockImplementation(async (cmd: string) =>
+      cmd === "link_status" ? { is_symlink: true, target: "/x/real.txt", broken: false } : undefined,
+    );
+    const { container } = render(FileList, {
+      ...base,
+      entries: [entry({ name: "shortcut", path: "/x/shortcut", is_symlink: true })],
+    });
+    expect(container.querySelector('[data-testid="link-badge"]')).toBeTruthy();
+  });
+
+  it("shows the distinct broken state when link_status reports a missing target", async () => {
+    coreInvoke.mockImplementation(async (cmd: string) =>
+      cmd === "link_status" ? { is_symlink: true, target: "/x/gone.txt", broken: true } : undefined,
+    );
+    const { container } = render(FileList, {
+      ...base,
+      entries: [entry({ name: "dangling", path: "/x/dangling", is_symlink: true })],
+    });
+
+    await waitFor(() => {
+      const badge = container.querySelector('[data-testid="link-badge"]');
+      expect(badge?.classList.contains("broken")).toBe(true);
+    });
+    const badge = container.querySelector('[data-testid="link-badge"]') as HTMLElement;
+    expect(badge.title).toMatch(/broken/i);
+    expect(badge.title).toContain("/x/gone.txt");
+  });
+
+  it("a plain (non-symlink) entry has no link badge and never calls link_status", async () => {
+    const { container } = render(FileList, {
+      ...base,
+      entries: [entry({ name: "plain.txt", path: "/x/plain.txt" })],
+    });
+    expect(container.querySelector('[data-testid="link-badge"]')).toBeNull();
+    // Give any stray microtask a turn, then assert link_status was never dispatched — the zero-added-cost
+    // guarantee for the common case (a folder with no links).
+    await Promise.resolve();
+    expect(coreInvoke).not.toHaveBeenCalledWith("link_status", expect.anything());
   });
 });
