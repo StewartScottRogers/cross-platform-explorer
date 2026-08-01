@@ -2,7 +2,7 @@
 id: CPE-739
 title: "EPIC: Scriptable actions / user macros"
 type: Task
-status: Proposed
+status: In Progress
 priority: Medium
 component: Multiple
 tags: [epic]
