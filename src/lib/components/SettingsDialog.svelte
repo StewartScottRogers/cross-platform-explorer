@@ -9,6 +9,7 @@
   import SidecarManager from "./SidecarManager.svelte";
   import ShellIntegration from "./ShellIntegration.svelte";
   import ScheduledSnapshots from "./ScheduledSnapshots.svelte";
+  import SpotlightHotkeySettings from "./SpotlightHotkeySettings.svelte";
 
   export let showHidden = false;
   export let showDetails = true;
@@ -93,6 +94,8 @@
     <ScheduledSnapshots />
 
     <ShellIntegration />
+
+    <SpotlightHotkeySettings />
 
     {#if platformOn}
       <div class="section-title">Sidecar platform</div>

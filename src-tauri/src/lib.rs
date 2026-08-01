@@ -2470,6 +2470,51 @@ async fn shell_integration_installed() -> bool {
         .unwrap_or(false)
 }
 
+/// Claim an OS-wide global hotkey that summons Spotlight (CPE-1215, epic CPE-704): pressing `chord`
+/// (Tauri accelerator syntax, e.g. `"CommandOrControl+Shift+Space"`) fires the `spotlight:open` event,
+/// which the CPE-1216 overlay listens for — so Spotlight can be opened even while the main window is
+/// hidden/unfocused. Driven ONLY by the Settings toggle (never a launch-time permission prompt,
+/// [[avoid-modal-permission-popups]]); the plugin itself is always initialized but registers nothing
+/// until this is called. Idempotent: any stale registration under the same chord is cleared first, so
+/// re-registering (e.g. after an app restart with the setting already on) never errors as "already
+/// registered". Desktop-only — mobile has no global-shortcut surface.
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
+#[tauri::command]
+#[cfg_attr(feature = "specta-bindings", specta::specta)]
+async fn register_spotlight_hotkey(app: tauri::AppHandle, chord: String) -> Result<(), String> {
+    use tauri::Emitter;
+    use tauri_plugin_global_shortcut::GlobalShortcutExt;
+    tauri::async_runtime::spawn_blocking(move || {
+        let gs = app.global_shortcut();
+        let _ = gs.unregister(chord.as_str()); // idempotent: drop any stale registration first
+        gs.on_shortcut(chord.as_str(), |ah, _shortcut, event| {
+            if event.state == tauri_plugin_global_shortcut::ShortcutState::Pressed {
+                let _ = ah.emit("spotlight:open", ());
+            }
+        })
+        .map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+/// Release the Spotlight global hotkey registered by [`register_spotlight_hotkey`] (CPE-1215, epic
+/// CPE-704) — called when the Settings toggle goes off, so an unused hotkey costs the OS nothing.
+/// Idempotent: unregistering a chord that isn't currently claimed (already off, or a chord that failed
+/// to register) is treated as success rather than surfaced as an error, since the caller's goal —
+/// "this chord is not claimed by us" — is already true.
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
+#[tauri::command]
+#[cfg_attr(feature = "specta-bindings", specta::specta)]
+async fn unregister_spotlight_hotkey(app: tauri::AppHandle, chord: String) -> Result<(), String> {
+    use tauri_plugin_global_shortcut::GlobalShortcutExt;
+    tauri::async_runtime::spawn_blocking(move || {
+        let _ = app.global_shortcut().unregister(chord.as_str());
+    })
+    .await
+    .map_err(|e| e.to_string())
+}
+
 /// Classify the drive a path lives on (CPE-805, epic CPE-716) — fixed / removable / network / cdrom / ram
 /// / unknown — so the sidebar can badge removable & network drives. Windows uses `GetDriveTypeW`; unix
 /// returns a best-effort `fixed` for now (richer classification is a follow-up).
@@ -7854,7 +7899,14 @@ pub fn run() {
                 tauri_plugin_window_state::Builder::default()
                     .skip_initial_state("main")
                     .build(),
-            );
+            )
+            // Spotlight global hotkey (CPE-1215, epic CPE-704): the plugin itself is always
+            // initialized (cheap — no OS registration happens here), but NO chord is registered at
+            // init time. `register_spotlight_hotkey`/`unregister_spotlight_hotkey` (below) are the
+            // only things that actually claim/release an OS-wide hotkey, driven by the Settings
+            // toggle — off means no background cost, and there is never a launch-time permission
+            // prompt ([[avoid-modal-permission-popups]]).
+            .plugin(tauri_plugin_global_shortcut::Builder::new().build());
     }
 
     // Keep the screen awake for as long as the app is open (CPE-225). We hold a
@@ -8066,6 +8118,10 @@ pub fn run() {
             install_shell_integration,
             uninstall_shell_integration,
             shell_integration_installed,
+            #[cfg(not(any(target_os = "android", target_os = "ios")))]
+            register_spotlight_hotkey,
+            #[cfg(not(any(target_os = "android", target_os = "ios")))]
+            unregister_spotlight_hotkey,
             drive_type,
             audit_record,
             audit_sessions,
@@ -8810,6 +8866,8 @@ pub fn export_bindings(out: &std::path::Path) -> Result<(), String> {
         install_shell_integration,
         uninstall_shell_integration,
         shell_integration_installed,
+        register_spotlight_hotkey,
+        unregister_spotlight_hotkey,
         drive_type,
         audit_record,
         audit_sessions,

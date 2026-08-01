@@ -5,6 +5,9 @@ import {
   loadMetaColumnsForFolder, saveMetaColumnsForFolder,
   addNetworkLocation, removeNetworkLocation,
   loadNativeBridgeEnabled, saveNativeBridgeEnabled,
+  loadSpotlightHotkeyEnabled, saveSpotlightHotkeyEnabled,
+  loadSpotlightHotkeyChord, saveSpotlightHotkeyChord,
+  DEFAULT_SPOTLIGHT_HOTKEY_CHORD,
 } from "./settings";
 import type { RecentFile, Favorite } from "./types";
 import type { WorkspaceTab } from "./workspaces";
@@ -79,6 +82,30 @@ describe("nativeBridgeEnabled (CPE-1177)", () => {
     expect(loadNativeBridgeEnabled()).toBe(true);
     saveNativeBridgeEnabled(false);
     expect(loadNativeBridgeEnabled()).toBe(false);
+  });
+});
+
+// CPE-1215 (epic CPE-704): the global-hotkey opt-in that claims/releases an OS-wide chord (via
+// tauri-plugin-global-shortcut) which fires `spotlight:open`. OFF by default — no background OS
+// registration cost unless the user turns it on in Settings. The chord persists independently so a
+// custom shortcut survives toggling the feature off and back on.
+describe("spotlightHotkeyEnabled / spotlightHotkeyChord (CPE-1215)", () => {
+  it("defaults to off with the default chord", () => {
+    expect(loadSpotlightHotkeyEnabled()).toBe(false);
+    expect(loadSpotlightHotkeyChord()).toBe(DEFAULT_SPOTLIGHT_HOTKEY_CHORD);
+  });
+
+  it("round-trips the enabled flag", () => {
+    saveSpotlightHotkeyEnabled(true);
+    expect(loadSpotlightHotkeyEnabled()).toBe(true);
+    saveSpotlightHotkeyEnabled(false);
+    expect(loadSpotlightHotkeyEnabled()).toBe(false);
+  });
+
+  it("round-trips a custom chord independently of the enabled flag", () => {
+    saveSpotlightHotkeyChord("Alt+Space");
+    expect(loadSpotlightHotkeyChord()).toBe("Alt+Space");
+    saveSpotlightHotkeyChord(DEFAULT_SPOTLIGHT_HOTKEY_CHORD); // reset for other tests
   });
 });
 
