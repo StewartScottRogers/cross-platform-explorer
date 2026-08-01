@@ -467,3 +467,21 @@ describe("ContextMenu open/close-race hardening (CPE-1160)", () => {
     now.mockRestore();
   });
 });
+
+describe("ContextMenu Securely delete… (CPE-1240, epic CPE-738)", () => {
+  it("hides the row when not shreddable (default)", () => {
+    render(ContextMenu, { props: { ...base } });
+    expect(screen.queryByText("Securely delete…")).toBeNull();
+  });
+
+  it("shows the row and dispatches 'shred' when shreddable", async () => {
+    const { component } = render(ContextMenu, { props: { ...base, shreddable: true } });
+    const action = vi.fn();
+    component.$on("action", (e) => action(e.detail));
+
+    const row = screen.getByText("Securely delete…");
+    expect(row).toBeTruthy();
+    await fireEvent.click(row);
+    expect(action).toHaveBeenCalledWith("shred");
+  });
+});

@@ -384,6 +384,11 @@ fn workbench_diff_impl(root: String, path: Option<String>) -> Result<WorkbenchDi
 // `is_hidden` helpers now live in `cpe_server::model` (CPE-815); re-export them so the many
 // construction/usage sites resolve unchanged.
 use cpe_server::model::{extension_of, is_hidden, DirEntry, EntryInfo, OpResult, Place};
+// Secure-delete shred (CPE-1240, epic CPE-738): `ShredScheme` picks the overwrite pattern
+// (`secure_delete`, pure planning), `ShredResult` is the per-path OpResult-shaped outcome the
+// `shred_paths` command returns (`secure_shred`, the disk-backed engine).
+use cpe_server::secure_delete::ShredScheme;
+use cpe_server::secure_shred::ShredResult;
 
 /// Would moving/copying `src` into `dest` put a directory inside itself?
 /// Copying a folder into its own descendant recurses forever and shreds data —
@@ -1494,6 +1499,29 @@ fn delete_permanent_impl(paths: Vec<String>) -> Vec<OpResult> {
             }
         })
         .collect()
+}
+
+/// Securely delete (shred) entries: overwrite each file's bytes pass-by-pass per `scheme`, then remove
+/// it. **Never** routed through the Recycle Bin / Trash — that would defeat the point, since the whole
+/// reason to shred instead of `delete_permanent` is that ordinary deletion (trashed OR permanent) still
+/// leaves the bytes recoverable on disk until overwritten. The UI must show an honest confirm — this is
+/// PERMANENT/NON-RECOVERABLE and, per `secure_delete::plan_shred`'s caveats, overwriting is best-effort
+/// (SSD wear-levelling / copy-on-write / journaling filesystems can leave remnants) — before ever
+/// calling this.
+///
+/// Thin dispatcher into `cpe_server::secure_shred::shred_paths` (CPE-1240, epic CPE-738); skip-and-
+/// report, so one path's failure doesn't lose the others' results. Async + `spawn_blocking` per
+/// CPE-760/761 — a multi-pass overwrite is heavy, potentially slow disk I/O and must not freeze the
+/// main thread.
+#[tauri::command]
+#[cfg_attr(feature = "specta-bindings", specta::specta)]
+async fn shred_paths(app: tauri::AppHandle, paths: Vec<String>, scheme: ShredScheme) -> Vec<ShredResult> {
+    // Same as its siblings `delete_to_trash`/`delete_permanent` — a shred is the user's doing too, not
+    // the owning agent session (CPE-1102 pattern).
+    note_app_op(&app, || paths.clone());
+    tauri::async_runtime::spawn_blocking(move || cpe_server::secure_shred::shred_paths(&paths, scheme))
+        .await
+        .unwrap()
 }
 
 /// Copy entries into `dest`, auto-renaming on collision.
@@ -8457,6 +8485,7 @@ pub fn run() {
             delete_permanent,
             can_restore_from_trash,
             restore_from_trash,
+            shred_paths,
             copy_entries,
             move_entries,
             run_watch_actions,
@@ -9211,6 +9240,7 @@ pub fn export_bindings(out: &std::path::Path) -> Result<(), String> {
         delete_permanent,
         can_restore_from_trash,
         restore_from_trash,
+        shred_paths,
         copy_entries,
         move_entries,
         run_watch_actions,

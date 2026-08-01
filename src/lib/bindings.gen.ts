@@ -772,6 +772,23 @@ async restoreFromTrash(paths: string[]) : Promise<OpResult[]> {
     return await TAURI_INVOKE("restore_from_trash", { paths });
 },
 /**
+ * Securely delete (shred) entries: overwrite each file's bytes pass-by-pass per `scheme`, then remove
+ * it. **Never** routed through the Recycle Bin / Trash — that would defeat the point, since the whole
+ * reason to shred instead of `delete_permanent` is that ordinary deletion (trashed OR permanent) still
+ * leaves the bytes recoverable on disk until overwritten. The UI must show an honest confirm — this is
+ * PERMANENT/NON-RECOVERABLE and, per `secure_delete::plan_shred`'s caveats, overwriting is best-effort
+ * (SSD wear-levelling / copy-on-write / journaling filesystems can leave remnants) — before ever
+ * calling this.
+ * 
+ * Thin dispatcher into `cpe_server::secure_shred::shred_paths` (CPE-1240, epic CPE-738); skip-and-
+ * report, so one path's failure doesn't lose the others' results. Async + `spawn_blocking` per
+ * CPE-760/761 — a multi-pass overwrite is heavy, potentially slow disk I/O and must not freeze the
+ * main thread.
+ */
+async shredPaths(paths: string[], scheme: ShredScheme) : Promise<ShredResult[]> {
+    return await TAURI_INVOKE("shred_paths", { paths, scheme });
+},
+/**
  * Copy entries into `dest`, auto-renaming on collision.
  */
 async copyEntries(paths: string[], dest: string) : Promise<OpResult[]> {
@@ -3495,6 +3512,37 @@ churnBytes: number;
  * Total fs-diff writes attributed to the session (not deduped by path).
  */
 editCount: number }
+/**
+ * Per-path outcome of a [`shred_paths`] batch run — `OpResult`-shaped (`path`/`ok`/`error`) so the
+ * frontend can feed it straight into the generic per-path result summary used by every other
+ * destructive op, plus the report fields a *successful* shred produced (zeroed on failure) so the UI
+ * can also show pass/byte detail (CPE-1240, epic CPE-738).
+ */
+export type ShredResult = { path: string; ok: boolean; error: string; passes_run: number; bytes_written: number; removed: boolean }
+/**
+ * An overwrite scheme — how many passes and with what patterns.
+ * 
+ * `Deserialize` (unlike its sibling planning types, output-only) because this one also crosses the
+ * IPC boundary as a `shred_paths` command **argument** (CPE-1240) — the frontend picks a scheme and
+ * sends it in.
+ */
+export type ShredScheme = 
+/**
+ * One zero pass — fast; fine for most needs on spinning disks.
+ */
+"zero" | 
+/**
+ * One random pass.
+ */
+"random" | 
+/**
+ * DoD 5220.22-M style: zeros, ones, then random (3 passes).
+ */
+"dod_3" | 
+/**
+ * A Gutmann-lite spread (7 passes): random bookends around fixed byte patterns.
+ */
+"gutmann"
 /**
  * A sidecar's health for the management panel (CPE-323): running state, the last error
  * that stopped it (if any), and recent log lines. Every string here is redacted.

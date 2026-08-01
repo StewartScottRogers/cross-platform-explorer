@@ -77,6 +77,65 @@ pub fn shred_file(path: &str, scheme: ShredScheme) -> Result<ShredReport, String
     Ok(ShredReport { path: path.to_string(), passes_run, bytes_written, removed: true })
 }
 
+/// Per-path outcome of a [`shred_paths`] batch run — `OpResult`-shaped (`path`/`ok`/`error`) so the
+/// frontend can feed it straight into the generic per-path result summary used by every other
+/// destructive op, plus the report fields a *successful* shred produced (zeroed on failure) so the UI
+/// can also show pass/byte detail (CPE-1240, epic CPE-738).
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[cfg_attr(feature = "specta", derive(specta::Type))]
+pub struct ShredResult {
+    pub path: String,
+    pub ok: bool,
+    pub error: String,
+    pub passes_run: u32,
+    pub bytes_written: u64,
+    pub removed: bool,
+}
+
+impl ShredResult {
+    fn from_report(r: ShredReport) -> Self {
+        Self {
+            path: r.path,
+            ok: true,
+            error: String::new(),
+            passes_run: r.passes_run,
+            bytes_written: r.bytes_written,
+            removed: r.removed,
+        }
+    }
+
+    fn from_err(path: &str, e: impl std::fmt::Display) -> Self {
+        Self {
+            path: path.to_string(),
+            ok: false,
+            error: e.to_string(),
+            passes_run: 0,
+            bytes_written: 0,
+            removed: false,
+        }
+    }
+}
+
+/// Shred every path in `paths` with `scheme`: skip-and-report — one path's failure (unreadable,
+/// remote, permission denied, ...) doesn't abort the batch or lose the others' results. Thin batch
+/// wrapper the `shred_paths` Tauri command dispatches straight into (CPE-1240); rejects remote paths
+/// via [`crate::fs_route::require_local`] up front, same guard `delete_permanent` uses, since shredding
+/// a remote file makes no sense (there's nothing local to overwrite).
+pub fn shred_paths(paths: &[String], scheme: ShredScheme) -> Vec<ShredResult> {
+    paths
+        .iter()
+        .map(|p| {
+            if let Err(e) = crate::fs_route::require_local(p) {
+                return ShredResult::from_err(p, e);
+            }
+            match shred_file(p, scheme) {
+                Ok(report) => ShredResult::from_report(report),
+                Err(e) => ShredResult::from_err(p, e),
+            }
+        })
+        .collect()
+}
+
 /// Run a single overwrite pass: open `path` for writing, seek to 0, overwrite exactly `size` bytes
 /// with `pattern`, then flush + `sync_all` so the pass is durable before the next one starts.
 fn run_pass(path: &str, pattern: PassPattern, size: u64, rng: &mut SplitMix64) -> Result<(), String> {
@@ -268,5 +327,50 @@ mod tests {
 
         assert_eq!(report.bytes_written, big_size as u64);
         assert!(!std::path::Path::new(&path).exists());
+    }
+
+    // --- shred_paths (CPE-1240: the batch wrapper the `shred_paths` command dispatches into) -----
+
+    #[test]
+    fn shred_paths_shreds_a_temp_file_and_reports_success() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = write_temp(&dir, "one.txt", &[0x42; 256]);
+
+        let results = shred_paths(std::slice::from_ref(&path), ShredScheme::Zero);
+
+        assert_eq!(results.len(), 1);
+        assert!(results[0].ok, "expected ok, got error: {}", results[0].error);
+        assert_eq!(results[0].path, path);
+        assert_eq!(results[0].passes_run, 1);
+        assert_eq!(results[0].bytes_written, 256);
+        assert!(results[0].removed);
+        assert!(!std::path::Path::new(&path).exists());
+    }
+
+    #[test]
+    fn shred_paths_is_skip_and_report_one_missing_path_does_not_abort_the_batch() {
+        let dir = tempfile::tempdir().unwrap();
+        let good = write_temp(&dir, "good.txt", &[0x01; 64]);
+        let missing = dir.path().join("nope.txt").to_string_lossy().to_string();
+
+        let results = shred_paths(&[missing.clone(), good.clone()], ShredScheme::Zero);
+
+        assert_eq!(results.len(), 2);
+        assert!(!results[0].ok);
+        assert!(!results[0].error.is_empty());
+        assert_eq!(results[0].path, missing);
+        assert!(results[1].ok, "the second (valid) path should still succeed: {}", results[1].error);
+        assert!(!std::path::Path::new(&good).exists());
+    }
+
+    #[test]
+    fn shred_paths_dod3_runs_three_passes_per_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = write_temp(&dir, "d.bin", &[0x77; 100]);
+
+        let results = shred_paths(&[path], ShredScheme::Dod3);
+
+        assert_eq!(results[0].passes_run, 3);
+        assert_eq!(results[0].bytes_written, 300);
     }
 }

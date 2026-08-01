@@ -19,7 +19,11 @@ pub enum PassPattern {
 }
 
 /// An overwrite scheme — how many passes and with what patterns.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+///
+/// `Deserialize` (unlike its sibling planning types, output-only) because this one also crosses the
+/// IPC boundary as a `shred_paths` command **argument** (CPE-1240) — the frontend picks a scheme and
+/// sends it in.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[cfg_attr(feature = "specta", derive(specta::Type))]
 #[serde(rename_all = "snake_case")]
 pub enum ShredScheme {
