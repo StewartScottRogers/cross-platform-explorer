@@ -948,6 +948,18 @@ fn thumb_stream_cancels(
     CANCELS.get_or_init(Default::default)
 }
 
+/// RAII guard that removes a `thumb_stream_cancels()` entry when dropped (CPE-1239). Panic-safe: if the
+/// `spawn_blocking` batch in `thumbnails_stream` panics, `.await` returns a `JoinError` and the `?` below
+/// returns early *before* a plain "remove at the end" line would run — but `Drop` still fires during that
+/// unwind, so the entry is always removed instead of leaking one `HashMap` slot per panicking batch.
+struct ThumbStreamCancelGuard(u64);
+
+impl Drop for ThumbStreamCancelGuard {
+    fn drop(&mut self) {
+        thumb_stream_cancels().lock().unwrap().remove(&self.0);
+    }
+}
+
 /// Stream thumbnails for a batch of visible/prefetch-margin tiles through the priority queue + shared
 /// in-memory cache (CPE-1237, epic CPE-718): wires the previously-orphaned `thumb_queue` (CPE-950,
 /// Visible > Prefetch > Background scheduling) and `thumb_cache` (CPE-939, dual-budget LRU) into a real
@@ -972,6 +984,8 @@ async fn thumbnails_stream(
     let service = state.inner().clone();
     let cancel = Arc::new(AtomicBool::new(false));
     thumb_stream_cancels().lock().unwrap().insert(stream_id, cancel.clone());
+    // Guarantees removal below even if the `spawn_blocking` batch panics (CPE-1239) — see the guard's docs.
+    let _cancel_guard = ThumbStreamCancelGuard(stream_id);
     let cache_dir = server_ctx::TauriCtx::new(&app).app_cache_dir().ok().map(|d| d.join("thumbnails"));
 
     let emitted = tauri::async_runtime::spawn_blocking(move || {
@@ -992,7 +1006,6 @@ async fn thumbnails_stream(
     .await
     .map_err(|e| e.to_string())?;
 
-    thumb_stream_cancels().lock().unwrap().remove(&stream_id);
     Ok(emitted)
 }
 

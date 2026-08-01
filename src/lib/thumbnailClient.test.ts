@@ -141,6 +141,40 @@ describe("thumbnailClient cancellation of superseded batches (CPE-1237)", () => 
   });
 });
 
+describe("thumbnailClient retry-cap exhaustion (CPE-1239 regression pin for CPE-1237's OOM fix)", () => {
+  it("resolves null after exactly MAX_REQUEUE_ATTEMPTS requeues when a batch keeps 'completing' without " +
+    "ever yielding that key, without spinning, and issues no thumbnails_stream calls past the cap", async () => {
+    // Simulates the exact bug CPE-1237 fixed: a `thumbnails_stream` call that settles ("completes")
+    // normally but never emits an `onThumb` message for this key — e.g. a backend that reports the batch
+    // done without ever actually resolving this particular tile. Without the requeue cap, the client would
+    // fold the still-unresolved request into the next flush forever (unbounded microtask spin -> OOM).
+    const p1 = requestThumbnail("/never-yields.png", 64, "visible");
+    await flushMicrotasks();
+    expect(streamCalls).toHaveLength(1);
+
+    // Drive it through every requeue: each call "completes" with zero results (no onThumb message at all)
+    // for "/never-yields.png". 1 initial attempt + MAX_REQUEUE_ATTEMPTS (4) requeues = 5 total calls before
+    // the client gives up.
+    for (let i = 0; i < 5; i++) {
+      expect(streamCalls).toHaveLength(i + 1); // exactly one new call appeared per requeue, no extra spin
+      streamCalls[i].resolve(0); // "completed" -- settled normally, but nothing was ever yielded for the key
+      await flushMicrotasks();
+    }
+
+    expect(streamCalls).toHaveLength(5);
+    expect(await p1).toBeNull(); // icon fallback, not a hang
+
+    // Cap reached: further microtask turns issue no additional thumbnails_stream calls.
+    await flushMicrotasks();
+    await flushMicrotasks();
+    expect(streamCalls).toHaveLength(5);
+
+    // A gave-up request was never cached (unlike a genuine null decode result) -- a fresh future request
+    // for the same tile tries again from scratch rather than being permanently stuck at null.
+    expect(cachedThumbnail("/never-yields.png", 64)).toBeUndefined();
+  });
+});
+
 describe("thumbnailClient cache (CPE-1237)", () => {
   it("resolves a cache hit synchronously, without a new backend call", async () => {
     const p1 = requestThumbnail("/x.png", 96, "visible");
