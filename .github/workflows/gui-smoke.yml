@@ -5,9 +5,13 @@ name: GUI smoke
 # pins the exact manual "launch the build and eyeball a screenshot" check that used to be the
 # only guard on that flow, so a regression reds this job instead of needing a human to notice.
 #
-# Windows only for this first slice — see gui-smoke/README.md "Follow-ups" for the planned Linux
-# (xvfb-run + webkit2gtk-driver) leg. macOS is unsupported by tauri-driver (no WKWebView
-# WebDriver) and stays attended.
+# Two legs today: `gui-smoke` (windows-latest, Edge/msedgedriver) below, and `gui-smoke-linux`
+# (CPE-1171 — ubuntu-latest, WebKitWebDriver under xvfb) further down, burning down
+# Manual-Test-Burndown row #4 (cross-OS GUI). Both run the IDENTICAL WebdriverIO suite in
+# `gui-smoke/` — `wdio.conf.ts` already resolves the app binary + native driver per-OS (see its
+# `APP_BINARY`/`TAURI_DRIVER_BIN` `process.platform` branches and `tauri-driver`'s own
+# `webkitgtk:browserOptions` vs `ms:edgeOptions` split), so no per-OS spec forking was needed.
+# macOS is unsupported by tauri-driver (no WKWebView WebDriver) and stays attended.
 on:
   push:
     branches: [main]
@@ -93,3 +97,92 @@ jobs:
       - name: Run GUI smoke suite
         working-directory: gui-smoke
         run: npm test
+
+  gui-smoke-linux:
+    name: GUI smoke (ubuntu-latest) — tauri-driver + WebdriverIO (CPE-1171)
+    runs-on: ubuntu-latest
+    # Non-blocking, same posture as the Windows leg above (CPE-1048): this is a NEW CI leg with no
+    # track record yet, and WebKitGTK-under-Xvfb has its own class of headless-CI flakiness (GPU-less
+    # compositing crashes, first-run cold-start jitter) distinct from — but analogous to — the
+    # WebView2 DevToolsActivePort issue that keeps the Windows leg non-blocking. Keep this
+    # `continue-on-error: true` until it has run green on `main` for a while; it is still a REAL
+    # diagnostic every push/PR (a human — or the next ticket — can read the log), it just doesn't red
+    # `main` on a flake. Burns down Manual-Test-Burndown row #4 (cross-OS GUI) as 🔧 in progress, not
+    # ✅, until it's proven stable.
+    continue-on-error: true
+    env:
+      # Analogous to the Windows leg's WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS: a defensive,
+      # commonly-recommended mitigation for WebKitGTK compositor crashes on GPU-less/restricted CI
+      # sessions (the Tauri docs' "Linux Graphics Issues" page lists this as the last-resort fix for
+      # silent crashes under Xvfb). Best-effort — not verified live yet (see PR description).
+      WEBKIT_DISABLE_COMPOSITING_MODE: "1"
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Rust cache
+        uses: swatinem/rust-cache@v2
+        with:
+          workspaces: "./src-tauri -> target"
+
+      # Same package set the ubuntu-latest leg of the 3-OS `Backend` job (.github/workflows/ci.yml)
+      # already builds `cargo tauri build` with, plus the two packages unique to WebDriver-under-CI:
+      # `webkit2gtk-driver` (installs `/usr/bin/WebKitWebDriver`, already on PATH — tauri-driver's own
+      # `which::which("WebKitWebDriver")` PATH lookup needs no extra step) and `xvfb` (the virtual
+      # display GTK needs to initialize at all in a headless session; tauri-driver must be started
+      # AFTER a display exists — wrapping the whole `npm test` invocation in `xvfb-run` below, rather
+      # than just the app, sets `DISPLAY` before tauri-driver's own child process ever spawns, which
+      # sidesteps the known "Failed to initialize gtk backend" ordering trap).
+      - name: Install Linux system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev \
+            libappindicator3-dev \
+            librsvg2-dev \
+            patchelf \
+            webkit2gtk-driver \
+            xvfb
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: "npm"
+
+      - name: Install frontend dependencies
+        run: npm ci
+
+      - name: Build frontend
+        run: npm run build
+
+      # Same rationale as the Windows leg's identically-named step above: `--no-bundle` skips
+      # installer packaging + signing, not the CLI `build` subcommand that embeds `frontendDist`
+      # (see the CPE-1044 comment on the Windows step and in wdio.conf.ts). No display needed for a
+      # build, so this step does not need `xvfb-run`.
+      - name: Build release binary (tauri build --no-bundle)
+        run: npm run tauri build -- --no-bundle
+
+      # The official WebDriver proxy — version is independent of the Tauri crate version. Locates
+      # `WebKitWebDriver` via PATH on Linux automatically (tauri-driver's own per-OS default —
+      # `msedgedriver.exe` on Windows, `WebKitWebDriver` on Linux); no `--native-driver` flag needed
+      # since `webkit2gtk-driver` above already put it at `/usr/bin/WebKitWebDriver`.
+      - name: Install tauri-driver
+        run: cargo install tauri-driver --locked
+
+      - name: Install gui-smoke dependencies
+        working-directory: gui-smoke
+        run: npm ci
+
+      - name: Type-check gui-smoke
+        working-directory: gui-smoke
+        run: npm run typecheck
+
+      # `xvfb-run` wraps the whole test command in a fake X display so tauri-driver -> WebKitWebDriver
+      # -> the app's GTK/WebKitGTK webview can all initialize headlessly (see the system-deps comment
+      # above for why the WHOLE command, not just the app, needs to run under it).
+      - name: Run GUI smoke suite (xvfb-run)
+        working-directory: gui-smoke
+        run: xvfb-run --auto-servernum npm test
