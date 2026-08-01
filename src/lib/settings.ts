@@ -13,7 +13,7 @@
  * crashing the app on launch.
  */
 import { commands } from "./bindings.gen"; // typed client (CPE-964)
-import { unwrap } from "./invoke";
+import { invoke, unwrap } from "./invoke";
 import type { ViewMode, SortKey, SortDir, RecentFile, Favorite } from "./types";
 import { COLUMN_DEFAULTS, META_COL_MIN, COLUMN_MAX, type ActiveMetaColumn } from "./columns";
 import { parseRules, serializeRules } from "./colorRulesStore";
@@ -65,6 +65,8 @@ export const KEYS = {
   paneBPath: "cpe.paneBPath",
   networkLocations: "cpe.networkLocations",
   nativeBridgeEnabled: "cpe.nativeBridgeEnabled",
+  spotlightHotkeyEnabled: "cpe.spotlightHotkeyEnabled",
+  spotlightHotkeyChord: "cpe.spotlightHotkeyChord",
 } as const;
 
 const MAX_RECENTS = 20;
@@ -135,6 +137,19 @@ export async function initSettings(): Promise<void> {
 
   // Persist the merged document so the migration is captured on disk.
   schedulePersist();
+
+  // Spotlight global hotkey (CPE-1215, epic CPE-704): a fresh process starts with NO OS-level
+  // registration (the plugin is initialized but claims nothing at Rust startup), so re-claim it here
+  // when the user left it enabled in a prior session. Off means off — this only runs when the persisted
+  // flag is true, and a failure (chord taken by another app, mobile target, plugin unavailable) is
+  // swallowed: it must never block startup, and the Settings toggle can always retry.
+  if (loadSpotlightHotkeyEnabled()) {
+    try {
+      await invoke("register_spotlight_hotkey", { chord: loadSpotlightHotkeyChord() });
+    } catch {
+      // best-effort — see comment above
+    }
+  }
 }
 
 // ---- typed accessors -------------------------------------------------------
@@ -248,6 +263,19 @@ export const saveNetworkLocations = (v: string[]) => write(KEYS.networkLocations
 // the plain explorer never touches native file metadata unless the user opts in here.
 export const loadNativeBridgeEnabled = (): boolean => read(KEYS.nativeBridgeEnabled, false, isBool);
 export const saveNativeBridgeEnabled = (v: boolean) => write(KEYS.nativeBridgeEnabled, v);
+
+// Spotlight global hotkey (CPE-1215, epic CPE-704): an OS-wide chord (via tauri-plugin-global-shortcut)
+// that fires `spotlight:open` even while the main window is hidden/unfocused — the CPE-1216 overlay
+// listens for it. Off by default: registering an OS-wide hotkey is exactly the kind of background cost
+// that must stay opt-in ([[avoid-modal-permission-popups]] — this control lives only in Settings, never
+// a launch-time prompt). `initSettings()` re-registers on startup when the flag was left on from a prior
+// session; the SpotlightHotkeySettings component registers/unregisters live as the toggle/chord change.
+export const DEFAULT_SPOTLIGHT_HOTKEY_CHORD = "CommandOrControl+Shift+Space";
+export const loadSpotlightHotkeyEnabled = (): boolean => read(KEYS.spotlightHotkeyEnabled, false, isBool);
+export const saveSpotlightHotkeyEnabled = (v: boolean) => write(KEYS.spotlightHotkeyEnabled, v);
+export const loadSpotlightHotkeyChord = (): string =>
+  read(KEYS.spotlightHotkeyChord, DEFAULT_SPOTLIGHT_HOTKEY_CHORD, isString);
+export const saveSpotlightHotkeyChord = (v: string) => write(KEYS.spotlightHotkeyChord, v);
 
 /** Append a network location, trimmed + de-duplicated (case/trailing-slash-insensitive). */
 export function addNetworkLocation(list: string[], path: string): string[] {

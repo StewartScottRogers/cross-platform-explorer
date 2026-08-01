@@ -94,6 +94,10 @@ fs4 = { version = "1", features = ["sync"] }
 [target.'cfg(not(any(target_os = "android", target_os = "ios")))'.dependencies]
 tauri-plugin-updater = "2"
 tauri-plugin-window-state = "2"
+# Spotlight global hotkey (CPE-1215, epic CPE-704): summons Spotlight (CPE-1216) with an OS-wide chord
+# even while the main window is hidden/unfocused. Desktop-only — mobile has no global-shortcut surface.
+# Registered with zero shortcuts at startup; Settings opts in (off means no background cost).
+tauri-plugin-global-shortcut = "2"
 
 # Keep the display awake while the app is open (CPE-225). Cross-platform screen-
 # lock / screensaver / display-sleep inhibition: Windows SetThreadExecutionState,

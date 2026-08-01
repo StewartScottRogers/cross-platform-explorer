@@ -1203,6 +1203,39 @@ async shellIntegrationInstalled() : Promise<boolean> {
     return await TAURI_INVOKE("shell_integration_installed");
 },
 /**
+ * Claim an OS-wide global hotkey that summons Spotlight (CPE-1215, epic CPE-704): pressing `chord`
+ * (Tauri accelerator syntax, e.g. `"CommandOrControl+Shift+Space"`) fires the `spotlight:open` event,
+ * which the CPE-1216 overlay listens for — so Spotlight can be opened even while the main window is
+ * hidden/unfocused. Driven ONLY by the Settings toggle (never a launch-time permission prompt,
+ * [[avoid-modal-permission-popups]]); the plugin itself is always initialized but registers nothing
+ * until this is called. Idempotent: any stale registration under the same chord is cleared first, so
+ * re-registering (e.g. after an app restart with the setting already on) never errors as "already
+ * registered". Desktop-only — mobile has no global-shortcut surface.
+ */
+async registerSpotlightHotkey(chord: string) : Promise<Result<null, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("register_spotlight_hotkey", { chord }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * Release the Spotlight global hotkey registered by [`register_spotlight_hotkey`] (CPE-1215, epic
+ * CPE-704) — called when the Settings toggle goes off, so an unused hotkey costs the OS nothing.
+ * Idempotent: unregistering a chord that isn't currently claimed (already off, or a chord that failed
+ * to register) is treated as success rather than surfaced as an error, since the caller's goal —
+ * "this chord is not claimed by us" — is already true.
+ */
+async unregisterSpotlightHotkey(chord: string) : Promise<Result<null, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("unregister_spotlight_hotkey", { chord }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
  * Classify the drive a path lives on (CPE-805, epic CPE-716) — fixed / removable / network / cdrom / ram
  * / unknown — so the sidebar can badge removable & network drives. Windows uses `GetDriveTypeW`; unix
  * returns a best-effort `fixed` for now (richer classification is a follow-up).
