@@ -2,7 +2,7 @@
 id: CPE-717
 title: "EPIC: Native metadata bridge — Finder tags, NTFS streams, xattrs"
 type: Task
-status: Proposed
+status: In Progress
 priority: Low
 component: Multiple
 tags: [epic]
@@ -11,6 +11,12 @@ created: 2026-07-18
 closed:
 ---
 
+> **GUI remainder activated 2026-07-31** (workshift, user directed "build all user-gated epics"). Backend +
+> Tauri commands + specta bindings all landed already; remaining DoD is the attended GUI: Properties surfacing,
+> a native-tags column, and an opt-in toggle. Decomposed into CPE-1175 (native-tags column), CPE-1176
+> (Properties native section), CPE-1177 (opt-in toggle + gate TagEditor controls), CPE-1178 (gui-smoke pin +
+> docs). Shared setting key `nativeBridgeEnabled` (default off), owned by CPE-1177.
+>
 > **Activated 2026-07-21** (dayshift, autonomous — best-guess decisions logged, user delegated PM).
 > Chosen for the dayshift because it is backend-first and **fully headless-verifiable**: NTFS ADS on the
 > local Windows machine + POSIX xattr, and a pure reconciliation layer, all exercised by CI's 3-OS
