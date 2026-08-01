@@ -1149,7 +1149,13 @@
 
   // ---- Archive browsing (CPE-242): read-only virtual view inside a .zip ----
   const ARCH = "\u0000arch:"; // sentinel prefix for in-archive breadcrumb paths
-  const ARCHIVE_EXTS = new Set(["zip", "jar", "apk", "war", "ear", "ipa", "xpi", "whl", "nupkg", "vsix"]);
+  // The original zip-family extensions: leaf-open for these goes through `extractArchiveEntry`
+  // (CPE-242). Kept as its own set so CPE-1181's new non-zip formats below can be routed through
+  // the format-agnostic `extractArchiveEntryAny` (CPE-1180) instead, once that command exists.
+  const ZIP_FAMILY_EXTS = new Set(["zip", "jar", "apk", "war", "ear", "ipa", "xpi", "whl", "nupkg", "vsix"]);
+  // CPE-1181: tar/tar.gz/tgz/7z/iso can also be entered and browsed — `readArchiveEntries` is
+  // already format-agnostic on the backend, so `archiveChildren` needs no changes.
+  const ARCHIVE_EXTS = new Set([...ZIP_FAMILY_EXTS, "tar", "gz", "tgz", "7z", "iso"]);
   interface ArchiveView { zipPath: string; zipName: string; entries: ArchiveEntry[]; inner: string }
   let archive: ArchiveView | null = null;
 
@@ -1267,7 +1273,24 @@
     }
     try {
       const zipPath = archive.zipPath;
-      const temp = unwrap(await commands.extractArchiveEntry(zipPath, entry.path));
+      const zipExt = zipPath.includes(".") ? zipPath.split(".").pop()!.toLowerCase() : "";
+      let temp: string;
+      if (ZIP_FAMILY_EXTS.has(zipExt)) {
+        temp = unwrap(await commands.extractArchiveEntry(zipPath, entry.path));
+      } else {
+        // CPE-1181/CPE-1180: non-zip formats (tar/tar.gz/tgz/7z/iso) route through the
+        // format-agnostic `extractArchiveEntryAny`. Feature-detect at runtime since that
+        // command may not exist yet in `bindings.gen.ts` on this branch (CPE-1180 lands
+        // separately) — fall back to a clear notice instead of a broken/typed call.
+        const anyCmds = commands as unknown as {
+          extractArchiveEntryAny?: (zip: string, inner: string) => Promise<{ status: "ok"; data: string } | { status: "error"; error: unknown }>;
+        };
+        if (typeof anyCmds.extractArchiveEntryAny !== "function") {
+          showNotice(`Can't open "${entry.name}" from this archive type yet.`, true);
+          return;
+        }
+        temp = unwrap(await anyCmds.extractArchiveEntryAny(zipPath, entry.path));
+      }
       unwrap(await commands.openExternal(temp));
     } catch {
       showNotice(`Couldn't open "${entry.name}" from the archive.`, true);
