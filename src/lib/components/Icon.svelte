@@ -272,6 +272,11 @@
     <path d="M8.7 15.3a3.5 3.5 0 0 0 5 0l1.4-1.4" />
     <path d="M15.3 8.7a3.5 3.5 0 0 0-5 0L8.9 10.1" />
     <path d="M4 4l16 16" />
+  {:else if name === "terminal"}
+    <!-- Embedded terminal dock toggle (CPE-1243, epic CPE-714): a screen frame with a ">_" prompt. -->
+    <rect x="3" y="4" width="18" height="16" rx="2" />
+    <path d="M7 10l3 3-3 3" />
+    <path d="M13 16h4" />
   {/if}
 </svg>
 

@@ -136,6 +136,18 @@ pub fn default_shell() -> (String, Vec<String>) {
     }
 }
 
+/// Resolve the shell dock's `open_pty` should launch (CPE-1243's shell picker): `shell` is the frontend's
+/// choice — a program name/path (e.g. `"powershell.exe"`, `"/bin/zsh"`) with no args, since an interactive
+/// shell needs none — or `None`/blank to fall back to [`default_shell`]. A tiny pure function so the
+/// picker's override path is unit-tested here rather than only exercised indirectly through the
+/// `#[tauri::command]` dispatcher in `lib.rs`.
+pub fn resolve_shell(shell: Option<String>) -> (String, Vec<String>) {
+    match shell.filter(|s| !s.trim().is_empty()) {
+        Some(program) => (program, Vec::new()),
+        None => default_shell(),
+    }
+}
+
 /// The launch command + args for an OS shell running a one-off inline command — used to exercise the
 /// PTY cross-platform in tests (mirrors `sidecar/ai-console/src/pty.rs::shell_command`). Test-only:
 /// production code always runs the interactive `default_shell()`.
@@ -403,5 +415,44 @@ mod tests {
         assert!(registry.write(999, b"x").is_err());
         assert!(registry.resize(999, 10, 10).is_err());
         assert!(registry.close(999).is_ok()); // closing an unknown id is a no-op, not an error
+    }
+
+    // --- resolve_shell: the CPE-1243 shell-picker override path ----------------------------------------
+
+    #[test]
+    fn resolve_shell_none_or_blank_falls_back_to_the_os_default() {
+        assert_eq!(resolve_shell(None), default_shell());
+        assert_eq!(resolve_shell(Some("".to_string())), default_shell());
+        assert_eq!(resolve_shell(Some("   ".to_string())), default_shell());
+    }
+
+    #[test]
+    fn resolve_shell_uses_the_frontend_s_choice_verbatim_with_no_args() {
+        let (program, args) = resolve_shell(Some("powershell.exe".to_string()));
+        assert_eq!(program, "powershell.exe");
+        assert!(args.is_empty());
+    }
+
+    #[test]
+    fn a_picked_shell_actually_runs_in_a_real_pty() {
+        // Exercise resolve_shell's output through a real PtySession — the picker is only useful if its
+        // choice actually launches (mirrors write_reaches_an_interactive_shell_and_its_echo_streams_back).
+        let (program, args) = resolve_shell(Some(default_shell().0));
+        let mut session = PtySession::spawn(&PtyLaunch {
+            program,
+            args,
+            cwd: None,
+            env: BTreeMap::new(),
+            rows: 24,
+            cols: 80,
+        })
+        .expect("spawn picked shell");
+        let mut writer = session.writer().expect("writer");
+        let line = if cfg!(windows) { "echo picked-shell-works\r\n" } else { "echo picked-shell-works\n" };
+        writer.write_all(line.as_bytes()).expect("write");
+        writer.flush().expect("flush");
+        let out = drain_until(&session, "picked-shell-works", Duration::from_secs(10));
+        assert!(out.contains("picked-shell-works"), "got: {out:?}");
+        let _ = session.kill();
     }
 }

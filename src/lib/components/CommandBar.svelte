@@ -14,6 +14,7 @@
   export let view: ViewMode = "details";
   export let fileFilter = "all";
   export let foldersFirst = true;
+  export let showTerminal = false;
 
   const dispatch = createEventDispatcher<{
     action: string;
@@ -23,6 +24,7 @@
     toggleHidden: void;
     toggleFoldersFirst: void;
     toggleDetails: void;
+    toggleTerminal: void;
   }>();
 
   let open: "" | "sort" | "view" | "filter" = "";
@@ -171,5 +173,16 @@
     on:click={() => dispatch("toggleDetails")}
   >
     <Icon name="details" /> Details
+  </button>
+
+  <!-- Terminal dock toggle (CPE-1243, epic CPE-714) — an xterm.js pane rooted at the current folder. -->
+  <button
+    class="cmd"
+    class:on={showTerminal}
+    data-testid="cmd-terminal"
+    title={showTerminal ? "Hide terminal" : "Show terminal"}
+    on:click={() => dispatch("toggleTerminal")}
+  >
+    <Icon name="terminal" /> Terminal
   </button>
 </div>

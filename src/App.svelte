@@ -77,6 +77,7 @@
   import Spotlight from "./lib/components/Spotlight.svelte";
   import type { ResultKind } from "./lib/bindings.gen";
   import TransferPanel from "./lib/components/TransferPanel.svelte";
+  import TerminalPanel from "./lib/components/TerminalPanel.svelte";
   import TransferConflictDialog from "./lib/components/TransferConflictDialog.svelte";
   import { initTransfers, startTransfer, startArchiveCompress, startArchiveExtract, collidingNames, type TransferReport, type ConflictPolicy } from "./lib/transfers";
   import DuplicatesDialog from "./lib/components/DuplicatesDialog.svelte";
@@ -728,6 +729,9 @@
   let showBoard = false;
   /** Integrated workbench (CPE-526) — git diff of the current folder. */
   let showWorkbench = false;
+  /** Embedded terminal dock (CPE-1243, epic CPE-714) — an xterm.js pane rooted at the current folder.
+   *  Mounted only while true, so a never-opened terminal costs nothing (no PTY, no dock tab, no xterm). */
+  let showTerminal = false;
   /** Application → Documents (CPE-537) — the built-in docs viewer. */
   let showDocs = false;
   /** Optional deep-link slug for the docs viewer (CPE-594/596); null ⇒ default (Overview). */
@@ -746,6 +750,7 @@
   /** The section the user is currently in, for F1 / the global Documents open (CPE-596). */
   function currentSection(): Section {
     if (showWorkbench) return "workbench";
+    if (showTerminal) return "terminal";
     return isHome ? "home" : "explorer";
   }
   /** Every documented section + a friendly label, for per-section jump-links (palette, menus) — CPE-764. */
@@ -754,6 +759,7 @@
     { section: "explorer", label: "Explorer" },
     { section: "disk-usage", label: "Disk usage" },
     { section: "workbench", label: "Workbench" },
+    { section: "terminal", label: "Terminal" },
     { section: "agent-board", label: "Agent Board" },
     { section: "ai-console", label: "Agent Deck" },
     { section: "agent-grid", label: "Agent Grid" },
@@ -4486,6 +4492,7 @@
   {view}
   {fileFilter}
   {foldersFirst}
+  {showTerminal}
   on:action={(e) => runAction(e.detail)}
   on:sort={(e) => {
     sortKey = e.detail.key; sortDir = e.detail.dir;
@@ -4496,6 +4503,7 @@
   on:toggleHidden={() => { showHidden = !showHidden; settings.saveShowHidden(showHidden); }}
   on:toggleFoldersFirst={() => { foldersFirst = !foldersFirst; settings.saveFoldersFirst(foldersFirst); }}
   on:toggleDetails={() => { showDetails = !showDetails; settings.saveShowDetails(showDetails); }}
+  on:toggleTerminal={() => (showTerminal = !showTerminal)}
 />
 
 <div
@@ -4761,6 +4769,13 @@
     </div>
   {/if}
 </div>
+
+{#if showTerminal}
+  <!-- Docked in normal layout flow (not an overlay), so it takes real space above the status bar and
+       pushes the explorer content up — like the other rows in #app's grid (CLAUDE.md STREAMING/dock
+       conventions). Mounted only while toggled on, so an unused terminal is zero cost. -->
+  <TerminalPanel cwd={isHome || archive ? "" : currentPath} on:close={() => (showTerminal = false)} />
+{/if}
 
 <StatusBar
   {itemCount}
