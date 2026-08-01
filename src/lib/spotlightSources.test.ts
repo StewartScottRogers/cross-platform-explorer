@@ -14,6 +14,7 @@ import {
   buildSources,
   streamFileHits,
   highlightByPositions,
+  basenamePositions,
 } from "./spotlightSources";
 import type { Command } from "./commandPalette";
 import { createHistory, visit } from "./history";
@@ -179,5 +180,38 @@ describe("spotlightSources — highlightByPositions (CPE-1216)", () => {
 
   it("handles a fully-matched string as one run", () => {
     expect(highlightByPositions("abc", [0, 1, 2])).toEqual([{ text: "abc", match: true }]);
+  });
+});
+
+describe("spotlightSources — basenamePositions (CPE-1223)", () => {
+  it("drops positions that fall in the path prefix, keeping only ones in the basename", () => {
+    // "C:\Users\me\Temp\marker.txt" — a stray hit on the "m" of "Temp" (index 14) plus the real
+    // "marker" run starting right after the last separator (index 17).
+    const text = "C:\\Users\\me\\Temp\\marker.txt";
+    const basenameStart = text.lastIndexOf("\\") + 1; // 17
+    const positions = [14, basenameStart, basenameStart + 1, basenameStart + 2];
+    expect(basenamePositions(text, positions)).toEqual([basenameStart, basenameStart + 1, basenameStart + 2]);
+  });
+
+  it("keeps every run of a genuine multi-run match within the filename (e.g. rdme -> README)", () => {
+    const text = "/home/dev/project/README.md";
+    const basenameStart = text.lastIndexOf("/") + 1;
+    // "rdme" subsequence inside "README.md": r(0) d(3) m(4) e(5) relative to the basename.
+    const positions = [basenameStart + 0, basenameStart + 3, basenameStart + 4, basenameStart + 5];
+    expect(basenamePositions(text, positions)).toEqual(positions);
+  });
+
+  it("is a no-op for text with no path separator (e.g. an action label)", () => {
+    expect(basenamePositions("Rename", [0, 1])).toEqual([0, 1]);
+  });
+
+  it("is a no-op for an empty positions array", () => {
+    expect(basenamePositions("C:\\Users\\marker.txt", [])).toEqual([]);
+  });
+
+  it("handles forward slashes too (non-Windows paths)", () => {
+    const text = "/tmp/marker/notes.txt";
+    const positions = [1, 5]; // "t" in /tmp, "m" in marker — both before the final separator
+    expect(basenamePositions(text, positions)).toEqual([]);
   });
 });

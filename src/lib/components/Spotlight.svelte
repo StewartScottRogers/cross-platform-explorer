@@ -5,7 +5,11 @@
    * `spotlight_search`/`spotlight_frecent` backend cores (CPE-1214, built on CPE-937/948/952). Modeled
    * on `CommandPalette.svelte` (same overlay chrome, ↑/↓/Enter/Esc keyboard model, visible border,
    * theme vars) but sectioned like `InstantSearch.svelte`, with matched-character highlighting from
-   * `SpotResult.positions` (see `highlightByPositions`, spotlightSources.ts).
+   * `SpotResult.positions` (see `highlightByPositions`, spotlightSources.ts). Matching/ranking still
+   * runs over the full path, but highlighted positions are scoped to the basename before rendering
+   * (`basenamePositions`, CPE-1223) — a stray subsequence hit in the directory prefix (e.g. the "m" in
+   * `.../Temp/...` for a query like "marker") would otherwise read as noise ahead of the real match run
+   * in the filename.
    *
    * Opened two ways (CPE-1215 owns the OS hotkey + backend event; this component is transport-agnostic
    * about *why* it's open): the host toggles a boolean prop-driven `{#if}` exactly like every other
@@ -25,7 +29,7 @@
   import type { Favorite } from "../types";
   import { isEnabled, type Command } from "../commandPalette";
   import { createHistory, type History } from "../history";
-  import { buildSources, streamFileHits, highlightByPositions } from "../spotlightSources";
+  import { buildSources, streamFileHits, highlightByPositions, basenamePositions } from "../spotlightSources";
   import { recordVisit, defaultView } from "../spotlightFrecency";
   import * as settings from "../settings";
   import { t } from "../i18n";
@@ -200,7 +204,7 @@
                 on:click={() => activate(row.i)}
               >
                 <span class="sp-text">
-                  {#each highlightByPositions(row.text, row.positions) as seg}{#if seg.match}<mark class="sp-hl">{seg.text}</mark>{:else}{seg.text}{/if}{/each}
+                  {#each highlightByPositions(row.text, basenamePositions(row.text, row.positions)) as seg}{#if seg.match}<mark class="sp-hl">{seg.text}</mark>{:else}{seg.text}{/if}{/each}
                 </span>
               </div>
             {/each}

@@ -130,6 +130,67 @@ describe("Spotlight — search debounce + sectioned/highlighted rendering (CPE-1
   });
 });
 
+describe("Spotlight — highlight scoped to the basename (CPE-1223)", () => {
+  it("suppresses a stray highlighted char in the path prefix, keeping the real run in the filename", async () => {
+    render(Spotlight, { root: "/root", paletteCommands });
+    await settle();
+
+    await fireEvent.input(input(), { target: { value: "marker" } });
+    await vi.advanceTimersByTimeAsync(150);
+    // Backend scores/highlights over the full path: a stray "m" at index 14 (the "m" of "Temp") ahead
+    // of the real "marker" run starting right after the last separator.
+    const text = "C:\\Users\\me\\Temp\\marker.txt";
+    const basenameStart = text.lastIndexOf("\\") + 1;
+    searchCalls[0].resolve([
+      {
+        kind: "file",
+        results: [
+          {
+            text,
+            kind: "file",
+            score: 20,
+            positions: [14, basenameStart, basenameStart + 1, basenameStart + 2, basenameStart + 3, basenameStart + 4, basenameStart + 5],
+          },
+        ],
+      },
+    ]);
+    await settle();
+
+    const marks = document.querySelectorAll(".sp-row mark.sp-hl");
+    expect(marks).toHaveLength(1); // no separate lone-char mark for the path-prefix "m"
+    expect(marks[0].textContent).toBe("marker"); // the full in-filename run, intact
+  });
+
+  it("still highlights every run of a genuine multi-run match within the filename", async () => {
+    render(Spotlight, { root: "/root", paletteCommands });
+    await settle();
+
+    await fireEvent.input(input(), { target: { value: "rme" } });
+    await vi.advanceTimersByTimeAsync(150);
+    const text = "/home/dev/project/README.md";
+    const basenameStart = text.lastIndexOf("/") + 1;
+    // "rme" subsequence within "README.md" — mirrors spotlight.rs's own doc example (r(0) … m(4) e(5)):
+    // two non-contiguous runs, "R" and "ME", both inside the filename.
+    searchCalls[0].resolve([
+      {
+        kind: "file",
+        results: [
+          {
+            text,
+            kind: "file",
+            score: 15,
+            positions: [basenameStart + 0, basenameStart + 4, basenameStart + 5],
+          },
+        ],
+      },
+    ]);
+    await settle();
+
+    const marks = document.querySelectorAll(".sp-row mark.sp-hl");
+    expect(Array.from(marks).map((m) => m.textContent)).toEqual(["R", "ME"]); // both runs preserved intact
+  });
+});
+
 describe("Spotlight — keyboard activation (CPE-1216)", () => {
   it("Enter on a folder/file/recent row dispatches activate, records a frecency visit, and closes", async () => {
     const { component } = render(Spotlight, { root: "/root", paletteCommands });

@@ -143,3 +143,28 @@ export function highlightByPositions(text: string, positions: number[]): Highlig
   if (buf) segments.push({ text: buf, match: bufMatch });
   return segments;
 }
+
+/**
+ * Restricts fuzzy-match positions to the basename (CPE-1223): `spotlight_search` scores/highlights
+ * candidates over the FULL path (`fileSource` feeds `h.path`), so the greedy subsequence matcher can
+ * plant a lone highlighted character in the path *prefix* ahead of the real match run in the filename
+ * — e.g. querying "marker" faintly highlights the "m" in `.../Temp/...` before the "marker" run in the
+ * filename itself. That reads as noise, not an intentional match.
+ *
+ * Ranking stays exactly as `spotlight_search` returned it (full-path scoring is untouched — this only
+ * changes which characters get `<mark>`ed); positions at/after the last path separator (the basename)
+ * pass through unchanged, including every run of a genuine multi-character match *within* the filename
+ * (e.g. "rdme" → "README" still highlights all its scattered-but-in-filename runs). Positions before
+ * the separator (the directory portion) are dropped. A no-op for text with no separator (action labels,
+ * bare filenames) — returns `positions` unchanged.
+ */
+export function basenamePositions(text: string, positions: number[]): number[] {
+  if (positions.length === 0) return positions;
+  const chars = Array.from(text); // char indices, matching positions' indexing (see highlightByPositions)
+  let basenameStart = 0;
+  for (let i = 0; i < chars.length; i++) {
+    if (chars[i] === "/" || chars[i] === "\\") basenameStart = i + 1;
+  }
+  if (basenameStart === 0) return positions; // no separator — whole text is already "the basename"
+  return positions.filter((p) => p >= basenameStart);
+}
