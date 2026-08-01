@@ -4,7 +4,7 @@ title: "Wire the SimHash text + Jaccard folder near-duplicate cores (stretch)"
 type: feature
 component: Backend
 priority: low
-status: Backlog
+status: In Progress
 tags: ready
 created: 2026-08-01
 epic: CPE-997
@@ -25,3 +25,14 @@ FOLDERS.
 
 ## Work Log
 - 2026-08-01 — Filed by Foreman (workshift, epic CPE-997). Stretch; pick up after the image spine lands.
+- 2026-08-01 — Wired end-to-end: `cpe_server::document_similarity` (walk + SimHash adapter over
+  `simhash::near_duplicate_docs`) and `cpe_server::folder_similarity_scan` (walk + per-folder hash-set
+  adapter over `folder_similarity::cluster_similar_folders`), each with cargo tests. Thin dispatchers
+  `find_similar_documents` / `find_similar_folders` registered in `generate_handler!`/`collect_commands!`;
+  `bindings.gen.ts` regenerated. Minimal frontend: `NearDuplicatesDialog.svelte` (read-only, no
+  delete/cleanup — the ticket's AC is the scan wiring, not a removal workflow), reached via Tools menu +
+  Command Palette ("Find similar documents…" / "Find near-identical folders…"), with Svelte tests.
+  `cargo test -p cpe-server` (1173 passed), `cargo test` in `src-tauri` (85 passed, incl. the
+  `bindings.gen.ts` drift guard), `cargo clippy --all-targets -D warnings` clean in both crates (plain +
+  `specta`/`specta-bindings,sidecar-platform` feature modes), `npm run check` clean, `npm test` clean
+  (1629 passed). PR opened.
