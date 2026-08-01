@@ -7,7 +7,7 @@
   import { t } from "../i18n";
   import { formatSize } from "../format";
   import { formatDate } from "../datetime";
-  import { iconFor, typeName, isImage } from "../filetypes";
+  import { iconFor, typeName, hasThumbnail } from "../filetypes";
   import {
     columnsTemplate, resizeColumnTo, boundaryOffsets, COLUMN_DEFAULTS, fullMins,
   } from "../columns";
@@ -622,7 +622,7 @@
         }}
       >
         <span class="cell name">
-          {#if (view === "icons" || view === "gallery") && !entry.is_dir && isImage(entry.name)}
+          {#if (view === "icons" || view === "gallery") && !entry.is_dir && hasThumbnail(entry.name)}
             <ThumbnailImage path={entry.path} size={view === "gallery" ? 128 : 48} fallback={iconFor(entry)} />
           {:else}
             <Icon name={iconFor(entry)} size={view === "gallery" ? 88 : view === "icons" ? 40 : 16} />

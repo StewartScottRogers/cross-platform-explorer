@@ -1,5 +1,14 @@
 import { describe, it, expect } from "vitest";
-import { categoryOf, typeName, sameTypeIndices, matchesFileFilter, isImage, CATEGORY_BY_EXT, TYPE_NAME_BY_EXT } from "./filetypes";
+import {
+  categoryOf,
+  typeName,
+  sameTypeIndices,
+  matchesFileFilter,
+  isImage,
+  hasThumbnail,
+  CATEGORY_BY_EXT,
+  TYPE_NAME_BY_EXT,
+} from "./filetypes";
 
 const file = (extension: string) => ({ is_dir: false, extension });
 const folder = { is_dir: true, extension: "" };
@@ -25,6 +34,31 @@ describe("isImage (CPE-643)", () => {
     expect(isImage(".png")).toBe(false);
     expect(isImage("photo.")).toBe(false);
     expect(isImage("")).toBe(false);
+  });
+});
+
+describe("hasThumbnail (CPE-1237) — gates the Icons/Gallery grid's thumbnail requests", () => {
+  it("is true for every isImage raster extension", () => {
+    for (const ext of ["jpg", "jpeg", "png", "gif", "webp", "bmp", "tif", "tiff", "avif"]) {
+      expect(hasThumbnail(`photo.${ext}`)).toBe(true);
+    }
+  });
+  it("is also true for the non-photo formats the backend pipeline renders (CPE-1236)", () => {
+    for (const ext of ["psd", "svg", "ttf", "otf", "woff", "woff2"]) {
+      expect(hasThumbnail(`file.${ext}`)).toBe(true);
+      expect(hasThumbnail(`FILE.${ext.toUpperCase()}`)).toBe(true);
+    }
+  });
+  it("is false for a format neither pipeline can render", () => {
+    for (const name of ["notes.txt", "clip.mp4", "favicon.ico", "raw.heic", "song.mp3"]) {
+      expect(hasThumbnail(name)).toBe(false);
+    }
+  });
+  it("is false for extensionless names, dotfiles, and trailing dots", () => {
+    expect(hasThumbnail("README")).toBe(false);
+    expect(hasThumbnail(".svg")).toBe(false);
+    expect(hasThumbnail("glyphs.")).toBe(false);
+    expect(hasThumbnail("")).toBe(false);
   });
 });
 

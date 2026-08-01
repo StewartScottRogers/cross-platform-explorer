@@ -356,8 +356,11 @@ async readImageDataUrl(path: string) : Promise<Result<string, string>> {
 },
 /**
  * A PNG thumbnail of an image file as a `data:` URL the `<img>` tag can show (CPE-642), served from
- * an mtime-keyed on-disk cache (CPE-644). Bounded by the preview size cap so a huge image can't
- * exhaust memory. Errors (rather than hangs) on a non-image, so the frontend falls back to an icon.
+ * an mtime-keyed on-disk cache (CPE-644). Also covers `.svg` (rasterized) and `.ttf`/`.otf`/`.woff`
+ * glyph-sheet specimens (CPE-1236) — the format dispatch lives entirely in
+ * `cpe_server::thumb_source`, so this stays a thin one-line-per-branch delegate. Bounded by the
+ * preview size cap so a huge image can't exhaust memory. Errors (rather than hangs) on an unsupported
+ * or malformed source, so the frontend falls back to an icon.
  */
 async thumbnail(path: string, maxEdge: number) : Promise<Result<string, string>> {
     try {
@@ -366,6 +369,34 @@ async thumbnail(path: string, maxEdge: number) : Promise<Result<string, string>>
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
 }
+},
+/**
+ * Stream thumbnails for a batch of visible/prefetch-margin tiles through the priority queue + shared
+ * in-memory cache (CPE-1237, epic CPE-718): wires the previously-orphaned `thumb_queue` (CPE-950,
+ * Visible > Prefetch > Background scheduling) and `thumb_cache` (CPE-939, dual-budget LRU) into a real
+ * dispatch path — `cpe_server::thumb_pipeline::run_thumb_batch` owns the whole enqueue/drain/compute
+ * loop, this command is just the thin Tauri wiring: resolve the on-disk cache dir, hand it the
+ * `thumbnail_cached` decoder as `compute`, and forward each streamed `ThumbResult` over `on_thumb` as it
+ * lands (STREAMING.md). `stream_id` registers a cancel flag `cancel_thumbnails_stream` can trip when the
+ * frontend's visible window moves on before this batch finishes draining. Async + `spawn_blocking` — the
+ * decode work is real file + CPU work and must never run on the UI thread.
+ */
+async thumbnailsStream(requests: ThumbRequest[], streamId: number, onThumb: TAURI_CHANNEL<ThumbResult>) : Promise<Result<number, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("thumbnails_stream", { requests, streamId, onThumb }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * Cancel an in-flight `thumbnails_stream` batch (CPE-1237) — the frontend calls this with the previous
+ * generation's `stream_id` when the visible window moves on before that batch finished draining, so
+ * requests for tiles that already scrolled away stop competing with the new visible-priority ones.
+ * Idempotent: a no-op for an unknown or already-finished `stream_id`.
+ */
+async cancelThumbnailsStream(streamId: number) : Promise<void> {
+    await TAURI_INVOKE("cancel_thumbnails_stream", { streamId });
 },
 /**
  * Read `settings.json` from `dir`, returning `{}` when it's absent or
@@ -1876,11 +1907,13 @@ async startArchiveCompress(paths: string[], dest: string, password: string | nul
  * Start an extract of `path` into `dest` through the transfer queue (CPE-1184): streams per-entry
  * progress and is cancellable exactly like a copy/move. `password` (non-empty) uses the AES-zip path;
  * otherwise the format is auto-detected by extension, mirroring [`extract_archive`]. Before queuing,
- * a zip-family archive's password is validated *synchronously* via
+ * a zip-family archive's password is validated up-front via
  * [`cpe_server::archive::check_zip_password`] — a cheap header-only check — so the frontend's existing
- * password-prompt-and-retry flow keeps its original synchronous try/catch shape (an instant rejection)
- * instead of round-tripping through a transfer id + completion event just to learn a password was
- * wrong. Returns the new transfer's id immediately once that check passes.
+ * password-prompt-and-retry flow keeps its original try/catch shape (an instant rejection) instead of
+ * round-tripping through a transfer id + completion event just to learn a password was wrong. That
+ * check opens the zip and reads its central directory (real disk I/O), so it runs off the main thread
+ * via `spawn_blocking` per CPE-760/761 — hence this command is `async`, matching every sibling archive
+ * command. Returns the new transfer's id immediately once the check passes.
  */
 async startArchiveExtract(path: string, dest: string, password: string | null) : Promise<Result<number, string>> {
     try {
@@ -3170,6 +3203,10 @@ export type PlannedItem = { input: string; output: string; summary: string }
  */
 export type PlannedOp = { input: string; kind: string; detail: string }
 /**
+ * Request priority, highest first. `Visible` = an on-screen row the user is looking at now.
+ */
+export type Priority = "visible" | "prefetch" | "background"
+/**
  * Everything a replay view needs for one session, assembled from its durable audit journal.
  */
 export type ReplayData = { 
@@ -3542,6 +3579,17 @@ export type TemplateSummary = { name: string; dirs: number; files: number }
  * Counts for a text file. Serialized to match the frontend `TextStats`.
  */
 export type TextStats = { lines: number; words: number; chars: number; bytes: number }
+/**
+ * One requested thumbnail: a source file, the target tile edge, and the priority to enqueue it at if
+ * it's not already cached. Sent from the frontend (CPE-1237): the visible window at `Priority::Visible`,
+ * the prefetch margin at `Priority::Prefetch`.
+ */
+export type ThumbRequest = { path: string; target_px: number; priority: Priority }
+/**
+ * One resolved thumbnail, streamed back as it's ready. `data_url` is `None` when the format can't be
+ * rendered (unreadable, unsupported, corrupt, oversized) — the frontend falls back to the type icon.
+ */
+export type ThumbResult = { path: string; target_px: number; data_url: string | null }
 /**
  * Whether a batch copies or moves its sources.
  */

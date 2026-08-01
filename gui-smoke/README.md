@@ -168,6 +168,7 @@ app's main screens** at `gui-smoke/.screenshots/<name>.png`. Two shared helpers 
 | `batch-media-dialog.png` | `batch-media-dialog-fail.png` | `batch-media.smoke.ts` | Batch-Media dialog's op-pill list + plan preview |
 | `replay-tab.png` | `replay-tab-fail.png` | `replay.smoke.ts` | Agent Watch drawer's Replay tab (transport/slider + reconstruction) |
 | `cost-history.png` | `cost-history-fail.png` | `cost-history.smoke.ts` | Agent Watch drawer's cost-History rollup |
+| `thumbnail-gallery.png` | `thumbnail-gallery-fail.png` | `thumbnail-gallery.smoke.ts` | Gallery view streaming real PNG/SVG thumbnails through the CPE-1237 priority queue + cache |
 
 `.screenshots/` is gitignored — these are run artifacts, never committed. Both helpers swallow their
 own errors (a screenshot is observability, not an assertion — it must never fail or mask a real

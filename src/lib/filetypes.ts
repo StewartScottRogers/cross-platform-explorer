@@ -214,9 +214,11 @@ const ICON_BY_EXT: Record<string, string> = {
 };
 
 /**
- * Extensions we render a real image thumbnail for in the Icons view (CPE-643,
- * epic CPE-615) — the raster formats the backend `image` crate decodes. SVG/ICO
- * are excluded (vector / multi-frame) and HEIC/RAW stay Blocked on decode libs.
+ * Extensions we render a real *photo* thumbnail for — the raster formats the backend `image` crate
+ * decodes. Used to gate photo-specific features (Similar Images search, the Properties dialog's image
+ * dimensions) that don't make sense for a vector/glyph-sheet render. SVG/ICO are excluded here (vector /
+ * multi-frame) and HEIC/RAW stay Blocked on decode libs. For "can the grid show ANY thumbnail" (icons/
+ * gallery tiles), see {@link hasThumbnail} — broader, and what CPE-1237's streaming client gates on.
  */
 const THUMBNAIL_IMAGE_EXTS = new Set([
   "jpg", "jpeg", "png", "gif", "webp", "bmp", "tif", "tiff", "avif",
@@ -230,6 +232,26 @@ export function isImage(name: string): boolean {
   const dot = name.lastIndexOf(".");
   if (dot <= 0 || dot === name.length - 1) return false;
   return THUMBNAIL_IMAGE_EXTS.has(name.slice(dot + 1).toLowerCase());
+}
+
+/**
+ * Extra non-photo formats the backend's thumbnail pipeline can render (CPE-1236, epic CPE-718):
+ * `.psd` (flattened composite), `.svg` (rasterized), and `.ttf`/`.otf`/`.woff`/`.woff2` (a glyph-sheet
+ * specimen) — see `cpe_server::thumb_source`'s dispatch, which this list mirrors.
+ */
+const THUMBNAIL_EXTRA_EXTS = new Set(["psd", "svg", "ttf", "otf", "woff", "woff2"]);
+
+/**
+ * True when `name` is anything the backend thumbnail pipeline can render a tile for — every
+ * {@link isImage} photo plus the non-photo formats in {@link THUMBNAIL_EXTRA_EXTS}. This is the gate the
+ * Icons/Gallery grid uses to decide whether a tile is worth requesting through the streaming thumbnail
+ * client (CPE-1237); a `false` here means zero backend cost — the tile just shows its type icon.
+ */
+export function hasThumbnail(name: string): boolean {
+  const dot = name.lastIndexOf(".");
+  if (dot <= 0 || dot === name.length - 1) return false;
+  const ext = name.slice(dot + 1).toLowerCase();
+  return THUMBNAIL_IMAGE_EXTS.has(ext) || THUMBNAIL_EXTRA_EXTS.has(ext);
 }
 
 /** Extensions treated as executable — eligible for Execute / Run as admin (CPE-241). */

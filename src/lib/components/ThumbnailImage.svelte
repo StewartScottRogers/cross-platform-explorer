@@ -1,20 +1,22 @@
 <script lang="ts">
   /**
-   * A real image thumbnail for the Icons view (CPE-643, epic CPE-615).
+   * A real image thumbnail for the Icons/Gallery view (CPE-643, epic CPE-615), streamed through the
+   * backend's priority queue + cache (CPE-1237, epic CPE-718) rather than decoded eagerly per tile.
    *
-   * Fetches a downscaled PNG data URL from the backend `thumbnail(path, max_edge)`
-   * command (CPE-642) — but only once the tile nears the viewport, so a folder of
-   * hundreds of photos never fires hundreds of decodes at once. Until then (and on
-   * any error — a non-image, an unreadable file, a decode failure) it shows the
-   * generic file Icon, so a tile is never blank.
-   *
-   * It renders its own image, so per the BUSY-CURSOR convention it calls
-   * `rawInvoke` (the untracked invoke) rather than the busy-tracking `invoke`, so a
-   * background thumbnail decode never raises the app-wide wait cursor.
+   * Two `IntersectionObserver`s split "near the viewport" from "actually on screen": a wide prefetch
+   * margin requests the thumbnail at `Prefetch` priority as soon as the tile is within it (so scrolling
+   * stays smooth — nothing decodes purely because it exists off-screen in a big folder), and a strict
+   * (zero-margin) observer promotes the SAME request to `Visible` priority once the tile is truly on
+   * screen, so what the user is looking at right now jumps the backend's `thumb_queue` ahead of anything
+   * merely nearby. `requestThumbnail` (`../thumbnailClient`) batches every tile mounting/observing in the
+   * same tick into one `thumbnails_stream` call, so the priority actually has something to arbitrate, and
+   * resolves instantly from the shared cache on a repeat request (CPE-939's LRU, fronted by the on-disk
+   * cache — thumbnails persist across sessions). On any failure (non-image, unreadable, decode error,
+   * unsupported format) it shows the generic file Icon, so a tile is never blank.
    */
   import { onDestroy } from "svelte";
   import Icon from "./Icon.svelte";
-  import { rawInvoke } from "../invoke";
+  import { requestThumbnail, type ThumbPriority } from "../thumbnailClient";
 
   /** Absolute path of the image file to thumbnail. */
   export let path: string;
@@ -25,45 +27,71 @@
 
   let src = "";
   let failed = false;
-  let started = false;
-  let observer: IntersectionObserver | undefined;
+  let requestedAt: ThumbPriority | undefined; // undefined = not yet requested this mount
+  let visibleObserver: IntersectionObserver | undefined;
+  let prefetchObserver: IntersectionObserver | undefined;
 
-  async function load(): Promise<void> {
-    if (started) return;
-    started = true;
+  const PRIORITY_RANK: Record<ThumbPriority, number> = { visible: 0, prefetch: 1, background: 2 };
+
+  async function load(priority: ThumbPriority): Promise<void> {
+    // Already resolved (src/failed set), or already asked at this-or-better priority: nothing to do.
+    if (src || failed) return;
+    if (requestedAt !== undefined && PRIORITY_RANK[priority] >= PRIORITY_RANK[requestedAt]) return;
+    requestedAt = priority;
     try {
-      src = await rawInvoke<string>("thumbnail", { path, maxEdge: Math.round(size) });
-      if (!src) failed = true;
+      const dataUrl = await requestThumbnail(path, size, priority);
+      if (dataUrl) src = dataUrl;
+      else failed = true; // non-image / unreadable / unsupported / decode error → keep the fallback icon
     } catch {
-      failed = true; // non-image / unreadable / decode error → keep the fallback icon
+      failed = true;
     }
   }
 
-  /** Svelte action: kick the fetch only when the tile scrolls near the viewport.
-      Falls back to an eager load where IntersectionObserver is unavailable (jsdom
-      in tests), so the feature still works everywhere. */
+  /** Svelte action: `Prefetch`-priority request once the tile is within `margin` of the viewport;
+      `Visible`-priority (promoting an in-flight Prefetch request) once it's strictly on screen. Falls
+      back to an eager `Visible` load where IntersectionObserver is unavailable (jsdom in tests), so the
+      feature still works everywhere. */
   function lazy(node: HTMLElement) {
     if (typeof IntersectionObserver === "undefined") {
-      void load();
+      void load("visible");
       return;
     }
-    observer = new IntersectionObserver(
+    prefetchObserver = new IntersectionObserver(
       (entries) => {
         for (const e of entries) {
           if (e.isIntersecting) {
-            void load();
-            observer?.disconnect();
-            break;
+            void load("prefetch");
+            prefetchObserver?.disconnect();
           }
         }
       },
-      { rootMargin: "150px" },
+      { rootMargin: "600px" },
     );
-    observer.observe(node);
-    return { destroy: () => observer?.disconnect() };
+    visibleObserver = new IntersectionObserver(
+      (entries) => {
+        for (const e of entries) {
+          if (e.isIntersecting) {
+            void load("visible");
+            visibleObserver?.disconnect();
+          }
+        }
+      },
+      { rootMargin: "0px" },
+    );
+    prefetchObserver.observe(node);
+    visibleObserver.observe(node);
+    return {
+      destroy: () => {
+        prefetchObserver?.disconnect();
+        visibleObserver?.disconnect();
+      },
+    };
   }
 
-  onDestroy(() => observer?.disconnect());
+  onDestroy(() => {
+    prefetchObserver?.disconnect();
+    visibleObserver?.disconnect();
+  });
 </script>
 
 <span class="thumb" style="--thumb-size: {size}px" use:lazy>

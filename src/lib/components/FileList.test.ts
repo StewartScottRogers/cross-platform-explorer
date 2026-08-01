@@ -274,6 +274,20 @@ describe("FileList rendering", () => {
     expect(screen.getByText("docs")).toBeTruthy();
   });
 
+  it("also thumbnails the non-photo formats the backend pipeline renders — SVG + fonts (CPE-1236/1237)", () => {
+    const { container } = render(FileList, {
+      ...base,
+      view: "gallery",
+      entries: [
+        entry({ name: "icon.svg", path: "/x/icon.svg", extension: "svg" }),
+        entry({ name: "brand.woff2", path: "/x/brand.woff2", extension: "woff2" }),
+        entry({ name: "notes.txt", path: "/x/notes.txt", extension: "txt" }),
+      ],
+    });
+    // Both the SVG and the font glyph-sheet get a real thumbnail tile now; only the .txt keeps its icon.
+    expect(container.querySelectorAll(".thumb")).toHaveLength(2);
+  });
+
   it("column dividers are labelled separators, resizable by keyboard (CPE-314 a11y)", async () => {
     const { container, component } = render(FileList, {
       ...base,
