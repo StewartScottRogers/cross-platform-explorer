@@ -34,3 +34,12 @@ Two non-blocking findings from the CPE-1182/1183 review (PR #497):
 
 ## Work Log
 - 2026-07-31 — Filed by Foreman (workshift) from the PR #497 reviewer's two non-blocking findings.
+
+## Update 2026-08-01 (workshift) — finding #1 fixed by CPE-1184 (#523)
+CPE-1184 moved the zip password check to `check_zip_password` running BEFORE the extract is queued/
+spawned, so a missing/wrong password (or a cancelled password prompt) no longer creates the
+auto-numbered dest folder at all — **the orphan-empty-dir-on-password-cancel finding is fixed**.
+REMAINING scope for this ticket: only finding #2 — the imprecise "Wrong password" message shown on a
+NON-password extract retry failure (`promptForExtractPassword`'s bare `catch {}` in `src/App.svelte`
+swallows the real error and always attributes failure to a bad password). Fix: surface the actual
+error text when the failure isn't a password mismatch.
