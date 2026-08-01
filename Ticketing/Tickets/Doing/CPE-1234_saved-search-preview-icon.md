@@ -34,3 +34,22 @@ section uses) rather than reusing Home's icon. Keep the "<name> (N items)" text.
 Product defect in CPE-1229's feature (1229 merged before its visual leg, per the deferred-pin flow).
 Also noted, likely UNRELATED/pre-existing (verify, do not necessarily fix here): "Gallery" in the
 Explore sidebar section renders dimmed vs its siblings — may be an intended disabled state.
+
+## Work Log
+
+2026-08-01 — Root cause: the no-selection placeholder hero is `DetailsPane.svelte`, not
+`PreviewPane.svelte` (`PreviewPane` slots `DetailsPane` in for its `entry === null` case).
+`DetailsPane`'s else-branch hard-coded `<Icon name="home" .../>` for every "nothing selected" case,
+including a structured saved search and a tag smart folder.
+2026-08-01 — Fix: added a `folderIcon` prop to `DetailsPane.svelte` (default `"home"`, unchanged for
+Home/archive/real-folder), and a `$: folderIcon = structuredSearch ? "search" : smartFolder ?
+"filter" : "home"` derivation in `App.svelte`, threaded into both `<DetailsPane>` usages (the
+preview-pane slot + the Details-tab fallback). `search`/`filter` are the exact glyphs the sidebar's
+"Saved Searches"/"Smart Folders" sections already use, so the placeholder now agrees with the
+breadcrumb/search-box/status-bar instead of contradicting them.
+2026-08-01 — Added `src/App.previewPlaceholderIcon.test.ts`: renders the real App, opens a structured
+saved search and a tag smart folder in turn, and asserts the actual placeholder `<svg>` markup
+carries the `search`/`filter` glyph's signature and NOT Home's distinctive `#c94f18` roof stroke; a
+third case confirms Home itself is untouched. Verified non-hollow by stashing the fix and re-running
+— the search/smart-folder cases fail exactly as expected against the old always-Home behavior.
+`npm run check`: 0 errors/0 warnings. `npm test` (vitest run): 155 files / 1710 tests passed.
