@@ -1320,6 +1320,88 @@ async checkpointRevertOne(root: string, manifestId: string, path: string) : Prom
 }
 },
 /**
+ * Preview retention-thinning `root`'s checkpoints under `policy`: which manifests would be kept vs.
+ * pruned, and the store's current footprint. Read-only.
+ */
+async snapshotPrunePreview(root: string, policy: RetentionPolicy) : Promise<Result<RetentionPreview, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("snapshot_prune_preview", { root, policy }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * Actually retention-prune `root`'s checkpoints to `policy` (+ an optional total-store-byte cap).
+ */
+async snapshotPruneApply(root: string, policy: RetentionPolicy, maxTotalBytes: number | null) : Promise<Result<RetentionApplyResult, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("snapshot_prune_apply", { root, policy, maxTotalBytes }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * Diff `rel_path` between checkpoint `manifest_id` (before) and its live state under `root` (after), for
+ * the restore-preview's "Open diff" affordance. Reuses `DiffPeek.svelte` on the frontend (a separate,
+ * parallel ticket wires that half in).
+ */
+async checkpointDiffFile(root: string, manifestId: string, relPath: string) : Promise<Result<FileDiff, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("checkpoint_diff_file", { root, manifestId, relPath }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * Every stored snapshot-schedule rule.
+ */
+async snapshotScheduleList() : Promise<Result<ScheduleRule[], string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("snapshot_schedule_list") };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * Save (insert or replace by `root`) a snapshot-schedule rule.
+ */
+async snapshotScheduleSet(rule: ScheduleRule) : Promise<Result<null, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("snapshot_schedule_set", { rule }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * Remove `root`'s snapshot-schedule rule, if any.
+ */
+async snapshotScheduleRemove(root: string) : Promise<Result<null, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("snapshot_schedule_remove", { root }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * Capture every root due for a scheduled snapshot (per its rule's interval) and retention-prune it.
+ * `now`/`last_run_times` are caller-supplied (epoch seconds) so this stays a deterministic single pass;
+ * no timer lives here.
+ */
+async snapshotRunDue(now: number, lastRunTimes: Partial<{ [key in string]: number }>) : Promise<Result<RunDueOutcome[], string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("snapshot_run_due", { now, lastRunTimes }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
  * Line / word / character / byte counts for a text file (CPE-414). Lines follow `str::lines`
  * (a final unterminated line still counts); words are whitespace-separated; characters are Unicode
  * scalar values. Capped so analysing a file stays predictable; a non-UTF-8 (binary) file, a
@@ -2500,6 +2582,18 @@ export type FileAttributes = { readonly: boolean; hidden: boolean; system: boole
  */
 mode: string | null }
 /**
+ * The before/after text of one file for the restore-preview's "Open diff" affordance.
+ */
+export type FileDiff = { 
+/**
+ * The file's content as captured in the checkpoint's manifest.
+ */
+before: string; 
+/**
+ * The file's current content on disk.
+ */
+after: string }
+/**
  * A file's inspection result — display-ready strings for the Properties panel. `None` fields are simply
  * not shown.
  */
@@ -2964,6 +3058,44 @@ export type ResolvedOp = { from: string; kind: string; detail: string; to: strin
  */
 export type ResolvedRun = { ops: ResolvedOp[]; inverses: InverseOp[] }
 /**
+ * The outcome of actually pruning a store: which manifests survived, which were removed (by the GFS
+ * policy and/or the optional byte cap), and how many bytes were freed.
+ */
+export type RetentionApplyResult = { 
+/**
+ * Manifest ids still present after pruning, newest-first.
+ */
+kept: string[]; 
+/**
+ * Manifest ids actually removed — the GFS losers, plus any byte-cap eviction beyond them.
+ */
+pruned: string[]; 
+/**
+ * Total bytes freed across every prune in this apply.
+ */
+bytes_freed: number }
+/**
+ * How many buckets to keep at each granularity. `0` disables a tier.
+ */
+export type RetentionPolicy = { hourly: number; daily: number; weekly: number; monthly: number }
+/**
+ * The keep/prune verdict for a store under a policy, plus the store's current footprint — non-destructive,
+ * safe to compute and show before [`apply`] touches anything.
+ */
+export type RetentionPreview = { 
+/**
+ * Manifest ids the policy would keep, newest-first.
+ */
+keep: string[]; 
+/**
+ * Manifest ids the policy would prune, oldest-first.
+ */
+prune: string[]; 
+/**
+ * The store's current total footprint in bytes (informational only — `preview` never mutates it).
+ */
+total_bytes: number }
+/**
  * Outcome of a revert — an `OpResult`-style summary: how many actions applied, plus the ones that were
  * skipped (each carried as a failed [`OpResult`] with the skip reason), preserving the engine's
  * skip-on-error guarantee.
@@ -3019,6 +3151,38 @@ drift_count: number;
  * The drifted paths, in plan order, so the UI can list them.
  */
 drift_paths: string[] }
+/**
+ * One due root's capture + retention outcome, as reported by [`snapshot_run_due`].
+ */
+export type RunDueOutcome = { root: string; 
+/**
+ * The manifest id this scheduled capture just wrote.
+ */
+manifest_id: string; 
+/**
+ * CPE-1196's retention-prune result, applied to `root` right after the capture.
+ */
+retained: RetentionApplyResult }
+/**
+ * One folder's periodic-snapshot rule.
+ */
+export type ScheduleRule = { 
+/**
+ * The watched root this rule captures.
+ */
+root: string; 
+/**
+ * Minimum seconds that must elapse since the last run before `root` is due again.
+ */
+interval_s: number; 
+/**
+ * The retention policy [`snapshot_run_due`] applies to `root` after each scheduled capture.
+ */
+retention: RetentionPolicy; 
+/**
+ * A disabled rule is never returned by [`due`].
+ */
+enabled: boolean }
 /**
  * One session's final cost + activity tallies. Mirrors the frontend `SessionMetrics`
  * (`src/lib/agentSessionMetrics.ts`) — camelCase on the wire to match it. **Advisory / best-effort:**

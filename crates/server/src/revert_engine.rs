@@ -90,7 +90,7 @@ pub fn execute_restore(
 /// string check over the `/`-joined convention `scan_dir`/`plan_restore` use — deliberately not
 /// `Path::starts_with`, which only compares an already-joined path and can be fooled by `..` components
 /// that are never resolved against the real filesystem.
-fn safe_segments(rel: &str) -> Result<Vec<&str>, String> {
+pub(crate) fn safe_segments(rel: &str) -> Result<Vec<&str>, String> {
     if rel.is_empty() {
         return Err("empty path".to_string());
     }
@@ -116,8 +116,11 @@ fn safe_segments(rel: &str) -> Result<Vec<&str>, String> {
 }
 
 /// Rebuild the real, validated target path under `root` from `rel`'s `/`-segments via [`Path::join`]
-/// (portable — never string concatenation), or an error if `rel` escapes `root`.
-fn safe_target(root: &Path, rel: &str) -> Result<PathBuf, String> {
+/// (portable — never string concatenation), or an error if `rel` escapes `root`. `pub(crate)` so sibling
+/// command-layer modules needing the same "resolve a caller-supplied relative path safely under a root"
+/// guard (e.g. [`crate::checkpoint_store`]'s per-file diff, CPE-1197) reuse this rather than duplicating
+/// the segment validation.
+pub(crate) fn safe_target(root: &Path, rel: &str) -> Result<PathBuf, String> {
     let segments = safe_segments(rel)?;
     let mut p = root.to_path_buf();
     for seg in segments {

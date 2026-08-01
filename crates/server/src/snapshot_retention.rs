@@ -14,7 +14,7 @@ pub struct Snapshot {
 }
 
 /// How many buckets to keep at each granularity. `0` disables a tier.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[cfg_attr(feature = "specta", derive(specta::Type))]
 pub struct RetentionPolicy {
     pub hourly: usize,

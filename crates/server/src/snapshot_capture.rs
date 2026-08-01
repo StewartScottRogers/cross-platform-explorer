@@ -96,8 +96,10 @@ fn relative_slash_path(root: &Path, path: &Path) -> Option<String> {
 }
 
 /// The inverse of [`relative_slash_path`]: rebuild an absolute path under `root` from a `/`-joined
-/// relative path, using the host OS's native separator.
-fn root_relative_to_abs(root: &Path, rel: &str) -> PathBuf {
+/// relative path, using the host OS's native separator. `pub(crate)` so sibling command-layer modules
+/// (e.g. [`crate::checkpoint_store`]'s per-file diff) can resolve the same live-file path this module's
+/// own [`capture`]/[`restore`] use, without duplicating the join logic.
+pub(crate) fn root_relative_to_abs(root: &Path, rel: &str) -> PathBuf {
     let mut p = root.to_path_buf();
     for part in rel.split('/') {
         p.push(part);
@@ -260,6 +262,47 @@ pub fn manifest_snapshot(store_dir: &str, manifest_id: &str) -> Result<Snapshot,
         .into_iter()
         .map(|(path, file)| (path, FileState::new(file.hash, file.size)))
         .collect())
+}
+
+/// A manifest's identifying info without loading its full path→hash map — enough for a retention/listing
+/// pass (CPE-1196) to decide keep/prune without paying for every file entry.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ManifestSummary {
+    pub id: String,
+    /// When the capture was taken, epoch milliseconds (same clock as [`Checkpoint::ts`] /
+    /// [`PersistedManifest::created_ms`]).
+    pub created_ms: u64,
+}
+
+/// Every manifest currently on disk under `store_dir`'s `manifests/` directory, unordered (callers sort as
+/// needed — [`crate::snapshot_retention::thin`] sorts internally). A missing `manifests/` dir (a store that
+/// has never captured) yields an empty list, not an error. A file that fails to parse as a manifest (torn
+/// write, hand-edit) is skipped rather than failing the whole enumeration — mirrors this module's other
+/// skip-on-error guardrails.
+pub fn list_manifests(store_dir: &str) -> Result<Vec<ManifestSummary>, String> {
+    let dir = manifests_dir(Path::new(store_dir));
+    let entries = match fs::read_dir(&dir) {
+        Ok(e) => e,
+        Err(_) => return Ok(Vec::new()),
+    };
+    let mut out = Vec::new();
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.extension().and_then(|e| e.to_str()) != Some("json") {
+            continue;
+        }
+        let Ok(data) = fs::read_to_string(&path) else { continue };
+        let Ok(m) = serde_json::from_str::<PersistedManifest>(&data) else { continue };
+        out.push(ManifestSummary { id: m.id, created_ms: m.created_ms });
+    }
+    Ok(out)
+}
+
+/// The store's current total footprint in bytes (sum of unique blob sizes — see
+/// [`crate::snapshot::BlobStore::total_bytes`]). A store that has never captured (no `index.json` yet)
+/// reads as `0`, not an error.
+pub fn store_total_bytes(store_dir: &str) -> Result<u64, String> {
+    Ok(load_store(Path::new(store_dir))?.total_bytes())
 }
 
 // ---- on-disk layout + persistence -----------------------------------------------------------------
