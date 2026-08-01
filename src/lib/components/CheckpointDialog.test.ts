@@ -211,5 +211,47 @@ describe("CheckpointDialog (CPE-1125)", () => {
       const notice = await screen.findByTestId("diff-error");
       expect(notice.textContent).toContain("binary diff isn't supported");
     });
+
+    it("ignores a stale diff response when the user switches rows before it resolves (race guard)", async () => {
+      render(CheckpointDialog, { initialPath: "/work/proj" });
+      await screen.findByTestId("cp-m-2");
+      invokeMock.mockImplementation(async (cmd: string) => {
+        if (cmd === "checkpoint_preview_revert") {
+          return { creates: 0, overwrites: 2, deletes: 0, bytes_written: 20, total: 2, drift_count: 2, drift_paths: ["a.txt", "b.txt"] };
+        }
+        if (cmd === "checkpoint_list") return CHECKPOINTS;
+        return null;
+      });
+      await fireEvent.click(screen.getByTestId("preview-btn-m-2"));
+      await screen.findByTestId("drift-list");
+
+      // a.txt's diff resolves LATE (gated); b.txt's resolves immediately.
+      let resolveA!: () => void;
+      const aGate = new Promise<void>((r) => { resolveA = r; });
+      invokeMock.mockImplementation(async (cmd: string, args?: unknown) => {
+        if (cmd === "checkpoint_diff_file") {
+          if ((args as { relPath?: string } | undefined)?.relPath === "a.txt") {
+            await aGate;
+            return { before: "A-before", after: "A-after" };
+          }
+          return { before: "B-before", after: "B-after" };
+        }
+        return null;
+      });
+
+      // Open A (its call is still pending), then switch to B (resolves now).
+      await fireEvent.click(screen.getByTestId("diff-btn-a.txt"));
+      await fireEvent.click(screen.getByTestId("diff-btn-b.txt"));
+      const bPanel = await screen.findByTestId("diff-panel-b.txt");
+      expect(bPanel.textContent).toContain("B-before");
+
+      // Let A's now-stale response land: it must NOT reopen A or pollute B's panel.
+      resolveA();
+      await new Promise((r) => setTimeout(r, 0));
+      expect(screen.queryByTestId("diff-panel-a.txt")).toBeNull();
+      const bAfter = screen.getByTestId("diff-panel-b.txt");
+      expect(bAfter.textContent).toContain("B-before");
+      expect(bAfter.textContent).not.toContain("A-before");
+    });
   });
 });

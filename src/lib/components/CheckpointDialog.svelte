@@ -73,12 +73,17 @@
     diffError = "";
     if (!selected) return;
     diffLoading = true;
+    // Guard against a stale response: if the user opens row A then row B before A's call resolves,
+    // A must not write its diff into B's open panel. Only apply the result if this row is still the
+    // one open (same generation-token idea as ContentSearchDialog).
+    const forPath = relPath;
     try {
-      diffResult = unwrap(await commands.checkpointDiffFile(path.trim(), selected.manifest_id, relPath));
+      const result = unwrap(await commands.checkpointDiffFile(path.trim(), selected.manifest_id, relPath));
+      if (diffOpenPath === forPath) diffResult = result;
     } catch (e) {
-      diffError = String(e instanceof Error ? e.message : e);
+      if (diffOpenPath === forPath) diffError = String(e instanceof Error ? e.message : e);
     } finally {
-      diffLoading = false;
+      if (diffOpenPath === forPath) diffLoading = false;
     }
   }
 
