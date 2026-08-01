@@ -3374,10 +3374,27 @@ async fn macro_undo(app: tauri::AppHandle, run: ResolvedRun) -> Result<(), Strin
 fn macro_apply_run(ctx: &dyn ServerCtx, run: ResolvedRun) -> Result<ResolvedRun, String> {
     for (applied, op) in run.ops.iter().enumerate() {
         if let Err(e) = macro_apply_op(ctx, &op.from, &op.kind, &op.detail, &op.to) {
+            // Roll back the already-applied ops in reverse. Collect any rollback failures rather
+            // than discarding them: if an inverse itself fails (e.g. a file was externally moved
+            // or locked between apply and rollback), the filesystem is left partially modified and
+            // the caller MUST be told the truth — never claim "(rolled back)" when it didn't.
+            let mut rollback_errs = Vec::new();
             for inv in run.inverses[..applied].iter().rev() {
-                let _ = macro_apply_op(ctx, &inv.from, &inv.kind, &inv.detail, &inv.to);
+                if let Err(re) = macro_apply_op(ctx, &inv.from, &inv.kind, &inv.detail, &inv.to) {
+                    rollback_errs.push(re);
+                }
             }
-            return Err(format!("macro run failed at step {}: {e} (rolled back)", applied + 1));
+            if rollback_errs.is_empty() {
+                return Err(format!("macro run failed at step {}: {e} (rolled back)", applied + 1));
+            }
+            return Err(format!(
+                "macro run failed at step {}: {e}; ROLLBACK ALSO FAILED for {} of {} inverse op(s) \
+                 ({}) — the filesystem may be partially modified",
+                applied + 1,
+                rollback_errs.len(),
+                applied,
+                rollback_errs.join("; "),
+            ));
         }
     }
     Ok(run)
@@ -3423,6 +3440,12 @@ fn macro_apply_op(ctx: &dyn ServerCtx, from: &str, kind: &str, detail: &str, to:
 /// extension), unlike the Batch-Media dialog's non-destructive-by-default siblings. A no-op when
 /// `to == from`. Non-image bytes or an unsupported target extension fail loudly rather than
 /// silently corrupting the file; `macro_apply_run` rolls the whole run back on any such failure.
+///
+/// **Undo of a `Convert` is a lossy RE-ENCODE, not a byte-exact restore.** The original file is
+/// deleted here, so `macro_undo`'s inverse re-encodes back to the source extension — a PNG→JPG→undo
+/// round-trip yields a re-encoded (quality-degraded) file, not the original bytes. Rename/move undo
+/// IS byte-exact; convert is the exception. A future improvement (CPE-1194) routes the original to
+/// the trash so convert-undo can truly restore it.
 fn macro_convert_in_place(from: &str, to: &str, detail: &str) -> Result<(), String> {
     if from == to {
         return Ok(());
