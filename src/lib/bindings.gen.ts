@@ -1460,6 +1460,20 @@ async extractArchiveEntry(zip: string, inner: string) : Promise<Result<string, s
 }
 },
 /**
+ * Extract a single entry from any supported non-zip archive (tar/tar.gz/tgz/7z; zip delegates to the
+ * same underlying extractor as [`extract_archive_entry`]) to a temp file and return its path, so a leaf
+ * inside a tar/7z archive can be opened the same way a zip leaf already can (CPE-1180, unblocks
+ * CPE-1181). Read-only: the temp copy is what opens, not the archived bytes.
+ */
+async extractArchiveEntryAny(path: string, inner: string) : Promise<Result<string, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("extract_archive_entry_any", { path, inner }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
  * Pack the given files/folders into a new deflated `.zip` at `dest` (CPE-251). Model lives in
  * `cpe_server::archive` (CPE-822); thin dispatcher.
  */
