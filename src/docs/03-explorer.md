@@ -15,8 +15,8 @@ The explorer is the core of the app and is tuned to stay **fast, small, and pred
 - **Back / Forward / Up** — move through history and up the tree.
 - **Tabs** — Ctrl+T opens a new tab; each tab remembers its own folder and history.
 - **Sidebar** — Home, Favorites (pin folders you use often), and drives with free-space bars. Each
-  section (Explore, Quick access, Drives, Favorites, Tags, Smart Folders) has a header you can click to
-  **collapse** it and reclaim vertical space; your choices persist across sessions.
+  section (Explore, Quick access, Drives, Favorites, Tags, Smart Folders, Saved Searches) has a header
+  you can click to **collapse** it and reclaim vertical space; your choices persist across sessions.
 
 ## Home screen
 
@@ -78,6 +78,14 @@ The Home screen has **Quick access** tiles up top and a tabbed lower section wit
   sidebar. Opening it lists every file carrying that tag, wherever they live, and the view refreshes
   automatically as you add or remove that tag. It's a read-only view (open a file's real location to
   change it); rename or delete a smart folder by right-clicking it. Smart folders persist across
+  sessions and cost nothing when you have none.
+- **Saved searches** — a structured search (extension, name pattern, size, or date, built the same way as
+  **Select by…**) saved as its own virtual folder, alongside smart folders but listed separately under
+  **Saved Searches** in the sidebar. From the Command Palette, run **Select by…** (or **Save search…** to
+  jump straight to naming it), set your criterion, then choose **Save search…** and give it a name.
+  Opening a saved search re-scans recursively from the folder it was saved in and shows only the entries
+  matching that criterion right now — a read-only view, like a smart folder (open a file's real location
+  to change it). Right-click a saved search to rename or delete it. Saved searches persist across
   sessions and cost nothing when you have none.
 - **Selection** — multi-select with Shift/Ctrl; the status bar shows the count and total size.
 - **Operations** — copy, cut, paste, rename, delete (to the trash, restorable), new folder, and batch

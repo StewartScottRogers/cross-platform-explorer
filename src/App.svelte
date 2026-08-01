@@ -102,6 +102,13 @@
     removeSaved as removeSmartSaved,
     type SmartFolder,
   } from "./lib/smartFolders";
+  import { evaluateSavedSearch, flattenTree, type SavedSearch } from "./lib/savedSearch";
+  import {
+    savedSearches,
+    addSavedSearch,
+    renameSavedSearch,
+    removeSavedSearch,
+  } from "./lib/savedSearchStore";
   import TagMenu from "./lib/components/TagMenu.svelte";
   import SmartFolderMenu from "./lib/components/SmartFolderMenu.svelte";
   import { tagCounts } from "./lib/tagFilter";
@@ -432,6 +439,9 @@
     }
   }
   let selectByOpen = false;
+  /** Open the "Select by…" dialog straight into its "Save search…" name field (CPE-1229's own
+      command-palette entry), vs. the default criterion picker for "Select by…" itself. */
+  let selectByAutoSave = false;
   let watchRulesOpen = false;
   let watchRules: WatchRule[] = settings.loadWatchRules();
   // Live watched-folder rules (CPE-794, sidecar-only). Watched folders + on/off persist; the log is
@@ -495,6 +505,8 @@
   let tagMenu: { x: number; y: number; tag: string } | null = null;
   /** Right-click menu for a sidebar smart folder (rename/delete), or null (CPE-667). */
   let smartFolderMenu: { x: number; y: number; id: string; name: string } | null = null;
+  /** Right-click menu for a sidebar saved (structured) search (rename/delete), or null (CPE-1229). */
+  let structuredSearchMenu: { x: number; y: number; id: string; name: string } | null = null;
   /** Full-screen quick-look of images (Space), or null (CPE-645). */
   let quickLook: { images: { path: string; name: string }[]; index: number } | null = null;
 
@@ -739,7 +751,7 @@
   // hotkey, listened for below) AND the in-app "Spotlight (search everywhere)…" palette command, so
   // it's reachable — and gui-smoke-testable — without the OS-level shortcut.
   let spotlightOpen = false;
-  const inFolder = () => !isHome && !archive && !smartFolder;
+  const inFolder = () => !isHome && !archive && !smartFolder && !structuredSearch;
   const hasSelection = () => selectedEntries.length > 0;
   const oneSelected = () => selectedEntries.length === 1;
   const canCloseTab = () => tabs.length > 1;
@@ -810,6 +822,9 @@
     { id: "tool.columns", group: $t("palette.groupTools"), label: $t("palette.manageColumns"), keywords: "columns metadata dimensions duration pages track year picker details view add remove reorder", run: () => (columnPickerOpen = true), enabled: inFolder },
     { id: "tool.verifyAll", group: $t("palette.groupTools"), label: $t("palette.verifyAll"), keywords: "integrity verify all baselined folders bitrot corruption monitor check", run: verifyAllBaselines, enabled: () => Object.keys(integrityBaselines).length > 0 },
     { id: "tool.selectBy", group: $t("palette.groupTools"), label: $t("palette.selectBy"), keywords: "select by criteria extension size date filter", run: () => (selectByOpen = true), enabled: inFolder },
+    // CPE-1229 (epic CPE-978): opens the SAME dialog straight into "Save search…" — capture the current
+    // structured search as a named SavedSearch instead of applying it to the selection.
+    { id: "tool.saveSearch", group: $t("palette.groupTools"), label: $t("palette.saveSearch"), keywords: "save search smart folder condition filter saved query", run: () => { selectByOpen = true; selectByAutoSave = true; }, enabled: inFolder },
     { id: "tool.watchRules", group: $t("palette.groupTools"), label: $t("palette.watchRules"), keywords: "watch rules folder automation move copy tag rename", run: () => (watchRulesOpen = true) },
     { id: "tool.workspaces", group: $t("palette.groupGo"), label: $t("palette.workspaces"), keywords: "workspace layout tabs save session restore", run: () => (workspacesOpen = true) },
     { id: "tool.backup", group: $t("palette.groupTools"), label: $t("palette.backup"), keywords: "backup jobs copy mirror restore sync", run: () => (backupOpen = true) },
@@ -1312,6 +1327,7 @@
   }
   function openSmartFolder(sf: SmartFolder) {
     smartFolder = sf;
+    structuredSearch = null; // the two virtual-folder kinds are mutually exclusive (CPE-1229)
     archive = null;
     selectedTag = "";
     search = "";
@@ -1319,6 +1335,40 @@
   }
   function exitSmartFolder() {
     smartFolder = null;
+    selection = emptySelection();
+  }
+
+  // Active saved STRUCTURED search (CPE-1229, epic CPE-978): a `Condition[]` query opened as a virtual,
+  // read-only listing — the same shape as the tag-only smart folder above, but driven by
+  // `evaluateSavedSearch` instead of the tag store. There's no whole-computer index yet (CPE-703's index
+  // engine is a separate, unbuilt epic), so "cutting across the tree" means recursively from the ONE
+  // folder the search was captured under (`search.root`, captured by "Save search…" at save time) rather
+  // than truly everywhere the way a tag can appear anywhere. A search saved before `root` existed (or
+  // whose captured folder no longer resolves) falls back to the currently-open folder at open time.
+  let structuredSearch: SavedSearch | null = null;
+  let structuredSearchEntries: DirEntry[] = [];
+  $: void loadStructuredSearchEntries(structuredSearch);
+  async function loadStructuredSearchEntries(s: SavedSearch | null) {
+    if (!s) { structuredSearchEntries = []; return; }
+    const root = s.root && s.root.trim() ? s.root : currentPath;
+    if (!root) { structuredSearchEntries = []; return; }
+    try {
+      const tree = await commands.scanTree(root, 12).then(unwrap);
+      structuredSearchEntries = evaluateSavedSearch(flattenTree(tree, root), s, Date.now());
+    } catch {
+      structuredSearchEntries = [];
+    }
+  }
+  function openStructuredSearch(s: SavedSearch) {
+    structuredSearch = s;
+    smartFolder = null;
+    archive = null;
+    selectedTag = "";
+    search = "";
+    selection = emptySelection();
+  }
+  function exitStructuredSearch() {
+    structuredSearch = null;
     selection = emptySelection();
   }
 
@@ -1397,6 +1447,10 @@
   function blockedInArchive(): boolean {
     if (smartFolder) {
       showNotice("This is a smart folder — a saved search view. Open a file's real location to change it.", true);
+      return true;
+    }
+    if (structuredSearch) {
+      showNotice("This is a saved search — a read-only view. Open a file's real location to change it.", true);
       return true;
     }
     if (archive) {
@@ -1510,6 +1564,7 @@
       : [];
 
     smartFolder = null; // navigating to a real folder exits any open smart folder (CPE-667)
+    structuredSearch = null; // ...or a saved structured search (CPE-1229)
 
     if (!keepSelection) {
       selection = emptySelection();
@@ -1862,6 +1917,7 @@
   /** Apply a rich "Select by…" criterion (CPE-782) to the visible list via the shared matcher. */
   function applySelectBy(condition: Condition) {
     selectByOpen = false;
+    selectByAutoSave = false;
     const idx = selectMatching(visible, condition, Date.now());
     selection = selectIndices(idx);
     showNotice(
@@ -1869,6 +1925,21 @@
         ? "No items match that criterion."
         : `Selected ${idx.length} item${idx.length === 1 ? "" : "s"}.`,
     );
+  }
+
+  /**
+   * "Save search…" (CPE-1229, epic CPE-978): capture the SAME `Condition` "Select by…" builds — the one
+   * structured search this app has — as a named `SavedSearch` via the CPE-1228 store, instead of (or as
+   * well as) applying it to the current selection. `match: "all"` is the only sensible choice for a
+   * single condition (all vs. any are equivalent with one term). `root` captures the folder open right
+   * now, since the open-evaluator later scans recursively from wherever the search was saved (no
+   * whole-computer index exists yet to search "everywhere").
+   */
+  function saveCurrentSearch(payload: { name: string; condition: Condition }) {
+    selectByOpen = false;
+    selectByAutoSave = false;
+    addSavedSearch(payload.name, [payload.condition], "all", currentPath);
+    showNotice($t("smart.searchSaved", { name: payload.name }));
   }
 
   function selectByPattern(pattern: string) {
@@ -1901,11 +1972,12 @@
   $: folderName = archive
     ? (archive.inner ? archive.inner.split("/").at(-1)! : archive.zipName)
     : smartFolder ? smartFolder.name
+    : structuredSearch ? structuredSearch.name
     : isHome ? "Home" : (splitPath(currentPath).at(-1)?.name ?? currentPath);
 
   // Folder-context detection (CPE-235): runs on the RAW listing (so hidden
   // markers like `.git` are seen regardless of the show-hidden setting).
-  $: folderContexts = (isHome || archive || smartFolder) ? [] : detectContexts({ path: currentPath, entries });
+  $: folderContexts = (isHome || archive || smartFolder || structuredSearch) ? [] : detectContexts({ path: currentPath, entries });
 
   // The sort/hidden/search/type/tag pipeline that turns the base listing into `visible` (+ its pre-filter
   // `shown`) now lives in <ExplorerPane> (CPE-676 domino 2). App resolves the base list + archive/smart
@@ -1919,15 +1991,17 @@
     ? [{ name: "Home", path: HOME }, ...splitPath(currentPath), ...archiveCrumbs(archive)]
     : smartFolder
       ? [{ name: "Home", path: HOME }, { name: smartFolder.name, path: "" }]
-      : isHome
-        ? [{ name: "Home", path: HOME }]
-        : [{ name: "Home", path: HOME }, ...splitPath(currentPath)];
+      : structuredSearch
+        ? [{ name: "Home", path: HOME }, { name: structuredSearch.name, path: "" }]
+        : isHome
+          ? [{ name: "Home", path: HOME }]
+          : [{ name: "Home", path: HOME }, ...splitPath(currentPath)];
 
   // `selectedEntries` is derived and owned by <ExplorerPane> now (bound above); App only consumes it.
   $: selectedSize = selectedEntries.reduce((n, e) => n + (e.is_dir ? 0 : e.size), 0);
-  $: itemCount = (isHome && !smartFolder) ? places.length + drives.length + pins.length : visible.length;
+  $: itemCount = (isHome && !smartFolder && !structuredSearch) ? places.length + drives.length + pins.length : visible.length;
   // The folder's pre-filter total, so the status bar can read "X of Y items" (CPE-407).
-  $: totalCount = ((isHome && !smartFolder) || archive) ? itemCount : shown.length;
+  $: totalCount = ((isHome && !smartFolder && !structuredSearch) || archive) ? itemCount : shown.length;
   $: pasteCheck = clipCanPaste(clipboard, isHome ? "" : currentPath);
   $: cutPaths = clipboard.mode === "cut" ? clipboard.paths : [];
 
@@ -2783,7 +2857,7 @@
       showNotice("This is a read-only Replay-mode reconstruction — exit Replay mode to make changes.", true);
       return;
     }
-    const dest = folderUnderCursor(pos) || (isHome || archive || smartFolder ? "" : currentPath);
+    const dest = folderUnderCursor(pos) || (isHome || archive || smartFolder || structuredSearch ? "" : currentPath);
     if (!dest) {
       showNotice($t("dnd.openFolderToImport"), true);
       return;
@@ -4339,10 +4413,14 @@
       {selectedTag}
       smartFolders={$smartFolders}
       activeSmartFolder={smartFolder?.id ?? ""}
+      savedSearches={$savedSearches}
+      activeSavedSearch={structuredSearch?.id ?? ""}
       on:filterTag={(e) => (selectedTag = selectedTag === e.detail ? "" : e.detail)}
       on:tagMenu={(e) => (tagMenu = e.detail)}
       on:openSmartFolder={(e) => openSmartFolder(e.detail)}
       on:smartFolderMenu={(e) => (smartFolderMenu = e.detail)}
+      on:openSavedSearch={(e) => openStructuredSearch(e.detail)}
+      on:savedSearchMenu={(e) => (structuredSearchMenu = e.detail)}
       on:driveContext={(e) => onDriveContext(e.detail)}
       on:navigate={(e) => { if (archive) exitArchive(); navigate(e.detail); }}
       on:openFile={(e) => openRecent(e.detail)}
@@ -4371,7 +4449,7 @@
   <div class="pane-col" class:pane-active={dualPane && activePane === 0} on:click={() => (activePane = 0)}>
     <ExplorerPane
       bind:this={explorerPane}
-      inHome={isHome && !smartFolder}
+      inHome={isHome && !smartFolder && !structuredSearch}
       {places}
       {drives}
       {pins}
@@ -4387,7 +4465,7 @@
       bind:showTimeline
       replayOverlay={replayOverlayEntries}
       bind:entries
-      smartOverride={smartFolder ? smartEntries : null}
+      smartOverride={smartFolder ? smartEntries : structuredSearch ? structuredSearchEntries : null}
       archiveOverride={archive ? archiveChildren(archive) : null}
       {search}
       {fileFilter}
@@ -4975,6 +5053,19 @@
   />
 {/if}
 
+{#if structuredSearchMenu}
+  <!-- Reuses SmartFolderMenu (CPE-1229) — it's already a generic name-based rename/delete popover, not
+       tag-specific, so a saved structured search's rename/delete needs no new menu component. -->
+  <SmartFolderMenu
+    x={structuredSearchMenu.x}
+    y={structuredSearchMenu.y}
+    name={structuredSearchMenu.name}
+    on:rename={(e) => { renameSavedSearch(structuredSearchMenu?.id ?? "", e.detail); if (structuredSearch && structuredSearch.id === structuredSearchMenu?.id) structuredSearch = { ...structuredSearch, name: e.detail }; structuredSearchMenu = null; }}
+    on:remove={() => { const id = structuredSearchMenu?.id ?? ""; if (structuredSearch?.id === id) exitStructuredSearch(); removeSavedSearch(id); structuredSearchMenu = null; }}
+    on:close={() => (structuredSearchMenu = null)}
+  />
+{/if}
+
 {#if patternSelectOpen}
   <PatternSelectDialog
     on:submit={(e) => selectByPattern(e.detail)}
@@ -5009,8 +5100,10 @@
 
 {#if selectByOpen}
   <SelectByDialog
+    autoReveal={selectByAutoSave}
     on:submit={(e) => applySelectBy(e.detail)}
-    on:cancel={() => (selectByOpen = false)}
+    on:save={(e) => saveCurrentSearch(e.detail)}
+    on:cancel={() => { selectByOpen = false; selectByAutoSave = false; }}
   />
 {/if}
 

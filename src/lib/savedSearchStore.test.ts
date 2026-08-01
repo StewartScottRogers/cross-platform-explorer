@@ -37,6 +37,17 @@ describe("savedSearchStore CRUD (CPE-1228)", () => {
     expect(addSavedSearchTo([], "   ", [png], "any")).toEqual([]);
   });
 
+  it("addSavedSearchTo captures an optional root (CPE-1229 'Save search…')", () => {
+    const after = addSavedSearchTo([], "Big PNGs", [png], "all", "Z:\\repos\\project");
+    expect(after[0].root).toBe("Z:\\repos\\project");
+  });
+
+  it("addSavedSearchTo omits root entirely when not given or blank (back-compat shape)", () => {
+    expect(addSavedSearchTo([], "No root", [png], "all")).toHaveLength(1);
+    expect(addSavedSearchTo([], "No root", [png], "all")[0].root).toBeUndefined();
+    expect(addSavedSearchTo([], "Blank root", [png], "all", "   ")[0].root).toBeUndefined();
+  });
+
   it("renameSavedSearchIn renames by id, ignoring blank/unknown", () => {
     const list = [search({ id: "a", name: "Old" })];
     expect(renameSavedSearchIn(list, "a", "New")[0].name).toBe("New");
@@ -109,6 +120,13 @@ describe("savedSearches writable store (CPE-1228)", () => {
     localStorage.setItem(KEY, "{not valid json");
     const { savedSearches } = await import("./savedSearchStore");
     expect(get(savedSearches)).toEqual([]);
+  });
+
+  it("addSavedSearch (module helper) threads the captured root through to persistence", async () => {
+    const mod = await import("./savedSearchStore");
+    mod.addSavedSearch("Rooted", [png], "all", "Z:\\repos\\project");
+    const persisted = parseSavedSearches(localStorage.getItem(KEY));
+    expect(persisted[0].root).toBe("Z:\\repos\\project");
   });
 
   it("add/rename/remove helpers persist every change to localStorage", async () => {

@@ -3,11 +3,20 @@
    * "Select by…" criteria dialog (CPE-782, epic CPE-711). Build a CPE-774 `Condition` across every kind
    * (extension / glob / size / age / is-folder); App applies it via `selectMatching` (CPE-780) to set the
    * selection. Richer than the glob-only "Select by pattern" — a thin front-end over the tested matcher.
+   *
+   * CPE-1229 (epic CPE-978): the SAME built condition can instead be captured as a named `SavedSearch`
+   * (one condition, `match: "all"`) — "the current structured search" this app has, since there's no
+   * separate multi-condition search bar. `autoReveal` lets the caller open straight into that flow (the
+   * command-palette "Save search…" entry) instead of making the user find a second button first.
    */
   import { createEventDispatcher, onMount } from "svelte";
   import type { Condition } from "../colorRules";
 
-  const dispatch = createEventDispatcher<{ submit: Condition; cancel: void }>();
+  /** Open with the "Save search…" name field already revealed (command palette "Save search…" entry),
+      vs. the default "Select by…" entry which opens on the criterion picker. */
+  export let autoReveal = false;
+
+  const dispatch = createEventDispatcher<{ submit: Condition; cancel: void; save: { name: string; condition: Condition } }>();
 
   let kind: Condition["kind"] = "ext";
   let exts = "";
@@ -18,7 +27,11 @@
   let isDirValue = true;
   let firstField: HTMLElement;
 
-  onMount(() => firstField?.focus());
+  let showSaveName = autoReveal;
+  let saveName = "";
+  let nameField: HTMLElement;
+
+  onMount(() => (showSaveName ? nameField : firstField)?.focus());
 
   function buildCondition(): Condition | null {
     switch (kind) {
@@ -48,6 +61,19 @@
   function submit() {
     const c = buildCondition();
     if (c) dispatch("submit", c);
+  }
+
+  /** First click reveals the name field (inline, not a second modal — the criterion above is still
+      live); a second click (or Enter in the name field) actually saves. */
+  function saveSearch() {
+    if (!showSaveName) {
+      showSaveName = true;
+      return;
+    }
+    const n = saveName.trim();
+    const c = buildCondition();
+    if (!n || !c) return;
+    dispatch("save", { name: n, condition: c });
   }
 </script>
 
@@ -84,6 +110,24 @@
       {/if}
     </div>
 
+    <!-- CPE-1229: capture this same condition as a named saved search instead of (or as well as)
+         applying it to the current selection. Inline reveal, not a second modal (prefer-inline-instant-controls). -->
+    <div class="row save-row">
+      {#if showSaveName}
+        <input
+          bind:this={nameField}
+          class="grow"
+          placeholder="Search name…"
+          bind:value={saveName}
+          aria-label="Search name"
+          on:keydown={(e) => e.key === "Enter" && saveSearch()}
+        />
+        <button class="btn" data-testid="save-search-confirm" on:click={saveSearch}>Save search</button>
+      {:else}
+        <button class="btn ghost" data-testid="save-search-reveal" on:click={saveSearch}>Save search…</button>
+      {/if}
+    </div>
+
     <div class="actions">
       <button class="btn" on:click={() => dispatch("cancel")}>Cancel</button>
       <button class="btn primary" data-testid="select-btn" on:click={submit}>Select</button>
@@ -101,8 +145,11 @@
   select, input:not([type="checkbox"]) { height: 32px; padding: 0 8px; font: inherit; color: var(--text); background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); }
   .num { width: 100px; }
   .unit, .chk { font-size: 12.5px; color: var(--text-dim); }
+  .save-row { margin-top: 10px; }
   .actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 18px; }
   .btn { height: 32px; padding: 0 16px; border: 1px solid var(--border-strong); border-radius: var(--radius); background: var(--surface-alt); color: var(--text); }
   .btn.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
   .btn.primary:hover { background: var(--accent-hover); }
+  .btn.ghost { border-color: transparent; background: transparent; color: var(--text-dim); padding: 0 4px; height: auto; }
+  .btn.ghost:hover { color: var(--text); }
 </style>
