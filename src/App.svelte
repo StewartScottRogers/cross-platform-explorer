@@ -2705,7 +2705,14 @@
             cancelledNotice: "Extraction cancelled.",
             failedNotice: `Couldn't extract "${entry.name}".`,
           });
-        } catch {
+        } catch (e) {
+          if (!isPasswordError(e)) {
+            // A non-password failure (disk full, corrupt archive, permission denied, …) — surface the
+            // real error and stop instead of misreporting it as a bad password (CPE-1186).
+            passwordPrompt = null;
+            showNotice(String(e), true);
+            return;
+          }
           // Wrong (or empty) password — re-prompt with the error line instead of dismissing.
           promptForExtractPassword(entry, dest, onSuccess, "Wrong password — try again.");
         }
