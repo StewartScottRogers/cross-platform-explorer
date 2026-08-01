@@ -2,7 +2,7 @@
 id: CPE-718
 title: "EPIC: Universal thumbnail pipeline"
 type: Task
-status: In Progress
+status: Proposed
 priority: Medium
 component: Multiple
 tags: [epic]
@@ -64,3 +64,22 @@ Decomposition (headless-buildable first; heavy-dep formats deferred):
 - **CPE-1238 (deferred)** — Video representative-frame + PDF first-page extractors. HEAVY native deps
   (ffmpeg/pdfium/mupdf) that fight PURPOSE's fast/small/predictable, and real-render verification is
   GUI/hardware-gated. Build-to-last-mile then defer to the user.
+
+## Headless slice COMPLETE 2026-08-01 (workshift) — remainder user-gated
+Delivered every cleanly-headless part of the DoD; reverted to Proposed because the ONLY remaining work
+is heavy-dep + user-gated (a dependency-weight decision), not crew-buildable:
+- **CPE-1236 (merged #537)** — SVG (resvg/usvg, pure-Rust) + font glyph-sheet (ab_glyph + WOFF1 unwrap)
+  thumbnail extractors, extending the existing dispatch; woff2 out (no Brotli dep). Reviewer + UAT.
+- **CPE-1237 (merged #538)** — frontend streaming client wiring the built-but-orphaned `thumb_queue`
+  (priority Visible>Prefetch>Background) + `thumb_cache` into visible virtualized tiles: `thumb_pipeline`
+  glue + `thumbnails_stream`/`cancel_thumbnails_stream` commands + `thumbnailClient.ts` (microtask-batch,
+  cache-hit sync, newer-batch-cancels-older, bounded retry cap). Reviewer + UAT + Visual Critic
+  **VISUAL PASS** (gallery: SVG→rendered thumbnail, PNG→rendered, garbage font→graceful type-icon).
+- Follow-ups filed: CPE-1239 (retry-cap regression-pin test).
+
+**REMAINING (all user-gated — build-to-last-mile reached):** CPE-1238 (deferred) — video
+representative-frame + PDF first-page + office thumbnails. These need HEAVY native crates
+(ffmpeg/pdfium/mupdf / libreoffice-headless) that materially grow build size + fight PURPOSE's
+fast/small/predictable tiebreaker, plus real-render verification is GUI/hardware-gated. Needs a USER
+decision on the dependency approach (bundled vs feature-gated vs sidecar) before proceeding. Re-activate
+with `/ticketing-epic activate` once that call is made.
