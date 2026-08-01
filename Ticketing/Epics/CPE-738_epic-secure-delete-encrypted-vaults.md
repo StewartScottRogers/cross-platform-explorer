@@ -2,7 +2,7 @@
 id: CPE-738
 title: "EPIC: Secure delete & encrypted vaults"
 type: Task
-status: Proposed
+status: In Progress
 priority: Low
 component: Multiple
 tags: [epic]
@@ -43,3 +43,23 @@ the overwrite engine, and the encrypted-vault half (passphrase/key derivation + 
 
 ## Board hygiene 2026-07-29 — reverted In Progress → Proposed
 Not actively being worked: all decomposed child tickets are Done. Remaining DoD is user-gated (GUI / model-key / cert / Mac) or a deferred cap. Reverted to **Proposed** so the epic queue honestly shows what's dormant vs active; re-activate with `/ticketing-epic activate` to resume (like CPE-703 was this session). **Remaining (DoD review 2026-07-30):** Overwrite engine + encrypted-vault (key derivation/mount) + security review unbuilt (only shred-plan model).
+
+## Re-activated 2026-08-01 (workshift) — secure-delete slice only; vaults stay user-gated
+PM scouting (grep-first). TRUE state:
+- The overwrite ENGINE `secure_shred::shred_file(path, scheme) -> ShredReport` (schemes
+  Zero/Random/DoD3/Gutmann, CPE-1012) + the honest-caveat plan `secure_delete::plan_shred` (CPE-941)
+  are BUILT + cargo-tested but ORPHANED — `grep shred src-tauri/src/lib.rs` finds only a comment; NO
+  command, NO UI. (Orphaned-but-built pattern.)
+- The VAULT half is entirely unbuilt + USER-GATED: needs an authenticated-encryption + KDF crate
+  (the repo enforces a hard no-new-dep guardrail — a dependency exception is a user call) AND the DoD
+  mandates a human security-review gate + OS-keychain key storage. Not crew-buildable alone.
+
+Building the secure-delete DoD bullet only:
+- **CPE-1240** — Wire secure delete: thin `shred_paths` command (dispatch to `shred_file`) + a
+  "Securely delete…" context-menu action + an explicit confirm dialog stating it is PERMANENT /
+  non-recoverable (NOT routed through the recoverable trash — that's the point) AND the honest
+  platform caveats (SSD wear-leveling / copy-on-write / journaling can leave remnants; overwrite is
+  best-effort). Backend command + frontend. Headless-verifiable (cargo + vitest).
+
+**Deferred (user-gated):** encrypted vaults — needs a crypto-dep exception + a security review + OS
+keychain. Revisit with the user.
