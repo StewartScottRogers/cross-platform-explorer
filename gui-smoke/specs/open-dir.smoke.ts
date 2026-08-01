@@ -6,6 +6,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { $, $$, browser } from "@wdio/globals";
 import { snap, snapFailure } from "../lib/snap.js"; // ESM relative import — resolves to lib/snap.ts under tsx
+import { compareSnapshotToBaseline } from "../lib/compare.js"; // CPE-1170 — advisory visual-diff vs. gui-smoke/baselines/
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const STATE_FILE = path.resolve(__dirname, "..", ".smoke-state.json");
@@ -78,6 +79,15 @@ describe("CPE-1045 — headless GUI smoke: --open <dir> navigates", () => {
     // On a FAILING run this line is never reached — the `afterEach` hook above captures
     // `open-dir-fail.png` of the failure state instead (CPE-1149).
     await snap("open-dir");
+
+    // CPE-1170 — visual-regression comparator, wired here as the worked example: diff the capture
+    // just written above against the committed golden `gui-smoke/baselines/open-dir.png`. Advisory
+    // by default (a mismatch only logs — see compareSnapshotToBaseline's doc comment); set
+    // GUI_SMOKE_VISUAL_STRICT=1 to make an over-threshold diff fail this spec instead. No baseline
+    // has been blessed for this surface yet in this repo (blessing needs a real `tauri build` run,
+    // not available in a headless dev sandbox) — until one exists this call is a documented no-op
+    // that logs "no baseline" and returns advisory-only, same failure-safe shape as `snap()` itself.
+    await compareSnapshotToBaseline("open-dir");
   });
 
   // CPE-1096 — QA-debt burndown: CPE-1090 (outline strip/breadcrumb) and CPE-1091 (per-line
