@@ -2,7 +2,7 @@
 id: CPE-714
 title: "EPIC: Terminal dock — embedded terminal panel"
 type: Task
-status: Proposed
+status: In Progress
 priority: Medium
 component: Multiple
 tags: [epic]
@@ -43,3 +43,20 @@ and the dock layout.
 
 ## Board hygiene 2026-07-29 — reverted In Progress → Proposed
 Not actively being worked: all decomposed child tickets are Done. Remaining DoD is user-gated (GUI / model-key / cert / Mac) or a deferred cap. Reverted to **Proposed** so the epic queue honestly shows what's dormant vs active; re-activate with `/ticketing-epic activate` to resume (like CPE-703 was this session). **Remaining (DoD review 2026-07-30):** PTY/shell spawn + xterm render + dock layout unbuilt (only tab model).
+
+## Activated 2026-08-01 (workshift, user said "you choose") — decomposition
+User granted the epic pick + the xterm.js dependency decision ("you choose"). Grep-first TRUE state:
+- `crates/server/src/terminal_tabs.rs` (`TerminalDock`: open/close/activate/rename/set_cwd/tabs,
+  CPE-947) is BUILT but ORPHANED (no PTY, no UI). `ThumbnailImage`-style orphaned-engine pattern.
+- PTY prior art: `sidecar/ai-console/src/pty.rs` — a full `PtySession` (spawn/master/resize/read/write)
+  on **`portable-pty` 0.8, ALREADY a workspace dep** (sidecar/ai-console/Cargo.toml). Backend reuses it
+  → no NEW backend dep. xterm.js is already referenced by the AI-console launcher (known frontend dep).
+
+Decomposition (sequential — 1243 needs 1242's commands):
+- **CPE-1242** — PTY backend session in cpe-server: mirror `sidecar/ai-console/src/pty.rs`'s PtySession
+  (portable-pty) — spawn a shell at a cwd, stream output over `ipc::Channel`, write input, resize, close;
+  thin Tauri commands driving it + the `terminal_tabs` dock model. Headless cargo-testable
+  (spawn echo/shell, write, read back, resize, close-frees-PTY). Async + spawn_blocking (CPE-760/761).
+- **CPE-1243** — Terminal dock UI: an xterm.js pane rendering the PTY stream, wired to the
+  `terminal_tabs` dock (tabs open/close/activate/rename), open-at-current-folder + follow-navigation
+  (`set_cwd`), per-OS shell selection, resize. Panel-closed = no PTY/background cost. gui-smoke + vitest.
