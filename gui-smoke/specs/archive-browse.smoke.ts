@@ -100,8 +100,14 @@ describe("CPE-1181 — headless GUI smoke: browsing into a non-zip (.tar.gz) arc
     );
 
     // Core assertion #2 (breadcrumb shows the archive name): `archiveCrumbs` appends the archive's own
-    // name as the last `button.crumb` once inside it (App.svelte's `crumbs` derivation).
-    const crumbs = await $$("button.crumb");
+    // name as the LAST crumb once inside it (App.svelte's `crumbs` derivation). NavToolbar.svelte
+    // renders every crumb except the last as `<button class="crumb">`, but the last (active) crumb —
+    // exactly the in-archive one we need here — is a non-button `<span class="crumb current"
+    // aria-current="page">` (NavToolbar.svelte's `{#if i === crumbs.length - 1}` branch). Scanning only
+    // `button.crumb` therefore always excludes the in-archive crumb and can never pass; query `.crumb`
+    // (which matches both the buttons and the trailing span — `.crumb-sep` is a distinct class so it's
+    // not swept in) to see the real, full trail.
+    const crumbs = await $$(".crumb");
     const crumbTexts: string[] = [];
     for await (const c of crumbs) crumbTexts.push((await c.getText()).trim());
     expect(
