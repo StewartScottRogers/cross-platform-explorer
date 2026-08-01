@@ -2,7 +2,7 @@
 id: CPE-715
 title: "EPIC: Link forge — symlink, junction & hardlink management"
 type: Task
-status: In Progress
+status: Done
 priority: Low
 component: Multiple
 tags: [epic]
