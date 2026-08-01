@@ -117,6 +117,10 @@ windows = { version = "0.56", features = ["Win32_Foundation", "Win32_Storage_Fil
 # (rust_xlsxwriter moved to `cpe-server` dev-deps with the spreadsheet-preview test, CPE-815.)
 # Temp dirs for filesystem tests (e.g. the Agent Board project-root walk-up, CPE-554).
 tempfile = "3"
+# Dev-only: build STRUCTURED image fixtures for the image-similarity integration test. A hand-embedded
+# featureless PNG is (correctly) excluded by the CPE-1205 featureless-guard, so the test needs a real
+# structured image; matches `cpe-server`'s image dep. Not a runtime dependency.
+image = { version = "0.25", default-features = false, features = ["png"] }
 
 [features]
 # This feature is used for production builds where `devUrl` is disabled.
