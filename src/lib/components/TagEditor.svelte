@@ -6,6 +6,7 @@
   import { get } from "svelte/store";
   import Icon from "./Icon.svelte";
   import { t } from "../i18n";
+  import * as settings from "../settings";
   import {
     tags as tagStore,
     entryFor,
@@ -39,18 +40,21 @@
   const LABELS: string[] = Object.keys(LABEL_COLORS);
 
   // Native tag sync (CPE-828): per-file only (native metadata is per-path), so hidden in batch mode.
+  // Also gated behind the nativeBridgeEnabled opt-in (CPE-1177, epic CPE-717) — off by default, so the
+  // plain tag editor shows no native controls until the user turns the bridge on in Settings.
+  const nativeBridgeEnabled = settings.loadNativeBridgeEnabled();
   let nativeName = "";
   let syncing = false;
   let syncNote = "";
 
   onMount(() => {
     input?.focus();
-    if (!batch) nativeTagStoreName().then((n) => (nativeName = n)).catch(() => {});
+    if (!batch && nativeBridgeEnabled) nativeTagStoreName().then((n) => (nativeName = n)).catch(() => {});
   });
 
   /** Pull the file's OS-native tags into the store, then re-seed this editor from the merged result. */
   async function pullNative() {
-    if (syncing || batch) return;
+    if (syncing || batch || !nativeBridgeEnabled) return;
     syncing = true; syncNote = "";
     try {
       await pullNativeTags(paths[0]);
@@ -67,7 +71,7 @@
 
   /** Persist the current edits, then push them out to the file's OS-native metadata. */
   async function pushNative() {
-    if (syncing || batch) return;
+    if (syncing || batch || !nativeBridgeEnabled) return;
     syncing = true; syncNote = "";
     addTag();
     try {
@@ -178,7 +182,7 @@
       </div>
     </div>
 
-    {#if !batch && nativeName}
+    {#if !batch && nativeBridgeEnabled && nativeName}
       <div class="field native" data-testid="native-sync">
         <span class="section-label">{nativeName}</span>
         <div class="native-row">

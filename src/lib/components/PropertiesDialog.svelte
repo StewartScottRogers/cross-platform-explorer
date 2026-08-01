@@ -9,6 +9,8 @@
   import { iconFor, typeName, categoryOf, isImage } from "../filetypes";
   import { checksumMatches } from "../checksum";
   import type { DirEntry } from "../types";
+  import * as settings from "../settings";
+  import { tags as tagStore, entryFor, nativeTagStoreName, pullNativeTags } from "../tags";
 
   /** The selected entries. One => full detail; many => aggregate summary. */
   export let entries: DirEntry[] = [];
@@ -130,6 +132,30 @@
   $: folderCount = entries.filter((e) => e.is_dir).length;
   $: fileCount = entries.length - folderCount;
 
+  // Native metadata (CPE-1176, epic CPE-717) — read-only surfacing of the OS-native tag/label store
+  // (macOS Finder tags / Windows NTFS ADS / Linux xattr) for the selected path, gated on CPE-1177's
+  // nativeBridgeEnabled opt-in. Writing stays TagEditor's job; this is Pull-only. The tags shown come
+  // from CPE's own tag store (already loaded app-wide via initTags()), which the Pull button re-seeds
+  // from native metadata via the same non-destructive union TagEditor uses.
+  const nativeBridgeEnabled = settings.loadNativeBridgeEnabled();
+  let nativeStoreName = "";
+  let nativePulling = false;
+  let nativeError = "";
+  $: nativeEntry = single ? entryFor($tagStore, single.path) : { tags: [] as string[], label: "" };
+
+  async function pullNative() {
+    if (!single || nativePulling) return;
+    nativePulling = true;
+    nativeError = "";
+    try {
+      await pullNativeTags(single.path);
+    } catch (e) {
+      nativeError = e instanceof Error ? e.message : String(e);
+    } finally {
+      nativePulling = false;
+    }
+  }
+
   onMount(async () => {
     if (!single) return;
     try {
@@ -151,6 +177,14 @@
         inspection = unwrap(await commands.inspectFile(single.path));
       } catch {
         /* leave inspection null; the dialog just omits the inspection rows */
+      }
+    }
+    // Native metadata store name (CPE-1176) — best-effort, only when the bridge is on.
+    if (nativeBridgeEnabled) {
+      try {
+        nativeStoreName = await nativeTagStoreName();
+      } catch {
+        /* leave nativeStoreName blank; the section still shows with a generic heading */
       }
     }
     // Folder sizes must be computed recursively, which can take a while on a
@@ -307,6 +341,35 @@
       </dl>
     {/if}
 
+    {#if nativeBridgeEnabled && single}
+      <div class="native-section" data-testid="native-metadata-section">
+        <div class="section-title">
+          Native metadata{#if nativeStoreName}<span class="dim"> — {nativeStoreName}</span>{/if}
+        </div>
+        <div class="native-row">
+          <span class="native-label">Tags</span>
+          <div class="chips">
+            {#each nativeEntry.tags as tag (tag)}
+              <span class="chip"><span class="chip-text">{tag}</span></span>
+            {/each}
+            {#if nativeEntry.tags.length === 0}
+              <span class="empty">No tags</span>
+            {/if}
+          </div>
+        </div>
+        <div class="native-row">
+          <span class="native-label">Label</span>
+          <span class="native-value">{nativeEntry.label || "None"}</span>
+        </div>
+        <div class="native-row">
+          <button class="mini" disabled={nativePulling} on:click={pullNative}>
+            {nativePulling ? "Pulling…" : "Pull"}
+          </button>
+          {#if nativeError}<span class="err-inline">{nativeError}</span>{/if}
+        </div>
+      </div>
+    {/if}
+
     <div class="actions">
       <button class="btn primary" on:click={close}>{$t("common.close")}</button>
     </div>
@@ -366,4 +429,29 @@
   .btn.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
   .btn.primary:hover { background: var(--accent-hover); }
   .error { color: #c42b1c; padding: 12px 0; }
+
+  /* Native metadata (CPE-1176) — a distinct, clearly-bordered read-only section
+     ([[dialogs-need-visible-border]]) below the main property list. */
+  .native-section {
+    margin-top: 12px;
+    padding: 10px 12px 12px;
+    border: 1px solid var(--border-strong);
+    border-radius: var(--radius);
+    background: var(--surface-alt);
+  }
+  .section-title { font-size: 12px; font-weight: 600; color: var(--text-dim); margin-bottom: 8px; }
+  .native-row { display: flex; align-items: center; gap: 10px; font-size: 13px; margin-bottom: 6px; }
+  .native-row:last-child { margin-bottom: 0; }
+  .native-label { color: var(--text-dim); width: 40px; flex: none; }
+  .native-value { flex: 1; overflow-wrap: anywhere; }
+  /* Reflow row: chips wrap onto more rows; each chip keeps its text on one line (tick-tacks). */
+  .chips { display: flex; flex-wrap: wrap; gap: 6px; flex: 1; }
+  .chip {
+    display: inline-flex; align-items: center;
+    flex: 0 0 auto; max-width: 100%;
+    padding: 2px 8px; background: var(--surface); border: 1px solid var(--border);
+    border-radius: 999px; font-size: 12px; white-space: nowrap;
+  }
+  .chip-text { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 220px; }
+  .empty { color: var(--text-faint); font-size: 12px; }
 </style>

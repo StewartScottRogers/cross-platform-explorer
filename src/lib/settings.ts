@@ -61,6 +61,7 @@ export const KEYS = {
   dualPane: "cpe.dualPane",
   paneBPath: "cpe.paneBPath",
   networkLocations: "cpe.networkLocations",
+  nativeBridgeEnabled: "cpe.nativeBridgeEnabled",
 } as const;
 
 const MAX_RECENTS = 20;
@@ -238,6 +239,12 @@ export const savePins = (v: string[]) => write(KEYS.pins, v);
 // OS-enumerated mapped drives; a corrupt value degrades to [].
 export const loadNetworkLocations = (): string[] => read(KEYS.networkLocations, [], isStringArray);
 export const saveNetworkLocations = (v: string[]) => write(KEYS.networkLocations, v);
+
+// Native-bridge opt-in (CPE-1177, epic CPE-717): gates the OS-native tag/comment sync controls (Pull/Push
+// in TagEditor, the read-only Native metadata section in PropertiesDialog per CPE-1176). Off by default —
+// the plain explorer never touches native file metadata unless the user opts in here.
+export const loadNativeBridgeEnabled = (): boolean => read(KEYS.nativeBridgeEnabled, false, isBool);
+export const saveNativeBridgeEnabled = (v: boolean) => write(KEYS.nativeBridgeEnabled, v);
 
 /** Append a network location, trimmed + de-duplicated (case/trailing-slash-insensitive). */
 export function addNetworkLocation(list: string[], path: string): string[] {
