@@ -4,7 +4,7 @@ title: "Archive extract polish: orphan dest dir on password-cancel + precise ret
 type: chore
 component: Multiple
 priority: low
-status: Backlog
+status: Done
 tags: ready
 created: 2026-07-31
 epic: CPE-705
@@ -28,9 +28,9 @@ Two non-blocking findings from the CPE-1182/1183 review (PR #497):
   errors on retry so a non-password failure shows its real message.
 
 ## Acceptance Criteria
-- [ ] Cancelling the password prompt leaves no empty dest folder.
-- [ ] A non-password extract failure on retry shows its real error, not "Wrong password".
-- [ ] `npm run check` + `npm test` + `cargo test` green.
+- [x] Cancelling the password prompt leaves no empty dest folder. (fixed by CPE-1184 / #523)
+- [x] A non-password extract failure on retry shows its real error, not "Wrong password".
+- [x] `npm run check` + `npm test` green (no backend code touched — this was a frontend-only fix).
 
 ## Work Log
 - 2026-07-31 — Filed by Foreman (workshift) from the PR #497 reviewer's two non-blocking findings.
@@ -43,3 +43,17 @@ REMAINING scope for this ticket: only finding #2 — the imprecise "Wrong passwo
 NON-password extract retry failure (`promptForExtractPassword`'s bare `catch {}` in `src/App.svelte`
 swallows the real error and always attributes failure to a bad password). Fix: surface the actual
 error text when the failure isn't a password mismatch.
+
+## Update 2026-08-01 (workshift) — finding #2 fixed, ticket Done
+`promptForExtractPassword`'s retry `catch` in `src/App.svelte` now reuses the existing
+`isPasswordError(e)` helper (already used one call-site up, in `extractWithPasswordFallback`, which
+checks the `zip` crate's own error wording — both "Password required to decrypt file" and "The
+password provided is incorrect" contain the substring "password", per CPE-1182). When the retry
+error is NOT a password error, the prompt is dismissed (`passwordPrompt = null`) and the real error
+is surfaced via `showNotice(String(e), true)` instead of looping back into "Wrong password — try
+again."; a genuine password error still re-prompts exactly as before. Added a new test case to
+`src/App.archivePassword.test.ts` ("a non-password retry failure (CPE-1186) surfaces the real error
+instead of claiming 'Wrong password'") that makes the retry fail with "No space left on device" and
+asserts the dialog closes with that real message shown, not "Wrong password — try again.". Frontend
+only — no backend/Rust files touched. `npm run check` (0 errors) and `npm test` (148 files / 1646
+tests) both green. PR opened from branch `cpe-1186-extract-error-precision`.

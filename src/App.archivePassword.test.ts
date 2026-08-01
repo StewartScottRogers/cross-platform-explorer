@@ -170,6 +170,35 @@ describe("archive password — extract prompt + retry (CPE-1182/1184)", () => {
     await waitFor(() => expect(screen.queryByTestId("password-field")).toBeNull());
   });
 
+  it("a non-password retry failure (CPE-1186) surfaces the real error instead of claiming 'Wrong password'", async () => {
+    mockBackend([file("secret.zip", "zip")], {
+      // The first (password: null) attempt looks exactly like a locked archive, so the prompt opens.
+      // The retry after a password is entered fails for an UNRELATED reason (disk full mid-write) —
+      // that error text must reach the user verbatim, not get relabelled "Wrong password".
+      start_archive_extract: (args) => {
+        const password = args.password as string | null;
+        if (password === null) throw new Error("unsupported Zip archive: Password required to decrypt file");
+        throw new Error("No space left on device");
+      },
+    });
+    await enterDrive();
+    await waitFor(() => expect(screen.getByText("secret.zip")).toBeTruthy());
+
+    rightClickRow("secret.zip");
+    await waitFor(() => expect(screen.getByText("Extract")).toBeTruthy());
+    await fireEvent.click(screen.getByText("Extract"));
+
+    const field = await screen.findByTestId("password-field");
+    await fireEvent.input(field, { target: { value: "hunter2" } });
+    await fireEvent.click(screen.getByTestId("ok-btn"));
+
+    // The dialog closes (no more re-prompting — this isn't a password problem) and the real error is
+    // shown as the status-bar notice.
+    await waitFor(() => expect(screen.queryByTestId("password-field")).toBeNull());
+    await waitFor(() => expect(screen.getByText("Error: No space left on device")).toBeTruthy());
+    expect(screen.queryByText("Wrong password — try again.")).toBeNull();
+  });
+
   it("Cancel aborts cleanly — no password ever sent to start_archive_extract, dialog closes", async () => {
     mockBackend([file("secret.zip", "zip")], {
       start_archive_extract: (args) => {
