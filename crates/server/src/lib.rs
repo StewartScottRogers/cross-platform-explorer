@@ -199,6 +199,19 @@ pub mod snapshot;
 /// directory byte-for-byte. Std + serde only; not feature-gated.
 pub mod snapshot_capture;
 
+/// Retention-prune command layer (CPE-1196, epic CPE-735): wires the pure grandfather-father-son policy
+/// ([`snapshot_retention::thin`]) to the real on-disk store — enumerate a root's manifests, preview a
+/// keep/prune decision non-destructively, and apply it via [`snapshot_capture::prune`] (+ an optional
+/// total-byte cap). Store-dir-based, like `snapshot_capture` itself.
+pub mod snapshot_prune;
+
+/// Snapshot schedule rules store + pure `due()` policy (CPE-1198, epic CPE-735): a persisted per-folder
+/// rule (path, interval, retention policy, enabled), mirroring the `column_config` store pattern, and a
+/// deterministic decision over which roots are due for a fresh capture at an injected `now`. No timer, no
+/// UI here — [`snapshot_schedule::snapshot_run_due`] is a single pass a caller (timer or "run now" button)
+/// invokes.
+pub mod snapshot_schedule;
+
 /// Revert-plan execution engine (CPE-1081, epic CPE-732) — applies a minimal [`restore_plan::RestoreAction`]
 /// plan (Create/Overwrite/Delete) to a REAL directory: the surgical, current-state-aware counterpart to
 /// [`snapshot_capture::restore`]'s whole-manifest replay. Std-only; reuses `restore_plan`/`snapshot_capture`

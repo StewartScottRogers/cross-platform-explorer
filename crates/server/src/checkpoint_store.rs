@@ -42,10 +42,12 @@ use crate::fsutil::to_epoch_ms;
 use crate::model::OpResult;
 use crate::restore_plan::{self, plan_restore, summarize_plan, RestoreAction};
 use crate::revert_attribution;
-use crate::revert_engine::{execute_restore, RestoreReport};
+use crate::revert_engine::{execute_restore, safe_target, RestoreReport};
 use crate::revert_safety::{classify_plan, summarize_conflicts};
 use crate::snapshot::{CaptureBudget, SkipReason};
 use crate::snapshot_capture;
+use crate::snapshot_prune::{self, RetentionApplyResult, RetentionPreview};
+use crate::snapshot_retention::RetentionPolicy;
 
 /// One recorded checkpoint's index entry: which manifest holds its captured tree, the user's label, and
 /// when it was taken (epoch ms). This is the row appended to / read from `checkpoints.json`.
@@ -349,6 +351,101 @@ pub fn checkpoint_revert_one(
     Ok(RevertOutcome::from_report(report))
 }
 
+// ---- Retention prune (CPE-1196, epic CPE-735) --------------------------------------------------------
+// Thin ctx-aware wrappers around `snapshot_prune`'s store-dir-based `preview`/`apply` — resolve `root`'s
+// per-root store dir the same way every other entry point in this module does, then delegate. `preview`
+// never touches disk; `apply` is the only one of the two that does, and it goes through
+// `snapshot_capture::prune` internally, so the manifest-deleted-first invariant is preserved unchanged.
+
+/// Preview retention-thinning `root`'s checkpoints under `policy`: which manifests would be kept vs.
+/// pruned, and the store's current footprint. Read-only.
+pub fn checkpoint_prune_preview(
+    ctx: &dyn ServerCtx,
+    root: &str,
+    policy: &RetentionPolicy,
+) -> Result<RetentionPreview, String> {
+    let store = store_dir_for(ctx, root)?.to_string_lossy().to_string();
+    snapshot_prune::preview(&store, policy)
+}
+
+/// Actually retention-prune `root`'s checkpoints to `policy` (+ an optional total-store-byte cap — see
+/// [`snapshot_prune::apply`]'s doc for the oldest-first/never-to-zero eviction rule beyond the GFS pass).
+pub fn checkpoint_prune_apply(
+    ctx: &dyn ServerCtx,
+    root: &str,
+    policy: &RetentionPolicy,
+    max_total_bytes: Option<u64>,
+) -> Result<RetentionApplyResult, String> {
+    let store = store_dir_for(ctx, root)?.to_string_lossy().to_string();
+    snapshot_prune::apply(&store, policy, max_total_bytes)
+}
+
+// ---- Per-file diff (CPE-1197 backend half, epic CPE-735) ---------------------------------------------
+
+/// A cap on how much text [`checkpoint_diff_file`] will diff on either side. Generous for a "what changed
+/// in this file" panel but never a giant blob — mirrors `read_file_text`'s "error rather than truncate"
+/// preview-skip semantics in `src-tauri/src/lib.rs` (a huge or binary file gets a clean error, not a
+/// silently truncated/garbled diff).
+const DIFF_MAX_BYTES: u64 = 5 * 1024 * 1024;
+
+/// The before/after text of one file for the restore-preview's "Open diff" affordance.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[cfg_attr(feature = "specta", derive(specta::Type))]
+pub struct FileDiff {
+    /// The file's content as captured in the checkpoint's manifest.
+    pub before: String,
+    /// The file's current content on disk.
+    pub after: String,
+}
+
+/// Diff `rel_path` between checkpoint `manifest_id` (the "before") and its live state under `root` (the
+/// "after"), for a single-file preview alongside [`checkpoint_preview_revert`]'s folder-level summary.
+/// Reads the checkpointed blob straight from the store (bypassing a full [`snapshot_capture::restore`])
+/// and the live file from disk. Errors — cleanly, never a silent truncation or replacement character glob
+/// — when: `rel_path` isn't in the checkpoint, `rel_path` escapes `root` (path-safety guard, reusing
+/// [`revert_engine::safe_target`]), either side is over [`DIFF_MAX_BYTES`], or either side isn't valid
+/// UTF-8 text (a binary file has no meaningful line diff here — mirrors `read_file_text`'s behaviour).
+pub fn checkpoint_diff_file(
+    ctx: &dyn ServerCtx,
+    root: &str,
+    manifest_id: &str,
+    rel_path: &str,
+) -> Result<FileDiff, String> {
+    let store_dir = store_dir_for(ctx, root)?;
+    let store = store_dir.to_string_lossy().to_string();
+    let checkpoint = snapshot_capture::manifest_snapshot(&store, manifest_id)?;
+    let state = checkpoint
+        .get(rel_path)
+        .ok_or_else(|| format!("{rel_path}: not present in checkpoint {manifest_id}"))?;
+
+    if state.size > DIFF_MAX_BYTES {
+        return Err(format!(
+            "{rel_path}: checkpoint content too large to diff ({} bytes; limit {DIFF_MAX_BYTES}).",
+            state.size
+        ));
+    }
+    let blob_path = store_dir.join("blobs").join(&state.hash);
+    let before_bytes = fs::read(&blob_path).map_err(|e| format!("{}: {e}", blob_path.display()))?;
+    let before = String::from_utf8(before_bytes).map_err(|_| {
+        format!("{rel_path}: checkpoint content is not valid UTF-8 text (binary diff isn't supported).")
+    })?;
+
+    let live_path = safe_target(Path::new(root), rel_path)?;
+    let meta = fs::metadata(&live_path).map_err(|e| format!("{}: {e}", live_path.display()))?;
+    if meta.len() > DIFF_MAX_BYTES {
+        return Err(format!(
+            "{rel_path}: live file too large to diff ({} bytes; limit {DIFF_MAX_BYTES}).",
+            meta.len()
+        ));
+    }
+    let after_bytes = fs::read(&live_path).map_err(|e| format!("{}: {e}", live_path.display()))?;
+    let after = String::from_utf8(after_bytes).map_err(|_| {
+        format!("{rel_path}: live file is not valid UTF-8 text (binary diff isn't supported).")
+    })?;
+
+    Ok(FileDiff { before, after })
+}
+
 /// String form of a capture skip reason for the wire (mirrors `snapshot_capture`'s private mapping).
 fn skip_reason_str(reason: SkipReason) -> &'static str {
     match reason {
@@ -644,6 +741,113 @@ mod tests {
             checkpoint_preview_revert(&ctx, &root_s, &manifest_id, Some("nobody")).unwrap();
         assert_eq!(preview.total, 1);
         assert_eq!(preview.drift_count, 1, "unattributed session → still conservative drift");
+
+        let _ = fs::remove_dir_all(&root);
+        let _ = fs::remove_dir_all(&app);
+    }
+
+    // ---- retention prune (CPE-1196) ---------------------------------------------------------------
+
+    #[test]
+    fn prune_preview_and_apply_go_through_the_roots_own_store() {
+        let app = scratch("app-data-prune");
+        let ctx = HeadlessCtx::new(&app);
+        let root = scratch("root-prune");
+        let root_s = root.to_string_lossy().to_string();
+        fs::write(root.join("a.txt"), b"v1").unwrap();
+        let first = checkpoint_create(&ctx, &root_s, "one").unwrap();
+        fs::write(root.join("a.txt"), b"v2").unwrap();
+        let second = checkpoint_create(&ctx, &root_s, "two").unwrap();
+
+        // Retention that only ever keeps 1 hourly bucket: since both checkpoints happen within the same
+        // wall-clock hour in a fast test run, thin() keeps just the newest of that bucket.
+        let pol = crate::snapshot_retention::RetentionPolicy { hourly: 1, daily: 0, weekly: 0, monthly: 0 };
+        let preview = checkpoint_prune_preview(&ctx, &root_s, &pol).unwrap();
+        assert_eq!(preview.keep.len() + preview.prune.len(), 2);
+
+        let applied = checkpoint_prune_apply(&ctx, &root_s, &pol, None).unwrap();
+        assert_eq!(applied.kept.len() + applied.pruned.len(), 2);
+        // Whichever the policy dropped no longer lists in the checkpoint index... no wait, the index is
+        // separate from manifests; assert instead that a pruned manifest can no longer be reverted to.
+        for id in &applied.pruned {
+            assert!(
+                checkpoint_preview_revert(&ctx, &root_s, id, None).is_err(),
+                "a pruned manifest {id} must no longer be readable"
+            );
+        }
+        for id in &applied.kept {
+            assert!(checkpoint_preview_revert(&ctx, &root_s, id, None).is_ok());
+        }
+        let _ = (first, second);
+
+        let _ = fs::remove_dir_all(&root);
+        let _ = fs::remove_dir_all(&app);
+    }
+
+    // ---- per-file diff (CPE-1197 backend half) ----------------------------------------------------
+
+    #[test]
+    fn diff_file_returns_checkpoint_and_live_content_for_a_changed_file() {
+        let app = scratch("app-data-diff");
+        let ctx = HeadlessCtx::new(&app);
+        let root = scratch("root-diff");
+        let root_s = root.to_string_lossy().to_string();
+        fs::write(root.join("a.txt"), b"original content").unwrap();
+
+        let created = checkpoint_create(&ctx, &root_s, "cp").unwrap();
+        fs::write(root.join("a.txt"), b"changed content").unwrap();
+
+        let diff = checkpoint_diff_file(&ctx, &root_s, &created.checkpoint.manifest_id, "a.txt").unwrap();
+        assert_eq!(diff.before, "original content");
+        assert_eq!(diff.after, "changed content");
+
+        let _ = fs::remove_dir_all(&root);
+        let _ = fs::remove_dir_all(&app);
+    }
+
+    #[test]
+    fn diff_file_errors_cleanly_on_binary_content_and_oversize_and_unknown_path() {
+        let app = scratch("app-data-diff-err");
+        let ctx = HeadlessCtx::new(&app);
+        let root = scratch("root-diff-err");
+        let root_s = root.to_string_lossy().to_string();
+        fs::write(root.join("bin.dat"), [0xFFu8, 0xFE, 0x00, 0x01]).unwrap(); // invalid UTF-8
+        fs::write(root.join("huge.txt"), vec![b'x'; (DIFF_MAX_BYTES + 1) as usize]).unwrap();
+        fs::write(root.join("ok.txt"), b"fine").unwrap();
+
+        let created = checkpoint_create(&ctx, &root_s, "cp").unwrap();
+        let id = &created.checkpoint.manifest_id;
+
+        assert!(
+            checkpoint_diff_file(&ctx, &root_s, id, "bin.dat").is_err(),
+            "non-UTF-8 checkpoint content must error, not garble"
+        );
+        assert!(
+            checkpoint_diff_file(&ctx, &root_s, id, "huge.txt").is_err(),
+            "over-cap content must error, not truncate"
+        );
+        assert!(
+            checkpoint_diff_file(&ctx, &root_s, id, "nope.txt").is_err(),
+            "a path absent from the checkpoint must error"
+        );
+        assert!(checkpoint_diff_file(&ctx, &root_s, id, "ok.txt").is_ok());
+
+        let _ = fs::remove_dir_all(&root);
+        let _ = fs::remove_dir_all(&app);
+    }
+
+    #[test]
+    fn diff_file_refuses_a_path_that_escapes_root() {
+        let app = scratch("app-data-diff-escape");
+        let ctx = HeadlessCtx::new(&app);
+        let root = scratch("root-diff-escape");
+        let root_s = root.to_string_lossy().to_string();
+        fs::write(root.join("a.txt"), b"content").unwrap();
+        let created = checkpoint_create(&ctx, &root_s, "cp").unwrap();
+
+        // Not in the checkpoint (never scanned as "../secret"), so this is refused on lookup already, but
+        // also exercises that a traversal-shaped rel_path never reaches `safe_target`'s live-file read.
+        assert!(checkpoint_diff_file(&ctx, &root_s, &created.checkpoint.manifest_id, "../secret").is_err());
 
         let _ = fs::remove_dir_all(&root);
         let _ = fs::remove_dir_all(&app);

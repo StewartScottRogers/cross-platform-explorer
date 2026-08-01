@@ -2703,6 +2703,124 @@ async fn checkpoint_revert_one(
     .map_err(|e| e.to_string())?
 }
 
+// ---- Snapshot retention prune (CPE-1196, epic CPE-735) --------------------------------------------
+// Thin `spawn_blocking` dispatchers over `cpe_server::checkpoint_store`'s retention wrappers, which in
+// turn delegate to `cpe_server::snapshot_prune` (pure store-dir logic) + `snapshot_capture::prune` (the
+// manifest-deleted-first invariant, unchanged). `preview` never touches disk; `apply` does.
+
+/// Preview retention-thinning `root`'s checkpoints under `policy`: which manifests would be kept vs.
+/// pruned, and the store's current footprint. Read-only.
+#[tauri::command]
+#[cfg_attr(feature = "specta-bindings", specta::specta)]
+async fn snapshot_prune_preview(
+    app: tauri::AppHandle,
+    root: String,
+    policy: cpe_server::snapshot_retention::RetentionPolicy,
+) -> Result<cpe_server::snapshot_prune::RetentionPreview, String> {
+    let ctx = server_ctx::TauriCtx::new(&app);
+    tauri::async_runtime::spawn_blocking(move || {
+        cpe_server::checkpoint_store::checkpoint_prune_preview(&ctx, &root, &policy)
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+/// Actually retention-prune `root`'s checkpoints to `policy` (+ an optional total-store-byte cap).
+#[tauri::command]
+#[cfg_attr(feature = "specta-bindings", specta::specta)]
+async fn snapshot_prune_apply(
+    app: tauri::AppHandle,
+    root: String,
+    policy: cpe_server::snapshot_retention::RetentionPolicy,
+    max_total_bytes: Option<u64>,
+) -> Result<cpe_server::snapshot_prune::RetentionApplyResult, String> {
+    let ctx = server_ctx::TauriCtx::new(&app);
+    tauri::async_runtime::spawn_blocking(move || {
+        cpe_server::checkpoint_store::checkpoint_prune_apply(&ctx, &root, &policy, max_total_bytes)
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+// ---- Snapshot per-file diff (CPE-1197 backend half, epic CPE-735) ----------------------------------
+
+/// Diff `rel_path` between checkpoint `manifest_id` (before) and its live state under `root` (after), for
+/// the restore-preview's "Open diff" affordance. Reuses `DiffPeek.svelte` on the frontend (a separate,
+/// parallel ticket wires that half in).
+#[tauri::command]
+#[cfg_attr(feature = "specta-bindings", specta::specta)]
+async fn checkpoint_diff_file(
+    app: tauri::AppHandle,
+    root: String,
+    manifest_id: String,
+    rel_path: String,
+) -> Result<cpe_server::checkpoint_store::FileDiff, String> {
+    let ctx = server_ctx::TauriCtx::new(&app);
+    tauri::async_runtime::spawn_blocking(move || {
+        cpe_server::checkpoint_store::checkpoint_diff_file(&ctx, &root, &manifest_id, &rel_path)
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+// ---- Snapshot schedule (CPE-1198, epic CPE-735) ----------------------------------------------------
+// Thin dispatchers over `cpe_server::snapshot_schedule`: a persisted per-folder rule store (CRUD) plus
+// `snapshot_run_due`, which captures every due root and retention-prunes it. No timer, no UI — a future
+// ticket (CPE-1199) supplies the background timer that calls `snapshot_run_due` on an interval.
+
+/// Every stored snapshot-schedule rule.
+#[tauri::command]
+#[cfg_attr(feature = "specta-bindings", specta::specta)]
+async fn snapshot_schedule_list(
+    app: tauri::AppHandle,
+) -> Result<Vec<cpe_server::snapshot_schedule::ScheduleRule>, String> {
+    let ctx = server_ctx::TauriCtx::new(&app);
+    tauri::async_runtime::spawn_blocking(move || cpe_server::snapshot_schedule::list_rules(&ctx))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+/// Save (insert or replace by `root`) a snapshot-schedule rule.
+#[tauri::command]
+#[cfg_attr(feature = "specta-bindings", specta::specta)]
+async fn snapshot_schedule_set(
+    app: tauri::AppHandle,
+    rule: cpe_server::snapshot_schedule::ScheduleRule,
+) -> Result<(), String> {
+    let ctx = server_ctx::TauriCtx::new(&app);
+    tauri::async_runtime::spawn_blocking(move || cpe_server::snapshot_schedule::set_rule(&ctx, rule))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+/// Remove `root`'s snapshot-schedule rule, if any.
+#[tauri::command]
+#[cfg_attr(feature = "specta-bindings", specta::specta)]
+async fn snapshot_schedule_remove(app: tauri::AppHandle, root: String) -> Result<(), String> {
+    let ctx = server_ctx::TauriCtx::new(&app);
+    tauri::async_runtime::spawn_blocking(move || cpe_server::snapshot_schedule::remove_rule(&ctx, &root))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+/// Capture every root due for a scheduled snapshot (per its rule's interval) and retention-prune it.
+/// `now`/`last_run_times` are caller-supplied (epoch seconds) so this stays a deterministic single pass;
+/// no timer lives here.
+#[tauri::command]
+#[cfg_attr(feature = "specta-bindings", specta::specta)]
+async fn snapshot_run_due(
+    app: tauri::AppHandle,
+    now: u64,
+    last_run_times: std::collections::BTreeMap<String, u64>,
+) -> Result<Vec<cpe_server::snapshot_schedule::RunDueOutcome>, String> {
+    let ctx = server_ctx::TauriCtx::new(&app);
+    tauri::async_runtime::spawn_blocking(move || {
+        cpe_server::snapshot_schedule::snapshot_run_due(&ctx, now, &last_run_times)
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
 /// Line / word / character / byte counts for a text file (CPE-414). Lines follow `str::lines`
 /// (a final unterminated line still counts); words are whitespace-separated; characters are Unicode
 /// scalar values. Capped so analysing a file stays predictable; a non-UTF-8 (binary) file, a
@@ -7761,6 +7879,13 @@ pub fn run() {
             checkpoint_preview_revert,
             checkpoint_revert,
             checkpoint_revert_one,
+            snapshot_prune_preview,
+            snapshot_prune_apply,
+            checkpoint_diff_file,
+            snapshot_schedule_list,
+            snapshot_schedule_set,
+            snapshot_schedule_remove,
+            snapshot_run_due,
             text_stats,
             inspect_file,
             search_file_contents,
@@ -8492,6 +8617,13 @@ pub fn export_bindings(out: &std::path::Path) -> Result<(), String> {
         checkpoint_preview_revert,
         checkpoint_revert,
         checkpoint_revert_one,
+        snapshot_prune_preview,
+        snapshot_prune_apply,
+        checkpoint_diff_file,
+        snapshot_schedule_list,
+        snapshot_schedule_set,
+        snapshot_schedule_remove,
+        snapshot_run_due,
         text_stats,
         inspect_file,
         search_file_contents,
