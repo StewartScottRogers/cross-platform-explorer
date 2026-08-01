@@ -100,6 +100,7 @@
     saveSmartFolder,
     renameSaved as renameSmartSaved,
     removeSaved as removeSmartSaved,
+    moveSaved as moveSmartSaved,
     type SmartFolder,
   } from "./lib/smartFolders";
   import { evaluateSavedSearch, flattenTree, resolveSavedSearchRoot, type SavedSearch } from "./lib/savedSearch";
@@ -114,6 +115,7 @@
     addSavedSearch,
     renameSavedSearch,
     removeSavedSearch,
+    moveSavedSearch,
   } from "./lib/savedSearchStore";
   import TagMenu from "./lib/components/TagMenu.svelte";
   import SmartFolderMenu from "./lib/components/SmartFolderMenu.svelte";
@@ -5125,8 +5127,12 @@
     x={smartFolderMenu.x}
     y={smartFolderMenu.y}
     name={smartFolderMenu.name}
+    canMoveUp={$smartFolders.findIndex((sf) => sf.id === smartFolderMenu?.id) > 0}
+    canMoveDown={(() => { const i = $smartFolders.findIndex((sf) => sf.id === smartFolderMenu?.id); return i !== -1 && i < $smartFolders.length - 1; })()}
     on:rename={(e) => { renameSmartSaved(smartFolderMenu?.id ?? "", e.detail); if (smartFolder && smartFolder.id === smartFolderMenu?.id) smartFolder = { ...smartFolder, name: e.detail }; smartFolderMenu = null; }}
     on:remove={() => { const id = smartFolderMenu?.id ?? ""; if (smartFolder?.id === id) exitSmartFolder(); removeSmartSaved(id); smartFolderMenu = null; }}
+    on:moveUp={() => moveSmartSaved(smartFolderMenu?.id ?? "", -1)}
+    on:moveDown={() => moveSmartSaved(smartFolderMenu?.id ?? "", 1)}
     on:close={() => (smartFolderMenu = null)}
   />
 {/if}
@@ -5138,8 +5144,12 @@
     x={structuredSearchMenu.x}
     y={structuredSearchMenu.y}
     name={structuredSearchMenu.name}
+    canMoveUp={$savedSearches.findIndex((s) => s.id === structuredSearchMenu?.id) > 0}
+    canMoveDown={(() => { const i = $savedSearches.findIndex((s) => s.id === structuredSearchMenu?.id); return i !== -1 && i < $savedSearches.length - 1; })()}
     on:rename={(e) => { renameSavedSearch(structuredSearchMenu?.id ?? "", e.detail); if (structuredSearch && structuredSearch.id === structuredSearchMenu?.id) structuredSearch = { ...structuredSearch, name: e.detail }; structuredSearchMenu = null; }}
     on:remove={() => { const id = structuredSearchMenu?.id ?? ""; if (structuredSearch?.id === id) exitStructuredSearch(); removeSavedSearch(id); structuredSearchMenu = null; }}
+    on:moveUp={() => moveSavedSearch(structuredSearchMenu?.id ?? "", -1)}
+    on:moveDown={() => moveSavedSearch(structuredSearchMenu?.id ?? "", 1)}
     on:close={() => (structuredSearchMenu = null)}
   />
 {/if}

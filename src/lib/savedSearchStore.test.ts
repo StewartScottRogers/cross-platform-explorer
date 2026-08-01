@@ -6,6 +6,7 @@ import {
   addSavedSearchTo,
   renameSavedSearchIn,
   removeSavedSearchFrom,
+  moveSavedSearchIn,
 } from "./savedSearchStore";
 import type { SavedSearch } from "./savedSearch";
 import type { Condition } from "./colorRules";
@@ -59,6 +60,41 @@ describe("savedSearchStore CRUD (CPE-1228)", () => {
     const list = [search({ id: "a", name: "A" }), search({ id: "b", name: "B" })];
     expect(removeSavedSearchFrom(list, "a")).toEqual([list[1]]);
     expect(removeSavedSearchFrom(list, "zzz")).toHaveLength(2);
+  });
+});
+
+// CPE-1231: reorder. Mirrors moveSmartFolder (smartFolders.ts) / moveRule (colorRulesStore.ts).
+describe("moveSavedSearchIn (CPE-1231)", () => {
+  const list = [
+    search({ id: "a", name: "A" }),
+    search({ id: "b", name: "B" }),
+    search({ id: "c", name: "C" }),
+  ];
+
+  it("moves an entry up (dir -1), swapping with its predecessor", () => {
+    expect(moveSavedSearchIn(list, "b", -1).map((s) => s.id)).toEqual(["b", "a", "c"]);
+  });
+
+  it("moves an entry down (dir 1), swapping with its successor", () => {
+    expect(moveSavedSearchIn(list, "b", 1).map((s) => s.id)).toEqual(["a", "c", "b"]);
+  });
+
+  it("is a no-op moving the first entry up", () => {
+    expect(moveSavedSearchIn(list, "a", -1).map((s) => s.id)).toEqual(["a", "b", "c"]);
+  });
+
+  it("is a no-op moving the last entry down", () => {
+    expect(moveSavedSearchIn(list, "c", 1).map((s) => s.id)).toEqual(["a", "b", "c"]);
+  });
+
+  it("is a no-op for an unknown id", () => {
+    expect(moveSavedSearchIn(list, "zzz", -1)).toEqual(list);
+  });
+
+  it("does not mutate the input array", () => {
+    const before = list.map((s) => s.id);
+    moveSavedSearchIn(list, "b", -1);
+    expect(list.map((s) => s.id)).toEqual(before);
   });
 });
 
@@ -156,5 +192,45 @@ describe("savedSearches writable store (CPE-1228)", () => {
     vi.resetModules();
     const { savedSearches: reloaded } = await import("./savedSearchStore");
     expect(get(reloaded)).toEqual(before);
+  });
+
+  // CPE-1231: reorder persists through the same module-level store as add/rename/remove above.
+  it("moveSavedSearch persists the new order to localStorage", async () => {
+    const mod = await import("./savedSearchStore");
+    mod.addSavedSearch("First", [png], "all");
+    mod.addSavedSearch("Second", [png], "all");
+    let persisted = parseSavedSearches(localStorage.getItem(KEY));
+    expect(persisted.map((s) => s.name)).toEqual(["First", "Second"]);
+    const firstId = persisted[0].id;
+
+    mod.moveSavedSearch(firstId, 1); // push "First" down past "Second"
+    persisted = parseSavedSearches(localStorage.getItem(KEY));
+    expect(persisted.map((s) => s.name)).toEqual(["Second", "First"]);
+  });
+
+  it("moveSavedSearch at a boundary is a no-op (order unchanged, still persisted)", async () => {
+    const mod = await import("./savedSearchStore");
+    mod.addSavedSearch("First", [png], "all");
+    mod.addSavedSearch("Second", [png], "all");
+    const persistedBefore = parseSavedSearches(localStorage.getItem(KEY));
+    const firstId = persistedBefore[0].id;
+
+    mod.moveSavedSearch(firstId, -1); // already first — no-op
+    const persistedAfter = parseSavedSearches(localStorage.getItem(KEY));
+    expect(persistedAfter.map((s) => s.name)).toEqual(["First", "Second"]);
+  });
+
+  it("reorder persistence round-trip: reordered list survives a fresh module load (simulated restart)", async () => {
+    const mod = await import("./savedSearchStore");
+    mod.addSavedSearch("First", [png], "all");
+    mod.addSavedSearch("Second", [png], "all");
+    const firstId = get(mod.savedSearches)[0].id;
+    mod.moveSavedSearch(firstId, 1);
+    const before = get(mod.savedSearches);
+
+    vi.resetModules();
+    const { savedSearches: reloaded } = await import("./savedSearchStore");
+    expect(get(reloaded)).toEqual(before);
+    expect(get(reloaded).map((s) => s.name)).toEqual(["Second", "First"]);
   });
 });

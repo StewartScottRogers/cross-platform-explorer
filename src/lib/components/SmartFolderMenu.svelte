@@ -1,14 +1,28 @@
 <script lang="ts">
   // Sidebar smart-folder context menu (CPE-667, epic CPE-614): right-click a saved smart folder to
   // rename or delete it. Mirrors TagMenu; theme-only colours per docs/design/MENUS.md (no red text).
+  // CPE-1231: also reused for saved (structured) searches — the move up/down buttons reorder within
+  // whichever list the caller wired up, disabled at the ends via `canMoveUp`/`canMoveDown` (the caller
+  // computes those from its own store's index, since this popover only knows the single item's `id`).
   import { createEventDispatcher, onMount } from "svelte";
   import { t } from "../i18n";
+  import Icon from "./Icon.svelte";
 
   export let x = 0;
   export let y = 0;
   export let name = "";
+  /** Whether the item can move earlier/later in its list (CPE-1231). Both default true so callers that
+      don't pass them (none currently) still render enabled buttons rather than silently breaking. */
+  export let canMoveUp = true;
+  export let canMoveDown = true;
 
-  const dispatch = createEventDispatcher<{ rename: string; remove: void; close: void }>();
+  const dispatch = createEventDispatcher<{
+    rename: string;
+    remove: void;
+    close: void;
+    moveUp: void;
+    moveDown: void;
+  }>();
 
   let value = name;
   let input: HTMLInputElement | undefined;
@@ -37,6 +51,22 @@
       autocomplete="off"
       aria-label={$t("ctx.rename")}
     />
+    <div class="row move-row">
+      <button
+        class="btn icon"
+        title={$t("smart.moveUp")}
+        aria-label={$t("smart.moveUp")}
+        disabled={!canMoveUp}
+        on:click={() => dispatch("moveUp")}
+      ><Icon name="chev-up" size={12} /></button>
+      <button
+        class="btn icon"
+        title={$t("smart.moveDown")}
+        aria-label={$t("smart.moveDown")}
+        disabled={!canMoveDown}
+        on:click={() => dispatch("moveDown")}
+      ><Icon name="chev-down" size={12} /></button>
+    </div>
     <div class="row">
       <button class="btn primary" on:click={apply}>{$t("common.apply")}</button>
       <button class="btn" on:click={() => dispatch("remove")}>{$t("menu.delete")}</button>
@@ -58,9 +88,12 @@
     border: 1px solid var(--border-strong); border-radius: var(--radius); background: var(--surface-alt); color: var(--text); }
   .rename:focus { outline: none; border-color: var(--accent); }
   .row { display: flex; gap: 6px; margin-top: 8px; justify-content: flex-end; }
+  .move-row { justify-content: flex-start; margin-top: 6px; }
   .btn { height: 28px; padding: 0 10px; font: inherit; font-size: 12px; border-radius: var(--radius);
     border: 1px solid var(--border-strong); background: var(--surface-alt); color: var(--text); }
+  .btn.icon { display: flex; align-items: center; justify-content: center; width: 28px; padding: 0; }
   .btn.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
   .btn.ghost { border-color: transparent; background: transparent; color: var(--text-dim); }
-  .btn:hover { filter: brightness(1.05); }
+  .btn:hover:not(:disabled) { filter: brightness(1.05); }
+  .btn:disabled { opacity: 0.5; cursor: default; }
 </style>
