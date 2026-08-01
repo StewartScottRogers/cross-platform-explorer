@@ -59,6 +59,19 @@ export function removeSmartFolder(list: SmartFolder[], id: string): SmartFolder[
   return list.filter((sf) => sf.id !== id);
 }
 
+/** Move the smart folder with `id` one step earlier (`dir < 0`) or later (`dir > 0`) in the saved
+    order (CPE-1231). Clamped at the ends — moving the first entry up (or the last down) is a no-op.
+    Unknown id is a no-op copy. Pure — mirrors `moveRule` (colorRulesStore.ts). */
+export function moveSmartFolder(list: SmartFolder[], id: string, dir: -1 | 1): SmartFolder[] {
+  const i = list.findIndex((sf) => sf.id === id);
+  if (i === -1) return [...list];
+  const j = i + dir;
+  if (j < 0 || j >= list.length) return [...list]; // already at an end
+  const next = [...list];
+  [next[i], next[j]] = [next[j], next[i]];
+  return next;
+}
+
 /** Every path in the tag store matching the smart folder's query, sorted. Pure — the single source of
     truth for what a smart folder contains, so it's the unit-tested core. */
 export function smartFolderPaths(store: TagStore, sf: SmartFolder): string[] {
@@ -88,4 +101,9 @@ export function renameSaved(id: string, name: string): void {
 /** Delete a saved smart folder by id. */
 export function removeSaved(id: string): void {
   store.update((list) => removeSmartFolder(list, id));
+}
+
+/** Reorder a saved smart folder by id (CPE-1231): `dir < 0` moves it up, `dir > 0` moves it down. */
+export function moveSaved(id: string, dir: -1 | 1): void {
+  store.update((list) => moveSmartFolder(list, id, dir));
 }

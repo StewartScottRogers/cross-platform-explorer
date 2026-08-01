@@ -68,6 +68,19 @@ export function removeSavedSearchFrom(list: SavedSearch[], id: string): SavedSea
   return list.filter((s) => s.id !== id);
 }
 
+/** Move the saved search with `id` one step earlier (`dir < 0`) or later (`dir > 0`) in the saved
+    order (CPE-1231). Clamped at the ends — moving the first entry up (or the last down) is a no-op.
+    Unknown id is a no-op copy. Pure — mirrors `moveSmartFolder` (smartFolders.ts). */
+export function moveSavedSearchIn(list: SavedSearch[], id: string, dir: -1 | 1): SavedSearch[] {
+  const i = list.findIndex((s) => s.id === id);
+  if (i === -1) return [...list];
+  const j = i + dir;
+  if (j < 0 || j >= list.length) return [...list]; // already at an end
+  const next = [...list];
+  [next[i], next[j]] = [next[j], next[i]];
+  return next;
+}
+
 const store: Writable<SavedSearch[]> = writable(parseSavedSearches(lsGet(STORE_KEY)));
 // Persist every change so saved searches survive restart (AC), reusing the shared persist layer.
 store.subscribe((list) => lsSet(STORE_KEY, serializeSavedSearches(list)));
@@ -88,4 +101,9 @@ export function renameSavedSearch(id: string, name: string): void {
 /** Delete a saved search by id. */
 export function removeSavedSearch(id: string): void {
   store.update((list) => removeSavedSearchFrom(list, id));
+}
+
+/** Reorder a saved search by id (CPE-1231): `dir < 0` moves it up, `dir > 0` moves it down. */
+export function moveSavedSearch(id: string, dir: -1 | 1): void {
+  store.update((list) => moveSavedSearchIn(list, id, dir));
 }
