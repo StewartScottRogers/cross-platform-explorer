@@ -564,6 +564,114 @@ async templateImport(json: string) : Promise<Result<Partial<{ [key in string]: T
 }
 },
 /**
+ * Save (insert or replace by name) a macro and persist. Returns the updated catalog.
+ */
+async macroSave(macro: ActionMacro) : Promise<Result<Partial<{ [key in string]: ActionMacro }>, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("macro_save", { macro }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * Every stored macro's name + step count, for the gallery.
+ */
+async macroList() : Promise<Result<MacroSummary[], string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("macro_list") };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * One stored macro by name (`None` if absent).
+ */
+async macroLoad(name: string) : Promise<Result<ActionMacro | null, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("macro_load", { name }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * Delete a stored macro by name and persist. Returns the updated catalog.
+ */
+async macroDelete(name: string) : Promise<Result<Partial<{ [key in string]: ActionMacro }>, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("macro_delete", { name }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * A single macro's JSON, for sharing/export.
+ */
+async macroExport(macro: ActionMacro) : Promise<Result<string, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("macro_export", { macro }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * Import a macro (or a whole catalog) from JSON, merged by name into the persisted store. Returns
+ * the updated catalog. **Never runs anything** — running is always the separate, explicit
+ * `macro_run` call the UI makes after the user picks the imported macro.
+ */
+async macroImport(json: string) : Promise<Result<Partial<{ [key in string]: ActionMacro }>, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("macro_import", { json }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * Expand `macro_` over `inputs` into the flat, unresolved `PlannedOp` preview list (CPE-938) — the
+ * macro-run confirm dialog's dry-run data. Pure; no collision-dedupe or scope check yet (those are
+ * `macro_run`'s job, via CPE-1187's `macro_run::resolve`).
+ */
+async macroPlan(macro: ActionMacro, inputs: string[]) : Promise<Result<PlannedOp[], string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("macro_plan", { macro, inputs }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * Run `macro_` over `inputs`, scoped to `root`: resolves + scope-checks via CPE-1187
+ * (`macro_run::resolve`), then physically applies each op. All-or-nothing — if any step fails
+ * partway, everything already applied is rolled back automatically via the recorded inverses
+ * before the error is returned. On success, returns the applied `ResolvedRun`; hang onto it (the
+ * frontend keeps it in memory) and pass it to `macro_undo` to reverse the whole run later.
+ */
+async macroRun(macro: ActionMacro, inputs: string[], root: string) : Promise<Result<ResolvedRun, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("macro_run", { macro, inputs, root }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * Undo a previously-applied `ResolvedRun` (as returned by `macro_run`) by replaying its inverses
+ * in reverse order.
+ */
+async macroUndo(run: ResolvedRun) : Promise<Result<null, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("macro_undo", { run }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
  * The human name of this OS's native tag store ("Finder tags" / "NTFS alternate data streams" / …).
  */
 async nativeTagsName() : Promise<string> {
@@ -1992,6 +2100,10 @@ async forgeConflictAbort(path: string) : Promise<Result<string, string>> {
 /** user-defined types **/
 
 /**
+ * A named, reusable multi-step action.
+ */
+export type ActionMacro = { name: string; steps: MacroStep[] }
+/**
  * A whole-run summary of an activity stream.
  */
 export type ActivitySummary = { total: number; by_kind: Partial<{ [key in string]: number }>; sessions: string[]; 
@@ -2477,6 +2589,13 @@ export type IndexHit = { path: string; name: string; is_dir: boolean; score: num
  */
 export type IntegrityReport = { intact: string[]; edited: string[]; corrupted: string[]; missing: string[]; new: string[] }
 /**
+ * The inverse of one [`ResolvedOp`]. Applying a run's inverses **in reverse order** restores the
+ * pre-run state. `kind` is `"untag"` (not `"tag"`) for a tag step's inverse — removing a label is a
+ * structurally different primitive call than adding one; `rename`/`move`/`convert` reuse their
+ * forward kind (the swapped `from`/`to`/`detail` is what makes them reverse it).
+ */
+export type InverseOp = { from: string; kind: string; detail: string; to: string }
+/**
  * A path's link status for the file list + link tooling (CPE-804, epic CPE-715): whether it's a symlink,
  * where it points, and whether that target is currently missing (a broken link).
  */
@@ -2489,6 +2608,31 @@ target: string | null;
  * True only for a symlink whose target does not currently resolve.
  */
 broken: boolean }
+/**
+ * One step in a macro. Each variant maps to an existing op primitive.
+ */
+export type MacroStep = 
+/**
+ * Rename each input using a template with `{name}` (full filename), `{stem}` (name without extension),
+ * `{ext}` (extension, no dot), and `{n}` (1-based selection index) tokens.
+ */
+{ rename: { template: string } } | 
+/**
+ * Move each input into `dest` (a directory path).
+ */
+{ move: { dest: string } } | 
+/**
+ * Attach the tag `label` to each input.
+ */
+{ tag: { label: string } } | 
+/**
+ * Convert each input to the extension `to_ext` (no leading dot).
+ */
+{ convert: { to_ext: string } }
+/**
+ * A light summary of one stored macro: its name and how many steps it has.
+ */
+export type MacroSummary = { name: string; steps: number }
 /**
  * One media transform in a batch. Order matters (ops apply left-to-right).
  */
@@ -2728,6 +2872,12 @@ kind: string }
  */
 export type PlannedItem = { input: string; output: string; summary: string }
 /**
+ * One concrete, expanded operation produced by [`plan`]. `kind` is a stable machine tag
+ * (`rename`/`move`/`tag`/`convert`); `detail` is the resolved argument (the new name, dest, label, or
+ * target extension).
+ */
+export type PlannedOp = { input: string; kind: string; detail: string }
+/**
  * Everything a replay view needs for one session, assembled from its durable audit journal.
  */
 export type ReplayData = { 
@@ -2801,6 +2951,18 @@ actions: string[]; up_to_date: boolean; conflicts_possible: boolean; blocked: st
  * status bar surfaces a "Resolve…" entry into the CPE-496 resolver.
  */
 conflicted: boolean }
+/**
+ * One concrete, ready-to-apply operation the CPE-1188 command executes in order. `from` is this
+ * input's path just before the step; `to` is its path just after (equal to `from` for `tag`, which
+ * never moves anything); `detail` is the primitive's argument — a tag label for `tag`, otherwise
+ * informational only (the apply layer derives the actual rename/move/convert target from `to`).
+ */
+export type ResolvedOp = { from: string; kind: string; detail: string; to: string }
+/**
+ * A resolved run: the ops to apply (in order) and their inverses (same order — apply the inverses
+ * in **reverse** to undo the run).
+ */
+export type ResolvedRun = { ops: ResolvedOp[]; inverses: InverseOp[] }
 /**
  * Outcome of a revert — an `OpResult`-style summary: how many actions applied, plus the ones that were
  * skipped (each carried as a failed [`OpResult`] with the skip reason), preserving the engine's
