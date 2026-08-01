@@ -102,7 +102,13 @@
     removeSaved as removeSmartSaved,
     type SmartFolder,
   } from "./lib/smartFolders";
-  import { evaluateSavedSearch, flattenTree, type SavedSearch } from "./lib/savedSearch";
+  import { evaluateSavedSearch, flattenTree, resolveSavedSearchRoot, type SavedSearch } from "./lib/savedSearch";
+  import {
+    watchPathsForScope,
+    batchTouchesScope,
+    TrailingDebounce,
+    type SmartFolderScope,
+  } from "./lib/smartFolderLiveRefresh"; // CPE-1230: recompute an open smart folder on disk change
   import {
     savedSearches,
     addSavedSearch,
@@ -160,7 +166,13 @@
   import type { Condition } from "./lib/colorRules";
   import WatchRulesDialog from "./lib/components/WatchRulesDialog.svelte";
   import type { WatchRule } from "./lib/watchRules";
-  import { startFolderWatch, stopFolderWatch, undoFire, type WatchFire } from "./lib/folderWatch";
+  import {
+    startFolderWatch,
+    stopFolderWatch,
+    undoFire,
+    type WatchFire,
+    type FolderWatchEvent,
+  } from "./lib/folderWatch";
   import WorkspacesDialog from "./lib/components/WorkspacesDialog.svelte";
   import { pruneMissing, type Workspace, type WorkspaceTab } from "./lib/workspaces";
   import BackupDashboard from "./lib/components/BackupDashboard.svelte";
@@ -1350,7 +1362,7 @@
   $: void loadStructuredSearchEntries(structuredSearch);
   async function loadStructuredSearchEntries(s: SavedSearch | null) {
     if (!s) { structuredSearchEntries = []; return; }
-    const root = s.root && s.root.trim() ? s.root : currentPath;
+    const root = resolveSavedSearchRoot(s, currentPath);
     if (!root) { structuredSearchEntries = []; return; }
     try {
       const tree = await commands.scanTree(root, 12).then(unwrap);
@@ -1528,6 +1540,53 @@
   $: activeTab = tabs.find((t) => t.id === activeId) as Tab;
   $: currentPath = current(activeTab.history) ?? HOME;
   $: isHome = currentPath === HOME;
+
+  // ---- Smart-folder live-refresh on filesystem change (CPE-1230, epic CPE-978) ----
+  // `smartPaths`/`loadStructuredSearchEntries` (declared above) already recompute reactively when the
+  // TAG store or the saved query itself changes; this covers the other half of the DoD — a
+  // create/delete/rename on DISK for a path the open smart folder cares about. Reuses the existing
+  // `folder-watch` FS-event bus (CPE-794) instead of a second `notify` watcher: `reconcileWatch` folds
+  // the open smart folder's scope into the SAME path set it already arms for the watched-folder-rules
+  // feature, and the listener here is a second, independent consumer of that one event stream (rule
+  // execution in `folderWatch.ts` is unaffected — it still only *acts* on a landed file that matches a
+  // configured watch rule, a no-op for most users who have configured none).
+  $: smartFolderScope = smartFolder
+    ? ({ kind: "paths", paths: smartPaths } as const)
+    : structuredSearch
+      ? ({ kind: "root", root: resolveSavedSearchRoot(structuredSearch, currentPath) } as const)
+      : null;
+
+  let smartRefreshUnlisten: (() => void) | null = null;
+  const smartRefreshDebounce = new TrailingDebounce(300); // mirrors the backend pumps' own debounce window
+
+  /** Re-run whichever smart-folder recompute is live, reading the CURRENT reactive state (not a value
+      captured when the listener was registered) so a debounced fire after a rapid open/close/switch
+      always recomputes the folder that's actually open — or does nothing if none is. */
+  function recomputeOpenSmartFolder() {
+    if (smartFolder) void loadSmartEntries(smartFolder, smartPaths);
+    else if (structuredSearch) void loadStructuredSearchEntries(structuredSearch);
+  }
+
+  /** Keep the live-refresh listener armed exactly while a smart folder is open (CPE-1230: "no always-on
+      cost when no smart folder is open", "unsubscribe on exit") and, independently, re-arm the shared
+      `folder-watch` backend watcher whenever the open folder's scope changes (opened, closed, or its
+      match set/root moved) so the OS watcher actually covers it. */
+  $: void manageSmartFolderLiveRefresh(smartFolderScope);
+  async function manageSmartFolderLiveRefresh(scope: SmartFolderScope) {
+    if (!scope) {
+      smartRefreshDebounce.cancel();
+      if (smartRefreshUnlisten) {
+        smartRefreshUnlisten();
+        smartRefreshUnlisten = null;
+      }
+    } else if (!smartRefreshUnlisten) {
+      smartRefreshUnlisten = await listen<FolderWatchEvent[]>("folder-watch", (e) => {
+        if (!smartFolderScope || !batchTouchesScope(e.payload, smartFolderScope)) return;
+        smartRefreshDebounce.schedule(recomputeOpenSmartFolder);
+      });
+    }
+    await reconcileWatch();
+  }
 
   // Display-only Home preview (CPE-1132): single-clicking a Recent/Favorite file on the Home screen
   // drives the right preview/detail pane, matching every other middle-pane view. Home has no
@@ -3729,11 +3788,19 @@
     settings.saveLastSession(captureCurrentTabs());
   }
 
-  /** (Re)start or stop the live watched-folder watcher to match the current config (CPE-794). Only the
-      sidecar build has the backend; a no-op fails soft elsewhere. */
+  /** (Re)start or stop the live watched-folder watcher to match the current config (CPE-794), ALSO
+      folding in whichever paths an open smart folder needs watched (CPE-1230) — one shared `notify`
+      watcher/event-bus rather than a second one. Rule execution (`startFolderWatch`'s own listener) is
+      unaffected by the extra paths: it only *acts* on a landed file that matches a configured watch
+      rule, so a smart-folder-only path with no matching rule is a no-op for it (typically ALL of them,
+      since most users have configured no watch rules at all). Only the sidecar build has the backend;
+      a no-op fails soft elsewhere. */
   async function reconcileWatch() {
-    if (watchLive && watchedFolders.length && aiConsoleAvailable) {
-      await startFolderWatch(watchedFolders, () => watchRules, (fire) => {
+    const rulePaths = watchLive ? watchedFolders : [];
+    const scopePaths = watchPathsForScope(smartFolderScope);
+    const paths = Array.from(new Set([...rulePaths, ...scopePaths]));
+    if (paths.length && aiConsoleAvailable) {
+      await startFolderWatch(paths, () => watchRules, (fire) => {
         watchLog = [fire, ...watchLog].slice(0, 50);
         showNotice(`Watch: ${fire.summary}`);
       });

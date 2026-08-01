@@ -5,6 +5,7 @@ import {
   serializeSavedSearch,
   parseSavedSearch,
   flattenTree,
+  resolveSavedSearchRoot,
   type SavedSearch,
 } from "./savedSearch";
 import type { Condition } from "./colorRules";
@@ -153,5 +154,20 @@ describe("flattenTree (CPE-1229)", () => {
     const s = search({ conditions: [{ kind: "ext", exts: ["png"] }], match: "all" });
     const matches = evaluateSavedSearch(flattenTree(tree, "/root"), s, NOW);
     expect(matches.map((e) => e.path)).toEqual(["/root/keep.png", "/root/nested/also-keep.png"]);
+  });
+});
+
+describe("resolveSavedSearchRoot (CPE-1229/1230)", () => {
+  it("uses the captured root when set", () => {
+    expect(resolveSavedSearchRoot(search({ root: "/captured" }), "/fallback")).toBe("/captured");
+  });
+
+  it("falls back to the given folder when root is blank/whitespace", () => {
+    expect(resolveSavedSearchRoot(search({ root: "" }), "/fallback")).toBe("/fallback");
+    expect(resolveSavedSearchRoot(search({ root: "   " }), "/fallback")).toBe("/fallback");
+  });
+
+  it("falls back when root is missing entirely (a search saved before CPE-1229)", () => {
+    expect(resolveSavedSearchRoot(search(), "/fallback")).toBe("/fallback");
   });
 });
