@@ -596,3 +596,37 @@ natural homes.
   - CPE-1168 (QA pin, sonnet) — zero-dep headless click-through for the standalone agent-board sidecar; FOUND + FIXED a real view-switch bug ([hidden] overridden by display:flex so panes never hid); MVD 8->7. Two-board lockstep verified (in-process BoardView is svelte-if, immune).
 - Tuned defaults confirmed: sonnet worker + opus reviewer for backend-correctness; test-infra fine on sonnet. One-worker-per-file. Slow Z: drive → cap concurrent builds at 1, stagger; git/lock writes routinely 2min-timeout under a worker build (harmless — retry).
 - Frontier verdict: after this batch the well closes back to user-gated (GUI interaction-feel, model/embedder, certs, Mac). Filed no filler. Next genuinely-headless work will likely need a NEW capability to land first (as CPE-707 did) before another vein opens.
+
+### 2026-07-31 18:58 USMST — wrap: three back-to-back QA/hardening batches (well confirmed near-dry)
+- User asked to "run three workshifts back to back." Queue was empty; PM (opus) frontier scout confirmed the
+  deep headless well is essentially TAPPED — all 38 epics' remainders user-gated — leaving one honest
+  QA/hardening batch, a thin second, and NO honest third. Ran it exactly that way; filed zero filler.
+- **Shipped (6 PRs merged, all through the ≥2-check gauntlet, all pushed, final HEAD CI 10/10 jobs green ×3 OS):**
+  - **Batch 1:** CPE-1169 parser panic-safety property harness (#487, sonnet worker / opus reviewer) — 27
+    entrypoints × ~1000 adversarial inputs, catch_unwind, no parser bug found (bounds-checking held). **Opus
+    reviewer caught a REAL hollowness bug**: the ID3 frame loop + PDF body were never reached (fake magic
+    rejected at the container gate). Foreman-applied the fix (maxed syncsafe ID3 size across majors 2/3/4;
+    full `%PDF-` sig), re-verified 27/0 with the loops genuinely exercised. CPE-1170 visual-diff comparator
+    for gui-smoke (#486) — hand-rolled PNG decode + pixel diff, advisory (GUI_SMOKE_VISUAL_STRICT), 15 tests,
+    no deps. CPE-1171 Linux gui-smoke CI leg (#485) — ubuntu xvfb + WebKitWebDriver, non-blocking; first live
+    run: 11/12 steps green incl. the real tauri build, only the xvfb WebDriver drive flaked (known WebKitGTK-CI
+    class, same as the Windows leg's CPE-1048) → row 4 stays 🔧.
+  - **Batch 2:** CPE-1172 (#488) — un-hollows the comparator suite by testing the Sub/Up/Average/Paeth defilter
+    branches (the ones that decode live screenshots); 21 tests, mutation-tested.
+  - **Batch 3:** CPE-1173 (#489) — gui-smoke cost-ledger pin via a test-mode `__CPE_TEST_INGEST_COST__` hook
+    (spike-confirmed feasible, mirrors the CPE-1130/1135/1114/1152 precedent).
+- **Escaped defect caught + fixed same shift:** CPE-1170 red-ded main — the root vitest glob had no
+  `gui-smoke/` exclude, so it collected gui-smoke's `node:test` files and failed them "No test suite found".
+  Foreman hotfix **CPE-1174** (#490) added `**/gui-smoke/**` to `vite.config.ts` exclude; root vitest back to
+  130 files / 1482 tests. **Gauntlet hardened:** any gui-smoke-touching change now also gates on root
+  `npm test`, not just gui-smoke's `test:unit` (that gap let the escaped defect through). Ledger:
+  CPE-1170 back-annotated `post_merge_defect: ci-red`.
+- **Metrics:** 6 PRs merged · 1 pre-merge defect caught (hollow harness) · 1 escaped defect caught+fixed
+  (ci-red) · 1 retry (the 1169 Foreman-applied fix) · ~16 sub-agents (nowhere near the 200 cap) · zero merge
+  conflicts except two trivial burndown/README rebases. Tuned defaults held: sonnet worker + opus reviewer for
+  correctness-sensitive test-infra; one-worker-per-file; slow Z: → 1 cargo build at a time.
+- **Frontier verdict (unchanged, now firmer):** after this batch the honest headless well is dry. Everything
+  left is user-gated (GUI interaction-feel, model/embedder/API key, code-signing cert, Mac). A NEW capability
+  must land before another solo-headless vein opens (as CPE-707 did for CPE-1166). MVD still 7 (rows 3 & 4
+  advanced to 🔧-with-ticket; none fully retired — visual-diff needs real blessed baselines, Linux leg needs
+  to go reliably green).
