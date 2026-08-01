@@ -204,12 +204,22 @@ fn archive_detect_format_never_panics() {
 
 #[test]
 fn read_id3v2_never_panics() {
-    run_battery("media_meta_read::read_id3v2", b"ID3", 10, |b| {
-        let r = read_id3v2(b);
-        if b.is_empty() {
-            assert!(r.is_empty(), "read_id3v2(empty) must be empty");
-        }
-    });
+    // Reach the FRAME LOOP, not just the header gate. `read_id3v2` returns early unless the 10-byte
+    // header is present with major ∈ 2..=4, and it clamps frame parsing to `end = (10 + tag_size)`.
+    // So a bare `b"ID3"` (or a valid header with a zero syncsafe size) leaves `end == 10` and the loop
+    // never runs — hollow. Use a valid header whose syncsafe tag-size is maxed (`0x7F7F7F7F`) so `end`
+    // clamps to the actual buffer length and the appended garbage in the `magic_then_*` /
+    // `overflowing_length_field` cases is genuinely walked as frames. One header per major version
+    // since the frame arithmetic differs (id/size widths, be_u24 vs be_u32 vs syncsafe28).
+    for major in [2u8, 3, 4] {
+        let header = [b'I', b'D', b'3', major, 0x00, 0x00, 0x7F, 0x7F, 0x7F, 0x7F];
+        run_battery("media_meta_read::read_id3v2", &header, 10, |b| {
+            let r = read_id3v2(b);
+            if b.is_empty() {
+                assert!(r.is_empty(), "read_id3v2(empty) must be empty");
+            }
+        });
+    }
 }
 
 #[test]
@@ -294,7 +304,11 @@ fn read_exif_orientation_never_panics() {
 
 #[test]
 fn read_pdf_never_panics() {
-    run_battery("media_meta_read::read_pdf", b"%PDF", 5, |b| {
+    // `read_pdf` gates on `has_pdf_header`, which requires the full `%PDF-` signature (WITH the dash).
+    // A bare `b"%PDF"` fails that check so the byte-scanning body (find_last_info_ref /
+    // resolve_indirect_dict / extract_pdf_fields) never runs — hollow. Use `b"%PDF-"` so the
+    // `magic_then_*` / `overflowing_length_field` cases carry an adversarial body into the real parser.
+    run_battery("media_meta_read::read_pdf", b"%PDF-", 5, |b| {
         let r = read_pdf(b);
         if b.is_empty() {
             assert!(r.is_empty(), "read_pdf(empty) must be empty");
