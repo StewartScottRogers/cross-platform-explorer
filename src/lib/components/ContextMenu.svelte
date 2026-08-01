@@ -70,6 +70,11 @@
    *  — determined via `commands.linkStatus(...).broken` by the opener (App.svelte), since it needs an
    *  async check the menu itself can't do. Shows "Repair link…" only for that one case. */
   export let linkBroken = false;
+  /** True when every selected item is a plain file (no folders), we're on a real writable location
+   *  (not Home/archive), and at least one item is selected — enables "Securely delete…" (CPE-1240, epic
+   *  CPE-738). The shred engine overwrites+removes a single file; it isn't recursive, so folders are
+   *  excluded rather than silently skipped mid-menu. */
+  export let shreddable = false;
 
   const dispatch = createEventDispatcher<{
     action: string;
@@ -295,6 +300,16 @@
     <button class="row" role="menuitem" on:click={() => run("metadataStudio")}>
       <Icon name="info" size={15} /> {$t('studio.menu')}
     </button>
+    {#if shreddable}
+      <!-- Securely delete… (CPE-1240, epic CPE-738): kept in its own separated group, same convention
+           as the Home-item destructive group (CPE-1162) — a rare, irreversible action stays visually
+           apart from the routine ones above. Leading icon, theme-var text, never red (MENUS.md); the
+           confirm dialog (not this menu) carries the honest permanence + platform-caveat messaging. -->
+      <div class="sep" />
+      <button class="row" role="menuitem" on:click={() => run("shred")}>
+        <Icon name="delete" size={15} /> {$t('ctx.shred')}
+      </button>
+    {/if}
     <div class="sep" />
     <button class="row" role="menuitem" on:click={() => run("help-docs")}>
       <Icon name="book" size={15} /> Documents for this view

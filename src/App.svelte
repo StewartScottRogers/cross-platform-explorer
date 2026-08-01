@@ -69,6 +69,7 @@
   import PasswordPromptDialog from "./lib/components/PasswordPromptDialog.svelte";
   import NewLinkDialog from "./lib/components/NewLinkDialog.svelte";
   import RepairLinkDialog from "./lib/components/RepairLinkDialog.svelte";
+  import ShredConfirmDialog from "./lib/components/ShredConfirmDialog.svelte";
   import ShortcutsDialog from "./lib/components/ShortcutsDialog.svelte";
   import ContentSearchDialog from "./lib/components/ContentSearchDialog.svelte";
   import FileNameSearchDialog from "./lib/components/FileNameSearchDialog.svelte";
@@ -565,6 +566,9 @@
   let newLinkDialogFor: string | null = null;
   /** The broken symlink a `RepairLinkDialog` is open for (CPE-1209, epic CPE-715), or null when closed. */
   let repairLinkFor: DirEntry | null = null;
+  /** Target paths + display label for an open `ShredConfirmDialog` (CPE-1240, epic CPE-738), or null
+   *  when closed. Set by `askShred`, cleared on close/done. */
+  let shredConfirmFor: { paths: string[]; what: string } | null = null;
   // The drive root + display name for an open "drive" context menu (CPE-1158). All drive-menu actions
   // target this path, so the menu works identically from a Home tile and a sidebar row — and from Home,
   // where there is no FileList selection to piggy-back on.
@@ -3047,6 +3051,41 @@
     }
   }
 
+  /** Open the "Securely delete…" confirm dialog (CPE-1240, epic CPE-738) for the current selection.
+   *  Guarded the same way as `askDelete`, plus a folder check: the shred engine overwrites a single
+   *  file's bytes then unlinks it — it isn't recursive — so a folder in the selection is refused with a
+   *  clear notice rather than silently skipped mid-operation. `ContextMenu`'s `shreddable` prop already
+   *  hides the row for a folder-containing selection; this is the belt-and-braces check for any other
+   *  caller (defense in depth, same reasoning as `blockedInArchive`'s re-checks elsewhere). */
+  function askShred() {
+    if (blockedInArchive() || selectedEntries.length === 0) return;
+    if (selectedEntries.some((e) => e.is_dir)) {
+      showNotice("Securely delete only works on files — remove folders from the selection first.", true);
+      return;
+    }
+    const n = selectedEntries.length;
+    shredConfirmFor = {
+      paths: selectedEntries.map((e) => e.path),
+      what: n === 1 ? `"${selectedEntries[0].name}"` : `${n} items`,
+    };
+  }
+
+  /** `ShredConfirmDialog`'s `done` handler: per-path shred results are `OpResult`-shaped (plus extra
+   *  pass/byte fields this summary doesn't need) — `reportResults` already handles a partial-failure
+   *  batch honestly. Reload so shredded files disappear from the listing. */
+  async function onShredDone(results: OpResult[]) {
+    shredConfirmFor = null;
+    reportResults(results, "Securely deleted");
+    await loadPath(currentPath);
+  }
+
+  /** `ShredConfirmDialog`'s `error` handler — same reasoning as `onNewLinkError`/`onLinkRepairError`:
+   *  surface via the toast; the dialog stays open (it shows the same message inline) so the user can
+   *  retry or cancel instead of losing the confirm state. */
+  function onShredError(message: string) {
+    showNotice(message, true);
+  }
+
   function openProperties() {
     if (selectedEntries.length === 0) return;
     propsFor = selectedEntries;
@@ -3155,6 +3194,7 @@
       case "batch-rename": beginBatchRename(); break;
       case "batch-media": beginBatchMedia(); break;
       case "delete": askDelete(false); break;
+      case "shred": askShred(); break;
       case "properties": openProperties(); break;
       case "metadataStudio": openMetadataStudio(); break;
       case "tags": if (selectedEntries.length >= 1) tagEditorFor = [...selectedEntries]; break;
@@ -4774,6 +4814,7 @@
     mediaEligible={selectedEntries.length > 1 && selectedEntries.some((e) => !e.is_dir && canBatchTransform(e.name))}
     canTerminal={!isHome && !archive}
     sameTypeExt={selectedEntries.length === 1 && !selectedEntries[0].is_dir ? selectedEntries[0].extension : ""}
+    shreddable={!isHome && !archive && selectedEntries.length >= 1 && selectedEntries.every((e) => !e.is_dir)}
     {view}
     {sortKey}
     {sortDir}
@@ -4807,6 +4848,16 @@
     on:repaired={(e) => onLinkRepaired(e.detail)}
     on:error={(e) => onLinkRepairError(e.detail)}
     on:close={() => (repairLinkFor = null)}
+  />
+{/if}
+
+{#if shredConfirmFor}
+  <ShredConfirmDialog
+    paths={shredConfirmFor.paths}
+    what={shredConfirmFor.what}
+    on:done={(e) => onShredDone(e.detail)}
+    on:error={(e) => onShredError(e.detail)}
+    on:close={() => (shredConfirmFor = null)}
   />
 {/if}
 

@@ -90,6 +90,15 @@ The Home screen has **Quick access** tiles up top and a tabbed lower section wit
 - **Selection** — multi-select with Shift/Ctrl; the status bar shows the count and total size.
 - **Operations** — copy, cut, paste, rename, delete (to the trash, restorable), new folder, and batch
   rename. Filesystem operations skip entries they can't read rather than failing the whole listing.
+- **Securely delete…** — right-click a file (or a multi-file selection, no folders) and choose
+  **Securely delete…** to overwrite its bytes before removing it, instead of an ordinary delete. This is
+  **permanent and non-recoverable** — unlike Delete, it never goes to the Recycle Bin/Trash, so there's no
+  undo. Pick an overwrite scheme (zero-fill, random, DoD 5220.22-M, or Gutmann) and confirm with the
+  danger button. Be honest with yourself about what this buys you: overwriting is **best-effort, not a
+  guarantee** — on an SSD, wear-levelling can leave the original cells untouched; on a copy-on-write
+  filesystem (APFS/Btrfs/ZFS), old data can survive in snapshots; and copies in backups or filesystem
+  journals are never touched either way. For an actual guarantee, use full-disk encryption or an
+  encrypted vault instead.
 - **New ▸** — right-click empty space, a folder, or a drive and open the **New** submenu to create a new
   item in the right place (the current folder, the clicked folder, or the drive root). Beyond **Folder**
   and **Text file** you can create **Markdown, Rich Text, JSON, YAML, XML, HTML, CSS, JavaScript, Python,
