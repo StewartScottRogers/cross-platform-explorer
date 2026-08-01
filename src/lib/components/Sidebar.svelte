@@ -11,6 +11,7 @@
   import type { DirEntry, Place, Favorite } from "../types";
   import type { AgentSession } from "../sidecar";
   import type { SmartFolder } from "../smartFolders";
+  import type { SavedSearch } from "../savedSearch";
   import { isValidDrop, hoverEffect } from "../dnd";
   import { sidebarSections, isOpen, toggleSection } from "../sidebarSections";
 
@@ -38,6 +39,11 @@
   export let smartFolders: SmartFolder[] = [];
   /** The id of the currently-open smart folder (or ""), for the highlight. */
   export let activeSmartFolder = "";
+  /** Saved STRUCTURED searches (CPE-1229, epic CPE-978): a `Condition[]` query, distinct from the
+      tag-only smart folders above. Its own "Saved Searches" section; empty ⇒ hidden. */
+  export let savedSearches: SavedSearch[] = [];
+  /** The id of the currently-open saved search (or ""), for the highlight. */
+  export let activeSavedSearch = "";
 
   const dispatch = createEventDispatcher<{
     navigate: string;
@@ -53,6 +59,8 @@
     tagMenu: { x: number; y: number; tag: string };
     openSmartFolder: SmartFolder;
     smartFolderMenu: { x: number; y: number; id: string; name: string };
+    openSavedSearch: SavedSearch;
+    savedSearchMenu: { x: number; y: number; id: string; name: string };
     /** Right-clicking a DRIVE row (CPE-1158): opens the same folder-like drive menu as a Home drive
      *  tile, targeting the drive's root path. Only drive rows dispatch this. */
     driveContext: { x: number; y: number; path: string; name: string };
@@ -67,6 +75,7 @@
   $: agentsOpen = isOpen($sidebarSections, "agents");
   $: tagsOpen = isOpen($sidebarSections, "tags");
   $: smartOpen = isOpen($sidebarSections, "smart");
+  $: savedSearchOpen = isOpen($sidebarSections, "savedSearch");
   const extOf = (name: string) => {
     const i = name.lastIndexOf(".");
     return i > 0 ? name.slice(i + 1).toLowerCase() : "";
@@ -294,6 +303,33 @@
             <span class="twisty hidden" />
             <Icon name="filter" />
             <span class="label">{sf.name}</span>
+          </button>
+        {/each}
+      </div>
+    {/if}
+    <div class="navigation-pane-sep" />
+  {/if}
+  {#if savedSearches.length > 0}
+    <div class="nav-item fav-head">
+      <button class="twisty" class:open={savedSearchOpen} title={savedSearchOpen ? "Collapse" : "Expand"} on:click={() => toggleSection("savedSearch")}>
+        <Icon name="chev-right" size={12} />
+      </button>
+      <Icon name="search" />
+      <span class="label fav-title">{$t("smart.searchSection")}</span>
+    </div>
+    {#if savedSearchOpen}
+      <div class="nav-children">
+        {#each savedSearches as ss (ss.id)}
+          <button
+            class="nav-item fav-item"
+            class:active={activeSavedSearch === ss.id}
+            title={$t("smart.searchItemTip")}
+            on:click={() => dispatch("openSavedSearch", ss)}
+            on:contextmenu|preventDefault={(e) => dispatch("savedSearchMenu", { x: e.clientX, y: e.clientY, id: ss.id, name: ss.name })}
+          >
+            <span class="twisty hidden" />
+            <Icon name="search" />
+            <span class="label">{ss.name}</span>
           </button>
         {/each}
       </div>

@@ -38,17 +38,22 @@ export function serializeSavedSearches(list: SavedSearch[]): string {
   return JSON.stringify(list);
 }
 
-/** Append a new saved search named `name` (trimmed) over `conditions`/`match`. Pure — returns a new
-    array; a blank name is a no-op. */
+/** Append a new saved search named `name` (trimmed) over `conditions`/`match`, optionally capturing the
+    folder it was run from (CPE-1229's "Save search…" — the recursive scan root the open-evaluator uses,
+    since there's no whole-computer index to search "everywhere" the way tag smart folders do). Pure —
+    returns a new array; a blank name is a no-op. */
 export function addSavedSearchTo(
   list: SavedSearch[],
   name: string,
   conditions: Condition[],
   match: "all" | "any",
+  root?: string,
 ): SavedSearch[] {
   const n = name.trim();
   if (!n) return list;
-  return [...list, { id: newId(), name: n, conditions, match }];
+  const entry: SavedSearch = { id: newId(), name: n, conditions, match };
+  if (root && root.trim()) entry.root = root;
+  return [...list, entry];
 }
 
 /** Rename the saved search with `id` (no-op on empty/unknown). Pure. */
@@ -70,9 +75,9 @@ store.subscribe((list) => lsSet(STORE_KEY, serializeSavedSearches(list)));
 /** Reactive list of saved searches (persisted). */
 export const savedSearches = store;
 
-/** Save a new saved search. */
-export function addSavedSearch(name: string, conditions: Condition[], match: "all" | "any"): void {
-  store.update((list) => addSavedSearchTo(list, name, conditions, match));
+/** Save a new saved search, optionally capturing the folder it was run from (see `addSavedSearchTo`). */
+export function addSavedSearch(name: string, conditions: Condition[], match: "all" | "any", root?: string): void {
+  store.update((list) => addSavedSearchTo(list, name, conditions, match, root));
 }
 
 /** Rename a saved search by id. */

@@ -5,18 +5,26 @@
 // neighbouring rule engines (colorRules / watchRules / selectMatch): one Condition matcher, tolerant parse.
 
 import type { DirEntry } from "./types";
+import type { TreeNode } from "./bindings.gen";
 import { matchesCondition, isValidCondition, type Condition } from "./colorRules";
 
 /**
  * A serialisable named query. `conditions` are combined with `match`:
  * - `"all"` — an entry must satisfy every condition (AND); an empty condition list matches everything.
  * - `"any"` — an entry must satisfy at least one condition (OR); an empty condition list matches nothing.
+ *
+ * `root` (CPE-1229) is the folder the search was captured from — there is no whole-computer index
+ * (CPE-703's index engine is a separate, not-yet-built epic), so a structured saved search evaluates
+ * recursively from this one captured folder rather than "everywhere" the way the tag-only smart folders
+ * do. Optional/omittable so older-shaped persisted data (and the CPE-986/1228 fixtures that predate it)
+ * still parses; a missing root falls back to the current folder at open time (see App.svelte).
  */
 export interface SavedSearch {
   id: string;
   name: string;
   conditions: Condition[];
   match: "all" | "any";
+  root?: string;
 }
 
 /** Whether `entry` satisfies the saved search, combining its conditions with all/any. Pure. */
@@ -58,7 +66,8 @@ function isValidSavedSearch(x: unknown): x is SavedSearch {
     o.name.trim() !== "" &&
     (o.match === "all" || o.match === "any") &&
     Array.isArray(o.conditions) &&
-    o.conditions.every(isValidCondition)
+    o.conditions.every(isValidCondition) &&
+    (o.root === undefined || typeof o.root === "string")
   );
 }
 
@@ -73,4 +82,51 @@ export function parseSavedSearch(json: string): SavedSearch | null {
   } catch {
     return null;
   }
+}
+
+/** Join a scanned-tree root with a child name, matching whichever separator `root` already uses (`\`
+    for a Windows-style root, `/` otherwise) so a flattened path is a real, navigable OS path rather than
+    a mix of separators. Not exported — an internal detail of {@link flattenTree}. */
+function joinScanPath(root: string, name: string): string {
+  const sep = root.includes("\\") ? "\\" : "/";
+  return root.endsWith(sep) ? root + name : root + sep + name;
+}
+
+/** Lowercased extension without the dot, mirroring the backend `DirEntry.extension` convention — empty
+    for a folder or a name with no extension. Not exported — an internal detail of {@link flattenTree}. */
+function extensionOf(name: string, isDir: boolean): string {
+  if (isDir) return "";
+  const dot = name.lastIndexOf(".");
+  return dot > 0 ? name.slice(dot + 1).toLowerCase() : "";
+}
+
+/**
+ * Flatten a `scanTree` result (CPE-779, `commands.scanTree`) into a `DirEntry[]` so a structured saved
+ * search can run through the same `evaluateSavedSearch`/`matchesCondition` as any other listing (CPE-1229
+ * open-evaluator — no parallel matcher). There's no whole-computer index yet, so this is how a structured
+ * search "cuts across the tree": recursively, from the one folder it was captured under. `modified`/`size`
+ * come straight off the scan; `hidden`/`is_symlink` default false (`scan_tree` never follows symlinks and
+ * doesn't report the hidden attribute — neither is read by `matchesCondition`, so this is a safe, inert
+ * default rather than a guess). Pure — order mirrors the tree's own (dir-then-file-as-scanned) order.
+ */
+export function flattenTree(nodes: TreeNode[], root: string): DirEntry[] {
+  const out: DirEntry[] = [];
+  const walk = (list: TreeNode[], parent: string) => {
+    for (const n of list) {
+      const path = joinScanPath(parent, n.name);
+      out.push({
+        name: n.name,
+        path,
+        is_dir: n.isDir,
+        size: n.size ?? 0,
+        modified: n.modified ?? null,
+        extension: extensionOf(n.name, n.isDir),
+        hidden: false,
+        is_symlink: false,
+      });
+      if (n.isDir && n.children) walk(n.children, path);
+    }
+  };
+  walk(nodes, root);
+  return out;
 }

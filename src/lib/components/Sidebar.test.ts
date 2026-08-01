@@ -7,6 +7,7 @@ import { describe, it, expect, vi } from "vitest";
 import { render, screen, fireEvent } from "@testing-library/svelte";
 import Sidebar from "./Sidebar.svelte";
 import type { AgentSession } from "../sidecar";
+import type { SavedSearch } from "../savedSearch";
 
 // The component tree imports Tauri APIs transitively; stub for jsdom.
 vi.mock("@tauri-apps/api/core", () => ({ invoke: vi.fn() }));
@@ -86,6 +87,84 @@ describe("Sidebar Agents section (CPE-397)", () => {
     expect(agentMenu).toHaveBeenCalledOnce();
     expect(agentMenu.mock.calls[0][0].sessionId).toBe("s2");
     expect(agentMenu.mock.calls[0][0].sessionLabel).toMatch(/Aider/);
+  });
+});
+
+describe("Sidebar Saved Searches section (CPE-1229)", () => {
+  const savedSearch = (over: Partial<SavedSearch> = {}): SavedSearch => ({
+    id: "ss1",
+    name: "Big PNGs",
+    conditions: [{ kind: "ext", exts: ["png"] }],
+    match: "all",
+    root: "Z:\\repos\\project",
+    ...over,
+  });
+
+  it("shows no Saved Searches section when none are saved", () => {
+    render(Sidebar, { places: [], drives: [], favorites: [], savedSearches: [] });
+    expect(screen.queryByText("Saved Searches")).toBeNull();
+  });
+
+  it("lists a saved search and opens it on click", async () => {
+    const { component } = render(Sidebar, {
+      places: [],
+      drives: [],
+      favorites: [],
+      savedSearches: [savedSearch()],
+    });
+    const opened: SavedSearch[] = [];
+    component.$on("openSavedSearch", (e) => opened.push(e.detail));
+
+    expect(screen.getByText("Saved Searches")).toBeTruthy();
+    expect(screen.getByText("Big PNGs")).toBeTruthy();
+
+    await fireEvent.click(screen.getByText("Big PNGs"));
+    expect(opened).toEqual([savedSearch()]);
+  });
+
+  it("highlights the currently-open saved search", () => {
+    const { container } = render(Sidebar, {
+      places: [],
+      drives: [],
+      favorites: [],
+      savedSearches: [savedSearch(), savedSearch({ id: "ss2", name: "Old logs" })],
+      activeSavedSearch: "ss2",
+    });
+    const items = container.querySelectorAll(".nav-children .fav-item");
+    const active = Array.from(items).find((el) => el.classList.contains("active")) as HTMLElement;
+    expect(active?.textContent).toContain("Old logs");
+  });
+
+  it("right-clicking a saved search opens its menu targeting that id", async () => {
+    const { component, container } = render(Sidebar, {
+      places: [],
+      drives: [],
+      favorites: [],
+      savedSearches: [savedSearch()],
+    });
+    const menu = vi.fn();
+    component.$on("savedSearchMenu", (e) => menu(e.detail));
+
+    const row = Array.from(container.querySelectorAll(".nav-children .fav-item")).find((el) =>
+      el.textContent?.includes("Big PNGs"),
+    ) as HTMLElement;
+    await fireEvent.contextMenu(row);
+    expect(menu).toHaveBeenCalledOnce();
+    expect(menu.mock.calls[0][0]).toMatchObject({ id: "ss1", name: "Big PNGs" });
+  });
+
+  it("keeps the Saved Searches section distinct from the tag-only Smart Folders section", async () => {
+    render(Sidebar, {
+      places: [],
+      drives: [],
+      favorites: [],
+      savedSearches: [savedSearch()],
+      smartFolders: [{ id: "sf1", name: "Screenshots", tag: "screenshot" }],
+    });
+    expect(screen.getByText("Smart Folders")).toBeTruthy();
+    expect(screen.getByText("Saved Searches")).toBeTruthy();
+    expect(screen.getByText("Screenshots")).toBeTruthy();
+    expect(screen.getByText("Big PNGs")).toBeTruthy();
   });
 });
 

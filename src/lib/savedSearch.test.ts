@@ -4,10 +4,12 @@ import {
   matchesSavedSearch,
   serializeSavedSearch,
   parseSavedSearch,
+  flattenTree,
   type SavedSearch,
 } from "./savedSearch";
 import type { Condition } from "./colorRules";
 import type { DirEntry } from "./types";
+import type { TreeNode } from "./bindings.gen";
 
 const NOW = 1_700_000_000_000;
 const DAY_MS = 86_400_000;
@@ -96,5 +98,60 @@ describe("serializeSavedSearch / parseSavedSearch (CPE-986)", () => {
     expect(parseSavedSearch(JSON.stringify({ ...search(), match: "some" }))).toBeNull();
     // { kind: "ext" } with no `exts` is a landmine that would later throw in matchesCondition.
     expect(parseSavedSearch(JSON.stringify({ ...search(), conditions: [{ kind: "ext" }] }))).toBeNull();
+  });
+
+  it("round-trips a captured `root` (CPE-1229) and rejects a non-string root", () => {
+    const withRoot = search({ root: "Z:\\repos\\project" });
+    expect(parseSavedSearch(serializeSavedSearch(withRoot))).toEqual(withRoot);
+    // Older-shaped data with no root at all still parses (root stays optional/omittable).
+    expect(parseSavedSearch(serializeSavedSearch(search()))?.root).toBeUndefined();
+    expect(parseSavedSearch(JSON.stringify({ ...search(), root: 42 }))).toBeNull();
+  });
+});
+
+// CPE-1229 open-evaluator: there's no whole-computer index, so opening a structured saved search scans
+// recursively from its captured `root` via the existing `commands.scanTree` and flattens the result into
+// a `DirEntry[]` that runs through the SAME `evaluateSavedSearch`/`matchesCondition` as any other listing
+// — no parallel matcher. `flattenTree` is the pure, DOM-free piece of that wiring (App.svelte owns the
+// `scanTree` IPC call itself); these tests prove it produces entries the real matcher can actually use.
+describe("flattenTree (CPE-1229)", () => {
+  const file = (name: string, size: number, modified: number | null = NOW): TreeNode => ({
+    name,
+    isDir: false,
+    size,
+    modified,
+  });
+  const dir = (name: string, children: TreeNode[]): TreeNode => ({ name, isDir: true, children });
+
+  it("joins root + name into a real path, recursing into subfolders", () => {
+    const tree: TreeNode[] = [file("a.txt", 5), dir("sub", [file("b.txt", 2)])];
+    const flat = flattenTree(tree, "Z:\\repos\\proj");
+    expect(flat.map((e) => e.path)).toEqual([
+      "Z:\\repos\\proj\\a.txt",
+      "Z:\\repos\\proj\\sub",
+      "Z:\\repos\\proj\\sub\\b.txt",
+    ]);
+    // A forward-slash root stays forward-slash (matches whichever separator the root already uses).
+    expect(flattenTree(tree, "/home/me")[0].path).toBe("/home/me/a.txt");
+  });
+
+  it("maps size/modified/is_dir straight through and derives a lowercase extension", () => {
+    const tree: TreeNode[] = [file("Photo.PNG", 9999, NOW), dir("Empty", [])];
+    const flat = flattenTree(tree, "/root");
+    const photo = flat.find((e) => e.name === "Photo.PNG")!;
+    expect(photo).toMatchObject({ is_dir: false, size: 9999, modified: NOW, extension: "png" });
+    const empty = flat.find((e) => e.name === "Empty")!;
+    expect(empty).toMatchObject({ is_dir: true, size: 0, modified: null, extension: "" });
+  });
+
+  it("flattened entries evaluate through the real matcher (the open-evaluator's actual wiring)", () => {
+    const tree: TreeNode[] = [
+      file("keep.png", 9999),
+      file("skip.txt", 9999),
+      dir("nested", [file("also-keep.png", 1)]),
+    ];
+    const s = search({ conditions: [{ kind: "ext", exts: ["png"] }], match: "all" });
+    const matches = evaluateSavedSearch(flattenTree(tree, "/root"), s, NOW);
+    expect(matches.map((e) => e.path)).toEqual(["/root/keep.png", "/root/nested/also-keep.png"]);
   });
 });
