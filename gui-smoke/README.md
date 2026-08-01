@@ -53,7 +53,8 @@ Self-contained: its own `package.json`/lockfile/`tsconfig.json`. Nothing here to
    & "$HOME/.cargo/bin/msedgedriver-tool.exe"
    $env:PATH = "$PWD;$env:PATH"
    ```
-   (Linux would instead need `webkit2gtk-driver` + `xvfb-run` — see Follow-ups below; **macOS is
+   (Linux instead needs `sudo apt install webkit2gtk-driver xvfb` and running under `xvfb-run` —
+   see the "CI" section above for the exact package list; CPE-1171 wires this up in CI. **macOS is
    not supported by `tauri-driver`** at all, no WKWebView WebDriver exists.)
 3. **A real Tauri CLI release build** — not a debug build, not a bare `cargo build`:
    ```
@@ -102,10 +103,22 @@ npm test
 
 ## CI
 
-`.github/workflows/gui-smoke.yml` runs this on `windows-latest` for push + PR to `main`: builds
-the frontend, does a `tauri build -- --no-bundle`, installs `msedgedriver` + `tauri-driver`, then
-runs this suite — so a regression in launch-or-navigate reds the pipeline instead of needing a
-human to notice.
+`.github/workflows/gui-smoke.yml` runs this suite on push + PR to `main` in **two** legs, both
+non-blocking (`continue-on-error: true`, see CPE-1048 below):
+
+- **`gui-smoke` (windows-latest)** — builds the frontend, does a `tauri build -- --no-bundle`,
+  installs `msedgedriver` + `tauri-driver`, then runs this suite.
+- **`gui-smoke-linux` (ubuntu-latest, CPE-1171)** — same build, then installs the Linux WebView
+  build deps (`libwebkit2gtk-4.1-dev`, `libappindicator3-dev`, `librsvg2-dev`, `patchelf` — the
+  same set the 3-OS `Backend` job in `ci.yml` already builds with) plus `webkit2gtk-driver`
+  (`WebKitWebDriver`, Linux's native driver, lands on `PATH` at `/usr/bin/WebKitWebDriver`) and
+  `xvfb`, installs `tauri-driver`, and runs the identical suite under `xvfb-run` (so GTK/WebKitGTK
+  has a virtual display to initialize against). No spec or `wdio.conf.ts` capability changes were
+  needed for the Linux leg — `APP_BINARY`/`TAURI_DRIVER_BIN` already resolve per-OS, and
+  `tauri-driver` itself picks `WebKitWebDriver` vs `msedgedriver.exe` off `PATH`.
+
+Either leg reds the job's own step output on a regression in launch-or-navigate, instead of needing
+a human to notice — the non-blocking posture just means a flake doesn't red `main`.
 
 ### CPE-1048 — `DevToolsActivePort file doesn't exist` on `windows-latest`
 
@@ -229,8 +242,11 @@ closed ~5 ms later because `paneContext` didn't `stopPropagation`).
 
 ## Follow-ups (not this ticket — see CPE-1045's "Follow-ups" section)
 
-- **Linux CI leg**: add an `ubuntu-latest` matrix arm using `webkit2gtk-driver` + `xvfb-run` (no
-  app code change needed).
+- ~~**Linux CI leg**: add an `ubuntu-latest` matrix arm using `webkit2gtk-driver` + `xvfb-run` (no
+  app code change needed).~~ **Done (CPE-1171)** — see the "CI" section above. Still non-blocking
+  and **not yet proven green on `main`**: it has not run live on GitHub Actions as of this writing
+  (offsite verification pending, no local Actions runner available). Watch the first few `main`
+  runs before considering Manual-Test-Burndown row #4 fully retired.
 - **macOS**: stays attended — `tauri-driver` has no WKWebView WebDriver support.
 - **More flows**: Back/Up navigation, dialogs, context menus, tab switching.
 - **Visual regression**: reuse WDIO's screenshot capture for light/dark pixel-diffs.

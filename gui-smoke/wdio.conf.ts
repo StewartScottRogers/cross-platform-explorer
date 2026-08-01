@@ -40,6 +40,9 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 // only skips *packaging*, it does not change the dev-vs-build cfg decision above, so the compiled
 // exe still embeds the real frontend. `--debug`, on the other hand, is NOT used here: keep this
 // pointed at a genuine release-profile CLI build so the smoke test matches what ships.
+// CPE-1171: this was already OS-generic before the Linux CI leg existed — audited, not changed.
+// `--no-bundle` produces the same unpackaged `src-tauri/target/release/<name>[.exe]` binary on every
+// OS, so the only per-OS bit is the `.exe` suffix below.
 const APP_BINARY = path.resolve(
   __dirname,
   "..",
@@ -58,6 +61,10 @@ if (!fs.existsSync(APP_BINARY)) {
   );
 }
 
+// CPE-1171: also already OS-generic — `tauri-driver` itself is what picks the NATIVE driver per OS
+// (`which::which("msedgedriver.exe")` on Windows vs `which::which("WebKitWebDriver")` on Linux, both
+// via a plain PATH lookup — no `--native-driver` override needed as long as CI installs the matching
+// driver package, which gui-smoke.yml's two jobs each do). Nothing here has to branch on that.
 const TAURI_DRIVER_BIN = path.resolve(
   os.homedir(),
   ".cargo",
@@ -212,10 +219,11 @@ const TAURI_CONF = JSON.parse(
   fs.readFileSync(path.resolve(__dirname, "..", "src-tauri", "tauri.conf.json"), "utf-8"),
 ) as { identifier: string };
 
-/** `<OS app-data root>/<bundle identifier>`, matching Tauri's `app_data_dir()`. This job runs
- *  `windows-latest` only today (see gui-smoke.yml's header comment), so the win32 branch (`APPDATA`)
- *  is what CI actually exercises; the darwin/linux branches are best-effort for local runs on those
- *  platforms later and are not covered by CI. */
+/** `<OS app-data root>/<bundle identifier>`, matching Tauri's `app_data_dir()`. CPE-1171 added a
+ *  `ubuntu-latest` CI leg alongside the original `windows-latest` one (see gui-smoke.yml's header
+ *  comment), so both the win32 (`APPDATA`) and linux (`XDG_DATA_HOME`) branches are now exercised by
+ *  CI; the darwin branch remains best-effort for local runs only — macOS has no `tauri-driver`
+ *  support (no WKWebView WebDriver) and stays attended. */
 function resolveAppDataDir(): string {
   if (process.platform === "win32") {
     const appData = process.env.APPDATA ?? path.join(os.homedir(), "AppData", "Roaming");
@@ -460,6 +468,11 @@ export const config: WebdriverIO.Config = {
         // created" failure; it nudges the driver into proper WebView2 mode. Cheap, zero-risk,
         // shipped alongside the WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS env var in gui-smoke.yml
         // (the actual DevToolsActivePort fix) rather than instead of it.
+        // CPE-1171: left unconditional (not Windows-gated) — tauri-driver's own `TauriOptions` struct
+        // only *has* a `webview_options` field under `#[cfg(target_os = "windows")]`; on the Linux
+        // build of tauri-driver that key simply isn't a struct field, and serde silently ignores
+        // unknown JSON keys by default (no `deny_unknown_fields` on that struct), so this is a no-op
+        // on the Linux leg rather than an error.
         webviewOptions: {},
       },
     } as WebdriverIO.Capabilities,
