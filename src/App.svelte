@@ -91,6 +91,7 @@
   import type { BatchReport } from "./lib/bindings.gen";
   import TagEditor from "./lib/components/TagEditor.svelte";
   import { initTags, tags, retagPath, renameTag, deleteTag, importTags, exportTags } from "./lib/tags";
+  import { migratePathList } from "./lib/pathMigrate";
   import { ZIP_FAMILY_EXTS, ARCHIVE_EXTS, EXTRACT_EXTS } from "./lib/archiveExts";
   import { resolveEffect } from "./lib/dnd";
   import {
@@ -2043,6 +2044,8 @@
       const to = unwrap(await commands.renameEntry(path, newName));
       // Carry any tags to the new path so they follow the file (CPE-652); best-effort.
       retagPath(path, to).catch(() => {});
+      // Carry favourites/frecency/recents entries too (CPE-1224); best-effort.
+      migrateFrontendStores(path, to);
       undoStack = pushUndo(undoStack, {
         kind: "rename",
         moves: [{ from: path, to }],
@@ -2276,6 +2279,34 @@
       Best-effort + fire-and-forget; an untagged file is a cheap no-op. */
   function retagMoves(moves: { from: string; to: string }[]) {
     for (const m of moves) retagPath(m.from, m.to).catch(() => {});
+    for (const m of moves) migrateFrontendStores(m.from, m.to);
+  }
+
+  /**
+   * Carry favourites, spotlight frecency, and recents/recent-folders entries to a path's new location
+   * after an in-app rename/move (CPE-1224, frontend analog of CPE-657/CPE-1222) — exact path + subtree,
+   * via the shared `migratePathList` helper. Best-effort: a migration hiccup must never break the
+   * rename/move itself, so every step is wrapped and silently swallowed on failure. Favourites/recents/
+   * recentFolders are mirrored into App.svelte's own reactive state (so the UI updates immediately);
+   * spotlight frecency has no live in-memory copy here (Spotlight.svelte reloads it on open), so it's
+   * migrated straight through the settings.ts load/save pair.
+   */
+  function migrateFrontendStores(from: string, to: string) {
+    try {
+      favorites = migratePathList(favorites, from, to);
+      settings.saveFavorites(favorites);
+    } catch { /* best-effort — see doc comment above */ }
+    try {
+      recents = migratePathList(recents, from, to);
+      settings.saveRecents(recents);
+    } catch { /* best-effort — see doc comment above */ }
+    try {
+      recentFolders = migratePathList(recentFolders, from, to);
+      settings.saveRecentFolders(recentFolders);
+    } catch { /* best-effort — see doc comment above */ }
+    try {
+      settings.saveSpotlightFrecency(migratePathList(settings.loadSpotlightFrecency(), from, to));
+    } catch { /* best-effort — see doc comment above */ }
   }
 
   /** Start a copy of `sources` into the current folder with the chosen conflict policy (CPE-624). */
