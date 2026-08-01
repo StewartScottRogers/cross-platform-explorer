@@ -2,7 +2,7 @@
 id: CPE-738
 title: "EPIC: Secure delete & encrypted vaults"
 type: Task
-status: In Progress
+status: Proposed
 priority: Low
 component: Multiple
 tags: [epic]
@@ -63,3 +63,12 @@ Building the secure-delete DoD bullet only:
 
 **Deferred (user-gated):** encrypted vaults — needs a crypto-dep exception + a security review + OS
 keychain. Revisit with the user.
+
+## Secure-delete slice COMPLETE 2026-08-01 (workshift) — vaults remain user-gated
+CPE-1240 (#539) wired the shred engine end-to-end: `shred_paths` command + "Securely delete…" context
+action + ShredConfirmDialog (honest permanence + best-effort platform caveat + scheme picker + red
+"Shred permanently"). CPE-1241 (#540) pinned it with a gui-smoke spec (Cancel-only, fixture-survives)
++ Visual Critic **VISUAL PASS**. Full gauntlet: Reviewer + UAT + Visual. The secure-delete DoD bullet
+is MET. Reverted to Proposed — the ONLY remaining DoD (encrypted vaults) is USER-GATED: needs a crypto
+dependency exception (repo enforces no-new-dep) + a human security review + OS-keychain key storage.
+Re-activate once the user makes the crypto-dependency call.
