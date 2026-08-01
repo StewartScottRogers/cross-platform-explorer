@@ -17,7 +17,8 @@ export type Section =
   | "agent-board"
   | "workbench"
   | "repositories"
-  | "swarms";
+  | "swarms"
+  | "native-metadata";
 
 /** Section id → doc slug (a `src/docs/*.md` filename without `.md`). */
 const SECTION_DOC: Record<Section, string> = {
@@ -30,6 +31,13 @@ const SECTION_DOC: Record<Section, string> = {
   workbench: "07-workbench",
   repositories: "08-repositories",
   swarms: "09-swarms",
+  // CPE-1178 (epic CPE-717): the native tag/metadata bridge — Settings' opt-in toggle (CPE-1177) plus
+  // the Properties "Native metadata" section and tag-editor Pull/Push controls it reveals (CPE-1176).
+  // Not a standalone view switched into via the sidebar (there's no dedicated screen for it, unlike
+  // the other entries above) — it's a cross-cutting feature reachable from Settings/Properties/the tag
+  // editor — but it still earns its own doc page + registry entry per [[maintain-in-app-docs-library]]
+  // so contextual help has somewhere exact to point.
+  "native-metadata": "17-native-metadata",
 };
 
 /** The default doc when a section has no page (or an unknown id is passed): the Overview. */
