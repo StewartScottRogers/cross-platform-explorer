@@ -24,7 +24,7 @@
   import { startAgentWatch, stopAgentWatch, type FsActivity, type AgentSession } from "./lib/sidecar";
   import { initAgentActivity, fsActivity, recentActivities, agentTimeline, affectsListing, ingestActivity } from "./lib/agentActivity";
   import { initAgentDiffs } from "./lib/agentDiffs";
-  import { initAgentCost } from "./lib/agentCost";
+  import { initAgentCost, ingestCost } from "./lib/agentCost";
   import { clearAgentSessionMetrics, flushSession, flushAllSessions } from "./lib/agentSessionMetrics";
   import AgentTimeline from "./lib/components/AgentTimeline.svelte";
   import DiskSpaceView from "./lib/components/DiskSpaceView.svelte";
@@ -221,6 +221,19 @@
   if (testMode) {
     (window as unknown as { __CPE_TEST_INGEST_ACTIVITY__?: (payload: string, at?: number) => void }).__CPE_TEST_INGEST_ACTIVITY__ =
       (payload: string, at?: number) => ingestActivity(JSON.parse(payload), at);
+  }
+
+  // CPE-1173: a test-mode-only hook mirroring the two above — lets the headless gui-smoke suite seed a
+  // SYNTHETIC per-session usage snapshot directly into the live `agentCost` store (the same shape an
+  // `ai-console://agent-cost` event decodes to via `agentCost.ts#ingestCost`) without a real sidecar's
+  // PTY usage scrape ever producing one. The Agent Watch drawer's Cost tab (`AgentTimeline.svelte`,
+  // CPE-1098) only renders `.cl-card` rows once the `agentCost` store has an entry — there is no other
+  // way to reach that render in a harness that never runs a real agent. Mirrors the
+  // `__CPE_TEST_INGEST_SESSION__`/`__CPE_TEST_INGEST_ACTIVITY__` convention: only attached when
+  // `testMode` is true, so it's absent (zero cost, zero attack surface) outside `--test-mode`.
+  if (testMode) {
+    (window as unknown as { __CPE_TEST_INGEST_COST__?: (payload: string) => void }).__CPE_TEST_INGEST_COST__ =
+      (payload: string) => ingestCost(JSON.parse(payload));
   }
 
   let notice = "";
