@@ -2,7 +2,7 @@
 id: CPE-1219
 title: "Fix spotlight gui-smoke: section-header assertion is case-sensitive but the label is CSS-uppercased"
 type: Bug
-status: In Progress
+status: Done
 priority: Medium
 component: gui-smoke
 tags: [ready]

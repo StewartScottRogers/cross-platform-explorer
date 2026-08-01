@@ -2,13 +2,13 @@
 id: CPE-704
 title: "EPIC: Global quick-launch spotlight overlay"
 type: Task
-status: In Progress
+status: Done
 priority: Medium
 component: Multiple
 tags: [epic]
 estimate: 4h+
 created: 2026-07-18
-closed:
+closed: 2026-08-01
 ---
 
 ## Goal
@@ -39,6 +39,25 @@ system-level tool, and it is the natural front-end for the instant index ([[CPE-
 2026-07-23 (dayshift) — **Activated.** First slice: **CPE-937** — `spotlight::fuzzy_score` + `rank`: the
 pure fuzzy-match/ranking core the overlay lists results with. Remaining: the system-wide hotkey, the
 lightweight overlay window, and feeding real files/folders/actions in.
+
+## Closed 2026-08-01 (workshift) — DoD met
+Re-activated and finished this shift. The remaining DoD (global hotkey + overlay window + real
+file/action feeding) is built and merged:
+- **CPE-1214** — `spotlight_search` + `spotlight_frecent` backbone commands + typed bindings.
+- **CPE-1215** — OS-level global hotkey (`tauri-plugin-global-shortcut`) firing `spotlight:open`,
+  with a Settings enable/disable + chord control (disabling unregisters the hotkey → no bg cost).
+- **CPE-1216** — the Spotlight overlay component (`Spotlight.svelte`): fuzzy-ranked, sectioned
+  (Action/Folder/File/Recent), matched-position highlighting, frecency-ordered default view, fed by
+  the real streamed file-name walk + the `spotlight_search` command. Opens via the global hotkey OR
+  the in-app Command Palette "Spotlight (search everywhere)…" entry.
+- **CPE-1219** — gui-smoke pin (`spotlight.smoke.ts`) drives the real built app + captures the
+  overlay screenshot for the Visual Critic.
+
+**Gauntlet:** Reviewer APPROVE + UAT PASS + Visual Critic **VISUAL PASS** on the overlay screenshot
+(border visible, FILES section hierarchy clean, active-row contrast good, matched run highlighted).
+One non-blocking visual nit (underline highlight could pop more) filed as **CPE-1220** (Low).
+DoD satisfied: hotkey opens the overlay fast even with the window hidden; it finds + executes
+files/folders/actions; disabling unregisters the hotkey.
 
 ## Board hygiene 2026-07-29 — reverted In Progress → Proposed
 Not actively being worked: all decomposed child tickets are Done. Remaining DoD is user-gated (GUI / model-key / cert / Mac) or a deferred cap. Reverted to **Proposed** so the epic queue honestly shows what's dormant vs active; re-activate with `/ticketing-epic activate` to resume (like CPE-703 was this session). **Remaining (DoD review 2026-07-30):** Global hotkey + overlay window + real file/action feeding unbuilt (only fuzzy-score core).
