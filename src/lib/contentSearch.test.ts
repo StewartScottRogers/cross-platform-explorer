@@ -66,6 +66,20 @@ describe("content search helpers (CPE-417)", () => {
     expect(parentDir("Z:\\repos\\app\\main.ts")).toBe("Z:\\repos\\app");
     expect(parentDir("x")).toBe("");
   });
+
+  // CPE-1235: a POSIX file directly at the filesystem root has its only separator at index 0, which
+  // failed the general `cut > 0` slice and returned "" — silently un-watchable by smartFolderLiveRefresh
+  // (a bare "" is filtered out of watchPathsForScope). The parent of a root-level file is the root itself.
+  it("parentDir returns the root for a POSIX file at the filesystem root (CPE-1235)", () => {
+    expect(parentDir("/foo.txt")).toBe("/");
+  });
+
+  it("parentDir regression set: nested POSIX, Windows drive-root, and no-separator are unaffected", () => {
+    expect(parentDir("/a/b/c.txt")).toBe("/a/b"); // nested POSIX path
+    expect(parentDir("C:\\foo.txt")).toBe("C:"); // Windows drive-root file
+    expect(parentDir("foo.txt")).toBe(""); // no separator at all
+    expect(parentDir("/")).toBe(""); // the root itself has no parent (unchanged, pre-existing behavior)
+  });
   it("baseName preserves case (CPE-618 — must not lowercase display names)", () => {
     expect(baseName("C:/Users/Stewart/Documents")).toBe("Documents");
     expect(baseName("Z:\\repos\\App.svelte")).toBe("App.svelte");

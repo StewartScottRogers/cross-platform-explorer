@@ -76,9 +76,18 @@ export function baseName(path: string): string {
   return parts[parts.length - 1] || path;
 }
 
-/** The parent directory of a path, cross-platform. Empty if there is none. Pure. */
+/** The parent directory of a path, cross-platform. Empty if there is none. Pure.
+ *
+ * A POSIX file directly at the filesystem root (`/foo.txt`) has its only separator at index 0, so the
+ * general `cut > 0` slice can't apply — but the file's parent isn't "none", it's the root itself.
+ * (CPE-1235: without this, `smartFolderLiveRefresh`'s `watchPathsForScope` filters the resulting `""`
+ * out, so a tag smart folder scoped to a root-level file never gets a directory watched and silently
+ * never live-refreshes.) A Windows drive-root path (`C:\foo.txt`) already has `cut > 1` and is
+ * unaffected. */
 export function parentDir(path: string): string {
   const trimmed = path.replace(/[\\/]+$/, "");
   const cut = Math.max(trimmed.lastIndexOf("/"), trimmed.lastIndexOf("\\"));
-  return cut > 0 ? trimmed.slice(0, cut) : "";
+  if (cut > 0) return trimmed.slice(0, cut);
+  if (cut === 0) return trimmed[0]; // POSIX root-level file, e.g. "/foo.txt" -> "/"
+  return "";
 }
