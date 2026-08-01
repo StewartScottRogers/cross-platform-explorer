@@ -912,8 +912,11 @@ async fn read_image_data_url(path: String) -> Result<String, String> {
 
 
 /// A PNG thumbnail of an image file as a `data:` URL the `<img>` tag can show (CPE-642), served from
-/// an mtime-keyed on-disk cache (CPE-644). Bounded by the preview size cap so a huge image can't
-/// exhaust memory. Errors (rather than hangs) on a non-image, so the frontend falls back to an icon.
+/// an mtime-keyed on-disk cache (CPE-644). Also covers `.svg` (rasterized) and `.ttf`/`.otf`/`.woff`
+/// glyph-sheet specimens (CPE-1236) — the format dispatch lives entirely in
+/// `cpe_server::thumb_source`, so this stays a thin one-line-per-branch delegate. Bounded by the
+/// preview size cap so a huge image can't exhaust memory. Errors (rather than hangs) on an unsupported
+/// or malformed source, so the frontend falls back to an icon.
 #[tauri::command]
 #[cfg_attr(feature = "specta-bindings", specta::specta)]
 fn thumbnail(app: tauri::AppHandle, path: String, max_edge: u32) -> Result<String, String> {

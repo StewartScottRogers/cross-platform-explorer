@@ -1,16 +1,22 @@
 //! Thumbnail **source decode** (CPE-1086, epic CPE-718): the decode step `make_thumbnail_png`
 //! (`thumbnail.rs`) delegates to. Today's `image::open` can't decode PSD (thumbnails fall back to a
-//! generic icon) and has no bomb-guard on a raster decode. This module owns both: PSD goes through the
-//! vendored `psd` crate's flattened RGBA composite (mirrors `image_preview::read_image_data_url`);
-//! everything else decodes via the `image` crate with a bounded `image::Limits` so a crafted
+//! generic icon) and has no bomb-guard on a raster decode. This module owns the dispatch: PSD goes
+//! through the vendored `psd` crate's flattened RGBA composite (mirrors
+//! `image_preview::read_image_data_url`); `.svg` goes through [`crate::thumb_svg::rasterize_svg`];
+//! `.ttf`/`.otf`/`.woff` go through [`crate::thumb_font::render_glyph_sheet`] (CPE-1236, epic
+//! CPE-718); everything else decodes via the `image` crate with a bounded `image::Limits` so a crafted
 //! decompression-bomb file fails fast with an `Err` rather than attempting an unbounded allocation.
 //!
 //! Returns the source's raw bytes alongside the decoded image so the caller can read EXIF and apply
-//! [`crate::thumb_orient::orient_for_display`] — decoding happens exactly once either way.
+//! [`crate::thumb_orient::orient_for_display`] — decoding happens exactly once either way. SVG/font
+//! sources carry no EXIF, so that step is a no-op for them; they're already rendered at ~`max_edge`
+//! pixels, so the caller's subsequent `.thumbnail(edge, edge)` downscale is close to a no-op too — one
+//! dispatch, one downstream pipeline, per the ticket's "extend, don't parallel-path" requirement.
 //!
-//! Reuses the already-vendored `psd` and `image` crates; **no new dependencies**. The `image::Limits`
-//! values are a local copy of `batch_transform::bounded_limits` (kept private there) — the same
-//! "documented local copy" precedent `thumb_orient` used for its EXIF-orientation logic.
+//! Reuses the already-vendored `psd` and `image` crates for the raster/PSD branches; **no new
+//! dependencies** there. The `image::Limits` values are a local copy of `batch_transform::bounded_limits`
+//! (kept private there) — the same "documented local copy" precedent `thumb_orient` used for its
+//! EXIF-orientation logic.
 
 use std::io::Cursor;
 use std::path::Path;
@@ -50,32 +56,41 @@ pub(crate) fn psd_within_limits(psd: &psd::Psd) -> bool {
 }
 
 /// Decode a thumbnail source to an image + its raw bytes (the bytes let the caller read EXIF
-/// orientation — a PSD carries none, so orientation is a no-op there). Dispatches on the (lowercased)
-/// file extension: `.psd` goes through the `psd` crate's composite, everything else through `image`
-/// with the bomb-guard [`Limits`] applied.
-pub fn decode_thumb_image(path: &Path) -> Result<(DynamicImage, Vec<u8>), String> {
+/// orientation — PSD/SVG/font sources carry none, so orientation is a no-op for them). Dispatches on
+/// the (lowercased) file extension: `.psd` goes through the `psd` crate's composite, `.svg` through
+/// [`crate::thumb_svg::rasterize_svg`], `.ttf`/`.otf`/`.woff` through
+/// [`crate::thumb_font::render_glyph_sheet`] (CPE-1236), everything else through `image` with the
+/// bomb-guard [`Limits`] applied. `max_edge` is threaded through to the SVG/font renderers so they
+/// render directly at (approximately) the requested size rather than at an arbitrary intrinsic size
+/// the caller's downstream `.thumbnail()` would then have to downscale.
+pub fn decode_thumb_image(path: &Path, max_edge: u32) -> Result<(DynamicImage, Vec<u8>), String> {
     let bytes = std::fs::read(path).map_err(|e| e.to_string())?;
     let ext = crate::model::extension_of(path);
 
-    let img = if ext == "psd" {
-        let psd = psd::Psd::from_bytes(&bytes).map_err(|e| e.to_string())?;
-        if !psd_within_limits(&psd) {
-            return Err(format!(
-                "PSD dimensions exceed limit ({}x{})",
-                psd.width(),
-                psd.height()
-            ));
+    let img = match ext.as_str() {
+        "psd" => {
+            let psd = psd::Psd::from_bytes(&bytes).map_err(|e| e.to_string())?;
+            if !psd_within_limits(&psd) {
+                return Err(format!(
+                    "PSD dimensions exceed limit ({}x{})",
+                    psd.width(),
+                    psd.height()
+                ));
+            }
+            let rgba = psd.rgba();
+            let buf = image::RgbaImage::from_raw(psd.width(), psd.height(), rgba)
+                .ok_or("PSD pixel buffer size mismatch")?;
+            DynamicImage::ImageRgba8(buf)
         }
-        let rgba = psd.rgba();
-        let buf = image::RgbaImage::from_raw(psd.width(), psd.height(), rgba)
-            .ok_or("PSD pixel buffer size mismatch")?;
-        DynamicImage::ImageRgba8(buf)
-    } else {
-        let mut reader = ImageReader::new(Cursor::new(&bytes))
-            .with_guessed_format()
-            .map_err(|e| e.to_string())?;
-        reader.limits(bounded_limits());
-        reader.decode().map_err(|e| e.to_string())?
+        "svg" => crate::thumb_svg::rasterize_svg(&bytes, max_edge)?,
+        "ttf" | "otf" | "woff" | "woff2" => crate::thumb_font::render_glyph_sheet(&bytes, &ext, max_edge)?,
+        _ => {
+            let mut reader = ImageReader::new(Cursor::new(&bytes))
+                .with_guessed_format()
+                .map_err(|e| e.to_string())?;
+            reader.limits(bounded_limits());
+            reader.decode().map_err(|e| e.to_string())?
+        }
     };
 
     Ok((img, bytes))
@@ -131,7 +146,7 @@ mod tests {
         let d = scratch("psd");
         let f = d.join("a.psd");
         std::fs::write(&f, minimal_psd(6, 4)).unwrap();
-        let (img, bytes) = decode_thumb_image(&f).unwrap();
+        let (img, bytes) = decode_thumb_image(&f, 64).unwrap();
         assert_eq!((img.width(), img.height()), (6, 4));
         assert!(!bytes.is_empty(), "raw bytes must be returned alongside the decoded image");
         let px = img.to_rgba8().get_pixel(0, 0).0;
@@ -150,7 +165,7 @@ mod tests {
         let d = scratch("psdbomb");
         let f = d.join("bomb.psd");
         std::fs::write(&f, minimal_psd(25_000, 2)).unwrap();
-        let err = decode_thumb_image(&f);
+        let err = decode_thumb_image(&f, 64);
         assert!(err.is_err(), "a PSD wider than MAX_IMAGE_DIMENSION must be rejected, not OOM/panic");
         let _ = std::fs::remove_dir_all(&d);
     }
@@ -174,8 +189,8 @@ mod tests {
         let raster_path = d.join("bad.png");
         std::fs::write(&psd_path, b"not a psd").unwrap();
         std::fs::write(&raster_path, b"not a png").unwrap();
-        let psd_err = decode_thumb_image(&psd_path).unwrap_err();
-        let raster_err = decode_thumb_image(&raster_path).unwrap_err();
+        let psd_err = decode_thumb_image(&psd_path, 64).unwrap_err();
+        let raster_err = decode_thumb_image(&raster_path, 64).unwrap_err();
         // Both error, and via different decoders — a sanity check the `.psd` extension really does
         // dispatch to the psd-decoder branch rather than silently falling through to `image`.
         assert!(!psd_err.is_empty());
@@ -188,7 +203,7 @@ mod tests {
         let d = scratch("png");
         let f = d.join("x.png");
         image::RgbImage::from_pixel(12, 8, image::Rgb([1u8, 2, 3])).save(&f).unwrap();
-        let (img, bytes) = decode_thumb_image(&f).unwrap();
+        let (img, bytes) = decode_thumb_image(&f, 64).unwrap();
         assert_eq!((img.width(), img.height()), (12, 8));
         assert!(!bytes.is_empty());
         let _ = std::fs::remove_dir_all(&d);
@@ -199,7 +214,7 @@ mod tests {
         let d = scratch("bomb");
         let f = d.join("bomb.png");
         std::fs::write(&f, bomb_png()).unwrap();
-        let err = decode_thumb_image(&f);
+        let err = decode_thumb_image(&f, 64);
         assert!(err.is_err(), "a huge-declared-dimension PNG must be rejected via image::Limits");
         let _ = std::fs::remove_dir_all(&d);
     }
