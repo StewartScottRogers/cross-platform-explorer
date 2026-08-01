@@ -2,13 +2,13 @@
 id: CPE-978
 title: "EPIC: Smart folders & saved searches"
 type: Task
-status: In Progress
+status: Done
 priority: Medium
 component: Multiple
 tags: [epic]
 estimate: 4h+
 created: 2026-07-24
-closed:
+closed: 2026-08-01
 ---
 
 > **Activated 2026-07-24** (workshift, Foreman — user away, decisions logged). First slice = the **pure
@@ -85,3 +85,22 @@ Decomposition (all headless-buildable TS/Svelte; SEQUENTIAL — they overlap App
 - CPE-1230 — Live refresh on filesystem change (folder-watch/CPE-833), not just $tags.
 - CPE-1231 — Reorder smart folders (both stores) + Sidebar reorder UI.
 - Deferred: semantic saved query (composes with CPE-976 + a model key).
+
+## Closed 2026-08-01 (workshift) — DoD met
+Wired the orphaned structured saved-search model into a complete, live feature. All DoD elements met:
+- **Save a search as a named smart folder** — CPE-1229 ("Save search…" in SelectByDialog + palette).
+- **Opening shows current matches across the tree** — CPE-1229 open-evaluator (scans the captured root
+  via `scan_tree`, filters through the existing `evaluateSavedSearch` — one matcher, no parallel logic).
+- **Refreshed as files change** — CPE-1230 (reuses the existing folder-watch bus, debounced in-scope
+  recompute, unsubscribe on exit; tag scope watches parent dirs so the watcher actually arms).
+- **Persist across sessions** — CPE-1228 (`savedSearchStore.ts`, localStorage, tolerant parse).
+- **Edit / reorder / remove** — rename+remove existed; CPE-1231 added reorder (both stores).
+- **Plain explorer unaffected** — sidebar section gated on non-empty; no always-on cost.
+
+**Children:** CPE-1228 (store) · CPE-1229 (Save + sidebar + open-evaluator) · CPE-1230 (live-refresh) ·
+CPE-1231 (reorder) · CPE-1233 (gui-smoke pin) · CPE-1234 (preview-icon fix). Gauntlet: every child got
+Reviewer + (behavioural) UAT; the marquee UI slice + preview fix got Visual Critic **VISUAL PASS**
+(saved-search sidebar section + magnifying-glass preview placeholder). CPE-1230 bounced once (two
+independent defects: a watchLive "off means off" bypass + tag-folder watcher-never-armed) and was
+fixed + re-verified. Follow-ups filed: CPE-1235 (parentDir POSIX-root edge). Deferred: semantic saved
+query (composes with CPE-976 + a model key).
