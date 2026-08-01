@@ -62,8 +62,12 @@ xattr = "1"
 # Windows registry access for the shell-citizen integration — writing/removing the "Open in CPE"
 # context-menu entries under HKCU (CPE-1020, epic CPE-712). Windows-only; same version the app adapter
 # already uses. The registration *decision* is pure (`shell_menu::windows_shell_plan`); this only applies it.
+# `junction` creates NTFS directory junctions (reparse points) via the correct DeviceIoControl reparse-point
+# buffer layout (CPE-1210, epic CPE-715) — hand-rolling that buffer is error-prone, so we take the small,
+# focused, Windows-only dep rather than reimplement it. Flagged for review per the ticket.
 [target.'cfg(windows)'.dependencies]
 winreg = "0.52"
+junction = "1"
 
 # The ticket-directives MCP server (CPE-962): a stdio MCP server an external agent launches to
 # list/reply to Agent Board directives. `ticket-mcp <repo-root>`.

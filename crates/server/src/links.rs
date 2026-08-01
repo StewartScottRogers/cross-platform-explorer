@@ -27,6 +27,27 @@ pub fn create_hard_link(target: &str, link_path: &str) -> Result<(), String> {
     std::fs::hard_link(target, link_path).map_err(|e| e.to_string())
 }
 
+/// Create a Windows directory junction at `link_path` pointing to `target` (CPE-1210, epic CPE-715). A
+/// junction is an NTFS reparse point on a *directory* — unlike a symlink it needs no Developer Mode /
+/// elevation, but `target` must already exist and be a directory. Uses the `junction` crate rather than
+/// hand-rolling the `DeviceIoControl` reparse-point buffer layout (error-prone to get right); see the
+/// `[target.'cfg(windows)'.dependencies]` block in `Cargo.toml` for the dep note.
+#[cfg(windows)]
+pub fn create_junction(target: &str, link_path: &str) -> Result<(), String> {
+    let target_path = std::path::Path::new(target);
+    if !target_path.is_dir() {
+        return Err(format!("{target} is not a directory (junctions can only target directories)"));
+    }
+    junction::create(target_path, std::path::Path::new(link_path)).map_err(|e| e.to_string())
+}
+
+/// Non-Windows stub (CPE-1210): junctions are an NTFS-only reparse-point kind, so this always reports a
+/// clear "Windows-only" error rather than compiling a no-op or failing to build.
+#[cfg(not(windows))]
+pub fn create_junction(_target: &str, _link_path: &str) -> Result<(), String> {
+    Err("Directory junctions are Windows-only".to_string())
+}
+
 /// A path's link status for the file list + link tooling (CPE-804, epic CPE-715): whether it's a symlink,
 /// where it points, and whether that target is currently missing (a broken link).
 #[derive(serde::Serialize, Default, PartialEq, Debug)]
@@ -254,6 +275,49 @@ mod tests {
         // same-named file exists under the root.
         let result = suggest_repair(&plain.to_string_lossy(), &[&root.to_string_lossy()]);
         assert_eq!(result, None);
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    /// Windows-only (CPE-1210): a junction to a directory resolves — listing through it reaches the
+    /// target's contents — and, unlike a symlink, creation needs no Developer Mode / elevation, so this
+    /// isn't gated behind the unprivileged-Windows skip pattern used for the symlink tests above.
+    #[cfg(windows)]
+    #[test]
+    fn junction_resolves_to_target_directory() {
+        let d = scratch();
+        let target_dir = d.join("target_dir");
+        fs::create_dir_all(&target_dir).unwrap();
+        fs::write(target_dir.join("inside.txt"), b"junction-data").unwrap();
+
+        let link = d.join("j_link");
+        create_junction(&target_dir.to_string_lossy(), &link.to_string_lossy()).unwrap();
+
+        // Resolves: the file inside the target is reachable through the junction path.
+        let via_link = fs::read(link.join("inside.txt")).unwrap();
+        assert_eq!(via_link, b"junction-data");
+
+        // Reports as a reparse point (symlink-like) to the rest of the app's link tooling.
+        let status = link_status(&link.to_string_lossy());
+        assert!(status.is_symlink, "a junction is a reparse point — should read as symlink-like");
+        assert!(!status.broken, "target exists — should not read as broken");
+
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    /// Windows-only: junctions can only target directories — a file target is a clear validation error,
+    /// not a confusing OS error surfaced straight from the syscall.
+    #[cfg(windows)]
+    #[test]
+    fn junction_rejects_file_target() {
+        let d = scratch();
+        let file_target = d.join("not_a_dir.txt");
+        fs::write(&file_target, b"data").unwrap();
+        let link = d.join("j_link2");
+
+        let result = create_junction(&file_target.to_string_lossy(), &link.to_string_lossy());
+        assert!(result.is_err());
+        assert!(!link.exists(), "no junction should be created for a file target");
+
         let _ = fs::remove_dir_all(&d);
     }
 

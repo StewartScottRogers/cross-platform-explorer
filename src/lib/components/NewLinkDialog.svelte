@@ -25,7 +25,13 @@
 
   const dispatch = createEventDispatcher<{ created: string; error: string; close: void }>();
 
-  let kind: "symlink" | "hardlink" = "symlink";
+  /** Windows-only detection (CPE-1210) for the "Junction" kind — same `navigator.platform`/`userAgent`
+   *  sniff `ShellIntegration.svelte` uses for its Windows-only shell-integration row, so the two stay
+   *  consistent rather than inventing a second detection path. */
+  const platform = typeof navigator !== "undefined" ? navigator.platform || navigator.userAgent : "";
+  const isWindows = /win/i.test(platform);
+
+  let kind: "symlink" | "hardlink" | "junction" = "symlink";
   let target = "";
   let name = "";
   let creating = false;
@@ -40,10 +46,15 @@
   /** Native picker for the link's target (CPE-1207, [[path-inputs-need-picker]]) — defaults to a FILE
    *  picker: hardlinks can only ever target a file (no filesystem supports a directory hardlink), and a
    *  file target is by far the common symlink case too. A symlink to a folder can still be typed by hand
-   *  into the field below. */
+   *  into the field below. A junction (CPE-1210) can only ever target a *directory*, so that kind flips
+   *  the picker to directory mode instead. */
   async function browseForTarget() {
     try {
-      const picked = await openFileDialog({ directory: false, multiple: false, title: translate(get(locale), "link.browse") });
+      const picked = await openFileDialog({
+        directory: kind === "junction",
+        multiple: false,
+        title: translate(get(locale), "link.browse"),
+      });
       if (typeof picked === "string") target = picked;
     } catch {
       // Cancelled or unavailable — leave the current value untouched.
@@ -71,7 +82,9 @@
     try {
       const res = kind === "symlink"
         ? await commands.createSymlink(target.trim(), linkPath)
-        : await commands.createHardLink(target.trim(), linkPath);
+        : kind === "hardlink"
+        ? await commands.createHardLink(target.trim(), linkPath)
+        : await commands.createJunction(target.trim(), linkPath);
       if (res.status === "ok") {
         dispatch("created", linkPath);
       } else {
@@ -105,6 +118,9 @@
     <select id="new-link-kind-field" class="field" bind:value={kind} data-testid="new-link-kind">
       <option value="symlink">{$t("link.kindSymlink")}</option>
       <option value="hardlink">{$t("link.kindHardlink")}</option>
+      {#if isWindows}
+        <option value="junction">{$t("link.kindJunction")}</option>
+      {/if}
     </select>
 
     <label class="field-label" for="new-link-target-field">{$t("link.targetLabel")}</label>
@@ -121,6 +137,9 @@
         {$t("link.browse")}
       </button>
     </div>
+    {#if kind === "junction"}
+      <div class="hint" data-testid="new-link-junction-hint">{$t("link.junctionTargetHint")}</div>
+    {/if}
 
     <label class="field-label" for="new-link-name-field">{$t("link.nameLabel")}</label>
     <input
@@ -187,6 +206,11 @@
     gap: 6px;
   }
   .row-input .field { flex: 1; }
+  .hint {
+    margin-top: 4px;
+    font-size: 11.5px;
+    color: var(--text-dim);
+  }
   .err {
     margin-top: 10px;
     font-size: 12.5px;
