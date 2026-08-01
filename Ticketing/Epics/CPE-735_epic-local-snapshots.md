@@ -2,7 +2,7 @@
 id: CPE-735
 title: "EPIC: Local snapshots / time-machine-lite"
 type: Task
-status: In Progress
+status: Done
 priority: Medium
 component: Multiple
 tags: [epic]
