@@ -2,7 +2,7 @@
 id: CPE-978
 title: "EPIC: Smart folders & saved searches"
 type: Task
-status: Proposed
+status: In Progress
 priority: Medium
 component: Multiple
 tags: [epic]
@@ -67,3 +67,21 @@ natural home for a saved **semantic** query ([[CPE-976]]).
 
 ## Board hygiene 2026-07-29 — reverted In Progress → Proposed
 Not actively being worked: all decomposed child tickets are Done. Remaining DoD is user-gated (GUI / model-key / cert / Mac) or a deferred cap. Reverted to **Proposed** so the epic queue honestly shows what's dormant vs active; re-activate with `/ticketing-epic activate` to resume (like CPE-703 was this session). **Remaining (DoD review 2026-07-30):** Sidebar smart-folder surface + live-refresh + persistence unbuilt (only pure saved-query evaluator).
+
+## Re-activated 2026-08-01 (workshift) — DoD-gap assessment + real decomposition
+Grep-first assessment (the 2026-07-30 "remaining" note was STALE both ways). TRUE state:
+- `src/lib/savedSearch.ts` (CPE-986, this epic's OWN structured-query model + `evaluateSavedSearch`,
+  9 tests) is built but ORPHANED — no store, no persistence, no UI, referenced only by its test.
+- A SEPARATE tag-only smart folder (`src/lib/smartFolders.ts`, epic CPE-614/CPE-667) IS wired
+  end-to-end (sidebar section, localStorage persist, rename/delete, reactive on `$tags`) — covers
+  ~half the DoD but only a single-tag query, NOT this epic's structured search.
+- DoD grade: sidebar-appears DONE; open-shows-matches DONE (tag scope only); persist DONE (tag store);
+  save-a-structured-search MISSING; live-refresh-on-FS-change MISSING (only tag-change today);
+  reorder MISSING.
+
+Decomposition (all headless-buildable TS/Svelte; SEQUENTIAL — they overlap App.svelte/Sidebar.svelte):
+- CPE-1228 — Saved-search store + persistence (foundation), wrapping serializeSavedSearch/parseSavedSearch.
+- CPE-1229 — Wire structured smart folders end-to-end: "Save search…" + sidebar surface + open-evaluator.
+- CPE-1230 — Live refresh on filesystem change (folder-watch/CPE-833), not just $tags.
+- CPE-1231 — Reorder smart folders (both stores) + Sidebar reorder UI.
+- Deferred: semantic saved query (composes with CPE-976 + a model key).
