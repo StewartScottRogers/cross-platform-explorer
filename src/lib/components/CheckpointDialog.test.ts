@@ -160,4 +160,56 @@ describe("CheckpointDialog (CPE-1125)", () => {
 
     expect(invokeMock).toHaveBeenCalledWith("checkpoint_revert_one", { root: "/work/proj", manifestId: "m-2", path: "/work/proj/a.txt" });
   });
+
+  describe("per-file diff (CPE-1197 frontend half)", () => {
+    async function previewWithDrift() {
+      render(CheckpointDialog, { initialPath: "/work/proj" });
+      await screen.findByTestId("cp-m-2");
+
+      invokeMock.mockImplementation(async (cmd: string) => {
+        if (cmd === "checkpoint_preview_revert") {
+          return { creates: 0, overwrites: 1, deletes: 0, bytes_written: 10, total: 1, drift_count: 1, drift_paths: ["a.txt"] };
+        }
+        if (cmd === "checkpoint_list") return CHECKPOINTS;
+        return null;
+      });
+
+      await fireEvent.click(screen.getByTestId("preview-btn-m-2"));
+      await screen.findByTestId("drift-list");
+    }
+
+    it("calls checkpointDiffFile with the right args and renders DiffPeek's before/after on Open diff", async () => {
+      await previewWithDrift();
+
+      invokeMock.mockImplementation(async (cmd: string) => {
+        if (cmd === "checkpoint_diff_file") return { before: "old line\n", after: "new line\n" };
+        return null;
+      });
+
+      await fireEvent.click(screen.getByTestId("diff-btn-a.txt"));
+
+      expect(invokeMock).toHaveBeenCalledWith("checkpoint_diff_file", { root: "/work/proj", manifestId: "m-2", relPath: "a.txt" });
+      const panel = await screen.findByTestId("diff-panel-a.txt");
+      expect(panel.textContent).toContain("old line");
+      expect(panel.textContent).toContain("new line");
+
+      // Clicking again collapses the panel.
+      await fireEvent.click(screen.getByTestId("diff-btn-a.txt"));
+      expect(screen.queryByTestId("diff-panel-a.txt")).toBeNull();
+    });
+
+    it("shows a small notice — not a crash — when checkpointDiffFile errors (binary/oversize/unknown-path)", async () => {
+      await previewWithDrift();
+
+      invokeMock.mockImplementation(async (cmd: string) => {
+        if (cmd === "checkpoint_diff_file") throw new Error("a.txt: live file is not valid UTF-8 text (binary diff isn't supported).");
+        return null;
+      });
+
+      await fireEvent.click(screen.getByTestId("diff-btn-a.txt"));
+
+      const notice = await screen.findByTestId("diff-error");
+      expect(notice.textContent).toContain("binary diff isn't supported");
+    });
+  });
 });
