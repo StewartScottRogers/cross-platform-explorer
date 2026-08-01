@@ -20,8 +20,11 @@ export default defineConfig(async () => ({
     environment: "jsdom",
     globals: true,
     // Never collect tests from sub-agent git worktrees or the Rust target dir — they'd run stale
-    // copies against the live source tree and report phantom failures.
-    exclude: ["**/node_modules/**", "**/dist/**", "**/.claude/**", "**/target/**"],
+    // copies against the live source tree and report phantom failures. `gui-smoke/` is a SEPARATE
+    // sub-project that runs its own `node:test` suite (`tsx --test`, via `gui-smoke`'s own
+    // `npm run test:unit`) — its `*.test.ts` files are not vitest suites, so if the root vitest glob
+    // collects them it fails them with "No test suite found" (CPE-1174). Exclude it here.
+    exclude: ["**/node_modules/**", "**/dist/**", "**/.claude/**", "**/target/**", "**/gui-smoke/**"],
     // @tauri-apps/* must be inlined, otherwise Vite pre-bundles it and
     // vi.mock() cannot intercept the import inside .svelte files.
     server: { deps: { inline: [/^@tauri-apps\//] } },
