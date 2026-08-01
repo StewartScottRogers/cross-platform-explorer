@@ -2821,6 +2821,73 @@ async fn snapshot_run_due(
     .map_err(|e| e.to_string())?
 }
 
+// ---- Background scheduled-snapshot timer (CPE-1199, epic CPE-735) ----------------------------------
+// The app's first generic periodic task beyond the `notify` watchers. A single dedicated thread wakes
+// on a deliberately un-tight cadence and runs one `snapshot_schedule_tick` per wake, holding the
+// last-run bookkeeping in memory for the app's lifetime. Everything security-sensitive (auto-capture +
+// auto-prune) is opt-in per folder via the Settings UI, and OFF MEANS OFF: with no enabled rule every
+// wake is a single cheap catalog read that early-returns before touching a folder or the disk.
+
+/// How often the background scheduled-snapshot timer wakes to check for due folders (CPE-1199). A
+/// deliberately un-tight cadence: rule intervals are minutes-to-days, and with no enabled rule a wake
+/// costs only one cheap catalog read that early-returns, so 60s keeps idle cost negligible while still
+/// honouring a rule's interval closely enough.
+const SNAPSHOT_SCHEDULE_TICK: std::time::Duration = std::time::Duration::from_secs(60);
+
+/// The current wall-clock time in epoch seconds (the `now` the scheduler's pure core is injected with).
+fn now_epoch_s() -> u64 {
+    SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0)
+}
+
+/// One scheduler tick, pure over an injected [`ServerCtx`] + clock so it's headlessly testable
+/// (CPE-1199). **Off means off:** if no rule is enabled the catalog read early-returns before any
+/// capture or disk write — a folderless / all-disabled app pays only this one cheap read per wake, and
+/// `last_run_times` is left untouched. Otherwise it captures every root due at `now` (via
+/// [`cpe_server::snapshot_schedule::snapshot_run_due`], which also retention-prunes each) and records
+/// each captured root's run time in `last_run_times`, returning the roots captured this tick. A listing
+/// or capture error is swallowed (returns empty) so a bad folder can never propagate out of the timer.
+fn snapshot_schedule_tick(
+    ctx: &dyn ServerCtx,
+    now: u64,
+    last_run_times: &mut std::collections::BTreeMap<String, u64>,
+) -> Vec<String> {
+    // Off means off: a listing error, an empty catalog, or an all-disabled catalog does nothing at all
+    // (no capture, no disk growth, no bookkeeping change) — verified by construction here.
+    match cpe_server::snapshot_schedule::list_rules(ctx) {
+        Ok(rules) if rules.iter().any(|r| r.enabled) => {}
+        _ => return Vec::new(),
+    }
+    let Ok(outcomes) = cpe_server::snapshot_schedule::snapshot_run_due(ctx, now, last_run_times) else {
+        return Vec::new();
+    };
+    let captured: Vec<String> = outcomes.into_iter().map(|o| o.root).collect();
+    for root in &captured {
+        last_run_times.insert(root.clone(), now);
+    }
+    captured
+}
+
+/// Spawn the background scheduled-snapshot timer (CPE-1199, epic CPE-735). A single dedicated thread
+/// sleeps [`SNAPSHOT_SCHEDULE_TICK`] between wakes and runs one [`snapshot_schedule_tick`] per wake,
+/// keeping the last-run map in memory for the app's lifetime (so re-arming an already-run rule waits
+/// its full interval, rather than re-capturing every 60s). It never blocks startup (spawned, never
+/// joined) and swallows per-tick errors, so nothing here can crash the app. Off means off: with no
+/// enabled rule each wake is one cheap catalog read that early-returns.
+///
+/// Bookkeeping is in-memory only, so on a fresh launch a never-run enabled rule is due immediately and
+/// captures on the first wake — the intended "snapshot when you open the app" behaviour, kept bounded
+/// by each rule's own retention policy.
+fn spawn_snapshot_schedule_timer(app: tauri::AppHandle) {
+    let _ = std::thread::Builder::new().name("cpe-snapshot-scheduler".into()).spawn(move || {
+        let mut last_run_times: std::collections::BTreeMap<String, u64> = std::collections::BTreeMap::new();
+        loop {
+            std::thread::sleep(SNAPSHOT_SCHEDULE_TICK);
+            let ctx = server_ctx::TauriCtx::new(&app);
+            let _ = snapshot_schedule_tick(&ctx, now_epoch_s(), &mut last_run_times);
+        }
+    });
+}
+
 /// Line / word / character / byte counts for a text file (CPE-414). Lines follow `str::lines`
 /// (a final unterminated line still counts); words are whitespace-separated; characters are Unicode
 /// scalar values. Capped so analysing a file stays predictable; a non-UTF-8 (binary) file, a
@@ -7753,6 +7820,13 @@ pub fn run() {
         // daemon that was file-locking the exe is gone before we rewrite it.
         #[cfg(feature = "sidecar-platform")]
         restore_stale_sidecars_on_startup(app.handle());
+
+        // Background scheduled-snapshot timer (CPE-1199, epic CPE-735). Spawned, never joined, so it
+        // never blocks startup. Opt-in per folder in Settings and off-means-off: until the user adds an
+        // enabled rule, each 60s wake is a single cheap catalog read that early-returns (no capture, no
+        // disk growth). Desktop-only — mobile has no scheduled-snapshot surface.
+        #[cfg(not(any(target_os = "android", target_os = "ios")))]
+        spawn_snapshot_schedule_timer(app.handle().clone());
         Ok(())
     });
 
@@ -8744,6 +8818,101 @@ mod tests {
         // The cross-crate cpe-server types now flow into the generated client.
         assert!(src.contains("DirEntry") && src.contains("OpResult") && src.contains("EntryInfo"),
             "cpe-server types should be exported into the typed client");
+    }
+
+    // ---- Background scheduled-snapshot timer (CPE-1199, epic CPE-735) -------------------------------
+    // These exercise `snapshot_schedule_tick` — the per-wake body of the timer — over a pure
+    // `HeadlessCtx` + injected clock (no tauri runtime, so this stays a pure-fs test per the note above).
+
+    use cpe_server::ctx::HeadlessCtx;
+    use cpe_server::{checkpoint_store, snapshot_schedule};
+    use std::collections::BTreeMap;
+
+    fn sched_scratch(tag: &str) -> PathBuf {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static SEQ: AtomicU64 = AtomicU64::new(0);
+        let n = SEQ.fetch_add(1, Ordering::Relaxed);
+        let d = std::env::temp_dir().join(format!("cpe-sched-tick-{}-{}-{}", tag, std::process::id(), n));
+        fs::create_dir_all(&d).unwrap();
+        d
+    }
+
+    /// Off means off: with no rules at all a tick captures nothing, writes nothing to disk, and leaves
+    /// the last-run bookkeeping empty — the zero-idle-cost guarantee, asserted by construction.
+    #[test]
+    fn snapshot_schedule_tick_is_zero_cost_with_no_rules() {
+        let app = sched_scratch("noop-app");
+        let ctx = HeadlessCtx::new(&app);
+        let probe = sched_scratch("noop-probe");
+        let probe_s = probe.to_string_lossy().to_string();
+
+        let mut last_run = BTreeMap::new();
+        let captured = snapshot_schedule_tick(&ctx, 10_000, &mut last_run);
+
+        assert!(captured.is_empty(), "no rules ⇒ nothing captured");
+        assert!(last_run.is_empty(), "no rules ⇒ bookkeeping untouched");
+        // No checkpoint store was created for any folder — the tick never touched the filesystem.
+        assert!(checkpoint_store::checkpoint_list(&ctx, &probe_s).unwrap().is_empty());
+
+        let _ = fs::remove_dir_all(&app);
+        let _ = fs::remove_dir_all(&probe);
+    }
+
+    /// An all-disabled catalog is also a no-op (off means off applies to a disabled rule, not just an
+    /// empty catalog) — no capture despite a stored rule.
+    #[test]
+    fn snapshot_schedule_tick_does_nothing_when_every_rule_is_disabled() {
+        let app = sched_scratch("disabled-app");
+        let ctx = HeadlessCtx::new(&app);
+        let root = sched_scratch("disabled-root");
+        let root_s = root.to_string_lossy().to_string();
+        fs::write(root.join("f.txt"), b"x").unwrap();
+        snapshot_schedule::set_rule(&ctx, snapshot_schedule::ScheduleRule {
+            root: root_s.clone(), interval_s: 1, retention: Default::default(), enabled: false,
+        }).unwrap();
+
+        let mut last_run = BTreeMap::new();
+        assert!(snapshot_schedule_tick(&ctx, 10_000, &mut last_run).is_empty());
+        assert!(last_run.is_empty());
+        assert!(checkpoint_store::checkpoint_list(&ctx, &root_s).unwrap().is_empty(), "disabled ⇒ no capture");
+
+        let _ = fs::remove_dir_all(&app);
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    /// The enable→due→capture path: an enabled, never-run rule is due immediately, so the first tick
+    /// captures it and records its run time; a second tick within the interval then captures nothing
+    /// (the recorded last-run holds it off) — proving the timer doesn't re-capture every wake.
+    #[test]
+    fn snapshot_schedule_tick_captures_a_due_enabled_root_then_holds_off_within_interval() {
+        let app = sched_scratch("capture-app");
+        let ctx = HeadlessCtx::new(&app);
+        let root = sched_scratch("capture-root");
+        let root_s = root.to_string_lossy().to_string();
+        fs::write(root.join("f.txt"), b"content").unwrap();
+        snapshot_schedule::set_rule(&ctx, snapshot_schedule::ScheduleRule {
+            root: root_s.clone(), interval_s: 3_600, retention: Default::default(), enabled: true,
+        }).unwrap();
+
+        let mut last_run = BTreeMap::new();
+        // Tick 1: never-run ⇒ due immediately ⇒ captured, and its run time is recorded at `now`.
+        let captured = snapshot_schedule_tick(&ctx, 1_000, &mut last_run);
+        assert_eq!(captured, vec![root_s.clone()]);
+        assert_eq!(last_run.get(&root_s), Some(&1_000));
+        assert_eq!(checkpoint_store::checkpoint_list(&ctx, &root_s).unwrap().len(), 1, "one scheduled capture landed");
+
+        // Tick 2: still inside the 3600s interval ⇒ not due ⇒ no second capture.
+        assert!(snapshot_schedule_tick(&ctx, 2_000, &mut last_run).is_empty(), "within interval ⇒ no re-capture");
+        assert_eq!(checkpoint_store::checkpoint_list(&ctx, &root_s).unwrap().len(), 1, "still just the one capture");
+
+        // Tick 3: past the interval ⇒ due again ⇒ a second capture, run time bumped.
+        let captured3 = snapshot_schedule_tick(&ctx, 5_000, &mut last_run);
+        assert_eq!(captured3, vec![root_s.clone()]);
+        assert_eq!(last_run.get(&root_s), Some(&5_000));
+        assert_eq!(checkpoint_store::checkpoint_list(&ctx, &root_s).unwrap().len(), 2, "interval elapsed ⇒ second capture");
+
+        let _ = fs::remove_dir_all(&app);
+        let _ = fs::remove_dir_all(&root);
     }
 
     #[test]
