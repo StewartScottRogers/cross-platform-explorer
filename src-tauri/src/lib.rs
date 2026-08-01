@@ -3395,6 +3395,30 @@ async fn find_similar_images_stream(
     .map_err(|e| e.to_string())?
 }
 
+/// Find near-duplicate (near-identical wording) text documents under `root` (CPE-1204, epic CPE-997
+/// stretch) — walk + SimHash + single-link cluster. Model lives in `cpe_server::document_similarity`;
+/// this is a thin `spawn_blocking` dispatcher, the textual complement of `find_similar_images`. A
+/// modest-sized collect-to-vec command (not streamed): SimHash clustering is a whole-set operation like
+/// image similarity, and this scope (plain-text notes/READMEs) is smaller than a full folder walk.
+#[tauri::command]
+#[cfg_attr(feature = "specta-bindings", specta::specta)]
+async fn find_similar_documents(root: String) -> Result<cpe_server::document_similarity::DocSimResult, String> {
+    tauri::async_runtime::spawn_blocking(move || cpe_server::document_similarity::find_similar_documents(&root))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+/// Find near-identical folders under `root` (CPE-1204, epic CPE-997 stretch) — walk + per-folder
+/// content-hash set + Jaccard single-link cluster. Model lives in `cpe_server::folder_similarity_scan`
+/// (adapter) / `cpe_server::folder_similarity` (pure core); this is a thin `spawn_blocking` dispatcher.
+#[tauri::command]
+#[cfg_attr(feature = "specta-bindings", specta::specta)]
+async fn find_similar_folders(root: String) -> Result<cpe_server::folder_similarity_scan::FolderSimResult, String> {
+    tauri::async_runtime::spawn_blocking(move || cpe_server::folder_similarity_scan::find_similar_folders(&root))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
 // ---- Rules-based auto-organize (CPE-1142, epic CPE-979) -------------------------------------------
 // Propose -> checkpoint -> apply, wired over the built+tested `cpe_server::organize` planner. The listing
 // + checkpoint + move glue lives in `cpe_server::organize_apply` (CPE-815 pattern); these commands are
@@ -8203,6 +8227,8 @@ pub fn run() {
             find_duplicates_stream,
             find_similar_images,
             find_similar_images_stream,
+            find_similar_documents,
+            find_similar_folders,
             organize_plan,
             organize_clutter,
             organize_apply,
@@ -8949,6 +8975,8 @@ pub fn export_bindings(out: &std::path::Path) -> Result<(), String> {
         find_duplicates_stream,
         find_similar_images,
         find_similar_images_stream,
+        find_similar_documents,
+        find_similar_folders,
         organize_plan,
         organize_clutter,
         organize_apply,
