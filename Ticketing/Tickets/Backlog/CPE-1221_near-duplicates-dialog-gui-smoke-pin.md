@@ -35,3 +35,8 @@ silently regress, and capture a real screenshot for the Visual Critic to judge.
 Filed by the Foreman at epic boundary rather than blocking the CPE-1204 merge on a full
 rebuild-and-capture chain, since the dialog reuses an already-visually-validated pattern. QA-Architect
 burndown item.
+
+## Also fix while here (CPE-1204 review nit)
+`crates/server/src/lib.rs`'s module doc comment for `folder_similarity_scan` is grammatically
+garbled ("The adapter [`folder_similarity`]'s own docs describe as the caller's job."). Cosmetic —
+tidy it up when touching the near-dup area for the render-pin.

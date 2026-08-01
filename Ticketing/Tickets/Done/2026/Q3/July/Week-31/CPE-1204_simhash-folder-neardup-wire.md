@@ -17,7 +17,7 @@ text / walk+hash-set-per-folder) + Tauri commands + bindings for near-duplicate 
 FOLDERS.
 
 ## Acceptance Criteria
-- [ ] cargo-tested adapters; commands in `bindings.gen.ts`; `npm run check` clean; clippy clean.
+- [x] cargo-tested adapters; commands in `bindings.gen.ts`; `npm run check` clean; clippy clean.
 
 ## Notes
 - Genuinely parallel to the image spine (different cores) but shares `lib.rs`/`bindings.gen.ts` with CPE-1201 —
