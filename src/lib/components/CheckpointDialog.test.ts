@@ -160,4 +160,98 @@ describe("CheckpointDialog (CPE-1125)", () => {
 
     expect(invokeMock).toHaveBeenCalledWith("checkpoint_revert_one", { root: "/work/proj", manifestId: "m-2", path: "/work/proj/a.txt" });
   });
+
+  describe("per-file diff (CPE-1197 frontend half)", () => {
+    async function previewWithDrift() {
+      render(CheckpointDialog, { initialPath: "/work/proj" });
+      await screen.findByTestId("cp-m-2");
+
+      invokeMock.mockImplementation(async (cmd: string) => {
+        if (cmd === "checkpoint_preview_revert") {
+          return { creates: 0, overwrites: 1, deletes: 0, bytes_written: 10, total: 1, drift_count: 1, drift_paths: ["a.txt"] };
+        }
+        if (cmd === "checkpoint_list") return CHECKPOINTS;
+        return null;
+      });
+
+      await fireEvent.click(screen.getByTestId("preview-btn-m-2"));
+      await screen.findByTestId("drift-list");
+    }
+
+    it("calls checkpointDiffFile with the right args and renders DiffPeek's before/after on Open diff", async () => {
+      await previewWithDrift();
+
+      invokeMock.mockImplementation(async (cmd: string) => {
+        if (cmd === "checkpoint_diff_file") return { before: "old line\n", after: "new line\n" };
+        return null;
+      });
+
+      await fireEvent.click(screen.getByTestId("diff-btn-a.txt"));
+
+      expect(invokeMock).toHaveBeenCalledWith("checkpoint_diff_file", { root: "/work/proj", manifestId: "m-2", relPath: "a.txt" });
+      const panel = await screen.findByTestId("diff-panel-a.txt");
+      expect(panel.textContent).toContain("old line");
+      expect(panel.textContent).toContain("new line");
+
+      // Clicking again collapses the panel.
+      await fireEvent.click(screen.getByTestId("diff-btn-a.txt"));
+      expect(screen.queryByTestId("diff-panel-a.txt")).toBeNull();
+    });
+
+    it("shows a small notice — not a crash — when checkpointDiffFile errors (binary/oversize/unknown-path)", async () => {
+      await previewWithDrift();
+
+      invokeMock.mockImplementation(async (cmd: string) => {
+        if (cmd === "checkpoint_diff_file") throw new Error("a.txt: live file is not valid UTF-8 text (binary diff isn't supported).");
+        return null;
+      });
+
+      await fireEvent.click(screen.getByTestId("diff-btn-a.txt"));
+
+      const notice = await screen.findByTestId("diff-error");
+      expect(notice.textContent).toContain("binary diff isn't supported");
+    });
+
+    it("ignores a stale diff response when the user switches rows before it resolves (race guard)", async () => {
+      render(CheckpointDialog, { initialPath: "/work/proj" });
+      await screen.findByTestId("cp-m-2");
+      invokeMock.mockImplementation(async (cmd: string) => {
+        if (cmd === "checkpoint_preview_revert") {
+          return { creates: 0, overwrites: 2, deletes: 0, bytes_written: 20, total: 2, drift_count: 2, drift_paths: ["a.txt", "b.txt"] };
+        }
+        if (cmd === "checkpoint_list") return CHECKPOINTS;
+        return null;
+      });
+      await fireEvent.click(screen.getByTestId("preview-btn-m-2"));
+      await screen.findByTestId("drift-list");
+
+      // a.txt's diff resolves LATE (gated); b.txt's resolves immediately.
+      let resolveA!: () => void;
+      const aGate = new Promise<void>((r) => { resolveA = r; });
+      invokeMock.mockImplementation(async (cmd: string, args?: unknown) => {
+        if (cmd === "checkpoint_diff_file") {
+          if ((args as { relPath?: string } | undefined)?.relPath === "a.txt") {
+            await aGate;
+            return { before: "A-before", after: "A-after" };
+          }
+          return { before: "B-before", after: "B-after" };
+        }
+        return null;
+      });
+
+      // Open A (its call is still pending), then switch to B (resolves now).
+      await fireEvent.click(screen.getByTestId("diff-btn-a.txt"));
+      await fireEvent.click(screen.getByTestId("diff-btn-b.txt"));
+      const bPanel = await screen.findByTestId("diff-panel-b.txt");
+      expect(bPanel.textContent).toContain("B-before");
+
+      // Let A's now-stale response land: it must NOT reopen A or pollute B's panel.
+      resolveA();
+      await new Promise((r) => setTimeout(r, 0));
+      expect(screen.queryByTestId("diff-panel-a.txt")).toBeNull();
+      const bAfter = screen.getByTestId("diff-panel-b.txt");
+      expect(bAfter.textContent).toContain("B-before");
+      expect(bAfter.textContent).not.toContain("A-before");
+    });
+  });
 });

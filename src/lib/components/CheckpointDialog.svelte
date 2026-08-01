@@ -12,8 +12,9 @@
   import { createEventDispatcher, onMount } from "svelte";
   import { unwrap } from "../invoke";
   import { commands } from "../bindings.gen"; // typed client (CPE-964)
-  import type { Checkpoint, RevertPreview, RevertOutcome } from "../bindings.gen";
+  import type { Checkpoint, RevertPreview, RevertOutcome, FileDiff } from "../bindings.gen";
   import Icon from "./Icon.svelte";
+  import DiffPeek from "./DiffPeek.svelte"; // reused as-is (CPE-1197 frontend half, epic CPE-735)
 
   /** Root folder to checkpoint/revert (pre-filled with the current folder by App). */
   export let initialPath = "";
@@ -35,6 +36,14 @@
   let error = "";
   let note = "";
 
+  /** The drift path whose "Open diff" panel is expanded, or null (CPE-1197 frontend half). */
+  let diffOpenPath: string | null = null;
+  let diffLoading = false;
+  let diffResult: FileDiff | null = null;
+  /** Clean-error text (binary/oversize/unknown-path) from `checkpointDiffFile` — shown as a small
+   *  notice, never a crash (mirrors the backend's error-rather-than-truncate convention). */
+  let diffError = "";
+
   async function loadList() {
     if (!path.trim()) { checkpoints = []; return; }
     loading = true; error = "";
@@ -49,6 +58,33 @@
     preview = null;
     outcome = null;
     confirming = null;
+    diffOpenPath = null;
+    diffResult = null;
+    diffError = "";
+  }
+
+  /** Toggle the "Open diff" panel for one drift path: fetches before (checkpoint) / after (live) text via
+   *  `checkpointDiffFile` and hands it to `DiffPeek` (reused, not rebuilt). Binary/oversize/unknown-path
+   *  errors from the backend surface as a small inline notice instead of throwing/crashing the dialog. */
+  async function toggleDiff(relPath: string) {
+    if (diffOpenPath === relPath) { diffOpenPath = null; return; }
+    diffOpenPath = relPath;
+    diffResult = null;
+    diffError = "";
+    if (!selected) return;
+    diffLoading = true;
+    // Guard against a stale response: if the user opens row A then row B before A's call resolves,
+    // A must not write its diff into B's open panel. Only apply the result if this row is still the
+    // one open (same generation-token idea as ContentSearchDialog).
+    const forPath = relPath;
+    try {
+      const result = unwrap(await commands.checkpointDiffFile(path.trim(), selected.manifest_id, relPath));
+      if (diffOpenPath === forPath) diffResult = result;
+    } catch (e) {
+      if (diffOpenPath === forPath) diffError = String(e instanceof Error ? e.message : e);
+    } finally {
+      if (diffOpenPath === forPath) diffLoading = false;
+    }
   }
 
   async function doCreate() {
@@ -197,7 +233,26 @@
         </div>
         {#if preview.drift_count > 0}
           <div class="drift-list" data-testid="drift-list">
-            {#each preview.drift_paths as p (p)}<div class="drift-item" title={p}>{p}</div>{/each}
+            {#each preview.drift_paths as p (p)}
+              <div class="drift-row">
+                <div class="drift-item" title={p}>
+                  <span class="drift-path">{p}</span>
+                  <button class="mini diff-btn" data-testid="diff-btn-{p}" disabled={loading}
+                    on:click={() => toggleDiff(p)}>{diffOpenPath === p ? "Close diff" : "Open diff"}</button>
+                </div>
+                {#if diffOpenPath === p}
+                  <div class="diff-panel" data-testid="diff-panel-{p}">
+                    {#if diffLoading}
+                      <div class="diff-status">Loading diff…</div>
+                    {:else if diffError}
+                      <div class="diff-status diff-error" data-testid="diff-error">{diffError}</div>
+                    {:else if diffResult}
+                      <DiffPeek before={diffResult.before} after={diffResult.after} />
+                    {/if}
+                  </div>
+                {/if}
+              </div>
+            {/each}
           </div>
         {/if}
       </div>
@@ -264,8 +319,14 @@
   .preview-counts { display: flex; flex-wrap: wrap; gap: 12px; font-size: 12px; color: var(--text-dim); }
   .preview-counts span { white-space: nowrap; flex: 0 0 auto; }
   .preview-counts .drift { color: #b8860b; font-weight: 600; }
-  .drift-list { margin-top: 8px; max-height: 14vh; overflow: auto; }
-  .drift-item { padding: 2px 0; font-size: 12px; color: var(--text-dim); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .drift-list { margin-top: 8px; max-height: 26vh; overflow: auto; }
+  .drift-row { padding: 2px 0; }
+  .drift-item { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+  .drift-path { flex: 1 1 auto; font-size: 12px; color: var(--text-dim); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0; }
+  .diff-btn { flex: 0 0 auto; height: 22px; padding: 0 8px; font-size: 11px; }
+  .diff-panel { margin: 4px 0 6px; }
+  .diff-status { padding: 6px 8px; font-size: 12px; color: var(--text-dim); }
+  .diff-status.diff-error { color: #b8860b; }
   .outcome { font-size: 12.5px; color: var(--text); margin-bottom: 8px; }
   .confirm { border: 1px solid #c42b1c; border-radius: var(--radius); padding: 12px; margin-bottom: 8px; background: color-mix(in srgb, #c42b1c 8%, var(--surface)); }
   .confirm-msg { color: var(--text); font-size: 12.5px; margin-bottom: 10px; }
