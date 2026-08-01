@@ -90,6 +90,44 @@ impl TerminalDock {
     }
 }
 
+/// Managed-state wrapper around a single [`TerminalDock`] (CPE-1242, epic CPE-714): the Tauri app holds
+/// one of these in managed state so the `terminal_dock_*` commands are thin dispatchers into it,
+/// mirroring [`crate::index_service::IndexService`]. Cheaply cloneable (an `Arc` around the mutex) and
+/// zero-cost until a tab is opened — no docked panel means an empty dock and no PTY (the PTY session
+/// registry that actually spawns shells lives separately, in the app's `pty` module).
+#[derive(Clone, Default)]
+pub struct TerminalDockState(std::sync::Arc<std::sync::Mutex<TerminalDock>>);
+
+impl TerminalDockState {
+    pub fn open(&self, cwd: &str, title: &str) -> u64 {
+        self.0.lock().unwrap().open(cwd, title)
+    }
+
+    pub fn close(&self, id: u64) {
+        self.0.lock().unwrap().close(id);
+    }
+
+    pub fn activate(&self, id: u64) {
+        self.0.lock().unwrap().activate(id);
+    }
+
+    pub fn rename(&self, id: u64, title: &str) {
+        self.0.lock().unwrap().rename(id, title);
+    }
+
+    pub fn set_cwd(&self, id: u64, cwd: &str) {
+        self.0.lock().unwrap().set_cwd(id, cwd);
+    }
+
+    pub fn tabs(&self) -> Vec<TermTab> {
+        self.0.lock().unwrap().tabs().to_vec()
+    }
+
+    pub fn active_tab(&self) -> Option<TermTab> {
+        self.0.lock().unwrap().active_tab().cloned()
+    }
+}
+
 fn basename(path: &str) -> String {
     let trimmed = path.trim_end_matches(['/', '\\']);
     let name = trimmed.rsplit(['/', '\\']).next().unwrap_or(trimmed);
@@ -147,5 +185,41 @@ mod tests {
         d.set_cwd(a, "/other"); // title is custom now → NOT retitled
         assert_eq!(d.active_tab().unwrap().title, "custom");
         assert_eq!(d.active_tab().unwrap().cwd, "/other");
+    }
+
+    #[test]
+    fn dock_state_dispatches_to_the_underlying_dock() {
+        let state = TerminalDockState::default();
+        assert!(state.tabs().is_empty());
+        assert!(state.active_tab().is_none());
+
+        let a = state.open("/a", "");
+        assert_eq!(state.tabs().len(), 1);
+        assert_eq!(state.active_tab().unwrap().id, a);
+        assert_eq!(state.active_tab().unwrap().title, "a");
+
+        let b = state.open("/b", "custom");
+        assert_eq!(state.active_tab().unwrap().id, b);
+        state.activate(a);
+        assert_eq!(state.active_tab().unwrap().id, a);
+        state.rename(a, "renamed");
+        assert_eq!(state.active_tab().unwrap().title, "renamed");
+        state.set_cwd(a, "/moved");
+        assert_eq!(state.active_tab().unwrap().cwd, "/moved");
+
+        state.close(a);
+        state.close(b);
+        assert!(state.tabs().is_empty());
+    }
+
+    /// A cloned handle shares the same underlying dock (it's an `Arc`), the way the Tauri app clones it
+    /// out of managed state into command handlers — a change through one clone is visible through another.
+    #[test]
+    fn dock_state_clones_share_the_same_dock() {
+        let state = TerminalDockState::default();
+        let clone = state.clone();
+        let id = state.open("/shared", "");
+        assert_eq!(clone.tabs().len(), 1);
+        assert_eq!(clone.active_tab().unwrap().id, id);
     }
 }

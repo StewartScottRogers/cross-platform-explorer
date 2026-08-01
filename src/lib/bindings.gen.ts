@@ -2385,6 +2385,110 @@ async forgeConflictAbort(path: string) : Promise<Result<string, string>> {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
 }
+},
+/**
+ * Open a tab in the terminal dock at `cwd` (auto-titled from `cwd`'s basename when `title` is blank)
+ * and return its id. Pure bookkeeping — does not spawn a shell; pair with `open_pty` to actually run
+ * one (the frontend correlates the two by passing this id back as `open_pty`'s `session_id`, CPE-1243).
+ */
+async terminalDockOpen(cwd: string, title: string) : Promise<number> {
+    return await TAURI_INVOKE("terminal_dock_open", { cwd, title });
+},
+/**
+ * Close a dock tab (active-tab fixup happens inside `TerminalDock::close`). Does **not** kill any PTY —
+ * callers close the tab's `open_pty` session (via `close_pty`) themselves, so the two stay decoupled
+ * (a tab can exist with no live shell, e.g. mid-open).
+ */
+async terminalDockClose(id: number) : Promise<void> {
+    await TAURI_INVOKE("terminal_dock_close", { id });
+},
+/**
+ * Make a dock tab active (no-op if `id` is unknown).
+ */
+async terminalDockActivate(id: number) : Promise<void> {
+    await TAURI_INVOKE("terminal_dock_activate", { id });
+},
+/**
+ * Update a dock tab's working directory (e.g. after the panel follows navigation or the shell `cd`s).
+ */
+async terminalDockSetCwd(id: number, cwd: string) : Promise<void> {
+    await TAURI_INVOKE("terminal_dock_set_cwd", { id, cwd });
+},
+/**
+ * All open dock tabs, in order.
+ */
+async terminalDockTabs() : Promise<TermTab[]> {
+    return await TAURI_INVOKE("terminal_dock_tabs");
+},
+/**
+ * The dock's currently active tab, if any are open.
+ */
+async terminalDockActive() : Promise<TermTab | null> {
+    return await TAURI_INVOKE("terminal_dock_active");
+},
+/**
+ * Open a PTY running the OS's default shell at `cwd` (empty/`None` = the process's own cwd), and start
+ * streaming its output over `on_output` as base64-encoded chunks (exact bytes — ANSI escapes and any
+ * split multibyte UTF-8 survive the trip — mirroring the sidecar's own PTY wire format,
+ * `session_server.rs`). Returns the new session's id, which `write_pty`/`resize_pty`/`close_pty` key on.
+ * 
+ * Async + `spawn_blocking` for the OS spawn itself (CPE-760/761 — launching a subprocess must never run
+ * on the UI thread). The **read loop** that follows is deliberately a raw `std::thread::spawn`, not
+ * another `spawn_blocking`: it runs for the session's whole lifetime, and parking a `spawn_blocking`
+ * task per open terminal would slowly exhaust the async runtime's bounded blocking-thread pool. This
+ * mirrors the sidecar's own long-lived reader pumps (`session_daemon.rs::spawn_reader`,
+ * `session_engine.rs::LocalEngine::launch`).
+ * 
+ * Self-cleaning: if the child exits on its own (the user types `exit`) the reader hits EOF and removes
+ * the session from the registry there too — a closed (or self-terminated) panel is never left as a
+ * "live" entry even if the frontend never calls `close_pty` (CPE-1242 DoD).
+ */
+async openPty(cwd: string | null, rows: number, cols: number, onOutput: TAURI_CHANNEL<string>) : Promise<Result<number, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("open_pty", { cwd, rows, cols, onOutput }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * Write `data` (base64-encoded, matching `open_pty`'s output encoding) to a session's shell input.
+ * Async + `spawn_blocking` — writing to a PTY's input pipe is subprocess I/O (CPE-760/761).
+ */
+async writePty(sessionId: number, data: string) : Promise<Result<null, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("write_pty", { sessionId, data }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * Resize a session's terminal (rows/cols). A lightweight ioctl/WinAPI call on an already-open handle —
+ * unlike open/write/close it touches no subprocess I/O, so it stays a plain sync command (mirrors
+ * `agent_watch_stop`'s quick in-memory ops).
+ */
+async resizePty(sessionId: number, rows: number, cols: number) : Promise<Result<null, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("resize_pty", { sessionId, rows, cols }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * Close a PTY session: remove it from the registry (so it stops counting as live) and kill the child +
+ * free the PTY. Idempotent — closing an unknown/already-closed id is a no-op success, so a panel that
+ * races its own cleanup (or double-closes) never errors. Async + `spawn_blocking` — killing a child
+ * process is subprocess control (CPE-760/761).
+ */
+async closePty(sessionId: number) : Promise<Result<null, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("close_pty", { sessionId }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
 }
 }
 
@@ -3623,6 +3727,10 @@ export type Template = { name: string; nodes?: Node[] }
  * A gallery summary of one stored template: its name and how many dirs/files it stamps.
  */
 export type TemplateSummary = { name: string; dirs: number; files: number }
+/**
+ * One terminal tab.
+ */
+export type TermTab = { id: number; title: string; cwd: string }
 /**
  * Counts for a text file. Serialized to match the frontend `TextStats`.
  */
