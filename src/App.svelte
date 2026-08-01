@@ -75,6 +75,7 @@
   import TransferConflictDialog from "./lib/components/TransferConflictDialog.svelte";
   import { initTransfers, startTransfer, collidingNames, type TransferReport, type ConflictPolicy } from "./lib/transfers";
   import DuplicatesDialog from "./lib/components/DuplicatesDialog.svelte";
+  import SimilarImagesDialog from "./lib/components/SimilarImagesDialog.svelte";
   import { namesList, detailList, csvList } from "./lib/listing";
   import { parentDir as parentOfPath, baseName } from "./lib/contentSearch";
   import PropertiesDialog from "./lib/components/PropertiesDialog.svelte";
@@ -657,6 +658,8 @@
   let deepSearchQuery = "";
   /** "Find duplicate files" overlay, scoped to the current folder (CPE-421). */
   let duplicatesOpen = false;
+  /** "Find similar images" overlay — near-duplicate image review + safe cleanup (CPE-1202). */
+  let similarImagesOpen = false;
   let patternSelectOpen = false;
   /** Repositories browser overlay (CPE-434/435) — browse GitHub & other forges in-app. */
   let showRepos = false;
@@ -756,6 +759,7 @@
     { id: "tool.searchInFiles", group: $t("palette.groupTools"), label: $t("palette.searchInFiles"), shortcut: "Ctrl+Shift+F", run: () => (contentSearchOpen = true), enabled: inFolder },
     { id: "tool.instantSearch", group: $t("palette.groupTools"), label: $t("palette.instantSearch"), shortcut: "Ctrl+K", run: () => (instantSearchOpen = true) },
     { id: "tool.findDuplicates", group: $t("palette.groupTools"), label: $t("palette.findDuplicates"), run: () => (duplicatesOpen = true), enabled: inFolder },
+    { id: "tool.findSimilarImages", group: $t("palette.groupTools"), label: $t("palette.findSimilarImages"), keywords: "near duplicate similar images photos perceptual dhash reclaim", run: () => (similarImagesOpen = true), enabled: inFolder },
     { id: "tool.colorRules", group: $t("palette.groupTools"), label: $t("palette.colorRules"), keywords: "color rules highlight label", run: () => (colorRulesOpen = true) },
     { id: "tool.sessionHistory", group: $t("palette.groupTools"), label: $t("palette.sessionHistory"), keywords: "audit log history export sessions activity", run: () => (sessionHistoryOpen = true) },
     { id: "tool.compareFolders", group: $t("palette.groupTools"), label: $t("palette.compareFolders"), keywords: "diff compare folders directories tree", run: openCompare },
@@ -3619,6 +3623,7 @@
       case "about": showAbout = true; break;
       case "content-search": if (!isHome && !archive) contentSearchOpen = true; break;
       case "find-duplicates": if (!isHome && !archive) duplicatesOpen = true; break;
+      case "find-similar-images": if (!isHome && !archive) similarImagesOpen = true; break;
       case "organize-folder": if (!isHome && !archive) organizeOpen = true; break;
       case "copy-file-names": copyListing(namesList(visible), "file names"); break;
       case "copy-file-list": copyListing(detailList(visible), "file list"); break;
@@ -4580,6 +4585,14 @@
     root={currentPath}
     on:navigate={(e) => { duplicatesOpen = false; revealFileInApp(e.detail); }}
     on:close={() => (duplicatesOpen = false)}
+  />
+{/if}
+
+{#if similarImagesOpen}
+  <SimilarImagesDialog
+    root={currentPath}
+    on:navigate={(e) => { similarImagesOpen = false; revealFileInApp(e.detail); }}
+    on:close={() => (similarImagesOpen = false)}
   />
 {/if}
 

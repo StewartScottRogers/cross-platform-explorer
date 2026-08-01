@@ -47,6 +47,7 @@
         { sep: true },
         { id: "content-search", labelKey: "mi.searchInFiles", hint: "Ctrl+Shift+F", icon: "search" },
         { id: "find-duplicates", labelKey: "mi.findDuplicates", icon: "copy" },
+        { id: "find-similar-images", labelKey: "mi.findSimilarImages", icon: "image" },
         { id: "organize-folder", labelKey: "mi.organizeFolder", icon: "sort" },
         { sep: true },
         { id: "copy-file-names", labelKey: "mi.copyFileNames", icon: "rename" },

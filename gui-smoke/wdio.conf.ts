@@ -203,6 +203,54 @@ function seedBatchMediaFixture(tmpDir: string): void {
   fs.writeFileSync(path.join(tmpDir, BATCH_MEDIA_PNG_B_NAME), tinyPng(4, 4, [60, 120, 200]));
 }
 
+// --- CPE-1203: similar-images fixture -----------------------------------------------------------
+// Seed two near-duplicate images for the Find-similar-images dialog (SimilarImagesDialog.svelte,
+// CPE-1202). The backend (crates/server/src/image_similarity.rs) reduces each image to a perceptual
+// dHash and clusters by Hamming distance — so the fixture must be a *structured* image (a solid fill
+// hashes to all-zero, which would wrongly cluster with the batch-media solids also seeded into this
+// tmpDir). A horizontal grayscale GRADIENT is dHash's canonical structured fixture; the same gradient
+// at two different sizes is a genuine near-duplicate pair (mirrors image_similarity.rs's own
+// `gradient_png` test fixture), while being far (in Hamming bits) from the flat batch-media PNGs, so
+// the two seeded gradients form their OWN group of exactly two.
+export const SIMILAR_PNG_A_NAME = "CPE-1203-scene-a.png";
+export const SIMILAR_PNG_B_NAME = "CPE-1203-scene-b.png";
+
+/** A horizontal grayscale gradient (brightness rises left→right) at `w×h` — a valid truecolour PNG
+ *  built with the same chunk/CRC/deflate machinery as {@link tinyPng}. Two sizes of it are perceptual
+ *  near-duplicates under dHash. */
+function gradientPng(width: number, height: number): Buffer {
+  const sig = Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]);
+  const ihdrData = Buffer.alloc(13);
+  ihdrData.writeUInt32BE(width, 0);
+  ihdrData.writeUInt32BE(height, 4);
+  ihdrData[8] = 8; // bit depth
+  ihdrData[9] = 2; // colour type: truecolour (RGB)
+  const rowBytes = 1 + width * 3;
+  const raw = Buffer.alloc(rowBytes * height);
+  for (let y = 0; y < height; y++) {
+    const rowStart = y * rowBytes;
+    raw[rowStart] = 0; // per-scanline filter type: None
+    for (let x = 0; x < width; x++) {
+      const v = Math.round((x / Math.max(1, width - 1)) * 255);
+      const px = rowStart + 1 + x * 3;
+      raw[px] = v;
+      raw[px + 1] = v;
+      raw[px + 2] = v;
+    }
+  }
+  return Buffer.concat([
+    sig,
+    pngChunk("IHDR", ihdrData),
+    pngChunk("IDAT", zlib.deflateSync(raw)),
+    pngChunk("IEND", Buffer.alloc(0)),
+  ]);
+}
+
+function seedSimilarImagesFixture(tmpDir: string): void {
+  fs.writeFileSync(path.join(tmpDir, SIMILAR_PNG_A_NAME), gradientPng(240, 160));
+  fs.writeFileSync(path.join(tmpDir, SIMILAR_PNG_B_NAME), gradientPng(120, 80));
+}
+
 // --- CPE-1130: cost-History fixture -----------------------------------------------------------
 // Seed a synthetic session-metrics journal (`history.jsonl`) into the REAL app-data directory this
 // exact build reads from, so the Agent Watch drawer's cost-History tab (AgentTimeline.svelte,
@@ -571,6 +619,10 @@ export const config: WebdriverIO.Config = {
     // CPE-1144: seed two real, decodable PNGs for the Batch-Media dialog's plan preview (see the
     // block above) — same tmpDir, same single app launch.
     seedBatchMediaFixture(tmpDir);
+
+    // CPE-1203: seed two near-duplicate gradient PNGs for the Find-similar-images dialog (see the
+    // block above) — same tmpDir, same single app launch.
+    seedSimilarImagesFixture(tmpDir);
 
     // CPE-1130: seed the cost-History journal fixture into the real app-data dir (see the block
     // above) before the app process ever starts, so `metrics_history` has rows to read the moment
