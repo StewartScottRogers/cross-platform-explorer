@@ -9,6 +9,11 @@
   export let selected: DirEntry[] = [];
   export let folderName = "";
   export let itemCount = 0;
+  /** Glyph for the no-selection placeholder hero (CPE-1234). Defaults to "home" (plain-folder /
+   *  Home view — unchanged behavior); the caller overrides it to "search" for an open structured
+   *  saved search or "filter" for an open tag smart folder, matching that view's own sidebar icon
+   *  so the placeholder never contradicts the breadcrumb / search box / status bar. */
+  export let folderIcon = "home";
 
   $: one = selected.length === 1 ? selected[0] : null;
   $: totalSize = selected.reduce((n, e) => n + (e.is_dir ? 0 : e.size), 0);
@@ -53,7 +58,7 @@
       <span>Folder contents aren't included in the size. Press Alt+Enter for full properties.</span>
     </div>
   {:else}
-    <div class="hero"><Icon name="home" size={72} /></div>
+    <div class="hero"><Icon name={folderIcon} size={72} /></div>
     <h2>{folderName} ({itemCount} item{itemCount === 1 ? "" : "s"})</h2>
     <div class="hint">
       <Icon name="info" size={15} />

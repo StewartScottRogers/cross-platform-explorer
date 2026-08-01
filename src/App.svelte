@@ -2034,6 +2034,13 @@
     : structuredSearch ? structuredSearch.name
     : isHome ? "Home" : (splitPath(currentPath).at(-1)?.name ?? currentPath);
 
+  // The DetailsPane no-selection placeholder hero icon (CPE-1234): a structured saved search or a
+  // tag smart folder is a virtual view, not Home, so its placeholder must use that view's own
+  // sidebar glyph ("search" / "filter") rather than defaulting to Home's icon — otherwise it
+  // contradicts the breadcrumb/search-box/status-bar, which all correctly say "saved search".
+  // Archive + real-folder + Home all keep the pre-existing "home" glyph, unchanged.
+  $: folderIcon = structuredSearch ? "search" : smartFolder ? "filter" : "home";
+
   // Folder-context detection (CPE-235): runs on the RAW listing (so hidden
   // markers like `.git` are seen regardless of the show-hidden setting).
   $: folderContexts = (isHome || archive || smartFolder || structuredSearch) ? [] : detectContexts({ path: currentPath, entries });
@@ -4704,10 +4711,10 @@
           loadImageData={loadImageData}
           saveText={savePreviewText}
         >
-          <DetailsPane selected={selectedEntries.length ? selectedEntries : (homePreview ? [homePreview] : [])} {folderName} {itemCount} />
+          <DetailsPane selected={selectedEntries.length ? selectedEntries : (homePreview ? [homePreview] : [])} {folderName} {itemCount} {folderIcon} />
         </PreviewPane>
       {:else}
-        <DetailsPane selected={selectedEntries.length ? selectedEntries : (homePreview ? [homePreview] : [])} {folderName} {itemCount} />
+        <DetailsPane selected={selectedEntries.length ? selectedEntries : (homePreview ? [homePreview] : [])} {folderName} {itemCount} {folderIcon} />
       {/if}
     </div>
   {/if}
