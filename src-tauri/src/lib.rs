@@ -10097,26 +10097,33 @@ mod tests {
 
     // find_duplicates tests moved with the code to `cpe_server::duplicates` (CPE-815).
 
-    // A minimal valid 4x2 gradient PNG (81 bytes) — lets this crate's test exercise the image-similarity
-    // collect path without pulling the `image` crate in as a dev-dependency here (the pipeline's own
-    // fixtures live in `cpe_server::image_similarity`'s tests). Two byte-identical copies hash equal, so
-    // they must land in one near-duplicate group.
-    const TINY_PNG: &[u8] = &[
-        0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0x00, 0x00, 0x0d, 0x49, 0x48, 0x44, 0x52,
-        0x00, 0x00, 0x00, 0x04, 0x00, 0x00, 0x00, 0x02, 0x08, 0x02, 0x00, 0x00, 0x00, 0xf0, 0xca, 0xea,
-        0x34, 0x00, 0x00, 0x00, 0x18, 0x49, 0x44, 0x41, 0x54, 0x78, 0x9c, 0x63, 0x60, 0x60, 0x60, 0xb0,
-        0xb7, 0xb7, 0xaf, 0xaf, 0xaf, 0xdf, 0xbf, 0x7f, 0x3f, 0x03, 0x32, 0x07, 0x00, 0x5d, 0xcb, 0x08,
-        0xef, 0x4e, 0x95, 0xaf, 0xd0, 0x00, 0x00, 0x00, 0x00, 0x49, 0x45, 0x4e, 0x44, 0xae, 0x42, 0x60,
-        0x82,
-    ];
+    // A STRUCTURED checkerboard PNG (real 2D structure → balanced dHash popcount, so it is NOT excluded by
+    // the CPE-1205 featureless-guard, unlike a flat/gradient image). Built with the dev-only `image` dep,
+    // mirroring `cpe_server::image_similarity`'s own structured fixtures. Two byte-identical copies hash
+    // equal, so they must land in one near-duplicate group.
+    fn checkerboard_png() -> Vec<u8> {
+        let img = image::RgbImage::from_fn(32, 32, |x, y| {
+            if ((x / 4) + (y / 4)) % 2 == 0 {
+                image::Rgb([20, 20, 20])
+            } else {
+                image::Rgb([235, 235, 235])
+            }
+        });
+        let mut buf = std::io::Cursor::new(Vec::new());
+        image::DynamicImage::ImageRgb8(img)
+            .write_to(&mut buf, image::ImageFormat::Png)
+            .unwrap();
+        buf.into_inner()
+    }
 
     #[test]
     fn find_similar_images_collect_groups_a_fixture() {
         let d = scratch("simimg");
         fs::create_dir_all(d.join("sub")).unwrap();
-        // Two byte-identical PNGs (across a subdir) → identical dHash → one near-duplicate group.
-        fs::write(d.join("a.png"), TINY_PNG).unwrap();
-        fs::write(d.join("sub/b.png"), TINY_PNG).unwrap();
+        // Two byte-identical STRUCTURED PNGs (across a subdir) → identical dHash → one near-duplicate group.
+        let png = checkerboard_png();
+        fs::write(d.join("a.png"), &png).unwrap();
+        fs::write(d.join("sub/b.png"), &png).unwrap();
         // A non-image file must be ignored by the extension filter.
         fs::write(d.join("notes.txt"), b"not an image").unwrap();
 
