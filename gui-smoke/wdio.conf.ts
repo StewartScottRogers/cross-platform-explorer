@@ -655,6 +655,27 @@ function seedShredFixture(tmpDir: string): void {
   );
 }
 
+// --- CPE-1226: TransferPanel archive-op row fixture ---------------------------------------------
+// A DEDICATED subfolder + throwaway source file (same isolation reasoning as CPE-1207/1241/1237
+// above) so transfer-panel.smoke.ts can drive a REAL "Compress to ZIP" through the context menu and
+// capture the operations/transfer panel's completed archive-op row (CPE-1184: archive icon + "N
+// items compressed" wording) without perturbing — or being perturbed by — any other spec's fixtures.
+// The name is deliberately deterministic so the spec can assert the exact created zip's filename:
+// `doCompress` (App.svelte) names it after the source's stem (`compressBaseName`/`stripExt`), so
+// TRANSFER_PANEL_SRC_NAME's ".txt" source yields a same-stem ".zip".
+export const TRANSFER_PANEL_DIR_NAME = "CPE-1226-transfer-panel-folder";
+export const TRANSFER_PANEL_SRC_NAME = "CPE-1226-compress-me.txt";
+
+function seedTransferPanelFixture(tmpDir: string): void {
+  const dir = path.join(tmpDir, TRANSFER_PANEL_DIR_NAME);
+  fs.mkdirSync(dir, { recursive: true });
+  fs.writeFileSync(
+    path.join(dir, TRANSFER_PANEL_SRC_NAME),
+    "CPE-1226 gui-smoke fixture — compressed for real through the operations/transfer panel.\n",
+    "utf-8",
+  );
+}
+
 let tauriDriver: ChildProcess | undefined;
 let shuttingDown = false;
 
@@ -788,6 +809,10 @@ export const config: WebdriverIO.Config = {
     // CPE-1241: seed a dedicated throwaway file for the ShredConfirmDialog render pin (see block
     // above) — its own subfolder so nothing else is ever at risk.
     seedShredFixture(tmpDir);
+
+    // CPE-1226: seed a dedicated subfolder + source file for the TransferPanel archive-op-row render
+    // pin (see block above) — its own subfolder, isolated from every other spec's fixtures.
+    seedTransferPanelFixture(tmpDir);
 
     const caps = capabilities as unknown as Array<{ "tauri:options": { args: string[] } }>;
     caps[0]["tauri:options"].args = ["--test-mode", "--x=-4000", `--open=${tmpDir}`];
