@@ -4,7 +4,7 @@ title: "Surface native metadata (store name, tags, comment) in PropertiesDialog"
 type: feature
 component: Frontend
 priority: medium
-status: Doing
+status: Done
 tags: ready
 created: 2026-07-31
 epic: CPE-717
@@ -31,3 +31,15 @@ by the same worker on one branch (it consumes CPE-1177's setting key).
 
 ## Work Log
 - 2026-07-31 — Filed by Foreman (workshift, epic CPE-717). Consumes CPE-1177's `nativeBridgeEnabled`; same worker.
+- 2026-07-31 — Done. Added a bordered, read-only "Native metadata" section to `PropertiesDialog.svelte`,
+  gated on `nativeBridgeEnabled` (CPE-1177) and shown only for a single selected entry. Calls
+  `nativeTagStoreName()` (`native_tags_name`) for the store display name and a Pull button calls
+  `pullNativeTags(path)` (`native_tags_pull`) to re-seed the tags shown, which are read reactively from
+  CPE's own tag store (`entryFor($tags, path)`) — no write path here (TagEditor keeps that job). Note: the
+  shipped native-metadata model is `{tags, label}` only (`crates/server/src/native_bridge.rs` /
+  `native_tags.rs`) — there is no separate "comment" field in the backend, so the section surfaces the
+  colour **Label** in that slot rather than inventing a new field. Tags render as reflowing pills
+  (flex-wrap container, nowrap chips) and the section has its own visible border, matching the dialog
+  conventions. Tests: `PropertiesDialog.test.ts` — hidden when the flag is off, and when on renders the
+  store name + tags + label after Pull. `npm run check` 0 errors; `npm test` all green. Built together with
+  CPE-1177 on branch `cpe-1177-1176-native-metadata-gui`, PR opened against `main`.
