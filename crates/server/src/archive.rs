@@ -5,7 +5,8 @@
 //! filesystem domain logic. The Tauri `read_archive_entries` command dispatches here.
 
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use serde::Serialize;
 
@@ -527,6 +528,518 @@ pub fn extract_archive(path: &str, dest: &str) -> Result<String, String> {
     Ok(dest.to_string())
 }
 
+// ---------------------------------------------------------------------------
+// Queue-routed compress/extract with progress + cancel (CPE-1184, epic CPE-705)
+// ---------------------------------------------------------------------------
+//
+// `compress_archive`/`extract_archive` above are one-shot, blocking, all-or-nothing calls — fine for a
+// small archive, but a large one freezes the UI (no progress, no cancel), against the streaming-liveness
+// convention. The functions below are the queue-routed siblings: item-level progress (one tick per
+// archive entry — cheap and enough to keep a progress bar honest without rewriting every writer to
+// chunk mid-entry) plus a `cancel` flag polled between entries, so the app-adapter
+// (`start_archive_compress`/`start_archive_extract` in `src-tauri/src/lib.rs`) can run them on a
+// background thread and forward progress as the *same* `transfer://progress`/`transfer://done` events
+// the copy/move transfer engine already uses — archive ops land in the same operations panel, are
+// cancellable the same way (the shared `TRANSFER_CANCELS` registry), and stay Tauri-free here per
+// SERVER-ARCHITECTURE.md. The original one-shot functions above are untouched (still used by
+// `extract_archive_entry`/`extract_archive_entry_any`'s single-leaf reads and anyone else calling them),
+// so nothing about their tested behaviour changes.
+
+/// A progress snapshot emitted while a compress/extract runs. Mirrors the transfer engine's
+/// `TransferProgress` shape minus the app-assigned `id` (a pure app/session concern the Tauri adapter
+/// attaches when it forwards this as a `transfer://progress` event).
+#[derive(Clone, Debug, Default)]
+pub struct ArchiveProgress {
+    pub total_bytes: u64,
+    pub done_bytes: u64,
+    pub total_items: u64,
+    pub done_items: u64,
+    pub current: String,
+}
+
+/// The final outcome of a compress/extract run. `done` counts entries actually written (an entry
+/// skipped for failing the zip-slip guard is neither done nor failed — it's recorded in `errors`,
+/// mirroring the silent-skip the one-shot extractors already do); `failed` stays 0 unless the whole run
+/// aborted with an error (compress/extract are otherwise all-or-nothing, same as the one-shot functions).
+#[derive(Clone, Debug, Default)]
+pub struct ArchiveReport {
+    pub done: u64,
+    pub failed: u64,
+    pub cancelled: bool,
+    pub errors: Vec<String>,
+}
+
+/// One item queued for an archive write — either a directory placeholder or a file with known size,
+/// discovered by [`collect_archive_sources`]'s recursive walk.
+struct ArchiveSourceEntry {
+    src: PathBuf,
+    /// The archive-internal path (forward-slash, relative).
+    name: String,
+    is_dir: bool,
+    size: u64,
+}
+
+/// Recursively enumerate `paths` into a flat list of entries to add to an archive — the same walk order
+/// (a directory entry, then its children sorted by name) [`zip_add_path`]/[`tar_add_path`] use, just
+/// flattened so a streamed writer can check `cancel` and emit progress between entries instead of only
+/// at the end of a deep recursion. Skips `skip` (the output archive's own canonical path) so it never
+/// packs itself (CPE-632), same guard the original recursive adders use.
+fn collect_archive_sources(paths: &[String], skip: Option<&Path>) -> Result<Vec<ArchiveSourceEntry>, String> {
+    fn walk(src: &Path, name: &str, skip: Option<&Path>, out: &mut Vec<ArchiveSourceEntry>) -> Result<(), String> {
+        if let (Some(skip), Ok(canon)) = (skip, src.canonicalize()) {
+            if canon == skip {
+                return Ok(());
+            }
+        }
+        let meta = fs::symlink_metadata(src).map_err(|e| e.to_string())?;
+        if meta.is_dir() {
+            out.push(ArchiveSourceEntry { src: src.to_path_buf(), name: name.to_string(), is_dir: true, size: 0 });
+            let mut children: Vec<_> = fs::read_dir(src).map_err(|e| e.to_string())?.filter_map(|e| e.ok()).collect();
+            children.sort_by_key(|e| e.file_name());
+            for child in children {
+                let child_name = child.file_name().to_string_lossy().to_string();
+                walk(&child.path(), &format!("{name}/{child_name}"), skip, out)?;
+            }
+        } else {
+            out.push(ArchiveSourceEntry { src: src.to_path_buf(), name: name.to_string(), is_dir: false, size: meta.len() });
+        }
+        Ok(())
+    }
+    let mut out = Vec::new();
+    for p in paths {
+        let src = Path::new(p);
+        let name = src.file_name().map(|s| s.to_string_lossy().to_string()).ok_or_else(|| format!("invalid path: {p}"))?;
+        walk(src, &name, skip, &mut out)?;
+    }
+    Ok(out)
+}
+
+/// Pack `paths` into a new `.zip` at `dest` — the streamed sibling of [`compress_to_zip`]: `cancel` is
+/// polled between entries and `emit` receives a progress snapshot after each. On cancellation the
+/// writer still finishes with whatever entries were already added, producing a valid but incomplete
+/// archive — mirrors the transfer engine's "leave the partial result, don't delete" choice.
+pub fn compress_to_zip_streamed(
+    paths: &[String],
+    dest: &str,
+    cancel: &AtomicBool,
+    mut emit: impl FnMut(&ArchiveProgress),
+) -> Result<ArchiveReport, String> {
+    if paths.is_empty() {
+        return Err("nothing to compress".into());
+    }
+    let dest_canon = Path::new(dest).canonicalize().ok();
+    let entries = collect_archive_sources(paths, dest_canon.as_deref())?;
+    let total_bytes = entries.iter().map(|e| e.size).sum();
+    let total_items = entries.iter().filter(|e| !e.is_dir).count() as u64;
+
+    let file = fs::File::create(dest).map_err(|e| e.to_string())?;
+    let mut writer = zip::ZipWriter::new(file);
+    let opts = zip::write::SimpleFileOptions::default().compression_method(zip::CompressionMethod::Deflated);
+
+    let mut prog = ArchiveProgress { total_bytes, done_bytes: 0, total_items, done_items: 0, current: String::new() };
+    let mut cancelled = false;
+    emit(&prog);
+    for e in &entries {
+        if cancel.load(Ordering::Relaxed) {
+            cancelled = true;
+            break;
+        }
+        prog.current = e.name.clone();
+        if e.is_dir {
+            writer.add_directory(format!("{}/", e.name), opts).map_err(|err| err.to_string())?;
+        } else {
+            writer.start_file(&e.name, opts).map_err(|err| err.to_string())?;
+            let mut f = fs::File::open(&e.src).map_err(|err| err.to_string())?;
+            std::io::copy(&mut f, &mut writer).map_err(|err| err.to_string())?;
+            prog.done_bytes += e.size;
+            prog.done_items += 1;
+        }
+        emit(&prog);
+    }
+    prog.current.clear();
+    emit(&prog);
+    writer.finish().map_err(|e| e.to_string())?;
+    Ok(ArchiveReport { done: prog.done_items, failed: 0, cancelled, errors: Vec::new() })
+}
+
+/// Pack `paths` into a new gzip-compressed tarball at `dest` — the streamed sibling of
+/// [`compress_to_targz`]. Same cancel/progress/partial-result contract as [`compress_to_zip_streamed`].
+pub fn compress_to_targz_streamed(
+    paths: &[String],
+    dest: &str,
+    cancel: &AtomicBool,
+    mut emit: impl FnMut(&ArchiveProgress),
+) -> Result<ArchiveReport, String> {
+    if paths.is_empty() {
+        return Err("nothing to compress".into());
+    }
+    let dest_canon = Path::new(dest).canonicalize().ok();
+    let entries = collect_archive_sources(paths, dest_canon.as_deref())?;
+    let total_bytes = entries.iter().map(|e| e.size).sum();
+    let total_items = entries.iter().filter(|e| !e.is_dir).count() as u64;
+
+    let file = fs::File::create(dest).map_err(|e| e.to_string())?;
+    let encoder = flate2::write::GzEncoder::new(file, flate2::Compression::default());
+    let mut builder = tar::Builder::new(encoder);
+
+    let mut prog = ArchiveProgress { total_bytes, done_bytes: 0, total_items, done_items: 0, current: String::new() };
+    let mut cancelled = false;
+    emit(&prog);
+    for e in &entries {
+        if cancel.load(Ordering::Relaxed) {
+            cancelled = true;
+            break;
+        }
+        prog.current = e.name.clone();
+        if e.is_dir {
+            builder.append_dir(&e.name, &e.src).map_err(|err| err.to_string())?;
+        } else {
+            builder.append_path_with_name(&e.src, &e.name).map_err(|err| err.to_string())?;
+            prog.done_bytes += e.size;
+            prog.done_items += 1;
+        }
+        emit(&prog);
+    }
+    prog.current.clear();
+    emit(&prog);
+    builder.into_inner().map_err(|e| e.to_string())?.finish().map_err(|e| e.to_string())?;
+    Ok(ArchiveReport { done: prog.done_items, failed: 0, cancelled, errors: Vec::new() })
+}
+
+/// Pack `paths` into `dest`, choosing the format by extension (`.zip` / `.tar.gz` / `.tgz`) — the
+/// streamed sibling of [`compress_archive`], used by `start_archive_compress`.
+pub fn compress_archive_streamed(
+    paths: &[String],
+    dest: &str,
+    cancel: &AtomicBool,
+    emit: impl FnMut(&ArchiveProgress),
+) -> Result<ArchiveReport, String> {
+    let lower = dest.to_ascii_lowercase();
+    if lower.ends_with(".zip") {
+        compress_to_zip_streamed(paths, dest, cancel, emit)
+    } else if lower.ends_with(".tar.gz") || lower.ends_with(".tgz") {
+        compress_to_targz_streamed(paths, dest, cancel, emit)
+    } else {
+        Err(format!("unsupported archive format for '{dest}' (use .zip or .tar.gz)"))
+    }
+}
+
+/// Pack `paths` into a password-protected (AES-256) `.zip` at `dest` — the streamed sibling of
+/// [`compress_to_zip_encrypted`], used by `start_archive_compress` when a password is given.
+pub fn compress_to_zip_encrypted_streamed(
+    paths: &[String],
+    dest: &str,
+    password: &str,
+    cancel: &AtomicBool,
+    mut emit: impl FnMut(&ArchiveProgress),
+) -> Result<ArchiveReport, String> {
+    if paths.is_empty() {
+        return Err("nothing to compress".into());
+    }
+    if password.is_empty() {
+        return Err("a password is required for an encrypted archive".into());
+    }
+    let dest_canon = Path::new(dest).canonicalize().ok();
+    let entries = collect_archive_sources(paths, dest_canon.as_deref())?;
+    let total_bytes = entries.iter().map(|e| e.size).sum();
+    let total_items = entries.iter().filter(|e| !e.is_dir).count() as u64;
+
+    let file = fs::File::create(dest).map_err(|e| e.to_string())?;
+    let mut writer = zip::ZipWriter::new(file);
+    let opts = zip::write::SimpleFileOptions::default()
+        .compression_method(zip::CompressionMethod::Deflated)
+        .with_aes_encryption(zip::AesMode::Aes256, password);
+
+    let mut prog = ArchiveProgress { total_bytes, done_bytes: 0, total_items, done_items: 0, current: String::new() };
+    let mut cancelled = false;
+    emit(&prog);
+    for e in &entries {
+        if cancel.load(Ordering::Relaxed) {
+            cancelled = true;
+            break;
+        }
+        prog.current = e.name.clone();
+        if e.is_dir {
+            writer.add_directory(format!("{}/", e.name), opts).map_err(|err| err.to_string())?;
+        } else {
+            writer.start_file(&e.name, opts).map_err(|err| err.to_string())?;
+            let mut f = fs::File::open(&e.src).map_err(|err| err.to_string())?;
+            std::io::copy(&mut f, &mut writer).map_err(|err| err.to_string())?;
+            prog.done_bytes += e.size;
+            prog.done_items += 1;
+        }
+        emit(&prog);
+    }
+    prog.current.clear();
+    emit(&prog);
+    writer.finish().map_err(|e| e.to_string())?;
+    Ok(ArchiveReport { done: prog.done_items, failed: 0, cancelled, errors: Vec::new() })
+}
+
+/// Quick, cheap check of whether `path` (a zip) needs `password` to read — or needs *some* password
+/// when `password` is `None` — without extracting anything (CPE-1184). Reads just entry 0's header
+/// (the `zip` crate needs the password to even set up an AES entry's reader, so this fails immediately
+/// for a wrong/missing password, the same error the old one-shot `extract_zip_encrypted`/`extract_archive`
+/// surfaced). `start_archive_extract` calls this synchronously *before* queuing the background
+/// extraction, so the frontend's password-prompt-and-retry flow keeps its original synchronous
+/// try/catch shape instead of round-tripping through a transfer id + completion event for what's
+/// normally an instant rejection.
+pub fn check_zip_password(path: &str, password: Option<&str>) -> Result<(), String> {
+    let file = fs::File::open(path).map_err(|e| e.to_string())?;
+    let mut archive = zip::ZipArchive::new(file).map_err(|e| e.to_string())?;
+    if archive.is_empty() {
+        return Ok(());
+    }
+    let result = match password {
+        Some(pw) => archive.by_index_decrypt(0, pw.as_bytes()).map(|_| ()),
+        None => archive.by_index(0).map(|_| ()),
+    };
+    result.map_err(|e| e.to_string())
+}
+
+/// Extract a plain (unencrypted) zip into `dest`, streamed — the manual-loop sibling the zip branch of
+/// [`extract_archive`] delegates to via [`extract_archive_streamed`]. Per-entry zip-slip guard mirrors
+/// [`extract_zip_encrypted`]'s (skip an unsafe name rather than aborting), so this doesn't regress the
+/// zip crate's own `enclosed_name` guard the one-shot `extract_archive` relies on — both are "safe",
+/// per the `zip_extraction_does_not_escape_the_destination` test below, which tolerates either an
+/// outright error or a silent skip.
+fn extract_zip_stream(
+    path: &str,
+    dest: &Path,
+    cancel: &AtomicBool,
+    emit: &mut dyn FnMut(&ArchiveProgress),
+) -> Result<ArchiveReport, String> {
+    let file = fs::File::open(path).map_err(|e| e.to_string())?;
+    let mut archive = zip::ZipArchive::new(file).map_err(|e| e.to_string())?;
+    extract_zip_archive_stream(&mut archive, dest, None, cancel, emit)
+}
+
+/// Shared zip-extraction loop for both the plain and password-protected streamed extractors: iterate
+/// entries, skip a zip-slip name, otherwise write it out, checking `cancel` and emitting progress
+/// between entries.
+fn extract_zip_archive_stream(
+    archive: &mut zip::ZipArchive<fs::File>,
+    dest: &Path,
+    password: Option<&str>,
+    cancel: &AtomicBool,
+    emit: &mut dyn FnMut(&ArchiveProgress),
+) -> Result<ArchiveReport, String> {
+    fs::create_dir_all(dest).map_err(|e| e.to_string())?;
+    let total_items = archive.len() as u64;
+    let mut prog = ArchiveProgress { total_bytes: 0, done_bytes: 0, total_items, done_items: 0, current: String::new() };
+    let mut report = ArchiveReport::default();
+    emit(&prog);
+    for i in 0..archive.len() {
+        if cancel.load(Ordering::Relaxed) {
+            report.cancelled = true;
+            break;
+        }
+        let mut entry = match password {
+            Some(pw) => archive.by_index_decrypt(i, pw.as_bytes()).map_err(|e| e.to_string())?,
+            None => archive.by_index(i).map_err(|e| e.to_string())?,
+        };
+        let name = entry.name().to_string();
+        prog.current = name.clone();
+        if !entry_name_is_safe(&name) {
+            report.errors.push(format!("{name}: unsafe entry name, skipped"));
+            prog.done_items += 1;
+            emit(&prog);
+            continue;
+        }
+        let out = dest.join(&name);
+        if entry.is_dir() {
+            fs::create_dir_all(&out).map_err(|e| e.to_string())?;
+        } else {
+            if let Some(parent) = out.parent() {
+                fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+            }
+            let mut f = fs::File::create(&out).map_err(|e| e.to_string())?;
+            std::io::copy(&mut entry, &mut f).map_err(|e| e.to_string())?;
+            prog.done_bytes += entry.size();
+            report.done += 1; // only files count toward "done" — a dir is a placeholder, not content
+        }
+        prog.done_items += 1;
+        emit(&prog);
+    }
+    prog.current.clear();
+    emit(&prog);
+    Ok(report)
+}
+
+/// Extract a password-protected `.zip` at `path` into `dest` with `password`, streamed — the sibling of
+/// [`extract_zip_encrypted`], used by `start_archive_extract` when a password is given.
+pub fn extract_zip_encrypted_streamed(
+    path: &str,
+    dest: &str,
+    password: &str,
+    cancel: &AtomicBool,
+    mut emit: impl FnMut(&ArchiveProgress),
+) -> Result<ArchiveReport, String> {
+    let file = fs::File::open(path).map_err(|e| e.to_string())?;
+    let mut archive = zip::ZipArchive::new(file).map_err(|e| e.to_string())?;
+    extract_zip_archive_stream(&mut archive, Path::new(dest), Some(password), cancel, &mut emit)
+}
+
+/// Totals (bytes, item count) for a tar/tar.gz stream, from a cheap first-pass listing — TAR has no
+/// central directory, so a byte/item total for the progress bar needs one read before the real
+/// streamed-extraction pass reopens the file. Best-effort: an unreadable/corrupt archive just yields
+/// `(0, 0)`, so the real pass's own error is what the caller ultimately sees.
+fn tar_totals(path: &str, gz: bool) -> (u64, u64) {
+    let read = || -> Result<Vec<ArchiveEntry>, String> {
+        let file = fs::File::open(path).map_err(|e| e.to_string())?;
+        if gz {
+            tar_entries(flate2::read::GzDecoder::new(file))
+        } else {
+            tar_entries(file)
+        }
+    };
+    match read() {
+        Ok(entries) => {
+            let total_bytes = entries.iter().filter(|e| !e.is_dir).map(|e| e.size).sum();
+            let total_items = entries.iter().filter(|e| !e.is_dir).count() as u64;
+            (total_bytes, total_items)
+        }
+        Err(_) => (0, 0),
+    }
+}
+
+/// Extract a tar stream into `dest`, streamed: each entry is unpacked via `unpack_in`, the tar crate's
+/// own path-safety-checked writer — the exact same per-entry call `Archive::unpack` (the one-shot
+/// [`extract_archive`]'s tar path) makes internally, so this is not a behaviour change, just the same
+/// work done one entry at a time so `cancel`/`emit` can run between them.
+fn extract_tar_stream<R: std::io::Read>(
+    reader: R,
+    dest: &Path,
+    total_bytes: u64,
+    total_items: u64,
+    cancel: &AtomicBool,
+    emit: &mut dyn FnMut(&ArchiveProgress),
+) -> Result<ArchiveReport, String> {
+    let mut archive = tar::Archive::new(reader);
+    let mut prog = ArchiveProgress { total_bytes, done_bytes: 0, total_items, done_items: 0, current: String::new() };
+    let mut report = ArchiveReport::default();
+    emit(&prog);
+    let entries = archive.entries().map_err(|e| e.to_string())?;
+    for entry in entries {
+        if cancel.load(Ordering::Relaxed) {
+            report.cancelled = true;
+            break;
+        }
+        let mut entry = entry.map_err(|e| e.to_string())?;
+        let is_dir = entry.header().entry_type().is_dir();
+        let size = entry.header().size().unwrap_or(0);
+        let name = entry.path().map(|p| p.to_string_lossy().to_string()).unwrap_or_default();
+        prog.current = name.clone();
+        let unpacked = entry.unpack_in(dest).map_err(|e| e.to_string())?;
+        if unpacked {
+            if !is_dir {
+                report.done += 1;
+                prog.done_bytes += size;
+                prog.done_items += 1;
+            }
+        } else {
+            report.errors.push(format!("{name}: unsafe entry name, skipped"));
+        }
+        emit(&prog);
+    }
+    prog.current.clear();
+    emit(&prog);
+    Ok(report)
+}
+
+/// Extract a `.7z` into `dest`, streamed: `decompress_file_with_extract_fn`'s per-entry callback lets us
+/// check `cancel` and emit progress between entries, applying the same [`entry_name_is_safe`] guard
+/// [`extract_7z_safe`] does. Returning `Ok(false)` on a cancel stops the scan cooperatively (no error) —
+/// the same "stop scanning" outcome [`extract_7z_entry`] already uses for its own early-stop case.
+fn extract_7z_stream(
+    path: &str,
+    dest: &Path,
+    cancel: &AtomicBool,
+    emit: &mut dyn FnMut(&ArchiveProgress),
+) -> Result<ArchiveReport, String> {
+    let (total_bytes, total_items) = match sevenz_entries(path) {
+        Ok(entries) => (
+            entries.iter().filter(|e| !e.is_dir).map(|e| e.size).sum(),
+            entries.iter().filter(|e| !e.is_dir).count() as u64,
+        ),
+        Err(_) => (0, 0),
+    };
+    let mut prog = ArchiveProgress { total_bytes, done_bytes: 0, total_items, done_items: 0, current: String::new() };
+    let mut report = ArchiveReport::default();
+    emit(&prog);
+    sevenz_rust::decompress_file_with_extract_fn(path, dest, |entry, reader, entry_dest| {
+        if cancel.load(Ordering::Relaxed) {
+            report.cancelled = true;
+            return Ok(false); // cooperative stop, not an error
+        }
+        let name = entry.name().to_string();
+        let size = entry.size();
+        let safe = entry_name_is_safe(&name);
+        prog.current = name.clone();
+        let outcome =
+            if safe { sevenz_rust::default_entry_extract_fn(entry, reader, entry_dest) } else { Ok(true) };
+        if outcome.is_ok() {
+            if safe {
+                prog.done_bytes += size;
+                prog.done_items += 1;
+                report.done += 1;
+            } else {
+                report.errors.push(format!("{name}: unsafe entry name, skipped"));
+            }
+            emit(&prog);
+        }
+        outcome
+    })
+    .map_err(|e| e.to_string())?;
+    prog.current.clear();
+    emit(&prog);
+    Ok(report)
+}
+
+/// Extract an archive into `dest`, streamed — the sibling of [`extract_archive`], used by
+/// `start_archive_extract`. Dispatched by extension exactly like the one-shot version; `dest` is
+/// created the same way.
+pub fn extract_archive_streamed(
+    path: &str,
+    dest: &str,
+    cancel: &AtomicBool,
+    mut emit: impl FnMut(&ArchiveProgress),
+) -> Result<ArchiveReport, String> {
+    fs::create_dir_all(dest).map_err(|e| e.to_string())?;
+    let dest_path = Path::new(dest);
+    let lower = path.to_lowercase();
+
+    if lower.ends_with(".tar") {
+        let (total_bytes, total_items) = tar_totals(path, false);
+        let file = fs::File::open(path).map_err(|e| e.to_string())?;
+        extract_tar_stream(file, dest_path, total_bytes, total_items, cancel, &mut emit)
+    } else if lower.ends_with(".tar.gz") || lower.ends_with(".tgz") {
+        let (total_bytes, total_items) = tar_totals(path, true);
+        let file = fs::File::open(path).map_err(|e| e.to_string())?;
+        extract_tar_stream(flate2::read::GzDecoder::new(file), dest_path, total_bytes, total_items, cancel, &mut emit)
+    } else if lower.ends_with(".gz") {
+        // A bare .gz holds a single file — one item, no per-entry granularity possible.
+        let stem = Path::new(path)
+            .file_stem()
+            .map(|s| s.to_string_lossy().to_string())
+            .unwrap_or_else(|| "extracted".to_string());
+        let mut prog = ArchiveProgress { total_bytes: 0, done_bytes: 0, total_items: 1, done_items: 0, current: stem.clone() };
+        emit(&prog);
+        let file = fs::File::open(path).map_err(|e| e.to_string())?;
+        let mut decoder = flate2::read::GzDecoder::new(file);
+        let mut out = fs::File::create(dest_path.join(&stem)).map_err(|e| e.to_string())?;
+        std::io::copy(&mut decoder, &mut out).map_err(|e| e.to_string())?;
+        prog.done_items = 1;
+        prog.current.clear();
+        emit(&prog);
+        Ok(ArchiveReport { done: 1, failed: 0, cancelled: false, errors: Vec::new() })
+    } else if lower.ends_with(".7z") {
+        extract_7z_stream(path, dest_path, cancel, &mut emit)
+    } else {
+        extract_zip_stream(path, dest_path, cancel, &mut emit)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -958,6 +1471,308 @@ mod tests {
             let err = extract_archive_entry_any(&sevenz.to_string_lossy(), bad).unwrap_err();
             assert!(err.contains("unsafe"), "7z: expected an unsafe-entry error, got {err:?}");
         }
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    // -----------------------------------------------------------------------------------------
+    // Streamed compress/extract with progress + cancel (CPE-1184)
+    // -----------------------------------------------------------------------------------------
+
+    /// Build a small source tree with enough files that a streamed run emits more than one progress
+    /// tick, so cancellation tests have somewhere to stop mid-run.
+    fn build_source_tree(d: &Path) -> String {
+        fs::create_dir_all(d.join("src/sub")).unwrap();
+        for i in 0..6 {
+            fs::write(d.join(format!("src/f{i}.txt")), format!("payload-{i}").repeat(50)).unwrap();
+        }
+        fs::write(d.join("src/sub/nested.txt"), b"nested").unwrap();
+        d.join("src").to_string_lossy().to_string()
+    }
+
+    #[test]
+    fn compress_to_zip_streamed_reports_growing_progress_and_round_trips() {
+        let d = scratch("stream_zip_compress");
+        let src = build_source_tree(&d);
+        let zip_path = d.join("out.zip");
+        let cancel = AtomicBool::new(false);
+        let mut ticks: Vec<ArchiveProgress> = Vec::new();
+
+        let report =
+            compress_to_zip_streamed(&[src], &zip_path.to_string_lossy(), &cancel, |p| ticks.push(p.clone())).unwrap();
+
+        assert!(!report.cancelled);
+        assert_eq!(report.done, 7, "6 files + 1 nested file"); // f0..f5 + sub/nested.txt
+        assert!(ticks.len() >= 7, "expected a progress tick per file, got {}", ticks.len());
+        // Progress is monotonically non-decreasing and the final tick reaches the totals.
+        for w in ticks.windows(2) {
+            assert!(w[1].done_bytes >= w[0].done_bytes);
+            assert!(w[1].done_items >= w[0].done_items);
+        }
+        let last = ticks.last().unwrap();
+        assert_eq!(last.done_items, last.total_items);
+        assert_eq!(last.done_bytes, last.total_bytes);
+
+        // Round-trips: the archive really contains what was streamed in.
+        let names: Vec<String> =
+            read_archive_entries(&zip_path.to_string_lossy()).unwrap().into_iter().map(|e| e.name.replace('\\', "/")).collect();
+        assert!(names.iter().any(|n| n.ends_with("f0.txt")));
+        assert!(names.iter().any(|n| n.ends_with("sub/nested.txt")));
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn compress_to_zip_streamed_can_be_cancelled_mid_run_and_leaves_a_valid_partial_archive() {
+        let d = scratch("stream_zip_cancel");
+        let src = build_source_tree(&d);
+        let zip_path = d.join("partial.zip");
+        let cancel = AtomicBool::new(false);
+        let mut count = 0u32;
+
+        let report = compress_to_zip_streamed(&[src], &zip_path.to_string_lossy(), &cancel, |_| {
+            count += 1;
+            if count == 2 {
+                cancel.store(true, Ordering::Relaxed);
+            }
+        })
+        .unwrap();
+
+        assert!(report.cancelled);
+        assert!(report.done < 7, "cancellation should stop before every file is packed");
+        // The partial file is still a valid, openable archive (writer.finish() ran regardless).
+        let archive = zip::ZipArchive::new(fs::File::open(&zip_path).unwrap()).unwrap();
+        assert!(archive.len() < 7);
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn compress_to_targz_streamed_reports_progress_and_round_trips() {
+        let d = scratch("stream_targz_compress");
+        let src = build_source_tree(&d);
+        let tgz = d.join("out.tar.gz");
+        let cancel = AtomicBool::new(false);
+        let mut ticks = 0u32;
+
+        let report =
+            compress_to_targz_streamed(&[src], &tgz.to_string_lossy(), &cancel, |_| ticks += 1).unwrap();
+
+        assert!(!report.cancelled);
+        assert_eq!(report.done, 7);
+        assert!(ticks >= 7);
+        let names: Vec<String> =
+            read_archive_entries(&tgz.to_string_lossy()).unwrap().into_iter().map(|e| e.name.replace('\\', "/")).collect();
+        assert!(names.iter().any(|n| n.ends_with("f3.txt")));
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn compress_archive_streamed_dispatches_by_extension_like_the_one_shot_version() {
+        let d = scratch("stream_dispatch");
+        fs::write(d.join("f.txt"), b"x").unwrap();
+        let src = d.join("f.txt").to_string_lossy().to_string();
+        let cancel = AtomicBool::new(false);
+
+        for ext in ["out.zip", "out.tar.gz", "out.tgz"] {
+            let dest = d.join(ext).to_string_lossy().to_string();
+            let report = compress_archive_streamed(std::slice::from_ref(&src), &dest, &cancel, |_| {})
+                .unwrap_or_else(|e| panic!("{ext}: {e}"));
+            assert_eq!(report.done, 1);
+        }
+        let err = compress_archive_streamed(&[src], &d.join("out.rar").to_string_lossy(), &cancel, |_| {}).unwrap_err();
+        assert!(err.contains("unsupported"));
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn compress_to_zip_encrypted_streamed_round_trips_and_rejects_a_wrong_password() {
+        let d = scratch("stream_encrypted");
+        fs::write(d.join("secret.txt"), b"top secret").unwrap();
+        let src = d.join("secret.txt").to_string_lossy().to_string();
+        let zip = d.join("locked.zip");
+        let cancel = AtomicBool::new(false);
+
+        assert!(compress_to_zip_encrypted_streamed(&[], &zip.to_string_lossy(), "pw", &cancel, |_| {}).is_err());
+        assert!(
+            compress_to_zip_encrypted_streamed(std::slice::from_ref(&src), &zip.to_string_lossy(), "", &cancel, |_| {})
+                .is_err(),
+            "an empty password errors"
+        );
+        let report = compress_to_zip_encrypted_streamed(&[src], &zip.to_string_lossy(), "hunter2", &cancel, |_| {}).unwrap();
+        assert_eq!(report.done, 1);
+
+        let out = d.join("out");
+        extract_zip_encrypted(&zip.to_string_lossy(), &out.to_string_lossy(), "hunter2").unwrap();
+        assert_eq!(fs::read(out.join("secret.txt")).unwrap(), b"top secret");
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn check_zip_password_detects_missing_and_wrong_passwords_fast() {
+        let d = scratch("check_password");
+        fs::write(d.join("secret.txt"), b"top secret").unwrap();
+        let src = d.join("secret.txt").to_string_lossy().to_string();
+        let zip = d.join("locked.zip");
+        compress_to_zip_encrypted(&[src], &zip.to_string_lossy(), "hunter2").unwrap();
+
+        assert!(check_zip_password(&zip.to_string_lossy(), None).is_err(), "no password -> needs one");
+        assert!(check_zip_password(&zip.to_string_lossy(), Some("wrong")).is_err(), "wrong password rejected");
+        assert!(check_zip_password(&zip.to_string_lossy(), Some("hunter2")).is_ok(), "right password accepted");
+
+        // A plain (unencrypted) archive never needs a password, with or without one supplied.
+        let plain = d.join("plain.zip");
+        compress_to_zip(&[d.join("secret.txt").to_string_lossy().to_string()], &plain.to_string_lossy()).unwrap();
+        assert!(check_zip_password(&plain.to_string_lossy(), None).is_ok());
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn extract_archive_streamed_zip_round_trips_and_reports_progress() {
+        let d = scratch("stream_zip_extract");
+        let src = build_source_tree(&d);
+        let zip_path = d.join("out.zip");
+        compress_to_zip(&[src], &zip_path.to_string_lossy()).unwrap();
+
+        let cancel = AtomicBool::new(false);
+        let mut ticks: Vec<ArchiveProgress> = Vec::new();
+        let out = d.join("unpacked");
+        let report =
+            extract_archive_streamed(&zip_path.to_string_lossy(), &out.to_string_lossy(), &cancel, |p| ticks.push(p.clone()))
+                .unwrap();
+
+        assert!(!report.cancelled);
+        assert_eq!(report.done, 7, "6 files + 1 nested file");
+        assert!(ticks.len() >= 7);
+        // total_items is the zip's whole entry count (files + directory placeholders — 7 files + 2 dirs
+        // = 9), known up front from the central directory before any entry is read.
+        assert_eq!(ticks.first().unwrap().total_items, 9, "totals known up front for zip (central directory)");
+        assert_eq!(fs::read_to_string(out.join("src/f0.txt")).unwrap(), "payload-0".repeat(50));
+        assert_eq!(fs::read_to_string(out.join("src/sub/nested.txt")).unwrap(), "nested");
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn extract_archive_streamed_zip_can_be_cancelled_mid_run() {
+        let d = scratch("stream_zip_extract_cancel");
+        let src = build_source_tree(&d);
+        let zip_path = d.join("out.zip");
+        compress_to_zip(&[src], &zip_path.to_string_lossy()).unwrap();
+
+        let cancel = AtomicBool::new(false);
+        let mut count = 0u32;
+        let out = d.join("unpacked");
+        let report = extract_archive_streamed(&zip_path.to_string_lossy(), &out.to_string_lossy(), &cancel, |_| {
+            count += 1;
+            if count == 2 {
+                cancel.store(true, Ordering::Relaxed);
+            }
+        })
+        .unwrap();
+
+        assert!(report.cancelled);
+        assert!(report.done < 7);
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn extract_archive_streamed_targz_reports_pre_measured_totals() {
+        let d = scratch("stream_targz_extract");
+        let src = build_source_tree(&d);
+        let tgz = d.join("out.tar.gz");
+        compress_to_targz(&[src], &tgz.to_string_lossy()).unwrap();
+
+        let cancel = AtomicBool::new(false);
+        let mut ticks: Vec<ArchiveProgress> = Vec::new();
+        let out = d.join("unpacked");
+        let report =
+            extract_archive_streamed(&tgz.to_string_lossy(), &out.to_string_lossy(), &cancel, |p| ticks.push(p.clone()))
+                .unwrap();
+
+        assert!(!report.cancelled);
+        assert_eq!(report.done, 7);
+        // The very FIRST emitted tick already knows the totals — proof of the tar pre-measurement pass,
+        // not just a running item count that only reaches the total at the end.
+        assert_eq!(ticks.first().unwrap().total_items, 7);
+        assert!(ticks.first().unwrap().total_bytes > 0);
+        assert_eq!(fs::read_to_string(out.join("src/f0.txt")).unwrap(), "payload-0".repeat(50));
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn extract_archive_streamed_7z_round_trips_and_reports_progress() {
+        let d = scratch("stream_7z_extract");
+        let sevenz = d.join("out.7z");
+        write_7z_fixture(&sevenz, &[("a.txt", b"alpha7z"), ("sub/b.txt", b"beta7z")]);
+
+        let cancel = AtomicBool::new(false);
+        let mut ticks: Vec<ArchiveProgress> = Vec::new();
+        let out = d.join("unpacked");
+        let report =
+            extract_archive_streamed(&sevenz.to_string_lossy(), &out.to_string_lossy(), &cancel, |p| ticks.push(p.clone()))
+                .unwrap();
+
+        assert!(!report.cancelled);
+        assert_eq!(report.done, 2);
+        assert!(ticks.len() >= 2);
+        assert_eq!(fs::read(out.join("a.txt")).unwrap(), b"alpha7z");
+        assert_eq!(fs::read(out.join("sub/b.txt")).unwrap(), b"beta7z");
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn extract_archive_streamed_gz_single_file_is_one_item() {
+        use flate2::write::GzEncoder;
+        use flate2::Compression;
+        let d = scratch("stream_gz_extract");
+        let gz_path = d.join("note.txt.gz");
+        {
+            let f = fs::File::create(&gz_path).unwrap();
+            let mut enc = GzEncoder::new(f, Compression::default());
+            enc.write_all(b"hello world").unwrap();
+            enc.finish().unwrap();
+        }
+        let cancel = AtomicBool::new(false);
+        let out = d.join("unpacked");
+        let report =
+            extract_archive_streamed(&gz_path.to_string_lossy(), &out.to_string_lossy(), &cancel, |_| {}).unwrap();
+        assert_eq!(report.done, 1);
+        assert_eq!(fs::read_to_string(out.join("note.txt")).unwrap(), "hello world");
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn extract_zip_encrypted_streamed_round_trips_and_rejects_a_wrong_password() {
+        let d = scratch("stream_extract_encrypted");
+        fs::write(d.join("secret.txt"), b"top secret").unwrap();
+        let src = d.join("secret.txt").to_string_lossy().to_string();
+        let zip = d.join("locked.zip");
+        compress_to_zip_encrypted(&[src], &zip.to_string_lossy(), "hunter2").unwrap();
+
+        let cancel = AtomicBool::new(false);
+        let bad = d.join("bad");
+        assert!(extract_zip_encrypted_streamed(&zip.to_string_lossy(), &bad.to_string_lossy(), "wrong", &cancel, |_| {})
+            .is_err());
+
+        let out = d.join("out");
+        let report =
+            extract_zip_encrypted_streamed(&zip.to_string_lossy(), &out.to_string_lossy(), "hunter2", &cancel, |_| {})
+                .unwrap();
+        assert_eq!(report.done, 1);
+        assert_eq!(fs::read(out.join("secret.txt")).unwrap(), b"top secret");
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn extract_archive_streamed_zip_extraction_does_not_escape_the_destination() {
+        let d = scratch("stream_zip_slip");
+        let zip_path = d.join("evil.zip");
+        fs::write(&zip_path, craft_zip_with_entry_name("../escape.txt", b"pwned")).unwrap();
+
+        let cancel = AtomicBool::new(false);
+        let dest = d.join("out");
+        // Same invariant as the one-shot extractor's guard test: either an error or a silent skip is
+        // acceptable, but the traversal entry must never land outside `dest`.
+        let _ = extract_archive_streamed(&zip_path.to_string_lossy(), &dest.to_string_lossy(), &cancel, |_| {});
+        assert!(!d.join("escape.txt").exists());
+        assert!(!dest.parent().unwrap().join("escape.txt").exists());
         let _ = fs::remove_dir_all(&d);
     }
 }

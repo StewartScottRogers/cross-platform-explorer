@@ -768,7 +768,9 @@ async startTransfer(sources: string[], dest: string, kind: TransferKind, policy:
     return await TAURI_INVOKE("start_transfer", { sources, dest, kind, policy });
 },
 /**
- * Signal a running transfer to stop at the next chunk boundary (CPE-620).
+ * Signal a running transfer to stop at the next chunk boundary (CPE-620). Also cancels an archive
+ * compress/extract queued via [`start_archive_compress`]/[`start_archive_extract`] — they share this
+ * same registry, so no separate cancel command was needed for them (CPE-1184).
  */
 async cancelTransfer(id: number) : Promise<void> {
     await TAURI_INVOKE("cancel_transfer", { id });
@@ -1856,6 +1858,39 @@ async extractZipEncrypted(path: string, dest: string, password: string) : Promis
 }
 },
 /**
+ * Start a compress of `paths` into `dest` through the transfer queue (CPE-1184): streams per-entry
+ * progress and is cancellable exactly like a copy/move. `password` (non-empty) uses the AES-256
+ * encrypted zip path; otherwise the format is picked by `dest`'s extension (`.zip`/`.tar.gz`/`.tgz`),
+ * mirroring [`compress_archive`]. Returns the new transfer's id immediately — progress/completion
+ * arrive as `transfer://progress`/`transfer://done` events, same as `start_transfer`.
+ */
+async startArchiveCompress(paths: string[], dest: string, password: string | null) : Promise<Result<number, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("start_archive_compress", { paths, dest, password }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * Start an extract of `path` into `dest` through the transfer queue (CPE-1184): streams per-entry
+ * progress and is cancellable exactly like a copy/move. `password` (non-empty) uses the AES-zip path;
+ * otherwise the format is auto-detected by extension, mirroring [`extract_archive`]. Before queuing,
+ * a zip-family archive's password is validated *synchronously* via
+ * [`cpe_server::archive::check_zip_password`] — a cheap header-only check — so the frontend's existing
+ * password-prompt-and-retry flow keeps its original synchronous try/catch shape (an instant rejection)
+ * instead of round-tripping through a transfer id + completion event just to learn a password was
+ * wrong. Returns the new transfer's id immediately once that check passes.
+ */
+async startArchiveExtract(path: string, dest: string, password: string | null) : Promise<Result<number, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("start_archive_extract", { path, dest, password }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
  * Open the platform's terminal with its working directory set to `path`
  * (CPE-253). Windows prefers Windows Terminal and falls back to a fresh cmd
  * window; macOS uses Terminal.app; Linux tries the common emulators in turn.
@@ -2843,9 +2878,13 @@ export type IndexHit = { path: string; name: string; is_dir: boolean; score: num
 export type IntegrityReport = { intact: string[]; edited: string[]; corrupted: string[]; missing: string[]; new: string[] }
 /**
  * The inverse of one [`ResolvedOp`]. Applying a run's inverses **in reverse order** restores the
- * pre-run state. `kind` is `"untag"` (not `"tag"`) for a tag step's inverse — removing a label is a
- * structurally different primitive call than adding one; `rename`/`move`/`convert` reuse their
- * forward kind (the swapped `from`/`to`/`detail` is what makes them reverse it).
+ * pre-run state. `kind` is `"untag"` (not `"tag"`) for a tag step's inverse as resolved here — the
+ * CPE-1188 apply layer may rewrite it to `"tag"` post-hoc when the label was already present before
+ * the run (CPE-1194: a no-op restore, not a strip); `rename`/`move` reuse their forward kind (the
+ * swapped `from`/`to`/`detail` is what makes them reverse it). `convert` does **not** reuse its
+ * forward kind — its inverse is the dedicated `"restore_convert"` kind (CPE-1194): the forward step
+ * trashes the pre-convert original rather than deleting it, so the inverse restores those exact
+ * bytes from the OS trash instead of re-encoding back to the source format.
  */
 export type InverseOp = { from: string; kind: string; detail: string; to: string }
 /**
