@@ -16,11 +16,20 @@
 //! this module's resolved plan; imported macros never auto-run — that gate lives entirely in the
 //! command/UI layer, this module only ever computes a plan when explicitly asked to.
 //!
-//! **Known scope limit (documented, not a bug):** the `tag`/`untag` inverse pair is a structural
-//! add/remove of exactly the label the macro attached — correct as long as the label wasn't already
-//! present on the path before the run. A byte-for-byte "restore the exact prior `TagEntry`" would
-//! need a snapshot read at apply time (real I/O), which is out of scope for this pure module; the
-//! CPE-1188 apply layer could add that refinement later without changing this module's shape.
+//! **Tag inverse fidelity (CPE-1194):** this pure module always emits `"untag"` as a tag step's
+//! inverse — it has no filesystem access, so it cannot know whether the label was already present on
+//! a path before the run. The CPE-1188 apply layer (`src-tauri`'s `macro_apply_run`) snapshots the
+//! pre-run tag state right before applying each `tag` op and, when the label was already there,
+//! rewrites that op's [`InverseOp::kind`] in the returned [`ResolvedRun`] from `"untag"` to `"tag"` —
+//! re-asserting a label that's already present is a no-op, so undo leaves a pre-existing tag alone
+//! instead of stripping it. This module's shape (and its default `"untag"` emission) is unchanged;
+//! only the apply layer's returned data is corrected against real state.
+//!
+//! **Convert inverse (CPE-1194):** a `convert` step's inverse always gets the dedicated
+//! `"restore_convert"` kind (see [`InverseOp`]) rather than reusing the forward `"convert"` kind —
+//! this is structural, not data-dependent, so it's decided here in the pure resolver. The apply layer
+//! trashes the pre-convert original instead of deleting it, so `"restore_convert"` can restore those
+//! exact bytes from the OS trash instead of re-encoding back to the source format.
 
 use std::collections::HashSet;
 
@@ -41,9 +50,13 @@ pub struct ResolvedOp {
 }
 
 /// The inverse of one [`ResolvedOp`]. Applying a run's inverses **in reverse order** restores the
-/// pre-run state. `kind` is `"untag"` (not `"tag"`) for a tag step's inverse — removing a label is a
-/// structurally different primitive call than adding one; `rename`/`move`/`convert` reuse their
-/// forward kind (the swapped `from`/`to`/`detail` is what makes them reverse it).
+/// pre-run state. `kind` is `"untag"` (not `"tag"`) for a tag step's inverse as resolved here — the
+/// CPE-1188 apply layer may rewrite it to `"tag"` post-hoc when the label was already present before
+/// the run (CPE-1194: a no-op restore, not a strip); `rename`/`move` reuse their forward kind (the
+/// swapped `from`/`to`/`detail` is what makes them reverse it). `convert` does **not** reuse its
+/// forward kind — its inverse is the dedicated `"restore_convert"` kind (CPE-1194): the forward step
+/// trashes the pre-convert original rather than deleting it, so the inverse restores those exact
+/// bytes from the OS trash instead of re-encoding back to the source format.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[cfg_attr(feature = "specta", derive(specta::Type))]
 pub struct InverseOp {
@@ -172,7 +185,7 @@ pub fn resolve(m: &ActionMacro, inputs: &[String], root: &str) -> Result<Resolve
                     });
                     inverses.push(InverseOp {
                         from: target.clone(),
-                        kind: "convert".into(),
+                        kind: "restore_convert".into(),
                         detail: old_ext.to_string(),
                         to: current.clone(),
                     });
