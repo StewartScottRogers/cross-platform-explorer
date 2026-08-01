@@ -3609,7 +3609,7 @@ fn template_import(app: tauri::AppHandle, json: String) -> Result<TemplateCatalo
     cpe_server::folder_template::import(&server_ctx::TauriCtx::new(&app), &json)
 }
 
-// ---- Action macros (CPE-938/951/1033/1187/1188, epic CPE-739) --------------------------------
+// ---- Action macros (CPE-938/951/1033/1187/1188/1194, epic CPE-739) ---------------------------
 // Thin dispatchers into `cpe_server::macro_store` (CRUD/persistence, CPE-1033) and the CPE-1187
 // `macro_run::resolve` executor (resolution + collision-safe naming + scope guard + inverse
 // model). The RUN command bridges the resolved plan to the existing `rename_entry`/`move_exact`
@@ -3618,6 +3618,11 @@ fn template_import(app: tauri::AppHandle, json: String) -> Result<TemplateCatalo
 // so a macro run is never left half-done. `macro_undo` replays a completed run's inverses in
 // reverse to reverse it later. Imported macros never auto-run: `macro_import` only writes to the
 // persisted catalog — running is always a separate, explicit `macro_run` call from the UI.
+//
+// CPE-1194 fixed two undo-fidelity gaps found in the CPE-1187/1188 review (PR #498): a `convert`
+// step now trashes its pre-convert original (instead of deleting it) so undo restores the exact
+// original bytes from the trash rather than lossily re-encoding; and `macro_apply_run` snapshots
+// the pre-run tag state so a `tag` step's undo never strips a label the path already had.
 use cpe_server::action_macro::{ActionMacro, PlannedOp};
 use cpe_server::macro_run::ResolvedRun;
 use cpe_server::macro_store::{Catalog as MacroCatalog, MacroSummary};
@@ -3723,9 +3728,16 @@ async fn macro_undo(app: tauri::AppHandle, run: ResolvedRun) -> Result<(), Strin
 
 /// Apply every op in `run.ops`, in order; if one fails, immediately replay the inverses of
 /// whatever already succeeded (in reverse), so the run is all-or-nothing, then return the original
-/// failure. On success, returns `run` unchanged — the caller's undo handle for `macro_undo`.
-fn macro_apply_run(ctx: &dyn ServerCtx, run: ResolvedRun) -> Result<ResolvedRun, String> {
-    for (applied, op) in run.ops.iter().enumerate() {
+/// failure. On success, returns `run` — the caller's undo handle for `macro_undo` — with one
+/// correction (CPE-1194): just before applying each `tag` op, the pre-run tag state at its path is
+/// snapshotted, and if the label was already present, that op's inverse is rewritten from `"untag"`
+/// to `"tag"` (a no-op restore) so undo never strips a label the user had before the run.
+fn macro_apply_run(ctx: &dyn ServerCtx, mut run: ResolvedRun) -> Result<ResolvedRun, String> {
+    for applied in 0..run.ops.len() {
+        let op = run.ops[applied].clone();
+        if op.kind == "tag" && macro_tag_already_present(ctx, &op.from, &op.detail) {
+            run.inverses[applied].kind = "tag".to_string();
+        }
         if let Err(e) = macro_apply_op(ctx, &op.from, &op.kind, &op.detail, &op.to) {
             // Roll back the already-applied ops in reverse. Collect any rollback failures rather
             // than discarding them: if an inverse itself fails (e.g. a file was externally moved
@@ -3762,7 +3774,8 @@ fn macro_apply_inverses(ctx: &dyn ServerCtx, run: &ResolvedRun) -> Result<(), St
 }
 
 /// Bridge one resolved (or inverse) op to its real primitive. `kind` is `"rename"` / `"move"` /
-/// `"convert"` / `"tag"` / `"untag"` (the inverse-only kind of a tag step, per `macro_run::InverseOp`).
+/// `"convert"` / `"tag"` / `"untag"` (the inverse-only kind of a tag step) / `"restore_convert"`
+/// (the inverse-only kind of a convert step, per `macro_run::InverseOp`; CPE-1194).
 fn macro_apply_op(ctx: &dyn ServerCtx, from: &str, kind: &str, detail: &str, to: &str) -> Result<(), String> {
     match kind {
         "rename" => {
@@ -3782,23 +3795,23 @@ fn macro_apply_op(ctx: &dyn ServerCtx, from: &str, kind: &str, detail: &str, to:
             }
         }
         "convert" => macro_convert_in_place(from, to, detail),
+        "restore_convert" => macro_restore_converted(from, to),
         "tag" => macro_add_tag(ctx, from, detail),
         "untag" => macro_remove_tag(ctx, from, detail),
         other => Err(format!("unknown macro op kind {other:?}")),
     }
 }
 
-/// Re-encode the image at `from` to the `detail` extension and write it at `to`, then remove the
-/// original — a macro `Convert` step is in-place from the user's perspective (one file, new
-/// extension), unlike the Batch-Media dialog's non-destructive-by-default siblings. A no-op when
-/// `to == from`. Non-image bytes or an unsupported target extension fail loudly rather than
-/// silently corrupting the file; `macro_apply_run` rolls the whole run back on any such failure.
+/// Re-encode the image at `from` to the `detail` extension and write it at `to`, then route the
+/// original to the OS trash — a macro `Convert` step is in-place from the user's perspective (one
+/// file, new extension), unlike the Batch-Media dialog's non-destructive-by-default siblings. A
+/// no-op when `to == from`. Non-image bytes or an unsupported target extension fail loudly rather
+/// than silently corrupting the file; `macro_apply_run` rolls the whole run back on any such failure.
 ///
-/// **Undo of a `Convert` is a lossy RE-ENCODE, not a byte-exact restore.** The original file is
-/// deleted here, so `macro_undo`'s inverse re-encodes back to the source extension — a PNG→JPG→undo
-/// round-trip yields a re-encoded (quality-degraded) file, not the original bytes. Rename/move undo
-/// IS byte-exact; convert is the exception. A future improvement (CPE-1194) routes the original to
-/// the trash so convert-undo can truly restore it.
+/// **The original is trashed, not permanently deleted (CPE-1194).** Routing it through the OS
+/// Recycle Bin / Trash (same primitive as `delete_to_trash`) rather than `fs::remove_file` means the
+/// `"restore_convert"` inverse (`macro_restore_converted`) can restore the exact original bytes from
+/// the trash on undo — a byte-exact restore, not a second lossy re-encode.
 fn macro_convert_in_place(from: &str, to: &str, detail: &str) -> Result<(), String> {
     if from == to {
         return Ok(());
@@ -3809,7 +3822,34 @@ fn macro_convert_in_place(from: &str, to: &str, detail: &str) -> Result<(), Stri
         &[cpe_server::batch_media::MediaOp::Convert { to_ext: detail.to_string() }],
     )?;
     fs::write(to, converted).map_err(|e| format!("could not write {to}: {e}"))?;
-    fs::remove_file(from).map_err(|e| format!("could not remove {from}: {e}"))?;
+    trash::delete(from).map_err(|e| format!("could not trash {from}: {e}"))?;
+    Ok(())
+}
+
+/// Undo of a `Convert` step (CPE-1194, the `"restore_convert"` inverse kind): restores the
+/// pre-convert original's exact bytes from the OS trash — where `macro_convert_in_place` routed them
+/// — instead of re-encoding back to the source extension, so a PNG→JPG→undo round-trip yields the
+/// real original bytes, not a second, lossier re-encode. `from` is the converted file (produced by
+/// the forward step, removed here); `to` is the original file's path (restored here). A no-op when
+/// `from == to` (the forward step never touched anything, so nothing was ever trashed).
+///
+/// If the platform can't programmatically restore from the trash (macOS — see
+/// `can_restore_from_trash_impl`), this fails loudly with that platform's honest error rather than
+/// silently leaving the original lost; the converted file is left in place in that case (never
+/// destroy the only remaining copy when the restore didn't happen).
+fn macro_restore_converted(from: &str, to: &str) -> Result<(), String> {
+    if from == to {
+        return Ok(());
+    }
+    let restored = restore_from_trash_impl(vec![to.to_string()]);
+    match restored.into_iter().next() {
+        Some(r) if r.ok => {}
+        Some(r) => return Err(r.error),
+        None => return Err("trash restore produced no result".to_string()),
+    }
+    // The converted file is no longer needed. Trash it too rather than permanently deleting it —
+    // an undo path must never do a silent permanent delete.
+    trash::delete(from).map_err(|e| format!("could not trash converted file {from}: {e}"))?;
     Ok(())
 }
 
@@ -3824,6 +3864,17 @@ fn macro_add_tag(ctx: &dyn ServerCtx, path: &str, label: &str) -> Result<(), Str
         tags.push(label.to_string());
     }
     cpe_server::tags::set(ctx, path, tags, existing_label).map(|_| ())
+}
+
+/// Whether `path` already carries `label` in the tag store, right now (CPE-1194) — used by
+/// `macro_apply_run` to snapshot pre-run tag state before a `tag` step runs, so its inverse can be
+/// corrected to a no-op when the label pre-existed. Defaults to `false` (treats a load failure the
+/// same as "not tagged"; a subsequent real tag-store operation surfaces the failure properly).
+fn macro_tag_already_present(ctx: &dyn ServerCtx, path: &str, label: &str) -> bool {
+    cpe_server::tags::load(ctx)
+        .ok()
+        .and_then(|store| store.get(path).map(|e| e.tags().iter().any(|t| t == label)))
+        .unwrap_or(false)
 }
 
 /// Remove `label` from `path`'s tags (the inverse of `macro_add_tag`), preserving the other tags
@@ -9259,6 +9310,141 @@ mod tests {
         // The first (successful) step's effect must have been rolled back.
         assert!(a.exists(), "rollback should restore the first step's original file");
         assert!(!work.path().join("renamed.txt").exists());
+    }
+
+    // ---- Undo fidelity (CPE-1194) ---------------------------------------------------------------
+
+    #[test]
+    fn macro_run_tag_step_preserves_a_pre_existing_tag_after_undo() {
+        // CPE-1194: the bug is specifically when the macro's OWN label was already on the path
+        // before the run. `untag` on undo used to strip it unconditionally (a structural
+        // add/remove of exactly that label), so a label the user had explicitly set before the run
+        // was wrongly stripped by undo even though the forward step was a no-op (union add).
+        // `macro_apply_run` must snapshot pre-run tag state and correct that op's inverse to a
+        // no-op restore when the label pre-existed, leaving a DIFFERENT, untouched tag alone either way.
+        let config = tempfile::tempdir().unwrap();
+        let ctx = cpe_server::ctx::HeadlessCtx::new(config.path());
+        let work = tempfile::tempdir().unwrap();
+        let file = work.path().join("a.txt");
+        fs::write(&file, b"hi").unwrap();
+        let input = file.to_string_lossy().to_string();
+        let root = work.path().to_string_lossy().to_string();
+
+        // The user already tagged this file "done" (the SAME label the macro attaches) AND "keep"
+        // (an unrelated label) before the macro ever runs.
+        cpe_server::tags::set(&ctx, &input, vec!["done".to_string(), "keep".to_string()], String::new())
+            .unwrap();
+
+        let mac = cpe_server::action_macro::ActionMacro {
+            name: "tag-done".into(),
+            steps: vec![cpe_server::action_macro::MacroStep::Tag { label: "done".into() }],
+        };
+        let resolved = cpe_server::macro_run::resolve(&mac, std::slice::from_ref(&input), &root).unwrap();
+        let applied = macro_apply_run(&ctx, resolved).unwrap();
+        // The apply layer must have corrected the tag step's inverse to a no-op restore.
+        assert_eq!(applied.inverses[0].kind, "tag", "pre-existing label ⇒ inverse must not be untag");
+
+        let store = cpe_server::tags::load(&ctx).unwrap();
+        let tags = store.get(&input).unwrap().tags();
+        assert!(tags.contains(&"keep".to_string()) && tags.contains(&"done".to_string()), "got: {tags:?}");
+
+        macro_apply_inverses(&ctx, &applied).unwrap();
+
+        let store = cpe_server::tags::load(&ctx).unwrap();
+        let tags = store.get(&input).map(|e| e.tags().to_vec()).unwrap_or_default();
+        assert!(tags.contains(&"keep".to_string()), "unrelated tag must survive undo: {tags:?}");
+        assert!(
+            tags.contains(&"done".to_string()),
+            "the pre-existing 'done' label must survive undo (this is the CPE-1194 fix): {tags:?}"
+        );
+    }
+
+    #[test]
+    fn macro_run_tag_step_with_no_pre_existing_tag_still_untags_on_undo() {
+        // The un-corrected case (CPE-1187 behavior) must still work: when the label was NOT already
+        // present, undo removes exactly what the run added.
+        let config = tempfile::tempdir().unwrap();
+        let ctx = cpe_server::ctx::HeadlessCtx::new(config.path());
+        let work = tempfile::tempdir().unwrap();
+        let file = work.path().join("a.txt");
+        fs::write(&file, b"hi").unwrap();
+        let input = file.to_string_lossy().to_string();
+        let root = work.path().to_string_lossy().to_string();
+
+        let mac = cpe_server::action_macro::ActionMacro {
+            name: "tag-done".into(),
+            steps: vec![cpe_server::action_macro::MacroStep::Tag { label: "done".into() }],
+        };
+        let resolved = cpe_server::macro_run::resolve(&mac, std::slice::from_ref(&input), &root).unwrap();
+        let applied = macro_apply_run(&ctx, resolved).unwrap();
+        assert_eq!(applied.inverses[0].kind, "untag", "no pre-existing label ⇒ inverse stays untag");
+
+        macro_apply_inverses(&ctx, &applied).unwrap();
+        let store = cpe_server::tags::load(&ctx).unwrap();
+        assert!(!store.contains_key(&input), "tag entry should be pruned back to nothing after undo");
+    }
+
+    /// A minimal valid PNG, built with the `image` crate (already a real dependency, used elsewhere
+    /// in this test module for fixtures) rather than hand-rolled bytes.
+    fn cpe_1194_test_png_bytes() -> Vec<u8> {
+        let img = image::RgbImage::from_pixel(4, 4, image::Rgb([200u8, 40, 60]));
+        let mut buf = std::io::Cursor::new(Vec::new());
+        image::DynamicImage::ImageRgb8(img)
+            .write_to(&mut buf, image::ImageFormat::Png)
+            .unwrap();
+        buf.into_inner()
+    }
+
+    // Trash restore (`trash::os_limited::{list, restore_all}`) is only implemented on Windows and
+    // Linux (see `restore_from_trash_impl` / CPE-044) — macOS has no programmatic trash listing API,
+    // so this scenario cannot be exercised there. Mirrors the existing platform split.
+    #[cfg(any(target_os = "windows", target_os = "linux"))]
+    #[test]
+    fn macro_run_convert_step_then_undo_restores_the_original_bytes_via_trash() {
+        // CPE-1194: undo of a `convert` step used to re-encode back to the source extension (lossy).
+        // The forward step now trashes the original instead of deleting it, so undo can restore the
+        // exact original bytes from the OS trash — proven here by a byte-for-byte comparison, not
+        // just "a file with the old extension exists again".
+        let config = tempfile::tempdir().unwrap();
+        let ctx = cpe_server::ctx::HeadlessCtx::new(config.path());
+        let work = tempfile::tempdir().unwrap();
+        let original = work.path().join("photo.png");
+        let original_bytes = cpe_1194_test_png_bytes();
+        fs::write(&original, &original_bytes).unwrap();
+        let input = original.to_string_lossy().to_string();
+        let root = work.path().to_string_lossy().to_string();
+
+        let mac = cpe_server::action_macro::ActionMacro {
+            name: "to-jpg".into(),
+            steps: vec![cpe_server::action_macro::MacroStep::Convert { to_ext: "jpg".into() }],
+        };
+        let resolved = cpe_server::macro_run::resolve(&mac, std::slice::from_ref(&input), &root).unwrap();
+        assert_eq!(resolved.inverses[0].kind, "restore_convert");
+        let applied = macro_apply_run(&ctx, resolved).unwrap();
+
+        let converted = work.path().join("photo.jpg");
+        assert!(converted.exists(), "converted file should exist");
+        assert!(!original.exists(), "original should be gone from its path (trashed, not left behind)");
+
+        macro_apply_inverses(&ctx, &applied).unwrap();
+
+        assert!(original.exists(), "undo should restore the original file");
+        assert!(!converted.exists(), "undo should remove the converted file (trashed, not left behind)");
+        let restored_bytes = fs::read(&original).unwrap();
+        assert_eq!(
+            restored_bytes, original_bytes,
+            "restored bytes must be byte-exact — a re-encode would differ"
+        );
+
+        // Best-effort cleanup: purge the converted file's trash entry so repeated test runs don't
+        // pile up in the real OS trash. Never fails the test either way.
+        let _ = trash::os_limited::list().map(|items| {
+            let ours: Vec<_> = items
+                .into_iter()
+                .filter(|i| i.name.to_string_lossy() == "photo.jpg")
+                .collect();
+            let _ = trash::os_limited::purge_all(ours);
+        });
     }
 
     // list_dir + stream_dir_entries walker tests moved with the code to `cpe_server::listing` (CPE-815).
