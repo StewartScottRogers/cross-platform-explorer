@@ -52,6 +52,15 @@ base64 = "0.22"
 # (CPE-829, epic CPE-717). Pure-Rust plist (binary + XML) reader/writer, no system libs. The codec is
 # cross-platform (round-trip-testable everywhere); only the storage side is macOS-specific.
 plist = "1"
+# SVG + font glyph-sheet thumbnails (CPE-1236, epic CPE-718). Both pure-Rust, no system libs, no
+# browser engine: `resvg` (re-exports `usvg` for XML->scene-tree parsing and `tiny-skia` for
+# rasterization) renders `.svg`; `ab_glyph` (already-minimal: pulls in only `ab_glyph_rasterizer` +
+# `owned_ttf_parser`) rasterizes `.ttf`/`.otf`/`.woff` glyph outlines. `resvg`'s default features are
+# trimmed to just `text` — `system-fonts`/`raster-images`/`gif`/`image-webp` are dropped since we don't
+# want a filesystem font-directory scan (non-deterministic across the 3-OS CI matrix) or embedded-raster
+# support the thumbnail use case doesn't need.
+resvg = { version = "0.45.1", default-features = false, features = ["text"] }
+ab_glyph = "0.2.32"
 
 # POSIX extended attributes for the native-metadata bridge (CPE-826, epic CPE-717). Pure-Rust (libc
 # syscalls, no system libs); Unix-only — Windows uses NTFS alternate data streams via std file I/O,

@@ -3,8 +3,9 @@
 //! (CPE-815). The Tauri `thumbnail` command resolves the cache dir via `ServerCtx` and wraps the PNG
 //! bytes as a `data:` URL.
 //!
-//! Source decode (PSD + bomb-guard) lives in [`crate::thumb_source`]; EXIF-orientation correction in
-//! [`crate::thumb_orient`] (CPE-1085/1086, epic CPE-718) — this module owns only the downscale + encode.
+//! Source decode (PSD + bomb-guard, plus SVG/font glyph-sheet extractors, CPE-1236) lives in
+//! [`crate::thumb_source`]; EXIF-orientation correction in [`crate::thumb_orient`] (CPE-1085/1086, epic
+//! CPE-718) — this module owns only the downscale + encode.
 
 use std::fs;
 use std::path::Path;
@@ -14,7 +15,7 @@ use crate::{thumb_orient, thumb_source};
 /// Decode `path` and produce a downscaled PNG thumbnail whose longest edge is at most `max_edge` pixels,
 /// preserving aspect ratio. `image::thumbnail` is a fast box filter — good enough for a grid tile.
 pub fn make_thumbnail_png(path: &Path, max_edge: u32) -> Result<Vec<u8>, String> {
-    let (img, bytes) = thumb_source::decode_thumb_image(path)?;
+    let (img, bytes) = thumb_source::decode_thumb_image(path, max_edge)?;
     let img = thumb_orient::orient_for_display(img, &bytes);
     let edge = max_edge.max(1);
     let thumb = img.thumbnail(edge, edge);
@@ -210,6 +211,47 @@ mod tests {
         let png = make_thumbnail_png(&f, 32).unwrap();
         let out = image::load_from_memory(&png).unwrap();
         assert!(out.height() > out.width(), "expected portrait, got {}x{}", out.width(), out.height());
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn make_thumbnail_png_rasterizes_an_svg_source_end_to_end() {
+        // CPE-1236: proves decode-dispatch -> (no-op orient) -> downscale -> PNG-encode are wired
+        // together for the SVG branch, not just `thumb_svg::rasterize_svg` in isolation.
+        let d = scratch("thumbsvg");
+        let f = d.join("wide.svg");
+        fs::write(
+            &f,
+            br##"<svg xmlns="http://www.w3.org/2000/svg" width="100" height="40">
+                  <rect width="100" height="40" fill="#00ff00"/>
+                </svg>"##,
+        )
+        .unwrap();
+        let png = make_thumbnail_png(&f, 32).unwrap();
+        assert!(!png.is_empty());
+        let out = image::load_from_memory(&png).unwrap();
+        assert_eq!(out.width(), 32, "longest edge scaled to max_edge");
+        assert!(out.height() <= 32 && out.height() >= 10, "aspect preserved: {}", out.height());
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn make_thumbnail_png_falls_back_gracefully_for_a_malformed_svg() {
+        let d = scratch("thumbsvgbad");
+        let f = d.join("bad.svg");
+        fs::write(&f, b"<svg><not valid xml at all").unwrap();
+        let err = make_thumbnail_png(&f, 32);
+        assert!(err.is_err(), "a malformed SVG must error (frontend falls back to a generic icon), not panic");
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn make_thumbnail_png_falls_back_gracefully_for_a_malformed_font() {
+        let d = scratch("thumbfontbad");
+        let f = d.join("bad.ttf");
+        fs::write(&f, b"this is not a font").unwrap();
+        let err = make_thumbnail_png(&f, 32);
+        assert!(err.is_err(), "malformed font data must error, not panic");
         let _ = fs::remove_dir_all(&d);
     }
 

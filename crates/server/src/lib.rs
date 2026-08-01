@@ -392,6 +392,14 @@ pub mod thumb_cache;
 /// bytes alongside the image so the caller can apply EXIF orientation (CPE-1086, epic CPE-718).
 pub mod thumb_source;
 
+/// SVG thumbnail rasterization via `resvg`/`usvg`/`tiny-skia`, bomb-guarded against an implausible
+/// declared canvas size (CPE-1236, epic CPE-718).
+pub mod thumb_svg;
+
+/// Font glyph-sheet thumbnails (`.ttf`/`.otf`/`.woff`) via `ab_glyph`, including a WOFF1->SFNT
+/// unwrapper reusing the already-vendored `flate2` (CPE-1236, epic CPE-718).
+pub mod thumb_font;
+
 /// Image preview — TIFF/PSD → PNG data-URL transcode + dimensions/EXIF metadata (CPE-099/101/659).
 pub mod image_preview;
 
