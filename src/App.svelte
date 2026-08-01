@@ -47,6 +47,12 @@
   import RunCommandConfirm from "./lib/components/RunCommandConfirm.svelte";
   import { commandsForSurface, resolveCommand, type UserCommand } from "./lib/userCommands";
   import type { Command } from "./lib/commandPalette";
+  import MacrosDialog from "./lib/components/MacrosDialog.svelte";
+  import MacroParamPrompt from "./lib/components/MacroParamPrompt.svelte";
+  import MacroRunConfirm from "./lib/components/MacroRunConfirm.svelte";
+  import { bindingsForSurface, matchHotkey, hotkeyFromEvent, type MacroBinding } from "./lib/macroBindings";
+  import { extractAskLabels, resolveAskParams } from "./lib/macroParams";
+  import type { ActionMacro, MacroSummary } from "./lib/bindings.gen";
   import AgentMenu from "./lib/components/AgentMenu.svelte";
   import Toolbar from "./lib/components/Toolbar.svelte";
   import ExplorerPane from "./lib/components/ExplorerPane.svelte";
@@ -569,6 +575,76 @@
   function openRunCommand(cmd: UserCommand) {
     runConfirm = { title: cmd.name, commands: resolveCommand(cmd, selectedEntries), cwd: isHome ? "" : currentPath };
   }
+
+  // Scriptable macros (CPE-1189/1190/1191, epic CPE-739): the library dialog, the persisted
+  // surface/hotkey bindings, and the run flow — {ask:label} prompt (if any) -> dry-run confirm
+  // (macro_plan) -> execute (macro_run) -> offer Undo (macro_undo). `macroSummaries` mirrors
+  // `userCommands`'s in-memory list but is refreshed from the CPE-1188 backend catalog (the source of
+  // truth is `macro_save`/`macro_delete`/`macro_import`, not local state) rather than persisted here.
+  let macrosOpen = false;
+  let macroSummaries: MacroSummary[] = [];
+  async function refreshMacroSummaries() {
+    try {
+      macroSummaries = unwrap(await commands.macroList());
+    } catch {
+      macroSummaries = [];
+    }
+  }
+  let macroBindings: MacroBinding[] = [];
+  function persistMacroBindings(list: MacroBinding[]) {
+    macroBindings = list;
+    settings.saveMacroBindings(list);
+  }
+  /** Bound macro names still present in the catalog, per surface — a binding for a since-deleted
+   *  macro is silently skipped rather than showing a dead menu row. */
+  $: macroContextNames = bindingsForSurface(macroBindings, "context")
+    .map((b) => b.name)
+    .filter((name) => macroSummaries.some((m) => m.name === name));
+  $: macroPaletteBindings = bindingsForSurface(macroBindings, "palette").filter((b) =>
+    macroSummaries.some((m) => m.name === b.name),
+  );
+
+  let macroParamPromptFor: { macro: ActionMacro; labels: string[] } | null = null;
+  let macroRunConfirmFor: { macro: ActionMacro; inputs: string[]; root: string } | null = null;
+
+  function beginMacroRun(macro: ActionMacro) {
+    macroRunConfirmFor = {
+      macro,
+      inputs: selectedEntries.map((e) => e.path),
+      root: isHome || archive ? "" : currentPath,
+    };
+  }
+
+  /** `MacroParamPrompt`'s `submit` handler: resolve the {ask:label} tokens against the answered
+   *  values, then hand off to the dry-run confirm. A plain function (not inlined in the template) so
+   *  it can null-check `macroParamPromptFor` once — an inline arrow in the template loses Svelte's
+   *  `{#if}` narrowing on read. */
+  function submitMacroParams(values: Record<string, string>) {
+    if (!macroParamPromptFor) return;
+    const resolved = resolveAskParams(macroParamPromptFor.macro, values);
+    macroParamPromptFor = null;
+    beginMacroRun(resolved);
+  }
+
+  /** Load a saved macro by name and start its run flow: prompt for `{ask:label}` params first (if
+   *  any), otherwise go straight to the dry-run confirm. The only entry point for running a macro —
+   *  from the context menu, the palette, or a bound hotkey. */
+  async function startMacro(name: string) {
+    try {
+      const macro = unwrap(await commands.macroLoad(name));
+      if (!macro) {
+        showNotice(`Macro "${name}" is gone.`, true);
+        await refreshMacroSummaries();
+        return;
+      }
+      const labels = extractAskLabels(macro);
+      if (labels.length > 0) macroParamPromptFor = { macro, labels };
+      else beginMacroRun(macro);
+    } catch (e) {
+      showNotice("Couldn't load the macro: " + (e instanceof Error ? e.message : String(e)), true);
+    }
+  }
+
   let shortcutsOpen = false;
   /** "Search in files" content-search overlay (Ctrl+Shift+F), scoped to the current folder (CPE-417). */
   let contentSearchOpen = false;
@@ -698,6 +774,7 @@
     { id: "tool.agentBoardWindow", group: $t("palette.groupTools"), label: $t("palette.openAgentBoardWindow"), keywords: "agent board kanban tickets window pop out", run: () => openAgentBoard() },
     { id: "app.settings", group: $t("palette.groupApp"), label: $t("palette.settings"), run: () => (showSettings = true) },
     { id: "app.userCommands", group: $t("palette.groupApp"), label: "Manage user commands…", keywords: "custom command run external", run: () => (showUserCommands = true) },
+    { id: "app.macros", group: $t("palette.groupApp"), label: "Manage macros…", keywords: "macro library rename move tag convert steps scriptable", run: () => (macrosOpen = true) },
     { id: "app.documents", group: $t("palette.groupApp"), label: $t("palette.documents"), shortcut: "F1", run: () => openDocs(currentSection()) },
     { id: "app.shortcuts", group: $t("palette.groupApp"), label: $t("palette.shortcuts"), shortcut: "?", run: () => (shortcutsOpen = true) },
     { id: "app.exportTags", group: $t("palette.groupApp"), label: $t("palette.exportTags"), keywords: "tags backup", run: exportTagsToFile },
@@ -716,6 +793,12 @@
     // Palette-surfaced user commands (CPE-783): run each via the confirm-before-launch dialog.
     ...commandsForSurface(userCommands, "palette").map((c) => ({
       id: `uc:${c.id}`, group: "Commands", label: c.name, keywords: c.template, run: () => openRunCommand(c),
+    })),
+    // Palette-surfaced saved macros (CPE-1191): run each via the {ask} prompt (if any) -> dry-run
+    // confirm -> execute flow, same gate as the context-menu "Run macro ▸" submenu.
+    ...macroPaletteBindings.map((b) => ({
+      id: `macro:${b.name}`, group: "Macros", label: `Run macro: ${b.name}`, keywords: "macro run rename move tag convert",
+      run: () => startMacro(b.name),
     })),
   ] satisfies Command[];
 
@@ -2714,6 +2797,12 @@
 
   // ---- context menu / command dispatch ----
   function runAction(action: string) {
+    // Run a saved macro from the "Run macro ▸" context-menu submenu (CPE-1191). `slice(6)` (not
+    // `split(":")`) so a macro name that itself contains a colon still round-trips intact.
+    if (action.startsWith("macro:")) {
+      void startMacro(action.slice(6));
+      return;
+    }
     // Typed New ▸ file types (CPE-1161) carry the extension as `new-file:<ext>` / `new-file-in:<ext>`
     // / `drive-new-file:<ext>`, resolved back to a spec here so one list drives all three menus. The
     // target folder mirrors the plain new-file rules: current folder / the clicked folder / drive root.
@@ -3240,6 +3329,18 @@
         goUp();
         break;
     }
+
+    // User-bound macro hotkeys (CPE-1191) — checked LAST, after every built-in binding above, so a
+    // macro can never shadow one: this only runs when the combo didn't match any `if`/`case` earlier
+    // in this handler (every one of them either `return`s or `break`s without touching this code).
+    // `hotkeyFromEvent` returns "" for a combo with no Ctrl/Alt, so it never fires for the type-ahead
+    // or plain-typing cases already handled above.
+    const macroCombo = hotkeyFromEvent(event);
+    const macroHit = macroCombo ? matchHotkey(macroBindings, macroCombo) : undefined;
+    if (macroHit && macroSummaries.some((m) => m.name === macroHit.name)) {
+      event.preventDefault();
+      void startMacro(macroHit.name);
+    }
   }
 
   /** Pull every preference from the settings store into the reactive UI vars. */
@@ -3724,6 +3825,8 @@
   onMount(async () => {
     applySettings();
     userCommands = settings.loadUserCommands(); // CPE-783: user-defined commands
+    macroBindings = settings.loadMacroBindings(); // CPE-1191: saved-macro surface/hotkey bindings
+    void refreshMacroSummaries(); // CPE-1189: catalog for menu/palette surfacing + hotkey dispatch
     // Opt-in integrity monitor (CPE-872): if enabled, verify all baselined folders once, a beat after
     // startup so it never blocks first paint. Reuses the tested verify + summary-notice path.
     if (verifyOnStartup && Object.keys(integrityBaselines).length > 0) {
@@ -4323,6 +4426,7 @@
     homeKind={ctx.target === "home-item" ? homeCtxKind : ""}
     homeIsDir={homeCtxIsDir}
     homeStale={homeCtxStale}
+    macros={ctx.target === "item" ? macroContextNames : []}
     on:action={(e) => runAction(e.detail)}
     on:close={() => (ctx = null)}
   />
@@ -4545,6 +4649,34 @@
     commands={runConfirm.commands}
     cwd={runConfirm.cwd}
     on:close={() => (runConfirm = null)}
+  />
+{/if}
+
+{#if macrosOpen}
+  <MacrosDialog
+    bindings={macroBindings}
+    on:bindingschange={(e) => persistMacroBindings(e.detail)}
+    on:changed={() => refreshMacroSummaries()}
+    on:close={() => (macrosOpen = false)}
+  />
+{/if}
+
+{#if macroParamPromptFor}
+  <MacroParamPrompt
+    title="Macro parameters — {macroParamPromptFor.macro.name}"
+    labels={macroParamPromptFor.labels}
+    on:submit={(e) => submitMacroParams(e.detail)}
+    on:cancel={() => (macroParamPromptFor = null)}
+  />
+{/if}
+
+{#if macroRunConfirmFor}
+  <MacroRunConfirm
+    macro={macroRunConfirmFor.macro}
+    inputs={macroRunConfirmFor.inputs}
+    root={macroRunConfirmFor.root}
+    on:ran={() => refresh()}
+    on:close={() => (macroRunConfirmFor = null)}
   />
 {/if}
 

@@ -89,4 +89,14 @@ export const SHORTCUT_GROUPS: ShortcutGroup[] = [
       { keys: "?", description: "Show this shortcuts list" },
     ],
   },
+  {
+    title: "Macros",
+    items: [
+      {
+        keys: "(user-configured)",
+        description:
+          "Run a saved macro over the selection — bind a Ctrl/Alt hotkey per macro in the Macro Library",
+      },
+    ],
+  },
 ];
