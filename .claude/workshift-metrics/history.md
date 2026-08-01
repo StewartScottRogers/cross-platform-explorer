@@ -587,3 +587,12 @@ natural homes.
   caught a stale-binary trap in gui-smoke (rebuilt to prove CPE-1151's echo).
 - Throttle held all session (single agent in flight, staggered) — no 529 recurrence.
 - Queue now: Doing empty, Backlog empty. Remaining work is user-gated (interaction-feel) or resource-gated.
+
+### 2026-07-31 17:04 USMST — wrap (post-context-menu-arc shift; modest honest batch)
+- Queue was empty at kickoff; PM (opus) scouted the frontier: deep headless well still essentially TAPPED, but the CPE-707 column-picker landing (2026-07-30, after the last sweep) reopened ONE real vein.
+- Shipped (all merged, reviewed, pushed):
+  - CPE-1166 (feature, sonnet worker / opus reviewer) — surfaced the dormant CPE-1000/1002 detectors (true-type / type-mismatch / encoding / line-endings) as opt-in metadata columns via the generic pipeline, NO new GUI; "applies-to-all" sentinel (empty extensions()). bindings regen, 3-mode clippy, 1096 cpe-server tests.
+  - CPE-1167 (gui-smoke pin) — pinned the ColumnPickerDialog render + confirmed the 4 new columns appear in the REAL picker (doubled as 1166's end-to-end check).
+  - CPE-1168 (QA pin, sonnet) — zero-dep headless click-through for the standalone agent-board sidecar; FOUND + FIXED a real view-switch bug ([hidden] overridden by display:flex so panes never hid); MVD 8->7. Two-board lockstep verified (in-process BoardView is svelte-if, immune).
+- Tuned defaults confirmed: sonnet worker + opus reviewer for backend-correctness; test-infra fine on sonnet. One-worker-per-file. Slow Z: drive → cap concurrent builds at 1, stagger; git/lock writes routinely 2min-timeout under a worker build (harmless — retry).
+- Frontier verdict: after this batch the well closes back to user-gated (GUI interaction-feel, model/embedder, certs, Mac). Filed no filler. Next genuinely-headless work will likely need a NEW capability to land first (as CPE-707 did) before another vein opens.
