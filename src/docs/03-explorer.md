@@ -88,6 +88,13 @@ The Home screen has **Quick access** tiles up top and a tabbed lower section wit
   CSV**, and a **Compressed (zipped) Folder**. The file is created empty (ready for you to fill in),
   except Rich Text (a minimal valid `.rtf` stub) and the zipped folder (a valid empty `.zip` archive),
   and it drops straight into inline rename like a new text file.
+- **Archives** — right-click a selection to **Compress to ZIP** or **Compress to .tar.gz**, or choose
+  **Compress with password…** to set a password that protects the archive (AES-256) — you'll need it
+  again to open the archive later. A `.zip`/`.tar.gz`/`.tar`/`.tgz`/`.7z` file can be browsed like a
+  folder (double-click to look inside, read-only) or unpacked: **Extract** drops its contents into a new
+  subfolder right there, and **Extract to…** lets you pick any destination folder instead. Opening or
+  extracting a password-protected archive prompts for its password; a wrong password re-prompts rather
+  than failing silently.
 - **Batch media** — right-click 2+ selected image files and choose **Batch media…** to queue an ordered
   list of edits (resize, **compress**, convert, rotate, flip, **watermark**, rename, strip metadata) and run
   them across every file at once. Pick an operation and its settings, then click **+ Add** to put it on the
