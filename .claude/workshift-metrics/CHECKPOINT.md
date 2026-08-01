@@ -1,76 +1,54 @@
-# Workshift Checkpoint
+# Workshift Checkpoint — 2026-08-01 ~07:40 local
 
-**Written 2026-07-30 ~00:50 local (USMST).** Clean end-of-shift stop — **nothing in flight, tree clean,
-worktrees pruned, Backlog empty, all merged + pushed + post-merge CI green.** The three honest-headless slices
-this file previously queued are now **DONE**. Resume with a fresh session + "resume the workshift"; this file
-+ `history.md` carry full context.
+Session: 6815e8b9. Standing mandate (user): build through ALL remaining user-gated epics in a useful
+order, Foreman's choice; report a rich plain-language + screenshot summary at EVERY epic boundary;
+never wrap-and-ask, roll straight into the next epic.
 
-## Latest (2026-07-30): 2 attended shifts — board hygiene + pane fix + 2 shipped twins
-User ran two back-to-back shifts + gave two directives. Shipped: epic-board hygiene (33 In Progress → Proposed;
-board now 5 Done/33 Proposed/0 active), CPE-1140 pane min-widths (GUI-verified), CPE-1141 archive commands,
-CPE-1142 rules-based auto-organize (checkpoint-protected move+undo, opus data-safety review, GUI-verified).
-4 PRs, 0 escaped defects. Shift-2 research: shipped the CPE-979 rules slice + CPE-705 archive residual;
-SKIPPED CPE-976 semantic (FakeEmbedder is lexical-only — misleading without a real embedder). Frontier now
-user-gated except a real-embedder decision for the AI cluster (976-980). Full detail in history.md.
+## State at checkpoint
+- `main` @ HEAD `108013ea` (origin/main), CI green, working tree clean.
+- **0 open PRs, 0 agent worktrees, backlog quiesced** — clean boundary.
 
-## Latest (2026-07-29 eve): instant-index epic CPE-703 CLOSED
-Attended session after the docs shift. User approved the instant-index big-design item; research found the
-engine (CPE-831/832/833) already built-but-unwired, so it was enablement + UI: CPE-1137 (commands+state),
-CPE-1138 (notify watcher), CPE-1139 (Ctrl+K overlay) — all merged, 3-OS CI green, user-GUI-verified, 0 escaped
-defects (2 real defects caught+fixed pre-merge). Epic CPE-703 = Done. **Frontier: the last built-but-unwired
-attended big-design item is now shipped — remaining epics are GUI/model-key/cert/Mac gated.** QA follow-up
-noted (not filed): a gui-smoke render pin for the Ctrl+K overlay. Full detail in history.md.
+## Merged this stretch (14 PRs) + epic-704 closed
+- Epic **CPE-704** (global Spotlight overlay) CLOSED — Reviewer+UAT+Visual PASS.
+- #514 CPE-1216 Spotlight overlay · #515 CPE-1219 smoke pin · #516 CPE-1192 archive-browse smoke ·
+  #517 CPE-1185 em-dash · #518 CPE-1194 macro-undo fidelity · #519 CPE-1204 near-dup finder ·
+  #520 CPE-1220 spotlight highlight polish · #521 CPE-1221 near-dup gui-smoke pin ·
+  #522 CPE-1222 tag migration on rename/move · #523 CPE-1184 archive ops via transfer queue ·
+  #524 CPE-1193 app-wide dialog borders · #525 CPE-1224 frontend store migration ·
+  #526 CPE-1225 snapshot-schedule migration · #528 CPE-1186 extract error precision.
 
-## What shipped this shift (2026-07-29) — all merged to `main`, full 2-check + UAT gauntlet, 3-OS CI green
-- **CPE-1133** (PR #449) — `read_ogg` reassembles the Vorbis-comment packet across OGG pages (real read-side
-  correctness bug the old naive `\x03vorbis` scan corrupted). Opus review + independent UAT.
-- **CPE-1134** (PR #448) — threaded `revert_attribution` into `checkpoint_preview_revert` (optional `session`;
-  `None` = old conservative behaviour). Opus reviewer caught a real safety false-negative (`unwrap_or(0)`
-  fallback on a torn index entry); fixed to conservative empty-set + regression test. Needed a
-  `bindings.gen.ts` regen (specta doc drift — see the tuned-default note in `history.md`).
-- **CPE-1135** (PR #450) — QA slice: `gui-smoke` pins the Agent-Watch Replay-scrubber render (seeded
-  audit-journal + baseline fixture). Burns down MVD row CPE-1094 (render automated; feel residual).
+## Open items (Backlog — small QA follow-ups, for the resuming session)
+- **CPE-1226** — gui-smoke pin + Visual Critic screenshot for the TransferPanel archive rows
+  (build-heavy; also fold in the CPE-1212 danger-badge visual spot-check noted in the ticket).
+- **CPE-1227** — add a `do_move_into`/`move_entries` schedule-migration regression test (CPE-1225 gap).
 
-**No queued honest-headless work remains.** A fresh 3-sweep researcher pass (2026-07-29, cross-checked vs git)
-re-confirmed the well is tapped: every marker hit is correct-but-cautious, every unwired engine is a
-documented GUI/model/attended gate, and the two remaining burndown tabs (CPE-1098 cost-ledger, CPE-1100 radar)
-are fed by **live IPC only** — NOT seedable from an on-disk fixture, so they can't be gui-smoke-pinned the way
-the replay/history tabs were. Next shift: expect to need the user (GUI / model key / signing cert / Mac /
-heavy native deps) or an attended big-design go-ahead. **Do NOT manufacture filler `cpe-server` modules.**
+## Deferred
+- **CPE-1223** (spotlight basename highlight) — position-filter approach (PR #529, closed) leaves a
+  PARTIAL highlight ("marker"->"arker") because the greedy full-path matcher consumes a prefix query
+  char; the spotlight gui-smoke catches it. Correct fix documented on the ticket: match the query
+  against the BASENAME directly for highlight positions. Low priority.
 
-## The honest state of the headless frontier (READ THIS before probing epics)
-Per `[[headless-frontier-and-cpe-net]]` and re-confirmed today: **the clean pure/headless well is genuinely
-tapped.** CPE-999/1001 (thought open) were already Done; CPE-1002's six detectors all Done; CPE-737 fully
-complete. Nearly every epic is "In Progress" but their **headless cores are built** — remaining work is
-**attended GUI / big-design / user-resource**. **Do NOT manufacture filler `cpe-server` modules.**
+## NEXT: activate the next epic (PM pick)
+Recommended: **CPE-978 (Smart folders & saved searches)** — high user value, buildable headless
+(query persistence + a saved-search surface), strong synergy with the search/spotlight/near-dup
+infrastructure just built. Alternatives if 978 turns out mostly-built on grep: CPE-688 (explorer
+performance 10x), CPE-1000 (true file-type detection & extension-mismatch flagging), CPE-718
+(universal thumbnail pipeline). GREP FIRST before decomposing any epic (features are sometimes
+already partly shipped).
 
-### The genuinely-honest headless work still on the table (was queued as wave 2, unbuilt at furlough)
-1. **OGG read-side multi-page packet reassembly** — a *real* correctness bug: `read_ogg` in
-   `crates/server/src/media_meta_read.rs` naively `\x03vorbis`-scans and mis-reads a comment header split
-   across OGG pages. Memory flags this as "a legit read-side correctness slice" (not filler). Needs a proper
-   page/packet reassembler; is the safety net that would also unblock the risky OGG **write-back**.
-2. **CPE-732 optional headless follow-up** — thread `revert_attribution` into `checkpoint_preview_revert` so
-   drift flags only *truly-outside* changes (today it conservatively warns about everything). Noted in the
-   CPE-732 epic log as an explicit optional headless refinement.
-3. **QA Architect** — fold the **CPE-1114 cost-History visual residual** into the `gui-smoke` CI job: seed a
-   synthetic `history.jsonl` and assert `.hd-*`/`.hd-bar` render on the real build. Burns down an MVD row.
-   (Was going to be filed as a new CPE ticket — next free id ≈ **CPE-1128**; verify the max before filing.)
-
-### Everything else = surface to the user, don't force it
-Big remaining menus, all **user-gated**: the AI-explorer UIs + real embedder/LLM/OCR backend (976–980, need a
-model choice / API key); remote-filesystem connections sidebar + keychain + transfer UI + SMB/S3 (616);
-native-metadata Properties UI + Mac Finder round-trip (717/828); archive
-compress/extract context actions + password prompt UI (705); checkpoint **restore panel + timeline markers**
-(CPE-1126, the CPE-732 GUI cap); media-studio editor UI; drag-OUT-to-OS (CPE-672/674, needs a plugin spike +
-GUI). Also **CPE-002** code-signing (blocked on the user's cert).
-
-## Tuned crew defaults (seed next shift)
-- sonnet worker + opus reviewer for GUI/frontend; opus worker for genuinely-hard slices.
-- One-worker-per-file + distinct anchors → zero merge conflicts (held again today).
-- Only ONE bindings-touching backend build in flight at a time.
-- Foreman-apply / Foreman-review tiny exactly-prescribed changes directly to stretch the agent budget.
-- De-risk each hard slice with ONE read-only Plan agent before building.
-
-## Budget at furlough
-This session spawned only **3 sub-agents** (3 workers, 0 reviewers/UAT — furlough wind-down). Nowhere near the
-200 cap. Fresh session next month = full budget.
+## Crew defaults that worked this session
+- Workers/Reviewers/UAT/combined-checkers: sonnet, `isolation:"worktree"` (ALWAYS isolate anything
+  that builds or `gh pr checkout`s — two non-isolated agents on the shared checkout collide, and even
+  an isolated agent's first `gh pr checkout` can transiently switch the SHARED branch: verify the
+  shared tree afterward). Proportionate gauntlet: full Reviewer+UAT (+Visual for GUI) for substantive
+  changes; ONE combined Reviewer+UAT checker for small pure-logic changes mirroring verified patterns.
+- Visual Critic for GUI changes = build the PR branch, run the relevant gui-smoke spec to capture a
+  real screenshot, dispatch a taste-aware critic to pixel-sample. Stash screenshots to scratchpad
+  before pruning the worktree.
+- Two recurring worker failure modes to correct via SendMessage immediately: (a) yielding "awaiting
+  the background notification" (sub-agents get NONE — tell them to run everything synchronously),
+  (b) backgrounding a build + a Monitor and waiting (same fix).
+- `gh pr merge --squash --delete-branch` often can't delete the LOCAL branch (used by a worktree) —
+  harmless; prune the worktree then `git branch -D`. Windows worktree-dir removal can hit
+  "Permission denied" (Defender/handle lock) — `git worktree prune` clears metadata; stale dir is harmless.
+- The recurring ` M src-tauri/Cargo.toml` after a checkout is CRLF/LF noise (empty diff) — discard it.
