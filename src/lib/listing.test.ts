@@ -3,7 +3,8 @@ import { namesList, detailList, csvList } from "./listing";
 import type { DirEntry } from "./types";
 
 const e = (over: Partial<DirEntry>): DirEntry => ({
-  name: "x", path: "/x", is_dir: false, size: 0, modified: 0, extension: "", hidden: false, ...over,
+  name: "x", path: "/x", is_dir: false, size: 0, modified: 0, extension: "", hidden: false,
+  is_symlink: false, ...over,
 });
 
 describe("copy folder listing (CPE-422)", () => {

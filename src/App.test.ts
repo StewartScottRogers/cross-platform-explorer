@@ -21,6 +21,7 @@ const entries: DirEntry[] = [
     modified: new Date(2026, 6, 10, 15, 0).getTime(),
     extension: "md",
     hidden: false,
+    is_symlink: false,
   },
   {
     name: "notes",
@@ -30,6 +31,7 @@ const entries: DirEntry[] = [
     modified: new Date(2026, 6, 9, 9, 0).getTime(),
     extension: "",
     hidden: false,
+    is_symlink: false,
   },
 ];
 

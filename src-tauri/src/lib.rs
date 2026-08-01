@@ -536,6 +536,10 @@ fn entry_for_path(path: &str) -> Option<DirEntry> {
     let p = Path::new(path);
     let meta = fs::metadata(p).ok()?;
     let is_dir = meta.is_dir();
+    // This is the arbitrary-path (smart folder) stat, not the hot `list_dir` walk, so a `symlink_metadata`
+    // call here (instead of `list_dir`'s free `file_type()` off the walk's own read) is fine — it's an
+    // extra syscall per *smart-folder row*, not per listed folder entry.
+    let is_symlink = fs::symlink_metadata(p).map(|m| m.file_type().is_symlink()).unwrap_or(false);
     Some(DirEntry {
         hidden: is_hidden(p, &meta),
         name: p
@@ -547,6 +551,7 @@ fn entry_for_path(path: &str) -> Option<DirEntry> {
         size: if is_dir { 0 } else { meta.len() },
         modified: meta.modified().ok().and_then(to_epoch_ms),
         extension: if is_dir { String::new() } else { extension_of(p) },
+        is_symlink,
     })
 }
 
@@ -2402,6 +2407,21 @@ async fn link_status(path: String) -> cpe_server::links::LinkStatus {
     tauri::async_runtime::spawn_blocking(move || cpe_server::links::link_status(&path))
         .await
         .unwrap_or_default()
+}
+
+/// Suggest a repair target for a broken symlink (CPE-1027, epic CPE-715): reads `broken_link`'s stored
+/// target's basename and searches `search_roots` (in order, each a bounded-depth walk) for the first
+/// matching entry. Returns `None` if `broken_link` isn't a readable symlink or nothing matches. Model in
+/// `cpe_server::links` (CPE-815); this is a thin `spawn_blocking` dispatcher.
+#[tauri::command]
+#[cfg_attr(feature = "specta-bindings", specta::specta)]
+async fn suggest_repair(broken_link: String, search_roots: Vec<String>) -> Option<String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let roots: Vec<&str> = search_roots.iter().map(String::as_str).collect();
+        cpe_server::links::suggest_repair(&broken_link, &roots)
+    })
+    .await
+    .unwrap_or(None)
 }
 
 /// Install the "Open in Cross-Platform Explorer" shell integration for the current user (CPE-1020, epic
@@ -7980,6 +8000,7 @@ pub fn run() {
             create_symlink,
             create_hard_link,
             link_status,
+            suggest_repair,
             install_shell_integration,
             uninstall_shell_integration,
             shell_integration_installed,
@@ -8720,6 +8741,7 @@ pub fn export_bindings(out: &std::path::Path) -> Result<(), String> {
         create_symlink,
         create_hard_link,
         link_status,
+        suggest_repair,
         install_shell_integration,
         uninstall_shell_integration,
         shell_integration_installed,

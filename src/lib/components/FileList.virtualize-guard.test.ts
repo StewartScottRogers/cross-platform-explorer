@@ -38,6 +38,7 @@ function makeEntries(n: number): DirEntry[] {
     modified: Date.now(),
     extension: "txt",
     hidden: false,
+    is_symlink: false,
   }));
 }
 

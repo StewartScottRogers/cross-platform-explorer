@@ -10,6 +10,7 @@ const entry = (over: Partial<DirEntry>): DirEntry => ({
   modified: 0,
   extension: "",
   hidden: false,
+  is_symlink: false,
   ...over,
 });
 

@@ -10,6 +10,7 @@ const entry = (name: string, is_dir = false): DirEntry => ({
   modified: 0,
   extension: is_dir ? "" : (name.includes(".") ? name.split(".").pop()!.toLowerCase() : ""),
   hidden: name.startsWith("."),
+  is_symlink: false,
 });
 
 const ids = (entries: DirEntry[]) =>

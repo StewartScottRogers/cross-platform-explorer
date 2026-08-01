@@ -34,7 +34,10 @@ describe("toDirEntries", () => {
     const dirs = new Set(["root/sub"]);
     const out = toDirEntries(rows, dirs);
     expect(out).toEqual([
-      { name: "sub", path: "/root/sub", is_dir: true, size: 0, modified: 10, extension: "", hidden: false },
+      {
+        name: "sub", path: "/root/sub", is_dir: true, size: 0, modified: 10, extension: "", hidden: false,
+        is_symlink: false,
+      },
     ]);
   });
 
@@ -49,6 +52,7 @@ describe("toDirEntries", () => {
       modified: 20,
       extension: "png",
       hidden: false,
+      is_symlink: false,
     });
   });
 
