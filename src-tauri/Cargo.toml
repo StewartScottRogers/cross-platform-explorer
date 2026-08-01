@@ -70,6 +70,12 @@ repos = { path = "../sidecar/repos", optional = true }
 base64 = "0.22"
 # (iso9660 moved to `cpe-server` with the archive-listing domain, CPE-815 — no longer a direct app dep.)
 
+# The terminal dock's embedded PTY backend (CPE-1242, epic CPE-714): mirrors the proven `PtySession` in
+# `sidecar/ai-console/src/pty.rs`. Same version, no drift — it's already a workspace dep there.
+# Cross-platform: Windows ConPTY, Unix openpty. Core-explorer feature (not sidecar-gated): the docked
+# terminal is additive but always available, like list_dir/thumbnails.
+portable-pty = "0.8"
+
 # Live provider API-key verification for the AI Console (CPE-347). Optional + gated behind
 # `sidecar-platform` so the plain explorer pulls no HTTP/TLS stack. ureq's default backend is
 # pure-Rust rustls — no OpenSSL / system libs.

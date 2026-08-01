@@ -60,3 +60,10 @@ Decomposition (sequential — 1243 needs 1242's commands):
 - **CPE-1243** — Terminal dock UI: an xterm.js pane rendering the PTY stream, wired to the
   `terminal_tabs` dock (tabs open/close/activate/rename), open-at-current-folder + follow-navigation
   (`set_cwd`), per-OS shell selection, resize. Panel-closed = no PTY/background cost. gui-smoke + vitest.
+
+2026-08-01 (workshift) — **CPE-1242 Done.** `src-tauri/src/pty.rs`: `PtySession`/`PtyRegistry` (mirrors
+the sidecar's `pty.rs`, same `portable-pty = "0.8"`, no drift) + `open_pty`/`write_pty`/`resize_pty`/
+`close_pty` commands, plus `TerminalDockState` wiring 6 `terminal_dock_*` dispatchers onto CPE-947's
+model. Registry self-cleans on a child's own exit, so "no live PTY when closed" holds even without an
+explicit close. 6 new real-PTY tests + 2 dock-state tests, clippy clean both feature modes, bindings
+regenerated. CPE-1243 (xterm.js UI) is now unblocked.

@@ -47,6 +47,12 @@ mod models_egress;
 #[cfg(feature = "sidecar-platform")]
 mod agent_shadow;
 
+/// Embedded terminal PTY backend (CPE-1242, epic CPE-714): the `PtySession`/`PtyRegistry` behind the
+/// terminal dock's `open_pty`/`write_pty`/`resize_pty`/`close_pty` commands. Always compiled — the
+/// docked terminal is a core-explorer feature, not sidecar (see the module docs for why it lives here
+/// rather than in `cpe-server`).
+mod pty;
+
 /// The session audit journal (CPE-800), pure window-geometry resolver (CPE-598), and Agent Board
 /// backend (CPE-520) now live in the `cpe-server` crate (CPE-815); re-export their module paths so
 /// existing `audit_journal::` / `geometry::` / `ticket_board::` references resolve unchanged.
@@ -4747,6 +4753,172 @@ fn open_terminal_impl(path: String) -> Result<(), String> {
     }
 }
 
+// ---- Embedded terminal dock: tab model + PTY backend (CPE-1242/947, epic CPE-714) -------------------
+// The dock's tab bookkeeping (`TerminalDock`) lives in `cpe_server::terminal_tabs` (Tauri-free, unit
+// tested there); the PTY session type + registry (`pty::PtySession`/`pty::PtyRegistry`) live in this
+// app's own `pty` module since a session spawns OS processes + streams over `ipc::Channel` (adapter
+// territory, per CLAUDE.md). Both are managed state; these commands are thin dispatchers into them.
+
+/// Open a tab in the terminal dock at `cwd` (auto-titled from `cwd`'s basename when `title` is blank)
+/// and return its id. Pure bookkeeping — does not spawn a shell; pair with `open_pty` to actually run
+/// one (the frontend correlates the two by passing this id back as `open_pty`'s `session_id`, CPE-1243).
+#[tauri::command]
+#[cfg_attr(feature = "specta-bindings", specta::specta)]
+fn terminal_dock_open(
+    state: tauri::State<cpe_server::terminal_tabs::TerminalDockState>,
+    cwd: String,
+    title: String,
+) -> u64 {
+    state.open(&cwd, &title)
+}
+
+/// Close a dock tab (active-tab fixup happens inside `TerminalDock::close`). Does **not** kill any PTY —
+/// callers close the tab's `open_pty` session (via `close_pty`) themselves, so the two stay decoupled
+/// (a tab can exist with no live shell, e.g. mid-open).
+#[tauri::command]
+#[cfg_attr(feature = "specta-bindings", specta::specta)]
+fn terminal_dock_close(state: tauri::State<cpe_server::terminal_tabs::TerminalDockState>, id: u64) {
+    state.close(id);
+}
+
+/// Make a dock tab active (no-op if `id` is unknown).
+#[tauri::command]
+#[cfg_attr(feature = "specta-bindings", specta::specta)]
+fn terminal_dock_activate(state: tauri::State<cpe_server::terminal_tabs::TerminalDockState>, id: u64) {
+    state.activate(id);
+}
+
+/// Update a dock tab's working directory (e.g. after the panel follows navigation or the shell `cd`s).
+#[tauri::command]
+#[cfg_attr(feature = "specta-bindings", specta::specta)]
+fn terminal_dock_set_cwd(state: tauri::State<cpe_server::terminal_tabs::TerminalDockState>, id: u64, cwd: String) {
+    state.set_cwd(id, &cwd);
+}
+
+/// All open dock tabs, in order.
+#[tauri::command]
+#[cfg_attr(feature = "specta-bindings", specta::specta)]
+fn terminal_dock_tabs(
+    state: tauri::State<cpe_server::terminal_tabs::TerminalDockState>,
+) -> Vec<cpe_server::terminal_tabs::TermTab> {
+    state.tabs()
+}
+
+/// The dock's currently active tab, if any are open.
+#[tauri::command]
+#[cfg_attr(feature = "specta-bindings", specta::specta)]
+fn terminal_dock_active(
+    state: tauri::State<cpe_server::terminal_tabs::TerminalDockState>,
+) -> Option<cpe_server::terminal_tabs::TermTab> {
+    state.active_tab()
+}
+
+/// Open a PTY running the OS's default shell at `cwd` (empty/`None` = the process's own cwd), and start
+/// streaming its output over `on_output` as base64-encoded chunks (exact bytes — ANSI escapes and any
+/// split multibyte UTF-8 survive the trip — mirroring the sidecar's own PTY wire format,
+/// `session_server.rs`). Returns the new session's id, which `write_pty`/`resize_pty`/`close_pty` key on.
+///
+/// Async + `spawn_blocking` for the OS spawn itself (CPE-760/761 — launching a subprocess must never run
+/// on the UI thread). The **read loop** that follows is deliberately a raw `std::thread::spawn`, not
+/// another `spawn_blocking`: it runs for the session's whole lifetime, and parking a `spawn_blocking`
+/// task per open terminal would slowly exhaust the async runtime's bounded blocking-thread pool. This
+/// mirrors the sidecar's own long-lived reader pumps (`session_daemon.rs::spawn_reader`,
+/// `session_engine.rs::LocalEngine::launch`).
+///
+/// Self-cleaning: if the child exits on its own (the user types `exit`) the reader hits EOF and removes
+/// the session from the registry there too — a closed (or self-terminated) panel is never left as a
+/// "live" entry even if the frontend never calls `close_pty` (CPE-1242 DoD).
+#[tauri::command]
+#[cfg_attr(feature = "specta-bindings", specta::specta)]
+async fn open_pty(
+    state: tauri::State<'_, pty::PtyRegistry>,
+    cwd: Option<String>,
+    rows: u16,
+    cols: u16,
+    on_output: tauri::ipc::Channel<String>,
+) -> Result<u64, String> {
+    let (program, args) = pty::default_shell();
+    let launch = pty::PtyLaunch {
+        program,
+        args,
+        cwd,
+        env: std::collections::BTreeMap::new(),
+        rows: rows.max(1),
+        cols: cols.max(1),
+    };
+    let (session, mut reader, writer) = tauri::async_runtime::spawn_blocking(move || {
+        let session = pty::PtySession::spawn(&launch)?;
+        let reader = session.reader()?;
+        let writer = session.writer()?;
+        Ok::<_, String>((session, reader, writer))
+    })
+    .await
+    .map_err(|e| e.to_string())??;
+
+    let registry = state.inner().clone();
+    let id = registry.insert(session, writer);
+
+    let cleanup_registry = registry.clone();
+    std::thread::spawn(move || {
+        use base64::Engine as _;
+        let mut buf = [0u8; 8192];
+        loop {
+            match reader.read(&mut buf) {
+                Ok(0) | Err(_) => break, // EOF or read error: the child is gone.
+                Ok(n) => {
+                    let chunk = base64::engine::general_purpose::STANDARD.encode(&buf[..n]);
+                    if on_output.send(chunk).is_err() {
+                        break; // frontend/channel gone — stop pumping.
+                    }
+                }
+            }
+        }
+        // The child exited on its own (or the channel died) without a `close_pty` call — still leave no
+        // live entry behind: `close` removes the registry entry and kills the (likely already-dead)
+        // child in one idempotent call, same as an explicit `close_pty`.
+        let _ = cleanup_registry.close(id);
+    });
+
+    Ok(id)
+}
+
+/// Write `data` (base64-encoded, matching `open_pty`'s output encoding) to a session's shell input.
+/// Async + `spawn_blocking` — writing to a PTY's input pipe is subprocess I/O (CPE-760/761).
+#[tauri::command]
+#[cfg_attr(feature = "specta-bindings", specta::specta)]
+async fn write_pty(state: tauri::State<'_, pty::PtyRegistry>, session_id: u64, data: String) -> Result<(), String> {
+    use base64::Engine as _;
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(&data)
+        .map_err(|e| format!("bad base64 input: {e}"))?;
+    let registry = state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || registry.write(session_id, &bytes))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+/// Resize a session's terminal (rows/cols). A lightweight ioctl/WinAPI call on an already-open handle —
+/// unlike open/write/close it touches no subprocess I/O, so it stays a plain sync command (mirrors
+/// `agent_watch_stop`'s quick in-memory ops).
+#[tauri::command]
+#[cfg_attr(feature = "specta-bindings", specta::specta)]
+fn resize_pty(state: tauri::State<pty::PtyRegistry>, session_id: u64, rows: u16, cols: u16) -> Result<(), String> {
+    state.resize(session_id, rows, cols)
+}
+
+/// Close a PTY session: remove it from the registry (so it stops counting as live) and kill the child +
+/// free the PTY. Idempotent — closing an unknown/already-closed id is a no-op success, so a panel that
+/// races its own cleanup (or double-closes) never errors. Async + `spawn_blocking` — killing a child
+/// process is subprocess control (CPE-760/761).
+#[tauri::command]
+#[cfg_attr(feature = "specta-bindings", specta::specta)]
+async fn close_pty(state: tauri::State<'_, pty::PtyRegistry>, session_id: u64) -> Result<(), String> {
+    let registry = state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || registry.close(session_id))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
 // ---- User-defined command exec (CPE-783, epic CPE-711) --------------------------------------------
 // Runs a user's resolved command line (built by userCommands.resolveCommand / cmdTemplate, CPE-781) and
 // returns its captured output + exit code. Executed through the platform shell (`cmd /C` on Windows,
@@ -8351,6 +8523,12 @@ pub fn run() {
     // first request, so it costs nothing when the app never shows a gallery/icon view.
     builder = builder.manage(cpe_server::thumb_pipeline::ThumbCacheService::default());
 
+    // Terminal dock (CPE-1242/947, epic CPE-714): the tab model + the live PTY session registry. Always
+    // registered — the docked terminal is a core-explorer feature, not sidecar — but off means off: an
+    // empty dock is zero tabs, and an empty PTY registry is zero shells/threads, until a panel is opened.
+    builder = builder.manage(cpe_server::terminal_tabs::TerminalDockState::default());
+    builder = builder.manage(pty::PtyRegistry::default());
+
     // Hold the AI Console sidecar connection in managed state (feature-gated).
     #[cfg(feature = "sidecar-platform")]
     {
@@ -8669,7 +8847,17 @@ pub fn run() {
             #[cfg(feature = "sidecar-platform")]
             forge_conflict_continue,
             #[cfg(feature = "sidecar-platform")]
-            forge_conflict_abort
+            forge_conflict_abort,
+            terminal_dock_open,
+            terminal_dock_close,
+            terminal_dock_activate,
+            terminal_dock_set_cwd,
+            terminal_dock_tabs,
+            terminal_dock_active,
+            open_pty,
+            write_pty,
+            resize_pty,
+            close_pty
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application");
@@ -9389,6 +9577,16 @@ pub fn export_bindings(out: &std::path::Path) -> Result<(), String> {
         forge_resolve_file,
         forge_conflict_continue,
         forge_conflict_abort,
+        terminal_dock_open,
+        terminal_dock_close,
+        terminal_dock_activate,
+        terminal_dock_set_cwd,
+        terminal_dock_tabs,
+        terminal_dock_active,
+        open_pty,
+        write_pty,
+        resize_pty,
+        close_pty,
     ])
     // CPE-1110: export the replay projection types that no command *returns* but the frontend fold
     // (`src/lib/replayFold.ts`) reconstructs client-side — `ReplayEntry` (a `children_at` row) and
