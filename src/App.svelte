@@ -3800,7 +3800,11 @@
     const scopePaths = watchPathsForScope(smartFolderScope);
     const paths = Array.from(new Set([...rulePaths, ...scopePaths]));
     if (paths.length && aiConsoleAvailable) {
-      await startFolderWatch(paths, () => watchRules, (fire) => {
+      // Gate the rules themselves on `watchLive`, not just the path list: a smart folder's scope can
+      // overlap a configured (but paused) rule's folder, which would otherwise keep `paths` nonempty
+      // and reactivate every enabled rule — "off means off" (CPE-1230 review) means a paused rule set
+      // must never execute just because a smart folder is open watching the same paths.
+      await startFolderWatch(paths, () => (watchLive ? watchRules : []), (fire) => {
         watchLog = [fire, ...watchLog].slice(0, 50);
         showNotice(`Watch: ${fire.summary}`);
       });

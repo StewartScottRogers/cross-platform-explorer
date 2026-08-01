@@ -8,6 +8,7 @@
 // `loadSmartEntries`/`loadStructuredSearchEntries` recompute functions.
 
 import { normalizePath } from "./agentSessions";
+import { parentDir } from "./contentSearch";
 import type { FolderWatchEvent } from "./folderWatch";
 
 /**
@@ -22,11 +23,22 @@ import type { FolderWatchEvent } from "./folderWatch";
  */
 export type SmartFolderScope = { kind: "paths"; paths: string[] } | { kind: "root"; root: string } | null;
 
-/** The literal paths to fold into `folder_watch_start`'s path set for `scope` — the individually-tagged
- *  paths, or the single structured-search root. Empty when `scope` is `null`. Pure. */
+/** The literal paths to fold into `folder_watch_start`'s path set for `scope` — the single
+ *  structured-search root, or (for a tag smart folder) the PARENT DIRECTORIES of the individually-
+ *  tagged files. Empty when `scope` is `null`. Pure.
+ *
+ *  A tag scope's matches are bare FILE paths, but the backend `folder_watch_start`'s `notify` watcher
+ *  only arms on directories — it silently skips a non-directory path (see `src-tauri/src/lib.rs`), so
+ *  passing the tagged files themselves watches nothing and a tag-only smart folder never live-refreshes
+ *  (UAT: "tag folders don't actually live-refresh"). Watching each file's parent directory instead
+ *  arms the watcher; `changedPathInScope`'s exact-path match still filters the resulting events down
+ *  to just the tagged files, so an unrelated sibling change in the same directory is not treated as
+ *  in-scope. */
 export function watchPathsForScope(scope: SmartFolderScope): string[] {
   if (!scope) return [];
-  return scope.kind === "paths" ? scope.paths : [scope.root];
+  if (scope.kind === "root") return [scope.root];
+  const dirs = scope.paths.map(parentDir).filter((d) => d !== "");
+  return Array.from(new Set(dirs));
 }
 
 /** Whether one changed path from a `folder-watch` batch is "under" `scope` and should trigger a

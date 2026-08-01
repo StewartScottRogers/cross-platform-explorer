@@ -13,14 +13,39 @@ describe("watchPathsForScope (CPE-1230)", () => {
     expect(watchPathsForScope(null)).toEqual([]);
   });
 
-  it("watches the exact matched paths for a tag smart folder", () => {
-    const scope: SmartFolderScope = { kind: "paths", paths: ["C:/a/one.pdf", "C:/b/two.pdf"] };
-    expect(watchPathsForScope(scope)).toEqual(["C:/a/one.pdf", "C:/b/two.pdf"]);
-  });
-
   it("watches the single captured root for a structured search", () => {
     const scope: SmartFolderScope = { kind: "root", root: "C:/Projects" };
     expect(watchPathsForScope(scope)).toEqual(["C:/Projects"]);
+  });
+
+  // Regression (CPE-1230 UAT defect — "tag folders don't actually live-refresh"): a tag smart
+  // folder's scope is the bare FILE paths that carry the tag, but the backend `folder_watch_start`
+  // only arms `notify` on DIRECTORIES — it silently skips a non-directory path (`src-tauri/src/lib.rs`
+  // `folder_watch_start`: `std::path::Path::new(p).is_dir() && watcher.watch(...)`). Passing the tagged
+  // files themselves therefore watches NOTHING, so a tagged file being deleted/modified/renamed never
+  // fires a `folder-watch` event and the tag folder never live-refreshes. This asserts the path-list
+  // construction itself — the real gate a tag scope must clear — rather than a mocked event signal.
+  describe("tag smart folder (paths scope) — must return WATCHABLE parent directories, not bare files", () => {
+    it("returns each tagged file's parent directory, not the file itself", () => {
+      const scope: SmartFolderScope = { kind: "paths", paths: ["C:/a/one.pdf", "C:/b/two.pdf"] };
+      const watched = watchPathsForScope(scope);
+      // None of the literal tagged file paths may appear — a bare file is silently skipped by the
+      // backend's directory-only `notify` gate, so watching them would arm nothing.
+      expect(watched).not.toContain("C:/a/one.pdf");
+      expect(watched).not.toContain("C:/b/two.pdf");
+      // Their parent directories must be present — these ARE directories, so the backend actually
+      // arms a watcher on them.
+      expect(watched).toEqual(expect.arrayContaining(["C:/a", "C:/b"]));
+      expect(watched).toHaveLength(2);
+    });
+
+    it("dedupes when multiple tagged files share the same parent directory", () => {
+      const scope: SmartFolderScope = {
+        kind: "paths",
+        paths: ["C:/docs/one.pdf", "C:/docs/two.pdf", "C:/docs/three.pdf"],
+      };
+      expect(watchPathsForScope(scope)).toEqual(["C:/docs"]);
+    });
   });
 });
 
