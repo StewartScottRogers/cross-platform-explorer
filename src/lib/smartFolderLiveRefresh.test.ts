@@ -46,6 +46,15 @@ describe("watchPathsForScope (CPE-1230)", () => {
       };
       expect(watchPathsForScope(scope)).toEqual(["C:/docs"]);
     });
+
+    // CPE-1235: a tagged file directly at the POSIX filesystem root (e.g. "/foo.txt") used to make
+    // `parentDir` return "", which this function's `.filter((d) => d !== "")` then dropped — so a
+    // root-level tagged file got NO watched directory at all and silently never live-refreshed. With
+    // the fix, the file's parent is the root itself ("/"), which is non-empty and survives the filter.
+    it("watches the root itself for a tagged file directly at the POSIX filesystem root", () => {
+      const scope: SmartFolderScope = { kind: "paths", paths: ["/foo.txt"] };
+      expect(watchPathsForScope(scope)).toEqual(["/"]);
+    });
   });
 });
 
