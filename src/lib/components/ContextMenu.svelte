@@ -66,6 +66,10 @@
    *  `macro:<name>` for App.svelte to run over the current selection via the dry-run confirm flow.
    *  Empty hides the "Run macro ▸" submenu entirely (no macros bound, or none saved yet). */
   export let macros: string[] = [];
+  /** True when the single selected item (`target: "item"`) is a broken symlink (CPE-1209, epic CPE-715)
+   *  — determined via `commands.linkStatus(...).broken` by the opener (App.svelte), since it needs an
+   *  async check the menu itself can't do. Shows "Repair link…" only for that one case. */
+  export let linkBroken = false;
 
   const dispatch = createEventDispatcher<{
     action: string;
@@ -165,6 +169,13 @@
     {#if canTerminal}
       <button class="row" role="menuitem" on:click={() => run("open-in-console")}>
         <Icon name="code" size={15} /> {$t('ctx.workOnThis')}
+      </button>
+    {/if}
+    {#if linkBroken}
+      <!-- Repair link… (CPE-1209, epic CPE-715): only offered for a broken symlink — the opener
+           (App.svelte) resolves `linkBroken` via `commands.linkStatus` before showing this menu. -->
+      <button class="row" role="menuitem" on:click={() => run("repair-link")}>
+        <Icon name="link" size={15} /> {$t('ctx.repairLink')}
       </button>
     {/if}
     <div class="sep" />
@@ -466,6 +477,13 @@
           </button>
         {/each}
       {/each}
+      <div class="sep" role="separator" />
+      <!-- New Link… (CPE-1207, epic CPE-715): opens NewLinkDialog for a symlink/hardlink, same reach as
+           New folder/file above but a dialog rather than an inline-rename create (kind + target need
+           picking first). -->
+      <button class="row" role="menuitem" on:click={() => run("new-link")}>
+        <Icon name="link" size={15} /> {$t('ctx.newLink')}
+      </button>
     </Submenu>
     <div class="sep" role="separator" />
     <button class="row" role="menuitem" disabled={!canPaste} on:click={() => run("paste")}>

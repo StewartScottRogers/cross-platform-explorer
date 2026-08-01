@@ -233,6 +233,11 @@
     <rect x="5" y="11" width="14" height="9" rx="1.5" />
     <path d="M8 11V8a4 4 0 0 1 8 0v3" />
     <circle cx="12" cy="15" r="1.2" fill="currentColor" stroke="none" />
+  {:else if name === "link"}
+    <!-- Chain link: New Link… / Repair link… menu rows + dialogs (CPE-1207/1209, epic CPE-715).
+         Monochrome via currentColor, like the other toolbar/ui glyphs (MENUS.md). -->
+    <path d="M10 14a4 4 0 0 0 5.7.4l2.6-2.6a4 4 0 0 0-5.7-5.7L11 7.5" />
+    <path d="M14 10a4 4 0 0 0-5.7-.4L5.7 12.2a4 4 0 0 0 5.7 5.7L13 16.5" />
   <!-- code-preview outline glyphs (CPE-1090): a short letter/mark per SymbolKind, drawn with `currentColor`
        text so a pill's own colour (theme-only, per MENUS.md) is inherited automatically. -->
   {:else if name === "function"}
