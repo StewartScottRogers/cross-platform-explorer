@@ -1217,9 +1217,10 @@ async fn rename_entry(app: tauri::AppHandle, path: String, new_name: String) -> 
 
 /// Rename `path` to `new_name` in place. `ctx` re-keys any tag-store entries under `path` — the
 /// file/folder's own entry and, for a directory, every tagged descendant's — to the new path so
-/// tags follow the rename instead of orphaning at the old path (CPE-1222). Best-effort: a tag-store
-/// write failure never fails an otherwise-successful filesystem rename (there's nothing sane to roll
-/// back to, and the original frontend-side migration was already best-effort).
+/// tags follow the rename instead of orphaning at the old path (CPE-1222); it likewise re-keys any
+/// scheduled-snapshot catalog entry under `path` to the new path (CPE-1225). Best-effort: a tag-store
+/// or schedule-catalog write failure never fails an otherwise-successful filesystem rename (there's
+/// nothing sane to roll back to, and the original frontend-side migration was already best-effort).
 fn rename_entry_impl(ctx: &dyn ServerCtx, path: String, new_name: String) -> Result<String, String> {
     cpe_server::fs_route::require_local(&path)?;
     let new_name = new_name.trim();
@@ -1243,6 +1244,7 @@ fn rename_entry_impl(ctx: &dyn ServerCtx, path: String, new_name: String) -> Res
     fs::rename(src, &target).map_err(|e| e.to_string())?;
     let target_str = target.to_string_lossy().to_string();
     let _ = cpe_server::tags::retag(ctx, &path, &target_str);
+    let _ = cpe_server::snapshot_schedule::reschedule(ctx, &path, &target_str);
     Ok(target_str)
 }
 
@@ -1456,7 +1458,8 @@ fn do_copy_into(src: &Path, dest_dir: &Path) -> Result<PathBuf, String> {
 /// back to copy-then-delete across filesystem boundaries (never deletes the source on a failed copy).
 /// Shared by the bulk move command and the watch executor. `ctx` re-keys any tag-store entries under
 /// `src` to the actually-written path on success (CPE-1222) — best-effort, same rationale as
-/// `rename_entry_impl`.
+/// `rename_entry_impl` — and likewise re-keys any scheduled-snapshot catalog entry under `src`
+/// (CPE-1225).
 fn do_move_into(ctx: &dyn ServerCtx, src: &Path, dest_dir: &Path) -> Result<PathBuf, String> {
     let file_name = src
         .file_name()
@@ -1468,6 +1471,11 @@ fn do_move_into(ctx: &dyn ServerCtx, src: &Path, dest_dir: &Path) -> Result<Path
     let target = unique_target(dest_dir, file_name);
     if fs::rename(src, &target).is_ok() {
         let _ = cpe_server::tags::retag(ctx, &src.to_string_lossy(), &target.to_string_lossy());
+        let _ = cpe_server::snapshot_schedule::reschedule(
+            ctx,
+            &src.to_string_lossy(),
+            &target.to_string_lossy(),
+        );
         return Ok(target);
     }
     // Cross-volume move: copy, then remove the original only if the copy fully succeeded.
@@ -1484,6 +1492,11 @@ fn do_move_into(ctx: &dyn ServerCtx, src: &Path, dest_dir: &Path) -> Result<Path
     };
     removed.map_err(|e| format!("Copied, but could not remove original: {e}"))?;
     let _ = cpe_server::tags::retag(ctx, &src.to_string_lossy(), &target.to_string_lossy());
+    let _ = cpe_server::snapshot_schedule::reschedule(
+        ctx,
+        &src.to_string_lossy(),
+        &target.to_string_lossy(),
+    );
     Ok(target)
 }
 
@@ -2180,7 +2193,8 @@ async fn move_exact(app: tauri::AppHandle, pairs: Vec<(String, String)>) -> Vec<
 }
 
 /// `ctx` re-keys any tag-store entries under each successfully-moved `from` to its `to` (CPE-1222) —
-/// including undo's move-back, which previously never migrated tags at all.
+/// including undo's move-back, which previously never migrated tags at all — and likewise re-keys any
+/// scheduled-snapshot catalog entry under `from` (CPE-1225).
 fn move_exact_impl(ctx: &dyn ServerCtx, pairs: Vec<(String, String)>) -> Vec<OpResult> {
     pairs
         .iter()
@@ -2209,6 +2223,7 @@ fn move_exact_impl(ctx: &dyn ServerCtx, pairs: Vec<(String, String)>) -> Vec<OpR
             match fs::rename(src, dst) {
                 Ok(()) => {
                     let _ = cpe_server::tags::retag(ctx, from, to);
+                    let _ = cpe_server::snapshot_schedule::reschedule(ctx, from, to);
                     OpResult::ok(dst)
                 }
                 Err(e) => OpResult::err(src, e),
@@ -10289,6 +10304,60 @@ mod tests {
         let _ = fs::remove_dir_all(&d);
     }
 
+    // ---- CPE-1225: rename/move must migrate the snapshot-schedule catalog entry too, not just tags -
+
+    fn schedule_rule(root: &str) -> cpe_server::snapshot_schedule::ScheduleRule {
+        cpe_server::snapshot_schedule::ScheduleRule {
+            root: root.to_string(),
+            interval_s: 3600,
+            retention: cpe_server::snapshot_retention::RetentionPolicy::default(),
+            enabled: true,
+        }
+    }
+
+    #[test]
+    fn rename_entry_impl_migrates_a_scheduled_folders_catalog_entry_to_the_new_path() {
+        let d = scratch("rename_schedule_migrate");
+        let ctx = HeadlessCtx::new(&d);
+        let sub = d.join("watched");
+        fs::create_dir_all(&sub).unwrap();
+        let old_path = sub.to_string_lossy().to_string();
+        cpe_server::snapshot_schedule::set_rule(&ctx, schedule_rule(&old_path)).unwrap();
+
+        let new_path = rename_entry_impl(&ctx, old_path.clone(), "renamed".into()).unwrap();
+
+        assert!(
+            cpe_server::snapshot_schedule::get_rule(&ctx, &old_path).unwrap().is_none(),
+            "old root must not linger in the schedule catalog"
+        );
+        let migrated = cpe_server::snapshot_schedule::get_rule(&ctx, &new_path).unwrap();
+        assert_eq!(migrated.as_ref().map(|r| r.root.as_str()), Some(new_path.as_str()));
+        assert_eq!(migrated.unwrap().interval_s, 3600);
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn rename_entry_impl_migrates_a_nested_scheduled_root_under_a_renamed_parent() {
+        // The subtree case, mirroring the tag-store test above: renaming a PARENT folder must carry a
+        // nested folder's own schedule along with it, not just an entry keyed on the parent itself.
+        let d = scratch("rename_schedule_subtree");
+        let ctx = HeadlessCtx::new(&d);
+        let parent = d.join("proj");
+        let nested = parent.join("sub");
+        fs::create_dir_all(&nested).unwrap();
+        let nested_old = nested.to_string_lossy().to_string();
+        cpe_server::snapshot_schedule::set_rule(&ctx, schedule_rule(&nested_old)).unwrap();
+
+        let renamed = rename_entry_impl(&ctx, parent.to_string_lossy().to_string(), "archive".into())
+            .unwrap();
+        let nested_new = PathBuf::from(&renamed).join("sub").to_string_lossy().to_string();
+
+        assert!(cpe_server::snapshot_schedule::get_rule(&ctx, &nested_old).unwrap().is_none());
+        let migrated = cpe_server::snapshot_schedule::get_rule(&ctx, &nested_new).unwrap();
+        assert_eq!(migrated.map(|r| r.root), Some(nested_new));
+        let _ = fs::remove_dir_all(&d);
+    }
+
     #[test]
     fn unique_target_appends_copy_suffixes_instead_of_overwriting() {
         let d = scratch("unique");
@@ -10860,6 +10929,28 @@ mod tests {
         let store = cpe_server::tags::load(&ctx).unwrap();
         assert!(!store.contains_key(&old_path), "old path must not linger");
         assert_eq!(store[&new_path].tags(), &["restored".to_string()]);
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    // CPE-1225: a folder moved via the exact-path primitive (used by both the bulk move command and
+    // undo) must migrate its scheduled-snapshot catalog entry the same way it migrates tags — otherwise
+    // the schedule silently stops applying once the folder lands at its new path.
+    #[test]
+    fn move_exact_impl_migrates_the_scheduled_catalog_entry_to_the_moved_path() {
+        let d = scratch("move_exact_schedule_migrate");
+        let ctx = HeadlessCtx::new(&d);
+        let old_dir = d.join("watched-old");
+        fs::create_dir_all(&old_dir).unwrap();
+        let old_path = old_dir.to_string_lossy().to_string();
+        let new_path = d.join("watched-new").to_string_lossy().to_string();
+        cpe_server::snapshot_schedule::set_rule(&ctx, schedule_rule(&old_path)).unwrap();
+
+        let results = move_exact_impl(&ctx, vec![(old_path.clone(), new_path.clone())]);
+        assert!(results[0].ok, "{}", results[0].error);
+
+        assert!(cpe_server::snapshot_schedule::get_rule(&ctx, &old_path).unwrap().is_none());
+        let migrated = cpe_server::snapshot_schedule::get_rule(&ctx, &new_path).unwrap();
+        assert_eq!(migrated.map(|r| r.root), Some(new_path));
         let _ = fs::remove_dir_all(&d);
     }
 
