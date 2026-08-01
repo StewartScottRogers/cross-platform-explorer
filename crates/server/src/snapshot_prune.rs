@@ -75,7 +75,21 @@ pub fn apply(
     max_total_bytes: Option<u64>,
 ) -> Result<RetentionApplyResult, String> {
     let snaps = manifests_as_snapshots(store_dir)?;
-    let result = thin(&snaps, policy);
+    let mut result = thin(&snaps, policy);
+
+    // Floor: NEVER prune a non-empty store down to zero snapshots. `thin()` returns an empty `keep`
+    // whenever the policy retains 0 across all four GFS tiers ({0,0,0,0}), which the GFS loop below
+    // would then execute as a full wipe — silent, irreversible data loss (a zeroed schedule-rule
+    // retention would erase every snapshot it just captured). This guard mirrors the `kept.len() <= 1`
+    // floor already present in the byte-cap branch: keep the single NEWEST manifest so at least one
+    // snapshot always survives. (Ties broken by id for determinism.)
+    if result.keep.is_empty() {
+        if let Some(newest) = snaps.iter().max_by_key(|s| (s.epoch_s, s.id.clone())) {
+            let id = newest.id.clone();
+            result.prune.retain(|p| p != &id);
+            result.keep.push(id);
+        }
+    }
 
     let mut bytes_freed = 0u64;
     let mut pruned = Vec::new();
@@ -260,5 +274,34 @@ mod tests {
 
         let _ = fs::remove_dir_all(&src);
         let _ = fs::remove_dir_all(&store);
+    }
+
+    #[test]
+    fn apply_with_an_all_zero_policy_keeps_the_newest_survivor_not_a_full_wipe() {
+        // Regression (CPE-1196 review): a policy that retains 0 in EVERY GFS tier made `thin()` return an
+        // empty keep, and the GFS prune loop executed that as a full wipe — silent, irreversible loss of
+        // the entire snapshot history (a zeroed schedule-rule retention was the real hazard). The floor
+        // must keep the single newest snapshot.
+        let src = scratch("zero-src");
+        let store = scratch("zero-store");
+        fs::write(src.join("a.txt"), b"v1").unwrap();
+        let m1 = capture_at(&src, &store, 3600);
+        fs::write(src.join("a.txt"), b"v2").unwrap();
+        let m2 = capture_at(&src, &store, 2 * 3600);
+
+        let zero = RetentionPolicy { hourly: 0, daily: 0, weekly: 0, monthly: 0 };
+        let result = apply(&store.to_string_lossy(), &zero, None).unwrap();
+
+        assert_eq!(result.kept, vec![m2.clone()], "the newest snapshot always survives an all-zero policy");
+        assert_eq!(result.pruned, vec![m1.clone()]);
+        // The survivor still restores byte-for-byte; the store is not empty.
+        let dest = scratch("zero-restore");
+        snapshot_capture::restore(&store.to_string_lossy(), &m2, &dest.to_string_lossy()).unwrap();
+        assert_eq!(fs::read(dest.join("a.txt")).unwrap(), b"v2");
+        assert!(!snapshot_capture::list_manifests(&store.to_string_lossy()).unwrap().is_empty());
+
+        let _ = fs::remove_dir_all(&src);
+        let _ = fs::remove_dir_all(&store);
+        let _ = fs::remove_dir_all(&dest);
     }
 }

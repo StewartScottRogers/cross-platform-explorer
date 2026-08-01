@@ -136,8 +136,14 @@ pub fn snapshot_run_due(
     for root in due_roots {
         let Some(rule) = by_root.get(root.as_str()) else { continue };
         let Ok(created) = checkpoint_store::checkpoint_create(ctx, &root, "scheduled") else { continue };
-        let retained =
-            checkpoint_store::checkpoint_prune_apply(ctx, &root, &rule.retention, None)?;
+        // Skip a root whose retention prune fails rather than aborting the whole scheduled batch — one
+        // bad root must not stop the others from being captured+pruned (matches the capture-failure
+        // skip above).
+        let Ok(retained) =
+            checkpoint_store::checkpoint_prune_apply(ctx, &root, &rule.retention, None)
+        else {
+            continue;
+        };
         out.push(RunDueOutcome { root, manifest_id: created.checkpoint.manifest_id, retained });
     }
     Ok(out)
