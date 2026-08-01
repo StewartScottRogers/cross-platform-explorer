@@ -86,6 +86,61 @@ pub fn remove_rule(ctx: &dyn ServerCtx, root: &str) -> Result<(), String> {
     write_catalog_to(&dir, &catalog)
 }
 
+/// Re-key a catalog entry — AND, when `from` is a directory, every entry keyed somewhere under it —
+/// from `from` → `to` (CPE-1225, mirrors [`crate::tags::tag_store_rename_subtree`]). A rule is keyed
+/// on the watched root itself, so renaming/moving that folder must re-key its own entry; renaming/
+/// moving a PARENT folder must also carry along any nested scheduled root underneath it, or that
+/// nested schedule would silently orphan at its old (now-nonexistent) path. An exact match re-keys the
+/// entry (map key and its `root` field both); any entry whose key starts with `from` plus a path
+/// separator (`/` or `\`, checked both ways since the catalog may hold paths from either convention)
+/// is re-keyed by swapping that `from` prefix for `to`, leaving the remainder untouched. Returns
+/// whether the catalog changed (so callers can skip a write when nothing needed to move). A no-op
+/// when `from` equals `to`, is empty, or nothing in the catalog is `from` or under it. Pure.
+pub fn catalog_rename_subtree(catalog: &mut Catalog, from: &str, to: &str) -> bool {
+    if from == to || from.is_empty() {
+        return false;
+    }
+    let under_slash = format!("{from}/");
+    let under_back = format!("{from}\\");
+    let matches: Vec<String> = catalog
+        .keys()
+        .filter(|k| k.as_str() == from || k.starts_with(&under_slash) || k.starts_with(&under_back))
+        .cloned()
+        .collect();
+    if matches.is_empty() {
+        return false;
+    }
+    for old_key in matches {
+        let new_key = if old_key == from {
+            to.to_string()
+        } else if let Some(rest) = old_key.strip_prefix(&under_slash) {
+            format!("{to}/{rest}")
+        } else if let Some(rest) = old_key.strip_prefix(&under_back) {
+            format!("{to}\\{rest}")
+        } else {
+            continue; // unreachable given the filter above, but keep the match total honest
+        };
+        if let Some(mut rule) = catalog.remove(&old_key) {
+            rule.root = new_key.clone();
+            catalog.insert(new_key, rule);
+        }
+    }
+    true
+}
+
+/// Re-key the schedule catalog entry (and any nested-root entries) from `from` → `to`, persisting on
+/// change (CPE-1225). Mirrors [`crate::tags::retag`]'s shape exactly, so callers hook it in alongside
+/// the tag migration in the same rename/move primitives — best-effort by convention there (a schedule
+/// catalog write failure must never fail the underlying filesystem rename/move).
+pub fn reschedule(ctx: &dyn ServerCtx, from: &str, to: &str) -> Result<Catalog, String> {
+    let dir = ctx.app_config_dir()?;
+    let mut catalog = read_catalog_from(&dir);
+    if catalog_rename_subtree(&mut catalog, from, to) {
+        write_catalog_to(&dir, &catalog)?;
+    }
+    Ok(catalog)
+}
+
 /// Pure decision: which of `rules`' roots are due for a fresh capture at `now` (epoch seconds), given each
 /// root's last successful run in `last_run_times` (root → epoch seconds). A disabled rule is never due. A
 /// root absent from `last_run_times` has never run and is due immediately. Otherwise a root is due once
@@ -171,6 +226,88 @@ mod tests {
             retention: RetentionPolicy::default(),
             enabled,
         }
+    }
+
+    // ---- catalog_rename_subtree / reschedule (CPE-1225) --------------------------------------------
+
+    #[test]
+    fn catalog_rename_subtree_re_keys_the_exact_root_and_its_root_field() {
+        let mut c: Catalog = Catalog::new();
+        c.insert("/photos".to_string(), rule("/photos", 3600, true));
+
+        let changed = catalog_rename_subtree(&mut c, "/photos", "/pics");
+        assert!(changed);
+        assert!(!c.contains_key("/photos"));
+        assert_eq!(c["/pics"].root, "/pics", "the entry's own root field is re-keyed too");
+        assert_eq!(c["/pics"].interval_s, 3600);
+    }
+
+    #[test]
+    fn catalog_rename_subtree_carries_nested_roots_under_a_moved_parent() {
+        let mut c: Catalog = Catalog::new();
+        c.insert("/proj".to_string(), rule("/proj", 60, true));
+        c.insert("/proj/sub".to_string(), rule("/proj/sub", 120, true));
+        // A sibling that merely shares a prefix (not a real separator boundary) must be untouched.
+        c.insert("/projector".to_string(), rule("/projector", 90, true));
+
+        let changed = catalog_rename_subtree(&mut c, "/proj", "/archive");
+        assert!(changed);
+
+        assert!(!c.contains_key("/proj") && !c.contains_key("/proj/sub"));
+        assert_eq!(c["/archive"].root, "/archive");
+        assert_eq!(c["/archive/sub"].root, "/archive/sub");
+        assert_eq!(c["/archive/sub"].interval_s, 120);
+        assert_eq!(c["/projector"].root, "/projector", "false-prefix sibling untouched");
+    }
+
+    #[test]
+    fn catalog_rename_subtree_handles_windows_backslash_paths_and_no_matches() {
+        let mut c: Catalog = Catalog::new();
+        c.insert(r"C:\Users\me\Docs".to_string(), rule(r"C:\Users\me\Docs", 60, true));
+        c.insert(
+            r"C:\Users\me\Docs\nested".to_string(),
+            rule(r"C:\Users\me\Docs\nested", 60, true),
+        );
+
+        assert!(catalog_rename_subtree(&mut c, r"C:\Users\me\Docs", r"C:\Users\me\Archive"));
+        assert!(c.contains_key(r"C:\Users\me\Archive"));
+        assert!(c.contains_key(r"C:\Users\me\Archive\nested"));
+        assert!(!c.contains_key(r"C:\Users\me\Docs") && !c.contains_key(r"C:\Users\me\Docs\nested"));
+
+        // Nothing under an unscheduled path: a reported no-op that touches nothing.
+        assert!(!catalog_rename_subtree(&mut c, "/nothing/here", "/elsewhere"));
+        // Renaming a path onto itself is also a reported no-op.
+        assert!(!catalog_rename_subtree(&mut c, r"C:\Users\me\Archive", r"C:\Users\me\Archive"));
+    }
+
+    #[test]
+    fn reschedule_persists_the_migration_and_a_later_run_uses_the_new_root() {
+        let base = scratch("reschedule-persist");
+        let ctx = HeadlessCtx::new(&base);
+        set_rule(&ctx, rule("/watched", 60, true)).unwrap();
+
+        let migrated = reschedule(&ctx, "/watched", "/watched-renamed").unwrap();
+        assert_eq!(migrated["/watched-renamed"].root, "/watched-renamed");
+
+        // Persisted: a fresh read (not the in-memory return value) reflects the new root.
+        assert!(get_rule(&ctx, "/watched").unwrap().is_none());
+        assert_eq!(
+            get_rule(&ctx, "/watched-renamed").unwrap(),
+            Some(rule("/watched-renamed", 60, true))
+        );
+        let _ = fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn reschedule_is_a_noop_and_skips_the_write_when_nothing_matches() {
+        let base = scratch("reschedule-noop");
+        let ctx = HeadlessCtx::new(&base);
+        set_rule(&ctx, rule("/kept", 60, true)).unwrap();
+
+        let result = reschedule(&ctx, "/absent", "/elsewhere").unwrap();
+        assert_eq!(result.len(), 1, "unrelated rule is untouched");
+        assert_eq!(get_rule(&ctx, "/kept").unwrap(), Some(rule("/kept", 60, true)));
+        let _ = fs::remove_dir_all(&base);
     }
 
     // ---- rule CRUD ---------------------------------------------------------------------------------
