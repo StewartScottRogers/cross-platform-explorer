@@ -4,7 +4,7 @@ title: "PasswordPromptDialog — shared masked-input modal (archive password own
 type: feature
 component: Frontend
 priority: medium
-status: Doing
+status: Done
 tags: ready
 created: 2026-07-31
 epic: CPE-705
@@ -29,3 +29,8 @@ for encrypted-archive extract/create. New files only — no App.svelte wiring he
 
 ## Work Log
 - 2026-07-31 — Filed by Foreman (workshift, epic CPE-705). Owner of the shared password dialog; consumed by CPE-1182.
+- 2026-07-31 — Done. Added `src/lib/components/PasswordPromptDialog.svelte` (+ `PasswordPromptDialog.test.ts`),
+  matching `ConfirmDialog`'s overlay/border/theme-variable conventions: masked `<input type="password">`,
+  Cancel/OK, Enter submits, Escape cancels, auto-focus on mount, optional `error` prop rendered inline (no
+  hard-coded colours, no red). `npm run check` 0 errors; `npm test` 132 files / 1495 tests green, incl. 6 new
+  tests. No new deps. New files only — no App.svelte wiring (CPE-1182 will consume it).
