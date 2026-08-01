@@ -229,10 +229,19 @@
       <button class="row" role="menuitem" on:click={() => run("extract")}>
         <Icon name="archive" size={15} /> {$t('ctx.extract')}
       </button>
+      <button class="row" role="menuitem" on:click={() => run("extract-to")}>
+        <Icon name="archive" size={15} /> {$t('ctx.extractTo')}
+      </button>
     {/if}
     {#if compressible}
       <button class="row" role="menuitem" on:click={() => run("compress")}>
         <Icon name="archive" size={15} /> {$t('ctx.compressZip')}
+      </button>
+      <button class="row" role="menuitem" on:click={() => run("compress-targz")}>
+        <Icon name="archive" size={15} /> {$t('ctx.compressTarGz')}
+      </button>
+      <button class="row" role="menuitem" on:click={() => run("compress-password")}>
+        <Icon name="lock" size={15} /> {$t('ctx.compressWithPassword')}
       </button>
     {/if}
     {#if folderSelected}

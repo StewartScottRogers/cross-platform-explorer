@@ -60,6 +60,7 @@
   import { loadAutoMirror, isDue, autoSyncActions, pausedReason } from "./lib/autoMirror";
   import ContextMenu from "./lib/components/ContextMenu.svelte";
   import ConfirmDialog from "./lib/components/ConfirmDialog.svelte";
+  import PasswordPromptDialog from "./lib/components/PasswordPromptDialog.svelte";
   import ShortcutsDialog from "./lib/components/ShortcutsDialog.svelte";
   import ContentSearchDialog from "./lib/components/ContentSearchDialog.svelte";
   import FileNameSearchDialog from "./lib/components/FileNameSearchDialog.svelte";
@@ -533,6 +534,16 @@
   let homeCtxKind = "";
   let homeCtxStale = false;
   let confirm: { title: string; message: string; label: string; onYes: () => void } | null = null;
+  /** Password prompt state (CPE-1182), mirroring `confirm` above: set to show `PasswordPromptDialog`,
+   *  cleared to null to dismiss (Cancel/Escape) or on a successful `onSubmit`. `onSubmit` re-sets this
+   *  itself (with `error` filled in) to re-prompt after a wrong password instead of closing. */
+  let passwordPrompt: {
+    title: string;
+    message: string;
+    confirmLabel: string;
+    error: string;
+    onSubmit: (password: string) => void | Promise<void>;
+  } | null = null;
   let propsFor: DirEntry[] | null = null;
   let studioFor: DirEntry[] | null = null;
   let batchRenameFor: DirEntry[] | null = null;
@@ -1221,7 +1232,20 @@
       archive = { zipPath: entry.path, zipName: entry.name, entries, inner: "" };
       selection = emptySelection();
       search = "";
-    } catch {
+    } catch (e) {
+      // AES-encrypted zips can't be LISTED without the password either (the `zip` crate needs it just
+      // to construct the per-entry reader) — there's no password-aware entry lister, only a
+      // password-aware full extract (CPE-1182). So "entering" one prompts for its password and extracts
+      // it to a sibling folder instead, the closest equivalent to opening it that the backend supports.
+      if (isPasswordError(e)) {
+        const { dest, name } = extractHereDest(entry);
+        promptForExtractPassword(entry, dest, async () => {
+          pendingSelectPath = dest;
+          showNotice(`"${entry.name}" is password-protected — extracted to "${name}" instead of opening in place.`);
+          await loadPath(currentPath);
+        });
+        return;
+      }
       showNotice(`Couldn't open the archive "${entry.name}".`, true);
     }
   }
@@ -2321,16 +2345,20 @@
     return stripExt(name);
   }
 
+  /** The base name for a new archive: the single selected item's name (folder) or stem (file), or
+   *  "Archive" for a multi-selection. Shared by every compress variant (CPE-251/1182/1183). */
+  function compressBaseName(): string {
+    return selectedEntries.length === 1
+      ? selectedEntries[0].is_dir
+        ? selectedEntries[0].name
+        : stripExt(selectedEntries[0].name)
+      : "Archive";
+  }
+
   /** Compress the selection into a new .zip in the current folder (CPE-251). */
   async function doCompress() {
     if (isHome || blockedInArchive() || selectedEntries.length === 0) return;
-    const base =
-      selectedEntries.length === 1
-        ? selectedEntries[0].is_dir
-          ? selectedEntries[0].name
-          : stripExt(selectedEntries[0].name)
-        : "Archive";
-    const name = uniqueNameWithExt(base, ".zip", entries.map((e) => e.name));
+    const name = uniqueNameWithExt(compressBaseName(), ".zip", entries.map((e) => e.name));
     const dest = joinPath(currentPath, name);
     const n = selectedEntries.length;
     try {
@@ -2343,22 +2371,153 @@
     }
   }
 
-  /** Extract the selected archive into a new subfolder of the current folder
-      (CPE-252). Named after the archive, auto-numbered to avoid collisions. */
-  async function doExtract() {
-    if (isHome || blockedInArchive()) return;
-    const entry = selectedEntries[0];
-    if (selectedEntries.length !== 1 || !entry || !isExtractable(entry)) return;
-    const name = uniqueName(archiveBaseName(entry.name), entries.map((e) => e.name));
+  /** Compress the selection via `compressArchive` (CPE-1183), letting `ext` pick the format: `.zip`
+   *  (deflate, same bytes as `doCompress`) or `.tar.gz` (gzip tarball). Kept separate from `doCompress`
+   *  so its existing hardcoded-zip callers/behaviour are untouched. */
+  async function doCompressAs(ext: ".zip" | ".tar.gz") {
+    if (isHome || blockedInArchive() || selectedEntries.length === 0) return;
+    const name = uniqueNameWithExt(compressBaseName(), ext, entries.map((e) => e.name));
     const dest = joinPath(currentPath, name);
+    const n = selectedEntries.length;
     try {
-      unwrap(await commands.extractArchive(entry.path, dest));
-      pendingSelectPath = dest;
-      showNotice(`Extracted "${entry.name}" to "${name}".`);
+      const created = unwrap(await commands.compressArchive(selectedEntries.map((e) => e.path), dest));
+      pendingSelectPath = created;
+      showNotice(`Compressed ${n} item${n === 1 ? "" : "s"} to "${name}".`);
       await loadPath(currentPath);
     } catch (e) {
       showNotice(String(e), true);
     }
+  }
+
+  /** Compress the selection into a password-protected .zip (CPE-1182): collect the password via
+   *  `PasswordPromptDialog`, then `compressToZipEncrypted`. An empty password re-prompts (the backend
+   *  itself rejects one, but asking again beats a raw error notice). */
+  async function doCompressWithPassword() {
+    if (isHome || blockedInArchive() || selectedEntries.length === 0) return;
+    const name = uniqueNameWithExt(compressBaseName(), ".zip", entries.map((e) => e.name));
+    const dest = joinPath(currentPath, name);
+    const n = selectedEntries.length;
+    promptForCompressPassword(dest, n, name, "");
+  }
+
+  function promptForCompressPassword(dest: string, n: number, name: string, error: string) {
+    passwordPrompt = {
+      title: "Set a password",
+      message: "Choose a password to protect this archive — you'll need it again to open the archive.",
+      confirmLabel: "Compress",
+      error,
+      onSubmit: async (password) => {
+        if (!password) {
+          promptForCompressPassword(dest, n, name, "A password is required.");
+          return;
+        }
+        try {
+          const created = unwrap(await commands.compressToZipEncrypted(selectedEntries.map((e) => e.path), dest, password));
+          passwordPrompt = null;
+          pendingSelectPath = created;
+          showNotice(`Compressed ${n} item${n === 1 ? "" : "s"} to "${name}" (password-protected).`);
+          await loadPath(currentPath);
+        } catch (e) {
+          showNotice(String(e), true);
+          passwordPrompt = null;
+        }
+      },
+    };
+  }
+
+  /** True when an archive error looks like it needs a password rather than being some other failure —
+   *  the `zip` crate's own wording for both cases ("Password required to decrypt file" when none was
+   *  given, "The password provided is incorrect" when the wrong one was) always contains "password"
+   *  (CPE-1182). */
+  function isPasswordError(e: unknown): boolean {
+    return String(e).toLowerCase().includes("password");
+  }
+
+  /** Where "extract here" (and a locked archive's forced-extract fallback, see `enterArchive`) puts an
+   *  archive's contents: a new subfolder of the current folder, named after the archive and
+   *  auto-numbered on collision (CPE-252/1182). */
+  function extractHereDest(entry: DirEntry): { dest: string; name: string } {
+    const name = uniqueName(archiveBaseName(entry.name), entries.map((e) => e.name));
+    return { dest: joinPath(currentPath, name), name };
+  }
+
+  /** Try a plain extract; if the archive is AES-encrypted, prompt for its password and retry via
+   *  `extractZipEncrypted` (CPE-1182). `onSuccess` runs after either path succeeds. */
+  async function extractWithPasswordFallback(entry: DirEntry, dest: string, onSuccess: () => void | Promise<void>) {
+    try {
+      unwrap(await commands.extractArchive(entry.path, dest));
+      await onSuccess();
+    } catch (e) {
+      if (!isPasswordError(e)) {
+        showNotice(String(e), true);
+        return;
+      }
+      promptForExtractPassword(entry, dest, onSuccess);
+    }
+  }
+
+  function promptForExtractPassword(
+    entry: DirEntry,
+    dest: string,
+    onSuccess: () => void | Promise<void>,
+    error = "",
+  ) {
+    passwordPrompt = {
+      title: "Password required",
+      message: `"${entry.name}" is password-protected — enter its password to extract it.`,
+      confirmLabel: "Extract",
+      error,
+      onSubmit: async (password) => {
+        try {
+          unwrap(await commands.extractZipEncrypted(entry.path, dest, password));
+          passwordPrompt = null;
+          await onSuccess();
+        } catch {
+          // Wrong (or empty) password — re-prompt with the error line instead of dismissing.
+          promptForExtractPassword(entry, dest, onSuccess, "Wrong password — try again.");
+        }
+      },
+    };
+  }
+
+  /** Extract the selected archive into a new subfolder of the current folder
+      (CPE-252). Named after the archive, auto-numbered to avoid collisions. Transparently prompts for a
+      password when the archive is AES-encrypted (CPE-1182). */
+  async function doExtract() {
+    if (isHome || blockedInArchive()) return;
+    const entry = selectedEntries[0];
+    if (selectedEntries.length !== 1 || !entry || !isExtractable(entry)) return;
+    const { dest, name } = extractHereDest(entry);
+    await extractWithPasswordFallback(entry, dest, async () => {
+      pendingSelectPath = dest;
+      showNotice(`Extracted "${entry.name}" to "${name}".`);
+      await loadPath(currentPath);
+    });
+  }
+
+  /** Extract the selected archive into a folder chosen from the native picker (CPE-1183), alongside the
+   *  existing "extract here". Same password fallback as `doExtract`. */
+  async function doExtractTo() {
+    if (isHome || blockedInArchive()) return;
+    const entry = selectedEntries[0];
+    if (selectedEntries.length !== 1 || !entry || !isExtractable(entry)) return;
+    let dest: string | string[] | null;
+    try {
+      dest = await openFolderDialog({
+        directory: true,
+        multiple: false,
+        defaultPath: currentPath,
+        title: `Extract "${entry.name}" to…`,
+      });
+    } catch {
+      return; // dialog unavailable / errored — no-op
+    }
+    if (!dest || typeof dest !== "string") return; // cancelled
+    const target = dest;
+    await extractWithPasswordFallback(entry, target, async () => {
+      showNotice(`Extracted "${entry.name}" to "${target}".`);
+      if (target === currentPath) await loadPath(currentPath);
+    });
   }
 
   /** Move `paths` into `dest` (drag & drop). Ctrl-drag copies instead. */
@@ -2588,7 +2747,10 @@
       case "duplicate": doDuplicate(); break;
       case "compare": compareFiles(); break;
       case "compress": doCompress(); break;
+      case "compress-targz": doCompressAs(".tar.gz"); break;
+      case "compress-password": doCompressWithPassword(); break;
       case "extract": doExtract(); break;
+      case "extract-to": doExtractTo(); break;
       case "copy-path": doCopyPath(); break;
       case "copy-name": doCopyName(); break;
       case "reveal": revealInExplorer(); break;
@@ -4174,6 +4336,17 @@
     danger
     on:confirm={confirm.onYes}
     on:cancel={() => (confirm = null)}
+  />
+{/if}
+
+{#if passwordPrompt}
+  <PasswordPromptDialog
+    title={passwordPrompt.title}
+    message={passwordPrompt.message}
+    confirmLabel={passwordPrompt.confirmLabel}
+    error={passwordPrompt.error}
+    on:submit={(e) => passwordPrompt?.onSubmit(e.detail)}
+    on:cancel={() => (passwordPrompt = null)}
   />
 {/if}
 

@@ -142,6 +142,50 @@ describe("ContextMenu Copy to / Move to folder (CPE-355)", () => {
   });
 });
 
+// Archive password support (CPE-1182) + extract-to/tar.gz format choice (CPE-1183): new rows
+// alongside the existing zip-only Extract/Compress, gated by the same extractable/compressible flags.
+describe("ContextMenu archive rows — extract-to + compress format/password (CPE-1182/1183)", () => {
+  it("offers Extract to… alongside Extract when extractable, and dispatches extract-to", async () => {
+    const { component } = render(ContextMenu, { props: { ...base, extractable: true } });
+    const action = vi.fn();
+    component.$on("action", (e) => action(e.detail));
+
+    expect(screen.getByText("Extract")).toBeTruthy();
+    const extractTo = screen.getByText("Extract to…");
+    expect(extractTo).toBeTruthy();
+    await fireEvent.click(extractTo);
+    expect(action).toHaveBeenCalledWith("extract-to");
+  });
+
+  it("hides Extract/Extract to… when not extractable", () => {
+    render(ContextMenu, { props: { ...base, extractable: false } });
+    expect(screen.queryByText("Extract")).toBeNull();
+    expect(screen.queryByText("Extract to…")).toBeNull();
+  });
+
+  it("offers Compress to .tar.gz and Compress with password… alongside the zip-only Compress, dispatching the right actions", async () => {
+    const { component } = render(ContextMenu, { props: { ...base, compressible: true } });
+    const action = vi.fn();
+    component.$on("action", (e) => action(e.detail));
+
+    await fireEvent.click(screen.getByText("Compress to ZIP"));
+    expect(action).toHaveBeenCalledWith("compress");
+
+    await fireEvent.click(screen.getByText("Compress to .tar.gz"));
+    expect(action).toHaveBeenCalledWith("compress-targz");
+
+    await fireEvent.click(screen.getByText("Compress with password…"));
+    expect(action).toHaveBeenCalledWith("compress-password");
+  });
+
+  it("hides all three compress rows when not compressible", () => {
+    render(ContextMenu, { props: { ...base, compressible: false } });
+    expect(screen.queryByText("Compress to ZIP")).toBeNull();
+    expect(screen.queryByText("Compress to .tar.gz")).toBeNull();
+    expect(screen.queryByText("Compress with password…")).toBeNull();
+  });
+});
+
 // The empty-area (background) menu brought to Windows 11 parity (CPE-1153): New ▸ / View ▸ / Sort by ▸
 // submenus, Undo, and background Properties.
 const empty = {
