@@ -38,6 +38,10 @@ vi.mock("@tauri-apps/api/core", () => ({ invoke, convertFileSrc: (p: string) => 
 vi.mock("@tauri-apps/plugin-updater", () => ({ check: vi.fn(async () => null) }));
 vi.mock("@tauri-apps/plugin-process", () => ({ relaunch: vi.fn() }));
 vi.mock("@tauri-apps/plugin-opener", () => ({ openPath: vi.fn() }));
+// Opening a structured search arms the CPE-1230 live-refresh listener, which wraps the REAL
+// `@tauri-apps/api/event.listen` — that needs the Tauri IPC bridge (`window.__TAURI_INTERNALS__`) that
+// doesn't exist in jsdom. Mock it to a no-op listener, same fix as `App.replayGuards.test.ts`.
+vi.mock("@tauri-apps/api/event", () => ({ listen: vi.fn(async () => () => {}) }));
 
 beforeEach(() => {
   localStorage.clear();

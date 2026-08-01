@@ -27,6 +27,15 @@ export interface SavedSearch {
   root?: string;
 }
 
+/** Resolve the folder a structured search should evaluate from: its captured `root` (CPE-1229) if set,
+    else `fallback` (the folder open at the time it's opened) — the same fallback a search saved before
+    `root` existed (or whose captured folder no longer resolves) needs. Pure — the one source of truth
+    so the open-evaluator (`App.svelte`'s `loadStructuredSearchEntries`) and the live-refresh watch scope
+    (CPE-1230's `smartFolderLiveRefresh.ts`) can't drift apart on which folder is "the" root. */
+export function resolveSavedSearchRoot(search: SavedSearch, fallback: string): string {
+  return search.root && search.root.trim() ? search.root : fallback;
+}
+
 /** Whether `entry` satisfies the saved search, combining its conditions with all/any. Pure. */
 export function matchesSavedSearch(entry: DirEntry, search: SavedSearch, now: number): boolean {
   const { conditions, match } = search;
