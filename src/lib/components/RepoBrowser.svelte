@@ -299,7 +299,7 @@
   /* A polished mini-app window matching the Agent Deck launcher: header · toolbar · status · body ·
      status bar. Uses the explorer theme tokens (app.css) so it is legible on the light theme. */
   .repo-panel { width: min(760px, 94vw); height: min(620px, 88vh); display: flex; flex-direction: column;
-    background: var(--surface); color: var(--text); border: 1px solid var(--border-strong);
+    background: var(--surface); color: var(--text); border: 1px solid var(--dialog-border);
     border-radius: 8px; box-shadow: 0 16px 48px rgba(0,0,0,0.4); overflow: hidden; }
 
   .repo-titlebar { display: flex; align-items: center; justify-content: space-between;

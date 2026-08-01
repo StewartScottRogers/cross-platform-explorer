@@ -130,7 +130,7 @@
 
 <style>
   .backdrop { position: fixed; inset: 0; background: rgba(0, 0, 0, 0.25); display: grid; place-items: center; z-index: 200; }
-  .dialog { width: 640px; max-width: 95vw; background: var(--surface); border: 1px solid var(--border-strong); border-radius: 10px; box-shadow: 0 20px 50px rgba(0, 0, 0, 0.25); padding: 20px; }
+  .dialog { width: 640px; max-width: 95vw; background: var(--surface); border: 1px solid var(--dialog-border); border-radius: 10px; box-shadow: 0 20px 50px rgba(0, 0, 0, 0.25); padding: 20px; }
   h2 { font-size: 16px; margin-bottom: 8px; }
   p { color: var(--text-dim); font-size: 12.5px; margin-bottom: 12px; line-height: 1.5; }
   .paths { display: flex; gap: 8px; }

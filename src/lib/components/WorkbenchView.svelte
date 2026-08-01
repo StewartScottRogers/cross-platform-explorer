@@ -162,7 +162,7 @@
   .wb-overlay { position: fixed; inset: 0; background: rgba(0,0,0,0.45); display: flex;
     align-items: center; justify-content: center; z-index: 60; }
   .wb-panel { width: min(1000px, 96vw); height: min(760px, 92vh); display: flex; flex-direction: column;
-    background: var(--surface); color: var(--text); border: 1px solid var(--border-strong);
+    background: var(--surface); color: var(--text); border: 1px solid var(--dialog-border);
     border-radius: 8px; box-shadow: 0 16px 48px rgba(0,0,0,0.4); overflow: hidden; }
 
   .wb-titlebar { display: flex; align-items: center; justify-content: space-between;
