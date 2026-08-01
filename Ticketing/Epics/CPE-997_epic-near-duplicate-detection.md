@@ -2,7 +2,7 @@
 id: CPE-997
 title: "EPIC: Near-duplicate & similar-image detection"
 type: Task
-status: Proposed
+status: In Progress
 priority: Medium
 component: Multiple
 tags: [epic]
