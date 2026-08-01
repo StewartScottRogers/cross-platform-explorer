@@ -93,6 +93,9 @@ describe("PropertiesDialog — Native metadata section (CPE-1176)", () => {
     const section = await screen.findByTestId("native-metadata-section");
     await waitFor(() => expect(invoke).toHaveBeenCalledWith("native_tags_name"));
     expect(section.textContent).toContain("NTFS alternate data streams");
+    // Header em-dash gets a space on both sides (CPE-1185) — not "metadata— name".
+    const title = section.querySelector(".section-title");
+    expect(title?.textContent).toBe("Native metadata — NTFS alternate data streams");
     // No tags pulled yet — starts empty.
     expect(section.textContent).toContain("No tags");
 

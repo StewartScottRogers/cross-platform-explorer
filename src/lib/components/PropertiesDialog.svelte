@@ -344,7 +344,7 @@
     {#if nativeBridgeEnabled && single}
       <div class="native-section" data-testid="native-metadata-section">
         <div class="section-title">
-          Native metadata{#if nativeStoreName}<span class="dim"> — {nativeStoreName}</span>{/if}
+          Native metadata{#if nativeStoreName}<span class="dim">{" — "}{nativeStoreName}</span>{/if}
         </div>
         <div class="native-row">
           <span class="native-label">Tags</span>
