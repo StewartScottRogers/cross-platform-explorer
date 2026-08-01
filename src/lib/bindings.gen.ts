@@ -1497,6 +1497,35 @@ async findDuplicatesStream(root: string, onGroup: TAURI_CHANNEL<DupGroup[]>) : P
 }
 },
 /**
+ * Find near-duplicate (visually-similar) images under `root` (CPE-1200/1201, epic CPE-997) — walk +
+ * dHash + single-link cluster. Model lives in `cpe_server::image_similarity`; this is a thin
+ * `spawn_blocking` dispatcher, the perceptual complement of `find_duplicates`.
+ */
+async findSimilarImages(root: string) : Promise<Result<SimResult, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("find_similar_images", { root }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * Streaming variant of `find_similar_images` (CPE-1200/1201, streaming-liveness convention): pushes the
+ * near-duplicate groups over an IPC channel so the UI thread never blocks on the walk + decode + cluster
+ * (CPE-760). Image clustering is a whole-set operation (single-link needs every hash first), so the
+ * groups arrive as one batch after the walk completes — the frontend still flips `loading` off on it.
+ * The walk is the shared `cpe_server::image_similarity::stream_similar_images`; the returned result
+ * carries the final `files_scanned` + `truncated` with empty `groups` (those streamed).
+ */
+async findSimilarImagesStream(root: string, onGroup: TAURI_CHANNEL<SimGroup[]>) : Promise<Result<SimResult, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("find_similar_images_stream", { root, onGroup }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
  * Propose an auto-organize plan for `dir` under `rule` — one [`cpe_server::organize::MoveProposal`] per
  * file. Read-only: moves nothing.
  */
@@ -3281,6 +3310,17 @@ binary_ok: boolean; requested: Capability[]; granted: Capability[] }
  * presence after the repair; `actions` are the plain-language steps taken.
  */
 export type SidecarRepair = { id: string; binary_ok: boolean; actions: string[] }
+/**
+ * A set of visually-similar images: every path whose dHash landed in one near-duplicate cluster. Only
+ * groups with 2+ members are produced (a singleton has no near-duplicate — dropped, mirroring
+ * [`crate::perceptual::cluster`]).
+ */
+export type SimGroup = { paths: string[] }
+/**
+ * The result of a similar-image scan: the near-duplicate groups, how many image candidates were hashed,
+ * and whether the file cap truncated the walk. Mirrors [`crate::duplicates::DupResult`].
+ */
+export type SimResult = { groups: SimGroup[]; files_scanned: number; truncated: boolean }
 /**
  * A file the capture left out (oversize / over budget), surfaced so the caller can warn a checkpoint is
  * incomplete rather than silently dropping content. The string form of [`crate::snapshot::SkipReason`].
