@@ -410,6 +410,12 @@ pub mod thumb_font;
 #[cfg(feature = "pdf-thumb")]
 pub mod thumb_pdf;
 
+/// Video representative-frame thumbnail extraction by shelling out to a bundled `ffmpeg` executable
+/// (CPE-1257, epic CPE-718). Feature-gated OFF by default (`video-thumb`) so the plain build compiles
+/// zero video code; adds no Cargo dependency even when on (subprocess, never linked).
+#[cfg(feature = "video-thumb")]
+pub mod thumb_video;
+
 /// Image preview — TIFF/PSD → PNG data-URL transcode + dimensions/EXIF metadata (CPE-099/101/659).
 pub mod image_preview;
 

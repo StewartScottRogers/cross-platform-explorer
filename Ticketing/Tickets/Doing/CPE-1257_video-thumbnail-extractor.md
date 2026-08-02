@@ -4,7 +4,7 @@ title: "Video representative-frame thumbnail extractor (bundled ffmpeg shell-out
 type: feature
 component: cpe-server
 priority: medium
-status: Backlog
+status: Doing
 tags: ready
 created: 2026-08-02
 epic: CPE-718
@@ -41,3 +41,20 @@ of the signed binary). See research-library `thumbnail-native-deps-pdf-video-202
 ## Notes
 Sequence AFTER CPE-1256 (shares additive lines in thumb_source.rs/Cargo.toml/lib.rs). Ship-enablement +
 release binary bundling is CPE-1258.
+
+## Work Log
+- 2026-08-02: Implemented `crates/server/src/thumb_video.rs` (`extract_frame`, resolves a bundled
+  ffmpeg next to the exe then falls back to PATH; shells ffmpeg via `std::process::Command`, seeks
+  ~1s in with a `-ss 0` retry, writes to a unique temp PNG, reads it back via `image::open`, deletes
+  the temp file on both the success and error path, then applies a final exact longest-edge downscale
+  that never upscales). Added `[features] video-thumb = []` to `crates/server/Cargo.toml` (zero new
+  Cargo deps — confirmed via `cargo tree` diff, identical with the feature on/off and with/without
+  `pdf-thumb`). Wired `#[cfg(feature = "video-thumb")] pub mod thumb_video;` in `lib.rs`, and an early
+  dispatch in `thumb_source::decode_thumb_image` (before `fs::read`) matching
+  `thumb_video::VIDEO_EXTENSIONS` (mp4/mov/mkv/webm/avi/m4v/mpg/mpeg/wmv/flv). Added placeholder ffmpeg
+  bundle-resource entries to both sidecar conf JSONs (path only; real binary acquisition is CPE-1258).
+  Verified: `cargo build` / `cargo build --features video-thumb` / `cargo build --features
+  pdf-thumb,video-thumb` all clean; `cargo test --lib` (1262 passed) and `cargo test --lib --features
+  video-thumb` (1269 passed, incl. all 7 `thumb_video` tests — ffmpeg 8.1.1 is installed locally so
+  both real-render tests ran for real, not skipped) both green; `cargo clippy --all-targets -D
+  warnings` clean with and without `--features video-thumb`.
