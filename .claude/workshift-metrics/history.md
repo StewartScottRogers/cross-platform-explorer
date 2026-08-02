@@ -630,3 +630,26 @@ natural homes.
   must land before another solo-headless vein opens (as CPE-707 did for CPE-1166). MVD still 7 (rows 3 & 4
   advanced to 🔧-with-ticket; none fully retired — visual-diff needs real blessed baselines, Linux leg needs
   to go reliably green).
+
+### 2026-08-01/02 — catch-up: five epics + backlog cleared across back-to-back mega-runs (~37 PRs), then vaults
+This block back-fills runs that landed on 2026-08-01 and 08-02 but were never distilled here (git log had
+them; history.md stopped at 07-31). Authoritative record is the checkpoint commits; distilled defaults below.
+- **Epics CLOSED (all merged, gauntleted, pushed):** CPE-704 global quick-launch spotlight, CPE-978 smart
+  folders & saved searches, CPE-718 universal-thumbnail (headless slice: SVG/font extractors + streaming
+  client), CPE-714 embedded terminal dock (PTY backend #544 + xterm.js UI #545, hardened #546/#547/#548),
+  CPE-738 encrypted vaults (crypto core→lifecycle→mount→create-UI→security-doc #550-553) + secure-delete.
+- **Notable follow-ups:** CPE-1212 danger-colour centralization; CPE-1225/1227 snapshot-schedule migration
+  + regression test; CPE-1235 parentDir POSIX-root edge; CPE-1239 thumbnail retry-cap; CPE-1244/1246 PTY
+  lifecycle hardening (in-proc + sidecar parity); CPE-1252 vault orphan-session sweep; CPE-1253/1254
+  home-menu + compress-password refresh race.
+- **Tuned defaults held:** sonnet worker + opus reviewer for backend-correctness; test-infra fine on sonnet;
+  one-worker-per-file; slow Z: drive → cap concurrent cargo builds at 1 and stagger. GitHub Actions runners
+  were intermittently STALLED late 08-01 into 08-02 — merges were verified via the full local triad
+  (Reviewer + UAT + Visual) + built-app gui-smoke instead of waiting on offsite CI.
+- **Bookkeeping note:** epic *frontmatter* statuses were correctly flipped to `Done` during these runs; only
+  this rolling log and some in-file Work-Log *prose* lagged. Epic status is trustworthy; narrative prose in
+  older epic bodies may describe a pre-build state.
+- **Frontier verdict (re-confirmed 08-02, 4th time):** the honest solo-headless PRODUCT well is TAPPED. Every
+  remaining epic slice is user-gated — model/API key (976/977/979/980), code-signing cert (002), Mac/OS
+  hardware (616/717/713/716), heavy native deps (1238 ffmpeg/pdfium), or interactive GUI feel. Unwired
+  `cpe-server` modules map exactly onto that gated set. Next product vein needs a user "you choose" pick.
