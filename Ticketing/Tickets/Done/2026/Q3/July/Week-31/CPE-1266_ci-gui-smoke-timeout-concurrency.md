@@ -4,7 +4,7 @@ title: "Fix CI stall: gui-smoke jobs hang with no timeout + no concurrency group
 type: bug
 component: ci
 priority: high
-status: Doing
+status: Done
 tags: ready
 created: 2026-08-02
 ---
@@ -28,3 +28,6 @@ that all piled up instead of superseding.
 - gui-smoke jobs cannot hang beyond ~20 min; queue no longer clogs on gui-smoke flakiness.
 - Superseded pushes auto-cancel via concurrency groups.
 - YAML valid; CI picks up runs again (verified by a fresh push going in_progress).
+
+## Work Log
+- 2026-08-02 11:32 — Cancelled 15 hung in_progress gui-smoke runs (4-5h old, holding all concurrency slots) + 45 stale queued. Added timeout-minutes:20 to both gui-smoke jobs + concurrency(cancel-in-progress) to ci.yml/gui-smoke.yml. Pushed to main (14ba7422); a fresh run went in_progress within 45s → root cause CONFIRMED + fixed. CI flowing again.
