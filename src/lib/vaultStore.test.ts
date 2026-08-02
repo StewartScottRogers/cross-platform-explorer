@@ -137,5 +137,8 @@ describe("vaultStore actions (CPE-1249)", () => {
     });
     await expect(lockVault(BLOB, failing)).rejects.toThrow(/remove/i);
     expect(isUnlocked(get(vaults), BLOB)).toBe(true); // still unlocked → retryable
+    // The session dir mapping survives a failed lock, so App.lockActiveVault can navigate BACK into it to
+    // re-expose the banner's Lock button for a retry (review #2 — no unreachable retry).
+    expect(sessionDirFor(get(vaults), BLOB)).toBe(SESSION);
   });
 });

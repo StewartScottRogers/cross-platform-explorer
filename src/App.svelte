@@ -75,6 +75,8 @@
     vaults,
     unlockVault,
     lockVault,
+    isUnlocked,
+    sessionDirFor,
     vaultOfSessionPath,
     vaultDisplayName,
     classifyUnlockError,
@@ -1903,15 +1905,32 @@
   /** The blob path of the unlocked vault we're currently browsing inside, or `null` (drives the banner). */
   $: activeVaultBlob = vaultOfSessionPath($vaults, currentPath);
 
-  /** Activation of a `.cpevault` row: confirm via `vault_is` (magic header, not just the extension), then
-   *  open the passphrase prompt. A `.cpevault`-named file that isn't actually a vault falls back to opening
-   *  it with the OS default, so a mis-named file is never a dead end. */
+  /** Bumped on every fresh vault passphrase prompt so the shared `PasswordPromptDialog` REMOUNTS
+   *  (`{#key vaultPromptNonce}` in the template) — otherwise a wrong-password re-prompt reuses the same
+   *  instance, keeping the (wrong) masked value and never re-firing auto-focus. */
+  let vaultPromptNonce = 0;
+
+  /** Activation of a `.cpevault` row. If it's ALREADY unlocked, navigate straight back into its existing
+   *  session dir — never re-unlock, which would allocate a fresh session dir and orphan the old plaintext
+   *  on disk (review #1). Otherwise confirm it's really a vault via `vault_is` (magic header, not just the
+   *  extension) and prompt for the passphrase. A `vault_is` I/O/permission error must NOT fall through to
+   *  opening the ENCRYPTED blob externally (review #4). A `.cpevault`-named file that is genuinely not a
+   *  vault opens with the OS default, so a mis-named file is never a dead end. */
   async function tryUnlockVault(entry: DirEntry) {
-    let isVault = false;
+    if (isUnlocked($vaults, entry.path)) {
+      const dir = sessionDirFor($vaults, entry.path);
+      if (dir) {
+        await navigate(dir);
+        return;
+      }
+    }
+    let isVault: boolean;
     try {
       isVault = unwrap(await commands.vaultIs(entry.path));
-    } catch {
-      isVault = false;
+    } catch (e) {
+      // Transient read failure — surface it, but never open the encrypted blob externally as a fallback.
+      showNotice(`Couldn't read "${entry.name}": ${String(e)}`, true);
+      return;
     }
     if (!isVault) {
       try {
@@ -1928,6 +1947,7 @@
    *  with distinct copy (wrong password vs damaged file) and records NO state (vaultStore records only on
    *  success), so there's never a half-open vault. The passphrase stays in memory only — never logged. */
   function promptForVaultPassphrase(entry: DirEntry, error = "") {
+    vaultPromptNonce++; // force a clean remount of the dialog (fresh empty field + refocus) each attempt
     passwordPrompt = {
       title: `Unlock ${entry.name}`,
       message:
@@ -1949,15 +1969,23 @@
   }
 
   /** Lock the vault we're browsing: navigate OUT of the session dir FIRST (it's about to be wiped), then
-   *  ask the backend to lock (shred + remove the session dir) and update the store. */
+   *  ask the backend to lock (shred + remove the session dir) and update the store. On a wipe FAILURE the
+   *  vault stays unlocked (retryable) — navigate BACK INTO the session dir so the banner + Lock button
+   *  reappear and the user can retry, rather than stranding the plaintext with no in-app affordance
+   *  (review #2). */
   async function lockActiveVault(blobPath: string) {
+    const sessionDir = sessionDirFor($vaults, blobPath);
     const back = parentOfPath(blobPath) || HOME;
     await navigate(back);
     try {
       await lockVault(blobPath);
       showNotice(`Locked "${vaultDisplayName(blobPath)}".`);
-    } catch (e) {
-      showNotice(`Couldn't lock the vault: ${String(e)}`, true);
+    } catch {
+      if (sessionDir) await navigate(sessionDir); // re-expose the banner's Lock button for a retry
+      showNotice(
+        `Couldn't lock "${vaultDisplayName(blobPath)}" — some files may still be in use. Try again.`,
+        true,
+      );
     }
   }
 
@@ -4973,14 +5001,20 @@
 {/if}
 
 {#if passwordPrompt}
-  <PasswordPromptDialog
-    title={passwordPrompt.title}
-    message={passwordPrompt.message}
-    confirmLabel={passwordPrompt.confirmLabel}
-    error={passwordPrompt.error}
-    on:submit={(e) => passwordPrompt?.onSubmit(e.detail)}
-    on:cancel={() => (passwordPrompt = null)}
-  />
+  <!-- `{#key vaultPromptNonce}` forces a fresh dialog instance on each vault attempt (CPE-1249 review #3):
+       a wrong-password re-prompt otherwise reuses the same instance, keeping the wrong masked value and
+       not re-firing auto-focus. Non-vault callers (archive extract) never bump the nonce, so their
+       existing behaviour is unchanged. -->
+  {#key vaultPromptNonce}
+    <PasswordPromptDialog
+      title={passwordPrompt.title}
+      message={passwordPrompt.message}
+      confirmLabel={passwordPrompt.confirmLabel}
+      error={passwordPrompt.error}
+      on:submit={(e) => passwordPrompt?.onSubmit(e.detail)}
+      on:cancel={() => (passwordPrompt = null)}
+    />
+  {/key}
 {/if}
 
 {#if activeWatchCwd && showTimeline}
