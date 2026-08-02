@@ -233,3 +233,50 @@ describe("ContentIndexSearchDialog — debounce + generation-token supersede (CP
     expect(searchCalls).toHaveLength(1); // only the opening probe — no search fired for the cleared query
   });
 });
+
+describe("ContentIndexSearchDialog — rebuild invalidates in-flight search (CPE-1265)", () => {
+  it("a search already in flight when Rebuild is clicked cannot overwrite post-rebuild state", async () => {
+    render(ContentIndexSearchDialog, { root: "Z:\\repos\\cpe" });
+    await settleProbe(true);
+
+    await fireEvent.input(input(), { target: { value: "abc" } });
+    await vi.advanceTimersByTimeAsync(250);
+    expect(searchCalls).toHaveLength(2); // probe + this search
+    const stale = searchCalls[1];
+
+    // Rebuild is triggered while that search is still in flight — this must bump `gen` so the
+    // stale search's eventual result can't land after (or during) the rebuild.
+    await fireEvent.click(screen.getByText("Rebuild index"));
+    expect(buildCalls).toHaveLength(1);
+
+    // The pre-rebuild search resolves AFTER Rebuild was clicked — it must be dropped, not rendered.
+    stale.resolve(outcome([hit("Z:\\stale.txt", 0.9)]));
+    await settle();
+    expect(hitPaths()).toEqual([]);
+
+    // The rebuild itself completes normally and leaves clean post-rebuild state — no trace of the
+    // stale pre-rebuild result.
+    buildCalls[0].resolve({ files_indexed: 5, files_skipped: 0, truncated: false });
+    await settle();
+    expect(hitPaths()).toEqual([]);
+    expect(input().disabled).toBe(false);
+    expect(screen.queryByText("No content index yet")).toBeNull();
+  });
+});
+
+describe("ContentIndexSearchDialog — probe reject branch (CPE-1265)", () => {
+  it("degrades gracefully (no crash, needs-build state) when the opening probe rejects at the IPC layer", async () => {
+    render(ContentIndexSearchDialog, { root: "Z:\\repos\\cpe" });
+    await settle(); // the onMount probe call is queued
+    expect(searchCalls).toHaveLength(1);
+
+    // IPC-layer failure, not a resolved `index_exists: false` — must not throw/unhandled-reject and
+    // must degrade to the same "needs build" fallback as a resolved false.
+    searchCalls[0].reject(new Error("ipc failure"));
+    await settle();
+
+    expect(screen.getByText("No content index yet")).toBeTruthy();
+    expect(screen.getByText("Build content index")).toBeTruthy();
+    expect(input().disabled).toBe(true);
+  });
+});

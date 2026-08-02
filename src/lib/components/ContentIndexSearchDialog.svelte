@@ -110,6 +110,7 @@
 
   async function buildIndex() {
     if (building) return;
+    gen += 1; // invalidate any in-flight probe/search — its result must not land after a rebuild
     building = true;
     buildError = "";
     buildProgress = null;
