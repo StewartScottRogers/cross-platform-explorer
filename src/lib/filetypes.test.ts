@@ -43,14 +43,20 @@ describe("hasThumbnail (CPE-1237) — gates the Icons/Gallery grid's thumbnail r
       expect(hasThumbnail(`photo.${ext}`)).toBe(true);
     }
   });
-  it("is also true for the non-photo formats the backend pipeline renders (CPE-1236)", () => {
-    for (const ext of ["psd", "svg", "ttf", "otf", "woff", "woff2"]) {
+  it("is also true for the non-photo formats the backend pipeline renders (CPE-1236 psd/svg/font, CPE-1256 pdf, CPE-1257 video)", () => {
+    for (const ext of [
+      "psd", "svg", "ttf", "otf", "woff", "woff2", // CPE-1236
+      "pdf", // CPE-1256
+      "mp4", "mov", "mkv", "webm", "avi", "m4v", "mpg", "mpeg", "wmv", "flv", // CPE-1257
+    ]) {
       expect(hasThumbnail(`file.${ext}`)).toBe(true);
       expect(hasThumbnail(`FILE.${ext.toUpperCase()}`)).toBe(true);
     }
   });
   it("is false for a format neither pipeline can render", () => {
-    for (const name of ["notes.txt", "clip.mp4", "favicon.ico", "raw.heic", "song.mp3"]) {
+    // CPE-1267: mp4 moved to the true set above (backend now renders a video frame). Anything the
+    // backend genuinely can't decode for a tile stays false.
+    for (const name of ["notes.txt", "favicon.ico", "raw.heic", "song.mp3"]) {
       expect(hasThumbnail(name)).toBe(false);
     }
   });
