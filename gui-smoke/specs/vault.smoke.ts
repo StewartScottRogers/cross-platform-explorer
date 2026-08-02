@@ -32,18 +32,20 @@ const STATE_FILE = path.resolve(__dirname, "..", ".smoke-state.json");
 // Duplicated literals rather than importing across the runner/worker boundary — matches this harness's
 // established convention (see shred-dialog.smoke.ts / context-menu.smoke.ts's identical notes). Keep in
 // sync with wdio.conf.ts#seedVaultFixture.
-const VAULT_DIR_NAME = "CPE-1249-vault-folder";
 const VAULT_FIXTURE_NAME = "CPE-1249-secret.cpevault";
 const VAULT_FIXTURE_PASSPHRASE = "open-sesame-1249";
 const VAULT_FIXTURE_INNER_NAME = "CPE-1249-inside.txt";
 
 /** Viewport-space centre of the FIRST `.rows .row` whose text content includes `name` (or `null`) — the
- *  textContent-scan primitive archive-browse.smoke.ts uses for a faithful CDP click under wry. */
+ *  textContent-scan primitive archive-browse.smoke.ts uses for a faithful CDP click under wry. Scrolls the
+ *  row into view first: the vault fixture is a root-level file that sorts LAST (so it never shifts sibling
+ *  specs' rows, CPE-1249 review) and therefore sits below the fold, where a raw rect would be off-screen. */
 async function pointOfRow(name: string): Promise<Point | null> {
   return browser.execute((n) => {
     const rows = Array.from(document.querySelectorAll(".rows .row"));
     const row = rows.find((r) => (r.textContent || "").includes(n));
     if (!row) return null;
+    row.scrollIntoView({ block: "center" });
     const rect = row.getBoundingClientRect();
     return { x: Math.round(rect.left + rect.width / 2), y: Math.round(rect.top + rect.height / 2) };
   }, name) as Promise<Point | null>;
@@ -60,19 +62,17 @@ describe("CPE-1249 — headless GUI smoke: unlock a .cpevault, browse it, then l
     await snapFailure(this.currentTest, "vault");
   });
 
-  it("navigates into the dedicated vault fixture folder and shows the locked badge", async () => {
+  it("shows the seeded .cpevault at the tmpDir root with the locked badge", async () => {
     const crumb = await $('[aria-current="page"]');
     await crumb.waitForExist({ timeout: 30_000 });
     await crumb.click(); // plain, non-interactive <span> — just moves focus off any input
 
-    const folderPt = await pointOfRow(VAULT_DIR_NAME);
-    expect(folderPt, `expected a row for the seeded "${VAULT_DIR_NAME}"`).to.not.equal(null);
-    await doubleClick(folderPt!);
-
-    // The vault row renders with the LOCKED badge (VaultBadge.svelte, derived from the empty vaults store).
+    // The vault fixture is a root-level file (see wdio.conf.ts#seedVaultFixture) and sits below the fold;
+    // pointOfRow scrolls it into view. It renders with the LOCKED badge (VaultBadge.svelte, derived from
+    // the empty vaults store).
     await browser.waitUntil(async () => (await pointOfRow(VAULT_FIXTURE_NAME)) !== null, {
       timeout: 15_000,
-      timeoutMsg: `expected a row for the seeded "${VAULT_FIXTURE_NAME}" after navigating in`,
+      timeoutMsg: `expected a row for the seeded "${VAULT_FIXTURE_NAME}"`,
     });
     const badge = await $('[data-testid="vault-badge"]');
     await badge.waitForExist({ timeout: 10_000, timeoutMsg: "expected the vault lock badge to render" });

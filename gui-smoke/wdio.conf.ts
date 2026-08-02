@@ -687,7 +687,13 @@ function seedTransferPanelFixture(tmpDir: string): void {
 // Sealed contents (the tree that appears once unlocked):
 //   CPE-1249-inside.txt          "top secret vault contents"
 //   notes/CPE-1249-hello.txt     "hello from inside the vault"
-export const VAULT_DIR_NAME = "CPE-1249-vault-folder";
+//
+// Seeded as a ROOT-LEVEL FILE, deliberately NOT in its own subfolder: a new top-level FOLDER sorts
+// before every file, shifting all file rows down one — which pushed fold-sensitive rows in sibling specs
+// (archive-browse/archive-password's `CPE-1181-archive.tar.gz`, shred's file) below the visible fold at
+// the default window height and broke their CDP clicks (CPE-1249 full-suite review). As a file named
+// `CPE-1249-*` it sorts AFTER every other seeded file, so it shifts nothing and keeps the shared tmpDir's
+// folder count identical to main. vault.smoke.ts scrolls it into view before activating it.
 export const VAULT_FIXTURE_NAME = "CPE-1249-secret.cpevault";
 export const VAULT_FIXTURE_PASSPHRASE = "open-sesame-1249";
 export const VAULT_FIXTURE_INNER_NAME = "CPE-1249-inside.txt";
@@ -699,9 +705,7 @@ const VAULT_FIXTURE_BASE64 =
   "WKFhklhFEAtoP+i7n2yyf3eurxiF/VpCQ2G7WAkyws5saRRM3U1nKzJ22tL9VLBfBtvj7Mp4jhbQ==";
 
 function seedVaultFixture(tmpDir: string): void {
-  const dir = path.join(tmpDir, VAULT_DIR_NAME);
-  fs.mkdirSync(dir, { recursive: true });
-  fs.writeFileSync(path.join(dir, VAULT_FIXTURE_NAME), Buffer.from(VAULT_FIXTURE_BASE64, "base64"));
+  fs.writeFileSync(path.join(tmpDir, VAULT_FIXTURE_NAME), Buffer.from(VAULT_FIXTURE_BASE64, "base64"));
 }
 
 let tauriDriver: ChildProcess | undefined;

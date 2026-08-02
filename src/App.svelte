@@ -5502,11 +5502,6 @@
      toolbar/keyboard acts on. The ::after is pointer-events:none so it never blocks clicks. */
   .pane-col {
     position: relative;
-    /* Grid items default to `min-width: auto`, which refuses to shrink below their content's min-content —
-       so a child with un-shrinkable content (e.g. the CPE-1249 vault banner's row) blows the whole grid
-       track past the viewport (horizontal overflow). `min-width: 0` lets the column shrink to its track and
-       its content truncate/scroll instead. */
-    min-width: 0;
   }
   .pane-active::after {
     content: "";
