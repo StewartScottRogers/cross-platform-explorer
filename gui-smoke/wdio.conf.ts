@@ -708,6 +708,28 @@ function seedVaultFixture(tmpDir: string): void {
   fs.writeFileSync(path.join(tmpDir, VAULT_FIXTURE_NAME), Buffer.from(VAULT_FIXTURE_BASE64, "base64"));
 }
 
+// --- CPE-1250: vault-CREATE source fixture (epic CPE-738) ---------------------------------------
+// A small plaintext tree the "Create encrypted vault…" folder action (VaultCreateDialog.svelte) seals
+// into a `.cpevault`. Seeded as a subfolder INSIDE the CPE-1241 shred fixture folder (same epic,
+// CPE-738) — deliberately NOT as a new TOP-LEVEL folder: a new top-level folder sorts before every file
+// and shifts the root file rows down one, the exact fold regression CPE-1249 hit (archive-browse/
+// -password's root `.tar.gz` row dropping below the visible fold, breaking their non-scrolling CDP
+// clicks). Nesting it keeps the tmpDir ROOT listing byte-identical to main, so no sibling spec's row
+// positions move. It adds ONE folder row to the shred folder's own listing, which shred-dialog.smoke.ts
+// is unaffected by (it locates CPE-1241-shred-me.txt by name scan). The `payload` subfolder is what gets
+// sealed; the created blob lands as `payload.cpevault` beside it (inside VAULT_CREATE_PARENT_DIR), so it
+// never even appears in the shred folder's direct listing.
+export const VAULT_CREATE_PARENT_DIR = "CPE-1250-vault-create"; // nested inside SHRED_DIR_NAME
+export const VAULT_CREATE_SRC_DIR = "payload"; // the folder the spec seals
+export const VAULT_CREATE_BLOB_NAME = "payload.cpevault"; // default sibling dest = <foldername>.cpevault
+
+function seedVaultCreateFixture(tmpDir: string): void {
+  const src = path.join(tmpDir, SHRED_DIR_NAME, VAULT_CREATE_PARENT_DIR, VAULT_CREATE_SRC_DIR);
+  fs.mkdirSync(path.join(src, "notes"), { recursive: true });
+  fs.writeFileSync(path.join(src, "CPE-1250-secret.txt"), "seal me into a vault\n", "utf-8");
+  fs.writeFileSync(path.join(src, "notes", "CPE-1250-more.txt"), "nested plaintext\n", "utf-8");
+}
+
 let tauriDriver: ChildProcess | undefined;
 let shuttingDown = false;
 
@@ -849,6 +871,10 @@ export const config: WebdriverIO.Config = {
     // CPE-1249: seed a dedicated subfolder + a real pre-sealed `.cpevault` blob for the vault
     // mount/browse/lock flow (see block above) — same tmpDir, same single app launch.
     seedVaultFixture(tmpDir);
+
+    // CPE-1250: seed a small plaintext tree (nested inside the CPE-1241 shred folder — see the block
+    // above for why it is NOT a new top-level folder) for the "Create encrypted vault…" flow.
+    seedVaultCreateFixture(tmpDir);
 
     const caps = capabilities as unknown as Array<{ "tauri:options": { args: string[] } }>;
     caps[0]["tauri:options"].args = ["--test-mode", "--x=-4000", `--open=${tmpDir}`];

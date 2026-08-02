@@ -71,6 +71,7 @@
   import RepairLinkDialog from "./lib/components/RepairLinkDialog.svelte";
   import ShredConfirmDialog from "./lib/components/ShredConfirmDialog.svelte";
   import VaultBanner from "./lib/components/VaultBanner.svelte";
+  import VaultCreateDialog from "./lib/components/VaultCreateDialog.svelte";
   import {
     vaults,
     unlockVault,
@@ -581,6 +582,9 @@
   /** Target paths + display label for an open `ShredConfirmDialog` (CPE-1240, epic CPE-738), or null
    *  when closed. Set by `askShred`, cleared on close/done. */
   let shredConfirmFor: { paths: string[]; what: string } | null = null;
+  /** The folder an open `VaultCreateDialog` is sealing (CPE-1250, epic CPE-738), or null when closed.
+   *  Set by the "vault-create" action, cleared on close/created. */
+  let vaultCreateFor: { folderPath: string; folderName: string } | null = null;
   // The drive root + display name for an open "drive" context menu (CPE-1158). All drive-menu actions
   // target this path, so the menu works identically from a Home tile and a sidebar row — and from Home,
   // where there is no FileList selection to piggy-back on.
@@ -1986,6 +1990,29 @@
     }
   }
 
+  // ---- Create encrypted vault (CPE-1250, epic CPE-738) ------------------------------------------
+  // Seal a selected folder into a `.cpevault`. The context menu offers this only for a single folder in a
+  // real filesystem location (see the `vaultable` prop); the dialog owns passphrase entry, the optional
+  // destructive shred-original confirm, and the backend `vault_create` call. On success we refresh the
+  // listing and select the new blob (it lands as a sibling of the folder, i.e. in the current folder).
+
+  /** Open the create-vault dialog for the single selected folder. Guarded to a real folder (never Home/
+   *  archive) — the same condition ContextMenu gates the menu item on. */
+  function askVaultCreate() {
+    const entry = selectedEntries[0];
+    if (!entry?.is_dir || isHome || archive) return;
+    vaultCreateFor = { folderPath: entry.path, folderName: entry.name };
+  }
+
+  /** `VaultCreateDialog`'s `created` handler: the new `.cpevault` blob path. Refresh the current folder
+   *  (the blob is a sibling of the sealed folder, so it's in view) and select it, then notice. */
+  async function onVaultCreated(dest: string) {
+    vaultCreateFor = null;
+    pendingSelectPath = dest; // the post-load hook selects it; the reactive block scrolls to it
+    await loadPath(currentPath, true);
+    showNotice(`Created encrypted vault "${vaultDisplayName(dest)}".`);
+  }
+
   async function openRecent(path: string) {
     try {
       unwrap(await commands.openExternal(path));
@@ -3303,6 +3330,7 @@
       case "batch-media": beginBatchMedia(); break;
       case "delete": askDelete(false); break;
       case "shred": askShred(); break;
+      case "vault-create": askVaultCreate(); break;
       case "properties": openProperties(); break;
       case "metadataStudio": openMetadataStudio(); break;
       case "tags": if (selectedEntries.length >= 1) tagEditorFor = [...selectedEntries]; break;
@@ -4940,6 +4968,7 @@
     canTerminal={!isHome && !archive}
     sameTypeExt={selectedEntries.length === 1 && !selectedEntries[0].is_dir ? selectedEntries[0].extension : ""}
     shreddable={!isHome && !archive && selectedEntries.length >= 1 && selectedEntries.every((e) => !e.is_dir)}
+    vaultable={!isHome && !archive && selectedEntries.length === 1 && selectedEntries[0]?.is_dir}
     {view}
     {sortKey}
     {sortDir}
@@ -4983,6 +5012,17 @@
     on:done={(e) => onShredDone(e.detail)}
     on:error={(e) => onShredError(e.detail)}
     on:close={() => (shredConfirmFor = null)}
+  />
+{/if}
+
+{#if vaultCreateFor}
+  <VaultCreateDialog
+    folderPath={vaultCreateFor.folderPath}
+    folderName={vaultCreateFor.folderName}
+    rememberDefault={settings.loadVaultRememberPassphrases()}
+    on:created={(e) => onVaultCreated(e.detail)}
+    on:error={(e) => showNotice(e.detail, true)}
+    on:close={() => (vaultCreateFor = null)}
   />
 {/if}
 
