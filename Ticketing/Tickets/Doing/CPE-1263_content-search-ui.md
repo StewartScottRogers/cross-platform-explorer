@@ -4,7 +4,7 @@ title: "File-content search UI (query box + ranked results with snippets, wired 
 type: feature
 component: frontend
 priority: medium
-status: Backlog
+status: Doing
 tags: ready
 created: 2026-08-02
 epic: CPE-976
