@@ -5,9 +5,11 @@
 //! `image_preview::read_image_data_url`); `.svg` goes through [`crate::thumb_svg::rasterize_svg`];
 //! `.ttf`/`.otf`/`.woff` go through [`crate::thumb_font::render_glyph_sheet`] (CPE-1236, epic
 //! CPE-718); `.pdf` goes through [`crate::thumb_pdf::render_first_page`] behind the off-by-default
-//! `pdf-thumb` feature (CPE-1256, epic CPE-718); everything else decodes via the `image` crate with a
-//! bounded `image::Limits` so a crafted decompression-bomb file fails fast with an `Err` rather than
-//! attempting an unbounded allocation.
+//! `pdf-thumb` feature (CPE-1256, epic CPE-718); a video extension goes through
+//! [`crate::thumb_video::extract_frame`] behind the off-by-default `video-thumb` feature (CPE-1257,
+//! epic CPE-718) — dispatched EARLY, before any bytes are read, since a video can be many gigabytes;
+//! everything else decodes via the `image` crate with a bounded `image::Limits` so a crafted
+//! decompression-bomb file fails fast with an `Err` rather than attempting an unbounded allocation.
 //!
 //! Returns the source's raw bytes alongside the decoded image so the caller can read EXIF and apply
 //! [`crate::thumb_orient::orient_for_display`] — decoding happens exactly once either way. SVG/font
@@ -66,8 +68,19 @@ pub(crate) fn psd_within_limits(psd: &psd::Psd) -> bool {
 /// render directly at (approximately) the requested size rather than at an arbitrary intrinsic size
 /// the caller's downstream `.thumbnail()` would then have to downscale.
 pub fn decode_thumb_image(path: &Path, max_edge: u32) -> Result<(DynamicImage, Vec<u8>), String> {
-    let bytes = std::fs::read(path).map_err(|e| e.to_string())?;
     let ext = crate::model::extension_of(path);
+
+    // Video dispatch goes EARLY, before the fs::read below: a video file can be many gigabytes and
+    // must never be slurped into memory the way the raster/PSD/SVG/PDF paths below deliberately do
+    // (CPE-1257, epic CPE-718). `thumb_video` shells out to ffmpeg directly against `path`; there are
+    // no raw bytes to return alongside the image (no EXIF for video), so this returns an empty `Vec`.
+    #[cfg(feature = "video-thumb")]
+    if crate::thumb_video::VIDEO_EXTENSIONS.contains(&ext.as_str()) {
+        let img = crate::thumb_video::extract_frame(path, max_edge)?;
+        return Ok((img, Vec::new()));
+    }
+
+    let bytes = std::fs::read(path).map_err(|e| e.to_string())?;
 
     let img = match ext.as_str() {
         "psd" => {

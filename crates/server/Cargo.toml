@@ -113,6 +113,12 @@ index = []
 # off" rule, mirrored from `index` above). Turn on with `--features pdf-thumb`; ship-enablement (the
 # app adapter turning it on + CI/release binary acquisition) is CPE-1258.
 pdf-thumb = ["dep:pdfium-render"]
+# Opt-in video representative-frame thumbnail extraction by shelling out to a bundled `ffmpeg`
+# executable (CPE-1257, epic CPE-718) — never linked in-process, so no `dep:` here at all (this feature
+# adds ZERO Cargo dependencies; `cargo tree` is unchanged with it on). OFF by default so the plain build
+# compiles zero video code (the "small when off" rule). Turn on with `--features video-thumb`;
+# ship-enablement (bundling the ffmpeg binary as a release resource) is CPE-1258.
+video-thumb = []
 
 [dev-dependencies]
 # Temp dirs for the ticket-board tests (moved from the app with the module, CPE-815).

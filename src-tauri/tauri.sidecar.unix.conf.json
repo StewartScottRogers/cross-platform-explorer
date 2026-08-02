@@ -11,7 +11,8 @@
       "../sidecar/repos/sidecar.json": "sidecars/repos.json",
       "../sidecar/ai-console/target/release/ai-console.pristine": "sidecars/ai-console.pristine",
       "../sidecar/agent-board/target/release/agent-board.pristine": "sidecars/agent-board.pristine",
-      "../sidecar/repos/target/release/repos.pristine": "sidecars/repos.pristine"
+      "../sidecar/repos/target/release/repos.pristine": "sidecars/repos.pristine",
+      "../native-deps/ffmpeg/unix/ffmpeg": "ffmpeg"
     }
   }
 }
