@@ -4,7 +4,7 @@ title: "gui-smoke: pin the Agent Watch Radar tab render (CPE-1100)"
 type: chore
 component: Testing
 priority: medium
-status: Doing
+status: Done
 tags: ready
 created: 2026-08-02
 epic: CPE-1148
@@ -54,3 +54,9 @@ change minimal and test-mode-gated.
 ## Notes
 Sibling of CPE-1173 (cost-ledger) / CPE-1135 (replay) / CPE-1130 (cost-history). After this lands, every
 live-IPC-fed Agent-Watch drawer tab has a render pin.
+
+## Work Log
+- 2026-08-02 — Foreman read-only spike confirmed feasibility (existing `__CPE_TEST_INGEST_ACTIVITY__` hook + `foldOverlaps` two-actor overlap). Worker (sonnet, worktree) built `gui-smoke/specs/radar.smoke.ts` + flipped the burndown row. No production code needed.
+- Verification: `npm run check` 0 errors; gui-smoke `typecheck` clean; gui-smoke `test:unit` 21/21; `agentConflicts.test.ts` 20/20 (pre-existing 2-actor-overlap case proves the seeding). Real-binary WebView2 gui-smoke run blocked locally (no msedgedriver + no network to fetch it — CPE-1048 class); runs on the non-blocking CI leg like every prior pin.
+- Independent Reviewer (sonnet) re-ran all checks + verified the assertion is non-hollow (exactly two `.rd-pill`s; empty-state cannot pass) and no `src/`/`src-tauri/` change → APPROVE.
+- Merged PR #557 (squash 70cbab96). MVD: CPE-1100 radar row → render-automated (feel residual); every live-IPC-fed Agent-Watch drawer tab now has a render pin.
