@@ -76,3 +76,16 @@ remember-passphrase checkbox UX; in-app docs page; final visual polish pass.
 Keep the passphrase in memory only; never log it. If `vaultRememberPassphrase` is wired for convenience,
 that's fine, but the full "remember in keychain" checkbox UX belongs to CPE-1250 — a minimal or no
 remember here is acceptable.
+
+## Done 2026-08-02 (workshift) — merged #552 @ f2d53089
+Unlock a .cpevault via a passphrase dialog → browse the decrypted tree as a location; lock wipes it.
+VaultBadge 🔒/🔓 + VaultBanner + vaultStore + app-cache session dir. Full gauntlet (this slice was the
+hardest): Reviewer APPROVE after fixing re-unlock plaintext-orphan (#1, frontend guard + backend
+best-effort superseded-wipe), failed-lock retry-reachability (#2), dialog remount (#3), vaultIs-error
+handling (#4); UAT on the REAL build caught a Lock button rendering off-viewport (app #app grid `auto`
+column sized to the deep session path → horizontal overflow) → fixed with `#app{minmax(0,1fr)}` +
+`.address{min-width:0;overflow-x:auto}` + `scrollAddressToStart` (Home crumb stays clickable); Visual
+PASS; and an INDEPENDENT full-suite gui-smoke regression gate that caught a fixture-pollution red herring
+(vault fixture added a top-level folder, shifting other specs' rows below the fold) — fixed (fixture is a
+root-level file), then independently re-confirmed all 5 gate specs green. Follow-ups filed: CPE-1252
+(orphan-session sweep), CPE-1253/1254 (pre-existing non-vault bugs the gate surfaced).
