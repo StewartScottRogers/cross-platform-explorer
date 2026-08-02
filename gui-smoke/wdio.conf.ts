@@ -676,6 +676,34 @@ function seedTransferPanelFixture(tmpDir: string): void {
   );
 }
 
+// --- CPE-1249: encrypted-vault mount/browse fixture (epic CPE-738) ------------------------------
+// A DEDICATED subfolder + a genuinely-valid, pre-sealed `.cpevault` blob so vault.smoke.ts can drive
+// the REAL unlock → browse → lock flow against a real vault (no mocked backend). The blob is the exact
+// envelope + `age` passphrase format the production backend reads (`vault_crypto`), generated ONCE with
+// a low scrypt work factor (fast to decrypt on CI) by `crates/server/examples/gen_vault_fixture.rs` —
+// regenerate + repaste the base64 below with `cargo run -p cpe-server --example gen_vault_fixture`, and
+// keep VAULT_FIXTURE_PASSPHRASE / the sealed inner names in sync with that example's constants.
+//
+// Sealed contents (the tree that appears once unlocked):
+//   CPE-1249-inside.txt          "top secret vault contents"
+//   notes/CPE-1249-hello.txt     "hello from inside the vault"
+export const VAULT_DIR_NAME = "CPE-1249-vault-folder";
+export const VAULT_FIXTURE_NAME = "CPE-1249-secret.cpevault";
+export const VAULT_FIXTURE_PASSPHRASE = "open-sesame-1249";
+export const VAULT_FIXTURE_INNER_NAME = "CPE-1249-inside.txt";
+const VAULT_FIXTURE_BASE64 =
+  "Q1BFVkxUMQEAYWdlLWVuY3J5cHRpb24ub3JnL3YxCi0+IHNjcnlwdCBWWGIraUdjN0RLTDJGRy9WVFVJNFpnIDQKdGxP" +
+  "b05NSVlvMk5hL0ZxMXQxRGtkVFBOS09PM2tqYVpYbWQ4Umo4OU4vWQotLS0gY0ZlT20weGNxQkY2RHBpM3dvMHYrQ29Y" +
+  "K1lLclgvd00xa2s0YVdVMThMSQr5iCEGTm7Pt0P89gommK/zoGcT/UV6AzZEDBWBcNUQYlBmB0K5K42wUhubaqySVPq" +
+  "r+Mif/L3RENo9sGT8ELP7C2ggMRIh5NRbcCuzvTaWeDBpWMpfF0mS5rXvTSiUXNOToE9C9HLbBQEk1OuciMmHvKux53" +
+  "WKFhklhFEAtoP+i7n2yyf3eurxiF/VpCQ2G7WAkyws5saRRM3U1nKzJ22tL9VLBfBtvj7Mp4jhbQ==";
+
+function seedVaultFixture(tmpDir: string): void {
+  const dir = path.join(tmpDir, VAULT_DIR_NAME);
+  fs.mkdirSync(dir, { recursive: true });
+  fs.writeFileSync(path.join(dir, VAULT_FIXTURE_NAME), Buffer.from(VAULT_FIXTURE_BASE64, "base64"));
+}
+
 let tauriDriver: ChildProcess | undefined;
 let shuttingDown = false;
 
@@ -813,6 +841,10 @@ export const config: WebdriverIO.Config = {
     // CPE-1226: seed a dedicated subfolder + source file for the TransferPanel archive-op-row render
     // pin (see block above) — its own subfolder, isolated from every other spec's fixtures.
     seedTransferPanelFixture(tmpDir);
+
+    // CPE-1249: seed a dedicated subfolder + a real pre-sealed `.cpevault` blob for the vault
+    // mount/browse/lock flow (see block above) — same tmpDir, same single app launch.
+    seedVaultFixture(tmpDir);
 
     const caps = capabilities as unknown as Array<{ "tauri:options": { args: string[] } }>;
     caps[0]["tauri:options"].args = ["--test-mode", "--x=-4000", `--open=${tmpDir}`];

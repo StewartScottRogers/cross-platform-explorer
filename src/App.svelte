@@ -70,6 +70,15 @@
   import NewLinkDialog from "./lib/components/NewLinkDialog.svelte";
   import RepairLinkDialog from "./lib/components/RepairLinkDialog.svelte";
   import ShredConfirmDialog from "./lib/components/ShredConfirmDialog.svelte";
+  import VaultBanner from "./lib/components/VaultBanner.svelte";
+  import {
+    vaults,
+    unlockVault,
+    lockVault,
+    vaultOfSessionPath,
+    vaultDisplayName,
+    classifyUnlockError,
+  } from "./lib/vaultStore";
   import ShortcutsDialog from "./lib/components/ShortcutsDialog.svelte";
   import ContentSearchDialog from "./lib/components/ContentSearchDialog.svelte";
   import FileNameSearchDialog from "./lib/components/FileNameSearchDialog.svelte";
@@ -1871,6 +1880,7 @@
       await navigate(entry.path);
       return;
     }
+    if (entry.extension === "cpevault") { await tryUnlockVault(entry); return; }
     if (isArchiveFile(entry)) { await enterArchive(entry); return; }
     try {
       // open_external runs it through the OS shell — reliably launches the
@@ -1881,6 +1891,73 @@
     } catch (e) {
       console.debug("open failed:", e);
       showNotice(`Can't open "${entry.name}" — no app is associated with this file type.`, true);
+    }
+  }
+
+  // ---- Encrypted vaults (CPE-1249, epic CPE-738) ------------------------------------------------
+  // Activating a `.cpevault` file (double-click / Enter) confirms it's a real vault, prompts for the
+  // passphrase, decrypts it into a private session dir, and navigates INTO that dir so the tree is
+  // browsable as a normal location. The unlocked-vault banner (below the toolbar) offers Lock, which
+  // navigates back out and securely wipes the session dir. See vaultStore.ts.
+
+  /** The blob path of the unlocked vault we're currently browsing inside, or `null` (drives the banner). */
+  $: activeVaultBlob = vaultOfSessionPath($vaults, currentPath);
+
+  /** Activation of a `.cpevault` row: confirm via `vault_is` (magic header, not just the extension), then
+   *  open the passphrase prompt. A `.cpevault`-named file that isn't actually a vault falls back to opening
+   *  it with the OS default, so a mis-named file is never a dead end. */
+  async function tryUnlockVault(entry: DirEntry) {
+    let isVault = false;
+    try {
+      isVault = unwrap(await commands.vaultIs(entry.path));
+    } catch {
+      isVault = false;
+    }
+    if (!isVault) {
+      try {
+        unwrap(await commands.openExternal(entry.path));
+      } catch {
+        showNotice(`Can't open "${entry.name}".`, true);
+      }
+      return;
+    }
+    promptForVaultPassphrase(entry);
+  }
+
+  /** Show the passphrase prompt for a vault; on submit, unlock + navigate in. A failed unlock re-prompts
+   *  with distinct copy (wrong password vs damaged file) and records NO state (vaultStore records only on
+   *  success), so there's never a half-open vault. The passphrase stays in memory only — never logged. */
+  function promptForVaultPassphrase(entry: DirEntry, error = "") {
+    passwordPrompt = {
+      title: `Unlock ${entry.name}`,
+      message:
+        `Enter the passphrase to unlock and browse "${entry.name}". While unlocked, its contents are ` +
+        `decrypted into a private temporary folder; locking it wipes that folder.`,
+      confirmLabel: "Unlock",
+      error,
+      onSubmit: async (passphrase) => {
+        try {
+          const sessionDir = await unlockVault(entry.path, passphrase);
+          passwordPrompt = null;
+          await navigate(sessionDir);
+          showNotice(`Unlocked "${entry.name}".`);
+        } catch (e) {
+          promptForVaultPassphrase(entry, classifyUnlockError(e));
+        }
+      },
+    };
+  }
+
+  /** Lock the vault we're browsing: navigate OUT of the session dir FIRST (it's about to be wiped), then
+   *  ask the backend to lock (shred + remove the session dir) and update the store. */
+  async function lockActiveVault(blobPath: string) {
+    const back = parentOfPath(blobPath) || HOME;
+    await navigate(back);
+    try {
+      await lockVault(blobPath);
+      showNotice(`Locked "${vaultDisplayName(blobPath)}".`);
+    } catch (e) {
+      showNotice(`Couldn't lock the vault: ${String(e)}`, true);
     }
   }
 
@@ -4575,6 +4652,14 @@
   <!-- File List Pane (middle column) -->
   <!-- svelte-ignore a11y-click-events-have-key-events a11y-no-static-element-interactions -->
   <div class="pane-col" class:pane-active={dualPane && activePane === 0} on:click={() => (activePane = 0)}>
+    {#if activeVaultBlob}
+      <!-- Unlocked-vault browsing banner (CPE-1249): shown while navigated inside a decrypted vault's
+           session dir; its Lock button re-seals the vault (navigate out + wipe). -->
+      <VaultBanner
+        name={vaultDisplayName(activeVaultBlob)}
+        on:lock={() => { if (activeVaultBlob) lockActiveVault(activeVaultBlob); }}
+      />
+    {/if}
     <ExplorerPane
       bind:this={explorerPane}
       inHome={isHome && !smartFolder && !structuredSearch}
