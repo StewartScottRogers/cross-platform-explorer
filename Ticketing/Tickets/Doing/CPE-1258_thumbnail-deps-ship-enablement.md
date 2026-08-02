@@ -4,7 +4,7 @@ title: "Ship-enablement + CI + docs for PDF/video thumbnails"
 type: chore
 component: build
 priority: medium
-status: Backlog
+status: Doing
 tags: ready
 created: 2026-08-02
 epic: CPE-718

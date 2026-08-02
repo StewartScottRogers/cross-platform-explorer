@@ -4,7 +4,7 @@ title: "Video representative-frame thumbnail extractor (bundled ffmpeg shell-out
 type: feature
 component: cpe-server
 priority: medium
-status: Doing
+status: Done
 tags: ready
 created: 2026-08-02
 epic: CPE-718
@@ -58,3 +58,14 @@ release binary bundling is CPE-1258.
   video-thumb` (1269 passed, incl. all 7 `thumb_video` tests — ffmpeg 8.1.1 is installed locally so
   both real-render tests ran for real, not skipped) both green; `cargo clippy --all-targets -D
   warnings` clean with and without `--features video-thumb`.
+
+## Work Log
+- 2026-08-02 — Worker (sonnet, worktree) built thumb_video.rs: shells bundled/PATH ffmpeg via vector args
+  (injection-safe), seeks ~1s (fallback 0), unique temp PNG (pid+nanos+atomic counter), cleanup on all paths,
+  exact non-upscaling longest-edge downscale. video-thumb feature = ZERO deps. Early dispatch before fs::read.
+- Verify: build clean all modes; 1262 off / 1269 on tests, ALL 7 video tests ran REAL (ffmpeg 8.1.1 local);
+  clippy clean both modes; cargo tree byte-identical on/off (dep-free).
+- Independent OPUS Reviewer re-ran 9 checks + point-by-point (injection SAFE, no-slurp, panic-safe, temp cleanup,
+  downscale, feature-gate, graceful degrade) → APPROVE. Merged PR #559 (squash cbb95a7d, --admin: CI stalled).
+- Non-blocking review finding → filed CPE-1261: temp name is unique but predictable (CWE-377 symlink-clobber
+  window on shared /tmp, Linux only; Win/macOS per-user temp unaffected). Fast-follow hardening.
