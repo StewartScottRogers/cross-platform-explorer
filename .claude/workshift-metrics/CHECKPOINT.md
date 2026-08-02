@@ -1,36 +1,35 @@
-# Workshift Checkpoint — 2026-08-02 ~06:52 local — SHIFT A DONE, SHIFT B underway
+# Workshift Checkpoint — 2026-08-02 ~07:58 local — SHIFTS A+B DONE, SHIFT C underway
 
-Session 39d31626. User said "Run three back-to-back workshifts" → green-lit ALL FOUR gated epics
-(thumbnails, AI, drag-out, shell). Real multi-shift build run. One heavy cargo build at a time (slow Z:).
+Session 39d31626. "Run three back-to-back workshifts" → user green-lit 4 gated epics. One heavy cargo build at a
+time (slow Z:). GitHub Actions runners STALLED entire run → merges via local triad + `gh pr merge --admin`.
 
-## SHIFT A — COMPLETE ✅ Epic CPE-718 (universal thumbnail pipeline) CLOSED
-- CPE-1256 PDF first-page extractor (pdfium-render, in-process, `pdf-thumb`) — merged #558.
-- CPE-1257 video representative-frame extractor (bundled-ffmpeg shell-out, `video-thumb`) — merged #559.
-- CPE-1258 ship-enablement (features on + per-feature CI + release native-dep staging + docs) — merged #560.
-  Opus reviewer caught + we fixed a real macOS/Linux bundled-binary path bug (resolvers used current_exe().parent();
-  now inject app.path().resource_dir() into cpe-server via set_native_dep_dir, mirroring resolve_sidecar_bin).
-- CPE-1238 parent closed. Follow-up filed: CPE-1261 (low, Linux /tmp temp-file hardening).
-- Installer grows ~25-40MB with features on (user approved dep weight); 0 when off. End-to-end PDF/video thumbnail
-  render on the installed app is attended/CI-gated (pdfium not local; runners stalled) — code correctness fully reviewed.
+## SHIFT A — DONE ✅ Thumbnails epic CPE-718 CLOSED
+CPE-1256 PDF (pdfium-render) #558 · CPE-1257 video (bundled ffmpeg) #559 · CPE-1258 enablement (features on + CI +
+release binary staging + docs) #560 (opus reviewer caught + fixed a macOS/Linux bundled-path bug). CPE-1238 closed.
+Follow-up: CPE-1261 (Linux /tmp temp-file hardening, low).
 
-## SHIFT B — IN PROGRESS: AI file-content search (epic CPE-976, activated)
-Engine stack pre-built+unwired (981 vector_index / 982 embedder seam + local FakeEmbedder / 983 ingest / 984 blend);
-local embedder = NO API key. Slices:
-- **CPE-1262** (backend wiring: content_index_build streamed + content_search + persist + specta bindings) — IN FLIGHT (worker building).
-- **CPE-1263** (content-search UI: query + ranked snippets + navigate) — Backlog, depends on 1262.
+## SHIFT B — DONE ✅ AI file-content search (epic CPE-976 headless core)
+CPE-1262 backend (content_index_build streamed + content_search + persist over the pre-built local FakeEmbedder — NO
+key) #561 (opus reviewer caught + fixed a Turkish-`İ` snippet slice panic) · CPE-1263 UI (ContentIndexSearchDialog,
+palette entry, docs, i18n ×12) #562. Follow-up: CPE-1265 (UI robustness, low). CPE-976 still In Progress: headless
+core shipped; better embedder model + pdf/docx text extraction DEFERRED (user-gated — needs a model/key).
 
-## SHIFT C — QUEUED: drag-out (CPE-672/674) + shell/OS (CPE-712/713/716)
-Drag-out via tauri-plugin-drag v2.1.1 (MIT/Apache) + `drag:default`; CPE-674 90% built (extract_archive_entry_any
-already stages+is a command). Slices A-plumbing(headless)/B-wire(attended)/C-archive(attended). Research filed to Library.
+## SHIFT C — IN PROGRESS: drag-out (CPE-672/674) + shell/OS (CPE-712/713/716)
+- **CPE-1264** drag-out PLUMBING (tauri-plugin-drag v2 + `drag:default` capability + dragOut.ts wrapper + unit tests;
+  NOT wired to rows) — IN FLIGHT (worker building). Headless foundation, epic CPE-661.
+- Remaining drag-out: Slice B (wire into rows + native/HTML5 coexistence) + Slice C (archive extract-on-drag via the
+  already-built extract_archive_entry_any) — both need ATTENDED drag-drop verification (skip-and-note).
+- Shell/OS (CPE-712 default-handler / 713 tray / 716 drive-bay) — mostly OS-registration + attended verify; some
+  backend (tray_quick.rs) exists. Build headless code where possible; attended verifies skip-and-noted.
 
 ## State
-- `main` @ origin `08cebd19`, clean. Lock: WORKSHIFT-LOCK (session 39d31626). GitHub Actions runners STALLED all run
-  → merges via local triad + `gh pr merge --admin`; re-check CI when up.
-- Leftover cruft to deep-clean later (file-locked, don't fight now): `.claude/worktrees/agent-a26d4e52a300930d6`,
-  `.claude/uat-1025`, `.claude/uat-1025b`.
-- Research Library: thumbnail-native-deps + drag-out entries filed.
+- `main` @ origin `8bc8c6d8`, clean. Lock session 39d31626. Research Library: thumbnail-deps + drag-out entries filed.
+- PROCESS FIX: Foreman owns ticket-file lifecycle in main tree; workers told NOT to move ticket files (squash-merge
+  duplicated CPE-1262/1263 when both moved them — cleaned up).
+- Leftover worktree dirs may linger if file-locked (harmless): `.claude/worktrees/agent-*`, `.claude/uat-1025*`.
 
 ## To resume
-Finish CPE-1262 (review→merge) → CPE-1263 UI → close/advance CPE-976. Then shift C (drag-out plumbing + shell headless).
-Attended verifications (installed-app thumbnail eyeballing, real drag-drop, OS-registration) skip-and-noted for a
-user-present session.
+Finish CPE-1264 (review→merge). Then build drag-out Slice B/C + shell code headlessly to the attended-verify line
+(skip-and-note the interactive drag-drop + OS-registration checks for a user-present session). Then FINAL WRAP: all
+3 shifts done; hand the user the attended-verification checklist (installed-app thumbnail eyeballing, real drag-drop,
+OS-registration) + the user-gated remainders (better AI model, pdf/docx extraction, code-signing, Mac).
