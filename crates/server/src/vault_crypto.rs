@@ -399,12 +399,20 @@ pub fn decrypt_tree(
 /// materializes files, so it is the safe recoverability check for the destructive "seal then shred the
 /// original" path: verifying no longer leaves an unshredded plaintext copy in a temp directory.
 ///
-/// Returns `Ok(())` iff the blob decrypts, authenticates, and its framing parses. Never panics.
+/// Returns `Ok(())` iff the blob decrypts, authenticates, its framing parses, **and every entry path
+/// is extraction-safe** — so verify green-lights exactly what a real extraction requires and can never
+/// pass a blob that would later abort on a rejected path. Never panics.
 pub fn verify_blob(blob: &[u8], passphrase: &SecretString) -> Result<(), VaultError> {
     let mut plaintext = decrypt_bytes(blob, passphrase)?;
     let parsed = unpack_entries(&plaintext);
     plaintext.zeroize();
-    parsed?;
+    let entries = parsed?;
+    // Defense-in-depth: prove every path passes the SAME extraction-side gate, in memory. Belt-and-
+    // braces against a future encrypt path that forgets to validate — verify then still refuses to
+    // certify a blob that `decrypt_tree` would reject, keeping the shred-safety invariant sound.
+    for e in &entries {
+        sanitize_rel_path(&e.path)?;
+    }
     Ok(())
 }
 
@@ -437,6 +445,19 @@ fn collect_dir(dir: &Path, rel: &str, out: &mut Vec<TreeEntry>) -> Result<(), Va
             format!("{rel}/{name}")
         };
         let child_path = entry.path();
+        // SEAL⟺EXTRACT SYMMETRY (CPE-1248): reject at *encrypt* time any path the *extract*-side
+        // `sanitize_rel_path` would refuse — a filename containing `\`, a drive-letter component, `..`,
+        // etc. (all legal on Linux/macOS but rejected on extraction). Running the identical gate here
+        // guarantees "if it sealed, it extracts", so a destructive `shred_original` seal can never
+        // produce an unextractable vault and then destroy the original. This runs before the blob is
+        // written or anything is shredded, so shred-safety is preserved (create returns Err first).
+        sanitize_rel_path(&child_rel).map_err(|_| {
+            VaultError::Format(format!(
+                "cannot seal file whose name is unsafe for extraction (contains '\\', a drive-letter, \
+                 or a traversal component): {}",
+                child_path.display()
+            ))
+        })?;
         if ft.is_dir() {
             out.push(TreeEntry {
                 path: child_rel.clone(),
@@ -809,6 +830,43 @@ mod tests {
 
         // Not a vault at all → BadMagic (never panics on arbitrary bytes).
         assert!(matches!(verify_blob(b"not a vault", &pw), Err(VaultError::BadMagic)));
+    }
+
+    #[test]
+    fn verify_blob_rejects_a_blob_with_an_unsafe_path() {
+        // A validly-encrypted blob whose framing carries paths that `decrypt_tree` would REJECT must
+        // not be green-lit by `verify_blob` — otherwise a destructive shred could destroy the original
+        // against a blob that can never be extracted (CPE-1248 review #2 follow-up).
+        let pw = pass("pw");
+        for bad in ["../escape.txt", "a\\b.txt", "C:evil.txt", "dir/z:evil.txt"] {
+            let entries = vec![TreeEntry {
+                path: bad.into(),
+                kind: EntryKind::File,
+                data: b"x".to_vec(),
+            }];
+            let blob = encrypt_fast(&pack_entries(&entries), &pw);
+            assert!(
+                matches!(verify_blob(&blob, &pw), Err(VaultError::Format(_))),
+                "verify_blob must reject unsafe path {bad:?}"
+            );
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn encrypt_tree_rejects_a_backslash_named_file() {
+        // On Linux/macOS `my\notes.txt` is one legal filename, but extraction's `sanitize_rel_path`
+        // rejects the backslash. Sealing must therefore refuse it up front (naming the file) rather than
+        // produce an unextractable vault — the seal⟺extract symmetry guarantee (CPE-1248 review).
+        let pw = pass("pw");
+        let src = tempfile::tempdir().unwrap();
+        std::fs::write(src.path().join("my\\notes.txt"), b"legal-on-unix").unwrap();
+
+        let result = encrypt_tree(src.path(), &pw);
+        assert!(matches!(result, Err(VaultError::Format(_))), "got {result:?}");
+        if let Err(VaultError::Format(msg)) = result {
+            assert!(msg.contains("notes.txt"), "error should name the offending file: {msg}");
+        }
     }
 
     // ---- path safety ----------------------------------------------------

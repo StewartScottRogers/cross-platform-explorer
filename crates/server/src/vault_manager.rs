@@ -282,7 +282,13 @@ impl VaultRegistry {
         let session = self.0.lock().unwrap().get(blob_path).cloned();
         if let Some(dir) = session {
             wipe(&dir)?; // on Err: the mapping is untouched → is_unlocked stays true → retryable.
-            self.0.lock().unwrap().remove(blob_path);
+            // Drop the mapping only if it STILL points at the dir we just wiped — guards the narrow
+            // unlock-during-lock race (a concurrent re-unlock into a different session dir), so we never
+            // clear a fresh mapping whose plaintext we didn't wipe.
+            let mut map = self.0.lock().unwrap();
+            if map.get(blob_path) == Some(&dir) {
+                map.remove(blob_path);
+            }
         }
         Ok(())
     }
@@ -590,6 +596,29 @@ mod tests {
         create_vault(&folder, &sibling, &pass("pw"), &opts).unwrap();
         assert!(!folder.exists(), "an outside dest must still let the folder be shredded");
         assert!(is_vault(&sibling));
+    }
+
+    /// CPE-1248 review follow-up (seal⟺extract symmetry): a folder containing a name that seals but
+    /// can't extract (`\` in a filename, legal on Unix) must make `create_vault` fail at ENCRYPT time —
+    /// before any write or shred — so `shred_original` never destroys the original against an
+    /// unextractable vault.
+    #[cfg(unix)]
+    #[test]
+    fn shred_original_preserves_original_when_a_name_is_unextractable() {
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("src");
+        std::fs::create_dir_all(&src).unwrap();
+        std::fs::write(src.join("keep.txt"), b"precious").unwrap();
+        std::fs::write(src.join("my\\notes.txt"), b"legal-on-unix").unwrap();
+        let blob_path = dir.path().join("v.cpevault");
+
+        let opts = CreateOpts { shred_original: true, shred_scheme: ShredScheme::Zero };
+        let result = create_vault(&src, &blob_path, &pass("pw"), &opts);
+        assert!(matches!(result, Err(VaultError::Format(_))), "must refuse an unsealable name: {result:?}");
+
+        // Nothing was written or shredded: the original survives and no blob was produced.
+        assert_eq!(std::fs::read(src.join("keep.txt")).unwrap(), b"precious");
+        assert!(!blob_path.exists(), "no vault blob should be written when sealing is refused");
     }
 
     /// CPE-1248 review #2 (plaintext leak): the recoverability check must run in memory and never
