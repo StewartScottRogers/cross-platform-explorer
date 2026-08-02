@@ -20,3 +20,6 @@ to the vault work. The menu opens then immediately closes.
 Investigate why the Home Folders-tab item context menu dismisses immediately (likely a click/blur/outside-
 click handler firing on the same event that opened it). Fix so it stays open like other context menus
 (see docs/design/MENUS.md). Re-enable/confirm the gui-smoke assertion.
+
+## Done 2026-08-02 (workshift) — merged #556 @ a382f6ea
+Test-only fix: NOT an app bug — the gui-smoke row was below the 700px fold so the right-click missed the webview. App menu-stays-open logic (ContextMenu OPEN_GUARD_MS + HomeView stopPropagation) verified already-correct. Spec now scrollIntoView before measuring (sibling-spec pattern). Reviewer APPROVE; gui-smoke home-item-menu 2/2.
