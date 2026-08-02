@@ -1,35 +1,26 @@
-# Workshift Checkpoint — 2026-08-01 ~19:05 local — ALL BUILDABLE WORK DONE
+# Workshift Checkpoint — 2026-08-02 ~02:35 local — ENCRYPTED VAULTS EPIC COMPLETE
 
-Session: 6815e8b9. User re-engaged twice ("you choose" → Terminal dock; "keep going" → cleared the last
-follow-ups). Now genuinely exhausted: **Backlog EMPTY, all deferred buildable items done.** Everything
-remaining is USER-GATED or a single optional low-value filler.
+Session 6815e8b9. User said "do the vaults" → built the entire encrypted-vaults half of CPE-738
+(5 slices, all merged), closing the epic. Frontier is USER-GATED again (as before "do the vaults").
 
-## State — CLEAN, IDLE, STANDING BY
-- `main` @ HEAD `b0693b12` (origin/main), tree clean. **Backlog EMPTY. 0 open PRs. 0 worktrees.**
-- GitHub runners backlogged much of the session; several PRs merged on full local verification + reviewer
-  analysis (pure-Rust/deterministic or gui-smoke-proven on the built app). Re-check main CI opportunistically.
+## State — CLEAN, IDLE
+- `main` @ HEAD `8ecbccce`. Backlog: 3 vault follow-ups (CPE-1252/1253/1254). 0 open PRs. Worktrees pruned.
+- GitHub Actions runners STALLED the entire vault run — every merge verified via the full local triad
+  (Reviewer + UAT + Visual) + built-app gui-smoke, not CI. Re-check CI when runners recover.
 
-## Delivered this session (~37 PRs merged, #514–#549)
-- **5 epics**: CPE-704 (Spotlight — incl. CPE-1223 basename highlight) · CPE-978 (Smart folders) ·
-  CPE-718 (Thumbnail pipeline, headless slice) · CPE-738 (Secure delete slice) · CPE-714 (Terminal dock,
-  incl. CPE-1244/1245/1246 hardening+polish+sidecar-parity).
-- The entire prior working backlog + every follow-up each epic surfaced + all deferred low-value nits.
+## CPE-738 CLOSED — encrypted vaults (this run) + secure delete (earlier)
+- CPE-1247 (#550) crypto core (age 0.12.1 passphrase); 1248 (#551) lifecycle+keychain; 1249 (#552)
+  mount/browse+indicator; 1250 (#553) create UI+settings+docs; 1251 security-review doc
+  (docs/design/VAULT-SECURITY.md). Every slice through the full gauntlet; security reviewer caught +
+  got fixed multiple real data-loss/plaintext-leak bugs. **External crypto audit recommended before GA.**
 
-## NOTHING buildable left except:
-- **CPE-1000 optional mismatch-review view** — a small "list all extension-mismatched files + one-click
-  rename" surface. NOT ticketed; LOW value (mismatch already surfaced via the ⚠ badge + the true-type/
-  mismatch columns). File + build only if the user wants it.
-
-## USER-GATED epics (need a decision — do NOT start autonomously)
-- **CPE-738 vaults** — crypto-dep exception + human security review + OS keychain.
-- **CPE-1238 video/PDF/office thumbnails** — heavy native deps (ffmpeg/pdfium/office); dep-weight call.
-- **CPE-976/977/979/980 AI** — model key / provider.
-- **CPE-713 tray / CPE-716 drive-bay(eject/hotplug) / CPE-712 shell-default / CPE-717 SFTP-Mac** —
-  real hardware / OS-registration/elevation / a Mac.
-- **CPE-672/674 drag-OUT to OS** — needs a plugin spike + interactive-drag verification.
-- Effectively DONE (user-gated remainder only): CPE-688 (perf 10x real-HW benchmark), CPE-1000 (file-type).
+## USER-GATED frontier (do NOT start autonomously — need a user decision)
+- **CPE-1238** video/PDF/office thumbnails — heavy native deps (ffmpeg/pdfium); dep-weight call.
+- **CPE-976/977/979/980** AI — needs a model key/provider (can't build without it).
+- **CPE-713 tray / 716 drive-bay / 712 shell-default / 717 SFTP-Mac** — hardware / OS-registration / Mac.
+- **CPE-672/674** drag-OUT — plugin spike + interactive-drag verification.
+- Follow-ups (buildable, low priority): CPE-1252 (orphan-session sweep), CPE-1253/1254 (pre-existing
+  non-vault bugs the gui-smoke gate surfaced).
 
 ## To resume
-User names one to unblock ("do the vaults" / "add ffmpeg for video thumbs" / "here's a model key" /
-"build the mismatch-review view") → pick it straight up. GREP-FIRST before decomposing (features are
-often partly-built). Crew defaults/lessons: see this file's git history.
+User names one to unblock (like "do the vaults") → grep-first, decompose, build with the gauntlet.
