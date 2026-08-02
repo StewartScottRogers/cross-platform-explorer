@@ -4,7 +4,7 @@ title: "Content-search UI: bump generation token on rebuild + cover probe reject
 type: chore
 component: frontend
 priority: low
-status: Doing
+status: Done
 tags: ready
 created: 2026-08-02
 epic: CPE-976
@@ -30,3 +30,6 @@ Two non-blocking robustness items from the CPE-1263 review (PR #562), both narro
 
 ## Notes
 Low priority. Both flagged non-blocking by the CPE-1263 reviewer.
+
+## Work Log
+- 2026-08-02 — Worker (sonnet) bumped `gen` at the top of buildIndex() (drops in-flight search on rebuild) + 2 tests (rebuild-mid-search supersede, probe IPC-reject graceful). Verify: npm check 0 errors, 13/13 component, 1879 full suite. Foreman-verified the one-line fix + non-hollow tests (proportionate 2nd check for a review-derived trivial fix). Merged #564.
