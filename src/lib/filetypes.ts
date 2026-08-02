@@ -235,11 +235,19 @@ export function isImage(name: string): boolean {
 }
 
 /**
- * Extra non-photo formats the backend's thumbnail pipeline can render (CPE-1236, epic CPE-718):
- * `.psd` (flattened composite), `.svg` (rasterized), and `.ttf`/`.otf`/`.woff`/`.woff2` (a glyph-sheet
- * specimen) — see `cpe_server::thumb_source`'s dispatch, which this list mirrors.
+ * Extra non-photo formats the backend's thumbnail pipeline can render (epic CPE-718) — see
+ * `cpe_server::thumb_source`'s dispatch, which this list mirrors:
+ * `.psd`/`.svg`/`.ttf`/`.otf`/`.woff`/`.woff2` (CPE-1236); `.pdf` first page via pdfium (CPE-1256);
+ * and the video formats (representative frame via ffmpeg, CPE-1257 — mirrors
+ * `cpe_server::thumb_video::VIDEO_EXTENSIONS`). CPE-1267: pdf + video were missing here, so the grid
+ * never requested those thumbnails even though the backend could render them — keep in sync with the
+ * backend dispatch.
  */
-const THUMBNAIL_EXTRA_EXTS = new Set(["psd", "svg", "ttf", "otf", "woff", "woff2"]);
+const THUMBNAIL_EXTRA_EXTS = new Set([
+  "psd", "svg", "ttf", "otf", "woff", "woff2", // CPE-1236
+  "pdf", // CPE-1256
+  "mp4", "mov", "mkv", "webm", "avi", "m4v", "mpg", "mpeg", "wmv", "flv", // CPE-1257 (VIDEO_EXTENSIONS)
+]);
 
 /**
  * True when `name` is anything the backend thumbnail pipeline can render a tile for — every
