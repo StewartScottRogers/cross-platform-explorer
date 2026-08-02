@@ -107,12 +107,20 @@ describe("CPE-1216 — headless GUI smoke: the Spotlight overlay renders ranked,
     );
 
     // Sectioned (CPE-1216: "renders sectioned results"): the row lives under a "Files" section header.
-    const sectionLabels = $$(".sp-section-label");
-    const labelTexts: string[] = [];
-    // `.sp-section-label` is CSS `text-transform: uppercase`, so WebDriver getText() returns the
-    // rendered "FILES" — compare case-insensitively (same lower-casing as the highlight check below).
-    for await (const el of sectionLabels) labelTexts.push((await el.getText()).toLowerCase());
-    expect(labelTexts, "expected a 'Files' section header to render").to.include("files");
+    // WAIT for the FILES section rather than reading labels once: the seeded marker may also be in the
+    // frecency/recents store (a prior activation), whose "Recent" section renders INSTANTLY while the
+    // streamed file-name walk that produces the "Files" section arrives a beat later — a one-shot read
+    // can catch that gap and see only ["recent"]. Poll until "files" is present. `.sp-section-label` is
+    // CSS `text-transform: uppercase`, so WebDriver getText() returns "FILES" — compare lower-cased.
+    await browser.waitUntil(
+      async () => {
+        const labels: string[] = [];
+        const els = $$(".sp-section-label");
+        for await (const el of els) labels.push((await el.getText()).toLowerCase());
+        return labels.includes("files");
+      },
+      { timeout: 15_000, timeoutMsg: "expected a 'Files' section header to render (streamed file results)" },
+    );
 
     // Matched-position highlighting (CPE-1216: from `SpotResult.positions`): the typed "marker"
     // substring is wrapped in a <mark class="sp-hl"> inside the matched row, not just plain text.
