@@ -16,6 +16,11 @@
 
   let value = "";
   let fieldEl: HTMLInputElement;
+  // Submit-guard (CPE-1249 review #B): once a submit is in flight, the OK button disables and Enter is
+  // ignored, so an impatient double-click / Enter+click can't fire `submit` twice and launch two
+  // concurrent operations (e.g. two vault unlocks racing). One submit per shown dialog; callers that
+  // re-prompt do so by remounting this component (a fresh instance re-arms the guard).
+  let submitting = false;
 
   onMount(async () => {
     await tick();
@@ -23,6 +28,8 @@
   });
 
   function submit() {
+    if (submitting) return;
+    submitting = true;
     dispatch("submit", value);
   }
 
@@ -58,7 +65,7 @@
 
     <div class="actions">
       <button class="btn" data-testid="cancel-btn" on:click={() => dispatch("cancel")}>Cancel</button>
-      <button class="btn primary" data-testid="ok-btn" on:click={submit}>{confirmLabel}</button>
+      <button class="btn primary" data-testid="ok-btn" on:click={submit} disabled={submitting}>{confirmLabel}</button>
     </div>
   </div>
 </div>
@@ -115,4 +122,6 @@
     color: #fff;
   }
   .btn.primary:hover { background: var(--accent-hover); }
+  /* Submit-guard disabled state (theme-only, matches ShredConfirmDialog's disabled treatment). */
+  .btn:disabled { opacity: 0.6; cursor: default; }
 </style>

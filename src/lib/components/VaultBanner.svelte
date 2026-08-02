@@ -32,6 +32,12 @@
     display: flex;
     align-items: center;
     gap: 8px;
+    /* Own the shrink contract fully so the row can never overflow its pane: the banner itself shrinks
+       (`min-width: 0`), the name text truncates (`.vb-text` below), and the Lock button holds its size
+       (`flex: 0 0 auto`) — so the control always stays inside the visible pane at any width. */
+    min-width: 0;
+    max-width: 100%;
+    box-sizing: border-box;
     padding: 6px 10px;
     background: color-mix(in srgb, var(--accent) 10%, var(--surface));
     border: 1px solid color-mix(in srgb, var(--accent) 45%, var(--border));

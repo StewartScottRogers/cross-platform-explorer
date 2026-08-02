@@ -84,6 +84,12 @@ body {
   display: grid;
   /* menubar / app-toolbar / tabs / nav / commands / main / status */
   grid-template-rows: auto auto auto auto auto 1fr auto;
+  /* Single column, pinned to the viewport width. Without this the implicit `auto` column sizes to its
+     widest child's max-content and can exceed the viewport (a grid `auto` track isn't capped by the
+     container), letting a wide inner pane — e.g. an unlocked vault's deep app-cache path, CPE-1249 —
+     push the whole app wider than the window and scroll right-hand controls off-screen. `minmax(0, 1fr)`
+     caps the column at the container and lets inner panes shrink/scroll within it. */
+  grid-template-columns: minmax(0, 1fr);
   background: var(--bg);
 }
 
@@ -182,6 +188,11 @@ button:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
 /* address bar */
 .address {
   flex: 1;
+  /* `min-width: 0` lets this flex item shrink below its crumbs' intrinsic width so `overflow-x: auto`
+     actually scrolls the trail INSIDE the bar (as `scrollAddressToEnd` intends). Without it a deep path
+     (e.g. an unlocked vault's app-cache session dir, CPE-1249) forces the whole navbar — and the page —
+     wider than the viewport, causing horizontal overflow that pushes right-hand controls off-screen. */
+  min-width: 0;
   display: flex; align-items: center; gap: 2px;
   height: 34px; padding: 0 8px;
   margin-left: 4px;

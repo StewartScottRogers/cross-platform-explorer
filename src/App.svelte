@@ -1905,11 +1905,6 @@
   /** The blob path of the unlocked vault we're currently browsing inside, or `null` (drives the banner). */
   $: activeVaultBlob = vaultOfSessionPath($vaults, currentPath);
 
-  /** Bumped on every fresh vault passphrase prompt so the shared `PasswordPromptDialog` REMOUNTS
-   *  (`{#key vaultPromptNonce}` in the template) — otherwise a wrong-password re-prompt reuses the same
-   *  instance, keeping the (wrong) masked value and never re-firing auto-focus. */
-  let vaultPromptNonce = 0;
-
   /** Activation of a `.cpevault` row. If it's ALREADY unlocked, navigate straight back into its existing
    *  session dir — never re-unlock, which would allocate a fresh session dir and orphan the old plaintext
    *  on disk (review #1). Otherwise confirm it's really a vault via `vault_is` (magic header, not just the
@@ -1947,7 +1942,9 @@
    *  with distinct copy (wrong password vs damaged file) and records NO state (vaultStore records only on
    *  success), so there's never a half-open vault. The passphrase stays in memory only — never logged. */
   function promptForVaultPassphrase(entry: DirEntry, error = "") {
-    vaultPromptNonce++; // force a clean remount of the dialog (fresh empty field + refocus) each attempt
+    // A fresh object reference each attempt → the `{#key passwordPrompt}` template block remounts the
+    // dialog (clean empty field + refocus + re-armed submit guard), so a wrong-password re-prompt never
+    // reuses the stale masked value (CPE-1249 review #3).
     passwordPrompt = {
       title: `Unlock ${entry.name}`,
       message:
@@ -5001,11 +4998,10 @@
 {/if}
 
 {#if passwordPrompt}
-  <!-- `{#key vaultPromptNonce}` forces a fresh dialog instance on each vault attempt (CPE-1249 review #3):
-       a wrong-password re-prompt otherwise reuses the same instance, keeping the wrong masked value and
-       not re-firing auto-focus. Non-vault callers (archive extract) never bump the nonce, so their
-       existing behaviour is unchanged. -->
-  {#key vaultPromptNonce}
+  <!-- `{#key passwordPrompt}` remounts the dialog on every (re)prompt — each prompt assigns a fresh object
+       reference (vault unlock, archive extract, compress), so a wrong-password re-prompt starts clean:
+       empty field, re-fired auto-focus, and a re-armed submit guard (CPE-1249 review #3 + #B). -->
+  {#key passwordPrompt}
     <PasswordPromptDialog
       title={passwordPrompt.title}
       message={passwordPrompt.message}
@@ -5506,6 +5502,11 @@
      toolbar/keyboard acts on. The ::after is pointer-events:none so it never blocks clicks. */
   .pane-col {
     position: relative;
+    /* Grid items default to `min-width: auto`, which refuses to shrink below their content's min-content —
+       so a child with un-shrinkable content (e.g. the CPE-1249 vault banner's row) blows the whole grid
+       track past the viewport (horizontal overflow). `min-width: 0` lets the column shrink to its track and
+       its content truncate/scroll instead. */
+    min-width: 0;
   }
   .pane-active::after {
     content: "";
