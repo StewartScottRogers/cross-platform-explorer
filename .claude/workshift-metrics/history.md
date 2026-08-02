@@ -669,3 +669,21 @@ them; history.md stopped at 07-31). Authoritative record is the checkpoint commi
 - **Frontier note:** the "tapped" verdict was PRODUCT-work-without-a-user-decision; once the user made the decisions,
   large genuinely-headless veins opened (thumbnails; AI search via the pre-built local embedder needs NO key). Lesson:
   a user "you choose"/dep-approval unlocks shifts of real work even when the autonomous frontier reads dry.
+
+### 2026-08-02 (cont.) — SHIFT B shipped: AI file-content search (epic CPE-976 headless core)
+- **Shipped (2 PRs, opus-gauntleted, pushed):** CPE-1262 backend wiring (content_index_build streamed + content_search
+  + per-root persist over the pre-built SemanticIndex/local FakeEmbedder — NO key, #561) · CPE-1263 content-search UI
+  (ContentIndexSearchDialog: query + streamed build progress + ranked snippets + navigate; 11 jsdom tests; palette entry;
+  docs; i18n ×12 locales, #562).
+- **Gauntlet SAVE #2:** #561 opus reviewer caught a REAL reachable panic — snippet_for indexed the original char-vec
+  with a char-index computed from a SEPARATELY-lowercased string; Turkish `İ` (1→2 chars under lowercase) made start>end
+  → slice panic crashing content_search. Fixed via per-char positional lowering (len-aligned) + windows() match + 2
+  regression tests. 1 retry. (Shift A had a similar save on #560's bundled-path bug.) The ≥2-check gate is earning out.
+- **Key enabler:** the "AI needs a key" gate was FALSE for search — the pre-built local FakeEmbedder (bag-of-words) makes
+  content search work offline with no model/key. Framed honestly as file-CONTENT search, embedder-pluggable (a real model
+  is the deferred, user-gated upgrade). CPE-976 headless core done; better-embedder + pdf/docx text extraction deferred.
+- **Process note:** workers that move ticket files to Done in their PR while the Foreman also moved them to Doing in main
+  → squash merge DUPLICATES the ticket (both Doing/ + Done/ copies). Happened twice (CPE-1262/1263); cleaned up each time.
+  FIX GOING FORWARD: Foreman owns ticket-file lifecycle in the main tree; tell workers NOT to move ticket files.
+- **Tuned defaults held:** sonnet worker + opus reviewer; one heavy build at a time (serialize reviewer vs worker builds);
+  frontend slices verify fast (jsdom + vitest). GitHub Actions runners STALLED entire run → merged via local triad + --admin.
