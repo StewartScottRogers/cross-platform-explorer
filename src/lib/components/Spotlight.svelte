@@ -5,7 +5,11 @@
    * `spotlight_search`/`spotlight_frecent` backend cores (CPE-1214, built on CPE-937/948/952). Modeled
    * on `CommandPalette.svelte` (same overlay chrome, ↑/↓/Enter/Esc keyboard model, visible border,
    * theme vars) but sectioned like `InstantSearch.svelte`, with matched-character highlighting from
-   * `SpotResult.positions` (see `highlightByPositions`, spotlightSources.ts).
+   * `SpotResult.positions` (see `highlightByPositions`, spotlightSources.ts). Ranking still runs over
+   * the FULL path, but the rendered highlight is re-matched directly against just the row's basename
+   * (`rowHighlightPositions`/`basenameMatchPositions`, CPE-1223) — a stray subsequence hit in the
+   * directory prefix (e.g. the "m" in `.../Temp/...` for a query like "marker") would otherwise read as
+   * noise ahead of the real match run in the filename.
    *
    * Opened two ways (CPE-1215 owns the OS hotkey + backend event; this component is transport-agnostic
    * about *why* it's open): the host toggles a boolean prop-driven `{#if}` exactly like every other
@@ -25,7 +29,7 @@
   import type { Favorite } from "../types";
   import { isEnabled, type Command } from "../commandPalette";
   import { createHistory, type History } from "../history";
-  import { buildSources, streamFileHits, highlightByPositions } from "../spotlightSources";
+  import { buildSources, streamFileHits, highlightByPositions, rowHighlightPositions } from "../spotlightSources";
   import { recordVisit, defaultView } from "../spotlightFrecency";
   import * as settings from "../settings";
   import { t } from "../i18n";
@@ -52,6 +56,12 @@
   };
 
   let query = "";
+  // The (trimmed) query that actually produced `sections` — kept separate from the live-typed `query`
+  // above since a debounced/streamed result can still be landing for an older query than what's in the
+  // input right now (STREAMING.md's supersede-by-generation applies to `sections`, not to `query`
+  // itself). Used to re-match highlight positions against each row's basename (CPE-1223); mismatching
+  // it against the wrong query would produce nonsense highlight positions.
+  let searchedQuery = "";
   let sections: SpotSection[] = [];
   let active = 0; // flat index across every row in every section, in render order
   let loading = false;
@@ -87,7 +97,10 @@
     loading = true;
     try {
       const secs = await defaultView(visits, Math.floor(Date.now() / 1000));
-      if (gen === searchGen) sections = secs;
+      if (gen === searchGen) {
+        sections = secs;
+        searchedQuery = "";
+      }
     } finally {
       if (gen === searchGen) loading = false;
     }
@@ -97,7 +110,10 @@
     const sources = buildSources(paletteCommands, places, favorites, history, fileHits);
     try {
       const secs = await commands.spotlightSearch(q, sources, PER_KIND_CAP);
-      if (gen === searchGen) sections = secs;
+      if (gen === searchGen) {
+        sections = secs;
+        searchedQuery = q;
+      }
     } finally {
       if (gen === searchGen) loading = false;
     }
@@ -200,7 +216,7 @@
                 on:click={() => activate(row.i)}
               >
                 <span class="sp-text">
-                  {#each highlightByPositions(row.text, row.positions) as seg}{#if seg.match}<mark class="sp-hl">{seg.text}</mark>{:else}{seg.text}{/if}{/each}
+                  {#each highlightByPositions(row.text, rowHighlightPositions(row.text, row.positions, searchedQuery)) as seg}{#if seg.match}<mark class="sp-hl">{seg.text}</mark>{:else}{seg.text}{/if}{/each}
                 </span>
               </div>
             {/each}
