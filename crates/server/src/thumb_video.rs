@@ -20,11 +20,21 @@
 //! before that `fs::read` — because a video can be many gigabytes. This module always operates on the
 //! file `Path` directly; ffmpeg reads it itself as a subprocess.
 //!
-//! **ffmpeg resolution:** a bundled copy sitting next to the running executable (where ship-time
-//! packaging, CPE-1258, will place it) is tried first; a bare `ffmpeg` resolved via `PATH` is the dev
-//! fallback (this mirrors `thumb_pdf::resolve_bindings`'s bundled-then-system order). If neither is
-//! present, spawning the process itself fails with a normal `Err` — never a panic — and the caller's
-//! existing contract (no thumbnail -> generic type icon) takes over.
+//! **ffmpeg resolution:** the injected native-dep dir ([`set_native_dep_dir`]) is tried first, then a
+//! bundled copy sitting next to the running executable, then a bare `ffmpeg` resolved via `PATH` as
+//! the dev fallback (mirrors `thumb_pdf::resolve_bindings`'s resolution order). If none are present,
+//! spawning the process itself fails with a normal `Err` — never a panic — and the caller's existing
+//! contract (no thumbnail -> generic type icon) takes over.
+//!
+//! **Why "next to the executable" alone isn't enough (CPE-1258 fix):** Tauri's `bundle.resources`
+//! (where ship-time packaging stages ffmpeg) land in a *different* directory than the running
+//! executable on 2 of the 3 shipped platforms — macOS (`AppName.app/Contents/MacOS/<exe>` vs
+//! `AppName.app/Contents/Resources/`) and Linux (`usr/bin/<exe>` vs `usr/lib/<exe>/`); only Windows
+//! NSIS stages resources next to the exe. This crate is Tauri-free and can't call
+//! `app.path().resource_dir()` itself, so the app adapter resolves it and calls
+//! [`set_native_dep_dir`] once at startup (mirroring how the sidecar host resolves `resource_dir()`
+//! for its own bundled binaries in `src-tauri/src/lib.rs`) — tried before the `current_exe().parent()`
+//! guess.
 //!
 //! **Frame selection:** seeks ~1s into the clip first (`-ss 1`) to skip a likely black lead-in frame;
 //! very short or unusual clips where that offset yields no frame fall back to `-ss 0` (the very first
@@ -47,6 +57,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::OnceLock;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use image::DynamicImage;
@@ -131,12 +142,39 @@ fn run_ffmpeg_frame(ffmpeg: &Path, input: &Path, out: &Path, offset_secs: &str, 
     Ok(())
 }
 
-/// Resolves the ffmpeg binary: a bundled copy next to the running executable first (ship-time
-/// packaging, CPE-1258, drops it there), then a bare `ffmpeg` resolved via `PATH` as the dev fallback.
+/// The bundle-resource directory injected by the (Tauri-aware) app adapter — see the module doc's
+/// "CPE-1258 fix" note. `None` until [`set_native_dep_dir`] is called (dev builds / not yet wired),
+/// in which case resolution falls through to the `current_exe().parent()` / `PATH` guesses unchanged.
+static NATIVE_DEP_DIR: OnceLock<PathBuf> = OnceLock::new();
+
+/// Sets the directory the bundled `ffmpeg` executable was staged into, so [`resolve_ffmpeg_bin`] can
+/// find it there first — call once at app startup with `app.path().resource_dir()` (or wherever the
+/// `bundle.resources` ffmpeg entry actually lands). This crate is Tauri-free and can't resolve that
+/// path itself, hence the injection seam (mirrors `thumb_pdf::set_native_dep_dir`). Unlike pdfium,
+/// ffmpeg is resolved fresh on every call rather than cached, so — unlike the pdfium setter — there's
+/// no "must be called before first use" ordering requirement here; still, call it once at startup.
+/// A second call is a silent no-op.
+pub fn set_native_dep_dir(dir: PathBuf) {
+    let _ = NATIVE_DEP_DIR.set(dir);
+}
+
+/// Resolves the ffmpeg binary, trying each candidate path in order (see the module doc's resolution-
+/// order note), then finally a bare `ffmpeg` resolved via `PATH` as the last-resort dev fallback.
 /// Never fails outright — an unresolvable PATH fallback simply fails later at spawn time with a normal
-/// `Err`, mirroring `thumb_pdf::resolve_bindings`'s bundled-then-system order.
+/// `Err`.
 fn resolve_ffmpeg_bin() -> PathBuf {
     let exe_name = if cfg!(windows) { "ffmpeg.exe" } else { "ffmpeg" };
+
+    // (1) The injected native-dep dir — the CPE-1258 fix, and the ONLY correct location on
+    // macOS/Linux once the app adapter has set it (real installs).
+    if let Some(dir) = NATIVE_DEP_DIR.get() {
+        let bundled = dir.join(exe_name);
+        if bundled.exists() {
+            return bundled;
+        }
+    }
+    // (2) Next to the running executable — already correct on Windows; a dev-build fallback
+    // everywhere else (e.g. `cargo run` with a hand-copied binary).
     if let Ok(exe) = std::env::current_exe() {
         if let Some(dir) = exe.parent() {
             let bundled = dir.join(exe_name);
@@ -145,6 +183,8 @@ fn resolve_ffmpeg_bin() -> PathBuf {
             }
         }
     }
+    // (3) Bare `ffmpeg`/`ffmpeg.exe` resolved via PATH — the dev fallback (e.g. a system ffmpeg
+    // install, or CI's package-manager install for the real-render tests).
     PathBuf::from(exe_name)
 }
 

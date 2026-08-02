@@ -139,6 +139,63 @@ jobs:
         if: matrix.os == 'ubuntu-latest'
         run: sudo apt-get update && sudo apt-get install -y attr
 
+      # Native deps for the PDF (`pdf-thumb`, CPE-1256) + video (`video-thumb`, CPE-1257) thumbnail
+      # extractors' real-render tests (ship-enablement CPE-1258, epic CPE-718). Both extractors already
+      # SKIP (not fail) their real-render test when the native dep isn't resolvable
+      # (crates/server/src/thumb_pdf.rs / thumb_video.rs), so a hiccup in either install degrades to a
+      # skipped assertion rather than a red CI run — but installing them here on all three OSes means the
+      # real assertions actually run instead of skipping. CI-only installs: ffmpeg's package-manager
+      # build's exact license/feature-set doesn't matter here (never distributed) — the shipped binary is
+      # a separately pinned LGPL build provisioned in release-sidecar.yml.
+      - name: Install ffmpeg (video-thumb real-render test, Linux)
+        if: matrix.os == 'ubuntu-latest'
+        run: sudo apt-get update && sudo apt-get install -y ffmpeg
+
+      - name: Install ffmpeg (video-thumb real-render test, macOS)
+        if: matrix.os == 'macos-latest'
+        run: command -v ffmpeg >/dev/null 2>&1 || brew install ffmpeg
+
+      - name: Install ffmpeg (video-thumb real-render test, Windows)
+        if: matrix.os == 'windows-latest'
+        run: choco install ffmpeg -y
+
+      # pdfium prebuilt (BSD-3-Clause, bblanchon/pdfium-binaries) staged where
+      # `Pdfium::bind_to_system_library()` resolves it via the OS's normal dynamic-library search path
+      # (LD_LIBRARY_PATH / DYLD_LIBRARY_PATH / PATH) — CI-only use, same pinned release the shipped
+      # binary's pdfium is provisioned from in release-sidecar.yml.
+      - name: Install pdfium prebuilt (pdf-thumb real-render test, Linux)
+        if: matrix.os == 'ubuntu-latest'
+        shell: bash
+        env:
+          PDFIUM_TAG: "chromium/7961"
+        run: |
+          mkdir -p "$RUNNER_TEMP/pdfium"
+          curl -sSL -o "$RUNNER_TEMP/pdfium.tgz" "https://github.com/bblanchon/pdfium-binaries/releases/download/${PDFIUM_TAG}/pdfium-linux-x64.tgz"
+          tar xzf "$RUNNER_TEMP/pdfium.tgz" -C "$RUNNER_TEMP/pdfium" lib/libpdfium.so
+          echo "LD_LIBRARY_PATH=$RUNNER_TEMP/pdfium/lib:${LD_LIBRARY_PATH:-}" >> "$GITHUB_ENV"
+
+      - name: Install pdfium prebuilt (pdf-thumb real-render test, macOS)
+        if: matrix.os == 'macos-latest'
+        shell: bash
+        env:
+          PDFIUM_TAG: "chromium/7961"
+        run: |
+          mkdir -p "$RUNNER_TEMP/pdfium"
+          curl -sSL -o "$RUNNER_TEMP/pdfium.tgz" "https://github.com/bblanchon/pdfium-binaries/releases/download/${PDFIUM_TAG}/pdfium-mac-arm64.tgz"
+          tar xzf "$RUNNER_TEMP/pdfium.tgz" -C "$RUNNER_TEMP/pdfium" lib/libpdfium.dylib
+          echo "DYLD_LIBRARY_PATH=$RUNNER_TEMP/pdfium/lib:${DYLD_LIBRARY_PATH:-}" >> "$GITHUB_ENV"
+
+      - name: Install pdfium prebuilt (pdf-thumb real-render test, Windows)
+        if: matrix.os == 'windows-latest'
+        shell: bash
+        env:
+          PDFIUM_TAG: "chromium/7961"
+        run: |
+          mkdir -p "$RUNNER_TEMP/pdfium"
+          curl -sSL -o "$RUNNER_TEMP/pdfium.tgz" "https://github.com/bblanchon/pdfium-binaries/releases/download/${PDFIUM_TAG}/pdfium-win-x64.tgz"
+          tar xzf "$RUNNER_TEMP/pdfium.tgz" -C "$RUNNER_TEMP/pdfium" bin/pdfium.dll
+          echo "$RUNNER_TEMP/pdfium/bin" >> "$GITHUB_PATH"
+
       - name: Rust cache
         uses: swatinem/rust-cache@v2
         with:
@@ -176,6 +233,12 @@ jobs:
           # above stays indexer-free (the "small when off" delete-test).
           cargo clippy --all-targets --features index -- -D warnings
           cargo test --features index
+          # The opt-in PDF (pdfium-render, CPE-1256) + video (bundled-ffmpeg shell-out, CPE-1257)
+          # thumbnail extractors, shipped for real by CPE-1258 — lint + test both together; the default
+          # build above stays extractor-free (the "small when off" delete-test). The native deps
+          # installed above let the real-render tests actually assert instead of skipping.
+          cargo clippy --all-targets --features pdf-thumb,video-thumb -- -D warnings
+          cargo test --features pdf-thumb,video-thumb
 
       - name: net — clippy + test
         # The headless network transport loop (Client(Rust) proxy + reference Server,

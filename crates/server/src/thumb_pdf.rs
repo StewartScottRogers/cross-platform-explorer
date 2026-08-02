@@ -17,14 +17,26 @@
 //! **Runtime lib resolution:** `pdfium-render`'s `Pdfium::new()` binds a *process-global* static
 //! exactly once — a second call panics (`assert!`) — so [`pdfium`] lazily binds behind a
 //! [`OnceLock`] and every call reuses the same instance (or the same cached bind failure).
-//! Resolution order: (1) a `pdfium` dynamic library sitting next to the running executable (where
-//! ship-time bundling, CPE-1258, drops it), then (2) the OS's system-installed pdfium, if any. If
-//! neither is present, the bind attempt returns a clear `Err` and every render call fails the same
-//! way — never a panic; the thumbnail pipeline's existing "no thumbnail → generic type icon"
-//! fallback handles it. The underlying C library isn't documented as safe for concurrent calls across
-//! different documents, so actual pdfium calls (document load + render) additionally serialize behind
-//! [`PDFIUM_CALL_LOCK`] — cheap, since a thumbnail render is already I/O/CPU-bound, not contended, and
-//! the thumbnail pipeline fans requests out across `spawn_blocking` threads.
+//! Resolution order: (1) the injected native-dep dir ([`set_native_dep_dir`]) if the app adapter has
+//! set one, (2) a `pdfium` dynamic library sitting next to the running executable (a dev-build
+//! fallback — see the note below on why it's not sufficient alone), then (3) the OS's
+//! system-installed pdfium, if any. If none are present, the bind attempt returns a clear `Err` and
+//! every render call fails the same way — never a panic; the thumbnail pipeline's existing "no
+//! thumbnail → generic type icon" fallback handles it. The underlying C library isn't documented as
+//! safe for concurrent calls across different documents, so actual pdfium calls (document load +
+//! render) additionally serialize behind [`PDFIUM_CALL_LOCK`] — cheap, since a thumbnail render is
+//! already I/O/CPU-bound, not contended, and the thumbnail pipeline fans requests out across
+//! `spawn_blocking` threads.
+//!
+//! **Why "next to the executable" alone isn't enough (CPE-1258 fix):** Tauri's `bundle.resources`
+//! (where ship-time packaging stages pdfium) land in a *different* directory than the running
+//! executable on 2 of the 3 shipped platforms — macOS (`AppName.app/Contents/MacOS/<exe>` vs
+//! `AppName.app/Contents/Resources/`) and Linux (`usr/bin/<exe>` vs `usr/lib/<exe>/`); only Windows
+//! NSIS stages resources next to the exe. This crate is Tauri-free and can't call
+//! `app.path().resource_dir()` itself, so the app adapter resolves it and calls
+//! [`set_native_dep_dir`] once at startup (mirroring how the sidecar host resolves
+//! `resource_dir()` for its own bundled binaries in `src-tauri/src/lib.rs`) — that's candidate (1)
+//! above, tried before the `current_exe().parent()` guess.
 //!
 //! Bomb-guard (mirrors `thumb_svg`'s `MAX_SVG_DIMENSION`): a PDF page's declared `MediaBox` size (in
 //! points) is clamped before any render target is allocated, so a crafted absurd page size can't
@@ -53,6 +65,22 @@ static PDFIUM_CALL_LOCK: Mutex<()> = Mutex::new(());
 /// The process-wide pdfium binding, resolved (and cached — success or failure) on first use.
 static PDFIUM: OnceLock<Result<Pdfium, String>> = OnceLock::new();
 
+/// The bundle-resource directory injected by the (Tauri-aware) app adapter — see the module doc's
+/// "CPE-1258 fix" note. `None` until [`set_native_dep_dir`] is called (dev builds / not yet wired),
+/// in which case resolution falls through to the `current_exe().parent()` guess unchanged.
+static NATIVE_DEP_DIR: OnceLock<PathBuf> = OnceLock::new();
+
+/// Sets the directory the bundled pdfium library was staged into, so [`resolve_bindings`] can find it
+/// there first — call once at app startup with `app.path().resource_dir()` (or wherever the
+/// `bundle.resources` pdfium entry actually lands), **before** the first thumbnail request touches
+/// this module (the binding itself is resolved lazily and cached on first use, so any call after that
+/// point is too late). This crate is Tauri-free and can't resolve that path itself, hence the
+/// injection seam. A second call is a silent no-op — startup only ever calls this once, so that's not
+/// expected to matter in practice.
+pub fn set_native_dep_dir(dir: PathBuf) {
+    let _ = NATIVE_DEP_DIR.set(dir);
+}
+
 /// Returns the shared, lazily-bound [`Pdfium`] instance, or the cached error from the first (and
 /// only) bind attempt. Never panics even if pdfium can't be found — a missing/unloadable library is a
 /// normal, expected outcome (pdfium isn't installed on most systems) reported as an `Err`.
@@ -66,13 +94,12 @@ fn pdfium() -> Result<&'static Pdfium, String> {
         .map_err(|e| e.clone())
 }
 
-/// Resolves the pdfium dynamic library: first a copy bundled next to the running executable (where
-/// ship-time packaging, CPE-1258, places it), then the OS's system-installed pdfium as a fallback
-/// (useful for local dev on a platform that packages pdfium, e.g. some Linux distros).
+/// Resolves the pdfium dynamic library, trying each candidate path in order (see the module doc's
+/// resolution-order note), then finally the OS's system-installed pdfium.
 fn resolve_bindings() -> Result<Box<dyn PdfiumLibraryBindings>, PdfiumError> {
-    if let Some(bundled) = bundled_library_path() {
-        if bundled.exists() {
-            if let Ok(bindings) = Pdfium::bind_to_library(&bundled) {
+    for candidate in bundled_library_path_candidates() {
+        if candidate.exists() {
+            if let Ok(bindings) = Pdfium::bind_to_library(&candidate) {
                 return Ok(bindings);
             }
         }
@@ -80,13 +107,21 @@ fn resolve_bindings() -> Result<Box<dyn PdfiumLibraryBindings>, PdfiumError> {
     Pdfium::bind_to_system_library()
 }
 
-/// The platform-specific pdfium library filename (e.g. `pdfium.dll` / `libpdfium.so` /
-/// `libpdfium.dylib`) resolved next to the current executable, or `None` if the executable's own
-/// path can't be determined.
-fn bundled_library_path() -> Option<PathBuf> {
-    let exe = std::env::current_exe().ok()?;
-    let dir = exe.parent()?;
-    Some(Pdfium::pdfium_platform_library_name_at_path(dir))
+/// Every place a bundled pdfium library might sit, in resolution order: the injected native-dep dir
+/// first (real installs, once [`set_native_dep_dir`] has run — this is the CPE-1258 fix, since that's
+/// the ONLY correct location on macOS/Linux), then next to the running executable (already correct on
+/// Windows; a dev-build fallback everywhere else, e.g. `cargo run` with a hand-copied library).
+fn bundled_library_path_candidates() -> Vec<PathBuf> {
+    let mut candidates = Vec::with_capacity(2);
+    if let Some(dir) = NATIVE_DEP_DIR.get() {
+        candidates.push(Pdfium::pdfium_platform_library_name_at_path(dir));
+    }
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(dir) = exe.parent() {
+            candidates.push(Pdfium::pdfium_platform_library_name_at_path(dir));
+        }
+    }
+    candidates
 }
 
 /// Renders page 0 of `bytes` (the contents of a `.pdf` file) to an RGBA image whose longest edge is

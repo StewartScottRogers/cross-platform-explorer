@@ -35,12 +35,20 @@ jobs:
       fail-fast: false
       matrix:
         include:
+          # `pdfium_overlay` selects the CPE-1258 pdfium resource overlay (a separate small config
+          # layered in with its own --config flag): pdfium's dynamic-library filename differs by OS
+          # (pdfium.dll / libpdfium.so / libpdfium.dylib) even though `overlay` (windows/unix) is
+          # shared between Linux and macOS for the OTHER sidecar resources — so pdfium needs its own,
+          # more precise per-OS split.
           - platform: windows-latest
             overlay: windows
+            pdfium_overlay: windows
           - platform: ubuntu-latest
             overlay: unix
+            pdfium_overlay: linux
           - platform: macos-latest
             overlay: unix
+            pdfium_overlay: macos
     runs-on: ${{ matrix.platform }}
     steps:
       - uses: actions/checkout@v4
@@ -137,6 +145,93 @@ jobs:
             cp "$bin" "sidecar/$s/target/release/$s.pristine"
           done
 
+      # --- PDF/video thumbnail native deps (CPE-1258, epic CPE-718) ---
+      # `pdf-thumb` + `video-thumb` are now ON for this build (src-tauri/Cargo.toml). Without the real
+      # native binaries staged here, the app still builds and runs fine — both extractors already fail
+      # gracefully to the generic type icon — but every PDF/video thumbnail would silently degrade in
+      # the shipped app. Staged at the exact resource source paths the sidecar-conf overlays declare:
+      # `../native-deps/ffmpeg/<windows|unix>/…` (ffmpeg.exe/ffmpeg, already referenced since CPE-1257)
+      # and the new `../native-deps/pdfium/<windows|unix>/…` (this ticket's pdfium overlays). Pinned,
+      # versioned sources — bump both the tag/version pins AND the matching download URLs together if
+      # ever updated:
+      #   - pdfium: bblanchon/pdfium-binaries release chromium/7961 (BSD-3-Clause), dynamically loaded
+      #     by pdfium-render at runtime — never linked into our binary (crates/server/src/thumb_pdf.rs).
+      #   - ffmpeg (Windows/Linux): BtbN/FFmpeg-Builds release autobuild-2026-08-01-13-21, the
+      #     ffmpeg-n8.1.2 "lgpl" static build (`--disable-gpl --disable-nonfree` — no copyleft/patent-
+      #     encumbered external codec libs linked in). Shelled out to as a separate bundled program
+      #     (mere aggregation — its license never attaches to our signed binary); its LICENSE.txt is
+      #     staged alongside so it's carried into the bundle, satisfying the LGPL aggregation notice
+      #     requirement.
+      #   - ffmpeg (macOS): BtbN doesn't publish macOS builds, and the third-party static macOS builds
+      #     we could find are GPL (link libx264/libx265 etc), not LGPL — so instead this compiles a
+      #     minimal LGPL ffmpeg from the OFFICIAL ffmpeg.org source at the SAME n8.1.2 tag used for
+      #     Windows/Linux, with `--disable-gpl --disable-nonfree` (ffmpeg's own built-in decoders cover
+      #     every extension `thumb_video::VIDEO_EXTENSIONS` claims — H.264/HEVC/VP8/VP9/etc — with no
+      #     GPL library needed for DECODE-only use). This leg is the one part of this step that could
+      #     not be dry-run on a real macOS runner while authoring this ticket (CPE-1258) — watch its
+      #     first live run closely.
+      - name: Stage native deps — ffmpeg + pdfium (CPE-1258)
+        shell: bash
+        env:
+          PDFIUM_TAG: "chromium/7961"
+          FFMPEG_BUILD_TAG: "autobuild-2026-08-01-13-21"
+          FFMPEG_BUILD_VER: "n8.1.2-34-g9b6c8969e0"
+          FFMPEG_SRC_TAG: "n8.1.2"
+        run: |
+          set -euo pipefail
+          mkdir -p native-deps/ffmpeg/windows native-deps/ffmpeg/unix native-deps/pdfium/windows native-deps/pdfium/unix
+
+          if [ "${{ matrix.platform }}" = "windows-latest" ]; then
+            echo "--- pdfium (Windows) ---"
+            curl -sSL -o pdfium.tgz "https://github.com/bblanchon/pdfium-binaries/releases/download/${PDFIUM_TAG}/pdfium-win-x64.tgz"
+            tar xzf pdfium.tgz bin/pdfium.dll LICENSE
+            mv bin/pdfium.dll native-deps/pdfium/windows/pdfium.dll
+            mv LICENSE native-deps/pdfium/windows/LICENSE.txt
+
+            echo "--- ffmpeg (Windows, BtbN LGPL static) ---"
+            curl -sSL -o ffmpeg.zip "https://github.com/BtbN/FFmpeg-Builds/releases/download/${FFMPEG_BUILD_TAG}/ffmpeg-${FFMPEG_BUILD_VER}-win64-lgpl-8.1.zip"
+            unzip -q ffmpeg.zip "*/bin/ffmpeg.exe" "*/LICENSE.txt"
+            mv */bin/ffmpeg.exe native-deps/ffmpeg/windows/ffmpeg.exe
+            mv */LICENSE.txt native-deps/ffmpeg/windows/LICENSE.txt
+
+          elif [ "${{ matrix.platform }}" = "ubuntu-latest" ]; then
+            echo "--- pdfium (Linux) ---"
+            curl -sSL -o pdfium.tgz "https://github.com/bblanchon/pdfium-binaries/releases/download/${PDFIUM_TAG}/pdfium-linux-x64.tgz"
+            tar xzf pdfium.tgz lib/libpdfium.so LICENSE
+            mv lib/libpdfium.so native-deps/pdfium/unix/libpdfium.so
+            mv LICENSE native-deps/pdfium/unix/LICENSE.txt
+
+            echo "--- ffmpeg (Linux, BtbN LGPL static) ---"
+            curl -sSL -o ffmpeg.tar.xz "https://github.com/BtbN/FFmpeg-Builds/releases/download/${FFMPEG_BUILD_TAG}/ffmpeg-${FFMPEG_BUILD_VER}-linux64-lgpl-8.1.tar.xz"
+            mkdir -p ffmpeg-extract
+            tar xJf ffmpeg.tar.xz -C ffmpeg-extract --strip-components=1
+            mv ffmpeg-extract/bin/ffmpeg native-deps/ffmpeg/unix/ffmpeg
+            mv ffmpeg-extract/LICENSE.txt native-deps/ffmpeg/unix/LICENSE.txt
+
+          elif [ "${{ matrix.platform }}" = "macos-latest" ]; then
+            echo "--- pdfium (macOS arm64) ---"
+            curl -sSL -o pdfium.tgz "https://github.com/bblanchon/pdfium-binaries/releases/download/${PDFIUM_TAG}/pdfium-mac-arm64.tgz"
+            tar xzf pdfium.tgz lib/libpdfium.dylib LICENSE
+            mv lib/libpdfium.dylib native-deps/pdfium/unix/libpdfium.dylib
+            mv LICENSE native-deps/pdfium/unix/LICENSE.txt
+            xattr -d com.apple.quarantine native-deps/pdfium/unix/libpdfium.dylib 2>/dev/null || true
+
+            echo "--- ffmpeg (macOS arm64, built from official source, LGPL-only) ---"
+            git clone --depth 1 --branch "$FFMPEG_SRC_TAG" https://github.com/FFmpeg/FFmpeg.git ffmpeg-src
+            (
+              cd ffmpeg-src
+              ./configure --disable-gpl --disable-nonfree --disable-doc --disable-debug \
+                --disable-ffplay --disable-ffprobe
+              make -j"$(sysctl -n hw.ncpu)"
+            )
+            mv ffmpeg-src/ffmpeg native-deps/ffmpeg/unix/ffmpeg
+            cp ffmpeg-src/COPYING.LGPLv2.1 native-deps/ffmpeg/unix/LICENSE.txt
+          fi
+
+          chmod +x native-deps/ffmpeg/windows/ffmpeg.exe native-deps/ffmpeg/unix/ffmpeg 2>/dev/null || true
+          echo "Staged native-deps:"
+          find native-deps -type f -exec ls -la {} \;
+
       # --- Windows code signing (CPE-1131 — self-signed) ---
       # Same conditional pattern as release.yml: sign only when the cert secret is present, else skip
       # (unsigned, still green). The bundle.windows patch lands on the BASE tauri.conf.json; the sidecar
@@ -197,8 +292,10 @@ jobs:
           releaseDraft: true
           prerelease: false
           # Build with the sidecar feature + the base overlay (product identity) + the per-OS
-          # overlay (which bundles the correctly-named sidecar binary + manifest + agent catalog).
-          args: --features sidecar-platform --config src-tauri/tauri.sidecar.conf.json --config src-tauri/tauri.sidecar.${{ matrix.overlay }}.conf.json
+          # overlay (which bundles the correctly-named sidecar binary + manifest + agent catalog) +
+          # the CPE-1258 pdfium overlay (bundles the correctly-named pdfium dynamic library — its
+          # filename differs by OS even where the other overlay is shared between Linux and macOS).
+          args: --features sidecar-platform --config src-tauri/tauri.sidecar.conf.json --config src-tauri/tauri.sidecar.${{ matrix.overlay }}.conf.json --config src-tauri/tauri.sidecar.pdfium.${{ matrix.pdfium_overlay }}.conf.json
           # This IS the auto-update channel (CPE-768): emit + upload latest.json. Combined with
           # createUpdaterArtifacts:true in tauri.sidecar.conf.json, the manifest references the
           # correctly-named `…Sidecar…` installers, signed with the shared updater key.
