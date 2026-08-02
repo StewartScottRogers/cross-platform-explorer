@@ -2491,6 +2491,94 @@ async closePty(sessionId: number) : Promise<Result<null, string>> {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
 }
+},
+/**
+ * Is `path` a CPE vault? Detected by reading its `CPEVLT1` magic header, not its extension. A quick
+ * bounded read, but still `spawn_blocking` since it opens a (possibly remote/slow) file (CPE-760/761).
+ */
+async vaultIs(path: string) : Promise<Result<boolean, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("vault_is", { path }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * Seal `folder` into a `.cpevault` blob at `dest`. `shred_original` (default from the caller) destroys the
+ * plaintext original — but ONLY after the encrypted copy is proven recoverable by a full decrypt
+ * round-trip (the verify-before-shred safety invariant lives in `vault_manager::create_vault`). Async +
+ * `spawn_blocking`: scrypt KDF (~1s) + a full tree walk/encrypt/write (CPE-760/761).
+ */
+async vaultCreate(folder: string, dest: string, passphrase: string, shredOriginal: boolean) : Promise<Result<null, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("vault_create", { folder, dest, passphrase, shredOriginal }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * Unlock the vault at `blob_path` with `passphrase`, decrypting its tree into `session_dir` and recording
+ * the unlocked state in the managed registry. Async + `spawn_blocking`: scrypt (~1s) + a full
+ * decrypt/extract to disk (CPE-760/761).
+ */
+async vaultUnlock(blobPath: string, passphrase: string, sessionDir: string) : Promise<Result<null, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("vault_unlock", { blobPath, passphrase, sessionDir }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * Lock the vault at `blob_path`: drop its unlocked state and securely wipe (shred + remove) its session
+ * directory so no plaintext lingers. Async + `spawn_blocking`: shreds + removes files (CPE-760/761).
+ */
+async vaultLock(blobPath: string) : Promise<Result<null, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("vault_lock", { blobPath }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * The lifecycle status of `blob_path`: is-vault (by magic), unlocked (from the registry), and whether a
+ * passphrase is saved in the keychain. Async + `spawn_blocking`: reads the file header + queries the OS
+ * credential store (CPE-760/761). Carries no secret value.
+ */
+async vaultStatus(blobPath: string) : Promise<Result<VaultStatus, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("vault_status", { blobPath }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * Save `passphrase` for the vault at `blob_path` in the OS keychain (the only place it persists). Async +
+ * `spawn_blocking`: the credential store is a blocking OS call (CPE-760/761).
+ */
+async vaultRememberPassphrase(blobPath: string, passphrase: string) : Promise<Result<null, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("vault_remember_passphrase", { blobPath, passphrase }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * Forget any saved passphrase for the vault at `blob_path`. Async + `spawn_blocking`: a blocking OS
+ * credential-store call (CPE-760/761).
+ */
+async vaultForgetPassphrase(blobPath: string) : Promise<Result<null, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("vault_forget_passphrase", { blobPath }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
 }
 }
 
@@ -3757,6 +3845,22 @@ export type TransferKind = "copy" | "move"
  * (`isDir`).
  */
 export type TreeNode = { name: string; isDir: boolean; size?: number | null; modified?: number | null; children?: TreeNode[] | null }
+/**
+ * A snapshot of a vault path's lifecycle state for the UI (CPE-1248). Carries no secret value.
+ */
+export type VaultStatus = { 
+/**
+ * The path is a `.cpevault` blob (recognised by its magic header, not its extension).
+ */
+is_vault: boolean; 
+/**
+ * The vault is currently unlocked (its plaintext is extracted in a live session directory).
+ */
+unlocked: boolean; 
+/**
+ * A passphrase for this vault is saved in the OS keychain.
+ */
+has_stored_passphrase: boolean }
 /**
  * The video-tag columns a user can add to the details view — each maps to a friendly key
  * [`crate::video_meta_read::read_mp4`] emits.

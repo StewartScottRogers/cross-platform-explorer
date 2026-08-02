@@ -4922,6 +4922,160 @@ async fn close_pty(state: tauri::State<'_, pty::PtyRegistry>, session_id: u64) -
         .map_err(|e| e.to_string())?
 }
 
+// ---- Encrypted-vault lifecycle + keychain seam (CPE-1248, epic CPE-738) ----------------------------
+// Thin async dispatchers into `cpe_server::vault_manager` (the Tauri-free lifecycle over the crypto core
+// `vault_crypto`, CPE-1247). Every command that touches crypto (scrypt ~1s) or the filesystem runs on a
+// `spawn_blocking` thread so the UI thread never stalls (CPE-760/761). Passphrases arrive as a `String`
+// over IPC and are wrapped into an `age::secrecy::SecretString` at this boundary — never logged, never
+// written to a plaintext file; the ONLY persistence is the OS keychain via `KeyringBackend` below.
+// Unlocked-session state lives in the managed `VaultRegistry` (like `TerminalDockState`/`PtyRegistry`).
+
+/// The real OS keychain backend for vault passphrases, via the cross-platform `keyring` crate — Windows
+/// Credential Manager, macOS Keychain, Linux Secret Service (D-Bus). Mirrors the sidecar's proven
+/// `KeyringBackend` (CPE-268/322): the code is identical across targets; only the per-OS `keyring`
+/// feature (in `Cargo.toml`) differs. This adapter is the app's concrete
+/// `cpe_server::vault_manager::SecretAccess`, keeping `cpe-server` itself keyring- and Tauri-free.
+#[cfg(any(windows, target_os = "macos", target_os = "linux"))]
+struct KeyringBackend;
+
+#[cfg(any(windows, target_os = "macos", target_os = "linux"))]
+impl cpe_server::vault_manager::SecretAccess for KeyringBackend {
+    fn set(&self, service: &str, account: &str, secret: &str) -> Result<(), String> {
+        keyring::Entry::new(service, account)
+            .and_then(|e| e.set_password(secret))
+            .map_err(|e| e.to_string())
+    }
+
+    fn get(&self, service: &str, account: &str) -> Result<Option<String>, String> {
+        match keyring::Entry::new(service, account).and_then(|e| e.get_password()) {
+            Ok(pw) => Ok(Some(pw)),
+            Err(keyring::Error::NoEntry) => Ok(None),
+            Err(e) => Err(e.to_string()),
+        }
+    }
+
+    fn delete(&self, service: &str, account: &str) -> Result<(), String> {
+        match keyring::Entry::new(service, account).and_then(|e| e.delete_credential()) {
+            Ok(()) | Err(keyring::Error::NoEntry) => Ok(()),
+            Err(e) => Err(e.to_string()),
+        }
+    }
+}
+
+/// Is `path` a CPE vault? Detected by reading its `CPEVLT1` magic header, not its extension. A quick
+/// bounded read, but still `spawn_blocking` since it opens a (possibly remote/slow) file (CPE-760/761).
+#[tauri::command]
+#[cfg_attr(feature = "specta-bindings", specta::specta)]
+async fn vault_is(path: String) -> Result<bool, String> {
+    tauri::async_runtime::spawn_blocking(move || cpe_server::vault_manager::is_vault(Path::new(&path)))
+        .await
+        .map_err(|e| e.to_string())
+}
+
+/// Seal `folder` into a `.cpevault` blob at `dest`. `shred_original` (default from the caller) destroys the
+/// plaintext original — but ONLY after the encrypted copy is proven recoverable by a full decrypt
+/// round-trip (the verify-before-shred safety invariant lives in `vault_manager::create_vault`). Async +
+/// `spawn_blocking`: scrypt KDF (~1s) + a full tree walk/encrypt/write (CPE-760/761).
+#[tauri::command]
+#[cfg_attr(feature = "specta-bindings", specta::specta)]
+async fn vault_create(
+    folder: String,
+    dest: String,
+    passphrase: String,
+    shred_original: bool,
+) -> Result<(), String> {
+    let pass = cpe_server::vault_manager::PassphraseSecret::from(passphrase);
+    tauri::async_runtime::spawn_blocking(move || {
+        let opts = cpe_server::vault_manager::CreateOpts { shred_original, ..Default::default() };
+        cpe_server::vault_manager::create_vault(Path::new(&folder), Path::new(&dest), &pass, &opts)
+            .map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+/// Unlock the vault at `blob_path` with `passphrase`, decrypting its tree into `session_dir` and recording
+/// the unlocked state in the managed registry. Async + `spawn_blocking`: scrypt (~1s) + a full
+/// decrypt/extract to disk (CPE-760/761).
+#[tauri::command]
+#[cfg_attr(feature = "specta-bindings", specta::specta)]
+async fn vault_unlock(
+    state: tauri::State<'_, cpe_server::vault_manager::VaultRegistry>,
+    blob_path: String,
+    passphrase: String,
+    session_dir: String,
+) -> Result<(), String> {
+    let registry = state.inner().clone();
+    let pass = cpe_server::vault_manager::PassphraseSecret::from(passphrase);
+    tauri::async_runtime::spawn_blocking(move || {
+        registry
+            .unlock(Path::new(&blob_path), &pass, Path::new(&session_dir))
+            .map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+/// Lock the vault at `blob_path`: drop its unlocked state and securely wipe (shred + remove) its session
+/// directory so no plaintext lingers. Async + `spawn_blocking`: shreds + removes files (CPE-760/761).
+#[tauri::command]
+#[cfg_attr(feature = "specta-bindings", specta::specta)]
+async fn vault_lock(
+    state: tauri::State<'_, cpe_server::vault_manager::VaultRegistry>,
+    blob_path: String,
+) -> Result<(), String> {
+    let registry = state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        registry.lock(Path::new(&blob_path)).map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+/// The lifecycle status of `blob_path`: is-vault (by magic), unlocked (from the registry), and whether a
+/// passphrase is saved in the keychain. Async + `spawn_blocking`: reads the file header + queries the OS
+/// credential store (CPE-760/761). Carries no secret value.
+#[tauri::command]
+#[cfg_attr(feature = "specta-bindings", specta::specta)]
+async fn vault_status(
+    state: tauri::State<'_, cpe_server::vault_manager::VaultRegistry>,
+    blob_path: String,
+) -> Result<cpe_server::vault_manager::VaultStatus, String> {
+    let registry = state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let path = Path::new(&blob_path);
+        let unlocked = registry.is_unlocked(path);
+        Ok(cpe_server::vault_manager::compute_status(path, unlocked, &KeyringBackend))
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+/// Save `passphrase` for the vault at `blob_path` in the OS keychain (the only place it persists). Async +
+/// `spawn_blocking`: the credential store is a blocking OS call (CPE-760/761).
+#[tauri::command]
+#[cfg_attr(feature = "specta-bindings", specta::specta)]
+async fn vault_remember_passphrase(blob_path: String, passphrase: String) -> Result<(), String> {
+    let pass = cpe_server::vault_manager::PassphraseSecret::from(passphrase);
+    tauri::async_runtime::spawn_blocking(move || {
+        cpe_server::vault_manager::remember_passphrase(&KeyringBackend, Path::new(&blob_path), &pass)
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+/// Forget any saved passphrase for the vault at `blob_path`. Async + `spawn_blocking`: a blocking OS
+/// credential-store call (CPE-760/761).
+#[tauri::command]
+#[cfg_attr(feature = "specta-bindings", specta::specta)]
+async fn vault_forget_passphrase(blob_path: String) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        cpe_server::vault_manager::forget_passphrase(&KeyringBackend, Path::new(&blob_path))
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
 // ---- User-defined command exec (CPE-783, epic CPE-711) --------------------------------------------
 // Runs a user's resolved command line (built by userCommands.resolveCommand / cmdTemplate, CPE-781) and
 // returns its captured output + exit code. Executed through the platform shell (`cmd /C` on Windows,
@@ -8532,6 +8686,11 @@ pub fn run() {
     builder = builder.manage(cpe_server::terminal_tabs::TerminalDockState::default());
     builder = builder.manage(pty::PtyRegistry::default());
 
+    // Encrypted-vault unlocked-session state (CPE-1248, epic CPE-738): the blob→session-dir map behind
+    // vault unlock/lock. Always registered — vaults are a core-explorer feature — but empty until a vault
+    // is unlocked, so it costs nothing (no plaintext, no session dir) when no vault is open.
+    builder = builder.manage(cpe_server::vault_manager::VaultRegistry::default());
+
     // Hold the AI Console sidecar connection in managed state (feature-gated).
     #[cfg(feature = "sidecar-platform")]
     {
@@ -8860,7 +9019,14 @@ pub fn run() {
             open_pty,
             write_pty,
             resize_pty,
-            close_pty
+            close_pty,
+            vault_is,
+            vault_create,
+            vault_unlock,
+            vault_lock,
+            vault_status,
+            vault_remember_passphrase,
+            vault_forget_passphrase
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application");
@@ -9599,6 +9765,13 @@ pub fn export_bindings(out: &std::path::Path) -> Result<(), String> {
         write_pty,
         resize_pty,
         close_pty,
+        vault_is,
+        vault_create,
+        vault_unlock,
+        vault_lock,
+        vault_status,
+        vault_remember_passphrase,
+        vault_forget_passphrase,
     ])
     // CPE-1110: export the replay projection types that no command *returns* but the frontend fold
     // (`src/lib/replayFold.ts`) reconstructs client-side — `ReplayEntry` (a `children_at` row) and
