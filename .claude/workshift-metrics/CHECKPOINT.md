@@ -1,43 +1,50 @@
-# Workshift Checkpoint — 2026-08-01 ~15:00 local — SAFE HEADLESS WORK EXHAUSTED
+# Workshift Checkpoint — 2026-08-01 ~18:00 local — 5 EPICS DONE, HIGH-VALUE WORK EXHAUSTED
 
-Session: 6815e8b9. Standing mandate (user): build all remaining user-gated epics in a useful order,
-report at each epic boundary, never wrap-and-ask. Reached the honest end condition: **the safe
-headless work has run out** — Backlog EMPTY, and every remaining epic needs a USER DECISION.
+Session: 6815e8b9. Standing mandate: build all remaining epics in a useful order; report at each epic
+boundary; never wrap-and-ask. User re-engaged mid-session with "you choose" → chose + delivered the
+Terminal dock. Now again at the honest end: only low-value polish + USER-GATED epics remain.
 
 ## State — CLEAN, IDLE, STANDING BY
-- `main` @ HEAD `8361018c` (origin/main), working tree clean. **Backlog EMPTY. 0 open PRs. 0 worktrees.**
-- (GitHub runners were badly backlogged all session — several PRs merged on full local verification +
-  reviewer dep-analysis; re-check main CI opportunistically, fix-forward if anything's red. The built
-  app was exercised by Visual Critics throughout, so confidence is high.)
+- `main` @ HEAD `51eaf02f` (origin/main), working tree clean. **Backlog = 1 low-pri ticket. 0 open PRs.
+  0 worktrees.**
+- GitHub runners were backlogged much of the session; several PRs merged on full local verification +
+  reviewer analysis (all pure-Rust/deterministic or gui-smoke-proven on the built app). Re-check main CI
+  opportunistically; fix-forward if red (none expected).
 
-## Delivered this session (~29 PRs merged, #514–#543)
-- **4 epics**: CPE-704 (Spotlight launcher, DONE) · CPE-978 (Smart folders & saved searches, DONE) ·
-  CPE-718 (Universal thumbnail pipeline — headless slice DONE; video/PDF/office deferred) · CPE-738
-  (Secure delete & vaults — secure-delete slice DONE; vaults deferred).
-- The entire prior working backlog + every follow-up the epics surfaced (macro-undo fidelity, tag/
-  favourite/search-history rename-migration, app-wide dialog borders, danger-colour centralization,
-  archive-ops-in-transfer-queue, snapshot-schedule migration, extract error precision, spotlight
-  highlight polish, + all QA gui-smoke pins for the new surfaces).
+## Delivered this session (~34 PRs merged, #514–#547)
+- **5 epics**: CPE-704 (Spotlight launcher) · CPE-978 (Smart folders & saved searches) · CPE-718
+  (Universal thumbnail pipeline — headless slice) · CPE-738 (Secure delete — secure-delete slice) ·
+  CPE-714 (Terminal dock — DONE, incl. hardening CPE-1244 + polish CPE-1245).
+- The entire prior working backlog + every follow-up each epic surfaced.
 
-## NEXT — all USER-GATED (pick up when the user decides; do NOT start autonomously)
-- **CPE-714 Terminal dock** — largest remaining buildable epic, BUT needs a decision to add **xterm.js**
-  (frontend terminal-emulator dep). Backend PTY slice is buildable without it (prior art:
-  `sidecar/ai-console/src/pty.rs`). Scout's runner-up.
-- **CPE-738 vaults** — needs a **crypto-dependency exception** (repo no-new-dep rule) + a human
-  **security review** + OS keychain. (CPE-1240 secure-delete half is DONE.)
-- **CPE-1238 video/PDF/office thumbnails** — heavy native deps (ffmpeg/pdfium/office) — user dep-weight call.
-- **CPE-976/977/979/980 AI epics** — need a model key / provider.
+## Open Backlog (low-value only)
+- **CPE-1246** — port the CPE-1244 PTY lifecycle hardening to the sidecar's pty.rs (parity/defense-in-
+  depth; the sidecar is OS-reaped on its own exit anyway). Low.
+
+## Deferred (low-value polish, buildable, our choice)
+- **CPE-1223** — spotlight basename-scoped highlight (needs basename-DIRECT matching; approach documented).
+- **CPE-672/674** — drag-OUT to OS (needs a plugin + interactive drag).
+- **CPE-1238** — video/PDF/office thumbnails (heavy deps; USER dep-weight call).
+- (Also: a tiny optional CPE-1000 mismatch-review view — not ticketed; file if wanted.)
+
+## USER-GATED epics (need a decision — do NOT start autonomously)
+- **CPE-738 vaults** — crypto-dep exception + human security review + OS keychain.
+- **CPE-1238 video/PDF/office thumbnails** — heavy native deps (ffmpeg/pdfium/office); dep-weight call.
+- **CPE-976/977/979/980 AI** — model key / provider.
 - **CPE-713 tray / CPE-716 drive-bay(eject/hotplug) / CPE-712 shell-default / CPE-717 SFTP-Mac** —
-  need real hardware / OS-registration/elevation / a Mac to build+verify.
-- Effectively DONE (only user-gated remainders): CPE-688 (perf — real-hardware 10× benchmark),
-  CPE-1000 (file-type — only a tiny optional mismatch-review view).
-- **Deferred low-value polish (buildable, our choice)**: CPE-1223 (spotlight highlight: needs
-  basename-DIRECT matching — approach documented on the ticket); CPE-661 drag-OUT (plugin + interactive).
+  real hardware / OS-registration/elevation / a Mac.
+- Effectively DONE (user-gated remainder only): CPE-688 (perf 10× real-HW benchmark), CPE-1000 (file-type).
 
-## Crew defaults / lessons (all still apply — see prior checkpoint history in git)
-- worktree-isolate anything that builds/`gh pr checkout`s; restore shared `main` before merging (gh
-  evades the git cd-guard). Proportionate gauntlet. Visual leg = build branch → gui-smoke snap →
-  taste-Critic; stash PNG before pruning. Correct stalled workers (bg-notification / Monitor waits) via
-  SendMessage → run synchronously. Merge-delete-local-branch fails while a worktree holds it — prune first.
-  New Rust deps: pure-Rust deterministic crates build cross-OS identically (reviewer dep-analysis can
-  substitute when the runner queue stalls the shift).
+## To resume
+User names one to unblock (e.g. "yes to vault crypto, do the vaults" / "add ffmpeg for video thumbs" /
+"here's a model key") → pick it straight up. Or "keep clearing nits" → do CPE-1246, then CPE-1223, etc.
+GREP-FIRST before decomposing any epic (features here are often partly-built).
+
+## Crew defaults / lessons — all still apply (see git history of this file)
+worktree-isolate builders; restore shared `main` before merging (gh evades the git cd-guard); discard the
+recurring empty Cargo.toml CRLF noise. Proportionate gauntlet; combined checker for small pure-logic;
+Foreman-verify test-only. Visual leg = build branch → gui-smoke snap → Critic. Correct stalled workers
+(bg-notification/Monitor waits) via SendMessage → run synchronously. Merge-delete-local-branch fails while
+a worktree holds it (prune first); Windows worktree-dir removal can hit Permission-denied (prune clears
+metadata). New deps: pure-Rust/deterministic build cross-OS; reviewer dep-analysis can substitute when the
+runner queue stalls. Security-sensitive shell/path code: single-quote-escape for POSIX (proven safe).
