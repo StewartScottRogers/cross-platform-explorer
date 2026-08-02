@@ -70,6 +70,14 @@ age = { version = "=0.12.1", default-features = false }
 # Best-effort wipe of the decrypted-plaintext buffer once it has been unpacked (CPE-1247). The passphrase
 # itself is already a zeroize-on-drop `age::secrecy::SecretString`; this covers the intermediate plaintext.
 zeroize = "1"
+# PDF first-page thumbnail extractor (CPE-1256, epic CPE-718). Optional: `pdfium-render` (MIT/Apache)
+# drives a **dynamically loaded** pdfium prebuilt (BSD-3-Clause, Chrome's own PDF engine) — never
+# statically linked into the binary; resolved at runtime via `Pdfium::bind_to_library`/
+# `bind_to_system_library`. Gated behind the `pdf-thumb` feature (off by default) so the plain build
+# carries zero PDF code or the pdfium dependency. See the decision log in research-library entry
+# `thumbnail-native-deps-pdf-video-2026-08-02.md` — `mupdf` (AGPL) was rejected outright as a
+# copyleft landmine in a distributed, signed binary.
+pdfium-render = { version = "0.9", optional = true }
 
 # POSIX extended attributes for the native-metadata bridge (CPE-826, epic CPE-717). Pure-Rust (libc
 # syscalls, no system libs); Unix-only — Windows uses NTFS alternate data streams via std file I/O,
@@ -100,6 +108,11 @@ specta = ["dep:specta"]
 # **zero** indexer code (the "small when off" delete-test) — the `index` module needs no extra crates, only
 # this gate. Turn on with `--features index` (or from the app adapter that exposes the index commands).
 index = []
+# Opt-in PDF first-page thumbnail rendering via `pdfium-render` (CPE-1256, epic CPE-718). OFF by
+# default so the plain build compiles zero PDF code / pulls in no pdfium dependency (the "small when
+# off" rule, mirrored from `index` above). Turn on with `--features pdf-thumb`; ship-enablement (the
+# app adapter turning it on + CI/release binary acquisition) is CPE-1258.
+pdf-thumb = ["dep:pdfium-render"]
 
 [dev-dependencies]
 # Temp dirs for the ticket-board tests (moved from the app with the module, CPE-815).

@@ -404,6 +404,12 @@ pub mod thumb_svg;
 /// unwrapper reusing the already-vendored `flate2` (CPE-1236, epic CPE-718).
 pub mod thumb_font;
 
+/// PDF first-page thumbnail rendering via `pdfium-render` driving a dynamically-loaded pdfium
+/// prebuilt (CPE-1256, epic CPE-718). Feature-gated OFF by default (`pdf-thumb`) so the plain build
+/// compiles zero PDF code and pulls in no pdfium dependency.
+#[cfg(feature = "pdf-thumb")]
+pub mod thumb_pdf;
+
 /// Image preview — TIFF/PSD → PNG data-URL transcode + dimensions/EXIF metadata (CPE-099/101/659).
 pub mod image_preview;
 
