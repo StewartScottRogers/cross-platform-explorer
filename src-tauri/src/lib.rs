@@ -8865,12 +8865,21 @@ pub fn run() {
         .build(tauri::generate_context!())
         .expect("error while building tauri application");
 
-    app.run(move |_app_handle, _event| {
+    app.run(move |app_handle, event| {
         // Owning `keep_awake` here keeps the assertion alive for the entire run
         // loop; it is dropped (and the screen lock re-enabled) when the loop
         // ends. The reference just anchors the capture — see the comment above.
         #[cfg(not(any(target_os = "android", target_os = "ios")))]
         let _ = &keep_awake;
+
+        // App-quit PTY sweep (CPE-1244): kill every still-open terminal dock shell so quitting with
+        // tabs open never orphans them. `RunEvent::Exit` fires once, after every window has closed and
+        // the run loop is about to end -- the right (and only) point to sweep state that outlives any
+        // one window. `PtyRegistry` is always managed (see above), so `state()` never panics here.
+        if let tauri::RunEvent::Exit = event {
+            use tauri::Manager;
+            app_handle.state::<pty::PtyRegistry>().close_all();
+        }
     });
 }
 

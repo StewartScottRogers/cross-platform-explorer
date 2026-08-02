@@ -15,6 +15,13 @@
 //! Home crate: `src-tauri`, not `cpe-server`. A PTY session spawns OS processes and holds OS handles —
 //! adapter territory, like the sidecar host — so it lives beside the app rather than in the Tauri-free
 //! domain crate (see the PR description for the full rationale).
+//!
+//! Lifecycle hardening (CPE-1244, follow-up to the CPE-1242 review): [`PtySession::kill`] does a final
+//! `wait()` after the kill so a SIGKILL-escalated child is always reaped (no zombie), [`PtySession`] has
+//! a belt-and-braces [`Drop`] impl that kills+reaps too, and [`PtyRegistry::close_all`] sweeps every live
+//! session on app quit (wired to `RunEvent::Exit` in `lib.rs::run()`) so terminal tabs left open never
+//! orphan their shells. The sidecar's own `ai-console/src/pty.rs` has the same two gaps and should get
+//! matching treatment in a separate PR — not done here (out of scope for this app-side ticket).
 
 use std::collections::{BTreeMap, HashMap};
 use std::io::{Read, Write};
@@ -119,10 +126,33 @@ impl PtySession {
 
     /// Terminate the session: kill the child and **close the ConPTY** (drop the master), so the output
     /// reader EOFs even when the session is held by the registry rather than the caller. Idempotent.
+    ///
+    /// CPE-1244: portable-pty 0.8.1's `ChildKiller` (the unix `impl ChildKiller for std::process::Child`
+    /// in its `lib.rs`) sends SIGHUP, polls `try_wait` ~5×50ms for a graceful exit, then — if the child
+    /// ignored SIGHUP — escalates to a bare `std::process::Child::kill()` (SIGKILL) with **no follow-up
+    /// wait**. `Child::kill()` only *sends* the signal; nothing reaps the now-dead child, so a
+    /// SIGHUP-ignoring child would be SIGKILL'd but left a transient zombie until something else waits
+    /// on it. The explicit `self.child.wait()` below closes that gap: it's a no-op/instant when the
+    /// grace-period polling already reaped the child (`std::process::Child` caches the exit status once
+    /// observed), and it's the actual reap when escalation was needed.
     pub fn kill(&mut self) -> Result<(), String> {
         let r = self.child.kill().map_err(|e| e.to_string());
+        let _ = self.child.wait(); // reap unconditionally -- see CPE-1244 doc comment above
         self.master = None; // drop the master -> close the ConPTY -> the output reader EOFs
         r
+    }
+}
+
+impl Drop for PtySession {
+    /// Belt-and-braces (CPE-1244): every current caller already calls `kill()` before a session is
+    /// dropped (`PtyRegistry::close`/`close_all`, and the tests below), so in practice this is a no-op.
+    /// But it costs nothing to make dropping a live session *always* kill + reap the child too, so a
+    /// future code path that forgets the explicit `kill()` can never leak a running shell or a zombie.
+    /// Idempotent/cheap on an already-killed session: `child.kill()` on a dead process errors (discarded)
+    /// and `child.wait()` returns the cached exit status instantly.
+    fn drop(&mut self) {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
     }
 }
 
@@ -232,6 +262,21 @@ impl PtyRegistry {
     pub fn len(&self) -> usize {
         self.sessions.lock().unwrap().len()
     }
+
+    /// App-quit sweep (CPE-1244): close and kill **every** live session, leaving the registry empty.
+    /// Wired to Tauri's `RunEvent::Exit` in `lib.rs::run()` so a user quitting with terminal tabs still
+    /// open never orphans those shell processes. Idempotent (an empty/already-swept registry is a
+    /// no-op) and best-effort per session — one session's kill failing doesn't stop the sweep of the
+    /// rest. Drains the map first (mirroring `close`'s remove-then-kill order) so nothing can be handed
+    /// out as "live" mid-sweep.
+    pub fn close_all(&self) {
+        let handles: Vec<Arc<PtyHandle>> = self.sessions.lock().unwrap().drain().map(|(_, h)| h).collect();
+        for handle in handles {
+            if let Ok(mut session) = handle.session.lock() {
+                let _ = session.kill();
+            }
+        }
+    }
 }
 
 #[cfg(test)]
@@ -279,6 +324,31 @@ mod tests {
             cols: 80,
         })
         .expect("spawn pty")
+    }
+
+    /// OS-level "is this pid still around" check (CPE-1244) — mirrors CPE-1242's manual UAT `tasklist`
+    /// check, but as an automated cross-platform test helper: `tasklist` on Windows, `ps -p` elsewhere
+    /// (works on both Linux and macOS CI runners, unlike a Linux-only `/proc/<pid>` check). Used to prove
+    /// `kill()`/`close_all()` actually terminate the OS process, not just close our handle to it.
+    fn pid_is_alive(pid: u32) -> bool {
+        #[cfg(windows)]
+        {
+            let out = std::process::Command::new("tasklist")
+                .args(["/FI", &format!("PID eq {pid}"), "/NH"])
+                .output();
+            match out {
+                Ok(o) => String::from_utf8_lossy(&o.stdout).contains(&pid.to_string()),
+                Err(_) => false,
+            }
+        }
+        #[cfg(not(windows))]
+        {
+            std::process::Command::new("ps")
+                .args(["-p", &pid.to_string()])
+                .status()
+                .map(|s| s.success())
+                .unwrap_or(false)
+        }
     }
 
     #[test]
@@ -353,6 +423,25 @@ mod tests {
         }
     }
 
+    #[test]
+    fn kill_reaps_the_child_synchronously_with_no_zombie_left_behind() {
+        // CPE-1244: `kill()` now does its own final `wait()`, so the reap should be observable
+        // *immediately* after `kill()` returns -- no polling loop needed (unlike the test above, which
+        // predates this fix and tolerates a delayed reap). A long-lived command so we're sure it's still
+        // running right before the kill.
+        let inline = if cfg!(windows) { "ping -n 10 127.0.0.1 >NUL" } else { "sleep 10" };
+        let mut session = spawn_inline(inline);
+        assert!(session.is_running(), "child should still be running before kill()");
+        let pid = session.child.process_id().expect("child should report a pid");
+        assert!(pid_is_alive(pid), "child process should be alive before kill()");
+
+        session.kill().unwrap();
+
+        // No sleep/poll: kill()'s own follow-up wait() must have already reaped it.
+        assert!(session.try_wait().is_some(), "child was not reaped synchronously by kill()");
+        assert!(!pid_is_alive(pid), "OS process should be gone right after kill()");
+    }
+
     // --- PtyRegistry: the id-keyed session bookkeeping that backs open/write/resize/close_pty --------
 
     #[test]
@@ -415,6 +504,46 @@ mod tests {
         assert!(registry.write(999, b"x").is_err());
         assert!(registry.resize(999, 10, 10).is_err());
         assert!(registry.close(999).is_ok()); // closing an unknown id is a no-op, not an error
+    }
+
+    #[test]
+    fn close_all_kills_every_session_and_leaves_no_process_behind() {
+        // CPE-1244: the app-quit sweep. Two independent long-lived sessions, so the sweep is proven to
+        // kill *every* live session, not just the first one it finds.
+        let registry = PtyRegistry::default();
+        let inline = if cfg!(windows) { "ping -n 10 127.0.0.1 >NUL" } else { "sleep 10" };
+
+        let mut ids_and_pids = Vec::new();
+        for _ in 0..2 {
+            let mut session = spawn_inline(inline);
+            assert!(session.is_running());
+            let pid = session.child.process_id().expect("child should report a pid");
+            assert!(pid_is_alive(pid), "child should be alive before close_all()");
+            let writer = session.writer().expect("writer");
+            let id = registry.insert(session, writer);
+            ids_and_pids.push((id, pid));
+        }
+        assert_eq!(registry.len(), 2);
+
+        registry.close_all();
+
+        assert_eq!(registry.len(), 0, "close_all() should empty the registry");
+        for (id, pid) in ids_and_pids {
+            assert!(
+                registry.write(id, b"echo too-late\n").is_err(),
+                "session {id} should be gone from the registry after close_all()"
+            );
+            // The OS-level check: not just "the registry forgot about it" but "the process is actually
+            // dead" -- proving close_all() really kills (not merely drops/forgets) each session.
+            assert!(!pid_is_alive(pid), "OS process {pid} should be gone after close_all()");
+        }
+    }
+
+    #[test]
+    fn close_all_on_an_empty_registry_is_a_no_op() {
+        let registry = PtyRegistry::default();
+        registry.close_all(); // must not panic
+        assert_eq!(registry.len(), 0);
     }
 
     // --- resolve_shell: the CPE-1243 shell-picker override path ----------------------------------------
