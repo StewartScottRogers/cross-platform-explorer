@@ -106,7 +106,16 @@ export interface OpenedTerminalTab {
 /** Open a new dock tab AT `cwd` — the ticket's "opens rooted at the current folder" — and spawn its PTY
  *  there. The two ids (`terminal_dock_open`'s tab id and `open_pty`'s session id) are correlated purely
  *  on the frontend: the dock model is pure bookkeeping and has no idea a PTY exists (see
- *  `terminal_dock_open`'s doc comment in `lib.rs` — the two stay decoupled by design). */
+ *  `terminal_dock_open`'s doc comment in `lib.rs` — the two stay decoupled by design).
+ *
+ *  Rollback on failure (CPE-1245, CPE-1243 review nit): the dock tab is created BEFORE the PTY spawns, so
+ *  a failing `open_pty` (bad shell path, spawn error, ...) would otherwise leave a dock entry with no PTY
+ *  behind it — an orphaned tab the caller never learns the id of, since the throw unwinds before this
+ *  returns. If `open_pty` throws, close the just-created dock entry here (best-effort — a rollback failure
+ *  must not mask the original error) and rethrow, so a caller that never sees a resolved `dockId` also
+ *  never leaves one live. The xterm `Terminal` instance itself is owned by the caller (it's passed in
+ *  already-constructed), so disposing it on failure is the caller's job — see `TerminalPanel.svelte`'s
+ *  `addTab`. */
 export async function openTerminalTab(
   cwd: string,
   shell: string | null,
@@ -116,7 +125,16 @@ export async function openTerminalTab(
 ): Promise<OpenedTerminalTab> {
   const dockId = await commands.terminalDockOpen(cwd, "");
   const bridge = new PtyBridge(term);
-  await bridge.open(cwd, shell, rows, cols);
+  try {
+    await bridge.open(cwd, shell, rows, cols);
+  } catch (e) {
+    try {
+      await commands.terminalDockClose(dockId);
+    } catch {
+      // Best-effort rollback — surface the ORIGINAL open_pty failure below regardless.
+    }
+    throw e;
+  }
   return { dockId, bridge };
 }
 
@@ -153,7 +171,22 @@ export function cdCommand(path: string): string {
   return `cd '${escaped}'\n`;
 }
 
-/** Follow navigation for an already-open tab: re-cwd the dock tab, then `cd` its live shell to match. */
+/** Follow navigation for an already-open tab: re-cwd the dock tab, then `cd` its live shell to match.
+ *
+ *  No "shell busy" guard (CPE-1245, CPE-1243 review nit, decision documented rather than built): this
+ *  sends the `cd` keystrokes UNCONDITIONALLY — there's no check for whether the shell is actually sitting
+ *  at an idle prompt versus mid-command or running a foreground program (an editor, `npm run dev`, a REPL,
+ *  ...). If it isn't at a prompt, the `cd` text goes to whatever IS reading stdin right now, same as if the
+ *  user had typed it themselves at the wrong moment.
+ *
+ *  Reliable busy-detection from the frontend would mean parsing the PTY's live output for a prompt pattern
+ *  — inherently fragile across shells/themes/custom prompts (PS1, oh-my-zsh, Starship, ConEmu prompts, ...)
+ *  and easy to get subtly wrong in a way that's worse than no guard at all (a false "busy" that silently
+ *  drops navigation is its own footgun). So the accepted tradeoff is: Follow-folder is **off by default**
+ *  (see the `followNav` doc comment in `TerminalPanel.svelte`) — a user opts in per-session, at which point
+ *  "navigating the explorer types into this terminal" is the explicit, understood contract; the risk is
+ *  then the user's own mid-command navigation, not a surprise. If a real guard is worth building later, the
+ *  natural approach is backend-side (the PTY already sees every byte) rather than frontend prompt-sniffing. */
 export async function followNavigation(dockId: number, bridge: PtyBridge, newCwd: string): Promise<void> {
   await commands.terminalDockSetCwd(dockId, newCwd);
   await bridge.sendInput(cdCommand(newCwd));

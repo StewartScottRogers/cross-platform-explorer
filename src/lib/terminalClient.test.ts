@@ -220,6 +220,49 @@ describe("openTerminalTab: open-at-current-folder (CPE-1243)", () => {
     const ptyOpenCall = calls.find((c) => c.cmd === "open_pty")!;
     expect(ptyOpenCall.args.shell).toBe("powershell.exe");
   });
+
+  it("rolls back the dock tab it just created when open_pty fails (CPE-1245 orphan-tab fix)", async () => {
+    // Make THIS open_pty call fail, mirroring a bad shell path / spawn error — the dock entry from
+    // terminal_dock_open above it has already resolved by the time this rejects.
+    invoke.mockImplementationOnce((cmd: string, args?: any): Promise<any> => {
+      calls.push({ cmd, args });
+      return Promise.resolve(nextDockId++); // the terminal_dock_open call
+    });
+    invoke.mockImplementationOnce((cmd: string, args?: any): Promise<any> => {
+      calls.push({ cmd, args });
+      return Promise.reject(new Error("spawn failed: no such shell"));
+    });
+
+    const term = new FakeTerm();
+    await expect(openTerminalTab("/repo", "/bin/nonexistent-shell", term)).rejects.toThrow(
+      "spawn failed: no such shell",
+    );
+
+    // The dock tab created before the failing open_pty must be closed again — no orphan left behind.
+    const cmds = calls.map((c) => c.cmd);
+    expect(cmds).toEqual(["terminal_dock_open", "open_pty", "terminal_dock_close"]);
+    const dockCloseCall = calls.find((c) => c.cmd === "terminal_dock_close")!;
+    expect(dockCloseCall.args).toEqual({ id: 1 }); // the dock id terminal_dock_open just returned
+  });
+
+  it("still rethrows the original open_pty error even if the rollback close also fails", async () => {
+    invoke.mockImplementationOnce((cmd: string, args?: any): Promise<any> => {
+      calls.push({ cmd, args });
+      return Promise.resolve(nextDockId++); // terminal_dock_open succeeds
+    });
+    invoke.mockImplementationOnce((cmd: string, args?: any): Promise<any> => {
+      calls.push({ cmd, args });
+      return Promise.reject(new Error("open_pty exploded"));
+    });
+    invoke.mockImplementationOnce((cmd: string, args?: any): Promise<any> => {
+      calls.push({ cmd, args });
+      return Promise.reject(new Error("terminal_dock_close also exploded"));
+    });
+
+    const term = new FakeTerm();
+    // The ORIGINAL failure must win — a rollback failure must never mask it.
+    await expect(openTerminalTab("/repo", null, term)).rejects.toThrow("open_pty exploded");
+  });
 });
 
 describe("closeTerminalTab (CPE-1243)", () => {

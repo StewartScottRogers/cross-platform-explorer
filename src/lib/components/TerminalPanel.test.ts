@@ -50,7 +50,11 @@ vi.mock("@tauri-apps/api/core", () => {
 // (loadAddon/open/onData/write/dispose + rows/cols for the resize path). Mirrors ai-console-launcher.
 // test.ts's `FakeTerm`. Defined INSIDE each factory (not referenced from an outer variable) because
 // `vi.mock` factories are hoisted above top-level declarations (see thumbnailClient.test.ts's `Channel`).
+// `disposeCalls` is a shared counter (module-scope inside the factory closure isn't visible to the test
+// file, so it's exposed on `globalThis` — the simplest way to observe `dispose()` calls from outside the
+// mocked class without fighting hoisting) used by the CPE-1245 orphan-tab rollback test below.
 vi.mock("@xterm/xterm", () => {
+  (globalThis as any).__termDisposeCalls = 0;
   class Terminal {
     rows = 24;
     cols = 80;
@@ -58,7 +62,9 @@ vi.mock("@xterm/xterm", () => {
     open() {}
     onData() {}
     write() {}
-    dispose() {}
+    dispose() {
+      (globalThis as any).__termDisposeCalls++;
+    }
   }
   return { Terminal };
 });
@@ -82,6 +88,7 @@ beforeEach(() => {
   calls = [];
   nextDockId = 1;
   nextSessionId = 100;
+  (globalThis as any).__termDisposeCalls = 0;
 });
 
 afterEach(() => cleanup());
@@ -180,5 +187,114 @@ describe("TerminalPanel (CPE-1243)", () => {
     const write = calls.find((c) => c.cmd === "write_pty");
     expect(setCwd?.args.cwd).toBe("/repo/b");
     expect(write).toBeTruthy();
+  });
+
+  describe("open_pty failure leaves no orphan (CPE-1245)", () => {
+    it("rolls back the dock tab, disposes the xterm instance, and never adds the tab to the strip", async () => {
+      // The FIRST addTab (onMount) succeeds normally; the SECOND (the "+" click) is the one whose
+      // open_pty we make fail, mirroring a bad shell path chosen after the panel is already open.
+      const { getByTitle, queryByTitle } = render(TerminalPanel, { cwd: "/repo/project" });
+      await flush();
+      invoke.mockClear();
+      calls = [];
+      (globalThis as any).__termDisposeCalls = 0;
+
+      invoke.mockImplementationOnce((cmd: string, args?: any): Promise<any> => {
+        calls.push({ cmd, args });
+        return Promise.resolve(nextDockId++); // terminal_dock_open for the new tab succeeds
+      });
+      invoke.mockImplementationOnce((cmd: string, args?: any): Promise<any> => {
+        calls.push({ cmd, args });
+        return Promise.reject(new Error("spawn failed"));
+      });
+
+      await fireEvent.click(getByTitle("New terminal at the current folder"));
+      await flush();
+
+      // The dock entry created for the failed attempt was rolled back (closed again) — no orphan.
+      const cmds = calls.map((c) => c.cmd);
+      expect(cmds).toEqual(["terminal_dock_open", "open_pty", "terminal_dock_close"]);
+
+      // The xterm `Terminal` created for the failed attempt was disposed — no undisposed instance debt.
+      expect((globalThis as any).__termDisposeCalls).toBe(1);
+
+      // Only the original mount's tab is in the strip — the failed one was never pushed to tabs[].
+      expect(getByTitle("/repo/project")).toBeTruthy();
+      expect(queryByTitle("New terminal at the current folder")).toBeTruthy(); // panel still usable
+    });
+
+    it("surfaces the failure inline instead of silently swallowing it", async () => {
+      const { getByTitle, findByTestId } = render(TerminalPanel, { cwd: "/repo/project" });
+      await flush();
+      invoke.mockClear();
+      calls = [];
+
+      invoke.mockImplementationOnce((cmd: string, args?: any): Promise<any> => {
+        calls.push({ cmd, args });
+        return Promise.resolve(nextDockId++);
+      });
+      invoke.mockImplementationOnce((cmd: string, args?: any): Promise<any> => {
+        calls.push({ cmd, args });
+        return Promise.reject(new Error("no such shell: /bin/nonexistent"));
+      });
+
+      await fireEvent.click(getByTitle("New terminal at the current folder"));
+      await flush();
+
+      const banner = await findByTestId("terminal-open-error");
+      expect(banner.textContent).toContain("no such shell: /bin/nonexistent");
+    });
+  });
+
+  describe("tab-close keyboard operability (CPE-1245)", () => {
+    it("the close control is in the tab order (not tabindex=-1)", async () => {
+      const { getByTitle } = render(TerminalPanel, { cwd: "/repo/project" });
+      await flush();
+
+      const closeBtn = getByTitle("Close tab");
+      expect(closeBtn.getAttribute("tabindex")).toBe("0");
+    });
+
+    it("pressing Enter on the focused close control closes the tab", async () => {
+      const { getByTitle, queryByTitle } = render(TerminalPanel, { cwd: "/repo/project" });
+      await flush();
+      calls = [];
+
+      const closeBtn = getByTitle("Close tab");
+      closeBtn.focus();
+      await fireEvent.keyDown(closeBtn, { key: "Enter" });
+      await flush();
+
+      expect(calls.map((c) => c.cmd)).toEqual(["close_pty", "terminal_dock_close"]);
+      expect(queryByTitle("/repo/project")).toBeNull();
+    });
+
+    it("pressing Space on the focused close control closes the tab", async () => {
+      const { getByTitle, queryByTitle } = render(TerminalPanel, { cwd: "/repo/project" });
+      await flush();
+      calls = [];
+
+      const closeBtn = getByTitle("Close tab");
+      closeBtn.focus();
+      await fireEvent.keyDown(closeBtn, { key: " " });
+      await flush();
+
+      expect(calls.map((c) => c.cmd)).toEqual(["close_pty", "terminal_dock_close"]);
+      expect(queryByTitle("/repo/project")).toBeNull();
+    });
+
+    it("other keys do nothing", async () => {
+      const { getByTitle, queryByTitle } = render(TerminalPanel, { cwd: "/repo/project" });
+      await flush();
+      calls = [];
+
+      const closeBtn = getByTitle("Close tab");
+      closeBtn.focus();
+      await fireEvent.keyDown(closeBtn, { key: "a" });
+      await flush();
+
+      expect(calls).toEqual([]);
+      expect(queryByTitle("/repo/project")).toBeTruthy();
+    });
   });
 });
