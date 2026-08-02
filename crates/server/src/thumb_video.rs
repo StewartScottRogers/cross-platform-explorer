@@ -42,10 +42,16 @@
 //! probing) as a second dependency surface — the ticket explicitly prefers keeping this to the ONE
 //! ffmpeg binary, so a fixed small offset + a zero-offset retry is used instead.
 //!
-//! **Output path + cleanup:** ffmpeg writes exactly one PNG frame to a unique path under the OS temp
-//! dir (never a fixed/shared name — concurrent thumbnail requests must not collide), which is read back
-//! via `image::open`, then deleted — on both the success and the error path, so a failed render never
-//! leaks a temp file.
+//! **Output path + cleanup (CPE-1261 hardening, CWE-377):** rather than writing ffmpeg's output PNG
+//! directly to a uniquely-named-but-*predictable* path under the shared OS temp dir (which, on a
+//! world-writable `/tmp`, an attacker could pre-plant a symlink at — ffmpeg's `-y` follows symlinks and
+//! truncates the target), each call first creates a fresh **exclusively-owned scratch directory** via
+//! [`create_scratch_dir`] using `std::fs::create_dir`, which fails atomically if the path already
+//! exists (a pre-planted dir or symlink included). A successful create therefore proves the directory
+//! is brand-new and attacker-uncontrolled; ffmpeg's single PNG frame is written *inside* it. The whole
+//! scratch dir is removed with `remove_dir_all` on both the success and every error path, so a failed
+//! render never leaks a temp file or directory. Windows/macOS use per-user temp dirs unaffected by this
+//! class of attack, but the hardening applies uniformly on every platform.
 //!
 //! **Sizing:** ffmpeg's own `scale` filter does the bulk of the downscale work (cheap: ffmpeg decodes
 //! at reduced resolution rather than us decoding a full-size frame into memory), capping width to
@@ -84,7 +90,11 @@ pub fn extract_frame(path: &Path, max_edge: u32) -> Result<DynamicImage, String>
 /// the current executable's directory.
 fn extract_frame_with_ffmpeg(path: &Path, max_edge: u32, ffmpeg: &Path) -> Result<DynamicImage, String> {
     let edge = max_edge.max(1);
-    let tmp = unique_temp_png_path();
+    // Exclusively-created scratch dir (CPE-1261, CWE-377 hardening) — see the module doc's "Output
+    // path + cleanup" note. If we can't even get a fresh directory, bail out cleanly; there's nothing
+    // to clean up yet.
+    let scratch_dir = create_scratch_dir()?;
+    let tmp = scratch_dir.join("frame.png");
 
     // Seek ~1s in first (skips a likely black lead-in frame); fall back to the very first frame if
     // that offset produced nothing (e.g. a clip shorter than 1s, or an unusual/variable-framerate file).
@@ -98,7 +108,9 @@ fn extract_frame_with_ffmpeg(path: &Path, max_edge: u32, ffmpeg: &Path) -> Resul
         image::open(&tmp).map_err(|e| format!("failed to decode ffmpeg's extracted frame: {e}"))
     });
 
-    let _ = fs::remove_file(&tmp); // clean up even on the error path — never leak the temp file
+    // Clean up the WHOLE scratch dir (not just the PNG) — on both the success and the error path, so a
+    // failed render never leaks the temp file or its owning directory.
+    let _ = fs::remove_dir_all(&scratch_dir);
 
     let img = decoded?;
     Ok(downscale_to_max_edge(img, edge))
@@ -188,14 +200,55 @@ fn resolve_ffmpeg_bin() -> PathBuf {
     PathBuf::from(exe_name)
 }
 
-/// A unique path under the OS temp dir for ffmpeg's single-frame PNG output — never a fixed/shared
-/// name, so concurrent thumbnail requests (the pipeline fans these out across `spawn_blocking` threads)
-/// can't collide on the same file.
-fn unique_temp_png_path() -> PathBuf {
+/// Creates a fresh, **exclusively-owned** scratch directory under the OS temp dir for one
+/// [`extract_frame`] invocation, and returns its path (the PNG is written inside it by the caller).
+///
+/// Security rationale (CPE-1261, CWE-377): the previous approach built a unique-but-*predictable*
+/// filename (`temp_dir()/cpe-thumbvideo-{pid}-{nanos}-{counter}.png`) and let ffmpeg write straight to
+/// it with `-y`. On a shared, world-writable `/tmp` an attacker who guessed (or brute-forced) that name
+/// ahead of time could pre-plant a symlink there; `-y` truncates-in-place and follows symlinks, so
+/// ffmpeg would clobber whatever the symlink pointed at. `std::fs::create_dir` closes that window
+/// atomically: it fails with `AlreadyExists` if *anything* — file, directory, or symlink — already sits
+/// at that path, so a successful return means this call, and only this call, owns a brand-new directory
+/// nothing could have been pre-planted inside (it didn't exist a moment ago). Writing ffmpeg's output
+/// *inside* that directory (rather than trying to harden the filename itself) means the exclusivity
+/// guarantee covers the PNG too, with no dependency on high-entropy randomness or a new crate.
+///
+/// Concurrency: the pid+nanos+monotonic-counter name is already effectively unique per call (the same
+/// scheme the old single-file path used, which the original CPE-1257 ticket already accepted as
+/// collision-free for concurrent `spawn_blocking` thumbnail requests), so `create_dir` is expected to
+/// succeed on the first attempt. The bounded retry below is belt-and-suspenders for the vanishingly
+/// unlikely case of a name collision (or a stale directory left behind by a prior crash reusing the
+/// same nanosecond+counter, which cannot really happen given the counter is process-lifetime
+/// monotonic) — it is not required for correctness, since each attempt still gets its own atomically-
+/// exclusive name.
+///
+/// Never panics: after `MAX_ATTEMPTS` failed creates, returns `Err` rather than looping forever or
+/// falling back to a non-exclusive path.
+fn create_scratch_dir() -> Result<PathBuf, String> {
+    const MAX_ATTEMPTS: u32 = 8;
     static SEQ: AtomicU64 = AtomicU64::new(0);
-    let n = SEQ.fetch_add(1, Ordering::Relaxed);
-    let ts = SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_nanos()).unwrap_or(0);
-    std::env::temp_dir().join(format!("cpe-thumbvideo-{}-{ts}-{n}.png", std::process::id()))
+
+    let mut last_err: Option<std::io::Error> = None;
+    for _ in 0..MAX_ATTEMPTS {
+        let n = SEQ.fetch_add(1, Ordering::Relaxed);
+        let ts = SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_nanos()).unwrap_or(0);
+        let dir = std::env::temp_dir().join(format!("cpe-thumbvideo-{}-{ts}-{n}", std::process::id()));
+
+        match fs::create_dir(&dir) {
+            Ok(()) => {
+                #[cfg(test)]
+                record_scratch_dir_for_test(dir.clone());
+                return Ok(dir);
+            }
+            Err(e) => last_err = Some(e),
+        }
+    }
+
+    Err(format!(
+        "failed to create an exclusive scratch dir under the OS temp dir after {MAX_ATTEMPTS} attempts: {}",
+        last_err.map(|e| e.to_string()).unwrap_or_else(|| "unknown error".to_string())
+    ))
 }
 
 /// Downscales `img` so its longest edge is at most `max_edge` pixels, preserving aspect ratio and
@@ -213,6 +266,26 @@ fn downscale_to_max_edge(img: DynamicImage, max_edge: u32) -> DynamicImage {
     let out_w = ((w as f32) * scale).round().max(1.0) as u32;
     let out_h = ((h as f32) * scale).round().max(1.0) as u32;
     img.resize(out_w, out_h, image::imageops::FilterType::Lanczos3)
+}
+
+// Test-only side channel: the most recent scratch dir `create_scratch_dir` created **on the calling
+// thread**. Thread-local (not a shared global) because cargo test runs each `#[test]` fn on its own
+// thread by default, so this lets a leak-check test that calls `extract_frame`/`extract_frame_with_ffmpeg`
+// (which don't return the scratch dir path themselves) recover exactly which directory to check, without
+// racing other tests that concurrently create their own scratch dirs.
+#[cfg(test)]
+thread_local! {
+    static LAST_SCRATCH_DIR: std::cell::RefCell<Option<PathBuf>> = const { std::cell::RefCell::new(None) };
+}
+
+#[cfg(test)]
+fn record_scratch_dir_for_test(dir: PathBuf) {
+    LAST_SCRATCH_DIR.with(|c| *c.borrow_mut() = Some(dir));
+}
+
+#[cfg(test)]
+fn last_scratch_dir_for_test() -> Option<PathBuf> {
+    LAST_SCRATCH_DIR.with(|c| c.borrow().clone())
 }
 
 /// True if ffmpeg is resolvable and actually runs in this environment (`ffmpeg -version` succeeds).
@@ -365,5 +438,97 @@ mod tests {
         let out = downscale_to_max_edge(portrait, 64);
         assert_eq!(out.height(), 64, "longest edge (height) must be capped to max_edge");
         assert!(out.width() <= 64);
+    }
+
+    // --- CPE-1261: exclusive scratch-dir hardening (CWE-377) ---------------------------------------
+
+    /// Unconditional (no ffmpeg needed): each concurrent [`create_scratch_dir`] call must succeed and
+    /// get a distinct, exclusively-owned directory — nobody can observe or race another call's path.
+    /// This is the "concurrent calls don't collide" guarantee the ticket asks to confirm: it's true by
+    /// construction (`std::fs::create_dir` on a fresh pid+nanos+counter name fails atomically on any
+    /// collision), and this test exercises that under real concurrent threads rather than just asserting
+    /// the rationale in a comment.
+    #[test]
+    fn create_scratch_dir_never_collides_across_concurrent_calls() {
+        use std::thread;
+
+        let handles: Vec<_> = (0..16)
+            .map(|_| thread::spawn(create_scratch_dir))
+            .collect();
+
+        let mut dirs: Vec<PathBuf> = handles
+            .into_iter()
+            .map(|h| h.join().expect("thread must not panic").expect("scratch dir creation must succeed"))
+            .collect();
+
+        let total = dirs.len();
+        dirs.sort();
+        dirs.dedup();
+        assert_eq!(dirs.len(), total, "every concurrent call must get a distinct, non-colliding scratch dir");
+
+        for d in &dirs {
+            assert!(d.is_dir(), "each returned path must actually be a created directory: {}", d.display());
+            let _ = fs::remove_dir_all(d);
+        }
+    }
+
+    /// Unconditional: pointing `extract_frame_with_ffmpeg` at a bogus ffmpeg binary still creates the
+    /// scratch dir first (before the doomed spawn), and the error path must remove it — no leaked temp
+    /// directory just because ffmpeg itself couldn't run.
+    #[test]
+    fn extract_frame_removes_the_scratch_dir_on_the_error_path_too() {
+        let d = scratch("no-leak-error");
+        let bogus_input = d.join("clip.mp4");
+        fs::write(&bogus_input, b"irrelevant").unwrap();
+        let bogus_ffmpeg = d.join("definitely-not-a-real-ffmpeg-binary-xyz123");
+
+        let err = extract_frame_with_ffmpeg(&bogus_input, 64, &bogus_ffmpeg);
+        assert!(err.is_err(), "a nonexistent ffmpeg binary must still be reported as Err");
+
+        let scratch_dir = last_scratch_dir_for_test()
+            .expect("create_scratch_dir must have run (and recorded itself) before the doomed ffmpeg spawn");
+        assert!(
+            !scratch_dir.exists(),
+            "scratch dir must be removed on the error path too, leaked: {}",
+            scratch_dir.display()
+        );
+
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    /// Real-render gated: after a SUCCESSFUL extract, the scratch dir the frame was written into must
+    /// be gone — no leaked temp directory on the happy path either. SKIPS (not fails) without ffmpeg.
+    #[test]
+    fn extract_frame_removes_the_scratch_dir_after_a_successful_extract() {
+        if !ffmpeg_available() {
+            eprintln!(
+                "skipping extract_frame scratch-dir-no-leak test: no ffmpeg binary available in this \
+                 environment"
+            );
+            return;
+        }
+
+        let d = scratch("no-leak-success");
+        let clip = d.join("synthetic.mp4");
+        let ffmpeg = resolve_ffmpeg_bin();
+
+        let synth = Command::new(&ffmpeg)
+            .args(["-y", "-f", "lavfi", "-i", "testsrc=duration=1:size=320x240:rate=10"])
+            .arg(&clip)
+            .output()
+            .expect("ffmpeg is available; synthesizing the test clip must not fail to spawn");
+        assert!(synth.status.success(), "synthesizing the test clip failed: {}", String::from_utf8_lossy(&synth.stderr));
+
+        let _img = extract_frame(&clip, 64).expect("ffmpeg is available; extracting a frame must succeed");
+
+        let scratch_dir = last_scratch_dir_for_test()
+            .expect("create_scratch_dir must have run (and recorded itself) during the successful extract");
+        assert!(
+            !scratch_dir.exists(),
+            "scratch dir must be removed after a successful extract, leaked: {}",
+            scratch_dir.display()
+        );
+
+        let _ = fs::remove_dir_all(&d);
     }
 }
