@@ -19,7 +19,8 @@ export type Section =
   | "repositories"
   | "swarms"
   | "native-metadata"
-  | "terminal";
+  | "terminal"
+  | "vaults";
 
 /** Section id → doc slug (a `src/docs/*.md` filename without `.md`). */
 const SECTION_DOC: Record<Section, string> = {
@@ -43,6 +44,12 @@ const SECTION_DOC: Record<Section, string> = {
   // you switch into (it's a panel toggled over the explorer via the CommandBar's Terminal button), but it
   // still earns its own doc page + registry entry per [[maintain-in-app-docs-library]].
   terminal: "19-terminal",
+  // CPE-1250 (epic CPE-738): encrypted vaults — the "Create encrypted vault…" folder action + the
+  // unlock/browse/lock flow (CPE-1249) + the keychain Settings toggle. Like native-metadata/terminal
+  // above, not a sidebar view you switch into (it's a cross-cutting feature reachable from a folder's
+  // context menu, a `.cpevault` file, and Settings), but it still earns its own doc page + registry
+  // entry per [[maintain-in-app-docs-library]].
+  vaults: "20-vaults",
 };
 
 /** The default doc when a section has no page (or an unknown id is passed): the Overview. */

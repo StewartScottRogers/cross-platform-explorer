@@ -39,6 +39,15 @@
     nativeBridgeEnabled = on;
     settings.saveNativeBridgeEnabled(on);
   }
+
+  // Encrypted vaults (CPE-1250, epic CPE-738): the DEFAULT for the create dialog's "Remember passphrase in
+  // the keychain" checkbox. Off by default — a passphrase persists in the OS keychain only when the user
+  // opts in. Self-contained (reads/writes settings.ts directly), like the native-bridge row above.
+  let vaultRememberPassphrases = settings.loadVaultRememberPassphrases();
+  function setVaultRememberPassphrases(on: boolean) {
+    vaultRememberPassphrases = on;
+    settings.saveVaultRememberPassphrases(on);
+  }
 </script>
 
 <svelte:window on:keydown={(e) => e.key === "Escape" && dispatch("close")} />
@@ -84,6 +93,22 @@
     <div class="note">
       Adds Pull/Push controls to the tag editor and a read-only Native metadata section to Properties.
       Off by default.
+    </div>
+
+    <div class="section-title">Encrypted vaults</div>
+    <div class="settings-row">
+      <span>Remember vault passphrases in the OS keychain</span>
+      <input
+        type="checkbox"
+        checked={vaultRememberPassphrases}
+        data-testid="vault-remember-toggle"
+        on:change={(e) => setVaultRememberPassphrases(e.currentTarget.checked)}
+      />
+    </div>
+    <div class="note">
+      Sets the default for the "Remember passphrase" option when you create a vault. When on, a vault's
+      passphrase is saved in this device's secure keychain so you don't have to retype it. Off by default —
+      turning it off keeps passphrases in memory only, for the current session.
     </div>
 
     <div class="section-title">Scheduled snapshots</div>

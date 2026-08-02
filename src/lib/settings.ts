@@ -67,6 +67,7 @@ export const KEYS = {
   paneBPath: "cpe.paneBPath",
   networkLocations: "cpe.networkLocations",
   nativeBridgeEnabled: "cpe.nativeBridgeEnabled",
+  vaultRememberPassphrases: "cpe.vaultRememberPassphrases",
   spotlightHotkeyEnabled: "cpe.spotlightHotkeyEnabled",
   spotlightHotkeyChord: "cpe.spotlightHotkeyChord",
   spotlightFrecency: "cpe.spotlightFrecency",
@@ -266,6 +267,14 @@ export const saveNetworkLocations = (v: string[]) => write(KEYS.networkLocations
 // the plain explorer never touches native file metadata unless the user opts in here.
 export const loadNativeBridgeEnabled = (): boolean => read(KEYS.nativeBridgeEnabled, false, isBool);
 export const saveNativeBridgeEnabled = (v: boolean) => write(KEYS.nativeBridgeEnabled, v);
+
+// Remember-vault-passphrases opt-in (CPE-1250, epic CPE-738): drives the DEFAULT state of the "Remember
+// passphrase in this device's keychain" checkbox in the vault-create dialog (VaultCreateDialog.svelte) and
+// whether CPE-1249's unlock offers a stored passphrase. Off by default — a passphrase persists in the OS
+// keychain only when the user opts in. A Settings control, never a launch-time permission modal
+// ([[avoid-modal-permission-popups]]).
+export const loadVaultRememberPassphrases = (): boolean => read(KEYS.vaultRememberPassphrases, false, isBool);
+export const saveVaultRememberPassphrases = (v: boolean) => write(KEYS.vaultRememberPassphrases, v);
 
 // Spotlight global hotkey (CPE-1215, epic CPE-704): an OS-wide chord (via tauri-plugin-global-shortcut)
 // that fires `spotlight:open` even while the main window is hidden/unfocused — the CPE-1216 overlay

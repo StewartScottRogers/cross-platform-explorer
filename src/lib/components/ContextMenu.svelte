@@ -75,6 +75,9 @@
    *  CPE-738). The shred engine overwrites+removes a single file; it isn't recursive, so folders are
    *  excluded rather than silently skipped mid-menu. */
   export let shreddable = false;
+  /** True when a SINGLE folder is selected in a real filesystem location (not Home/archive) — enables
+   *  "Create encrypted vault…" (CPE-1250, epic CPE-738), which seals that folder into a `.cpevault`. */
+  export let vaultable = false;
 
   const dispatch = createEventDispatcher<{
     action: string;
@@ -262,6 +265,14 @@
       </button>
       <button class="row" role="menuitem" on:click={() => run("compress-password")}>
         <Icon name="lock" size={15} /> {$t('ctx.compressWithPassword')}
+      </button>
+    {/if}
+    {#if vaultable}
+      <!-- Create encrypted vault… (CPE-1250, epic CPE-738): seal a single folder into a `.cpevault`.
+           Leading icon + theme-var text, never red (MENUS.md); the create dialog (not this menu) carries
+           the passphrase entry + the honest destructive warning for the optional shred-original path. -->
+      <button class="row" role="menuitem" on:click={() => run("vault-create")}>
+        <Icon name="lock" size={15} /> Create encrypted vault…
       </button>
     {/if}
     {#if folderSelected}
