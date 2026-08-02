@@ -90,6 +90,15 @@ Decomposition (SEQUENTIAL — each needs the prior; core-first, heaviest review 
   security review + an explicit "professional external audit recommended before GA" flag (DoD's review gate,
   done honestly — a crew review de-risks but does not substitute for a professional crypto audit).
 
+### Dependency-weight ACK (Foreman, from CPE-1247 security review, finding #4)
+`age =0.12.1` with `default-features=false` adds exactly two DIRECT deps (`age` + `zeroize`) but ~90
+TRANSITIVE crates (curve25519-dalek/x25519-dalek, p256, ml-kem, hpke, i18n-embed/fluent for age's
+localized errors). This is a real, conscious cost against PURPOSE's "small" tiebreaker. Accepted rationale:
+the user explicitly authorized the crypto dependency; `age` is the audited, footgun-free choice and NOT
+hand-rolling AEAD/KDF/nonces is worth the weight for a security feature; and vaults are an ADDITIVE mode
+(zero cost when unused). Possible future trim (follow-up, not now): investigate whether age's i18n/fluent
+pull can be dropped. Recorded so the weight is a deliberate decision, not an accident.
+
 ## Secure-delete slice COMPLETE 2026-08-01 (workshift) — vaults remain user-gated
 CPE-1240 (#539) wired the shred engine end-to-end: `shred_paths` command + "Securely delete…" context
 action + ShredConfirmDialog (honest permanence + best-effort platform caveat + scheme picker + red
