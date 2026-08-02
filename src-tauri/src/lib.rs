@@ -5407,6 +5407,38 @@ fn reap_orphan_session_daemons_on_startup(app: &tauri::AppHandle) {
     }
 }
 
+/// Sweep orphaned encrypted-vault session dirs at startup (CPE-1252, VAULT-SECURITY.md §5). The
+/// managed `VaultRegistry` is always empty at process start (v1 has no persisted unlock state across
+/// a restart), so any `vault-sessions/*` dir found here can only be a leftover from the app being
+/// killed/crashing while a vault was unlocked — by definition an orphan holding decrypted plaintext.
+/// Model lives in `cpe_server::vault_manager::sweep_orphan_sessions`; this is the thin adapter that
+/// resolves the SAME base dir the frontend allocates (`appCacheDir()` + `"vault-sessions"`, see
+/// `src/lib/vaultStore.ts`'s `defaultAllocSessionDir`) via Tauri's own path resolver, so the sweep
+/// looks in exactly the directory unlock/lock actually use.
+///
+/// Runs off the main/setup thread (`spawn`) and does the fs work in `spawn_blocking` (CPE-760/761) so
+/// a large/slow sweep never delays the window coming up; best-effort and never fatal — a failed sweep
+/// (missing cache dir, a permission error) only logs, it must never block or fail app launch.
+fn sweep_orphan_vault_sessions_on_startup(app: &tauri::AppHandle) {
+    let Ok(cache_dir) = server_ctx::TauriCtx::new(app).app_cache_dir() else {
+        eprintln!("cpe: vault-session sweep skipped: could not resolve the app cache dir");
+        return;
+    };
+    let sessions_root = cache_dir.join("vault-sessions");
+    tauri::async_runtime::spawn(async move {
+        let outcome = tauri::async_runtime::spawn_blocking(move || {
+            cpe_server::vault_manager::sweep_orphan_sessions(&sessions_root)
+        })
+        .await;
+        match outcome {
+            Ok(Ok(0)) => {}
+            Ok(Ok(n)) => eprintln!("cpe: swept {n} orphaned vault-session dir(s) at startup (CPE-1252)"),
+            Ok(Err(e)) => eprintln!("cpe: vault-session sweep failed (non-fatal): {e}"),
+            Err(e) => eprintln!("cpe: vault-session sweep task panicked (non-fatal): {e}"),
+        }
+    });
+}
+
 /// Directory holding the persisted capability-consent store (CPE-296).
 #[cfg(feature = "sidecar-platform")]
 fn consent_dir(app: &tauri::AppHandle) -> Result<PathBuf, String> {
@@ -8754,6 +8786,10 @@ pub fn run() {
         // daemon that was file-locking the exe is gone before we rewrite it.
         #[cfg(feature = "sidecar-platform")]
         restore_stale_sidecars_on_startup(app.handle());
+
+        // Securely wipe any orphaned encrypted-vault session dir left behind by a crash/kill while a
+        // vault was unlocked (CPE-1252, VAULT-SECURITY.md §5). Core-explorer feature, not sidecar-gated.
+        sweep_orphan_vault_sessions_on_startup(app.handle());
 
         // Background scheduled-snapshot timer (CPE-1199, epic CPE-735). Spawned, never joined, so it
         // never blocks startup. Opt-in per folder in Settings and off-means-off: until the user adds an

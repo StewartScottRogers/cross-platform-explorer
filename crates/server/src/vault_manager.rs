@@ -238,6 +238,69 @@ pub fn wipe_session_dir(session_dir: &Path, scheme: ShredScheme) -> Result<(), V
     Ok(())
 }
 
+/// Startup orphan-session sweep (CPE-1252, VAULT-SECURITY.md §5). Enumerates the immediate child
+/// directories of `sessions_root` (the app's `vault-sessions` base dir) and securely wipes each one
+/// with the SAME wiper [`lock`](VaultRegistry::lock) uses ([`wipe_session_dir`] at
+/// [`SESSION_WIPE_SCHEME`]) — never a plain `remove_dir_all`, since every entry here holds decrypted
+/// vault plaintext.
+///
+/// Every session dir under `sessions_root` is only ever "live" while the in-memory [`VaultRegistry`]
+/// holds a blob→session mapping to it, and that registry is always empty at process start — v1 has no
+/// persisted unlock state across a restart. So EVERY immediate child directory found here is, by
+/// construction, an orphan: a leftover from the app being killed (or crashing) while a vault was
+/// unlocked, or a superseded session dir whose best-effort wipe on re-unlock ([`VaultRegistry::unlock`])
+/// failed. The caller (app startup, before any vault can be unlocked in the new process) is the only
+/// safe place to run this — calling it while vaults may legitimately be unlocked would destroy live
+/// sessions.
+///
+/// A missing or empty `sessions_root` is `Ok(0)`, never an error — most machines never create a vault,
+/// so "no directory yet" is the common case, not a failure. Skips (rather than aborting the whole
+/// sweep on) any child that is not a directory, or whose wipe fails (permissions, a file held open by
+/// another process, etc.) — this is a best-effort security backstop, not a transactional operation;
+/// one stubborn leftover must not stop the rest from being cleaned up. Returns the count of session
+/// directories successfully wiped and removed.
+///
+/// Safety: this function does not walk above `sessions_root` — it only ever touches paths returned by
+/// reading `sessions_root` itself, so callers must pass the exact `vault-sessions` directory, never a
+/// broader ancestor.
+pub fn sweep_orphan_sessions(sessions_root: &Path) -> Result<usize, VaultError> {
+    sweep_orphan_sessions_with_wiper(sessions_root, |dir| {
+        wipe_session_dir(dir, SESSION_WIPE_SCHEME)
+    })
+}
+
+/// [`sweep_orphan_sessions`] with the wiper injected, so tests can force a wipe failure on one entry
+/// and assert the sweep keeps going and still cleans up the rest. Production always calls
+/// [`sweep_orphan_sessions`], which wires the real [`wipe_session_dir`] — matching the
+/// `unlock_with_wiper`/`lock_with_wiper` dependency-injection shape already used by
+/// [`VaultRegistry`] for the same reason.
+fn sweep_orphan_sessions_with_wiper(
+    sessions_root: &Path,
+    wipe: impl Fn(&Path) -> Result<(), VaultError>,
+) -> Result<usize, VaultError> {
+    let entries = match std::fs::read_dir(sessions_root) {
+        Ok(entries) => entries,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(0),
+        Err(e) => return Err(VaultError::Io(e)),
+    };
+
+    let mut wiped = 0usize;
+    for entry in entries {
+        let Ok(entry) = entry else { continue };
+        let Ok(file_type) = entry.file_type() else { continue };
+        if !file_type.is_dir() {
+            // Not a session dir (a stray file, etc.) — never touched by the sweep.
+            continue;
+        }
+        if wipe(&entry.path()).is_ok() {
+            wiped += 1;
+        }
+        // A failed wipe is skipped rather than aborting the sweep (best-effort backstop, see above);
+        // the caller may log the returned count against the number of child dirs it expected.
+    }
+    Ok(wiped)
+}
+
 /// The set of currently-unlocked vaults: `blob path → session directory`. Cheaply cloneable (an
 /// `Arc` around the map) and zero-cost until a vault is unlocked, mirroring
 /// [`crate::terminal_tabs::TerminalDockState`] — the shape the Tauri app manages as state.
@@ -855,5 +918,143 @@ mod tests {
         let plain = dir.path().join("plain.txt");
         std::fs::write(&plain, b"hi").unwrap();
         assert!(!compute_status(&plain, false, &access).is_vault);
+    }
+
+    // ---- orphan-session sweep (CPE-1252) ---------------------------------
+
+    /// The whole point: seeded "orphan" session dirs (fake plaintext, exactly what a crash-while-
+    /// unlocked would leave behind) are wiped AND removed, and the sweep reports how many.
+    #[test]
+    fn sweep_wipes_and_removes_every_orphan_session_dir() {
+        let dir = tempfile::tempdir().unwrap();
+        let sessions_root = dir.path().join("vault-sessions");
+        let orphan_a = sessions_root.join("11111111-1111-1111-1111-111111111111");
+        let orphan_b = sessions_root.join("22222222-2222-2222-2222-222222222222");
+        sample_folder(&orphan_a);
+        sample_folder(&orphan_b);
+        assert!(orphan_a.join("top.txt").exists());
+
+        let wiped = sweep_orphan_sessions(&sessions_root).unwrap();
+
+        assert_eq!(wiped, 2, "both orphan session dirs must be counted as wiped");
+        assert!(!orphan_a.exists(), "orphan dir a must be gone after the sweep");
+        assert!(!orphan_b.exists(), "orphan dir b must be gone after the sweep");
+        // The root itself is left behind (only its children are session dirs); a fresh unlock can
+        // still create new session dirs under it.
+        assert!(sessions_root.exists());
+    }
+
+    /// A missing `vault-sessions` root (the common case — most machines never create a vault) is a
+    /// clean `Ok(0)`, never an error.
+    #[test]
+    fn sweep_missing_root_is_ok_zero() {
+        let dir = tempfile::tempdir().unwrap();
+        let missing = dir.path().join("does-not-exist").join("vault-sessions");
+        assert!(!missing.exists());
+        assert_eq!(sweep_orphan_sessions(&missing).unwrap(), 0);
+    }
+
+    /// An existing-but-empty root is also `Ok(0)` — nothing to wipe, no error.
+    #[test]
+    fn sweep_empty_root_is_ok_zero() {
+        let dir = tempfile::tempdir().unwrap();
+        let sessions_root = dir.path().join("vault-sessions");
+        std::fs::create_dir_all(&sessions_root).unwrap();
+        assert_eq!(sweep_orphan_sessions(&sessions_root).unwrap(), 0);
+        assert!(sessions_root.exists(), "the sweep must not remove the root itself");
+    }
+
+    /// A stray FILE sitting directly in `vault-sessions` (never a real session, which is always a
+    /// dir) is skipped, not wiped/removed — proves the sweep only ever touches directories.
+    #[test]
+    fn sweep_skips_stray_files_and_keeps_going() {
+        let dir = tempfile::tempdir().unwrap();
+        let sessions_root = dir.path().join("vault-sessions");
+        std::fs::create_dir_all(&sessions_root).unwrap();
+        let stray_file = sessions_root.join("not-a-session.txt");
+        std::fs::write(&stray_file, b"stray").unwrap();
+        let real_orphan = sessions_root.join("33333333-3333-3333-3333-333333333333");
+        sample_folder(&real_orphan);
+
+        let wiped = sweep_orphan_sessions(&sessions_root).unwrap();
+
+        assert_eq!(wiped, 1, "only the real (directory) orphan counts as wiped");
+        assert!(stray_file.exists(), "a stray file must be left untouched, never wiped/deleted");
+        assert!(!real_orphan.exists(), "the real orphan dir must still be wiped");
+    }
+
+    /// An already-empty orphan directory (no plaintext to shred) still counts as wiped and removed —
+    /// `wipe_session_dir`'s "missing directory is a no-op success" only covers a directory that's
+    /// gone entirely; an empty-but-present one must still be removed by the sweep.
+    #[test]
+    fn sweep_counts_and_removes_an_already_empty_orphan_dir() {
+        let dir = tempfile::tempdir().unwrap();
+        let sessions_root = dir.path().join("vault-sessions");
+        let empty_orphan = sessions_root.join("44444444-4444-4444-4444-444444444444");
+        std::fs::create_dir_all(&empty_orphan).unwrap();
+
+        let wiped = sweep_orphan_sessions(&sessions_root).unwrap();
+
+        assert_eq!(wiped, 1);
+        assert!(!empty_orphan.exists());
+    }
+
+    /// A dir whose wipe fails (permissions, a file held open, etc.) must NOT abort the whole sweep —
+    /// the failure is injected via [`sweep_orphan_sessions_with_wiper`] (the same DI shape
+    /// `lock_with_wiper`/`unlock_with_wiper` use to test their own failure paths), matching one
+    /// specific dir by name and letting the rest wipe normally. Proves the "keep going" contract from
+    /// the ticket's acceptance criteria without relying on a platform-specific way to make a real
+    /// directory unremovable.
+    #[test]
+    fn sweep_keeps_going_past_a_dir_whose_wipe_fails() {
+        let dir = tempfile::tempdir().unwrap();
+        let sessions_root = dir.path().join("vault-sessions");
+        let failing = sessions_root.join("bad");
+        let ok_a = sessions_root.join("ok-a");
+        let ok_b = sessions_root.join("ok-b");
+        std::fs::create_dir_all(&failing).unwrap();
+        std::fs::create_dir_all(&ok_a).unwrap();
+        std::fs::create_dir_all(&ok_b).unwrap();
+
+        let wiped = sweep_orphan_sessions_with_wiper(&sessions_root, |p| {
+            if p.file_name().and_then(|n| n.to_str()) == Some("bad") {
+                Err(VaultError::Io(std::io::Error::new(std::io::ErrorKind::PermissionDenied, "nope")))
+            } else {
+                std::fs::remove_dir_all(p).map_err(VaultError::Io)
+            }
+        })
+        .unwrap();
+
+        assert_eq!(wiped, 2, "the two good dirs must still be wiped despite one failure");
+        assert!(failing.exists(), "the dir whose wipe failed must be left in place, not half-deleted");
+        assert!(!ok_a.exists());
+        assert!(!ok_b.exists());
+    }
+
+    /// A non-`NotFound` error reading `sessions_root` itself (as opposed to a missing root) propagates
+    /// as an `Err` rather than being silently swallowed to `Ok(0)` — only "missing" and "empty" are
+    /// defined as clean successes per the ticket.
+    #[test]
+    fn sweep_propagates_a_non_missing_root_read_error() {
+        // A regular FILE where a directory is expected makes `read_dir` fail with something other
+        // than `NotFound` (typically `NotADirectory` / `PermissionDenied`-ish) on every platform.
+        let dir = tempfile::tempdir().unwrap();
+        let not_a_dir = dir.path().join("vault-sessions");
+        std::fs::write(&not_a_dir, b"not a directory").unwrap();
+
+        let result = sweep_orphan_sessions(&not_a_dir);
+        assert!(result.is_err(), "reading a non-directory root must not be treated as Ok(0)");
+    }
+
+    /// Falsifiable delete-test: without the sweep, orphan dirs are exactly what's left behind, proving
+    /// the test isn't vacuously true. (Companion to `sweep_wipes_and_removes_every_orphan_session_dir`
+    /// above, which proves the sweep DOES clean them up.)
+    #[test]
+    fn without_the_sweep_orphan_dirs_would_linger() {
+        let dir = tempfile::tempdir().unwrap();
+        let sessions_root = dir.path().join("vault-sessions");
+        let orphan = sessions_root.join("55555555-5555-5555-5555-555555555555");
+        sample_folder(&orphan);
+        assert!(orphan.join("top.txt").exists(), "an un-swept orphan still holds its plaintext");
     }
 }
