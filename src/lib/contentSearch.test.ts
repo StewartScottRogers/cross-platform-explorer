@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { groupMatches, baseName, parentDir, highlightSegments, pushRecentSearch, type ContentMatch } from "./contentSearch";
+import { groupMatches, baseName, parentDir, highlightSegments, pushRecentSearch, relativeToRoot, scorePercent, type ContentMatch } from "./contentSearch";
 
 const m = (path: string, line_number: number, line = "x"): ContentMatch => ({ path, line_number, line });
 
@@ -83,5 +83,38 @@ describe("content search helpers (CPE-417)", () => {
   it("baseName preserves case (CPE-618 — must not lowercase display names)", () => {
     expect(baseName("C:/Users/Stewart/Documents")).toBe("Documents");
     expect(baseName("Z:\\repos\\App.svelte")).toBe("App.svelte");
+  });
+});
+
+describe("relativeToRoot (CPE-1263)", () => {
+  it("strips the root prefix, both separator styles", () => {
+    expect(relativeToRoot("Z:\\repos\\app\\src\\main.ts", "Z:\\repos\\app")).toBe("src/main.ts");
+    expect(relativeToRoot("/home/u/proj/src/main.ts", "/home/u/proj")).toBe("src/main.ts");
+  });
+
+  it("is case-insensitive about the root prefix (Windows drives)", () => {
+    expect(relativeToRoot("Z:\\Repos\\App\\src\\main.ts", "z:\\repos\\app")).toBe("src/main.ts");
+  });
+
+  it("tolerates a trailing slash on root", () => {
+    expect(relativeToRoot("Z:\\repos\\app\\src\\main.ts", "Z:\\repos\\app\\")).toBe("src/main.ts");
+  });
+
+  it("falls back to the normalised full path when it isn't under root", () => {
+    expect(relativeToRoot("Z:\\other\\file.txt", "Z:\\repos\\app")).toBe("Z:/other/file.txt");
+  });
+});
+
+describe("scorePercent (CPE-1263)", () => {
+  it("scales a 0..1 cosine score to a rounded 0..100 percentage", () => {
+    expect(scorePercent(1)).toBe(100);
+    expect(scorePercent(0.5)).toBe(50);
+    expect(scorePercent(0.873)).toBe(87);
+    expect(scorePercent(0)).toBe(0);
+  });
+
+  it("clamps defensively outside 0..1", () => {
+    expect(scorePercent(1.4)).toBe(100);
+    expect(scorePercent(-0.2)).toBe(0);
   });
 });

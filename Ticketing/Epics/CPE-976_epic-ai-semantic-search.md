@@ -98,7 +98,16 @@ Not actively being worked: all decomposed child tickets are Done. Remaining DoD 
 Engine stack already built by children CPE-981 (vector_index) / 982 (embedder seam + local FakeEmbedder) / 983
 (chunk→embed ingest) / 984 (query blend). Local `FakeEmbedder` = dependency-free bag-of-words → **buildable with NO
 API key**. Remaining, headless slices:
-- **CPE-1262** — wire index-build + search + persist to Tauri commands (local embedder).
-- **CPE-1263** — file-content search UI (query + ranked snippets, navigate).
+- **CPE-1262** — wire index-build + search + persist to Tauri commands (local embedder). **Done 2026-08-02.**
+- **CPE-1263** — file-content search UI (query + ranked snippets, navigate). **Done 2026-08-02.**
 Deferred (needs a user resource): a real/better embedder model (bundled local model or opt-in external endpoint +
 key) behind the existing seam; richer text extraction (pdf/docx). Framed honestly as file-CONTENT search, not oversold.
+
+2026-08-02 (workshift) — **CPE-1263** landed the frontend: `ContentIndexSearchDialog.svelte` (command
+palette → "Search file contents…"), a needs-build prompt, streamed index-build progress, debounced ranked
+results (name/relative-path/score/snippet), navigate-on-click, and a "12-search" docs section. **CPE-976 is
+now fully headless-complete** — every child ticket (981/982/983/984/1262/1263) is Done. The only remaining
+gaps are the deferred, user-gated big-design items above (a real embedder backend, richer extraction) —
+neither blocks using the feature today with the local `FakeEmbedder`. Residual: no `gui-smoke` render pin
+yet for the new dialog (command-palette-only entry point, no free keyboard shortcut); logged in
+`MANUAL-TEST-BURNDOWN.md` as a jsdom-pinned-only row pending a human glance on the installed build.

@@ -76,6 +76,27 @@ export function baseName(path: string): string {
   return parts[parts.length - 1] || path;
 }
 
+/** `path` relative to `root`, cross-platform (`\` and `/` both normalised to `/`), for the
+ *  file-content-search results list (CPE-1263) — shows "where under this folder" rather than the whole
+ *  absolute path. Falls back to the normalised absolute path when `path` isn't actually under `root`
+ *  (e.g. a stale index entry for a moved/renamed folder). Pure. */
+export function relativeToRoot(path: string, root: string): string {
+  const normPath = path.replace(/\\/g, "/");
+  const normRoot = root.replace(/\\/g, "/").replace(/\/+$/, "");
+  if (normRoot && normPath.toLowerCase().startsWith(`${normRoot.toLowerCase()}/`)) {
+    return normPath.slice(normRoot.length + 1);
+  }
+  return normPath;
+}
+
+/** A `content_search` cosine-similarity score (only-positive by construction, see
+ *  `semantic_index::SemanticIndex::search`) as a 0–100 match percentage for the results list's score
+ *  indicator (CPE-1263). Clamped defensively so a future embedder that scores outside (0, 1] still
+ *  renders a sane bar instead of an overflowing/negative one. Pure. */
+export function scorePercent(score: number): number {
+  return Math.round(Math.max(0, Math.min(1, score)) * 100);
+}
+
 /** The parent directory of a path, cross-platform. Empty if there is none. Pure.
  *
  * A POSIX file directly at the filesystem root (`/foo.txt`) has its only separator at index 0, so the
