@@ -122,6 +122,20 @@ winreg = "0.52"
 # Windows file attributes (hidden/system/archive) for the attributes editor (CPE-785). Version matches the
 # copy Tauri already pulls in, so it's not a second `windows` crate in the tree.
 windows = { version = "0.56", features = ["Win32_Foundation", "Win32_Storage_FileSystem"] }
+# Encrypted-vault passphrase storage in the OS credential store (CPE-1248, epic CPE-738): the ONLY place a
+# vault passphrase persists. The `KeyringBackend` adapter (mirroring the sidecar's, CPE-268/322) is the real
+# `cpe_server::vault_manager::SecretAccess` impl; `cpe-server` stays Tauri- and keyring-free. Same per-OS
+# `keyring` v3 feature set as `sidecar/host` so there's no version/feature drift. Windows Credential Manager.
+keyring = { version = "3", features = ["windows-native"] }
+
+# macOS Keychain via the Security framework for vault passphrases (CPE-1248) — pure system framework, no libs.
+[target.'cfg(target_os = "macos")'.dependencies]
+keyring = { version = "3", features = ["apple-native"] }
+
+# Linux Secret Service over D-Bus (GNOME Keyring / KWallet) for vault passphrases (CPE-1248).
+# `sync-secret-service` uses zbus (pure-Rust D-Bus, no libdbus); `crypto-rust` keeps session crypto pure-Rust.
+[target.'cfg(target_os = "linux")'.dependencies]
+keyring = { version = "3", features = ["sync-secret-service", "crypto-rust"] }
 
 [dev-dependencies]
 # (rust_xlsxwriter moved to `cpe-server` dev-deps with the spreadsheet-preview test, CPE-815.)

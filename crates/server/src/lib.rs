@@ -524,6 +524,14 @@ pub mod secure_shred;
 /// No hand-rolled crypto, no global state; a crafted blob can never panic.
 pub mod vault_crypto;
 
+/// Encrypted-vault **lifecycle manager** (CPE-1248, epic CPE-738): the state model + OS-keychain seam
+/// over [`vault_crypto`]. Detects a vault by magic, creates one (with a verify-before-shred safety
+/// invariant for the destructive "seal then destroy the original" path), unlocks/locks a vault into a
+/// session directory (securely wiped on lock), and persists a passphrase through the [`vault_manager::
+/// SecretAccess`] keychain seam — the ONLY place a passphrase persists. Tauri-free; the real keyring
+/// backend + the managed [`vault_manager::VaultRegistry`] wiring live in the app adapter.
+pub mod vault_manager;
+
 /// AI-copilot operation-plan model — the pure, filesystem-free structured plan (a closed, whitelisted set of
 /// move/rename/delete/mkdir/copy ops) an NL instruction compiles to, plus its scope+cap validator and a
 /// dry-run summary (CPE-990, epic CPE-977). No LLM, no I/O; the safe, inspectable middle of the copilot.
