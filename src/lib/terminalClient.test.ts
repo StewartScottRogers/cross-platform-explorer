@@ -259,8 +259,41 @@ describe("cdCommand (CPE-1243)", () => {
     expect(cdCommand("C:\\Users\\me\\project")).toBe('cd /d "C:\\Users\\me\\project"\r\n');
   });
 
-  it("uses a plain cd for a POSIX path", () => {
-    expect(cdCommand("/home/me/project")).toBe('cd "/home/me/project"\n');
+  it("single-quotes a POSIX path", () => {
+    expect(cdCommand("/home/me/project")).toBe("cd '/home/me/project'\n");
+  });
+
+  it("neutralizes POSIX command injection via an embedded double-quote/semicolon (CPE-1243 security fix)", () => {
+    // A folder literally named this is a legal POSIX filename. The old double-quote implementation
+    // (`cd "${path}"`) would close the shell's quoting right after `foo`, letting everything from `; rm`
+    // onward execute as a real command in the live terminal.
+    const malicious = '/tmp/foo"; rm -rf ~; echo "';
+    const result = cdCommand(malicious);
+
+    // Single-quoting makes every character literal, including `"`, `;`, and spaces — assert the exact
+    // safely-escaped output rather than a loose substring check, so the whole string is pinned down.
+    expect(result).toBe(`cd '${malicious}'\n`);
+
+    // Belt-and-suspenders: the dangerous `; rm -rf ~` sequence must never appear OUTSIDE a quoted region.
+    // Here the entire path — `"` and all — sits inside a single unbroken `'...'` pair, so a POSIX shell
+    // treats it as one literal argument and never reaches a second command.
+    const singleQuoted = result.match(/^cd '(.*)'\n$/s);
+    expect(singleQuoted).not.toBeNull();
+    expect(singleQuoted![1]).toBe(malicious); // no embedded `'` here, so nothing needed escaping
+    expect(singleQuoted![1]).not.toMatch(/(?<!')'(?!')/); // the only `'`s are the two wrapping delimiters
+  });
+
+  it("escapes an embedded single quote using the '\\'' close/escape/reopen idiom (CPE-1243 security fix)", () => {
+    const result = cdCommand("/tmp/it's mine");
+    expect(result).toBe("cd '/tmp/it'\\''s mine'\n");
+
+    // Sanity: reconstructing what a POSIX shell would actually see (each `'\''` decodes back to a literal
+    // `'`) must round-trip to the original path, proving the escape is correct, not just present.
+    const decoded = result
+      .replace(/^cd '/, "")
+      .replace(/'\n$/, "")
+      .replace(/'\\''/g, "'");
+    expect(decoded).toBe("/tmp/it's mine");
   });
 });
 

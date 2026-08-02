@@ -136,10 +136,21 @@ export async function closeTerminalTab(dockId: number, bridge: PtyBridge): Promi
  *  the user has running in it. So "follow" means typing a `cd` into the still-live shell — exactly what a
  *  user would do by hand — while the dock's own `cwd` bookkeeping is updated alongside it via
  *  `terminal_dock_set_cwd`. Windows' `cmd.exe`/PowerShell both accept `cd /d "path"` (the `/d` also
- *  crosses drive letters); POSIX shells use a plain `cd "path"`. */
+ *  crosses drive letters); POSIX shells use `cd '...'`.
+ *
+ *  Security (command injection, CPE-1243 review): the path is attacker-controlled — it is whatever a
+ *  folder on disk is named, and "follow folder" types this straight into a LIVE interactive shell. NTFS
+ *  can't contain `"`, so the Windows double-quote wrap is safe as-is. POSIX filesystems, though, allow
+ *  `"` (and `;`, `$()`, backticks, spaces, ...) in a filename, so double-quoting there would let a folder
+ *  named e.g. `foo"; rm -rf ~; echo "` break out of the quotes and execute arbitrary shell. POSIX shells'
+ *  SINGLE quotes are the one quoting style that treats every character literally with no exceptions (not
+ *  even `\`), so the POSIX branch single-quotes the path and escapes any embedded `'` the standard
+ *  close-quote/escaped-quote/reopen-quote way: `'` -> `'\''`. */
 export function cdCommand(path: string): string {
   const isWindowsPath = /^[a-zA-Z]:[\\/]/.test(path) || path.includes("\\");
-  return isWindowsPath ? `cd /d "${path}"\r\n` : `cd "${path}"\n`;
+  if (isWindowsPath) return `cd /d "${path}"\r\n`;
+  const escaped = path.replace(/'/g, `'\\''`);
+  return `cd '${escaped}'\n`;
 }
 
 /** Follow navigation for an already-open tab: re-cwd the dock tab, then `cd` its live shell to match. */
