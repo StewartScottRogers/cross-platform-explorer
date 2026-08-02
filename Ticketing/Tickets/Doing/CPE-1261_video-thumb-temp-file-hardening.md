@@ -4,7 +4,7 @@ title: "Harden video-thumbnail temp file against symlink pre-plant (CWE-377) on 
 type: chore
 component: cpe-server
 priority: low
-status: Backlog
+status: Doing
 tags: ready
 created: 2026-08-02
 epic: CPE-718

@@ -4,7 +4,7 @@ title: "Content-search UI: bump generation token on rebuild + cover probe reject
 type: chore
 component: frontend
 priority: low
-status: Backlog
+status: Doing
 tags: ready
 created: 2026-08-02
 epic: CPE-976
