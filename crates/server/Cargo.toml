@@ -61,6 +61,15 @@ plist = "1"
 # support the thumbnail use case doesn't need.
 resvg = { version = "0.45.1", default-features = false, features = ["text"] }
 ab_glyph = "0.2.32"
+# Encrypted-vaults crypto core (CPE-1247, epic CPE-738): the `age` crate in **passphrase mode** — scrypt
+# KDF + ChaCha20-Poly1305 streaming AEAD, pure-Rust, audited. This is the approved crypto dependency; the
+# module MUST NOT hand-roll AEAD/KDF/nonces. Pinned to an exact version (the passphrase entry points moved
+# across 0.9→0.11). `default-features = false` — age's default feature set is already empty, so this keeps
+# armor/ssh/cli-common/plugin out; passphrase (scrypt) support lives in the base crate.
+age = { version = "=0.12.1", default-features = false }
+# Best-effort wipe of the decrypted-plaintext buffer once it has been unpacked (CPE-1247). The passphrase
+# itself is already a zeroize-on-drop `age::secrecy::SecretString`; this covers the intermediate plaintext.
+zeroize = "1"
 
 # POSIX extended attributes for the native-metadata bridge (CPE-826, epic CPE-717). Pure-Rust (libc
 # syscalls, no system libs); Unix-only — Windows uses NTFS alternate data streams via std file I/O,
