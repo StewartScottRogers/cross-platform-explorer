@@ -4,8 +4,10 @@
 //! through the vendored `psd` crate's flattened RGBA composite (mirrors
 //! `image_preview::read_image_data_url`); `.svg` goes through [`crate::thumb_svg::rasterize_svg`];
 //! `.ttf`/`.otf`/`.woff` go through [`crate::thumb_font::render_glyph_sheet`] (CPE-1236, epic
-//! CPE-718); everything else decodes via the `image` crate with a bounded `image::Limits` so a crafted
-//! decompression-bomb file fails fast with an `Err` rather than attempting an unbounded allocation.
+//! CPE-718); `.pdf` goes through [`crate::thumb_pdf::render_first_page`] behind the off-by-default
+//! `pdf-thumb` feature (CPE-1256, epic CPE-718); everything else decodes via the `image` crate with a
+//! bounded `image::Limits` so a crafted decompression-bomb file fails fast with an `Err` rather than
+//! attempting an unbounded allocation.
 //!
 //! Returns the source's raw bytes alongside the decoded image so the caller can read EXIF and apply
 //! [`crate::thumb_orient::orient_for_display`] — decoding happens exactly once either way. SVG/font
@@ -83,6 +85,8 @@ pub fn decode_thumb_image(path: &Path, max_edge: u32) -> Result<(DynamicImage, V
             DynamicImage::ImageRgba8(buf)
         }
         "svg" => crate::thumb_svg::rasterize_svg(&bytes, max_edge)?,
+        #[cfg(feature = "pdf-thumb")]
+        "pdf" => crate::thumb_pdf::render_first_page(&bytes, max_edge)?,
         "ttf" | "otf" | "woff" | "woff2" => crate::thumb_font::render_glyph_sheet(&bytes, &ext, max_edge)?,
         _ => {
             let mut reader = ImageReader::new(Cursor::new(&bytes))
