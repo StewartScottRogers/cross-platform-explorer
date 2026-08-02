@@ -2,13 +2,13 @@
 id: CPE-738
 title: "EPIC: Secure delete & encrypted vaults"
 type: Task
-status: In Progress
+status: Done
 priority: Low
 component: Multiple
 tags: [epic]
 estimate: 4h+
 created: 2026-07-18
-closed:
+closed: 2026-08-02
 ---
 
 ## Goal
@@ -89,6 +89,32 @@ Decomposition (SEQUENTIAL — each needs the prior; core-first, heaviest review 
 - **CPE-1251** — Security-review doc (threat model + crypto choices + honest guarantees) + crew adversarial
   security review + an explicit "professional external audit recommended before GA" flag (DoD's review gate,
   done honestly — a crew review de-risks but does not substitute for a professional crypto audit).
+
+## CLOSED 2026-08-02 (workshift, user "do the vaults") — DoD MET
+Both halves of CPE-738 are complete:
+- **Secure delete** (earlier this session): CPE-1240 (shred_paths command + "Securely delete…" action +
+  honest permanent/best-effort ShredConfirmDialog) + CPE-1241 (gui-smoke pin). DoD bullet met.
+- **Encrypted vaults** (this run, 5 slices, all merged, each through the full gauntlet):
+  - CPE-1247 (#550) — crypto core: `age` =0.12.1 passphrase (ChaCha20-Poly1305 + scrypt), `.cpevault`
+    format, deterministic framing, path-sanitization, atomic extraction, work-factor cap.
+  - CPE-1248 (#551) — lifecycle + OS-keychain seam (keyring v3) + 7 async spawn_blocking commands;
+    verify-before-shred; seal⟺extract symmetry.
+  - CPE-1249 (#552) — unlock → browse the decrypted tree as a location + lock (wipes session) + 🔒/🔓
+    tree badge; re-unlock orphan + failed-lock retry + off-viewport Lock button all fixed.
+  - CPE-1250 (#553) — create-vault action + dialog (passphrase+confirm, sibling dest, default-OFF
+    secure-delete-original, remember-in-keychain) + Settings toggle + in-app docs (20-vaults.md).
+  - CPE-1251 — docs/design/VAULT-SECURITY.md (threat model + crypto design + honest limits + adversarial-
+    review record + external-audit flag), independently accuracy-checked.
+
+**DoD status:** "Secure delete honest guarantees" ✓; "per-folder vaults lock/unlock + mount transparently"
+✓; "keys in OS keychain, never plaintext" ✓; "crypto passes a security review" ✓ at the **crew** level
+(independent adversarial review across all slices — found + fixed a colon-asymmetry, dest-inside-shred
+data-loss, verify-to-%TEMP% plaintext leak, lock-strand, re-unlock orphan, and a seal/extract regression).
+**Honest caveat (documented, not a blocker to closing the epic):** a **professional external crypto audit
+is recommended before GA** — the crew review de-risks but does not replace it. Follow-ups filed:
+CPE-1252 (orphan-session startup sweep), CPE-1253/1254 (pre-existing non-vault bugs the gui-smoke gate
+surfaced). All merged locally; GitHub Actions runners were stalled through this run, so every merge was
+verified via the full local triad (+ built-app gui-smoke); CI is the backstop when runners recover.
 
 ### Dependency-weight ACK (Foreman, from CPE-1247 security review, finding #4)
 `age =0.12.1` with `default-features=false` adds exactly two DIRECT deps (`age` + `zeroize`) but ~90
