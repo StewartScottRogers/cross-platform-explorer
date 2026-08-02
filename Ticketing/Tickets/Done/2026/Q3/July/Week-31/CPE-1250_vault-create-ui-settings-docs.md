@@ -78,3 +78,13 @@ The orphan-session sweep (CPE-1252); the crew security-review doc (CPE-1251, nex
 ## Notes
 Destructive default OFF; verify-before-shred is already backend-enforced but the confirm is the human
 safeguard. Passphrase kept in memory only (+ keychain if the user opts in); never logged.
+
+## Done 2026-08-02 (workshift) — merged #553 @ 22860da5
+"Create encrypted vault…" folder action + VaultCreateDialog (passphrase+confirm w/ per-field show-hide,
+sibling <name>.cpevault dest with native picker, default-OFF secure-delete-original behind an honest
+warning, remember-in-keychain) + Settings toggle + in-app docs (src/docs/20-vaults.md + sectionDocs).
+Full gauntlet: Reviewer APPROVE (destructive defaults OFF, sibling dest never-inside-folder, vaultCreate
+binding correct, docs guard passes, NO app-wide CSS), UAT PASS on the real build, FULL-suite gui-smoke
+NO-REGRESSION (the fixture nested to keep the tmpDir root listing byte-identical — slice-3 lesson applied),
+Visual PASS after one fix round (both passphrase fields now share a consistent app-owned eye toggle;
+native ::-ms-reveal suppressed). CI stalled at merge; verified locally.
