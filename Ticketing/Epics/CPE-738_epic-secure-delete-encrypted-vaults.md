@@ -2,7 +2,7 @@
 id: CPE-738
 title: "EPIC: Secure delete & encrypted vaults"
 type: Task
-status: Proposed
+status: In Progress
 priority: Low
 component: Multiple
 tags: [epic]
@@ -63,6 +63,32 @@ Building the secure-delete DoD bullet only:
 
 **Deferred (user-gated):** encrypted vaults — needs a crypto-dep exception + a security review + OS
 keychain. Revisit with the user.
+
+## Re-activated 2026-08-01 (workshift) — VAULTS half, user said "do the vaults"
+User authorized the crypto-dependency call. Grep-first reuse found: `keyring` v3 is ALREADY a workspace
+dep (`sidecar/host`, per-OS native backends) with a proven `KeyringBackend` seam
+(`sidecar/host/src/providers/secrets.rs`) + a `SecretAccess`-style trait in `sidecar/ai-console/src/vault.rs`
+(a secret-REFERENCE vault — not file crypto, but the seam pattern to mirror). NO file-encryption crate
+exists yet.
+
+**Crypto decision (Foreman, per the mandate to use audited primitives, never hand-roll):** the vault
+format uses the **`age`** crate (passphrase mode: ChaCha20-Poly1305 AEAD + scrypt KDF, pure-Rust,
+streaming, audited) — no nonce/KDF footguns. This is the NEW dep the user approved. Keychain via the
+already-approved `keyring` v3. **Format:** a folder → a single `.cpevault` blob (tar of the tree, age-
+encrypted) — atomic lock/unlock, and it hides file names/count/sizes (more private than per-file `.age`).
+
+Decomposition (SEQUENTIAL — each needs the prior; core-first, heaviest review on the crypto core):
+- **CPE-1247** — Vault crypto core (`cpe-server/src/vault_crypto.rs`): pure `age`-passphrase encrypt/
+  decrypt of a folder tree ↔ a `.cpevault` blob (magic + schema version); cargo tests: round-trip,
+  tamper-detection (flip a byte → fail), wrong-passphrase-rejected, empty/nested/large. NEW dep `age`.
+- **CPE-1248** — Vault lifecycle + keychain seam + thin async commands (create shreds plaintext via the
+  built secure-shred engine; lock/unlock/status/is-vault; `SecretAccess` mirror of the keyring backend).
+- **CPE-1249** — Transparent mount/browse of an unlocked vault as a location + tree lock/unlock indicator.
+- **CPE-1250** — Vault UI (create/unlock/lock dialogs w/ visible border + path picker; indicators;
+  Settings for keychain caching); gui-smoke + Visual Critic.
+- **CPE-1251** — Security-review doc (threat model + crypto choices + honest guarantees) + crew adversarial
+  security review + an explicit "professional external audit recommended before GA" flag (DoD's review gate,
+  done honestly — a crew review de-risks but does not substitute for a professional crypto audit).
 
 ## Secure-delete slice COMPLETE 2026-08-01 (workshift) — vaults remain user-gated
 CPE-1240 (#539) wired the shred engine end-to-end: `shred_paths` command + "Securely delete…" context
