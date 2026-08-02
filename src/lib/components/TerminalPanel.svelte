@@ -41,6 +41,10 @@
   let tabs: Tab[] = [];
   let activeId: number | null = null;
   let opening = false;
+  /** Set when the most recent `addTab` failed (bad shell, spawn error, ...) — cleared on the next attempt.
+   *  Surfaced inline rather than silently swallowed, per [[avoid-modal-permission-popups]] (plain text, no
+   *  modal). */
+  let openError = "";
 
   /** Follow navigation (CPE-1243): when on, navigating the explorer `cd`s the ACTIVE tab's live shell to
    *  match (see `terminalClient.ts::followNavigation`'s doc comment for why a `cd`, not a respawn). Off by
@@ -102,12 +106,20 @@
   async function addTab(atCwd: string | null): Promise<void> {
     if (opening) return;
     opening = true;
+    openError = "";
+    const { term, fit } = makeTerm();
     try {
-      const { term, fit } = makeTerm();
       const { dockId, bridge } = await openTerminalTab(atCwd ?? "", selectedShell, term);
       const tab: Tab = { id: dockId, cwd: atCwd ?? "", term, fit, bridge };
       tabs = [...tabs, tab];
       activeId = dockId;
+    } catch (e) {
+      // CPE-1245: `openTerminalTab` already rolled back the dock entry it created (if any) before
+      // rethrowing, so the only leftover here is the xterm instance THIS function made — dispose it so a
+      // failed open never leaves an orphaned dock tab OR an undisposed `Terminal` behind. `fit` (the addon)
+      // never attached — `mountXterm` only runs once the tab is in `tabs[]`, which never happened here.
+      term.dispose();
+      openError = e instanceof Error ? e.message : String(e);
     } finally {
       opening = false;
     }
@@ -171,8 +183,25 @@
       <button class="tab" class:active={t.id === activeId} on:click={() => selectTab(t.id)} title={t.cwd}>
         <Icon name="terminal" size={14} />
         <span class="tab-label">{basename(t.cwd) || "shell"}</span>
-        <!-- svelte-ignore a11y-no-static-element-interactions a11y-click-events-have-key-events -->
-        <span class="tab-close" role="button" tabindex="-1" title="Close tab" on:click|stopPropagation={() => closeTab(t.id)} on:keydown|stopPropagation>
+        <!-- Not a real `<button>`: it lives inside the tab's own `<button>`, and HTML doesn't allow nesting
+             interactive controls. Made keyboard-operable directly instead (CPE-1245) — focusable via
+             tabindex="0" (was "-1", unreachable by Tab) and Enter/Space-activated like a real button, per
+             the ARIA "custom button" authoring pattern. Mirrors the AI Console launcher's tab-close, which
+             sidesteps the nesting problem the other way (a real `<button>` inside a non-button `.tab` div). -->
+        <!-- svelte-ignore a11y-no-static-element-interactions -->
+        <span
+          class="tab-close"
+          role="button"
+          tabindex="0"
+          title="Close tab"
+          on:click|stopPropagation={() => closeTab(t.id)}
+          on:keydown|stopPropagation={(e) => {
+            if (e.key === "Enter" || e.key === " ") {
+              e.preventDefault();
+              closeTab(t.id);
+            }
+          }}
+        >
           <Icon name="close" size={12} />
         </span>
       </button>
@@ -196,6 +225,15 @@
       </button>
     </span>
   </div>
+
+  {#if openError}
+    <!-- CPE-1245: surfaces an `addTab` failure inline (plain text, no modal — [[avoid-modal-permission-popups]])
+         instead of silently leaving the user staring at nothing while the tab that should have opened
+         doesn't exist. -->
+    <div class="terminal-open-error error" data-testid="terminal-open-error">
+      Couldn't open terminal: {openError}
+    </div>
+  {/if}
 
   <div class="terminal-body" data-testid="terminal-body" bind:this={bodyEl}>
     {#each tabs as t (t.id)}
@@ -255,6 +293,13 @@
     color: var(--text-dim);
     white-space: nowrap;
     cursor: pointer;
+  }
+  .terminal-open-error {
+    font-size: 12px;
+    padding: 4px 10px;
+    border-bottom: 1px solid var(--border);
+    background: var(--surface-alt);
+    flex: none;
   }
   .terminal-body {
     flex: 1;
