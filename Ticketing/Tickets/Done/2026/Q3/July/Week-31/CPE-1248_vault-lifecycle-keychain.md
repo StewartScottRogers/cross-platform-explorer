@@ -74,3 +74,14 @@ security-review doc (CPE-1251).
 ## Notes
 Keep the destructive "shred original" OFF by default and gated behind the verify-first invariant — the
 confirm UX comes in CPE-1250, but the backend must be safe even if called directly.
+
+## Done 2026-08-01 (workshift) — merged #551 @ aa442900
+VaultRegistry (create/unlock/lock/status/is_vault) in cpe-server behind a SecretAccess keychain seam
+(real KeyringBackend on keyring v3, mirroring sidecar) + 7 thin async spawn_blocking Tauri commands +
+VaultStatus specta type (bindings regenerated). Verify-before-shred invariant enforced. Full gauntlet:
+UAT PASS + independent SECURITY review APPROVE after TWO fix rounds — it caught (r1) dest-blob-inside-
+shredded-folder data-loss + verify writing plaintext to %TEMP% + lock-drops-mapping-before-wipe, then
+(r2) a regression where the in-memory verify skipped sanitize so a `\`/drive-letter-named file could
+seal+verify+shred but never extract. Closed by enforcing seal<->extract symmetry at encrypt time +
+verify defense-in-depth + a lock TOCTOU guard. Foreman-verified locally (31 vault tests, clippy both
+modes). CI runners stalled at merge.
