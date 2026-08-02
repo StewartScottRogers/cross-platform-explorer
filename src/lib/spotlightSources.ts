@@ -143,3 +143,66 @@ export function highlightByPositions(text: string, positions: number[]): Highlig
   if (buf) segments.push({ text: buf, match: bufMatch });
   return segments;
 }
+
+/**
+ * Greedy subsequence match of `query` against just the BASENAME of `text` (the substring after the
+ * last `/` or `\`), returning highlight positions as indices into the FULL `text` (offset by wherever
+ * the basename starts) — CPE-1223.
+ *
+ * Why not just filter `spotlight_search`'s own positions down to the basename (PR #529's approach,
+ * closed unmerged)? Ranking/highlighting there runs `fuzzy_score` (spotlight.rs) over the FULL path
+ * greedily left-to-right, so when the path *prefix* happens to contain a query character, the matcher
+ * can consume it there before ever reaching the filename — e.g. query "marker" against
+ * ".../Temp/CPE-1045-marker.txt" matches the leading `m` against the `m` in "Temp", leaving only
+ * "arker" for the basename-filtered positions. Rendering that drops the leading `m` of the real
+ * in-filename run, i.e. a partial, buggy-looking highlight. Re-matching the query fresh, against the
+ * basename alone, sidesteps the whole problem: the query never sees the prefix, so it always finds the
+ * full run in the filename when one exists.
+ *
+ * Mirrors spotlight.rs's `fuzzy_score` matching semantics (case-insensitive `toLowerCase`, greedy
+ * left-to-right, first-fit subsequence) so the highlighted run is a valid match by the same rules the
+ * backend uses for ranking — just scoped to a smaller haystack. It does NOT reproduce the backend's
+ * scoring/bonuses (irrelevant here: ranking/order stays exactly what `spotlight_search` returned; this
+ * only decides which characters get `<mark>`ed).
+ *
+ * Returns `null` when the query does not fully match as a subsequence of the basename alone. That's
+ * expected to be rare — it means the full-path ranking match relied on characters outside the basename
+ * in a way this isolated re-match can't reproduce (e.g. the basename alone doesn't contain every query
+ * character in order). Callers should fall back to the backend-supplied full-path `positions` in that
+ * case (`rowHighlightPositions` below) so a real match never ends up with no highlight at all.
+ */
+export function basenameMatchPositions(text: string, query: string): number[] | null {
+  const q = Array.from(query.trim().toLowerCase());
+  if (q.length === 0) return null;
+  const chars = Array.from(text); // char-by-char, matching highlightByPositions' code-point indexing
+  let basenameStart = 0;
+  for (let i = 0; i < chars.length; i++) {
+    if (chars[i] === "/" || chars[i] === "\\") basenameStart = i + 1;
+  }
+  const positions: number[] = [];
+  let qi = 0;
+  for (let ci = basenameStart; ci < chars.length && qi < q.length; ci++) {
+    if (chars[ci].toLowerCase() === q[qi]) {
+      positions.push(ci);
+      qi++;
+    }
+  }
+  return qi === q.length ? positions : null;
+}
+
+/**
+ * The highlight positions to actually render for a Spotlight row (CPE-1223): prefers a fresh
+ * basename-direct match (`basenameMatchPositions`) over the backend's raw full-path `positions`, so the
+ * highlighted run lands cleanly within the filename instead of scattering into the path prefix.
+ *
+ * Falls back to `positions` unchanged when either there's nothing to highlight (empty `positions` —
+ * e.g. the frecency default view, or a non-matching row) or the basename-direct match can't fully match
+ * the query on its own (see `basenameMatchPositions` doc) — that keeps a genuine match from ever
+ * silently losing its highlight. Non-file rows (action labels, anything with no path separator) are
+ * unaffected either way: `basenameMatchPositions` treats text with no separator as entirely "the
+ * basename", so the result is the same fresh-match highlighting, just over the whole string.
+ */
+export function rowHighlightPositions(text: string, positions: number[], query: string): number[] {
+  if (positions.length === 0) return positions;
+  return basenameMatchPositions(text, query) ?? positions;
+}

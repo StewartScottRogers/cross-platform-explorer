@@ -130,6 +130,60 @@ describe("Spotlight — search debounce + sectioned/highlighted rendering (CPE-1
   });
 });
 
+describe("Spotlight — highlight scoped to the basename (CPE-1223)", () => {
+  it("renders the FULL query highlighted within the basename, not a partial run, when a path-prefix char confuses the backend's full-path match (PR #529's failure case)", async () => {
+    render(Spotlight, { root: "/root", paletteCommands });
+    await settle();
+
+    await fireEvent.input(input(), { target: { value: "marker" } });
+    await vi.advanceTimersByTimeAsync(150);
+    // Backend scores/highlights over the full path: its greedy match consumes the stray "m" of "Temp"
+    // (index 14) for the query's leading "m", so the positions it reports only cover "arker" within the
+    // basename (indices 18-22) — exactly PR #529's partial-highlight bug. The basename-direct rematch
+    // must recover the WHOLE "marker" run, none of it in the "Temp" prefix.
+    const text = "C:\\Users\\me\\Temp\\marker.txt";
+    searchCalls[0].resolve([
+      {
+        kind: "file",
+        results: [{ text, kind: "file", score: 20, positions: [14, 18, 19, 20, 21, 22] }],
+      },
+    ]);
+    await settle();
+
+    const marks = document.querySelectorAll(".sp-row mark.sp-hl");
+    expect(marks).toHaveLength(1); // no separate stray mark in the "Temp" prefix
+    expect(marks[0].textContent).toBe("marker"); // the full run, not "arker"
+  });
+
+  it("still highlights every run of a genuine scattered in-filename match (rdme -> README.md)", async () => {
+    render(Spotlight, { root: "/root", paletteCommands });
+    await settle();
+
+    await fireEvent.input(input(), { target: { value: "rdme" } });
+    await vi.advanceTimersByTimeAsync(150);
+    const text = "/home/dev/project/README.md";
+    const basenameStart = text.lastIndexOf("/") + 1;
+    // r(0) d(3) m(4) e(5) relative to the basename — mirrors spotlight.rs's own multi-run shape.
+    searchCalls[0].resolve([
+      {
+        kind: "file",
+        results: [
+          {
+            text,
+            kind: "file",
+            score: 15,
+            positions: [basenameStart + 0, basenameStart + 3, basenameStart + 4, basenameStart + 5],
+          },
+        ],
+      },
+    ]);
+    await settle();
+
+    const marks = document.querySelectorAll(".sp-row mark.sp-hl");
+    expect(Array.from(marks).map((m) => m.textContent)).toEqual(["R", "DME"]);
+  });
+});
+
 describe("Spotlight — keyboard activation (CPE-1216)", () => {
   it("Enter on a folder/file/recent row dispatches activate, records a frecency visit, and closes", async () => {
     const { component } = render(Spotlight, { root: "/root", paletteCommands });
