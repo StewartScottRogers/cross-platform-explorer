@@ -150,6 +150,19 @@ fn create_vault_with_verifier(
     opts: &CreateOpts,
     verify: impl Fn(&Path, &SecretString) -> Result<(), VaultError>,
 ) -> Result<(), VaultError> {
+    if opts.shred_original {
+        // DATA-LOSS GUARD (checked BEFORE anything is written or destroyed): refuse to shred when the
+        // destination blob would live INSIDE the folder we're about to `remove_dir_all`. Otherwise the
+        // just-verified encrypted copy would be shredded along with the plaintext, losing both.
+        if resolves_inside(folder, dest_blob_path)? {
+            return Err(VaultError::Format(format!(
+                "refusing to shred: destination vault {} is inside the folder being shredded {}",
+                dest_blob_path.display(),
+                folder.display()
+            )));
+        }
+    }
+
     let blob = vault_crypto::encrypt_tree(folder, passphrase)?;
     std::fs::write(dest_blob_path, &blob)?;
 
@@ -163,17 +176,41 @@ fn create_vault_with_verifier(
     Ok(())
 }
 
-/// Prove the blob at `blob_path` is fully recoverable: read it back from disk and decrypt its entire
-/// tree into a throwaway scratch directory, which is removed afterwards. Success means the encrypted
-/// copy authenticates and the passphrase opens it.
+/// Prove the blob at `blob_path` is fully recoverable — read it back from disk and authenticate +
+/// parse it **entirely in memory** via [`vault_crypto::verify_blob`]. Deliberately writes no plaintext
+/// to disk (an earlier version extracted into a `%TEMP%` dir, leaving a recoverable unshredded copy
+/// that defeated the shred — CPE-1248 review). Success means the on-disk encrypted copy authenticates
+/// and the passphrase opens it.
 fn verify_recoverable(blob_path: &Path, passphrase: &SecretString) -> Result<(), VaultError> {
     let blob = std::fs::read(blob_path)?;
-    let probe = scratch_path("verify");
-    // `decrypt_tree` needs a non-existent / empty target; ensure no stale probe is in the way.
-    let _ = std::fs::remove_dir_all(&probe);
-    let result = vault_crypto::decrypt_tree(&blob, passphrase, &probe);
-    let _ = std::fs::remove_dir_all(&probe);
-    result
+    vault_crypto::verify_blob(&blob, passphrase)
+}
+
+/// Does `dest` resolve to a location inside `folder` (including `folder` itself)? Used to guard the
+/// destructive shred path so the vault blob is never written where the shred will destroy it.
+///
+/// `folder` must exist (it's the tree being sealed). `dest` typically does **not** exist yet, so its
+/// parent is canonicalized and the file name re-appended rather than canonicalizing a missing path.
+/// Comparing canonicalized paths collapses `..`/symlinks/`.\` on both sides so the containment check
+/// can't be fooled by a non-normalized destination.
+fn resolves_inside(folder: &Path, dest: &Path) -> Result<bool, VaultError> {
+    let folder_canon = std::fs::canonicalize(folder)?;
+    let dest_canon = match std::fs::canonicalize(dest) {
+        Ok(p) => p,
+        Err(_) => {
+            let parent = dest.parent().filter(|p| !p.as_os_str().is_empty());
+            let parent_canon = match parent {
+                Some(p) => std::fs::canonicalize(p)?,
+                // A bare file name with no parent resolves against the current dir.
+                None => std::fs::canonicalize(".")?,
+            };
+            match dest.file_name() {
+                Some(name) => parent_canon.join(name),
+                None => parent_canon,
+            }
+        }
+    };
+    Ok(dest_canon.starts_with(&folder_canon))
 }
 
 // ---------------------------------------------------------------------------
@@ -224,12 +261,28 @@ impl VaultRegistry {
         Ok(())
     }
 
-    /// Lock `blob_path`: drop the unlocked mapping and securely wipe its session directory. Locking a
+    /// Lock `blob_path`: securely wipe its session directory, then drop the unlocked mapping. Locking a
     /// vault that is not unlocked is a no-op success.
+    ///
+    /// The mapping is dropped **only after** the wipe succeeds: if the wipe fails (a read-only extracted
+    /// file, a file held open by another process), the vault stays reported unlocked so the lock is
+    /// retryable and never claims "locked" while plaintext still lingers on disk.
     pub fn lock(&self, blob_path: &Path) -> Result<(), VaultError> {
-        let session = self.0.lock().unwrap().remove(blob_path);
+        self.lock_with_wiper(blob_path, |dir| wipe_session_dir(dir, SESSION_WIPE_SCHEME))
+    }
+
+    /// [`lock`](Self::lock) with the wipe injected, so tests can force a wipe failure and assert the
+    /// vault stays unlocked (retryable). Production always passes [`wipe_session_dir`].
+    fn lock_with_wiper(
+        &self,
+        blob_path: &Path,
+        wipe: impl Fn(&Path) -> Result<(), VaultError>,
+    ) -> Result<(), VaultError> {
+        // Read (don't remove) the session first, so a failing wipe leaves the mapping in place.
+        let session = self.0.lock().unwrap().get(blob_path).cloned();
         if let Some(dir) = session {
-            wipe_session_dir(&dir, SESSION_WIPE_SCHEME)?;
+            wipe(&dir)?; // on Err: the mapping is untouched → is_unlocked stays true → retryable.
+            self.0.lock().unwrap().remove(blob_path);
         }
         Ok(())
     }
@@ -333,20 +386,6 @@ fn collect_files(dir: &Path, out: &mut Vec<PathBuf>) -> Result<(), VaultError> {
         }
     }
     Ok(())
-}
-
-/// A unique, non-existent scratch path under the system temp dir (no RNG dependency — pid + a
-/// process-lifetime counter + wall-clock nanos, same recipe the crypto core uses for staging).
-fn scratch_path(tag: &str) -> PathBuf {
-    use std::sync::atomic::{AtomicU64, Ordering};
-    static COUNTER: AtomicU64 = AtomicU64::new(0);
-    let n = COUNTER.fetch_add(1, Ordering::Relaxed);
-    let pid = std::process::id();
-    let nanos = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_nanos())
-        .unwrap_or(0);
-    std::env::temp_dir().join(format!("cpe-vault-{tag}-{pid}-{nanos}-{n}"))
 }
 
 #[cfg(test)]
@@ -516,6 +555,109 @@ mod tests {
         reg.unlock(&blob_path, &pass("pw"), &session).unwrap();
         assert_eq!(std::fs::read(session.join("top.txt")).unwrap(), b"top secret");
         reg.lock(&blob_path).unwrap();
+    }
+
+    /// CPE-1248 review #1 (data-loss): if the destination blob would land INSIDE the folder being
+    /// shredded, `create_vault` with `shred_original` must refuse BEFORE writing/destroying anything —
+    /// otherwise the just-verified encrypted copy would be shredded with the plaintext, losing both.
+    #[test]
+    fn shred_original_refuses_when_dest_is_inside_the_folder_to_be_shredded() {
+        let dir = tempfile::tempdir().unwrap();
+        let folder = dir.path().join("secret");
+        sample_folder(&folder);
+        // A pre-existing blob living INSIDE the folder — the exact data-loss scenario.
+        let dest_inside = folder.join("archive.cpevault");
+        std::fs::write(&dest_inside, b"pre-existing bytes").unwrap();
+
+        let opts = CreateOpts { shred_original: true, shred_scheme: ShredScheme::Zero };
+        let result = create_vault(&folder, &dest_inside, &pass("pw"), &opts);
+        assert!(matches!(result, Err(VaultError::Format(_))), "must refuse a dest inside the folder: {result:?}");
+
+        // Nothing was shredded or overwritten: plaintext AND the pre-existing blob both survive intact.
+        assert_eq!(std::fs::read(folder.join("top.txt")).unwrap(), b"top secret");
+        assert_eq!(std::fs::read(&dest_inside).unwrap(), b"pre-existing bytes");
+
+        // A nested-inside dest is refused too (guard is by canonicalized path prefix, not name match).
+        let nested = folder.join("sub").join("deep.cpevault");
+        assert!(matches!(
+            create_vault(&folder, &nested, &pass("pw"), &opts),
+            Err(VaultError::Format(_))
+        ));
+        assert_eq!(std::fs::read(folder.join("top.txt")).unwrap(), b"top secret");
+
+        // A sibling dest just OUTSIDE the folder (shared name prefix) is allowed and shreds cleanly.
+        let sibling = dir.path().join("secret.cpevault");
+        create_vault(&folder, &sibling, &pass("pw"), &opts).unwrap();
+        assert!(!folder.exists(), "an outside dest must still let the folder be shredded");
+        assert!(is_vault(&sibling));
+    }
+
+    /// CPE-1248 review #2 (plaintext leak): the recoverability check must run in memory and never
+    /// extract plaintext to the temp dir. Guards against re-introducing the `%TEMP%` extraction that
+    /// left a recoverable unshredded copy. (`vault_crypto::verify_blob`'s own unit test proves the
+    /// in-memory authentication path; this asserts no on-disk artefact escapes into temp.)
+    #[test]
+    fn verify_before_shred_leaves_no_plaintext_in_the_temp_dir() {
+        let temp = std::env::temp_dir();
+        let before = count_cpe_vault_temp_dirs(&temp);
+
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("src");
+        sample_folder(&src);
+        let blob_path = dir.path().join("v.cpevault");
+        let opts = CreateOpts { shred_original: true, shred_scheme: ShredScheme::Zero };
+        create_vault(&src, &blob_path, &pass("pw"), &opts).unwrap();
+
+        assert_eq!(
+            before,
+            count_cpe_vault_temp_dirs(&temp),
+            "the recoverability verify must not extract any plaintext into the temp dir"
+        );
+    }
+
+    /// Count leftover `cpe-vault*` scratch entries in `temp` (the prefix the removed disk-based verify
+    /// used) — a regression tripwire for a temp-extracting verify creeping back in.
+    fn count_cpe_vault_temp_dirs(temp: &Path) -> usize {
+        std::fs::read_dir(temp)
+            .map(|rd| {
+                rd.filter_map(|e| e.ok())
+                    .filter(|e| e.file_name().to_string_lossy().starts_with("cpe-vault"))
+                    .count()
+            })
+            .unwrap_or(0)
+    }
+
+    /// CPE-1248 review #3: a failed wipe must leave the vault UNLOCKED (retryable), never report it
+    /// "locked" while the plaintext session dir still lingers. The mapping is dropped only on a
+    /// successful wipe.
+    #[test]
+    fn lock_stays_unlocked_and_retryable_when_the_wipe_fails() {
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("src");
+        sample_folder(&src);
+        let blob_path = dir.path().join("v.cpevault");
+        create_vault(&src, &blob_path, &pass("pw"), &CreateOpts::default()).unwrap();
+
+        let reg = VaultRegistry::default();
+        let session = dir.path().join("session");
+        reg.unlock(&blob_path, &pass("pw"), &session).unwrap();
+        assert!(reg.is_unlocked(&blob_path));
+
+        // Inject a failing wipe.
+        let result = reg.lock_with_wiper(&blob_path, |_| {
+            Err(VaultError::Io(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                "cannot remove",
+            )))
+        });
+        assert!(result.is_err(), "a failed wipe must surface an error");
+        assert!(reg.is_unlocked(&blob_path), "a failed wipe must leave the vault unlocked (retryable)");
+        assert!(session.exists(), "the session dir (plaintext) must still exist after a failed lock");
+
+        // A subsequent real lock succeeds: state cleared and the session dir securely wiped away.
+        reg.lock(&blob_path).unwrap();
+        assert!(!reg.is_unlocked(&blob_path));
+        assert!(!session.exists(), "a successful lock must wipe the session dir");
     }
 
     // ---- passphrase persistence through the fake ------------------------

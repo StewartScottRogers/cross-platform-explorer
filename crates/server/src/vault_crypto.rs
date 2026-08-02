@@ -390,6 +390,24 @@ pub fn decrypt_tree(
     write_tree_atomic(&entries, out_dir)
 }
 
+/// Prove a `.cpevault` blob is fully recoverable **without writing any plaintext to disk** (CPE-1248).
+///
+/// Runs the same authentication path a real open would — [`decrypt_bytes`] (which checks the outer
+/// envelope, derives the scrypt key, and authenticates the streaming AEAD, so a wrong passphrase or a
+/// tampered/truncated payload fails) and [`unpack_entries`] (which confirms the internal framing parses)
+/// — but keeps the decrypted plaintext entirely in memory and [`Zeroize`]s it before returning. It never
+/// materializes files, so it is the safe recoverability check for the destructive "seal then shred the
+/// original" path: verifying no longer leaves an unshredded plaintext copy in a temp directory.
+///
+/// Returns `Ok(())` iff the blob decrypts, authenticates, and its framing parses. Never panics.
+pub fn verify_blob(blob: &[u8], passphrase: &SecretString) -> Result<(), VaultError> {
+    let mut plaintext = decrypt_bytes(blob, passphrase)?;
+    let parsed = unpack_entries(&plaintext);
+    plaintext.zeroize();
+    parsed?;
+    Ok(())
+}
+
 /// Collect a directory tree into sorted [`TreeEntry`]s.
 fn collect_tree(root: &Path) -> Result<Vec<TreeEntry>, VaultError> {
     let mut entries = Vec::new();
@@ -765,6 +783,32 @@ mod tests {
         for n in 0..real.len() {
             assert!(decrypt_bytes(&real[..n], &pw).is_err());
         }
+    }
+
+    // ---- in-memory recoverability check (verify_blob, CPE-1248) ---------
+
+    #[test]
+    fn verify_blob_accepts_a_good_blob_and_rejects_bad_ones() {
+        let pw = pass("verify-pw");
+        let blob = encrypt_fast(&pack_entries(&sample_tree()), &pw);
+
+        // A good blob with the right passphrase verifies.
+        assert!(verify_blob(&blob, &pw).is_ok());
+
+        // Wrong passphrase → BadPassphrase (authenticated, so it can't be trusted/shredded against).
+        assert!(matches!(
+            verify_blob(&blob, &pass("nope")),
+            Err(VaultError::BadPassphrase)
+        ));
+
+        // A tampered payload → Corrupt.
+        let mut tampered = blob.clone();
+        let last = tampered.len() - 1;
+        tampered[last] ^= 0x01;
+        assert!(matches!(verify_blob(&tampered, &pw), Err(VaultError::Corrupt)));
+
+        // Not a vault at all → BadMagic (never panics on arbitrary bytes).
+        assert!(matches!(verify_blob(b"not a vault", &pw), Err(VaultError::BadMagic)));
     }
 
     // ---- path safety ----------------------------------------------------
