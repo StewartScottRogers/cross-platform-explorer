@@ -114,6 +114,12 @@ tauri-plugin-window-state = "2"
 # Registered with zero shortcuts at startup; Settings opts in (off means no background cost).
 tauri-plugin-global-shortcut = "2"
 
+# Native OS drag-OUT plumbing (CPE-1264, epic CPE-661 follow-on for CPE-672/674): starts a real OS-level
+# file drag from `startDrag` in `src/lib/dragOut.ts` so a drop lands in Explorer/Finder/other apps — HTML5
+# webview drag can't expose real filesystem paths cross-platform. This slice only registers the plugin;
+# nothing calls it yet (no row is wired to drag-out). Desktop-only — mobile has no OS drag-out surface.
+tauri-plugin-drag = "2"
+
 # Keep the display awake while the app is open (CPE-225). Cross-platform screen-
 # lock / screensaver / display-sleep inhibition: Windows SetThreadExecutionState,
 # macOS IOPMAssertion, Linux org.freedesktop.ScreenSaver via zbus (no system dbus
