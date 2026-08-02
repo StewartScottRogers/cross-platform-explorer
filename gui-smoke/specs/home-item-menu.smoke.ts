@@ -63,8 +63,22 @@ async function clickPill(label: RegExp): Promise<void> {
 
 /** Viewport-space centre of the FIRST Home list `.recent-row` (a Recent/Favorites/Folders entry), or
  *  `null` if the current tab shows none. Aims at the row's name cell so the hit lands on the row
- *  itself, not its trailing ✕/★ affordance. */
+ *  itself, not its trailing ✕/★ affordance. Scrolls the row into view first (same convention as
+ *  drive-menu.smoke.ts's `pointOfSidebarDrive`/vault.smoke.ts/transfer-panel.smoke.ts): the Home
+ *  page's Quick-access grid can push a Recent/Favorites/Folders row below the fold of the harness's
+ *  1000x700 test window (real drives/pins/places on the runner add rows), and a `getBoundingClientRect`
+ *  point below `window.innerHeight` fails CDP's real hit-test (`elementFromPoint` returns null outside
+ *  the viewport) — so the right-click silently lands on nothing and no `contextmenu` ever fires. That
+ *  is CPE-1253's actual root cause: confirmed by instrumenting a real run (a capture-phase event trace
+ *  showed ZERO mousedown/mouseup/contextmenu events reached the page for an off-screen row's
+ *  coordinates, while `.ctx` opened and STAYED open once the row was scrolled into view first) — not an
+ *  app-side dismiss race (ContextMenu.svelte's CPE-1160 `OPEN_GUARD_MS` + every Home row handler's
+ *  `stopPropagation` already prevent that, same as the working drive-tile/file-row menus). */
 async function pointOfFirstRow(): Promise<Point | null> {
+  await browser.execute(() => {
+    document.querySelector(".recent-row")?.scrollIntoView({ block: "center" });
+  });
+  await browser.pause(150);
   return browser.execute(() => {
     const row = document.querySelector(".recent-row");
     if (!row) return null;
