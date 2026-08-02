@@ -84,6 +84,7 @@
   } from "./lib/vaultStore";
   import ShortcutsDialog from "./lib/components/ShortcutsDialog.svelte";
   import ContentSearchDialog from "./lib/components/ContentSearchDialog.svelte";
+  import ContentIndexSearchDialog from "./lib/components/ContentIndexSearchDialog.svelte";
   import FileNameSearchDialog from "./lib/components/FileNameSearchDialog.svelte";
   import InstantSearch from "./lib/components/InstantSearch.svelte";
   import Spotlight from "./lib/components/Spotlight.svelte";
@@ -726,6 +727,9 @@
   /** Instant Search overlay (Ctrl+K) — keyboard-first cross-volume search over the resident index
    *  (CPE-1139, epic CPE-703). Global: works from any folder, or the Home screen. */
   let instantSearchOpen = false;
+  /** File-content search overlay (palette only — no shortcut free) — ranked hits from the local content
+   *  index built by `content_index_build` (CPE-1263, epic CPE-976). Scoped to the current folder. */
+  let contentIndexSearchOpen = false;
   /** Query the toolbar Search hands to the recursive find dialog on Enter (CPE-866). */
   let deepSearchQuery = "";
   /** "Find duplicate files" overlay, scoped to the current folder (CPE-421). */
@@ -846,6 +850,7 @@
     { id: "tool.findByName", group: $t("palette.groupTools"), label: $t("palette.findByName"), shortcut: "Ctrl+P", run: () => (fileSearchOpen = true), enabled: inFolder },
     { id: "tool.searchInFiles", group: $t("palette.groupTools"), label: $t("palette.searchInFiles"), shortcut: "Ctrl+Shift+F", run: () => (contentSearchOpen = true), enabled: inFolder },
     { id: "tool.instantSearch", group: $t("palette.groupTools"), label: $t("palette.instantSearch"), shortcut: "Ctrl+K", run: () => (instantSearchOpen = true) },
+    { id: "tool.contentIndexSearch", group: $t("palette.groupTools"), label: $t("palette.contentIndexSearch"), keywords: "content semantic meaning embedding embedder offline index snippet ranked", run: () => (contentIndexSearchOpen = true), enabled: inFolder },
     { id: "tool.spotlight", group: $t("palette.groupTools"), label: $t("palette.spotlight"), keywords: "quick launch omnibox everywhere actions folders files recent", run: () => (spotlightOpen = true) },
     { id: "tool.findDuplicates", group: $t("palette.groupTools"), label: $t("palette.findDuplicates"), run: () => (duplicatesOpen = true), enabled: inFolder },
     { id: "tool.findSimilarImages", group: $t("palette.groupTools"), label: $t("palette.findSimilarImages"), keywords: "near duplicate similar images photos perceptual dhash reclaim", run: () => (similarImagesOpen = true), enabled: inFolder },
@@ -5186,6 +5191,15 @@
     on:help={() => openDocsSlug("12-search")}
     on:navigate={(e) => { instantSearchOpen = false; revealFileInApp(e.detail); }}
     on:close={() => (instantSearchOpen = false)}
+  />
+{/if}
+
+{#if contentIndexSearchOpen}
+  <ContentIndexSearchDialog
+    root={currentPath}
+    on:help={() => openDocsSlug("12-search")}
+    on:navigate={(e) => { contentIndexSearchOpen = false; revealFileInApp(e.detail); }}
+    on:close={() => (contentIndexSearchOpen = false)}
   />
 {/if}
 

@@ -82,6 +82,31 @@ Besides finding files by **name**, you can search their **contents**. Both searc
 Both boxes remember your **recent queries** — start typing to pick one from the drop-down. Results
 **stream in** as the folder tree is walked, so matches appear immediately even on large trees.
 
+## Search file contents — ranked results from a local content index
+
+Open the command palette and choose **"Search file contents…"** for a third way to search inside files —
+this one ranks results by how well a file's *indexed text* matches your query, instead of listing every
+literal line that contains it (that's "Search in files" above). It's built on a small, **dependency-free
+local model that runs entirely on this device** — no API key, no network call, nothing leaves your
+machine. It's honestly a **content search**, not a magic mind-reader: it scores files by shared words/
+phrases with your query, so results improve when the query uses words likely to actually appear in the
+file (the underlying model is pluggable, so a stronger one can be dropped in later without changing this
+UI).
+
+- **Build the index first.** A folder needs a **content index** before it can be searched this way — the
+  first time you open it for a folder with none yet, you'll see a **"Build content index"** prompt
+  instead of an error. Building walks the folder's text-like files (skipping binaries and anything
+  oversized) and shows live progress (files indexed so far) without freezing the app; once it finishes,
+  the query box unlocks.
+- **Type to search.** Once an index exists, results appear after a short pause as you type — no need to
+  press Enter. Each result shows the **file name**, its **path relative to the folder**, a **match-score
+  bar** (how strong a hit it is), and a **snippet** of the matching text. Click a result to jump to it
+  (its folder opens and the file is selected).
+- **Refresh the index** any time from the **Rebuild index** button in the dialog's header — useful after
+  adding, editing, or removing a lot of files, since the index isn't kept live automatically.
+- If a search comes back with **no matches**, that means the index has no file scoring above zero for
+  that query — try different wording, or rebuild the index if files changed recently.
+
 ## Instant search (Ctrl+K) — every indexed folder, any drive
 
 The two search boxes above both work **inside** a folder you've opened. **Instant Search** (**Ctrl+K**,
