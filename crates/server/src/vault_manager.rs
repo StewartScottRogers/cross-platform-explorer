@@ -247,17 +247,56 @@ pub struct VaultRegistry(Arc<Mutex<HashMap<PathBuf, PathBuf>>>);
 impl VaultRegistry {
     /// Unlock `blob_path` into `session_dir` and record the mapping. If decryption fails, no state is
     /// recorded (the vault stays locked).
+    ///
+    /// Re-unlock safety (CPE-1249 review #1): if `blob_path` is ALREADY unlocked into a *different* session
+    /// dir, that prior session dir's plaintext is securely wiped before the mapping is overwritten — so a
+    /// direct/double unlock never leaves the old plaintext orphaned on disk. The new decrypt runs first, so
+    /// a failed re-unlock leaves the existing unlocked state (and its plaintext) untouched.
     pub fn unlock(
         &self,
         blob_path: &Path,
         passphrase: &SecretString,
         session_dir: &Path,
     ) -> Result<(), VaultError> {
+        self.unlock_with_wiper(blob_path, passphrase, session_dir, |dir| {
+            wipe_session_dir(dir, SESSION_WIPE_SCHEME)
+        })
+    }
+
+    /// [`unlock`](Self::unlock) with the stale-session wipe injected, so tests can assert a re-unlock wipes
+    /// the prior session dir. Production always passes [`wipe_session_dir`].
+    ///
+    /// The superseded-dir wipe is **best-effort by design** (a deliberate asymmetry vs [`lock`](Self::lock),
+    /// where wiping IS the operation and stays retryable): once the NEW session is decrypted and mapped the
+    /// unlock has already succeeded, so a failure to wipe the OLD (superseded) dir must NOT turn the whole
+    /// unlock into an `Err` — that would falsely report a failure while a valid new session is live, and
+    /// orphan the new session in the UI. We swallow that wipe error and return `Ok`; CPE-1252's startup
+    /// sweep is the backstop for any old dir that lingers.
+    fn unlock_with_wiper(
+        &self,
+        blob_path: &Path,
+        passphrase: &SecretString,
+        session_dir: &Path,
+        wipe: impl Fn(&Path) -> Result<(), VaultError>,
+    ) -> Result<(), VaultError> {
+        // Decrypt into the NEW session dir first — a failed decrypt must leave any existing unlocked state
+        // (and its plaintext) intact, so this happens before we touch the map.
         unlock_to_session(blob_path, passphrase, session_dir)?;
-        self.0
-            .lock()
-            .unwrap()
-            .insert(blob_path.to_path_buf(), session_dir.to_path_buf());
+        // Record the new mapping, capturing any prior session dir for the same blob. Inserting BEFORE the
+        // wipe keeps the (freshly-decrypted) new session always reachable/lockable even if the wipe below
+        // fails on a stubborn file — the new plaintext is never the orphan.
+        let prev = {
+            let mut map = self.0.lock().unwrap();
+            map.insert(blob_path.to_path_buf(), session_dir.to_path_buf())
+        };
+        if let Some(old) = prev {
+            if old != session_dir {
+                // Best-effort (see the doc comment): the unlock has already succeeded, so a failed wipe of
+                // the superseded dir is swallowed rather than propagated. The startup sweep (CPE-1252) is
+                // the backstop for any dir left behind here.
+                let _ = wipe(&old);
+            }
+        }
         Ok(())
     }
 
@@ -501,6 +540,70 @@ mod tests {
         assert!(!session.exists(), "lock must wipe the session dir — no plaintext left behind");
         // The vault blob itself is untouched.
         assert!(is_vault(&blob_path));
+    }
+
+    #[test]
+    fn re_unlocking_wipes_the_prior_session_dir_leaving_no_orphaned_plaintext() {
+        // CPE-1249 review #1: unlocking an ALREADY-unlocked vault into a new session dir must securely wipe
+        // the previous session dir's plaintext, not orphan it on disk.
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("src");
+        sample_folder(&src);
+        let blob_path = dir.path().join("v.cpevault");
+        create_vault(&src, &blob_path, &pass("pw"), &CreateOpts::default()).unwrap();
+
+        let reg = VaultRegistry::default();
+        let session1 = dir.path().join("session1");
+        reg.unlock(&blob_path, &pass("pw"), &session1).unwrap();
+        assert!(session1.join("top.txt").exists(), "first unlock extracts plaintext");
+
+        // Re-unlock into a DIFFERENT session dir.
+        let session2 = dir.path().join("session2");
+        reg.unlock(&blob_path, &pass("pw"), &session2).unwrap();
+
+        // The registry now points at the new dir, and the OLD session dir has been wiped away entirely —
+        // no lingering, unreferenced plaintext.
+        assert_eq!(reg.session_dir(&blob_path).as_deref(), Some(session2.as_path()));
+        assert!(!session1.exists(), "re-unlock must wipe the prior session dir (no orphaned plaintext)");
+        assert!(session2.join("top.txt").exists(), "the new session dir holds the plaintext");
+
+        // And a normal lock still cleans up the current session.
+        reg.lock(&blob_path).unwrap();
+        assert!(!session2.exists());
+        assert!(!reg.is_unlocked(&blob_path));
+    }
+
+    #[test]
+    fn re_unlock_with_a_failing_old_dir_wipe_still_succeeds_and_maps_the_new_session() {
+        // CPE-1249 re-review (A): the superseded-dir wipe is best-effort. If wiping the OLD session dir
+        // fails, the re-unlock must STILL return Ok and leave the NEW session mapped + browsable — never
+        // report the whole unlock as failed (which would orphan the live new session in the UI). Any
+        // lingering old dir is left for CPE-1252's startup sweep.
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("src");
+        sample_folder(&src);
+        let blob_path = dir.path().join("v.cpevault");
+        create_vault(&src, &blob_path, &pass("pw"), &CreateOpts::default()).unwrap();
+
+        let reg = VaultRegistry::default();
+        let session1 = dir.path().join("session1");
+        reg.unlock(&blob_path, &pass("pw"), &session1).unwrap();
+
+        // Re-unlock into a new dir with a wiper that always fails on the OLD dir.
+        let session2 = dir.path().join("session2");
+        let result = reg.unlock_with_wiper(&blob_path, &pass("pw"), &session2, |_| {
+            Err(VaultError::Io(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                "cannot remove",
+            )))
+        });
+
+        assert!(result.is_ok(), "a failed old-dir wipe must NOT fail the unlock: {result:?}");
+        // The new session is live: mapped + decrypted + browsable.
+        assert_eq!(reg.session_dir(&blob_path).as_deref(), Some(session2.as_path()));
+        assert!(session2.join("top.txt").exists(), "the new session dir must be valid/browsable");
+        // The old dir lingers here (the injected wipe failed) — that's the accepted tradeoff, swept later.
+        assert!(session1.exists(), "old dir lingers when its wipe fails (startup sweep is the backstop)");
     }
 
     #[test]

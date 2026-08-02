@@ -70,6 +70,17 @@
   import NewLinkDialog from "./lib/components/NewLinkDialog.svelte";
   import RepairLinkDialog from "./lib/components/RepairLinkDialog.svelte";
   import ShredConfirmDialog from "./lib/components/ShredConfirmDialog.svelte";
+  import VaultBanner from "./lib/components/VaultBanner.svelte";
+  import {
+    vaults,
+    unlockVault,
+    lockVault,
+    isUnlocked,
+    sessionDirFor,
+    vaultOfSessionPath,
+    vaultDisplayName,
+    classifyUnlockError,
+  } from "./lib/vaultStore";
   import ShortcutsDialog from "./lib/components/ShortcutsDialog.svelte";
   import ContentSearchDialog from "./lib/components/ContentSearchDialog.svelte";
   import FileNameSearchDialog from "./lib/components/FileNameSearchDialog.svelte";
@@ -1871,6 +1882,7 @@
       await navigate(entry.path);
       return;
     }
+    if (entry.extension === "cpevault") { await tryUnlockVault(entry); return; }
     if (isArchiveFile(entry)) { await enterArchive(entry); return; }
     try {
       // open_external runs it through the OS shell — reliably launches the
@@ -1881,6 +1893,96 @@
     } catch (e) {
       console.debug("open failed:", e);
       showNotice(`Can't open "${entry.name}" — no app is associated with this file type.`, true);
+    }
+  }
+
+  // ---- Encrypted vaults (CPE-1249, epic CPE-738) ------------------------------------------------
+  // Activating a `.cpevault` file (double-click / Enter) confirms it's a real vault, prompts for the
+  // passphrase, decrypts it into a private session dir, and navigates INTO that dir so the tree is
+  // browsable as a normal location. The unlocked-vault banner (below the toolbar) offers Lock, which
+  // navigates back out and securely wipes the session dir. See vaultStore.ts.
+
+  /** The blob path of the unlocked vault we're currently browsing inside, or `null` (drives the banner). */
+  $: activeVaultBlob = vaultOfSessionPath($vaults, currentPath);
+
+  /** Activation of a `.cpevault` row. If it's ALREADY unlocked, navigate straight back into its existing
+   *  session dir — never re-unlock, which would allocate a fresh session dir and orphan the old plaintext
+   *  on disk (review #1). Otherwise confirm it's really a vault via `vault_is` (magic header, not just the
+   *  extension) and prompt for the passphrase. A `vault_is` I/O/permission error must NOT fall through to
+   *  opening the ENCRYPTED blob externally (review #4). A `.cpevault`-named file that is genuinely not a
+   *  vault opens with the OS default, so a mis-named file is never a dead end. */
+  async function tryUnlockVault(entry: DirEntry) {
+    if (isUnlocked($vaults, entry.path)) {
+      const dir = sessionDirFor($vaults, entry.path);
+      if (dir) {
+        await navigate(dir);
+        return;
+      }
+    }
+    let isVault: boolean;
+    try {
+      isVault = unwrap(await commands.vaultIs(entry.path));
+    } catch (e) {
+      // Transient read failure — surface it, but never open the encrypted blob externally as a fallback.
+      showNotice(`Couldn't read "${entry.name}": ${String(e)}`, true);
+      return;
+    }
+    if (!isVault) {
+      try {
+        unwrap(await commands.openExternal(entry.path));
+      } catch {
+        showNotice(`Can't open "${entry.name}".`, true);
+      }
+      return;
+    }
+    promptForVaultPassphrase(entry);
+  }
+
+  /** Show the passphrase prompt for a vault; on submit, unlock + navigate in. A failed unlock re-prompts
+   *  with distinct copy (wrong password vs damaged file) and records NO state (vaultStore records only on
+   *  success), so there's never a half-open vault. The passphrase stays in memory only — never logged. */
+  function promptForVaultPassphrase(entry: DirEntry, error = "") {
+    // A fresh object reference each attempt → the `{#key passwordPrompt}` template block remounts the
+    // dialog (clean empty field + refocus + re-armed submit guard), so a wrong-password re-prompt never
+    // reuses the stale masked value (CPE-1249 review #3).
+    passwordPrompt = {
+      title: `Unlock ${entry.name}`,
+      message:
+        `Enter the passphrase to unlock and browse "${entry.name}". While unlocked, its contents are ` +
+        `decrypted into a private temporary folder; locking it wipes that folder.`,
+      confirmLabel: "Unlock",
+      error,
+      onSubmit: async (passphrase) => {
+        try {
+          const sessionDir = await unlockVault(entry.path, passphrase);
+          passwordPrompt = null;
+          await navigate(sessionDir);
+          showNotice(`Unlocked "${entry.name}".`);
+        } catch (e) {
+          promptForVaultPassphrase(entry, classifyUnlockError(e));
+        }
+      },
+    };
+  }
+
+  /** Lock the vault we're browsing: navigate OUT of the session dir FIRST (it's about to be wiped), then
+   *  ask the backend to lock (shred + remove the session dir) and update the store. On a wipe FAILURE the
+   *  vault stays unlocked (retryable) — navigate BACK INTO the session dir so the banner + Lock button
+   *  reappear and the user can retry, rather than stranding the plaintext with no in-app affordance
+   *  (review #2). */
+  async function lockActiveVault(blobPath: string) {
+    const sessionDir = sessionDirFor($vaults, blobPath);
+    const back = parentOfPath(blobPath) || HOME;
+    await navigate(back);
+    try {
+      await lockVault(blobPath);
+      showNotice(`Locked "${vaultDisplayName(blobPath)}".`);
+    } catch {
+      if (sessionDir) await navigate(sessionDir); // re-expose the banner's Lock button for a retry
+      showNotice(
+        `Couldn't lock "${vaultDisplayName(blobPath)}" — some files may still be in use. Try again.`,
+        true,
+      );
     }
   }
 
@@ -4575,6 +4677,14 @@
   <!-- File List Pane (middle column) -->
   <!-- svelte-ignore a11y-click-events-have-key-events a11y-no-static-element-interactions -->
   <div class="pane-col" class:pane-active={dualPane && activePane === 0} on:click={() => (activePane = 0)}>
+    {#if activeVaultBlob}
+      <!-- Unlocked-vault browsing banner (CPE-1249): shown while navigated inside a decrypted vault's
+           session dir; its Lock button re-seals the vault (navigate out + wipe). -->
+      <VaultBanner
+        name={vaultDisplayName(activeVaultBlob)}
+        on:lock={() => { if (activeVaultBlob) lockActiveVault(activeVaultBlob); }}
+      />
+    {/if}
     <ExplorerPane
       bind:this={explorerPane}
       inHome={isHome && !smartFolder && !structuredSearch}
@@ -4888,14 +4998,19 @@
 {/if}
 
 {#if passwordPrompt}
-  <PasswordPromptDialog
-    title={passwordPrompt.title}
-    message={passwordPrompt.message}
-    confirmLabel={passwordPrompt.confirmLabel}
-    error={passwordPrompt.error}
-    on:submit={(e) => passwordPrompt?.onSubmit(e.detail)}
-    on:cancel={() => (passwordPrompt = null)}
-  />
+  <!-- `{#key passwordPrompt}` remounts the dialog on every (re)prompt — each prompt assigns a fresh object
+       reference (vault unlock, archive extract, compress), so a wrong-password re-prompt starts clean:
+       empty field, re-fired auto-focus, and a re-armed submit guard (CPE-1249 review #3 + #B). -->
+  {#key passwordPrompt}
+    <PasswordPromptDialog
+      title={passwordPrompt.title}
+      message={passwordPrompt.message}
+      confirmLabel={passwordPrompt.confirmLabel}
+      error={passwordPrompt.error}
+      on:submit={(e) => passwordPrompt?.onSubmit(e.detail)}
+      on:cancel={() => (passwordPrompt = null)}
+    />
+  {/key}
 {/if}
 
 {#if activeWatchCwd && showTimeline}

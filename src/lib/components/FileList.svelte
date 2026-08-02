@@ -4,6 +4,7 @@
   import Icon from "./Icon.svelte";
   import ThumbnailImage from "./ThumbnailImage.svelte";
   import LinkBadge from "./LinkBadge.svelte";
+  import VaultBadge from "./VaultBadge.svelte";
   import { t } from "../i18n";
   import { formatSize } from "../format";
   import { formatDate } from "../datetime";
@@ -658,6 +659,12 @@
                  links renders zero of these, so the hot listing path is untouched (PURPOSE.md). The
                  target/broken lookup inside LinkBadge is itself lazy (fetched on visibility/hover). -->
             <LinkBadge path={entry.path} />
+          {/if}
+          {#if !entry.is_dir && entry.extension === "cpevault"}
+            <!-- Vault lock/unlock badge (CPE-1249, epic CPE-738): only mounted for `.cpevault` rows, so a
+                 folder with no vaults renders zero of these (hot listing path untouched, PURPOSE.md). The
+                 locked/unlocked state derives purely from the reactive `vaults` store. -->
+            <VaultBadge path={entry.path} />
           {/if}
           {#if act}
             <span class="agent-badge {act.kind}">{$t(ACTIVITY_LABEL_KEY[act.kind])}</span>

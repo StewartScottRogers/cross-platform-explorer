@@ -233,6 +233,12 @@
     <rect x="5" y="11" width="14" height="9" rx="1.5" />
     <path d="M8 11V8a4 4 0 0 1 8 0v3" />
     <circle cx="12" cy="15" r="1.2" fill="currentColor" stroke="none" />
+  {:else if name === "lock-open"}
+    <!-- Open padlock: an UNLOCKED vault (CPE-1249, epic CPE-738). Same lock body with the shackle swung
+         open, monochrome via currentColor so it inherits the badge/menu row's theme colour (MENUS.md). -->
+    <rect x="5" y="11" width="14" height="9" rx="1.5" />
+    <path d="M8 11V8a4 4 0 0 1 7.5-1.6" />
+    <circle cx="12" cy="15" r="1.2" fill="currentColor" stroke="none" />
   {:else if name === "link"}
     <!-- Chain link: New Link… / Repair link… menu rows + dialogs (CPE-1207/1209, epic CPE-715).
          Monochrome via currentColor, like the other toolbar/ui glyphs (MENUS.md). -->

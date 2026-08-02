@@ -25,14 +25,17 @@
   let addressEl: HTMLElement | undefined;
   let draft = "";
 
-  // On a deep path the crumb strip overflows (address is overflow-x:auto with a
-  // hidden scrollbar). Default scroll is the left/root end, which hides the crumb
-  // you're actually in. Scroll to the end so the current folder stays visible
-  // whenever the path changes (CPE-343).
-  $: if (crumbs && !editingPath) scrollAddressToEnd();
-  async function scrollAddressToEnd() {
+  // On a deep path the crumb strip overflows the bar (`.address` is `min-width: 0; overflow-x: auto`
+  // with a hidden scrollbar, so it scrolls INSIDE the bar rather than widening the page — CPE-1249
+  // overflow review). Anchor the scroll at the LEFT so the Home / drive-root crumbs stay visible and
+  // clickable, and the deep tail scrolls off the RIGHT edge (reachable by scrolling the bar). Anchoring
+  // at the end instead would left-truncate Home out of view, breaking "click Home/a parent crumb" — the
+  // reachability the address bar exists for (revises CPE-343's scroll-to-end now that the bar truly
+  // scrolls internally instead of expanding the whole navbar).
+  $: if (crumbs && !editingPath) scrollAddressToStart();
+  async function scrollAddressToStart() {
     await tick();
-    if (addressEl) addressEl.scrollLeft = addressEl.scrollWidth;
+    if (addressEl) addressEl.scrollLeft = 0;
   }
 
   // When the parent flips editingPath on (Ctrl+L / Alt+D), seed and focus.
