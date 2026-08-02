@@ -25,3 +25,10 @@ frame (GUI/real-hardware). Deferred by our choice pending a decision on the depe
 ## Notes
 Deferred out of the CPE-718 headless slice (CPE-1236 SVG/font + CPE-1237 streaming client). Revisit with
 the user for the dep-weight call.
+
+## Work Log
+- 2026-08-02 — User green-lit the dependency weight. Opus Researcher + Foreman decided the architecture
+  (Library: thumbnail-native-deps-pdf-video-2026-08-02.md): PDF via pdfium-render in-process (BSD/MIT) behind
+  `pdf-thumb`; video via BUNDLED ffmpeg shell-out behind `video-thumb` (LGPL/GPL stays out of the signed binary);
+  never link mupdf (AGPL). Decomposed into CPE-1256 (PDF), CPE-1257 (video), CPE-1258 (ship-enablement+CI+docs).
+  Closes when all three merge.
