@@ -1,0 +1,9 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "bundle": {
+    "resources": {
+      "../native-deps/pdfium/unix/libpdfium.dylib": "libpdfium.dylib",
+      "../native-deps/pdfium/unix/LICENSE.txt": "licenses/pdfium-LICENSE.txt"
+    }
+  }
+}

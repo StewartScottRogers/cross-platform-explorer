@@ -41,6 +41,10 @@ catalog-out/
 
 # Bundled sidecar binary staged for release (built in CI / locally)
 src-tauri/sidecars/
+
+# Downloaded/compiled pdfium + ffmpeg native deps staged for the sidecar release bundle (CPE-1258) —
+# ephemeral CI download/build output, never committed.
+native-deps/
 .aider*
 
 # Swarm how-to-demo output files created when running demos in the repo folder (CPE-954/956)

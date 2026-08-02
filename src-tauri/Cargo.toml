@@ -42,7 +42,16 @@ tauri-specta = { version = "=2.0.0-rc.21", features = ["derive", "typescript"], 
 # The app is the adapter that exposes the index commands, so it enables the gate here (the crate default
 # stays OFF, keeping `cpe-server`'s own plain build/test the delete-test). Adds no new crates — the index
 # is std-only.
-cpe-server = { path = "../crates/server", features = ["index"] }
+# `pdf-thumb` (CPE-1256) + `video-thumb` (CPE-1257) turn on the PDF first-page / video representative-
+# frame thumbnail extractors for the shipped build (CPE-1258, epic CPE-718). Both stay feature-gated OFF
+# in `cpe-server`'s own default build — enabling them here is what actually ships the code. `pdf-thumb`
+# pulls in `pdfium-render`, which loads the pdfium shared library at RUNTIME via `libloading` (never
+# statically linked), so the app still *builds and ships* with zero local pdfium install — the native
+# libs (pdfium + a bundled ffmpeg) are provisioned as release bundle resources (CPE-1258;
+# release-sidecar.yml) and resolved next to the running executable at startup, falling back gracefully
+# to the generic type icon if either is missing. `video-thumb` adds zero new crates (shells out to a
+# bundled `ffmpeg`, never linked).
+cpe-server = { path = "../crates/server", features = ["index", "pdf-thumb", "video-thumb"] }
 # (sha2 moved to `cpe-server` with the checksum/backup/thumbnail domains, CPE-815/821 — no longer a
 # direct app dep.)
 # (The recursive directory-size walk that used rayon moved to `cpe-server` (CPE-815, disk_usage);

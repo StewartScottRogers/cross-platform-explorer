@@ -49,6 +49,11 @@ The Home screen has **Quick access** tiles up top and a tabbed lower section wit
 - **Thumbnails** — in the **icons** view, image files (JPEG, PNG, GIF, WebP, BMP, TIFF, AVIF) show a real
   downscaled thumbnail instead of a generic icon. They load lazily as tiles scroll into view, so a folder
   of hundreds of photos stays responsive; non-image files and the list/details views are unchanged.
+  **PDFs** show their first page and **videos** (MP4, MOV, MKV, WebM, AVI, M4V, MPG/MPEG, WMV, FLV) show a
+  representative frame, the same way. Both ride on optional native rendering (a bundled pdfium library for
+  PDFs, a bundled ffmpeg for videos) that ships with the app — if either is ever missing or fails to load,
+  that file quietly falls back to its plain type icon instead of erroring, exactly like an undecodable
+  image.
 - **Gallery view** — a fourth view mode (View menu or the command palette) that lays photos out as large
   tiles on a wide grid — a light-table for a folder of images, with bigger thumbnails than the icons view.
 - **Quick-look** — press **Space** on a selected image to open a full-screen preview; **←/→** step through
