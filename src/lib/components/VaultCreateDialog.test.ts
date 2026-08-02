@@ -61,6 +61,34 @@ describe("VaultCreateDialog — defaults + validation", () => {
   });
 });
 
+describe("VaultCreateDialog — both password fields have a consistent show/hide toggle", () => {
+  it("each twin field has its own eye toggle that flips its input between password and text", async () => {
+    render(VaultCreateDialog, base);
+    const passField = screen.getByTestId("vault-passphrase") as HTMLInputElement;
+    const confirmField = screen.getByTestId("vault-passphrase-confirm") as HTMLInputElement;
+    const passToggle = screen.getByTestId("vault-passphrase-toggle");
+    const confirmToggle = screen.getByTestId("vault-passphrase-confirm-toggle");
+
+    // Both start masked.
+    expect(passField.type).toBe("password");
+    expect(confirmField.type).toBe("password");
+
+    // Independent reveal: toggling the passphrase does NOT reveal the confirm.
+    await fireEvent.click(passToggle);
+    expect(passField.type).toBe("text");
+    expect(confirmField.type).toBe("password");
+    expect(passToggle.getAttribute("aria-label")).toBe("Hide passphrase");
+
+    await fireEvent.click(confirmToggle);
+    expect(confirmField.type).toBe("text");
+
+    // Toggle back to masked.
+    await fireEvent.click(passToggle);
+    expect(passField.type).toBe("password");
+    expect(passToggle.getAttribute("aria-label")).toBe("Show passphrase");
+  });
+});
+
 describe("VaultCreateDialog — shred checkbox gates the honest warning", () => {
   it("hides the destructive warning by default and shows it only when checked (off by default)", async () => {
     render(VaultCreateDialog, base);

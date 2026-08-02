@@ -41,6 +41,11 @@
   let remember = rememberDefault;
   let busy = false;
   let error = ""; // backend error surfaced after a failed create
+  // Independent show/hide reveal per field (CPE-1250 Visual Critic): each password field owns its own
+  // eye toggle so the two twins are consistent, and the WebView2 native `::-ms-reveal` is suppressed in
+  // CSS so there is exactly ONE consistent, theme-styled reveal control per field.
+  let showPass = false;
+  let showConfirm = false;
 
   let passField: HTMLInputElement;
   onMount(async () => {
@@ -99,27 +104,77 @@
     </p>
 
     <label class="field-label" for="vault-passphrase">Passphrase</label>
-    <input
-      id="vault-passphrase"
-      class="field"
-      type="password"
-      bind:this={passField}
-      bind:value={passphrase}
-      disabled={busy}
-      autocomplete="new-password"
-      data-testid="vault-passphrase"
-    />
+    <div class="pw-wrap">
+      <input
+        id="vault-passphrase"
+        class="field pw-input"
+        type={showPass ? "text" : "password"}
+        bind:this={passField}
+        value={passphrase}
+        on:input={(e) => (passphrase = e.currentTarget.value)}
+        disabled={busy}
+        autocomplete="new-password"
+        data-testid="vault-passphrase"
+      />
+      <button
+        type="button"
+        class="pw-toggle"
+        disabled={busy}
+        aria-label={showPass ? "Hide passphrase" : "Show passphrase"}
+        aria-pressed={showPass}
+        title={showPass ? "Hide passphrase" : "Show passphrase"}
+        data-testid="vault-passphrase-toggle"
+        on:click={() => (showPass = !showPass)}
+      >
+        {#if showPass}
+          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <path d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19m-6.72-1.07a3 3 0 1 1-4.24-4.24" />
+            <line x1="1" y1="1" x2="23" y2="23" />
+          </svg>
+        {:else}
+          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <path d="M1 12s4-7 11-7 11 7 11 7-4 7-11 7-11-7-11-7z" />
+            <circle cx="12" cy="12" r="3" />
+          </svg>
+        {/if}
+      </button>
+    </div>
 
     <label class="field-label" for="vault-passphrase-confirm">Confirm passphrase</label>
-    <input
-      id="vault-passphrase-confirm"
-      class="field"
-      type="password"
-      bind:value={confirm}
-      disabled={busy}
-      autocomplete="new-password"
-      data-testid="vault-passphrase-confirm"
-    />
+    <div class="pw-wrap">
+      <input
+        id="vault-passphrase-confirm"
+        class="field pw-input"
+        type={showConfirm ? "text" : "password"}
+        value={confirm}
+        on:input={(e) => (confirm = e.currentTarget.value)}
+        disabled={busy}
+        autocomplete="new-password"
+        data-testid="vault-passphrase-confirm"
+      />
+      <button
+        type="button"
+        class="pw-toggle"
+        disabled={busy}
+        aria-label={showConfirm ? "Hide passphrase" : "Show passphrase"}
+        aria-pressed={showConfirm}
+        title={showConfirm ? "Hide passphrase" : "Show passphrase"}
+        data-testid="vault-passphrase-confirm-toggle"
+        on:click={() => (showConfirm = !showConfirm)}
+      >
+        {#if showConfirm}
+          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <path d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19m-6.72-1.07a3 3 0 1 1-4.24-4.24" />
+            <line x1="1" y1="1" x2="23" y2="23" />
+          </svg>
+        {:else}
+          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <path d="M1 12s4-7 11-7 11 7 11 7-4 7-11 7-11-7-11-7z" />
+            <circle cx="12" cy="12" r="3" />
+          </svg>
+        {/if}
+      </button>
+    </div>
 
     {#if mismatch}
       <div class="err" data-testid="vault-passphrase-error">The passphrases don't match.</div>
@@ -139,6 +194,7 @@
         bind:value={dest}
         disabled={busy}
         spellcheck="false"
+        title={dest}
         data-testid="vault-dest"
       />
       <button class="btn" type="button" disabled={busy} on:click={browseDest} data-testid="vault-dest-browse">
@@ -251,8 +307,33 @@
     box-sizing: border-box;
     margin-bottom: 12px;
   }
+  /* Password field + its reveal toggle. The wrap owns the 12px gap the plain `.field` normally carries,
+     and the input reserves room on the right for the eye button. */
+  .pw-wrap { position: relative; margin-bottom: 12px; }
+  .pw-input { margin-bottom: 0; padding-right: 36px; }
+  /* Suppress WebView2 / Edge's own native password-reveal + clear controls so there is exactly ONE
+     consistent, theme-styled reveal per field (the native one appeared inconsistently — CPE-1250 review). */
+  .pw-input::-ms-reveal,
+  .pw-input::-ms-clear { display: none; }
+  .pw-toggle {
+    position: absolute;
+    top: 0;
+    right: 4px;
+    height: 32px;
+    width: 30px;
+    display: grid;
+    place-items: center;
+    padding: 0;
+    background: transparent;
+    border: 0;
+    border-radius: var(--radius);
+    color: var(--text-dim);
+    cursor: pointer;
+  }
+  .pw-toggle:hover:not(:disabled) { color: var(--text); }
+  .pw-toggle:disabled { opacity: 0.6; cursor: default; }
   .dest-row { display: flex; gap: 8px; align-items: flex-start; }
-  .dest-row .field { flex: 1 1 auto; }
+  .dest-row .field { flex: 1 1 auto; min-width: 0; text-overflow: ellipsis; }
   .dest-row .btn { flex: 0 0 auto; }
   .warn-note { color: var(--text-dim); font-size: 12px; line-height: 1.5; margin: 2px 0 14px; }
   .warn-note strong { color: var(--text); }
