@@ -33,3 +33,11 @@ session's known-unlocked set.
 ## Notes
 Coordinate with the honest security-review doc (CPE-1251) — this closes the "plaintext lingers after a
 crash" gap it will document.
+
+## Done 2026-08-02 (workshift) — merged #554 @ af2630d2
+`sweep_orphan_sessions` in cpe-server (DI pattern like lock_with_wiper; reuses the real secure wiper +
+SESSION_WIPE_SCHEME, not a plain delete) + non-fatal off-thread startup wiring in src-tauri (base dir =
+app_cache_dir()/vault-sessions, byte-identical to the frontend's allocation). 9 new tests + a UAT
+recursive no-plaintext-left check. Gauntlet: Reviewer APPROVE (scope-contained to the exact root, no
+symlink-follow, path-match + secure-wipe verified) + UAT PASS. Closes the VAULT-SECURITY.md orphan-on-
+crash gap.
