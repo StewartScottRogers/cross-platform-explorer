@@ -41,11 +41,16 @@
 //! captured. (Other special entries — devices, FIFOs, sockets — are likewise skipped.)
 //!
 //! # Extraction safety
-//! [`decrypt_tree`] sanitizes every record path before writing: a component of `..`, an absolute
-//! path, or a component containing a drive/stream separator (`\\` or `:`) is rejected with
-//! [`VaultError::Format`] rather than written, so a maliciously-authored (but validly-encrypted)
-//! vault cannot escape the output directory ("zip-slip"). Non-UTF-8 filenames are unsupported in v1
-//! and rejected on encrypt.
+//! [`decrypt_tree`] extracts **atomically**: it decrypts fully in memory, writes the tree into a
+//! sibling temporary directory, and renames it into place only on success — so any failure (a
+//! rejected path, an OS write error) leaves the output directory untouched rather than
+//! half-populated. Every record path is sanitized first: a `..` traversal component, an absolute
+//! path, a backslash/UNC component, or a Windows drive-letter component (`C:`, `C:evil`) is rejected
+//! with [`VaultError::Format`], so a maliciously-authored (but validly-encrypted) vault cannot escape
+//! the output directory ("zip-slip"). A `:` *inside* an ordinary component is allowed, so a
+//! Linux/macOS filename like `notes:draft.txt` seals and extracts on those platforms (a Windows host
+//! extracting such a vault fails cleanly and leaves nothing partial). Non-UTF-8 filenames are
+//! unsupported in v1 and rejected on encrypt.
 //!
 //! # Zeroization
 //! The passphrase is an [`age::secrecy::SecretString`], which zeroizes its heap buffer on drop. We
@@ -174,8 +179,15 @@ fn seal(encryptor: age::Encryptor, plaintext: &[u8]) -> Result<Vec<u8>, VaultErr
 ///
 /// Error mapping (the security-critical part):
 /// - wrong passphrase → [`VaultError::BadPassphrase`]
-/// - any AEAD/tamper failure (payload, header MAC, malformed age header) → [`VaultError::Corrupt`]
+/// - a tampered/corrupt **payload** (streaming-AEAD failure) → [`VaultError::Corrupt`]
 /// - missing/short magic → [`VaultError::BadMagic`]; unknown version → [`VaultError::UnsupportedVersion`]
+///
+/// **Header-region tampering** is also always a hard failure, but the *variant* depends on where the
+/// flip lands, because the age header is authenticated only after the scrypt key is derived: a mangled
+/// scrypt salt / wrapped file key is indistinguishable from a wrong passphrase and surfaces as
+/// [`VaultError::BadPassphrase`]; a mangled recipient stanza reads as "not passphrase-encrypted" and
+/// surfaces as [`VaultError::Format`]; a bad header MAC or otherwise-malformed header structure is
+/// [`VaultError::Corrupt`]. In every case no plaintext is returned and no tamper is silently accepted.
 ///
 /// Never panics on arbitrary input.
 pub fn decrypt_bytes(blob: &[u8], passphrase: &SecretString) -> Result<Vec<u8>, VaultError> {
@@ -357,10 +369,15 @@ pub fn encrypt_tree(root: &Path, passphrase: &SecretString) -> Result<Vec<u8>, V
     result
 }
 
-/// Open a `.cpevault` blob with `passphrase` and write its tree under `out_dir`.
+/// Open a `.cpevault` blob with `passphrase` and write its tree under `out_dir`, **atomically**.
 ///
-/// `out_dir` is created if needed. Every path is sanitized against directory traversal before it is
-/// written (see module docs). The intermediate decrypted plaintext is zeroized before writing.
+/// The blob is decrypted fully in memory, then the tree is written into a sibling temporary
+/// directory and renamed into place only on success. Any failure (a rejected path, an OS write
+/// error, e.g. a Windows host extracting a Linux vault that holds a `:`-name) removes the temporary
+/// directory and leaves `out_dir` untouched — never a half-populated result. `out_dir` may be a
+/// not-yet-existing path or an existing **empty** directory; a non-empty `out_dir` is refused rather
+/// than clobbered. Every path is sanitized against directory traversal first (see module docs). The
+/// intermediate decrypted plaintext is zeroized before writing.
 pub fn decrypt_tree(
     blob: &[u8],
     passphrase: &SecretString,
@@ -370,7 +387,7 @@ pub fn decrypt_tree(
     let parsed = unpack_entries(&plaintext);
     plaintext.zeroize();
     let entries = parsed?;
-    write_tree(&entries, out_dir)
+    write_tree_atomic(&entries, out_dir)
 }
 
 /// Collect a directory tree into sorted [`TreeEntry`]s.
@@ -422,7 +439,71 @@ fn collect_dir(dir: &Path, rel: &str, out: &mut Vec<TreeEntry>) -> Result<(), Va
     Ok(())
 }
 
-/// Materialize entries under `out_dir`, sanitizing each path first.
+/// Write `entries` into `out_dir` atomically: stage into a sibling temp dir, then rename into place.
+///
+/// On any failure the staging directory is removed, so a failed extraction never leaves partial
+/// output. A staging *sibling* (same parent, hence same filesystem) guarantees the final `rename`
+/// is a cheap, atomic same-volume move on both Unix and Windows.
+fn write_tree_atomic(entries: &[TreeEntry], out_dir: &Path) -> Result<(), VaultError> {
+    let staging = staging_path(out_dir);
+    // Best-effort clear of any stale staging dir from a previous crashed run.
+    let _ = std::fs::remove_dir_all(&staging);
+    std::fs::create_dir_all(&staging)?;
+
+    if let Err(e) = write_tree(entries, &staging) {
+        let _ = std::fs::remove_dir_all(&staging);
+        return Err(e);
+    }
+    if let Err(e) = promote(&staging, out_dir) {
+        let _ = std::fs::remove_dir_all(&staging);
+        return Err(VaultError::Io(e));
+    }
+    Ok(())
+}
+
+/// Compute a unique sibling staging path next to `out_dir` (same parent → same filesystem).
+fn staging_path(out_dir: &Path) -> PathBuf {
+    let parent = out_dir.parent().unwrap_or_else(|| Path::new("."));
+    let name = out_dir
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "vault".to_owned());
+    parent.join(format!(".{name}.cpevault-tmp-{}", unique_suffix()))
+}
+
+/// A process-and-call-unique suffix for the staging directory name (no RNG dependency).
+fn unique_suffix() -> String {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+    let n = COUNTER.fetch_add(1, Ordering::Relaxed);
+    let pid = std::process::id();
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    format!("{pid}-{nanos}-{n}")
+}
+
+/// Promote `staging` to `out_dir`. If `out_dir` already exists it must be empty (it is then removed
+/// so the rename target is free); a non-empty `out_dir` is refused rather than clobbered.
+fn promote(staging: &Path, out_dir: &Path) -> std::io::Result<()> {
+    match std::fs::read_dir(out_dir) {
+        Ok(mut rd) => {
+            if rd.next().is_some() {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::AlreadyExists,
+                    "output directory already exists and is not empty",
+                ));
+            }
+            std::fs::remove_dir(out_dir)?;
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => return Err(e),
+    }
+    std::fs::rename(staging, out_dir)
+}
+
+/// Materialize entries under `dir`, sanitizing each path first. Used against the staging directory.
 fn write_tree(entries: &[TreeEntry], out_dir: &Path) -> Result<(), VaultError> {
     for e in entries {
         let rel = sanitize_rel_path(&e.path)?;
@@ -443,6 +524,13 @@ fn write_tree(entries: &[TreeEntry], out_dir: &Path) -> Result<(), VaultError> {
 }
 
 /// Turn a relative POSIX path from a vault into a safe, traversal-free [`PathBuf`], or reject it.
+///
+/// Rejects (all `Format` errors): `..` traversal, empty paths, any component containing a backslash
+/// (a Windows separator — also covers UNC `\\server\share`), and a Windows **drive-letter** component
+/// (a component whose first two bytes are `<letter>:`, blocking `C:` and `C:evil`). A `:` *inside* an
+/// ordinary component is **allowed**, so a legal Linux/macOS filename such as `notes:draft.txt` is
+/// preserved (seal ⇄ extract symmetry on those platforms). Leading `/` (or `//…`) yields empty first
+/// components that are skipped, so an "absolute-looking" path is normalized to a safe relative one.
 fn sanitize_rel_path(rel: &str) -> Result<PathBuf, VaultError> {
     let mut pb = PathBuf::new();
     let mut any = false;
@@ -453,9 +541,14 @@ fn sanitize_rel_path(rel: &str) -> Result<PathBuf, VaultError> {
         if comp == ".." {
             return Err(VaultError::Format(format!("path escapes vault root: {rel}")));
         }
-        if comp.contains('\\') || comp.contains(':') {
+        if comp.contains('\\') {
             return Err(VaultError::Format(format!(
-                "illegal path component in vault: {rel}"
+                "illegal path component (backslash) in vault: {rel}"
+            )));
+        }
+        if is_drive_letter_component(comp) {
+            return Err(VaultError::Format(format!(
+                "illegal path component (drive letter) in vault: {rel}"
             )));
         }
         pb.push(comp);
@@ -465,6 +558,12 @@ fn sanitize_rel_path(rel: &str) -> Result<PathBuf, VaultError> {
         return Err(VaultError::Format(format!("empty path in vault: {rel}")));
     }
     Ok(pb)
+}
+
+/// Does `comp` look like a Windows drive-letter reference (`^[A-Za-z]:`)? Matches `C:` and `C:evil`.
+fn is_drive_letter_component(comp: &str) -> bool {
+    let b = comp.as_bytes();
+    b.len() >= 2 && b[0].is_ascii_alphabetic() && b[1] == b':'
 }
 
 #[cfg(test)]
@@ -674,10 +773,25 @@ mod tests {
     fn sanitize_rejects_traversal_and_absolute_and_drive() {
         assert!(sanitize_rel_path("../escape").is_err());
         assert!(sanitize_rel_path("a/../../b").is_err());
-        assert!(sanitize_rel_path("C:evil").is_err());
-        assert!(sanitize_rel_path("a\\b").is_err());
+        assert!(sanitize_rel_path("C:evil").is_err()); // drive-letter component
+        assert!(sanitize_rel_path("C:").is_err()); // bare drive letter
+        assert!(sanitize_rel_path("a\\b").is_err()); // backslash / UNC separator
         assert!(sanitize_rel_path("").is_err());
         assert!(sanitize_rel_path("./.").is_err());
+        // A `:` INSIDE an ordinary component (not in drive-letter position) is allowed — a legal
+        // Linux/macOS name. (Compared via components so the assertion is robust to Windows PathBuf's
+        // own colon parsing.)
+        let colon = sanitize_rel_path("notes:draft.txt").unwrap();
+        assert!(colon.is_relative());
+        assert_eq!(
+            colon.components().count(),
+            1,
+            "expected a single component, got {colon:?}"
+        );
+        // But a single letter + `:` at the start of a component IS a drive-letter reference (matches
+        // `^[A-Za-z]:`) and is rejected — including when nested — so it can never smuggle in a drive.
+        assert!(sanitize_rel_path("a:b.txt").is_err());
+        assert!(sanitize_rel_path("dir/z:evil.txt").is_err());
         // A leading '/' yields an empty first component (skipped), so an "absolute-looking" path
         // sanitizes to a *relative* one that cannot escape out_dir — that's the property we need.
         let abs = sanitize_rel_path("/etc/passwd").unwrap();
@@ -741,6 +855,112 @@ mod tests {
         assert!(matches!(result, Err(VaultError::Format(_))), "got {result:?}");
         // Nothing was written outside the destination.
         assert!(!dst.path().parent().unwrap().join("escaped.txt").exists());
+    }
+
+    #[test]
+    fn failed_extraction_leaves_no_partial_output() {
+        let pw = pass("pw");
+        // A good entry FIRST (which would be staged), then a traversal entry that aborts extraction.
+        let entries = vec![
+            TreeEntry {
+                path: "keep.txt".into(),
+                kind: EntryKind::File,
+                data: b"data".to_vec(),
+            },
+            TreeEntry {
+                path: "sub".into(),
+                kind: EntryKind::Dir,
+                data: vec![],
+            },
+            TreeEntry {
+                path: "../evil.txt".into(),
+                kind: EntryKind::File,
+                data: b"pwned".to_vec(),
+            },
+        ];
+        let blob = encrypt_fast(&pack_entries(&entries), &pw);
+
+        let tmp = tempfile::tempdir().unwrap();
+        let out = tmp.path().join("out"); // does not exist yet
+        let result = decrypt_tree(&blob, &pw, &out);
+
+        assert!(matches!(result, Err(VaultError::Format(_))), "got {result:?}");
+        // The output directory was never created — no half-written tree.
+        assert!(!out.exists(), "failed extraction must leave out_dir absent");
+        // And no stray staging siblings are left behind in the parent.
+        let leftovers: Vec<_> = std::fs::read_dir(tmp.path())
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .collect();
+        assert!(
+            leftovers.iter().all(|n| !n.contains("cpevault-tmp")),
+            "staging dir not cleaned up: {leftovers:?}"
+        );
+    }
+
+    #[test]
+    fn extraction_refuses_nonempty_out_dir_without_clobbering() {
+        let pw = pass("pw");
+        let entries = vec![TreeEntry {
+            path: "new.txt".into(),
+            kind: EntryKind::File,
+            data: b"new".to_vec(),
+        }];
+        let blob = encrypt_fast(&pack_entries(&entries), &pw);
+
+        let tmp = tempfile::tempdir().unwrap();
+        let out = tmp.path().join("out");
+        std::fs::create_dir_all(&out).unwrap();
+        std::fs::write(out.join("existing.txt"), b"precious").unwrap();
+
+        let result = decrypt_tree(&blob, &pw, &out);
+        assert!(result.is_err(), "must refuse a non-empty out_dir");
+        // The pre-existing content is untouched and no vault file was written into it.
+        assert_eq!(std::fs::read(out.join("existing.txt")).unwrap(), b"precious");
+        assert!(!out.join("new.txt").exists());
+    }
+
+    #[test]
+    fn header_region_tamper_is_always_a_hard_failure() {
+        let pw = pass("pw");
+        let blob = encrypt_fast(b"payload bytes here", &pw);
+        // Walk the age-header region (right after our 9-byte envelope) and flip each byte: every
+        // result must be a hard failure (BadPassphrase / Format / Corrupt), never Ok, never a panic.
+        let region_end = (HEADER_LEN + 64).min(blob.len());
+        for i in HEADER_LEN..region_end {
+            let mut t = blob.clone();
+            t[i] ^= 0x01;
+            let r = decrypt_bytes(&t, &pw);
+            assert!(
+                matches!(
+                    r,
+                    Err(VaultError::BadPassphrase)
+                        | Err(VaultError::Format(_))
+                        | Err(VaultError::Corrupt)
+                ),
+                "byte {i} flip unexpectedly gave {r:?}"
+            );
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn colon_filename_roundtrips_on_unix() {
+        // A `:` in a filename is legal on Linux/macOS; it must seal AND extract (symmetry).
+        let pw = pass("pw");
+        let src = tempfile::tempdir().unwrap();
+        std::fs::write(src.path().join("notes:draft.txt"), b"colon body").unwrap();
+
+        let blob = encrypt_tree(src.path(), &pw).unwrap();
+        let tmp = tempfile::tempdir().unwrap();
+        let out = tmp.path().join("out");
+        decrypt_tree(&blob, &pw, &out).unwrap();
+
+        assert_eq!(
+            std::fs::read(out.join("notes:draft.txt")).unwrap(),
+            b"colon body"
+        );
     }
 
     #[cfg(unix)]
