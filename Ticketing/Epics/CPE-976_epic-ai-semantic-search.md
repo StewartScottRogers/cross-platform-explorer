@@ -2,7 +2,7 @@
 id: CPE-976
 title: "EPIC: AI semantic search — find files by meaning"
 type: Task
-status: Proposed
+status: In Progress
 priority: High
 component: Multiple
 tags: [epic, big-design]
@@ -93,3 +93,12 @@ hard rule as CPE-703).
 
 ## Board hygiene 2026-07-29 — reverted In Progress → Proposed
 Not actively being worked: all decomposed child tickets are Done. Remaining DoD is user-gated (GUI / model-key / cert / Mac) or a deferred cap. Reverted to **Proposed** so the epic queue honestly shows what's dormant vs active; re-activate with `/ticketing-epic activate` to resume (like CPE-703 was this session). **Remaining (DoD review 2026-07-30):** NL search UI (CPE-985) + a REAL embedding model backend unbuilt (FakeEmbedder headless core only).
+
+## Activation (2026-08-02, workshift — user green-lit AI epics)
+Engine stack already built by children CPE-981 (vector_index) / 982 (embedder seam + local FakeEmbedder) / 983
+(chunk→embed ingest) / 984 (query blend). Local `FakeEmbedder` = dependency-free bag-of-words → **buildable with NO
+API key**. Remaining, headless slices:
+- **CPE-1262** — wire index-build + search + persist to Tauri commands (local embedder).
+- **CPE-1263** — file-content search UI (query + ranked snippets, navigate).
+Deferred (needs a user resource): a real/better embedder model (bundled local model or opt-in external endpoint +
+key) behind the existing seam; richer text extraction (pdf/docx). Framed honestly as file-CONTENT search, not oversold.
