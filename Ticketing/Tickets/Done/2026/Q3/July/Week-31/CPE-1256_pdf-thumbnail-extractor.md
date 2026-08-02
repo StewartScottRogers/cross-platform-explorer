@@ -4,7 +4,7 @@ title: "PDF first-page thumbnail extractor (pdfium-render, feature-gated)"
 type: feature
 component: cpe-server
 priority: medium
-status: Doing
+status: Done
 tags: ready
 created: 2026-08-02
 epic: CPE-718
@@ -40,3 +40,14 @@ using `pdfium-render` (MIT/Apache) + the dynamically-loaded pdfium prebuilt (BSD
 Sibling of CPE-1257 (video, next). Both share additive lines in thumb_source.rs/Cargo.toml/lib.rs — sequenced
 after this to avoid a merge. pdfium is NOT installed locally; ffmpeg IS (for the sibling). Ship-enablement +
 CI + release binary acquisition is CPE-1258.
+
+## Work Log
+- 2026-08-02 — Worker (sonnet, worktree) built thumb_pdf.rs (pdfium-render 0.9, feature `pdf-thumb`, off by default),
+  mirroring thumb_svg.rs: bomb-guard, OnceLock bind + Mutex-serialized FFI (poison-recovered), aspect-preserving
+  (caught pdfium `.thumbnail()` stretching non-square → manual min-scale), never panics, Err→icon fallback.
+- Verify: build/test/clippy clean BOTH feature modes; 1262 tests off / +4 thumb_pdf on (2 real, 2 pdfium-gated skip
+  gracefully — pdfium not local); `cargo tree` 0 pdfium when off (small-when-off holds).
+- Independent OPUS Reviewer re-ran the full battery + point-by-point (panic-safety, bomb-guard, aspect, concurrency
+  poison-recovery, feature-gating, graceful degradation) → APPROVE. Merged PR #558 (squash 105421d6, --admin: CI stalled).
+- UAT of the real end-to-end PDF render needs pdfium installed → deferred to CPE-1258 (CI provisioning); code correctness
+  fully verified locally + by tests.
