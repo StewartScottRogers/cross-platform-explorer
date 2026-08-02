@@ -4368,7 +4368,22 @@
       if (r.op === "compress" || r.op === "extract") {
         const pending = pendingArchiveOps.get(r.id);
         pendingArchiveOps.delete(r.id);
-        if (!pending) return; // stray/unknown id — nothing registered, nothing to do
+        if (!pending) {
+          // A very fast/small archive op — e.g. "Compress with password…", whose dialog also closes
+          // right after queuing — can finish and emit this event before the call site's `await
+          // startArchiveCompress(...)` continuation has run `pendingArchiveOps.set(id, ...)` (CPE-1254:
+          // the operations panel still shows "N item(s) compressed" via its own independent listener
+          // in `lib/transfers.ts`, but this listener — the one that owns the folder refresh — had
+          // nothing registered yet, so the new/extracted entry never appeared). On a clean finish,
+          // still refresh the folder so the entry shows up; fall back to a generic notice since the
+          // call site's specific wording isn't available here.
+          if (!r.cancelled && r.failed === 0) {
+            const verb = r.op === "compress" ? "compressed" : "extracted";
+            showNotice(`${r.transferred} item${r.transferred === 1 ? "" : "s"} ${verb}.`);
+            loadPath(currentPath).catch(() => {});
+          }
+          return;
+        }
         if (r.cancelled) { showNotice(pending.cancelledNotice); return; }
         if (r.failed > 0) { showNotice(r.errors[0] || pending.failedNotice, true); return; }
         Promise.resolve(pending.onSuccess()).catch(() => {});
