@@ -267,12 +267,26 @@ fn snippet_for(path: &str, query: &str) -> String {
     if flat.is_empty() {
         return String::new();
     }
-    let lower: String = flat.iter().collect::<String>().to_lowercase();
+    // Lowercase **per-char, positionally** so the lowered sequence stays exactly `flat.len()` long and
+    // index-aligned with `flat`. Whole-string `str::to_lowercase()` can expand some characters into
+    // multiple code points (e.g. Turkish 'İ' U+0130 → "i" + a combining dot above), which desyncs a
+    // char-count taken from the lowered string from an index into the original `flat` — the review repro
+    // (CPE-1262) hit exactly this: a hit char index past `flat.len()` made `start > end` after clamping
+    // `end`, and `flat[start..end]` panicked. Taking only the first lowered char per position is a
+    // best-effort case-fold (not full Unicode case-folding), but it guarantees every index found below is
+    // a valid, in-bounds index into `flat` — no panic is possible regardless of the input's scripts.
+    let lower_chars: Vec<char> = flat.iter().map(|&c| c.to_lowercase().next().unwrap_or(c)).collect();
     let hit_char = query.split_whitespace().find_map(|term| {
-        let term = term.to_lowercase();
-        lower.find(&term).map(|byte_idx| lower[..byte_idx].chars().count())
+        let term_chars: Vec<char> = term.chars().map(|c| c.to_lowercase().next().unwrap_or(c)).collect();
+        if term_chars.is_empty() || term_chars.len() > lower_chars.len() {
+            return None;
+        }
+        lower_chars.windows(term_chars.len()).position(|w| w == term_chars.as_slice())
     });
-    let start = hit_char.map(|c| c.saturating_sub(SNIPPET_MAX_CHARS / 4)).unwrap_or(0);
+    // `hit_char` (when `Some`) is guaranteed < flat.len() by construction (it's a valid `windows()`
+    // position over a slice the same length as `flat`); `.min(flat.len())` is a belt-and-braces guard in
+    // case that invariant is ever weakened by a future edit, not load-bearing today.
+    let start = hit_char.map(|c| c.saturating_sub(SNIPPET_MAX_CHARS / 4)).unwrap_or(0).min(flat.len());
     let end = (start + SNIPPET_MAX_CHARS).min(flat.len());
     let mut snippet: String = flat[start..end].iter().collect();
     if start > 0 {
@@ -358,6 +372,62 @@ mod tests {
 
         let _ = fs::remove_dir_all(&tree);
         let _ = fs::remove_dir_all(&idxdir);
+    }
+
+    /// Regression (review of CPE-1262, PR #561): `snippet_for` must never panic on text containing
+    /// characters whose `str::to_lowercase()` expands into MORE code points than the original char count
+    /// — e.g. Turkish 'İ' (U+0130 LATIN CAPITAL LETTER I WITH DOT ABOVE) lowercases to "i" + a combining
+    /// dot above (two chars for one). The old implementation lowercased the whole string at once and used
+    /// `lower[..byte_idx].chars().count()` as an index into the ORIGINAL (unexpanded) `flat` char vector —
+    /// with enough expanding chars before a match, that index landed past `flat.len()`, making
+    /// `start > end` after `end` was clamped, and `flat[start..end]` panicked (confirmed repro:
+    /// `flat.len()=101 lower.chars=201 hit_char=Some(200) start=140 end=101`). A panic inside
+    /// `snippet_for` propagates out of `spawn_blocking` in the `content_search` command as a generic
+    /// "task panicked" `Err`, breaking search for any file containing ordinary Turkish text (e.g.
+    /// "İstanbul", "İş") that happens to match a query. This test pins the exact repro shape (a long run
+    /// of 'İ' before the matched term) end-to-end through `search_index` (the real product path).
+    #[test]
+    fn search_index_does_not_panic_on_case_expanding_characters_before_a_match() {
+        let tree = scratch("turkish-tree");
+        // A long run of 'İ' (each lowercases to 2 chars) before the query term reproduces the review's
+        // repro shape: enough expansion that a byte-derived lowercase char-count runs past flat.len().
+        let prefix = "İ".repeat(80);
+        let content = format!("{prefix} volcano eruption near Istanbul today");
+        fs::write(tree.join("turkish.txt"), content.as_bytes()).unwrap();
+        let idxdir = scratch("turkish-idx");
+        let root = tree.to_string_lossy().to_string();
+
+        let (index, _) = build_index(&root, &AtomicBool::new(false)).unwrap();
+        save_index(&index, &idxdir, &root).unwrap();
+
+        // Must return Ok, never panic (never a generic "task panicked" Err either) — this is the exact
+        // path the review's repro broke: search_index -> ContentHit -> snippet_for.
+        let outcome = search_index(&idxdir, &root, "volcano eruption", 5).unwrap();
+        assert!(outcome.index_exists);
+        assert!(!outcome.hits.is_empty(), "the Turkish-prefixed doc should still match the query");
+        assert!(!outcome.hits[0].snippet.is_empty(), "a non-empty snippet should come back, not a panic");
+
+        let _ = fs::remove_dir_all(&tree);
+        let _ = fs::remove_dir_all(&idxdir);
+    }
+
+    /// Same regression, exercised directly against `snippet_for` (the function that actually panicked) —
+    /// with the match term appearing AFTER a run of case-expanding characters, so a naive whole-string
+    /// lowercase-then-char-count would compute an index past `flat.len()`. Also checks the snippet is
+    /// centred near the real match rather than silently falling back to the start of the file.
+    #[test]
+    fn snippet_for_stays_index_aligned_with_case_expanding_characters() {
+        let tree = scratch("snippet-turkish");
+        let prefix = "İ".repeat(200); // enough expansion that the old bug's `start` would exceed `flat.len()`
+        let content = format!("{prefix} needle-term-here");
+        let file = tree.join("t.txt");
+        fs::write(&file, content.as_bytes()).unwrap();
+
+        // Never panics, regardless of how many case-expanding chars precede the match.
+        let snippet = snippet_for(&file.to_string_lossy(), "needle-term-here");
+        assert!(snippet.contains("needle-term-here"), "snippet should include the actual match: {snippet:?}");
+
+        let _ = fs::remove_dir_all(&tree);
     }
 
     #[test]
