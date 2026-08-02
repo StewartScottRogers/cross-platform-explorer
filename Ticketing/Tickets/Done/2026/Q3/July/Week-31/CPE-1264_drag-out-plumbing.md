@@ -4,7 +4,7 @@ title: "Drag-out plumbing: tauri-plugin-drag + capability + dragOut.ts wrapper (
 type: feature
 component: frontend
 priority: medium
-status: Doing
+status: Done
 tags: ready
 created: 2026-08-02
 epic: CPE-661
@@ -35,3 +35,6 @@ carries zero interactive-verification risk. See research-library `drag-out-to-os
 Slice B (wire drag-out into rows + native/HTML5 coexistence) and Slice C (archive extract-on-drag, reusing the existing
 `extract_archive_entry_any` command) both need ATTENDED drag-drop verification and are separate tickets. This slice is
 the headless foundation. Do NOT move this ticket file — the Foreman owns ticket lifecycle in the main tree.
+
+## Work Log
+- 2026-08-02 — Worker (sonnet) added tauri-plugin-drag 2.1.1 + @crabnebula/tauri-plugin-drag 2.1.0, plugin registered (desktop-only), drag:default capability, dragOut.ts wrapper (startFileDrag, never-throws, not wired). 16 jsdom tests. Verify: cargo check+clippy clean, npm check 0 errors, 1877 tests. Opus reviewer APPROVE (capability minimal, deps clean, tests non-hollow). Merged #563. NOTE for CPE-672 wiring: resolve DEFAULT_DRAG_ICON to an absolute path first.
