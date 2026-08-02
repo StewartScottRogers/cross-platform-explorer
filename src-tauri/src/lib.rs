@@ -5407,6 +5407,39 @@ fn reap_orphan_session_daemons_on_startup(app: &tauri::AppHandle) {
     }
 }
 
+/// Injects the resolved bundle-resource directory into the (Tauri-free) `cpe_server` crate's PDF +
+/// video thumbnail extractors (CPE-1258 fix). `pdf-thumb`/`video-thumb` are unconditionally on for
+/// `cpe-server` from this app (see the dependency line in `src-tauri/Cargo.toml`), so this call — like
+/// the extractors themselves — is not gated behind `sidecar-platform`.
+///
+/// **Why this exists:** both extractors originally looked ONLY next to the running executable
+/// (`current_exe().parent()`) for their bundled native binary. That's where Tauri's NSIS bundler
+/// stages `bundle.resources` on Windows, so it worked there — but on macOS the exe lives in
+/// `AppName.app/Contents/MacOS/` while resources land in `AppName.app/Contents/Resources/`, and on
+/// Linux the exe is `usr/bin/<exe>` while resources land in `usr/lib/<exe>/`. On those two platforms
+/// the old code silently never found the bundled pdfium/ffmpeg, and every PDF/video thumbnail
+/// degraded to the generic type icon. `cpe_server` is Tauri-free and can't call
+/// `app.path().resource_dir()` itself, so this adapter resolves it and pushes it in — mirroring how
+/// `resolve_sidecar_bin` (below) resolves the SAME `resource_dir()` for the sidecar binaries, and
+/// exactly matching where the `tauri.sidecar.*.conf.json` overlays' flat `bundle.resources` keys
+/// (`"ffmpeg.exe"`, `"pdfium.dll"`, `"libpdfium.so"`, `"libpdfium.dylib"`, all with no subfolder
+/// prefix) actually land.
+///
+/// Must run before the first thumbnail request reaches `cpe_server::thumb_pdf` (its pdfium binding is
+/// resolved lazily and cached on first use — a later call would be too late); called from `setup()`,
+/// so that's guaranteed. `thumb_video` re-resolves on every call, so it has no such ordering
+/// requirement, but is wired the same way for symmetry. Best-effort: if `resource_dir()` can't be
+/// resolved (shouldn't happen on a real bundled build — only a theoretical dev-environment gap), both
+/// extractors simply keep falling back to their `current_exe().parent()` / PATH guesses, unchanged
+/// from before this fix.
+fn init_thumbnail_native_dep_dir(app: &tauri::AppHandle) {
+    use tauri::Manager;
+    if let Ok(resource) = app.path().resource_dir() {
+        cpe_server::thumb_pdf::set_native_dep_dir(resource.clone());
+        cpe_server::thumb_video::set_native_dep_dir(resource);
+    }
+}
+
 /// Sweep orphaned encrypted-vault session dirs at startup (CPE-1252, VAULT-SECURITY.md §5). The
 /// managed `VaultRegistry` is always empty at process start (v1 has no persisted unlock state across
 /// a restart), so any `vault-sessions/*` dir found here can only be a leftover from the app being
@@ -8790,6 +8823,11 @@ pub fn run() {
         // Securely wipe any orphaned encrypted-vault session dir left behind by a crash/kill while a
         // vault was unlocked (CPE-1252, VAULT-SECURITY.md §5). Core-explorer feature, not sidecar-gated.
         sweep_orphan_vault_sessions_on_startup(app.handle());
+
+        // Tell the PDF/video thumbnail extractors where their bundled native binaries actually landed
+        // (CPE-1258 fix) — BEFORE anything can request a thumbnail. Core-explorer feature, not
+        // sidecar-gated (pdf-thumb/video-thumb are unconditionally on for cpe-server).
+        init_thumbnail_native_dep_dir(app.handle());
 
         // Background scheduled-snapshot timer (CPE-1199, epic CPE-735). Spawned, never joined, so it
         // never blocks startup. Opt-in per folder in Settings and off-means-off: until the user adds an
