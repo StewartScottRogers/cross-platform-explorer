@@ -8812,7 +8812,12 @@ pub fn run() {
             // only things that actually claim/release an OS-wide hotkey, driven by the Settings
             // toggle — off means no background cost, and there is never a launch-time permission
             // prompt ([[avoid-modal-permission-popups]]).
-            .plugin(tauri_plugin_global_shortcut::Builder::new().build());
+            .plugin(tauri_plugin_global_shortcut::Builder::new().build())
+            // Native OS drag-out plumbing (CPE-1264, epic CPE-661 follow-on for CPE-672/674): registers
+            // `plugin:drag|start_drag` so `src/lib/dragOut.ts` can start a real OS-level file drag.
+            // Plumbing only in this slice — no row calls it yet, so this is a no-op until a later
+            // ticket wires it into FileList/Sidebar dragstart. Desktop-only, same as the block above.
+            .plugin(tauri_plugin_drag::init());
     }
 
     // Keep the screen awake for as long as the app is open (CPE-225). We hold a
