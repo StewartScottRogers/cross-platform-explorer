@@ -2,13 +2,13 @@
 id: CPE-714
 title: "EPIC: Terminal dock — embedded terminal panel"
 type: Task
-status: In Progress
+status: Done
 priority: Medium
 component: Multiple
 tags: [epic]
 estimate: 4h+
 created: 2026-07-18
-closed:
+closed: 2026-08-01
 ---
 
 ## Goal
@@ -67,3 +67,22 @@ the sidecar's `pty.rs`, same `portable-pty = "0.8"`, no drift) + `open_pty`/`wri
 model. Registry self-cleans on a child's own exit, so "no live PTY when closed" holds even without an
 explicit close. 6 new real-PTY tests + 2 dock-state tests, clippy clean both feature modes, bindings
 regenerated. CPE-1243 (xterm.js UI) is now unblocked.
+
+## Closed 2026-08-01 (workshift, user "you choose") — DoD met
+A working embedded terminal dock. Both children merged with full gauntlets:
+- **CPE-1242 (#544)** — PTY backend: `pty.rs` (PtySession + PtyRegistry) mirroring the sidecar's proven
+  pattern on `portable-pty` (already vendored — no new backend dep); streaming open/write/resize/close
+  commands + a session registry. Reviewer + UAT (UAT proved NO leaked OS process after close via a
+  live `tasklist` check).
+- **CPE-1243 (#545)** — Terminal dock UI: xterm.js pane + `terminalClient.ts` (PtyBridge) wired to the
+  `terminal_tabs` dock (tabs/shell-picker/Follow-folder), docked in the App grid, opens rooted at the
+  current folder. Reviewer + UAT + Visual Critic **VISUAL PASS** (real cmd.exe echoing a marker).
+  Reviewer caught a POSIX `cd` command-injection (unescaped quote in a crafted dir name with
+  Follow-folder on) → fixed with single-quote-safe escaping + a security re-check that PROVED the
+  neutralization + revert-verified the regression test.
+
+DoD MET: terminal opens at the current folder + follows navigation; per-OS shell selection;
+input/output/resize behave like a real terminal; panel closed = no PTY/background cost, core explorer
+unchanged. Dep added: `@xterm/xterm` 6.0.0 + `@xterm/addon-fit` 0.11.0 (user-approved). Follow-ups
+(non-blocking): CPE-1244 (app-quit PTY sweep + SIGKILL reap), CPE-1245 (orphaned-tab-on-error +
+tab-close a11y + follow-nav busy note).
