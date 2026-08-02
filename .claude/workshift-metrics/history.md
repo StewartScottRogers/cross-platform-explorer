@@ -687,3 +687,22 @@ them; history.md stopped at 07-31). Authoritative record is the checkpoint commi
   FIX GOING FORWARD: Foreman owns ticket-file lifecycle in the main tree; tell workers NOT to move ticket files.
 - **Tuned defaults held:** sonnet worker + opus reviewer; one heavy build at a time (serialize reviewer vs worker builds);
   frontend slices verify fast (jsdom + vitest). GitHub Actions runners STALLED entire run → merged via local triad + --admin.
+
+### 2026-08-02 (cont.) — SHIFT C shipped: drag-out foundation + gauntlet-surfaced hardening; 3-shift run COMPLETE
+- **Shipped (3 PRs):** CPE-1264 drag-out PLUMBING (tauri-plugin-drag v2.1.1 + drag:default capability + dragOut.ts
+  wrapper, not wired to rows — headless foundation, #563) · CPE-1261 video-thumbnail temp-file hardening (exclusive
+  scratch dir, CWE-377 close, #565) · CPE-1265 content-search UI robustness (gen-bump on rebuild + probe-reject test, #564).
+- **Honest scope call:** the REMAINING drag-out (wire-into-rows + coexistence, archive-on-drag) and ALL shell/OS
+  integration (712 default-handler / 713 tray / 716 drive-bay) genuinely need ATTENDED verification (real drag-drop,
+  OS registration, hardware) — building them blind risks unverifiable regressions. So shift C delivered the headless
+  drag-out foundation + closed the two hardening follow-ups the gauntlet surfaced this run, rather than padding with
+  blind code. The attended remainder is handed to the user as a checklist.
+- **Run totals:** 9 PRs merged (#557 radar pin + #558-565), 0 escaped defects. The ≥2-check gauntlet caught 2 real
+  BLOCKING pre-merge defects CI could not (macOS/Linux bundled-binary path mismatch #560; Turkish-İ snippet slice
+  panic #561) + several non-blocking items (→ filed+fixed CPE-1261/1265). Full local verification throughout
+  (GitHub Actions runners stalled the entire run; merged via --admin). Sonnet worker + opus reviewer for
+  backend-correctness held as the winning default.
+- **Frontier lesson (reinforced):** the autonomous "well is tapped" verdict meant "no PRODUCT work without a user
+  DECISION" — a single pick-list answer from the user (green-lighting deps/model/scope) unlocked 3 full shifts of
+  genuinely-headless work (thumbnails; content search via the pre-built local embedder needed NO key). Always offer
+  the decision, don't just report dry.
