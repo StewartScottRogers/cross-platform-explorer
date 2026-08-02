@@ -43,8 +43,11 @@ artifact once sealed.
   is a deliberate choice to avoid hand-rolling AEAD/KDF/nonce management. `age` provides:
   - **AEAD:** ChaCha20-Poly1305 (authenticated encryption — confidentiality + integrity).
   - **Passphrase KDF:** scrypt, with a work factor (see §4).
-  - Streaming encryption with correct nonce handling, so large trees encrypt/decrypt without loading the
-    whole ciphertext at once and without nonce-reuse footguns.
+  - Chunked STREAM AEAD framing with correct per-chunk nonce handling (no nonce-reuse footgun). Note:
+    `age` streams *internally*, but the v1 cpe wrapper **buffers the whole tree in memory** when sealing/
+    opening (each file is read fully, packed into one plaintext stream, then encrypted; opening reads the
+    whole blob + plaintext together) — so peak memory scales with total vault size (~2-3×).
+    Streaming-from-disk is future work. See §5.
 - **Blob format (`.cpevault`):** `MAGIC (b"CPEVLT1") || u16 schema_version (LE, =1) || age-ciphertext`.
   The magic + version are checked before any crypto; a bad magic / unsupported version yields a distinct,
   non-crypto error (never a panic).
@@ -97,6 +100,10 @@ artifact once sealed.
 - **Session-dir wipe pass.** The transient session dir is wiped with a single Zero pass (it's short-lived
   extracted plaintext); the destructive original-shred defaults to a stronger scheme. Both are honest,
   documented tradeoffs.
+- **Whole-vault in-memory buffering (v1).** Sealing reads every file fully into memory and packs the whole
+  tree into one plaintext stream before encrypting; opening holds the whole blob and decrypted plaintext
+  together. Peak RAM scales with total vault size (~2-3×), so a very large (multi-GB) vault can exhaust
+  memory — a scalability limit (and minor availability consideration). Streaming-from-disk is future work.
 - **Dependency weight.** `age` (with `default-features=false`) adds ~90 transitive crates. Accepted as the
   cost of not hand-rolling crypto for a security feature; vaults are an additive mode (zero cost unused).
 

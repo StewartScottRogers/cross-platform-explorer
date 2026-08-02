@@ -35,3 +35,11 @@ recommended before GA" flag. (User-facing summary already ships in `src/docs/20-
 - Explicitly states the crew review de-risks but does NOT substitute for a professional external audit,
   which is recommended before shipping to real users at GA.
 - Independently sanity-checked by the security reviewer for accuracy.
+
+## Done 2026-08-02 (workshift) — docs/design/VAULT-SECURITY.md finalized @ main
+Threat model + crypto design + key handling + honest limits + adversarial-review record + explicit
+"professional external audit recommended before GA" flag. Independently accuracy-checked against the merged
+code by the security reviewer: verdict DOC ACCURATE except one performance overstatement (claimed
+streaming/low-memory; v1 actually buffers the whole tree in RAM) — CORRECTED (§3 fixed + §5 buffering
+caveat added). No security-property overclaim found; crypto/key/path-safety/destructive-guard claims all
+match the code. DoD "crypto passes a security review" met at the crew level; external audit is the GA gate.
