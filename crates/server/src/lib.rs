@@ -516,6 +516,14 @@ pub mod secure_delete;
 /// a real file — overwrite pass by pass, flush + sync, then unlink — and reports what ran.
 pub mod secure_shred;
 
+/// Encrypted-vault crypto **core** (CPE-1247, epic CPE-738): the pure, Tauri-free heart of the
+/// encrypted-vaults feature. Packs a folder tree into one deterministic length-prefixed byte stream,
+/// encrypts it with the `age` crate in passphrase mode (scrypt KDF + ChaCha20-Poly1305 AEAD) into a
+/// `.cpevault` blob, and decrypts + authenticates it back — mapping a wrong passphrase, a tampered
+/// blob, a bad magic, and an unsupported version to distinct [`vault_crypto::VaultError`] variants.
+/// No hand-rolled crypto, no global state; a crafted blob can never panic.
+pub mod vault_crypto;
+
 /// AI-copilot operation-plan model — the pure, filesystem-free structured plan (a closed, whitelisted set of
 /// move/rename/delete/mkdir/copy ops) an NL instruction compiles to, plus its scope+cap validator and a
 /// dry-run summary (CPE-990, epic CPE-977). No LLM, no I/O; the safe, inspectable middle of the copilot.
