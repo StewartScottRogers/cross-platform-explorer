@@ -18,7 +18,8 @@ export type Section =
   | "workbench"
   | "repositories"
   | "swarms"
-  | "native-metadata";
+  | "native-metadata"
+  | "terminal";
 
 /** Section id → doc slug (a `src/docs/*.md` filename without `.md`). */
 const SECTION_DOC: Record<Section, string> = {
@@ -38,6 +39,10 @@ const SECTION_DOC: Record<Section, string> = {
   // editor — but it still earns its own doc page + registry entry per [[maintain-in-app-docs-library]]
   // so contextual help has somewhere exact to point.
   "native-metadata": "17-native-metadata",
+  // CPE-1243 (epic CPE-714): the embedded terminal dock — like native-metadata above, not a sidebar view
+  // you switch into (it's a panel toggled over the explorer via the CommandBar's Terminal button), but it
+  // still earns its own doc page + registry entry per [[maintain-in-app-docs-library]].
+  terminal: "19-terminal",
 };
 
 /** The default doc when a section has no page (or an unknown id is passed): the Overview. */

@@ -2427,7 +2427,9 @@ async terminalDockActive() : Promise<TermTab | null> {
     return await TAURI_INVOKE("terminal_dock_active");
 },
 /**
- * Open a PTY running the OS's default shell at `cwd` (empty/`None` = the process's own cwd), and start
+ * Open a PTY at `cwd` (empty/`None` = the process's own cwd) running `shell` (a program name/path, e.g.
+ * `"powershell.exe"`/`"/bin/zsh"` — the frontend's shell picker, CPE-1243) or, when `shell` is
+ * `None`/blank, the OS's own default shell (`pty::default_shell()`, via `pty::resolve_shell`). Starts
  * streaming its output over `on_output` as base64-encoded chunks (exact bytes — ANSI escapes and any
  * split multibyte UTF-8 survive the trip — mirroring the sidecar's own PTY wire format,
  * `session_server.rs`). Returns the new session's id, which `write_pty`/`resize_pty`/`close_pty` key on.
@@ -2443,9 +2445,9 @@ async terminalDockActive() : Promise<TermTab | null> {
  * the session from the registry there too — a closed (or self-terminated) panel is never left as a
  * "live" entry even if the frontend never calls `close_pty` (CPE-1242 DoD).
  */
-async openPty(cwd: string | null, rows: number, cols: number, onOutput: TAURI_CHANNEL<string>) : Promise<Result<number, string>> {
+async openPty(cwd: string | null, shell: string | null, rows: number, cols: number, onOutput: TAURI_CHANNEL<string>) : Promise<Result<number, string>> {
     try {
-    return { status: "ok", data: await TAURI_INVOKE("open_pty", { cwd, rows, cols, onOutput }) };
+    return { status: "ok", data: await TAURI_INVOKE("open_pty", { cwd, shell, rows, cols, onOutput }) };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
