@@ -9,6 +9,12 @@ on:
   pull_request:
     branches: [main]
 
+# CPE-1266: a newer push/PR to a ref cancels that ref's superseded in-flight CI run, so rapid
+# back-to-back pushes don't pile up dozens of full matrix runs and clog the account's concurrency.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   frontend:
     name: Frontend — type-check and test
