@@ -4,7 +4,7 @@ title: "Harden video-thumbnail temp file against symlink pre-plant (CWE-377) on 
 type: chore
 component: cpe-server
 priority: low
-status: Doing
+status: Done
 tags: ready
 created: 2026-08-02
 epic: CPE-718
@@ -34,3 +34,6 @@ is already solved by the atomic counter.
 
 ## Notes
 Low priority / Linux-only. Fold into shift A's tail or a later hardening pass.
+
+## Work Log
+- 2026-08-02 — Worker (sonnet) replaced the predictable temp file with an exclusive per-invocation scratch dir (atomic fs::create_dir, bounded retry, remove_dir_all on all paths); 3 tests (16-thread no-collision, error+success cleanup). Opus-grade sonnet reviewer confirmed CWE-377 window closed + cleanup on all paths + dep-free → APPROVE. Merged #565.
