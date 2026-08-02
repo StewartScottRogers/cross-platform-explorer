@@ -1784,6 +1784,35 @@ async indexClear() : Promise<void> {
     await TAURI_INVOKE("index_clear");
 },
 /**
+ * Walk `root`'s text-like files into a fresh content index, streaming `ContentIndexProgress` over
+ * `on_progress` as the walk advances (per `docs/design/STREAMING.md`), then persist it under app-data
+ * keyed by `root`. Re-issuing a build for the same `root` cancels any prior build for it. Returns the
+ * final `ContentIndexBuildStats`. Async + `spawn_blocking` — the walk/chunk/embed is CPU+IO work and must
+ * never run on the UI thread (CPE-760).
+ */
+async contentIndexBuild(root: string, onProgress: TAURI_CHANNEL<ContentIndexProgress>) : Promise<Result<ContentIndexBuildStats, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("content_index_build", { root, onProgress }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * Search `root`'s persisted content index for `query`, returning up to `k` ranked hits (path, score,
+ * snippet). No index built yet for `root` → an empty, `index_exists: false` outcome — a clean "needs
+ * build" signal, not an error/crash. Async + `spawn_blocking` (loading + scoring the index is blocking
+ * IO/CPU work).
+ */
+async contentSearch(root: string, query: string, k: number) : Promise<Result<ContentSearchOutcome, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("content_search", { root, query, k }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
  * Read a repo's `.git/config` and return its origin remote as a browsable https
  * URL (folder-context plugins, CPE-235). A cheap single file read; returns None
  * if the folder isn't a repo or has no remote.
@@ -2917,9 +2946,33 @@ truncated: boolean }
  */
 export type ConsentState = { requested: Capability[]; granted: Capability[]; undecided: Capability[] }
 /**
+ * One ranked `content_search` hit: the file, its similarity score, and a snippet of its text.
+ */
+export type ContentHit = { path: string; score: number; snippet: string }
+/**
+ * The final `content_index_build` result: how many files were indexed vs skipped, and whether a cap or
+ * cancellation cut the walk short. Serialisable: it's the command's return type.
+ */
+export type ContentIndexBuildStats = { files_indexed: number; files_skipped: number; truncated: boolean }
+/**
+ * One `content_index_build` progress tick — how far the walk has gotten. Serialisable: it's the
+ * `content_index_build` progress-channel payload (`docs/design/STREAMING.md`).
+ */
+export type ContentIndexProgress = { files_indexed: number; files_skipped: number; 
+/**
+ * The file most recently indexed (empty on the final tick, which reports the finished totals).
+ */
+current_path: string }
+/**
  * One content-search hit: the file, the 1-based line number, and the (trimmed, truncated) line.
  */
 export type ContentMatch = { path: string; line_number: number; line: string }
+/**
+ * The `content_search` result: ranked hits, plus whether an index existed at all for `root` — lets the
+ * frontend tell "index built, zero matches" apart from "never built, prompt to build" without either one
+ * looking like a failure (CPE-1262 acceptance: a missing index is a clean signal, not an error/crash).
+ */
+export type ContentSearchOutcome = { hits: ContentHit[]; index_exists: boolean }
 /**
  * The result of a content search: the hits, how many files were scanned, and whether a cap was hit.
  */

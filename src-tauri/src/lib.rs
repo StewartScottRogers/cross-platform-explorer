@@ -3661,6 +3661,105 @@ fn index_clear(app: tauri::AppHandle, state: tauri::State<'_, cpe_server::index_
     index_watch_stop_all(&app);
 }
 
+// ---- File-content search / content index (CPE-1262, epic CPE-976) ---------------------------------
+// Thin dispatchers over `cpe_server::content_index`: walk a folder's text-like files into a local,
+// dependency-free `FakeEmbedder`-backed `SemanticIndex` (no network, no API key), persist it under
+// app-data keyed by a stable hash of the indexed root, and search it. Honestly file-CONTENT search
+// (embedder-pluggable), not oversold "semantic" — see `cpe_server::content_index`'s module docs. No
+// managed state: each command loads/saves the persisted index directly on a blocking thread — unlike
+// `index_service`'s whole-machine instant index, a per-folder content index is small enough that keeping
+// it resident between calls buys nothing.
+
+/// Resolve the content-index directory under app-data (`<app_data>/content-index`), sibling of `index`.
+fn content_index_dir(app: &tauri::AppHandle) -> Result<std::path::PathBuf, String> {
+    let dir = server_ctx::TauriCtx::new(app).app_data_dir()?.join("content-index");
+    Ok(dir)
+}
+
+/// Registry of in-flight `content_index_build` cancel flags, keyed by [`cpe_server::content_index::root_key`],
+/// so a re-issued build for the same root cancels the prior one (mirrors `DIR_STREAM_CANCELS`/
+/// `INDEX_BUILD_CANCELS`).
+static CONTENT_INDEX_BUILD_CANCELS: std::sync::OnceLock<
+    std::sync::Mutex<std::collections::HashMap<u64, std::sync::Arc<std::sync::atomic::AtomicBool>>>,
+> = std::sync::OnceLock::new();
+
+fn content_index_build_registry(
+) -> &'static std::sync::Mutex<std::collections::HashMap<u64, std::sync::Arc<std::sync::atomic::AtomicBool>>>
+{
+    CONTENT_INDEX_BUILD_CANCELS.get_or_init(Default::default)
+}
+
+/// Walk `root`'s text-like files into a fresh content index, streaming `ContentIndexProgress` over
+/// `on_progress` as the walk advances (per `docs/design/STREAMING.md`), then persist it under app-data
+/// keyed by `root`. Re-issuing a build for the same `root` cancels any prior build for it. Returns the
+/// final `ContentIndexBuildStats`. Async + `spawn_blocking` — the walk/chunk/embed is CPU+IO work and must
+/// never run on the UI thread (CPE-760).
+#[tauri::command]
+#[cfg_attr(feature = "specta-bindings", specta::specta)]
+async fn content_index_build(
+    app: tauri::AppHandle,
+    root: String,
+    on_progress: tauri::ipc::Channel<cpe_server::content_index::ContentIndexProgress>,
+) -> Result<cpe_server::content_index::ContentIndexBuildStats, String> {
+    use std::sync::atomic::Ordering;
+    let dir = content_index_dir(&app)?;
+    let key = cpe_server::content_index::root_key(&root);
+
+    // Cancel any build already running for this root, then register our own flag.
+    let cancel = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    {
+        let mut reg = content_index_build_registry().lock().unwrap();
+        if let Some(prev) = reg.get(&key) {
+            prev.store(true, Ordering::Relaxed);
+        }
+        reg.insert(key, cancel.clone());
+    }
+    let cancel_id = cancel.clone();
+
+    let result = tauri::async_runtime::spawn_blocking(move || {
+        let (index, stats) = cpe_server::content_index::build_index_with(&root, &cancel, |p| {
+            let _ = on_progress.send(p);
+        })?;
+        // A build superseded mid-walk (cancel signalled by a newer same-root build) must not persist a
+        // partial index over the newer build's own save — same discipline as `IndexService::build_root`.
+        if !cancel.load(Ordering::Relaxed) {
+            cpe_server::content_index::save_index(&index, &dir, &root)?;
+        }
+        Ok(stats)
+    })
+    .await
+    .map_err(|e| e.to_string())?;
+
+    // Deregister — but only if a newer build hasn't already replaced our flag.
+    {
+        let mut reg = content_index_build_registry().lock().unwrap();
+        if reg.get(&key).is_some_and(|f| std::sync::Arc::ptr_eq(f, &cancel_id)) {
+            reg.remove(&key);
+        }
+    }
+    result
+}
+
+/// Search `root`'s persisted content index for `query`, returning up to `k` ranked hits (path, score,
+/// snippet). No index built yet for `root` → an empty, `index_exists: false` outcome — a clean "needs
+/// build" signal, not an error/crash. Async + `spawn_blocking` (loading + scoring the index is blocking
+/// IO/CPU work).
+#[tauri::command]
+#[cfg_attr(feature = "specta-bindings", specta::specta)]
+async fn content_search(
+    app: tauri::AppHandle,
+    root: String,
+    query: String,
+    k: usize,
+) -> Result<cpe_server::content_index::ContentSearchOutcome, String> {
+    let dir = content_index_dir(&app)?;
+    tauri::async_runtime::spawn_blocking(move || {
+        cpe_server::content_index::search_index(&dir, &root, &query, k)
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
 /// Find duplicate files under `root` (CPE-420) — size-then-hash two-pass scan. Model lives in
 /// `cpe_server::duplicates` (CPE-815); this is a thin `spawn_blocking` dispatcher.
 #[tauri::command]
@@ -8999,6 +9098,8 @@ pub fn run() {
             index_status,
             index_drop,
             index_clear,
+            content_index_build,
+            content_search,
             git_remote_url,
             open_external,
             run_as_admin,
@@ -9778,6 +9879,8 @@ pub fn export_bindings(out: &std::path::Path) -> Result<(), String> {
         index_status,
         index_drop,
         index_clear,
+        content_index_build,
+        content_search,
         git_remote_url,
         open_external,
         run_as_admin,

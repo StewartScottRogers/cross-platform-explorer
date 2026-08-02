@@ -512,6 +512,13 @@ pub mod ocr;
 /// semantically searchable (CPE-996, epic CPE-980 ↔ CPE-976). Pure glue, no I/O.
 pub mod semantic_ingest;
 
+/// Content-index wiring — walk a folder's text-like files into a [`semantic_index::SemanticIndex`] (local
+/// `FakeEmbedder`, no key/network), persist + reload it keyed by the indexed root, and search it into
+/// ranked `{path, score, snippet}` hits (CPE-1262, epic CPE-976). The `content_index_build`/`content_search`
+/// Tauri commands are thin dispatchers into this module. Framed honestly as file-CONTENT search
+/// (embedder-pluggable), not oversold "semantic".
+pub mod content_index;
+
 /// Batch metadata apply — apply one shared set of edits to a whole selection of files, with a per-file
 /// result + run summary; builds on media_meta_edit (CPE-949, epic CPE-725).
 pub mod media_meta_batch;
