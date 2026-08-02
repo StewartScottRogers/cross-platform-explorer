@@ -653,3 +653,19 @@ them; history.md stopped at 07-31). Authoritative record is the checkpoint commi
   remaining epic slice is user-gated — model/API key (976/977/979/980), code-signing cert (002), Mac/OS
   hardware (616/717/713/716), heavy native deps (1238 ffmpeg/pdfium), or interactive GUI feel. Unwired
   `cpe-server` modules map exactly onto that gated set. Next product vein needs a user "you choose" pick.
+
+### 2026-08-02 (cont.) — user green-lit 4 gated epics; SHIFT A shipped: thumbnails epic CPE-718 CLOSED
+- After the honest "well is tapped" report, user picked ALL FOUR gated epics off the wrap pick-list → real build run.
+- **Shift A shipped (3 PRs, all opus-reviewer gauntleted, pushed):** CPE-1256 PDF thumbnails (pdfium-render in-process,
+  `pdf-thumb`, #558) · CPE-1257 video thumbnails (bundled-ffmpeg shell-out, `video-thumb`, #559) · CPE-1258 enablement
+  (features on + per-feature CI + release native-dep staging + docs, #560). Epic CPE-718 CLOSED; CPE-1238 done.
+- **Gauntlet SAVE:** the #560 opus reviewer caught a real blocking bug the CI could NOT — resolvers used
+  `current_exe().parent()` but Tauri stages resources to `resource_dir()` (differs on macOS/Linux) → silent icon
+  fallback on 2 of 3 OSes. Fixed by injecting `app.path().resource_dir()` into the Tauri-free cpe-server via a setter
+  (mirrors resolve_sidecar_bin). 1 retry (attempt 2 passed). This is exactly why the ≥2-independent-checks gate exists.
+- **Tuned defaults held:** sonnet worker + opus reviewer for backend-correctness; ONE heavy cargo build at a time on the
+  slow Z: drive (serialize reviewer builds vs new workers; pipeline only non-build work). Research-first for the
+  dep-weight + drag-out architecture calls (2 opus researchers, both filed to Library → reused, not re-run).
+- **Frontier note:** the "tapped" verdict was PRODUCT-work-without-a-user-decision; once the user made the decisions,
+  large genuinely-headless veins opened (thumbnails; AI search via the pre-built local embedder needs NO key). Lesson:
+  a user "you choose"/dep-approval unlocks shifts of real work even when the autonomous frontier reads dry.

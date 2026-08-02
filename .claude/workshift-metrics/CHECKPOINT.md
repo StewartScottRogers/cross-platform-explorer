@@ -1,33 +1,36 @@
-# Workshift Checkpoint — 2026-08-02 ~05:50 local — 3-SHIFT BUILD RUN (user green-lit 4 epics)
+# Workshift Checkpoint — 2026-08-02 ~06:52 local — SHIFT A DONE, SHIFT B underway
 
-Session 39d31626. User said "Run three back-to-back workshifts". Frontier was user-gated; user then
-green-lit ALL FOUR gated epics via a pick-list: media thumbnails, drag-out, shell/OS integration, AI.
-This is now a real multi-shift product build run.
+Session 39d31626. User said "Run three back-to-back workshifts" → green-lit ALL FOUR gated epics
+(thumbnails, AI, drag-out, shell). Real multi-shift build run. One heavy cargo build at a time (slow Z:).
 
-## Plan (one epic at a time — slow Z: drive caps heavy cargo builds at 1, so stagger)
-- **Shift A — Media thumbnails (CPE-1238, epic CPE-718)**: PDF via pdfium-render in-process (`pdf-thumb`);
-  video via bundled-ffmpeg shell-out (`video-thumb`); never mupdf(AGPL). Slices CPE-1256/1257/1258.
-- **Shift B — AI semantic (file-content) search (epic CPE-976)**: the whole engine stack is BUILT+UNWIRED
-  (children 981 vector_index / 982 embedder seam / 983 semantic_ingest chunk→embed / 984 query blend done;
-  `FakeEmbedder` = local dependency-free bag-of-words → NO API KEY needed). Remaining = wire to Tauri
-  commands (build-index-over-folder + persist + search) + a content-search UI. Frame honestly as file-CONTENT
-  search, embedder-pluggable (better model later), NOT oversold "semantic".
-- **Shift C — Drag-out (CPE-672/674) + shell/OS integration (CPE-712/713/716)**: drag-out via
-  `tauri-plugin-drag` v2.1.1 (MIT/Apache) + `drag:default` capability; CPE-674 90% built
-  (extract_archive_entry_any already stages to temp + is a command). Slices A-plumbing(headless) /
-  B-wire(attended verify) / C-archive(attended). Shell/tray/drive-bay = headless build to attended-verify line.
+## SHIFT A — COMPLETE ✅ Epic CPE-718 (universal thumbnail pipeline) CLOSED
+- CPE-1256 PDF first-page extractor (pdfium-render, in-process, `pdf-thumb`) — merged #558.
+- CPE-1257 video representative-frame extractor (bundled-ffmpeg shell-out, `video-thumb`) — merged #559.
+- CPE-1258 ship-enablement (features on + per-feature CI + release native-dep staging + docs) — merged #560.
+  Opus reviewer caught + we fixed a real macOS/Linux bundled-binary path bug (resolvers used current_exe().parent();
+  now inject app.path().resource_dir() into cpe-server via set_native_dep_dir, mirroring resolve_sidecar_bin).
+- CPE-1238 parent closed. Follow-up filed: CPE-1261 (low, Linux /tmp temp-file hardening).
+- Installer grows ~25-40MB with features on (user approved dep weight); 0 when off. End-to-end PDF/video thumbnail
+  render on the installed app is attended/CI-gated (pdfium not local; runners stalled) — code correctness fully reviewed.
 
-## State (as of ~05:50)
-- `main` @ origin, clean. CPE-1255 radar pin merged (#557). **CPE-1256 PDF extractor merged (#558, Done)**.
-- **CPE-1257 video extractor**: PR #559 open, in independent opus review (subprocess/temp-safety focus).
-- CPE-1258 (ship-enablement: turn on both features in src-tauri/Cargo.toml + per-feature CI + pdfium/ffmpeg
-  binary acquisition in release-sidecar.yml + docs) — Backlog, depends on 1257 merging.
-- ffmpeg 8.1.1 present locally (video tests run real); pdfium NOT local (PDF real-render gated → CPE-1258/CI).
-- Research filed to Library: thumbnail-native-deps-pdf-video-2026-08-02, drag-out-to-os-tauri-plugin-drag-2026-08-02.
-- GitHub Actions runners INTERMITTENTLY STALLED → merges via local triad + `gh pr merge --admin`; re-check CI when up.
+## SHIFT B — IN PROGRESS: AI file-content search (epic CPE-976, activated)
+Engine stack pre-built+unwired (981 vector_index / 982 embedder seam + local FakeEmbedder / 983 ingest / 984 blend);
+local embedder = NO API key. Slices:
+- **CPE-1262** (backend wiring: content_index_build streamed + content_search + persist + specta bindings) — IN FLIGHT (worker building).
+- **CPE-1263** (content-search UI: query + ranked snippets + navigate) — Backlog, depends on 1262.
+
+## SHIFT C — QUEUED: drag-out (CPE-672/674) + shell/OS (CPE-712/713/716)
+Drag-out via tauri-plugin-drag v2.1.1 (MIT/Apache) + `drag:default`; CPE-674 90% built (extract_archive_entry_any
+already stages+is a command). Slices A-plumbing(headless)/B-wire(attended)/C-archive(attended). Research filed to Library.
+
+## State
+- `main` @ origin `08cebd19`, clean. Lock: WORKSHIFT-LOCK (session 39d31626). GitHub Actions runners STALLED all run
+  → merges via local triad + `gh pr merge --admin`; re-check CI when up.
+- Leftover cruft to deep-clean later (file-locked, don't fight now): `.claude/worktrees/agent-a26d4e52a300930d6`,
+  `.claude/uat-1025`, `.claude/uat-1025b`.
+- Research Library: thumbnail-native-deps + drag-out entries filed.
 
 ## To resume
-Finish shift A: merge #559 (CPE-1257) after review → CPE-1256/57 both Done → dispatch CPE-1258 enablement →
-close epic CPE-718 (CPE-1238). Then decompose + build shift B (CPE-976 wiring + UI). Then shift C (drag-out
-plumbing + shell). Attended verifications (real drag-drop, installed-build thumbnail eyeballing, OS-registration)
-are skip-and-noted for a user-present session. Lock: .claude/workshift-metrics/WORKSHIFT-LOCK (session 39d31626).
+Finish CPE-1262 (review→merge) → CPE-1263 UI → close/advance CPE-976. Then shift C (drag-out plumbing + shell headless).
+Attended verifications (installed-app thumbnail eyeballing, real drag-drop, OS-registration) skip-and-noted for a
+user-present session.
