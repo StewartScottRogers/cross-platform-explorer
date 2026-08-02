@@ -32,3 +32,5 @@ the user for the dep-weight call.
   `pdf-thumb`; video via BUNDLED ffmpeg shell-out behind `video-thumb` (LGPL/GPL stays out of the signed binary);
   never link mupdf (AGPL). Decomposed into CPE-1256 (PDF), CPE-1257 (video), CPE-1258 (ship-enablement+CI+docs).
   Closes when all three merge.
+
+- 2026-08-02 — All 3 slices merged (CPE-1256 PDF #558, CPE-1257 video #559, CPE-1258 enablement #560). DONE.

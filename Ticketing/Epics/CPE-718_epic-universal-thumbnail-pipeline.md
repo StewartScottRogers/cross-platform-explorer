@@ -2,7 +2,7 @@
 id: CPE-718
 title: "EPIC: Universal thumbnail pipeline"
 type: Task
-status: Proposed
+status: Done
 priority: Medium
 component: Multiple
 tags: [epic]
@@ -83,3 +83,9 @@ representative-frame + PDF first-page + office thumbnails. These need HEAVY nati
 fast/small/predictable tiebreaker, plus real-render verification is GUI/hardware-gated. Needs a USER
 decision on the dependency approach (bundled vs feature-gated vs sidecar) before proceeding. Re-activate
 with `/ticketing-epic activate` once that call is made.
+
+## Closed 2026-08-02 (workshift)
+All thumbnail formats delivered: raster/PSD (base), SVG + font glyph-sheets (CPE-1236), streaming client (CPE-1237),
+PDF first-page (CPE-1256, pdfium-render feature-gated), video representative-frame (CPE-1257, bundled-ffmpeg shell-out
+feature-gated), ship-enablement + CI + release binary provisioning + docs (CPE-1258). CPE-1238 (the pdf/video "remaining
+formats" ticket) closed. Follow-up: CPE-1261 (low, Linux /tmp temp-file hardening). Epic DONE.

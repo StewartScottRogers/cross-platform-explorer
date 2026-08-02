@@ -4,7 +4,7 @@ title: "Ship-enablement + CI + docs for PDF/video thumbnails"
 type: chore
 component: build
 priority: medium
-status: Doing
+status: Done
 tags: ready
 created: 2026-08-02
 epic: CPE-718
@@ -35,3 +35,12 @@ CPE-1256 + CPE-1257 landing.
 Licensing: pdfium BSD links in-process; ffmpeg stays a separate bundled exe (mere aggregation) — carry its LICENSE.
 Never link mupdf (AGPL). Full end-to-end bundling is verifiable only once this lands + CI runs (CI currently
 intermittently stalled — verify what can be verified locally).
+
+## Work Log
+- 2026-08-02 — Worker (sonnet, worktree) enabled pdf-thumb+video-thumb in src-tauri, per-feature CI (ffmpeg/pdfium
+  installs), release-sidecar.yml native-dep staging (pdfium chromium/7961, LGPL ffmpeg n8.1.2, LICENSE carried), pdfium
+  overlay confs, docs. Opus Reviewer caught a BLOCKING defect: resolvers used current_exe().parent() but Tauri stages
+  resources to resource_dir() (differs on macOS/Linux) → silent icon fallback; CI couldn't catch it (only tests the
+  PATH fallback). Fix (c79fa0a8): inject app.path().resource_dir() into cpe-server via set_native_dep_dir setters
+  (mirrors resolve_sidecar_bin), called from setup(). Reviewer re-verified → APPROVE. Merged #560 (df7f65b3, --admin).
+- Full bundled-path end-to-end confirmation needs a real macOS/Linux release build (attended/CI-gated).
