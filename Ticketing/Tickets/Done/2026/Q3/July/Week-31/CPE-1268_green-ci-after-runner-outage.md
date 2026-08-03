@@ -54,3 +54,6 @@ gate (CPE-1267).
 - ci.yml changes (pdfium/ffmpeg steps) can't be validated by the PR's own `pull_request` run (it uses the
   base/main workflow); they take effect once merged. Reasoned + YAML-validated.
 - Foreman owns lifecycle — do not move this ticket.
+
+## Work Log
+- 2026-08-02 — Opus worker fixed all CI failures after the runner-outage --admin merges: thumb_video tiny-max_edge (real), pty kill-already-reaped ESRCH (real Unix), macro-via-trash CI-env probe-skip, macos dead_code cfg-gate, pdfium install tar/cygpath+continue-on-error. Swept extra red jobs too. Added a two-sided frontend<->backend THUMBNAIL_EXTRA_EXTS parity guard + gui-smoke pdf/video thumbnail pin (guards CPE-1267). PR #566 all 10 CI jobs green (verified). Merged.
