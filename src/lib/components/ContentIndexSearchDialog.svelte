@@ -28,6 +28,7 @@
   import { commands } from "../bindings.gen";
   import type { ContentHit, ContentIndexBuildStats, ContentIndexProgress } from "../bindings.gen";
   import { rawInvoke, createChannel, unwrap } from "../invoke";
+  import { loadContentEmbedderConfig } from "../settings";
   import { t } from "../i18n";
   import { baseName, relativeToRoot, scorePercent, highlightSegments } from "../contentSearch";
   import Icon from "./Icon.svelte";
@@ -65,7 +66,7 @@
   async function probe() {
     const g = ++gen;
     try {
-      const outcome = unwrap(await commands.contentSearch(root, "", 0));
+      const outcome = unwrap(await commands.contentSearch(root, "", 0, loadContentEmbedderConfig()));
       if (g === gen) indexExists = outcome.index_exists;
     } catch {
       if (g === gen) indexExists = false; // treat a failed probe as "needs build", not a crash
@@ -94,7 +95,7 @@
     error = "";
     searched = true;
     try {
-      const outcome = unwrap(await commands.contentSearch(root, trimmed, K));
+      const outcome = unwrap(await commands.contentSearch(root, trimmed, K, loadContentEmbedderConfig()));
       if (g !== gen) return; // superseded by a newer query — drop the stale result
       hits = outcome.hits;
       indexExists = outcome.index_exists;
@@ -118,7 +119,11 @@
     try {
       const channel = createChannel<ContentIndexProgress>();
       channel.onmessage = (p) => { buildProgress = p; };
-      const final = await rawInvoke<ContentIndexBuildStats>("content_index_build", { root, onProgress: channel });
+      const final = await rawInvoke<ContentIndexBuildStats>("content_index_build", {
+        root,
+        onProgress: channel,
+        embedder: loadContentEmbedderConfig(),
+      });
       buildStats = final;
       indexExists = true;
       if (query.trim()) scheduleSearch();

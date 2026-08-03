@@ -78,6 +78,12 @@ zeroize = "1"
 # `thumbnail-native-deps-pdf-video-2026-08-02.md` — `mupdf` (AGPL) was rejected outright as a
 # copyleft landmine in a distributed, signed binary.
 pdfium-render = { version = "0.9", optional = true }
+# Configurable real embedder for content search (CPE-1273, epic CPE-976): a blocking HTTP client for an
+# OpenAI-compatible `/embeddings` endpoint. Optional + feature-gated (`http-embedder`) so the lean default
+# build pulls in zero HTTP/TLS code. NOT a new workspace dependency — `ureq` is already used by
+# `cpe-webdav` and the app adapter; this reuses the same crate/version (same pure-Rust rustls TLS, no C
+# build tooling), so `cargo tree`/`Cargo.lock` gain no new crate.
+ureq = { version = "2", default-features = false, features = ["tls", "gzip"], optional = true }
 
 # POSIX extended attributes for the native-metadata bridge (CPE-826, epic CPE-717). Pure-Rust (libc
 # syscalls, no system libs); Unix-only — Windows uses NTFS alternate data streams via std file I/O,
@@ -119,6 +125,12 @@ pdf-thumb = ["dep:pdfium-render"]
 # compiles zero video code (the "small when off" rule). Turn on with `--features video-thumb`;
 # ship-enablement (bundling the ffmpeg binary as a release resource) is CPE-1258.
 video-thumb = []
+# Opt-in real HTTP embedder for content search (CPE-1273, epic CPE-976). OFF by default so the lean
+# default build compiles zero HTTP code / pulls in no `ureq`/TLS stack (the "small when off" rule,
+# mirrored from `index`/`pdf-thumb` above). The `http_embedder` module always compiles (its pure
+# request-build/parse logic + transport seam are unit-tested with no network); only the real `ureq`
+# transport + `connect()` are behind this gate. The app adapter turns it on.
+http-embedder = ["dep:ureq"]
 
 [dev-dependencies]
 # Temp dirs for the ticket-board tests (moved from the app with the module, CPE-815).

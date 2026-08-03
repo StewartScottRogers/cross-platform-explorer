@@ -13,7 +13,7 @@
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use crate::embedder::{Embedder, FakeEmbedder};
 use crate::fsutil::entry_is_symlink;
@@ -89,10 +89,31 @@ pub struct ContentSearchOutcome {
     pub index_exists: bool,
 }
 
-/// A fresh embedder for building/loading a content index — always [`CONTENT_INDEX_DIM`]-dimensional, so
-/// every index this module touches agrees on the one dimension that matters for load compatibility.
+/// A fresh **default** embedder for building/loading a content index — the local, dependency-free
+/// [`FakeEmbedder`] at [`CONTENT_INDEX_DIM`]. This is the off/unconfigured path (CPE-1273): when no real
+/// embedder is enabled, everything is byte-identical to pre-CPE-1273 behavior (same embedder, same
+/// untagged index path). A real embedder (CPE-1273) is selected via [`resolve_configured_embedder`] and
+/// used through the `*_with_embedder`/`*_tagged`/`*_configured` entry points below.
 fn make_embedder() -> Box<dyn Embedder> {
     Box::new(FakeEmbedder::new(CONTENT_INDEX_DIM))
+}
+
+/// Persisted selection of the embedder content search uses (CPE-1273, epic CPE-976). Off by default →
+/// the local [`FakeEmbedder`] (current behavior). When `enabled` with a `base_url` + `model`, an
+/// OpenAI-compatible [`crate::http_embedder::HttpEmbedder`] is used instead. The API **key is NOT here**
+/// — it lives in the OS keychain and is fetched separately at the command boundary and passed to
+/// [`resolve_configured_embedder`], so a key never persists in plaintext settings.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "specta", derive(specta::Type))]
+pub struct ContentEmbedderConfig {
+    /// When false (the default), content search uses the local [`FakeEmbedder`] and the legacy untagged
+    /// index — no network, no key.
+    pub enabled: bool,
+    /// The embeddings server base URL, with or without `/v1` (e.g. `http://localhost:1234/v1` for LM
+    /// Studio, or `https://api.openai.com/v1`). See [`crate::http_embedder::embeddings_url`].
+    pub base_url: String,
+    /// The embedding model name the server expects (e.g. `text-embedding-3-small`, or a local model id).
+    pub model: String,
 }
 
 /// FNV-1a 64-bit — a small, **stable** hash (cross-run, cross-platform), unlike `std`'s randomly-seeded
@@ -113,9 +134,32 @@ pub fn root_key(root: &str) -> u64 {
 }
 
 /// The on-disk path `root`'s content index is persisted to under `dir` (typically
-/// `<app_data>/content-index`): `dir/<hash(root)>.cix`.
+/// `<app_data>/content-index`): `dir/<hash(root)>.cix`. This is the **default/local** (FakeEmbedder)
+/// path — untagged, so the off/unconfigured path stays byte-identical to pre-CPE-1273.
 pub fn index_path(dir: &Path, root: &str) -> PathBuf {
     dir.join(format!("{:016x}.cix", root_key(root)))
+}
+
+/// The on-disk path for `root`'s index built with a **non-default embedder**, keyed by that embedder's
+/// identity `tag` (CPE-1273): `dir/<hash(root)>-<tag>.cix`. Keying by embedder identity means switching
+/// embedders (or model, or dim) points at a *different* file, so a switch cleanly reads as "needs build"
+/// (a rebuild) rather than serving vectors a different model produced. See [`http_embedder_tag`].
+pub fn index_path_for(dir: &Path, root: &str, tag: &str) -> PathBuf {
+    dir.join(format!("{:016x}-{}.cix", root_key(root), tag))
+}
+
+/// The persisted-index identity tag for an HTTP embedder: `http-<sanitised model>-<dim>` (CPE-1273). A
+/// distinct model or vector dimensionality yields a distinct tag → a distinct on-disk index file → a
+/// clean rebuild when the user switches. The model is sanitised to a filename-safe slug (non-alphanumeric
+/// → `-`, trimmed) so any model id produces a valid filename.
+pub fn http_embedder_tag(model: &str, dim: usize) -> String {
+    let slug: String = model
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() { c.to_ascii_lowercase() } else { '-' })
+        .collect();
+    let slug = slug.trim_matches('-');
+    let slug = if slug.is_empty() { "model" } else { slug };
+    format!("http-{slug}-{dim}")
 }
 
 /// Walk `root`, index every text-like file under it into a fresh [`SemanticIndex`], and return it plus the
@@ -129,13 +173,37 @@ pub fn index_path(dir: &Path, root: &str) -> PathBuf {
 pub fn build_index_with(
     root: &str,
     cancel: &AtomicBool,
+    progress: impl FnMut(ContentIndexProgress),
+) -> Result<(SemanticIndex, ContentIndexBuildStats), String> {
+    build_index_impl(root, cancel, progress, make_embedder())
+}
+
+/// [`build_index_with`] but backed by a caller-supplied `embedder` (CPE-1273) — the real HTTP embedder
+/// path. Identical walk; only the embedder that turns each file's text into vectors differs. The
+/// resulting index's persisted path must be keyed by the embedder's identity (see [`save_index_tagged`]).
+pub fn build_index_with_embedder(
+    root: &str,
+    cancel: &AtomicBool,
+    progress: impl FnMut(ContentIndexProgress),
+    embedder: Box<dyn Embedder>,
+) -> Result<(SemanticIndex, ContentIndexBuildStats), String> {
+    build_index_impl(root, cancel, progress, embedder)
+}
+
+/// Shared walk used by both [`build_index_with`] (default FakeEmbedder) and [`build_index_with_embedder`]
+/// (a configured real embedder). The only difference between the two is which `embedder` sizes + fills
+/// the [`SemanticIndex`].
+fn build_index_impl(
+    root: &str,
+    cancel: &AtomicBool,
     mut progress: impl FnMut(ContentIndexProgress),
+    embedder: Box<dyn Embedder>,
 ) -> Result<(SemanticIndex, ContentIndexBuildStats), String> {
     let root_path = Path::new(root);
     if !root_path.is_dir() {
         return Err(format!("{root}: not a folder"));
     }
-    let mut index = SemanticIndex::new(make_embedder());
+    let mut index = SemanticIndex::new(embedder);
     let mut stats = ContentIndexBuildStats::default();
 
     let mut stack = vec![root_path.to_path_buf()];
@@ -203,10 +271,24 @@ pub fn build_index(root: &str, cancel: &AtomicBool) -> Result<(SemanticIndex, Co
     build_index_with(root, cancel, |_| {})
 }
 
-/// Persist `index` to `dir/<hash(root)>.cix`, creating `dir` if it doesn't exist yet.
+/// Persist `index` to `dir/<hash(root)>.cix` (the default/local path), creating `dir` if needed.
 pub fn save_index(index: &SemanticIndex, dir: &Path, root: &str) -> Result<(), String> {
-    std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
-    index.save(&index_path(dir, root)).map_err(|e| e.to_string())
+    save_at(index, &index_path(dir, root))
+}
+
+/// Persist `index` to the embedder-identity-keyed path `dir/<hash(root)>-<tag>.cix` (CPE-1273), creating
+/// `dir` if needed — so an index built with a given real embedder is stored separately from the local
+/// one and from any other model's index.
+pub fn save_index_tagged(index: &SemanticIndex, dir: &Path, root: &str, tag: &str) -> Result<(), String> {
+    save_at(index, &index_path_for(dir, root, tag))
+}
+
+/// Shared persistence: create the parent dir, then atomically write the index at `path`.
+fn save_at(index: &SemanticIndex, path: &Path) -> Result<(), String> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+    }
+    index.save(path).map_err(|e| e.to_string())
 }
 
 /// Load `root`'s persisted content index from `dir`, using the fixed [`CONTENT_INDEX_DIM`] embedder.
@@ -216,11 +298,29 @@ pub fn save_index(index: &SemanticIndex, dir: &Path, root: &str) -> Result<(), S
 ///   embedder) → `Err` with a readable message — never a panic, mirroring [`SemanticIndex::load`]'s own
 ///   discipline.
 pub fn load_index(dir: &Path, root: &str) -> Result<Option<SemanticIndex>, String> {
-    let path = index_path(dir, root);
+    load_at(&index_path(dir, root), make_embedder())
+}
+
+/// Load `root`'s index built with the real embedder identified by `tag`, attaching `embedder` (whose
+/// `dim` must match the persisted vectors' — a mismatch degrades to a clean "rebuild it" `Err`, never a
+/// panic, exactly as the default path). A missing file → `Ok(None)` ("needs build"). See [`load_at`].
+pub fn load_index_tagged(
+    dir: &Path,
+    root: &str,
+    tag: &str,
+    embedder: Box<dyn Embedder>,
+) -> Result<Option<SemanticIndex>, String> {
+    load_at(&index_path_for(dir, root, tag), embedder)
+}
+
+/// Shared load: a missing file is a clean `Ok(None)` ("needs build"); a present-but-unloadable file
+/// (stale format, or a dimension mismatch from a different/older embedder) is a readable `Err`, never a
+/// panic — mirroring [`SemanticIndex::load`]'s discipline (CPE-1262 acceptance).
+fn load_at(path: &Path, embedder: Box<dyn Embedder>) -> Result<Option<SemanticIndex>, String> {
     if !path.is_file() {
         return Ok(None);
     }
-    SemanticIndex::load(&path, make_embedder())
+    SemanticIndex::load(path, embedder)
         .map(Some)
         .map_err(|e| match e {
             SemanticIndexError::Stale => {
@@ -240,7 +340,31 @@ pub fn load_index(dir: &Path, root: &str) -> Result<Option<SemanticIndex>, Strin
 /// to the start of the file otherwise (the embedder can also match on hashed token overlap that isn't a
 /// literal substring).
 pub fn search_index(dir: &Path, root: &str, query: &str, k: usize) -> Result<ContentSearchOutcome, String> {
-    let Some(index) = load_index(dir, root)? else {
+    search_loaded(load_index(dir, root)?, query, k)
+}
+
+/// [`search_index`] against `root`'s index built with the real embedder identified by `tag`, embedding
+/// the query with the supplied `embedder` (CPE-1273). No such index → a clean `index_exists: false`
+/// outcome ("needs build"), same as the default path.
+pub fn search_index_tagged(
+    dir: &Path,
+    root: &str,
+    query: &str,
+    k: usize,
+    embedder: Box<dyn Embedder>,
+    tag: &str,
+) -> Result<ContentSearchOutcome, String> {
+    search_loaded(load_index_tagged(dir, root, tag, embedder)?, query, k)
+}
+
+/// Shared scoring over an already-loaded index (or `None` → a clean empty, `index_exists: false`
+/// outcome). The query is embedded by the index's own attached embedder inside [`SemanticIndex::search`].
+fn search_loaded(
+    index: Option<SemanticIndex>,
+    query: &str,
+    k: usize,
+) -> Result<ContentSearchOutcome, String> {
+    let Some(index) = index else {
         return Ok(ContentSearchOutcome::default());
     };
     let hits = index
@@ -252,6 +376,103 @@ pub fn search_index(dir: &Path, root: &str, query: &str, k: usize) -> Result<Con
         })
         .collect();
     Ok(ContentSearchOutcome { hits, index_exists: true })
+}
+
+// ---- Configured-embedder selection + command-layer entry points (CPE-1273) -------------------------
+
+/// A configured **non-default** embedder plus the identity `tag` its persisted index is keyed by — the
+/// `Some` arm of [`resolve_configured_embedder`]. (`None` there means "use the local FakeEmbedder path".)
+pub type ResolvedEmbedder = (Box<dyn Embedder>, String);
+
+/// Build the embedder a content-index command should use, from the persisted [`ContentEmbedderConfig`]
+/// plus the API key the app fetched from the OS keychain (never from settings). Returns:
+///
+/// - `Ok(None)` — use the built-in local [`FakeEmbedder`] path (the legacy untagged index). This is the
+///   disabled/unconfigured default, byte-identical to pre-CPE-1273.
+/// - `Ok(Some((embedder, tag)))` — use the tagged index keyed by `tag` (the configured real embedder).
+/// - `Err(_)` — enabled + configured but the endpoint is unreachable / the key is bad / the response is
+///   malformed (or this build lacks the `http-embedder` feature). A clear error, never a panic; the
+///   command surfaces it to the user as a failed build/search.
+///
+/// The `api_key` is consumed (moved into the embedder's `Authorization` header) and never returned.
+pub fn resolve_configured_embedder(
+    config: Option<&ContentEmbedderConfig>,
+    api_key: Option<String>,
+) -> Result<Option<ResolvedEmbedder>, String> {
+    let Some(c) = config else { return Ok(None) };
+    if !c.enabled || c.base_url.trim().is_empty() || c.model.trim().is_empty() {
+        return Ok(None);
+    }
+    #[cfg(feature = "http-embedder")]
+    {
+        let emb = crate::http_embedder::HttpEmbedder::connect(c.base_url.trim(), c.model.trim(), api_key)?;
+        let tag = http_embedder_tag(c.model.trim(), emb.dim());
+        Ok(Some((Box::new(emb), tag)))
+    }
+    #[cfg(not(feature = "http-embedder"))]
+    {
+        let _ = api_key;
+        Err("this build was compiled without HTTP-embedder support".to_string())
+    }
+}
+
+/// Build `root`'s content index with the embedder selected by `config` + `api_key`, then persist it to
+/// the matching path (tagged for a real embedder, untagged for the local default) — but only if the build
+/// wasn't cancelled mid-walk (a superseded build must not overwrite a newer one's save). The one entry
+/// point the `content_index_build` command dispatches into, keeping that command thin.
+pub fn build_and_save(
+    root: &str,
+    dir: &Path,
+    cancel: &AtomicBool,
+    progress: impl FnMut(ContentIndexProgress),
+    config: Option<&ContentEmbedderConfig>,
+    api_key: Option<String>,
+) -> Result<ContentIndexBuildStats, String> {
+    match resolve_configured_embedder(config, api_key)? {
+        Some((embedder, tag)) => {
+            let (index, stats) = build_index_with_embedder(root, cancel, progress, embedder)?;
+            if !cancel.load(Ordering::Relaxed) {
+                save_index_tagged(&index, dir, root, &tag)?;
+            }
+            Ok(stats)
+        }
+        None => {
+            let (index, stats) = build_index_with(root, cancel, progress)?;
+            if !cancel.load(Ordering::Relaxed) {
+                save_index(&index, dir, root)?;
+            }
+            Ok(stats)
+        }
+    }
+}
+
+/// Search `root`'s content index with the embedder selected by `config` + `api_key`. The one entry point
+/// the `content_search` command dispatches into. A disabled/unconfigured `config` searches the local
+/// index (byte-identical to pre-CPE-1273); an enabled+unreachable endpoint is a clear `Err`.
+pub fn search_configured(
+    dir: &Path,
+    root: &str,
+    query: &str,
+    k: usize,
+    config: Option<&ContentEmbedderConfig>,
+    api_key: Option<String>,
+) -> Result<ContentSearchOutcome, String> {
+    match resolve_configured_embedder(config, api_key)? {
+        Some((embedder, tag)) => search_index_tagged(dir, root, query, k, embedder, &tag),
+        None => search_index(dir, root, query, k),
+    }
+}
+
+/// Probe a configured endpoint (embed a short string) and return the detected vector dimensionality, or
+/// a clear error — the backend of the Settings "Test connection" button (CPE-1273). Ignores the
+/// `enabled` flag (the user tests before flipping it on). Feature-gated; without `http-embedder` this is
+/// a compile-time no-op (the app only calls it in the feature-on build).
+#[cfg(feature = "http-embedder")]
+pub fn probe_embedder(base_url: &str, model: &str, api_key: Option<String>) -> Result<usize, String> {
+    if base_url.trim().is_empty() || model.trim().is_empty() {
+        return Err("enter an endpoint URL and a model name first".to_string());
+    }
+    Ok(crate::http_embedder::HttpEmbedder::connect(base_url.trim(), model.trim(), api_key)?.dim())
 }
 
 /// A short snippet of `path`'s own text, centred on `query`'s first literally-matching token when one is
@@ -519,6 +740,137 @@ mod tests {
         assert_eq!(last.files_indexed, stats.files_indexed);
         assert_eq!(last.current_path, "", "final tick reports empty current_path");
         let _ = fs::remove_dir_all(&tree);
+    }
+
+    // ---- configurable real embedder selection + tagged index plumbing (CPE-1273) ----------------
+
+    #[test]
+    fn resolve_returns_none_when_disabled_or_unconfigured() {
+        // No config at all → local FakeEmbedder path.
+        assert!(resolve_configured_embedder(None, None).unwrap().is_none());
+        // Explicitly disabled.
+        let disabled = ContentEmbedderConfig { enabled: false, base_url: "http://x/v1".into(), model: "m".into() };
+        assert!(resolve_configured_embedder(Some(&disabled), None).unwrap().is_none());
+        // Enabled but missing url/model → still the local path (not an error).
+        let no_url = ContentEmbedderConfig { enabled: true, base_url: "  ".into(), model: "m".into() };
+        assert!(resolve_configured_embedder(Some(&no_url), None).unwrap().is_none());
+        let no_model = ContentEmbedderConfig { enabled: true, base_url: "http://x/v1".into(), model: "".into() };
+        assert!(resolve_configured_embedder(Some(&no_model), None).unwrap().is_none());
+    }
+
+    /// Without the `http-embedder` feature, an enabled+configured selection is a clear compile-time-gated
+    /// error, never a panic. (With the feature on, this path instead tries to reach the endpoint — which
+    /// needs the user's server and so isn't exercised in a no-network unit test.)
+    #[cfg(not(feature = "http-embedder"))]
+    #[test]
+    fn resolve_enabled_without_feature_is_a_clear_err() {
+        let cfg = ContentEmbedderConfig { enabled: true, base_url: "http://x/v1".into(), model: "m".into() };
+        assert!(resolve_configured_embedder(Some(&cfg), None).is_err());
+    }
+
+    #[test]
+    fn http_embedder_tag_is_filename_safe_and_identity_keyed() {
+        let a = http_embedder_tag("text-embedding-3-small", 1536);
+        assert_eq!(a, "http-text-embedding-3-small-1536");
+        // Different model or dim ⇒ different tag (⇒ different index file ⇒ a switch rebuilds).
+        assert_ne!(a, http_embedder_tag("nomic-embed-text", 1536));
+        assert_ne!(a, http_embedder_tag("text-embedding-3-small", 768));
+        // Awkward characters (slashes, colons, spaces) are slugified to a safe filename fragment.
+        let slug = http_embedder_tag("Qwen/Qwen3-Embedding:0.6b", 1024);
+        assert!(slug.chars().all(|c| c.is_ascii_alphanumeric() || c == '-'), "tag must be filename-safe: {slug}");
+        // An all-symbol model name still yields a usable tag.
+        assert_eq!(http_embedder_tag("!!!", 8), "http-model-8");
+    }
+
+    #[test]
+    fn tagged_index_path_is_distinct_from_default_and_per_tag() {
+        let dir = PathBuf::from("Z:/appdata/content-index");
+        let root = "Z:/repos/one";
+        assert_ne!(index_path(&dir, root), index_path_for(&dir, root, "http-m-1024"));
+        assert_ne!(
+            index_path_for(&dir, root, "http-a-1024"),
+            index_path_for(&dir, root, "http-b-1024"),
+        );
+        assert_eq!(index_path_for(&dir, root, "t"), index_path_for(&dir, root, "t"));
+    }
+
+    /// The tagged build→persist→search round-trip works with ANY `Embedder`, proving the real-embedder
+    /// plumbing end-to-end without a network: here a FakeEmbedder at a DIFFERENT dim stands in for "a
+    /// different model". The tagged file is written; the default (untagged) file is NOT.
+    #[test]
+    fn tagged_build_persist_search_round_trips_with_a_custom_embedder() {
+        let tree = scratch("tagged-tree");
+        sample_tree(&tree);
+        let idxdir = scratch("tagged-idx");
+        let root = tree.to_string_lossy().to_string();
+        let tag = "http-fake-256";
+
+        let embedder: Box<dyn Embedder> = Box::new(FakeEmbedder::new(256));
+        let (index, stats) =
+            build_index_with_embedder(&root, &AtomicBool::new(false), |_| {}, embedder).unwrap();
+        assert_eq!(stats.files_indexed, 2);
+        save_index_tagged(&index, &idxdir, &root, tag).unwrap();
+
+        // Only the tagged file exists — the default local path was never written.
+        assert!(index_path_for(&idxdir, &root, tag).is_file());
+        assert!(!index_path(&idxdir, &root).exists());
+
+        let outcome =
+            search_index_tagged(&idxdir, &root, "quick fox", 5, Box::new(FakeEmbedder::new(256)), tag).unwrap();
+        assert!(outcome.index_exists);
+        assert!(outcome.hits[0].path.replace('\\', "/").ends_with("fox.txt"));
+
+        let _ = fs::remove_dir_all(&tree);
+        let _ = fs::remove_dir_all(&idxdir);
+    }
+
+    /// Switching embedders (a different tag) reads as a clean "needs build", NOT a stale error or a
+    /// crash: the new tag points at a file that doesn't exist yet → `index_exists: false`.
+    #[test]
+    fn switching_embedder_tag_reads_as_needs_build() {
+        let tree = scratch("switch-tree");
+        sample_tree(&tree);
+        let idxdir = scratch("switch-idx");
+        let root = tree.to_string_lossy().to_string();
+
+        // Build + persist under tag A.
+        let (index, _) =
+            build_index_with_embedder(&root, &AtomicBool::new(false), |_| {}, Box::new(FakeEmbedder::new(256))).unwrap();
+        save_index_tagged(&index, &idxdir, &root, "http-modelA-256").unwrap();
+
+        // Searching under a DIFFERENT tag (a switched model) finds no index → needs build, no error.
+        let switched =
+            search_index_tagged(&idxdir, &root, "quick fox", 5, Box::new(FakeEmbedder::new(256)), "http-modelB-256").unwrap();
+        assert!(!switched.index_exists);
+        assert!(switched.hits.is_empty());
+
+        let _ = fs::remove_dir_all(&tree);
+        let _ = fs::remove_dir_all(&idxdir);
+    }
+
+    #[test]
+    fn build_and_save_then_search_configured_with_no_config_uses_the_local_untagged_index() {
+        let tree = scratch("cfg-none-tree");
+        sample_tree(&tree);
+        let idxdir = scratch("cfg-none-idx");
+        let root = tree.to_string_lossy().to_string();
+
+        // No config → the local FakeEmbedder + the legacy untagged path (byte-identical to pre-CPE-1273).
+        let stats = build_and_save(&root, &idxdir, &AtomicBool::new(false), |_| {}, None, None).unwrap();
+        assert_eq!(stats.files_indexed, 2);
+        assert!(index_path(&idxdir, &root).is_file(), "the default untagged index must be written");
+
+        let outcome = search_configured(&idxdir, &root, "quick fox", 5, None, None).unwrap();
+        assert!(outcome.index_exists);
+        assert!(outcome.hits[0].path.replace('\\', "/").ends_with("fox.txt"));
+
+        // A disabled config behaves exactly like no config.
+        let disabled = ContentEmbedderConfig::default();
+        let outcome2 = search_configured(&idxdir, &root, "quick fox", 5, Some(&disabled), None).unwrap();
+        assert_eq!(outcome.hits[0].path, outcome2.hits[0].path);
+
+        let _ = fs::remove_dir_all(&tree);
+        let _ = fs::remove_dir_all(&idxdir);
     }
 
     #[test]
