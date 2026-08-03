@@ -122,6 +122,15 @@ pub fn plan_with(
 /// envelope [`plan_with`] used — a stale or tampered plan whose paths now escape `root`, or that exceeds the
 /// cap, is refused with nothing run and no checkpoint taken. Otherwise a checkpoint is captured **before**
 /// any op, then the whitelisted ops are applied top-to-bottom (skip-on-error), deletes routed to `trash`.
+///
+/// # Scope: breadth vs. traversal
+/// `root` is **caller-supplied**. [`op_plan::validate`]'s textual check confines every path *under* `root`,
+/// and the per-op [`parent_confined`] check below defends against a symlink/junction component **resolving
+/// out** of `root` at kernel time (the data-loss guard). What the backend can NOT floor is the *breadth* of
+/// `root` itself — a compromised frontend could pass `root = C:\`. The human-confirm step (the UI previews
+/// the folder + the plan before execute is ever called) is the guard on that: a person is choosing which
+/// folder the copilot may touch. This is documented, deliberate, and mirrors every other folder-scoped
+/// command in the app (organize/checkpoint/…), which are likewise scoped to a caller-chosen folder.
 pub fn execute_with(
     ctx: &dyn ServerCtx,
     trash: &dyn TrashBin,
@@ -133,16 +142,71 @@ pub fn execute_with(
         // Never trust a stale/tampered plan: refuse without checkpointing or touching disk.
         return Ok(CopilotExecuteResult { checkpoint: None, results: Vec::new(), violations });
     }
+    // Resolve the real root ONCE so the per-op confinement check ([`parent_confined`]) can compare each
+    // op's kernel-resolved parent against it. A root that can't be canonicalized (missing/unreadable) is a
+    // hard error — nothing runs, nothing is checkpointed.
+    let canonical_root = std::fs::canonicalize(root)
+        .map_err(|e| format!("cannot resolve the target folder {root:?}: {e}"))?;
     // Checkpoint BEFORE any mutation so the whole plan is one-click undoable even on partial failure.
     let checkpoint = checkpoint_create(ctx, root, CHECKPOINT_LABEL)?;
-    let results = plan.ops.iter().map(|op| apply_op(op, trash)).collect();
+    let results = plan.ops.iter().map(|op| apply_op(op, &canonical_root, trash)).collect();
     Ok(CopilotExecuteResult { checkpoint: Some(checkpoint), results, violations: Vec::new() })
+}
+
+/// The path-typed fields of an op as `(field, value)` pairs — the paths that must be symlink-confined
+/// before the op mutates. `new_name` is deliberately excluded (a bare name; its location is `path`'s
+/// parent, which IS checked). Mirrors `op_plan::FileOp::path_fields` (private there).
+fn op_path_fields(op: &FileOp) -> Vec<(&'static str, &str)> {
+    match op {
+        FileOp::Move { src, dst } => vec![("src", src), ("dst", dst)],
+        FileOp::Copy { src, dst } => vec![("src", src), ("dst", dst)],
+        FileOp::Rename { path, .. } => vec![("path", path)],
+        FileOp::Delete { path } => vec![("path", path)],
+        FileOp::Mkdir { path } => vec![("path", path)],
+    }
+}
+
+/// Is `path`'s parent directory, **after kernel symlink/junction resolution**, still within
+/// `canonical_root`? This is the traversal guard [`op_plan::validate`] (purely textual — no filesystem
+/// access) cannot provide: an intermediate component under `root` that is a symlink/junction pointing
+/// OUTSIDE (common with OneDrive, NTFS junctions, `C:\Users\Public`) would let `rename`/`create_dir_all`/
+/// `copy`/`trash::delete` act on a real location outside the confirmed folder — and outside the pre-execute
+/// checkpoint, so undo could not restore it. We canonicalize the **deepest existing ancestor** of `path`'s
+/// parent (the not-yet-created remainder is created UNDER that confined ancestor, so it stays confined) and
+/// require it to start with `canonical_root`. Mirrors `archive.rs`'s zip-slip defence (canonicalize +
+/// canonical-containment). A path with no canonicalizable in-root ancestor is treated as unconfined.
+fn parent_confined(canonical_root: &Path, path: &Path) -> bool {
+    let mut cur = path.parent();
+    while let Some(dir) = cur {
+        if dir.as_os_str().is_empty() {
+            break;
+        }
+        match dir.canonicalize() {
+            Ok(canon) => return canon.starts_with(canonical_root),
+            // This component doesn't exist yet — walk up to the deepest ancestor that does.
+            Err(_) => cur = dir.parent(),
+        }
+    }
+    false
 }
 
 /// Apply one whitelisted op, returning its [`OpResult`]. Never all-or-nothing: a failure (locked file,
 /// collision, unreadable source) is a failed result for that op and the caller runs the rest. Move/copy
 /// **refuse to overwrite** an existing destination (a safer default than clobbering); deletes go to trash.
-fn apply_op(op: &FileOp, trash: &dyn TrashBin) -> OpResult {
+///
+/// **Symlink/junction confinement (data-loss guard):** before any mutation, every path field's parent must
+/// resolve within `canonical_root` ([`parent_confined`]). An op that would resolve outside — via a
+/// symlinked intermediate component that passed the textual [`op_plan::validate`] — is **refused** as a
+/// failed result and never executed, so no mutation ever lands outside the confirmed folder.
+fn apply_op(op: &FileOp, canonical_root: &Path, trash: &dyn TrashBin) -> OpResult {
+    for (field, value) in op_path_fields(op) {
+        if !parent_confined(canonical_root, Path::new(value)) {
+            return OpResult::err(
+                Path::new(value),
+                format!("refused: {field} {value:?} resolves outside the folder (symlink/junction escape)"),
+            );
+        }
+    }
     match op {
         FileOp::Mkdir { path } => {
             let p = Path::new(path);
@@ -500,6 +564,83 @@ mod tests {
         // The existing file is untouched and the source is still there.
         assert_eq!(fs::read(root.join("b.txt")).unwrap(), b"existing");
         assert!(root.join("a.txt").exists());
+    }
+
+    /// Create `link` pointing at directory `target` without needing admin: an NTFS **junction** on Windows
+    /// (no privilege) and a symlink on Unix. Returns whether it was created (some CI/sandbox envs forbid
+    /// even junctions — the pure `parent_confined` unit test still covers the confinement logic there).
+    fn make_dir_link(target: &Path, link: &Path) -> bool {
+        #[cfg(windows)]
+        {
+            junction::create(target, link).is_ok()
+        }
+        #[cfg(unix)]
+        {
+            std::os::unix::fs::symlink(target, link).is_ok()
+        }
+        #[cfg(not(any(windows, unix)))]
+        {
+            let _ = (target, link);
+            false
+        }
+    }
+
+    #[test]
+    fn parent_confined_accepts_in_root_and_rejects_escapes() {
+        let root = scratch("confine");
+        let canon = root.canonicalize().unwrap();
+        // A normal in-root leaf (parent is root).
+        assert!(parent_confined(&canon, &root.join("a.txt")));
+        // A deep not-yet-existing path: the deepest existing ancestor is root → confined.
+        assert!(parent_confined(&canon, &root.join("new/deep/x")));
+        // A sibling entirely outside root.
+        let outside = scratch("confine-out");
+        assert!(!parent_confined(&canon, &outside.join("y")));
+        // Through a symlink/junction to outside → rejected (the core traversal guard).
+        let link = root.join("out");
+        if make_dir_link(&outside, &link) {
+            assert!(
+                !parent_confined(&canon, &link.join("x")),
+                "a path resolving out of root via a symlinked component must be rejected"
+            );
+        }
+    }
+
+    #[test]
+    fn execute_refuses_ops_that_escape_root_through_a_symlinked_component() {
+        let root = scratch("symlink-escape");
+        let outside = scratch("outside-target");
+        fs::write(outside.join("victim.txt"), b"precious").unwrap();
+
+        let link = root.join("link"); // root/link -> outside (junction/symlink, no admin needed)
+        if !make_dir_link(&outside, &link) {
+            eprintln!("skipping symlink-escape exec test: could not create a link in this environment \
+(the parent_confined unit test still covers the confinement logic)");
+            return;
+        }
+        let ctx = ctx_for(&root);
+        let trash = FakeTrash::new(scratch("hold-symlink"));
+
+        // Both ops pass the TEXTUAL validate (they start with root) but resolve through the link to OUTSIDE.
+        let plan = FileOpPlan {
+            ops: vec![
+                FileOp::Delete { path: root_str(&link.join("victim.txt")) },
+                FileOp::Mkdir { path: root_str(&link.join("newdir")) },
+            ],
+        };
+        let out = execute_with(&ctx, &trash, &root_str(&root), &plan).unwrap();
+
+        // Every op refused, with a clear escape reason, and NOTHING outside root was touched.
+        assert_eq!(out.results.len(), 2);
+        assert!(out.results.iter().all(|r| !r.ok), "{:?}", out.results);
+        assert!(
+            out.results.iter().all(|r| r.error.contains("symlink") || r.error.contains("outside")),
+            "{:?}",
+            out.results
+        );
+        assert!(outside.join("victim.txt").exists(), "the out-of-root file must NOT be deleted");
+        assert!(!outside.join("newdir").exists(), "no directory must be created out of root");
+        assert_eq!(trash.trashed.lock().unwrap().len(), 0, "nothing was trashed");
     }
 
     #[test]
