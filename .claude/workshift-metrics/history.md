@@ -738,3 +738,16 @@ them; history.md stopped at 07-31). Authoritative record is the checkpoint commi
 - Assessment during item 3: CPE-712 shell context-menu + CPE-716 sidebar drive listing ALREADY shipped; the invasive remainders (OS default-file-manager registration, drive eject/removable) deliberately NOT built blind — flagged as explicit user opt-in.
 - Shipped builds for attended verify: 0.57.43 (drag-out fix), 0.57.44 (tray + archive-drag). Item 4 needs a 0.57.45 build + the user's endpoint to try AI search.
 - LESSON reinforced + now guarded: the sidecar-overlay build drops base array-form bundle.resources — caught twice by hand, now caught automatically by the CPE-1271 guard.
+
+### 2026-08-03 (cont.) — "keep going" post-queue: content-search deepened, then safe well tapped
+- After the 4-item queue, user said "keep going + remember we need to get back to [AI testing]". Saved a
+  [[pending-attended-verifications]] memory. Continued with safe headless work:
+  - CPE-1274 (#572) — content search now extracts+indexes PDF (bundled pdfium) + docx/xlsx/pptx (existing zip
+    dep), not just plain text. char-safe cap, no new dep, 19 tests.
+  - CPE-1269 (#573) — drag-out icon resolution hardened (never passes a relative icon to the plugin) + unit coverage.
+- Cut 0.57.45 (adds the CPE-1273 configurable embedder) + installed for the user to enable AI search (LM Studio/OpenAI) — NOT yet tested by the user.
+- WRAP: safe immediately-valuable headless well is tapped (queue + follow-ups done). Remaining is USER-GATED:
+  AI copilot/auto-organize (CPE-977/979) + OCR (980) need a generative LLM / OCR engine (the user's model — LM Studio
+  makes a configurable-LLM seam viable like CPE-1273 did for embeddings, but it's inert without their model);
+  invasive shell (712 default-file-manager, 716 drive-eject) need explicit consent/hardware. Plus pending ATTENDED
+  tests: AI search (v0.57.45), tray, archive-drag. Did NOT manufacture filler.
