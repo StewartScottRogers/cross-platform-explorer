@@ -11,6 +11,7 @@
   import ScheduledSnapshots from "./ScheduledSnapshots.svelte";
   import SpotlightHotkeySettings from "./SpotlightHotkeySettings.svelte";
   import ContentEmbedderSettings from "./ContentEmbedderSettings.svelte";
+  import CopilotSettings from "./CopilotSettings.svelte";
 
   export let showHidden = false;
   export let showDetails = true;
@@ -149,6 +150,8 @@
     <SpotlightHotkeySettings />
 
     <ContentEmbedderSettings />
+
+    <CopilotSettings />
 
     {#if platformOn}
       <div class="section-title">Sidecar platform</div>
