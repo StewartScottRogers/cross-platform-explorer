@@ -673,6 +673,12 @@ pub mod folder_similarity_scan;
 /// dependencies.
 pub mod dangling_links;
 
+/// Dangling/cyclic symlink **scan** pipeline (CPE-1284, epic CPE-1002). Walks a folder tree,
+/// resolves each symlink it finds, and hands the built records to [`dangling_links::scan_dangling`]
+/// — the adapter that [`dangling_links`]'s own docs describe as the caller's job. No command/UI
+/// wiring here (CPE-1287).
+pub mod dangling_links_scan;
+
 /// File-inspection composition (CPE-1009, epic CPE-1002): compose the pure detectors (encoding + line
 /// endings + true type + extension mismatch) into one display-ready `FileInspection` for the Properties
 /// panel. Pure over a file's leading bytes + name; the Tauri command reads the bytes.
