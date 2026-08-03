@@ -241,9 +241,12 @@ export function isImage(name: string): boolean {
  * and the video formats (representative frame via ffmpeg, CPE-1257 — mirrors
  * `cpe_server::thumb_video::VIDEO_EXTENSIONS`). CPE-1267: pdf + video were missing here, so the grid
  * never requested those thumbnails even though the backend could render them — keep in sync with the
- * backend dispatch.
+ * backend dispatch. **Exported for the CPE-1268 parity guard** (`filetypes.test.ts`), which pins this
+ * set to the backend's explicit `thumb_source` dispatch arms so the two can never silently drift again
+ * (the exact class of bug CPE-1267 was). If you add/remove a backend non-photo thumbnail format, update
+ * BOTH this set and the matching Rust canonical list in `crates/server/src/thumb_source.rs`.
  */
-const THUMBNAIL_EXTRA_EXTS = new Set([
+export const THUMBNAIL_EXTRA_EXTS = new Set([
   "psd", "svg", "ttf", "otf", "woff", "woff2", // CPE-1236
   "pdf", // CPE-1256
   "mp4", "mov", "mkv", "webm", "avi", "m4v", "mpg", "mpeg", "wmv", "flv", // CPE-1257 (VIDEO_EXTENSIONS)

@@ -6,6 +6,7 @@ import {
   matchesFileFilter,
   isImage,
   hasThumbnail,
+  THUMBNAIL_EXTRA_EXTS,
   CATEGORY_BY_EXT,
   TYPE_NAME_BY_EXT,
 } from "./filetypes";
@@ -65,6 +66,36 @@ describe("hasThumbnail (CPE-1237) — gates the Icons/Gallery grid's thumbnail r
     expect(hasThumbnail(".svg")).toBe(false);
     expect(hasThumbnail("glyphs.")).toBe(false);
     expect(hasThumbnail("")).toBe(false);
+  });
+});
+
+describe("THUMBNAIL_EXTRA_EXTS ↔ backend thumb_source parity (CPE-1268 regression pin for CPE-1267)", () => {
+  // CPE-1267 was a silent DRIFT: the frontend `hasThumbnail` gate (this set) fell behind the backend's
+  // `cpe_server::thumb_source` dispatch, so the grid never requested pdf/video thumbnails the backend
+  // could actually render. This test pins the frontend set to the backend's *explicit* non-photo
+  // dispatch arms so the two can't drift apart again unnoticed. The canonical list below MIRRORS, in
+  // one place, the backend's non-`image`-crate arms:
+  //   - `crates/server/src/thumb_source.rs` `decode_thumb_image`: psd, svg, pdf, ttf/otf/woff/woff2
+  //   - `crates/server/src/thumb_video.rs` `VIDEO_EXTENSIONS`: the video formats
+  // A matching Rust test (`thumb_source::tests`) pins the backend side to this SAME list, so adding a
+  // backend format fails there until BOTH lists (and this one) are updated together.
+  const BACKEND_NONPHOTO_THUMBNAIL_EXTS = [
+    // thumb_source.rs explicit arms (CPE-1236 fonts/psd/svg + CPE-1256 pdf)
+    "psd", "svg", "ttf", "otf", "woff", "woff2", "pdf",
+    // thumb_video.rs VIDEO_EXTENSIONS (CPE-1257)
+    "mp4", "mov", "mkv", "webm", "avi", "m4v", "mpg", "mpeg", "wmv", "flv",
+  ];
+
+  it("the frontend set equals the backend's explicit non-photo dispatch set, exactly", () => {
+    const frontend = [...THUMBNAIL_EXTRA_EXTS].sort();
+    const backend = [...BACKEND_NONPHOTO_THUMBNAIL_EXTS].sort();
+    expect(frontend).toEqual(backend);
+  });
+
+  it("in particular pdf + every video format are gated in (the exact CPE-1267 miss)", () => {
+    for (const ext of ["pdf", "mp4", "mov", "mkv", "webm", "avi", "m4v", "mpg", "mpeg", "wmv", "flv"]) {
+      expect(hasThumbnail(`x.${ext}`), `${ext} must be thumbnail-eligible`).toBe(true);
+    }
   });
 });
 

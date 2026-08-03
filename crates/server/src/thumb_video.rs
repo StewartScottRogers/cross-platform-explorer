@@ -120,10 +120,18 @@ fn extract_frame_with_ffmpeg(path: &Path, max_edge: u32, ffmpeg: &Path) -> Resul
 /// a failed spawn (binary missing/unresolvable), a non-zero exit, or a missing output file — never
 /// panics.
 fn run_ffmpeg_frame(ffmpeg: &Path, input: &Path, out: &Path, offset_secs: &str, max_edge: u32) -> Result<(), String> {
-    // Caps the width to at most max_edge, height computed to preserve aspect (ffmpeg's `-2` rounds to
-    // an even value). The comma inside `min(...)` must be backslash-escaped so ffmpeg's filtergraph
-    // parser doesn't read it as a filter separator.
-    let scale = format!("scale='min({max_edge}\\,iw)':-2");
+    // Fit the frame INSIDE a `max_edge`×`max_edge` box, preserving aspect and only ever shrinking
+    // (`force_original_aspect_ratio=decrease`), so ffmpeg itself caps the *longest* edge — the final
+    // Rust `downscale_to_max_edge` then just double-checks it. Each dimension is floored at 2px
+    // (`max(2\,…)`): the old `…:-2` height expression rounds a tiny target height down to 0 for a very
+    // small `max_edge` (e.g. width clamped to 1 on a 320×240 clip → height 0), which makes ffmpeg's
+    // swscaler reject the filter with `dsth out of range [1 - …]` and produce no frame (CPE-1268). A
+    // 2px floor is always valid; the exact `max_edge` cap is enforced afterwards in Rust. The commas
+    // inside the `min(…)`/`max(…)` expressions must be backslash-escaped so ffmpeg's filtergraph parser
+    // doesn't read them as filter separators.
+    let scale = format!(
+        "scale=w='max(2\\,min({max_edge}\\,iw))':h='max(2\\,min({max_edge}\\,ih))':force_original_aspect_ratio=decrease"
+    );
 
     let output = Command::new(ffmpeg)
         .arg("-y")

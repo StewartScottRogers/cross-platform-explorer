@@ -153,54 +153,72 @@ jobs:
       # real assertions actually run instead of skipping. CI-only installs: ffmpeg's package-manager
       # build's exact license/feature-set doesn't matter here (never distributed) — the shipped binary is
       # a separately pinned LGPL build provisioned in release-sidecar.yml.
+      # All native-dep installs below are BEST-EFFORT (continue-on-error) on purpose: the PDF/video
+      # real-render tests SKIP (not fail) when their dep is unresolvable (crates/server/src/thumb_pdf.rs
+      # / thumb_video.rs), so a flaky third-party download must never red the pipeline (CPE-1268). When
+      # the install succeeds the real assertions run; when it hiccups they degrade to a skip.
       - name: Install ffmpeg (video-thumb real-render test, Linux)
         if: matrix.os == 'ubuntu-latest'
+        continue-on-error: true
         run: sudo apt-get update && sudo apt-get install -y ffmpeg
 
       - name: Install ffmpeg (video-thumb real-render test, macOS)
         if: matrix.os == 'macos-latest'
+        continue-on-error: true
         run: command -v ffmpeg >/dev/null 2>&1 || brew install ffmpeg
 
       - name: Install ffmpeg (video-thumb real-render test, Windows)
         if: matrix.os == 'windows-latest'
-        run: choco install ffmpeg -y
+        continue-on-error: true
+        run: choco install ffmpeg -y --no-progress
 
       # pdfium prebuilt (BSD-3-Clause, bblanchon/pdfium-binaries) staged where
       # `Pdfium::bind_to_system_library()` resolves it via the OS's normal dynamic-library search path
       # (LD_LIBRARY_PATH / DYLD_LIBRARY_PATH / PATH) — CI-only use, same pinned release the shipped
       # binary's pdfium is provisioned from in release-sidecar.yml.
+      # curl uses --fail (a bad HTTP status is an error, not a silently-saved error page) + --retry so a
+      # transient network blip retries instead of leaving a truncated/empty archive for tar to choke on.
       - name: Install pdfium prebuilt (pdf-thumb real-render test, Linux)
         if: matrix.os == 'ubuntu-latest'
+        continue-on-error: true
         shell: bash
         env:
           PDFIUM_TAG: "chromium/7961"
         run: |
           mkdir -p "$RUNNER_TEMP/pdfium"
-          curl -sSL -o "$RUNNER_TEMP/pdfium.tgz" "https://github.com/bblanchon/pdfium-binaries/releases/download/${PDFIUM_TAG}/pdfium-linux-x64.tgz"
+          curl --fail --location --retry 5 --retry-all-errors --retry-delay 3 -sS -o "$RUNNER_TEMP/pdfium.tgz" "https://github.com/bblanchon/pdfium-binaries/releases/download/${PDFIUM_TAG}/pdfium-linux-x64.tgz"
           tar xzf "$RUNNER_TEMP/pdfium.tgz" -C "$RUNNER_TEMP/pdfium" lib/libpdfium.so
           echo "LD_LIBRARY_PATH=$RUNNER_TEMP/pdfium/lib:${LD_LIBRARY_PATH:-}" >> "$GITHUB_ENV"
 
       - name: Install pdfium prebuilt (pdf-thumb real-render test, macOS)
         if: matrix.os == 'macos-latest'
+        continue-on-error: true
         shell: bash
         env:
           PDFIUM_TAG: "chromium/7961"
         run: |
           mkdir -p "$RUNNER_TEMP/pdfium"
-          curl -sSL -o "$RUNNER_TEMP/pdfium.tgz" "https://github.com/bblanchon/pdfium-binaries/releases/download/${PDFIUM_TAG}/pdfium-mac-arm64.tgz"
+          curl --fail --location --retry 5 --retry-all-errors --retry-delay 3 -sS -o "$RUNNER_TEMP/pdfium.tgz" "https://github.com/bblanchon/pdfium-binaries/releases/download/${PDFIUM_TAG}/pdfium-mac-arm64.tgz"
           tar xzf "$RUNNER_TEMP/pdfium.tgz" -C "$RUNNER_TEMP/pdfium" lib/libpdfium.dylib
           echo "DYLD_LIBRARY_PATH=$RUNNER_TEMP/pdfium/lib:${DYLD_LIBRARY_PATH:-}" >> "$GITHUB_ENV"
 
+      # Windows: $RUNNER_TEMP is a drive-letter path (D:\a\_temp\…). GNU tar reads a path whose second
+      # char is a colon as a `host:path` REMOTE archive and tries to "connect to D:" (the observed
+      # `tar (child): Cannot connect to D: resolve failed` — CPE-1268). --force-local makes tar treat
+      # the `-f` archive path as a plain local file. The extract dir is passed to `cd` first (POSIX
+      # form) so its drive letter never reaches tar's remote-detection at all.
       - name: Install pdfium prebuilt (pdf-thumb real-render test, Windows)
         if: matrix.os == 'windows-latest'
+        continue-on-error: true
         shell: bash
         env:
           PDFIUM_TAG: "chromium/7961"
         run: |
-          mkdir -p "$RUNNER_TEMP/pdfium"
-          curl -sSL -o "$RUNNER_TEMP/pdfium.tgz" "https://github.com/bblanchon/pdfium-binaries/releases/download/${PDFIUM_TAG}/pdfium-win-x64.tgz"
-          tar xzf "$RUNNER_TEMP/pdfium.tgz" -C "$RUNNER_TEMP/pdfium" bin/pdfium.dll
-          echo "$RUNNER_TEMP/pdfium/bin" >> "$GITHUB_PATH"
+          dest="$(cygpath -u "$RUNNER_TEMP")/pdfium"
+          mkdir -p "$dest"
+          curl --fail --location --retry 5 --retry-all-errors --retry-delay 3 -sS -o "$dest/pdfium.tgz" "https://github.com/bblanchon/pdfium-binaries/releases/download/${PDFIUM_TAG}/pdfium-win-x64.tgz"
+          tar --force-local -xzf "$dest/pdfium.tgz" -C "$dest" bin/pdfium.dll
+          echo "$(cygpath -w "$dest/bin")" >> "$GITHUB_PATH"
 
       - name: Rust cache
         uses: swatinem/rust-cache@v2
