@@ -4,7 +4,7 @@ title: "AI file copilot backend: LlmPlanner (OpenAI-compatible) → FileOpPlan +
 type: feature
 component: cpe-server
 priority: medium
-status: Doing
+status: Done
 tags: ready
 created: 2026-08-03
 epic: CPE-977
@@ -46,3 +46,6 @@ the plan/execute commands. UI is slice 2 (CPE-1276). Mirror the CPE-1273 embedde
 ## Notes
 UI (instruction input → plan preview → confirm → execute → undo) is CPE-1276. Human-always-in-the-loop: execute is
 only ever called after the user confirms the previewed plan.
+
+## Work Log
+- 2026-08-03 — LlmPlanner + HttpPlanner (OpenAI-compatible chat via reused ureq, `copilot` feature) → whitelisted FileOpPlan; copilot_plan (validate root-scope+op-cap, no exec) + copilot_execute (re-validate → canonicalize+confine EVERY op path under real root [symlink/junction-safe, mirrors archive zip-slip] → checkpoint → apply skip-on-error → deletes to TRASH → undo). Key in keychain cpe.copilot (never plaintext/logged/returned). Opus security reviewer caught + worker fixed a symlink-traversal escape (junction test genuinely exercised it) → APPROVE. cpe-server 1336/26, src-tauri 109, vitest 1913, no new dep. Merged #574. UI = CPE-1276.
