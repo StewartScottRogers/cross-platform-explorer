@@ -1335,6 +1335,29 @@ async driveType(path: string) : Promise<Result<string, string>> {
 }
 },
 /**
+ * Whether a path *looks* ejectable to the UI (CPE-1278) — true only for a `removable` drive, so the
+ * sidebar shows an eject affordance on those rows alone. This never itself ejects anything.
+ */
+async driveEjectable(path: string) : Promise<boolean> {
+    return await TAURI_INVOKE("drive_ejectable", { path });
+},
+/**
+ * Safely eject / remove the removable drive that owns `path` (CPE-1278, epic CPE-716). SAFETY-CRITICAL:
+ * refuses anything that is not a *removable* volume — a fixed/system, network, CD-ROM, RAM, or unknown
+ * drive is rejected with a clear error and NO eject syscall is issued. Only after the guard passes does
+ * Windows run the safe-remove sequence on the volume handle (`\\.\X:`): `FSCTL_LOCK_VOLUME` →
+ * `FSCTL_DISMOUNT_VOLUME` → `IOCTL_STORAGE_EJECT_MEDIA`, unlocking on any failure so an in-use volume
+ * ("files open") is left mounted and usable. Non-Windows is not supported yet and returns an honest error.
+ */
+async ejectDrive(path: string) : Promise<Result<null, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("eject_drive", { path }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
  * Append one filesystem-activity event to its session journal (bounded/rotated). `ts` is stamped here
  * (server-side epoch ms) so callers can't skew the log.
  */

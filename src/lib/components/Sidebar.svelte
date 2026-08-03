@@ -24,6 +24,9 @@
   export let sessions: AgentSession[] = [];
   /** Free/total bytes per drive path for the usage bars (CPE-406). Absent ⇒ no bar. */
   export let driveUsage: Record<string, { free: number; total: number }> = {};
+  /** Which drive paths are REMOVABLE and thus safely ejectable (CPE-1278). Only these rows get the
+   *  eject affordance — fixed/system/network drives never do. Absent/false ⇒ no eject button. */
+  export let driveRemovable: Record<string, boolean> = {};
   export let currentPath = "";
   export let isHome = false;
   /** The middle pane's currently selected folder (or ""), for two-way highlight
@@ -64,6 +67,9 @@
     /** Right-clicking a DRIVE row (CPE-1158): opens the same folder-like drive menu as a Home drive
      *  tile, targeting the drive's root path. Only drive rows dispatch this. */
     driveContext: { x: number; y: number; path: string; name: string };
+    /** Safely eject a removable drive (CPE-1278). Only removable drive rows dispatch this; App runs
+     *  the backend `eject_drive`, toasts the outcome, and refreshes the drive list. */
+    eject: { path: string; name: string };
   }>();
 
   // Every sidebar section's collapse state now comes from one persisted store (CPE-675), so a layout the
@@ -435,6 +441,16 @@
         >
           {place.name}
         </button>
+        {#if isDrive && driveRemovable[place.path]}
+          <button
+            class="eject-btn"
+            title={`Safely eject ${place.name}`}
+            aria-label={`Safely eject ${place.name}`}
+            on:click|stopPropagation={() => dispatch("eject", { path: place.path, name: place.name })}
+          >
+            <Icon name="eject" size={13} />
+          </button>
+        {/if}
       </div>
 
       {#if isDrive && driveUsage[place.path]}
@@ -519,4 +535,20 @@
   .drive-bar-fill.warn { background: #b5872b; }
   .drive-bar-fill.full { background: var(--danger); }
   .drive-free { font-size: 10px; opacity: 0.55; }
+  /* Eject affordance on REMOVABLE drive rows only (CPE-1278). Sits at the row's trailing edge; faint
+     until the row is hovered, then clear, so it never competes with the drive name at rest. */
+  .eject-btn {
+    flex: 0 0 auto;
+    display: inline-grid;
+    place-items: center;
+    margin-left: auto;
+    margin-right: 4px;
+    padding: 2px;
+    border-radius: 4px;
+    color: var(--text);
+    opacity: 0.45;
+    cursor: pointer;
+  }
+  .eject-btn:hover { opacity: 1; background: var(--selection); }
+  .nav-item:hover .eject-btn { opacity: 0.8; }
 </style>

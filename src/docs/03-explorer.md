@@ -17,6 +17,11 @@ The explorer is the core of the app and is tuned to stay **fast, small, and pred
 - **Sidebar** — Home, Favorites (pin folders you use often), and drives with free-space bars. Each
   section (Explore, Quick access, Drives, Favorites, Tags, Smart Folders, Saved Searches) has a header
   you can click to **collapse** it and reclaim vertical space; your choices persist across sessions.
+- **Eject a removable drive** — a **removable** drive (a USB stick or external disk) shows a small
+  **eject** button on its sidebar row, and a **Safely eject** item in its right-click menu. Choosing it
+  flushes and dismounts the volume so Windows reports it safe to remove. Fixed/system and network drives
+  never show the control and can never be ejected. If files are still open on the drive the eject is
+  refused with a clear message — close them and try again, and nothing is unmounted.
 
 ## Home screen
 
