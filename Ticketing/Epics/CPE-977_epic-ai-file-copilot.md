@@ -2,7 +2,7 @@
 id: CPE-977
 title: "EPIC: AI file copilot — natural-language file operations"
 type: Task
-status: Proposed
+status: In Progress
 priority: High
 component: Multiple
 tags: [epic, big-design]
