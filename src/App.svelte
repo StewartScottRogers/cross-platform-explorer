@@ -1209,6 +1209,45 @@
       }),
     );
   }
+
+  /** Which drives are REMOVABLE, so only those rows show an eject button (CPE-1278). Non-blocking; a
+   *  failed probe just leaves the drive non-ejectable (the safe default). */
+  let driveRemovable: Record<string, boolean> = {};
+  async function loadDriveRemovable(list: Place[]) {
+    await Promise.all(
+      list.map(async (d) => {
+        try {
+          const removable = await commands.driveEjectable(d.path);
+          driveRemovable = { ...driveRemovable, [d.path]: removable };
+        } catch {
+          /* treat an unknowable drive as non-removable — never offer eject we can't vouch for */
+        }
+      }),
+    );
+  }
+
+  /** Safely eject a removable drive (CPE-1278). The backend refuses anything non-removable, so this can
+   *  only ever act on a USB/removable volume. Toasts the outcome and refreshes the drive list so an
+   *  ejected drive drops out of the sidebar. */
+  async function ejectDrive(path: string, name: string) {
+    try {
+      unwrap(await commands.ejectDrive(path));
+      showNotice(`${name} is safe to remove.`);
+    } catch (e) {
+      showNotice(typeof e === "string" ? e : `Couldn't eject ${name}.`, true);
+    }
+    // Refresh drives + removable flags regardless: on success the drive is gone; on failure state is fresh.
+    try {
+      const d = await commands.listDrives();
+      drives = d;
+      driveUsage = {};
+      driveRemovable = {};
+      loadDriveUsage(d);
+      loadDriveRemovable(d);
+    } catch {
+      /* a refresh failure is cosmetic — the toast already told the user the real outcome */
+    }
+  }
   $: updateDiskSpace(currentPath, isHome, !!archive);
   async function updateDiskSpace(path: string, home: boolean, inArchive: boolean) {
     if (home || inArchive || !path) { diskFree = null; diskTotal = null; return; }
@@ -3363,6 +3402,7 @@
       case "drive-copy-path": copyDrivePath(); break;
       case "drive-terminal": openDriveTerminal(); break;
       case "drive-properties": openDriveProperties(); break;
+      case "drive-eject": if (driveCtxPath) ejectDrive(driveCtxPath, driveCtxName || driveCtxPath); break;
       // Home row menu (CPE-1162) — every action targets `homeCtxPath` (the clicked row), independent of
       // any FileList selection. `home-delete` trashes the real file; `home-remove` prunes only the list
       // pointer — deliberately two different verbs so the menu can keep them unmistakably distinct.
@@ -4467,6 +4507,7 @@
       homePath = h;
       canRestoreTrash = canRestore;
       loadDriveUsage(d); // fire-and-forget: sidebar usage bars (CPE-406)
+      loadDriveRemovable(d); // fire-and-forget: which drives get an eject button (CPE-1278)
     } catch (e) {
       console.debug("could not load places:", e);
     }
@@ -4701,6 +4742,7 @@
       {drives}
       {favorites}
       {driveUsage}
+      {driveRemovable}
       sessions={$agentSessions}
       {currentPath}
       {isHome}
@@ -4719,6 +4761,7 @@
       on:openSavedSearch={(e) => openStructuredSearch(e.detail)}
       on:savedSearchMenu={(e) => (structuredSearchMenu = e.detail)}
       on:driveContext={(e) => onDriveContext(e.detail)}
+      on:eject={(e) => ejectDrive(e.detail.path, e.detail.name)}
       on:navigate={(e) => { if (archive) exitArchive(); navigate(e.detail); }}
       on:openFile={(e) => openRecent(e.detail)}
       on:home={() => { if (archive) exitArchive(); navigate(HOME); }}
@@ -5020,6 +5063,7 @@
     homeStale={homeCtxStale}
     macros={ctx.target === "item" ? macroContextNames : []}
     linkBroken={ctx.target === "item" ? ctxLinkBroken : false}
+    driveEjectable={ctx.target === "drive" && !!driveRemovable[driveCtxPath]}
     on:action={(e) => runAction(e.detail)}
     on:close={() => (ctx = null)}
   />

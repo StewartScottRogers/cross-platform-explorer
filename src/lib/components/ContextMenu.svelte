@@ -78,6 +78,10 @@
   /** True when a SINGLE folder is selected in a real filesystem location (not Home/archive) — enables
    *  "Create encrypted vault…" (CPE-1250, epic CPE-738), which seals that folder into a `.cpevault`. */
   export let vaultable = false;
+  /** True when the right-clicked drive (`target: "drive"`) is REMOVABLE (CPE-1278) — adds a "Safely
+   *  eject" item to the drive menu. Fixed/system/network drives never set this, so they can't be ejected
+   *  from the menu any more than from the sidebar's inline button. */
+  export let driveEjectable = false;
 
   const dispatch = createEventDispatcher<{
     action: string;
@@ -360,6 +364,12 @@
     <button class="row" role="menuitem" on:click={() => run("drive-properties")}>
       <Icon name="info" size={15} /> {$t('ctx.properties')}
     </button>
+    {#if driveEjectable}
+      <div class="sep" role="separator" />
+      <button class="row" role="menuitem" on:click={() => run("drive-eject")}>
+        <Icon name="eject" size={15} /> {$t('ctx.ejectDrive')}
+      </button>
+    {/if}
     <div class="sep" role="separator" />
     <button class="row" role="menuitem" on:click={() => run("help-docs")}>
       <Icon name="book" size={15} /> Documents for this view

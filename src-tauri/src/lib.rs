@@ -2948,6 +2948,156 @@ fn drive_type_impl(_path: &str) -> String {
     "fixed".to_string()
 }
 
+// ---- Safe drive eject / remove (CPE-1278, epic CPE-716) ------------------------------------------
+// SAFETY-CRITICAL. Never eject a fixed/system, network, optical, or RAM drive — ONLY a removable
+// volume. The guard (`eject_guard`) is a pure function, unit-tested exhaustively; `eject_drive_seam`
+// injects both the classifier and the eject syscall so a test can PROVE the syscall is never reached
+// for a non-removable drive, without any real hardware. `eject_drive_impl` wires the real
+// `drive_type_impl` classifier + the platform `perform_eject` into that seam.
+
+/// Whether a path *looks* ejectable to the UI (CPE-1278) — true only for a `removable` drive, so the
+/// sidebar shows an eject affordance on those rows alone. This never itself ejects anything.
+#[tauri::command]
+#[cfg_attr(feature = "specta-bindings", specta::specta)]
+async fn drive_ejectable(path: String) -> bool {
+    tauri::async_runtime::spawn_blocking(move || eject_guard(&path, &drive_type_impl(&path)).is_ok())
+        .await
+        .unwrap_or(false)
+}
+
+/// Safely eject / remove the removable drive that owns `path` (CPE-1278, epic CPE-716). SAFETY-CRITICAL:
+/// refuses anything that is not a *removable* volume — a fixed/system, network, CD-ROM, RAM, or unknown
+/// drive is rejected with a clear error and NO eject syscall is issued. Only after the guard passes does
+/// Windows run the safe-remove sequence on the volume handle (`\\.\X:`): `FSCTL_LOCK_VOLUME` →
+/// `FSCTL_DISMOUNT_VOLUME` → `IOCTL_STORAGE_EJECT_MEDIA`, unlocking on any failure so an in-use volume
+/// ("files open") is left mounted and usable. Non-Windows is not supported yet and returns an honest error.
+#[tauri::command]
+#[cfg_attr(feature = "specta-bindings", specta::specta)]
+async fn eject_drive(path: String) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || eject_drive_impl(&path))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+/// Normalise any path to its drive-letter root ("X:\\") when it has one; otherwise pass it through.
+fn drive_root_of(path: &str) -> String {
+    if path.len() >= 2 && path.as_bytes()[1] == b':' {
+        format!("{}:\\", &path[..1])
+    } else {
+        path.to_string()
+    }
+}
+
+/// The SAFETY CORE (CPE-1278): given a drive's classification (from `drive_type_impl`), decide whether a
+/// safe-eject may proceed. ONLY `removable` is ejectable; every other kind — `fixed` (the system disk),
+/// `network`, `cdrom`, `ram`, `unknown`, or anything unexpected — is refused with a user-facing message.
+/// Pure + hardware-free, so it is exhaustively unit-tested.
+fn eject_guard(root: &str, kind: &str) -> Result<(), String> {
+    match kind {
+        "removable" => Ok(()),
+        "fixed" => Err(format!(
+            "{root} is a fixed/system drive and can never be ejected — only removable drives can be safely removed."
+        )),
+        "network" => Err(format!("{root} is a network drive; disconnect it rather than eject it.")),
+        "cdrom" => Err(format!("{root} is an optical drive, not a removable USB volume.")),
+        other => Err(format!("{root} ({other}) is not a removable drive and cannot be ejected.")),
+    }
+}
+
+/// Guard-then-perform with the classifier and the eject syscall injected as SEAMS. The guard runs BEFORE
+/// `do_eject` can, so a non-removable drive can never reach the eject path — a fact the unit tests assert
+/// directly without touching hardware. `eject_drive_impl` supplies the real classifier + platform eject.
+fn eject_drive_seam(
+    path: &str,
+    classify: impl Fn(&str) -> String,
+    do_eject: impl FnOnce(&str) -> Result<(), String>,
+) -> Result<(), String> {
+    let root = drive_root_of(path);
+    let kind = classify(&root);
+    eject_guard(&root, &kind)?; // refuses non-removable BEFORE any eject syscall can run
+    do_eject(&root)
+}
+
+fn eject_drive_impl(path: &str) -> Result<(), String> {
+    eject_drive_seam(path, drive_type_impl, perform_eject)
+}
+
+/// The real Windows safe-remove sequence on the volume handle. Called ONLY after `eject_guard` has
+/// confirmed a removable drive. Never panics; unlocks + closes the handle on every exit path.
+#[cfg(windows)]
+fn perform_eject(root: &str) -> Result<(), String> {
+    use windows::core::HSTRING;
+    use windows::Win32::Foundation::{CloseHandle, HANDLE};
+    use windows::Win32::Storage::FileSystem::{
+        CreateFileW, FILE_FLAGS_AND_ATTRIBUTES, FILE_SHARE_READ, FILE_SHARE_WRITE, OPEN_EXISTING,
+    };
+    use windows::Win32::System::Ioctl::{
+        FSCTL_DISMOUNT_VOLUME, FSCTL_LOCK_VOLUME, FSCTL_UNLOCK_VOLUME, IOCTL_STORAGE_EJECT_MEDIA,
+    };
+    use windows::Win32::System::IO::DeviceIoControl;
+
+    // GENERIC_READ | GENERIC_WRITE — lock/dismount/eject all need write access to the volume.
+    const ACCESS: u32 = 0x8000_0000 | 0x4000_0000;
+
+    let letter = root.chars().next().ok_or_else(|| "invalid drive root".to_string())?;
+    let device = format!(r"\\.\{letter}:");
+    let wide = HSTRING::from(device);
+
+    // SAFETY: `wide` is a valid NUL-terminated wide string; a standard volume-handle open for
+    // lock/dismount/eject. CreateFileW returns Err on the invalid-handle sentinel, so success ⇒ a real
+    // handle, which we CloseHandle on every path below.
+    let handle: HANDLE = unsafe {
+        CreateFileW(
+            &wide,
+            ACCESS,
+            FILE_SHARE_READ | FILE_SHARE_WRITE,
+            None,
+            OPEN_EXISTING,
+            FILE_FLAGS_AND_ATTRIBUTES(0),
+            None,
+        )
+    }
+    .map_err(|e| format!("Couldn't open the drive to eject it: {e}"))?;
+
+    let mut bytes: u32 = 0;
+    // SAFETY: `handle` is a valid open volume handle; all buffers are None (these control codes take no
+    // data) and `bytes` outlives every call.
+    let mut ioctl = |code: u32| -> windows::core::Result<()> {
+        unsafe { DeviceIoControl(handle, code, None, 0, None, 0, Some(&mut bytes as *mut u32), None) }
+    };
+
+    // 1) Lock — fails if files/handles are open on the volume ("drive in use").
+    if let Err(e) = ioctl(FSCTL_LOCK_VOLUME) {
+        unsafe {
+            let _ = CloseHandle(handle);
+        }
+        return Err(format!(
+            "The drive is in use — close any open files or windows on it, then try again. ({e})"
+        ));
+    }
+    // 2) Dismount so the filesystem is flushed and detached.
+    if let Err(e) = ioctl(FSCTL_DISMOUNT_VOLUME) {
+        let _ = ioctl(FSCTL_UNLOCK_VOLUME);
+        unsafe {
+            let _ = CloseHandle(handle);
+        }
+        return Err(format!("Couldn't dismount the drive: {e}"));
+    }
+    // 3) Eject the media / spin the device down.
+    let ejected = ioctl(IOCTL_STORAGE_EJECT_MEDIA);
+    let _ = ioctl(FSCTL_UNLOCK_VOLUME);
+    unsafe {
+        let _ = CloseHandle(handle);
+    }
+    ejected.map_err(|e| format!("The drive was dismounted but couldn't be ejected: {e}"))?;
+    Ok(())
+}
+
+#[cfg(not(windows))]
+fn perform_eject(_root: &str) -> Result<(), String> {
+    Err("Safe drive eject isn't supported on this platform yet.".to_string())
+}
+
 // ---- Session audit journal (CPE-800, epic CPE-733) ------------------------------------------------
 // Thin I/O shell over the `audit_journal` module: record an Agent Watch activity event to a durable
 // per-session JSON-lines journal under the app-data dir, and list / read past sessions back for the
@@ -9401,6 +9551,8 @@ pub fn run() {
             #[cfg(not(any(target_os = "android", target_os = "ios")))]
             unregister_spotlight_hotkey,
             drive_type,
+            drive_ejectable,
+            eject_drive,
             audit_record,
             audit_sessions,
             audit_read,
@@ -10193,6 +10345,8 @@ pub fn export_bindings(out: &std::path::Path) -> Result<(), String> {
         register_spotlight_hotkey,
         unregister_spotlight_hotkey,
         drive_type,
+        drive_ejectable,
+        eject_drive,
         audit_record,
         audit_sessions,
         audit_read,
@@ -10993,6 +11147,69 @@ mod tests {
     #[test]
     fn drive_type_unix_fallback() {
         assert_eq!(drive_type_impl("/"), "fixed");
+    }
+
+    // ---- Safe drive eject guard (CPE-1278) — hardware-free, cross-platform ------------------------
+
+    #[test]
+    fn eject_guard_permits_only_removable() {
+        assert!(eject_guard("E:\\", "removable").is_ok(), "a removable drive is ejectable");
+        for kind in ["fixed", "network", "cdrom", "ram", "unknown", "", "garbage"] {
+            assert!(
+                eject_guard("C:\\", kind).is_err(),
+                "a {kind:?} drive must NEVER be ejectable"
+            );
+        }
+    }
+
+    #[test]
+    fn eject_refuses_fixed_drive_and_never_calls_syscall() {
+        use std::cell::Cell;
+        let called = Cell::new(false);
+        let r = eject_drive_seam(
+            "C:\\Windows\\System32",
+            |_| "fixed".to_string(),
+            |_| {
+                called.set(true);
+                Ok(())
+            },
+        );
+        assert!(r.is_err(), "a fixed/system drive must be refused");
+        assert!(!called.get(), "the eject syscall seam must NEVER run for a non-removable drive");
+    }
+
+    #[test]
+    fn eject_runs_syscall_only_for_removable_drive() {
+        use std::cell::Cell;
+        let called = Cell::new(false);
+        let r = eject_drive_seam(
+            "E:\\",
+            |_| "removable".to_string(),
+            |_| {
+                called.set(true);
+                Ok(())
+            },
+        );
+        assert!(r.is_ok(), "a removable drive should reach the eject seam");
+        assert!(called.get(), "the eject seam must run for a removable drive");
+    }
+
+    #[test]
+    fn eject_drive_impl_refuses_the_system_drive() {
+        // The real classifier over the current working dir's drive is "fixed" (Windows GetDriveTypeW,
+        // and the unix fallback), so the real impl must refuse — no removable hardware required.
+        let cwd = std::env::current_dir().unwrap().to_string_lossy().into_owned();
+        assert!(
+            eject_drive_impl(&cwd).is_err(),
+            "the system/working drive must never be ejectable"
+        );
+    }
+
+    #[test]
+    fn drive_root_of_normalises_to_letter_root() {
+        assert_eq!(drive_root_of("E:\\some\\path"), "E:\\");
+        assert_eq!(drive_root_of("C:\\"), "C:\\");
+        assert_eq!(drive_root_of("/mnt/usb"), "/mnt/usb");
     }
 
     #[cfg(unix)]

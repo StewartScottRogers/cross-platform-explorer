@@ -135,6 +135,9 @@
   {:else if name === "drive"}
     <rect x="3" y="9" width="18" height="7" rx="1.5" fill="#eceff3" stroke="#5f6b7a" />
     <circle cx="17.5" cy="12.5" r="1" fill="#2e7d43" stroke="none" />
+  {:else if name === "eject"}
+    <path d="M12 5l7 9H5z" />
+    <path d="M5 18h14" />
   <!-- toolbar / ui -->
   {:else if name === "back"}
     <path d="M15 5l-7 7 7 7" />
