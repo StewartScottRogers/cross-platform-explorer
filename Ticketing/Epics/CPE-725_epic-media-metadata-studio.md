@@ -2,7 +2,7 @@
 id: CPE-725
 title: "EPIC: Media metadata studio (editable EXIF / IPTC / ID3)"
 type: Task
-status: Proposed
+status: In Progress
 priority: Medium
 component: Multiple
 tags: [epic]
