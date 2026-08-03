@@ -4,7 +4,7 @@ title: "XMP + WAV/RIFF-INFO read codecs"
 type: feature
 component: cpe-server
 priority: medium
-status: Doing
+status: Done
 tags: ready
 created: 2026-08-03
 epic: CPE-725
@@ -44,3 +44,4 @@ packet reading (photos) and WAV/RIFF-INFO reading (audio). Headless, cargo-teste
 Epic CPE-725. Do XMP then WAV in the same worker (shared file). Sequenced after CPE-1290 (IPTC, merged).
 
 ## Work Log
+- 2026-08-03 — XMP + WAV read codecs merged (#590, landed via ff after media_meta.rs union resolve with CPE-1288). 1 rework: reviewer required wiring read_xmp/read_wav into the parser_panic_safety.rs fuzz harness (CPE-1169, overflowing-length-field class) — added read_xmp/read_wav_never_panics + table-driven dispatch variants (harness 27->29), avoided the hollow-test trap (full 12B WAV header). No functional bug (offset-audited panic-safe). 1410 green clippy clean.
