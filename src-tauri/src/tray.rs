@@ -27,8 +27,10 @@ use cpe_server::tray_quick::QuickAccess;
 /// How many recent folders the tray remembers (pinned entries are unbounded).
 const MAX_RECENT: usize = 8;
 
-/// The tray icon's stable id, so `note_folder` can re-fetch it to swap the menu.
-const TRAY_ID: &str = "main";
+/// The tray icon's stable id, so `note_folder` can re-fetch it to swap the menu — and so the window
+/// CloseRequested handler can check the tray actually exists before hiding-to-tray (never trap the user
+/// with a hidden window and no tray Quit if `setup` failed to create the icon).
+pub const TRAY_ID: &str = "main";
 
 /// Menu-item id prefix carrying a folder path to open (`tray-open::<path>`).
 const OPEN_PREFIX: &str = "tray-open::";
@@ -117,10 +119,12 @@ fn on_menu(app: &AppHandle, id: &str) {
     }
 }
 
-/// Rebuild + swap the tray menu to reflect the current quick-access state.
+/// Rebuild + swap the tray menu to reflect the current quick-access state. A no-op if the tray icon or
+/// its state isn't present (e.g. `setup` failed to create the tray), so this never panics.
 fn rebuild_menu(app: &AppHandle) {
     let Some(tray) = app.tray_by_id(TRAY_ID) else { return };
-    let qa = { app.state::<TrayState>().0.lock().unwrap().clone() };
+    let Some(state) = app.try_state::<TrayState>() else { return };
+    let qa = { state.0.lock().unwrap().clone() };
     if let Ok(menu) = build_menu(app, &qa) {
         let _ = tray.set_menu(Some(menu));
     }
@@ -128,16 +132,26 @@ fn rebuild_menu(app: &AppHandle) {
 
 /// Record that a folder was opened: move it to the front of recents, persist, and refresh the tray menu.
 /// Called from the `tray_note_folder` command, which the frontend fires on every folder navigation.
+/// Degrades to a no-op if the tray state was never managed (i.e. `setup` failed) — `try_state` instead of
+/// `state`, so a failed tray never turns navigation into a panic.
 pub fn note_folder(app: &AppHandle, path: &str, label: &str) -> Result<(), String> {
+    let Some(state) = app.try_state::<TrayState>() else { return Ok(()) };
     let ctx = crate::server_ctx::TauriCtx::new(app);
     {
-        let state = app.state::<TrayState>();
         let mut qa = state.0.lock().unwrap();
         qa.touch(path, label);
         cpe_server::tray_quick::save(&ctx, &qa)?;
     }
     rebuild_menu(app);
     Ok(())
+}
+
+/// The pure hide-to-tray decision for a window close: hide (stay tray-resident) ONLY when a tray icon is
+/// actually present AND the user opted into close-to-tray. If the tray failed to create, this is always
+/// `false` so the close falls through to a normal quit — the user is never trapped with a hidden window
+/// and no tray Quit (the CPE-1272 review fix).
+pub fn should_hide_to_tray(tray_present: bool, close_to_tray: bool) -> bool {
+    tray_present && close_to_tray
 }
 
 /// Whether a window-close should hide-to-tray instead of quitting. Reads the persisted Settings flag
@@ -184,4 +198,25 @@ pub fn setup(app: &tauri::App) -> tauri::Result<()> {
 
     builder.build(app)?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::should_hide_to_tray;
+
+    #[test]
+    fn hide_to_tray_requires_both_a_tray_and_the_opt_in() {
+        // The happy path: tray exists and the user opted in → hide (stay resident).
+        assert!(should_hide_to_tray(true, true));
+
+        // Never hide without the opt-in (default off) — a plain close quits.
+        assert!(!should_hide_to_tray(true, false));
+
+        // The review fix: even with close-to-tray ON, a MISSING tray must NOT hide, or the window is
+        // stranded with no way back and no tray Quit.
+        assert!(!should_hide_to_tray(false, true));
+
+        // No tray, no opt-in → plainly a normal close.
+        assert!(!should_hide_to_tray(false, false));
+    }
 }

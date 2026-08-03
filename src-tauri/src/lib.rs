@@ -8942,12 +8942,18 @@ pub fn run() {
             // a window close HIDES the window (leaving the app tray-resident) instead of quitting; Quit
             // stays available from the tray menu. Default off — the flag is read fresh on each close, so
             // a plain close still quits unless the user opted in. Desktop-only (this whole block is).
+            //
+            // Critically, hide-to-tray is ALSO gated on a tray icon actually existing: `tray::setup`
+            // fails non-fatally (e.g. a Linux DE with no notification-area host), and hiding without a
+            // tray would strand the window with no way to restore it and no tray Quit. If there's no
+            // tray, we fall through to a normal close/quit so the user is never trapped.
             {
                 let handle = app.handle().clone();
                 let win_for_close = win.clone();
                 win.on_window_event(move |event| {
                     if let tauri::WindowEvent::CloseRequested { api, .. } = event {
-                        if tray::close_to_tray_enabled(&handle) {
+                        let tray_present = handle.tray_by_id(tray::TRAY_ID).is_some();
+                        if tray::should_hide_to_tray(tray_present, tray::close_to_tray_enabled(&handle)) {
                             api.prevent_close();
                             let _ = win_for_close.hide();
                         }
