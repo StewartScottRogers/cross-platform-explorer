@@ -31,7 +31,7 @@ import type { UserCommand } from "./userCommands";
 import { parseBindings, serializeBindings } from "./macroBindings";
 import type { MacroBinding } from "./macroBindings";
 import { parseFrecent, serializeFrecent } from "./spotlightFrecency";
-import type { Visit, ContentEmbedderConfig } from "./bindings.gen";
+import type { Visit, ContentEmbedderConfig, CopilotConfig } from "./bindings.gen";
 
 export const KEYS = {
   view: "cpe.view",
@@ -75,6 +75,9 @@ export const KEYS = {
   contentEmbedderEnabled: "cpe.contentEmbedderEnabled",
   contentEmbedderBaseUrl: "cpe.contentEmbedderBaseUrl",
   contentEmbedderModel: "cpe.contentEmbedderModel",
+  copilotEnabled: "cpe.copilotEnabled",
+  copilotBaseUrl: "cpe.copilotBaseUrl",
+  copilotModel: "cpe.copilotModel",
 } as const;
 
 const MAX_RECENTS = 20;
@@ -325,6 +328,33 @@ export function loadContentEmbedderConfig(): ContentEmbedderConfig {
     enabled: loadContentEmbedderEnabled(),
     base_url: loadContentEmbedderBaseUrl(),
     model: loadContentEmbedderModel(),
+  };
+}
+
+// AI file copilot (CPE-1276, epic CPE-977) — configurable OpenAI-compatible model that turns a natural-
+// language instruction into a whitelisted file-operation plan (`copilot_plan`/`copilot_execute`, CPE-1275).
+// Mirrors the content-embedder settings above: off by default, enabled/URL/model persist here
+// (settings.json), and the API KEY is NEVER stored here — it lives only in the OS keychain, written via
+// `copilot_set_key`. Empty defaults so a corrupt value degrades to "disabled/unconfigured" (safe: no plan
+// can be produced).
+export const loadCopilotEnabled = (): boolean => read(KEYS.copilotEnabled, false, isBool);
+export const saveCopilotEnabled = (v: boolean) => write(KEYS.copilotEnabled, v);
+export const loadCopilotBaseUrl = (): string => read(KEYS.copilotBaseUrl, "", isString);
+export const saveCopilotBaseUrl = (v: string) => write(KEYS.copilotBaseUrl, v);
+export const loadCopilotModel = (): string => read(KEYS.copilotModel, "", isString);
+export const saveCopilotModel = (v: string) => write(KEYS.copilotModel, v);
+
+/**
+ * The copilot config to pass to `copilotPlan`/`copilotExecute`/`copilotTest`. Always returns the object
+ * (the backend refuses to plan when `enabled` is false or `base_url`/`model` are blank); the API key is
+ * not included (the backend fetches it from the keychain). The one place callers assemble this, so the
+ * command args stay consistent.
+ */
+export function loadCopilotConfig(): CopilotConfig {
+  return {
+    enabled: loadCopilotEnabled(),
+    base_url: loadCopilotBaseUrl(),
+    model: loadCopilotModel(),
   };
 }
 
