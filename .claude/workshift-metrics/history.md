@@ -751,3 +751,34 @@ them; history.md stopped at 07-31). Authoritative record is the checkpoint commi
   makes a configurable-LLM seam viable like CPE-1273 did for embeddings, but it's inert without their model);
   invasive shell (712 default-file-manager, 716 drive-eject) need explicit consent/hardware. Plus pending ATTENDED
   tests: AI search (v0.57.45), tray, archive-drag. Did NOT manufacture filler.
+
+## 2026-08-03 — "3 workshifts back to back": safety-scan vein + media-metadata codecs (14 shipped)
+- Shipped: CPE-1279 (release single-draft + eject glyph), CPE-1281/1282/1283/1284/1285 (5 cpe-server safety
+  scans: archive/zip-bomb, empty-dirs, orphan-sidecars, dangling-links, disguised-file sweep), CPE-1286
+  (file_type +13 magic-byte formats), CPE-1287 (wire 5 scan commands + specta bindings), CPE-1293 (front-end
+  File-Health model), CPE-1288 (EXIF write), CPE-1290 (IPTC read), CPE-1291 (XMP+WAV read), CPE-1289 (OGG write).
+  Epics CPE-1002 + CPE-1000 (safety-scan vein) and CPE-725 (media codecs) advanced; all headless.
+- Tuned defaults:
+  - **cpe-server pure scan adapter (walk over a done pure core)**: sonnet, ~2-wide+ (5-wide held fine on 32
+    cores), ~9-11m median, 0 retries. The disjoint-new-module + "no command/bindings, integration ticket does
+    that" split kept the parallel front conflict-free — repeat it. Only shared surface = crates/server/src/lib.rs
+    mod list (append, trivial).
+  - **format codec (byte-exact write: EXIF/OGG)**: opus, ~15-33m, format-RISKY — always opus + an opus reviewer.
+    Both write codecs had subtle correctness issues an opus reviewer caught/verified (EXIF data-loss; OGG CRC KAT).
+  - **read codec (IPTC/XMP/WAV/file_type)**: sonnet + sonnet reviewer, fine.
+  - **command-integration (lib.rs + bindings regen)**: sonnet; reviewer MUST re-run the bindings generator +
+    `git diff --exit-code` for zero drift and check BOTH generate_handler! lists.
+- Gauntlet earned it (2 catches, 0 escaped defects):
+  1. CPE-1288 EXIF write silently DESTROYED GPS/DateTime/Orientation/Make (rebuilt IFD from only editable tags).
+     Opus reviewer proved it with a probe test; 1 rework fixed it (re-emit all IFD/sub-IFD fields, override only
+     editable). Lesson: a codec whose READER marks fields read-only must have its WRITER re-carry them.
+  2. CPE-1291 XMP/WAV: no functional bug but reviewer required wiring new byte-parsers into the repo's
+     parser_panic_safety.rs fuzz harness (CPE-1169, overflowing-length-field class). New byte-parser => add a
+     `*_never_panics` entry there, non-negotiable.
+- PROCESS SCAR (see [[admin-merge-conflict-deletes-branch]] memory): `gh pr merge --admin --delete-branch` on a
+  CONFLICTING PR CLOSES + DELETES the branch WITHOUT merging (nearly lost the reviewed EXIF fix). ALWAYS
+  `gh pr view <n> --json mergeable` first; if CONFLICTING, resolve locally (branch from PR head, `git merge main`,
+  union-resolve, ff-land) and NEVER pass --delete-branch pre-confirmation. Parallel read-vs-write codec PRs on the
+  same file (media_meta.rs) always conflict on imports+doc+dispatch arms → resolve to the UNION.
+- Throughput: ~14 tickets, ~34 sub-agent runs, deep budget headroom (never near the 200 reset line). Main green
+  throughout (real CI; GUI-smoke still times out at 20m systemically — pre-existing, unrelated).
