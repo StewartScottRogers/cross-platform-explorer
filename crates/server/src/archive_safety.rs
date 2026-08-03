@@ -7,6 +7,8 @@
 //! out of the `zip`/`tar`/`sevenz-rust` crates into `archive.rs`'s listing is a later adapter
 //! concern — kept out of this ticket to avoid touching that multi-format dispatch plumbing.
 
+use serde::Serialize;
+
 /// One archive entry's compressed and uncompressed size — the input the caller supplies (typically
 /// read straight off an archive's central directory / header during listing).
 pub struct EntrySizes {
@@ -16,7 +18,8 @@ pub struct EntrySizes {
 }
 
 /// An entry whose expansion ratio exceeded [`RatioLimits::max_entry_ratio`].
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[cfg_attr(feature = "specta", derive(specta::Type))]
 pub struct FlaggedEntry {
     pub name: String,
     pub ratio: f64,
@@ -24,7 +27,8 @@ pub struct FlaggedEntry {
 
 /// The result of scoring an archive's entries: totals, the overall ratio, any per-entry flags, and
 /// a single `dangerous` verdict.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[cfg_attr(feature = "specta", derive(specta::Type))]
 pub struct RatioReport {
     pub total_compressed: u64,
     pub total_uncompressed: u64,
