@@ -30,7 +30,51 @@ permissions:
   contents: write
 
 jobs:
+  # --- Single-draft-release coordination (CPE-1279) ---
+  # The 3 build legs below run concurrently on separate runners. Previously each one called
+  # tauri-action with just `tagName`, and tauri-action creates the GitHub Release itself if none
+  # exists yet for that tag — so when none of the 3 legs could see each other's in-flight release
+  # creation, two (or three) legs each independently created a release for the SAME tag, splitting
+  # the assets across separate drafts (observed: v0.57.47-sidecar produced one macOS-only draft and
+  # one Linux+Windows draft). This job runs FIRST, alone, on a single runner, and creates the draft
+  # release exactly once via `gh release create`. Its numeric release ID is then passed to every
+  # matrix leg's tauri-action call as `releaseId`, which — per tauri-action's own docs — makes that
+  # leg upload assets to the given release directly instead of searching for/creating one by tag,
+  # so all 3 legs converge on one draft.
+  create-release:
+    runs-on: ubuntu-latest
+    outputs:
+      release_id: ${{ steps.create-release.outputs.release_id }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Create the draft release once (CPE-1279)
+        id: create-release
+        shell: bash
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ inputs.tag }}
+        run: |
+          set -euo pipefail
+          # Same title/body/draft/prerelease semantics the matrix legs used to pass to tauri-action
+          # directly (see the "Build and publish sidecar-enabled release" step below) — just created
+          # by a single writer instead of racing.
+          notes_file="$(mktemp)"
+          cat > "$notes_file" <<'EOF'
+          Build with the sidecar platform + AI Console bundled in — this is the shipping,
+          auto-updating channel (the build `/run` installs). Publish the draft to release it;
+          once public, installed apps pick it up on their next update check.
+          EOF
+          gh release create "$TAG" \
+            --repo "${{ github.repository }}" \
+            --title "Cross-Platform Explorer $TAG (sidecar)" \
+            --notes-file "$notes_file" \
+            --draft
+          release_id="$(gh api "repos/${{ github.repository }}/releases/tags/$TAG" --jq .id)"
+          echo "release_id=$release_id" >> "$GITHUB_OUTPUT"
+
   release-sidecar:
+    needs: create-release
     strategy:
       fail-fast: false
       matrix:
@@ -281,14 +325,17 @@ jobs:
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         with:
           tagName: ${{ inputs.tag }}
-          releaseName: "Cross-Platform Explorer ${{ inputs.tag }} (sidecar)"
-          releaseBody: |
-            Build with the sidecar platform + AI Console bundled in — this is the shipping,
-            auto-updating channel (the build `/run` installs). Publish the draft to release it;
-            once public, installed apps pick it up on their next update check.
-          # Created as a draft so it can be reviewed before going public, but NOT a prerelease:
-          # GitHub's `/releases/latest/` (the updater endpoint) skips prereleases, so the sidecar
-          # channel must be non-prerelease to serve auto-updates (CPE-768).
+          # Upload to the single draft the create-release job already made instead of letting this
+          # leg search for/create a release by tag — that per-leg creation is what raced (CPE-1279).
+          # Per tauri-action's docs, when releaseId is set it's used directly and tagName/releaseName
+          # are not consulted to find or create a release, so releaseName/releaseBody (set once, at
+          # creation time, above) are omitted here.
+          releaseId: ${{ needs.create-release.outputs.release_id }}
+          # Must match the status of the release create-release made (tauri-action requires this to
+          # agree with the existing release when uploading via releaseId). Created as a draft so it
+          # can be reviewed before going public, but NOT a prerelease: GitHub's `/releases/latest/`
+          # (the updater endpoint) skips prereleases, so the sidecar channel must be non-prerelease to
+          # serve auto-updates (CPE-768).
           releaseDraft: true
           prerelease: false
           # Build with the sidecar feature + the base overlay (product identity) + the per-OS
