@@ -28,6 +28,33 @@ pub enum FileType {
     Mp3,
     Wav,
     Mp4,
+    Svg,
+    /// EBML container — backs both Matroska (`.mkv`) and WebM (`.webm`); the two share the exact same
+    /// `1A 45 DF A3` header and are not distinguishable without walking the EBML tree, so they are treated
+    /// as one detected type covering both extensions (see [`FileType::extensions`]).
+    Matroska,
+    Avi,
+    Sqlite,
+    /// Compiled JVM `.class` file. Its `CA FE BA BE` header is also the magic number for a Mach-O
+    /// "fat"/universal binary, so this signature is inherently ambiguous in isolation. We resolve in
+    /// favour of Java class files: a class file is common in ordinary trees (build output, JARs unpacked
+    /// for inspection), while a fat Mach-O is comparatively rare and, when present, is almost always inside
+    /// an `.app` bundle rather than sitting around as a bare extensioned file. Telling the two apart for
+    /// certain would need parsing the bytes that follow (Java's minor/major version pair vs. Mach-O's
+    /// architecture count) — out of scope for a pure leading-signature sniff.
+    JavaClass,
+    Ico,
+    /// TrueType-flavoured `sfnt` font (`.ttf`). Signature is `00 01 00 00` — note this is a different byte
+    /// order to [`FileType::Ico`]'s `00 00 01 00`; the two are easy to transpose when hand-writing the byte
+    /// arrays, so double-check against a hex dump if either signature is ever touched.
+    TrueType,
+    /// OpenType-flavoured `sfnt` font (`.otf`), tagged `OTTO`.
+    OpenType,
+    Woff,
+    Woff2,
+    Xz,
+    Zstd,
+    Bzip2,
 }
 
 impl FileType {
@@ -53,6 +80,19 @@ impl FileType {
             FileType::Mp3 => "MP3 audio",
             FileType::Wav => "WAV audio",
             FileType::Mp4 => "MP4 media",
+            FileType::Svg => "SVG image",
+            FileType::Matroska => "Matroska/WebM media",
+            FileType::Avi => "AVI video",
+            FileType::Sqlite => "SQLite database",
+            FileType::JavaClass => "Java class file",
+            FileType::Ico => "Windows icon",
+            FileType::TrueType => "TrueType font",
+            FileType::OpenType => "OpenType font",
+            FileType::Woff => "WOFF font",
+            FileType::Woff2 => "WOFF2 font",
+            FileType::Xz => "xz archive",
+            FileType::Zstd => "Zstd archive",
+            FileType::Bzip2 => "Bzip2 archive",
         }
     }
 
@@ -85,6 +125,22 @@ impl FileType {
             FileType::Mp3 => &["mp3"],
             FileType::Wav => &["wav"],
             FileType::Mp4 => &["mp4", "m4a", "m4v"],
+            // The `<?xml`/`<svg` sniff can't tell a real SVG apart from any other well-formed XML document
+            // that happens to lead with the same declaration — both are accepted here so a plain `.xml`
+            // file is never false-flagged as a "renamed .svg" (mirrors the ZIP-container reasoning above).
+            FileType::Svg => &["svg", "xml"],
+            FileType::Matroska => &["webm", "mkv"],
+            FileType::Avi => &["avi"],
+            FileType::Sqlite => &["sqlite", "sqlite3", "db"],
+            FileType::JavaClass => &["class"],
+            FileType::Ico => &["ico"],
+            FileType::TrueType => &["ttf"],
+            FileType::OpenType => &["otf"],
+            FileType::Woff => &["woff"],
+            FileType::Woff2 => &["woff2"],
+            FileType::Xz => &["xz"],
+            FileType::Zstd => &["zst"],
+            FileType::Bzip2 => &["bz2"],
         }
     }
 }
@@ -95,12 +151,31 @@ fn matches_at(bytes: &[u8], offset: usize, pat: &[u8]) -> bool {
     bytes.len() >= offset + pat.len() && &bytes[offset..offset + pat.len()] == pat
 }
 
+/// True if `bytes`, after skipping an optional UTF-8 BOM and any leading ASCII whitespace, starts with an
+/// XML declaration (`<?xml`) or an inline `<svg` root tag — the two ways a real-world SVG file commonly
+/// opens. Tolerant of the leading noise editors/exporters sometimes add so a BOM or a blank line doesn't
+/// hide the signature.
+fn looks_like_svg(bytes: &[u8]) -> bool {
+    let mut s = bytes.strip_prefix(&[0xEF, 0xBB, 0xBF]).unwrap_or(bytes);
+    while let Some(&b) = s.first() {
+        if b.is_ascii_whitespace() {
+            s = &s[1..];
+        } else {
+            break;
+        }
+    }
+    s.starts_with(b"<?xml") || s.starts_with(b"<svg")
+}
+
 /// Sniff `bytes` for a recognised magic signature. Returns `None` for unknown or too-short input; never
 /// panics regardless of length (including empty).
 ///
 /// Order matters only where a shorter/less specific signature could otherwise shadow a longer one still to
-/// come; the two-byte `MZ` (PE) check is placed last for exactly that reason. Every other signature here is
-/// unambiguous relative to the rest of the set.
+/// come; the two-byte `MZ` (PE) check is placed last for exactly that reason. The `Ico`/`TrueType` pair and
+/// the `Woff`/`Woff2` pair are full-length exact matches against different byte sequences, so despite
+/// looking similar at a glance neither pair can shadow the other. The one genuine full-length collision —
+/// `CA FE BA BE` meaning both a Java class file and a Mach-O fat binary — is resolved as documented on
+/// [`FileType::JavaClass`]. Every other signature here is unambiguous relative to the rest of the set.
 pub fn detect_type(bytes: &[u8]) -> Option<FileType> {
     if matches_at(bytes, 0, &[0x89, 0x50, 0x4E, 0x47]) {
         return Some(FileType::Png);
@@ -156,6 +231,48 @@ pub fn detect_type(bytes: &[u8]) -> Option<FileType> {
         if matches_at(bytes, 8, b"WEBP") {
             return Some(FileType::WebP);
         }
+        if matches_at(bytes, 8, b"AVI ") {
+            return Some(FileType::Avi);
+        }
+    }
+    // EBML container header — shared verbatim by Matroska and WebM (see the doc comment on the variant).
+    if matches_at(bytes, 0, &[0x1A, 0x45, 0xDF, 0xA3]) {
+        return Some(FileType::Matroska);
+    }
+    if matches_at(bytes, 0, b"SQLite format 3\0") {
+        return Some(FileType::Sqlite);
+    }
+    if matches_at(bytes, 0, &[0xCA, 0xFE, 0xBA, 0xBE]) {
+        return Some(FileType::JavaClass);
+    }
+    // ICONDIR header: reserved=0, idType=1 (icon), little-endian — see the doc comment on `TrueType` for
+    // how this is kept distinct from the sfnt version signature it superficially resembles.
+    if matches_at(bytes, 0, &[0x00, 0x00, 0x01, 0x00]) {
+        return Some(FileType::Ico);
+    }
+    if matches_at(bytes, 0, &[0x00, 0x01, 0x00, 0x00]) {
+        return Some(FileType::TrueType);
+    }
+    if matches_at(bytes, 0, b"OTTO") {
+        return Some(FileType::OpenType);
+    }
+    if matches_at(bytes, 0, b"wOFF") {
+        return Some(FileType::Woff);
+    }
+    if matches_at(bytes, 0, b"wOF2") {
+        return Some(FileType::Woff2);
+    }
+    if matches_at(bytes, 0, &[0xFD, 0x37, 0x7A, 0x58, 0x5A, 0x00]) {
+        return Some(FileType::Xz);
+    }
+    if matches_at(bytes, 0, &[0x28, 0xB5, 0x2F, 0xFD]) {
+        return Some(FileType::Zstd);
+    }
+    if matches_at(bytes, 0, b"BZh") {
+        return Some(FileType::Bzip2);
+    }
+    if looks_like_svg(bytes) {
+        return Some(FileType::Svg);
     }
     // ISO base media container family (MP4/M4A/M4V/…): a 4-byte box size followed by "ftyp" at offset 4.
     if matches_at(bytes, 4, b"ftyp") {
@@ -347,6 +464,89 @@ mod tests {
         assert_eq!(detect_type(&bytes), Some(FileType::Mp4));
     }
 
+    #[test]
+    fn detects_avi_by_riff_plus_avi_tag_at_offset_8() {
+        let mut bytes = b"RIFF".to_vec();
+        bytes.extend_from_slice(&[0x00, 0x01, 0x00, 0x00]);
+        bytes.extend_from_slice(b"AVI LIST");
+        assert_eq!(detect_type(&bytes), Some(FileType::Avi));
+    }
+
+    #[test]
+    fn detects_matroska_and_webm_via_shared_ebml_header() {
+        // Matroska and WebM share the exact same EBML magic — the sniff can only report the container.
+        assert_eq!(detect_type(&[0x1A, 0x45, 0xDF, 0xA3, 0x9F, 0x42]), Some(FileType::Matroska));
+    }
+
+    #[test]
+    fn detects_sqlite() {
+        let mut bytes = b"SQLite format 3\x00".to_vec();
+        bytes.extend_from_slice(&[0, 0, 0, 0]);
+        assert_eq!(detect_type(&bytes), Some(FileType::Sqlite));
+    }
+
+    #[test]
+    fn detects_java_class() {
+        assert_eq!(
+            detect_type(&[0xCA, 0xFE, 0xBA, 0xBE, 0x00, 0x00, 0x00, 0x3D]),
+            Some(FileType::JavaClass)
+        );
+    }
+
+    #[test]
+    fn detects_ico() {
+        assert_eq!(detect_type(&[0x00, 0x00, 0x01, 0x00, 0x01, 0x00]), Some(FileType::Ico));
+    }
+
+    #[test]
+    fn detects_truetype_and_does_not_collide_with_ico() {
+        // Same four bytes reordered — must resolve to the other type, not ICO.
+        assert_eq!(detect_type(&[0x00, 0x01, 0x00, 0x00, 0x00, 0x0C]), Some(FileType::TrueType));
+        assert_ne!(detect_type(&[0x00, 0x01, 0x00, 0x00]), detect_type(&[0x00, 0x00, 0x01, 0x00]));
+    }
+
+    #[test]
+    fn detects_opentype() {
+        assert_eq!(detect_type(b"OTTO\x00\x0C"), Some(FileType::OpenType));
+    }
+
+    #[test]
+    fn detects_woff_and_woff2_distinctly() {
+        assert_eq!(detect_type(b"wOFF\x00\x01"), Some(FileType::Woff));
+        assert_eq!(detect_type(b"wOF2\x00\x01"), Some(FileType::Woff2));
+    }
+
+    #[test]
+    fn detects_xz() {
+        assert_eq!(
+            detect_type(&[0xFD, 0x37, 0x7A, 0x58, 0x5A, 0x00, 0x00]),
+            Some(FileType::Xz)
+        );
+    }
+
+    #[test]
+    fn detects_zstd() {
+        assert_eq!(detect_type(&[0x28, 0xB5, 0x2F, 0xFD, 0x00]), Some(FileType::Zstd));
+    }
+
+    #[test]
+    fn detects_bzip2() {
+        assert_eq!(detect_type(b"BZh91AY"), Some(FileType::Bzip2));
+    }
+
+    #[test]
+    fn detects_svg_via_xml_declaration_and_bare_svg_tag() {
+        assert_eq!(detect_type(b"<?xml version=\"1.0\"?><svg/>"), Some(FileType::Svg));
+        assert_eq!(detect_type(b"<svg xmlns=\"http://www.w3.org/2000/svg\"/>"), Some(FileType::Svg));
+    }
+
+    #[test]
+    fn detects_svg_tolerant_of_leading_bom_and_whitespace() {
+        let mut bytes = vec![0xEF, 0xBB, 0xBF]; // UTF-8 BOM
+        bytes.extend_from_slice(b"\n\t  <?xml version=\"1.0\"?><svg/>");
+        assert_eq!(detect_type(&bytes), Some(FileType::Svg));
+    }
+
     // ---- unknown / short / empty input never panics ----
 
     #[test]
@@ -409,6 +609,30 @@ mod tests {
     }
 
     #[test]
+    fn mismatch_is_none_for_svg_bytes_under_the_xml_container_extension() {
+        // The `<?xml`/`<svg` sniff can't distinguish a real SVG from a plain XML document — `.xml` is
+        // accepted as a non-mismatching extension for the detected type so a genuine XML file isn't
+        // false-flagged as a "renamed .svg".
+        let svg_bytes = b"<?xml version=\"1.0\"?><svg/>".to_vec();
+        assert_eq!(mismatch(&svg_bytes, "svg"), None);
+        assert_eq!(mismatch(&svg_bytes, "xml"), None);
+        let m = mismatch(&svg_bytes, "png").expect("SVG bytes claiming .png must mismatch");
+        assert_eq!(m.detected, FileType::Svg);
+    }
+
+    #[test]
+    fn mismatch_distinguishes_ico_and_truetype_despite_similar_bytes() {
+        let ico_bytes = vec![0x00, 0x00, 0x01, 0x00, 0x01, 0x00];
+        let ttf_bytes = vec![0x00, 0x01, 0x00, 0x00, 0x00, 0x0C];
+        assert_eq!(mismatch(&ico_bytes, "ico"), None);
+        assert_eq!(mismatch(&ttf_bytes, "ttf"), None);
+        let m = mismatch(&ico_bytes, "ttf").expect("ICO bytes claiming .ttf must mismatch");
+        assert_eq!(m.detected, FileType::Ico);
+        let m = mismatch(&ttf_bytes, "ico").expect("TrueType bytes claiming .ico must mismatch");
+        assert_eq!(m.detected, FileType::TrueType);
+    }
+
+    #[test]
     fn mismatch_strips_a_leading_dot() {
         let m = mismatch(&pe_bytes(), ".jpg").expect("leading dot must be stripped, not break the match");
         assert_eq!(m.actual_ext, "jpg");
@@ -461,5 +685,35 @@ mod tests {
         for e in ["zip", "jar", "apk", "docx", "xlsx", "pptx", "odt", "ods", "odp", "epub"] {
             assert!(exts.contains(&e), "Zip::extensions() missing {e}");
         }
+    }
+
+    #[test]
+    fn label_and_extensions_for_new_signature_formats() {
+        assert_eq!(FileType::Svg.label(), "SVG image");
+        assert_eq!(FileType::Svg.extensions(), &["svg", "xml"]);
+        assert_eq!(FileType::Matroska.label(), "Matroska/WebM media");
+        assert_eq!(FileType::Matroska.extensions(), &["webm", "mkv"]);
+        assert_eq!(FileType::Avi.label(), "AVI video");
+        assert_eq!(FileType::Avi.extensions(), &["avi"]);
+        assert_eq!(FileType::Sqlite.label(), "SQLite database");
+        assert_eq!(FileType::Sqlite.extensions(), &["sqlite", "sqlite3", "db"]);
+        assert_eq!(FileType::JavaClass.label(), "Java class file");
+        assert_eq!(FileType::JavaClass.extensions(), &["class"]);
+        assert_eq!(FileType::Ico.label(), "Windows icon");
+        assert_eq!(FileType::Ico.extensions(), &["ico"]);
+        assert_eq!(FileType::TrueType.label(), "TrueType font");
+        assert_eq!(FileType::TrueType.extensions(), &["ttf"]);
+        assert_eq!(FileType::OpenType.label(), "OpenType font");
+        assert_eq!(FileType::OpenType.extensions(), &["otf"]);
+        assert_eq!(FileType::Woff.label(), "WOFF font");
+        assert_eq!(FileType::Woff.extensions(), &["woff"]);
+        assert_eq!(FileType::Woff2.label(), "WOFF2 font");
+        assert_eq!(FileType::Woff2.extensions(), &["woff2"]);
+        assert_eq!(FileType::Xz.label(), "xz archive");
+        assert_eq!(FileType::Xz.extensions(), &["xz"]);
+        assert_eq!(FileType::Zstd.label(), "Zstd archive");
+        assert_eq!(FileType::Zstd.extensions(), &["zst"]);
+        assert_eq!(FileType::Bzip2.label(), "Bzip2 archive");
+        assert_eq!(FileType::Bzip2.extensions(), &["bz2"]);
     }
 }
