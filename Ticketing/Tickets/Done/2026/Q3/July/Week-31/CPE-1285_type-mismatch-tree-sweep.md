@@ -4,7 +4,7 @@ title: "Disguised-file (extension-mismatch) tree sweep"
 type: feature
 component: cpe-server
 priority: medium
-status: Doing
+status: Done
 tags: ready
 created: 2026-08-03
 epic: CPE-1000
@@ -34,3 +34,4 @@ whose content doesn't match its extension — the security-review complement (a 
 Template: `folder_similarity_scan.rs`. Epic CPE-1000. Streaming variant is a possible follow-up.
 
 ## Work Log
+- 2026-08-03 — type_mismatch_scan merged (#585). Reviewer APPROVE, 64B header cap sufficient (max 16 needed), container-safe (real ZIP-as-docx test), 10/10 re-run, clippy clean. Non-blocking: no symlink-dir test; walks dot-dirs (deliberate for a security sweep).

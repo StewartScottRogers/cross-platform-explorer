@@ -4,7 +4,7 @@ title: "Wire safety-scan commands + regen bindings (integration)"
 type: feature
 component: app
 priority: medium
-status: Backlog
+status: Doing
 tags: ready
 created: 2026-08-03
 epic: CPE-1002
