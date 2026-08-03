@@ -4,7 +4,7 @@ title: "Archive expansion-ratio scan (zip-bomb warning)"
 type: feature
 component: cpe-server
 priority: medium
-status: Doing
+status: Done
 tags: ready
 created: 2026-08-03
 epic: CPE-1002
@@ -43,3 +43,4 @@ Template: `crates/server/src/folder_similarity_scan.rs` (walk + caps + `truncate
 CPE-1002. Command wiring + bindings + the "File Health" UI are separate (CPE-1287 / attended).
 
 ## Work Log
+- 2026-08-03 — archive_safety_scan merged (#581). Reviewer APPROVE, panic-free verified (no unwrap/expect in production), specta additive-safe, 12/12 re-run, clippy clean. Non-blocking: no >200k truncation fixture.
