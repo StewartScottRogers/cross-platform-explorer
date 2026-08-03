@@ -17,6 +17,9 @@ The explorer is the core of the app and is tuned to stay **fast, small, and pred
 - **Sidebar** — Home, Favorites (pin folders you use often), and drives with free-space bars. Each
   section (Explore, Quick access, Drives, Favorites, Tags, Smart Folders, Saved Searches) has a header
   you can click to **collapse** it and reclaim vertical space; your choices persist across sessions.
+- **Drives update live** — plug in a USB stick or external disk and it appears in the **Drives**
+  section within a few seconds, with its free-space bar and eject button; unplug (or eject) one and it
+  drops out. No relaunch or manual refresh needed.
 - **Eject a removable drive** — a **removable** drive (a USB stick or external disk) shows a small
   **eject** button on its sidebar row, and a **Safely eject** item in its right-click menu. Choosing it
   flushes and dismounts the volume so Windows reports it safe to remove. Fixed/system and network drives
