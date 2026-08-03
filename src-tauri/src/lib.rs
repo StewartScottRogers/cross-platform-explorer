@@ -53,6 +53,12 @@ mod agent_shadow;
 /// rather than in `cpe-server`).
 mod pty;
 
+/// System-tray icon + quick-access menu + show/hide + close-to-tray (CPE-1272, epic CPE-713). Desktop-only
+/// (mobile has no system tray). Renders `cpe_server::tray_quick::QuickAccess::items()` and wires the tray's
+/// events; see the module docs. Gated the same way as the tray plugin bits below.
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
+mod tray;
+
 /// The session audit journal (CPE-800), pure window-geometry resolver (CPE-598), and Agent Board
 /// backend (CPE-520) now live in the `cpe-server` crate (CPE-815); re-export their module paths so
 /// existing `audit_journal::` / `geometry::` / `ticket_board::` references resolve unchanged.
@@ -3933,6 +3939,26 @@ fn read_settings(app: tauri::AppHandle) -> Result<String, String> {
 #[cfg_attr(feature = "specta-bindings", specta::specta)]
 fn write_settings(app: tauri::AppHandle, contents: String) -> Result<(), String> {
     cpe_server::settings::save(&server_ctx::TauriCtx::new(&app), &contents)
+}
+
+/// Record a folder the user just opened into the system-tray quick-access list (CPE-1272, epic CPE-713):
+/// it moves to the front of "recents", is persisted, and the tray menu is refreshed. The frontend fires
+/// this on every folder navigation (`recordRecentFolder`). Not annotated for typed bindings — it takes
+/// only strings, so callers use the busy-cursor `invoke` wrapper. A no-op on mobile (no system tray).
+#[tauri::command]
+// The `return` reads as needless on desktop (where it's the last statement once the mobile arm below is
+// cfg'd out), but it's required so the two mutually-exclusive cfg arms both type-check.
+#[allow(clippy::needless_return)]
+fn tray_note_folder(app: tauri::AppHandle, path: String, label: String) -> Result<(), String> {
+    #[cfg(not(any(target_os = "android", target_os = "ios")))]
+    {
+        return tray::note_folder(&app, &path, &label);
+    }
+    #[cfg(any(target_os = "android", target_os = "ios"))]
+    {
+        let _ = (&app, &path, &label);
+        Ok(())
+    }
 }
 
 // ---- Tag store (CPE-635, epic CPE-614) -------------------------------------------------------
@@ -8912,10 +8938,41 @@ pub fn run() {
             }
             let win = wb.build()?;
 
+            // Close-to-tray (CPE-1272, epic CPE-713): when the Settings toggle `cpe.closeToTray` is on,
+            // a window close HIDES the window (leaving the app tray-resident) instead of quitting; Quit
+            // stays available from the tray menu. Default off — the flag is read fresh on each close, so
+            // a plain close still quits unless the user opted in. Desktop-only (this whole block is).
+            //
+            // Critically, hide-to-tray is ALSO gated on a tray icon actually existing: `tray::setup`
+            // fails non-fatally (e.g. a Linux DE with no notification-area host), and hiding without a
+            // tray would strand the window with no way to restore it and no tray Quit. If there's no
+            // tray, we fall through to a normal close/quit so the user is never trapped.
+            {
+                let handle = app.handle().clone();
+                let win_for_close = win.clone();
+                win.on_window_event(move |event| {
+                    if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                        let tray_present = handle.tray_by_id(tray::TRAY_ID).is_some();
+                        if tray::should_hide_to_tray(tray_present, tray::close_to_tray_enabled(&handle)) {
+                            api.prevent_close();
+                            let _ = win_for_close.hide();
+                        }
+                    }
+                });
+            }
+
             // `main` is in the window-state plugin's skip_initial_state list, so restore its saved
             // geometry here (deterministic) BEFORE the CLI flags override it — restore then override.
             let _ = win.restore_state(StateFlags::all());
             apply_cli_geometry(app.handle());
+
+            // System-tray icon + quick-access menu + show/hide (CPE-1272, epic CPE-713). Built after the
+            // window exists so its click/menu handlers can toggle/show it. Reuses the bundled app icon, so
+            // no new bundle resource (CPE-1271 guard stays green). A failure here is logged, not fatal —
+            // the explorer still works without a tray.
+            if let Err(e) = tray::setup(app) {
+                eprintln!("tray: could not create system-tray icon: {e}");
+            }
         }
         #[cfg(feature = "sidecar-platform")]
         reap_orphan_session_daemons_on_startup(app.handle());
@@ -8984,6 +9041,7 @@ pub fn run() {
             cancel_thumbnails_stream,
             read_settings,
             write_settings,
+            tray_note_folder,
             load_tags,
             set_tags,
             tag_counts,

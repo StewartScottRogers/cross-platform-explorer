@@ -37,6 +37,14 @@ it — the interface switches instantly and remembers your choice. Right-to-left
 Hebrew, Persian, Urdu) mirror the layout. English is fully translated and is the fallback for any string
 a language hasn't been translated yet.
 
+## System tray
+
+Cross-Platform Explorer puts an icon in your system tray. **Click it** to show or hide the window, or
+**right-click** it for a menu that lists your recent and pinned folders — pick one to jump straight there.
+The menu also has **Show/Hide Window** and **Quit**. By default, closing the window quits the app; turn on
+**Settings → System tray → Close to tray instead of quitting** to keep it running in the tray when you
+close the window (Quit from the tray menu still exits).
+
 ## Keyboard
 
 Common shortcuts: navigate with the arrow keys, Enter to open, Backspace to go up, Ctrl+T for a new tab,

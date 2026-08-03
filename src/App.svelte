@@ -1,7 +1,7 @@
 <script lang="ts">
   import { onMount, onDestroy, tick } from "svelte";
   import { convertFileSrc } from "@tauri-apps/api/core";
-  import { rawInvoke, createChannel, unwrap } from "./lib/invoke";
+  import { invoke, rawInvoke, createChannel, unwrap } from "./lib/invoke";
   // Generated typed command client (CPE-953). First migrated call site — proves the typed surface works
   // end-to-end (routes through the busy-cursor invoke); the broader migration is incremental.
   import { commands } from "./lib/bindings.gen";
@@ -1038,6 +1038,8 @@
   let unlistenTransferDone: (() => void) | null = null;
   let unlistenOpenDocs: (() => void) | null = null;
   let unlistenSpotlightOpen: (() => void) | null = null;
+  /** Teardown for the system-tray quick-access jump listener (CPE-1272). */
+  let unlistenTrayOpen: (() => void) | null = null;
   // OS file drop-in (CPE-670): overlay shown while OS files are dragged over the window.
   let osDragActive = false;
   let unlistenOsDrop: (() => void) | null = null;
@@ -4066,6 +4068,10 @@
     const name = path.split(/[\\/]/).filter(Boolean).pop() ?? path;
     recentFolders = settings.addRecent(recentFolders, { path, name });
     settings.saveRecentFolders(recentFolders);
+    // Mirror into the system-tray quick-access list (CPE-1272, epic CPE-713) so the tray menu offers a
+    // one-click jump back here. Fire-and-forget: the tray is a nicety, never blocking navigation, and it's
+    // simply absent outside a desktop Tauri build (the call no-ops / rejects, which we swallow).
+    void invoke("tray_note_folder", { path, label: name }).catch(() => {});
   }
 
   /** App-level Settings gear: restore every preference to its default. */
@@ -4416,6 +4422,13 @@
       spotlightOpen = true;
     }).then((un) => (unlistenSpotlightOpen = un)).catch(() => {});
 
+    // System-tray quick-access jump (CPE-1272, epic CPE-713): the tray backend shows/focuses the window
+    // and emits this with the chosen folder path; navigate there through the normal navigation path.
+    listen<string>("tray://open-folder", (e) => {
+      const path = e.payload;
+      if (path) navigate(path);
+    }).then((un) => (unlistenTrayOpen = un)).catch(() => {});
+
     // OS file drop-in (CPE-670): files dragged from the desktop/Explorer onto the window are copied into
     // the folder under the cursor (else the current folder). A themed overlay shows while dragging over.
     // Guarded: outside a Tauri webview (e.g. the jsdom test env) this API is absent — drop-in is then
@@ -4503,6 +4516,7 @@
     unlistenTransferDone?.();
     unlistenOpenDocs?.();
     unlistenSpotlightOpen?.();
+    unlistenTrayOpen?.();
     unlistenOsDrop?.();
     unlistenActivity?.();
     if (watchRefreshTimer) clearTimeout(watchRefreshTimer);
