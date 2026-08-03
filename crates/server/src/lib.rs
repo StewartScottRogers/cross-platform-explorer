@@ -258,6 +258,12 @@ pub mod spotlight_frecency;
 /// (CPE-1006, epic CPE-1002). No AI, no I/O, no new deps.
 pub mod orphan_sidecars;
 
+/// Orphaned-sidecar **scan** pipeline (CPE-1283, epic CPE-1002): walks a folder (optionally
+/// recursive, skip-unreadable), groups its files per directory, and calls [`orphan_sidecars::
+/// find_orphans`] on each group — the adapter [`orphan_sidecars`]'s own docs describe as the
+/// caller's job. Command/UI wiring is a separate ticket (CPE-1287).
+pub mod orphan_sidecars_scan;
+
 /// Filename search — substring/glob/brace-group matching + the shared streaming walker (CPE-603/697/666).
 pub mod name_search;
 
