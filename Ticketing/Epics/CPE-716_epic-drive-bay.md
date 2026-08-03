@@ -2,7 +2,7 @@
 id: CPE-716
 title: "EPIC: Drive bay — removable & network volume manager"
 type: Task
-status: Proposed
+status: In Progress
 priority: Low
 component: Multiple
 tags: [epic]

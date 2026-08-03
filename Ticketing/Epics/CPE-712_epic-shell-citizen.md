@@ -2,7 +2,7 @@
 id: CPE-712
 title: "EPIC: Shell citizen — OS context-menu & default file manager"
 type: Task
-status: Proposed
+status: In Progress
 priority: Medium
 component: Multiple
 tags: [epic]
