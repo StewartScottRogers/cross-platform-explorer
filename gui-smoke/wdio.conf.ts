@@ -18,7 +18,7 @@
 // A real fix (a non-activating/off-screen/`--test-mode` launch) is tracked as a CPE-1046 follow-up
 // on the app side; until that lands, do not run this suite on a machine someone is actively using —
 // CI (windows-latest, no interactive user) is the intended place to run it.
-import { spawn, type ChildProcess } from "node:child_process";
+import { spawn, spawnSync, type ChildProcess } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -634,6 +634,80 @@ function seedThumbnailGalleryFixture(tmpDir: string): void {
   fs.writeFileSync(path.join(dir, THUMB_GALLERY_BADFONT_NAME), "not a real font, just bytes\n", "utf-8");
 }
 
+// --- CPE-1268: pdf + video real-thumbnail regression pin (guards CPE-1267) ----------------------
+// CPE-1267 was a silent drift: the frontend `hasThumbnail` gate (src/lib/filetypes.ts) fell behind
+// the backend `thumb_source` dispatch, so the grid never even REQUESTED pdf/video thumbnails. The
+// always-run backstop is the two-sided parity guard (filetypes.test.ts ↔ thumb_source.rs); THIS
+// gui-smoke fixture is the end-to-end proof at the GUI: a real one-page PDF + a real tiny video, in
+// their own isolated subfolder, that the Gallery view must render as REAL `.thumb-img` tiles.
+//
+// NOTE on native deps: pdf rendering needs pdfium and video needs ffmpeg. The smoke binary is an
+// UNBUNDLED `--no-bundle` release build, so those resolve via the OS search path (PATH / system
+// library), NOT from `bundle.resources`. ffmpeg is reliably on PATH in CI (the video-thumb install
+// step) and on dev machines, so the video tile renders; pdfium is often absent, so the PDF tile's
+// real-render assertion is best-effort (logged, never fails the run) while its tile MOUNT — the actual
+// CPE-1267 regression surface — is asserted unconditionally. gui-smoke is non-blocking anyway (CPE-1048).
+export const THUMB_FORMATS_DIR_NAME = "CPE-1268-pdf-video-thumbnails";
+export const THUMB_FORMATS_PDF_NAME = "CPE-1268-doc.pdf";
+export const THUMB_FORMATS_VIDEO_NAME = "CPE-1268-clip.mp4";
+
+/** A strictly-valid one-page PDF (200×200) drawing a filled blue rectangle so the rendered first-page
+ *  thumbnail has real, non-blank content. Built by hand with byte-accurate xref offsets — no PDF lib.
+ *  `latin1` throughout so byte lengths equal string lengths for the offset/`/Length` maths. */
+function minimalOnePagePdf(): Buffer {
+  const objs: string[] = [];
+  objs[1] = "1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n";
+  objs[2] = "2 0 obj\n<< /Type /Pages /Kids [3 0 R] /Count 1 >>\nendobj\n";
+  objs[3] =
+    "3 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 200 200] /Contents 4 0 R /Resources << >> >>\nendobj\n";
+  const content = "0 0 1 rg\n20 20 160 160 re\nf\n";
+  objs[4] = `4 0 obj\n<< /Length ${content.length} >>\nstream\n${content}endstream\nendobj\n`;
+
+  let body = "%PDF-1.4\n";
+  const offsets: number[] = [];
+  for (let i = 1; i <= 4; i++) {
+    offsets[i] = Buffer.byteLength(body, "latin1");
+    body += objs[i];
+  }
+  const xrefStart = Buffer.byteLength(body, "latin1");
+  let xref = "xref\n0 5\n0000000000 65535 f \n";
+  for (let i = 1; i <= 4; i++) {
+    xref += `${offsets[i].toString().padStart(10, "0")} 00000 n \n`;
+  }
+  const trailer = `trailer\n<< /Size 5 /Root 1 0 R >>\nstartxref\n${xrefStart}\n%%EOF\n`;
+  return Buffer.from(body + xref + trailer, "latin1");
+}
+
+/** Seeds the CPE-1268 pdf/video subfolder. The PDF is always written; the video is generated with the
+ *  PATH `ffmpeg` (same binary the app resolves), and skipped — with a log — if ffmpeg isn't available
+ *  at seed time (in which case the app couldn't render it either). Returns which fixtures were seeded so
+ *  the spec knows what to assert. */
+function seedThumbnailFormatsFixture(tmpDir: string): { pdf: boolean; video: boolean } {
+  const dir = path.join(tmpDir, THUMB_FORMATS_DIR_NAME);
+  fs.mkdirSync(dir, { recursive: true });
+
+  fs.writeFileSync(path.join(dir, THUMB_FORMATS_PDF_NAME), minimalOnePagePdf());
+
+  let video = false;
+  const videoPath = path.join(dir, THUMB_FORMATS_VIDEO_NAME);
+  try {
+    const r = spawnSync(
+      "ffmpeg",
+      ["-y", "-f", "lavfi", "-i", "testsrc=duration=1:size=160x120:rate=5", "-pix_fmt", "yuv420p", videoPath],
+      { stdio: "ignore" },
+    );
+    video = r.status === 0 && fs.existsSync(videoPath) && fs.statSync(videoPath).size > 0;
+    if (!video) {
+      // eslint-disable-next-line no-console
+      console.warn("[gui-smoke] CPE-1268: ffmpeg unavailable/failed at seed — video tile will be skipped");
+    }
+  } catch {
+    // eslint-disable-next-line no-console
+    console.warn("[gui-smoke] CPE-1268: ffmpeg not on PATH at seed — video tile will be skipped");
+  }
+  return { pdf: true, video };
+}
+
 // --- CPE-1241: shred-dialog fixture (epic CPE-738) ----------------------------------------------
 // A DEDICATED subfolder + throwaway file for shred-dialog.smoke.ts's render pin of
 // `ShredConfirmDialog` (CPE-1240) — the one destructive surface in the app with NO trash fallback
@@ -860,6 +934,10 @@ export const config: WebdriverIO.Config = {
     // gallery render pin (see block above) — same tmpDir, same single app launch.
     seedThumbnailGalleryFixture(tmpDir);
 
+    // CPE-1268: seed a real one-page PDF + a tiny (ffmpeg-generated) video for the pdf/video real-
+    // thumbnail regression pin guarding CPE-1267 (see block above). Best-effort video (needs ffmpeg).
+    const thumbFormatsFixture = seedThumbnailFormatsFixture(tmpDir);
+
     // CPE-1241: seed a dedicated throwaway file for the ShredConfirmDialog render pin (see block
     // above) — its own subfolder so nothing else is ever at risk.
     seedShredFixture(tmpDir);
@@ -881,7 +959,11 @@ export const config: WebdriverIO.Config = {
 
     fs.writeFileSync(
       STATE_FILE,
-      JSON.stringify({ tmpDir, linkBadgeFixture: { supported: linkBadgeSupported } }),
+      JSON.stringify({
+        tmpDir,
+        linkBadgeFixture: { supported: linkBadgeSupported },
+        thumbFormatsFixture,
+      }),
       "utf-8",
     );
   },

@@ -10331,8 +10331,11 @@ mod tests {
         assert!(!store.contains_key(&input), "tag entry should be pruned back to nothing after undo");
     }
 
-    /// A minimal valid PNG, built with the `image` crate (already a real dependency, used elsewhere
-    /// in this test module for fixtures) rather than hand-rolled bytes.
+    /// A minimal valid PNG, built with the `image` crate (already a real dependency) rather than
+    /// hand-rolled bytes. Its only caller is the trash-restore test below, which is gated to Windows +
+    /// Linux (macOS has no programmatic trash listing), so this helper carries the same `cfg`; without
+    /// it the fn is dead code on macOS and `-D warnings` fails the build there (CPE-1268).
+    #[cfg(any(target_os = "windows", target_os = "linux"))]
     fn cpe_1194_test_png_bytes() -> Vec<u8> {
         let img = image::RgbImage::from_pixel(4, 4, image::Rgb([200u8, 40, 60]));
         let mut buf = std::io::Cursor::new(Vec::new());
@@ -10342,12 +10345,64 @@ mod tests {
         buf.into_inner()
     }
 
+    /// Probes whether THIS environment can perform a full trash *round-trip* (delete → list →
+    /// restore), not just whether the platform's API exists. A headless CI runner — e.g. GitHub's
+    /// Windows Server image, which runs the job in a non-interactive session with no working Recycle
+    /// Bin — can move a file to the trash but then cannot list/restore it, so the round-trip fails
+    /// there through no fault of the product (CPE-1268). Tests that assert an undo-via-trash round-trip
+    /// skip (not fail) when this returns false. This is purely a test-environment probe: real desktops
+    /// round-trip fine, and the product guarantee is unchanged.
+    #[cfg(any(target_os = "windows", target_os = "linux"))]
+    fn trash_roundtrip_available() -> bool {
+        let dir = match tempfile::tempdir() {
+            Ok(d) => d,
+            Err(_) => return false,
+        };
+        let probe = dir.path().join("cpe-trash-roundtrip-probe.tmp");
+        if fs::write(&probe, b"probe").is_err() {
+            return false;
+        }
+        if trash::delete(&probe).is_err() {
+            return false;
+        }
+        // It must be listable back out of the trash by its original path...
+        let item = match trash::os_limited::list() {
+            Ok(items) => items
+                .into_iter()
+                .find(|i| i.original_parent.join(&i.name) == probe),
+            Err(_) => None,
+        };
+        let item = match item {
+            Some(i) => i,
+            None => return false,
+        };
+        // ...and restorable to that path.
+        if trash::os_limited::restore_all([item]).is_err() {
+            return false;
+        }
+        let restored = probe.exists();
+        let _ = fs::remove_file(&probe);
+        restored
+    }
+
     // Trash restore (`trash::os_limited::{list, restore_all}`) is only implemented on Windows and
     // Linux (see `restore_from_trash_impl` / CPE-044) — macOS has no programmatic trash listing API,
     // so this scenario cannot be exercised there. Mirrors the existing platform split.
     #[cfg(any(target_os = "windows", target_os = "linux"))]
     #[test]
     fn macro_run_convert_step_then_undo_restores_the_original_bytes_via_trash() {
+        // CPE-1268: skip (don't fail) on a runner with no working trash round-trip — see
+        // `trash_roundtrip_available`. The product guarantee is proven on any real desktop / a CI
+        // runner whose Recycle Bin works (Linux does; a headless Windows Server session may not).
+        if !trash_roundtrip_available() {
+            eprintln!(
+                "skipping trash round-trip test: this environment cannot delete→list→restore via the \
+                 OS trash (e.g. a headless CI Windows Server session with no working Recycle Bin) — \
+                 CPE-1268"
+            );
+            return;
+        }
+
         // CPE-1194: undo of a `convert` step used to re-encode back to the source extension (lossy).
         // The forward step now trashes the original instead of deleting it, so undo can restore the
         // exact original bytes from the OS trash — proven here by a byte-for-byte comparison, not

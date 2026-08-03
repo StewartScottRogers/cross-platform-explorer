@@ -126,6 +126,38 @@ mod tests {
         d
     }
 
+    /// CPE-1268 regression pin for CPE-1267 (frontend/backend thumbnail-format drift). This is the
+    /// backend anchor of a two-sided parity guard: the canonical list below is the set of **explicit,
+    /// non-photo** extensions `decode_thumb_image` dispatches to a dedicated renderer (i.e. everything
+    /// that is NOT handled by the generic `image`-crate `_` arm). The identical list is pinned on the
+    /// frontend in `src/lib/filetypes.ts` (`THUMBNAIL_EXTRA_EXTS`) and asserted in `filetypes.test.ts`.
+    /// If you add or remove a non-photo thumbnail format in `decode_thumb_image` / `VIDEO_EXTENSIONS`,
+    /// update this list AND the frontend one together — CPE-1267 was exactly the two silently diverging.
+    #[cfg(all(feature = "pdf-thumb", feature = "video-thumb"))]
+    #[test]
+    fn explicit_nonphoto_dispatch_set_matches_the_frontend_thumbnail_extra_exts() {
+        // The static match-arm extensions in `decode_thumb_image` (psd/svg/pdf + the font family)...
+        let mut canonical: Vec<&str> = vec!["psd", "svg", "pdf", "ttf", "otf", "woff", "woff2"];
+        // ...plus the video family, taken straight from the single source of truth for it.
+        canonical.extend_from_slice(crate::thumb_video::VIDEO_EXTENSIONS);
+        canonical.sort_unstable();
+
+        let expected_mirroring_filetypes_ts: Vec<&str> = {
+            let mut v = vec![
+                "psd", "svg", "ttf", "otf", "woff", "woff2", "pdf", // thumb_source.rs explicit arms
+                "mp4", "mov", "mkv", "webm", "avi", "m4v", "mpg", "mpeg", "wmv", "flv", // VIDEO_EXTENSIONS
+            ];
+            v.sort_unstable();
+            v
+        };
+
+        assert_eq!(
+            canonical, expected_mirroring_filetypes_ts,
+            "backend non-photo thumbnail dispatch drifted from the canonical list — update BOTH this \
+             list and src/lib/filetypes.ts THUMBNAIL_EXTRA_EXTS (CPE-1268/CPE-1267)"
+        );
+    }
+
     /// Build a minimal, valid, **uncompressed** 8BPS PSD by hand: a 26-byte file header (RGB, 8-bit,
     /// `width` x `height`), three empty length-prefixed sections (color mode data / image resources /
     /// layer-and-mask — each just a zero `u32` length, which every section parser accepts as "empty"),

@@ -129,10 +129,27 @@ impl PtySession {
     /// grace-period polling already reaped the child (`std::process::Child` caches the exit status once
     /// observed), and it's the actual reap when escalation was needed.
     pub fn kill(&mut self) -> Result<(), String> {
-        let r = self.child.kill().map_err(|e| e.to_string());
+        // CPE-1268: an idempotent kill must tolerate an already-exited/already-reaped child. On Unix,
+        // once a prior `try_wait()`/`is_running()` poll (or `kill()` itself) has reaped the process,
+        // `std::process::Child::kill()` returns `Err` ("invalid argument: can't kill an exited
+        // process" / ESRCH). That is NOT a failure — the child is already dead, which is exactly what
+        // kill() promises. Fast-path it: if the child has already exited, closing the ConPTY is all
+        // that's left to do.
+        if self.try_wait().is_some() {
+            self.master = None; // drop the master → close the ConPTY → the output reader EOFs
+            return Ok(());
+        }
+        let kill_res = self.child.kill();
         let _ = self.child.wait(); // reap unconditionally -- see CPE-1246/CPE-1244 doc comment above
         self.master = None; // drop the master → close the ConPTY → the output reader EOFs
-        r
+        match kill_res {
+            Ok(()) => Ok(()),
+            // The child may have exited on its own in the window between the try_wait check above and
+            // the kill signal; the unconditional wait() above has since reaped it, so a kill error that
+            // only means "the process was already gone" is success, not failure.
+            Err(_) if self.try_wait().is_some() => Ok(()),
+            Err(e) => Err(e.to_string()),
+        }
     }
 
     /// Wait for the child to exit and return its exit code.
