@@ -4,7 +4,7 @@ title: Drag files OUT to other OS applications
 type: feature
 component: Multiple
 priority: medium
-status: Deferred
+status: Doing
 tags: deferred-internal
 created: 2026-07-18
 epic: CPE-661
