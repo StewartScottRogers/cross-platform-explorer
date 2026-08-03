@@ -494,6 +494,13 @@ pub mod vector_index;
 /// (CPE-982, epic CPE-976). A real backend is deferred + feature-gated.
 pub mod embedder;
 
+/// Real, configurable embedder over an OpenAI-compatible `/embeddings` endpoint (LM Studio/Ollama local,
+/// or OpenAI/others with a key) — a genuine [`embedder::Embedder`] behind the same seam as `FakeEmbedder`
+/// (CPE-1273, epic CPE-976). The `ureq` transport is feature-gated (`http-embedder`) so the lean default
+/// build pulls in zero HTTP/TLS code; the request-build/response-parse logic is a transport-injectable
+/// seam, unit-tested with no network. Selected from persisted config in [`content_index`].
+pub mod http_embedder;
+
 /// Semantic index pipeline — chunk a document, embed each chunk via an [`embedder::Embedder`], index it in
 /// [`vector_index`], and search per document (best chunk wins) (CPE-983, epic CPE-976). Pure.
 pub mod semantic_index;

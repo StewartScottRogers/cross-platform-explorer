@@ -8,6 +8,10 @@ import {
   loadSpotlightHotkeyEnabled, saveSpotlightHotkeyEnabled,
   loadSpotlightHotkeyChord, saveSpotlightHotkeyChord,
   DEFAULT_SPOTLIGHT_HOTKEY_CHORD,
+  loadContentEmbedderEnabled, saveContentEmbedderEnabled,
+  loadContentEmbedderBaseUrl, saveContentEmbedderBaseUrl,
+  loadContentEmbedderModel, saveContentEmbedderModel,
+  loadContentEmbedderConfig,
 } from "./settings";
 import type { RecentFile, Favorite } from "./types";
 import type { WorkspaceTab } from "./workspaces";
@@ -106,6 +110,42 @@ describe("spotlightHotkeyEnabled / spotlightHotkeyChord (CPE-1215)", () => {
     saveSpotlightHotkeyChord("Alt+Space");
     expect(loadSpotlightHotkeyChord()).toBe("Alt+Space");
     saveSpotlightHotkeyChord(DEFAULT_SPOTLIGHT_HOTKEY_CHORD); // reset for other tests
+  });
+});
+
+// CPE-1273 (epic CPE-976): the configurable real embedder for content search. OFF by default so content
+// search keeps using the local dependency-free embedder (no key, no network). The enabled/URL/model
+// persist here; the API KEY never does (it lives only in the OS keychain, via content_embedder_set_key).
+describe("contentEmbedder config (CPE-1273)", () => {
+  it("defaults to disabled with blank endpoint + model", () => {
+    expect(loadContentEmbedderEnabled()).toBe(false);
+    expect(loadContentEmbedderBaseUrl()).toBe("");
+    expect(loadContentEmbedderModel()).toBe("");
+    expect(loadContentEmbedderConfig()).toEqual({ enabled: false, base_url: "", model: "" });
+  });
+
+  it("round-trips the enabled flag, endpoint, and model", () => {
+    saveContentEmbedderEnabled(true);
+    saveContentEmbedderBaseUrl("http://localhost:1234/v1");
+    saveContentEmbedderModel("text-embedding-3-small");
+    expect(loadContentEmbedderConfig()).toEqual({
+      enabled: true,
+      base_url: "http://localhost:1234/v1",
+      model: "text-embedding-3-small",
+    });
+    // reset for other tests
+    saveContentEmbedderEnabled(false);
+    saveContentEmbedderBaseUrl("");
+    saveContentEmbedderModel("");
+  });
+
+  it("the assembled config carries NO api key field (the key lives only in the keychain)", () => {
+    saveContentEmbedderEnabled(true);
+    const cfg = loadContentEmbedderConfig();
+    expect(Object.keys(cfg).sort()).toEqual(["base_url", "enabled", "model"]);
+    expect(cfg).not.toHaveProperty("api_key");
+    expect(cfg).not.toHaveProperty("key");
+    saveContentEmbedderEnabled(false);
   });
 });
 

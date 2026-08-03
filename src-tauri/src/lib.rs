@@ -3682,6 +3682,37 @@ fn content_index_dir(app: &tauri::AppHandle) -> Result<std::path::PathBuf, Strin
     Ok(dir)
 }
 
+// ---- Configurable real embedder for content search (CPE-1273, epic CPE-976) -----------------------
+// Content search (CPE-1262/1263) defaults to the local, dependency-free FakeEmbedder (no key, no
+// network). This lets the user opt into a REAL, OpenAI-compatible embeddings endpoint (a local LM Studio /
+// Ollama server, or OpenAI/others with a key) via the "AI content search" Settings section. The
+// enabled/base-URL/model config is persisted by the frontend (settings.ts) and passed to
+// `content_index_build`/`content_search`; the API KEY is stored ONLY in the OS keychain (never in
+// settings.json), fetched here through the same `SecretAccess` seam the vault work uses (KeyringBackend).
+// The embedder SELECTION + the HttpEmbedder live in `cpe_server` (Tauri-free); these commands are thin.
+
+/// Keychain service/account the content-search embedder API key is stored under. A single global key
+/// (there's one configured endpoint), unlike the per-vault passphrase accounts.
+const EMBEDDER_KEY_SERVICE: &str = "cpe.content-embedder";
+const EMBEDDER_KEY_ACCOUNT: &str = "api-key";
+
+/// Fetch the saved content-embedder API key from the OS keychain, or `None`. Best-effort: a keychain
+/// error degrades to `None` (treated as "no key" — a local server needs none) rather than failing the
+/// whole build/search. The value is never logged.
+#[cfg(any(windows, target_os = "macos", target_os = "linux"))]
+fn content_embedder_key() -> Option<String> {
+    use cpe_server::vault_manager::SecretAccess;
+    KeyringBackend
+        .get(EMBEDDER_KEY_SERVICE, EMBEDDER_KEY_ACCOUNT)
+        .ok()
+        .flatten()
+        .filter(|k| !k.is_empty())
+}
+#[cfg(not(any(windows, target_os = "macos", target_os = "linux")))]
+fn content_embedder_key() -> Option<String> {
+    None
+}
+
 /// Registry of in-flight `content_index_build` cancel flags, keyed by [`cpe_server::content_index::root_key`],
 /// so a re-issued build for the same root cancels the prior one (mirrors `DIR_STREAM_CANCELS`/
 /// `INDEX_BUILD_CANCELS`).
@@ -3706,6 +3737,7 @@ async fn content_index_build(
     app: tauri::AppHandle,
     root: String,
     on_progress: tauri::ipc::Channel<cpe_server::content_index::ContentIndexProgress>,
+    embedder: Option<cpe_server::content_index::ContentEmbedderConfig>,
 ) -> Result<cpe_server::content_index::ContentIndexBuildStats, String> {
     use std::sync::atomic::Ordering;
     let dir = content_index_dir(&app)?;
@@ -3722,16 +3754,21 @@ async fn content_index_build(
     }
     let cancel_id = cancel.clone();
 
+    // Fetch the API key from the keychain (only used when an enabled HTTP embedder is configured; a
+    // local server needs none). `build_and_save` picks the embedder from `embedder` + this key, builds,
+    // and persists to the identity-keyed path — or the local untagged path when unconfigured (CPE-1273).
+    let api_key = content_embedder_key();
     let result = tauri::async_runtime::spawn_blocking(move || {
-        let (index, stats) = cpe_server::content_index::build_index_with(&root, &cancel, |p| {
-            let _ = on_progress.send(p);
-        })?;
-        // A build superseded mid-walk (cancel signalled by a newer same-root build) must not persist a
-        // partial index over the newer build's own save — same discipline as `IndexService::build_root`.
-        if !cancel.load(Ordering::Relaxed) {
-            cpe_server::content_index::save_index(&index, &dir, &root)?;
-        }
-        Ok(stats)
+        cpe_server::content_index::build_and_save(
+            &root,
+            &dir,
+            &cancel,
+            |p| {
+                let _ = on_progress.send(p);
+            },
+            embedder.as_ref(),
+            api_key,
+        )
     })
     .await
     .map_err(|e| e.to_string())?;
@@ -3757,10 +3794,68 @@ async fn content_search(
     root: String,
     query: String,
     k: usize,
+    embedder: Option<cpe_server::content_index::ContentEmbedderConfig>,
 ) -> Result<cpe_server::content_index::ContentSearchOutcome, String> {
     let dir = content_index_dir(&app)?;
+    let api_key = content_embedder_key();
     tauri::async_runtime::spawn_blocking(move || {
-        cpe_server::content_index::search_index(&dir, &root, &query, k)
+        cpe_server::content_index::search_configured(&dir, &root, &query, k, embedder.as_ref(), api_key)
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+/// Save (or clear) the content-search embedder API key in the OS keychain — the ONLY place it persists,
+/// never settings.json, never a log (CPE-1273). An empty/blank `key` deletes the stored key (so a local
+/// server that needs none leaves nothing behind). Async + `spawn_blocking`: the credential store is a
+/// blocking OS call (CPE-760/761). The key value is never echoed back.
+#[tauri::command]
+#[cfg_attr(feature = "specta-bindings", specta::specta)]
+async fn content_embedder_set_key(key: String) -> Result<(), String> {
+    #[cfg(any(windows, target_os = "macos", target_os = "linux"))]
+    {
+        tauri::async_runtime::spawn_blocking(move || {
+            use cpe_server::vault_manager::SecretAccess;
+            if key.trim().is_empty() {
+                KeyringBackend.delete(EMBEDDER_KEY_SERVICE, EMBEDDER_KEY_ACCOUNT)
+            } else {
+                KeyringBackend.set(EMBEDDER_KEY_SERVICE, EMBEDDER_KEY_ACCOUNT, &key)
+            }
+        })
+        .await
+        .map_err(|e| e.to_string())?
+    }
+    #[cfg(not(any(windows, target_os = "macos", target_os = "linux")))]
+    {
+        let _ = key;
+        Err("no OS keychain available on this platform".to_string())
+    }
+}
+
+/// Whether a content-search embedder API key is saved in the OS keychain — lets Settings show "key
+/// saved" without ever materialising (or transmitting) the value. Async + `spawn_blocking` (blocking OS
+/// credential-store call).
+#[tauri::command]
+#[cfg_attr(feature = "specta-bindings", specta::specta)]
+async fn content_embedder_has_key() -> Result<bool, String> {
+    tauri::async_runtime::spawn_blocking(content_embedder_key)
+        .await
+        .map(|k| k.is_some())
+        .map_err(|e| e.to_string())
+}
+
+/// Test an embeddings endpoint (the Settings "Test connection" button): embed a short probe string and
+/// report the detected vector dimensionality, or a clear error (unreachable, bad key, bad response) —
+/// never a panic (CPE-1273). Uses the key currently saved in the keychain, so the user can Save then Test.
+/// Ignores the `enabled` flag (you test before turning it on). Async + `spawn_blocking` (network I/O).
+#[tauri::command]
+#[cfg_attr(feature = "specta-bindings", specta::specta)]
+async fn content_embedder_test(
+    config: cpe_server::content_index::ContentEmbedderConfig,
+) -> Result<usize, String> {
+    let api_key = content_embedder_key();
+    tauri::async_runtime::spawn_blocking(move || {
+        cpe_server::content_index::probe_embedder(&config.base_url, &config.model, api_key)
     })
     .await
     .map_err(|e| e.to_string())?
@@ -9163,6 +9258,9 @@ pub fn run() {
             index_clear,
             content_index_build,
             content_search,
+            content_embedder_set_key,
+            content_embedder_has_key,
+            content_embedder_test,
             git_remote_url,
             open_external,
             run_as_admin,
@@ -9944,6 +10042,9 @@ pub fn export_bindings(out: &std::path::Path) -> Result<(), String> {
         index_clear,
         content_index_build,
         content_search,
+        content_embedder_set_key,
+        content_embedder_has_key,
+        content_embedder_test,
         git_remote_url,
         open_external,
         run_as_admin,

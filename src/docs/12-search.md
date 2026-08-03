@@ -107,6 +107,32 @@ UI).
 - If a search comes back with **no matches**, that means the index has no file scoring above zero for
   that query — try different wording, or rebuild the index if files changed recently.
 
+### Use a real embeddings model (optional)
+
+By default, "Search file contents" uses a small **built-in local model** — no key, no network, nothing
+leaves your machine. If you'd like stronger, more meaning-aware ranking, you can point it at a **real
+embeddings model** instead, in **Settings → AI content search**. It works with **any OpenAI-compatible
+`/embeddings` endpoint**:
+
+- **A local server (no key).** Run something like **LM Studio** or **Ollama** with an embedding model
+  loaded, then set the **Endpoint URL** to that server's address (for LM Studio, `http://localhost:1234/v1`)
+  and the **Model** to the embedding model's name. Leave the **API key** blank — a local server needs none.
+  Nothing leaves your machine.
+- **OpenAI or another hosted provider (with a key).** Set the **Endpoint URL** (e.g.
+  `https://api.openai.com/v1`), the **Model** (e.g. `text-embedding-3-small`), and paste your **API key**.
+  The key is stored only in your operating system's secure **keychain** — never in a settings file, never
+  in a log, and it's never shown back to you.
+
+Click **Test connection** to check the endpoint is reachable and see the vector size it reports. Then
+turn the section **on**. The endpoint URL may be given **with or without** the `/v1` segment — both work.
+
+> **Switching models rebuilds the index.** Each folder's content index is tied to the exact model that
+> built it, so when you enable a real model (or change the endpoint/model), the folder will show the
+> **"Build content index"** prompt again the next time you search it — build it once with the new model
+> and searches are fast again. Turning the feature back **off** returns to the built-in local model. If
+> the endpoint is unreachable when you build or search, you'll get a clear error rather than wrong
+> results — check that your server is running and the URL/model are correct.
+
 ## Instant search (Ctrl+K) — every indexed folder, any drive
 
 The two search boxes above both work **inside** a folder you've opened. **Instant Search** (**Ctrl+K**,

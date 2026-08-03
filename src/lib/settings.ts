@@ -31,7 +31,7 @@ import type { UserCommand } from "./userCommands";
 import { parseBindings, serializeBindings } from "./macroBindings";
 import type { MacroBinding } from "./macroBindings";
 import { parseFrecent, serializeFrecent } from "./spotlightFrecency";
-import type { Visit } from "./bindings.gen";
+import type { Visit, ContentEmbedderConfig } from "./bindings.gen";
 
 export const KEYS = {
   view: "cpe.view",
@@ -72,6 +72,9 @@ export const KEYS = {
   spotlightHotkeyChord: "cpe.spotlightHotkeyChord",
   spotlightFrecency: "cpe.spotlightFrecency",
   closeToTray: "cpe.closeToTray",
+  contentEmbedderEnabled: "cpe.contentEmbedderEnabled",
+  contentEmbedderBaseUrl: "cpe.contentEmbedderBaseUrl",
+  contentEmbedderModel: "cpe.contentEmbedderModel",
 } as const;
 
 const MAX_RECENTS = 20;
@@ -295,6 +298,35 @@ export const saveSpotlightHotkeyChord = (v: string) => write(KEYS.spotlightHotke
 // close. Off by default so a plain close still quits, never surprising the user.
 export const loadCloseToTray = (): boolean => read(KEYS.closeToTray, false, isBool);
 export const saveCloseToTray = (v: boolean) => write(KEYS.closeToTray, v);
+
+// AI content search — configurable real embedder (CPE-1273, epic CPE-976). Content search defaults to a
+// local, dependency-free embedder (no key, no network). When enabled with an endpoint + model, an
+// OpenAI-compatible embeddings server (a local LM Studio/Ollama, or OpenAI/others) is used instead. Off
+// by default — the plain feature is unchanged until the user opts in. The enabled/URL/model live here
+// (settings.json); the API KEY is NEVER stored here — it lives only in the OS keychain, written via the
+// `content_embedder_set_key` command. Empty defaults so a corrupt value degrades to "disabled/local".
+export const loadContentEmbedderEnabled = (): boolean =>
+  read(KEYS.contentEmbedderEnabled, false, isBool);
+export const saveContentEmbedderEnabled = (v: boolean) => write(KEYS.contentEmbedderEnabled, v);
+export const loadContentEmbedderBaseUrl = (): string =>
+  read(KEYS.contentEmbedderBaseUrl, "", isString);
+export const saveContentEmbedderBaseUrl = (v: string) => write(KEYS.contentEmbedderBaseUrl, v);
+export const loadContentEmbedderModel = (): string => read(KEYS.contentEmbedderModel, "", isString);
+export const saveContentEmbedderModel = (v: string) => write(KEYS.contentEmbedderModel, v);
+
+/**
+ * The content-search embedder config to pass to `content_index_build` / `content_search`. Always returns
+ * the object (the backend decides: disabled/blank → the local FakeEmbedder path); the API key is not
+ * included (the backend fetches it from the keychain). The one place callers assemble this, so the
+ * command args stay consistent.
+ */
+export function loadContentEmbedderConfig(): ContentEmbedderConfig {
+  return {
+    enabled: loadContentEmbedderEnabled(),
+    base_url: loadContentEmbedderBaseUrl(),
+    model: loadContentEmbedderModel(),
+  };
+}
 
 /** Append a network location, trimmed + de-duplicated (case/trailing-slash-insensitive). */
 export function addNetworkLocation(list: string[], path: string): string[] {

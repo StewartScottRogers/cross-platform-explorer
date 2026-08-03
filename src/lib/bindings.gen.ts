@@ -1790,9 +1790,9 @@ async indexClear() : Promise<void> {
  * final `ContentIndexBuildStats`. Async + `spawn_blocking` — the walk/chunk/embed is CPU+IO work and must
  * never run on the UI thread (CPE-760).
  */
-async contentIndexBuild(root: string, onProgress: TAURI_CHANNEL<ContentIndexProgress>) : Promise<Result<ContentIndexBuildStats, string>> {
+async contentIndexBuild(root: string, onProgress: TAURI_CHANNEL<ContentIndexProgress>, embedder: ContentEmbedderConfig | null) : Promise<Result<ContentIndexBuildStats, string>> {
     try {
-    return { status: "ok", data: await TAURI_INVOKE("content_index_build", { root, onProgress }) };
+    return { status: "ok", data: await TAURI_INVOKE("content_index_build", { root, onProgress, embedder }) };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
@@ -1804,9 +1804,50 @@ async contentIndexBuild(root: string, onProgress: TAURI_CHANNEL<ContentIndexProg
  * build" signal, not an error/crash. Async + `spawn_blocking` (loading + scoring the index is blocking
  * IO/CPU work).
  */
-async contentSearch(root: string, query: string, k: number) : Promise<Result<ContentSearchOutcome, string>> {
+async contentSearch(root: string, query: string, k: number, embedder: ContentEmbedderConfig | null) : Promise<Result<ContentSearchOutcome, string>> {
     try {
-    return { status: "ok", data: await TAURI_INVOKE("content_search", { root, query, k }) };
+    return { status: "ok", data: await TAURI_INVOKE("content_search", { root, query, k, embedder }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * Save (or clear) the content-search embedder API key in the OS keychain — the ONLY place it persists,
+ * never settings.json, never a log (CPE-1273). An empty/blank `key` deletes the stored key (so a local
+ * server that needs none leaves nothing behind). Async + `spawn_blocking`: the credential store is a
+ * blocking OS call (CPE-760/761). The key value is never echoed back.
+ */
+async contentEmbedderSetKey(key: string) : Promise<Result<null, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("content_embedder_set_key", { key }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * Whether a content-search embedder API key is saved in the OS keychain — lets Settings show "key
+ * saved" without ever materialising (or transmitting) the value. Async + `spawn_blocking` (blocking OS
+ * credential-store call).
+ */
+async contentEmbedderHasKey() : Promise<Result<boolean, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("content_embedder_has_key") };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * Test an embeddings endpoint (the Settings "Test connection" button): embed a short probe string and
+ * report the detected vector dimensionality, or a clear error (unreachable, bad key, bad response) —
+ * never a panic (CPE-1273). Uses the key currently saved in the keychain, so the user can Save then Test.
+ * Ignores the `enabled` flag (you test before turning it on). Async + `spawn_blocking` (network I/O).
+ */
+async contentEmbedderTest(config: ContentEmbedderConfig) : Promise<Result<number, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("content_embedder_test", { config }) };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
@@ -2945,6 +2986,28 @@ truncated: boolean }
  * which are already granted, and which are still undecided (need a consent prompt).
  */
 export type ConsentState = { requested: Capability[]; granted: Capability[]; undecided: Capability[] }
+/**
+ * Persisted selection of the embedder content search uses (CPE-1273, epic CPE-976). Off by default →
+ * the local [`FakeEmbedder`] (current behavior). When `enabled` with a `base_url` + `model`, an
+ * OpenAI-compatible [`crate::http_embedder::HttpEmbedder`] is used instead. The API **key is NOT here**
+ * — it lives in the OS keychain and is fetched separately at the command boundary and passed to
+ * [`resolve_configured_embedder`], so a key never persists in plaintext settings.
+ */
+export type ContentEmbedderConfig = { 
+/**
+ * When false (the default), content search uses the local [`FakeEmbedder`] and the legacy untagged
+ * index — no network, no key.
+ */
+enabled: boolean; 
+/**
+ * The embeddings server base URL, with or without `/v1` (e.g. `http://localhost:1234/v1` for LM
+ * Studio, or `https://api.openai.com/v1`). See [`crate::http_embedder::embeddings_url`].
+ */
+base_url: string; 
+/**
+ * The embedding model name the server expects (e.g. `text-embedding-3-small`, or a local model id).
+ */
+model: string }
 /**
  * One ranked `content_search` hit: the file, its similarity score, and a snippet of its text.
  */
