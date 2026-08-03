@@ -15,6 +15,7 @@
 // mirroring how `invoke.ts`/other lib modules keep the Tauri boundary a call site never has to guard by
 // hand.
 import { startDrag } from "@crabnebula/tauri-plugin-drag";
+import { resolveResource } from "@tauri-apps/api/path";
 
 /** Copy-vs-move hint for the OS drag, same vocabulary as the existing HTML5 drag (`dnd.ts`). Optional —
  *  omit it to let the OS/target decide (its native default). */
@@ -47,10 +48,41 @@ export interface StartFileDragOptions {
   onEvent?: (event: DragOutEvent) => void;
 }
 
-/** Bundled app icon used as the drag preview when the caller doesn't supply one. Good enough as a
- *  placeholder for this plumbing slice; the attended CPE-672/674 tickets that actually wire up drag-out
- *  can pass a more specific preview (a thumbnail, a multi-file badge, …) via `opts.icon`. */
+/** Relative RESOURCE identifier for the bundled app icon used as the drag preview when the caller
+ *  doesn't supply one. This is NOT a usable value on its own — the plugin's `icon` must be an absolute
+ *  filesystem path (CPE-1264 reviewer flag) — so it's resolved to an absolute path at runtime by
+ *  {@link resolveDragIcon}. `icons/icon.png` ships in `bundle.resources` (src-tauri/tauri.conf.json) so
+ *  `resolveResource` can turn it into a real on-disk path inside the app's resource directory. The
+ *  attended CPE-672/674 tickets that wire up drag-out can still pass a more specific preview (a
+ *  thumbnail, a multi-file badge, …) via `opts.icon`. */
 export const DEFAULT_DRAG_ICON = "icons/icon.png";
+
+// Resolve the bundled icon once and reuse it — `resolveResource` is a Tauri IPC round-trip, and a drag
+// starts on a mouse gesture where we want the icon ready synchronously (pre-warm it via
+// `resolveDragIcon()` at mount). Only a SUCCESSFUL absolute resolution is cached, so a transient failure
+// (called before the bridge is up) never poisons later calls.
+let cachedDragIcon: string | null = null;
+
+/**
+ * Resolve {@link DEFAULT_DRAG_ICON} to an ABSOLUTE filesystem path the plugin will accept, via Tauri's
+ * `resolveResource`. Falls back to the relative identifier if resolution fails (no Tauri bridge, resource
+ * missing) — best-effort, since a missing/relative icon only degrades the drag *preview*, never the drag
+ * itself. Never throws. Call it once at mount to pre-warm the cache so a later drag has the icon ready.
+ */
+export async function resolveDragIcon(): Promise<string> {
+  if (cachedDragIcon) return cachedDragIcon;
+  try {
+    const abs = await resolveResource(DEFAULT_DRAG_ICON);
+    if (abs && abs.length > 0) {
+      cachedDragIcon = abs;
+      return abs;
+    }
+  } catch {
+    // No Tauri IPC bridge (plain browser / jsdom) or the resource isn't present — fall through to the
+    // relative identifier rather than surfacing an error the caller would have to guard.
+  }
+  return DEFAULT_DRAG_ICON;
+}
 
 export type StartFileDragResult =
   /** The OS drag was started. (This resolves once the drag *starts*, not once it ends — see `onEvent`
@@ -81,7 +113,10 @@ export async function startFileDrag(
     return { status: "unavailable", reason: "no-paths" };
   }
 
-  const icon = opts.icon && opts.icon.length > 0 ? opts.icon : DEFAULT_DRAG_ICON;
+  // A caller-supplied icon is used verbatim (it's expected to already be absolute); otherwise resolve the
+  // bundled default to an absolute path — `startDrag`'s `icon` must be a real filesystem path, and a bare
+  // relative "icons/icon.png" was the CPE-1264 reviewer's flag.
+  const icon = opts.icon && opts.icon.length > 0 ? opts.icon : await resolveDragIcon();
 
   try {
     await startDrag(
