@@ -1738,6 +1738,74 @@ async findSimilarFolders(root: string) : Promise<Result<FolderSimResult, string>
 }
 },
 /**
+ * Score a ZIP archive at `path` for zip-bomb-like expansion ratio (CPE-1281, epic CPE-1002). Thin
+ * `spawn_blocking` dispatcher into [`cpe_server::archive_safety_scan::analyze_archive_safety`], which uses
+ * [`cpe_server::archive_safety::RatioLimits::default`] and never errors on its own — a corrupt, missing, or
+ * non-ZIP `path` yields a graceful zero-entry, non-dangerous report rather than an `Err`.
+ */
+async analyzeArchiveSafety(path: string) : Promise<Result<ArchiveSafetyReport, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("analyze_archive_safety", { path }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * Find the topmost cascade-empty directories under `root` (CPE-1282, epic CPE-1002) — a directory that is
+ * empty or contains only nested empty directories. Thin `spawn_blocking` dispatcher into
+ * [`cpe_server::empty_dirs_scan::find_empty_dirs`], which never errors — an unreadable/non-existent `root`
+ * yields an empty, non-truncated report.
+ */
+async findEmptyDirs(root: string) : Promise<Result<EmptyDirsReport, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("find_empty_dirs", { root }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * Find orphaned sidecar files (e.g. a `.srt`/`.xmp` with no matching primary) under `root` (CPE-1283, epic
+ * CPE-1002), using [`cpe_server::orphan_sidecars_scan`]'s default rules. `recursive` controls whether
+ * subdirectories are walked (each directory's sidecars are only ever paired against primaries in that same
+ * directory). Thin `spawn_blocking` dispatcher; never errors.
+ */
+async findOrphanSidecars(root: string, recursive: boolean) : Promise<Result<OrphanSidecarResult, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("find_orphan_sidecars", { root, recursive }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * Find dangling (target-missing) and cyclic (self/loop) symlinks under `root` (CPE-1284, epic CPE-1002).
+ * Thin `spawn_blocking` dispatcher into [`cpe_server::dangling_links_scan::find_dangling_links`], which
+ * errors when `root` isn't a directory.
+ */
+async findDanglingLinks(root: string) : Promise<Result<DanglingReport, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("find_dangling_links", { root }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * Sweep `root` for files whose sniffed content disagrees with their claimed extension (CPE-1285, epic
+ * CPE-1002) — e.g. a `.jpg` that's really a Windows PE. Thin `spawn_blocking` dispatcher into
+ * [`cpe_server::type_mismatch_scan::find_type_mismatches`]; never errors.
+ */
+async findTypeMismatches(root: string) : Promise<Result<MismatchReport, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("find_type_mismatches", { root }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
  * Propose an auto-organize plan for `dir` under `rule` — one [`cpe_server::organize::MoveProposal`] per
  * file. Read-only: moves nothing.
  */
@@ -2810,6 +2878,11 @@ span_ms: number }
  */
 export type ArchiveEntry = { name: string; size: number; is_dir: boolean }
 /**
+ * The result of scanning a real archive for zip-bomb risk: the pure ratio scoring plus scan bookkeeping
+ * (how many entries were actually considered, and whether [`MAX_ENTRIES`] truncated the scan).
+ */
+export type ArchiveSafetyReport = { report: RatioReport; entries_scanned: number; truncated: boolean }
+/**
  * The audio metadata columns a user can add to the details view — each maps to a friendly key
  * [`crate::media_meta_read::read_id3v2`] emits.
  */
@@ -3223,6 +3296,29 @@ export type CopilotPlanResult = { plan: FileOpPlan; summary: PlanSummary; violat
  */
 export type Corner = "top_left" | "top_right" | "bottom_left" | "bottom_right" | "center"
 /**
+ * One dangling link and why it was flagged.
+ */
+export type DanglingLink = { path: string; reason: DanglingReason }
+/**
+ * Why a link was classified as dangling.
+ */
+export type DanglingReason = 
+/**
+ * The target does not exist and following the target chain does not loop.
+ */
+"Missing" | 
+/**
+ * Following the chain of symlink targets (within the supplied `links`) revisits a path
+ * already seen in the walk — the link can never resolve to real content.
+ */
+"Cyclic"
+/**
+ * The result of a dangling/cyclic symlink scan: the flagged links (healthy symlinks are omitted,
+ * same convention as [`scan_dangling`]), how many filesystem entries were visited, and whether
+ * either cap truncated the walk.
+ */
+export type DanglingReport = { links: DanglingLink[]; scanned: number; truncated: boolean }
+/**
  * One redacted log line in a diagnostics response (CPE-323).
  */
 export type DiagLogLine = { 
@@ -3287,6 +3383,24 @@ export type DupGroup = { size: number; hash: string; paths: string[] }
  * considered, and whether the file cap was hit.
  */
 export type DupResult = { groups: DupGroup[]; files_scanned: number; truncated: boolean }
+/**
+ * The result of an empty-folder cascade scan: the topmost cascade-empty directory paths, how
+ * many directories were visited, and whether the walk cap was hit.
+ */
+export type EmptyDirsReport = { 
+/**
+ * Topmost cascade-empty directory paths, in deterministic pre-order (see
+ * [`crate::empty_dirs::cascade_empty`]).
+ */
+dirs: string[]; 
+/**
+ * How many directories were successfully read during the walk.
+ */
+scanned: number; 
+/**
+ * Set when [`EMPTY_DIRS_MAX`] was hit — the walk stopped early, so `dirs` may be incomplete.
+ */
+truncated: boolean }
 /**
  * Detailed metadata for the Properties dialog.
  */
@@ -3367,6 +3481,10 @@ export type FileOp =
  * An ordered plan: the concrete ops an instruction compiled to, executed top-to-bottom.
  */
 export type FileOpPlan = { ops: FileOp[] }
+/**
+ * An entry whose expansion ratio exceeded [`RatioLimits::max_entry_ratio`].
+ */
+export type FlaggedEntry = { name: string; ratio: number }
 /**
  * The kind of a fold range (drives the gutter glyph / default-collapsed heuristics later).
  */
@@ -3634,6 +3752,33 @@ fill: number;
  */
 indent: number }
 /**
+ * One flagged content/extension disagreement.
+ */
+export type MismatchHit = { 
+/**
+ * The full path of the flagged file.
+ */
+path: string; 
+/**
+ * The extension the file claims (lowercased, no leading dot).
+ */
+claimed_ext: string; 
+/**
+ * Human-readable name of the type actually sniffed from the file's bytes (e.g. "Windows
+ * executable/library").
+ */
+detected_label: string; 
+/**
+ * The canonical extension for the detected type (e.g. `"exe"` for a sniffed PE) — the first entry
+ * of [`crate::file_type::FileType::extensions`], which is always non-empty.
+ */
+detected_ext: string }
+/**
+ * The result of a type-mismatch tree sweep: every flagged file, how many regular files were
+ * considered, and whether [`MAX_FILES`] cut the walk short.
+ */
+export type MismatchReport = { hits: MismatchHit[]; scanned: number; truncated: boolean }
+/**
  * A proposed move: put file `name` into subfolder `target_subdir` (relative to its current folder).
  */
 export type MoveProposal = { name: string; target_subdir: string }
@@ -3708,6 +3853,11 @@ export type OrganizeRule =
  */
 "by_size_bucket"
 /**
+ * The result of an orphaned-sidecar scan: the orphaned sidecar files' full paths, how many files
+ * were scanned, and whether the file cap truncated the walk.
+ */
+export type OrphanSidecarResult = { orphans: string[]; scanned: number; truncated: boolean }
+/**
  * A window of rows from a data source: the columns, the row window (each cell stringified), and the
  * total row count when known (so the UI can size a scrollbar without loading everything).
  */
@@ -3743,6 +3893,11 @@ export type PlannedOp = { input: string; kind: string; detail: string }
  * Request priority, highest first. `Visible` = an on-screen row the user is looking at now.
  */
 export type Priority = "visible" | "prefetch" | "background"
+/**
+ * The result of scoring an archive's entries: totals, the overall ratio, any per-entry flags, and
+ * a single `dangerous` verdict.
+ */
+export type RatioReport = { total_compressed: number; total_uncompressed: number; overall_ratio: number; flagged: FlaggedEntry[]; dangerous: boolean }
 /**
  * Everything a replay view needs for one session, assembled from its durable audit journal.
  */
