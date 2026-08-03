@@ -311,6 +311,276 @@ pub fn write_flac(orig: &[u8], fields: &[MetaField]) -> Vec<u8> {
     out
 }
 
+// ---- EXIF / JPEG write-back (CPE-1288) ----
+
+/// Rebuild a JPEG (`orig`) with the four editable EXIF tags — ImageDescription / Artist / Copyright /
+/// UserComment (the ones [`crate::media_meta_read::read_exif`] marks `editable`) — taken from the
+/// `group == "exif"` fields in `fields`, encoded into a fresh Exif APP1 segment that **replaces** any
+/// existing Exif APP1 while preserving every other segment and the entropy-coded scan data byte-for-byte.
+///
+/// The new APP1 (`FFE1` + 2-byte big-endian length + `"Exif\0\0"` + a TIFF/Exif block built with the
+/// vendored `kamadak-exif` crate's experimental `Writer`) is inserted right after the SOI (`FFD8`) and any
+/// leading APP0 JFIF segment, matching where cameras place it; a pre-existing `Exif\0\0` APP1 anywhere in
+/// the header is stripped so re-writing is idempotent rather than stacking.
+///
+/// Read values are un-quoted first (the reader renders ASCII tags with surrounding quotes via
+/// `display_value`), so a field carried through unchanged round-trips; UserComment is written with the
+/// standard 8-byte `ASCII\0\0\0` character-code prefix, or, if the value is still the reader's `0x…` hex
+/// form, decoded back to its raw bytes so it round-trips too. Camera intrinsics (Make/Model/exposure/…)
+/// are never rebuilt — only the four editable tags are — so this is not a lossy re-encode of the whole IFD.
+///
+/// Returns `Err` (never panics) for non-JPEG/truncated input, when there are no editable EXIF fields to
+/// write, or when the encoded Exif block won't fit a single 64 KiB APP1 segment. **JPEG only** — for a
+/// TIFF the EXIF *is* the file's own IFD chain (rewriting it would drop the image strips/thumbnail), so
+/// `tif`/`tiff` are deliberately left out of [`crate::media_meta::is_writable`] for now.
+pub fn write_exif(orig: &[u8], fields: &[MetaField]) -> Result<Vec<u8>, String> {
+    if orig.len() < 2 || orig[0] != 0xFF || orig[1] != 0xD8 {
+        return Err("not a JPEG (missing SOI marker)".into());
+    }
+    let tiff = build_exif_tiff(fields)?;
+
+    // APP1 segment: FFE1 + 2-byte length (covers the length field itself + payload) + "Exif\0\0" + TIFF.
+    let payload_len = 6 + tiff.len();
+    let seg_len = payload_len + 2;
+    if seg_len > 0xFFFF {
+        return Err("EXIF data too large for a JPEG APP1 segment".into());
+    }
+    let mut app1 = Vec::with_capacity(4 + payload_len);
+    app1.extend_from_slice(&[0xFF, 0xE1]);
+    app1.extend_from_slice(&(seg_len as u16).to_be_bytes());
+    app1.extend_from_slice(b"Exif\0\0");
+    app1.extend_from_slice(&tiff);
+
+    let mut out = Vec::with_capacity(orig.len() + app1.len());
+    out.extend_from_slice(&orig[0..2]); // SOI
+    let mut pos = 2usize;
+    let mut inserted = false;
+    loop {
+        // Need at least a 2-byte marker to continue parsing the header.
+        if pos + 1 >= orig.len() {
+            if !inserted {
+                out.extend_from_slice(&app1);
+                inserted = true;
+            }
+            out.extend_from_slice(&orig[pos..]);
+            break;
+        }
+        if orig[pos] != 0xFF {
+            // Out of sync (or scan data we didn't parse into) — copy the remainder verbatim.
+            if !inserted {
+                out.extend_from_slice(&app1);
+                inserted = true;
+            }
+            out.extend_from_slice(&orig[pos..]);
+            break;
+        }
+        let marker = orig[pos + 1];
+        // A run of 0xFF fill bytes may precede a real marker; emit one and re-align.
+        if marker == 0xFF {
+            out.push(0xFF);
+            pos += 1;
+            continue;
+        }
+        // Stand-alone markers carry no length field: TEM (0x01), RSTn/SOI/EOI (0xD0..=0xD9).
+        if marker == 0x01 || (0xD0..=0xD9).contains(&marker) {
+            if !inserted {
+                out.extend_from_slice(&app1);
+                inserted = true;
+            }
+            out.extend_from_slice(&orig[pos..pos + 2]);
+            pos += 2;
+            if marker == 0xD9 {
+                // EOI — copy any trailer and stop.
+                out.extend_from_slice(&orig[pos..]);
+                break;
+            }
+            continue;
+        }
+        // Every other marker has a 2-byte big-endian length (which includes those 2 bytes).
+        if pos + 4 > orig.len() {
+            if !inserted {
+                out.extend_from_slice(&app1);
+                inserted = true;
+            }
+            out.extend_from_slice(&orig[pos..]);
+            break;
+        }
+        let seg_len_here = u16::from_be_bytes([orig[pos + 2], orig[pos + 3]]) as usize;
+        if seg_len_here < 2 {
+            return Err("malformed JPEG (segment length < 2)".into());
+        }
+        let seg_end = pos + 2 + seg_len_here;
+        if seg_end > orig.len() {
+            if !inserted {
+                out.extend_from_slice(&app1);
+                inserted = true;
+            }
+            out.extend_from_slice(&orig[pos..]);
+            break;
+        }
+        // SOS (0xDA): the scan data begins after it. Insert our APP1 (if not yet placed) then copy the
+        // SOS header and everything after it byte-for-byte.
+        if marker == 0xDA {
+            if !inserted {
+                out.extend_from_slice(&app1);
+                inserted = true;
+            }
+            out.extend_from_slice(&orig[pos..]);
+            break;
+        }
+        let payload = &orig[pos + 4..seg_end];
+        // Keep any leading APP0 (JFIF) ahead of our APP1, matching conventional segment order.
+        if marker == 0xE0 && !inserted {
+            out.extend_from_slice(&orig[pos..seg_end]);
+            pos = seg_end;
+            continue;
+        }
+        // First non-APP0 header segment: this is where the new Exif APP1 goes.
+        if !inserted {
+            out.extend_from_slice(&app1);
+            inserted = true;
+        }
+        // Strip a pre-existing Exif APP1 (replace, don't stack); keep every other segment verbatim.
+        if marker == 0xE1 && payload.starts_with(b"Exif\0\0") {
+            pos = seg_end;
+            continue;
+        }
+        out.extend_from_slice(&orig[pos..seg_end]);
+        pos = seg_end;
+    }
+    if !inserted {
+        out.extend_from_slice(&app1);
+    }
+    Ok(out)
+}
+
+/// Build a raw TIFF/Exif block (big-endian) carrying only the editable tags found in `fields`, via
+/// `kamadak-exif`'s experimental `Writer`. `Err` if no writable field is present (an Exif block must have
+/// at least one field) or the encoder fails.
+fn build_exif_tiff(fields: &[MetaField]) -> Result<Vec<u8>, String> {
+    let exif_fields = build_exif_fields(fields);
+    if exif_fields.is_empty() {
+        return Err("no editable EXIF fields to write".into());
+    }
+    let mut writer = exif::experimental::Writer::new();
+    for f in &exif_fields {
+        writer.push_field(f);
+    }
+    let mut cursor = std::io::Cursor::new(Vec::new());
+    writer.write(&mut cursor, false).map_err(|e| format!("failed to encode EXIF: {e}"))?;
+    Ok(cursor.into_inner())
+}
+
+/// Translate the `"exif"`-group, editable fields into `exif::Field`s the `Writer` understands. Only the
+/// four editable tags are emitted; blank values, other groups, and camera-intrinsic keys are skipped
+/// (mirrors [`build_frames`]'s handling of the `"id3"` group). ASCII tags are un-quoted; UserComment gets
+/// its standard character-code prefix (see [`user_comment_bytes`]).
+fn build_exif_fields(fields: &[MetaField]) -> Vec<exif::Field> {
+    let mut out = Vec::new();
+    for f in fields {
+        if !f.group.eq_ignore_ascii_case("exif") || f.value.is_empty() {
+            continue;
+        }
+        let field = match f.key.to_ascii_lowercase().as_str() {
+            "imagedescription" => exif::Field {
+                tag: exif::Tag::ImageDescription,
+                ifd_num: exif::In::PRIMARY,
+                value: exif::Value::Ascii(vec![unquote_display_ascii(&f.value).into_bytes()]),
+            },
+            "artist" => exif::Field {
+                tag: exif::Tag::Artist,
+                ifd_num: exif::In::PRIMARY,
+                value: exif::Value::Ascii(vec![unquote_display_ascii(&f.value).into_bytes()]),
+            },
+            "copyright" => exif::Field {
+                tag: exif::Tag::Copyright,
+                ifd_num: exif::In::PRIMARY,
+                value: exif::Value::Ascii(vec![unquote_display_ascii(&f.value).into_bytes()]),
+            },
+            "usercomment" => exif::Field {
+                tag: exif::Tag::UserComment,
+                ifd_num: exif::In::PRIMARY,
+                value: exif::Value::Undefined(user_comment_bytes(&f.value), 0),
+            },
+            _ => continue,
+        };
+        out.push(field);
+    }
+    out
+}
+
+/// Undo [`crate::media_meta_read::read_exif`]'s ASCII display formatting (`display_value` wraps ASCII in
+/// double quotes and escapes `\"`, `\\`, and non-printable bytes as `\xNN`) so a value read from the file
+/// and carried through unchanged is written back as its original text. A value that isn't wrapped in
+/// quotes (e.g. a freshly-typed edit) is returned as-is.
+fn unquote_display_ascii(value: &str) -> String {
+    let b = value.as_bytes();
+    if b.len() < 2 || b[0] != b'"' || b[b.len() - 1] != b'"' {
+        return value.to_string();
+    }
+    let inner = &b[1..b.len() - 1];
+    let mut out: Vec<u8> = Vec::with_capacity(inner.len());
+    let mut i = 0;
+    while i < inner.len() {
+        if inner[i] == b'\\' && i + 1 < inner.len() {
+            match inner[i + 1] {
+                b'"' => {
+                    out.push(b'"');
+                    i += 2;
+                }
+                b'\\' => {
+                    out.push(b'\\');
+                    i += 2;
+                }
+                b'x' if i + 3 < inner.len() => {
+                    let hi = (inner[i + 2] as char).to_digit(16);
+                    let lo = (inner[i + 3] as char).to_digit(16);
+                    if let (Some(hi), Some(lo)) = (hi, lo) {
+                        out.push((hi * 16 + lo) as u8);
+                        i += 4;
+                    } else {
+                        out.push(inner[i]);
+                        i += 1;
+                    }
+                }
+                _ => {
+                    out.push(inner[i]);
+                    i += 1;
+                }
+            }
+        } else {
+            out.push(inner[i]);
+            i += 1;
+        }
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
+/// Encode a UserComment tag body. EXIF stores UserComment as an UNDEFINED value whose first 8 bytes are a
+/// character-code (`ASCII\0\0\0`, `UNICODE\0`, …). A freshly-typed edit is written as ASCII with that
+/// prefix; a value still in the reader's `0x…` hex form (UNDEFINED renders as hex) is decoded back to its
+/// exact raw bytes so a carried-through comment round-trips unchanged.
+fn user_comment_bytes(value: &str) -> Vec<u8> {
+    if let Some(hex) = value.strip_prefix("0x") {
+        if !hex.is_empty() && hex.len() % 2 == 0 && hex.bytes().all(|c| c.is_ascii_hexdigit()) {
+            let hb = hex.as_bytes();
+            let mut raw = Vec::with_capacity(hb.len() / 2);
+            let mut i = 0;
+            while i + 1 < hb.len() {
+                let hi = (hb[i] as char).to_digit(16).unwrap_or(0);
+                let lo = (hb[i + 1] as char).to_digit(16).unwrap_or(0);
+                raw.push((hi * 16 + lo) as u8);
+                i += 2;
+            }
+            return raw;
+        }
+    }
+    let mut out = Vec::with_capacity(8 + value.len());
+    out.extend_from_slice(b"ASCII\0\0\0");
+    out.extend_from_slice(value.as_bytes());
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -708,5 +978,122 @@ mod tests {
         for cut in 0..valid.len() {
             let _ = write_flac(&valid[..cut], &[vfield("Title", "X")]); // must never panic
         }
+    }
+
+    // ---- EXIF / JPEG write-back (CPE-1288) ----
+
+    fn efield(key: &str, value: &str) -> MetaField {
+        MetaField { group: "exif".to_string(), key: key.to_string(), value: value.to_string(), editable: true }
+    }
+
+    /// A JPEG of `SOI + COM(comment) + EOI` — the COM + EOI tail is our "must survive byte-for-byte"
+    /// witness (it stands in for every non-EXIF segment + the scan data).
+    fn jpeg_with_comment(comment: &[u8]) -> (Vec<u8>, Vec<u8>) {
+        let mut seed = vec![0xFFu8, 0xD8];
+        seed.extend_from_slice(&[0xFF, 0xFE]); // COM marker
+        seed.extend_from_slice(&((comment.len() + 2) as u16).to_be_bytes());
+        seed.extend_from_slice(comment);
+        seed.extend_from_slice(&[0xFF, 0xD9]); // EOI
+        let tail = seed[2..].to_vec(); // everything after SOI = COM + EOI
+        (seed, tail)
+    }
+
+    #[test]
+    fn write_exif_errs_on_non_jpeg_without_panicking() {
+        for orig in [&b""[..], &b"\xFF"[..], &b"\xFF\x00"[..], &b"\x89PNG\r\n\x1a\n"[..], &b"just text"[..]] {
+            assert!(write_exif(orig, &[efield("Artist", "X")]).is_err());
+        }
+    }
+
+    #[test]
+    fn write_exif_errs_when_no_editable_field_is_present() {
+        let seed = [0xFFu8, 0xD8, 0xFF, 0xD9];
+        let fields = vec![
+            // read-only intrinsic + wrong group + wrong key → nothing writable → Err (empty IFD).
+            MetaField { group: "exif".into(), key: "Make".into(), value: "Acme".into(), editable: false },
+            MetaField { group: "id3".into(), key: "Title".into(), value: "N".into(), editable: true },
+        ];
+        assert!(write_exif(&seed, &fields).is_err());
+    }
+
+    #[test]
+    fn write_exif_round_trips_editable_tags_through_the_reader() {
+        use crate::media_meta_read::read_exif;
+        let seed = [0xFFu8, 0xD8, 0xFF, 0xD9];
+        let jpg = write_exif(
+            &seed,
+            &[efield("ImageDescription", "Hello"), efield("Artist", "Me"), efield("Copyright", "2026")],
+        )
+        .unwrap();
+        assert!(jpg.starts_with(&[0xFF, 0xD8, 0xFF, 0xE1]));
+        let fields = read_exif(&jpg);
+        let g = |k: &str| fields.iter().find(|f| f.key == k).map(|f| f.value.as_str());
+        // The reader renders ASCII tags with surrounding quotes.
+        assert_eq!(g("ImageDescription"), Some("\"Hello\""));
+        assert_eq!(g("Artist"), Some("\"Me\""));
+        assert_eq!(g("Copyright"), Some("\"2026\""));
+    }
+
+    #[test]
+    fn write_exif_replaces_prior_exif_app1_and_preserves_other_segments() {
+        let (seed, tail) = jpeg_with_comment(b"keep-this-comment");
+        let v1 = write_exif(&seed, &[efield("Artist", "First")]).unwrap();
+        // APP1 inserted right after SOI; COM + EOI preserved byte-for-byte.
+        assert!(v1.starts_with(&[0xFF, 0xD8, 0xFF, 0xE1]));
+        assert!(v1.ends_with(&tail[..]));
+
+        // Re-writing replaces the APP1 rather than stacking a second one.
+        let v2 = write_exif(&v1, &[efield("Artist", "Second")]).unwrap();
+        assert!(v2.ends_with(&tail[..]));
+        let exif_app1_count = v2.windows(6).filter(|w| *w == b"Exif\0\0").count();
+        assert_eq!(exif_app1_count, 1, "must replace, not stack, the Exif APP1");
+
+        use crate::media_meta_read::read_exif;
+        assert_eq!(
+            read_exif(&v2).iter().find(|f| f.key == "Artist").map(|f| f.value.as_str()),
+            Some("\"Second\"")
+        );
+    }
+
+    #[test]
+    fn write_exif_keeps_a_leading_app0_jfif_ahead_of_the_new_app1() {
+        // SOI + APP0(JFIF) + EOI. The APP1 must land after APP0, not before it.
+        let mut seed = vec![0xFFu8, 0xD8, 0xFF, 0xE0];
+        let jfif = b"JFIF\0\x01\x02\x00\x00\x01\x00\x01\x00\x00"; // minimal APP0 body
+        seed.extend_from_slice(&((jfif.len() + 2) as u16).to_be_bytes());
+        seed.extend_from_slice(jfif);
+        seed.extend_from_slice(&[0xFF, 0xD9]);
+        let out = write_exif(&seed, &[efield("Artist", "X")]).unwrap();
+        // Order: SOI, APP0, APP1(Exif), EOI.
+        assert_eq!(&out[0..4], &[0xFF, 0xD8, 0xFF, 0xE0]);
+        let app0_end = 4 + 2 + jfif.len();
+        assert_eq!(&out[app0_end..app0_end + 2], &[0xFF, 0xE1]);
+    }
+
+    #[test]
+    fn write_exif_writing_twice_is_idempotent() {
+        let (seed, _) = jpeg_with_comment(b"c");
+        let fields = [efield("ImageDescription", "Cap"), efield("Artist", "A")];
+        let once = write_exif(&seed, &fields).unwrap();
+        let twice = write_exif(&once, &fields).unwrap();
+        assert_eq!(once, twice, "re-writing over an already-written EXIF must produce identical bytes");
+    }
+
+    #[test]
+    fn write_exif_never_panics_on_any_truncation_of_a_valid_jpeg() {
+        let (seed, _) = jpeg_with_comment(b"comment");
+        let valid = write_exif(&seed, &[efield("Artist", "X")]).unwrap();
+        for cut in 0..valid.len() {
+            let _ = write_exif(&valid[..cut], &[efield("Artist", "Y")]); // must never panic
+        }
+    }
+
+    #[test]
+    fn unquote_display_ascii_inverts_the_readers_formatting() {
+        assert_eq!(unquote_display_ascii("\"Hello\""), "Hello");
+        assert_eq!(unquote_display_ascii("plain"), "plain"); // not display-quoted → unchanged
+        assert_eq!(unquote_display_ascii("\"a\\\"b\""), "a\"b"); // \" → "
+        assert_eq!(unquote_display_ascii("\"a\\\\b\""), "a\\b"); // \\ → \
+        assert_eq!(unquote_display_ascii("\"\\x41BC\""), "ABC"); // \x41 → A
     }
 }
