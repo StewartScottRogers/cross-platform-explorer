@@ -4,7 +4,7 @@ title: "Tray-resident: wire the system-tray icon + quick-access menu + minimize/
 type: feature
 component: src-tauri
 priority: medium
-status: Doing
+status: Done
 tags: ready
 created: 2026-08-02
 epic: CPE-713
@@ -37,3 +37,6 @@ window + minimize/close-to-tray, so the app can live in the tray.
 ## Notes
 Part of item 3 (shell/OS). Sibling: CPE-712 shell-integration (install_shell_integration already exists) + CPE-716
 drive-bay. Tray icon + OS behavior needs a build→install→run for the user to confirm.
+
+## Work Log
+- 2026-08-02 — Wired Tauri v2 system tray (tray.rs): TrayIconBuilder reusing the bundled app icon (no new resource → CPE-1271 guard green), menu from tray_quick QuickAccess items (pinned+recents, persisted to tray_quick.json), left-click show/hide, close-to-tray Settings toggle (default OFF). Reviewer caught + worker fixed a stuck-hidden hazard: hide now gated on should_hide_to_tray(tray_present, opt_in) (unit-tested all 4 combos) + try_state hardening. clippy both modes + 109 cargo tests + 1898 vitest green. Merged #570. Attended: tray icon appears, menu jumps to folders, show/hide, close-to-tray.
