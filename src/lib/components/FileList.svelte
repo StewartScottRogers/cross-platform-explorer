@@ -15,6 +15,7 @@
   import { isSelected } from "../selection";
   import { setDragData, isValidDrop, hoverEffect, resolveEffect } from "../dnd";
   import { startFileDrag, resolveDragIcon, isTauriEnv } from "../dragOut";
+  import { commands } from "../bindings.gen";
   import type { Selection } from "../selection";
   import type { DirEntry, SortKey, SortDir, ViewMode } from "../types";
   import type { AvailableColumn, MetadataCell } from "../bindings.gen";
@@ -86,6 +87,12 @@
       archive (CPE-673), whose rows are synthetic in-zip paths, not real files — so dragging them out or
       dropping onto them would be meaningless. */
   export let canDrag = true;
+  /** Absolute path of the currently-open archive when these rows are its synthetic in-zip children
+      (CPE-673/674), else `null`. When set, each `entry.path` is an in-archive-relative path (not a real
+      filesystem path — see `canDrag`'s comment) that must be extracted to a real temp file before it can
+      be dragged to another OS app; see `onDragStart`'s archive branch. `null` for every ordinary (on-disk)
+      view, so a plain folder's drag-out is byte-for-byte unaffected. */
+  export let archivePath: string | null = null;
   /** Initial text for the inline editor. */
   export let renameValue = "";
 
@@ -224,9 +231,50 @@
     }
     // Drag the whole selection if the grabbed row is part of it; otherwise
     // just the grabbed row (Explorer's behaviour).
-    const paths = isSelected(selection, i)
-      ? entries.filter((_, j) => isSelected(selection, j)).map((x) => x.path)
-      : [entries[i].path];
+    const selEntries = isSelected(selection, i)
+      ? entries.filter((_, j) => isSelected(selection, j))
+      : [entries[i]];
+    const paths = selEntries.map((x) => x.path);
+
+    // ── Archive extract-on-drag-out (CPE-674) ───────────────────────────────────────────────────────
+    // Archive rows (`archivePath` set — CPE-673) carry SYNTHETIC in-zip paths, not real filesystem
+    // paths, so neither the internal HTML5 drag (its drop handlers resolve real paths) nor a native OS
+    // drag (the OS needs a real file to hand to the drop target) can use them as-is. Alt-drag here means
+    // "extract, then drag OUT": stage each selected file entry to a real temp file via the existing
+    // `extractArchiveEntryAny` (CPE-1180/1182 backend, already ships zip/tar/tar.gz/7z), then hand the
+    // resulting temp paths to the same native-drag wrapper CPE-672 uses. A plain (no-Alt) drag on an
+    // archive row stays a no-op — exactly as it was before this ticket (the row wasn't draggable at all
+    // while `canDrag` was false; see the `draggable` binding below) — never internal, never native.
+    if (archivePath) {
+      if (!e.altKey || !isTauriEnv()) {
+        // Not the drag-out gesture (or no native-drag bridge): swallow the browser's native drag start
+        // so a plain drag on a read-only archive row does nothing, matching pre-CPE-674 behaviour.
+        e.preventDefault();
+        return;
+      }
+      e.preventDefault();
+      draggedPaths = [];
+      const mode = resolveEffect({ ctrlKey: e.ctrlKey, shiftKey: e.shiftKey }, null);
+      const zip = archivePath;
+      const icon = dragOutIcon || undefined;
+      // Directories can't be staged by the single-entry extractor — skip them gracefully rather than
+      // failing the whole drag; extraction must finish before the native drag can start (there's no real
+      // file to hand the OS until then), so this whole branch is async.
+      const fileEntries = selEntries.filter((x) => !x.is_dir);
+      void (async () => {
+        const tempPaths: string[] = [];
+        for (const f of fileEntries) {
+          try {
+            const r = await commands.extractArchiveEntryAny(zip, f.path);
+            if (r.status === "ok") tempPaths.push(r.data);
+          } catch {
+            // Skip an entry that failed to stage (unsupported/corrupt) — drag whatever DID extract.
+          }
+        }
+        if (tempPaths.length > 0) void startFileDrag(tempPaths, { icon, mode });
+      })();
+      return;
+    }
 
     // ── Native OS drag-OUT (CPE-672) ────────────────────────────────────────────────────────────────
     // Coexistence approach = option (B) from the research: keep the HTML5 internal drag as the DEFAULT
@@ -640,7 +688,7 @@
         bind:this={rowEls[i]}
         role="button"
         tabindex="0"
-        draggable={!renamingPath && canDrag}
+        draggable={!renamingPath && (canDrag || !!archivePath)}
         on:pointerdown={() => onRowPointerDown(i)}
         on:dragstart={(e) => onDragStart(e, i)}
         on:dragend={onDragEnd}

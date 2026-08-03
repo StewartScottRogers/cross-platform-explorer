@@ -138,7 +138,10 @@ The Home screen has **Quick access** tiles up top and a tabbed lower section wit
   one shows the same progress panel as a paste. To drag a selection **out** to another application (drop
   files into your OS file manager, an email, a chat window, and so on), **hold Alt while you start the
   drag** — a plain drag stays inside the app for folder/sidebar drops, and Alt-drag hands the real files to
-  the OS. Ctrl/Shift still choose copy vs move.
+  the OS. Ctrl/Shift still choose copy vs move. Alt-drag also works **inside an open archive**: since those
+  rows are a read-only view into the archive rather than real files on disk, Alt-dragging one out extracts
+  it to a temp file first, then drags that — a plain drag inside an archive stays inert (archive rows never
+  drop internally, since there's nothing to move).
 - **File transfers** — a paste that **copies** runs through the transfer manager: a small panel appears
   in the bottom-right showing the progress bar, file count, and any errors, and lets you **cancel**
   mid-copy. It stays hidden when nothing is transferring. (Moves are near-instant same-folder-volume
