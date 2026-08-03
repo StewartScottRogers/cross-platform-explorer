@@ -35,7 +35,9 @@ use cpe_server::inspect::inspect_bytes;
 use cpe_server::media_column::AudioColumn;
 use cpe_server::media_meta::{read_all, write_back};
 use cpe_server::media_meta_edit::MetaEdit;
-use cpe_server::media_meta_read::{parse_vorbis_comment, read_exif, read_flac, read_id3v2, read_ogg, read_pdf};
+use cpe_server::media_meta_read::{
+    parse_vorbis_comment, read_exif, read_flac, read_id3v2, read_ogg, read_pdf, read_wav, read_xmp,
+};
 use cpe_server::media_meta_write::{write_flac, write_id3v2};
 use cpe_server::metadata_column::CellValue;
 use cpe_server::perceptual::phash;
@@ -252,6 +254,23 @@ fn parse_vorbis_comment_never_panics() {
     });
 }
 
+#[test]
+fn read_wav_never_panics() {
+    // `read_wav` gates on a 12-byte "RIFF" + size(4, unused by the parser) + "WAVE" header before it ever
+    // walks the chunk tree, so a bare `b"RIFF"` (or `b"RIFF"` followed by garbage that doesn't happen to
+    // spell "WAVE" at byte 8) returns early — hollow, same trap `read_id3v2_never_panics` and
+    // `read_pdf_never_panics` avoid above. Use a full valid 12-byte header so every adversarial class
+    // (crucially the `overflowing_length_field_*` ones) actually reaches the chunk-walk loop and lands on
+    // a real chunk id/size pair — exactly the 4-byte little-endian chunk-size exposure this test guards.
+    let header = *b"RIFF\x00\x00\x00\x00WAVE";
+    run_battery("media_meta_read::read_wav", &header, 12, |b| {
+        let r = read_wav(b);
+        if b.is_empty() {
+            assert!(r.is_empty(), "read_wav(empty) must be empty");
+        }
+    });
+}
+
 // ---------------------------------------------------------------------------------------------
 // Entrypoints: image metadata (EXIF, header dimensions, perceptual hash, orientation)
 // ---------------------------------------------------------------------------------------------
@@ -294,6 +313,25 @@ fn read_exif_orientation_never_panics() {
         let r = read_exif_orientation(b);
         if b.is_empty() {
             assert!(r.is_none(), "read_exif_orientation(empty) must be None");
+        }
+    });
+}
+
+#[test]
+fn read_xmp_never_panics() {
+    // `read_xmp` has two entry paths (CPE-1291): a standalone `.xmp` sidecar (no fixed leading magic —
+    // battery it with an empty magic, same as `read_mp4_never_panics`) and a JPEG APP1-embedded packet
+    // (its own magic: SOI + the APP1 marker). Battery both so a regression in either path is caught.
+    run_battery("media_meta_read::read_xmp(sidecar)", &[], 9, |b| {
+        let r = read_xmp(b);
+        if b.is_empty() {
+            assert!(r.is_empty(), "read_xmp(empty) must be empty");
+        }
+    });
+    run_battery("media_meta_read::read_xmp(jpeg-app1)", &[0xFF, 0xD8, 0xFF, 0xE1], 4, |b| {
+        let r = read_xmp(b);
+        if b.is_empty() {
+            assert!(r.is_empty(), "read_xmp(empty) must be empty");
         }
     });
 }
@@ -384,12 +422,21 @@ fn write_flac_never_panics() {
 
 #[test]
 fn media_meta_read_all_never_panics() {
-    run_battery("media_meta::read_all(mp3)", b"ID3", 10, |b| {
-        let r = read_all("mp3", b);
-        if b.is_empty() {
-            assert!(r.is_empty(), "read_all(\"mp3\", empty) must be empty");
-        }
-    });
+    // One battery per extension `read_all` special-cases its own codec for (CPE-1291 added "wav"/"xmp" to
+    // this list), so a dispatch-layer regression on any of them is caught here too — not just via each
+    // codec's own direct entrypoint test above. Magic/header_len per extension mirror the same
+    // non-hollow-header reasoning used above (maxed ID3 syncsafe size; full RIFF/WAVE header; no fixed
+    // magic for the xmp-sidecar path).
+    let cases: [(&str, &[u8], usize); 3] =
+        [("mp3", &b"ID3\x03\x00\x00\x7F\x7F\x7F\x7F"[..], 10), ("wav", &b"RIFF\x00\x00\x00\x00WAVE"[..], 12), ("xmp", &[], 9)];
+    for (ext, magic, header_len) in cases {
+        run_battery(&format!("media_meta::read_all({ext})"), magic, header_len, |b| {
+            let r = read_all(ext, b);
+            if b.is_empty() {
+                assert!(r.is_empty(), "read_all(\"{ext}\", empty) must be empty");
+            }
+        });
+    }
 }
 
 #[test]
@@ -405,12 +452,17 @@ fn media_meta_write_back_never_panics() {
 
 #[test]
 fn column_extract_read_audio_tags_never_panics() {
-    run_battery("column_extract::read_audio_tags(mp3)", b"ID3", 10, |b| {
-        let r = read_audio_tags("mp3", b);
-        if b.is_empty() {
-            assert!(r.is_empty(), "read_audio_tags(\"mp3\", empty) must be empty");
-        }
-    });
+    // CPE-1291 added "wav" to AUDIO_EXTS / read_audio_tags — battery it alongside mp3.
+    let cases: [(&str, &[u8], usize); 2] =
+        [("mp3", &b"ID3"[..], 10), ("wav", &b"RIFF\x00\x00\x00\x00WAVE"[..], 12)];
+    for (ext, magic, header_len) in cases {
+        run_battery(&format!("column_extract::read_audio_tags({ext})"), magic, header_len, |b| {
+            let r = read_audio_tags(ext, b);
+            if b.is_empty() {
+                assert!(r.is_empty(), "read_audio_tags(\"{ext}\", empty) must be empty");
+            }
+        });
+    }
 }
 
 #[test]
