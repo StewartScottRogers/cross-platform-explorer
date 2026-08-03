@@ -14,7 +14,7 @@
 // `__TAURI_INTERNALS__` IPC bridge — this wrapper catches that and resolves to an `"unavailable"` result,
 // mirroring how `invoke.ts`/other lib modules keep the Tauri boundary a call site never has to guard by
 // hand.
-import { startDrag } from "@crabnebula/tauri-plugin-drag";
+import { startDrag, type Options as DragPluginOptions } from "@crabnebula/tauri-plugin-drag";
 import { resolveResource } from "@tauri-apps/api/path";
 
 /** Copy-vs-move hint for the OS drag, same vocabulary as the existing HTML5 drag (`dnd.ts`). Optional —
@@ -60,16 +60,21 @@ export const DEFAULT_DRAG_ICON = "icons/icon.png";
 // Resolve the bundled icon once and reuse it — `resolveResource` is a Tauri IPC round-trip, and a drag
 // starts on a mouse gesture where we want the icon ready synchronously (pre-warm it via
 // `resolveDragIcon()` at mount). Only a SUCCESSFUL absolute resolution is cached, so a transient failure
-// (called before the bridge is up) never poisons later calls.
+// (called before the bridge is up) never poisons later calls — and a failed attempt never poisons a
+// *later* successful one either, since nothing is cached until resolution actually succeeds.
 let cachedDragIcon: string | null = null;
 
 /**
  * Resolve {@link DEFAULT_DRAG_ICON} to an ABSOLUTE filesystem path the plugin will accept, via Tauri's
- * `resolveResource`. Falls back to the relative identifier if resolution fails (no Tauri bridge, resource
- * missing) — best-effort, since a missing/relative icon only degrades the drag *preview*, never the drag
- * itself. Never throws. Call it once at mount to pre-warm the cache so a later drag has the icon ready.
+ * `resolveResource`. Returns `null` if resolution fails (no Tauri bridge, resource missing) — CPE-1269
+ * hardening: earlier this fell back to the RELATIVE `DEFAULT_DRAG_ICON` identifier, which a caller (e.g.
+ * `FileList`'s `dragOutIcon` cache) could then pass straight through to the plugin as `icon`, violating
+ * its "must be an absolute filesystem path" invariant and silently failing the drag. Returning `null`
+ * instead means "no resolved icon" is unambiguous, so both the cache and {@link startFileDrag} can tell a
+ * good absolute path apart from a failed resolution and never store/forward a relative one. Never throws.
+ * Call it once at mount to pre-warm the cache so a later drag has the icon ready.
  */
-export async function resolveDragIcon(): Promise<string> {
+export async function resolveDragIcon(): Promise<string | null> {
   if (cachedDragIcon) return cachedDragIcon;
   try {
     const abs = await resolveResource(DEFAULT_DRAG_ICON);
@@ -78,10 +83,10 @@ export async function resolveDragIcon(): Promise<string> {
       return abs;
     }
   } catch {
-    // No Tauri IPC bridge (plain browser / jsdom) or the resource isn't present — fall through to the
-    // relative identifier rather than surfacing an error the caller would have to guard.
+    // No Tauri IPC bridge (plain browser / jsdom) or the resource isn't present — fall through to `null`
+    // rather than the relative identifier or a surfaced error; see the doc comment above (CPE-1269).
   }
-  return DEFAULT_DRAG_ICON;
+  return null;
 }
 
 export type StartFileDragResult =
@@ -115,16 +120,27 @@ export async function startFileDrag(
 
   // A caller-supplied icon is used verbatim (it's expected to already be absolute); otherwise resolve the
   // bundled default to an absolute path — `startDrag`'s `icon` must be a real filesystem path, and a bare
-  // relative "icons/icon.png" was the CPE-1264 reviewer's flag.
+  // relative "icons/icon.png" was the CPE-1264 reviewer's flag. `resolveDragIcon` now returns `null`
+  // rather than a relative fallback (CPE-1269) when resolution fails, so `icon` here is either a verified
+  // absolute path or nothing at all — never a relative string that would reach the plugin.
   const icon = opts.icon && opts.icon.length > 0 ? opts.icon : await resolveDragIcon();
+
+  // The plugin's `Options.icon` is typed as a required `string`, but there is no absolute path to give it
+  // when resolution failed and the caller didn't supply one. Sending the known-bad relative
+  // `DEFAULT_DRAG_ICON` would violate the plugin's absolute-path invariant and silently break the drag
+  // (the CPE-1269 bug this hardens); sending nothing is the lesser risk — worst case the plugin falls
+  // back to its own default preview (or, if it truly requires the field, rejects the call, which surfaces
+  // through the existing catch below as `status: "error"` same as any other rejected `startDrag`). The
+  // `as DragPluginOptions` cast documents that tradeoff explicitly rather than lying about the type.
+  const dragOptions = (
+    icon
+      ? { item: [...paths], icon, mode: opts.mode }
+      : { item: [...paths], mode: opts.mode }
+  ) as DragPluginOptions;
 
   try {
     await startDrag(
-      {
-        item: [...paths],
-        icon,
-        mode: opts.mode,
-      },
+      dragOptions,
       opts.onEvent
         ? (payload) =>
             opts.onEvent!({

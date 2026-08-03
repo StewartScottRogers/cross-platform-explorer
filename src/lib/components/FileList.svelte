@@ -220,9 +220,11 @@
   }
 
   // Native OS drag-out preview icon (CPE-672), resolved to an absolute path once at mount so an Alt-drag
-  // has it ready synchronously (see onDragStart). Empty until resolved / outside Tauri — then startFileDrag
-  // resolves it itself as a fallback, so an unresolved icon never blocks a drag.
-  let dragOutIcon = "";
+  // has it ready synchronously (see onDragStart). `null` until resolved / outside Tauri / resolution fails
+  // — `resolveDragIcon` returns `null` rather than a relative fallback (CPE-1269) so this can never hold a
+  // non-absolute path; `startFileDrag` treats a missing icon here as "resolve it itself" as a fallback, so
+  // an unresolved icon never blocks a drag.
+  let dragOutIcon: string | null = null;
 
   function onDragStart(e: DragEvent, i: number) {
     if (renamingPath || Date.now() < suppressDragUntil) {
