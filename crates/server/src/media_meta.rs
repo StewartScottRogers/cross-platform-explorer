@@ -6,13 +6,14 @@
 //! Read coverage spans the codecs shipped so far: ID3 (mp3), Vorbis (flac / ogg), EXIF (jpeg / tiff), IPTC
 //! (jpeg APP13/8BIM/IIM, merged alongside EXIF), XMP (jpeg APP1, merged alongside EXIF + IPTC, plus
 //! standalone `.xmp` sidecars), WAV/RIFF-INFO, PDF `/Info`, and MP4/MOV video tags. Write coverage is
-//! narrower — only the formats with a write codec
-//! ([`crate::media_meta_write`]): **mp3** and **flac**. [`is_writable`] lets the UI show read-only fields
-//! for the rest until their writers land (OGG/EXIF/video/PDF write-back are deferred as format-risky).
+//! narrower — only the formats with a write codec ([`crate::media_meta_write`]): **mp3**, **flac**, and
+//! **jpeg** (EXIF). [`is_writable`] lets the UI show read-only fields for the rest until their writers land
+//! (OGG/video/PDF write-back are deferred as format-risky, and TIFF EXIF write is deferred because the EXIF
+//! *is* a TIFF's own IFD chain).
 
 use crate::media_meta_edit::{apply_edits, MetaEdit, MetaField};
 use crate::media_meta_read::{read_exif, read_flac, read_id3v2, read_iptc, read_ogg, read_pdf, read_wav, read_xmp};
-use crate::media_meta_write::{write_flac, write_id3v2};
+use crate::media_meta_write::{write_exif, write_flac, write_id3v2};
 use crate::video_meta_read::read_mp4;
 
 /// Every metadata field the studio can show for a file, chosen by extension. A file whose kind has no
@@ -39,7 +40,9 @@ pub fn read_all(ext: &str, bytes: &[u8]) -> Vec<MetaField> {
 
 /// Whether `ext` has a write-back codec today, so the studio can offer editing (not just viewing).
 pub fn is_writable(ext: &str) -> bool {
-    matches!(ext.to_ascii_lowercase().as_str(), "mp3" | "flac")
+    // jpg/jpeg carry an EXIF write codec ([`write_exif`]); tif/tiff are intentionally excluded — for a
+    // TIFF the EXIF *is* the file's own IFD chain, so rebuilding it from four tags would drop the image.
+    matches!(ext.to_ascii_lowercase().as_str(), "mp3" | "flac" | "jpg" | "jpeg")
 }
 
 /// Apply `edits` to the file's current fields and serialise the result back to new file bytes. Reads the
@@ -52,6 +55,7 @@ pub fn write_back(ext: &str, orig: &[u8], edits: &[MetaEdit]) -> Result<Vec<u8>,
     match ext.to_ascii_lowercase().as_str() {
         "mp3" => Ok(write_id3v2(orig, &result.fields)),
         "flac" => Ok(write_flac(orig, &result.fields)),
+        "jpg" | "jpeg" => write_exif(orig, &result.fields),
         other => Err(format!("editing {other} metadata isn't supported yet")),
     }
 }
@@ -103,9 +107,12 @@ mod tests {
     }
 
     #[test]
-    fn is_writable_only_for_mp3_and_flac() {
+    fn is_writable_for_mp3_flac_and_jpeg() {
         assert!(is_writable("mp3") && is_writable("FLAC"));
-        assert!(!is_writable("pdf") && !is_writable("mp4") && !is_writable("ogg") && !is_writable("jpg"));
+        assert!(is_writable("jpg") && is_writable("JPEG")); // EXIF write codec (CPE-1288)
+        // TIFF EXIF write is deferred (the EXIF is a TIFF's own IFD); other formats have no writer yet.
+        assert!(!is_writable("tif") && !is_writable("tiff"));
+        assert!(!is_writable("pdf") && !is_writable("mp4") && !is_writable("ogg"));
     }
 
     #[test]
@@ -127,5 +134,43 @@ mod tests {
     fn write_back_errors_for_unsupported_format() {
         let err = write_back("pdf", b"%PDF-1.4", &[]).unwrap_err();
         assert!(err.contains("pdf"));
+    }
+
+    fn exif_set(key: &str, value: &str) -> MetaEdit {
+        MetaEdit::Set { group: "exif".into(), key: key.into(), value: value.into() }
+    }
+
+    #[test]
+    fn write_back_round_trips_exif_for_jpeg_and_preserves_other_segments() {
+        // Seed a JPEG whose only non-SOI content is a COM segment + EOI — our preservation witness.
+        let com = b"non-exif-comment";
+        let mut seed = vec![0xFFu8, 0xD8];
+        seed.extend_from_slice(&[0xFF, 0xFE]);
+        seed.extend_from_slice(&((com.len() + 2) as u16).to_be_bytes());
+        seed.extend_from_slice(com);
+        seed.extend_from_slice(&[0xFF, 0xD9]);
+        let tail = seed[2..].to_vec(); // COM + EOI
+
+        // Build a base image carrying two editable EXIF tags via the write path itself.
+        let base = write_back("jpg", &seed, &[exif_set("ImageDescription", "Old Caption"), exif_set("Artist", "Old Artist")])
+            .expect("jpg is writable");
+        let fields = read_all("jpg", &base);
+        assert_eq!(get(&fields, "ImageDescription"), Some("\"Old Caption\"")); // reader quotes ASCII
+        assert_eq!(get(&fields, "Artist"), Some("\"Old Artist\""));
+        assert!(base.ends_with(&tail[..])); // non-EXIF segments intact
+
+        // Edit only ImageDescription; Artist must survive the rebuild unchanged.
+        let out = write_back("jpg", &base, &[exif_set("ImageDescription", "New Caption")]).unwrap();
+        let after = read_all("jpg", &out);
+        assert_eq!(get(&after, "ImageDescription"), Some("\"New Caption\""));
+        assert_eq!(get(&after, "Artist"), Some("\"Old Artist\""));
+        assert!(out.ends_with(&tail[..])); // still preserved — only the APP1 was replaced
+        assert!(is_writable("jpg"));
+    }
+
+    #[test]
+    fn write_back_errors_for_non_jpeg_bytes_routed_to_the_exif_codec() {
+        let err = write_back("jpg", b"not a jpeg at all", &[exif_set("ImageDescription", "x")]).unwrap_err();
+        assert!(err.contains("JPEG") || err.contains("SOI"));
     }
 }
