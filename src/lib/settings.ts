@@ -71,6 +71,7 @@ export const KEYS = {
   spotlightHotkeyEnabled: "cpe.spotlightHotkeyEnabled",
   spotlightHotkeyChord: "cpe.spotlightHotkeyChord",
   spotlightFrecency: "cpe.spotlightFrecency",
+  closeToTray: "cpe.closeToTray",
 } as const;
 
 const MAX_RECENTS = 20;
@@ -288,6 +289,12 @@ export const saveSpotlightHotkeyEnabled = (v: boolean) => write(KEYS.spotlightHo
 export const loadSpotlightHotkeyChord = (): string =>
   read(KEYS.spotlightHotkeyChord, DEFAULT_SPOTLIGHT_HOTKEY_CHORD, isString);
 export const saveSpotlightHotkeyChord = (v: string) => write(KEYS.spotlightHotkeyChord, v);
+
+// Close-to-tray (CPE-1272, epic CPE-713): when on, closing the main window HIDES it (leaving the app
+// tray-resident) instead of quitting. The Rust close handler reads this flag from settings.json on each
+// close. Off by default so a plain close still quits, never surprising the user.
+export const loadCloseToTray = (): boolean => read(KEYS.closeToTray, false, isBool);
+export const saveCloseToTray = (v: boolean) => write(KEYS.closeToTray, v);
 
 /** Append a network location, trimmed + de-duplicated (case/trailing-slash-insensitive). */
 export function addNetworkLocation(list: string[], path: string): string[] {

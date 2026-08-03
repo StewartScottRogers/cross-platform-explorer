@@ -2,9 +2,18 @@
 //! folder access — a bounded, ordered list of **pinned** + **recent** entries with add/pin/unpin/remove.
 //! Pinned entries persist at the top; recents move-to-front on access and evict the oldest past a cap. No
 //! tray or OS code here; the tray renders `items()`.
+//!
+//! **Persistence (CPE-1272):** the state is serialized to `tray_quick.json` in the app data dir via
+//! [`load`]/[`save`], so pins + recents survive a restart. The tray wires the icon/menu; this stays
+//! Tauri-free (a [`ServerCtx`] resolves the dir), mirroring [`crate::settings`].
+
+use std::fs;
+use std::path::Path;
+
+use crate::ctx::ServerCtx;
 
 /// One quick-access entry (a folder or file the tray offers a one-click jump to).
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[cfg_attr(feature = "specta", derive(specta::Type))]
 pub struct QuickEntry {
     pub path: String,
@@ -14,7 +23,7 @@ pub struct QuickEntry {
 
 /// The tray's quick-access state: pinned entries (in pin order) followed by recents (most-recent first),
 /// with a cap on how many recents are retained.
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[cfg_attr(feature = "specta", derive(specta::Type))]
 pub struct QuickAccess {
     pinned: Vec<QuickEntry>,
@@ -77,6 +86,48 @@ impl QuickAccess {
     }
 }
 
+/// The persisted file name inside the app data dir.
+const FILE: &str = "tray_quick.json";
+
+/// Deserialize the state from `dir/tray_quick.json`, falling back to a fresh, empty [`QuickAccess`] with
+/// the given cap whenever the file is missing/corrupt (so a bad file never breaks the tray). The cap is
+/// re-clamped to at least 1 and the recents re-capped defensively in case an on-disk `max_recent` was 0
+/// or the recents grew past the cap in an older format.
+pub fn read_from(dir: &Path, max_recent: usize) -> QuickAccess {
+    match fs::read_to_string(dir.join(FILE)) {
+        Ok(s) => match serde_json::from_str::<QuickAccess>(&s) {
+            Ok(mut qa) => {
+                qa.max_recent = qa.max_recent.max(1);
+                qa.recent.truncate(qa.max_recent);
+                qa
+            }
+            Err(_) => QuickAccess::new(max_recent),
+        },
+        Err(_) => QuickAccess::new(max_recent),
+    }
+}
+
+/// Persist the state to `dir/tray_quick.json`, creating `dir` if needed.
+pub fn write_to(dir: &Path, qa: &QuickAccess) -> Result<(), String> {
+    fs::create_dir_all(dir).map_err(|e| e.to_string())?;
+    let json = serde_json::to_string_pretty(qa).map_err(|e| e.to_string())?;
+    fs::write(dir.join(FILE), json.as_bytes()).map_err(|e| e.to_string())
+}
+
+/// Load the persisted quick-access state via the [`ServerCtx`] app-data dir; a fresh empty state on any
+/// error so the tray always has something to render.
+pub fn load(ctx: &dyn ServerCtx, max_recent: usize) -> QuickAccess {
+    match ctx.app_data_dir() {
+        Ok(dir) => read_from(&dir, max_recent),
+        Err(_) => QuickAccess::new(max_recent),
+    }
+}
+
+/// Save the quick-access state via the [`ServerCtx`] app-data dir.
+pub fn save(ctx: &dyn ServerCtx, qa: &QuickAccess) -> Result<(), String> {
+    write_to(&ctx.app_data_dir()?, qa)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -129,5 +180,84 @@ mod tests {
         q.remove("/p");
         q.remove("/r");
         assert!(q.is_empty());
+    }
+
+    // --- Persistence (CPE-1272) ---------------------------------------------------------------
+    use crate::ctx::HeadlessCtx;
+
+    fn scratch(tag: &str) -> std::path::PathBuf {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static SEQ: AtomicU64 = AtomicU64::new(0);
+        let n = SEQ.fetch_add(1, Ordering::Relaxed);
+        let d = std::env::temp_dir().join(format!("cpe-tray-{}-{}-{}", tag, std::process::id(), n));
+        std::fs::create_dir_all(&d).unwrap();
+        d
+    }
+
+    #[test]
+    fn read_from_defaults_to_empty_when_absent() {
+        let d = scratch("absent");
+        let q = super::read_from(&d, 5);
+        assert!(q.is_empty());
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn write_then_read_round_trips_pins_and_recents() {
+        let d = scratch("round");
+        let mut q = QuickAccess::new(3);
+        q.pin("/keep", "keep");
+        q.touch("/a", "a");
+        q.touch("/b", "b");
+        super::write_to(&d, &q).unwrap();
+
+        let loaded = super::read_from(&d, 3);
+        assert_eq!(loaded, q);
+        assert_eq!(paths(&loaded), vec!["/keep", "/b", "/a"]);
+        assert!(loaded.items()[0].pinned);
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn read_from_recovers_from_a_corrupt_file() {
+        let d = scratch("corrupt");
+        std::fs::write(d.join("tray_quick.json"), b"not json {{{").unwrap();
+        let q = super::read_from(&d, 4);
+        assert!(q.is_empty()); // corrupt → fresh, never a panic
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn ctx_load_save_round_trip_and_recents_update() {
+        let base = scratch("ctx");
+        let ctx = HeadlessCtx::new(&base);
+        // Fresh install → empty.
+        assert!(super::load(&ctx, 5).is_empty());
+
+        // Simulate opening two folders (recents update), then persist.
+        let mut q = super::load(&ctx, 5);
+        q.touch("/proj/one", "one");
+        q.touch("/proj/two", "two");
+        super::save(&ctx, &q).unwrap();
+
+        // A later process loads exactly what was saved.
+        let reloaded = super::load(&ctx, 5);
+        assert_eq!(paths(&reloaded), vec!["/proj/two", "/proj/one"]);
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn read_from_reclamps_a_zero_cap_and_recaps_overlong_recents() {
+        let d = scratch("reclamp");
+        // Hand-craft a file with max_recent=0 and 3 recents (an older/tampered format).
+        let bad = r#"{"pinned":[],"recent":[
+            {"path":"/a","label":"a","pinned":false},
+            {"path":"/b","label":"b","pinned":false},
+            {"path":"/c","label":"c","pinned":false}],"max_recent":0}"#;
+        std::fs::write(d.join("tray_quick.json"), bad).unwrap();
+        let q = super::read_from(&d, 5);
+        // max_recent clamped to >=1, recents truncated to it (defensive).
+        assert_eq!(paths(&q), vec!["/a"]);
+        let _ = std::fs::remove_dir_all(&d);
     }
 }

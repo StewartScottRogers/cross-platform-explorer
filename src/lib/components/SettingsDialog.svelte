@@ -48,6 +48,15 @@
     vaultRememberPassphrases = on;
     settings.saveVaultRememberPassphrases(on);
   }
+
+  // Close-to-tray (CPE-1272, epic CPE-713): when on, closing the main window HIDES it (the app stays in
+  // the system tray) instead of quitting. Off by default so a plain close still quits — Quit stays on the
+  // tray menu. The Rust close handler reads this flag from settings.json; nothing else to invoke here.
+  let closeToTray = settings.loadCloseToTray();
+  function setCloseToTray(on: boolean) {
+    closeToTray = on;
+    settings.saveCloseToTray(on);
+  }
 </script>
 
 <svelte:window on:keydown={(e) => e.key === "Escape" && dispatch("close")} />
@@ -117,6 +126,22 @@
       folder and off by default — nothing is captured until you add an enabled folder below.
     </div>
     <ScheduledSnapshots />
+
+    <div class="section-title">System tray</div>
+    <div class="settings-row">
+      <span>Close to tray instead of quitting</span>
+      <input
+        type="checkbox"
+        checked={closeToTray}
+        data-testid="close-to-tray-toggle"
+        on:change={(e) => setCloseToTray(e.currentTarget.checked)}
+      />
+    </div>
+    <div class="note">
+      When on, closing the window keeps Cross-Platform Explorer running in the system tray — click the tray
+      icon to bring it back, or use the tray menu's Quit to exit. The tray menu also lists your recent and
+      pinned folders for a one-click jump. Off by default: closing the window quits the app.
+    </div>
 
     <ShellIntegration />
 
