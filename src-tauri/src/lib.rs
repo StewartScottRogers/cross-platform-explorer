@@ -2820,6 +2820,48 @@ async fn shell_integration_installed() -> bool {
         .unwrap_or(false)
 }
 
+/// Register CPE as a Windows "Default apps" *candidate* (CPE-1277, epic CPE-712), then open the Windows
+/// Default-apps settings page so the user can confirm the choice. This is HONEST + reversible: modern
+/// Windows never lets a program silently force itself as the default, so we only publish the registration
+/// (an app Capabilities entry + a folder ProgID under HKCU) and direct the user to Settings → Default apps.
+/// Windows-only today; other OSes return an error. Logic in `cpe_server::shell_menu`.
+#[tauri::command]
+#[cfg_attr(feature = "specta-bindings", specta::specta)]
+async fn set_default_file_manager() -> Result<(), String> {
+    let exe = std::env::current_exe().map_err(|e| e.to_string())?.to_string_lossy().into_owned();
+    tauri::async_runtime::spawn_blocking(move || {
+        cpe_server::shell_menu::install_default_apps_registration(&exe, "Cross-Platform Explorer")?;
+        // Registration only makes CPE selectable — the user confirms the default in Windows Settings.
+        open_external_impl("ms-settings:defaultapps".to_string())
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+/// Remove the Windows Default-apps registration (CPE-1277) — a complete, idempotent reversal of everything
+/// `set_default_file_manager` wrote. Does NOT change any default the user may have chosen (Windows owns
+/// that); it only withdraws CPE as a candidate. Logic in `cpe_server::shell_menu`.
+#[tauri::command]
+#[cfg_attr(feature = "specta-bindings", specta::specta)]
+async fn unset_default_file_manager() -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(|| {
+        cpe_server::shell_menu::uninstall_default_apps_registration("Cross-Platform Explorer")
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+/// Whether CPE is currently registered as a Windows Default-apps candidate (CPE-1277) — best-effort, so the
+/// Settings control can reflect true state. Note: this reports *registration*, not whether the user has
+/// actually chosen CPE as the default (Windows doesn't expose that reliably). Logic in `cpe_server::shell_menu`.
+#[tauri::command]
+#[cfg_attr(feature = "specta-bindings", specta::specta)]
+async fn default_file_manager_status() -> bool {
+    tauri::async_runtime::spawn_blocking(cpe_server::shell_menu::default_apps_registered)
+        .await
+        .unwrap_or(false)
+}
+
 /// Claim an OS-wide global hotkey that summons Spotlight (CPE-1215, epic CPE-704): pressing `chord`
 /// (Tauri accelerator syntax, e.g. `"CommandOrControl+Shift+Space"`) fires the `spotlight:open` event,
 /// which the CPE-1216 overlay listens for — so Spotlight can be opened even while the main window is
@@ -9351,6 +9393,9 @@ pub fn run() {
             install_shell_integration,
             uninstall_shell_integration,
             shell_integration_installed,
+            set_default_file_manager,
+            unset_default_file_manager,
+            default_file_manager_status,
             #[cfg(not(any(target_os = "android", target_os = "ios")))]
             register_spotlight_hotkey,
             #[cfg(not(any(target_os = "android", target_os = "ios")))]
@@ -10142,6 +10187,9 @@ pub fn export_bindings(out: &std::path::Path) -> Result<(), String> {
         install_shell_integration,
         uninstall_shell_integration,
         shell_integration_installed,
+        set_default_file_manager,
+        unset_default_file_manager,
+        default_file_manager_status,
         register_spotlight_hotkey,
         unregister_spotlight_hotkey,
         drive_type,

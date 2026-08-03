@@ -1253,6 +1253,42 @@ async shellIntegrationInstalled() : Promise<boolean> {
     return await TAURI_INVOKE("shell_integration_installed");
 },
 /**
+ * Register CPE as a Windows "Default apps" *candidate* (CPE-1277, epic CPE-712), then open the Windows
+ * Default-apps settings page so the user can confirm the choice. This is HONEST + reversible: modern
+ * Windows never lets a program silently force itself as the default, so we only publish the registration
+ * (an app Capabilities entry + a folder ProgID under HKCU) and direct the user to Settings → Default apps.
+ * Windows-only today; other OSes return an error. Logic in `cpe_server::shell_menu`.
+ */
+async setDefaultFileManager() : Promise<Result<null, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("set_default_file_manager") };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * Remove the Windows Default-apps registration (CPE-1277) — a complete, idempotent reversal of everything
+ * `set_default_file_manager` wrote. Does NOT change any default the user may have chosen (Windows owns
+ * that); it only withdraws CPE as a candidate. Logic in `cpe_server::shell_menu`.
+ */
+async unsetDefaultFileManager() : Promise<Result<null, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("unset_default_file_manager") };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * Whether CPE is currently registered as a Windows Default-apps candidate (CPE-1277) — best-effort, so the
+ * Settings control can reflect true state. Note: this reports *registration*, not whether the user has
+ * actually chosen CPE as the default (Windows doesn't expose that reliably). Logic in `cpe_server::shell_menu`.
+ */
+async defaultFileManagerStatus() : Promise<boolean> {
+    return await TAURI_INVOKE("default_file_manager_status");
+},
+/**
  * Claim an OS-wide global hotkey that summons Spotlight (CPE-1215, epic CPE-704): pressing `chord`
  * (Tauri accelerator syntax, e.g. `"CommandOrControl+Shift+Space"`) fires the `spotlight:open` event,
  * which the CPE-1216 overlay listens for — so Spotlight can be opened even while the main window is
