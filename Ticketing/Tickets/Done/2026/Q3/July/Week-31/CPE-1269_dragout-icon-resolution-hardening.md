@@ -4,7 +4,7 @@ title: "Drag-out: harden icon resolution fallback + add resolveDragIcon unit cov
 type: chore
 component: frontend
 priority: low
-status: Backlog
+status: Done
 tags: ready
 created: 2026-08-02
 epic: CPE-661
@@ -26,3 +26,6 @@ Two non-blocking items from the CPE-672 review (PR #567):
 
 ## Notes
 Low priority; pre-existing weakness from the CPE-1264 fallback design. Not user-visible unless resource resolution fails.
+
+## Work Log
+- 2026-08-03 — resolveDragIcon now returns string|null (never a relative path); startFileDrag omits icon when unresolved rather than sending the relative default; +11 tests (mock @tauri-apps/api/path, cover success/failure/cache-only-on-success). Full suite 1913 pass. Foreman-verified. Merged #573.
