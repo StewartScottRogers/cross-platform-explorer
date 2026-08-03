@@ -13,7 +13,8 @@
     columnsTemplate, resizeColumnTo, boundaryOffsets, COLUMN_DEFAULTS, fullMins,
   } from "../columns";
   import { isSelected } from "../selection";
-  import { setDragData, isValidDrop, hoverEffect } from "../dnd";
+  import { setDragData, isValidDrop, hoverEffect, resolveEffect } from "../dnd";
+  import { startFileDrag, resolveDragIcon, isTauriEnv } from "../dragOut";
   import type { Selection } from "../selection";
   import type { DirEntry, SortKey, SortDir, ViewMode } from "../types";
   import type { AvailableColumn, MetadataCell } from "../bindings.gen";
@@ -211,6 +212,11 @@
     lastPressIndex = i;
   }
 
+  // Native OS drag-out preview icon (CPE-672), resolved to an absolute path once at mount so an Alt-drag
+  // has it ready synchronously (see onDragStart). Empty until resolved / outside Tauri — then startFileDrag
+  // resolves it itself as a fallback, so an unresolved icon never blocks a drag.
+  let dragOutIcon = "";
+
   function onDragStart(e: DragEvent, i: number) {
     if (renamingPath || Date.now() < suppressDragUntil) {
       e.preventDefault();
@@ -221,6 +227,31 @@
     const paths = isSelected(selection, i)
       ? entries.filter((_, j) => isSelected(selection, j)).map((x) => x.path)
       : [entries[i].path];
+
+    // ── Native OS drag-OUT (CPE-672) ────────────────────────────────────────────────────────────────
+    // Coexistence approach = option (B) from the research: keep the HTML5 internal drag as the DEFAULT
+    // and opt INTO a native OS drag with a discriminator — holding **Alt** while starting the drag. The
+    // plugin's `startDrag` launches a NATIVE OS drag that PRE-EMPTS the HTML5 DataTransfer drag that
+    // internal folder/sidebar drops (dnd.ts `setDragData` → ExplorerPane/Sidebar drop handlers) rely on;
+    // the two can't run in one gesture. So a PLAIN drag stays 100% internal (zero regression — the
+    // non-negotiable constraint), and Alt-drag is the explicit "take this out of the app" gesture. Gated
+    // on `canDrag` (so read-only archive rows never native-drag — their paths are synthetic) and
+    // `isTauriEnv()` (so a plain browser / non-Tauri target falls straight through to the HTML5 path,
+    // no-op and no error). Chosen over option (A) — unifying everything on the native drag — because (A)
+    // is a far bigger refactor that would route every internal drop through Tauri hit-testing, exactly the
+    // regression risk constraint #1 forbids.
+    if (canDrag && e.altKey && isTauriEnv()) {
+      // Suppress the HTML5 internal drag so only the native OS drag runs; `startFileDrag` itself is a
+      // no-op-safe async call (feature-gated, never throws). `mode` follows the same Ctrl=copy/Shift=move
+      // convention as internal drops; with neither held it resolves to copy — the safe default that never
+      // removes the source when dropping into another app.
+      e.preventDefault();
+      draggedPaths = [];
+      const mode = resolveEffect({ ctrlKey: e.ctrlKey, shiftKey: e.shiftKey }, null);
+      void startFileDrag(paths, { icon: dragOutIcon || undefined, mode });
+      return;
+    }
+
     draggedPaths = paths;
     setDragData(e.dataTransfer, paths);
     setDragBadge(e, paths.length);
@@ -458,6 +489,10 @@
   }
 
   onMount(() => {
+    // Pre-warm the native drag-out preview icon (CPE-672) so an Alt-drag has an absolute icon path ready
+    // synchronously rather than awaiting a Tauri IPC round-trip mid-gesture. Best-effort: outside Tauri it
+    // resolves to the relative fallback and the Alt-drag branch never fires anyway (isTauriEnv gate).
+    void resolveDragIcon().then((p) => (dragOutIcon = p));
     // May be too early (`.rows` not rendered yet) — measureGeometry()/wireScroller() are idempotent and
     // the reactive re-measure below picks it up once `.rows` exists.
     measureGeometry();

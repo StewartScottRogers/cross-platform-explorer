@@ -135,7 +135,10 @@ The Home screen has **Quick access** tiles up top and a tabbed lower section wit
   item shows a small badge with the count. You can also drag files **in** from the desktop or your system
   file manager: drop them on the window and they're **copied** into the folder under the cursor (or the
   current folder), with a highlight while you drag over. Drops run through the transfer manager, so a large
-  one shows the same progress panel as a paste.
+  one shows the same progress panel as a paste. To drag a selection **out** to another application (drop
+  files into your OS file manager, an email, a chat window, and so on), **hold Alt while you start the
+  drag** — a plain drag stays inside the app for folder/sidebar drops, and Alt-drag hands the real files to
+  the OS. Ctrl/Shift still choose copy vs move.
 - **File transfers** — a paste that **copies** runs through the transfer manager: a small panel appears
   in the bottom-right showing the progress bar, file count, and any errors, and lets you **cancel**
   mid-copy. It stays hidden when nothing is transferring. (Moves are near-instant same-folder-volume
