@@ -4,7 +4,7 @@ title: Drag files OUT to other OS applications
 type: feature
 component: Multiple
 priority: medium
-status: Doing
+status: Done
 tags: deferred-internal
 created: 2026-07-18
 epic: CPE-661
@@ -43,3 +43,6 @@ platform is unsupported, gate gracefully. Prereq: CPE-669.
 deferred-on: attended GUI verification + a decision on native-vs-HTML5 drag coexistence (above). Nothing
 external blocks it — it's pickable anytime, but wants a human at the keyboard to drag into another app and
 confirm internal DnD isn't regressed. revisit-when: next attended session or a /run drag-test.
+
+## Work Log
+- 2026-08-02 — Wired native drag-out via Alt+drag (opt-in, zero-regression to internal HTML5 drag; Ctrl=copy/Shift=move, default copy). Fixed DEFAULT_DRAG_ICON to absolute (resolveResource + bundle.resources, pre-warmed at mount). Opus reviewer APPROVE: internal-drag regression guarded+tested, icon-timing safe with pre-warm, graceful gating, 1888 tests green. Merged #567. ATTENDED verify needed: Alt+drag a file out to Explorer; plain drag still does internal drops; drag preview shows. UX note: Alt-drag was the safe choice; plain-drag-out (unify-on-native, option A) is available if the user prefers standard file-manager feel.
