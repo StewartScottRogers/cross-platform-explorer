@@ -4,7 +4,7 @@ title: Extract an archive entry by dragging it out
 type: feature
 component: Multiple
 priority: low
-status: Doing
+status: Done
 tags: deferred-internal
 created: 2026-07-18
 epic: CPE-661
@@ -28,3 +28,6 @@ no drop targets) as the safe interim, so nothing is broken meanwhile.
 ## Deferred
 deferred-on: GUI-critical verification (dragging out of a real archive) + a small backend extract-entry
 command. revisit-when: attended session / alongside CPE-672 drag-out work (related native-drag concerns).
+
+## Work Log
+- 2026-08-02 — Alt-drag a file out of an opened archive → extractArchiveEntryAny(zipPath, innerPath) per file → startFileDrag(tempPaths). Reused CPE-673 archive plumbing (archivePath prop chain) + CPE-672 Alt-drag + existing extract command (no Rust change). Plain drag in archive stays inert; on-disk CPE-672 drag + internal drag unchanged (regression-tested). 6 tests, full suite 1898 pass. Opus-grade sonnet reviewer APPROVE. Merged #569. Attended verify: Alt-drag an entry out of a real archive to Explorer.
