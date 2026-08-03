@@ -323,11 +323,16 @@ pub fn write_flac(orig: &[u8], fields: &[MetaField]) -> Vec<u8> {
 /// leading APP0 JFIF segment, matching where cameras place it; a pre-existing `Exif\0\0` APP1 anywhere in
 /// the header is stripped so re-writing is idempotent rather than stacking.
 ///
-/// Read values are un-quoted first (the reader renders ASCII tags with surrounding quotes via
-/// `display_value`), so a field carried through unchanged round-trips; UserComment is written with the
-/// standard 8-byte `ASCII\0\0\0` character-code prefix, or, if the value is still the reader's `0x…` hex
-/// form, decoded back to its raw bytes so it round-trips too. Camera intrinsics (Make/Model/exposure/…)
-/// are never rebuilt — only the four editable tags are — so this is not a lossy re-encode of the whole IFD.
+/// **Every other existing EXIF field is preserved.** The block is rebuilt by re-parsing `orig`'s current
+/// EXIF and re-emitting all of the primary image's fields (IFD0 + the Exif / GPS / Interop sub-IFDs),
+/// then *overriding* only the four editable tags with the new values — so intrinsics the reader marks
+/// read-only (Orientation, GPS geotag, DateTimeOriginal, Make/Model, exposure, …) survive a caption edit
+/// instead of being discarded. Read values are un-quoted first (the reader renders ASCII tags with
+/// surrounding quotes via `display_value`), so an editable field carried through unchanged round-trips;
+/// UserComment is written with the standard 8-byte `ASCII\0\0\0` character-code prefix, or, if the value
+/// is still the reader's `0x…` hex form, decoded back to its raw bytes so it round-trips too. (The
+/// thumbnail image — IFD1 / `In::THUMBNAIL` — is the one thing not carried, since its JPEG bytes can't be
+/// threaded through this writer; thumbnails are regenerable, not intrinsic metadata.)
 ///
 /// Returns `Err` (never panics) for non-JPEG/truncated input, when there are no editable EXIF fields to
 /// write, or when the encoded Exif block won't fit a single 64 KiB APP1 segment. **JPEG only** — for a
@@ -337,7 +342,7 @@ pub fn write_exif(orig: &[u8], fields: &[MetaField]) -> Result<Vec<u8>, String> 
     if orig.len() < 2 || orig[0] != 0xFF || orig[1] != 0xD8 {
         return Err("not a JPEG (missing SOI marker)".into());
     }
-    let tiff = build_exif_tiff(fields)?;
+    let tiff = build_exif_tiff(orig, fields)?;
 
     // APP1 segment: FFE1 + 2-byte length (covers the length field itself + payload) + "Exif\0\0" + TIFF.
     let payload_len = 6 + tiff.len();
@@ -454,28 +459,52 @@ pub fn write_exif(orig: &[u8], fields: &[MetaField]) -> Result<Vec<u8>, String> 
     Ok(out)
 }
 
-/// Build a raw TIFF/Exif block (big-endian) carrying only the editable tags found in `fields`, via
-/// `kamadak-exif`'s experimental `Writer`. `Err` if no writable field is present (an Exif block must have
-/// at least one field) or the encoder fails.
-fn build_exif_tiff(fields: &[MetaField]) -> Result<Vec<u8>, String> {
-    let exif_fields = build_exif_fields(fields);
-    if exif_fields.is_empty() {
+/// Build a raw TIFF/Exif block (big-endian) via `kamadak-exif`'s experimental `Writer`, preserving every
+/// existing field of `orig`'s primary image (IFD0 + the Exif / GPS / Interop sub-IFDs) and overriding only
+/// the four editable tags with the new values from `fields`. Re-parsing `orig` (rather than trusting the
+/// `MetaField` list, which only carries the tags [`crate::media_meta_read::read_exif`] surfaces) is what
+/// keeps intrinsics — Orientation, GPS, DateTimeOriginal, Make/Model, exposure — from being lost on an
+/// edit. The thumbnail image (`In::THUMBNAIL`) is dropped because its JPEG bytes can't be carried through
+/// this writer. `Err` if no editable field is present (an Exif block must have at least one field, and we
+/// never write an intrinsics-only block that just re-encodes what was already there) or the encoder fails.
+fn build_exif_tiff(orig: &[u8], fields: &[MetaField]) -> Result<Vec<u8>, String> {
+    let overrides = build_override_fields(fields);
+    if overrides.is_empty() {
         return Err("no editable EXIF fields to write".into());
     }
+    // Existing EXIF (if any) whose non-overridden fields we carry through. `.ok()` → None for a JPEG with
+    // no EXIF yet (e.g. a freshly-created image), in which case only the overrides are written.
+    let existing = exif::Reader::new().read_from_container(&mut std::io::Cursor::new(orig)).ok();
+
     let mut writer = exif::experimental::Writer::new();
-    for f in &exif_fields {
+    if let Some(ref exif) = existing {
+        for f in exif.fields() {
+            // Preserve only the primary image's IFDs; skip the thumbnail image (its data can't be carried).
+            if f.ifd_num != exif::In::PRIMARY {
+                continue;
+            }
+            // Don't re-emit a stale copy of a tag we're about to override (would duplicate the entry).
+            if overrides.iter().any(|o| o.tag == f.tag) {
+                continue;
+            }
+            writer.push_field(f);
+        }
+    }
+    for f in &overrides {
         writer.push_field(f);
     }
+
     let mut cursor = std::io::Cursor::new(Vec::new());
     writer.write(&mut cursor, false).map_err(|e| format!("failed to encode EXIF: {e}"))?;
     Ok(cursor.into_inner())
 }
 
-/// Translate the `"exif"`-group, editable fields into `exif::Field`s the `Writer` understands. Only the
-/// four editable tags are emitted; blank values, other groups, and camera-intrinsic keys are skipped
-/// (mirrors [`build_frames`]'s handling of the `"id3"` group). ASCII tags are un-quoted; UserComment gets
-/// its standard character-code prefix (see [`user_comment_bytes`]).
-fn build_exif_fields(fields: &[MetaField]) -> Vec<exif::Field> {
+/// Translate the `"exif"`-group, editable fields into the `exif::Field` overrides the `Writer` applies on
+/// top of the preserved existing IFDs. Only the four editable tags are emitted; blank values, other
+/// groups, and camera-intrinsic keys are skipped (mirrors [`build_frames`]'s handling of the `"id3"`
+/// group). ASCII tags are un-quoted; UserComment gets its standard character-code prefix (see
+/// [`user_comment_bytes`]).
+fn build_override_fields(fields: &[MetaField]) -> Vec<exif::Field> {
     let mut out = Vec::new();
     for f in fields {
         if !f.group.eq_ignore_ascii_case("exif") || f.value.is_empty() {
@@ -1095,5 +1124,118 @@ mod tests {
         assert_eq!(unquote_display_ascii("\"a\\\"b\""), "a\"b"); // \" → "
         assert_eq!(unquote_display_ascii("\"a\\\\b\""), "a\\b"); // \\ → \
         assert_eq!(unquote_display_ascii("\"\\x41BC\""), "ABC"); // \x41 → A
+    }
+
+    /// Build a JPEG standing in for a real camera photo: IFD0 (ImageDescription + Make + Orientation) +
+    /// GPS sub-IFD (a geotag), wrapped in an Exif APP1. Uses the exif `Writer` directly so the fixture is
+    /// independent of the code under test.
+    fn camera_photo_jpeg() -> Vec<u8> {
+        let fields = vec![
+            exif::Field {
+                tag: exif::Tag::ImageDescription,
+                ifd_num: exif::In::PRIMARY,
+                value: exif::Value::Ascii(vec![b"Old Caption".to_vec()]),
+            },
+            exif::Field {
+                tag: exif::Tag::Make,
+                ifd_num: exif::In::PRIMARY,
+                value: exif::Value::Ascii(vec![b"Acme".to_vec()]),
+            },
+            exif::Field {
+                tag: exif::Tag::Orientation,
+                ifd_num: exif::In::PRIMARY,
+                value: exif::Value::Short(vec![6]), // rotate 90° CW — portrait would display sideways if lost
+            },
+            exif::Field {
+                tag: exif::Tag::GPSLatitudeRef,
+                ifd_num: exif::In::PRIMARY,
+                value: exif::Value::Ascii(vec![b"N".to_vec()]),
+            },
+            exif::Field {
+                tag: exif::Tag::GPSLatitude,
+                ifd_num: exif::In::PRIMARY,
+                value: exif::Value::Rational(vec![
+                    exif::Rational { num: 37, denom: 1 },
+                    exif::Rational { num: 46, denom: 1 },
+                    exif::Rational { num: 30, denom: 1 },
+                ]),
+            },
+        ];
+        let mut w = exif::experimental::Writer::new();
+        for f in &fields {
+            w.push_field(f);
+        }
+        let mut cur = std::io::Cursor::new(Vec::new());
+        w.write(&mut cur, false).unwrap();
+        let tiff = cur.into_inner();
+
+        let mut jpg = vec![0xFFu8, 0xD8];
+        jpg.extend_from_slice(&[0xFF, 0xE1]);
+        jpg.extend_from_slice(&((tiff.len() + 6 + 2) as u16).to_be_bytes());
+        jpg.extend_from_slice(b"Exif\0\0");
+        jpg.extend_from_slice(&tiff);
+        jpg.extend_from_slice(&[0xFF, 0xD9]);
+        jpg
+    }
+
+    /// Regression guard for the write-back data-loss bug: editing the caption of a real photo must NOT
+    /// wipe the read-only camera intrinsics (Make / Orientation / GPS geotag). Before the fix,
+    /// `write_exif` rebuilt the IFD from only the four editable tags and silently dropped everything else.
+    #[test]
+    fn write_exif_preserves_intrinsics_gps_and_orientation_when_editing_caption() {
+        use crate::media_meta_read::read_exif;
+
+        let photo = camera_photo_jpeg();
+        // Sanity: the fixture really carries the intrinsics.
+        let before = read_exif(&photo);
+        let g = |fs: &[MetaField], k: &str| fs.iter().find(|f| f.key == k).map(|f| f.value.clone());
+        assert_eq!(g(&before, "Make"), Some("\"Acme\"".to_string()));
+        assert_eq!(g(&before, "ImageDescription"), Some("\"Old Caption\"".to_string()));
+        assert!(g(&before, "Orientation").is_some());
+        assert!(g(&before, "GPS Latitude").is_some());
+
+        // Edit ONLY the caption (as write_back would: carry every read field through apply_edits).
+        let edited: Vec<MetaField> = before
+            .iter()
+            .map(|f| {
+                if f.key == "ImageDescription" {
+                    MetaField { value: "New Caption".to_string(), ..f.clone() }
+                } else {
+                    f.clone()
+                }
+            })
+            .collect();
+        let out = write_exif(&photo, &edited).unwrap();
+        let after = read_exif(&out);
+
+        // The caption changed …
+        assert_eq!(g(&after, "ImageDescription"), Some("\"New Caption\"".to_string()));
+        // … and every intrinsic SURVIVED (this is the bug this test guards against).
+        assert_eq!(g(&after, "Make"), Some("\"Acme\"".to_string()));
+        assert_eq!(g(&after, "GPS Latitude"), g(&before, "GPS Latitude"));
+        assert_eq!(g(&after, "Orientation"), g(&before, "Orientation"));
+    }
+
+    /// UserComment (an UNDEFINED-typed tag written with the `ASCII\0\0\0` character-code prefix) survives
+    /// a write and reads back as the reader's hex rendering of those exact bytes.
+    #[test]
+    fn write_exif_round_trips_user_comment() {
+        use crate::media_meta_read::read_exif;
+
+        let seed = [0xFFu8, 0xD8, 0xFF, 0xD9];
+        let jpg = write_exif(&seed, &[efield("UserComment", "Hi there")]).unwrap();
+        let fields = read_exif(&jpg);
+        let uc = fields.iter().find(|f| f.key == "UserComment").map(|f| f.value.clone());
+        // Reader renders UNDEFINED as hex: "ASCII\0\0\0Hi there" = 41 53 43 49 49 00 00 00 48 69 …
+        let mut expected = Vec::from(*b"ASCII\0\0\0");
+        expected.extend_from_slice(b"Hi there");
+        let expected_hex = format!("0x{}", expected.iter().map(|b| format!("{b:02x}")).collect::<String>());
+        assert_eq!(uc, Some(expected_hex.clone()));
+
+        // And it survives a second write unchanged (the `0x…` form is decoded back to raw bytes).
+        let carried = vec![MetaField { group: "exif".into(), key: "UserComment".into(), value: expected_hex.clone(), editable: true }];
+        let jpg2 = write_exif(&jpg, &carried).unwrap();
+        let uc2 = read_exif(&jpg2).iter().find(|f| f.key == "UserComment").map(|f| f.value.clone());
+        assert_eq!(uc2, Some(expected_hex));
     }
 }
