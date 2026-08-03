@@ -635,6 +635,13 @@ pub mod minimap;
 /// dependencies.
 pub mod file_type;
 
+/// Disguised-file (extension-mismatch) **tree sweep** (CPE-1285, epic CPE-1000). Walks a real directory
+/// tree (skip-unreadable), reads a capped ~64-byte header per regular file, and calls
+/// [`file_type::mismatch`] to flag every file whose sniffed content disagrees with its claimed extension
+/// — the tree-wide sweep companion to the per-row `TypeMismatch` metadata column. Container-safe (relies
+/// on `file_type::mismatch`'s own ZIP-container handling). Pure adapter; command/UI wiring is CPE-1287.
+pub mod type_mismatch_scan;
+
 /// Text-encoding + line-ending detection (CPE-1003, epic CPE-1002 "File inspection & safety
 /// utilities"). Guesses a text file's encoding from a leading byte-order mark or UTF-8 validity, and
 /// separately reports which line-ending convention(s) a decoded string uses. Pure over a byte slice
