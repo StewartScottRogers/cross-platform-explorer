@@ -9,6 +9,7 @@ import ShellIntegration from "./ShellIntegration.svelte";
 
 const calls: string[] = [];
 let installedState = false;
+let registeredState = false;
 
 vi.mock("@tauri-apps/api/core", () => ({
   // Channel is imported by ../invoke; provide a stub so the module loads.
@@ -24,6 +25,16 @@ vi.mock("@tauri-apps/api/core", () => ({
       installedState = false;
       return undefined;
     }
+    // Default-apps registration (CPE-1277).
+    if (cmd === "default_file_manager_status") return registeredState;
+    if (cmd === "set_default_file_manager") {
+      registeredState = true; // registers CPE + (in prod) opens Windows Default apps
+      return undefined;
+    }
+    if (cmd === "unset_default_file_manager") {
+      registeredState = false;
+      return undefined;
+    }
     return undefined;
   }),
 }));
@@ -35,6 +46,7 @@ function setPlatform(value: string) {
 beforeEach(() => {
   calls.length = 0;
   installedState = false;
+  registeredState = false;
 });
 afterEach(() => setPlatform(""));
 
@@ -79,5 +91,49 @@ describe("ShellIntegration toggle (CPE-1023)", () => {
     // No install/uninstall/query calls on an unsupported OS.
     expect(calls).not.toContain("install_shell_integration");
     expect(calls).not.toContain("shell_integration_installed");
+  });
+});
+
+describe("Default file manager registration (CPE-1277)", () => {
+  it("on Windows, registers CPE and shows the honest confirm-in-Windows note", async () => {
+    setPlatform("Win32");
+    render(ShellIntegration);
+    await waitFor(() => expect(calls).toContain("default_file_manager_status"));
+
+    // Honest copy: never claims to force the default; directs to Windows Default apps.
+    expect(screen.getByText(/confirm it in Settings → Default apps/i)).toBeTruthy();
+    expect(screen.getByText(/never lets an app set itself as the default/i)).toBeTruthy();
+
+    const register = screen.getByRole("button", { name: /^(re-?)?register$/i });
+    await fireEvent.click(register);
+    await waitFor(() => expect(calls).toContain("set_default_file_manager"));
+    // Re-reads registration state after the mutation and reflects it.
+    expect(calls.filter((c) => c === "default_file_manager_status").length).toBeGreaterThanOrEqual(2);
+    await waitFor(() => expect(screen.getByText(/Registered —/i)).toBeTruthy());
+  });
+
+  it("on Windows, unregisters when already registered", async () => {
+    setPlatform("Win32");
+    registeredState = true;
+    render(ShellIntegration);
+    const unregister = await waitFor(() => {
+      const b = screen.getByRole("button", { name: /^unregister$/i }) as HTMLButtonElement;
+      expect(b.disabled).toBe(false);
+      return b;
+    });
+
+    await fireEvent.click(unregister);
+    await waitFor(() => expect(calls).toContain("unset_default_file_manager"));
+  });
+
+  it("off Windows, the register/unregister actions are disabled and the backend is never called", async () => {
+    setPlatform("Linux x86_64");
+    render(ShellIntegration);
+    const register = screen.getByRole("button", { name: /^(re-?)?register$/i }) as HTMLButtonElement;
+    const unregister = screen.getByRole("button", { name: /^unregister$/i }) as HTMLButtonElement;
+    expect(register.disabled).toBe(true);
+    expect(unregister.disabled).toBe(true);
+    expect(calls).not.toContain("set_default_file_manager");
+    expect(calls).not.toContain("default_file_manager_status");
   });
 });

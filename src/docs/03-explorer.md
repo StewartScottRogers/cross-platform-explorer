@@ -233,6 +233,18 @@ The toggle registers under your **user** account only, so enabling it never need
 It's available on **Windows** today; the macOS and Linux equivalents are on the way, and the toggle shows a
 "coming soon" note on those platforms until then.
 
+### Set as default file manager
+
+The same section has a **Set as default file manager** control. It's honest about what modern Windows
+allows: an app **cannot** silently make itself the default — Windows always leaves that choice to you.
+So **Register** does two things: it records Cross-Platform Explorer with Windows as a *candidate* (an
+app entry under your user account, plus a folder-open command), and it opens **Settings › Default apps**
+so you can confirm the choice yourself. CPE never claims to have flipped the default for you.
+
+**Unregister** completely withdraws that registration — everything it added is removed, with nothing left
+behind. (It doesn't change any default you may have picked; Windows owns that.) Like shell integration,
+this is Windows-only for now and shows a "coming soon" note elsewhere.
+
 ## Agent Watch
 
 Agent Watch is a mode layered over the explorer, not a separate app or a toggle you hunt for. It appears

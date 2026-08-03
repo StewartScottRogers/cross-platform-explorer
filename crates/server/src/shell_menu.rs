@@ -216,6 +216,89 @@ pub fn macos_shell_plan(app_name: &str, bundle_id: &str) -> MacShellPlan {
     }
 }
 
+// ── Windows "Default apps" registration plan (CPE-1277, epic CPE-712) ────────────────────────────────
+// Modern Windows never lets a program silently *become* the default handler — the user must confirm the
+// choice in Settings → Default apps. All we can honestly do is REGISTER Cross-Platform Explorer as a
+// *candidate*: publish an app-Capabilities entry under HKCU\Software\RegisteredApplications (so CPE shows
+// up in the Default-apps app list) plus an "open a folder" ProgID with a launch command. This plan is
+// that registration, as data, so the applier stays trivial and the reversal is unit-testable. No registry
+// I/O here. Everything lives under HKCU, so no elevation is required.
+
+/// A single registry *value* (its key path under HKCU + the value name) to delete on uninstall — distinct
+/// from deleting a whole key subtree, used to drop the `RegisteredApplications` pointer without disturbing
+/// the other apps registered alongside it.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[cfg_attr(feature = "specta", derive(specta::Type))]
+pub struct RegValueRef {
+    pub key: String,
+    pub value_name: String,
+}
+
+/// The Windows Default-apps registration plan: values to write on install, key subtrees to delete on
+/// uninstall, and individual values to delete on uninstall (the `RegisteredApplications` pointer, whose
+/// siblings must survive). Together `remove_keys` + `remove_values` reverse the whole `install` set.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[cfg_attr(feature = "specta", derive(specta::Type))]
+pub struct WinDefaultAppsPlan {
+    pub install: Vec<RegEntry>,
+    pub remove_keys: Vec<String>,
+    pub remove_values: Vec<RegValueRef>,
+}
+
+/// Stable HKCU vendor key holding our published capabilities. Name-independent, so `default_apps_registered`
+/// and the key-removal set need no arguments; the whole subtree is deleted on uninstall.
+const CAPS_ROOT: &str = r"Software\CrossPlatformExplorer";
+/// ProgID registered as the "open a folder" handler CPE advertises in its capabilities.
+const FOLDER_PROGID: &str = "CrossPlatformExplorer.Folder";
+
+/// Build the HKCU plan that registers CPE as a Windows Default-apps *candidate* for opening folders.
+///
+/// Writes: a `RegisteredApplications` pointer (value name = `app_name`, data = the Capabilities key path)
+/// so CPE appears in the Default-apps app list; a `Capabilities` key carrying `ApplicationName` /
+/// `ApplicationDescription` and a `FileAssociations` entry that *advertises* the folder ProgID (declares
+/// capability only — it never sets the default); and that ProgID itself (`(Default)` label, `DefaultIcon`,
+/// and `shell\open\command` → `"exe" "%1"`). This only makes CPE *selectable* in Settings → Default apps;
+/// the user still confirms the choice there. `exe_path` is quoted so spaces are safe.
+pub fn windows_default_apps_plan(exe_path: &str, app_name: &str) -> WinDefaultAppsPlan {
+    let caps = format!(r"{CAPS_ROOT}\Capabilities");
+    let progid_root = format!(r"Software\Classes\{FOLDER_PROGID}");
+    let reg_apps = r"Software\RegisteredApplications".to_string();
+    let description = format!("Browse and open folders with {app_name}, a cross-platform file explorer.");
+
+    let install = vec![
+        // Publish the app so it appears in the Default-apps list. The value NAME is the display app name;
+        // the value DATA is the HKCU-relative path of the Capabilities key.
+        RegEntry { key: reg_apps.clone(), value_name: app_name.to_string(), value: caps.clone() },
+        // Capabilities: what Windows shows + the associations we advertise.
+        RegEntry { key: caps.clone(), value_name: "ApplicationName".into(), value: app_name.to_string() },
+        RegEntry { key: caps.clone(), value_name: "ApplicationDescription".into(), value: description },
+        // Advertise that our folder ProgID handles the folder ("Directory") class. Capability only — it
+        // does NOT set the default (that stays the user's choice in Settings → Default apps).
+        RegEntry {
+            key: format!(r"{caps}\FileAssociations"),
+            value_name: "Directory".into(),
+            value: FOLDER_PROGID.to_string(),
+        },
+        // The folder ProgID: label, icon, and the command that launches CPE on the chosen folder (%1).
+        RegEntry { key: progid_root.clone(), value_name: String::new(), value: format!("{app_name} Folder") },
+        RegEntry { key: format!(r"{progid_root}\DefaultIcon"), value_name: String::new(), value: exe_path.to_string() },
+        RegEntry {
+            key: format!(r"{progid_root}\shell\open\command"),
+            value_name: String::new(),
+            value: format!(r#""{exe_path}" "%1""#),
+        },
+    ];
+    WinDefaultAppsPlan {
+        install,
+        // Deleting these two roots removes the Capabilities subtree (incl. FileAssociations) and the whole
+        // ProgID subtree (incl. DefaultIcon + shell\open\command).
+        remove_keys: vec![CAPS_ROOT.to_string(), progid_root],
+        // …and drop the single RegisteredApplications pointer value (a key delete there would nuke the
+        // entries of every other app).
+        remove_values: vec![RegValueRef { key: reg_apps, value_name: app_name.to_string() }],
+    }
+}
+
 // ── Apply / remove the Windows plan against the real registry (CPE-1020, epic CPE-712) ──────────────
 // Thin glue over `windows_shell_plan`: write every entry under HKCU on install, delete every root key on
 // uninstall. All decision logic lives in the plan; this only executes it. Windows-only (behind `winreg`);
@@ -266,6 +349,73 @@ pub fn uninstall_shell_integration() -> Result<(), String> {
 pub fn shell_integration_installed() -> bool {
     let hkcu = winreg::RegKey::predef(winreg::enums::HKEY_CURRENT_USER);
     windows_shell_plan("", "").remove.first().is_some_and(|k| hkcu.open_subkey(k).is_ok())
+}
+
+// ── Apply / remove the Default-apps registration against the real registry (CPE-1277) ───────────────
+// Same thin-glue pattern as the shell integration: install writes the plan's entries, uninstall deletes
+// its key subtrees AND drops the RegisteredApplications pointer value (a key delete there would clobber
+// every other registered app). Idempotent both ways; absent keys/values are treated as success.
+
+/// Delete individual registry values (idempotent). Opens each parent key for write and drops the named
+/// value; an absent parent key or value is success (already gone), so uninstall is safe to re-run.
+#[cfg(windows)]
+fn remove_values(hkcu: &winreg::RegKey, values: &[RegValueRef]) -> Result<(), String> {
+    for v in values {
+        match hkcu.open_subkey_with_flags(&v.key, winreg::enums::KEY_SET_VALUE) {
+            Ok(key) => match key.delete_value(&v.value_name) {
+                Ok(()) => {}
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                Err(e) => return Err(format!(r"delete value {}\{}: {e}", v.key, v.value_name)),
+            },
+            // Parent key absent ⇒ the value is already gone.
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => return Err(format!("open {}: {e}", v.key)),
+        }
+    }
+    Ok(())
+}
+
+/// Register CPE as a Windows Default-apps *candidate* for `exe_path` / `app_name` — writes the plan under
+/// HKCU (no elevation). This never sets CPE as the default; the user confirms that in Settings → Default
+/// apps. Idempotent — re-registering overwrites the same values.
+#[cfg(windows)]
+pub fn install_default_apps_registration(exe_path: &str, app_name: &str) -> Result<(), String> {
+    let hkcu = winreg::RegKey::predef(winreg::enums::HKEY_CURRENT_USER);
+    apply_entries(&hkcu, &windows_default_apps_plan(exe_path, app_name).install)
+}
+
+/// Remove the Default-apps registration — delete the Capabilities + ProgID subtrees and drop the
+/// RegisteredApplications pointer. Tolerates already-absent keys/values, so it's safe when nothing is
+/// registered. `app_name` names the RegisteredApplications value to drop.
+#[cfg(windows)]
+pub fn uninstall_default_apps_registration(app_name: &str) -> Result<(), String> {
+    let hkcu = winreg::RegKey::predef(winreg::enums::HKEY_CURRENT_USER);
+    let plan = windows_default_apps_plan("", app_name);
+    remove_keys(&hkcu, &plan.remove_keys)?;
+    remove_values(&hkcu, &plan.remove_values)
+}
+
+/// Whether CPE is currently registered as a Default-apps candidate (the Capabilities key exists). Best
+/// effort; name-independent so the Settings control can reflect true state without arguments.
+#[cfg(windows)]
+pub fn default_apps_registered() -> bool {
+    let hkcu = winreg::RegKey::predef(winreg::enums::HKEY_CURRENT_USER);
+    hkcu.open_subkey(format!(r"{CAPS_ROOT}\Capabilities")).is_ok()
+}
+
+#[cfg(not(windows))]
+pub fn install_default_apps_registration(_exe_path: &str, _app_name: &str) -> Result<(), String> {
+    Err("default-apps registration is only implemented on Windows so far".into())
+}
+
+#[cfg(not(windows))]
+pub fn uninstall_default_apps_registration(_app_name: &str) -> Result<(), String> {
+    Err("default-apps registration is only implemented on Windows so far".into())
+}
+
+#[cfg(not(windows))]
+pub fn default_apps_registered() -> bool {
+    false
 }
 
 #[cfg(not(windows))]
@@ -447,5 +597,109 @@ mod tests {
         remove_keys(&hkcu, std::slice::from_ref(&base)).expect("remove");
         remove_keys(&hkcu, std::slice::from_ref(&base)).expect("remove is idempotent when absent");
         assert!(hkcu.open_subkey(&base).is_err(), "scratch key should be gone after remove");
+    }
+
+    // ── Windows Default-apps registration plan (CPE-1277) ──
+
+    fn dplan() -> WinDefaultAppsPlan {
+        windows_default_apps_plan(r"C:\Program Files\Cross-Platform Explorer\cpe.exe", "Cross-Platform Explorer")
+    }
+
+    fn val<'a>(p: &'a WinDefaultAppsPlan, key: &str, name: &str) -> Option<&'a str> {
+        p.install.iter().find(|e| e.key == key && e.value_name == name).map(|e| e.value.as_str())
+    }
+
+    #[test]
+    fn default_apps_plan_publishes_the_app_under_registered_applications() {
+        let p = dplan();
+        // RegisteredApplications: value name = display name, data = the Capabilities key path.
+        assert_eq!(
+            val(&p, r"Software\RegisteredApplications", "Cross-Platform Explorer"),
+            Some(r"Software\CrossPlatformExplorer\Capabilities")
+        );
+    }
+
+    #[test]
+    fn default_apps_plan_writes_capabilities_and_advertises_the_folder_progid() {
+        let p = dplan();
+        let caps = r"Software\CrossPlatformExplorer\Capabilities";
+        assert_eq!(val(&p, caps, "ApplicationName"), Some("Cross-Platform Explorer"));
+        assert!(val(&p, caps, "ApplicationDescription").unwrap().contains("Cross-Platform Explorer"));
+        // FileAssociations advertises the folder ProgID for the "Directory" class (capability, not default).
+        assert_eq!(
+            val(&p, r"Software\CrossPlatformExplorer\Capabilities\FileAssociations", "Directory"),
+            Some("CrossPlatformExplorer.Folder")
+        );
+    }
+
+    #[test]
+    fn default_apps_plan_registers_a_quoted_folder_open_command() {
+        let p = dplan();
+        let progid = r"Software\Classes\CrossPlatformExplorer.Folder";
+        assert_eq!(val(&p, progid, ""), Some("Cross-Platform Explorer Folder"));
+        assert_eq!(val(&p, &format!(r"{progid}\DefaultIcon"), ""), Some(r"C:\Program Files\Cross-Platform Explorer\cpe.exe"));
+        // The launch command keeps the exe a single quoted token (spaces safe) and passes the folder (%1).
+        let cmd = val(&p, &format!(r"{progid}\shell\open\command"), "").unwrap();
+        assert_eq!(cmd, r#""C:\Program Files\Cross-Platform Explorer\cpe.exe" "%1""#);
+        assert!(cmd.starts_with(r#""C:\Program Files\"#));
+    }
+
+    #[test]
+    fn default_apps_plan_never_force_sets_a_default() {
+        // Honesty invariant: the plan only *registers* a candidate. It must not touch any HKCU location
+        // that actually assigns a default handler — those live under `…\UserChoice`.
+        let p = dplan();
+        for e in &p.install {
+            assert!(!e.key.contains("UserChoice"), "plan must not write a UserChoice (would force a default): {}", e.key);
+        }
+    }
+
+    #[test]
+    fn default_apps_plan_is_completely_reversible() {
+        // Every installed entry must be reversed: either by a key-subtree delete (its key equals or nests
+        // under a remove_keys root) or by an explicit value delete (the RegisteredApplications pointer).
+        let p = dplan();
+        for e in &p.install {
+            let covered_by_key = p.remove_keys.iter().any(|k| e.key == *k || e.key.starts_with(&format!(r"{k}\")));
+            let covered_by_value = p.remove_values.iter().any(|v| v.key == e.key && v.value_name == e.value_name);
+            assert!(covered_by_key || covered_by_value, "install entry {}\\{} is not reversed on uninstall", e.key, e.value_name);
+        }
+        // Nothing stray: exactly the two subtree roots + the single pointer value.
+        assert_eq!(p.remove_keys.len(), 2);
+        assert_eq!(p.remove_values.len(), 1);
+        assert_eq!(p.remove_values[0].key, r"Software\RegisteredApplications");
+        assert_eq!(p.remove_values[0].value_name, "Cross-Platform Explorer");
+    }
+
+    // Exercises the real winreg apply → remove_keys + remove_values roundtrip under an ISOLATED scratch key,
+    // never the live RegisteredApplications/Classes entries, so it pollutes nothing and needs no elevation.
+    #[cfg(windows)]
+    #[test]
+    fn default_apps_apply_then_remove_values_roundtrips_and_is_idempotent() {
+        use winreg::enums::HKEY_CURRENT_USER;
+        use winreg::RegKey;
+        let hkcu = RegKey::predef(HKEY_CURRENT_USER);
+        let base = format!(r"Software\CPE-dtest-{}", std::process::id());
+        let reg_apps = format!(r"{base}\RegisteredApplications");
+        let caps = format!(r"{base}\Caps");
+        let entries = vec![
+            RegEntry { key: reg_apps.clone(), value_name: "AppA".into(), value: caps.clone() },
+            RegEntry { key: reg_apps.clone(), value_name: "AppB".into(), value: "keep-me".into() },
+            RegEntry { key: caps.clone(), value_name: "ApplicationName".into(), value: "A".into() },
+        ];
+        apply_entries(&hkcu, &entries).expect("apply");
+
+        // remove_values drops only the named value; the sibling ("AppB") survives.
+        let vals = vec![RegValueRef { key: reg_apps.clone(), value_name: "AppA".into() }];
+        remove_values(&hkcu, &vals).expect("remove_values");
+        remove_values(&hkcu, &vals).expect("remove_values is idempotent when absent");
+        let ra = hkcu.open_subkey(&reg_apps).expect("RegisteredApplications key still exists");
+        assert!(ra.get_value::<String, _>("AppA").is_err(), "AppA value should be gone");
+        assert_eq!(ra.get_value::<String, _>("AppB").unwrap(), "keep-me", "sibling value must survive");
+
+        // remove_keys clears the subtree; remove_values on an absent parent is a no-op (not an error).
+        remove_keys(&hkcu, std::slice::from_ref(&base)).expect("remove scratch subtree");
+        remove_values(&hkcu, &vals).expect("remove_values tolerates an absent parent key");
+        assert!(hkcu.open_subkey(&base).is_err(), "scratch key should be gone");
     }
 }
