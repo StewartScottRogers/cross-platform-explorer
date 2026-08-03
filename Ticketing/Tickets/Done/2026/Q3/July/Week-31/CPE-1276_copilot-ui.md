@@ -4,7 +4,7 @@ title: "AI file copilot UI: instruction → plan preview → confirm → execute
 type: feature
 component: frontend
 priority: medium
-status: Doing
+status: Done
 tags: ready
 created: 2026-08-03
 epic: CPE-977
@@ -46,3 +46,6 @@ Settings section for the model endpoint mirroring CPE-1273's embedder settings.
 Backend is safe (whitelisted plan, root-confined incl. symlink-safe, checkpoint+trash+undo, re-validate on execute).
 The UI must preserve the human-in-the-loop contract: nothing executes without an explicit Confirm on the shown plan.
 Attended: real plan quality needs the user's LM Studio/OpenAI endpoint.
+
+## Work Log
+- 2026-08-03 — CopilotDialog: instruction → copilotPlan → preview (summary counts + op list) → violations block Confirm → single Confirm call-site → copilotExecute → per-op results → Undo (checkpointRevert); CopilotSettings mirrors embedder (key write-only→keychain, Test); palette entry + i18n×12; needs-config prompt; docs 21-ai-copilot.md. Reviewer APPROVE: no-execute-without-Confirm airtight (verified single call site + test), 1925 tests pass. Merged #575. CPE-977 copilot delivered (backend #574 + UI #575). Attended: try vs LM Studio.
