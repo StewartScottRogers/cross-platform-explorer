@@ -4,7 +4,7 @@ title: "OGG Vorbis write-back codec"
 type: feature
 component: cpe-server
 priority: medium
-status: Doing
+status: Done
 tags: ready
 created: 2026-08-03
 epic: CPE-725
@@ -39,3 +39,4 @@ Hard but pure + testable (Ogg paging + CRC32). Epic CPE-725. Shares `media_meta_
 EXIF write (CPE-1288) — build on current main.
 
 ## Work Log
+- 2026-08-03 — OGG Vorbis write-back merged (#591, ff-landed after media_meta.rs union resolve). Reviewer (opus) APPROVE: CRC provably correct non-reflected Ogg variant (KAT 0x89A1897F + dual-impl agreement), re-paging (lacing/continuation/BOS/EOS/seq) correct incl 70KB multi-page, output re-parses thru read_ogg with every page CRC re-validated, panic-safe, multiplexed/chained refused. 1417 green clippy clean.
