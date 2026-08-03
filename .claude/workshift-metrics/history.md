@@ -706,3 +706,25 @@ them; history.md stopped at 07-31). Authoritative record is the checkpoint commi
   DECISION" — a single pick-list answer from the user (green-lighting deps/model/scope) unlocked 3 full shifts of
   genuinely-headless work (thumbnails; content search via the pre-built local embedder needed NO key). Always offer
   the decision, don't just report dry.
+
+### 2026-08-02 (cont.) — user "run so I can eyeball" → CI-recovery arc + thumbnail end-to-end fix
+- User asked to install+run the app to eyeball the new features. Uncovered a cascade, all now resolved:
+- **CI stall root-caused + fixed (CPE-1266):** GitHub Actions had been stuck for HOURS — NOT an outage/billing.
+  ~15 gui-smoke jobs (no `timeout-minutes`) hung to the 6h max holding every account concurrency slot, starving
+  the queue. Cancelled the hung+stale runs; added `timeout-minutes:20` to both gui-smoke jobs + `cancel-in-progress`
+  concurrency groups to ci.yml/gui-smoke.yml. A fresh run went in_progress within seconds → confirmed. LESSON: read
+  ALL runs (the hung ones were OLDER than the recent-queued slice I first looked at), and every long CI job needs a timeout.
+- **Thumbnails didn't render in the installed app → real end-to-end gap (CPE-1267):** backend decoders + bundled
+  pdfium/ffmpeg were correct (proven by a throwaway example on the user's actual files), but the FRONTEND
+  `hasThumbnail` gate (`src/lib/filetypes.ts` `THUMBNAIL_EXTRA_EXTS`) was never updated past CPE-1236 → the grid never
+  requested pdf/video thumbnails. Compounded by a Windows case-collision: my first edit went to `fileTypes.ts`
+  (camelCase) while the imported/tracked file is `filetypes.ts` (lowercase), so the "fix" never entered the build.
+  Landed in the correct lowercase file, shipped in **v0.57.41-sidecar** (verified live by the user). LESSON: headless
+  tests + reviews can't catch a frontend↔backend WIRING gap; and on Windows always edit/commit the exact tracked case.
+- **CI greened after the outage (CPE-1268):** the whole workshift had merged via `--admin` during the stall, so CI's
+  first real run was red across many jobs — thumb_video tiny-max_edge (real), pty kill-already-reaped ESRCH (real Unix),
+  macro-via-trash (CI has no Recycle Bin → probe-skip), macOS dead_code cfg-gate, pdfium install tar/cygpath +
+  best-effort. PR #566: all 10 CI jobs green (verified), merged; main green across all 3 OSes.
+- **Regression pin:** two-sided frontend↔backend `THUMBNAIL_EXTRA_EXTS` parity guard (vitest + a Rust thumb_source
+  test) + a gui-smoke pdf/video render spec — the CPE-1267 drift can never silently recur.
+- LESSON (process): merging via `--admin` during a CI outage defers, doesn't skip, verification — it all came due at once.
