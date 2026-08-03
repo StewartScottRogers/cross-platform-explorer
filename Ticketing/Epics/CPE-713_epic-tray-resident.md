@@ -2,7 +2,7 @@
 id: CPE-713
 title: "EPIC: Tray resident — system tray & background quick-access"
 type: Task
-status: Proposed
+status: In Progress
 priority: Low
 component: Multiple
 tags: [epic]
