@@ -658,6 +658,11 @@ pub mod extract_plan;
 /// algorithm; no I/O, no new dependencies.
 pub mod empty_dirs;
 
+/// Filesystem-walk adapter for [`empty_dirs::cascade_empty`] (CPE-1282, epic CPE-1002): recursively
+/// walks a real directory tree (skip-unreadable, capped) into an `empty_dirs::DirNode` tree and reports
+/// the topmost cascade-empty directory paths. Pure adapter; command/UI wiring is CPE-1287.
+pub mod empty_dirs_scan;
+
 /// Near-identical-folder detection via Jaccard similarity over file-content-hash sets (CPE-1007,
 /// epic CPE-1002). A level up from [`duplicates`] (byte-identical *files*): finds folders that are
 /// ~the same even though they aren't identical as a whole (e.g. `Photos/` vs. `Photos (backup)/`
