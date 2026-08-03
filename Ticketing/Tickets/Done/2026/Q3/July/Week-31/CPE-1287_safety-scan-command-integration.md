@@ -4,7 +4,7 @@ title: "Wire safety-scan commands + regen bindings (integration)"
 type: feature
 component: app
 priority: medium
-status: Doing
+status: Done
 tags: ready
 created: 2026-08-03
 epic: CPE-1002
@@ -34,3 +34,4 @@ across the parallel module workers.
 Prereq: CPE-1281–1285 merged. Feeds the frontend "File Health" model (CPE-1288 / T7). Epic CPE-1002.
 
 ## Work Log
+- 2026-08-03 — 5 scan commands wired + bindings regen merged (#588). Reviewer APPROVE: all 5 in BOTH generate_handler lists, bindings drift ZERO (git diff --exit-code clean after regen), fallible/infallible wrapping correct, smoke test real, no capability needed, both feature modes build+clippy clean, 170 test + npm check green. Safety-scan vein (CPE-1002/1000) now callable from frontend.
