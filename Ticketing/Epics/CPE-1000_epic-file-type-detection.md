@@ -2,7 +2,7 @@
 id: CPE-1000
 title: "EPIC: True file-type detection & extension-mismatch flagging"
 type: Task
-status: Proposed
+status: In Progress
 priority: Medium
 component: Multiple
 tags: [epic]

@@ -2,7 +2,7 @@
 id: CPE-1002
 title: "EPIC: File inspection & safety utilities"
 type: Task
-status: Proposed
+status: In Progress
 priority: Medium
 component: Backend
 tags: [epic]
