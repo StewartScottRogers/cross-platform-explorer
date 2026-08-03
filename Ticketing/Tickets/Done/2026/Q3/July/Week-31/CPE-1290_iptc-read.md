@@ -4,7 +4,7 @@ title: "IPTC (JPEG APP13 / 8BIM) read codec"
 type: feature
 component: cpe-server
 priority: medium
-status: Doing
+status: Done
 tags: ready
 created: 2026-08-03
 epic: CPE-725
@@ -37,3 +37,4 @@ Epic CPE-725. Shares `media_meta_read.rs` + `media_meta.rs` (read_all arm) with 
 CPE-1292 (WAV read) → sequence those after this.
 
 ## Work Log
+- 2026-08-03 — read_iptc merged (#586). Reviewer APPROVE, 8BIM-walk correct (even-padded Pascal name), 7 IIM fields spec-correct, panic-safe (bounds-checked + real truncation fuzz), read_all merges exif+iptc, 1389 re-run green clippy clean.
