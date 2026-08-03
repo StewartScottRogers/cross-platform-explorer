@@ -4,7 +4,7 @@ title: "Dangling / cyclic symlink scan"
 type: feature
 component: cpe-server
 priority: medium
-status: Doing
+status: Done
 tags: ready
 created: 2026-08-03
 epic: CPE-1002
@@ -35,3 +35,4 @@ classifies broken (target missing) and cyclic (self/loop) links. Headless, cargo
 Template: `folder_similarity_scan.rs` + `fsutil.rs` symlink helpers. Epic CPE-1002. Command/UI separate.
 
 ## Work Log
+- 2026-08-03 — dangling_links_scan merged (#584). Reviewer APPROVE, loop-safety confirmed (lexical normalize, no canonicalize, metadata relies on ELOOP), 11/11 re-run, clippy clean. Non-blocking: PR body test count off (8 not 11).

@@ -4,7 +4,7 @@ title: "Empty-folder cascade scan"
 type: feature
 component: cpe-server
 priority: medium
-status: Doing
+status: Done
 tags: ready
 created: 2026-08-03
 epic: CPE-1002
@@ -36,3 +36,4 @@ cascade-empty directories (a dir that is empty or contains only empty dirs). Hea
 Template: `folder_similarity_scan.rs`. Epic CPE-1002. Command/UI separate.
 
 ## Work Log
+- 2026-08-03 — empty_dirs_scan merged (#582). Reviewer APPROVE, topmost-only cascade correct, 14/14 re-run, clippy clean. Non-blocking: explicit symlink guard redundant vs DirEntry::metadata().is_dir() (belt-and-suspenders, harmless).
