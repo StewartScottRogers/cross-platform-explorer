@@ -4,7 +4,7 @@ title: "Guard: every runtime-resolved resource must be present in the shipped si
 type: chore
 component: build
 priority: high
-status: Doing
+status: Done
 tags: ready
 created: 2026-08-02
 epic: CPE-862
@@ -40,3 +40,6 @@ overlays instead of being replaced), removing the footgun at the source — but 
 - The guard fails if any required runtime resource is absent from the merged shipped sidecar `bundle.resources`
   (verify by temporarily removing icons/icon.png from the overlay → test goes red).
 - Passes on current main (all resources now present). `npm run check`/cargo as applicable clean. Runs in CI.
+
+## Work Log
+- 2026-08-02 — Guard `src/lib/sidecarBundleResources.test.ts` (runs in CI via npm test): merges base+sidecar+pdfium overlays per shipped OS with tauri --config semantics (overlay object REPLACES base array — the CPE-1270 footgun) + asserts a canonical REQUIRED list (icon/pdfium/ffmpeg/sidecars) is in the final bundle per OS. Proven non-hollow by deliberate-fail repro of CPE-1270. Also converted base tauri.conf.json resources array→object (footgun removed at source). 1892 tests pass. Foreman-verified merge logic + required list. Merged #568.
