@@ -193,6 +193,11 @@ fn be_u24(b: &[u8]) -> u32 {
     ((b[0] as u32) << 16) | ((b[1] as u32) << 8) | (b[2] as u32)
 }
 
+/// Read a big-endian u16 from 2 bytes (JPEG segment lengths, Photoshop resource ids, IIM dataset lengths).
+fn be_u16(b: &[u8]) -> u16 {
+    ((b[0] as u16) << 8) | (b[1] as u16)
+}
+
 /// Read a little-endian u32 from 4 bytes (Vorbis-comment lengths/counts).
 fn le_u32(b: &[u8]) -> u32 {
     u32::from_le_bytes([b[0], b[1], b[2], b[3]])
@@ -415,6 +420,188 @@ pub fn read_exif(bytes: &[u8]) -> Vec<MetaField> {
             continue;
         }
         fields.push(MetaField { group: "exif".to_string(), key: key.to_string(), value, editable });
+    }
+    fields
+}
+
+// ---- IPTC IIM (CPE-1290) ----
+
+/// The Photoshop "resource data" signature that opens a JPEG APP13 segment carrying IPTC (and other
+/// Photoshop) resource blocks.
+const PHOTOSHOP_SIG: &[u8] = b"Photoshop 3.0\0";
+
+/// The Photoshop image-resource-block signature (`8BIM`) that precedes each resource inside an APP13
+/// payload.
+const EIGHT_BIM_SIG: &[u8] = b"8BIM";
+
+/// The Photoshop image-resource id for the IPTC-IIM (International Press Telecommunications Council —
+/// Information Interchange Model) block.
+const IPTC_RESOURCE_ID: u16 = 0x0404;
+
+/// Parse IPTC-IIM metadata out of a JPEG's APP13 "Photoshop 3.0" segment into [`MetaField`]s in group
+/// `"iptc"`. Walks the JPEG marker stream looking for an APP13 (`0xFF 0xED`) segment whose payload opens
+/// with the Photoshop resource signature, then walks that payload's `8BIM` resource blocks to the
+/// IPTC-IIM block (resource id `0x0404`) and decodes its datasets.
+///
+/// Mirrors [`read_exif`]/[`read_id3v2`]'s defensive style: every offset is bounds-checked via `get(..)`
+/// before use (never a raw index that could panic on truncated/malformed input), and any parse failure —
+/// no SOI, no APP13, no Photoshop signature, no IPTC block, corrupt dataset framing — simply yields
+/// whatever fields were found before the failure (often none), never a panic.
+pub fn read_iptc(bytes: &[u8]) -> Vec<MetaField> {
+    // JPEG files start with the SOI marker 0xFFD8; anything else isn't a JPEG we can scan.
+    if bytes.len() < 4 || bytes[0] != 0xFF || bytes[1] != 0xD8 {
+        return Vec::new();
+    }
+    let mut pos = 2usize;
+    while pos + 2 <= bytes.len() {
+        if bytes[pos] != 0xFF {
+            break; // desynced from marker boundaries (e.g. ran into entropy-coded scan data) — stop
+        }
+        // Encoders may pad with extra 0xFF fill bytes before the real marker byte; skip them.
+        let mut marker_pos = pos + 1;
+        while bytes.get(marker_pos) == Some(&0xFF) {
+            marker_pos += 1;
+        }
+        let Some(&marker) = bytes.get(marker_pos) else { break };
+        // Standalone markers carry no length-prefixed payload: SOI, EOI, RSTn (0xD0-0xD7), TEM (0x01).
+        if marker == 0xD8 || marker == 0xD9 || marker == 0x01 || (0xD0..=0xD7).contains(&marker) {
+            pos = marker_pos + 1;
+            continue;
+        }
+        // SOS begins entropy-coded scan data with no further length-prefixed segments — APP13 always
+        // precedes it in a well-formed file, so there is nothing more to find.
+        if marker == 0xDA {
+            break;
+        }
+        let Some(len_bytes) = bytes.get(marker_pos + 1..marker_pos + 3) else { break };
+        let seg_len = be_u16(len_bytes) as usize; // includes these 2 length bytes themselves
+        if seg_len < 2 {
+            break; // malformed length — can't trust anything past this point
+        }
+        let seg_start = marker_pos + 1; // start of the length field
+        let payload_start = seg_start + 2;
+        let Some(payload_end) = seg_start.checked_add(seg_len) else { break };
+        if payload_end > bytes.len() || payload_start > payload_end {
+            break; // segment claims to run past EOF
+        }
+        if marker == 0xED {
+            if let Some(app13) = bytes.get(payload_start..payload_end) {
+                if let Some(sig_rest) = app13.strip_prefix(PHOTOSHOP_SIG) {
+                    let fields = parse_photoshop_8bim(sig_rest);
+                    if !fields.is_empty() {
+                        return fields;
+                    }
+                }
+            }
+        }
+        pos = payload_end;
+    }
+    Vec::new()
+}
+
+/// Walk a Photoshop APP13 payload's `8BIM` image-resource blocks (starting right after the
+/// `Photoshop 3.0\0` signature) looking for the IPTC-IIM resource (id `0x0404`), and hand its data to
+/// [`parse_iim_datasets`]. Resource-block layout: 4-byte `8BIM` signature, 2-byte big-endian resource id,
+/// a Pascal string name (1-byte length + name bytes, the whole thing padded to an even length), a 4-byte
+/// big-endian data size, then that many data bytes (padded to an even length). Returns an empty vec if no
+/// IPTC block is found or the block structure is malformed — never panics.
+fn parse_photoshop_8bim(data: &[u8]) -> Vec<MetaField> {
+    let mut pos = 0usize;
+    while let Some(sig) = data.get(pos..pos + EIGHT_BIM_SIG.len()) {
+        if sig != EIGHT_BIM_SIG {
+            break; // not a resource-block boundary — can't reliably resync
+        }
+        pos += EIGHT_BIM_SIG.len();
+        let Some(id_bytes) = data.get(pos..pos + 2) else { break };
+        let resource_id = be_u16(id_bytes);
+        pos += 2;
+        let Some(&name_len) = data.get(pos) else { break };
+        let name_total = 1 + name_len as usize; // length byte + name bytes
+        let name_padded = if name_total % 2 == 0 { name_total } else { name_total + 1 };
+        let Some(after_name) = pos.checked_add(name_padded) else { break };
+        if after_name > data.len() {
+            break;
+        }
+        pos = after_name;
+        let Some(size_bytes) = data.get(pos..pos + 4) else { break };
+        let data_size = be_u32(size_bytes) as usize;
+        pos += 4;
+        let Some(block_data) = data.get(pos..pos + data_size) else { break };
+        let data_padded = if data_size % 2 == 0 { data_size } else { data_size + 1 };
+        if resource_id == IPTC_RESOURCE_ID {
+            return parse_iim_datasets(block_data);
+        }
+        let Some(next) = pos.checked_add(data_padded) else { break };
+        pos = next;
+    }
+    Vec::new()
+}
+
+/// Map an IIM `(record, dataset)` pair to its friendly key, or `None` for datasets we don't surface.
+/// Keywords (2:25) is repeatable in the IIM model — the caller joins repeats into one field.
+fn iim_friendly_key(record: u8, dataset: u8) -> Option<&'static str> {
+    if record != 2 {
+        return None; // only the "Application Record" (record 2) carries the fields we surface
+    }
+    match dataset {
+        120 => Some("Caption/Abstract"),
+        25 => Some("Keywords"),
+        80 => Some("By-line"),
+        105 => Some("Headline"),
+        116 => Some("Copyright Notice"),
+        90 => Some("City"),
+        101 => Some("Country/Primary Location Name"),
+        _ => None,
+    }
+}
+
+/// Parse a raw IPTC-IIM data block into [`MetaField`]s (group `"iptc"`, all editable — these are the
+/// user-facing caption/keyword/byline-style fields, not camera intrinsics). Each dataset is
+/// `0x1C, record(1), dataset(1), length(2 big-endian), value(length bytes)`; values decode UTF-8 lossily
+/// (IIM is nominally Latin-1/ISO-8859-1 by default but modern writers commonly emit UTF-8, and lossy UTF-8
+/// degrades gracefully either way — matching the ticket's chosen decoding). The repeatable Keywords
+/// dataset (2:25) collects every occurrence into one semicolon-joined field. Extended (>32767-byte)
+/// dataset lengths are not supported (rare in practice for these text fields) — encountering one stops the
+/// scan rather than misreading the length. Every offset is bounds-checked; malformed/truncated input
+/// simply stops the scan with whatever was decoded so far — never a panic.
+fn parse_iim_datasets(data: &[u8]) -> Vec<MetaField> {
+    let mut fields = Vec::new();
+    let mut keywords: Vec<String> = Vec::new();
+    let mut pos = 0usize;
+    while let Some(&tag) = data.get(pos) {
+        if tag != 0x1C {
+            break; // not a dataset boundary — stop rather than mis-scan
+        }
+        let Some(&record) = data.get(pos + 1) else { break };
+        let Some(&dataset) = data.get(pos + 2) else { break };
+        let Some(len_bytes) = data.get(pos + 3..pos + 5) else { break };
+        let len = be_u16(len_bytes);
+        if len & 0x8000 != 0 {
+            break; // extended-length form (high bit set) — not supported, bail cleanly
+        }
+        let len = len as usize;
+        let value_start = pos + 5;
+        let Some(value_bytes) = data.get(value_start..value_start + len) else { break };
+        pos = value_start + len;
+
+        let Some(key) = iim_friendly_key(record, dataset) else { continue };
+        let value = String::from_utf8_lossy(value_bytes).trim().to_string();
+        if value.is_empty() {
+            continue;
+        }
+        if dataset == 25 {
+            keywords.push(value);
+        } else {
+            fields.push(MetaField { group: "iptc".to_string(), key: key.to_string(), value, editable: true });
+        }
+    }
+    if !keywords.is_empty() {
+        fields.push(MetaField {
+            group: "iptc".to_string(),
+            key: "Keywords".to_string(),
+            value: keywords.join("; "),
+            editable: true,
+        });
     }
     fields
 }
@@ -1607,5 +1794,219 @@ mod tests {
         pdf.extend_from_slice(b"8 0 obj\n<< /Title (Current Title) >>\nendobj\n");
         pdf.extend_from_slice(b"trailer\n<< /Size 9 /Root 1 0 R /Info 8 0 R >>\n%%EOF");
         assert_eq!(get(&read_pdf(&pdf), "Title"), Some("Current Title"));
+    }
+
+    // ---- IPTC IIM fixture builders (CPE-1290) ----
+
+    /// One IIM dataset: `0x1C, record, dataset, 2-byte big-endian length, value` (no padding — IIM
+    /// datasets aren't padded, unlike the enclosing 8BIM resource block).
+    fn iim_dataset(record: u8, dataset: u8, value: &str) -> Vec<u8> {
+        let mut d = vec![0x1C, record, dataset];
+        d.extend_from_slice(&(value.len() as u16).to_be_bytes());
+        d.extend_from_slice(value.as_bytes());
+        d
+    }
+
+    /// Wrap raw IIM dataset bytes as an `8BIM` image-resource block with the given resource id: 4-byte
+    /// `8BIM` signature, 2-byte big-endian id, a zero-length (empty) Pascal-string name padded to even
+    /// (i.e. one NUL padding byte), 4-byte big-endian data size, then the data padded to even length.
+    fn eight_bim_block(resource_id: u16, data: &[u8]) -> Vec<u8> {
+        let mut b = Vec::new();
+        b.extend_from_slice(b"8BIM");
+        b.extend_from_slice(&resource_id.to_be_bytes());
+        b.extend_from_slice(&[0u8, 0u8]); // empty Pascal-string name (1 len byte + 0 name bytes), padded to 2
+        b.extend_from_slice(&(data.len() as u32).to_be_bytes());
+        b.extend_from_slice(data);
+        if data.len() % 2 != 0 {
+            b.push(0); // pad data to even length
+        }
+        b
+    }
+
+    /// Build a JPEG APP13 segment payload: the `Photoshop 3.0\0` signature followed by one or more 8BIM
+    /// resource blocks (already-serialized, e.g. from [`eight_bim_block`]).
+    fn photoshop_app13_payload(blocks: &[u8]) -> Vec<u8> {
+        let mut p = PHOTOSHOP_SIG.to_vec();
+        p.extend_from_slice(blocks);
+        p
+    }
+
+    /// Wrap a segment payload as a JPEG marker segment: `0xFF, marker, 2-byte big-endian length (including
+    /// the length field itself), payload`.
+    fn jpeg_segment(marker: u8, payload: &[u8]) -> Vec<u8> {
+        let mut s = vec![0xFF, marker];
+        let len = (payload.len() + 2) as u16;
+        s.extend_from_slice(&len.to_be_bytes());
+        s.extend_from_slice(payload);
+        s
+    }
+
+    /// Build a minimal-but-structurally-valid JPEG: SOI, an optional list of pre-built marker segments
+    /// (e.g. an APP13), then a trivial SOS + a couple of fake entropy-coded bytes + EOI. Good enough for
+    /// [`read_iptc`]'s marker-stream walk without needing a real decodable image.
+    fn build_jpeg(segments: &[Vec<u8>]) -> Vec<u8> {
+        let mut j = vec![0xFF, 0xD8]; // SOI
+        for seg in segments {
+            j.extend_from_slice(seg);
+        }
+        // A minimal SOS segment (length 2 = no scan components, technically invalid JPEG but our reader
+        // never inspects component data — it just needs to see 0xFFDA and stop) + fake scan bytes + EOI.
+        j.extend_from_slice(&jpeg_segment(0xDA, &[]));
+        j.extend_from_slice(&[0x00, 0x00, 0x00]); // fake entropy-coded data
+        j.extend_from_slice(&[0xFF, 0xD9]); // EOI
+        j
+    }
+
+    fn get_all<'a>(fields: &'a [MetaField], key: &str) -> Vec<&'a str> {
+        fields.iter().filter(|f| f.key == key).map(|f| f.value.as_str()).collect()
+    }
+
+    #[test]
+    fn read_iptc_extracts_caption_and_repeated_keywords() {
+        let iim = [
+            iim_dataset(2, 120, "A caption"),
+            iim_dataset(2, 25, "nature"),
+            iim_dataset(2, 25, "landscape"),
+            iim_dataset(2, 80, "Jane Doe"),
+        ]
+        .concat();
+        let app13 = photoshop_app13_payload(&eight_bim_block(0x0404, &iim));
+        let jpeg = build_jpeg(&[jpeg_segment(0xED, &app13)]);
+
+        let f = read_iptc(&jpeg);
+        assert_eq!(get(&f, "Caption/Abstract"), Some("A caption"));
+        assert_eq!(get(&f, "By-line"), Some("Jane Doe"));
+        assert_eq!(get(&f, "Keywords"), Some("nature; landscape"));
+        assert!(f.iter().all(|x| x.group == "iptc" && x.editable));
+    }
+
+    #[test]
+    fn read_iptc_maps_all_known_fields() {
+        let iim = [
+            iim_dataset(2, 120, "Caption text"),
+            iim_dataset(2, 25, "tag-one"),
+            iim_dataset(2, 80, "By Someone"),
+            iim_dataset(2, 105, "A Headline"),
+            iim_dataset(2, 116, "(c) 2026 Someone"),
+            iim_dataset(2, 90, "Springfield"),
+            iim_dataset(2, 101, "USA"),
+        ]
+        .concat();
+        let app13 = photoshop_app13_payload(&eight_bim_block(0x0404, &iim));
+        let jpeg = build_jpeg(&[jpeg_segment(0xED, &app13)]);
+
+        let f = read_iptc(&jpeg);
+        assert_eq!(get(&f, "Caption/Abstract"), Some("Caption text"));
+        assert_eq!(get(&f, "Keywords"), Some("tag-one"));
+        assert_eq!(get(&f, "By-line"), Some("By Someone"));
+        assert_eq!(get(&f, "Headline"), Some("A Headline"));
+        assert_eq!(get(&f, "Copyright Notice"), Some("(c) 2026 Someone"));
+        assert_eq!(get(&f, "City"), Some("Springfield"));
+        assert_eq!(get(&f, "Country/Primary Location Name"), Some("USA"));
+        assert_eq!(f.len(), 7);
+    }
+
+    #[test]
+    fn read_iptc_skips_unrelated_8bim_blocks_and_finds_iptc_among_them() {
+        // A resolution-info block (id 0x03ED, not IPTC) followed by the real IPTC block — the walker must
+        // skip past the first (using its declared, possibly odd, size) to find the second.
+        let unrelated = eight_bim_block(0x03ED, &[1, 2, 3]); // odd length forces the padding path
+        let iptc = eight_bim_block(0x0404, &iim_dataset(2, 120, "Found it"));
+        let blocks = [unrelated, iptc].concat();
+        let app13 = photoshop_app13_payload(&blocks);
+        let jpeg = build_jpeg(&[jpeg_segment(0xED, &app13)]);
+
+        let f = read_iptc(&jpeg);
+        assert_eq!(get(&f, "Caption/Abstract"), Some("Found it"));
+    }
+
+    #[test]
+    fn read_iptc_ignores_records_other_than_the_application_record() {
+        // Record 1 (envelope record) dataset 90 happens to share a dataset number with something in
+        // record 2 elsewhere in the wild — but only record 2 is one we surface.
+        let iim = [iim_dataset(1, 90, "Envelope stuff"), iim_dataset(2, 90, "Real City")].concat();
+        let app13 = photoshop_app13_payload(&eight_bim_block(0x0404, &iim));
+        let jpeg = build_jpeg(&[jpeg_segment(0xED, &app13)]);
+
+        let f = read_iptc(&jpeg);
+        assert_eq!(get_all(&f, "City"), vec!["Real City"]);
+    }
+
+    #[test]
+    fn read_iptc_finds_app13_after_a_leading_app1_exif_segment() {
+        // A realistic JPEG carries an APP1 (EXIF) segment before APP13 — the walker must step over it.
+        let app1 = b"Exif\0\0fake exif bytes, never parsed by read_iptc".to_vec();
+        let app13 = photoshop_app13_payload(&eight_bim_block(0x0404, &iim_dataset(2, 105, "A Headline")));
+        let jpeg = build_jpeg(&[jpeg_segment(0xE1, &app1), jpeg_segment(0xED, &app13)]);
+
+        let f = read_iptc(&jpeg);
+        assert_eq!(get(&f, "Headline"), Some("A Headline"));
+    }
+
+    #[test]
+    fn read_all_merges_exif_and_iptc_for_jpeg() {
+        let ifd0 = vec![ascii_entry(0x010F, "Acme")]; // Make, via the EXIF codec
+        let exif_bytes = build_exif_tiff(ifd0, Vec::new(), Vec::new());
+        let app1 = {
+            let mut p = b"Exif\0\0".to_vec();
+            p.extend_from_slice(&exif_bytes);
+            p
+        };
+        let app13 = photoshop_app13_payload(&eight_bim_block(0x0404, &iim_dataset(2, 120, "A caption")));
+        let jpeg = build_jpeg(&[jpeg_segment(0xE1, &app1), jpeg_segment(0xED, &app13)]);
+
+        let f = crate::media_meta::read_all("jpg", &jpeg);
+        assert_eq!(get(&f, "Make"), Some("\"Acme\""));
+        assert_eq!(get(&f, "Caption/Abstract"), Some("A caption"));
+        let exif_group = f.iter().find(|x| x.key == "Make").unwrap();
+        assert_eq!(exif_group.group, "exif");
+        let iptc_group = f.iter().find(|x| x.key == "Caption/Abstract").unwrap();
+        assert_eq!(iptc_group.group, "iptc");
+    }
+
+    #[test]
+    fn read_iptc_returns_empty_for_jpeg_with_no_app13() {
+        // A JPEG with only an unrelated APP0 (JFIF) segment — no Photoshop/IPTC data at all.
+        let jfif = b"JFIF\0\x01\x01\x00\x00\x01\x00\x01\x00\x00".to_vec();
+        let jpeg = build_jpeg(&[jpeg_segment(0xE0, &jfif)]);
+        assert!(read_iptc(&jpeg).is_empty());
+
+        // No APP13 whatsoever.
+        let plain = build_jpeg(&[]);
+        assert!(read_iptc(&plain).is_empty());
+    }
+
+    #[test]
+    fn read_iptc_returns_empty_for_app13_without_photoshop_signature() {
+        // APP13 marker present, but the payload doesn't open with "Photoshop 3.0\0" (e.g. some other
+        // vendor's private APP13 use) — must not be mis-parsed as IPTC.
+        let app13 = b"Not Photoshop data at all".to_vec();
+        let jpeg = build_jpeg(&[jpeg_segment(0xED, &app13)]);
+        assert!(read_iptc(&jpeg).is_empty());
+    }
+
+    #[test]
+    fn read_iptc_returns_empty_for_non_jpeg_and_garbage_bytes() {
+        assert!(read_iptc(b"").is_empty());
+        assert!(read_iptc(b"not a jpeg at all, just plain text").is_empty());
+        assert!(read_iptc(&[0u8; 16]).is_empty());
+        assert!(read_iptc(b"fLaC....").is_empty()); // a real FLAC magic, but not a JPEG
+    }
+
+    #[test]
+    fn read_iptc_tolerates_truncation_without_panicking() {
+        let iim = [
+            iim_dataset(2, 120, "A caption"),
+            iim_dataset(2, 25, "nature"),
+            iim_dataset(2, 80, "Jane Doe"),
+        ]
+        .concat();
+        let app13 = photoshop_app13_payload(&eight_bim_block(0x0404, &iim));
+        let jpeg = build_jpeg(&[jpeg_segment(0xED, &app13)]);
+        for cut in 0..jpeg.len() {
+            let _ = read_iptc(&jpeg[..cut]); // must never panic on any truncation
+        }
+        // The untruncated document still yields the caption.
+        assert_eq!(get(&read_iptc(&jpeg), "Caption/Abstract"), Some("A caption"));
     }
 }
