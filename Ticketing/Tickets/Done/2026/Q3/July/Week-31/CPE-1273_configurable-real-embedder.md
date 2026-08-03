@@ -4,7 +4,7 @@ title: "Configurable real embedder for content search (OpenAI-compatible /v1/emb
 type: feature
 component: cpe-server
 priority: medium
-status: Doing
+status: Done
 tags: ready
 created: 2026-08-02
 epic: CPE-976
@@ -48,3 +48,6 @@ embeddings standard and fits the user's installed LM Studio.
 ## Notes
 End-to-end (real embeddings → better search quality) is the USER's step: they point it at their LM Studio (local)
 or OpenAI (key). Surface that clearly. The pluggable seam already exists (embedder.rs Embedder trait + FakeEmbedder).
+
+## Work Log
+- 2026-08-03 — HttpEmbedder (OpenAI-compatible /embeddings) via reused ureq behind off-by-default `http-embedder` feature; API key in OS keychain only (never plaintext/logged/returned); config {enabled,base_url,model} drives selection (HttpEmbedder vs FakeEmbedder); index keyed by embedder identity → clean rebuild-on-switch; disabled path byte-identical; injectable transport → tests mock HTTP (no network). Settings UI + Test-connection. cpe-server 1295/1294, src-tauri 109, vitest 1906, guards green. Security-focused reviewer APPROVE (key-never-leaks + disabled-unchanged confirmed). Merged #571. Enable via Settings → LM Studio localhost:1234/v1 (no key) or OpenAI + key.
