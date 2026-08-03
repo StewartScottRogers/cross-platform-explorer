@@ -4,7 +4,7 @@ title: Extract an archive entry by dragging it out
 type: feature
 component: Multiple
 priority: low
-status: Deferred
+status: Doing
 tags: deferred-internal
 created: 2026-07-18
 epic: CPE-661
