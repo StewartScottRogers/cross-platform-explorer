@@ -4,7 +4,7 @@ title: "Disguised-file (extension-mismatch) tree sweep"
 type: feature
 component: cpe-server
 priority: medium
-status: Backlog
+status: Doing
 tags: ready
 created: 2026-08-03
 epic: CPE-1000
