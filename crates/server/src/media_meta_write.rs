@@ -7,6 +7,10 @@
 //! - [`write_flac`] rebuilds a **FLAC** stream with its `VORBIS_COMMENT` metadata block replaced by one
 //!   built from the `group == "vorbis"` fields (via [`write_vorbis_comment`]), preserving STREAMINFO,
 //!   every other metadata block, and the audio frames byte-for-byte.
+//! - [`write_ogg`] rebuilds an **Ogg Vorbis** stream (CPE-1289) with its comment-header packet replaced,
+//!   **re-paging** the header region (re-laced segment tables, reassigned page sequence numbers, and
+//!   recomputed per-page CRC32 — Ogg's non-reflected `0x04c11db7` polynomial, by hand) while preserving the
+//!   identification header and every audio page.
 //!
 //! Pure + std-only (no new deps): fully cargo-testable by round-tripping through
 //! [`crate::media_meta_read`]'s readers with synthesised inputs, and does no I/O. Bounds-checked
@@ -608,6 +612,246 @@ fn user_comment_bytes(value: &str) -> Vec<u8> {
     out.extend_from_slice(b"ASCII\0\0\0");
     out.extend_from_slice(value.as_bytes());
     out
+}
+
+// ---- OGG / Vorbis comment write-back (CPE-1289) ----
+
+/// The three Vorbis header-packet type+signature prefixes (`\x01vorbis` / `\x03vorbis` / `\x05vorbis`) —
+/// identification, comment, and setup respectively. Mirrors [`crate::media_meta_read`]'s
+/// `OGG_VORBIS_COMMENT_SIG`.
+const OGG_IDENT_SIG: &[u8] = b"\x01vorbis";
+const OGG_COMMENT_SIG: &[u8] = b"\x03vorbis";
+const OGG_SETUP_SIG: &[u8] = b"\x05vorbis";
+
+/// CRC-32 lookup table for Ogg's page checksum: polynomial `0x04c11db7`, MSB-first, **no** input/output
+/// reflection, initial value 0, no final xor. Built at compile time so there's no runtime table setup and
+/// no dependency. (This is deliberately *not* the reflected CRC-32 used by zlib/PNG.)
+const OGG_CRC_TABLE: [u32; 256] = build_ogg_crc_table();
+
+const fn build_ogg_crc_table() -> [u32; 256] {
+    let mut table = [0u32; 256];
+    let mut i = 0usize;
+    while i < 256 {
+        let mut r = (i as u32) << 24;
+        let mut j = 0;
+        while j < 8 {
+            r = if r & 0x8000_0000 != 0 { (r << 1) ^ 0x04c1_1db7 } else { r << 1 };
+            j += 1;
+        }
+        table[i] = r;
+        i += 1;
+    }
+    table
+}
+
+/// Compute Ogg's page CRC over `data`. The caller must have zeroed the 4-byte CRC field (offset 22..26)
+/// within `data` first — Ogg checksums the *entire* page with that field cleared.
+fn ogg_crc32(data: &[u8]) -> u32 {
+    let mut crc: u32 = 0;
+    for &b in data {
+        let idx = (((crc >> 24) as u8) ^ b) as usize;
+        crc = (crc << 8) ^ OGG_CRC_TABLE[idx];
+    }
+    crc
+}
+
+/// One parsed Ogg page: its byte range within the original buffer plus the header fields this codec needs.
+/// `body_start`/`body_len` delimit the concatenated segment bodies (right after the segment table).
+struct OggPage {
+    start: usize,
+    end: usize,
+    header_type: u8,
+    serial: u32,
+    seg_table: Vec<u8>,
+    body_start: usize,
+    body_len: usize,
+}
+
+/// Parse `bytes` into its sequence of Ogg pages, bounds-checked throughout — a truncated header, segment
+/// table, or body yields `Err` rather than a panic. Each page's declared body length is the sum of its
+/// lacing values (the segment table). `Err` for anything that isn't a clean run of `OggS` pages.
+fn parse_ogg_pages(bytes: &[u8]) -> Result<Vec<OggPage>, String> {
+    let mut pages = Vec::new();
+    let mut pos = 0usize;
+    while pos < bytes.len() {
+        let header = bytes.get(pos..pos + 27).ok_or("truncated Ogg page header")?;
+        if &header[0..4] != b"OggS" {
+            return Err("not an Ogg stream (bad capture pattern)".into());
+        }
+        let header_type = header[5];
+        let serial = u32::from_le_bytes([header[14], header[15], header[16], header[17]]);
+        let page_segments = header[26] as usize;
+        let seg_table_start = pos + 27;
+        let seg_table =
+            bytes.get(seg_table_start..seg_table_start + page_segments).ok_or("truncated Ogg segment table")?.to_vec();
+        let body_start = seg_table_start + page_segments;
+        let body_len: usize = seg_table.iter().map(|&l| l as usize).sum();
+        let end = body_start + body_len;
+        if end > bytes.len() {
+            return Err("truncated Ogg page body".into());
+        }
+        pages.push(OggPage { start: pos, end, header_type, serial, seg_table, body_start, body_len });
+        pos = end;
+    }
+    if pages.is_empty() {
+        return Err("no Ogg pages found".into());
+    }
+    Ok(pages)
+}
+
+/// Lace `packets` into Ogg segments (each packet → floor(len/255) full 255-byte segments + one terminator
+/// segment of `len % 255` bytes, so an exact-multiple length still gets a trailing 0-lace terminator),
+/// split them into pages of at most 255 segments, and append the serialized pages to `out`. The first page
+/// gets `first_flags` (e.g. `0x02` BOS); any later page produced by this call is a **continuation** page
+/// (`0x01`) iff the previous page's final lacing value was `255` (the packet ran past the page boundary),
+/// else `0x00`. Header pages carry granule position 0 (per the Vorbis spec). `seq` is advanced past every
+/// page emitted. Each page's CRC is computed last, over the finished page with its CRC field zeroed.
+fn page_out(out: &mut Vec<u8>, packets: &[&[u8]], serial: u32, seq: &mut u32, first_flags: u8) {
+    let mut segs: Vec<(u8, &[u8])> = Vec::new();
+    for &pkt in packets {
+        let mut rest = pkt;
+        loop {
+            if rest.len() >= 255 {
+                segs.push((255, &rest[..255]));
+                rest = &rest[255..];
+            } else {
+                segs.push((rest.len() as u8, rest));
+                break;
+            }
+        }
+    }
+
+    let mut i = 0usize;
+    let mut page_index = 0usize;
+    let mut prev_last_lace = 0u8;
+    while i < segs.len() {
+        let take = (segs.len() - i).min(255);
+        let chunk = &segs[i..i + take];
+        let flags = if page_index == 0 {
+            first_flags
+        } else if prev_last_lace == 255 {
+            0x01 // continued packet spilled onto this page
+        } else {
+            0x00
+        };
+        emit_page(out, flags, 0, serial, *seq, chunk);
+        *seq += 1;
+        prev_last_lace = chunk.last().map(|&(l, _)| l).unwrap_or(0);
+        i += take;
+        page_index += 1;
+    }
+}
+
+/// Serialize one Ogg page (27-byte header + segment table + segment bodies) to the tail of `out` and fill
+/// in its CRC. `granule` is the page's granule position (0 for header pages).
+fn emit_page(out: &mut Vec<u8>, flags: u8, granule: u64, serial: u32, seq: u32, segs: &[(u8, &[u8])]) {
+    let start = out.len();
+    out.extend_from_slice(b"OggS");
+    out.push(0); // stream structure version
+    out.push(flags);
+    out.extend_from_slice(&granule.to_le_bytes());
+    out.extend_from_slice(&serial.to_le_bytes());
+    out.extend_from_slice(&seq.to_le_bytes());
+    out.extend_from_slice(&[0, 0, 0, 0]); // CRC placeholder, filled in below
+    out.push(segs.len() as u8);
+    for &(lace, _) in segs {
+        out.push(lace);
+    }
+    for &(_, body) in segs {
+        out.extend_from_slice(body);
+    }
+    let crc = ogg_crc32(&out[start..]);
+    out[start + 22..start + 26].copy_from_slice(&crc.to_le_bytes());
+}
+
+/// Rebuild an Ogg Vorbis stream (`orig`) with its Vorbis **comment header** (the 2nd of the three Vorbis
+/// header packets) replaced by a fresh one built from the `"vorbis"`-group fields in `fields` (via
+/// [`write_vorbis_comment`]), then **re-page** the header region: the identification header is kept alone on
+/// the beginning-of-stream page, the new comment + the original setup header are re-laced onto the following
+/// page(s), page sequence numbers are reassigned, and every rebuilt page's CRC32 is recomputed. The
+/// identification header packet and all audio pages are preserved (audio pages byte-for-byte apart from
+/// their renumbered sequence field + recomputed CRC — granule positions, serial, and header-type/EOS flags
+/// are untouched).
+///
+/// Scope: a single logical Vorbis bitstream (standard `.ogg`/`.oga` audio). Multiplexed/chained streams
+/// (a page whose serial differs from the first page's) are refused with `Err` rather than risk corrupting
+/// another stream's page numbering. `Err` (never a panic) for non-Ogg/truncated/malformed input, a stream
+/// with no complete Vorbis header packets, non-Vorbis header signatures, or a non-standard layout where
+/// audio data shares the setup header's page.
+pub fn write_ogg(orig: &[u8], fields: &[MetaField]) -> Result<Vec<u8>, String> {
+    if orig.len() < 4 || &orig[0..4] != b"OggS" {
+        return Err("not an Ogg stream (missing OggS capture pattern)".into());
+    }
+    let pages = parse_ogg_pages(orig)?;
+
+    // Single logical bitstream only — refuse multiplexed/chained streams (each logical stream owns its own
+    // per-serial page numbering, which re-paging the Vorbis headers would disturb).
+    let serial = pages[0].serial;
+    if pages.iter().any(|p| p.serial != serial) {
+        return Err("multiplexed/chained Ogg streams are not supported for metadata write".into());
+    }
+    if pages[0].header_type & 0x02 == 0 {
+        return Err("first Ogg page is not a beginning-of-stream page".into());
+    }
+
+    // Reassemble the first three Vorbis header packets (identification, comment, setup) by concatenating
+    // segment bodies across pages, and record the page where the setup header terminates — the boundary
+    // between the header pages we rebuild and the audio pages we preserve.
+    let mut cur: Vec<u8> = Vec::new();
+    let mut packets: Vec<Vec<u8>> = Vec::new();
+    let mut last_hdr_page: Option<usize> = None;
+    'outer: for (pi, page) in pages.iter().enumerate() {
+        let body = &orig[page.body_start..page.body_start + page.body_len];
+        let mut off = 0usize;
+        for &lace in &page.seg_table {
+            cur.extend_from_slice(&body[off..off + lace as usize]);
+            off += lace as usize;
+            if lace < 255 {
+                packets.push(std::mem::take(&mut cur));
+                if packets.len() == 3 {
+                    // The setup header must be the last packet on its page: Vorbis audio starts on a fresh
+                    // page, so leftover segment data here means a layout we won't risk re-paging.
+                    if off != page.body_len {
+                        return Err("audio data shares the Vorbis setup-header page (unsupported layout)".into());
+                    }
+                    last_hdr_page = Some(pi);
+                    break 'outer;
+                }
+            }
+        }
+    }
+    let last_hdr_page = last_hdr_page.ok_or("Ogg stream has no complete Vorbis header packets")?;
+
+    let ident = &packets[0];
+    let setup = &packets[2];
+    if !ident.starts_with(OGG_IDENT_SIG) || !packets[1].starts_with(OGG_COMMENT_SIG) || !setup.starts_with(OGG_SETUP_SIG)
+    {
+        return Err("not a Vorbis stream (unexpected header-packet signatures)".into());
+    }
+
+    // Fresh comment packet: 0x03 "vorbis" + freshly built comment data + the Vorbis framing bit (0x01),
+    // exactly the shape a decoder expects (the reader ignores the trailing framing byte).
+    let mut new_comment = OGG_COMMENT_SIG.to_vec();
+    new_comment.extend_from_slice(&write_vorbis_comment(fields));
+    new_comment.push(0x01);
+
+    let mut out = Vec::with_capacity(orig.len() + new_comment.len());
+    let mut seq = 0u32;
+    // Identification header alone on the BOS page (as the Vorbis spec requires), then comment + setup.
+    page_out(&mut out, &[ident], serial, &mut seq, 0x02);
+    page_out(&mut out, &[&new_comment, setup], serial, &mut seq, 0x00);
+
+    // Preserve every audio page byte-for-byte apart from a renumbered sequence field + recomputed CRC.
+    for page in &pages[last_hdr_page + 1..] {
+        let pstart = out.len();
+        out.extend_from_slice(&orig[page.start..page.end]);
+        out[pstart + 18..pstart + 22].copy_from_slice(&seq.to_le_bytes());
+        out[pstart + 22..pstart + 26].copy_from_slice(&[0, 0, 0, 0]);
+        let crc = ogg_crc32(&out[pstart..]);
+        out[pstart + 22..pstart + 26].copy_from_slice(&crc.to_le_bytes());
+        seq += 1;
+    }
+    Ok(out)
 }
 
 #[cfg(test)]
@@ -1237,5 +1481,259 @@ mod tests {
         let jpg2 = write_exif(&jpg, &carried).unwrap();
         let uc2 = read_exif(&jpg2).iter().find(|f| f.key == "UserComment").map(|f| f.value.clone());
         assert_eq!(uc2, Some(expected_hex));
+    }
+
+    // ---- OGG / Vorbis-comment write-back (CPE-1289) ----
+
+    /// A from-scratch, bitwise (table-free) Ogg CRC — the reference the codec's table-driven [`ogg_crc32`]
+    /// is cross-checked against. Two independent implementations agreeing is our CRC-correctness proof.
+    fn ref_ogg_crc(data: &[u8]) -> u32 {
+        let mut crc: u32 = 0;
+        for &b in data {
+            crc ^= (b as u32) << 24;
+            for _ in 0..8 {
+                crc = if crc & 0x8000_0000 != 0 { (crc << 1) ^ 0x04c1_1db7 } else { crc << 1 };
+            }
+        }
+        crc
+    }
+
+    /// Lace one packet into `(lace, body)` segments (255-byte runs + a `< 255` terminator).
+    fn lace_packet(packet: &[u8]) -> Vec<(u8, Vec<u8>)> {
+        let mut segs = Vec::new();
+        let mut rest = packet;
+        while rest.len() >= 255 {
+            let (c, t) = rest.split_at(255);
+            segs.push((255u8, c.to_vec()));
+            rest = t;
+        }
+        segs.push((rest.len() as u8, rest.to_vec()));
+        segs
+    }
+
+    /// Serialize one Ogg page independently of the code under test (its own CRC via [`ref_ogg_crc`]).
+    fn build_page(flags: u8, granule: u64, serial: u32, seq: u32, segs: &[(u8, Vec<u8>)]) -> Vec<u8> {
+        let mut p = Vec::new();
+        p.extend_from_slice(b"OggS");
+        p.push(0);
+        p.push(flags);
+        p.extend_from_slice(&granule.to_le_bytes());
+        p.extend_from_slice(&serial.to_le_bytes());
+        p.extend_from_slice(&seq.to_le_bytes());
+        p.extend_from_slice(&[0, 0, 0, 0]); // CRC placeholder
+        p.push(segs.len() as u8);
+        for (lace, _) in segs {
+            p.push(*lace);
+        }
+        for (_, body) in segs {
+            p.extend_from_slice(body);
+        }
+        let crc = ref_ogg_crc(&p);
+        p[22..26].copy_from_slice(&crc.to_le_bytes());
+        p
+    }
+
+    /// Build a minimal but valid single-stream Ogg Vorbis file: page 0 = identification header (BOS),
+    /// page 1 = comment + setup headers, page 2 = one dummy audio page (EOS). Returns `(bytes, ident,
+    /// audio_body)` so tests can assert those survive.
+    fn build_ogg_vorbis(comment_fields: &[MetaField], serial: u32) -> (Vec<u8>, Vec<u8>, Vec<u8>) {
+        // Identification header: 0x01 "vorbis" + 22 opaque bytes + framing bit = 30 bytes total.
+        let mut ident = OGG_IDENT_SIG.to_vec();
+        ident.extend_from_slice(&[0x11u8; 22]);
+        ident.push(0x01);
+
+        // Comment header: 0x03 "vorbis" + comment data + framing bit.
+        let mut comment = OGG_COMMENT_SIG.to_vec();
+        comment.extend_from_slice(&write_vorbis_comment(comment_fields));
+        comment.push(0x01);
+
+        // Setup header: 0x05 "vorbis" + opaque codebook stand-in.
+        let mut setup = OGG_SETUP_SIG.to_vec();
+        setup.extend_from_slice(&[0x5Au8; 40]);
+
+        let audio_body = b"DUMMY-VORBIS-AUDIO-PACKET-BYTES".to_vec();
+
+        let page0 = build_page(0x02, 0, serial, 0, &lace_packet(&ident));
+        let mut cs_segs = lace_packet(&comment);
+        cs_segs.extend(lace_packet(&setup));
+        let page1 = build_page(0x00, 0, serial, 1, &cs_segs);
+        // Audio page: EOS flag, a non-zero granule position that must be preserved verbatim.
+        let page2 = build_page(0x04, 0xDEAD_BEEF, serial, 2, &lace_packet(&audio_body));
+
+        let mut out = page0.clone();
+        out.extend_from_slice(&page1);
+        out.extend_from_slice(&page2);
+        (out, ident, audio_body)
+    }
+
+    /// Walk `bytes` as Ogg pages and confirm every page's stored CRC matches an independent recomputation.
+    /// Returns `(all_valid, page_count)`; a structurally broken stream yields `(false, _)`.
+    fn all_page_crcs_valid(bytes: &[u8]) -> (bool, usize) {
+        let mut pos = 0usize;
+        let mut count = 0usize;
+        while pos < bytes.len() {
+            if pos + 27 > bytes.len() || &bytes[pos..pos + 4] != b"OggS" {
+                return (false, count);
+            }
+            let nsegs = bytes[pos + 26] as usize;
+            let seg_start = pos + 27;
+            if seg_start + nsegs > bytes.len() {
+                return (false, count);
+            }
+            let body_len: usize = bytes[seg_start..seg_start + nsegs].iter().map(|&l| l as usize).sum();
+            let end = seg_start + nsegs + body_len;
+            if end > bytes.len() {
+                return (false, count);
+            }
+            let stored = u32::from_le_bytes([bytes[pos + 22], bytes[pos + 23], bytes[pos + 24], bytes[pos + 25]]);
+            let mut page = bytes[pos..end].to_vec();
+            page[22..26].copy_from_slice(&[0, 0, 0, 0]);
+            if ref_ogg_crc(&page) != stored {
+                return (false, count);
+            }
+            count += 1;
+            pos = end;
+        }
+        (true, count)
+    }
+
+    #[test]
+    fn ogg_crc32_matches_an_independent_bitwise_reference() {
+        // The table-driven codec CRC must agree with the from-scratch bitwise CRC on assorted inputs …
+        for data in [
+            &b""[..],
+            &b"OggS"[..],
+            &b"\x00"[..],
+            &b"123456789"[..],
+            &[0xFFu8; 300][..],
+            &b"the quick brown fox jumps over the lazy dog"[..],
+        ] {
+            assert_eq!(ogg_crc32(data), ref_ogg_crc(data), "CRC mismatch for {data:?}");
+        }
+        // … and a fixed known-answer vector pins the polynomial/endianness so a silent regression is caught.
+        assert_eq!(ogg_crc32(b"123456789"), 0x89A1897F);
+    }
+
+    #[test]
+    fn write_ogg_round_trips_a_comment_edit_and_preserves_ident_and_audio() {
+        use crate::media_meta::{read_all, write_back};
+        use crate::media_meta_edit::MetaEdit;
+
+        let (orig, ident, audio_body) =
+            build_ogg_vorbis(&[vfield("Title", "Old Title"), vfield("Artist", "Keep Artist")], 0x1234_5678);
+
+        // Sanity: the reader sees the original tags and the fixture is a valid Ogg stream.
+        assert_eq!(get(&read_all("ogg", &orig), "Title"), Some("Old Title"));
+        assert_eq!(all_page_crcs_valid(&orig), (true, 3));
+
+        let out = write_back(
+            "ogg",
+            &orig,
+            &[MetaEdit::Set { group: "vorbis".into(), key: "Title".into(), value: "New Title".into() }],
+        )
+        .expect("ogg is writable");
+
+        // The edit landed and the untouched field survived.
+        let after = read_all("ogg", &out);
+        assert_eq!(get(&after, "Title"), Some("New Title"));
+        assert_eq!(get(&after, "Artist"), Some("Keep Artist"));
+
+        // Identification header packet + audio packet body preserved.
+        assert!(contains_subslice(&out, &ident), "identification header must survive");
+        assert!(contains_subslice(&out, &audio_body), "audio data must survive");
+
+        // Every page in the output validates, and the audio page kept its granule + EOS flag.
+        let (valid, pages) = all_page_crcs_valid(&out);
+        assert!(valid, "every output page CRC must validate");
+        assert!(pages >= 3);
+        // Locate the EOS/granule audio page (header_type 0x04) and confirm its granule is intact.
+        let mut found_audio = false;
+        let mut pos = 0usize;
+        while pos < out.len() {
+            let nsegs = out[pos + 26] as usize;
+            let body_len: usize = out[pos + 27..pos + 27 + nsegs].iter().map(|&l| l as usize).sum();
+            let end = pos + 27 + nsegs + body_len;
+            if out[pos + 5] & 0x04 != 0 {
+                let granule = u64::from_le_bytes(out[pos + 6..pos + 14].try_into().unwrap());
+                assert_eq!(granule, 0xDEAD_BEEF, "audio granule position must be preserved");
+                found_audio = true;
+            }
+            pos = end;
+        }
+        assert!(found_audio, "the EOS audio page must be present");
+    }
+
+    #[test]
+    fn write_ogg_re_pages_a_comment_that_grows_across_a_page_boundary() {
+        // A comment big enough to force the comment+setup region onto more than one page (segments > 255),
+        // exercising the multi-page re-lacing + continuation-flag + page renumbering path.
+        let big = "X".repeat(70_000);
+        let (orig, _ident, audio_body) = build_ogg_vorbis(&[vfield("Title", "small")], 0x0BAD_F00D);
+
+        let out = crate::media_meta::write_back(
+            "ogg",
+            &orig,
+            &[crate::media_meta_edit::MetaEdit::Set { group: "vorbis".into(), key: "Comment".into(), value: big.clone() }],
+        )
+        .expect("ogg is writable");
+
+        let after = crate::media_meta::read_all("ogg", &out);
+        assert_eq!(get(&after, "Comment"), Some(big.as_str()));
+        assert_eq!(get(&after, "Title"), Some("small"));
+        let (valid, _pages) = all_page_crcs_valid(&out);
+        assert!(valid, "every re-paged output page CRC must validate");
+        assert!(contains_subslice(&out, &audio_body), "audio data must survive re-paging");
+
+        // The crate's own reader reassembles the comment across the new page boundary.
+        assert_eq!(crate::media_meta_read::read_ogg(&out).iter().find(|f| f.key == "Comment").map(|f| f.value.as_str()), Some(big.as_str()));
+    }
+
+    #[test]
+    fn write_ogg_errs_on_non_ogg_and_incomplete_streams_without_panicking() {
+        for orig in [&b""[..], &b"Ogg"[..], &b"fLaC...."[..], &b"just some bytes"[..], &b"OggS-too-short"[..]] {
+            assert!(write_ogg(orig, &[vfield("Title", "X")]).is_err());
+        }
+        // A single BOS page carrying only the ident header (no comment/setup) → no complete header set → Err.
+        let mut ident = OGG_IDENT_SIG.to_vec();
+        ident.extend_from_slice(&[0u8; 22]);
+        ident.push(0x01);
+        let just_ident = build_page(0x02, 0, 7, 0, &lace_packet(&ident));
+        assert!(write_ogg(&just_ident, &[vfield("Title", "X")]).is_err());
+    }
+
+    #[test]
+    fn write_ogg_refuses_multiplexed_streams() {
+        // Two logical streams (different serials) — refused rather than risk corrupting the other's paging.
+        let (a, _, _) = build_ogg_vorbis(&[vfield("Title", "A")], 1);
+        let (b, _, _) = build_ogg_vorbis(&[vfield("Title", "B")], 2);
+        let mut muxed = a;
+        muxed.extend_from_slice(&b);
+        assert!(write_ogg(&muxed, &[vfield("Title", "X")]).is_err());
+    }
+
+    #[test]
+    fn write_ogg_never_panics_on_any_truncation_of_a_valid_stream() {
+        let (valid, _, _) = build_ogg_vorbis(&[vfield("Title", "T"), vfield("Artist", "A")], 0x4242);
+        for cut in 0..valid.len() {
+            let _ = write_ogg(&valid[..cut], &[vfield("Title", "X")]); // must never panic
+        }
+    }
+
+    #[test]
+    fn write_ogg_output_reparses_cleanly_through_the_crate_reader() {
+        let (orig, _, _) = build_ogg_vorbis(&[vfield("Title", "Orig"), vfield("Artist", "Band")], 0x99);
+        let out = write_ogg(
+            &orig,
+            &crate::media_meta_edit::apply_edits(
+                &crate::media_meta::read_all("ogg", &orig),
+                &[crate::media_meta_edit::MetaEdit::Set { group: "vorbis".into(), key: "Album".into(), value: "Fresh".into() }],
+            )
+            .fields,
+        )
+        .unwrap();
+        let f = crate::media_meta_read::read_ogg(&out);
+        assert_eq!(get(&f, "Album"), Some("Fresh"));
+        assert_eq!(get(&f, "Title"), Some("Orig"));
+        assert_eq!(get(&f, "Artist"), Some("Band"));
     }
 }

@@ -6,13 +6,13 @@
 //! Read coverage spans the codecs shipped so far: ID3 (mp3), Vorbis (flac / ogg), EXIF (jpeg / tiff), IPTC
 //! (jpeg APP13/8BIM/IIM, merged alongside EXIF), PDF `/Info`, and MP4/MOV video tags. Write coverage is
 //! narrower — only the formats with a write codec ([`crate::media_meta_write`]): **mp3**, **flac**, and
-//! **jpeg** (EXIF). [`is_writable`] lets the UI show read-only fields for the rest until their writers land
-//! (OGG/video/PDF write-back are deferred as format-risky, and TIFF EXIF write is deferred because the EXIF
-//! *is* a TIFF's own IFD chain).
+//! **jpeg** (EXIF), and **ogg**/**oga** (Vorbis comments). [`is_writable`] lets the UI show read-only fields
+//! for the rest until their writers land (video/PDF write-back are deferred as format-risky, and TIFF EXIF
+//! write is deferred because the EXIF *is* a TIFF's own IFD chain).
 
 use crate::media_meta_edit::{apply_edits, MetaEdit, MetaField};
 use crate::media_meta_read::{read_exif, read_flac, read_id3v2, read_iptc, read_ogg, read_pdf};
-use crate::media_meta_write::{write_exif, write_flac, write_id3v2};
+use crate::media_meta_write::{write_exif, write_flac, write_id3v2, write_ogg};
 use crate::video_meta_read::read_mp4;
 
 /// Every metadata field the studio can show for a file, chosen by extension. A file whose kind has no
@@ -36,9 +36,10 @@ pub fn read_all(ext: &str, bytes: &[u8]) -> Vec<MetaField> {
 
 /// Whether `ext` has a write-back codec today, so the studio can offer editing (not just viewing).
 pub fn is_writable(ext: &str) -> bool {
-    // jpg/jpeg carry an EXIF write codec ([`write_exif`]); tif/tiff are intentionally excluded — for a
-    // TIFF the EXIF *is* the file's own IFD chain, so rebuilding it from four tags would drop the image.
-    matches!(ext.to_ascii_lowercase().as_str(), "mp3" | "flac" | "jpg" | "jpeg")
+    // jpg/jpeg carry an EXIF write codec ([`write_exif`]); ogg/oga carry a Vorbis-comment write codec
+    // ([`write_ogg`]). tif/tiff are intentionally excluded — for a TIFF the EXIF *is* the file's own IFD
+    // chain, so rebuilding it from four tags would drop the image.
+    matches!(ext.to_ascii_lowercase().as_str(), "mp3" | "flac" | "jpg" | "jpeg" | "ogg" | "oga")
 }
 
 /// Apply `edits` to the file's current fields and serialise the result back to new file bytes. Reads the
@@ -51,6 +52,7 @@ pub fn write_back(ext: &str, orig: &[u8], edits: &[MetaEdit]) -> Result<Vec<u8>,
     match ext.to_ascii_lowercase().as_str() {
         "mp3" => Ok(write_id3v2(orig, &result.fields)),
         "flac" => Ok(write_flac(orig, &result.fields)),
+        "ogg" | "oga" => write_ogg(orig, &result.fields),
         "jpg" | "jpeg" => write_exif(orig, &result.fields),
         other => Err(format!("editing {other} metadata isn't supported yet")),
     }
@@ -103,12 +105,13 @@ mod tests {
     }
 
     #[test]
-    fn is_writable_for_mp3_flac_and_jpeg() {
+    fn is_writable_for_mp3_flac_jpeg_and_ogg() {
         assert!(is_writable("mp3") && is_writable("FLAC"));
         assert!(is_writable("jpg") && is_writable("JPEG")); // EXIF write codec (CPE-1288)
+        assert!(is_writable("ogg") && is_writable("OGA")); // Vorbis-comment write codec (CPE-1289)
         // TIFF EXIF write is deferred (the EXIF is a TIFF's own IFD); other formats have no writer yet.
         assert!(!is_writable("tif") && !is_writable("tiff"));
-        assert!(!is_writable("pdf") && !is_writable("mp4") && !is_writable("ogg"));
+        assert!(!is_writable("pdf") && !is_writable("mp4"));
     }
 
     #[test]
