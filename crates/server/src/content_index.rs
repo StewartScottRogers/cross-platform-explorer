@@ -2,8 +2,11 @@
 //! [`crate::semantic_index::SemanticIndex`] + [`crate::embedder::FakeEmbedder`] into something a Tauri
 //! command can build, persist, reload, and search over a real folder. The engine (chunk/embed/search/
 //! persist) is already built and tested in `semantic_index`/`embedder`/`vector_index` (CPE-981/982/983);
-//! this module supplies the missing plumbing: walk a folder for text-like files, feed them to
-//! [`SemanticIndex::upsert_document`], and persist + reload the result keyed by the indexed root.
+//! this module supplies the missing plumbing: walk a folder for text-like (and, since CPE-1274,
+//! text-*extractable* — PDF/DOCX/XLSX/PPTX) files, feed them to [`SemanticIndex::upsert_document`], and
+//! persist + reload the result keyed by the indexed root. The per-file bytes→text step is
+//! [`crate::content_text::content_text_of`] — see that module for the extraction dispatch itself; this
+//! module only owns the walk, the persistence, and the search/snippet plumbing around it.
 //!
 //! Framed honestly: this is file-**content** search — a local, dependency-free feature-hashed
 //! bag-of-words embedder, no network call, no API key — not an oversold "AI semantic" claim. A better or
@@ -42,12 +45,6 @@ const PROGRESS_EVERY: u64 = 10;
 /// Length (in chars) of the snippet returned per hit — a short slice of the matched document's text, not
 /// the whole file.
 const SNIPPET_MAX_CHARS: usize = 240;
-
-/// True if a byte slice looks binary (contains a NUL in the sniffed prefix) — same heuristic
-/// `content_search` uses to skip files not worth reading as text.
-fn looks_binary(bytes: &[u8]) -> bool {
-    bytes.iter().take(8192).any(|&b| b == 0)
-}
 
 /// One `content_index_build` progress tick — how far the walk has gotten. Serialisable: it's the
 /// `content_index_build` progress-channel payload (`docs/design/STREAMING.md`).
@@ -241,11 +238,14 @@ fn build_index_impl(
                 stats.files_skipped += 1;
                 continue;
             };
-            if looks_binary(&bytes) {
+            // CPE-1274: dispatches by extension — plain text/code unchanged, PDF/DOCX/XLSX/PPTX get
+            // their actual text extracted instead of being NUL-sniffed out as "binary". `None` covers
+            // everything the old inline check did (binary/unknown) plus a malformed/encrypted document
+            // of a supported type — either way, skip this one file without failing the whole build.
+            let Some(text) = crate::content_text::content_text_of(&path, &bytes) else {
                 stats.files_skipped += 1;
                 continue;
-            }
-            let text = String::from_utf8_lossy(&bytes);
+            };
             let path_str = path.to_string_lossy().into_owned();
             index.upsert_document(&path_str, &text);
             stats.files_indexed += 1;
@@ -478,12 +478,16 @@ pub fn probe_embedder(base_url: &str, model: &str, api_key: Option<String>) -> R
 /// A short snippet of `path`'s own text, centred on `query`'s first literally-matching token when one is
 /// found (case-insensitive), else the start of the file. Best-effort: an unreadable/moved/binary file
 /// yields an empty snippet rather than an error — the file could have changed since the index was built.
+///
+/// CPE-1274: re-extracts through the same [`crate::content_text::content_text_of`] dispatch the build
+/// walk uses, rather than raw-`from_utf8_lossy`-ing the file's bytes — a PDF/DOCX/XLSX/PPTX hit's
+/// snippet is real extracted text (or empty, for an extraction failure), never mojibake from decoding
+/// a ZIP/binary container as if it were UTF-8 text.
 fn snippet_for(path: &str, query: &str) -> String {
     let Ok(bytes) = std::fs::read(path) else { return String::new() };
-    if looks_binary(&bytes) {
+    let Some(text) = crate::content_text::content_text_of(Path::new(path), &bytes) else {
         return String::new();
-    }
-    let text = String::from_utf8_lossy(&bytes);
+    };
     let flat: Vec<char> = text.split_whitespace().collect::<Vec<_>>().join(" ").chars().collect();
     if flat.is_empty() {
         return String::new();

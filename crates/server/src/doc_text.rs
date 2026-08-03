@@ -2,6 +2,11 @@
 //! EPUB for the preview pane. Small, dependency-light (reuses the `zip` reader already in the Server for
 //! the office/ebook containers; RTF is a hand-rolled reader) — not full renderers, just enough for a
 //! text preview. Pure and Tauri-free (CPE-815); the Tauri `read_preview_info` command dispatches here.
+//!
+//! [`xlsx_text`]/[`pptx_text`] (CPE-1274, epic CPE-976) extend the same approach to the other two OOXML
+//! container formats, reusing [`zip_read_text`]/[`strip_markup_to_text`] — no new dependency, just two
+//! more extension→ZIP-part mappings, same as [`docx_text`]. [`crate::content_text`] is their consumer
+//! (content search's text-extraction dispatch); the preview pane doesn't currently call them.
 
 use std::fs;
 
@@ -81,6 +86,72 @@ fn zip_read_text(path: &str, entry_name: &str) -> Result<String, String> {
 pub fn docx_text(path: &str) -> Result<String, String> {
     let xml = zip_read_text(path, "word/document.xml")?;
     Ok(strip_markup_to_text(&xml, &["w:p"]))
+}
+
+/// Read one entry of a zip as UTF-8 text if present, or `Ok(None)` if the archive simply doesn't have
+/// that part (a normal, non-error shape some documents legitimately lack — e.g. an all-numeric XLSX
+/// workbook has no `sharedStrings.xml` at all). A file that isn't a valid zip at all is still `Err`.
+fn zip_read_text_optional(path: &str, entry_name: &str) -> Result<Option<String>, String> {
+    use std::io::Read;
+    let file = fs::File::open(path).map_err(|e| e.to_string())?;
+    let mut zip = zip::ZipArchive::new(file).map_err(|e| e.to_string())?;
+    let result = match zip.by_name(entry_name) {
+        Ok(mut entry) => {
+            let mut buf = String::new();
+            entry.read_to_string(&mut buf).map_err(|e| e.to_string())?;
+            Ok(Some(buf))
+        }
+        Err(_) => Ok(None),
+    };
+    result
+}
+
+/// Extract cell text from an XLSX workbook's shared-strings table (`xl/sharedStrings.xml`) (CPE-1274):
+/// the OOXML spreadsheet format stores every distinct text string used by any cell once, in this one
+/// part, referenced by index from the sheets — so it's the whole workbook's textual content without
+/// needing to parse the (much larger, mostly numeric) per-sheet XML at all. A workbook with no shared
+/// strings (e.g. an all-numeric sheet) is a normal, valid `Ok("")`, not an error — only an unreadable /
+/// non-ZIP file is `Err`.
+pub fn xlsx_text(path: &str) -> Result<String, String> {
+    let xml = zip_read_text_optional(path, "xl/sharedStrings.xml")?;
+    Ok(xml.map(|x| strip_markup_to_text(&x, &["si"])).unwrap_or_default())
+}
+
+/// Extract slide text from a PPTX presentation's `ppt/slides/slideN.xml` parts (CPE-1274), concatenated
+/// in (string) filename order with a blank line between slides — mirrors [`epub_text`]'s
+/// enumerate-then-concatenate shape (list entries under a prefix, sort, strip each, join). A
+/// presentation with no slides yields an empty string, not an error.
+pub fn pptx_text(path: &str) -> Result<String, String> {
+    use std::io::Read;
+    let file = fs::File::open(path).map_err(|e| e.to_string())?;
+    let mut zip = zip::ZipArchive::new(file).map_err(|e| e.to_string())?;
+
+    let mut names: Vec<String> = Vec::new();
+    for i in 0..zip.len() {
+        if let Ok(entry) = zip.by_index(i) {
+            let n = entry.name().to_string();
+            let low = n.to_lowercase();
+            if low.starts_with("ppt/slides/slide") && low.ends_with(".xml") {
+                names.push(n);
+            }
+        }
+    }
+    names.sort();
+
+    let mut out = String::new();
+    for n in &names {
+        if let Ok(mut entry) = zip.by_name(n) {
+            let mut buf = String::new();
+            if entry.read_to_string(&mut buf).is_ok() {
+                let text = strip_markup_to_text(&buf, &["a:p"]);
+                if !text.trim().is_empty() {
+                    out.push_str(text.trim());
+                    out.push_str("\n\n");
+                }
+            }
+        }
+    }
+    Ok(out)
 }
 
 /// Extract the body text of an ODT (content.xml) (CPE-072).
@@ -277,6 +348,92 @@ mod tests {
         let text = docx_text(&f.to_string_lossy()).unwrap();
         assert!(text.contains("Hello world"), "runs joined within a paragraph: {text:?}");
         assert!(text.contains("Next & last"), "entities decoded");
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn xlsx_text_extracts_shared_strings() {
+        let d = scratch("xlsx");
+        let f = d.join("book.xlsx");
+        {
+            let file = fs::File::create(&f).unwrap();
+            let mut zip = zip::ZipWriter::new(file);
+            let opts = zip::write::SimpleFileOptions::default();
+            zip.start_file("xl/sharedStrings.xml", opts).unwrap();
+            let xml = r#"<?xml version="1.0"?><sst><si><t>Budget</t></si><si><t>Q1 &amp; Q2</t></si></sst>"#;
+            zip.write_all(xml.as_bytes()).unwrap();
+            zip.finish().unwrap();
+        }
+        let text = xlsx_text(&f.to_string_lossy()).unwrap();
+        assert!(text.contains("Budget"), "first shared string present: {text:?}");
+        assert!(text.contains("Q1 & Q2"), "entities decoded, second shared string present: {text:?}");
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn xlsx_text_with_no_shared_strings_part_is_an_empty_ok_not_an_error() {
+        let d = scratch("xlsx-empty");
+        let f = d.join("numbers.xlsx");
+        {
+            // A valid zip, but with no xl/sharedStrings.xml part at all — an all-numeric workbook.
+            let file = fs::File::create(&f).unwrap();
+            let mut zip = zip::ZipWriter::new(file);
+            let opts = zip::write::SimpleFileOptions::default();
+            zip.start_file("xl/workbook.xml", opts).unwrap();
+            zip.write_all(b"<workbook/>").unwrap();
+            zip.finish().unwrap();
+        }
+        let text = xlsx_text(&f.to_string_lossy()).unwrap();
+        assert!(text.is_empty(), "no shared-strings part -> empty text, not an error: {text:?}");
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn xlsx_text_on_a_non_zip_file_is_an_err_not_a_panic() {
+        let d = scratch("xlsx-notzip");
+        let f = d.join("fake.xlsx");
+        fs::write(&f, b"not a zip at all").unwrap();
+        assert!(xlsx_text(&f.to_string_lossy()).is_err());
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn pptx_text_extracts_and_concatenates_slide_text() {
+        let d = scratch("pptx");
+        let f = d.join("deck.pptx");
+        {
+            let file = fs::File::create(&f).unwrap();
+            let mut zip = zip::ZipWriter::new(file);
+            let opts = zip::write::SimpleFileOptions::default();
+            zip.start_file("ppt/slides/slide1.xml", opts).unwrap();
+            zip.write_all(b"<p:sld><a:p><a:r><a:t>Title Slide</a:t></a:r></a:p></p:sld>").unwrap();
+            zip.start_file("ppt/slides/slide2.xml", opts).unwrap();
+            zip.write_all(b"<p:sld><a:p><a:r><a:t>Second &amp; last</a:t></a:r></a:p></p:sld>").unwrap();
+            // A non-slide part under ppt/slides/ (e.g. a rels sidecar) must not be picked up.
+            zip.start_file("ppt/slides/_rels/slide1.xml.rels", opts).unwrap();
+            zip.write_all(b"<Relationships/>").unwrap();
+            zip.finish().unwrap();
+        }
+        let text = pptx_text(&f.to_string_lossy()).unwrap();
+        assert!(text.contains("Title Slide"), "first slide's text present: {text:?}");
+        assert!(text.contains("Second & last"), "second slide's text present, entities decoded: {text:?}");
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn pptx_text_with_no_slides_is_an_empty_ok_not_an_error() {
+        let d = scratch("pptx-empty");
+        let f = d.join("blank.pptx");
+        {
+            let file = fs::File::create(&f).unwrap();
+            let mut zip = zip::ZipWriter::new(file);
+            let opts = zip::write::SimpleFileOptions::default();
+            zip.start_file("[Content_Types].xml", opts).unwrap();
+            zip.write_all(b"<Types/>").unwrap();
+            zip.finish().unwrap();
+        }
+        let text = pptx_text(&f.to_string_lossy()).unwrap();
+        assert!(text.is_empty(), "no slide parts -> empty text, not an error: {text:?}");
         let _ = fs::remove_dir_all(&d);
     }
 }

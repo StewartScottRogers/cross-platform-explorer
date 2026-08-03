@@ -169,6 +169,48 @@ pub fn render_first_page(bytes: &[u8], max_edge: u32) -> Result<DynamicImage, St
     bitmap.as_image().map_err(|e| e.to_string())
 }
 
+/// Extracts every page's text from `bytes` (the contents of a `.pdf` file), concatenated in page order
+/// with a blank line between pages — the CPE-1274 text-extraction sibling of [`render_first_page`],
+/// reusing the same lazily-bound [`pdfium()`] instance and [`PDFIUM_CALL_LOCK`] serialization (see the
+/// module doc for why FFI calls are serialized). `max_chars` bounds accumulation *while iterating*
+/// (rather than extracting everything then truncating) so an implausibly text-heavy PDF can't balloon
+/// memory before the [`crate::content_text`] caller's own cap would have trimmed it anyway.
+///
+/// Never panics: a missing/unloadable pdfium library, or an encrypted/malformed/empty/zero-page PDF,
+/// returns `Err` — the caller ([`crate::content_text::content_text_of`]) treats that as "skip this
+/// file", the same discipline every other unreadable document already gets in the content index.
+pub fn extract_text(bytes: &[u8], max_chars: usize) -> Result<String, String> {
+    let pdfium = pdfium()?;
+
+    // Serialize the actual FFI-touching work — same reasoning as render_first_page.
+    let _guard = PDFIUM_CALL_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+
+    let document = pdfium
+        .load_pdf_from_byte_slice(bytes, None)
+        .map_err(|e| e.to_string())?;
+
+    let mut out = String::new();
+    for page in document.pages().iter() {
+        if out.chars().count() >= max_chars {
+            break;
+        }
+        // A single page failing to yield a text object (rare — e.g. a scanned-image-only page with no
+        // text layer) shouldn't abort extraction of the rest of the document.
+        if let Ok(page_text) = page.text() {
+            let s = page_text.all();
+            if !s.trim().is_empty() {
+                if !out.is_empty() {
+                    out.push('\n');
+                }
+                out.push_str(&s);
+            }
+        }
+    }
+    Ok(out)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -277,5 +319,96 @@ mod tests {
         let img = render_first_page(&minimal_one_page_pdf(), 0)
             .expect("pdfium is available; rendering at max_edge=0 must still succeed (clamped)");
         assert_eq!((img.width(), img.height()), (1, 1));
+    }
+
+    /// A minimal single-page PDF whose content stream actually draws text ("Hello World") using a
+    /// standard base-14 font (Helvetica, needs no embedded font program) — [`minimal_one_page_pdf`]
+    /// draws nothing, so text extraction needs its own fixture. Built by hand with the same
+    /// byte-offset/xref discipline (CPE-1274).
+    fn minimal_text_pdf() -> Vec<u8> {
+        let mut buf = Vec::new();
+        buf.extend_from_slice(b"%PDF-1.4\n");
+
+        let content = b"BT /F1 24 Tf 72 200 Td (Hello World) Tj ET";
+        let content_obj = format!(
+            "4 0 obj\n<< /Length {} >>\nstream\n{}\nendstream\nendobj\n",
+            content.len(),
+            std::str::from_utf8(content).unwrap()
+        );
+
+        let objects: Vec<String> = vec![
+            "1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n".to_string(),
+            "2 0 obj\n<< /Type /Pages /Kids [3 0 R] /Count 1 >>\nendobj\n".to_string(),
+            "3 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 200 300] \
+             /Resources << /Font << /F1 5 0 R >> >> /Contents 4 0 R >>\nendobj\n"
+                .to_string(),
+            content_obj,
+            "5 0 obj\n<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>\nendobj\n".to_string(),
+        ];
+
+        let mut offsets = Vec::with_capacity(objects.len());
+        for obj in &objects {
+            offsets.push(buf.len());
+            buf.extend_from_slice(obj.as_bytes());
+        }
+
+        let xref_offset = buf.len();
+        buf.extend_from_slice(b"xref\n");
+        buf.extend_from_slice(format!("0 {}\n", objects.len() + 1).as_bytes());
+        buf.extend_from_slice(b"0000000000 65535 f \n");
+        for off in &offsets {
+            buf.extend_from_slice(format!("{off:010} 00000 n \n").as_bytes());
+        }
+        buf.extend_from_slice(b"trailer\n");
+        buf.extend_from_slice(format!("<< /Size {} /Root 1 0 R >>\n", objects.len() + 1).as_bytes());
+        buf.extend_from_slice(b"startxref\n");
+        buf.extend_from_slice(format!("{xref_offset}\n").as_bytes());
+        buf.extend_from_slice(b"%%EOF");
+        buf
+    }
+
+    /// Unconditional — no pdfium install needed: empty/garbage bytes must fail cleanly, never panic
+    /// (mirrors `render_first_page`'s equivalent unconditional tests).
+    #[test]
+    fn extract_text_rejects_empty_and_garbage_bytes_without_panicking() {
+        assert!(extract_text(&[], 1000).is_err(), "empty bytes must be rejected, not panic");
+        assert!(
+            extract_text(b"not a pdf at all", 1000).is_err(),
+            "garbage bytes must be rejected, not panic"
+        );
+    }
+
+    /// Real-extraction smoke test, gated on pdfium being loadable (same discipline as the render tests
+    /// above — pdfium isn't bundled in this sandbox). Confirms the actual drawn text round-trips out.
+    #[test]
+    fn extract_text_returns_real_text_when_pdfium_is_available() {
+        if pdfium().is_err() {
+            eprintln!(
+                "skipping extract_text real-extraction test: no pdfium library available in this \
+                 environment (expected until CPE-1258 provisions one for CI/dev)"
+            );
+            return;
+        }
+
+        let text = extract_text(&minimal_text_pdf(), 10_000)
+            .expect("pdfium is available; extracting text from a well-formed minimal PDF must succeed");
+        assert!(text.contains("Hello World"), "drawn text should round-trip out: {text:?}");
+    }
+
+    /// Gated the same way: `max_chars` must actually bound accumulation rather than being ignored.
+    #[test]
+    fn extract_text_respects_max_chars() {
+        if pdfium().is_err() {
+            eprintln!(
+                "skipping extract_text max_chars test: no pdfium library available in this environment \
+                 (expected until CPE-1258 provisions one for CI/dev)"
+            );
+            return;
+        }
+
+        // A cap of 0 means the very first page already trips the break-before-append check.
+        let text = extract_text(&minimal_text_pdf(), 0)
+            .expect("pdfium is available; extraction with a zero cap must still succeed (empty result)");
+        assert!(text.is_empty(), "a zero max_chars cap must yield no accumulated text: {text:?}");
     }
 }

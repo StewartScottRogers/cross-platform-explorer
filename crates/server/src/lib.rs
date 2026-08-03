@@ -526,6 +526,12 @@ pub mod semantic_ingest;
 /// (embedder-pluggable), not oversold "semantic".
 pub mod content_index;
 
+/// Document text extraction for content search (CPE-1274, epic CPE-976): the extension-dispatched
+/// `content_text_of` that turns a file's bytes into indexable text — plain-text unchanged, `.pdf` via
+/// pdfium (`pdf-thumb`), `.docx`/`.xlsx`/`.pptx` via the existing `zip` reader + `doc_text`'s
+/// extractors. The one call [`content_index`]'s walk (and its snippet re-read) both dispatch through.
+pub mod content_text;
+
 /// Batch metadata apply — apply one shared set of edits to a whole selection of files, with a per-file
 /// result + run summary; builds on media_meta_edit (CPE-949, epic CPE-725).
 pub mod media_meta_batch;
