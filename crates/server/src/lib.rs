@@ -569,6 +569,20 @@ pub mod vault_manager;
 /// dry-run summary (CPE-990, epic CPE-977). No LLM, no I/O; the safe, inspectable middle of the copilot.
 pub mod op_plan;
 
+/// AI-copilot **LLM seam** — natural-language → a candidate [`op_plan::FileOpPlan`] over an OpenAI-compatible
+/// `/chat/completions` endpoint (LM Studio local, or OpenAI/others with a key) (CPE-1275, epic CPE-977). The
+/// `ureq` transport is feature-gated (`copilot`) so the lean default build compiles zero HTTP/TLS code; the
+/// prompt-build/response-parse logic is a transport-injectable seam, unit-tested with no network. Output is
+/// only ever a closed whitelisted plan by construction — no free-form/shell escape. Mirrors `http_embedder`.
+pub mod copilot_planner;
+
+/// AI-copilot **command-layer glue** — the safe plan → confirm → execute → undo pipeline (CPE-1275, epic
+/// CPE-977): [`copilot::plan_with`] validates a planner's output against the scope+cap envelope (no disk
+/// change); [`copilot::execute_with`] RE-VALIDATES, checkpoints first (one-click undo), applies the
+/// whitelisted ops, and routes deletes to the OS trash via the [`copilot::TrashBin`] seam (recoverable).
+/// Tauri-free; the real keyring + trash + `TauriCtx` wiring live in the app adapter.
+pub mod copilot;
+
 /// Perceptual-hash + similarity-clustering core — dHash over decoded image bytes + Hamming-distance
 /// single-link clustering, the pure engine behind near-duplicate / similar-image detection (CPE-998, epic
 /// CPE-997). The complement of [`duplicates`] (byte-identical); this finds visually-similar images. Pure

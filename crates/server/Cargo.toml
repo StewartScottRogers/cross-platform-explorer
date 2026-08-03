@@ -131,6 +131,13 @@ video-thumb = []
 # request-build/parse logic + transport seam are unit-tested with no network); only the real `ureq`
 # transport + `connect()` are behind this gate. The app adapter turns it on.
 http-embedder = ["dep:ureq"]
+# Opt-in real HTTP planner for the AI file copilot (CPE-1275, epic CPE-977). OFF by default so the lean
+# default build compiles zero copilot HTTP code / pulls in no `ureq`/TLS stack (the "small when off" rule,
+# mirrored from `http-embedder` above). The `copilot_planner`/`copilot` modules always compile (their pure
+# prompt-build/parse logic + seams are unit-tested with no network); only the real `ureq` `ChatTransport` +
+# `connect()` + `resolve_planner`/`probe_planner` are behind this gate. Reuses `ureq` (no new dep); the app
+# adapter turns it on.
+copilot = ["dep:ureq"]
 
 [dev-dependencies]
 # Temp dirs for the ticket-board tests (moved from the app with the module, CPE-815).

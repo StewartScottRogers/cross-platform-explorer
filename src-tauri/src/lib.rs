@@ -3861,6 +3861,146 @@ async fn content_embedder_test(
     .map_err(|e| e.to_string())?
 }
 
+// ---- AI file copilot: LLM planner → plan/execute + undo (CPE-1275, epic CPE-977) ------------------
+// SAFETY-CRITICAL: an LLM proposes file operations. Everything the copilot does is whitelisted by
+// construction (`cpe_server::op_plan::FileOp` is a closed set — no shell/free-form op exists) and passes
+// the same safety chain the domain layer owns: validate (scope root + op cap) → human confirm (the UI's
+// job) → RE-VALIDATE at execute → checkpoint FIRST (one-click undo) → apply → deletes to the OS TRASH
+// (recoverable). The planner + plan/execute glue live in `cpe_server::copilot{,_planner}` (Tauri-free);
+// these commands are thin `spawn_blocking` dispatchers. The API key is stored ONLY in the OS keychain
+// (service `cpe.copilot`, distinct from the content-embedder key), fetched through the same `SecretAccess`
+// seam the vault + embedder work use — never in settings.json, never logged, never returned.
+
+/// Keychain service/account the AI-copilot model API key is stored under. Distinct from
+/// [`EMBEDDER_KEY_SERVICE`] so the two endpoints keep independent keys.
+const COPILOT_KEY_SERVICE: &str = "cpe.copilot";
+const COPILOT_KEY_ACCOUNT: &str = "api-key";
+
+/// Fetch the saved copilot API key from the OS keychain, or `None`. Best-effort: a keychain error degrades
+/// to `None` (treated as "no key" — a local server needs none). The value is never logged.
+#[cfg(any(windows, target_os = "macos", target_os = "linux"))]
+fn copilot_key() -> Option<String> {
+    use cpe_server::vault_manager::SecretAccess;
+    KeyringBackend
+        .get(COPILOT_KEY_SERVICE, COPILOT_KEY_ACCOUNT)
+        .ok()
+        .flatten()
+        .filter(|k| !k.is_empty())
+}
+#[cfg(not(any(windows, target_os = "macos", target_os = "linux")))]
+fn copilot_key() -> Option<String> {
+    None
+}
+
+/// The app's [`cpe_server::copilot::TrashBin`] impl — routes a copilot `Delete` op to the OS recycle bin /
+/// trash via the same `trash` crate `delete_to_trash` uses, so a copilot delete is recoverable (never a
+/// hard delete). Keeps `cpe-server` free of the `trash` crate, exactly as `KeyringBackend` keeps it free of
+/// `keyring`.
+struct TauriTrash;
+impl cpe_server::copilot::TrashBin for TauriTrash {
+    fn trash(&self, path: &str) -> Result<(), String> {
+        trash::delete(path).map_err(|e| format!("could not move {path} to the trash: {e}"))
+    }
+}
+
+/// Build a SAFE, validated file-operation plan for `instruction` over `root` (CPE-1275). Lists the folder,
+/// asks the configured OpenAI-compatible model for a whitelisted [`cpe_server::op_plan::FileOpPlan`], then
+/// validates it against the scope+cap envelope — returning the plan, a dry-run summary, and ALL violations
+/// (non-empty ⇒ the UI must NOT offer execute). NO filesystem change. Model unreachable / bad output → a
+/// clear `Err`; an unsafe-but-produced plan → a non-empty `violations`. The API key comes from the keychain
+/// (a local server needs none). Async + `spawn_blocking` (network + a directory listing).
+#[tauri::command]
+#[cfg_attr(feature = "specta-bindings", specta::specta)]
+async fn copilot_plan(
+    root: String,
+    instruction: String,
+    config: cpe_server::copilot::CopilotConfig,
+) -> Result<cpe_server::copilot::CopilotPlanResult, String> {
+    cpe_server::fs_route::require_local(&root)?;
+    let api_key = copilot_key();
+    tauri::async_runtime::spawn_blocking(move || {
+        let planner = cpe_server::copilot::resolve_planner(&config, api_key)?;
+        cpe_server::copilot::plan_with(planner.as_ref(), &root, &instruction)
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+/// Execute a human-confirmed copilot `plan` against `root` (CPE-1275). RE-VALIDATES the plan against the
+/// same envelope (never trusts a stale/tampered plan from the frontend) — if it no longer validates,
+/// nothing runs and no checkpoint is taken. Otherwise a checkpoint is captured FIRST (one-click undo for
+/// the whole plan), then the whitelisted ops are applied (skip-on-error), with deletes routed to the OS
+/// trash (recoverable). Returns per-op results + the checkpoint/undo handle. Async + `spawn_blocking`
+/// (filesystem I/O + snapshot capture).
+#[tauri::command]
+#[cfg_attr(feature = "specta-bindings", specta::specta)]
+async fn copilot_execute(
+    app: tauri::AppHandle,
+    root: String,
+    plan: cpe_server::op_plan::FileOpPlan,
+) -> Result<cpe_server::copilot::CopilotExecuteResult, String> {
+    cpe_server::fs_route::require_local(&root)?;
+    let ctx = server_ctx::TauriCtx::new(&app);
+    tauri::async_runtime::spawn_blocking(move || {
+        cpe_server::copilot::execute_with(&ctx, &TauriTrash, &root, &plan)
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+/// Save (or clear) the AI-copilot model API key in the OS keychain — the ONLY place it persists, never
+/// settings.json, never a log (CPE-1275, mirrors `content_embedder_set_key`). An empty/blank `key` deletes
+/// the stored key (a local server needs none). Async + `spawn_blocking` (blocking credential-store call).
+/// The key value is never echoed back.
+#[tauri::command]
+#[cfg_attr(feature = "specta-bindings", specta::specta)]
+async fn copilot_set_key(key: String) -> Result<(), String> {
+    #[cfg(any(windows, target_os = "macos", target_os = "linux"))]
+    {
+        tauri::async_runtime::spawn_blocking(move || {
+            use cpe_server::vault_manager::SecretAccess;
+            if key.trim().is_empty() {
+                KeyringBackend.delete(COPILOT_KEY_SERVICE, COPILOT_KEY_ACCOUNT)
+            } else {
+                KeyringBackend.set(COPILOT_KEY_SERVICE, COPILOT_KEY_ACCOUNT, &key)
+            }
+        })
+        .await
+        .map_err(|e| e.to_string())?
+    }
+    #[cfg(not(any(windows, target_os = "macos", target_os = "linux")))]
+    {
+        let _ = key;
+        Err("no OS keychain available on this platform".to_string())
+    }
+}
+
+/// Whether an AI-copilot API key is saved in the OS keychain — lets Settings show "key saved" without ever
+/// materialising (or transmitting) the value. Async + `spawn_blocking` (blocking credential-store call).
+#[tauri::command]
+#[cfg_attr(feature = "specta-bindings", specta::specta)]
+async fn copilot_has_key() -> Result<bool, String> {
+    tauri::async_runtime::spawn_blocking(copilot_key)
+        .await
+        .map(|k| k.is_some())
+        .map_err(|e| e.to_string())
+}
+
+/// Test a model endpoint (the Settings "Test connection" button): send a trivial planning request and
+/// confirm a parseable plan comes back, or a clear error (unreachable, bad key, bad response) — never a
+/// panic (CPE-1275). Uses the key currently saved in the keychain, so the user can Save then Test. Ignores
+/// the `enabled` flag (you test before turning it on). Async + `spawn_blocking` (network I/O).
+#[tauri::command]
+#[cfg_attr(feature = "specta-bindings", specta::specta)]
+async fn copilot_test(config: cpe_server::copilot::CopilotConfig) -> Result<(), String> {
+    let api_key = copilot_key();
+    tauri::async_runtime::spawn_blocking(move || {
+        cpe_server::copilot::probe_planner(&config.base_url, &config.model, api_key)
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
 /// Find duplicate files under `root` (CPE-420) — size-then-hash two-pass scan. Model lives in
 /// `cpe_server::duplicates` (CPE-815); this is a thin `spawn_blocking` dispatcher.
 #[tauri::command]
@@ -9261,6 +9401,11 @@ pub fn run() {
             content_embedder_set_key,
             content_embedder_has_key,
             content_embedder_test,
+            copilot_plan,
+            copilot_execute,
+            copilot_set_key,
+            copilot_has_key,
+            copilot_test,
             git_remote_url,
             open_external,
             run_as_admin,
@@ -10045,6 +10190,11 @@ pub fn export_bindings(out: &std::path::Path) -> Result<(), String> {
         content_embedder_set_key,
         content_embedder_has_key,
         content_embedder_test,
+        copilot_plan,
+        copilot_execute,
+        copilot_set_key,
+        copilot_has_key,
+        copilot_test,
         git_remote_url,
         open_external,
         run_as_admin,

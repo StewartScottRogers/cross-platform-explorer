@@ -1854,6 +1854,78 @@ async contentEmbedderTest(config: ContentEmbedderConfig) : Promise<Result<number
 }
 },
 /**
+ * Build a SAFE, validated file-operation plan for `instruction` over `root` (CPE-1275). Lists the folder,
+ * asks the configured OpenAI-compatible model for a whitelisted [`cpe_server::op_plan::FileOpPlan`], then
+ * validates it against the scope+cap envelope — returning the plan, a dry-run summary, and ALL violations
+ * (non-empty ⇒ the UI must NOT offer execute). NO filesystem change. Model unreachable / bad output → a
+ * clear `Err`; an unsafe-but-produced plan → a non-empty `violations`. The API key comes from the keychain
+ * (a local server needs none). Async + `spawn_blocking` (network + a directory listing).
+ */
+async copilotPlan(root: string, instruction: string, config: CopilotConfig) : Promise<Result<CopilotPlanResult, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("copilot_plan", { root, instruction, config }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * Execute a human-confirmed copilot `plan` against `root` (CPE-1275). RE-VALIDATES the plan against the
+ * same envelope (never trusts a stale/tampered plan from the frontend) — if it no longer validates,
+ * nothing runs and no checkpoint is taken. Otherwise a checkpoint is captured FIRST (one-click undo for
+ * the whole plan), then the whitelisted ops are applied (skip-on-error), with deletes routed to the OS
+ * trash (recoverable). Returns per-op results + the checkpoint/undo handle. Async + `spawn_blocking`
+ * (filesystem I/O + snapshot capture).
+ */
+async copilotExecute(root: string, plan: FileOpPlan) : Promise<Result<CopilotExecuteResult, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("copilot_execute", { root, plan }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * Save (or clear) the AI-copilot model API key in the OS keychain — the ONLY place it persists, never
+ * settings.json, never a log (CPE-1275, mirrors `content_embedder_set_key`). An empty/blank `key` deletes
+ * the stored key (a local server needs none). Async + `spawn_blocking` (blocking credential-store call).
+ * The key value is never echoed back.
+ */
+async copilotSetKey(key: string) : Promise<Result<null, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("copilot_set_key", { key }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * Whether an AI-copilot API key is saved in the OS keychain — lets Settings show "key saved" without ever
+ * materialising (or transmitting) the value. Async + `spawn_blocking` (blocking credential-store call).
+ */
+async copilotHasKey() : Promise<Result<boolean, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("copilot_has_key") };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * Test a model endpoint (the Settings "Test connection" button): send a trivial planning request and
+ * confirm a parseable plan comes back, or a clear error (unreachable, bad key, bad response) — never a
+ * panic (CPE-1275). Uses the key currently saved in the keychain, so the user can Save then Test. Ignores
+ * the `enabled` flag (you test before turning it on). Async + `spawn_blocking` (network I/O).
+ */
+async copilotTest(config: CopilotConfig) : Promise<Result<null, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("copilot_test", { config }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
  * Read a repo's `.git/config` and return its origin remote as a browsable https
  * URL (folder-context plugins, CPE-235). A cheap single file read; returns None
  * if the folder isn't a repo or has no remote.
@@ -3041,6 +3113,52 @@ export type ContentSearchOutcome = { hits: ContentHit[]; index_exists: boolean }
  */
 export type ContentSearchResult = { matches: ContentMatch[]; files_scanned: number; truncated: boolean }
 /**
+ * Persisted selection of the model the copilot uses (CPE-1275, epic CPE-977) — mirrors
+ * [`crate::content_index::ContentEmbedderConfig`]. Off by default. When `enabled` with a `base_url` +
+ * `model`, an OpenAI-compatible [`crate::copilot_planner::HttpPlanner`] is used. The API **key is NOT
+ * here** — it lives in the OS keychain (service `cpe.copilot`), fetched separately at the command boundary,
+ * so a key never persists in plaintext settings.
+ */
+export type CopilotConfig = { 
+/**
+ * When false (the default), the copilot is disabled and no plan can be produced.
+ */
+enabled: boolean; 
+/**
+ * The model server base URL, with or without `/v1` (e.g. `http://localhost:1234/v1` for LM Studio, or
+ * `https://api.openai.com/v1`). See [`crate::copilot_planner::chat_completions_url`].
+ */
+base_url: string; 
+/**
+ * The chat model name the server expects (e.g. `gpt-4o-mini`, or a local model id).
+ */
+model: string }
+/**
+ * The result of [`execute_with`]. Either the plan ran — `checkpoint` is `Some` (the undo handle) and
+ * `results` holds a per-op outcome — or re-validation refused the plan: `checkpoint` is `None`, `results`
+ * is empty, and `violations` explains why nothing ran. The two states are mutually exclusive.
+ */
+export type CopilotExecuteResult = { 
+/**
+ * The checkpoint captured immediately before any op ran — revert to it to undo the whole plan. `None`
+ * iff re-validation refused the plan (nothing ran).
+ */
+checkpoint: CheckpointCreated | null; 
+/**
+ * One outcome per op, in plan order. Empty iff re-validation refused the plan.
+ */
+results: OpResult[]; 
+/**
+ * The scope/cap violations that made execute refuse the plan. Empty iff the plan ran.
+ */
+violations: string[] }
+/**
+ * The result of [`plan_with`]: the validated candidate plan, its dry-run summary, and every scope/cap
+ * violation (empty ⇒ safe to offer for execution). A non-empty `violations` means the UI must NOT offer
+ * execute — execute would re-validate and refuse anyway.
+ */
+export type CopilotPlanResult = { plan: FileOpPlan; summary: PlanSummary; violations: string[] }
+/**
  * Where a [`MediaOp::Watermark`] overlay is anchored on the base image. Default `BottomRight`
  * matches the common "small logo in the corner" placement.
  */
@@ -3161,6 +3279,35 @@ file_type: string | null;
  * matches, the type is unknown, or there is no extension.
  */
 type_mismatch: string | null }
+/**
+ * One concrete file operation. A **closed, whitelisted** set — the only vocabulary a plan (and therefore
+ * the NL translator that emits one) may use, so there is no free-form/shell escape hatch by construction.
+ */
+export type FileOp = 
+/**
+ * Move `src` to `dst` (both full paths within the scope root).
+ */
+{ move: { src: string; dst: string } } | 
+/**
+ * Rename the entry at `path` to the bare name `new_name` (a filename, not a path).
+ */
+{ rename: { path: string; new_name: string } } | 
+/**
+ * Delete the entry at `path`.
+ */
+{ delete: { path: string } } | 
+/**
+ * Create the directory `path`.
+ */
+{ mkdir: { path: string } } | 
+/**
+ * Copy `src` to `dst` (both full paths within the scope root).
+ */
+{ copy: { src: string; dst: string } }
+/**
+ * An ordered plan: the concrete ops an instruction compiled to, executed top-to-bottom.
+ */
+export type FileOpPlan = { ops: FileOp[] }
 /**
  * The kind of a fold range (drives the gutter glyph / default-collapsed heuristics later).
  */
@@ -3519,6 +3666,10 @@ name: string; path: string;
  * "desktop" | "documents" | "downloads" | "pictures" | "music" | "videos" | "drive" | "home".
  */
 kind: string }
+/**
+ * The dry-run tally of a plan — the per-kind counts a confirm dialog shows before the plan runs.
+ */
+export type PlanSummary = { moves: number; renames: number; deletes: number; mkdirs: number; copies: number }
 /**
  * One planned output: where `input` will be written and a one-line summary of what happens to it.
  */
