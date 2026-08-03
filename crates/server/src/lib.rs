@@ -640,6 +640,11 @@ pub mod text_encoding;
 /// new dependencies.
 pub mod archive_safety;
 
+/// Archive expansion-ratio / zip-bomb safety **scan** adapter (CPE-1281, epic CPE-1002): opens a real
+/// ZIP via the `zip` crate and scores it with [`archive_safety::expansion_ratio`] — the adapter
+/// [`archive_safety`]'s own docs describe as a later caller's job.
+pub mod archive_safety_scan;
+
 /// Extract planner (CPE-1055, epic CPE-705). Given an archive's entry list and the destination's
 /// existing entry names, computes resolved destination paths, zip-slip rejections, name collisions,
 /// directories to create, and totals — without opening the archive or touching the filesystem. Reuses
