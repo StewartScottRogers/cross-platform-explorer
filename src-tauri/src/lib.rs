@@ -4295,6 +4295,84 @@ async fn find_similar_folders(root: String) -> Result<cpe_server::folder_similar
         .map_err(|e| e.to_string())?
 }
 
+// ---- Safety-scan command integration (CPE-1287, epic CPE-1002) ------------------------------------
+// Thin `spawn_blocking` dispatchers into the Shift-1 `cpe-server` scan adapters (CPE-1281–1285). Each
+// adapter module owns its own walk/caps/skip-unreadable discipline; these commands add nothing but the
+// String->Path conversion and the async boundary, mirroring `find_similar_folders` above.
+
+/// Score a ZIP archive at `path` for zip-bomb-like expansion ratio (CPE-1281, epic CPE-1002). Thin
+/// `spawn_blocking` dispatcher into [`cpe_server::archive_safety_scan::analyze_archive_safety`], which uses
+/// [`cpe_server::archive_safety::RatioLimits::default`] and never errors on its own — a corrupt, missing, or
+/// non-ZIP `path` yields a graceful zero-entry, non-dangerous report rather than an `Err`.
+#[tauri::command]
+#[cfg_attr(feature = "specta-bindings", specta::specta)]
+async fn analyze_archive_safety(
+    path: String,
+) -> Result<cpe_server::archive_safety_scan::ArchiveSafetyReport, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        cpe_server::archive_safety_scan::analyze_archive_safety(std::path::Path::new(&path))
+    })
+    .await
+    .map_err(|e| e.to_string())
+}
+
+/// Find the topmost cascade-empty directories under `root` (CPE-1282, epic CPE-1002) — a directory that is
+/// empty or contains only nested empty directories. Thin `spawn_blocking` dispatcher into
+/// [`cpe_server::empty_dirs_scan::find_empty_dirs`], which never errors — an unreadable/non-existent `root`
+/// yields an empty, non-truncated report.
+#[tauri::command]
+#[cfg_attr(feature = "specta-bindings", specta::specta)]
+async fn find_empty_dirs(root: String) -> Result<cpe_server::empty_dirs_scan::EmptyDirsReport, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        cpe_server::empty_dirs_scan::find_empty_dirs(std::path::Path::new(&root))
+    })
+    .await
+    .map_err(|e| e.to_string())
+}
+
+/// Find orphaned sidecar files (e.g. a `.srt`/`.xmp` with no matching primary) under `root` (CPE-1283, epic
+/// CPE-1002), using [`cpe_server::orphan_sidecars_scan`]'s default rules. `recursive` controls whether
+/// subdirectories are walked (each directory's sidecars are only ever paired against primaries in that same
+/// directory). Thin `spawn_blocking` dispatcher; never errors.
+#[tauri::command]
+#[cfg_attr(feature = "specta-bindings", specta::specta)]
+async fn find_orphan_sidecars(
+    root: String,
+    recursive: bool,
+) -> Result<cpe_server::orphan_sidecars_scan::OrphanSidecarResult, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        cpe_server::orphan_sidecars_scan::find_orphan_sidecars(std::path::Path::new(&root), recursive)
+    })
+    .await
+    .map_err(|e| e.to_string())
+}
+
+/// Find dangling (target-missing) and cyclic (self/loop) symlinks under `root` (CPE-1284, epic CPE-1002).
+/// Thin `spawn_blocking` dispatcher into [`cpe_server::dangling_links_scan::find_dangling_links`], which
+/// errors when `root` isn't a directory.
+#[tauri::command]
+#[cfg_attr(feature = "specta-bindings", specta::specta)]
+async fn find_dangling_links(root: String) -> Result<cpe_server::dangling_links_scan::DanglingReport, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        cpe_server::dangling_links_scan::find_dangling_links(std::path::Path::new(&root))
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+/// Sweep `root` for files whose sniffed content disagrees with their claimed extension (CPE-1285, epic
+/// CPE-1002) — e.g. a `.jpg` that's really a Windows PE. Thin `spawn_blocking` dispatcher into
+/// [`cpe_server::type_mismatch_scan::find_type_mismatches`]; never errors.
+#[tauri::command]
+#[cfg_attr(feature = "specta-bindings", specta::specta)]
+async fn find_type_mismatches(root: String) -> Result<cpe_server::type_mismatch_scan::MismatchReport, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        cpe_server::type_mismatch_scan::find_type_mismatches(std::path::Path::new(&root))
+    })
+    .await
+    .map_err(|e| e.to_string())
+}
+
 // ---- Rules-based auto-organize (CPE-1142, epic CPE-979) -------------------------------------------
 // Propose -> checkpoint -> apply, wired over the built+tested `cpe_server::organize` planner. The listing
 // + checkpoint + move glue lives in `cpe_server::organize_apply` (CPE-815 pattern); these commands are
@@ -9584,6 +9662,11 @@ pub fn run() {
             find_similar_images_stream,
             find_similar_documents,
             find_similar_folders,
+            analyze_archive_safety,
+            find_empty_dirs,
+            find_orphan_sidecars,
+            find_dangling_links,
+            find_type_mismatches,
             organize_plan,
             organize_clutter,
             organize_apply,
@@ -10378,6 +10461,11 @@ pub fn export_bindings(out: &std::path::Path) -> Result<(), String> {
         find_similar_images_stream,
         find_similar_documents,
         find_similar_folders,
+        analyze_archive_safety,
+        find_empty_dirs,
+        find_orphan_sidecars,
+        find_dangling_links,
+        find_type_mismatches,
         organize_plan,
         organize_clutter,
         organize_apply,
@@ -10521,6 +10609,43 @@ mod tests {
         // The cross-crate cpe-server types now flow into the generated client.
         assert!(src.contains("DirEntry") && src.contains("OpResult") && src.contains("EntryInfo"),
             "cpe-server types should be exported into the typed client");
+    }
+
+    // ---- Safety-scan command smoke tests (CPE-1287, epic CPE-1002) ----------------------------------
+    // Confirms each thin command actually dispatches into its `cpe-server` adapter and comes back with a
+    // sane `Ok` result — the adapters themselves are exhaustively tested in their own crate; this is just
+    // the wiring (String->Path conversion, spawn_blocking, error mapping, command registration).
+
+    #[test]
+    fn safety_scan_commands_dispatch_into_their_adapters() {
+        let d = std::env::temp_dir().join(format!("cpe1287_safety_scan_{}", std::process::id()));
+        let _ = fs::remove_dir_all(&d);
+        fs::create_dir_all(d.join("empty_sub")).expect("scratch dir");
+        fs::write(d.join("keep.txt"), b"hello world").unwrap();
+        let root = d.to_string_lossy().into_owned();
+
+        let archive = tauri::async_runtime::block_on(analyze_archive_safety(d.join("keep.txt").to_string_lossy().into_owned()))
+            .expect("analyze_archive_safety dispatches");
+        assert_eq!(archive.entries_scanned, 0, "keep.txt isn't a zip, so nothing to score");
+        assert!(!archive.report.dangerous);
+
+        let empty = tauri::async_runtime::block_on(find_empty_dirs(root.clone())).expect("find_empty_dirs dispatches");
+        assert!(empty.dirs.iter().any(|p| Path::new(p) == d.join("empty_sub")), "empty_sub should be reported: {:?}", empty.dirs);
+
+        let orphans =
+            tauri::async_runtime::block_on(find_orphan_sidecars(root.clone(), false)).expect("find_orphan_sidecars dispatches");
+        assert!(orphans.orphans.is_empty(), "keep.txt is not a sidecar type");
+        assert_eq!(orphans.scanned, 1);
+
+        let dangling = tauri::async_runtime::block_on(find_dangling_links(root.clone())).expect("find_dangling_links dispatches");
+        assert!(dangling.links.is_empty(), "no symlinks in the scratch tree");
+
+        let mismatches =
+            tauri::async_runtime::block_on(find_type_mismatches(root.clone())).expect("find_type_mismatches dispatches");
+        assert!(mismatches.hits.is_empty(), "plain text keep.txt has no content/extension mismatch");
+        assert_eq!(mismatches.scanned, 1);
+
+        let _ = fs::remove_dir_all(&d);
     }
 
     // ---- Background scheduled-snapshot timer (CPE-1199, epic CPE-735) -------------------------------
