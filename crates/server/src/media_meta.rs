@@ -4,14 +4,15 @@
 //! the actual file I/O; this only routes.
 //!
 //! Read coverage spans the codecs shipped so far: ID3 (mp3), Vorbis (flac / ogg), EXIF (jpeg / tiff), IPTC
-//! (jpeg APP13/8BIM/IIM, merged alongside EXIF), PDF `/Info`, and MP4/MOV video tags. Write coverage is
+//! (jpeg APP13/8BIM/IIM, merged alongside EXIF), XMP (jpeg APP1, merged alongside EXIF + IPTC, plus
+//! standalone `.xmp` sidecars), WAV/RIFF-INFO, PDF `/Info`, and MP4/MOV video tags. Write coverage is
 //! narrower — only the formats with a write codec ([`crate::media_meta_write`]): **mp3**, **flac**, and
 //! **jpeg** (EXIF), and **ogg**/**oga** (Vorbis comments). [`is_writable`] lets the UI show read-only fields
 //! for the rest until their writers land (video/PDF write-back are deferred as format-risky, and TIFF EXIF
 //! write is deferred because the EXIF *is* a TIFF's own IFD chain).
 
 use crate::media_meta_edit::{apply_edits, MetaEdit, MetaField};
-use crate::media_meta_read::{read_exif, read_flac, read_id3v2, read_iptc, read_ogg, read_pdf};
+use crate::media_meta_read::{read_exif, read_flac, read_id3v2, read_iptc, read_ogg, read_pdf, read_wav, read_xmp};
 use crate::media_meta_write::{write_exif, write_flac, write_id3v2, write_ogg};
 use crate::video_meta_read::read_mp4;
 
@@ -22,14 +23,17 @@ pub fn read_all(ext: &str, bytes: &[u8]) -> Vec<MetaField> {
         "mp3" => read_id3v2(bytes),
         "flac" => read_flac(bytes),
         "ogg" | "oga" => read_ogg(bytes),
+        "wav" => read_wav(bytes),
         "pdf" => read_pdf(bytes),
         "mp4" | "mov" | "m4v" => read_mp4(bytes),
         "jpg" | "jpeg" => {
             let mut fields = read_exif(bytes);
             fields.extend(read_iptc(bytes));
+            fields.extend(read_xmp(bytes));
             fields
         }
         "tif" | "tiff" => read_exif(bytes),
+        "xmp" => read_xmp(bytes),
         _ => Vec::new(),
     }
 }

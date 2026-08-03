@@ -606,6 +606,364 @@ fn parse_iim_datasets(data: &[u8]) -> Vec<MetaField> {
     fields
 }
 
+// ---- XMP (CPE-1291) ----
+
+/// The Adobe XMP signature that opens a JPEG APP1 segment carrying an embedded XMP packet — as opposed to
+/// the far more common APP1 EXIF use, signed `Exif\0\0`.
+const XMP_APP1_SIG: &[u8] = b"http://ns.adobe.com/xap/1.0/\0";
+
+/// The XMP packet's opening processing instruction. Present when the packet is wrapped the "normal" way
+/// (embedded in an image, or a `.xmp` sidecar written by a tool that includes the wrapper); a bare
+/// RDF/XML document with no wrapper (just `<x:xmpmeta>…` or `<rdf:RDF>…`) is tolerated too — see
+/// [`bound_xmp_region`].
+const XPACKET_BEGIN: &[u8] = b"<?xpacket";
+/// The closing tag of the common `x:xmpmeta` wrapper around the RDF payload.
+const XMPMETA_END: &[u8] = b"</x:xmpmeta>";
+/// Fallback closing tag for a packet with no `x:xmpmeta` wrapper — just a bare RDF document.
+const RDF_END: &[u8] = b"</rdf:RDF>";
+
+/// The Dublin-Core / XMP properties this codec surfaces, as `(qualified tag name, friendly key,
+/// editable)`. `CreateDate` is a fixed authoring timestamp (like EXIF's `DateTimeOriginal`) so it's
+/// read-only; the rest are user-facing descriptive fields, editable like their IPTC counterparts.
+const XMP_PROPS: &[(&str, &str, bool)] = &[
+    ("dc:title", "Title", true),
+    ("dc:creator", "Creator", true),
+    ("dc:subject", "Keywords", true),
+    ("dc:description", "Description", true),
+    ("xmp:CreateDate", "Create Date", false),
+    ("photoshop:Headline", "Headline", true),
+];
+
+/// Parse an XMP packet's Dublin-Core / XMP properties into [`MetaField`]s in group `"xmp"`. Locates the
+/// packet in one of two ways: a JPEG's APP1 (`0xFF 0xE1`) segment whose payload opens with
+/// [`XMP_APP1_SIG`] (checked first, mirroring [`read_iptc`]'s marker-stream walk), or — for any other
+/// input, including a standalone `.xmp` sidecar's raw bytes — the input itself. Either way the packet is
+/// then bounded to `<?xpacket …?>` … `</x:xmpmeta>` (or `</rdf:RDF>` when there's no `x:xmpmeta` wrapper)
+/// before a small tolerant tag scan extracts each known property (no XML-parser dependency — this is a
+/// hand-rolled scanner, deliberately not a general-purpose one).
+///
+/// Every offset is bounds-checked via `get(..)`/`find(..)` (never a raw index that could panic), and any
+/// failure to locate a packet, wrapper, or property simply yields whatever was found (often nothing) —
+/// this **never panics**, including on truncated or garbage input.
+pub fn read_xmp(bytes: &[u8]) -> Vec<MetaField> {
+    let Some(packet) = extract_xmp_packet(bytes) else { return Vec::new() };
+    parse_xmp_packet(packet)
+}
+
+/// Locate the XMP packet in `bytes`, per [`read_xmp`]'s two strategies.
+fn extract_xmp_packet(bytes: &[u8]) -> Option<&[u8]> {
+    if bytes.len() >= 2 && bytes[0] == 0xFF && bytes[1] == 0xD8 {
+        find_xmp_in_jpeg(bytes)
+    } else {
+        bound_xmp_region(bytes)
+    }
+}
+
+/// Walk a JPEG's marker stream (structurally the same walk as [`read_iptc`]'s) looking for an APP1
+/// (`0xFF 0xE1`) segment whose payload opens with [`XMP_APP1_SIG`], and bound what follows the signature
+/// to the XMP packet region. A JPEG commonly carries a separate APP1 for EXIF (`Exif\0\0`) before or after
+/// the XMP one — the walk simply steps over segments that don't match, same as the IPTC walk stepping over
+/// a leading EXIF APP1 to reach APP13.
+fn find_xmp_in_jpeg(bytes: &[u8]) -> Option<&[u8]> {
+    let mut pos = 2usize;
+    while pos + 2 <= bytes.len() {
+        if bytes[pos] != 0xFF {
+            break; // desynced from marker boundaries — stop
+        }
+        let mut marker_pos = pos + 1;
+        while bytes.get(marker_pos) == Some(&0xFF) {
+            marker_pos += 1;
+        }
+        let Some(&marker) = bytes.get(marker_pos) else { break };
+        if marker == 0xD8 || marker == 0xD9 || marker == 0x01 || (0xD0..=0xD7).contains(&marker) {
+            pos = marker_pos + 1;
+            continue;
+        }
+        if marker == 0xDA {
+            break; // start of entropy-coded scan data — nothing more to find
+        }
+        let Some(len_bytes) = bytes.get(marker_pos + 1..marker_pos + 3) else { break };
+        let seg_len = be_u16(len_bytes) as usize;
+        if seg_len < 2 {
+            break; // malformed length
+        }
+        let seg_start = marker_pos + 1;
+        let payload_start = seg_start + 2;
+        let Some(payload_end) = seg_start.checked_add(seg_len) else { break };
+        if payload_end > bytes.len() || payload_start > payload_end {
+            break; // segment claims to run past EOF
+        }
+        if marker == 0xE1 {
+            if let Some(app1) = bytes.get(payload_start..payload_end) {
+                if let Some(rest) = app1.strip_prefix(XMP_APP1_SIG) {
+                    if let Some(region) = bound_xmp_region(rest) {
+                        return Some(region);
+                    }
+                }
+            }
+        }
+        pos = payload_end;
+    }
+    None
+}
+
+/// Bound `bytes` to the XMP packet region: from `<?xpacket` (if present — a standalone sidecar or an
+/// embedded packet with no xpacket wrapper simply starts at byte 0 instead) through the end of
+/// `</x:xmpmeta>`, falling back to `</rdf:RDF>` when there's no `x:xmpmeta` wrapper. Returns `None` when
+/// neither closing marker is found — not a recognisable XMP/RDF document.
+fn bound_xmp_region(bytes: &[u8]) -> Option<&[u8]> {
+    let start = find_subslice(bytes, XPACKET_BEGIN).unwrap_or(0);
+    let region = bytes.get(start..)?;
+    let end = find_subslice(region, XMPMETA_END)
+        .map(|i| i + XMPMETA_END.len())
+        .or_else(|| find_subslice(region, RDF_END).map(|i| i + RDF_END.len()))?;
+    region.get(..end)
+}
+
+/// Scan a bounded XMP packet for each of [`XMP_PROPS`], in order.
+fn parse_xmp_packet(packet: &[u8]) -> Vec<MetaField> {
+    // XMP is normatively UTF-8; a lossy decode degrades gracefully on any stray non-UTF-8 byte instead of
+    // losing the whole packet over it.
+    let text = String::from_utf8_lossy(packet);
+    let mut fields = Vec::new();
+    for &(prop, friendly, editable) in XMP_PROPS {
+        if let Some(value) = extract_xmp_prop(&text, prop) {
+            fields.push(MetaField { group: "xmp".to_string(), key: friendly.to_string(), value, editable });
+        }
+    }
+    fields
+}
+
+/// Extract one property's value from `text`, trying attribute form first (the common case for a
+/// simple/single-value property inside an `<rdf:Description ...>` element), then element form.
+fn extract_xmp_prop(text: &str, prop: &str) -> Option<String> {
+    extract_xmp_attribute(text, prop).or_else(|| extract_xmp_element(text, prop))
+}
+
+/// Attribute form: `prop="value"` (RDF's compact attribute syntax, e.g. `photoshop:Headline="Foo"` as an
+/// attribute of an `<rdf:Description ...>` element). Tolerates single- or double-quoted values.
+fn extract_xmp_attribute(text: &str, prop: &str) -> Option<String> {
+    for quote in ['"', '\''] {
+        let needle = format!("{prop}={quote}");
+        let idx = text.find(needle.as_str())?;
+        let rest = text.get(idx + needle.len()..)?;
+        let end = rest.find(quote)?;
+        let value = decode_xml_entities(rest[..end].trim());
+        if !value.is_empty() {
+            return Some(value);
+        }
+    }
+    None
+}
+
+/// Element form: `<prop ...>content</prop>`, tolerant of attributes on the opening tag. If `content`
+/// contains one or more `<rdf:li>` list items (an `rdf:Bag`/`rdf:Seq`/`rdf:Alt` wrapper — how
+/// `dc:creator`/`dc:subject`/language-alternative properties are normally written), their text is joined
+/// with `"; "`; otherwise any nested tags inside `content` are stripped and the remaining text is used.
+fn extract_xmp_element(text: &str, prop: &str) -> Option<String> {
+    let open_needle = format!("<{prop}");
+    let open_idx = text.find(open_needle.as_str())?;
+    let after_name = text.get(open_idx + open_needle.len()..)?;
+    // The opening tag ends at its first unescaped '>'; a self-closing tag (`.../>`) has no content.
+    let tag_close = after_name.find('>')?;
+    if after_name[..tag_close].ends_with('/') {
+        return None;
+    }
+    let content_start = tag_close + 1;
+    let close_needle = format!("</{prop}>");
+    let rest = after_name.get(content_start..)?;
+    let close_idx = rest.find(close_needle.as_str())?;
+    let content = &rest[..close_idx];
+
+    let items = extract_rdf_li_items(content);
+    if !items.is_empty() {
+        return Some(items.join("; "));
+    }
+    let value = decode_xml_entities(strip_xml_tags(content).trim());
+    if value.is_empty() {
+        None
+    } else {
+        Some(value)
+    }
+}
+
+/// Collect the text of every `<rdf:li ...>text</rdf:li>` item inside `content` (an `rdf:Bag`/`rdf:Seq`/
+/// `rdf:Alt` list body), in order. Malformed/unterminated list items simply stop the scan with whatever
+/// was collected so far.
+fn extract_rdf_li_items(content: &str) -> Vec<String> {
+    const LI_OPEN: &str = "<rdf:li";
+    const LI_CLOSE: &str = "</rdf:li>";
+    let mut items = Vec::new();
+    let mut rest = content;
+    while let Some(idx) = rest.find(LI_OPEN) {
+        let Some(after) = rest.get(idx + LI_OPEN.len()..) else { break };
+        let Some(tag_close) = after.find('>') else { break };
+        if after[..tag_close].ends_with('/') {
+            let Some(next) = after.get(tag_close + 1..) else { break };
+            rest = next; // empty self-closing <rdf:li/>
+            continue;
+        }
+        let content_start = tag_close + 1;
+        let Some(li_rest) = after.get(content_start..) else { break };
+        let Some(close_idx) = li_rest.find(LI_CLOSE) else { break };
+        let item = decode_xml_entities(strip_xml_tags(&li_rest[..close_idx]).trim());
+        if !item.is_empty() {
+            items.push(item);
+        }
+        let Some(next) = li_rest.get(close_idx + LI_CLOSE.len()..) else { break };
+        rest = next;
+    }
+    items
+}
+
+/// Strip any `<...>` tags from `s`, concatenating the text between them (handles e.g. a stray wrapper
+/// element with no `rdf:li` inside — degrades to plain text rather than losing the value).
+fn strip_xml_tags(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut in_tag = false;
+    for c in s.chars() {
+        match c {
+            '<' => in_tag = true,
+            '>' => in_tag = false,
+            _ if !in_tag => out.push(c),
+            _ => {}
+        }
+    }
+    out
+}
+
+/// Decode the five predefined XML entities (`&amp; &lt; &gt; &quot; &apos;`) plus numeric character
+/// references (`&#NN;` / `&#xHH;`). An unrecognised or malformed entity is left as-is (the literal `&…;`
+/// text is copied through) rather than dropped.
+fn decode_xml_entities(s: &str) -> String {
+    if !s.contains('&') {
+        return s.to_string();
+    }
+    let mut out = String::with_capacity(s.len());
+    let mut i = 0usize;
+    while i < s.len() {
+        if s.as_bytes()[i] == b'&' {
+            if let Some(rel) = s[i..].find(';') {
+                let end = i + rel;
+                let entity = &s[i + 1..end];
+                let decoded = match entity {
+                    "amp" => Some('&'),
+                    "lt" => Some('<'),
+                    "gt" => Some('>'),
+                    "quot" => Some('"'),
+                    "apos" => Some('\''),
+                    _ => entity
+                        .strip_prefix('#')
+                        .and_then(|rest| {
+                            if let Some(hex) = rest.strip_prefix('x').or_else(|| rest.strip_prefix('X')) {
+                                u32::from_str_radix(hex, 16).ok()
+                            } else {
+                                rest.parse::<u32>().ok()
+                            }
+                        })
+                        .and_then(char::from_u32),
+                };
+                if let Some(c) = decoded {
+                    out.push(c);
+                    i = end + 1;
+                    continue;
+                }
+            }
+        }
+        let Some(ch) = s[i..].chars().next() else { break };
+        out.push(ch);
+        i += ch.len_utf8();
+    }
+    out
+}
+
+// ---- WAV / RIFF INFO (CPE-1291) ----
+
+/// Map a RIFF `LIST`/`INFO` sub-chunk id to the SAME friendly key the ID3v2/Vorbis codecs use for the
+/// equivalent tag, so the audio-column extractor ([`crate::column_extract`]) treats WAV tags identically
+/// to MP3/FLAC/OGG ones. Unrecognised ids are dropped rather than passed through (unlike the ID3 codec's
+/// unknown-text-frame passthrough) since RIFF INFO defines many more chunk ids than are worth surfacing.
+fn wav_info_key(id: &[u8]) -> Option<&'static str> {
+    match id {
+        b"INAM" => Some("Title"),
+        b"IART" => Some("Artist"),
+        b"IPRD" => Some("Album"),
+        b"ICRD" => Some("Year"),
+        b"ICMT" => Some("Comment"),
+        b"IGNR" => Some("Genre"),
+        _ => None,
+    }
+}
+
+/// Parse a WAV file's `LIST`/`INFO` chunk into [`MetaField`]s in group `"wav"`. Requires the `RIFF`…`WAVE`
+/// header, then walks the top-level RIFF chunk tree — each chunk is a 4-byte id + little-endian 4-byte
+/// size + that many data bytes, padded to an even length — looking for a `LIST` chunk whose first 4 data
+/// bytes (its "form type") are `INFO`; that chunk's remaining bytes are handed to [`parse_wav_info`].
+/// Returns an empty vec — never panics — for non-WAV, truncated, or garbage input, or a WAV with no INFO
+/// chunk; every offset is bounds-checked via `get(..)`/`checked_add(..)` before use.
+pub fn read_wav(bytes: &[u8]) -> Vec<MetaField> {
+    // "RIFF"(4) + chunk size(4, little-endian, unused here) + "WAVE"(4).
+    if bytes.len() < 12 || &bytes[0..4] != b"RIFF" || &bytes[8..12] != b"WAVE" {
+        return Vec::new();
+    }
+    let mut pos = 12usize;
+    while pos + 8 <= bytes.len() {
+        let Some(id) = bytes.get(pos..pos + 4) else { break };
+        let Some(size_bytes) = bytes.get(pos + 4..pos + 8) else { break };
+        let size = le_u32(size_bytes) as usize;
+        let data_start = pos + 8;
+        let Some(data_end) = data_start.checked_add(size) else { break };
+        if data_end > bytes.len() {
+            break; // chunk claims to run past EOF — truncated/corrupt file, stop rather than over-read
+        }
+        if id == b"LIST" {
+            if let Some(data) = bytes.get(data_start..data_end) {
+                if data.get(0..4) == Some(b"INFO") {
+                    let fields = parse_wav_info(&data[4..]);
+                    if !fields.is_empty() {
+                        return fields;
+                    }
+                }
+            }
+        }
+        // RIFF chunks are padded to an even length; the pad byte is not part of the next chunk.
+        let padded_size = if size % 2 == 0 { size } else { size + 1 };
+        let Some(next) = data_start.checked_add(padded_size) else { break };
+        pos = next;
+    }
+    Vec::new()
+}
+
+/// Decode a `LIST`/`INFO` chunk's sub-chunks — right after the 4-byte `INFO` form type, already stripped
+/// by [`read_wav`] — into [`MetaField`]s. Layout mirrors the outer RIFF chunk tree: 4-byte id +
+/// little-endian 4-byte size + that many data bytes, padded to an even length. An id [`wav_info_key`]
+/// doesn't recognise is skipped but still advances the scan correctly, so unsupported INFO fields never
+/// derail the ones we do surface. Never panics on malformed/truncated input — it simply stops the scan
+/// with whatever was decoded so far.
+fn parse_wav_info(data: &[u8]) -> Vec<MetaField> {
+    let mut fields = Vec::new();
+    let mut pos = 0usize;
+    while pos + 8 <= data.len() {
+        let Some(id) = data.get(pos..pos + 4) else { break };
+        let Some(size_bytes) = data.get(pos + 4..pos + 8) else { break };
+        let size = le_u32(size_bytes) as usize;
+        let value_start = pos + 8;
+        let Some(value_end) = value_start.checked_add(size) else { break };
+        let Some(raw) = data.get(value_start..value_end) else { break };
+        let padded_size = if size % 2 == 0 { size } else { size + 1 };
+        let Some(next) = value_start.checked_add(padded_size) else { break };
+        pos = next;
+
+        let Some(key) = wav_info_key(id) else { continue };
+        let value = String::from_utf8_lossy(raw).trim_matches('\u{0}').trim().to_string();
+        if value.is_empty() {
+            continue;
+        }
+        fields.push(MetaField { group: "wav".to_string(), key: key.to_string(), value, editable: true });
+    }
+    fields
+}
+
 // ---- PDF /Info (CPE-1036) ----
 
 /// Standard PDF document-info dictionary keys mapped to friendly names, in the order we emit them.
@@ -2008,5 +2366,241 @@ mod tests {
         }
         // The untruncated document still yields the caption.
         assert_eq!(get(&read_iptc(&jpeg), "Caption/Abstract"), Some("A caption"));
+    }
+
+    // ---- XMP fixtures + tests (CPE-1291) ----
+
+    /// A well-formed XMP packet (xpacket wrapper + x:xmpmeta + rdf:RDF) exercising both attribute form
+    /// (`photoshop:Headline`, `xmp:CreateDate`) and element form — including `rdf:Alt`/`rdf:Seq`/`rdf:Bag`
+    /// list wrappers — for the rest of the surfaced properties.
+    fn xmp_packet_fixture() -> String {
+        r#"<?xpacket begin="" id="W5M0MpCehiHzreSzNTczkc9d"?>
+<x:xmpmeta xmlns:x="adobe:ns:meta/">
+ <rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#">
+  <rdf:Description rdf:about="" xmlns:dc="http://purl.org/dc/elements/1.1/" xmlns:photoshop="http://ns.adobe.com/photoshop/1.0/" xmlns:xmp="http://ns.adobe.com/xap/1.0/" photoshop:Headline="A Headline" xmp:CreateDate="2024-01-02T03:04:05">
+   <dc:title>
+    <rdf:Alt>
+     <rdf:li xml:lang="x-default">My Title</rdf:li>
+    </rdf:Alt>
+   </dc:title>
+   <dc:creator>
+    <rdf:Seq>
+     <rdf:li>Jane Doe</rdf:li>
+    </rdf:Seq>
+   </dc:creator>
+   <dc:subject>
+    <rdf:Bag>
+     <rdf:li>nature</rdf:li>
+     <rdf:li>landscape</rdf:li>
+    </rdf:Bag>
+   </dc:subject>
+   <dc:description>
+    <rdf:Alt>
+     <rdf:li xml:lang="x-default">A description</rdf:li>
+    </rdf:Alt>
+   </dc:description>
+  </rdf:Description>
+ </rdf:RDF>
+</x:xmpmeta>
+<?xpacket end="w"?>
+"#
+        .to_string()
+    }
+
+    #[test]
+    fn read_xmp_extracts_fields_from_jpeg_embedded_app1() {
+        let mut app1 = XMP_APP1_SIG.to_vec();
+        app1.extend_from_slice(xmp_packet_fixture().as_bytes());
+        let jpeg = build_jpeg(&[jpeg_segment(0xE1, &app1)]);
+
+        let f = read_xmp(&jpeg);
+        assert_eq!(get(&f, "Title"), Some("My Title"));
+        assert_eq!(get(&f, "Creator"), Some("Jane Doe"));
+        assert_eq!(get(&f, "Keywords"), Some("nature; landscape"));
+        assert_eq!(get(&f, "Description"), Some("A description"));
+        assert_eq!(get(&f, "Headline"), Some("A Headline"));
+        assert_eq!(get(&f, "Create Date"), Some("2024-01-02T03:04:05"));
+        assert!(f.iter().all(|x| x.group == "xmp"));
+
+        let headline = f.iter().find(|x| x.key == "Headline").unwrap();
+        assert!(headline.editable);
+        let create_date = f.iter().find(|x| x.key == "Create Date").unwrap();
+        assert!(!create_date.editable, "CreateDate is a fixed timestamp, not user-editable");
+    }
+
+    #[test]
+    fn read_xmp_extracts_fields_from_standalone_sidecar() {
+        let packet = xmp_packet_fixture();
+        let f = read_xmp(packet.as_bytes());
+        assert_eq!(get(&f, "Title"), Some("My Title"));
+        assert_eq!(get(&f, "Creator"), Some("Jane Doe"));
+        assert_eq!(get(&f, "Keywords"), Some("nature; landscape"));
+        assert_eq!(get(&f, "Headline"), Some("A Headline"));
+    }
+
+    #[test]
+    fn read_xmp_handles_attribute_form_on_a_self_closing_description() {
+        let packet = br#"<?xpacket begin=""?>
+<x:xmpmeta xmlns:x="adobe:ns:meta/">
+ <rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#">
+  <rdf:Description rdf:about="" xmlns:dc="http://purl.org/dc/elements/1.1/" xmlns:photoshop="http://ns.adobe.com/photoshop/1.0/" dc:title="Attr Title" photoshop:Headline="Attr Headline"/>
+ </rdf:RDF>
+</x:xmpmeta>"#;
+        let f = read_xmp(packet);
+        assert_eq!(get(&f, "Title"), Some("Attr Title"));
+        assert_eq!(get(&f, "Headline"), Some("Attr Headline"));
+    }
+
+    #[test]
+    fn read_all_merges_exif_iptc_and_xmp_for_jpeg() {
+        let ifd0 = vec![ascii_entry(0x010F, "Acme")]; // Make, via the EXIF codec
+        let exif_bytes = build_exif_tiff(ifd0, Vec::new(), Vec::new());
+        let mut app1_exif = b"Exif\0\0".to_vec();
+        app1_exif.extend_from_slice(&exif_bytes);
+        let app13 = photoshop_app13_payload(&eight_bim_block(0x0404, &iim_dataset(2, 120, "A caption")));
+        let mut app1_xmp = XMP_APP1_SIG.to_vec();
+        app1_xmp.extend_from_slice(xmp_packet_fixture().as_bytes());
+        let jpeg = build_jpeg(&[
+            jpeg_segment(0xE1, &app1_exif),
+            jpeg_segment(0xE1, &app1_xmp),
+            jpeg_segment(0xED, &app13),
+        ]);
+
+        let f = crate::media_meta::read_all("jpg", &jpeg);
+        assert_eq!(get(&f, "Make"), Some("\"Acme\""));
+        assert_eq!(get(&f, "Caption/Abstract"), Some("A caption"));
+        assert_eq!(get(&f, "Title"), Some("My Title"));
+        assert_eq!(f.iter().find(|x| x.key == "Make").unwrap().group, "exif");
+        assert_eq!(f.iter().find(|x| x.key == "Caption/Abstract").unwrap().group, "iptc");
+        assert_eq!(f.iter().find(|x| x.key == "Title").unwrap().group, "xmp");
+    }
+
+    #[test]
+    fn read_all_routes_standalone_xmp_extension() {
+        let f = crate::media_meta::read_all("xmp", xmp_packet_fixture().as_bytes());
+        assert_eq!(get(&f, "Title"), Some("My Title"));
+    }
+
+    #[test]
+    fn read_xmp_returns_empty_for_non_xmp_and_garbage() {
+        assert!(read_xmp(b"").is_empty());
+        assert!(read_xmp(b"not xmp at all, just plain text").is_empty());
+        assert!(read_xmp(&[0u8; 16]).is_empty());
+        assert!(read_xmp(&build_jpeg(&[])).is_empty()); // JPEG with no XMP APP1 at all
+    }
+
+    #[test]
+    fn read_xmp_tolerates_truncation_without_panicking() {
+        let packet = xmp_packet_fixture();
+        let mut app1 = XMP_APP1_SIG.to_vec();
+        app1.extend_from_slice(packet.as_bytes());
+        let jpeg = build_jpeg(&[jpeg_segment(0xE1, &app1)]);
+        for cut in 0..jpeg.len() {
+            let _ = read_xmp(&jpeg[..cut]); // must never panic on any truncation
+        }
+        // Also fuzz the standalone-sidecar code path (bound_xmp_region called directly, not via the JPEG walk).
+        for cut in 0..packet.len() {
+            let _ = read_xmp(&packet.as_bytes()[..cut]);
+        }
+        assert_eq!(get(&read_xmp(&jpeg), "Title"), Some("My Title"));
+    }
+
+    // ---- WAV / RIFF-INFO fixtures + tests (CPE-1291) ----
+
+    /// Build one RIFF sub-chunk: 4-byte id + little-endian 4-byte size + data, padded to an even length.
+    fn riff_chunk(id: &[u8; 4], data: &[u8]) -> Vec<u8> {
+        let mut c = Vec::new();
+        c.extend_from_slice(id);
+        c.extend_from_slice(&(data.len() as u32).to_le_bytes());
+        c.extend_from_slice(data);
+        if data.len() % 2 != 0 {
+            c.push(0); // RIFF pad byte
+        }
+        c
+    }
+
+    /// Build a `LIST`/`INFO` chunk from `(4-char sub-chunk id, text)` entries.
+    fn build_wav_info_list(entries: &[(&[u8; 4], &str)]) -> Vec<u8> {
+        let mut body = b"INFO".to_vec();
+        for (id, text) in entries {
+            body.extend_from_slice(&riff_chunk(id, text.as_bytes()));
+        }
+        riff_chunk(b"LIST", &body)
+    }
+
+    /// Build a minimal-but-structurally-valid RIFF/WAVE file: `RIFF` header, a stub `fmt ` chunk, an
+    /// optional `LIST`/`INFO` chunk, and a stub `data` chunk. Good enough for [`read_wav`]'s chunk walk
+    /// without needing real PCM audio.
+    fn build_wav(info_list: Option<Vec<u8>>) -> Vec<u8> {
+        let mut chunks = riff_chunk(b"fmt ", &[0u8; 16]);
+        if let Some(list) = info_list {
+            chunks.extend_from_slice(&list);
+        }
+        chunks.extend_from_slice(&riff_chunk(b"data", &[0u8; 4]));
+
+        let mut w = Vec::new();
+        w.extend_from_slice(b"RIFF");
+        w.extend_from_slice(&((4 + chunks.len()) as u32).to_le_bytes()); // "WAVE" + chunks
+        w.extend_from_slice(b"WAVE");
+        w.extend_from_slice(&chunks);
+        w
+    }
+
+    #[test]
+    fn read_wav_extracts_info_fields() {
+        let list = build_wav_info_list(&[
+            (b"INAM", "Song Title"),
+            (b"IART", "The Artist"),
+            (b"IPRD", "The Album"),
+            (b"ICRD", "2024"),
+            (b"ICMT", "A comment"),
+            (b"IGNR", "Rock"),
+        ]);
+        let wav = build_wav(Some(list));
+        let f = read_wav(&wav);
+        assert_eq!(get(&f, "Title"), Some("Song Title"));
+        assert_eq!(get(&f, "Artist"), Some("The Artist"));
+        assert_eq!(get(&f, "Album"), Some("The Album"));
+        assert_eq!(get(&f, "Year"), Some("2024"));
+        assert_eq!(get(&f, "Comment"), Some("A comment"));
+        assert_eq!(get(&f, "Genre"), Some("Rock"));
+        assert!(f.iter().all(|x| x.group == "wav" && x.editable));
+    }
+
+    #[test]
+    fn read_wav_skips_unrecognised_info_ids_and_odd_length_padding() {
+        // ISFT (software) isn't one we surface, and its odd-length ("Odd" = 3 bytes) value forces the
+        // padding path before INAM — the walker must still land on the right offset for it.
+        let list = build_wav_info_list(&[(b"ISFT", "Odd"), (b"INAM", "After Pad")]);
+        let wav = build_wav(Some(list));
+        let f = read_wav(&wav);
+        assert_eq!(get(&f, "Title"), Some("After Pad"));
+        assert_eq!(f.len(), 1);
+    }
+
+    #[test]
+    fn read_all_routes_wav_by_extension() {
+        let list = build_wav_info_list(&[(b"INAM", "Via read_all")]);
+        let wav = build_wav(Some(list));
+        assert_eq!(get(&crate::media_meta::read_all("wav", &wav), "Title"), Some("Via read_all"));
+        assert_eq!(get(&crate::media_meta::read_all("WAV", &wav), "Title"), Some("Via read_all")); // case-insensitive
+    }
+
+    #[test]
+    fn read_wav_returns_empty_without_info_chunk_or_for_non_wav() {
+        assert!(read_wav(&build_wav(None)).is_empty());
+        assert!(read_wav(b"").is_empty());
+        assert!(read_wav(b"not a wav at all").is_empty());
+        assert!(read_wav(b"RIFF\x00\x00\x00\x00AVI \x00\x00").is_empty()); // RIFF, but not WAVE
+    }
+
+    #[test]
+    fn read_wav_tolerates_truncation_without_panicking() {
+        let list = build_wav_info_list(&[(b"INAM", "Truncate Me"), (b"IART", "Artist")]);
+        let wav = build_wav(Some(list));
+        for cut in 0..wav.len() {
+            let _ = read_wav(&wav[..cut]); // must never panic on any truncation
+        }
+        assert_eq!(get(&read_wav(&wav), "Title"), Some("Truncate Me"));
     }
 }

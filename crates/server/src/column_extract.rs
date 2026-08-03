@@ -16,7 +16,7 @@ use crate::file_type::{detect_type, mismatch};
 use crate::image_column::image_dimensions_cell;
 use crate::media_column::{audio_cell, AudioColumn};
 use crate::media_meta_edit::MetaField;
-use crate::media_meta_read::{read_flac, read_id3v2, read_ogg, read_pdf};
+use crate::media_meta_read::{read_flac, read_id3v2, read_ogg, read_pdf, read_wav};
 use crate::metadata_column::CellValue;
 use crate::native_tags::NativeTags;
 use crate::text_encoding::{detect_encoding, detect_line_endings, EncodingGuess, LineEnding};
@@ -24,8 +24,8 @@ use crate::video_column::video_cell;
 use crate::video_meta_read::read_mp4;
 use crate::video_tag_column::{video_tag_cell, VideoTagColumn};
 
-/// Audio file extensions the audio-tag extractors read (ID3v2/FLAC/OGG-Vorbis).
-const AUDIO_EXTS: &[&str] = &["mp3", "flac", "ogg", "oga"];
+/// Audio file extensions the audio-tag extractors read (ID3v2/FLAC/OGG-Vorbis/RIFF-INFO).
+const AUDIO_EXTS: &[&str] = &["mp3", "flac", "ogg", "oga", "wav"];
 /// Image extensions the pixel-dimensions header reader attempts.
 const IMAGE_EXTS: &[&str] = &["png", "jpg", "jpeg", "gif", "bmp", "webp", "tiff", "tif"];
 /// Document extensions the page-count / doc-info readers attempt (PDF only, v1).
@@ -169,12 +169,13 @@ impl MetaColumn {
 }
 
 /// Read a file's audio tags, choosing the codec by extension: `mp3` → ID3v2, `flac` → FLAC/Vorbis,
-/// `ogg`/`oga` → OGG/Vorbis. A non-audio (or unrecognised) extension yields no fields.
+/// `ogg`/`oga` → OGG/Vorbis, `wav` → RIFF/INFO. A non-audio (or unrecognised) extension yields no fields.
 pub fn read_audio_tags(ext: &str, bytes: &[u8]) -> Vec<MetaField> {
     match ext.to_ascii_lowercase().as_str() {
         "mp3" => read_id3v2(bytes),
         "flac" => read_flac(bytes),
         "ogg" | "oga" => read_ogg(bytes),
+        "wav" => read_wav(bytes),
         _ => Vec::new(),
     }
 }
