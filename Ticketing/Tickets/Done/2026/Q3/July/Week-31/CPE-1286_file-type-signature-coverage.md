@@ -4,7 +4,7 @@ title: "Extend file_type magic-byte signature coverage"
 type: feature
 component: cpe-server
 priority: low
-status: Doing
+status: Done
 tags: ready
 created: 2026-08-03
 epic: CPE-1000
@@ -36,3 +36,4 @@ Pure signature work — highest parallelism, zero shared surface with the other 
 CPE-1000 (true-type/mismatch columns already shipped; this widens coverage). Feeds CPE-1285's tree sweep.
 
 ## Work Log
+- 2026-08-03 — file_type +13 formats merged (#583). Reviewer APPROVE, all 13 signatures byte-verified vs specs, 50/50 file_type tests, clippy clean both modes. Only touched file_type.rs (clean merge).
