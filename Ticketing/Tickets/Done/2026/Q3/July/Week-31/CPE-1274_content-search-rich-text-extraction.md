@@ -4,7 +4,7 @@ title: "Content search: extract text from PDF + Office docs so they're indexed (
 type: feature
 component: cpe-server
 priority: medium
-status: Doing
+status: Done
 tags: ready
 created: 2026-08-03
 epic: CPE-976
@@ -45,3 +45,6 @@ bundled (CPE-1256), so PDF text is cheap.
 ## Notes
 Directly boosts the AI content search the user is about to enable (CPE-1273). Attended: none needed beyond the
 existing content-search verification (this is headless-testable with fixtures).
+
+## Work Log
+- 2026-08-03 — content_text_of dispatches PDF (thumb_pdf::extract_text via bundled pdfium) + docx/xlsx/pptx (existing zip dep + tag-strip); wired into index walk + snippet; 4M-char char-safe cap; no new dep (cargo tree identical); base feature-off byte-identical. 19 new tests; 1310 default / 1318 pdf-thumb pass. Reviewer APPROVE (char-boundary-safe by construction, never-panic, snippet-safe). Merged #572.
