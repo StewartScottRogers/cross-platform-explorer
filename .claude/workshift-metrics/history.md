@@ -728,3 +728,13 @@ them; history.md stopped at 07-31). Authoritative record is the checkpoint commi
 - **Regression pin:** two-sided frontend↔backend `THUMBNAIL_EXTRA_EXTS` parity guard (vitest + a Rust thumb_source
   test) + a gui-smoke pdf/video render spec — the CPE-1267 drift can never silently recur.
 - LESSON (process): merging via `--admin` during a CI outage defers, doesn't skip, verification — it all came due at once.
+
+### 2026-08-03 — "do all of them in order": 4-item user queue COMPLETE
+- User picked "do all 4 in order". Delivered sequentially, each gauntleted (worker + independent reviewer), all merged, main CI green:
+  1. CPE-1271 sidecar-bundle resource guard (#568) — CI test asserts every runtime-resolved resource (icon/pdfium/ffmpeg/sidecars) is in the merged shipped sidecar bundle per OS; proven non-hollow by deliberate-fail. Closes the "works in test, broken in shipped build" class that bit thumbnails (CPE-1267) + drag-out (CPE-1270).
+  2. CPE-674 archive extract-on-drag (#569) — Alt-drag a file OUT of an archive → extract_archive_entry_any → native drag.
+  3. CPE-713/CPE-1272 tray-resident (#570) — Tauri tray icon + quick-access folder menu + show/hide + close-to-tray toggle (default off); reviewer caught + fixed a stuck-hidden hazard (hide gated on tray presence).
+  4. CPE-976/CPE-1273 configurable real embedder (#571) — OpenAI-compatible HttpEmbedder (reused ureq, off-by-default feature) for content search; API key in OS keychain only; LM Studio (local, no key) or OpenAI; disabled path byte-identical.
+- Assessment during item 3: CPE-712 shell context-menu + CPE-716 sidebar drive listing ALREADY shipped; the invasive remainders (OS default-file-manager registration, drive eject/removable) deliberately NOT built blind — flagged as explicit user opt-in.
+- Shipped builds for attended verify: 0.57.43 (drag-out fix), 0.57.44 (tray + archive-drag). Item 4 needs a 0.57.45 build + the user's endpoint to try AI search.
+- LESSON reinforced + now guarded: the sidecar-overlay build drops base array-form bundle.resources — caught twice by hand, now caught automatically by the CPE-1271 guard.
