@@ -13,7 +13,8 @@
       "../sidecar/agent-board/target/release/agent-board.pristine": "sidecars/agent-board.pristine",
       "../sidecar/repos/target/release/repos.pristine": "sidecars/repos.pristine",
       "../native-deps/ffmpeg/unix/ffmpeg": "ffmpeg",
-      "../native-deps/ffmpeg/unix/LICENSE.txt": "licenses/ffmpeg-LICENSE.txt"
+      "../native-deps/ffmpeg/unix/LICENSE.txt": "licenses/ffmpeg-LICENSE.txt",
+      "icons/icon.png": "icons/icon.png"
     }
   }
 }
