@@ -72,6 +72,10 @@
   // Archive mode disables the hidden/search/type/tag filters (raw list, only sorted).
   export let smartOverride: DirEntry[] | null = null;
   export let archiveOverride: DirEntry[] | null = null;
+  /** Absolute path of the open archive when `archiveOverride` is active (CPE-673/674), else `null`.
+      Forwarded straight to `<FileList>` so an Alt-drag on an archive row can extract-then-drag-out; see
+      `FileList.svelte`'s `archivePath` prop doc for the flow. */
+  export let archivePath: string | null = null;
   // The base list the pipeline runs on, resolved from the plain listing + the active-view overrides.
   $: baseEntries = archiveOverride ?? smartOverride ?? entries;
   $: rawList = archiveOverride != null;
@@ -497,6 +501,7 @@
     {cutPaths}
     {renamingPath}
     canDrag={canDrag && !inReplay}
+    archivePath={!inReplay && archiveOverride != null ? archivePath : null}
     {renameValue}
     {columnWidths}
     activeMetaColumns={resolvedMetaColumns}

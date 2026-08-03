@@ -4753,6 +4753,7 @@
       bind:entries
       smartOverride={smartFolder ? smartEntries : structuredSearch ? structuredSearchEntries : null}
       archiveOverride={archive ? archiveChildren(archive) : null}
+      archivePath={archive ? archive.zipPath : null}
       {search}
       {fileFilter}
       {foldersFirst}
