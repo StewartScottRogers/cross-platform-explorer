@@ -197,6 +197,7 @@
   import { planBackup, type BackupJob } from "./lib/backup";
   import type { CompareNode } from "./lib/treeDiff";
   import { startDriveScheduler, stopDriveScheduler } from "./lib/driveScheduler";
+  import { startDriveWatch, stopDriveWatch, pokeDriveWatch } from "./lib/driveWatch";
   import AttributesDialog from "./lib/components/AttributesDialog.svelte";
   import {
     pushUndo, popUndo, canUndo, peekLabel, invert, deletedPaths, type UndoEntry,
@@ -1226,6 +1227,18 @@
     );
   }
 
+  /** Apply a freshly-enumerated drive list to the sidebar: reassign `drives`, drop usage/eject state for
+   *  drives that vanished, and (re)probe the current set. Shared by the eject refresh (CPE-1278) and the
+   *  live drive watcher (CPE-1280) — keeping the surviving drives' bars avoids a flicker on every change. */
+  function applyDriveList(d: Place[]) {
+    drives = d;
+    const present = new Set(d.map((x) => x.path));
+    driveUsage = Object.fromEntries(Object.entries(driveUsage).filter(([p]) => present.has(p)));
+    driveRemovable = Object.fromEntries(Object.entries(driveRemovable).filter(([p]) => present.has(p)));
+    loadDriveUsage(d); // fire-and-forget: (re)fill the sidebar usage bars (CPE-406)
+    loadDriveRemovable(d); // fire-and-forget: which drives get an eject button (CPE-1278)
+  }
+
   /** Safely eject a removable drive (CPE-1278). The backend refuses anything non-removable, so this can
    *  only ever act on a USB/removable volume. Toasts the outcome and refreshes the drive list so an
    *  ejected drive drops out of the sidebar. */
@@ -1238,12 +1251,7 @@
     }
     // Refresh drives + removable flags regardless: on success the drive is gone; on failure state is fresh.
     try {
-      const d = await commands.listDrives();
-      drives = d;
-      driveUsage = {};
-      driveRemovable = {};
-      loadDriveUsage(d);
-      loadDriveRemovable(d);
+      applyDriveList(await commands.listDrives());
     } catch {
       /* a refresh failure is cosmetic — the toast already told the user the real outcome */
     }
@@ -4554,6 +4562,12 @@
 
     // Drive-connect scheduler (CPE-797): starts polling only if a backup job opted into auto-run.
     reconcileDriveScheduler();
+
+    // Live removable-drive detection (CPE-1280): keep the sidebar Drives section in step with reality —
+    // a plugged-in USB appears, an unplugged one drops out — without relaunching. Always-on but cheap
+    // (fires only on a real drive-set change); poke it on focus for instant feedback after alt-tabbing.
+    startDriveWatch(applyDriveList);
+    window.addEventListener("focus", pokeDriveWatch);
   });
 
   onDestroy(() => {
@@ -4570,6 +4584,8 @@
     window.removeEventListener("focus", maybeAutoSync);
     window.removeEventListener("contextmenu", suppressNativeMenu); // CPE-1154
     stopDriveScheduler();
+    stopDriveWatch(); // CPE-1280: stop live drive polling
+    window.removeEventListener("focus", pokeDriveWatch); // CPE-1280
   });
 </script>
 
