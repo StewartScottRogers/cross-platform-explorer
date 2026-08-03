@@ -4,7 +4,7 @@ title: "EXIF write-back codec (JPEG/TIFF)"
 type: feature
 component: cpe-server
 priority: medium
-status: Doing
+status: Done
 tags: ready
 created: 2026-08-03
 epic: CPE-725
@@ -39,3 +39,4 @@ Format-risky (IFD offset rewriting) — flagged for careful review. Epic CPE-725
 `media_meta_write.rs` with CPE-1289 (OGG write) → sequence that after this.
 
 ## Work Log
+- 2026-08-03 — EXIF write-back merged (#587) after 1 rework. First review (opus) caught a BLOCKER: rebuilt EXIF from only 4 editable tags -> silently destroyed GPS/DateTime/Orientation/Make on edit (proven with probe). Fixed: re-emit all IFD0+Exif/GPS/Interop sub-IFD fields, override only editable, no dup; +regression test (Make+GPS+Orientation survive, fails-on-old) + UserComment round-trip. Re-review APPROVE (added own sub-IFD probe). JPEG marker-walk panic-safe. TIFF deferred. 1391 green. Gauntlet caught real data-loss pre-merge.
