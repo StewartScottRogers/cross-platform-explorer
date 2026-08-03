@@ -4,7 +4,7 @@ title: "Orphaned-sidecar scan"
 type: feature
 component: cpe-server
 priority: medium
-status: Doing
+status: Done
 tags: ready
 created: 2026-08-03
 epic: CPE-1002
@@ -34,3 +34,4 @@ gone (a `.srt`/`.xmp`/`.aae`/etc. with no matching media/primary file). Headless
 Template: `folder_similarity_scan.rs`. Epic CPE-1002. Command/UI separate.
 
 ## Work Log
+- 2026-08-03 — orphan_sidecars_scan adapter merged (#580). Per-directory grouping correct (cross-dir no-false-match test). Reviewer APPROVE, 18/18 re-run. Known minor non-blocking limits: (a) at the 50k ORPHAN_MAX_FILES cap the in-progress dir is not flushed before break (truncated=true signals it); (b) symlinked files skipped (DirEntry::metadata semantics). Both >50k-scale / doc-level; deferred.
