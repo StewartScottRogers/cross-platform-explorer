@@ -24,7 +24,8 @@ pub struct LinkEntry {
 }
 
 /// Why a link was classified as dangling.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[cfg_attr(feature = "specta", derive(specta::Type))]
 pub enum DanglingReason {
     /// The target does not exist and following the target chain does not loop.
     Missing,
@@ -34,7 +35,8 @@ pub enum DanglingReason {
 }
 
 /// One dangling link and why it was flagged.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[cfg_attr(feature = "specta", derive(specta::Type))]
 pub struct DanglingLink {
     pub path: String,
     pub reason: DanglingReason,
