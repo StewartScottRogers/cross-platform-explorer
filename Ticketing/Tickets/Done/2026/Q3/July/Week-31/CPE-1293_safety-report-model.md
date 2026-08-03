@@ -4,7 +4,7 @@ title: "Frontend File-Health safety-report model"
 type: feature
 component: frontend
 priority: medium
-status: Doing
+status: Done
 tags: ready
 created: 2026-08-03
 epic: CPE-1002
@@ -41,3 +41,4 @@ Headless frontend (vitest). The eventual "File Health" panel UI is a later atten
 Disjoint from all Rust work + all other frontend files.
 
 ## Work Log
+- 2026-08-03 — File-Health model merged (#589). Reviewer APPROVE, 10/10 vitest, npm check clean, real bindings field-access verified, severity high(mismatch/zipbomb)>med(dangling)>low(orphan)>info(empty) with deterministic ordinal sort. Non-blocking: archive finding path = in-archive entry name (documented follow-up), scanned not carried.
