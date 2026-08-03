@@ -4,7 +4,7 @@ title: "Set-as-default-file-manager: register CPE as a default-apps candidate + 
 type: feature
 component: cpe-server
 priority: medium
-status: Doing
+status: Done
 tags: ready
 created: 2026-08-03
 epic: CPE-712
@@ -41,3 +41,6 @@ it appears as a choice, and the USER confirms in Settings → Default apps. Buil
 ## Notes
 Attended verify: run set-default → confirm CPE appears + is selectable in Windows Settings → Default apps → then
 unset and confirm clean removal. Part of the CPE-712 epic (context menu already done).
+
+## Work Log
+- 2026-08-03 — HKCU registrations (RegisteredApplications pointer + Capabilities + Directory ProgID) so CPE is SELECTABLE in Windows Default apps; set_default_file_manager opens ms-settings:defaultapps (never force-sets — test asserts no UserChoice); fully reversible (unset removes subtrees + drops only CPE's RegisteredApplications value, siblings survive — test-enforced); registry tests use isolated scratch key. cpe-server 1342, src-tauri 109, vitest 1928, no new dep, bindings zero-diff. Reviewer APPROVE. Merged #576.
