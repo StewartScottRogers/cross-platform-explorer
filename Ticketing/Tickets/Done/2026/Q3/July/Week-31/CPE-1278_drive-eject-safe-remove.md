@@ -4,7 +4,7 @@ title: "Drive eject / safe-remove for removable drives"
 type: feature
 component: cpe-server
 priority: medium
-status: Doing
+status: Done
 tags: ready
 created: 2026-08-03
 epic: CPE-716
@@ -37,3 +37,6 @@ eject affordance. Safety-critical: never eject the system/fixed drive; report in
 ## Notes
 Attended verify: plug in a USB, eject it from the sidebar, confirm Windows reports it safe to remove; confirm the
 system drive shows no eject control + can't be ejected. Part of the CPE-716 drive-bay epic (listing already shipped).
+
+## Work Log
+- 2026-08-03 — Removable-drive eject/safe-remove: drive_ejectable query + eject_drive (Windows lock→dismount→eject via DeviceIoControl, unlock/close on all paths, in-use error, never panics). Safety: eject_guard default-deny (removable-only), guard-before-syscall via `?` (no bypass path), 5 hardware-free tests incl. refuses-fixed-never-calls-syscall + refuses-system-drive. UI eject affordance on removable rows + context menu, toast. Reused windows crate (3 features, no new dep). cargo test 114, vitest 1928, bindings zero-drift. Security reviewer APPROVE. Merged #577. NOTE (cosmetic, follow-up): the eject glyph renders as an outline, not the solid eject symbol — worth a polish.
