@@ -4,7 +4,7 @@ title: "Streaming variant for the dangling-symlinks sweep"
 type: feature
 component: cpe-server
 priority: medium
-status: Doing
+status: Done
 tags: ready
 created: 2026-08-03
 epic: CPE-1002
@@ -35,3 +35,4 @@ incrementally. Headless; command wiring is CPE-1299.
 Template: `listing.rs`. Epic CPE-1002; command wiring CPE-1299. Independent of CPE-1294/1296.
 
 ## Work Log
+- 2026-08-03 — dangling-links streaming walker merged (#594). Reviewer APPROVE + validated the design: is_cyclic follows the chain through the full by_path map, so per-directory incremental flush WOULD misclassify a cross-dir cycle (concrete example) — walk-to-completion-then-batch(256) is required for correctness, not a missed optimization. Parity structurally guaranteed, loop-safe normalize preserved, 12/12 re-run (unix tests on CI legs), clippy clean.
