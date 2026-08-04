@@ -1271,6 +1271,402 @@ fn pdf_obj_num_before(bytes: &[u8], space_before_obj: usize) -> Option<u32> {
     std::str::from_utf8(&bytes[i..num_end]).ok()?.parse().ok()
 }
 
+// ---- IPTC (JPEG APP13 / 8BIM IRB) + XMP (JPEG APP1 xap) write-back (CPE-1305) ----
+
+/// The Photoshop image-resource signature that opens a JPEG APP13 payload, and the IPTC-IIM resource id
+/// within it. Re-declared locally (same reasoning as this module's other codecs' helpers — they mirror
+/// [`crate::media_meta_read`]'s private constants to avoid widening that module's visibility).
+const PHOTOSHOP_SIG: &[u8] = b"Photoshop 3.0\0";
+const IPTC_RESOURCE_ID: u16 = 0x0404;
+/// The Adobe XMP signature that opens a JPEG APP1 segment carrying an embedded XMP packet (as opposed to
+/// the far more common `Exif\0\0` APP1). Mirrors [`crate::media_meta_read`]'s `XMP_APP1_SIG`.
+const XMP_APP1_SIG: &[u8] = b"http://ns.adobe.com/xap/1.0/\0";
+
+/// One parsed JPEG header marker segment: its marker byte plus the segment's *complete* raw bytes
+/// (`0xFF`, marker, 2-byte big-endian length, payload) sliced from the original buffer. Only length-prefixed
+/// header segments (APPn, DQT, DHT, SOFn, COM, …) are modelled — the entropy-coded scan (from SOS onward) is
+/// kept verbatim as the "tail" by [`split_jpeg`].
+struct JpegSegment<'a> {
+    marker: u8,
+    bytes: &'a [u8],
+}
+
+impl JpegSegment<'_> {
+    /// The segment's payload — everything after the `0xFF`, marker, and 2-byte length (i.e. `bytes[4..]`).
+    fn payload(&self) -> &[u8] {
+        self.bytes.get(4..).unwrap_or(&[])
+    }
+}
+
+/// Split a JPEG into its header segments and the byte offset where the scan tail begins. `orig[0..2]` is the
+/// SOI; the returned segments are every length-prefixed header segment in order; `orig[tail_start..]` is the
+/// SOS marker and everything after it (entropy-coded scan + trailing markers + EOI), copied byte-for-byte by
+/// the writers. This is the same marker-stream walk [`write_exif`] performs inline and that
+/// [`crate::media_meta_read::read_iptc`]/`read_xmp` walk on the read side — factored out here so `write_iptc`
+/// and `write_xmp` share one JPEG parser rather than each hand-rolling another. Bounds-checked throughout:
+/// truncated/desynced input stops the header scan and treats the remainder as tail (skip-on-error, matching
+/// the surrounding style) rather than panicking. `Err` only for a non-JPEG input or a segment whose declared
+/// length is `< 2` (structurally impossible — a length field counts itself).
+fn split_jpeg(orig: &[u8]) -> Result<(Vec<JpegSegment<'_>>, usize), String> {
+    if orig.len() < 2 || orig[0] != 0xFF || orig[1] != 0xD8 {
+        return Err("not a JPEG (missing SOI marker)".into());
+    }
+    let mut segs = Vec::new();
+    let mut pos = 2usize;
+    loop {
+        if pos + 1 >= orig.len() || orig[pos] != 0xFF {
+            return Ok((segs, pos)); // no more markers (or desynced) — treat the rest as tail
+        }
+        // A run of 0xFF fill bytes may precede the real marker byte; skip them.
+        let mut marker_pos = pos + 1;
+        while orig.get(marker_pos) == Some(&0xFF) {
+            marker_pos += 1;
+        }
+        let Some(&marker) = orig.get(marker_pos) else { return Ok((segs, pos)) };
+        // SOS begins the entropy-coded scan (no more length-prefixed header segments); standalone markers
+        // (TEM/RSTn/SOI/EOI) don't legally appear in the header before SOS — either way, stop here and let
+        // the caller copy from `pos` onward verbatim.
+        if marker == 0xDA || marker == 0x01 || (0xD0..=0xD9).contains(&marker) {
+            return Ok((segs, pos));
+        }
+        let Some(len_bytes) = orig.get(marker_pos + 1..marker_pos + 3) else { return Ok((segs, pos)) };
+        let seg_len = u16::from_be_bytes([len_bytes[0], len_bytes[1]]) as usize; // includes these 2 bytes
+        if seg_len < 2 {
+            return Err("malformed JPEG (segment length < 2)".into());
+        }
+        let seg_start = marker_pos - 1; // the 0xFF byte introducing this marker
+        let seg_end = marker_pos + 1 + seg_len; // length field starts at marker_pos+1 and counts itself
+        if seg_end > orig.len() {
+            return Ok((segs, pos)); // segment runs past EOF — treat the rest as tail
+        }
+        segs.push(JpegSegment { marker, bytes: &orig[seg_start..seg_end] });
+        pos = seg_end;
+    }
+}
+
+/// Build a complete JPEG marker segment (`0xFF`, `marker`, 2-byte big-endian length, `payload`). The length
+/// field covers itself plus the payload, so a payload above `0xFFFF - 2` bytes can't fit a single segment
+/// and yields `Err` (matching [`write_exif`]'s 64 KiB APP1 guard — XMP/IPTC of that size would need the
+/// multi-segment ExtendedXMP / paged-IRB forms, out of scope for these text fields).
+fn build_jpeg_segment(marker: u8, payload: &[u8]) -> Result<Vec<u8>, String> {
+    let seg_len = payload.len() + 2;
+    if seg_len > 0xFFFF {
+        return Err("metadata too large for a single JPEG marker segment (64 KiB limit)".into());
+    }
+    let mut s = Vec::with_capacity(4 + payload.len());
+    s.push(0xFF);
+    s.push(marker);
+    s.extend_from_slice(&(seg_len as u16).to_be_bytes());
+    s.extend_from_slice(payload);
+    Ok(s)
+}
+
+/// Rebuild a JPEG from its parsed header segments, inserting `new_seg` and dropping any segment for which
+/// `is_stale` is true (replace-not-stack). The new segment is placed right after the SOI and any leading
+/// APP0 (JFIF) segment — the conventional header position, matching where [`write_exif`] inserts its Exif
+/// APP1 — and every other segment plus the scan tail (`orig[tail_start..]`) is preserved byte-for-byte.
+fn splice_jpeg_header(orig: &[u8], segs: &[JpegSegment], tail_start: usize, new_seg: &[u8], is_stale: impl Fn(&JpegSegment) -> bool) -> Vec<u8> {
+    let mut out = Vec::with_capacity(orig.len() + new_seg.len());
+    out.extend_from_slice(&orig[0..2]); // SOI
+    let mut inserted = false;
+    for seg in segs {
+        if is_stale(seg) {
+            continue; // drop the segment we're replacing
+        }
+        // Keep any leading APP0 ahead of the new segment; insert at the first non-APP0 header segment.
+        if !inserted && seg.marker != 0xE0 {
+            out.extend_from_slice(new_seg);
+            inserted = true;
+        }
+        out.extend_from_slice(seg.bytes);
+    }
+    if !inserted {
+        out.extend_from_slice(new_seg); // no non-APP0 header segment (or no segments at all) — append it
+    }
+    out.extend_from_slice(&orig[tail_start..]); // SOS + scan data + EOI, verbatim
+    out
+}
+
+/// Rebuild a JPEG **dropping** every header segment for which `is_stale` is true and inserting nothing —
+/// every other segment plus the scan tail (`orig[tail_start..]`) is preserved byte-for-byte. Used when a
+/// metadata group is edited down to empty (its last field cleared): its segment is *removed* rather than
+/// rewritten as an empty one, so the cleared value can't persist on reopen.
+fn strip_jpeg_segment(orig: &[u8], segs: &[JpegSegment], tail_start: usize, is_stale: impl Fn(&JpegSegment) -> bool) -> Vec<u8> {
+    let mut out = Vec::with_capacity(orig.len());
+    out.extend_from_slice(&orig[0..2]); // SOI
+    for seg in segs {
+        if is_stale(seg) {
+            continue; // drop the segment being removed
+        }
+        out.extend_from_slice(seg.bytes);
+    }
+    out.extend_from_slice(&orig[tail_start..]); // SOS + scan data + EOI, verbatim
+    out
+}
+
+/// Map a friendly IPTC key (as produced by [`crate::media_meta_read`]'s `iim_friendly_key`) back to its
+/// IIM Application-Record (record 2) dataset number. The inverse of that private mapping. A friendly key
+/// outside the known set is skipped — there's no raw-id passthrough on the read side to invert.
+fn iim_dataset_for_key(key: &str) -> Option<u8> {
+    Some(match key {
+        "Caption/Abstract" => 120,
+        "Keywords" => 25,
+        "By-line" => 80,
+        "Headline" => 105,
+        "Copyright Notice" => 116,
+        "City" => 90,
+        "Country/Primary Location Name" => 101,
+        _ => return None,
+    })
+}
+
+/// Append one IIM dataset to `out`: `0x1C`, record, dataset, 2-byte big-endian length, value. Values are
+/// clamped to the standard (non-extended) 0x7FFF length form — these are short text fields in practice, and
+/// the reader ([`crate::media_meta_read`]'s `parse_iim_datasets`) doesn't decode the extended-length form.
+fn push_iim_dataset(out: &mut Vec<u8>, record: u8, dataset: u8, value: &[u8]) {
+    let len = value.len().min(0x7FFF);
+    out.push(0x1C);
+    out.push(record);
+    out.push(dataset);
+    out.extend_from_slice(&(len as u16).to_be_bytes());
+    out.extend_from_slice(&value[..len]);
+}
+
+/// Build a raw IPTC-IIM data block from the `group == "iptc"` fields in `fields` — the inverse of
+/// [`crate::media_meta_read`]'s `parse_iim_datasets`. Each recognised, non-blank field becomes a record-2
+/// dataset; the repeatable Keywords field (which the reader joins with `"; "`) is split back into one 2:25
+/// dataset per keyword. Unrecognised friendly keys, other groups, and blank values are skipped (mirrors
+/// [`build_frames`]'s handling of the `"id3"` group).
+fn build_iim_datasets(fields: &[MetaField]) -> Vec<u8> {
+    let mut out = Vec::new();
+    for f in fields {
+        if !f.group.eq_ignore_ascii_case("iptc") || f.value.is_empty() {
+            continue;
+        }
+        let Some(dataset) = iim_dataset_for_key(&f.key) else { continue };
+        if dataset == 25 {
+            for kw in f.value.split("; ") {
+                let kw = kw.trim();
+                if !kw.is_empty() {
+                    push_iim_dataset(&mut out, 2, 25, kw.as_bytes());
+                }
+            }
+        } else {
+            push_iim_dataset(&mut out, 2, dataset, f.value.as_bytes());
+        }
+    }
+    out
+}
+
+/// Serialize an `8BIM` image-resource block: 4-byte `8BIM` signature, 2-byte big-endian resource id, an
+/// empty Pascal-string name (`0x00`) padded to an even length (a second `0x00`), a 4-byte big-endian data
+/// size, then the data padded to an even length. Mirrors what [`crate::media_meta_read`]'s
+/// `parse_photoshop_8bim` walks.
+fn build_8bim_block(resource_id: u16, data: &[u8]) -> Vec<u8> {
+    let mut b = Vec::with_capacity(12 + data.len() + 1);
+    b.extend_from_slice(b"8BIM");
+    b.extend_from_slice(&resource_id.to_be_bytes());
+    b.extend_from_slice(&[0u8, 0u8]); // empty Pascal-string name, padded to an even length
+    b.extend_from_slice(&(data.len() as u32).to_be_bytes());
+    b.extend_from_slice(data);
+    if data.len() % 2 != 0 {
+        b.push(0); // pad the data to an even length (Photoshop IRB convention)
+    }
+    b
+}
+
+/// Collect every `8BIM` resource block in a Photoshop APP13 `payload` EXCEPT the IPTC-IIM one (id `0x0404`),
+/// as owned bytes, so a rewrite carries other resources (resolution info, colour transfer, …) through rather
+/// than dropping them. `payload` is the APP13 content *after* the `Photoshop 3.0\0` signature. On any
+/// malformed block framing the walk stops with whatever it gathered (skip-on-error, mirroring the reader's
+/// `parse_photoshop_8bim`) — never panics.
+fn other_8bim_blocks(payload: &[u8]) -> Vec<u8> {
+    let mut kept = Vec::new();
+    let mut pos = 0usize;
+    while let Some(sig) = payload.get(pos..pos + 4) {
+        if sig != b"8BIM" {
+            break;
+        }
+        let block_start = pos;
+        pos += 4;
+        let Some(id_bytes) = payload.get(pos..pos + 2) else { break };
+        let resource_id = u16::from_be_bytes([id_bytes[0], id_bytes[1]]);
+        pos += 2;
+        let Some(&name_len) = payload.get(pos) else { break };
+        let name_total = 1 + name_len as usize;
+        let name_padded = if name_total % 2 == 0 { name_total } else { name_total + 1 };
+        let Some(after_name) = pos.checked_add(name_padded) else { break };
+        if after_name > payload.len() {
+            break;
+        }
+        pos = after_name;
+        let Some(size_bytes) = payload.get(pos..pos + 4) else { break };
+        let data_size = u32::from_be_bytes([size_bytes[0], size_bytes[1], size_bytes[2], size_bytes[3]]) as usize;
+        pos += 4;
+        let data_padded = if data_size % 2 == 0 { data_size } else { data_size + 1 };
+        let Some(block_end) = pos.checked_add(data_padded) else { break };
+        if block_end > payload.len() {
+            break;
+        }
+        if resource_id != IPTC_RESOURCE_ID {
+            kept.extend_from_slice(&payload[block_start..block_end]);
+        }
+        pos = block_end;
+    }
+    kept
+}
+
+/// Rebuild a JPEG (`orig`) with the editable IPTC-IIM fields from the `group == "iptc"` fields in `fields`
+/// written into a JPEG APP13 Photoshop 8BIM IRB — inserting the APP13 segment if absent and **replacing** the
+/// IPTC-IIM resource (id `0x0404`) if present, while preserving every other segment (a leading EXIF/XMP APP1,
+/// APP0 JFIF, quantisation/Huffman tables, …), any *other* 8BIM resources inside an existing APP13, and the
+/// entropy-coded scan data byte-for-byte. Round-trips through [`crate::media_meta_read::read_iptc`].
+///
+/// When `fields` carries **no** IPTC values (the group was edited down to empty — its last field cleared),
+/// the IPTC-IIM resource is *removed* rather than rewritten empty: if no other 8BIM resource remains, the
+/// whole APP13 segment is dropped; otherwise the APP13 is rewritten carrying just the other resources. This
+/// is what lets a "clear the last caption" edit actually take effect on reopen. `Err` (never panics) for
+/// non-JPEG/truncated input or an IPTC block too large for a single APP13 segment.
+pub fn write_iptc(orig: &[u8], fields: &[MetaField]) -> Result<Vec<u8>, String> {
+    let (segs, tail_start) = split_jpeg(orig)?;
+
+    // Carry through any non-IPTC 8BIM resources from an existing APP13 Photoshop segment.
+    let mut kept_blocks = Vec::new();
+    for seg in &segs {
+        if seg.marker == 0xED {
+            if let Some(rest) = seg.payload().strip_prefix(PHOTOSHOP_SIG) {
+                kept_blocks = other_8bim_blocks(rest);
+                break;
+            }
+        }
+    }
+
+    let iim = build_iim_datasets(fields);
+    let is_iptc_app13 = |s: &JpegSegment| s.marker == 0xED && s.payload().starts_with(PHOTOSHOP_SIG);
+
+    // The IPTC group was edited to empty: strip its resource so the stale value doesn't persist.
+    if iim.is_empty() {
+        if kept_blocks.is_empty() {
+            // Nothing else in the APP13 — remove the whole segment.
+            return Ok(strip_jpeg_segment(orig, &segs, tail_start, is_iptc_app13));
+        }
+        // Other 8BIM resources remain — rewrite APP13 with just those, dropping the IPTC resource.
+        let mut app13_payload = PHOTOSHOP_SIG.to_vec();
+        app13_payload.extend_from_slice(&kept_blocks);
+        let new_seg = build_jpeg_segment(0xED, &app13_payload)?;
+        return Ok(splice_jpeg_header(orig, &segs, tail_start, &new_seg, is_iptc_app13));
+    }
+
+    let iptc_block = build_8bim_block(IPTC_RESOURCE_ID, &iim);
+    let mut app13_payload = PHOTOSHOP_SIG.to_vec();
+    app13_payload.extend_from_slice(&kept_blocks);
+    app13_payload.extend_from_slice(&iptc_block);
+    let new_seg = build_jpeg_segment(0xED, &app13_payload)?;
+
+    Ok(splice_jpeg_header(orig, &segs, tail_start, &new_seg, is_iptc_app13))
+}
+
+/// XML-escape the three characters that must not appear literally in element text (`&`, `<`, `>`) so the
+/// value round-trips through [`crate::media_meta_read`]'s `decode_xml_entities`. Element text (not attribute
+/// text) is emitted, so quotes need no escaping.
+fn xml_escape(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars() {
+        match c {
+            '&' => out.push_str("&amp;"),
+            '<' => out.push_str("&lt;"),
+            '>' => out.push_str("&gt;"),
+            _ => out.push(c),
+        }
+    }
+    out
+}
+
+/// Build a fresh, standard XMP packet carrying the editable `group == "xmp"` fields in `fields`, shaped so
+/// [`crate::media_meta_read::read_xmp`] reads every one back: Title/Description as language-alternative
+/// `rdf:Alt`, Creator/Keywords as `rdf:Seq`/`rdf:Bag` list items (the reader joins list items with `"; "`,
+/// so a `"; "`-joined value is split back into one `rdf:li` per item), Headline/Create Date as simple
+/// elements. Only the six properties the reader surfaces are written (the studio only ever edits those);
+/// blank/absent fields are omitted. Values are XML-escaped so `& < >` round-trip.
+///
+/// Returns an **empty string** when no XMP property is present (every field blank/absent) — [`write_xmp`]
+/// treats that as "the XMP group was edited down to empty" and removes the XMP APP1 segment entirely
+/// rather than emitting a props-less packet.
+fn build_xmp_props(fields: &[MetaField]) -> String {
+    let get = |key: &str| -> Option<&str> {
+        fields.iter().find(|f| f.group.eq_ignore_ascii_case("xmp") && f.key == key && !f.value.is_empty()).map(|f| f.value.as_str())
+    };
+    let li_items = |value: &str| -> String {
+        value.split("; ").map(str::trim).filter(|s| !s.is_empty()).map(|s| format!("<rdf:li>{}</rdf:li>", xml_escape(s))).collect()
+    };
+
+    let mut props = String::new();
+    if let Some(v) = get("Title") {
+        props.push_str(&format!("   <dc:title><rdf:Alt><rdf:li xml:lang=\"x-default\">{}</rdf:li></rdf:Alt></dc:title>\n", xml_escape(v)));
+    }
+    if let Some(v) = get("Creator") {
+        props.push_str(&format!("   <dc:creator><rdf:Seq>{}</rdf:Seq></dc:creator>\n", li_items(v)));
+    }
+    if let Some(v) = get("Keywords") {
+        props.push_str(&format!("   <dc:subject><rdf:Bag>{}</rdf:Bag></dc:subject>\n", li_items(v)));
+    }
+    if let Some(v) = get("Description") {
+        props.push_str(&format!("   <dc:description><rdf:Alt><rdf:li xml:lang=\"x-default\">{}</rdf:li></rdf:Alt></dc:description>\n", xml_escape(v)));
+    }
+    if let Some(v) = get("Headline") {
+        props.push_str(&format!("   <photoshop:Headline>{}</photoshop:Headline>\n", xml_escape(v)));
+    }
+    if let Some(v) = get("Create Date") {
+        props.push_str(&format!("   <xmp:CreateDate>{}</xmp:CreateDate>\n", xml_escape(v)));
+    }
+    props
+}
+
+/// Wrap [`build_xmp_props`]'s properties in the standard `x:xmpmeta` / `rdf:RDF` XMP packet envelope. The
+/// caller ([`write_xmp`]) only reaches this when at least one property is present.
+fn build_xmp_packet(fields: &[MetaField]) -> Vec<u8> {
+    let props = build_xmp_props(fields);
+
+    let packet = format!(
+        "<?xpacket begin=\"\u{feff}\" id=\"W5M0MpCehiHzreSzNTczkc9d\"?>\n\
+<x:xmpmeta xmlns:x=\"adobe:ns:meta/\">\n\
+ <rdf:RDF xmlns:rdf=\"http://www.w3.org/1999/02/22-rdf-syntax-ns#\">\n\
+  <rdf:Description rdf:about=\"\" xmlns:dc=\"http://purl.org/dc/elements/1.1/\" xmlns:xmp=\"http://ns.adobe.com/xap/1.0/\" xmlns:photoshop=\"http://ns.adobe.com/photoshop/1.0/\">\n\
+{props}  </rdf:Description>\n\
+ </rdf:RDF>\n\
+</x:xmpmeta>\n\
+<?xpacket end=\"w\"?>"
+    );
+    packet.into_bytes()
+}
+
+/// Rebuild a JPEG (`orig`) with an XMP packet built from the `group == "xmp"` fields in `fields` written into
+/// a JPEG APP1 `http://ns.adobe.com/xap/1.0/` segment — inserting the segment if absent and **replacing** an
+/// existing XMP APP1 if present, while preserving every other segment (the EXIF `Exif\0\0` APP1, an APP13
+/// IPTC IRB, tables, …) and the scan data byte-for-byte. Round-trips through
+/// [`crate::media_meta_read::read_xmp`]. Only the six properties the reader surfaces are (re)written; a
+/// pre-existing XMP packet's other properties are not carried (out of scope, as `write_exif` drops the EXIF
+/// thumbnail).
+///
+/// When `fields` carries **no** XMP property (the group was edited down to empty — its last field cleared),
+/// the XMP APP1 segment is *removed* rather than rewritten as a props-less packet, so the cleared value
+/// doesn't persist on reopen. `Err` (never panics) for non-JPEG/truncated input or a packet too large for
+/// one APP1 segment.
+pub fn write_xmp(orig: &[u8], fields: &[MetaField]) -> Result<Vec<u8>, String> {
+    let (segs, tail_start) = split_jpeg(orig)?;
+    let is_xmp_app1 = |s: &JpegSegment| s.marker == 0xE1 && s.payload().starts_with(XMP_APP1_SIG);
+
+    // The XMP group was edited to empty: strip the XMP APP1 so the stale value doesn't persist.
+    if build_xmp_props(fields).is_empty() {
+        return Ok(strip_jpeg_segment(orig, &segs, tail_start, is_xmp_app1));
+    }
+
+    let mut app1_payload = XMP_APP1_SIG.to_vec();
+    app1_payload.extend_from_slice(&build_xmp_packet(fields));
+    let new_seg = build_jpeg_segment(0xE1, &app1_payload)?;
+    Ok(splice_jpeg_header(orig, &segs, tail_start, &new_seg, is_xmp_app1))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2467,5 +2863,147 @@ mod tests {
         let read_back = read_pdf(&out);
         assert_eq!(get(&read_back, "Title"), Some("After"));
         assert_eq!(get(&read_back, "Creator"), Some("Studio")); // read-only field carried through
+    }
+
+    // ---- IPTC + XMP JPEG write-back (CPE-1305) ----
+
+    /// A single JPEG marker segment: `0xFF`, marker, 2-byte big-endian length (incl. itself), payload.
+    fn jseg(marker: u8, payload: &[u8]) -> Vec<u8> {
+        let mut s = vec![0xFF, marker];
+        s.extend_from_slice(&((payload.len() + 2) as u16).to_be_bytes());
+        s.extend_from_slice(payload);
+        s
+    }
+
+    /// Build a minimal JPEG (SOI + the given header segments + a trivial SOS + fake entropy bytes + EOI) and
+    /// return `(jpeg, scan_tail)` — `scan_tail` is the SOS-onward suffix a writer must preserve verbatim.
+    fn jpeg_with(segments: &[Vec<u8>]) -> (Vec<u8>, Vec<u8>) {
+        let mut j = vec![0xFF, 0xD8]; // SOI
+        for s in segments {
+            j.extend_from_slice(s);
+        }
+        let mut tail = Vec::new();
+        tail.extend_from_slice(&jseg(0xDA, &[])); // trivial SOS
+        tail.extend_from_slice(&[0x11, 0x22, 0x33]); // fake entropy-coded data
+        tail.extend_from_slice(&[0xFF, 0xD9]); // EOI
+        j.extend_from_slice(&tail);
+        (j, tail)
+    }
+
+    fn mfield(group: &str, key: &str, value: &str) -> MetaField {
+        MetaField { group: group.to_string(), key: key.to_string(), value: value.to_string(), editable: true }
+    }
+
+    #[test]
+    fn write_iptc_round_trips_and_preserves_exif_and_image() {
+        use crate::media_meta_read::read_iptc;
+        let exif_app1 = b"Exif\0\0INTRINSIC-EXIF-BYTES".to_vec();
+        let (seed, tail) = jpeg_with(&[jseg(0xE1, &exif_app1)]);
+        let fields = vec![
+            mfield("iptc", "Caption/Abstract", "Sunset over the bay"),
+            mfield("iptc", "Keywords", "sunset; ocean; sky"),
+            mfield("iptc", "By-line", "Jane Doe"),
+            mfield("iptc", "City", "Lisbon"),
+        ];
+        let out = write_iptc(&seed, &fields).unwrap();
+
+        let back = read_iptc(&out);
+        assert_eq!(get(&back, "Caption/Abstract"), Some("Sunset over the bay"));
+        assert_eq!(get(&back, "Keywords"), Some("sunset; ocean; sky")); // repeated 2:25 rejoined by reader
+        assert_eq!(get(&back, "By-line"), Some("Jane Doe"));
+        assert_eq!(get(&back, "City"), Some("Lisbon"));
+        // The pre-existing EXIF APP1 survives byte-for-byte, and so does the entropy-coded scan tail.
+        assert!(out.windows(exif_app1.len()).any(|w| w == exif_app1.as_slice()), "EXIF APP1 must survive");
+        assert!(out.ends_with(&tail), "image scan data must be preserved verbatim");
+    }
+
+    #[test]
+    fn write_iptc_replaces_existing_app13_and_keeps_other_8bim_resources() {
+        use crate::media_meta_read::read_iptc;
+        // Seed an APP13 that already carries a non-IPTC 8BIM (resolution-info id 0x03ED, odd length → the
+        // padding path) plus an old IPTC block that must be replaced.
+        let res_block = build_8bim_block(0x03ED, &[0xDE, 0xAD, 0xBE]);
+        let mut app13 = PHOTOSHOP_SIG.to_vec();
+        app13.extend_from_slice(&res_block);
+        app13.extend_from_slice(&build_8bim_block(IPTC_RESOURCE_ID, &build_iim_datasets(&[mfield("iptc", "Headline", "Old Headline")])));
+        let (seed, _tail) = jpeg_with(&[jseg(0xED, &app13)]);
+
+        let out = write_iptc(&seed, &[mfield("iptc", "Headline", "New Headline")]).unwrap();
+        assert_eq!(get(&read_iptc(&out), "Headline"), Some("New Headline"));
+        // The unrelated resolution 8BIM's distinctive payload is carried through, not dropped.
+        assert!(out.windows(3).any(|w| w == [0xDE, 0xAD, 0xBE]), "non-IPTC 8BIM resource must be preserved");
+        // Exactly one APP13 Photoshop segment — the old one was replaced, not stacked.
+        let n = out.windows(PHOTOSHOP_SIG.len()).filter(|w| *w == PHOTOSHOP_SIG).count();
+        assert_eq!(n, 1, "APP13 must be replaced, not stacked");
+    }
+
+    #[test]
+    fn write_xmp_round_trips_and_preserves_exif_and_image() {
+        use crate::media_meta_read::read_xmp;
+        let exif_app1 = b"Exif\0\0INTRINSIC-EXIF".to_vec();
+        let (seed, tail) = jpeg_with(&[jseg(0xE1, &exif_app1)]);
+        let fields = vec![
+            mfield("xmp", "Title", "A New Title"),
+            mfield("xmp", "Creator", "Ann Lee; Bob Ray"),
+            mfield("xmp", "Keywords", "sky; sea"),
+            mfield("xmp", "Description", "Caption with & < > entities"),
+            mfield("xmp", "Headline", "Breaking"),
+            mfield("xmp", "Create Date", "2026-08-03T10:20:30"),
+        ];
+        let out = write_xmp(&seed, &fields).unwrap();
+
+        let back = read_xmp(&out);
+        assert_eq!(get(&back, "Title"), Some("A New Title"));
+        assert_eq!(get(&back, "Creator"), Some("Ann Lee; Bob Ray")); // rdf:Seq items rejoined by reader
+        assert_eq!(get(&back, "Keywords"), Some("sky; sea")); // rdf:Bag items rejoined by reader
+        assert_eq!(get(&back, "Description"), Some("Caption with & < > entities")); // XML entities round-trip
+        assert_eq!(get(&back, "Headline"), Some("Breaking"));
+        assert_eq!(get(&back, "Create Date"), Some("2026-08-03T10:20:30"));
+        assert!(out.windows(exif_app1.len()).any(|w| w == exif_app1.as_slice()), "EXIF APP1 must survive");
+        assert!(out.ends_with(&tail), "image scan data must be preserved verbatim");
+    }
+
+    #[test]
+    fn write_xmp_replaces_existing_packet_not_stack() {
+        use crate::media_meta_read::read_xmp;
+        let (seed, _t) = jpeg_with(&[]);
+        let first = write_xmp(&seed, &[mfield("xmp", "Title", "First")]).unwrap();
+        let second = write_xmp(&first, &[mfield("xmp", "Title", "Second")]).unwrap();
+        assert_eq!(get(&read_xmp(&second), "Title"), Some("Second"));
+        let n = second.windows(XMP_APP1_SIG.len()).filter(|w| *w == XMP_APP1_SIG).count();
+        assert_eq!(n, 1, "XMP APP1 must be replaced, not stacked");
+    }
+
+    #[test]
+    fn write_iptc_and_write_xmp_err_on_non_jpeg_without_panicking() {
+        assert!(write_iptc(b"not a jpeg at all", &[mfield("iptc", "City", "x")]).is_err());
+        assert!(write_xmp(b"not a jpeg at all", &[mfield("xmp", "Title", "x")]).is_err());
+        // Truncations of a well-formed fixture must never panic (Err or Ok, just no crash).
+        let (jpeg, _t) = jpeg_with(&[jseg(0xE1, b"Exif\0\0x")]);
+        for cut in 0..jpeg.len() {
+            let _ = write_iptc(&jpeg[..cut], &[mfield("iptc", "City", "x")]);
+            let _ = write_xmp(&jpeg[..cut], &[mfield("xmp", "Title", "x")]);
+        }
+    }
+
+    #[test]
+    fn write_back_persists_iptc_and_xmp_edits_for_jpeg_preserving_exif() {
+        use crate::media_meta::{read_all, write_back};
+        use crate::media_meta_edit::MetaEdit;
+        // A JPEG that already carries real EXIF (Artist), written via the EXIF codec — the jpg write chain
+        // must preserve it while persisting an IPTC caption edit and an XMP title edit.
+        let (seed, _t) = jpeg_with(&[]);
+        let with_exif = write_exif(&seed, &[mfield("exif", "Artist", "Cam")]).unwrap();
+
+        let edits = vec![
+            MetaEdit::Set { group: "iptc".into(), key: "Caption/Abstract".into(), value: "A caption".into() },
+            MetaEdit::Set { group: "xmp".into(), key: "Title".into(), value: "An XMP title".into() },
+        ];
+        let out = write_back("jpg", &with_exif, &edits).expect("jpg is writable via write_back");
+
+        let all = read_all("jpg", &out);
+        assert_eq!(get(&all, "Caption/Abstract"), Some("A caption")); // IPTC edit persisted
+        assert_eq!(get(&all, "Title"), Some("An XMP title")); // XMP edit persisted
+        assert_eq!(get(&all, "Artist"), Some("\"Cam\"")); // EXIF preserved (reader quotes ASCII)
     }
 }

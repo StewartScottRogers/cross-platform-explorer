@@ -14,7 +14,7 @@
 
 use crate::media_meta_edit::{apply_edits, MetaEdit, MetaField};
 use crate::media_meta_read::{read_exif, read_flac, read_id3v2, read_iptc, read_ogg, read_pdf, read_wav, read_xmp};
-use crate::media_meta_write::{write_exif, write_flac, write_id3v2, write_ogg, write_pdf, write_wav};
+use crate::media_meta_write::{write_exif, write_flac, write_id3v2, write_iptc, write_ogg, write_pdf, write_wav, write_xmp};
 use crate::video_meta_read::read_mp4;
 
 /// Every metadata field the studio can show for a file, chosen by extension. A file whose kind has no
@@ -41,7 +41,8 @@ pub fn read_all(ext: &str, bytes: &[u8]) -> Vec<MetaField> {
 
 /// Whether `ext` has a write-back codec today, so the studio can offer editing (not just viewing).
 pub fn is_writable(ext: &str) -> bool {
-    // jpg/jpeg carry an EXIF write codec ([`write_exif`]); ogg/oga carry a Vorbis-comment write codec
+    // jpg/jpeg carry EXIF, IPTC, and XMP write codecs ([`write_exif`]/[`write_iptc`]/[`write_xmp`], the last
+    // two added in CPE-1305); ogg/oga carry a Vorbis-comment write codec
     // ([`write_ogg`]); wav carries a RIFF LIST/INFO write codec ([`write_wav`]); pdf carries an
     // incremental `/Info` write codec ([`write_pdf`], CPE-1301). tif/tiff are intentionally excluded —
     // for a TIFF the EXIF *is* the file's own IFD chain, so rebuilding it from four tags would drop the
@@ -60,11 +61,50 @@ pub fn write_back(ext: &str, orig: &[u8], edits: &[MetaEdit]) -> Result<Vec<u8>,
         "mp3" => Ok(write_id3v2(orig, &result.fields)),
         "flac" => Ok(write_flac(orig, &result.fields)),
         "ogg" | "oga" => write_ogg(orig, &result.fields),
-        "jpg" | "jpeg" => write_exif(orig, &result.fields),
+        // A JPEG can carry EXIF (APP1), IPTC (APP13), and XMP (APP1/xap) side by side, so an edit to any of
+        // those groups is persisted by chaining the three codecs — each preserves the others' segments, so
+        // they coexist in the output. A codec runs only when the user's edit actually *targeted* that group
+        // (see [`write_jpeg`]) — not merely because the group is present in the file — so an IPTC/XMP-only
+        // edit on a camera JPEG isn't refused by `write_exif`'s "no editable EXIF fields" guard, and clearing
+        // a group's last field still runs its codec so the stale segment is removed.
+        "jpg" | "jpeg" => write_jpeg(orig, &result.fields, edits),
         "wav" => write_wav(orig, &result.fields),
         "pdf" => write_pdf(orig, &result.fields),
         other => Err(format!("editing {other} metadata isn't supported yet")),
     }
+}
+
+/// Serialise the JPEG metadata groups back into one file: EXIF, then IPTC, then XMP, each fed the previous
+/// codec's output so all three coexist. A codec is invoked only when the user's `edits` actually **targeted**
+/// that group — *not* when the group merely happens to be present in the file. Gating on the edit, not on
+/// presence, fixes two failures:
+///  - EXIF is (re)written only when an editable EXIF field was edited, so an IPTC/XMP-only save on an
+///    ordinary camera JPEG (which carries intrinsic EXIF like Make/Model, but no editable EXIF field) no
+///    longer trips `write_exif`'s "no editable EXIF fields to write" error. When EXIF isn't the edit target
+///    it's left untouched — its existing APP1 is preserved byte-for-byte by the IPTC/XMP codecs.
+///  - Clearing a group's *last* field still runs that group's codec (the group is no longer "present" after
+///    the clear, but it *was* edited), so [`write_iptc`]/[`write_xmp`] can strip the stale segment rather
+///    than leaving the old value in the file.
+fn write_jpeg(orig: &[u8], fields: &[MetaField], edits: &[MetaEdit]) -> Result<Vec<u8>, String> {
+    let edited = |group: &str| {
+        edits.iter().any(|e| {
+            let g = match e {
+                MetaEdit::Set { group, .. } | MetaEdit::Clear { group, .. } => group,
+            };
+            g.eq_ignore_ascii_case(group)
+        })
+    };
+    let mut out = orig.to_vec();
+    if edited("exif") {
+        out = write_exif(&out, fields)?;
+    }
+    if edited("iptc") {
+        out = write_iptc(&out, fields)?;
+    }
+    if edited("xmp") {
+        out = write_xmp(&out, fields)?;
+    }
+    Ok(out)
 }
 
 #[cfg(test)]
@@ -247,5 +287,117 @@ mod tests {
     fn write_back_errors_for_non_jpeg_bytes_routed_to_the_exif_codec() {
         let err = write_back("jpg", b"not a jpeg at all", &[exif_set("ImageDescription", "x")]).unwrap_err();
         assert!(err.contains("JPEG") || err.contains("SOI"));
+    }
+
+    // ---- CPE-1305 UAT regressions: IPTC/XMP-only save on a camera JPEG, and clearing a group's last field ----
+
+    /// A JPEG standing in for an ordinary camera photo: **intrinsic-only** EXIF (Make + Model, both
+    /// read-only) — NO editable EXIF field (ImageDescription/Artist/Copyright/UserComment) — plus a trivial
+    /// SOS scan acting as the "image". Built with the exif `Writer` directly so it's independent of the code
+    /// under test. Returns `(jpeg, scan_tail)`; the writers must preserve `scan_tail` verbatim.
+    fn camera_jpeg_intrinsic_exif_only() -> (Vec<u8>, Vec<u8>) {
+        let make =
+            exif::Field { tag: exif::Tag::Make, ifd_num: exif::In::PRIMARY, value: exif::Value::Ascii(vec![b"AcmeCam".to_vec()]) };
+        let model =
+            exif::Field { tag: exif::Tag::Model, ifd_num: exif::In::PRIMARY, value: exif::Value::Ascii(vec![b"X100".to_vec()]) };
+        let mut w = exif::experimental::Writer::new();
+        w.push_field(&make);
+        w.push_field(&model);
+        let mut cur = std::io::Cursor::new(Vec::new());
+        w.write(&mut cur, false).unwrap();
+        let tiff = cur.into_inner();
+
+        let mut jpg = vec![0xFFu8, 0xD8]; // SOI
+        jpg.extend_from_slice(&[0xFF, 0xE1]);
+        jpg.extend_from_slice(&((tiff.len() + 6 + 2) as u16).to_be_bytes());
+        jpg.extend_from_slice(b"Exif\0\0");
+        jpg.extend_from_slice(&tiff);
+        // Trivial SOS + fake entropy scan ("image") + EOI — the writers must preserve this verbatim.
+        let mut tail = Vec::new();
+        tail.extend_from_slice(&[0xFF, 0xDA, 0x00, 0x02]); // SOS, length 2 (no payload)
+        tail.extend_from_slice(&[0x11, 0x22, 0x33]); // fake entropy-coded image data
+        tail.extend_from_slice(&[0xFF, 0xD9]); // EOI
+        jpg.extend_from_slice(&tail);
+        (jpg, tail)
+    }
+
+    /// Bug 1: an IPTC-only edit on a camera JPEG whose EXIF is intrinsic-only must SUCCEED (before the fix,
+    /// `write_jpeg` dispatched `write_exif` because the exif group was merely *present* — Make/Model — and
+    /// `write_exif` then errored with "no editable EXIF fields to write", failing the whole save). The
+    /// caption must round-trip, and the intrinsic EXIF + image must survive.
+    #[test]
+    fn iptc_only_edit_succeeds_on_camera_jpeg_with_intrinsic_exif() {
+        let (orig, tail) = camera_jpeg_intrinsic_exif_only();
+        // Sanity: the fixture carries intrinsic EXIF but no editable EXIF field.
+        let before = read_all("jpg", &orig);
+        assert_eq!(get(&before, "Make"), Some("\"AcmeCam\""));
+        assert_eq!(get(&before, "Model"), Some("\"X100\""));
+        assert!(get(&before, "ImageDescription").is_none() && get(&before, "Artist").is_none());
+
+        let out = write_back("jpg", &orig, &[MetaEdit::Set { group: "iptc".into(), key: "Caption/Abstract".into(), value: "A caption".into() }])
+            .expect("IPTC-only save must succeed on a camera JPEG carrying intrinsic-only EXIF");
+
+        let after = read_all("jpg", &out);
+        assert_eq!(get(&after, "Caption/Abstract"), Some("A caption")); // IPTC edit persisted
+        // Intrinsic EXIF preserved (not rewritten — the EXIF codec never ran) …
+        assert_eq!(get(&after, "Make"), Some("\"AcmeCam\""));
+        assert_eq!(get(&after, "Model"), Some("\"X100\""));
+        // … and the image scan data survives verbatim.
+        assert!(out.ends_with(&tail), "image scan data must be preserved");
+    }
+
+    /// A title-only XMP edit on the same intrinsic-only camera JPEG must likewise succeed (same bug, XMP path).
+    #[test]
+    fn xmp_only_edit_succeeds_on_camera_jpeg_with_intrinsic_exif() {
+        let (orig, _tail) = camera_jpeg_intrinsic_exif_only();
+        let out = write_back("jpg", &orig, &[MetaEdit::Set { group: "xmp".into(), key: "Title".into(), value: "A title".into() }])
+            .expect("XMP-only save must succeed on a camera JPEG carrying intrinsic-only EXIF");
+        let after = read_all("jpg", &out);
+        assert_eq!(get(&after, "Title"), Some("A title"));
+        assert_eq!(get(&after, "Make"), Some("\"AcmeCam\"")); // intrinsics preserved
+    }
+
+    /// A plain JPEG (SOI + trivial SOS scan + EOI), no metadata segments yet.
+    fn plain_jpeg() -> Vec<u8> {
+        let mut jpg = vec![0xFFu8, 0xD8];
+        jpg.extend_from_slice(&[0xFF, 0xDA, 0x00, 0x02]); // SOS
+        jpg.extend_from_slice(&[0xAB, 0xCD]); // fake entropy scan
+        jpg.extend_from_slice(&[0xFF, 0xD9]); // EOI
+        jpg
+    }
+
+    /// Bug 2 (IPTC): clearing the LAST IPTC field must remove the value on reopen — the stale APP13 segment
+    /// must be stripped, not left behind. Before the fix, dispatch keyed off `has("iptc")` *after*
+    /// `apply_edits`, which is false once the field is cleared, so `write_iptc` never ran and the old
+    /// caption survived (a silent no-op save).
+    #[test]
+    fn clearing_last_iptc_field_removes_it_on_reopen() {
+        // Set a caption first, then clear it.
+        let seeded = write_back("jpg", &plain_jpeg(), &[MetaEdit::Set { group: "iptc".into(), key: "Caption/Abstract".into(), value: "Temp caption".into() }])
+            .expect("initial IPTC set");
+        assert_eq!(get(&read_all("jpg", &seeded), "Caption/Abstract"), Some("Temp caption")); // sanity: present
+
+        let cleared = write_back("jpg", &seeded, &[MetaEdit::Clear { group: "iptc".into(), key: "Caption/Abstract".into() }])
+            .expect("clearing IPTC must succeed");
+
+        assert!(get(&read_all("jpg", &cleared), "Caption/Abstract").is_none(), "cleared caption must be gone on reopen");
+        // The whole APP13 Photoshop segment must be stripped (nothing else was in it).
+        assert!(!cleared.windows(13).any(|w| w == b"Photoshop 3.0"), "stale APP13 IPTC segment must be removed");
+    }
+
+    /// Bug 2 (XMP): clearing the LAST XMP field must remove it on reopen — the stale XMP APP1 segment must be
+    /// stripped, not left with the old value.
+    #[test]
+    fn clearing_last_xmp_field_removes_it_on_reopen() {
+        let seeded = write_back("jpg", &plain_jpeg(), &[MetaEdit::Set { group: "xmp".into(), key: "Title".into(), value: "Temp title".into() }])
+            .expect("initial XMP set");
+        assert_eq!(get(&read_all("jpg", &seeded), "Title"), Some("Temp title")); // sanity: present
+
+        let cleared = write_back("jpg", &seeded, &[MetaEdit::Clear { group: "xmp".into(), key: "Title".into() }])
+            .expect("clearing XMP must succeed");
+
+        assert!(get(&read_all("jpg", &cleared), "Title").is_none(), "cleared title must be gone on reopen");
+        // The XMP APP1 segment (its Adobe xap signature) must be stripped.
+        assert!(!cleared.windows(28).any(|w| w == b"http://ns.adobe.com/xap/1.0/"), "stale XMP APP1 segment must be removed");
     }
 }
