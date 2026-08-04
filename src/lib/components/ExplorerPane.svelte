@@ -287,10 +287,29 @@
     // Stop the backend walking the folder we just left (CPE-665); no-op if it already finished.
     if (gen > 1) rawInvoke("cancel_dir_stream", { streamId: gen - 1 }).catch(() => {});
 
+    // Perf instrumentation (CPE-691/CPE-1304): time-to-first-paint (first batch actually in the DOM)
+    // and time-to-settled (stream done AND the reactive `visible = sortEntries(...)` pipeline above has
+    // re-derived), so the CPE-688 10× target is a measured before/after rather than a vibe. Dev-gated —
+    // `import.meta.env.DEV` is a Vite compile-time constant, so this whole block dead-code-eliminates out
+    // of the production bundle. Console marks only; CPE-757 removed the on-screen readout, don't bring it
+    // back (see FileList.perf-budget.test.ts / CPE-1304 for the falsifiable multi-size budget instead).
+    const perfOn = import.meta.env.DEV;
+    if (perfOn) performance.mark(`listing:start:${gen}`);
+    const perfStart = perfOn ? performance.now() : 0;
+    let perfPainted = false;
+    const markPainted = () => {
+      if (!perfOn || perfPainted) return;
+      perfPainted = true;
+      performance.mark(`listing:first-paint:${gen}`);
+      performance.measure(`listing first-paint "${path}"`, `listing:start:${gen}`, `listing:first-paint:${gen}`);
+      console.debug(`[perf] first paint "${path}" ${Math.round(performance.now() - perfStart)}ms`);
+    };
+
     const servedFromCache = useCache ? cacheGet(path) : undefined;
     if (servedFromCache) {
       entries = servedFromCache;
       loading = false;
+      markPainted();
       await tick(); // let the reactive `visible` derive before the caller's post-load hooks read it
     } else {
       entries = [];
@@ -306,7 +325,8 @@
           if (gen !== loadGen || buffer.length === 0) { buffer = []; return; }
           entries = entries.concat(buffer);
           buffer = [];
-          loading = false;
+          loading = false; // first real rows are in the DOM — drop the "Loading…" placeholder
+          markPainted();
         };
         channel.onmessage = (batch) => {
           if (gen !== loadGen) return; // superseded — drop stale rows
@@ -323,7 +343,27 @@
       if (gen === loadGen) cachePut(path, entries);
     }
 
-    if (gen !== loadGen) return false; // a newer navigation superseded this one
+    if (gen !== loadGen) {
+      // Superseded (the user navigated again before this one settled) — still clear this gen's marks so
+      // rapid navigation doesn't leak `listing:start:<gen>` entries into the perf buffer forever.
+      if (perfOn) performance.clearMarks(`listing:start:${gen}`);
+      return false;
+    }
+
+    // "Settled" = stream done AND `visible` has actually re-sorted, not just the raw fetch finishing —
+    // `tick()` flushes the reactive `visible = sortEntries(...)`/`sortByMetaColumn(...)` statements above
+    // so this mark lands after the sort a caller would actually see painted (CPE-1304 AC).
+    if (perfOn) {
+      await tick();
+      performance.mark(`listing:settled:${gen}`);
+      performance.measure(`listing settled "${path}"`, `listing:start:${gen}`, `listing:settled:${gen}`);
+      console.debug(`[perf] settled "${path}" ${Math.round(performance.now() - perfStart)}ms — ${entries.length} entries`);
+      performance.clearMarks(`listing:start:${gen}`);
+      performance.clearMarks(`listing:first-paint:${gen}`);
+      performance.clearMarks(`listing:settled:${gen}`);
+      performance.clearMeasures(`listing first-paint "${path}"`);
+      performance.clearMeasures(`listing settled "${path}"`);
+    }
 
     // Stale-while-revalidate (CPE-756): a cache-served folder re-lists in the background.
     if (servedFromCache && !error) setTimeout(() => revalidateDir(path, gen), 300);
