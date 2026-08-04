@@ -4347,6 +4347,71 @@ async fn find_orphan_sidecars(
     .map_err(|e| e.to_string())
 }
 
+/// Registry of in-flight `find_orphan_sidecars_stream` walks' cancel flags, keyed by the frontend-supplied
+/// `stream_id`, mirroring `DIR_STREAM_CANCELS` (CPE-1299, STREAMING.md).
+static ORPHAN_SIDECARS_STREAM_CANCELS: std::sync::OnceLock<
+    std::sync::Mutex<std::collections::HashMap<u64, std::sync::Arc<std::sync::atomic::AtomicBool>>>,
+> = std::sync::OnceLock::new();
+
+fn orphan_sidecars_stream_registry(
+) -> &'static std::sync::Mutex<std::collections::HashMap<u64, std::sync::Arc<std::sync::atomic::AtomicBool>>>
+{
+    ORPHAN_SIDECARS_STREAM_CANCELS.get_or_init(Default::default)
+}
+
+/// Streaming variant of `find_orphan_sidecars` (CPE-1299, streaming-liveness convention): pushes each
+/// directory's orphan batch over an IPC channel as [`cpe_server::orphan_sidecars_scan::walk_orphan_sidecars`]
+/// finds it, so a slow/large tree paints progressively instead of blocking on the whole walk. Async +
+/// `spawn_blocking` so the walk never freezes the UI thread (CPE-760). `stream_id` (frontend-supplied,
+/// monotonic) registers a cancel flag polled each batch, so a superseded walk stops promptly — mirrors
+/// `list_dir_stream`/`cancel_dir_stream` (CPE-665). The returned result carries the final `scanned` +
+/// `truncated` with an empty `orphans` (those streamed, in walk order).
+#[tauri::command]
+#[cfg_attr(feature = "specta-bindings", specta::specta)]
+async fn find_orphan_sidecars_stream(
+    root: String,
+    recursive: bool,
+    stream_id: u64,
+    on_orphan: tauri::ipc::Channel<Vec<String>>,
+) -> Result<cpe_server::orphan_sidecars_scan::OrphanSidecarResult, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        use std::sync::atomic::Ordering;
+        let cancel = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        orphan_sidecars_stream_registry().lock().unwrap().insert(stream_id, cancel.clone());
+        let tail = cpe_server::orphan_sidecars_scan::walk_orphan_sidecars(
+            std::path::Path::new(&root),
+            recursive,
+            |batch| {
+                let _ = on_orphan.send(batch);
+                if cancel.load(Ordering::Relaxed) {
+                    std::ops::ControlFlow::Break(())
+                } else {
+                    std::ops::ControlFlow::Continue(())
+                }
+            },
+        );
+        orphan_sidecars_stream_registry().lock().unwrap().remove(&stream_id);
+        Ok(cpe_server::orphan_sidecars_scan::OrphanSidecarResult {
+            orphans: Vec::new(),
+            scanned: tail.scanned,
+            truncated: tail.truncated,
+        })
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+/// Signal an in-flight `find_orphan_sidecars_stream` to stop at the next batch boundary (CPE-1299). A
+/// no-op if the stream already finished (its id is gone from the registry).
+#[tauri::command]
+#[cfg_attr(feature = "specta-bindings", specta::specta)]
+fn cancel_orphan_sidecars_stream(stream_id: u64) {
+    use std::sync::atomic::Ordering;
+    if let Some(flag) = orphan_sidecars_stream_registry().lock().unwrap().get(&stream_id) {
+        flag.store(true, Ordering::Relaxed);
+    }
+}
+
 /// Find dangling (target-missing) and cyclic (self/loop) symlinks under `root` (CPE-1284, epic CPE-1002).
 /// Thin `spawn_blocking` dispatcher into [`cpe_server::dangling_links_scan::find_dangling_links`], which
 /// errors when `root` isn't a directory.
@@ -4360,6 +4425,67 @@ async fn find_dangling_links(root: String) -> Result<cpe_server::dangling_links_
     .map_err(|e| e.to_string())?
 }
 
+/// Registry of in-flight `find_dangling_links_stream` walks' cancel flags, keyed by the frontend-supplied
+/// `stream_id`, mirroring `DIR_STREAM_CANCELS` (CPE-1299, STREAMING.md).
+static DANGLING_LINKS_STREAM_CANCELS: std::sync::OnceLock<
+    std::sync::Mutex<std::collections::HashMap<u64, std::sync::Arc<std::sync::atomic::AtomicBool>>>,
+> = std::sync::OnceLock::new();
+
+fn dangling_links_stream_registry(
+) -> &'static std::sync::Mutex<std::collections::HashMap<u64, std::sync::Arc<std::sync::atomic::AtomicBool>>>
+{
+    DANGLING_LINKS_STREAM_CANCELS.get_or_init(Default::default)
+}
+
+/// Streaming variant of `find_dangling_links` (CPE-1299, streaming-liveness convention): pushes classified
+/// batches over an IPC channel as [`cpe_server::dangling_links_scan::walk_dangling_links`] delivers them —
+/// note the walk itself must finish (classification needs the whole link set) before the first flush, but
+/// `flush` still lets a superseded stream stop consuming further batches early. Async + `spawn_blocking` so
+/// the walk never freezes the UI thread (CPE-760). `stream_id` (frontend-supplied, monotonic) registers a
+/// cancel flag polled each batch, mirroring `list_dir_stream`/`cancel_dir_stream` (CPE-665). The returned
+/// result carries the final `scanned` + `truncated` with an empty `links` (those streamed).
+#[tauri::command]
+#[cfg_attr(feature = "specta-bindings", specta::specta)]
+async fn find_dangling_links_stream(
+    root: String,
+    stream_id: u64,
+    on_link: tauri::ipc::Channel<Vec<cpe_server::dangling_links::DanglingLink>>,
+) -> Result<cpe_server::dangling_links_scan::DanglingReport, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        use std::sync::atomic::Ordering;
+        let cancel = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        dangling_links_stream_registry().lock().unwrap().insert(stream_id, cancel.clone());
+        let tail = cpe_server::dangling_links_scan::walk_dangling_links(std::path::Path::new(&root), |batch| {
+            let _ = on_link.send(batch);
+            if cancel.load(Ordering::Relaxed) {
+                std::ops::ControlFlow::Break(())
+            } else {
+                std::ops::ControlFlow::Continue(())
+            }
+        });
+        dangling_links_stream_registry().lock().unwrap().remove(&stream_id);
+        let tail = tail?;
+        Ok(cpe_server::dangling_links_scan::DanglingReport {
+            links: Vec::new(),
+            scanned: tail.scanned,
+            truncated: tail.truncated,
+        })
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+/// Signal an in-flight `find_dangling_links_stream` to stop at the next batch boundary (CPE-1299). A
+/// no-op if the stream already finished (its id is gone from the registry).
+#[tauri::command]
+#[cfg_attr(feature = "specta-bindings", specta::specta)]
+fn cancel_dangling_links_stream(stream_id: u64) {
+    use std::sync::atomic::Ordering;
+    if let Some(flag) = dangling_links_stream_registry().lock().unwrap().get(&stream_id) {
+        flag.store(true, Ordering::Relaxed);
+    }
+}
+
 /// Sweep `root` for files whose sniffed content disagrees with their claimed extension (CPE-1285, epic
 /// CPE-1002) — e.g. a `.jpg` that's really a Windows PE. Thin `spawn_blocking` dispatcher into
 /// [`cpe_server::type_mismatch_scan::find_type_mismatches`]; never errors.
@@ -4371,6 +4497,66 @@ async fn find_type_mismatches(root: String) -> Result<cpe_server::type_mismatch_
     })
     .await
     .map_err(|e| e.to_string())
+}
+
+/// Registry of in-flight `find_type_mismatches_stream` walks' cancel flags, keyed by the frontend-supplied
+/// `stream_id`, mirroring `DIR_STREAM_CANCELS` (CPE-1299, STREAMING.md).
+static TYPE_MISMATCH_STREAM_CANCELS: std::sync::OnceLock<
+    std::sync::Mutex<std::collections::HashMap<u64, std::sync::Arc<std::sync::atomic::AtomicBool>>>,
+> = std::sync::OnceLock::new();
+
+fn type_mismatch_stream_registry(
+) -> &'static std::sync::Mutex<std::collections::HashMap<u64, std::sync::Arc<std::sync::atomic::AtomicBool>>>
+{
+    TYPE_MISMATCH_STREAM_CANCELS.get_or_init(Default::default)
+}
+
+/// Streaming variant of `find_type_mismatches` (CPE-1299, streaming-liveness convention): pushes each
+/// flagged-file batch over an IPC channel as [`cpe_server::type_mismatch_scan::walk_type_mismatches`] finds
+/// it, so a slow/large tree paints progressively instead of blocking on the whole sweep. Async +
+/// `spawn_blocking` so the walk never freezes the UI thread (CPE-760). `stream_id` (frontend-supplied,
+/// monotonic) registers a cancel flag polled each batch, mirroring `list_dir_stream`/`cancel_dir_stream`
+/// (CPE-665). The returned result carries the final `scanned` + `truncated` with an empty `hits` (those
+/// streamed, in walk order).
+#[tauri::command]
+#[cfg_attr(feature = "specta-bindings", specta::specta)]
+async fn find_type_mismatches_stream(
+    root: String,
+    stream_id: u64,
+    on_hit: tauri::ipc::Channel<Vec<cpe_server::type_mismatch_scan::MismatchHit>>,
+) -> Result<cpe_server::type_mismatch_scan::MismatchReport, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        use std::sync::atomic::Ordering;
+        let cancel = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        type_mismatch_stream_registry().lock().unwrap().insert(stream_id, cancel.clone());
+        let tail = cpe_server::type_mismatch_scan::walk_type_mismatches(std::path::Path::new(&root), |batch| {
+            let _ = on_hit.send(batch);
+            if cancel.load(Ordering::Relaxed) {
+                std::ops::ControlFlow::Break(())
+            } else {
+                std::ops::ControlFlow::Continue(())
+            }
+        });
+        type_mismatch_stream_registry().lock().unwrap().remove(&stream_id);
+        Ok(cpe_server::type_mismatch_scan::MismatchReport {
+            hits: Vec::new(),
+            scanned: tail.scanned,
+            truncated: tail.truncated,
+        })
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+/// Signal an in-flight `find_type_mismatches_stream` to stop at the next batch boundary (CPE-1299). A
+/// no-op if the stream already finished (its id is gone from the registry).
+#[tauri::command]
+#[cfg_attr(feature = "specta-bindings", specta::specta)]
+fn cancel_type_mismatches_stream(stream_id: u64) {
+    use std::sync::atomic::Ordering;
+    if let Some(flag) = type_mismatch_stream_registry().lock().unwrap().get(&stream_id) {
+        flag.store(true, Ordering::Relaxed);
+    }
 }
 
 // ---- Rules-based auto-organize (CPE-1142, epic CPE-979) -------------------------------------------
@@ -9665,8 +9851,14 @@ pub fn run() {
             analyze_archive_safety,
             find_empty_dirs,
             find_orphan_sidecars,
+            find_orphan_sidecars_stream,
+            cancel_orphan_sidecars_stream,
             find_dangling_links,
+            find_dangling_links_stream,
+            cancel_dangling_links_stream,
             find_type_mismatches,
+            find_type_mismatches_stream,
+            cancel_type_mismatches_stream,
             organize_plan,
             organize_clutter,
             organize_apply,
@@ -10464,8 +10656,14 @@ pub fn export_bindings(out: &std::path::Path) -> Result<(), String> {
         analyze_archive_safety,
         find_empty_dirs,
         find_orphan_sidecars,
+        find_orphan_sidecars_stream,
+        cancel_orphan_sidecars_stream,
         find_dangling_links,
+        find_dangling_links_stream,
+        cancel_dangling_links_stream,
         find_type_mismatches,
+        find_type_mismatches_stream,
+        cancel_type_mismatches_stream,
         organize_plan,
         organize_clutter,
         organize_apply,
@@ -10644,6 +10842,115 @@ mod tests {
             tauri::async_runtime::block_on(find_type_mismatches(root.clone())).expect("find_type_mismatches dispatches");
         assert!(mismatches.hits.is_empty(), "plain text keep.txt has no content/extension mismatch");
         assert_eq!(mismatches.scanned, 1);
+
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    // ---- Streaming safety-scan commands (CPE-1299, epic CPE-1002) -----------------------------------
+    // Confirms each `*_stream` command actually drives its `cpe-server` walker over a real
+    // `tauri::ipc::Channel` — constructible standalone via `Channel::new` (no running app/webview
+    // needed) — and delivers at least one batch, mirroring `list_dir_stream`'s Channel + stream_id +
+    // cancel-registry shape. The tail `Result` always comes back with an empty collection (CPE-420's
+    // `find_duplicates_stream` convention): the batches are what streamed.
+
+    /// Collect every batch a `Channel<TSend>` receives into `out`, decoding the JSON body as a generic
+    /// [`serde_json::Value`] array — the same wire shape a real frontend `Channel` gets from
+    /// `on_message`. Decoding as `Value` (rather than the batch item's own Rust type) sidesteps
+    /// `MismatchHit`/`DanglingLink` deriving `Serialize` only (no app-side need for `Deserialize`);
+    /// `TSend` is only ever a phantom type parameter here, inferred from the command signature the
+    /// `Channel` is passed into.
+    fn collecting_channel<TSend>(
+        out: std::sync::Arc<std::sync::Mutex<Vec<serde_json::Value>>>,
+    ) -> tauri::ipc::Channel<TSend> {
+        tauri::ipc::Channel::new(move |body| {
+            if let tauri::ipc::InvokeResponseBody::Json(json) = body {
+                if let Ok(serde_json::Value::Array(items)) = serde_json::from_str::<serde_json::Value>(&json) {
+                    out.lock().unwrap().extend(items);
+                }
+            }
+            Ok(())
+        })
+    }
+
+    #[test]
+    fn find_type_mismatches_stream_drives_the_walker_and_emits_a_batch() {
+        let d = std::env::temp_dir().join(format!("cpe1299_mismatch_stream_{}", std::process::id()));
+        let _ = fs::remove_dir_all(&d);
+        fs::create_dir_all(&d).expect("scratch dir");
+        // Real PE/MZ header disguised as a .jpg (same fixture as `type_mismatch_scan`'s own tests).
+        fs::write(d.join("disguised.jpg"), [0x4D, 0x5A, 0x90, 0x00, 0x03, 0x00]).unwrap();
+        let root = d.to_string_lossy().into_owned();
+
+        let hits: std::sync::Arc<std::sync::Mutex<Vec<serde_json::Value>>> = Default::default();
+        let on_hit = collecting_channel(hits.clone());
+        let result = tauri::async_runtime::block_on(find_type_mismatches_stream(root, 1, on_hit))
+            .expect("find_type_mismatches_stream dispatches");
+
+        assert_eq!(result.scanned, 1);
+        assert!(result.hits.is_empty(), "hits stream over the channel, not in the tail result");
+        let hits = hits.lock().unwrap();
+        assert_eq!(hits.len(), 1, "the disguised PE must stream as one batch: {hits:?}");
+        assert!(hits[0]["path"].as_str().unwrap().ends_with("disguised.jpg"));
+
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn find_orphan_sidecars_stream_drives_the_walker_and_emits_a_batch() {
+        let d = std::env::temp_dir().join(format!("cpe1299_orphan_stream_{}", std::process::id()));
+        let _ = fs::remove_dir_all(&d);
+        fs::create_dir_all(&d).expect("scratch dir");
+        // A .srt with no matching video primary in the same folder is an orphaned sidecar.
+        fs::write(d.join("movie.srt"), b"1\n00:00:00,000 --> 00:00:01,000\nhi\n").unwrap();
+        let root = d.to_string_lossy().into_owned();
+
+        let orphans: std::sync::Arc<std::sync::Mutex<Vec<serde_json::Value>>> = Default::default();
+        let on_orphan = collecting_channel(orphans.clone());
+        let result =
+            tauri::async_runtime::block_on(find_orphan_sidecars_stream(root, false, 1, on_orphan))
+                .expect("find_orphan_sidecars_stream dispatches");
+
+        assert_eq!(result.scanned, 1);
+        assert!(result.orphans.is_empty(), "orphans stream over the channel, not in the tail result");
+        let orphans = orphans.lock().unwrap();
+        assert_eq!(orphans.len(), 1, "movie.srt has no primary, so it must stream as an orphan: {orphans:?}");
+        assert!(orphans[0].as_str().unwrap().ends_with("movie.srt"));
+
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn find_dangling_links_stream_drives_the_walker_and_emits_a_batch() {
+        let d = std::env::temp_dir().join(format!("cpe1299_dangling_stream_{}", std::process::id()));
+        let _ = fs::remove_dir_all(&d);
+        fs::create_dir_all(&d).expect("scratch dir");
+        let target = d.join("gone.txt");
+        fs::write(&target, "will be deleted").unwrap();
+        let link = d.join("broken_link");
+        // Skip where symlink creation is unprivileged (Windows without Developer Mode / admin) — same
+        // guard `recursive_walks_skip_symlinked_dirs_and_do_not_cycle` uses above.
+        #[cfg(windows)]
+        let made = std::os::windows::fs::symlink_file(&target, &link).is_ok();
+        #[cfg(unix)]
+        let made = std::os::unix::fs::symlink(&target, &link).is_ok();
+        if !made {
+            let _ = fs::remove_dir_all(&d);
+            return;
+        }
+        fs::remove_file(&target).unwrap();
+        let root = d.to_string_lossy().into_owned();
+
+        // `DanglingLink` derives `Serialize` only — decode the wire JSON as `Value` (same reasoning as
+        // the type-mismatch test above).
+        let links: std::sync::Arc<std::sync::Mutex<Vec<serde_json::Value>>> = Default::default();
+        let on_link = collecting_channel(links.clone());
+        let result = tauri::async_runtime::block_on(find_dangling_links_stream(root, 1, on_link))
+            .expect("find_dangling_links_stream dispatches");
+
+        assert!(result.links.is_empty(), "links stream over the channel, not in the tail result");
+        let links = links.lock().unwrap();
+        assert_eq!(links.len(), 1, "the broken link must stream as one batch: {links:?}");
+        assert!(links[0]["path"].as_str().unwrap().ends_with("broken_link"));
 
         let _ = fs::remove_dir_all(&d);
     }
