@@ -14,6 +14,10 @@
 //! - [`write_wav`] rebuilds a **WAV/RIFF** stream (CPE-1298) with its `LIST`/`INFO` chunk replaced (or
 //!   inserted, if absent) with one built from the `group == "wav"` fields, preserving every other chunk
 //!   (`fmt `, `data`, …) byte-for-byte and updating the outer `RIFF` size to match.
+//! - [`write_pdf`] appends a **PDF** incremental update (CPE-1301): a fresh `/Info` object + a classic
+//!   `xref` subsection + a new trailer chained to the original via `/Prev`, built from the `group == "pdf"`
+//!   fields. The original bytes are an exact prefix of the output (append-only); xref-stream PDFs are
+//!   refused with a clear `Err` rather than emitting a broken classic table.
 //!
 //! Pure + std-only (no new deps): fully cargo-testable by round-tripping through
 //! [`crate::media_meta_read`]'s readers with synthesised inputs, and does no I/O. Bounds-checked
@@ -991,10 +995,286 @@ pub fn write_wav(orig: &[u8], fields: &[MetaField]) -> Result<Vec<u8>, String> {
     Ok(out)
 }
 
+// ---- PDF /Info incremental-update write-back (CPE-1301) ----
+
+/// The document-`/Info` keys [`write_pdf`] serialises, friendly key → raw PDF key, in emission order.
+/// Mirrors [`crate::media_meta_read`]'s `PDF_INFO_KEYS` (re-declared locally, same reasoning as this
+/// module's other codecs' helpers). Every field the reader surfaces is written back — the four editable
+/// descriptive tags carrying any edits, the four producer intrinsics carried through unchanged — so an
+/// incremental update never *drops* metadata the reader could previously see.
+const PDF_WRITE_KEYS: &[(&str, &str)] = &[
+    ("Title", "/Title"),
+    ("Author", "/Author"),
+    ("Subject", "/Subject"),
+    ("Keywords", "/Keywords"),
+    ("Creator", "/Creator"),
+    ("Producer", "/Producer"),
+    ("Date Created", "/CreationDate"),
+    ("Date Modified", "/ModDate"),
+];
+
+/// Rebuild a PDF (`orig`) with an updated document-`/Info` dictionary carrying the `group == "pdf"` fields
+/// in `fields`, using the spec-sanctioned **incremental update**: the original bytes are left *entirely*
+/// untouched and a new section is appended — a fresh indirect `/Info` object, a classic cross-reference
+/// subsection for it, and a new trailer whose `/Prev` chains back to the original's cross-reference table.
+/// The original bytes are therefore a byte-for-byte **prefix** of the output (`out.starts_with(orig)`),
+/// which is the safety property of an incremental update: nothing already in the file can be corrupted.
+///
+/// How it works:
+/// 1. Locate the original's last `startxref` (the active cross-reference table) and require it to be a
+///    **classic** `xref` table. **Xref-stream PDFs** (`/Type /XRef`, PDF 1.5+, no `xref` keyword at that
+///    offset) are refused with `Err("xref-stream PDFs not yet supported")` rather than emitting a broken
+///    classic table a stream-based reader wouldn't consult — the honest degrade the ticket calls for.
+/// 2. Carry `/Root` forward (the last `/Root N G R` in the file) and take the new object number from the
+///    trailer's `/Size` (one past the highest object number; a scan of `N G obj` declarations is the
+///    fallback if `/Size` is absent).
+/// 3. Append `<n> 0 obj << …/Info dict… >> endobj`, a `xref` subsection listing that one object at its
+///    byte offset, and a trailer `<< /Size <n+1> /Root <root> R /Info <n> 0 R /Prev <old startxref> >>`
+///    followed by `startxref <offset-of-new-xref>` and `%%EOF`.
+///
+/// **String encoding:** a value that is entirely printable ASCII is written as a PDF literal string
+/// `( … )` with `(`, `)`, and `\` backslash-escaped (human-readable, round-trips through the reader's
+/// Latin-1 decode of a non-BOM string); a value with any non-ASCII/non-printable character is written as
+/// a **UTF-16BE hex string** `<FEFF…>` (the reader decodes the `FE FF` BOM as UTF-16BE), so the full
+/// Unicode range round-trips through [`crate::media_meta_read::read_pdf`].
+///
+/// Never panics: non-PDF/truncated input, a missing `startxref`/`/Root`, or an xref-stream PDF all return
+/// a clear `Err`, never a broken file.
+pub fn write_pdf(orig: &[u8], fields: &[MetaField]) -> Result<Vec<u8>, String> {
+    if pdf_find(&orig[..orig.len().min(1024)], b"%PDF-").is_none() {
+        return Err("not a PDF (missing %PDF- header)".into());
+    }
+
+    // The active cross-reference table is the one named by the file's *last* startxref.
+    let old_startxref = pdf_last_startxref(orig).ok_or("PDF has no startxref (cannot append an incremental update)")?;
+    let xref_region = orig.get(old_startxref..).ok_or("startxref points past the end of the file")?;
+    let xref_body_start = pdf_skip_ws(xref_region, 0);
+    if !xref_region[xref_body_start..].starts_with(b"xref") {
+        // An `N G obj … /Type /XRef …` cross-reference stream (or any non-classic table) lives here — we
+        // won't emit a classic subsection a stream reader would ignore.
+        return Err("xref-stream PDFs not yet supported".into());
+    }
+
+    let (root_num, root_gen) = pdf_last_indirect_ref(orig, b"/Root").ok_or("PDF trailer has no /Root reference")?;
+    let new_num = pdf_trailer_size(orig).or_else(|| pdf_max_obj_num(orig).map(|m| m + 1)).ok_or("cannot determine the PDF's object count")?;
+
+    // Serialise the new /Info dictionary body from the pdf-group fields, in the canonical key order.
+    let mut dict = Vec::new();
+    dict.extend_from_slice(b"<<");
+    for &(friendly, raw_key) in PDF_WRITE_KEYS {
+        let Some(value) = fields.iter().find(|f| f.group.eq_ignore_ascii_case("pdf") && f.key == friendly && !f.value.is_empty()) else {
+            continue;
+        };
+        dict.push(b' ');
+        dict.extend_from_slice(raw_key.as_bytes());
+        dict.push(b' ');
+        dict.extend_from_slice(&encode_pdf_string(&value.value));
+    }
+    dict.extend_from_slice(b" >>");
+
+    let mut out = orig.to_vec();
+    // The appended object must start on its own line; add a separator only if the file didn't end in one.
+    if !out.ends_with(b"\n") && !out.ends_with(b"\r") {
+        out.push(b'\n');
+    }
+
+    let obj_offset = out.len();
+    out.extend_from_slice(format!("{new_num} 0 obj\n").as_bytes());
+    out.extend_from_slice(&dict);
+    out.extend_from_slice(b"\nendobj\n");
+
+    let xref_offset = out.len();
+    out.extend_from_slice(b"xref\n");
+    out.extend_from_slice(format!("{new_num} 1\n").as_bytes());
+    // One 20-byte cross-reference entry: 10-digit offset, 5-digit generation, in-use flag, 2-byte EOL.
+    out.extend_from_slice(format!("{obj_offset:010} 00000 n\r\n").as_bytes());
+    out.extend_from_slice(b"trailer\n");
+    out.extend_from_slice(
+        format!("<< /Size {} /Root {} {} R /Info {} 0 R /Prev {} >>\n", new_num + 1, root_num, root_gen, new_num, old_startxref)
+            .as_bytes(),
+    );
+    out.extend_from_slice(b"startxref\n");
+    out.extend_from_slice(format!("{xref_offset}\n").as_bytes());
+    out.extend_from_slice(b"%%EOF\n");
+    Ok(out)
+}
+
+/// Encode a string as a PDF string object. Printable-ASCII values become a literal `( … )` with `(`, `)`,
+/// and `\` escaped; anything with a non-ASCII or control byte becomes a UTF-16BE hex string `<FEFF…>` so
+/// the reader's BOM path decodes it losslessly. See [`write_pdf`]'s doc for the round-trip rationale.
+fn encode_pdf_string(value: &str) -> Vec<u8> {
+    if value.bytes().all(|b| (0x20..=0x7e).contains(&b)) {
+        let mut out = Vec::with_capacity(value.len() + 2);
+        out.push(b'(');
+        for &b in value.as_bytes() {
+            if b == b'(' || b == b')' || b == b'\\' {
+                out.push(b'\\');
+            }
+            out.push(b);
+        }
+        out.push(b')');
+        out
+    } else {
+        let mut out = Vec::with_capacity(value.len() * 4 + 8);
+        out.push(b'<');
+        let push_hex = |out: &mut Vec<u8>, byte: u8| {
+            const HEX: &[u8; 16] = b"0123456789ABCDEF";
+            out.push(HEX[(byte >> 4) as usize]);
+            out.push(HEX[(byte & 0x0f) as usize]);
+        };
+        push_hex(&mut out, 0xFE);
+        push_hex(&mut out, 0xFF);
+        for u in value.encode_utf16() {
+            let [hi, lo] = u.to_be_bytes();
+            push_hex(&mut out, hi);
+            push_hex(&mut out, lo);
+        }
+        out.push(b'>');
+        out
+    }
+}
+
+/// Find the first occurrence of `needle` in `hay` (bounded substring search; never panics on empty input).
+fn pdf_find(hay: &[u8], needle: &[u8]) -> Option<usize> {
+    if needle.is_empty() || needle.len() > hay.len() {
+        return None;
+    }
+    hay.windows(needle.len()).position(|w| w == needle)
+}
+
+/// Skip PDF whitespace (space/tab/CR/LF/form-feed/NUL) in `bytes` starting at `start`, returning the index
+/// of the first non-whitespace byte (or `bytes.len()`).
+fn pdf_skip_ws(bytes: &[u8], start: usize) -> usize {
+    let mut i = start;
+    while i < bytes.len() && matches!(bytes[i], b' ' | b'\t' | b'\r' | b'\n' | 0x0c | 0x00) {
+        i += 1;
+    }
+    i
+}
+
+/// Parse a run of ASCII digits at `start` as a `u32`, returning the value and the index just past it.
+/// `None` if there are no digits or the value doesn't fit in a `u32`.
+fn pdf_parse_uint(bytes: &[u8], start: usize) -> Option<(u32, usize)> {
+    let mut i = start;
+    while i < bytes.len() && bytes[i].is_ascii_digit() {
+        i += 1;
+    }
+    if i == start {
+        return None;
+    }
+    let n: u32 = std::str::from_utf8(&bytes[start..i]).ok()?.parse().ok()?;
+    Some((n, i))
+}
+
+/// Read the value of the file's **last** `startxref` — the byte offset of the active cross-reference
+/// table. `None` if there is no well-formed `startxref` keyword followed by an integer.
+fn pdf_last_startxref(bytes: &[u8]) -> Option<usize> {
+    const KW: &[u8] = b"startxref";
+    let mut search_from = 0usize;
+    let mut last = None;
+    while let Some(rel) = pdf_find(&bytes[search_from..], KW) {
+        let after = search_from + rel + KW.len();
+        let i = pdf_skip_ws(bytes, after);
+        if let Some((n, _)) = pdf_parse_uint(bytes, i) {
+            last = Some(n as usize);
+        }
+        search_from = after;
+    }
+    last
+}
+
+/// Scan for the **last** `<key> N G R` indirect reference in `bytes` (e.g. `/Root 1 0 R`), returning
+/// `(N, G)`. The last one wins so an incrementally-updated file's active trailer overrides stale ones.
+fn pdf_last_indirect_ref(bytes: &[u8], key: &[u8]) -> Option<(u32, u32)> {
+    let mut search_from = 0usize;
+    let mut found = None;
+    while let Some(rel) = pdf_find(&bytes[search_from..], key) {
+        let after = search_from + rel + key.len();
+        let i = pdf_skip_ws(bytes, after);
+        if let Some((num, i)) = pdf_parse_uint(bytes, i) {
+            let i = pdf_skip_ws(bytes, i);
+            if let Some((gen, i)) = pdf_parse_uint(bytes, i) {
+                let i = pdf_skip_ws(bytes, i);
+                if bytes.get(i) == Some(&b'R') && !bytes.get(i + 1).is_some_and(|c| c.is_ascii_alphanumeric()) {
+                    found = Some((num, gen));
+                }
+            }
+        }
+        search_from = after;
+    }
+    found
+}
+
+/// Read the `/Size` entry of the file's **last** trailer dictionary (one past the highest object number).
+/// `None` if no `/Size N` is present.
+fn pdf_trailer_size(bytes: &[u8]) -> Option<u32> {
+    const KEY: &[u8] = b"/Size";
+    let mut search_from = 0usize;
+    let mut last = None;
+    while let Some(rel) = pdf_find(&bytes[search_from..], KEY) {
+        let after = search_from + rel + KEY.len();
+        let i = pdf_skip_ws(bytes, after);
+        if let Some((n, _)) = pdf_parse_uint(bytes, i) {
+            last = Some(n);
+        }
+        search_from = after;
+    }
+    last
+}
+
+/// Fallback when the trailer has no `/Size`: scan every `N G obj` declaration and return the highest object
+/// number `N`. `None` if the file declares no indirect objects at all.
+fn pdf_max_obj_num(bytes: &[u8]) -> Option<u32> {
+    const KW: &[u8] = b" obj";
+    let mut search_from = 0usize;
+    let mut max: Option<u32> = None;
+    while let Some(rel) = pdf_find(&bytes[search_from..], KW) {
+        let obj_kw = search_from + rel;
+        // Walk left over the generation number, its whitespace, and the object number to read `N`.
+        if let Some(num) = pdf_obj_num_before(bytes, obj_kw) {
+            max = Some(max.map_or(num, |m| m.max(num)));
+        }
+        search_from = obj_kw + KW.len();
+    }
+    max
+}
+
+/// Given the index of the space before an `obj` keyword (`… N G obj`), parse the object number `N` that
+/// precedes the generation number. Returns `None` if the bytes before don't look like `<digits> <digits>`.
+fn pdf_obj_num_before(bytes: &[u8], space_before_obj: usize) -> Option<u32> {
+    // bytes[space_before_obj] is the ' ' in " obj"; before it: <num><ws><gen>.
+    let mut i = space_before_obj;
+    // Skip back over the generation digits.
+    let gen_end = i;
+    while i > 0 && bytes[i - 1].is_ascii_digit() {
+        i -= 1;
+    }
+    if i == gen_end {
+        return None; // no generation digits
+    }
+    // Skip back over whitespace between object and generation numbers.
+    let ws_end = i;
+    while i > 0 && matches!(bytes[i - 1], b' ' | b'\t' | b'\r' | b'\n') {
+        i -= 1;
+    }
+    if i == ws_end {
+        return None; // no separating whitespace
+    }
+    // Skip back over the object-number digits.
+    let num_end = i;
+    while i > 0 && bytes[i - 1].is_ascii_digit() {
+        i -= 1;
+    }
+    if i == num_end {
+        return None; // no object-number digits
+    }
+    std::str::from_utf8(&bytes[i..num_end]).ok()?.parse().ok()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::media_meta_read::{parse_vorbis_comment, read_flac, read_id3v2, read_wav};
+    use crate::media_meta_read::{parse_vorbis_comment, read_flac, read_id3v2, read_pdf, read_wav};
 
     fn field(key: &str, value: &str) -> MetaField {
         MetaField { group: "id3".to_string(), key: key.to_string(), value: value.to_string(), editable: true }
@@ -2044,5 +2324,148 @@ mod tests {
         let read_back = read_wav(&written);
         assert_eq!(read_back.len(), 1);
         assert_eq!(get(&read_back, "Title"), Some("Kept"));
+    }
+
+    // ---- PDF /Info incremental-update write-back (CPE-1301) ----
+
+    fn pfield(key: &str, value: &str) -> MetaField {
+        MetaField { group: "pdf".to_string(), key: key.to_string(), value: value.to_string(), editable: true }
+    }
+
+    /// Build a minimal but structurally-valid classic-**xref** PDF (one catalog, one pages, one Info
+    /// object) with a real `xref` table and `startxref`, so [`write_pdf`]'s trailer arithmetic has
+    /// something authentic to chain onto. Byte offsets in the xref table are computed from the assembled
+    /// bytes. `info` is the raw `/Info` dictionary body (e.g. `<< /Title (Old) >>`).
+    fn build_classic_xref_pdf(info: &[u8]) -> Vec<u8> {
+        let mut pdf = Vec::new();
+        pdf.extend_from_slice(b"%PDF-1.4\n");
+        let mut offsets = [0usize; 4]; // offsets[1..=3] for objects 1,2,3
+        offsets[1] = pdf.len();
+        pdf.extend_from_slice(b"1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n");
+        offsets[2] = pdf.len();
+        pdf.extend_from_slice(b"2 0 obj\n<< /Type /Pages /Kids [] /Count 0 >>\nendobj\n");
+        offsets[3] = pdf.len();
+        pdf.extend_from_slice(b"3 0 obj\n");
+        pdf.extend_from_slice(info);
+        pdf.extend_from_slice(b"\nendobj\n");
+        let xref_at = pdf.len();
+        pdf.extend_from_slice(b"xref\n0 4\n");
+        pdf.extend_from_slice(b"0000000000 65535 f\r\n");
+        for &off in &offsets[1..=3] {
+            pdf.extend_from_slice(format!("{off:010} 00000 n\r\n").as_bytes());
+        }
+        pdf.extend_from_slice(b"trailer\n<< /Size 4 /Root 1 0 R /Info 3 0 R >>\n");
+        pdf.extend_from_slice(b"startxref\n");
+        pdf.extend_from_slice(format!("{xref_at}\n").as_bytes());
+        pdf.extend_from_slice(b"%%EOF\n");
+        pdf
+    }
+
+    /// Read the value of the file's last `startxref` (test-side mirror of the production helper) so the
+    /// tests can prove the appended xref offset is correct.
+    fn last_startxref(bytes: &[u8]) -> usize {
+        let kw = b"startxref";
+        let mut pos = 0usize;
+        let mut last = 0usize;
+        while let Some(rel) = bytes[pos..].windows(kw.len()).position(|w| w == kw) {
+            let mut i = pos + rel + kw.len();
+            while i < bytes.len() && (bytes[i] as char).is_whitespace() {
+                i += 1;
+            }
+            let start = i;
+            while i < bytes.len() && bytes[i].is_ascii_digit() {
+                i += 1;
+            }
+            last = std::str::from_utf8(&bytes[start..i]).unwrap().parse().unwrap();
+            pos = pos + rel + kw.len();
+        }
+        last
+    }
+
+    #[test]
+    fn write_pdf_round_trips_edits_and_is_an_append_only_prefix() {
+        let orig = build_classic_xref_pdf(b"<< /Title (Old Title) /Author (Old Author) /Producer (Acme PDF) >>");
+        let edits = vec![
+            pfield("Title", "New Title"),
+            pfield("Author", "Jane (Q.) Doe"), // parens must be escaped
+            pfield("Producer", "Acme PDF"),    // carried-through read-only field must survive
+        ];
+        let out = write_pdf(&orig, &edits).expect("classic-xref PDF is writable");
+
+        // (b) incremental-append prefix property: the original bytes are an exact prefix of the output.
+        assert!(out.starts_with(&orig), "output must be an append-only superset of the original");
+
+        // (a) the reader resolves the *new* /Info (last trailer wins) and sees the edited values.
+        let read_back = read_pdf(&out);
+        assert_eq!(get(&read_back, "Title"), Some("New Title"));
+        assert_eq!(get(&read_back, "Author"), Some("Jane (Q.) Doe"));
+        assert_eq!(get(&read_back, "Producer"), Some("Acme PDF")); // preserved, not dropped
+
+        // (c) the new startxref points exactly at the appended `xref` keyword.
+        let sx = last_startxref(&out);
+        assert!(sx > orig.len(), "new startxref must point into the appended section");
+        assert_eq!(&out[sx..sx + 4], b"xref", "startxref must point at the appended xref table");
+
+        // The appended trailer chains back to the original xref via /Prev, and numbers the new object 4.
+        let old_sx = last_startxref(&orig);
+        let tail = &out[orig.len()..];
+        assert!(contains_subslice(tail, format!("/Prev {old_sx}").as_bytes()), "trailer must chain via /Prev");
+        assert!(contains_subslice(tail, b"/Info 4 0 R"), "new Info object should be number 4");
+        assert!(contains_subslice(tail, b"/Size 5"), "/Size should be highest object number + 1");
+    }
+
+    #[test]
+    fn write_pdf_round_trips_non_ascii_via_utf16_hex() {
+        let orig = build_classic_xref_pdf(b"<< /Title (Old) >>");
+        let out = write_pdf(&orig, &[pfield("Title", "Étude \u{A9} — café")]).unwrap();
+        assert!(out.starts_with(&orig));
+        assert_eq!(get(&read_pdf(&out), "Title"), Some("Étude \u{A9} — café"));
+        // A non-ASCII value is written as a UTF-16BE hex string with a BOM, not a raw-byte literal.
+        let tail = &out[orig.len()..];
+        assert!(contains_subslice(tail, b"<FEFF"), "non-ASCII value should be a UTF-16BE hex string");
+    }
+
+    #[test]
+    fn write_pdf_errs_on_xref_stream_without_panicking() {
+        // A PDF whose last startxref points at an `N 0 obj … /Type /XRef` cross-reference *stream*.
+        let mut pdf = Vec::new();
+        pdf.extend_from_slice(b"%PDF-1.5\n");
+        pdf.extend_from_slice(b"1 0 obj\n<< /Type /Catalog >>\nendobj\n");
+        let xref_at = pdf.len();
+        pdf.extend_from_slice(b"2 0 obj\n<< /Type /XRef /Size 3 /Root 1 0 R /W [1 1 1] /Length 6 >>\nstream\n");
+        pdf.extend_from_slice(&[0u8; 6]);
+        pdf.extend_from_slice(b"\nendstream\nendobj\n");
+        pdf.extend_from_slice(b"startxref\n");
+        pdf.extend_from_slice(format!("{xref_at}\n").as_bytes());
+        pdf.extend_from_slice(b"%%EOF\n");
+
+        let err = write_pdf(&pdf, &[pfield("Title", "x")]).unwrap_err();
+        assert!(err.contains("xref-stream"), "expected an honest xref-stream refusal, got: {err}");
+    }
+
+    #[test]
+    fn write_pdf_errs_on_malformed_input_without_panicking() {
+        // Not a PDF at all.
+        assert!(write_pdf(b"not a pdf", &[pfield("Title", "x")]).is_err());
+        // Has a header but no startxref → cannot do an incremental update.
+        assert!(write_pdf(b"%PDF-1.4\nnothing else here", &[pfield("Title", "x")]).is_err());
+        // Truncations of a real classic-xref PDF must never panic (Err or Ok, just no crash).
+        let full = build_classic_xref_pdf(b"<< /Title (T) >>");
+        for cut in 0..full.len() {
+            let _ = write_pdf(&full[..cut], &[pfield("Title", "x")]);
+        }
+    }
+
+    #[test]
+    fn write_pdf_via_write_back_end_to_end() {
+        use crate::media_meta::write_back;
+        use crate::media_meta_edit::MetaEdit;
+        let orig = build_classic_xref_pdf(b"<< /Title (Before) /Creator (Studio) >>");
+        let out = write_back("pdf", &orig, &[MetaEdit::Set { group: "pdf".into(), key: "Title".into(), value: "After".into() }])
+            .expect("pdf is writable via write_back");
+        assert!(out.starts_with(&orig));
+        let read_back = read_pdf(&out);
+        assert_eq!(get(&read_back, "Title"), Some("After"));
+        assert_eq!(get(&read_back, "Creator"), Some("Studio")); // read-only field carried through
     }
 }

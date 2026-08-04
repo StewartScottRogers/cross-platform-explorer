@@ -82,7 +82,10 @@ fn pdf_info_baseline() {
     assert_eq!(val(&f, "Keywords"), "cpe,sample,baseline");
     assert_eq!(val(&f, "Producer"), "gen_samples.py");
     assert_eq!(val(&f, "Date Created"), "D:20260725110000");
-    assert!(f.iter().all(|x| x.group == "pdf" && !x.editable));
+    assert!(f.iter().all(|x| x.group == "pdf"));
+    // Descriptive tags are editable (CPE-1301 write codec); producer intrinsics stay read-only.
+    assert!(f.iter().find(|x| x.key == "Title").unwrap().editable);
+    assert!(!f.iter().find(|x| x.key == "Producer").unwrap().editable);
 }
 
 #[test]

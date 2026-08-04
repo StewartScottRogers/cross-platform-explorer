@@ -966,16 +966,20 @@ fn parse_wav_info(data: &[u8]) -> Vec<MetaField> {
 
 // ---- PDF /Info (CPE-1036) ----
 
-/// Standard PDF document-info dictionary keys mapped to friendly names, in the order we emit them.
-const PDF_INFO_KEYS: &[(&str, &str)] = &[
-    ("/Title", "Title"),
-    ("/Author", "Author"),
-    ("/Subject", "Subject"),
-    ("/Keywords", "Keywords"),
-    ("/Creator", "Creator"),
-    ("/Producer", "Producer"),
-    ("/CreationDate", "Date Created"),
-    ("/ModDate", "Date Modified"),
+/// Standard PDF document-info dictionary keys mapped to friendly names, in the order we emit them. The
+/// third element marks whether the field is user-**editable**: Title/Author/Subject/Keywords are the
+/// descriptive tags the write codec ([`crate::media_meta_write::write_pdf`], CPE-1301) can round-trip via
+/// an incremental `/Info` update; Creator/Producer/CreationDate/ModDate are producer-set intrinsics kept
+/// read-only (the writer still *preserves* them unchanged, it just won't let the studio edit them).
+const PDF_INFO_KEYS: &[(&str, &str, bool)] = &[
+    ("/Title", "Title", true),
+    ("/Author", "Author", true),
+    ("/Subject", "Subject", true),
+    ("/Keywords", "Keywords", true),
+    ("/Creator", "Creator", false),
+    ("/Producer", "Producer", false),
+    ("/CreationDate", "Date Created", false),
+    ("/ModDate", "Date Modified", false),
 ];
 
 /// Parse a PDF's standard document `/Info` dictionary — Title, Author, Subject, Keywords, Creator,
@@ -1168,7 +1172,7 @@ fn find_balanced_dict(bytes: &[u8]) -> Option<(usize, usize)> {
 /// dictionary or reference in that slot is skipped, not mis-parsed). Empty decoded values are dropped.
 fn extract_pdf_fields(dict: &[u8]) -> Vec<MetaField> {
     let mut fields = Vec::new();
-    for &(pdf_key, friendly) in PDF_INFO_KEYS {
+    for &(pdf_key, friendly, editable) in PDF_INFO_KEYS {
         let Some(rel) = find_subslice(dict, pdf_key.as_bytes()) else { continue };
         let after = rel + pdf_key.len();
         let ws_limit = dict.len().min(after + 16);
@@ -1184,7 +1188,7 @@ fn extract_pdf_fields(dict: &[u8]) -> Vec<MetaField> {
         if value.is_empty() {
             continue;
         }
-        fields.push(MetaField { group: "pdf".to_string(), key: friendly.to_string(), value, editable: false });
+        fields.push(MetaField { group: "pdf".to_string(), key: friendly.to_string(), value, editable });
     }
     fields
 }
@@ -2049,7 +2053,15 @@ mod tests {
         assert_eq!(get(&f, "Date Created"), Some("D:20240101120000"));
         assert_eq!(get(&f, "Date Modified"), Some("D:20240102000000"));
         assert_eq!(f.len(), 8);
-        assert!(f.iter().all(|x| x.group == "pdf" && !x.editable));
+        assert!(f.iter().all(|x| x.group == "pdf"));
+        // The four descriptive tags are user-editable (the write codec, CPE-1301, round-trips them);
+        // the producer intrinsics stay read-only (the writer preserves but won't edit them).
+        for key in ["Title", "Author", "Subject", "Keywords"] {
+            assert!(f.iter().find(|x| x.key == key).unwrap().editable, "{key} should be editable");
+        }
+        for key in ["Creator", "Producer", "Date Created", "Date Modified"] {
+            assert!(!f.iter().find(|x| x.key == key).unwrap().editable, "{key} should be read-only");
+        }
     }
 
     #[test]
