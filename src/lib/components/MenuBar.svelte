@@ -50,6 +50,7 @@
         { id: "find-similar-images", labelKey: "mi.findSimilarImages", icon: "image" },
         { id: "find-similar-documents", labelKey: "mi.findSimilarDocuments", icon: "document" },
         { id: "find-similar-folders", labelKey: "mi.findSimilarFolders", icon: "folder" },
+        { id: "find-dangling-links", labelKey: "mi.findDanglingLinks", icon: "link-broken" },
         { id: "organize-folder", labelKey: "mi.organizeFolder", icon: "sort" },
         { sep: true },
         { id: "copy-file-names", labelKey: "mi.copyFileNames", icon: "rename" },
