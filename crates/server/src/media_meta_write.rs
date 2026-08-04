@@ -1457,8 +1457,22 @@ fn iim_dataset_for_key(key: &str) -> Option<u8> {
 /// Append one IIM dataset to `out`: `0x1C`, record, dataset, 2-byte big-endian length, value. Values are
 /// clamped to the standard (non-extended) 0x7FFF length form — these are short text fields in practice, and
 /// the reader ([`crate::media_meta_read`]'s `parse_iim_datasets`) doesn't decode the extended-length form.
+/// `value` is always UTF-8 (every caller passes `str::as_bytes()`), so a raw byte clamp at 0x7FFF can land
+/// mid-codepoint and emit invalid UTF-8 (CPE-1313). Back the cap off to the nearest UTF-8 char boundary —
+/// a byte is a continuation byte (not a boundary) when its top two bits are `10` — so the emitted value is
+/// always valid UTF-8, never a partial codepoint. `str::is_char_boundary`/`floor_char_boundary` aren't
+/// usable here since `value` is `&[u8]`, not `&str`; this hand-rolls the same rule. A no-op for the common
+/// case (value.len() <= 0x7FFF), since the end of a valid UTF-8 slice is always already a char boundary.
 fn push_iim_dataset(out: &mut Vec<u8>, record: u8, dataset: u8, value: &[u8]) {
-    let len = value.len().min(0x7FFF);
+    let mut len = value.len().min(0x7FFF);
+    if len < value.len() {
+        // Only walk back when the cap actually truncated something — `len == value.len()` is always
+        // itself a valid boundary (the end of a valid UTF-8 slice), and indexing `value[len]` there
+        // would be out of bounds.
+        while len > 0 && (value[len] & 0xC0) == 0x80 {
+            len -= 1;
+        }
+    }
     out.push(0x1C);
     out.push(record);
     out.push(dataset);
@@ -3060,6 +3074,60 @@ mod tests {
         assert_eq!(get(&back, "City"), Some("Lisbon"));
         assert!(out.windows(3).any(|w| w == [0x1B, 0x25, 0x47]), "charset declaration is unconditional, even for pure ASCII");
         assert!(out.ends_with(&tail));
+    }
+
+    /// CPE-1313: `push_iim_dataset`'s 0x7FFF length clamp used to be a raw byte slice (`value.len().min(0x7FFF)`
+    /// then `&value[..len]`), with no UTF-8 char-boundary check. 16384 repeats of 'é' (U+00E9, a 2-byte UTF-8
+    /// codepoint) is exactly 32768 bytes — one past the cap — so the naive clamp lands at byte offset 32767,
+    /// which is the *second* byte of the final 'é' (a continuation byte, not a char boundary): a raw clamp
+    /// there slices a partial codepoint into the dataset, producing invalid UTF-8. This is the falsifiable
+    /// core of the bug: reverting the fix (back to the one-line `let len = value.len().min(0x7FFF);` clamp)
+    /// makes the `std::str::from_utf8` assertion below panic with a `Utf8Error` — verified by hand before
+    /// applying the fix. With the fix, the cap backs off to the nearest char boundary (32766, i.e. 16383
+    /// whole 'é's) and the emitted bytes are always valid UTF-8.
+    #[test]
+    fn push_iim_dataset_clamps_on_a_utf8_char_boundary_not_mid_codepoint() {
+        let value = "é".repeat(16384);
+        assert_eq!(value.len(), 32768, "sanity: byte length exceeds the 0x7FFF cap by exactly one byte");
+        let mut out = Vec::new();
+        push_iim_dataset(&mut out, 2, 120, value.as_bytes());
+
+        // Dataset framing: 0x1C, record, dataset, 2-byte BE length, then `length` bytes of value.
+        assert_eq!(out[0], 0x1C);
+        assert_eq!(out[1], 2);
+        assert_eq!(out[2], 120);
+        let len = u16::from_be_bytes([out[3], out[4]]) as usize;
+        assert!(len <= 0x7FFF, "dataset length must stay within the standard non-extended form");
+        assert_eq!(out.len(), 5 + len, "no trailing bytes past the declared length");
+        let written_value = &out[5..5 + len];
+
+        // The core assertion: the written value must be valid UTF-8, never a partial codepoint.
+        std::str::from_utf8(written_value).expect("push_iim_dataset must never split a UTF-8 codepoint");
+
+        // Backs off to 32766 (16383 whole 'é's), not the mid-codepoint 32767 a raw byte clamp would keep.
+        assert_eq!(len, 32766);
+        assert_eq!(written_value, "é".repeat(16383).as_bytes());
+    }
+
+    /// End-to-end version of the same CPE-1313 fix, through the public `write_iptc`/`read_iptc` pair: a CJK
+    /// caption (3-byte codepoints) long enough that the 0x7FFF cap lands mid-codepoint must still round-trip
+    /// as clean, valid UTF-8 — not as `read_iptc`'s `from_utf8_lossy` silently mojibaking corrupt bytes into
+    /// U+FFFD replacement characters (which would mask the corruption rather than surface it).
+    #[test]
+    fn write_iptc_long_multibyte_caption_stays_valid_utf8_and_round_trips_without_corruption() {
+        use crate::media_meta_read::read_iptc;
+        // 11000 repeats of 3-byte U+6587 ("文") = 33000 bytes; 0x7FFF (32767) isn't a multiple of 3, so the
+        // naive clamp truncates inside the last character's bytes.
+        let long_caption = "文".repeat(11000);
+        assert!(long_caption.len() > 0x7FFF, "sanity: caption exceeds the 0x7FFF cap");
+        let (seed, tail) = jpeg_with(&[]);
+        let out = write_iptc(&seed, &[mfield("iptc", "Caption/Abstract", &long_caption)]).unwrap();
+
+        let back = read_iptc(&out);
+        let round_tripped = get(&back, "Caption/Abstract").expect("truncated caption must still survive as a field");
+        assert!(!round_tripped.contains('\u{FFFD}'), "truncated caption must not contain UTF-8 replacement chars (mid-codepoint corruption)");
+        assert!(long_caption.starts_with(round_tripped), "surviving value must be a clean prefix of the original, not corrupted bytes");
+        assert!(out.ends_with(&tail), "image scan data must be preserved verbatim");
     }
 
     /// Re-verify finding #3: clearing the LAST IPTC field when a **non-IPTC** 8BIM resource also exists in
