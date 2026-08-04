@@ -4,7 +4,7 @@ title: "Exclude-glob support for the tree-scan walkers"
 type: feature
 component: cpe-server
 priority: medium
-status: Doing
+status: Done
 tags: ready
 created: 2026-08-03
 epic: CPE-1002
@@ -43,3 +43,4 @@ Final shift-3 headless item (PM: value thinning beyond this). Glob-exclude, NOT 
 Touches the walkers refactored in CPE-1294/1295/1296 + empty_dirs + the shared matcher + commands + bindings.
 
 ## Work Log
+- 2026-08-03 — exclude-globs merged (#600). Reviewer (opus) APPROVE: shared glob.rs matcher preserves BOTH callers exact semantics (19x17 parity matrix — name_search case-sensitive, selection case-insensitive wrapper), empty==old (short-circuit, all pre-existing tests pass with &[]), exclude prunes incl the empty-dirs cascade subtlety (excluded child counted as content — no false cascade-empty, tested both ways), bindings zero-drift (exactly 7 signatures gain excludes). 1463+ + 118 test, both feature modes clippy + npm check clean. Backend capability; UI wiring a separate ticket.
