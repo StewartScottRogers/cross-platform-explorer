@@ -4,7 +4,7 @@ title: "Streaming variant for the type-mismatch tree sweep"
 type: feature
 component: cpe-server
 priority: medium
-status: Doing
+status: Done
 tags: ready
 created: 2026-08-03
 epic: CPE-1002
@@ -39,3 +39,4 @@ Template: `crates/server/src/listing.rs` (`stream_dir_entries`). Streaming-liven
 Epic CPE-1002; command wiring = CPE-1299 (shared with CPE-1295/1296).
 
 ## Work Log
+- 2026-08-03 — type-mismatch streaming walker merged (#595). Reviewer APPROVE: collect-to-vec parity by direct diff + struct-equality test, batching (<=64 + per-dir + final flush) + early-Break truncation verified, container-safety untouched, 14/14 re-run clippy clean both modes.
