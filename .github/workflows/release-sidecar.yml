@@ -71,12 +71,21 @@ jobs:
             --notes-file "$notes_file" \
             --draft
           # Draft releases are NOT git-tagged until published, so `GET /releases/tags/{tag}` 404s on a
-          # draft (CPE-1303). List releases and match by `tag_name` (which drafts DO carry) instead.
-          release_id="$(gh api --paginate "repos/${{ github.repository }}/releases" \
-            --jq ".[] | select(.tag_name == \"$TAG\") | .id" | head -n1)"
-          if [ -z "$release_id" ]; then
-            echo "::error::could not resolve draft release id for $TAG"; exit 1
+          # draft (CPE-1303). Resolve the draft's numeric id via `gh release view` (which matches drafts by
+          # tag_name), and RETRY — the just-created draft can take a few seconds to become visible to the
+          # API (eventual consistency), which is what failed the first attempt.
+          release_id=""
+          for attempt in 1 2 3 4 5 6; do
+            release_id="$(gh release view "$TAG" --repo "${{ github.repository }}" \
+              --json databaseId --jq '.databaseId' 2>/dev/null || true)"
+            if [ -n "$release_id" ] && [ "$release_id" != "null" ]; then break; fi
+            echo "draft release id for $TAG not visible yet (attempt $attempt/6) — retrying in 5s"
+            sleep 5
+          done
+          if [ -z "$release_id" ] || [ "$release_id" = "null" ]; then
+            echo "::error::could not resolve draft release id for $TAG after retries"; exit 1
           fi
+          echo "resolved release_id=$release_id"
           echo "release_id=$release_id" >> "$GITHUB_OUTPUT"
 
   release-sidecar:
