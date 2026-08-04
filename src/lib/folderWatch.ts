@@ -110,22 +110,36 @@ export async function handleFolderBatch(
       g.guard(ev.path, now);
       for (const a of actions) g.guard(a.resolved, now);
       const results = await deps.run(ev.path, actions);
-      // Fold the results into a reversible record: track where the file ended (move/rename) + copies made.
+      // Fold the results into a reversible record: track where the file ended (move/rename) + copies
+      // made — but only for actions that actually succeeded. A failed op (disk full, permission
+      // denied, ...) must never be recorded as fired or made undoable: nothing landed at the result
+      // path, so guarding/undoing it would be acting on a location the real file was never touched at.
       let finalPath = ev.path;
       const copies: string[] = [];
+      const succeeded: typeof actions = [];
       actions.forEach((a, i) => {
-        const outPath = results[i]?.path ?? a.resolved;
+        const result = results[i];
+        if (!result?.ok) {
+          // Never swallow a partial failure — name what went wrong (matches App.svelte's reportResults).
+          console.warn(
+            `Watch rule "${plan.rule.name}" failed to ${a.kind} ${ev.path} -> ${a.resolved}: ${result?.error ?? "no result"}`,
+          );
+          return;
+        }
+        succeeded.push(a);
+        const outPath = result.path;
         g.guard(outPath, now); // the result path's echo event is the executor's own
         if (a.kind === "copy") copies.push(outPath);
         else finalPath = outPath; // move / rename relocates the file
       });
+      if (succeeded.length === 0) continue; // every action failed — nothing fired, nothing to undo
       onFire({
         id: newFireId(),
         rule: plan.rule.name,
         source: ev.path,
         finalPath,
         copies,
-        summary: `${plan.rule.name}: ${entry.name} → ${actions.map((a) => a.resolved).join(", ")}`,
+        summary: `${plan.rule.name}: ${entry.name} → ${succeeded.map((a) => a.resolved).join(", ")}`,
       });
     } catch {
       // File gone / stat failed / exec error — skip this one, keep watching.
