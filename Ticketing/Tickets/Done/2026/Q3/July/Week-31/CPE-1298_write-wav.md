@@ -4,7 +4,7 @@ title: "write_wav: RIFF LIST/INFO metadata writer (read/write symmetry)"
 type: feature
 component: cpe-server
 priority: medium
-status: Doing
+status: Done
 tags: ready
 created: 2026-08-03
 epic: CPE-725
@@ -39,3 +39,4 @@ later `write_pdf` (CPE-1300) — sequence write_pdf after this. Do NOT add write
 `parser_panic_safety.rs` here (keeps it disjoint from CPE-1297); a one-line harness follow-up can come later.
 
 ## Work Log
+- 2026-08-03 — write_wav merged (#596). Reviewer APPROVE: RIFF size recomputed (no drift), even-padding correct, id-mapping exact inverse of read_wav, idempotent, fmt/data byte-preserved (tested), 118/118 re-run clippy clean. Non-blocking nit (follow-up): the INFO-form-type peek (media_meta_write.rs ~965) reads from orig directly rather than the chunk-bounded data slice like read_wav does — harmless (.get()-guarded, only on malformed <4B LIST), could tighten to `orig.get(data_start..data_end)?.get(0..4)`.
