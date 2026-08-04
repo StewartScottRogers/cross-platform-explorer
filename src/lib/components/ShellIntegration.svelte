@@ -1,19 +1,23 @@
 <script lang="ts">
-  /** Settings › Shell integration (CPE-1023, epic CPE-712). A self-contained toggle that adds/removes the
-      "Open in Cross-Platform Explorer" entry in the OS right-click menu by calling the backend
-      install/uninstall commands (CPE-1020). Self-managing (queries its own state on mount) like
-      SidecarManager, so the parent SettingsDialog stays a dumb view. Windows-only backend today: on other
-      OSes the control is shown disabled with a "coming soon" note rather than hidden, so the feature is
-      discoverable everywhere. No launch-time consent modal — this lives in Settings per
-      [[avoid-modal-permission-popups]]. */
+  /** Settings › Shell integration (CPE-1023, epic CPE-712; Linux support CPE-1306). A self-contained toggle
+      that adds/removes the "Open in Cross-Platform Explorer" entry in the OS right-click menu by calling
+      the backend install/uninstall commands (CPE-1020 Windows, CPE-1306 Linux). Self-managing (queries its
+      own state on mount) like SidecarManager, so the parent SettingsDialog stays a dumb view. The apply
+      glue is implemented on Windows and Linux; macOS is still "coming soon" — shown disabled with a note
+      rather than hidden, so the feature is discoverable everywhere. No launch-time consent modal — this
+      lives in Settings per [[avoid-modal-permission-popups]]. */
   import { onMount } from "svelte";
   import { invoke } from "../invoke";
 
-  // The webview's navigator reflects the host OS (as DiagnosticsOverlay already relies on). The apply glue
-  // exists on Windows only so far (CPE-1020); elsewhere we disable the control and say so.
+  // The webview's navigator reflects the host OS (as DiagnosticsOverlay already relies on), detected with
+  // the same platform-sniffing convention used across the codebase (e.g. NewLinkDialog's `isWindows`). The
+  // shell-integration apply glue exists on Windows (CPE-1020) and Linux (CPE-1306); macOS (CPE-1022) is
+  // plan-only so far — elsewhere we disable the control and say so.
   const platform = typeof navigator !== "undefined" ? navigator.platform || navigator.userAgent : "";
   const isWindows = /win/i.test(platform);
-  const osLabel = /mac/i.test(platform) ? "macOS" : /linux/i.test(platform) ? "Linux" : "this platform";
+  const isLinux = /linux/i.test(platform);
+  const isSupported = isWindows || isLinux;
+  const osLabel = /mac/i.test(platform) ? "macOS" : isLinux ? "Linux" : "this platform";
 
   let installed: boolean | null = null; // null → still loading / unknown
   let busy = false;
@@ -26,19 +30,24 @@
   let dfmError = "";
 
   onMount(async () => {
-    if (!isWindows) {
+    if (isSupported) {
+      try {
+        installed = await invoke<boolean>("shell_integration_installed");
+      } catch {
+        installed = false; // treat an unreadable state as "not installed" rather than blocking the toggle
+      }
+    } else {
       installed = false;
-      registered = false;
-      return;
     }
-    try {
-      installed = await invoke<boolean>("shell_integration_installed");
-    } catch {
-      installed = false; // treat an unreadable state as "not installed" rather than blocking the toggle
-    }
-    try {
-      registered = await invoke<boolean>("default_file_manager_status");
-    } catch {
+    // Default-apps registration is Windows-only so far (CPE-1277); Linux keeps the "coming soon" copy for
+    // this sub-section even though the shell-integration toggle above is now enabled for it.
+    if (isWindows) {
+      try {
+        registered = await invoke<boolean>("default_file_manager_status");
+      } catch {
+        registered = false;
+      }
+    } else {
       registered = false;
     }
   });
@@ -106,12 +115,12 @@
   <input
     type="checkbox"
     checked={installed === true}
-    disabled={!isWindows || busy || installed === null}
+    disabled={!isSupported || busy || installed === null}
     on:change={(e) => toggle(e.currentTarget.checked)}
   />
 </div>
-{#if !isWindows}
-  <div class="note">Coming to {osLabel} soon — available on Windows today.</div>
+{#if !isSupported}
+  <div class="note">Coming to {osLabel} soon — available on Windows and Linux today.</div>
 {:else if error}
   <div class="note error">Couldn’t update: {error}</div>
 {/if}

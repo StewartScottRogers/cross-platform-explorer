@@ -142,15 +142,23 @@ pub struct LinuxShellPlan {
 /// Build the Linux "Open in CPE" registration plan: a `.desktop` launcher that opens folders (`%F`,
 /// `MimeType=inode/directory`) with an "Open in <app>" desktop action, installed in the user's
 /// applications dir and set as the default `inode/directory` handler.
+///
+/// Per the freedesktop Desktop Entry spec: `Icon` must be an icon *theme name* (or an absolute path to
+/// an icon *file*) — never the executable — so it's hardcoded to the app's installed hicolor icon name
+/// (Tauri's Linux bundler installs it under that name, matching the Cargo package name /
+/// `desktop_id` basename below, not the caller-supplied `exe_path`). `Exec` quotes the executable path
+/// (a space in the install path would otherwise break DE parsing) with the field code kept OUTSIDE the
+/// quotes, mirroring the Windows sibling (`windows_shell_plan`).
 pub fn linux_shell_plan(exe_path: &str, app_name: &str, home: &str) -> LinuxShellPlan {
     let desktop_id = "cross-platform-explorer.desktop".to_string();
+    let icon_name = "cross-platform-explorer";
     let desktop_path = format!("{home}/.local/share/applications/{desktop_id}");
     let desktop_contents = format!(
         "[Desktop Entry]\n\
          Type=Application\n\
          Name={app_name}\n\
-         Exec={exe_path} %F\n\
-         Icon={exe_path}\n\
+         Exec=\"{exe_path}\" %F\n\
+         Icon={icon_name}\n\
          Terminal=false\n\
          NoDisplay=false\n\
          MimeType=inode/directory;\n\
@@ -159,7 +167,7 @@ pub fn linux_shell_plan(exe_path: &str, app_name: &str, home: &str) -> LinuxShel
          \n\
          [Desktop Action OpenInCPE]\n\
          Name=Open in {app_name}\n\
-         Exec={exe_path} %F\n"
+         Exec=\"{exe_path}\" %F\n"
     );
     LinuxShellPlan {
         remove_paths: vec![desktop_path.clone()],
@@ -607,10 +615,35 @@ mod tests {
         assert_eq!(p.mime_type, "inode/directory");
         // A valid launcher for folders, with the "Open in …" action.
         assert!(p.desktop_contents.contains("[Desktop Entry]"));
-        assert!(p.desktop_contents.contains("Exec=/opt/cpe/cpe %F"));
+        assert!(p.desktop_contents.contains(r#"Exec="/opt/cpe/cpe" %F"#));
         assert!(p.desktop_contents.contains("MimeType=inode/directory;"));
         assert!(p.desktop_contents.contains("[Desktop Action OpenInCPE]"));
         assert!(p.desktop_contents.contains("Name=Open in Cross-Platform Explorer"));
+    }
+
+    #[test]
+    fn linux_plan_icon_is_a_bare_theme_name_not_the_exe_path() {
+        // Desktop Entry spec: Icon must be an icon theme name (or an absolute path to an icon FILE) —
+        // never the app's executable. A space or unusual chars in the install path must not leak in.
+        let p = linux_shell_plan("/opt/cross platform explorer/cpe", "Cross-Platform Explorer", "/home/sam");
+        let icon_line = p.desktop_contents.lines().find(|l| l.starts_with("Icon=")).expect("Icon= line present");
+        let icon_value = icon_line.strip_prefix("Icon=").unwrap();
+        assert!(!icon_value.contains('/'), "Icon must be a bare name, not a path: {icon_value}");
+        assert!(!icon_value.ends_with(".png"), "Icon must be a theme name, not a filename: {icon_value}");
+        assert_ne!(icon_value, "/opt/cross platform explorer/cpe", "Icon must not be the exe path");
+        assert_eq!(icon_value, "cross-platform-explorer");
+    }
+
+    #[test]
+    fn linux_plan_quotes_the_exe_path_in_both_exec_lines() {
+        // A space in the install path must not break DE parsing; the field code (%F) stays outside the
+        // quotes, mirroring the Windows sibling's quoted-exe command strings.
+        let p = linux_shell_plan("/opt/cross platform explorer/cpe", "Cross-Platform Explorer", "/home/sam");
+        let exec_lines: Vec<&str> = p.desktop_contents.lines().filter(|l| l.starts_with("Exec=")).collect();
+        assert_eq!(exec_lines.len(), 2, "expected an Exec= in [Desktop Entry] and in [Desktop Action OpenInCPE]");
+        for line in exec_lines {
+            assert_eq!(line, r#"Exec="/opt/cross platform explorer/cpe" %F"#, "exe path must be quoted, %F outside quotes: {line}");
+        }
     }
 
     #[test]
@@ -650,15 +683,25 @@ mod tests {
         assert!(!std::path::Path::new(&plan.desktop_path).exists(), "desktop file should be gone after remove");
     }
 
+    /// Guards process-wide `$HOME` mutation so this test can't race any other test in the same binary
+    /// that reads `HOME` (`cargo test` runs tests on multiple threads by default). No new dependency —
+    /// `std::sync::Mutex`, poison-tolerant via `unwrap_or_else(PoisonError::into_inner)` so one panicking
+    /// test under the lock can't wedge the rest.
+    #[cfg(target_os = "linux")]
+    static HOME_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     #[cfg(target_os = "linux")]
     #[test]
     fn linux_shell_integration_installed_reflects_the_real_file() {
+        // Serialize against any other test in this process that reads/writes $HOME while we mutate it.
+        let _guard = HOME_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+
         // Route `linux_plan_for_current_user` at a scratch $HOME via env var for this one test, restoring
         // afterwards so it can't leak into other tests running in the same process.
         let scratch = tempfile::tempdir().expect("tempdir");
         let prior = std::env::var("HOME").ok();
-        // SAFETY: test-only, single-threaded within this test's own execution; restored below before
-        // returning so no other test observes the overridden value.
+        // SAFETY: test-only, guarded by HOME_ENV_LOCK above so no other test observes a torn value;
+        // restored below before returning so no other test observes the overridden value.
         unsafe { std::env::set_var("HOME", scratch.path()) };
 
         assert!(!shell_integration_installed(), "nothing installed yet");

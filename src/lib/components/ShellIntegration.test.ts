@@ -82,12 +82,45 @@ describe("ShellIntegration toggle (CPE-1023)", () => {
     expect(calls).toContain("uninstall_shell_integration");
   });
 
-  it("off Windows, the control is disabled with a coming-soon note and never calls the backend", async () => {
+  it("on Linux, reflects not-installed state and installs on check (CPE-1306)", async () => {
     setPlatform("Linux x86_64");
+    render(ShellIntegration);
+    // Linux now drives the same backend path as Windows — queries state on mount; checkbox starts
+    // unchecked + enabled.
+    await waitFor(() => expect(calls).toContain("shell_integration_installed"));
+    const box = screen.getByRole("checkbox") as HTMLInputElement;
+    expect(box.checked).toBe(false);
+    expect(box.disabled).toBe(false);
+
+    await fireEvent.change(box, { target: { checked: true } });
+    await waitFor(() => expect(box.checked).toBe(true));
+    expect(calls).toContain("install_shell_integration");
+    expect(calls.filter((c) => c === "shell_integration_installed").length).toBeGreaterThanOrEqual(2);
+    // No "coming soon" note once the OS is supported.
+    expect(screen.queryByText(/coming to Linux soon/i)).toBeFalsy();
+  });
+
+  it("on Linux, uninstalls when already installed and unchecked (CPE-1306)", async () => {
+    setPlatform("Linux x86_64");
+    installedState = true;
+    render(ShellIntegration);
+    const box = await waitFor(() => {
+      const b = screen.getByRole("checkbox") as HTMLInputElement;
+      expect(b.checked).toBe(true);
+      return b;
+    });
+
+    await fireEvent.change(box, { target: { checked: false } });
+    await waitFor(() => expect(box.checked).toBe(false));
+    expect(calls).toContain("uninstall_shell_integration");
+  });
+
+  it("off Windows and Linux (macOS), the control is disabled with a coming-soon note and never calls the backend", async () => {
+    setPlatform("MacIntel");
     render(ShellIntegration);
     const box = screen.getByRole("checkbox") as HTMLInputElement;
     expect(box.disabled).toBe(true);
-    expect(screen.getByText(/coming to Linux soon/i)).toBeTruthy();
+    expect(screen.getByText(/coming to macOS soon/i)).toBeTruthy();
     // No install/uninstall/query calls on an unsupported OS.
     expect(calls).not.toContain("install_shell_integration");
     expect(calls).not.toContain("shell_integration_installed");
