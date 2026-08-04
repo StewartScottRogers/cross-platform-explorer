@@ -7,13 +7,14 @@
 //! (jpeg APP13/8BIM/IIM, merged alongside EXIF), XMP (jpeg APP1, merged alongside EXIF + IPTC, plus
 //! standalone `.xmp` sidecars), WAV/RIFF-INFO, PDF `/Info`, and MP4/MOV video tags. Write coverage is
 //! narrower — only the formats with a write codec ([`crate::media_meta_write`]): **mp3**, **flac**, and
-//! **jpeg** (EXIF), and **ogg**/**oga** (Vorbis comments). [`is_writable`] lets the UI show read-only fields
-//! for the rest until their writers land (video/PDF write-back are deferred as format-risky, and TIFF EXIF
-//! write is deferred because the EXIF *is* a TIFF's own IFD chain).
+//! **jpeg** (EXIF), **ogg**/**oga** (Vorbis comments), and **wav** (RIFF `LIST`/`INFO`).
+//! [`is_writable`] lets the UI show read-only fields for the rest until their writers land (video/PDF
+//! write-back are deferred as format-risky, and TIFF EXIF write is deferred because the EXIF *is* a
+//! TIFF's own IFD chain).
 
 use crate::media_meta_edit::{apply_edits, MetaEdit, MetaField};
 use crate::media_meta_read::{read_exif, read_flac, read_id3v2, read_iptc, read_ogg, read_pdf, read_wav, read_xmp};
-use crate::media_meta_write::{write_exif, write_flac, write_id3v2, write_ogg};
+use crate::media_meta_write::{write_exif, write_flac, write_id3v2, write_ogg, write_wav};
 use crate::video_meta_read::read_mp4;
 
 /// Every metadata field the studio can show for a file, chosen by extension. A file whose kind has no
@@ -41,9 +42,10 @@ pub fn read_all(ext: &str, bytes: &[u8]) -> Vec<MetaField> {
 /// Whether `ext` has a write-back codec today, so the studio can offer editing (not just viewing).
 pub fn is_writable(ext: &str) -> bool {
     // jpg/jpeg carry an EXIF write codec ([`write_exif`]); ogg/oga carry a Vorbis-comment write codec
-    // ([`write_ogg`]). tif/tiff are intentionally excluded — for a TIFF the EXIF *is* the file's own IFD
-    // chain, so rebuilding it from four tags would drop the image.
-    matches!(ext.to_ascii_lowercase().as_str(), "mp3" | "flac" | "jpg" | "jpeg" | "ogg" | "oga")
+    // ([`write_ogg`]); wav carries a RIFF LIST/INFO write codec ([`write_wav`]). tif/tiff are
+    // intentionally excluded — for a TIFF the EXIF *is* the file's own IFD chain, so rebuilding it from
+    // four tags would drop the image.
+    matches!(ext.to_ascii_lowercase().as_str(), "mp3" | "flac" | "jpg" | "jpeg" | "ogg" | "oga" | "wav")
 }
 
 /// Apply `edits` to the file's current fields and serialise the result back to new file bytes. Reads the
@@ -58,6 +60,7 @@ pub fn write_back(ext: &str, orig: &[u8], edits: &[MetaEdit]) -> Result<Vec<u8>,
         "flac" => Ok(write_flac(orig, &result.fields)),
         "ogg" | "oga" => write_ogg(orig, &result.fields),
         "jpg" | "jpeg" => write_exif(orig, &result.fields),
+        "wav" => write_wav(orig, &result.fields),
         other => Err(format!("editing {other} metadata isn't supported yet")),
     }
 }
@@ -109,13 +112,79 @@ mod tests {
     }
 
     #[test]
-    fn is_writable_for_mp3_flac_jpeg_and_ogg() {
+    fn is_writable_for_mp3_flac_jpeg_ogg_and_wav() {
         assert!(is_writable("mp3") && is_writable("FLAC"));
         assert!(is_writable("jpg") && is_writable("JPEG")); // EXIF write codec (CPE-1288)
         assert!(is_writable("ogg") && is_writable("OGA")); // Vorbis-comment write codec (CPE-1289)
+        assert!(is_writable("wav") && is_writable("WAV")); // RIFF LIST/INFO write codec (CPE-1298)
         // TIFF EXIF write is deferred (the EXIF is a TIFF's own IFD); other formats have no writer yet.
         assert!(!is_writable("tif") && !is_writable("tiff"));
         assert!(!is_writable("pdf") && !is_writable("mp4"));
+    }
+
+    /// Build a minimal WAV: `RIFF` header + a `fmt ` chunk + a `data` chunk carrying `audio`, and (if
+    /// `info_fields` is non-empty) a `LIST`/`INFO` chunk built via `write_wav` semantics from those fields.
+    fn wav(info_fields: &[(&str, &str)], audio: &[u8]) -> Vec<u8> {
+        use crate::media_meta_write::write_wav;
+        let fmt_data: [u8; 16] = [1, 0, 2, 0, 0x44, 0xAC, 0, 0, 0, 0, 0, 0, 4, 0, 16, 0];
+        let mut body = Vec::new();
+        body.extend_from_slice(b"WAVE");
+        body.extend_from_slice(b"fmt ");
+        body.extend_from_slice(&(fmt_data.len() as u32).to_le_bytes());
+        body.extend_from_slice(&fmt_data);
+        body.extend_from_slice(b"data");
+        body.extend_from_slice(&(audio.len() as u32).to_le_bytes());
+        body.extend_from_slice(audio);
+        if audio.len() % 2 != 0 {
+            body.push(0);
+        }
+        let mut base = Vec::new();
+        base.extend_from_slice(b"RIFF");
+        base.extend_from_slice(&(body.len() as u32).to_le_bytes());
+        base.extend_from_slice(&body);
+        if info_fields.is_empty() {
+            return base;
+        }
+        let fields: Vec<MetaField> = info_fields
+            .iter()
+            .map(|&(k, v)| MetaField { group: "wav".to_string(), key: k.to_string(), value: v.to_string(), editable: true })
+            .collect();
+        write_wav(&base, &fields).expect("well-formed WAV")
+    }
+
+    #[test]
+    fn write_back_round_trips_and_preserves_audio_for_wav() {
+        let audio = b"WAVEFORMSAMPLESHERE";
+        let orig = wav(&[("Title", "Old Title"), ("Artist", "Keep Artist")], audio);
+        let edits = vec![
+            MetaEdit::Set { group: "wav".into(), key: "Title".into(), value: "New Title".into() },
+            MetaEdit::Set { group: "wav".into(), key: "Album".into(), value: "New Album".into() },
+        ];
+        let out = write_back("wav", &orig, &edits).expect("wav is writable");
+        let fields = read_all("wav", &out);
+        assert_eq!(get(&fields, "Title"), Some("New Title"));
+        assert_eq!(get(&fields, "Album"), Some("New Album"));
+        assert_eq!(get(&fields, "Artist"), Some("Keep Artist")); // untouched field survives
+        assert!(out.windows(audio.len()).any(|w| w == audio), "audio data must survive byte-for-byte");
+    }
+
+    #[test]
+    fn write_back_inserts_wav_info_chunk_when_absent() {
+        let audio = b"NOINFOAUDIO";
+        let orig = wav(&[], audio); // no LIST/INFO chunk at all
+        assert!(read_all("wav", &orig).is_empty()); // sanity: nothing to read yet
+
+        let out = write_back("wav", &orig, &[MetaEdit::Set { group: "wav".into(), key: "Title".into(), value: "Fresh".into() }])
+            .expect("wav is writable");
+        let fields = read_all("wav", &out);
+        assert_eq!(get(&fields, "Title"), Some("Fresh"));
+        assert!(out.windows(audio.len()).any(|w| w == audio));
+    }
+
+    #[test]
+    fn write_back_errs_for_malformed_wav_bytes_without_panicking() {
+        let err = write_back("wav", b"not a wav file at all", &[]).unwrap_err();
+        assert!(err.contains("WAV") || err.contains("RIFF"));
     }
 
     #[test]
