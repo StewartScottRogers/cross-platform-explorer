@@ -782,3 +782,39 @@ them; history.md stopped at 07-31). Authoritative record is the checkpoint commi
   same file (media_meta.rs) always conflict on imports+doc+dispatch arms → resolve to the UNION.
 - Throughput: ~14 tickets, ~34 sub-agent runs, deep budget headroom (never near the 200 reset line). Main green
   throughout (real CI; GUI-smoke still times out at 20m systemically — pre-existing, unrelated).
+
+## 2026-08-03 (run 2) — "another 3 workshifts": streaming scans + robustness + write symmetry (9 shipped)
+- Shipped: CPE-1294/1295/1296 (streaming walkers for the mismatch/dangling/orphan tree-sweeps —
+  flush-callback over ipc::Channel per listing.rs), CPE-1297 (close parser_panic_safety gap:
+  iptc/exif-write/ogg-write/vorbis-write), CPE-1298 (write_wav RIFF LIST/INFO), CPE-1299 (wire 3 stream
+  commands + 3 cancel + bindings), CPE-1300 (post-audit bug sweep — ALL CLEAN, honest, +1 regression test),
+  CPE-1301 (write_pdf incremental /Info update), CPE-1302 (exclude-glob support for the 4 tree-scans +
+  shared glob matcher). Epics CPE-1002 + CPE-725.
+- PM verdict up front: headless well "real but shallowing — ~2 solid shifts, thinning to a 3rd of lower
+  value." Held to it: did the 8 solid tickets + 1 genuinely-useful shift-3 item (exclude-globs); SKIPPED the
+  flaky/low-value perf-smoke (T9) rather than manufacture filler.
+- Tuned defaults CONFIRMED from run 1:
+  - **streaming-walker refactor (flush-callback + collect-to-vec wrapper)**: sonnet, disjoint single-file,
+    ~9-13m, 0 retries. Reviewer must confirm collect-to-vec parity byte-identical + Break + no-empty-flush.
+    Design nuance to respect: dangling-links can't stream incrementally (is_cyclic needs the whole link set)
+    → walk-to-completion-then-batch is correct, not a missed optimization.
+  - **format codec (write_wav/write_pdf)**: sonnet for WAV (RIFF is simple), OPUS for PDF (xref/trailer
+    arithmetic) + opus reviewer. write_pdf: incremental-append (prefix property) is the safe approach; refuse
+    xref-stream PDFs with an honest Err rather than emit a broken table.
+  - **stream/command integration (lib.rs + bindings)**: sonnet; reviewer re-runs export_bindings +
+    `git diff --exit-code` for zero drift AND checks BOTH generate_handler! + collect_commands! lists.
+  - **audit ticket**: opus; an all-clean result is a valid honest outcome (don't manufacture a fix). Reviewer
+    should EMPIRICALLY spot-check (mutate a slice → confirm the regression test catches it).
+- Gauntlet: 0 escaped defects, 0 retries this run (vs 1 catch-and-fix in run 1). Reviewers were rigorous —
+  one wrote a throwaway test to prove stream-cancel actually breaks the walk; one mutated a slice to prove an
+  audit regression test was real; one validated the dangling-stream design with a concrete misclassification
+  example. This depth is why nothing bounced.
+- PROCESS: applied the run-1 lesson ([[admin-merge-conflict-deletes-branch]]) — checked `gh pr view --json
+  mergeable` before every --admin merge; media_meta.rs / media_meta_read.rs union-conflicts (parallel
+  read-vs-write codec PRs) resolved locally via branch-from-PR-head + `git merge main` + ff-land, never
+  --admin-on-conflict. Zero lost work this run.
+- Throughput: 9 tickets, ~34 sub-agent runs, deep budget headroom. Main green throughout (real CI).
+- HONEST STATE AFTER 2 RUNS: the clean headless well is now essentially tapped. Remaining frontier is
+  GUI/attended (File-Health panel UI, metadata-edit UI, scan-exclude UI, near-dup review) or user-gated
+  (AI model/key, OCR engine, cloud/SFTP creds, code-signing cert, Mac). Next session should either take an
+  attended/GUI epic WITH the user, or get a user resource — not scrape for more headless filler.
