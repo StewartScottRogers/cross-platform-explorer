@@ -4,8 +4,10 @@
 //! MP4/MOV files are **ISO-BMFF**: a flat sequence of *boxes*, each a big-endian `u32` size + 4-byte
 //! ASCII type, optionally nested. The file's duration lives in the `moov` container box's `mvhd` child.
 //! This module walks just enough of the box tree to reach `mvhd` and read `timescale`/`duration`, without
-//! decoding any media — pure over bytes, no filesystem, adapter supplies the bytes.
+//! decoding any media — pure over bytes, no filesystem, adapter supplies the bytes. The box-header/child
+//! primitives live in the shared [`crate::iso_bmff`] module (CPE-1309).
 
+use crate::iso_bmff::find_child_box;
 use crate::metadata_column::CellValue;
 
 /// The [`CellValue::Float`] duration in seconds for a video's `bytes` (read from the ISO-BMFF
@@ -16,64 +18,6 @@ pub fn video_cell(bytes: &[u8]) -> CellValue {
         Some(secs) => CellValue::Float(secs),
         None => CellValue::Empty,
     }
-}
-
-/// A parsed ISO-BMFF box header: the byte range `[offset, box_end)` covers the whole box (header +
-/// content), and `content_start` is where the box's payload begins.
-struct BoxHeader {
-    box_type: [u8; 4],
-    content_start: usize,
-    box_end: usize,
-}
-
-/// Read the box header at `offset` within `bytes`, bounded by `end` (the enclosing box's content end, or
-/// `bytes.len()` at the top level). Returns `None` on any truncation or an internally inconsistent size
-/// rather than panicking.
-fn read_box_header(bytes: &[u8], offset: usize, end: usize) -> Option<BoxHeader> {
-    if offset.checked_add(8)? > end || end > bytes.len() {
-        return None;
-    }
-    let size32 = u32::from_be_bytes(bytes[offset..offset + 4].try_into().ok()?);
-    let mut box_type = [0u8; 4];
-    box_type.copy_from_slice(&bytes[offset + 4..offset + 8]);
-
-    let (total_size, header_len): (u64, u64) = if size32 == 1 {
-        // 64-bit largesize follows the type.
-        if offset.checked_add(16)? > end {
-            return None;
-        }
-        let largesize = u64::from_be_bytes(bytes[offset + 8..offset + 16].try_into().ok()?);
-        (largesize, 16)
-    } else if size32 == 0 {
-        // Box runs to the end of the enclosing range.
-        ((end - offset) as u64, 8)
-    } else {
-        (size32 as u64, 8)
-    };
-
-    if total_size < header_len {
-        return None; // internally inconsistent — declared size smaller than its own header
-    }
-    let box_end = offset.checked_add(usize::try_from(total_size).ok()?)?;
-    if box_end > end {
-        return None; // truncated / overruns the enclosing box
-    }
-    let content_start = offset + usize::try_from(header_len).ok()?;
-    Some(BoxHeader { box_type, content_start, box_end })
-}
-
-/// Find the first child box of type `target` directly inside `[start, end)`, returning its content range
-/// `(content_start, content_end)`. `None` if not found or the box tree is malformed/truncated.
-fn find_child_box(bytes: &[u8], start: usize, end: usize, target: &[u8; 4]) -> Option<(usize, usize)> {
-    let mut offset = start;
-    while offset < end {
-        let header = read_box_header(bytes, offset, end)?;
-        if &header.box_type == target {
-            return Some((header.content_start, header.box_end));
-        }
-        offset = header.box_end;
-    }
-    None
 }
 
 fn read_u32_be(bytes: &[u8], offset: usize) -> Option<u32> {

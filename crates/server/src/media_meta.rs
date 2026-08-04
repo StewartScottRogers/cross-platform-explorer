@@ -6,16 +6,17 @@
 //! Read coverage spans the codecs shipped so far: ID3 (mp3), Vorbis (flac / ogg), EXIF (jpeg / tiff), IPTC
 //! (jpeg APP13/8BIM/IIM, merged alongside EXIF), XMP (jpeg APP1, merged alongside EXIF + IPTC, plus
 //! standalone `.xmp` sidecars), WAV/RIFF-INFO, PDF `/Info`, and MP4/MOV video tags. Write coverage is
-//! narrower — only the formats with a write codec ([`crate::media_meta_write`]): **mp3**, **flac**, and
-//! **jpeg** (EXIF), **ogg**/**oga** (Vorbis comments), and **wav** (RIFF `LIST`/`INFO`).
-//! [`is_writable`] lets the UI show read-only fields for the rest until their writers land (video/PDF
-//! write-back are deferred as format-risky, and TIFF EXIF write is deferred because the EXIF *is* a
-//! TIFF's own IFD chain).
+//! narrower — the formats with a write codec ([`crate::media_meta_write`] / [`crate::video_meta_write`]):
+//! **mp3**, **flac**, **jpeg** (EXIF/IPTC/XMP), **ogg**/**oga** (Vorbis comments), **wav** (RIFF
+//! `LIST`/`INFO`), **pdf** (incremental `/Info`), and **mp4**/**mov**/**m4v** (ISO-BMFF `udta/meta/ilst`).
+//! [`is_writable`] lets the UI show read-only fields for the rest until their writers land (TIFF EXIF write
+//! is deferred because the EXIF *is* a TIFF's own IFD chain).
 
 use crate::media_meta_edit::{apply_edits, MetaEdit, MetaField};
 use crate::media_meta_read::{read_exif, read_flac, read_id3v2, read_iptc, read_ogg, read_pdf, read_wav, read_xmp};
 use crate::media_meta_write::{write_exif, write_flac, write_id3v2, write_iptc, write_ogg, write_pdf, write_wav, write_xmp};
 use crate::video_meta_read::read_mp4;
+use crate::video_meta_write::write_mp4;
 
 /// Every metadata field the studio can show for a file, chosen by extension. A file whose kind has no
 /// codec (or an unreadable one) yields an empty vec — the studio then shows "no editable metadata".
@@ -44,10 +45,13 @@ pub fn is_writable(ext: &str) -> bool {
     // jpg/jpeg carry EXIF, IPTC, and XMP write codecs ([`write_exif`]/[`write_iptc`]/[`write_xmp`], the last
     // two added in CPE-1305); ogg/oga carry a Vorbis-comment write codec
     // ([`write_ogg`]); wav carries a RIFF LIST/INFO write codec ([`write_wav`]); pdf carries an
-    // incremental `/Info` write codec ([`write_pdf`], CPE-1301). tif/tiff are intentionally excluded —
-    // for a TIFF the EXIF *is* the file's own IFD chain, so rebuilding it from four tags would drop the
-    // image.
-    matches!(ext.to_ascii_lowercase().as_str(), "mp3" | "flac" | "jpg" | "jpeg" | "ogg" | "oga" | "wav" | "pdf")
+    // incremental `/Info` write codec ([`write_pdf`], CPE-1301); mp4/mov/m4v carry the ISO-BMFF
+    // `udta/meta/ilst` write codec ([`write_mp4`], CPE-1309). tif/tiff are intentionally excluded — for a
+    // TIFF the EXIF *is* the file's own IFD chain, so rebuilding it from four tags would drop the image.
+    matches!(
+        ext.to_ascii_lowercase().as_str(),
+        "mp3" | "flac" | "jpg" | "jpeg" | "ogg" | "oga" | "wav" | "pdf" | "mp4" | "mov" | "m4v"
+    )
 }
 
 /// Apply `edits` to the file's current fields and serialise the result back to new file bytes. Reads the
@@ -70,6 +74,7 @@ pub fn write_back(ext: &str, orig: &[u8], edits: &[MetaEdit]) -> Result<Vec<u8>,
         "jpg" | "jpeg" => write_jpeg(orig, &result.fields, edits),
         "wav" => write_wav(orig, &result.fields),
         "pdf" => write_pdf(orig, &result.fields),
+        "mp4" | "mov" | "m4v" => write_mp4(orig, &result.fields),
         other => Err(format!("editing {other} metadata isn't supported yet")),
     }
 }
@@ -160,9 +165,10 @@ mod tests {
         assert!(is_writable("ogg") && is_writable("OGA")); // Vorbis-comment write codec (CPE-1289)
         assert!(is_writable("wav") && is_writable("WAV")); // RIFF LIST/INFO write codec (CPE-1298)
         assert!(is_writable("pdf") && is_writable("PDF")); // incremental /Info write codec (CPE-1301)
+        assert!(is_writable("mp4") && is_writable("MOV") && is_writable("m4v")); // ISO-BMFF write codec (CPE-1309)
         // TIFF EXIF write is deferred (the EXIF is a TIFF's own IFD); other formats have no writer yet.
         assert!(!is_writable("tif") && !is_writable("tiff"));
-        assert!(!is_writable("mp4"));
+        assert!(!is_writable("mkv") && !is_writable("avi"));
     }
 
     /// Build a minimal WAV: `RIFF` header + a `fmt ` chunk + a `data` chunk carrying `audio`, and (if
@@ -247,8 +253,9 @@ mod tests {
 
     #[test]
     fn write_back_errors_for_unsupported_format() {
-        let err = write_back("mp4", b"\0\0\0\x18ftyp", &[]).unwrap_err();
-        assert!(err.contains("mp4"));
+        // mkv has no write codec — it falls through to the catch-all error arm.
+        let err = write_back("mkv", b"\x1aE\xdf\xa3", &[]).unwrap_err();
+        assert!(err.contains("mkv"));
     }
 
     fn exif_set(key: &str, value: &str) -> MetaEdit {

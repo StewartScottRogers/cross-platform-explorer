@@ -459,6 +459,11 @@ pub mod media_column;
 /// [`metadata_column::CellValue::Dimensions`] cell for a Dimensions column (CPE-974, epic CPE-707).
 pub mod image_column;
 
+/// Shared ISO-BMFF (`MP4`/`MOV`) box-walking primitives — the one `BoxHeader`/`read_box_header`/
+/// `find_child_box` implementation used by [`video_column`], [`video_meta_read`], and [`video_meta_write`]
+/// (CPE-1309, epic CPE-725). Bounds-checked, never panics.
+pub mod iso_bmff;
+
 /// Video-metadata column extractor — walk the ISO-BMFF (`MP4`/`MOV`) box tree to `moov/mvhd` for a
 /// duration-in-seconds [`metadata_column::CellValue::Float`] cell (CPE-1028, epic CPE-707). Pure.
 pub mod video_column;
@@ -467,6 +472,11 @@ pub mod video_column;
 /// descriptive tags (Title/Artist/Album/…) into [`media_meta_edit::MetaField`]s in group `"video"`
 /// (CPE-1037, epic CPE-725). Pure, std-only, never panics on malformed/truncated input.
 pub mod video_meta_read;
+
+/// MP4/MOV video-metadata **write** codec — the counterpart to [`video_meta_read::read_mp4`]. Writes the
+/// nine iTunes-style tags into `moov/udta/meta/ilst` via a never-move-`mdat` append-and-shadow rewrite, so
+/// the absolute `stco`/`co64` sample offsets stay valid (CPE-1309, epic CPE-725). Pure, std-only.
+pub mod video_meta_write;
 
 /// Document-info column extractor — map a PDF's read `/Info` [`media_meta_edit::MetaField`]s to typed
 /// [`metadata_column::CellValue`]s so Title/Author/… columns surface for PDFs (CPE-1039, epic CPE-707).

@@ -9,76 +9,20 @@
 //!
 //! [`crate::video_column`] already walks `moov/mvhd` for duration; this module walks the sibling
 //! `moov/udta/meta/ilst` path for descriptive tags, surfacing them as [`MetaField`]s in group `"video"`
-//! (all `editable: false` — this is a read codec only, no write-back yet). Pure std, no new dependencies;
-//! every box size is clamped to the remaining buffer and nesting is depth-capped, so malformed/truncated/
-//! adversarial input yields an empty (or partial) result and **never panics**.
+//! (all `editable: true` since CPE-1309 landed the [`crate::video_meta_write`] write-back codec). Pure
+//! std, no new dependencies; every box size is clamped to the remaining buffer and nesting is depth-capped,
+//! so malformed/truncated/adversarial input yields an empty (or partial) result and **never panics**. The
+//! box-header/child primitives live in the shared [`crate::iso_bmff`] module.
 
+use crate::iso_bmff::{find_child_box, read_box_header, BoxHeader};
 use crate::media_meta_edit::MetaField;
 
 /// Cap on box-tree nesting depth while descending to `ilst` — well beyond any real file's structure,
 /// just a backstop against pathological/adversarial input.
 const MAX_DEPTH: u32 = 16;
 
-/// A parsed ISO-BMFF box header: `[offset, box_end)` covers the whole box (header + payload), and
-/// `content_start` is where the payload begins.
-struct BoxHeader {
-    box_type: [u8; 4],
-    content_start: usize,
-    box_end: usize,
-}
-
-/// Read the box header at `offset`, bounded by `end` (the enclosing box's content end, or `bytes.len()`
-/// at the top level). `None` on any truncation or an internally inconsistent size — never panics. Every
-/// size is clamped to `end` so a lying/huge declared size can't cause an over-read.
-fn read_box_header(bytes: &[u8], offset: usize, end: usize) -> Option<BoxHeader> {
-    if offset.checked_add(8)? > end || end > bytes.len() {
-        return None;
-    }
-    let size32 = u32::from_be_bytes(bytes[offset..offset + 4].try_into().ok()?);
-    let mut box_type = [0u8; 4];
-    box_type.copy_from_slice(&bytes[offset + 4..offset + 8]);
-
-    let (total_size, header_len): (u64, u64) = if size32 == 1 {
-        // 64-bit largesize follows the type.
-        if offset.checked_add(16)? > end {
-            return None;
-        }
-        let largesize = u64::from_be_bytes(bytes[offset + 8..offset + 16].try_into().ok()?);
-        (largesize, 16)
-    } else if size32 == 0 {
-        // Box runs to the end of the enclosing range.
-        ((end - offset) as u64, 8)
-    } else {
-        (size32 as u64, 8)
-    };
-
-    if total_size < header_len {
-        return None; // internally inconsistent — declared size smaller than its own header
-    }
-    let box_end = offset.checked_add(usize::try_from(total_size).ok()?)?;
-    if box_end > end {
-        return None; // truncated / overruns the enclosing box — clamp by rejecting rather than over-reading
-    }
-    let content_start = offset + usize::try_from(header_len).ok()?;
-    Some(BoxHeader { box_type, content_start, box_end })
-}
-
-/// Find the first child box of type `target` directly inside `[start, end)`. `None` if not found or the
-/// box tree is malformed/truncated at some point during the walk.
-fn find_child_box(bytes: &[u8], start: usize, end: usize, target: &[u8; 4]) -> Option<(usize, usize)> {
-    let mut offset = start;
-    while offset < end {
-        let header = read_box_header(bytes, offset, end)?;
-        if &header.box_type == target {
-            return Some((header.content_start, header.box_end));
-        }
-        offset = header.box_end;
-    }
-    None
-}
-
 /// Read iTunes-style MP4/MOV metadata (`moov ▸ udta ▸ meta ▸ ilst`) from `bytes` into [`MetaField`]s in
-/// group `"video"` (all `editable: false`). Returns an empty vec when the file isn't parseable ISO-BMFF,
+/// group `"video"` (all `editable: true`). Returns an empty vec when the file isn't parseable ISO-BMFF,
 /// has no `moov`, has `moov` but no `udta`/`meta`/`ilst`, or is truncated/garbage — never panics.
 pub fn read_mp4(bytes: &[u8]) -> Vec<MetaField> {
     let Some((moov_start, moov_end)) = find_child_box(bytes, 0, bytes.len(), b"moov") else {
@@ -136,7 +80,7 @@ fn parse_ilst(bytes: &[u8], start: usize, end: usize, depth: u32) -> Vec<MetaFie
         let Some(header) = read_box_header(bytes, offset, end) else { break };
         if let Some((key, value)) = decode_ilst_entry(bytes, &header) {
             if !value.is_empty() {
-                fields.push(MetaField { group: "video".to_string(), key, value, editable: false });
+                fields.push(MetaField { group: "video".to_string(), key, value, editable: true });
             }
         }
         offset = header.box_end;
@@ -295,7 +239,7 @@ mod tests {
         let f = read_mp4(&file);
         assert_eq!(get(&f, "Title"), Some("Big Buck Bunny"));
         assert_eq!(get(&f, "Artist"), Some("Blender Foundation"));
-        assert!(f.iter().all(|x| x.group == "video" && !x.editable));
+        assert!(f.iter().all(|x| x.group == "video" && x.editable));
     }
 
     #[test]
