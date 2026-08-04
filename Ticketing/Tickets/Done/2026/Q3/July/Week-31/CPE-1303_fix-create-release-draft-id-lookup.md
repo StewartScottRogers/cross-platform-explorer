@@ -4,7 +4,7 @@ title: "Fix release-sidecar create-release: draft id lookup 404s (by-tag endpoin
 type: bug
 component: build
 priority: high
-status: Doing
+status: Done
 tags: ready
 created: 2026-08-04
 epic: CPE-716
@@ -36,3 +36,4 @@ Hotfix to unblock a "Run". Validated by re-dispatching the release. Part of the 
 lineage.
 
 ## Work Log
+- 2026-08-04 — FIXED + validated. First live run of the CPE-1279 create-release job (v0.57.49) failed: (1) by-tag REST endpoint 404s on drafts (not git-tagged until published), then (2) the list/view lookup was correct but raced eventual consistency (draft not API-visible ~2s after create). Fix: `gh release view "$TAG" --json databaseId` in a 6x/5s retry loop + explicit guard. Re-dispatched: create-release SUCCESS, 3 legs building. Deleted 2 orphaned empty drafts. Exactly the failure the CPE-1279 reviewer flagged for attended verify.
