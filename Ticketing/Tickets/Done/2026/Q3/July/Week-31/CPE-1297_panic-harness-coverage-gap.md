@@ -4,7 +4,7 @@ title: "Close parser panic-safety coverage gap (iptc / exif-write / ogg-write / 
 type: test
 component: cpe-server
 priority: medium
-status: Doing
+status: Done
 tags: ready
 created: 2026-08-03
 epic: CPE-1002
@@ -38,3 +38,4 @@ Only touches `crates/server/tests/parser_panic_safety.rs` — fully independent,
 CPE-1002 (safety/robustness). Convention: every new byte-parser gets a harness entry.
 
 ## Work Log
+- 2026-08-03 — 4 fuzz batteries merged (#592). Reviewer APPROVE: each drives the real entrypoint (write_exif field passes gate into exif Reader/Writer; write_vorbis_comment correctly field-fuzzed as it takes no bytes), not hollow; 33/33 re-run, clippy clean, test-only.
