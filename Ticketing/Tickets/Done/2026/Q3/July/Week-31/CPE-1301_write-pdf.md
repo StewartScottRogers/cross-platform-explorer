@@ -4,7 +4,7 @@ title: "write_pdf: incremental /Info metadata writer"
 type: feature
 component: cpe-server
 priority: medium
-status: Doing
+status: Done
 tags: ready
 created: 2026-08-03
 epic: CPE-725
@@ -45,3 +45,4 @@ Hardest of the media codecs (xref/trailer arithmetic) — opus, careful review. 
 `media_meta_write.rs` + `media_meta.rs` with the merged write codecs — build on current main.
 
 ## Work Log
+- 2026-08-03 — write_pdf merged (#598, ff-landed after clean auto-merge with the CPE-1300 audit test in media_meta_read.rs). Reviewer (opus) APPROVE: startxref offset exact (20-byte xref entry validated), round-trip works for escaped-parens + non-ASCII UTF-16BE, xref-stream refused honestly, editable-fields change required + assertions STRENGTHENED, panic-safe. 124 media tests + fixtures + clippy clean.
