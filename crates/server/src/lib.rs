@@ -353,6 +353,10 @@ pub mod volume;
 /// (CPE-1024, epic CPE-716). No network or mount I/O here.
 pub mod net_share;
 
+/// Shared anchored-wildcard (glob) matcher — one `*`/`?` matcher behind [`selection`], [`name_search`],
+/// and the tree-scan exclude-glob support (CPE-1302). Pure: no filesystem access.
+pub mod glob;
+
 /// Select-by-pattern engine — glob/extension/kind selection queries over a listing, plus `Invert`
 /// (CPE-1025, epic CPE-711). Pure: no filesystem access.
 pub mod selection;

@@ -4319,12 +4319,16 @@ async fn analyze_archive_safety(
 /// Find the topmost cascade-empty directories under `root` (CPE-1282, epic CPE-1002) — a directory that is
 /// empty or contains only nested empty directories. Thin `spawn_blocking` dispatcher into
 /// [`cpe_server::empty_dirs_scan::find_empty_dirs`], which never errors — an unreadable/non-existent `root`
-/// yields an empty, non-truncated report.
+/// yields an empty, non-truncated report. `excludes` are glob patterns pruning matching sub-directories
+/// (CPE-1302); an empty list scans the whole tree.
 #[tauri::command]
 #[cfg_attr(feature = "specta-bindings", specta::specta)]
-async fn find_empty_dirs(root: String) -> Result<cpe_server::empty_dirs_scan::EmptyDirsReport, String> {
+async fn find_empty_dirs(
+    root: String,
+    excludes: Vec<String>,
+) -> Result<cpe_server::empty_dirs_scan::EmptyDirsReport, String> {
     tauri::async_runtime::spawn_blocking(move || {
-        cpe_server::empty_dirs_scan::find_empty_dirs(std::path::Path::new(&root))
+        cpe_server::empty_dirs_scan::find_empty_dirs(std::path::Path::new(&root), &excludes)
     })
     .await
     .map_err(|e| e.to_string())
@@ -4333,15 +4337,17 @@ async fn find_empty_dirs(root: String) -> Result<cpe_server::empty_dirs_scan::Em
 /// Find orphaned sidecar files (e.g. a `.srt`/`.xmp` with no matching primary) under `root` (CPE-1283, epic
 /// CPE-1002), using [`cpe_server::orphan_sidecars_scan`]'s default rules. `recursive` controls whether
 /// subdirectories are walked (each directory's sidecars are only ever paired against primaries in that same
-/// directory). Thin `spawn_blocking` dispatcher; never errors.
+/// directory). Thin `spawn_blocking` dispatcher; never errors. `excludes` are glob patterns pruning
+/// matching sub-directories when `recursive` (CPE-1302); an empty list scans the whole tree.
 #[tauri::command]
 #[cfg_attr(feature = "specta-bindings", specta::specta)]
 async fn find_orphan_sidecars(
     root: String,
     recursive: bool,
+    excludes: Vec<String>,
 ) -> Result<cpe_server::orphan_sidecars_scan::OrphanSidecarResult, String> {
     tauri::async_runtime::spawn_blocking(move || {
-        cpe_server::orphan_sidecars_scan::find_orphan_sidecars(std::path::Path::new(&root), recursive)
+        cpe_server::orphan_sidecars_scan::find_orphan_sidecars(std::path::Path::new(&root), recursive, &excludes)
     })
     .await
     .map_err(|e| e.to_string())
@@ -4371,6 +4377,7 @@ fn orphan_sidecars_stream_registry(
 async fn find_orphan_sidecars_stream(
     root: String,
     recursive: bool,
+    excludes: Vec<String>,
     stream_id: u64,
     on_orphan: tauri::ipc::Channel<Vec<String>>,
 ) -> Result<cpe_server::orphan_sidecars_scan::OrphanSidecarResult, String> {
@@ -4381,6 +4388,7 @@ async fn find_orphan_sidecars_stream(
         let tail = cpe_server::orphan_sidecars_scan::walk_orphan_sidecars(
             std::path::Path::new(&root),
             recursive,
+            &excludes,
             |batch| {
                 let _ = on_orphan.send(batch);
                 if cancel.load(Ordering::Relaxed) {
@@ -4414,12 +4422,16 @@ fn cancel_orphan_sidecars_stream(stream_id: u64) {
 
 /// Find dangling (target-missing) and cyclic (self/loop) symlinks under `root` (CPE-1284, epic CPE-1002).
 /// Thin `spawn_blocking` dispatcher into [`cpe_server::dangling_links_scan::find_dangling_links`], which
-/// errors when `root` isn't a directory.
+/// errors when `root` isn't a directory. `excludes` are glob patterns pruning matching sub-directories
+/// (CPE-1302); an empty list walks the whole tree.
 #[tauri::command]
 #[cfg_attr(feature = "specta-bindings", specta::specta)]
-async fn find_dangling_links(root: String) -> Result<cpe_server::dangling_links_scan::DanglingReport, String> {
+async fn find_dangling_links(
+    root: String,
+    excludes: Vec<String>,
+) -> Result<cpe_server::dangling_links_scan::DanglingReport, String> {
     tauri::async_runtime::spawn_blocking(move || {
-        cpe_server::dangling_links_scan::find_dangling_links(std::path::Path::new(&root))
+        cpe_server::dangling_links_scan::find_dangling_links(std::path::Path::new(&root), &excludes)
     })
     .await
     .map_err(|e| e.to_string())?
@@ -4448,6 +4460,7 @@ fn dangling_links_stream_registry(
 #[cfg_attr(feature = "specta-bindings", specta::specta)]
 async fn find_dangling_links_stream(
     root: String,
+    excludes: Vec<String>,
     stream_id: u64,
     on_link: tauri::ipc::Channel<Vec<cpe_server::dangling_links::DanglingLink>>,
 ) -> Result<cpe_server::dangling_links_scan::DanglingReport, String> {
@@ -4455,7 +4468,7 @@ async fn find_dangling_links_stream(
         use std::sync::atomic::Ordering;
         let cancel = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
         dangling_links_stream_registry().lock().unwrap().insert(stream_id, cancel.clone());
-        let tail = cpe_server::dangling_links_scan::walk_dangling_links(std::path::Path::new(&root), |batch| {
+        let tail = cpe_server::dangling_links_scan::walk_dangling_links(std::path::Path::new(&root), &excludes, |batch| {
             let _ = on_link.send(batch);
             if cancel.load(Ordering::Relaxed) {
                 std::ops::ControlFlow::Break(())
@@ -4488,12 +4501,16 @@ fn cancel_dangling_links_stream(stream_id: u64) {
 
 /// Sweep `root` for files whose sniffed content disagrees with their claimed extension (CPE-1285, epic
 /// CPE-1002) — e.g. a `.jpg` that's really a Windows PE. Thin `spawn_blocking` dispatcher into
-/// [`cpe_server::type_mismatch_scan::find_type_mismatches`]; never errors.
+/// [`cpe_server::type_mismatch_scan::find_type_mismatches`]; never errors. `excludes` are glob patterns
+/// pruning matching sub-directories (CPE-1302); an empty list sweeps the whole tree.
 #[tauri::command]
 #[cfg_attr(feature = "specta-bindings", specta::specta)]
-async fn find_type_mismatches(root: String) -> Result<cpe_server::type_mismatch_scan::MismatchReport, String> {
+async fn find_type_mismatches(
+    root: String,
+    excludes: Vec<String>,
+) -> Result<cpe_server::type_mismatch_scan::MismatchReport, String> {
     tauri::async_runtime::spawn_blocking(move || {
-        cpe_server::type_mismatch_scan::find_type_mismatches(std::path::Path::new(&root))
+        cpe_server::type_mismatch_scan::find_type_mismatches(std::path::Path::new(&root), &excludes)
     })
     .await
     .map_err(|e| e.to_string())
@@ -4522,6 +4539,7 @@ fn type_mismatch_stream_registry(
 #[cfg_attr(feature = "specta-bindings", specta::specta)]
 async fn find_type_mismatches_stream(
     root: String,
+    excludes: Vec<String>,
     stream_id: u64,
     on_hit: tauri::ipc::Channel<Vec<cpe_server::type_mismatch_scan::MismatchHit>>,
 ) -> Result<cpe_server::type_mismatch_scan::MismatchReport, String> {
@@ -4529,7 +4547,7 @@ async fn find_type_mismatches_stream(
         use std::sync::atomic::Ordering;
         let cancel = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
         type_mismatch_stream_registry().lock().unwrap().insert(stream_id, cancel.clone());
-        let tail = cpe_server::type_mismatch_scan::walk_type_mismatches(std::path::Path::new(&root), |batch| {
+        let tail = cpe_server::type_mismatch_scan::walk_type_mismatches(std::path::Path::new(&root), &excludes, |batch| {
             let _ = on_hit.send(batch);
             if cancel.load(Ordering::Relaxed) {
                 std::ops::ControlFlow::Break(())
@@ -10827,19 +10845,19 @@ mod tests {
         assert_eq!(archive.entries_scanned, 0, "keep.txt isn't a zip, so nothing to score");
         assert!(!archive.report.dangerous);
 
-        let empty = tauri::async_runtime::block_on(find_empty_dirs(root.clone())).expect("find_empty_dirs dispatches");
+        let empty = tauri::async_runtime::block_on(find_empty_dirs(root.clone(), Vec::new())).expect("find_empty_dirs dispatches");
         assert!(empty.dirs.iter().any(|p| Path::new(p) == d.join("empty_sub")), "empty_sub should be reported: {:?}", empty.dirs);
 
         let orphans =
-            tauri::async_runtime::block_on(find_orphan_sidecars(root.clone(), false)).expect("find_orphan_sidecars dispatches");
+            tauri::async_runtime::block_on(find_orphan_sidecars(root.clone(), false, Vec::new())).expect("find_orphan_sidecars dispatches");
         assert!(orphans.orphans.is_empty(), "keep.txt is not a sidecar type");
         assert_eq!(orphans.scanned, 1);
 
-        let dangling = tauri::async_runtime::block_on(find_dangling_links(root.clone())).expect("find_dangling_links dispatches");
+        let dangling = tauri::async_runtime::block_on(find_dangling_links(root.clone(), Vec::new())).expect("find_dangling_links dispatches");
         assert!(dangling.links.is_empty(), "no symlinks in the scratch tree");
 
         let mismatches =
-            tauri::async_runtime::block_on(find_type_mismatches(root.clone())).expect("find_type_mismatches dispatches");
+            tauri::async_runtime::block_on(find_type_mismatches(root.clone(), Vec::new())).expect("find_type_mismatches dispatches");
         assert!(mismatches.hits.is_empty(), "plain text keep.txt has no content/extension mismatch");
         assert_eq!(mismatches.scanned, 1);
 
@@ -10883,7 +10901,7 @@ mod tests {
 
         let hits: std::sync::Arc<std::sync::Mutex<Vec<serde_json::Value>>> = Default::default();
         let on_hit = collecting_channel(hits.clone());
-        let result = tauri::async_runtime::block_on(find_type_mismatches_stream(root, 1, on_hit))
+        let result = tauri::async_runtime::block_on(find_type_mismatches_stream(root, Vec::new(), 1, on_hit))
             .expect("find_type_mismatches_stream dispatches");
 
         assert_eq!(result.scanned, 1);
@@ -10907,7 +10925,7 @@ mod tests {
         let orphans: std::sync::Arc<std::sync::Mutex<Vec<serde_json::Value>>> = Default::default();
         let on_orphan = collecting_channel(orphans.clone());
         let result =
-            tauri::async_runtime::block_on(find_orphan_sidecars_stream(root, false, 1, on_orphan))
+            tauri::async_runtime::block_on(find_orphan_sidecars_stream(root, false, Vec::new(), 1, on_orphan))
                 .expect("find_orphan_sidecars_stream dispatches");
 
         assert_eq!(result.scanned, 1);
@@ -10944,7 +10962,7 @@ mod tests {
         // the type-mismatch test above).
         let links: std::sync::Arc<std::sync::Mutex<Vec<serde_json::Value>>> = Default::default();
         let on_link = collecting_channel(links.clone());
-        let result = tauri::async_runtime::block_on(find_dangling_links_stream(root, 1, on_link))
+        let result = tauri::async_runtime::block_on(find_dangling_links_stream(root, Vec::new(), 1, on_link))
             .expect("find_dangling_links_stream dispatches");
 
         assert!(result.links.is_empty(), "links stream over the channel, not in the tail result");

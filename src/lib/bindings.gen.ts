@@ -1755,11 +1755,12 @@ async analyzeArchiveSafety(path: string) : Promise<Result<ArchiveSafetyReport, s
  * Find the topmost cascade-empty directories under `root` (CPE-1282, epic CPE-1002) — a directory that is
  * empty or contains only nested empty directories. Thin `spawn_blocking` dispatcher into
  * [`cpe_server::empty_dirs_scan::find_empty_dirs`], which never errors — an unreadable/non-existent `root`
- * yields an empty, non-truncated report.
+ * yields an empty, non-truncated report. `excludes` are glob patterns pruning matching sub-directories
+ * (CPE-1302); an empty list scans the whole tree.
  */
-async findEmptyDirs(root: string) : Promise<Result<EmptyDirsReport, string>> {
+async findEmptyDirs(root: string, excludes: string[]) : Promise<Result<EmptyDirsReport, string>> {
     try {
-    return { status: "ok", data: await TAURI_INVOKE("find_empty_dirs", { root }) };
+    return { status: "ok", data: await TAURI_INVOKE("find_empty_dirs", { root, excludes }) };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
@@ -1769,11 +1770,12 @@ async findEmptyDirs(root: string) : Promise<Result<EmptyDirsReport, string>> {
  * Find orphaned sidecar files (e.g. a `.srt`/`.xmp` with no matching primary) under `root` (CPE-1283, epic
  * CPE-1002), using [`cpe_server::orphan_sidecars_scan`]'s default rules. `recursive` controls whether
  * subdirectories are walked (each directory's sidecars are only ever paired against primaries in that same
- * directory). Thin `spawn_blocking` dispatcher; never errors.
+ * directory). Thin `spawn_blocking` dispatcher; never errors. `excludes` are glob patterns pruning
+ * matching sub-directories when `recursive` (CPE-1302); an empty list scans the whole tree.
  */
-async findOrphanSidecars(root: string, recursive: boolean) : Promise<Result<OrphanSidecarResult, string>> {
+async findOrphanSidecars(root: string, recursive: boolean, excludes: string[]) : Promise<Result<OrphanSidecarResult, string>> {
     try {
-    return { status: "ok", data: await TAURI_INVOKE("find_orphan_sidecars", { root, recursive }) };
+    return { status: "ok", data: await TAURI_INVOKE("find_orphan_sidecars", { root, recursive, excludes }) };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
@@ -1788,9 +1790,9 @@ async findOrphanSidecars(root: string, recursive: boolean) : Promise<Result<Orph
  * `list_dir_stream`/`cancel_dir_stream` (CPE-665). The returned result carries the final `scanned` +
  * `truncated` with an empty `orphans` (those streamed, in walk order).
  */
-async findOrphanSidecarsStream(root: string, recursive: boolean, streamId: number, onOrphan: TAURI_CHANNEL<string[]>) : Promise<Result<OrphanSidecarResult, string>> {
+async findOrphanSidecarsStream(root: string, recursive: boolean, excludes: string[], streamId: number, onOrphan: TAURI_CHANNEL<string[]>) : Promise<Result<OrphanSidecarResult, string>> {
     try {
-    return { status: "ok", data: await TAURI_INVOKE("find_orphan_sidecars_stream", { root, recursive, streamId, onOrphan }) };
+    return { status: "ok", data: await TAURI_INVOKE("find_orphan_sidecars_stream", { root, recursive, excludes, streamId, onOrphan }) };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
@@ -1806,11 +1808,12 @@ async cancelOrphanSidecarsStream(streamId: number) : Promise<void> {
 /**
  * Find dangling (target-missing) and cyclic (self/loop) symlinks under `root` (CPE-1284, epic CPE-1002).
  * Thin `spawn_blocking` dispatcher into [`cpe_server::dangling_links_scan::find_dangling_links`], which
- * errors when `root` isn't a directory.
+ * errors when `root` isn't a directory. `excludes` are glob patterns pruning matching sub-directories
+ * (CPE-1302); an empty list walks the whole tree.
  */
-async findDanglingLinks(root: string) : Promise<Result<DanglingReport, string>> {
+async findDanglingLinks(root: string, excludes: string[]) : Promise<Result<DanglingReport, string>> {
     try {
-    return { status: "ok", data: await TAURI_INVOKE("find_dangling_links", { root }) };
+    return { status: "ok", data: await TAURI_INVOKE("find_dangling_links", { root, excludes }) };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
@@ -1825,9 +1828,9 @@ async findDanglingLinks(root: string) : Promise<Result<DanglingReport, string>> 
  * cancel flag polled each batch, mirroring `list_dir_stream`/`cancel_dir_stream` (CPE-665). The returned
  * result carries the final `scanned` + `truncated` with an empty `links` (those streamed).
  */
-async findDanglingLinksStream(root: string, streamId: number, onLink: TAURI_CHANNEL<DanglingLink[]>) : Promise<Result<DanglingReport, string>> {
+async findDanglingLinksStream(root: string, excludes: string[], streamId: number, onLink: TAURI_CHANNEL<DanglingLink[]>) : Promise<Result<DanglingReport, string>> {
     try {
-    return { status: "ok", data: await TAURI_INVOKE("find_dangling_links_stream", { root, streamId, onLink }) };
+    return { status: "ok", data: await TAURI_INVOKE("find_dangling_links_stream", { root, excludes, streamId, onLink }) };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
@@ -1843,11 +1846,12 @@ async cancelDanglingLinksStream(streamId: number) : Promise<void> {
 /**
  * Sweep `root` for files whose sniffed content disagrees with their claimed extension (CPE-1285, epic
  * CPE-1002) — e.g. a `.jpg` that's really a Windows PE. Thin `spawn_blocking` dispatcher into
- * [`cpe_server::type_mismatch_scan::find_type_mismatches`]; never errors.
+ * [`cpe_server::type_mismatch_scan::find_type_mismatches`]; never errors. `excludes` are glob patterns
+ * pruning matching sub-directories (CPE-1302); an empty list sweeps the whole tree.
  */
-async findTypeMismatches(root: string) : Promise<Result<MismatchReport, string>> {
+async findTypeMismatches(root: string, excludes: string[]) : Promise<Result<MismatchReport, string>> {
     try {
-    return { status: "ok", data: await TAURI_INVOKE("find_type_mismatches", { root }) };
+    return { status: "ok", data: await TAURI_INVOKE("find_type_mismatches", { root, excludes }) };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
@@ -1862,9 +1866,9 @@ async findTypeMismatches(root: string) : Promise<Result<MismatchReport, string>>
  * (CPE-665). The returned result carries the final `scanned` + `truncated` with an empty `hits` (those
  * streamed, in walk order).
  */
-async findTypeMismatchesStream(root: string, streamId: number, onHit: TAURI_CHANNEL<MismatchHit[]>) : Promise<Result<MismatchReport, string>> {
+async findTypeMismatchesStream(root: string, excludes: string[], streamId: number, onHit: TAURI_CHANNEL<MismatchHit[]>) : Promise<Result<MismatchReport, string>> {
     try {
-    return { status: "ok", data: await TAURI_INVOKE("find_type_mismatches_stream", { root, streamId, onHit }) };
+    return { status: "ok", data: await TAURI_INVOKE("find_type_mismatches_stream", { root, excludes, streamId, onHit }) };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
