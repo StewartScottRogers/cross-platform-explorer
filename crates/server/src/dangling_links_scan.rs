@@ -9,6 +9,7 @@
 //! Missing/Cyclic classification logic lives in [`crate::dangling_links`], same division of labour as
 //! [`crate::folder_similarity_scan`] over [`crate::folder_similarity`].
 
+use std::ops::ControlFlow;
 use std::path::{Component, Path, PathBuf};
 
 use serde::Serialize;
@@ -24,6 +25,11 @@ const MAX_ENTRIES: u64 = 200_000;
 /// Cap on symlinks collected for classification. Hitting it sets `truncated`.
 const MAX_LINKS: u64 = 50_000;
 
+/// Number of classified links per flush — mirrors [`crate::listing::LIST_DIR_BATCH`]'s role: small
+/// enough that a streaming caller (CPE-1299) paints promptly, large enough that a typical tree's
+/// results are one flush.
+pub const DANGLING_LINKS_BATCH: usize = 256;
+
 /// The result of a dangling/cyclic symlink scan: the flagged links (healthy symlinks are omitted,
 /// same convention as [`scan_dangling`]), how many filesystem entries were visited, and whether
 /// either cap truncated the walk.
@@ -31,6 +37,15 @@ const MAX_LINKS: u64 = 50_000;
 #[cfg_attr(feature = "specta", derive(specta::Type))]
 pub struct DanglingReport {
     pub links: Vec<DanglingLink>,
+    pub scanned: u64,
+    pub truncated: bool,
+}
+
+/// The tail of a [`walk_dangling_links`] run: how many filesystem entries were visited and whether
+/// either cap truncated the walk. Doesn't carry the links themselves — those are delivered to
+/// `flush` as the walk (and classification) completes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ScanTail {
     pub scanned: u64,
     pub truncated: bool,
 }
@@ -53,11 +68,22 @@ fn normalize(path: &Path) -> PathBuf {
     result
 }
 
-/// Find dangling (target missing) and cyclic (self/loop) symlinks under `root`. Directories that
-/// can't be read are skipped rather than failing the whole walk (never panics); a symlinked
-/// directory is recorded as a link but never descended into (avoids walk cycles, same discipline as
-/// [`crate::folder_similarity_scan`] / `list_dir`). A non-directory `root` is an `Err`.
-pub fn find_dangling_links(root: &Path) -> Result<DanglingReport, String> {
+/// Walk `root` collecting symlinks (skip-unreadable, never descending into a symlinked directory —
+/// same discipline as [`crate::folder_similarity_scan`] / `list_dir`), classify the whole set with
+/// [`scan_dangling`], then hand the flagged links to `flush` in batches of up to
+/// [`DANGLING_LINKS_BATCH`], honoring an early [`ControlFlow::Break`] by stopping further flushes.
+///
+/// Classification genuinely needs the full link set before any single link can be judged — a link's
+/// target may point at another symlink discovered later, anywhere else in the tree, and cyclic
+/// detection ([`scan_dangling`]) has to see every candidate to tell a cycle from a chain that simply
+/// runs off the known links. So unlike [`crate::listing::stream_dir_entries`], the walk itself always
+/// runs to completion (or a cap) before the first flush; `flush` still lets a streaming caller paint
+/// the *results* incrementally and stop consuming further batches early. A non-directory `root` is an
+/// `Err`.
+pub fn walk_dangling_links(
+    root: &Path,
+    mut flush: impl FnMut(Vec<DanglingLink>) -> ControlFlow<()>,
+) -> Result<ScanTail, String> {
     if !root.is_dir() {
         return Err(format!("{}: not a folder", root.display()));
     }
@@ -110,7 +136,27 @@ pub fn find_dangling_links(root: &Path) -> Result<DanglingReport, String> {
     }
 
     let flagged = scan_dangling(&links);
-    Ok(DanglingReport { links: flagged, scanned, truncated })
+    for batch in flagged.chunks(DANGLING_LINKS_BATCH) {
+        if flush(batch.to_vec()).is_break() {
+            break;
+        }
+    }
+
+    Ok(ScanTail { scanned, truncated })
+}
+
+/// Find dangling (target missing) and cyclic (self/loop) symlinks under `root`. Directories that
+/// can't be read are skipped rather than failing the whole walk (never panics); a symlinked
+/// directory is recorded as a link but never descended into (avoids walk cycles, same discipline as
+/// [`crate::folder_similarity_scan`] / `list_dir`). A non-directory `root` is an `Err`. Thin
+/// collect-to-vec wrapper over [`walk_dangling_links`].
+pub fn find_dangling_links(root: &Path) -> Result<DanglingReport, String> {
+    let mut links = Vec::new();
+    let tail = walk_dangling_links(root, |batch| {
+        links.extend(batch);
+        ControlFlow::Continue(())
+    })?;
+    Ok(DanglingReport { links, scanned: tail.scanned, truncated: tail.truncated })
 }
 
 #[cfg(test)]
@@ -246,6 +292,105 @@ mod tests {
 
         let r = find_dangling_links(&d).unwrap();
         assert_eq!(r.scanned, 3, "a.txt, b.txt, link_to_a");
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn walk_non_directory_root_is_err() {
+        let d = scratch("walk-nondir");
+        let f = d.join("file.txt");
+        fs::write(&f, "x").unwrap();
+        assert!(walk_dangling_links(&f, |_| ControlFlow::Continue(())).is_err());
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn walk_dangling_links_matches_find_dangling_links() {
+        use std::os::unix::fs::symlink;
+
+        let d = scratch("walk-matches");
+        let target = d.join("gone.txt");
+        fs::write(&target, "will be deleted").unwrap();
+        symlink(&target, d.join("broken_link")).unwrap();
+        fs::remove_file(&target).unwrap();
+        symlink("loopy", d.join("loopy")).unwrap();
+        fs::write(d.join("plain.txt"), "x").unwrap();
+
+        let mut streamed = Vec::new();
+        let tail = walk_dangling_links(&d, |batch| {
+            streamed.extend(batch);
+            ControlFlow::Continue(())
+        })
+        .unwrap();
+
+        let collected = find_dangling_links(&d).unwrap();
+        assert_eq!(tail.scanned, collected.scanned);
+        assert_eq!(tail.truncated, collected.truncated);
+
+        let mut a: Vec<_> = streamed.iter().map(|l| l.path.clone()).collect();
+        let mut b: Vec<_> = collected.links.iter().map(|l| l.path.clone()).collect();
+        a.sort();
+        b.sort();
+        assert_eq!(a, b, "walker's flushed batches carry the same flagged links as the collect-to-vec form");
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn walk_dangling_links_batches_a_large_flagged_set() {
+        use std::os::unix::fs::symlink;
+
+        // More than one DANGLING_LINKS_BATCH worth of broken symlinks, so the flush loop must run
+        // more than once.
+        let d = scratch("walk-batches");
+        let n = DANGLING_LINKS_BATCH * 2 + 10;
+        for i in 0..n {
+            symlink(format!("/nowhere/{i}"), d.join(format!("broken_{i:05}"))).unwrap();
+        }
+
+        let mut batch_sizes = Vec::new();
+        let mut total = 0usize;
+        let tail = walk_dangling_links(&d, |batch| {
+            total += batch.len();
+            batch_sizes.push(batch.len());
+            ControlFlow::Continue(())
+        })
+        .unwrap();
+
+        assert_eq!(total, n, "every flagged link is delivered across all flushes");
+        assert!(batch_sizes.len() >= 2, "{n} links at batch {DANGLING_LINKS_BATCH} must flush more than once");
+        assert!(batch_sizes.iter().all(|&s| s <= DANGLING_LINKS_BATCH), "no batch exceeds the cap");
+        assert!(!tail.truncated);
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn walk_dangling_links_stops_flushing_on_break() {
+        use std::os::unix::fs::symlink;
+
+        let d = scratch("walk-break");
+        let n = DANGLING_LINKS_BATCH * 2 + 10;
+        for i in 0..n {
+            symlink(format!("/nowhere/{i}"), d.join(format!("broken_{i:05}"))).unwrap();
+        }
+
+        let mut seen = 0usize;
+        let mut flushes = 0usize;
+        let tail = walk_dangling_links(&d, |batch| {
+            seen += batch.len();
+            flushes += 1;
+            ControlFlow::Break(())
+        })
+        .unwrap();
+
+        assert_eq!(flushes, 1, "break on the first flush stops further batches");
+        assert_eq!(seen, DANGLING_LINKS_BATCH, "only the first batch was delivered");
+        // The walk + classification still ran to completion before flushing began (classification
+        // needs the full link set), so the tail reflects the whole tree regardless of the break.
+        assert_eq!(tail.scanned, n as u64);
+        assert!(!tail.truncated);
         let _ = fs::remove_dir_all(&d);
     }
 }
