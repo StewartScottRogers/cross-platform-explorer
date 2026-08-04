@@ -45,6 +45,7 @@ use cpe_server::text_encoding::{detect_encoding, EncodingGuess};
 use cpe_server::thumb_orient::read_exif_orientation;
 use cpe_server::video_column::video_cell;
 use cpe_server::video_meta_read::read_mp4;
+use cpe_server::video_meta_write::write_mp4;
 
 // ---------------------------------------------------------------------------------------------
 // Deterministic pseudo-random bytes (no `rand` dependency)
@@ -459,6 +460,26 @@ fn write_ogg_never_panics() {
         let r = write_ogg(b, &fields);
         if b.is_empty() {
             assert!(r.is_err(), "write_ogg(empty, _) must return Err (not a valid OggS stream)");
+        }
+    });
+}
+
+#[test]
+fn write_mp4_never_panics() {
+    // `write_mp4` takes (orig: &[u8], fields: &[MetaField]) and rejects non-BMFF/fragmented/open-ended or
+    // truncated input gracefully (via `Err`, never a panic). Feed a small fixed field set and fuzz the
+    // ISO-BMFF bytes (seeded with a plausible `moov` box magic so the battery reaches the walk, not just
+    // the header-length reject). CPE-1309.
+    let fields = vec![MetaField {
+        group: "video".to_string(),
+        key: "Title".to_string(),
+        value: "test title".to_string(),
+        editable: true,
+    }];
+    run_battery("video_meta_write::write_mp4", &[0x00, 0x00, 0x00, 0x10, b'm', b'o', b'o', b'v'], 8, |b| {
+        let r = write_mp4(b, &fields);
+        if b.is_empty() {
+            assert!(r.is_err(), "write_mp4(empty, _) must return Err (no moov box)");
         }
     });
 }
