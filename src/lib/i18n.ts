@@ -420,6 +420,8 @@ const messages: Record<Locale, Record<string, string>> = {
     "studio.tabImage": "Image",
     "studio.tabDocument": "Document",
     "studio.tabVideo": "Video",
+    "studio.tabIptc": "IPTC",
+    "studio.tabXmp": "XMP",
     "studio.save": "Save",
     "studio.saving": "Saving…",
     "studio.saved": "Saved.",

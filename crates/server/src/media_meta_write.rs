@@ -1387,6 +1387,23 @@ fn splice_jpeg_header(orig: &[u8], segs: &[JpegSegment], tail_start: usize, new_
     out
 }
 
+/// Rebuild a JPEG **dropping** every header segment for which `is_stale` is true and inserting nothing —
+/// every other segment plus the scan tail (`orig[tail_start..]`) is preserved byte-for-byte. Used when a
+/// metadata group is edited down to empty (its last field cleared): its segment is *removed* rather than
+/// rewritten as an empty one, so the cleared value can't persist on reopen.
+fn strip_jpeg_segment(orig: &[u8], segs: &[JpegSegment], tail_start: usize, is_stale: impl Fn(&JpegSegment) -> bool) -> Vec<u8> {
+    let mut out = Vec::with_capacity(orig.len());
+    out.extend_from_slice(&orig[0..2]); // SOI
+    for seg in segs {
+        if is_stale(seg) {
+            continue; // drop the segment being removed
+        }
+        out.extend_from_slice(seg.bytes);
+    }
+    out.extend_from_slice(&orig[tail_start..]); // SOS + scan data + EOI, verbatim
+    out
+}
+
 /// Map a friendly IPTC key (as produced by [`crate::media_meta_read`]'s `iim_friendly_key`) back to its
 /// IIM Application-Record (record 2) dataset number. The inverse of that private mapping. A friendly key
 /// outside the known set is skipped — there's no raw-id passthrough on the read side to invert.
@@ -1503,8 +1520,13 @@ fn other_8bim_blocks(payload: &[u8]) -> Vec<u8> {
 /// written into a JPEG APP13 Photoshop 8BIM IRB — inserting the APP13 segment if absent and **replacing** the
 /// IPTC-IIM resource (id `0x0404`) if present, while preserving every other segment (a leading EXIF/XMP APP1,
 /// APP0 JFIF, quantisation/Huffman tables, …), any *other* 8BIM resources inside an existing APP13, and the
-/// entropy-coded scan data byte-for-byte. Round-trips through [`crate::media_meta_read::read_iptc`]. `Err`
-/// (never panics) for non-JPEG/truncated input or an IPTC block too large for a single APP13 segment.
+/// entropy-coded scan data byte-for-byte. Round-trips through [`crate::media_meta_read::read_iptc`].
+///
+/// When `fields` carries **no** IPTC values (the group was edited down to empty — its last field cleared),
+/// the IPTC-IIM resource is *removed* rather than rewritten empty: if no other 8BIM resource remains, the
+/// whole APP13 segment is dropped; otherwise the APP13 is rewritten carrying just the other resources. This
+/// is what lets a "clear the last caption" edit actually take effect on reopen. `Err` (never panics) for
+/// non-JPEG/truncated input or an IPTC block too large for a single APP13 segment.
 pub fn write_iptc(orig: &[u8], fields: &[MetaField]) -> Result<Vec<u8>, String> {
     let (segs, tail_start) = split_jpeg(orig)?;
 
@@ -1520,15 +1542,28 @@ pub fn write_iptc(orig: &[u8], fields: &[MetaField]) -> Result<Vec<u8>, String> 
     }
 
     let iim = build_iim_datasets(fields);
+    let is_iptc_app13 = |s: &JpegSegment| s.marker == 0xED && s.payload().starts_with(PHOTOSHOP_SIG);
+
+    // The IPTC group was edited to empty: strip its resource so the stale value doesn't persist.
+    if iim.is_empty() {
+        if kept_blocks.is_empty() {
+            // Nothing else in the APP13 — remove the whole segment.
+            return Ok(strip_jpeg_segment(orig, &segs, tail_start, is_iptc_app13));
+        }
+        // Other 8BIM resources remain — rewrite APP13 with just those, dropping the IPTC resource.
+        let mut app13_payload = PHOTOSHOP_SIG.to_vec();
+        app13_payload.extend_from_slice(&kept_blocks);
+        let new_seg = build_jpeg_segment(0xED, &app13_payload)?;
+        return Ok(splice_jpeg_header(orig, &segs, tail_start, &new_seg, is_iptc_app13));
+    }
+
     let iptc_block = build_8bim_block(IPTC_RESOURCE_ID, &iim);
     let mut app13_payload = PHOTOSHOP_SIG.to_vec();
     app13_payload.extend_from_slice(&kept_blocks);
     app13_payload.extend_from_slice(&iptc_block);
     let new_seg = build_jpeg_segment(0xED, &app13_payload)?;
 
-    Ok(splice_jpeg_header(orig, &segs, tail_start, &new_seg, |s| {
-        s.marker == 0xED && s.payload().starts_with(PHOTOSHOP_SIG)
-    }))
+    Ok(splice_jpeg_header(orig, &segs, tail_start, &new_seg, is_iptc_app13))
 }
 
 /// XML-escape the three characters that must not appear literally in element text (`&`, `<`, `>`) so the
@@ -1553,7 +1588,11 @@ fn xml_escape(s: &str) -> String {
 /// so a `"; "`-joined value is split back into one `rdf:li` per item), Headline/Create Date as simple
 /// elements. Only the six properties the reader surfaces are written (the studio only ever edits those);
 /// blank/absent fields are omitted. Values are XML-escaped so `& < >` round-trip.
-fn build_xmp_packet(fields: &[MetaField]) -> Vec<u8> {
+///
+/// Returns an **empty string** when no XMP property is present (every field blank/absent) — [`write_xmp`]
+/// treats that as "the XMP group was edited down to empty" and removes the XMP APP1 segment entirely
+/// rather than emitting a props-less packet.
+fn build_xmp_props(fields: &[MetaField]) -> String {
     let get = |key: &str| -> Option<&str> {
         fields.iter().find(|f| f.group.eq_ignore_ascii_case("xmp") && f.key == key && !f.value.is_empty()).map(|f| f.value.as_str())
     };
@@ -1580,6 +1619,13 @@ fn build_xmp_packet(fields: &[MetaField]) -> Vec<u8> {
     if let Some(v) = get("Create Date") {
         props.push_str(&format!("   <xmp:CreateDate>{}</xmp:CreateDate>\n", xml_escape(v)));
     }
+    props
+}
+
+/// Wrap [`build_xmp_props`]'s properties in the standard `x:xmpmeta` / `rdf:RDF` XMP packet envelope. The
+/// caller ([`write_xmp`]) only reaches this when at least one property is present.
+fn build_xmp_packet(fields: &[MetaField]) -> Vec<u8> {
+    let props = build_xmp_props(fields);
 
     let packet = format!(
         "<?xpacket begin=\"\u{feff}\" id=\"W5M0MpCehiHzreSzNTczkc9d\"?>\n\
@@ -1600,15 +1646,25 @@ fn build_xmp_packet(fields: &[MetaField]) -> Vec<u8> {
 /// IPTC IRB, tables, …) and the scan data byte-for-byte. Round-trips through
 /// [`crate::media_meta_read::read_xmp`]. Only the six properties the reader surfaces are (re)written; a
 /// pre-existing XMP packet's other properties are not carried (out of scope, as `write_exif` drops the EXIF
-/// thumbnail). `Err` (never panics) for non-JPEG/truncated input or a packet too large for one APP1 segment.
+/// thumbnail).
+///
+/// When `fields` carries **no** XMP property (the group was edited down to empty — its last field cleared),
+/// the XMP APP1 segment is *removed* rather than rewritten as a props-less packet, so the cleared value
+/// doesn't persist on reopen. `Err` (never panics) for non-JPEG/truncated input or a packet too large for
+/// one APP1 segment.
 pub fn write_xmp(orig: &[u8], fields: &[MetaField]) -> Result<Vec<u8>, String> {
     let (segs, tail_start) = split_jpeg(orig)?;
+    let is_xmp_app1 = |s: &JpegSegment| s.marker == 0xE1 && s.payload().starts_with(XMP_APP1_SIG);
+
+    // The XMP group was edited to empty: strip the XMP APP1 so the stale value doesn't persist.
+    if build_xmp_props(fields).is_empty() {
+        return Ok(strip_jpeg_segment(orig, &segs, tail_start, is_xmp_app1));
+    }
+
     let mut app1_payload = XMP_APP1_SIG.to_vec();
     app1_payload.extend_from_slice(&build_xmp_packet(fields));
     let new_seg = build_jpeg_segment(0xE1, &app1_payload)?;
-    Ok(splice_jpeg_header(orig, &segs, tail_start, &new_seg, |s| {
-        s.marker == 0xE1 && s.payload().starts_with(XMP_APP1_SIG)
-    }))
+    Ok(splice_jpeg_header(orig, &segs, tail_start, &new_seg, is_xmp_app1))
 }
 
 #[cfg(test)]

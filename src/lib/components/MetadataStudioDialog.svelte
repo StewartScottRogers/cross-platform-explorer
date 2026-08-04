@@ -32,6 +32,8 @@
     id3: "studio.tabAudio",
     vorbis: "studio.tabAudio",
     exif: "studio.tabImage",
+    iptc: "studio.tabIptc",
+    xmp: "studio.tabXmp",
     pdf: "studio.tabDocument",
     video: "studio.tabVideo",
   };
