@@ -55,6 +55,8 @@ stakes for daily-driver use and makes CPE reachable from everywhere the OS offer
 - **CPE-1022** — macOS Services/LSHandlers registration plan (pure). ✅ Done.
 - **CPE-1023** — In-app "Shell integration" Settings toggle. ✅ Done (implementation + headless verify;
   visual GUI verify via a release build recommended as the epic's closing check).
+- **CPE-1306** — Linux shell-integration apply/remove glue (`.desktop` file write + `xdg-mime` best-effort).
+  ✅ Done (backend; real behaviour pending CI's Linux leg).
 
 ## Work Log
 2026-07-23 (dayshift) — **Activated.** First slice: **CPE-945** — `shell_menu::verbs_for`: the pure
@@ -70,3 +72,8 @@ registry (install → verbs present via `reg query`; uninstall → no residue). 
 
 ## Board hygiene 2026-07-29 — reverted In Progress → Proposed
 Not actively being worked: all decomposed child tickets are Done. Remaining DoD is user-gated (GUI / model-key / cert / Mac) or a deferred cap. Reverted to **Proposed** so the epic queue honestly shows what's dormant vs active; re-activate with `/ticketing-epic activate` to resume (like CPE-703 was this session). **Remaining (DoD review 2026-07-30):** Default-file-manager handshake deferred; Linux/macOS apply glue unbuilt; macOS Mac-gated (Windows applies end-to-end).
+
+2026-08-03 — **CPE-1306 done**: Linux apply/remove glue built (`.desktop` file write/delete +
+best-effort `xdg-mime`/`update-desktop-database`), mirroring the Windows registry glue. Windows + Linux
+now both apply end-to-end at the backend. **Remaining:** default-file-manager handshake (deferred), macOS
+apply glue (Mac-gated).
