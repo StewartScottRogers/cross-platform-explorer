@@ -400,4 +400,38 @@ mod tests {
         // The XMP APP1 segment (its Adobe xap signature) must be stripped.
         assert!(!cleared.windows(28).any(|w| w == b"http://ns.adobe.com/xap/1.0/"), "stale XMP APP1 segment must be removed");
     }
+
+    // ---- CPE-1308: EXIF clear-symmetry (the re-verify finding IPTC/XMP's fix above didn't cover) ----
+
+    /// Before the fix, `write_jpeg` ran `write_exif` whenever the "exif" group was edited, and `write_exif`
+    /// (via `build_exif_tiff`) `Err`'d with "no editable EXIF fields to write" whenever the override list
+    /// was empty — so clearing the ONLY editable EXIF field (e.g. the sole ImageDescription) failed the
+    /// WHOLE save instead of persisting the clear. The fix makes an editable tag's presence entirely
+    /// governed by the current field list: clearing it is a real removal from the rebuilt IFD, and if
+    /// nothing else survives, the Exif APP1 itself is stripped — never an error.
+    ///
+    /// Falsifiable: set → clear → reopen must show the field gone, while Make/Model (camera intrinsics) and
+    /// the image scan data survive byte-for-byte. Reverting `build_exif_tiff`'s "carry an editable tag
+    /// through only via `overrides`" change (i.e. going back to unconditionally preserving every existing
+    /// primary-IFD field not explicitly overridden) makes this test fail at the `ImageDescription` assertion
+    /// below, because the stale value would be silently kept.
+    #[test]
+    fn clearing_last_editable_exif_field_removes_it_on_reopen_preserving_intrinsics_and_image() {
+        let (orig, tail) = camera_jpeg_intrinsic_exif_only(); // Make/Model only — no editable field yet
+
+        // Set the only editable field, then clear it.
+        let seeded = write_back("jpg", &orig, &[exif_set("ImageDescription", "Temp caption")]).expect("initial EXIF set");
+        assert_eq!(get(&read_all("jpg", &seeded), "ImageDescription"), Some("\"Temp caption\"")); // sanity: present
+
+        let cleared = write_back("jpg", &seeded, &[MetaEdit::Clear { group: "exif".into(), key: "ImageDescription".into() }])
+            .expect("clearing the last editable EXIF field must succeed, not error (CPE-1308)");
+
+        let after = read_all("jpg", &cleared);
+        assert!(get(&after, "ImageDescription").is_none(), "cleared ImageDescription must be gone on reopen");
+        // Intrinsic EXIF survives untouched …
+        assert_eq!(get(&after, "Make"), Some("\"AcmeCam\""));
+        assert_eq!(get(&after, "Model"), Some("\"X100\""));
+        // … and so does the image scan data, byte-for-byte.
+        assert!(cleared.ends_with(&tail), "image scan data must be preserved verbatim");
+    }
 }

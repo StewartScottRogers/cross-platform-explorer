@@ -345,15 +345,25 @@ pub fn write_flac(orig: &[u8], fields: &[MetaField]) -> Vec<u8> {
 /// thumbnail image — IFD1 / `In::THUMBNAIL` — is the one thing not carried, since its JPEG bytes can't be
 /// threaded through this writer; thumbnails are regenerable, not intrinsic metadata.)
 ///
-/// Returns `Err` (never panics) for non-JPEG/truncated input, when there are no editable EXIF fields to
-/// write, or when the encoded Exif block won't fit a single 64 KiB APP1 segment. **JPEG only** — for a
-/// TIFF the EXIF *is* the file's own IFD chain (rewriting it would drop the image strips/thumbnail), so
-/// `tif`/`tiff` are deliberately left out of [`crate::media_meta::is_writable`] for now.
+/// Returns `Err` (never panics) for non-JPEG/truncated input or when the encoded Exif block won't fit a
+/// single 64 KiB APP1 segment. When clearing edits leave **no** EXIF content at all (no editable field and
+/// nothing intrinsic either — see [`build_exif_tiff`]), the existing Exif APP1 is stripped entirely rather
+/// than erroring the save (CPE-1308 clear-symmetry; mirrors [`write_iptc`]/[`write_xmp`]'s own
+/// last-field-cleared handling). **JPEG only** — for a TIFF the EXIF *is* the file's own IFD chain
+/// (rewriting it would drop the image strips/thumbnail), so `tif`/`tiff` are deliberately left out of
+/// [`crate::media_meta::is_writable`] for now.
 pub fn write_exif(orig: &[u8], fields: &[MetaField]) -> Result<Vec<u8>, String> {
     if orig.len() < 2 || orig[0] != 0xFF || orig[1] != 0xD8 {
         return Err("not a JPEG (missing SOI marker)".into());
     }
-    let tiff = build_exif_tiff(orig, fields)?;
+    let Some(tiff) = build_exif_tiff(orig, fields)? else {
+        // Nothing to write (see build_exif_tiff): strip any pre-existing Exif APP1 outright, reusing the
+        // shared JPEG-segment helpers write_iptc/write_xmp already use for their own "cleared to empty"
+        // case, rather than hand-rolling a second strip loop alongside the insertion loop below.
+        let (segs, tail_start) = split_jpeg(orig)?;
+        let is_exif_app1 = |s: &JpegSegment| s.marker == 0xE1 && s.payload().starts_with(b"Exif\0\0");
+        return Ok(strip_jpeg_segment(orig, &segs, tail_start, is_exif_app1));
+    };
 
     // APP1 segment: FFE1 + 2-byte length (covers the length field itself + payload) + "Exif\0\0" + TIFF.
     let payload_len = 6 + tiff.len();
@@ -470,44 +480,68 @@ pub fn write_exif(orig: &[u8], fields: &[MetaField]) -> Result<Vec<u8>, String> 
     Ok(out)
 }
 
+/// Whether `tag` is one of the four fields [`crate::media_meta_read::read_exif`] marks `editable` —
+/// ImageDescription / Artist / Copyright / UserComment. Used by [`build_exif_tiff`] to decide which of
+/// `orig`'s existing primary-IFD fields are carried through verbatim (everything else — intrinsics like
+/// Make/Model/GPS/Orientation) versus governed entirely by `fields`/[`build_override_fields`] (these four).
+fn is_editable_exif_tag(tag: exif::Tag) -> bool {
+    matches!(tag, exif::Tag::ImageDescription | exif::Tag::Artist | exif::Tag::Copyright | exif::Tag::UserComment)
+}
+
 /// Build a raw TIFF/Exif block (big-endian) via `kamadak-exif`'s experimental `Writer`, preserving every
-/// existing field of `orig`'s primary image (IFD0 + the Exif / GPS / Interop sub-IFDs) and overriding only
-/// the four editable tags with the new values from `fields`. Re-parsing `orig` (rather than trusting the
-/// `MetaField` list, which only carries the tags [`crate::media_meta_read::read_exif`] surfaces) is what
-/// keeps intrinsics — Orientation, GPS, DateTimeOriginal, Make/Model, exposure — from being lost on an
-/// edit. The thumbnail image (`In::THUMBNAIL`) is dropped because its JPEG bytes can't be carried through
-/// this writer. `Err` if no editable field is present (an Exif block must have at least one field, and we
-/// never write an intrinsics-only block that just re-encodes what was already there) or the encoder fails.
-fn build_exif_tiff(orig: &[u8], fields: &[MetaField]) -> Result<Vec<u8>, String> {
+/// existing *intrinsic* field of `orig`'s primary image (IFD0 + the Exif / GPS / Interop sub-IFDs, minus the
+/// four editable tags) and writing the four editable tags purely from `fields`/`overrides` — never carried
+/// through from `orig`. Re-parsing `orig` (rather than trusting the `MetaField` list, which only carries the
+/// tags [`crate::media_meta_read::read_exif`] surfaces) is what keeps intrinsics — Orientation, GPS,
+/// DateTimeOriginal, Make/Model, exposure — from being lost on an edit. The thumbnail image
+/// (`In::THUMBNAIL`) is dropped because its JPEG bytes can't be carried through this writer.
+///
+/// **CPE-1308 clear-symmetry:** an editable tag is emitted *only* when `overrides` supplies it — so
+/// clearing the last editable EXIF field (its `MetaField` is simply absent from `fields`, per
+/// [`crate::media_meta_edit::apply_edits`]'s `Clear`) is a **real removal** from the rebuilt IFD, not a
+/// "no override, so skip" no-op that would otherwise leave the stale value in place. This is the
+/// counterpart to `write_iptc`/`write_xmp` stripping their last field's segment.
+///
+/// Returns `Ok(None)` — "nothing to write" — when no intrinsic field survives (rare: only possible on an
+/// image whose *entire* EXIF was the one editable tag just cleared) and no editable field remains either;
+/// the underlying `Writer` refuses to encode a TIFF with zero fields in every IFD ("At least one IFD must
+/// exist"), so the caller ([`write_exif`]) strips the Exif APP1 outright in that case instead of erroring.
+/// `Err` only for an encoder failure.
+fn build_exif_tiff(orig: &[u8], fields: &[MetaField]) -> Result<Option<Vec<u8>>, String> {
     let overrides = build_override_fields(fields);
-    if overrides.is_empty() {
-        return Err("no editable EXIF fields to write".into());
-    }
-    // Existing EXIF (if any) whose non-overridden fields we carry through. `.ok()` → None for a JPEG with
-    // no EXIF yet (e.g. a freshly-created image), in which case only the overrides are written.
+    // Existing EXIF (if any) whose non-editable (intrinsic) fields we carry through. `.ok()` → None for a
+    // JPEG with no EXIF yet (e.g. a freshly-created image), in which case only the overrides are written.
     let existing = exif::Reader::new().read_from_container(&mut std::io::Cursor::new(orig)).ok();
 
     let mut writer = exif::experimental::Writer::new();
+    let mut any_field = false;
     if let Some(ref exif) = existing {
         for f in exif.fields() {
             // Preserve only the primary image's IFDs; skip the thumbnail image (its data can't be carried).
             if f.ifd_num != exif::In::PRIMARY {
                 continue;
             }
-            // Don't re-emit a stale copy of a tag we're about to override (would duplicate the entry).
-            if overrides.iter().any(|o| o.tag == f.tag) {
+            // The four editable tags are governed entirely by `overrides` below, never carried through here
+            // — this is what makes a clear a real removal rather than a silent "kept the old value".
+            if is_editable_exif_tag(f.tag) {
                 continue;
             }
             writer.push_field(f);
+            any_field = true;
         }
     }
     for f in &overrides {
         writer.push_field(f);
+        any_field = true;
+    }
+
+    if !any_field {
+        return Ok(None);
     }
 
     let mut cursor = std::io::Cursor::new(Vec::new());
     writer.write(&mut cursor, false).map_err(|e| format!("failed to encode EXIF: {e}"))?;
-    Ok(cursor.into_inner())
+    Ok(Some(cursor.into_inner()))
 }
 
 /// Translate the `"exif"`-group, editable fields into the `exif::Field` overrides the `Writer` applies on
@@ -1432,13 +1466,25 @@ fn push_iim_dataset(out: &mut Vec<u8>, record: u8, dataset: u8, value: &[u8]) {
     out.extend_from_slice(&value[..len]);
 }
 
+/// The IIM Envelope-Record (record 1) `CodedCharacterSet` dataset (`1:90`) value declaring UTF-8: the
+/// ISO 2022 escape sequence `ESC % G` (`0x1B 0x25 0x47`). IIM is nominally Latin-1/ISO-8859-1 by default, so
+/// without this declaration a reader that respects it (exiftool, Photoshop, …) mojibakes any non-ASCII byte
+/// in the record-2 datasets that follow. ASCII values are valid UTF-8 too, so declaring it is harmless (and
+/// correct) even when every field happens to be ASCII — real-world IIM writers declare it unconditionally
+/// rather than sniffing each value, which this mirrors (CPE-1308).
+const IPTC_UTF8_CHARSET_ESC: &[u8] = b"\x1B\x25\x47";
+
 /// Build a raw IPTC-IIM data block from the `group == "iptc"` fields in `fields` — the inverse of
 /// [`crate::media_meta_read`]'s `parse_iim_datasets`. Each recognised, non-blank field becomes a record-2
 /// dataset; the repeatable Keywords field (which the reader joins with `"; "`) is split back into one 2:25
 /// dataset per keyword. Unrecognised friendly keys, other groups, and blank values are skipped (mirrors
-/// [`build_frames`]'s handling of the `"id3"` group).
+/// [`build_frames`]'s handling of the `"id3"` group). When at least one record-2 dataset is emitted, a
+/// `1:90` [`IPTC_UTF8_CHARSET_ESC`] dataset is written first, declaring the record-2 text as UTF-8 — the
+/// reader ([`crate::media_meta_read`]'s `iim_friendly_key`) ignores record 1 entirely, so this is inert on
+/// the read side and additive on the write side. Returns empty when there's nothing to write (no charset
+/// declaration for an empty payload — [`write_iptc`] treats an empty result as "strip the IPTC resource").
 fn build_iim_datasets(fields: &[MetaField]) -> Vec<u8> {
-    let mut out = Vec::new();
+    let mut records = Vec::new();
     for f in fields {
         if !f.group.eq_ignore_ascii_case("iptc") || f.value.is_empty() {
             continue;
@@ -1448,13 +1494,19 @@ fn build_iim_datasets(fields: &[MetaField]) -> Vec<u8> {
             for kw in f.value.split("; ") {
                 let kw = kw.trim();
                 if !kw.is_empty() {
-                    push_iim_dataset(&mut out, 2, 25, kw.as_bytes());
+                    push_iim_dataset(&mut records, 2, 25, kw.as_bytes());
                 }
             }
         } else {
-            push_iim_dataset(&mut out, 2, dataset, f.value.as_bytes());
+            push_iim_dataset(&mut records, 2, dataset, f.value.as_bytes());
         }
     }
+    if records.is_empty() {
+        return records;
+    }
+    let mut out = Vec::with_capacity(8 + records.len());
+    push_iim_dataset(&mut out, 1, 90, IPTC_UTF8_CHARSET_ESC);
+    out.extend_from_slice(&records);
     out
 }
 
@@ -2091,15 +2143,44 @@ mod tests {
         }
     }
 
+    /// CPE-1308: this used to `Err("no editable EXIF fields to write")` (an empty-IFD encoder failure that
+    /// aborted the whole save). Now "nothing to write" is a success case — no Exif APP1 to insert and none
+    /// to strip either, so the JPEG comes back byte-for-byte unchanged. See the next test,
+    /// `write_exif_strips_the_app1_entirely_when_clearing_leaves_nothing_behind`, for the case where an Exif
+    /// APP1 *did* exist and must be removed.
     #[test]
-    fn write_exif_errs_when_no_editable_field_is_present() {
+    fn write_exif_succeeds_with_unchanged_jpeg_when_no_editable_or_intrinsic_field_is_present() {
         let seed = [0xFFu8, 0xD8, 0xFF, 0xD9];
         let fields = vec![
-            // read-only intrinsic + wrong group + wrong key → nothing writable → Err (empty IFD).
+            // read-only intrinsic + wrong group + wrong key → nothing writable → Ok, nothing to add/strip.
             MetaField { group: "exif".into(), key: "Make".into(), value: "Acme".into(), editable: false },
             MetaField { group: "id3".into(), key: "Title".into(), value: "N".into(), editable: true },
         ];
-        assert!(write_exif(&seed, &fields).is_err());
+        let out = write_exif(&seed, &fields).expect("nothing to write must not error (CPE-1308 clear-symmetry)");
+        assert_eq!(out, seed, "no Exif APP1 existed and none was written — bytes unchanged");
+    }
+
+    /// CPE-1308 clear-symmetry, the "real removal, no error" case the ticket asks for: a JPEG whose **only**
+    /// EXIF content is the one editable field about to be cleared (no intrinsics survive) must have its Exif
+    /// APP1 stripped entirely, not error the save. The non-EXIF part of the JPEG (here: the scan tail) must
+    /// still come through byte-for-byte.
+    #[test]
+    fn write_exif_strips_the_app1_entirely_when_clearing_leaves_nothing_behind() {
+        use crate::media_meta_read::read_exif;
+        let (seed, tail) = jpeg_with_comment(b"keep-this-comment");
+        let with_desc = write_exif(&seed, &[efield("ImageDescription", "Only field")]).unwrap();
+        assert_eq!(
+            read_exif(&with_desc).iter().find(|f| f.key == "ImageDescription").map(|f| f.value.as_str()),
+            Some("\"Only field\"")
+        ); // sanity: present before the clear
+
+        // Clearing it: the fields list carries no exif-group entries at all (mirrors apply_edits' Clear
+        // removing the MetaField outright) and the fixture has no other EXIF to fall back on.
+        let cleared = write_exif(&with_desc, &[]).expect("clearing to empty EXIF must not error");
+
+        assert!(read_exif(&cleared).iter().find(|f| f.key == "ImageDescription").is_none(), "cleared field must be gone on reopen");
+        assert!(!cleared.windows(6).any(|w| w == b"Exif\0\0"), "the Exif APP1 segment itself must be removed, not left with a stale value");
+        assert!(cleared.ends_with(&tail[..]), "non-EXIF content (COM segment + EOI) must be preserved verbatim");
     }
 
     #[test]
@@ -2935,6 +3016,74 @@ mod tests {
         // Exactly one APP13 Photoshop segment — the old one was replaced, not stacked.
         let n = out.windows(PHOTOSHOP_SIG.len()).filter(|w| *w == PHOTOSHOP_SIG).count();
         assert_eq!(n, 1, "APP13 must be replaced, not stacked");
+    }
+
+    // ---- CPE-1308 polish: IPTC UTF-8 CodedCharacterSet + surviving-8BIM clear ----
+
+    /// The `1:90` CodedCharacterSet declaration (ESC `% G`) must be present whenever there's IPTC content to
+    /// declare a charset for, and a non-ASCII value must round-trip through `read_iptc` rather than
+    /// mojibaking (the reader always decodes UTF-8; declaring it is for *other* tools like exiftool/Photoshop
+    /// that respect `1:90` and would otherwise assume Latin-1).
+    #[test]
+    fn write_iptc_declares_utf8_charset_and_round_trips_non_ascii_caption() {
+        use crate::media_meta_read::read_iptc;
+        let (seed, tail) = jpeg_with(&[]);
+        let caption = "Caf\u{e9} m\u{fc}n\u{fc}\u{6587}"; // "Café münち" — mixes Latin-1-representable + CJK
+        let out = write_iptc(&seed, &[mfield("iptc", "Caption/Abstract", caption)]).unwrap();
+
+        assert_eq!(get(&read_iptc(&out), "Caption/Abstract"), Some(caption));
+        assert!(out.windows(3).any(|w| w == [0x1B, 0x25, 0x47]), "1:90 UTF-8 CodedCharacterSet ESC sequence must be present");
+        // The declaration is dataset 1:90 specifically (0x1C, record=1, dataset=90), not merely the ESC bytes
+        // appearing incidentally somewhere else.
+        assert!(out.windows(5).any(|w| w == [0x1C, 0x01, 0x5A, 0x00, 0x03]), "must be framed as the 1:90 dataset (record 1, dataset 90, 3-byte value)");
+        assert!(out.ends_with(&tail), "image scan data must be preserved verbatim");
+    }
+
+    /// A pure-ASCII payload must still round-trip correctly even though the mandatory `1:90` declaration adds
+    /// a few bytes ahead of the record-2 datasets — the ticket's "ASCII stays byte-identical" is about the
+    /// *decoded field values* being unaffected by the always-on charset declaration, not the raw segment
+    /// length (which necessarily grows by the fixed 8-byte `1:90` dataset). All four field values must still
+    /// be exactly what was written, byte for byte.
+    #[test]
+    fn write_iptc_ascii_caption_still_round_trips_with_charset_declared() {
+        use crate::media_meta_read::read_iptc;
+        let (seed, tail) = jpeg_with(&[]);
+        let fields = vec![
+            mfield("iptc", "Caption/Abstract", "Sunset over the bay"),
+            mfield("iptc", "By-line", "Jane Doe"),
+            mfield("iptc", "City", "Lisbon"),
+        ];
+        let out = write_iptc(&seed, &fields).unwrap();
+        let back = read_iptc(&out);
+        assert_eq!(get(&back, "Caption/Abstract"), Some("Sunset over the bay"));
+        assert_eq!(get(&back, "By-line"), Some("Jane Doe"));
+        assert_eq!(get(&back, "City"), Some("Lisbon"));
+        assert!(out.windows(3).any(|w| w == [0x1B, 0x25, 0x47]), "charset declaration is unconditional, even for pure ASCII");
+        assert!(out.ends_with(&tail));
+    }
+
+    /// Re-verify finding #3: clearing the LAST IPTC field when a **non-IPTC** 8BIM resource also exists in
+    /// the APP13 must rewrite the segment carrying just the survivor — not drop the whole APP13 (which would
+    /// also destroy the unrelated resource) and not leave the stale IPTC resource behind.
+    #[test]
+    fn write_iptc_clearing_last_field_keeps_surviving_8bim_and_drops_iptc_resource() {
+        use crate::media_meta_read::read_iptc;
+        let res_block = build_8bim_block(0x03ED, &[0xDE, 0xAD, 0xBE, 0xEF]); // resolution-info-style survivor
+        let mut app13 = PHOTOSHOP_SIG.to_vec();
+        app13.extend_from_slice(&res_block);
+        app13.extend_from_slice(&build_8bim_block(IPTC_RESOURCE_ID, &build_iim_datasets(&[mfield("iptc", "Caption/Abstract", "Old caption")])));
+        let (seed, tail) = jpeg_with(&[jseg(0xED, &app13)]);
+        assert_eq!(get(&read_iptc(&seed), "Caption/Abstract"), Some("Old caption")); // sanity: present pre-clear
+
+        // Clearing the last IPTC field means the studio's post-edit field list carries no "iptc" entries at
+        // all — mirrored here by calling write_iptc with an empty slice, same as write_jpeg's dispatch does.
+        let out = write_iptc(&seed, &[]).unwrap();
+
+        assert!(get(&read_iptc(&out), "Caption/Abstract").is_none(), "cleared caption must not survive");
+        assert!(out.windows(4).any(|w| w == [0xDE, 0xAD, 0xBE, 0xEF]), "non-IPTC 8BIM resource must survive the clear");
+        let n = out.windows(PHOTOSHOP_SIG.len()).filter(|w| *w == PHOTOSHOP_SIG).count();
+        assert_eq!(n, 1, "APP13 must be rewritten carrying the survivor, not dropped entirely or stacked");
+        assert!(out.ends_with(&tail), "image scan data must be preserved verbatim");
     }
 
     #[test]
