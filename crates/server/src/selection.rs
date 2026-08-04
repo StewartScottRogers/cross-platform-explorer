@@ -3,14 +3,13 @@
 //! the complement of another query (`Invert`). Pure: no filesystem access, so it's unit-testable without
 //! touching disk and reusable by both a `#[tauri::command]` dispatcher and any future batch-select UI.
 //!
-//! Glob reuse note: `crates/server/src/name_search.rs` (CPE-603/697/666, the wildcard-search feature)
-//! has its own `*`/`?` matcher, but it's a private `glob_is_match` wrapped by the public `name_matches`,
-//! which folds in a *substring* fallback for patterns without wildcard characters — a literal
-//! `SelQuery::Glob("readme.txt")` would then match any name merely *containing* "readme.txt" rather than
-//! being anchored to the whole name, which is exactly the semantics this ticket needs. Reaching in to
-//! make the private matcher `pub(crate)` would touch a file outside this ticket's scope, so this module
-//! ships its own small self-contained anchored matcher (same iterative two-pointer backtracking
-//! approach, no regex dependency) rather than a second divergent implementation of `name_matches`.
+//! Glob reuse note: the raw `*`/`?` matcher lives in [`crate::glob::glob_is_match`] (CPE-1302), shared
+//! with `name_search.rs` (which used to carry a byte-identical private copy). It is **anchored** to the
+//! whole name — deliberately unlike `name_search`'s public `name_matches`, which folds in a *substring*
+//! fallback for patterns without wildcard characters (a literal `SelQuery::Glob("readme.txt")` must match
+//! only the exact name, not any name merely *containing* "readme.txt"). This module keeps its own
+//! case-insensitive `glob_is_match` wrapper that lowercases both sides before delegating to the shared
+//! matcher, preserving its long-standing case-insensitive-anchored semantics.
 
 /// One listing entry as far as selection cares: its name and whether it's a folder.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
@@ -44,32 +43,10 @@ pub enum SelQuery {
 }
 
 /// Anchored wildcard match: `*` matches any run of characters (including none), `?` exactly one
-/// character. Case-insensitive. Iterative two-pointer backtracking — no regex dependency.
+/// character. Case-insensitive — lowercases both sides, then delegates to the shared, case-sensitive
+/// [`crate::glob::glob_is_match`] (CPE-1302). Semantics unchanged from the former private copy.
 fn glob_is_match(name: &str, pattern: &str) -> bool {
-    let n: Vec<char> = name.to_lowercase().chars().collect();
-    let p: Vec<char> = pattern.to_lowercase().chars().collect();
-    let (mut i, mut j) = (0usize, 0usize);
-    let (mut star, mut mark) = (None, 0usize);
-    while i < n.len() {
-        if j < p.len() && (p[j] == '?' || p[j] == n[i]) {
-            i += 1;
-            j += 1;
-        } else if j < p.len() && p[j] == '*' {
-            star = Some(j);
-            mark = i;
-            j += 1;
-        } else if let Some(s) = star {
-            j = s + 1;
-            mark += 1;
-            i = mark;
-        } else {
-            return false;
-        }
-    }
-    while j < p.len() && p[j] == '*' {
-        j += 1;
-    }
-    j == p.len()
+    crate::glob::glob_is_match(&name.to_lowercase(), &pattern.to_lowercase())
 }
 
 /// Lower-cased extension of `name` with no leading dot, or `None` for an extensionless name (or a

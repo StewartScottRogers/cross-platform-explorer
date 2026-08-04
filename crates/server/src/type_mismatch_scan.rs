@@ -23,6 +23,7 @@ use serde::Serialize;
 
 use crate::file_type::mismatch;
 use crate::fsutil::entry_is_symlink;
+use crate::glob::any_glob_matches;
 use crate::model::extension_of;
 
 /// Capped header read per file, in bytes. 64 bytes comfortably covers every signature
@@ -102,8 +103,14 @@ fn read_capped_header(path: &Path) -> std::io::Result<Vec<u8>> {
 /// file with no extension, or whose bytes don't match a known signature, is never reported — see
 /// [`crate::file_type::mismatch`]'s own contract. Caps at [`MAX_FILES`] regular files considered; hitting
 /// the cap sets `truncated` and stops the walk early.
+///
+/// `excludes` are glob patterns (CPE-1302): any discovered sub-directory whose base name matches one is
+/// pruned — skipped and never descended into, so nothing inside it is scanned or reported. An **empty**
+/// `excludes` slice prunes nothing, so passing `&[]` is byte-identical to the pre-exclude behavior. The
+/// `root` itself is always scanned regardless of `excludes`.
 pub fn walk_type_mismatches(
     root: &Path,
+    excludes: &[String],
     mut flush: impl FnMut(Vec<MismatchHit>) -> ControlFlow<()>,
 ) -> ScanTail {
     let mut scanned = 0u64;
@@ -118,8 +125,10 @@ pub fn walk_type_mismatches(
             let Ok(meta) = entry.metadata() else { continue };
             if meta.is_dir() {
                 // Skip symlinked dirs to avoid walk cycles (same discipline as `folder_similarity_scan`
-                // / `empty_dirs_scan` / `dangling_links_scan`).
-                if !entry_is_symlink(&entry) {
+                // / `empty_dirs_scan` / `dangling_links_scan`), and prune excluded dirs (CPE-1302).
+                if !entry_is_symlink(&entry)
+                    && !any_glob_matches(&entry.file_name().to_string_lossy(), excludes)
+                {
                     stack.push(path);
                 }
                 continue;
@@ -170,10 +179,11 @@ pub fn walk_type_mismatches(
 
 /// Collect-to-vec type-mismatch sweep: every flagged file under `root`, plus how many regular files
 /// were considered and whether the walk was truncated. A thin wrapper over [`walk_type_mismatches`] —
-/// behavior is unchanged from before the CPE-1294 refactor.
-pub fn find_type_mismatches(root: &Path) -> MismatchReport {
+/// behavior is unchanged from before the CPE-1294 refactor. `excludes` prunes matching sub-directories
+/// (CPE-1302); pass `&[]` for the original whole-tree sweep.
+pub fn find_type_mismatches(root: &Path, excludes: &[String]) -> MismatchReport {
     let mut hits = Vec::new();
-    let tail = walk_type_mismatches(root, |batch| {
+    let tail = walk_type_mismatches(root, excludes, |batch| {
         hits.extend(batch);
         ControlFlow::Continue(())
     });
@@ -203,7 +213,7 @@ mod tests {
         // A real PE/MZ header ("MZ" DOS stub) written into a file claiming to be a .jpg.
         fs::write(d.join("foo.jpg"), PE_HEADER).unwrap();
 
-        let r = find_type_mismatches(&d);
+        let r = find_type_mismatches(&d, &[]);
         assert!(!r.truncated);
         assert_eq!(r.scanned, 1);
         assert_eq!(r.hits.len(), 1, "the disguised PE must be flagged: {:?}", r.hits);
@@ -221,7 +231,7 @@ mod tests {
         let png_bytes = [0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 0, 0, 0, 0];
         fs::write(d.join("photo.png"), png_bytes).unwrap();
 
-        let r = find_type_mismatches(&d);
+        let r = find_type_mismatches(&d, &[]);
         assert!(!r.truncated);
         assert_eq!(r.scanned, 1);
         assert!(r.hits.is_empty(), "a genuine PNG must not be flagged: {:?}", r.hits);
@@ -234,7 +244,7 @@ mod tests {
         // ZIP local-file-header magic — a real .docx is a ZIP container under the hood.
         fs::write(d.join("report.docx"), [0x50, 0x4B, 0x03, 0x04, 0x14, 0x00]).unwrap();
 
-        let r = find_type_mismatches(&d);
+        let r = find_type_mismatches(&d, &[]);
         assert!(r.hits.is_empty(), "a genuine ZIP-backed .docx must not be flagged: {:?}", r.hits);
         let _ = fs::remove_dir_all(&d);
     }
@@ -245,7 +255,7 @@ mod tests {
         // Real PE bytes, but no extension at all — nothing to disagree with.
         fs::write(d.join("myapp"), [0x4D, 0x5A, 0x90, 0x00]).unwrap();
 
-        let r = find_type_mismatches(&d);
+        let r = find_type_mismatches(&d, &[]);
         assert_eq!(r.scanned, 1);
         assert!(r.hits.is_empty(), "an extensionless file must never be flagged: {:?}", r.hits);
         let _ = fs::remove_dir_all(&d);
@@ -258,7 +268,7 @@ mod tests {
         let d = scratch("plaintext");
         fs::write(d.join("notes.jpg"), b"just some plain text, not a binary format").unwrap();
 
-        let r = find_type_mismatches(&d);
+        let r = find_type_mismatches(&d, &[]);
         assert!(r.hits.is_empty(), "undetectable content must not be flagged: {:?}", r.hits);
         let _ = fs::remove_dir_all(&d);
     }
@@ -269,7 +279,7 @@ mod tests {
         fs::create_dir_all(d.join("a/b")).unwrap();
         fs::write(d.join("a/b/hidden.png"), [0x4D, 0x5A, 0x90, 0x00]).unwrap();
 
-        let r = find_type_mismatches(&d);
+        let r = find_type_mismatches(&d, &[]);
         assert_eq!(r.hits.len(), 1);
         assert!(r.hits[0].path.replace('\\', "/").ends_with("a/b/hidden.png"));
         let _ = fs::remove_dir_all(&d);
@@ -278,7 +288,7 @@ mod tests {
     #[test]
     fn missing_root_scans_clean_without_panicking() {
         let missing = std::env::temp_dir().join("cpe-typemismatch-does-not-exist-at-all");
-        let r = find_type_mismatches(&missing);
+        let r = find_type_mismatches(&missing, &[]);
         assert!(r.hits.is_empty());
         assert_eq!(r.scanned, 0);
         assert!(!r.truncated);
@@ -302,7 +312,7 @@ mod tests {
             .open(&path)
             .expect("exclusive open for the test fixture itself");
 
-        let r = find_type_mismatches(&d);
+        let r = find_type_mismatches(&d, &[]);
         assert_eq!(r.scanned, 1, "the file is still counted as considered");
         assert!(r.hits.is_empty(), "an unreadable file must be skipped, not flagged or panicked on");
         drop(_handle);
@@ -316,7 +326,7 @@ mod tests {
         fs::write(d.join("b.png"), [0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A]).unwrap(); // ok
         fs::write(d.join("c.txt"), b"plain text").unwrap(); // undetectable
 
-        let r = find_type_mismatches(&d);
+        let r = find_type_mismatches(&d, &[]);
         assert_eq!(r.scanned, 3);
         assert_eq!(r.hits.len(), 1);
         let _ = fs::remove_dir_all(&d);
@@ -337,7 +347,7 @@ mod tests {
 
         let mut batch_sizes = Vec::new();
         let mut total_hits = 0usize;
-        let tail = walk_type_mismatches(&d, |b| {
+        let tail = walk_type_mismatches(&d, &[], |b| {
             batch_sizes.push(b.len());
             total_hits += b.len();
             ControlFlow::Continue(())
@@ -364,7 +374,7 @@ mod tests {
 
         let mut seen = 0usize;
         // Break after the first flush — the walk must stop rather than deliver every hit.
-        let tail = walk_type_mismatches(&d, |b| {
+        let tail = walk_type_mismatches(&d, &[], |b| {
             seen += b.len();
             ControlFlow::Break(())
         });
@@ -390,7 +400,7 @@ mod tests {
 
         let mut flush_count = 0usize;
         let mut total = 0usize;
-        let tail = walk_type_mismatches(&d, |b| {
+        let tail = walk_type_mismatches(&d, &[], |b| {
             flush_count += 1;
             total += b.len();
             ControlFlow::Continue(())
@@ -413,12 +423,12 @@ mod tests {
         fs::write(d.join("a/real.png"), [0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A]).unwrap(); // genuine
 
         let mut collected = Vec::new();
-        let tail = walk_type_mismatches(&d, |b| {
+        let tail = walk_type_mismatches(&d, &[], |b| {
             collected.extend(b);
             ControlFlow::Continue(())
         });
 
-        let report = find_type_mismatches(&d);
+        let report = find_type_mismatches(&d, &[]);
 
         assert_eq!(report.scanned, tail.scanned);
         assert_eq!(report.truncated, tail.truncated);
@@ -431,6 +441,48 @@ mod tests {
         b.sort();
         assert_eq!(a, b);
         assert_eq!(report.hits, collected, "find_type_mismatches must be byte-identical to the raw walk");
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    // --- CPE-1302: exclude-glob support. ---
+
+    #[test]
+    fn excluded_directory_is_pruned_and_its_disguised_file_is_not_reported() {
+        let d = scratch("exclude-prune");
+        fs::create_dir_all(d.join("node_modules/pkg")).unwrap();
+        fs::create_dir_all(d.join("src")).unwrap();
+        // A disguised PE hides inside node_modules (deep) and another in src.
+        fs::write(d.join("node_modules/pkg/evil.jpg"), PE_HEADER).unwrap();
+        fs::write(d.join("src/evil.jpg"), PE_HEADER).unwrap();
+        fs::write(d.join("top.jpg"), PE_HEADER).unwrap();
+
+        // Baseline: with empty excludes, all three disguised files are flagged.
+        let all = find_type_mismatches(&d, &[]);
+        assert_eq!(all.hits.len(), 3, "empty excludes reports every disguised file: {:?}", all.hits);
+
+        // Excluding node_modules prunes it: its file is neither scanned nor reported, and the dir
+        // itself is never descended into (scanned drops by exactly the one file inside it).
+        let excl = find_type_mismatches(&d, &["node_modules".to_string()]);
+        assert_eq!(excl.hits.len(), 2, "the disguised file inside node_modules must not be reported: {:?}", excl.hits);
+        assert!(!excl.hits.iter().any(|h| h.path.replace('\\', "/").contains("node_modules")));
+        assert_eq!(excl.scanned, all.scanned - 1, "the pruned dir's file is not scanned");
+        assert!(excl.hits.iter().any(|h| h.path.replace('\\', "/").ends_with("src/evil.jpg")));
+        assert!(excl.hits.iter().any(|h| h.path.ends_with("top.jpg")));
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn empty_excludes_equals_original_behavior() {
+        let d = scratch("exclude-empty-parity");
+        fs::create_dir_all(d.join("a/b")).unwrap();
+        fs::write(d.join("a/b/hidden.png"), [0x4D, 0x5A, 0x90, 0x00]).unwrap();
+        fs::write(d.join("real.png"), [0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A]).unwrap();
+
+        // Passing an empty excludes slice must be identical to the no-exclude path.
+        let a = find_type_mismatches(&d, &[]);
+        let no_dirs_excluded = find_type_mismatches(&d, &["does_not_exist_anywhere".to_string()]);
+        assert_eq!(a.hits, no_dirs_excluded.hits, "a non-matching exclude changes nothing");
+        assert_eq!(a.scanned, no_dirs_excluded.scanned);
         let _ = fs::remove_dir_all(&d);
     }
 }

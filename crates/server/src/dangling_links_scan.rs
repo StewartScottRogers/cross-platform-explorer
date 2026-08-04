@@ -16,6 +16,7 @@ use serde::Serialize;
 
 use crate::dangling_links::{scan_dangling, DanglingLink, LinkEntry};
 use crate::fsutil::entry_is_symlink;
+use crate::glob::any_glob_matches;
 
 /// Cap on filesystem entries visited across the whole walk — bounds a pathological tree even before
 /// any symlinks are found. Hitting it sets `truncated`. Mirrors the caps in
@@ -80,8 +81,14 @@ fn normalize(path: &Path) -> PathBuf {
 /// runs to completion (or a cap) before the first flush; `flush` still lets a streaming caller paint
 /// the *results* incrementally and stop consuming further batches early. A non-directory `root` is an
 /// `Err`.
+///
+/// `excludes` are glob patterns (CPE-1302): any discovered sub-directory whose base name matches one is
+/// pruned — skipped and never descended into, so no symlink inside it is collected or classified. An
+/// **empty** `excludes` slice prunes nothing, so passing `&[]` is byte-identical to the pre-exclude
+/// behavior. The `root` itself is always walked regardless of `excludes`.
 pub fn walk_dangling_links(
     root: &Path,
+    excludes: &[String],
     mut flush: impl FnMut(Vec<DanglingLink>) -> ControlFlow<()>,
 ) -> Result<ScanTail, String> {
     if !root.is_dir() {
@@ -129,7 +136,7 @@ pub fn walk_dangling_links(
             }
 
             let Ok(meta) = entry.metadata() else { continue };
-            if meta.is_dir() {
+            if meta.is_dir() && !any_glob_matches(&entry.file_name().to_string_lossy(), excludes) {
                 stack.push(entry.path());
             }
         }
@@ -149,10 +156,11 @@ pub fn walk_dangling_links(
 /// can't be read are skipped rather than failing the whole walk (never panics); a symlinked
 /// directory is recorded as a link but never descended into (avoids walk cycles, same discipline as
 /// [`crate::folder_similarity_scan`] / `list_dir`). A non-directory `root` is an `Err`. Thin
-/// collect-to-vec wrapper over [`walk_dangling_links`].
-pub fn find_dangling_links(root: &Path) -> Result<DanglingReport, String> {
+/// collect-to-vec wrapper over [`walk_dangling_links`]. `excludes` prunes matching sub-directories
+/// (CPE-1302); pass `&[]` for the original whole-tree walk.
+pub fn find_dangling_links(root: &Path, excludes: &[String]) -> Result<DanglingReport, String> {
     let mut links = Vec::new();
-    let tail = walk_dangling_links(root, |batch| {
+    let tail = walk_dangling_links(root, excludes, |batch| {
         links.extend(batch);
         ControlFlow::Continue(())
     })?;
@@ -178,14 +186,14 @@ mod tests {
         let d = scratch("nondir");
         let f = d.join("file.txt");
         fs::write(&f, "x").unwrap();
-        assert!(find_dangling_links(&f).is_err());
+        assert!(find_dangling_links(&f, &[]).is_err());
         let _ = fs::remove_dir_all(&d);
     }
 
     #[test]
     fn empty_tree_scans_clean() {
         let d = scratch("empty");
-        let r = find_dangling_links(&d).unwrap();
+        let r = find_dangling_links(&d, &[]).unwrap();
         assert!(r.links.is_empty());
         assert!(!r.truncated);
         let _ = fs::remove_dir_all(&d);
@@ -204,7 +212,7 @@ mod tests {
         symlink(&target, &link).unwrap();
         fs::remove_file(&target).unwrap();
 
-        let r = find_dangling_links(&d).unwrap();
+        let r = find_dangling_links(&d, &[]).unwrap();
         assert_eq!(r.links.len(), 1);
         assert_eq!(r.links[0].reason, DanglingReason::Missing);
         assert!(r.links[0].path.ends_with("broken_link"));
@@ -222,7 +230,7 @@ mod tests {
         // Relative self-loop: the link's own stored target is just its own file name.
         symlink("loopy", &link).unwrap();
 
-        let r = find_dangling_links(&d).unwrap();
+        let r = find_dangling_links(&d, &[]).unwrap();
         assert_eq!(r.links.len(), 1);
         assert_eq!(r.links[0].reason, DanglingReason::Cyclic);
         assert!(r.links[0].path.ends_with("loopy"));
@@ -241,7 +249,7 @@ mod tests {
         symlink("b_link", &a).unwrap();
         symlink("a_link", &b).unwrap();
 
-        let r = find_dangling_links(&d).unwrap();
+        let r = find_dangling_links(&d, &[]).unwrap();
         assert_eq!(r.links.len(), 2);
         assert!(r.links.iter().all(|l| l.reason == DanglingReason::Cyclic));
         let _ = fs::remove_dir_all(&d);
@@ -258,7 +266,7 @@ mod tests {
         let link = d.join("good_link");
         symlink(&target, &link).unwrap();
 
-        let r = find_dangling_links(&d).unwrap();
+        let r = find_dangling_links(&d, &[]).unwrap();
         assert!(r.links.is_empty(), "a healthy symlink must not be reported");
         assert!(!r.truncated);
         let _ = fs::remove_dir_all(&d);
@@ -275,7 +283,7 @@ mod tests {
         // Relative target resolved against the link's own parent dir (sub/), not the walk root.
         symlink("real.txt", d.join("sub/rel_link")).unwrap();
 
-        let r = find_dangling_links(&d).unwrap();
+        let r = find_dangling_links(&d, &[]).unwrap();
         assert!(r.links.is_empty(), "relative target must resolve against the link's own directory");
         let _ = fs::remove_dir_all(&d);
     }
@@ -290,7 +298,7 @@ mod tests {
         fs::write(d.join("b.txt"), "b").unwrap();
         symlink(d.join("a.txt"), d.join("link_to_a")).unwrap();
 
-        let r = find_dangling_links(&d).unwrap();
+        let r = find_dangling_links(&d, &[]).unwrap();
         assert_eq!(r.scanned, 3, "a.txt, b.txt, link_to_a");
         let _ = fs::remove_dir_all(&d);
     }
@@ -300,7 +308,7 @@ mod tests {
         let d = scratch("walk-nondir");
         let f = d.join("file.txt");
         fs::write(&f, "x").unwrap();
-        assert!(walk_dangling_links(&f, |_| ControlFlow::Continue(())).is_err());
+        assert!(walk_dangling_links(&f, &[], |_| ControlFlow::Continue(())).is_err());
         let _ = fs::remove_dir_all(&d);
     }
 
@@ -318,13 +326,13 @@ mod tests {
         fs::write(d.join("plain.txt"), "x").unwrap();
 
         let mut streamed = Vec::new();
-        let tail = walk_dangling_links(&d, |batch| {
+        let tail = walk_dangling_links(&d, &[], |batch| {
             streamed.extend(batch);
             ControlFlow::Continue(())
         })
         .unwrap();
 
-        let collected = find_dangling_links(&d).unwrap();
+        let collected = find_dangling_links(&d, &[]).unwrap();
         assert_eq!(tail.scanned, collected.scanned);
         assert_eq!(tail.truncated, collected.truncated);
 
@@ -351,7 +359,7 @@ mod tests {
 
         let mut batch_sizes = Vec::new();
         let mut total = 0usize;
-        let tail = walk_dangling_links(&d, |batch| {
+        let tail = walk_dangling_links(&d, &[], |batch| {
             total += batch.len();
             batch_sizes.push(batch.len());
             ControlFlow::Continue(())
@@ -378,7 +386,7 @@ mod tests {
 
         let mut seen = 0usize;
         let mut flushes = 0usize;
-        let tail = walk_dangling_links(&d, |batch| {
+        let tail = walk_dangling_links(&d, &[], |batch| {
             seen += batch.len();
             flushes += 1;
             ControlFlow::Break(())
@@ -391,6 +399,33 @@ mod tests {
         // needs the full link set), so the tail reflects the whole tree regardless of the break.
         assert_eq!(tail.scanned, n as u64);
         assert!(!tail.truncated);
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    // --- CPE-1302: exclude-glob support. ---
+
+    #[cfg(unix)]
+    #[test]
+    fn excluded_directory_is_pruned_and_its_broken_link_is_not_reported() {
+        use std::os::unix::fs::symlink;
+
+        let d = scratch("exclude-prune");
+        fs::create_dir_all(d.join("node_modules")).unwrap();
+        // A broken symlink hides inside node_modules, another sits at the top.
+        symlink("/nowhere/gone", d.join("node_modules/broken_inner")).unwrap();
+        symlink("/nowhere/gone", d.join("broken_top")).unwrap();
+
+        // Baseline: empty excludes flags both broken links.
+        let all = find_dangling_links(&d, &[]).unwrap();
+        assert_eq!(all.links.len(), 2, "empty excludes flags every broken link: {:?}", all.links);
+
+        // Excluding node_modules prunes it: the inner broken link is neither visited nor reported.
+        let excl = find_dangling_links(&d, &["node_modules".to_string()]).unwrap();
+        assert_eq!(excl.links.len(), 1, "the broken link inside node_modules must not be reported: {:?}", excl.links);
+        assert!(excl.links[0].path.ends_with("broken_top"));
+        assert!(!excl.links.iter().any(|l| l.path.contains("node_modules")));
+        // node_modules's contents (the inner symlink) were never visited, so fewer entries scanned.
+        assert!(excl.scanned < all.scanned, "the pruned dir's contents are not scanned");
         let _ = fs::remove_dir_all(&d);
     }
 }

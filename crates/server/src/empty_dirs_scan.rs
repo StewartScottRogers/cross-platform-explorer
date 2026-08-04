@@ -12,6 +12,7 @@ use serde::Serialize;
 
 use crate::empty_dirs::{cascade_empty, DirNode};
 use crate::fsutil::entry_is_symlink;
+use crate::glob::any_glob_matches;
 
 /// Cap on directories visited during the walk — bounds a runaway tree, mirroring
 /// [`crate::folder_similarity_scan::FOLDER_MAX_DIRS`]. Hitting it sets `truncated`; directories
@@ -40,10 +41,17 @@ pub struct EmptyDirsReport {
 /// symlinked subdirectories to avoid cycles. Caps the walk at [`EMPTY_DIRS_MAX`] visited
 /// directories. Never panics — an unreadable/non-existent `root` yields an empty, untruncated
 /// report rather than an error.
-pub fn find_empty_dirs(root: &Path) -> EmptyDirsReport {
+///
+/// `excludes` are glob patterns (CPE-1302): any discovered sub-directory whose base name matches one is
+/// pruned — never descended into, so nothing inside it is scanned or reported. Crucially, an excluded
+/// directory still counts as **content** in its parent (like a file would), so a directory whose only
+/// entry is an excluded one is NOT reported as cascade-empty — deleting it would delete the excluded
+/// directory too. An **empty** `excludes` slice prunes nothing, so passing `&[]` is byte-identical to
+/// the pre-exclude behavior. The `root` itself is always scanned regardless of `excludes`.
+pub fn find_empty_dirs(root: &Path, excludes: &[String]) -> EmptyDirsReport {
     let mut scanned = 0u64;
     let mut truncated = false;
-    let dirs = match build_node(root, &mut scanned, &mut truncated) {
+    let dirs = match build_node(root, excludes, &mut scanned, &mut truncated) {
         Some(node) => cascade_empty(&node),
         None => Vec::new(),
     };
@@ -53,7 +61,11 @@ pub fn find_empty_dirs(root: &Path) -> EmptyDirsReport {
 /// Recursively build a [`DirNode`] for `path`. Returns `None` if `path` can't be read (skipped,
 /// not an error) or the walk cap has already been hit — either way the caller (the parent call)
 /// simply omits this entry from its own children rather than propagating a failure.
-fn build_node(path: &Path, scanned: &mut u64, truncated: &mut bool) -> Option<DirNode> {
+///
+/// An excluded sub-directory (base name matches an `excludes` glob) is not recursed into and is
+/// instead counted toward its parent's `file_count`, so the parent is treated as having content
+/// rather than being (falsely) collapsible (CPE-1302).
+fn build_node(path: &Path, excludes: &[String], scanned: &mut u64, truncated: &mut bool) -> Option<DirNode> {
     if *scanned >= EMPTY_DIRS_MAX {
         *truncated = true;
         return None;
@@ -70,7 +82,13 @@ fn build_node(path: &Path, scanned: &mut u64, truncated: &mut bool) -> Option<Di
             if entry_is_symlink(&entry) {
                 continue;
             }
-            if let Some(child) = build_node(&entry.path(), scanned, truncated) {
+            // An excluded directory is preserved content: don't descend, but count it so its parent
+            // can't be reported as cascade-empty (deleting the parent would delete it too).
+            if any_glob_matches(&entry.file_name().to_string_lossy(), excludes) {
+                file_count += 1;
+                continue;
+            }
+            if let Some(child) = build_node(&entry.path(), excludes, scanned, truncated) {
                 children.push(child);
             }
         } else if meta.is_file() {
@@ -107,7 +125,7 @@ mod tests {
         fs::create_dir_all(root.join("keep")).unwrap();
         fs::write(root.join("keep/file.txt"), "not empty").unwrap();
 
-        let report = find_empty_dirs(&root);
+        let report = find_empty_dirs(&root, &[]);
         assert!(!report.truncated);
         assert_eq!(report.dirs.len(), 1, "expected exactly one topmost cascade-empty dir: {:?}", report.dirs);
         let reported = Path::new(&report.dirs[0]);
@@ -124,7 +142,7 @@ mod tests {
         fs::write(root.join("g/h/keep.txt"), "not empty").unwrap();
         fs::create_dir_all(root.join("e")).unwrap();
 
-        let report = find_empty_dirs(&root);
+        let report = find_empty_dirs(&root, &[]);
         assert!(!report.truncated);
         let reported: Vec<_> = report.dirs.iter().map(Path::new).collect();
         assert!(!reported.iter().any(|p| p.starts_with(root.join("g"))), "g/h and g must not be flagged: {:?}", report.dirs);
@@ -137,7 +155,7 @@ mod tests {
         let root = scratch("fullyempty");
         fs::create_dir_all(root.join("x/y/z")).unwrap();
 
-        let report = find_empty_dirs(&root);
+        let report = find_empty_dirs(&root, &[]);
         assert!(!report.truncated);
         assert_eq!(report.dirs, vec![root.to_string_lossy().into_owned()]);
         let _ = fs::remove_dir_all(&root);
@@ -149,7 +167,7 @@ mod tests {
         fs::create_dir_all(root.join("a")).unwrap();
         fs::create_dir_all(root.join("b")).unwrap();
 
-        let report = find_empty_dirs(&root);
+        let report = find_empty_dirs(&root, &[]);
         // root + a + b = 3 directories read.
         assert_eq!(report.scanned, 3);
         let _ = fs::remove_dir_all(&root);
@@ -158,7 +176,7 @@ mod tests {
     #[test]
     fn non_existent_root_yields_empty_untruncated_report_not_a_panic() {
         let missing = std::env::temp_dir().join("cpe-emptydirs-does-not-exist-at-all");
-        let report = find_empty_dirs(&missing);
+        let report = find_empty_dirs(&missing, &[]);
         assert!(report.dirs.is_empty());
         assert_eq!(report.scanned, 0);
         assert!(!report.truncated);
@@ -183,8 +201,43 @@ mod tests {
             let _ = std::os::windows::fs::symlink_dir(root.join("target"), root.join("link"));
         }
 
-        let report = find_empty_dirs(&root);
+        let report = find_empty_dirs(&root, &[]);
         assert!(report.dirs.iter().any(|p| Path::new(p) == root.join("real_empty")));
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    // --- CPE-1302: exclude-glob support. ---
+
+    #[test]
+    fn excluded_directory_is_pruned_and_neither_it_nor_its_empty_child_is_reported() {
+        // root/node_modules/ contains an empty subdir. With node_modules excluded, that inner empty
+        // dir must NOT be reported (the dir isn't descended), AND — critically — root itself must not
+        // be reported as empty just because its only child is the (preserved) excluded directory.
+        let root = scratch("exclude-prune");
+        fs::create_dir_all(root.join("node_modules/empty_inside")).unwrap();
+
+        // Baseline: with empty excludes the whole tree is cascade-empty, so root is reported.
+        let all = find_empty_dirs(&root, &[]);
+        assert_eq!(all.dirs, vec![root.to_string_lossy().into_owned()], "empty excludes: whole tree collapses to root");
+
+        let excl = find_empty_dirs(&root, &["node_modules".to_string()]);
+        assert!(excl.dirs.is_empty(), "neither node_modules, its empty child, nor root may be reported: {:?}", excl.dirs);
+        // node_modules was not descended into, so its inner empty dir was never scanned.
+        assert!(excl.scanned < all.scanned, "the pruned dir's contents are not scanned");
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_genuinely_empty_sibling_is_still_reported_alongside_an_excluded_dir() {
+        // root has an excluded node_modules (content) AND a genuinely empty sibling. The sibling is
+        // still reported; root itself is not (it has the excluded dir as content).
+        let root = scratch("exclude-sibling");
+        fs::create_dir_all(root.join("node_modules/pkg")).unwrap();
+        fs::create_dir_all(root.join("really_empty")).unwrap();
+
+        let excl = find_empty_dirs(&root, &["node_modules".to_string()]);
+        assert_eq!(excl.dirs.len(), 1, "only the genuinely-empty sibling is reported: {:?}", excl.dirs);
+        assert_eq!(Path::new(&excl.dirs[0]), root.join("really_empty"));
         let _ = fs::remove_dir_all(&root);
     }
 }

@@ -16,6 +16,7 @@ use std::path::{Path, PathBuf};
 
 use serde::Serialize;
 
+use crate::glob::any_glob_matches;
 use crate::orphan_sidecars::{default_rules, find_orphans, FileEntry};
 
 /// Cap on files scanned across the whole walk — mirrors the caps in `duplicates` /
@@ -52,9 +53,15 @@ pub struct ScanTail {
 /// `flush` returns a `ControlFlow` so a streaming caller can stop the walk early (cancellation) at a
 /// per-directory batch boundary; a non-empty batch that returns `Break` is still delivered to `flush`
 /// before the walk stops.
+///
+/// `excludes` are glob patterns (CPE-1302): when `recursive`, any discovered sub-directory whose base
+/// name matches one is pruned — skipped and never descended into, so no sidecar inside it is scanned or
+/// reported. An **empty** `excludes` slice prunes nothing, so passing `&[]` is byte-identical to the
+/// pre-exclude behavior. The `root` itself is always scanned regardless of `excludes`.
 pub fn walk_orphan_sidecars(
     root: &Path,
     recursive: bool,
+    excludes: &[String],
     mut flush: impl FnMut(Vec<String>) -> std::ops::ControlFlow<()>,
 ) -> ScanTail {
     let rules = default_rules();
@@ -69,7 +76,7 @@ pub fn walk_orphan_sidecars(
             let path = entry.path();
             let Ok(meta) = entry.metadata() else { continue };
             if meta.is_dir() {
-                if recursive {
+                if recursive && !any_glob_matches(&entry.file_name().to_string_lossy(), excludes) {
                     stack.push(path);
                 }
                 continue;
@@ -102,10 +109,11 @@ pub fn walk_orphan_sidecars(
 /// only `root`'s direct file children are considered; when `true`, every subdirectory is walked too.
 /// Directories/files that can't be read are skipped rather than failing the whole scan (skip-on-error,
 /// like `list_dir`). A `root` that doesn't exist or isn't readable yields an empty, non-truncated
-/// result rather than an error — this function never panics.
-pub fn find_orphan_sidecars(root: &Path, recursive: bool) -> OrphanSidecarResult {
+/// result rather than an error — this function never panics. `excludes` prunes matching sub-directories
+/// when `recursive` (CPE-1302); pass `&[]` for the original whole-tree scan.
+pub fn find_orphan_sidecars(root: &Path, recursive: bool, excludes: &[String]) -> OrphanSidecarResult {
     let mut orphans: Vec<String> = Vec::new();
-    let tail = walk_orphan_sidecars(root, recursive, |batch| {
+    let tail = walk_orphan_sidecars(root, recursive, excludes, |batch| {
         orphans.extend(batch);
         std::ops::ControlFlow::Continue(())
     });
@@ -152,7 +160,7 @@ mod tests {
         fs::write(d.join("movie.mp4"), "video bytes").unwrap();
         fs::write(d.join("movie.srt"), "1\n00:00:00,000 --> 00:00:01,000\nhi\n").unwrap();
 
-        let r = find_orphan_sidecars(&d, false);
+        let r = find_orphan_sidecars(&d, false, &[]);
         assert!(r.orphans.is_empty(), "srt with a present mp4 primary must not be reported: {:?}", r.orphans);
         assert_eq!(r.scanned, 2);
         assert!(!r.truncated);
@@ -164,7 +172,7 @@ mod tests {
         let d = scratch("xmp-orphan");
         fs::write(d.join("orphan.xmp"), "<x:xmpmeta/>").unwrap();
 
-        let r = find_orphan_sidecars(&d, false);
+        let r = find_orphan_sidecars(&d, false, &[]);
         let names = norm(&r.orphans);
         assert_eq!(names.len(), 1);
         assert!(names[0].ends_with("orphan.xmp"));
@@ -178,7 +186,7 @@ mod tests {
         fs::write(d.join("photo.jpg"), "jpeg bytes").unwrap();
         fs::write(d.join("photo.xmp"), "<x:xmpmeta/>").unwrap();
 
-        let r = find_orphan_sidecars(&d, false);
+        let r = find_orphan_sidecars(&d, false, &[]);
         assert!(r.orphans.is_empty(), "xmp with a present jpg primary must not be reported: {:?}", r.orphans);
         let _ = fs::remove_dir_all(&d);
     }
@@ -190,7 +198,7 @@ mod tests {
         fs::write(d.join("top.xmp"), "orphan at top").unwrap();
         fs::write(d.join("sub/nested.xmp"), "orphan nested").unwrap();
 
-        let r = find_orphan_sidecars(&d, false);
+        let r = find_orphan_sidecars(&d, false, &[]);
         let names = norm(&r.orphans);
         assert_eq!(names.len(), 1, "only the top-level orphan is scanned: {names:?}");
         assert!(names[0].ends_with("top.xmp"));
@@ -205,7 +213,7 @@ mod tests {
         fs::write(d.join("top.xmp"), "orphan at top").unwrap();
         fs::write(d.join("sub/nested.xmp"), "orphan nested").unwrap();
 
-        let r = find_orphan_sidecars(&d, true);
+        let r = find_orphan_sidecars(&d, true, &[]);
         let names = norm(&r.orphans);
         assert_eq!(names.len(), 2, "both orphans found recursively: {names:?}");
         assert!(names.iter().any(|p| p.ends_with("top.xmp")));
@@ -225,7 +233,7 @@ mod tests {
         fs::write(d.join("videos/movie.mp4"), "video bytes").unwrap();
         fs::write(d.join("subs/movie.srt"), "subtitle text").unwrap();
 
-        let r = find_orphan_sidecars(&d, true);
+        let r = find_orphan_sidecars(&d, true, &[]);
         let names = norm(&r.orphans);
         assert_eq!(names.len(), 1, "the srt is still orphaned despite the same-stem mp4 next door: {names:?}");
         assert!(names[0].ends_with("subs/movie.srt"));
@@ -236,7 +244,7 @@ mod tests {
     fn unreadable_root_yields_empty_non_truncated_result_not_a_panic() {
         let d = scratch("missing-parent");
         let missing = d.join("does-not-exist");
-        let r = find_orphan_sidecars(&missing, true);
+        let r = find_orphan_sidecars(&missing, true, &[]);
         assert!(r.orphans.is_empty());
         assert_eq!(r.scanned, 0);
         assert!(!r.truncated);
@@ -247,7 +255,7 @@ mod tests {
     fn non_sidecar_files_are_never_reported() {
         let d = scratch("plain");
         fs::write(d.join("readme.txt"), "hello").unwrap();
-        let r = find_orphan_sidecars(&d, false);
+        let r = find_orphan_sidecars(&d, false, &[]);
         assert!(r.orphans.is_empty());
         assert_eq!(r.scanned, 1);
         let _ = fs::remove_dir_all(&d);
@@ -264,7 +272,7 @@ mod tests {
         fs::write(d.join("b/two.xmp"), "orphan b").unwrap();
 
         let mut batches: Vec<Vec<String>> = Vec::new();
-        let tail = walk_orphan_sidecars(&d, true, |batch| {
+        let tail = walk_orphan_sidecars(&d, true, &[], |batch| {
             batches.push(batch);
             std::ops::ControlFlow::Continue(())
         });
@@ -289,7 +297,7 @@ mod tests {
         fs::write(d.join("readme.txt"), "hello").unwrap();
 
         let mut flush_calls = 0usize;
-        let tail = walk_orphan_sidecars(&d, false, |_batch| {
+        let tail = walk_orphan_sidecars(&d, false, &[], |_batch| {
             flush_calls += 1;
             std::ops::ControlFlow::Continue(())
         });
@@ -310,7 +318,7 @@ mod tests {
         }
 
         let mut batches_seen = 0usize;
-        let tail = walk_orphan_sidecars(&d, true, |batch| {
+        let tail = walk_orphan_sidecars(&d, true, &[], |batch| {
             batches_seen += 1;
             assert_eq!(batch.len(), 1);
             std::ops::ControlFlow::Break(())
@@ -333,16 +341,41 @@ mod tests {
         fs::write(d.join("top.xmp"), "orphan at top").unwrap();
 
         let mut manual: Vec<String> = Vec::new();
-        let manual_tail = walk_orphan_sidecars(&d, true, |batch| {
+        let manual_tail = walk_orphan_sidecars(&d, true, &[], |batch| {
             manual.extend(batch);
             std::ops::ControlFlow::Continue(())
         });
 
-        let via_collect = find_orphan_sidecars(&d, true);
+        let via_collect = find_orphan_sidecars(&d, true, &[]);
 
         assert_eq!(norm(&manual), norm(&via_collect.orphans));
         assert_eq!(manual_tail.scanned, via_collect.scanned);
         assert_eq!(manual_tail.truncated, via_collect.truncated);
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    // --- CPE-1302: exclude-glob support. ---
+
+    #[test]
+    fn excluded_directory_is_pruned_and_its_orphan_is_not_reported() {
+        let d = scratch("exclude-prune");
+        fs::create_dir_all(d.join("node_modules")).unwrap();
+        fs::create_dir_all(d.join("subs")).unwrap();
+        // An orphaned sidecar (no primary) hides inside node_modules, another inside subs.
+        fs::write(d.join("node_modules/orphan_inner.xmp"), "<x:xmpmeta/>").unwrap();
+        fs::write(d.join("subs/orphan_kept.xmp"), "<x:xmpmeta/>").unwrap();
+
+        // Baseline: empty excludes reports both orphans recursively.
+        let all = find_orphan_sidecars(&d, true, &[]);
+        assert_eq!(all.orphans.len(), 2, "empty excludes reports every orphan: {:?}", all.orphans);
+
+        // Excluding node_modules prunes it: its orphan is neither scanned nor reported.
+        let excl = find_orphan_sidecars(&d, true, &["node_modules".to_string()]);
+        let names = norm(&excl.orphans);
+        assert_eq!(names.len(), 1, "the orphan inside node_modules must not be reported: {names:?}");
+        assert!(names[0].ends_with("subs/orphan_kept.xmp"));
+        assert!(!names.iter().any(|p| p.contains("node_modules")));
+        assert_eq!(excl.scanned, all.scanned - 1, "the pruned dir's file is not scanned");
         let _ = fs::remove_dir_all(&d);
     }
 }

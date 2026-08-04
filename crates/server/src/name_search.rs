@@ -10,6 +10,7 @@ use std::path::Path;
 use serde::Serialize;
 
 use crate::fsutil::entry_is_symlink;
+use crate::glob::glob_is_match;
 
 /// One filename-search hit: the full path, the bare name, and whether it's a folder.
 #[derive(Serialize)]
@@ -35,35 +36,6 @@ const NAME_SEARCH_MAX_DIRS: u64 = 50_000;
 
 /// How many matches to buffer before flushing a batch over the channel — small so hits appear live.
 pub const NAME_SEARCH_BATCH: usize = 32;
-
-/// Anchored wildcard match: `*` matches any run of characters, `?` exactly one. Both `name` and
-/// `pattern` are assumed already lowercased. Iterative two-pointer backtracking — no regex dependency.
-fn glob_is_match(name: &str, pattern: &str) -> bool {
-    let n: Vec<char> = name.chars().collect();
-    let p: Vec<char> = pattern.chars().collect();
-    let (mut i, mut j) = (0usize, 0usize);
-    let (mut star, mut mark) = (None, 0usize);
-    while i < n.len() {
-        if j < p.len() && (p[j] == '?' || p[j] == n[i]) {
-            i += 1;
-            j += 1;
-        } else if j < p.len() && p[j] == '*' {
-            star = Some(j);
-            mark = i;
-            j += 1;
-        } else if let Some(s) = star {
-            j = s + 1;
-            mark += 1;
-            i = mark;
-        } else {
-            return false;
-        }
-    }
-    while j < p.len() && p[j] == '*' {
-        j += 1;
-    }
-    j == p.len()
-}
 
 /// Safety cap on the number of patterns one query's brace expansion may produce.
 const BRACE_EXPANSION_CAP: usize = 1024;
