@@ -45,7 +45,9 @@ use cpe_server::media_meta_edit::{MetaEdit, MetaField};
 use cpe_server::media_meta_read::{
     parse_vorbis_comment, read_exif, read_flac, read_id3v2, read_iptc, read_ogg, read_pdf, read_wav, read_xmp,
 };
-use cpe_server::media_meta_write::{write_exif, write_flac, write_id3v2, write_ogg, write_vorbis_comment};
+use cpe_server::media_meta_write::{
+    write_exif, write_flac, write_id3v2, write_iptc, write_ogg, write_pdf, write_vorbis_comment, write_wav, write_xmp,
+};
 use cpe_server::metadata_column::CellValue;
 use cpe_server::perceptual::phash;
 use cpe_server::text_encoding::{detect_encoding, EncodingGuess};
@@ -299,6 +301,85 @@ fn write_flac_never_panics() {
         let r = write_flac(b, &[]);
         if b.is_empty() {
             assert_eq!(r, b.to_vec(), "write_flac(empty, _) must return the input unchanged");
+        }
+    });
+}
+
+#[test]
+fn write_wav_never_panics() {
+    // `write_wav` takes (orig: &[u8], fields: &[MetaField]) and rejects non-WAV or truncated/corrupt
+    // chunk trees gracefully (via `Err`, never a panic) — same 12-byte RIFF/WAVE header gate as
+    // `read_wav_never_panics`. Feed a small fixed field set and fuzz the RIFF bytes. CPE-1314.
+    let fields = vec![MetaField {
+        group: "wav".to_string(),
+        key: "Title".to_string(),
+        value: "test title".to_string(),
+        editable: true,
+    }];
+    let header = *b"RIFF\x00\x00\x00\x00WAVE";
+    run_battery("media_meta_write::write_wav", &header, 12, |b| {
+        let r = write_wav(b, &fields);
+        if b.is_empty() {
+            assert!(r.is_err(), "write_wav(empty, _) must return Err (not a WAV file)");
+        }
+    });
+}
+
+#[test]
+fn write_pdf_never_panics() {
+    // `write_pdf` takes (orig: &[u8], fields: &[MetaField]) and rejects a missing `%PDF-` header, a
+    // missing/non-classic xref table, or a missing `/Root`/trailer gracefully (via `Err`, never a panic).
+    // Same `%PDF-` magic as `read_pdf_never_panics`. Feed a small fixed field set and fuzz the PDF bytes.
+    // CPE-1314.
+    let fields = vec![MetaField {
+        group: "pdf".to_string(),
+        key: "Title".to_string(),
+        value: "test title".to_string(),
+        editable: true,
+    }];
+    run_battery("media_meta_write::write_pdf", b"%PDF-", 5, |b| {
+        let r = write_pdf(b, &fields);
+        if b.is_empty() {
+            assert!(r.is_err(), "write_pdf(empty, _) must return Err (not a PDF)");
+        }
+    });
+}
+
+#[test]
+fn write_iptc_never_panics() {
+    // `write_iptc` takes (orig: &[u8], fields: &[MetaField]) and rejects non-JPEG/truncated input
+    // gracefully (via `Err`, never a panic) — same JPEG SOI + APP1-ish magic as `read_iptc_never_panics`.
+    // Feed a small fixed field set and fuzz the JPEG bytes. CPE-1314.
+    let fields = vec![MetaField {
+        group: "iptc".to_string(),
+        key: "Headline".to_string(),
+        value: "test headline".to_string(),
+        editable: true,
+    }];
+    run_battery("media_meta_write::write_iptc", &[0xFF, 0xD8, 0xFF, 0xE1], 4, |b| {
+        let r = write_iptc(b, &fields);
+        if b.is_empty() {
+            assert!(r.is_err(), "write_iptc(empty, _) must return Err (not a JPEG)");
+        }
+    });
+}
+
+#[test]
+fn write_xmp_never_panics() {
+    // `write_xmp` takes (orig: &[u8], fields: &[MetaField]) and rejects non-JPEG/truncated input
+    // gracefully (via `Err`, never a panic) — unlike `read_xmp`, the write side is JPEG-only (no sidecar
+    // path). Same JPEG magic as `read_xmp_never_panics`'s jpeg-app1 case. Feed a small fixed field set and
+    // fuzz the JPEG bytes. CPE-1314.
+    let fields = vec![MetaField {
+        group: "xmp".to_string(),
+        key: "Title".to_string(),
+        value: "test title".to_string(),
+        editable: true,
+    }];
+    run_battery("media_meta_write::write_xmp", &[0xFF, 0xD8, 0xFF, 0xE1], 4, |b| {
+        let r = write_xmp(b, &fields);
+        if b.is_empty() {
+            assert!(r.is_err(), "write_xmp(empty, _) must return Err (not a JPEG)");
         }
     });
 }
