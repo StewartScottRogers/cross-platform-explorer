@@ -2505,6 +2505,40 @@ mod tests {
         assert_eq!(get(&read_xmp(&jpeg), "Title"), Some("My Title"));
     }
 
+    #[test]
+    fn read_xmp_extracts_multibyte_utf8_values_without_slicing_mid_char() {
+        // CPE-1300 audit (pattern 1: str-slice-at-byte-offset). The hand-rolled XMP scanner slices
+        // the UTF-8-decoded packet at byte offsets from `str::find(..)` — both the attribute form
+        // (`extract_xmp_attribute`'s `rest[..end]`) and the element/`rdf:li` form
+        // (`extract_xmp_element`/`extract_rdf_li_items`'s `[..close_idx]`). Feeding multi-byte UTF-8
+        // (accented Latin, CJK, emoji) whose closing quote/tag sits right after a multi-byte char
+        // proves those offsets land on char boundaries: a naive byte offset that ignored boundaries
+        // would panic here. Documents the audited-clean edge and guards against a future regression.
+        let packet = "<?xpacket begin=\"\"?>\n\
+<x:xmpmeta xmlns:x=\"adobe:ns:meta/\">\n\
+ <rdf:RDF xmlns:rdf=\"http://www.w3.org/1999/02/22-rdf-syntax-ns#\">\n\
+  <rdf:Description rdf:about=\"\" xmlns:dc=\"http://purl.org/dc/elements/1.1/\" xmlns:photoshop=\"http://ns.adobe.com/photoshop/1.0/\" photoshop:Headline=\"café ☕ 音楽🎵\">\n\
+   <dc:title>\n\
+    <rdf:Alt>\n\
+     <rdf:li xml:lang=\"x-default\">日本語のタイトル 🎬</rdf:li>\n\
+    </rdf:Alt>\n\
+   </dc:title>\n\
+   <dc:subject>\n\
+    <rdf:Bag>\n\
+     <rdf:li>naïve</rdf:li>\n\
+     <rdf:li>café</rdf:li>\n\
+    </rdf:Bag>\n\
+   </dc:subject>\n\
+  </rdf:Description>\n\
+ </rdf:RDF>\n\
+</x:xmpmeta>\n\
+<?xpacket end=\"w\"?>";
+        let f = read_xmp(packet.as_bytes());
+        assert_eq!(get(&f, "Headline"), Some("café ☕ 音楽🎵"), "attribute form, multi-byte value");
+        assert_eq!(get(&f, "Title"), Some("日本語のタイトル 🎬"), "element + rdf:li form, multi-byte value");
+        assert_eq!(get(&f, "Keywords"), Some("naïve; café"), "multiple rdf:li items, multi-byte, joined");
+    }
+
     // ---- WAV / RIFF-INFO fixtures + tests (CPE-1291) ----
 
     /// Build one RIFF sub-chunk: 4-byte id + little-endian 4-byte size + data, padded to an even length.
