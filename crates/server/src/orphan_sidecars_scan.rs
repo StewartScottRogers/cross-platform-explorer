@@ -32,14 +32,32 @@ pub struct OrphanSidecarResult {
     pub truncated: bool,
 }
 
-/// Find orphaned sidecar files under `root` using [`default_rules`]. When `recursive` is `false`,
-/// only `root`'s direct file children are considered; when `true`, every subdirectory is walked too.
-/// Directories/files that can't be read are skipped rather than failing the whole scan (skip-on-error,
-/// like `list_dir`). A `root` that doesn't exist or isn't readable yields an empty, non-truncated
-/// result rather than an error — this function never panics.
-pub fn find_orphan_sidecars(root: &Path, recursive: bool) -> OrphanSidecarResult {
+/// The tail of a [`walk_orphan_sidecars`] walk: how many files were scanned and whether the file cap
+/// truncated it early. Mirrors the non-`orphans` fields of [`OrphanSidecarResult`].
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct ScanTail {
+    pub scanned: u64,
+    pub truncated: bool,
+}
+
+/// Walk `root` for orphaned sidecar files using [`default_rules`], flushing each directory's orphan
+/// batch to `flush` as soon as it's computed — a directory's files are gathered, `find_orphans` runs
+/// once per directory (it assumes its whole input lives in one directory), and that directory's
+/// orphaned paths are the natural streaming boundary. When `recursive` is `false`, only `root`'s direct
+/// file children are considered; when `true`, every subdirectory is walked too. Directories/files that
+/// can't be read are skipped rather than failing the whole scan (skip-on-error, like `list_dir`). A
+/// `root` that doesn't exist or isn't readable yields an empty, non-truncated tail without ever calling
+/// `flush` — this function never panics.
+///
+/// `flush` returns a `ControlFlow` so a streaming caller can stop the walk early (cancellation) at a
+/// per-directory batch boundary; a non-empty batch that returns `Break` is still delivered to `flush`
+/// before the walk stops.
+pub fn walk_orphan_sidecars(
+    root: &Path,
+    recursive: bool,
+    mut flush: impl FnMut(Vec<String>) -> std::ops::ControlFlow<()>,
+) -> ScanTail {
     let rules = default_rules();
-    let mut orphans: Vec<String> = Vec::new();
     let mut scanned = 0u64;
     let mut truncated = false;
     let mut stack: Vec<PathBuf> = vec![root.to_path_buf()];
@@ -68,12 +86,30 @@ pub fn find_orphan_sidecars(root: &Path, recursive: bool) -> OrphanSidecarResult
             let (stem, ext) = split_stem_ext(&name);
             dir_entries.push(FileEntry::new(name, stem, ext));
         }
-        for name in find_orphans(&dir_entries, &rules) {
-            orphans.push(dir.join(&name).to_string_lossy().into_owned());
+        let batch: Vec<String> = find_orphans(&dir_entries, &rules)
+            .into_iter()
+            .map(|name| dir.join(&name).to_string_lossy().into_owned())
+            .collect();
+        if !batch.is_empty() && flush(batch).is_break() {
+            break 'walk;
         }
     }
 
-    OrphanSidecarResult { orphans, scanned, truncated }
+    ScanTail { scanned, truncated }
+}
+
+/// Find orphaned sidecar files under `root` using [`default_rules`]. When `recursive` is `false`,
+/// only `root`'s direct file children are considered; when `true`, every subdirectory is walked too.
+/// Directories/files that can't be read are skipped rather than failing the whole scan (skip-on-error,
+/// like `list_dir`). A `root` that doesn't exist or isn't readable yields an empty, non-truncated
+/// result rather than an error — this function never panics.
+pub fn find_orphan_sidecars(root: &Path, recursive: bool) -> OrphanSidecarResult {
+    let mut orphans: Vec<String> = Vec::new();
+    let tail = walk_orphan_sidecars(root, recursive, |batch| {
+        orphans.extend(batch);
+        std::ops::ControlFlow::Continue(())
+    });
+    OrphanSidecarResult { orphans, scanned: tail.scanned, truncated: tail.truncated }
 }
 
 /// Split a file name into its `(stem, lowercased-extension-without-dot)`, matching the contract
@@ -214,6 +250,99 @@ mod tests {
         let r = find_orphan_sidecars(&d, false);
         assert!(r.orphans.is_empty());
         assert_eq!(r.scanned, 1);
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn walk_flushes_one_batch_per_directory() {
+        // Two subdirectories, each with one orphan — the walker must flush them as separate batches
+        // (the per-directory grouping is the natural streaming boundary), not one combined batch.
+        let d = scratch("walk-batches");
+        fs::create_dir_all(d.join("a")).unwrap();
+        fs::create_dir_all(d.join("b")).unwrap();
+        fs::write(d.join("a/one.xmp"), "orphan a").unwrap();
+        fs::write(d.join("b/two.xmp"), "orphan b").unwrap();
+
+        let mut batches: Vec<Vec<String>> = Vec::new();
+        let tail = walk_orphan_sidecars(&d, true, |batch| {
+            batches.push(batch);
+            std::ops::ControlFlow::Continue(())
+        });
+
+        assert_eq!(batches.len(), 2, "each directory's orphans flush as their own batch: {batches:?}");
+        assert!(batches.iter().all(|b| b.len() == 1));
+        let mut all: Vec<String> = batches.into_iter().flatten().collect();
+        all = norm(&all);
+        assert_eq!(all.len(), 2);
+        assert!(all.iter().any(|p| p.ends_with("a/one.xmp")));
+        assert!(all.iter().any(|p| p.ends_with("b/two.xmp")));
+        assert_eq!(tail.scanned, 2);
+        assert!(!tail.truncated);
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn walk_never_flushes_an_empty_batch() {
+        // A directory with no orphans (e.g. a plain file, or a sidecar whose primary is present) must
+        // not trigger a flush call at all.
+        let d = scratch("walk-empty-batch");
+        fs::write(d.join("readme.txt"), "hello").unwrap();
+
+        let mut flush_calls = 0usize;
+        let tail = walk_orphan_sidecars(&d, false, |_batch| {
+            flush_calls += 1;
+            std::ops::ControlFlow::Continue(())
+        });
+
+        assert_eq!(flush_calls, 0, "no orphans in this directory means no flush call");
+        assert_eq!(tail.scanned, 1);
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn walk_stops_early_on_break() {
+        // Three directories each with one orphan; breaking on the first flushed batch must stop the
+        // walk rather than visiting the remaining directories.
+        let d = scratch("walk-break");
+        for sub in ["a", "b", "c"] {
+            fs::create_dir_all(d.join(sub)).unwrap();
+            fs::write(d.join(sub).join("orphan.xmp"), "x").unwrap();
+        }
+
+        let mut batches_seen = 0usize;
+        let tail = walk_orphan_sidecars(&d, true, |batch| {
+            batches_seen += 1;
+            assert_eq!(batch.len(), 1);
+            std::ops::ControlFlow::Break(())
+        });
+
+        assert_eq!(batches_seen, 1, "the walk stops after the first flushed batch is Broken");
+        assert_eq!(tail.scanned, 1, "only the one directory that produced the first batch was scanned");
+        assert!(!tail.truncated);
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn find_orphan_sidecars_matches_a_manual_walk_collection() {
+        // The collect-to-vec entry point must be byte-identical to driving the walker by hand.
+        let d = scratch("collect-parity");
+        fs::create_dir_all(d.join("videos")).unwrap();
+        fs::create_dir_all(d.join("subs")).unwrap();
+        fs::write(d.join("videos/movie.mp4"), "video bytes").unwrap();
+        fs::write(d.join("subs/movie.srt"), "subtitle text").unwrap();
+        fs::write(d.join("top.xmp"), "orphan at top").unwrap();
+
+        let mut manual: Vec<String> = Vec::new();
+        let manual_tail = walk_orphan_sidecars(&d, true, |batch| {
+            manual.extend(batch);
+            std::ops::ControlFlow::Continue(())
+        });
+
+        let via_collect = find_orphan_sidecars(&d, true);
+
+        assert_eq!(norm(&manual), norm(&via_collect.orphans));
+        assert_eq!(manual_tail.scanned, via_collect.scanned);
+        assert_eq!(manual_tail.truncated, via_collect.truncated);
         let _ = fs::remove_dir_all(&d);
     }
 }
