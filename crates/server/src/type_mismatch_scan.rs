@@ -5,11 +5,19 @@
 //! `TypeMismatch` metadata column: a `.jpg` that's really a Windows PE, a `.pdf` that's really a bare
 //! ZIP. Container formats (`.docx`/`.xlsx`/`.jar`/…) are never flagged; that safety already lives in
 //! [`crate::file_type::mismatch`] via [`crate::file_type::FileType::extensions`], so this adapter simply
-//! relies on it rather than re-implementing container awareness. Pure adapter + its own tests; no
-//! `#[tauri::command]` here — that wiring is a separate ticket (CPE-1287).
+//! relies on it rather than re-implementing container awareness.
+//!
+//! CPE-1294: the DFS walk lives in [`walk_type_mismatches`], a shared flush-callback walker mirroring
+//! [`crate::listing::stream_dir_entries`] — `flush` receives batches of [`MismatchHit`] as they're found
+//! and can stop the walk early by returning `ControlFlow::Break`. [`find_type_mismatches`] is a thin
+//! collect-to-vec wrapper over it, so its behavior is unchanged from before the refactor. A future
+//! streaming command (CPE-1299) feeds `walk_type_mismatches` through an `ipc::Channel` in the app
+//! adapter; that wiring is deliberately out of scope here. Pure adapter + its own tests; no
+//! `#[tauri::command]` here.
 
 use std::io::Read;
-use std::path::Path;
+use std::ops::ControlFlow;
+use std::path::{Path, PathBuf};
 
 use serde::Serialize;
 
@@ -27,6 +35,12 @@ const HEADER_CAP: u64 = 64;
 /// [`crate::folder_similarity_scan::FOLDER_MAX_FILES`]. Hitting it sets `truncated` and stops the walk
 /// early rather than scanning an unbounded tree.
 const MAX_FILES: u64 = 50_000;
+
+/// Number of flagged hits per streamed batch — small so a UI streaming this walk (CPE-1299) paints
+/// progress steadily even on a tree where mismatches cluster in one directory. `walk_type_mismatches`
+/// also flushes whatever's pending at the end of each directory, so a sparser tree still streams at a
+/// directory-sized cadence rather than waiting for a full batch to fill.
+pub const MISMATCH_SCAN_BATCH: usize = 64;
 
 /// One flagged content/extension disagreement.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -54,6 +68,15 @@ pub struct MismatchReport {
     pub truncated: bool,
 }
 
+/// The tail of a [`walk_type_mismatches`] run: how many regular files were considered, and whether
+/// [`MAX_FILES`] cut the walk short. Returned regardless of whether `flush` ever returned `Break` —
+/// both fields reflect progress made up to the point the walk stopped.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ScanTail {
+    pub scanned: u64,
+    pub truncated: bool,
+}
+
 /// Read at most [`HEADER_CAP`] bytes of `path`. Any I/O failure (missing file, no permission, a
 /// directory that slipped through, a locked file, …) surfaces as `Err` so the caller skips the file
 /// rather than panicking or aborting the whole sweep.
@@ -65,19 +88,28 @@ fn read_capped_header(path: &Path) -> std::io::Result<Vec<u8>> {
 }
 
 /// Walk `root` (recursive, skip-unreadable directories, skip symlinked directories to avoid cycles —
-/// same discipline as [`crate::folder_similarity_scan::find_similar_folders`]) and flag every regular
-/// file whose sniffed content disagrees with its claimed extension via [`crate::file_type::mismatch`].
+/// same discipline as [`crate::folder_similarity_scan::find_similar_folders`]), flag every regular file
+/// whose sniffed content disagrees with its claimed extension via [`crate::file_type::mismatch`], and
+/// deliver flagged hits to `flush` in batches of up to [`MISMATCH_SCAN_BATCH`] (plus a flush of whatever
+/// is pending at the end of each directory, so a sparse tree still streams steadily).
+///
+/// `flush` returns a `ControlFlow` so a streaming caller can stop the walk early at a batch boundary
+/// (mirrors [`crate::listing::stream_dir_entries`]); returning `Break` stops the walk and the returned
+/// [`ScanTail`] reflects progress made up to that point.
 ///
 /// Never panics: a directory that can't be listed, or a file that can't be opened/read (permissions,
 /// mid-scan deletion, a locked/quarantined file), is silently skipped rather than aborting the sweep. A
 /// file with no extension, or whose bytes don't match a known signature, is never reported — see
 /// [`crate::file_type::mismatch`]'s own contract. Caps at [`MAX_FILES`] regular files considered; hitting
 /// the cap sets `truncated` and stops the walk early.
-pub fn find_type_mismatches(root: &Path) -> MismatchReport {
-    let mut hits = Vec::new();
+pub fn walk_type_mismatches(
+    root: &Path,
+    mut flush: impl FnMut(Vec<MismatchHit>) -> ControlFlow<()>,
+) -> ScanTail {
     let mut scanned = 0u64;
     let mut truncated = false;
-    let mut stack: Vec<std::path::PathBuf> = vec![root.to_path_buf()];
+    let mut stack: Vec<PathBuf> = vec![root.to_path_buf()];
+    let mut buf: Vec<MismatchHit> = Vec::new();
 
     'walk: while let Some(dir) = stack.pop() {
         let Ok(entries) = std::fs::read_dir(&dir) else { continue };
@@ -104,7 +136,7 @@ pub fn find_type_mismatches(root: &Path) -> MismatchReport {
             let ext = extension_of(&path);
             let Ok(header) = read_capped_header(&path) else { continue };
             if let Some(m) = mismatch(&header, &ext) {
-                hits.push(MismatchHit {
+                buf.push(MismatchHit {
                     path: path.to_string_lossy().into_owned(),
                     claimed_ext: m.actual_ext,
                     detected_label: m.detected.label().to_string(),
@@ -116,11 +148,36 @@ pub fn find_type_mismatches(root: &Path) -> MismatchReport {
                         .unwrap_or_default()
                         .to_string(),
                 });
+                if buf.len() >= MISMATCH_SCAN_BATCH && flush(std::mem::take(&mut buf)).is_break() {
+                    return ScanTail { scanned, truncated };
+                }
             }
+        }
+        // End of this directory: flush whatever's pending so a streaming caller sees per-directory
+        // progress rather than waiting for a full MISMATCH_SCAN_BATCH to accumulate.
+        if !buf.is_empty() && flush(std::mem::take(&mut buf)).is_break() {
+            return ScanTail { scanned, truncated };
         }
     }
 
-    MismatchReport { hits, scanned, truncated }
+    // The walk can end (cap hit mid-directory) with a partial batch never flushed above.
+    if !buf.is_empty() {
+        let _ = flush(buf);
+    }
+
+    ScanTail { scanned, truncated }
+}
+
+/// Collect-to-vec type-mismatch sweep: every flagged file under `root`, plus how many regular files
+/// were considered and whether the walk was truncated. A thin wrapper over [`walk_type_mismatches`] —
+/// behavior is unchanged from before the CPE-1294 refactor.
+pub fn find_type_mismatches(root: &Path) -> MismatchReport {
+    let mut hits = Vec::new();
+    let tail = walk_type_mismatches(root, |batch| {
+        hits.extend(batch);
+        ControlFlow::Continue(())
+    });
+    MismatchReport { hits, scanned: tail.scanned, truncated: tail.truncated }
 }
 
 #[cfg(test)]
@@ -137,11 +194,14 @@ mod tests {
         d
     }
 
+    /// Real PE/MZ header bytes — sniffs as a Windows executable regardless of the claimed extension.
+    const PE_HEADER: [u8; 6] = [0x4D, 0x5A, 0x90, 0x00, 0x03, 0x00];
+
     #[test]
     fn pe_disguised_as_jpg_is_flagged_with_right_claimed_and_detected() {
         let d = scratch("pe-as-jpg");
         // A real PE/MZ header ("MZ" DOS stub) written into a file claiming to be a .jpg.
-        fs::write(d.join("foo.jpg"), [0x4D, 0x5A, 0x90, 0x00, 0x03, 0x00]).unwrap();
+        fs::write(d.join("foo.jpg"), PE_HEADER).unwrap();
 
         let r = find_type_mismatches(&d);
         assert!(!r.truncated);
@@ -259,6 +319,118 @@ mod tests {
         let r = find_type_mismatches(&d);
         assert_eq!(r.scanned, 3);
         assert_eq!(r.hits.len(), 1);
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    // --- CPE-1294: walk_type_mismatches streaming-walker tests, mirroring listing.rs's
+    // stream_dir_entries_* coverage. ---
+
+    #[test]
+    fn walk_type_mismatches_batches_and_flushes_all() {
+        let d = scratch("walk-batches");
+        // More than MISMATCH_SCAN_BATCH flagged hits in one flat directory, so both the mid-directory
+        // batch-size flush and the end-of-directory leftover flush are exercised.
+        let n_flagged = MISMATCH_SCAN_BATCH * 2 + 10;
+        for i in 0..n_flagged {
+            fs::write(d.join(format!("f{i:04}.jpg")), PE_HEADER).unwrap();
+        }
+
+        let mut batch_sizes = Vec::new();
+        let mut total_hits = 0usize;
+        let tail = walk_type_mismatches(&d, |b| {
+            batch_sizes.push(b.len());
+            total_hits += b.len();
+            ControlFlow::Continue(())
+        });
+
+        assert!(!tail.truncated);
+        assert_eq!(tail.scanned, n_flagged as u64);
+        assert_eq!(total_hits, n_flagged);
+        assert!(batch_sizes.len() >= 2, "more than one batch worth of hits should flush more than once");
+        assert!(
+            batch_sizes.iter().all(|&s| s <= MISMATCH_SCAN_BATCH),
+            "no batch exceeds MISMATCH_SCAN_BATCH: {batch_sizes:?}"
+        );
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn walk_type_mismatches_stops_on_break() {
+        let d = scratch("walk-break");
+        let n_flagged = MISMATCH_SCAN_BATCH * 3;
+        for i in 0..n_flagged {
+            fs::write(d.join(format!("f{i:04}.jpg")), PE_HEADER).unwrap();
+        }
+
+        let mut seen = 0usize;
+        // Break after the first flush — the walk must stop rather than deliver every hit.
+        let tail = walk_type_mismatches(&d, |b| {
+            seen += b.len();
+            ControlFlow::Break(())
+        });
+
+        assert_eq!(seen, MISMATCH_SCAN_BATCH, "break after the first batch stops the walk");
+        assert!(
+            tail.scanned < n_flagged as u64,
+            "the walk must not have considered every file after an early break: scanned={}",
+            tail.scanned
+        );
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn walk_type_mismatches_flushes_pending_hits_per_directory_even_below_batch_size() {
+        // Two nested directories, each with a single flagged hit — far fewer than
+        // MISMATCH_SCAN_BATCH. The per-directory flush must still deliver each one rather than only
+        // flushing at the very end of the whole walk.
+        let d = scratch("walk-per-dir");
+        fs::create_dir_all(d.join("sub")).unwrap();
+        fs::write(d.join("top.jpg"), PE_HEADER).unwrap();
+        fs::write(d.join("sub/nested.jpg"), PE_HEADER).unwrap();
+
+        let mut flush_count = 0usize;
+        let mut total = 0usize;
+        let tail = walk_type_mismatches(&d, |b| {
+            flush_count += 1;
+            total += b.len();
+            ControlFlow::Continue(())
+        });
+
+        assert_eq!(total, 2);
+        assert_eq!(tail.scanned, 2);
+        assert!(flush_count >= 2, "each directory's lone hit should flush separately: {flush_count}");
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn find_type_mismatches_equals_collect_to_vec_over_walk_type_mismatches() {
+        let d = scratch("collect-eq");
+        fs::create_dir_all(d.join("a/b")).unwrap();
+        fs::write(d.join("top.jpg"), PE_HEADER).unwrap();
+        fs::write(d.join("a/mid.png"), PE_HEADER).unwrap();
+        fs::write(d.join("a/b/deep.docx"), [0x50, 0x4B, 0x03, 0x04, 0x14, 0x00]).unwrap(); // container-safe
+        fs::write(d.join("a/b/plain.txt"), b"plain text").unwrap(); // undetectable
+        fs::write(d.join("a/real.png"), [0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A]).unwrap(); // genuine
+
+        let mut collected = Vec::new();
+        let tail = walk_type_mismatches(&d, |b| {
+            collected.extend(b);
+            ControlFlow::Continue(())
+        });
+
+        let report = find_type_mismatches(&d);
+
+        assert_eq!(report.scanned, tail.scanned);
+        assert_eq!(report.truncated, tail.truncated);
+
+        // DFS order is deterministic given a fixed tree, but sort both to compare contents robustly
+        // (equality of the collect-to-vec wrapper's output to the raw walk, not incidental ordering).
+        let mut a: Vec<_> = collected.iter().map(|h| h.path.clone()).collect();
+        let mut b: Vec<_> = report.hits.iter().map(|h| h.path.clone()).collect();
+        a.sort();
+        b.sort();
+        assert_eq!(a, b);
+        assert_eq!(report.hits, collected, "find_type_mismatches must be byte-identical to the raw walk");
         let _ = fs::remove_dir_all(&d);
     }
 }
