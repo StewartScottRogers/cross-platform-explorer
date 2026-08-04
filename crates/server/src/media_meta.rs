@@ -14,7 +14,7 @@
 
 use crate::media_meta_edit::{apply_edits, MetaEdit, MetaField};
 use crate::media_meta_read::{read_exif, read_flac, read_id3v2, read_iptc, read_ogg, read_pdf, read_wav, read_xmp};
-use crate::media_meta_write::{write_exif, write_flac, write_id3v2, write_ogg, write_pdf, write_wav};
+use crate::media_meta_write::{write_exif, write_flac, write_id3v2, write_iptc, write_ogg, write_pdf, write_wav, write_xmp};
 use crate::video_meta_read::read_mp4;
 
 /// Every metadata field the studio can show for a file, chosen by extension. A file whose kind has no
@@ -41,7 +41,8 @@ pub fn read_all(ext: &str, bytes: &[u8]) -> Vec<MetaField> {
 
 /// Whether `ext` has a write-back codec today, so the studio can offer editing (not just viewing).
 pub fn is_writable(ext: &str) -> bool {
-    // jpg/jpeg carry an EXIF write codec ([`write_exif`]); ogg/oga carry a Vorbis-comment write codec
+    // jpg/jpeg carry EXIF, IPTC, and XMP write codecs ([`write_exif`]/[`write_iptc`]/[`write_xmp`], the last
+    // two added in CPE-1305); ogg/oga carry a Vorbis-comment write codec
     // ([`write_ogg`]); wav carries a RIFF LIST/INFO write codec ([`write_wav`]); pdf carries an
     // incremental `/Info` write codec ([`write_pdf`], CPE-1301). tif/tiff are intentionally excluded —
     // for a TIFF the EXIF *is* the file's own IFD chain, so rebuilding it from four tags would drop the
@@ -60,11 +61,35 @@ pub fn write_back(ext: &str, orig: &[u8], edits: &[MetaEdit]) -> Result<Vec<u8>,
         "mp3" => Ok(write_id3v2(orig, &result.fields)),
         "flac" => Ok(write_flac(orig, &result.fields)),
         "ogg" | "oga" => write_ogg(orig, &result.fields),
-        "jpg" | "jpeg" => write_exif(orig, &result.fields),
+        // A JPEG can carry EXIF (APP1), IPTC (APP13), and XMP (APP1/xap) side by side, so an edit to any of
+        // those groups is persisted by chaining the three codecs — each preserves the others' segments, so
+        // they coexist in the output. A codec runs only when that group has fields present, so an
+        // IPTC-or-XMP-only edit on a JPEG with no EXIF isn't refused by `write_exif`'s "no editable EXIF
+        // fields" guard.
+        "jpg" | "jpeg" => write_jpeg(orig, &result.fields),
         "wav" => write_wav(orig, &result.fields),
         "pdf" => write_pdf(orig, &result.fields),
         other => Err(format!("editing {other} metadata isn't supported yet")),
     }
+}
+
+/// Serialise the JPEG metadata groups back into one file: EXIF, then IPTC, then XMP, each fed the previous
+/// codec's output so all three coexist. A codec is invoked only when its group has at least one field
+/// present in `fields` — this both avoids `write_exif`'s "no editable EXIF fields to write" error on a
+/// JPEG that only carries IPTC/XMP, and leaves a group's segment untouched when nothing targets it.
+fn write_jpeg(orig: &[u8], fields: &[MetaField]) -> Result<Vec<u8>, String> {
+    let has = |group: &str| fields.iter().any(|f| f.group.eq_ignore_ascii_case(group));
+    let mut out = orig.to_vec();
+    if has("exif") {
+        out = write_exif(&out, fields)?;
+    }
+    if has("iptc") {
+        out = write_iptc(&out, fields)?;
+    }
+    if has("xmp") {
+        out = write_xmp(&out, fields)?;
+    }
+    Ok(out)
 }
 
 #[cfg(test)]
