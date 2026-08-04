@@ -142,15 +142,23 @@ pub struct LinuxShellPlan {
 /// Build the Linux "Open in CPE" registration plan: a `.desktop` launcher that opens folders (`%F`,
 /// `MimeType=inode/directory`) with an "Open in <app>" desktop action, installed in the user's
 /// applications dir and set as the default `inode/directory` handler.
+///
+/// Per the freedesktop Desktop Entry spec: `Icon` must be an icon *theme name* (or an absolute path to
+/// an icon *file*) — never the executable — so it's hardcoded to the app's installed hicolor icon name
+/// (Tauri's Linux bundler installs it under that name, matching the Cargo package name /
+/// `desktop_id` basename below, not the caller-supplied `exe_path`). `Exec` quotes the executable path
+/// (a space in the install path would otherwise break DE parsing) with the field code kept OUTSIDE the
+/// quotes, mirroring the Windows sibling (`windows_shell_plan`).
 pub fn linux_shell_plan(exe_path: &str, app_name: &str, home: &str) -> LinuxShellPlan {
     let desktop_id = "cross-platform-explorer.desktop".to_string();
+    let icon_name = "cross-platform-explorer";
     let desktop_path = format!("{home}/.local/share/applications/{desktop_id}");
     let desktop_contents = format!(
         "[Desktop Entry]\n\
          Type=Application\n\
          Name={app_name}\n\
-         Exec={exe_path} %F\n\
-         Icon={exe_path}\n\
+         Exec=\"{exe_path}\" %F\n\
+         Icon={icon_name}\n\
          Terminal=false\n\
          NoDisplay=false\n\
          MimeType=inode/directory;\n\
@@ -159,7 +167,7 @@ pub fn linux_shell_plan(exe_path: &str, app_name: &str, home: &str) -> LinuxShel
          \n\
          [Desktop Action OpenInCPE]\n\
          Name=Open in {app_name}\n\
-         Exec={exe_path} %F\n"
+         Exec=\"{exe_path}\" %F\n"
     );
     LinuxShellPlan {
         remove_paths: vec![desktop_path.clone()],
@@ -418,17 +426,91 @@ pub fn default_apps_registered() -> bool {
     false
 }
 
-#[cfg(not(windows))]
-pub fn install_shell_integration(_exe_path: &str, _app_name: &str) -> Result<(), String> {
-    Err("shell-menu integration is only implemented on Windows so far".into())
+// ── Apply / remove the Linux plan against the real filesystem (CPE-1306, epic CPE-712) ────────────────
+// Thin glue over `linux_shell_plan`: write the `.desktop` file on install (creating parent dirs), delete it
+// on uninstall. `xdg-mime`/`update-desktop-database` are best-effort afterwards — their failure is
+// non-fatal, since the `.desktop` file write is the source of truth (a desktop environment will pick it up
+// on its next rescan even if these helper binaries are missing or fail). All decision logic (target path +
+// file contents) lives in `linux_shell_plan`, which is OS-agnostic and unit-tested on every host; this only
+// executes it against the real filesystem, so it stays Linux-only + thin.
+
+/// Delete the `.desktop` file(s) named by a Linux plan. Idempotent — an already-absent path is success, not
+/// an error, matching the Windows `remove_keys` reversibility contract.
+#[cfg(target_os = "linux")]
+fn remove_desktop_files(remove_paths: &[String]) -> Result<(), String> {
+    for path in remove_paths {
+        match std::fs::remove_file(path) {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => return Err(format!("remove {path}: {e}")),
+        }
+    }
+    Ok(())
 }
 
-#[cfg(not(windows))]
+/// Write a Linux plan's `.desktop` file to disk (creating its parent directory if needed), then best-effort
+/// shell out to `xdg-mime`/`update-desktop-database` so desktop environments pick it up immediately. Those
+/// two commands' failure (including "not found") is swallowed — the file write above already succeeded, so
+/// the integration is installed either way.
+#[cfg(target_os = "linux")]
+fn apply_desktop_file(plan: &LinuxShellPlan) -> Result<(), String> {
+    let path = std::path::Path::new(&plan.desktop_path);
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| format!("create {}: {e}", parent.display()))?;
+    }
+    std::fs::write(path, &plan.desktop_contents).map_err(|e| format!("write {}: {e}", plan.desktop_path))?;
+
+    // Best-effort desktop-environment refresh; the file on disk is the source of truth regardless.
+    let _ = std::process::Command::new("xdg-mime").args(["default", &plan.desktop_id, &plan.mime_type]).status();
+    if let Some(apps_dir) = path.parent() {
+        let _ = std::process::Command::new("update-desktop-database").arg(apps_dir).status();
+    }
+    Ok(())
+}
+
+/// Resolve the real Linux plan for the current user (reads `$HOME`), reusing the pure `linux_shell_plan` for
+/// the actual path/content decisions.
+#[cfg(target_os = "linux")]
+fn linux_plan_for_current_user(exe_path: &str, app_name: &str) -> Result<LinuxShellPlan, String> {
+    let home = std::env::var("HOME").map_err(|_| "HOME environment variable is not set".to_string())?;
+    Ok(linux_shell_plan(exe_path, app_name, &home))
+}
+
+/// Install the Linux "Open in CPE" shell integration: write the `.desktop` launcher for `exe_path` /
+/// `app_name` under `~/.local/share/applications` (user scope, no root needed), then best-effort refresh the
+/// desktop's mime/database caches. Idempotent — re-installing overwrites the same file.
+#[cfg(target_os = "linux")]
+pub fn install_shell_integration(exe_path: &str, app_name: &str) -> Result<(), String> {
+    apply_desktop_file(&linux_plan_for_current_user(exe_path, app_name)?)
+}
+
+/// Remove the Linux "Open in CPE" shell integration — delete the `.desktop` file. Tolerates an
+/// already-absent file, so it's safe to call when nothing is installed.
+#[cfg(target_os = "linux")]
 pub fn uninstall_shell_integration() -> Result<(), String> {
-    Err("shell-menu integration is only implemented on Windows so far".into())
+    // The remove set is independent of exe/app name, so placeholders are fine (mirrors the Windows glue).
+    remove_desktop_files(&linux_plan_for_current_user("", "")?.remove_paths)
 }
 
-#[cfg(not(windows))]
+/// Whether the integration is currently installed (the `.desktop` file exists). Best effort: an unreadable
+/// `$HOME` is reported as "not installed" rather than propagating an error, matching the Windows/macOS
+/// `*_installed` contract of returning a plain bool.
+#[cfg(target_os = "linux")]
+pub fn shell_integration_installed() -> bool {
+    linux_plan_for_current_user("", "").is_ok_and(|p| std::path::Path::new(&p.desktop_path).exists())
+}
+
+#[cfg(not(any(windows, target_os = "linux")))]
+pub fn install_shell_integration(_exe_path: &str, _app_name: &str) -> Result<(), String> {
+    Err("shell-menu integration is only implemented on Windows and Linux so far".into())
+}
+
+#[cfg(not(any(windows, target_os = "linux")))]
+pub fn uninstall_shell_integration() -> Result<(), String> {
+    Err("shell-menu integration is only implemented on Windows and Linux so far".into())
+}
+
+#[cfg(not(any(windows, target_os = "linux")))]
 pub fn shell_integration_installed() -> bool {
     false
 }
@@ -533,10 +615,35 @@ mod tests {
         assert_eq!(p.mime_type, "inode/directory");
         // A valid launcher for folders, with the "Open in …" action.
         assert!(p.desktop_contents.contains("[Desktop Entry]"));
-        assert!(p.desktop_contents.contains("Exec=/opt/cpe/cpe %F"));
+        assert!(p.desktop_contents.contains(r#"Exec="/opt/cpe/cpe" %F"#));
         assert!(p.desktop_contents.contains("MimeType=inode/directory;"));
         assert!(p.desktop_contents.contains("[Desktop Action OpenInCPE]"));
         assert!(p.desktop_contents.contains("Name=Open in Cross-Platform Explorer"));
+    }
+
+    #[test]
+    fn linux_plan_icon_is_a_bare_theme_name_not_the_exe_path() {
+        // Desktop Entry spec: Icon must be an icon theme name (or an absolute path to an icon FILE) —
+        // never the app's executable. A space or unusual chars in the install path must not leak in.
+        let p = linux_shell_plan("/opt/cross platform explorer/cpe", "Cross-Platform Explorer", "/home/sam");
+        let icon_line = p.desktop_contents.lines().find(|l| l.starts_with("Icon=")).expect("Icon= line present");
+        let icon_value = icon_line.strip_prefix("Icon=").unwrap();
+        assert!(!icon_value.contains('/'), "Icon must be a bare name, not a path: {icon_value}");
+        assert!(!icon_value.ends_with(".png"), "Icon must be a theme name, not a filename: {icon_value}");
+        assert_ne!(icon_value, "/opt/cross platform explorer/cpe", "Icon must not be the exe path");
+        assert_eq!(icon_value, "cross-platform-explorer");
+    }
+
+    #[test]
+    fn linux_plan_quotes_the_exe_path_in_both_exec_lines() {
+        // A space in the install path must not break DE parsing; the field code (%F) stays outside the
+        // quotes, mirroring the Windows sibling's quoted-exe command strings.
+        let p = linux_shell_plan("/opt/cross platform explorer/cpe", "Cross-Platform Explorer", "/home/sam");
+        let exec_lines: Vec<&str> = p.desktop_contents.lines().filter(|l| l.starts_with("Exec=")).collect();
+        assert_eq!(exec_lines.len(), 2, "expected an Exec= in [Desktop Entry] and in [Desktop Action OpenInCPE]");
+        for line in exec_lines {
+            assert_eq!(line, r#"Exec="/opt/cross platform explorer/cpe" %F"#, "exe path must be quoted, %F outside quotes: {line}");
+        }
     }
 
     #[test]
@@ -545,6 +652,71 @@ mod tests {
         // Everything installed (the one .desktop file) is in the remove set → no residue.
         assert!(p.remove_paths.contains(&p.desktop_path));
         assert_eq!(p.remove_paths.len(), 1);
+    }
+
+    // ── apply / remove glue (CPE-1306) ── Exercises the real filesystem mechanics under an isolated scratch
+    // `$HOME`-shaped tempdir (never a real `~/.local/share/applications`), so it neither pollutes the host
+    // nor needs any Linux-specific privilege. Linux-only: this is where `apply_desktop_file`/
+    // `remove_desktop_files` actually exist (the Windows leg's equivalent proof is
+    // `apply_then_remove_roundtrips_and_is_idempotent` above).
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn linux_apply_then_remove_roundtrips_and_is_idempotent() {
+        let scratch = tempfile::tempdir().expect("tempdir");
+        let home = scratch.path().to_str().expect("utf8 tempdir path");
+        let plan = linux_shell_plan("/opt/cpe/cpe", "Test CPE", home);
+
+        // Not installed yet.
+        assert!(!std::path::Path::new(&plan.desktop_path).exists());
+
+        // Install writes the .desktop file with the planned contents...
+        apply_desktop_file(&plan).expect("apply");
+        let written = std::fs::read_to_string(&plan.desktop_path).expect("desktop file exists after apply");
+        assert_eq!(written, plan.desktop_contents);
+
+        // ...and re-applying (as a fresh install would) overwrites cleanly, no error.
+        apply_desktop_file(&plan).expect("apply is idempotent");
+
+        // Uninstall removes it, and a second remove is a no-op (idempotent, absent = Ok).
+        remove_desktop_files(&plan.remove_paths).expect("remove");
+        remove_desktop_files(&plan.remove_paths).expect("remove is idempotent when absent");
+        assert!(!std::path::Path::new(&plan.desktop_path).exists(), "desktop file should be gone after remove");
+    }
+
+    /// Guards process-wide `$HOME` mutation so this test can't race any other test in the same binary
+    /// that reads `HOME` (`cargo test` runs tests on multiple threads by default). No new dependency —
+    /// `std::sync::Mutex`, poison-tolerant via `unwrap_or_else(PoisonError::into_inner)` so one panicking
+    /// test under the lock can't wedge the rest.
+    #[cfg(target_os = "linux")]
+    static HOME_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn linux_shell_integration_installed_reflects_the_real_file() {
+        // Serialize against any other test in this process that reads/writes $HOME while we mutate it.
+        let _guard = HOME_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+
+        // Route `linux_plan_for_current_user` at a scratch $HOME via env var for this one test, restoring
+        // afterwards so it can't leak into other tests running in the same process.
+        let scratch = tempfile::tempdir().expect("tempdir");
+        let prior = std::env::var("HOME").ok();
+        // SAFETY: test-only, guarded by HOME_ENV_LOCK above so no other test observes a torn value;
+        // restored below before returning so no other test observes the overridden value.
+        unsafe { std::env::set_var("HOME", scratch.path()) };
+
+        assert!(!shell_integration_installed(), "nothing installed yet");
+        install_shell_integration("/opt/cpe/cpe", "Test CPE").expect("install");
+        assert!(shell_integration_installed(), "installed after apply");
+        uninstall_shell_integration().expect("uninstall");
+        assert!(!shell_integration_installed(), "gone after uninstall");
+
+        // SAFETY: see above.
+        unsafe {
+            match prior {
+                Some(h) => std::env::set_var("HOME", h),
+                None => std::env::remove_var("HOME"),
+            }
+        }
     }
 
     // ── macOS plan (CPE-1022) ──
