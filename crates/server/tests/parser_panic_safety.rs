@@ -34,11 +34,11 @@ use cpe_server::image_column::image_dimensions_cell;
 use cpe_server::inspect::inspect_bytes;
 use cpe_server::media_column::AudioColumn;
 use cpe_server::media_meta::{read_all, write_back};
-use cpe_server::media_meta_edit::MetaEdit;
+use cpe_server::media_meta_edit::{MetaEdit, MetaField};
 use cpe_server::media_meta_read::{
-    parse_vorbis_comment, read_exif, read_flac, read_id3v2, read_ogg, read_pdf, read_wav, read_xmp,
+    parse_vorbis_comment, read_exif, read_flac, read_id3v2, read_iptc, read_ogg, read_pdf, read_wav, read_xmp,
 };
-use cpe_server::media_meta_write::{write_flac, write_id3v2};
+use cpe_server::media_meta_write::{write_exif, write_flac, write_id3v2, write_ogg, write_vorbis_comment};
 use cpe_server::metadata_column::CellValue;
 use cpe_server::perceptual::phash;
 use cpe_server::text_encoding::{detect_encoding, EncodingGuess};
@@ -413,6 +413,94 @@ fn write_flac_never_panics() {
             assert_eq!(r, b.to_vec(), "write_flac(empty, _) must return the input unchanged");
         }
     });
+}
+
+#[test]
+fn read_iptc_never_panics() {
+    // `read_iptc` expects a JPEG SOI marker (0xFF 0xD8) at the start, followed by APP13 segment
+    // with Photoshop/IPTC data; gracefully returns empty if not present or malformed.
+    run_battery("media_meta_read::read_iptc", &[0xFF, 0xD8, 0xFF, 0xE1], 4, |b| {
+        let r = read_iptc(b);
+        if b.is_empty() {
+            assert!(r.is_empty(), "read_iptc(empty) must be empty");
+        }
+    });
+}
+
+#[test]
+fn write_exif_never_panics() {
+    // `write_exif` takes (orig: &[u8], fields: &[MetaField]) and rejects non-JPEG or truncated input
+    // gracefully (via `Err`, never a panic). Feed a small fixed field set and fuzz the JPEG bytes.
+    let fields = vec![MetaField {
+        group: "exif".to_string(),
+        key: "ImageDescription".to_string(),
+        value: "test description".to_string(),
+        editable: true,
+    }];
+    run_battery("media_meta_write::write_exif", &[0xFF, 0xD8, 0xFF, 0xE1], 4, |b| {
+        let r = write_exif(b, &fields);
+        if b.is_empty() {
+            assert!(r.is_err(), "write_exif(empty, _) must return Err (not a valid JPEG)");
+        }
+    });
+}
+
+#[test]
+fn write_ogg_never_panics() {
+    // `write_ogg` takes (orig: &[u8], fields: &[MetaField]) and rejects non-Ogg or malformed input
+    // gracefully (via `Err`, never a panic). Feed a small fixed field set and fuzz the OGG bytes.
+    let fields = vec![MetaField {
+        group: "vorbis".to_string(),
+        key: "Title".to_string(),
+        value: "test title".to_string(),
+        editable: true,
+    }];
+    run_battery("media_meta_write::write_ogg", &[0x4F, 0x67, 0x67, 0x53], 27, |b| {
+        let r = write_ogg(b, &fields);
+        if b.is_empty() {
+            assert!(r.is_err(), "write_ogg(empty, _) must return Err (not a valid OggS stream)");
+        }
+    });
+}
+
+#[test]
+fn write_vorbis_comment_never_panics() {
+    // `write_vorbis_comment` takes only &[MetaField] (no orig bytes), so fuzz the field values
+    // themselves rather than raw bytes: long strings, empty strings, non-ASCII unicode. It always
+    // returns Vec<u8> (never panics, never errors). Test multiple field configurations.
+    let test_cases = vec![
+        ("empty_fields", vec![]),
+        ("simple_title", vec![MetaField {
+            group: "vorbis".to_string(),
+            key: "Title".to_string(),
+            value: "simple".to_string(),
+            editable: true,
+        }]),
+        ("empty_value", vec![MetaField {
+            group: "vorbis".to_string(),
+            key: "Comment".to_string(),
+            value: "".to_string(),
+            editable: true,
+        }]),
+        ("long_artist", vec![MetaField {
+            group: "vorbis".to_string(),
+            key: "Artist".to_string(),
+            value: "a".repeat(1000),
+            editable: true,
+        }]),
+        ("unicode_album", vec![MetaField {
+            group: "vorbis".to_string(),
+            key: "Album".to_string(),
+            value: "unicode: μ π ω".to_string(),
+            editable: true,
+        }]),
+    ];
+    for (class_name, fields) in test_cases {
+        assert_no_panic("media_meta_write::write_vorbis_comment", class_name, || {
+            let _r = write_vorbis_comment(&fields);
+            // Function always succeeds; just assert it didn't panic
+        });
+    }
 }
 
 // ---------------------------------------------------------------------------------------------
