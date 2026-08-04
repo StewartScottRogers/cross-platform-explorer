@@ -92,4 +92,65 @@ describe("handleFolderBatch (CPE-794)", () => {
     await handleFolderBatch([{ path: "/dl/x.pdf", kind: "created" }], [tagRule], () => {}, d);
     expect(d.run).not.toHaveBeenCalled();
   });
+
+  // CPE-1312: `runWatchActions` returns one `OpResult` per action, and a real op can fail (disk full,
+  // permission denied, ...). The executor must only treat a fired/undoable op as the ones where
+  // `OpResult.ok === true` — a failed op must never be recorded as fired, must not appear in the fire's
+  // `finalPath`/`copies`, and undo must not touch its (never-written) result path.
+  describe("failed OpResult handling (CPE-1312)", () => {
+    const moveCopyRule = addRule([], "Archive + Backup", { kind: "ext", exts: ["pdf"] }, [
+      { kind: "move", dest: "/archive" },
+      { kind: "copy", dest: "/backup" },
+    ])[0];
+
+    it("only records the successful action when one action in the plan fails", async () => {
+      const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+      const d = deps({
+        // Mixed result: the move lands, the copy fails (e.g. disk full).
+        run: vi.fn(async () => [
+          { path: "/archive/invoice.pdf", ok: true, error: "" },
+          { path: "/backup/invoice.pdf", ok: false, error: "disk full" },
+        ]),
+      });
+      const fires: WatchFire[] = [];
+      await handleFolderBatch([{ path: "/dl/invoice.pdf", kind: "created" }], [moveCopyRule], (f) => fires.push(f), d);
+
+      expect(fires).toHaveLength(1);
+      // The successful move is recorded and undoable...
+      expect(fires[0].finalPath).toBe("/archive/invoice.pdf");
+      // ...but the failed copy must NOT be recorded as a copy to clean up on undo.
+      expect(fires[0].copies).toEqual([]);
+      // The failure must be surfaced, not swallowed.
+      expect(warn).toHaveBeenCalled();
+      expect(warn.mock.calls[0][0]).toContain("disk full");
+
+      // Undo must only act on what actually landed: move the file back, no deletes (nothing was copied).
+      const plan = undoPlan(fires[0]);
+      expect(plan).toEqual({ moveBack: { from: "/archive/invoice.pdf", to: "/dl/invoice.pdf" }, deletes: [] });
+
+      warn.mockRestore();
+    });
+
+    it("fires nothing and guards nothing when every action fails", async () => {
+      const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+      const g = new OscillationGuard(3000);
+      const d = deps({
+        guard: g,
+        run: vi.fn(async () => [
+          { path: "/archive/invoice.pdf", ok: false, error: "permission denied" },
+          { path: "/backup/invoice.pdf", ok: false, error: "permission denied" },
+        ]),
+      });
+      const fires: WatchFire[] = [];
+      await handleFolderBatch([{ path: "/dl/invoice.pdf", kind: "created" }], [moveCopyRule], (f) => fires.push(f), d);
+
+      expect(fires).toEqual([]);
+      expect(warn).toHaveBeenCalledTimes(2);
+      // Nothing landed at the (failed) result paths, so they must not be guarded as the executor's echo.
+      expect(g.isGuarded("/archive/invoice.pdf", 100)).toBe(false);
+      expect(g.isGuarded("/backup/invoice.pdf", 100)).toBe(false);
+
+      warn.mockRestore();
+    });
+  });
 });
