@@ -8,11 +8,12 @@ categoryOrder: 2
 # File Health
 
 **File Health** is a tabbed panel that surfaces the file-inspection detectors built for the explorer —
-facts and hazards the plain listing doesn't show. It grows one tab at a time; today it wires the first
-one: **dangling and cyclic symlinks**.
+facts and hazards the plain listing doesn't show. It grows one tab at a time; today it wires three:
+**dangling and cyclic symlinks**, **type mismatches**, and **orphan sidecars**.
 
-Open it from the **Tools** menu (*Find dangling links…*) or the **command palette**
-(Ctrl/Cmd+Shift+P → *Find dangling links…*). Both are scoped to the folder you're currently in.
+Open it from the **Tools** menu (*Find dangling links…* / *Find type mismatches…* / *Find orphan
+sidecars…*) or the **command palette** (Ctrl/Cmd+Shift+P → the same three entries). Each entry opens the
+panel straight to its own tab; every scan is scoped to the folder you're currently in.
 
 ## Dangling links
 
@@ -26,11 +27,36 @@ back on a path already seen, so it can never resolve to real content either way.
 2. **Review.** Each flagged link is shown with its name, location, and a **Missing target** or
    **Cyclic link** badge. Click any entry to jump straight to that file in the explorer.
 
-This tab is **read-only** — nothing is deleted or modified. It's a review surface, not a cleanup tool;
-use the explorer's normal delete/move actions on anything you want to fix once you've found it.
+## Type mismatches
+
+A file has a **type mismatch** when its actual content doesn't match what its extension claims — for
+example, a `.jpg` that's really a renamed Windows executable, or a document saved with the wrong
+extension. The app sniffs each file's real bytes rather than trusting the name.
+
+1. **Scan.** The app walks the current folder (and subfolders) checking each file's sniffed type against
+   its claimed extension. Results **stream in live** as they're found.
+2. **Review.** Each flagged file is shown with its name, location, and a badge reading *"claims `.ext` →
+   looks like <detected type>"*. Click any entry to jump straight to that file in the explorer.
+
+## Orphan sidecars
+
+A **sidecar** is a companion file that only makes sense alongside a primary file — a `.srt` subtitle
+track, an `.xmp` metadata sidecar, and similar pairings. An **orphan sidecar** is one whose matching
+primary file is missing, so it no longer has anything to accompany.
+
+1. **Scan.** The app walks the current folder and subfolders looking for sidecar files with no matching
+   primary in the same folder. Results **stream in live** as they're found.
+2. **Review.** Each flagged file is shown with its name and location. Click any entry to jump straight to
+   that file in the explorer.
+
+## Read-only
+
+Every tab in this panel is **read-only** — nothing is deleted or modified. It's a review surface, not a
+cleanup tool; use the explorer's normal delete/move actions on anything you want to fix once you've found
+it.
 
 ## More tabs coming
 
-The panel is built to grow: future slices add tabs for the explorer's other file-health detectors
-(disguised file types, archive expansion-ratio warnings, orphaned sidecar files, empty-folder cascades)
-alongside this one, so File Health becomes a single place to review everything the explorer has noticed.
+The panel is built to grow: future slices add tabs for the explorer's remaining file-health detectors
+(archive expansion-ratio warnings, empty-folder cascades) alongside these three, so File Health becomes a
+single place to review everything the explorer has noticed.

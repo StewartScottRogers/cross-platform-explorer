@@ -1,42 +1,59 @@
 <script lang="ts">
   /**
-   * File Health panel, SLICE 1 (CPE-1315, epic CPE-1002): a tabbed dialog shell surfacing the pure
-   * detectors built (but never surfaced) for that epic — `safetyReport.ts`'s `buildFileHealth` already
-   * unifies all five (`type-mismatch` / `zip-bomb` / `dangling-link` / `orphaned-sidecar` / `empty-folder`),
-   * but this slice wires only ONE tab end to end: **dangling / cyclic symlinks**, over the STREAMING
-   * `find_dangling_links_stream` command (CPE-1299) — the first frontend consumer of a `_stream` command
-   * that isn't already covered by DuplicatesDialog/SimilarImagesDialog's shape. Future slices add a tab
-   * per remaining category; `TABS` below is the extension point (add an entry + a matching `{#if}` block).
+   * File Health panel, SLICE 1+2 (CPE-1315/CPE-1316, epic CPE-1002): a tabbed dialog shell surfacing the
+   * pure detectors built (but never surfaced) for that epic — `safetyReport.ts`'s `buildFileHealth`
+   * already unifies all five (`type-mismatch` / `zip-bomb` / `dangling-link` / `orphaned-sidecar` /
+   * `empty-folder`). Slice 1 wired the first tab (**dangling / cyclic symlinks**) end to end over the
+   * STREAMING `find_dangling_links_stream` command (CPE-1299) — the first frontend consumer of a
+   * `_stream` command that isn't already covered by DuplicatesDialog/SimilarImagesDialog's shape. Slice 2
+   * adds two more tabs — **type mismatches** (`find_type_mismatches_stream`) and **orphan sidecars**
+   * (`find_orphan_sidecars_stream`) — copying the exact same wiring per tab. Future slices add the
+   * remaining categories; `TABS` below is the extension point (add an entry + a matching `{#if}` block).
    *
    * Mirrors NearDuplicatesDialog's read-only reveal-dialog skeleton (intro → Scan → loading → error →
-   * empty → results, `searchGen` supersede token, `reveal(path)` → navigate+close) crossed with
+   * empty → results, a per-tab generation supersede token, `reveal(path)` → navigate+close) crossed with
    * SimilarImagesDialog's STREAMING shape (`rawInvoke` + `createChannel` from `../invoke`, append
    * batches, flip `loading` off on the first batch). The in-dialog tab strip (`.tabs`/`.tab`/`.tab.active`)
    * follows MetadataStudioDialog's local convention (docs/design/TABS.md's accent-top-bar treatment,
    * scoped to a dialog rather than the main window's `.tabbar`).
    *
-   * Cancellation mirrors ExplorerPane's `list_dir_stream`/`cancel_dir_stream` convention (CPE-665): the
-   * frontend-supplied `streamId` is just `searchGen`, so a rescan cancels exactly the PRIOR generation's
-   * still-in-flight walk before starting the next one.
+   * Cancellation mirrors ExplorerPane's `list_dir_stream`/`cancel_dir_stream` convention (CPE-665): each
+   * tab has its OWN generation counter (`searchGen` / `mismatchGen` / `orphanGen`) that doubles as the
+   * frontend-supplied `streamId` for THAT scan's `_stream` command, paired with THAT scan's own
+   * `cancel_*_stream` command — the three scans never share a counter or a cancel call, so rescanning one
+   * tab can never cancel (or be superseded by) another tab's in-flight walk.
    */
   import { createEventDispatcher } from "svelte";
   import { rawInvoke, createChannel } from "../invoke";
   import Icon from "./Icon.svelte";
   import { t } from "../i18n";
   import { baseName, parentDir } from "../contentSearch";
-  import type { DanglingLink, DanglingReport, DanglingReason } from "../bindings.gen";
+  import type {
+    DanglingLink,
+    DanglingReport,
+    DanglingReason,
+    MismatchHit,
+    MismatchReport,
+    OrphanSidecarResult,
+  } from "../bindings.gen";
 
   export let root = "";
+  /** Which tab to open on (CPE-1316) — lets a Tools-menu / command-palette entry that targets one
+   *  specific detector (e.g. "Find type mismatches…") open the panel scoped straight to that tab, instead
+   *  of always landing on the first one. Defaults to slice 1's dangling-links tab. */
+  export let initialTab: TabId = "dangling";
 
   const dispatch = createEventDispatcher<{ close: void; navigate: string }>();
 
   /** Tab shell extension point — add an entry here (+ a matching `{#if activeTab === …}` block) to wire
-   *  another File-Health category. Only `dangling` is wired this slice. */
-  type TabId = "dangling";
+   *  another File-Health category. `dangling` (slice 1), `mismatch` + `orphan` (slice 2) are wired. */
+  type TabId = "dangling" | "mismatch" | "orphan";
   const TABS: { id: TabId; labelKey: string; icon: string }[] = [
     { id: "dangling", labelKey: "fh.tabDangling", icon: "link-broken" },
+    { id: "mismatch", labelKey: "fh.tabMismatch", icon: "ban" },
+    { id: "orphan", labelKey: "fh.tabOrphan", icon: "unknown" },
   ];
-  let activeTab: TabId = "dangling";
+  let activeTab: TabId = initialTab;
 
   /** A rendered dangling/cyclic link with a stable `id` for the `{#each}` key (batches only carry
    *  `path`/`reason`). */
@@ -101,6 +118,140 @@
       // An EMPTY result streams NO batch (mirrors SimilarImagesDialog/CPE-1202) — clearing `loading`
       // here on the awaited resolution is what stops an empty scan spinning forever.
       if (gen === searchGen) loading = false;
+    }
+  }
+
+  /** A rendered type-mismatch hit with a stable `id` for the `{#each}` key (batches only carry the
+   *  `MismatchHit` fields). */
+  interface MismatchRow {
+    id: number;
+    path: string;
+    claimedExt: string;
+    detectedLabel: string;
+    detectedExt: string;
+  }
+
+  let mismatchLoading = false;
+  let mismatchError = "";
+  let mismatchStarted = false;
+  let mismatchHits: MismatchRow[] = [];
+  let mismatchScanned = 0;
+  let mismatchTruncated = false;
+  let mismatchNextId = 0;
+  // This tab's OWN generation counter, also doubling as its OWN frontend-supplied streamId — entirely
+  // independent of `searchGen`/`orphanGen` so a mismatch rescan can never cancel or be superseded by
+  // either of the other two scans.
+  let mismatchGen = 0;
+
+  async function runMismatch() {
+    // A rescan supersedes whatever the PRIOR mismatch scan's walk is still draining — cancel that
+    // generation's stream (never the dangling/orphan scans' streamIds, which live in their own counters).
+    if (mismatchGen > 0) {
+      void rawInvoke("cancel_type_mismatches_stream", { streamId: mismatchGen }).catch(() => {});
+    }
+    mismatchLoading = true;
+    mismatchError = "";
+    mismatchStarted = true;
+    mismatchHits = [];
+    mismatchScanned = 0;
+    mismatchTruncated = false;
+    const gen = ++mismatchGen;
+    try {
+      const channel = createChannel<MismatchHit[]>();
+      channel.onmessage = (batch) => {
+        if (gen !== mismatchGen) return; // superseded by a newer mismatch scan — drop stale rows
+        mismatchHits = [
+          ...mismatchHits,
+          ...batch.map((h) => ({
+            id: mismatchNextId++,
+            path: h.path,
+            claimedExt: h.claimed_ext,
+            detectedLabel: h.detected_label,
+            detectedExt: h.detected_ext,
+          })),
+        ];
+        mismatchLoading = false; // first batch is in — reveal it
+      };
+      const final = await rawInvoke<MismatchReport>("find_type_mismatches_stream", {
+        root,
+        excludes: [],
+        streamId: gen,
+        onHit: channel,
+      });
+      if (gen === mismatchGen) {
+        mismatchScanned = final.scanned;
+        mismatchTruncated = final.truncated;
+      }
+    } catch (e) {
+      if (gen === mismatchGen) {
+        mismatchError = String(e);
+        mismatchHits = [];
+      }
+    } finally {
+      // An EMPTY result streams NO batch — clearing `loading` here on the awaited resolution is what
+      // stops an empty scan spinning forever (mirrors the dangling tab).
+      if (gen === mismatchGen) mismatchLoading = false;
+    }
+  }
+
+  /** A rendered orphan sidecar with a stable `id` for the `{#each}` key (batches carry plain path
+   *  strings — there's no per-row metadata beyond the path itself). */
+  interface OrphanRow {
+    id: number;
+    path: string;
+  }
+
+  let orphanLoading = false;
+  let orphanError = "";
+  let orphanStarted = false;
+  let orphans: OrphanRow[] = [];
+  let orphanScanned = 0;
+  let orphanTruncated = false;
+  let orphanNextId = 0;
+  // This tab's OWN generation counter / streamId — independent of `searchGen`/`mismatchGen` (same
+  // reasoning as `mismatchGen` above).
+  let orphanGen = 0;
+
+  async function runOrphan() {
+    // A rescan supersedes whatever the PRIOR orphan scan's walk is still draining — cancel that
+    // generation's stream only (never the dangling/mismatch scans' streamIds).
+    if (orphanGen > 0) {
+      void rawInvoke("cancel_orphan_sidecars_stream", { streamId: orphanGen }).catch(() => {});
+    }
+    orphanLoading = true;
+    orphanError = "";
+    orphanStarted = true;
+    orphans = [];
+    orphanScanned = 0;
+    orphanTruncated = false;
+    const gen = ++orphanGen;
+    try {
+      const channel = createChannel<string[]>();
+      channel.onmessage = (batch) => {
+        if (gen !== orphanGen) return; // superseded by a newer orphan scan — drop stale rows
+        orphans = [...orphans, ...batch.map((p) => ({ id: orphanNextId++, path: p }))];
+        orphanLoading = false; // first batch is in — reveal it
+      };
+      // recursive:true (CPE-1316 spec) — sidecars are paired only against primaries in the same
+      // directory, so a recursive walk is needed to cover subfolders too.
+      const final = await rawInvoke<OrphanSidecarResult>("find_orphan_sidecars_stream", {
+        root,
+        recursive: true,
+        excludes: [],
+        streamId: gen,
+        onOrphan: channel,
+      });
+      if (gen === orphanGen) {
+        orphanScanned = final.scanned;
+        orphanTruncated = final.truncated;
+      }
+    } catch (e) {
+      if (gen === orphanGen) {
+        orphanError = String(e);
+        orphans = [];
+      }
+    } finally {
+      if (gen === orphanGen) orphanLoading = false;
     }
   }
 
@@ -173,6 +324,83 @@
                 <span class="name">{baseName(l.path)}</span>
                 <span class="loc">{parentDir(l.path)}</span>
                 <span class="reason" data-testid="fh-reason">{reasonLabel(l.reason)}</span>
+              </button>
+            {/each}
+          </div>
+        </div>
+      {/if}
+    {:else if activeTab === "mismatch"}
+      {#if !mismatchStarted}
+        <div class="intro">
+          <p>{$t("fh.introMismatch")}</p>
+          <button class="btn primary" data-testid="fh-scan-btn" on:click={runMismatch}>{$t("fh.scan")}</button>
+        </div>
+      {:else if mismatchLoading}
+        <p class="dim">{$t("fh.scanning")}</p>
+      {:else if mismatchError}
+        <p class="err">{mismatchError}</p>
+        <button class="mini" data-testid="fh-rescan-btn" on:click={runMismatch}>{$t("fh.scan")}</button>
+      {:else if mismatchHits.length === 0}
+        <p class="dim" data-testid="fh-none">{$t("fh.noneMismatch", { count: mismatchScanned.toLocaleString() })}</p>
+        <button class="mini" data-testid="fh-rescan-btn" on:click={runMismatch}>{$t("fh.scan")}</button>
+      {:else}
+        <div class="summary">
+          <span>
+            {mismatchHits.length === 1
+              ? $t("fh.summaryOneMismatch", { count: mismatchHits.length })
+              : $t("fh.summaryManyMismatch", { count: mismatchHits.length })}
+            <span class="dim"> · {$t("fh.scanned", { count: mismatchScanned.toLocaleString() })}</span>
+            {#if mismatchTruncated}<span class="dim"> {$t("fh.capped")}</span>{/if}
+          </span>
+          <button class="mini" data-testid="fh-rescan-btn" on:click={runMismatch}>{$t("fh.scan")}</button>
+        </div>
+        <div class="results">
+          <div class="rows">
+            {#each mismatchHits as h (h.id)}
+              <button class="row" data-testid="fh-row" title={h.path} on:click={() => reveal(h.path)}>
+                <Icon name="ban" size={14} />
+                <span class="name">{baseName(h.path)}</span>
+                <span class="loc">{parentDir(h.path)}</span>
+                <span class="reason" data-testid="fh-reason">
+                  {$t("fh.mismatchBadge", { claimed: h.claimedExt, detected: h.detectedLabel })}
+                </span>
+              </button>
+            {/each}
+          </div>
+        </div>
+      {/if}
+    {:else if activeTab === "orphan"}
+      {#if !orphanStarted}
+        <div class="intro">
+          <p>{$t("fh.introOrphan")}</p>
+          <button class="btn primary" data-testid="fh-scan-btn" on:click={runOrphan}>{$t("fh.scan")}</button>
+        </div>
+      {:else if orphanLoading}
+        <p class="dim">{$t("fh.scanning")}</p>
+      {:else if orphanError}
+        <p class="err">{orphanError}</p>
+        <button class="mini" data-testid="fh-rescan-btn" on:click={runOrphan}>{$t("fh.scan")}</button>
+      {:else if orphans.length === 0}
+        <p class="dim" data-testid="fh-none">{$t("fh.noneOrphan", { count: orphanScanned.toLocaleString() })}</p>
+        <button class="mini" data-testid="fh-rescan-btn" on:click={runOrphan}>{$t("fh.scan")}</button>
+      {:else}
+        <div class="summary">
+          <span>
+            {orphans.length === 1
+              ? $t("fh.summaryOneOrphan", { count: orphans.length })
+              : $t("fh.summaryManyOrphan", { count: orphans.length })}
+            <span class="dim"> · {$t("fh.scanned", { count: orphanScanned.toLocaleString() })}</span>
+            {#if orphanTruncated}<span class="dim"> {$t("fh.capped")}</span>{/if}
+          </span>
+          <button class="mini" data-testid="fh-rescan-btn" on:click={runOrphan}>{$t("fh.scan")}</button>
+        </div>
+        <div class="results">
+          <div class="rows">
+            {#each orphans as o (o.id)}
+              <button class="row" data-testid="fh-row" title={o.path} on:click={() => reveal(o.path)}>
+                <Icon name="unknown" size={14} />
+                <span class="name">{baseName(o.path)}</span>
+                <span class="loc">{parentDir(o.path)}</span>
               </button>
             {/each}
           </div>

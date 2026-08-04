@@ -747,9 +747,13 @@
    *  picks the engine. */
   let similarDocsOpen = false;
   let similarFoldersOpen = false;
-  /** File Health panel overlay (CPE-1315, epic CPE-1002) — a tabbed dialog surfacing the file-inspection
-   *  detectors; slice 1 wires only the streaming dangling/cyclic-links tab. */
+  /** File Health panel overlay (CPE-1315/CPE-1316, epic CPE-1002) — a tabbed dialog surfacing the
+   *  file-inspection detectors; slice 1 wired the streaming dangling/cyclic-links tab, slice 2 adds
+   *  type-mismatch + orphan-sidecar tabs. */
   let fileHealthOpen = false;
+  /** Which File Health tab to land on when it opens (CPE-1316) — set right before flipping
+   *  `fileHealthOpen`, so each Tools-menu / palette entry that targets one detector opens straight to it. */
+  let fileHealthTab: "dangling" | "mismatch" | "orphan" = "dangling";
   let patternSelectOpen = false;
   /** Repositories browser overlay (CPE-434/435) — browse GitHub & other forges in-app. */
   let showRepos = false;
@@ -866,7 +870,9 @@
     { id: "tool.findSimilarImages", group: $t("palette.groupTools"), label: $t("palette.findSimilarImages"), keywords: "near duplicate similar images photos perceptual dhash reclaim", run: () => (similarImagesOpen = true), enabled: inFolder },
     { id: "tool.findSimilarDocuments", group: $t("palette.groupTools"), label: $t("palette.findSimilarDocuments"), keywords: "near duplicate similar documents text notes readme simhash", run: () => (similarDocsOpen = true), enabled: inFolder },
     { id: "tool.findSimilarFolders", group: $t("palette.groupTools"), label: $t("palette.findSimilarFolders"), keywords: "near identical similar folders jaccard", run: () => (similarFoldersOpen = true), enabled: inFolder },
-    { id: "tool.findDanglingLinks", group: $t("palette.groupTools"), label: $t("palette.findDanglingLinks"), keywords: "dangling broken cyclic symlink link file health", run: () => (fileHealthOpen = true), enabled: inFolder },
+    { id: "tool.findDanglingLinks", group: $t("palette.groupTools"), label: $t("palette.findDanglingLinks"), keywords: "dangling broken cyclic symlink link file health", run: () => { fileHealthTab = "dangling"; fileHealthOpen = true; }, enabled: inFolder },
+    { id: "tool.findTypeMismatches", group: $t("palette.groupTools"), label: $t("palette.findTypeMismatches"), keywords: "type mismatch extension disguised renamed wrong file health", run: () => { fileHealthTab = "mismatch"; fileHealthOpen = true; }, enabled: inFolder },
+    { id: "tool.findOrphanSidecars", group: $t("palette.groupTools"), label: $t("palette.findOrphanSidecars"), keywords: "orphan sidecar srt xmp companion file health", run: () => { fileHealthTab = "orphan"; fileHealthOpen = true; }, enabled: inFolder },
     { id: "tool.colorRules", group: $t("palette.groupTools"), label: $t("palette.colorRules"), keywords: "color rules highlight label", run: () => (colorRulesOpen = true) },
     { id: "tool.sessionHistory", group: $t("palette.groupTools"), label: $t("palette.sessionHistory"), keywords: "audit log history export sessions activity", run: () => (sessionHistoryOpen = true) },
     { id: "tool.compareFolders", group: $t("palette.groupTools"), label: $t("palette.compareFolders"), keywords: "diff compare folders directories tree", run: openCompare },
@@ -4197,7 +4203,9 @@
       case "find-similar-images": if (!isHome && !archive) similarImagesOpen = true; break;
       case "find-similar-documents": if (!isHome && !archive) similarDocsOpen = true; break;
       case "find-similar-folders": if (!isHome && !archive) similarFoldersOpen = true; break;
-      case "find-dangling-links": if (!isHome && !archive) fileHealthOpen = true; break;
+      case "find-dangling-links": if (!isHome && !archive) { fileHealthTab = "dangling"; fileHealthOpen = true; } break;
+      case "find-type-mismatches": if (!isHome && !archive) { fileHealthTab = "mismatch"; fileHealthOpen = true; } break;
+      case "find-orphan-sidecars": if (!isHome && !archive) { fileHealthTab = "orphan"; fileHealthOpen = true; } break;
       case "organize-folder": if (!isHome && !archive) organizeOpen = true; break;
       case "copy-file-names": copyListing(namesList(visible), "file names"); break;
       case "copy-file-list": copyListing(detailList(visible), "file list"); break;
@@ -5337,6 +5345,7 @@
 {#if fileHealthOpen}
   <FileHealthDialog
     root={currentPath}
+    initialTab={fileHealthTab}
     on:navigate={(e) => { fileHealthOpen = false; revealFileInApp(e.detail); }}
     on:close={() => (fileHealthOpen = false)}
   />
