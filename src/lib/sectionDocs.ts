@@ -20,7 +20,8 @@ export type Section =
   | "swarms"
   | "native-metadata"
   | "terminal"
-  | "vaults";
+  | "vaults"
+  | "file-health";
 
 /** Section id → doc slug (a `src/docs/*.md` filename without `.md`). */
 const SECTION_DOC: Record<Section, string> = {
@@ -50,6 +51,12 @@ const SECTION_DOC: Record<Section, string> = {
   // context menu, a `.cpevault` file, and Settings), but it still earns its own doc page + registry
   // entry per [[maintain-in-app-docs-library]].
   vaults: "20-vaults",
+  // CPE-1315 (epic CPE-1002): the File Health panel — a tabbed dialog surfacing the file-inspection
+  // detectors (dangling/cyclic symlinks this slice, more categories in later slices). Like vaults/
+  // terminal/native-metadata above, not a sidebar view you switch into (it's reachable from the Tools
+  // menu / command palette), but it still earns its own doc page + registry entry per
+  // [[maintain-in-app-docs-library]].
+  "file-health": "22-file-health",
 };
 
 /** The default doc when a section has no page (or an unknown id is passed): the Overview. */

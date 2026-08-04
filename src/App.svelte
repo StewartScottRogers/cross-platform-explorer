@@ -97,6 +97,7 @@
   import DuplicatesDialog from "./lib/components/DuplicatesDialog.svelte";
   import SimilarImagesDialog from "./lib/components/SimilarImagesDialog.svelte";
   import NearDuplicatesDialog from "./lib/components/NearDuplicatesDialog.svelte";
+  import FileHealthDialog from "./lib/components/FileHealthDialog.svelte";
   import { namesList, detailList, csvList } from "./lib/listing";
   import { parentDir as parentOfPath, baseName } from "./lib/contentSearch";
   import PropertiesDialog from "./lib/components/PropertiesDialog.svelte";
@@ -746,6 +747,9 @@
    *  picks the engine. */
   let similarDocsOpen = false;
   let similarFoldersOpen = false;
+  /** File Health panel overlay (CPE-1315, epic CPE-1002) — a tabbed dialog surfacing the file-inspection
+   *  detectors; slice 1 wires only the streaming dangling/cyclic-links tab. */
+  let fileHealthOpen = false;
   let patternSelectOpen = false;
   /** Repositories browser overlay (CPE-434/435) — browse GitHub & other forges in-app. */
   let showRepos = false;
@@ -862,6 +866,7 @@
     { id: "tool.findSimilarImages", group: $t("palette.groupTools"), label: $t("palette.findSimilarImages"), keywords: "near duplicate similar images photos perceptual dhash reclaim", run: () => (similarImagesOpen = true), enabled: inFolder },
     { id: "tool.findSimilarDocuments", group: $t("palette.groupTools"), label: $t("palette.findSimilarDocuments"), keywords: "near duplicate similar documents text notes readme simhash", run: () => (similarDocsOpen = true), enabled: inFolder },
     { id: "tool.findSimilarFolders", group: $t("palette.groupTools"), label: $t("palette.findSimilarFolders"), keywords: "near identical similar folders jaccard", run: () => (similarFoldersOpen = true), enabled: inFolder },
+    { id: "tool.findDanglingLinks", group: $t("palette.groupTools"), label: $t("palette.findDanglingLinks"), keywords: "dangling broken cyclic symlink link file health", run: () => (fileHealthOpen = true), enabled: inFolder },
     { id: "tool.colorRules", group: $t("palette.groupTools"), label: $t("palette.colorRules"), keywords: "color rules highlight label", run: () => (colorRulesOpen = true) },
     { id: "tool.sessionHistory", group: $t("palette.groupTools"), label: $t("palette.sessionHistory"), keywords: "audit log history export sessions activity", run: () => (sessionHistoryOpen = true) },
     { id: "tool.compareFolders", group: $t("palette.groupTools"), label: $t("palette.compareFolders"), keywords: "diff compare folders directories tree", run: openCompare },
@@ -4192,6 +4197,7 @@
       case "find-similar-images": if (!isHome && !archive) similarImagesOpen = true; break;
       case "find-similar-documents": if (!isHome && !archive) similarDocsOpen = true; break;
       case "find-similar-folders": if (!isHome && !archive) similarFoldersOpen = true; break;
+      case "find-dangling-links": if (!isHome && !archive) fileHealthOpen = true; break;
       case "organize-folder": if (!isHome && !archive) organizeOpen = true; break;
       case "copy-file-names": copyListing(namesList(visible), "file names"); break;
       case "copy-file-list": copyListing(detailList(visible), "file list"); break;
@@ -5325,6 +5331,14 @@
     kind="folders"
     on:navigate={(e) => { similarFoldersOpen = false; revealFileInApp(e.detail); }}
     on:close={() => (similarFoldersOpen = false)}
+  />
+{/if}
+
+{#if fileHealthOpen}
+  <FileHealthDialog
+    root={currentPath}
+    on:navigate={(e) => { fileHealthOpen = false; revealFileInApp(e.detail); }}
+    on:close={() => (fileHealthOpen = false)}
   />
 {/if}
 
