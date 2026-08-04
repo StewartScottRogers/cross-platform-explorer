@@ -818,3 +818,36 @@ them; history.md stopped at 07-31). Authoritative record is the checkpoint commi
   GUI/attended (File-Health panel UI, metadata-edit UI, scan-exclude UI, near-dup review) or user-gated
   (AI model/key, OCR engine, cloud/SFTP creds, code-signing cert, Mac). Next session should either take an
   attended/GUI epic WITH the user, or get a user resource — not scrape for more headless filler.
+
+## 2026-08-04 (run "6 workshifts") — media-metadata write-back completion + robustness (10 shipped)
+- Shipped: CPE-1304 (perf-budget harness), 1305 (IPTC/XMP write-back), 1306 (Linux shell integration), 1307
+  (macOS xattr OS-interop test — retired MVD row5; was mis-numbered CPE-828), 1308 (media-meta polish:
+  EXIF clear-symmetry + IPTC 1:90 UTF-8 charset + 8BIM survivor), 1309 (write_mp4 video metadata + iso_bmff
+  refactor), 1311 (binary/data preview panic coverage), 1312 (folderWatch data-integrity bug), 1313 (IIM
+  mid-codepoint truncation bug), 1314 (write-codec panic harness). **Epic CPE-725 write-back COMPLETE (9 formats).**
+- Gauntlet: **0 escaped defects**. 4 tickets bounced-and-fixed IN-gauntlet before merge — independent UAT caught
+  2 real photo-corruption-adjacent bugs in 1305 (camera-JPEG save fail + silent clear no-op) and an
+  unreachable-feature bug in 1306; the 1307 macOS test hit a lossy xattr readback on the real runner; an opus
+  re-verify caught an i18n coverage-gate break (fixed by the Foreman directly). This depth is why nothing bounced.
+- Tuned defaults CONFIRMED:
+  - **JPEG-segment codec (write_iptc/xmp/exif)**: opus build + opus reviewer (photo byte-surgery). Dispatch must
+    key on EDITED-groups not field-presence; strip the segment on last-field-clear; reviewer checks insert-vs-
+    replace BOTH paths + EXIF/XMP APP1 disambiguation (Exif\0\0 vs the xap URL).
+  - **MP4 atom write (write_mp4)**: opus build + opus reviewer. The write_pdf-style copy-moov → append at EOF →
+    shadow old moov "free" strategy (NEVER move mdat / touch stco/co64) is the ONLY safe approach. Load-bearing
+    test = re-derive stco/co64 offsets from the REWRITTEN file → deref to mdat bytes (a tag-only round-trip
+    MISSES silent playback corruption). Plan filed in Library (mp4-metadata-writeback-plan-2026-08-04).
+  - **cross-OS-cfg tickets (Linux/macOS)**: the worker can't run the cfg arm locally → `cargo check --target
+    <triple>` (a zig-cc wrapper handles the C build-scripts: rusqlite/lzma-sys) is the local proof; real gate is
+    the CI other-OS leg; merge only after PR CI green. Structure the pure logic OS-agnostic + unit-test it.
+  - **test-only PRs (panic/coverage)**: one Reviewer + the 3-OS CI run AS the 2nd independent check (third-party
+    parsers can panic per-OS) — proportionate, saves a UAT spawn.
+  - **Foreman-applied tiny fixes**: the i18n coverage-gate needs keys in ALL 12 locales (es/de/fr/it are all
+    COMPLETE_LOCALES) — Foreman-applied directly, saving a worker round-trip.
+  - **ID hygiene**: verify next-free ID with a RECURSIVE find incl. Done/ (bash `**` doesn't recurse without
+    globstar) — a mis-numbered CPE-828 collision cost a rename pass (→ CPE-1307).
+- Throughput: 10 tickets, ~53 sub-agent runs, budget deep headroom (never near the 150 reset line). main green
+  throughout (real 3-OS CI). Merges gated on PR CI green via background pollers (offsite Actions).
+- HONEST STATE: clean headless well DRY after this run (3 independent sweeps agree). Remaining = attended-GUI or
+  user-gated (model key / Mac / signing cert / SFTP / Docker). Next session should take an attended epic WITH the
+  user or get a resource — do NOT scrape filler.
