@@ -4,7 +4,7 @@ title: "Streaming variant for the orphan-sidecars sweep"
 type: feature
 component: cpe-server
 priority: medium
-status: Doing
+status: Done
 tags: ready
 created: 2026-08-03
 epic: CPE-1002
@@ -36,3 +36,4 @@ each directory's orphans as found. Headless; command wiring is CPE-1299.
 Template: `listing.rs`. Epic CPE-1002; command wiring CPE-1299. Independent of CPE-1294/1295.
 
 ## Work Log
+- 2026-08-03 — orphan-sidecars streaming walker merged (#593). Reviewer APPROVE: collect-to-vec parity byte-identical vs main, skip-empty + Break confirmed, cross-dir guarantee preserved, 4 substantive tests, 22/22 re-run, clippy clean both modes.
