@@ -4,7 +4,7 @@ title: "Post-audit bug sweep of cpe-server modules added since 2026-07-21"
 type: chore
 component: cpe-server
 priority: medium
-status: Doing
+status: Done
 tags: ready
 created: 2026-08-03
 epic: CPE-1002
@@ -37,3 +37,4 @@ Epic CPE-1002 (safety/robustness). Read-mostly; sequenced after the streaming re
 Bug patterns from [[cpe-server-logic-audited]].
 
 ## Work Log
+- 2026-08-03 — audit merged (#597). ALL-CLEAN honest result: 7 newer modules clean on both bug patterns (no manufactured fix). Reviewer APPROVE with rigor — EMPIRICALLY proved the new regression test (mutated the slice -> confirmed char-boundary panic -> restored), independently spot-checked read_xmp/read_wav/read_iptc/type_mismatch_scan clean. 119/119 re-run clippy clean. Added 1 regression test (read_xmp multibyte UTF-8).
