@@ -1780,6 +1780,30 @@ async findOrphanSidecars(root: string, recursive: boolean) : Promise<Result<Orph
 }
 },
 /**
+ * Streaming variant of `find_orphan_sidecars` (CPE-1299, streaming-liveness convention): pushes each
+ * directory's orphan batch over an IPC channel as [`cpe_server::orphan_sidecars_scan::walk_orphan_sidecars`]
+ * finds it, so a slow/large tree paints progressively instead of blocking on the whole walk. Async +
+ * `spawn_blocking` so the walk never freezes the UI thread (CPE-760). `stream_id` (frontend-supplied,
+ * monotonic) registers a cancel flag polled each batch, so a superseded walk stops promptly — mirrors
+ * `list_dir_stream`/`cancel_dir_stream` (CPE-665). The returned result carries the final `scanned` +
+ * `truncated` with an empty `orphans` (those streamed, in walk order).
+ */
+async findOrphanSidecarsStream(root: string, recursive: boolean, streamId: number, onOrphan: TAURI_CHANNEL<string[]>) : Promise<Result<OrphanSidecarResult, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("find_orphan_sidecars_stream", { root, recursive, streamId, onOrphan }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * Signal an in-flight `find_orphan_sidecars_stream` to stop at the next batch boundary (CPE-1299). A
+ * no-op if the stream already finished (its id is gone from the registry).
+ */
+async cancelOrphanSidecarsStream(streamId: number) : Promise<void> {
+    await TAURI_INVOKE("cancel_orphan_sidecars_stream", { streamId });
+},
+/**
  * Find dangling (target-missing) and cyclic (self/loop) symlinks under `root` (CPE-1284, epic CPE-1002).
  * Thin `spawn_blocking` dispatcher into [`cpe_server::dangling_links_scan::find_dangling_links`], which
  * errors when `root` isn't a directory.
@@ -1793,6 +1817,30 @@ async findDanglingLinks(root: string) : Promise<Result<DanglingReport, string>> 
 }
 },
 /**
+ * Streaming variant of `find_dangling_links` (CPE-1299, streaming-liveness convention): pushes classified
+ * batches over an IPC channel as [`cpe_server::dangling_links_scan::walk_dangling_links`] delivers them —
+ * note the walk itself must finish (classification needs the whole link set) before the first flush, but
+ * `flush` still lets a superseded stream stop consuming further batches early. Async + `spawn_blocking` so
+ * the walk never freezes the UI thread (CPE-760). `stream_id` (frontend-supplied, monotonic) registers a
+ * cancel flag polled each batch, mirroring `list_dir_stream`/`cancel_dir_stream` (CPE-665). The returned
+ * result carries the final `scanned` + `truncated` with an empty `links` (those streamed).
+ */
+async findDanglingLinksStream(root: string, streamId: number, onLink: TAURI_CHANNEL<DanglingLink[]>) : Promise<Result<DanglingReport, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("find_dangling_links_stream", { root, streamId, onLink }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * Signal an in-flight `find_dangling_links_stream` to stop at the next batch boundary (CPE-1299). A
+ * no-op if the stream already finished (its id is gone from the registry).
+ */
+async cancelDanglingLinksStream(streamId: number) : Promise<void> {
+    await TAURI_INVOKE("cancel_dangling_links_stream", { streamId });
+},
+/**
  * Sweep `root` for files whose sniffed content disagrees with their claimed extension (CPE-1285, epic
  * CPE-1002) — e.g. a `.jpg` that's really a Windows PE. Thin `spawn_blocking` dispatcher into
  * [`cpe_server::type_mismatch_scan::find_type_mismatches`]; never errors.
@@ -1804,6 +1852,30 @@ async findTypeMismatches(root: string) : Promise<Result<MismatchReport, string>>
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
 }
+},
+/**
+ * Streaming variant of `find_type_mismatches` (CPE-1299, streaming-liveness convention): pushes each
+ * flagged-file batch over an IPC channel as [`cpe_server::type_mismatch_scan::walk_type_mismatches`] finds
+ * it, so a slow/large tree paints progressively instead of blocking on the whole sweep. Async +
+ * `spawn_blocking` so the walk never freezes the UI thread (CPE-760). `stream_id` (frontend-supplied,
+ * monotonic) registers a cancel flag polled each batch, mirroring `list_dir_stream`/`cancel_dir_stream`
+ * (CPE-665). The returned result carries the final `scanned` + `truncated` with an empty `hits` (those
+ * streamed, in walk order).
+ */
+async findTypeMismatchesStream(root: string, streamId: number, onHit: TAURI_CHANNEL<MismatchHit[]>) : Promise<Result<MismatchReport, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("find_type_mismatches_stream", { root, streamId, onHit }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * Signal an in-flight `find_type_mismatches_stream` to stop at the next batch boundary (CPE-1299). A
+ * no-op if the stream already finished (its id is gone from the registry).
+ */
+async cancelTypeMismatchesStream(streamId: number) : Promise<void> {
+    await TAURI_INVOKE("cancel_type_mismatches_stream", { streamId });
 },
 /**
  * Propose an auto-organize plan for `dir` under `rule` — one [`cpe_server::organize::MoveProposal`] per
