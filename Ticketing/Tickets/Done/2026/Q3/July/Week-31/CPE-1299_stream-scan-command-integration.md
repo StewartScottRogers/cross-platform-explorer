@@ -4,7 +4,7 @@ title: "Wire streaming scan commands (ipc::Channel) + bindings"
 type: feature
 component: app
 priority: medium
-status: Doing
+status: Done
 tags: ready
 created: 2026-08-03
 epic: CPE-1002
@@ -34,3 +34,4 @@ Prereq: CPE-1294/1295/1296 merged. `ipc::Channel` stays in the app adapter (per 
 streaming-liveness convention (STREAMING.md).
 
 ## Work Log
+- 2026-08-03 — 3 stream commands + 3 cancel commands + bindings merged (#599). Reviewer APPROVE with rigor: wrote throwaway test proving cancel BREAKS the walk (scanned 50/250, registry cleaned no leak), re-ran export_bindings + git diff --exit-code = ZERO drift, all 6 cmds in BOTH generate_handler+collect_commands, empty-collection tail convention, real Channel smoke tests, both feature modes build+clippy+test+npm check green. Non-blocking: no cancel-specific unit test (small follow-up).
