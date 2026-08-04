@@ -11,6 +11,9 @@
 //!   **re-paging** the header region (re-laced segment tables, reassigned page sequence numbers, and
 //!   recomputed per-page CRC32 — Ogg's non-reflected `0x04c11db7` polynomial, by hand) while preserving the
 //!   identification header and every audio page.
+//! - [`write_wav`] rebuilds a **WAV/RIFF** stream (CPE-1298) with its `LIST`/`INFO` chunk replaced (or
+//!   inserted, if absent) with one built from the `group == "wav"` fields, preserving every other chunk
+//!   (`fmt `, `data`, …) byte-for-byte and updating the outer `RIFF` size to match.
 //!
 //! Pure + std-only (no new deps): fully cargo-testable by round-tripping through
 //! [`crate::media_meta_read`]'s readers with synthesised inputs, and does no I/O. Bounds-checked
@@ -854,10 +857,144 @@ pub fn write_ogg(orig: &[u8], fields: &[MetaField]) -> Result<Vec<u8>, String> {
     Ok(out)
 }
 
+// ---- WAV / RIFF-INFO write-back (CPE-1298) ----
+
+/// One parsed top-level RIFF chunk: its 4-byte id and the byte range of its *data* (header excluded)
+/// within the original buffer.
+struct RiffChunk {
+    id: [u8; 4],
+    data_start: usize,
+    data_end: usize,
+}
+
+/// Parse `bytes`' top-level RIFF chunk tree, starting right after the `RIFF`+size+`WAVE` header (offset
+/// 12 — checked by the caller). Each chunk is a 4-byte id + little-endian 4-byte size + that many data
+/// bytes, padded to an even length (the pad byte, if any, is not part of the next chunk — mirrors
+/// [`crate::media_meta_read::read_wav`]'s walk). `Err` for a chunk whose declared size runs past the end
+/// of the buffer (truncated/corrupt input); trailing bytes too short to hold another chunk header are
+/// silently ignored, same as the reader. Never panics.
+fn parse_riff_chunks(bytes: &[u8]) -> Result<Vec<RiffChunk>, String> {
+    let mut chunks = Vec::new();
+    let mut pos = 12usize;
+    while pos + 8 <= bytes.len() {
+        let id_bytes = bytes.get(pos..pos + 4).ok_or("truncated RIFF chunk header")?;
+        let size_bytes = bytes.get(pos + 4..pos + 8).ok_or("truncated RIFF chunk header")?;
+        let size = le_u32(size_bytes) as usize;
+        let data_start = pos + 8;
+        let data_end = data_start.checked_add(size).ok_or("RIFF chunk size overflow")?;
+        if data_end > bytes.len() {
+            return Err("RIFF chunk runs past end of file (truncated/corrupt WAV)".into());
+        }
+        let mut id = [0u8; 4];
+        id.copy_from_slice(id_bytes);
+        chunks.push(RiffChunk { id, data_start, data_end });
+        let padded_size = if size % 2 == 0 { size } else { size + 1 };
+        let next = data_start.checked_add(padded_size).ok_or("RIFF chunk padding overflow")?;
+        pos = next;
+    }
+    Ok(chunks)
+}
+
+/// Read a little-endian u32 from 4 bytes (mirrors `media_meta_read`'s private helper; re-implemented
+/// locally for the same reason as [`syncsafe28_decode`]/[`be_u24`]).
+fn le_u32(b: &[u8]) -> u32 {
+    u32::from_le_bytes([b[0], b[1], b[2], b[3]])
+}
+
+/// Map a friendly key (as produced by [`crate::media_meta_read::wav_info_key`]) back to its raw 4-char
+/// RIFF `INFO` sub-chunk id. The inverse of that private mapping (re-implemented locally, same reasoning
+/// as this module's other codecs). A friendly key outside the known set is skipped — RIFF INFO defines
+/// many more ids than [`crate::media_meta_read::read_wav`] chooses to surface, so there's no raw-id
+/// passthrough to invert.
+fn wav_field_id(key: &str) -> Option<&'static [u8; 4]> {
+    match key {
+        "Title" => Some(b"INAM"),
+        "Artist" => Some(b"IART"),
+        "Album" => Some(b"IPRD"),
+        "Year" => Some(b"ICRD"),
+        "Comment" => Some(b"ICMT"),
+        "Genre" => Some(b"IGNR"),
+        _ => None,
+    }
+}
+
+/// Build the sub-chunks of a `LIST`/`INFO` chunk (right after where its 4-byte `INFO` form type goes) from
+/// the `group == "wav"` fields in `fields` — the inverse of [`crate::media_meta_read::parse_wav_info`].
+/// Each recognised, non-blank field becomes one sub-chunk: a 4-byte id, a little-endian 4-byte size, the
+/// value's UTF-8 bytes, and a NUL terminator (the conventional RIFF INFO string form), padded to an even
+/// length. Unrecognised friendly keys and blank values are skipped (mirrors [`build_frames`]'s handling of
+/// the `"id3"` group).
+fn build_wav_info(fields: &[MetaField]) -> Vec<u8> {
+    let mut out = Vec::new();
+    for f in fields {
+        if f.group != "wav" || f.value.is_empty() {
+            continue;
+        }
+        let Some(id) = wav_field_id(&f.key) else { continue };
+        let mut value = f.value.as_bytes().to_vec();
+        value.push(0); // NUL-terminated, the conventional RIFF INFO string form
+        out.extend_from_slice(id);
+        out.extend_from_slice(&(value.len() as u32).to_le_bytes());
+        out.extend_from_slice(&value);
+        if value.len() % 2 != 0 {
+            out.push(0); // pad this sub-chunk to an even length
+        }
+    }
+    out
+}
+
+/// Rebuild a WAV/RIFF stream (`orig`) with its `LIST`/`INFO` chunk replaced by a fresh one built from the
+/// `"wav"`-group fields in `fields` (via [`build_wav_info`]) — inserted at the end of the chunk list if no
+/// `LIST`/`INFO` chunk existed yet. Every other chunk (`fmt `, `data`, and any other `LIST` chunk whose
+/// form type isn't `INFO`) is preserved byte-for-byte, and the outer `RIFF` size is recomputed to match
+/// the new total. `Err` (never a panic) for input that isn't a well-formed `RIFF`…`WAVE` stream, or whose
+/// chunk tree is truncated/corrupt.
+pub fn write_wav(orig: &[u8], fields: &[MetaField]) -> Result<Vec<u8>, String> {
+    if orig.len() < 12 || &orig[0..4] != b"RIFF" || &orig[8..12] != b"WAVE" {
+        return Err("not a WAV file (missing RIFF/WAVE header)".into());
+    }
+    let chunks = parse_riff_chunks(orig)?;
+    let info_data = build_wav_info(fields);
+    let mut new_info = Vec::with_capacity(4 + info_data.len());
+    new_info.extend_from_slice(b"INFO");
+    new_info.extend_from_slice(&info_data);
+
+    let mut out_chunks: Vec<([u8; 4], &[u8])> = Vec::with_capacity(chunks.len() + 1);
+    let mut found = false;
+    for c in &chunks {
+        if !found && c.id == *b"LIST" && orig.get(c.data_start..c.data_start + 4) == Some(&b"INFO"[..]) {
+            out_chunks.push((c.id, &new_info[..]));
+            found = true;
+        } else {
+            out_chunks.push((c.id, &orig[c.data_start..c.data_end]));
+        }
+    }
+    if !found {
+        out_chunks.push((*b"LIST", &new_info[..]));
+    }
+
+    let mut body = Vec::with_capacity(4 + out_chunks.iter().map(|(_, d)| 8 + d.len() + (d.len() % 2)).sum::<usize>());
+    body.extend_from_slice(b"WAVE");
+    for (id, data) in &out_chunks {
+        body.extend_from_slice(id);
+        body.extend_from_slice(&(data.len() as u32).to_le_bytes());
+        body.extend_from_slice(data);
+        if data.len() % 2 != 0 {
+            body.push(0); // pad this chunk to an even length
+        }
+    }
+
+    let mut out = Vec::with_capacity(8 + body.len());
+    out.extend_from_slice(b"RIFF");
+    out.extend_from_slice(&(body.len() as u32).to_le_bytes());
+    out.extend_from_slice(&body);
+    Ok(out)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::media_meta_read::{parse_vorbis_comment, read_flac, read_id3v2};
+    use crate::media_meta_read::{parse_vorbis_comment, read_flac, read_id3v2, read_wav};
 
     fn field(key: &str, value: &str) -> MetaField {
         MetaField { group: "id3".to_string(), key: key.to_string(), value: value.to_string(), editable: true }
@@ -1735,5 +1872,177 @@ mod tests {
         assert_eq!(get(&f, "Album"), Some("Fresh"));
         assert_eq!(get(&f, "Title"), Some("Orig"));
         assert_eq!(get(&f, "Artist"), Some("Band"));
+    }
+
+    // ---- WAV / RIFF-INFO write-back (CPE-1298) ----
+
+    fn wfield(key: &str, value: &str) -> MetaField {
+        MetaField { group: "wav".to_string(), key: key.to_string(), value: value.to_string(), editable: true }
+    }
+
+    /// Serialize one raw RIFF chunk: 4-byte id + little-endian 4-byte size + data, padded to even.
+    fn riff_chunk(id: &[u8; 4], data: &[u8]) -> Vec<u8> {
+        let mut c = Vec::with_capacity(8 + data.len() + 1);
+        c.extend_from_slice(id);
+        c.extend_from_slice(&(data.len() as u32).to_le_bytes());
+        c.extend_from_slice(data);
+        if data.len() % 2 != 0 {
+            c.push(0);
+        }
+        c
+    }
+
+    /// A `LIST`/`INFO` chunk built from `fields`, independently of [`build_wav_info`]'s caller — used to
+    /// seed a fixture's *existing* INFO chunk.
+    fn info_chunk(fields: &[MetaField]) -> Vec<u8> {
+        let mut data = Vec::new();
+        data.extend_from_slice(b"INFO");
+        data.extend_from_slice(&build_wav_info(fields));
+        riff_chunk(b"LIST", &data)
+    }
+
+    /// Build a minimal but valid WAV file: `RIFF`+size+`WAVE` header followed by the given already-
+    /// serialized chunks (e.g. via [`riff_chunk`]/[`info_chunk`]).
+    fn build_wav(chunks: &[Vec<u8>]) -> Vec<u8> {
+        let mut body = Vec::new();
+        body.extend_from_slice(b"WAVE");
+        for c in chunks {
+            body.extend_from_slice(c);
+        }
+        let mut out = Vec::new();
+        out.extend_from_slice(b"RIFF");
+        out.extend_from_slice(&(body.len() as u32).to_le_bytes());
+        out.extend_from_slice(&body);
+        out
+    }
+
+    /// A representative 16-byte PCM `fmt ` chunk.
+    fn fmt_chunk() -> Vec<u8> {
+        let fmt_data: [u8; 16] = [1, 0, 2, 0, 0x44, 0xAC, 0, 0, 0x10, 0xB1, 0x02, 0, 4, 0, 16, 0];
+        riff_chunk(b"fmt ", &fmt_data)
+    }
+
+    fn data_chunk(audio: &[u8]) -> Vec<u8> {
+        riff_chunk(b"data", audio)
+    }
+
+    /// Read the outer `RIFF` size field out of a written WAV, for asserting it matches the true total.
+    fn riff_size_field(bytes: &[u8]) -> usize {
+        u32::from_le_bytes(bytes[4..8].try_into().unwrap()) as usize
+    }
+
+    #[test]
+    fn write_wav_round_trips_edits_and_preserves_fmt_and_data_byte_for_byte() {
+        let fmt = fmt_chunk();
+        let old_info = info_chunk(&[wfield("Title", "Old Title"), wfield("Artist", "Keep Artist")]);
+        let audio = b"SOME-AUDIO-SAMPLE-BYTES".to_vec();
+        let data = data_chunk(&audio);
+        let orig = build_wav(&[fmt.clone(), old_info, data.clone()]);
+
+        // Sanity: the reader sees the old tags before we touch anything.
+        assert_eq!(get(&read_wav(&orig), "Title"), Some("Old Title"));
+
+        let written = write_wav(&orig, &[wfield("Title", "New Title"), wfield("Artist", "Keep Artist")]).unwrap();
+
+        // `fmt ` stayed in place (it precedes the replaced LIST/INFO chunk, so its byte range is untouched);
+        // `data` is preserved byte-for-byte too (its position may shift if the INFO chunk's length changed).
+        assert_eq!(&written[12..12 + fmt.len()], &fmt[..]);
+        assert!(contains_subslice(&written, &data), "data chunk must be preserved byte-for-byte");
+
+        // Outer RIFF size matches the true total.
+        assert_eq!(riff_size_field(&written), written.len() - 8);
+
+        let read_back = read_wav(&written);
+        assert_eq!(get(&read_back, "Title"), Some("New Title"));
+        assert_eq!(get(&read_back, "Artist"), Some("Keep Artist"));
+    }
+
+    #[test]
+    fn write_wav_inserts_info_chunk_when_absent() {
+        let fmt = fmt_chunk();
+        let audio = b"AUDIO-NO-INFO-YET".to_vec();
+        let data = data_chunk(&audio);
+        let orig = build_wav(&[fmt.clone(), data.clone()]); // no LIST/INFO chunk at all
+
+        assert!(read_wav(&orig).is_empty()); // sanity: nothing to read yet
+
+        let written = write_wav(&orig, &[wfield("Title", "Fresh Tag")]).unwrap();
+
+        assert_eq!(get(&read_wav(&written), "Title"), Some("Fresh Tag"));
+        assert!(contains_subslice(&written, &fmt));
+        assert!(contains_subslice(&written, &data));
+        assert_eq!(riff_size_field(&written), written.len() - 8);
+    }
+
+    #[test]
+    fn write_wav_does_not_confuse_a_non_info_list_chunk_with_the_info_chunk() {
+        let fmt = fmt_chunk();
+        let other_list = riff_chunk(b"LIST", b"adtlSOMEOTHERDATA"); // LIST chunk whose form type isn't INFO
+        let audio = b"AUDIO".to_vec();
+        let data = data_chunk(&audio);
+        let orig = build_wav(&[fmt, other_list.clone(), data]);
+        assert!(read_wav(&orig).is_empty()); // the reader doesn't treat it as INFO either
+
+        let written = write_wav(&orig, &[wfield("Title", "New")]).unwrap();
+        assert!(contains_subslice(&written, &other_list), "non-INFO LIST chunk must be preserved byte-for-byte");
+        assert_eq!(get(&read_wav(&written), "Title"), Some("New"));
+    }
+
+    #[test]
+    fn write_wav_writing_twice_is_idempotent_payload_wise() {
+        let fmt = fmt_chunk();
+        let audio = b"AUDIO-DATA-HERE".to_vec();
+        let data = data_chunk(&audio);
+        let orig = build_wav(&[fmt, data]);
+        let fields = [wfield("Title", "A"), wfield("Artist", "B")];
+        let once = write_wav(&orig, &fields).unwrap();
+        let twice = write_wav(&once, &fields).unwrap();
+        assert_eq!(once, twice, "re-writing over an already-written WAV must produce identical bytes");
+    }
+
+    #[test]
+    fn write_wav_errs_on_non_riff_and_malformed_input_without_panicking() {
+        for orig in [&b""[..], &b"RIFF"[..], &b"RIFFxxxxWAVEjunk"[..8], &b"not a wav file at all"[..], &[0xFFu8, 0xFB, 0x90, 0x00][..]] {
+            assert!(write_wav(orig, &[wfield("Title", "X")]).is_err());
+        }
+
+        // Well-formed RIFF/WAVE header but a chunk that claims to run past EOF.
+        let mut truncated = Vec::new();
+        truncated.extend_from_slice(b"RIFF");
+        truncated.extend_from_slice(&100u32.to_le_bytes());
+        truncated.extend_from_slice(b"WAVE");
+        truncated.extend_from_slice(b"fmt ");
+        truncated.extend_from_slice(&999u32.to_le_bytes()); // claims 999 bytes, far more than present
+        truncated.extend_from_slice(&[0u8; 4]);
+        assert!(write_wav(&truncated, &[wfield("Title", "X")]).is_err());
+    }
+
+    #[test]
+    fn write_wav_never_panics_on_any_truncation_of_a_valid_stream() {
+        let fmt = fmt_chunk();
+        let info = info_chunk(&[wfield("Title", "T")]);
+        let audio = b"AUDIO-BYTES-HERE".to_vec();
+        let data = data_chunk(&audio);
+        let valid = build_wav(&[fmt, info, data]);
+        for cut in 0..valid.len() {
+            let _ = write_wav(&valid[..cut], &[wfield("Title", "X")]); // must never panic
+        }
+    }
+
+    #[test]
+    fn write_wav_skips_unmappable_keys_and_blank_values() {
+        let fmt = fmt_chunk();
+        let data = data_chunk(b"AUDIO");
+        let orig = build_wav(&[fmt, data]);
+        let fields = vec![
+            wfield("Title", "Kept"),
+            wfield("Some Random Thing", "value"), // no raw INFO id mapping — skipped
+            wfield("Comment", ""),                // blank — skipped
+            MetaField { group: "id3".into(), key: "Artist".into(), value: "Ignored".into(), editable: true }, // wrong group
+        ];
+        let written = write_wav(&orig, &fields).unwrap();
+        let read_back = read_wav(&written);
+        assert_eq!(read_back.len(), 1);
+        assert_eq!(get(&read_back, "Title"), Some("Kept"));
     }
 }
