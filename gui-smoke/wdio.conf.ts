@@ -804,6 +804,33 @@ function seedVaultCreateFixture(tmpDir: string): void {
   fs.writeFileSync(path.join(src, "notes", "CPE-1250-more.txt"), "nested plaintext\n", "utf-8");
 }
 
+// --- File-Health GUI verification fixture (workshift QA, epic CPE-1002) -------------------------
+// Seeds the 3 findings the File-Health panel's `mismatch`/`orphan`/`empty` tabs need for an
+// end-to-end proof over a REAL Tauri ipc::Channel (the `dangling` tab's finding already exists —
+// `seedLinkBadgeFixture`'s LINK_BROKEN_NAME broken symlink, shared at tmpDir root — so it is not
+// re-seeded here). Isolated in its own subfolder so it never perturbs any other spec's row-position
+// assumptions in the shared tmpDir.
+export const FILE_HEALTH_DIR_NAME = "file-health-gui-verify";
+export const FILE_HEALTH_MISMATCH_NAME = "fh-disguised.jpg";
+export const FILE_HEALTH_ORPHAN_NAME = "fh-orphan.srt";
+export const FILE_HEALTH_EMPTY_SUBDIR_NAME = "fh-empty-nested";
+
+function seedFileHealthFixture(tmpDir: string): void {
+  const dir = path.join(tmpDir, FILE_HEALTH_DIR_NAME);
+  fs.mkdirSync(dir, { recursive: true });
+  // Real PE/MZ header bytes claiming to be a .jpg — sniffs as "Windows executable/library" per
+  // `crates/server/src/type_mismatch_scan.rs`'s own
+  // `pe_disguised_as_jpg_is_flagged_with_right_claimed_and_detected` test fixture.
+  fs.writeFileSync(path.join(dir, FILE_HEALTH_MISMATCH_NAME), Buffer.from([0x4d, 0x5a, 0x90, 0x00, 0x03, 0x00]));
+  // A subtitle sidecar with no matching video primary (`.mp4`/`.mkv`/…) anywhere in the same
+  // directory — `crates/server/src/orphan_sidecars.rs`'s default rules report it as orphaned.
+  fs.writeFileSync(path.join(dir, FILE_HEALTH_ORPHAN_NAME), "1\n00:00:00,000 --> 00:00:01,000\nhi\n", "utf-8");
+  // An empty nested subfolder — cascade-empty, reported by `find_empty_dirs`
+  // (`crates/server/src/empty_dirs_scan.rs`). The PARENT dir is not itself empty (it holds the two
+  // files above), so only this nested folder is expected to be reported.
+  fs.mkdirSync(path.join(dir, FILE_HEALTH_EMPTY_SUBDIR_NAME), { recursive: true });
+}
+
 let tauriDriver: ChildProcess | undefined;
 let shuttingDown = false;
 
@@ -953,6 +980,10 @@ export const config: WebdriverIO.Config = {
     // CPE-1250: seed a small plaintext tree (nested inside the CPE-1241 shred folder — see the block
     // above for why it is NOT a new top-level folder) for the "Create encrypted vault…" flow.
     seedVaultCreateFixture(tmpDir);
+
+    // File-Health GUI verification (workshift QA, epic CPE-1002): seed the mismatch/orphan/empty
+    // findings for file-health.smoke.ts's 4-tab end-to-end pass (see block above).
+    seedFileHealthFixture(tmpDir);
 
     const caps = capabilities as unknown as Array<{ "tauri:options": { args: string[] } }>;
     caps[0]["tauri:options"].args = ["--test-mode", "--x=-4000", `--open=${tmpDir}`];

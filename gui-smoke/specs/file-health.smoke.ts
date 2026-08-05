@@ -1,21 +1,22 @@
-// CPE-1315 — headless GUI smoke for the File Health panel's Dangling-links tab (FileHealthDialog.svelte,
+// CPE-1315/1316/1317 — headless GUI smoke for the File Health panel's 4 tabs (FileHealthDialog.svelte,
 // epic CPE-1002): drives the real built app, opens the dialog via its real opener — the Command Palette
 // (Ctrl+Shift+P → "Find dangling links…", the same `tool.findDanglingLinks` command the Tools ▸ menu
-// item is wired to, see App.svelte's `paletteCommands`) — scans the seeded tmpDir, and asserts the
-// permanently-broken symlink (already seeded for link-badge.smoke.ts, CPE-1208) renders as a dangling
-// link with the "Missing target" reason badge.
+// item is wired to, see App.svelte's `paletteCommands`) — then, for each of the 4 tabs, clicks Scan and
+// asserts >=1 result row renders. This is the workshift QA end-to-end proof that the panel's 3 STREAMING
+// tabs (dangling / mismatch / orphan, each over a real Tauri `ipc::Channel`) and its 1 plain-invoke tab
+// (empty) all actually deliver rows over a REAL IPC round trip against the real built binary — jsdom in
+// FileHealthDialog.test.ts / FileHealthDialogMismatch.test.ts / FileHealthDialogOrphan.test.ts /
+// FileHealthDialogEmpty.test.ts already cover the streaming/cancel/supersede logic in isolation with a
+// mocked Channel, but never against a real backend process.
 //
-// This spec is a RENDER-SPEC SKETCH (per the ticket's own instruction — the Foreman verifies the real
-// streamed-Channel path end to end against a live build; jsdom in FileHealthDialog.test.ts already covers
-// the streaming/cancel/supersede logic in isolation with a mocked Channel). It's written to actually run
-// (reuses a real, already-seeded fixture — see below), it just isn't executed as part of this ticket.
-//
-// Reuses `seedLinkBadgeFixture` (wdio.conf.ts) rather than adding a new fixture: that seed already lands
-// one intact + one PERMANENTLY broken symlink (LINK_BROKEN_NAME -> a name that's never created) in the
-// same tmpDir every other dialog spec shares. Symlink creation needs Developer Mode/elevation on
-// Windows, so — exactly like link-badge.smoke.ts — this spec reads `linkBadgeFixture.supported` from
-// STATE_FILE and skips its assertions on an unprivileged runner rather than failing the whole suite over
-// a sandbox permission gap.
+// Fixtures:
+//   - `dangling` reuses `seedLinkBadgeFixture`'s LINK_BROKEN_NAME (wdio.conf.ts) — a permanently-broken
+//     symlink at the shared tmpDir root. Symlink creation needs Developer Mode/elevation on Windows, so
+//     — exactly like link-badge.smoke.ts — this spec reads `linkBadgeFixture.supported` from STATE_FILE
+//     and skips ONLY the dangling-tab assertion (not the whole suite) on an unprivileged runner.
+//   - `mismatch` / `orphan` / `empty` reuse `seedFileHealthFixture`'s dedicated subfolder (wdio.conf.ts),
+//     seeded unconditionally (no privilege requirement): a PE-header file misnamed `.jpg`, an orphaned
+//     `.srt` subtitle with no video primary, and an empty nested subfolder.
 import { expect } from "chai";
 import fs from "node:fs";
 import path from "node:path";
@@ -26,10 +27,13 @@ import { snap, snapFailure } from "../lib/snap.js";
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const STATE_FILE = path.resolve(__dirname, "..", ".smoke-state.json");
 
-// Kept as a literal (not imported from wdio.conf.ts) to match this harness's existing convention of
+// Kept as literals (not imported from wdio.conf.ts) to match this harness's existing convention of
 // duplicating seeded filenames rather than reaching across the runner/worker boundary (see
 // link-badge.smoke.ts's identical note on LINK_BROKEN_NAME).
 const LINK_BROKEN_NAME = "CPE-1208-broken-link.txt";
+const FILE_HEALTH_MISMATCH_NAME = "fh-disguised.jpg";
+const FILE_HEALTH_ORPHAN_NAME = "fh-orphan.srt";
+const FILE_HEALTH_EMPTY_SUBDIR_NAME = "fh-empty-nested";
 
 /** The `[data-testid="fh-row"]` whose rendered HTML contains `name` — scans HTML rather than an exact-
  *  text locator, same reasoning as near-duplicates.smoke.ts / similar-images.smoke.ts. */
@@ -52,18 +56,18 @@ async function findRowContaining(name: string): Promise<WebdriverIO.Element> {
   return found!;
 }
 
-describe("CPE-1315 — headless GUI smoke: File Health dialog streams the seeded broken symlink", () => {
-  let supported = false;
+describe("CPE-1315/1316/1317 — headless GUI smoke: File Health dialog's 4 tabs stream real findings", () => {
+  let linkBadgeSupported = false;
 
   before(() => {
     const state = JSON.parse(fs.readFileSync(STATE_FILE, "utf-8")) as {
       linkBadgeFixture?: { supported: boolean };
     };
-    supported = state.linkBadgeFixture?.supported ?? false;
-    if (!supported) {
+    linkBadgeSupported = state.linkBadgeFixture?.supported ?? false;
+    if (!linkBadgeSupported) {
       // eslint-disable-next-line no-console
       console.warn(
-        "[file-health.smoke] symlink creation was unprivileged on this runner — skipping CPE-1315 assertions",
+        "[file-health.smoke] symlink creation was unprivileged on this runner — skipping the dangling-tab assertion only",
       );
     }
   });
@@ -72,9 +76,7 @@ describe("CPE-1315 — headless GUI smoke: File Health dialog streams the seeded
     await snapFailure(this.currentTest, "file-health");
   });
 
-  it("opens via the command palette, scans, and streams the seeded broken symlink as a dangling link", async function () {
-    if (!supported) return this.skip();
-
+  it("opens via the command palette and streams/invokes >=1 finding on each of the 4 tabs", async function () {
     // Wait for the initial `--open=<tmpDir>` navigation so `currentPath` is the seeded tmpDir before
     // reaching for a folder-scoped command — `tool.findDanglingLinks` is `enabled: inFolder`.
     const crumb = await $('[aria-current="page"]');
@@ -113,27 +115,79 @@ describe("CPE-1315 — headless GUI smoke: File Health dialog streams the seeded
     // Dangling-links tab already active.
     const dialog = await $('[aria-label="File health"]');
     await dialog.waitForExist({ timeout: 10_000, timeoutMsg: "expected the File Health dialog to render" });
-    const tab = await $('[data-testid="fh-tab-dangling"]');
-    await tab.waitForExist({ timeout: 5_000, timeoutMsg: "expected the Dangling links tab to render" });
 
-    // Kick the scan via its real button — this is the REAL `find_dangling_links_stream` command over a
-    // real Tauri ipc::Channel, the first GUI exercise of that streaming path (jsdom mocks it elsewhere).
-    const scanBtn = await $('[data-testid="fh-scan-btn"]');
-    await scanBtn.waitForClickable({ timeout: 10_000 });
-    await scanBtn.click();
+    // Pre-scan intro state, captured before any tab's Scan button is clicked — the Visual Critic's
+    // baseline "what does this dialog look like before a scan runs" frame.
+    const introScanBtn = await $('[data-testid="fh-scan-btn"]');
+    await introScanBtn.waitForExist({ timeout: 5_000, timeoutMsg: "expected the intro Scan button to render" });
+    await snap("file-health-intro");
 
-    // Core assertion (CPE-1315): the seeded permanently-broken symlink streams back as a dangling link
-    // with the "Missing target" reason — the FALSIFIABLE check tied to this spec's own fixture. If the
-    // scan returned nothing (broken invoke, bad path/excludes wiring, or a classifier regression)
-    // `[data-testid="fh-none"]` would render and no fh-row would exist, so this fails loudly rather than
-    // passing on an empty view.
-    const brokenRow = await findRowContaining(LINK_BROKEN_NAME);
-    const badge = await brokenRow.$('[data-testid="fh-reason"]');
-    await badge.waitForExist({ timeout: 5_000, timeoutMsg: "expected the row to show a reason badge" });
-    expect(await badge.getText()).to.equal("Missing target");
+    // --- Tab 1: dangling links (STREAMING find_dangling_links_stream, already active on open) ------
+    if (!linkBadgeSupported) {
+      // eslint-disable-next-line no-console
+      console.warn("[file-health.smoke] dangling-tab assertion skipped: symlink fixture unsupported here");
+    } else {
+      const tab = await $('[data-testid="fh-tab-dangling"]');
+      await tab.waitForExist({ timeout: 5_000, timeoutMsg: "expected the Dangling links tab to render" });
+      const scanBtn = await $('[data-testid="fh-scan-btn"]');
+      await scanBtn.waitForClickable({ timeout: 10_000 });
+      await scanBtn.click();
 
-    // CPE-1148/1149: capture the passing state (the streamed dangling-link row) for the Visual Critic.
-    await snap("file-health");
+      // Core assertion: the seeded permanently-broken symlink streams back as a dangling link with the
+      // "Missing target" reason — the FALSIFIABLE check tied to this fixture. If the scan returned
+      // nothing (broken invoke, bad path/excludes wiring, or a classifier regression) `[data-testid=
+      // "fh-none"]` would render and no fh-row would exist, so this fails loudly rather than passing on
+      // an empty view.
+      const brokenRow = await findRowContaining(LINK_BROKEN_NAME);
+      const badge = await brokenRow.$('[data-testid="fh-reason"]');
+      await badge.waitForExist({ timeout: 5_000, timeoutMsg: "expected the row to show a reason badge" });
+      expect(await badge.getText()).to.equal("Missing target");
+
+      await snap("file-health-dangling");
+    }
+
+    // --- Tab 2: type mismatches (STREAMING find_type_mismatches_stream) ----------------------------
+    const mismatchTab = await $('[data-testid="fh-tab-mismatch"]');
+    await mismatchTab.waitForClickable({ timeout: 10_000, timeoutMsg: "expected the Type mismatch tab to be clickable" });
+    await mismatchTab.click();
+    const mismatchScanBtn = await $('[data-testid="fh-scan-btn"]');
+    await mismatchScanBtn.waitForClickable({ timeout: 10_000, timeoutMsg: "expected the mismatch tab's Scan button" });
+    await mismatchScanBtn.click();
+
+    // The seeded PE-header file misnamed `.jpg` must stream back flagged — if the scan returned
+    // nothing, `[data-testid="fh-none"]` would render instead and this loudly fails.
+    const mismatchRow = await findRowContaining(FILE_HEALTH_MISMATCH_NAME);
+    const mismatchReason = await mismatchRow.$('[data-testid="fh-reason"]');
+    await mismatchReason.waitForExist({ timeout: 5_000, timeoutMsg: "expected the mismatch row to show a reason badge" });
+    expect(await mismatchReason.getText()).to.include("Windows executable/library");
+
+    await snap("file-health-mismatch");
+
+    // --- Tab 3: orphan sidecars (STREAMING find_orphan_sidecars_stream) ----------------------------
+    const orphanTab = await $('[data-testid="fh-tab-orphan"]');
+    await orphanTab.waitForClickable({ timeout: 10_000, timeoutMsg: "expected the Orphan sidecars tab to be clickable" });
+    await orphanTab.click();
+    const orphanScanBtn = await $('[data-testid="fh-scan-btn"]');
+    await orphanScanBtn.waitForClickable({ timeout: 10_000, timeoutMsg: "expected the orphan tab's Scan button" });
+    await orphanScanBtn.click();
+
+    // The seeded orphaned .srt (no matching video primary in the same folder) must stream back.
+    await findRowContaining(FILE_HEALTH_ORPHAN_NAME);
+
+    await snap("file-health-orphan");
+
+    // --- Tab 4: empty folders (plain-invoke find_empty_dirs, no streaming Channel) ------------------
+    const emptyTab = await $('[data-testid="fh-tab-empty"]');
+    await emptyTab.waitForClickable({ timeout: 10_000, timeoutMsg: "expected the Empty folders tab to be clickable" });
+    await emptyTab.click();
+    const emptyScanBtn = await $('[data-testid="fh-scan-btn"]');
+    await emptyScanBtn.waitForClickable({ timeout: 10_000, timeoutMsg: "expected the empty tab's Scan button" });
+    await emptyScanBtn.click();
+
+    // The seeded empty nested subfolder must come back as a cascade-empty directory.
+    await findRowContaining(FILE_HEALTH_EMPTY_SUBDIR_NAME);
+
+    await snap("file-health-empty");
 
     // Read-only dialog (no delete/repair action here) — dismiss via the close button.
     const closeBtn = await $('[data-testid="fh-close-btn"]');
