@@ -10,12 +10,16 @@
 //! (Stanford Polygon/Triangle Format, `.ply`, both ASCII and binary). Pure over an in-memory byte slice —
 //! no filesystem I/O; the Tauri command reads the bytes.
 //!
-//! glTF/GLB support (CPE-1335) is deliberately partial and says so honestly: full triangle/vertex counts
-//! need per-primitive accessor dereferencing (resolving each mesh primitive's `POSITION`/`indices`
-//! accessor, decoding buffer views, honoring primitive `mode`) that this module doesn't implement. Rather
-//! than fabricate a number, glTF/GLB reports the mesh count (directly available from the document) and
-//! leaves triangle/vertex counts at an honest `0`. The bounding box is filled in when accessors carry the
-//! `min`/`max` extrema glTF requires on a rendered `POSITION` accessor.
+//! glTF/GLB support (CPE-1335, geometry counts added by CPE-1339) derives triangle/vertex counts directly
+//! from each mesh primitive's accessor `count` fields in the already-parsed JSON document — a glTF
+//! accessor declares its element count right there, so no buffer/BIN byte reading is needed.
+//! `vertex_count` sums each primitive's `POSITION` accessor `count`; `triangle_count` sums the same
+//! primitives honoring `primitive.mode` (glTF default 4 = TRIANGLES), using the `indices` accessor
+//! `count` when the primitive is indexed or the `POSITION` accessor `count` otherwise. A primitive this
+//! module can't derive a count for (no `POSITION`, an index that doesn't resolve to an accessor, a missing
+//! `count`) is simply skipped rather than aborting the whole file or fabricating a number. The mesh count
+//! (directly available from the document) and the bounding box (from accessor `min`/`max` extrema) are
+//! unchanged from CPE-1335.
 //!
 //! PLY support (CPE-1337) is unlike the others in one respect: its header is plain text that declares the
 //! element counts directly (`element vertex N` / `element face M`), so vertex/face counts come straight
@@ -52,10 +56,14 @@ pub struct ModelInfo {
     /// STL: the facet count. OBJ: the `f` (face) line count — OBJ faces are not necessarily triangles
     /// (they may be quads/n-gons), so this is a face count, not a guaranteed-triangle count. PLY: the
     /// `element face` count from the header — same caveat as OBJ, a PLY face is not necessarily a
-    /// triangle. glTF/GLB: always `0` — see the module doc comment for why this isn't computed.
+    /// triangle. glTF/GLB: the sum, over every mesh primitive, of the triangles implied by its `indices`
+    /// (or `POSITION`, if non-indexed) accessor `count` and its `mode` — see the module doc comment. A
+    /// primitive this module can't derive a count for (missing accessor data) contributes `0`, not a
+    /// fabricated guess.
     pub triangle_count: u32,
     /// PLY: the `element vertex` count from the header (both ASCII and binary — the header declares it
-    /// directly). glTF/GLB: always `0` — see the module doc comment for why this isn't computed.
+    /// directly). glTF/GLB: the sum, over every mesh primitive, of its `POSITION` accessor `count` — see
+    /// the module doc comment. A primitive with no resolvable `POSITION` accessor contributes `0`.
     pub vertex_count: u32,
     /// `[min_x, min_y, min_z, max_x, max_y, max_z]`. All zero when no vertices were read (an empty mesh,
     /// a binary PLY — see the module doc comment — or, for glTF/GLB, no `POSITION` accessor carried
@@ -285,15 +293,91 @@ fn model_info_from_gltf_document(doc: &serde_json::Value, ascii: bool) -> Option
         .map(|accessors| bbox_from_position_accessors(obj, accessors))
         .unwrap_or([0.0; 6]);
 
+    let (vertex_count, triangle_count) = obj
+        .get("accessors")
+        .and_then(|a| a.as_array())
+        .map(|accessors| geometry_counts_from_meshes(obj, accessors))
+        .unwrap_or((0, 0));
+
     Some(ModelInfo {
         format: ModelFormat::Gltf,
-        // Honest 0s, not fabricated numbers — see the module doc comment for why these aren't computed.
-        triangle_count: 0,
-        vertex_count: 0,
+        triangle_count,
+        vertex_count,
         bounding_box,
         ascii,
         mesh_count,
     })
+}
+
+/// Walk every mesh primitive and sum `vertex_count`/`triangle_count` straight from accessor `count`
+/// fields — no buffer/BIN byte reading needed, since a glTF accessor declares its element count in the
+/// JSON itself. `vertex_count` is the sum of each primitive's `POSITION` accessor `count`. `triangle_count`
+/// honors `primitive.mode` (glTF default 4 = TRIANGLES when the field is absent): for an indexed primitive
+/// (`indices` present) `n` is the `indices` accessor `count`; for a non-indexed primitive `n` is the
+/// `POSITION` accessor `count`. Mode 4 (TRIANGLES) contributes `n / 3`; modes 5/6 (TRIANGLE_STRIP/FAN)
+/// contribute `n.saturating_sub(2)`; modes 0-3 (points/lines) contribute `0`. A primitive missing the data
+/// needed to count it (no `POSITION` attribute, an index that doesn't resolve to an accessor, an accessor
+/// missing `count`) simply contributes nothing to either sum — the same "skip rather than abort" discipline
+/// [`bbox_from_position_accessors`] uses. Sums use `saturating_add` so a maliciously large declared count
+/// can't overflow; no allocation is ever driven by a declared count.
+fn geometry_counts_from_meshes(
+    doc: &serde_json::Map<String, serde_json::Value>,
+    accessors: &[serde_json::Value],
+) -> (u32, u32) {
+    let mut vertex_count: u32 = 0;
+    let mut triangle_count: u32 = 0;
+    let Some(meshes) = doc.get("meshes").and_then(|m| m.as_array()) else {
+        return (0, 0);
+    };
+    for mesh in meshes {
+        let Some(primitives) = mesh.get("primitives").and_then(|p| p.as_array()) else {
+            continue;
+        };
+        for prim in primitives {
+            let position_count = accessor_count(prim, "attributes", Some("POSITION"), accessors);
+            if let Some(n) = position_count {
+                vertex_count = vertex_count.saturating_add(n);
+            }
+
+            let indices_count = accessor_count(prim, "indices", None, accessors);
+            let Some(n) = indices_count.or(position_count) else {
+                continue;
+            };
+            let mode = prim.get("mode").and_then(|m| m.as_u64()).unwrap_or(4);
+            let triangles = match mode {
+                4 => n / 3,
+                5 | 6 => n.saturating_sub(2),
+                // Points/lines (0-3) contribute no triangles. Any other value isn't a topology defined by
+                // the glTF spec (which only defines 0..=6) — treat it as contributing nothing rather than
+                // guessing, the same "skip rather than fabricate" stance the rest of this module takes.
+                _ => 0,
+            };
+            triangle_count = triangle_count.saturating_add(triangles);
+        }
+    }
+    (vertex_count, triangle_count)
+}
+
+/// Resolve an accessor `count` referenced from `prim`, either directly by a top-level field name (pass
+/// `field` = `"indices"`, `attr = None`) or through a nested attributes object (pass `field =
+/// "attributes"`, `attr = Some("POSITION")`). Every step — the field lookup, the index parse, the accessor
+/// array bounds, the `count` field itself — is a fallible `Option` chain, so a missing attribute, an
+/// out-of-range accessor index, or an accessor with no numeric `count` all simply yield `None` instead of
+/// panicking or indexing out of bounds.
+fn accessor_count(
+    prim: &serde_json::Value,
+    field: &str,
+    attr: Option<&str>,
+    accessors: &[serde_json::Value],
+) -> Option<u32> {
+    let index_value = match attr {
+        Some(attr_name) => prim.get(field)?.get(attr_name)?,
+        None => prim.get(field)?,
+    };
+    let index = index_value.as_u64()?;
+    let accessor = accessors.get(usize::try_from(index).ok()?)?;
+    let count = accessor.get("count")?.as_u64()?;
+    Some(u32::try_from(count).unwrap_or(u32::MAX))
 }
 
 /// Walk every mesh primitive's `POSITION` attribute, resolve that index into `accessors`, and grow a
@@ -717,18 +801,18 @@ mod tests {
     }
 
     #[test]
-    fn gltf_json_reports_mesh_count_and_bbox_from_accessor_min_max() {
+    fn gltf_json_reports_mesh_count_bbox_and_geometry_counts_from_accessors() {
         let info = read_model_info(MINIMAL_GLTF_JSON.as_bytes()).expect("valid glTF JSON");
         assert_eq!(info.format, ModelFormat::Gltf);
         assert!(info.ascii, "a standalone .gltf JSON file is text");
         assert_eq!(info.mesh_count, 1);
         assert_eq!(
-            info.triangle_count, 0,
-            "honest 0 — accessor dereferencing for a real triangle count isn't implemented"
+            info.vertex_count, 3,
+            "POSITION accessor count (3), no buffer bytes read"
         );
         assert_eq!(
-            info.vertex_count, 0,
-            "honest 0 — accessor dereferencing for a real vertex count isn't implemented"
+            info.triangle_count, 1,
+            "non-indexed, unspecified mode defaults to TRIANGLES: 3 / 3 = 1"
         );
         assert_eq!(info.bounding_box, [0.0, -1.0, 0.0, 2.0, 1.0, 3.0]);
     }
@@ -767,14 +851,14 @@ mod tests {
     }
 
     #[test]
-    fn glb_is_read_via_the_json_chunk_with_mesh_count_and_bbox() {
+    fn glb_is_read_via_the_json_chunk_with_mesh_count_bbox_and_geometry_counts() {
         let bytes = glb(MINIMAL_GLTF_JSON.as_bytes());
         let info = read_model_info(&bytes).expect("well-formed glb");
         assert_eq!(info.format, ModelFormat::Gltf);
         assert!(!info.ascii, "a .glb container is binary even though its JSON chunk is text");
         assert_eq!(info.mesh_count, 1);
-        assert_eq!(info.triangle_count, 0);
-        assert_eq!(info.vertex_count, 0);
+        assert_eq!(info.triangle_count, 1, "same accessor-count derivation as the .gltf JSON path");
+        assert_eq!(info.vertex_count, 3);
         assert_eq!(info.bounding_box, [0.0, -1.0, 0.0, 2.0, 1.0, 3.0]);
     }
 
@@ -816,6 +900,123 @@ mod tests {
     #[test]
     fn glb_too_short_to_contain_even_a_header_yields_none() {
         assert_eq!(read_model_info(b"glT"), None);
+    }
+
+    // ---- glTF/GLB geometry counts (CPE-1339) ----
+
+    #[test]
+    fn gltf_indexed_triangles_default_mode_counts_indices_over_three() {
+        let text = r#"{
+            "asset": {"version": "2.0"},
+            "meshes": [{"primitives": [{"attributes": {"POSITION": 0}, "indices": 1}]}],
+            "accessors": [
+                {"componentType": 5126, "count": 24, "type": "VEC3"},
+                {"componentType": 5123, "count": 36, "type": "SCALAR"}
+            ]
+        }"#;
+        let info = read_model_info(text.as_bytes()).expect("valid glTF JSON");
+        assert_eq!(info.vertex_count, 24, "vertex_count is the POSITION accessor count");
+        assert_eq!(info.triangle_count, 12, "indexed TRIANGLES: 36 indices / 3 = 12");
+    }
+
+    #[test]
+    fn gltf_triangle_strip_counts_indices_minus_two() {
+        let text = r#"{
+            "asset": {"version": "2.0"},
+            "meshes": [{"primitives": [{"attributes": {"POSITION": 0}, "indices": 1, "mode": 5}]}],
+            "accessors": [
+                {"componentType": 5126, "count": 8, "type": "VEC3"},
+                {"componentType": 5123, "count": 10, "type": "SCALAR"}
+            ]
+        }"#;
+        let info = read_model_info(text.as_bytes()).expect("valid glTF JSON");
+        assert_eq!(info.vertex_count, 8);
+        assert_eq!(info.triangle_count, 8, "TRIANGLE_STRIP: 10 indices - 2 = 8");
+    }
+
+    #[test]
+    fn gltf_non_indexed_triangles_counts_position_over_three() {
+        let text = r#"{
+            "asset": {"version": "2.0"},
+            "meshes": [{"primitives": [{"attributes": {"POSITION": 0}}]}],
+            "accessors": [{"componentType": 5126, "count": 9, "type": "VEC3"}]
+        }"#;
+        let info = read_model_info(text.as_bytes()).expect("valid glTF JSON");
+        assert_eq!(info.vertex_count, 9);
+        assert_eq!(info.triangle_count, 3, "non-indexed TRIANGLES: 9 positions / 3 = 3");
+    }
+
+    #[test]
+    fn gltf_points_primitive_counts_vertices_but_zero_triangles() {
+        let text = r#"{
+            "asset": {"version": "2.0"},
+            "meshes": [{"primitives": [{"attributes": {"POSITION": 0}, "mode": 0}]}],
+            "accessors": [{"componentType": 5126, "count": 5, "type": "VEC3"}]
+        }"#;
+        let info = read_model_info(text.as_bytes()).expect("valid glTF JSON");
+        assert_eq!(info.vertex_count, 5, "vertices are still counted for a points primitive");
+        assert_eq!(info.triangle_count, 0, "mode 0 (POINTS) contributes no triangles");
+    }
+
+    /// Two meshes, three primitives total, mixing indexed/non-indexed and different modes — the sums must
+    /// add every primitive's contribution correctly.
+    const MULTI_PRIMITIVE_GLTF_JSON: &str = r#"{
+        "asset": {"version": "2.0"},
+        "meshes": [
+            {"primitives": [
+                {"attributes": {"POSITION": 0}, "indices": 1},
+                {"attributes": {"POSITION": 2}, "mode": 0}
+            ]},
+            {"primitives": [
+                {"attributes": {"POSITION": 3}, "indices": 4, "mode": 5}
+            ]}
+        ],
+        "accessors": [
+            {"componentType": 5126, "count": 3, "type": "VEC3"},
+            {"componentType": 5123, "count": 3, "type": "SCALAR"},
+            {"componentType": 5126, "count": 4, "type": "VEC3"},
+            {"componentType": 5126, "count": 8, "type": "VEC3"},
+            {"componentType": 5123, "count": 10, "type": "SCALAR"}
+        ]
+    }"#;
+
+    #[test]
+    fn gltf_multi_mesh_multi_primitive_sums_are_correct() {
+        let info = read_model_info(MULTI_PRIMITIVE_GLTF_JSON.as_bytes()).expect("valid glTF JSON");
+        assert_eq!(info.mesh_count, 2);
+        // 3 (indexed triangles) + 4 (points) + 8 (strip) = 15.
+        assert_eq!(info.vertex_count, 15);
+        // 1 (3 indices / 3) + 0 (points) + 8 (10 - 2 strip) = 9.
+        assert_eq!(info.triangle_count, 9);
+    }
+
+    #[test]
+    fn glb_multi_mesh_multi_primitive_sums_match_the_gltf_json_path() {
+        let bytes = glb(MULTI_PRIMITIVE_GLTF_JSON.as_bytes());
+        let info = read_model_info(&bytes).expect("well-formed glb");
+        assert_eq!(info.vertex_count, 15);
+        assert_eq!(info.triangle_count, 9);
+    }
+
+    #[test]
+    fn gltf_malformed_accessor_references_are_skipped_not_panicked() {
+        // Primitive 1: POSITION index out of range. Primitive 2: POSITION resolves but its accessor has
+        // no `count` field, and its `indices` index is out of range. Primitive 3: no POSITION attribute
+        // at all. Primitive 4: no `attributes` object at all. None of these should panic or contribute to
+        // either sum.
+        let text = r#"{
+            "asset": {"version": "2.0"},
+            "meshes": [{"primitives": [
+                {"attributes": {"POSITION": 5}},
+                {"attributes": {"POSITION": 0}, "indices": 99},
+                {"attributes": {}},
+                {}
+            ]}],
+            "accessors": [{"componentType": 5126, "type": "VEC3"}]
+        }"#;
+        let info = read_model_info(text.as_bytes()).expect("still valid glTF JSON, just malformed geometry refs");
+        assert_eq!(info.vertex_count, 0);
+        assert_eq!(info.triangle_count, 0);
     }
 
     // ---- PLY (CPE-1337) ----
