@@ -3900,12 +3900,16 @@ export type ModelInfo = { format: ModelFormat;
  * STL: the facet count. OBJ: the `f` (face) line count — OBJ faces are not necessarily triangles
  * (they may be quads/n-gons), so this is a face count, not a guaranteed-triangle count. PLY: the
  * `element face` count from the header — same caveat as OBJ, a PLY face is not necessarily a
- * triangle. glTF/GLB: always `0` — see the module doc comment for why this isn't computed.
+ * triangle. glTF/GLB: the sum, over every mesh primitive, of the triangles implied by its `indices`
+ * (or `POSITION`, if non-indexed) accessor `count` and its `mode` — see the module doc comment. A
+ * primitive this module can't derive a count for (missing accessor data) contributes `0`, not a
+ * fabricated guess.
  */
 triangle_count: number; 
 /**
  * PLY: the `element vertex` count from the header (both ASCII and binary — the header declares it
- * directly). glTF/GLB: always `0` — see the module doc comment for why this isn't computed.
+ * directly). glTF/GLB: the sum, over every mesh primitive, of its `POSITION` accessor `count` — see
+ * the module doc comment. A primitive with no resolvable `POSITION` accessor contributes `0`.
  */
 vertex_count: number; 
 /**
