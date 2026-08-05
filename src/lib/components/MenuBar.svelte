@@ -53,6 +53,7 @@
         { id: "find-dangling-links", labelKey: "mi.findDanglingLinks", icon: "link-broken" },
         { id: "find-type-mismatches", labelKey: "mi.findTypeMismatches", icon: "ban" },
         { id: "find-orphan-sidecars", labelKey: "mi.findOrphanSidecars", icon: "unknown" },
+        { id: "find-empty-dirs", labelKey: "mi.findEmptyDirs", icon: "folder" },
         { id: "organize-folder", labelKey: "mi.organizeFolder", icon: "sort" },
         { sep: true },
         { id: "copy-file-names", labelKey: "mi.copyFileNames", icon: "rename" },
