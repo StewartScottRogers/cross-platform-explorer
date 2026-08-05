@@ -62,6 +62,10 @@ pub enum FileType {
     Obj,
     /// Binary glTF (`.glb`), tagged `glTF` at offset 0 per the glTF 2.0 binary container spec.
     Glb,
+    /// PLY 3D-model mesh (`.ply`, Stanford Polygon/Triangle Format), ASCII or binary flavour — both open
+    /// with the literal text `ply` followed by a newline (`\n` or `\r\n`), which (unlike ASCII STL's
+    /// `solid` keyword) is a genuine unambiguous magic prefix, not a heuristic.
+    Ply,
 }
 
 impl FileType {
@@ -103,6 +107,7 @@ impl FileType {
             FileType::Stl => "STL 3D model",
             FileType::Obj => "Wavefront OBJ 3D model",
             FileType::Glb => "glTF binary 3D model",
+            FileType::Ply => "PLY 3D model",
         }
     }
 
@@ -154,6 +159,7 @@ impl FileType {
             FileType::Stl => &["stl"],
             FileType::Obj => &["obj"],
             FileType::Glb => &["glb"],
+            FileType::Ply => &["ply"],
         }
     }
 }
@@ -331,6 +337,11 @@ pub fn detect_type(bytes: &[u8]) -> Option<FileType> {
     }
     if matches_at(bytes, 0, b"BZh") {
         return Some(FileType::Bzip2);
+    }
+    // PLY: an exact, unambiguous magic prefix — the literal text `ply` followed by a newline — so (unlike
+    // the ASCII-STL/OBJ heuristics just below) this is a real signature check, not a soft sniff.
+    if matches_at(bytes, 0, b"ply\n") || matches_at(bytes, 0, b"ply\r\n") {
+        return Some(FileType::Ply);
     }
     if looks_like_svg(bytes) {
         return Some(FileType::Svg);
@@ -623,6 +634,18 @@ mod tests {
     }
 
     #[test]
+    fn detects_ply_via_magic_prefix_both_line_endings() {
+        assert_eq!(detect_type(b"ply\nformat ascii 1.0\n"), Some(FileType::Ply));
+        assert_eq!(detect_type(b"ply\r\nformat ascii 1.0\r\n"), Some(FileType::Ply));
+    }
+
+    #[test]
+    fn does_not_detect_ply_for_a_word_that_merely_starts_with_ply() {
+        // "plyometrics" is not a word boundary after "ply" — must not misfire.
+        assert_eq!(detect_type(b"plyometrics are a form of exercise.\n"), None);
+    }
+
+    #[test]
     fn detects_ascii_stl_via_solid_keyword() {
         let bytes = b"solid mymesh\nfacet normal 0 0 1\nouter loop\nvertex 0 0 0\nendloop\nendfacet\nendsolid\n";
         assert_eq!(detect_type(bytes), Some(FileType::Stl));
@@ -822,5 +845,15 @@ mod tests {
         assert_eq!(FileType::Obj.extensions(), &["obj"]);
         assert_eq!(FileType::Glb.label(), "glTF binary 3D model");
         assert_eq!(FileType::Glb.extensions(), &["glb"]);
+        assert_eq!(FileType::Ply.label(), "PLY 3D model");
+        assert_eq!(FileType::Ply.extensions(), &["ply"]);
+    }
+
+    #[test]
+    fn mismatch_flags_ply_bytes_claiming_a_different_extension() {
+        let ply_bytes = b"ply\nformat ascii 1.0\nend_header\n".to_vec();
+        assert_eq!(mismatch(&ply_bytes, "ply"), None);
+        let m = mismatch(&ply_bytes, "stl").expect("PLY bytes claiming .stl must mismatch");
+        assert_eq!(m.detected, FileType::Ply);
     }
 }

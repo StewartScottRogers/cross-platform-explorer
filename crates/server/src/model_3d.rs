@@ -6,8 +6,9 @@
 //! for a Properties-style summary. This module reads that summary with pure Rust, std-only, zero new
 //! dependencies.
 //!
-//! Supports binary STL, ASCII STL, Wavefront OBJ, glTF (JSON, `.gltf`), and glTF Binary (`.glb`). Pure
-//! over an in-memory byte slice — no filesystem I/O; the Tauri command reads the bytes.
+//! Supports binary STL, ASCII STL, Wavefront OBJ, glTF (JSON, `.gltf`), glTF Binary (`.glb`), and PLY
+//! (Stanford Polygon/Triangle Format, `.ply`, both ASCII and binary). Pure over an in-memory byte slice —
+//! no filesystem I/O; the Tauri command reads the bytes.
 //!
 //! glTF/GLB support (CPE-1335) is deliberately partial and says so honestly: full triangle/vertex counts
 //! need per-primitive accessor dereferencing (resolving each mesh primitive's `POSITION`/`indices`
@@ -15,6 +16,15 @@
 //! than fabricate a number, glTF/GLB reports the mesh count (directly available from the document) and
 //! leaves triangle/vertex counts at an honest `0`. The bounding box is filled in when accessors carry the
 //! `min`/`max` extrema glTF requires on a rendered `POSITION` accessor.
+//!
+//! PLY support (CPE-1337) is unlike the others in one respect: its header is plain text that declares the
+//! element counts directly (`element vertex N` / `element face M`), so vertex/face counts come straight
+//! from the header for *both* the ASCII and binary flavours — no buffer/accessor dereferencing needed, and
+//! (per the panic-safety discipline this module follows throughout) the declared counts are never trusted
+//! for allocation, only compared against how much data is actually present. The bounding box, however, is
+//! only filled in for ASCII PLY (the vertex rows are plain text to parse); decoding the binary vertex block
+//! to extract `x`/`y`/`z` is not implemented, so a binary PLY's bounding box is left honestly zeroed — the
+//! same "fabricate nothing" stance glTF/GLB takes for its triangle/vertex counts.
 
 use serde::{Deserialize, Serialize};
 
@@ -27,6 +37,10 @@ pub enum ModelFormat {
     /// Covers both a standalone `.gltf` JSON document and the JSON chunk of a binary `.glb` container;
     /// [`ModelInfo::ascii`] distinguishes the two.
     Gltf,
+    /// Stanford Polygon/Triangle Format (`.ply`); covers both the ASCII and binary flavours —
+    /// [`ModelInfo::ascii`] distinguishes the two. See the module doc comment for what's/isn't computed
+    /// for each.
+    Ply,
 }
 
 /// Geometry summary for a 3D-model file, good enough for a metadata-pane fallback (triangle/vertex
@@ -36,16 +50,19 @@ pub enum ModelFormat {
 pub struct ModelInfo {
     pub format: ModelFormat,
     /// STL: the facet count. OBJ: the `f` (face) line count — OBJ faces are not necessarily triangles
-    /// (they may be quads/n-gons), so this is a face count, not a guaranteed-triangle count. glTF/GLB:
-    /// always `0` — see the module doc comment for why this isn't computed.
+    /// (they may be quads/n-gons), so this is a face count, not a guaranteed-triangle count. PLY: the
+    /// `element face` count from the header — same caveat as OBJ, a PLY face is not necessarily a
+    /// triangle. glTF/GLB: always `0` — see the module doc comment for why this isn't computed.
     pub triangle_count: u32,
-    /// glTF/GLB: always `0` — see the module doc comment for why this isn't computed.
+    /// PLY: the `element vertex` count from the header (both ASCII and binary — the header declares it
+    /// directly). glTF/GLB: always `0` — see the module doc comment for why this isn't computed.
     pub vertex_count: u32,
     /// `[min_x, min_y, min_z, max_x, max_y, max_z]`. All zero when no vertices were read (an empty mesh,
-    /// or — for glTF/GLB — no `POSITION` accessor carried `min`/`max`).
+    /// a binary PLY — see the module doc comment — or, for glTF/GLB, no `POSITION` accessor carried
+    /// `min`/`max`).
     pub bounding_box: [f32; 6],
-    /// True for ASCII STL, OBJ, and a standalone `.gltf` JSON file (all plain text); false for binary STL
-    /// and `.glb` (the JSON chunk is text, but the container itself is a binary format).
+    /// True for ASCII STL, OBJ, ASCII PLY, and a standalone `.gltf` JSON file (all plain text); false for
+    /// binary STL, binary PLY, and `.glb` (the JSON chunk is text, but the container itself is binary).
     pub ascii: bool,
     /// glTF/GLB only: the document's top-level `meshes` array length — the one geometry count directly
     /// available without accessor dereferencing. Always `0` for STL/OBJ (the concept doesn't apply).
@@ -57,16 +74,18 @@ pub struct ModelInfo {
 ///
 /// Detection order: binary STL first (a precise structural check — see [`parse_binary_stl`]'s doc comment
 /// for why this must run *before* any text-based sniff), then ASCII STL, then OBJ, then binary GLB (a
-/// precise magic-number + structural check), then glTF JSON last (the most permissive text format, so it
-/// must lose to every more specific check). A file that fails every check (e.g. random binary garbage, or
-/// a truncated/corrupt STL/GLB) yields `None` rather than panicking or guessing — callers fall back to
-/// whatever generic metadata they already show.
+/// precise magic-number + structural check), then glTF JSON, then PLY last (its `ply\n`/`ply\r\n` magic is
+/// exact and doesn't collide with any of the above, so its position in the chain isn't load-bearing the
+/// way STL's is). A file that fails every check (e.g. random binary garbage, or a truncated/corrupt
+/// STL/GLB/PLY) yields `None` rather than panicking or guessing — callers fall back to whatever generic
+/// metadata they already show.
 pub fn read_model_info(bytes: &[u8]) -> Option<ModelInfo> {
     parse_binary_stl(bytes)
         .or_else(|| parse_ascii_stl(bytes))
         .or_else(|| parse_obj(bytes))
         .or_else(|| parse_glb(bytes))
         .or_else(|| parse_gltf_json(bytes))
+        .or_else(|| parse_ply(bytes))
 }
 
 /// Binary STL: an 80-byte header (arbitrary bytes — **not** a reliable text signature) followed by a
@@ -331,6 +350,137 @@ fn read_vec3(v: &serde_json::Value) -> Option<[f32; 3]> {
     let y = arr[1].as_f64()? as f32;
     let z = arr[2].as_f64()? as f32;
     Some([x, y, z])
+}
+
+/// PLY (Stanford Polygon/Triangle Format): a plain-text header — `ply`, a `format` line, `element`/
+/// `property` declarations, `end_header` — optionally followed by a data section that is *itself* text
+/// (ASCII flavour) or raw binary (`binary_little_endian`/`binary_big_endian` flavour). Unlike STL/OBJ,
+/// PLY's element counts (`element vertex N`, `element face M`) are declared directly in the header, so
+/// counts come from the header for both flavours — no buffer dereferencing needed. The header itself is
+/// always ASCII text even in the binary flavour, so it's always safe to decode as UTF-8; only the *data*
+/// section (after `end_header`) may be binary, which is why this function locates `end_header` as a raw
+/// byte search first and only interprets the header portion as text.
+///
+/// The bounding box is filled in for ASCII PLY by parsing the vertex rows' `x`/`y`/`z` columns (located by
+/// their declared property order — see [`vertex_xyz_indices`]). For binary PLY, decoding the binary vertex
+/// block is not implemented (see the module doc comment for why); the bounding box is left honestly
+/// zeroed rather than fabricated, mirroring how glTF/GLB leaves triangle/vertex counts at `0` when it
+/// can't compute them.
+///
+/// Bounds/panic-safety: every count comes from `.parse().ok()?`, never trusted for allocation; a missing
+/// `end_header` marker, a missing/unrecognised `format` line, or non-UTF8 header bytes all yield `None`
+/// rather than panicking.
+fn parse_ply(bytes: &[u8]) -> Option<ModelInfo> {
+    if !(bytes.starts_with(b"ply\n") || bytes.starts_with(b"ply\r\n")) {
+        return None;
+    }
+
+    const MARKER: &[u8] = b"end_header";
+    let marker_pos = bytes.windows(MARKER.len()).position(|w| w == MARKER)?;
+    let mut data_start = marker_pos + MARKER.len();
+    if bytes.get(data_start) == Some(&b'\r') {
+        data_start += 1;
+    }
+    if bytes.get(data_start) == Some(&b'\n') {
+        data_start += 1;
+    }
+    // The header (up to and including `end_header` + its line ending) is always ASCII text per the PLY
+    // spec, regardless of whether the data section that follows is text or binary.
+    let header_text = std::str::from_utf8(&bytes[..data_start]).ok()?;
+
+    let mut ascii = false;
+    let mut format_seen = false;
+    let mut vertex_count: u32 = 0;
+    let mut face_count: u32 = 0;
+    let mut vertex_props: Vec<&str> = Vec::new();
+    let mut current_element: Option<&str> = None;
+
+    for raw_line in header_text.lines() {
+        let line = raw_line.trim();
+        if let Some(rest) = line.strip_prefix("format ") {
+            let kind = rest.split_whitespace().next()?;
+            ascii = match kind {
+                "ascii" => true,
+                "binary_little_endian" | "binary_big_endian" => false,
+                _ => return None,
+            };
+            format_seen = true;
+        } else if let Some(rest) = line.strip_prefix("element ") {
+            let mut it = rest.split_whitespace();
+            let name = it.next()?;
+            let count: u32 = it.next()?.parse().ok()?;
+            match name {
+                "vertex" => {
+                    vertex_count = count;
+                    current_element = Some("vertex");
+                }
+                "face" => {
+                    face_count = count;
+                    current_element = Some("face");
+                }
+                _ => current_element = Some(name),
+            }
+        } else if let Some(rest) = line.strip_prefix("property ") {
+            if current_element == Some("vertex") {
+                if let Some(name) = rest.split_whitespace().last() {
+                    vertex_props.push(name);
+                }
+            }
+        }
+        // `ply`, `comment ...`, `obj_info ...`, `end_header`, and blank lines all fall through unhandled.
+    }
+    if !format_seen {
+        // No `format` line at all — not a usable PLY header, even though the `ply\n` magic matched.
+        return None;
+    }
+
+    let mut bbox = empty_bbox();
+    if ascii {
+        if let Some((xi, yi, zi)) = vertex_xyz_indices(&vertex_props) {
+            if let Ok(body_text) = std::str::from_utf8(&bytes[data_start..]) {
+                let mut seen = 0u32;
+                for raw_line in body_text.lines() {
+                    if seen >= vertex_count {
+                        break;
+                    }
+                    let line = raw_line.trim();
+                    if line.is_empty() {
+                        continue;
+                    }
+                    let tokens: Vec<&str> = line.split_whitespace().collect();
+                    let max_idx = xi.max(yi).max(zi);
+                    if tokens.len() > max_idx {
+                        if let (Ok(x), Ok(y), Ok(z)) =
+                            (tokens[xi].parse::<f32>(), tokens[yi].parse::<f32>(), tokens[zi].parse::<f32>())
+                        {
+                            grow_bbox(&mut bbox, x, y, z);
+                        }
+                    }
+                    seen += 1;
+                }
+            }
+        }
+    }
+
+    Some(ModelInfo {
+        format: ModelFormat::Ply,
+        triangle_count: face_count,
+        vertex_count,
+        bounding_box: normalize_bbox(bbox),
+        ascii,
+        mesh_count: 0,
+    })
+}
+
+/// Locate the `x`/`y`/`z` columns within the `vertex` element's declared property order (e.g. `["x", "y",
+/// "z", "nx", "ny", "nz"]` → `(0, 1, 2)`). `None` if any of the three is missing — an ASCII PLY without
+/// `x`/`y`/`z` vertex properties (unusual but not disallowed by the format) simply gets no bounding box
+/// rather than a wrong one.
+fn vertex_xyz_indices(props: &[&str]) -> Option<(usize, usize, usize)> {
+    let x = props.iter().position(|&p| p == "x")?;
+    let y = props.iter().position(|&p| p == "y")?;
+    let z = props.iter().position(|&p| p == "z")?;
+    Some((x, y, z))
 }
 
 /// Parse the 3 whitespace-separated floats that follow `keyword` at the start of `line` (e.g. `"vertex 1.0
@@ -666,5 +816,142 @@ mod tests {
     #[test]
     fn glb_too_short_to_contain_even_a_header_yields_none() {
         assert_eq!(read_model_info(b"glT"), None);
+    }
+
+    // ---- PLY (CPE-1337) ----
+
+    /// A minimal-but-valid ASCII PLY cube: 8 vertices, 6 (quad) faces.
+    const ASCII_PLY_CUBE: &str = "ply\n\
+        format ascii 1.0\n\
+        comment a simple cube\n\
+        element vertex 8\n\
+        property float x\n\
+        property float y\n\
+        property float z\n\
+        element face 6\n\
+        property list uchar int vertex_index\n\
+        end_header\n\
+        0 0 0\n\
+        1 0 0\n\
+        1 1 0\n\
+        0 1 0\n\
+        0 0 1\n\
+        1 0 1\n\
+        1 1 1\n\
+        0 1 1\n\
+        4 0 1 2 3\n\
+        4 7 6 5 4\n\
+        4 0 4 5 1\n\
+        4 1 5 6 2\n\
+        4 2 6 7 3\n\
+        4 4 0 3 7\n";
+
+    #[test]
+    fn ascii_ply_cube_reports_counts_and_bbox_from_header_and_vertex_rows() {
+        let info = read_model_info(ASCII_PLY_CUBE.as_bytes()).expect("valid ASCII PLY");
+        assert_eq!(info.format, ModelFormat::Ply);
+        assert!(info.ascii);
+        assert_eq!(info.vertex_count, 8);
+        assert_eq!(info.triangle_count, 6, "PLY face count, not necessarily triangles — same as OBJ");
+        assert_eq!(info.bounding_box, [0.0, 0.0, 0.0, 1.0, 1.0, 1.0]);
+        assert_eq!(info.mesh_count, 0, "mesh_count is a glTF-only concept");
+    }
+
+    #[test]
+    fn ascii_ply_tolerates_crlf_line_endings() {
+        let crlf = ASCII_PLY_CUBE.replace('\n', "\r\n");
+        assert!(crlf.starts_with("ply\r\n"));
+        let info = read_model_info(crlf.as_bytes()).expect("CRLF PLY must still parse");
+        assert_eq!(info.vertex_count, 8);
+        assert_eq!(info.triangle_count, 6);
+    }
+
+    #[test]
+    fn binary_ply_header_reports_counts_from_the_header_with_zeroed_bbox() {
+        let mut bytes = b"ply\n\
+            format binary_little_endian 1.0\n\
+            comment a simple cube\n\
+            element vertex 8\n\
+            property float x\n\
+            property float y\n\
+            property float z\n\
+            element face 6\n\
+            property list uchar int vertex_index\n\
+            end_header\n"
+            .to_vec();
+        // The binary data section isn't decoded (see the module doc comment) — its exact bytes are
+        // irrelevant to this test, only that counts/ascii come from the header alone.
+        bytes.extend_from_slice(&[0u8; 32]);
+        let info = read_model_info(&bytes).expect("valid binary PLY header");
+        assert_eq!(info.format, ModelFormat::Ply);
+        assert!(!info.ascii);
+        assert_eq!(info.vertex_count, 8);
+        assert_eq!(info.triangle_count, 6);
+        assert_eq!(
+            info.bounding_box,
+            [0.0; 6],
+            "binary PLY vertex data isn't decoded — bbox is honestly zeroed, not fabricated"
+        );
+    }
+
+    #[test]
+    fn binary_big_endian_ply_header_is_also_recognised_as_non_ascii() {
+        let bytes = b"ply\nformat binary_big_endian 1.0\nelement vertex 1\nproperty float x\nproperty float y\nproperty float z\nend_header\n\0\0\0\0\0\0\0\0\0\0\0\0";
+        let info = read_model_info(bytes).expect("valid binary_big_endian PLY header");
+        assert_eq!(info.format, ModelFormat::Ply);
+        assert!(!info.ascii);
+        assert_eq!(info.vertex_count, 1);
+        assert_eq!(info.triangle_count, 0, "no element face line at all -> 0, not a parse failure");
+    }
+
+    #[test]
+    fn ply_header_without_end_header_marker_yields_none() {
+        let text = "ply\nformat ascii 1.0\nelement vertex 8\nproperty float x\nproperty float y\nproperty float z\n";
+        assert_eq!(read_model_info(text.as_bytes()), None, "truncated header with no end_header must not parse");
+    }
+
+    #[test]
+    fn ply_header_without_a_format_line_yields_none() {
+        let text = "ply\nelement vertex 1\nproperty float x\nproperty float y\nproperty float z\nend_header\n0 0 0\n";
+        assert_eq!(read_model_info(text.as_bytes()), None, "no format line at all is a malformed header");
+    }
+
+    #[test]
+    fn ply_header_with_unrecognised_format_kind_yields_none() {
+        let text = "ply\nformat weird_flavor 1.0\nelement vertex 1\nend_header\n0 0 0\n";
+        assert_eq!(read_model_info(text.as_bytes()), None);
+    }
+
+    #[test]
+    fn bytes_merely_starting_with_ply_but_no_newline_are_not_mistaken_for_ply() {
+        // "plyometric" etc. — must not false-positive on the bare 3-byte prefix without its magic newline.
+        assert_eq!(read_model_info(b"plyometrics are a form of exercise.\n"), None);
+    }
+
+    #[test]
+    fn ply_without_xyz_vertex_properties_still_parses_with_zeroed_bbox() {
+        // Header declares only a "value" property on the vertex element — x/y/z can't be located, so the
+        // bbox stays zeroed, but the counts are still reported (not a parse failure).
+        let text = "ply\nformat ascii 1.0\nelement vertex 2\nproperty float value\nend_header\n1.0\n2.0\n";
+        let info = read_model_info(text.as_bytes()).expect("still a valid PLY, just no x/y/z");
+        assert_eq!(info.vertex_count, 2);
+        assert_eq!(info.bounding_box, [0.0; 6]);
+    }
+
+    #[test]
+    fn ascii_ply_tolerates_a_malformed_vertex_row_by_skipping_it() {
+        let text = "ply\nformat ascii 1.0\nelement vertex 2\nproperty float x\nproperty float y\nproperty float z\nend_header\n0 0 0\nnot a number here\n";
+        let info = read_model_info(text.as_bytes()).expect("still parses despite one bad row");
+        assert_eq!(info.vertex_count, 2);
+        assert_eq!(
+            info.bounding_box,
+            [0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+            "only the one well-formed vertex row (0 0 0) contributes to the bbox"
+        );
+    }
+
+    #[test]
+    fn empty_ply_after_ply_prefix_yields_none() {
+        assert_eq!(read_model_info(b"ply\n"), None, "just the magic bytes, no header content at all");
     }
 }
