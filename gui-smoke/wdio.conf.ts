@@ -856,6 +856,61 @@ function seedDeclutterFixture(tmpDir: string): void {
   fs.writeFileSync(path.join(dir, DECLUTTER_BACKUP_NAME), "old content\n", "utf-8");
 }
 
+// --- CPE-1331: Metadata Studio fixture (epic CPE-725) -------------------------------------------
+// A DEDICATED subfolder + a tiny but genuinely-valid ID3v2.3-tagged "mp3" so metadata-studio.smoke.ts
+// can select it, open the real Metadata Studio dialog (MetadataStudioDialog.svelte, CPE-1041) via the
+// Command Palette, and assert its EDITABLE fields actually render against a real IPC round trip
+// (`metadata_read` / `metadata_writable`, crates/server/src/media_meta.rs).
+//
+// The file is NOT a playable audio stream — like ORGANIZE_MP3_NAME above, the app never decodes
+// audio here — but unlike that throwaway fixture, this one carries a hand-built, byte-accurate ID3v2
+// tag (see `read_id3v2` in crates/server/src/media_meta_read.rs: it parses the tag purely off the
+// leading `ID3` header + syncsafe size + frames, entirely independent of whether the rest of the file
+// is a real MPEG stream). `is_writable("mp3")` is unconditional on extension
+// (crates/server/src/media_meta.rs), so this fixture round-trips through the dialog's real "writable"
+// gate without needing any audio payload at all. Isolated in its own subfolder, same reasoning as the
+// CPE-1241/1226/1249 fixtures above.
+export const METADATA_STUDIO_DIR_NAME = "metadata-studio-gui-verify";
+export const METADATA_STUDIO_MP3_NAME = "CPE-1331-song.mp3";
+export const METADATA_STUDIO_TITLE = "CPE-1331 Song Title";
+export const METADATA_STUDIO_ARTIST = "CPE-1331 Artist";
+
+/** Encode a 28-bit ID3v2 "syncsafe" integer (7 usable bits per byte, matching `read_id3v2`'s own
+ *  `syncsafe28` decoder) into the 4-byte big-endian form the tag header expects. */
+function id3Syncsafe28(n: number): Buffer {
+  return Buffer.from([(n >> 21) & 0x7f, (n >> 14) & 0x7f, (n >> 7) & 0x7f, n & 0x7f]);
+}
+
+/** One ID3v2.3 text frame: 4-byte id + 4-byte big-endian (non-syncsafe — v2.3 frame sizes are plain
+ *  big-endian per `read_id3v2`'s `major == 3` branch) size + 2 flag bytes (unset) + a 1-byte Latin-1
+ *  encoding marker (`0x00`) + the text itself. */
+function id3TextFrame(id: string, text: string): Buffer {
+  const body = Buffer.concat([Buffer.from([0x00]), Buffer.from(text, "latin1")]);
+  const size = Buffer.alloc(4);
+  size.writeUInt32BE(body.length, 0);
+  return Buffer.concat([Buffer.from(id, "latin1"), size, Buffer.from([0x00, 0x00]), body]);
+}
+
+/** A minimal, genuinely-valid ID3v2.3 tag (header + text frames, no audio payload needed — see the
+ *  fixture header comment above) that `read_id3v2` parses into real editable `MetaField`s. */
+function minimalId3v2Mp3(frames: Array<[string, string]>): Buffer {
+  const frameBytes = Buffer.concat(frames.map(([id, text]) => id3TextFrame(id, text)));
+  const header = Buffer.concat([Buffer.from("ID3", "latin1"), Buffer.from([3, 0, 0]), id3Syncsafe28(frameBytes.length)]);
+  return Buffer.concat([header, frameBytes]);
+}
+
+function seedMetadataStudioFixture(tmpDir: string): void {
+  const dir = path.join(tmpDir, METADATA_STUDIO_DIR_NAME);
+  fs.mkdirSync(dir, { recursive: true });
+  fs.writeFileSync(
+    path.join(dir, METADATA_STUDIO_MP3_NAME),
+    minimalId3v2Mp3([
+      ["TIT2", METADATA_STUDIO_TITLE],
+      ["TPE1", METADATA_STUDIO_ARTIST],
+    ]),
+  );
+}
+
 let tauriDriver: ChildProcess | undefined;
 let shuttingDown = false;
 
@@ -1013,6 +1068,10 @@ export const config: WebdriverIO.Config = {
     // CPE-1329: seed one file per ClutterReason for declutter.smoke.ts's Declutter-dialog pass
     // (see block above) — same tmpDir, same single app launch.
     seedDeclutterFixture(tmpDir);
+
+    // CPE-1331: seed the ID3-tagged mp3 for the Metadata Studio dialog's editable-fields render pin
+    // (see block above) — same tmpDir, same single app launch.
+    seedMetadataStudioFixture(tmpDir);
 
     const caps = capabilities as unknown as Array<{ "tauri:options": { args: string[] } }>;
     caps[0]["tauri:options"].args = ["--test-mode", "--x=-4000", `--open=${tmpDir}`];

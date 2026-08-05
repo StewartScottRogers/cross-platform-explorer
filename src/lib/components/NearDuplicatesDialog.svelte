@@ -197,9 +197,9 @@
             </div>
             <div class="items">
               {#each g.paths as p (p)}
-                <div class="row" class:picked={selected.has(p)}>
+                <div class="row" data-testid="nd-row" class:picked={selected.has(p)}>
                   <label class="pick" title={$t("nd.markForBin")}>
-                    <input type="checkbox" checked={selected.has(p)} on:change={() => toggle(p)} />
+                    <input type="checkbox" data-testid="nd-checkbox" checked={selected.has(p)} on:change={() => toggle(p)} />
                   </label>
                   <button class="item" data-testid="nd-item" title={p} on:click={() => reveal(p)}>
                     <Icon name={icon} size={14} />

@@ -198,10 +198,10 @@
 <!-- svelte-ignore a11y-click-events-have-key-events a11y-no-static-element-interactions -->
 <div class="backdrop" on:click={close}>
   <!-- svelte-ignore a11y-no-noninteractive-element-interactions -->
-  <div class="dialog" role="dialog" aria-modal="true" on:click|stopPropagation>
+  <div class="dialog" role="dialog" aria-modal="true" aria-label={$t("studio.title")} on:click|stopPropagation>
     <header>
       <h2>{$t("studio.title")}</h2>
-      <button class="x" title={$t("common.close")} on:click={close}><Icon name="close" size={14} /></button>
+      <button class="x" data-testid="ms-close-btn" title={$t("common.close")} on:click={close}><Icon name="close" size={14} /></button>
     </header>
 
     {#if !primary}
@@ -236,15 +236,16 @@
           </div>
         {/if}
 
-        <div class="fields">
+        <div class="fields" data-testid="ms-fields">
           {#each shown as f (ekey(f))}
-            <div class="row" class:changed={isFieldDirty(f, edited)}>
+            <div class="row" data-testid="ms-field-row" class:changed={isFieldDirty(f, edited)}>
               <label class="k" for={`mf-${ekey(f)}`}>{f.key}</label>
               {#if editable(f)}
                 <div class="vwrap">
                   <input
                     id={`mf-${ekey(f)}`}
                     class="v"
+                    data-testid="ms-field-input"
                     value={currentValue(f, edited)}
                     on:input={(e) => onEdit(f, e.currentTarget.value)}
                   />
