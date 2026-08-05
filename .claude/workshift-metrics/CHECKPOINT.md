@@ -37,3 +37,41 @@ locally-verifiable headless vein remains. Next steps:
 ## To resume
 Everything green + shipped. Next session: name an attended epic to pair on, provide a resource, or green-light
 the offsite QA-infra batch. Nothing is blocked or broken.
+
+---
+## RUN 2 UPDATE — 2026-08-04 ~04:35 local — STOPPED ON WEEKLY USAGE LIMIT (resets Aug 5 06:00 America/Phoenix)
+User re-issued "run 6 workshifts". Since the headless well was dry, run 2 pivoted to GUI features whose
+backends were already built — the **File-Health panel** surfacing the file-inspection-safety scans (epic CPE-1002).
+- **Shipped (merged → main, code-gauntlet + Frontend CI green):**
+  - CPE-1315 — File-Health panel shell + dangling-links streaming tab (#611).
+  - CPE-1316 — type-mismatch + orphan-sidecars streaming tabs, per-scan-isolated (#612).
+- **In progress / NOT done:** CPE-1317 (slice 3: empty-dirs tab + already-open tab-switch fix) — worker hit the
+  weekly limit mid-build; NO PR, worktree discarded. Re-dispatch from scratch when the limit resets.
+- **Remaining File-Health slices:** slice 3 (empty-dirs + tab-switch fix, ticket CPE-1317 filed), slice 4
+  (archive-safety, right-click single-archive — not yet ticketed).
+- **PENDING (batched, needs a real build — NOT yet done):** one build → gui-smoke → Visual-Critic pass across the
+  File-Health panel to (a) prove the real streamed-Channel path end-to-end (only jsdom-mocked so far) and
+  (b) visually judge the panel + produce an installed build for the user. The streaming wiring is proven-by-
+  code-identity to the shipping SimilarImagesDialog, so risk is low, but this verification is still owed.
+- Incident: a Foreman Janitor `rm -rf worktrees/agent-*` glob clobbered a live worker mid-build (recovered, main
+  intact); lesson saved to memory [[janitor-never-rmrf-active-worktrees]].
+- main GREEN, backlog empty, 12 tickets shipped total this session (10 run-1 + 2 run-2).
+
+---
+## RUN 2 FINAL — 2026-08-05 ~08:35 local — FILE-HEALTH EPIC COMPLETE (clean checkpoint, budget-paced)
+After the weekly-limit reset, "continue" → built out the File-Health GUI epic (backends existed, no UI). DONE + verified.
+- **Shipped (merged → main, all gauntlet + Frontend-CI green):**
+  - CPE-1315 panel shell + dangling-links streaming tab · CPE-1316 type-mismatch + orphan-sidecars tabs (per-scan-isolated)
+  - CPE-1317 empty-dirs tab + already-open tab-switch fix · CPE-1318 archive-safety right-click dialog (ZIP-only gated)
+  - CPE-1319 visual fixes (mismatch subtitle + orphan pill) · CPE-1321 mismatch-subtitle scrollbar-clip fix
+  - CPE-1320 corrupt-zip `unreadable` signal (backend+bindings+dialog) · CPE-1322 mismatch "rename to correct ext" fix-it (move_exact, overwrite-safe)
+  - Test infra: real gui-smoke spec covering all 4 File-Health tabs (committed to main).
+- **Verified for real:** built the app + ran gui-smoke → all 4 scan tabs render real rows over LIVE Tauri IPC (first live exercise of the 3 `_stream` commands). Visual Critic judged screenshots, caught 2 real layout defects (mismatch overflow, orphan missing badge) → both fixed → re-screenshotted PASS. The CPE-1148 Visual-Critic loop worked end-to-end with no user round-trip.
+- **Session total: 18 tickets** (10 run-1 headless completing media-metadata write-back across 9 formats incl. video; 8 run-2 GUI = File-Health). main GREEN throughout, 0 escaped defects. Backlog + Doing EMPTY.
+- **Incidents (both recovered):** a Foreman Janitor `rm -rf worktrees/*` glob clobbered a live worker (main intact; lesson memorized [[janitor-never-rmrf-active-worktrees]]); weekly usage limit hit + reset (Aug 5 06:00), resumed cleanly.
+
+## To resume (next session — budget resets to full)
+File-Health is complete. Candidate next GUI work (backends mostly exist): scan-EXCLUDE UI (CPE-1302 exclude-glob backend
+exists — a UI to configure excludes, integrable with the File-Health panel); the File-Health AGGREGATE panel (safetyReport.ts
+`archiveFindings()`) should also surface `unreadable` archives (noted in CPE-1320 UAT); near-duplicate review UI; metadata-edit
+UI polish. Or resume the offsite QA-infra (Docker net-E2E needs Docker up; bless gui-smoke baselines). Nothing blocked or broken.

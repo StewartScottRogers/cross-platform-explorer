@@ -851,3 +851,33 @@ them; history.md stopped at 07-31). Authoritative record is the checkpoint commi
 - HONEST STATE: clean headless well DRY after this run (3 independent sweeps agree). Remaining = attended-GUI or
   user-gated (model key / Mac / signing cert / SFTP / Docker). Next session should take an attended epic WITH the
   user or get a resource — do NOT scrape filler.
+
+## 2026-08-04 (run 2, cut short by weekly usage limit) — File-Health panel GUI (2 slices shipped)
+- Pivoted to GUI features (backends already built) via the jsdom-logic-test + gui-smoke-spec + (owed) Visual-Critic
+  loop, since the headless well was dry. Shipped CPE-1315 (panel shell + dangling stream tab) + CPE-1316
+  (mismatch + orphan stream tabs, per-scan-isolated). Slice 3 (CPE-1317) died mid-build on the weekly limit (no PR).
+- Streaming-consumer UI pattern (rawInvoke+createChannel+per-scan generation token+cancel-prior+late-batch-drop+
+  finally-clears-loading) is now proven for the File-Health panel — reuse it for remaining scan tabs.
+- OWED: a real build → gui-smoke → Visual-Critic pass across the panel (streamed-Channel end-to-end only jsdom-
+  mocked so far; low risk, proven-by-identity to SimilarImagesDialog).
+- LESSON: Janitor must never rm -rf worktree globs while a worker is active (clobbered a live worker; recovered).
+
+## 2026-08-05 (run 2 cont.) — File-Health GUI epic COMPLETE (8 slices, Visual-Critic-verified)
+- After the headless well ran dry (run 1) + a weekly-limit reset, user "continue" → surfaced the built-but-unshipped
+  file-inspection-safety scans in the GUI: CPE-1315..1322 (4-scan File-Health panel + archive-safety dialog + visual fixes +
+  corrupt-zip signal + mismatch rename-to-correct-ext). All merged, Frontend/backend CI green, 0 escaped defects.
+- **GUI-via-Visual-Critic loop proven:** build app → gui-smoke screenshots (streaming Channels proven over live IPC) →
+  taste-aware Visual Critic caught 2 real layout defects markup-review missed → fixed → re-screenshot PASS. No user round-trip.
+  This is the template for doing GUI epics autonomously.
+- Tuned defaults for GUI slices:
+  - **streaming-consumer UI**: rawInvoke + createChannel + PER-SCAN generation token + cancel-prior + late-batch-drop +
+    finally-clears-loading (empty-result edge). Each scan needs its OWN gen counter/cancel (cross-tab isolation test).
+  - **non-streaming tab**: plain `invoke` from src/lib/invoke.ts (busy-cursor), stale-response guard via a gen counter.
+  - GUI slices SERIALIZE on shared wiring files (FileHealthDialog.svelte, App.svelte menu/palette arrays, i18n.ts) — build
+    one, merge, next. i18n = ALL 12 locales or i18n.test.ts fails. sectionDocs.ts + a src/docs page for new sections.
+  - Merge frontend-only PRs on the Frontend CI job (backend legs irrelevant); backend/bindings PRs need the 3-OS + drift guard.
+  - GUI-verifier sub-agents MUST run the tauri build + gui-smoke SYNCHRONOUSLY (foreground) — one stalled by backgrounding
+    the build + yielding (no bg notifications for sub-agents); resume via SendMessage telling it to run synchronously.
+  - `overflow-x:hidden` on a flex-wrap results list kills a spurious horizontal scrollbar that clips tall rows.
+- Throughput run 2: 8 GUI tickets, ~50 sub-agent runs (heavier: build+gui-smoke+Visual-Critic per epic). Budget ~114/200 at
+  clean checkpoint. LESSON: never rm -rf worktree globs while a worker is live (clobbered one; recovered).
