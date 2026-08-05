@@ -55,6 +55,13 @@ pub enum FileType {
     Xz,
     Zstd,
     Bzip2,
+    /// STL 3D-model mesh (`.stl`), ASCII flavour only — see [`looks_like_ascii_stl`] for why the binary
+    /// flavour isn't (safely) magic-byte-detectable here.
+    Stl,
+    /// Wavefront OBJ 3D-model mesh (`.obj`) — see [`looks_like_obj`].
+    Obj,
+    /// Binary glTF (`.glb`), tagged `glTF` at offset 0 per the glTF 2.0 binary container spec.
+    Glb,
 }
 
 impl FileType {
@@ -93,6 +100,9 @@ impl FileType {
             FileType::Xz => "xz archive",
             FileType::Zstd => "Zstd archive",
             FileType::Bzip2 => "Bzip2 archive",
+            FileType::Stl => "STL 3D model",
+            FileType::Obj => "Wavefront OBJ 3D model",
+            FileType::Glb => "glTF binary 3D model",
         }
     }
 
@@ -141,6 +151,9 @@ impl FileType {
             FileType::Xz => &["xz"],
             FileType::Zstd => &["zst"],
             FileType::Bzip2 => &["bz2"],
+            FileType::Stl => &["stl"],
+            FileType::Obj => &["obj"],
+            FileType::Glb => &["glb"],
         }
     }
 }
@@ -165,6 +178,51 @@ fn looks_like_svg(bytes: &[u8]) -> bool {
         }
     }
     s.starts_with(b"<?xml") || s.starts_with(b"<svg")
+}
+
+/// True if `bytes`, decoded as UTF-8, starts (after trimming leading whitespace) with the word `solid`
+/// followed by a word boundary (whitespace or end of input) — the opening keyword of an ASCII STL.
+///
+/// This module (unlike [`crate::model_3d::read_model_info`]) is a *header* sniffer: callers here typically
+/// hand it only a capped prefix of a file, not the whole thing, so there is no reliable way to also apply
+/// the full-length structural check that safely tells binary STL apart from ASCII STL (see the doc comment
+/// on `model_3d::parse_binary_stl`). A binary STL whose 80-byte header happens to start with "solid" would
+/// therefore be misdetected as ASCII by this function alone — an acceptable trade-off for a best-effort
+/// extension-mismatch hint (worst case: a rare binary STL isn't flagged when misnamed), which is why
+/// [`model_3d::read_model_info`] does its own independent, authoritative detection over the full file
+/// rather than reusing this sniff.
+fn looks_like_ascii_stl(bytes: &[u8]) -> bool {
+    let Ok(text) = std::str::from_utf8(bytes) else { return false };
+    let trimmed = text.trim_start();
+    let lower_prefix: String = trimmed.chars().take(5).collect::<String>().to_ascii_lowercase();
+    if lower_prefix != "solid" {
+        return false;
+    }
+    match trimmed.as_bytes().get(5) {
+        None => true, // "solid" is the entire (truncated) input — still a word boundary
+        Some(b) => b.is_ascii_whitespace(),
+    }
+}
+
+/// True if the first non-empty, non-comment line of `bytes` (decoded as UTF-8) opens with a token unique
+/// to Wavefront OBJ (`v`/`vt`/`vn`/`vp`/`f`/`l`/`o`/`g`/`s`/`usemtl`/`mtllib`, each followed by whitespace).
+/// OBJ has no magic bytes at all, so this is inherently a soft heuristic; checking only the first
+/// substantive line (rather than requiring every line in a possibly-truncated header to match) keeps it
+/// simple while still avoiding a false positive on ordinary prose, which essentially never opens with one
+/// of these short, specific tokens.
+fn looks_like_obj(bytes: &[u8]) -> bool {
+    let Ok(text) = std::str::from_utf8(bytes) else { return false };
+    const TOKENS: [&str; 11] =
+        ["v", "vt", "vn", "vp", "f", "l", "o", "g", "s", "usemtl", "mtllib"];
+    for raw_line in text.lines() {
+        let line = raw_line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let head = line.split_whitespace().next().unwrap_or("");
+        return TOKENS.contains(&head) && line.len() > head.len();
+    }
+    false
 }
 
 /// Sniff `bytes` for a recognised magic signature. Returns `None` for unknown or too-short input; never
@@ -216,6 +274,9 @@ pub fn detect_type(bytes: &[u8]) -> Option<FileType> {
     }
     if matches_at(bytes, 0, &[0x00, 0x61, 0x73, 0x6D]) {
         return Some(FileType::Wasm);
+    }
+    if matches_at(bytes, 0, b"glTF") {
+        return Some(FileType::Glb);
     }
     if matches_at(bytes, 0, b"fLaC") {
         return Some(FileType::Flac);
@@ -273,6 +334,12 @@ pub fn detect_type(bytes: &[u8]) -> Option<FileType> {
     }
     if looks_like_svg(bytes) {
         return Some(FileType::Svg);
+    }
+    if looks_like_ascii_stl(bytes) {
+        return Some(FileType::Stl);
+    }
+    if looks_like_obj(bytes) {
+        return Some(FileType::Obj);
     }
     // ISO base media container family (MP4/M4A/M4V/…): a 4-byte box size followed by "ftyp" at offset 4.
     if matches_at(bytes, 4, b"ftyp") {
@@ -547,6 +614,40 @@ mod tests {
         assert_eq!(detect_type(&bytes), Some(FileType::Svg));
     }
 
+    #[test]
+    fn detects_glb_by_gltf_magic() {
+        let mut bytes = b"glTF".to_vec();
+        bytes.extend_from_slice(&[0x02, 0x00, 0x00, 0x00]); // version
+        bytes.extend_from_slice(&[0x00, 0x01, 0x00, 0x00]); // total length
+        assert_eq!(detect_type(&bytes), Some(FileType::Glb));
+    }
+
+    #[test]
+    fn detects_ascii_stl_via_solid_keyword() {
+        let bytes = b"solid mymesh\nfacet normal 0 0 1\nouter loop\nvertex 0 0 0\nendloop\nendfacet\nendsolid\n";
+        assert_eq!(detect_type(bytes), Some(FileType::Stl));
+        // Exactly the bare keyword (no trailing content) is still a word boundary.
+        assert_eq!(detect_type(b"solid"), Some(FileType::Stl));
+    }
+
+    #[test]
+    fn does_not_detect_stl_for_a_word_that_merely_starts_with_solid() {
+        // "solidarity" is not a word boundary after "solid" — must not misfire.
+        assert_eq!(detect_type(b"solidarity forever, my friend"), None);
+    }
+
+    #[test]
+    fn detects_obj_via_leading_vertex_or_face_line() {
+        let bytes = b"# a cube\nv 0.0 0.0 0.0\nv 1.0 0.0 0.0\nf 1 2 3\n";
+        assert_eq!(detect_type(bytes), Some(FileType::Obj));
+        assert_eq!(detect_type(b"f 1 2 3\nv 0 0 0\n"), Some(FileType::Obj));
+    }
+
+    #[test]
+    fn does_not_detect_obj_for_ordinary_prose() {
+        assert_eq!(detect_type(b"variables and functions are common programming terms.\n"), None);
+    }
+
     // ---- unknown / short / empty input never panics ----
 
     #[test]
@@ -715,5 +816,11 @@ mod tests {
         assert_eq!(FileType::Zstd.extensions(), &["zst"]);
         assert_eq!(FileType::Bzip2.label(), "Bzip2 archive");
         assert_eq!(FileType::Bzip2.extensions(), &["bz2"]);
+        assert_eq!(FileType::Stl.label(), "STL 3D model");
+        assert_eq!(FileType::Stl.extensions(), &["stl"]);
+        assert_eq!(FileType::Obj.label(), "Wavefront OBJ 3D model");
+        assert_eq!(FileType::Obj.extensions(), &["obj"]);
+        assert_eq!(FileType::Glb.label(), "glTF binary 3D model");
+        assert_eq!(FileType::Glb.extensions(), &["glb"]);
     }
 }

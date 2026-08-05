@@ -339,6 +339,20 @@ async dataBrowserQuery(path: string, sql: string, offset: number, limit: number)
 }
 },
 /**
+ * 3D-model geometry/stats reader (CPE-1333, epic CPE-118): reads a binary/ASCII STL or Wavefront OBJ's
+ * triangle/vertex counts + bounding box for the metadata-pane fallback the (blocked) interactive-viewer
+ * epic's acceptance criteria call for. Thin async dispatcher into `cpe_server::model_3d`; capped by the
+ * same preview size guard the other whole-file info readers use.
+ */
+async readModelInfo(path: string) : Promise<Result<ModelInfo | null, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("read_model_info", { path }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
  * Decode an image the webview can't render natively (TIFF, PSD) to a PNG
  * `data:` URL the <img> tag can show (CPE-099/101). PSD uses the psd crate's
  * flattened composite; TIFF uses the image crate. Capped by the source reader,
@@ -3862,6 +3876,28 @@ detected_ext: string }
  * considered, and whether [`MAX_FILES`] cut the walk short.
  */
 export type MismatchReport = { hits: MismatchHit[]; scanned: number; truncated: boolean }
+/**
+ * Which of the supported 3D formats [`read_model_info`] recognised.
+ */
+export type ModelFormat = "Stl" | "Obj"
+/**
+ * Geometry summary for a 3D-model file, good enough for a metadata-pane fallback (triangle/vertex
+ * counts + bounding box) without ever needing to actually render the mesh.
+ */
+export type ModelInfo = { format: ModelFormat; 
+/**
+ * STL: the facet count. OBJ: the `f` (face) line count — OBJ faces are not necessarily triangles
+ * (they may be quads/n-gons), so this is a face count, not a guaranteed-triangle count.
+ */
+triangle_count: number; vertex_count: number; 
+/**
+ * `[min_x, min_y, min_z, max_x, max_y, max_z]`. All zero when no vertices were read (an empty mesh).
+ */
+bounding_box: [number, number, number, number, number, number]; 
+/**
+ * True for ASCII STL and OBJ (both plain text); false for binary STL.
+ */
+ascii: boolean }
 /**
  * A proposed move: put file `name` into subfolder `target_subdir` (relative to its current folder).
  */
