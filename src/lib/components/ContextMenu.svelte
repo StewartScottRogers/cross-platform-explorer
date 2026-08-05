@@ -31,6 +31,10 @@
   export let comparable = false;
   /** True when exactly one archive file is selected — enables Extract (CPE-252). */
   export let extractable = false;
+  /** True when exactly one ZIP-family archive file is selected — enables "Check archive safety…"
+   *  (CPE-1318, epic CPE-1002). Narrower than {@link extractable}: the backend scan only scores true ZIP
+   *  containers (see `ARCHIVE_SAFETY_EXTS` in `archiveExts.ts`), not tar/gz/7z/iso. */
+  export let archiveSafetyEligible = false;
   /** True when Open-in-Terminal applies (a real folder, not Home/archive) (CPE-253). */
   export let canTerminal = false;
   /** Extension (no dot) to offer "Select all .ext"; empty hides the row (CPE-258). */
@@ -258,6 +262,14 @@
       </button>
       <button class="row" role="menuitem" on:click={() => run("extract-to")}>
         <Icon name="archive" size={15} /> {$t('ctx.extractTo')}
+      </button>
+    {/if}
+    {#if archiveSafetyEligible}
+      <!-- Check archive safety… (CPE-1318, epic CPE-1002): surfaces the zip-bomb / compression-ratio
+           report for a ZIP-family archive. Leading icon + theme-var text (MENUS.md); the DANGER
+           treatment lives in the dialog, not this menu row. -->
+      <button class="row" role="menuitem" on:click={() => run("archive-safety")}>
+        <Icon name="archive" size={15} /> {$t('ctx.archiveSafety')}
       </button>
     {/if}
     {#if compressible}

@@ -68,8 +68,26 @@ Every tab in this panel is **read-only** — nothing is deleted or modified. It'
 cleanup tool; use the explorer's normal delete/move actions on anything you want to fix once you've found
 it.
 
+## Archive safety
+
+**Check archive safety…** is a related, one-off check rather than a fifth tab: right-click a `.zip`-family
+archive (`.zip`, `.jar`, `.apk`, `.war`, `.ear`, `.ipa`, `.xpi`, `.whl`, `.nupkg`, `.vsix`) and choose
+**Check archive safety…** to score it for zip-bomb / expansion-ratio risk — a tiny, highly compressible
+payload that decompresses to something enormous.
+
+1. **Scan.** The dialog reads the archive's central directory and compares every entry's compressed size
+   against its uncompressed size — a single, immediate check, not a background walk.
+2. **Review.** The dialog reports the archive's overall compression ratio, its compressed → uncompressed
+   size, how many entries were scanned, and any individual entries whose own ratio is unusually high
+   (flagged as pills). A clear **danger** indicator appears when the archive as a whole crosses the
+   zip-bomb threshold; otherwise it reports as safe.
+
+Only true ZIP containers are scored today — `.tar`, `.tar.gz`/`.tgz`, `.7z`, and `.iso` aren't ZIP
+archives, so the action doesn't offer itself for them (rather than silently reporting "0 entries scanned"
+as if it had checked). Support for those formats is a later addition.
+
 ## More tabs coming
 
 The panel is built to grow: future slices add tabs for the explorer's remaining file-health detectors
-(archive expansion-ratio warnings) alongside these four, so File Health becomes a single place to review
-everything the explorer has noticed.
+alongside these four, so File Health becomes a single place to review everything the explorer has
+noticed.

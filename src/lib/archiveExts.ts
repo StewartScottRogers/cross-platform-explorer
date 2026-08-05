@@ -28,3 +28,14 @@ export const ARCHIVE_EXTS = new Set([...ZIP_FAMILY_EXTS, "tar", "gz", "tgz", "7z
  * formats from leaking an Extract action.
  */
 export const EXTRACT_EXTS = new Set([...ZIP_FAMILY_EXTS, "tar", "gz", "tgz", "7z"]);
+
+/**
+ * Formats `analyze_archive_safety` can actually score for zip-bomb / expansion-ratio risk (CPE-1318):
+ * exactly the zip family. The backend scan (`cpe_server::archive_safety_scan`) opens the file directly
+ * with the `zip` crate — tar/gz/tgz/7z/iso aren't ZIP containers, so scoring them isn't wired yet (see
+ * that module's doc comment) and would silently return a "0 entries scanned, not dangerous" report that
+ * *looks* safe but was never actually analyzed. Deriving from ZIP_FAMILY_EXTS (not ARCHIVE_EXTS or
+ * EXTRACT_EXTS) keeps that misleading state out of the UI — the same discipline EXTRACT_EXTS follows
+ * per the CPE-1181 lesson above.
+ */
+export const ARCHIVE_SAFETY_EXTS = new Set([...ZIP_FAMILY_EXTS]);
