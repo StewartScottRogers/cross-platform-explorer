@@ -917,3 +917,31 @@ Tuned defaults / lessons (seed next GUI shift):
   SFTP, Docker, removable-drive hardware). Next shift: take an attended/backend epic WITH the user, don't scrape filler.
 - Throughput: 7 tickets, ~46 sub-agents, budget deep (~46/200, never near reset line). Median gauntlet ~7m,
   0 retries, 0 escaped defects. main green throughout (real 3-OS CI; FE-only PRs gated on Frontend job).
+
+## 2026-08-05 (run 3 cont.) — "keep going" ×2: QA/docs debt + 3D-model feature (6 more tickets, 14 total)
+After the GUI vein tapped, user "keep going" → closed real debt + opened the backend frontier:
+- **CPE-1331** gui-smoke coverage: new metadata-studio.smoke.ts (byte-accurate ID3v2.3 seed) + filled-exclude-pill +
+  enabled-Move-to-Bin interactive snaps — all Visual-Critic PASS. Metadata render gap RETIRED. (#629)
+- **CPE-1332** in-app docs pages for Declutter/Near-Duplicates/Metadata-Studio (CPE-579 gap). Reviewer caught 2
+  wrong menu labels ("Find clutter"→"Declutter", File-menu→context-menu) → Foreman-applied fixes. (#627)
+- **3D-MODEL FEATURE (epic CPE-118, complete):** CPE-1333 pure-Rust STL/OBJ geometry reader (model_3d.rs, zero
+  deps, 20 inline tests incl. malformed→None, Reviewer panic/DoS-clean) (#628) · CPE-1335 glTF+GLB parsing
+  (serde_json, bounds-checked, honest tri/vertex=0) (#631) · CPE-1334 preview-pane info section wiring
+  readModelInfo (stale-guard, "Faces" for OBJ) (#630) · CPE-1336 glTF rendering (format label + Meshes row, no
+  bare "0 triangles", zero-bbox dim suppression) (#632).
+- Escaped defect: CPE-1329's declutter.smoke.ts asserted on the wrong DOM node (spec type-checked, not run) →
+  caught by the GUI-verifier build, fixed + verified-green as CPE-1330. LESSON: gui-smoke specs must be RUN at
+  build/review, not just type-checked.
+- Tuned defaults: backend format-reader = pure-logic in crates/server + INLINE-byte-array fixtures (no committed
+  binaries) + regen bindings via `cargo run --bin export_bindings --features "specta-bindings sidecar-platform"`.
+  Backend PRs gate on 3-OS + drift guard; Windows/Ubuntu server-crates legs run ~20-26min (be patient, don't
+  strong-signal-merge then rapid-push bookkeeping — the concurrency group cancels the in-flight CODE CI run,
+  producing a scary-looking "X cancelled" that is NOT a failure).
+- Throughput: 14 tickets (CPE-1323-1336), 7 epics, ~110 sub-agent runs, 0 escaped defects open, budget ~108/200.
+
+## FRONTIER (2026-08-05, after run 3) — CLEAN AUTONOMOUS VEIN EXHAUSTED
+Two GUI surveys + one backend survey + building the one clean backend slice (3D reader) agree: no clean,
+locally-cargo/gui-verifiable, no-user-resource work remains. Remaining candidates are gold-plating (glTF
+accessor-deref for real tri/vertex counts — deliberately deferred, low value) or USER-GATED (AI model key,
+Mac, signing cert, SFTP/Docker/removable-hardware, or a NEEDS-BACKEND/heavy-dep format reader HEIC/DICOM/RAR).
+Library: [[clean-gui-vein-tapped-after-declutter-2026-08-05]], [[clean-backend-vein-3d-reader-2026-08-05]].
