@@ -3,10 +3,16 @@
   // codecs (ID3/Vorbis audio, EXIF image, PDF doc, MP4 video). Editable formats (mp3/flac today) can be
   // changed and saved back via `metadata_write`; the rest are shown read-only until their write codecs
   // land. Follows the dialog convention (visible border) and the tab standard (accent active tab).
+  // CPE-1325: `save()` takes a best-effort `checkpointCreate` of the target folder ONCE before the write
+  // (batch-safe: single file and applyToAll both checkpoint once, before the loop). A checkpoint failure
+  // never blocks the write — it's a bonus safety net, not a gate — and success is surfaced only as a
+  // subtle suffix on the existing "Saved" notice, never a blocking modal (mirrors SimilarImagesDialog's
+  // pre-move checkpoint).
   import { createEventDispatcher, onMount } from "svelte";
   import { unwrap } from "../invoke";
   import { commands, type MetaField } from "../bindings.gen";
   import { joinFieldKey, buildMetaEdits } from "../metaEdits";
+  import { parentDir } from "../contentSearch";
   import Icon from "./Icon.svelte";
   import { t } from "../i18n";
   import type { DirEntry } from "../types";
@@ -94,13 +100,25 @@
     const targets = applyToAll ? files : [primary];
     saving = true;
     notice = "";
+    // Best-effort checkpoint of the target folder BEFORE this mutates any file (CPE-1325): metadata
+    // write-back has no undo, so a bad edit should still be recoverable. Taken ONCE before the whole
+    // batch (single file or applyToAll) begins — never per-field, never per-file. A checkpoint failure
+    // must never block the write; it's a bonus safety net, not a gate — log it and proceed.
+    let checkpointed = false;
+    try {
+      await commands.checkpointCreate(parentDir(primary.path), "Before metadata edit");
+      checkpointed = true;
+    } catch (e) {
+      console.error("Metadata Studio: pre-save checkpoint failed (proceeding with write)", e);
+    }
     try {
       for (const f of targets) {
         const res = unwrap(await commands.metadataWrite(f.path, edits));
         if (f.path === primary.path) fields = res;
       }
       edited = {};
-      notice = targets.length > 1 ? $t("studio.savedN", { n: targets.length }) : $t("studio.saved");
+      const saved = targets.length > 1 ? $t("studio.savedN", { n: targets.length }) : $t("studio.saved");
+      notice = checkpointed ? `${saved} ${$t("studio.checkpointed")}` : saved;
     } catch (e) {
       notice = String(e);
     } finally {
