@@ -159,7 +159,13 @@
     // must never block the write; it's a bonus safety net, not a gate — log it and proceed.
     let checkpointed = false;
     try {
-      await commands.checkpointCreate(parentDir(primary.path), "Before metadata edit");
+      // `unwrap` throws on a `{status:"error"}` envelope too, not just a thrown `Error` (CPE-1328): a
+      // Rust-side `Err(String)` rejects the raw promise with a plain string, which the generated
+      // binding only rethrows when it's an `Error` instance — otherwise it resolves to
+      // `{status:"error"}` WITHOUT throwing. Without unwrapping, that resolved-but-failed case would
+      // fall straight through to `checkpointed = true` and the UI would claim a checkpoint that never
+      // happened.
+      unwrap(await commands.checkpointCreate(parentDir(primary.path), "Before metadata edit"));
       checkpointed = true;
     } catch (e) {
       console.error("Metadata Studio: pre-save checkpoint failed (proceeding with write)", e);

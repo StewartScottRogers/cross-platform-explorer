@@ -14,6 +14,11 @@ type Pending = { channel: { onmessage: ((b: unknown) => void) | null }; resolve:
 let pending: Pending[] = [];
 let trashCalls: string[][] = [];
 let checkpointCalls: Array<[string, string]> = [];
+// CPE-1328: "reject-string" mimics a Tauri `Result<T, String>` command's `Err(String)` — the raw promise
+// rejects with a plain string. The generated `checkpointCreate` binding only rethrows `e instanceof
+// Error`; a plain string instead resolves to `{status:"error", error}` WITHOUT throwing, which is the
+// case the un-unwrapped `await commands.checkpointCreate(...)` used to silently miss.
+let checkpointBehavior: "ok" | "reject-string" = "ok";
 
 const invoke = vi.fn(async (cmd: string, args?: any) => {
   if (cmd === "find_similar_images_stream") {
@@ -25,7 +30,11 @@ const invoke = vi.fn(async (cmd: string, args?: any) => {
   }
   if (cmd === "checkpoint_create") {
     checkpointCalls.push([args.root, args.label]);
-    return { status: "ok", data: { id: "cp1", label: args.label } };
+    // eslint-disable-next-line no-throw-literal -- deliberately a non-Error rejection (Err(String) shape)
+    if (checkpointBehavior === "reject-string") throw "checkpoint boom (domain error)";
+    // Raw IPC boundary value: the plain domain result, NOT the frontend's `{status,data}` Result
+    // envelope — that wrapping happens inside bindings.gen.ts's generated `checkpointCreate`, not here.
+    return { id: "cp1", label: args.label };
   }
   if (cmd === "thumbnail") return ""; // ThumbnailImage falls back to its Icon — irrelevant here
   return null;
@@ -53,6 +62,7 @@ beforeEach(() => {
   pending = [];
   trashCalls = [];
   checkpointCalls = [];
+  checkpointBehavior = "ok";
 });
 
 describe("SimilarImagesDialog (CPE-1202)", () => {
@@ -144,4 +154,28 @@ describe("SimilarImagesDialog (CPE-1202)", () => {
     // The group dropped to one copy → no longer a near-duplicate → the list empties.
     await waitFor(() => expect(screen.getByTestId("sim-none")).toBeTruthy());
   });
+
+  it(
+    "CPE-1328: a checkpoint that resolves to a non-throwing {status:'error'} envelope (Err(String)) " +
+      "still lets the trash move proceed — non-blocking preserved for the case a bare `await` used to miss",
+    async () => {
+      checkpointBehavior = "reject-string";
+      const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+      render(SimilarImagesDialog, { root: "/repo" });
+      await fireEvent.click(screen.getByText("Scan for similar images"));
+      emit(0, [{ paths: ["/repo/a.png", "/repo/sub/b.png"] }]);
+      await finish(0, 2);
+      await waitFor(() => expect(screen.getByTestId("sim-group")).toBeTruthy());
+
+      await fireEvent.click(screen.getByText("Select extras"));
+      await fireEvent.click(await screen.findByText("Move 1 to Recycle Bin"));
+
+      // The trash move still happens even though the checkpoint's envelope was an error.
+      await waitFor(() => expect(trashCalls).toEqual([["/repo/sub/b.png"]]));
+      expect(checkpointCalls).toEqual([["/repo", "Before removing similar images"]]);
+      // The failure is surfaced to the console for diagnostics rather than silently vanishing.
+      expect(errSpy).toHaveBeenCalled();
+      errSpy.mockRestore();
+    },
+  );
 });

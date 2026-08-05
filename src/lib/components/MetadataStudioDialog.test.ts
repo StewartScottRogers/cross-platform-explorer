@@ -10,7 +10,13 @@ import type { DirEntry } from "../types";
 let checkpointCalls: Array<[string, string]> = [];
 let writeCalls: string[] = [];
 let writeEditsCalls: unknown[] = [];
-let checkpointBehavior: "ok" | "reject" = "ok";
+// "reject" throws an Error instance — the generated `checkpointCreate` binding rethrows it, so the
+// existing `catch` in `save()` sees it directly. "reject-string" throws a plain string, the shape a
+// Tauri `Result<T, String>` command's `Err(String)` actually rejects with — the generated binding only
+// rethrows `e instanceof Error`, so a plain string instead resolves to `{status:"error", error}`
+// WITHOUT throwing (CPE-1328). That's the case the un-unwrapped `await commands.checkpointCreate(...)`
+// used to miss entirely, silently setting `checkpointed = true` on a checkpoint that never happened.
+let checkpointBehavior: "ok" | "reject" | "reject-string" = "ok";
 
 const field = { group: "id3", key: "Title", value: "Old Title", editable: true };
 // CPE-1326: a richer field set (two editable, one read-only) for the batch-op tests below.
@@ -34,6 +40,8 @@ const invoke = vi.fn(async (cmd: string, args?: any) => {
   if (cmd === "checkpoint_create") {
     checkpointCalls.push([args.root, args.label]);
     if (checkpointBehavior === "reject") throw new Error("checkpoint boom");
+    // eslint-disable-next-line no-throw-literal -- deliberately a non-Error rejection (Err(String) shape)
+    if (checkpointBehavior === "reject-string") throw "checkpoint boom (domain error)";
     return { checkpoint: { manifest_id: "cp1", label: args.label }, new_blobs: 1, reused_blobs: 0, skipped: [] };
   }
   if (cmd === "metadata_write") {
@@ -82,6 +90,9 @@ describe("MetadataStudioDialog checkpoint-before-save (CPE-1325)", () => {
     const writeIdx = invoke.mock.calls.findIndex((c) => c[0] === "metadata_write");
     expect(cpIdx).toBeGreaterThanOrEqual(0);
     expect(cpIdx).toBeLessThan(writeIdx);
+
+    // CPE-1328: a genuinely successful checkpoint shows the truthful "(checkpoint saved)" suffix.
+    await waitFor(() => expect(screen.getByText(/checkpoint saved/)).toBeTruthy());
   });
 
   it("does NOT block the write when the checkpoint is rejected (best-effort, non-blocking)", async () => {
@@ -98,8 +109,35 @@ describe("MetadataStudioDialog checkpoint-before-save (CPE-1325)", () => {
     expect(checkpointCalls).toEqual([["/repo/music", "Before metadata edit"]]);
     // No blocking error is surfaced from the failed checkpoint — the save itself still reports success.
     await waitFor(() => expect(screen.getByText(/Saved/)).toBeTruthy());
+    // The suffix must NOT lie: a thrown-Error checkpoint failure is not a success.
+    expect(screen.queryByText(/checkpoint saved/)).toBeNull();
     errSpy.mockRestore();
   });
+
+  it("CPE-1328: does NOT show '(checkpoint saved)' — and still proceeds with the write — when checkpointCreate " +
+    "resolves to a non-throwing {status:'error'} envelope (the Err(String) case the un-unwrapped await used to miss)",
+    async () => {
+      checkpointBehavior = "reject-string";
+      const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+      render(MetadataStudioDialog, { entries: [makeEntry("/repo/music/song.mp3")] });
+
+      const input = await screen.findByDisplayValue("Old Title");
+      await fireEvent.input(input, { target: { value: "New Title" } });
+      await fireEvent.click(screen.getByText("Save"));
+
+      // Non-blocking preserved: the write still proceeds even though the checkpoint's envelope was an error.
+      await waitFor(() => expect(writeCalls).toEqual(["/repo/music/song.mp3"]));
+      expect(checkpointCalls).toEqual([["/repo/music", "Before metadata edit"]]);
+      await waitFor(() => expect(screen.getByText(/Saved/)).toBeTruthy());
+
+      // Truthful failure: the checkpoint did NOT actually succeed, so the suffix must not appear even
+      // though nothing threw all the way out to the outer catch.
+      expect(screen.queryByText(/checkpoint saved/)).toBeNull();
+      // The failure is still surfaced to the console for diagnostics, same as the thrown-Error case.
+      expect(errSpy).toHaveBeenCalled();
+      errSpy.mockRestore();
+    },
+  );
 
   it("checkpoints ONCE before a whole applyToAll batch, not per-file", async () => {
     render(MetadataStudioDialog, {

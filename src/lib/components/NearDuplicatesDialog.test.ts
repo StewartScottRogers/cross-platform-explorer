@@ -13,6 +13,11 @@ let calls: Array<{ cmd: string; args: unknown }> = [];
 let responder: ((cmd: string, args: unknown) => unknown) | null = null;
 let trashCalls: string[][] = [];
 let checkpointCalls: Array<[string, string]> = [];
+// CPE-1328: "reject" throws an Error instance (the generated `checkpointCreate` binding rethrows it as-
+// is); "reject-string" throws a plain string, the shape a Tauri `Result<T, String>` command's
+// `Err(String)` actually rejects with — the binding only rethrows `e instanceof Error`, so a plain
+// string instead resolves to `{status:"error", error}` WITHOUT throwing.
+let checkpointBehavior: "ok" | "reject" | "reject-string" = "ok";
 
 const invoke = vi.fn(async (cmd: string, args?: any) => {
   calls.push({ cmd, args });
@@ -22,7 +27,12 @@ const invoke = vi.fn(async (cmd: string, args?: any) => {
   }
   if (cmd === "checkpoint_create") {
     checkpointCalls.push([args.root, args.label]);
-    return { status: "ok", data: { id: "cp1", label: args.label } };
+    if (checkpointBehavior === "reject") throw new Error("disk full");
+    // eslint-disable-next-line no-throw-literal -- deliberately a non-Error rejection (Err(String) shape)
+    if (checkpointBehavior === "reject-string") throw "disk full (domain error)";
+    // Raw IPC boundary value: the plain domain result, NOT the frontend's `{status,data}` Result
+    // envelope — that wrapping happens inside bindings.gen.ts's generated `checkpointCreate`, not here.
+    return { id: "cp1", label: args.label };
   }
   if (!responder) throw new Error(`no responder set for ${cmd}`);
   return responder(cmd, args);
@@ -41,6 +51,7 @@ beforeEach(() => {
   responder = null;
   trashCalls = [];
   checkpointCalls = [];
+  checkpointBehavior = "ok";
 });
 
 describe("NearDuplicatesDialog — documents kind (CPE-1204)", () => {
@@ -208,11 +219,10 @@ describe("NearDuplicatesDialog — keeper-guarded cleanup (CPE-1324)", () => {
     await waitFor(() => expect(screen.getByTestId("nd-none")).toBeTruthy());
   });
 
-  it("a checkpoint failure does not block the (already recoverable) trash move", async () => {
-    responder = (cmd) => {
-      if (cmd === "checkpoint_create") throw new Error("disk full");
-      return { groups: [{ paths: ["/repo/a.txt", "/repo/b.txt"] }], files_scanned: 2, truncated: false };
-    };
+  it("a checkpoint failure (thrown Error) does not block the (already recoverable) trash move", async () => {
+    checkpointBehavior = "reject";
+    const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    responder = () => ({ groups: [{ paths: ["/repo/a.txt", "/repo/b.txt"] }], files_scanned: 2, truncated: false });
     render(NearDuplicatesDialog, { root: "/repo", kind: "documents" });
     await fireEvent.click(screen.getByTestId("nd-scan-btn"));
     await waitFor(() => expect(screen.getByTestId("nd-group")).toBeTruthy());
@@ -223,7 +233,32 @@ describe("NearDuplicatesDialog — keeper-guarded cleanup (CPE-1324)", () => {
     // Checkpoint failed but the trash move still went through — a checkpoint is a bonus, not a gate.
     await waitFor(() => expect(trashCalls).toEqual([["/repo/b.txt"]]));
     await waitFor(() => expect(screen.getByTestId("nd-none")).toBeTruthy());
+    expect(errSpy).toHaveBeenCalled();
+    errSpy.mockRestore();
   });
+
+  it(
+    "CPE-1328: a checkpoint that resolves to a non-throwing {status:'error'} envelope (Err(String)) " +
+      "still lets the trash move proceed — non-blocking preserved for the case a bare `await` used to miss",
+    async () => {
+      checkpointBehavior = "reject-string";
+      const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+      responder = () => ({ groups: [{ paths: ["/repo/a.txt", "/repo/b.txt"] }], files_scanned: 2, truncated: false });
+      render(NearDuplicatesDialog, { root: "/repo", kind: "documents" });
+      await fireEvent.click(screen.getByTestId("nd-scan-btn"));
+      await waitFor(() => expect(screen.getByTestId("nd-group")).toBeTruthy());
+
+      await fireEvent.click(screen.getByText("Select extras"));
+      await fireEvent.click(await screen.findByText("Move 1 to Recycle Bin"));
+
+      // The trash move still happens even though the checkpoint's envelope was an error.
+      await waitFor(() => expect(trashCalls).toEqual([["/repo/b.txt"]]));
+      await waitFor(() => expect(screen.getByTestId("nd-none")).toBeTruthy());
+      // The failure is surfaced to the console for diagnostics rather than silently vanishing.
+      expect(errSpy).toHaveBeenCalled();
+      errSpy.mockRestore();
+    },
+  );
 
   it("shows a live selected count in the Move to Bin label", async () => {
     responder = () => ({
