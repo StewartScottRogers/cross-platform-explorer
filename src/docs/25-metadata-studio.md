@@ -12,7 +12,7 @@ itself — ID3/Vorbis tags on audio, EXIF/IPTC/XMP on images, and document/video
 to the app's own tag store (see **Native Metadata Bridge**, its own page in this library, for that —
 a different, OS-level feature).
 
-Select one or more files and open **Metadata Studio…** from the **File** menu or the command palette
+Select one or more files and open **Metadata Studio…** from the **right-click context menu** (next to Properties) or the command palette
 (Ctrl/Cmd+Shift+P). The first selected file is the one shown and edited; selecting more than one
 enables the batch controls described below.
 

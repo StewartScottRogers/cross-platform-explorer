@@ -11,8 +11,8 @@ categoryOrder: 2
 that nothing else in the app flags on its own. It's a rules-based, review-first surface: it *finds*
 candidates and lets you decide, it never deletes anything on its own.
 
-Open it from the **Tools** menu (*Find clutter…*) or the **command palette** (Ctrl/Cmd+Shift+P →
-*Find clutter…*). The scan is always scoped to the folder you're currently in.
+Open it from the **Tools** menu (*Declutter…*) or the **command palette** (Ctrl/Cmd+Shift+P →
+*Declutter…*). The scan is always scoped to the folder you're currently in.
 
 ## What it finds
 
