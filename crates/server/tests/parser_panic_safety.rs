@@ -49,6 +49,7 @@ use cpe_server::media_meta_write::{
     write_exif, write_flac, write_id3v2, write_iptc, write_ogg, write_pdf, write_vorbis_comment, write_wav, write_xmp,
 };
 use cpe_server::metadata_column::CellValue;
+use cpe_server::model_3d::read_model_info;
 use cpe_server::perceptual::phash;
 use cpe_server::text_encoding::{detect_encoding, EncodingGuess};
 use cpe_server::thumb_orient::read_exif_orientation;
@@ -277,6 +278,27 @@ fn video_cell_never_panics() {
         let r = video_cell(b);
         if b.is_empty() {
             assert_eq!(r, CellValue::Empty, "video_cell(empty) must be Empty");
+        }
+    });
+}
+
+// ---------------------------------------------------------------------------------------------
+// Entrypoints: 3D model geometry read
+// ---------------------------------------------------------------------------------------------
+
+#[test]
+fn read_model_info_never_panics() {
+    // `read_model_info` chains five format parsers (binary STL, ASCII STL, OBJ, GLB, glTF JSON) with no
+    // single fixed leading magic shared across all of them (binary STL's 80-byte header is arbitrary
+    // bytes, OBJ/ASCII-STL are plain text) — same "no fixed magic" situation as `read_mp4_never_panics`
+    // above, so battery it with no magic. `header_len` is aimed at binary STL's 84-byte header (80-byte
+    // header + the little-endian `u32` triangle count at offset 80..84 that drives `triangle_count * 50`
+    // — the read's own overflowing-length-field boundary), since binary STL is checked first and is the
+    // most structurally strict (and thus most panic-risky) of the five parsers.
+    run_battery("model_3d::read_model_info", &[], 84, |b| {
+        let r = read_model_info(b);
+        if b.is_empty() {
+            assert!(r.is_none(), "read_model_info(empty) must be None");
         }
     });
 }
