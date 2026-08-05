@@ -20,6 +20,7 @@
    * over a reasonable tree is neither).
    */
   import { createEventDispatcher } from "svelte";
+  import { unwrap } from "../invoke";
   import { commands } from "../bindings.gen"; // typed client (CPE-964)
   import Icon from "./Icon.svelte";
   import { t } from "../i18n";
@@ -76,11 +77,14 @@
     deleting = true;
     try {
       // Best-effort checkpoint before the bulk move so it's reversible beyond the Bin too. A failure
-      // here must never block the (already recoverable) trash move — swallow it.
+      // here must never block the (already recoverable) trash move — swallow it. `unwrap` also catches
+      // a `{status:"error"}` envelope (a Rust-side `Err(String)` rejects the raw promise without the
+      // generated binding rethrowing it, since it only rethrows `Error` instances) so that case is
+      // logged the same as a thrown error instead of silently vanishing (CPE-1328).
       try {
-        await commands.checkpointCreate(root, "Before removing near-duplicates");
-      } catch {
-        /* checkpoint is a bonus safety net, not a gate */
+        unwrap(await commands.checkpointCreate(root, "Before removing near-duplicates"));
+      } catch (e) {
+        console.error("Near Duplicates: pre-cleanup checkpoint failed (proceeding with trash move)", e);
       }
       await commands.deleteToTrash(paths); // returns OpResult[] directly (no Result wrapper)
       groups = pruneGroups(groups, selected);
