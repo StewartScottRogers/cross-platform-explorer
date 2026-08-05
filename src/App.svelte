@@ -99,6 +99,7 @@
   import SimilarImagesDialog from "./lib/components/SimilarImagesDialog.svelte";
   import NearDuplicatesDialog from "./lib/components/NearDuplicatesDialog.svelte";
   import FileHealthDialog from "./lib/components/FileHealthDialog.svelte";
+  import DeclutterDialog from "./lib/components/DeclutterDialog.svelte";
   import { namesList, detailList, csvList } from "./lib/listing";
   import { parentDir as parentOfPath, baseName } from "./lib/contentSearch";
   import PropertiesDialog from "./lib/components/PropertiesDialog.svelte";
@@ -765,6 +766,11 @@
    *  manually (a plain `$: activeTab = initialTab` can't tell that apart from "no change"). See
    *  `openFileHealth` below, the single call site that bumps it. */
   let fileHealthNonce = 0;
+  /** Declutter overlay — surfaces `organize_clutter`'s rules-based junk findings (empty files,
+   *  installers, temp/partial downloads, backups) for safe review + move-to-bin (CPE-1329, epic
+   *  CPE-979). Read-only until the user selects + confirms; the AI classifier is a separate, gated
+   *  concern this dialog does not touch. */
+  let declutterOpen = false;
 
   /** Open the File Health panel scoped to `tab` (CPE-1316/CPE-1317) — the single call site every
    *  Tools-menu / command-palette File-Health entry uses, so the nonce bump can never be forgotten at a
@@ -894,6 +900,7 @@
     { id: "tool.findTypeMismatches", group: $t("palette.groupTools"), label: $t("palette.findTypeMismatches"), keywords: "type mismatch extension disguised renamed wrong file health", run: () => openFileHealth("mismatch"), enabled: inFolder },
     { id: "tool.findOrphanSidecars", group: $t("palette.groupTools"), label: $t("palette.findOrphanSidecars"), keywords: "orphan sidecar srt xmp companion file health", run: () => openFileHealth("orphan"), enabled: inFolder },
     { id: "tool.findEmptyDirs", group: $t("palette.groupTools"), label: $t("palette.findEmptyDirs"), keywords: "empty folder cascade cleanup file health", run: () => openFileHealth("empty"), enabled: inFolder },
+    { id: "tool.findClutter", group: $t("palette.groupTools"), label: $t("palette.findClutter"), keywords: "declutter junk clutter empty installer temp partial backup clean up review bin", run: () => (declutterOpen = true), enabled: inFolder },
     { id: "tool.colorRules", group: $t("palette.groupTools"), label: $t("palette.colorRules"), keywords: "color rules highlight label", run: () => (colorRulesOpen = true) },
     { id: "tool.sessionHistory", group: $t("palette.groupTools"), label: $t("palette.sessionHistory"), keywords: "audit log history export sessions activity", run: () => (sessionHistoryOpen = true) },
     { id: "tool.compareFolders", group: $t("palette.groupTools"), label: $t("palette.compareFolders"), keywords: "diff compare folders directories tree", run: openCompare },
@@ -4246,6 +4253,7 @@
       case "find-type-mismatches": if (!isHome && !archive) openFileHealth("mismatch"); break;
       case "find-orphan-sidecars": if (!isHome && !archive) openFileHealth("orphan"); break;
       case "find-empty-dirs": if (!isHome && !archive) openFileHealth("empty"); break;
+      case "find-clutter": if (!isHome && !archive) declutterOpen = true; break;
       case "organize-folder": if (!isHome && !archive) organizeOpen = true; break;
       case "copy-file-names": copyListing(namesList(visible), "file names"); break;
       case "copy-file-list": copyListing(detailList(visible), "file list"); break;
@@ -5397,6 +5405,14 @@
     openNonce={fileHealthNonce}
     on:navigate={(e) => { fileHealthOpen = false; revealFileInApp(e.detail); }}
     on:close={() => (fileHealthOpen = false)}
+  />
+{/if}
+
+{#if declutterOpen}
+  <DeclutterDialog
+    root={currentPath}
+    on:navigate={(e) => { declutterOpen = false; revealFileInApp(e.detail); }}
+    on:close={() => (declutterOpen = false)}
   />
 {/if}
 
