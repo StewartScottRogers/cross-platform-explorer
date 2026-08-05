@@ -11,7 +11,7 @@
   import { createEventDispatcher, onMount } from "svelte";
   import { unwrap } from "../invoke";
   import { commands, type MetaField } from "../bindings.gen";
-  import { joinFieldKey, buildMetaEdits } from "../metaEdits";
+  import { joinFieldKey, buildMetaEdits, stageFieldEdits } from "../metaEdits";
   import { parentDir } from "../contentSearch";
   import Icon from "./Icon.svelte";
   import { t } from "../i18n";
@@ -75,9 +75,17 @@
   }
   onMount(load);
 
-  function currentValue(f: MetaField): string {
+  // `e` defaults to the outer `edited` but MUST also be passed explicitly at every call site in the
+  // template (`currentValue(f, edited)`, not `currentValue(f)`): Svelte's reactive dependency tracking
+  // for a template expression is a static scan of the identifiers written directly in that expression —
+  // it doesn't see into a called function's body — so a call that only mentions `f` would never be
+  // recognized as depending on `edited` and the bound DOM value would go stale the moment `edited` is
+  // set from anywhere other than that same input's own `on:input` (which sets the DOM value natively via
+  // the browser, masking the gap). CPE-1326's batch ops are the first callers that mutate `edited`
+  // programmatically for fields the user never typed into, which is what surfaced this.
+  function currentValue(f: MetaField, e: Record<string, string> = edited): string {
     const k = ekey(f);
-    return k in edited ? edited[k] : f.value;
+    return k in e ? e[k] : f.value;
   }
   function editable(f: MetaField): boolean {
     return writable && f.editable;
@@ -93,6 +101,33 @@
   }
 
   const buildEdits = () => buildMetaEdits(edited);
+
+  // NB: must reference `writable` directly (not just via the `editable(f)` closure) — Svelte's reactive
+  // statement dependency tracking is a static textual scan, and `load()` assigns `fields` and `writable`
+  // in two separate awaited steps, so a statement that only mentions `fields` would compute against a
+  // stale `writable` and never re-run when it flips true a tick later.
+  $: editableFields = writable ? fields.filter((f) => f.editable) : [];
+
+  /** "Strip editable metadata" (CPE-1326): stage every editable field to empty, which `buildMetaEdits`
+   *  turns into a `clear` edit — reusing the existing clear path, not a new mechanism. This only stages
+   *  pending edits; it applies to whatever `targets` `save()` would use (primary alone, or the whole
+   *  selection when "Apply to all" is checked), so the CPE-1325 pre-save checkpoint still fires and the
+   *  user still has to hit Save. */
+  function stripEditable() {
+    if (!primary || saving || editableFields.length === 0) return;
+    edited = { ...edited, ...stageFieldEdits(editableFields, () => "") };
+  }
+
+  /** "Copy from first" (CPE-1326): stage the primary file's own editable values as edits, and force
+   *  "Apply to all" on — copying the primary onto itself is a no-op, the point is pushing its values onto
+   *  the OTHER selected files. Writability is still respected: only fields this dialog already treats as
+   *  editable for the primary are staged, and the unchanged `metadataWrite` call validates every target
+   *  file/format on save exactly as the existing "Apply to all" path already does. */
+  function copyFromFirst() {
+    if (!primary || saving || editableFields.length === 0 || files.length < 2) return;
+    edited = { ...edited, ...stageFieldEdits(editableFields, (f) => f.value) };
+    applyToAll = true;
+  }
 
   async function save() {
     if (!primary || !dirty || saving) return;
@@ -185,12 +220,12 @@
                 <input
                   id={`mf-${ekey(f)}`}
                   class="v"
-                  value={currentValue(f)}
+                  value={currentValue(f, edited)}
                   on:input={(e) => onEdit(f, e.currentTarget.value)}
                 />
               {:else}
                 <span class="v ro" title={writable ? $t("studio.fieldReadonly") : $t("studio.viewOnly")}>
-                  {currentValue(f) || "—"}
+                  {currentValue(f, edited) || "—"}
                 </span>
               {/if}
             </div>
@@ -206,6 +241,24 @@
             <input type="checkbox" bind:checked={applyToAll} />
             {$t("studio.applyAll", { n: files.length })}
           </label>
+          {#if editableFields.length > 0}
+            <button
+              class="btn ghost"
+              disabled={saving}
+              title={$t("studio.stripEditableHint")}
+              on:click={stripEditable}
+            >
+              {$t("studio.stripEditable")}
+            </button>
+            <button
+              class="btn ghost"
+              disabled={saving}
+              title={$t("studio.copyFromFirstHint")}
+              on:click={copyFromFirst}
+            >
+              {$t("studio.copyFromFirst")}
+            </button>
+          {/if}
         {/if}
         {#if notice}<span class="notice">{notice}</span>{/if}
       </div>
@@ -381,8 +434,9 @@
   }
   .left {
     display: flex;
+    flex-wrap: wrap;
     align-items: center;
-    gap: 10px;
+    gap: 6px 10px;
     min-width: 0;
   }
   .all {
@@ -423,5 +477,19 @@
   .btn:disabled {
     opacity: 0.5;
     cursor: default;
+  }
+  /* Compact secondary action for the batch ops (CPE-1326) — sits inline with the "Apply to all"
+     checkbox rather than competing with the primary Close/Save pair on the right. */
+  .btn.ghost {
+    height: auto;
+    padding: 2px 8px;
+    font-size: 12px;
+    border-color: transparent;
+    background: transparent;
+    color: var(--text-dim);
+  }
+  .btn.ghost:hover:not(:disabled) {
+    color: var(--text);
+    border-color: var(--border);
   }
 </style>

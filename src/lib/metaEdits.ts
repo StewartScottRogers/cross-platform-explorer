@@ -4,7 +4,7 @@
 // character that can never appear in either — and splits on the FIRST NUL. Splitting on a space (or any
 // character the data can contain) would silently corrupt those fields, so this logic is centralized and
 // unit-tested rather than inlined in the component.
-import type { MetaEdit } from "./bindings.gen";
+import type { MetaEdit, MetaField } from "./bindings.gen";
 
 /** Separator that cannot appear in a metadata group or key. */
 export const FIELD_SEP = "\u0000";
@@ -31,4 +31,25 @@ export function buildMetaEdits(edited: Record<string, string>): MetaEdit[] {
       ? ({ edit: "clear", group, key } as MetaEdit)
       : ({ edit: "set", group, key, value } as MetaEdit);
   });
+}
+
+/** Build a pending-edits record (the same composite-key shape `buildMetaEdits` consumes) staging every
+ *  field in `fields` to a new value computed by `valueFor`. Shared by the Metadata Studio's two batch ops
+ *  (CPE-1326): "Strip editable metadata" passes `() => ""` (an empty value becomes a `clear` via
+ *  `buildMetaEdits` — no separate clear mechanism), and "Copy from first" passes `(f) => f.value` to stage
+ *  the primary file's own values. Callers must pre-filter `fields` to the ones that are actually editable
+ *  (writability is a per-file/per-format property the caller already has, not something this pure helper
+ *  can see) — this just maps each field to its composite key deterministically, unconditionally (no
+ *  "skip if unchanged" short-circuit), because the resulting record is later applied uniformly to every
+ *  target file in a batch, whose current values may differ from the primary's even when a field looks
+ *  unchanged relative to the primary. */
+export function stageFieldEdits(
+  fields: MetaField[],
+  valueFor: (f: MetaField) => string,
+): Record<string, string> {
+  const out: Record<string, string> = {};
+  for (const f of fields) {
+    out[joinFieldKey(f.group, f.key)] = valueFor(f);
+  }
+  return out;
 }
