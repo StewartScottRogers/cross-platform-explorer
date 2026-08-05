@@ -1,15 +1,21 @@
 <script lang="ts">
   /**
-   * Near-duplicate DOCUMENTS + near-identical FOLDERS review UI (CPE-1204, epic CPE-997 stretch) — the
-   * minimal frontend entry point over the `find_similar_documents` / `find_similar_folders` engines
-   * (`cpe_server::document_similarity` / `cpe_server::folder_similarity_scan`). One dialog handles both
-   * via the `kind` prop, mirroring {@link SimilarImagesDialog}'s shape (intro → scan → grouped results)
-   * but deliberately smaller: this is **read-only** (no cleanup/delete action — the ticket's acceptance
-   * criteria is wiring the scan, not a removal workflow), so there's no selection state, no keeper guard,
-   * and no trash integration. Clicking an item just reveals it, like `DuplicatesDialog`'s file rows.
+   * Near-duplicate DOCUMENTS + near-identical FOLDERS review UI (CPE-1204, epic CPE-997 stretch; keeper-
+   * guarded cleanup added CPE-1324) — the frontend entry point over the `find_similar_documents` /
+   * `find_similar_folders` engines (`cpe_server::document_similarity` / `cpe_server::folder_similarity_scan`).
+   * One dialog handles both via the `kind` prop, mirroring {@link SimilarImagesDialog}'s shape (intro →
+   * scan → grouped results → keeper-guarded cleanup) — including its exact safety rails, reusing the SAME
+   * `keepsOnePerGroup` / `pruneGroups` helpers from ../duplicates so the guard logic isn't duplicated:
+   *   1. cleanup uses `commands.deleteToTrash` — recoverable Recycle Bin, NEVER a hard delete;
+   *   2. it is guarded by `keepsOnePerGroup`, so at least one item per group always survives;
+   *   3. NOTHING is selected by default (no auto-select-all) — the user opts in per item;
+   *   4. "Move to Bin" is DISABLED whenever the current selection would remove every copy of any group;
+   *   5. a best-effort checkpoint (`commands.checkpointCreate`) is taken before a bulk move, so the
+   *      action is reversible beyond the Bin too. A checkpoint failure never blocks the (already
+   *      reversible) trash move.
    *
-   * Both backends are modest collect-to-vec commands (not streamed) per the ticket's stated scope — the
-   * typed `commands.*` client already routes through the busy-cursor `invoke` wrapper
+   * Both backends are modest collect-to-vec commands (not streamed) per the original ticket's stated
+   * scope — the typed `commands.*` client already routes through the busy-cursor `invoke` wrapper
    * ([[prefer-streaming-liveness]] applies to *large/slow* producers; a folder/document near-dup scan
    * over a reasonable tree is neither).
    */
@@ -18,6 +24,7 @@
   import Icon from "./Icon.svelte";
   import { t } from "../i18n";
   import { baseName, parentDir } from "../contentSearch";
+  import { keepsOnePerGroup, pruneGroups } from "../duplicates";
 
   export let root = "";
   /** Which engine to run — `documents` (SimHash text near-dup) or `folders` (Jaccard folder near-dup). */
@@ -40,8 +47,50 @@
   let nextId = 0;
   let searchGen = 0; // supersede a stale scan when a newer one starts (mirrors SimilarImagesDialog)
 
+  // Paths the user has marked for removal. A Set, reassigned to trigger reactivity. SAFETY: starts
+  // EMPTY — nothing is auto-selected (CPE-1324, mirrors SimilarImagesDialog CPE-1202).
+  let selected = new Set<string>();
+  let deleting = false;
+
+  // SAFETY guard: cleanable only if something is selected AND every group still keeps a copy.
+  $: canClean = selected.size > 0 && keepsOnePerGroup(groups, selected);
+
   $: title = kind === "documents" ? $t("nd.titleDocs") : $t("nd.titleFolders");
   $: icon = kind === "documents" ? "document" : "folder";
+
+  function toggle(path: string) {
+    if (selected.has(path)) selected.delete(path);
+    else selected.add(path);
+    selected = new Set(selected);
+  }
+
+  /** Convenience: tick every item except the first of each group — always keeps one, so it can never
+   *  arm a would-delete-all selection. Off by default (nothing is pre-selected). */
+  function selectExtras() {
+    selected = new Set(groups.flatMap((g) => g.paths.slice(1)));
+  }
+
+  async function cleanUp() {
+    if (!canClean) return;
+    const paths = [...selected];
+    deleting = true;
+    try {
+      // Best-effort checkpoint before the bulk move so it's reversible beyond the Bin too. A failure
+      // here must never block the (already recoverable) trash move — swallow it.
+      try {
+        await commands.checkpointCreate(root, "Before removing near-duplicates");
+      } catch {
+        /* checkpoint is a bonus safety net, not a gate */
+      }
+      await commands.deleteToTrash(paths); // returns OpResult[] directly (no Result wrapper)
+      groups = pruneGroups(groups, selected);
+      selected = new Set();
+    } catch (e) {
+      error = String(e);
+    } finally {
+      deleting = false;
+    }
+  }
 
   async function run() {
     loading = true;
@@ -50,6 +99,7 @@
     groups = [];
     scannedCount = 0;
     truncated = false;
+    selected = new Set();
     const gen = ++searchGen;
     try {
       if (kind === "documents") {
@@ -126,7 +176,13 @@
           <span class="dim"> · {$t("sim.scanned", { count: scannedCount.toLocaleString() })}</span>
           {#if truncated}<span class="dim"> {$t("sim.capped")}</span>{/if}
         </span>
-        <button class="mini" data-testid="nd-rescan-btn" on:click={run}>{$t("nd.scan")}</button>
+        <span class="cleanup">
+          <button class="mini" data-testid="nd-rescan-btn" on:click={run}>{$t("nd.scan")}</button>
+          <button class="mini" on:click={selectExtras} title={$t("nd.selectExtrasTip")}>{$t("sim.selectExtras")}</button>
+          <button class="mini danger" data-testid="nd-move-btn" disabled={!canClean || deleting} on:click={cleanUp}>
+            {deleting ? $t("sim.removing") : $t("sim.moveToBin", { count: selected.size })}
+          </button>
+        </span>
       </div>
       <div class="results">
         {#each groups as g (g.id)}
@@ -137,11 +193,16 @@
             </div>
             <div class="items">
               {#each g.paths as p (p)}
-                <button class="item" data-testid="nd-item" title={p} on:click={() => reveal(p)}>
-                  <Icon name={icon} size={14} />
-                  <span class="name">{baseName(p)}</span>
-                  <span class="loc">{parentDir(p)}</span>
-                </button>
+                <div class="row" class:picked={selected.has(p)}>
+                  <label class="pick" title={$t("nd.markForBin")}>
+                    <input type="checkbox" checked={selected.has(p)} on:change={() => toggle(p)} />
+                  </label>
+                  <button class="item" data-testid="nd-item" title={p} on:click={() => reveal(p)}>
+                    <Icon name={icon} size={14} />
+                    <span class="name">{baseName(p)}</span>
+                    <span class="loc">{parentDir(p)}</span>
+                  </button>
+                </div>
               {/each}
             </div>
           </div>
@@ -167,14 +228,19 @@
   .btn { height: 32px; padding: 0 16px; border-radius: var(--radius); border: 1px solid var(--border-strong); background: var(--surface-alt); justify-self: start; }
   .btn.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
   .summary { font-size: 12px; color: var(--text-dim); margin-bottom: 6px; display: flex; align-items: center; gap: 10px; }
-  .summary .mini { margin-left: auto; flex: 0 0 auto; }
+  .cleanup { margin-left: auto; display: flex; gap: 6px; flex: 0 0 auto; }
   .mini { height: 24px; padding: 0 10px; border-radius: var(--radius); border: 1px solid var(--border-strong); background: var(--surface-alt); font-size: 12px; }
   .mini:hover { background: var(--surface); }
+  .mini.danger:not(:disabled) { border-color: var(--danger); color: var(--danger); }
+  .mini:disabled { opacity: 0.5; }
   .results { overflow: auto; }
   .group { margin-bottom: 12px; }
   .ghead { display: flex; align-items: center; gap: 6px; font-size: 12px; font-weight: 600; padding: 3px 6px; }
   /* Rows reflow: the group wraps items onto more rows and grows; each row keeps its text on one line. */
   .items { display: flex; flex-wrap: wrap; gap: 6px; padding: 4px 6px; }
+  .row { flex: 0 0 auto; display: flex; align-items: center; gap: 4px; }
+  .row.picked .item { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent) inset; }
+  .pick { display: inline-flex; align-items: center; }
   .item {
     flex: 0 0 auto; max-width: 280px; display: flex; align-items: center; gap: 6px;
     padding: 5px 10px; border: 1px solid var(--border); border-radius: var(--radius); background: var(--surface-alt);
