@@ -111,3 +111,33 @@ NEEDS-BACKEND epic to build with cargo tests. Owed non-blocking QA: interactive-
 exclude-pill / enabled Move-to-Bin); a metadata-studio.smoke.ts; a src/docs page for Declutter+near-dup Tools.
 Two optional SUBJECTIVE taste picks await the user: near-dup checkbox in-gutter-vs-in-chip; Declutter per-reason
 icons vs uniform glyph. Nothing blocked or broken.
+
+---
+## RUN 3 EXTENDED — 2026-08-05 ~14:30 local — "keep going" ×2 COMPLETE (14 tickets total; frontier exhausted)
+After RUN 3 FINAL (File-Health/near-dup/metadata, CPE-1323-1330), user "keep going" → 6 more tickets:
+- **QA/docs debt CLOSED:** CPE-1331 (gui-smoke: metadata-studio spec + interactive-state snaps, Visual-Critic PASS),
+  CPE-1332 (in-app docs: Declutter/Near-Dup/Metadata-Studio, CPE-579).
+- **3D-MODEL FEATURE COMPLETE (epic CPE-118):** CPE-1333 STL/OBJ reader + CPE-1335 glTF/GLB (crates/server
+  model_3d.rs, zero new deps, panic/DoS-clean, cargo-tested) + CPE-1334 preview-pane info section + CPE-1336
+  honest glTF rendering (Meshes row, no bare "0 triangles"). Reader covers STL/OBJ/glTF/GLB; UI surfaces
+  format/counts/dimensions in PreviewPane. (The interactive 3D WebGL viewer remains the attended/blocked part.)
+
+## State
+- `main` @ origin `16f0bb98` (+ this checkpoint), CLEAN, Backlog + Doing EMPTY. Worktrees deep-cleaned. 14 tickets Done.
+- Each PR's OWN CI passed (incl. backend 3-OS + drift for #628/#631). NOTE: post-merge main CI runs often show
+  "cancelled" because rapid bookkeeping pushes supersede them via the concurrency group — NOT failures; the PR CIs
+  are authoritative. Don't panic on a cancelled main run.
+
+## FRONTIER EXHAUSTED (evidence: 2 GUI surveys + 1 backend survey + built the 1 clean backend slice)
+No clean, locally-verifiable, no-user-resource work remains. Next work needs the USER:
+- **A resource:** AI model key/embedder (CPE-976/977/979/980 semantic search / copilot / auto-organize / OCR),
+  a Mac (macOS attended), a code-signing cert (releases), SFTP/cloud creds (remote FS), Docker (net-E2E),
+  removable-drive hardware (drive badges).
+- **A NEEDS-BACKEND / heavy-dep epic:** HEIC (libheif), DICOM (dicom-rs), RAR (unrar licensing), camera-RAW
+  (needs a committed binary fixture), or the interactive 3D WebGL viewer (GPU/attended).
+- **Or a marginal enhancement** (gold-plating, low value): glTF accessor-deref for real triangle/vertex counts
+  (currently honestly 0; mesh count + dimensions already shown).
+
+## To resume
+Name a focus or provide a resource. Do NOT re-run a clean-vein hunt — three surveys agree it's dry; don't
+manufacture filler. Nothing is blocked or broken; main is clean.
