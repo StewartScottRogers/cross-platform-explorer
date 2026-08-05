@@ -118,23 +118,29 @@
   }
 
   /** Bounding-box DIMENSIONS (width × height × depth), derived as max − min per axis from
-   *  `[min_x,min_y,min_z,max_x,max_y,max_z]` — never the raw min/max themselves. */
-  $: modelDims = modelInfo
-    ? {
-        w: modelInfo.bounding_box[3] - modelInfo.bounding_box[0],
-        h: modelInfo.bounding_box[4] - modelInfo.bounding_box[1],
-        d: modelInfo.bounding_box[5] - modelInfo.bounding_box[2],
-      }
-    : null;
+   *  `[min_x,min_y,min_z,max_x,max_y,max_z]` — never the raw min/max themselves. All-zero means no
+   *  vertices/accessor-extrema were read (an empty mesh, or a glTF with no POSITION min/max) — omit
+   *  the row entirely rather than showing a misleading "0 × 0 × 0". */
+  $: modelDims =
+    modelInfo && modelInfo.bounding_box.some((v) => v !== 0)
+      ? {
+          w: modelInfo.bounding_box[3] - modelInfo.bounding_box[0],
+          h: modelInfo.bounding_box[4] - modelInfo.bounding_box[1],
+          d: modelInfo.bounding_box[5] - modelInfo.bounding_box[2],
+        }
+      : null;
 
   /** Trim a geometry float to at most 3 decimals without trailing zeros (2.500 → "2.5", 10 → "10"). */
   function fmtDim(n: number): string {
     return (Math.round(n * 1000) / 1000).toString();
   }
 
-  $: modelFormatLabel = modelInfo?.format === "Obj" ? "OBJ" : modelInfo?.format === "Stl" ? "STL" : "";
+  $: modelFormatLabel =
+    modelInfo?.format === "Obj" ? "OBJ" : modelInfo?.format === "Stl" ? "STL" : modelInfo?.format === "Gltf" ? "glTF" : "";
   // OBJ's triangle_count is a FACE count (quads/n-gons aren't necessarily triangles) — label it
-  // "Faces" for OBJ; STL facets really are triangles, so "Triangles" is accurate there.
+  // "Faces" for OBJ; STL facets really are triangles, so "Triangles" is accurate there. glTF has no
+  // triangle/face count at all (see ModelInfo.triangle_count doc) — it gets its own "Meshes" row
+  // instead, so this label is never consulted for Gltf.
   $: modelCountLabel = modelInfo?.format === "Obj" ? $t("pv.model.faces") : $t("pv.model.triangles");
 
   async function loadInfoFor(e: DirEntry) {
@@ -656,8 +662,12 @@
             <span class="model-v">{modelInfo.ascii ? $t("pv.model.ascii") : $t("pv.model.binary")}</span>
           </div>
         {/if}
-        <div class="model-row"><span class="model-k">{modelCountLabel}</span><span class="model-v">{modelInfo.triangle_count.toLocaleString()}</span></div>
-        <div class="model-row"><span class="model-k">{$t("pv.model.vertices")}</span><span class="model-v">{modelInfo.vertex_count.toLocaleString()}</span></div>
+        {#if modelInfo.format === "Gltf"}
+          <div class="model-row"><span class="model-k">{$t("pv.model.meshes")}</span><span class="model-v">{modelInfo.mesh_count.toLocaleString()}</span></div>
+        {:else}
+          <div class="model-row"><span class="model-k">{modelCountLabel}</span><span class="model-v">{modelInfo.triangle_count.toLocaleString()}</span></div>
+          <div class="model-row"><span class="model-k">{$t("pv.model.vertices")}</span><span class="model-v">{modelInfo.vertex_count.toLocaleString()}</span></div>
+        {/if}
         {#if modelDims}
           <div class="model-row">
             <span class="model-k">{$t("pv.model.dimensions")}</span>
