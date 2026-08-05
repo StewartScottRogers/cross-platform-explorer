@@ -27,13 +27,37 @@ const DECLUTTER_INSTALLER_NAME = "declutter-setup.exe";
 const DECLUTTER_TEMP_NAME = "declutter-movie.mp4.part";
 const DECLUTTER_BACKUP_NAME = "declutter-notes.txt.bak";
 
-/** The `[data-testid="dc-row"]` whose rendered HTML contains `name` — scans HTML rather than an exact-
- *  text locator, same reasoning as file-health.smoke.ts's `findRowContaining`. */
-async function findRowContaining(name: string): Promise<WebdriverIO.Element> {
+/** The `[data-testid="dc-group"]` whose rendered HTML contains `text` — the group header renders
+ *  `{reasonLabel(g.reason)} ({g.rows.length})` as a SIBLING of the `dc-row`s, not inside any one row
+ *  (see DeclutterDialog.svelte), so the group — not the row — is what carries the reason label. Scans
+ *  HTML rather than an exact-text locator, same reasoning as file-health.smoke.ts's `findRowContaining`. */
+async function findGroupContaining(text: string): Promise<WebdriverIO.Element> {
   let found: WebdriverIO.Element | undefined;
   await browser.waitUntil(
     async () => {
-      const rows = $$('[data-testid="dc-row"]');
+      const groups = $$('[data-testid="dc-group"]');
+      for await (const group of groups) {
+        const html = await group.getHTML({ includeSelectorTag: false });
+        if (html.includes(text)) {
+          found = group;
+          return true;
+        }
+      }
+      return false;
+    },
+    { timeout: 20_000, timeoutMsg: `expected a dc-group containing "${text}"` },
+  );
+  return found!;
+}
+
+/** The `[data-testid="dc-row"]` (scoped to `group`) whose rendered HTML contains the seeded `name` —
+ *  each row holds only a checkbox + filename button, so this confirms the finding actually rendered as
+ *  a row under the group located by `findGroupContaining`. */
+async function findRowContaining(group: WebdriverIO.Element, name: string): Promise<WebdriverIO.Element> {
+  let found: WebdriverIO.Element | undefined;
+  await browser.waitUntil(
+    async () => {
+      const rows = group.$$('[data-testid="dc-row"]');
       for await (const row of rows) {
         const html = await row.getHTML({ includeSelectorTag: false });
         if (html.includes(name)) {
@@ -112,21 +136,24 @@ describe("CPE-1329 — headless GUI smoke: Declutter dialog surfaces real organi
     await scanBtn.waitForClickable({ timeout: 10_000 });
     await scanBtn.click();
 
-    // Core assertion: all four seeded findings — one per ClutterReason — stream back. If the scan
-    // returned nothing (broken invoke, bad `dir` wiring, or a rules-engine regression) `[data-testid=
-    // "dc-none"]` would render and no dc-row would exist, so this fails loudly rather than passing on
-    // an empty view.
-    const zeroByteRow = await findRowContaining(DECLUTTER_ZERO_BYTE_NAME);
-    expect(await zeroByteRow.getHTML({ includeSelectorTag: false })).to.include("Empty file");
+    // Core assertion: all four seeded findings — one per ClutterReason — stream back, each under its
+    // correctly-labelled reason group. If the scan returned nothing (broken invoke, bad `dir` wiring, or
+    // a rules-engine regression) `[data-testid="dc-none"]` would render and no dc-group would exist, so
+    // this fails loudly rather than passing on an empty view. The reason label + count ("Empty file (1)")
+    // lives on the `dc-group` header (a sibling of the rows), NOT inside any one `dc-row` — see
+    // DeclutterDialog.svelte — so each finding is checked in two steps: locate its group by the labelled
+    // header, then confirm the seeded filename rendered as a `dc-row` under that same group.
+    const zeroByteGroup = await findGroupContaining("Empty file (1)");
+    await findRowContaining(zeroByteGroup, DECLUTTER_ZERO_BYTE_NAME);
 
-    const installerRow = await findRowContaining(DECLUTTER_INSTALLER_NAME);
-    expect(await installerRow.getHTML({ includeSelectorTag: false })).to.include("Installer");
+    const installerGroup = await findGroupContaining("Installer (1)");
+    await findRowContaining(installerGroup, DECLUTTER_INSTALLER_NAME);
 
-    const tempRow = await findRowContaining(DECLUTTER_TEMP_NAME);
-    expect(await tempRow.getHTML({ includeSelectorTag: false })).to.include("Temporary / partial download");
+    const tempGroup = await findGroupContaining("Temporary / partial download (1)");
+    await findRowContaining(tempGroup, DECLUTTER_TEMP_NAME);
 
-    const backupRow = await findRowContaining(DECLUTTER_BACKUP_NAME);
-    expect(await backupRow.getHTML({ includeSelectorTag: false })).to.include("Backup / leftover");
+    const backupGroup = await findGroupContaining("Backup / leftover (1)");
+    await findRowContaining(backupGroup, DECLUTTER_BACKUP_NAME);
 
     await snap("declutter-results");
 
