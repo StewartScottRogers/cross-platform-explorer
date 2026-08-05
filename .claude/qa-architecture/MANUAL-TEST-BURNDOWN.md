@@ -106,3 +106,17 @@ Seven GUI tickets shipped across 4 epics. QA/coverage changes:
 - **Docs gap (minor):** Declutter (like NearDuplicatesDialog) did not register a `sectionDocs.ts` Section/doc
   page. Not a CI failure (no new Section enum added), but a `src/docs` page for the new Tools features is owed
   per the self-maintaining-docs rule — worth a small follow-up ticket.
+
+### Workshift 2026-08-05 (cont.) — coverage debt CLOSED (CPE-1331/1332) + backend 3D reader (CPE-1333)
+- ✅ **Metadata Studio render/visual gap RETIRED:** `gui-smoke/specs/metadata-studio.smoke.ts` (CPE-1331) now drives
+  a real `tauri build`, seeds a byte-accurate ID3v2.3 mp3, opens the Studio via the palette, and asserts the
+  editable Title/Artist inputs render with correct values over live IPC. **Visual Critic judged it VISUAL PASS.**
+  The 4 metadata tickets (CPE-1325-1328) shipped this shift are no longer render/visual-manual.
+- ✅ **Interactive-state screenshots RETIRED:** file-health spec now snaps a FILLED exclude-pill (after clicking a
+  quick-add chip); near-dup spec now snaps the ENABLED "Move 1 to Recycle Bin" (after checking a box). Both
+  Visual-Critic PASS. The "resting-state-only" owed debt from earlier this shift is closed.
+- ✅ **Docs gap RETIRED (CPE-1332):** src/docs pages added for Declutter (23), Near-Duplicates (24), Metadata
+  Studio (25) — the CPE-579 self-maintaining-docs guardrail is satisfied for these Tools features.
+- **New coverage (CPE-1333, 3D reader):** `model_3d.rs` + `file_type.rs` 3D signatures are pure-logic cargo-tested
+  (20 inline tests incl. malformed/hostile-input → None, no panic; Reviewer's panic/DoS pass clean). Backend, not
+  a manual surface. Follow-up owed: a frontend 3D-model metadata column/pane (wires `read_model_info`).
