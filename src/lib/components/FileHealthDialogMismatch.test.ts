@@ -122,6 +122,33 @@ describe("FileHealthDialog — Type mismatch tab (CPE-1316)", () => {
     expect(screen.getByTestId("fh-reason").textContent).toContain("Windows executable/library");
   });
 
+  // CPE-1319 (Visual Critic defect 1): the full sentence used to render as a right-side PILL, which
+  // squeezed the filename column down to an unreadable "f…" because pills don't shrink. It must now
+  // render as a dim SUBTITLE line under the filename — the full sentence stays visible and the name
+  // gets its own line, structurally separate from the reason text (not sharing a flex line with it).
+  it("renders the mismatch reason as a subtitle UNDER the filename, not a right-competing pill", async () => {
+    await openMismatchTab();
+    await fireEvent.click(screen.getByTestId("fh-scan-btn"));
+    emit(0, [
+      { path: "/repo/photo.jpg", claimed_ext: "jpg", detected_label: "Windows executable/library", detected_ext: "exe" },
+    ]);
+    await finish(0, 1);
+
+    const reason = await screen.findByTestId("fh-reason");
+    // The full sentence is visible in full — never truncated to a short label.
+    expect(reason.textContent).toContain("claims jpg");
+    expect(reason.textContent).toContain("looks like Windows executable/library");
+    // It's the dim ".subtitle" treatment, not the old right-competing ".reason" pill.
+    expect(reason.className).toContain("subtitle");
+    expect(reason.className).not.toContain("reason");
+
+    // The filename lives on its own line — the subtitle isn't sharing a parent with it, and the
+    // subtitle span itself doesn't wrap (contain) the filename.
+    const name = screen.getByText("photo.jpg");
+    expect(name.parentElement).not.toBe(reason.parentElement);
+    expect(reason.contains(name)).toBe(false);
+  });
+
   it("clears loading on an EMPTY result even though no batch is streamed", async () => {
     await openMismatchTab();
     await fireEvent.click(screen.getByTestId("fh-scan-btn"));

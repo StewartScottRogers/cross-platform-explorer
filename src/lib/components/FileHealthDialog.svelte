@@ -429,12 +429,27 @@
         <div class="results">
           <div class="rows">
             {#each mismatchHits as h (h.id)}
-              <button class="row" data-testid="fh-row" title={h.path} on:click={() => reveal(h.path)}>
+              <!-- CPE-1319 (Visual Critic defect 1): the full "claims X → looks like Y" sentence can be
+                   long, so it renders as a dim SUBTITLE line under the filename instead of a right-side
+                   pill — a pill here squeezed the name/loc line down to an unreadable "f…" because pills
+                   don't shrink (`flex:0 0 auto`) while name/loc did. This row is deliberately full-width
+                   (`row-wide`, stacked) rather than the compact reflowing pill used by the other tabs, so
+                   the sentence never needs truncating. -->
+              <button
+                class="row row-wide"
+                data-testid="fh-row"
+                title={h.path}
+                on:click={() => reveal(h.path)}
+              >
                 <Icon name="ban" size={14} />
-                <span class="name">{baseName(h.path)}</span>
-                <span class="loc">{parentDir(h.path)}</span>
-                <span class="reason" data-testid="fh-reason">
-                  {$t("fh.mismatchBadge", { claimed: h.claimedExt, detected: h.detectedLabel })}
+                <span class="rowbody">
+                  <span class="rowline">
+                    <span class="name">{baseName(h.path)}</span>
+                    <span class="loc">{parentDir(h.path)}</span>
+                  </span>
+                  <span class="subtitle" data-testid="fh-reason">
+                    {$t("fh.mismatchBadge", { claimed: h.claimedExt, detected: h.detectedLabel })}
+                  </span>
                 </span>
               </button>
             {/each}
@@ -473,6 +488,9 @@
                 <Icon name="unknown" size={14} />
                 <span class="name">{baseName(o.path)}</span>
                 <span class="loc">{parentDir(o.path)}</span>
+                <!-- CPE-1319 (Visual Critic defect 2): orphan rows had no status badge, unlike the
+                     dangling/mismatch tabs — add the same short reason-pill treatment for consistency. -->
+                <span class="reason" data-testid="fh-reason">{$t("fh.orphanBadge")}</span>
               </button>
             {/each}
           </div>
@@ -561,6 +579,19 @@
   .reason {
     flex: 0 0 auto; white-space: nowrap; font-size: 10px; padding: 2px 7px; border-radius: 999px;
     background: var(--surface); border: 1px solid var(--border); color: var(--text-dim);
+  }
+  /* CPE-1319: the mismatch tab's row is full-width and STACKED (name+loc on top, the full mismatch
+     sentence as a dim subtitle underneath) instead of the compact single-line pill row used elsewhere —
+     the sentence is often too long to share a line with the filename without squeezing it unreadably
+     short, and the point of a subtitle (vs. a pill) is to show the FULL text, not truncate it. */
+  .row-wide { flex: 1 1 100%; max-width: 100%; align-items: flex-start; }
+  .rowbody { display: flex; flex-direction: column; gap: 2px; min-width: 0; flex: 1 1 auto; }
+  .rowline { display: flex; align-items: baseline; gap: 8px; min-width: 0; }
+  .rowline .name { max-width: 320px; }
+  .subtitle {
+    font-size: 11px; color: var(--text-faint); line-height: 1.4;
+    /* Deliberately NOT nowrap+ellipsis (unlike the .reason pill) — this text must stay fully visible. */
+    white-space: normal; overflow-wrap: anywhere;
   }
   .dim { color: var(--text-faint); }
   .err { color: var(--danger); }
