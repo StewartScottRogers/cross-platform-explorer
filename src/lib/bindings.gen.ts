@@ -3879,7 +3879,12 @@ export type MismatchReport = { hits: MismatchHit[]; scanned: number; truncated: 
 /**
  * Which of the supported 3D formats [`read_model_info`] recognised.
  */
-export type ModelFormat = "Stl" | "Obj"
+export type ModelFormat = "Stl" | "Obj" | 
+/**
+ * Covers both a standalone `.gltf` JSON document and the JSON chunk of a binary `.glb` container;
+ * [`ModelInfo::ascii`] distinguishes the two.
+ */
+"Gltf"
 /**
  * Geometry summary for a 3D-model file, good enough for a metadata-pane fallback (triangle/vertex
  * counts + bounding box) without ever needing to actually render the mesh.
@@ -3887,17 +3892,29 @@ export type ModelFormat = "Stl" | "Obj"
 export type ModelInfo = { format: ModelFormat; 
 /**
  * STL: the facet count. OBJ: the `f` (face) line count — OBJ faces are not necessarily triangles
- * (they may be quads/n-gons), so this is a face count, not a guaranteed-triangle count.
+ * (they may be quads/n-gons), so this is a face count, not a guaranteed-triangle count. glTF/GLB:
+ * always `0` — see the module doc comment for why this isn't computed.
  */
-triangle_count: number; vertex_count: number; 
+triangle_count: number; 
 /**
- * `[min_x, min_y, min_z, max_x, max_y, max_z]`. All zero when no vertices were read (an empty mesh).
+ * glTF/GLB: always `0` — see the module doc comment for why this isn't computed.
+ */
+vertex_count: number; 
+/**
+ * `[min_x, min_y, min_z, max_x, max_y, max_z]`. All zero when no vertices were read (an empty mesh,
+ * or — for glTF/GLB — no `POSITION` accessor carried `min`/`max`).
  */
 bounding_box: [number, number, number, number, number, number]; 
 /**
- * True for ASCII STL and OBJ (both plain text); false for binary STL.
+ * True for ASCII STL, OBJ, and a standalone `.gltf` JSON file (all plain text); false for binary STL
+ * and `.glb` (the JSON chunk is text, but the container itself is a binary format).
  */
-ascii: boolean }
+ascii: boolean; 
+/**
+ * glTF/GLB only: the document's top-level `meshes` array length — the one geometry count directly
+ * available without accessor dereferencing. Always `0` for STL/OBJ (the concept doesn't apply).
+ */
+mesh_count: number }
 /**
  * A proposed move: put file `name` into subfolder `target_subdir` (relative to its current folder).
  */
