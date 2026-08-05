@@ -141,3 +141,33 @@ No clean, locally-verifiable, no-user-resource work remains. Next work needs the
 ## To resume
 Name a focus or provide a resource. Do NOT re-run a clean-vein hunt — three surveys agree it's dry; don't
 manufacture filler. Nothing is blocked or broken; main is clean.
+
+---
+## RUN 3 EXTENDED-2 — 2026-08-05 ~16:20 local — 3D READER LANE COMPLETE (18 tickets); budget-reset checkpoint
+After the 3D-model feature (CPE-1333-1336), user kept saying "keep going" → rounded out the reader:
+- CPE-1337 PLY format (5th format) · CPE-1338 fuzz-harness coverage for read_model_info · CPE-1339 real glTF
+  vertex/triangle counts from accessors · CPE-1340 frontend PLY rendering.
+- **The 3D reader now covers STL / OBJ / glTF / GLB / PLY** with honest geometry (vertex + tri/face counts, mesh
+  count, bounding box/dimensions), full preview-pane UI, and panic-safety pinned in the cross-cutting fuzz battery.
+
+## State
+- `main` @ `c81f9e05`, CLEAN, Backlog + Doing EMPTY, worktrees deep-cleaned. 18 tickets Done (CPE-1323-1340).
+- Each PR's own CI passed. INCIDENT (recovered): CPE-1339 tripped the Typed-bindings drift guard because a
+  DOC-COMMENT edit to the `ModelInfo` specta::Type regenerates bindings.gen.ts — Foreman regenerated + pushed.
+  Lesson: regen bindings after ANY specta::Type edit, comments included.
+
+## BUDGET: ~136/200 sub-agents — approaching the ~150 reset line. THIS IS A CLEAN HAND-OFF POINT.
+Per the reset-often loop, checkpointing here rather than starting a new lane into the wall. A FRESH session
+resumes with full budget.
+
+## FRONTIER (after 3D lane) — clean vein essentially exhausted
+- ONE remaining clean-ish incremental slice: more `file_type` magic signatures (fonts ttf/otf/woff/woff2 + a few
+  formats) — small, zero-dep, cargo-testable, feeds epic CPE-1000. Everything else is gold-plating or gated.
+- USER-GATED / heavy-dep (need the user): AI model key/embedder (CPE-976/977/979/980), Mac, signing cert,
+  SFTP/cloud creds, Docker, removable-drive hardware; HEIC(libheif)/DICOM(dicom-rs)/RAR(unrar)/camera-RAW(fixture);
+  the interactive 3D WebGL viewer (GPU/attended).
+
+## To resume
+Start a fresh session and say "resume the workshift" (reads this checkpoint + history) — OR name a focus / provide
+a resource. If continuing autonomously, the font-signatures slice is the last clean-ish increment; after that,
+take a gated/heavy epic WITH the user rather than manufacturing filler. Nothing blocked or broken; main clean.
