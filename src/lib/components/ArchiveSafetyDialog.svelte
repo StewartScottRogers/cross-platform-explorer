@@ -75,6 +75,13 @@
     {:else if error}
       <p class="err" data-testid="as-error">{error}</p>
       <button class="mini" data-testid="as-retry-btn" on:click={run}>{$t("arcsafe.retry")}</button>
+    {:else if result?.unreadable}
+      <!-- CPE-1320: a corrupt/unreadable ZIP must NEVER render as "No zip-bomb risk" — before this
+           fix `analyze_archive_safety` collapsed a genuinely-unscanned archive to the same
+           zero-entries/not-dangerous shape as a valid empty one, so a corrupt file silently read as
+           safe. `result.unreadable` distinguishes the two; this is a dedicated unknown/error state,
+           styled like `.err` (never the safe banner). -->
+      <p class="err" data-testid="as-unreadable">{$t("arcsafe.unreadable")}</p>
     {:else if result}
       {#if result.report.dangerous}
         <!-- DANGER treatment: --danger is an app-wide THEME variable (see app.css :root), same token
