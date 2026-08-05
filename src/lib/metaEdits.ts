@@ -53,3 +53,29 @@ export function stageFieldEdits(
   }
   return out;
 }
+
+/** Whether `f` has a pending edit staged in `edited` (its composite key is present) — i.e. the field is
+ *  "dirty" relative to the value loaded from disk. Used by per-field revert (CPE-1327) to decide whether
+ *  to show the revert control on a given row; kept here (rather than inlined at the call site) so the
+ *  same composite-key lookup the rest of this module uses can't drift out of sync with `onEdit`'s own
+ *  drop-when-equal-to-original invariant in the component. */
+export function isFieldDirty(f: MetaField, edited: Record<string, string>): boolean {
+  return joinFieldKey(f.group, f.key) in edited;
+}
+
+/** Drop `f`'s pending edit from `edited`, leaving every other field's edit untouched — the per-field
+ *  "revert to original" action (CPE-1327). Once the composite key is gone, the component's existing
+ *  `currentValue(f, edited)` falls back to `f.value` (the value loaded from disk), so this alone is
+ *  enough to restore the field; no separate "original value" store is needed.
+ *
+ *  Returns a NEW record rather than mutating `edited` in place — callers MUST reassign
+ *  (`edited = revertFieldEdit(f, edited)`), not just call this and discard the result, because Svelte's
+ *  reactivity tracks *assignment*, not in-place mutation (the same rule CPE-1326's `stageFieldEdits`
+ *  callers follow — see `currentValue`'s doc comment in MetadataStudioDialog.svelte). Returns the same
+ *  reference when the field wasn't dirty, so a no-op revert never triggers a spurious re-render. */
+export function revertFieldEdit(f: MetaField, edited: Record<string, string>): Record<string, string> {
+  const k = joinFieldKey(f.group, f.key);
+  if (!(k in edited)) return edited;
+  const { [k]: _drop, ...rest } = edited;
+  return rest;
+}
