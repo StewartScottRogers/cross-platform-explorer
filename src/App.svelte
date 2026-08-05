@@ -72,6 +72,7 @@
   import ShredConfirmDialog from "./lib/components/ShredConfirmDialog.svelte";
   import VaultBanner from "./lib/components/VaultBanner.svelte";
   import VaultCreateDialog from "./lib/components/VaultCreateDialog.svelte";
+  import ArchiveSafetyDialog from "./lib/components/ArchiveSafetyDialog.svelte";
   import {
     vaults,
     unlockVault,
@@ -109,7 +110,7 @@
   import TagEditor from "./lib/components/TagEditor.svelte";
   import { initTags, tags, retagPath, renameTag, deleteTag, importTags, exportTags } from "./lib/tags";
   import { migratePathList } from "./lib/pathMigrate";
-  import { ZIP_FAMILY_EXTS, ARCHIVE_EXTS, EXTRACT_EXTS } from "./lib/archiveExts";
+  import { ZIP_FAMILY_EXTS, ARCHIVE_EXTS, EXTRACT_EXTS, ARCHIVE_SAFETY_EXTS } from "./lib/archiveExts";
   import { resolveEffect } from "./lib/dnd";
   import {
     smartFolders,
@@ -589,6 +590,9 @@
   /** The folder an open `VaultCreateDialog` is sealing (CPE-1250, epic CPE-738), or null when closed.
    *  Set by the "vault-create" action, cleared on close/created. */
   let vaultCreateFor: { folderPath: string; folderName: string } | null = null;
+  /** The archive path an open `ArchiveSafetyDialog` is scanning (CPE-1318, epic CPE-1002), or null when
+   *  closed. Set by the "archive-safety" context-menu action, cleared on close. */
+  let archiveSafetyFor: string | null = null;
   // The drive root + display name for an open "drive" context menu (CPE-1158). All drive-menu actions
   // target this path, so the menu works identically from a Home tile and a sidebar row — and from Home,
   // where there is no FileList selection to piggy-back on.
@@ -1502,6 +1506,10 @@
 
   const isExtractable = (e: DirEntry) => !e.is_dir && EXTRACT_EXTS.has(e.extension);
 
+  /** True for a ZIP-family archive the `analyze_archive_safety` scan can actually score (CPE-1318) — see
+   *  `ARCHIVE_SAFETY_EXTS`'s doc comment for why this is narrower than {@link isArchiveFile}. */
+  const isArchiveSafetyEligible = (e: DirEntry) => !e.is_dir && ARCHIVE_SAFETY_EXTS.has(e.extension);
+
   /** The immediate children of the archive's current inner folder, as DirEntry-
       shaped rows (folders are derived from deeper paths when not explicit). */
   function archiveChildren(view: ArchiveView): DirEntry[] {
@@ -2089,6 +2097,19 @@
     const entry = selectedEntries[0];
     if (!entry?.is_dir || isHome || archive) return;
     vaultCreateFor = { folderPath: entry.path, folderName: entry.name };
+  }
+
+  // ---- Check archive safety (CPE-1318, epic CPE-1002) --------------------------------------------
+  // Surfaces the built-but-unwired `analyze_archive_safety` backend command behind a right-click
+  // action on a ZIP-family archive file. The context menu gates on `archiveSafetyEligible` (same
+  // guard, re-checked here defense-in-depth like `askVaultCreate` above); the dialog itself owns the
+  // call + result rendering.
+
+  /** Open the archive-safety dialog for the single selected ZIP-family archive. */
+  function askArchiveSafety() {
+    const entry = selectedEntries[0];
+    if (!entry || isHome || archive || !isArchiveSafetyEligible(entry)) return;
+    archiveSafetyFor = entry.path;
   }
 
   /** `VaultCreateDialog`'s `created` handler: the new `.cpevault` blob path. Refresh the current folder
@@ -3401,6 +3422,7 @@
       case "compress-password": doCompressWithPassword(); break;
       case "extract": doExtract(); break;
       case "extract-to": doExtractTo(); break;
+      case "archive-safety": askArchiveSafety(); break;
       case "copy-path": doCopyPath(); break;
       case "copy-name": doCopyName(); break;
       case "reveal": revealInExplorer(); break;
@@ -5093,6 +5115,7 @@
     pinned={selectedEntries.length === 1 && pins.includes(selectedEntries[0].path)}
     favorited={selectedEntries.length === 1 && favorites.some((f) => f.path === selectedEntries[0].path)}
     extractable={!isHome && !archive && selectedEntries.length === 1 && isExtractable(selectedEntries[0])}
+    archiveSafetyEligible={!isHome && !archive && selectedEntries.length === 1 && isArchiveSafetyEligible(selectedEntries[0])}
     compressible={!isHome && !archive && selectedEntries.length >= 1}
     comparable={!isHome && !archive && selectedEntries.length === 2 && selectedEntries.every((e) => !e.is_dir)}
     mediaEligible={selectedEntries.length > 1 && selectedEntries.some((e) => !e.is_dir && canBatchTransform(e.name))}
@@ -5155,6 +5178,13 @@
     on:created={(e) => onVaultCreated(e.detail)}
     on:error={(e) => showNotice(e.detail, true)}
     on:close={() => (vaultCreateFor = null)}
+  />
+{/if}
+
+{#if archiveSafetyFor}
+  <ArchiveSafetyDialog
+    path={archiveSafetyFor}
+    on:close={() => (archiveSafetyFor = null)}
   />
 {/if}
 
