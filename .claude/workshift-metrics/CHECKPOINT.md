@@ -75,3 +75,39 @@ File-Health is complete. Candidate next GUI work (backends mostly exist): scan-E
 exists — a UI to configure excludes, integrable with the File-Health panel); the File-Health AGGREGATE panel (safetyReport.ts
 `archiveFindings()`) should also surface `unreadable` archives (noted in CPE-1320 UAT); near-duplicate review UI; metadata-edit
 UI polish. Or resume the offsite QA-infra (Docker net-E2E needs Docker up; bless gui-smoke baselines). Nothing blocked or broken.
+
+---
+## RUN 3 FINAL — 2026-08-05 ~11:15 local — GUI "backends-exist" sweep COMPLETE (8 tickets, 4 epics, clean)
+User: "start three workshifts back to back". Headless well long-dry, so continued the proven GUI-via-Visual-Critic
+template. Shipped 8 FE-only tickets through the full Reviewer+UAT (+Visual-Critic on GUI) gauntlet, all merged on
+Frontend CI green:
+- **CPE-1323** File-Health exclude-glob input UI (#619) · **CPE-1324** NearDuplicates keeper-guarded move-to-bin (#620)
+- **CPE-1325** Metadata Studio checkpoint-before-save (#621) · **CPE-1326** batch strip/copy + latent Svelte
+  reactivity bugfix (#622) · **CPE-1327** per-field revert + reset-all (#623) · **CPE-1328** truthful
+  checkpoint-status bugfix across 3 dialogs + 2 test-mock fixes (#624)
+- **CPE-1329** NEW Declutter junk-review dialog (epic CPE-979; surfaces built-but-unwired organize_clutter) (#625)
+- **CPE-1330** fix declutter.smoke.ts assertion (escaped defect from #625 — spec was only type-checked, not run;
+  now verified green on a real build) (#626)
+- **Verified for real:** batched Visual Critic judged File-Health/near-dup screenshots VISUAL PASS; a dedicated
+  build screenshotted the new Declutter dialog → VISUAL PASS. Declutter gui-smoke spec now passes on a real binary.
+- **1 escaped defect** (the declutter spec assertion) — caught by the GUI-verifier build + fixed within-shift
+  (CPE-1330) → **net 0 open defects**. Lesson reinforced: gui-smoke specs must be RUN, not just type-checked, at
+  build/review time.
+
+## State
+- `main` @ origin `81ae1b99`, CLEAN, Backlog + Doing EMPTY. Worktrees deep-cleaned (only main). 8 tickets Done.
+- Tuned defaults / lessons filed to `history.md` (unwrap() on checkpointCreate mandatory; Svelte closure dep-scan;
+  shared-component GUI slices serialize; batched Visual Critic works; specs must be run not type-checked).
+
+## FRONTIER TAPPED (survey + Library `clean-gui-vein-tapped-after-declutter-2026-08-05`)
+After CPE-1329, the clean autonomous GUI-with-existing-backend vein is DRY. Every remaining candidate was checked
+in-code and classified: NEEDS-BACKEND (audio/video decode CPE-720; unix driveType) or USER-GATED (AI classifier /
+model key for CPE-979/976/977/980; a Mac; signing cert; SFTP/cloud creds; Docker net-E2E; removable-drive hardware).
+
+## To resume (next session)
+Do NOT re-run a clean-GUI hunt (two sweeps + Library agree it's dry — don't manufacture filler). Next real work
+needs the USER: provide a resource (model key / Mac / cert / creds / Docker / hardware) or green-light a
+NEEDS-BACKEND epic to build with cargo tests. Owed non-blocking QA: interactive-state gui-smoke snaps (filled
+exclude-pill / enabled Move-to-Bin); a metadata-studio.smoke.ts; a src/docs page for Declutter+near-dup Tools.
+Two optional SUBJECTIVE taste picks await the user: near-dup checkbox in-gutter-vs-in-chip; Declutter per-reason
+icons vs uniform glyph. Nothing blocked or broken.
