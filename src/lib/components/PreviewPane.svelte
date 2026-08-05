@@ -50,9 +50,10 @@
    * which the backend's file-type detector recognises by magic but doesn't yet geometry-parse — calling
    * it for those simply returns `null` (handled gracefully, no section shown) rather than reinventing
    * detection. Independent of the preview `provider` kind: the geometry section is additive and appears
-   * above whatever provider (hex/etc.) renders for these binary formats.
+   * above whatever provider (hex/etc.) renders for these binary formats. PLY (CPE-1340, backend
+   * CPE-1337) reuses this same fallback.
    */
-  const MODEL_EXTS = new Set(["stl", "obj", "glb", "gltf"]);
+  const MODEL_EXTS = new Set(["stl", "obj", "glb", "gltf", "ply"]);
 
   $: provider = pickProvider(entry);
   $: needsText =
@@ -136,12 +137,20 @@
   }
 
   $: modelFormatLabel =
-    modelInfo?.format === "Obj" ? "OBJ" : modelInfo?.format === "Stl" ? "STL" : modelInfo?.format === "Gltf" ? "glTF" : "";
-  // OBJ's triangle_count is a FACE count (quads/n-gons aren't necessarily triangles) — label it
-  // "Faces" for OBJ; STL facets really are triangles, so "Triangles" is accurate there. glTF has no
+    modelInfo?.format === "Obj"
+      ? "OBJ"
+      : modelInfo?.format === "Stl"
+        ? "STL"
+        : modelInfo?.format === "Gltf"
+          ? "glTF"
+          : modelInfo?.format === "Ply"
+            ? "PLY"
+            : "";
+  // OBJ's and PLY's triangle_count is a FACE count (quads/n-gons aren't necessarily triangles) — label
+  // it "Faces" for both; STL facets really are triangles, so "Triangles" is accurate there. glTF has no
   // triangle/face count at all (see ModelInfo.triangle_count doc) — it gets its own "Meshes" row
   // instead, so this label is never consulted for Gltf.
-  $: modelCountLabel = modelInfo?.format === "Obj" ? $t("pv.model.faces") : $t("pv.model.triangles");
+  $: modelCountLabel = modelInfo?.format === "Obj" || modelInfo?.format === "Ply" ? $t("pv.model.faces") : $t("pv.model.triangles");
 
   async function loadInfoFor(e: DirEntry) {
     const mine = ++infoReqId;

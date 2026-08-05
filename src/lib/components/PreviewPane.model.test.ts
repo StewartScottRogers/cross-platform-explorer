@@ -79,6 +79,28 @@ const gltfInfoZeroBbox = {
   mesh_count: 2,
 };
 
+// CPE-1337 (backend) / CPE-1340 (frontend): PLY's element-face count is a FACE count too (not
+// guaranteed triangles), same caveat as OBJ — must be labelled "Faces", not "Triangles".
+const plyInfo = {
+  format: "Ply" as const,
+  triangle_count: 20, // "element face" count — a face count, not necessarily triangles
+  vertex_count: 12,
+  bounding_box: [-1, -2, -3, 1, 2, 3] as [number, number, number, number, number, number],
+  ascii: true,
+  mesh_count: 0,
+};
+
+// Binary PLY carries a zeroed bounding box (not computed for the binary flavour) — the dimensions
+// row must be omitted, same as the glTF no-extrema case.
+const plyInfoZeroBbox = {
+  format: "Ply" as const,
+  triangle_count: 20,
+  vertex_count: 12,
+  bounding_box: [0, 0, 0, 0, 0, 0] as [number, number, number, number, number, number],
+  ascii: false,
+  mesh_count: 0,
+};
+
 describe("PreviewPane — 3D-model geometry section (CPE-1334)", () => {
   it("renders the 3D section with format/count/vertex/dimension stats for a parseable STL", async () => {
     readModelInfoMock.mockResolvedValueOnce({ status: "ok", data: stlInfo });
@@ -183,6 +205,42 @@ describe("PreviewPane — 3D-model geometry section (CPE-1334)", () => {
     expect(section.textContent).toContain("glTF");
     expect(section.textContent).toContain("Meshes");
     expect(section.textContent).toContain("2"); // mesh_count
+    expect(section.textContent).not.toContain("Dimensions");
+    expect(section.textContent).not.toContain("0 × 0 × 0");
+  });
+
+  // CPE-1340: CPE-1337 (backend) added the Ply format, but the pane didn't handle it — a .ply file
+  // triggered no readModelInfo call (missing from MODEL_EXTS), and modelFormatLabel had no Ply arm.
+  it("renders PLY as 'PLY' with a Faces count + dimensions, like OBJ (not 'Triangles')", async () => {
+    readModelInfoMock.mockResolvedValueOnce({ status: "ok", data: plyInfo });
+
+    const { container } = render(PreviewPane, {
+      entry: entry({ name: "scan.ply", path: "/models/scan.ply", extension: "ply" }),
+    });
+
+    await waitFor(() => expect(container.querySelector('[data-testid="model-info-section"]')).toBeTruthy());
+    expect(readModelInfoMock).toHaveBeenCalledWith("/models/scan.ply");
+
+    const section = container.querySelector('[data-testid="model-info-section"]')!;
+    expect(section.textContent).toContain("PLY");
+    expect(section.textContent).toContain("Faces");
+    expect(section.textContent).toContain("20"); // face count
+    expect(section.textContent).toContain("12"); // vertex count
+    expect(section.textContent).toContain("2 × 4 × 6"); // bounding-box DIMENSIONS (max-min)
+    expect(section.textContent).not.toContain("Triangles");
+  });
+
+  it("omits the Dimensions row for a binary PLY with an all-zero bounding box", async () => {
+    readModelInfoMock.mockResolvedValueOnce({ status: "ok", data: plyInfoZeroBbox });
+
+    const { container } = render(PreviewPane, {
+      entry: entry({ name: "scan.ply", path: "/models/scan.ply", extension: "ply" }),
+    });
+
+    await waitFor(() => expect(container.querySelector('[data-testid="model-info-section"]')).toBeTruthy());
+    const section = container.querySelector('[data-testid="model-info-section"]')!;
+    expect(section.textContent).toContain("PLY");
+    expect(section.textContent).toContain("Faces");
     expect(section.textContent).not.toContain("Dimensions");
     expect(section.textContent).not.toContain("0 × 0 × 0");
   });
