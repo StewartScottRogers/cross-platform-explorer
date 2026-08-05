@@ -31,6 +31,7 @@ const SAFE_REPORT = {
   report: { total_compressed: 1024, total_uncompressed: 2048, overall_ratio: 2.0, flagged: [], dangerous: false },
   entries_scanned: 3,
   truncated: false,
+  unreadable: false,
 };
 
 const DANGEROUS_REPORT = {
@@ -43,6 +44,18 @@ const DANGEROUS_REPORT = {
   },
   entries_scanned: 2,
   truncated: false,
+  unreadable: false,
+};
+
+// CPE-1320: a corrupt/unreadable ZIP — `analyze_archive_safety` can't tell "never opened" from "opened,
+// nothing in it" without this flag; before the fix both shapes were identical (`entries_scanned: 0,
+// report.dangerous: false`) and the dialog rendered the misleading "No zip-bomb risk · 0 entries" safe
+// banner for a file that was never actually scanned.
+const UNREADABLE_REPORT = {
+  report: { total_compressed: 0, total_uncompressed: 0, overall_ratio: 0, flagged: [], dangerous: false },
+  entries_scanned: 0,
+  truncated: false,
+  unreadable: true,
 };
 
 describe("ArchiveSafetyDialog (CPE-1318)", () => {
@@ -104,6 +117,19 @@ describe("ArchiveSafetyDialog (CPE-1318)", () => {
     await fireEvent.click(screen.getByTestId("as-retry-btn"));
     await waitFor(() => expect(screen.getByTestId("as-ratio")).toBeTruthy());
     expect(invoke).toHaveBeenCalledTimes(2);
+  });
+
+  it("shows an unreadable/error state (not the safe banner) for a corrupt or unopenable archive (CPE-1320)", async () => {
+    responder = () => UNREADABLE_REPORT;
+    render(ArchiveSafetyDialog, { path: "/repo/corrupt.zip" });
+
+    await waitFor(() => expect(screen.getByTestId("as-unreadable")).toBeTruthy());
+    // Must NOT render as "safe" — that would silently mislead the user about a file that was never
+    // actually scanned.
+    expect(screen.queryByTestId("as-safe")).toBeNull();
+    expect(screen.queryByTestId("as-danger")).toBeNull();
+    expect(screen.queryByTestId("as-entries")).toBeNull();
+    expect(screen.queryByTestId("as-none-flagged")).toBeNull();
   });
 
   it("closing dispatches close", async () => {

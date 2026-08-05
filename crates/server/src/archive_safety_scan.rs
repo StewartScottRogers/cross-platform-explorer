@@ -28,18 +28,28 @@ const MAX_ENTRIES: usize = 200_000;
 
 /// The result of scanning a real archive for zip-bomb risk: the pure ratio scoring plus scan bookkeeping
 /// (how many entries were actually considered, and whether [`MAX_ENTRIES`] truncated the scan).
+///
+/// `unreadable` (CPE-1320) is the signal that distinguishes a **corrupt/unopenable** archive from a
+/// **valid, empty** one — both used to collapse to the same `entries_scanned: 0, report.dangerous: false`
+/// shape, which the Archive-Safety dialog rendered as a misleading "No zip-bomb risk" for a file that was
+/// never actually scanned. `unreadable == true` means `path` couldn't be opened at all (missing file, not
+/// a zip, corrupt/truncated central directory) — the rest of the report is a placeholder, not a real
+/// scan, and callers must not read it as "safe". `unreadable == false` means the archive opened fine (an
+/// empty archive still reports `entries_scanned: 0`, but with `unreadable: false`).
 #[derive(Debug, Clone, Serialize)]
 #[cfg_attr(feature = "specta", derive(specta::Type))]
 pub struct ArchiveSafetyReport {
     pub report: RatioReport,
     pub entries_scanned: u64,
     pub truncated: bool,
+    pub unreadable: bool,
 }
 
 /// Score `path` (a ZIP archive) for zip-bomb-like expansion ratio, using
 /// [`archive_safety::RatioLimits::default`]. Never fails or panics: an archive that can't be opened, or
-/// whose central directory is corrupt/garbage, yields an [`ArchiveSafetyReport`] with zero entries scanned
-/// and `report.dangerous == false` rather than an `Err`.
+/// whose central directory is corrupt/garbage, yields an [`ArchiveSafetyReport`] with zero entries scanned,
+/// `report.dangerous == false`, and `unreadable == true` (CPE-1320) rather than an `Err` — the caller must
+/// check `unreadable` before treating the report as "no risk found".
 pub fn analyze_archive_safety(path: &Path) -> ArchiveSafetyReport {
     analyze_archive_safety_with_limits(path, &RatioLimits::default())
 }
@@ -48,10 +58,10 @@ pub fn analyze_archive_safety(path: &Path) -> ArchiveSafetyReport {
 /// other thresholds directly.
 pub fn analyze_archive_safety_with_limits(path: &Path, limits: &RatioLimits) -> ArchiveSafetyReport {
     let Ok(file) = fs::File::open(path) else {
-        return empty_report(limits);
+        return empty_report(limits, true);
     };
     let Ok(mut zip) = zip::ZipArchive::new(file) else {
-        return empty_report(limits);
+        return empty_report(limits, true);
     };
 
     let mut entries: Vec<EntrySizes> = Vec::new();
@@ -73,15 +83,21 @@ pub fn analyze_archive_safety_with_limits(path: &Path, limits: &RatioLimits) -> 
 
     let entries_scanned = entries.len() as u64;
     let report = archive_safety::expansion_ratio(&entries, limits);
-    ArchiveSafetyReport { report, entries_scanned, truncated }
+    ArchiveSafetyReport { report, entries_scanned, truncated, unreadable: false }
 }
 
-/// The graceful empty result for an archive that couldn't be opened at all.
-fn empty_report(limits: &RatioLimits) -> ArchiveSafetyReport {
+/// The graceful empty result for an archive that couldn't be opened at all. `unreadable` distinguishes
+/// "we tried to open this and failed" (`true`, CPE-1320: file missing, not a zip, or a corrupt central
+/// directory) from "we opened it fine and it happens to have nothing scoreable" (`false` — not currently
+/// reached by any call site, since a successfully-opened-but-empty zip goes through the normal scan path
+/// above and constructs its own `ArchiveSafetyReport` directly; kept as a parameter rather than a hardcoded
+/// `true` so this helper stays honest if a future caller needs a genuine empty-but-opened placeholder).
+fn empty_report(limits: &RatioLimits, unreadable: bool) -> ArchiveSafetyReport {
     ArchiveSafetyReport {
         report: archive_safety::expansion_ratio(&[], limits),
         entries_scanned: 0,
         truncated: false,
+        unreadable,
     }
 }
 
@@ -136,6 +152,7 @@ mod tests {
         assert!(!result.truncated);
         assert!(result.report.flagged.is_empty(), "flagged: {:?}", result.report.flagged);
         assert!(!result.report.dangerous);
+        assert!(!result.unreadable, "a successfully opened archive is not unreadable");
         let _ = fs::remove_dir_all(&d);
     }
 
@@ -155,13 +172,18 @@ mod tests {
         assert_eq!(result.report.flagged[0].name, "bomb.bin");
         assert!(result.report.flagged[0].ratio > 100.0);
         assert!(result.report.dangerous);
+        assert!(!result.unreadable, "a successfully opened archive is not unreadable, even a dangerous one");
         let _ = fs::remove_dir_all(&d);
     }
 
+    /// CPE-1320: a corrupt/truncated ZIP (garbage bytes with a `.zip`-shaped name) must be distinguishable
+    /// from a valid empty archive — before this fix both collapsed to `entries_scanned: 0,
+    /// report.dangerous: false`, which the Archive-Safety dialog rendered as a misleading "No zip-bomb
+    /// risk · 0 entries" for a file that was never actually scanned.
     #[test]
-    fn garbage_bytes_are_handled_gracefully_never_panics() {
+    fn a_corrupt_zip_is_reported_unreadable_not_silently_safe() {
         let d = scratch("garbage");
-        let garbage_path = d.join("not-a-zip.bin");
+        let garbage_path = d.join("not-a-zip.zip");
         fs::write(&garbage_path, b"this is definitely not a valid zip archive, just plain bytes").unwrap();
 
         let result = analyze_archive_safety(&garbage_path);
@@ -169,6 +191,7 @@ mod tests {
         assert!(!result.truncated);
         assert!(result.report.flagged.is_empty());
         assert!(!result.report.dangerous);
+        assert!(result.unreadable, "a corrupt/non-zip file must be flagged unreadable, not reported as safe");
         let _ = fs::remove_dir_all(&d);
     }
 
@@ -181,6 +204,25 @@ mod tests {
         assert_eq!(result.entries_scanned, 0);
         assert!(!result.truncated);
         assert!(!result.report.dangerous);
+        assert!(result.unreadable, "a missing file couldn't be opened, so it's unreadable too");
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    /// CPE-1320 round-trip: a **valid** empty zip (opened fine, zero entries) must NOT be flagged
+    /// unreadable — only an open-failure sets that flag. This is the contrast case for
+    /// `a_corrupt_zip_is_reported_unreadable_not_silently_safe`: same `entries_scanned == 0`, same
+    /// `report.dangerous == false`, but `unreadable` differs because one archive actually opened.
+    #[test]
+    fn a_valid_empty_zip_is_not_flagged_unreadable() {
+        let d = scratch("valid-empty");
+        let zip_path = d.join("empty.zip");
+        write_zip(&zip_path, &[]);
+
+        let result = analyze_archive_safety(&zip_path);
+        assert_eq!(result.entries_scanned, 0);
+        assert!(!result.truncated);
+        assert!(!result.report.dangerous);
+        assert!(!result.unreadable, "a validly-opened empty archive is not unreadable");
         let _ = fs::remove_dir_all(&d);
     }
 

@@ -10844,6 +10844,7 @@ mod tests {
             .expect("analyze_archive_safety dispatches");
         assert_eq!(archive.entries_scanned, 0, "keep.txt isn't a zip, so nothing to score");
         assert!(!archive.report.dangerous);
+        assert!(archive.unreadable, "keep.txt isn't a valid zip, so it should be flagged unreadable (CPE-1320)");
 
         let empty = tauri::async_runtime::block_on(find_empty_dirs(root.clone(), Vec::new())).expect("find_empty_dirs dispatches");
         assert!(empty.dirs.iter().any(|p| Path::new(p) == d.join("empty_sub")), "empty_sub should be reported: {:?}", empty.dirs);

@@ -2956,8 +2956,16 @@ export type ArchiveEntry = { name: string; size: number; is_dir: boolean }
 /**
  * The result of scanning a real archive for zip-bomb risk: the pure ratio scoring plus scan bookkeeping
  * (how many entries were actually considered, and whether [`MAX_ENTRIES`] truncated the scan).
+ * 
+ * `unreadable` (CPE-1320) is the signal that distinguishes a **corrupt/unopenable** archive from a
+ * **valid, empty** one — both used to collapse to the same `entries_scanned: 0, report.dangerous: false`
+ * shape, which the Archive-Safety dialog rendered as a misleading "No zip-bomb risk" for a file that was
+ * never actually scanned. `unreadable == true` means `path` couldn't be opened at all (missing file, not
+ * a zip, corrupt/truncated central directory) — the rest of the report is a placeholder, not a real
+ * scan, and callers must not read it as "safe". `unreadable == false` means the archive opened fine (an
+ * empty archive still reports `entries_scanned: 0`, but with `unreadable: false`).
  */
-export type ArchiveSafetyReport = { report: RatioReport; entries_scanned: number; truncated: boolean }
+export type ArchiveSafetyReport = { report: RatioReport; entries_scanned: number; truncated: boolean; unreadable: boolean }
 /**
  * The audio metadata columns a user can add to the details view — each maps to a friendly key
  * [`crate::media_meta_read::read_id3v2`] emits.
