@@ -831,6 +831,31 @@ function seedFileHealthFixture(tmpDir: string): void {
   fs.mkdirSync(path.join(dir, FILE_HEALTH_EMPTY_SUBDIR_NAME), { recursive: true });
 }
 
+// --- Declutter GUI verification fixture (CPE-1329, epic CPE-979) -------------------------------
+// Seeds one file per `ClutterReason` (`crates/server/src/organize.rs`) into its own subfolder, so
+// the Declutter dialog's real `organize_clutter` scan has one finding to flag under each of the
+// four reason groups it renders. Isolated in its own subfolder so it never perturbs any other
+// spec's row-position assumptions in the shared tmpDir.
+export const DECLUTTER_DIR_NAME = "declutter-gui-verify";
+export const DECLUTTER_ZERO_BYTE_NAME = "declutter-empty.log";
+export const DECLUTTER_INSTALLER_NAME = "declutter-setup.exe";
+export const DECLUTTER_TEMP_NAME = "declutter-movie.mp4.part";
+export const DECLUTTER_BACKUP_NAME = "declutter-notes.txt.bak";
+
+function seedDeclutterFixture(tmpDir: string): void {
+  const dir = path.join(tmpDir, DECLUTTER_DIR_NAME);
+  fs.mkdirSync(dir, { recursive: true });
+  // A zero-byte file — `find_clutter`'s most-definitive reason, flagged purely by `size == 0`.
+  fs.writeFileSync(path.join(dir, DECLUTTER_ZERO_BYTE_NAME), "");
+  // An installer extension (`.exe`) — needs non-zero content so it doesn't get claimed by the
+  // (checked-first) zero-byte rule instead.
+  fs.writeFileSync(path.join(dir, DECLUTTER_INSTALLER_NAME), Buffer.from([0x4d, 0x5a, 0x90, 0x00]));
+  // A partial/temporary download (`.part`) — matched by `name_lower.ends_with(".part")`.
+  fs.writeFileSync(path.join(dir, DECLUTTER_TEMP_NAME), "partial download bytes\n", "utf-8");
+  // A backup/leftover (`.bak` extension) — matched by `entry.ext == "bak"`.
+  fs.writeFileSync(path.join(dir, DECLUTTER_BACKUP_NAME), "old content\n", "utf-8");
+}
+
 let tauriDriver: ChildProcess | undefined;
 let shuttingDown = false;
 
@@ -984,6 +1009,10 @@ export const config: WebdriverIO.Config = {
     // File-Health GUI verification (workshift QA, epic CPE-1002): seed the mismatch/orphan/empty
     // findings for file-health.smoke.ts's 4-tab end-to-end pass (see block above).
     seedFileHealthFixture(tmpDir);
+
+    // CPE-1329: seed one file per ClutterReason for declutter.smoke.ts's Declutter-dialog pass
+    // (see block above) — same tmpDir, same single app launch.
+    seedDeclutterFixture(tmpDir);
 
     const caps = capabilities as unknown as Array<{ "tauri:options": { args: string[] } }>;
     caps[0]["tauri:options"].args = ["--test-mode", "--x=-4000", `--open=${tmpDir}`];

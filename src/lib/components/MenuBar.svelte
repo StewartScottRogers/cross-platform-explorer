@@ -54,6 +54,7 @@
         { id: "find-type-mismatches", labelKey: "mi.findTypeMismatches", icon: "ban" },
         { id: "find-orphan-sidecars", labelKey: "mi.findOrphanSidecars", icon: "unknown" },
         { id: "find-empty-dirs", labelKey: "mi.findEmptyDirs", icon: "folder" },
+        { id: "find-clutter", labelKey: "mi.findClutter", icon: "delete" },
         { id: "organize-folder", labelKey: "mi.organizeFolder", icon: "sort" },
         { sep: true },
         { id: "copy-file-names", labelKey: "mi.copyFileNames", icon: "rename" },
