@@ -42,6 +42,7 @@
     EmptyDirsReport,
     MismatchHit,
     MismatchReport,
+    OpResult,
     OrphanSidecarResult,
   } from "../bindings.gen";
 
@@ -148,13 +149,18 @@
   }
 
   /** A rendered type-mismatch hit with a stable `id` for the `{#each}` key (batches only carry the
-   *  `MismatchHit` fields). */
+   *  `MismatchHit` fields), plus the per-row "rename to correct extension" fix-it state (CPE-1322):
+   *  `fixing` disables the button and shows an in-progress label while the rename is in flight, and
+   *  `fixError` surfaces a failed attempt (target already exists, permission denied, …) inline on the
+   *  row instead of silently doing nothing or clobbering an existing file. */
   interface MismatchRow {
     id: number;
     path: string;
     claimedExt: string;
     detectedLabel: string;
     detectedExt: string;
+    fixing?: boolean;
+    fixError?: string;
   }
 
   let mismatchLoading = false;
@@ -217,6 +223,46 @@
       // An EMPTY result streams NO batch — clearing `loading` here on the awaited resolution is what
       // stops an empty scan spinning forever (mirrors the dangling tab).
       if (gen === mismatchGen) mismatchLoading = false;
+    }
+  }
+
+  /** The rename target for a mismatch hit (CPE-1322): same directory, same file stem, but the
+   *  DETECTED extension instead of the claimed one (`foo.jpg` that's really an exe → `foo.exe`).
+   *  Cross-platform via the shared `parentDir`/`baseName` helpers, preserving whichever separator the
+   *  path already uses (mirrors App.svelte's `joinPath`). Pure — no filesystem access. */
+  function mismatchFixTarget(path: string, detectedExt: string): string {
+    const dir = parentDir(path);
+    const base = baseName(path);
+    const dot = base.lastIndexOf(".");
+    const stem = dot > 0 ? base.slice(0, dot) : base;
+    const name = `${stem}.${detectedExt}`;
+    if (!dir) return name;
+    const sep = path.includes("\\") ? "\\" : "/";
+    return dir.endsWith(sep) ? `${dir}${name}` : `${dir}${sep}${name}`;
+  }
+
+  /** Rename one mismatch hit to its detected extension (CPE-1322's per-row fix-it action), reusing the
+   *  existing `move_exact` command (the same one BatchRenameDialog applies its plan through) rather than
+   *  adding a new backend command — it already refuses to overwrite an existing target, so a name
+   *  collision fails loudly instead of clobbering whatever occupies that name. On success the row is
+   *  removed from the results (it's fixed); on failure the error is surfaced inline on the row and the
+   *  row stays put — never a silent no-op. */
+  async function fixMismatch(h: MismatchRow) {
+    if (h.fixing) return;
+    const target = mismatchFixTarget(h.path, h.detectedExt);
+    mismatchHits = mismatchHits.map((x) => (x.id === h.id ? { ...x, fixing: true, fixError: "" } : x));
+    try {
+      const results = await invoke<OpResult[]>("move_exact", { pairs: [[h.path, target]] });
+      const result = results[0];
+      if (result?.ok) {
+        mismatchHits = mismatchHits.filter((x) => x.id !== h.id);
+      } else {
+        const message = $t("fh.mismatchFixFailed", { error: result?.error ?? String(result) });
+        mismatchHits = mismatchHits.map((x) => (x.id === h.id ? { ...x, fixing: false, fixError: message } : x));
+      }
+    } catch (e) {
+      const message = $t("fh.mismatchFixFailed", { error: String(e) });
+      mismatchHits = mismatchHits.map((x) => (x.id === h.id ? { ...x, fixing: false, fixError: message } : x));
     }
   }
 
@@ -435,11 +481,21 @@
                    don't shrink (`flex:0 0 auto`) while name/loc did. This row is deliberately full-width
                    (`row-wide`, stacked) rather than the compact reflowing pill used by the other tabs, so
                    the sentence never needs truncating. -->
-              <button
+              <!-- CPE-1322: the row itself is still the "reveal in folder" click target, but it can no
+                   longer be a <button> now that it hosts a nested "Rename to .ext" action button (a
+                   button inside a button is invalid HTML and un-clickable in real browsers) — a
+                   role="button" div + matching keydown handler reproduces the same click/keyboard
+                   semantics (mirrors BoardView.svelte's card rows, which have the same nested-button
+                   shape for their own "copy id" action). -->
+              <!-- svelte-ignore a11y-no-static-element-interactions a11y-click-events-have-key-events -->
+              <div
                 class="row row-wide"
                 data-testid="fh-row"
                 title={h.path}
+                role="button"
+                tabindex="0"
                 on:click={() => reveal(h.path)}
+                on:keydown={(e) => (e.key === "Enter" || e.key === " ") && reveal(h.path)}
               >
                 <Icon name="ban" size={14} />
                 <span class="rowbody">
@@ -450,8 +506,24 @@
                   <span class="subtitle" data-testid="fh-reason">
                     {$t("fh.mismatchBadge", { claimed: h.claimedExt, detected: h.detectedLabel })}
                   </span>
+                  {#if h.fixError}
+                    <span class="fix-error" data-testid="fh-fix-error">{h.fixError}</span>
+                  {/if}
                 </span>
-              </button>
+                {#if h.detectedExt && h.detectedExt !== h.claimedExt}
+                  <button
+                    class="fix-btn"
+                    data-testid="fh-fix-btn"
+                    disabled={h.fixing}
+                    title={$t("fh.mismatchFix", { ext: h.detectedExt })}
+                    on:click|stopPropagation={() => fixMismatch(h)}
+                    on:keydown|stopPropagation
+                  >
+                    <Icon name="rename" size={12} />
+                    {h.fixing ? $t("fh.mismatchFixing") : $t("fh.mismatchFix", { ext: h.detectedExt })}
+                  </button>
+                {/if}
+              </div>
             {/each}
           </div>
         </div>
@@ -601,6 +673,22 @@
     /* Deliberately NOT nowrap+ellipsis (unlike the .reason pill) — this text must stay fully visible. */
     white-space: normal; overflow-wrap: anywhere;
   }
+  /* CPE-1322: the per-row "rename to correct extension" fix-it action. Sits as a sibling of `.rowbody`
+     inside the flex `.row-wide`, so `.rowbody`'s `flex: 1 1 auto` naturally pushes it to the row's right
+     edge without any extra layout — same reflow behaviour as the rest of the panel (the row itself still
+     wraps/grows via `.rows`' flex-wrap; this button never shrinks or wraps its own text, per the
+     tick-tacks convention). */
+  .fix-btn {
+    flex: 0 0 auto; display: flex; align-items: center; gap: 4px; white-space: nowrap;
+    height: 22px; padding: 0 9px; font-size: 11px; color: var(--text);
+    border: 1px solid var(--border-strong); border-radius: var(--radius); background: var(--surface);
+  }
+  .fix-btn:hover:not(:disabled) { background: var(--surface-alt); border-color: var(--accent); }
+  .fix-btn:disabled { opacity: 0.6; cursor: default; }
+  /* A failed fix-it attempt (target already exists, permission denied, …) surfaces inline right under the
+     mismatch subtitle instead of a silent no-op or a separate dialog — same "stay fully visible, never
+     truncated" treatment as `.subtitle` above. */
+  .fix-error { font-size: 11px; color: var(--danger); line-height: 1.4; white-space: normal; overflow-wrap: anywhere; }
   .dim { color: var(--text-faint); }
   .err { color: var(--danger); }
 </style>

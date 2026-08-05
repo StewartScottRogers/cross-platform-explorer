@@ -19,6 +19,13 @@ let pending: Pending[] = [];
 let cancelCalls: number[] = [];
 let danglingCancelCalls: number[] = [];
 
+// CPE-1322's per-row "rename to correct extension" fix-it action reuses the existing `move_exact`
+// backend command (the same one BatchRenameDialog applies its plan through) — `moveExactImpl` resolves
+// each call from a queue so a test can control ok/error per invocation instead of hard-coding one
+// canned response.
+let moveExactImpl: ((pairs: [string, string][]) => unknown) | null = null;
+let moveExactCalls: [string, string][][] = [];
+
 const invoke = vi.fn(async (cmd: string, args?: any) => {
   if (cmd === "find_type_mismatches_stream") {
     return await new Promise((resolve, reject) =>
@@ -37,6 +44,11 @@ const invoke = vi.fn(async (cmd: string, args?: any) => {
   if (cmd === "cancel_dangling_links_stream") {
     danglingCancelCalls.push(args.streamId);
     return null;
+  }
+  if (cmd === "move_exact") {
+    moveExactCalls.push(args.pairs);
+    if (!moveExactImpl) throw new Error("unexpected move_exact call");
+    return moveExactImpl(args.pairs);
   }
   return null;
 });
@@ -77,6 +89,8 @@ beforeEach(() => {
   pending = [];
   cancelCalls = [];
   danglingCancelCalls = [];
+  moveExactImpl = null;
+  moveExactCalls = [];
 });
 
 describe("FileHealthDialog — Type mismatch tab (CPE-1316)", () => {
@@ -207,5 +221,88 @@ describe("FileHealthDialog — Type mismatch tab (CPE-1316)", () => {
     // The mismatch scan's own cancel command was used with the mismatch generation counter — the
     // dangling tab's cancel command/counter must never be invoked by mismatch-tab rescans.
     expect(danglingCancelCalls).toEqual([]);
+  });
+
+  // CPE-1322: per-row "Rename to .{detected extension}" fix-it action, reusing the existing `move_exact`
+  // command (never a new backend command) — refuses to overwrite, so a name collision surfaces loudly.
+  describe("rename-to-detected-extension fix-it action", () => {
+    async function scanOneHit(hit: { path: string; claimed_ext: string; detected_label: string; detected_ext: string }) {
+      const result = await openMismatchTab();
+      await fireEvent.click(screen.getByTestId("fh-scan-btn"));
+      emit(0, [hit]);
+      await finish(0, 1);
+      await waitFor(() => expect(screen.getByTestId("fh-row")).toBeTruthy());
+      return result;
+    }
+
+    it("shows the fix button only when detected_ext is present and differs from claimed_ext", async () => {
+      await scanOneHit({ path: "/repo/photo.jpg", claimed_ext: "jpg", detected_label: "Windows executable/library", detected_ext: "exe" });
+      expect(screen.getByTestId("fh-fix-btn")).toBeTruthy();
+    });
+
+    it("hides the fix button when detected_ext is empty or matches claimed_ext (nothing to rename to)", async () => {
+      await scanOneHit({ path: "/repo/photo.jpg", claimed_ext: "jpg", detected_label: "unrecognised", detected_ext: "" });
+      expect(screen.queryByTestId("fh-fix-btn")).toBeNull();
+    });
+
+    it("calls move_exact with the source path and a target of the same dir + stem + detected extension, then removes the row on success", async () => {
+      moveExactImpl = (pairs) => pairs.map(([, to]) => ({ path: to, ok: true, error: "" }));
+      await scanOneHit({ path: "/repo/photo.jpg", claimed_ext: "jpg", detected_label: "Windows executable/library", detected_ext: "exe" });
+
+      await fireEvent.click(screen.getByTestId("fh-fix-btn"));
+
+      expect(moveExactCalls).toEqual([[["/repo/photo.jpg", "/repo/photo.exe"]]]);
+      await waitFor(() => expect(screen.queryByTestId("fh-row")).toBeNull());
+    });
+
+    it("computes the target from the DETECTED extension even when the original name has multiple dots", async () => {
+      moveExactImpl = (pairs) => pairs.map(([, to]) => ({ path: to, ok: true, error: "" }));
+      await scanOneHit({ path: "/repo/archive.tar.gz", claimed_ext: "gz", detected_label: "PDF document", detected_ext: "pdf" });
+
+      await fireEvent.click(screen.getByTestId("fh-fix-btn"));
+
+      // Only the LAST extension segment is replaced — the stem keeps the rest of the name intact.
+      expect(moveExactCalls).toEqual([[["/repo/archive.tar.gz", "/repo/archive.tar.pdf"]]]);
+    });
+
+    it("does NOT navigate/close the dialog when the fix button is clicked (stopPropagation from the row's reveal click)", async () => {
+      moveExactImpl = (pairs) => pairs.map(([, to]) => ({ path: to, ok: true, error: "" }));
+      const { component } = await scanOneHit({ path: "/repo/photo.jpg", claimed_ext: "jpg", detected_label: "Windows executable/library", detected_ext: "exe" });
+      const navigated: string[] = [];
+      let closed = false;
+      component.$on("navigate", (e: CustomEvent<string>) => navigated.push(e.detail));
+      component.$on("close", () => (closed = true));
+
+      await fireEvent.click(screen.getByTestId("fh-fix-btn"));
+
+      expect(navigated).toEqual([]);
+      expect(closed).toBe(false);
+    });
+
+    it("surfaces a backend refusal (e.g. target already exists) inline and does NOT remove the row", async () => {
+      moveExactImpl = (pairs) => pairs.map(([, to]) => ({ path: to, ok: false, error: `"${to.split("/").pop()}" already exists` }));
+      await scanOneHit({ path: "/repo/photo.jpg", claimed_ext: "jpg", detected_label: "Windows executable/library", detected_ext: "exe" });
+
+      await fireEvent.click(screen.getByTestId("fh-fix-btn"));
+
+      await waitFor(() => expect(screen.getByTestId("fh-fix-error")).toBeTruthy());
+      expect(screen.getByTestId("fh-fix-error").textContent).toContain("already exists");
+      // The row is NOT removed on failure — never a silent no-op.
+      expect(screen.getByTestId("fh-row")).toBeTruthy();
+      expect(screen.getByText("photo.jpg")).toBeTruthy();
+    });
+
+    it("surfaces a rejected/thrown move_exact call inline and does NOT remove the row", async () => {
+      moveExactImpl = () => {
+        throw new Error("permission denied");
+      };
+      await scanOneHit({ path: "/repo/photo.jpg", claimed_ext: "jpg", detected_label: "Windows executable/library", detected_ext: "exe" });
+
+      await fireEvent.click(screen.getByTestId("fh-fix-btn"));
+
+      await waitFor(() => expect(screen.getByTestId("fh-fix-error")).toBeTruthy());
+      expect(screen.getByTestId("fh-fix-error").textContent).toContain("permission denied");
+      expect(screen.getByTestId("fh-row")).toBeTruthy();
+    });
   });
 });
