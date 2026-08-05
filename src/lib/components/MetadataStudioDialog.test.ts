@@ -184,3 +184,77 @@ describe("MetadataStudioDialog batch ops (CPE-1326)", () => {
     expect(writeEditsCalls).toEqual([expectedEdits, expectedEdits]);
   });
 });
+
+// CPE-1327: per-field revert + "Reset all edits" — pure client-side discards of staged edits. Neither
+// must ever call metadataWrite or checkpointCreate (they never save or checkpoint), and per-field revert
+// must leave every OTHER field's pending edit untouched (reuses the CPE-1326 explicit-`edited`
+// reactivity pattern, so the DOM input re-renders from the fresh `edited` reference).
+describe("MetadataStudioDialog per-field revert + reset-all edits (CPE-1327)", () => {
+  it("shows a revert control only on a dirty field, and clicking it restores just that field", async () => {
+    metaFields = fields2;
+    render(MetadataStudioDialog, { entries: [makeEntry("/repo/music/song.mp3")] });
+    await screen.findByDisplayValue("Old Title");
+
+    // No revert control before any edit is made.
+    expect(screen.queryByLabelText(/Revert Title/)).toBeNull();
+    expect(screen.queryByLabelText(/Revert Artist/)).toBeNull();
+
+    const titleInput = screen.getByLabelText("Title") as HTMLInputElement;
+    const artistInput = screen.getByLabelText("Artist") as HTMLInputElement;
+    await fireEvent.input(titleInput, { target: { value: "New Title" } });
+    await fireEvent.input(artistInput, { target: { value: "New Artist" } });
+
+    // Both fields are now dirty and each shows its own revert control.
+    expect(titleInput.value).toBe("New Title");
+    expect(artistInput.value).toBe("New Artist");
+    const revertTitle = screen.getByLabelText(/Revert Title/);
+    expect(screen.getByLabelText(/Revert Artist/)).toBeTruthy();
+
+    await fireEvent.click(revertTitle);
+
+    // Title is back to its loaded value and its revert control disappears; Artist's edit is untouched.
+    expect(titleInput.value).toBe("Old Title");
+    expect(screen.queryByLabelText(/Revert Title/)).toBeNull();
+    expect(artistInput.value).toBe("New Artist");
+    expect(screen.getByLabelText(/Revert Artist/)).toBeTruthy();
+
+    // No write or checkpoint was triggered by the revert.
+    expect(writeCalls).toEqual([]);
+    expect(checkpointCalls).toEqual([]);
+  });
+
+  it("'Reset all edits' clears every pending edit back to loaded values, across the whole applyToAll selection, without writing to disk", async () => {
+    metaFields = fields2;
+    render(MetadataStudioDialog, {
+      entries: [makeEntry("/repo/music/a.mp3"), makeEntry("/repo/music/b.mp3")],
+    });
+    await screen.findByDisplayValue("Old Title");
+
+    await fireEvent.click(screen.getByLabelText(/Apply to all/));
+    await fireEvent.click(screen.getByText("Strip editable metadata"));
+
+    const titleInput = screen.getByLabelText("Title") as HTMLInputElement;
+    const artistInput = screen.getByLabelText("Artist") as HTMLInputElement;
+    expect(titleInput.value).toBe("");
+    expect(artistInput.value).toBe("");
+
+    await fireEvent.click(screen.getByText("Reset all edits"));
+
+    // Every field is restored to its loaded value.
+    expect(titleInput.value).toBe("Old Title");
+    expect(artistInput.value).toBe("Old Artist");
+    expect(screen.queryByLabelText(/Revert Title/)).toBeNull();
+    expect(screen.queryByLabelText(/Revert Artist/)).toBeNull();
+
+    // Save is now disabled (nothing pending) and neither metadataWrite nor checkpointCreate ever fired.
+    expect((screen.getByText("Save") as HTMLButtonElement).disabled).toBe(true);
+    expect(writeCalls).toEqual([]);
+    expect(checkpointCalls).toEqual([]);
+  });
+
+  it("does not offer 'Reset all edits' when there are no pending edits", async () => {
+    render(MetadataStudioDialog, { entries: [makeEntry("/repo/music/song.mp3")] });
+    await screen.findByDisplayValue("Old Title");
+    expect(screen.queryByText("Reset all edits")).toBeNull();
+  });
+});

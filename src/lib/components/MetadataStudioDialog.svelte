@@ -11,7 +11,7 @@
   import { createEventDispatcher, onMount } from "svelte";
   import { unwrap } from "../invoke";
   import { commands, type MetaField } from "../bindings.gen";
-  import { joinFieldKey, buildMetaEdits, stageFieldEdits } from "../metaEdits";
+  import { joinFieldKey, buildMetaEdits, stageFieldEdits, isFieldDirty, revertFieldEdit } from "../metaEdits";
   import { parentDir } from "../contentSearch";
   import Icon from "./Icon.svelte";
   import { t } from "../i18n";
@@ -129,6 +129,24 @@
     applyToAll = true;
   }
 
+  /** Per-field revert (CPE-1327): discard just this field's pending edit, restoring the value loaded from
+   *  disk. Mirrors CPE-1326's reactivity fix — reassign `edited` to a new record (via `revertFieldEdit`)
+   *  rather than mutating it, so the bound input picks up the change via `currentValue(f, edited)`. This
+   *  never writes to disk and never touches the CPE-1325 checkpoint — it's a pure client-side discard. */
+  function revertField(f: MetaField) {
+    if (saving) return;
+    edited = revertFieldEdit(f, edited);
+  }
+
+  /** "Reset all edits" (CPE-1327): discard every pending edit — across the whole selection when
+   *  applyToAll is on, since edits are staged once in `edited` and applied uniformly to `targets` at save
+   *  time (the same shared state CPE-1326's batch ops stage into). No disk write, no checkpoint — this
+   *  only clears client-side staged state back to the loaded-from-disk values. */
+  function resetAllEdits() {
+    if (saving || !dirty) return;
+    edited = {};
+  }
+
   async function save() {
     if (!primary || !dirty || saving) return;
     const edits = buildEdits();
@@ -214,15 +232,28 @@
 
         <div class="fields">
           {#each shown as f (ekey(f))}
-            <div class="row" class:changed={ekey(f) in edited}>
+            <div class="row" class:changed={isFieldDirty(f, edited)}>
               <label class="k" for={`mf-${ekey(f)}`}>{f.key}</label>
               {#if editable(f)}
-                <input
-                  id={`mf-${ekey(f)}`}
-                  class="v"
-                  value={currentValue(f, edited)}
-                  on:input={(e) => onEdit(f, e.currentTarget.value)}
-                />
+                <div class="vwrap">
+                  <input
+                    id={`mf-${ekey(f)}`}
+                    class="v"
+                    value={currentValue(f, edited)}
+                    on:input={(e) => onEdit(f, e.currentTarget.value)}
+                  />
+                  {#if isFieldDirty(f, edited)}
+                    <button
+                      type="button"
+                      class="revert"
+                      title={$t("studio.revertFieldHint")}
+                      aria-label={$t("studio.revertFieldAria", { field: f.key })}
+                      on:click={() => revertField(f)}
+                    >
+                      <Icon name="refresh" size={13} />
+                    </button>
+                  {/if}
+                </div>
               {:else}
                 <span class="v ro" title={writable ? $t("studio.fieldReadonly") : $t("studio.viewOnly")}>
                   {currentValue(f, edited) || "—"}
@@ -259,6 +290,16 @@
               {$t("studio.copyFromFirst")}
             </button>
           {/if}
+        {/if}
+        {#if writable && dirty}
+          <button
+            class="btn ghost"
+            disabled={saving}
+            title={$t("studio.resetAllHint")}
+            on:click={resetAllEdits}
+          >
+            {$t("studio.resetAll")}
+          </button>
         {/if}
         {#if notice}<span class="notice">{notice}</span>{/if}
       </div>
@@ -401,7 +442,17 @@
   .v {
     font-size: 13px;
   }
+  /* Wraps the input + its per-field revert button (CPE-1327) so the revert control sits inline without
+     disturbing the row's 150px/1fr grid — the wrapper fills the 1fr column exactly as the input alone
+     used to, and lays its two children out in a row internally. */
+  .vwrap {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+  }
   input.v {
+    flex: 1 1 auto;
+    min-width: 0;
     height: 30px;
     padding: 0 10px;
     border: 1px solid var(--border-strong);
@@ -415,6 +466,27 @@
   }
   .row.changed input.v {
     border-color: var(--accent);
+  }
+  /* Per-field revert (CPE-1327): only rendered while the field is dirty, so no layout reserved for it
+     on untouched rows. Small icon-only ghost button, consistent with the other inline affordances. */
+  .revert {
+    flex: 0 0 auto;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 24px;
+    height: 24px;
+    padding: 0;
+    border: 1px solid transparent;
+    border-radius: var(--radius);
+    background: transparent;
+    color: var(--text-dim);
+    cursor: pointer;
+  }
+  .revert:hover {
+    color: var(--text);
+    border-color: var(--border);
+    background: var(--surface-alt);
   }
   .v.ro {
     display: inline-flex;
