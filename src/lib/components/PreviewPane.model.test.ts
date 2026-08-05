@@ -44,6 +44,7 @@ const stlInfo = {
   vertex_count: 8,
   bounding_box: [0, 0, 0, 2, 3, 4] as [number, number, number, number, number, number],
   ascii: true,
+  mesh_count: 0,
 };
 
 const objInfo = {
@@ -52,6 +53,30 @@ const objInfo = {
   vertex_count: 8,
   bounding_box: [-1, -1, -1, 1, 1, 1] as [number, number, number, number, number, number],
   ascii: true,
+  mesh_count: 0,
+};
+
+// CPE-1336: glTF/GLB never has a triangle/vertex count (see ModelInfo doc comment) — it gets its own
+// "Meshes" row instead, and the triangle/face + vertex rows must be suppressed rather than showing a
+// misleading "0 Triangles" / "0 Vertices".
+const gltfInfo = {
+  format: "Gltf" as const,
+  triangle_count: 0,
+  vertex_count: 0,
+  bounding_box: [-2, -1, -1, 2, 1, 1] as [number, number, number, number, number, number],
+  ascii: true,
+  mesh_count: 3,
+};
+
+// A glTF with no POSITION accessor min/max carries an all-zero bounding box — the dimensions row
+// must be omitted entirely rather than showing "0 × 0 × 0".
+const gltfInfoZeroBbox = {
+  format: "Gltf" as const,
+  triangle_count: 0,
+  vertex_count: 0,
+  bounding_box: [0, 0, 0, 0, 0, 0] as [number, number, number, number, number, number],
+  ascii: false,
+  mesh_count: 2,
 };
 
 describe("PreviewPane — 3D-model geometry section (CPE-1334)", () => {
@@ -123,5 +148,42 @@ describe("PreviewPane — 3D-model geometry section (CPE-1334)", () => {
     const section = container.querySelector('[data-testid="model-info-section"]')!;
     expect(section.textContent).toContain("OBJ"); // the second (current) selection's format
     expect(section.textContent).not.toContain("STL"); // the stale first response was dropped
+  });
+
+  // CPE-1336: CPE-1335 added the Gltf format + mesh_count, but the pane didn't handle either — a
+  // glTF/GLB file rendered a blank format row and a misleading "0 Triangles".
+  it("renders glTF as 'glTF' with a Meshes count + dimensions, and suppresses the triangle/vertex rows", async () => {
+    readModelInfoMock.mockResolvedValueOnce({ status: "ok", data: gltfInfo });
+
+    const { container } = render(PreviewPane, {
+      entry: entry({ name: "scene.gltf", path: "/models/scene.gltf", extension: "gltf" }),
+    });
+
+    await waitFor(() => expect(container.querySelector('[data-testid="model-info-section"]')).toBeTruthy());
+    const section = container.querySelector('[data-testid="model-info-section"]')!;
+    expect(section.textContent).toContain("glTF");
+    expect(section.textContent).toContain("Meshes");
+    expect(section.textContent).toContain("3"); // mesh_count
+    expect(section.textContent).toContain("4 × 2 × 2"); // bounding-box DIMENSIONS (max-min)
+    expect(section.textContent).not.toContain("Triangles");
+    expect(section.textContent).not.toContain("Vertices");
+    expect(section.textContent).not.toContain("0 Triangles");
+    expect(section.textContent).not.toContain("0 Vertices");
+  });
+
+  it("omits the Dimensions row for a glTF with an all-zero bounding box (no POSITION accessor extrema)", async () => {
+    readModelInfoMock.mockResolvedValueOnce({ status: "ok", data: gltfInfoZeroBbox });
+
+    const { container } = render(PreviewPane, {
+      entry: entry({ name: "scene.glb", path: "/models/scene.glb", extension: "glb" }),
+    });
+
+    await waitFor(() => expect(container.querySelector('[data-testid="model-info-section"]')).toBeTruthy());
+    const section = container.querySelector('[data-testid="model-info-section"]')!;
+    expect(section.textContent).toContain("glTF");
+    expect(section.textContent).toContain("Meshes");
+    expect(section.textContent).toContain("2"); // mesh_count
+    expect(section.textContent).not.toContain("Dimensions");
+    expect(section.textContent).not.toContain("0 × 0 × 0");
   });
 });
