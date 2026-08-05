@@ -945,3 +945,26 @@ locally-cargo/gui-verifiable, no-user-resource work remains. Remaining candidate
 accessor-deref for real tri/vertex counts — deliberately deferred, low value) or USER-GATED (AI model key,
 Mac, signing cert, SFTP/Docker/removable-hardware, or a NEEDS-BACKEND/heavy-dep format reader HEIC/DICOM/RAR).
 Library: [[clean-gui-vein-tapped-after-declutter-2026-08-05]], [[clean-backend-vein-3d-reader-2026-08-05]].
+
+## 2026-08-05 (run 3, keep-going ×3) — 3D reader rounded out to 5 formats (4 more tickets, 18 total)
+User kept re-issuing "keep going" → extended the shipped 3D reader with genuinely-clean, zero-dep, cargo-testable
+format work (the incremental format-support vein the app has always mined):
+- **CPE-1337** PLY (Stanford Polygon Format) reader — 4th format; header declares vertex/face counts; ASCII bbox
+  computed, binary bbox honestly zeroed. FileType::Ply exact magic. (#633)
+- **CPE-1338** folded `read_model_info` into the cross-cutting `parser_panic_safety.rs` fuzz battery (was a gap
+  the CPE-1337 reviewer flagged) — 3D parser panic-safety now pinned. (#634)
+- **CPE-1339** real glTF/GLB vertex+triangle counts from accessor `count` fields (no buffer deref needed after
+  all) — mode-aware (TRIANGLES n/3, STRIP/FAN n−2, points/lines 0). Replaced the honest-0 placeholder. (#636)
+- **CPE-1340** frontend PLY rendering (MODEL_EXTS + "PLY" label + "Faces" count). (#635)
+- INCIDENT (recovered, lesson reinforced): CPE-1339's Backend CI failed ONLY on the Typed-bindings drift guard —
+  the worker edited the `ModelInfo` field DOC COMMENTS (a specta::Type), which regenerates bindings.gen.ts even
+  though the shape was unchanged; worker wrongly concluded "no regen needed". Foreman regenerated + pushed → green.
+  REINFORCES [[regen-specta-bindings-on-struct-change]]: regen after ANY edit to a specta::Type, INCLUDING comments.
+- Net: 18 tickets this session (CPE-1323-1340), 8 epics. 3D reader = STL/OBJ/glTF/GLB/PLY, honest counts, full UI,
+  fuzz-pinned. Budget ~136/200 at checkpoint (approaching the ~150 reset line — hence this clean hand-off).
+
+## FRONTIER (2026-08-05, after 3D lane) — clean vein down to heavy-dep/gold-plating
+The 5 common mesh formats are done. Remaining CLEAN incremental candidates are thin: more file_type magic
+signatures (fonts ttf/otf/woff — small, real, zero-dep — the ONE remaining clean-ish slice), or gold-plating.
+Everything of scale is USER-GATED (AI model key, Mac, cert, SFTP/Docker/hardware) or NEEDS a heavy/licensed dep
+(HEIC/DICOM/RAR/camera-RAW). See [[clean-backend-vein-3d-reader-2026-08-05]], [[clean-gui-vein-tapped-after-declutter-2026-08-05]].
