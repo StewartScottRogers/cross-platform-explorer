@@ -105,6 +105,19 @@ describe("FileHealthDialog — Orphan sidecars tab (CPE-1316)", () => {
     await finish(0, 20);
   });
 
+  // CPE-1319 (Visual Critic defect 2): orphan rows previously had NO status badge at all — icon+name+path
+  // only — inconsistent with the dangling tab's "Missing target"/"Cyclic link" reason pill and the
+  // mismatch tab's reason. Every orphan row must now carry a short, consistent "Orphaned" status badge.
+  it("renders a consistent Orphaned status badge on every row", async () => {
+    await openOrphanTab();
+    await fireEvent.click(screen.getByTestId("fh-scan-btn"));
+    emit(0, ["/repo/movie.srt"]);
+    await finish(0, 1);
+
+    const badge = await screen.findByTestId("fh-reason");
+    expect(badge.textContent?.trim()).toBe("Orphaned");
+  });
+
   it("clears loading on an EMPTY result even though no batch is streamed", async () => {
     await openOrphanTab();
     await fireEvent.click(screen.getByTestId("fh-scan-btn"));
