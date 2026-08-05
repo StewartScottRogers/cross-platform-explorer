@@ -725,3 +725,10 @@ pub mod inspect;
 /// visible-column ids chosen for a folder, persisted as `column_config.json` in the app config dir.
 /// Mirrors the `folder_template.rs` store; string column-ids only, no dependency on `column_extract`.
 pub mod column_config;
+
+/// 3D-model geometry/stats reader (CPE-1333, epic CPE-118 "Preview/edit support for 3D models"). Reads
+/// binary/ASCII STL and Wavefront OBJ from an in-memory byte slice into a triangle/vertex count + bounding
+/// box — the metadata-pane fallback the (blocked) interactive-viewer epic's acceptance criteria call for,
+/// deliverable without the heavy WebGL dependency the full viewer needs. Pure, std-only, no new
+/// dependencies.
+pub mod model_3d;

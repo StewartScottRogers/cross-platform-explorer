@@ -910,6 +910,22 @@ async fn data_browser_query(
         .await.map_err(|e| e.to_string())?
 }
 
+/// 3D-model geometry/stats reader (CPE-1333, epic CPE-118): reads a binary/ASCII STL or Wavefront OBJ's
+/// triangle/vertex counts + bounding box for the metadata-pane fallback the (blocked) interactive-viewer
+/// epic's acceptance criteria call for. Thin async dispatcher into `cpe_server::model_3d`; capped by the
+/// same preview size guard the other whole-file info readers use.
+#[tauri::command]
+#[cfg_attr(feature = "specta-bindings", specta::specta)]
+async fn read_model_info(path: String) -> Result<Option<cpe_server::model_3d::ModelInfo>, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        ensure_previewable_size(&path, PREVIEW_INFO_MAX_BYTES)?;
+        let bytes = fs::read(&path).map_err(|e| e.to_string())?;
+        Ok(cpe_server::model_3d::read_model_info(&bytes))
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
 /// Decode an image the webview can't render natively (TIFF, PSD) to a PNG
 /// `data:` URL the <img> tag can show (CPE-099/101). PSD uses the psd crate's
 /// flattened composite; TIFF uses the image crate. Capped by the source reader,
@@ -9744,6 +9760,7 @@ pub fn run() {
             data_browser_sources,
             data_browser_page,
             data_browser_query,
+            read_model_info,
             read_image_data_url,
             thumbnail,
             thumbnails_stream,
@@ -10552,6 +10569,7 @@ pub fn export_bindings(out: &std::path::Path) -> Result<(), String> {
         data_browser_sources,
         data_browser_page,
         data_browser_query,
+        read_model_info,
         read_image_data_url,
         thumbnail,
         thumbnails_stream,
