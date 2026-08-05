@@ -82,6 +82,43 @@
     activeTab = initialTab;
   }
 
+  /** Exclude-glob patterns (CPE-1323), SHARED across all four tabs — one list, not per-tab. The
+   *  backend already accepts `excludes: string[]` on every scan command (CPE-1302 pruned matching
+   *  directories/entries during the walk); this was the missing UI to configure it — every call site
+   *  below was hardcoding `excludes: []`. Each `run*()` reads this array at the moment Scan/Rescan is
+   *  clicked, so editing excludes never retroactively affects an in-flight or already-rendered scan —
+   *  it only takes effect on the NEXT scan, same as the ticket requires. Mirrors `TagEditor.svelte`'s
+   *  chip-input interaction (Enter adds, dedupe, empty-input Backspace peels the last chip) rather than
+   *  inventing a new pattern. */
+  let excludes: string[] = [];
+  let excludeDraft = "";
+
+  /** Quick-add suggestions (CPE-1323 spec) — add ON CLICK only, never pre-applied, so a user who never
+   *  touches this UI still gets the old "scan everything" behavior. Filtered against the current
+   *  `excludes` list so an already-added suggestion doesn't linger as a redundant, no-op chip. */
+  const EXCLUDE_SUGGESTIONS = ["node_modules", ".git", "target"];
+
+  function addExclude(pattern?: string) {
+    const value = (pattern ?? excludeDraft).trim();
+    if (value && !excludes.includes(value)) excludes = [...excludes, value];
+    if (pattern === undefined) excludeDraft = "";
+  }
+
+  function removeExclude(pattern: string) {
+    excludes = excludes.filter((x) => x !== pattern);
+  }
+
+  function onExcludeKey(e: KeyboardEvent) {
+    if (e.key === "Enter") {
+      e.preventDefault();
+      addExclude();
+    } else if (e.key === "Backspace" && excludeDraft === "" && excludes.length > 0) {
+      // Empty input + Backspace peels the last chip, like TagEditor's tag input.
+      e.preventDefault();
+      excludes = excludes.slice(0, -1);
+    }
+  }
+
   /** A rendered dangling/cyclic link with a stable `id` for the `{#each}` key (batches only carry
    *  `path`/`reason`). */
   interface LinkRow {
@@ -128,7 +165,7 @@
       // SimilarImagesDialog / the STREAMING convention.
       const final = await rawInvoke<DanglingReport>("find_dangling_links_stream", {
         root,
-        excludes: [],
+        excludes,
         streamId: gen,
         onLink: channel,
       });
@@ -206,7 +243,7 @@
       };
       const final = await rawInvoke<MismatchReport>("find_type_mismatches_stream", {
         root,
-        excludes: [],
+        excludes,
         streamId: gen,
         onHit: channel,
       });
@@ -309,7 +346,7 @@
       const final = await rawInvoke<OrphanSidecarResult>("find_orphan_sidecars_stream", {
         root,
         recursive: true,
-        excludes: [],
+        excludes,
         streamId: gen,
         onOrphan: channel,
       });
@@ -358,7 +395,7 @@
       // Plain awaited `invoke` (busy-cursor wrapper from `../invoke`, NOT `rawInvoke`) — this tab is
       // deliberately NOT a `_stream` command (CPE-1317's stated scope), so it opts INTO the busy cursor
       // like any other blocking call, unlike the three streaming tabs above which opt out by design.
-      const result = await invoke<EmptyDirsReport>("find_empty_dirs", { root, excludes: [] });
+      const result = await invoke<EmptyDirsReport>("find_empty_dirs", { root, excludes });
       if (gen !== emptyGen) return; // superseded by a newer rescan — drop this stale response
       emptyDirs = result.dirs.map((p) => ({ id: emptyNextId++, path: p }));
       emptyScanned = result.scanned;
@@ -407,6 +444,51 @@
           {$t(tab.labelKey)}
         </button>
       {/each}
+    </div>
+
+    <!-- CPE-1323: exclude-glob configuration, SHARED across all four tabs (one list, not per-tab) —
+         sits between the tab strip and each tab's body so it's visible no matter which tab is active.
+         Editing this never triggers a scan; each tab's Scan/Rescan button reads `excludes` at click
+         time (see `run`/`runMismatch`/`runOrphan`/`runEmpty` above). -->
+    <div class="excludes" data-testid="fh-excludes">
+      <span class="excludes-label">{$t("fh.excludeLabel")}</span>
+      <div class="excludes-row">
+        <div class="chips">
+          {#each excludes as pattern (pattern)}
+            <span class="chip">
+              <span class="chip-text" title={pattern}>{pattern}</span>
+              <button
+                class="chip-x"
+                data-testid="fh-exclude-remove"
+                title={$t("fh.excludeRemove")}
+                aria-label={$t("fh.excludeRemove")}
+                on:click={() => removeExclude(pattern)}
+              >
+                <Icon name="close" size={11} />
+              </button>
+            </span>
+          {/each}
+          {#if excludes.length === 0}
+            <span class="empty">{$t("fh.excludeEmpty")}</span>
+          {/if}
+        </div>
+        <input
+          class="exclude-input"
+          data-testid="fh-exclude-input"
+          bind:value={excludeDraft}
+          spellcheck="false"
+          aria-label={$t("fh.excludeAddLabel")}
+          placeholder={$t("fh.excludeAddPlaceholder")}
+          on:keydown={onExcludeKey}
+        />
+      </div>
+      <div class="suggest-row">
+        <span class="suggest-label">{$t("fh.excludeSuggest")}</span>
+        {#each EXCLUDE_SUGGESTIONS.filter((s) => !excludes.includes(s)) as s (s)}
+          <button class="suggest-chip" data-testid="fh-exclude-suggest" on:click={() => addExclude(s)}>+ {s}</button>
+        {/each}
+        <span class="exclude-hint">{$t("fh.excludeHint")}</span>
+      </div>
     </div>
 
     {#if activeTab === "dangling"}
@@ -691,4 +773,35 @@
   .fix-error { font-size: 11px; color: var(--danger); line-height: 1.4; white-space: normal; overflow-wrap: anywhere; }
   .dim { color: var(--text-faint); }
   .err { color: var(--danger); }
+
+  /* CPE-1323: exclude-glob configuration, shared above all four tab bodies. */
+  .excludes { padding: 4px 0 10px; margin-bottom: 8px; border-bottom: 1px solid var(--border); }
+  .excludes-label { display: block; font-size: 11px; color: var(--text-dim); margin-bottom: 6px; }
+  .excludes-row { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
+  /* Pills reflow: the container wraps onto more rows and grows; each pill keeps its text on one line
+     and doesn't shrink (CLAUDE.md's tick-tacks rule) — mirrors TagEditor.svelte's chip pattern. */
+  .chips { display: flex; flex-wrap: wrap; gap: 6px; flex: 1 1 auto; min-width: 140px; }
+  .chip {
+    display: inline-flex; align-items: center; gap: 4px; flex: 0 0 auto; max-width: 100%;
+    padding: 2px 4px 2px 8px; background: var(--surface-alt); border: 1px solid var(--border);
+    border-radius: 999px; font-size: 12px; white-space: nowrap;
+  }
+  .chip-text { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 180px; }
+  .chip-x { display: grid; place-items: center; width: 16px; height: 16px; border-radius: 999px; color: var(--text-dim); flex: 0 0 auto; }
+  .chip-x:hover { background: var(--hover); color: var(--text); }
+  .empty { color: var(--text-faint); font-size: 12px; align-self: center; }
+  .exclude-input {
+    flex: 1 1 160px; min-width: 140px; height: 26px; padding: 0 8px; font: inherit; font-size: 12px;
+    color: var(--text); background: var(--surface); border: 1px solid var(--border-strong);
+    border-radius: var(--radius); outline: none;
+  }
+  .exclude-input:focus { border-color: var(--accent); }
+  .suggest-row { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin-top: 6px; }
+  .suggest-label { flex: 0 0 auto; font-size: 11px; color: var(--text-faint); }
+  .suggest-chip {
+    flex: 0 0 auto; white-space: nowrap; font-size: 11px; padding: 2px 8px; border-radius: 999px;
+    border: 1px dashed var(--border-strong); background: var(--surface); color: var(--text-dim);
+  }
+  .suggest-chip:hover { background: var(--surface-alt); color: var(--text); border-style: solid; }
+  .exclude-hint { flex: 1 1 auto; font-size: 11px; color: var(--text-faint); text-align: right; }
 </style>

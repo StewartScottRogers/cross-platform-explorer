@@ -87,6 +87,20 @@ describe("FileHealthDialog — Orphan sidecars tab (CPE-1316)", () => {
     );
   });
 
+  // CPE-1323: shared exclude UI — a pattern added on this tab reaches this tab's scan call.
+  it("a configured exclude pattern (CPE-1323) is passed to find_orphan_sidecars_stream", async () => {
+    await openOrphanTab();
+    const input = screen.getByTestId("fh-exclude-input");
+    await fireEvent.input(input, { target: { value: ".git" } });
+    await fireEvent.keyDown(input, { key: "Enter" });
+
+    await fireEvent.click(screen.getByTestId("fh-scan-btn"));
+    expect(invoke).toHaveBeenCalledWith(
+      "find_orphan_sidecars_stream",
+      expect.objectContaining({ excludes: [".git"] }),
+    );
+  });
+
   it("flips loading off after the first batch and APPENDS (not replaces) subsequent batches", async () => {
     await openOrphanTab();
     await fireEvent.click(screen.getByTestId("fh-scan-btn"));

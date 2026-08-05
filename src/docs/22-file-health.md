@@ -16,6 +16,19 @@ sidecars…* / *Find empty folders…*) or the **command palette** (Ctrl/Cmd+Shi
 entries). Each entry opens the panel straight to its own tab — even if the panel is already open on a
 different tab — and every scan is scoped to the folder you're currently in.
 
+## Excluding folders from a scan
+
+Below the tab strip is an **Exclude** box, shared across all four tabs — one exclude list, not a
+separate one per tab. Type a glob pattern (for example `node_modules`, `*.log`, or `.git`) and press
+**Enter** to add it as a pill; click a pill's **×** to remove it. **Quick add** offers one-click chips
+for the three most common noisy folders — `node_modules`, `.git`, `target` — which add nothing until
+you actually click them, so a scan you run without touching this box behaves exactly as before.
+
+Excludes take effect on your **next** Scan or Rescan — editing the list never re-runs a scan by itself,
+and a scan already in progress keeps using whatever excludes were active when you clicked Scan. A
+matching folder is pruned entirely (nothing inside it is walked or reported), which both speeds up the
+scan and keeps noisy directories like `node_modules` out of the results.
+
 ## Dangling links
 
 A symlink is **dangling** when it points at a target that no longer exists — often left behind after the

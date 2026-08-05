@@ -50,6 +50,17 @@ describe("FileHealthDialog — Empty folders tab (CPE-1317)", () => {
     expect(Object.keys(call).sort()).toEqual(["excludes", "root"]);
   });
 
+  // CPE-1323: shared exclude UI — a pattern added on this tab reaches find_empty_dirs too.
+  it("a configured exclude pattern (CPE-1323) is passed to find_empty_dirs", async () => {
+    await openEmptyTab();
+    const input = screen.getByTestId("fh-exclude-input");
+    await fireEvent.input(input, { target: { value: "target" } });
+    await fireEvent.keyDown(input, { key: "Enter" });
+
+    await fireEvent.click(screen.getByTestId("fh-scan-btn"));
+    expect(invoke).toHaveBeenCalledWith("find_empty_dirs", { root: "/repo", excludes: ["target"] });
+  });
+
   it("shows loading, then renders results from the single resolved response (no batching)", async () => {
     await openEmptyTab();
     await fireEvent.click(screen.getByTestId("fh-scan-btn"));

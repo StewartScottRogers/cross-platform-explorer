@@ -170,3 +170,93 @@ describe("FileHealthDialog — Dangling links tab (CPE-1315)", () => {
     expect(screen.getAllByTestId("fh-row").length).toBe(1);
   });
 });
+
+// CPE-1323: the exclude-glob configuration UI, shared across all four tabs. The backend already
+// accepts `excludes: string[]` on every scan command (CPE-1302) — this suite proves the UI actually
+// configures it: typed/added patterns render as removable pills, a quick-add suggestion only applies
+// on click (never pre-applied), and the CONFIGURED array — not a hardcoded `[]` — is what reaches the
+// scan command, only as of the NEXT Scan/Rescan click.
+describe("FileHealthDialog — exclude-glob configuration (CPE-1323)", () => {
+  it("typing a pattern and pressing Enter adds a removable pill, with no scan triggered", async () => {
+    render(FileHealthDialog, { root: "/repo" });
+    const input = screen.getByTestId("fh-exclude-input");
+
+    await fireEvent.input(input, { target: { value: "node_modules" } });
+    await fireEvent.keyDown(input, { key: "Enter" });
+
+    expect(screen.getByText("node_modules")).toBeTruthy();
+    expect(screen.getAllByTestId("fh-exclude-remove").length).toBe(1);
+    expect(invoke).not.toHaveBeenCalled(); // editing excludes never runs a scan by itself
+  });
+
+  it("a configured exclude pattern is passed to the scan call, replacing the old hardcoded []", async () => {
+    render(FileHealthDialog, { root: "/repo" });
+    const input = screen.getByTestId("fh-exclude-input");
+    await fireEvent.input(input, { target: { value: ".git" } });
+    await fireEvent.keyDown(input, { key: "Enter" });
+
+    await fireEvent.click(screen.getByTestId("fh-scan-btn"));
+    expect(invoke).toHaveBeenCalledWith(
+      "find_dangling_links_stream",
+      expect.objectContaining({ root: "/repo", excludes: [".git"], streamId: 1 }),
+    );
+  });
+
+  it("quick-add suggestion chips add on click only — NOT pre-applied to a scan run without touching them", async () => {
+    render(FileHealthDialog, { root: "/repo" });
+
+    // A scan run without ever touching the exclude UI still gets an empty excludes array.
+    await fireEvent.click(screen.getByTestId("fh-scan-btn"));
+    expect(invoke).toHaveBeenCalledWith(
+      "find_dangling_links_stream",
+      expect.objectContaining({ excludes: [] }),
+    );
+  });
+
+  it("clicking a quick-add suggestion chip adds that pattern as a pill", async () => {
+    render(FileHealthDialog, { root: "/repo" });
+    const suggestions = screen.getAllByTestId("fh-exclude-suggest");
+    const nodeModules = suggestions.find((b) => b.textContent?.includes("node_modules"));
+    expect(nodeModules).toBeTruthy();
+
+    await fireEvent.click(nodeModules!);
+    expect(screen.getByText("node_modules")).toBeTruthy();
+
+    await fireEvent.click(screen.getByTestId("fh-scan-btn"));
+    expect(invoke).toHaveBeenCalledWith(
+      "find_dangling_links_stream",
+      expect.objectContaining({ excludes: ["node_modules"] }),
+    );
+  });
+
+  it("removing a pill drops it from the NEXT scan's excludes array", async () => {
+    render(FileHealthDialog, { root: "/repo" });
+    const input = screen.getByTestId("fh-exclude-input");
+    await fireEvent.input(input, { target: { value: "target" } });
+    await fireEvent.keyDown(input, { key: "Enter" });
+    expect(screen.getByText("target")).toBeTruthy();
+
+    await fireEvent.click(screen.getByTestId("fh-exclude-remove"));
+    expect(screen.queryByText("target")).toBeNull();
+
+    await fireEvent.click(screen.getByTestId("fh-scan-btn"));
+    expect(invoke).toHaveBeenCalledWith(
+      "find_dangling_links_stream",
+      expect.objectContaining({ excludes: [] }),
+    );
+  });
+
+  it("does not add a duplicate or blank pattern", async () => {
+    render(FileHealthDialog, { root: "/repo" });
+    const input = screen.getByTestId("fh-exclude-input");
+
+    await fireEvent.input(input, { target: { value: "dist" } });
+    await fireEvent.keyDown(input, { key: "Enter" });
+    await fireEvent.input(input, { target: { value: "dist" } });
+    await fireEvent.keyDown(input, { key: "Enter" });
+    expect(screen.getAllByTestId("fh-exclude-remove").length).toBe(1);
+
+    await fireEvent.keyDown(input, { key: "Enter" }); // blank draft — no-op
+    expect(screen.getAllByTestId("fh-exclude-remove").length).toBe(1);
+  });
+});
