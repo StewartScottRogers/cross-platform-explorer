@@ -92,6 +92,25 @@ describe("FileHealthDialog — cross-tab generation/cancel isolation (CPE-1316)"
     expect(cancels).toEqual([]);
   });
 
+  // CPE-1323: the exclude-glob list is ONE shared array, not per-tab — a pattern added while parked on
+  // one tab must still be visible (and still feed the scan call) after switching to another tab.
+  it("the exclude-glob list is shared across tabs — a pill added on one tab is still there (and still applied) on another", async () => {
+    render(FileHealthDialog, { root: "/repo" });
+    const input = screen.getByTestId("fh-exclude-input");
+    await fireEvent.input(input, { target: { value: "node_modules" } });
+    await fireEvent.keyDown(input, { key: "Enter" });
+    expect(screen.getByText("node_modules")).toBeTruthy();
+
+    await fireEvent.click(screen.getByTestId("fh-tab-mismatch"));
+    expect(screen.getByText("node_modules")).toBeTruthy(); // pill survived the tab switch
+
+    await fireEvent.click(screen.getByTestId("fh-scan-btn"));
+    expect(invoke).toHaveBeenCalledWith(
+      "find_type_mismatches_stream",
+      expect.objectContaining({ excludes: ["node_modules"] }),
+    );
+  });
+
   it("rescanning one tab cancels only that tab's PRIOR stream — the other two tabs' counters/cancels are untouched", async () => {
     render(FileHealthDialog, { root: "/repo" });
 

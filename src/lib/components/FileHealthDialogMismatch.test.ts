@@ -105,6 +105,21 @@ describe("FileHealthDialog — Type mismatch tab (CPE-1316)", () => {
     );
   });
 
+  // CPE-1323: the exclude-glob UI is SHARED across all four tabs — a pattern added while on this tab
+  // (or any other) must reach this tab's scan call too, not just the dangling tab's.
+  it("a configured exclude pattern (CPE-1323) is passed to find_type_mismatches_stream", async () => {
+    await openMismatchTab();
+    const input = screen.getByTestId("fh-exclude-input");
+    await fireEvent.input(input, { target: { value: "node_modules" } });
+    await fireEvent.keyDown(input, { key: "Enter" });
+
+    await fireEvent.click(screen.getByTestId("fh-scan-btn"));
+    expect(invoke).toHaveBeenCalledWith(
+      "find_type_mismatches_stream",
+      expect.objectContaining({ excludes: ["node_modules"] }),
+    );
+  });
+
   it("flips loading off after the first batch and APPENDS (not replaces) subsequent batches", async () => {
     await openMismatchTab();
     await fireEvent.click(screen.getByTestId("fh-scan-btn"));
