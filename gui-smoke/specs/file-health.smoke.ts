@@ -122,6 +122,33 @@ describe("CPE-1315/1316/1317 — headless GUI smoke: File Health dialog's 4 tabs
     await introScanBtn.waitForExist({ timeout: 5_000, timeoutMsg: "expected the intro Scan button to render" });
     await snap("file-health-intro");
 
+    // CPE-1331: fill the shared exclude-pill row (CPE-1323) via its real quick-add chip — the intro
+    // snap above only ever captured the EMPTY "no excludes yet" state (`.empty` placeholder text); this
+    // is the render-coverage gap this ticket closes. Click rather than type-and-Enter so the seeded
+    // pattern is deterministic and doesn't depend on synthetic key events landing correctly.
+    const excludeSuggestChip = await $('[data-testid="fh-exclude-suggest"]');
+    await excludeSuggestChip.waitForClickable({ timeout: 10_000, timeoutMsg: "expected an exclude quick-add chip to render" });
+    const suggestedPattern = await excludeSuggestChip.getText(); // e.g. "+ node_modules"
+    await excludeSuggestChip.click();
+
+    // Core assertion (CPE-1331): the quick-add chip's pattern now renders as a real FILLED exclude pill
+    // (`.chip`/`[data-testid="fh-exclude-remove"]`), not just the empty placeholder — the FALSIFIABLE
+    // check tied to this click. If `addExclude` regressed, the excludes container would still show only
+    // the `.empty` placeholder and no `fh-exclude-remove` chip-x would exist.
+    await browser.waitUntil(async () => (await $$('[data-testid="fh-exclude-remove"]').length) > 0, {
+      timeout: 10_000,
+      timeoutMsg: "expected a filled exclude pill to render after clicking a quick-add chip",
+    });
+    const excludesEl = await $('[data-testid="fh-excludes"]');
+    const excludesHtml = await excludesEl.getHTML({ includeSelectorTag: false });
+    expect(excludesHtml, `expected the exclude pill row to contain "${suggestedPattern.replace(/^\+\s*/, "")}"`).to.include(
+      suggestedPattern.replace(/^\+\s*/, ""),
+    );
+
+    // Visual Critic frame: the exclude row with a real, non-empty pill — the render-coverage gap this
+    // ticket closes (previously only ever captured empty).
+    await snap("file-health-excludes-filled");
+
     // --- Tab 1: dangling links (STREAMING find_dangling_links_stream, already active on open) ------
     if (!linkBadgeSupported) {
       // eslint-disable-next-line no-console

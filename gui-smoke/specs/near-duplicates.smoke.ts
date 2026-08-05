@@ -5,10 +5,13 @@
 // tmpDir, and asserts the two near-identical seeded .md files render as ONE group containing BOTH.
 //
 // `NearDuplicatesDialog` is a near-clone of the already-pinned `SimilarImagesDialog`
-// (similar-images.smoke.ts, CPE-1203): same dialog chrome, same grouped-results list. Unlike that
-// dialog, this one is deliberately **read-only** (no delete/Move-to-Bin action — CPE-1204's stated
-// scope), so there is no selection/keeper-guard assertion to mirror here; the spec dismisses via the
-// close button and never mutates the tmpDir.
+// (similar-images.smoke.ts, CPE-1203): same dialog chrome, same grouped-results list. CPE-1204's
+// original scope was read-only, but CPE-1324 added the same keeper-guarded cleanup flow
+// `SimilarImagesDialog` already has (a per-item checkbox + a "Move N to Recycle Bin" button, disabled
+// until a selection exists that still keeps at least one copy per group — see `keepsOnePerGroup` in
+// ../duplicates). CPE-1331 closes the render-coverage gap that follow-up left: this spec now also
+// checks ONE item's box and asserts the Move button flips from disabled to ENABLED, `snap()`-ing that
+// state — but it never clicks Move-to-Bin, so the seeded fixtures on disk are never mutated.
 //
 // The seeded fixture (wdio.conf.ts#seedNearDupDocsFixture) follows the same shape as `simhash.rs`'s
 // own `near_identical_text_is_closer_than_unrelated_text` unit test (a base paragraph, a lightly-edited
@@ -131,7 +134,35 @@ describe("CPE-1221 — headless GUI smoke: Find-similar-documents dialog groups 
     // CPE-1148/1149: capture the passing state (the grouped-results view) for the Visual Critic.
     await snap("near-duplicates");
 
-    // Read-only dialog (no delete action) — dismiss via the close button.
+    // CPE-1331: nothing is selected by default (CPE-1324's safety rail — see NearDuplicatesDialog's
+    // own header comment), so the Move button starts disabled.
+    const moveBtn = await $('[data-testid="nd-move-btn"]');
+    await moveBtn.waitForExist({ timeout: 5_000, timeoutMsg: "expected the Move-to-Bin button to render" });
+    expect(await moveBtn.isEnabled(), "expected Move-to-Bin to start disabled with nothing selected").to.equal(false);
+
+    // Check ONE item's box in the two-item group — `keepsOnePerGroup` still passes (one copy remains),
+    // so this is exactly the selection a real user makes before a safe cleanup.
+    const checkbox = await group.$('[data-testid="nd-checkbox"]');
+    await checkbox.waitForClickable({ timeout: 5_000, timeoutMsg: "expected the item's checkbox to render" });
+    await checkbox.click();
+
+    // Core assertion (CPE-1331): the Move button flips to ENABLED — the FALSIFIABLE check tied to this
+    // click, tying `canClean`'s reactive guard to a real DOM state change rather than just unit-tested
+    // logic. If `toggle`/`canClean` regressed, this would still read disabled.
+    await browser.waitUntil(async () => moveBtn.isEnabled(), {
+      timeout: 5_000,
+      timeoutMsg: "expected Move-to-Bin to become enabled after checking one item's box",
+    });
+    const moveBtnText = await moveBtn.getText();
+    expect(moveBtnText, 'expected the enabled button to read "Move 1 to Recycle Bin"').to.include("1");
+
+    // Visual Critic frame: the ENABLED "Move N to Recycle Bin" state — the render-coverage gap this
+    // ticket closes (previously only ever captured the disabled/nothing-selected state above).
+    await snap("near-duplicates-move-enabled");
+
+    // Never click Move-to-Bin — this dialog's cleanup mutates real files on disk (`deleteToTrash`) and
+    // this spec's job is only to prove the button renders/enables correctly, not to exercise the
+    // deletion path. Dismiss via the close button instead, leaving both seeded fixtures untouched.
     const closeBtn = await $('[data-testid="nd-close-btn"]');
     await closeBtn.click();
   });
