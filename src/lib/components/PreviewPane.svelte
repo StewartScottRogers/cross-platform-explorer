@@ -16,13 +16,14 @@
     rowScrollTarget,
   } from "../preview/outline";
   import { commands } from "../bindings.gen";
-  import type { Symbol as CodeSymbol, FoldRange, MinimapRow } from "../bindings.gen";
+  import type { Symbol as CodeSymbol, FoldRange, MinimapRow, ModelInfo } from "../bindings.gen";
   import HexView from "./HexView.svelte";
   import DataBrowser from "./DataBrowser.svelte";
   import Icon from "./Icon.svelte";
   import { t } from "../i18n";
   import { formatSize } from "../format";
   import { lsBool, lsSet } from "../persist";
+  import { unwrap } from "../invoke";
 
   /** The single selected entry to preview, or null. */
   export let entry: DirEntry | null = null;
@@ -41,6 +42,17 @@
 
   /** Cap the number of CSV rows rendered so a huge sheet can't lock the pane. */
   const CSV_ROW_CAP = 200;
+
+  /**
+   * 3D-model extensions (CPE-1334): the metadata-pane fallback for epic CPE-118. Reuses the same
+   * extension list `filetypes.ts`'s ICON_BY_EXT already recognises for the "cube" icon (stl/obj/gltf/
+   * glb), narrowed to the formats `read_model_info` (CPE-1333) actually parses (STL/OBJ) plus glTF/GLB,
+   * which the backend's file-type detector recognises by magic but doesn't yet geometry-parse — calling
+   * it for those simply returns `null` (handled gracefully, no section shown) rather than reinventing
+   * detection. Independent of the preview `provider` kind: the geometry section is additive and appears
+   * above whatever provider (hex/etc.) renders for these binary formats.
+   */
+  const MODEL_EXTS = new Set(["stl", "obj", "glb", "gltf"]);
 
   $: provider = pickProvider(entry);
   $: needsText =
@@ -72,6 +84,13 @@
   const FONT_SAMPLE = "The quick brown fox jumps over the lazy dog";
   const FONT_SIZES = [12, 18, 24, 36, 48];
 
+  // 3D-model geometry summary (CPE-1334): independent of `provider.kind` — see MODEL_EXTS above.
+  // `modelInfo` stays null (never an error state) whenever the backend can't parse the file, so a
+  // corrupt/unsupported model just omits the section instead of showing an error toast.
+  let modelInfo: ModelInfo | null = null;
+  let modelReqId = 0;
+  $: isModelFile = !!entry && !entry.is_dir && MODEL_EXTS.has(entry.extension);
+
   // Load text whenever the selected entry (for a text-based provider) changes.
   // A monotonically increasing request id discards any load superseded by a
   // newer selection.
@@ -79,6 +98,44 @@
   $: if (entry && provider.kind === "archive") loadEntriesFor(entry);
   $: if (entry && provider.kind === "info") loadInfoFor(entry);
   $: if (entry && provider.kind === "decoded-image") loadImageDataFor(entry);
+  $: if (entry && isModelFile) {
+    loadModelFor(entry);
+  } else {
+    modelInfo = null;
+    modelReqId++; // supersede any in-flight fetch for a file we've navigated away from
+  }
+
+  async function loadModelFor(e: DirEntry) {
+    const mine = ++modelReqId;
+    try {
+      const result = unwrap(await commands.readModelInfo(e.path));
+      if (mine !== modelReqId) return; // stale — selection moved on while this was in flight
+      modelInfo = result;
+    } catch {
+      if (mine !== modelReqId) return;
+      modelInfo = null; // never an error toast — the section is just omitted
+    }
+  }
+
+  /** Bounding-box DIMENSIONS (width × height × depth), derived as max − min per axis from
+   *  `[min_x,min_y,min_z,max_x,max_y,max_z]` — never the raw min/max themselves. */
+  $: modelDims = modelInfo
+    ? {
+        w: modelInfo.bounding_box[3] - modelInfo.bounding_box[0],
+        h: modelInfo.bounding_box[4] - modelInfo.bounding_box[1],
+        d: modelInfo.bounding_box[5] - modelInfo.bounding_box[2],
+      }
+    : null;
+
+  /** Trim a geometry float to at most 3 decimals without trailing zeros (2.500 → "2.5", 10 → "10"). */
+  function fmtDim(n: number): string {
+    return (Math.round(n * 1000) / 1000).toString();
+  }
+
+  $: modelFormatLabel = modelInfo?.format === "Obj" ? "OBJ" : modelInfo?.format === "Stl" ? "STL" : "";
+  // OBJ's triangle_count is a FACE count (quads/n-gons aren't necessarily triangles) — label it
+  // "Faces" for OBJ; STL facets really are triangles, so "Triangles" is accurate there.
+  $: modelCountLabel = modelInfo?.format === "Obj" ? $t("pv.model.faces") : $t("pv.model.triangles");
 
   async function loadInfoFor(e: DirEntry) {
     const mine = ++infoReqId;
@@ -588,6 +645,28 @@
 
 <!-- svelte-ignore a11y-no-noninteractive-element-interactions -->
 <aside class="preview" on:contextmenu={openTextMenu} on:scroll={handlePreviewScroll}>
+  {#if modelInfo}
+    <div class="model-info" data-testid="model-info-section">
+      <div class="model-info-title">{$t("pv.model.title")}</div>
+      <div class="model-info-rows">
+        <div class="model-row"><span class="model-k">{$t("pv.model.format")}</span><span class="model-v">{modelFormatLabel}</span></div>
+        {#if modelInfo.format === "Stl"}
+          <div class="model-row">
+            <span class="model-k">{$t("pv.model.encoding")}</span>
+            <span class="model-v">{modelInfo.ascii ? $t("pv.model.ascii") : $t("pv.model.binary")}</span>
+          </div>
+        {/if}
+        <div class="model-row"><span class="model-k">{modelCountLabel}</span><span class="model-v">{modelInfo.triangle_count.toLocaleString()}</span></div>
+        <div class="model-row"><span class="model-k">{$t("pv.model.vertices")}</span><span class="model-v">{modelInfo.vertex_count.toLocaleString()}</span></div>
+        {#if modelDims}
+          <div class="model-row">
+            <span class="model-k">{$t("pv.model.dimensions")}</span>
+            <span class="model-v">{fmtDim(modelDims.w)} × {fmtDim(modelDims.h)} × {fmtDim(modelDims.d)}</span>
+          </div>
+        {/if}
+      </div>
+    </div>
+  {/if}
   {#if provider.kind === "image" && entry}
     <img class="preview-img" src={assetUrl(entry.path)} alt={entry.name} />
   {:else if provider.kind === "decoded-image" && entry}
@@ -895,6 +974,24 @@
     border: 1px solid var(--accent);
     pointer-events: none;
   }
+  /* 3D-model geometry summary (CPE-1334): additive header above whatever the underlying provider
+     renders (hex/etc.) for these binary formats — the metadata-pane fallback for epic CPE-118. */
+  .model-info {
+    flex: none;
+    padding: 8px 12px;
+    border-bottom: 1px solid var(--border);
+    background: var(--surface);
+  }
+  .model-info-title {
+    font-size: 12px;
+    font-weight: 600;
+    color: var(--text-dim);
+    margin-bottom: 6px;
+  }
+  .model-info-rows { display: flex; flex-direction: column; gap: 4px; }
+  .model-row { display: flex; gap: 10px; font-size: 12px; }
+  .model-k { color: var(--text-dim); width: 90px; flex: none; }
+  .model-v { color: var(--text); overflow-wrap: anywhere; }
   /* Symbol outline strip + breadcrumb (CPE-1090): additive header above the code <pre>. */
   .outline-bar {
     display: flex;
