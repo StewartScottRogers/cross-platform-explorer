@@ -747,13 +747,29 @@
    *  picks the engine. */
   let similarDocsOpen = false;
   let similarFoldersOpen = false;
-  /** File Health panel overlay (CPE-1315/CPE-1316, epic CPE-1002) — a tabbed dialog surfacing the
-   *  file-inspection detectors; slice 1 wired the streaming dangling/cyclic-links tab, slice 2 adds
-   *  type-mismatch + orphan-sidecar tabs. */
+  /** File Health panel overlay (CPE-1315/CPE-1316/CPE-1317, epic CPE-1002) — a tabbed dialog surfacing
+   *  the file-inspection detectors; slice 1 wired the streaming dangling/cyclic-links tab, slice 2 adds
+   *  type-mismatch + orphan-sidecar tabs, slice 3 adds the non-streaming empty-folders tab. */
   let fileHealthOpen = false;
   /** Which File Health tab to land on when it opens (CPE-1316) — set right before flipping
    *  `fileHealthOpen`, so each Tools-menu / palette entry that targets one detector opens straight to it. */
-  let fileHealthTab: "dangling" | "mismatch" | "orphan" = "dangling";
+  let fileHealthTab: "dangling" | "mismatch" | "orphan" | "empty" = "dangling";
+  /** Bumped every time a File-Health entry is invoked (CPE-1317) — lets `FileHealthDialog` jump to the
+   *  requested tab even when the panel is ALREADY OPEN (a one-time `activeTab = initialTab` initializer
+   *  can't see a later `fileHealthTab` change, since `{#if fileHealthOpen}` never remounts once open),
+   *  and even when the SAME entry is invoked again while the user has since clicked to a different tab
+   *  manually (a plain `$: activeTab = initialTab` can't tell that apart from "no change"). See
+   *  `openFileHealth` below, the single call site that bumps it. */
+  let fileHealthNonce = 0;
+
+  /** Open the File Health panel scoped to `tab` (CPE-1316/CPE-1317) — the single call site every
+   *  Tools-menu / command-palette File-Health entry uses, so the nonce bump can never be forgotten at a
+   *  new call site. */
+  function openFileHealth(tab: "dangling" | "mismatch" | "orphan" | "empty") {
+    fileHealthTab = tab;
+    fileHealthNonce++;
+    fileHealthOpen = true;
+  }
   let patternSelectOpen = false;
   /** Repositories browser overlay (CPE-434/435) — browse GitHub & other forges in-app. */
   let showRepos = false;
@@ -870,9 +886,10 @@
     { id: "tool.findSimilarImages", group: $t("palette.groupTools"), label: $t("palette.findSimilarImages"), keywords: "near duplicate similar images photos perceptual dhash reclaim", run: () => (similarImagesOpen = true), enabled: inFolder },
     { id: "tool.findSimilarDocuments", group: $t("palette.groupTools"), label: $t("palette.findSimilarDocuments"), keywords: "near duplicate similar documents text notes readme simhash", run: () => (similarDocsOpen = true), enabled: inFolder },
     { id: "tool.findSimilarFolders", group: $t("palette.groupTools"), label: $t("palette.findSimilarFolders"), keywords: "near identical similar folders jaccard", run: () => (similarFoldersOpen = true), enabled: inFolder },
-    { id: "tool.findDanglingLinks", group: $t("palette.groupTools"), label: $t("palette.findDanglingLinks"), keywords: "dangling broken cyclic symlink link file health", run: () => { fileHealthTab = "dangling"; fileHealthOpen = true; }, enabled: inFolder },
-    { id: "tool.findTypeMismatches", group: $t("palette.groupTools"), label: $t("palette.findTypeMismatches"), keywords: "type mismatch extension disguised renamed wrong file health", run: () => { fileHealthTab = "mismatch"; fileHealthOpen = true; }, enabled: inFolder },
-    { id: "tool.findOrphanSidecars", group: $t("palette.groupTools"), label: $t("palette.findOrphanSidecars"), keywords: "orphan sidecar srt xmp companion file health", run: () => { fileHealthTab = "orphan"; fileHealthOpen = true; }, enabled: inFolder },
+    { id: "tool.findDanglingLinks", group: $t("palette.groupTools"), label: $t("palette.findDanglingLinks"), keywords: "dangling broken cyclic symlink link file health", run: () => openFileHealth("dangling"), enabled: inFolder },
+    { id: "tool.findTypeMismatches", group: $t("palette.groupTools"), label: $t("palette.findTypeMismatches"), keywords: "type mismatch extension disguised renamed wrong file health", run: () => openFileHealth("mismatch"), enabled: inFolder },
+    { id: "tool.findOrphanSidecars", group: $t("palette.groupTools"), label: $t("palette.findOrphanSidecars"), keywords: "orphan sidecar srt xmp companion file health", run: () => openFileHealth("orphan"), enabled: inFolder },
+    { id: "tool.findEmptyDirs", group: $t("palette.groupTools"), label: $t("palette.findEmptyDirs"), keywords: "empty folder cascade cleanup file health", run: () => openFileHealth("empty"), enabled: inFolder },
     { id: "tool.colorRules", group: $t("palette.groupTools"), label: $t("palette.colorRules"), keywords: "color rules highlight label", run: () => (colorRulesOpen = true) },
     { id: "tool.sessionHistory", group: $t("palette.groupTools"), label: $t("palette.sessionHistory"), keywords: "audit log history export sessions activity", run: () => (sessionHistoryOpen = true) },
     { id: "tool.compareFolders", group: $t("palette.groupTools"), label: $t("palette.compareFolders"), keywords: "diff compare folders directories tree", run: openCompare },
@@ -4203,9 +4220,10 @@
       case "find-similar-images": if (!isHome && !archive) similarImagesOpen = true; break;
       case "find-similar-documents": if (!isHome && !archive) similarDocsOpen = true; break;
       case "find-similar-folders": if (!isHome && !archive) similarFoldersOpen = true; break;
-      case "find-dangling-links": if (!isHome && !archive) { fileHealthTab = "dangling"; fileHealthOpen = true; } break;
-      case "find-type-mismatches": if (!isHome && !archive) { fileHealthTab = "mismatch"; fileHealthOpen = true; } break;
-      case "find-orphan-sidecars": if (!isHome && !archive) { fileHealthTab = "orphan"; fileHealthOpen = true; } break;
+      case "find-dangling-links": if (!isHome && !archive) openFileHealth("dangling"); break;
+      case "find-type-mismatches": if (!isHome && !archive) openFileHealth("mismatch"); break;
+      case "find-orphan-sidecars": if (!isHome && !archive) openFileHealth("orphan"); break;
+      case "find-empty-dirs": if (!isHome && !archive) openFileHealth("empty"); break;
       case "organize-folder": if (!isHome && !archive) organizeOpen = true; break;
       case "copy-file-names": copyListing(namesList(visible), "file names"); break;
       case "copy-file-list": copyListing(detailList(visible), "file list"); break;
@@ -5346,6 +5364,7 @@
   <FileHealthDialog
     root={currentPath}
     initialTab={fileHealthTab}
+    openNonce={fileHealthNonce}
     on:navigate={(e) => { fileHealthOpen = false; revealFileInApp(e.detail); }}
     on:close={() => (fileHealthOpen = false)}
   />

@@ -1,13 +1,17 @@
 <script lang="ts">
   /**
-   * File Health panel, SLICE 1+2 (CPE-1315/CPE-1316, epic CPE-1002): a tabbed dialog shell surfacing the
-   * pure detectors built (but never surfaced) for that epic — `safetyReport.ts`'s `buildFileHealth`
-   * already unifies all five (`type-mismatch` / `zip-bomb` / `dangling-link` / `orphaned-sidecar` /
-   * `empty-folder`). Slice 1 wired the first tab (**dangling / cyclic symlinks**) end to end over the
-   * STREAMING `find_dangling_links_stream` command (CPE-1299) — the first frontend consumer of a
-   * `_stream` command that isn't already covered by DuplicatesDialog/SimilarImagesDialog's shape. Slice 2
-   * adds two more tabs — **type mismatches** (`find_type_mismatches_stream`) and **orphan sidecars**
-   * (`find_orphan_sidecars_stream`) — copying the exact same wiring per tab. Future slices add the
+   * File Health panel, SLICE 1+2+3 (CPE-1315/CPE-1316/CPE-1317, epic CPE-1002): a tabbed dialog shell
+   * surfacing the pure detectors built (but never surfaced) for that epic — `safetyReport.ts`'s
+   * `buildFileHealth` already unifies all five (`type-mismatch` / `zip-bomb` / `dangling-link` /
+   * `orphaned-sidecar` / `empty-folder`). Slice 1 wired the first tab (**dangling / cyclic symlinks**) end
+   * to end over the STREAMING `find_dangling_links_stream` command (CPE-1299) — the first frontend
+   * consumer of a `_stream` command that isn't already covered by DuplicatesDialog/SimilarImagesDialog's
+   * shape. Slice 2 adds two more tabs — **type mismatches** (`find_type_mismatches_stream`) and **orphan
+   * sidecars** (`find_orphan_sidecars_stream`) — copying the exact same wiring per tab. Slice 3 adds
+   * **empty folders**, the first NON-streaming tab: `find_empty_dirs` is a modest collect-to-vec command
+   * (CPE-1287 already wired the backend dispatcher + typed bindings), so its tab body models
+   * NearDuplicatesDialog's plain-awaited pattern instead — a single `invoke("find_empty_dirs", …)` from
+   * `../invoke` (the busy-cursor wrapper), no Channel, no `cancel_*` command. Future slices add the
    * remaining categories; `TABS` below is the extension point (add an entry + a matching `{#if}` block).
    *
    * Mirrors NearDuplicatesDialog's read-only reveal-dialog skeleton (intro → Scan → loading → error →
@@ -18,13 +22,16 @@
    * scoped to a dialog rather than the main window's `.tabbar`).
    *
    * Cancellation mirrors ExplorerPane's `list_dir_stream`/`cancel_dir_stream` convention (CPE-665): each
-   * tab has its OWN generation counter (`searchGen` / `mismatchGen` / `orphanGen`) that doubles as the
-   * frontend-supplied `streamId` for THAT scan's `_stream` command, paired with THAT scan's own
+   * STREAMING tab has its OWN generation counter (`searchGen` / `mismatchGen` / `orphanGen`) that doubles
+   * as the frontend-supplied `streamId` for THAT scan's `_stream` command, paired with THAT scan's own
    * `cancel_*_stream` command — the three scans never share a counter or a cancel call, so rescanning one
-   * tab can never cancel (or be superseded by) another tab's in-flight walk.
+   * tab can never cancel (or be superseded by) another tab's in-flight walk. The empty-dirs tab has no
+   * `_stream`/cancel command to pair with (it's a single awaited call), so its OWN counter (`emptyGen`)
+   * only guards against a stale response landing after a newer rescan — same supersede idea, no backend
+   * cancel signal needed.
    */
   import { createEventDispatcher } from "svelte";
-  import { rawInvoke, createChannel } from "../invoke";
+  import { invoke, rawInvoke, createChannel } from "../invoke";
   import Icon from "./Icon.svelte";
   import { t } from "../i18n";
   import { baseName, parentDir } from "../contentSearch";
@@ -32,6 +39,7 @@
     DanglingLink,
     DanglingReport,
     DanglingReason,
+    EmptyDirsReport,
     MismatchHit,
     MismatchReport,
     OrphanSidecarResult,
@@ -42,18 +50,36 @@
    *  specific detector (e.g. "Find type mismatches…") open the panel scoped straight to that tab, instead
    *  of always landing on the first one. Defaults to slice 1's dangling-links tab. */
   export let initialTab: TabId = "dangling";
+  /** Bumped by the host every time a Tools-menu / palette File-Health entry is invoked (CPE-1317) —
+   *  INCLUDING re-invoking the same entry while the panel is already open on some other (manually
+   *  clicked) tab. A one-time `activeTab = initialTab` initializer only applies at mount, so it misses an
+   *  entry invoked while `{#if fileHealthOpen}` is already mounted; a plain `$: activeTab = initialTab`
+   *  still misses the "same tab id, fire again" case. Reacting to a CHANGED nonce (not a changed
+   *  `initialTab` value) catches both, while manual in-panel tab clicks (`activeTab = tab.id`, below)
+   *  remain untouched between nonce bumps. */
+  export let openNonce = 0;
 
   const dispatch = createEventDispatcher<{ close: void; navigate: string }>();
 
   /** Tab shell extension point — add an entry here (+ a matching `{#if activeTab === …}` block) to wire
-   *  another File-Health category. `dangling` (slice 1), `mismatch` + `orphan` (slice 2) are wired. */
-  type TabId = "dangling" | "mismatch" | "orphan";
+   *  another File-Health category. `dangling` (slice 1), `mismatch` + `orphan` (slice 2), `empty` (slice 3)
+   *  are wired. */
+  type TabId = "dangling" | "mismatch" | "orphan" | "empty";
   const TABS: { id: TabId; labelKey: string; icon: string }[] = [
     { id: "dangling", labelKey: "fh.tabDangling", icon: "link-broken" },
     { id: "mismatch", labelKey: "fh.tabMismatch", icon: "ban" },
     { id: "orphan", labelKey: "fh.tabOrphan", icon: "unknown" },
+    { id: "empty", labelKey: "fh.tabEmpty", icon: "folder" },
   ];
   let activeTab: TabId = initialTab;
+  // CPE-1317's tab-switch fix: track the nonce we last reacted to, so this only fires on a genuine bump
+  // (never on initial mount, where `seenNonce` already equals `openNonce` and `activeTab` is already
+  // `initialTab` from the declaration above).
+  let seenNonce = openNonce;
+  $: if (openNonce !== seenNonce) {
+    seenNonce = openNonce;
+    activeTab = initialTab;
+  }
 
   /** A rendered dangling/cyclic link with a stable `id` for the `{#each}` key (batches only carry
    *  `path`/`reason`). */
@@ -255,6 +281,52 @@
     }
   }
 
+  /** A rendered empty-folder with a stable `id` for the `{#each}` key (the backend only carries the
+   *  path — there's no per-row metadata, same shape as an orphan row). */
+  interface EmptyRow {
+    id: number;
+    path: string;
+  }
+
+  let emptyLoading = false;
+  let emptyError = "";
+  let emptyStarted = false;
+  let emptyDirs: EmptyRow[] = [];
+  let emptyScanned = 0;
+  let emptyTruncated = false;
+  let emptyNextId = 0;
+  // Own generation counter (NearDuplicatesDialog's pattern, not the streaming tabs' `searchGen`-and-
+  // `cancel_*`-command pair) — `find_empty_dirs` is a single plain-awaited call with no in-flight walk to
+  // cancel, so this only guards against a stale response landing after a newer rescan.
+  let emptyGen = 0;
+
+  async function runEmpty() {
+    emptyLoading = true;
+    emptyError = "";
+    emptyStarted = true;
+    emptyDirs = [];
+    emptyScanned = 0;
+    emptyTruncated = false;
+    const gen = ++emptyGen;
+    try {
+      // Plain awaited `invoke` (busy-cursor wrapper from `../invoke`, NOT `rawInvoke`) — this tab is
+      // deliberately NOT a `_stream` command (CPE-1317's stated scope), so it opts INTO the busy cursor
+      // like any other blocking call, unlike the three streaming tabs above which opt out by design.
+      const result = await invoke<EmptyDirsReport>("find_empty_dirs", { root, excludes: [] });
+      if (gen !== emptyGen) return; // superseded by a newer rescan — drop this stale response
+      emptyDirs = result.dirs.map((p) => ({ id: emptyNextId++, path: p }));
+      emptyScanned = result.scanned;
+      emptyTruncated = result.truncated;
+    } catch (e) {
+      if (gen === emptyGen) {
+        emptyError = String(e);
+        emptyDirs = [];
+      }
+    } finally {
+      if (gen === emptyGen) emptyLoading = false;
+    }
+  }
+
   function reveal(path: string) {
     dispatch("navigate", path);
     dispatch("close");
@@ -401,6 +473,43 @@
                 <Icon name="unknown" size={14} />
                 <span class="name">{baseName(o.path)}</span>
                 <span class="loc">{parentDir(o.path)}</span>
+              </button>
+            {/each}
+          </div>
+        </div>
+      {/if}
+    {:else if activeTab === "empty"}
+      {#if !emptyStarted}
+        <div class="intro">
+          <p>{$t("fh.introEmpty")}</p>
+          <button class="btn primary" data-testid="fh-scan-btn" on:click={runEmpty}>{$t("fh.scan")}</button>
+        </div>
+      {:else if emptyLoading}
+        <p class="dim">{$t("fh.scanning")}</p>
+      {:else if emptyError}
+        <p class="err">{emptyError}</p>
+        <button class="mini" data-testid="fh-rescan-btn" on:click={runEmpty}>{$t("fh.scan")}</button>
+      {:else if emptyDirs.length === 0}
+        <p class="dim" data-testid="fh-none">{$t("fh.noneEmpty", { count: emptyScanned.toLocaleString() })}</p>
+        <button class="mini" data-testid="fh-rescan-btn" on:click={runEmpty}>{$t("fh.scan")}</button>
+      {:else}
+        <div class="summary">
+          <span>
+            {emptyDirs.length === 1
+              ? $t("fh.summaryOneEmpty", { count: emptyDirs.length })
+              : $t("fh.summaryManyEmpty", { count: emptyDirs.length })}
+            <span class="dim"> · {$t("fh.scanned", { count: emptyScanned.toLocaleString() })}</span>
+            {#if emptyTruncated}<span class="dim"> {$t("fh.capped")}</span>{/if}
+          </span>
+          <button class="mini" data-testid="fh-rescan-btn" on:click={runEmpty}>{$t("fh.scan")}</button>
+        </div>
+        <div class="results">
+          <div class="rows">
+            {#each emptyDirs as d (d.id)}
+              <button class="row" data-testid="fh-row" title={d.path} on:click={() => reveal(d.path)}>
+                <Icon name="folder" size={14} />
+                <span class="name">{baseName(d.path)}</span>
+                <span class="loc">{parentDir(d.path)}</span>
               </button>
             {/each}
           </div>

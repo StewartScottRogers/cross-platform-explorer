@@ -129,3 +129,62 @@ describe("FileHealthDialog — cross-tab generation/cancel isolation (CPE-1316)"
     expect(invoke).not.toHaveBeenCalledWith("find_dangling_links_stream", expect.anything());
   });
 });
+
+// CPE-1317's already-open tab-switch fix. Slice-2 UAT finding: `activeTab = initialTab` is a one-time
+// initializer, so invoking a different File-Health Tools-menu/palette entry while the panel is ALREADY
+// OPEN never jumped the visible tab (`{#if fileHealthOpen}` never remounts, so the initializer never
+// re-runs). The fix is a host-bumped `openNonce` prop that FileHealthDialog reacts to — this suite drives
+// that reaction directly via `rerender` (simulating App.svelte's prop updates from `openFileHealth`),
+// without needing App.svelte itself, and is written to be FALSIFIABLE: each assertion targets a specific
+// tab's `aria-selected` state, so a broken (or reverted) fix fails these deterministically rather than by
+// accident.
+describe("FileHealthDialog — already-open tab-switch fix (CPE-1317)", () => {
+  function isActive(tabId: string): boolean {
+    return screen.getByTestId(`fh-tab-${tabId}`).getAttribute("aria-selected") === "true";
+  }
+
+  it("bumping openNonce with a new initialTab jumps the ALREADY-OPEN panel to that tab", async () => {
+    const { rerender } = render(FileHealthDialog, { root: "/repo", initialTab: "dangling", openNonce: 1 });
+    expect(isActive("dangling")).toBe(true);
+    expect(isActive("mismatch")).toBe(false);
+
+    // Simulate re-invoking "Find type mismatches…" while the panel is already open on Dangling.
+    await rerender({ root: "/repo", initialTab: "mismatch", openNonce: 2 });
+    expect(isActive("mismatch")).toBe(true);
+    expect(isActive("dangling")).toBe(false);
+
+    // A different entry again (empty-folders, slice 3's new tab) also jumps straight there.
+    await rerender({ root: "/repo", initialTab: "empty", openNonce: 3 });
+    expect(isActive("empty")).toBe(true);
+    expect(isActive("mismatch")).toBe(false);
+  });
+
+  it("re-invoking the SAME entry while manually parked on a different tab jumps back — a changed initialTab is not required, only a changed nonce", async () => {
+    const { rerender } = render(FileHealthDialog, { root: "/repo", initialTab: "dangling", openNonce: 1 });
+
+    // User manually switches to Orphan sidecars (no prop change — a plain in-panel click).
+    await fireEvent.click(screen.getByTestId("fh-tab-orphan"));
+    expect(isActive("orphan")).toBe(true);
+    expect(isActive("dangling")).toBe(false);
+
+    // The host re-invokes the SAME "Find dangling links…" entry: `initialTab` is UNCHANGED ("dangling"),
+    // only `openNonce` bumps. A plain `$: activeTab = initialTab` would see no change here and do
+    // nothing — the panel would stay stuck on Orphan. The nonce-based fix must still jump back.
+    await rerender({ root: "/repo", initialTab: "dangling", openNonce: 2 });
+    expect(isActive("dangling")).toBe(true);
+    expect(isActive("orphan")).toBe(false);
+  });
+
+  it("manual in-panel tab clicks still work and are not clobbered by a re-render that does NOT bump the nonce", async () => {
+    const { rerender } = render(FileHealthDialog, { root: "/repo", initialTab: "dangling", openNonce: 1 });
+
+    await fireEvent.click(screen.getByTestId("fh-tab-mismatch"));
+    expect(isActive("mismatch")).toBe(true);
+
+    // A re-render with the SAME openNonce (e.g. an unrelated prop like `root` changing) must NOT reset
+    // the user's manual tab choice — only a nonce bump should move `activeTab`.
+    await rerender({ root: "/repo/other", initialTab: "dangling", openNonce: 1 });
+    expect(isActive("mismatch")).toBe(true);
+    expect(isActive("dangling")).toBe(false);
+  });
+});

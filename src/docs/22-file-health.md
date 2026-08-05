@@ -8,12 +8,13 @@ categoryOrder: 2
 # File Health
 
 **File Health** is a tabbed panel that surfaces the file-inspection detectors built for the explorer —
-facts and hazards the plain listing doesn't show. It grows one tab at a time; today it wires three:
-**dangling and cyclic symlinks**, **type mismatches**, and **orphan sidecars**.
+facts and hazards the plain listing doesn't show. It grows one tab at a time; today it wires four:
+**dangling and cyclic symlinks**, **type mismatches**, **orphan sidecars**, and **empty folders**.
 
 Open it from the **Tools** menu (*Find dangling links…* / *Find type mismatches…* / *Find orphan
-sidecars…*) or the **command palette** (Ctrl/Cmd+Shift+P → the same three entries). Each entry opens the
-panel straight to its own tab; every scan is scoped to the folder you're currently in.
+sidecars…* / *Find empty folders…*) or the **command palette** (Ctrl/Cmd+Shift+P → the same four
+entries). Each entry opens the panel straight to its own tab — even if the panel is already open on a
+different tab — and every scan is scoped to the folder you're currently in.
 
 ## Dangling links
 
@@ -49,6 +50,18 @@ primary file is missing, so it no longer has anything to accompany.
 2. **Review.** Each flagged file is shown with its name and location. Click any entry to jump straight to
    that file in the explorer.
 
+## Empty folders
+
+An **empty folder** is one with nothing in it — or one that contains only other empty folders (an "empty
+cascade"). Removing the topmost folder in a cascade removes the whole thing, so only the topmost
+cascade-empty folder in each branch is reported, not every nested empty folder inside it.
+
+1. **Scan.** The app walks the current folder and subfolders looking for cascade-empty folders. Unlike
+   the other three tabs, this scan runs as a single pass rather than streaming results in live — it's
+   typically a fast walk, so the whole result lands at once.
+2. **Review.** Each flagged folder is shown with its name and location. Click any entry to jump straight
+   to that folder in the explorer.
+
 ## Read-only
 
 Every tab in this panel is **read-only** — nothing is deleted or modified. It's a review surface, not a
@@ -58,5 +71,5 @@ it.
 ## More tabs coming
 
 The panel is built to grow: future slices add tabs for the explorer's remaining file-health detectors
-(archive expansion-ratio warnings, empty-folder cascades) alongside these three, so File Health becomes a
-single place to review everything the explorer has noticed.
+(archive expansion-ratio warnings) alongside these four, so File Health becomes a single place to review
+everything the explorer has noticed.
