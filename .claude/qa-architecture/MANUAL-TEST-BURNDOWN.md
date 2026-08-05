@@ -86,3 +86,23 @@ each tab renders a real row over live IPC (first live exercise of the 3 `_stream
 locally 2026-08-05. Advances MVD rows 1/3 (headless GUI + visual). The Visual Critic judged the panel's
 screenshots and caught 2 real layout defects (mismatch badge overflow, orphan missing badge), both fixed
 (CPE-1319/1321) — the CPE-1148 Visual-Critic loop working end-to-end without a user round-trip.
+
+### Workshift 2026-08-05 — GUI batch (CPE-1323/1324 + Metadata Studio 1325-1328 + Declutter 1329)
+Seven GUI tickets shipped across 4 epics. QA/coverage changes:
+- **File-Health exclude UI (CPE-1323) + near-dup cleanup (CPE-1324):** render-covered by the existing
+  `file-health.smoke.ts` / `near-duplicates.smoke.ts` specs and **Visual-Critic judged VISUAL PASS** on a real
+  `tauri build` this shift (no user round-trip). Advances the "GUI render + visual" automation.
+- **Declutter dialog (CPE-1329):** NEW `gui-smoke/specs/declutter.smoke.ts` + `seedDeclutterFixture` (one file
+  per `ClutterReason`) drives the real build and asserts the 4 findings render under labelled groups — render
+  automated on arrival. (Visual-Critic pass captured this shift.)
+- **Metadata Studio (CPE-1325/1326/1327/1328):** logic fully jsdom-covered (checkpoint order, batch strip/copy
+  payloads, per-field revert isolation, truthful-checkpoint on `Err(String)`). **No gui-smoke spec reaches
+  MetadataStudioDialog** (it opens on a media selection, not a palette command) → its render/visual is still
+  manual. Owed automation: a `metadata-studio.smoke.ts` that seeds a writable media file + opens the dialog.
+- **OWED DEBT (interactive-state screenshots):** the File-Health/near-dup specs capture only the RESTING state —
+  they never type an exclude pattern (so no filled exclude-pill row) or check a cleanup box (so no enabled
+  Move-to-Bin). A future QA slice should add post-interaction `snap()`s so the Visual Critic can judge the
+  filled/enabled states, not just the empty ones.
+- **Docs gap (minor):** Declutter (like NearDuplicatesDialog) did not register a `sectionDocs.ts` Section/doc
+  page. Not a CI failure (no new Section enum added), but a `src/docs` page for the new Tools features is owed
+  per the self-maintaining-docs rule — worth a small follow-up ticket.

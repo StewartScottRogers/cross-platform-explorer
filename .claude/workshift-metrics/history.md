@@ -881,3 +881,39 @@ them; history.md stopped at 07-31). Authoritative record is the checkpoint commi
   - `overflow-x:hidden` on a flex-wrap results list kills a spurious horizontal scrollbar that clips tall rows.
 - Throughput run 2: 8 GUI tickets, ~50 sub-agent runs (heavier: build+gui-smoke+Visual-Critic per epic). Budget ~114/200 at
   clean checkpoint. LESSON: never rm -rf worktree globs while a worker is live (clobbered one; recovered).
+
+## 2026-08-05 (run 3) — GUI "backends-exist" sweep: 7 tickets, 4 epics, 0 retries, 0 escaped
+User: "start three workshifts back to back". Headless well long-dry, so continued the proven GUI-via-Visual-Critic
+template (build → gui-smoke screenshots → taste-aware Critic, no user round-trip). Shipped 7 FE-only tickets,
+each through the full Reviewer+UAT gauntlet, all merged on Frontend CI green, **zero rework, zero escaped defects**:
+- **CPE-1323** File-Health exclude-glob input UI (backend CPE-1302 existed; frontend hardcoded `excludes:[]`). #619
+- **CPE-1324** NearDuplicatesDialog keeper-guarded move-to-bin (parity w/ SimilarImagesDialog; reused duplicates.ts). #620
+- **CPE-1325** Metadata Studio checkpoint-before-save (best-effort, non-blocking). #621
+- **CPE-1326** Metadata Studio batch strip / copy-from-first — worker also found+fixed a latent Svelte reactivity
+  bug (`currentValue(f)` closure defeated static dep-tracking; now passes `edited` explicitly). #622
+- **CPE-1327** Metadata Studio per-field revert + reset-all (pure client-side, no write/checkpoint). #623
+- **CPE-1328** truthful checkpoint-status bugfix — un-unwrapped `checkpointCreate` swallowed `Err(String)`
+  (`{status:"error"}` doesn't throw) → "(checkpoint saved)" could lie. Fixed via `unwrap()` in 3 dialogs; also
+  fixed 2 double-wrapped test mocks + a dead-code test. Both reviewers independently surfaced the pattern. #624
+- **CPE-1329** NEW Declutter junk-review dialog (epic CPE-979) — surfaces the built-but-unwired `organize_clutter`
+  engine; safe move-to-bin, applied the CPE-1328 unwrap lesson; new `declutter.smoke.ts` spec. #625
+
+Tuned defaults / lessons (seed next GUI shift):
+- **GUI slices on a shared component SERIALIZE** (MetadataStudioDialog carried 1325→1326→1327→1328). i18n.ts is
+  append-only so parallel branches auto-merge (fh.*/nd.*/studio.* didn't collide); the merge lock rebases fine.
+- **`unwrap()` (src/lib/invoke.ts) is mandatory on `checkpointCreate`** — the generated binding only throws on an
+  `Error` instance, so a Rust `Err(String)` resolves `{status:"error"}` silently. Any new best-effort command call
+  that gates a success message must unwrap or it will lie. (CPE-1328.)
+- **Function-call closures defeat Svelte's static dep-scan** — `currentValue(f)` didn't re-run on programmatic
+  `edited` changes; pass state explicitly (`currentValue(f, edited)`) + reassign (`edited = {...}`). (CPE-1326.)
+- **Worktree base lag:** workers branched before an untracked Backlog ticket file existed → recreated/didn't-touch
+  it inconsistently. Foreman reconciled centrally (move Backlog→Done after merge). File the ticket + commit it, or
+  accept workers won't see it.
+- **Batched Visual Critic works:** one build screenshots the resting state of multiple merged surfaces; Critic
+  judged VISUAL PASS. OWED: specs capture only resting state (no filled exclude-pill / enabled Move-to-Bin) —
+  add post-interaction snaps. MetadataStudioDialog has NO gui-smoke spec (opens on media selection, not palette).
+- **Frontier: TAPPED after CPE-1329** (survey + [[clean-gui-vein-tapped-after-declutter-2026-08-05]]). Remaining =
+  NEEDS-BACKEND (audio/video decode, unix driveType) or USER-GATED (AI classifier/model key, Mac, signing cert,
+  SFTP, Docker, removable-drive hardware). Next shift: take an attended/backend epic WITH the user, don't scrape filler.
+- Throughput: 7 tickets, ~46 sub-agents, budget deep (~46/200, never near reset line). Median gauntlet ~7m,
+  0 retries, 0 escaped defects. main green throughout (real 3-OS CI; FE-only PRs gated on Frontend job).
