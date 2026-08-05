@@ -77,3 +77,12 @@ numbered Ledger, that's a separate reorganisation, not part of this ticket's sco
 
 - 2026-07-30 16:31 USMST — **CPE-1126 revert-safety GUI verify** (owner: user). The Agent-Watch restore panel + checkpoint markers are code-complete + reviewer-APPROVED (PR #466), but "confirm-to-revert is safe/clear" + "markers land right" need a user-present build→run. Blocker to full headless coverage: gui-smoke cannot render a checkpoint marker without a `checkpoint_create` test-mode seam (see CPE-1126 P2). Automating that seam would retire this row.
   → ✅ **RETIRED 2026-07-30 19:40 USMST.** CPE-1152 (PR #469, `dc2ea001`) added the seam: `gui-smoke/specs/checkpoint-restore.smoke.ts` drives the real `checkpoint_create` so the restore panel + a scrubber marker render, and `snap()`s `checkpoint-restore-panel` + `checkpoint-revert-confirm`. The **Visual Critic** judged those screenshots `VISUAL PASS` (look + safety-clarity), and the user signed off. The surface is now automatically screenshot-verifiable (non-blocking per CPE-1048) + Critic-judged — no routine human eyes needed. First formal Visual-Critic verdict on a GUI ticket (CPE-1148 loop).
+
+### File-Health panel — render-automated 2026-08-05 (CPE-1315..1321)
+The new File-Health panel (4 folder scans: dangling-links, type-mismatch, orphan-sidecars, empty-dirs) + the
+archive-safety right-click dialog are now **gui-smoke render-covered**: `gui-smoke/specs/file-health.smoke.ts`
++ `wdio.conf.ts::seedFileHealthFixture` drive a real `tauri build` binary, open Tools → File Health, and assert
+each tab renders a real row over live IPC (first live exercise of the 3 `_stream` scan commands) — proven green
+locally 2026-08-05. Advances MVD rows 1/3 (headless GUI + visual). The Visual Critic judged the panel's
+screenshots and caught 2 real layout defects (mismatch badge overflow, orphan missing badge), both fixed
+(CPE-1319/1321) — the CPE-1148 Visual-Critic loop working end-to-end without a user round-trip.
