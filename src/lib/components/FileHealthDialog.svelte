@@ -565,7 +565,15 @@
   .summary .mini { margin-left: auto; flex: 0 0 auto; }
   .mini { height: 24px; padding: 0 10px; border-radius: var(--radius); border: 1px solid var(--border-strong); background: var(--surface-alt); font-size: 12px; }
   .mini:hover { background: var(--surface); }
-  .results { overflow: auto; }
+  /* CPE-1321: was a bare `overflow:auto` (both axes). `.rows` already reflows via flex-wrap, so a
+     horizontal scrollbar was never an intentional affordance here — when one did appear (a row's
+     min-content transiently exceeding the container width), it docked along the bottom INSIDE the
+     scroll box's content edge and painted over the bottom of whatever sat there, which is exactly what
+     clipped the mismatch tab's two-line stacked subtitle (CPE-1319). Pin `overflow-x: hidden` so that
+     scrollbar can never appear/overlap, and add `padding-bottom` so the scrollable content — including
+     the tall stacked row — always has clearance below it before the box's edge, whether or not a
+     vertical scrollbar is showing. */
+  .results { overflow-y: auto; overflow-x: hidden; padding-bottom: 8px; }
   /* Rows reflow: the container wraps pills onto more rows and grows; each pill keeps its text on one
      line and doesn't shrink — including the nested reason badge (CLAUDE.md's tick-tacks rule). */
   .rows { display: flex; flex-wrap: wrap; gap: 6px; padding: 4px 6px; }
