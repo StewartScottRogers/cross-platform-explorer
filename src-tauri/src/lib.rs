@@ -3026,9 +3026,145 @@ fn drive_type_impl(path: &str) -> String {
     .to_string()
 }
 
-#[cfg(not(windows))]
+// ---- Linux drive-type classification (CPE-1355, epic CPE-716) ------------------------------------
+// `classify_drive_type_from_proc` is the pure SAFETY-RELEVANT core: it takes an already-read
+// `/proc/mounts` string and a `read_removable` seam (real I/O on Linux, a synthetic map in tests) and
+// returns "removable"/"fixed". No real I/O inside it, so it compiles + runs (and is unit-tested) on
+// every OS, including this Windows dev box — mirrors how `eject_guard`/`eject_drive_seam` above split
+// hardware-dependent logic into a pure, hardware-free core plus a thin OS-specific wrapper.
+
+/// Filesystem types that are pseudo/virtual (never a real removable/fixed block device) — a match on
+/// `/proc/mounts`' 3rd field skips these mounts outright so they never get classified as "removable".
+/// `cfg`-gated to Linux (the only real caller) + test (so the pure-fn unit tests run on every OS,
+/// including this Windows dev box) — otherwise a non-Linux release build sees it as dead code.
+#[cfg(any(target_os = "linux", test))]
+fn is_virtual_fstype(fstype: &str) -> bool {
+    matches!(
+        fstype,
+        "tmpfs"
+            | "proc"
+            | "sysfs"
+            | "devtmpfs"
+            | "devpts"
+            | "overlay"
+            | "cgroup"
+            | "cgroup2"
+            | "squashfs"
+            | "ramfs"
+            | "debugfs"
+            | "tracefs"
+            | "securityfs"
+            | "pstore"
+            | "mqueue"
+            | "hugetlbfs"
+            | "autofs"
+            | "configfs"
+            | "fusectl"
+            | "binfmt_misc"
+            | "nsfs"
+    )
+}
+
+/// Reduce a partition device name (already stripped of the `/dev/` prefix, e.g. `sdb1`, `nvme0n1p1`,
+/// `mmcblk0p1`) to its parent block device (`sdb`, `nvme0n1`, `mmcblk0`) for the `/sys/block/<dev>`
+/// lookup. `nvme`/`mmcblk` devices name their partitions with an explicit `pN` suffix (`nvme0n1p1`,
+/// `mmcblk0p1`), so ONLY that suffix is stripped for them — an unpartitioned whole-disk name like
+/// `nvme0n1` or `mmcblk0` has no `pN` and must be returned unchanged; a naive trailing-digit trim would
+/// wrongly cut the trailing digit off the base name itself (`nvme0n1` → `nvme0n`, `mmcblk0` → `mmcblk`),
+/// pointing the `/sys/block/<dev>/removable` lookup at a device that doesn't exist (CPE-1355 review fix).
+/// `sd`/`hd`/`vd`-style devices have no such ambiguity — their partition number IS a plain trailing-digit
+/// suffix (`sdb1` → `sdb`), so those keep the trim.
+#[cfg(any(target_os = "linux", test))]
+fn parent_block_device(dev: &str) -> String {
+    if dev.starts_with("nvme") || dev.starts_with("mmcblk") {
+        // Partition form is "...p<N>"; strip ONLY that. A whole disk (no "pN") is returned unchanged.
+        if let Some(pos) = dev.rfind('p') {
+            let tail = &dev[pos + 1..];
+            if !tail.is_empty() && tail.bytes().all(|b| b.is_ascii_digit()) {
+                return dev[..pos].to_string();
+            }
+        }
+        return dev.to_string();
+    }
+    // sd/hd/vd/etc: the partition number is a plain trailing-digit suffix.
+    dev.trim_end_matches(|c: char| c.is_ascii_digit()).to_string()
+}
+
+/// The pure classifier core (CPE-1355). Given `path`, the contents of `/proc/mounts`, and a
+/// `read_removable` seam that returns the `removable` sysfs flag for a base block device name (or
+/// `None` if it can't be read), decide `"removable"` vs `"fixed"`:
+/// - Find the mount entry whose mount point is the LONGEST prefix of `path` (the containing mount),
+///   skipping pseudo/virtual filesystems and any non-`/dev/*` device.
+/// - Reduce that mount's partition device to its parent block device and consult `read_removable`.
+/// - `"1"` → `"removable"`; anything else, or any failure along the way (no matching mount, unreadable
+///   flag, malformed input) → `"fixed"`. Never panics.
+#[cfg(any(target_os = "linux", test))]
+fn classify_drive_type_from_proc(
+    path: &str,
+    mounts: &str,
+    read_removable: impl Fn(&str) -> Option<String>,
+) -> String {
+    let mut best: Option<(&str, &str)> = None; // (mount_point, device)
+    for line in mounts.lines() {
+        let mut fields = line.split_whitespace();
+        let device = match fields.next() {
+            Some(d) => d,
+            None => continue,
+        };
+        let mount_point = match fields.next() {
+            Some(m) => m,
+            None => continue,
+        };
+        let fstype = fields.next().unwrap_or("");
+        if !device.starts_with("/dev/") || is_virtual_fstype(fstype) {
+            continue; // pseudo/virtual fs (tmpfs, proc, sysfs, overlay, snap squashfs, ...) never removable
+        }
+        let is_prefix_mount = mount_point == "/"
+            || path == mount_point
+            || path.starts_with(&format!("{mount_point}/"));
+        if !is_prefix_mount {
+            continue;
+        }
+        if best.map_or(true, |(bm, _)| mount_point.len() > bm.len()) {
+            best = Some((mount_point, device));
+        }
+    }
+
+    let Some((_, device)) = best else {
+        return "fixed".to_string();
+    };
+    let dev_name = device.trim_start_matches("/dev/");
+    if dev_name.is_empty() {
+        return "fixed".to_string();
+    }
+    let base = parent_block_device(dev_name);
+    match read_removable(&base) {
+        Some(flag) if flag.trim() == "1" => "removable".to_string(),
+        _ => "fixed".to_string(),
+    }
+}
+
+/// Real Linux wrapper (CPE-1355): reads `/proc/mounts` and, for the matched device, `/sys/block/<dev>/removable`,
+/// then delegates all decision logic to the pure `classify_drive_type_from_proc`. Any I/O failure surfaces
+/// as `None`/missing input to the pure fn, which already falls back to `"fixed"` — never panics. This
+/// wrapper does real filesystem I/O so it can only be *compiled* on Linux (CI's ubuntu leg) and cannot be
+/// exercised on this Windows dev box; the decision logic it delegates to is fully unit-tested above.
+#[cfg(target_os = "linux")]
+fn drive_type_impl(path: &str) -> String {
+    let mounts = match std::fs::read_to_string("/proc/mounts") {
+        Ok(s) => s,
+        Err(_) => return "fixed".to_string(),
+    };
+    classify_drive_type_from_proc(path, &mounts, |dev| {
+        std::fs::read_to_string(format!("/sys/block/{dev}/removable"))
+            .ok()
+            .map(|s| s.trim().to_string())
+    })
+}
+
+#[cfg(all(unix, not(target_os = "linux")))]
 fn drive_type_impl(_path: &str) -> String {
-    // Best-effort until unix mount-type classification lands (a follow-up).
+    // Best-effort until a macOS/BSD classifier lands (a follow-up); Linux gets real classification above.
     "fixed".to_string()
 }
 
@@ -11688,10 +11824,151 @@ mod tests {
         assert_eq!(drive_type_impl(&cwd.to_string_lossy()), "fixed");
     }
 
-    #[cfg(not(windows))]
+    // macOS/BSD still use the hardcoded fallback (CPE-1355 only lands real classification on Linux);
+    // gated to exclude Linux so it doesn't assert on the real `/proc`+`/sys` classifier's environment-
+    // dependent outcome on CI's ubuntu leg (that's covered by the pure-fn tests below instead).
+    #[cfg(all(unix, not(target_os = "linux")))]
     #[test]
     fn drive_type_unix_fallback() {
         assert_eq!(drive_type_impl("/"), "fixed");
+    }
+
+    // ---- Linux drive-type classifier — pure fn, runs + is asserted on EVERY OS (CPE-1355) ----------
+
+    #[test]
+    fn classify_drive_type_usb_removable() {
+        let mounts = "/dev/sda2 / ext4 rw,relatime 0 0\n/dev/sdb1 /media/usb vfat rw,relatime 0 0\n";
+        let removable = |dev: &str| match dev {
+            "sdb" => Some("1".to_string()),
+            "sda" => Some("0".to_string()),
+            _ => None,
+        };
+        assert_eq!(
+            classify_drive_type_from_proc("/media/usb", mounts, removable),
+            "removable"
+        );
+        assert_eq!(
+            classify_drive_type_from_proc("/media/usb/photos", mounts, removable),
+            "removable",
+            "a path nested under the mount point still resolves to the containing mount"
+        );
+    }
+
+    #[test]
+    fn classify_drive_type_internal_disk_is_fixed() {
+        let mounts = "/dev/sda2 / ext4 rw,relatime 0 0\n";
+        let removable = |dev: &str| if dev == "sda" { Some("0".to_string()) } else { None };
+        assert_eq!(classify_drive_type_from_proc("/", mounts, removable), "fixed");
+        assert_eq!(
+            classify_drive_type_from_proc("/home/user/file.txt", mounts, removable),
+            "fixed"
+        );
+    }
+
+    #[test]
+    fn classify_drive_type_nvme_partition_reduces_to_parent_device() {
+        let mounts = "/dev/nvme0n1p3 /mnt/data ext4 rw,relatime 0 0\n";
+        let removable = |dev: &str| if dev == "nvme0n1" { Some("1".to_string()) } else { None };
+        assert_eq!(classify_drive_type_from_proc("/mnt/data", mounts, removable), "removable");
+    }
+
+    #[test]
+    fn classify_drive_type_mmcblk_partition_reduces_to_parent_device() {
+        let mounts = "/dev/mmcblk0p1 /media/sdcard vfat rw,relatime 0 0\n";
+        let removable = |dev: &str| if dev == "mmcblk0" { Some("1".to_string()) } else { None };
+        assert_eq!(
+            classify_drive_type_from_proc("/media/sdcard", mounts, removable),
+            "removable"
+        );
+    }
+
+    #[test]
+    fn classify_drive_type_unpartitioned_nvme_whole_disk_is_removable() {
+        // A directly-mounted, unpartitioned removable NVMe/SD device (no "pN" suffix) — the regression
+        // caught by review: a naive trailing-digit trim previously mangled "nvme0n1" into "nvme0n" and
+        // "mmcblk0" into "mmcblk", so the sysfs lookup missed and this always fell back to "fixed".
+        let mounts = "/dev/nvme0n1 /mnt/nvme ext4 rw,relatime 0 0\n";
+        let removable = |dev: &str| if dev == "nvme0n1" { Some("1".to_string()) } else { None };
+        assert_eq!(classify_drive_type_from_proc("/mnt/nvme", mounts, removable), "removable");
+    }
+
+    #[test]
+    fn classify_drive_type_unpartitioned_mmcblk_whole_disk_is_removable() {
+        let mounts = "/dev/mmcblk0 /mnt/sd ext4 rw,relatime 0 0\n";
+        let removable = |dev: &str| if dev == "mmcblk0" { Some("1".to_string()) } else { None };
+        assert_eq!(classify_drive_type_from_proc("/mnt/sd", mounts, removable), "removable");
+    }
+
+    #[test]
+    fn classify_drive_type_picks_longest_prefix_mount() {
+        // A path under a nested mount must resolve to the NESTED mount's device, not the outer "/".
+        let mounts = "/dev/sda2 / ext4 rw,relatime 0 0\n/dev/sdc1 /mnt/nested ext4 rw,relatime 0 0\n";
+        let removable = |dev: &str| match dev {
+            "sda" => Some("0".to_string()),
+            "sdc" => Some("1".to_string()),
+            _ => None,
+        };
+        assert_eq!(
+            classify_drive_type_from_proc("/mnt/nested/deep/file", mounts, removable),
+            "removable",
+            "the nested mount is the containing mount, not the root fs"
+        );
+    }
+
+    #[test]
+    fn classify_drive_type_unresolvable_path_is_fixed() {
+        let mounts = "/dev/sda2 /home ext4 rw,relatime 0 0\n";
+        // No mount entry contains "/nowhere" as a prefix — no fallback root "/" mount either.
+        assert_eq!(
+            classify_drive_type_from_proc("/nowhere", mounts, |_| Some("1".to_string())),
+            "fixed"
+        );
+    }
+
+    #[test]
+    fn classify_drive_type_missing_device_or_unreadable_removable_is_fixed() {
+        let mounts = "/dev/sda2 / ext4 rw,relatime 0 0\n";
+        // read_removable seam returns None (simulating a missing/unreadable /sys/block/*/removable).
+        assert_eq!(classify_drive_type_from_proc("/", mounts, |_| None), "fixed");
+    }
+
+    #[test]
+    fn classify_drive_type_pseudo_filesystems_are_never_removable() {
+        let mounts = "\
+tmpfs /tmp tmpfs rw,relatime 0 0
+proc /proc proc rw,relatime 0 0
+overlay / overlay rw,relatime 0 0
+";
+        // Even if the (bogus) removable seam would say "1", pseudo/virtual mounts must be skipped, so
+        // there's no `/dev/*` device left to resolve and the classifier falls back to "fixed".
+        assert_eq!(
+            classify_drive_type_from_proc("/", mounts, |_| Some("1".to_string())),
+            "fixed"
+        );
+    }
+
+    #[test]
+    fn classify_drive_type_malformed_mounts_never_panics() {
+        let mounts = "garbage line with no fields really\n\n/dev/sdb1\nonlytwo fields\n";
+        assert_eq!(classify_drive_type_from_proc("/", mounts, |_| Some("1".to_string())), "fixed");
+    }
+
+    #[test]
+    fn parent_block_device_reductions() {
+        // sd/hd/vd-style: the partition number is a plain trailing-digit suffix.
+        assert_eq!(parent_block_device("sda1"), "sda");
+        assert_eq!(parent_block_device("sda15"), "sda");
+        assert_eq!(parent_block_device("sdb1"), "sdb");
+        assert_eq!(parent_block_device("sda2"), "sda");
+        assert_eq!(parent_block_device("sdb"), "sdb", "a whole-disk mount has no partition suffix to strip");
+        // nvme/mmcblk: ONLY strip an explicit "pN" partition suffix — an unpartitioned whole-disk name
+        // (no "pN") must come back unchanged, never trimmed on its own trailing digit (review regression:
+        // "nvme0n1" -> "nvme0n" / "mmcblk0" -> "mmcblk" would point the /sys/block lookup at nothing).
+        assert_eq!(parent_block_device("nvme0n1p3"), "nvme0n1");
+        assert_eq!(parent_block_device("nvme0n1"), "nvme0n1", "unpartitioned whole-disk nvme");
+        assert_eq!(parent_block_device("nvme1n1"), "nvme1n1", "unpartitioned whole-disk nvme, other index");
+        assert_eq!(parent_block_device("mmcblk0p1"), "mmcblk0");
+        assert_eq!(parent_block_device("mmcblk0"), "mmcblk0", "unpartitioned whole-disk mmcblk");
     }
 
     // ---- Safe drive eject guard (CPE-1278) — hardware-free, cross-platform ------------------------
