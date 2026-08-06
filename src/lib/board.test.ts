@@ -214,6 +214,18 @@ describe("epic completion bar (CPE-1356)", () => {
     }
   });
 
+  it("renders a Backlog (Proposed) epic as not-started even when its children are all done (CPE-1365)", () => {
+    // The reported bug: a Proposed epic reverted to Backlog after its slices shipped still has done
+    // children, so the old code fell into `partial` and drew a full hatched in-WORK bar in the BACKLOG
+    // lane. The swim lane is the truth — Backlog reads not-started, regardless of child counts.
+    const bar = epicBar("Proposed", 14, 14);
+    expect(bar.state).toBe("empty"); // NOT "partial"/"complete" — it's in the Backlog lane
+    expect(bar.percent).toBe(0);
+    expect(bar.label).toBe("—");
+    // Partially-done Proposed epic → still not-started (Backlog lane wins over the raw count).
+    expect(epicBar("Proposed", 3, 10).state).toBe("empty");
+  });
+
   it("shows an in-progress epic as partial — never a solid complete bar — even at 100% child completion", () => {
     // The reported contradiction: an In Progress epic with all children done rendered a full *complete*
     // bar that fought its Doing swim lane. It must be the distinct `partial` state instead.

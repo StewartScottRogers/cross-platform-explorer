@@ -115,26 +115,33 @@ export function epicProgress(cards: Card[], epicId: string): { done: number; tot
 /** The completion-bar display state for one epic. */
 export type EpicBarState = "complete" | "partial" | "empty";
 
-/** Resolve an epic's completion bar (CPE-1356) so it **agrees with the epic's own swim lane** (its
- *  `status:`) instead of contradicting it, and never renders a broken `0/0` sliver:
- *  - A **Done** epic reads as complete — a full bar — even when its children are archived/unlinked and
- *    the counted `total` is 0 (label `done`, not a misleading `0/0` at 0%).
- *  - A not-yet-decomposed epic (`total === 0`, not Done) reads as a clear, aligned **empty** track
- *    (label `—`), not a thin misplaced fill.
- *  - Otherwise the bar shows child completion as a visually distinct **partial** (in-progress) style, so
- *    an open epic whose known children happen to be all-done never reads as a solid *complete* bar.
+/** Resolve an epic's completion bar (CPE-1356/1365) so it **agrees with the epic's own swim lane** (the
+ *  column `epicColumn(status)` puts it in) instead of contradicting it, and never renders a broken sliver.
+ *  The lane is the source of truth — not the raw child counts:
+ *  - A **Done** epic reads as complete — a full bar — even when its children are archived/unlinked and the
+ *    counted `total` is 0 (label `done`, not a misleading `0/0` at 0%).
+ *  - A **Backlog** epic (Proposed / not-yet-started) reads as **not-started** — an empty track — REGARDLESS
+ *    of child counts. An epic can sit in Backlog with already-done children (e.g. one reverted to Proposed
+ *    after its slices shipped); it must NOT render an in-work/partial bar in the Backlog lane (CPE-1365 —
+ *    the "backlog epics showing in work" bug).
+ *  - A **Doing** (In Progress) epic shows child completion as a visually distinct **partial** (hatched)
+ *    style, so an open epic whose known children happen to be all-done never reads as a solid *complete*
+ *    bar; with no decomposed children yet it's an empty track.
  *  Pure — the `done`/`total` come from {@link epicProgress} over the full (archive-inclusive) card set. */
 export function epicBar(
   status: string,
   done: number,
   total: number,
 ): { percent: number; label: string; state: EpicBarState } {
-  if (epicColumn(status) === "Done") {
+  const col = epicColumn(status);
+  if (col === "Done") {
     return { percent: 100, label: total > 0 ? `${done}/${total}` : "done", state: "complete" };
   }
-  if (total === 0) {
+  // Backlog (not started) → always the empty/not-started track; Doing with no children → likewise empty.
+  if (col === "Backlog" || total === 0) {
     return { percent: 0, label: "—", state: "empty" };
   }
+  // Doing with decomposed children → hatched in-work partial.
   return { percent: Math.round((100 * done) / total), label: `${done}/${total}`, state: "partial" };
 }
 
