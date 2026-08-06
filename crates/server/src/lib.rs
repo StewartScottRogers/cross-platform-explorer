@@ -372,6 +372,11 @@ pub mod archive;
 /// epic CPE-705).
 pub mod archive_format;
 
+/// RAR entry listing — hand-rolled RAR4/RAR5 header walk, listing only (names/sizes/is_dir), ZERO new
+/// deps and no UnRAR (CPE-1347, epic CPE-111). Standalone module: not yet wired into `archive.rs`'s
+/// dispatch — that's a follow-up integration ticket.
+pub mod rar;
+
 /// Per-line indent-guide depth for a code preview (CPE-1051, epic CPE-724).
 pub mod indent_guides;
 
@@ -434,6 +439,10 @@ pub mod image_preview;
 /// compiles zero DICOM code and pulls in no `dicom-object`/`dicom-pixeldata` dependency.
 #[cfg(feature = "dicom-thumb")]
 pub mod dicom;
+/// Camera-RAW embedded-preview extraction (CPE-1346) — CR2/NEF/ARW are TIFF containers; a hand-rolled,
+/// bounds-checked TIFF/IFD walker (no demosaicing, no new dependency) pulls out the largest embedded
+/// JPEG preview already inside the file, falling back to `kamadak-exif`'s standard thumbnail tag.
+pub mod camera_raw;
 
 /// Backup copy engine — plan executor (copy/update/mirror-delete) with per-file results (CPE-797).
 pub mod backup;
