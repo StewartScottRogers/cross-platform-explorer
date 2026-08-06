@@ -384,6 +384,35 @@ async readRawPreviewDataUrl(path: string) : Promise<Result<string, string>> {
 }
 },
 /**
+ * Decode a DICOM (`.dcm`) file's pixel data to a PNG `data:` URL the `<img>` tag can show
+ * (CPE-1350, epic CPE-102). Mirrors `read_raw_preview_data_url` above: a thin `spawn_blocking`
+ * dispatcher into `cpe_server::dicom`, capped by the same preview size guard. `Err` on a corrupt
+ * file or a transfer syntax needing a native codec this build doesn't carry (JPEG2000/JPEG-LS/
+ * vendor) — the frontend falls back to the metadata view (tags, if readable, still show).
+ */
+async readDicomImageDataUrl(path: string) : Promise<Result<string, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("read_dicom_image_data_url", { path }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * Read a curated set of DICOM tags (patient/study identity + basic imaging attributes) for the
+ * preview pane (CPE-1350). A thin `spawn_blocking` dispatcher into `cpe_server::dicom` — no size
+ * cap needed, `dicom-object` reads the header/data-set structurally rather than slurping the whole
+ * file. `Err` only when the file can't be opened as DICOM at all.
+ */
+async readDicomTags(path: string) : Promise<Result<([string, string])[], string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("read_dicom_tags", { path }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
  * A PNG thumbnail of an image file as a `data:` URL the `<img>` tag can show (CPE-642), served from
  * an mtime-keyed on-disk cache (CPE-644). Also covers `.svg` (rasterized) and `.ttf`/`.otf`/`.woff`
  * glyph-sheet specimens (CPE-1236) — the format dispatch lives entirely in

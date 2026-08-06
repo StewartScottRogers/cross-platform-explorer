@@ -41,6 +41,10 @@
   export let loadImageData: (path: string) => Promise<string> = async () => "";
   /** Extract a camera-RAW file's embedded JPEG preview as a data: URL (a backend command in the app). */
   export let loadRawImageData: (path: string) => Promise<string> = async () => "";
+  /** Decode a DICOM file's pixel data to a data: URL (a backend command in the app). */
+  export let loadDicomImageData: (path: string) => Promise<string> = async () => "";
+  /** Read a curated set of DICOM tags for the preview pane (a backend command in the app). */
+  export let loadDicomTags: (path: string) => Promise<[string, string][]> = async () => [];
 
   /** Cap the number of CSV rows rendered so a huge sheet can't lock the pane. */
   const CSV_ROW_CAP = 200;
@@ -87,6 +91,16 @@
   let rawImgState: "idle" | "loading" | "error" = "idle";
   let rawImgReqId = 0;
 
+  // DICOM (CPE-1350): the decoded pixel-data image and the curated tag list load independently —
+  // an unsupported transfer syntax / corrupt pixel data can fail the image while the tags (read
+  // structurally, not from pixel data) still come back fine, so both get their own request/state.
+  let dicomImgUrl = "";
+  let dicomImgState: "idle" | "loading" | "error" = "idle";
+  let dicomImgReqId = 0;
+
+  let dicomTags: [string, string][] = [];
+  let dicomTagsReqId = 0;
+
   let fontFamily = "";
   let fontState: "idle" | "loading" | "error" = "idle";
   let fontReqId = 0;
@@ -108,6 +122,10 @@
   $: if (entry && provider.kind === "info") loadInfoFor(entry);
   $: if (entry && provider.kind === "decoded-image") loadImageDataFor(entry);
   $: if (entry && provider.kind === "raw-image") loadRawImageDataFor(entry);
+  $: if (entry && provider.kind === "dicom") {
+    loadDicomImageDataFor(entry);
+    loadDicomTagsFor(entry);
+  }
   $: if (entry && isModelFile) {
     loadModelFor(entry);
   } else {
@@ -203,6 +221,36 @@
     } catch {
       if (mine !== rawImgReqId) return;
       rawImgState = "error";
+    }
+  }
+
+  /** No decodable pixel data (backend `Err` — unsupported transfer syntax/corrupt) lands in
+   *  `dicomImgState === "error"`, which the render side shows as the metadata slot rather than an
+   *  error message, same as the raw-image miss above; the tag list (loaded separately) still shows
+   *  if it came back. */
+  async function loadDicomImageDataFor(e: DirEntry) {
+    const mine = ++dicomImgReqId;
+    dicomImgState = "loading";
+    try {
+      const url = await loadDicomImageData(e.path);
+      if (mine !== dicomImgReqId) return;
+      dicomImgUrl = url;
+      dicomImgState = "idle";
+    } catch {
+      if (mine !== dicomImgReqId) return;
+      dicomImgState = "error";
+    }
+  }
+
+  async function loadDicomTagsFor(e: DirEntry) {
+    const mine = ++dicomTagsReqId;
+    try {
+      const tags = await loadDicomTags(e.path);
+      if (mine !== dicomTagsReqId) return;
+      dicomTags = tags;
+    } catch {
+      if (mine !== dicomTagsReqId) return;
+      dicomTags = []; // never an error toast — the section is just omitted
     }
   }
 
@@ -712,6 +760,16 @@
       </div>
     </div>
   {/if}
+  {#if provider.kind === "dicom" && dicomTags.length > 0}
+    <div class="model-info" data-testid="dicom-tags-section">
+      <div class="model-info-title">{$t("pv.dicom.title")}</div>
+      <div class="model-info-rows">
+        {#each dicomTags as [name, value]}
+          <div class="model-row"><span class="model-k">{name}</span><span class="model-v">{value}</span></div>
+        {/each}
+      </div>
+    </div>
+  {/if}
   {#if provider.kind === "image" && entry}
     <img class="preview-img" src={assetUrl(entry.path)} alt={entry.name} />
   {:else if provider.kind === "decoded-image" && entry}
@@ -729,6 +787,14 @@
       <slot />
     {:else}
       <img class="preview-img" src={rawImgUrl} alt={entry.name} />
+    {/if}
+  {:else if provider.kind === "dicom" && entry}
+    {#if dicomImgState === "loading"}
+      <p class="preview-note">{$t("pv.loading")}</p>
+    {:else if dicomImgState === "error"}
+      <slot />
+    {:else}
+      <img class="preview-img" src={dicomImgUrl} alt={entry.name} />
     {/if}
   {:else if provider.kind === "audio" && entry}
     <!-- svelte-ignore a11y-media-has-caption -->

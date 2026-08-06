@@ -25,5 +25,11 @@ export const loadImageData = (path: string): Promise<string> =>
 export const loadRawImageData = (path: string): Promise<string> =>
   commands.readRawPreviewDataUrl(path).then(unwrap);
 
+export const loadDicomImageData = (path: string): Promise<string> =>
+  commands.readDicomImageDataUrl(path).then(unwrap);
+
+export const loadDicomTags = (path: string): Promise<[string, string][]> =>
+  commands.readDicomTags(path).then(unwrap);
+
 export const savePreviewText = (path: string, contents: string): Promise<void> =>
   commands.writeFileText(path, contents).then((r) => void unwrap(r));

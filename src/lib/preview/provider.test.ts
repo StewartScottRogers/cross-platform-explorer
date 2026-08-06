@@ -140,6 +140,14 @@ describe("pickProvider", () => {
     expect(pickProvider(entry({ name: "a.png", extension: "png" })).kind).toBe("image");
   });
 
+  it("decodes DICOM (.dcm) files via the dicom provider, not the generic image/hex fallback (CPE-1350)", () => {
+    const p = pickProvider(entry({ name: "a.dcm", extension: "dcm" }));
+    expect(p.kind).toBe("dicom");
+    expect(p.editable).toBe(false);
+    // sanity: a native image still uses the plain image provider, not dicom
+    expect(pickProvider(entry({ name: "a.png", extension: "png" })).kind).toBe("image");
+  });
+
   it("falls back to metadata for folders and nothing selected", () => {
     expect(pickProvider(entry({ name: "dir", is_dir: true, extension: "" })).kind).toBe("none");
     expect(pickProvider(null).kind).toBe("none");

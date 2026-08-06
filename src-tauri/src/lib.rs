@@ -959,6 +959,34 @@ async fn read_raw_preview_data_url(path: String) -> Result<String, String> {
     .map_err(|e| e.to_string())?
 }
 
+/// Decode a DICOM (`.dcm`) file's pixel data to a PNG `data:` URL the `<img>` tag can show
+/// (CPE-1350, epic CPE-102). Mirrors `read_raw_preview_data_url` above: a thin `spawn_blocking`
+/// dispatcher into `cpe_server::dicom`, capped by the same preview size guard. `Err` on a corrupt
+/// file or a transfer syntax needing a native codec this build doesn't carry (JPEG2000/JPEG-LS/
+/// vendor) — the frontend falls back to the metadata view (tags, if readable, still show).
+#[tauri::command]
+#[cfg_attr(feature = "specta-bindings", specta::specta)]
+async fn read_dicom_image_data_url(path: String) -> Result<String, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        ensure_previewable_size(&path, PREVIEW_INFO_MAX_BYTES)?;
+        cpe_server::dicom::read_dicom_image_data_url(&path)
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+/// Read a curated set of DICOM tags (patient/study identity + basic imaging attributes) for the
+/// preview pane (CPE-1350). A thin `spawn_blocking` dispatcher into `cpe_server::dicom` — no size
+/// cap needed, `dicom-object` reads the header/data-set structurally rather than slurping the whole
+/// file. `Err` only when the file can't be opened as DICOM at all.
+#[tauri::command]
+#[cfg_attr(feature = "specta-bindings", specta::specta)]
+async fn read_dicom_tags(path: String) -> Result<Vec<(String, String)>, String> {
+    tauri::async_runtime::spawn_blocking(move || cpe_server::dicom::read_dicom_tags(&path))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
 
 /// A PNG thumbnail of an image file as a `data:` URL the `<img>` tag can show (CPE-642), served from
 /// an mtime-keyed on-disk cache (CPE-644). Also covers `.svg` (rasterized) and `.ttf`/`.otf`/`.woff`
@@ -9779,6 +9807,8 @@ pub fn run() {
             read_model_info,
             read_image_data_url,
             read_raw_preview_data_url,
+            read_dicom_image_data_url,
+            read_dicom_tags,
             thumbnail,
             thumbnails_stream,
             cancel_thumbnails_stream,
@@ -10589,6 +10619,8 @@ pub fn export_bindings(out: &std::path::Path) -> Result<(), String> {
         read_model_info,
         read_image_data_url,
         read_raw_preview_data_url,
+        read_dicom_image_data_url,
+        read_dicom_tags,
         thumbnail,
         thumbnails_stream,
         cancel_thumbnails_stream,
