@@ -1,17 +1,26 @@
 //! DICOM medical-image reading (CPE-1345, gated-format-reader lane): a curated tag list for the
 //! Properties dialog + pixel-data → PNG `data:` URL transcode, via the pure-Rust `dicom-rs` crates
-//! (`dicom-object` parses the file meta + data set, `dicom-pixeldata` decodes pixel data to a
-//! `DynamicImage`). Feature-gated behind `dicom-thumb` (off by default) so the plain build pulls in
-//! none of this. Mirrors `image_preview::read_image_data_url`'s `data:image/png;base64,...` shape.
+//! (`dicom-object` parses the file meta + data set, `dicom-pixeldata` decodes pixel data). Feature-gated
+//! behind `dicom-thumb` (off by default) so the plain build pulls in none of this. Mirrors
+//! `image_preview::read_image_data_url`'s `data:image/png;base64,...` shape.
 //!
 //! Native compressed transfer syntaxes (JPEG2000, JPEG-LS, vendor codecs) are deliberately NOT
 //! supported — `dicom-pixeldata`'s `openjp2`/`charls`/`gdcm` features all require a C toolchain and
 //! are left off the build (see `Cargo.toml`). Opening a file that needs one of those cleanly errors
 //! (`ts.can_decode_all()` is false for an unregistered codec) instead of decoding — never a panic.
+//!
+//! `read_dicom_image_data_url` deliberately does NOT use `dicom-pixeldata`'s `to_dynamic_image` /
+//! `image` feature (CPE-1352, trimming the +2.81 MiB DICOM ship-cost from CPE-1350): that feature pulls
+//! in `dicom-pixeldata`'s OWN `image` dependency, which via Cargo feature-unification expands the app's
+//! curated `image` dep (`tiff/png/jpeg/gif/webp/bmp`) to also compile the `exr` + `pnm` decoders DICOM
+//! never needs. Instead it reads windowed pixel bytes via the un-feature-gated
+//! `DecodedPixelData::to_vec_frame_with_options` + `rows()`/`columns()`/`samples_per_pixel()`/
+//! `photometric_interpretation()`/`bits_allocated()` accessors, and builds the `image::DynamicImage`
+//! from the app's own `image` dependency.
 
 use dicom_dictionary_std::tags;
 use dicom_object::Tag;
-use dicom_pixeldata::PixelDecoder;
+use dicom_pixeldata::{ConvertOptions, PhotometricInterpretation, PixelDecoder, VoiLutOption};
 
 /// The curated tag set surfaced for the Properties dialog: identity + a handful of the imaging
 /// attributes that describe the pixel data itself. Order here is the display order.
@@ -47,17 +56,89 @@ pub fn read_dicom_tags(path: &str) -> Result<Vec<(String, String)>, String> {
 }
 
 /// Decode a DICOM file's first pixel-data frame to a PNG `data:` URL the `<img>` tag can show.
-/// Applies the default `dicom-pixeldata` processing pipeline (Modality LUT, then the first VOI
-/// LUT/window-center-width transform found in the object, if any) before encoding to PNG via the
-/// `image` crate. Errors — never panics — on a corrupt file, an unreadable pixel-data attribute set,
-/// or a transfer syntax needing a native codec this build doesn't carry (JPEG2000/JPEG-LS/vendor).
+/// Applies the same processing pipeline `dicom-pixeldata`'s own `to_dynamic_image` default applies
+/// (Modality LUT, then the first VOI LUT/window-center-width transform found in the object, if any;
+/// MONOCHROME1 is inverted so the minimum sample still displays as white) — but via the un-feature-gated
+/// `to_vec_frame_with_options` raw-bytes path (CPE-1352) instead of `dicom-pixeldata`'s `image`
+/// integration, so the app's own curated `image` dependency does the PNG encode. Handles the common
+/// photometric interpretations: MONOCHROME1/MONOCHROME2 (1 sample per pixel → 8-bit grayscale) and RGB
+/// (3 samples per pixel → 8-bit RGB, copied through unwindowed like `dicom-pixeldata` does for
+/// non-monochrome images). Any other photometric interpretation / sample-per-pixel count is a clean
+/// `Err`. Errors — never panics — on a corrupt file, an unreadable pixel-data attribute set, or a
+/// transfer syntax needing a native codec this build doesn't carry (JPEG2000/JPEG-LS/vendor).
 pub fn read_dicom_image_data_url(path: &str) -> Result<String, String> {
     use base64::Engine;
+    use image::{DynamicImage, ImageBuffer, Luma, Rgb};
     use std::io::Cursor;
 
     let obj = dicom_object::open_file(path).map_err(|e| e.to_string())?;
     let pixel_data = obj.decode_pixel_data().map_err(|e| e.to_string())?;
-    let dynamic_image = pixel_data.to_dynamic_image(0).map_err(|e| e.to_string())?;
+
+    let rows = pixel_data.rows();
+    let columns = pixel_data.columns();
+    let samples_per_pixel = pixel_data.samples_per_pixel();
+    let photometric_interpretation = pixel_data.photometric_interpretation();
+    let bits_allocated = pixel_data.bits_allocated();
+
+    // `VoiLutOption::First` is the raw-vec-path equivalent of `to_dynamic_image`'s default: apply the
+    // first VOI LUT/window-level found in the object (its own `Default` only auto-applies the window
+    // "when converting to an image" per the `dicom-pixeldata` docs; the bare-vec conversion methods
+    // need `First` spelled out to get the same windowing). Note: unlike `to_dynamic_image`'s default,
+    // this does not consult an explicit VOI LUT SEQUENCE (only WindowCenter/WindowWidth) — a narrow gap
+    // accepted here since a plain window/level is the overwhelmingly common case.
+    let options = ConvertOptions::new().with_voi_lut(VoiLutOption::First);
+
+    let dynamic_image: DynamicImage = match (samples_per_pixel, photometric_interpretation) {
+        (1, pi) if pi.is_monochrome() => {
+            // `to_vec_frame_with_options`'s output range tracks the INPUT bit depth (bits_stored
+            // rounded up to a power of two), not the requested output type — asking for `u8` when
+            // bits_allocated > 8 would try to cast values up to 65535 into a `u8` LUT table and error.
+            // So: decode at native width, then narrow to 8-bit ourselves for bits_allocated > 8,
+            // mirroring `dicom-pixeldata`'s own `mono_image_with_narrow`'s `(x >> 8) as u8`.
+            let mut gray: Vec<u8> = if bits_allocated <= 8 {
+                pixel_data
+                    .to_vec_frame_with_options::<u8>(0, &options)
+                    .map_err(|e| e.to_string())?
+            } else {
+                pixel_data
+                    .to_vec_frame_with_options::<u16>(0, &options)
+                    .map_err(|e| e.to_string())?
+                    .into_iter()
+                    .map(|v| (v >> 8) as u8)
+                    .collect()
+            };
+
+            // `to_vec_frame_with_options` ignores photometric interpretation entirely (per its own
+            // docs), unlike `to_dynamic_image`'s default `PhotometricInterpretationOption::InvertMonochrome1`
+            // — so MONOCHROME1 (minimum sample = white) needs the same inversion applied by hand here.
+            if matches!(photometric_interpretation, PhotometricInterpretation::Monochrome1) {
+                for px in gray.iter_mut() {
+                    *px = 255 - *px;
+                }
+            }
+
+            let buffer: ImageBuffer<Luma<u8>, Vec<u8>> = ImageBuffer::from_raw(columns, rows, gray)
+                .ok_or_else(|| "DICOM pixel buffer size does not match rows x columns".to_string())?;
+            DynamicImage::ImageLuma8(buffer)
+        }
+        (3, _) => {
+            // Non-monochrome pixel data is copied through unwindowed by `dicom-pixeldata` itself (the
+            // Modality/VOI LUT only applies when the photometric interpretation is monochrome), so RGB
+            // needs no narrowing step regardless of `bits_allocated`.
+            let rgb: Vec<u8> = pixel_data
+                .to_vec_frame_with_options::<u8>(0, &options)
+                .map_err(|e| e.to_string())?;
+            let buffer: ImageBuffer<Rgb<u8>, Vec<u8>> = ImageBuffer::from_raw(columns, rows, rgb)
+                .ok_or_else(|| "DICOM pixel buffer size does not match rows x columns".to_string())?;
+            DynamicImage::ImageRgb8(buffer)
+        }
+        (spp, pi) => {
+            return Err(format!(
+                "unsupported DICOM pixel layout: {spp} samples/pixel, {} photometric interpretation",
+                pi.as_str()
+            ));
+        }
+    };
 
     let mut out = Cursor::new(Vec::new());
     dynamic_image
@@ -198,6 +279,112 @@ mod tests {
         };
         let decoded = image::load_from_memory(&png_bytes).unwrap();
         assert_eq!((decoded.width(), decoded.height()), (4, 4));
+
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// Decode a `data:image/png;base64,...` URL (as produced by `read_dicom_image_data_url`) back to
+    /// an `image::DynamicImage` for pixel-level assertions in the tests below.
+    fn decode_png_data_url(url: &str) -> image::DynamicImage {
+        use base64::Engine;
+        let b64 = url.strip_prefix("data:image/png;base64,").unwrap();
+        let png_bytes = base64::engine::general_purpose::STANDARD.decode(b64).unwrap();
+        image::load_from_memory(&png_bytes).unwrap()
+    }
+
+    /// A 3-samples-per-pixel RGB DICOM (no windowing applies to non-monochrome pixel data, mirroring
+    /// `dicom-pixeldata` itself) decodes to an 8-bit RGB PNG with the exact input colors preserved.
+    #[test]
+    fn read_dicom_image_data_url_decodes_an_rgb_image() {
+        let d = scratch("rgb");
+        let f = d.join("a.dcm");
+
+        let mut obj = InMemDicomObject::new_empty();
+        obj.put(DataElement::new(tags::ROWS, VR::US, dicom_value!(U16, [2])));
+        obj.put(DataElement::new(tags::COLUMNS, VR::US, dicom_value!(U16, [2])));
+        obj.put(DataElement::new(tags::SAMPLES_PER_PIXEL, VR::US, dicom_value!(U16, [3])));
+        obj.put(DataElement::new(
+            tags::PHOTOMETRIC_INTERPRETATION,
+            VR::CS,
+            dicom_value!(Strs, ["RGB"]),
+        ));
+        obj.put(DataElement::new(tags::PLANAR_CONFIGURATION, VR::US, dicom_value!(U16, [0])));
+        obj.put(DataElement::new(tags::BITS_ALLOCATED, VR::US, dicom_value!(U16, [8])));
+        obj.put(DataElement::new(tags::BITS_STORED, VR::US, dicom_value!(U16, [8])));
+        obj.put(DataElement::new(tags::HIGH_BIT, VR::US, dicom_value!(U16, [7])));
+        obj.put(DataElement::new(tags::PIXEL_REPRESENTATION, VR::US, dicom_value!(U16, [0])));
+
+        // 2x2 pixels, interleaved RGB: red, green, blue, white.
+        #[rustfmt::skip]
+        let pixels: Vec<u8> = vec![
+            255, 0, 0,    0, 255, 0,
+            0, 0, 255,    255, 255, 255,
+        ];
+        obj.put(DataElement::new(tags::PIXEL_DATA, VR::OB, PrimitiveValue::U8(pixels.into())));
+
+        let file_obj = obj
+            .with_meta(
+                FileMetaTableBuilder::new()
+                    .transfer_syntax(uids::EXPLICIT_VR_LITTLE_ENDIAN)
+                    .media_storage_sop_class_uid("1.2.840.10008.5.1.4.1.1.7"),
+            )
+            .unwrap();
+        file_obj.write_to_file(&f).unwrap();
+
+        let url = read_dicom_image_data_url(&f.to_string_lossy()).unwrap();
+        let decoded = decode_png_data_url(&url).into_rgb8();
+        assert_eq!((decoded.width(), decoded.height()), (2, 2));
+        assert_eq!(decoded.get_pixel(0, 0).0, [255, 0, 0]);
+        assert_eq!(decoded.get_pixel(1, 0).0, [0, 255, 0]);
+        assert_eq!(decoded.get_pixel(0, 1).0, [0, 0, 255]);
+        assert_eq!(decoded.get_pixel(1, 1).0, [255, 255, 255]);
+
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// MONOCHROME1 (minimum sample value = white) is inverted so it displays the same as an
+    /// equivalent MONOCHROME2 image would — mirroring `dicom-pixeldata`'s own `to_dynamic_image`
+    /// default (`PhotometricInterpretationOption::InvertMonochrome1`), which the raw-vec conversion
+    /// path used here does not apply automatically.
+    #[test]
+    fn read_dicom_image_data_url_inverts_monochrome1() {
+        let d = scratch("mono1");
+        let f = d.join("a.dcm");
+
+        let mut obj = InMemDicomObject::new_empty();
+        obj.put(DataElement::new(tags::ROWS, VR::US, dicom_value!(U16, [2])));
+        obj.put(DataElement::new(tags::COLUMNS, VR::US, dicom_value!(U16, [2])));
+        obj.put(DataElement::new(tags::SAMPLES_PER_PIXEL, VR::US, dicom_value!(U16, [1])));
+        obj.put(DataElement::new(
+            tags::PHOTOMETRIC_INTERPRETATION,
+            VR::CS,
+            dicom_value!(Strs, ["MONOCHROME1"]),
+        ));
+        obj.put(DataElement::new(tags::BITS_ALLOCATED, VR::US, dicom_value!(U16, [8])));
+        obj.put(DataElement::new(tags::BITS_STORED, VR::US, dicom_value!(U16, [8])));
+        obj.put(DataElement::new(tags::HIGH_BIT, VR::US, dicom_value!(U16, [7])));
+        obj.put(DataElement::new(tags::PIXEL_REPRESENTATION, VR::US, dicom_value!(U16, [0])));
+
+        let pixels: Vec<u8> = vec![0, 50, 200, 255];
+        obj.put(DataElement::new(tags::PIXEL_DATA, VR::OB, PrimitiveValue::U8(pixels.into())));
+
+        let file_obj = obj
+            .with_meta(
+                FileMetaTableBuilder::new()
+                    .transfer_syntax(uids::EXPLICIT_VR_LITTLE_ENDIAN)
+                    .media_storage_sop_class_uid("1.2.840.10008.5.1.4.1.1.7"),
+            )
+            .unwrap();
+        file_obj.write_to_file(&f).unwrap();
+
+        let url = read_dicom_image_data_url(&f.to_string_lossy()).unwrap();
+        let decoded = decode_png_data_url(&url).into_luma8();
+        assert_eq!((decoded.width(), decoded.height()), (2, 2));
+        // Input samples [0, 50, 200, 255] inverted (255 - x) => [255, 205, 55, 0].
+        assert_eq!(decoded.get_pixel(0, 0).0, [255]);
+        assert_eq!(decoded.get_pixel(1, 0).0, [205]);
+        assert_eq!(decoded.get_pixel(0, 1).0, [55]);
+        assert_eq!(decoded.get_pixel(1, 1).0, [0]);
 
         let _ = std::fs::remove_dir_all(&d);
     }
