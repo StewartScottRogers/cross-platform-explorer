@@ -1003,3 +1003,18 @@ unsafe WIC FFI worker+reviewer); provider-wiring shares src-tauri/lib.rs + bindi
 MUST sequence (branch each off the prior merge), can't parallelize. HEIC needs OS HEIF extension on Windows
 (graceful Err fallback). ~86 sub-agents this session. FRONTIER: program complete; remaining = attended visual
 (build->deploy->run; macOS on a Mac) — no clean headless work left in this lane.
+
+## Shift 2026-08-06 (resume, cont.2) — POST-PROGRAM HARDENING (CPE-1354/1355), 15 tickets total
+After the format-reader program, a broad frontier scan (evidence-based, NOT trusting "dry") found 3 real items:
+- CPE-1354 (HIGH): the shipped `dicom-thumb` feature was NEVER run by CI `cargo test`/clippy — so the DICOM
+  tests incl. the CPE-1353 YBR regression were invisible. Added dicom-thumb to ci.yml server job + put
+  rar/dicom/camera_raw into the panic-safety fuzz battery. Lesson: when a feature SHIPS, grep ci.yml to confirm
+  its tests actually RUN there.
+- CPE-1355: real Linux drive-type classification (was hardcoded "fixed"). Pure classify fn (testable on Windows)
+  + linux-cfg /proc wrapper (CI-compiled on ubuntu). Gauntlet caught the unpartitioned whole-disk nvme/mmcblk
+  reduction bug (nvme0n1->nvme0n). CPE-1355 (Linux drive-type) filed CPE-1355; gui-smoke fixtures for the 4 new
+  preview types (#4) left as heavier-infra follow-up (not filed — needs tauri-driver pipeline effort).
+Session total: 15 tickets (CPE-1341-1355), main GREEN throughout, 0 escaped defects. Gauntlet caught 5 real
+bugs pre-merge (RAR overflow-hang, HEIC macOS deprecations, HEIC dim-guard, DICOM YBR wrong-color, DICOM upstream
+sign bug, drive-type whole-disk reduction). ~105 sub-agents. FRONTIER: clean headless vein tapped again — remaining
+is attended visual (build->deploy->run; a Mac) or the heavier gui-smoke-fixtures infra.

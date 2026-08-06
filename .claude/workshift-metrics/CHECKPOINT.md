@@ -239,3 +239,30 @@ DICOM YBR wrong-color regression, upstream YCbCr sign bug.
 Program is complete. Next: pair on the build→deploy→run visual (say "Run" to cut+install a fresh build), provide
 a Mac for the HEIC macOS check, or name a new focus. Do NOT manufacture a clean-headless hunt in this lane — it's
 done. Nothing blocked or broken; main clean + green.
+
+---
+## RUN 2026-08-06 (resume, cont.2) — ~00:44 local — POST-PROGRAM HARDENING; 15 tickets total; CLEAN WRAP
+A broad evidence-based frontier scan (after the format-reader program completed) found 3 real items:
+- **CPE-1354** (HIGH, merged #649): the shipped `dicom-thumb` feature was NEVER exercised by CI test/clippy —
+  the DICOM tests incl. the CPE-1353 YBR sign-bug regression were invisible in CI. Fixed (added to ci.yml server
+  job) + added rar/dicom/camera_raw to the panic-safety fuzz battery.
+- **CPE-1355** (merged #650): real Linux drive-type classification (was hardcoded "fixed"). Pure fn + linux-cfg
+  wrapper; gauntlet caught the whole-disk nvme/mmcblk reduction bug.
+- Scan #4 (gui-smoke fixtures for the 4 new preview types): heavier tauri-driver infra, NOT filed — a dedicated
+  follow-up if wanted.
+
+## State
+- `main` @ origin `28a8c4c4`, CLEAN. Backlog + Doing EMPTY (only wiki.md). Worktrees: only main. ~105 sub-agents
+  this session (under the 150 reset line). Session shipped **15 tickets (CPE-1341-1355)**, 0 escaped defects.
+- Parent epics CPE-097/102/111/219 moved Blocked→Deferred (backend+wiring shipped; attended-visual remainder).
+
+## REMAINING = ATTENDED or heavier-infra (no clean headless work left)
+1. **Visual verification (build → deploy → run):** open a .heic/.dcm/RAW/.rar in the real installed build. Say
+   "Run" to cut+install a fresh build. (Windows HEIC needs the OS HEIF Image Extensions — present on this dev box.)
+2. **HEIC macOS** visual on a real Mac.
+3. **gui-smoke fixtures** for the 4 new preview types (scan #4) — heavier tauri-driver/WebView2 infra, if wanted.
+
+## To resume
+Program + hardening complete. Do NOT re-run a clean-headless hunt in this lane (two evidence-based scans this
+session already mined it dry — the 2nd's real items are shipped). Next: pair on the build→deploy→run visual, a Mac
+for HEIC-macOS, green-light the gui-smoke-fixtures infra, or name a NEW focus. Nothing blocked or broken.
