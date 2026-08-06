@@ -75,17 +75,20 @@ fn jpeg_exif_baseline() {
 
 #[test]
 fn pdf_info_baseline() {
+    // `documents/doc.pdf` was replaced (CPE-1357/1358) with a real, valid multi-page PDF — the old
+    // fixture was a 406-byte structurally-invalid file (`/Kids [] /Count 0`, no xref) that crashed the
+    // PDF preview (the bug CPE-1357 fixes). The new file is a Pillow-rendered raster PDF, so it carries a
+    // slimmer `/Info` dict than the old hand-authored baseline (no Author/Subject/Keywords/Producer) —
+    // update these expectations if `doc.pdf` is regenerated again.
     let f = read_pdf(&sample("documents/doc.pdf"));
-    assert_eq!(val(&f, "Title"), "Baseline Sample");
-    assert_eq!(val(&f, "Author"), "CPE Test Suite");
-    assert_eq!(val(&f, "Subject"), "Baseline fixture");
-    assert_eq!(val(&f, "Keywords"), "cpe,sample,baseline");
-    assert_eq!(val(&f, "Producer"), "gen_samples.py");
-    assert_eq!(val(&f, "Date Created"), "D:20260725110000");
+    assert_eq!(val(&f, "Title"), "doc");
+    assert_eq!(val(&f, "Date Created"), "D:20260806120452Z");
+    assert_eq!(val(&f, "Date Modified"), "D:20260806120452Z");
+    assert!(!f.iter().any(|x| x.key == "Author"), "no /Author in the new fixture's /Info dict");
     assert!(f.iter().all(|x| x.group == "pdf"));
     // Descriptive tags are editable (CPE-1301 write codec); producer intrinsics stay read-only.
     assert!(f.iter().find(|x| x.key == "Title").unwrap().editable);
-    assert!(!f.iter().find(|x| x.key == "Producer").unwrap().editable);
+    assert!(!f.iter().find(|x| x.key == "Date Created").unwrap().editable);
 }
 
 #[test]

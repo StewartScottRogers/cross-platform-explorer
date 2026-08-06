@@ -429,6 +429,25 @@ async readHeicPreviewDataUrl(path: string) : Promise<Result<string, string>> {
 }
 },
 /**
+ * Structural-validity check for a `.pdf` file, called BEFORE the preview pane hands it to WebView2's
+ * embedded PDF viewer for the raw `<iframe>` render (CPE-1357): a malformed or empty PDF (no resolvable
+ * cross-reference table, or a `/Pages` tree declaring zero pages) can crash the WebView2 PDF renderer
+ * and take the whole app down, so an `Err` here routes the pane to the metadata fallback instead of
+ * ever reaching the iframe. Thin `spawn_blocking` dispatcher into `cpe_server::media_meta_read::
+ * pdf_validity` (a pure byte-scan, not pdfium — no native dependency needed for this check), capped by
+ * the same preview size guard as the other automatic-on-selection preview readers above. `Ok(Some(n))`
+ * is a known page count, `Ok(None)` means the scanner couldn't resolve `/Pages` (e.g. compressed
+ * cross-reference streams) but the header/xref checks passed — still treated as previewable.
+ */
+async readPdfValidity(path: string) : Promise<Result<number | null, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("read_pdf_validity", { path }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
  * A PNG thumbnail of an image file as a `data:` URL the `<img>` tag can show (CPE-642), served from
  * an mtime-keyed on-disk cache (CPE-644). Also covers `.svg` (rasterized) and `.ttf`/`.otf`/`.woff`
  * glyph-sheet specimens (CPE-1236) — the format dispatch lives entirely in

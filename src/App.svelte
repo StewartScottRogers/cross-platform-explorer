@@ -2816,6 +2816,12 @@
     return commands.readHeicPreviewDataUrl(path).then(unwrap);
   }
 
+  /** Structural-validity check for a PDF (CPE-1357), called before the preview pane hands the file to
+   *  the WebView2 iframe — a malformed/empty PDF rejects here instead of crashing the renderer. */
+  function loadPdfValidity(path: string): Promise<number | null> {
+    return commands.readPdfValidity(path).then(unwrap);
+  }
+
   /** Save edited text back to a file, then refresh so size/date update. */
   async function savePreviewText(path: string, contents: string): Promise<void> {
     unwrap(await commands.writeFileText(path, contents));
@@ -5082,6 +5088,7 @@
           loadDicomImageData={loadDicomImageData}
           loadDicomTags={loadDicomTags}
           loadHeicImageData={loadHeicImageData}
+          loadPdfValidity={loadPdfValidity}
           saveText={savePreviewText}
         >
           <DetailsPane selected={selectedEntries.length ? selectedEntries : (homePreview ? [homePreview] : [])} {folderName} {itemCount} {folderIcon} />

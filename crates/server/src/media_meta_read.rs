@@ -1343,6 +1343,76 @@ fn decode_pdf_string(raw: &[u8]) -> String {
     }
 }
 
+// ---- PDF structural-validity check (CPE-1357) ----
+
+/// Lightweight structural-validity check for a `.pdf` file: before the preview pane hands a PDF to
+/// WebView2's embedded viewer for the raw `<iframe>` render, it calls this first. A malformed or empty
+/// PDF (no resolvable cross-reference table, or a `/Pages` tree that declares zero pages) can crash the
+/// WebView2 PDF renderer and take the whole app down — an `Err` here routes the pane to the metadata
+/// fallback instead of ever reaching the iframe.
+///
+/// Not a full PDF parser — same pragmatic bounded-scanner discipline as [`read_pdf`] above: requires a
+/// `%PDF-` header and a `startxref` pointer to *some* cross-reference section. (The fixture that
+/// motivated this check, `samples/documents/doc.pdf`'s old degenerate form, had a `trailer` but no
+/// `xref`/`startxref` at all — not a loadable PDF.) If a `/Type /Pages … /Count N` declaration can be
+/// found by the same plain-text scan (last occurrence wins, mirroring [`find_last_info_ref`]'s handling
+/// of incrementally-updated PDFs), `N == 0` is rejected as an empty document. When no such declaration is
+/// found at all — e.g. a modern PDF using compressed cross-reference/object streams, which this scanner
+/// deliberately doesn't decompress — the page count is reported as `None` rather than guessed; the
+/// `%PDF-`+`startxref` checks having passed is treated as good enough to attempt the render, leaning on
+/// the iframe's own sandbox/timeout defense-in-depth (CPE-1357) for whatever this scan can't see.
+///
+/// Every scan is bounds-checked and windowed, so a lying/huge/garbage input can't over-read or hang —
+/// same discipline as every other reader in this module (never panics).
+pub fn pdf_validity(bytes: &[u8]) -> Result<Option<u32>, String> {
+    if !has_pdf_header(bytes) {
+        return Err("not a PDF: no %PDF- header found".to_string());
+    }
+    if find_subslice(bytes, b"startxref").is_none() {
+        return Err("no startxref: unresolvable cross-reference table".to_string());
+    }
+    match find_last_page_count(bytes) {
+        Some(0) => Err("PDF declares zero pages".to_string()),
+        Some(n) => Ok(Some(n)),
+        None => Ok(None),
+    }
+}
+
+/// Scan for the **last** `/Type /Pages … /Count N` declaration in `bytes` (last-wins, same rationale as
+/// [`find_last_info_ref`]): find each `/Type` token, skip whitespace, and check whether `/Pages`
+/// immediately follows; if so, look forward in a small bounded window for `/Count` and parse the digits
+/// after it. Tolerates the handful of bytes of whitespace/newlines real PDF writers put between tokens.
+/// Every window is capped, so a pathological input can't force a long scan.
+fn find_last_page_count(bytes: &[u8]) -> Option<u32> {
+    const TYPE: &[u8] = b"/Type";
+    const PAGES: &[u8] = b"/Pages";
+    const COUNT: &[u8] = b"/Count";
+    let mut pos = 0usize;
+    let mut found: Option<u32> = None;
+    while pos < bytes.len() {
+        let Some(rel) = find_subslice(&bytes[pos..], TYPE) else { break };
+        let idx = pos + rel;
+        let after_type = idx + TYPE.len();
+        pos = after_type; // always advance, whether or not this occurrence matches
+        let ws_limit = bytes.len().min(after_type + 8);
+        let ws_end = skip_ws(bytes, after_type, ws_limit);
+        if bytes.get(ws_end..ws_end + PAGES.len()) != Some(PAGES) {
+            continue;
+        }
+        let after_pages = ws_end + PAGES.len();
+        let window_end = bytes.len().min(after_pages + 512);
+        let Some(window) = bytes.get(after_pages..window_end) else { continue };
+        let Some(count_rel) = find_subslice(window, COUNT) else { continue };
+        let count_start = after_pages + count_rel + COUNT.len();
+        let num_limit = bytes.len().min(count_start + 16);
+        let i = skip_ws(bytes, count_start, num_limit);
+        if let Some((n, _)) = parse_uint(bytes, i, num_limit) {
+            found = Some(n);
+        }
+    }
+    found
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2164,6 +2234,77 @@ mod tests {
         pdf.extend_from_slice(b"8 0 obj\n<< /Title (Current Title) >>\nendobj\n");
         pdf.extend_from_slice(b"trailer\n<< /Size 9 /Root 1 0 R /Info 8 0 R >>\n%%EOF");
         assert_eq!(get(&read_pdf(&pdf), "Title"), Some("Current Title"));
+    }
+
+    // ---- pdf_validity (CPE-1357) ----
+
+    /// A valid, well-formed multi-page PDF: header, `/Type /Pages /Count 2`, and a real xref+startxref —
+    /// mirrors the shape of the real `samples/documents/doc.pdf` fixture (produced by Pillow's PDF
+    /// driver: `/Type /Pages` then `/Count N` on the next line, no space collapsing).
+    fn valid_multi_page_pdf() -> Vec<u8> {
+        let mut pdf = Vec::new();
+        pdf.extend_from_slice(b"%PDF-1.4\n");
+        pdf.extend_from_slice(b"1 0 obj<<\n/Type /Catalog\n/Pages 2 0 R\n>>endobj\n");
+        pdf.extend_from_slice(b"2 0 obj<<\n/Type /Pages\n/Count 2\n/Kids [ 3 0 R 4 0 R ]\n>>endobj\n");
+        pdf.extend_from_slice(b"xref\n0 5\n0000000000 65535 f \ntrailer\n<< /Size 5 /Root 1 0 R >>\n");
+        pdf.extend_from_slice(b"startxref\n0\n%%EOF");
+        pdf
+    }
+
+    #[test]
+    fn pdf_validity_accepts_a_valid_multi_page_pdf() {
+        assert_eq!(pdf_validity(&valid_multi_page_pdf()), Ok(Some(2)));
+    }
+
+    /// The exact bug report (CPE-1357): a `trailer` present but no `xref`/`startxref` at all — the old
+    /// degenerate `samples/documents/doc.pdf` fixture's shape (`/Type /Pages /Kids [] /Count 0`, plus no
+    /// resolvable cross-reference table).
+    #[test]
+    fn pdf_validity_rejects_a_pdf_with_no_startxref() {
+        let mut pdf = Vec::new();
+        pdf.extend_from_slice(b"%PDF-1.4\n");
+        pdf.extend_from_slice(b"2 0 obj\n<< /Type /Pages /Kids [] /Count 0 >>\nendobj\n");
+        pdf.extend_from_slice(b"trailer\n<< /Size 3 /Root 1 0 R >>\n%%EOF");
+        assert!(pdf_validity(&pdf).is_err());
+    }
+
+    #[test]
+    fn pdf_validity_rejects_a_pdf_that_declares_zero_pages() {
+        let mut pdf = Vec::new();
+        pdf.extend_from_slice(b"%PDF-1.4\n");
+        pdf.extend_from_slice(b"2 0 obj\n<< /Type /Pages /Kids [] /Count 0 >>\nendobj\n");
+        pdf.extend_from_slice(b"xref\n0 3\n0000000000 65535 f \ntrailer\n<< /Size 3 /Root 1 0 R >>\n");
+        pdf.extend_from_slice(b"startxref\n0\n%%EOF");
+        assert_eq!(pdf_validity(&pdf), Err("PDF declares zero pages".to_string()));
+    }
+
+    #[test]
+    fn pdf_validity_rejects_non_pdf_and_empty_bytes_without_panicking() {
+        assert!(pdf_validity(b"").is_err());
+        assert!(pdf_validity(b"just some random text, not a pdf at all").is_err());
+        assert!(pdf_validity(&[0u8; 32]).is_err());
+    }
+
+    /// A structurally-plausible PDF (header + startxref) whose `/Pages` dict this plain-text scanner
+    /// can't find (e.g. it's tucked inside a compressed object stream in a real modern PDF) — reported as
+    /// "page count unknown" rather than rejected outright, so a real-world compressed-xref PDF isn't
+    /// blanket-refused just because this pragmatic scanner can't see inside compressed streams.
+    #[test]
+    fn pdf_validity_treats_unresolvable_page_count_as_unknown_not_a_rejection() {
+        let mut pdf = Vec::new();
+        pdf.extend_from_slice(b"%PDF-1.4\n");
+        pdf.extend_from_slice(b"1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n");
+        pdf.extend_from_slice(b"trailer\n<< /Size 2 /Root 1 0 R >>\nstartxref\n0\n%%EOF");
+        assert_eq!(pdf_validity(&pdf), Ok(None));
+    }
+
+    /// Every truncation of a valid PDF must never panic (same discipline as `read_pdf_tolerates_truncation`).
+    #[test]
+    fn pdf_validity_tolerates_truncation_without_panicking() {
+        let pdf = valid_multi_page_pdf();
+        for cut in 0..pdf.len() {
+            let _ = pdf_validity(&pdf[..cut]); // must never panic on any truncation
+        }
     }
 
     // ---- IPTC IIM fixture builders (CPE-1290) ----
