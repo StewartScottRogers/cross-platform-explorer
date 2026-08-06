@@ -12,6 +12,7 @@ import { categoryOf } from "../filetypes";
 export type PreviewKind =
   | "image"
   | "decoded-image"
+  | "raw-image"
   | "audio"
   | "video"
   | "pdf"
@@ -83,6 +84,14 @@ const DATA_GRID_EXT = new Set([
  */
 const DECODED_IMAGE_EXT = new Set(["tiff", "tif", "psd"]);
 
+/**
+ * Camera-RAW formats: TIFF-based containers around undemosaiced sensor data that the webview can't
+ * render. Rather than decode the raw pixels, the backend extracts whichever embedded JPEG
+ * preview/thumbnail the camera already wrote via `read_raw_preview_data_url` (CPE-1349, epic
+ * CPE-102) — same data-URL shape as `read_image_data_url`, different backend call.
+ */
+const RAW_EXT = new Set(["cr2", "nef", "arw"]);
+
 /** Font files rendered as a live specimen via the webview's FontFace API (CPE-117). */
 const FONT_EXT = new Set(["ttf", "otf", "woff", "woff2"]);
 
@@ -100,6 +109,15 @@ export const providers: PreviewProvider[] = [
     kind: "decoded-image",
     editable: false,
     canPreview: (e) => !e.is_dir && DECODED_IMAGE_EXT.has(e.extension),
+  },
+  // Must also precede the native image provider: cr2/nef/arw categorise as images but the webview
+  // can't decode raw sensor data — route to the embedded-JPEG-extraction backend instead.
+  {
+    id: "raw-image",
+    label: "Camera RAW",
+    kind: "raw-image",
+    editable: false,
+    canPreview: (e) => !e.is_dir && RAW_EXT.has(e.extension),
   },
   {
     id: "image",

@@ -39,6 +39,8 @@
   export let loadInfo: (path: string) => Promise<string> = async () => "";
   /** Decode a non-native image to a data: URL (a backend command in the app). */
   export let loadImageData: (path: string) => Promise<string> = async () => "";
+  /** Extract a camera-RAW file's embedded JPEG preview as a data: URL (a backend command in the app). */
+  export let loadRawImageData: (path: string) => Promise<string> = async () => "";
 
   /** Cap the number of CSV rows rendered so a huge sheet can't lock the pane. */
   const CSV_ROW_CAP = 200;
@@ -79,6 +81,12 @@
   let imgState: "idle" | "loading" | "error" = "idle";
   let imgReqId = 0;
 
+  // Camera-RAW embedded preview (CPE-1349): kept separate from the decoded-image state above so a
+  // missing embedded preview can fall back to the metadata slot instead of the tiff/psd error note.
+  let rawImgUrl = "";
+  let rawImgState: "idle" | "loading" | "error" = "idle";
+  let rawImgReqId = 0;
+
   let fontFamily = "";
   let fontState: "idle" | "loading" | "error" = "idle";
   let fontReqId = 0;
@@ -99,6 +107,7 @@
   $: if (entry && provider.kind === "archive") loadEntriesFor(entry);
   $: if (entry && provider.kind === "info") loadInfoFor(entry);
   $: if (entry && provider.kind === "decoded-image") loadImageDataFor(entry);
+  $: if (entry && provider.kind === "raw-image") loadRawImageDataFor(entry);
   $: if (entry && isModelFile) {
     loadModelFor(entry);
   } else {
@@ -177,6 +186,23 @@
     } catch {
       if (mine !== imgReqId) return;
       imgState = "error";
+    }
+  }
+
+  /** No embedded JPEG (backend `Err`) lands in `rawImgState === "error"`, which the render side
+   *  below shows as the metadata slot rather than an error message — a RAW file's info pane is
+   *  useful on its own, unlike a genuinely corrupt tiff/psd. */
+  async function loadRawImageDataFor(e: DirEntry) {
+    const mine = ++rawImgReqId;
+    rawImgState = "loading";
+    try {
+      const url = await loadRawImageData(e.path);
+      if (mine !== rawImgReqId) return;
+      rawImgUrl = url;
+      rawImgState = "idle";
+    } catch {
+      if (mine !== rawImgReqId) return;
+      rawImgState = "error";
     }
   }
 
@@ -695,6 +721,14 @@
       <p class="preview-note">{$t("pv.cantImage")}</p>
     {:else}
       <img class="preview-img" src={imgUrl} alt={entry.name} />
+    {/if}
+  {:else if provider.kind === "raw-image" && entry}
+    {#if rawImgState === "loading"}
+      <p class="preview-note">{$t("pv.loading")}</p>
+    {:else if rawImgState === "error"}
+      <slot />
+    {:else}
+      <img class="preview-img" src={rawImgUrl} alt={entry.name} />
     {/if}
   {:else if provider.kind === "audio" && entry}
     <!-- svelte-ignore a11y-media-has-caption -->

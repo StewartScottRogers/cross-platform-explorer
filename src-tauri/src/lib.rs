@@ -943,6 +943,22 @@ async fn read_image_data_url(path: String) -> Result<String, String> {
     .map_err(|e| e.to_string())?
 }
 
+/// Extract the embedded JPEG preview from a camera-RAW file (`.cr2`/`.nef`/`.arw`) as a
+/// `data:image/jpeg;base64,...` URL the `<img>` tag can show (CPE-1349, epic CPE-102). Mirrors
+/// `read_image_data_url` above: a thin `spawn_blocking` dispatcher into `cpe_server::camera_raw`,
+/// capped by the same preview size guard. `Err` when the file can't be parsed as a TIFF-based raw
+/// container or carries no embedded JPEG preview — the frontend falls back to the metadata view.
+#[tauri::command]
+#[cfg_attr(feature = "specta-bindings", specta::specta)]
+async fn read_raw_preview_data_url(path: String) -> Result<String, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        ensure_previewable_size(&path, PREVIEW_INFO_MAX_BYTES)?;
+        cpe_server::camera_raw::read_raw_preview_data_url(&path)
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
 
 /// A PNG thumbnail of an image file as a `data:` URL the `<img>` tag can show (CPE-642), served from
 /// an mtime-keyed on-disk cache (CPE-644). Also covers `.svg` (rasterized) and `.ttf`/`.otf`/`.woff`
@@ -9762,6 +9778,7 @@ pub fn run() {
             data_browser_query,
             read_model_info,
             read_image_data_url,
+            read_raw_preview_data_url,
             thumbnail,
             thumbnails_stream,
             cancel_thumbnails_stream,
@@ -10571,6 +10588,7 @@ pub fn export_bindings(out: &std::path::Path) -> Result<(), String> {
         data_browser_query,
         read_model_info,
         read_image_data_url,
+        read_raw_preview_data_url,
         thumbnail,
         thumbnails_stream,
         cancel_thumbnails_stream,

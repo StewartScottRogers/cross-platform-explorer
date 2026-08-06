@@ -15,7 +15,7 @@
   import Icon from "./Icon.svelte";
   import { iconFor } from "../filetypes";
   import {
-    loadPreviewText, loadArchiveEntries, loadPreviewInfo, loadImageData, savePreviewText,
+    loadPreviewText, loadArchiveEntries, loadPreviewInfo, loadImageData, loadRawImageData, savePreviewText,
   } from "../preview/loaders";
   import type { DirEntry } from "../types";
 
@@ -76,6 +76,7 @@
           loadEntries={loadArchiveEntries}
           loadInfo={loadPreviewInfo}
           loadImageData={loadImageData}
+          loadRawImageData={loadRawImageData}
           saveText={savePreviewText}
         >
           <DetailsPane selected={[active.entry]} folderName="" itemCount={0} />

@@ -22,5 +22,8 @@ export const loadPreviewInfo = (path: string): Promise<string> =>
 export const loadImageData = (path: string): Promise<string> =>
   commands.readImageDataUrl(path).then(unwrap);
 
+export const loadRawImageData = (path: string): Promise<string> =>
+  commands.readRawPreviewDataUrl(path).then(unwrap);
+
 export const savePreviewText = (path: string, contents: string): Promise<void> =>
   commands.writeFileText(path, contents).then((r) => void unwrap(r));

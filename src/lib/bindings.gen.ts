@@ -369,6 +369,21 @@ async readImageDataUrl(path: string) : Promise<Result<string, string>> {
 }
 },
 /**
+ * Extract the embedded JPEG preview from a camera-RAW file (`.cr2`/`.nef`/`.arw`) as a
+ * `data:image/jpeg;base64,...` URL the `<img>` tag can show (CPE-1349, epic CPE-102). Mirrors
+ * `read_image_data_url` above: a thin `spawn_blocking` dispatcher into `cpe_server::camera_raw`,
+ * capped by the same preview size guard. `Err` when the file can't be parsed as a TIFF-based raw
+ * container or carries no embedded JPEG preview — the frontend falls back to the metadata view.
+ */
+async readRawPreviewDataUrl(path: string) : Promise<Result<string, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("read_raw_preview_data_url", { path }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
  * A PNG thumbnail of an image file as a `data:` URL the `<img>` tag can show (CPE-642), served from
  * an mtime-keyed on-disk cache (CPE-644). Also covers `.svg` (rasterized) and `.ttf`/`.otf`/`.woff`
  * glyph-sheet specimens (CPE-1236) — the format dispatch lives entirely in
