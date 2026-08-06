@@ -1,5 +1,16 @@
 {
   "name": "baseline",
-  "count": 3,
-  "tags": ["cpe", "sample"]
+  "version": 2,
+  "generated_by": "gen_samples.py",
+  "tags": ["cpe", "sample", "baseline", "json"],
+  "metadata": {
+    "title": "Baseline Sample",
+    "artist": "CPE Test Suite",
+    "year": 2026
+  },
+  "items": [
+    { "id": 1, "label": "alpha", "value": 10.5, "active": true },
+    { "id": 2, "label": "beta", "value": 20.0, "active": false },
+    { "id": 3, "label": "gamma", "value": 30.25, "active": true }
+  ]
 }

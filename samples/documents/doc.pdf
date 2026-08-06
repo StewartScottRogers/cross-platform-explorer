@@ -3,45 +3,86 @@
 << /Type /Catalog /Pages 2 0 R >>
 endobj
 2 0 obj
-<< /Type /Pages /Kids [3 0 R 5 0 R] /Count 2 >>
+<< /Type /Pages /Kids [3 0 R 4 0 R 5 0 R] /Count 3 >>
 endobj
 3 0 obj
-<< /Type /Page /Parent 2 0 R /MediaBox [0 0 200 200] /Contents 4 0 R /Resources << >> >>
+<< /Type /Page /Parent 2 0 R /MediaBox [0 0 400 300] /Contents 6 0 R /Resources << /Font << /F1 9 0 R >> >> >>
 endobj
 4 0 obj
-<< /Length 28 >>
-stream
-0 0 1 rg
-20 20 160 160 re
-f
-endstream
+<< /Type /Page /Parent 2 0 R /MediaBox [0 0 400 300] /Contents 7 0 R /Resources << /Font << /F1 9 0 R >> >> >>
 endobj
 5 0 obj
-<< /Type /Page /Parent 2 0 R /MediaBox [0 0 200 200] /Contents 6 0 R /Resources << >> >>
+<< /Type /Page /Parent 2 0 R /MediaBox [0 0 400 300] /Contents 8 0 R /Resources << /Font << /F1 9 0 R >> >> >>
 endobj
 6 0 obj
-<< /Length 28 >>
+<< /Length 102 >>
 stream
-0 1 0 rg
-20 20 160 160 re
+q
+0 0 1 rg
+40 40 320 220 re
 f
+Q
+BT
+/F1 20 Tf
+0 0 0 rg
+60 270 Td
+(Baseline Sample - Page 1 of 3) Tj
+ET
 endstream
 endobj
 7 0 obj
+<< /Length 104 >>
+stream
+q
+0 0.6 0 rg
+40 40 320 220 re
+f
+Q
+BT
+/F1 20 Tf
+0 0 0 rg
+60 270 Td
+(Baseline Sample - Page 2 of 3) Tj
+ET
+endstream
+endobj
+8 0 obj
+<< /Length 104 >>
+stream
+q
+0.8 0 0 rg
+40 40 320 220 re
+f
+Q
+BT
+/F1 20 Tf
+0 0 0 rg
+60 270 Td
+(Baseline Sample - Page 3 of 3) Tj
+ET
+endstream
+endobj
+9 0 obj
+<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>
+endobj
+10 0 obj
 << /Title (Baseline Sample) /Author (CPE Test Suite) /Subject (Baseline fixture) /Keywords (cpe,sample,baseline) /Creator (gen_samples.py) /Producer (gen_samples.py) /CreationDate (D:20260725110000) /ModDate (D:20260725110000) >>
 endobj
 xref
-0 8
+0 11
 0000000000 65535 f 
 0000000009 00000 n 
 0000000058 00000 n 
-0000000121 00000 n 
-0000000225 00000 n 
-0000000302 00000 n 
-0000000406 00000 n 
-0000000483 00000 n 
+0000000127 00000 n 
+0000000253 00000 n 
+0000000379 00000 n 
+0000000505 00000 n 
+0000000657 00000 n 
+0000000811 00000 n 
+0000000965 00000 n 
+0000001035 00000 n 
 trailer
-<< /Size 8 /Root 1 0 R /Info 7 0 R >>
+<< /Size 11 /Root 1 0 R /Info 10 0 R >>
 startxref
-728
+1281
 %%EOF

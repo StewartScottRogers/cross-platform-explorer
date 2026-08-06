@@ -1,2 +1,16 @@
-Baseline sample text file.
-Used to verify plain-text preview + line/word counts.
+Baseline sample text file
+=========================
+
+This file exercises the plain-text preview: line and word counts, scrolling,
+and encoding detection. It deliberately spans multiple paragraphs and lines so
+the reader has real content to lay out.
+
+Lorem ipsum dolor sit amet, consectetur adipiscing elit. Sed do eiusmod tempor
+incididunt ut labore et dolore magna aliqua. Ut enim ad minim veniam, quis
+nostrud exercitation ullamco laboris nisi ut aliquip ex ea commodo consequat.
+
+- A short bullet list
+- with a few items
+- to vary the line shapes
+
+End of sample.

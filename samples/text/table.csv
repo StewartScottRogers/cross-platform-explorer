@@ -1,4 +1,9 @@
-id,name,value
-1,alpha,10
-2,beta,20
-3,gamma,30
+id,name,department,city,salary,start_date
+1,Ann,Engineering,Oslo,82000,2024-01-15
+2,Bo,Design,Berlin,74000,2024-03-02
+3,Cai,Engineering,Kyoto,90000,2023-11-20
+4,Dana,Marketing,Lima,68000,2025-02-10
+5,Eli,Sales,Cairo,71000,2024-07-30
+6,Faye,Engineering,Perth,88000,2023-09-05
+7,Gus,Support,Quito,60000,2025-01-22
+8,Hana,Design,Reno,76000,2024-05-14
