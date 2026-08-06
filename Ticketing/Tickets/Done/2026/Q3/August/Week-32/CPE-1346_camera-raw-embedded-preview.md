@@ -2,13 +2,13 @@
 id: CPE-1346
 title: "Camera-RAW embedded-preview backend (cpe-server): TIFF/IFD walk → largest embedded JPEG, ZERO new deps"
 type: Feature
-status: Backlog
+status: Done
 priority: Medium
 component: cpe-server
 tags: [ready]
 epic: CPE-102
 created: 2026-08-05
-closed:
+closed: 2026-08-05
 ---
 
 ## Goal
@@ -51,3 +51,6 @@ feature gate needed; it's pure logic in the lean-core spirit).
 
 Backend-only (no command/frontend wiring — follow-up). Standalone new module → parallelizable with
 CPE-1345/1347. Consider adding `read_raw_preview_data_url` to the parser panic-safety battery.
+
+## Work Log
+- 2026-08-05 (workshift): Camera-RAW embedded-JPEG via TIFF/IFD walk (zero deps). PR #641 squash-merged to main (b7a0f829). Worker(sonnet); independent Reviewer(+security lens) APPROVE + UAT PASS. Backend-only (no command/frontend wiring — follow-up). main compiles clean both feature modes.

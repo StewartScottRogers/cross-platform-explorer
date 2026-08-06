@@ -45,3 +45,6 @@ Dependency/approach: Backend unrar. Editing model: none. Editable types reuse [[
 - [ ] Decide on UnRAR licensing (its licence forbids re-creating a RAR compressor; extraction is allowed under terms) or a pure-Rust alternative
 - [ ] Add a rar branch to read_archive_entries listing members
 - [ ] Verify against RAR4 and RAR5 sample archives
+
+## Work Log
+- 2026-08-05 (workshift): BACKEND landed via CPE-1347 — RAR entry-listing backend (rar_entries, RAR4/RAR5, zero deps), merged to main, cargo-verified + gauntlet-passed. REMAINING (still blocked): frontend preview-provider registration + a thin #[tauri::command] dispatcher + jsdom tests, then attended visual verification. The heavy/decode half is done; the wiring + eyes-on half remains.

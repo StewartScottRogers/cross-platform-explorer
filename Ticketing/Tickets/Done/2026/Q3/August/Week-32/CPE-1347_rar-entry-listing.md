@@ -2,13 +2,13 @@
 id: CPE-1347
 title: "RAR entry-listing backend (cpe-server): pure-Rust RAR4/RAR5 header walk, ZERO new deps (no UnRAR)"
 type: Feature
-status: Backlog
+status: Done
 priority: Low
 component: cpe-server
 tags: [ready]
 epic: CPE-111
 created: 2026-08-05
-closed:
+closed: 2026-08-05
 ---
 
 ## Goal
@@ -49,3 +49,6 @@ Return the same `ArchiveEntry` shape those use (check `archive.rs` for the exact
 Backend-only (no command / archive.rs dispatch wiring — that's the follow-up integration ticket, to keep this
 a standalone non-colliding module PR). Parallelizable with CPE-1345/1346. If a real-world RAR5 vint edge case
 is ambiguous, implement the common case + return `Err` for the exotic one (log the assumption).
+
+## Work Log
+- 2026-08-05 (workshift): RAR4/RAR5 listing (zero deps, no UnRAR). PR #640 squash-merged to main (25e25ef0). Worker(sonnet); independent Reviewer(+security lens) APPROVE + UAT PASS. Backend-only (no command/frontend wiring — follow-up). main compiles clean both feature modes.

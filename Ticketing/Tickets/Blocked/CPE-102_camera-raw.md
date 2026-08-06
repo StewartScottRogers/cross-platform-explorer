@@ -45,3 +45,6 @@ Dependency/approach: Backend RAW preview extract. Editing model: none. Editable 
 - [ ] Integrate rawloader (pure Rust) or libraw; render the embedded JPEG preview first as a fast path
 - [ ] Backend command returns a viewable image; verify against sample CR2/NEF/ARW files
 - [ ] Decide scope: embedded-preview only vs. full demosaic
+
+## Work Log
+- 2026-08-05 (workshift): BACKEND landed via CPE-1346 — Camera-RAW embedded-preview backend (read_raw_preview_data_url, TIFF/IFD walk, zero deps), merged to main, cargo-verified + gauntlet-passed. REMAINING (still blocked): frontend preview-provider registration + a thin #[tauri::command] dispatcher + jsdom tests, then attended visual verification. The heavy/decode half is done; the wiring + eyes-on half remains.

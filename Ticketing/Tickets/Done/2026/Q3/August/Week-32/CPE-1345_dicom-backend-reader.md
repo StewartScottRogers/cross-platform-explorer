@@ -2,13 +2,13 @@
 id: CPE-1345
 title: "DICOM backend reader (cpe-server): tags + frame→PNG, feature-gated dicom-thumb (pure-Rust dicom-rs)"
 type: Feature
-status: Backlog
+status: Done
 priority: Medium
 component: cpe-server
 tags: [ready]
 epic: CPE-219
 created: 2026-08-05
-closed:
+closed: 2026-08-05
 ---
 
 ## Goal
@@ -52,3 +52,6 @@ The **backend** half of DICOM preview support (epic CPE-219): a pure `cpe-server
 Backend-only this ticket (no command/frontend wiring — that's a follow-up integration ticket, to avoid
 shared-file collisions). Standalone new module → parallelizable with CPE-1346/1347. If `dicom.rs` types are
 NOT specta-exported, no bindings regen; if any are, regenerate `bindings.gen.ts`.
+
+## Work Log
+- 2026-08-05 (workshift): DICOM reader (dicom-rs, feature-gated dicom-thumb, native codecs off). PR #642 squash-merged to main (3a994f5a). Worker(sonnet); independent Reviewer(+security lens) APPROVE + UAT PASS. Backend-only (no command/frontend wiring — follow-up). main compiles clean both feature modes.

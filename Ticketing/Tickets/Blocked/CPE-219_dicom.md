@@ -43,3 +43,6 @@ Syntax highlighting builds on [[CPE-065]]; editable types reuse [[CPE-066]] writ
 - [ ] Use dicom-rs to read metadata (patient/study/series) and pixel data
 - [ ] Apply window/level; transcode a frame to PNG for the image provider
 - [ ] Verify with sample DICOM datasets on a display
+
+## Work Log
+- 2026-08-05 (workshift): BACKEND landed via CPE-1345 — DICOM backend reader (tags + frame->PNG, dicom-rs feature-gated), merged to main, cargo-verified + gauntlet-passed. REMAINING (still blocked): frontend preview-provider registration + a thin #[tauri::command] dispatcher + jsdom tests, then attended visual verification. The heavy/decode half is done; the wiring + eyes-on half remains.
