@@ -39,7 +39,7 @@ use std::io::Write;
 use cpe_server::binary_preview::{midi_info, pe_info, torrent_info, wasm_info};
 use cpe_server::camera_raw::read_raw_preview_data_url;
 use cpe_server::data_preview::{spreadsheet_info, sqlite_info};
-use cpe_server::rar::rar_entries;
+use cpe_server::rar::{rar_entries, rar_extract_entry};
 
 #[cfg(feature = "dicom-thumb")]
 use cpe_server::dicom::{read_dicom_image_data_url, read_dicom_tags};
@@ -264,6 +264,32 @@ fn rar_entries_never_panics() {
         let r = rar_entries(path);
         if b.is_empty() {
             assert!(r.is_err(), "rar_entries(empty file) must be Err, not a panic");
+        }
+    });
+}
+
+#[test]
+fn rar_extract_entry_never_panics() {
+    // Extraction (CPE-1360) is the second hand-rolled RAR path: it re-walks the header block AND then
+    // slices the data area (`data[data_start..next_pos]`) for a STORED entry — untrusted offsets/sizes, so
+    // a malformed/truncated header must Err (or return bytes), never panic. Same realistic RAR5 magic as
+    // `rar_entries_never_panics` (a file header naming "hello.txt"), plus a few STORED data bytes after it
+    // so an un-mutated case actually reaches the data-copy path rather than bailing at the header.
+    const RAR5_MARKER: [u8; 8] = [0x52, 0x61, 0x72, 0x21, 0x1A, 0x07, 0x01, 0x00];
+    let mut magic = RAR5_MARKER.to_vec();
+    magic.extend(rar5_header(&rar5_file_header_body("hello.txt", 8)));
+    magic.extend_from_slice(b"ABCDEFGH"); // 8 STORED data bytes for the extractor to copy
+
+    let header_len = magic.len();
+    run_battery("rar::rar_extract_entry", &magic, header_len, |b| {
+        let f = write_temp(b, ".rar");
+        let path = f.path().to_str().expect("temp path must be valid UTF-8");
+        // Ask for the entry the magic names, plus a name that won't match — both must be panic-free on
+        // every mutation (the miss exercises the walk-to-end-without-finding path).
+        let r = rar_extract_entry(path, "hello.txt");
+        let _ = rar_extract_entry(path, "nope.bin");
+        if b.is_empty() {
+            assert!(r.is_err(), "rar_extract_entry(empty file) must be Err, not a panic");
         }
     });
 }
