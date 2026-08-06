@@ -46,3 +46,6 @@ Syntax highlighting builds on [[CPE-065]]; editable types reuse [[CPE-066]] writ
 
 ## Work Log
 - 2026-08-05 (workshift): BACKEND landed via CPE-1345 — DICOM backend reader (tags + frame->PNG, dicom-rs feature-gated), merged to main, cargo-verified + gauntlet-passed. REMAINING (still blocked): frontend preview-provider registration + a thin #[tauri::command] dispatcher + jsdom tests, then attended visual verification. The heavy/decode half is done; the wiring + eyes-on half remains.
+
+## Work Log
+- 2026-08-05 (workshift): backend + preview-provider wiring SHIPPED (CPE-1345/1350/1352/1353). Remaining = attended-only (on-screen visual verification via build->deploy->run). Moved Blocked->Deferred (our-choice: attended verification), no longer externally gated.

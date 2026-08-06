@@ -48,3 +48,6 @@ Dependency/approach: Backend RAW preview extract. Editing model: none. Editable 
 
 ## Work Log
 - 2026-08-05 (workshift): BACKEND landed via CPE-1346 — Camera-RAW embedded-preview backend (read_raw_preview_data_url, TIFF/IFD walk, zero deps), merged to main, cargo-verified + gauntlet-passed. REMAINING (still blocked): frontend preview-provider registration + a thin #[tauri::command] dispatcher + jsdom tests, then attended visual verification. The heavy/decode half is done; the wiring + eyes-on half remains.
+
+## Work Log
+- 2026-08-05 (workshift): backend + preview-provider wiring SHIPPED (CPE-1346/1349). Remaining = attended-only (on-screen visual verification via build->deploy->run). Moved Blocked->Deferred (our-choice: attended verification), no longer externally gated.
