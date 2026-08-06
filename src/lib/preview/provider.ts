@@ -13,6 +13,7 @@ export type PreviewKind =
   | "image"
   | "decoded-image"
   | "raw-image"
+  | "dicom"
   | "audio"
   | "video"
   | "pdf"
@@ -92,6 +93,13 @@ const DECODED_IMAGE_EXT = new Set(["tiff", "tif", "psd"]);
  */
 const RAW_EXT = new Set(["cr2", "nef", "arw"]);
 
+/**
+ * DICOM medical-image files: the pixel data is decoded to a PNG `data:` URL via
+ * `read_dicom_image_data_url`, alongside a curated tag list via `read_dicom_tags` (CPE-1350, epic
+ * CPE-102). Same data-URL shape as `read_image_data_url`/`read_raw_preview_data_url`, plus the tags.
+ */
+const DICOM_EXT = new Set(["dcm"]);
+
 /** Font files rendered as a live specimen via the webview's FontFace API (CPE-117). */
 const FONT_EXT = new Set(["ttf", "otf", "woff", "woff2"]);
 
@@ -118,6 +126,15 @@ export const providers: PreviewProvider[] = [
     kind: "raw-image",
     editable: false,
     canPreview: (e) => !e.is_dir && RAW_EXT.has(e.extension),
+  },
+  // .dcm isn't recognised as an image category at all today (falls to hex otherwise) — this must
+  // still precede the generic image/hex providers so it gets its own decode+tags rendering.
+  {
+    id: "dicom",
+    label: "DICOM",
+    kind: "dicom",
+    editable: false,
+    canPreview: (e) => !e.is_dir && DICOM_EXT.has(e.extension),
   },
   {
     id: "image",

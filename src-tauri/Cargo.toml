@@ -51,7 +51,11 @@ tauri-specta = { version = "=2.0.0-rc.21", features = ["derive", "typescript"], 
 # release-sidecar.yml) and resolved next to the running executable at startup, falling back gracefully
 # to the generic type icon if either is missing. `video-thumb` adds zero new crates (shells out to a
 # bundled `ffmpeg`, never linked).
-cpe-server = { path = "../crates/server", features = ["index", "pdf-thumb", "video-thumb", "http-embedder", "copilot"] }
+# `dicom-thumb` (CPE-1345/1350, epic CPE-102) turns on the DICOM tag reader + pixel-data-to-PNG decoder
+# for the shipped build — it stays OFF in `cpe-server`'s own default build; enabling it here is what
+# actually ships the code (pulls in the pure-Rust `dicom-object`/`dicom-pixeldata` crates, no native
+# codec toolchain required — see `crates/server/Cargo.toml`).
+cpe-server = { path = "../crates/server", features = ["index", "pdf-thumb", "video-thumb", "http-embedder", "copilot", "dicom-thumb"] }
 # (sha2 moved to `cpe-server` with the checksum/backup/thumbnail domains, CPE-815/821 — no longer a
 # direct app dep.)
 # (The recursive directory-size walk that used rayon moved to `cpe-server` (CPE-815, disk_usage);

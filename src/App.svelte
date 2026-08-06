@@ -2801,6 +2801,16 @@
     return commands.readRawPreviewDataUrl(path).then(unwrap);
   }
 
+  /** Decode a DICOM file's pixel data to a data: URL for the preview pane. */
+  function loadDicomImageData(path: string): Promise<string> {
+    return commands.readDicomImageDataUrl(path).then(unwrap);
+  }
+
+  /** Read a curated set of DICOM tags for the preview pane. */
+  function loadDicomTags(path: string): Promise<[string, string][]> {
+    return commands.readDicomTags(path).then(unwrap);
+  }
+
   /** Save edited text back to a file, then refresh so size/date update. */
   async function savePreviewText(path: string, contents: string): Promise<void> {
     unwrap(await commands.writeFileText(path, contents));
@@ -5064,6 +5074,8 @@
           loadInfo={loadPreviewInfo}
           loadImageData={loadImageData}
           loadRawImageData={loadRawImageData}
+          loadDicomImageData={loadDicomImageData}
+          loadDicomTags={loadDicomTags}
           saveText={savePreviewText}
         >
           <DetailsPane selected={selectedEntries.length ? selectedEntries : (homePreview ? [homePreview] : [])} {folderName} {itemCount} {folderIcon} />
