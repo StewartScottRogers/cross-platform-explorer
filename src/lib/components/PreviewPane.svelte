@@ -146,7 +146,14 @@
   $: if (entry && provider.kind === "decoded-image") loadImageDataFor(entry);
   $: if (entry && provider.kind === "raw-image") loadRawImageDataFor(entry);
   $: if (entry && provider.kind === "heic") loadHeicImageDataFor(entry);
-  $: if (entry && provider.kind === "pdf") loadPdfValidityFor(entry);
+  $: if (entry && provider.kind === "pdf") {
+    loadPdfValidityFor(entry);
+  } else {
+    // Navigated away from a PDF (to a non-PDF, a folder, or nothing): disarm any in-flight PDF load so a
+    // leftover 15s load-timeout can't later flip `pdfState` to "error" on a file we're no longer showing
+    // (CPE-1363 audit #2). Idempotent, so re-running on unrelated reactive ticks is a no-op.
+    cancelPdfLoad();
+  }
   $: if (entry && provider.kind === "dicom") {
     loadDicomImageDataFor(entry);
     loadDicomTagsFor(entry);
@@ -330,6 +337,21 @@
       pdfLoadTimer = undefined;
     }
     pdfState = "error";
+  }
+
+  /** Disarm any in-flight PDF validity check + armed load-timeout, and reset to idle. Called when the
+   *  selection leaves a PDF and on teardown, so a leftover timer can't fire against a stale file
+   *  (CPE-1363 audit #2). Idempotent: once there's no timer and state is already idle it does nothing, so
+   *  re-running on unrelated reactive ticks is free. */
+  function cancelPdfLoad() {
+    if (pdfLoadTimer !== undefined) {
+      clearTimeout(pdfLoadTimer);
+      pdfLoadTimer = undefined;
+    }
+    if (pdfState !== "idle") {
+      pdfReqId++; // supersede a pending loadPdfValidity so its late resolve is discarded
+      pdfState = "idle";
+    }
   }
 
   onDestroy(() => {

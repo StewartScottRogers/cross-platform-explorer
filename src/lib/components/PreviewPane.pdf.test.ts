@@ -74,6 +74,33 @@ describe("PreviewPane — PDF preview crash resilience (CPE-1357)", () => {
     expect(container.querySelector("iframe.preview-pdf")).toBeNull();
   });
 
+  it("disarms the load-timeout when navigating from a PDF to a non-PDF before the iframe settles (CPE-1363 #2)", async () => {
+    // PDF-A passes validity → the 15s load-timeout is armed while the iframe is still loading. Selecting a
+    // non-PDF must disarm that timer so it can't later flip pdfState to "error" on a file we've left.
+    vi.useFakeTimers();
+    try {
+      const loadPdfValidity = vi.fn(async () => 1);
+      const { container, rerender } = render(PreviewPane, {
+        entry: entry({ name: "a.pdf", path: "/docs/a.pdf", extension: "pdf" }),
+        loadPdfValidity,
+        assetUrl: (p: string) => `asset://${p}`,
+      });
+      // Let the validity promise resolve so the iframe renders and the timeout is armed.
+      await vi.waitFor(() => expect(loadPdfValidity).toHaveBeenCalledWith("/docs/a.pdf"));
+      await vi.waitFor(() => expect(container.querySelector("iframe.preview-pdf")).toBeTruthy());
+
+      // Navigate to a non-PDF (text) before the iframe fires load/error.
+      await rerender({ entry: entry({ name: "notes.txt", path: "/docs/notes.txt", extension: "txt" }) });
+      expect(container.querySelector("iframe.preview-pdf")).toBeNull();
+
+      // Advance past the 15s timeout — the disarmed timer must NOT fire (no error state resurfacing a PDF).
+      vi.advanceTimersByTime(20_000);
+      expect(container.querySelector("iframe.preview-pdf")).toBeNull(); // still a non-PDF, no stale flip
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("drops a stale response when the selection changes mid-flight (generation guard)", async () => {
     let resolveFirst!: (v: number | null) => void;
     const loadPdfValidity = vi

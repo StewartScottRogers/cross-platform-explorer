@@ -59,12 +59,29 @@ describe("archivePreview extract-then-preview (CPE-1360)", () => {
     expect(invokeMock).toHaveBeenCalledWith("extract_archive_entry_any", { path: "C:/x/a.7z", inner: "d/y" });
   });
 
-  it("caches per (zipPath, inner) so re-selecting doesn't re-extract", async () => {
+  it("caches per (zipPath, inner) so re-selecting doesn't re-extract (temp still on disk)", async () => {
+    // The mock resolves every command — including the `entry_info` re-validation stat — to a truthy value,
+    // so the cached temp reads as still-present and the second select is served from cache.
     invokeMock.mockResolvedValue("C:/temp/cpe-archive/cached.txt");
     const first = await extractInnerToTemp("C:/x/cache.zip", "cached.txt");
     const second = await extractInnerToTemp("C:/x/cache.zip", "cached.txt");
     expect(first).toBe(second);
-    expect(invokeMock).toHaveBeenCalledTimes(1); // second call served from cache
+    const extractCalls = invokeMock.mock.calls.filter((c) => c[0] === "extract_archive_entry");
+    expect(extractCalls).toHaveLength(1); // extraction happened once; the 2nd select re-used the cache
+  });
+
+  it("re-extracts when the cached temp file was reaped mid-session (entry_info reports it gone)", async () => {
+    // entry_info (the cache re-validation stat) throws → the cached path is dead → the second select must
+    // drop the stale entry and re-extract to the stable temp path, not hand a loader a dead path.
+    invokeMock.mockImplementation(async (cmd: string) => {
+      if (cmd === "entry_info") throw new Error("no such file"); // temp reaped by the OS
+      return "C:/temp/cpe-archive/reaped.txt";
+    });
+    const a = await extractInnerToTemp("C:/x/reap.zip", "reaped.txt");
+    const b = await extractInnerToTemp("C:/x/reap.zip", "reaped.txt");
+    expect(a).toBe(b);
+    const extractCalls = invokeMock.mock.calls.filter((c) => c[0] === "extract_archive_entry");
+    expect(extractCalls).toHaveLength(2); // cache hit was invalidated → extracted again
   });
 
   it("resolveArchivePreviewEntry keeps name/extension but points path at the temp file", async () => {
