@@ -34,5 +34,11 @@ export const loadDicomTags = (path: string): Promise<[string, string][]> =>
 export const loadHeicImageData = (path: string): Promise<string> =>
   commands.readHeicPreviewDataUrl(path).then(unwrap);
 
+/** Structural-validity check for a PDF (CPE-1357) — resolves with the page count (or `null` when it
+ *  couldn't be determined but the file still looks structurally sound) on a previewable PDF, rejects on
+ *  a malformed/empty one. Gates whether the preview pane hands the file to the WebView2 iframe at all. */
+export const loadPdfValidity = (path: string): Promise<number | null> =>
+  commands.readPdfValidity(path).then(unwrap);
+
 export const savePreviewText = (path: string, contents: string): Promise<void> =>
   commands.writeFileText(path, contents).then((r) => void unwrap(r));

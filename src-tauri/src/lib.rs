@@ -1011,6 +1011,26 @@ async fn read_heic_preview_data_url(path: String) -> Result<String, String> {
     .map_err(|e| e.to_string())?
 }
 
+/// Structural-validity check for a `.pdf` file, called BEFORE the preview pane hands it to WebView2's
+/// embedded PDF viewer for the raw `<iframe>` render (CPE-1357): a malformed or empty PDF (no resolvable
+/// cross-reference table, or a `/Pages` tree declaring zero pages) can crash the WebView2 PDF renderer
+/// and take the whole app down, so an `Err` here routes the pane to the metadata fallback instead of
+/// ever reaching the iframe. Thin `spawn_blocking` dispatcher into `cpe_server::media_meta_read::
+/// pdf_validity` (a pure byte-scan, not pdfium — no native dependency needed for this check), capped by
+/// the same preview size guard as the other automatic-on-selection preview readers above. `Ok(Some(n))`
+/// is a known page count, `Ok(None)` means the scanner couldn't resolve `/Pages` (e.g. compressed
+/// cross-reference streams) but the header/xref checks passed — still treated as previewable.
+#[tauri::command]
+#[cfg_attr(feature = "specta-bindings", specta::specta)]
+async fn read_pdf_validity(path: String) -> Result<Option<u32>, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        ensure_previewable_size(&path, PREVIEW_INFO_MAX_BYTES)?;
+        let bytes = fs::read(&path).map_err(|e| e.to_string())?;
+        cpe_server::media_meta_read::pdf_validity(&bytes)
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
 
 /// A PNG thumbnail of an image file as a `data:` URL the `<img>` tag can show (CPE-642), served from
 /// an mtime-keyed on-disk cache (CPE-644). Also covers `.svg` (rasterized) and `.ttf`/`.otf`/`.woff`
@@ -9970,6 +9990,7 @@ pub fn run() {
             read_dicom_image_data_url,
             read_dicom_tags,
             read_heic_preview_data_url,
+            read_pdf_validity,
             thumbnail,
             thumbnails_stream,
             cancel_thumbnails_stream,
@@ -10783,6 +10804,7 @@ pub fn export_bindings(out: &std::path::Path) -> Result<(), String> {
         read_dicom_image_data_url,
         read_dicom_tags,
         read_heic_preview_data_url,
+        read_pdf_validity,
         thumbnail,
         thumbnails_stream,
         cancel_thumbnails_stream,
