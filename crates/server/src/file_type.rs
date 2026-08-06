@@ -103,6 +103,13 @@ pub enum FileType {
     Lz4,
     /// lzip archive (`.lz`), tagged `LZIP` at offset 0.
     Lzip,
+    /// Microsoft OLE2 / Compound File Binary Format (CFBF) container, tagged `D0 CF 11 E0 A1 B1 1A E1` at
+    /// offset 0. This is the legacy pre-XML Office container — it backs `.doc`/`.xls`/`.ppt`, Windows
+    /// Installer `.msi`, Outlook `.msg`, and Visio `.vsd` — all reused from the same underlying container
+    /// format, mirroring the [`FileType::Zip`] "one container, many extensions" pattern above. `.msi` in
+    /// particular is a known malware-disguise vector (an installer renamed to look like an innocuous
+    /// document), so detecting this signature closes a real gap in the mismatch detector.
+    Ole2,
 }
 
 impl FileType {
@@ -160,6 +167,7 @@ impl FileType {
             FileType::Cur => "Windows cursor",
             FileType::Lz4 => "LZ4 archive",
             FileType::Lzip => "lzip archive",
+            FileType::Ole2 => "Microsoft OLE2 / legacy Office document",
         }
     }
 
@@ -227,6 +235,7 @@ impl FileType {
             FileType::Cur => &["cur"],
             FileType::Lz4 => &["lz4"],
             FileType::Lzip => &["lz"],
+            FileType::Ole2 => &["doc", "xls", "ppt", "msi", "msg", "vsd"],
         }
     }
 }
@@ -377,6 +386,12 @@ pub fn detect_type(bytes: &[u8]) -> Option<FileType> {
     }
     if matches_at(bytes, 0, b"MSCF") {
         return Some(FileType::Cab);
+    }
+    // OLE2/CFBF container — backs legacy .doc/.xls/.ppt, Windows Installer .msi, Outlook .msg, and Visio
+    // .vsd (see the doc comment on the variant). Full 8-byte unique magic, so it cannot shadow or be
+    // shadowed by any other signature here.
+    if matches_at(bytes, 0, &[0xD0, 0xCF, 0x11, 0xE0, 0xA1, 0xB1, 0x1A, 0xE1]) {
+        return Some(FileType::Ole2);
     }
     if matches_at(bytes, 0, b"!<arch>\n") {
         return Some(FileType::Ar);
@@ -1009,6 +1024,48 @@ mod tests {
         assert_eq!(m.detected, FileType::Psd);
         assert_eq!(mismatch(b"8BPS\x00\x01\x00\x00", "psd"), None);
         assert_eq!(mismatch(b"8BPS\x00\x01\x00\x00", "psb"), None);
+    }
+
+    // ---- OLE2/CFBF container (CPE-1344) ----
+
+    fn ole2_bytes() -> Vec<u8> {
+        let mut b = vec![0xD0, 0xCF, 0x11, 0xE0, 0xA1, 0xB1, 0x1A, 0xE1];
+        b.extend_from_slice(&[0, 0, 0, 0]);
+        b
+    }
+
+    #[test]
+    fn detects_ole2_cfbf_magic() {
+        assert_eq!(detect_type(&ole2_bytes()), Some(FileType::Ole2));
+    }
+
+    #[test]
+    fn mismatch_is_none_for_ole2_bytes_under_any_covered_extension() {
+        for ext in ["doc", "xls", "ppt", "msi", "msg", "vsd"] {
+            assert_eq!(mismatch(&ole2_bytes(), ext), None, "extension {ext} should not mismatch");
+        }
+    }
+
+    #[test]
+    fn mismatch_flags_ole2_bytes_disguised_as_pdf() {
+        // The malware-disguise scenario this ticket exists for: an .msi (or any OLE2 container) renamed
+        // to look like an innocuous document must be caught.
+        let m = mismatch(&ole2_bytes(), "pdf").expect("OLE2 bytes claiming .pdf must mismatch");
+        assert_eq!(m.detected, FileType::Ole2);
+        assert_eq!(m.actual_ext, "pdf");
+    }
+
+    #[test]
+    fn label_and_extensions_for_ole2() {
+        assert_eq!(FileType::Ole2.label(), "Microsoft OLE2 / legacy Office document");
+        assert_eq!(FileType::Ole2.extensions(), &["doc", "xls", "ppt", "msi", "msg", "vsd"]);
+    }
+
+    #[test]
+    fn ole2_magic_shorter_than_full_signature_is_none_not_a_panic() {
+        for n in 0..8 {
+            assert_eq!(detect_type(&ole2_bytes()[..n]), None);
+        }
     }
 
     // ---- unknown / short / empty input never panics ----
