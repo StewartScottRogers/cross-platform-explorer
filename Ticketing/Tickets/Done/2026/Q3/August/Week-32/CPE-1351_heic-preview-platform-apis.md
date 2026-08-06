@@ -2,13 +2,13 @@
 id: CPE-1351
 title: "HEIC/HEIF preview via per-OS platform APIs (Windows WIC + macOS ImageIO) — backend + provider wiring"
 type: Feature
-status: Backlog
+status: Done
 priority: Medium
 component: Multiple
 tags: [ready]
 epic: CPE-097
 created: 2026-08-05
-closed:
+closed: 2026-08-05
 ---
 
 ## Goal
@@ -66,3 +66,6 @@ platform `cfg` (no Cargo feature).
 Sequence AFTER CPE-1350 (shares src-tauri/lib.rs, bindings.gen.ts, provider.ts, loaders.ts, PreviewPane).
 This UNBLOCKS/супerseeds the old libheif blocker on CPE-097. macOS visual + a no-extension-Windows-box test
 are the attended remainders.
+
+## Work Log
+- 2026-08-05 (workshift): PR #646 merged (67915f02). HEIC/HEIF preview via per-OS platform APIs: Windows WIC (real decode verified on this machine - HEIF ext installed) + macOS ImageIO (cfg-gated, CI-compiled, visual attended). Shared cpe-server encode_rgba_to_png_data_url. Worker(opus); opus Reviewer APPROVE (crafted a real HEIC, proved WIC end-to-end; verified COM lifecycle + buffer safety) + UAT PASS (real 64x64 decode). Incidents fixed within-shift: macOS objc2 0.3 deprecations under -D warnings (renamed to method-form APIs); dimension guard added (review nit: bound buffer < u32::MAX). No bundled C, all-permissive licenses. macOS visual + a no-HEIF-extension Windows box = attended remainders.

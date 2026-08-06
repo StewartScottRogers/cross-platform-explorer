@@ -45,3 +45,6 @@ Dependency/approach: Backend decode (libheif). Editing model: none. Editable typ
 - [ ] Add a HEIC->PNG transcode path (libheif-rs, or platform APIs: macOS ImageIO, Windows WIC) behind a backend command
 - [ ] Confirm licensing of the chosen decoder for redistribution
 - [ ] Return a data URL / temp PNG the image provider can show; verify visually on each OS
+
+## Work Log
+- 2026-08-05 (workshift): UNBLOCKED via the platform-API approach (user chose WIC/ImageIO over libheif). Backend + full wiring shipped in CPE-1351 (#646): read_heic_preview_data_url + heic provider render .heic/.heif/.hif. Windows real-decode verified; macOS cfg-compiled. REMAINING = attended only: macOS visual on a Mac + a no-HEIF-extension Windows box (graceful metadata fallback). Moving to Deferred (our-choice: attended verification), no longer externally blocked.
