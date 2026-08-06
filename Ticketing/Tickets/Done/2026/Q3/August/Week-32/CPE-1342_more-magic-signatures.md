@@ -2,13 +2,13 @@
 id: CPE-1342
 title: "file_type: add common missing magic signatures (tar, psd, cab, icns, ar/deb, aiff, midi, flv, cur, lz4, lzip)"
 type: Task
-status: Backlog
+status: Done
 priority: Medium
 component: cpe-server
 tags: [ready]
 epic: CPE-1000
 created: 2026-08-05
-closed:
+closed: 2026-08-05
 ---
 
 ## Problem
@@ -60,3 +60,6 @@ dependency**.
 
 Pure `cpe-server` change; headless, cargo-testable. Feeds epic CPE-1000. Touches the same
 file as CPE-1341 (ftyp brands) — sequence them on one worker to avoid a merge collision.
+
+## Work Log
+- 2026-08-05 (workshift): Implemented in PR #637 (squash-merged to main as 3425e136). Worker(sonnet); independent Reviewer APPROVE + UAT PASS; all backend/server/sidecar/frontend CI green on 3 OS. GUI-smoke cancelled twice (concurrency-group supersede, not a real failure) — non-blocking on a pure-backend diff; main is unprotected so gauntlet+authoritative-CI is the gate. No new deps; bindings.gen.ts unchanged.

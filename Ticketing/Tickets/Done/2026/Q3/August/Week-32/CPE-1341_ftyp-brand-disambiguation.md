@@ -2,13 +2,13 @@
 id: CPE-1341
 title: "file_type: read the ftyp brand so .mov/.heic/.avif aren't false-flagged as MP4 mismatches"
 type: Bug
-status: Backlog
+status: Done
 priority: Medium
 component: cpe-server
 tags: [ready]
 epic: CPE-1000
 created: 2026-08-05
-closed:
+closed: 2026-08-05
 ---
 
 ## Problem
@@ -60,3 +60,6 @@ space padding (`qt  `, `M4A `). Keep it pure, bounds-checked, no new deps.
 Pure `cpe-server` change; headless, cargo-testable. If any of the new `FileType` variants
 touch a `specta::Type`-exported struct, regenerate `bindings.gen.ts` (they should not — this
 enum is internal to the sniffer). Feeds epic CPE-1000.
+
+## Work Log
+- 2026-08-05 (workshift): Implemented in PR #637 (squash-merged to main as 3425e136). Worker(sonnet); independent Reviewer APPROVE + UAT PASS; all backend/server/sidecar/frontend CI green on 3 OS. GUI-smoke cancelled twice (concurrency-group supersede, not a real failure) — non-blocking on a pure-backend diff; main is unprotected so gauntlet+authoritative-CI is the gate. No new deps; bindings.gen.ts unchanged.
