@@ -3067,21 +3067,26 @@ fn is_virtual_fstype(fstype: &str) -> bool {
 
 /// Reduce a partition device name (already stripped of the `/dev/` prefix, e.g. `sdb1`, `nvme0n1p1`,
 /// `mmcblk0p1`) to its parent block device (`sdb`, `nvme0n1`, `mmcblk0`) for the `/sys/block/<dev>`
-/// lookup. `nvme`/`mmcblk` partitions use a `pN` suffix on a device whose base name already ends in a
-/// digit, so a plain trailing-digit trim would wrongly cut into the base name — special-case that shape
-/// first, then fall back to trimming trailing digits for the plain `sdX N` / `hdXN` style.
+/// lookup. `nvme`/`mmcblk` devices name their partitions with an explicit `pN` suffix (`nvme0n1p1`,
+/// `mmcblk0p1`), so ONLY that suffix is stripped for them — an unpartitioned whole-disk name like
+/// `nvme0n1` or `mmcblk0` has no `pN` and must be returned unchanged; a naive trailing-digit trim would
+/// wrongly cut the trailing digit off the base name itself (`nvme0n1` → `nvme0n`, `mmcblk0` → `mmcblk`),
+/// pointing the `/sys/block/<dev>/removable` lookup at a device that doesn't exist (CPE-1355 review fix).
+/// `sd`/`hd`/`vd`-style devices have no such ambiguity — their partition number IS a plain trailing-digit
+/// suffix (`sdb1` → `sdb`), so those keep the trim.
 #[cfg(any(target_os = "linux", test))]
 fn parent_block_device(dev: &str) -> String {
-    if let Some(idx) = dev.rfind('p') {
-        let (head, tail) = dev.split_at(idx);
-        let tail_digits = &tail[1..]; // skip the 'p'
-        let looks_like_nvme_style_partition = !tail_digits.is_empty()
-            && tail_digits.chars().all(|c| c.is_ascii_digit())
-            && head.chars().last().is_some_and(|c| c.is_ascii_digit());
-        if looks_like_nvme_style_partition {
-            return head.to_string();
+    if dev.starts_with("nvme") || dev.starts_with("mmcblk") {
+        // Partition form is "...p<N>"; strip ONLY that. A whole disk (no "pN") is returned unchanged.
+        if let Some(pos) = dev.rfind('p') {
+            let tail = &dev[pos + 1..];
+            if !tail.is_empty() && tail.bytes().all(|b| b.is_ascii_digit()) {
+                return dev[..pos].to_string();
+            }
         }
+        return dev.to_string();
     }
+    // sd/hd/vd/etc: the partition number is a plain trailing-digit suffix.
     dev.trim_end_matches(|c: char| c.is_ascii_digit()).to_string()
 }
 
@@ -11878,6 +11883,23 @@ mod tests {
     }
 
     #[test]
+    fn classify_drive_type_unpartitioned_nvme_whole_disk_is_removable() {
+        // A directly-mounted, unpartitioned removable NVMe/SD device (no "pN" suffix) — the regression
+        // caught by review: a naive trailing-digit trim previously mangled "nvme0n1" into "nvme0n" and
+        // "mmcblk0" into "mmcblk", so the sysfs lookup missed and this always fell back to "fixed".
+        let mounts = "/dev/nvme0n1 /mnt/nvme ext4 rw,relatime 0 0\n";
+        let removable = |dev: &str| if dev == "nvme0n1" { Some("1".to_string()) } else { None };
+        assert_eq!(classify_drive_type_from_proc("/mnt/nvme", mounts, removable), "removable");
+    }
+
+    #[test]
+    fn classify_drive_type_unpartitioned_mmcblk_whole_disk_is_removable() {
+        let mounts = "/dev/mmcblk0 /mnt/sd ext4 rw,relatime 0 0\n";
+        let removable = |dev: &str| if dev == "mmcblk0" { Some("1".to_string()) } else { None };
+        assert_eq!(classify_drive_type_from_proc("/mnt/sd", mounts, removable), "removable");
+    }
+
+    #[test]
     fn classify_drive_type_picks_longest_prefix_mount() {
         // A path under a nested mount must resolve to the NESTED mount's device, not the outer "/".
         let mounts = "/dev/sda2 / ext4 rw,relatime 0 0\n/dev/sdc1 /mnt/nested ext4 rw,relatime 0 0\n";
@@ -11933,11 +11955,20 @@ overlay / overlay rw,relatime 0 0
 
     #[test]
     fn parent_block_device_reductions() {
+        // sd/hd/vd-style: the partition number is a plain trailing-digit suffix.
+        assert_eq!(parent_block_device("sda1"), "sda");
+        assert_eq!(parent_block_device("sda15"), "sda");
         assert_eq!(parent_block_device("sdb1"), "sdb");
         assert_eq!(parent_block_device("sda2"), "sda");
-        assert_eq!(parent_block_device("nvme0n1p3"), "nvme0n1");
-        assert_eq!(parent_block_device("mmcblk0p1"), "mmcblk0");
         assert_eq!(parent_block_device("sdb"), "sdb", "a whole-disk mount has no partition suffix to strip");
+        // nvme/mmcblk: ONLY strip an explicit "pN" partition suffix — an unpartitioned whole-disk name
+        // (no "pN") must come back unchanged, never trimmed on its own trailing digit (review regression:
+        // "nvme0n1" -> "nvme0n" / "mmcblk0" -> "mmcblk" would point the /sys/block lookup at nothing).
+        assert_eq!(parent_block_device("nvme0n1p3"), "nvme0n1");
+        assert_eq!(parent_block_device("nvme0n1"), "nvme0n1", "unpartitioned whole-disk nvme");
+        assert_eq!(parent_block_device("nvme1n1"), "nvme1n1", "unpartitioned whole-disk nvme, other index");
+        assert_eq!(parent_block_device("mmcblk0p1"), "mmcblk0");
+        assert_eq!(parent_block_device("mmcblk0"), "mmcblk0", "unpartitioned whole-disk mmcblk");
     }
 
     // ---- Safe drive eject guard (CPE-1278) — hardware-free, cross-platform ------------------------
