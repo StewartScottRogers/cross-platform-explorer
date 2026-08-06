@@ -434,6 +434,11 @@ pub mod thumb_video;
 /// Image preview — TIFF/PSD → PNG data-URL transcode + dimensions/EXIF metadata (CPE-099/101/659).
 pub mod image_preview;
 
+/// Camera-RAW embedded-preview extraction (CPE-1346) — CR2/NEF/ARW are TIFF containers; a hand-rolled,
+/// bounds-checked TIFF/IFD walker (no demosaicing, no new dependency) pulls out the largest embedded
+/// JPEG preview already inside the file, falling back to `kamadak-exif`'s standard thumbnail tag.
+pub mod camera_raw;
+
 /// Backup copy engine — plan executor (copy/update/mirror-delete) with per-file results (CPE-797).
 pub mod backup;
 
