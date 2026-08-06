@@ -44,3 +44,11 @@ Dependency/approach: three.js (bundle-size review). Editing model: none. Editabl
 - [ ] Bundle a self-contained WebGL viewer (three.js) under the CSP; add a "model" preview kind
 - [ ] Parse STL/OBJ/GLTF; render with orbit controls
 - [ ] Review bundle-size impact against PURPOSE.md; verify on a real GPU/display
+
+- 2026-08-06 — **Partial delivery (still Blocked).** The 3D *reader* lane shipped a read-only **geometry
+  summary** in the preview pane — `read_model_info` → `ModelInfo` (vertex + triangle counts, bounding-box
+  dimensions) for STL/OBJ/GLTF/GLB/PLY (CPE-1333/1334/1339), rendered as a metadata section with graceful
+  fallback + request-id cancellation. Remaining (and still blocking) scope is the ticket's headline
+  **interactive orbit/zoom WebGL viewer** — a large frontend dep (three.js, bundle-size review against
+  PURPOSE.md's small/fast tiebreaker) whose GPU rendering can't be verified headlessly and needs an
+  attended check. Narrowed to just that viewer; the summary half is done.

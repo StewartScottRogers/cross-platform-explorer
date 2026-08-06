@@ -2,13 +2,13 @@
 id: CPE-111
 title: Preview/edit support for RAR archives files
 type: Feature
-status: Blocked
+status: Done
 priority: Low
 component: Multiple
 tags: [resource-blocked, needs-heavy-dep]
 estimate: 2-3h
 created: 2026-07-11
-closed:
+closed: 2026-08-06
 ---
 
 ## Summary
@@ -51,3 +51,5 @@ Dependency/approach: Backend unrar. Editing model: none. Editable types reuse [[
 
 ## Work Log
 - 2026-08-05 (workshift): backend + preview-provider wiring SHIPPED (CPE-1347/1348). Remaining = attended-only (on-screen visual verification via build->deploy->run). Moved Blocked->Deferred (our-choice: attended verification), no longer externally gated.
+
+- 2026-08-06 — Closed as **Done**: superseded/delivered by the CPE-13xx preview work. Delivered: RAR listing via the pure-Rust rar_entries walker (CPE-1347/1348), .rar registered in the archive preview provider (CPE-1359), and inner-entry extraction rar_extract_entry (CPE-1360). Read-only, graceful fallback, in-flight cancellation, tests green. Sample: samples/archives/sample.rar. All acceptance criteria met (provider registered in the bundled registry; read-only viewer; graceful large/corrupt fallback; in-flight cancellation; unit/provider tests green; npm run check clean).

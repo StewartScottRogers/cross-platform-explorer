@@ -2,13 +2,13 @@
 id: CPE-097
 title: Preview/edit support for HEIC / HEIF images files
 type: Feature
-status: Blocked
+status: Done
 priority: Medium
 component: Multiple
 tags: [resource-blocked, needs-heavy-dep]
 estimate: 2-3h
 created: 2026-07-11
-closed:
+closed: 2026-08-06
 ---
 
 ## Summary
@@ -48,3 +48,5 @@ Dependency/approach: Backend decode (libheif). Editing model: none. Editable typ
 
 ## Work Log
 - 2026-08-05 (workshift): UNBLOCKED via the platform-API approach (user chose WIC/ImageIO over libheif). Backend + full wiring shipped in CPE-1351 (#646): read_heic_preview_data_url + heic provider render .heic/.heif/.hif. Windows real-decode verified; macOS cfg-compiled. REMAINING = attended only: macOS visual on a Mac + a no-HEIF-extension Windows box (graceful metadata fallback). Moving to Deferred (our-choice: attended verification), no longer externally blocked.
+
+- 2026-08-06 — Closed as **Done**: superseded/delivered by the CPE-13xx preview work. Delivered: heic/heif/hif preview provider + read_heic_preview_data_url platform decode (CPE-1351). Read-only, Err->metadata fallback, request-id cancellation, provider tests green. Sample: samples/images/iphone-photo.heic. All acceptance criteria met (provider registered in the bundled registry; read-only viewer; graceful large/corrupt fallback; in-flight cancellation; unit/provider tests green; npm run check clean).

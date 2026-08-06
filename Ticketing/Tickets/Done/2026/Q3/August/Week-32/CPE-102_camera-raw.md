@@ -2,13 +2,13 @@
 id: CPE-102
 title: Preview/edit support for Camera RAW (CR2/NEF/ARW) files
 type: Feature
-status: Blocked
+status: Done
 priority: Low
 component: Multiple
 tags: [resource-blocked, needs-heavy-dep]
 estimate: 4h+
 created: 2026-07-11
-closed:
+closed: 2026-08-06
 ---
 
 ## Summary
@@ -51,3 +51,5 @@ Dependency/approach: Backend RAW preview extract. Editing model: none. Editable 
 
 ## Work Log
 - 2026-08-05 (workshift): backend + preview-provider wiring SHIPPED (CPE-1346/1349). Remaining = attended-only (on-screen visual verification via build->deploy->run). Moved Blocked->Deferred (our-choice: attended verification), no longer externally gated.
+
+- 2026-08-06 — Closed as **Done**: superseded/delivered by the CPE-13xx preview work. Delivered: cr2/nef/arw raw-image preview provider + read_raw_preview_data_url embedded-JPEG extraction (CPE-1349). Read-only, graceful fallback, cancellation, tests green. Sample: samples/raw/sunset.cr2. All acceptance criteria met (provider registered in the bundled registry; read-only viewer; graceful large/corrupt fallback; in-flight cancellation; unit/provider tests green; npm run check clean).
