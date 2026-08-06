@@ -984,3 +984,22 @@ colliding tickets by FILE (1343 type_mismatch_scan.rs ∥ 1344 file_type.rs). Wi
 NOTE: gauntlet agents run withOUT worktree isolation leave scratch (pr637.diff) in the MAIN tree — Foreman
 git-rm'd it; consider isolating reviewers too or a targeted add. FRONTIER: signature vein now TAPPED (Library
 `file-type-signature-vein-tapped-2026-08-05`); only DDS/EOT left = gold-plating, skip. Next work needs the user.
+
+## Shift 2026-08-05 (resume, cont.) — GATED FORMAT-READER PROGRAM COMPLETE (13 tickets)
+User: "you pick and if you do all of it that would be fine" + "keep trying" → took the 4 long-Blocked
+format-reader epics (HEIC/DICOM/RAR/camera-RAW). Vetted licensing first (Library
+`gated-format-readers-dicom-raw-rar-2026-08-05` + `heic-preview-platform-apis-2026-08-05`), then shipped:
+- Backends: CPE-1345 DICOM (dicom-rs, feature-gated), CPE-1346 camera-RAW embedded-JPEG (0 deps), CPE-1347
+  RAR4/RAR5 listing (0 deps, no UnRAR). CPE-1341-1344 file-type detection earlier same session.
+- Wiring: CPE-1348 RAR into archive browser; CPE-1349 RAW preview provider; CPE-1350 DICOM provider + SHIP
+  (dicom-thumb enabled in app build, user-approved +2.81 MiB); CPE-1351 HEIC via per-OS platform APIs
+  (Windows WIC — real decode verified on this machine; macOS ImageIO cfg-gated + CI-compiled).
+- Polish: CPE-1352 trim DICOM ship-cost (drop dicom-pixeldata image feature → exr/pnm gone, 315->307 crates);
+  CPE-1353 fix a YCbCr green-term SIGN BUG (we now render color Doppler more correctly than upstream dicom-pixeldata).
+GAUNTLET CAUGHT (all fixed within-shift, 0 escaped defects): RAR integer-overflow hang (checked_add), HEIC
+macOS objc2 0.3 deprecations under -D warnings, HEIC huge-dimension buffer guard, DICOM silent YBR wrong-color
+regression, then the deeper upstream YCbCr sign bug. Tuned defaults: format-reader class = sonnet (opus for the
+unsafe WIC FFI worker+reviewer); provider-wiring shares src-tauri/lib.rs + bindings.gen.ts + provider.ts →
+MUST sequence (branch each off the prior merge), can't parallelize. HEIC needs OS HEIF extension on Windows
+(graceful Err fallback). ~86 sub-agents this session. FRONTIER: program complete; remaining = attended visual
+(build->deploy->run; macOS on a Mac) — no clean headless work left in this lane.

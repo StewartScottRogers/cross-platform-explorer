@@ -2,13 +2,13 @@
 id: CPE-1353
 title: "DICOM color: fix YCbCr→RGB green-term sign bug (color Doppler renders non-primary hues wrong)"
 type: Bug
-status: Backlog
+status: Done
 priority: Low
 component: cpe-server
 tags: [ready]
 epic: CPE-219
 created: 2026-08-05
-closed:
+closed: 2026-08-05
 ---
 
 ## Problem
@@ -53,3 +53,6 @@ standard.
 
 Small, isolated, headless. Makes our DICOM color MORE correct than upstream dicom-pixeldata. Surfaced by the
 CPE-1352 (#647) re-review.
+
+## Work Log
+- 2026-08-05 (workshift): PR #648 merged. Flipped the Cb-term sign in convert_ybr_full_to_rgb_u8 green channel (+->-) to match DICOM PS3.3 C.7.6.3.1.2 / pydicom; green+blue regression test added. Foreman-applied; independent verifier APPROVE (round-tripped own hues orange/cyan within +/-1, proved test non-hollow). Now more correct than upstream dicom-pixeldata (which has the sign bug).

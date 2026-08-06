@@ -207,3 +207,35 @@ Do NOT re-run a clean file-type/signature hunt — this shift already did an evi
 real items it found; the Library says the vein is tapped and DDS/EOT is filler. Next real work needs the USER:
 name/provide a resource, green-light a gated/heavy-dep epic to build WITH cargo tests, or accept an attended-GUI
 epic to pair on (build → deploy → run). Nothing blocked or broken; main clean and green.
+
+---
+## RUN 2026-08-05 (resume, cont.) — ~23:25 local — GATED FORMAT-READER PROGRAM COMPLETE (13 tickets)
+After the file-type lane (CPE-1341-1344), user said "you pick and if you do all of it that would be fine" +
+"keep trying" → took the 4 long-Blocked format-reader epics and shipped the whole program:
+- **DICOM (CPE-219)**: backend CPE-1345 + provider/ship CPE-1350 (dicom-thumb ON in the app build,
+  user-approved) + trim CPE-1352 + color-correctness CPE-1353. Image + tags; ships.
+- **Camera-RAW (CPE-102)**: backend CPE-1346 (embedded-JPEG, 0 deps) + provider CPE-1349.
+- **RAR (CPE-111)**: backend CPE-1347 (RAR4/RAR5 listing, 0 deps) + archive-browser wiring CPE-1348.
+- **HEIC (CPE-097)**: CPE-1351 per-OS platform APIs (Windows WIC + macOS ImageIO). Moved CPE-097 Blocked→Deferred
+  (attended-only remainder: macOS visual + a no-HEIF-extension Windows box).
+All merged, each PR's OWN CI green, gauntlet(+security/unsafe/supply-chain lenses) verified, **0 escaped defects**.
+Bugs the gauntlet caught + fixed within-shift: RAR overflow-hang, HEIC macOS deprecations, HEIC dim-guard,
+DICOM YBR wrong-color regression, upstream YCbCr sign bug.
+
+## State
+- `main` @ origin `c5606f5e`, CLEAN. Backlog + Doing EMPTY. Worktrees deep-cleaned (only main). ~86 sub-agents
+  this session (well under the 150 reset line — no reset needed). MVD unchanged.
+- User decisions locked this session: HEIC = per-OS platform APIs (not libheif); DICOM = ship-enabled.
+
+## REMAINING = ATTENDED (needs the user) — no clean headless work left in this lane
+1. **Visual verification (build → deploy → run):** the 4 new preview types passed automated checks + code-identity,
+   but "does each image render nicely on screen" is eyes-on. Owed: open a .heic, .dcm, RAW photo, .rar in the
+   real installed build. (Windows HEIC needs the OS HEIF Image Extensions — present on THIS dev box.)
+2. **HEIC macOS** visual on a real Mac (cfg-compiled by CI, not run here).
+3. Optional headless leftovers if desired: gui-smoke fixtures for the new preview types (a QA-infra ticket);
+   nothing else clean is outstanding.
+
+## To resume
+Program is complete. Next: pair on the build→deploy→run visual (say "Run" to cut+install a fresh build), provide
+a Mac for the HEIC macOS check, or name a new focus. Do NOT manufacture a clean-headless hunt in this lane — it's
+done. Nothing blocked or broken; main clean + green.
