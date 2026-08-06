@@ -1,6 +1,6 @@
 // CPE-521: Agent Board model — column grouping, ordering, counts, and move validation.
 import { describe, it, expect } from "vitest";
-import { groupByColumn, columnCounts, isValidMove, isColumn, ticketTask, groupByLane, laneFor, clampBoardSize, BOARD_MIN_W, BOARD_MIN_H, groupByEpic, todoDone, epicProgress, doneWithArchived, filterCards, epicColumn, groupEpicsByColumn, archivedEpics, filterEpics, type Card, type Epic } from "./board";
+import { groupByColumn, columnCounts, isValidMove, isColumn, ticketTask, groupByLane, laneFor, clampBoardSize, BOARD_MIN_W, BOARD_MIN_H, groupByEpic, todoDone, epicProgress, epicBar, doneWithArchived, filterCards, epicColumn, groupEpicsByColumn, archivedEpics, filterEpics, type Card, type Epic } from "./board";
 
 function card(id: string, column: string, extra: Partial<Card> = {}): Card {
   return { id, title: `t ${id}`, ticket_type: "Feature", priority: "Medium", tags: [], column, ...extra };
@@ -173,5 +173,57 @@ describe("epics-as-kanban (CPE-922)", () => {
   it("filterCards also matches the epic field (drill-down)", () => {
     const rows: Card[] = [card("CPE-11", "Doing", { epic: "CPE-503" }), card("CPE-12", "Backlog", { epic: "CPE-999" })];
     expect(filterCards(rows, "CPE-503").map((c) => c.id)).toEqual(["CPE-11"]);
+  });
+});
+
+describe("epic completion bar (CPE-1356)", () => {
+  it("counts archived (dated Done/**) children when passed the full card set", () => {
+    // A closed epic whose children have been archived: only when the archived cards are included in the
+    // set does `total` reflect them — otherwise a completed epic reads as 0/0.
+    const recent: Card[] = [card("CPE-20", "Backlog")]; // unrelated recent card
+    const archivedChildren: Card[] = [
+      card("CPE-31", "Done", { epic: "CPE-500" }),
+      card("CPE-32", "Done", { epic: "CPE-500" }),
+    ];
+    // Recent-only view misses the archived children.
+    expect(epicProgress(recent, "CPE-500")).toEqual({ done: 0, total: 0 });
+    // Full universe (recent + archived) counts them.
+    expect(epicProgress([...recent, ...archivedChildren], "CPE-500")).toEqual({ done: 2, total: 2 });
+  });
+
+  it("shows a Done epic as complete even when it has zero counted children (archived/unlinked)", () => {
+    const bar = epicBar("Done", 0, 0);
+    expect(bar.state).toBe("complete");
+    expect(bar.percent).toBe(100);
+    expect(bar.label).toBe("done"); // not a misleading "0/0"
+  });
+
+  it("shows a Done epic with counted children as complete with the real count", () => {
+    expect(epicBar("Done", 4, 4)).toEqual({ percent: 100, label: "4/4", state: "complete" });
+    // Even a Done epic whose counted children look partial reads as complete (its status is the truth).
+    expect(epicBar("Closed", 2, 5).state).toBe("complete");
+    expect(epicBar("Closed", 2, 5).percent).toBe(100);
+  });
+
+  it("renders a not-yet-decomposed epic (0 children, not Done) as a clear empty state", () => {
+    for (const status of ["Proposed", "", "Backlog"]) {
+      const bar = epicBar(status, 0, 0);
+      expect(bar.state).toBe("empty");
+      expect(bar.percent).toBe(0);
+      expect(bar.label).toBe("—"); // an intentional empty marker, not "0/0"
+    }
+  });
+
+  it("shows an in-progress epic as partial — never a solid complete bar — even at 100% child completion", () => {
+    // The reported contradiction: an In Progress epic with all children done rendered a full *complete*
+    // bar that fought its Doing swim lane. It must be the distinct `partial` state instead.
+    const allDone = epicBar("In Progress", 3, 3);
+    expect(allDone.state).toBe("partial");
+    expect(allDone.percent).toBe(100); // honest count…
+    expect(allDone.state).not.toBe("complete"); // …but styled as in-progress, not complete
+    // A genuinely partial in-progress epic.
+    expect(epicBar("In Progress", 1, 4)).toEqual({ percent: 25, label: "1/4", state: "partial" });
+    // An in-progress epic with no children yet is empty, not a bogus fill.
+    expect(epicBar("In Progress", 0, 0).state).toBe("empty");
   });
 });

@@ -104,10 +104,38 @@ export function todoDone(cards: Card[]): { todo: Card[]; done: Card[] } {
   };
 }
 
-/** Per-epic progress `{ done, total }` computed from the cards attached to that epic id. */
+/** Per-epic progress `{ done, total }` computed from the cards attached to that epic id. Pass the
+ *  **full** card universe (recent + archived) so a closed epic whose children have moved to the dated
+ *  `Done/**` archive still counts them — otherwise a completed epic reads as `0/0` (CPE-1356). */
 export function epicProgress(cards: Card[], epicId: string): { done: number; total: number } {
   const mine = cards.filter((c) => (c.epic || NO_EPIC) === epicId);
   return { done: mine.filter((c) => c.column === "Done").length, total: mine.length };
+}
+
+/** The completion-bar display state for one epic. */
+export type EpicBarState = "complete" | "partial" | "empty";
+
+/** Resolve an epic's completion bar (CPE-1356) so it **agrees with the epic's own swim lane** (its
+ *  `status:`) instead of contradicting it, and never renders a broken `0/0` sliver:
+ *  - A **Done** epic reads as complete — a full bar — even when its children are archived/unlinked and
+ *    the counted `total` is 0 (label `done`, not a misleading `0/0` at 0%).
+ *  - A not-yet-decomposed epic (`total === 0`, not Done) reads as a clear, aligned **empty** track
+ *    (label `—`), not a thin misplaced fill.
+ *  - Otherwise the bar shows child completion as a visually distinct **partial** (in-progress) style, so
+ *    an open epic whose known children happen to be all-done never reads as a solid *complete* bar.
+ *  Pure — the `done`/`total` come from {@link epicProgress} over the full (archive-inclusive) card set. */
+export function epicBar(
+  status: string,
+  done: number,
+  total: number,
+): { percent: number; label: string; state: EpicBarState } {
+  if (epicColumn(status) === "Done") {
+    return { percent: 100, label: total > 0 ? `${done}/${total}` : "done", state: "complete" };
+  }
+  if (total === 0) {
+    return { percent: 0, label: "—", state: "empty" };
+  }
+  return { percent: Math.round((100 * done) / total), label: `${done}/${total}`, state: "partial" };
 }
 
 // --- Epics-as-kanban (CPE-922): lay epics out across ticket-style columns instead of a list+detail, so

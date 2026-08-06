@@ -14,7 +14,7 @@
   import {
     BOARD_LANES, groupByLane, isValidMove, ticketTask,
     clampBoardSize, loadBoardSize, saveBoardSize,
-    epicProgress, doneWithArchived, filterCards,
+    epicProgress, epicBar, doneWithArchived, filterCards,
     EPIC_COLUMNS, groupEpicsByColumn, archivedEpics, filterEpics,
     type Card, type Lane, type Epic,
   } from "../board";
@@ -98,6 +98,12 @@
   $: epicCols = groupEpicsByColumn(filterEpics(epics, boardQuery));
   $: archivedEpicList = archivedEpics(filterCards(archived, boardQuery));
   $: epicDoneDisplay = showArchived ? [...epicCols.Done, ...archivedEpicList] : epicCols.Done;
+  // Count epic children against the FULL card universe — recent + archived — so a closed epic whose
+  // children moved to the dated Done/** archive still counts them (not 0/0). Independent of the display
+  // `showArchived` toggle: the progress count shouldn't change just because archived cards are hidden
+  // (CPE-1356). `archived` is always loaded by `loadArchived()` on refresh/mount, so this is populated
+  // regardless of the toggle.
+  $: epicCountCards = [...cards, ...archived];
   /** Click an epic card → jump to the Board filtered to that epic's tickets (filterCards matches epic). */
   // Filter the board to an epic's tickets. Also reveal archived Done tickets: a closed epic's children
   // live in the dated Done/** subfolders, so without this "View tickets" could show an empty board (CPE-960).
@@ -293,7 +299,8 @@
             </div>
             <div class="board-col-body">
               {#each list as e (e.id)}
-                {@const p = epicProgress(cards, e.id)}
+                {@const p = epicProgress(epicCountCards, e.id)}
+                {@const bar = epicBar(e.status, p.done, p.total)}
                 <!-- svelte-ignore a11y-no-static-element-interactions a11y-click-events-have-key-events -->
                 <div class="card epic-card" class:is-done={col === "Done"} on:click={() => openDetail(e.id, true)}
                   role="button" tabindex="0" on:keydown={(ev) => (ev.key === "Enter" || ev.key === " ") && openDetail(e.id, true)}
@@ -305,9 +312,16 @@
                     {#if e.status}<span class="epic-status">{e.status}</span>{/if}
                   </div>
                   <div class="card-title">{e.title}</div>
-                  <div class="epic-progress" title={p.done + " of " + p.total + " tickets done"}>
-                    <div class="epic-bar"><span style="width:{p.total ? Math.round((100 * p.done) / p.total) : 0}%"></span></div>
-                    <span class="epic-count">{p.done}/{p.total}</span>
+                  <div
+                    class="epic-progress"
+                    title={bar.state === "empty"
+                      ? "No sub-tickets yet"
+                      : bar.state === "complete" && p.total === 0
+                        ? "Epic complete"
+                        : p.done + " of " + p.total + " tickets done"}
+                  >
+                    <div class="epic-bar is-{bar.state}"><span style="width:{bar.percent}%"></span></div>
+                    <span class="epic-count">{bar.label}</span>
                   </div>
                 </div>
               {/each}
@@ -424,8 +438,19 @@
   .epic-card.is-done { opacity: .72; }
   .epic-card:hover { border-color: var(--accent); }
   .epic-progress { display: flex; align-items: center; gap: 8px; margin-top: 8px; }
+  /* The track always renders full-width at a fixed height, so the empty (not-decomposed) state reads as
+     an intentional, aligned bar rather than a thin misplaced sliver (CPE-1356). */
   .epic-bar { flex: 1; height: 5px; border-radius: 3px; background: rgba(128,128,128,0.22); overflow: hidden; }
   .epic-bar span { display: block; height: 100%; background: var(--accent); border-radius: 3px; }
+  /* State styles (CPE-1356): a Done epic's fill is solid accent (complete); an in-progress epic's fill is
+     hatched, so even at 100% child completion it never reads as the solid *complete* bar and so never
+     contradicts its Doing swim lane; an empty epic shows only the muted track. The hatch gaps are
+     `transparent`, revealing the grey track behind — no color-mix needed. */
+  .epic-bar.is-complete span { background: var(--accent); }
+  .epic-bar.is-partial span {
+    background: repeating-linear-gradient(45deg, var(--accent) 0 4px, transparent 4px 8px);
+  }
+  .epic-bar.is-empty span { width: 0 !important; }
   .epic-count { font-size: 10px; color: var(--text-dim); font-variant-numeric: tabular-nums; }
   .board-x { border: 0; background: transparent; color: var(--text-dim); font-size: 20px; cursor: pointer;
     line-height: 1; padding: 0 4px; border-radius: 4px; }

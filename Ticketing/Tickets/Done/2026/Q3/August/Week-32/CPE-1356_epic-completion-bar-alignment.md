@@ -2,13 +2,13 @@
 id: CPE-1356
 title: "Agent Board Epics view: epic completion bars are wrong (0/0 empty on Done epics; full bar on in-progress; misaligned)"
 type: Bug
-status: Backlog
+status: Done
 priority: Medium
 component: Multiple
 tags: [ready]
 epic: CPE-922
 created: 2026-08-06
-closed:
+closed: 2026-08-06
 ---
 
 ## Problem (observed in the running v0.57.50 sidecar, Agent Board → Epics view)
@@ -80,3 +80,35 @@ bring it to parity if it is to show bars.
 
 Filed 2026-08-06 from the running v0.57.50-sidecar Agent Board (user-reported). Epic CPE-922
 (Epics-as-kanban). The final "looks right" is an attended visual check.
+
+## Work Log
+
+- 2026-08-06 — Implemented the fix in the in-process board (the only board that renders epic bars):
+  - `src/lib/board.ts`: added `epicBar(status, done, total) → {percent, label, state}` (state =
+    complete|partial|empty). **Done** epic → complete/100%, label `done/total` or `done` when it has 0
+    counted children (archived) — never a misleading `0/0`. Non-Done with 0 children → `empty`/`—`.
+    Otherwise `partial` with the honest child percent. `epicProgress` doc clarified to pass the full
+    (recent+archived) card set.
+  - `src/lib/components/BoardView.svelte`: new `$: epicCountCards = [...cards, ...archived]` (archived
+    is loaded unconditionally by `loadArchived()` on mount, so the count is independent of the display
+    `showArchived` toggle; the two sets are disjoint so no double-count). Epics view now renders
+    `epicBar(e.status, …)` with a state class + label. CSS: `.is-complete` solid accent, `.is-partial`
+    hatched (`repeating-linear-gradient`, transparent gaps reveal the grey track — no color-mix), so an
+    open epic at 100% child-completion reads as in-progress, not complete; `.is-empty` shows only the
+    aligned muted track (no sliver).
+  - `src/lib/board.test.ts`: added "epic completion bar (CPE-1356)" block — archived-children counting,
+    Done-with-zero-children, not-decomposed empty state, and the in-progress-at-100% partial case.
+  - Verify: `board.test.ts` 24/24 green; `npm run check` 0 errors.
+- 2026-08-06 — **Sidecar board decision (lockstep, [[two-board-implementations]]):** the sidecar
+  Epics view (`sidecar/agent-board/src/ui.rs` `loadEpics`) renders a plain row list (id + title +
+  status) with **no completion bars**, and its `Epic` struct carries no done/total — so it has neither
+  the bug nor a contradicting completion claim. The two boards already agree (both defer to the epic's
+  status/swim-lane); no sidecar change is required for this bug. Adding bars to the sidecar is optional
+  future parity, not part of this fix.
+- 2026-08-06 — Independent code review dispatched; attended visual re-check on a real build still
+  pending (bundled into the next installed build).
+- 2026-08-06 — Independent review: **APPROVE** (correct, complete, well-tested; archived-load-order,
+  disjointness, hoisting, hatch-vs-solid distinctness all verified). Applied two cosmetic nits from the
+  review: fixed the `loadArchived()` comment reference, and simplified the Done/0-children tooltip to
+  "Epic complete" (it no longer over-claims "archived" when an epic simply had no sub-tickets). Code
+  complete + committed. Attended visual re-check on a real build remains (bundled into the next build).
