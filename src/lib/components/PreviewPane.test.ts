@@ -85,13 +85,14 @@ describe("PreviewPane", () => {
     expect(container.querySelector("video.preview-media")).toBeTruthy();
   });
 
-  it("renders an <iframe> for a pdf entry", () => {
+  it("renders an <iframe> for a pdf entry once the validity check passes (CPE-1357)", async () => {
     const { container } = render(PreviewPane, {
       entry: entry({ name: "doc.pdf", path: "C:\\d\\doc.pdf", extension: "pdf" }),
       assetUrl: (p: string) => `asset://${p}`,
+      loadPdfValidity: async () => 1,
     });
+    await waitFor(() => expect(container.querySelector("iframe.preview-pdf")).toBeTruthy());
     const frame = container.querySelector("iframe.preview-pdf");
-    expect(frame).toBeTruthy();
     expect(frame!.getAttribute("src")).toBe("asset://C:\\d\\doc.pdf");
   });
 

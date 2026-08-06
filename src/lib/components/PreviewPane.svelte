@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { tick } from "svelte";
+  import { tick, onDestroy } from "svelte";
   import type { DirEntry } from "../types";
   import { pickProvider, type ArchiveEntry } from "../preview/provider";
   import { parseCsv } from "../preview/csv";
@@ -47,6 +47,9 @@
   export let loadDicomTags: (path: string) => Promise<[string, string][]> = async () => [];
   /** Decode a HEIC/HEIF file to a data: URL via the platform image stack (a backend command in the app). */
   export let loadHeicImageData: (path: string) => Promise<string> = async () => "";
+  /** Structural-validity check for a PDF — resolves (page count, or null if unknown) when the file looks
+   *  safe to hand to the WebView2 iframe, rejects on a malformed/empty PDF (a backend command in the app). */
+  export let loadPdfValidity: (path: string) => Promise<number | null> = async () => null;
 
   /** Cap the number of CSV rows rendered so a huge sheet can't lock the pane. */
   const CSV_ROW_CAP = 200;
@@ -109,6 +112,18 @@
   let heicImgState: "idle" | "loading" | "error" = "idle";
   let heicImgReqId = 0;
 
+  // PDF (CPE-1357): WebView2's built-in PDF viewer can crash the renderer — and take the whole app
+  // down with it — on a malformed/empty PDF. `pdfState` gates the raw `<iframe>` render: it only ever
+  // reaches `src={assetUrl(...)}` once a backend structural-validity check (`loadPdfValidity`) comes
+  // back clean; `error` (a rejected check, an iframe `error` event, or a load timeout — see the two
+  // handlers below) shows the metadata fallback slot instead, same pattern as raw-image/heic/dicom.
+  let pdfState: "idle" | "loading" | "error" = "idle";
+  let pdfReqId = 0;
+  let pdfLoadTimer: ReturnType<typeof setTimeout> | undefined;
+  /** Generous — even a large, legitimately valid PDF should start rendering well inside this; a miss
+   *  means the WebView2 PDF plugin is hung on this file, not just being slow. */
+  const PDF_LOAD_TIMEOUT_MS = 15_000;
+
   let fontFamily = "";
   let fontState: "idle" | "loading" | "error" = "idle";
   let fontReqId = 0;
@@ -131,6 +146,7 @@
   $: if (entry && provider.kind === "decoded-image") loadImageDataFor(entry);
   $: if (entry && provider.kind === "raw-image") loadRawImageDataFor(entry);
   $: if (entry && provider.kind === "heic") loadHeicImageDataFor(entry);
+  $: if (entry && provider.kind === "pdf") loadPdfValidityFor(entry);
   $: if (entry && provider.kind === "dicom") {
     loadDicomImageDataFor(entry);
     loadDicomTagsFor(entry);
@@ -267,6 +283,58 @@
       dicomImgState = "error";
     }
   }
+
+  /** Validates a PDF's structure BEFORE ever setting the iframe's `src` (CPE-1357): a rejected check
+   *  (backend `Err` — no `%PDF-` header, no resolvable xref, or zero declared pages) lands in
+   *  `pdfState === "error"`, which the render side shows as the metadata slot rather than handing the
+   *  file to WebView2's PDF viewer at all — that viewer can crash the whole app on exactly this input. A
+   *  passed check arms a load-timeout defense (see `onPdfIframeLoad`/`onPdfIframeError` below) for the
+   *  iframe render that follows. */
+  async function loadPdfValidityFor(e: DirEntry) {
+    const mine = ++pdfReqId;
+    pdfState = "loading";
+    if (pdfLoadTimer !== undefined) {
+      clearTimeout(pdfLoadTimer);
+      pdfLoadTimer = undefined;
+    }
+    try {
+      await loadPdfValidity(e.path);
+      if (mine !== pdfReqId) return; // stale — selection moved on while this was in flight
+      pdfState = "idle";
+      // Defense in depth: even a structurally-valid PDF could still hang the WebView2 PDF plugin on
+      // load (rather than error or crash outright). If neither `on:load` nor `on:error` fires in time,
+      // fall back rather than leave the pane wedged on a dead iframe.
+      pdfLoadTimer = setTimeout(() => {
+        if (mine === pdfReqId) pdfState = "error";
+      }, PDF_LOAD_TIMEOUT_MS);
+    } catch {
+      if (mine !== pdfReqId) return;
+      pdfState = "error";
+    }
+  }
+
+  /** The iframe loaded (or at least fired `load` — WebView2's PDF viewer does this once it has taken
+   *  over rendering) — disarm the hang-detection timeout above. */
+  function onPdfIframeLoad() {
+    if (pdfLoadTimer !== undefined) {
+      clearTimeout(pdfLoadTimer);
+      pdfLoadTimer = undefined;
+    }
+  }
+
+  /** The iframe itself reported an error (e.g. the asset protocol request failed) — disarm the timeout
+   *  and fall back immediately rather than waiting it out. */
+  function onPdfIframeError() {
+    if (pdfLoadTimer !== undefined) {
+      clearTimeout(pdfLoadTimer);
+      pdfLoadTimer = undefined;
+    }
+    pdfState = "error";
+  }
+
+  onDestroy(() => {
+    if (pdfLoadTimer !== undefined) clearTimeout(pdfLoadTimer);
+  });
 
   async function loadDicomTagsFor(e: DirEntry) {
     const mine = ++dicomTagsReqId;
@@ -837,7 +905,20 @@
     <!-- svelte-ignore a11y-media-has-caption -->
     <video class="preview-media" controls src={assetUrl(entry.path)}></video>
   {:else if provider.kind === "pdf" && entry}
-    <iframe class="preview-pdf" title={entry.name} src={assetUrl(entry.path)}></iframe>
+    {#if pdfState === "loading"}
+      <p class="preview-note">{$t("pv.loading")}</p>
+    {:else if pdfState === "error"}
+      <slot />
+    {:else}
+      <iframe
+        class="preview-pdf"
+        title={entry.name}
+        src={assetUrl(entry.path)}
+        sandbox="allow-scripts allow-same-origin"
+        on:load={onPdfIframeLoad}
+        on:error={onPdfIframeError}
+      ></iframe>
+    {/if}
   {:else if provider.kind === "font" && entry}
     {#if fontState === "error"}
       <p class="preview-note">{$t("pv.cantFont")}</p>
