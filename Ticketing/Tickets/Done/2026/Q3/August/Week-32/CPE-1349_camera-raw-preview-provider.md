@@ -2,13 +2,13 @@
 id: CPE-1349
 title: "Wire Camera-RAW preview provider: read_raw_preview_data_url command + cr2/nef/arw decoded-image provider"
 type: Feature
-status: Backlog
+status: Done
 priority: Low
 component: Multiple
 tags: [ready]
 epic: CPE-102
 created: 2026-08-05
-closed:
+closed: 2026-08-05
 ---
 
 ## Goal
@@ -51,3 +51,6 @@ Mostly headless (jsdom/vitest); the only eyes-on part is confirming the image re
 Touches `src-tauri/src/lib.rs`, `bindings.gen.ts`, `src/lib/preview/provider.ts`, the loader, + tests.
 Do this on ONE branch (shared frontend files — do not parallelize with the DICOM provider wiring). The
 final "does the image look right" is a quick attended/Visual-Critic check after merge.
+
+## Work Log
+- 2026-08-05 (workshift): PR #644 merged (a1488e3d). Camera-RAW wired: read_raw_preview_data_url command + raw-image provider + PreviewPane loader (Err->metadata fallback, generation guard), both surfaces. Bindings regen (drift-clean). Reviewer APPROVE + UAT PASS (mutation-tested). On-screen render = post-merge attended check.
