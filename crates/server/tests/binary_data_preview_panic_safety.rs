@@ -2,13 +2,18 @@
 //! epic CPE-1002 "File inspection & safety utilities").
 //!
 //! `parser_panic_safety.rs` (CPE-1169) already proved this contract — malformed input yields a graceful
-//! `Err`/`None`/empty result, never a panic — for every `&[u8]`-taking parser entrypoint. Six entrypoints
-//! were out of scope there because they take a `path: &str` and read the file themselves:
+//! `Err`/`None`/empty result, never a panic — for every `&[u8]`-taking parser entrypoint. Ten entrypoints
+//! are out of scope there because they take a `path: &str` and read the file themselves:
 //! `binary_preview::{pe_info, midi_info, wasm_info, torrent_info}` (goblin / midly / wasmprinter /
-//! serde_bencode) and `data_preview::{spreadsheet_info, sqlite_info}` (calamine / rusqlite). `goblin` and
-//! `midly` in particular are historically panic-prone on crafted/adversarial input (out-of-bounds slicing
-//! on bogus section/track counts, integer overflow on declared lengths), which is exactly the class of
-//! bug this harness exists to catch before a single malformed file can take down the whole preview pane.
+//! serde_bencode), `data_preview::{spreadsheet_info, sqlite_info}` (calamine / rusqlite),
+//! `rar::rar_entries` and `camera_raw::read_raw_preview_data_url` (both hand-rolled binary-format
+//! walkers, CPE-1354), and — behind the `dicom-thumb` feature — `dicom::{read_dicom_tags,
+//! read_dicom_image_data_url}` (`dicom-object`/`dicom-pixeldata`, also CPE-1354). `goblin` and `midly` in
+//! particular are historically panic-prone on crafted/adversarial input (out-of-bounds slicing on bogus
+//! section/track counts, integer overflow on declared lengths); `rar` and `dicom` are hand-rolled or
+//! third-party binary-format walkers over untrusted bytes, exactly the same risk class. All of it is the
+//! kind of bug this harness exists to catch before a single malformed file can take down the whole
+//! preview pane.
 //!
 //! This file reuses the *exact same* adversarial battery + `catch_unwind` harness from
 //! `tests/common/mod.rs` (shared with `parser_panic_safety.rs`, not duplicated) and adds one seam: since
@@ -32,7 +37,18 @@ use common::run_battery;
 use std::io::Write;
 
 use cpe_server::binary_preview::{midi_info, pe_info, torrent_info, wasm_info};
+use cpe_server::camera_raw::read_raw_preview_data_url;
 use cpe_server::data_preview::{spreadsheet_info, sqlite_info};
+use cpe_server::rar::rar_entries;
+
+#[cfg(feature = "dicom-thumb")]
+use cpe_server::dicom::{read_dicom_image_data_url, read_dicom_tags};
+#[cfg(feature = "dicom-thumb")]
+use dicom_core::{DataElement, PrimitiveValue, VR, dicom_value};
+#[cfg(feature = "dicom-thumb")]
+use dicom_dictionary_std::{tags, uids};
+#[cfg(feature = "dicom-thumb")]
+use dicom_object::{FileMetaTableBuilder, InMemDicomObject};
 
 /// Write `bytes` to a fresh uniquely-named temp file with the given extension (so
 /// `calamine::open_workbook_auto`, which dispatches by extension, picks the right reader) and return the
@@ -179,6 +195,197 @@ fn sqlite_info_never_panics() {
             // "no tables" result rather than an error.
             assert!(r.is_ok(), "sqlite_info(empty file) must gracefully report an empty database: {r:?}");
             assert!(r.unwrap().contains("0 table"), "empty database must report 0 tables/views");
+        }
+    });
+}
+
+// ---------------------------------------------------------------------------------------------
+// rar.rs — hand-rolled RAR4/RAR5 header walker (CPE-1354)
+// ---------------------------------------------------------------------------------------------
+
+/// Write one RAR5 vint (little-endian base-128, continuation bit in the high bit of each byte) — a
+/// small, self-contained duplicate of `rar.rs`'s own (private) `write_vint` test helper, kept here only
+/// to build a realistic adversarial-battery fixture (not a new dependency, not exported from the crate).
+fn rar5_write_vint(buf: &mut Vec<u8>, mut v: u64) {
+    loop {
+        let mut byte = (v & 0x7F) as u8;
+        v >>= 7;
+        if v != 0 {
+            byte |= 0x80;
+        }
+        buf.push(byte);
+        if v == 0 {
+            break;
+        }
+    }
+}
+
+/// One RAR5 header envelope: `HeaderCRC32` (4 raw bytes, unchecked) + `HeaderSize` vint + body.
+fn rar5_header(body: &[u8]) -> Vec<u8> {
+    let mut out = Vec::new();
+    out.extend_from_slice(&0u32.to_le_bytes());
+    rar5_write_vint(&mut out, body.len() as u64);
+    out.extend_from_slice(body);
+    out
+}
+
+/// A minimal-but-real RAR5 file-header body: `HeaderType`=File(2), `HeaderFlags`=0 (no extra/data
+/// area), `FileFlags`=0, `UnpackedSize`, `Attributes`=0, `CompressionInfo`=0, `HostOS`=0, then
+/// `NameLength` + the name bytes — walks `parse_rar5` past the common envelope into its real
+/// vint-by-vint file-header field reads (the historically panic-prone part on crafted length/flag
+/// fields) instead of bailing at the 8-byte marker check.
+fn rar5_file_header_body(name: &str, size: u64) -> Vec<u8> {
+    let mut body = Vec::new();
+    rar5_write_vint(&mut body, 2); // HeaderType = File
+    rar5_write_vint(&mut body, 0); // HeaderFlags
+    rar5_write_vint(&mut body, 0); // FileFlags
+    rar5_write_vint(&mut body, size); // UnpackedSize
+    rar5_write_vint(&mut body, 0); // Attributes
+    rar5_write_vint(&mut body, 0); // CompressionInfo
+    rar5_write_vint(&mut body, 0); // HostOS
+    rar5_write_vint(&mut body, name.len() as u64); // NameLength
+    body.extend_from_slice(name.as_bytes());
+    body
+}
+
+#[test]
+fn rar_entries_never_panics() {
+    // RAR5 signature (`Rar!\x1a\x07\x01\x00`) followed by one real file-header block naming
+    // "hello.txt" — realistic enough to walk `parse_rar5`'s actual field reads rather than just
+    // exercising the marker-detection gate.
+    const RAR5_MARKER: [u8; 8] = [0x52, 0x61, 0x72, 0x21, 0x1A, 0x07, 0x01, 0x00];
+    let mut magic = RAR5_MARKER.to_vec();
+    magic.extend(rar5_header(&rar5_file_header_body("hello.txt", 8)));
+
+    let header_len = magic.len();
+    run_battery("rar::rar_entries", &magic, header_len, |b| {
+        let f = write_temp(b, ".rar");
+        let path = f.path().to_str().expect("temp path must be valid UTF-8");
+        let r = rar_entries(path);
+        if b.is_empty() {
+            assert!(r.is_err(), "rar_entries(empty file) must be Err, not a panic");
+        }
+    });
+}
+
+// ---------------------------------------------------------------------------------------------
+// camera_raw.rs — hand-rolled TIFF/IFD walker for embedded-JPEG raw previews (CPE-1354)
+// ---------------------------------------------------------------------------------------------
+
+#[test]
+fn read_raw_preview_data_url_never_panics() {
+    // A minimal-but-real little-endian TIFF: header(8) -> IFD0 (one JPEGInterchangeFormat/Length
+    // pointer pair) -> a JPEG-SOI-shaped stub — realistic enough that the walk reaches the real
+    // IFD-entry / embedded-JPEG-candidate extraction logic instead of bailing at the II/MM + magic-42
+    // gate (mirrors `binary_preview::wasm_info`'s "use the whole minimal-valid file as magic" approach).
+    const TAG_JPEG_OFFSET: u16 = 0x0201;
+    const TAG_JPEG_LENGTH: u16 = 0x0202;
+    const TYPE_LONG: u16 = 4;
+
+    fn tiff_entry(tag: u16, typ: u16, count: u32, value: u32) -> Vec<u8> {
+        let mut e = Vec::with_capacity(12);
+        e.extend_from_slice(&tag.to_le_bytes());
+        e.extend_from_slice(&typ.to_le_bytes());
+        e.extend_from_slice(&count.to_le_bytes());
+        e.extend_from_slice(&value.to_le_bytes());
+        e
+    }
+
+    let jpeg: Vec<u8> = vec![0xFF, 0xD8, 0x00, 0x00, 0xFF, 0xD9]; // SOI ... EOI stub
+    let ifd0_offset: u32 = 8;
+    // header(8) -> IFD0 (2-byte entry count + 2 entries*12 bytes + 4-byte NextIFD) -> jpeg bytes.
+    let jpeg_offset: u32 = ifd0_offset + 2 + 24 + 4;
+
+    let mut ifd0 = Vec::new();
+    ifd0.extend_from_slice(&2u16.to_le_bytes()); // entry count
+    ifd0.extend_from_slice(&tiff_entry(TAG_JPEG_OFFSET, TYPE_LONG, 1, jpeg_offset));
+    ifd0.extend_from_slice(&tiff_entry(TAG_JPEG_LENGTH, TYPE_LONG, 1, jpeg.len() as u32));
+    ifd0.extend_from_slice(&0u32.to_le_bytes()); // NextIFD = 0
+
+    let mut magic = Vec::new();
+    magic.extend_from_slice(b"II");
+    magic.extend_from_slice(&42u16.to_le_bytes());
+    magic.extend_from_slice(&ifd0_offset.to_le_bytes());
+    magic.extend_from_slice(&ifd0);
+    magic.extend_from_slice(&jpeg);
+
+    let header_len = magic.len();
+    run_battery("camera_raw::read_raw_preview_data_url", &magic, header_len, |b| {
+        let f = write_temp(b, ".cr2");
+        let path = f.path().to_str().expect("temp path must be valid UTF-8");
+        let r = read_raw_preview_data_url(path);
+        if b.is_empty() {
+            assert!(r.is_err(), "read_raw_preview_data_url(empty file) must be Err, not a panic");
+        }
+    });
+}
+
+// ---------------------------------------------------------------------------------------------
+// dicom.rs — dicom-object/dicom-pixeldata backed tag + pixel-data reader (CPE-1354). Gated behind the
+// `dicom-thumb` feature (off by default, mirroring the module itself); these cases only compile/run
+// with it enabled, e.g. `cargo test --features dicom-thumb`.
+// ---------------------------------------------------------------------------------------------
+
+/// A minimal-but-real, uncompressed (Explicit VR Little Endian) DICOM Part-10 file — 128-byte preamble,
+/// `DICM` magic, file-meta group, and a tiny 2x2 8-bit MONOCHROME2 pixel array — built via
+/// `dicom-object`'s own round-trip API (mirrors `dicom.rs`'s own `write_minimal_dicom` unit-test
+/// helper) and read back as bytes, so the battery's "magic" is realistic enough to walk both
+/// `read_dicom_tags` and `read_dicom_image_data_url` into their real file-meta/data-set/pixel-data
+/// parsing rather than bailing at the `DICM` gate.
+#[cfg(feature = "dicom-thumb")]
+fn build_minimal_dicom_bytes() -> Vec<u8> {
+    let mut obj = InMemDicomObject::new_empty();
+    obj.put(DataElement::new(tags::PATIENT_NAME, VR::PN, dicom_value!(Strs, ["Doe^Jane"])));
+    obj.put(DataElement::new(tags::ROWS, VR::US, dicom_value!(U16, [2])));
+    obj.put(DataElement::new(tags::COLUMNS, VR::US, dicom_value!(U16, [2])));
+    obj.put(DataElement::new(tags::SAMPLES_PER_PIXEL, VR::US, dicom_value!(U16, [1])));
+    obj.put(DataElement::new(tags::PHOTOMETRIC_INTERPRETATION, VR::CS, dicom_value!(Strs, ["MONOCHROME2"])));
+    obj.put(DataElement::new(tags::BITS_ALLOCATED, VR::US, dicom_value!(U16, [8])));
+    obj.put(DataElement::new(tags::BITS_STORED, VR::US, dicom_value!(U16, [8])));
+    obj.put(DataElement::new(tags::HIGH_BIT, VR::US, dicom_value!(U16, [7])));
+    obj.put(DataElement::new(tags::PIXEL_REPRESENTATION, VR::US, dicom_value!(U16, [0])));
+    let pixels: Vec<u8> = vec![10, 20, 30, 40];
+    obj.put(DataElement::new(tags::PIXEL_DATA, VR::OB, PrimitiveValue::U8(pixels.into())));
+
+    let file_obj = obj
+        .with_meta(
+            FileMetaTableBuilder::new()
+                .transfer_syntax(uids::EXPLICIT_VR_LITTLE_ENDIAN)
+                .media_storage_sop_class_uid("1.2.840.10008.5.1.4.1.1.7"),
+        )
+        .expect("building the file-meta table must succeed");
+
+    let tmp = tempfile::NamedTempFile::new().expect("failed to create temp file for DICOM fixture");
+    file_obj.write_to_file(tmp.path()).expect("failed to write minimal DICOM fixture");
+    std::fs::read(tmp.path()).expect("failed to read back minimal DICOM fixture")
+}
+
+#[cfg(feature = "dicom-thumb")]
+#[test]
+fn read_dicom_tags_never_panics() {
+    let magic = build_minimal_dicom_bytes();
+    let header_len = magic.len();
+    run_battery("dicom::read_dicom_tags", &magic, header_len, |b| {
+        let f = write_temp(b, ".dcm");
+        let path = f.path().to_str().expect("temp path must be valid UTF-8");
+        let r = read_dicom_tags(path);
+        if b.is_empty() {
+            assert!(r.is_err(), "read_dicom_tags(empty file) must be Err, not a panic");
+        }
+    });
+}
+
+#[cfg(feature = "dicom-thumb")]
+#[test]
+fn read_dicom_image_data_url_never_panics() {
+    let magic = build_minimal_dicom_bytes();
+    let header_len = magic.len();
+    run_battery("dicom::read_dicom_image_data_url", &magic, header_len, |b| {
+        let f = write_temp(b, ".dcm");
+        let path = f.path().to_str().expect("temp path must be valid UTF-8");
+        let r = read_dicom_image_data_url(path);
+        if b.is_empty() {
+            assert!(r.is_err(), "read_dicom_image_data_url(empty file) must be Err, not a panic");
         }
     });
 }

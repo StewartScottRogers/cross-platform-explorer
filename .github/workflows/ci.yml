@@ -258,11 +258,12 @@ jobs:
           cargo clippy --all-targets --features index -- -D warnings
           cargo test --features index
           # The opt-in PDF (pdfium-render, CPE-1256) + video (bundled-ffmpeg shell-out, CPE-1257)
-          # thumbnail extractors, shipped for real by CPE-1258 — lint + test both together; the default
-          # build above stays extractor-free (the "small when off" delete-test). The native deps
-          # installed above let the real-render tests actually assert instead of skipping.
-          cargo clippy --all-targets --features pdf-thumb,video-thumb -- -D warnings
-          cargo test --features pdf-thumb,video-thumb
+          # thumbnail extractors, shipped for real by CPE-1258, plus the opt-in DICOM medical-image
+          # reader (dicom-object/dicom-pixeldata, CPE-1345) — lint + test all three together; the
+          # default build above stays extractor-free (the "small when off" delete-test). The native
+          # deps installed above let the real-render tests actually assert instead of skipping.
+          cargo clippy --all-targets --features pdf-thumb,video-thumb,dicom-thumb -- -D warnings
+          cargo test --features pdf-thumb,video-thumb,dicom-thumb
 
       - name: net — clippy + test
         # The headless network transport loop (Client(Rust) proxy + reference Server,
