@@ -121,3 +121,18 @@ stream batch. Not decomposed; activate to plan.
 
 ## Board hygiene 2026-07-29 — reverted In Progress → Proposed
 Not actively being worked: all decomposed child tickets are Done. Remaining DoD is user-gated (GUI / model-key / cert / Mac) or a deferred cap. Reverted to **Proposed** so the epic queue honestly shows what's dormant vs active; re-activate with `/ticketing-epic activate` to resume (like CPE-703 was this session). **Remaining (DoD review 2026-07-30):** Benchmark harness + regression budget (CPE-691) is Deferred; the measured 10x + perf guard are unproven (virtualization shipped).
+
+## Status review 2026-08-06 — major items already delivered (still Proposed)
+Re-checked the code against the diagnosis. The headline optimizations the epic called for have since
+shipped as their own tickets and are live in `src/lib/components/`:
+- **File-list virtualization** — `FileList.svelte` renders only a windowed slice
+  (`windowed = entries.slice(win.start, win.end)`, `virtualize` threshold, `src/lib/virtualize.ts`),
+  with GUI-verified keyboard-nav/scroll-into-view handling (**CPE-692**).
+- **Streaming re-sort coalescing** — `ExplorerPane.svelte loadListing` buffers stream batches and flushes
+  once per animation frame, so `visible` re-sorts a handful of times, not once per 256-row batch
+  (**CPE-689**); first frame still paints live.
+- **Perf instrumentation** — time-to-first-paint (first batch in the DOM) instrumented (**CPE-691/1304**).
+The diagnosis's cited line numbers (`App.svelte:805` concat, etc.) are stale: streaming moved into
+`ExplorerPane` (CPE-676). Remaining DoD is a **measured 10× before/after on large folders** — an attended
+benchmark on a real build (and any residual per-row slimming that surfaces). The buildable-headlessly work
+is essentially done; leaving Proposed until the attended perf measurement closes it out.
