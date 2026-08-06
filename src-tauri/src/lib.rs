@@ -6276,6 +6276,32 @@ async fn extract_archive_entry_any(app: tauri::AppHandle, path: String, inner: S
         .await.map_err(|e| e.to_string())?
 }
 
+/// Extract a single **STORED** entry from a `.rar` to a temp file and return its path (CPE-1360). RAR's
+/// compression is proprietary with no free decoder, so only uncompressed (STORE) entries can be served;
+/// a compressed entry returns a clear error. Used by the archive preview's extract-then-preview path and
+/// by external-open of a stored rar leaf. Read-only: the temp copy is what previews/opens.
+#[tauri::command]
+#[cfg_attr(feature = "specta-bindings", specta::specta)]
+async fn extract_rar_entry(app: tauri::AppHandle, path: String, inner: String) -> Result<String, String> {
+    // Record the exact temp-file target `cpe_server::archive::extract_rar_entry` will write (mirroring
+    // `extract_archive_entry`'s note above — CPE-1102/1360), best-effort.
+    note_app_op(&app, || {
+        Path::new(&inner)
+            .file_name()
+            .map(|base| {
+                std::env::temp_dir()
+                    .join("cpe-archive")
+                    .join(base)
+                    .to_string_lossy()
+                    .into_owned()
+            })
+            .into_iter()
+            .collect()
+    });
+    tauri::async_runtime::spawn_blocking(move || cpe_server::archive::extract_rar_entry(&path, &inner))
+        .await.map_err(|e| e.to_string())?
+}
+
 // Archive creation & extraction (CPE-251/252/242) now live in `cpe_server::archive` (CPE-822); the
 // commands below are thin dispatchers.
 
@@ -10147,6 +10173,7 @@ pub fn run() {
             run_as_admin,
             extract_archive_entry,
             extract_archive_entry_any,
+            extract_rar_entry,
             compress_to_zip,
             extract_archive,
             compress_archive,
@@ -10958,6 +10985,7 @@ pub fn export_bindings(out: &std::path::Path) -> Result<(), String> {
         run_as_admin,
         extract_archive_entry,
         extract_archive_entry_any,
+        extract_rar_entry,
         compress_to_zip,
         extract_archive,
         compress_archive,

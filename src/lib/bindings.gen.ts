@@ -2284,6 +2284,20 @@ async extractArchiveEntryAny(path: string, inner: string) : Promise<Result<strin
 }
 },
 /**
+ * Extract a single **STORED** entry from a `.rar` to a temp file and return its path (CPE-1360). RAR's
+ * compression is proprietary with no free decoder, so only uncompressed (STORE) entries can be served;
+ * a compressed entry returns a clear error. Used by the archive preview's extract-then-preview path and
+ * by external-open of a stored rar leaf. Read-only: the temp copy is what previews/opens.
+ */
+async extractRarEntry(path: string, inner: string) : Promise<Result<string, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("extract_rar_entry", { path, inner }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
  * Pack the given files/folders into a new deflated `.zip` at `dest` (CPE-251). Model lives in
  * `cpe_server::archive` (CPE-822); thin dispatcher.
  */
