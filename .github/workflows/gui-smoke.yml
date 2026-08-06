@@ -12,6 +12,13 @@ name: GUI smoke
 # `APP_BINARY`/`TAURI_DRIVER_BIN` `process.platform` branches and `tauri-driver`'s own
 # `webkitgtk:browserOptions` vs `ms:edgeOptions` split), so no per-OS spec forking was needed.
 # macOS is unsupported by tauri-driver (no WKWebView WebDriver) and stays attended.
+#
+# `npm test` (both legs' "Run GUI smoke suite" step below) discovers every `gui-smoke/specs/*.smoke.ts`
+# automatically via `wdio.conf.ts`'s `specs` glob — no per-spec wiring needed here. CPE-1358 added
+# `specs/samples.smoke.ts` this way: it walks EVERY file in the repo's `samples/` tree on the real built
+# app and asserts no crash + a rendered/graceful preview for each, reproducing the CPE-1357 PDF-preview
+# crash as a regression guard (`documents/malformed.pdf`, run last in that spec so a still-open crash
+# doesn't blind the rest of the walk — see that file's header comment).
 on:
   push:
     branches: [main]

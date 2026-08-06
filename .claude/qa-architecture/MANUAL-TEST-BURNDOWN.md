@@ -120,3 +120,37 @@ Seven GUI tickets shipped across 4 epics. QA/coverage changes:
 - **New coverage (CPE-1333, 3D reader):** `model_3d.rs` + `file_type.rs` 3D signatures are pure-logic cargo-tested
   (20 inline tests incl. malformed/hostile-input → None, no panic; Reviewer's panic/DoS pass clean). Backend, not
   a manual surface. Follow-up owed: a frontend 3D-model metadata column/pane (wires `read_model_info`).
+
+### CPE-1358 (2026-08-06) — "open each supported file type by hand" RETIRED
+A PDF preview crash (CPE-1357) was found by hand — `samples/documents/doc.pdf` was itself a degenerate,
+unloadable fixture (`/Kids [] /Count 0`, no `xref` table) that took the whole app down. This ticket turns
+"open every kind of file and see if it breaks" into two permanent CI ratchets so that class of bug can't
+hide again:
+- **Headless coverage ratchet:** `src/lib/sampleCoverage.test.ts` computes the REAL preview-provider
+  `kind` (via `pickProvider`, `src/lib/preview/provider.ts` — the production code path, not a
+  hand-maintained duplicate) for every file under `samples/` and fails if any supported kind has zero
+  samples. Filled the gaps: `images/photo.tiff` (decoded-image), `text/table.tsv` (tsv),
+  `archives/sample.zip` (archive — `sample.rar` does NOT count, it's not in the frontend's `ARCHIVE_EXT`
+  and resolves to the generic hex provider instead), `fonts/mini.ttf` (font, hand-built sfnt),
+  `database/mini.sqlite` (data-grid), `other/tiny.wasm` (info). `documents/doc.pdf` replaced with a real, valid
+  2-page PDF (byte-accurate `xref`), preserving the exact `/Info` metadata baseline
+  `sample_fixtures.rs::pdf_info_baseline` already asserted. The OLD degenerate bytes are preserved
+  unchanged as `documents/malformed.pdf` — the deliberate crash-regression fixture.
+- **End-to-end walk:** `gui-smoke/specs/samples.smoke.ts` seeds a copy of the real `samples/` tree into
+  the shared tmpDir (`wdio.conf.ts#seedSamplesFixture`, `fs.cpSync` — new samples are picked up
+  automatically, no filename list to maintain) and, on a real `tauri build` binary, opens EVERY file:
+  navigates to its folder via the address bar (Ctrl+L), selects it, and asserts (a) the app/window is
+  still responding (the crash guard) and (b) the preview settled into real content or an explicit
+  graceful "can't preview" note — never a stuck spinner. `documents/malformed.pdf` runs LAST, in its own
+  `it()`, specifically so a still-open crash there doesn't blind the rest of the walk; it's expected to
+  FAIL today and pass once CPE-1357's fix lands. Non-blocking on both CI legs (`continue-on-error`,
+  CPE-1048), same posture as the rest of `gui-smoke`.
+
+**Not yet run live on GitHub Actions** (offsite Actions verification pending, same caveat as CPE-1171's
+Linux leg) — locally verified: `npm run check` clean, the full vitest suite (187 files / 2080 tests)
+green including the new coverage test, `gui-smoke`'s own `typecheck` + `test:unit` green, and the Rust
+`sample_fixtures` test green against the new `doc.pdf`. The `samples.smoke.ts` walk itself needs a real
+`tauri build --no-bundle` + `tauri-driver` session (this worktree's sandbox couldn't run one) — watch the
+first CI run for the malformed-pdf-guard result and the cascading-failure note in that spec's header
+comment (a still-open CPE-1357 crash there is expected to red the later-alphabetical specs too, sharing
+one app session — not a separate new regression).

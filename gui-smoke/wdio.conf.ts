@@ -911,6 +911,28 @@ function seedMetadataStudioFixture(tmpDir: string): void {
   );
 }
 
+// --- CPE-1358: sample-navigation fixture (epic CPE-1148) ----------------------------------------
+// A COPY of the real repo `samples/` tree, seeded into its own subfolder of the shared tmpDir, for
+// `samples.smoke.ts` to walk — every file the app claims to support a preview for, opened for real and
+// asserted not to crash the app (the CPE-1357 PDF-preview-crash class of bug). Copied (not opened via a
+// second `--open=<dir>`) because this harness's `wdio.conf.ts`/`onPrepare` launches exactly ONE shared
+// app session that every spec in the suite navigates around inside — the same reasoning every other
+// `seed*Fixture` above follows (CPE-1143/1207/1241/1226/1249/1329/…), not a special case invented here.
+// `fs.cpSync`'s recursive copy means new samples added to the real `samples/` tree are picked up
+// automatically the next time this runs — no filename list to keep in sync, matching the ticket's "drive
+// it data-first off the sample tree" requirement. `README.md` is excluded (documentation, not a fixture
+// — `sampleCoverage.test.ts` excludes it too, for the same reason).
+export const SAMPLES_DIR_NAME = "CPE-1358-samples";
+const REAL_SAMPLES_DIR = path.resolve(__dirname, "..", "samples");
+
+function seedSamplesFixture(tmpDir: string): void {
+  const dest = path.join(tmpDir, SAMPLES_DIR_NAME);
+  fs.cpSync(REAL_SAMPLES_DIR, dest, {
+    recursive: true,
+    filter: (src) => path.basename(src) !== "README.md",
+  });
+}
+
 let tauriDriver: ChildProcess | undefined;
 let shuttingDown = false;
 
@@ -1072,6 +1094,10 @@ export const config: WebdriverIO.Config = {
     // CPE-1331: seed the ID3-tagged mp3 for the Metadata Studio dialog's editable-fields render pin
     // (see block above) — same tmpDir, same single app launch.
     seedMetadataStudioFixture(tmpDir);
+
+    // CPE-1358: seed a copy of the real samples/ tree for the sample-navigation smoke walk (see block
+    // above) — same tmpDir, same single app launch.
+    seedSamplesFixture(tmpDir);
 
     const caps = capabilities as unknown as Array<{ "tauri:options": { args: string[] } }>;
     caps[0]["tauri:options"].args = ["--test-mode", "--x=-4000", `--open=${tmpDir}`];

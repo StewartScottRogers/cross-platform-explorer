@@ -54,9 +54,9 @@ All media files carry this fixed metadata (the single source of truth is the top
 | `audio/track.ogg`   | OGG / Vorbis    | Same tags; read-only in the Studio (no OGG writer yet) |
 | `images/photo.jpg`  | JPEG + EXIF     | EXIF Make/Model/ImageDescription/Artist/Copyright (descriptive tags editable, intrinsics read-only) |
 | `images/pixel.png`  | PNG (2×2)       | A real, openable raster (thumbnail/preview path) |
-| `documents/doc.pdf` | PDF             | `/Info` Title/Author/Subject/Keywords/Creator/Producer/Dates (read-only) |
+| `documents/doc.pdf` | PDF             | `/Info` Title/Author/Subject/Keywords/Creator/Producer/Dates (read-only); a genuinely valid, loadable 2-page PDF (byte-accurate `xref`) — see "PDF fixtures" below |
 | `video/clip.mp4`    | MP4 / iTunes    | `ilst` Title/Artist/Album/Year (read-only) |
-| `text/notes.txt`, `readme.md`, `data.json`, `table.csv`, `hello.py` | Text | Plain-text/markdown/JSON/CSV/code preview + line/word counts |
+| `text/notes.txt`, `readme.md`, `data.json`, `table.csv`, `table.tsv`, `hello.py` | Text | Plain-text/markdown/JSON/CSV/TSV/code preview + line/word counts |
 
 The files are **minimal-but-valid**: the app's read codecs parse their metadata correctly. They are
 baselines for *metadata* and general-explorer checks, not full studio-quality media (the audio/video files
@@ -64,3 +64,46 @@ carry only a token frame).
 
 The automated guard lives in `crates/server/tests/sample_fixtures.rs`, which reads each file through the
 shipped codecs and asserts the values above.
+
+## PDF fixtures (CPE-1357/1358)
+
+`documents/doc.pdf` used to be a **degenerate** fixture (`/Kids [] /Count 0`, no `xref` table at all) —
+opening it in the preview pane crashed the app (CPE-1357). It has been replaced with a genuinely valid,
+loadable 2-page PDF (real `xref`/`startxref`/`%%EOF`, same `/Info` metadata baseline as before).
+
+The **old, broken bytes are preserved unchanged** as `documents/malformed.pdf` — a deliberate regression
+fixture for the crash: `gui-smoke/specs/samples.smoke.ts` opens it (last, after every other sample) and
+asserts the app survives. Today, before CPE-1357's fix lands, that assertion is expected to fail; it
+should pass once PDF preview is made crash-resilient.
+
+## Sample-coverage ratchet (CPE-1358)
+
+Every supported preview **kind** (`src/lib/preview/provider.ts`) has at least one valid sample below, so
+opening any format the app claims to support has real fixture coverage:
+
+| Preview kind    | Sample(s)                                             |
+|------------------|-------------------------------------------------------|
+| `image`          | `images/photo.jpg`, `images/pixel.png`                |
+| `decoded-image`  | `images/photo.tiff`                                   |
+| `raw-image`      | `raw/sunset.cr2`                                       |
+| `dicom`          | `medical/ct-scan.dcm`                                  |
+| `heic`           | `images/iphone-photo.heic`                             |
+| `audio`          | `audio/track.mp3`, `audio/track.flac`, `audio/track.ogg` |
+| `video`          | `video/clip.mp4`                                        |
+| `pdf`            | `documents/doc.pdf` (valid), `documents/malformed.pdf` (CPE-1357 regression trigger) |
+| `json`           | `text/data.json`                                        |
+| `csv`            | `text/table.csv`                                        |
+| `tsv`            | `text/table.tsv`                                        |
+| `archive`        | `archives/sample.zip` (`archives/sample.rar` also exists but is NOT wired into the frontend's `ARCHIVE_EXT` list — it renders via the generic hex-dump provider instead; see the note in `sampleCoverage.test.ts`) |
+| `font`           | `fonts/mini.ttf`                                        |
+| `data-grid`      | `database/mini.sqlite`                                  |
+| `info`           | `other/tiny.wasm`                                       |
+| `markdown`       | `text/readme.md`                                        |
+| `text`           | `text/notes.txt`, `text/hello.py`                        |
+| `hex`            | `archives/sample.rar` (any file no richer provider claims falls back to the hex view) |
+
+The headless guard is `src/lib/sampleCoverage.test.ts` (vitest): it computes the real preview-provider
+`kind` for every file under `samples/` (via `pickProvider`, the exact production code path) and fails if
+any kind above has zero samples — a new preview format shipped without a sample breaks CI. The end-to-end
+guard is `gui-smoke/specs/samples.smoke.ts`: it walks the same `samples/` tree on a real built app and
+asserts every file's preview renders (or degrades gracefully) without crashing.
