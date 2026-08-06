@@ -52,10 +52,13 @@ export interface PreviewProvider {
 
 const MARKDOWN_EXT = new Set(["md", "markdown"]);
 
-/** Extensions the read_archive_entries backend can list (zip family, tar, gzip). */
+/** Extensions the read_archive_entries backend can list (zip family, tar, gzip, 7z, iso, rar). RAR is
+ *  browse-only (listed via the pure-Rust rar_entries walker, CPE-1347/1348) — it must be here too, not just
+ *  in archiveExts.ts's ARCHIVE_EXTS, or a .rar falls through to the hex/info provider instead of listing
+ *  its entries (CPE-1359). */
 const ARCHIVE_EXT = new Set([
   "zip", "jar", "apk", "war", "ear", "ipa", "xpi",
-  "tar", "tgz", "gz", "7z", "iso",
+  "tar", "tgz", "gz", "7z", "iso", "rar",
 ]);
 
 /**

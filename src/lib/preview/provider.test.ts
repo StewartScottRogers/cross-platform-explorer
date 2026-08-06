@@ -116,6 +116,14 @@ describe("pickProvider", () => {
     expect(pickProvider(entry({ name: "a.iso", extension: "iso" })).kind).toBe("archive");
   });
 
+  it("previews .rar via the archive provider — lists entries, not a hex dump (CPE-1359)", () => {
+    // read_archive_entries dispatches .rar to the pure-Rust rar_entries walker (CPE-1347/1348); the
+    // preview provider must route .rar to the archive kind, not fall through to hex/info.
+    expect(pickProvider(entry({ name: "a.rar", extension: "rar" })).kind).toBe("archive");
+    // Browse-only: RAR is not extractable, but the preview provider only needs the listing kind.
+    expect(pickProvider(entry({ name: "a.rar", extension: "rar" })).editable).toBe(false);
+  });
+
   it("previews fonts via the font provider (CPE-117)", () => {
     for (const ext of ["ttf", "otf", "woff", "woff2"]) {
       expect(pickProvider(entry({ name: `a.${ext}`, extension: ext })).kind).toBe("font");

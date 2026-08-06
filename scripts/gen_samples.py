@@ -337,10 +337,10 @@ def make_tiff() -> bytes:
 
 
 # ── ZIP archive (archive preview path, CPE-1358) ────────────────────────────────────────────────────
-# Uses the stdlib `zipfile` module (not `.rar` — the frontend's archive preview provider does not list
-# `rar` in ARCHIVE_EXT, so `samples/archives/sample.rar` renders via the generic hex-dump provider, not
-# the archive-listing one; this .zip is the real "archive" preview-kind coverage sample). Fixed
-# `date_time` so the output is reproducible across runs.
+# Uses the stdlib `zipfile` module. Both this `.zip` and `samples/archives/sample.rar` now render via the
+# archive-listing provider — CPE-1359 added `rar` to `ARCHIVE_EXT` in `src/lib/preview/provider.ts`, so a
+# `.rar` no longer falls through to the generic hex-dump provider. This `.zip` remains the reproducible
+# "archive" preview-kind coverage sample. Fixed `date_time` so the output is reproducible across runs.
 def make_zip() -> bytes:
     import io
     import zipfile
@@ -541,6 +541,15 @@ def make_ttf() -> bytes:
     return font
 
 
+# ── generic binary blob (hex-dump preview kind, CPE-1359) ────────────────────────────────────────────
+# The `hex` provider (`src/lib/preview/provider.ts`) is the catch-all for any non-directory file no more
+# specific provider claimed. Before CPE-1359, `samples/archives/sample.rar` was the accidental "hex"
+# coverage sample (rar fell through to hex); once rar became an archive, `hex` needed its own fixture.
+# A 64-byte non-text blob under an unrecognised extension (`.pak`) renders as a hex dump.
+def make_hex_blob() -> bytes:
+    return bytes((i * 37 + 11) & 0xFF for i in range(64))
+
+
 def main() -> None:
     print(f"Generating pristine samples under {SAMPLES} …")
     write("audio/track.mp3", make_mp3())
@@ -560,6 +569,7 @@ def main() -> None:
     write("archives/sample.zip", make_zip())
     write("database/mini.sqlite", make_sqlite())
     write("other/tiny.wasm", make_wasm())
+    write("other/blob.pak", make_hex_blob())  # CPE-1359: hex preview-kind coverage
     write("fonts/mini.ttf", make_ttf())
     print("Done. Remember: samples/ is PRISTINE — copy to .sandbox/ before editing (see samples/README.md).")
 
