@@ -112,6 +112,7 @@
   import { initTags, tags, retagPath, renameTag, deleteTag, importTags, exportTags } from "./lib/tags";
   import { migratePathList } from "./lib/pathMigrate";
   import { ZIP_FAMILY_EXTS, ARCHIVE_EXTS, EXTRACT_EXTS, ARCHIVE_SAFETY_EXTS } from "./lib/archiveExts";
+  import { resolveArchivePreviewEntry, createArchivePreviewResolver } from "./lib/archivePreview";
   import { resolveEffect } from "./lib/dnd";
   import {
     smartFolders,
@@ -1574,6 +1575,16 @@
     archive = null;
     selection = emptySelection();
   }
+
+  // Extract-then-preview inside an archive (CPE-1360). A selected inner entry carries a VIRTUAL path
+  // (see `archiveChildren`) that doesn't exist on disk, so the preview pane's loaders can't read it.
+  // When exactly one non-directory inner entry is selected we extract it to a temp file and feed the
+  // preview pane a DirEntry whose `.path` is that temp path (name/extension preserved so the provider is
+  // unchanged). The resolver's request-id guard supersedes a stale extraction if the selection changes
+  // mid-flight; a directory selection (or no archive) resolves to null so nothing is previewed.
+  let archivePreviewEntry: DirEntry | null = null;
+  const archivePreviewResolver = createArchivePreviewResolver((e) => { archivePreviewEntry = e; });
+  $: archivePreviewResolver.update(archive, selectedEntries);
 
   /** Guard file-mutating actions: the in-archive view, a smart folder, and Replay mode's reconstructed
    *  overlay are all read-only. CPE-1112 rework (independent review + UAT both flagged this): the file
@@ -4231,6 +4242,18 @@
       showNotice("Select a single file first, then pop its preview out.", true);
       return;
     }
+    // Inside an archive the selected entry's path is virtual (CPE-1360). The float window has no archive
+    // context of its own, so resolve the inner entry to a real temp-file DirEntry here before sending it,
+    // giving the FloatPreview host the same previewable entry the in-app pane gets.
+    let floatEntry = entry;
+    if (archive && !entry.is_dir) {
+      try {
+        floatEntry = await resolveArchivePreviewEntry(archive.zipPath, entry);
+      } catch {
+        showNotice(`Couldn't preview "${entry.name}" from the archive.`, true);
+        return;
+      }
+    }
     try {
       let win = await WebviewWindow.getByLabel(FLOAT_LABEL);
       if (!win) {
@@ -4251,7 +4274,7 @@
         });
         await ready;
       }
-      await emit("float:add", entry);
+      await emit("float:add", floatEntry);
       await win.setFocus();
     } catch (e) {
       console.debug("pop out failed:", e);
@@ -5078,7 +5101,7 @@
 
       {#if showPreview}
         <PreviewPane
-          entry={selectedEntries.length === 1 ? selectedEntries[0] : homePreview}
+          entry={archive ? archivePreviewEntry : (selectedEntries.length === 1 ? selectedEntries[0] : homePreview)}
           assetUrl={convertFileSrc}
           loadText={loadPreviewText}
           loadEntries={loadArchiveEntries}

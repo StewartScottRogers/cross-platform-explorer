@@ -271,6 +271,9 @@ pub fn extract_archive_entry_any(path: &str, inner: &str) -> Result<String, Stri
         extract_tar_entry(file, inner, &out)?
     } else if lower.ends_with(".7z") {
         extract_7z_entry(path, inner, &out)?
+    } else if lower.ends_with(".rar") {
+        // RAR has no ZIP-style directory; the STORED-entry extractor writes its own temp file below.
+        return extract_rar_entry(path, inner);
     } else {
         return extract_archive_entry(path, inner);
     };
@@ -279,6 +282,22 @@ pub fn extract_archive_entry_any(path: &str, inner: &str) -> Result<String, Stri
     } else {
         Err(format!("entry not found: {inner}"))
     }
+}
+
+/// Extract a single **STORED** entry from a `.rar` to a temp file and return its path (CPE-1360). RAR's
+/// compression is proprietary with no free decoder, so only uncompressed (STORE) entries can be served;
+/// a compressed entry is a clean `Err` from [`crate::rar::rar_extract_entry`]. Mirrors
+/// [`extract_archive_entry`]'s contract — a flat temp file at `%TEMP%/cpe-archive/<basename>` — so the
+/// frontend's open-leaf / extract-for-preview flow doesn't need to know which extractor served it. The
+/// entry name is [`entry_name_is_safe`]-validated before anything is written.
+pub fn extract_rar_entry(path: &str, inner: &str) -> Result<String, String> {
+    if !entry_name_is_safe(inner) {
+        return Err(format!("unsafe entry name: {inner}"));
+    }
+    let bytes = crate::rar::rar_extract_entry(path, inner)?;
+    let out = temp_extract_target(inner)?;
+    fs::write(&out, &bytes).map_err(|e| e.to_string())?;
+    Ok(out.to_string_lossy().to_string())
 }
 
 /// Recursively add `src` to an open zip under the archive path `name_in_zip`. Directories become explicit
@@ -1500,6 +1519,48 @@ mod tests {
         compress_to_zip(&[d.join("a.txt").to_string_lossy().to_string()], &zip_path.to_string_lossy()).unwrap();
         let tmp = extract_archive_entry_any(&zip_path.to_string_lossy(), "a.txt").unwrap();
         assert_eq!(fs::read(&tmp).unwrap(), b"alpha");
+        let _ = fs::remove_file(&tmp);
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn extract_archive_entry_any_routes_rar_to_the_rar_extractor() {
+        // Hand-build a minimal RAR4 with one STORED entry (the `rar` module's own builders are private
+        // to its test module, so assemble the few bytes here) and prove `.rar` now routes to the RAR
+        // extractor instead of the ZIP one (which used to fail).
+        fn rar4_block(head_type: u8, body: &[u8], payload: &[u8]) -> Vec<u8> {
+            let head_size = (7 + body.len()) as u16;
+            let mut b = Vec::new();
+            b.extend_from_slice(&0u16.to_le_bytes()); // crc16
+            b.push(head_type);
+            b.extend_from_slice(&0u16.to_le_bytes()); // flags
+            b.extend_from_slice(&head_size.to_le_bytes());
+            b.extend_from_slice(body);
+            b.extend_from_slice(payload);
+            b
+        }
+        let payload = b"rar stored bytes";
+        let mut file_body = Vec::new();
+        file_body.extend_from_slice(&(payload.len() as u32).to_le_bytes()); // pack_size
+        file_body.extend_from_slice(&(payload.len() as u32).to_le_bytes()); // unp_size
+        file_body.push(0); // host_os
+        file_body.extend_from_slice(&0u32.to_le_bytes()); // crc
+        file_body.extend_from_slice(&0u32.to_le_bytes()); // ftime
+        file_body.push(0); // unp_ver
+        file_body.push(0x30); // method = STORE
+        file_body.extend_from_slice(&(b"note.txt".len() as u16).to_le_bytes()); // name_size
+        file_body.extend_from_slice(&0u32.to_le_bytes()); // attr
+        file_body.extend_from_slice(b"note.txt");
+
+        let mut buf = vec![0x52, 0x61, 0x72, 0x21, 0x1A, 0x07, 0x00]; // RAR4 marker
+        buf.extend(rar4_block(0x73, &[], &[])); // MAIN_HEAD
+        buf.extend(rar4_block(0x74, &file_body, payload)); // FILE_HEAD (stored)
+
+        let d = scratch("any_rar");
+        let path = d.join("a.rar");
+        fs::write(&path, &buf).unwrap();
+        let tmp = extract_archive_entry_any(&path.to_string_lossy(), "note.txt").unwrap();
+        assert_eq!(fs::read(&tmp).unwrap(), payload);
         let _ = fs::remove_file(&tmp);
         let _ = fs::remove_dir_all(&d);
     }

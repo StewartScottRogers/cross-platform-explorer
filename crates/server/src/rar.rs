@@ -339,6 +339,236 @@ fn parse_rar5(data: &[u8]) -> Result<Vec<ArchiveEntry>, String> {
     Ok(out)
 }
 
+// ---------------------------------------------------------------------------
+// Single-entry extraction (CPE-1360): STORED (uncompressed) entries only.
+// ---------------------------------------------------------------------------
+//
+// RAR's compression is proprietary and has no free/pure-Rust decoder (the native `unrar` lib is
+// non-free — see this module's header), so a real decompressor is explicitly out of scope. But a RAR
+// entry stored with method STORE keeps its bytes verbatim in the archive's data area, so those can be
+// returned by a copy — no decompression involved. This is enough for the archive-preview's
+// extract-then-preview path (CPE-1360) to render an uncompressed inner file; a compressed entry degrades
+// to a clean `Err` rather than crashing or showing garbage. Same bounds-checking discipline as the
+// listing walkers above: every offset is validated, malformed input is an `Err`, never a panic.
+
+/// RAR4 compression-method byte for a STORED (uncompressed) entry. Any other value is a genuine
+/// compression algorithm this module deliberately does not implement.
+const RAR4_METHOD_STORE: u8 = 0x30;
+
+/// Extract a single **STORED** entry's bytes from a `.rar` archive by name, without decompressing
+/// (CPE-1360). Detects RAR4/RAR5 by signature and walks to the named file header (reusing the same
+/// header-walk logic as [`rar_entries`]). For a STORE entry (RAR4 method `0x30` / RAR5 compression
+/// method `0`) it returns the data-area bytes that follow the header verbatim; for a COMPRESSED entry it
+/// returns a clear `Err` (no RAR decompressor exists here). A missing name, or corrupt/truncated/oversized
+/// input, is a clean `Err` — this never panics or reads out of bounds. `inner`'s `\` are normalised to
+/// `/` before matching, mirroring how the frontend builds archive-relative paths.
+pub fn rar_extract_entry(path: &str, inner: &str) -> Result<Vec<u8>, String> {
+    let data = std::fs::read(path).map_err(|e| e.to_string())?;
+    let target = inner.replace('\\', "/");
+    if data.starts_with(&RAR5_MARKER) {
+        extract_rar5(&data[RAR5_MARKER.len()..], &target)
+    } else if data.starts_with(&RAR4_MARKER) {
+        extract_rar4(&data[RAR4_MARKER.len()..], &target)
+    } else {
+        Err("not a RAR archive (unrecognised signature)".to_string())
+    }
+}
+
+/// Walk RAR4 blocks looking for the named file entry; return its stored data-area bytes. Mirrors
+/// [`parse_rar4`]'s bounds-checked walk, but instead of collecting a listing it stops at the matching
+/// name and returns its payload (STORE only).
+fn extract_rar4(data: &[u8], target: &str) -> Result<Vec<u8>, String> {
+    let len = data.len();
+    let mut pos: usize = 0;
+
+    while pos < len {
+        if pos + 7 > len {
+            return Err("truncated RAR4 block: not enough bytes for the common header".to_string());
+        }
+        let block_start = pos;
+        let head_type = data[pos + 2];
+        let flags = u16::from_le_bytes([data[pos + 3], data[pos + 4]]);
+        let head_size = u16::from_le_bytes([data[pos + 5], data[pos + 6]]) as usize;
+        if head_size < 7 {
+            return Err("invalid RAR4 block: head_size smaller than the common header".to_string());
+        }
+        let header_end = block_start
+            .checked_add(head_size)
+            .ok_or_else(|| "RAR4 head_size overflowed".to_string())?;
+        if header_end > len {
+            return Err("RAR4 block header extends past end of file".to_string());
+        }
+        if head_type == RAR4_PROTECT_HEAD {
+            return Err("RAR4 recovery record (PROTECT_HEAD) is not supported".to_string());
+        }
+
+        let mut pack_size: u64 = 0;
+        let mut matched = false;
+        let mut method: u8 = 0;
+
+        if head_type == RAR4_FILE_HEAD || head_type == RAR4_SUB_HEAD || head_type == RAR4_NEWSUB_HEAD {
+            let fixed_start = block_start + 7;
+            let fixed_end = fixed_start
+                .checked_add(25)
+                .ok_or_else(|| "RAR4 file header field overflow".to_string())?;
+            if fixed_end > header_end {
+                return Err("truncated RAR4 file header: missing fixed fields".to_string());
+            }
+            let low_pack = u32::from_le_bytes(data[fixed_start..fixed_start + 4].try_into().unwrap()) as u64;
+            let this_method = data[fixed_start + 18];
+            let name_size = u16::from_le_bytes(data[fixed_start + 19..fixed_start + 21].try_into().unwrap()) as usize;
+
+            let mut field_pos = fixed_end;
+            let high_pack = if flags & RAR4_LHD_LARGE != 0 {
+                let large_end = field_pos
+                    .checked_add(8)
+                    .ok_or_else(|| "RAR4 large-size field overflow".to_string())?;
+                if large_end > header_end {
+                    return Err("truncated RAR4 file header: missing LHD_LARGE fields".to_string());
+                }
+                let hp = u32::from_le_bytes(data[field_pos..field_pos + 4].try_into().unwrap()) as u64;
+                field_pos = large_end;
+                hp
+            } else {
+                0u64
+            };
+
+            let name_end = field_pos
+                .checked_add(name_size)
+                .ok_or_else(|| "RAR4 name_size overflow".to_string())?;
+            if name_end > header_end {
+                return Err("RAR4 file name extends past its header".to_string());
+            }
+            let name = decode_rar4_name(&data[field_pos..name_end], flags & RAR4_LHD_UNICODE != 0);
+            pack_size = low_pack | (high_pack << 32);
+            let is_dir = flags & RAR4_LHD_WINDOWMASK == RAR4_LHD_DIRECTORY;
+            if !is_dir && name.replace('\\', "/") == target {
+                matched = true;
+                method = this_method;
+            }
+        }
+
+        let data_start = header_end;
+        let next_pos_u64 = (header_end as u64)
+            .checked_add(pack_size)
+            .ok_or_else(|| "RAR4 data payload size overflowed".to_string())?;
+        if next_pos_u64 > len as u64 {
+            return Err("RAR4 data payload extends past end of file".to_string());
+        }
+        let next_pos = next_pos_u64 as usize;
+
+        if matched {
+            if method != RAR4_METHOD_STORE {
+                return Err("compressed RAR entries aren't supported for preview".to_string());
+            }
+            return Ok(data[data_start..next_pos].to_vec());
+        }
+
+        pos = next_pos;
+        if head_type == RAR4_ENDARC_HEAD {
+            break;
+        }
+    }
+
+    Err(format!("entry not found: {target}"))
+}
+
+/// Walk RAR5 headers looking for the named file entry; return its stored data-area bytes. Mirrors
+/// [`parse_rar5`]'s bounds-checked walk, decoding a file/service header far enough to read its
+/// `CompressionInfo` (method lives in bits 7..=9) and name, then returns the data area for a STORE entry.
+fn extract_rar5(data: &[u8], target: &str) -> Result<Vec<u8>, String> {
+    let len = data.len();
+    let mut pos: usize = 0;
+
+    while pos < len {
+        if take_bytes(data, &mut pos, 4).is_none() {
+            return Err("truncated RAR5 header: missing HeaderCRC32".to_string());
+        }
+        let header_size = read_vint(data, &mut pos)
+            .ok_or_else(|| "truncated RAR5 header: missing HeaderSize vint".to_string())? as usize;
+        let header_start = pos;
+        let header_end = header_start
+            .checked_add(header_size)
+            .ok_or_else(|| "RAR5 header_size overflowed".to_string())?;
+        if header_end > len {
+            return Err("RAR5 header extends past end of file".to_string());
+        }
+        let header = &data[header_start..header_end];
+
+        let mut hp: usize = 0;
+        let header_type =
+            read_vint(header, &mut hp).ok_or_else(|| "truncated RAR5 header: missing HeaderType".to_string())?;
+        let header_flags =
+            read_vint(header, &mut hp).ok_or_else(|| "truncated RAR5 header: missing HeaderFlags".to_string())?;
+
+        if header_flags & RAR5_HFL_EXTRA != 0 {
+            read_vint(header, &mut hp).ok_or_else(|| "truncated RAR5 header: missing ExtraAreaSize".to_string())?;
+        }
+        let data_size = if header_flags & RAR5_HFL_DATA != 0 {
+            read_vint(header, &mut hp).ok_or_else(|| "truncated RAR5 header: missing DataSize".to_string())?
+        } else {
+            0
+        };
+
+        let mut matched = false;
+        let mut method: u64 = 0;
+
+        if header_type == RAR5_HEAD_FILE || header_type == RAR5_HEAD_SERVICE {
+            let file_flags = read_vint(header, &mut hp)
+                .ok_or_else(|| "truncated RAR5 file header: missing FileFlags".to_string())?;
+            read_vint(header, &mut hp)
+                .ok_or_else(|| "truncated RAR5 file header: missing UnpackedSize".to_string())?;
+            read_vint(header, &mut hp)
+                .ok_or_else(|| "truncated RAR5 file header: missing Attributes".to_string())?;
+            if file_flags & RAR5_FHFL_UTIME != 0 {
+                take_bytes(header, &mut hp, 4)
+                    .ok_or_else(|| "truncated RAR5 file header: missing mtime".to_string())?;
+            }
+            if file_flags & RAR5_FHFL_CRC32 != 0 {
+                take_bytes(header, &mut hp, 4)
+                    .ok_or_else(|| "truncated RAR5 file header: missing data CRC32".to_string())?;
+            }
+            let compression_info = read_vint(header, &mut hp)
+                .ok_or_else(|| "truncated RAR5 file header: missing CompressionInfo".to_string())?;
+            read_vint(header, &mut hp).ok_or_else(|| "truncated RAR5 file header: missing HostOS".to_string())?;
+            let name_length = read_vint(header, &mut hp)
+                .ok_or_else(|| "truncated RAR5 file header: missing NameLength".to_string())? as usize;
+            let name_bytes = take_bytes(header, &mut hp, name_length)
+                .ok_or_else(|| "RAR5 file name extends past its header".to_string())?;
+            let name = String::from_utf8_lossy(name_bytes).to_string();
+            let is_dir = file_flags & RAR5_FHFL_DIRECTORY != 0;
+            if !is_dir && name.replace('\\', "/") == target {
+                matched = true;
+                // RAR5 CompressionInfo: bits 0..=5 = version, bit 6 = solid, bits 7..=9 = method.
+                method = (compression_info >> 7) & 0x7;
+            }
+        }
+
+        let data_start = header_end;
+        let next_pos_u64 = (header_end as u64)
+            .checked_add(data_size)
+            .ok_or_else(|| "RAR5 data area size overflowed".to_string())?;
+        if next_pos_u64 > len as u64 {
+            return Err("RAR5 data area extends past end of file".to_string());
+        }
+        let next_pos = next_pos_u64 as usize;
+
+        if matched {
+            if method != 0 {
+                return Err("compressed RAR entries aren't supported for preview".to_string());
+            }
+            return Ok(data[data_start..next_pos].to_vec());
+        }
+
+        pos = next_pos;
+        if header_type == RAR5_HEAD_ENDARC {
+            break;
+        }
+    }
+
+    Err(format!("entry not found: {target}"))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -492,6 +722,83 @@ mod tests {
         let _ = std::fs::remove_dir_all(&d);
     }
 
+    // --- RAR4 single-entry extraction (CPE-1360) -------------------------------------------
+
+    /// Build one RAR4 file block that carries a real data payload after its header, with an explicit
+    /// compression method byte (`0x30` = STORE). `pack_size`/`unp_size` are set to the payload length.
+    fn rar4_file_block_with_data(name: &str, payload: &[u8], method: u8) -> Vec<u8> {
+        let mut body = Vec::new();
+        body.extend_from_slice(&(payload.len() as u32).to_le_bytes()); // pack_size
+        body.extend_from_slice(&(payload.len() as u32).to_le_bytes()); // unp_size
+        body.push(0); // host_os
+        body.extend_from_slice(&0u32.to_le_bytes()); // file_crc
+        body.extend_from_slice(&0u32.to_le_bytes()); // ftime
+        body.push(0); // unp_ver
+        body.push(method); // method
+        body.extend_from_slice(&(name.len() as u16).to_le_bytes()); // name_size
+        body.extend_from_slice(&0u32.to_le_bytes()); // attr
+        body.extend_from_slice(name.as_bytes());
+        let head_size = (7 + body.len()) as u16;
+        let mut block = Vec::new();
+        block.extend_from_slice(&0u16.to_le_bytes()); // crc16 (unchecked)
+        block.push(RAR4_FILE_HEAD);
+        block.extend_from_slice(&0u16.to_le_bytes()); // flags
+        block.extend_from_slice(&head_size.to_le_bytes());
+        block.extend_from_slice(&body);
+        block.extend_from_slice(payload); // data payload immediately follows the header
+        block
+    }
+
+    #[test]
+    fn rar4_extracts_a_stored_entry() {
+        let mut buf = RAR4_MARKER.to_vec();
+        buf.extend(rar4_block(0x73, 0, "", 0)); // MAIN_HEAD
+        buf.extend(rar4_file_block_with_data("hello.txt", b"hello rar stored", RAR4_METHOD_STORE));
+        buf.extend(rar4_file_block_with_data("sub/inner.bin", &[1, 2, 3, 4, 5], RAR4_METHOD_STORE));
+        let d = scratch("rar4-extract");
+        let path = write_rar(&d, "a.rar", &buf);
+        assert_eq!(rar_extract_entry(&path, "hello.txt").unwrap(), b"hello rar stored");
+        // A subfolder-nested entry extracts too.
+        assert_eq!(rar_extract_entry(&path, "sub/inner.bin").unwrap(), vec![1, 2, 3, 4, 5]);
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn rar4_compressed_entry_is_a_graceful_error() {
+        let mut buf = RAR4_MARKER.to_vec();
+        // method 0x33 = a real compression level, which we can't decode.
+        buf.extend(rar4_file_block_with_data("packed.txt", b"whatever", 0x33));
+        let d = scratch("rar4-compressed");
+        let path = write_rar(&d, "a.rar", &buf);
+        let err = rar_extract_entry(&path, "packed.txt").unwrap_err();
+        assert!(err.contains("compressed"), "unexpected error: {err}");
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn rar4_missing_entry_is_an_error() {
+        let mut buf = RAR4_MARKER.to_vec();
+        buf.extend(rar4_file_block_with_data("present.txt", b"x", RAR4_METHOD_STORE));
+        let d = scratch("rar4-missing");
+        let path = write_rar(&d, "a.rar", &buf);
+        assert!(rar_extract_entry(&path, "absent.txt").is_err());
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn rar_extract_on_non_rar_or_malformed_input_is_an_error_not_a_panic() {
+        let d = scratch("rar-extract-malformed");
+        // Not a RAR at all.
+        let plain = write_rar(&d, "plain.txt", b"not a rar archive");
+        assert!(rar_extract_entry(&plain, "anything").is_err());
+        // RAR4 marker + truncated block.
+        let mut trunc = RAR4_MARKER.to_vec();
+        trunc.extend_from_slice(&[0x00, 0x00, RAR4_FILE_HEAD]);
+        let trunc_path = write_rar(&d, "trunc.rar", &trunc);
+        let _ = rar_extract_entry(&trunc_path, "x"); // must not panic
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
     // --- RAR5 fixture builders -------------------------------------------------------------
 
     fn write_vint(buf: &mut Vec<u8>, mut v: u64) {
@@ -547,6 +854,49 @@ mod tests {
         buf.extend(rar5_header(RAR5_HEAD_FILE, &rar5_file_header_body("sub", 0, true)));
         buf.extend(rar5_header(RAR5_HEAD_FILE, &rar5_file_header_body("sub/inner.bin", 4096, false)));
         buf
+    }
+
+    /// Build a RAR5 file header (with data area) plus its trailing data area, for extraction tests.
+    /// `method` goes into CompressionInfo bits 7..=9 (0 = STORE).
+    fn rar5_stored_file(name: &str, payload: &[u8], method: u64) -> (Vec<u8>, Vec<u8>) {
+        let mut body = Vec::new();
+        write_vint(&mut body, RAR5_HEAD_FILE);
+        write_vint(&mut body, RAR5_HFL_DATA); // has a data area
+        write_vint(&mut body, payload.len() as u64); // DataSize
+        write_vint(&mut body, 0); // FileFlags
+        write_vint(&mut body, payload.len() as u64); // UnpackedSize
+        write_vint(&mut body, 0); // Attributes
+        write_vint(&mut body, method << 7); // CompressionInfo (method in bits 7..=9)
+        write_vint(&mut body, 0); // HostOS
+        write_vint(&mut body, name.len() as u64); // NameLength
+        body.extend_from_slice(name.as_bytes());
+        (rar5_header(RAR5_HEAD_FILE, &body), payload.to_vec())
+    }
+
+    #[test]
+    fn rar5_extracts_a_stored_entry() {
+        let mut buf = RAR5_MARKER.to_vec();
+        buf.extend(rar5_header(1, &rar5_main_header_body()));
+        let (hdr, area) = rar5_stored_file("hello.txt", b"hi rar5 stored", 0);
+        buf.extend(hdr);
+        buf.extend(area);
+        let d = scratch("rar5-extract");
+        let path = write_rar(&d, "a.rar", &buf);
+        assert_eq!(rar_extract_entry(&path, "hello.txt").unwrap(), b"hi rar5 stored");
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn rar5_compressed_entry_is_a_graceful_error() {
+        let mut buf = RAR5_MARKER.to_vec();
+        let (hdr, area) = rar5_stored_file("packed.txt", b"whatever", 1); // method 1 = compressed
+        buf.extend(hdr);
+        buf.extend(area);
+        let d = scratch("rar5-compressed");
+        let path = write_rar(&d, "a.rar", &buf);
+        let err = rar_extract_entry(&path, "packed.txt").unwrap_err();
+        assert!(err.contains("compressed"), "unexpected error: {err}");
+        let _ = std::fs::remove_dir_all(&d);
     }
 
     #[test]
