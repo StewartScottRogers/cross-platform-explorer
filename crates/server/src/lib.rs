@@ -372,6 +372,11 @@ pub mod archive;
 /// epic CPE-705).
 pub mod archive_format;
 
+/// RAR entry listing — hand-rolled RAR4/RAR5 header walk, listing only (names/sizes/is_dir), ZERO new
+/// deps and no UnRAR (CPE-1347, epic CPE-111). Standalone module: not yet wired into `archive.rs`'s
+/// dispatch — that's a follow-up integration ticket.
+pub mod rar;
+
 /// Per-line indent-guide depth for a code preview (CPE-1051, epic CPE-724).
 pub mod indent_guides;
 
