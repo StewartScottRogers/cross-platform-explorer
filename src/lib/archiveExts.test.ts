@@ -2,9 +2,9 @@ import { describe, it, expect } from "vitest";
 import { ZIP_FAMILY_EXTS, ARCHIVE_EXTS, EXTRACT_EXTS, ARCHIVE_SAFETY_EXTS } from "./archiveExts";
 
 describe("archive extension sets (CPE-1181)", () => {
-  it("ARCHIVE_EXTS (browsable) includes the zip family plus tar/gz/tgz/7z/iso", () => {
+  it("ARCHIVE_EXTS (browsable) includes the zip family plus tar/gz/tgz/7z/iso/rar", () => {
     for (const e of ZIP_FAMILY_EXTS) expect(ARCHIVE_EXTS.has(e)).toBe(true);
-    for (const e of ["tar", "gz", "tgz", "7z", "iso"]) expect(ARCHIVE_EXTS.has(e)).toBe(true);
+    for (const e of ["tar", "gz", "tgz", "7z", "iso", "rar"]) expect(ARCHIVE_EXTS.has(e)).toBe(true);
   });
 
   it("EXTRACT_EXTS (backend-unpackable) is the zip family plus tar/gz/tgz/7z", () => {
@@ -15,6 +15,11 @@ describe("archive extension sets (CPE-1181)", () => {
   it("iso is browsable but NOT extractable (backend has no ISO extractor — CPE-1181 regression guard)", () => {
     expect(ARCHIVE_EXTS.has("iso")).toBe(true);
     expect(EXTRACT_EXTS.has("iso")).toBe(false);
+  });
+
+  it("rar is browsable but NOT extractable (no free RAR decompressor — CPE-1348)", () => {
+    expect(ARCHIVE_EXTS.has("rar")).toBe(true);
+    expect(EXTRACT_EXTS.has("rar")).toBe(false);
   });
 
   it("EXTRACT_EXTS never silently inherits a browse-only format from ARCHIVE_EXTS", () => {

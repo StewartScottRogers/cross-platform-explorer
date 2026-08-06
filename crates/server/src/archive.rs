@@ -132,7 +132,9 @@ fn iso_entries(path: &str) -> Result<Vec<ArchiveEntry>, String> {
 }
 
 /// List an archive's entries without extracting it, for the preview pane. Dispatches by extension: ZIP
-/// family (zip/jar/apk/…), TAR, gzip-compressed TAR (.tar.gz/.tgz), single-file gzip (.gz), 7-Zip, ISO.
+/// family (zip/jar/apk/…), TAR, gzip-compressed TAR (.tar.gz/.tgz), single-file gzip (.gz), 7-Zip, ISO,
+/// RAR (listing only — see [`crate::rar`]; there is no extractor for it, so it's never routed to
+/// `extract_archive*`/`pack_*`).
 pub fn read_archive_entries(path: &str) -> Result<Vec<ArchiveEntry>, String> {
     let lower = path.to_lowercase();
     if lower.ends_with(".tar") {
@@ -147,6 +149,8 @@ pub fn read_archive_entries(path: &str) -> Result<Vec<ArchiveEntry>, String> {
         sevenz_entries(path)
     } else if lower.ends_with(".iso") {
         iso_entries(path)
+    } else if lower.ends_with(".rar") {
+        crate::rar::rar_entries(path)
     } else {
         zip_entries(path)
     }
@@ -1366,6 +1370,50 @@ mod tests {
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].name, "note.txt", "name is the archive name minus .gz");
         assert_eq!(entries[0].size, 11, "ISIZE trailer is the uncompressed length");
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn read_archive_entries_lists_rar_contents() {
+        // Build a minimal synthetic RAR4 archive (mirrors crate::rar's own test fixtures, rebuilt here
+        // rather than imported since those builders are private to that module) and drive it THROUGH
+        // read_archive_entries's dispatch (CPE-1348) — proving the .rar branch is wired to
+        // crate::rar::rar_entries, not just exercising rar_entries directly.
+        const RAR4_MARKER: [u8; 7] = [0x52, 0x61, 0x72, 0x21, 0x1A, 0x07, 0x00];
+        const RAR4_FILE_HEAD: u8 = 0x74;
+
+        fn rar4_file_block(name: &str, unp_size: u32) -> Vec<u8> {
+            let mut body = Vec::new();
+            body.extend_from_slice(&0u32.to_le_bytes()); // pack_size
+            body.extend_from_slice(&unp_size.to_le_bytes()); // unp_size
+            body.push(0); // host_os
+            body.extend_from_slice(&0u32.to_le_bytes()); // file_crc
+            body.extend_from_slice(&0u32.to_le_bytes()); // ftime
+            body.push(0); // unp_ver
+            body.push(0); // method
+            body.extend_from_slice(&(name.len() as u16).to_le_bytes()); // name_size
+            body.extend_from_slice(&0u32.to_le_bytes()); // attr
+            body.extend_from_slice(name.as_bytes());
+            let head_size = (7 + body.len()) as u16;
+            let mut block = Vec::new();
+            block.extend_from_slice(&0u16.to_le_bytes()); // crc16 (unchecked)
+            block.push(RAR4_FILE_HEAD);
+            block.extend_from_slice(&0u16.to_le_bytes()); // flags
+            block.extend_from_slice(&head_size.to_le_bytes());
+            block.extend_from_slice(&body);
+            block
+        }
+
+        let d = scratch("rar_list");
+        let rar_path = d.join("bundle.rar");
+        let mut buf = RAR4_MARKER.to_vec();
+        buf.extend(rar4_file_block("hello.txt", 8));
+        fs::write(&rar_path, &buf).unwrap();
+
+        let entries = read_archive_entries(&rar_path.to_string_lossy()).unwrap();
+        let hello = entries.iter().find(|e| e.name == "hello.txt").unwrap();
+        assert!(!hello.is_dir);
+        assert_eq!(hello.size, 8);
         let _ = fs::remove_dir_all(&d);
     }
 
