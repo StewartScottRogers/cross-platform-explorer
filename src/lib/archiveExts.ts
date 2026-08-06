@@ -12,20 +12,23 @@ export const ZIP_FAMILY_EXTS = new Set([
 ]);
 
 /**
- * Formats that can be ENTERED and browsed in the virtual archive view (CPE-1181): the zip family
- * plus tar/tar.gz/tgz/7z/iso. `read_archive_entries` is format-agnostic on the backend, so browsing
- * needs no per-format frontend code.
+ * Formats that can be ENTERED and browsed in the virtual archive view (CPE-1181, CPE-1348): the zip
+ * family plus tar/tar.gz/tgz/7z/iso/rar. `read_archive_entries` is format-agnostic on the backend, so
+ * browsing needs no per-format frontend code. `rar` is listing-only (see EXTRACT_EXTS below) — there is
+ * no free/pure-Rust RAR decoder, so `crate::rar::rar_entries` only parses header metadata to list names,
+ * never decompresses.
  */
-export const ARCHIVE_EXTS = new Set([...ZIP_FAMILY_EXTS, "tar", "gz", "tgz", "7z", "iso"]);
+export const ARCHIVE_EXTS = new Set([...ZIP_FAMILY_EXTS, "tar", "gz", "tgz", "7z", "iso", "rar"]);
 
 /**
  * Formats `extract_archive` can actually unpack to a folder (CPE-252): the zip family plus
  * tar/gz/tgz/7z. ("foo.tar.gz" has extension "gz"; the backend disambiguates by the full path.)
  *
- * Deliberately derives from ZIP_FAMILY_EXTS (NOT ARCHIVE_EXTS) and EXCLUDES "iso": iso is browsable
- * but the backend has no ISO extractor, so offering "Extract" for it would fail with a leaked
- * zip-parser error (CPE-1181 review). Deriving from the narrower set keeps future browse-only
- * formats from leaking an Extract action.
+ * Deliberately derives from ZIP_FAMILY_EXTS (NOT ARCHIVE_EXTS) and EXCLUDES "iso" and "rar": both are
+ * browsable but the backend has no extractor for either (RAR has no free decompressor at all, ISO none
+ * wired), so offering "Extract" for them would fail with a leaked parser error (CPE-1181 review, CPE-1348
+ * for rar). Deriving from the narrower set keeps future browse-only formats from leaking an Extract
+ * action.
  */
 export const EXTRACT_EXTS = new Set([...ZIP_FAMILY_EXTS, "tar", "gz", "tgz", "7z"]);
 
