@@ -2,13 +2,13 @@
 id: CPE-1358
 title: "QA: gui-smoke that opens EVERY sample file (no crash + preview renders), + a valid sample per supported type, run in CI"
 type: Task
-status: Backlog
+status: Done
 priority: High
 component: Multiple
 tags: [ready]
 epic: CPE-1148
 created: 2026-08-06
-closed:
+closed: 2026-08-06
 ---
 
 ## Goal (QA Architect mission — erode Manual Verification Debt)
@@ -65,3 +65,6 @@ It already paid for itself before it exists: opening `samples/documents/doc.pdf`
 
 QA Architect owns the design; a Worker implements the harness. Pairs with CPE-1357 (the harness is that
 bug's regression test). Epic CPE-1148 (Visual-Critic / gui-smoke). Filed 2026-08-06 (user-requested).
+
+## Work Log
+- 2026-08-06: PR #652 merged. QA sample-navigation harness: sampleCoverage.test.ts (self-updating ratchet derived from provider.ts; fails if a preview kind lacks a sample) + gui-smoke/specs/samples.smoke.ts (opens every sample on the real app, asserts alive+rendered/graceful, malformed.pdf last as CPE-1357 regression pin) wired via wdio specs glob. Filled coverage: tiff/tsv/zip/ttf/sqlite/wasm; kept degenerate PDF as malformed.pdf. Reviewer CHANGES-then-APPROVE (merged-state pdf_info_baseline reconciled to script-gen doc.pdf; aside.details selector fix for the #651 fallback) + UAT PASS (ratchet mutation-killed, fixtures real-parser-verified). Surfaced CPE-1359 (rar not in provider.ts ARCHIVE_EXT).

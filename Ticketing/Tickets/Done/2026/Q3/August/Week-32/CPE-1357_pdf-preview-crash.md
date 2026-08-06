@@ -2,13 +2,13 @@
 id: CPE-1357
 title: "PDF preview crashes the app — malformed/empty PDF in the WebView2 iframe takes down the renderer"
 type: Bug
-status: Backlog
+status: Done
 priority: High
 component: Multiple
 tags: [ready]
 epic: CPE-059
 created: 2026-08-06
-closed:
+closed: 2026-08-06
 ---
 
 ## Problem (reported live on v0.57.50)
@@ -55,3 +55,6 @@ of killing the renderer. Options (pick per testing on the real build):
 Reported 2026-08-06 from the running v0.57.50 sidecar. The gui-smoke sample harness (CPE-1358) is the
 regression vehicle — it should reproduce this and stay green after the fix. The final "app survives" is an
 attended/gui-smoke check on the real build.
+
+## Work Log
+- 2026-08-06: PR #651 merged. PDF preview crash-resilience: pure pdf_validity byte-scan (requires %PDF- + startxref; rejects /Count 0; unknown page-count = not-rejected so compressed-xref/linearized PDFs still render) gates the iframe before src is set; iframe sandbox + on:error + 15s timeout defense. read_pdf_validity command + bindings regen. Also fixed sample_fixtures::pdf_info_baseline (red on main from the doc.pdf swap). Reviewer APPROVE (14 real Adobe PDFs incl compressed-xref NOT over-rejected) + UAT PASS (pikepdf compressed-xref accepted). Final WebView2-survives check = CPE-1358 gui-smoke. Minor non-blocking: stale pdfLoadTimer not cleared on navigate-away pre-15s (harmless).
