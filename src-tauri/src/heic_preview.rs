@@ -156,17 +156,20 @@ fn decode_heic_windows_inner(path: &str) -> Result<String, String> {
 fn decode_heic_macos(path: &str) -> Result<String, String> {
     use std::ffi::c_void;
 
-    use objc2_core_foundation::{CGPoint, CGRect, CGSize, CFURLCreateFromFileSystemRepresentation};
+    // objc2 0.3 deprecated the free-function forms (`CGImageSourceCreateWithURL`, …) in favour of
+    // associated-method forms on the types; CI's macOS `clippy -D warnings` promotes those
+    // deprecation notes to errors, so we call the method forms here. The parameter/return types are
+    // identical to the free functions — only the call path moved onto the type (CPE-1351 CI fix).
+    use objc2_core_foundation::{CFURL, CGPoint, CGRect, CGSize};
     use objc2_core_graphics::{
-        CGBitmapContextCreate, CGColorSpaceCreateDeviceRGB, CGContextDrawImage, CGImageAlphaInfo,
-        CGImageGetHeight, CGImageGetWidth,
+        CGColorSpace, CGContext, CGImage, CGImageAlphaInfo,
     };
-    use objc2_image_io::{CGImageSourceCreateImageAtIndex, CGImageSourceCreateWithURL};
+    use objc2_image_io::CGImageSource;
 
     // On macOS the file-system representation of a path is its UTF-8 bytes.
     let bytes = path.as_bytes();
     unsafe {
-        let url = CFURLCreateFromFileSystemRepresentation(
+        let url = CFURL::from_file_system_representation(
             None,
             bytes.as_ptr(),
             bytes.len() as isize,
@@ -174,20 +177,20 @@ fn decode_heic_macos(path: &str) -> Result<String, String> {
         )
         .ok_or("failed to build CFURL for the HEIC path")?;
 
-        let source = CGImageSourceCreateWithURL(&url, None)
+        let source = CGImageSource::with_url(&url, None)
             .ok_or("ImageIO could not open the file as an image source")?;
 
-        let image = CGImageSourceCreateImageAtIndex(&source, 0, None)
+        let image = CGImageSource::image_at_index(&source, 0, None)
             .ok_or("ImageIO could not decode the first HEIC image")?;
 
-        let w = CGImageGetWidth(Some(&image));
-        let h = CGImageGetHeight(Some(&image));
+        let w = CGImage::width(Some(&image));
+        let h = CGImage::height(Some(&image));
         if w == 0 || h == 0 {
             return Err("HEIC decode produced empty dimensions".into());
         }
 
         let color_space =
-            CGColorSpaceCreateDeviceRGB().ok_or("failed to create a device RGB color space")?;
+            CGColorSpace::new_device_rgb().ok_or("failed to create a device RGB color space")?;
 
         let stride = w.checked_mul(4).ok_or("HEIC width overflows the row stride")?;
         let buf_len = stride
@@ -196,7 +199,12 @@ fn decode_heic_macos(path: &str) -> Result<String, String> {
         let mut buf = vec![0u8; buf_len];
 
         // 8 bits/component, alpha-last (RGBA) — draw the decoded image into our own buffer.
-        let ctx = CGBitmapContextCreate(
+        // NOTE: the bitmap-context constructor's renamed method form couldn't be confirmed from the
+        // objc2 0.3 docs (unlike the other calls here), and this box can't compile macOS to check —
+        // so this ONE known-compiling free-function call is kept under a scoped `#[allow(deprecated)]`
+        // rather than risk a wrong rename that would break the macOS build. Behaviour is unchanged.
+        #[allow(deprecated)]
+        let ctx = objc2_core_graphics::CGBitmapContextCreate(
             buf.as_mut_ptr() as *mut c_void,
             w,
             h,
@@ -208,7 +216,7 @@ fn decode_heic_macos(path: &str) -> Result<String, String> {
         .ok_or("failed to create an RGBA bitmap context")?;
 
         let rect = CGRect::new(CGPoint::new(0.0, 0.0), CGSize::new(w as f64, h as f64));
-        CGContextDrawImage(Some(&ctx), rect, Some(&image));
+        CGContext::draw_image(Some(&ctx), rect, Some(&image));
 
         cpe_server::image_preview::encode_rgba_to_png_data_url(w as u32, h as u32, buf)
     }
