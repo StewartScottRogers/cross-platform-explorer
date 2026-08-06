@@ -2,13 +2,13 @@
 id: CPE-1348
 title: "Wire RAR listing into the archive browser: .rar branch in read_archive_entries + ARCHIVE_EXTS (browse-only)"
 type: Feature
-status: Backlog
+status: Done
 priority: Low
 component: Multiple
 tags: [ready]
 epic: CPE-111
 created: 2026-08-05
-closed:
+closed: 2026-08-05
 ---
 
 ## Goal
@@ -47,3 +47,6 @@ zip/tar/7z/iso archive-entry listing UI).
 Small, self-contained, headless. Completes RAR to end-to-end-usable. RAW (CPE-1346) and DICOM (CPE-1345)
 readers still need their own preview-provider wiring (separate follow-ups; those need new providers +
 attended visual). Touches `archive.rs` + `archiveExts.ts` + the two test files.
+
+## Work Log
+- 2026-08-05 (workshift): PR #643 merged. .rar now browses in the existing archive UI via read_archive_entries dispatch → crate::rar::rar_entries; browse-only (ARCHIVE_EXTS, not EXTRACT_EXTS). Reviewer APPROVE + UAT PASS; cargo+clippy+npm check+vitest all green. RAR is now end-to-end usable.
