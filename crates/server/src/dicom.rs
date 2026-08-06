@@ -55,17 +55,44 @@ pub fn read_dicom_tags(path: &str) -> Result<Vec<(String, String)>, String> {
     Ok(out)
 }
 
+/// Convert a `YBR_FULL`/`YBR_FULL_422` pixel buffer (interleaved Y, Cb, Cr samples, one triple per
+/// pixel) to RGB in place. Ported verbatim (same matrix, same `+0.5`-then-`floor` rounding, same
+/// clamp) from `dicom-pixeldata`'s own (feature-gated-behind-`image`, hence unavailable to us now)
+/// `convert_colorspace_u8` — CPE-1352 needs the identical output for parity, since this is the one
+/// piece of real color-space math the old `to_dynamic_image` path did that a raw byte copy does not.
+/// `data.len()` must be a multiple of 3; a short trailing partial pixel (shouldn't happen for a
+/// well-formed buffer already validated to be `rows * columns * 3` bytes) is left untouched by
+/// `chunks_exact_mut`.
+fn convert_ybr_full_to_rgb_u8(data: &mut [u8]) {
+    for pixel in data.chunks_exact_mut(3) {
+        let y = pixel[0] as f32;
+        let cb = pixel[1] as f32 - 128.0;
+        let cr = pixel[2] as f32 - 128.0;
+
+        let r = (y + 1.402 * cr) + 0.5;
+        let g = (y + (0.114 * 1.772 / 0.587) * cb + (-0.299 * 1.402 / 0.587) * cr) + 0.5;
+        let b = (y + 1.772 * cb) + 0.5;
+
+        pixel[0] = r.floor().clamp(0.0, u8::MAX as f32) as u8;
+        pixel[1] = g.floor().clamp(0.0, u8::MAX as f32) as u8;
+        pixel[2] = b.floor().clamp(0.0, u8::MAX as f32) as u8;
+    }
+}
+
 /// Decode a DICOM file's first pixel-data frame to a PNG `data:` URL the `<img>` tag can show.
 /// Applies the same processing pipeline `dicom-pixeldata`'s own `to_dynamic_image` default applies
 /// (Modality LUT, then the first VOI LUT/window-center-width transform found in the object, if any;
 /// MONOCHROME1 is inverted so the minimum sample still displays as white) — but via the un-feature-gated
 /// `to_vec_frame_with_options` raw-bytes path (CPE-1352) instead of `dicom-pixeldata`'s `image`
 /// integration, so the app's own curated `image` dependency does the PNG encode. Handles the common
-/// photometric interpretations: MONOCHROME1/MONOCHROME2 (1 sample per pixel → 8-bit grayscale) and RGB
-/// (3 samples per pixel → 8-bit RGB, copied through unwindowed like `dicom-pixeldata` does for
-/// non-monochrome images). Any other photometric interpretation / sample-per-pixel count is a clean
-/// `Err`. Errors — never panics — on a corrupt file, an unreadable pixel-data attribute set, or a
-/// transfer syntax needing a native codec this build doesn't carry (JPEG2000/JPEG-LS/vendor).
+/// photometric interpretations: MONOCHROME1/MONOCHROME2 (1 sample per pixel → 8-bit grayscale), RGB (3
+/// samples per pixel → 8-bit RGB, copied through unwindowed like `dicom-pixeldata` does for
+/// non-monochrome images), and YBR_FULL/YBR_FULL_422 (3 samples per pixel, the standard photometric
+/// interpretation for color ultrasound/Doppler DICOM — converted to RGB via `convert_ybr_full_to_rgb_u8`,
+/// since the raw-bytes path does none of `dicom-pixeldata`'s own colorspace conversion). Any other
+/// photometric interpretation / sample-per-pixel count is a clean `Err`. Errors — never panics — on a
+/// corrupt file, an unreadable pixel-data attribute set, or a transfer syntax needing a native codec
+/// this build doesn't carry (JPEG2000/JPEG-LS/vendor).
 pub fn read_dicom_image_data_url(path: &str) -> Result<String, String> {
     use base64::Engine;
     use image::{DynamicImage, ImageBuffer, Luma, Rgb};
@@ -94,7 +121,10 @@ pub fn read_dicom_image_data_url(path: &str) -> Result<String, String> {
             // rounded up to a power of two), not the requested output type — asking for `u8` when
             // bits_allocated > 8 would try to cast values up to 65535 into a `u8` LUT table and error.
             // So: decode at native width, then narrow to 8-bit ourselves for bits_allocated > 8,
-            // mirroring `dicom-pixeldata`'s own `mono_image_with_narrow`'s `(x >> 8) as u8`.
+            // mirroring `dicom-pixeldata`'s own `mono_image_with_narrow`'s `(x >> 8) as u8`. Narrowing
+            // straight to 8-bit here (rather than preserving 16-bit precision) is an intentional
+            // simplification: the `<img>` tag this feeds is an 8-bit-per-channel PNG either way, so
+            // there is no display-visible precision to preserve past 8 bits.
             let mut gray: Vec<u8> = if bits_allocated <= 8 {
                 pixel_data
                     .to_vec_frame_with_options::<u8>(0, &options)
@@ -121,14 +151,40 @@ pub fn read_dicom_image_data_url(path: &str) -> Result<String, String> {
                 .ok_or_else(|| "DICOM pixel buffer size does not match rows x columns".to_string())?;
             DynamicImage::ImageLuma8(buffer)
         }
-        (3, _) => {
-            // Non-monochrome pixel data is copied through unwindowed by `dicom-pixeldata` itself (the
-            // Modality/VOI LUT only applies when the photometric interpretation is monochrome), so RGB
-            // needs no narrowing step regardless of `bits_allocated`.
-            let rgb: Vec<u8> = pixel_data
-                .to_vec_frame_with_options::<u8>(0, &options)
-                .map_err(|e| e.to_string())?;
-            let buffer: ImageBuffer<Rgb<u8>, Vec<u8>> = ImageBuffer::from_raw(columns, rows, rgb)
+        (3, pi @ (PhotometricInterpretation::Rgb
+        | PhotometricInterpretation::YbrFull
+        | PhotometricInterpretation::YbrFull422)) => {
+            // Non-monochrome pixel data gets no Modality/VOI LUT from `dicom-pixeldata` either (that
+            // only applies when the photometric interpretation is monochrome) — but unlike the
+            // monochrome case, the SAMPLE VALUES themselves still need narrowing to 8-bit for a
+            // bits_allocated > 8 buffer (same reasoning/simplification as the monochrome path above:
+            // the output PNG is 8-bit-per-channel regardless).
+            let mut samples: Vec<u8> = if bits_allocated <= 8 {
+                pixel_data
+                    .to_vec_frame_with_options::<u8>(0, &options)
+                    .map_err(|e| e.to_string())?
+            } else {
+                pixel_data
+                    .to_vec_frame_with_options::<u16>(0, &options)
+                    .map_err(|e| e.to_string())?
+                    .into_iter()
+                    .map(|v| (v >> 8) as u8)
+                    .collect()
+            };
+
+            // RGB is already what the `ImageBuffer` below expects. YBR_FULL/YBR_FULL_422 (the standard
+            // photometric interpretation for color ultrasound/Doppler DICOM) is Y/Cb/Cr triples and
+            // needs the real colorspace conversion — `to_vec_frame_with_options` is a raw byte
+            // passthrough with no colorspace awareness, unlike `dicom-pixeldata`'s own `to_dynamic_image`
+            // (which special-cases exactly these two enum variants via `convert_colorspace_u8`).
+            if matches!(
+                pi,
+                PhotometricInterpretation::YbrFull | PhotometricInterpretation::YbrFull422
+            ) {
+                convert_ybr_full_to_rgb_u8(&mut samples);
+            }
+
+            let buffer: ImageBuffer<Rgb<u8>, Vec<u8>> = ImageBuffer::from_raw(columns, rows, samples)
                 .ok_or_else(|| "DICOM pixel buffer size does not match rows x columns".to_string())?;
             DynamicImage::ImageRgb8(buffer)
         }
@@ -338,6 +394,55 @@ mod tests {
         assert_eq!(decoded.get_pixel(1, 0).0, [0, 255, 0]);
         assert_eq!(decoded.get_pixel(0, 1).0, [0, 0, 255]);
         assert_eq!(decoded.get_pixel(1, 1).0, [255, 255, 255]);
+
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// A YBR_FULL (YCbCr) DICOM — the standard photometric interpretation for color
+    /// ultrasound/Doppler DICOM, not an exotic case — is converted to RGB rather than passed through
+    /// as raw bytes. `[Y=76, Cb=85, Cr=255]` is the standard full-range JFIF YCbCr encoding of pure
+    /// red; decoding it as raw RGB bytes (the bug this test guards against) would wrongly produce a
+    /// dull olive `[76, 85, 255]` instead.
+    #[test]
+    fn read_dicom_image_data_url_converts_ybr_full_to_rgb() {
+        let d = scratch("ybr");
+        let f = d.join("a.dcm");
+
+        let mut obj = InMemDicomObject::new_empty();
+        obj.put(DataElement::new(tags::ROWS, VR::US, dicom_value!(U16, [1])));
+        obj.put(DataElement::new(tags::COLUMNS, VR::US, dicom_value!(U16, [1])));
+        obj.put(DataElement::new(tags::SAMPLES_PER_PIXEL, VR::US, dicom_value!(U16, [3])));
+        obj.put(DataElement::new(
+            tags::PHOTOMETRIC_INTERPRETATION,
+            VR::CS,
+            dicom_value!(Strs, ["YBR_FULL"]),
+        ));
+        obj.put(DataElement::new(tags::PLANAR_CONFIGURATION, VR::US, dicom_value!(U16, [0])));
+        obj.put(DataElement::new(tags::BITS_ALLOCATED, VR::US, dicom_value!(U16, [8])));
+        obj.put(DataElement::new(tags::BITS_STORED, VR::US, dicom_value!(U16, [8])));
+        obj.put(DataElement::new(tags::HIGH_BIT, VR::US, dicom_value!(U16, [7])));
+        obj.put(DataElement::new(tags::PIXEL_REPRESENTATION, VR::US, dicom_value!(U16, [0])));
+
+        // A single pixel: Y=76, Cb=85, Cr=255 — pure red in full-range YCbCr.
+        let pixels: Vec<u8> = vec![76, 85, 255];
+        obj.put(DataElement::new(tags::PIXEL_DATA, VR::OB, PrimitiveValue::U8(pixels.into())));
+
+        let file_obj = obj
+            .with_meta(
+                FileMetaTableBuilder::new()
+                    .transfer_syntax(uids::EXPLICIT_VR_LITTLE_ENDIAN)
+                    .media_storage_sop_class_uid("1.2.840.10008.5.1.4.1.1.7"),
+            )
+            .unwrap();
+        file_obj.write_to_file(&f).unwrap();
+
+        let url = read_dicom_image_data_url(&f.to_string_lossy()).unwrap();
+        let decoded = decode_png_data_url(&url).into_rgb8();
+        assert_eq!((decoded.width(), decoded.height()), (1, 1));
+        let [r, g, b] = decoded.get_pixel(0, 0).0;
+        assert!(r >= 254, "expected R ~= 255 (pure red), got {r}");
+        assert!(g <= 1, "expected G ~= 0 (pure red), got {g}");
+        assert!(b <= 1, "expected B ~= 0 (pure red), got {b}");
 
         let _ = std::fs::remove_dir_all(&d);
     }
