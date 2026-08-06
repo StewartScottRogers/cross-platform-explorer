@@ -69,8 +69,13 @@ fn convert_ybr_full_to_rgb_u8(data: &mut [u8]) {
         let cb = pixel[1] as f32 - 128.0;
         let cr = pixel[2] as f32 - 128.0;
 
+        // BT.601 full-range YCbCr → RGB (DICOM PS3.3 C.7.6.3.1.2 / pydicom). NOTE: we deliberately
+        // diverge from `dicom-pixeldata-0.10.0`'s `convert_colorspace_u8`, which has a sign bug — it uses
+        // `+0.344136·Cb'` on the green term; the correct coefficient is NEGATIVE. With the upstream sign,
+        // non-primary hues render a wrong green channel (e.g. pure green → [0,198,1] instead of [0,255,1]);
+        // pure primaries don't expose it because G clamps. (CPE-1353.)
         let r = (y + 1.402 * cr) + 0.5;
-        let g = (y + (0.114 * 1.772 / 0.587) * cb + (-0.299 * 1.402 / 0.587) * cr) + 0.5;
+        let g = (y - (0.114 * 1.772 / 0.587) * cb + (-0.299 * 1.402 / 0.587) * cr) + 0.5;
         let b = (y + 1.772 * cb) + 0.5;
 
         pixel[0] = r.floor().clamp(0.0, u8::MAX as f32) as u8;
@@ -443,6 +448,61 @@ mod tests {
         assert!(r >= 254, "expected R ~= 255 (pure red), got {r}");
         assert!(g <= 1, "expected G ~= 0 (pure red), got {g}");
         assert!(b <= 1, "expected B ~= 0 (pure red), got {b}");
+
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// Non-primary / non-red YBR_FULL hues exercise the GREEN channel's Cb coefficient, which
+    /// `dicom-pixeldata` gets wrong (positive sign). Pure red clamps G to 0 and so can't catch it;
+    /// green and blue do. Standard full-range YCbCr encodings: green `[0,255,0]` = `[Y=150,Cb=44,Cr=21]`,
+    /// blue `[0,0,255]` = `[Y=29,Cb=255,Cr=107]`. With the correct (negative-Cb) matrix green must decode
+    /// to ~`[0,255,1]` (the buggy upstream sign gives `[0,198,1]`) and blue to ~`[0,0,255]`. (CPE-1353.)
+    #[test]
+    fn read_dicom_image_data_url_ybr_full_green_and_blue_use_correct_matrix() {
+        let d = scratch("ybr_gb");
+        let f = d.join("a.dcm");
+
+        let mut obj = InMemDicomObject::new_empty();
+        obj.put(DataElement::new(tags::ROWS, VR::US, dicom_value!(U16, [1])));
+        obj.put(DataElement::new(tags::COLUMNS, VR::US, dicom_value!(U16, [2])));
+        obj.put(DataElement::new(tags::SAMPLES_PER_PIXEL, VR::US, dicom_value!(U16, [3])));
+        obj.put(DataElement::new(
+            tags::PHOTOMETRIC_INTERPRETATION,
+            VR::CS,
+            dicom_value!(Strs, ["YBR_FULL"]),
+        ));
+        obj.put(DataElement::new(tags::PLANAR_CONFIGURATION, VR::US, dicom_value!(U16, [0])));
+        obj.put(DataElement::new(tags::BITS_ALLOCATED, VR::US, dicom_value!(U16, [8])));
+        obj.put(DataElement::new(tags::BITS_STORED, VR::US, dicom_value!(U16, [8])));
+        obj.put(DataElement::new(tags::HIGH_BIT, VR::US, dicom_value!(U16, [7])));
+        obj.put(DataElement::new(tags::PIXEL_REPRESENTATION, VR::US, dicom_value!(U16, [0])));
+
+        // Pixel 0 = green in YCbCr, pixel 1 = blue in YCbCr.
+        let pixels: Vec<u8> = vec![150, 44, 21, 29, 255, 107];
+        obj.put(DataElement::new(tags::PIXEL_DATA, VR::OB, PrimitiveValue::U8(pixels.into())));
+
+        let file_obj = obj
+            .with_meta(
+                FileMetaTableBuilder::new()
+                    .transfer_syntax(uids::EXPLICIT_VR_LITTLE_ENDIAN)
+                    .media_storage_sop_class_uid("1.2.840.10008.5.1.4.1.1.7"),
+            )
+            .unwrap();
+        file_obj.write_to_file(&f).unwrap();
+
+        let url = read_dicom_image_data_url(&f.to_string_lossy()).unwrap();
+        let decoded = decode_png_data_url(&url).into_rgb8();
+        assert_eq!((decoded.width(), decoded.height()), (2, 1));
+
+        let [gr, gg, gb] = decoded.get_pixel(0, 0).0;
+        assert!(gr <= 1, "green: expected R ~= 0, got {gr}");
+        assert!(gg >= 254, "green: expected G ~= 255 (would be ~198 with the upstream sign bug), got {gg}");
+        assert!(gb <= 2, "green: expected B ~= 0, got {gb}");
+
+        let [br, bg, bb] = decoded.get_pixel(1, 0).0;
+        assert!(br <= 1, "blue: expected R ~= 0, got {br}");
+        assert!(bg <= 1, "blue: expected G ~= 0, got {bg}");
+        assert!(bb >= 253, "blue: expected B ~= 255, got {bb}");
 
         let _ = std::fs::remove_dir_all(&d);
     }
