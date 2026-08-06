@@ -84,6 +84,20 @@ pdfium-render = { version = "0.9", optional = true }
 # `cpe-webdav` and the app adapter; this reuses the same crate/version (same pure-Rust rustls TLS, no C
 # build tooling), so `cargo tree`/`Cargo.lock` gain no new crate.
 ureq = { version = "2", default-features = false, features = ["tls", "gzip"], optional = true }
+# DICOM medical-image reading (CPE-1345, gated-format-reader lane). Optional: `dicom-object` (parse the
+# file meta + data set) and `dicom-pixeldata` (decode pixel data to a `DynamicImage`). Both pure-Rust,
+# MIT OR Apache-2.0. `dicom-pixeldata`'s default features (`rayon`, `native`) cover the common
+# uncompressed/native-codec transfer syntaxes (raw, JPEG baseline, RLE, deflate) with no C dependency;
+# we additionally enable its `image` feature (also pure-Rust, reuses the `image` crate already a
+# dependency above) to get `to_dynamic_image`. The native-codec `openjp2`/`charls`/`gdcm` features
+# (JPEG2000/JPEG-LS/vendor libs, all requiring a C toolchain) are deliberately left off — a compressed
+# transfer syntax needing one of those cleanly errors instead of pulling in native code.
+dicom-object = { version = "0.10", optional = true }
+dicom-pixeldata = { version = "0.10", default-features = true, features = ["image"], optional = true }
+# Re-exported transitively by `dicom-object`/`dicom-pixeldata`, but declared directly too since the
+# module uses their tag/UID constants and `DataElement`/`VR` types by name.
+dicom-core = { version = "0.10", optional = true }
+dicom-dictionary-std = { version = "0.10", optional = true }
 
 # POSIX extended attributes for the native-metadata bridge (CPE-826, epic CPE-717). Pure-Rust (libc
 # syscalls, no system libs); Unix-only — Windows uses NTFS alternate data streams via std file I/O,
@@ -138,6 +152,10 @@ http-embedder = ["dep:ureq"]
 # `connect()` + `resolve_planner`/`probe_planner` are behind this gate. Reuses `ureq` (no new dep); the app
 # adapter turns it on.
 copilot = ["dep:ureq"]
+# Opt-in DICOM medical-image reading (CPE-1345, gated-format-reader lane). OFF by default so the plain
+# build compiles zero DICOM code / pulls in no `dicom-object`/`dicom-pixeldata` dependencies (the "small
+# when off" rule, mirrored from `pdf-thumb`/`video-thumb` above). Turn on with `--features dicom-thumb`.
+dicom-thumb = ["dep:dicom-object", "dep:dicom-pixeldata", "dep:dicom-core", "dep:dicom-dictionary-std"]
 
 [dev-dependencies]
 # Temp dirs for the ticket-board tests (moved from the app with the module, CPE-815).
