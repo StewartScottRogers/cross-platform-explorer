@@ -910,11 +910,15 @@
     {:else if pdfState === "error"}
       <slot />
     {:else}
+      <!-- No `sandbox` attribute: WebView2/Chromium render PDFs through the MimeHandlerView plugin
+           (the built-in PDF viewer), which a sandboxed iframe disables outright — the pane went blank
+           on valid PDFs (CPE-1362). Crash-safety is preserved without it: the `pdfState` gate above
+           only reaches this branch once the backend `read_pdf_validity` check passes, and the load
+           timeout + `on:error` handler still catch a valid-looking PDF that hangs the plugin. -->
       <iframe
         class="preview-pdf"
         title={entry.name}
         src={assetUrl(entry.path)}
-        sandbox="allow-scripts allow-same-origin"
         on:load={onPdfIframeLoad}
         on:error={onPdfIframeError}
       ></iframe>

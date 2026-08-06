@@ -39,9 +39,11 @@ describe("PreviewPane — PDF preview crash resilience (CPE-1357)", () => {
 
     const iframe = container.querySelector("iframe.preview-pdf") as HTMLIFrameElement;
     expect(iframe.getAttribute("src")).toBe("asset:///docs/doc.pdf");
-    // Isolation (CPE-1357 defense-in-depth): the iframe must never be handed the run of the page
-    // unsandboxed.
-    expect(iframe.getAttribute("sandbox")).not.toBeNull();
+    // CPE-1362: the iframe must NOT carry a `sandbox` attribute — WebView2/Chromium render PDFs via the
+    // MimeHandlerView plugin (the built-in PDF viewer), which a sandboxed iframe disables, leaving the
+    // pane blank on valid PDFs. Crash-safety comes from the validity gate (this branch is only reached
+    // once `loadPdfValidity` resolves) plus the load-timeout/on:error fallback, not from the sandbox.
+    expect(iframe.getAttribute("sandbox")).toBeNull();
   });
 
   it("falls back to the metadata slot (no iframe at all) when the validity check rejects — malformed/empty PDF", async () => {
