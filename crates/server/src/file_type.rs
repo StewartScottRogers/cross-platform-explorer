@@ -66,6 +66,43 @@ pub enum FileType {
     /// with the literal text `ply` followed by a newline (`\n` or `\r\n`), which (unlike ASCII STL's
     /// `solid` keyword) is a genuine unambiguous magic prefix, not a heuristic.
     Ply,
+    /// QuickTime video (`.mov`), an ISO-BMFF container whose `ftyp` major brand (offset 8) is `qt  `.
+    Mov,
+    /// HEIC/HEIF still image, an ISO-BMFF container whose `ftyp` major brand is one of
+    /// `heic`/`heix`/`heif`/`mif1`/`msf1`.
+    Heic,
+    /// AVIF still image, an ISO-BMFF container whose `ftyp` major brand is `avif` or `avis`.
+    Avif,
+    /// 3GPP/3GPP2 video, an ISO-BMFF container whose `ftyp` major brand starts with `3gp` (e.g. `3gp4`,
+    /// `3gp5`) or is `3g2`.
+    ThreeGpp,
+    /// TAR archive (`.tar`), identified by the POSIX ustar magic `ustar` at byte offset 257 (either the
+    /// null-terminated GNU/POSIX form `ustar\0` or the space-padded pre-POSIX form `ustar  `).
+    Tar,
+    /// Photoshop document (`.psd`/`.psb`), tagged `8BPS` at offset 0.
+    Psd,
+    /// Windows Cabinet archive (`.cab`), tagged `MSCF` at offset 0.
+    Cab,
+    /// Apple icon image (`.icns`), tagged `icns` at offset 0.
+    Icns,
+    /// Unix `ar` archive — also the container format for Debian packages (`.deb`) and static libraries
+    /// (`.a`/`.lib`) — tagged with the literal `!<arch>\n` at offset 0.
+    Ar,
+    /// AIFF/AIFF-C audio, an IFF `FORM` container disambiguated by the `AIFF`/`AIFC` tag at offset 8 —
+    /// mirrors the existing RIFF-at-offset-8 pattern used for WAV/WebP/AVI. A bare `FORM` (any other IFF
+    /// flavour) is deliberately NOT detected as this type.
+    Aiff,
+    /// MIDI sequence (`.mid`/`.midi`), tagged `MThd` at offset 0.
+    Midi,
+    /// Flash video (`.flv`), tagged `FLV` at offset 0.
+    Flv,
+    /// Windows cursor (`.cur`) — an ICONDIR header with idType=2, the sibling of [`FileType::Ico`]'s
+    /// idType=1.
+    Cur,
+    /// LZ4 frame archive (`.lz4`), tagged `04 22 4D 18` at offset 0.
+    Lz4,
+    /// lzip archive (`.lz`), tagged `LZIP` at offset 0.
+    Lzip,
 }
 
 impl FileType {
@@ -108,6 +145,21 @@ impl FileType {
             FileType::Obj => "Wavefront OBJ 3D model",
             FileType::Glb => "glTF binary 3D model",
             FileType::Ply => "PLY 3D model",
+            FileType::Mov => "QuickTime video",
+            FileType::Heic => "HEIC image",
+            FileType::Avif => "AVIF image",
+            FileType::ThreeGpp => "3GPP video",
+            FileType::Tar => "TAR archive",
+            FileType::Psd => "Photoshop document",
+            FileType::Cab => "Windows Cabinet archive",
+            FileType::Icns => "Apple icon image",
+            FileType::Ar => "Unix archive / Debian package",
+            FileType::Aiff => "AIFF audio",
+            FileType::Midi => "MIDI sequence",
+            FileType::Flv => "Flash video",
+            FileType::Cur => "Windows cursor",
+            FileType::Lz4 => "LZ4 archive",
+            FileType::Lzip => "lzip archive",
         }
     }
 
@@ -160,6 +212,21 @@ impl FileType {
             FileType::Obj => &["obj"],
             FileType::Glb => &["glb"],
             FileType::Ply => &["ply"],
+            FileType::Mov => &["mov", "qt"],
+            FileType::Heic => &["heic", "heif", "hif"],
+            FileType::Avif => &["avif"],
+            FileType::ThreeGpp => &["3gp", "3g2"],
+            FileType::Tar => &["tar"],
+            FileType::Psd => &["psd", "psb"],
+            FileType::Cab => &["cab"],
+            FileType::Icns => &["icns"],
+            FileType::Ar => &["a", "ar", "deb", "lib"],
+            FileType::Aiff => &["aif", "aiff", "aifc"],
+            FileType::Midi => &["mid", "midi"],
+            FileType::Flv => &["flv"],
+            FileType::Cur => &["cur"],
+            FileType::Lz4 => &["lz4"],
+            FileType::Lzip => &["lz"],
         }
     }
 }
@@ -231,15 +298,42 @@ fn looks_like_obj(bytes: &[u8]) -> bool {
     false
 }
 
+/// Resolve the ISO-BMFF (`ftyp`) major brand at offset 8 (4 bytes, space-padded on the right when the tag
+/// itself is shorter than 4 characters) into the specific container flavour it names, falling back to the
+/// generic [`FileType::Mp4`] for `isom`/`mp4x`/`dash`/`M4V `/`M4A `/`M4B `/any brand this sniffer doesn't
+/// special-case, and for a `ftyp` box too short to carry a brand at all. This fallback is deliberate and
+/// safety-critical: every real ISO-BMFF file has *some* `ftyp`, so defaulting an unrecognised brand to Mp4
+/// (rather than `None`) means a real media file is never regressed all the way to "unknown".
+fn resolve_ftyp_brand(bytes: &[u8]) -> FileType {
+    if bytes.len() < 12 {
+        return FileType::Mp4;
+    }
+    let brand = &bytes[8..12];
+    let mut end = brand.len();
+    while end > 0 && brand[end - 1] == b' ' {
+        end -= 1;
+    }
+    let trimmed = &brand[..end];
+    match trimmed {
+        b"qt" => FileType::Mov,
+        b"heic" | b"heix" | b"heif" | b"mif1" | b"msf1" => FileType::Heic,
+        b"avif" | b"avis" => FileType::Avif,
+        b"3g2" => FileType::ThreeGpp,
+        _ if trimmed.starts_with(b"3gp") => FileType::ThreeGpp,
+        _ => FileType::Mp4,
+    }
+}
+
 /// Sniff `bytes` for a recognised magic signature. Returns `None` for unknown or too-short input; never
 /// panics regardless of length (including empty).
 ///
 /// Order matters only where a shorter/less specific signature could otherwise shadow a longer one still to
-/// come; the two-byte `MZ` (PE) check is placed last for exactly that reason. The `Ico`/`TrueType` pair and
-/// the `Woff`/`Woff2` pair are full-length exact matches against different byte sequences, so despite
-/// looking similar at a glance neither pair can shadow the other. The one genuine full-length collision —
-/// `CA FE BA BE` meaning both a Java class file and a Mach-O fat binary — is resolved as documented on
-/// [`FileType::JavaClass`]. Every other signature here is unambiguous relative to the rest of the set.
+/// come; the two-byte `MZ` (PE) check is placed last for exactly that reason. The `Ico`/`Cur`/`TrueType`
+/// trio and the `Woff`/`Woff2` pair are full-length exact matches against different byte sequences, so
+/// despite looking similar at a glance none of them can shadow another. The one genuine full-length
+/// collision — `CA FE BA BE` meaning both a Java class file and a Mach-O fat binary — is resolved as
+/// documented on [`FileType::JavaClass`]. Every other signature here is unambiguous relative to the rest of
+/// the set.
 pub fn detect_type(bytes: &[u8]) -> Option<FileType> {
     if matches_at(bytes, 0, &[0x89, 0x50, 0x4E, 0x47]) {
         return Some(FileType::Png);
@@ -255,6 +349,12 @@ pub fn detect_type(bytes: &[u8]) -> Option<FileType> {
     }
     if matches_at(bytes, 0, &[0x49, 0x49, 0x2A, 0x00]) || matches_at(bytes, 0, &[0x4D, 0x4D, 0x00, 0x2A]) {
         return Some(FileType::Tiff);
+    }
+    if matches_at(bytes, 0, b"8BPS") {
+        return Some(FileType::Psd);
+    }
+    if matches_at(bytes, 0, b"icns") {
+        return Some(FileType::Icns);
     }
     if matches_at(bytes, 0, b"%PDF") {
         return Some(FileType::Pdf);
@@ -274,6 +374,23 @@ pub fn detect_type(bytes: &[u8]) -> Option<FileType> {
     }
     if matches_at(bytes, 0, &[0x52, 0x61, 0x72, 0x21, 0x1A, 0x07]) {
         return Some(FileType::Rar);
+    }
+    if matches_at(bytes, 0, b"MSCF") {
+        return Some(FileType::Cab);
+    }
+    if matches_at(bytes, 0, b"!<arch>\n") {
+        return Some(FileType::Ar);
+    }
+    // TAR: no magic at offset 0 — the ustar tag sits 257 bytes into the (512-byte-aligned) header. Both the
+    // null-terminated POSIX/GNU form and the space-padded pre-POSIX form are accepted.
+    if matches_at(bytes, 257, b"ustar\0") || matches_at(bytes, 257, b"ustar  ") {
+        return Some(FileType::Tar);
+    }
+    if matches_at(bytes, 0, &[0x04, 0x22, 0x4D, 0x18]) {
+        return Some(FileType::Lz4);
+    }
+    if matches_at(bytes, 0, b"LZIP") {
+        return Some(FileType::Lzip);
     }
     if matches_at(bytes, 0, &[0x7F, 0x45, 0x4C, 0x46]) {
         return Some(FileType::Elf);
@@ -302,6 +419,17 @@ pub fn detect_type(bytes: &[u8]) -> Option<FileType> {
             return Some(FileType::Avi);
         }
     }
+    // IFF container: same offset-8 disambiguation pattern as RIFF above. A bare `FORM` with neither tag is
+    // deliberately left undetected — this sniffer only claims the AIFF/AIFF-C flavour, not the whole family.
+    if matches_at(bytes, 0, b"FORM") && (matches_at(bytes, 8, b"AIFF") || matches_at(bytes, 8, b"AIFC")) {
+        return Some(FileType::Aiff);
+    }
+    if matches_at(bytes, 0, b"MThd") {
+        return Some(FileType::Midi);
+    }
+    if matches_at(bytes, 0, b"FLV") {
+        return Some(FileType::Flv);
+    }
     // EBML container header — shared verbatim by Matroska and WebM (see the doc comment on the variant).
     if matches_at(bytes, 0, &[0x1A, 0x45, 0xDF, 0xA3]) {
         return Some(FileType::Matroska);
@@ -316,6 +444,10 @@ pub fn detect_type(bytes: &[u8]) -> Option<FileType> {
     // how this is kept distinct from the sfnt version signature it superficially resembles.
     if matches_at(bytes, 0, &[0x00, 0x00, 0x01, 0x00]) {
         return Some(FileType::Ico);
+    }
+    // ICONDIR header, idType=2 (cursor) — the sibling of the Ico check just above.
+    if matches_at(bytes, 0, &[0x00, 0x00, 0x02, 0x00]) {
+        return Some(FileType::Cur);
     }
     if matches_at(bytes, 0, &[0x00, 0x01, 0x00, 0x00]) {
         return Some(FileType::TrueType);
@@ -352,9 +484,11 @@ pub fn detect_type(bytes: &[u8]) -> Option<FileType> {
     if looks_like_obj(bytes) {
         return Some(FileType::Obj);
     }
-    // ISO base media container family (MP4/M4A/M4V/…): a 4-byte box size followed by "ftyp" at offset 4.
+    // ISO base media container family (MP4/MOV/HEIC/AVIF/3GPP/…): a 4-byte box size followed by "ftyp" at
+    // offset 4, then a 4-byte major brand at offset 8 that resolves the specific flavour (see
+    // `resolve_ftyp_brand`) — falling back to the generic Mp4 for any brand not special-cased there.
     if matches_at(bytes, 4, b"ftyp") {
-        return Some(FileType::Mp4);
+        return Some(resolve_ftyp_brand(bytes));
     }
     // MP3: either an ID3v2 tag up front, or a bare MPEG audio frame sync — 11 set sync bits, i.e. 0xFF
     // followed by a byte whose top 3 bits are all set.
@@ -542,6 +676,84 @@ mod tests {
         assert_eq!(detect_type(&bytes), Some(FileType::Mp4));
     }
 
+    // ---- ISO-BMFF ftyp major-brand disambiguation (CPE-1341) ----
+
+    /// Builds a minimal ISO-BMFF header: 4-byte box size, `ftyp`, then the given 4-byte major brand.
+    fn ftyp_bytes(brand: &[u8; 4]) -> Vec<u8> {
+        let mut bytes = vec![0x00, 0x00, 0x00, 0x14]; // box size
+        bytes.extend_from_slice(b"ftyp");
+        bytes.extend_from_slice(brand);
+        bytes
+    }
+
+    #[test]
+    fn detects_mov_by_qt_brand() {
+        assert_eq!(detect_type(&ftyp_bytes(b"qt  ")), Some(FileType::Mov));
+        assert_eq!(mismatch(&ftyp_bytes(b"qt  "), "mov"), None);
+        assert_eq!(mismatch(&ftyp_bytes(b"qt  "), "qt"), None);
+    }
+
+    #[test]
+    fn detects_heic_by_various_brands() {
+        for brand in [b"heic", b"heix", b"heif", b"mif1", b"msf1"] {
+            assert_eq!(detect_type(&ftyp_bytes(brand)), Some(FileType::Heic), "brand {brand:?}");
+        }
+        assert_eq!(mismatch(&ftyp_bytes(b"heic"), "heic"), None);
+    }
+
+    #[test]
+    fn detects_avif_by_avif_and_avis_brands() {
+        assert_eq!(detect_type(&ftyp_bytes(b"avif")), Some(FileType::Avif));
+        assert_eq!(detect_type(&ftyp_bytes(b"avis")), Some(FileType::Avif));
+        assert_eq!(mismatch(&ftyp_bytes(b"avif"), "avif"), None);
+    }
+
+    #[test]
+    fn detects_3gpp_by_3gp_prefixed_and_3g2_brands() {
+        assert_eq!(detect_type(&ftyp_bytes(b"3gp4")), Some(FileType::ThreeGpp));
+        assert_eq!(detect_type(&ftyp_bytes(b"3gp5")), Some(FileType::ThreeGpp));
+        assert_eq!(detect_type(&ftyp_bytes(b"3g2 ")), Some(FileType::ThreeGpp));
+        assert_eq!(mismatch(&ftyp_bytes(b"3gp4"), "3gp"), None);
+        assert_eq!(mismatch(&ftyp_bytes(b"3g2 "), "3g2"), None);
+    }
+
+    #[test]
+    fn unrecognised_ftyp_brands_still_fall_back_to_mp4_not_unknown() {
+        // A brand we don't special-case must never regress a real ftyp file all the way to "unknown".
+        for brand in [b"isom", b"mp41", b"mp42", b"dash", b"M4V ", b"M4A ", b"M4B ", b"zzzz"] {
+            assert_eq!(detect_type(&ftyp_bytes(brand)), Some(FileType::Mp4), "brand {brand:?}");
+        }
+        // Also still true for the exact bytes the pre-existing regression test uses.
+        assert_eq!(
+            detect_type(&{
+                let mut b = vec![0x00, 0x00, 0x00, 0x18];
+                b.extend_from_slice(b"ftypmp42");
+                b
+            }),
+            Some(FileType::Mp4)
+        );
+    }
+
+    #[test]
+    fn a_mov_file_renamed_to_jpg_still_mismatches() {
+        let m = mismatch(&ftyp_bytes(b"qt  "), "jpg").expect("MOV bytes claiming .jpg must mismatch");
+        assert_eq!(m.detected, FileType::Mov);
+    }
+
+    #[test]
+    fn label_and_extensions_for_ftyp_brand_formats() {
+        assert_eq!(FileType::Mov.label(), "QuickTime video");
+        assert_eq!(FileType::Mov.extensions(), &["mov", "qt"]);
+        assert_eq!(FileType::Heic.label(), "HEIC image");
+        assert_eq!(FileType::Heic.extensions(), &["heic", "heif", "hif"]);
+        assert_eq!(FileType::Avif.label(), "AVIF image");
+        assert_eq!(FileType::Avif.extensions(), &["avif"]);
+        assert_eq!(FileType::ThreeGpp.label(), "3GPP video");
+        assert_eq!(FileType::ThreeGpp.extensions(), &["3gp", "3g2"]);
+        // Mp4's extension list is unchanged by this ticket.
+        assert_eq!(FileType::Mp4.extensions(), &["mp4", "m4a", "m4v"]);
+    }
+
     #[test]
     fn detects_avi_by_riff_plus_avi_tag_at_offset_8() {
         let mut bytes = b"RIFF".to_vec();
@@ -669,6 +881,134 @@ mod tests {
     #[test]
     fn does_not_detect_obj_for_ordinary_prose() {
         assert_eq!(detect_type(b"variables and functions are common programming terms.\n"), None);
+    }
+
+    // ---- additional common magic signatures (CPE-1342) ----
+
+    #[test]
+    fn detects_tar_via_ustar_at_offset_257_both_paddings() {
+        let mut null_terminated = vec![0u8; 257];
+        null_terminated.extend_from_slice(b"ustar\0");
+        null_terminated.extend_from_slice(b"00");
+        assert_eq!(detect_type(&null_terminated), Some(FileType::Tar));
+
+        let mut space_padded = vec![0u8; 257];
+        space_padded.extend_from_slice(b"ustar  ");
+        assert_eq!(detect_type(&space_padded), Some(FileType::Tar));
+    }
+
+    #[test]
+    fn tar_header_shorter_than_offset_257_is_none_not_a_panic() {
+        assert_eq!(detect_type(&[0u8; 100]), None);
+        assert_eq!(detect_type(&[0u8; 257]), None);
+    }
+
+    #[test]
+    fn detects_psd() {
+        assert_eq!(detect_type(b"8BPS\x00\x01\x00\x00"), Some(FileType::Psd));
+    }
+
+    #[test]
+    fn detects_cab() {
+        assert_eq!(detect_type(b"MSCF\x00\x00\x00\x00"), Some(FileType::Cab));
+    }
+
+    #[test]
+    fn detects_icns() {
+        assert_eq!(detect_type(b"icns\x00\x00\x01\x00"), Some(FileType::Icns));
+    }
+
+    #[test]
+    fn detects_ar() {
+        assert_eq!(detect_type(b"!<arch>\ndebian-binary"), Some(FileType::Ar));
+    }
+
+    #[test]
+    fn detects_aiff_and_aifc_but_not_bare_form() {
+        let mut aiff = b"FORM".to_vec();
+        aiff.extend_from_slice(&[0, 0, 0, 0x12]);
+        aiff.extend_from_slice(b"AIFF");
+        assert_eq!(detect_type(&aiff), Some(FileType::Aiff));
+
+        let mut aifc = b"FORM".to_vec();
+        aifc.extend_from_slice(&[0, 0, 0, 0x12]);
+        aifc.extend_from_slice(b"AIFC");
+        assert_eq!(detect_type(&aifc), Some(FileType::Aiff));
+
+        // A bare FORM with some other IFF tag at offset 8 must NOT be detected as AIFF.
+        let mut other = b"FORM".to_vec();
+        other.extend_from_slice(&[0, 0, 0, 0x12]);
+        other.extend_from_slice(b"8SVX");
+        assert_eq!(detect_type(&other), None);
+    }
+
+    #[test]
+    fn detects_midi() {
+        assert_eq!(detect_type(b"MThd\x00\x00\x00\x06"), Some(FileType::Midi));
+    }
+
+    #[test]
+    fn detects_flv() {
+        assert_eq!(detect_type(b"FLV\x01\x05\x00\x00\x00\x09"), Some(FileType::Flv));
+    }
+
+    #[test]
+    fn detects_lz4() {
+        assert_eq!(detect_type(&[0x04, 0x22, 0x4D, 0x18, 0x00]), Some(FileType::Lz4));
+    }
+
+    #[test]
+    fn detects_lzip() {
+        assert_eq!(detect_type(b"LZIP\x01\x00"), Some(FileType::Lzip));
+    }
+
+    #[test]
+    fn detects_cur() {
+        assert_eq!(detect_type(&[0x00, 0x00, 0x02, 0x00, 0x01, 0x00]), Some(FileType::Cur));
+    }
+
+    #[test]
+    fn ico_cur_and_truetype_resolve_distinctly() {
+        let ico = detect_type(&[0x00, 0x00, 0x01, 0x00, 0x01, 0x00]);
+        let cur = detect_type(&[0x00, 0x00, 0x02, 0x00, 0x01, 0x00]);
+        let ttf = detect_type(&[0x00, 0x01, 0x00, 0x00, 0x00, 0x0C]);
+        assert_eq!(ico, Some(FileType::Ico));
+        assert_eq!(cur, Some(FileType::Cur));
+        assert_eq!(ttf, Some(FileType::TrueType));
+        assert_ne!(ico, cur);
+        assert_ne!(ico, ttf);
+        assert_ne!(cur, ttf);
+    }
+
+    #[test]
+    fn mismatch_and_label_extensions_for_cpe_1342_formats() {
+        assert_eq!(FileType::Tar.label(), "TAR archive");
+        assert_eq!(FileType::Tar.extensions(), &["tar"]);
+        assert_eq!(FileType::Psd.label(), "Photoshop document");
+        assert_eq!(FileType::Psd.extensions(), &["psd", "psb"]);
+        assert_eq!(FileType::Cab.label(), "Windows Cabinet archive");
+        assert_eq!(FileType::Cab.extensions(), &["cab"]);
+        assert_eq!(FileType::Icns.label(), "Apple icon image");
+        assert_eq!(FileType::Icns.extensions(), &["icns"]);
+        assert_eq!(FileType::Ar.label(), "Unix archive / Debian package");
+        assert_eq!(FileType::Ar.extensions(), &["a", "ar", "deb", "lib"]);
+        assert_eq!(FileType::Aiff.label(), "AIFF audio");
+        assert_eq!(FileType::Aiff.extensions(), &["aif", "aiff", "aifc"]);
+        assert_eq!(FileType::Midi.label(), "MIDI sequence");
+        assert_eq!(FileType::Midi.extensions(), &["mid", "midi"]);
+        assert_eq!(FileType::Flv.label(), "Flash video");
+        assert_eq!(FileType::Flv.extensions(), &["flv"]);
+        assert_eq!(FileType::Cur.label(), "Windows cursor");
+        assert_eq!(FileType::Cur.extensions(), &["cur"]);
+        assert_eq!(FileType::Lz4.label(), "LZ4 archive");
+        assert_eq!(FileType::Lz4.extensions(), &["lz4"]);
+        assert_eq!(FileType::Lzip.label(), "lzip archive");
+        assert_eq!(FileType::Lzip.extensions(), &["lz"]);
+
+        let m = mismatch(b"8BPS\x00\x01\x00\x00", "jpg").expect("PSD bytes claiming .jpg must mismatch");
+        assert_eq!(m.detected, FileType::Psd);
+        assert_eq!(mismatch(b"8BPS\x00\x01\x00\x00", "psd"), None);
+        assert_eq!(mismatch(b"8BPS\x00\x01\x00\x00", "psb"), None);
     }
 
     // ---- unknown / short / empty input never panics ----
