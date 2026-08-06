@@ -429,6 +429,12 @@ pub mod thumb_video;
 /// Image preview — TIFF/PSD → PNG data-URL transcode + dimensions/EXIF metadata (CPE-099/101/659).
 pub mod image_preview;
 
+/// DICOM medical-image reading: curated tag list + pixel-data → PNG data-URL transcode via `dicom-rs`
+/// (CPE-1345, gated-format-reader lane). Feature-gated OFF by default (`dicom-thumb`) so the plain build
+/// compiles zero DICOM code and pulls in no `dicom-object`/`dicom-pixeldata` dependency.
+#[cfg(feature = "dicom-thumb")]
+pub mod dicom;
+
 /// Backup copy engine — plan executor (copy/update/mirror-delete) with per-file results (CPE-797).
 pub mod backup;
 
