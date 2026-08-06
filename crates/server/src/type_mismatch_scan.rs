@@ -26,11 +26,12 @@ use crate::fsutil::entry_is_symlink;
 use crate::glob::any_glob_matches;
 use crate::model::extension_of;
 
-/// Capped header read per file, in bytes. 64 bytes comfortably covers every signature
-/// [`crate::file_type::detect_type`] checks (the longest, SQLite's `"SQLite format 3\0"`, is 16 bytes;
-/// the offset-based RIFF/`ftyp` checks look no further than byte 12), while staying far short of a full
-/// read even for a huge file — this walk never reads whole files.
-const HEADER_CAP: u64 = 64;
+/// Capped header read per file, in bytes. Must reach the deepest offset-based signature
+/// [`crate::file_type::detect_type`] checks: TAR's `ustar`/`ustar\0` tag at byte offset 257 (a full
+/// 512-byte POSIX header block, with the tag itself needing bytes 257..264). 512 clears that with
+/// margin, while staying far short of a full read even for a huge file — this walk never reads whole
+/// files.
+const HEADER_CAP: u64 = 512;
 
 /// Cap on regular files scanned across the whole walk — mirrors
 /// [`crate::folder_similarity_scan::FOLDER_MAX_FILES`]. Hitting it sets `truncated` and stops the walk
@@ -222,6 +223,46 @@ mod tests {
         assert_eq!(hit.claimed_ext, "jpg");
         assert_eq!(hit.detected_label, "Windows executable/library");
         assert_eq!(hit.detected_ext, "exe");
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    /// CPE-1343: TAR's `ustar\0` magic sits at byte offset 257 — [`HEADER_CAP`] must reach it, or a
+    /// disguised `.tar` can never be flagged by this tree sweep (the per-row `column_cells.rs` path,
+    /// with its much larger cap, already caught this; the sweep didn't).
+    fn fake_tar_header(padding_byte: u8) -> Vec<u8> {
+        let mut bytes = vec![padding_byte; 257];
+        bytes.extend_from_slice(b"ustar\0");
+        bytes
+    }
+
+    #[test]
+    fn tar_disguised_as_txt_is_flagged_with_right_claimed_and_detected() {
+        let d = scratch("tar-as-txt");
+        // A minimal fake TAR: 257 bytes of padding then the ustar magic at the real offset, written
+        // into a file claiming to be a .txt.
+        fs::write(d.join("foo.txt"), fake_tar_header(0)).unwrap();
+
+        let r = find_type_mismatches(&d, &[]);
+        assert!(!r.truncated);
+        assert_eq!(r.scanned, 1);
+        assert_eq!(r.hits.len(), 1, "the disguised TAR must be flagged: {:?}", r.hits);
+        let hit = &r.hits[0];
+        assert!(hit.path.ends_with("foo.txt"));
+        assert_eq!(hit.claimed_ext, "txt");
+        assert_eq!(hit.detected_label, "TAR archive");
+        assert_eq!(hit.detected_ext, "tar");
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn genuine_tar_named_tar_is_not_flagged() {
+        let d = scratch("real-tar");
+        fs::write(d.join("archive.tar"), fake_tar_header(0)).unwrap();
+
+        let r = find_type_mismatches(&d, &[]);
+        assert!(!r.truncated);
+        assert_eq!(r.scanned, 1);
+        assert!(r.hits.is_empty(), "a genuine TAR named .tar must not be flagged: {:?}", r.hits);
         let _ = fs::remove_dir_all(&d);
     }
 
