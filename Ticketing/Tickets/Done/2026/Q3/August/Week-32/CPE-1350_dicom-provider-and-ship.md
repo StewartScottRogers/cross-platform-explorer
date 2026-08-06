@@ -2,13 +2,13 @@
 id: CPE-1350
 title: "Wire DICOM preview provider + ENABLE dicom-thumb in the shipped build (user-approved)"
 type: Feature
-status: Backlog
+status: Done
 priority: Medium
 component: Multiple
 tags: [ready]
 epic: CPE-219
 created: 2026-08-05
-closed:
+closed: 2026-08-05
 ---
 
 ## Goal
@@ -54,3 +54,6 @@ the `dicom-thumb` feature in the released build (moderate binary-size cost accep
 Sequence AFTER CPE-1349 (shares `src-tauri/lib.rs`, `bindings.gen.ts`, `provider.ts`, `loaders.ts`,
 `PreviewPane.svelte`). Final on-screen visual (does the DICOM image render + tags read) is an attended/
 Visual-Critic check post-merge. Ship-enablement mirrors CPE-1258 (pdf-thumb) pattern.
+
+## Work Log
+- 2026-08-05 (workshift): PR #645 merged. DICOM shipped: dicom-thumb enabled in app build; read_dicom_image_data_url + read_dicom_tags commands; dcm provider renders image + independent tag list (tags show even if image decode Errs); Err->metadata fallback. Reviewer(+supply-chain) APPROVE + UAT PASS (mutation-tested). Size +2.81 MiB (real crates: 7 dicom + exr/pnm via image-feature unification + CJK charset tables; AVIF/JXL are UNCOMPILED lock rows, 0 bytes). Trim follow-up = CPE-1352. Supply-chain minor: encoding-index-* unmaintained (transitive from dicom-rs). On-screen render = attended.
