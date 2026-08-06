@@ -14,7 +14,7 @@ import { describe, it, expect } from "vitest";
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { pickProvider } from "./preview/provider";
+import { pickProvider, providers } from "./preview/provider";
 import type { PreviewKind } from "./preview/provider";
 import type { DirEntry } from "./types";
 
@@ -22,30 +22,14 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 // src/lib/ -> repo root is two levels up.
 const SAMPLES_DIR = path.resolve(__dirname, "..", "..", "samples");
 
-/** Every preview kind that can actually be picked for a FILE (not a folder). "none" is `pickProvider`'s
- *  fallback for folders/null entries only — no real file ever resolves to it (the "hex" provider's
- *  `canPreview: (e) => !e.is_dir` already claims every remaining file), so it's deliberately excluded
- *  from the coverage requirement below. */
-const REQUIRED_KINDS: PreviewKind[] = [
-  "image",
-  "decoded-image",
-  "raw-image",
-  "dicom",
-  "heic",
-  "audio",
-  "video",
-  "pdf",
-  "json",
-  "csv",
-  "tsv",
-  "archive",
-  "markdown",
-  "text",
-  "info",
-  "data-grid",
-  "font",
-  "hex",
-];
+/** Every preview kind that can actually be picked for a FILE (not a folder) — derived from the real
+ *  registered `providers` array (`provider.ts`), not a hand-maintained duplicate, so a new provider
+ *  automatically becomes a coverage requirement here with no second list to update. `FALLBACK`'s "none"
+ *  kind is deliberately absent from `providers` (it's returned separately by `pickProvider` only for
+ *  folders/null entries — no real FILE ever resolves to it, since the "hex" provider's
+ *  `canPreview: (e) => !e.is_dir` already claims every remaining file), so it's correctly never required
+ *  here either. */
+const REQUIRED_KINDS: PreviewKind[] = [...new Set(providers.map((p) => p.kind))];
 
 /** Builds a minimal `DirEntry`-shaped object for a file, matching `provider.test.ts`'s own helper —
  *  `pickProvider` only reads `is_dir`/`extension`/`name` off it. */

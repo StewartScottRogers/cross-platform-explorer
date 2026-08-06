@@ -131,26 +131,31 @@ hide again:
   hand-maintained duplicate) for every file under `samples/` and fails if any supported kind has zero
   samples. Filled the gaps: `images/photo.tiff` (decoded-image), `text/table.tsv` (tsv),
   `archives/sample.zip` (archive — `sample.rar` does NOT count, it's not in the frontend's `ARCHIVE_EXT`
-  and resolves to the generic hex provider instead), `fonts/mini.ttf` (font, hand-built sfnt),
-  `database/mini.sqlite` (data-grid), `other/tiny.wasm` (info). `documents/doc.pdf` replaced with a real, valid
-  2-page PDF (byte-accurate `xref`), preserving the exact `/Info` metadata baseline
-  `sample_fixtures.rs::pdf_info_baseline` already asserted. The OLD degenerate bytes are preserved
-  unchanged as `documents/malformed.pdf` — the deliberate crash-regression fixture.
+  and resolves to the generic hex provider instead — filed as CPE-1359), `fonts/mini.ttf` (font,
+  hand-built sfnt), `database/mini.sqlite` (data-grid), `other/tiny.wasm` (info). `documents/doc.pdf`
+  replaced with a real, valid 2-page PDF (byte-accurate `xref`), carrying the same full `/Info` metadata
+  baseline as every other sample format (`sample_fixtures.rs::pdf_info_baseline` updated to match — an
+  intermediate commit had briefly swapped `doc.pdf` for a slimmer Pillow-rendered fixture, both restored
+  together). The OLD degenerate bytes are preserved unchanged as `documents/malformed.pdf` — the
+  deliberate crash-regression fixture.
 - **End-to-end walk:** `gui-smoke/specs/samples.smoke.ts` seeds a copy of the real `samples/` tree into
   the shared tmpDir (`wdio.conf.ts#seedSamplesFixture`, `fs.cpSync` — new samples are picked up
   automatically, no filename list to maintain) and, on a real `tauri build` binary, opens EVERY file:
   navigates to its folder via the address bar (Ctrl+L), selects it, and asserts (a) the app/window is
   still responding (the crash guard) and (b) the preview settled into real content or an explicit
-  graceful "can't preview" note — never a stuck spinner. `documents/malformed.pdf` runs LAST, in its own
-  `it()`, specifically so a still-open crash there doesn't blind the rest of the walk; it's expected to
-  FAIL today and pass once CPE-1357's fix lands. Non-blocking on both CI legs (`continue-on-error`,
-  CPE-1048), same posture as the rest of `gui-smoke`.
+  graceful "can't preview" note/fallback — never a stuck spinner. `documents/malformed.pdf` runs LAST, in
+  its own `it()`, as a defense-in-depth regression pin: CPE-1357's validate-before-embed fix
+  (`pdf_validity` in media_meta_read.rs, landed on `main` the same day) already lands this file in the
+  metadata-pane fallback rather than WebView2's PDF viewer, so this assertion is expected to PASS like
+  every other file — it stays last so a FUTURE regression in that validation path can't blind the rest of
+  the walk. Non-blocking on both CI legs (`continue-on-error`, CPE-1048), same posture as the rest of
+  `gui-smoke`.
 
 **Not yet run live on GitHub Actions** (offsite Actions verification pending, same caveat as CPE-1171's
 Linux leg) — locally verified: `npm run check` clean, the full vitest suite (187 files / 2080 tests)
-green including the new coverage test, `gui-smoke`'s own `typecheck` + `test:unit` green, and the Rust
-`sample_fixtures` test green against the new `doc.pdf`. The `samples.smoke.ts` walk itself needs a real
-`tauri build --no-bundle` + `tauri-driver` session (this worktree's sandbox couldn't run one) — watch the
-first CI run for the malformed-pdf-guard result and the cascading-failure note in that spec's header
-comment (a still-open CPE-1357 crash there is expected to red the later-alphabetical specs too, sharing
-one app session — not a separate new regression).
+green including the new coverage test, `gui-smoke`'s own `typecheck` + `test:unit` green, and the FULL
+`cargo test -p cpe-server` suite green (1606 unit tests + every integration test file, incl.
+`sample_fixtures::pdf_info_baseline` and CPE-1357's 6 `pdf_validity` tests) in the merged tree (this
+branch merged `origin/main` after CPE-1357's fix landed there first). The `samples.smoke.ts` walk itself
+needs a real `tauri build --no-bundle` + `tauri-driver` session (this worktree's sandbox couldn't run
+one) — it will execute for the first time in CI.

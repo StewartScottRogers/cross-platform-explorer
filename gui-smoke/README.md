@@ -45,13 +45,16 @@ Self-contained: its own `package.json`/lockfile/`tsconfig.json`. Nothing here to
    each, navigates to its folder via the address bar (`Ctrl+L` → type the absolute path → Enter),
    selects it, and asserts (a) the app/window is still responding — the crash guard — and (b) the
    preview pane settled into real content (`.preview-img`/`.preview-media`/`.preview-pdf`/
-   `.preview-font`/`.preview-table-wrap`/`.preview-markdown`/`.code-view`/`[data-testid="hexview"]`/
-   `.data-browser`) or an explicit graceful "can't preview this" note — never a stuck spinner.
-   `documents/malformed.pdf` (the ORIGINAL degenerate PDF that crashed the app, CPE-1357 — see
-   `samples/README.md`'s "PDF fixtures" section) runs LAST, in its own `it()`, so a still-open crash
-   there doesn't blind the rest of the walk; it's expected to fail until CPE-1357's fix lands. Pairs
-   with the headless coverage ratchet `src/lib/sampleCoverage.test.ts`, which asserts every supported
-   preview kind has a sample in the first place.
+   `.preview-font`/`.preview-table-wrap`/`.preview-markdown`/`.code-view`/`pre.preview-text`/
+   `[data-testid="hexview"]`/`.data-browser`) or an explicit graceful "can't preview this" note/fallback
+   (`.preview-note`, or the `aside.details` metadata pane) — never a stuck spinner. `documents/
+   malformed.pdf` (the ORIGINAL degenerate PDF that crashed the app, CPE-1357 — see `samples/README.md`'s
+   "PDF fixtures" section) runs LAST, in its own `it()`, so a regression in the crash guard doesn't blind
+   the rest of the walk; CPE-1357's validate-before-embed fix (`pdf_validity`) already lands this file in
+   the metadata-pane fallback rather than WebView2's PDF viewer, so this assertion is expected to PASS
+   like every other file — it stays last as a defense-in-depth regression pin, not because it's currently
+   expected to fail. Pairs with the headless coverage ratchet `src/lib/sampleCoverage.test.ts`, which
+   asserts every supported preview kind has a sample in the first place.
 
 ## Prerequisites
 
@@ -186,7 +189,7 @@ app's main screens** at `gui-smoke/.screenshots/<name>.png`. Two shared helpers 
 | `samples-pdf-valid.png` | `samples-walk-fail.png` | `samples.smoke.ts` | The replaced, now-valid `documents/doc.pdf` rendering in the PDF preview |
 | `samples-font.png` | `samples-walk-fail.png` | `samples.smoke.ts` | The new `fonts/mini.ttf` sample rendering in the font-specimen preview |
 | `samples-data-grid.png` | `samples-walk-fail.png` | `samples.smoke.ts` | The new `data/mini.sqlite` sample rendering in the data-grid preview |
-| `samples-pdf-malformed.png` | `samples-walk-fail.png` | `samples.smoke.ts` | The CPE-1357 crash-regression fixture (`documents/malformed.pdf`) — the app surviving (or, until CPE-1357 lands, the failure frame) |
+| `samples-pdf-malformed.png` | `samples-walk-fail.png` | `samples.smoke.ts` | The CPE-1357 crash-regression fixture (`documents/malformed.pdf`) — the app surviving via the `pdf_validity` reject → metadata-pane fallback |
 
 `.screenshots/` is gitignored — these are run artifacts, never committed. Both helpers swallow their
 own errors (a screenshot is observability, not an assertion — it must never fail or mask a real

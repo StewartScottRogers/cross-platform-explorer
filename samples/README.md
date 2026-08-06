@@ -69,12 +69,18 @@ shipped codecs and asserts the values above.
 
 `documents/doc.pdf` used to be a **degenerate** fixture (`/Kids [] /Count 0`, no `xref` table at all) —
 opening it in the preview pane crashed the app (CPE-1357). It has been replaced with a genuinely valid,
-loadable 2-page PDF (real `xref`/`startxref`/`%%EOF`, same `/Info` metadata baseline as before).
+loadable 2-page PDF (real `xref`/`startxref`/`%%EOF`), carrying the SAME full `/Info` metadata baseline
+every other sample format documents here (Title/Author/Subject/Keywords/Creator/Producer/Dates — an
+intermediate commit briefly swapped in a Pillow-rendered raster PDF with a slimmer `/Info` dict; this
+generator-produced fixture, and `sample_fixtures.rs::pdf_info_baseline`, both restore the full baseline).
 
 The **old, broken bytes are preserved unchanged** as `documents/malformed.pdf` — a deliberate regression
 fixture for the crash: `gui-smoke/specs/samples.smoke.ts` opens it (last, after every other sample) and
-asserts the app survives. Today, before CPE-1357's fix lands, that assertion is expected to fail; it
-should pass once PDF preview is made crash-resilient.
+asserts the app survives. CPE-1357 landed a validate-before-embed fix
+(`cpe_server::media_meta_read::pdf_validity`): a PDF with no resolvable `startxref` or a declared
+zero-page `/Pages` tree — exactly `malformed.pdf`'s shape — is rejected BEFORE ever reaching WebView2's
+PDF viewer, falling back to the metadata pane instead. So this fixture now doubles as CPE-1357's
+regression pin: opening it must keep degrading gracefully (never crash) for as long as that fix stands.
 
 ## Sample-coverage ratchet (CPE-1358)
 

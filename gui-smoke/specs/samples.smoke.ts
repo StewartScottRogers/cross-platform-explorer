@@ -18,18 +18,22 @@
 // `documents/malformed.pdf` — the ORIGINAL degenerate (0-page, no-xref) PDF that crashed the app
 // (CPE-1357), preserved unchanged as its own fixture once `documents/doc.pdf` was replaced with a real,
 // valid PDF (samples/README.md's "PDF fixtures" section) — is deliberately run LAST, in its own `it()`,
-// rather than interleaved into the walk below. If it still crashes the shared app process today (before
-// CPE-1357 lands), that failure must not prevent every OTHER sample in this walk from being exercised —
-// interleaving it earlier would silently blind the rest of the coverage to whatever ordering the
-// filesystem happens to return. Once CPE-1357 lands this assertion should pass like every other file.
+// rather than interleaved into the walk below. CPE-1357's fix has landed (`pdf_validity` in
+// media_meta_read.rs validates a PDF BEFORE ever setting the iframe's `src`; a rejection — no resolvable
+// `startxref`, or a declared zero-page `/Pages` tree, exactly this file's shape — falls back to the
+// metadata pane instead of ever reaching WebView2), so this assertion is expected to PASS like every
+// other file in the walk. It still runs last rather than interleaved: if a FUTURE regression in that
+// validate-before-embed path ever reintroduces the crash, that failure must not prevent every OTHER
+// sample in this walk from being exercised — interleaving it earlier would silently blind the rest of
+// the coverage to whatever ordering the filesystem happens to return.
 //
 // NOTE on blast radius: every spec in this suite shares ONE app session/process (see wdio.conf.ts's
-// header comment). If `documents/malformed.pdf` genuinely still crashes the whole app today, spec files
-// that sort alphabetically AFTER this one (saved-search, shred-dialog, similar-images, snapshot-*,
-// spotlight, terminal-panel, thumbnail-gallery, transfer-panel, vault*) will cascade-fail too, for the
-// same underlying reason — that is expected, not a separate regression, and self-resolves once CPE-1357
-// fixes PDF-preview crash resilience. The whole `gui-smoke` job is non-blocking (`continue-on-error`,
-// CPE-1048) on both CI legs, so this is a loud diagnostic, not a red `main`.
+// header comment). If `documents/malformed.pdf` ever crashes the whole app again (a regression in the
+// CPE-1357 fix), spec files that sort alphabetically AFTER this one (saved-search, shred-dialog,
+// similar-images, snapshot-*, spotlight, terminal-panel, thumbnail-gallery, transfer-panel, vault*)
+// would cascade-fail too, for the same underlying reason — that would be a real, loud signal, not a
+// separate bug in THIS spec. The whole `gui-smoke` job is non-blocking (`continue-on-error`, CPE-1048)
+// on both CI legs regardless, so this is a diagnostic, not a red `main`.
 import { expect } from "chai";
 import fs from "node:fs";
 import path from "node:path";
@@ -80,6 +84,14 @@ const WALK_FILES = ALL_SAMPLES.filter((f) => f !== MALFORMED_PDF_REL);
 // of these mount synchronously except for the async-loading kinds (decoded-image/raw-image/heic/dicom/
 // archive/info/data-grid/json/csv/tsv/markdown/text), which show a transient `.preview-note` "Loading
 // preview…" first — see `waitForPreviewToSettle` below.
+//
+// `aside.details` (DetailsPane.svelte) is ALSO a valid terminal state, not just decorative extra
+// coverage: CPE-1357's validate-before-embed fix renders `<slot />` — App.svelte passes a `<DetailsPane>`
+// as PreviewPane's default slot content — when a PDF fails structural validation (`pdfState === "error"`,
+// PreviewPane.svelte), rather than a `.preview-note`. `documents/malformed.pdf` (no resolvable
+// `startxref`) hits exactly this path, so without `aside.details` here, `waitForPreviewToSettle` would
+// spin to its timeout and misreport the CPE-1357 regression pin as a "stuck spinner" even though the app
+// correctly degraded to the metadata pane.
 const CONTENT_SELECTOR = [
   ".preview-img",
   ".preview-media",
@@ -92,6 +104,7 @@ const CONTENT_SELECTOR = [
   ".preview-editor",
   '[data-testid="hexview"]',
   ".data-browser",
+  "aside.details",
 ].join(", ");
 
 // The exact English `pv.loading` string (PreviewPane.svelte / src/lib/i18n.ts) — the default locale in
@@ -237,10 +250,12 @@ describe("CPE-1358 — headless GUI smoke: every samples/ file opens without cra
     });
   }
 
-  // CPE-1357 regression repro — deliberately LAST, see the file header comment for why. A longer
-  // crash-detection pause than the default: this is the one file in the walk where "nothing threw yet"
-  // is the least trustworthy signal, so give WebView2's embedded PDF plugin more room to actually crash
-  // before this spec declares victory.
+  // CPE-1357 regression pin — deliberately LAST, see the file header comment for why. A longer
+  // crash-detection pause than the default: `pdf_validity` should reject this file BEFORE the iframe
+  // ever mounts (falling back to `aside.details`, see CONTENT_SELECTOR's comment above), so nothing
+  // should ever reach WebView2's PDF plugin at all — but this is the one file in the whole walk where
+  // "nothing threw yet" is the least trustworthy signal, so give a regression in that validation path
+  // extra room to manifest before this spec declares victory.
   it(`opens samples/${MALFORMED_PDF_REL}: the CPE-1357 crash-regression guard`, async function () {
     await openAndVerify(samplesRootAbs, MALFORMED_PDF_REL, 2_000);
     await snap("samples-pdf-malformed");

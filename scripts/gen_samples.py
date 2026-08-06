@@ -181,11 +181,16 @@ def make_pdf() -> bytes:
     WebView2's built-in PDF viewer (the `<iframe class="preview-pdf">` preview, PreviewPane.svelte) can
     actually load it — unlike the OLD fixture this replaces (`/Kids [] /Count 0`, no `xref` table at
     all), which was a degenerate, unloadable "PDF" that crashed the app (CPE-1357; the bad bytes are
-    preserved, unchanged, as the regression fixture `make_malformed_pdf()` below). Keeps the exact same
-    `/Info` dictionary fields as the old fixture so `sample_fixtures.rs`'s `pdf_info_baseline` test (and
-    the Metadata Studio) still see the documented baseline metadata — `read_pdf` (media_meta_read.rs)
-    text-scans for `/Info N G R` and never required a real xref anyway, so only the *loadability* half of
-    the fixture was ever broken, not the metadata half."""
+    preserved, unchanged, as the regression fixture `make_malformed_pdf()` below; CPE-1357 also added
+    validate-before-embed so a rejected PDF like that one now falls back to the metadata pane instead of
+    ever reaching WebView2). Keeps the exact same full `/Info` dictionary fields as the ORIGINAL
+    hand-authored fixture (Title/Author/Subject/Keywords/Creator/Producer/dates) — an intermediate commit
+    briefly swapped `doc.pdf` for a Pillow-rendered raster PDF with a slimmer `/Info` dict (Title only) and
+    updated `sample_fixtures.rs::pdf_info_baseline` to match that slimmer shape; this generator-produced
+    fixture restores the full baseline (and `pdf_info_baseline` was restored alongside it), matching every
+    other sample format's documented metadata contract (`read_pdf` in media_meta_read.rs text-scans for
+    `/Info N G R` and never required a real xref anyway, so only the *loadability* half of the ORIGINAL
+    fixture was ever broken, not the metadata half)."""
     info_dict = (
         b"<< /Title (" + TITLE.encode() + b") /Author (" + ARTIST.encode() + b")"
         b" /Subject (Baseline fixture) /Keywords (cpe,sample,baseline)"
