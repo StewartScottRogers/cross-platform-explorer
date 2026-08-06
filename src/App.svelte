@@ -2811,6 +2811,11 @@
     return commands.readDicomTags(path).then(unwrap);
   }
 
+  /** Decode a HEIC/HEIF file to a data: URL (platform image stack) for the preview pane. */
+  function loadHeicImageData(path: string): Promise<string> {
+    return commands.readHeicPreviewDataUrl(path).then(unwrap);
+  }
+
   /** Save edited text back to a file, then refresh so size/date update. */
   async function savePreviewText(path: string, contents: string): Promise<void> {
     unwrap(await commands.writeFileText(path, contents));
@@ -5076,6 +5081,7 @@
           loadRawImageData={loadRawImageData}
           loadDicomImageData={loadDicomImageData}
           loadDicomTags={loadDicomTags}
+          loadHeicImageData={loadHeicImageData}
           saveText={savePreviewText}
         >
           <DetailsPane selected={selectedEntries.length ? selectedEntries : (homePreview ? [homePreview] : [])} {folderName} {itemCount} {folderIcon} />

@@ -148,6 +148,11 @@ windows = { version = "0.56", features = [
     "Win32_Security",
     "Win32_System_Ioctl",
     "Win32_System_IO",
+    # HEIC/HEIF preview via the Windows Imaging Component (CPE-1351, epic CPE-097): WIC decoder +
+    # format-converter to 32bpp RGBA (Win32_Graphics_Imaging), plus COM apartment init/CoCreateInstance
+    # (Win32_System_Com). Same `windows` dep — just more features, no second crate.
+    "Win32_Graphics_Imaging",
+    "Win32_System_Com",
 ] }
 # Encrypted-vault passphrase storage in the OS credential store (CPE-1248, epic CPE-738): the ONLY place a
 # vault passphrase persists. The `KeyringBackend` adapter (mirroring the sidecar's, CPE-268/322) is the real
@@ -158,6 +163,21 @@ keyring = { version = "3", features = ["windows-native"] }
 # macOS Keychain via the Security framework for vault passphrases (CPE-1248) — pure system framework, no libs.
 [target.'cfg(target_os = "macos")'.dependencies]
 keyring = { version = "3", features = ["apple-native"] }
+# HEIC/HEIF preview via ImageIO (CPE-1351, epic CPE-097): pure Rust bindings to the system ImageIO +
+# CoreGraphics frameworks — macOS decodes HEIC natively (since 10.13), no Store install needed. All
+# permissive (`Zlib OR Apache-2.0 OR MIT`); no bundled C — the frameworks are dynamically linked from
+# the OS. objc2 0.6 / objc2-* 0.3 per the vetted plan. objc2 crates gate every type behind a
+# per-type feature, so the exact ones the ImageIO decode path names are enabled explicitly.
+objc2 = "0.6"
+objc2-foundation = "0.3"
+objc2-core-foundation = { version = "0.3", features = ["CFURL", "CFCGTypes", "CFBase"] }
+objc2-core-graphics = { version = "0.3", features = [
+    "CGImage",
+    "CGContext",
+    "CGColorSpace",
+    "CGBitmapContext",
+] }
+objc2-image-io = { version = "0.3", features = ["CGImageSource", "objc2-core-graphics"] }
 
 # Linux Secret Service over D-Bus (GNOME Keyring / KWallet) for vault passphrases (CPE-1248).
 # `sync-secret-service` uses zbus (pure-Rust D-Bus, no libdbus); `crypto-rust` keeps session crypto pure-Rust.

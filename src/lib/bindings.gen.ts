@@ -413,6 +413,22 @@ async readDicomTags(path: string) : Promise<Result<([string, string])[], string>
 }
 },
 /**
+ * Decode a HEIC/HEIF (`.heic`/`.heif`/`.hif`) file to a PNG `data:` URL the `<img>` tag can show
+ * (CPE-1351, epic CPE-097), via the platform image stack (Windows Imaging Component / macOS
+ * ImageIO). Mirrors `read_raw_preview_data_url` above: a thin `spawn_blocking` dispatcher into the
+ * app-adapter `heic_preview` module (the FFI can't live in `cpe-server`), capped by the same preview
+ * size guard. `Err` on a corrupt file, an unsupported platform, or — commonly on Windows — a missing
+ * OS HEIF codec (the Store "HEIF Image Extensions"); the frontend falls back to the metadata view.
+ */
+async readHeicPreviewDataUrl(path: string) : Promise<Result<string, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("read_heic_preview_data_url", { path }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
  * A PNG thumbnail of an image file as a `data:` URL the `<img>` tag can show (CPE-642), served from
  * an mtime-keyed on-disk cache (CPE-644). Also covers `.svg` (rasterized) and `.ttf`/`.otf`/`.woff`
  * glyph-sheet specimens (CPE-1236) — the format dispatch lives entirely in

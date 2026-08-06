@@ -8,6 +8,26 @@ use std::path::Path;
 
 use serde::Serialize;
 
+/// Encode a raw RGBA8 pixel buffer (`width * height * 4` bytes, row-major, no padding) to a PNG
+/// `data:image/png;base64,...` URL the `<img>` tag can show. The single shared sink both the
+/// pure-Rust preview decoders and the platform-API HEIC/HEIF decoders in the app adapter feed
+/// (CPE-1351): they own the FFI; this owns the PNG-encode + base64 wrap, keeping the encoding in
+/// one tested place in `cpe-server`. `Err` (never a panic) when `rgba`'s length doesn't match
+/// `width * height * 4` or PNG encoding fails.
+pub fn encode_rgba_to_png_data_url(width: u32, height: u32, rgba: Vec<u8>) -> Result<String, String> {
+    use base64::Engine;
+    use std::io::Cursor;
+
+    let buf = image::RgbaImage::from_raw(width, height, rgba)
+        .ok_or("RGBA buffer size does not match width * height * 4")?;
+    let mut out = Cursor::new(Vec::new());
+    image::DynamicImage::ImageRgba8(buf)
+        .write_to(&mut out, image::ImageFormat::Png)
+        .map_err(|e| e.to_string())?;
+    let b64 = base64::engine::general_purpose::STANDARD.encode(out.into_inner());
+    Ok(format!("data:image/png;base64,{b64}"))
+}
+
 /// Decode an image the webview can't render natively (TIFF, PSD) to a PNG `data:` URL the `<img>` tag
 /// can show. PSD uses the psd crate's flattened composite; TIFF (and any other image-crate-decodable
 /// format routed here) uses the image crate. Errors (rather than hangs) on a corrupt file.
@@ -16,7 +36,7 @@ pub fn read_image_data_url(path: &str) -> Result<String, String> {
     use std::io::Cursor;
 
     let ext = crate::model::extension_of(Path::new(path));
-    let png: Vec<u8> = if ext == "psd" {
+    if ext == "psd" {
         let bytes = fs::read(path).map_err(|e| e.to_string())?;
         let psd = psd::Psd::from_bytes(&bytes).map_err(|e| e.to_string())?;
         if !crate::thumb_source::psd_within_limits(&psd) {
@@ -26,23 +46,15 @@ pub fn read_image_data_url(path: &str) -> Result<String, String> {
                 psd.height()
             ));
         }
-        let rgba = psd.rgba();
-        let buf = image::RgbaImage::from_raw(psd.width(), psd.height(), rgba)
-            .ok_or("PSD pixel buffer size mismatch")?;
-        let mut out = Cursor::new(Vec::new());
-        image::DynamicImage::ImageRgba8(buf)
-            .write_to(&mut out, image::ImageFormat::Png)
-            .map_err(|e| e.to_string())?;
-        out.into_inner()
+        // The composite is already RGBA8 — route it through the shared PNG sink (CPE-1351).
+        encode_rgba_to_png_data_url(psd.width(), psd.height(), psd.rgba())
     } else {
         let img = image::open(path).map_err(|e| e.to_string())?;
         let mut out = Cursor::new(Vec::new());
         img.write_to(&mut out, image::ImageFormat::Png).map_err(|e| e.to_string())?;
-        out.into_inner()
-    };
-
-    let b64 = base64::engine::general_purpose::STANDARD.encode(&png);
-    Ok(format!("data:image/png;base64,{b64}"))
+        let b64 = base64::engine::general_purpose::STANDARD.encode(out.into_inner());
+        Ok(format!("data:image/png;base64,{b64}"))
+    }
 }
 
 /// Image dimensions + basic EXIF for the Properties dialog. Best-effort: every field is optional and a
@@ -120,6 +132,27 @@ mod tests {
         let d = std::env::temp_dir().join(format!("cpe-imgprev-{}-{}-{}", tag, std::process::id(), n));
         fs::create_dir_all(&d).unwrap();
         d
+    }
+
+    #[test]
+    fn encode_rgba_to_png_data_url_round_trips_a_2x2() {
+        // A tiny 2x2 RGBA buffer (4 opaque pixels: red, green, blue, white).
+        let rgba = vec![
+            255, 0, 0, 255, //
+            0, 255, 0, 255, //
+            0, 0, 255, 255, //
+            255, 255, 255, 255,
+        ];
+        let url = encode_rgba_to_png_data_url(2, 2, rgba).unwrap();
+        assert!(url.starts_with("data:image/png;base64,"));
+        // The base64 payload must decode back to a valid 2x2 PNG.
+        use base64::Engine;
+        let b64 = url.strip_prefix("data:image/png;base64,").unwrap();
+        let bytes = base64::engine::general_purpose::STANDARD.decode(b64).unwrap();
+        let img = image::load_from_memory(&bytes).unwrap();
+        assert_eq!((img.width(), img.height()), (2, 2));
+        // A buffer whose length doesn't match width*height*4 is an Err, not a panic.
+        assert!(encode_rgba_to_png_data_url(2, 2, vec![0u8; 3]).is_err());
     }
 
     #[test]

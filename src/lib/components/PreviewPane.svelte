@@ -45,6 +45,8 @@
   export let loadDicomImageData: (path: string) => Promise<string> = async () => "";
   /** Read a curated set of DICOM tags for the preview pane (a backend command in the app). */
   export let loadDicomTags: (path: string) => Promise<[string, string][]> = async () => [];
+  /** Decode a HEIC/HEIF file to a data: URL via the platform image stack (a backend command in the app). */
+  export let loadHeicImageData: (path: string) => Promise<string> = async () => "";
 
   /** Cap the number of CSV rows rendered so a huge sheet can't lock the pane. */
   const CSV_ROW_CAP = 200;
@@ -101,6 +103,12 @@
   let dicomTags: [string, string][] = [];
   let dicomTagsReqId = 0;
 
+  // HEIC/HEIF (CPE-1351): decoded via the platform image stack. Kept separate so a missing OS HEIF
+  // codec (the common Windows case → backend Err) falls back to the metadata slot, like raw-image.
+  let heicImgUrl = "";
+  let heicImgState: "idle" | "loading" | "error" = "idle";
+  let heicImgReqId = 0;
+
   let fontFamily = "";
   let fontState: "idle" | "loading" | "error" = "idle";
   let fontReqId = 0;
@@ -122,6 +130,7 @@
   $: if (entry && provider.kind === "info") loadInfoFor(entry);
   $: if (entry && provider.kind === "decoded-image") loadImageDataFor(entry);
   $: if (entry && provider.kind === "raw-image") loadRawImageDataFor(entry);
+  $: if (entry && provider.kind === "heic") loadHeicImageDataFor(entry);
   $: if (entry && provider.kind === "dicom") {
     loadDicomImageDataFor(entry);
     loadDicomTagsFor(entry);
@@ -221,6 +230,23 @@
     } catch {
       if (mine !== rawImgReqId) return;
       rawImgState = "error";
+    }
+  }
+
+  /** No decodable HEIC (backend `Err` — commonly a missing OS HEIF codec on Windows, or a corrupt
+   *  file) lands in `heicImgState === "error"`, which the render side shows as the metadata slot
+   *  rather than an error message — same clean fallback as the raw-image miss above. */
+  async function loadHeicImageDataFor(e: DirEntry) {
+    const mine = ++heicImgReqId;
+    heicImgState = "loading";
+    try {
+      const url = await loadHeicImageData(e.path);
+      if (mine !== heicImgReqId) return;
+      heicImgUrl = url;
+      heicImgState = "idle";
+    } catch {
+      if (mine !== heicImgReqId) return;
+      heicImgState = "error";
     }
   }
 
@@ -787,6 +813,14 @@
       <slot />
     {:else}
       <img class="preview-img" src={rawImgUrl} alt={entry.name} />
+    {/if}
+  {:else if provider.kind === "heic" && entry}
+    {#if heicImgState === "loading"}
+      <p class="preview-note">{$t("pv.loading")}</p>
+    {:else if heicImgState === "error"}
+      <slot />
+    {:else}
+      <img class="preview-img" src={heicImgUrl} alt={entry.name} />
     {/if}
   {:else if provider.kind === "dicom" && entry}
     {#if dicomImgState === "loading"}

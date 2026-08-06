@@ -148,6 +148,16 @@ describe("pickProvider", () => {
     expect(pickProvider(entry({ name: "a.png", extension: "png" })).kind).toBe("image");
   });
 
+  it("decodes HEIC/HEIF (heic/heif/hif) via the heic provider, beating native image (CPE-1351)", () => {
+    for (const ext of ["heic", "heif", "hif"]) {
+      const p = pickProvider(entry({ name: `a.${ext}`, extension: ext }));
+      expect(p.kind).toBe("heic");
+      expect(p.editable).toBe(false);
+    }
+    // sanity: a native image still uses the plain image provider, not heic
+    expect(pickProvider(entry({ name: "a.png", extension: "png" })).kind).toBe("image");
+  });
+
   it("falls back to metadata for folders and nothing selected", () => {
     expect(pickProvider(entry({ name: "dir", is_dir: true, extension: "" })).kind).toBe("none");
     expect(pickProvider(null).kind).toBe("none");

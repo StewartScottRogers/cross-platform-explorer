@@ -16,7 +16,7 @@
   import { iconFor } from "../filetypes";
   import {
     loadPreviewText, loadArchiveEntries, loadPreviewInfo, loadImageData, loadRawImageData,
-    loadDicomImageData, loadDicomTags, savePreviewText,
+    loadDicomImageData, loadDicomTags, loadHeicImageData, savePreviewText,
   } from "../preview/loaders";
   import type { DirEntry } from "../types";
 
@@ -80,6 +80,7 @@
           loadRawImageData={loadRawImageData}
           loadDicomImageData={loadDicomImageData}
           loadDicomTags={loadDicomTags}
+          loadHeicImageData={loadHeicImageData}
           saveText={savePreviewText}
         >
           <DetailsPane selected={[active.entry]} folderName="" itemCount={0} />
