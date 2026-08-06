@@ -11,9 +11,13 @@ use cpe_server::video_meta_read::read_mp4;
 use std::fs;
 use std::path::PathBuf;
 
-fn sample(rel: &str) -> Vec<u8> {
+fn sample_path(rel: &str) -> String {
     let p: PathBuf = [env!("CARGO_MANIFEST_DIR"), "..", "..", "samples", rel].iter().collect();
-    fs::read(&p).unwrap_or_else(|e| panic!("read sample {rel}: {e}"))
+    p.to_string_lossy().to_string()
+}
+
+fn sample(rel: &str) -> Vec<u8> {
+    fs::read(sample_path(rel)).unwrap_or_else(|e| panic!("read sample {rel}: {e}"))
 }
 
 fn val<'a>(fields: &'a [MetaField], key: &str) -> &'a str {
@@ -123,4 +127,80 @@ fn text_samples_exist_and_are_readable() {
     }
     // The PNG is a real image: PNG signature.
     assert_eq!(&sample("images/pixel.png")[..8], b"\x89PNG\r\n\x1a\n");
+}
+
+// ─────────────────────────────────────────────────────────────────────────────────────────────────────
+// Substantial-fixture assertions (CPE-1361): each new REAL fixture opens through its shipped parser.
+// ─────────────────────────────────────────────────────────────────────────────────────────────────────
+
+/// The multi-folder ZIP lists its real tree and an inner file's bytes extract intact (the CPE-1360
+/// archive-inner-preview path).
+#[test]
+fn zip_lists_real_tree_and_extracts_inner_file() {
+    use cpe_server::archive::{extract_archive_entry_any, read_archive_entries};
+    let path = sample_path("archives/sample.zip");
+    let entries = read_archive_entries(&path).expect("list zip");
+    let names: Vec<&str> = entries.iter().map(|e| e.name.as_str()).collect();
+    for expected in ["docs/readme.md", "docs/sub/notes.txt", "images/logo.png", "data/table.csv", "src/main.py"] {
+        assert!(names.iter().any(|n| n == &expected), "zip missing {expected}; have {names:?}");
+    }
+    assert!(entries.iter().any(|e| e.is_dir), "zip should carry explicit directory entries");
+
+    let extracted = extract_archive_entry_any(&path, "docs/readme.md").expect("extract inner file");
+    let text = fs::read_to_string(&extracted).expect("read extracted");
+    assert!(text.contains("Sample Archive"), "inner readme content extracted: {text:?}");
+}
+
+/// The hand-built RAR4 lists the same tree via the pure-Rust `rar_entries` walker (CPE-1347).
+#[test]
+fn rar_lists_real_tree() {
+    use cpe_server::rar::rar_entries;
+    let entries = rar_entries(&sample_path("archives/sample.rar")).expect("list rar");
+    let files: Vec<&str> = entries.iter().filter(|e| !e.is_dir).map(|e| e.name.as_str()).collect();
+    for expected in ["docs/readme.md", "docs/sub/notes.txt", "images/logo.png", "data/table.csv", "src/main.py"] {
+        assert!(files.iter().any(|n| n == &expected), "rar missing file {expected}; have {files:?}");
+    }
+    assert!(entries.iter().any(|e| e.is_dir && e.name == "images"), "rar should list directory entries");
+    let readme = entries.iter().find(|e| e.name == "docs/readme.md").unwrap();
+    assert!(readme.size > 0, "stored file advertises its real (uncompressed) size");
+}
+
+/// The SQLite database opens read-only and reports its several tables + real row counts (data-grid preview).
+#[test]
+fn sqlite_reports_tables_and_row_counts() {
+    use cpe_server::data_preview::sqlite_info;
+    let info = sqlite_info(&sample_path("database/mini.sqlite")).expect("read sqlite");
+    assert!(info.contains("users (table) — 20 rows"), "users table + rows: {info}");
+    assert!(info.contains("products (table) — 12 rows"), "products table + rows: {info}");
+    assert!(info.contains("orders (table) — 40 rows"), "orders table + rows: {info}");
+    assert!(info.contains("order_summary (view)"), "view present: {info}");
+    assert!(info.contains("columns: id, name, email"), "column list present: {info}");
+}
+
+/// The WASM module disassembles to meaningful WAT exporting `add` and `fib` (binary-info preview).
+#[test]
+fn wasm_disassembles_to_add_and_fib() {
+    use cpe_server::binary_preview::wasm_info;
+    let wat = wasm_info(&sample_path("other/tiny.wasm"), 64 * 1024).expect("disassemble wasm");
+    assert!(wat.contains("func"), "WAT has functions: {wat}");
+    assert!(wat.contains("add"), "exports add: {wat}");
+    assert!(wat.contains("fib"), "exports fib: {wat}");
+}
+
+/// The TTF renders a real "Aa" specimen (non-empty ink) through the glyph-sheet thumbnailer.
+#[test]
+fn ttf_renders_a_specimen_with_ink() {
+    use cpe_server::thumb_font::render_glyph_sheet;
+    let img = render_glyph_sheet(&sample("fonts/mini.ttf"), "ttf", 64).expect("render glyph sheet");
+    let rgba = img.to_rgba8();
+    let has_ink = rgba.pixels().any(|p| p.0[0] < 250 || p.0[1] < 250 || p.0[2] < 250);
+    assert!(has_ink, "the full-ASCII font must paint real glyph ink for the 'Aa' specimen");
+}
+
+/// The TIFF decodes and transcodes to a PNG data URL (decoded-image preview path).
+#[test]
+fn tiff_transcodes_to_png_data_url() {
+    use cpe_server::image_preview::read_image_data_url;
+    let url = read_image_data_url(&sample_path("images/photo.tiff")).expect("transcode tiff");
+    assert!(url.starts_with("data:image/png;base64,"), "decoded-image preview yields a PNG data URL");
 }
