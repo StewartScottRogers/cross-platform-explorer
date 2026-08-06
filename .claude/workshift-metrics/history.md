@@ -968,3 +968,19 @@ The 5 common mesh formats are done. Remaining CLEAN incremental candidates are t
 signatures (fonts ttf/otf/woff — small, real, zero-dep — the ONE remaining clean-ish slice), or gold-plating.
 Everything of scale is USER-GATED (AI model key, Mac, cert, SFTP/Docker/hardware) or NEEDS a heavy/licensed dep
 (HEIC/DICOM/RAR/camera-RAW). See [[clean-backend-vein-3d-reader-2026-08-05]], [[clean-gui-vein-tapped-after-declutter-2026-08-05]].
+
+## Shift 2026-08-05 (resume) — 4 tickets, file-type correctness lane (epic CPE-1000)
+Resumed the workshift; fresh session, full budget. Checkpoint said the last clean slice was "font signatures"
+but they were already done — reading file_type.rs surfaced 2 real items instead, and a mid-shift evidence-based
+frontier scan surfaced 2 more. Shipped 4, all gauntlet (Reviewer+UAT) + CI-green on 3 OS, 0 escaped defects:
+- CPE-1341 (#637) ftyp-brand disambiguation — real false-positive bug (mov/heic/avif/3gp flagged as MP4 mismatch).
+- CPE-1342 (#637) +11 magic signatures (tar/psd/cab/icns/ar/aiff/midi/flv/cur/lz4/lzip).
+- CPE-1343 (#638) type_mismatch_scan HEADER_CAP 64→512 — TAR@257 was unreachable by the tree-sweep (a latent
+  gap CPE-1342 exposed). LESSON: new offset-based signature → verify HEADER_CAP/column caps can read that deep.
+- CPE-1344 (#639) OLE2/CFBF container signature (legacy doc/xls/ppt/msi/msg/vsd), were invisible to mismatch.
+Tuned defaults: file_type-sniffer class = sonnet, ~11m gauntlet median, 0 retries, 0 stuck; parallelize non-
+colliding tickets by FILE (1343 type_mismatch_scan.rs ∥ 1344 file_type.rs). Windows Server-crates CI ran ~30m
+(cold runner, both feature modes) — expect the long tail; Backend-windows is green much earlier on the same crate.
+NOTE: gauntlet agents run withOUT worktree isolation leave scratch (pr637.diff) in the MAIN tree — Foreman
+git-rm'd it; consider isolating reviewers too or a targeted add. FRONTIER: signature vein now TAPPED (Library
+`file-type-signature-vein-tapped-2026-08-05`); only DDS/EOT left = gold-plating, skip. Next work needs the user.

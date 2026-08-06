@@ -1,3 +1,7 @@
+# Workshift Checkpoint — 2026-08-05 ~18:25 local — 4 TICKETS SHIPPED (file-type correctness) · SIGNATURE VEIN TAPPED · main GREEN
+
+> **Latest run at the BOTTOM of this file** (`## RUN 2026-08-05 (resume)`). Older runs kept below for history.
+
 # Workshift Checkpoint — 2026-08-04 ~02:00 local — 10 TICKETS SHIPPED · MEDIA-METADATA WRITE-BACK COMPLETE · WELL DRY
 
 Session 9526080f (CLI). User said "run 6 workshifts back to back … see you in the morning." Delivered **10
@@ -171,3 +175,35 @@ resumes with full budget.
 Start a fresh session and say "resume the workshift" (reads this checkpoint + history) — OR name a focus / provide
 a resource. If continuing autonomously, the font-signatures slice is the last clean-ish increment; after that,
 take a gated/heavy epic WITH the user rather than manufacturing filler. Nothing blocked or broken; main clean.
+
+---
+## RUN 2026-08-05 (resume) — ~18:25 local — 4 TICKETS SHIPPED, file-type correctness lane, SIGNATURE VEIN TAPPED
+Fresh session (full budget), resumed the workshift. The prior checkpoint pointed at "font signatures" as the
+last clean slice — but they were already done. Reading `crates/server/src/file_type.rs` surfaced two REAL items,
+and a mid-shift evidence-based frontier scan surfaced two more. All 4 shipped through the full Reviewer+UAT
+gauntlet, CI-green on 3 OS, **0 escaped defects**:
+- **CPE-1341** (#637) ftyp major-brand disambiguation — fixed a live false-positive: `.mov`/`.heic`/`.avif`/`.3gp`
+  were flagged as MP4 mismatches. New variants Mov/Heic/Avif/ThreeGpp; unknown brands still fall back to Mp4.
+- **CPE-1342** (#637) +11 magic signatures: tar/psd/cab/icns/ar(+deb)/aiff/midi/flv/cur/lz4/lzip.
+- **CPE-1343** (#638) `type_mismatch_scan.rs` HEADER_CAP 64→512 — the tree-sweep could never reach TAR's
+  offset-257 magic (added by 1342), so disguised `.tar` was invisible there (the column path at 1 MiB did catch it).
+- **CPE-1344** (#639) OLE2/CFBF container signature → FileType::Ole2 (doc/xls/ppt/msi/msg/vsd), were sniffing None.
+
+## State
+- `main` @ origin `782cd700` (+ this checkpoint), CLEAN. Backlog + Doing EMPTY. Worktrees deep-cleaned (only main). MVD 6 (unchanged; all-headless lane).
+- Each PR's OWN CI green incl. Server-crates + Backend on all 3 OS. NOTE: Windows Server-crates CI ran ~30 min
+  (cold runner, clippy ×2 feature modes) — expect that long tail; Backend-windows greens much earlier on the same crate.
+- GUI-smoke showed "fail" twice = cancelled-while-queued (concurrency supersede), NOT real failures; irrelevant to a
+  backend-only diff. main is UNPROTECTED (no required checks) — the gauntlet + authoritative CI is the gate.
+
+## FRONTIER — file-type/format-signature vein now TAPPED (evidence: fresh 2026-08-05 scan + Library entry)
+Library `file-type-signature-vein-tapped-2026-08-05` (read it). Only DDS/EOT signatures remain = **gold-plating, SKIP**.
+Everything of scale is USER-GATED (AI model key/embedder for CPE-976/977/979/980; Mac; signing cert; SFTP/cloud
+creds; Docker net-E2E; removable-drive hardware) or NEEDS a heavy/licensed dep (HEIC/DICOM/RAR/camera-RAW) or is
+attended GUI (interactive 3D WebGL viewer, metadata-edit UI polish, near-dup review UI).
+
+## To resume
+Do NOT re-run a clean file-type/signature hunt — this shift already did an evidence-based scan and shipped the 2
+real items it found; the Library says the vein is tapped and DDS/EOT is filler. Next real work needs the USER:
+name/provide a resource, green-light a gated/heavy-dep epic to build WITH cargo tests, or accept an attended-GUI
+epic to pair on (build → deploy → run). Nothing blocked or broken; main clean and green.

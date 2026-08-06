@@ -2,13 +2,13 @@
 id: CPE-1344
 title: "file_type: add OLE2/CFBF signature (legacy .doc/.xls/.ppt, .msi, .msg) — currently invisible to mismatch detection"
 type: Task
-status: Backlog
+status: Done
 priority: Medium
 component: cpe-server
 tags: [ready]
 epic: CPE-1000
 created: 2026-08-05
-closed:
+closed: 2026-08-05
 ---
 
 ## Problem
@@ -53,3 +53,6 @@ extensions — following the exact pattern of the existing ZIP container arm:
 Pure `cpe-server`, headless, cargo-testable. Touches `file_type.rs` — **no overlap** with
 CPE-1343 (`type_mismatch_scan.rs`), so the two run in parallel. Surfaced by the 2026-08-05
 frontier scan. Feeds epic CPE-1000.
+
+## Work Log
+- 2026-08-05 (workshift): PR #639 squash-merged to main (782cd700). Worker(sonnet); Reviewer APPROVE + UAT PASS (independent probe: OLE2 magic detects, 6 container exts not flagged, disguised .pdf flagged, no panic). All CI green 3 OS. FileType::Ole2 (doc/xls/ppt/msi/msg/vsd); no new deps. Surfaced by the frontier scan.
