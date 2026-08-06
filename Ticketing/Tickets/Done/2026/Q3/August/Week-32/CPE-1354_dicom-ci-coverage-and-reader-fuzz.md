@@ -2,13 +2,13 @@
 id: CPE-1354
 title: "Harden the shipped readers: run dicom-thumb tests in CI + add rar/dicom/camera_raw to the panic-safety battery"
 type: Task
-status: Backlog
+status: Done
 priority: High
 component: Multiple
 tags: [ready]
 epic: CPE-219
 created: 2026-08-05
-closed:
+closed: 2026-08-06
 ---
 
 ## Problem (two related gaps, both in code shipped THIS session)
@@ -59,3 +59,6 @@ CI — that's fine; they still run locally with the feature.)
 Two files: `.github/workflows/ci.yml` + `crates/server/tests/binary_data_preview_panic_safety.rs` (no
 collision). High value: closes a live regression-detection hole for code shipped this session + extends the
 codebase's own proof layer to the new highest-risk parsers. Surfaced by the 2026-08-05 frontier scan.
+
+## Work Log
+- 2026-08-06 (workshift): PR #649 merged. (A) CI server job now runs --features ...,dicom-thumb (clippy+test) so the DICOM tests incl. the CPE-1353 YBR regression actually execute in CI (were invisible). (B) rar/camera_raw/dicom added to binary_data_preview_panic_safety.rs battery with structurally-real magic seeds. Reviewer APPROVE (seeds verified reaching real parse code) + UAT PASS (proved non-hollow via injected-panic). Validated: Server-crates-ubuntu green with dicom-thumb.
