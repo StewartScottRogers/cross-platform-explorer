@@ -126,6 +126,17 @@ fn decode_heic_windows_inner(path: &str) -> Result<String, String> {
         if w == 0 || h == 0 {
             return Err("HEIC decode produced empty dimensions".into());
         }
+        // A malformed/hostile HEIC can *declare* enormous dimensions independent of its file size (the
+        // upstream `ensure_previewable_size` cap bounds bytes, not pixels). Refuse absurd dimensions
+        // before allocating: this keeps the RGBA buffer well under `u32::MAX` bytes — both avoiding a
+        // multi-gigabyte transient allocation and sidestepping the windows-rs `CopyPixels` wrapper's
+        // internal `len().try_into::<u32>().unwrap()` panic on an over-4GiB buffer. (CPE-1351 review.)
+        const MAX_HEIC_DIM: u32 = 20_000;
+        if w > MAX_HEIC_DIM || h > MAX_HEIC_DIM {
+            return Err(format!(
+                "HEIC dimensions {w}x{h} exceed the {MAX_HEIC_DIM}px preview limit"
+            ));
+        }
 
         let stride = w
             .checked_mul(4)
