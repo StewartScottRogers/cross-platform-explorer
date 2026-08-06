@@ -14,6 +14,7 @@ export type PreviewKind =
   | "decoded-image"
   | "raw-image"
   | "dicom"
+  | "heic"
   | "audio"
   | "video"
   | "pdf"
@@ -100,6 +101,16 @@ const RAW_EXT = new Set(["cr2", "nef", "arw"]);
  */
 const DICOM_EXT = new Set(["dcm"]);
 
+/**
+ * HEIC/HEIF images (Apple's HEVC-based photo container): the webview can't render them and no
+ * pure-Rust decoder handles them cleanly, so the backend decodes them through the platform image
+ * stack (Windows Imaging Component / macOS ImageIO) via `read_heic_preview_data_url` (CPE-1351, epic
+ * CPE-097) — same PNG data-URL shape as `read_image_data_url`. On Windows this needs the OS "HEIF
+ * Image Extensions"; when they're absent the backend returns `Err` and the pane falls back to the
+ * metadata slot (like raw-image), so the miss is clean.
+ */
+const HEIC_EXT = new Set(["heic", "heif", "hif"]);
+
 /** Font files rendered as a live specimen via the webview's FontFace API (CPE-117). */
 const FONT_EXT = new Set(["ttf", "otf", "woff", "woff2"]);
 
@@ -135,6 +146,15 @@ export const providers: PreviewProvider[] = [
     kind: "dicom",
     editable: false,
     canPreview: (e) => !e.is_dir && DICOM_EXT.has(e.extension),
+  },
+  // heic/heif/hif categorise as images but the webview can't decode HEVC-based data — route to the
+  // platform-API decode backend instead. Must precede the generic image provider.
+  {
+    id: "heic",
+    label: "HEIC",
+    kind: "heic",
+    editable: false,
+    canPreview: (e) => !e.is_dir && HEIC_EXT.has(e.extension),
   },
   {
     id: "image",

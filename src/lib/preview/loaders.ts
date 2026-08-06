@@ -31,5 +31,8 @@ export const loadDicomImageData = (path: string): Promise<string> =>
 export const loadDicomTags = (path: string): Promise<[string, string][]> =>
   commands.readDicomTags(path).then(unwrap);
 
+export const loadHeicImageData = (path: string): Promise<string> =>
+  commands.readHeicPreviewDataUrl(path).then(unwrap);
+
 export const savePreviewText = (path: string, contents: string): Promise<void> =>
   commands.writeFileText(path, contents).then((r) => void unwrap(r));

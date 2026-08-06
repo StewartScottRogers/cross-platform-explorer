@@ -53,6 +53,13 @@ mod agent_shadow;
 /// rather than in `cpe-server`).
 mod pty;
 
+/// HEIC/HEIF preview via per-OS platform APIs (CPE-1351, epic CPE-097): decode `.heic`/`.heif`/`.hif`
+/// to a PNG `data:` URL through the Windows Imaging Component / macOS ImageIO — the FFI the
+/// domain-crate `image_preview::encode_rgba_to_png_data_url` sink can't own (it stays Tauri- and
+/// platform-FFI-free). Dispatched by plain `cfg`; the `read_heic_preview_data_url` command below is a
+/// thin `spawn_blocking` into it.
+mod heic_preview;
+
 /// System-tray icon + quick-access menu + show/hide + close-to-tray (CPE-1272, epic CPE-713). Desktop-only
 /// (mobile has no system tray). Renders `cpe_server::tray_quick::QuickAccess::items()` and wires the tray's
 /// events; see the module docs. Gated the same way as the tray plugin bits below.
@@ -985,6 +992,23 @@ async fn read_dicom_tags(path: String) -> Result<Vec<(String, String)>, String> 
     tauri::async_runtime::spawn_blocking(move || cpe_server::dicom::read_dicom_tags(&path))
         .await
         .map_err(|e| e.to_string())?
+}
+
+/// Decode a HEIC/HEIF (`.heic`/`.heif`/`.hif`) file to a PNG `data:` URL the `<img>` tag can show
+/// (CPE-1351, epic CPE-097), via the platform image stack (Windows Imaging Component / macOS
+/// ImageIO). Mirrors `read_raw_preview_data_url` above: a thin `spawn_blocking` dispatcher into the
+/// app-adapter `heic_preview` module (the FFI can't live in `cpe-server`), capped by the same preview
+/// size guard. `Err` on a corrupt file, an unsupported platform, or — commonly on Windows — a missing
+/// OS HEIF codec (the Store "HEIF Image Extensions"); the frontend falls back to the metadata view.
+#[tauri::command]
+#[cfg_attr(feature = "specta-bindings", specta::specta)]
+async fn read_heic_preview_data_url(path: String) -> Result<String, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        ensure_previewable_size(&path, PREVIEW_INFO_MAX_BYTES)?;
+        heic_preview::decode_heic_preview(&path)
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 
@@ -9809,6 +9833,7 @@ pub fn run() {
             read_raw_preview_data_url,
             read_dicom_image_data_url,
             read_dicom_tags,
+            read_heic_preview_data_url,
             thumbnail,
             thumbnails_stream,
             cancel_thumbnails_stream,
@@ -10621,6 +10646,7 @@ pub fn export_bindings(out: &std::path::Path) -> Result<(), String> {
         read_raw_preview_data_url,
         read_dicom_image_data_url,
         read_dicom_tags,
+        read_heic_preview_data_url,
         thumbnail,
         thumbnails_stream,
         cancel_thumbnails_stream,
