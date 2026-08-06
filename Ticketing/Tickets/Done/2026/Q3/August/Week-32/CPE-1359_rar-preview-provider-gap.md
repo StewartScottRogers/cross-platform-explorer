@@ -2,13 +2,13 @@
 id: CPE-1359
 title: "RAR preview gap: .rar isn't in provider.ts ARCHIVE_EXT, so selecting a .rar shows the hex view instead of its entry list"
 type: Bug
-status: Backlog
+status: Done
 priority: Medium
 component: frontend
 tags: [ready]
 epic: CPE-111
 created: 2026-08-06
-closed:
+closed: 2026-08-06
 ---
 
 ## Problem
@@ -45,3 +45,6 @@ component renders the RAR entry list.
 
 Found 2026-08-06 via the CPE-1358 QA harness — exactly the kind of cross-list drift the sample-coverage
 ratchet + gui-smoke walk are meant to surface. Epic CPE-111. Small frontend fix.
+
+## Work Log
+- 2026-08-06: PR #653 merged (2a200f52). Added "rar" to ARCHIVE_EXT in provider.ts so .rar lists entries via the archive provider (read_archive_entries already dispatches to rar_entries) instead of the hex dump. Coverage ratchet flagged sample.rar was the only hex cover -> added samples/other/blob.pak + gen_samples.py make_hex_blob generator (byte-reproducible). provider.test.ts asserts rar->archive. Reviewer APPROVE (rar->archive + blob.pak->hex verified, generator byte-match, ratchet mutation-killed). Foreman-applied. Fixed stale sampleCoverage.test.ts comment (rar->archive now).

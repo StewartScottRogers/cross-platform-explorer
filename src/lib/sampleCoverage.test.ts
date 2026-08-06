@@ -5,9 +5,10 @@
 //
 // This test computes the ACTUAL preview kind for every file under `samples/` using the real production
 // `pickProvider` code path (not a hand-maintained duplicate mapping), so it can never silently drift
-// from what the app really does — e.g. it correctly reports that `archives/sample.rar` resolves to the
-// "hex" kind today (RAR is not in `provider.ts`'s `ARCHIVE_EXT`), not "archive", matching the app's real
-// behaviour rather than what a human might assume from the file's extension.
+// from what the app really does — e.g. it correctly reports that `other/blob.pak` (a generic binary
+// under an unrecognised extension) resolves to the "hex" catch-all kind, matching the app's real
+// behaviour rather than what a human might assume from the file's extension. (`archives/sample.rar`
+// resolves to "archive" as of CPE-1359, which added `rar` to `provider.ts`'s `ARCHIVE_EXT`.)
 //
 // A new preview kind added to `provider.ts` without a matching sample fails THIS test — the ratchet.
 import { describe, it, expect } from "vitest";
