@@ -173,7 +173,9 @@ fn parse_rar4(data: &[u8]) -> Result<Vec<ArchiveEntry>, String> {
             }
         }
 
-        let next_pos_u64 = header_end as u64 + pack_size;
+        let next_pos_u64 = (header_end as u64)
+            .checked_add(pack_size)
+            .ok_or_else(|| "RAR4 data payload size overflowed".to_string())?;
         if next_pos_u64 > len as u64 {
             return Err("RAR4 data payload extends past end of file".to_string());
         }
@@ -321,7 +323,9 @@ fn parse_rar5(data: &[u8]) -> Result<Vec<ArchiveEntry>, String> {
             }
         }
 
-        let next_pos_u64 = header_end as u64 + data_size;
+        let next_pos_u64 = (header_end as u64)
+            .checked_add(data_size)
+            .ok_or_else(|| "RAR5 data area size overflowed".to_string())?;
         if next_pos_u64 > len as u64 {
             return Err("RAR5 data area extends past end of file".to_string());
         }
@@ -446,6 +450,48 @@ mod tests {
         let _ = std::fs::remove_dir_all(&d);
     }
 
+    #[test]
+    fn rar4_huge_pack_size_overflowing_next_block_offset_is_an_error_not_a_hang() {
+        // A near-u64::MAX pack_size (reconstructed from LHD_LARGE's high half) makes
+        // `header_end + pack_size` overflow u64. Regression for the reviewer-found bug: this must
+        // return Err via checked_add, not panic (debug) or wrap to a position behind the current
+        // block and loop forever (release). Empty name means no entry is pushed, so MAX_ENTRIES
+        // could never mask a wrap-around hang — the overflow check is the only thing standing
+        // between this input and an infinite loop.
+        let mut body = Vec::new();
+        body.extend_from_slice(&0xFFFF_FFFFu32.to_le_bytes()); // pack_size (low) = u32::MAX
+        body.extend_from_slice(&0u32.to_le_bytes()); // unp_size (low)
+        body.push(0);
+        body.extend_from_slice(&0u32.to_le_bytes());
+        body.extend_from_slice(&0u32.to_le_bytes());
+        body.push(0);
+        body.push(0);
+        body.extend_from_slice(&0u16.to_le_bytes()); // name_size = 0 (empty name)
+        body.extend_from_slice(&0u32.to_le_bytes()); // attr
+        // LHD_LARGE fields: high_pack_size = u32::MAX -> total pack_size = u64::MAX
+        body.extend_from_slice(&0xFFFF_FFFFu32.to_le_bytes());
+        body.extend_from_slice(&0u32.to_le_bytes()); // high_unp_size
+        // (no name bytes: name_size is 0)
+        let head_size = (7 + body.len()) as u16;
+        let mut block = Vec::new();
+        block.extend_from_slice(&0u16.to_le_bytes());
+        block.push(RAR4_FILE_HEAD);
+        block.extend_from_slice(&RAR4_LHD_LARGE.to_le_bytes());
+        block.extend_from_slice(&head_size.to_le_bytes());
+        block.extend_from_slice(&body);
+
+        let mut buf = RAR4_MARKER.to_vec();
+        buf.extend(block);
+        let d = scratch("rar4-overflow");
+        let path = write_rar(&d, "overflow.rar", &buf);
+        // ArchiveEntry doesn't derive Debug, so assert by matching rather than formatting the Ok value.
+        match rar_entries(&path) {
+            Err(_) => {}
+            Ok(entries) => panic!("expected Err on an overflowing pack_size, got Ok with {} entries", entries.len()),
+        }
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
     // --- RAR5 fixture builders -------------------------------------------------------------
 
     fn write_vint(buf: &mut Vec<u8>, mut v: u64) {
@@ -551,6 +597,30 @@ mod tests {
         assert_eq!(entries[0].name, "x.db");
         assert_eq!(entries[0].size, 123);
         assert_eq!(entries[1].name, "after.txt");
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn rar5_huge_data_size_overflowing_next_header_offset_is_an_error_not_a_hang() {
+        // A DataSize vint near u64::MAX makes `header_end + data_size` overflow u64. Regression for
+        // the reviewer-found bug: must return Err via checked_add, not panic (debug) or wrap to a
+        // position behind the current header and loop forever (release). Header type is Main (not
+        // File/Service), so this exercises the overflow purely off HeaderFlags/DataSize — no name is
+        // ever parsed, so nothing could push an entry to trip MAX_ENTRIES as an accidental safety net.
+        let mut body = Vec::new();
+        write_vint(&mut body, 1); // HeaderType = Main
+        write_vint(&mut body, RAR5_HFL_DATA); // HeaderFlags: has a data area
+        write_vint(&mut body, u64::MAX); // DataSize = u64::MAX
+
+        let mut buf = RAR5_MARKER.to_vec();
+        buf.extend(rar5_header(1, &body));
+
+        let d = scratch("rar5-overflow");
+        let path = write_rar(&d, "overflow.rar", &buf);
+        match rar_entries(&path) {
+            Err(_) => {}
+            Ok(entries) => panic!("expected Err on an overflowing data_size, got Ok with {} entries", entries.len()),
+        }
         let _ = std::fs::remove_dir_all(&d);
     }
 
