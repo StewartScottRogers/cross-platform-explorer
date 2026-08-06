@@ -2,13 +2,13 @@
 id: CPE-1343
 title: "type_mismatch_scan: HEADER_CAP (64B) too small to reach TAR's offset-257 magic — disguised .tar never flagged"
 type: Bug
-status: Backlog
+status: Done
 priority: Medium
 component: cpe-server
 tags: [ready]
 epic: CPE-1000
 created: 2026-08-05
-closed:
+closed: 2026-08-05
 ---
 
 ## Problem
@@ -51,3 +51,6 @@ feature disagree.
 Pure `cpe-server`, headless, cargo-testable. Single file (`type_mismatch_scan.rs`) — no
 overlap with CPE-1344 (which touches `file_type.rs`). Surfaced by the 2026-08-05 frontier scan.
 Feeds epic CPE-1000.
+
+## Work Log
+- 2026-08-05 (workshift): PR #638 squash-merged to main (25ec5128). Worker(sonnet); Reviewer APPROVE + UAT PASS (independent probe confirmed disguised .tar now flagged, genuine .tar not). All backend/server/sidecar/frontend CI green on 3 OS. HEADER_CAP 64->512; no new deps. Surfaced by the frontier scan (a real inconsistency introduced by CPE-1342 TAR detection vs the 64B scan cap).
