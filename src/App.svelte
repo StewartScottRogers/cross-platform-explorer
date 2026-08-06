@@ -2796,6 +2796,11 @@
     return commands.readImageDataUrl(path).then(unwrap);
   }
 
+  /** Extract a camera-RAW file's (cr2/nef/arw) embedded JPEG preview for the preview pane. */
+  function loadRawImageData(path: string): Promise<string> {
+    return commands.readRawPreviewDataUrl(path).then(unwrap);
+  }
+
   /** Save edited text back to a file, then refresh so size/date update. */
   async function savePreviewText(path: string, contents: string): Promise<void> {
     unwrap(await commands.writeFileText(path, contents));
@@ -5058,6 +5063,7 @@
           loadEntries={loadArchiveEntries}
           loadInfo={loadPreviewInfo}
           loadImageData={loadImageData}
+          loadRawImageData={loadRawImageData}
           saveText={savePreviewText}
         >
           <DetailsPane selected={selectedEntries.length ? selectedEntries : (homePreview ? [homePreview] : [])} {folderName} {itemCount} {folderIcon} />

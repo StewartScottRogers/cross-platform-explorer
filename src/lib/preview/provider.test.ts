@@ -130,6 +130,16 @@ describe("pickProvider", () => {
     expect(pickProvider(entry({ name: "a.png", extension: "png" })).kind).toBe("image");
   });
 
+  it("extracts camera-RAW embedded previews via the raw-image provider, beating native image (CPE-1349)", () => {
+    for (const ext of ["cr2", "nef", "arw"]) {
+      const p = pickProvider(entry({ name: `a.${ext}`, extension: ext }));
+      expect(p.kind).toBe("raw-image");
+      expect(p.editable).toBe(false);
+    }
+    // sanity: a native image still uses the plain image provider, not raw-image
+    expect(pickProvider(entry({ name: "a.png", extension: "png" })).kind).toBe("image");
+  });
+
   it("falls back to metadata for folders and nothing selected", () => {
     expect(pickProvider(entry({ name: "dir", is_dir: true, extension: "" })).kind).toBe("none");
     expect(pickProvider(null).kind).toBe("none");
