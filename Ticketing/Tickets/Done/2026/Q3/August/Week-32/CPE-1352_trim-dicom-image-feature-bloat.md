@@ -2,13 +2,13 @@
 id: CPE-1352
 title: "Perf: trim DICOM ship-cost — drop dicom-pixeldata's image feature, encode PNG from raw pixels"
 type: Task
-status: Backlog
+status: Done
 priority: Low
 component: cpe-server
 tags: [ready]
 epic: CPE-219
 created: 2026-08-05
-closed:
+closed: 2026-08-05
 ---
 
 ## Problem (Performance Guard)
@@ -50,3 +50,6 @@ So the reader can obtain windowed 8-bit pixel bytes WITHOUT `dicom-pixeldata`'s 
 Optional cleanup, low priority — DICOM already ships and works (CPE-1350). Also worth a one-line note: the
 `encoding`/`encoding-index-*` crates (unmaintained rust-encoding) come transitively from `dicom-encoding`;
 not removable without upstream change, narrow attack surface (static tables) — accept + document.
+
+## Work Log
+- 2026-08-05 (workshift): PR #647 merged. Dropped dicom-pixeldata image feature (default-features=false, features=[rayon,native]); rebuilt read_dicom_image_data_url on raw-pixel path (to_vec_frame_with_options + accessors); exr + 7 transitive crates gone (315->307). Window/level parity traced (VoiLutOption::First is REQUIRED in the raw path); MONOCHROME1 hand-inversion; 16-bit narrow. Reviewer CHANGES-then-APPROVE (caught + fixed a silent YBR_FULL wrong-color regression — YCbCr->RGB ported verbatim from dicom-pixeldata) + UAT PASS (pixel-exact MONOCHROME2/1). NOTE: upstream dicom-pixeldata has a G-term sign bug we now inherit bug-for-bug (== pre-trim main); follow-up CPE-1353 fixes it (we own the fn now).
