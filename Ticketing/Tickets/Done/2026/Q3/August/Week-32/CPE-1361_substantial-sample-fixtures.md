@@ -2,13 +2,13 @@
 id: CPE-1361
 title: "Make every sample fixture real & substantial (not tiny metadata stubs) for robust preview/GUI testing"
 type: Task
-status: Backlog
+status: Done
 priority: High
 component: Multiple
 tags: [ready]
 epic: CPE-1148
 created: 2026-08-06
-closed:
+closed: 2026-08-06
 ---
 
 ## Problem
@@ -69,3 +69,6 @@ source of truth) and regenerate.
 
 Pairs with CPE-1360 (archive-inner-file preview) — the substantial multi-folder zip/rar are the fixtures that
 fix needs. User asked to "spend the effort" — do it thoroughly. Epic CPE-1148 (QA/testing).
+
+## Work Log
+- 2026-08-06: substantial samples (#654 703404e3): real audio/video via ffmpeg, 800x600 images, multi-folder zip+rar (10 entries each), 96-glyph font, add/fib wasm, 4-table sqlite, 3-page pdf; metadata baseline preserved (sample_fixtures 13/13). Reviewer APPROVE + UAT PASS (both re-ran full cargo+vitest green). CI red was a transient GitHub Actions infra outage (action-download Service Unavailable), not code; combined main verified green locally. Attended visual = post-build.

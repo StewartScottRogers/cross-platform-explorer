@@ -2,13 +2,13 @@
 id: CPE-1360
 title: "Archive inner-file preview: selecting a file inside a .zip/.rar shows an error, not its contents (virtual path never extracted)"
 type: Bug
-status: Backlog
+status: Done
 priority: High
 component: Multiple
 tags: [ready]
 epic: CPE-111
 created: 2026-08-06
-closed:
+closed: 2026-08-06
 ---
 
 ## Problem (reported v0.57.51; root-caused)
@@ -71,3 +71,6 @@ misroutes `.rar` into the ZIP extractor (which fails). So RAR inner files can't 
 Root-caused by the 2026-08-06 investigation. Pairs with CPE-1361 (substantial archive samples are the test
 fixtures). Part A is the high-impact frontend fix; Part B closes RAR (stored) + fixes RAR external-open.
 Epic CPE-111. Different files from CPE-1361 (parallelizable).
+
+## Work Log
+- 2026-08-06: archive inner-file preview (#655 660aef56): extract-then-preview resolver (temp path, request-id guard, cache, both hosts) for zip/tar/7z + backend rar_extract_entry (STORED entries; compressed->graceful Err) + .rar routing fix (also fixes external-open). Reviewer APPROVE + UAT PASS (both re-ran full cargo+vitest green). CI red was a transient GitHub Actions infra outage (action-download Service Unavailable), not code; combined main verified green locally. Attended visual = post-build.
