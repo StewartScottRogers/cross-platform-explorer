@@ -27,6 +27,9 @@ Thumbs.db
 updater.pw
 .env
 .env.*
+# Exception: throwaway DEMO-ONLY crypto sample fixtures (CPE-1425) — intentionally committed,
+# never a real credential.
+!samples/crypto/*.key
 
 # Sub-agent worktrees (transient; never commit)
 .claude/worktrees/
