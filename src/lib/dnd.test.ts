@@ -16,6 +16,15 @@ describe("dnd shared model (CPE-669)", () => {
       expect(isValidDrop(["C:\\a\\folder"], "C:/a/folder2")).toBe(true); // sibling, not descendant
       expect(isValidDrop(["C:/a/folder/"], "C:/a/folder")).toBe(false); // trailing slash still itself
     });
+    it("rejects a case-differing self-descendant drop (CPE-1379: case-insensitive filesystems)", () => {
+      expect(isValidDrop(["C:\\Foo"], "C:\\FOO\\sub")).toBe(false); // same physical dir, differing case
+      expect(isValidDrop(["C:/Foo"], "C:/FOO/sub")).toBe(false); // forward-slash variant
+      expect(isValidDrop(["C:\\Foo"], "C:\\foo")).toBe(false); // itself, differing case
+    });
+    it("still allows a case-differing but genuinely unrelated folder", () => {
+      expect(isValidDrop(["C:\\Foo"], "C:\\Bar")).toBe(true);
+      expect(isValidDrop(["C:\\Foo"], "C:\\FOOBAR")).toBe(true); // segment-boundary check, not raw prefix match
+    });
   });
 
   describe("resolveEffect (OS convention + modifier override)", () => {
