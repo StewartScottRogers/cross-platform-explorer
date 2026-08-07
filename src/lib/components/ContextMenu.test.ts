@@ -1,6 +1,7 @@
 /**
- * ContextMenu render tests — focused on the "Copy to / Move to folder" actions (CPE-355),
- * which are gated to a real folder (canTerminal) and dispatch the right command.
+ * ContextMenu render tests — focused on the "Copy to / Move to folder" actions (CPE-355), gated on their
+ * own `copyMoveEligible` prop (split out from `canTerminal` by CPE-1384 so a pane-B-opened menu can offer
+ * them without also turning on the pane-A-only terminal/console/compress rows `canTerminal` still gates).
  */
 import { describe, it, expect, vi } from "vitest";
 import { render, screen, fireEvent } from "@testing-library/svelte";
@@ -22,6 +23,7 @@ const base = {
   compressible: false,
   extractable: false,
   canTerminal: true,
+  copyMoveEligible: true,
   sameTypeExt: "",
 };
 
@@ -43,9 +45,15 @@ describe("ContextMenu Copy to / Move to folder (CPE-355)", () => {
   });
 
   it("hides both actions when not in a real folder (Home/archive)", () => {
-    render(ContextMenu, { props: { ...base, canTerminal: false } });
+    render(ContextMenu, { props: { ...base, canTerminal: false, copyMoveEligible: false } });
     expect(screen.queryByText("Copy to folder…")).toBeNull();
     expect(screen.queryByText("Move to folder…")).toBeNull();
+  });
+
+  it("offers both actions for a pane-B row (copyMoveEligible true) even though canTerminal stays off there (CPE-1384)", () => {
+    render(ContextMenu, { props: { ...base, canTerminal: false, copyMoveEligible: true } });
+    expect(screen.getByText("Copy to folder…")).toBeTruthy();
+    expect(screen.getByText("Move to folder…")).toBeTruthy();
   });
 
   it("shows Repair link… only when linkBroken, and dispatches repair-link (CPE-1209)", async () => {
