@@ -291,3 +291,104 @@ describe("App — clipboard copy/cut/paste is pane-aware (CPE-1380)", () => {
     expect(within(paneAWrap).getByText("alpha.txt").closest(".row")?.className).toContain("selected");
   });
 });
+
+describe("App — doPaste is re-entrancy-safe against a double-fire cut/move (CPE-1385)", () => {
+  it("two rapid Ctrl+V after a Cut call moveEntries EXACTLY ONCE, not twice", async () => {
+    saveDualPane(false);
+    render(App);
+    const driveButtons = await screen.findAllByText("Local Disk (C:)");
+    await fireEvent.click(driveButtons[0]);
+    await waitFor(() => expect(screen.getByText("alpha.txt")).toBeTruthy());
+
+    await fireEvent.click(screen.getByText("alpha.txt"));
+    await fireEvent.keyDown(window, { key: "x", ctrlKey: true }); // cut
+
+    // Navigate into an empty subfolder so the paste destination differs from the cut item's own folder.
+    await fireEvent.dblClick(screen.getByText("destInA"));
+    await waitFor(() => expect(screen.queryByText("alpha.txt")).toBeNull());
+
+    // Swap in a move_entries handler backed by a promise WE control, so the assertion below can prove
+    // the guard fires before the first paste even resolves — not just "eventually settles at 1".
+    let resolveMove!: (v: { path: string; ok: boolean; error: string }[]) => void;
+    const movePromise = new Promise<{ path: string; ok: boolean; error: string }[]>((res) => { resolveMove = res; });
+    invoke.mockImplementation(async (cmd: string, args: Record<string, unknown> = {}) => {
+      const listingFor = (path: unknown) => disks[path as string] ?? [];
+      switch (cmd) {
+        case "special_folders": return [];
+        case "list_drives": return drives;
+        case "home_dir": return "C:\\Users\\t";
+        case "can_restore_from_trash": return true;
+        case "list_dir": return listingFor(args.path);
+        case "list_dir_stream": {
+          const ch = args.onEntry as { onmessage: (b: unknown) => void };
+          const data = listingFor(args.path);
+          ch.onmessage(data);
+          return data.length;
+        }
+        case "parent_dir": return null;
+        case "read_file_text": return "";
+        case "move_entries": {
+          const paths = args.paths as string[];
+          const dest = args.dest as string;
+          moveEntriesCalls.push({ paths, dest });
+          // Mutate the "disk" the same way the default beforeEach handler does, so the eventual refresh
+          // (once `movePromise` resolves below) shows the moved file — but return the CONTROLLED promise
+          // itself, so the test can assert the call count before the frontend ever sees a result.
+          for (const p of paths) {
+            const name = p.split("\\").pop() as string;
+            for (const key of Object.keys(disks)) disks[key] = disks[key].filter((e) => e.path !== p);
+            disks[dest] = [...(disks[dest] ?? []), file(name, dest)];
+          }
+          return movePromise; // stays pending until we resolve it below
+        }
+        default: return null;
+      }
+    });
+
+    // Two rapid Ctrl+V: `doPaste` is invoked fire-and-forget from the keydown handler (never awaited by
+    // its caller), and `fireEvent.keyDown` dispatches synchronously — so NOT awaiting between these two
+    // calls reproduces the exact CPE-1385 window: both `doPaste` invocations run their synchronous prefix
+    // back-to-back, before either's `await commands.moveEntries(...)` has a chance to settle.
+    fireEvent.keyDown(window, { key: "v", ctrlKey: true });
+    fireEvent.keyDown(window, { key: "v", ctrlKey: true });
+
+    // Let any already-queued microtasks flush WITHOUT resolving `movePromise` — proves the second
+    // `doPaste` already no-op'd via `clipEmpty(clipboard)` rather than merely "not yet reached" moveEntries.
+    await Promise.resolve();
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(moveEntriesCalls.length).toBe(1); // NOT 2 — the sync clear-before-await guard did its job
+
+    resolveMove([{ path: `${DEST_IN_A}\\alpha.txt`, ok: true, error: "" }]);
+    await waitFor(() => expect(screen.getByText("alpha.txt")).toBeTruthy()); // the single move completed + refreshed
+  });
+
+  it("paste-COPY is unaffected: the clipboard is NOT cleared after a copy, so a second Ctrl+V can repeat it", async () => {
+    saveDualPane(false);
+    render(App);
+    const driveButtons = await screen.findAllByText("Local Disk (C:)");
+    await fireEvent.click(driveButtons[0]);
+    await waitFor(() => expect(screen.getByText("alpha.txt")).toBeTruthy());
+
+    await fireEvent.click(screen.getByText("alpha.txt"));
+    await fireEvent.keyDown(window, { key: "c", ctrlKey: true }); // COPY, not cut
+
+    await fireEvent.dblClick(screen.getByText("destInA"));
+    await waitFor(() => expect(screen.queryByText("alpha.txt")).toBeNull());
+
+    await fireEvent.keyDown(window, { key: "v", ctrlKey: true });
+    await waitFor(() => expect(startTransferCalls.length).toBe(1));
+
+    // A SECOND, separately-awaited Ctrl+V still starts another copy — proving CPE-1385's fix (which only
+    // guards the cut/move branch) left copy-repeat intentionally intact.
+    await fireEvent.keyDown(window, { key: "v", ctrlKey: true });
+    await waitFor(() => expect(startTransferCalls.length).toBe(2));
+    expect(startTransferCalls[1]).toEqual({
+      sources: [`${PATH_A}\\alpha.txt`],
+      dest: DEST_IN_A,
+      kind: "copy",
+      policy: "keepboth",
+    });
+  });
+});
