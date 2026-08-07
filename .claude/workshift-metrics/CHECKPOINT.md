@@ -37,7 +37,19 @@ genuinely unbuilt + high-value + visible + user-verifiable-now. Uses the webview
 - **CPE-1431** (DEFERRED follow-up) — waveform/keyframe scrub strip (heavier: extraction + caching; reuse
   thumbnail pipeline CPE-718). Not this round unless cheap.
 
-**To resume:** gauntlet CPE-1429 → merge → dispatch CPE-1430 → gauntlet → merge → rebuild so the user can
-play media live → report at the epic boundary (per workshift-report-each-epic) → PM picks the next epic. All
-FEATURE work otherwise user-gated per Library `headless-well-dry-post-dualpane-2026-08-07`; media player is a
-present-user attended-GUI epic. Nothing blocked or broken; board clean + green.
+**STATUS 2026-08-07 (cont.): epic CPE-720 CORE COMPLETE.**
+- **CPE-1429** (#698 MERGED) — audio/video playback + full transport in the preview pane. Reviewer reproduced a
+  mutation; one reviewer catch (stale gui-smoke `.preview-media`→`.mp-media` selector) fixed pre-merge.
+  New: `src/lib/mediaTransport.ts` (pure controller), `src/lib/components/MediaPlayer.svelte`, `media` provider kind.
+- **CPE-1430** (#699 MERGED) — Space full-screen quick-look + ←/→ folder stepping (repeat/shuffle mirror the
+  Rust CPE-943 playlist, verified line-by-line incl. u64-wrap shuffle parity). New: `src/lib/mediaQuickLook.ts`,
+  `MediaQuickLook.svelte`. Reviewer reproduced a mutation.
+- **Building v0.57.61-sidecar** now (run 31223702866) to verify media live with the present user.
+- Deferred/follow-ups: **CPE-1431** (waveform/keyframe strip, Deferred), **CPE-1432** (Space quick-look should
+  honor active pane in dual-pane — low-pri, pre-existing CPE-645 pattern).
+
+**To resume:** publish v0.57.61-sidecar draft (after asset check) → install (kill all cpe/ai-console procs first;
+verify host+sidecar timestamps match) → launch → user plays a `samples/audio|video/` clip + Space quick-look.
+Then PM picks the next epic (candidates whose backend ships + only GUI remains: CPE-716 drive-bay, CPE-713 tray,
+CPE-714 terminal-dock, CPE-715 link-forge — VERIFY build-state before committing; several epics are
+more-done-than-their-brief). Board clean + green.
