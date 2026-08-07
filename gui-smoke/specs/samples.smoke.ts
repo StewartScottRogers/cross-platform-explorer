@@ -73,8 +73,8 @@ const ALL_SAMPLES = listSampleFiles(REAL_SAMPLES_DIR);
 const WALK_FILES = ALL_SAMPLES.filter((f) => f !== MALFORMED_PDF_REL);
 
 // A definite "the preview rendered real content" indicator, one selector per PreviewKind's success
-// markup (PreviewPane.svelte): image/decoded-image/raw-image/heic/dicom -> `.preview-img`; audio/video
-// -> `.preview-media`; pdf -> `.preview-pdf`; font -> `.preview-font`; archive/csv/tsv ->
+// markup (PreviewPane.svelte): image/decoded-image/raw-image/heic/dicom -> `.preview-img`; media
+// (audio/video, MediaPlayer.svelte) -> `.mp-media`; pdf -> `.preview-pdf`; font -> `.preview-font`; archive/csv/tsv ->
 // `.preview-table-wrap`; markdown -> `.preview-markdown`; text/code -> `.code-view`; json AND the `info`
 // kind's own success view -> a bare `pre.preview-text` (NEITHER wraps in `.preview-note` on success — no
 // loading/error sibling to fall back to, so this selector is load-bearing, not decorative: without it,
@@ -94,7 +94,7 @@ const WALK_FILES = ALL_SAMPLES.filter((f) => f !== MALFORMED_PDF_REL);
 // correctly degraded to the metadata pane.
 const CONTENT_SELECTOR = [
   ".preview-img",
-  ".preview-media",
+  ".mp-media",
   ".preview-pdf",
   ".preview-font",
   ".preview-table-wrap",
