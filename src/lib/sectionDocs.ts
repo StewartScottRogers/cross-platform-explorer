@@ -23,7 +23,8 @@ export type Section =
   | "vaults"
   | "file-health"
   | "crypto-preview"
-  | "folder-preview";
+  | "folder-preview"
+  | "cert-management";
 
 /** Section id → doc slug (a `src/docs/*.md` filename without `.md`). */
 const SECTION_DOC: Record<Section, string> = {
@@ -71,6 +72,13 @@ const SECTION_DOC: Record<Section, string> = {
   // preview pane shows for a highlighted directory), but it still earns its own doc page + registry
   // entry per [[maintain-in-app-docs-library]].
   "folder-preview": "27-folder-preview",
+  // CPE-1423/1424 (epic CPE-1417): the CREATE/SIGN side of certificate management — CreateCertDialog +
+  // SignCertDialog, opened from the pane-aware context menu's "Create certificate here…" / "Issue cert
+  // from this CSR…" / "Sign with this as CA…" or the command palette. Like crypto-preview/vaults above,
+  // not a sidebar view you switch into (it's a pair of dialogs reachable from a folder/cert-file's
+  // context menu and the palette), but it still earns its own doc page + registry entry per
+  // [[maintain-in-app-docs-library]].
+  "cert-management": "28-cert-management",
 };
 
 /** The default doc when a section has no page (or an unknown id is passed): the Overview. */

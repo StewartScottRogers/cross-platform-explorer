@@ -476,6 +476,94 @@ describe("ContextMenu open/close-race hardening (CPE-1160)", () => {
   });
 });
 
+// Certificate management (CPE-1424, epic CPE-1417): cert/CSR/JWT rows gated by file type, plus the
+// folder-row and empty-area "Create certificate here…" entries gated by certCreateEligible.
+describe("ContextMenu certificate management (CPE-1424, epic CPE-1417)", () => {
+  it("a .csr file offers 'Issue cert from this CSR…' (not 'Sign with this as CA…') plus Inspect", async () => {
+    const { component } = render(ContextMenu, { props: { ...base, certFileKind: "csr" as const } });
+    const action = vi.fn();
+    component.$on("action", (e) => action(e.detail));
+
+    expect(screen.getByText("Issue cert from this CSR…")).toBeTruthy();
+    expect(screen.queryByText("Sign with this as CA…")).toBeNull();
+    await fireEvent.click(screen.getByText("Issue cert from this CSR…"));
+    expect(action).toHaveBeenCalledWith("cert-issue-from-csr");
+
+    await fireEvent.click(screen.getByText("Inspect"));
+    expect(action).toHaveBeenCalledWith("cert-inspect");
+  });
+
+  it("a .pem/.crt/.cer/.der file offers 'Sign with this as CA…' (not the CSR row) plus Inspect", async () => {
+    const { component } = render(ContextMenu, { props: { ...base, certFileKind: "cert" as const } });
+    const action = vi.fn();
+    component.$on("action", (e) => action(e.detail));
+
+    expect(screen.getByText("Sign with this as CA…")).toBeTruthy();
+    expect(screen.queryByText("Issue cert from this CSR…")).toBeNull();
+    await fireEvent.click(screen.getByText("Sign with this as CA…"));
+    expect(action).toHaveBeenCalledWith("cert-sign-as-ca");
+  });
+
+  it("hides all cert rows for an ordinary file", () => {
+    render(ContextMenu, { props: { ...base, certFileKind: "" as const } });
+    expect(screen.queryByText("Issue cert from this CSR…")).toBeNull();
+    expect(screen.queryByText("Sign with this as CA…")).toBeNull();
+    expect(screen.queryByText("Inspect")).toBeNull();
+  });
+
+  it("a .jwt file offers 'Inspect JWT' and dispatches jwt-inspect", async () => {
+    const { component } = render(ContextMenu, { props: { ...base, jwtSelected: true } });
+    const action = vi.fn();
+    component.$on("action", (e) => action(e.detail));
+    const row = screen.getByText("Inspect JWT");
+    expect(row).toBeTruthy();
+    await fireEvent.click(row);
+    expect(action).toHaveBeenCalledWith("jwt-inspect");
+  });
+
+  it("hides Inspect JWT for a non-JWT file", () => {
+    render(ContextMenu, { props: { ...base, jwtSelected: false } });
+    expect(screen.queryByText("Inspect JWT")).toBeNull();
+  });
+
+  it("offers 'Create certificate here…' on a folder row when certCreateEligible, and dispatches cert-create-here", async () => {
+    const { component } = render(ContextMenu, {
+      props: { ...base, folderSelected: true, certCreateEligible: true },
+    });
+    const action = vi.fn();
+    component.$on("action", (e) => action(e.detail));
+    const row = screen.getByText("Create certificate here…");
+    expect(row).toBeTruthy();
+    await fireEvent.click(row);
+    expect(action).toHaveBeenCalledWith("cert-create-here");
+  });
+
+  it("hides 'Create certificate here…' on a folder row when not certCreateEligible (Home/archive)", () => {
+    render(ContextMenu, { props: { ...base, folderSelected: true, certCreateEligible: false } });
+    expect(screen.queryByText("Create certificate here…")).toBeNull();
+  });
+
+  it("hides 'Create certificate here…' on a FILE row even when certCreateEligible", () => {
+    render(ContextMenu, { props: { ...base, folderSelected: false, certCreateEligible: true } });
+    expect(screen.queryByText("Create certificate here…")).toBeNull();
+  });
+
+  it("offers 'Create certificate here…' on the empty-area menu when certCreateEligible, and dispatches cert-create-here", async () => {
+    const { component } = render(ContextMenu, { props: { ...empty, certCreateEligible: true } });
+    const action = vi.fn();
+    component.$on("action", (e) => action(e.detail));
+    const row = screen.getByText("Create certificate here…");
+    expect(row).toBeTruthy();
+    await fireEvent.click(row);
+    expect(action).toHaveBeenCalledWith("cert-create-here");
+  });
+
+  it("hides 'Create certificate here…' on the empty-area menu when not certCreateEligible", () => {
+    render(ContextMenu, { props: { ...empty, certCreateEligible: false } });
+    expect(screen.queryByText("Create certificate here…")).toBeNull();
+  });
+});
+
 describe("ContextMenu Securely delete… (CPE-1240, epic CPE-738)", () => {
   it("hides the row when not shreddable (default)", () => {
     render(ContextMenu, { props: { ...base } });
