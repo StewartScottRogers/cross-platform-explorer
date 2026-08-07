@@ -129,11 +129,12 @@ oid-registry = "0.7"
 # `x509-parser` (CPE-1421): turns on `rcgen::CertificateSigningRequestParams::from_pem`/`from_der` and
 # `rcgen::Issuer::from_ca_cert_pem`/`from_ca_cert_der` — parsing an incoming PKCS#10 CSR and loading an
 # existing CA certificate as a signing `Issuer`, exactly what `cert_sign::cert_issue_from_csr` needs.
-# rcgen's own `x509-parser` feature pins a newer `x509-parser` (^0.17) than the `x509-parser = "0.16"`
-# direct dependency above (pinned for `cert_decode`, CPE-1419); Cargo resolves both as separate crate
-# instances in the dependency graph, which is a normal, safe outcome (no shared types cross the
-# boundary — rcgen only uses its copy internally to parse the CSR/CA-cert PEM, cert_sign never touches
-# x509-parser types directly). Bumping the direct dependency to 0.17 to unify them is out of scope here.
+# rcgen's own `x509-parser` feature pins a newer `x509-parser` (^0.18, resolves 0.18.1) than the
+# `x509-parser = "0.16"` direct dependency above (pinned for `cert_decode`, CPE-1419); Cargo resolves
+# both as separate crate instances in the dependency graph, which is a normal, safe outcome (no shared
+# types cross the boundary — rcgen only uses its copy internally to parse the CSR/CA-cert PEM, cert_sign
+# never touches x509-parser types directly). Bumping the direct dependency to 0.18 to unify them is out
+# of scope here.
 rcgen = { version = "0.14", features = ["crypto", "pem", "x509-parser"] }
 # Pure-Rust RSA key generation (CPE-1420) — rcgen's default `ring` backend can *sign* with an RSA key
 # but cannot *generate* one (RSA keygen needs the `aws_lc_rs` backend, which needs cmake/nasm); the `rsa`

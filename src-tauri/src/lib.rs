@@ -998,6 +998,9 @@ async fn cert_issue_from_csr(
     out_cert_path: String,
 ) -> Result<(), String> {
     tauri::async_runtime::spawn_blocking(move || {
+        ensure_previewable_size(&csr_path, PREVIEW_INFO_MAX_BYTES)?;
+        ensure_previewable_size(&ca_cert_path, PREVIEW_INFO_MAX_BYTES)?;
+        ensure_previewable_size(&ca_key_path, PREVIEW_INFO_MAX_BYTES)?;
         let csr_pem = fs::read_to_string(&csr_path).map_err(|e| e.to_string())?;
         let ca_cert_pem = fs::read_to_string(&ca_cert_path).map_err(|e| e.to_string())?;
         let ca_key_pem = fs::read_to_string(&ca_key_path).map_err(|e| e.to_string())?;
