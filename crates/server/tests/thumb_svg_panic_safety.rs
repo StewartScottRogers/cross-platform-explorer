@@ -223,6 +223,30 @@ fn rasterize_svg_never_stack_overflows_on_a_three_hop_use_cycle_on_a_small_stack
 }
 
 #[test]
+fn rasterize_svg_never_stack_overflows_on_an_entity_encoded_use_cycle_on_a_small_stack() {
+    // The confirmed CPE-1414 review bypass: an href written as a numeric/hex char ref (`&#35;`/`&#x23;`
+    // = `#`) decodes to `#b`/`#a` under roxmltree BEFORE usvg resolves it, forming the same a<->b cycle a
+    // raw-byte scan would miss (it sees a leading `&`, not `#`). The guard now XML-decodes id/href values
+    // first, so both encodings must degrade to a graceful `Err` with no stack overflow on a 256KB stack.
+    for variant in [
+        &br##"<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" width="10" height="10">
+            <symbol id="a"><use xlink:href="&#35;b"/></symbol>
+            <symbol id="b"><use xlink:href="&#35;a"/></symbol>
+            <use xlink:href="#a"/>
+        </svg>"##[..],
+        &br##"<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" width="10" height="10">
+            <symbol id="a"><use xlink:href="&#x23;b"/></symbol>
+            <symbol id="b"><use xlink:href="&#x23;a"/></symbol>
+            <use xlink:href="#a"/>
+        </svg>"##[..],
+    ] {
+        let svg = variant.to_vec();
+        let result = run_on_small_stack(move || rasterize_svg(&svg, 32));
+        assert!(result.is_err(), "an entity-encoded <use> reference cycle must be rejected, not risk a stack overflow");
+    }
+}
+
+#[test]
 fn rasterize_svg_renders_a_deep_acyclic_use_chain_on_a_normal_stack() {
     // The false-positive guard: legitimate SVGs reuse `<use>`/`<symbol>` heavily. A deep but strictly
     // ACYCLIC reference chain (a base shape, then 200 `<use>`s each referencing the previous) must STILL

@@ -48,7 +48,11 @@
 //! edges, so a legitimate SVG that reuses `<use>`/`<symbol>` heavily but *acyclically* (even a deep
 //! reference chain) is never rejected — only an actual cycle is. Like the depth guard it shares the same
 //! quote/comment/CDATA/PI/DOCTYPE-aware byte scan, so an embedded `>` inside an attribute value (the
-//! `<a b="/>">` scan-evasion class that bit webdav's first CPE-1398 fix) can't smuggle a hidden edge past it.
+//! `<a b="/>">` scan-evasion class that bit webdav's first CPE-1398 fix) can't smuggle a hidden edge past
+//! it. It also XML-decodes character/entity references in `id`/`href` values before interning them (an
+//! href written `&#35;b` or an id written `&#97;`), because roxmltree decodes them before usvg resolves
+//! the reference — so the guard's graph is keyed on the same decoded strings usvg matches, not raw source
+//! bytes (the second confirmed CPE-1414 review bypass).
 
 use image::{DynamicImage, RgbaImage};
 use std::collections::HashMap;
@@ -216,6 +220,66 @@ fn svg_use_reference_cycle(bytes: &[u8]) -> bool {
         }
     }
 
+    /// Decode the XML character/entity references roxmltree resolves in an attribute value *before*
+    /// usvg matches an `id`/`href` — so the graph is built on the same decoded strings usvg sees, not
+    /// the raw source bytes. Without this an href written `&#35;b` (numeric `#`) or an id written
+    /// `&#97;` (`a`) is invisible to a raw-byte scan yet forms a real cycle once usvg decodes it (the
+    /// confirmed CPE-1414 review bypass). Handles numeric char refs `&#NN;` / `&#xNN;` and the five
+    /// predefined named entities; any unrecognized/malformed `&…` is left literal (never panics), which
+    /// only ever *adds* an entity nobody references, never hides one.
+    fn decode_xml_entities(raw: &[u8]) -> Vec<u8> {
+        if !raw.contains(&b'&') {
+            return raw.to_vec(); // fast path: nothing to decode
+        }
+        let n = raw.len();
+        let mut out = Vec::with_capacity(n);
+        let mut i = 0usize;
+        while i < n {
+            if raw[i] != b'&' {
+                out.push(raw[i]);
+                i += 1;
+                continue;
+            }
+            if let Some(semi) = raw[i + 1..].iter().position(|&c| c == b';').map(|p| i + 1 + p) {
+                let ent = &raw[i + 1..semi];
+                let decoded: Option<Vec<u8>> = if ent.first() == Some(&b'#') {
+                    let (radix, digits) = if matches!(ent.get(1), Some(b'x') | Some(b'X')) {
+                        (16u32, &ent[2..])
+                    } else {
+                        (10u32, &ent[1..])
+                    };
+                    if !digits.is_empty() && digits.iter().all(|&c| (c as char).is_digit(radix)) {
+                        std::str::from_utf8(digits)
+                            .ok()
+                            .and_then(|s| u32::from_str_radix(s, radix).ok())
+                            .and_then(char::from_u32)
+                            .map(|ch| ch.encode_utf8(&mut [0u8; 4]).as_bytes().to_vec())
+                    } else {
+                        None
+                    }
+                } else {
+                    match ent {
+                        b"amp" => Some(vec![b'&']),
+                        b"lt" => Some(vec![b'<']),
+                        b"gt" => Some(vec![b'>']),
+                        b"quot" => Some(vec![b'"']),
+                        b"apos" => Some(vec![b'\'']),
+                        _ => None,
+                    }
+                };
+                if let Some(bytes) = decoded {
+                    out.extend_from_slice(&bytes);
+                    i = semi + 1;
+                    continue;
+                }
+            }
+            // Not a recognized entity — emit '&' literally and keep scanning.
+            out.push(b'&');
+            i += 1;
+        }
+        out
+    }
+
     // A tiny quote-aware attribute tokenizer over a tag's inner bytes (everything between `<` and the
     // matching unquoted `>`, minus any trailing `/`). Returns the element's local name, its `id`
     // attribute value, and — for `<use>` elements — the local id its `href`/`xlink:href` points at
@@ -281,19 +345,23 @@ fn svg_use_reference_cycle(bytes: &[u8]) -> bool {
             };
             let local = local_name(attr_name);
             if local == b"id" && id.is_none() {
-                id = Some(value.clone());
+                // Decode entities so an entity-encoded id (`&#97;` = `a`) interns to the same node key
+                // usvg resolves an href against.
+                id = Some(decode_xml_entities(&value));
             }
             if is_use && local == b"href" && href.is_none() {
+                // Decode entities FIRST (an href written `&#35;b` / `&#x23;b` decodes to `#b`), then trim
+                // and strip the leading `#`, matching how roxmltree/usvg see the reference.
+                let decoded = decode_xml_entities(&value);
                 let mut lo = 0usize;
-                let mut hi = value.len();
-                while lo < hi && value[lo].is_ascii_whitespace() {
+                let mut hi = decoded.len();
+                while lo < hi && decoded[lo].is_ascii_whitespace() {
                     lo += 1;
                 }
-                while hi > lo && value[hi - 1].is_ascii_whitespace() {
+                while hi > lo && decoded[hi - 1].is_ascii_whitespace() {
                     hi -= 1;
                 }
-                let t = &value[lo..hi];
-                if let Some(target) = t.strip_prefix(b"#") {
+                if let Some(target) = decoded[lo..hi].strip_prefix(b"#") {
                     if !target.is_empty() {
                         href = Some(target.to_vec());
                     }
@@ -724,6 +792,45 @@ mod tests {
     }
 
     #[test]
+    fn use_cycle_guard_decodes_entities_before_matching_references() {
+        // The confirmed CPE-1414 review bypass: hrefs written as numeric/hex char refs (`&#35;` / `&#x23;`
+        // = `#`) decode to `#b`/`#a` under roxmltree BEFORE usvg resolves them, forming the a<->b cycle —
+        // but a raw-byte scan sees a leading `&`, not `#`, and misses the edge. The guard must decode first.
+        let numeric = br##"<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" width="10" height="10">
+            <symbol id="a"><use xlink:href="&#35;b"/></symbol>
+            <symbol id="b"><use xlink:href="&#35;a"/></symbol>
+            <use xlink:href="#a"/>
+        </svg>"##;
+        assert!(svg_use_reference_cycle(numeric), "a numeric-char-ref-encoded (&#35;) <use> cycle must be flagged");
+
+        let hex = br##"<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" width="10" height="10">
+            <symbol id="a"><use xlink:href="&#x23;b"/></symbol>
+            <symbol id="b"><use xlink:href="&#x23;a"/></symbol>
+            <use xlink:href="#a"/>
+        </svg>"##;
+        assert!(svg_use_reference_cycle(hex), "a hex-char-ref-encoded (&#x23;) <use> cycle must be flagged");
+
+        // Entity-encoded *id* (`&#97;` = `a`) must intern to the same node key the plain `#a` href targets.
+        let entity_id = br##"<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" width="10" height="10">
+            <symbol id="&#97;"><use xlink:href="#b"/></symbol>
+            <symbol id="b"><use xlink:href="#a"/></symbol>
+            <use xlink:href="#a"/>
+        </svg>"##;
+        assert!(svg_use_reference_cycle(entity_id), "an entity-encoded id must not dodge the cycle guard");
+    }
+
+    #[test]
+    fn use_cycle_guard_allows_acyclic_entity_encoded_reference() {
+        // Decoding must not OVER-reject: a legit acyclic href written as a numeric char ref to a real,
+        // non-cyclic target has no cycle and must not be flagged.
+        let svg = br##"<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" width="10" height="10">
+            <symbol id="leaf"><rect width="2" height="2" fill="#00f"/></symbol>
+            <use xlink:href="&#35;leaf"/>
+        </svg>"##;
+        assert!(!svg_use_reference_cycle(svg), "an acyclic entity-encoded reference must not be flagged");
+    }
+
+    #[test]
     fn use_cycle_guard_handles_truncated_and_malformed_input_without_panicking() {
         for doc in [
             "<use xlink:href=\"#a\"",
@@ -748,5 +855,16 @@ mod tests {
         // The false-positive guard end-to-end: deep acyclic reuse must still produce an image.
         let img = rasterize_svg(&acyclic_use_chain_svg(200), 32);
         assert!(img.is_ok(), "deep acyclic <use> reuse must still render, got {img:?}");
+    }
+
+    #[test]
+    fn rasterize_svg_renders_acyclic_entity_encoded_reference() {
+        // Decoding entities must not make the guard over-reject a legitimate acyclic entity-encoded href.
+        let svg = br##"<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" width="10" height="10">
+            <rect id="leaf" width="8" height="8" fill="#00f"/>
+            <use xlink:href="&#35;leaf"/>
+        </svg>"##;
+        let img = rasterize_svg(svg, 32);
+        assert!(img.is_ok(), "a legit acyclic entity-encoded reference must still render, got {img:?}");
     }
 }
