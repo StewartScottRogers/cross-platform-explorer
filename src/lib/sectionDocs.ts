@@ -21,7 +21,8 @@ export type Section =
   | "native-metadata"
   | "terminal"
   | "vaults"
-  | "file-health";
+  | "file-health"
+  | "crypto-preview";
 
 /** Section id → doc slug (a `src/docs/*.md` filename without `.md`). */
 const SECTION_DOC: Record<Section, string> = {
@@ -57,6 +58,11 @@ const SECTION_DOC: Record<Section, string> = {
   // menu / command palette), but it still earns its own doc page + registry entry per
   // [[maintain-in-app-docs-library]].
   "file-health": "22-file-health",
+  // CPE-1422 (epic CPE-1417): the JWT/certificate preview-pane views (CPE-1418/1419's decoders wired
+  // into the pane). Like file-health/vaults/terminal/native-metadata above, not a sidebar view you
+  // switch into (it's whichever decoded panel the preview pane shows for a .jwt/.pem/etc. file), but it
+  // still earns its own doc page + registry entry per [[maintain-in-app-docs-library]].
+  "crypto-preview": "26-crypto-preview",
 };
 
 /** The default doc when a section has no page (or an unknown id is passed): the Overview. */
