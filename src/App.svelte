@@ -163,9 +163,9 @@
   import {
     emptySelection, click as selClick, selectOnly, selectAll, moveLead,
     selectedIndices, selectedCount, remapByPath, invertSelection, selectIndices,
-    type Selection,
+    pickActivePane, type Selection,
   } from "./lib/selection";
-  import { arrowDelta } from "./lib/gridnav";
+  import { arrowDelta, pageDelta } from "./lib/gridnav";
   import {
     emptyClipboard, stage, isEmpty as clipEmpty, canPaste as clipCanPaste,
     type Clipboard,
@@ -378,15 +378,40 @@
     return maxSidePaneWidth(window.innerWidth, sidebarWidth, PANE_DIVIDER_W, 2, MID_MIN, RIGHT_MIN);
   }
 
-  /** Live column count of the file grid, for 2-D arrow-key nav (CPE-769). 1 for list/details; for the
-      icons/gallery grid, read the resolved `grid-template-columns` off the live `.rows.grid` (the same
-      source of truth FileList windows against), so it tracks pane width / view without extra plumbing. */
+  /** The keyboard-active pane's own `.rows` element (CPE-1370): `.pane-active .rows` in dual-pane mode
+      (pane A only carries `.pane-active` when dualPane is on — see the pane-col markup below — so this
+      resolves to pane B's grid when it's focused), plain `.rows` in single-pane, which is always pane
+      A's — so single-pane behaviour is untouched. Shared base query for `currentGridCols()` and
+      `visibleRowCount()` so both agree on which pane's DOM they're reading. */
+  function activeRowsEl(): HTMLElement | null {
+    return document.querySelector<HTMLElement>(dualPane ? ".pane-active .rows" : ".rows");
+  }
+
+  /** Live column count of the file grid, for 2-D arrow-key nav (CPE-769) and Page-key paging
+      (CPE-1374). 1 for list/details; for the icons/gallery grid, read the resolved
+      `grid-template-columns` off the active pane's live `.rows.grid` (the same source of truth
+      FileList windows against), so it tracks pane width / view without extra plumbing. */
   function currentGridCols(): number {
     if (view !== "icons" && view !== "gallery") return 1;
-    const el = document.querySelector<HTMLElement>(".rows.grid");
+    const el = activeRowsEl();
     if (!el) return 1;
     const tracks = getComputedStyle(el).gridTemplateColumns.split(" ").filter((s) => s && s !== "none").length;
     return Math.max(1, tracks);
+  }
+
+  /** Rows visible in the active pane's viewport, for PageUp/PageDown (CPE-1374): the row list's
+      scrollable ancestor (`.filelist-pane`) height divided by one row/tile's measured height — grid-
+      aware since it reads the same `.rows` element `currentGridCols()` does. Falls back to a
+      conservative default when nothing is measurable yet (empty folder, first paint, a headless test
+      harness with no real layout) so a Page key always moves the lead by *something* rather than 0. */
+  function visibleRowCount(): number {
+    const rowsEl = activeRowsEl();
+    const scroller = rowsEl?.closest<HTMLElement>(".filelist-pane") ?? null;
+    const firstRow = rowsEl?.querySelector<HTMLElement>(".row");
+    const viewportH = scroller?.getBoundingClientRect().height ?? 0;
+    const rowH = firstRow?.getBoundingClientRect().height ?? 0;
+    if (viewportH <= 0 || rowH <= 0) return 10;
+    return Math.max(1, Math.floor(viewportH / rowH));
   }
 
   function startResize(which: "left" | "right", e: MouseEvent) {
@@ -2256,7 +2281,8 @@
     selectByOpen = false;
     selectByAutoSave = false;
     const idx = selectMatching(visible, condition, Date.now());
-    selection = selectIndices(idx);
+    // CPE-1373: keep the current lead (scroll position) instead of jumping to the match's max index.
+    selection = selectIndices(idx, selection.lead);
     showNotice(
       idx.length === 0
         ? "No items match that criterion."
@@ -2284,7 +2310,8 @@
     const idx = visible
       .map((e, i) => (matchesGlob(e.name, pattern) ? i : -1))
       .filter((i) => i >= 0);
-    selection = selectIndices(idx);
+    // CPE-1373: keep the current lead (scroll position) instead of jumping to the match's max index.
+    selection = selectIndices(idx, selection.lead);
     showNotice(
       idx.length === 0
         ? `No items match "${pattern}".`
@@ -3309,9 +3336,15 @@
   }
 
   function askDelete(permanent: boolean) {
-    if (blockedInArchive() || selectedEntries.length === 0) return;
-    const n = selectedEntries.length;
-    const what = n === 1 ? `"${selectedEntries[0].name}"` : `${n} items`;
+    // CPE-1370: the Delete key (and Shift+Delete) must act on whichever pane is focused. `archive` /
+    // `smartFolder` / `structuredSearch` / Replay mode are all pane-A-only virtual views (pane B —
+    // when it's the active pane — always shows a plain real folder), so `blockedInArchive()` only
+    // applies when we're actually targeting pane A.
+    const inPaneB = dualPane && activePane === 1;
+    const pane = activePaneState();
+    if ((!inPaneB && blockedInArchive()) || pane.selectedEntries.length === 0) return;
+    const n = pane.selectedEntries.length;
+    const what = n === 1 ? `"${pane.selectedEntries[0].name}"` : `${n} items`;
 
     if (!permanent) {
       // Recycle bin is recoverable, so no modal — just do it and say so.
@@ -3328,7 +3361,11 @@
 
   async function doDelete(permanent: boolean) {
     confirm = null;
-    const paths = selectedEntries.map((e) => e.path);
+    // CPE-1370: re-derive the target pane the same way `askDelete` did, so a delete confirmed via the
+    // dialog (a tick later) still lands on the pane the user actually meant.
+    const inPaneB = dualPane && activePane === 1;
+    const pane = activePaneState();
+    const paths = pane.selectedEntries.map((e) => e.path);
     if (paths.length === 0) return;
     try {
       const results = permanent
@@ -3352,7 +3389,11 @@
           });
         }
       }
-      await loadPath(currentPath);
+      if (inPaneB) {
+        if (paneBPath) await explorerPaneB?.loadListing(paneBPath, false);
+      } else {
+        await loadPath(currentPath);
+      }
     } catch (e) {
       showNotice(String(e), true);
     }
@@ -3416,7 +3457,8 @@
       without textually assigning `selection` inside the reactive `paletteCommands` block — that would
       make Svelte see a write and form a selection ⇄ selectedEntries cycle. */
   function selectAllVisible() {
-    selection = selectAll(visible.length);
+    // CPE-1373: keep the current lead (scroll position) instead of jumping to the last row.
+    selection = selectAll(visible.length, selection.lead);
   }
 
   /** Run the selected executable normally (CPE-241) — same shell open as double-click. */
@@ -3545,13 +3587,15 @@
       // Shared row menu (CPE-1163): Disconnect a mapped drive, or Remove a user-added location.
       case "share-disconnect": disconnectShare(); break;
       case "share-remove": removeNetworkLocation(homeCtxPath); break;
-      case "select-all": selection = selectAll(visible.length); break;
-      case "invert-selection": selection = invertSelection(selection, visible.length); break;
+      // CPE-1373: pass the current lead through so bulk selections keep the scroll position instead of
+      // yanking the viewport to the last/max-index row.
+      case "select-all": selection = selectAll(visible.length, selection.lead); break;
+      case "invert-selection": selection = invertSelection(selection, visible.length, selection.lead); break;
       case "select-pattern": patternSelectOpen = true; break;
       case "color-rules": colorRulesOpen = true; break;
       case "select-type": {
         const e = selectedEntries[0];
-        if (e && !e.is_dir) selection = selectIndices(sameTypeIndices(visible, e.extension));
+        if (e && !e.is_dir) selection = selectIndices(sameTypeIndices(visible, e.extension), selection.lead);
         break;
       }
       case "refresh": refresh(); break;
@@ -3862,6 +3906,32 @@
     e.preventDefault();
   }
 
+  /** The keyboard-active pane's live selection state (CPE-1370): in dual-pane mode, when pane B has
+   *  focus, navigation/destructive keys must read/write pane B's own `selectionB`/`visibleB`/
+   *  `selectedEntriesB` instead of always operating on pane A — `pickActivePane` (lib/selection.ts) is
+   *  the pure, unit-tested routing decision; this just wraps it around the live bindings. Single-pane
+   *  (dualPane off) — and pane A focused in dual-pane — always resolves to pane A, so existing
+   *  single-pane behaviour is untouched. `openEntry` mirrors the double-click wiring on each pane's
+   *  `on:open` (line ~5000/5045 below): pane A's richer `open()` (archives/vaults/…) vs pane B's
+   *  simpler `openB()` (plain folders only, v1). */
+  function activePaneState() {
+    const paneA = {
+      selection,
+      visible,
+      selectedEntries,
+      setSelection: (s: Selection) => { selection = s; },
+      openEntry: (e: DirEntry) => open(e),
+    };
+    const paneB = {
+      selection: selectionB,
+      visible: visibleB,
+      selectedEntries: selectedEntriesB,
+      setSelection: (s: Selection) => { selectionB = s; },
+      openEntry: (e: DirEntry) => openB(e),
+    };
+    return pickActivePane(dualPane, activePane, paneA, paneB);
+  }
+
   // ---- keyboard ----
   function handleKeydown(event: KeyboardEvent) {
     const target = event.target as HTMLElement | null;
@@ -3878,6 +3948,10 @@
     }
 
     const ctrl = event.ctrlKey || event.metaKey;
+    // CPE-1370: the pane keyboard nav/destructive keys below act on — pane B only in dual-pane mode
+    // with pane B focused, pane A otherwise. Computed once up front so every case below reads/writes
+    // the same pane consistently.
+    const pane = activePaneState();
     // Dual-pane (CPE-677): plain Tab switches the active pane. Single-pane (dualPane off) leaves Tab's
     // default focus traversal untouched.
     if (dualPane && !ctrl && !event.altKey && event.key === "Tab") {
@@ -3905,7 +3979,12 @@
     if (ctrl && event.key.toLowerCase() === "t") { event.preventDefault(); newTab(); return; }
     if (ctrl && event.key.toLowerCase() === "w") { event.preventDefault(); closeTab(activeId); return; }
     if (ctrl && event.key === "Tab") { event.preventDefault(); cycleTab(event.shiftKey ? -1 : 1); return; }
-    if (ctrl && event.key.toLowerCase() === "a") { event.preventDefault(); selection = selectAll(visible.length); return; }
+    if (ctrl && event.key.toLowerCase() === "a") {
+      event.preventDefault();
+      // CPE-1373: keep the current lead (scroll position) instead of jumping to the last row.
+      pane.setSelection(selectAll(pane.visible.length, pane.selection.lead));
+      return;
+    }
     if (ctrl && event.shiftKey && event.key.toLowerCase() === "c") { event.preventDefault(); doCopyPath(); return; }
     // Don't hijack Ctrl+C when text is selected (e.g. in the Preview Pane) — let the browser copy it.
     if (ctrl && event.key.toLowerCase() === "c" && !(window.getSelection()?.isCollapsed ?? true)) return;
@@ -3935,12 +4014,12 @@
       typeAheadAt = now;
       const single = typeAheadBuffer.length === 1;
       const idx = firstMatchIndex(
-        visible.map((e) => e.name),
+        pane.visible.map((e) => e.name),
         typeAheadBuffer,
-        selection.lead,
+        pane.selection.lead,
         single,
       );
-      if (idx >= 0) selection = selectOnly(idx);
+      if (idx >= 0) pane.setSelection(selectOnly(idx));
       return;
     }
 
@@ -3950,7 +4029,7 @@
       case "F5": event.preventDefault(); refresh(); break;
       case "F2":
         event.preventDefault();
-        if (selectedEntries.length === 1) beginRename(selectedEntries[0]);
+        if (pane.selectedEntries.length === 1) beginRename(pane.selectedEntries[0]);
         break;
       case "Delete":
         event.preventDefault();
@@ -3962,11 +4041,11 @@
         break;
       case "ArrowDown":
         event.preventDefault();
-        selection = moveLead(selection, arrowDelta("ArrowDown", currentGridCols()), visible.length, event.shiftKey);
+        pane.setSelection(moveLead(pane.selection, arrowDelta("ArrowDown", currentGridCols()), pane.visible.length, event.shiftKey));
         break;
       case "ArrowUp":
         event.preventDefault();
-        selection = moveLead(selection, arrowDelta("ArrowUp", currentGridCols()), visible.length, event.shiftKey);
+        pane.setSelection(moveLead(pane.selection, arrowDelta("ArrowUp", currentGridCols()), pane.visible.length, event.shiftKey));
         break;
       case "ArrowRight":
       case "ArrowLeft": {
@@ -3975,22 +4054,31 @@
         const gcols = currentGridCols();
         if (gcols > 1) {
           event.preventDefault();
-          selection = moveLead(selection, arrowDelta(event.key, gcols), visible.length, event.shiftKey);
+          pane.setSelection(moveLead(pane.selection, arrowDelta(event.key, gcols), pane.visible.length, event.shiftKey));
         }
+        break;
+      }
+      case "PageDown":
+      case "PageUp": {
+        // CPE-1374: move the lead by ~one viewport of rows, grid-aware (currentGridCols) — same
+        // Shift-extend semantics as Arrow keys, just scaled up to a page.
+        event.preventDefault();
+        const delta = pageDelta(event.key, currentGridCols(), visibleRowCount());
+        pane.setSelection(moveLead(pane.selection, delta, pane.visible.length, event.shiftKey));
         break;
       }
       case "Home":
         event.preventDefault();
-        selection = moveLead(selection, -visible.length, visible.length, event.shiftKey);
+        pane.setSelection(moveLead(pane.selection, -pane.visible.length, pane.visible.length, event.shiftKey));
         break;
       case "End":
         event.preventDefault();
-        selection = moveLead(selection, visible.length, visible.length, event.shiftKey);
+        pane.setSelection(moveLead(pane.selection, pane.visible.length, pane.visible.length, event.shiftKey));
         break;
       case "Enter":
         if (target?.closest(".row")) return;
         event.preventDefault();
-        if (selectedEntries[0]) open(selectedEntries[0]);
+        if (pane.selectedEntries[0]) void pane.openEntry(pane.selectedEntries[0]);
         break;
       case "Backspace":
         event.preventDefault();

@@ -78,18 +78,31 @@ export function selectOnly(index: number): Selection {
   return { indices: new Set([index]), anchor: index, lead: index };
 }
 
-export function selectAll(count: number): Selection {
+/**
+ * Select every row from 0 to `count - 1`.
+ *
+ * `keepLead` (CPE-1373): when given a valid row (`0 <= keepLead < count`), the lead stays there
+ * instead of jumping to the last row. Explorer/Finder don't move the viewport on Ctrl+A — only the
+ * default (no `keepLead`, or an out-of-range one) falls back to the old "lead = last row" behaviour,
+ * so existing callers are unaffected.
+ */
+export function selectAll(count: number, keepLead = -1): Selection {
   if (count <= 0) return emptySelection();
+  const lead = keepLead >= 0 && keepLead < count ? keepLead : count - 1;
   return {
     indices: new Set(range(0, count - 1)),
     anchor: 0,
-    lead: count - 1,
+    lead,
   };
 }
 
-/** Build a selection from an explicit set of row indices. Negative indices are
- *  ignored; the lowest becomes the anchor and the highest leads. */
-export function selectIndices(indices: number[]): Selection {
+/**
+ * Build a selection from an explicit set of row indices. Negative indices are ignored; the lowest
+ * becomes the anchor and the highest leads — unless `keepLead` (CPE-1373) names a row, in which case
+ * the lead stays there instead (used by bulk selections — Invert, Select-all-of-type — so they don't
+ * yank the viewport to the selection's max row; see `selectAll`'s doc for why).
+ */
+export function selectIndices(indices: number[], keepLead = -1): Selection {
   const clean = indices.filter((i) => i >= 0);
   if (clean.length === 0) return emptySelection();
   // Min/max via a loop, NOT `Math.min(...clean)`: spreading a large array into a call overflows the
@@ -101,17 +114,19 @@ export function selectIndices(indices: number[]): Selection {
     if (i < anchor) anchor = i;
     if (i > lead) lead = i;
   }
+  if (keepLead >= 0) lead = keepLead;
   return { indices: new Set(clean), anchor, lead };
 }
 
-/** Flip the selection across `count` visible rows: every row not currently
- *  selected becomes selected, and vice-versa. */
-export function invertSelection(sel: Selection, count: number): Selection {
+/** Flip the selection across `count` visible rows: every row not currently selected becomes
+ *  selected, and vice-versa. `keepLead` (CPE-1373) is forwarded to `selectIndices` to keep the lead
+ *  (and scroll position) put instead of jumping to the inverted selection's max row. */
+export function invertSelection(sel: Selection, count: number, keepLead = -1): Selection {
   const out: number[] = [];
   for (let i = 0; i < count; i++) {
     if (!sel.indices.has(i)) out.push(i);
   }
-  return selectIndices(out);
+  return selectIndices(out, keepLead);
 }
 
 /**
@@ -134,6 +149,22 @@ export function moveLead(
     return { indices: new Set(range(anchor, next)), anchor, lead: next };
   }
   return selectOnly(next);
+}
+
+/**
+ * Pick which of two panes' state a keyboard action should act on (CPE-1370, dual-pane commander
+ * mode): pane B only when dual-pane is on AND it's the active pane; single-pane — and pane A active
+ * in dual-pane — always resolves to pane A. Generic + pure so the routing decision itself is
+ * unit-testable without mounting the app; App.svelte's `activePaneState()` is a thin call to this
+ * over its live `selection`/`selectionB` (etc.) bindings.
+ */
+export function pickActivePane<T>(
+  dualPane: boolean,
+  activePane: 0 | 1,
+  paneA: T,
+  paneB: T,
+): T {
+  return dualPane && activePane === 1 ? paneB : paneA;
 }
 
 /**
