@@ -594,6 +594,12 @@
 
   let renamingPath = "";
   let renameValue = "";
+  /** Pane B's own inline-rename state (CPE-1377): pane B is a second `<ExplorerPane>` instance, so it
+   *  needs its own `renamingPath`/`renameValue` pair — reusing pane A's would let a pane-A rename-in-
+   *  progress leak an editor into pane B (or vice versa). `beginRename`/`commitRename` route to this
+   *  pair via their `inPaneB` parameter, exactly like `selectionB`/`selectedEntriesB` already do. */
+  let renamingPathB = "";
+  let renameValueB = "";
   /** Path of a freshly-created folder, so we can auto-rename it once listed. */
   let pendingRenamePath = "";
   let pendingSelectPath = ""; // select (no rename) a just-created item after reload
@@ -603,7 +609,13 @@
   let canRestoreTrash = false;
   /** Paths currently being dragged, shared with the sidebar as a drop target. */
   let draggedPaths: string[] = [];
-  let ctx: { x: number; y: number; target: "item" | "empty" | "drive" | "home-item" } | null = null;
+  /** `inPaneB` (CPE-1377): which pane the menu was opened OVER, set by `onRowContext`/`onDriveContext`/
+   *  `onHomeItemContext`/pane B's `contextEmpty` handler. Deliberately NOT derived from live `activePane`
+   *  — a right-click doesn't focus a pane (only a plain click does, per the `pane-col`'s `on:click`), so
+   *  right-clicking pane B while pane A is still "active" must still target pane B. `runAction`/the
+   *  `<ContextMenu>` props below read it via `ctx?.inPaneB` (menu-open-time) rather than `activePane`
+   *  (focus-time) — the same reasoning `snapshotConfirmTarget` already applies to a delete confirm. */
+  let ctx: { x: number; y: number; target: "item" | "empty" | "drive" | "home-item"; inPaneB?: boolean } | null = null;
   /** True when the single item the currently-open `target: "item"` menu is for is a broken symlink
    *  (CPE-1209, epic CPE-715) — resolved async in `onRowContext` via `commands.linkStatus` (the menu
    *  itself can't do async), gating the "Repair link…" row. Reset to false whenever a new item menu
@@ -1866,11 +1878,21 @@
     await loadPath(path, false, true); // navigation uses the listing cache (CPE-756)
   }
 
-  /** Navigate pane B independently of pane A (dual-pane, CPE-677); persists its folder. */
+  /** Navigate pane B independently of pane A (dual-pane, CPE-677); persists its folder.
+   *  `path === HOME` (CPE-1378, once pane B could actually land on Home): mirrors `loadPath`'s own HOME
+   *  short-circuit above — HOME is the abstract landing view, not a real filesystem path, so there is no
+   *  listing to fetch. Skipping `loadListing` here avoids issuing a bogus `list_dir(" home")` backend
+   *  call (Home's `<HomeView>` reads `places`/`pins`/`recents`/etc., never `entries`/`visible`, so that
+   *  call's result would go unused anyway) and the dev-only perf-mark instrumentation that comes with it. */
   async function navigateB(path: string) {
     paneBPath = path;
     settings.savePaneBPath(path);
     selectedTagB = ""; // a tag filter is folder-scoped (CPE-639); mirrors pane A's loadPath reset
+    if (path === HOME) {
+      entriesB = [];
+      loadingB = false;
+      return;
+    }
     await explorerPaneB?.loadListing(path, true);
   }
 
@@ -2380,6 +2402,25 @@
   $: totalCount = ((isHome && !smartFolder && !structuredSearch) || archive) ? itemCount : shown.length;
   $: pasteCheck = clipCanPaste(clipboard, isHome ? "" : currentPath);
   $: cutPaths = clipboard.mode === "cut" ? clipboard.paths : [];
+  // CPE-1377: which pane the currently-OPEN `<ContextMenu>` (`ctx`) is FOR — read from `ctx.inPaneB`
+  // (menu-open-time), never live `activePane` (focus-time); see the `ctx` declaration's comment. Drives
+  // every entry-derived `<ContextMenu>` prop below so a pane-B right-click shows pane B's selection, not
+  // pane A's leftover one. `ctxPane` is meaningless while `ctx` is null but harmless (defaults to pane A)
+  // — the menu itself only renders `{#if ctx}`.
+  //
+  // Deliberately NOT `paneStateFor(ctxInPaneB)` here: Svelte's `$:` dependency tracking is static — it
+  // only sees identifiers written directly in the reactive statement's own expression, not ones a called
+  // function reads internally. `paneStateFor(ctxInPaneB)` would only ever re-run when `ctxInPaneB`
+  // itself changes, NOT when `selection`/`selectedEntries`/`selectionB`/`selectedEntriesB` change on
+  // their own — leaving the menu showing a stale selection (caught by a real test regression: "Open in
+  // new tab" stopped appearing because `folderSelected` was one flush behind the just-updated
+  // selection). Referencing every field directly, even in the untaken ternary branch, makes them real
+  // dependencies. `paneStateFor` itself stays fine for plain (non-reactive) function calls like
+  // `runAction`'s, which always read live values at call time regardless of Svelte's tracking.
+  $: ctxInPaneB = ctx?.inPaneB ?? false;
+  $: ctxPane = ctxInPaneB
+    ? { selection: selectionB, visible: visibleB, selectedEntries: selectedEntriesB }
+    : { selection, visible, selectedEntries };
 
   $: tabList = tabs.map((t) => {
     const p = current(t.history) ?? HOME;
@@ -2414,8 +2455,13 @@
    *  except the F2 keyboard path (which can target either pane) targets pane A, so it defaults false. */
   function beginRename(entry: DirEntry, inPaneB = false) {
     if (!inPaneB && blockedInArchive()) return;
-    renamingPath = entry.path;
-    renameValue = entry.name;
+    if (inPaneB) {
+      renamingPathB = entry.path;
+      renameValueB = entry.name;
+    } else {
+      renamingPath = entry.path;
+      renameValue = entry.name;
+    }
   }
 
   /** Open the batch-rename dialog for the current multi-selection (CPE-255). */
@@ -2489,12 +2535,16 @@
     await loadPath(currentPath);
   }
 
-  async function commitRename(newName: string) {
-    const path = renamingPath;
-    renamingPath = "";
+  /** `inPaneB` (CPE-1377): mirrors `beginRename`'s parameter — reads/clears the right pane's
+   *  `renamingPath{,B}`, looks the entry up in the right pane's `visible{,B}`, and reloads the right
+   *  pane afterward (matching `doDelete`'s `inPaneB ? explorerPaneB?.loadListing(...) : loadPath(...)`
+   *  pattern) so a pane-B rename never touches pane A's listing or vice versa. */
+  async function commitRename(newName: string, inPaneB = false) {
+    const path = inPaneB ? renamingPathB : renamingPath;
+    if (inPaneB) renamingPathB = ""; else renamingPath = "";
     if (!path) return;
 
-    const entry = visible.find((e) => e.path === path);
+    const entry = (inPaneB ? visibleB : visible).find((e) => e.path === path);
     if (!entry || newName.trim() === "" || newName === entry.name) return;
 
     const invalid = validateFileName(newName);
@@ -2514,7 +2564,11 @@
         moves: [{ from: path, to }],
         label: `Rename to "${newName}"`,
       });
-      await loadPath(currentPath);
+      if (inPaneB) {
+        if (paneBPath) await explorerPaneB?.loadListing(paneBPath, false);
+      } else {
+        await loadPath(currentPath);
+      }
     } catch (e) {
       showNotice(String(e), true);
     }
@@ -2886,22 +2940,25 @@
     await loadPath(currentPath);
   }
 
-  /** Copy the selection's full path(s) to the OS clipboard, quoted, one per
-      line — Explorer's "Copy as path". */
-  async function doCopyPath() {
-    if (selectedEntries.length === 0) return;
-    const text = formatPathsForClipboard(selectedEntries.map((e) => e.path));
+  /** Copy the selection's full path(s) to the OS clipboard, quoted, one per line — Explorer's "Copy as
+   *  path". `entries` (CPE-1377) defaults to pane A's `selectedEntries` for every existing caller
+   *  (keyboard shortcut, command palette); `runAction`'s "copy-path" case passes the context-menu's
+   *  pane-aware `pane.selectedEntries` so a pane-B right-click copies pane B's path, not pane A's. */
+  async function doCopyPath(entries: DirEntry[] = selectedEntries) {
+    if (entries.length === 0) return;
+    const text = formatPathsForClipboard(entries.map((e) => e.path));
     try {
       await navigator.clipboard.writeText(text);
-      showNotice(`Copied path${selectedEntries.length === 1 ? "" : "s"} to the clipboard.`);
+      showNotice(`Copied path${entries.length === 1 ? "" : "s"} to the clipboard.`);
     } catch {
       showNotice("Couldn't copy the path to the clipboard.", true);
     }
   }
 
-  /** Copy just the selected item's name to the clipboard (CPE-248). */
-  async function doCopyName() {
-    const entry = selectedEntries[0];
+  /** Copy just the selected item's name to the clipboard (CPE-248). `entries` defaults as `doCopyPath`
+   *  does above (CPE-1377). */
+  async function doCopyName(entries: DirEntry[] = selectedEntries) {
+    const entry = entries[0];
     if (!entry) return;
     try {
       await navigator.clipboard.writeText(entry.name);
@@ -2911,9 +2968,11 @@
     }
   }
 
-  /** Reveal the selected item (or the current folder) in the OS file manager (CPE-247). */
-  async function revealInExplorer() {
-    const target = selectedEntries.length === 1 ? selectedEntries[0].path : (isHome ? "" : currentPath);
+  /** Reveal the selected item (or the current folder) in the OS file manager (CPE-247). `entries` +
+   *  `fallback` default to pane A (CPE-1377) — `runAction`'s "reveal" case passes pane B's selection +
+   *  `paneBPath` when the menu was opened over pane B, so it reveals the right pane's item/folder. */
+  async function revealInExplorer(entries: DirEntry[] = selectedEntries, fallback: string = isHome ? "" : currentPath) {
+    const target = entries.length === 1 ? entries[0].path : fallback;
     if (!target) return;
     try {
       await revealItemInDir(target);
@@ -2932,9 +2991,12 @@
     }
   }
 
-  /** Pin/unpin the selected folder in the Home view (CPE-249). */
-  function togglePinSelected() {
-    const entry = selectedEntries[0];
+  /** Pin/unpin the selected folder in the Home view (CPE-249). `entries` defaults to pane A's selection
+   *  for every existing caller; `runAction`'s "pin" case passes the context-menu's pane-aware selection
+   *  (CPE-1377) so pinning FROM pane B pins the folder actually right-clicked. `pins` itself is a single
+   *  shared list either way (Home is not per-pane). */
+  function togglePinSelected(entries: DirEntry[] = selectedEntries) {
+    const entry = entries[0];
     if (!entry?.is_dir) return;
     const wasPinned = pins.includes(entry.path);
     pins = settings.togglePin(pins, entry.path);
@@ -2958,9 +3020,10 @@
     }
   }
 
-  /** Star/unstar the single selected item (file or folder) as a Favorite (CPE-338). */
-  function toggleFavoriteSelected() {
-    const entry = selectedEntries[0];
+  /** Star/unstar the single selected item (file or folder) as a Favorite (CPE-338). `entries` defaults
+   *  as `togglePinSelected` does above (CPE-1377). */
+  function toggleFavoriteSelected(entries: DirEntry[] = selectedEntries) {
+    const entry = entries[0];
     if (!entry) return;
     const wasFav = favorites.some((f) => f.path === entry.path);
     favorites = settings.toggleFavorite(favorites, {
@@ -3366,7 +3429,13 @@
     if (matchesA || !matchesB) await loadPath(currentPath);
   }
 
-  function askDelete(permanent: boolean) {
+  /** `inPaneBOverride` (CPE-1377): a context-menu-invoked delete must target the pane the menu was
+   *  opened OVER (`ctx?.inPaneB`), not the live `activePane` — right-clicking pane B doesn't focus it
+   *  (only a plain click does), so the default `dualPane && activePane === 1` would silently target
+   *  whichever pane last had focus instead of the one actually right-clicked. The keyboard Delete path
+   *  (Delete/Shift+Delete in `handleKeydown`) has no menu-open-time pane to snapshot, so it keeps using
+   *  the default (live active pane), unchanged from CPE-1370. */
+  function askDelete(permanent: boolean, inPaneBOverride?: boolean) {
     // CPE-1370 review (data-loss fix): SNAPSHOT the target pane + paths right now via
     // `snapshotConfirmTarget` — the confirm dialog stays open for an arbitrary amount of time, during
     // which `activePane` can still change underneath it (Tab still reaches `handleKeydown` while
@@ -3377,8 +3446,8 @@
     // `archive`/`smartFolder`/`structuredSearch`/Replay mode are all pane-A-only virtual views (pane B —
     // when it's the active pane — always shows a plain real folder), so `blockedInArchive()` only
     // applies when we're actually targeting pane A.
-    const inPaneB = dualPane && activePane === 1;
-    const pane = activePaneState();
+    const inPaneB = inPaneBOverride ?? (dualPane && activePane === 1);
+    const pane = paneStateFor(inPaneB);
     if ((!inPaneB && blockedInArchive()) || pane.selectedEntries.length === 0) return;
     const target = snapshotConfirmTarget(inPaneB, pane.selectedEntries);
     const n = pane.selectedEntries.length;
@@ -3475,18 +3544,23 @@
     showNotice(message, true);
   }
 
-  function openProperties() {
-    if (selectedEntries.length === 0) return;
-    propsFor = selectedEntries;
+  /** `entries` defaults to pane A's selection (CPE-1377) — `runAction`'s "properties" case passes the
+   *  context-menu's pane-aware selection so Properties opened over a pane-B row describes pane B's
+   *  item, not whatever happens to be selected in pane A. */
+  function openProperties(entries: DirEntry[] = selectedEntries) {
+    if (entries.length === 0) return;
+    propsFor = entries;
   }
 
   /** Properties for the CURRENT folder (CPE-1153) — the empty-area menu's Properties row, when nothing
    *  is selected. Home is an abstract view with no single path, so it's skipped there. The dialog
-   *  re-fetches real info from the backend via the path, so a synthesized folder entry is enough. */
-  function openFolderProperties() {
-    if (isHome) return;
-    const name = splitPath(currentPath).at(-1)?.name ?? currentPath;
-    propsFor = [{ name, path: currentPath, is_dir: true, size: 0, modified: null, extension: "", hidden: false, is_symlink: false }];
+   *  re-fetches real info from the backend via the path, so a synthesized folder entry is enough.
+   *  `path` defaults to pane A's `currentPath` (CPE-1377) — `runAction`'s "properties-folder" case
+   *  passes `paneBPath` when the empty-area menu was opened over pane B. */
+  function openFolderProperties(path: string = currentPath) {
+    if (path === HOME) return;
+    const name = splitPath(path).at(-1)?.name ?? path;
+    propsFor = [{ name, path, is_dir: true, size: 0, modified: null, extension: "", hidden: false, is_symlink: false }];
   }
 
   function openMetadataStudio() {
@@ -3532,6 +3606,14 @@
       void startMacro(action.slice(6));
       return;
     }
+    // CPE-1377: which pane the OPEN menu was opened over (`ctx?.inPaneB`) — NOT the live `activePane`,
+    // since a right-click doesn't focus a pane (see the `ctx` declaration's comment). Read once, up
+    // front, synchronously — before any `await` — exactly like `askDelete` already snapshots its own
+    // target, so a case below can't read a stale `ctx` after `ContextMenu`'s `close` event nulls it.
+    // `CommandBar`'s toolbar actions and the empty-space palette also route through here with `ctx`
+    // null, which correctly resolves to pane A (the toolbar always acts on pane A today).
+    const inPaneB = ctx?.inPaneB ?? false;
+    const pane = paneStateFor(inPaneB);
     // Typed New ▸ file types (CPE-1161) carry the extension as `new-file:<ext>` / `new-file-in:<ext>`
     // / `drive-new-file:<ext>`, resolved back to a spec here so one list drives all three menus. The
     // target folder mirrors the plain new-file rules: current folder / the clicked folder / drive root.
@@ -3540,7 +3622,7 @@
       const spec = ext ? NEW_FILE_TYPE_BY_EXT[ext] : undefined;
       if (spec && (verb === "new-file" || verb === "new-file-in" || verb === "drive-new-file" || verb === "home-new-file")) {
         if (verb === "new-file-in") {
-          if (selectedEntries[0]?.is_dir) newFile(selectedEntries[0].path, spec);
+          if (pane.selectedEntries[0]?.is_dir) newFile(pane.selectedEntries[0].path, spec);
         } else if (verb === "drive-new-file") {
           if (driveCtxPath) newFile(driveCtxPath, spec);
         } else if (verb === "home-new-file") {
@@ -3555,14 +3637,20 @@
       // Command Palette discoverable entry points (CPE-1164) — the toolbar button and the empty-area
       // context-menu row both dispatch this; reuse the same open path as Ctrl+Shift+P.
       case "command-palette": paletteOpen = true; break;
-      case "open": if (selectedEntries[0]) open(selectedEntries[0]); break;
+      case "open": if (pane.selectedEntries[0]) pane.openEntry(pane.selectedEntries[0]); break;
       case "execute": executeSelected(); break;
       case "execute-admin": executeAsAdmin(); break;
-      case "open-new-tab": if (selectedEntries[0]) openInNewTab(selectedEntries[0]); break;
+      case "open-new-tab": if (pane.selectedEntries[0]) openInNewTab(pane.selectedEntries[0]); break;
+      // Clipboard verbs (cut/copy/paste/duplicate/copy-to/move-to) stay pane-A-only here — CPE-1380
+      // covers making them pane-aware; out of this ticket's scope (CPE-1377/1378).
       case "cut": doCut(); break;
       case "copy": doCopy(); break;
       case "paste": doPaste(); break;
       case "duplicate": doDuplicate(); break;
+      // Archive/vault/media-batch ops are pane-A-only concepts in v1 — pane B is always a plain real
+      // folder (see `beginRename`'s comment), and `<ContextMenu>`'s `compressible`/`extractable`/
+      // `archiveSafetyEligible`/`comparable`/`mediaEligible`/`shreddable`/`vaultable`/`canTerminal` props
+      // are already forced off for a pane-B-opened menu below, so these rows simply don't show there.
       case "compare": compareFiles(); break;
       case "compress": doCompress(); break;
       case "compress-targz": doCompressAs(".tar.gz"); break;
@@ -3570,26 +3658,26 @@
       case "extract": doExtract(); break;
       case "extract-to": doExtractTo(); break;
       case "archive-safety": askArchiveSafety(); break;
-      case "copy-path": doCopyPath(); break;
-      case "copy-name": doCopyName(); break;
-      case "reveal": revealInExplorer(); break;
+      case "copy-path": doCopyPath(pane.selectedEntries); break;
+      case "copy-name": doCopyName(pane.selectedEntries); break;
+      case "reveal": revealInExplorer(pane.selectedEntries, inPaneB ? (paneBPath === HOME ? "" : paneBPath) : (isHome ? "" : currentPath)); break;
       case "terminal": openTerminal(currentPath); break;
-      case "terminal-folder": if (selectedEntries[0]?.is_dir) openTerminal(selectedEntries[0].path); break;
-      case "pin": togglePinSelected(); break;
-      case "favorite": toggleFavoriteSelected(); break;
+      case "terminal-folder": if (pane.selectedEntries[0]?.is_dir) openTerminal(pane.selectedEntries[0].path); break;
+      case "pin": togglePinSelected(pane.selectedEntries); break;
+      case "favorite": toggleFavoriteSelected(pane.selectedEntries); break;
       case "open-in-console": openSelectionInConsole(); break;
       case "copy-to": copyMoveToFolder(false); break;
       case "move-to": copyMoveToFolder(true); break;
       case "open-folder-in-console": if (!isHome && !archive) openAiConsole({ cwd: currentPath }); break;
-      case "rename": if (selectedEntries.length === 1) beginRename(selectedEntries[0]); break;
+      case "rename": if (pane.selectedEntries.length === 1) beginRename(pane.selectedEntries[0], inPaneB); break;
       case "batch-rename": beginBatchRename(); break;
       case "batch-media": beginBatchMedia(); break;
-      case "delete": askDelete(false); break;
+      case "delete": askDelete(false, inPaneB); break;
       case "shred": askShred(); break;
       case "vault-create": askVaultCreate(); break;
-      case "properties": openProperties(); break;
+      case "properties": openProperties(pane.selectedEntries); break;
       case "metadataStudio": openMetadataStudio(); break;
-      case "tags": if (selectedEntries.length >= 1) tagEditorFor = [...selectedEntries]; break;
+      case "tags": if (pane.selectedEntries.length >= 1) tagEditorFor = [...pane.selectedEntries]; break;
       case "new-folder": newFolder(); break;
       case "new-file": newFile(); break;
       // New Link… (CPE-1207) — empty-area menu + command palette only, always targets currentPath.
@@ -3597,11 +3685,13 @@
       // Repair link… (CPE-1209) — offered only when ContextMenu's `linkBroken` gated it on.
       case "repair-link": if (selectedEntries.length === 1) repairLinkFor = selectedEntries[0]; break;
       // New ▸ from a folder right-click (CPE-1156) — create INSIDE the clicked folder (its own path).
-      case "new-folder-in": if (selectedEntries[0]?.is_dir) newFolder(selectedEntries[0].path); break;
-      case "new-file-in": if (selectedEntries[0]?.is_dir) newFile(selectedEntries[0].path); break;
+      case "new-folder-in": if (pane.selectedEntries[0]?.is_dir) newFolder(pane.selectedEntries[0].path); break;
+      case "new-file-in": if (pane.selectedEntries[0]?.is_dir) newFile(pane.selectedEntries[0].path); break;
       // Drive/disk menu (CPE-1158) — every action targets the drive ROOT (`driveCtxPath`), so it works
       // the same from a Home tile and a sidebar row. New reuses CPE-1156's create-in-target path.
-      case "drive-open": if (driveCtxPath) navigate(driveCtxPath); break;
+      // "drive-open" navigates the pane the drive tile lives in (inPaneB from a pane-B Home tile; the
+      // shared Sidebar's drive rows always resolve to pane A, unchanged).
+      case "drive-open": if (driveCtxPath) { if (inPaneB) void navigateB(driveCtxPath); else navigate(driveCtxPath); } break;
       case "drive-new-folder": if (driveCtxPath) newFolder(driveCtxPath); break;
       case "drive-new-file": if (driveCtxPath) newFile(driveCtxPath); break;
       case "drive-copy-path": copyDrivePath(); break;
@@ -3611,6 +3701,8 @@
       // Home row menu (CPE-1162) — every action targets `homeCtxPath` (the clicked row), independent of
       // any FileList selection. `home-delete` trashes the real file; `home-remove` prunes only the list
       // pointer — deliberately two different verbs so the menu can keep them unmistakably distinct.
+      // Home's underlying stores (pins/favorites/recents/…) are shared across both panes (CPE-1378), so
+      // these need no pane-aware routing beyond `homeCtxPath` itself, already set by `onHomeItemContext`.
       case "home-open": openHomeItem(); break;
       case "home-open-new-tab": if (homeCtxIsDir && homeCtxPath) openInNewTab(homeCtxEntry()); break;
       case "home-reveal": revealHomeItem(); break;
@@ -3629,19 +3721,23 @@
       case "share-disconnect": disconnectShare(); break;
       case "share-remove": removeNetworkLocation(homeCtxPath); break;
       // CPE-1373: pass the current lead through so bulk selections keep the scroll position instead of
-      // yanking the viewport to the last/max-index row.
-      case "select-all": selection = selectAll(visible.length, selection.lead); break;
-      case "invert-selection": selection = invertSelection(selection, visible.length, selection.lead); break;
+      // yanking the viewport to the last/max-index row. CPE-1377: routed through `pane` so a select-all/
+      // invert/same-type triggered from a pane-B context menu acts on pane B's own selection.
+      case "select-all": pane.setSelection(selectAll(pane.visible.length, pane.selection.lead)); break;
+      case "invert-selection": pane.setSelection(invertSelection(pane.selection, pane.visible.length, pane.selection.lead)); break;
       case "select-pattern": patternSelectOpen = true; break;
       case "color-rules": colorRulesOpen = true; break;
       case "select-type": {
-        const e = selectedEntries[0];
-        if (e && !e.is_dir) selection = selectIndices(sameTypeIndices(visible, e.extension), selection.lead);
+        const e = pane.selectedEntries[0];
+        if (e && !e.is_dir) pane.setSelection(selectIndices(sameTypeIndices(pane.visible, e.extension), pane.selection.lead));
         break;
       }
-      case "refresh": refresh(); break;
+      case "refresh":
+        if (inPaneB) { if (paneBPath) void explorerPaneB?.loadListing(paneBPath, false); }
+        else refresh();
+        break;
       case "undo": undo(); break;
-      case "properties-folder": openFolderProperties(); break;
+      case "properties-folder": openFolderProperties(inPaneB ? paneBPath : currentPath); break;
       // View / Sort submenus (CPE-1153) — drive the SAME view/sortKey/sortDir state the toolbar and
       // column headers use (single source of truth), and persist exactly as those paths do.
       case "view:details": view = "details"; settings.saveView(view); break;
@@ -3658,19 +3754,28 @@
     }
   }
 
-  async function onRowContext(e: { x: number; y: number; index: number }) {
+  /** `inPaneB` (CPE-1377): pane B's `<ExplorerPane>` passes `true` so a pane-B right-click selects
+   *  within `selectionB`/`visibleB` (never pane A's) and records which pane the menu is FOR on `ctx`,
+   *  independent of live `activePane` — see the `ctx` declaration's comment. */
+  async function onRowContext(e: { x: number; y: number; index: number }, inPaneB = false) {
     // Right-clicking an unselected row selects it first, as Explorer does.
-    if (!selection.indices.has(e.index)) selection = selectOnly(e.index);
-    ctx = { x: e.x, y: e.y, target: "item" };
+    const sel = inPaneB ? selectionB : selection;
+    const vis = inPaneB ? visibleB : visible;
+    if (!sel.indices.has(e.index)) {
+      if (inPaneB) selectionB = selectOnly(e.index);
+      else selection = selectOnly(e.index);
+    }
+    ctx = { x: e.x, y: e.y, target: "item", inPaneB };
     ctxLinkBroken = false; // reset before the async check below settles (CPE-1209)
-    // `visible[e.index]` (not `selectedEntries[0]`) — `selection` was just reassigned above and the
-    // `$:` derived `selectedEntries` hasn't recomputed yet in this same synchronous tick.
-    const entry = visible[e.index];
+    // `vis[e.index]` (not `selectedEntries`/`selectedEntriesB`) — the selection was just reassigned
+    // above and the `$:` derived selected-entries list hasn't recomputed yet in this same tick.
+    const entry = vis[e.index];
     if (entry?.is_symlink) {
       try {
         const status = await commands.linkStatus(entry.path);
         // Guard against a stale write: only apply if this item's menu is still the one open.
-        if (ctx?.target === "item" && visible[e.index]?.path === entry.path) ctxLinkBroken = status.broken;
+        const curVis = inPaneB ? visibleB : visible;
+        if (ctx?.target === "item" && curVis[e.index]?.path === entry.path) ctxLinkBroken = status.broken;
       } catch {
         // Never block the menu on a failed check — leave it false (Repair row simply doesn't show).
       }
@@ -3679,11 +3784,13 @@
 
   /** Open the drive/disk context menu (CPE-1158) for a Home drive tile or a sidebar drive row. The
    *  menu's actions all target `driveCtxPath` (the drive ROOT), so New creates at the root and
-   *  Properties describes the root — independent of the FileList selection (Home has none). */
-  function onDriveContext(e: { x: number; y: number; path: string; name: string }) {
+   *  Properties describes the root — independent of the FileList selection (Home has none).
+   *  `inPaneB` (CPE-1377): true only when pane B's own `<ExplorerPane>` (its Home drive tiles) fired
+   *  this — the shared Sidebar's drive rows always pass the default `false` (pane A), unchanged. */
+  function onDriveContext(e: { x: number; y: number; path: string; name: string }, inPaneB = false) {
     driveCtxPath = e.path;
     driveCtxName = e.name;
-    ctx = { x: e.x, y: e.y, target: "drive" };
+    ctx = { x: e.x, y: e.y, target: "drive", inPaneB };
   }
 
   /** Copy the drive root path to the OS clipboard (CPE-1158 drive menu). */
@@ -3748,14 +3855,14 @@
   /** Open the "home-item" menu for a Home row (CPE-1162). Stores the target, opens the menu, then fires
    *  a best-effort existence check (reusing `entries_for_paths`, the same stat-a-path command Home's
    *  preview uses) to mark it stale — a missing target disables the on-disk rows but keeps Remove live. */
-  function onHomeItemContext(e: { x: number; y: number; path: string; is_dir: boolean; view: "recent" | "favorites" | "folders" | "shared"; kind?: string }) {
+  function onHomeItemContext(e: { x: number; y: number; path: string; is_dir: boolean; view: "recent" | "favorites" | "folders" | "shared"; kind?: string }, inPaneB = false) {
     homeCtxPath = e.path;
     homeCtxName = leafName(e.path);
     homeCtxIsDir = e.is_dir;
     homeCtxView = e.view;
     homeCtxKind = e.kind ?? "";
     homeCtxStale = false; // optimistic; the async check below flips it if the target is gone
-    ctx = { x: e.x, y: e.y, target: "home-item" };
+    ctx = { x: e.x, y: e.y, target: "home-item", inPaneB };
     // Shared rows deliberately skip the stat-based stale check (CPE-1163): statting a dead/offline
     // network path could stall, and an unreachable share must degrade gracefully — Open surfaces its
     // own error, while Remove/Disconnect stay live regardless. Local rows keep the freshness check.
@@ -3955,7 +4062,13 @@
    *  single-pane behaviour is untouched. `openEntry` mirrors the double-click wiring on each pane's
    *  `on:open` (line ~5000/5045 below): pane A's richer `open()` (archives/vaults/…) vs pane B's
    *  simpler `openB()` (plain folders only, v1). */
-  function activePaneState() {
+  /** Same paneA/paneB shape as `activePaneState()`, but for an explicit `inPaneB` flag rather than the
+   *  live `activePane` (CPE-1377) — a right-click doesn't focus a pane, so a context-menu action must
+   *  target whichever pane the menu was opened OVER (`ctx?.inPaneB`), not whichever pane last had a
+   *  plain click. Reuses `pickActivePane` (same routing decision `activePaneState()` uses) by always
+   *  passing `dualPane: true` and feeding it the explicit flag instead of the live `activePane` — when
+   *  `inPaneB` is false this resolves to pane A exactly like single-pane mode always has. */
+  function paneStateFor(inPaneB: boolean) {
     const paneA = {
       selection,
       visible,
@@ -3970,7 +4083,11 @@
       setSelection: (s: Selection) => { selectionB = s; },
       openEntry: (e: DirEntry) => openB(e),
     };
-    return pickActivePane(dualPane, activePane, paneA, paneB);
+    return pickActivePane(true, inPaneB ? 1 : 0, paneA, paneB);
+  }
+
+  function activePaneState() {
+    return paneStateFor(dualPane && activePane === 1);
   }
 
   // ---- keyboard ----
@@ -5164,6 +5281,7 @@
     <div class="pane-col" class:pane-active={activePane === 1} on:click={() => (activePane = 1)}>
       <ExplorerPane
         bind:this={explorerPaneB}
+        inHome={paneBPath === HOME}
         bind:entries={entriesB}
         bind:visible={visibleB}
         bind:shown={shownB}
@@ -5177,6 +5295,8 @@
         {recents}
         {favorites}
         {recentFolders}
+        {shared}
+        {sharedLoading}
         {colorRules}
         {folderContexts}
         {view}
@@ -5190,11 +5310,32 @@
         {showFolderSizes}
         {folderSizes}
         on:needSizes={(e) => fillFolderSizes(e.detail)}
+        bind:renamingPath={renamingPathB}
+        renameValue={renameValueB}
+        bind:columnWidths
+        {activeMetaColumns}
+        on:resizeMetaColumns={(e) => { activeMetaColumns = applyMetaColumnWidths(activeMetaColumns, e.detail); settings.saveMetaColumnsForFolder(currentPath, activeMetaColumns); }}
+        on:openColumnPicker={() => (columnPickerOpen = true)}
         bind:selectedTag={selectedTagB}
         bind:draggedPaths
+        on:contextAction={(e) => handleContextAction(e.detail)}
         on:open={(e) => openB(e.detail)}
         on:navigate={(e) => navigateB(e.detail)}
         on:openRecent={(e) => openRecent(e.detail)}
+        on:homeSelect={(e) => selectHomeEntry(e.detail)}
+        on:unpin={(e) => { pins = settings.togglePin(pins, e.detail); settings.savePins(pins); }}
+        on:unfavorite={(e) => { favorites = favorites.filter((f) => f.path !== e.detail); settings.saveFavorites(favorites); }}
+        on:removeRecent={(e) => { recents = settings.removeRecent(recents, e.detail); settings.saveRecents(recents); }}
+        on:removeRecentFolder={(e) => { recentFolders = settings.removeRecent(recentFolders, e.detail); settings.saveRecentFolders(recentFolders); }}
+        on:clearRecents={() => { recents = []; settings.saveRecents(recents); }}
+        on:rowContext={(e) => onRowContext(e.detail, true)}
+        on:driveContext={(e) => onDriveContext(e.detail, true)}
+        on:homeItemContext={(e) => onHomeItemContext(e.detail, true)}
+        on:loadShared={() => loadShared()}
+        on:addNetworkLocation={(e) => addNetworkLocation(e.detail)}
+        on:removeNetworkLocation={(e) => removeNetworkLocation(e.detail)}
+        on:contextEmpty={(e) => (ctx = { x: e.detail.x, y: e.detail.y, target: "empty", inPaneB: true })}
+        on:commitRename={(e) => commitRename(e.detail, true)}
         on:drop={(e) => dropInto(e.detail.paths, e.detail.dest, e.detail)}
       />
     </div>
@@ -5341,21 +5482,21 @@
     y={ctx.y}
     target={ctx.target}
     canPaste={pasteCheck.allowed}
-    selectionCount={selectedCount(selection)}
-    folderSelected={selectedEntries.length === 1 && selectedEntries[0]?.is_dir}
-    executableSelected={selectedEntries.length === 1 && isExecutable(selectedEntries[0])}
-    openIcon={selectedEntries.length === 1 ? iconFor(selectedEntries[0]) : "folder"}
-    pinned={selectedEntries.length === 1 && pins.includes(selectedEntries[0].path)}
-    favorited={selectedEntries.length === 1 && favorites.some((f) => f.path === selectedEntries[0].path)}
-    extractable={!isHome && !archive && selectedEntries.length === 1 && isExtractable(selectedEntries[0])}
-    archiveSafetyEligible={!isHome && !archive && selectedEntries.length === 1 && isArchiveSafetyEligible(selectedEntries[0])}
-    compressible={!isHome && !archive && selectedEntries.length >= 1}
-    comparable={!isHome && !archive && selectedEntries.length === 2 && selectedEntries.every((e) => !e.is_dir)}
-    mediaEligible={selectedEntries.length > 1 && selectedEntries.some((e) => !e.is_dir && canBatchTransform(e.name))}
-    canTerminal={!isHome && !archive}
-    sameTypeExt={selectedEntries.length === 1 && !selectedEntries[0].is_dir ? selectedEntries[0].extension : ""}
-    shreddable={!isHome && !archive && selectedEntries.length >= 1 && selectedEntries.every((e) => !e.is_dir)}
-    vaultable={!isHome && !archive && selectedEntries.length === 1 && selectedEntries[0]?.is_dir}
+    selectionCount={selectedCount(ctxPane.selection)}
+    folderSelected={ctxPane.selectedEntries.length === 1 && ctxPane.selectedEntries[0]?.is_dir}
+    executableSelected={ctxPane.selectedEntries.length === 1 && isExecutable(ctxPane.selectedEntries[0])}
+    openIcon={ctxPane.selectedEntries.length === 1 ? iconFor(ctxPane.selectedEntries[0]) : "folder"}
+    pinned={ctxPane.selectedEntries.length === 1 && pins.includes(ctxPane.selectedEntries[0].path)}
+    favorited={ctxPane.selectedEntries.length === 1 && favorites.some((f) => f.path === ctxPane.selectedEntries[0].path)}
+    extractable={!ctxInPaneB && !isHome && !archive && ctxPane.selectedEntries.length === 1 && isExtractable(ctxPane.selectedEntries[0])}
+    archiveSafetyEligible={!ctxInPaneB && !isHome && !archive && ctxPane.selectedEntries.length === 1 && isArchiveSafetyEligible(ctxPane.selectedEntries[0])}
+    compressible={!ctxInPaneB && !isHome && !archive && ctxPane.selectedEntries.length >= 1}
+    comparable={!ctxInPaneB && !isHome && !archive && ctxPane.selectedEntries.length === 2 && ctxPane.selectedEntries.every((e) => !e.is_dir)}
+    mediaEligible={!ctxInPaneB && ctxPane.selectedEntries.length > 1 && ctxPane.selectedEntries.some((e) => !e.is_dir && canBatchTransform(e.name))}
+    canTerminal={!ctxInPaneB && !isHome && !archive}
+    sameTypeExt={ctxPane.selectedEntries.length === 1 && !ctxPane.selectedEntries[0].is_dir ? ctxPane.selectedEntries[0].extension : ""}
+    shreddable={!ctxInPaneB && !isHome && !archive && ctxPane.selectedEntries.length >= 1 && ctxPane.selectedEntries.every((e) => !e.is_dir)}
+    vaultable={!ctxInPaneB && !isHome && !archive && ctxPane.selectedEntries.length === 1 && ctxPane.selectedEntries[0]?.is_dir}
     {view}
     {sortKey}
     {sortDir}
