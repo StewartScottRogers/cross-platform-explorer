@@ -30,3 +30,26 @@ export function arrowDelta(key: string, cols: number): number {
       return 0;
   }
 }
+
+/** PageUp / PageDown, the same shape as `arrowDelta` (CPE-1374). */
+export type PageKey = "PageUp" | "PageDown";
+
+/**
+ * The index delta for a Page key given the live column count and how many full rows are visible in
+ * the viewport. Mirrors `arrowDelta`'s "one row = ±cols" math, just scaled up to a whole page
+ * (`rowsPerPage` rows) instead of one — so PageDown/PageUp move the lead by ~one viewport, grid-aware,
+ * the same way Down/Up move it by one row. `rowsPerPage` is floored and clamped to at least 1, so a
+ * Page key always moves by at least one row even when the viewport can't fit a full one.
+ */
+export function pageDelta(key: string, cols: number, rowsPerPage: number): number {
+  const c = Math.max(1, Math.floor(cols) || 1);
+  const r = Math.max(1, Math.floor(rowsPerPage) || 1);
+  switch (key) {
+    case "PageDown":
+      return c * r;
+    case "PageUp":
+      return -(c * r);
+    default:
+      return 0;
+  }
+}
