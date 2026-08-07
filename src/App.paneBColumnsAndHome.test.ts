@@ -36,7 +36,7 @@
  * `navigateB` now mirrors `loadPath`'s HOME short-circuit.
  */
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { render, screen, fireEvent, waitFor } from "@testing-library/svelte";
+import { render, screen, fireEvent, waitFor, within } from "@testing-library/svelte";
 import App from "./App.svelte";
 import {
   resetSettings,
@@ -46,6 +46,7 @@ import {
   loadColumnWidths,
   loadPins,
   saveMetaColumnsForFolder,
+  loadMetaColumnsForFolder,
 } from "./lib/settings";
 import { __resetMetaColumnCatalogForTests } from "./lib/metaColumnCatalog";
 import type { DirEntry, Place } from "./lib/types";
@@ -318,5 +319,119 @@ describe("App — the Sidebar's Home control routes by active pane (CPE-1383)", 
     // Pane B is untouched.
     expect(paneBWrap.querySelector(".home")).toBeNull();
     expect(paneBWrap.textContent).toContain("alpha.txt");
+  });
+});
+
+describe("App — the Column Picker dialog is pane-aware (CPE-1388)", () => {
+  it("opening the picker from pane B loads/saves pane B's OWN column set, leaving pane A's untouched", async () => {
+    const PATH_B = "C:\\dB";
+    const entriesB: DirEntry[] = [file("bravo.txt", PATH_B)];
+    const DIMS: AvailableColumn = { id: "dimensions", label: "Dimensions", column: "ImageDimensions", extensions: [] };
+    const PAGES: AvailableColumn = { id: "pages", label: "Pages", column: "DocPages", extensions: [] };
+    // Neither folder has any active columns saved yet — both dialogs would start from an empty set,
+    // so the assertions below can only be explained by WRITE routing, not by different starting data.
+    __resetMetaColumnCatalogForTests();
+
+    invoke.mockImplementation(async (cmd: string, args: Record<string, unknown> = {}) => {
+      const listingFor = (path: unknown) => (path === PATH_B ? entriesB : entriesA);
+      switch (cmd) {
+        case "special_folders": return [];
+        case "list_drives": return drives;
+        case "home_dir": return "C:\\Users\\t";
+        case "can_restore_from_trash": return true;
+        case "list_dir": return listingFor(args.path);
+        case "list_dir_stream": {
+          const ch = args.onEntry as { onmessage: (b: unknown) => void };
+          const data = listingFor(args.path);
+          ch.onmessage(data);
+          return data.length;
+        }
+        case "parent_dir": return null;
+        case "metadata_columns_available": return [DIMS, PAGES];
+        default: return null;
+      }
+    });
+
+    saveDualPane(true);
+    savePaneBPath(PATH_B);
+    render(App);
+
+    await waitFor(() => expect(screen.getByText("bravo.txt")).toBeTruthy());
+    const driveButtons = await screen.findAllByText("Local Disk (C:)");
+    await fireEvent.click(driveButtons[0]);
+    await waitFor(() => expect(screen.getByText("alpha.txt")).toBeTruthy());
+
+    const paneAWrap = screen.getByText("alpha.txt").closest(".pane-col") as HTMLElement;
+    const paneBWrap = screen.getByText("bravo.txt").closest(".pane-col") as HTMLElement;
+
+    // Open the column picker from PANE B's own header "Columns…" button (never pane A's).
+    await fireEvent.click(within(paneBWrap).getByTestId("open-column-picker"));
+    const dialog = await screen.findByRole("dialog");
+    // Pre-fix, the dialog was hard-wired to `activeMetaColumns` (pane A's) regardless of which pane's
+    // button was clicked — this assertion alone doesn't distinguish the two (both start empty), but the
+    // save-target check below does.
+    expect(within(dialog).queryByTestId("active-pages")).toBeNull();
+
+    await fireEvent.click(within(dialog).getByTestId("add-pages"));
+
+    // Persisted under pane B's OWN folder — never pane A's `currentPath` (CPE-1388's actual fix).
+    await waitFor(() => expect(loadMetaColumnsForFolder(PATH_B).some((c) => c.id === "pages")).toBe(true));
+    expect(loadMetaColumnsForFolder(PATH_A).some((c) => c.id === "pages")).toBe(false);
+
+    await fireEvent.click(within(dialog).getByTestId("done-btn"));
+
+    // Pane B's header now renders the new column; pane A's is completely untouched.
+    await waitFor(() => expect(within(paneBWrap).queryByText("Pages")).toBeTruthy());
+    expect(within(paneAWrap).queryByText("Pages")).toBeNull();
+  });
+
+  it("opening the picker from pane A still loads/saves pane A's OWN column set (unchanged default routing)", async () => {
+    const PATH_B = "C:\\dB";
+    const entriesB: DirEntry[] = [file("bravo.txt", PATH_B)];
+    const DIMS: AvailableColumn = { id: "dimensions", label: "Dimensions", column: "ImageDimensions", extensions: [] };
+    __resetMetaColumnCatalogForTests();
+
+    invoke.mockImplementation(async (cmd: string, args: Record<string, unknown> = {}) => {
+      const listingFor = (path: unknown) => (path === PATH_B ? entriesB : entriesA);
+      switch (cmd) {
+        case "special_folders": return [];
+        case "list_drives": return drives;
+        case "home_dir": return "C:\\Users\\t";
+        case "can_restore_from_trash": return true;
+        case "list_dir": return listingFor(args.path);
+        case "list_dir_stream": {
+          const ch = args.onEntry as { onmessage: (b: unknown) => void };
+          const data = listingFor(args.path);
+          ch.onmessage(data);
+          return data.length;
+        }
+        case "parent_dir": return null;
+        case "metadata_columns_available": return [DIMS];
+        default: return null;
+      }
+    });
+
+    saveDualPane(true);
+    savePaneBPath(PATH_B);
+    render(App);
+
+    await waitFor(() => expect(screen.getByText("bravo.txt")).toBeTruthy());
+    const driveButtons = await screen.findAllByText("Local Disk (C:)");
+    await fireEvent.click(driveButtons[0]);
+    await waitFor(() => expect(screen.getByText("alpha.txt")).toBeTruthy());
+
+    const paneAWrap = screen.getByText("alpha.txt").closest(".pane-col") as HTMLElement;
+    const paneBWrap = screen.getByText("bravo.txt").closest(".pane-col") as HTMLElement;
+
+    await fireEvent.click(within(paneAWrap).getByTestId("open-column-picker"));
+    const dialog = await screen.findByRole("dialog");
+    await fireEvent.click(within(dialog).getByTestId("add-dimensions"));
+
+    await waitFor(() => expect(loadMetaColumnsForFolder(PATH_A).some((c) => c.id === "dimensions")).toBe(true));
+    expect(loadMetaColumnsForFolder(PATH_B).some((c) => c.id === "dimensions")).toBe(false);
+
+    await fireEvent.click(within(dialog).getByTestId("done-btn"));
+    await waitFor(() => expect(within(paneAWrap).queryByText("Dimensions")).toBeTruthy());
+    expect(within(paneBWrap).queryByText("Dimensions")).toBeNull();
   });
 });

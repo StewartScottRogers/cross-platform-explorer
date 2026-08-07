@@ -464,6 +464,11 @@
       folder's saved config. */
   let activeMetaColumnsB: ActiveMetaColumn[] = [];
   let columnPickerOpen = false;
+  /** CPE-1388: which pane's `on:openColumnPicker` opened the dialog — captured at open time (pane B's
+   *  binding passes `true`) so the dialog loads FROM and saves TO the originating pane's own column set
+   *  (`activeMetaColumnsB`/`paneBPath` vs `activeMetaColumns`/`currentPath`), mirroring CPE-1382's
+   *  per-pane READ fix on the WRITE side too. Meaningless while `columnPickerOpen` is false. */
+  let columnPickerInPaneB = false;
   /** Active rule-based coloring rule set (CPE-776, epic CPE-709); empty ⇒ rows unstyled. */
   let colorRules: ColorRule[] = settings.loadColorRules();
   let colorRulesOpen = false;
@@ -687,8 +692,10 @@
   let batchRenameFor: { entries: DirEntry[]; inPaneB: boolean; dir: string } | null = null;
   /** Eligible (image-only) entries for the Batch-Media dialog (CPE-1093), or null when closed. `inPaneB`
    *  (CPE-1384) is snapshot at open time the same way, so the post-apply refresh always targets the pane
-   *  the dialog was actually opened for, even if the active pane changes while it's open. */
-  let batchMediaFor: { entries: DirEntry[]; inPaneB: boolean } | null = null;
+   *  the dialog was actually opened for, even if the active pane changes while it's open. `dir` (CPE-1387)
+   *  is snapshot too, mirroring `batchRenameFor`, so the refresh reloads the folder actually operated on
+   *  even if that pane gets renavigated elsewhere while the dialog is still open. */
+  let batchMediaFor: { entries: DirEntry[]; inPaneB: boolean; dir: string } | null = null;
   /** The entry whose tags/label are being edited (CPE-637), or null when the editor is closed. */
   let tagEditorFor: DirEntry[] | null = null;
 
@@ -960,7 +967,7 @@
     { id: "tool.templates", group: $t("palette.groupTools"), label: $t("palette.templates"), keywords: "folder templates scaffold capture stamp new from template boilerplate", run: () => (templatesOpen = true) },
     { id: "tool.checkpoint", group: $t("palette.groupTools"), label: $t("palette.checkpoint"), keywords: "checkpoint rollback revert restore snapshot undo agent watch", run: () => (checkpointOpen = true), enabled: inFolder },
     { id: "tool.organize", group: $t("palette.groupTools"), label: $t("palette.organize"), keywords: "organize auto organize sort files by kind extension year size declutter clean up", run: () => (organizeOpen = true), enabled: inFolder },
-    { id: "tool.columns", group: $t("palette.groupTools"), label: $t("palette.manageColumns"), keywords: "columns metadata dimensions duration pages track year picker details view add remove reorder", run: () => (columnPickerOpen = true), enabled: inFolder },
+    { id: "tool.columns", group: $t("palette.groupTools"), label: $t("palette.manageColumns"), keywords: "columns metadata dimensions duration pages track year picker details view add remove reorder", run: () => { columnPickerInPaneB = false; columnPickerOpen = true; }, enabled: inFolder },
     { id: "tool.verifyAll", group: $t("palette.groupTools"), label: $t("palette.verifyAll"), keywords: "integrity verify all baselined folders bitrot corruption monitor check", run: verifyAllBaselines, enabled: () => Object.keys(integrityBaselines).length > 0 },
     { id: "tool.selectBy", group: $t("palette.groupTools"), label: $t("palette.selectBy"), keywords: "select by criteria extension size date filter", run: () => (selectByOpen = true), enabled: inFolder },
     // CPE-1229 (epic CPE-978): opens the SAME dialog straight into "Save search…" — capture the current
@@ -2510,7 +2517,7 @@
     const target = batchRenameFor;
     batchRenameFor = null;
     if (!target || items.length === 0) return;
-    const { dir, inPaneB } = target;
+    const { dir } = target;
     const pairs: [string, string][] = items.map((it) => [
       joinPath(dir, it.from),
       joinPath(dir, it.to),
@@ -2529,8 +2536,7 @@
           label: `Rename ${moves.length} item${moves.length === 1 ? "" : "s"}`,
         });
       }
-      if (inPaneB) { if (paneBPath) await explorerPaneB?.loadListing(paneBPath, false); }
-      else await loadPath(currentPath);
+      await refreshBatchApplyTarget(dir);
     } catch (e) {
       showNotice(String(e), true);
     }
@@ -2553,7 +2559,7 @@
     if (skipped > 0) {
       showNotice(`${skipped} of ${pane.selectedEntries.length} files aren't images and will be skipped.`);
     }
-    batchMediaFor = { entries: eligible, inPaneB };
+    batchMediaFor = { entries: eligible, inPaneB, dir: inPaneB ? paneBPath : currentPath };
   }
 
   /** Apply a completed batch-media run (CPE-1093): the dialog itself streams the execute + shows its own
@@ -2573,8 +2579,21 @@
         report.written === 0,
       );
     }
-    if (target?.inPaneB) { if (paneBPath) await explorerPaneB?.loadListing(paneBPath, false); }
-    else await loadPath(currentPath);
+    if (target) await refreshBatchApplyTarget(target.dir);
+  }
+
+  /** After a batch-rename/batch-media apply (CPE-1387), refresh whichever pane(s) currently show `dir` —
+   *  the SNAPSHOT `beginBatchRename`/`beginBatchMedia` captured as the folder actually operated on — not
+   *  live `paneBPath`/`currentPath`. If the targeted pane was renavigated elsewhere while the dialog was
+   *  open, live `paneBPath`/`currentPath` no longer names the operated folder, so reloading it would
+   *  refresh the WRONG listing; matching against the snapshot instead means a renavigated pane is simply
+   *  left alone (it's already showing its own fresh folder) while any pane still ON `dir` gets refreshed.
+   *  Mirrors `refreshDropSourcePane`'s both-can-match reasoning (CPE-1371): `dir` can be showing in BOTH
+   *  panes at once (a mirrored folder), so refresh every pane that currently matches it. */
+  async function refreshBatchApplyTarget(dir: string) {
+    const norm = normalizePath(dir);
+    if (dualPane && paneBPath && norm === normalizePath(paneBPath)) await explorerPaneB?.loadListing(paneBPath, false);
+    if (norm === normalizePath(currentPath)) await loadPath(currentPath);
   }
 
   /** `inPaneB` (CPE-1377): mirrors `beginRename`'s parameter — reads/clears the right pane's
@@ -2977,6 +2996,14 @@
     // must refresh — `refreshPasteAffectedPanes` mirrors `refreshDropSourcePane`'s both-can-match
     // reasoning (CPE-1371), extended to the paste destination since (unlike a drag-drop, which always
     // lands ON a child row) a paste's destination IS the target pane's own current-folder listing.
+    //
+    // CPE-1385: clear the clipboard SYNCHRONOUSLY, before the `await`, and operate on the local
+    // `sources` snapshot taken above — not on `clipboard` again. Two rapid Ctrl+V within the async
+    // window both used to read the same non-empty cut clipboard and both call moveEntries with the
+    // same sources (a double-move). Clearing before the await means the second doPaste's
+    // `clipEmpty(clipboard)` check at the top sees an empty clipboard and no-ops. Copy is unaffected —
+    // that branch returns above without ever reaching this clear, so paste-copy can still repeat.
+    clipboard = emptyClipboard();
     try {
       const results = await commands.moveEntries(sources, destPath);
       reportResults(results, "Moved");
@@ -2992,10 +3019,31 @@
         });
         retagMoves(moves); // tags follow the moved files (CPE-657)
       }
-      clipboard = emptyClipboard();
+      // CPE-1385 review (Reviewer + UAT): `moveEntries` resolves with one `OpResult` PER source, index-
+      // aligned with `sources` (same correlation `moves` above already relies on) — a partial failure
+      // (permission denied / locked file / one item on a dropped network share) must not silently drop
+      // that item from the clipboard just because its SIBLINGS moved. Re-stage only the paths that did
+      // NOT move as a fresh cut set, so a retry paste only re-attempts what actually failed — the
+      // already-moved paths are correctly gone for good. `clipEmpty` guards against clobbering: if the
+      // user cut something else (or copied) during this await, the clipboard is no longer empty and must
+      // be left alone rather than overwritten with this call's stale, now-irrelevant leftovers.
+      // CPE-1385 review (Reviewer + UAT): `moveEntries` resolves with one `OpResult` PER source, index-
+      // aligned with `sources` (same correlation `moves` above already relies on) — a partial failure
+      // (permission denied / locked file / one item on a dropped network share) must not silently drop
+      // that item from the clipboard just because its SIBLINGS moved. Re-stage only the paths that did
+      // NOT move as a fresh cut set, so a retry paste only re-attempts what actually failed — the
+      // already-moved paths are correctly gone for good. `clipEmpty` guards against clobbering: if the
+      // user cut something else (or copied) during this await, the clipboard is no longer empty and must
+      // be left alone rather than overwritten with this call's stale, now-irrelevant leftovers.
+      const unmoved = sources.filter((_, i) => !results[i]?.ok);
+      if (unmoved.length > 0 && clipEmpty(clipboard)) clipboard = stage(unmoved, "cut");
       await refreshPasteAffectedPanes(sources, inPaneB);
     } catch (e) {
       showNotice(String(e), true);
+      // CPE-1385 review: the call itself rejected (IPC/backend error) rather than resolving with
+      // per-item results — nothing was moved at all, so restore the FULL cut set (same `clipEmpty` guard
+      // as above) rather than leaving the user's selection silently gone and forcing a re-cut.
+      if (clipEmpty(clipboard)) clipboard = stage(sources, "cut");
     }
   }
 
@@ -5416,7 +5464,7 @@
       bind:columnWidths
       {activeMetaColumns}
       on:resizeMetaColumns={(e) => { activeMetaColumns = applyMetaColumnWidths(activeMetaColumns, e.detail); settings.saveMetaColumnsForFolder(currentPath, activeMetaColumns); }}
-      on:openColumnPicker={() => (columnPickerOpen = true)}
+      on:openColumnPicker={() => { columnPickerInPaneB = false; columnPickerOpen = true; }}
       bind:selection
       bind:selectedEntries
       bind:draggedPaths
@@ -5484,7 +5532,7 @@
         bind:columnWidths
         activeMetaColumns={activeMetaColumnsB}
         on:resizeMetaColumns={(e) => { activeMetaColumnsB = applyMetaColumnWidths(activeMetaColumnsB, e.detail); settings.saveMetaColumnsForFolder(paneBPath, activeMetaColumnsB); }}
-        on:openColumnPicker={() => (columnPickerOpen = true)}
+        on:openColumnPicker={() => { columnPickerInPaneB = true; columnPickerOpen = true; }}
         bind:selectedTag={selectedTagB}
         bind:draggedPaths
         on:contextAction={(e) => handleContextAction(e.detail)}
@@ -6247,14 +6295,17 @@
 
 {#if columnPickerOpen}
   <!-- Column picker (CPE-1146, epic CPE-707): every change (add/remove/reorder) is persisted per-folder
-       immediately, so there's nothing to "cancel" — the dialog just closes. Always edits pane A's
-       `activeMetaColumns`/`currentPath` regardless of which pane's header opened it (CPE-1382 only fixed
-       the READ side — pane B now DISPLAYS its own folder's columns via `activeMetaColumnsB` — the picker's
-       write routing by active pane is an unaddressed follow-up). -->
+       immediately, so there's nothing to "cancel" — the dialog just closes. `columnPickerInPaneB`
+       (CPE-1388, captured at open time by each pane's `on:openColumnPicker` handler) routes both the
+       initial `active` set and the save target to whichever pane actually opened the dialog — mirroring
+       CPE-1382's per-pane READ fix on the WRITE side too, instead of always editing pane A. -->
   <ColumnPickerDialog
     available={$metaColumnCatalog}
-    active={activeMetaColumns}
-    on:change={(e) => { activeMetaColumns = e.detail; settings.saveMetaColumnsForFolder(currentPath, activeMetaColumns); }}
+    active={columnPickerInPaneB ? activeMetaColumnsB : activeMetaColumns}
+    on:change={(e) => {
+      if (columnPickerInPaneB) { activeMetaColumnsB = e.detail; settings.saveMetaColumnsForFolder(paneBPath, activeMetaColumnsB); }
+      else { activeMetaColumns = e.detail; settings.saveMetaColumnsForFolder(currentPath, activeMetaColumns); }
+    }}
     on:close={() => (columnPickerOpen = false)}
   />
 {/if}

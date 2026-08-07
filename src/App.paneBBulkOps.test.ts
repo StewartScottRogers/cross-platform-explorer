@@ -275,6 +275,55 @@ describe("App — Batch rename is pane-aware (CPE-1384)", () => {
     await waitFor(() => expect(moveExactCalls.length).toBe(1));
     expect(moveExactCalls[0].pairs.every(([from]) => from.startsWith(PATH_A))).toBe(true);
   });
+
+  it("post-apply refresh targets the SNAPSHOT folder the rename actually ran in, not pane B's live path if it was renavigated while the dialog was open (CPE-1387)", async () => {
+    // Mirror both panes onto the SAME folder (PATH_A) — a common commander pattern — so the bug is
+    // externally observable: pre-fix, the refresh only ever reloaded whichever LIVE path the target pane
+    // happened to be on (`paneBPath`/`currentPath`), never the snapshotted `dir`. Opening the dialog from
+    // pane B, then renavigating pane B elsewhere, meant the refresh reloaded pane B's NEW (unrelated,
+    // un-renamed) folder while pane A — still showing the actually-renamed PATH_A — never refreshed at
+    // all and kept displaying the stale, pre-rename names.
+    saveDualPane(true);
+    savePaneBPath(PATH_A);
+    render(App);
+    await waitFor(() => expect(screen.getAllByText("alpha1.png").length).toBeGreaterThanOrEqual(1));
+    const driveButtons = await screen.findAllByText("Local Disk (C:)");
+    await fireEvent.click(driveButtons[0]);
+    await waitFor(() => expect(screen.getAllByText("alpha1.png").length).toBe(2));
+
+    const [paneAWrap, paneBWrap] = screen.getAllByText("alpha1.png").map(
+      (el) => el.closest(".pane-col") as HTMLElement,
+    );
+
+    // Open the batch-rename dialog FROM pane B, targeting the mirrored folder (PATH_A) — `beginBatchRename`
+    // snapshots `dir: paneBPath` (= PATH_A) right now.
+    await fireEvent.click(within(paneBWrap).getByText("alpha1.png"));
+    await fireEvent.click(within(paneBWrap).getByText("alpha2.png"), { ctrlKey: true });
+    const bravoRow = within(paneBWrap).getByText("alpha2.png").closest(".row") as HTMLElement;
+    await fireEvent.contextMenu(bravoRow);
+    const menu = within(await screen.findByRole("menu"));
+    await fireEvent.click(menu.getByText("Rename…"));
+    const dialog = await screen.findByRole("dialog");
+
+    // WHILE the dialog is still open, renavigate pane B away into its own empty subfolder — live
+    // `paneBPath` now names a folder the rename never touched.
+    await fireEvent.dblClick(within(paneBWrap).getByText("destInA"));
+    await waitFor(() => expect(within(paneBWrap).queryByText("alpha1.png")).toBeNull());
+
+    await fireEvent.click(within(dialog).getByText("Add text"));
+    await fireEvent.input(within(dialog).getByLabelText("Prefix"), { target: { value: "x-" } });
+    await fireEvent.click(within(dialog).getByText("Rename"));
+
+    await waitFor(() => expect(moveExactCalls.length).toBe(1));
+    expect(moveExactCalls[0].pairs.every(([from]) => from.startsWith(PATH_A))).toBe(true);
+
+    // Pane A — which still shows the actually-renamed folder (PATH_A) — refreshes and shows the new
+    // names. Pre-fix this never happened (the refresh only ever touched whatever pane B's LIVE path was).
+    await waitFor(() => expect(within(paneAWrap).queryByText("x-alpha1.png")).toBeTruthy());
+    // Pane B stays exactly where the user renavigated it (destInA, still empty) — its own navigation is
+    // respected, not silently reloaded with the (unrelated) rename result.
+    expect(within(paneBWrap).queryByText("x-alpha1.png")).toBeNull();
+  });
 });
 
 describe("App — Batch media is pane-aware (CPE-1384)", () => {
