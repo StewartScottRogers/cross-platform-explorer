@@ -34,8 +34,10 @@ mod common;
 use common::{assert_no_panic, run_battery};
 
 use cpe_server::archive_format::{detect_format, ArchiveFormat};
+use cpe_server::cert_decode::cert_decode;
 use cpe_server::column_extract::{extract_column, read_audio_tags, MetaColumn};
 use cpe_server::doc_column::doc_pages_cell;
+use cpe_server::jwt_preview::jwt_preview;
 use cpe_server::file_type::{detect_type, mismatch};
 use cpe_server::image_column::image_dimensions_cell;
 use cpe_server::inspect::inspect_bytes;
@@ -644,5 +646,60 @@ fn inspect_bytes_never_panics() {
             assert!(r.file_type.is_none());
             assert!(r.type_mismatch.is_none());
         }
+    });
+}
+
+// ---------------------------------------------------------------------------------------------
+// jwt_preview.rs / cert_decode.rs — CPE-1418/1419 (epic CPE-1417 "Crypto/security file viewers").
+// Both are read-only decoders (never verify anything), so their whole graceful-return contract is
+// exactly this harness's concern: adversarial input must yield a `CertPreview`/`JwtPreview` with `error`
+// set, never a panic.
+// ---------------------------------------------------------------------------------------------
+
+#[test]
+fn jwt_preview_never_panics() {
+    // A real (if unsigned) HS256-shaped token as "magic" — walks the base64url-decode + JSON-parse path
+    // for both header and payload instead of only exercising the "wrong segment count" early-out.
+    let magic = b"eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxIiwiZXhwIjoxNzAwMDAwMDAwfQ.c2ln".to_vec();
+    let header_len = magic.len();
+    run_battery("jwt_preview::jwt_preview", &magic, header_len, |b| {
+        // jwt_preview takes a `&str`; adversarial bytes are frequently not valid UTF-8, and the whole
+        // point of this harness is that even that must not panic — `from_utf8_lossy` is the same
+        // "accept whatever the OS/user handed us" conversion the real command layer would do reading a
+        // file as text, so this battery exercises jwt_preview's actual malformed-input contract rather
+        // than silently skipping every non-UTF-8 case.
+        let token = String::from_utf8_lossy(b);
+        let r = jwt_preview(&token);
+        if b.is_empty() {
+            assert!(r.error.is_some(), "jwt_preview(empty) must report an error, not panic");
+        }
+    });
+}
+
+#[test]
+fn cert_decode_never_panics() {
+    // A real DER-encoded self-signed certificate as "magic" (checked in for this exact purpose — see
+    // `cert_decode.rs`'s own test module for how it was generated) — walks x509-parser's real
+    // TBSCertificate field-extraction path under truncation/corruption instead of only reaching its
+    // outermost SEQUENCE-length gate.
+    let magic = include_bytes!("../src/testdata/certs/rsa_self_signed.der").to_vec();
+    let header_len = magic.len();
+    run_battery("cert_decode::cert_decode", &magic, header_len, |b| {
+        let r = cert_decode(b);
+        if b.is_empty() {
+            assert!(r.error.is_some(), "cert_decode(empty) must report an error, not panic");
+        }
+    });
+}
+
+#[test]
+fn cert_decode_never_panics_on_pem_armored_garbage() {
+    // A second battery aimed at the PEM path specifically (the DER battery above never has a
+    // "-----BEGIN"-shaped prefix, so `find_pem_block`'s own label/base64 walk is otherwise untested here)
+    // — corrupts the base64 body of a real PEM cert.
+    let pem = include_bytes!("../src/testdata/certs/rsa_self_signed.pem");
+    let header_len = pem.len();
+    run_battery("cert_decode::cert_decode(pem)", pem, header_len, |b| {
+        let _ = cert_decode(b);
     });
 }

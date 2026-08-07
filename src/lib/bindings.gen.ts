@@ -339,6 +339,34 @@ async dataBrowserQuery(path: string, sql: string, offset: number, limit: number)
 }
 },
 /**
+ * JWT preview decoder (CPE-1418, epic CPE-1417): read-only header/payload/claims viewer, never a
+ * signature verifier. Thin async dispatcher into `cpe_server::jwt_preview`; reads the file as text
+ * (capped by the same preview size guard the other whole-file info readers use) and hands it straight to
+ * the pure decoder, which never panics on malformed input.
+ */
+async jwtPreview(path: string) : Promise<Result<JwtPreview, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("jwt_preview", { path }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * Certificate/CSR/public-key decoder (CPE-1419, epic CPE-1417): read-only X.509 viewer, never a
+ * verifier. Thin async dispatcher into `cpe_server::cert_decode`; reads the file's raw bytes (capped by
+ * the same preview size guard the other whole-file info readers use) and hands them to the pure decoder,
+ * which never panics on malformed input.
+ */
+async certDecode(path: string) : Promise<Result<CertPreview, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("cert_decode", { path }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
  * 3D-model geometry/stats reader (CPE-1333, epic CPE-118): reads a binary/ASCII STL or Wavefront OBJ's
  * triangle/vertex counts + bounding box for the metadata-pane fallback the (blocked) interactive-viewer
  * epic's acceptance criteria call for. Thin async dispatcher into `cpe_server::model_3d`; capped by the
@@ -3233,6 +3261,39 @@ export type CellValue =
  */
 "Empty"
 /**
+ * The overall decode result. Exactly one of `certificate`/`csr`/`public_key`/`private_key` is set on
+ * success; `error` is set (and everything else left `None`) on failure. Never a panic either way.
+ */
+export type CertPreview = { 
+/**
+ * `"certificate"` / `"csr"` / `"public_key"` / `"private_key"`, mirroring whichever field below is set.
+ */
+kind: string | null; 
+/**
+ * Whether the input was PEM- or DER-encoded.
+ */
+encoding: string | null; certificate: CertificateInfo | null; csr: CsrInfo | null; public_key: KeyInfo | null; private_key: KeyInfo | null; error: string | null }
+/**
+ * A decoded X.509 certificate's fields.
+ */
+export type CertificateInfo = { subject: string; issuer: string; 
+/**
+ * Serial number, formatted as lowercase hex.
+ */
+serial: string; 
+/**
+ * `"v1"` / `"v2"` / `"v3"`.
+ */
+version: string; not_before: string; not_after: string; expired: boolean; not_yet_valid: boolean; signature_algorithm: string; public_key: KeyInfo; subject_alt_names: string[]; is_ca: boolean; key_usage: string[]; extended_key_usage: string[]; 
+/**
+ * Lowercase hex, no separators.
+ */
+sha256_fingerprint: string; 
+/**
+ * Lowercase hex, no separators.
+ */
+sha1_fingerprint: string }
+/**
  * One recorded checkpoint's index entry: which manifest holds its captured tree, the user's label, and
  * when it was taken (epoch ms). This is the row appended to / read from `checkpoints.json`.
  */
@@ -3486,6 +3547,10 @@ export type CopilotPlanResult = { plan: FileOpPlan; summary: PlanSummary; violat
  * matches the common "small logo in the corner" placement.
  */
 export type Corner = "top_left" | "top_right" | "bottom_left" | "bottom_right" | "center"
+/**
+ * A decoded PKCS#10 certificate-signing request's fields.
+ */
+export type CsrInfo = { subject: string; requested_sans: string[]; public_key: KeyInfo }
 /**
  * One dangling link and why it was flagged.
  */
@@ -3762,6 +3827,95 @@ export type IntegrityReport = { intact: string[]; edited: string[]; corrupted: s
  * bytes from the OS trash instead of re-encoding back to the source format.
  */
 export type InverseOp = { from: string; kind: string; detail: string; to: string }
+/**
+ * A decoded `exp`/`iat`/`nbf` claim: the raw Unix-epoch seconds plus a humanized UTC timestamp.
+ */
+export type JwtClaimTime = { 
+/**
+ * Raw claim value, seconds since the Unix epoch (as declared — may be negative or absurdly large;
+ * [`unix_to_rfc3339`] renders whatever it's given).
+ */
+raw: number; 
+/**
+ * `raw` rendered as an RFC 3339 UTC timestamp (`YYYY-MM-DDTHH:MM:SSZ`).
+ */
+rfc3339: string }
+/**
+ * A JWT preview: header/payload decoded to pretty JSON plus a few humanized well-known claims. Every
+ * field is optional except `signature_present`/`signature_len` (always computable) — a malformed token
+ * still returns as much as could be decoded, with `error` describing what wasn't.
+ */
+export type JwtPreview = { 
+/**
+ * Header `alg` (e.g. `"HS256"`, `"none"`).
+ */
+alg: string | null; 
+/**
+ * Header `typ` (e.g. `"JWT"`).
+ */
+typ: string | null; 
+/**
+ * Header `kid`, if present.
+ */
+kid: string | null; 
+/**
+ * The full header, pretty-printed JSON.
+ */
+header_json: string | null; 
+/**
+ * The full payload (every claim, not just the well-known ones below), pretty-printed JSON.
+ */
+payload_json: string | null; 
+/**
+ * The `exp` claim, humanized.
+ */
+exp: JwtClaimTime | null; 
+/**
+ * The `iat` claim, humanized.
+ */
+iat: JwtClaimTime | null; 
+/**
+ * The `nbf` claim, humanized.
+ */
+nbf: JwtClaimTime | null; 
+/**
+ * `true` if `exp` is present and is in the past (compared to wall-clock time when decoded).
+ */
+expired: boolean | null; 
+/**
+ * `true` if `nbf` is present and is in the future (compared to wall-clock time when decoded).
+ */
+not_yet_valid: boolean | null; 
+/**
+ * `false` for an unsigned token (`alg: none`, empty signature segment) or a malformed one.
+ */
+signature_present: boolean; 
+/**
+ * Decoded byte length of the signature segment (0 if absent/malformed).
+ */
+signature_len: number; 
+/**
+ * Set when some part of the token couldn't be decoded. Other fields still carry whatever *could*
+ * be decoded (e.g. a broken payload still leaves the header fields populated).
+ */
+error: string | null }
+/**
+ * A decoded public/private key's algorithm shape. Never carries key material — only what identifies the
+ * algorithm and its size, which is exactly what CPE-1419 asks a private-key branch to report.
+ */
+export type KeyInfo = { 
+/**
+ * Friendly algorithm name (`"RSA"`, `"EC"`, `"Ed25519"`, `"DSA"`, or the raw OID if unrecognized).
+ */
+algorithm: string; 
+/**
+ * Key size in bits, when computable (RSA modulus bit length, EC field size).
+ */
+size_bits: number | null; 
+/**
+ * Named curve, for an EC key (e.g. `"prime256v1"`).
+ */
+curve: string | null }
 /**
  * A path's link status for the file list + link tooling (CPE-804, epic CPE-715): whether it's a symlink,
  * where it points, and whether that target is currently missing (a broken link).

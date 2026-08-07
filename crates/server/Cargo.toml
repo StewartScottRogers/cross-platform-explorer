@@ -22,6 +22,11 @@ serde_json = "1"
 specta = { version = "=2.0.0-rc.22", features = ["derive"], optional = true }
 # Streaming SHA-256 for file checksums / integrity baselines (CPE-412/791). Pure-Rust, no system libs.
 sha2 = "0.10"
+# SHA-1 certificate fingerprints (CPE-1419) — still the conventional "SHA1 fingerprint" browsers/openssl
+# show alongside SHA-256 for a cert, even though SHA-1 itself is deprecated for signing. Already resolved
+# transitively (same RustCrypto family as `sha2`, pulled in via other deps); declared directly here since
+# `cert_decode` names it explicitly, same reasoning as `dicom-core` above.
+sha1 = "0.10"
 # Work-stealing parallelism for the recursive directory-size walk (CPE-754). Pure-Rust.
 rayon = "1"
 # Archive listing (CPE-064/109/110/113) — browse into an archive's directory without extracting. All
@@ -103,6 +108,18 @@ dicom-pixeldata = { version = "0.10", default-features = false, features = ["ray
 # module uses their tag/UID constants and `DataElement`/`VR` types by name.
 dicom-core = { version = "0.10", optional = true }
 dicom-dictionary-std = { version = "0.10", optional = true }
+# Certificate/CSR/public-key decoder (CPE-1419, epic CPE-1417): a read-only VIEWER for X.509
+# certificates, PKCS#10 CSRs, and SubjectPublicKeyInfo public keys. Pure-Rust, nom-based parser — no
+# OpenSSL/system TLS library, no native build tooling, matching every other format reader in this crate.
+# Always on (not feature-gated): it is small (no transitive HTTP/TLS/native-codec stack, unlike
+# `pdf-thumb`/`dicom-thumb`) and, being a pure metadata *decoder*, carries none of the "opt-in because it
+# changes app behaviour" concerns those gates exist for.
+x509-parser = "0.16"
+# Re-exported transitively by `x509-parser` (OID short-name lookups for signature/public-key algorithms
+# and named EC curves — e.g. `sha256WithRSAEncryption`, `prime256v1`), declared directly since
+# `cert_decode` names its `oid_registry()`/`OidRegistry` types directly rather than only reaching them
+# through `x509_parser::oid_registry::*`. Same version x509-parser 0.16 already pins transitively.
+oid-registry = "0.7"
 
 # POSIX extended attributes for the native-metadata bridge (CPE-826, epic CPE-717). Pure-Rust (libc
 # syscalls, no system libs); Unix-only — Windows uses NTFS alternate data streams via std file I/O,
@@ -161,6 +178,10 @@ copilot = ["dep:ureq"]
 # build compiles zero DICOM code / pulls in no `dicom-object`/`dicom-pixeldata` dependencies (the "small
 # when off" rule, mirrored from `pdf-thumb`/`video-thumb` above). Turn on with `--features dicom-thumb`.
 dicom-thumb = ["dep:dicom-object", "dep:dicom-pixeldata", "dep:dicom-core", "dep:dicom-dictionary-std"]
+
+# Note: `cert_decode` (CPE-1419) is NOT gated behind a feature — unlike the optional readers above, it
+# adds a single small pure-Rust dependency (`x509-parser`, see below) with no native/system-lib cost, so
+# it ships in the default lean build like `checksum`/`data_preview` do.
 
 [dev-dependencies]
 # Temp dirs for the ticket-board tests (moved from the app with the module, CPE-815).
