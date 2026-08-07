@@ -12,9 +12,17 @@ export interface DragMods {
   shiftKey: boolean;
 }
 
-/** Normalize a path for comparison: backslashes → forward slashes, trailing slash dropped. Pure. */
+/**
+ * Normalize a path for comparison: backslashes → forward slashes, trailing slash dropped, case-folded
+ * (CPE-1379). The self-descendant guard below is the only consumer, and on the app's primary target
+ * platforms (Windows, macOS) the filesystem is case-insensitive, so `C:\Foo` and `C:\FOO` are the same
+ * physical directory — comparing case-sensitively let a folder be dropped into itself under a
+ * differently-cased path. Linux is case-sensitive, but treating paths case-insensitively for this guard
+ * only ever makes it *more* conservative (blocks a same-path drop it might otherwise miss), never less
+ * safe. Pure.
+ */
 function norm(p: string): string {
-  return p.replace(/\\/g, "/").replace(/\/+$/, "");
+  return p.replace(/\\/g, "/").replace(/\/+$/, "").toLowerCase();
 }
 
 /** Put the dragged selection on the DataTransfer and allow both copy and move. No-op if `dt` is null. */
