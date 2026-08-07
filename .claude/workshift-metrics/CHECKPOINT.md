@@ -266,3 +266,28 @@ A broad evidence-based frontier scan (after the format-reader program completed)
 Program + hardening complete. Do NOT re-run a clean-headless hunt in this lane (two evidence-based scans this
 session already mined it dry — the 2nd's real items are shipped). Next: pair on the build→deploy→run visual, a Mac
 for HEIC-macOS, green-light the gui-smoke-fixtures infra, or name a NEW focus. Nothing blocked or broken.
+
+---
+## RUN 2026-08-06→07 (CLI, session cli-1786069944) — 19 PRs · DUAL-PANE EPIC COMPLETE + QA-AUTOMATION BATCH · WELL DRY · main GREEN
+
+**State:** `main` @ origin `a9f9d924`, working tree CLEAN, CI green, **0 live worktrees**, **Backlog EMPTY**, Doing empty.
+Blocked/ holds only the known user-gated CPE-002 (signing cert) + CPE-118 (GPU 3D viewer). ~140 sub-agents, 0 escaped defects.
+
+**Shipped this run (all merged → main, all gauntlet-verified + Frontend-CI-green):**
+- Dual-pane pane-B FULL PARITY, epic CPE-617 COMPLETE — 11 PRs, CPE-1370–1388 (#656–#666): keyboard/selection,
+  cross-pane DnD, display props, context menu, rename, columns, Home nav, clipboard copy/cut/paste, bulk ops,
+  archive/vault family — all pane-routed + snapshot-safe. Gauntlet caught 4 real bugs (2 data-loss) pre-merge.
+- QA-automation jsdom render-specs — 7 PRs, CPE-1389–1395 (#667–#673): Integrity, RunCommandConfirm,
+  ConflictDialog, DataBrowser, CompareDialog, SessionHistoryDialog, SyncDialog. Each pins render + typed-command
+  wiring + states; surfaced 2 real UI bugs.
+- UI-fix follow-ups CPE-1396/1397 (#674): ConflictDialog error/empty-state clash + DataBrowser page-range spacing.
+
+**WELL DRY — remaining work is USER-GATED (needs YOUR decision or a resource).** A rigorous frontier re-scan of all
+34 epics (Library `headless-well-dry-post-dualpane-2026-08-07`) confirms every epic's pure/backend core is shipped;
+remaining scope everywhere is attended-GUI, Mac, signing-cert, AI-model-key, or SFTP/cloud/Docker gated. No clean
+locally-verifiable FEATURE slice remains. Low-value-only leftovers: QA-Architect 2nd-tier render-specs
+(BackupDashboard/SpotlightHotkeySettings — flagged low-leverage/likely-hollow, deliberately NOT chased).
+
+**To resume:** name an attended epic to pair on (build→deploy→run GUI verification of the many backend-done/
+GUI-pending panels), activate a gated epic (AI CPE-976–980, remote-FS CPE-616, signing CPE-002), or provide a
+resource (Mac / API key / creds). Nothing is blocked or broken; the board is clean and green.

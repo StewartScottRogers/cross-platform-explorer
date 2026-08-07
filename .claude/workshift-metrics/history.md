@@ -1018,3 +1018,37 @@ Session total: 15 tickets (CPE-1341-1355), main GREEN throughout, 0 escaped defe
 bugs pre-merge (RAR overflow-hang, HEIC macOS deprecations, HEIC dim-guard, DICOM YBR wrong-color, DICOM upstream
 sign bug, drive-type whole-disk reduction). ~105 sub-agents. FRONTIER: clean headless vein tapped again — remaining
 is attended visual (build->deploy->run; a Mac) or the heavier gui-smoke-fixtures infra.
+
+## Shift 2026-08-06→07 (CLI, ~19:30–02:00) — DUAL-PANE EPIC COMPLETE + QA-AUTOMATION BATCH — 19 PRs, 0 escaped defects
+User: "run 10 workshifts back to back." Started with a 5-ticket backlog (dual-pane/selection bugs); it opened a
+huge vein. Delivered **19 PRs merged, main GREEN throughout, 0 escaped defects**, ~140 sub-agents.
+
+**Program 1 — Dual-pane commander pane-B FULL PARITY (epic CPE-617), 11 PRs (CPE-1370–1388):** pane B went from
+mouse-only second-class to first-class across keyboard-nav, bulk-select scroll, PageUp/Down, cross-pane DnD,
+display props (search/filter/tags/cut/sizes), context menu, inline rename, custom columns, Home actions+nav,
+clipboard copy/cut/paste, and the whole bulk-op + archive/vault family (duplicate/batch-rename/media/copy-to/
+move-to/compress/extract/shred/vault) — all pane-routed with the CPE-1370 `snapshotConfirmTarget` safety model
+for every destructive op. Reusable patterns: `pickActivePane`/`activePaneState()` (keyboard, live activePane),
+`paneStateFor(ctx.inPaneB)` (context-menu, menu-open-time), `snapshotConfirmTarget` (destructive), and
+`refreshDropSourcePane`/`refreshPasteAffectedPanes`/`refreshBatchApplyTarget(dir)` (both-panes refresh, no ghost).
+GAUNTLET CAUGHT 4 REAL BUGS PRE-MERGE (2 data-loss): (1) Tab-mid-confirm permanent-delete hit the WRONG pane
+(CRITICAL); (2) drag-move ghost row when both panes mirror a folder; (3) empty-area New-Folder created in pane A
+from a pane-B menu; (4) cut+paste-fail silently lost the clipboard. All fixed within-shift.
+
+**Program 2 — QA-automation render-specs (MVD burndown), 7 PRs (CPE-1389–1395):** frontier scan (rigorous
+re-verify of all 34 epics) confirmed the clean FEATURE well DRY → pivoted to jsdom render-specs (locally
+vitest-verifiable, NOT flaky gui-smoke). QA-Architect (opus) found the real gap = shipped App-wired dialogs with
+ZERO coverage: Integrity, RunCommandConfirm (external-process safety gate), ConflictDialog, DataBrowser,
+CompareDialog, SessionHistoryDialog, SyncDialog. All pinned with the `vi.mock("@tauri-apps/api/core")` +
+@testing-library/svelte recipe (mock the CORE invoke seam, since bindings.gen's TAURI_INVOKE re-exports it). These
+are PARALLEL-SAFE (independent new test files) → ran 4-wide fan-out. Specs surfaced 2 real UI bugs → fixed
+(CPE-1396 ConflictDialog error/empty-state clash, CPE-1397 DataBrowser missing space, PR #674).
+
+Tuned defaults: render-spec class = sonnet, ~1 review each (test-only → single-reviewer gauntlet, reviewer does
+its OWN mutation-check), parallel-safe; pane-B chain = serial on App.svelte, bundle same-block tickets. LESSON:
+test-only + independent-file work parallelizes wide; App.svelte work serializes hard. Every merge Reviewer+UAT
+(or single-reviewer for test-only) gauntlet-verified + Frontend-CI-green; GUI-smoke is non-gating flake (merge on
+UNSTABLE-not-BLOCKED). FRONTIER after this shift: clean headless well DRY again (Library
+`headless-well-dry-post-dualpane-2026-08-07`) — next FEATURE work needs the user (attended GUI, Mac, signing cert,
+AI keys, SFTP/Docker creds). Low-value remainder: QA-Architect 2nd-tier render-specs (BackupDashboard etc.) +
+follow-ups CPE-1385(done)/1386(done); open follow-ups: none in backlog (all closed).
