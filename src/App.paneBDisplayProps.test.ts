@@ -165,9 +165,11 @@ describe("App — pane B cut-highlight (CPE-1376)", () => {
     await fireEvent.click(driveButtons[0]);
     await waitFor(() => expect(screen.getAllByText("shared.txt").length).toBe(2));
 
-    // Cut it via pane A (Ctrl+X always operates on pane A's selection today — out of this ticket's
-    // scope to change) — the resulting `cutPaths` is a single shared clipboard, so pane B's row for the
-    // SAME path must dim too, proving `{cutPaths}` actually reached pane B's ExplorerPane.
+    // Cut it via pane A (pane A is still the active pane here — neither `.pane-col` wrapper was
+    // clicked, so Ctrl+X routes to pane A per CPE-1380's `activePaneState()` — see
+    // App.clipboardPaneRouting.test.ts for the pane-B-active routing itself) — the resulting `cutPaths`
+    // is a single shared clipboard, so pane B's row for the SAME path must dim too, proving `{cutPaths}`
+    // actually reached pane B's ExplorerPane.
     const rows = screen.getAllByText("shared.txt").map((el) => el.closest(".row") as HTMLElement);
     await fireEvent.click(rows[0]);
     await fireEvent.keyDown(window, { key: "x", ctrlKey: true });

@@ -1130,8 +1130,16 @@
   // OS file drop-in (CPE-670): overlay shown while OS files are dragged over the window.
   let osDragActive = false;
   let unlistenOsDrop: (() => void) | null = null;
-  /** A copy-paste awaiting the user's conflict choice (CPE-624). */
-  let pendingCopy: { sources: string[]; count: number } | null = null;
+  /** A copy-paste awaiting the user's conflict choice (CPE-624). `inPaneB` (CPE-1380) is the destination
+   *  pane the paste targeted — carried through to `resolveCopyConflict` so the eventual copy still lands
+   *  wherever the paste was actually invoked, even though the dialog itself has no pane concept. */
+  let pendingCopy: { sources: string[]; count: number; inPaneB: boolean } | null = null;
+  /** CPE-1380: transfer ids for an in-flight clipboard-PASTE copy that targeted pane B — set by
+   *  `startCopyWithPolicy(sources, policy, true)`, consumed by the shared `transfer://done` listener
+   *  below so it refreshes pane B (not pane A) once that specific transfer finishes. Every other copy
+   *  source (copy-to-folder, drag-drop, Home copy, quick actions) never adds an id here and keeps
+   *  refreshing pane A exactly as before this ticket. */
+  const pasteCopyPaneB = new Set<number>();
   // Agent Watch view (CPE-399): the Project folder currently being watched (or ""), and the
   // teardown for its activity listener. Watching turns on only while the explorer is inside a
   // running agent's project, and off the moment it leaves — off means off (AGENT-WATCH.md).
@@ -2402,6 +2410,11 @@
   $: totalCount = ((isHome && !smartFolder && !structuredSearch) || archive) ? itemCount : shown.length;
   $: pasteCheck = clipCanPaste(clipboard, isHome ? "" : currentPath);
   $: cutPaths = clipboard.mode === "cut" ? clipboard.paths : [];
+  // CPE-1380: the shared `<ContextMenu>`'s "Paste" row must reflect whichever pane it was opened OVER
+  // (`ctxInPaneB`), not always pane A's `pasteCheck` — a paste-into-itself/self-descendant refusal (or a
+  // plain empty clipboard) has to be evaluated against pane B's OWN folder when the menu is over pane B.
+  // `paneBPath === HOME` is pane B's "no real destination" case (mirrors `isHome` for pane A).
+  $: ctxPasteCheck = clipCanPaste(clipboard, ctxInPaneB ? (paneBPath === HOME ? "" : paneBPath) : (isHome ? "" : currentPath));
   // CPE-1377: which pane the currently-OPEN `<ContextMenu>` (`ctx`) is FOR — read from `ctx.inPaneB`
   // (menu-open-time), never live `activePane` (focus-time); see the `ctx` declaration's comment. Drives
   // every entry-derived `<ContextMenu>` prop below so a pane-B right-click shows pane B's selection, not
@@ -2734,15 +2747,26 @@
     showNotice(message, true);
   }
 
-  function doCopy() {
-    if (blockedInArchive() || selectedEntries.length === 0) return;
-    clipboard = stage(selectedEntries.map((e) => e.path), "copy");
+  /** `inPaneB` (CPE-1380): Ctrl+C/context-menu-copy must stage whichever pane's selection is actually
+   *  targeted — `handleKeydown` passes the live active pane (`activePaneState`'s routing), a context-menu
+   *  invocation passes `ctx.inPaneB` (menu-open-time, same reasoning as `askDelete`'s override). Defaults
+   *  to pane A so every other/legacy caller and all single-pane behavior is unchanged.
+   *  `blockedInArchive()` reads pane-A-only archive state, so — like `createNewItem`/`askDelete` — it only
+   *  gates a pane-A copy; pane B is always a plain real folder in v1. */
+  function doCopy(inPaneB = false) {
+    const pane = paneStateFor(inPaneB);
+    if ((!inPaneB && blockedInArchive()) || pane.selectedEntries.length === 0) return;
+    clipboard = stage(pane.selectedEntries.map((e) => e.path), "copy");
     showNotice(`Copied ${clipboard.paths.length} item${clipboard.paths.length === 1 ? "" : "s"}.`);
   }
 
-  function doCut() {
-    if (blockedInArchive() || selectedEntries.length === 0) return;
-    clipboard = stage(selectedEntries.map((e) => e.path), "cut");
+  /** Same pane-aware reasoning as `doCopy` (CPE-1380) — the cut set is captured from whichever pane was
+   *  actually targeted, at cut time, so a later paste (possibly into the OTHER pane) moves the right
+   *  files regardless of which pane is active by then. */
+  function doCut(inPaneB = false) {
+    const pane = paneStateFor(inPaneB);
+    if ((!inPaneB && blockedInArchive()) || pane.selectedEntries.length === 0) return;
+    clipboard = stage(pane.selectedEntries.map((e) => e.path), "cut");
     showNotice(`Cut ${clipboard.paths.length} item${clipboard.paths.length === 1 ? "" : "s"}.`);
   }
 
@@ -2852,26 +2876,39 @@
     } catch { /* best-effort — see doc comment above */ }
   }
 
-  /** Start a copy of `sources` into the current folder with the chosen conflict policy (CPE-624). */
-  async function startCopyWithPolicy(sources: string[], policy: ConflictPolicy) {
+  /** Start a copy of `sources` into the current folder — or pane B's (`inPaneB`, CPE-1380) — with the
+   *  chosen conflict policy (CPE-624). Tags the resulting transfer id in `pasteCopyPaneB` when it targets
+   *  pane B so the shared `transfer://done` listener refreshes the right pane once it finishes. */
+  async function startCopyWithPolicy(sources: string[], policy: ConflictPolicy, inPaneB = false) {
     try {
-      await startTransfer(sources, currentPath, "copy", policy);
+      const id = await startTransfer(sources, inPaneB ? paneBPath : currentPath, "copy", policy);
+      if (inPaneB) pasteCopyPaneB.add(id);
     } catch (e) {
       showNotice(String(e), true);
     }
   }
 
-  /** The conflict dialog's choice: run the pending copy with that policy (CPE-624). */
+  /** The conflict dialog's choice: run the pending copy with that policy (CPE-624), at the pane
+   *  `doPaste` originally captured it for (CPE-1380). */
   function resolveCopyConflict(policy: ConflictPolicy) {
     const p = pendingCopy;
     pendingCopy = null;
-    if (p) startCopyWithPolicy(p.sources, policy);
+    if (p) startCopyWithPolicy(p.sources, policy, p.inPaneB);
   }
 
-  async function doPaste() {
-    if (isHome || blockedInArchive() || clipEmpty(clipboard)) return;
-    if (!pasteCheck.allowed) {
-      showNotice(pasteCheck.reason, true);
+  /** `inPaneB` (CPE-1380): Ctrl+V/context-menu-paste must target whichever pane is actually meant — the
+   *  keyboard path passes the live active pane, a context-menu invocation passes `ctx.inPaneB`
+   *  (menu-open-time). The destination is that pane's OWN folder — `paneBPath`, not `currentPath` —
+   *  mirroring `newFolder`/`askDelete`'s pane routing. `isHome`/`blockedInArchive()` are pane-A-only
+   *  concepts (pane B is always a plain real folder in v1); pane B's equivalent "no real destination" is
+   *  `paneBPath === HOME`. */
+  async function doPaste(inPaneB = false) {
+    if (inPaneB ? paneBPath === HOME : (isHome || blockedInArchive())) return;
+    if (clipEmpty(clipboard)) return;
+    const destPath = inPaneB ? paneBPath : currentPath;
+    const check = clipCanPaste(clipboard, destPath);
+    if (!check.allowed) {
+      showNotice(check.reason, true);
       return;
     }
     const wasCut = clipboard.mode === "cut";
@@ -2882,18 +2919,23 @@
     // undo coupling. If names would collide, ask how to resolve the batch (CPE-624); otherwise
     // "keepboth" preserves the old auto-rename-on-collision behaviour.
     if (!wasCut) {
-      const collisions = collidingNames(sources, entries.map((e) => e.name));
+      const destEntries = inPaneB ? entriesB : entries;
+      const collisions = collidingNames(sources, destEntries.map((e) => e.name));
       if (collisions.length > 0) {
-        pendingCopy = { sources, count: collisions.length };
+        pendingCopy = { sources, count: collisions.length, inPaneB };
         return; // the conflict dialog resumes via startCopyWithPolicy
       }
-      startCopyWithPolicy(sources, "keepboth");
+      startCopyWithPolicy(sources, "keepboth", inPaneB);
       return;
     }
 
-    // MOVE → the existing synchronous path: instant same-volume rename and undo support.
+    // MOVE → the existing synchronous path: instant same-volume rename and undo support. Both the
+    // source pane(s) (the moved rows disappear) and the destination pane (the moved rows newly appear)
+    // must refresh — `refreshPasteAffectedPanes` mirrors `refreshDropSourcePane`'s both-can-match
+    // reasoning (CPE-1371), extended to the paste destination since (unlike a drag-drop, which always
+    // lands ON a child row) a paste's destination IS the target pane's own current-folder listing.
     try {
-      const results = await commands.moveEntries(sources, currentPath);
+      const results = await commands.moveEntries(sources, destPath);
       reportResults(results, "Moved");
       const moves = results
         .map((r, i) => ({ from: sources[i], to: r.path, ok: r.ok }))
@@ -2908,7 +2950,7 @@
         retagMoves(moves); // tags follow the moved files (CPE-657)
       }
       clipboard = emptyClipboard();
-      await loadPath(currentPath);
+      await refreshPasteAffectedPanes(sources, inPaneB);
     } catch (e) {
       showNotice(String(e), true);
     }
@@ -3455,6 +3497,24 @@
     if (matchesA || !matchesB) await loadPath(currentPath);
   }
 
+  /** After a clipboard cut+paste MOVE (CPE-1380), refresh whichever pane(s) show either side of the
+   *  move: the pane(s) whose current folder is the moved items' SOURCE parent (their rows disappear) —
+   *  same source-matching logic as `refreshDropSourcePane` — PLUS the paste's own DESTINATION pane
+   *  (`destInPaneB`), whose rows newly appear. This differs from `refreshDropSourcePane`: a drag-drop
+   *  always lands ON a child row inside the receiving pane, so only the source needs reloading; a paste's
+   *  destination IS the target pane's own current-folder listing, so it must reload too. Both source and
+   *  destination pane(s) can match at once (e.g. both panes mirror the same folder) — refresh every pane
+   *  that matches either side so no ghost/missing row is left behind, mirroring CPE-1371's reasoning. */
+  async function refreshPasteAffectedPanes(sources: string[], destInPaneB: boolean) {
+    const srcParent = normalizePath(parentOfPath(sources[0] ?? ""));
+    const matchesB = !!(dualPane && paneBPath && srcParent === normalizePath(paneBPath));
+    const matchesA = srcParent === normalizePath(currentPath);
+    const refreshB = matchesB || destInPaneB;
+    const refreshA = matchesA || !destInPaneB;
+    if (refreshB) await explorerPaneB?.loadListing(paneBPath, false);
+    if (refreshA) await loadPath(currentPath);
+  }
+
   /** `inPaneBOverride` (CPE-1377): a context-menu-invoked delete must target the pane the menu was
    *  opened OVER (`ctx?.inPaneB`), not the live `activePane` — right-clicking pane B doesn't focus it
    *  (only a plain click does), so the default `dualPane && activePane === 1` would silently target
@@ -3667,11 +3727,12 @@
       case "execute": executeSelected(); break;
       case "execute-admin": executeAsAdmin(); break;
       case "open-new-tab": if (pane.selectedEntries[0]) openInNewTab(pane.selectedEntries[0]); break;
-      // Clipboard verbs (cut/copy/paste/duplicate/copy-to/move-to) stay pane-A-only here — CPE-1380
-      // covers making them pane-aware; out of this ticket's scope (CPE-1377/1378).
-      case "cut": doCut(); break;
-      case "copy": doCopy(); break;
-      case "paste": doPaste(); break;
+      // Cut/copy/paste route via `inPaneB` (CPE-1380: a context-menu invocation targets whichever pane
+      // the menu was opened OVER, same as every other pane-routed case in this switch). Duplicate/
+      // copy-to/move-to stay pane-A-only here — that's CPE-1384, out of this ticket's scope.
+      case "cut": doCut(inPaneB); break;
+      case "copy": doCopy(inPaneB); break;
+      case "paste": doPaste(inPaneB); break;
       case "duplicate": doDuplicate(); break;
       // Archive/vault/media-batch ops are pane-A-only concepts in v1 — pane B is always a plain real
       // folder (see `beginRename`'s comment), and `<ContextMenu>`'s `compressible`/`extractable`/
@@ -4188,9 +4249,9 @@
     if (ctrl && event.shiftKey && event.key.toLowerCase() === "c") { event.preventDefault(); doCopyPath(); return; }
     // Don't hijack Ctrl+C when text is selected (e.g. in the Preview Pane) — let the browser copy it.
     if (ctrl && event.key.toLowerCase() === "c" && !(window.getSelection()?.isCollapsed ?? true)) return;
-    if (ctrl && event.key.toLowerCase() === "c") { event.preventDefault(); doCopy(); return; }
-    if (ctrl && event.key.toLowerCase() === "x") { event.preventDefault(); doCut(); return; }
-    if (ctrl && event.key.toLowerCase() === "v") { event.preventDefault(); doPaste(); return; }
+    if (ctrl && event.key.toLowerCase() === "c") { event.preventDefault(); doCopy(inPaneB); return; }
+    if (ctrl && event.key.toLowerCase() === "x") { event.preventDefault(); doCut(inPaneB); return; }
+    if (ctrl && event.key.toLowerCase() === "v") { event.preventDefault(); doPaste(inPaneB); return; }
     if (ctrl && event.key.toLowerCase() === "d") { event.preventDefault(); doDuplicate(); return; }
     if (ctrl && event.key.toLowerCase() === "z") { event.preventDefault(); undo(); return; }
 
@@ -4874,7 +4935,18 @@
         Promise.resolve(pending.onSuccess()).catch(() => {});
         return;
       }
-      loadPath(currentPath).catch(() => {});
+      // CPE-1380: a clipboard-paste copy that targeted pane B is tagged in `pasteCopyPaneB` (by
+      // `startCopyWithPolicy`) — refresh pane B for it, PLUS pane A too when pane A happens to mirror the
+      // same folder (both-can-match, same reasoning as `refreshDropSourcePane`/`refreshPasteAffectedPanes`
+      // — otherwise pane A would miss the newly-copied item if both panes show the same folder). Every
+      // other copy source (copy-to-folder, drag-drop, Home copy, quick actions) never adds an id here, so
+      // this falls through to the pre-existing pane-A-only refresh, unchanged.
+      if (pasteCopyPaneB.delete(r.id)) {
+        if (paneBPath && normalizePath(paneBPath) === normalizePath(currentPath)) loadPath(currentPath).catch(() => {});
+        explorerPaneB?.loadListing(paneBPath, false).catch(() => {});
+      } else {
+        loadPath(currentPath).catch(() => {});
+      }
       if (r.cancelled) showNotice("Copy cancelled.");
       else if (r.failed > 0) showNotice(`Copied ${r.transferred}, ${r.failed} failed.`, true);
       else showNotice(`Copied ${r.transferred} item${r.transferred === 1 ? "" : "s"}.`);
@@ -5516,7 +5588,7 @@
     x={ctx.x}
     y={ctx.y}
     target={ctx.target}
-    canPaste={pasteCheck.allowed}
+    canPaste={ctxPasteCheck.allowed}
     selectionCount={selectedCount(ctxPane.selection)}
     folderSelected={ctxPane.selectedEntries.length === 1 && ctxPane.selectedEntries[0]?.is_dir}
     executableSelected={ctxPane.selectedEntries.length === 1 && isExecutable(ctxPane.selectedEntries[0])}
