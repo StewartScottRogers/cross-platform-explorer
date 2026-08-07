@@ -251,4 +251,40 @@ mod tests {
         let csr_pem = make_csr("leaf.cpe-sample.local", "leaf.cpe-sample.local");
         assert!(cert_issue_from_csr(&csr_pem, &ca_cert_pem, "", 365).is_err());
     }
+
+    /// Build a CSR that itself REQUESTS CA powers (BasicConstraints CA:TRUE via `is_ca = IsCa::Ca(...)`
+    /// on the CSR's own params). rcgen 0.14 honors a CSR's requested BasicConstraints extension when
+    /// signing it (`CertificateSigningRequestParams::signed_by`), so without the explicit
+    /// `csr_params.params.is_ca = IsCa::NoCa` override in `cert_issue_from_csr` this CSR would come back
+    /// as an issued CA certificate — exactly the privilege-escalation the CPE-1421 threat model depends
+    /// on being impossible. This is the load-bearing regression test (CPE-1428 / CPE-1421 reviewer
+    /// follow-up): a CSR must never be able to talk its way into CA powers.
+    fn make_ca_requesting_csr(common_name: &str, san_dns: &str) -> String {
+        let csr_key = KeyPair::generate_for(&rcgen::PKCS_ECDSA_P256_SHA256).expect("CSR keygen");
+        let mut csr_params = CertificateParams::new(vec![san_dns.to_string()]).expect("CSR params");
+        csr_params.distinguished_name.push(DnType::CommonName, common_name);
+        csr_params.is_ca = IsCa::Ca(rcgen::BasicConstraints::Unconstrained);
+        let csr = csr_params.serialize_request(&csr_key).expect("serialize CSR");
+        csr.pem().expect("CSR PEM")
+    }
+
+    #[test]
+    fn csr_requesting_ca_powers_is_still_issued_as_non_ca_leaf() {
+        let (ca_cert_pem, ca_key_pem) = make_ca(KeyType::EcP256);
+        let csr_pem = make_ca_requesting_csr("leaf.cpe-sample.local", "leaf.cpe-sample.local");
+
+        let issued_pem = cert_issue_from_csr(&csr_pem, &ca_cert_pem, &ca_key_pem, 365)
+            .expect("issuing from a CA-requesting CSR must still succeed");
+
+        let preview = cert_decode(issued_pem.as_bytes());
+        assert!(preview.error.is_none(), "decode of issued cert must not error: {:?}", preview.error);
+        let leaf = preview.certificate.expect("issued certificate must be set");
+        assert!(
+            !leaf.is_ca,
+            "a CSR requesting CA:TRUE BasicConstraints must NOT result in an issued CA certificate — \
+             IsCa::NoCa must be forced regardless of what the CSR asked for"
+        );
+
+        assert_signed_by_ca(&issued_pem, &ca_cert_pem);
+    }
 }

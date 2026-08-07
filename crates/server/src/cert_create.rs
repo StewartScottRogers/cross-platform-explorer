@@ -264,6 +264,30 @@ mod tests {
         assert_key_pairs_with_cert(&result.cert_pem, &result.key_pem);
     }
 
+    /// RSA-4096 (CPE-1427, CPE-1420/PR #694 reviewer follow-up): same parameterized `cert_create` path
+    /// as RSA-2048 above, just the larger key size — full key-size coverage for `generate_rsa_key_pair`.
+    /// RSA-4096 keygen is noticeably slower than the other key types but still completes in well under a
+    /// second in practice, so this runs as a normal (non-`#[ignore]`d) test rather than being skipped.
+    #[test]
+    fn rsa_4096_round_trips_through_cert_decode() {
+        let result = cert_create(&base_params(KeyType::Rsa4096, false)).expect("RSA-4096 cert_create must succeed");
+        assert!(result.cert_pem.starts_with("-----BEGIN CERTIFICATE-----"));
+        assert!(result.key_pem.starts_with("-----BEGIN PRIVATE KEY-----"));
+
+        let preview = cert_decode(result.cert_pem.as_bytes());
+        assert!(preview.error.is_none(), "decode of freshly created RSA-4096 cert must not error: {:?}", preview.error);
+        let c = preview.certificate.expect("certificate must be set");
+
+        assert!(c.subject.contains("test.cpe-sample.local"));
+        assert_eq!(c.public_key.algorithm, "RSA");
+        assert_eq!(c.public_key.size_bits, Some(4096));
+        assert!(!c.expired);
+        assert!(!c.not_yet_valid);
+        assert!(!c.is_ca);
+
+        assert_key_pairs_with_cert(&result.cert_pem, &result.key_pem);
+    }
+
     #[test]
     fn is_ca_true_sets_basic_constraints() {
         let result = cert_create(&base_params(KeyType::EcP256, true)).expect("CA cert_create must succeed");
