@@ -3353,12 +3353,17 @@
    *  single-pane mode, or a Sidebar-driven drop whose source isn't a currently-open pane at all) fall
    *  back to refreshing pane A, matching pre-CPE-1371 behavior. */
   async function refreshDropSourcePane(paths: string[]) {
-    const parent = parentOfPath(paths[0] ?? "");
-    if (dualPane && paneBPath && normalizePath(parent) === normalizePath(paneBPath)) {
-      await explorerPaneB?.loadListing(paneBPath, false);
-    } else {
-      await loadPath(currentPath);
-    }
+    const parent = normalizePath(parentOfPath(paths[0] ?? ""));
+    const matchesB = !!(dualPane && paneBPath && parent === normalizePath(paneBPath));
+    const matchesA = parent === normalizePath(currentPath);
+    // Both can match at once — a common commander pattern is mirroring the SAME folder into both panes
+    // (compare/sort one dir two ways). A mutually-exclusive if/else here left the non-matched pane
+    // rendering a GHOST row for a file the move had already removed (CPE-1371 review/UAT: reproduced
+    // with `paneBPath === currentPath`). Refresh whichever pane(s) actually show the source folder,
+    // falling back to pane A when neither matches (Sidebar-driven drop whose source isn't a currently
+    // open pane at all), matching pre-fix behavior.
+    if (matchesB) await explorerPaneB?.loadListing(paneBPath, false);
+    if (matchesA || !matchesB) await loadPath(currentPath);
   }
 
   function askDelete(permanent: boolean) {

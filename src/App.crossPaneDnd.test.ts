@@ -209,4 +209,36 @@ describe("App — cross-pane drag-and-drop (CPE-1371)", () => {
     expect(moveEntriesCalls.length).toBe(0);
     expect(screen.getByText("destInB")).toBeTruthy();
   });
+
+  it("both panes mirroring the SAME folder both refresh after a move — no ghost row left behind (Reviewer/UAT catch)", async () => {
+    // A common commander pattern: both panes navigated to the SAME folder (compare/sort one dir two
+    // ways). `refreshDropSourcePane`'s old mutually-exclusive if/else refreshed EITHER pane B OR pane A,
+    // never both — whichever pane it skipped kept rendering a GHOST row for a file the move had already
+    // removed, because `list_dir`/`list_dir_stream` was never re-issued for it.
+    saveDualPane(true);
+    savePaneBPath(PATH_A); // pane B mirrors pane A's folder, not its own PATH_B
+    render(App);
+
+    // Pane B auto-restores to PATH_A on mount; then navigate pane A into the same drive/folder.
+    await waitFor(() => expect(screen.getAllByText("alpha.txt").length).toBeGreaterThanOrEqual(1));
+    const driveButtons = await screen.findAllByText("Local Disk (C:)");
+    await fireEvent.click(driveButtons[0]);
+    await waitFor(() => expect(screen.getAllByText("alpha.txt").length).toBe(2));
+    expect(screen.getAllByText("destInA").length).toBe(2);
+
+    const alphaRows = screen.getAllByText("alpha.txt").map((el) => el.closest(".row") as HTMLElement);
+    const destRows = screen.getAllByText("destInA").map((el) => el.closest(".row") as HTMLElement);
+
+    const dt = fakeDataTransfer();
+    await fireDragStart(alphaRows[0], dt); // drag from pane A's row
+    await fireDragOver(destRows[1], dt, true); // drop onto pane B's row for the same subfolder (cross-pane)
+    await fireDrop(destRows[1], dt, true);
+
+    await waitFor(() => expect(moveEntriesCalls.length).toBe(1));
+    expect(moveEntriesCalls[0]).toEqual({ paths: [`${PATH_A}\\alpha.txt`], dest: `${PATH_A}\\destInA` });
+
+    // BOTH panes show the source folder, so BOTH must refresh — asserting a full 0, not just "pane A" or
+    // "pane B" individually, is what catches a fix that only refreshes one of the two.
+    await waitFor(() => expect(screen.queryAllByText("alpha.txt").length).toBe(0));
+  });
 });
