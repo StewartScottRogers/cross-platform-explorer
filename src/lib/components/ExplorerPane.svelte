@@ -16,7 +16,7 @@
   import * as settings from "../settings";
   import { baseName } from "../contentSearch";
   import { fsActivity, agentTimeline } from "../agentActivity";
-  import { click as selClick, selectedIndices, emptySelection, type Selection } from "../selection";
+  import { click as selClick, selectedIndices, emptySelection, remapByPath, type Selection } from "../selection";
   import { sortEntries, sortByMetaColumn } from "../sort";
   import { makeEntryMatcher } from "../entrySearch";
   import { matchesFileFilter } from "../filetypes";
@@ -143,6 +143,33 @@
   $: visible = activeSortColumn
     ? sortByMetaColumn(tagFiltered, (p) => metaCells.get(activeSortColumn as string)?.get(p)?.cell ?? "Empty", sortDir, foldersFirst)
     : sortEntries(tagFiltered, sortKey as SortKey, sortDir, foldersFirst, sizeOf);
+
+  // CPE-1369 — keep the selection pinned to its FILES when `visible` re-orders/re-filters IN PLACE.
+  // `selection` is a set of ROW INDICES into `visible` (see the Replay note below `selectedEntries`), so a
+  // sort (column header OR CommandBar), a type/tag filter, or a streamed batch appended mid-selection would
+  // otherwise leave the indices pointing at DIFFERENT files — silently moving both the highlight and every
+  // op target (Delete / rename / copy / extract / …) to the wrong file, with no "selection lost" cue. So on
+  // every `visible` change, remap the selection by PATH, recovering the selected paths from the PREVIOUS
+  // `visible`. This depends ONLY on `visible` (the fn arg) — reading `selection`/`prevVisible` inside the
+  // helper doesn't make them reactive deps — so it can't self-loop. Navigation is unaffected: App clears
+  // `selection` before a real load (keepSelection=false) so there's nothing to remap, and its own
+  // keepSelection remap produces the same result. Only reassigns when the index SET actually changes, so an
+  // unchanged selection keeps its anchor/lead (no gratuitous churn or scroll jump).
+  let prevVisible: DirEntry[] = [];
+  $: reconcileSelectionToVisible(visible);
+  function reconcileSelectionToVisible(vis: DirEntry[]) {
+    const prev = prevVisible;
+    prevVisible = vis;
+    if (prev === vis || prev.length === 0) return; // first paint / nothing was shown before
+    const idx = selectedIndices(selection);
+    if (idx.length === 0) return; // nothing selected (also the post-navigation cleared-selection case)
+    const paths = idx.map((i) => prev[i]?.path).filter((p): p is string => !!p);
+    const remapped = remapByPath(paths, vis);
+    const unchanged =
+      remapped.indices.size === selection.indices.size &&
+      [...selection.indices].every((i) => remapped.indices.has(i));
+    if (!unchanged) selection = remapped;
+  }
 
   // ---- Metadata columns (CPE-1146, epic CPE-707) --------------------------------------------------
   // The catalog is a shared, app-wide singleton (metaColumnCatalog.ts) — fetched once regardless of how
