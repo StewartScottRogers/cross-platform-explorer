@@ -322,3 +322,23 @@ signing cert / AI keys / SFTP-Docker creds) per Library `headless-well-dry-post-
 **To resume:** a fresh session can (a) knock out CPE-1407/1408 (cheap, well-specified), then (b) pause for user
 direction — name an attended epic, activate a gated epic, or provide a resource. Nothing blocked or broken;
 board clean + green.
+
+---
+## RUN 2026-08-07 (CLI resume cont., session cli-1786069944) — SECURITY SWEEP · 4 real DoS/hang bugs found · main GREEN
+**State:** `main` @ origin `f7000bfc`, CLEAN, 0 worktrees. Backlog = 2 low-pri follow-ups only. Session total 35 PRs,
+0 escaped defects. Adversarial parser fuzzing found + fixed 3 DoS (WebDAV/SVG-deep-nest/ISO-hang) + wire memory-cap,
+documented 1 (SVG use-cycle), reported 1 upstream (sevenz). Batteries now cover archive/svg/font/webdav/jwt.
+
+**READY BACKLOG (next session — both LOW priority, well-specified):**
+- CPE-1414 — SVG mutual `<use>` reference-cycle stack-overflow. SAFE on prod 2MB stacks (low risk). Needs a
+  non-recursive `<use>`/href cycle detector (deliberately deferred as fragile — same class as CPE-1398's own
+  follow-up bypass). `#[ignore]`d reproducer exists in thumb_svg_panic_safety.rs.
+- CPE-1415 — defensive `catch_unwind` around sevenz-rust parse (already contained via spawn_blocking → not urgent)
+  + track the upstream `sevenz-rust` overflow bug (`#[should_panic]` tests flip red on a fix).
+
+**Then user-gated:** all remaining FEATURE work needs the user (attended GUI / Mac / signing cert / AI keys /
+SFTP-Docker creds) per Library `headless-well-dry-post-dualpane-2026-08-07`. Parser-fuzz vein covered per
+`untrusted-parser-fuzz-sweep-2026-08-07`.
+
+**To resume:** a fresh session can pick up CPE-1414/1415 (both low-pri) or scout a new angle, then pause for user
+direction. Nothing blocked or broken; clean + green.

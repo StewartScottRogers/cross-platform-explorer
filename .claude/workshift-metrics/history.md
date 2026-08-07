@@ -1089,3 +1089,32 @@ this shift: the genuinely-valuable vein is now down to minor follow-up FIXES (CP
 UserCommands/archive-pin specs. Feature work still user-gated. Session ~135 agents used → checkpointed for a
 fresh-session reset. Two shifts this session = 27 PRs total (dual-pane epic + QA render-specs + security/coverage
 hardening), 0 escaped defects.
+
+## Shift 2026-08-07 (CLI, resume cont. ~06:56–08:30) — UNTRUSTED-PARSER SECURITY SWEEP — found 4 REAL DoS/hang bugs
+User: "keep working, back in an hour" (×2) after the coverage vein drained. Pursued the ONE genuinely-valuable
+unscouted vein: adversarially fuzz every parser of UNTRUSTED bytes (opened files / network) — the vein that found
+the WebDAV DoS. It paid off big. 9 PRs this segment (CPE-1407/1408 fixes + 1409/1410 coverage from the prior
+segment, then CPE-1411/1412/1413/1416 security). main GREEN throughout, 0 escaped defects.
+
+**FOUR real DoS/hang bugs found by fuzzing (static review had missed ALL of them):**
+- WebDAV `parse_multistatus` deep-XML stack-overflow (CPE-1398, prior segment) — FIXED.
+- SVG `thumb_svg.rs` deep-nesting stack-overflow (CPE-1413) — FIXED (quote/comment/CDATA/PI-aware non-recursive
+  depth guard MAX=64, run before usvg; reviewer built 6 evasion payloads incl. the webdav quote-bypass shape —
+  none bypassed). Worker learned from CPE-1398 and made it quote-aware from the start.
+- SVG mutual `<use>` reference-cycle stack-overflow (CPE-1414) — DEFERRED (safe on prod 2MB spawn_blocking stacks,
+  low risk; needs a fragile non-recursive cycle detector; `#[ignore]`d reproducer).
+- ISO `archive.rs:iso_entries` malformed-record INFINITE-LOOP HANG (CPE-1411) — FIXED (`continue`→`break`;
+  iso9660 0.1.1's iterator doesn't advance on parse error).
+- sevenz-rust 0.6.1 crafted-.7z overflow panic (CPE-1415) — reported; CONTAINED (spawn_blocking task boundary →
+  Err, no crash; no panic=abort). catch_unwind mitigation = low-pri follow-up.
+- Font glyph (CPE-1412, ab_glyph SFNT/glyf) — fuzzed ~250 cases, NO bug (held up).
+- Wire `read_envelope` unbounded read → memory-DoS (CPE-1416) — FIXED (`.take(16 MiB)` cap; reviewer mutation
+  showed the old path silently decoded a truncated frame).
+
+Tuned defaults: security-parser batteries = sonnet worker + a reviewer that ADVERSARIALLY tries to evade the fix
+(the single highest-value check — caught webdav's bypass, verified SVG's guard). Probe stack-overflow on a 256KiB
+`std::thread` (uncatchable by catch_unwind — a failed .join() is the detector). Guard recursive-parser DoS with a
+non-recursive depth pre-scan. Library entry: `untrusted-parser-fuzz-sweep-2026-08-07` (coverage map + lessons).
+FRONTIER: this vein now COVERED (archive/svg/font/webdav/jwt batteries); remaining = 2 low-pri follow-ups
+(CPE-1414/1415) + user-gated feature work. Session TOTAL across all segments = 35 PRs, 0 escaped defects, 5 real
+security bugs found (4 fixed).
