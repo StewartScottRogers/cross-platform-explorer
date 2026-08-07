@@ -102,7 +102,15 @@ fn iso_entries(path: &str) -> Result<Vec<ArchiveEntry>, String> {
         for entry in dir.contents() {
             let entry = match entry {
                 Ok(e) => e,
-                Err(_) => continue,
+                // `continue` here would infinite-loop (CPE-1411): the `iso9660` crate's directory
+                // iterator does not advance its read cursor on a parse error (`ISODirectoryIterator::next`
+                // only updates `next_offset` on `Ok`), so calling `.next()` again after an `Err` re-reads
+                // the exact same bytes and gets the exact same `Err`, forever — a single malformed
+                // directory record (e.g. a non-UTF8 identifier) hangs the whole listing thread. `break`
+                // stops reading the REST of *this* directory's entries (same skip-what-we-can't-read
+                // spirit as every other archive/filesystem reader here) while the outer
+                // `while let Some(..) = stack.pop()` still visits any other directories already queued.
+                Err(_) => break,
             };
             match entry {
                 DirectoryEntry::Directory(d) => {
