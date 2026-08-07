@@ -30,9 +30,19 @@
 //! required, and for `pe_info` in particular isn't attempted beyond the DOS+COFF header — the point is to
 //! walk far enough into each parser's real logic that a crafted tail can reach it, not to round-trip a
 //! perfectly well-formed file.
+//!
+//! `thumb_font::render_glyph_sheet` (CPE-1412) is bytes-based, not path-based, so it doesn't need the
+//! `write_temp` seam the rest of this file uses — it's battery-tested directly. Its section adds a second
+//! technique on top of the shared header/truncation/garbage sweep: *targeted table-directory corruption*.
+//! `ab_glyph`/`owned_ttf_parser`'s SFNT/glyf walk is driven by numeric fields buried at known byte offsets
+//! (table offsets/lengths, `numTables`, `maxp.numGlyphs`, `glyf.numberOfContours`) that a purely random
+//! byte-flip battery would rarely hit precisely enough to reach the interesting code past those fields —
+//! so those offsets are located in a real, valid font (`DEMO_TTF`, reused from `thumb_font.rs`'s own test
+//! fixture) and corrupted to extreme values one field at a time, covering the ticket's "truncated tables,
+//! out-of-range cmap/loca offsets, huge glyph/table counts, bad table directory" classes directly.
 
 mod common;
-use common::run_battery;
+use common::{assert_no_panic, run_battery};
 
 use std::io::Write;
 
@@ -40,6 +50,7 @@ use cpe_server::binary_preview::{midi_info, pe_info, torrent_info, wasm_info};
 use cpe_server::camera_raw::read_raw_preview_data_url;
 use cpe_server::data_preview::{spreadsheet_info, sqlite_info};
 use cpe_server::rar::{rar_entries, rar_extract_entry};
+use cpe_server::thumb_font::render_glyph_sheet;
 
 #[cfg(feature = "dicom-thumb")]
 use cpe_server::dicom::{read_dicom_image_data_url, read_dicom_tags};
@@ -344,6 +355,258 @@ fn read_raw_preview_data_url_never_panics() {
             assert!(r.is_err(), "read_raw_preview_data_url(empty file) must be Err, not a panic");
         }
     });
+}
+
+// ---------------------------------------------------------------------------------------------
+// thumb_font.rs — ab_glyph/owned_ttf_parser backed TTF/OTF/WOFF glyph-sheet rasterizer (CPE-1412)
+// ---------------------------------------------------------------------------------------------
+
+/// The same minimal-but-real SFNT TrueType fixture `thumb_font.rs`'s own unit tests use: `ttf-parser`'s
+/// own doc-test fixture (`tests/fonts/demo.ttf`), 400 bytes, 7 tables (cmap/glyf/head/hhea/hmtx/loca/
+/// maxp), a single mapped glyph (`'A'` -> glyph 1) with a real outline — see `thumb_font.rs`'s `DEMO_TTF`
+/// doc comment for full provenance/license. Included directly here via `include_bytes!` (rather than
+/// reused from `thumb_font`'s private `#[cfg(test)]`-only const, which an integration test can't reach)
+/// so this battery can locate and corrupt its table directory by byte offset.
+const DEMO_TTF: &[u8] = include_bytes!("../src/testdata/demo.ttf");
+
+/// Look up one SFNT table by 4-byte tag in `DEMO_TTF`'s own table directory (12-byte header, then one
+/// 16-byte `tag(4)/checksum(4)/offset(4)/length(4)` entry per table) and return
+/// `(directory_record_offset, table_offset, table_length)`.
+fn demo_ttf_table_dir_entry(tag: &[u8; 4]) -> Option<(usize, usize, usize)> {
+    let num_tables = u16::from_be_bytes([DEMO_TTF[4], DEMO_TTF[5]]) as usize;
+    (0..num_tables).find_map(|i| {
+        let rec = 12 + i * 16;
+        if &DEMO_TTF[rec..rec + 4] != tag {
+            return None;
+        }
+        let offset = u32::from_be_bytes([DEMO_TTF[rec + 8], DEMO_TTF[rec + 9], DEMO_TTF[rec + 10], DEMO_TTF[rec + 11]]);
+        let length = u32::from_be_bytes([DEMO_TTF[rec + 12], DEMO_TTF[rec + 13], DEMO_TTF[rec + 14], DEMO_TTF[rec + 15]]);
+        Some((rec, offset as usize, length as usize))
+    })
+}
+
+/// Build a real WOFF 1.0 container wrapping `DEMO_TTF`'s own tables, zlib-compressing each one — the same
+/// construction `thumb_font.rs`'s own (private, unit-test-only) `woff_wrapping_demo_ttf` helper uses,
+/// duplicated here since an integration test can't reach a private helper in another test module. No new
+/// dependency: `flate2` is already a normal dependency of `cpe-server` (used by `thumb_font::unwrap_woff`
+/// itself, and elsewhere for tar.gz/zip), so it's available directly to this integration test too.
+fn build_woff_from_demo_ttf() -> Vec<u8> {
+    let num_tables = u16::from_be_bytes([DEMO_TTF[4], DEMO_TTF[5]]) as usize;
+    struct T {
+        tag: [u8; 4],
+        data: Vec<u8>,
+        checksum: u32,
+    }
+    let mut tables = Vec::new();
+    for i in 0..num_tables {
+        let rec = 12 + i * 16;
+        let tag = [DEMO_TTF[rec], DEMO_TTF[rec + 1], DEMO_TTF[rec + 2], DEMO_TTF[rec + 3]];
+        let checksum =
+            u32::from_be_bytes([DEMO_TTF[rec + 4], DEMO_TTF[rec + 5], DEMO_TTF[rec + 6], DEMO_TTF[rec + 7]]);
+        let offset = u32::from_be_bytes([DEMO_TTF[rec + 8], DEMO_TTF[rec + 9], DEMO_TTF[rec + 10], DEMO_TTF[rec + 11]])
+            as usize;
+        let len = u32::from_be_bytes([DEMO_TTF[rec + 12], DEMO_TTF[rec + 13], DEMO_TTF[rec + 14], DEMO_TTF[rec + 15]])
+            as usize;
+        tables.push(T { tag, data: DEMO_TTF[offset..offset + len].to_vec(), checksum });
+    }
+
+    let mut compressed: Vec<Vec<u8>> = Vec::new();
+    for t in &tables {
+        let mut enc = flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::best());
+        enc.write_all(&t.data).expect("zlib-compressing a WOFF table for the fixture must succeed");
+        compressed.push(enc.finish().expect("finishing the zlib stream for the fixture must succeed"));
+    }
+
+    let n = tables.len() as u32;
+    let dir_len = 20 * tables.len();
+    let mut data_offset = 44 + dir_len as u32;
+    let mut dir = Vec::new();
+    let mut data_blob = Vec::new();
+    for (t, comp) in tables.iter().zip(compressed.iter()) {
+        dir.extend_from_slice(&t.tag);
+        dir.extend_from_slice(&data_offset.to_be_bytes()); // offset
+        dir.extend_from_slice(&(comp.len() as u32).to_be_bytes()); // compLength
+        dir.extend_from_slice(&(t.data.len() as u32).to_be_bytes()); // origLength
+        dir.extend_from_slice(&t.checksum.to_be_bytes());
+        data_blob.extend_from_slice(comp);
+        data_offset += comp.len() as u32;
+    }
+
+    let mut out = Vec::new();
+    out.extend_from_slice(&0x774F_4646u32.to_be_bytes()); // "wOFF"
+    out.extend_from_slice(&0x0001_0000u32.to_be_bytes()); // flavor (TrueType)
+    let total_len = 44 + dir.len() as u32 + data_blob.len() as u32;
+    out.extend_from_slice(&total_len.to_be_bytes()); // length
+    out.extend_from_slice(&(n as u16).to_be_bytes()); // numTables
+    out.extend_from_slice(&0u16.to_be_bytes()); // reserved
+    out.extend_from_slice(&0u32.to_be_bytes()); // totalSfntSize
+    out.extend_from_slice(&1u16.to_be_bytes()); // majorVersion
+    out.extend_from_slice(&0u16.to_be_bytes()); // minorVersion
+    out.extend_from_slice(&0u32.to_be_bytes()); // metaOffset
+    out.extend_from_slice(&0u32.to_be_bytes()); // metaLength
+    out.extend_from_slice(&0u32.to_be_bytes()); // metaOrigLength
+    out.extend_from_slice(&0u32.to_be_bytes()); // privOffset
+    out.extend_from_slice(&0u32.to_be_bytes()); // privLength
+    out.extend_from_slice(&dir);
+    out.extend_from_slice(&data_blob);
+    out
+}
+
+#[test]
+fn render_glyph_sheet_never_panics_on_a_generically_mutated_ttf() {
+    // The shared battery's own truncation/garbage/overflow sweep, using the *whole* real font as "magic"
+    // (mirrors `wasm_info_never_panics`'s "use the whole minimal-valid file" approach for a
+    // header-less-in-the-traditional-sense format) — walks truncation at every byte offset of the real
+    // font plus valid-font-then-garbage appends, covering "truncated tables", "garbage", and "empty".
+    let header_len = DEMO_TTF.len();
+    run_battery("thumb_font::render_glyph_sheet(ttf)", DEMO_TTF, header_len, |b| {
+        let r = render_glyph_sheet(b, "ttf", 64);
+        if b.is_empty() {
+            assert!(r.is_err(), "render_glyph_sheet(empty, ttf) must be Err, not a panic");
+        }
+    });
+}
+
+#[test]
+fn render_glyph_sheet_never_panics_on_a_non_font_magic() {
+    // "non-font magic": a real, unrelated file signature (PNG's) instead of an SFNT/WOFF one — must fail
+    // to parse gracefully, not panic, for every extension `render_glyph_sheet` accepts.
+    let png_like: [u8; 8] = [0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A];
+    for ext in ["ttf", "otf", "woff"] {
+        run_battery(&format!("thumb_font::render_glyph_sheet({ext})/non_font_magic"), &png_like, 8, |b| {
+            let r = render_glyph_sheet(b, ext, 32);
+            if b.is_empty() {
+                assert!(r.is_err(), "render_glyph_sheet(empty, {ext}) must be Err, not a panic");
+            }
+        });
+    }
+}
+
+#[test]
+fn render_glyph_sheet_never_panics_on_corrupted_sfnt_table_directory_entries() {
+    // Targeted at the ticket's real concern: corrupt each named table's *offset*/*length* directory field
+    // (not just generic byte flips) to out-of-range/overflowing/zero/huge values, one field at a time —
+    // this reaches `ab_glyph`/`owned_ttf_parser`'s glyf/loca/cmap walk with genuinely out-of-range table
+    // offsets/lengths (the "out-of-range cmap/loca offsets" and "bad table directory" classes) far more
+    // reliably than a lucky random byte flip would.
+    let num_tables = u16::from_be_bytes([DEMO_TTF[4], DEMO_TTF[5]]) as usize;
+    let extreme: [u32; 6] =
+        [0, 1, u32::MAX, u32::MAX / 2, DEMO_TTF.len() as u32, DEMO_TTF.len() as u32 + 1];
+
+    for i in 0..num_tables {
+        let rec = 12 + i * 16;
+        let tag = String::from_utf8_lossy(&DEMO_TTF[rec..rec + 4]).to_string();
+        for &v in &extreme {
+            for (field_name, field_off) in [("offset", 8usize), ("length", 12usize)] {
+                let mut buf = DEMO_TTF.to_vec();
+                buf[rec + field_off..rec + field_off + 4].copy_from_slice(&v.to_be_bytes());
+                assert_no_panic(
+                    "thumb_font::render_glyph_sheet(ttf)",
+                    &format!("table_{tag}_{field_name}_{v}"),
+                    || {
+                        let _ = render_glyph_sheet(&buf, "ttf", 64);
+                    },
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn render_glyph_sheet_never_panics_on_a_corrupted_sfnt_table_count() {
+    // Corrupt the SFNT header's own `numTables` field (offset 4, big-endian u16) directly — a value
+    // larger than the file can actually hold pushes the directory-entry scan past the buffer, and a
+    // value of 0 leaves nothing for the parser to work with; both are "bad table directory"/"huge table
+    // counts" per the ticket, at the header level rather than a single entry's fields.
+    for &n in &[0u16, 1, 0x7FFF, 0xFFFF] {
+        let mut buf = DEMO_TTF.to_vec();
+        buf[4..6].copy_from_slice(&n.to_be_bytes());
+        assert_no_panic("thumb_font::render_glyph_sheet(ttf)", &format!("sfnt_numTables_{n}"), || {
+            let _ = render_glyph_sheet(&buf, "ttf", 64);
+        });
+    }
+}
+
+#[test]
+fn render_glyph_sheet_never_panics_on_a_huge_declared_glyph_count() {
+    // Corrupt `maxp`'s `numGlyphs` field to a huge value while `loca`/`glyf` stay their real (small)
+    // size — the "huge glyph counts" class: a naive implementation trusting `numGlyphs` to size a
+    // loop/allocation over `loca` would run far past the real table's end.
+    let (_, maxp_offset, maxp_len) = demo_ttf_table_dir_entry(b"maxp").expect("demo.ttf must have a maxp table");
+    assert!(maxp_len >= 6, "maxp table must have version + numGlyphs fields");
+
+    for &n in &[0xFFFFu16, 0x7FFF, 0xFFFE] {
+        let mut buf = DEMO_TTF.to_vec();
+        buf[maxp_offset + 4..maxp_offset + 6].copy_from_slice(&n.to_be_bytes());
+        assert_no_panic("thumb_font::render_glyph_sheet(ttf)", &format!("maxp_numGlyphs_{n}"), || {
+            let _ = render_glyph_sheet(&buf, "ttf", 64);
+        });
+    }
+}
+
+#[test]
+fn render_glyph_sheet_never_panics_when_glyf_forced_into_composite_interpretation() {
+    // Flip the 'A' glyph's own `numberOfContours` field (the first two bytes of the glyf table) from a
+    // small positive count to -1 (0xFFFF big-endian), which per the SFNT spec means "this is a composite
+    // glyph" — forcing `ab_glyph`/`owned_ttf_parser` to reinterpret the glyph's original simple-glyph
+    // outline bytes (contour endpoints/flags/coordinates) as composite-glyph component records instead.
+    // Malformed/cyclic composite-glyph references are exactly the historically panic-prone construct this
+    // ticket calls out; this is the cheapest way to reach that code path starting from a real, otherwise-
+    // valid font without hand-building an entire synthetic glyf table.
+    let (_, glyf_offset, glyf_len) = demo_ttf_table_dir_entry(b"glyf").expect("demo.ttf must have a glyf table");
+    assert!(glyf_len >= 2, "glyf table must have at least a numberOfContours field to flip");
+
+    let mut buf = DEMO_TTF.to_vec();
+    buf[glyf_offset] = 0xFF;
+    buf[glyf_offset + 1] = 0xFF;
+    assert_no_panic("thumb_font::render_glyph_sheet(ttf)", "glyf_forced_composite", || {
+        let _ = render_glyph_sheet(&buf, "ttf", 64);
+    });
+}
+
+#[test]
+fn render_glyph_sheet_never_panics_on_a_generically_mutated_woff() {
+    // Same "whole real file as magic" battery as the TTF case above, but for a real WOFF wrapping
+    // `DEMO_TTF`'s tables — walks `unwrap_woff`'s header/directory parsing plus the zlib-decompression
+    // path under truncation/garbage/overflow.
+    let woff = build_woff_from_demo_ttf();
+    assert_eq!(&woff[0..4], b"wOFF", "sanity: fixture really is WOFF-signed");
+    let header_len = woff.len();
+    run_battery("thumb_font::render_glyph_sheet(woff)", &woff, header_len, |b| {
+        let r = render_glyph_sheet(b, "woff", 48);
+        if b.is_empty() {
+            assert!(r.is_err(), "render_glyph_sheet(empty, woff) must be Err, not a panic");
+        }
+    });
+}
+
+#[test]
+fn render_glyph_sheet_never_panics_on_corrupted_woff_table_directory_entries() {
+    // Same "corrupt one directory field to an extreme value" technique as the SFNT table-directory test
+    // above, but aimed at WOFF's own directory (`offset`/`compLength`/`origLength` per table, at record
+    // offsets 4/8/12 within each 20-byte WOFF directory entry) — the ticket's "bad table directory" class
+    // applied to the WOFF container path specifically, since `unwrap_woff` does its own bounds/size
+    // validation before ever handing reconstructed bytes to `ab_glyph`.
+    let woff = build_woff_from_demo_ttf();
+    let num_tables = u16::from_be_bytes([woff[12], woff[13]]) as usize;
+    let extreme: [u32; 5] = [0, 1, u32::MAX, u32::MAX / 2, woff.len() as u32 + 1];
+
+    for i in 0..num_tables {
+        let rec = 44 + i * 20;
+        for &v in &extreme {
+            for (field_name, field_off) in [("offset", 4usize), ("compLength", 8usize), ("origLength", 12usize)] {
+                let mut buf = woff.clone();
+                buf[rec + field_off..rec + field_off + 4].copy_from_slice(&v.to_be_bytes());
+                assert_no_panic(
+                    "thumb_font::render_glyph_sheet(woff)",
+                    &format!("woff_table_{i}_{field_name}_{v}"),
+                    || {
+                        let _ = render_glyph_sheet(&buf, "woff", 48);
+                    },
+                );
+            }
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------------------------
