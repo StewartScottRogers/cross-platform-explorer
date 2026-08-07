@@ -15,8 +15,7 @@ export type PreviewKind =
   | "raw-image"
   | "dicom"
   | "heic"
-  | "audio"
-  | "video"
+  | "media"
   | "pdf"
   | "json"
   | "csv"
@@ -185,19 +184,18 @@ export const providers: PreviewProvider[] = [
     editable: false,
     canPreview: (e) => !e.is_dir && categoryOf(e) === "image",
   },
+  // Temporal media (CPE-1429, epic CPE-720): audio + video play in the pane's native <audio>/<video>
+  // element behind a custom themed transport (MediaPlayer.svelte). One `media` kind covers both —
+  // `mediaType()` below decides which element to render. Sits before the generic text/hex handlers, like
+  // jwt/cert, so a media file is never claimed by them. Uses the same `categoryOf` audio/video mapping as
+  // the file list, so any recognised clip gets the player (with a graceful open-externally fallback on an
+  // unsupported codec) rather than a hex dump.
   {
-    id: "audio",
-    label: "Audio",
-    kind: "audio",
+    id: "media",
+    label: "Media",
+    kind: "media",
     editable: false,
-    canPreview: (e) => !e.is_dir && categoryOf(e) === "audio",
-  },
-  {
-    id: "video",
-    label: "Video",
-    kind: "video",
-    editable: false,
-    canPreview: (e) => !e.is_dir && categoryOf(e) === "video",
+    canPreview: (e) => !e.is_dir && (categoryOf(e) === "audio" || categoryOf(e) === "video"),
   },
   {
     id: "pdf",
@@ -334,4 +332,14 @@ export function pickProvider(entry: DirEntry | null | undefined): PreviewProvide
   if (!entry) return FALLBACK;
   if (entry.is_dir) return FOLDER;
   return providers.find((p) => p.canPreview(entry)) ?? FALLBACK;
+}
+
+/**
+ * Which element a `media`-kind entry should render in (CPE-1429). Video files use `<video>`; everything
+ * else in the media kind (including the ambiguous `.ogg`, which `filetypes.ts` maps to audio) uses
+ * `<audio>`. Derived from the same `categoryOf` mapping the provider matches on, so the two never
+ * disagree.
+ */
+export function mediaType(entry: DirEntry): "audio" | "video" {
+  return categoryOf(entry) === "video" ? "video" : "audio";
 }

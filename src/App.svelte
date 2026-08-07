@@ -5879,6 +5879,7 @@
           loadHeicImageData={loadHeicImageData}
           loadPdfValidity={loadPdfValidity}
           saveText={savePreviewText}
+          openExternal={async (p) => { unwrap(await commands.openExternal(p)); }}
           on:pick={onFolderPeekPick}
           on:open={onFolderPeekOpen}
         >

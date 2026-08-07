@@ -24,7 +24,8 @@ export type Section =
   | "file-health"
   | "crypto-preview"
   | "folder-preview"
-  | "cert-management";
+  | "cert-management"
+  | "media-player";
 
 /** Section id → doc slug (a `src/docs/*.md` filename without `.md`). */
 const SECTION_DOC: Record<Section, string> = {
@@ -79,6 +80,11 @@ const SECTION_DOC: Record<Section, string> = {
   // context menu and the palette), but it still earns its own doc page + registry entry per
   // [[maintain-in-app-docs-library]].
   "cert-management": "28-cert-management",
+  // CPE-1429 (epic CPE-720): the preview pane's audio/video player + custom transport. Like
+  // folder-preview/crypto-preview above, not a sidebar view you switch into (it's what the preview pane
+  // shows for a selected media file), but it still earns its own doc page + registry entry per
+  // [[maintain-in-app-docs-library]].
+  "media-player": "29-media-player",
 };
 
 /** The default doc when a section has no page (or an unknown id is passed): the Overview. */
