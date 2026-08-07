@@ -401,6 +401,10 @@ pub mod jwt_preview;
 /// (CPE-1419, epic CPE-1417).
 pub mod cert_decode;
 
+/// Certificate creation — keypair + self-signed X.509 certificate generation via `rcgen`
+/// (CPE-1420, epic CPE-1417).
+pub mod cert_create;
+
 /// Image thumbnails — downscaled PNG generation + mtime-keyed disk cache (CPE-642/644).
 pub mod thumbnail;
 

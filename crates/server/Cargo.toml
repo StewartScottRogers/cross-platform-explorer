@@ -120,6 +120,26 @@ x509-parser = "0.16"
 # `cert_decode` names its `oid_registry()`/`OidRegistry` types directly rather than only reaching them
 # through `x509_parser::oid_registry::*`. Same version x509-parser 0.16 already pins transitively.
 oid-registry = "0.7"
+# Certificate creation (CPE-1420, epic CPE-1417): keypair + self-signed X.509 certificate generation.
+# Pure Rust (ring backend — no `aws_lc_rs`/cmake/nasm needed), no OpenSSL/system TLS library, matching
+# every other format/crypto dependency in this crate. `crypto`+`pem` features enable key generation and
+# PEM encoding respectively. Not feature-gated (small, no native/system-lib cost), same reasoning as
+# `x509-parser` above. Proven working (same version) by the throwaway CPE-1425 samples generator
+# (see `samples/crypto/README.md`) before being adopted here as a real dependency.
+rcgen = { version = "0.14", features = ["crypto", "pem"] }
+# Pure-Rust RSA key generation (CPE-1420) — rcgen's default `ring` backend can *sign* with an RSA key
+# but cannot *generate* one (RSA keygen needs the `aws_lc_rs` backend, which needs cmake/nasm); the `rsa`
+# crate fills exactly that gap so RSA-2048/4096 key creation stays pure-Rust with no native build
+# tooling. Same crate/feature set the CPE-1425 samples generator already proved works.
+rsa = { version = "0.9", features = ["pem", "sha2"] }
+# CSPRNG for RSA key generation (CPE-1420) — `rsa::RsaPrivateKey::new` takes an `rand_core`-compatible
+# RNG; `rand` (already a transitive dependency of several crates here) provides
+# `rand::rngs::OsRng`/`thread_rng()`.
+rand = "0.8"
+# Validity-window arithmetic for certificate creation (CPE-1420) — `rcgen`'s `not_before`/`not_after`
+# fields are `time::OffsetDateTime`, but `rcgen` itself doesn't re-export the `time` crate, so it's
+# declared directly to compute "now + N days" without hand-rolling calendar math.
+time = { version = "0.3", features = ["std"] }
 
 # POSIX extended attributes for the native-metadata bridge (CPE-826, epic CPE-717). Pure-Rust (libc
 # syscalls, no system libs); Unix-only — Windows uses NTFS alternate data streams via std file I/O,

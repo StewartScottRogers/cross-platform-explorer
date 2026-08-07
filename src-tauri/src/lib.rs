@@ -959,6 +959,43 @@ async fn cert_decode(path: String) -> Result<cpe_server::cert_decode::CertPrevie
     .map_err(|e| e.to_string())?
 }
 
+/// Certificate creation (CPE-1420, epic CPE-1417): generate a keypair + self-signed X.509 certificate
+/// and write both PEM files to disk. Thin async dispatcher into `cpe_server::cert_create`; the pure
+/// generation logic lives there, this only writes the two resulting PEMs to the caller-chosen paths. The
+/// private key is written with restrictive permissions where the OS supports it (POSIX chmod 0600 on
+/// Unix — see [`write_key_pem_restrictive`]) and is NEVER logged or echoed back over IPC: on success this
+/// returns only `()`, never the key material, so it can't leak into a frontend console or Diagnostics-mode
+/// invoke log.
+#[tauri::command]
+#[cfg_attr(feature = "specta-bindings", specta::specta)]
+async fn cert_create(
+    params: cpe_server::cert_create::CertCreateParams,
+    cert_path: String,
+    key_path: String,
+) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let result = cpe_server::cert_create::cert_create(&params)?;
+        fs::write(&cert_path, &result.cert_pem).map_err(|e| e.to_string())?;
+        write_key_pem_restrictive(&key_path, &result.key_pem)
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+/// Write a private-key PEM to `path` and tighten its permissions where the OS supports it: POSIX chmod
+/// 0600 (owner read/write only) on Unix, right after writing. Windows inherits the parent directory's
+/// ACL — narrowing that needs a Windows-specific ACL call this dispatcher doesn't attempt, the same
+/// Unix-only scope `set_permissions` above already has.
+fn write_key_pem_restrictive(path: &str, key_pem: &str) -> Result<(), String> {
+    fs::write(path, key_pem).map_err(|e| e.to_string())?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(path, fs::Permissions::from_mode(0o600)).map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}
+
 /// 3D-model geometry/stats reader (CPE-1333, epic CPE-118): reads a binary/ASCII STL or Wavefront OBJ's
 /// triangle/vertex counts + bounding box for the metadata-pane fallback the (blocked) interactive-viewer
 /// epic's acceptance criteria call for. Thin async dispatcher into `cpe_server::model_3d`; capped by the
@@ -10070,6 +10107,7 @@ pub fn run() {
             data_browser_query,
             jwt_preview,
             cert_decode,
+            cert_create,
             read_model_info,
             read_image_data_url,
             read_raw_preview_data_url,
@@ -10887,6 +10925,7 @@ pub fn export_bindings(out: &std::path::Path) -> Result<(), String> {
         data_browser_query,
         jwt_preview,
         cert_decode,
+        cert_create,
         read_model_info,
         read_image_data_url,
         read_raw_preview_data_url,

@@ -367,6 +367,23 @@ async certDecode(path: string) : Promise<Result<CertPreview, string>> {
 }
 },
 /**
+ * Certificate creation (CPE-1420, epic CPE-1417): generate a keypair + self-signed X.509 certificate
+ * and write both PEM files to disk. Thin async dispatcher into `cpe_server::cert_create`; the pure
+ * generation logic lives there, this only writes the two resulting PEMs to the caller-chosen paths. The
+ * private key is written with restrictive permissions where the OS supports it (POSIX chmod 0600 on
+ * Unix — see [`write_key_pem_restrictive`]) and is NEVER logged or echoed back over IPC: on success this
+ * returns only `()`, never the key material, so it can't leak into a frontend console or Diagnostics-mode
+ * invoke log.
+ */
+async certCreate(params: CertCreateParams, certPath: string, keyPath: string) : Promise<Result<null, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("cert_create", { params, certPath, keyPath }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
  * 3D-model geometry/stats reader (CPE-1333, epic CPE-118): reads a binary/ASCII STL or Wavefront OBJ's
  * triangle/vertex counts + bounding box for the metadata-pane fallback the (blocked) interactive-viewer
  * epic's acceptance criteria call for. Thin async dispatcher into `cpe_server::model_3d`; capped by the
@@ -3261,6 +3278,38 @@ export type CellValue =
  */
 "Empty"
 /**
+ * Input parameters for [`cert_create`].
+ */
+export type CertCreateParams = { 
+/**
+ * Subject Common Name (CN), e.g. `"my-service.local"`. Must not be empty.
+ */
+common_name: string; 
+/**
+ * DNS-name Subject Alternative Names.
+ */
+san_dns?: string[]; 
+/**
+ * IP-address Subject Alternative Names (IPv4 or IPv6), e.g. `"127.0.0.1"` / `"::1"`.
+ */
+san_ips?: string[]; 
+/**
+ * Validity window length in days, starting ~5 minutes ago (a small clock-skew allowance so a
+ * certificate is immediately usable on a machine whose clock runs a little behind). Clamped to
+ * [`MAX_VALIDITY_DAYS`] to keep the resulting `not_after` comfortably inside `time`'s representable
+ * range no matter what a caller passes.
+ */
+validity_days: number; 
+/**
+ * Keypair algorithm/size.
+ */
+key_type?: KeyType; 
+/**
+ * Whether the certificate is a CA (sets the `BasicConstraints` CA flag so it can sign other
+ * certificates).
+ */
+is_ca?: boolean }
+/**
  * The overall decode result. Exactly one of `certificate`/`csr`/`public_key`/`private_key` is set on
  * success; `error` is set (and everything else left `None`) on failure. Never a panic either way.
  */
@@ -3916,6 +3965,11 @@ size_bits: number | null;
  * Named curve, for an EC key (e.g. `"prime256v1"`).
  */
 curve: string | null }
+/**
+ * Which keypair algorithm/size to generate. EC-P256 is the default (fast, small, no big-int keygen);
+ * RSA is offered for interop with systems that don't accept EC certificates.
+ */
+export type KeyType = "ec_p256" | "ec_p384" | "rsa_2048" | "rsa_4096"
 /**
  * A path's link status for the file list + link tooling (CPE-804, epic CPE-715): whether it's a symlink,
  * where it points, and whether that target is currently missing (a broken link).
