@@ -88,6 +88,19 @@
   /** True when a SINGLE folder is selected in a real filesystem location (not Home/archive) — enables
    *  "Create encrypted vault…" (CPE-1250, epic CPE-738), which seals that folder into a `.cpevault`. */
   export let vaultable = false;
+  /** Kind of the single selected cert/CSR-family file (CPE-1424, epic CPE-1417): `"csr"` for a `.csr`
+   *  file enables "Issue cert from this CSR…"; `"cert"` for a `.pem`/`.crt`/`.cer`/`.der` file enables
+   *  "Sign with this as CA…" instead. Either value also enables the shared "Inspect" row. `""` hides all
+   *  three — narrower than the preview pane's own cert-family detection (no `.pub`/`.key`, which aren't
+   *  csr/cert-shaped enough to sign/issue from). */
+  export let certFileKind: "csr" | "cert" | "" = "";
+  /** True when the single selected item is a `.jwt`/`.jws` file (CPE-1424) — enables "Inspect JWT". */
+  export let jwtSelected = false;
+  /** True on a real writable location for either pane (CPE-1424) — pane A's `!isHome && !archive`, or
+   *  pane B's `paneBPath !== HOME`, same eligibility shape as {@link copyMoveEligible}. Enables "Create
+   *  certificate here…" on a folder row (combined with {@link folderSelected}) and on the empty-area
+   *  menu. */
+  export let certCreateEligible = false;
   /** True when the right-clicked drive (`target: "drive"`) is REMOVABLE (CPE-1278) — adds a "Safely
    *  eject" item to the drive menu. Fixed/system/network drives never set this, so they can't be ejected
    *  from the menu any more than from the sidebar's inline button. */
@@ -295,6 +308,39 @@
            the passphrase entry + the honest destructive warning for the optional shred-original path. -->
       <button class="row" role="menuitem" on:click={() => run("vault-create")}>
         <Icon name="lock" size={15} /> Create encrypted vault…
+      </button>
+    {/if}
+    {#if certFileKind === "csr"}
+      <!-- Issue cert from this CSR… (CPE-1424, epic CPE-1417): opens SignCertDialog pre-filled with the
+           clicked .csr as the CSR to issue from. Leading icon + theme-var text (MENUS.md). -->
+      <button class="row" role="menuitem" on:click={() => run("cert-issue-from-csr")}>
+        <Icon name="certificate" size={15} /> Issue cert from this CSR…
+      </button>
+    {:else if certFileKind === "cert"}
+      <!-- Sign with this as CA… (CPE-1424): opens SignCertDialog pre-filled with the clicked cert file
+           as the CA certificate to sign with. -->
+      <button class="row" role="menuitem" on:click={() => run("cert-sign-as-ca")}>
+        <Icon name="certificate" size={15} /> Sign with this as CA…
+      </button>
+    {/if}
+    {#if certFileKind}
+      <!-- Inspect (CPE-1424): the row is already selected (right-click selects first), and the preview
+           pane auto-decodes a cert/CSR file on selection — this just brings the preview tab forward. -->
+      <button class="row" role="menuitem" on:click={() => run("cert-inspect")}>
+        <Icon name="certificate" size={15} /> Inspect
+      </button>
+    {/if}
+    {#if jwtSelected}
+      <!-- Inspect JWT (CPE-1424): same reasoning as Inspect above, for a .jwt/.jws file. -->
+      <button class="row" role="menuitem" on:click={() => run("jwt-inspect")}>
+        <Icon name="lock" size={15} /> Inspect JWT
+      </button>
+    {/if}
+    {#if certCreateEligible && folderSelected}
+      <!-- Create certificate here… (CPE-1424): opens CreateCertDialog defaulted to write into the
+           clicked folder. -->
+      <button class="row" role="menuitem" on:click={() => run("cert-create-here")}>
+        <Icon name="certificate" size={15} /> Create certificate here…
       </button>
     {/if}
     {#if folderSelected}
@@ -626,6 +672,14 @@
     {#if canTerminal}
       <button class="row" role="menuitem" on:click={() => run("properties-folder")}>
         <Icon name="info" size={15} /> {$t('ctx.properties')}
+      </button>
+    {/if}
+    {#if certCreateEligible}
+      <!-- Create certificate here… (CPE-1424, epic CPE-1417): opens CreateCertDialog defaulted to write
+           into the clicked/active pane's current folder. -->
+      <div class="sep" role="separator" />
+      <button class="row" role="menuitem" on:click={() => run("cert-create-here")}>
+        <Icon name="certificate" size={15} /> Create certificate here…
       </button>
     {/if}
     <!-- Command Palette (CPE-1164) — a right-click affordance for the Ctrl+Shift+P palette; App maps

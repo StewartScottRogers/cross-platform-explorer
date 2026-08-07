@@ -73,6 +73,8 @@
   import VaultBanner from "./lib/components/VaultBanner.svelte";
   import VaultCreateDialog from "./lib/components/VaultCreateDialog.svelte";
   import ArchiveSafetyDialog from "./lib/components/ArchiveSafetyDialog.svelte";
+  import CreateCertDialog from "./lib/components/CreateCertDialog.svelte";
+  import SignCertDialog from "./lib/components/SignCertDialog.svelte";
   import {
     vaults,
     unlockVault,
@@ -653,6 +655,17 @@
   /** The archive path an open `ArchiveSafetyDialog` is scanning (CPE-1318, epic CPE-1002), or null when
    *  closed. Set by the "archive-safety" context-menu action, cleared on close. */
   let archiveSafetyFor: string | null = null;
+  /** Prefill + pane/dir context for an open `CreateCertDialog` (CPE-1423/1424, epic CPE-1417), or null
+   *  when closed. `dir` is the pane's currently-displayed folder — SNAPSHOT at open time (mirrors
+   *  `vaultCreateFor`) so a pane that navigates away while the dialog is open doesn't retarget the
+   *  refresh. `outDir` is the dialog's own default output folder: the clicked folder (a folder-row
+   *  "Create certificate here…") or `dir` itself (empty space / the command palette). */
+  let certCreateFor: { dir: string; outDir: string; inPaneB: boolean } | null = null;
+  /** Prefill + pane/dir context for an open `SignCertDialog` (CPE-1423/1424), or null when closed.
+   *  `csrPath`/`caCertPath` prefill from the clicked file ("Issue cert from this CSR…" / "Sign with this
+   *  as CA…"); both "" when opened from the command palette. `dir` mirrors `certCreateFor.dir` — the
+   *  refresh target once a certificate is issued. */
+  let certSignFor: { dir: string; inPaneB: boolean; csrPath: string; caCertPath: string } | null = null;
   // The drive root + display name for an open "drive" context menu (CPE-1158). All drive-menu actions
   // target this path, so the menu works identically from a Home tile and a sidebar row — and from Home,
   // where there is no FileList selection to piggy-back on.
@@ -979,6 +992,10 @@
     { id: "tool.sessionHistory", group: $t("palette.groupTools"), label: $t("palette.sessionHistory"), keywords: "audit log history export sessions activity", run: () => (sessionHistoryOpen = true) },
     { id: "tool.compareFolders", group: $t("palette.groupTools"), label: $t("palette.compareFolders"), keywords: "diff compare folders directories tree", run: openCompare },
     { id: "tool.integrity", group: $t("palette.groupTools"), label: $t("palette.integrity"), keywords: "integrity checksum bitrot corruption verify baseline", run: () => (integrityOpen = true) },
+    // Certificate management (CPE-1423/1424, epic CPE-1417): the same two dialogs the pane-aware
+    // context menu opens, reachable here with no file context needed — both target pane A's own folder.
+    { id: "tool.certCreate", group: $t("palette.groupTools"), label: "Create certificate…", keywords: "cert certificate tls ssl x509 self-signed ca create keypair", run: () => askCertCreate(), enabled: inFolder },
+    { id: "tool.certSign", group: $t("palette.groupTools"), label: "Sign / issue certificate…", keywords: "cert certificate csr sign issue ca x509", run: () => askCertSign(), enabled: inFolder },
     { id: "tool.templates", group: $t("palette.groupTools"), label: $t("palette.templates"), keywords: "folder templates scaffold capture stamp new from template boilerplate", run: () => (templatesOpen = true) },
     { id: "tool.checkpoint", group: $t("palette.groupTools"), label: $t("palette.checkpoint"), keywords: "checkpoint rollback revert restore snapshot undo agent watch", run: () => (checkpointOpen = true), enabled: inFolder },
     { id: "tool.organize", group: $t("palette.groupTools"), label: $t("palette.organize"), keywords: "organize auto organize sort files by kind extension year size declutter clean up", run: () => (organizeOpen = true), enabled: inFolder },
@@ -1598,6 +1615,25 @@
   /** True for a ZIP-family archive the `analyze_archive_safety` scan can actually score (CPE-1318) — see
    *  `ARCHIVE_SAFETY_EXTS`'s doc comment for why this is narrower than {@link isArchiveFile}. */
   const isArchiveSafetyEligible = (e: DirEntry) => !e.is_dir && ARCHIVE_SAFETY_EXTS.has(e.extension);
+
+  /** Cert-family extensions the pane-aware context menu offers "Sign with this as CA…" for (CPE-1424,
+   *  epic CPE-1417) — deliberately narrower than CertPreview's own auto-decode set (no `.pub`/`.key`,
+   *  which aren't cert-shaped enough to sign with as a CA). */
+  const CERT_SIGN_EXTS = new Set(["pem", "crt", "cer", "der"]);
+
+  /** Kind of a clicked cert/CSR-family file for the context menu's cert-management rows (CPE-1424):
+   *  `"csr"` offers "Issue cert from this CSR…", `"cert"` offers "Sign with this as CA…" instead, `""`
+   *  hides both (and the shared "Inspect" row). */
+  const certKindOf = (e: DirEntry): "csr" | "cert" | "" => {
+    if (e.is_dir) return "";
+    if (e.extension === "csr") return "csr";
+    if (CERT_SIGN_EXTS.has(e.extension)) return "cert";
+    return "";
+  };
+
+  /** True for a `.jwt`/`.jws` file — matches the preview pane's own JWT auto-decode eligibility, so
+   *  "Inspect JWT" (CPE-1424) only ever appears where the preview can actually show something. */
+  const isJwtFile = (e: DirEntry) => !e.is_dir && (e.extension === "jwt" || e.extension === "jws");
 
   /** The immediate children of the archive's current inner folder, as DirEntry-
       shaped rows (folders are derived from deeper paths when not explicit). */
@@ -2291,6 +2327,83 @@
     }
     if (dualPane && paneBPath && norm === normalizePath(paneBPath)) await explorerPaneB?.loadListing(paneBPath, false);
     showNotice(`Created encrypted vault "${vaultDisplayName(dest)}".`);
+  }
+
+  // ---- Certificate management (CPE-1423/1424, epic CPE-1417) ------------------------------------
+  // Two dialogs (CreateCertDialog / SignCertDialog) wired behind the pane-aware context menu (CPE-1424)
+  // + a command-palette entry each. `inPaneB` (CPE-1377/1384 pattern): a context-menu invocation targets
+  // whichever pane the menu was opened OVER (`runAction`'s `inPaneB` local); the command palette always
+  // targets pane A's `currentPath`.
+
+  /** Open CreateCertDialog (CPE-1424): "Create certificate here…" on a folder row targets that folder as
+   *  the default output location; on empty space / the command palette it targets the clicked/active
+   *  pane's own current folder. `dir` (the pane's displayed folder) is SNAPSHOT now, mirroring
+   *  `askVaultCreate` — the dialog can stay open for a while, and a pane navigating away underneath it
+   *  must not retarget the eventual refresh. */
+  function askCertCreate(inPaneB = false) {
+    const pane = paneStateFor(inPaneB);
+    const entry = pane.selectedEntries[0];
+    const dir = inPaneB ? paneBPath : currentPath;
+    if (inPaneB ? dir === HOME : (isHome || archive)) return;
+    const outDir = entry?.is_dir ? entry.path : dir;
+    certCreateFor = { dir, outDir, inPaneB };
+  }
+
+  /** Open SignCertDialog (CPE-1424): `prefill.csrPath`/`prefill.caCertPath` carry the clicked file for
+   *  "Issue cert from this CSR…" / "Sign with this as CA…"; both omitted for the command-palette entry
+   *  (no file context). `dir` is SNAPSHOT the same way `askCertCreate` does. */
+  function askCertSign(inPaneB = false, prefill: { csrPath?: string; caCertPath?: string } = {}) {
+    const dir = inPaneB ? paneBPath : currentPath;
+    if (inPaneB ? dir === HOME : (isHome || archive)) return;
+    certSignFor = { dir, inPaneB, csrPath: prefill.csrPath ?? "", caCertPath: prefill.caCertPath ?? "" };
+  }
+
+  /** "Inspect" / "Inspect JWT" (CPE-1424): the row is already selected — right-clicking selects first
+   *  (`onRowContext`) — and the preview pane auto-decodes a cert/CSR/JWT file on selection (CPE-1422), so
+   *  this only needs to make sure the Preview tab (not Details) is what's showing. */
+  function inspectCryptoFile() {
+    showDetails = true;
+    settings.saveShowDetails(true);
+    showPreview = true;
+    settings.saveShowPreview(true);
+  }
+
+  /** `CreateCertDialog`'s `created` handler: the new certificate's full path. Refresh whichever pane(s)
+   *  currently show the SNAPSHOT `dir` `askCertCreate` captured — mirrors `onVaultCreated`'s reasoning
+   *  (not live `currentPath`/`paneBPath`, so a pane renavigated away while the dialog was open is left
+   *  alone). */
+  async function onCertCreated(certPath: string) {
+    const target = certCreateFor;
+    certCreateFor = null;
+    if (!target) return;
+    const norm = normalizePath(target.dir);
+    if (norm === normalizePath(currentPath)) {
+      pendingSelectPath = certPath;
+      await loadPath(currentPath, true);
+    }
+    if (dualPane && paneBPath && norm === normalizePath(paneBPath)) await explorerPaneB?.loadListing(paneBPath, false);
+    showNotice(`Created certificate "${fileNameOf(certPath)}".`);
+  }
+
+  /** `SignCertDialog`'s `created` handler: the issued certificate's full path. Same refresh reasoning as
+   *  `onCertCreated`. */
+  async function onCertSigned(certPath: string) {
+    const target = certSignFor;
+    certSignFor = null;
+    if (!target) return;
+    const norm = normalizePath(target.dir);
+    if (norm === normalizePath(currentPath)) {
+      pendingSelectPath = certPath;
+      await loadPath(currentPath, true);
+    }
+    if (dualPane && paneBPath && norm === normalizePath(paneBPath)) await explorerPaneB?.loadListing(paneBPath, false);
+    showNotice(`Issued certificate "${fileNameOf(certPath)}".`);
+  }
+
+  /** Basename of a full path, separator-agnostic — for the create/issue success toasts above. */
+  function fileNameOf(path: string): string {
+    const idx = Math.max(path.lastIndexOf("/"), path.lastIndexOf("\\"));
+    return idx < 0 ? path : path.slice(idx + 1);
   }
 
   async function openRecent(path: string) {
@@ -3973,6 +4086,13 @@
       case "delete": askDelete(false, inPaneB); break;
       case "shred": askShred(inPaneB); break;
       case "vault-create": askVaultCreate(inPaneB); break;
+      // Certificate management (CPE-1424, epic CPE-1417) — same pane-routed reasoning as vault-create
+      // above: a context-menu invocation targets whichever pane the menu was opened OVER.
+      case "cert-create-here": askCertCreate(inPaneB); break;
+      case "cert-issue-from-csr": if (pane.selectedEntries[0]) askCertSign(inPaneB, { csrPath: pane.selectedEntries[0].path }); break;
+      case "cert-sign-as-ca": if (pane.selectedEntries[0]) askCertSign(inPaneB, { caCertPath: pane.selectedEntries[0].path }); break;
+      case "cert-inspect": inspectCryptoFile(); break;
+      case "jwt-inspect": inspectCryptoFile(); break;
       case "properties": openProperties(pane.selectedEntries); break;
       case "metadataStudio": openMetadataStudio(); break;
       case "tags": if (pane.selectedEntries.length >= 1) tagEditorFor = [...pane.selectedEntries]; break;
@@ -5834,6 +5954,9 @@
     sameTypeExt={ctxPane.selectedEntries.length === 1 && !ctxPane.selectedEntries[0].is_dir ? ctxPane.selectedEntries[0].extension : ""}
     shreddable={(ctxInPaneB ? paneBPath !== HOME : (!isHome && !archive)) && ctxPane.selectedEntries.length >= 1 && ctxPane.selectedEntries.every((e) => !e.is_dir)}
     vaultable={(ctxInPaneB ? paneBPath !== HOME : (!isHome && !archive)) && ctxPane.selectedEntries.length === 1 && ctxPane.selectedEntries[0]?.is_dir}
+    certFileKind={ctxPane.selectedEntries.length === 1 ? certKindOf(ctxPane.selectedEntries[0]) : ""}
+    jwtSelected={ctxPane.selectedEntries.length === 1 && isJwtFile(ctxPane.selectedEntries[0])}
+    certCreateEligible={ctxInPaneB ? paneBPath !== HOME : (!isHome && !archive)}
     {view}
     {sortKey}
     {sortDir}
@@ -5896,6 +6019,26 @@
   <ArchiveSafetyDialog
     path={archiveSafetyFor}
     on:close={() => (archiveSafetyFor = null)}
+  />
+{/if}
+
+{#if certCreateFor}
+  <CreateCertDialog
+    outDir={certCreateFor.outDir}
+    on:created={(e) => onCertCreated(e.detail)}
+    on:error={(e) => showNotice(e.detail, true)}
+    on:close={() => (certCreateFor = null)}
+  />
+{/if}
+
+{#if certSignFor}
+  <SignCertDialog
+    csrPath={certSignFor.csrPath}
+    caCertPath={certSignFor.caCertPath}
+    outDir={certSignFor.dir}
+    on:created={(e) => onCertSigned(e.detail)}
+    on:error={(e) => showNotice(e.detail, true)}
+    on:close={() => (certSignFor = null)}
   />
 {/if}
 
