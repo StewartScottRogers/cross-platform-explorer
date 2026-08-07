@@ -31,6 +31,9 @@
   let logsOpen: Record<string, boolean> = {};
   // Transient per-sidecar repair outcome message (CPE-863), keyed by id.
   let repairMsg: Record<string, string> = {};
+  // Whether that outcome was a success or a failure (CPE-1408), keyed by id — the template must not
+  // prefix a failure message with "Repaired:", which would read as success.
+  let repairOk: Record<string, boolean> = {};
 
   /** A sidecar's health status (CPE-863) — a status key + tone, worst-first, derived from binary
    *  presence, contract compat, enablement, the last error, and running state. */
@@ -87,6 +90,7 @@
   // the binary. Shows the steps taken, then refreshes so the status pill reflects the new state.
   async function repair(row: SidecarInfo) {
     const r = await repairSidecar(row.id);
+    repairOk = { ...repairOk, [row.id]: !!r };
     repairMsg = { ...repairMsg, [row.id]: r ? r.actions.join("; ") : $t("mgr.repairFailed") };
     await refresh();
   }
@@ -152,7 +156,7 @@
         </div>
 
         {#if repairMsg[row.id]}
-          <div class="repair-msg" role="status">{$t("mgr.repairDid")}: {repairMsg[row.id]}</div>
+          <div class="repair-msg" class:fail={!repairOk[row.id]} role="status">{#if repairOk[row.id]}{$t("mgr.repairDid")}: {repairMsg[row.id]}{:else}{repairMsg[row.id]}{/if}</div>
         {/if}
 
         {#if logsOpen[row.id] && diag}
@@ -260,6 +264,10 @@
     color: var(--text-dim, #a0a0a0);
     border-left: 2px solid var(--accent, #3a7d3a);
     padding-left: 8px;
+  }
+  .repair-msg.fail {
+    color: var(--warn, #d08b2b);
+    border-left-color: var(--warn, #d08b2b);
   }
   .spacer {
     flex: 1;

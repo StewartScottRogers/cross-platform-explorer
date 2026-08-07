@@ -276,14 +276,10 @@ describe("SidecarManager — action wirings (each calls its command + re-refresh
 
     expect(repairSidecar).toHaveBeenCalledWith(row.id);
     await waitFor(() => expect(sidecarDetails).toHaveBeenCalledTimes(1));
-    // Real mis-wire (not fixed, per ticket instructions): the message is unconditionally prefixed
-    // "Repaired: " even on FAILURE — repairMsg is set to $t("mgr.repairFailed") but the surrounding
-    // template text is always $t("mgr.repairDid") + ": " + repairMsg[row.id], so a failed repair
-    // renders "Repaired: Repair failed — the platform may be off", which reads as a success.
-    await waitFor(() =>
-      expect(screen.getByRole("status").textContent).toBe(
-        "Repaired: Repair failed — the platform may be off",
-      ),
-    );
+    // Fixed (CPE-1408): a failed repair must NOT be prefixed "Repaired: " — that reads as success.
+    // The status line shows the failure copy alone, with a warn-toned ".fail" class.
+    const status = screen.getByRole("status");
+    await waitFor(() => expect(status.textContent).toBe("Repair failed — the platform may be off"));
+    expect(status.classList.contains("fail")).toBe(true);
   });
 });
