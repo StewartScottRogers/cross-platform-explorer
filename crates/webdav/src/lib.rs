@@ -143,10 +143,81 @@ impl FileSystemProvider for WebdavProvider {
     }
 }
 
+/// The deepest element nesting `parse_multistatus` will hand to `roxmltree` before refusing the response.
+/// `roxmltree::Document::parse` — like most XML parsers — recurses per nesting level, so a PROPFIND
+/// response with a few hundred levels of nesting is enough to blow a normal 1-2MB thread stack and crash
+/// the whole process with an **uncatchable** stack overflow (confirmed locally: ~300-500 levels reliably
+/// overflows a 2MB stack). A real WebDAV `multistatus` body is only ever a handful of levels deep
+/// (`multistatus > response > propstat > prop > ...`), so 128 leaves a huge margin for legitimate
+/// responses while sitting far below the crash threshold (CPE-1398).
+const MAX_XML_NESTING_DEPTH: usize = 128;
+
+/// Cheap non-recursive guard against maliciously (or accidentally) deep XML nesting, run before the
+/// document is handed to `roxmltree` (see [`MAX_XML_NESTING_DEPTH`]). A single linear pass over the raw
+/// text — no recursion of its own — that skips comments, CDATA sections, processing instructions, and
+/// `<!...>` declarations (their contents don't nest) and counts only real element start/end tags.
+/// Intentionally not a full XML parser: it only needs to be a safe, fast upper-bound check that never
+/// under-counts nesting depth for well-formed XML, not a validator (a malformed tag it miscounts still
+/// gets the definitive answer from `roxmltree::Document::parse` right afterward).
+fn xml_nesting_too_deep(xml: &str, max_depth: usize) -> bool {
+    fn find(bytes: &[u8], from: usize, needle: &[u8]) -> Option<usize> {
+        let from = from.min(bytes.len());
+        bytes[from..].windows(needle.len()).position(|w| w == needle).map(|p| p + from)
+    }
+
+    let bytes = xml.as_bytes();
+    let mut i = 0;
+    let mut depth: usize = 0;
+    while i < bytes.len() {
+        if bytes[i] != b'<' {
+            i += 1;
+            continue;
+        }
+        if bytes[i..].starts_with(b"<!--") {
+            i = find(bytes, i + 4, b"-->").map(|p| p + 3).unwrap_or(bytes.len());
+            continue;
+        }
+        if bytes[i..].starts_with(b"<![CDATA[") {
+            i = find(bytes, i + 9, b"]]>").map(|p| p + 3).unwrap_or(bytes.len());
+            continue;
+        }
+        if bytes[i..].starts_with(b"<?") {
+            i = find(bytes, i + 2, b"?>").map(|p| p + 2).unwrap_or(bytes.len());
+            continue;
+        }
+        if bytes[i..].starts_with(b"<!") {
+            // DOCTYPE or other markup declaration: skip to the next '>'. Good enough for a guard — it
+            // doesn't need to track a nested internal subset, since that isn't element nesting.
+            i = find(bytes, i + 2, b">").map(|p| p + 1).unwrap_or(bytes.len());
+            continue;
+        }
+        // A real start or end tag: find its closing '>'.
+        let is_end_tag = bytes.get(i + 1) == Some(&b'/');
+        let close = match find(bytes, i + 1, b">") {
+            Some(p) => p,
+            None => break, // unterminated tag — let roxmltree report the real parse error
+        };
+        let self_closing = close > 0 && bytes[close - 1] == b'/';
+        if is_end_tag {
+            depth = depth.saturating_sub(1);
+        } else if !self_closing {
+            depth += 1;
+            if depth > max_depth {
+                return true;
+            }
+        }
+        i = close + 1;
+    }
+    false
+}
+
 /// Parse a PROPFIND `multistatus` XML body into provider entries. If `skip_path` is set, the entry whose
 /// href equals that path (the collection itself, in a Depth:1 listing) is omitted. Matches element
 /// **local** names, so DAV namespace prefixes (`d:` / `D:` / none) don't matter.
 fn parse_multistatus(xml: &str, skip_path: Option<&str>) -> Result<Vec<ProviderEntry>, String> {
+    if xml_nesting_too_deep(xml, MAX_XML_NESTING_DEPTH) {
+        return Err("webdav: PROPFIND response XML nesting too deep".to_string());
+    }
     let doc = roxmltree::Document::parse(xml).map_err(|e| format!("webdav: bad PROPFIND XML: {e}"))?;
     let skip = skip_path.map(normalize_href);
     let mut out = Vec::new();
@@ -410,5 +481,243 @@ mod tests {
         let provider = WebdavProvider::connect(&WebdavConfig::new(&base));
         assert!(provider.read("/nope.txt").unwrap_err().contains("404"));
         assert!(provider.stat("/nope").is_err());
+    }
+
+    // -----------------------------------------------------------------------------------------
+    // Adversarial panic-safety battery for `parse_multistatus` (CPE-1398).
+    //
+    // `parse_multistatus` hand-parses PROPFIND-response XML that comes straight off the wire from a
+    // NETWORK-CONTROLLED WebDAV server — potentially malicious or just buggy. This table-driven battery
+    // (mirroring the pattern in `crates/server/tests/parser_panic_safety.rs`) feeds it a wide range of
+    // hostile input and asserts it never panics — always returns `Ok` or `Err`, never unwinds. It runs as
+    // a `#[cfg(test)] mod` (not a `tests/` integration file) because `parse_multistatus` is private to
+    // this crate, and that's the entrypoint the ticket asks to exercise directly (no need to relax its
+    // visibility just for a test).
+    // -----------------------------------------------------------------------------------------
+
+    use std::panic::{self, AssertUnwindSafe};
+
+    /// A tiny seeded linear-congruential generator so "seeded pseudo-random" bytes are deterministic
+    /// across runs/machines — mirrors `crates/server/tests/common/mod.rs`'s `lcg_bytes` (no new
+    /// dependency; not cryptographic, just reproducible).
+    fn lcg_bytes(seed: u64, len: usize) -> Vec<u8> {
+        let mut state = seed ^ 0x9E37_79B9_7F4A_7C15;
+        (0..len)
+            .map(|_| {
+                state = state.wrapping_mul(6_364_136_223_846_793_005).wrapping_add(1_442_695_040_888_963_407);
+                (state >> 33) as u8
+            })
+            .collect()
+    }
+
+    /// Wrap `inner` in a well-formed `<d:multistatus>` envelope with the XML declaration this crate's
+    /// real PROPFIND body uses, so cases that aren't testing the envelope itself don't also trip on it.
+    fn multistatus_wrap(inner: &str) -> String {
+        format!(r#"<?xml version="1.0" encoding="utf-8"?><d:multistatus xmlns:d="DAV:">{inner}</d:multistatus>"#)
+    }
+
+    /// The adversarial battery: `(case name, xml text)`. Covers CPE-1398's hostile-input classes: empty
+    /// and garbage bytes (including non-UTF8 byte sequences, lossily decoded to `String` since
+    /// `parse_multistatus` takes `&str` and Rust strings are always valid UTF-8 — the lossy conversion is
+    /// itself the adversarial input here), truncated mid-tag/mid-attribute, deeply-nested elements (stack
+    /// safety, a few thousand deep), huge/negative/overflowing `getcontentlength`, missing/empty/
+    /// duplicate `href`, duplicate/empty tags, mismatched/unclosed tags, entity references (including a
+    /// DOCTYPE expansion attempt), malformed percent-escapes in the href text, and an XML-bomb-ish flood
+    /// of thousands of `<d:response>` elements.
+    fn parse_multistatus_battery() -> Vec<(String, String)> {
+        let mut cases: Vec<(String, String)> = vec![
+            ("empty".into(), String::new()),
+            ("garbage_ascii".into(), "not xml at all !@#$%^&*()".into()),
+            (
+                "garbage_bytes_lossy".into(),
+                String::from_utf8_lossy(&[0xFF, 0xFE, 0x00, 0x01, 0x80, 0x81, 0x9F, 0xC0, 0xC1, 0xF5, 0xFF])
+                    .into_owned(),
+            ),
+            ("just_lt".into(), "<".into()),
+            ("just_gt".into(), ">".into()),
+            ("just_amp".into(), "&".into()),
+            ("bare_open_tag".into(), "<d:multistatus xmlns:d=\"DAV:\">".into()),
+            (
+                "truncated_mid_tag".into(),
+                "<?xml version=\"1.0\"?><d:multistatus xmlns:d=\"DAV:\"><d:response><d:href>/fo".into(),
+            ),
+            ("truncated_mid_attr".into(), "<d:multistatus xmlns:d=\"DAV:\"".into()),
+            ("unclosed_response".into(), multistatus_wrap("<d:response><d:href>/foo</d:href>")),
+            ("mismatched_tags".into(), multistatus_wrap("<d:response><d:href>/foo</d:wrong></d:response>")),
+            (
+                "missing_href".into(),
+                multistatus_wrap(
+                    "<d:response><d:propstat><d:prop><d:resourcetype/></d:prop></d:propstat></d:response>",
+                ),
+            ),
+            ("empty_href".into(), multistatus_wrap("<d:response><d:href></d:href></d:response>")),
+            ("whitespace_href".into(), multistatus_wrap("<d:response><d:href>   </d:href></d:response>")),
+            (
+                "duplicate_href".into(),
+                multistatus_wrap("<d:response><d:href>/a</d:href><d:href>/b</d:href></d:response>"),
+            ),
+            (
+                "duplicate_getcontentlength".into(),
+                multistatus_wrap(
+                    r#"<d:response><d:href>/a</d:href><d:propstat><d:prop><d:getcontentlength>5</d:getcontentlength><d:getcontentlength>999</d:getcontentlength></d:prop></d:propstat></d:response>"#,
+                ),
+            ),
+            (
+                "huge_getcontentlength".into(),
+                multistatus_wrap(
+                    r#"<d:response><d:href>/a</d:href><d:propstat><d:prop><d:getcontentlength>999999999999999999999999999999999999999999</d:getcontentlength></d:prop></d:propstat></d:response>"#,
+                ),
+            ),
+            (
+                "negative_getcontentlength".into(),
+                multistatus_wrap(
+                    r#"<d:response><d:href>/a</d:href><d:propstat><d:prop><d:getcontentlength>-1</d:getcontentlength></d:prop></d:propstat></d:response>"#,
+                ),
+            ),
+            (
+                "overflow_u64_plus_one_getcontentlength".into(),
+                multistatus_wrap(
+                    r#"<d:response><d:href>/a</d:href><d:propstat><d:prop><d:getcontentlength>18446744073709551616</d:getcontentlength></d:prop></d:propstat></d:response>"#,
+                ),
+            ),
+            (
+                "nonnumeric_getcontentlength".into(),
+                multistatus_wrap(
+                    "<d:response><d:href>/a</d:href><d:propstat><d:prop><d:getcontentlength>abc123</d:getcontentlength></d:prop></d:propstat></d:response>",
+                ),
+            ),
+            (
+                "whitespace_only_getcontentlength".into(),
+                multistatus_wrap(
+                    "<d:response><d:href>/a</d:href><d:propstat><d:prop><d:getcontentlength>   \t\n  </d:getcontentlength></d:prop></d:propstat></d:response>",
+                ),
+            ),
+            (
+                "empty_getcontentlength".into(),
+                multistatus_wrap(
+                    "<d:response><d:href>/a</d:href><d:propstat><d:prop><d:getcontentlength></d:getcontentlength></d:prop></d:propstat></d:response>",
+                ),
+            ),
+            (
+                "collection_trailing_slash_no_marker".into(),
+                multistatus_wrap("<d:response><d:href>/a/</d:href></d:response>"),
+            ),
+            (
+                "entity_refs".into(),
+                multistatus_wrap("<d:response><d:href>/a&amp;b&lt;&gt;&quot;&apos;</d:href></d:response>"),
+            ),
+            ("undefined_entity".into(), multistatus_wrap("<d:response><d:href>/a&undefined;</d:href></d:response>")),
+            (
+                "cdata_and_comment".into(),
+                multistatus_wrap("<!-- comment --><d:response><![CDATA[weird data]]><d:href>/a</d:href></d:response>"),
+            ),
+            (
+                "doctype_entity_expansion_attempt".into(),
+                "<?xml version=\"1.0\"?><!DOCTYPE d [<!ENTITY lol \"lol\">]><d:multistatus xmlns:d=\"DAV:\"><d:response><d:href>&lol;</d:href></d:response></d:multistatus>".into(),
+            ),
+            (
+                "bad_xml_decl_encoding".into(),
+                "<?xml version=\"1.0\" encoding=\"bogus-charset\"?><d:multistatus xmlns:d=\"DAV:\"></d:multistatus>".into(),
+            ),
+            (
+                "null_byte_in_element_text".into(),
+                "<d:multistatus xmlns:d=\"DAV:\"><d:response><d:href>/a\u{0}b</d:href></d:response></d:multistatus>".to_string(),
+            ),
+            ("malformed_percent_in_href".into(), multistatus_wrap("<d:response><d:href>/a%zz%b%</d:href></d:response>")),
+            ("percent_at_very_end".into(), multistatus_wrap("<d:response><d:href>/a%4</d:href></d:response>")),
+            (
+                "many_attributes".into(),
+                multistatus_wrap(&format!(
+                    "<d:response {}><d:href>/a</d:href></d:response>",
+                    (0..500).map(|i| format!("x{i}=\"v\"")).collect::<Vec<_>>().join(" ")
+                )),
+            ),
+        ];
+
+        // Deeply nested elements — stack safety, a few thousand deep, per the ticket. One case leaves the
+        // root unclosed (also exercises "truncated mid-deep-nesting"), one closes everything properly.
+        let depth = 4000;
+        cases.push((
+            "deeply_nested_elements_unclosed_root".into(),
+            format!("<d:multistatus xmlns:d=\"DAV:\">{}{}", "<a>".repeat(depth), "</a>".repeat(depth)),
+        ));
+        cases.push((
+            "deeply_nested_elements_closed".into(),
+            format!("<d:multistatus xmlns:d=\"DAV:\">{}{}</d:multistatus>", "<a>".repeat(depth), "</a>".repeat(depth)),
+        ));
+
+        // An XML-bomb-ish flood of thousands of <d:response> elements (roxmltree has no DTD entity
+        // expansion beyond the 5 predefined XML entities, so this is the realistic "huge document" shape
+        // a hostile/buggy server could actually send, rather than a billion-laughs entity bomb).
+        let mut flood = String::from("<d:multistatus xmlns:d=\"DAV:\">");
+        for i in 0..8000 {
+            flood.push_str(&format!(
+                "<d:response><d:href>/f{i}</d:href><d:propstat><d:prop><d:getcontentlength>{i}</d:getcontentlength></d:prop></d:propstat></d:response>"
+            ));
+        }
+        flood.push_str("</d:multistatus>");
+        cases.push(("flood_of_responses".into(), flood));
+
+        // Seeded pseudo-random garbage of a few sizes, lossily decoded to valid UTF-8 text (the lossy
+        // decode is itself part of the adversarial input, same rationale as `garbage_bytes_lossy` above).
+        for &n in &[16usize, 256, 4096] {
+            let bytes = lcg_bytes(0x00C0_FFEE ^ n as u64, n);
+            cases.push((format!("seeded_random_lossy_{n}"), String::from_utf8_lossy(&bytes).into_owned()));
+        }
+
+        cases
+    }
+
+    /// Run `parse_multistatus(xml, skip)` under `catch_unwind`; a panic (the parser's own, or this
+    /// harness's own bug) is re-raised as one clearly-attributed failure naming the case and skip variant.
+    fn assert_parse_multistatus_no_panic(case_name: &str, skip: Option<&str>, xml: &str) {
+        let result = panic::catch_unwind(AssertUnwindSafe(|| parse_multistatus(xml, skip)));
+        if let Err(payload) = result {
+            let msg = payload
+                .downcast_ref::<&str>()
+                .map(|s| s.to_string())
+                .or_else(|| payload.downcast_ref::<String>().cloned())
+                .unwrap_or_else(|| "<non-string panic payload>".to_string());
+            panic!(
+                "parse_multistatus panic-safety violation: case `{case_name}` (skip_path={skip:?}) did \
+                 not return gracefully (Ok/Err) but unwound: {msg}"
+            );
+        }
+    }
+
+    #[test]
+    fn parse_multistatus_never_panics_on_hostile_input() {
+        let cases = parse_multistatus_battery();
+        assert!(cases.len() >= 30, "battery should cover the full hostile-input class list; got {}", cases.len());
+        // Run every case both with no skip and with a skip_path set, so both `normalize_href` call sites
+        // (the skip-target comparison and the per-response href) are exercised together.
+        let skip_variants: [Option<&str>; 2] = [None, Some("/")];
+        for (name, xml) in &cases {
+            for skip in skip_variants {
+                assert_parse_multistatus_no_panic(name, skip, xml);
+            }
+        }
+    }
+
+    #[test]
+    fn parse_multistatus_empty_input_is_a_graceful_err_not_a_panic() {
+        // Explicit contract check for the simplest hostile case, kept separate from the battery above for
+        // a clear, targeted failure message if it regresses.
+        let r = panic::catch_unwind(|| parse_multistatus("", None));
+        assert!(r.is_ok(), "parse_multistatus(\"\", None) must not panic");
+        assert!(r.unwrap().is_err(), "parse_multistatus(\"\", None) should be Err (not valid XML)");
+    }
+
+    #[test]
+    fn xml_nesting_guard_rejects_deep_nesting_before_it_reaches_roxmltree() {
+        // Confirms the CPE-1398 stack-overflow fix: nesting past MAX_XML_NESTING_DEPTH is rejected by the
+        // cheap pre-scan (fast, no parse attempted), while a shallow, realistic multistatus body is not.
+        let deep = format!("<d:multistatus xmlns:d=\"DAV:\">{}{}</d:multistatus>", "<a>".repeat(4000), "</a>".repeat(4000));
+        assert!(xml_nesting_too_deep(&deep, MAX_XML_NESTING_DEPTH));
+        assert!(parse_multistatus(&deep, None).is_err());
+
+        let shallow = multistatus_wrap("<d:response><d:href>/a</d:href></d:response>");
+        assert!(!xml_nesting_too_deep(&shallow, MAX_XML_NESTING_DEPTH));
+        assert!(parse_multistatus(&shallow, None).is_ok());
     }
 }
