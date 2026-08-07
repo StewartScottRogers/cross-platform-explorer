@@ -1052,3 +1052,40 @@ UNSTABLE-not-BLOCKED). FRONTIER after this shift: clean headless well DRY again 
 `headless-well-dry-post-dualpane-2026-08-07`) — next FEATURE work needs the user (attended GUI, Mac, signing cert,
 AI keys, SFTP/Docker creds). Low-value remainder: QA-Architect 2nd-tier render-specs (BackupDashboard etc.) +
 follow-ups CPE-1385(done)/1386(done); open follow-ups: none in backlog (all closed).
+
+## Shift 2026-08-07 (CLI, resume ~04:50–06:30) — SECURITY + COVERAGE HARDENING — 8 PRs, found a REAL DoS
+User: "start 8 workshifts back to back" (after the dual-pane+QA shift confirmed the feature well dry). A scout
+re-verified: integration-bug vein is genuinely THIN (dual-pane program drained it, seams already guarded w/
+citing comments); real value in Vein C (security-hardening) + Vein B (component coverage). Delivered 8 PRs
+(CPE-1398–1406), main GREEN throughout, 0 escaped defects, ~40 sub-agents.
+
+**Headline — a REAL DoS found+fixed (CPE-1398, #678):** adversarial panic battery for WebDAV `parse_multistatus`
+(untrusted network XML) found that deeply-nested XML (~500 levels, few-KB payload) triggers an UNCATCHABLE
+`STATUS_STACK_OVERFLOW` process crash (roxmltree recurses per level) — a genuine DoS from a malicious/buggy
+WebDAV server. GAUNTLET THEN CAUGHT THE FIRST FIX'S OWN BYPASS: a quote-unaware `>`-scan let `<a b="/>">`
+misclassify a real open tag as self-closing → guard evaded → crash reproduced by the reviewer. Robust v2 fix:
+count depth via `xmlparser::Tokenizer` (roxmltree's non-recursive lexer ancestor, added as direct dep — vetted:
+0 transitive deps, MIT/Apache, v0.13.6 carries xmlparser's own recursion fix), cap lowered 128→64. Re-reviewer
+built 9 divergence-attack payloads on small-stack threads, couldn't crash it. LESSON: static "no panics found"
+≠ safe; only adversarial fuzzing on the real recursive parser found it; a security guard needs a re-review that
+TRIES to evade it (weaken the gate → prove the battery catches forgery).
+
+**Other security battery:** CPE-1399 (#677) JWT `HmacJwtVerifier::verify` fuzz battery (~40 adversarial cases:
+alg-confusion/`alg:none`/tamper/splice/wrong-key + a valid-token positive control so it can't pass by
+rejecting-everything). Reviewer weakened BOTH the signature gate and the alg gate → battery caught each. No
+production bug found (verify is sound), but now has adversarial regression coverage.
+
+**Coverage specs (Vein B) — each FOUND a real (minor) UI bug:** CPE-1400 WatchRulesDialog (Add-btn not gated on
+condition validity → silent no-op; fixed in CPE-1402), CPE-1401 FileNameSearchDialog (gen-token supersede — no
+bug), CPE-1404 DiskSpaceView (cache+gen-token+refreshToken — no bug), CPE-1405 ColorRulesDialog (SAME Add-btn
+validation bug → CPE-1407 filed), CPE-1406 SidecarManager (failed-repair renders "Repaired: …failed" → CPE-1408
+filed). Pattern: jsdom render-specs on shipped-but-untested dialogs keep surfacing real bugs — genuine value,
+not busywork.
+
+Tuned defaults: security-Rust batteries = sonnet + a re-review that ADVERSARIALLY tries to evade the guard (the
+single most valuable check — it caught the DoS-fix bypass AND would catch a verify regression); render-specs =
+sonnet, single-reviewer-with-own-mutation-check, parallel-safe (independent files, fan out wide). FRONTIER after
+this shift: the genuinely-valuable vein is now down to minor follow-up FIXES (CPE-1407/1408) + the truly-thin
+UserCommands/archive-pin specs. Feature work still user-gated. Session ~135 agents used → checkpointed for a
+fresh-session reset. Two shifts this session = 27 PRs total (dual-pane epic + QA render-specs + security/coverage
+hardening), 0 escaped defects.

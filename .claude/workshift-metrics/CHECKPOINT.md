@@ -291,3 +291,34 @@ locally-verifiable FEATURE slice remains. Low-value-only leftovers: QA-Architect
 **To resume:** name an attended epic to pair on (build→deploy→run GUI verification of the many backend-done/
 GUI-pending panels), activate a gated epic (AI CPE-976–980, remote-FS CPE-616, signing CPE-002), or provide a
 resource (Mac / API key / creds). Nothing is blocked or broken; the board is clean and green.
+
+---
+## RUN 2026-08-07 (CLI resume, session cli-1786069944) — SECURITY+COVERAGE HARDENING · 8 PRs · REAL DoS FIXED · main GREEN
+
+**State:** `main` @ origin `be8ecfd9`, working tree CLEAN, 0 worktrees. **Backlog = 2 documented minor bugs**
+(CPE-1407, CPE-1408 — ready to pick up). Session ~135 sub-agents used (approaching the 150 reset line) → checkpointed.
+
+**Shipped this run (all merged → main, gauntlet-verified + Frontend/CI green):**
+- CPE-1398 (#678) — WebDAV `parse_multistatus` adversarial panic battery + **REAL DoS FIX** (deep-nested XML
+  stack-overflow crash; robust `xmlparser::Tokenizer` depth guard, cap 64). Gauntlet caught the first fix's own
+  quote-unaware bypass; v2 verified against 9 divergence attacks.
+- CPE-1399 (#677) — JWT `HmacJwtVerifier::verify` adversarial fuzz battery (alg-confusion/tamper/splice + positive
+  control). No prod bug; now has regression coverage.
+- CPE-1400/1401/1404/1405/1406 (#676/#675/#679/#681/#682) — jsdom render-specs for WatchRules, FileNameSearch,
+  DiskSpaceView, ColorRules, SidecarManager. Each pins render + typed-command wiring + streaming/gen-token/status
+  logic; several found real minor bugs.
+- CPE-1402/1403 (#680) — WatchRules Add-button validation fix + WebDAV doc-margin note.
+
+**READY BACKLOG (next session, minor fixes — same shape as the merged CPE-1402):**
+- CPE-1407 — ColorRulesDialog Add-btn not gated on condition validity (silent no-op); apply the CPE-1402 reactive
+  `validCondition` fix + update the 5 documenting tests in ColorRulesDialog.test.ts.
+- CPE-1408 — SidecarManager failed-repair renders "Repaired: …failed" (reads as success); branch the message on
+  outcome + update the documenting test.
+
+**Then TRULY thin / user-gated:** remaining scout Vein-B specs (UserCommands = smallest, archive-nesting
+regression-pin = no bug) are diminishing-returns coverage. All FEATURE work is user-gated (attended GUI / Mac /
+signing cert / AI keys / SFTP-Docker creds) per Library `headless-well-dry-post-dualpane-2026-08-07`.
+
+**To resume:** a fresh session can (a) knock out CPE-1407/1408 (cheap, well-specified), then (b) pause for user
+direction — name an attended epic, activate a gated epic, or provide a resource. Nothing blocked or broken;
+board clean + green.
